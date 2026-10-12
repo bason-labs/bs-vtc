@@ -1,0 +1,5 @@
+.DS_Store
+# private Claude session exports
+claude-session-*.zip
+# VTC local state (when the product runs here)
+.vtc/state/
