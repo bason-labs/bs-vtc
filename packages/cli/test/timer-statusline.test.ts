@@ -3,11 +3,18 @@
  * agent's `vtc engine --wake-due` starts the daemons whose time has come. And the Claude
  * statusline tee shim (§6.9): the user's statusline unchanged, usage forwarded to the engine.
  */
+import { execFileSync } from "node:child_process";
 import { existsSync, readdirSync, statSync, writeFileSync } from "node:fs";
 import { request } from "node:http";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
-import { ENGINE_HTTP, engineRepoKey, type RunningDaemon } from "@vtc/shared";
+import {
+  ENGINE_HTTP,
+  engineRepoKey,
+  STATUSLINE_TEE,
+  statuslineTeeCommand,
+  type RunningDaemon,
+} from "@vtc/shared";
 import { createDiskAssetBundle } from "../src/assets.js";
 import { createStatuslineTeeCommand } from "../src/commands/statusline-tee.js";
 import { WAKE_GRACE_MS, wakeDue } from "../src/commands/engine.js";
@@ -21,6 +28,7 @@ import {
   runShellCommand,
   MAX_FORWARD_BYTES,
   runStatuslineTee,
+  STATUSLINE_TEE_USAGE,
   userCommandOf,
   type StatuslineDeps,
 } from "../src/statusline.js";
@@ -39,9 +47,6 @@ import {
 } from "./helpers.js";
 
 const daemons: RunningDaemon[] = [];
-const never = (): never => {
-  throw new Error("no command");
-};
 afterEach(async () => {
   for (const d of daemons.splice(0)) await d.close();
   cleanupDirs();
@@ -167,34 +172,67 @@ const getJson = (port: number, path: string, token: string): Promise<unknown> =>
   });
 
 describe("vtc statusline-tee (§6.9)", () => {
-  it("takes the user's command from after --: one command string, or an argv", () => {
-    expect(userCommandOf(["--", "cat | head -c 5"])).toEqual({
-      kind: "shell",
-      line: "cat | head -c 5",
-    });
-    expect(userCommandOf(["--", "~/bin/status.sh", "--short"])).toEqual({
-      kind: "argv",
-      argv: ["~/bin/status.sh", "--short"],
-    });
-    expect(userCommandOf([])).toBeNull();
-    expect(userCommandOf(["--"])).toBeNull();
+  it("parses exactly `vtc statusline-tee [-- <one shell-quoted word>]` (STATUSLINE_TEE)", () => {
+    expect(userCommandOf(["--", "cat | head -c 5"])).toEqual({ command: "cat | head -c 5" });
+    // zero words after `--`, or none at all: no user command
+    expect(userCommandOf([])).toEqual({ command: null });
+    expect(userCommandOf(["--"])).toEqual({ command: null });
+    // anything else is not the frozen form: never run as an argv or re-joined
+    for (const bad of [
+      ["--", "~/bin/status.sh", "--short"],
+      ["cat"],
+      ["--x", "--", "cat"],
+      ["cat", "--", "cat"],
+    ])
+      expect(userCommandOf(bad)).toEqual({ error: STATUSLINE_TEE_USAGE });
+    expect(STATUSLINE_TEE_USAGE).toMatch(/^usage: vtc statusline-tee \[-- /);
   });
 
-  it("hands the command string to the shell exactly once", async () => {
-    // the wiring form: the user's original statusLine command as one argument
+  it("hands the one word to the shell exactly once, as the adapter's wiring quotes it", async () => {
+    // the user's original statusLine command, as statuslineTeeCommand writes it
     const original = `printf '%s|' 'a b' "c  d" | tr -d '\n'`;
-    expect(await runShellCommand(userCommandOf(["--", original]) ?? never(), "")).toEqual({
+    const wired = statuslineTeeCommand(original);
+    expect(wired.startsWith(`${STATUSLINE_TEE.command} ${STATUSLINE_TEE.subcommand} -- `)).toBe(
+      true,
+    );
+    // what the shell Claude Code runs statusLine.command through hands the shim
+    const argv = execFileSync(
+      "/bin/sh",
+      ["-c", `printf '%s\\0' ${wired.slice(STATUSLINE_TEE.command.length + 1)}`],
+      { encoding: "utf8" },
+    )
+      .split("\0")
+      .slice(0, -1);
+    expect(argv).toEqual([STATUSLINE_TEE.subcommand, STATUSLINE_TEE.separator, original]);
+    const parsed = userCommandOf(argv.slice(1));
+    expect(parsed).toEqual({ command: original });
+    expect(await runShellCommand(original, "")).toEqual({
       code: 0,
       stdout: "a b|c  d|",
       stderr: "",
     });
-    // several arguments are an argv: no shell parses them, quotes and spaces survive
-    expect(
-      await runShellCommand(
-        userCommandOf(["--", "printf", "%s|", "a 'b'", "$HOME"]) ?? never(),
-        "",
-      ),
-    ).toEqual({ code: 0, stdout: "a 'b'|$HOME|", stderr: "" });
+    expect(statuslineTeeCommand(null)).toBe("vtc statusline-tee");
+  });
+
+  it("forwards usage even when the arguments are not the frozen form, and says so", async () => {
+    const posts: string[] = [];
+    const deps: StatuslineDeps = {
+      vtcHome: tempHome(),
+      cwd: "/",
+      findRepoRoot: () => Promise.resolve("/r"),
+      liveDaemon: () => Promise.resolve({ port: 1 } as never),
+      readInstallToken: () => "t",
+      post: (_port, path) => {
+        posts.push(path);
+        return Promise.resolve({ status: 204 });
+      },
+      runCommand: () => Promise.reject(new Error("never run")),
+    };
+    const output = await runStatuslineTee(["--", "printf", "x"], JSON.stringify(STATUSLINE), deps);
+    expect(output.code).toBe(64);
+    expect(output.stdout).toBe("");
+    expect(output.stderr).toMatch(/usage: vtc statusline-tee \[-- '<your statusline command>'\]/);
+    expect(posts).toEqual([ENGINE_HTTP.routes.statuslineIngest.path]);
   });
 
   it("passes stdin of any size to the user's command, forwarding only a statusline-sized one", async () => {

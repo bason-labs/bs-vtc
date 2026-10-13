@@ -1,19 +1,33 @@
 /**
  * `vtc hook <session-start|pre-tool-use|subagent-stop> --host <host>`: the command every plugin
  * hook runs (AD-16 rule 3; the frozen contract is `@vtc/shared` hook.ts). It fails open: no VTC
- * run, no live daemon, unreadable input or any error is exit 0 with no output. It blocks (exit 2,
- * the reason on stderr) only a VTC role agent's git write, or a write outside the write scope of
- * that agent's in-flight dispatch: its worktree's scope entries, plus the entries it writes in the
- * main checkout (QA author mode's hidden-test staging). The engine stays the enforcement point.
+ * run, unreadable input or any error is exit 0 with no output, and so is no live daemon for
+ * `pre-tool-use` and `subagent-stop`. `session-start` reads the committed event logs itself and
+ * prints the resume hint for each unfinished run whether or not a daemon answers yet (D-af, spine
+ * §5 reading 52; `run-log.ts`).
+ *
+ * It blocks (exit 2, the reason on stderr) only a VTC role agent's git write (commits, pushes,
+ * merges, rebases, resets, config changes, ref writes and `git -c` / `--config-env` overrides of
+ * keys that are not output-only; reading 64), or a write outside its effective write scope (D-ag,
+ * reading 53): its own worktree within its in-flight dispatch's write scope, its main-checkout
+ * staging entries (QA author mode's hidden tests, reading 65) and the OS temp directory
+ * ({@link osTempDirs}). The engine stays the enforcement point.
  *
  * Known limit: the host's hook input names the calling agent but not which of its dispatches it
  * serves. With concurrency 2-3, two in-flight dispatches can share an agent (two `vtc-engineer`
  * tasks). When the input's `cwd` lies in one of their worktrees, only that dispatch counts;
  * otherwise a write into either worktree, inside that worktree's own scope, is allowed. The
  * engine still attributes and checks each worktree's diff against its own task (L5).
+ *
+ * TODO(engine-core, spine §5 reading 67): the write scope is still read from the rendered
+ * Markdown pack (`packWriteScopes`) and matched with the cli's copy of the glob dialect
+ * (`hook-rules.ts`), because build/foundation's `core` exports neither `matchesAny` /
+ * `globToRegExp` nor a structured per-dispatch write scope yet. Switch to those exports and delete
+ * both copies as soon as engine-core lands them.
  */
-import { readFileSync, realpathSync } from "node:fs";
-import { basename, dirname, isAbsolute, join, relative, sep } from "node:path";
+import { lstatSync, readFileSync, readlinkSync, realpathSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { basename, dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import { core, git } from "@vtc/engine";
 import {
   VTC_HOOK,
@@ -32,6 +46,7 @@ import {
   shellCommandOf,
   writeTargets,
 } from "./hook-rules.js";
+import { unfinishedRuns, type UnfinishedRun } from "./run-log.js";
 
 export interface HookOutcome {
   readonly code: number;
@@ -49,7 +64,29 @@ export interface HookDeps {
   readonly findRepoRoot: (cwd: string) => Promise<string | null>;
   readonly liveDaemon: (vtcHome: string, repoRoot: string) => Promise<EngineDiscovery | null>;
   readonly loadRuns: (repoRoot: string) => readonly RunState[];
+  /** The OS temp directories a role agent may write in (D-ag); {@link osTempDirs} by default. */
+  readonly tempDirs?: readonly string[];
+  /** The repo's unfinished runs from its event logs (`run-log.ts`), by default. */
+  readonly unfinishedRuns?: (repoRoot: string, deadline: number) => Promise<UnfinishedRun[]>;
+  /** When the hook must have answered (epoch ms); `VTC_HOOK.timeoutMs` from now by default. */
+  readonly deadline?: number;
 }
+
+/**
+ * The OS temp directory (D-ag, spine §5 reading 53): an absolute `$TMPDIR`, the runtime's
+ * `tmpdir()`, `/tmp` and `/private/tmp`, and `/var/folders` on macOS (where `$TMPDIR` lives).
+ */
+export const osTempDirs = (
+  env: Readonly<Record<string, string | undefined>> = process.env,
+  platform: NodeJS.Platform = process.platform,
+  osTmp: string = tmpdir(),
+): string[] => {
+  const dirs = [env.TMPDIR, osTmp, "/tmp", "/private/tmp"];
+  if (platform === "darwin") dirs.push("/var/folders");
+  return [
+    ...new Set(dirs.filter((d): d is string => d !== undefined && d !== "" && isAbsolute(d))),
+  ];
+};
 
 export const ALLOW: HookOutcome = { code: VTC_HOOK.exit.allow };
 
@@ -69,13 +106,30 @@ const activeRunOf = async (
   return run === undefined || run.run.finished_at !== undefined ? null : { repoRoot, run };
 };
 
-/** The path with symlinks resolved as far as it exists (a new file's parent, and so on). */
-const realish = (abs: string): string => {
+/** Links followed before a path is judged as it is written (the kernel's own limit is 40). */
+const MAX_LINKS = 40;
+
+/**
+ * The path with symlinks resolved as far as it exists (a new file's parent, and so on). A
+ * dangling symlink is judged by where it points, since writing through it creates its target.
+ */
+const realish = (abs: string, links = 0): string => {
   try {
     return realpathSync(abs);
   } catch {
     const parent = dirname(abs);
-    return parent === abs ? abs : join(realish(parent), basename(abs));
+    if (parent === abs) return abs;
+    const realParent = realish(parent, links);
+    if (links < MAX_LINKS) {
+      let target: string | null = null;
+      try {
+        if (lstatSync(abs).isSymbolicLink()) target = readlinkSync(abs);
+      } catch {
+        // not there yet: a new file
+      }
+      if (target !== null) return realish(resolve(realParent, target), links + 1);
+    }
+    return join(realParent, basename(abs));
   }
 };
 
@@ -137,6 +191,7 @@ const writeViolation = (
   repoRoot: string,
   run: RunState,
   dispatches: readonly core.RoleRunRecord[],
+  tempDirs: readonly string[],
 ): string | null => {
   const scopes = scopesOf(repoRoot, dispatches);
   if (scopes === null) return null; // a pack is unreadable: allow (the engine still checks)
@@ -144,6 +199,9 @@ const writeViolation = (
   const inWorktrees = below(relative(realish(join(repoRoot, git.WORKTREES_DIR)), real));
   if (inWorktrees === null) {
     const inRepo = below(relative(realish(repoRoot), real));
+    // outside the repo (where it lands, symlinks resolved), the OS temp directory is allowed
+    if (inRepo === null && tempDirs.some((dir) => below(relative(realish(dir), real)) !== null))
+      return null;
     const allowed =
       inRepo !== null &&
       dispatches.some((d) =>
@@ -152,7 +210,9 @@ const writeViolation = (
           posix(inRepo),
         ),
       );
-    return allowed ? null : `${target} is outside your worktree under ${git.WORKTREES_DIR}/`;
+    return allowed
+      ? null
+      : `${target} is outside your worktree under ${git.WORKTREES_DIR}/ (and outside the OS temp directory)`;
   }
   const [id = "", ...rest] = inWorktrees.split(sep);
   const path = rest.join("/");
@@ -190,22 +250,53 @@ const preToolUse = async (input: VtcHookInput, deps: HookDeps): Promise<HookOutc
     cwdWorktree === null ? [] : sameAgent.filter((d) => ownsWorktree(active.run, d, cwdWorktree));
   const dispatches = own.length > 0 ? own : sameAgent;
   for (const target of targets) {
-    const violation = writeViolation(target, active.repoRoot, active.run, dispatches);
+    const violation = writeViolation(
+      target,
+      active.repoRoot,
+      active.run,
+      dispatches,
+      deps.tempDirs ?? osTempDirs(),
+    );
     if (violation !== null)
       return block(`VTC: ${violation}. Write only inside your task pack's write scope.`);
   }
   return ALLOW;
 };
 
-const sessionStart = async (input: VtcHookInput, deps: HookDeps): Promise<HookOutcome> => {
-  const active = await activeRunOf(input, deps);
-  if (active === null) return ALLOW;
-  const { run } = active.run;
+/** At most this many runs get a hint, the newest; older ones are counted in one line. */
+export const MAX_HINTED_RUNS = 3;
+/** An upper bound on what `session-start` prints into the Lead's context. */
+export const MAX_RESUME_HINT_CHARS = 2000;
+
+/** The one-paragraph hint for an unfinished run (hook rule 3, §6.8). */
+const resumeHint = (run: UnfinishedRun): string => {
+  const what = [run.track, run.phase === null ? null : `phase ${run.phase}`]
+    .filter((p) => p !== null)
+    .join(", ");
   const state = run.paused ? "paused" : "in progress";
-  return {
-    code: VTC_HOOK.exit.allow,
-    stdout: `VTC: run ${run.id} (${run.track}, phase ${run.phase}) is ${state} in this repo. Offer the user to resume it: call the vtc \`status\` tool to summarise it${run.paused ? ", `resume` if the user agrees," : ""} then \`next\` and perform exactly the actions it returns.\n`,
-  };
+  return `VTC: run ${run.id}${what === "" ? "" : ` (${what})`} is ${state} in this repo. Resume run? Offer the user to resume it: call the vtc \`status\` tool to summarise it${run.paused ? ", `resume` if the user agrees," : ""} then \`next\` and perform exactly the actions it returns.\n`;
+};
+
+/**
+ * Hook rule 3 with D-af: the hint for the newest runs the committed event log shows unfinished,
+ * read from the logs themselves, so it needs no daemon. Only for the Lead: a VTC role session
+ * (headless roles load the plugin too, D-aa) gets nothing. `run-log.ts` lets only schema-valid
+ * ids, tracks and phases through, and the output is bounded.
+ */
+const sessionStart = async (input: VtcHookInput, deps: HookDeps): Promise<HookOutcome> => {
+  if (isVtcRoleAgent(input.agent_type)) return ALLOW;
+  const repoRoot = await deps.findRepoRoot(input.cwd ?? deps.cwd);
+  if (repoRoot === null) return ALLOW;
+  const read = deps.unfinishedRuns ?? unfinishedRuns;
+  const runs = await read(repoRoot, deps.deadline ?? Date.now() + VTC_HOOK.timeoutMs);
+  if (runs.length === 0) return ALLOW;
+  const older = runs.length - MAX_HINTED_RUNS;
+  const hints = runs.slice(-MAX_HINTED_RUNS).map(resumeHint);
+  if (older > 0)
+    hints.push(
+      `VTC: ${String(older)} older unfinished ${older === 1 ? "run is" : "runs are"} in this repo too; the vtc \`status\` tool lists them.\n`,
+    );
+  return { code: VTC_HOOK.exit.allow, stdout: hints.join("").slice(0, MAX_RESUME_HINT_CHARS) };
 };
 
 const subagentStop = async (input: VtcHookInput, deps: HookDeps): Promise<HookOutcome> => {

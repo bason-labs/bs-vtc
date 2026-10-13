@@ -1,6 +1,7 @@
 /**
- * `vtc statusline-tee -- '<the user's statusline command>'` (§6.9, spine §5 reading 6): the
- * Claude statusline shim. It wraps the user's own statusline command instead of replacing it: the
+ * `vtc statusline-tee [-- '<the user's statusline command>']` (§6.9, spine §5 readings 6 and 61;
+ * the frozen form is `STATUSLINE_TEE` / `statuslineTeeCommand` in `@vtc/shared`): the Claude
+ * statusline shim. It wraps the user's own statusline command instead of replacing it: the
  * command gets Claude's statusline JSON on stdin unchanged and its output is printed unchanged.
  * Alongside, the shim turns the JSON into a `StatuslineIngest` with the adapter's pure
  * `statuslineIngestFromClaude` and POSTs it to the repo's running engine (found through the
@@ -9,7 +10,12 @@
  */
 import { spawn } from "node:child_process";
 import { statuslineIngestFromClaude } from "@vtc/adapters";
-import { ENGINE_HTTP, type EngineDiscovery, type StatuslineIngest } from "@vtc/shared";
+import {
+  ENGINE_HTTP,
+  STATUSLINE_TEE,
+  type EngineDiscovery,
+  type StatuslineIngest,
+} from "@vtc/shared";
 
 export interface StatuslineDeps {
   readonly vtcHome: string;
@@ -25,7 +31,8 @@ export interface StatuslineDeps {
   ) => Promise<{
     readonly status: number;
   }>;
-  readonly runCommand: (command: UserCommand, stdin: string) => Promise<CommandOutput>;
+  /** Runs the user's command line through the shell once (`runShellCommand`). */
+  readonly runCommand: (line: string, stdin: string) => Promise<CommandOutput>;
 }
 
 export interface CommandOutput {
@@ -68,23 +75,23 @@ export const forwardStatusline = async (stdin: string, deps: StatuslineDeps): Pr
 };
 
 /**
- * The user's statusline command, from the arguments after `--`. The wiring form (the Claude
- * adapter's `install`, AD-6 rule 4) is exactly one argument: the user's original `statusLine`
- * command string, quoted as a single shell word, which the shim hands to the shell once, as
- * Claude Code itself would. More than one argument is an argv run directly, with no shell, so
+ * The user's statusline command, parsed from exactly the frozen form (`STATUSLINE_TEE`, reading
+ * 61): no arguments, or `--` alone, is no user command; `--` and one word is the user's original
+ * `statusLine` command, which the adapter shell-quoted as that one word and which the shim hands
+ * to the shell exactly once, as Claude Code itself would. Anything else is not a form the adapter
+ * writes and is refused rather than guessed at (never run as an argv, never re-joined), so
  * nothing is ever shell-parsed twice.
  */
-export type UserCommand =
-  | { readonly kind: "shell"; readonly line: string }
-  | { readonly kind: "argv"; readonly argv: readonly [string, ...string[]] };
+export type UserCommandParse = { readonly command: string | null } | { readonly error: string };
 
-export const userCommandOf = (args: readonly string[]): UserCommand | null => {
-  const at = args.indexOf("--");
-  const [first, ...rest] = at < 0 ? [] : args.slice(at + 1);
-  if (first === undefined) return null;
-  return rest.length === 0
-    ? { kind: "shell", line: first }
-    : { kind: "argv", argv: [first, ...rest] };
+export const STATUSLINE_TEE_USAGE = `usage: ${STATUSLINE_TEE.command} ${STATUSLINE_TEE.subcommand} [${STATUSLINE_TEE.separator} '<your statusline command>'] (the command as one shell-quoted word)`;
+
+export const userCommandOf = (args: readonly string[]): UserCommandParse => {
+  if (args.length === 0) return { command: null };
+  const [separator, word, ...rest] = args;
+  if (separator !== STATUSLINE_TEE.separator || rest.length > 0)
+    return { error: STATUSLINE_TEE_USAGE };
+  return { command: word ?? null };
 };
 
 /**
@@ -93,42 +100,41 @@ export const userCommandOf = (args: readonly string[]): UserCommand | null => {
  */
 export const MAX_FORWARD_BYTES = 256 * 1024;
 
-/** Runs the shim: the user's statusline output (and exit code) unchanged, usage forwarded. */
+/**
+ * Runs the shim: the user's statusline output (and exit code) unchanged, usage forwarded. Usage
+ * is forwarded whatever the arguments; arguments that are not the frozen form run nothing and
+ * exit 64 with the usage on stderr.
+ */
 export const runStatuslineTee = async (
   args: readonly string[],
   stdin: string,
   deps: StatuslineDeps,
 ): Promise<CommandOutput> => {
-  const command = userCommandOf(args);
+  const parsed = userCommandOf(args);
   const [, output] = await Promise.all([
     Buffer.byteLength(stdin) <= MAX_FORWARD_BYTES
       ? forwardStatusline(stdin, deps)
       : Promise.resolve(false),
-    command === null
-      ? Promise.resolve<CommandOutput>({ code: 0, stdout: "", stderr: "" })
-      : deps.runCommand(command, stdin),
+    "error" in parsed
+      ? Promise.resolve<CommandOutput>({ code: 64, stdout: "", stderr: `${parsed.error}\n` })
+      : parsed.command === null
+        ? Promise.resolve<CommandOutput>({ code: 0, stdout: "", stderr: "" })
+        : deps.runCommand(parsed.command, stdin),
   ]);
   return output;
 };
 
-/**
- * Runs the user's statusline command: a command line through the shell once, as Claude Code itself
- * would, or an argv directly.
- */
+/** Runs the user's statusline command line through the shell once, as Claude Code itself would. */
 export const runShellCommand = (
-  command: UserCommand,
+  line: string,
   stdin: string,
   timeoutMs = 10_000,
 ): Promise<CommandOutput> =>
   new Promise((resolve) => {
     let stdout = "";
     let stderr = "";
-    const [file, args, shell] =
-      command.kind === "shell"
-        ? [command.line, [], true]
-        : [command.argv[0], command.argv.slice(1), false];
-    const child = spawn(file, args, {
-      shell,
+    const child = spawn(line, [], {
+      shell: true,
       stdio: ["pipe", "pipe", "pipe"],
       windowsHide: true,
     });
