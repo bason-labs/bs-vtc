@@ -31,6 +31,7 @@ import { afterEach, describe, expect, it } from "vitest";
 import {
   HIDDEN_DETAILS_WITHHELD,
   ScannerUnavailableError,
+  type GateJailSpec,
   type ScannerStore,
 } from "../../src/gates/index.js";
 import { cleanupDirs, tempDir, writeFile } from "../helpers/repo.js";
@@ -38,6 +39,7 @@ import {
   cases,
   commitAll,
   config,
+  fakeReaperSandbox,
   harness,
   installGate,
   JUNIT,
@@ -1196,6 +1198,68 @@ process.exit(problems.length === 0 ? 0 : 1);
     }
     // The run removes its home and temp dirs.
     expect(existsSync(h.specs[0]?.home ?? "")).toBe(false);
+  });
+
+  it("hides the user's home and the repo's state from every command, keeps its own checkout and the git directory readable, and denies evidence", async () => {
+    const h = harness({ "tests/unit.json": cases([{ name: "ok" }]) }, config([testsGate]), {
+      env: { ...process.env, HOME: "/home/someone" },
+    });
+    writeFile(h.repo, "tests/unit.json", cases([{ name: "ok", status: "fail" }]));
+    const head = commitAll(h.repo);
+    await h.run({ head, layers: ["L2"] });
+    const repo = realpathSync(h.repo);
+    expect(h.specs.length).toBe(2);
+    for (const s of h.specs as readonly GateJailSpec[]) {
+      expect(s.hideRead).toEqual(
+        expect.arrayContaining(["/home/someone", join(h.repo, ".vtc/state")]),
+      );
+      expect(s.denyRead).toContain(join(h.repo, ".vtc/evidence"));
+      expect(s.allowRead).toContain(join(repo, ".git"));
+      // The checkout (the head's, or the base's for the baseline) is the command's own.
+      expect(s.checkout.startsWith(join(repo, ".vtc/state/checkouts/"))).toBe(true);
+    }
+  });
+
+  it("copies hidden tests in only after every install-phase gate has finished", async () => {
+    const probe = `import { existsSync } from "node:fs";
+process.exit(existsSync("tests/hidden/h.json") ? 3 : 0);
+`;
+    const h = harness(
+      { "tests/unit.json": cases([{ name: "ok" }]), "tools/probe.mjs": probe },
+      config([testsGate, { ...installGate, command: [NODE, "tools/probe.mjs"] }]),
+    );
+    const hiddenDir = join(h.home, "hidden", engineRepoKey(h.repo), "T-1", "tests/hidden");
+    mkdirSync(hiddenDir, { recursive: true });
+    writeFileSync(join(hiddenDir, "h.json"), cases([{ name: "[REQ-1] hidden edge" }]));
+    writeFile(h.repo, "src/x.ts", "export const x = 1;\n");
+    const head = commitAll(h.repo);
+    const report = await h.run({ head, layers: ["L2"], include_hidden: true });
+    expect(gate(report, "install")).toMatchObject({ status: "pass" });
+    expect(gate(report, "tests")).toMatchObject({ status: "pass", tests: { executed: 2 } });
+  });
+
+  it("stops the run when a command's leftovers could not be confirmed stopped", async () => {
+    const h = harness(
+      { "tests/unit.json": cases([{ name: "ok" }]) },
+      config([testsGate, installGate]),
+      { sandbox: fakeReaperSandbox(false) },
+    );
+    const report = await h.run({ head: h.base });
+    expect(gate(report, "install")).toMatchObject({ status: "error", failure_class: "infra" });
+    expect(read(h.repo, gate(report, "install").evidence[0]?.ref ?? "")).toMatch(/reaper/);
+    expect(gate(report, "tests").status).not.toBe("pass");
+    expect(report.verdict).toBe("infra_error");
+  });
+
+  it("runs normally under a reaper that confirms", async () => {
+    const h = harness(
+      { "tests/unit.json": cases([{ name: "ok" }]) },
+      config([testsGate, installGate]),
+      { sandbox: fakeReaperSandbox(true) },
+    );
+    const report = await h.run({ head: h.base });
+    expect(gate(report, "install")).toMatchObject({ status: "pass" });
+    expect(gate(report, "tests")).toMatchObject({ status: "pass" });
   });
 
   it("wraps the baseline run on the base checkout too", async () => {

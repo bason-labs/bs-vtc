@@ -3,18 +3,28 @@
  * command the Gate Runner starts (calibration, L0–L5, guards, Final Review, the OSV database
  * download) runs through a {@link GateSandbox}:
  *
- * - macOS: `/usr/bin/sandbox-exec` with a profile generated here ({@link sandboxExecProfile}).
- *   Paths reach the profile as `-D` parameters, never spliced into its text.
- * - Linux: `bwrap` ({@link bwrapArgs}): the host root read-only, the checkout and the private temp
- *   directories bound writable, denied paths hidden, and its own network namespace in the verify
- *   phase (a private loopback only).
+ * - macOS: `/usr/bin/sandbox-exec` with a profile generated here ({@link sandboxExecProfile}). The
+ *   profile starts from `(deny default)`: the command may fork, exec, read files (narrowed below),
+ *   signal and inspect its own sandbox, and look up a short list of system services
+ *   ({@link GATE_MACH_SERVICES}); LaunchServices, AppleEvents, background downloads, the
+ *   pasteboard and the keychain stay out of reach, so nothing it does can have launchd start code
+ *   outside the sandbox. Paths reach the profile as `-D` parameters, never spliced into its text.
+ *   The command runs under an in-sandbox reaper ({@link REAPER_SCRIPT}) that kills everything left
+ *   in the sandbox when the command ends (macOS has no PID namespace).
+ * - Linux: `bwrap` ({@link bwrapArgs}): a minimal root of read-only system directories and
+ *   toolchains (never the host root, so no host `/run`, `/tmp` or `/var/run` and none of the IPC
+ *   sockets in them), the checkout and the private directories bound writable, its own PID
+ *   namespace (everything dies with the command) and, in the verify phase, its own network
+ *   namespace (a private loopback only).
  *
- * Rules, the same in both: the verify phase has no network; the install phase gets the full
- * network (neither tool can filter by registry host, so `WrappedGateCommand.network` says
- * `full`) with the same filesystem rules; writes only to the checkout, the command's private temp
- * directory and the run's empty `HOME`; reads denied on {@link gateDenyReadPaths} (the VTC home
- * except the scanners, rules and OSV database the gates run with, the host config directories,
- * the host credential files and common credential stores). The environment is the allowlist of
+ * Rules, the same in both: the verify phase has no network; the install phase gets IP networking
+ * (neither tool can filter by registry host, so `WrappedGateCommand.network` says `full`) with the
+ * same filesystem rules and no Unix socket outside the writable directories (on macOS DNS goes
+ * through mDNSResponder); writes only to the checkout, the command's private temp directory and
+ * the run's empty `HOME`. Reads follow {@link gateReadPolicy}: the real home and the repo's
+ * `.vtc/state` are hidden except the toolchains, the VTC home entries the gates run with, the
+ * repo's git directory and the command's own checkout; the deny list (VTC home, host config and
+ * credential stores, the repo's evidence) is never readable. The environment is the allowlist of
  * `exec.ts` with `HOME` and the temp variables pointed at the per-run directories and `VTC_HOME`
  * unset ({@link sandboxEnv}).
  *
@@ -36,12 +46,14 @@ import {
   mkdirSync,
   mkdtempSync,
   readdirSync,
+  readFileSync,
   realpathSync,
   rmSync,
   statSync,
+  writeFileSync,
 } from "node:fs";
 import { homedir, tmpdir } from "node:os";
-import { delimiter, isAbsolute, join } from "node:path";
+import { basename, delimiter, dirname, isAbsolute, join, resolve as resolvePath } from "node:path";
 import {
   GATE_SANDBOX,
   HOST_CREDENTIAL_DENY_READ,
@@ -79,14 +91,31 @@ export const HOME_CREDENTIAL_LOCATIONS: readonly string[] = [
   ".azure",
   ".config/gcloud",
   ".config/gh",
+  ".config/hub",
+  ".config/op",
   ".config/git/credentials",
+  ".config/containers",
   ".git-credentials",
   ".netrc",
   ".npmrc",
+  ".yarnrc",
+  ".yarnrc.yml",
+  ".bunfig.toml",
   ".pypirc",
+  ".cargo/credentials",
+  ".cargo/credentials.toml",
+  ".gem/credentials",
+  ".gradle/gradle.properties",
+  ".m2/settings.xml",
+  ".m2/settings-security.xml",
+  ".terraform.d/credentials.tfrc.json",
+  ".vault-token",
+  ".pgpass",
   ".docker",
   ".kube",
   ".gnupg",
+  ".password-store",
+  ".local/share/keyrings",
   ".claude.json",
   "Library/Keychains",
 ];
@@ -138,6 +167,185 @@ export const gateDenyReadPaths = (vtcHome: string, env: Env = process.env): stri
 };
 
 /**
+ * Variables naming a toolchain's install root. Their absolute values stay readable inside the
+ * hidden home ({@link gateToolchainRoots}).
+ */
+export const TOOLCHAIN_ROOT_ENV: readonly string[] = [
+  "NVM_DIR",
+  "VOLTA_HOME",
+  "PNPM_HOME",
+  "BUN_INSTALL",
+  "RUSTUP_HOME",
+  "CARGO_HOME",
+  "PYENV_ROOT",
+  "JAVA_HOME",
+  "GOROOT",
+  "GOPATH",
+  "VIRTUAL_ENV",
+  "SDKMAN_DIR",
+  "ASDF_DATA_DIR",
+  "ASDF_DIR",
+  "FNM_DIR",
+  "N_PREFIX",
+  "DENO_INSTALL",
+  "NODENV_ROOT",
+  "RBENV_ROOT",
+  "HOMEBREW_PREFIX",
+  "CONDA_PREFIX",
+  "GEM_HOME",
+  "MISE_DATA_DIR",
+];
+
+/** PATH entries whose parent is the toolchain's root (`…/node/v22/bin` needs `…/node/v22/lib`). */
+const PREFIXED_BIN_DIRS: ReadonlySet<string> = new Set(["bin", "sbin", "shims"]);
+
+/** Whether `path` is `dir` or inside it (both absolute and normalized). */
+const within = (path: string, dir: string): boolean =>
+  path === dir || path.startsWith(dir.endsWith("/") ? dir : `${dir}/`);
+
+/**
+ * The toolchain roots a gate reads inside the hidden home: every absolute `PATH` entry (its parent
+ * for a `bin`, `sbin` or `shims` directory, so a Node, Python or Ruby install finds its libraries,
+ * except directly under a hidden directory or `.local`) and the absolute values of
+ * {@link TOOLCHAIN_ROOT_ENV}. A root that is a hidden directory or contains one is left out: it
+ * would make the hidden directory readable again.
+ */
+export const gateToolchainRoots = (env: Env, hidden: readonly string[]): string[] => {
+  const roots: string[] = [];
+  const exposes = (dir: string): boolean => hidden.some((h) => within(resolvePath(h), dir));
+  const keep = (dir: string): boolean => {
+    if (exposes(dir)) return false;
+    if (!roots.includes(dir)) roots.push(dir);
+    return true;
+  };
+  for (const entry of (env.PATH ?? "").split(delimiter)) {
+    if (entry === "" || !isAbsolute(entry)) continue;
+    const dir = resolvePath(entry);
+    const parent = dirname(dir);
+    const prefixed =
+      PREFIXED_BIN_DIRS.has(basename(dir)) &&
+      parent !== dirname(parent) &&
+      basename(parent) !== ".local" &&
+      !hidden.some((h) => resolvePath(h) === parent);
+    if (!(prefixed && keep(parent))) keep(dir);
+  }
+  for (const key of TOOLCHAIN_ROOT_ENV) {
+    const value = env[key];
+    if (value !== undefined && isAbsolute(value)) keep(resolvePath(value));
+  }
+  return roots;
+};
+
+/**
+ * The repository's shared git directory: `.git` itself, or for a linked worktree the directory
+ * its `commondir` names. Verification checkouts are linked worktrees of the repo, so `git` in a
+ * gate needs it. Reads only the repo's own git metadata; `null` when there is none.
+ */
+export const gitCommonDir = (repoRoot: string): string | null => {
+  const dotGit = join(repoRoot, ".git");
+  try {
+    if (statSync(dotGit).isDirectory()) return realpathSync(dotGit);
+    const match = /^gitdir:\s*(.+?)\s*$/m.exec(readFileSync(dotGit, "utf8"));
+    if (match?.[1] === undefined) return null;
+    const gitDir = resolvePath(repoRoot, match[1]);
+    let common = gitDir;
+    try {
+      common = resolvePath(gitDir, readFileSync(join(gitDir, "commondir"), "utf8").trim());
+    } catch {
+      // a gitdir without commondir is its own common directory
+    }
+    return realpathSync(common);
+  } catch {
+    return null;
+  }
+};
+
+/** What a gate command may read (the sandbox enforces it; nothing here opens the paths). */
+export interface GateReadPolicy {
+  /** Never readable, not even their names' metadata on macOS. */
+  readonly denyRead: readonly string[];
+  /** Contents unreadable (names and metadata stay visible on macOS), except {@link allowRead}. */
+  readonly hideRead: readonly string[];
+  /** Readable again inside {@link hideRead}; {@link denyRead} still wins. */
+  readonly allowRead: readonly string[];
+}
+
+/**
+ * The read policy of a run's gate commands: the real home (both `$HOME` and the account's home)
+ * and the repo's `.vtc/state` (other checkouts and the raw logs of hidden-test runs) are hidden;
+ * the toolchains ({@link gateToolchainRoots}), the VTC home entries the gates run with
+ * ({@link GATE_READABLE_VTC_HOME}) and the repo's git directory stay readable, and the command's
+ * own checkout is readable and writable. Denied: {@link gateDenyReadPaths} and the repo's
+ * `.vtc/evidence`.
+ */
+export const gateReadPolicy = (options: {
+  readonly vtcHome: string;
+  readonly env?: Env;
+  readonly repoRoot?: string;
+  /** The account's home (default `os.homedir()`). */
+  readonly homedir?: string;
+}): GateReadPolicy => {
+  const env = options.env ?? process.env;
+  const account = options.homedir ?? homedir();
+  const home = env.HOME !== undefined && isAbsolute(env.HOME) ? env.HOME : account;
+  const repo = options.repoRoot;
+  const hideRead = [
+    ...new Set([home, account]),
+    ...(repo === undefined ? [] : [join(repo, ".vtc", "state")]),
+  ];
+  const common = repo === undefined ? null : gitCommonDir(repo);
+  return {
+    denyRead: [
+      ...gateDenyReadPaths(options.vtcHome, env),
+      ...(repo === undefined ? [] : [join(repo, ".vtc", "evidence")]),
+    ],
+    hideRead,
+    allowRead: [
+      ...new Set([
+        ...gateToolchainRoots(env, hideRead),
+        ...GATE_READABLE_VTC_HOME.map((name) => join(options.vtcHome, name)),
+        ...(common === null ? [] : [common]),
+      ]),
+    ],
+  };
+};
+
+/**
+ * The spec a {@link GateCommandJail} hands the sandbox: the contract's `GateSandboxSpec` plus the
+ * hidden and readable roots of {@link GateReadPolicy} and the reaper's sentinel. A sandbox that
+ * knows nothing of the extra fields still gets every contract rule.
+ */
+export interface GateJailSpec extends GateSandboxSpec {
+  readonly hideRead?: readonly string[];
+  readonly allowRead?: readonly string[];
+  /**
+   * A file in the run's private root (outside every writable directory). The macOS profile
+   * denies reading it, and {@link REAPER_SCRIPT} kills only when it cannot read it, so the reaper
+   * never kills anything outside a sandbox.
+   */
+  readonly reapSentinel?: string;
+}
+
+/** A wrapped command that runs under {@link REAPER_SCRIPT} (see `exec.ts` `ExecRequest.reaper`). */
+export interface ReapedGateCommand extends WrappedGateCommand {
+  readonly reaper: true;
+}
+
+const isReaped = (wrapped: WrappedGateCommand): wrapped is ReapedGateCommand =>
+  (wrapped as Partial<ReapedGateCommand>).reaper === true;
+
+const extrasOf = (
+  spec: GateSandboxSpec,
+): { hideRead: readonly string[]; allowRead: readonly string[]; reapSentinel?: string } => {
+  const extra = spec as GateJailSpec;
+  return {
+    hideRead: extra.hideRead ?? [],
+    allowRead: extra.allowRead ?? [],
+    ...(extra.reapSentinel === undefined ? {} : { reapSentinel: extra.reapSentinel }),
+  };
+};
+
+/**
  * The environment of a sandboxed gate: the scrubbed allowlist (`gateEnv`) without
  * {@link SANDBOX_DROPPED_ENV}, `HOME` (and `USERPROFILE`) at the run's empty home and the temp
  * variables at the command's private temp directory.
@@ -162,7 +370,16 @@ export const sandboxEnv = (
 
 const checkSpec = (argv: readonly string[], spec: GateSandboxSpec): void => {
   if (argv.length === 0 || argv[0] === "") throw new Error("gate sandbox: empty command");
-  for (const p of [spec.checkout, spec.tempDir, spec.home, ...spec.denyRead]) {
+  const extra = extrasOf(spec);
+  for (const p of [
+    spec.checkout,
+    spec.tempDir,
+    spec.home,
+    ...spec.denyRead,
+    ...extra.hideRead,
+    ...extra.allowRead,
+    ...(extra.reapSentinel === undefined ? [] : [extra.reapSentinel]),
+  ]) {
     if (!isAbsolute(p)) throw new Error(`gate sandbox: expected an absolute path, got ${p}`);
   }
 };
@@ -178,66 +395,165 @@ const realOrSelf = (p: string): string => {
 /** The `-D` parameters of the writable directories. */
 const WRITABLE = ["CHECKOUT", "TEMP", "HOME"] as const;
 
-/** Mach services of the user's keychain (macOS reads keychain items through them, not files). */
-const KEYCHAIN_SERVICES = ["com.apple.SecurityServer", "com.apple.securityd.xpc"];
+/**
+ * The system services (mach-lookup global names) a gate command may reach on macOS; every other
+ * service is refused by `(deny default)`. `always`: user and group lookups, logging,
+ * notifications and the per-user directory helper. `install`: DNS, network configuration and
+ * certificate trust, only where the network is. Never on either list: LaunchServices
+ * (`com.apple.coreservices.launchservicesd`, `com.apple.lsd.*`), AppleEvents, `nsurlsessiond`,
+ * the pasteboard and the keychain (`com.apple.SecurityServer`, `com.apple.securityd.xpc`), any of
+ * which could have code run, or secrets read, outside the sandbox.
+ */
+export const GATE_MACH_SERVICES = {
+  always: [
+    "com.apple.system.opendirectoryd.libinfo",
+    "com.apple.system.opendirectoryd.membership",
+    "com.apple.system.notification_center",
+    "com.apple.system.logger",
+    "com.apple.logd",
+    "com.apple.bsd.dirhelper",
+  ],
+  install: [
+    "com.apple.dnssd.service",
+    "com.apple.SystemConfiguration.configd",
+    "com.apple.SystemConfiguration.DNSConfiguration",
+    "com.apple.networkd",
+    "com.apple.trustd",
+    "com.apple.trustd.agent",
+    "com.apple.ocspd",
+  ],
+} as const;
+
+/** The read operations, spelled out: a rule for one operation beats a `file-read*` rule. */
+const READ_OPS = "file-read-data file-read-metadata file-read-xattr";
+/** Hidden: no contents or extended attributes, but names and metadata (so paths still resolve). */
+const HIDE_OPS = "file-read-data file-read-xattr";
+
+/**
+ * The supervisor every macOS gate command runs under, inside its sandbox (`sh -c` with the
+ * sentinel, then the gate's argv). It starts an anchor in its own process group (so the timeout's
+ * process-group kill misses it) that waits for the jail to close the control pipe (stdin, moved
+ * to fd 4) once the command has ended, then kills every process left in the sandbox with
+ * `kill -KILL -1` (the profile lets a process signal only its own sandbox) and confirms with `R`
+ * on fd 3 first. The command itself gets `/dev/null` as stdin and neither pipe. The anchor kills
+ * only when it cannot read the sentinel, i.e. only inside the sandbox; unsandboxed it does
+ * nothing and the jail reports the missing confirmation.
+ */
+export const REAPER_SCRIPT = [
+  "s=$1; shift",
+  "exec 4<&0 0</dev/null",
+  "set -m",
+  '{ read -r _ <&4; if [ -e "$s" ] && ! (: <"$s") 2>/dev/null; then printf R >&3; kill -KILL -1; fi; } >/dev/null 2>&1 &',
+  "set +m",
+  "exec 3>&- 4<&-",
+  '"$@"',
+].join("\n");
 
 /**
  * The `sandbox-exec` profile for one command and its `-D` parameters. `resolve` maps a path to
- * its real path (the kernel checks real paths: `/tmp` is `/private/tmp` on macOS); a deny entry
- * whose real path differs is denied under both spellings.
+ * its real path (the kernel checks real paths: `/tmp` is `/private/tmp` on macOS); a deny, hide
+ * or read entry whose real path differs is listed under both spellings.
+ *
+ * Read rules, in order (for the same operations the last matching rule wins): every file is
+ * readable; the hidden directories' contents are not; the readable roots inside them are again;
+ * the writable directories are readable and writable; the deny list and the user's terminals are
+ * not readable at all.
  */
 export const sandboxExecProfile = (
-  spec: GateSandboxSpec,
+  spec: GateJailSpec,
   resolve: (path: string) => string = realOrSelf,
 ): { readonly profile: string; readonly params: readonly (readonly [string, string])[] } => {
+  const extra = extrasOf(spec);
   const params: [string, string][] = [
     ["CHECKOUT", resolve(spec.checkout)],
     ["TEMP", resolve(spec.tempDir)],
     ["HOME", resolve(spec.home)],
   ];
-  const deny: string[] = [];
-  for (const path of spec.denyRead) {
-    for (const p of new Set([path, resolve(path)])) {
-      const key = `DENY_${String(deny.length)}`;
-      deny.push(key);
-      params.push([key, p]);
+  const keyed = (prefix: string, paths: readonly string[]): string[] => {
+    const keys: string[] = [];
+    for (const path of paths) {
+      for (const p of new Set([path, resolve(path)])) {
+        const key = `${prefix}_${String(keys.length)}`;
+        keys.push(key);
+        params.push([key, p]);
+      }
     }
-  }
-  const writable = WRITABLE.map((key) => `(subpath (param "${key}"))`).join(" ");
-  const lines = [
-    "(version 1)",
-    "(allow default)",
-    "(deny file-write*)",
-    `(allow file-write* ${writable} (literal "/dev/null") (literal "/dev/zero") (literal "/dev/dtracehelper") (literal "/dev/tty") (regex #"^/dev/ttys[0-9]+$") (subpath "/dev/fd"))`,
-    `(deny mach-lookup ${KEYCHAIN_SERVICES.map((s) => `(global-name "${s}")`).join(" ")})`,
+    return keys;
+  };
+  const hide = keyed("HIDE", extra.hideRead);
+  const read = keyed("READ", extra.allowRead);
+  const deny = keyed("DENY", spec.denyRead);
+  const sentinel = extra.reapSentinel;
+  if (sentinel !== undefined) params.push(["SENTINEL", sentinel]);
+  const sub = (key: string): string => `(subpath (param "${key}"))`;
+  const writable = WRITABLE.map(sub).join(" ");
+  const mach = [
+    ...GATE_MACH_SERVICES.always,
+    ...(spec.phase === "install" ? GATE_MACH_SERVICES.install : []),
   ];
   // One rule per path: a socket filter takes a single path filter, so rules are never combined.
-  for (const key of deny) lines.push(`(deny file-read* (subpath (param "${key}")))`);
+  const unixSockets = WRITABLE.flatMap((key) => [
+    `(allow network-bind network-inbound (local unix-socket ${sub(key)}))`,
+    `(allow network-outbound (remote unix-socket ${sub(key)}))`,
+  ]);
+  const lines = [
+    "(version 1)",
+    "(deny default)",
+    "(allow process-fork)",
+    "(allow process-exec)",
+    "(allow signal (target same-sandbox))",
+    "(allow process-info* (target same-sandbox))",
+    "(allow sysctl-read)",
+    "(allow ipc-posix-sem)",
+    `(allow mach-lookup ${mach.map((name) => `(global-name "${name}")`).join(" ")})`,
+    "(allow file-read*)",
+    ...hide.map((key) => `(deny ${HIDE_OPS} ${sub(key)})`),
+    ...read.map((key) => `(allow ${READ_OPS} ${sub(key)})`),
+    `(allow ${READ_OPS} file-write* ${writable})`,
+    '(allow file-write-data (literal "/dev/null") (literal "/dev/zero") (subpath "/dev/fd"))',
+    '(allow file-ioctl (literal "/dev/null") (literal "/dev/zero") (literal "/dev/random") (literal "/dev/urandom"))',
+    ...deny.map((key) => `(deny file-read* ${READ_OPS} ${sub(key)})`),
+    `(deny file-read* ${READ_OPS} (literal "/dev/tty") (regex #"^/dev/ttys[0-9]+$"))`,
+    ...(sentinel === undefined ? [] : [`(deny ${HIDE_OPS} (literal (param "SENTINEL")))`]),
+  ];
   if (spec.phase === "verify") {
     // No network at all; Unix sockets only inside the writable directories (test runners' IPC).
-    lines.push("(deny network*)");
-    for (const key of WRITABLE) {
-      lines.push(
-        `(allow network-bind network-inbound (local unix-socket (subpath (param "${key}"))))`,
-        `(allow network-outbound (remote unix-socket (subpath (param "${key}"))))`,
-      );
-    }
+    lines.push("(allow system-socket (socket-domain AF_UNIX))", ...unixSockets);
+  } else {
+    // IP networking for the registries; of the Unix sockets only DNS and the writable directories
+    // (never the engine socket, an ssh or gpg agent, or Docker).
+    lines.push(
+      "(allow system-socket)",
+      "(allow network-outbound (remote ip))",
+      "(allow network-bind network-inbound (local ip))",
+      '(allow network-outbound (remote unix-socket (path-literal "/private/var/run/mDNSResponder")))',
+      ...unixSockets,
+    );
   }
   return { profile: lines.join("\n"), params };
 };
 
-/** `sandbox-exec` with a VTC-generated profile (macOS). */
+/**
+ * `sandbox-exec` with a VTC-generated profile (macOS). With the jail's sentinel the command runs
+ * under {@link REAPER_SCRIPT} and the result is a {@link ReapedGateCommand}.
+ */
 export const createSandboxExecSandbox = (
   options: { readonly binary?: string; readonly realpath?: (path: string) => string } = {},
 ): GateSandbox => ({
   kind: "sandbox-exec",
-  wrap: (argv, spec): WrappedGateCommand => {
+  wrap: (argv, spec): WrappedGateCommand | ReapedGateCommand => {
     checkSpec(argv, spec);
     const { profile, params } = sandboxExecProfile(spec, options.realpath);
+    const sentinel = extrasOf(spec).reapSentinel;
+    const head = ["-p", profile, ...params.flatMap(([k, v]) => ["-D", `${k}=${v}`]), "--"];
+    const network = spec.phase === "verify" ? "none" : "full";
+    const command = options.binary ?? SANDBOX_EXEC;
+    if (sentinel === undefined) return { command, args: [...head, ...argv], network };
     return {
-      command: options.binary ?? SANDBOX_EXEC,
-      args: ["-p", profile, ...params.flatMap(([k, v]) => ["-D", `${k}=${v}`]), "--", ...argv],
-      network: spec.phase === "verify" ? "none" : "full",
+      command,
+      args: [...head, "/bin/sh", "-c", REAPER_SCRIPT, "vtc-gate", sentinel, ...argv],
+      network,
+      reaper: true,
     };
   },
 });
@@ -260,17 +576,92 @@ const hostFs: BwrapFs = {
 };
 
 /**
+ * The host directories a bwrap sandbox shows (read-only, when they exist): programs, libraries
+ * and system configuration. Never `/home`, `/root`, `/run`, `/tmp`, `/var` or `/mnt`: the host's
+ * IPC endpoints (the D-Bus session bus under `/run/user`, X11 under `/tmp/.X11-unix`,
+ * `/var/run/docker.sock`, ssh and gpg agent sockets) live there, and a read-only bind does not
+ * stop a `connect()` on a socket.
+ */
+export const BWRAP_SYSTEM_ROOTS: readonly string[] = [
+  "/usr",
+  "/bin",
+  "/sbin",
+  "/lib",
+  "/lib32",
+  "/lib64",
+  "/libx32",
+  "/etc",
+  "/opt",
+  "/nix",
+  "/snap",
+  "/sys",
+];
+
+interface Mount {
+  readonly op: "--ro-bind" | "--bind" | "--symlink" | "--tmpfs";
+  readonly src: string;
+  readonly dest: string;
+}
+
+const depthOf = (path: string): number => path.split("/").filter((part) => part !== "").length;
+
+/**
  * The `bwrap` arguments (before the gate's argv) for one command: new PID, IPC and UTS
- * namespaces, its own network namespace in the verify phase, the host root read-only, the
- * checkout, home and temp directory writable, then every existing denied path hidden (an empty
- * read-only tmpfs over a directory, `/dev/null` over a file). Missing denied paths are skipped:
- * there is nothing to read, and bwrap cannot mount over a path that does not exist.
+ * namespaces, its own network namespace in the verify phase, and a minimal root:
+ * {@link BWRAP_SYSTEM_ROOTS} read-only (a symlinked one, like merged-`/usr` `/bin`, stays a
+ * link), a fresh `/tmp`, the readable roots read-only, an empty tmpfs over each hidden directory
+ * a bound root would show, and the checkout, home and temp directory writable; mounts go
+ * shallowest first, so a deeper one is never covered. The install phase also gets the file
+ * `/etc/resolv.conf` points to. Last, every visible denied path is hidden (an empty read-only
+ * tmpfs over a directory, `/dev/null` over a file). Paths that do not exist are skipped: there is
+ * nothing to read, and bwrap cannot mount over them.
  */
 export const bwrapArgs = (
   argv: readonly string[],
-  spec: GateSandboxSpec,
+  spec: GateJailSpec,
   fs: BwrapFs = hostFs,
 ): string[] => {
+  const extra = extrasOf(spec);
+  const mounts: Mount[] = [{ op: "--tmpfs", src: "", dest: "/tmp" }];
+  const add = (mount: Mount): void => {
+    if (!mounts.some((m) => m.op === mount.op && m.dest === mount.dest)) mounts.push(mount);
+  };
+  const readOnly = (path: string): void => {
+    if (fs.kind(path) === null) return;
+    const real = fs.realpath(path);
+    add({ op: "--ro-bind", src: real, dest: real });
+    if (real !== path) add({ op: "--ro-bind", src: real, dest: path });
+  };
+  for (const root of BWRAP_SYSTEM_ROOTS) {
+    if (fs.kind(root) === null) continue;
+    const real = fs.realpath(root);
+    add(
+      real === root
+        ? { op: "--ro-bind", src: root, dest: root }
+        : { op: "--symlink", src: real, dest: root },
+    );
+  }
+  const binds = (): string[] =>
+    mounts.filter((m) => m.op === "--ro-bind" || m.op === "--bind").map((m) => m.dest);
+  const visible = (path: string): boolean => binds().some((dest) => within(path, dest));
+  if (spec.phase === "install" && fs.kind("/etc/resolv.conf") !== null) {
+    const resolv = fs.realpath("/etc/resolv.conf");
+    if (!visible(resolv)) add({ op: "--ro-bind", src: resolv, dest: resolv });
+  }
+  for (const path of extra.allowRead) readOnly(path);
+  for (const dir of [spec.checkout, spec.home, spec.tempDir]) {
+    const real = fs.realpath(dir);
+    add({ op: "--bind", src: real, dest: real });
+  }
+  for (const path of extra.hideRead) {
+    if (fs.kind(path) === null) continue;
+    const real = fs.realpath(path);
+    if (visible(real)) add({ op: "--tmpfs", src: "", dest: real });
+  }
+  const ordered = mounts
+    .map((mount, index) => ({ mount, index }))
+    .sort((a, b) => depthOf(a.mount.dest) - depthOf(b.mount.dest) || a.index - b.index)
+    .map(({ mount }) => mount);
   const args = [
     "--die-with-parent",
     "--new-session",
@@ -278,24 +669,21 @@ export const bwrapArgs = (
     "--unshare-ipc",
     "--unshare-uts",
     ...(spec.phase === "verify" ? ["--unshare-net"] : []),
-    "--ro-bind",
-    "/",
-    "/",
     "--dev",
     "/dev",
     "--proc",
     "/proc",
   ];
-  for (const dir of [spec.checkout, spec.home, spec.tempDir]) {
-    const real = fs.realpath(dir);
-    args.push("--bind", real, real);
+  for (const m of ordered) {
+    if (m.op === "--tmpfs") args.push("--tmpfs", m.dest);
+    else args.push(m.op, m.src, m.dest);
   }
   const seen = new Set<string>();
   for (const path of spec.denyRead) {
     const kind = fs.kind(path);
     if (kind === null) continue;
     const real = fs.realpath(path);
-    if (seen.has(real)) continue;
+    if (seen.has(real) || !visible(real)) continue;
     seen.add(real);
     if (kind === "dir") args.push("--tmpfs", real, "--remount-ro", real);
     else args.push("--ro-bind", "/dev/null", real);
@@ -448,22 +836,35 @@ export interface JailedRequest extends ExecRequest {
 
 export interface JailedResult extends ExecResult {
   readonly network: WrappedGateCommand["network"];
+  /**
+   * Set when processes the command left may still be running: the in-sandbox reaper did not
+   * confirm it stopped them (the command may have killed it). The jail then runs nothing more.
+   */
+  readonly leftover?: string;
 }
+
+/** Why a jail refuses to run anything after a reaper did not confirm. */
+export const REAPER_UNCONFIRMED =
+  "the gate sandbox's reaper did not confirm that it stopped every process the command left behind (the command may have killed it), so no further gate command runs in this run";
 
 /**
  * The per-run side of the sandbox: one private temp root (mode 0700) holding the run's empty
- * `HOME` and a fresh temp directory per command, removed by {@link dispose}. Wraps and runs each
- * command; `ran` says whether any command started (a report then names the sandbox).
+ * `HOME`, the reaper's sentinel and a fresh temp directory per command, removed by
+ * {@link dispose}. Wraps and runs each command with the run's read policy; `ran` says whether any
+ * command started (a report then names the sandbox).
  */
 export class GateCommandJail {
   private root: string | null = null;
   private home = "";
+  private sentinel = "";
   private count = 0;
+  private broken: string | null = null;
   ran = false;
 
   constructor(
     readonly sandbox: GateSandbox,
     private readonly denyRead: readonly string[],
+    private readonly read: Pick<Partial<GateReadPolicy>, "hideRead" | "allowRead"> = {},
   ) {}
 
   get kind(): GateSandboxKind {
@@ -478,6 +879,8 @@ export class GateCommandJail {
       this.root = root;
       this.home = join(root, "home");
       mkdirSync(this.home, { mode: 0o700 });
+      this.sentinel = join(root, "sandboxed");
+      writeFileSync(this.sentinel, "", { mode: 0o600 });
     }
     return this.home;
   }
@@ -491,20 +894,31 @@ export class GateCommandJail {
   }
 
   async run(request: JailedRequest): Promise<JailedResult> {
+    if (this.broken !== null) throw new Error(this.broken);
     const { home, tempDir } = this.dirs();
-    const wrapped = this.sandbox.wrap(request.argv, {
+    const spec: GateJailSpec = {
       phase: request.phase,
       checkout: realOrSelf(request.checkout),
       tempDir,
       home,
       denyRead: this.denyRead,
-    });
+      hideRead: this.read.hideRead ?? [],
+      allowRead: this.read.allowRead ?? [],
+      reapSentinel: this.sentinel,
+    };
+    const wrapped = this.sandbox.wrap(request.argv, spec);
+    const reaper = isReaped(wrapped);
     this.ran = true;
     const result = await runCommand({
       ...request,
       argv: [wrapped.command, ...wrapped.args],
       env: sandboxEnv(request.env, { home, tempDir }),
+      ...(reaper ? { reaper: true } : {}),
     });
+    if (reaper && result.spawnError === undefined && result.reaped !== true) {
+      this.broken = REAPER_UNCONFIRMED;
+      return { ...result, network: wrapped.network, leftover: REAPER_UNCONFIRMED };
+    }
     return { ...result, network: wrapped.network };
   }
 
