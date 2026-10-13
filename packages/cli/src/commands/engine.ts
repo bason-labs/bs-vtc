@@ -109,6 +109,8 @@ const runMcpBridge = async (
     host.data,
     ctx.vtcHome,
     (stdio.sessionSandboxEnv ?? defaultSessionSandboxEnv)(),
+    // the session's own cwd: Claude Code reads its project settings there (a linked worktree)
+    ctx.cwd,
   );
   await runBridge({
     repoRoot,
