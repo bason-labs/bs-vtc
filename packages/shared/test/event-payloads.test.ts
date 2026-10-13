@@ -88,6 +88,14 @@ const examples: { [T in CoreEventType]: { data: EventDataInput<T>; envelope?: ob
     envelope: { feature: "F-1" },
   },
   "branch.pushed": { data: { branch: "vtc/F-1", commit: COMMIT }, envelope: { feature: "F-1" } },
+  "branch.push_failed": {
+    data: { branch: "vtc/F-1", detail: "rejected: non-fast-forward" },
+    envelope: { feature: "F-1" },
+  },
+  "feature.pr_failed": {
+    data: { detail: "gh: could not create the pull request" },
+    envelope: { feature: "F-1" },
+  },
   "role.dispatched": {
     data: {
       action_id: "a-1",
@@ -261,6 +269,8 @@ describe("EVENT_PAYLOAD_SCHEMAS", () => {
       "data.pr.url",
     ],
     ["branch.pushed", { branch: "main", commit: COMMIT }, "data.branch"],
+    ["branch.push_failed", { branch: "vtc/F-1", detail: "" }, "data.detail"],
+    ["feature.pr_failed", { detail: "x", url: "https://github.com/acme/app/pull/1" }, "data"],
     ["role.dispatched", { ...examples["role.dispatched"].data, dispatch: "cron" }, "data.dispatch"],
     ["role.dispatched", { ...examples["role.dispatched"].data, subject: "AC-2" }, "data.subject"],
     ["role.submitted", { ...examples["role.submitted"].data, findings: -1 }, "data.findings"],
@@ -319,7 +329,12 @@ describe("EVENT_PAYLOAD_SCHEMAS", () => {
     expectInvalid(EventSchema, noRole, "role");
     const { feature: _f, ...noFeature } = event("feature.created") as Record<string, unknown>;
     expectInvalid(EventSchema, noFeature, "feature");
-    for (const type of ["feature.task_added", "branch.pushed"] as const) {
+    for (const type of [
+      "feature.task_added",
+      "branch.pushed",
+      "branch.push_failed",
+      "feature.pr_failed",
+    ] as const) {
       const { feature: _g, ...rest } = event(type) as Record<string, unknown>;
       expectInvalid(EventSchema, rest, "feature");
     }
@@ -337,6 +352,16 @@ describe("EVENT_PAYLOAD_SCHEMAS", () => {
     }
     // null spend is allowed (unknown or unpriced), absence is not
     expectValid(EventSchema, event("role.submitted"));
+  });
+  it("downgrades a level-2 run without a remote (no_remote) and records config changes", () => {
+    expect(
+      validateEventData("run.merge_level_changed", { from: 2, to: 1, reason: "no_remote" }).ok,
+    ).toBe(true);
+    for (const kind of ["config_changed", "checkout_write"]) {
+      expect(
+        validateEventData("incident.recorded", { kind, detail: "project.yaml changed" }).ok,
+      ).toBe(true);
+    }
   });
   it("a built result records the snapshot commit it refers to (§6.3 steps 4–5)", () => {
     const built = { ...examples["role.submitted"].data, exit: "built", head: COMMIT };

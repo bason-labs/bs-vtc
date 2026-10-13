@@ -1,5 +1,6 @@
 // @ts-check
 import js from "@eslint/js";
+import reactHooks from "eslint-plugin-react-hooks";
 import globals from "globals";
 import tseslint from "typescript-eslint";
 
@@ -71,6 +72,16 @@ export const SHARED_RESTRICTED_GLOBALS = [
   })),
 ];
 
+/**
+ * React's rules of hooks for the dashboard (apps/*): hooks only at the top level of components
+ * and hooks, and complete effect dependencies.
+ * @type {import("eslint").Linter.RulesRecord}
+ */
+export const REACT_HOOKS_RULES = {
+  "react-hooks/rules-of-hooks": "error",
+  "react-hooks/exhaustive-deps": "error",
+};
+
 export default tseslint.config(
   {
     ignores: [
@@ -109,7 +120,7 @@ export default tseslint.config(
   {
     files: ["packages/*/src/**/*.ts", "apps/*/src/**/*.{ts,tsx}"],
     // The deny list itself is the one place the markers may appear.
-    ignores: ["**/*.test.ts", "packages/shared/src/helpers/compliance.ts"],
+    ignores: ["**/*.test.{ts,tsx}", "packages/shared/src/helpers/compliance.ts"],
     rules: {
       // AD-9: never bypass host permissions, never touch host credentials (spec §12.5, §15).
       "no-restricted-syntax": AD9_RESTRICTED_SYNTAX,
@@ -138,7 +149,12 @@ export default tseslint.config(
     rules: { "@typescript-eslint/triple-slash-reference": ["error", { path: "always" }] },
   },
   {
-    files: ["**/*.test.ts", "**/test/**/*.ts"],
+    files: ["apps/*/src/**/*.tsx", "apps/*/test/**/*.tsx"],
+    plugins: { "react-hooks": reactHooks },
+    rules: REACT_HOOKS_RULES,
+  },
+  {
+    files: ["**/*.test.{ts,tsx}", "**/test/**/*.{ts,tsx}"],
     rules: {
       "@typescript-eslint/no-non-null-assertion": "off",
     },

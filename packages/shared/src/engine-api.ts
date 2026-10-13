@@ -31,7 +31,12 @@ import {
   VerdictSubjectSchema,
   type HostId,
 } from "./primitives.js";
-import { RoleExitSchema, RoleResultSchema, VerdictSchema } from "./role-result.js";
+import {
+  ArtifactRefSchema,
+  RoleExitSchema,
+  RoleResultSchema,
+  VerdictSchema,
+} from "./role-result.js";
 import {
   ChangeRequestArtifactSchema,
   FrozenArtifactSchema,
@@ -103,6 +108,13 @@ export const ENGINE_MCP_TOOLS = [
     output: "ChangeRequestResult",
   },
   {
+    name: "consult",
+    purpose:
+      "Consult an advisor at the human's request: the engine dispatches it like a role (logged, priced, budgeted) and returns the spawn_role action.",
+    input: "ConsultInput",
+    output: "ConsultResult",
+  },
+  {
     name: "pause",
     purpose:
       "Kill switch: stop dispatching and merging; in-flight steps finish or are interrupted.",
@@ -154,27 +166,40 @@ export const StartResultSchema = z.strictObject({
 export type StartResult = z.infer<typeof StartResultSchema>;
 
 /**
+ * A subagent spawn the Lead performs (AD-4 rule 4): from `next`, or from `consult` for an
+ * advisor.
+ */
+export const SpawnRoleActionSchema = z.strictObject({
+  type: z.literal("spawn_role"),
+  /** Echoed back in `submit`; results for unknown or stale action ids are rejected. */
+  action_id: SlugSchema,
+  role: RoleIdSchema,
+  mode: SlugSchema.optional(),
+  task: TaskIdSchema.optional(),
+  feature: FeatureIdSchema.optional(),
+  /** The one subject this call judges, e.g. the AC of a Spec-Verifier call (§7.4). */
+  subject: VerdictSubjectSchema.optional(),
+  /** The task pack the role reads (§6.3 step 1; `TaskPack`, rendered by `renderTaskPack`). */
+  pack: RelPathSchema,
+  ...SubagentInstructionSchema.shape,
+  /**
+   * The model id the engine resolved for this run (AD-6 rule 2), after a tier escalation
+   * (§6.3 step 9) or a budget drop (§11). The Lead passes it to the host's subagent spawn where
+   * the host takes a model; the `role.dispatched` envelope records the same id.
+   */
+  model: z.string().min(1).max(200).optional(),
+  /** Resume this host session (patch rounds, answers: §6.3 step 8, §6.5), when the host can. */
+  resume: SessionRefSchema.optional(),
+});
+export type SpawnRoleAction = z.infer<typeof SpawnRoleActionSchema>;
+
+/**
  * One action from `next` (§4.2 step 1). The Lead only dispatches what the engine returns.
  * `spawn_role` is always a subagent spawn the Lead performs; headless runs are launched by the
  * engine itself and never appear here (AD-4 rule 4).
  */
 export const LeadActionSchema = z.discriminatedUnion("type", [
-  z.strictObject({
-    type: z.literal("spawn_role"),
-    /** Echoed back in `submit`; results for unknown or stale action ids are rejected. */
-    action_id: SlugSchema,
-    role: RoleIdSchema,
-    mode: SlugSchema.optional(),
-    task: TaskIdSchema.optional(),
-    feature: FeatureIdSchema.optional(),
-    /** The one subject this call judges, e.g. the AC of a Spec-Verifier call (§7.4). */
-    subject: VerdictSubjectSchema.optional(),
-    /** The task pack the role reads (§6.3 step 1; `TaskPack`, rendered by `renderTaskPack`). */
-    pack: RelPathSchema,
-    ...SubagentInstructionSchema.shape,
-    /** Resume this host session (patch rounds, answers: §6.3 step 8, §6.5), when the host can. */
-    resume: SessionRefSchema.optional(),
-  }),
+  SpawnRoleActionSchema,
   z.strictObject({
     type: z.literal("ask_human"),
     escalations: z.array(EscalationIdSchema).min(1),
@@ -225,6 +250,11 @@ export const SubmitInputSchema = z.discriminatedUnion("kind", [
     action_id: SlugSchema,
     result: RoleResultSchema,
     usage: RunUsageSchema.optional(),
+    /**
+     * The host session the run used, as the host reported it to the Lead. The engine records it
+     * as `task.session_updated`, so later rounds and answers resume it (§6.3 step 8, §6.5).
+     */
+    session_ref: SessionRefSchema.optional(),
   }),
   z.strictObject({
     kind: z.literal("failure"),
@@ -330,6 +360,30 @@ export const ChangeRequestResultSchema = z.strictObject({
   escalation: EscalationIdSchema,
 });
 export type ChangeRequestResult = z.infer<typeof ChangeRequestResultSchema>;
+
+/**
+ * `consult` (§5.4 "called through the Lead"; spine §5 reading 25): the human asked the Lead for
+ * an advisor. The engine checks that `advisor` is an advisor role (`RoleContract.kind`), that the
+ * run's advisor budget (`budgets.advisor_usd`) is not spent, writes the pack (the question and the
+ * inputs) and returns the `spawn_role` action. The Lead spawns it and submits its `RoleResult`
+ * with `submit`, so the call is logged (`role.dispatched` / `role.submitted` with prompt SHA and
+ * model) and priced like any role. Advice changes nothing by itself: acting on it goes through
+ * `start`, `change_request` or `answer`.
+ */
+export const ConsultInputSchema = z.strictObject({
+  run: RunIdSchema.optional(),
+  advisor: RoleIdSchema,
+  question: z.string().min(1).max(4000),
+  /** Artifacts the advisor should read, by type and path (e.g. `cost_history`, `run_status`). */
+  inputs: z.array(ArtifactRefSchema).max(20).default([]),
+});
+export type ConsultInput = z.infer<typeof ConsultInputSchema>;
+
+export const ConsultResultSchema = z.strictObject({
+  run: RunIdSchema,
+  action: SpawnRoleActionSchema,
+});
+export type ConsultResult = z.infer<typeof ConsultResultSchema>;
 
 export const RunControlResultSchema = z.strictObject({
   run: RunIdSchema,
