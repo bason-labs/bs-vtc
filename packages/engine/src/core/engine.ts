@@ -4,7 +4,7 @@
  * the engine decides every transition, cap, budget and route (D11).
  */
 import { createHash } from "node:crypto";
-import { existsSync, readFileSync } from "node:fs";
+import { existsSync, readFileSync, statSync } from "node:fs";
 import { join } from "node:path";
 import {
   dotenvValues,
@@ -33,7 +33,14 @@ import {
   type UsageSnapshot,
   type VtcEvent,
 } from "@vtc/shared";
-import { loadGatesConfig, loadProjectConfig, pipelineConfigHash, ConfigError } from "./config.js";
+import {
+  ConfigError,
+  GATES_CONFIG_PATH,
+  loadGatesConfig,
+  loadProjectConfig,
+  pipelineConfigHash,
+  PROJECT_CONFIG_PATH,
+} from "./config.js";
 import { dispatchNow, phaseRoles } from "./dispatch.js";
 import { parkEscalation } from "./escalations.js";
 import { openEventLog, type EventDraft } from "./event-log.js";
@@ -104,6 +111,7 @@ export class Engine implements Kernel {
   private readonly jobs = new Map<string, Promise<void>>();
   private readonly chains = new Map<string, Promise<unknown>>();
   private readonly listeners = new Set<EventListener>();
+  private readonly fileCache = new Map<string, { stamp: number; value: unknown }>();
 
   private constructor(readonly deps: EngineCoreDeps) {}
 
@@ -155,9 +163,20 @@ export class Engine implements Kernel {
     return this.deps.now();
   }
 
+  /** Reads a repo file through a cache keyed on its modification time (files may change). */
+  private cached<T>(path: string, load: () => T): T {
+    const abs = join(this.deps.repoRoot, path);
+    const stamp = existsSync(abs) ? statSync(abs).mtimeMs : -1;
+    const hit = this.fileCache.get(path);
+    if (hit !== undefined && hit.stamp === stamp) return hit.value as T;
+    const value = load();
+    this.fileCache.set(path, { stamp, value });
+    return value;
+  }
+
   config(): ProjectConfig {
     try {
-      return loadProjectConfig(this.deps.repoRoot);
+      return this.cached(PROJECT_CONFIG_PATH, () => loadProjectConfig(this.deps.repoRoot));
     } catch (error) {
       if (error instanceof ConfigError) throw new EngineError("config", error.message);
       throw error;
@@ -166,7 +185,7 @@ export class Engine implements Kernel {
 
   gatesConfig(): GatesConfig | null {
     try {
-      return loadGatesConfig(this.deps.repoRoot);
+      return this.cached(GATES_CONFIG_PATH, () => loadGatesConfig(this.deps.repoRoot));
     } catch (error) {
       if (error instanceof ConfigError) throw new EngineError("config", error.message);
       throw error;
@@ -174,8 +193,10 @@ export class Engine implements Kernel {
   }
 
   secrets(): readonly string[] {
-    const env = join(this.deps.repoRoot, ".env");
-    return existsSync(env) ? dotenvValues(readFileSync(env, "utf8")) : [];
+    return this.cached(".env", () => {
+      const env = join(this.deps.repoRoot, ".env");
+      return existsSync(env) ? dotenvValues(readFileSync(env, "utf8")) : [];
+    });
   }
 
   emit(handle: RunHandle, draft: EventDraft): VtcEvent {
