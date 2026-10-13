@@ -12,7 +12,7 @@ import type {
   WriteScopeReport,
   WriteScopeViolationKind,
 } from "@vtc/shared";
-import { matchesAny } from "./globs.js";
+import { matchesAny, matchesAnyCaseless } from "./globs.js";
 import { guardedSections, isMixedConfig } from "./mixed-configs.js";
 import {
   DEFAULT_PROTECTED_GLOBS,
@@ -144,7 +144,9 @@ const toolSectionsChanged = async (
  * the runner adds the project's `tests.protected_configs`) is a violation, added files included:
  * a new nested `vitest.config.ts` or `.gitleaksignore` can weaken the gates as much as an edit.
  * A changed scanner config is a `new_suppression`. A `pyproject.toml` or `package.json` is a
- * violation only when its tool sections changed (`mixed-configs.ts`). A task-runner file (Makefile,
+ * violation only when its tool sections changed (`mixed-configs.ts`). All of these match in any
+ * letter case, because tools find their configs by the canonical name and a case-insensitive file
+ * system finds `Vitest.config.ts` under `vitest.config.ts`. A task-runner file (Makefile,
  * justfile, `*.mk`, Taskfile, noxfile.py, in any letter case) is always guarded, like package.json
  * `scripts`, whatever `protectedGlobs` holds (D-y). The only exception is a file
  * the task's `files_scope` names exactly (no wildcard), which is how a plan allows a config change.
@@ -173,7 +175,7 @@ export const checkWriteScope = async (
       if (protectedPaths.has(path)) continue;
       if (!matchesAny(request.filesScope, path)) add("out_of_scope_write", path);
       if (request.filesScope.includes(path)) continue;
-      if (!matchesAny(protectedGlobs, path) && !isTaskRunnerFile(path)) {
+      if (!matchesAnyCaseless(protectedGlobs, path) && !isTaskRunnerFile(path)) {
         if (isMixedConfig(path) && (await toolSectionsChanged(git, request, file, path))) {
           add(file.status === "deleted" ? "protected_deleted" : "protected_modified", path);
         }
@@ -183,7 +185,7 @@ export const checkWriteScope = async (
       add(
         gone
           ? "protected_deleted"
-          : matchesAny(SCANNER_CONFIG_GLOBS, path)
+          : matchesAnyCaseless(SCANNER_CONFIG_GLOBS, path)
             ? "new_suppression"
             : "protected_modified",
         path,

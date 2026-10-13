@@ -24,6 +24,7 @@ import {
   gateCommandAllowed,
   gateReportVerdict,
   GateReportSchema,
+  GateRunRequestSchema,
   HIDDEN_TESTS,
   TestInventorySchema,
   isAtLeast,
@@ -62,7 +63,7 @@ import {
   type PendingWrite,
 } from "./evidence.js";
 import { gateEnv, runCommand, type ExecResult } from "./exec.js";
-import { matchesAny } from "./globs.js";
+import { matchesAny, matchesAnyCaseless } from "./globs.js";
 import { countsOf, inventoryOf, monotonicViolations } from "./metrics.js";
 import { guardedSections, isMixedConfig, withBaseSections } from "./mixed-configs.js";
 import { diffCoveragePct, parseJsonFindings } from "./parsers/json-reports.js";
@@ -550,7 +551,7 @@ class Run {
     toolSections: boolean,
   ): Promise<(() => void) | null> {
     const whole = (path: string): boolean =>
-      matchesAny(globs, path) || (toolSections && isTaskRunnerFile(path));
+      matchesAnyCaseless(globs, path) || (toolSections && isTaskRunnerFile(path));
     const pinned = (path: string): boolean => whole(path) || (toolSections && isMixedConfig(path));
     const touched = this.changed.filter(
       (f) => pinned(f.path) || (f.oldPath !== undefined && pinned(f.oldPath)),
@@ -1390,6 +1391,75 @@ class Run {
 }
 
 /**
+ * A request that does not satisfy {@link GateRunRequestSchema} runs nothing: the Gate Runner is
+ * the trust boundary for test material, and a malformed id (`../T-1`) would otherwise be joined
+ * into hidden-test and evidence paths. The report is `error` / `infra` with the reasons in a log
+ * under `.vtc/state/gates/rejected/`, a path built from no request field. Never throws.
+ */
+const rejectedRequest = (
+  deps: GateRunnerDeps,
+  request: GateRunRequest,
+  issues: readonly { readonly path: readonly PropertyKey[]; readonly message: string }[],
+): GateReport => {
+  const now = (): Date => deps.now?.() ?? new Date();
+  const started = now();
+  const dir = `${GATES_STATE_DIR}/rejected`;
+  const log = `${dir}/${attemptId(deps.repoRoot, [dir], "request", "rejected", started)}/gate-runner.log`;
+  const reasons = issues.map((i) => `${i.path.map(String).join(".") || "request"}: ${i.message}`);
+  try {
+    writeRepoFile(
+      deps.repoRoot,
+      log,
+      `request rejected, no gate ran:\n${reasons.map((r) => `  ${r}`).join("\n")}\n`,
+    );
+  } catch {
+    // nothing more to do: the report below says what happened
+  }
+  const results: GateResult[] = [
+    {
+      gate_id: "gate-runner",
+      layer: "L0",
+      phase: "verify",
+      status: "error",
+      blocking: true,
+      new_violations: 0,
+      baseline_violations: 0,
+      monotonic: [],
+      findings: [],
+      failure_class: "infra",
+      evidence: [{ type: "command_output", ref: log }],
+      duration_ms: 0,
+    },
+  ];
+  const r = request as Partial<GateRunRequest>;
+  return {
+    run: r.run ?? "",
+    ...(r.task === undefined ? {} : { task: r.task }),
+    ...(r.feature === undefined ? {} : { feature: r.feature }),
+    reason: r.reason ?? "round",
+    scope: r.scope ?? "full",
+    base: r.base ?? "",
+    head: r.head ?? "",
+    expect: r.expect ?? "pass",
+    results,
+    verdict: gateReportVerdict(results),
+    started_at: started.toISOString(),
+    finished_at: now().toISOString(),
+  };
+};
+
+/** The checked request, or the report that rejects it. */
+const checkRequest = (
+  deps: GateRunnerDeps,
+  request: GateRunRequest,
+): { request: GateRunRequest } | { report: GateReport } => {
+  const parsed = GateRunRequestSchema.safeParse(request);
+  return parsed.success
+    ? { request: parsed.data }
+    : { report: rejectedRequest(deps, request, parsed.error.issues) };
+};
+
+/**
  * One run against an explicit config instead of `.vtc/gates.yml`: `vtc calibrate` runs the
  * proposed gates before anything is written (the allowlist still applies).
  */
@@ -1398,14 +1468,17 @@ export const runWithConfig = (
   options: GateRunnerOptions,
   request: GateRunRequest,
   config: GatesConfig,
-): Promise<GateReport> =>
-  new Run(
+): Promise<GateReport> => {
+  const checked = checkRequest(deps, request);
+  if ("report" in checked) return Promise.resolve(checked.report);
+  return new Run(
     deps,
     options.scanners ?? createScannerStore({ vtcHome: deps.vtcHome }),
     options.env ?? process.env,
-    request,
+    checked.request,
     config,
   ).execute();
+};
 
 /** The Gate Runner with explicit options (tests inject fake scanners). */
 export const createGateRunnerWith = (
@@ -1415,7 +1488,11 @@ export const createGateRunnerWith = (
   const scanners = options.scanners ?? createScannerStore({ vtcHome: deps.vtcHome });
   const env = options.env ?? process.env;
   return {
-    run: (request) => new Run(deps, scanners, env, request).execute(),
+    run: (request) => {
+      const checked = checkRequest(deps, request);
+      if ("report" in checked) return Promise.resolve(checked.report);
+      return new Run(deps, scanners, env, checked.request).execute();
+    },
     checkWriteScope: async (request) => {
       // The project's protected configs as calibrated at the base commit, plus the defaults.
       let globs: readonly string[] = [];

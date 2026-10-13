@@ -167,10 +167,15 @@ describe("scanner store", () => {
     const error: unknown = await store.ensure("checkov").catch((e: unknown) => e);
     expect(error).toBeInstanceOf(ScannerUnavailableError);
     expect(error).toMatchObject({ scanner: "checkov", platform: "darwin-arm64" });
+    // Nothing confirms or records the user's binary, and the message says what will run instead.
+    expect(String(error)).not.toMatch(/confirm/);
+    expect(String(error)).toMatch(/first checkov on an absolute PATH entry outside the repo/);
+    expect(String(error)).toMatch(/does not checksum-verify/);
     const nowhere = createScannerStore({ vtcHome: tempDir(), platform: null, download });
-    expect(await nowhere.ensure("gitleaks").catch((e: unknown) => e)).toBeInstanceOf(
-      ScannerUnavailableError,
-    );
+    const gitleaks: unknown = await nowhere.ensure("gitleaks").catch((e: unknown) => e);
+    expect(gitleaks).toBeInstanceOf(ScannerUnavailableError);
+    // Only user-installable scanners are told to install themselves.
+    expect(String(gitleaks)).not.toMatch(/install it yourself/);
     // Platforms with a native build keep their pin.
     const linux = createScannerStore({ vtcHome: tempDir(), platform: "linux-arm64", download });
     const pinned: unknown = await linux.ensure("checkov").catch((e: unknown) => e);

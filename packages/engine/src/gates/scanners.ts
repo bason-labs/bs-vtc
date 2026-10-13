@@ -48,7 +48,9 @@ export class ScannerUnavailableError extends ScannerError {
   ) {
     super(
       scanner,
-      `no pinned build for ${platform}; install it yourself and confirm it in vtc calibrate`,
+      USER_INSTALLED_SCANNERS.includes(scanner)
+        ? `no pinned build for ${platform}; install it yourself: the Gate Runner then runs the first ${scanner} on an absolute PATH entry outside the repo, which VTC does not checksum-verify`
+        : `no pinned build for ${platform}`,
     );
     this.name = "ScannerUnavailableError";
   }
@@ -69,8 +71,8 @@ const isInsideDir = (root: string, path: string): boolean => {
  * A user-installed scanner on `PATH`: the first executable regular file named `name` in an
  * absolute `PATH` entry that is not inside any of `untrusted` (the repo and its checkouts, which
  * a diff controls), symlinks resolved. Relative entries are ignored for the same reason. `null`
- * when there is none. It is not SHA-verified: the user installed it and confirmed its use in
- * `vtc calibrate`.
+ * when there is none. It is not SHA-verified and nothing records or confirms its path: whatever
+ * the user's `PATH` resolves to at gate time runs, and the gate's evidence names it.
  */
 export const findUserInstalled = (
   name: string,

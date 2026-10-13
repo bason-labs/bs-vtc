@@ -1,8 +1,8 @@
 /**
  * Configuration files a diff could use to weaken the gates (§7.2 L1/L4/L5, §7.3, §7.6 rule 5).
  * `vtc calibrate` always writes all of them to `tests.protected_configs`, whether or not a match
- * exists yet; L5 flags every changed file that matches; L1 and the scanners run with the base
- * commit's version of any that the diff changed. Pure data. `pyproject.toml` and `package.json`
+ * exists yet; L5 flags every changed file that matches, in any letter case; L1 and the scanners
+ * run with the base commit's version of any that the diff changed. Pure data. `pyproject.toml` and `package.json`
  * also hold dependencies, so only their tool sections are guarded (`mixed-configs.ts`).
  */
 
@@ -25,6 +25,10 @@ export const LINT_TEST_CONFIG_GLOBS: readonly string[] = [
   "**/pytest.ini",
   "**/conftest.py",
   "**/tox.ini",
+  // tox 4.21+ native TOML config; the [tool.tox] table of pyproject.toml is guarded separately.
+  "**/tox.toml",
+  // Hatch's standalone config, for parity with the guarded [tool.hatch.envs] of pyproject.toml.
+  "**/hatch.toml",
   "**/setup.cfg",
   "**/.flake8",
   "**/ruff.toml",
