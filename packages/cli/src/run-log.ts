@@ -7,7 +7,13 @@
  * Read only and tolerant: files are opened read-only and never written; a line that is not JSON,
  * a torn last line or an unknown event is skipped; a log that is not a regular file (a directory,
  * a symlink) is skipped and never followed. Only the run lifecycle events matter (`run.started`,
- * `run.phase_changed`, `run.paused` / `run.resumed`, `run.finished`). The reader works in chunks
+ * `run.phase_changed`, `run.paused` / `run.resumed`, `run.finished`).
+ *
+ * The logs are git-tracked, so a cloned repo controls them, and what this returns goes into the
+ * Lead's context. So nothing unvalidated gets through: a run directory counts only when its name
+ * is a `RunIdSchema` id, and a lifecycle line only when it is a valid `EventSchema` event (typed
+ * payload included, so `track` is a `TrackSchema` value and `phase` a `PhaseSchema` one) of that
+ * same run. Anything else is skipped like a torn line. The reader works in chunks
  * and gives up with {@link RunLogDeadlineError} once `deadline` passes, so the hook stays within
  * `VTC_HOOK.timeoutMs` and fails open.
  */
@@ -15,6 +21,16 @@ import { constants } from "node:fs";
 import { lstat, open, readdir } from "node:fs/promises";
 import { join } from "node:path";
 import { StringDecoder } from "node:string_decoder";
+import {
+  EventSchema,
+  RunIdSchema,
+  isEventOfType,
+  parsePersisted,
+  readEventData,
+  type Phase,
+  type Track,
+  type VtcEvent,
+} from "@vtc/shared";
 
 /** Where the engine keeps one directory per run (`eventLogPath`). */
 export const RUNS_DIR = ".vtc/runs";
@@ -27,11 +43,12 @@ const MAX_LINE_BYTES = 1024 * 1024;
 const RUN_EVENT = /"type"\s*:\s*"run\./;
 
 export interface UnfinishedRun {
+  /** A `RunIdSchema` id (the run directory's name). */
   readonly id: string;
-  /** From `run.started`; `null` when the log does not say. */
-  readonly track: string | null;
+  /** From `run.started`. */
+  readonly track: Track | null;
   /** The latest `run.phase_changed` target, or `null`. */
-  readonly phase: string | null;
+  readonly phase: Phase | null;
   readonly paused: boolean;
 }
 
@@ -45,32 +62,39 @@ export class RunLogDeadlineError extends Error {
 interface Lifecycle {
   started: boolean;
   finished: boolean;
-  track: string | null;
-  phase: string | null;
+  track: Track | null;
+  phase: Phase | null;
   paused: boolean;
 }
 
-const isRecord = (v: unknown): v is Record<string, unknown> =>
-  typeof v === "object" && v !== null && !Array.isArray(v);
-
-const apply = (state: Lifecycle, line: string): void => {
-  if (!RUN_EVENT.test(line)) return;
-  let event: unknown;
+/** The line as a valid event of `run`, or `null` (not JSON, invalid, another run's). */
+const eventOf = (run: string, line: string): VtcEvent | null => {
+  if (!RUN_EVENT.test(line)) return null;
+  let raw: unknown;
   try {
-    event = JSON.parse(line);
+    raw = JSON.parse(line);
   } catch {
+    return null;
+  }
+  // a reader of persisted data: a key a newer MINOR vtc added is dropped, not an error (AD-3)
+  const parsed = parsePersisted(EventSchema, raw);
+  return parsed.success && parsed.data.run === run ? parsed.data : null;
+};
+
+const apply = (state: Lifecycle, run: string, line: string): void => {
+  const event = eventOf(run, line);
+  if (event === null) return;
+  // EventSchema has already validated each core payload, so readEventData does not throw
+  if (isEventOfType(event, "run.started")) {
+    state.started = true;
+    state.track = readEventData(event).track;
     return;
   }
-  if (!isRecord(event) || typeof event.type !== "string") return;
-  const data = isRecord(event.data) ? event.data : {};
+  if (isEventOfType(event, "run.phase_changed")) {
+    state.phase = readEventData(event).to;
+    return;
+  }
   switch (event.type) {
-    case "run.started":
-      state.started = true;
-      state.track = typeof data.track === "string" ? data.track : state.track;
-      break;
-    case "run.phase_changed":
-      state.phase = typeof data.to === "string" ? data.to : state.phase;
-      break;
     case "run.paused":
       state.paused = true;
       break;
@@ -84,7 +108,7 @@ const apply = (state: Lifecycle, line: string): void => {
 };
 
 /** Replays one log's lifecycle events, chunk by chunk, checking the deadline between chunks. */
-const readLifecycle = async (path: string, deadline: number): Promise<Lifecycle> => {
+const readLifecycle = async (run: string, path: string, deadline: number): Promise<Lifecycle> => {
   const state: Lifecycle = {
     started: false,
     finished: false,
@@ -109,7 +133,7 @@ const readLifecycle = async (path: string, deadline: number): Promise<Lifecycle>
       const lines = (pending + decoder.write(buffer.subarray(0, bytesRead))).split("\n");
       pending = lines.pop() ?? "";
       for (const line of lines) {
-        if (!skipping) apply(state, line);
+        if (!skipping) apply(state, run, line);
         skipping = false;
       }
       if (pending.length > MAX_LINE_BYTES) {
@@ -117,16 +141,19 @@ const readLifecycle = async (path: string, deadline: number): Promise<Lifecycle>
         skipping = true; // the rest of this over-long line is skipped too
       }
     }
-    if (!skipping) apply(state, pending);
+    if (!skipping) apply(state, run, pending);
   } finally {
     await file.close();
   }
   return state;
 };
 
+/** Run-id order, numbers by value (`R-2026-10-14-9` before `R-2026-10-14-10`). */
+const byRunId = new Intl.Collator("en", { numeric: true }).compare;
+
 /**
- * Every run in `repoRoot` whose log has a `run.started` and no `run.finished`, in run-id order.
- * Rejects with {@link RunLogDeadlineError} once `deadline` (epoch ms) passes.
+ * Every run in `repoRoot` whose log has a valid `run.started` and no `run.finished`, oldest first
+ * in run-id order. Rejects with {@link RunLogDeadlineError} once `deadline` (epoch ms) passes.
  */
 export const unfinishedRuns = async (
   repoRoot: string,
@@ -143,7 +170,8 @@ export const unfinishedRuns = async (
   const ids = entries
     .filter((e) => e.isDirectory())
     .map((e) => e.name)
-    .sort();
+    .filter((name) => RunIdSchema.safeParse(name).success)
+    .sort(byRunId);
   for (const id of ids) {
     const path = join(repoRoot, RUNS_DIR, id, EVENTS_FILE);
     try {
@@ -153,7 +181,7 @@ export const unfinishedRuns = async (
     }
     let state: Lifecycle;
     try {
-      state = await readLifecycle(path, deadline);
+      state = await readLifecycle(id, path, deadline);
     } catch (error) {
       if (error instanceof RunLogDeadlineError) throw error;
       continue;

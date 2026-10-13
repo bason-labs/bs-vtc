@@ -25,9 +25,9 @@
  * `globToRegExp` nor a structured per-dispatch write scope yet. Switch to those exports and delete
  * both copies as soon as engine-core lands them.
  */
-import { readFileSync, realpathSync } from "node:fs";
+import { lstatSync, readFileSync, readlinkSync, realpathSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { basename, dirname, isAbsolute, join, relative, sep } from "node:path";
+import { basename, dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import { core, git } from "@vtc/engine";
 import {
   VTC_HOOK,
@@ -106,13 +106,30 @@ const activeRunOf = async (
   return run === undefined || run.run.finished_at !== undefined ? null : { repoRoot, run };
 };
 
-/** The path with symlinks resolved as far as it exists (a new file's parent, and so on). */
-const realish = (abs: string): string => {
+/** Links followed before a path is judged as it is written (the kernel's own limit is 40). */
+const MAX_LINKS = 40;
+
+/**
+ * The path with symlinks resolved as far as it exists (a new file's parent, and so on). A
+ * dangling symlink is judged by where it points, since writing through it creates its target.
+ */
+const realish = (abs: string, links = 0): string => {
   try {
     return realpathSync(abs);
   } catch {
     const parent = dirname(abs);
-    return parent === abs ? abs : join(realish(parent), basename(abs));
+    if (parent === abs) return abs;
+    const realParent = realish(parent, links);
+    if (links < MAX_LINKS) {
+      let target: string | null = null;
+      try {
+        if (lstatSync(abs).isSymbolicLink()) target = readlinkSync(abs);
+      } catch {
+        // not there yet: a new file
+      }
+      if (target !== null) return realish(resolve(realParent, target), links + 1);
+    }
+    return join(realParent, basename(abs));
   }
 };
 
@@ -246,6 +263,11 @@ const preToolUse = async (input: VtcHookInput, deps: HookDeps): Promise<HookOutc
   return ALLOW;
 };
 
+/** At most this many runs get a hint, the newest; older ones are counted in one line. */
+export const MAX_HINTED_RUNS = 3;
+/** An upper bound on what `session-start` prints into the Lead's context. */
+export const MAX_RESUME_HINT_CHARS = 2000;
+
 /** The one-paragraph hint for an unfinished run (hook rule 3, §6.8). */
 const resumeHint = (run: UnfinishedRun): string => {
   const what = [run.track, run.phase === null ? null : `phase ${run.phase}`]
@@ -256,16 +278,25 @@ const resumeHint = (run: UnfinishedRun): string => {
 };
 
 /**
- * Hook rule 3 with D-af: the hint for every run the committed event log shows unfinished, read
- * from the logs themselves, so it needs no daemon.
+ * Hook rule 3 with D-af: the hint for the newest runs the committed event log shows unfinished,
+ * read from the logs themselves, so it needs no daemon. Only for the Lead: a VTC role session
+ * (headless roles load the plugin too, D-aa) gets nothing. `run-log.ts` lets only schema-valid
+ * ids, tracks and phases through, and the output is bounded.
  */
 const sessionStart = async (input: VtcHookInput, deps: HookDeps): Promise<HookOutcome> => {
+  if (isVtcRoleAgent(input.agent_type)) return ALLOW;
   const repoRoot = await deps.findRepoRoot(input.cwd ?? deps.cwd);
   if (repoRoot === null) return ALLOW;
   const read = deps.unfinishedRuns ?? unfinishedRuns;
   const runs = await read(repoRoot, deps.deadline ?? Date.now() + VTC_HOOK.timeoutMs);
   if (runs.length === 0) return ALLOW;
-  return { code: VTC_HOOK.exit.allow, stdout: runs.map(resumeHint).join("") };
+  const older = runs.length - MAX_HINTED_RUNS;
+  const hints = runs.slice(-MAX_HINTED_RUNS).map(resumeHint);
+  if (older > 0)
+    hints.push(
+      `VTC: ${String(older)} older unfinished ${older === 1 ? "run is" : "runs are"} in this repo too; the vtc \`status\` tool lists them.\n`,
+    );
+  return { code: VTC_HOOK.exit.allow, stdout: hints.join("").slice(0, MAX_RESUME_HINT_CHARS) };
 };
 
 const subagentStop = async (input: VtcHookInput, deps: HookDeps): Promise<HookOutcome> => {
