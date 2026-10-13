@@ -44,8 +44,9 @@ const scratch = (): string => {
 
 // not under /home: on macOS that is an automount, and the overlap check resolves real paths
 const VTC_HOME = "/users-dev/.vtc";
+// macOS: the one platform where the network-off sandbox is shown to block a Unix-socket connect
 const profile = (tools: RoleTools, network: "none" | "registries" = "none") =>
-  createCodexAdapter({ vtcHome: VTC_HOME }).sandboxProfile({
+  createCodexAdapter({ vtcHome: VTC_HOME, platform: "darwin" }).sandboxProfile({
     tools,
     cwd: CWD,
     writablePaths: ["src/**"],
@@ -104,6 +105,39 @@ describe("Codex sandboxProfile (§12.1, AD-9)", () => {
         network: true,
         secretsUnreadable: false,
       });
+    }
+  });
+
+  it("fails closed where the network-off sandbox is not shown to block a Unix-socket connect into the VTC home's run/ (D-an): the engine then refuses the run", () => {
+    for (const platform of ["linux", "win32", "freebsd"] as const) {
+      for (const tools of [READ_ONLY, WRITE_SCOPED, ENGINEER]) {
+        const p = createCodexAdapter({ vtcHome: VTC_HOME, platform }).sandboxProfile({
+          tools,
+          cwd: CWD,
+          writablePaths: [],
+          protectedPaths: [],
+          network: "none",
+        });
+        // the sandbox still asks for no network, but the profile does not claim it is enforced
+        expect(p.cliArgs).not.toContain("sandbox_workspace_write.network_access=true");
+        expect(p.enforced.network).toBe(false);
+        expect(p.enforced.secretsUnreadable).toBe(false);
+        // the engine's guard (`roleSandboxProblem`) accepts only one of the two
+        expect(p.enforced.secretsUnreadable === true || p.enforced.network).toBe(false);
+      }
+    }
+  });
+
+  it("reads the platform from the process by default", () => {
+    for (const tools of [READ_ONLY, ENGINEER]) {
+      const p = createCodexAdapter({ vtcHome: VTC_HOME }).sandboxProfile({
+        tools,
+        cwd: CWD,
+        writablePaths: [],
+        protectedPaths: [],
+        network: "none",
+      });
+      expect(p.enforced.network).toBe(process.platform === "darwin");
     }
   });
 

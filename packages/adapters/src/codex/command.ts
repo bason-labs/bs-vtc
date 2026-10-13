@@ -29,15 +29,20 @@
  *   (`exclude_tmpdir_env_var`, `exclude_slash_tmp`). Paths compare by real location, so a
  *   symlinked worktree or VTC home cannot hide an overlap.
  * - The VTC home's `homeReadDeny` (D-an: the token, the sockets in `run/`, the hidden tests) is
- *   readable too, for the same reason. The network is off, but whether that also stops a
- *   Unix-socket connect into `run/` is not verified on any platform: macOS seatbelt's network
- *   deny is said to cover a Unix connect, while a Linux network namespace alone does not hide a
- *   path-based socket that is visible in the mount namespace. If the connect works, a Codex role
- *   can send a cli hello with the token it read, and the token is the cli's proof of a human for
- *   `approve`/`answer`/`change_request` (D-an). The spine has no §7 row for this yet (the
- *   plugin-only residual row covers Claude Code sessions only): it is escalated to the Lead for a
- *   spike check or an accepted residual, and the adapter can only report it, through
- *   `enforced.secretsUnreadable: false`.
+ *   readable too, for the same reason. If a role could also connect to a socket in `run/`, it
+ *   could send a cli hello with the token it read, and the token is the cli's proof of a human
+ *   for `approve`/`answer`/`change_request` (D-an). So `enforced.network` claims more than "no
+ *   TCP": it is true only on a platform where the network-off sandbox is shown to block a
+ *   path-based Unix-socket connect too ({@link CODEX_UNIX_CONNECT_BLOCKED_PLATFORMS}). On macOS
+ *   it is: under codex-cli 0.162.1 seatbelt, `sandbox_mode` `read-only` and `workspace-write`
+ *   with `network_access=false` both fail a `connect()` to a listening Unix socket with `EPERM`,
+ *   while `network_access=true` lets it through (checked 2026-10-14 with `codex sandbox` and a
+ *   temp `CODEX_HOME`). Elsewhere it is not shown (Linux: a network namespace alone does not
+ *   hide a socket path visible in the mount namespace, and bwrap/landlock behaviour is
+ *   unchecked), so the profile reports `enforced.network: false` and the engine's
+ *   `roleSandboxProblem` refuses the run (fail closed) until the spine §7 item for Codex roles
+ *   (token readable; Unix-socket connect under the network-off sandbox, per platform) passes
+ *   on that platform.
  * - Host config in the worktree (D-ao, spine §5 reading 72): every role run passes
  *   `-c notify=[]`, so no `notify` command (user or role-planted) runs outside the sandbox, and
  *   `--ignore-rules` (on `codex exec` and `codex exec resume`, 0.162.1), so no execpolicy
@@ -83,7 +88,16 @@ export interface CodexProfileOptions {
    * `$TMPDIR`, `os.tmpdir()` and `/tmp`; tests pass their own.
    */
   readonly tempRoots?: readonly string[];
+  /** The platform the role runs on. Default: `process.platform`; tests pass their own. */
+  readonly platform?: NodeJS.Platform;
 }
+
+/**
+ * Platforms where Codex's network-off sandbox is shown to block a Unix-socket connect into
+ * `<vtcHome>/run/` as well as TCP (see the header). Only there does a profile claim
+ * `enforced.network`, the engine's condition for running a role that can read the token.
+ */
+export const CODEX_UNIX_CONNECT_BLOCKED_PLATFORMS: readonly NodeJS.Platform[] = ["darwin"];
 
 const defaultTempRoots = (): string[] =>
   [process.env.TMPDIR, tmpdir(), "/tmp"].filter(
@@ -120,7 +134,8 @@ export const codexSandboxProfile = (
     enforced: {
       readOnly: mode === "read-only",
       perPathWriteDeny: false,
-      network: true,
+      // fail closed where a Unix-socket connect into `<vtcHome>/run/` is not shown blocked (D-an)
+      network: CODEX_UNIX_CONNECT_BLOCKED_PLATFORMS.includes(options.platform ?? process.platform),
       // no per-path read deny on Codex: the token and host credentials stay readable (D-ad)
       secretsUnreadable: false,
     },
