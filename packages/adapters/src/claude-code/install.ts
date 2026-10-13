@@ -17,7 +17,12 @@
  *    The cli shows the user that block before it calls `install`, and the result's notes repeat
  *    it. Only in a git checkout (a `.git` in the project root); elsewhere a note says how to turn
  *    it on. The file to write is checked with `findForbiddenInText` first, and a hit refuses the
- *    whole install before anything is written (AD-9).
+ *    whole install before anything is written (AD-9). So does a settings layer (local, shared or
+ *    user) that reopens an escape (`excludedCommands`, Unix sockets or read/write allowances into
+ *    the VTC home, the weaker nested sandbox; see `./local-settings.ts`).
+ * 5. keeps the project's local file the project's own (both scopes): a linked file or `.claude`
+ *    directory is refused, as is a file git tracks; one nothing ignores yet is added to the
+ *    repository's `info/exclude` (local to the clone, never committed).
  * Both scopes are accepted (the cli picks the default, `DEFAULT_INSTALL_SCOPE`, D-ah), and the
  * marketplace always lives under `InstallRequest.home` (spine §5 reading 60).
  * The exact marketplace form is provisional until the spike tries it on a real install (spine §7).
@@ -35,6 +40,12 @@ import {
 import { readJsonSettings, replaceDirectory, writeFileAtomic, writeJson } from "../common/files.js";
 import { isRecord, text } from "../common/json.js";
 import { insidePlugin, readPluginManifest } from "../common/plugin.js";
+import {
+  planGitExclusion,
+  refuseLinkedLocalSettings,
+  sessionSandboxEscapes,
+  type GitExclusion,
+} from "./local-settings.js";
 
 export const CLAUDE_MARKETPLACE = "vtc-local";
 const CLAUDE_PLUGIN_MANIFEST = ".claude-plugin/plugin.json";
@@ -114,6 +125,15 @@ const withSessionSandbox = (
   };
 };
 
+/** Refuses settings layers that reopen an escape from the session sandbox (D-an). */
+const refuseEscapes = (localPath: string, escapes: readonly string[], vtcHome: string): void => {
+  if (escapes.length > 0) {
+    throw new Error(
+      `refusing to turn on the session sandbox in ${localPath}: these settings reopen what it closes for roles in your sessions (D-an): ${escapes.join("; ")}. Remove them, or narrow the paths clear of ${vtcHome}, then install again`,
+    );
+  }
+};
+
 /** The text `writeJson` would write. */
 const jsonText = (value: unknown): string => `${JSON.stringify(value, null, 2)}\n`;
 
@@ -152,15 +172,25 @@ export const installClaudeCode = (
   // every settings file is read and built first, so a refusal leaves everything as it was
   const userSettingsPath = join(request.home, ".claude", "settings.json");
   const localSettingsPath = join(request.projectRoot, ".claude", "settings.local.json");
+  const sharedSettingsPath = join(request.projectRoot, ".claude", "settings.json");
   const settingsPath = request.scope === "user" ? userSettingsPath : localSettingsPath;
+
+  // the session sandbox goes into the project's local file, in a git checkout only (D-an); Claude
+  // Code's sandbox (and the shared settings builder) takes POSIX paths only, so not on Windows
+  const posixHome = options.vtcHome.startsWith("/");
+  const gitCheckout = existsSync(join(request.projectRoot, ".git"));
+  const sandboxed = posixHome && gitCheckout;
+  const writesLocal = sandboxed || request.scope === "project";
+  // the local file is the project's own: never a link out of it, never tracked by git
+  if (writesLocal) refuseLinkedLocalSettings(request.projectRoot);
+  const exclusion: GitExclusion | null =
+    writesLocal && gitCheckout ? planGitExclusion(request.projectRoot) : null;
+
   const settings = readJsonSettings(settingsPath);
   const fallbacks =
     request.scope === "user"
       ? []
-      : [
-          readJsonSettings(join(request.projectRoot, ".claude", "settings.json")),
-          readJsonSettings(userSettingsPath),
-        ];
+      : [readJsonSettings(sharedSettingsPath), readJsonSettings(userSettingsPath)];
   const marketplaces = isRecord(settings.extraKnownMarketplaces)
     ? settings.extraKnownMarketplaces
     : {};
@@ -175,15 +205,32 @@ export const installClaudeCode = (
     statusLine: wiredStatusLine(settings, fallbacks),
   };
 
-  // the session sandbox goes into the project's local file, in a git checkout only (D-an); Claude
-  // Code's sandbox (and the shared settings builder) takes POSIX paths only, so not on Windows
-  const posixHome = options.vtcHome.startsWith("/");
-  const gitCheckout = existsSync(join(request.projectRoot, ".git"));
-  const sandboxed = posixHome && gitCheckout;
   const writes = new Map<string, Record<string, unknown>>([[settingsPath, registered]]);
   if (sandboxed) {
-    const local = writes.get(localSettingsPath) ?? readJsonSettings(localSettingsPath);
-    writes.set(localSettingsPath, withSessionSandbox(local, options.vtcHome));
+    const local = withSessionSandbox(
+      writes.get(localSettingsPath) ?? readJsonSettings(localSettingsPath),
+      options.vtcHome,
+    );
+    writes.set(localSettingsPath, local);
+    // Claude Code layers the local, shared and user files; none may reopen an escape
+    const userLayer = writes.get(userSettingsPath) ?? readJsonSettings(userSettingsPath);
+    refuseEscapes(
+      localSettingsPath,
+      sessionSandboxEscapes(
+        [
+          { file: localSettingsPath, settings: local, base: request.projectRoot },
+          {
+            file: sharedSettingsPath,
+            settings: fallbacks[0] ?? readJsonSettings(sharedSettingsPath),
+            base: request.projectRoot,
+          },
+          { file: userSettingsPath, settings: userLayer, base: join(request.home, ".claude") },
+        ],
+        options.vtcHome,
+        request.home,
+      ),
+      options.vtcHome,
+    );
   }
   const texts = [...writes].map(([path, value]) => [path, jsonText(value)] as const);
   if (sandboxed) {
@@ -207,10 +254,15 @@ export const installClaudeCode = (
     ],
   });
   for (const [path, settingsText] of texts) writeFileAtomic(path, settingsText);
+  if (exclusion?.kind === "exclude") writeFileAtomic(exclusion.path, exclusion.text);
 
-  const local = sandboxed || request.scope === "project";
   return {
-    written: [...filesUnder(pluginTarget), index, ...texts.map(([path]) => path)],
+    written: [
+      ...filesUnder(pluginTarget),
+      index,
+      ...texts.map(([path]) => path),
+      ...(exclusion?.kind === "exclude" ? [exclusion.path] : []),
+    ],
     notes: [
       `Restart Claude Code, then confirm the ${manifest.plugin} plugin from the ${CLAUDE_MARKETPLACE} marketplace if /plugin asks.`,
       "Your statusline now runs through `vtc statusline-tee`, which shows it unchanged and forwards only the usage windows to the local engine.",
@@ -219,7 +271,15 @@ export const installClaudeCode = (
         : !posixHome
           ? "No session sandbox written: Claude Code has no session sandbox on this platform, so the engine will not run code-running roles inside your Claude Code session."
           : `No session sandbox written: ${request.projectRoot} is not a git checkout. Run vtc install --host claude-code in the repo, or the engine will not run code-running roles inside your Claude Code session.`,
-      ...(local ? [`Keep ${localSettingsPath} out of git: it names paths on this machine.`] : []),
+      ...(!writesLocal
+        ? []
+        : exclusion === null
+          ? [`Keep ${localSettingsPath} out of git: it names paths on this machine.`]
+          : exclusion.kind === "ignored"
+            ? [`${localSettingsPath} stays out of git: the repository already ignores it.`]
+            : [
+                `Kept ${localSettingsPath} out of git: it names paths on this machine, so it is now listed in ${exclusion.path} (local to this clone, never committed).`,
+              ]),
     ],
   };
 };
