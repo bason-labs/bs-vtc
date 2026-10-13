@@ -1,0 +1,10 @@
+# Dev fixture: the Designer's screen list for the golden run's password reset (spec §9).
+screens:
+  - id: reset-request
+    route: /reset/
+    states: [empty, loading, error, success]
+    reqs: [REQ-2]
+  - id: reset-confirm
+    route: /reset/confirm/
+    states: [form, expired, success]
+    reqs: [REQ-2, REQ-2.AC-1]

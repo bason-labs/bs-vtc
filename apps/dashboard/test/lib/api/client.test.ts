@@ -88,3 +88,62 @@ describe("createEngineClient against the golden run", () => {
     await expect(api.runs()).rejects.toMatchObject({ code: "offline" });
   });
 });
+
+describe("postDesignReview (the dashboard's one write, AD-5 rule 5)", () => {
+  const pin = {
+    screen: "reset-request",
+    state: "empty",
+    viewport: 390,
+    theme: "light" as const,
+    x_pct: 10,
+    y_pct: 20,
+    comment: "Too tight",
+  };
+
+  it("POSTs the validated comment as JSON with the bearer and reads DesignReviewResult", async () => {
+    const { api, f } = client(
+      {
+        "/api/design/reviews": () =>
+          Response.json({ ok: true, path: ".vtc/design/reviews/reset-request.jsonl" }),
+      },
+      "s".repeat(43),
+    );
+    const result = await api.postDesignReview(pin);
+    expect(result.path).toBe(".vtc/design/reviews/reset-request.jsonl");
+    const req = f.requests[0]!;
+    expect(req.method).toBe("POST");
+    expect(req.url).toBe("/api/design/reviews");
+    expect(req.headers.get("content-type")).toBe("application/json");
+    expect(req.headers.get("authorization")).toBe(`Bearer ${"s".repeat(43)}`);
+    expect(JSON.parse(req.body ?? "")).toEqual(pin);
+  });
+
+  it("refuses an invalid comment without sending it", async () => {
+    const { api, f } = client();
+    await expect(api.postDesignReview({ ...pin, screen: "../x" })).rejects.toMatchObject({
+      code: "bad_request",
+    });
+    expect(f.requests).toHaveLength(0);
+  });
+
+  it("rejects a result that claims a path outside .vtc/design/reviews/", async () => {
+    const { api } = client({
+      "/api/design/reviews": () => Response.json({ ok: true, path: ".vtc/spec/spec.md" }),
+    });
+    await expect(api.postDesignReview(pin)).rejects.toMatchObject({ code: "bad_response" });
+  });
+
+  it("passes the engine's refusal through", async () => {
+    const { api } = client({
+      "/api/design/reviews": () =>
+        Response.json(
+          { error: { code: "payload_too_large", message: "body over 8192 bytes" } },
+          { status: 413 },
+        ),
+    });
+    await expect(api.postDesignReview(pin)).rejects.toMatchObject({
+      status: 413,
+      code: "payload_too_large",
+    });
+  });
+});

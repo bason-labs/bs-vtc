@@ -6,7 +6,15 @@
  * engine's SPA fallback to `index.html`) lands on the same view.
  */
 export type View =
-  "runs" | "run" | "task" | "feature" | "escalations" | "usage" | "artifact" | "not_found";
+  | "runs"
+  | "run"
+  | "task"
+  | "feature"
+  | "escalations"
+  | "usage"
+  | "artifact"
+  | "design"
+  | "not_found";
 
 export const VIEW_PATHS = {
   runs: "/",
@@ -16,6 +24,7 @@ export const VIEW_PATHS = {
   escalations: "/escalations/",
   usage: "/usage/",
   artifact: "/artifact/",
+  design: "/design/",
 } as const satisfies Record<Exclude<View, "not_found">, string>;
 
 const BY_PATH = new Map<string, View>(
@@ -37,6 +46,14 @@ const withQuery = (path: string, query: Record<string, string | undefined>): str
 
 export type RunZoom = "phases" | "tasks";
 
+/** The design review's switchers (spec §17), all optional: the view fills in defaults. */
+export interface DesignQuery {
+  readonly screen?: string;
+  readonly state?: string;
+  readonly viewport?: number;
+  readonly theme?: "light" | "dark";
+}
+
 export const hrefs = {
   runs: (): string => VIEW_PATHS.runs,
   run: (run: string, zoom?: RunZoom, node?: string): string =>
@@ -48,6 +65,14 @@ export const hrefs = {
   escalations: (run: string): string => withQuery(VIEW_PATHS.escalations, { run }),
   usage: (): string => VIEW_PATHS.usage,
   artifact: (run: string, path: string): string => withQuery(VIEW_PATHS.artifact, { run, path }),
+  design: (run: string, q: DesignQuery = {}): string =>
+    withQuery(VIEW_PATHS.design, {
+      run,
+      screen: q.screen,
+      state: q.state,
+      viewport: q.viewport === undefined ? undefined : String(q.viewport),
+      theme: q.theme,
+    }),
 };
 
 const listeners = new Set<() => void>();

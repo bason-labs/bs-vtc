@@ -10,6 +10,7 @@ import { Link } from "@/components/app/Link";
 import { Drawer, StatusPill } from "@/components/ui";
 import { DiffSection } from "./DiffSection";
 import { FindingItem, Section, Stat } from "./DrawerParts";
+import { GateReports } from "./GateReports";
 import { nodeEyebrow } from "./StepNode";
 
 export interface NodeDrawerProps {
@@ -117,18 +118,7 @@ export function NodeDrawer({ run, node, detail, onClose }: NodeDrawerProps) {
 
           {model.gateReports.length === 0 ? null : (
             <Section title="Gate reports" count={model.gateReports.length}>
-              <ul className="space-y-1 text-xs">
-                {model.gateReports.map((g) => (
-                  <li
-                    key={`${g.reason}-${g.started_at}`}
-                    className="rounded-lg bg-surface-2 px-2 py-1"
-                  >
-                    {g.reason.replace(/_/g, " ")} · {g.scope} · verdict {g.verdict} ·{" "}
-                    {g.results.filter((r) => r.status === "pass").length}/{g.results.length} gates
-                    passed
-                  </li>
-                ))}
-              </ul>
+              <GateReports run={run} reports={model.gateReports} />
             </Section>
           )}
 

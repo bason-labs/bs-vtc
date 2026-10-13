@@ -1,5 +1,7 @@
 import {
   ArtifactContentSchema,
+  DesignReviewCommentInputSchema,
+  DesignReviewResultSchema,
   EscalationListSchema,
   EVENT_PAGE_LIMIT,
   EventPageSchema,
@@ -15,6 +17,8 @@ import {
   UsageReportSchema,
   WorkflowGraphSchema,
   type ArtifactContent,
+  type DesignReviewCommentInput,
+  type DesignReviewResult,
   type EngineHttpRouteName,
   type EscalationList,
   type EventPage,
@@ -60,6 +64,14 @@ export interface EngineClient {
   ): Promise<WorkflowGraph>;
   escalations(run: string, signal?: AbortSignal): Promise<EscalationList>;
   usage(signal?: AbortSignal): Promise<UsageReport>;
+  /**
+   * The dashboard's only write (AD-5 rule 5): a click-to-pin design review comment, which the
+   * engine appends to `.vtc/design/reviews/<screen>.jsonl`. Validated before it is sent.
+   */
+  postDesignReview(
+    input: DesignReviewCommentInput,
+    signal?: AbortSignal,
+  ): Promise<DesignReviewResult>;
   /** Opens the SSE stream (`GET /api/stream`); the caller reads and closes the body. */
   openStream(lastEventId: string | null, signal: AbortSignal): Promise<ReadableStream<Uint8Array>>;
 }
@@ -74,12 +86,19 @@ export const createEngineClient = (options: EngineClientOptions): EngineClient =
     accept: string,
     signal?: AbortSignal,
     extra: Readonly<Record<string, string>> = {},
+    body?: string,
   ) => {
     let response: Response;
     try {
       response = await options.fetch(url, {
-        method: "GET",
-        headers: { accept, ...authHeaders(options.getToken()), ...extra },
+        method: body === undefined ? "GET" : "POST",
+        headers: {
+          accept,
+          ...(body === undefined ? {} : { "content-type": "application/json" }),
+          ...authHeaders(options.getToken()),
+          ...extra,
+        },
+        ...(body === undefined ? {} : { body }),
         credentials: "omit",
         cache: "no-store",
         ...(signal === undefined ? {} : { signal }),
@@ -90,22 +109,19 @@ export const createEngineClient = (options: EngineClientOptions): EngineClient =
     }
     if (response.ok) return response;
     if (response.status === 401 || response.status === 403) options.onUnauthorized?.();
-    const body: unknown = await response.json().catch(() => null);
-    const parsed = HttpErrorSchema.safeParse(body);
+    const error: unknown = await response.json().catch(() => null);
+    const parsed = HttpErrorSchema.safeParse(error);
     if (parsed.success) {
       throw new ApiError(parsed.data.error.code, parsed.data.error.message, response.status);
     }
     throw new ApiError(codeForStatus(response.status), response.statusText, response.status);
   };
 
-  const read = async <S extends z.ZodType>(
+  const parse = async <S extends z.ZodType>(
     schema: S,
     route: EngineHttpRouteName,
-    params: RouteParams,
-    query: RouteQuery,
-    signal: AbortSignal | undefined,
+    response: Response,
   ): Promise<z.infer<S>> => {
-    const response = await send(routeUrl(route, params, query), "application/json", signal);
     const raw: unknown = await response.json().catch(() => undefined);
     // Tolerant reader (AD-3 rule 2): keys a newer MINOR engine added are dropped, not errors.
     const parsed = parsePersisted(schema, raw);
@@ -114,6 +130,15 @@ export const createEngineClient = (options: EngineClientOptions): EngineClient =
     }
     return parsed.data;
   };
+
+  const read = async <S extends z.ZodType>(
+    schema: S,
+    route: EngineHttpRouteName,
+    params: RouteParams,
+    query: RouteQuery,
+    signal: AbortSignal | undefined,
+  ): Promise<z.infer<S>> =>
+    parse(schema, route, await send(routeUrl(route, params, query), "application/json", signal));
 
   return {
     health: (signal) => read(HealthResultSchema, "health", {}, {}, signal),
@@ -137,6 +162,19 @@ export const createEngineClient = (options: EngineClientOptions): EngineClient =
       read(WorkflowGraphSchema, "graph", { run }, { scope, task }, signal),
     escalations: (run, signal) => read(EscalationListSchema, "escalations", { run }, {}, signal),
     usage: (signal) => read(UsageReportSchema, "usage", {}, {}, signal),
+    postDesignReview: async (input, signal) => {
+      const valid = DesignReviewCommentInputSchema.safeParse(input);
+      if (!valid.success)
+        throw new ApiError("bad_request", "the design review comment is not valid");
+      const response = await send(
+        routeUrl("designReviews"),
+        "application/json",
+        signal,
+        {},
+        JSON.stringify(valid.data),
+      );
+      return parse(DesignReviewResultSchema, "designReviews", response);
+    },
     openStream: async (lastEventId, signal) => {
       const response = await send(
         routeUrl("stream"),

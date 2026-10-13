@@ -2,11 +2,12 @@
   "name": "@vtc/dashboard",
   "version": "0.0.0",
   "private": true,
-  "description": "Flow Studio: the read-only local dashboard (spec §17), a Next.js static export served by the vtc binary.",
+  "description": "Flow Studio: the read-only local dashboard (spec \u00a717), a Next.js static export served by the vtc binary.",
   "type": "module",
   "scripts": {
     "dev": "next dev --port 4300",
     "dev:fixtures": "node --experimental-strip-types --disable-warning=ExperimentalWarning scripts/fixture-server.ts",
+    "dev:engine": "node --experimental-strip-types --disable-warning=ExperimentalWarning scripts/engine-proxy.ts",
     "build": "next build && node -e \"require('node:fs').rmSync('next-env.d.ts',{force:true})\"",
     "typecheck": "tsc -p tsconfig.json",
     "lint": "eslint src test scripts next.config.ts vitest.config.ts postcss.config.js",
@@ -23,6 +24,7 @@
     "react": "19.3.0",
     "react-dom": "19.3.0",
     "tailwind-merge": "3.7.0",
+    "yaml": "2.9.1",
     "zod": "4.6.7"
   },
   "devDependencies": {
