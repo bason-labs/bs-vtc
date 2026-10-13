@@ -202,7 +202,9 @@ export interface Harness {
   readonly base: string;
   readonly run: (request: Partial<GateRunRequestInput> & { head: string }) => Promise<GateReport>;
   /** Like `run`, but hands the request to the runner unparsed (a malformed caller). */
-  readonly runUnparsed: (request: Record<string, unknown> & { head: string }) => Promise<GateReport>;
+  readonly runUnparsed: (
+    request: Record<string, unknown> & { head: string },
+  ) => Promise<GateReport>;
 }
 
 export const osvGate: Gate = {
