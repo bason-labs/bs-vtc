@@ -15,12 +15,14 @@ import {
   DesignScreensFileSchema,
   DOMAIN_PACKS,
   ENGINE_MCP_TOOLS,
+  EffortSchema,
   engineMcpServer,
   HOST_IDS,
   isKnownArtifactType,
   PrototypeThemeSchema,
   prototypeStatePath,
   ROLE_CONTRACTS_ASSET,
+  ROLE_DENIED_VTC,
   RoleContractSchema,
   VerdictQuestionTypeSchema,
   type RoleContract,
@@ -28,11 +30,13 @@ import {
 import {
   ADVISOR_QUESTION_ARTIFACT,
   checkPluginFiles,
+  CLAUDE_DENIED_TOOLS,
   claudeEngineToolName,
   compiledAgentNames,
   compilePlugins,
   HOOKS_FILE,
   loadRoles,
+  PLUGIN_NAME,
   PROPOSED_ARTIFACT_TYPES,
   readSources,
   ROLE_FACING_ENGINE_TOOLS,
@@ -150,6 +154,90 @@ describe("role agents get only what their contract allows (AD-4, AD-8 rule 3)", 
     expect(noShell.length).toBeGreaterThan(0);
     for (const agent of noShell) {
       expect(RUN_INSTRUCTION.exec(agent.body)?.[0], agent.path).toBeUndefined();
+    }
+  });
+});
+
+describe("no role touches VTC's own guard rails (D-w, spine §5 reading 43)", () => {
+  const agentFiles = (host: "claude-code" | "codex") =>
+    output().targets[host].filter((f) => f.path.startsWith("agents/"));
+
+  it("every Claude Code agent denies `vtc calibrate` and writes to the guarded VTC home globs", () => {
+    const files = agentFiles("claude-code");
+    expect(files.length).toBe(roles.flatMap(compiledAgentNames).length);
+    for (const f of files) {
+      const match = /^---\n([\s\S]*?)\n---\n/.exec(f.text);
+      const front = parseYaml(match?.[1] ?? "") as { disallowedTools?: string };
+      const denied = (front.disallowedTools ?? "").split(", ");
+      for (const sub of ROLE_DENIED_VTC.subcommands) {
+        expect(denied, f.path).toContain(`Bash(vtc ${sub}:*)`);
+      }
+      for (const glob of ROLE_DENIED_VTC.homeWriteDeny) {
+        expect(denied, f.path).toContain(`Edit(~/.vtc/${glob})`);
+        expect(denied, f.path).toContain(`Write(~/.vtc/${glob})`);
+      }
+      expect(denied, f.path).toEqual(CLAUDE_DENIED_TOOLS);
+    }
+  });
+
+  it("every Codex agent keeps the VTC home outside its sandbox: no writable roots, no wider mode", () => {
+    // A Codex agent file cannot deny one command (execpolicy rules are session-level, not
+    // per-agent), so the barrier on Codex is the sandbox: read-only, or workspace-write with no
+    // extra writable root, so neither `vtc calibrate` nor a role can write under ~/.vtc/.
+    const files = agentFiles("codex");
+    expect(files.length).toBe(roles.flatMap(compiledAgentNames).length);
+    for (const f of files) {
+      const toml = parseToml(f.text);
+      expect(["read-only", "workspace-write"], f.path).toContain(toml.sandbox_mode);
+      expect(toml.sandbox_workspace_write, f.path).toBeUndefined();
+      expect(f.text, f.path).not.toMatch(/writable_roots|network_access/);
+    }
+  });
+});
+
+describe("host identity of the compiled agents (D-aa, D-ae; spine §5 readings 26, 47, 51)", () => {
+  const pluginJson = (path: string): { name?: string } =>
+    JSON.parse(sources.find((s) => s.path === path)?.text ?? "{}") as { name?: string };
+
+  it("keeps the plugin name `vtc` on both hosts, so headless Claude runs resolve `--agent vtc:<agent>`", () => {
+    expect(PLUGIN_NAME).toBe("vtc");
+    expect(pluginJson("plugins/claude-code/.claude-plugin/plugin.json").name).toBe(PLUGIN_NAME);
+    expect(pluginJson("plugins/codex/plugin.json").name).toBe(PLUGIN_NAME);
+  });
+
+  it("names every Claude Code agent by its bare compiled name; the host adds the `vtc:` namespace", () => {
+    for (const f of output().targets["claude-code"].filter((t) => t.path.startsWith("agents/"))) {
+      const match = /^---\n([\s\S]*?)\n---\n/.exec(f.text);
+      const front = parseYaml(match?.[1] ?? "") as { name?: string };
+      expect(`agents/${String(front.name)}.md`).toBe(f.path);
+      expect(front.name, f.path).not.toContain(":");
+    }
+  });
+
+  it("sets only the reasoning effort on every Codex agent, never a model id (D-ae)", () => {
+    for (const f of output().targets.codex.filter((t) => t.path.startsWith("agents/"))) {
+      const toml = parseToml(f.text);
+      expect(toml.model, f.path).toBeUndefined();
+      expect(EffortSchema.options, f.path).toContain(toml.model_reasoning_effort);
+    }
+  });
+
+  it("emits Codex agents only as top-level Codex config keys, ready for the headless identity spike", () => {
+    // headless `codex exec` has no --agent flag (spine §7): whichever way the spike loads a role
+    // (agent file, profile or config overrides), each key here is a plain Codex config key
+    const keys = new Set([
+      "name",
+      "description",
+      "model_reasoning_effort",
+      "sandbox_mode",
+      "developer_instructions",
+      "mcp_servers",
+    ]);
+    for (const f of output().targets.codex.filter((t) => t.path.startsWith("agents/"))) {
+      expect(
+        Object.keys(parseToml(f.text)).filter((k) => !keys.has(k)),
+        f.path,
+      ).toEqual([]);
     }
   });
 });
@@ -346,6 +434,31 @@ describe("spine §5 readings 27, 29 and 37 (write scopes of the research and des
   });
 });
 
+describe("the Planner names exact config and task-runner paths (D-x, D-y; readings 44, 45, 63)", () => {
+  const locked = (): string =>
+    (promptOf("planner").split("<!-- vtc:editable -->")[0] ?? "").replace(/\s+/g, " ");
+
+  it("tells the Planner, in the locked core, to list each config or task-runner file by exact path", () => {
+    const text = locked();
+    expect(text).toContain("scaffolds or changes a lint, test or scanner config");
+    for (const file of ["`Makefile`", "`justfile`", "`*.mk`", "`package.json` `scripts`"]) {
+      expect(text, file).toContain(file);
+    }
+    expect(text).toMatch(/`files_scope` must name that exact path/);
+    expect(text).toContain("`packages/foo/tsconfig.json`");
+    expect(text).toMatch(/no wildcard/);
+  });
+
+  it("tells the Planner write-scope globs have no alternatives or rule-breaking characters", () => {
+    const text = locked();
+    expect(text).toContain("`{a,b}`");
+    for (const word of ["commas", "parentheses", "quotes", "backticks", "whitespace"]) {
+      expect(text, word).toContain(word);
+    }
+    expect(text).toMatch(/each alternative as its own entry/);
+  });
+});
+
 describe("prompts read the engine's dispatch settings from the pack (spine §5 reading 32)", () => {
   const compiledBody = (name: string): string =>
     claudeAgentBody(
@@ -463,7 +576,9 @@ describe("the advisors (§5.4: Tier 3; called through the engine's consult, spin
 
   it("tells the Lead to pass the model and report the session and full failure outcomes (AD-4)", () => {
     const loop = (/^## The loop\n([\s\S]*?)\n## /m.exec(lead())?.[1] ?? "").replace(/\s+/g, " ");
-    expect(loop).toMatch(/Pass `model` to the spawn/);
+    expect(loop).toMatch(/When `spawn_role` carries `model`, pass it to the spawn/);
+    // D-ae: no model on the action means the session's model; never invent one
+    expect(loop).toMatch(/When it has no `model`, pass none/);
     expect(loop).toMatch(
       /`submit` with `kind` `result`, the `action_id`, the `result`, `session_ref`/,
     );

@@ -56,6 +56,16 @@ Both also get:
   tags only the host, AD-12 rule 3). Both the spike item and an engine-side guard on `approve`,
   `answer`, `submit` and `change_request` are proposed to the integrator; until they land, this
   entry is the only barrier on Codex.
+- **No role touches VTC's own guard rails** (D-w, spine §5 reading 43, `ROLE_DENIED_VTC`). Every
+  Claude Code agent carries `disallowedTools` (`CLAUDE_DENIED_TOOLS`): `Bash(vtc calibrate:*)`,
+  and `Edit`/`Write` on `~/.vtc/allowlists/**`, `~/.vtc/osv-db/**` and `~/.vtc/hidden/**`, on
+  every profile. The rules name the default VTC home; a `$VTC_HOME` elsewhere is unknown at
+  compile time, and the adapter's sandbox profile, which resolves it, is the barrier for shell
+  writes. A Codex agent file cannot deny one command (execpolicy rules are session-level), so on
+  Codex the barrier is the sandbox: every agent is `read-only` or `workspace-write` with no
+  writable roots of its own, so the VTC home is outside its writes, `vtc calibrate`'s included.
+  Whether Claude Code honours rule specifiers in an agent's `disallowedTools` is proposed for the
+  Claude headless role-run spike row (spine §7).
 - **Codex sandbox gap.** A Codex `sandbox_mode` limits what an agent's commands may write, not
   whether it may run a shell, and write-scoped agents need `workspace-write`. So on Codex "run no
   shell command" is an instruction, not a host restriction, and the write paths are not a host
@@ -69,12 +79,20 @@ Both also get:
   Lead spawns `spawn_role.agent` exactly as given on both hosts. A host that namespaces plugin
   agents (Claude Code: `vtc:vtc-qa-judge`) gets the namespace from its adapter, inside the
   `SubagentInstruction` (AD-14 rule 1), never from the Lead.
-- **Model tier on Codex** (spine §5 reading 26). Claude Code maps the role's tier to a model
-  alias (top/mid/low = opus/sonnet/haiku). A Codex agent never pins a model: it sets only
-  `model_reasoning_effort` and runs on the session's model, and the compiler rejects a Codex
-  model in `role.yaml`. The tier-to-model map lives in the Codex adapter's defaults and
-  `project.yaml` `hosts.models.codex`; until the spike names Codex model ids, per-host scoring
-  must not assume tiers differ on Codex.
+- **Model tier on Codex** (spine §5 readings 26 and 51, D-ae). Claude Code maps the role's tier
+  to a model alias (top/mid/low = opus/sonnet/haiku). A Codex agent never pins a model: it sets
+  only `model_reasoning_effort` and runs on the session's model, and the compiler rejects a Codex
+  model in `role.yaml`. The engine is the only model resolver (`project.yaml`
+  `hosts.models.codex`, then its built-in map, which names no Codex ids until the spike does);
+  with no id, `spawn_role` carries no `model` and the Lead passes none. Per-host scoring must not
+  assume tiers differ on Codex.
+- **Host identity of a role run.** The plugin is named `vtc` on both hosts and agent files carry
+  the bare compiled name, so Claude Code lists them as `vtc:<agent>` and an engine-launched
+  headless run resolves `--agent vtc:<agent>` (D-aa, reading 47). Headless `codex exec` has no
+  `--agent` (spine §7, Codex headless role identity): each Codex agent file holds only top-level
+  Codex config keys (`name`, `description`, `model_reasoning_effort`, `sandbox_mode`,
+  `developer_instructions`, `mcp_servers`), so whichever load path the spike confirms can use it
+  unchanged.
 - The Codex manifest fields are provisional until the sub-project 0 spike confirms them (spike
   item proposed for spine §7).
 - AD-9 applies to every file here and every emitted file: no permission-bypass flag, no credential
