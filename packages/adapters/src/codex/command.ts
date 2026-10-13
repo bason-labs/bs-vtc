@@ -20,13 +20,27 @@
  *   them anywhere, but it can copy them into its output or worktree.
  * - The role deny list (D-w): Codex has no per-command deny for a headless run, so `vtc
  *   calibrate` cannot be denied here (it confirms only in an interactive terminal, which a role
- *   run never has). Writes to the VTC home's allowlists, scanner database and hidden tests are
- *   blocked because `workspace-write` writes only the worktree and the OS temp roots (`$TMPDIR`,
- *   `/tmp`; D-ag lets roles write there). So a profile whose worktree overlaps one of those
- *   directories is refused, and when one lies under a temp root (a VTC home in the temp
+ *   run never has). Writes to everything in `ROLE_DENIED_VTC.homeWriteDeny` (D-w, D-ap: the
+ *   allowlists, scanner database and binaries, hidden tests, plugin copies, discovery files and
+ *   sockets, `config.yaml` and the token) are blocked because `workspace-write` writes only the
+ *   worktree and the OS temp roots (`$TMPDIR`, `/tmp`; D-ag lets roles write there). So a profile
+ *   whose worktree overlaps one of those paths is refused, and when one lies under a temp root (a VTC home in the temp
  *   directory, as in test setups) the profile takes both temp roots out of the writable set
  *   (`exclude_tmpdir_env_var`, `exclude_slash_tmp`). Paths compare by real location, so a
  *   symlinked worktree or VTC home cannot hide an overlap.
+ * - The VTC home's `homeReadDeny` (D-an: the token, the sockets in `run/`, the hidden tests) is
+ *   readable too, for the same reason. The network is off; whether that also stops a Unix-socket
+ *   connect into `run/` on every platform is not verified here (handed to the engine as a §7
+ *   residual).
+ * - Host config in the worktree (D-ao, spine §5 reading 72): every role run passes
+ *   `-c notify=[]`, so no `notify` command (user or role-planted) runs outside the sandbox.
+ *   `codex exec --help` (0.162.1) has no override that drops project MCP servers: `-c` sets one
+ *   dotted key, the help does not say whether a table value replaces or merges, no flag skips the
+ *   project `.codex/config.toml` (`--ignore-user-config` covers only `$CODEX_HOME`), and a
+ *   blanket `mcp_servers={}` would also drop the engine bridge roles use. The engine's restore of
+ *   `.codex/**` before every dispatch and resume is the barrier; the §7 spike row ("Codex project
+ *   config in a linked worktree") settles the override. Project hooks need persisted trust, and
+ *   no run ever passes the hook-trust bypass.
  * - `codex exec` has no agent flag: a headless run gets no compiled role instructions
  *   (`developer_instructions` of `.codex/agents/vtc-*.toml`), so the role rests on the prompt
  *   (the task pack). Engine-launched Codex runs (cross-family review, auto-resume) must carry the
@@ -42,7 +56,7 @@ import type {
   SessionRef,
   SpawnRoleRequest,
 } from "@vtc/shared";
-import { canonicalPath, vtcHomeWriteDeniedDirs } from "../common/homes.js";
+import { canonicalPath, vtcHomeWriteDeniedPaths } from "../common/homes.js";
 
 export const CODEX_BINARY = "codex";
 export const HOST = "codex";
@@ -83,7 +97,7 @@ export const codexSandboxProfile = (
   }
   // compared by real location, each path resolved once
   const denied =
-    mode === "workspace-write" ? vtcHomeWriteDeniedDirs(options.vtcHome).map(canonicalPath) : [];
+    mode === "workspace-write" ? vtcHomeWriteDeniedPaths(options.vtcHome).map(canonicalPath) : [];
   const cwd = denied.length === 0 ? request.cwd : canonicalPath(request.cwd);
   const exposed = denied.find((dir) => within(cwd, dir) || within(dir, cwd));
   if (exposed !== undefined) {
@@ -184,6 +198,9 @@ export const codexHeadlessCommand = (
       ...(request.model.model === undefined ? [] : ["--model", request.model.model]),
       "--config",
       `model_reasoning_effort="${request.model.effort}"`,
+      // no notify command, from the user's config or one a role planted in the worktree (D-ao)
+      "--config",
+      "notify=[]",
       "--",
       ...(session === undefined ? [] : [session.id]),
       "-",

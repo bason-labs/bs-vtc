@@ -48,19 +48,28 @@ const profile = (...args: Parameters<typeof profileRequest>) =>
 /** Denied to every role: the web tools (engine tools only). */
 const ALWAYS_DENIED = ["WebFetch", "WebSearch"];
 /**
- * Never readable, as absolute rules in the settings: the install token, the Codex home and
+ * Never readable, as absolute rules in the settings: the VTC home's install token, daemon
+ * sockets and hidden acceptance tests (`ROLE_DENIED_VTC.homeReadDeny`, D-an), the Codex home and
  * Claude's own credential file (D-ad).
  */
 const UNREADABLE_RULES = [
   "Read(//home/dev/.vtc/token)",
+  "Read(//home/dev/.vtc/run/**)",
+  "Read(//home/dev/.vtc/hidden/**)",
   "Read(//home/dev/.codex/**)",
   `Read(/${CLAUDE_CREDENTIALS})`,
 ];
 /** The VTC home's hidden acceptance tests and daemon sockets (§7.3; spine §7). */
 const UNREADABLE_VTC_DIRS = [`${VTC_HOME}/hidden`, `${VTC_HOME}/run`];
-const UNREADABLE = [`${VTC_HOME}/token`, CODEX_HOME, CLAUDE_CREDENTIALS, ...UNREADABLE_VTC_DIRS];
-/** D-w: what no role may write under the VTC home, as sandbox directories. */
-const VTC_HOME_DENIED_DIRS = [
+const UNREADABLE = [
+  `${VTC_HOME}/token`,
+  `${VTC_HOME}/run`,
+  `${VTC_HOME}/hidden`,
+  CODEX_HOME,
+  CLAUDE_CREDENTIALS,
+];
+/** D-w, D-ap: what no role may write under the VTC home, as sandbox paths (directories and files). */
+const VTC_HOME_DENIED_PATHS = [
   "allowlists",
   "osv-db",
   "hidden",
@@ -135,7 +144,7 @@ describe("Claude sandboxProfile (§12.1, AD-9)", () => {
         expect.arrayContaining(ALWAYS_DENIED),
       );
       const settings = settingsOf(p);
-      expect(settings.permissions.deny.slice(0, 3)).toEqual(UNREADABLE_RULES);
+      expect(settings.permissions.deny.slice(0, 5)).toEqual(UNREADABLE_RULES);
       expect(settings.sandbox.filesystem.denyRead).toEqual(UNREADABLE);
       // the credential path appears only in the two sanctioned deny lists (AD-9 exemption)
       expect(findForbiddenHostArgs(p.cliArgs)).toEqual([]);
@@ -155,6 +164,41 @@ describe("Claude sandboxProfile (§12.1, AD-9)", () => {
       expect(settings.sandbox.filesystem.denyRead).toEqual(
         expect.arrayContaining(UNREADABLE_VTC_DIRS),
       );
+    }
+  });
+
+  it("builds every VTC-home read deny from ROLE_DENIED_VTC.homeReadDeny, the one source (D-an)", () => {
+    expect([...ROLE_DENIED_VTC.homeReadDeny].sort()).toEqual(["hidden/**", "run/**", "token"]);
+    for (const tools of [READ_ONLY, WRITE_SCOPED, ENGINEER]) {
+      const settings = settingsOf(profile(tools));
+      const ruleRead = settings.permissions.deny.filter((r) =>
+        r.startsWith("Read(//home/dev/.vtc/"),
+      );
+      expect(ruleRead).toEqual(
+        ROLE_DENIED_VTC.homeReadDeny.map((glob) => `Read(//home/dev/.vtc/${glob})`),
+      );
+      expect(
+        settings.sandbox.filesystem.denyRead.filter((p) => p.startsWith(`${VTC_HOME}/`)),
+      ).toEqual(
+        ROLE_DENIED_VTC.homeReadDeny.map((glob) => `${VTC_HOME}/${glob.replace(/\/\*\*$/u, "")}`),
+      );
+    }
+  });
+
+  it("write-denies the VTC home's single files as files, not as directories (D-ap: config.yaml, token)", () => {
+    for (const tools of [READ_ONLY, WRITE_SCOPED, ENGINEER]) {
+      const settings = settingsOf(profile(tools));
+      for (const file of ["config.yaml", "token"]) {
+        expect(ROLE_DENIED_VTC.homeWriteDeny).toContain(file);
+        expect(settings.sandbox.filesystem.denyWrite).toContain(`${VTC_HOME}/${file}`);
+        for (const tool of ["Edit", "Write", "NotebookEdit"]) {
+          expect(settings.permissions.deny).toContain(`${tool}(//home/dev/.vtc/${file})`);
+          expect(settings.permissions.deny).not.toContain(`${tool}(//home/dev/.vtc/${file}/**)`);
+        }
+      }
+      // a directory entry still covers everything below it
+      expect(settings.permissions.deny).toContain("Write(//home/dev/.vtc/claude-marketplace/**)");
+      expect(settings.sandbox.filesystem.denyWrite).toContain(`${VTC_HOME}/claude-marketplace`);
     }
   });
 
@@ -178,7 +222,7 @@ describe("Claude sandboxProfile (§12.1, AD-9)", () => {
         }
       }
       expect(settings.sandbox.filesystem.denyWrite).toEqual(
-        expect.arrayContaining(VTC_HOME_DENIED_DIRS),
+        expect.arrayContaining(VTC_HOME_DENIED_PATHS),
       );
     }
   });
@@ -201,10 +245,10 @@ describe("Claude sandboxProfile (§12.1, AD-9)", () => {
     );
     expect(settings.sandbox.filesystem.denyRead).toEqual([
       "/srv/vtc home/token",
+      "/srv/vtc home/run",
+      "/srv/vtc home/hidden",
       "/srv/codex",
       credentials,
-      "/srv/vtc home/hidden",
-      "/srv/vtc home/run",
     ]);
     expect(settings.permissions.deny).toEqual(
       expect.arrayContaining(["Read(//srv/vtc home/hidden/**)", "Read(//srv/vtc home/run/**)"]),
@@ -227,16 +271,18 @@ describe("Claude sandboxProfile (§12.1, AD-9)", () => {
           .filesystem.denyRead,
       ).toEqual([
         "/env/vtc/token",
+        "/env/vtc/run",
+        "/env/vtc/hidden",
         "/env/codex",
         credentialsIn("/env/claude"),
-        "/env/vtc/hidden",
-        "/env/vtc/run",
       ]);
       const wired = ADAPTER_FACTORIES["claude-code"]!({ vtcHome: "/cli/vtc" });
       expect(
-        settingsOf(wired.sandboxProfile(profileRequest(READ_ONLY))).permissions.deny.slice(0, 3),
+        settingsOf(wired.sandboxProfile(profileRequest(READ_ONLY))).permissions.deny.slice(0, 5),
       ).toEqual([
         "Read(//cli/vtc/token)",
+        "Read(//cli/vtc/run/**)",
+        "Read(//cli/vtc/hidden/**)",
         "Read(//env/codex/**)",
         `Read(/${credentialsIn("/env/claude")})`,
       ]);
@@ -250,7 +296,7 @@ describe("Claude sandboxProfile (§12.1, AD-9)", () => {
           profileRequest(READ_ONLY),
         ),
       ).sandbox.filesystem.denyRead;
-      expect(denyRead[2]).toBe(credentialsIn(join(homedir(), ".claude")));
+      expect(denyRead.at(-1)).toBe(credentialsIn(join(homedir(), ".claude")));
     });
   });
 
@@ -367,7 +413,7 @@ describe("Claude sandboxProfile (§12.1, AD-9)", () => {
             `${CWD}/.claude/**`,
             `${CWD}/.mcp.json`,
             `${CWD}/.codex/**`,
-            ...VTC_HOME_DENIED_DIRS,
+            ...VTC_HOME_DENIED_PATHS,
           ],
           denyRead: UNREADABLE,
         },

@@ -14,7 +14,13 @@ import {
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
-import { STATUSLINE_TEE, statuslineTeeCommand } from "@vtc/shared";
+import {
+  claudeSessionSandboxSettings,
+  claudeSessionSandboxState,
+  ROLE_DENIED_VTC,
+  STATUSLINE_TEE,
+  statuslineTeeCommand,
+} from "@vtc/shared";
 import * as adapters from "../../src/index.js";
 import { createClaudeCodeAdapter } from "../../src/index.js";
 import { writeFixturePlugin } from "../support/plugin-fixture.js";
@@ -267,5 +273,143 @@ describe("Claude install (AD-6 rule 5, AD-16 rule 4)", () => {
     await expect(
       createClaudeCodeAdapter().install({ ...env, scope: "user" }),
     ).resolves.toMatchObject({ written: expect.any(Array) as unknown });
+  });
+});
+
+describe("Claude install: the session sandbox for in-session roles (D-an, spine §5 reading 71)", () => {
+  const VTC_HOME = "/home/dev/.vtc";
+  /** A project that is a git checkout, where the session sandbox goes. */
+  const repoSetup = () => {
+    const env = setup();
+    mkdirSync(join(env.projectRoot, ".git"));
+    return env;
+  };
+  const localOf = (projectRoot: string) => join(projectRoot, ".claude", "settings.local.json");
+
+  it("writes claudeSessionSandboxSettings into the project's settings.local.json in either scope", async () => {
+    for (const scope of ["user", "project"] as const) {
+      const env = repoSetup();
+      const result = await createClaudeCodeAdapter({ vtcHome: VTC_HOME }).install({
+        ...env,
+        scope,
+      });
+      const local = localOf(env.projectRoot);
+      expect(result.written).toContain(local);
+      const settings = readJson(local);
+      expect(settings.sandbox).toEqual(claudeSessionSandboxSettings(VTC_HOME).sandbox);
+      expect(claudeSessionSandboxState(settings, VTC_HOME)).toEqual({ state: "on", missing: [] });
+      // reads denied on the token and sockets, writes on every homeWriteDeny entry
+      const sandbox = settings.sandbox as {
+        filesystem: { denyRead: string[]; denyWrite: string[] };
+      };
+      expect(sandbox.filesystem.denyRead).toEqual(
+        expect.arrayContaining([`${VTC_HOME}/token`, `${VTC_HOME}/run`]),
+      );
+      expect(sandbox.filesystem.denyWrite).toHaveLength(ROLE_DENIED_VTC.homeWriteDeny.length);
+      // the user is told what was written, and that the file stays out of git
+      const notes = result.notes.join("\n");
+      expect(notes).toContain(local);
+      expect(notes).toContain(`${VTC_HOME}/token`);
+      expect(notes).toContain("out of git");
+    }
+  });
+
+  it("user scope leaves the user's own settings without a sandbox block", async () => {
+    const env = repoSetup();
+    await createClaudeCodeAdapter({ vtcHome: VTC_HOME }).install({ ...env, scope: "user" });
+    expect(readJson(join(env.home, ".claude", "settings.json"))).not.toHaveProperty("sandbox");
+    expect(readJson(localOf(env.projectRoot))).toEqual({
+      sandbox: claudeSessionSandboxSettings(VTC_HOME).sandbox,
+    });
+  });
+
+  it("merges into the existing local settings: keeps the user's keys and entries, turns the sandbox on, and is idempotent", async () => {
+    const env = repoSetup();
+    const local = localOf(env.projectRoot);
+    writeJsonFile(local, {
+      model: "opus",
+      sandbox: {
+        enabled: false,
+        allowUnsandboxedCommands: true,
+        network: { allowedDomains: ["example.test"] },
+        filesystem: { denyRead: ["/secrets", `${VTC_HOME}/token`], allowWrite: ["/scratch"] },
+      },
+    });
+    const adapter = createClaudeCodeAdapter({ vtcHome: VTC_HOME });
+    await adapter.install({ ...env, scope: "user" });
+    const wanted = claudeSessionSandboxSettings(VTC_HOME).sandbox;
+    const settings = readJson(local);
+    expect(settings.model).toBe("opus");
+    expect(settings.sandbox).toEqual({
+      enabled: true,
+      allowUnsandboxedCommands: false,
+      network: { allowedDomains: ["example.test"] },
+      filesystem: {
+        denyRead: [
+          "/secrets",
+          `${VTC_HOME}/token`,
+          ...wanted.filesystem.denyRead.filter((p) => p !== `${VTC_HOME}/token`),
+        ],
+        denyWrite: wanted.filesystem.denyWrite,
+        allowWrite: ["/scratch"],
+      },
+    });
+    expect(claudeSessionSandboxState(settings, VTC_HOME).state).toBe("on");
+    const first = readFileSync(local, "utf8");
+    await adapter.install({ ...env, scope: "user" });
+    expect(readFileSync(local, "utf8")).toBe(first);
+  });
+
+  it("project scope keeps the plugin registration and the sandbox in the one local file", async () => {
+    const env = repoSetup();
+    await createClaudeCodeAdapter({ vtcHome: VTC_HOME }).install({ ...env, scope: "project" });
+    const settings = readJson(localOf(env.projectRoot));
+    expect(settings.enabledPlugins).toEqual({ "vtc@vtc-local": true });
+    expect(claudeSessionSandboxState(settings, VTC_HOME).state).toBe("on");
+  });
+
+  it("refuses, writing nothing, when the local settings it would write carry an AD-9 marker", async () => {
+    const env = repoSetup();
+    const local = localOf(env.projectRoot);
+    writeJsonFile(local, { permissions: { defaultMode: "bypassPermissions" } });
+    const before = readFileSync(local, "utf8");
+    await expect(
+      createClaudeCodeAdapter({ vtcHome: VTC_HOME }).install({ ...env, scope: "user" }),
+    ).rejects.toThrow(/bypassPermissions/);
+    expect(readFileSync(local, "utf8")).toBe(before);
+    expect(existsSync(join(env.home, ".vtc", "claude-marketplace"))).toBe(false);
+    expect(existsSync(join(env.home, ".claude", "settings.json"))).toBe(false);
+  });
+
+  it("writes no sandbox outside a git checkout, and says how to turn it on", async () => {
+    const env = setup();
+    const result = await createClaudeCodeAdapter({ vtcHome: VTC_HOME }).install({
+      ...env,
+      scope: "user",
+    });
+    expect(existsSync(localOf(env.projectRoot))).toBe(false);
+    expect(result.notes.join("\n")).toMatch(/session sandbox/);
+  });
+
+  it("writes no sandbox for a Windows VTC home, where Claude Code has no session sandbox, and says so", async () => {
+    const env = repoSetup();
+    const result = await createClaudeCodeAdapter({ vtcHome: "C:\\Users\\u\\.vtc" }).install({
+      ...env,
+      scope: "user",
+    });
+    expect(existsSync(localOf(env.projectRoot))).toBe(false);
+    expect(result.notes.join("\n")).toMatch(/no session sandbox on this platform/);
+  });
+
+  it("follows the VTC home the cli resolved", async () => {
+    const env = repoSetup();
+    await adapters.ADAPTER_FACTORIES["claude-code"]!({ vtcHome: "/cli/vtc home" }).install({
+      ...env,
+      scope: "user",
+    });
+    expect(claudeSessionSandboxState(readJson(localOf(env.projectRoot)), "/cli/vtc home")).toEqual({
+      state: "on",
+      missing: [],
+    });
   });
 });
