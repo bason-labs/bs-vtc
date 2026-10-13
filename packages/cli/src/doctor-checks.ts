@@ -1,12 +1,14 @@
 /**
- * `vtc doctor` prerequisite checks (§4.4), and the auto-resume timer (§6.9 step 4; launchd on
- * macOS, systemd on Linux, `timer.ts`). The pinned scanners are checked in `scanner-checks.ts`. Host logins are read only through the hosts' own
+ * `vtc doctor` prerequisite checks (§4.4), the auto-resume timer (§6.9 step 4; launchd on macOS,
+ * systemd on Linux, `timer.ts`, none on Windows in v1) and the daemon's `env_passthrough` (D-ak).
+ * The pinned scanners are checked in `scanner-checks.ts`. Host logins are read only through the hosts' own
  * status commands (`claude auth status --json`, `codex login status`); VTC never reads a
  * credential file or the keychain (AD-9). Account details the status commands print (email,
  * organisation) are never echoed.
  */
 import type { DaemonState } from "./daemon.js";
 import type { Exec } from "./process.js";
+import type { UserConfigRead } from "./user-config.js";
 
 export type CheckStatus = "ok" | "warn" | "fail";
 
@@ -23,8 +25,11 @@ export interface DoctorEnv {
   readonly exec: Exec;
   /** `process.versions`: `bun` is set inside the binary, `node` always. */
   readonly versions: Readonly<Record<string, string | undefined>>;
-  /** The auto-resume timer's state; the check is skipped when absent (no timer on this OS). */
-  readonly timer?: TimerEnv;
+  /**
+   * The auto-resume timer's state; `"unsupported"` on a platform with no timer in v1 (Windows,
+   * D-aj, spine §5 reading 56), which doctor explains; the check is skipped when absent.
+   */
+  readonly timer?: TimerEnv | "unsupported";
 }
 
 /** What the auto-resume check reads (§6.9 step 4). */
@@ -69,6 +74,14 @@ export const checkAutoResume = (env: TimerEnv): DoctorCheck => {
   return { name, status: "ok", detail: `${env.kind} installed (${program})` };
 };
 
+/** Windows in v1 (D-aj, spine §5 reading 56): no timer; resume waits for the engine. */
+export const NO_TIMER_CHECK: DoctorCheck = {
+  name: "auto-resume",
+  status: "warn",
+  detail:
+    "no auto-resume timer on this platform in v1: a run parked on a usage limit resumes when its engine next runs on that repo",
+};
+
 const firstLine = (text: string): string => text.trim().split(/\r?\n/)[0] ?? "";
 
 export const checkRuntime = (versions: DoctorEnv["versions"]): DoctorCheck => {
@@ -108,7 +121,12 @@ export const checkGh = async (exec: Exec): Promise<DoctorCheck> => {
     : { name: "gh", status: "ok", detail: version };
 };
 
-/** Claude Code: on PATH, and logged in per `claude auth status --json` (`loggedIn`). */
+/**
+ * Claude Code: on PATH, and logged in per `claude auth status --json` (`loggedIn`). An
+ * `apiKeyHelper` setup (named by its `authMethod` or `apiKeySource`) is a warning (D-ab, spine §5
+ * reading 48): role runs ignore user settings, where the helper lives, so VTC runs need the
+ * user's own subscription login. Nothing but that status command is consulted (AD-9).
+ */
 export const checkClaude = async (exec: Exec): Promise<DoctorCheck> => {
   const version = await present(exec, "claude");
   if (version === null)
@@ -116,13 +134,27 @@ export const checkClaude = async (exec: Exec): Promise<DoctorCheck> => {
   const status = await exec("claude", ["auth", "status", "--json"], { timeoutMs: 20_000 });
   let loggedIn: boolean;
   let method: string | undefined;
+  let helper = false;
   try {
-    const parsed = JSON.parse(status.stdout) as { loggedIn?: unknown; authMethod?: unknown };
+    const parsed = JSON.parse(status.stdout) as {
+      loggedIn?: unknown;
+      authMethod?: unknown;
+      apiKeySource?: unknown;
+    };
     loggedIn = parsed.loggedIn === true;
     method = typeof parsed.authMethod === "string" ? parsed.authMethod : undefined;
+    helper = [parsed.authMethod, parsed.apiKeySource].some(
+      (v) => typeof v === "string" && /apikeyhelper/i.test(v),
+    );
   } catch {
     loggedIn = false;
   }
+  if (helper)
+    return {
+      name: "claude-code",
+      status: "warn",
+      detail: `${version}: an apiKeyHelper setup is out of scope for v1 (role runs ignore user settings, where the helper lives): log in with your Claude subscription (run claude, then /login)`,
+    };
   return loggedIn
     ? {
         name: "claude-code",
@@ -155,7 +187,12 @@ export const runDoctorChecks = async (env: DoctorEnv): Promise<DoctorCheck[]> =>
   ]);
   const hosts = [claude, codex];
   const anyHost = hosts.some((h) => h.status === "ok");
-  const timer = env.timer === undefined ? null : checkAutoResume(env.timer);
+  const timer =
+    env.timer === undefined
+      ? null
+      : env.timer === "unsupported"
+        ? NO_TIMER_CHECK
+        : checkAutoResume(env.timer);
   return [
     checkRuntime(env.versions),
     git,
@@ -191,12 +228,36 @@ export const checkEngine = (repoRoot: string, found: DaemonState): DoctorCheck |
 
 /**
  * Playwright's Chromium for Visual QA (§4.4: downloaded on demand by `vtc doctor`, pinned by
- * checksum, into `~/.vtc/`). This build does not provision it yet; the check keeps the gap
- * visible until the Visual QA layer ships its pin.
+ * checksum, into `~/.vtc/`). The pin is deferred until Visual QA has a consumer (D-ai, spine §5
+ * reading 55: Playwright's CDN publishes no SHA-256, so the pin will be the hash of a reviewed
+ * download); until then doctor only warns.
  */
 export const checkChromium = (): DoctorCheck => ({
   name: "chromium",
   status: "warn",
   detail:
-    "Playwright's Chromium (Visual QA screenshots) is not provisioned by this vtc build yet; UI runs skip what needs it",
+    "Playwright's Chromium (Visual QA screenshots) is not provisioned: its pin is deferred until Visual QA has a consumer; UI runs skip what needs it",
 });
+
+/**
+ * Which credential variables reach the detached daemon (D-ak, spine §5 reading 57): it drops
+ * them unless `~/.vtc/config.yaml` lists their names in `env_passthrough`. Names only, never
+ * values. A file that does not parse fails the check (nothing passes until it is fixed).
+ */
+export const checkEnvPassthrough = (read: UserConfigRead): DoctorCheck => {
+  if (!read.ok)
+    return {
+      name: "env",
+      status: "fail",
+      detail: `${read.path} does not parse (${read.error}); the detached daemon passes no credential variables until it does`,
+    };
+  const names = read.config.env_passthrough;
+  return {
+    name: "env",
+    status: "ok",
+    detail:
+      names.length === 0
+        ? `the detached daemon drops credential variables; none pass (env_passthrough in ${read.path})`
+        : `passes ${names.join(", ")} to the detached daemon (env_passthrough in ${read.path})`,
+  };
+};

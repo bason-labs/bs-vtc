@@ -5,7 +5,7 @@
  */
 import { homedir } from "node:os";
 import { join, resolve } from "node:path";
-import { ADAPTER_FACTORIES } from "@vtc/adapters";
+import { ADAPTER_FACTORIES, type AdapterFactoryOptions } from "@vtc/adapters";
 import { ENGINE_NAME, gates, git, mcp, runDaemon } from "@vtc/engine";
 import {
   CONTRACTS_VERSION,
@@ -72,13 +72,33 @@ export const lazyGateRunner = (create: () => GateRunner): GateRunner => {
   };
 };
 
-/** One adapter per host registered in `ADAPTER_FACTORIES` (AD-6 rule 6). */
+/** How the cli constructs an adapter (`ADAPTER_FACTORIES`, `@vtc/adapters`). */
+export type AdapterFactory = (options?: AdapterFactoryOptions) => HostAdapter;
+
+/** What every adapter is constructed with (spine §5 reading 66). */
+export interface AdapterContext {
+  readonly vtcHome: string;
+  /** The host's compiled plugin on disk (`CliRuntime.pluginDir`). */
+  readonly pluginDir: (host: HostId, vtcHome: string) => string;
+}
+
+/**
+ * One adapter per host registered in `ADAPTER_FACTORIES` (AD-6 rule 6), each constructed with
+ * `{ pluginDir, vtcHome, vtcVersion }`. Models are never passed: the engine resolves every model
+ * (`SpawnRoleRequest.model`). Without `pluginDir` a headless Claude run is refused, so it is
+ * always passed.
+ */
 export const createAdapters = (
-  factories: Readonly<Partial<Record<HostId, () => HostAdapter>>> = ADAPTER_FACTORIES,
+  factories: Readonly<Partial<Record<HostId, AdapterFactory>>>,
+  context: AdapterContext,
 ): Partial<Record<HostId, HostAdapter>> => {
   const adapters: Partial<Record<HostId, HostAdapter>> = {};
-  for (const [host, factory] of Object.entries(factories) as [HostId, () => HostAdapter][])
-    adapters[host] = factory();
+  for (const [host, factory] of Object.entries(factories) as [HostId, AdapterFactory][])
+    adapters[host] = factory({
+      pluginDir: context.pluginDir(host, context.vtcHome),
+      vtcHome: context.vtcHome,
+      vtcVersion: VERSION,
+    });
   return adapters;
 };
 
@@ -88,12 +108,14 @@ export interface BuildEnginePartsOptions {
   readonly installToken: string;
   readonly assets: AssetBundle;
   /**
-   * Defaults: the runtime's storage driver, `gates.createGateRunner`, `ADAPTER_FACTORIES`, the
-   * persisted wake scheduler and the `gh`-backed PR service (`ghCommand`, default `gh`).
+   * Defaults: the runtime's storage driver, `gates.createGateRunner`, `ADAPTER_FACTORIES` with
+   * the runtime's plugin dirs, the persisted wake scheduler and the `gh`-backed PR service
+   * (`ghCommand`, default `gh`).
    */
   readonly openStorage?: StorageFactory;
   readonly createGateRunner?: CreateGateRunner;
-  readonly adapterFactories?: Readonly<Partial<Record<HostId, () => HostAdapter>>>;
+  readonly adapterFactories?: Readonly<Partial<Record<HostId, AdapterFactory>>>;
+  readonly pluginDir?: (host: HostId, vtcHome: string) => string;
   readonly scheduler?: AutoResumeScheduler;
   readonly pullRequests?: PullRequestService;
   readonly ghCommand?: string;
@@ -108,10 +130,14 @@ export const buildEngineParts = async (options: BuildEnginePartsOptions): Promis
     vtcHome,
     installToken: options.installToken,
     openStorage: options.openStorage ?? (await loadStorage()),
+    // the Gate Runner reads and diffs through the engine's GitOps only (AD-13 rule 4)
     gateRunner: lazyGateRunner(() =>
       createGateRunner({ repoRoot, vtcHome, git: git.createGitOps({ repoRoot }) }),
     ),
-    adapters: createAdapters(options.adapterFactories),
+    adapters: createAdapters(options.adapterFactories ?? ADAPTER_FACTORIES, {
+      vtcHome,
+      pluginDir: options.pluginDir ?? ((host, home) => runtime().pluginDir(host, home)),
+    }),
     assets: options.assets,
     scheduler: options.scheduler ?? createWakeScheduler(vtcHome),
     pullRequests: options.pullRequests ?? git.createGhPullRequests(repoRoot, options.ghCommand),
