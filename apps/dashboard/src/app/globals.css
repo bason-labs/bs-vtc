@@ -1,0 +1,270 @@
+@import "tailwindcss";
+
+/* Fonts are self-hosted (Fontsource), so Flow Studio works offline on 127.0.0.1 (spec §17, D14:
+   Be Vietnam Pro + Space Grotesk, as in bs-job-agents). */
+@import "@fontsource/be-vietnam-pro/400.css";
+@import "@fontsource/be-vietnam-pro/500.css";
+@import "@fontsource/be-vietnam-pro/600.css";
+@import "@fontsource/be-vietnam-pro/700.css";
+@import "@fontsource/space-grotesk/500.css";
+@import "@fontsource/space-grotesk/600.css";
+@import "@fontsource/space-grotesk/700.css";
+
+/* Theme tokens copied from bs-job-agents apps/web/app/globals.css (Deep Sea palette, spec D14).
+   Light is the default; data-theme="dark" on <html> flips every token. */
+
+/* Make `dark:` utilities respond to our data-theme attribute, not just OS. */
+@custom-variant dark (&:where([data-theme="dark"], [data-theme="dark"] *));
+
+:root {
+  --font-sans: "Be Vietnam Pro";
+  --font-display: "Space Grotesk";
+
+  /* Surfaces */
+  --bg: #f7f8fa; /* page */
+  --surface: #ffffff; /* cards, inputs */
+  --surface-2: #f1f4f8; /* hover, inset, skeletons */
+  --surface-3: #e8edf3; /* deeper inset */
+  --border: #e3e7ec; /* dividers, card outlines */
+
+  /* Text */
+  --fg: #0f172a; /* slate-900 */
+  --muted: #64748b; /* slate-500 */
+
+  /* Brand & accents */
+  --brand: #006d6f; /* Caribbean Current */
+  --brand-2: #008b8b; /* Dark Cyan */
+  --glow: #0d98ba; /* Blue-Green */
+  --accent: #15a3c7; /* Cyan Blue */
+  --danger: #c92d3a;
+  --ok: #1a7f37;
+  --warn: #b7791f;
+  --grid: rgba(15, 23, 42, 0.08);
+
+  /* Flow Studio extension: text-safe variants. In light mode the copied muted, accent and warn
+     tokens are below WCAG AA (4.5:1) as small text on the page and inset surfaces, so text uses
+     these; fills and borders keep the original tokens. */
+  --muted-fg: #5b6b80;
+  --accent-fg: #0b7390;
+  --warn-fg: #8a5a12;
+
+  /* Derived effects */
+  --gradient-brand: linear-gradient(135deg, #008b8b 0%, #006d6f 60%, #0d98ba 100%);
+  --shadow-glow: 0 0 24px -4px rgba(13, 152, 186, 0.45);
+  --ring-focus: 0 0 0 3px rgba(13, 152, 186, 0.35);
+}
+
+[data-theme="dark"] {
+  /* Surfaces */
+  --bg: #06100f;
+  --surface: #0e1c1c;
+  --surface-2: #152a2a;
+  --surface-3: #1a3535;
+  --border: #1f3a3a;
+
+  /* Text */
+  --fg: #e0ffff; /* Light Cyan */
+  --muted: #7aa8a8;
+
+  /* Brand & accents (brighter on dark) */
+  --brand: #008b8b; /* Dark Cyan */
+  --brand-2: #006d6f; /* Caribbean Current */
+  --glow: #7df9ff; /* Electric Blue */
+  --accent: #40e0d0; /* Turquoise */
+  --danger: #ff5f6d;
+  --ok: #3fd68a;
+  --warn: #f2c14e;
+  --grid: rgba(125, 249, 255, 0.07);
+
+  /* On dark the original tokens already pass AA as text. */
+  --muted-fg: var(--muted);
+  --accent-fg: var(--accent);
+  --warn-fg: var(--warn);
+
+  --gradient-brand: linear-gradient(135deg, #008b8b 0%, #006d6f 60%, #0d98ba 100%);
+  --shadow-glow: 0 0 24px -4px rgba(125, 249, 255, 0.55);
+  --ring-focus: 0 0 0 3px rgba(125, 249, 255, 0.45);
+}
+
+/* Tailwind v4 token bridge: exposes utilities like `bg-surface`, `text-fg`,
+   `border-border`, `text-brand`, etc. */
+@theme inline {
+  --color-bg: var(--bg);
+  --color-surface: var(--surface);
+  --color-surface-2: var(--surface-2);
+  --color-surface-3: var(--surface-3);
+  --color-border: var(--border);
+  --color-fg: var(--fg);
+  --color-muted: var(--muted);
+  --color-brand: var(--brand);
+  --color-brand-2: var(--brand-2);
+  --color-glow: var(--glow);
+  --color-accent: var(--accent);
+  --color-danger: var(--danger);
+  --color-ok: var(--ok);
+  --color-warn: var(--warn);
+  --color-muted-fg: var(--muted-fg);
+  --color-accent-fg: var(--accent-fg);
+  --color-warn-fg: var(--warn-fg);
+
+  --font-sans: var(--font-sans), "Segoe UI", Arial, sans-serif;
+  --font-display: var(--font-display), var(--font-sans), sans-serif;
+
+  /* Animation utilities: map keyframe names to `animate-*` classes. */
+  --animate-pulse-dot: pulseDot 2.2s ease-in-out infinite;
+  --animate-pulse-dot-fast: pulseDot 1.4s ease-in-out infinite;
+  --animate-shimmer: shimmer 1.6s linear infinite;
+  --animate-blink: blink 1s steps(2) infinite;
+}
+
+body {
+  background: var(--bg);
+  color: var(--fg);
+  font-family: var(--font-sans), "Segoe UI", Arial, sans-serif;
+  /* Soft ambient brand-tinted glow in the corners. */
+  background-image:
+    radial-gradient(
+      60vmax 60vmax at 15% -10%,
+      color-mix(in oklab, var(--brand) 12%, transparent),
+      transparent 60%
+    ),
+    radial-gradient(
+      50vmax 50vmax at 110% 110%,
+      color-mix(in oklab, var(--accent) 9%, transparent),
+      transparent 60%
+    );
+  background-attachment: fixed;
+}
+
+[data-theme="dark"] body {
+  background-image:
+    radial-gradient(
+      60vmax 60vmax at 15% -10%,
+      color-mix(in oklab, var(--brand) 18%, transparent),
+      transparent 60%
+    ),
+    radial-gradient(
+      50vmax 50vmax at 110% 110%,
+      color-mix(in oklab, var(--accent) 14%, transparent),
+      transparent 60%
+    );
+}
+
+/* Cursor rule: pointer on every interactive element, set globally so components don't repeat
+   `cursor-pointer`; disabled elements get `not-allowed`. */
+@layer base {
+  :where(
+    button,
+    a[href],
+    summary,
+    label[for],
+    [role="button"],
+    [role="tab"],
+    [role="radio"],
+    [data-clickable]
+  ) {
+    cursor: pointer;
+  }
+
+  :where(button, input, select, textarea):disabled,
+  [aria-disabled="true"],
+  [data-disabled] {
+    cursor: not-allowed;
+  }
+}
+
+/* Focus ring for keyboard users on every interactive element. Unlayered on
+   purpose: it beats component shadows, so focus is always visible. */
+:where(
+  button,
+  a[href],
+  summary,
+  [role="button"],
+  [role="tab"],
+  [role="radio"],
+  [tabindex]:not([tabindex="-1"])
+):focus-visible {
+  outline: none;
+  box-shadow: var(--ring-focus);
+}
+
+/* Skip link: hidden until focused (first stop for keyboard users). */
+.skip-link {
+  position: absolute;
+  left: 0.75rem;
+  top: -3rem;
+  z-index: 70;
+}
+.skip-link:focus-visible {
+  top: 0.75rem;
+}
+
+/* Dotted grid for canvas backgrounds (flows). */
+.bg-grid {
+  background-image: radial-gradient(var(--grid) 1.2px, transparent 1.2px);
+  background-size: 18px 18px;
+}
+
+/* Tabular numerics for counters, scores and money. */
+.tabular {
+  font-variant-numeric: tabular-nums;
+}
+
+/* Brand gradient text + background helpers, as @utility so Tailwind variants work. */
+@utility text-gradient-brand {
+  background: var(--gradient-brand);
+  -webkit-background-clip: text;
+  background-clip: text;
+  color: transparent;
+}
+
+@utility bg-gradient-brand {
+  background: var(--gradient-brand);
+}
+
+@utility shadow-glow {
+  box-shadow: var(--shadow-glow);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.001ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.001ms !important;
+  }
+}
+
+/* Live status dot. */
+@keyframes pulseDot {
+  0%,
+  100% {
+    transform: scale(1);
+    box-shadow: 0 0 0 0 color-mix(in srgb, var(--accent) 60%, transparent);
+  }
+  50% {
+    transform: scale(1.05);
+    box-shadow: 0 0 0 5px color-mix(in srgb, var(--accent) 0%, transparent);
+  }
+}
+
+/* Skeleton loading shimmer; requires background-size >= 200% on the element. */
+@keyframes shimmer {
+  from {
+    background-position: 200% 0;
+  }
+  to {
+    background-position: -200% 0;
+  }
+}
+
+/* Streaming cursor blink. */
+@keyframes blink {
+  0% {
+    opacity: 1;
+  }
+  50% {
+    opacity: 0;
+  }
+}
