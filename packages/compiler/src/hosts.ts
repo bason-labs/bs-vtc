@@ -4,9 +4,9 @@
  * No emitted file sets a permission mode or a full-access sandbox (AD-9): read-only enforcement
  * comes from tool allowlists, the Codex sandbox, the OS sandbox and the engine's write-scope check.
  */
-import type { ModelTier, RoleTools } from "@vtc/shared";
+import { engineMcpServer, type ModelTier, type RoleTools } from "@vtc/shared";
 import { renderFrontmatter } from "./frontmatter.js";
-import { tomlMultiline, tomlString } from "./toml.js";
+import { tomlMultiline, tomlString, tomlStringArray } from "./toml.js";
 import type { CompiledAgent } from "./types.js";
 
 /** Plugin name on both hosts. The MCP server it registers is also `vtc` (`engineMcpServer`). */
@@ -55,6 +55,26 @@ export const codexSandboxFor = (tools: RoleTools): "read-only" | "workspace-writ
   tools.profile === "read_only" ? "read-only" : "workspace-write";
 
 /**
+ * The agent's own `[mcp_servers.vtc]` table. The plugin registers the engine bridge for the whole
+ * session, and it serves the Lead's run-driving tools; a role agent must not reach them (AD-8
+ * rule 3: not a prompt rule). A role with no engine tools gets the server disabled, otherwise only
+ * its tools enabled. The entry repeats the full `engineMcpServer("codex")` command so it is valid
+ * whether Codex merges or replaces the session's entry. Provisional until the spike confirms that
+ * Codex agent files honour per-agent `mcp_servers` (spine §7).
+ */
+export const codexMcpTable = (tools: RoleTools): string[] => {
+  const entry = engineMcpServer("codex");
+  return [
+    `[mcp_servers.${entry.name}]`,
+    `command = ${tomlString(entry.command)}`,
+    `args = ${tomlStringArray(entry.args)}`,
+    tools.engine_tools.length === 0
+      ? "enabled = false"
+      : `enabled_tools = ${tomlStringArray(tools.engine_tools)}`,
+  ];
+};
+
+/**
  * A Codex agent file. The model is pinned only when role.yaml names one for Codex; otherwise the
  * agent runs on the session's model at the role's reasoning effort.
  */
@@ -67,5 +87,7 @@ export const renderCodexAgent = (agent: CompiledAgent): string =>
     `model_reasoning_effort = ${tomlString(agent.model.effort)}`,
     `sandbox_mode = ${tomlString(codexSandboxFor(agent.tools))}`,
     `developer_instructions = ${tomlMultiline(agent.instructions)}`,
+    "",
+    ...codexMcpTable(agent.tools),
     "",
   ].join("\n");

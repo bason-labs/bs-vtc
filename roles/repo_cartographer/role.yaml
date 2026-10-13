@@ -23,5 +23,4 @@ models:
 tools:
   profile: write_scoped
   write_paths: [".vtc/research/repo-map/**"]
-  engine_tools: [repo_map]
 budget: { context_tokens: 80000 }

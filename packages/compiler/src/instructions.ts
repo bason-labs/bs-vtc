@@ -25,6 +25,7 @@ import {
   resolveRoleMode,
   SUMMARY_MAX_CHARS,
   TASK_PACK_SECTIONS,
+  VerdictQuestionTypeSchema,
   type EffectiveRoleContract,
   type HostId,
   type RoleContract,
@@ -43,15 +44,22 @@ export const PROTOCOL_VARS: Readonly<Record<string, string>> = {
   finding_categories: FindingCategorySchema.options.join(", "),
   finding_kinds: FindingKindSchema.options.join(", "),
   summary_max_chars: String(SUMMARY_MAX_CHARS),
+  verdict_question_types: VerdictQuestionTypeSchema.options.join(", "),
 };
 
 const list = (items: readonly string[]): string => (items.length === 0 ? "none" : items.join(", "));
 
+/**
+ * What each profile may do, worded as instructions rather than as guarantees: on Codex a
+ * write-scoped agent runs in `workspace-write`, which does not itself block a shell, and on both
+ * hosts the write paths are not a host-level deny (spine §7: per-path deny is a spike item).
+ */
 const TOOL_LINES: Readonly<Record<EffectiveRoleContract["tools"]["profile"], string>> = {
-  read_only: "read-only (no file writes, no shell)",
-  write_scoped: "file reads; writes only inside the Write scope of your task pack (no shell)",
+  read_only: "read-only: read and search files; write no file and run no shell command",
+  write_scoped:
+    "read and search files; write files only inside the Write scope of your task pack; run no shell command",
   code_sandboxed:
-    "files and shell in a sandboxed worktree; writes only inside the Write scope of your task pack",
+    "files and shell in a sandboxed worktree; write only inside the Write scope of your task pack",
 };
 
 /** The `## Contract` section for one effective contract. */
@@ -59,7 +67,7 @@ export const renderContract = (role: RoleContract, contract: EffectiveRoleContra
   const lines = [
     "## Contract",
     "",
-    "Generated from role.yaml. The engine enforces every line and rejects a result that breaks one.",
+    "Generated from role.yaml. The engine checks your result against it and rejects one that breaks it.",
     "",
     `- Role: ${role.id}${contract.mode === undefined ? "" : `, mode ${contract.mode}`} (version ${role.version})`,
     `- Inputs (artifact types in your task pack): ${list(contract.inputs)}`,
@@ -67,6 +75,9 @@ export const renderContract = (role: RoleContract, contract: EffectiveRoleContra
     `- Verdicts: ${list(contract.output.verdicts)}`,
     `- Output artifact types: ${list(contract.output.artifacts)}`,
     `- Tools: ${TOOL_LINES[contract.tools.profile]}`,
+    ...(contract.tools.profile === "write_scoped"
+      ? [`- Write paths (role.yaml): ${list(contract.tools.write_paths)}`]
+      : []),
     ...(contract.tools.engine_tools.length === 0
       ? []
       : [`- Engine tools: ${list(contract.tools.engine_tools)}`]),

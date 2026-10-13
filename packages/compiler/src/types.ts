@@ -55,7 +55,7 @@ export interface ManifestAgent {
   readonly discipline: Discipline | null;
   readonly role_version: string;
   readonly file: string;
-  /** SHA-256 of the instructions as emitted (§13: every run records its prompt content SHA). */
+  /** `promptSha256(instructions)`: see there for exactly what is hashed (§13). */
   readonly prompt_sha256: string;
   readonly tier: ModelTier;
   readonly effort: Effort;
@@ -69,7 +69,14 @@ export interface ManifestSkill {
   readonly file: string;
 }
 
-/** `vtc-manifest.json` in each emitted plugin: what the plugin contains, for engine and installer. */
+/**
+ * `vtc-manifest.json` in each emitted plugin: what the plugin contains.
+ *
+ * **Provisional, compiler-internal.** A file other packages read must be a Zod schema in
+ * @vtc/shared (AD-3), and the engine and adapters cannot import this package (AD-1). Until
+ * `PluginManifestSchema` and a shared `promptShaFor` land there (proposed to the integrator), no
+ * other package may read this file; the shape may change with that proposal.
+ */
 export interface PluginManifest {
   readonly v: 1;
   readonly host: HostId;

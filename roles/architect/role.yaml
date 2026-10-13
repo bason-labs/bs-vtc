@@ -28,5 +28,4 @@ models:
 tools:
   profile: write_scoped
   write_paths: [".vtc/architecture/**"]
-  engine_tools: [fact_lookup]
 budget: { context_tokens: 80000 }

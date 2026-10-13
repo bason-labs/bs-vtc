@@ -1,14 +1,22 @@
 import { createHash } from "node:crypto";
 import { parse as parseToml } from "smol-toml";
 import { describe, expect, it } from "vitest";
-import { engineMcpServer, EvidenceTypeSchema, TASK_PACK_SECTIONS, type HostId } from "@vtc/shared";
+import {
+  AD9_FORBIDDEN_MARKERS,
+  engineMcpServer,
+  EvidenceTypeSchema,
+  TASK_PACK_SECTIONS,
+  type HostId,
+} from "@vtc/shared";
 import {
   assetEntries,
+  checkEmitted,
   compilePlugins,
   createMemoryAssetBundle,
   type CompileOutput,
   type EmittedFile,
   type PluginManifest,
+  promptSha256,
 } from "../src/index.js";
 import { fixtureFiles } from "./fixtures.js";
 
@@ -49,7 +57,6 @@ describe("compilePlugins: target layout", () => {
       "agents/vtc-qa-author.md",
       "agents/vtc-qa-judge.md",
       "commands/vtc.md",
-      "hooks/hooks.json",
       "skills/domain-desktop/SKILL.md",
       "skills/lead/SKILL.md",
       "skills/lens-db/SKILL.md",
@@ -68,7 +75,6 @@ describe("compilePlugins: target layout", () => {
       "agents/vtc-lens-db.toml",
       "agents/vtc-qa-author.toml",
       "agents/vtc-qa-judge.toml",
-      "hooks/hooks.json",
       "plugin.json",
       "skills/domain-desktop/SKILL.md",
       "skills/lead/SKILL.md",
@@ -126,6 +132,24 @@ describe("compilePlugins: agent instructions", () => {
     expect(claude("vtc-qa-author")).toContain("- Output artifact types: acceptance_test");
     expect(claude("vtc-qa-judge")).toContain("- Verdicts: pass, fail, unknown");
     expect(claude("vtc-qa-judge")).toContain("- Tools: read-only");
+  });
+
+  it("states tool limits as instructions and lists the write paths of a write-scoped mode", () => {
+    const author = claude("vtc-qa-author");
+    expect(author).toContain("run no shell command");
+    expect(author).toContain("- Write paths (role.yaml): tests/acceptance/**");
+    expect(claude("vtc-qa-judge")).not.toContain("- Write paths");
+    expect(claude("vtc-engineer")).not.toContain("run no shell command");
+  });
+
+  it("disables the engine bridge inside every Codex role agent (no Lead tools)", () => {
+    for (const name of ["vtc-qa-author", "vtc-engineer", "vtc-lens-db"]) {
+      const toml = parseToml(file(output, "codex", `agents/${name}.toml`));
+      const entry = engineMcpServer("codex");
+      expect(toml.mcp_servers).toEqual({
+        [entry.name]: { command: entry.command, args: entry.args, enabled: false },
+      });
+    }
   });
 
   it("fills the shared protocol from the frozen contracts", () => {
@@ -190,6 +214,12 @@ describe("compilePlugins: manifest", () => {
     });
     const instructions = body(file(output, "claude-code", "agents/vtc-qa-author.md"));
     expect(author?.prompt_sha256).toBe(createHash("sha256").update(instructions).digest("hex"));
+    expect(author?.prompt_sha256).toBe(promptSha256(instructions));
+    const codexInstructions = parseToml(file(output, "codex", "agents/vtc-qa-author.toml"))
+      .developer_instructions as string;
+    expect(manifest(output, "codex").agents.find((a) => a.name === "vtc-qa-author")).toMatchObject({
+      prompt_sha256: promptSha256(codexInstructions),
+    });
     expect(m.agents.find((a) => a.name === "vtc-engineer-frontend")?.discipline).toBe("frontend");
   });
 
@@ -277,12 +307,83 @@ describe("compilePlugins: errors", () => {
     );
   });
 
+  it("rejects hooks until the command they run has a cli contract, and unknown host files", () => {
+    expect(errorsOf({ "plugins/claude-code/hooks/hooks.json": '{ "hooks": {} }' })).toContain(
+      "plugins/claude-code/hooks/hooks.json: hooks need a cli contract",
+    );
+    expect(errorsOf({ "plugins/codex/hooks/hooks.json": '{ "hooks": {} }' })).toContain(
+      "plugins/codex/hooks/hooks.json: hooks need a cli contract",
+    );
+    expect(errorsOf({ "plugins/codex/settings.json": "{}" })).toContain(
+      "plugins/codex/settings.json: unexpected host plugin file",
+    );
+    expect(errorsOf({ "plugins/codex/.mcp.json": "{}" })).toContain(
+      "plugins/codex/.mcp.json: the Codex MCP entry is generated from engineMcpServer",
+    );
+  });
+
+  it.each([
+    "plugins/codex/../../outside.json",
+    "plugins/codex/./plugin.json",
+    "plugins/codex//plugin.json",
+    "/plugins/codex/plugin.json",
+    "plugins\\codex\\x.json",
+    "skills/stack-react-next/../../../x.md",
+  ])("rejects the unclean source path %j", (path) => {
+    expect(errorsOf({ [path]: "{}" })).toContain(
+      `${path}: source paths are relative POSIX paths without . or ..`,
+    );
+  });
+
+  it("rejects engine tools outside the frozen role-facing surface (AD-4 rule 3)", () => {
+    const qa = fixtureFiles().find((f) => f.path === "roles/qa/role.yaml")?.text ?? "";
+    const withTools = (tools: string): string =>
+      qa.replace(
+        'tools: { profile: write_scoped, write_paths: ["tests/acceptance/**"] }',
+        `tools: { profile: write_scoped, write_paths: ["tests/acceptance/**"], engine_tools: [${tools}] }`,
+      );
+    expect(errorsOf({ "roles/qa/role.yaml": withTools("repo_map") })).toContain(
+      "roles/qa: engine tool repo_map is not a role-facing tool in @vtc/shared",
+    );
+    expect(errorsOf({ "roles/qa/role.yaml": withTools("approve") })).toContain(
+      "roles/qa: engine tool approve drives the run; only the Lead may call it",
+    );
+  });
+
   it("collects every error instead of stopping at the first", () => {
     const result = compilePlugins(
       fixtureFiles({ "roles/qa/notes.md": "x", "skills/lens-db/SKILL.md": "nope\n" }),
     );
     expect(result.ok).toBe(false);
     if (!result.ok) expect(result.errors.length).toBeGreaterThanOrEqual(2);
+  });
+});
+
+describe("checkEmitted: the gate on emitted trees (AD-16 rule 2)", () => {
+  const marker = AD9_FORBIDDEN_MARKERS[0];
+
+  it("reports an AD-9 marker that appears only in an emitted file, with host, path and line", () => {
+    const emitted = [
+      { path: "agents/vtc-qa-judge.toml", text: `name = "vtc-qa-judge"\nx = "${marker}"\n` },
+      { path: "vtc-manifest.json", text: "{}\n" },
+    ];
+    expect(checkEmitted("codex", emitted)).toEqual([
+      {
+        path: "codex:agents/vtc-qa-judge.toml",
+        message: `line 2: AD-9 marker ${marker} in emitted file`,
+      },
+    ]);
+  });
+
+  it("reports a path emitted twice and passes a clean tree", () => {
+    const twice = [
+      { path: "NOTICE", text: "a\n" },
+      { path: "NOTICE", text: "b\n" },
+    ];
+    expect(checkEmitted("claude-code", twice)).toEqual([
+      { path: "claude-code:NOTICE", message: "emitted twice" },
+    ]);
+    expect(checkEmitted("claude-code", compileOk().targets["claude-code"])).toEqual([]);
   });
 });
 

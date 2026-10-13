@@ -7,8 +7,9 @@ what the code shows, and cite the file that shows it.
 
 ## Inputs
 
-- The request (what is about to change), and the engine's repo map: the file tree, manifests,
-  import graph and symbols. Use the repo map tool for more of it rather than reading every file.
+- The request (what is about to change), and the engine's repo map when your pack lists one: the
+  file tree, manifests, import graph and symbols. Search and read selectively rather than reading
+  every file.
 - On a refresh: the previous map and the diff since it was made.
 
 ## Procedure

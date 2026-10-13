@@ -1,7 +1,7 @@
 import { parse as parseToml } from "smol-toml";
 import { parse as parseYaml } from "yaml";
 import { describe, expect, it } from "vitest";
-import type { RoleTools } from "@vtc/shared";
+import { engineMcpServer, type RoleTools } from "@vtc/shared";
 import {
   CLAUDE_MODEL_ALIASES,
   claudeEngineToolName,
@@ -97,6 +97,14 @@ describe("Codex agent (.toml)", () => {
       model_reasoning_effort: "medium",
       sandbox_mode: "workspace-write",
       developer_instructions: "# Mission\n\nWrite tests.\n",
+      mcp_servers: { vtc: { command: "vtc", args: engineMcpServer("codex").args, enabled: false } },
+    });
+  });
+
+  it("limits the agent's engine bridge to its own engine tools, never the Lead's", () => {
+    const parsed = parseToml(renderCodexAgent(agent({ tools: tools("read_only", ["repo_map"]) })));
+    expect(parsed.mcp_servers).toEqual({
+      vtc: { command: "vtc", args: engineMcpServer("codex").args, enabled_tools: ["repo_map"] },
     });
   });
 

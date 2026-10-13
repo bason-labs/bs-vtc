@@ -51,17 +51,27 @@ The Lead is not a compiled agent: it is the main session, driven by the Lead ski
 
 ## Readings recorded here
 
-- **Write paths of DISCOVER roles.** §5.2 lists the Repo Cartographer and the Research Analyst as
-  read-only, but each must hand over a document longer than a result's summary. They are
-  `write_scoped` to `.vtc/research/repo-map/**` and `.vtc/research/briefs/**` only (§15: research
-  roles write nothing outside their sandbox).
+- **Write paths of DISCOVER roles** (proposed to the integrator as a spine §5 reading; provisional
+  until recorded there). §5.2 lists the Repo Cartographer and the Research Analyst as read-only,
+  but each must hand over a document longer than a result's summary. They are `write_scoped` to
+  `.vtc/research/repo-map/**` and `.vtc/research/briefs/**` only (§15: research roles write
+  nothing outside their sandbox).
 - **Security design mode** writes the threat model to `.vtc/architecture/threat-model/**`; the
   engine merges its SEC-n requirements into the specification. Verify mode is read-only.
 - **QA author mode** writes where `gates.yml` `tests.acceptance_globs` says (spine AD-7 rule 7);
   its `write_paths` hold the hidden-test staging directory only.
 - **Visual QA criteria V1 to V8** are defined in `visual_qa/prompt.md` (the spec names them
   without listing them), each with its question type.
-- **Engine tool names** `repo_map`, `research_search`, `research_fetch` and `fact_lookup` are the
-  role-facing MCP tools these roles expect (spine AD-4 rule 3); the engine adds them.
+- **No engine tools yet.** Role-facing engine MCP tools (repo map, research fetchers, fact
+  lookups) are added to `@vtc/shared` as a MINOR contract change (spine AD-4 rule 3; names and
+  shapes proposed to the integrator). Until then `tools.engine_tools` must stay empty: the
+  compiler rejects any entry that is not a role-facing tool in the frozen contract, and always
+  rejects the Lead's run-driving tools. The Cartographer, Research Analyst and Architect work from
+  what the engine puts in their task pack.
+- **Write paths are instructions plus an engine check, not a host deny.** The contract section
+  lists `write_paths`; the engine checks writes on submit (AD-8 rule 14 for worktree roles; the
+  same check for every write-scoped role is proposed to engine-core).
 
-Forked roles name their upstream files in a `# Forked from` comment at the top of `role.yaml`.
+Forked roles name their upstream files in a `# Forked from` comment at the top of `role.yaml`;
+roles written for VTC say so in a `# Written for VTC` comment and name what they merged in. The
+compiler's repo test checks both lists against the role catalogue.
