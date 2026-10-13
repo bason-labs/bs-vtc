@@ -44,8 +44,10 @@ import { guardHumanOnly, humanCliHello } from "../src/human-channel.js";
 import type { Exec, ExecResult } from "../src/process.js";
 import {
   CLAUDE_LOCAL_SETTINGS,
-  claudeSessionSandboxOf,
-  mergeSessionSandboxSettings,
+  claudeSessionSandboxOf as sandboxOfWith,
+  mergeSessionSandboxSettings as mergeWith,
+  sessionSandboxSettings,
+  type SessionSandboxEnv,
 } from "../src/session-sandbox.js";
 import type { UserConfigRead } from "../src/user-config.js";
 import { buildEngineParts } from "../src/wiring.js";
@@ -66,6 +68,20 @@ import {
 afterEach(cleanupDirs);
 
 const TOKEN = "k".repeat(43);
+
+/** Nothing read from the real user's Claude settings; a machine that has Seatbelt. */
+const NO_USER = "/nonexistent-user-home";
+const SANDBOX_ENV: SessionSandboxEnv = {
+  userSettings: null,
+  homeDir: NO_USER,
+  platform: "darwin",
+  pathEnv: "",
+  exists: () => true,
+};
+const claudeSessionSandboxOf = (repo: string, vtcHome: string) =>
+  sandboxOfWith(repo, vtcHome, SANDBOX_ENV);
+const mergeSessionSandboxSettings = (existing: Record<string, unknown>, vtcHome: string) =>
+  mergeWith(existing, vtcHome, { projectRoot: "/r", homeDir: NO_USER });
 
 const initialize = (id: number): string =>
   rpc(id, "initialize", {
@@ -231,6 +247,8 @@ describe("the session sandbox the bridge reports (D-an, reading 71)", () => {
     expect(claudeSessionSandboxOf(repo, home)).toEqual({
       state: "on",
       missing: [],
+      widening: [],
+      unavailable: [],
       file: "ok",
       path: settingsPath,
     });
@@ -271,6 +289,7 @@ describe("the session sandbox the bridge reports (D-an, reading 71)", () => {
       sandbox: {
         enabled: true,
         allowUnsandboxedCommands: false,
+        failIfUnavailable: true,
         network: { allowedDomains: ["registry.npmjs.org"] },
         filesystem: {
           denyRead: ["/secret", ...wanted.filesystem.denyRead],
@@ -314,6 +333,7 @@ describe("vtc install --host claude-code writes the session sandbox (D-an)", () 
         throw new Error("the real launchd or systemd is never touched in tests");
       },
       confirm,
+      sessionSandboxEnv: () => SANDBOX_ENV,
     });
 
   it("shows the settings, writes them after the user confirms, merged and gitignored", async () => {
@@ -329,7 +349,7 @@ describe("vtc install --host claude-code writes the session sandbox (D-an)", () 
     const text = out.join("\n");
     // what is written is shown before the question
     expect(text).toContain(
-      JSON.stringify(claudeSessionSandboxSettings(home), null, 2)
+      JSON.stringify(sessionSandboxSettings(home), null, 2)
         .split("\n")
         .map((line) => `  ${line}`)
         .join("\n"),
@@ -462,19 +482,32 @@ describe("the gate sandbox (D-al, reading 69)", () => {
     expect(await build(home, true)).toMatchObject({ allowUnsandboxed: true });
   });
 
-  it("detects sandbox-exec on macOS and bwrap on Linux, without running a gate", async () => {
+  it("detects sandbox-exec on macOS and bwrap on Linux with a confined no-op, not a gate", async () => {
     const exists = (p: string): boolean => p === "/usr/bin/sandbox-exec";
-    expect(await detectGateSandbox("darwin", exists, execOf({}))).toBe("sandbox-exec");
-    expect(await detectGateSandbox("darwin", () => false, execOf({}))).toBeNull();
+    const seatbelt = {
+      "/usr/bin/sandbox-exec -p (version 1)(allow default) -- /usr/bin/true": {},
+    };
+    expect(await detectGateSandbox("darwin", exists, execOf(seatbelt))).toBe("sandbox-exec");
+    expect(await detectGateSandbox("darwin", () => false, execOf(seatbelt))).toBeNull();
+    expect(
+      await detectGateSandbox(
+        "linux",
+        () => false,
+        execOf({
+          "bwrap --ro-bind / / --dev /dev --proc /proc --unshare-pid --unshare-net --die-with-parent -- true":
+            {},
+        }),
+      ),
+    ).toBe("bwrap");
+    // installed is not enough: a bwrap that cannot create namespaces is none
     expect(
       await detectGateSandbox(
         "linux",
         () => false,
         execOf({ "bwrap --version": { stdout: "bubblewrap 0.11.0\n" } }),
       ),
-    ).toBe("bwrap");
-    expect(await detectGateSandbox("linux", () => false, execOf({}))).toBeNull();
-    expect(await detectGateSandbox("win32", exists, execOf({}))).toBeNull();
+    ).toBeNull();
+    expect(await detectGateSandbox("win32", exists, execOf(seatbelt))).toBeNull();
   });
 
   it("vtc doctor reports the sandbox in use, fails without one and warns about the opt-in", async () => {

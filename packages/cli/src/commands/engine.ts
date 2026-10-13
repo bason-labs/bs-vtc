@@ -6,8 +6,8 @@
  *   (AD-16): it finds the repo's daemon (starting one detached when none is live), sends its
  *   hello and then relays bytes. In a repo `vtc init` never set up, or outside any git
  *   repository (reading 74), it starts no daemon, creates nothing and answers MCP itself
- *   (`bridge.ts`). On Claude Code its hello reports the session sandbox the repo's
- *   `.claude/settings.local.json` gives (D-an). Nothing but MCP is ever written to its stdout.
+ *   (`bridge.ts`). On Claude Code every hello reports the session sandbox the repo's and
+ *   the user's Claude settings give, read afresh each time (D-an). Nothing but MCP is ever written to its stdout.
  * - `vtc engine --stop` stops the repo's running daemon (e.g. one of an older `vtc` that refuses
  *   this one after an upgrade).
  * - `vtc engine --wake-due` is what the auto-resume timer (launchd or systemd) runs every minute: it starts
@@ -28,7 +28,11 @@ import {
 } from "../repo.js";
 import { runtime } from "../runtime.js";
 import { createWakeScheduler, dueWakeups, wakeRecords } from "../scheduler.js";
-import { claudeSessionSandboxOf } from "../session-sandbox.js";
+import {
+  defaultSessionSandboxEnv,
+  sessionSandboxProbe,
+  type SessionSandboxEnv,
+} from "../session-sandbox.js";
 import { ensureInstallToken } from "../token.js";
 import { buildEngineParts, disposeAdapters, engineVersions, startDaemon } from "../wiring.js";
 import type { CommandContext, CommandSpec } from "./types.js";
@@ -81,6 +85,8 @@ const runDaemonCommand = async (ctx: CommandContext, wake: boolean): Promise<num
 export interface EngineCommandDeps {
   readonly stdin: Readable;
   readonly stdout: Writable;
+  /** Where the Claude session sandbox state is read from (the real machine by default). */
+  readonly sessionSandboxEnv?: () => SessionSandboxEnv;
 }
 
 export const defaultEngineCommandDeps = (): EngineCommandDeps => ({
@@ -97,10 +103,13 @@ const runMcpBridge = async (
   if (!host.success) throw new UsageError("--mcp needs --host claude-code or --host codex");
   // outside a git repository: the deferred bridge, never a daemon (reading 74)
   const repoRoot = await findRepoRoot(ctx.cwd);
-  const sessionSandbox =
-    repoRoot !== null && host.data === "claude-code"
-      ? claudeSessionSandboxOf(repoRoot, ctx.vtcHome).state
-      : undefined;
+  // read again for every hello: Claude Code applies settings edits to the running session
+  const sessionSandbox = sessionSandboxProbe(
+    repoRoot,
+    host.data,
+    ctx.vtcHome,
+    (stdio.sessionSandboxEnv ?? defaultSessionSandboxEnv)(),
+  );
   await runBridge({
     repoRoot,
     host: host.data,
@@ -111,7 +120,7 @@ const runMcpBridge = async (
       repoRoot === null
         ? Promise.reject(new Error(NOT_A_GIT_REPO))
         : ensureDaemon({ vtcHome: ctx.vtcHome, repoRoot, selfCommand: runtime().selfCommand }),
-    sessionSandbox: () => sessionSandbox,
+    ...(sessionSandbox === undefined ? {} : { sessionSandbox }),
     serverVersion: engineVersions().engine,
   });
   return EXIT.ok;

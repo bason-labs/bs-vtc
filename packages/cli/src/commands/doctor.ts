@@ -40,7 +40,11 @@ import {
   type ScannerEnv,
 } from "../scanner-checks.js";
 import { wakeRecords } from "../scheduler.js";
-import { claudeSessionSandboxOf, type SessionSandboxReport } from "../session-sandbox.js";
+import {
+  claudeSessionSandboxOf,
+  defaultSessionSandboxEnv,
+  type SessionSandboxReport,
+} from "../session-sandbox.js";
 import { autoResumeTimer, defaultTimerHost } from "../timer.js";
 import { readUserConfig, type UserConfigRead } from "../user-config.js";
 import type { CommandContext, CommandSpec } from "./types.js";
@@ -114,7 +118,9 @@ export const defaultDoctorEnv = (ctx: CommandContext): DoctorCommandEnv => {
     gateSandbox: () => detectGateSandbox(process.platform, existsSync, exec),
     sessionSandbox: async () => {
       const repoRoot = await findRepoRoot(ctx.cwd);
-      return repoRoot === null ? null : claudeSessionSandboxOf(repoRoot, ctx.vtcHome);
+      return repoRoot === null
+        ? null
+        : claudeSessionSandboxOf(repoRoot, ctx.vtcHome, defaultSessionSandboxEnv());
     },
   };
 };
