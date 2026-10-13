@@ -3,10 +3,51 @@
  * sub-project 1). Implements the frozen `GitOps` seam from @vtc/shared (`createGitOps`), which the
  * cli builds and injects into the Gate Runner (`GateRunnerDeps.git`); engine core also uses it for
  * worktrees, the submit snapshot commit (`role.submitted.head`) and the merge queue. Imports no
- * other engine module. Uses the user's own git auth (AD-9).
+ * other engine module. Uses the user's own git auth (AD-9). Also home of the engine's repo file
+ * writes that never follow a symlink (`writeRepoFile`, `appendRepoFile`).
  */
-import type { CreateGitOps } from "@vtc/shared";
-
-export const createGitOps: CreateGitOps = () => {
-  throw new Error("createGitOps is not implemented yet (engine core, sub-project 1)");
-};
+export { createGitOps, parseNameStatus, CHECKOUTS_DIR } from "./git-ops.js";
+export {
+  ALLOWED_CONFIG_KEYS,
+  fingerprintChanges,
+  GitConfigChangedError,
+  gitConfigFingerprint,
+  gitDirOf,
+  globalConfigFiles,
+  isAllowedConfigKey,
+} from "./git-config.js";
+export { gitEnv } from "./env.js";
+export {
+  createWorkspace,
+  WORKTREES_DIR,
+  WorktreeError,
+  type MergeOutcome,
+  type Workspace,
+} from "./workspace.js";
+export {
+  appendRepoFile,
+  assertNoSymlinks,
+  ensureRepoDir,
+  observeRepoWrites,
+  removeRepoFile,
+  UnsafePathError,
+  writeRepoFile,
+  type RepoWrite,
+  type RepoWriteObserver,
+} from "./repo-files.js";
+export {
+  ciFromRollup,
+  createGhPullRequests,
+  pullRequestFromGh,
+  type PullRequestRequest,
+  type PullRequestService,
+} from "./pull-requests.js";
+export {
+  GitError,
+  gitText,
+  runGit,
+  setGitPreflight,
+  setGitSigning,
+  type GitResult,
+  type GitRunOptions,
+} from "./exec.js";
