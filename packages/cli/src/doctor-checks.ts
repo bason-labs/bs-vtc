@@ -5,6 +5,7 @@
  * credential file or the keychain (AD-9). Account details the status commands print (email,
  * organisation) are never echoed.
  */
+import type { DaemonState } from "./daemon.js";
 import type { Exec } from "./process.js";
 
 export type CheckStatus = "ok" | "warn" | "fail";
@@ -163,3 +164,39 @@ export const runDoctorChecks = async (env: DoctorEnv): Promise<DoctorCheck[]> =>
     ...(timer === null ? [] : [timer]),
   ];
 };
+
+/**
+ * The repo's running engine, when doctor runs in a repo: a daemon that refuses this `vtc` (e.g.
+ * one an upgrade left running with a different contracts MAJOR) fails, since every bridge and
+ * control command would fail until it is stopped. No running daemon is no check.
+ */
+export const checkEngine = (repoRoot: string, found: DaemonState): DoctorCheck | null => {
+  switch (found.state) {
+    case "absent":
+      return null;
+    case "live":
+      return {
+        name: "engine",
+        status: "ok",
+        detail: `running for ${repoRoot} (pid ${String(found.record.pid)}, ${found.record.engine_version})`,
+      };
+    case "refused":
+      return {
+        name: "engine",
+        status: "fail",
+        detail: `the engine running for ${repoRoot} (pid ${String(found.record.pid)}, ${found.record.engine_version}) refuses this vtc (${found.error}): run vtc engine --stop in that repo`,
+      };
+  }
+};
+
+/**
+ * Playwright's Chromium for Visual QA (§4.4: downloaded on demand by `vtc doctor`, pinned by
+ * checksum, into `~/.vtc/`). This build does not provision it yet; the check keeps the gap
+ * visible until the Visual QA layer ships its pin.
+ */
+export const checkChromium = (): DoctorCheck => ({
+  name: "chromium",
+  status: "warn",
+  detail:
+    "Playwright's Chromium (Visual QA screenshots) is not provisioned by this vtc build yet; UI runs skip what needs it",
+});

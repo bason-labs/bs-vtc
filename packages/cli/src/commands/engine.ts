@@ -4,19 +4,24 @@
  *   @vtc/engine (engine-core team); it runs until the daemon exits (idle, or SIGINT/SIGTERM).
  * - `vtc engine --mcp --host <host>` is the stdio bridge, the MCP entry of every host plugin
  *   (AD-16): it finds the repo's daemon (starting one detached when none is live), sends its
- *   hello and then relays bytes. Nothing but MCP is ever written to its stdout.
+ *   hello and then relays bytes. In a repo `vtc init` never set up it starts no daemon and
+ *   answers MCP itself until the repo is set up (`bridge.ts`). Nothing but MCP is ever written to
+ *   its stdout.
+ * - `vtc engine --stop` stops the repo's running daemon (e.g. one of an older `vtc` that refuses
+ *   this one after an upgrade).
  * - `vtc engine --wake-due` is what the auto-resume timer (launchd or systemd) runs every minute: it starts
  *   `vtc engine --daemon --wake` for each repo whose persisted wake-up is due (§6.9 step 4).
  */
 import { existsSync } from "node:fs";
-import { core, mcp } from "@vtc/engine";
+import { core } from "@vtc/engine";
 import { HostIdSchema } from "@vtc/shared";
-import { ensureDaemon, liveDaemon } from "../daemon.js";
-import { requireRepoRoot, UsageError } from "../repo.js";
+import { runBridge } from "../bridge.js";
+import { ensureDaemon, liveDaemon, stopDaemon } from "../daemon.js";
+import { isVtcProject, requireRepoRoot, requireVtcProject, UsageError } from "../repo.js";
 import { runtime } from "../runtime.js";
 import { createWakeScheduler, dueWakeups, wakeRecords } from "../scheduler.js";
 import { ensureInstallToken } from "../token.js";
-import { buildEngineParts, disposeAdapters, startDaemon } from "../wiring.js";
+import { buildEngineParts, disposeAdapters, engineVersions, startDaemon } from "../wiring.js";
 import type { CommandContext, CommandSpec } from "./types.js";
 import { EXIT, guarded, parseFlags } from "./util.js";
 
@@ -30,6 +35,7 @@ const onTerminate = (handler: () => void): (() => void) => {
 
 const runDaemonCommand = async (ctx: CommandContext, wake: boolean): Promise<number> => {
   const repoRoot = await requireRepoRoot(ctx.cwd);
+  requireVtcProject(repoRoot);
   const rt = runtime();
   const parts = await buildEngineParts({
     repoRoot,
@@ -62,21 +68,32 @@ const runDaemonCommand = async (ctx: CommandContext, wake: boolean): Promise<num
   return EXIT.ok;
 };
 
-const runBridge = async (ctx: CommandContext, hostName: string | undefined): Promise<number> => {
+const runMcpBridge = async (ctx: CommandContext, hostName: string | undefined): Promise<number> => {
   const host = HostIdSchema.safeParse(hostName);
   if (!host.success) throw new UsageError("--mcp needs --host claude-code or --host codex");
   const repoRoot = await requireRepoRoot(ctx.cwd);
-  const discovery = await ensureDaemon({
-    vtcHome: ctx.vtcHome,
+  await runBridge({
     repoRoot,
-    selfCommand: runtime().selfCommand,
-  });
-  await mcp.runStdioBridge({
-    path: discovery.mcp_socket,
     host: host.data,
     stdin: process.stdin,
     stdout: process.stdout,
+    initialised: () => isVtcProject(repoRoot),
+    daemonSocket: async () =>
+      (await ensureDaemon({ vtcHome: ctx.vtcHome, repoRoot, selfCommand: runtime().selfCommand }))
+        .mcp_socket,
+    serverVersion: engineVersions().engine,
   });
+  return EXIT.ok;
+};
+
+const runStop = async (ctx: CommandContext): Promise<number> => {
+  const repoRoot = await requireRepoRoot(ctx.cwd);
+  const pid = await stopDaemon(ctx.vtcHome, repoRoot);
+  ctx.io.out(
+    pid === null
+      ? `vtc engine: no engine is running for ${repoRoot}`
+      : `vtc engine: stopped the engine for ${repoRoot} (pid ${String(pid)})`,
+  );
   return EXIT.ok;
 };
 
@@ -97,8 +114,8 @@ export const wakeDue = async (
   let started = 0;
   const scheduler = createWakeScheduler(ctx.vtcHome);
   for (const record of dueWakeups(ctx.vtcHome, now)) {
-    if (!existsSync(record.repo_root)) {
-      await scheduler.cancel(record.repo_root); // the repo is gone: nothing to resume
+    if (!existsSync(record.repo_root) || !isVtcProject(record.repo_root)) {
+      await scheduler.cancel(record.repo_root); // the repo or its .vtc/ is gone: nothing to resume
       continue;
     }
     if ((await liveDaemon(ctx.vtcHome, record.repo_root)) !== null) continue; // it owns its timer
@@ -126,7 +143,8 @@ export const wakeDue = async (
 
 export const command: CommandSpec = {
   name: "engine",
-  summary: "Run the engine daemon (--daemon) or the stdio MCP bridge (--mcp --host <host>)",
+  summary:
+    "Run the engine daemon (--daemon), the stdio MCP bridge (--mcp --host <host>) or stop the repo's daemon (--stop)",
   run: (args, ctx) =>
     guarded("engine", ctx, async () => {
       const { values } = parseFlags(args, {
@@ -135,14 +153,18 @@ export const command: CommandSpec = {
         mcp: { type: "boolean" },
         host: { type: "string" },
         "wake-due": { type: "boolean" },
+        stop: { type: "boolean" },
       });
-      const modes = [values.daemon, values.mcp, values["wake-due"]].filter((v) => v === true);
+      const modes = [values.daemon, values.mcp, values["wake-due"], values.stop].filter(
+        (v) => v === true,
+      );
       if (modes.length !== 1)
         throw new UsageError(
-          "usage: vtc engine --daemon [--wake] | --mcp --host <claude-code|codex> | --wake-due",
+          "usage: vtc engine --daemon [--wake] | --mcp --host <claude-code|codex> | --wake-due | --stop",
         );
       if (values.daemon === true) return runDaemonCommand(ctx, values.wake === true);
-      if (values.mcp === true) return runBridge(ctx, values.host);
+      if (values.mcp === true) return runMcpBridge(ctx, values.host);
+      if (values.stop === true) return runStop(ctx);
       await wakeDue(ctx);
       return EXIT.ok;
     }),

@@ -4,8 +4,9 @@
  * engine's own worktrees (`.vtc/state/worktrees/<id>`, git worktrees of the same repo): the
  * shared git directory (`--git-common-dir`) names the main working tree.
  */
-import { realpathSync } from "node:fs";
-import { basename, dirname } from "node:path";
+import { lstatSync, realpathSync } from "node:fs";
+import { basename, dirname, join } from "node:path";
+import { core } from "@vtc/engine";
 import { exec, type Exec } from "./process.js";
 
 /** The repo's absolute, symlink-resolved root, or `null` when `cwd` is not in a git work tree. */
@@ -40,3 +41,29 @@ export class UsageError extends Error {
     this.name = "UsageError";
   }
 }
+
+/**
+ * True when `vtc init` set the repo up: `.vtc/project.yaml` is a plain file. The plugins are
+ * user-scoped, so their MCP entry runs in every repo a host session opens; nothing starts a
+ * daemon (which creates `.vtc/state/`) in a repo that never opted in.
+ */
+export const isVtcProject = (repoRoot: string): boolean => {
+  try {
+    return lstatSync(join(repoRoot, core.PROJECT_CONFIG_PATH)).isFile();
+  } catch {
+    return false;
+  }
+};
+
+/** The repo is not set up for VTC (`vtc init` has not run there). */
+export class NotInitialisedError extends Error {
+  constructor(readonly repoRoot: string) {
+    super(`VTC is not set up in ${repoRoot}: run \`vtc init\` there first`);
+    this.name = "NotInitialisedError";
+  }
+}
+
+/** Throws {@link NotInitialisedError} unless {@link isVtcProject}. */
+export const requireVtcProject = (repoRoot: string): void => {
+  if (!isVtcProject(repoRoot)) throw new NotInitialisedError(repoRoot);
+};

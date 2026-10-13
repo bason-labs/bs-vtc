@@ -15,6 +15,7 @@ import {
   type GateRunner,
   type PullRequestService,
 } from "@vtc/shared";
+import { defaultProjectConfig, renderProjectYaml } from "../src/commands/init.js";
 import { createCommandContext, type CommandContext } from "../src/index.js";
 
 export const PRODUCT_ROOT = fileURLToPath(new URL("../../../", import.meta.url));
@@ -50,6 +51,17 @@ export const initRepo = (): string => {
   git(repo, "commit", "-q", "-m", "init");
   return repo;
 };
+
+/** What `vtc init` writes: `.vtc/project.yaml` with the defaults and `.vtc/.gitignore`. */
+export const initProject = (repo: string): string => {
+  mkdirSync(join(repo, ".vtc"), { recursive: true });
+  writeFileSync(join(repo, ".vtc/project.yaml"), renderProjectYaml(defaultProjectConfig()));
+  writeFileSync(join(repo, ".vtc/.gitignore"), "/state/\n");
+  return repo;
+};
+
+/** A git repo with one commit, set up for VTC as `vtc init` does. */
+export const initVtcRepo = (): string => initProject(initRepo());
 
 let compiled: ReturnType<typeof compilePlugins> | undefined;
 

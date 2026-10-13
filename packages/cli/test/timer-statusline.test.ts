@@ -3,7 +3,7 @@
  * agent's `vtc engine --wake-due` starts the daemons whose time has come. And the Claude
  * statusline tee shim (§6.9): the user's statusline unchanged, usage forwarded to the engine.
  */
-import { readdirSync, statSync, writeFileSync } from "node:fs";
+import { existsSync, readdirSync, statSync, writeFileSync } from "node:fs";
 import { request } from "node:http";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
@@ -31,6 +31,7 @@ import {
   cleanupDirs,
   fakeGateRunner,
   fakePullRequests,
+  initProject,
   initRepo,
   tempDir,
   tempHome,
@@ -76,9 +77,13 @@ describe("the persisted wake scheduler (AutoResumeScheduler)", () => {
 
   it("vtc engine --wake-due starts each due repo's daemon with --wake, leaving the wake-up to it", async () => {
     const home = tempHome();
-    const [due, moved, later] = [tempDir(), tempDir(), tempDir()];
+    const due = initProject(tempDir());
+    const moved = initProject(tempDir());
+    const later = initProject(tempDir());
     const gone = join(tempDir(), "deleted-repo");
+    const uninitialised = tempDir(); // its .vtc/ was removed since: nothing to resume there
     const scheduler = createWakeScheduler(home);
+    await scheduler.schedule(uninitialised, new Date("2026-10-13T09:30:00Z"));
     await scheduler.schedule(due, new Date("2026-10-13T10:00:00Z"));
     await scheduler.schedule(moved, new Date("2026-10-13T10:00:00Z"));
     await scheduler.schedule(later, new Date("2026-10-13T20:00:00Z"));
@@ -94,6 +99,7 @@ describe("the persisted wake scheduler (AutoResumeScheduler)", () => {
     });
     expect(count).toBe(2);
     expect(started.sort()).toEqual([`${due} --wake`, `${moved} --wake`].sort());
+    expect(existsSync(join(uninitialised, ".vtc"))).toBe(false);
     // within the grace the woken engine owns its wake-up: nothing is dropped under it
     expect(
       wakeRecords(home)

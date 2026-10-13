@@ -3,7 +3,8 @@
  * builds, the daemon they start (serving the embedded-or-disk dashboard and the compiled role
  * contracts), discovery, the stdio bridge, and the control client.
  */
-import { chmodSync, existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { spawn } from "node:child_process";
+import { chmodSync, existsSync, mkdirSync, readFileSync, unlinkSync, writeFileSync } from "node:fs";
 import { request } from "node:http";
 import { createServer, type Socket } from "node:net";
 import { join } from "node:path";
@@ -12,19 +13,33 @@ import { afterEach, describe, expect, it } from "vitest";
 import { mcp } from "@vtc/engine";
 import {
   CONTRACTS_VERSION,
+  ENGINE_INSTANCE,
+  ENGINE_MCP_TOOLS,
   engineDiscoveryFile,
   type GateRunner,
   type HostAdapter,
   type RunningDaemon,
 } from "@vtc/shared";
 import { createDiskAssetBundle } from "../src/assets.js";
-import { daemonAnswers, ensureDaemon, liveDaemon, pidAlive } from "../src/daemon.js";
+import { runBridge } from "../src/bridge.js";
+import {
+  daemonAnswers,
+  daemonEnv,
+  daemonState,
+  ensureDaemon,
+  liveDaemon,
+  pidAlive,
+  stopDaemon,
+} from "../src/daemon.js";
+import { checkEngine } from "../src/doctor-checks.js";
+import { isVtcProject } from "../src/repo.js";
 import {
   buildEngineParts,
   composeEngineDeps,
   connectToRepoEngine,
   createAdapters,
   lazyGateRunner,
+  resolveVtcHome,
   startDaemon,
   type EngineParts,
 } from "../src/wiring.js";
@@ -33,7 +48,9 @@ import {
   DASHBOARD_FIXTURE,
   fakeGateRunner,
   fakePullRequests,
+  initProject,
   initRepo,
+  initVtcRepo,
   tempDir,
   tempHome,
   writePluginTrees,
@@ -143,7 +160,7 @@ describe("buildEngineParts and composeEngineDeps (AD-19)", () => {
 
 describe("the daemon the cli wires (AD-12, AD-20)", () => {
   it("starts on the compiled role contracts, serves the dashboard and is found by discovery", async () => {
-    const repo = initRepo();
+    const repo = initVtcRepo();
     const home = tempHome();
     const daemon = await startDaemon(await partsFor(repo, home), { wake: false });
     daemons.push(daemon);
@@ -173,7 +190,7 @@ describe("the daemon the cli wires (AD-12, AD-20)", () => {
   });
 
   it("relays MCP for two bridges sharing one daemon (AD-12 rule 3)", async () => {
-    const repo = initRepo();
+    const repo = initVtcRepo();
     const home = tempHome();
     const daemon = await startDaemon(await partsFor(repo, home), { wake: false });
     daemons.push(daemon);
@@ -214,7 +231,7 @@ describe("the daemon the cli wires (AD-12, AD-20)", () => {
   });
 
   it("reports a daemon that fails to start instead of waiting out the timeout", async () => {
-    const repo = initRepo();
+    const repo = initVtcRepo();
     const home = tempHome();
     const started = Date.now();
     await expect(
@@ -238,7 +255,7 @@ describe("the daemon the cli wires (AD-12, AD-20)", () => {
   });
 
   it("treats a record whose pid is alive but whose socket does not answer as stale (AD-12 rule 3)", async () => {
-    const repo = initRepo();
+    const repo = initVtcRepo();
     const home = tempHome();
     // a daemon that died without cleanup, its pid since reused (here: by this test process)
     const stale = {
@@ -283,6 +300,260 @@ describe("the daemon the cli wires (AD-12, AD-20)", () => {
     } finally {
       for (const s of accepted) s.destroy();
       await new Promise((r) => fake.close(r));
+    }
+  }, 20_000);
+});
+
+/** Lines written to a PassThrough, and a wait for the one that matches. */
+const lineSink = (): {
+  stdout: PassThrough;
+  next: (match: RegExp, ms?: number) => Promise<Record<string, unknown>>;
+} => {
+  const stdout = new PassThrough();
+  const lines: string[] = [];
+  let buffer = "";
+  stdout.on("data", (c: Buffer) => {
+    buffer += c.toString("utf8");
+    const parts = buffer.split("\n");
+    buffer = parts.pop() ?? "";
+    lines.push(...parts.filter((l) => l !== ""));
+  });
+  const next = async (match: RegExp, ms = 10_000): Promise<Record<string, unknown>> => {
+    const deadline = Date.now() + ms;
+    for (;;) {
+      const at = lines.findIndex((l) => match.test(l));
+      if (at >= 0) return JSON.parse(lines.splice(at, 1)[0] ?? "{}") as Record<string, unknown>;
+      if (Date.now() > deadline)
+        throw new Error(`no line matching ${String(match)} in ${JSON.stringify(lines)}`);
+      await new Promise((r) => setTimeout(r, 20));
+    }
+  };
+  return { stdout, next };
+};
+
+const rpc = (id: number, method: string, params?: unknown): string =>
+  `${JSON.stringify({ jsonrpc: "2.0", id, method, ...(params === undefined ? {} : { params }) })}\n`;
+
+describe("repos vtc init never set up (the plugins are user-scoped)", () => {
+  it("starts no daemon for the control commands or ensureDaemon", async () => {
+    const repo = initRepo();
+    const home = tempHome();
+    expect(isVtcProject(repo)).toBe(false);
+    await expect(
+      ensureDaemon({ vtcHome: home, repoRoot: repo, selfCommand: ["/nonexistent/vtc"] }),
+    ).rejects.toThrow(/VTC is not set up in .*: run `vtc init` there first/);
+    await expect(connectToRepoEngine(repo, home)).rejects.toThrow(/run `vtc init`/);
+    expect(existsSync(join(repo, ".vtc"))).toBe(false);
+    expect(existsSync(join(home, "logs"))).toBe(false);
+  });
+
+  it("the bridge answers MCP itself until vtc init, then starts the engine on the next call", async () => {
+    const repo = initRepo();
+    const home = tempHome();
+    let started = 0;
+    const stdin = new PassThrough();
+    const { stdout, next } = lineSink();
+    const done = runBridge({
+      repoRoot: repo,
+      host: "claude-code",
+      stdin,
+      stdout,
+      initialised: () => isVtcProject(repo),
+      daemonSocket: async () => {
+        started += 1;
+        const daemon = await startDaemon(await partsFor(repo, home), { wake: false });
+        daemons.push(daemon);
+        return daemon.discovery.mcp_socket;
+      },
+      serverVersion: "vtc-engine@0.0.0",
+    });
+    stdin.write(
+      rpc(1, "initialize", {
+        protocolVersion: "2025-06-18",
+        capabilities: {},
+        clientInfo: { name: "t", version: "1" },
+      }),
+    );
+    stdin.write(`${JSON.stringify({ jsonrpc: "2.0", method: "notifications/initialized" })}\n`);
+    expect(await next(/"id":1\b/)).toMatchObject({
+      result: { protocolVersion: "2025-06-18", serverInfo: { name: "vtc" } },
+    });
+    stdin.write(rpc(2, "tools/list"));
+    const tools = (await next(/"id":2\b/)) as { result: { tools: { name: string }[] } };
+    expect(tools.result.tools.map((t) => t.name).sort()).toEqual(
+      ENGINE_MCP_TOOLS.map((t) => t.name).sort(),
+    );
+    stdin.write(rpc(3, "tools/call", { name: "status", arguments: {} }));
+    const refused = (await next(/"id":3\b/)) as {
+      result: { isError: boolean; content: { text: string }[] };
+    };
+    expect(refused.result.isError).toBe(true);
+    expect(refused.result.content[0]?.text).toMatch(/not set up in .*run `vtc init`/);
+    stdin.write(rpc(9, "resources/list"));
+    expect(await next(/"id":9\b/)).toMatchObject({ error: { code: -32601 } });
+    expect(started).toBe(0);
+    expect(existsSync(join(repo, ".vtc"))).toBe(false);
+    // the user runs vtc init: the next call reaches a daemon, relayed byte for byte from then on
+    initProject(repo);
+    stdin.write(rpc(4, "tools/call", { name: "status", arguments: {} }));
+    stdin.write(
+      rpc(5, "tools/call", {
+        name: "start",
+        arguments: {
+          request: "Add a health endpoint",
+          track: "quick_fix",
+          repo: "existing",
+          has_ui: false,
+        },
+      }),
+    );
+    const status = (await next(/"id":4\b/)) as {
+      result: { isError: boolean; content: { text: string }[] };
+    };
+    expect(status.result.isError).toBe(true);
+    expect(status.result.content[0]?.text).toMatch(/no_run/);
+    const run = (await next(/"id":5\b/)) as { result: { structuredContent: { run: string } } };
+    expect(run.result.structuredContent.run).toMatch(/\S/);
+    stdin.write(rpc(6, "tools/call", { name: "status", arguments: {} }));
+    expect(await next(/"id":6\b/)).toMatchObject({
+      result: { structuredContent: { run: { id: run.result.structuredContent.run } } },
+    });
+    expect(started).toBe(1);
+    stdin.end();
+    await done;
+  }, 30_000);
+});
+
+describe("the daemon's environment, home and start-up race", () => {
+  it("starts the daemon with an allow-listed environment, not the host session's", () => {
+    const env = daemonEnv(
+      {
+        PATH: "/usr/bin",
+        HOME: "/home/u",
+        LC_ALL: "C.UTF-8",
+        XDG_CONFIG_HOME: "/home/u/.config",
+        SSH_AUTH_SOCK: "/tmp/agent.sock",
+        CLAUDECODE: "1",
+        CLAUDE_CODE_ENTRYPOINT: "cli",
+        ANTHROPIC_API_KEY: "sk-secret",
+        GITHUB_TOKEN: "ghp_secret",
+        AWS_SECRET_ACCESS_KEY: "secret",
+        VTC_HOME: "/elsewhere",
+      },
+      "/vh",
+    );
+    expect(env).toEqual({
+      PATH: "/usr/bin",
+      HOME: "/home/u",
+      LC_ALL: "C.UTF-8",
+      XDG_CONFIG_HOME: "/home/u/.config",
+      SSH_AUTH_SOCK: "/tmp/agent.sock",
+      VTC_HOME: "/vh",
+    });
+  });
+
+  it("resolves a relative VTC_HOME against the caller's cwd", () => {
+    expect(resolveVtcHome({ VTC_HOME: "rel/home" }, "/work")).toBe("/work/rel/home");
+    expect(resolveVtcHome({ VTC_HOME: "/abs" }, "/work")).toBe("/abs");
+    expect(resolveVtcHome({}, "/work")).toMatch(/\.vtc$/);
+  });
+
+  it("keeps waiting while another process holds the engine lock, past the early-exit grace", async () => {
+    const repo = initVtcRepo();
+    const home = tempHome();
+    const holder = spawn(process.execPath, ["-e", "setTimeout(() => {}, 60000)"], {
+      stdio: "ignore",
+    });
+    const lock = join(repo, ENGINE_INSTANCE.lockFile);
+    mkdirSync(join(lock, ".."), { recursive: true });
+    writeFileSync(
+      lock,
+      `${JSON.stringify({ pid: holder.pid, acquired_at: new Date().toISOString() })}\n`,
+    );
+    const began = Date.now();
+    const ensured = ensureDaemon({
+      vtcHome: home,
+      repoRoot: repo,
+      // loses the lock at once, as a second start would
+      selfCommand: [process.execPath, "-e", "process.exit(1)"],
+      timeoutMs: 15_000,
+    });
+    await new Promise((r) => setTimeout(r, 3_000));
+    // the holder turns out to be the winner: it publishes its discovery record
+    holder.kill("SIGKILL");
+    unlinkSync(lock);
+    const daemon = await startDaemon(await partsFor(repo, home), { wake: false });
+    daemons.push(daemon);
+    expect(await ensured).toEqual(daemon.discovery);
+    expect(Date.now() - began).toBeGreaterThan(2_500);
+  }, 25_000);
+});
+
+describe("a running daemon that refuses this vtc (an upgrade left it running)", () => {
+  it("is reported with how to stop it, by ensureDaemon and doctor, and vtc engine --stop stops it", async () => {
+    const repo = initVtcRepo();
+    const home = tempHome();
+    const socketPath = join(home, "run", "old.sock");
+    mkdirSync(join(home, "run"), { recursive: true });
+    const welcome = JSON.stringify({
+      v: 1,
+      ok: false,
+      engine_version: "vtc-engine@9.0.0",
+      contracts_version: "9.0.0",
+      error: "contracts 9.0.0 is not compatible with 4.0.0",
+    });
+    const old = spawn(
+      process.execPath,
+      [
+        "-e",
+        `const s = require("node:net").createServer((c) => { c.on("error", () => {}); c.once("data", () => c.end(${JSON.stringify(`${welcome}
+`)})); });
+         s.listen(process.argv[1], () => console.log("ready"));
+         process.on("SIGTERM", () => { s.close(); process.exit(0); });`,
+        socketPath,
+      ],
+      { stdio: ["ignore", "pipe", "inherit"] },
+    );
+    await new Promise<void>((r) => {
+      old.stdout.once("data", () => {
+        r();
+      });
+    });
+    mkdirSync(join(home, "engines"), { recursive: true });
+    writeFileSync(
+      join(home, engineDiscoveryFile(repo)),
+      JSON.stringify({
+        v: 1,
+        pid: old.pid,
+        port: 1,
+        prototype_port: null,
+        mcp_socket: socketPath,
+        repo_root: repo,
+        started_at: "2026-10-13T00:00:00.000Z",
+        engine_version: "vtc-engine@9.0.0",
+        contracts_version: "9.0.0",
+      }),
+    );
+    try {
+      expect(await liveDaemon(home, repo)).toBeNull();
+      const found = await daemonState(home, repo);
+      expect(found).toMatchObject({ state: "refused", error: /not compatible/ });
+      await expect(
+        ensureDaemon({ vtcHome: home, repoRoot: repo, selfCommand: ["/nonexistent/vtc"] }),
+      ).rejects.toThrow(
+        new RegExp(`pid ${String(old.pid)}\\) refused this vtc .*vtc engine --stop`),
+      );
+      expect(checkEngine(repo, found)).toMatchObject({
+        name: "engine",
+        status: "fail",
+        detail: expect.stringMatching(/refuses this vtc .*run vtc engine --stop/) as string,
+      });
+      expect(checkEngine(repo, { state: "absent" })).toBeNull();
+      expect(await stopDaemon(home, repo)).toBe(old.pid);
+      expect(pidAlive(old.pid ?? 0)).toBe(false);
+      expect(await stopDaemon(home, repo)).toBeNull();
+    } finally {
+      if (old.exitCode === null) old.kill("SIGKILL");
     }
   }, 20_000);
 });
