@@ -1256,6 +1256,27 @@ the integrator's, also pending human review. G2 did not cover them. Each is reve
     only, because a threat model is longer than a result's summary; `verify` mode stays
     read-only with SARIF findings.
 
+**Readings 38–39 (2026-10-13, integration round 1).** Seams found when wiring the compiled roles
+into the engine.
+
+38. **Engineer discipline profiles are dispatched as the Engineer** (§5.2a "profiles share the
+    Engineer contract"; §13 `prompt_sha`). _Lead decision 2026-10-13, pending human review._ The
+    engine dispatches role `engineer` for every Engineer task. When the host's plugin manifest
+    has a profile agent for the task's discipline (`PluginCatalog.profileFor`, e.g.
+    `vtc-engineer-backend`), the Lead spawns that agent instead of `vtc-engineer`, and
+    `role.dispatched` records the profile's agent name and prompt SHA. The profile reports role
+    `engineer` (its compiled contract says so), and the engine checks its result against the
+    Engineer's contract; a profile's `role.yaml` keeps its own id for compiling and for its
+    prompt-only inputs (e.g. `threat_model`). Without a profile the base `vtc-engineer` runs.
+    Only the Engineer gets a profile; QA and reviewers of the task keep their own agents.
+39. **The prototype listener runs from daemon start** (AD-5 rule 9 does not say when it starts).
+    _Integrator reading 2026-10-13, pending human review._ The Designer writes
+    `.vtc/design/prototype/` mid-run, so the daemon (and snapshot mode) starts the prototype
+    listener at startup whether or not the directory exists; it answers 404 until it does.
+    `EngineDiscovery.prototype_port` is always set by the daemon, and
+    `HealthResult.prototype_url` is non-null once the directory exists. The dashboard re-reads
+    health when the Designer submits.
+
 ## 6. Change process for this spine
 
 - Changing an AD, adding one, or changing a frozen contract (AD-3) needs an architecture review

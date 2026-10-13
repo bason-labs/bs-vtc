@@ -149,6 +149,50 @@ describe("Flow Studio against the golden run", () => {
     expect(requests.filter((r) => r.url === "/api/usage").length).toBe(before + 1);
   });
 
+  it("re-reads health when the Designer submits, so a new prototype origin shows up", async () => {
+    const designer = JSON.stringify({
+      v: 1,
+      seq: 99,
+      ts: "2026-10-13T09:20:00.000Z",
+      run: "golden-1",
+      type: "role.submitted",
+      actor: "role",
+      role: "designer",
+      data: { action_id: "a-9", exit: "done", findings: 0, questions: 0, session_ref: null },
+      prompt_sha: "4".repeat(64),
+      host: "claude-code",
+      model: "claude-sonnet-5",
+      tokens: { in: 1, out: 1, cache_r: 0, cache_w: 0 },
+      cost_usd: 0.1,
+    });
+    let push: ((s: string) => void) | null = null;
+    const { requests } = renderApp("/usage/", {
+      "/api/health": () =>
+        Response.json({
+          ok: true,
+          mode: "live",
+          engine_version: "0.0.0",
+          contracts_version: "4.0.0",
+          prototype_url: null,
+        }),
+      "/api/stream": () => {
+        const res = openStream();
+        const reader = new TransformStream<Uint8Array, Uint8Array>();
+        const writer = reader.writable.getWriter();
+        push = (s) => void writer.write(new TextEncoder().encode(s));
+        return new Response(reader.readable, { headers: res.headers });
+      },
+    });
+    await screen.findByTestId("usage-claude-code");
+    expect(await screen.findByTestId("connection")).toHaveTextContent("Live");
+    const before = requests.filter((r) => r.url === "/api/health").length;
+    await act(async () => {
+      push?.(`id: golden-1:99\ndata: ${designer}\n\n`);
+      await new Promise((r) => setTimeout(r, 50));
+    });
+    expect(requests.filter((r) => r.url === "/api/health").length).toBe(before + 1);
+  });
+
   it("exchanges the #nonce once, strips it from the URL and sends the session as a bearer", async () => {
     const nonce = "n".repeat(43);
     const session = "s".repeat(43);
