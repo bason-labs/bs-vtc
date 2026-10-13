@@ -1,0 +1,39 @@
+{
+  "run": "golden-1",
+  "task": "T-1",
+  "rows": [
+    {
+      "req": "REQ-1",
+      "tests": [
+        {
+          "id": "token store [REQ-1] binds a token to one user",
+          "status": "pass",
+          "hidden": false,
+          "provenance": "spec"
+        }
+      ],
+      "covered": true
+    },
+    {
+      "req": "REQ-1.AC-1",
+      "tests": [
+        {
+          "id": "token store [REQ-1.AC-1] stores only the hash",
+          "status": "pass",
+          "hidden": false,
+          "provenance": "spec"
+        },
+        {
+          "id": "acceptance [REQ-1.AC-1] hash survives restart",
+          "status": "pass",
+          "hidden": true,
+          "provenance": "mixed"
+        }
+      ],
+      "covered": true
+    }
+  ],
+  "gaps": [],
+  "scope_creep": [],
+  "built_at": "2026-10-13T09:19:00.000Z"
+}
