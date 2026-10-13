@@ -16,6 +16,36 @@
     "test": {
       "dependsOn": ["^typecheck"],
       "outputs": []
+    },
+    "@vtc/engine#test": {
+      "dependsOn": ["^typecheck"],
+      "outputs": [],
+      "inputs": ["$TURBO_DEFAULT$", "$TURBO_ROOT$/roles/**", "$TURBO_ROOT$/fixtures/**"]
+    },
+    "@vtc/compiler#test": {
+      "dependsOn": ["^typecheck"],
+      "outputs": [],
+      "inputs": [
+        "$TURBO_DEFAULT$",
+        "$TURBO_ROOT$/roles/**",
+        "$TURBO_ROOT$/skills/**",
+        "$TURBO_ROOT$/plugins/**"
+      ]
+    },
+    "@vtc/shared#test": {
+      "dependsOn": ["^typecheck"],
+      "outputs": [],
+      "inputs": ["$TURBO_DEFAULT$", "$TURBO_ROOT$/fixtures/**"]
+    },
+    "@vtc/dashboard#test": {
+      "dependsOn": ["^typecheck"],
+      "outputs": [],
+      "inputs": ["$TURBO_DEFAULT$", "$TURBO_ROOT$/fixtures/**"]
+    },
+    "@vtc/arch-tests#test": {
+      "dependsOn": ["^typecheck"],
+      "outputs": [],
+      "cache": false
     }
   }
 }

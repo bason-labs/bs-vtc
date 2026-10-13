@@ -11,7 +11,7 @@
     "build": "turbo run build",
     "typecheck": "turbo run typecheck",
     "lint": "turbo run lint && eslint eslint.config.js vitest.shared.ts vitest.config.ts .dependency-cruiser.cjs",
-    "test": "turbo run test",
+    "test": "turbo run test --concurrency=1",
     "deps:check": "depcruise packages apps --config .dependency-cruiser.cjs",
     "format": "prettier --write .",
     "format:check": "prettier --check .",
