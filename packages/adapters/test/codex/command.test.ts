@@ -14,10 +14,12 @@ import {
   findForbiddenHostArgs,
   HostOutcomeSchema,
   jsonSchemaFor,
+  ROLE_DENIED_VTC,
   type RoleTools,
   type SpawnRoleRequest,
 } from "@vtc/shared";
-import { createCodexAdapter } from "../../src/index.js";
+import { codexSandboxProfile } from "../../src/codex/command.js";
+import { ADAPTER_FACTORIES, createCodexAdapter } from "../../src/index.js";
 import { fakeSpawner } from "../support/fake-spawner.js";
 import { fixtureLines } from "../support/fixtures.js";
 
@@ -40,8 +42,10 @@ const scratch = (): string => {
   return dir;
 };
 
+// not under /home: on macOS that is an automount, and the overlap check resolves real paths
+const VTC_HOME = "/users-dev/.vtc";
 const profile = (tools: RoleTools, network: "none" | "registries" = "none") =>
-  createCodexAdapter().sandboxProfile({
+  createCodexAdapter({ vtcHome: VTC_HOME }).sandboxProfile({
     tools,
     cwd: CWD,
     writablePaths: ["src/**"],
@@ -54,7 +58,7 @@ const argAfter = (args: readonly string[], flag: string): string | undefined =>
 
 const request = (overrides: Partial<SpawnRoleRequest> = {}): SpawnRoleRequest => ({
   role: "spec_verifier",
-  model: { tier: "top", effort: "high", model: "gpt-5-codex" },
+  model: { tier: "top", effort: "high", model: "engine-model-id" },
   dispatch: "headless",
   cwd: CWD,
   prompt: "Read the task pack and follow it.",
@@ -69,7 +73,12 @@ describe("Codex sandboxProfile (§12.1, AD-9)", () => {
     const p = profile(READ_ONLY);
     expect(p.cliArgs).toEqual(["--config", 'sandbox_mode="read-only"']);
     expect(p.settings).toEqual({ sandbox_mode: "read-only" });
-    expect(p.enforced).toEqual({ readOnly: true, perPathWriteDeny: false, network: true });
+    expect(p.enforced).toEqual({
+      readOnly: true,
+      perPathWriteDeny: false,
+      network: true,
+      secretsUnreadable: false,
+    });
   });
 
   it("write-scoped roles and engineers run workspace-write with the network forced off; the engine checks the paths", () => {
@@ -88,19 +97,138 @@ describe("Codex sandboxProfile (§12.1, AD-9)", () => {
         sandbox_mode: "workspace-write",
         sandbox_workspace_write: { network_access: false, writable_roots: [] },
       });
-      expect(p.enforced).toEqual({ readOnly: false, perPathWriteDeny: false, network: true });
+      // Codex has no per-path read deny: the token and host credentials stay readable (D-ad)
+      expect(p.enforced).toEqual({
+        readOnly: false,
+        perPathWriteDeny: false,
+        network: true,
+        secretsUnreadable: false,
+      });
     }
   });
 
-  it("refuses the install phase's registry network: Codex could only open all of it, engine API included", () => {
-    for (const tools of [WRITE_SCOPED, ENGINEER]) {
+  it("refuses the registry network for every role: Codex could only open all of it, engine API included (D-ac)", () => {
+    for (const tools of [READ_ONLY, WRITE_SCOPED, ENGINEER]) {
       expect(() => profile(tools, "registries")).toThrow(/registries network on Codex/);
     }
-    // a reviewer never gets network anyway, so its profile is unchanged
-    expect(profile(READ_ONLY, "registries").cliArgs).toEqual([
+  });
+
+  it("keeps the VTC home's denied directories unwritable: the sandbox writes only the worktree, so a worktree overlapping one is refused (D-w)", () => {
+    const at =
+      (vtcHome: string, tools: RoleTools, cwd = CWD) =>
+      () =>
+        createCodexAdapter({ vtcHome }).sandboxProfile({
+          tools,
+          cwd,
+          writablePaths: [],
+          protectedPaths: [],
+          network: "none",
+        });
+    for (const tools of [WRITE_SCOPED, ENGINEER]) {
+      expect(at(`${CWD}/.home/.vtc`, tools)).toThrow(/VTC home/);
+      expect(at("/v", tools, "/v/hidden/T-1")).toThrow(/VTC home/);
+      expect(at("/v", tools, "/v")).toThrow(/VTC home/);
+      // a repo whose own .vtc is the VTC home (a dotfiles repo at ~) keeps its worktrees writable
+      expect(at(VTC_HOME, tools, `${VTC_HOME}/state/worktrees/T-1`)).not.toThrow();
+    }
+    // a reviewer writes nothing, wherever the VTC home is
+    expect(() =>
+      createCodexAdapter({ vtcHome: `${CWD}/.vtc-home` }).sandboxProfile({
+        tools: READ_ONLY,
+        cwd: CWD,
+        writablePaths: [],
+        protectedPaths: [],
+        network: "none",
+      }),
+    ).not.toThrow();
+  });
+
+  it("drops the OS temp roots from the writable set when the VTC home lies under one (D-w)", () => {
+    const request = (tools: RoleTools) => ({
+      tools,
+      cwd: CWD,
+      writablePaths: [],
+      protectedPaths: [],
+      network: "none" as const,
+    });
+    const excluded = [
       "--config",
-      'sandbox_mode="read-only"',
-    ]);
+      "sandbox_workspace_write.exclude_tmpdir_env_var=true",
+      "--config",
+      "sandbox_workspace_write.exclude_slash_tmp=true",
+    ];
+    for (const tools of [WRITE_SCOPED, ENGINEER]) {
+      const p = codexSandboxProfile(request(tools), {
+        vtcHome: "/scratch-tmp/vtc",
+        tempRoots: ["/scratch-tmp"],
+      });
+      expect(p.cliArgs.slice(-4)).toEqual(excluded);
+      expect(p.settings).toEqual({
+        sandbox_mode: "workspace-write",
+        sandbox_workspace_write: {
+          network_access: false,
+          writable_roots: [],
+          exclude_tmpdir_env_var: true,
+          exclude_slash_tmp: true,
+        },
+      });
+      // a VTC home outside every temp root keeps the temp directory writable (D-ag)
+      expect(
+        codexSandboxProfile(request(tools), { vtcHome: VTC_HOME, tempRoots: ["/scratch-tmp"] })
+          .cliArgs,
+      ).not.toContain("sandbox_workspace_write.exclude_slash_tmp=true");
+      // the real temp directory, as the adapter finds it
+      expect(
+        createCodexAdapter({ vtcHome: join(scratch(), "vtc") }).sandboxProfile(request(tools))
+          .cliArgs,
+      ).toEqual(expect.arrayContaining(excluded));
+    }
+    // a reviewer writes nothing, so it needs no exclusion
+    expect(
+      codexSandboxProfile(request(READ_ONLY), {
+        vtcHome: "/scratch-tmp/vtc",
+        tempRoots: ["/scratch-tmp"],
+      }).cliArgs,
+    ).toEqual(["--config", 'sandbox_mode="read-only"']);
+  });
+
+  it.skipIf(process.platform === "win32")(
+    "compares real paths, so a symlinked worktree or VTC home cannot hide an overlap (D-w)",
+    () => {
+      const root = scratch();
+      const vtcHome = join(root, "vtc");
+      mkdirSync(join(vtcHome, "hidden", "T-1"), { recursive: true });
+      symlinkSync(join(vtcHome, "hidden", "T-1"), join(root, "worktree-link"));
+      const at = (home: string, cwd: string) => () =>
+        createCodexAdapter({ vtcHome: home }).sandboxProfile({
+          tools: ENGINEER,
+          cwd,
+          writablePaths: [],
+          protectedPaths: [],
+          network: "none",
+        });
+      expect(at(vtcHome, join(root, "worktree-link"))).toThrow(/VTC home/);
+      const worktree = join(root, "repo", "wt");
+      mkdirSync(join(worktree, "nested"), { recursive: true });
+      symlinkSync(join(worktree, "nested"), join(root, "vtc-link"));
+      expect(at(join(root, "vtc-link"), worktree)).toThrow(/VTC home/);
+    },
+  );
+
+  it("records what Codex cannot express of the role deny list (D-w): no command deny for `vtc calibrate`, no per-path write deny", () => {
+    // Gap: Codex has no per-command deny for a headless run, so `vtc calibrate` cannot be denied
+    // here. Writes to <vtcHome>/{allowlists,osv-db,hidden} are blocked only because
+    // workspace-write writes nothing outside the worktree (and the OS temp directory, D-ag).
+    // `vtc calibrate` confirms in an interactive terminal only, and the engine never runs a role
+    // with a terminal.
+    expect(ROLE_DENIED_VTC.subcommands).toEqual(["calibrate"]);
+    for (const tools of [READ_ONLY, WRITE_SCOPED, ENGINEER]) {
+      const p = profile(tools);
+      const text = JSON.stringify([p.cliArgs, p.settings]);
+      expect(text).not.toContain("calibrate");
+      for (const glob of ROLE_DENIED_VTC.homeWriteDeny) expect(text).not.toContain(glob);
+      expect(p.enforced.perPathWriteDeny).toBe(false);
+    }
   });
 });
 
@@ -119,7 +247,7 @@ describe("Codex headlessCommand", () => {
     );
     expect(args).toContain('model_reasoning_effort="high"');
     // the engine resolves the model (AD-6 rule 2); the adapter never picks one
-    expect(argAfter(args, "--model")).toBe("gpt-5-codex");
+    expect(argAfter(args, "--model")).toBe("engine-model-id");
     expect(args.slice(-2)).toEqual(["--", "-"]);
     expect(args.join(" ")).not.toContain("Read the task pack");
     expect(findForbiddenHostArgs(args)).toEqual([]);
@@ -135,6 +263,20 @@ describe("Codex headlessCommand", () => {
     expect(args).toContain('sandbox_mode="read-only"');
     expect(args).not.toContain("--sandbox");
     expect(args.slice(-3)).toEqual(["--", "thr-1", "-"]);
+  });
+
+  it("runs on the session's default model with only the effort set when the engine resolved no id (D-ae)", () => {
+    const adapter = ADAPTER_FACTORIES.codex!({ vtcHome: VTC_HOME });
+    for (const session of [undefined, { host: "codex" as const, id: "thr-1" }]) {
+      const args = adapter.headlessCommand(
+        request({ model: { tier: "mid", effort: "medium" } }),
+        session,
+      ).args;
+      expect(args).not.toContain("--model");
+      expect(args).not.toContain("-m");
+      expect(args.some((a) => a.startsWith("model="))).toBe(false);
+      expect(args).toContain('model_reasoning_effort="medium"');
+    }
   });
 
   it("refuses another host's session", () => {

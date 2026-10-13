@@ -6,7 +6,12 @@ import {
   StatuslineIngestSchema,
   usageFromStatuslineIngest,
 } from "@vtc/shared";
-import { ADAPTER_FACTORIES, HOST_CAPABILITIES, statuslineIngestFromClaude } from "../src/index.js";
+import {
+  ADAPTER_FACTORIES,
+  HOST_CAPABILITIES,
+  statuslineIngestFromClaude,
+  type AdapterFactoryOptions,
+} from "../src/index.js";
 import { runHostAdapterSafetyContract } from "./host-adapter-contract.js";
 
 const fixture = (path: string): unknown =>
@@ -53,6 +58,22 @@ describe("adapter registry (AD-6 rule 6)", () => {
     const claude = ADAPTER_FACTORIES["claude-code"]!();
     expect("readUsage" in codex && "watchUsage" in codex).toBe(true);
     expect("readUsage" in claude || "watchUsage" in claude).toBe(false);
+  });
+  it("factories take only { pluginDir, vtcHome, vtcVersion }: models come from the engine (AD-6 rule 2, D-ae)", () => {
+    const options: AdapterFactoryOptions = {
+      pluginDir: "/opt/vtc/plugins/x",
+      vtcHome: "/home/dev/.vtc",
+      vtcVersion: "1.2.3",
+    };
+    // @ts-expect-error -- no `models` option: the engine's ResolvedModel is the only source
+    const withModels: AdapterFactoryOptions = { models: { codex: { top: "x" } } };
+    for (const host of HOST_IDS) {
+      const factory: ((options?: AdapterFactoryOptions) => unknown) | undefined =
+        ADAPTER_FACTORIES[host];
+      expect(factory).toBeDefined();
+      expect(ADAPTER_FACTORIES[host]?.(options).host).toBe(host);
+    }
+    expect(withModels).toBeDefined();
   });
   it("Codex runs the model the engine resolved (AD-6 rule 2)", () => {
     const adapter = ADAPTER_FACTORIES.codex?.();

@@ -6,6 +6,7 @@ import { tmpdir, userInfo } from "node:os";
 import { join } from "node:path";
 import type { HostAdapter, HostCapabilities, SessionRef, SpawnRoleRequest } from "@vtc/shared";
 import { createRunLauncher, subagentSpawn } from "../common/dispatch.js";
+import { envHome } from "../common/homes.js";
 import { ensurePrivateDir, writeFileAtomic } from "../common/files.js";
 import { nodeSpawner, type Spawner } from "../common/process.js";
 import { createCodexUsageSource } from "./app-server.js";
@@ -41,6 +42,11 @@ export interface CodexAdapterOptions {
   readonly killGraceMs?: number;
   /** Reported to the app-server as the client version. */
   readonly clientVersion?: string;
+  /**
+   * The absolute VTC home no role may write (D-w). Default: `$VTC_HOME`, else `~/.vtc` (the
+   * cli's own rule); the cli passes the one it resolved.
+   */
+  readonly vtcHome?: string;
 }
 
 /** Per user, so two users of one machine never share it (and a planted one is refused). */
@@ -51,6 +57,7 @@ export const createCodexAdapter = (options: CodexAdapterOptions = {}): HostAdapt
   const spawner = options.spawner ?? nodeSpawner;
   const scratchDir = options.scratchDir ?? defaultScratchDir();
   const commandOptions = { scratchDir };
+  const profileOptions = { vtcHome: options.vtcHome ?? envHome("VTC_HOME", ".vtc") };
   const runs = createRunLauncher({
     spawner,
     outcome: codexOutcomeAfterExit,
@@ -103,7 +110,7 @@ export const createCodexAdapter = (options: CodexAdapterOptions = {}): HostAdapt
       }
       return spawn(request, session);
     },
-    sandboxProfile: codexSandboxProfile,
+    sandboxProfile: (request) => codexSandboxProfile(request, profileOptions),
     readUsage: () => usageSource().read(),
     watchUsage: (onUpdate) => usageSource().watch(onUpdate),
     async dispose() {

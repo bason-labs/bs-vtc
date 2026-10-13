@@ -3,10 +3,15 @@
  * statusline shim posts `statuslineIngestFromClaude(...)` to the engine, and `parseEvents`
  * returns the SDK rate-limit readings of runs the engine launched. So there is no `readUsage`.
  */
-import { homedir } from "node:os";
-import { join } from "node:path";
-import type { HostAdapter, HostCapabilities, SessionRef, SpawnRoleRequest } from "@vtc/shared";
+import {
+  HOST_CREDENTIAL_DENY_READ,
+  type HostAdapter,
+  type HostCapabilities,
+  type SessionRef,
+  type SpawnRoleRequest,
+} from "@vtc/shared";
 import { createRunLauncher, subagentSpawn } from "../common/dispatch.js";
+import { envHome } from "../common/homes.js";
 import { nodeSpawner, type Spawner } from "../common/process.js";
 import {
   claudeHeadlessCommand,
@@ -39,16 +44,16 @@ export interface ClaudeCodeAdapterOptions {
   /** The absolute Codex home, which no role may read. Default: `$CODEX_HOME`, else `~/.codex`. */
   readonly codexHome?: string;
   /**
+   * Claude's config directory, whose credential file no role may read (D-ad). Default:
+   * `$CLAUDE_CONFIG_DIR`, else `~/.claude`. Only a path for the deny rules: never read.
+   */
+  readonly claudeConfigDir?: string;
+  /**
    * The compiled Claude plugin on disk; see `ClaudeCommandOptions.pluginDir`. Required for
    * headless runs: without it `headlessCommand`, `spawnRole` (headless) and `resume` refuse.
    */
   readonly pluginDir?: string;
 }
-
-const envHome = (name: string, fallback: string): string => {
-  const value = process.env[name];
-  return value === undefined || value === "" ? join(homedir(), fallback) : value;
-};
 
 export const createClaudeCodeAdapter = (options: ClaudeCodeAdapterOptions = {}): HostAdapter => {
   const runs = createRunLauncher({
@@ -56,9 +61,13 @@ export const createClaudeCodeAdapter = (options: ClaudeCodeAdapterOptions = {}):
     outcome: claudeOutcomeAfterExit,
     ...(options.killGraceMs === undefined ? {} : { killGraceMs: options.killGraceMs }),
   });
+  const codex = HOST_CREDENTIAL_DENY_READ.codex;
+  const claude = HOST_CREDENTIAL_DENY_READ["claude-code"];
   const profileOptions = {
     vtcHome: options.vtcHome ?? envHome("VTC_HOME", ".vtc"),
-    codexHome: options.codexHome ?? envHome("CODEX_HOME", ".codex"),
+    codexHome: options.codexHome ?? envHome(codex.configDirEnv, codex.defaultConfigDir),
+    claudeConfigDir:
+      options.claudeConfigDir ?? envHome(claude.configDirEnv, claude.defaultConfigDir),
   };
   const commandOptions = options.pluginDir === undefined ? {} : { pluginDir: options.pluginDir };
   const headlessCommand = (request: SpawnRoleRequest, session?: SessionRef) =>
@@ -93,4 +102,3 @@ export const createClaudeCodeAdapter = (options: ClaudeCodeAdapterOptions = {}):
 
 export { statuslineIngestFromClaude } from "./statusline.js";
 export { claudeSubagentName } from "./command.js";
-export { STATUSLINE_TEE, statuslineTeeCommand } from "./install.js";
