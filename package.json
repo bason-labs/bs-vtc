@@ -15,7 +15,9 @@
     "deps:check": "depcruise packages apps --config .dependency-cruiser.cjs",
     "format": "prettier --write .",
     "format:check": "prettier --check .",
-    "check": "pnpm typecheck && pnpm lint && pnpm deps:check && pnpm test && pnpm format:check"
+    "check": "pnpm typecheck && pnpm lint && pnpm deps:check && pnpm test && pnpm format:check",
+    "verify": "pnpm check && pnpm build",
+    "hooks:install": "git config core.hooksPath .githooks"
   },
   "devDependencies": {
     "@eslint/js": "10.0.1",

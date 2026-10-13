@@ -1,6 +1,13 @@
 import { describe, expect, it } from "vitest";
-import { capForRisk, FeatureSchema, TASK_MAIN_PATH, TaskSchema } from "../src/index.js";
-import { validFeature, validTask } from "./fixtures.js";
+import {
+  capForRisk,
+  FeatureSchema,
+  PlanFileFrontmatterSchema,
+  TASK_MAIN_PATH,
+  TaskDraftSchema,
+  TaskSchema,
+} from "../src/index.js";
+import { COMMIT, SHA, validFeature, validTask, validTaskDraft } from "./fixtures.js";
 import { expectInvalid, expectValid } from "./helpers.js";
 
 describe("TaskSchema", () => {
@@ -92,5 +99,56 @@ describe("FeatureSchema", () => {
     ["status", { status: "merged" }],
   ])("rejects invalid %s", (path, patch) => {
     expectInvalid(FeatureSchema, { ...validFeature(), ...patch }, path);
+  });
+});
+
+describe("task worktree and baseline", () => {
+  it("keeps machine paths and short SHAs out of the git-tracked record", () => {
+    expectInvalid(TaskSchema, { ...validTask(), worktree: "/tmp/wt/T-7" }, "worktree");
+    expectInvalid(
+      TaskSchema,
+      { ...validTask(), baseline_revision: "0123abcd" },
+      "baseline_revision",
+    );
+    expectValid(TaskSchema, { ...validTask(), baseline_revision: COMMIT });
+  });
+});
+
+describe("TaskDraftSchema (Planner output)", () => {
+  it("accepts a draft with its intent contract", () => {
+    const draft = expectValid(TaskDraftSchema, validTaskDraft());
+    expect(draft.intent.io_matrix).toHaveLength(1);
+  });
+  it.each([
+    ["status", { status: "ready" }],
+    ["cap", { cap: 5 }],
+    ["budget_usd", { budget_usd: 100 }],
+    ["round", { round: 0 }],
+    ["spent_usd", { spent_usd: 0 }],
+    ["worktree", { worktree: ".vtc/state/worktrees/T-7" }],
+    ["branch", { branch: "vtc/T-7" }],
+    ["deferred", { deferred: [] }],
+    ["baseline_revision", { baseline_revision: COMMIT }],
+  ])("rejects the engine-owned field %s", (_field, patch) => {
+    expectInvalid(TaskDraftSchema, { ...validTaskDraft(), ...patch }, "");
+  });
+  it.each([
+    ["intent", { intent: undefined }],
+    ["intent.io_matrix", { intent: { statement: "x", io_matrix: [] } }],
+    [
+      "provides_contract",
+      { provides_contract: { kind: "openapi", path: "a.yaml", frozen_sha256: SHA } },
+    ],
+    ["after", { after: ["T-7"] }],
+    ["stack_packs", { stack_packs: ["a", "b", "c", "d"] }],
+  ])("rejects invalid %s", (path, patch) => {
+    expectInvalid(TaskDraftSchema, { ...validTaskDraft(), ...patch }, path);
+  });
+});
+
+describe("PlanFileFrontmatterSchema", () => {
+  it("is the engine's task projection", () => {
+    expect(PlanFileFrontmatterSchema).toBe(TaskSchema);
+    expectValid(PlanFileFrontmatterSchema, validTask());
   });
 });

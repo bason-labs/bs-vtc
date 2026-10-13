@@ -1,7 +1,7 @@
 /** Role result contract: what every role returns through `engine.submit` (§4.2, §5.1, §16). */
 import { z } from "zod";
 import { FindingDraftSchema } from "./finding.js";
-import { estimateTokens, RETURN_CAP_TOKENS } from "./helpers/tokens.js";
+import { CHARS_PER_TOKEN, estimateTokens, RETURN_CAP_TOKENS } from "./helpers/tokens.js";
 import {
   ArtifactTypeSchema,
   EvidenceSchema,
@@ -13,6 +13,8 @@ import {
   SlugSchema,
   TaskIdSchema,
 } from "./primitives.js";
+import { QuestionSchema } from "./question.js";
+import { TaskDraftSchema } from "./task.js";
 
 /**
  * Role exits. §5.1 `done | spec_conflict | blocked(question) | unknown`, plus the Engineer's
@@ -28,9 +30,21 @@ export const RoleExitSchema = z.enum([
 ]);
 export type RoleExit = z.infer<typeof RoleExitSchema>;
 
-/** Reviewer verdict (e.g. Spec-Verifier PASS/FAIL/UNKNOWN, §5.2). */
-export const VerdictSchema = z.enum(["pass", "fail", "unknown"]);
+/**
+ * Reviewer verdict (e.g. Spec-Verifier PASS/FAIL/UNKNOWN, §5.2). `unchecked` = a route, state or
+ * screen could not be reached or rendered: "unreached is not clean" (§7.5), so it blocks a pass.
+ */
+export const VerdictSchema = z.enum(["pass", "fail", "unknown", "unchecked"]);
 export type Verdict = z.infer<typeof VerdictSchema>;
+
+/** Question type each Visual QA verdict names (§7.5). */
+export const VerdictQuestionTypeSchema = z.enum([
+  "structure_content",
+  "state",
+  "layout",
+  "brand_design_system",
+]);
+export type VerdictQuestionType = z.infer<typeof VerdictQuestionTypeSchema>;
 
 /** A claim the engine verifies against reality before accepting a result (§4.2 step 3). */
 export const ClaimTypeSchema = z.enum(["file", "commit", "citation", "test", "url"]);
@@ -47,10 +61,17 @@ export const ArtifactRefSchema = z.strictObject({
 });
 export type ArtifactRef = z.infer<typeof ArtifactRefSchema>;
 
-/** Summary capped at about 1.5k tokens (§5.1). */
+/** Longest summary in characters: the 1.5k-token cap at the estimator's 4 chars per token. */
+export const SUMMARY_MAX_CHARS = RETURN_CAP_TOKENS * CHARS_PER_TOKEN;
+
+/**
+ * Summary capped at about 1.5k tokens (§5.1). `max` puts the cap into the JSON Schema hosts see;
+ * the refine keeps it tied to the token estimator.
+ */
 export const SummarySchema = z
   .string()
   .min(1)
+  .max(SUMMARY_MAX_CHARS)
   .refine((text) => estimateTokens(text) <= RETURN_CAP_TOKENS, {
     message: `summary exceeds the ${RETURN_CAP_TOKENS}-token return cap`,
   });
@@ -62,7 +83,16 @@ const base = {
   task: TaskIdSchema.optional(),
   feature: FeatureIdSchema.optional(),
   verdict: VerdictSchema.optional(),
+  /** Visual QA: the question type of this verdict (§7.5). */
+  question_type: VerdictQuestionTypeSchema.optional(),
   findings: z.array(FindingDraftSchema).default([]),
+  /**
+   * Questions raised while still finishing the work, e.g. QA author-mode `spec_question` items
+   * (§6.3 step 2). The engine turns each into an escalation (`escalationFromQuestion`).
+   */
+  questions: z.array(QuestionSchema).default([]),
+  /** Planner output (§5.2): task drafts the engine checks at PLAN (§6.1). Planner only. */
+  tasks: z.array(TaskDraftSchema).optional(),
   artifacts: z.array(ArtifactRefSchema).default([]),
   claims: z.array(ClaimSchema).default([]),
   summary: SummarySchema,
@@ -76,8 +106,8 @@ const SimpleExitResult = z.strictObject({
 const BlockedResult = z.strictObject({
   ...base,
   exit: z.literal("blocked"),
-  /** The single question that parks the task (§6.3 step 3). */
-  question: z.string().min(1).max(1000),
+  /** The single question that parks the work, with 2–4 options (§6.3 step 3, §6.5). */
+  question: QuestionSchema,
 });
 
 const SpecConflictResult = z.strictObject({

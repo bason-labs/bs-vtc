@@ -1,0 +1,4 @@
+#!/bin/sh
+# AD-10: every Check is blocking. Refuse to push a branch that fails `pnpm verify`.
+# Install once per clone: pnpm hooks:install
+exec pnpm verify

@@ -1,0 +1,46 @@
+{
+  "run": "golden-1",
+  "tasks": [
+    {
+      "id": "T-1",
+      "title": "Reset token store",
+      "feature": "F-1",
+      "covers": ["REQ-1"],
+      "after": [],
+      "files_scope": ["src/t-1/**"],
+      "discipline": "backend",
+      "stack_packs": [],
+      "consumes_contracts": [],
+      "risk": "med",
+      "cap": 4,
+      "size": "M",
+      "arch_triage": "fits",
+      "budget_usd": 5,
+      "spent_usd": 1.2,
+      "status": "merged",
+      "round": 1,
+      "deferred": []
+    },
+    {
+      "id": "T-2",
+      "title": "Reset endpoint",
+      "feature": "F-1",
+      "covers": ["REQ-2"],
+      "after": ["T-1"],
+      "files_scope": ["src/t-2/**"],
+      "discipline": "backend",
+      "stack_packs": [],
+      "consumes_contracts": [],
+      "risk": "med",
+      "cap": 4,
+      "size": "M",
+      "arch_triage": "fits",
+      "budget_usd": 5,
+      "spent_usd": 4.4,
+      "status": "parked",
+      "park_reason": "cap",
+      "round": 4,
+      "deferred": []
+    }
+  ]
+}

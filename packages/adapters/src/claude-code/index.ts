@@ -9,3 +9,5 @@ export const claudeCodeCapabilities: HostCapabilities = {
   turnCap: true,
   budgetCap: true,
 };
+
+export { statuslineIngestFromClaude } from "./statusline.js";

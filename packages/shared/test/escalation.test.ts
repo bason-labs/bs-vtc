@@ -1,5 +1,11 @@
-import { describe, it } from "vitest";
-import { EscalationAnswerSchema, EscalationOptionSchema, EscalationSchema } from "../src/index.js";
+import { describe, expect, it } from "vitest";
+import {
+  EscalationAnswerSchema,
+  EscalationOptionSchema,
+  EscalationSchema,
+  escalationFromQuestion,
+  QuestionSchema,
+} from "../src/index.js";
 import { NOW, validEscalation } from "./fixtures.js";
 import { expectInvalid, expectValid } from "./helpers.js";
 
@@ -48,9 +54,53 @@ describe("EscalationSchema", () => {
   ])("rejects invalid %s", (path, patch) => {
     expectInvalid(EscalationSchema, { ...validEscalation(), ...patch }, path);
   });
-  it("requires a task or feature", () => {
+  it("requires a task, a feature or a run phase", () => {
     const { task: _t, ...rest } = validEscalation();
     expectInvalid(EscalationSchema, rest, "task");
+  });
+  it("accepts run-scoped escalations raised before PLAN", () => {
+    const { task: _t, blocks: _b, ...rest } = validEscalation();
+    expectValid(EscalationSchema, {
+      ...rest,
+      phase: "specify",
+      reason: "spec_question",
+      raised_by: "qa",
+      options: [
+        { id: "a", label: "Expire after 15 minutes", effect: "clarify" },
+        { id: "b", label: "Expire after 24 hours", effect: "clarify" },
+      ],
+      recommended: "a",
+      evidence: [{ type: "spec_ref", ref: "REQ-3.AC-2" }],
+    });
+    expectValid(EscalationSchema, {
+      ...rest,
+      phase: "intake",
+      reason: "gate_infra",
+      question: "Calibration could not run the test suite twice. How should we proceed?",
+      options: [
+        { id: "retry", label: "Retry calibration", effect: "retry" },
+        { id: "hint", label: "Give the test command", effect: "hint" },
+      ],
+      recommended: "retry",
+      evidence: [{ type: "log_line", ref: ".vtc/state/calibrate.log:88" }],
+    });
+  });
+  it("phase is exclusive with task and feature", () => {
+    expectInvalid(EscalationSchema, { ...validEscalation(), phase: "build" }, "phase");
+  });
+  it("names the risk rule exactly when the reason is risk_rule", () => {
+    expectValid(EscalationSchema, {
+      ...validEscalation(),
+      reason: "risk_rule",
+      risk_rule: "db_migration",
+    });
+    expectInvalid(EscalationSchema, { ...validEscalation(), reason: "risk_rule" }, "risk_rule");
+    expectInvalid(EscalationSchema, { ...validEscalation(), risk_rule: "large_diff" }, "risk_rule");
+    expectInvalid(
+      EscalationSchema,
+      { ...validEscalation(), reason: "risk_rule", risk_rule: "vibes" },
+      "risk_rule",
+    );
   });
   it("rejects duplicate option ids and more than 4 options", () => {
     const opt = { id: "a", label: "x", effect: "hint" };
@@ -92,5 +142,54 @@ describe("EscalationAnswerSchema", () => {
   it("requires who_should_have_caught", () => {
     expectInvalid(EscalationAnswerSchema, { option: "a" }, "who_should_have_caught");
     expectValid(EscalationAnswerSchema, { option: "a", who_should_have_caught: "none" });
+  });
+});
+
+describe("QuestionSchema and escalationFromQuestion", () => {
+  const question = () => ({
+    question: "Should reset links expire after 15 minutes or 24 hours?",
+    options: [
+      { id: "short", label: "15 minutes", effect: "clarify" },
+      { id: "long", label: "24 hours", effect: "clarify" },
+    ],
+    recommended: "short",
+    evidence: [{ type: "spec_ref", ref: "REQ-3.AC-2" }],
+  });
+  it.each([
+    ["options", { options: [{ id: "a", label: "only", effect: "clarify" }] }],
+    ["recommended", { recommended: "medium" }],
+    ["evidence", { evidence: [] }],
+    ["question", { question: "" }],
+  ])("rejects invalid %s", (path, patch) => {
+    expectInvalid(QuestionSchema, { ...question(), ...patch }, path);
+  });
+  it("maps a role question to an escalation without losing anything", () => {
+    const q = expectValid(QuestionSchema, question());
+    const escalation = escalationFromQuestion(q, {
+      id: "E-5",
+      run: "r1",
+      reason: "spec_question",
+      task: "T-7",
+      raised_by: "qa",
+      created_at: NOW,
+      blocks: ["T-7"],
+    });
+    expect(escalation).toMatchObject({
+      question: q.question,
+      options: q.options,
+      recommended: q.recommended,
+      evidence: q.evidence,
+      task: "T-7",
+      reason: "spec_question",
+      raised_by: "qa",
+      blocks: ["T-7"],
+    });
+    expect(EscalationSchema.parse(escalation)).toEqual(escalation);
+  });
+  it("refuses to build an escalation without a scope", () => {
+    const q = expectValid(QuestionSchema, question());
+    expect(() =>
+      escalationFromQuestion(q, { id: "E-6", run: "r1", reason: "spec_question", created_at: NOW }),
+    ).toThrow();
   });
 });

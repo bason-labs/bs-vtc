@@ -14,13 +14,13 @@ describe("EventSchema", () => {
   it("accepts a role event", () => {
     expectValid(EventSchema, validEvent());
   });
-  it("accepts a minimal engine event and defaults data", () => {
+  it("accepts a minimal event of an unknown (open) type and defaults data", () => {
     const event = expectValid(EventSchema, {
       v: 1,
       seq: 2,
       ts: "2026-10-13T08:00:01Z",
       run: "r1",
-      type: "run.started",
+      type: "research.cached",
       actor: "engine",
     });
     expect(event.data).toEqual({});

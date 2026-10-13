@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import {
+  AcceptanceCriterionIdSchema,
   DisciplineSchema,
   EscalationIdSchema,
   FeatureIdSchema,
@@ -8,7 +9,10 @@ import {
   IsoDateTimeSchema,
   LocationSchema,
   RelPathSchema,
+  PlatformSchema,
   RequirementIdSchema,
+  RequirementRefSchema,
+  RiskRuleIdSchema,
   RoleIdSchema,
   RunIdSchema,
   SessionRefSchema,
@@ -38,6 +42,31 @@ describe("identifiers", () => {
   it.each(["REQ-0", "req-1", "AC-1", "REQ-1.AC1"])("rejects requirement %s", (id) => {
     expectInvalid(RequirementIdSchema, id);
   });
+  it.each(["REQ-3.AC-2", "SEC-1.AC-10"])("accepts acceptance criterion %s", (id) => {
+    expectValid(AcceptanceCriterionIdSchema, id);
+    expectValid(RequirementRefSchema, id);
+  });
+  it.each(["AC-1", "REQ-3", "REQ-3.AC-0", "REQ-3.ac-1", "REQ-3.AC-1.AC-2"])(
+    "rejects acceptance criterion %s",
+    (id) => {
+      expectInvalid(AcceptanceCriterionIdSchema, id);
+    },
+  );
+  it("requirement refs accept a REQ or one of its ACs, nothing else", () => {
+    expectValid(RequirementRefSchema, "REQ-3");
+    expectInvalid(RequirementRefSchema, "AC-1");
+    expectInvalid(RequirementRefSchema, "REQ-3.");
+  });
+  it("lists the 13 risk rules of §7.6 and the 5 download platforms of §4.4", () => {
+    expect(RiskRuleIdSchema.options).toHaveLength(13);
+    expect(PlatformSchema.options).toEqual([
+      "darwin-arm64",
+      "darwin-x64",
+      "linux-x64",
+      "linux-arm64",
+      "windows-x64",
+    ]);
+  });
   it.each(["run-1", "2026-10-13_a.b"])("accepts run id %s", (id) => {
     expectValid(RunIdSchema, id);
   });
@@ -58,8 +87,11 @@ describe("hashes and time", () => {
     expectValid(Sha256HexSchema, "f".repeat(64));
     expectInvalid(Sha256HexSchema, "F".repeat(64));
     expectInvalid(Sha256HexSchema, "f".repeat(63));
-    expectValid(GitShaSchema, "abc1234");
-    expectInvalid(GitShaSchema, "abc12");
+    expectValid(GitShaSchema, "a".repeat(40));
+    expectValid(GitShaSchema, "b".repeat(64));
+    expectInvalid(GitShaSchema, "abc1234");
+    expectInvalid(GitShaSchema, "a".repeat(41));
+    expectInvalid(GitShaSchema, "A".repeat(40));
   });
   it("requires ISO timestamps with zone", () => {
     expectValid(IsoDateTimeSchema, "2026-10-13T08:00:00Z");

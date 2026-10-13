@@ -9,6 +9,8 @@ import type {
 } from "../src/index.js";
 
 export const SHA = "a".repeat(64);
+/** A full 40-hex git commit id. */
+export const COMMIT = "0123456789abcdef0123456789abcdef01234567";
 export const NOW = "2026-10-13T08:00:00.000Z";
 
 export const validTask = (): TaskInput => ({
@@ -30,8 +32,8 @@ export const validTask = (): TaskInput => ({
   spent_usd: 1.25,
   status: "fixing",
   round: 2,
-  baseline_revision: "0123abcd",
-  worktree: "/tmp/wt/T-7",
+  baseline_revision: COMMIT,
+  worktree: ".vtc/state/worktrees/T-7",
   branch: "vtc/T-7",
   session_ref: { host: "claude-code", id: "sess-123" },
   deferred: [SHA],
@@ -107,7 +109,13 @@ export const validEvent = (): VtcEventInput => ({
   type: "role.submitted",
   actor: "role",
   role: "engineer",
-  data: { exit: "built" },
+  data: {
+    action_id: "a-7",
+    exit: "built",
+    findings: 0,
+    questions: 0,
+    session_ref: { host: "codex", id: "sess-9" },
+  },
   prompt_sha: SHA,
   host: "codex",
   model: "gpt-5-codex",
@@ -148,7 +156,7 @@ export const validRoleContract = (): RoleContractInput => ({
 
 export const validGatesConfig = (): GatesConfigInput => ({
   version: 1,
-  baseline: { revision: "0123abcd", calibrated_at: NOW, confirmed: true, flaky_tests: ["t1"] },
+  baseline: { revision: COMMIT, calibrated_at: NOW, confirmed: true, flaky_tests: ["t1"] },
   sources: ["task_runner", "ci"],
   gates: [
     {
@@ -167,7 +175,68 @@ export const validGatesConfig = (): GatesConfigInput => ({
     { id: "checkov", layer: "L4", command: ["checkov", "-d", "."], when_changed: ["infra/**"] },
     { id: "deps", layer: "L6", command: ["depcruise", "src"], blocking: false },
   ],
-  scanners: [{ name: "gitleaks", version: "8.30.0", sha256: SHA }],
 });
 
 export const validProjectConfig = (): ProjectConfigInput => ({ version: 1 });
+
+export const validGateResult = () => ({
+  gate_id: "tests",
+  layer: "L2",
+  phase: "verify",
+  status: "fail",
+  blocking: true,
+  new_violations: 2,
+  baseline_violations: 1,
+  tests: { executed: 120, skipped: 3, failed: 2 },
+  report: { format: "junit", path: ".vtc/evidence/T-7/round-2/junit.xml" },
+  failure_class: "product",
+  evidence: [{ type: "junit", ref: ".vtc/evidence/T-7/round-2/junit.xml#reset-expiry" }],
+  duration_ms: 18250,
+});
+
+export const validGateReport = () => ({
+  run: "run-2026-10-13",
+  task: "T-7",
+  reason: "round",
+  scope: "affected",
+  base: COMMIT,
+  head: "fedcba9876543210fedcba9876543210fedcba98",
+  results: [
+    {
+      gate_id: "typecheck",
+      layer: "L0",
+      phase: "verify",
+      status: "pass",
+      blocking: true,
+      new_violations: 0,
+      baseline_violations: 0,
+      duration_ms: 4100,
+    },
+    validGateResult(),
+  ],
+  verdict: "fail",
+  started_at: NOW,
+  finished_at: "2026-10-13T08:00:30.000Z",
+});
+
+export const validTaskDraft = () => ({
+  id: "T-7",
+  title: "Add password reset endpoint",
+  feature: "F-1",
+  covers: ["REQ-3", "SEC-1"],
+  after: ["T-2"],
+  files_scope: ["src/auth/reset/**"],
+  discipline: "backend",
+  stack_packs: ["node-nest"],
+  provides_contract: { kind: "openapi", path: "contracts/auth.yaml" },
+  risk: "high",
+  risk_tags: ["auth"],
+  size: "M",
+  arch_triage: "extends",
+  intent: {
+    statement: "A user can reset a forgotten password through an emailed, single-use link.",
+    always: ["Bind the token to one user"],
+    never: ["Reveal whether an email exists"],
+    io_matrix: [{ case: "expired token", input: "token older than 15 min", expected: "410" }],
+  },
+});

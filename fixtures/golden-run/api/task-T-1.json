@@ -1,0 +1,72 @@
+{
+  "run": "golden-1",
+  "task": {
+    "id": "T-1",
+    "title": "Reset token store",
+    "feature": "F-1",
+    "covers": ["REQ-1"],
+    "after": [],
+    "files_scope": ["src/t-1/**"],
+    "discipline": "backend",
+    "stack_packs": [],
+    "consumes_contracts": [],
+    "risk": "med",
+    "cap": 4,
+    "size": "M",
+    "arch_triage": "fits",
+    "budget_usd": 5,
+    "spent_usd": 1.2,
+    "status": "merged",
+    "round": 1,
+    "deferred": []
+  },
+  "plan_file": ".vtc/tasks/T-1.md",
+  "findings": [],
+  "gate_reports": [
+    {
+      "run": "golden-1",
+      "task": "T-1",
+      "reason": "round",
+      "scope": "affected",
+      "base": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "head": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+      "results": [
+        {
+          "gate_id": "typecheck",
+          "layer": "L0",
+          "phase": "verify",
+          "status": "pass",
+          "blocking": true,
+          "new_violations": 0,
+          "baseline_violations": 0,
+          "evidence": [],
+          "duration_ms": 3900
+        },
+        {
+          "gate_id": "tests",
+          "layer": "L2",
+          "phase": "verify",
+          "status": "pass",
+          "blocking": true,
+          "new_violations": 0,
+          "baseline_violations": 0,
+          "tests": {
+            "executed": 48,
+            "skipped": 0,
+            "failed": 0
+          },
+          "report": {
+            "format": "junit",
+            "path": ".vtc/evidence/T-1/round-1/junit.xml"
+          },
+          "evidence": [],
+          "duration_ms": 12100
+        }
+      ],
+      "verdict": "pass",
+      "started_at": "2026-10-13T09:18:00.000Z",
+      "finished_at": "2026-10-13T09:19:00.000Z"
+    }
+  ],
+  "escalations": []
+}

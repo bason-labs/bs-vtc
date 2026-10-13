@@ -2,7 +2,11 @@
   "extends": "./tsconfig.base.json",
   "compilerOptions": {
     "noEmit": true,
-    "customConditions": ["@vtc/source"]
+    "jsx": "preserve",
+    "customConditions": ["@vtc/source"],
+    "paths": {
+      "@/*": ["./apps/dashboard/src/*"]
+    }
   },
-  "include": ["packages/*/src/**/*.ts"]
+  "include": ["packages/*/src/**/*.ts", "apps/*/src/**/*.ts", "apps/*/src/**/*.tsx"]
 }

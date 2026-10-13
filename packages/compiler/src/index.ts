@@ -1,5 +1,11 @@
 /** @vtc/compiler: neutral role sources → host plugin formats (§4.1, §4.4). Depends on @vtc/shared only. */
-import { RoleContractSchema, type HostId, type RoleContract } from "@vtc/shared";
+import {
+  agentNameFor,
+  RoleContractSchema,
+  splitRolePrompt,
+  type HostId,
+  type RoleContract,
+} from "@vtc/shared";
 
 /** Generated output directories per host (§4.4; never hand-edited). */
 export const COMPILE_TARGETS: Readonly<Record<HostId, string>> = {
@@ -22,3 +28,19 @@ export const checkRoleContract = (document: unknown): RoleContractCheck => {
     ),
   };
 };
+
+export type RolePromptCheck =
+  | { readonly ok: true; readonly locked: string; readonly editable: string }
+  | { readonly ok: false; readonly errors: readonly string[] };
+
+/**
+ * Validate a `roles/<role>/prompt.md`: exactly one locked core and one editable section, in
+ * that order, separated by the `PROMPT_MARKERS` lines (§5.1, §13).
+ */
+export const checkRolePrompt = (text: string): RolePromptCheck => splitRolePrompt(text);
+
+/** Compiled agent names for a role: one per mode, or one for a role without modes (AD-14). */
+export const compiledAgentNames = (role: RoleContract): string[] =>
+  role.modes === undefined
+    ? [agentNameFor(role.id)]
+    : Object.keys(role.modes).map((mode) => agentNameFor(role.id, mode));

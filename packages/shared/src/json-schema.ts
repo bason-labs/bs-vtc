@@ -4,50 +4,120 @@ import {
   AnswerInputSchema,
   ApproveInputSchema,
   ChangeRequestInputSchema,
+  ChangeRequestResultSchema,
+  DesignReviewCommentInputSchema,
+  DesignReviewResultSchema,
+  EscalationListSchema,
+  EventPageSchema,
+  HealthResultSchema,
+  HttpErrorSchema,
+  IngestResultSchema,
   LeadActionSchema,
   NextResultSchema,
+  RunControlResultSchema,
+  RunListSchema,
+  RunScopedInputSchema,
   StartInputSchema,
+  StartResultSchema,
+  StatusResultSchema,
   SubmitInputSchema,
+  SubmitResultSchema,
+  TaskDetailSchema,
+  TaskListSchema,
 } from "./engine-api.js";
+import { EngineDiscoverySchema } from "./engine-instance.js";
 import { EscalationSchema } from "./escalation.js";
+import { EVENT_PAYLOAD_SCHEMAS } from "./event-payloads.js";
 import { EventSchema } from "./event.js";
 import { FeatureSchema } from "./feature.js";
 import { FindingDraftSchema, FindingSchema } from "./finding.js";
-import { GatesConfigSchema } from "./gates-config.js";
-import { HostOutcomeSchema } from "./interfaces/host-adapter.js";
+import {
+  GateReportSchema,
+  GateResultSchema,
+  GateRunRequestSchema,
+  WriteScopeReportSchema,
+} from "./gate-result.js";
+import { GatesConfigSchema, ScannerPinsSchema } from "./gates-config.js";
+import { HostOutcomeSchema, SubagentInstructionSchema } from "./interfaces/host-adapter.js";
 import { ProjectConfigSchema } from "./project-config.js";
+import { QuestionSchema } from "./question.js";
 import { RoleContractSchema } from "./role-contract.js";
 import { RoleResultSchema } from "./role-result.js";
-import { TaskSchema } from "./task.js";
-import { UsageSnapshotSchema } from "./usage.js";
+import { RunSchema } from "./run.js";
+import { PlanFileFrontmatterSchema, TaskDraftSchema, TaskSchema } from "./task.js";
+import { AssertionProvenanceSchema } from "./traceability.js";
+import { StatuslineIngestSchema, UsageReportSchema, UsageSnapshotSchema } from "./usage.js";
 import { WorkflowEdgeSchema, WorkflowGraphSchema, WorkflowNodeSchema } from "./workflow.js";
 
 /** Every frozen contract by name. */
 export const CONTRACT_SCHEMAS = {
+  // domain records
+  Run: RunSchema,
   Task: TaskSchema,
+  TaskDraft: TaskDraftSchema,
+  PlanFileFrontmatter: PlanFileFrontmatterSchema,
   Feature: FeatureSchema,
   Finding: FindingSchema,
   FindingDraft: FindingDraftSchema,
+  Question: QuestionSchema,
   Escalation: EscalationSchema,
   Event: EventSchema,
+  EventPayloads: z.strictObject(EVENT_PAYLOAD_SCHEMAS),
   RoleResult: RoleResultSchema,
   RoleContract: RoleContractSchema,
+  AssertionProvenance: AssertionProvenanceSchema,
+  // config files
   ProjectConfig: ProjectConfigSchema,
   GatesConfig: GatesConfigSchema,
+  ScannerPins: ScannerPinsSchema,
+  // gate runner (AD-13)
+  GateRunRequest: GateRunRequestSchema,
+  GateResult: GateResultSchema,
+  GateReport: GateReportSchema,
+  WriteScopeReport: WriteScopeReportSchema,
+  // usage
   UsageSnapshot: UsageSnapshotSchema,
+  UsageReport: UsageReportSchema,
+  StatuslineIngest: StatuslineIngestSchema,
+  // flow graph
   WorkflowNode: WorkflowNodeSchema,
   WorkflowEdge: WorkflowEdgeSchema,
   WorkflowGraph: WorkflowGraphSchema,
+  // hosts
   HostOutcome: HostOutcomeSchema,
+  SubagentInstruction: SubagentInstructionSchema,
+  // engine instance (AD-12)
+  EngineDiscovery: EngineDiscoverySchema,
+  // MCP tools (AD-4)
+  RunScopedInput: RunScopedInputSchema,
+  StartInput: StartInputSchema,
+  StartResult: StartResultSchema,
   LeadAction: LeadActionSchema,
   NextResult: NextResultSchema,
-  StartInput: StartInputSchema,
   SubmitInput: SubmitInputSchema,
+  SubmitResult: SubmitResultSchema,
+  StatusResult: StatusResultSchema,
+  EscalationList: EscalationListSchema,
   AnswerInput: AnswerInputSchema,
   ApproveInput: ApproveInputSchema,
   ChangeRequestInput: ChangeRequestInputSchema,
+  ChangeRequestResult: ChangeRequestResultSchema,
+  RunControlResult: RunControlResultSchema,
+  // HTTP (AD-5)
+  HealthResult: HealthResultSchema,
+  RunList: RunListSchema,
+  EventPage: EventPageSchema,
+  TaskList: TaskListSchema,
+  TaskDetail: TaskDetailSchema,
+  IngestResult: IngestResultSchema,
+  DesignReviewCommentInput: DesignReviewCommentInputSchema,
+  DesignReviewResult: DesignReviewResultSchema,
+  HttpError: HttpErrorSchema,
 } as const;
 export type ContractName = keyof typeof CONTRACT_SCHEMAS;
+
+export const isContractName = (name: string): name is ContractName =>
+  Object.hasOwn(CONTRACT_SCHEMAS, name);
 
 export type JsonSchema = Record<string, unknown>;
 
@@ -57,7 +127,111 @@ export interface JsonSchemaOptions {
    * `output` describes the parsed value: defaulted fields are required.
    */
   readonly io?: "input" | "output";
+  /**
+   * `contract` (default): the plain export. `structured-output`: the form handed to hosts as
+   * `--output-schema` / `--json-schema` (AD-3 rule 8): an object root (a root union is merged
+   * into one object), every property required (optional ones become nullable), no `default`.
+   * Parse what the host returns with {@link fromStructuredOutput}, which re-validates with Zod.
+   */
+  readonly target?: "contract" | "structured-output";
 }
+
+/** Contracts a host may be asked to produce as structured output. */
+export const STRUCTURED_OUTPUT_CONTRACTS = [
+  "RoleResult",
+] as const satisfies readonly ContractName[];
+export type StructuredOutputContract = (typeof STRUCTURED_OUTPUT_CONTRACTS)[number];
+
+const isRecord = (value: unknown): value is Record<string, unknown> =>
+  typeof value === "object" && value !== null && !Array.isArray(value);
+
+const NULL_SCHEMA = { type: "null" };
+
+const nullable = (schema: unknown): unknown => {
+  if (isRecord(schema) && Array.isArray(schema.anyOf)) {
+    const members = schema.anyOf as unknown[];
+    return members.some((m) => isRecord(m) && m.type === "null")
+      ? schema
+      : { ...schema, anyOf: [...members, NULL_SCHEMA] };
+  }
+  return { anyOf: [schema, NULL_SCHEMA] };
+};
+
+/** Allowed literal values of a discriminator property, or null if it is not one. */
+const literalValues = (schema: unknown): unknown[] | null => {
+  if (!isRecord(schema)) return null;
+  if ("const" in schema) return [schema.const];
+  if (Array.isArray(schema.enum)) return schema.enum as unknown[];
+  return null;
+};
+
+/** Merges a union of object schemas into one object schema (a host-friendly root). */
+const mergeObjectUnion = (
+  variants: readonly Record<string, unknown>[],
+): Record<string, unknown> => {
+  const names = [
+    ...new Set(variants.flatMap((v) => Object.keys(isRecord(v.properties) ? v.properties : {}))),
+  ];
+  const properties: Record<string, unknown> = {};
+  const required: string[] = [];
+  for (const name of names) {
+    const defs = variants.map((v) => (isRecord(v.properties) ? v.properties[name] : undefined));
+    const present = defs.filter((d) => d !== undefined);
+    const everywhere = present.length === variants.length;
+    const literals = present.map(literalValues);
+    let merged: unknown;
+    if (everywhere && literals.every((l) => l !== null)) {
+      const values = [...new Set(literals.flat())];
+      const first = present[0];
+      merged = {
+        ...(isRecord(first) && typeof first.type === "string" ? { type: first.type } : {}),
+        enum: values,
+      };
+    } else {
+      const distinct = [...new Map(present.map((d) => [JSON.stringify(d), d])).values()];
+      merged = distinct.length === 1 ? distinct[0] : { anyOf: distinct };
+    }
+    const requiredEverywhere =
+      everywhere &&
+      variants.every((v) => Array.isArray(v.required) && (v.required as unknown[]).includes(name));
+    properties[name] = merged;
+    if (requiredEverywhere) required.push(name);
+  }
+  return { type: "object", properties, required, additionalProperties: false };
+};
+
+const toStructured = (schema: unknown): unknown => {
+  if (Array.isArray(schema)) return schema.map(toStructured);
+  if (!isRecord(schema)) return schema;
+  let node: Record<string, unknown> = { ...schema };
+  delete node.default;
+  const union = node.oneOf ?? node.anyOf;
+  if (
+    Array.isArray(union) &&
+    union.length > 1 &&
+    union.every((v) => isRecord(v) && v.type === "object")
+  ) {
+    const { oneOf: _o, anyOf: _a, ...rest } = node;
+    node = { ...rest, ...mergeObjectUnion(union as Record<string, unknown>[]) };
+  }
+  const out: Record<string, unknown> = {};
+  for (const [key, value] of Object.entries(node)) {
+    if (key === "properties" && isRecord(value)) {
+      const required = new Set(Array.isArray(node.required) ? (node.required as string[]) : []);
+      const props: Record<string, unknown> = {};
+      for (const [name, prop] of Object.entries(value)) {
+        const converted = toStructured(prop);
+        props[name] = required.has(name) ? converted : nullable(converted);
+      }
+      out.properties = props;
+      out.required = Object.keys(value);
+    } else if (key !== "required") {
+      out[key] = toStructured(value);
+    }
+  }
+  if (!("properties" in out) && "required" in node) out.required = node.required;
+  return out;
+};
 
 /**
  * JSON Schema (draft 2020-12) for one contract. Cross-field rules (`superRefine`) are not
@@ -70,7 +244,9 @@ export const jsonSchemaFor = (name: ContractName, options: JsonSchemaOptions = {
     io: options.io ?? "input",
     unrepresentable: "any",
   }) as JsonSchema;
-  return { $id: `https://vtc.local/schemas/${name}.json`, title: name, ...schema };
+  const body =
+    options.target === "structured-output" ? (toStructured(schema) as JsonSchema) : schema;
+  return { $id: `https://vtc.local/schemas/${name}.json`, title: name, ...body };
 };
 
 /** JSON Schemas for every contract, keyed by name. */
@@ -81,3 +257,24 @@ export const jsonSchemas = (options: JsonSchemaOptions = {}): Record<ContractNam
       jsonSchemaFor(name, options),
     ]),
   ) as Record<ContractName, JsonSchema>;
+
+const stripNulls = (value: unknown): unknown => {
+  if (Array.isArray(value)) return value.map(stripNulls);
+  if (!isRecord(value)) return value;
+  return Object.fromEntries(
+    Object.entries(value)
+      .filter(([, v]) => v !== null)
+      .map(([k, v]) => [k, stripNulls(v)]),
+  );
+};
+
+/**
+ * Parses a host's structured output back into the contract: `null` means "absent" (these
+ * contracts have no nullable fields, which `json-schema.test.ts` guards), then Zod re-validates
+ * every rule, including the cross-field ones JSON Schema cannot express (AD-3 rule 3).
+ */
+export const fromStructuredOutput = <N extends StructuredOutputContract>(
+  name: N,
+  value: unknown,
+): z.ZodSafeParseResult<z.infer<(typeof CONTRACT_SCHEMAS)[N]>> =>
+  CONTRACT_SCHEMAS[name].safeParse(stripNulls(value));

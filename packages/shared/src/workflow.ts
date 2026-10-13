@@ -25,13 +25,17 @@ export const WorkflowNodeKindSchema = z.enum([
 ]);
 export type WorkflowNodeKind = z.infer<typeof WorkflowNodeKindSchema>;
 
-/** Node display states (§17). `looping` carries round/cap. */
+/**
+ * Node display states (§17). `looping` carries round/cap; `interrupted` = stopped by a usage
+ * limit, waiting for the auto-resume (§6.8, §6.9).
+ */
 export const WorkflowNodeStateSchema = z.enum([
   "waiting",
   "running",
   "passed",
   "looping",
   "parked",
+  "interrupted",
   "done",
 ]);
 export type WorkflowNodeState = z.infer<typeof WorkflowNodeStateSchema>;

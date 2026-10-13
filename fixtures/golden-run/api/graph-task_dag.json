@@ -1,0 +1,40 @@
+{
+  "id": "golden-1-tasks",
+  "scope": "task_dag",
+  "nodes": [
+    {
+      "id": "t-1",
+      "kind": "subflow",
+      "label": "T-1 Reset token store",
+      "task": "T-1",
+      "ports_in": [],
+      "ports_out": [],
+      "reason_added": "planner",
+      "state": "passed",
+      "round": 1,
+      "cap": 4,
+      "subflow": "task-t-1"
+    },
+    {
+      "id": "t-2",
+      "kind": "subflow",
+      "label": "T-2 Reset endpoint",
+      "task": "T-2",
+      "ports_in": [],
+      "ports_out": [],
+      "reason_added": "planner",
+      "state": "parked",
+      "round": 4,
+      "cap": 4,
+      "park_reason": "cap",
+      "subflow": "task-t-2"
+    }
+  ],
+  "edges": [
+    {
+      "id": "t-1-t-2",
+      "from": "t-1",
+      "to": "t-2"
+    }
+  ]
+}

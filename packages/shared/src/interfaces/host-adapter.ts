@@ -1,6 +1,7 @@
 /**
  * Host adapter interface (§4.1, §12.1). Implemented by packages/adapters (claude-code, codex);
- * consumed by the engine, which never imports an implementation (AD-1).
+ * consumed by the engine, which never imports an implementation (AD-1). The cli constructs the
+ * adapters, injects them into the engine and calls `dispose()` on shutdown (AD-6).
  */
 import { z } from "zod";
 import {
@@ -11,8 +12,8 @@ import {
   type RoleId,
   type SessionRef,
 } from "../primitives.js";
-import type { RoleHostModel, RoleTools } from "../role-contract.js";
-import type { UsageSnapshot } from "../usage.js";
+import type { ResolvedModel, RoleTools } from "../role-contract.js";
+import { UsageWindowKindSchema, type UsageSnapshot } from "../usage.js";
 
 /**
  * Terminal outcome of a role run, normalised across hosts to `done | limit | auth | error`
@@ -34,10 +35,13 @@ export const HostOutcomeSchema = z.discriminatedUnion("kind", [
     session_ref: SessionRefSchema.nullable(),
     /** Reset time if the host reported one; `null` = unknown, back off and re-read usage (§6.9). */
     resets_at: IsoDateTimeSchema.nullable(),
-    /** Which window or model limit was hit, if known (e.g. `five_hour`, `seven_day`). */
-    window: z.string().min(1).nullable(),
+    /** Which plan window was hit, if known; a per-model limit sets `model` instead. */
+    window: UsageWindowKindSchema.nullable(),
     model: z.string().min(1).nullable(),
     message: z.string(),
+    /** Spend before the limit hit, so partial work is still counted (§11). */
+    tokens: TokenUsageSchema.nullable(),
+    cost_usd: z.number().nonnegative().nullable(),
   }),
   z.strictObject({
     kind: z.literal("auth"),
@@ -47,9 +51,32 @@ export const HostOutcomeSchema = z.discriminatedUnion("kind", [
     kind: z.literal("error"),
     message: z.string(),
     retryable: z.boolean(),
+    /** Spend before the failure, when the host reported it (§11). */
+    tokens: TokenUsageSchema.nullable(),
+    cost_usd: z.number().nonnegative().nullable(),
   }),
 ]);
 export type HostOutcome = z.infer<typeof HostOutcomeSchema>;
+
+/** The outcomes a Lead reports through `submit` when a subagent did not finish (§4.1, §6.9). */
+export const HostFailureOutcomeSchema = z.discriminatedUnion("kind", [
+  HostOutcomeSchema.options[1],
+  HostOutcomeSchema.options[2],
+  HostOutcomeSchema.options[3],
+]);
+export type HostFailureOutcome = z.infer<typeof HostFailureOutcomeSchema>;
+
+/**
+ * What the Lead runs for a `spawn_role` action (subagent dispatch). `agent` is the compiled
+ * agent name (`agentNameFor`), `prompt` the short instruction pointing at the task pack.
+ */
+export const SubagentInstructionSchema = z.strictObject({
+  agent: z.string().min(1).max(128),
+  prompt: z.string().min(1).max(8000),
+  /** Run as a background subagent where the host supports it (§4.2 step 2). */
+  background: z.boolean(),
+});
+export type SubagentInstruction = z.infer<typeof SubagentInstructionSchema>;
 
 /** What a host can enforce itself (§12.1). Anything false is enforced by the engine only. */
 export interface HostCapabilities {
@@ -101,11 +128,17 @@ export interface SandboxProfile {
   readonly cliArgs: readonly string[];
 }
 
+/**
+ * Dispatch rule (AD-4 rule 4): `subagent` spawns are performed by the Lead in its own session
+ * (the adapter returns a {@link SubagentInstruction}, which the engine sends as a `spawn_role`
+ * action); `headless` runs are launched by the engine through this adapter and never appear as
+ * Lead actions.
+ */
 export interface SpawnRoleRequest {
   readonly role: RoleId;
   readonly mode?: string;
-  /** Model tier/effort for this host, resolved by the engine from role.yaml + project.yaml. */
-  readonly model: RoleHostModel;
+  /** Concrete model, resolved by the engine from role.yaml + project.yaml (AD-6 rule 2). */
+  readonly model: ResolvedModel;
   readonly dispatch: "subagent" | "headless";
   /** Absolute working directory (the task's worktree). */
   readonly cwd: string;
@@ -118,14 +151,6 @@ export interface SpawnRoleRequest {
   readonly timeoutMs: number;
   readonly maxTurns?: number;
   readonly maxBudgetUsd?: number;
-}
-
-/** In subagent mode the Lead performs the spawn inside its own session. */
-export interface SubagentInstruction {
-  /** Compiled agent name for this host. */
-  readonly agent: string;
-  readonly prompt: string;
-  readonly background: boolean;
 }
 
 /** A headless child process started by the adapter. */
@@ -164,6 +189,19 @@ export interface HostAdapter {
   resume(session: SessionRef, request: SpawnRoleRequest): Promise<SpawnResult>;
   /** Pure: host-specific sandbox settings for a role's tool profile. */
   sandboxProfile(request: SandboxProfileRequest): SandboxProfile;
-  /** Read usage from sanctioned sources only (§6.9). Unknown data stays null. */
-  readUsage(): Promise<UsageSnapshot>;
+  /**
+   * Pull usage from a sanctioned source the adapter owns (§6.9), e.g. Codex
+   * `account/rateLimits/read`. Absent when the host pushes usage elsewhere: Claude usage arrives
+   * on the engine's statusline ingest route and from SDK events of engine-launched runs.
+   * Unknown data stays null, never 0.
+   */
+  readUsage?(): Promise<UsageSnapshot>;
+  /**
+   * Subscribe to pushed usage changes (Codex `account/rateLimits/updated`). Returns an
+   * unsubscribe function. Starting the subscription may start a managed child process
+   * (`codex app-server`), which `dispose()` must stop.
+   */
+  watchUsage?(onUpdate: (snapshot: UsageSnapshot) => void): () => void;
+  /** Stop every child process and subscription this adapter owns: no orphans (§15). Idempotent. */
+  dispose(): Promise<void>;
 }

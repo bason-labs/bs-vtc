@@ -1,9 +1,14 @@
-/** `.vtc/gates.yml` (§4.3, §7): calibrated gate commands, the baseline, and scanner pins. */
+/**
+ * `.vtc/gates.yml` (§4.3, §7): calibrated gate commands and the baseline of one project.
+ * Scanner pins are product data, not project data: they live in the product's `gates/` directory
+ * (`gates/scanners.json`, {@link ScannerPinsSchema}) and are embedded in the binary (§4.4).
+ */
 import { z } from "zod";
 import {
   GitShaSchema,
   GlobSchema,
   IsoDateTimeSchema,
+  PlatformSchema,
   RelPathSchema,
   Sha256HexSchema,
   SlugSchema,
@@ -62,13 +67,46 @@ export const GateSchema = z
   });
 export type Gate = z.infer<typeof GateSchema>;
 
-/** Scanner binaries are pinned by version and SHA-256 and never auto-updated (§7.2, §15). */
-export const ScannerPinSchema = z.strictObject({
-  name: SlugSchema,
-  version: z.string().min(1).max(64),
-  sha256: Sha256HexSchema,
-});
+/**
+ * A scanner pinned by version and per-platform SHA-256, never auto-updated (§7.2, §15). Each
+ * download target has its own checksum (§4.4). `url` is a template with `{version}` and
+ * `{platform}` placeholders. `vtc doctor` downloads into `~/.vtc/` and verifies the checksum.
+ */
+export const ScannerPinSchema = z
+  .strictObject({
+    name: SlugSchema,
+    version: z.string().min(1).max(64),
+    url: z
+      .url()
+      .refine((url) => url.startsWith("https://"), "scanner downloads must use https")
+      .refine((url) => url.includes("{platform}"), "url must contain {platform}"),
+    sha256: z.partialRecord(PlatformSchema, Sha256HexSchema),
+    license: z.string().min(1).max(100),
+  })
+  .superRefine((pin, ctx) => {
+    if (Object.keys(pin.sha256).length === 0) {
+      ctx.addIssue({
+        code: "custom",
+        path: ["sha256"],
+        message: "pin at least one platform checksum",
+      });
+    }
+  });
 export type ScannerPin = z.infer<typeof ScannerPinSchema>;
+
+/** The product's scanner pin file, `gates/scanners.json` (§4.4). */
+export const ScannerPinsSchema = z
+  .strictObject({
+    version: z.literal(1),
+    scanners: z.array(ScannerPinSchema).default([]),
+  })
+  .superRefine((pins, ctx) => {
+    const names = pins.scanners.map((s) => s.name);
+    if (new Set(names).size !== names.length) {
+      ctx.addIssue({ code: "custom", path: ["scanners"], message: "duplicate scanner pins" });
+    }
+  });
+export type ScannerPins = z.infer<typeof ScannerPinsSchema>;
 
 export const GatesConfigSchema = z
   .strictObject({
@@ -83,7 +121,6 @@ export const GatesConfigSchema = z
     }),
     sources: z.array(CalibrationSourceSchema).default([]),
     gates: z.array(GateSchema).min(1),
-    scanners: z.array(ScannerPinSchema).default([]),
   })
   .superRefine((config, ctx) => {
     const ids = config.gates.map((g) => g.id);
@@ -94,10 +131,6 @@ export const GatesConfigSchema = z
         path: ["gates"],
         message: `duplicate gate ids: ${[...new Set(dupes)].join(", ")}`,
       });
-    }
-    const scanners = config.scanners.map((s) => s.name);
-    if (new Set(scanners).size !== scanners.length) {
-      ctx.addIssue({ code: "custom", path: ["scanners"], message: "duplicate scanner pins" });
     }
   });
 export type GatesConfig = z.infer<typeof GatesConfigSchema>;
