@@ -16,6 +16,7 @@ import {
   SubmitInputSchema,
   type LeadAction,
 } from "@vtc/shared";
+import { guardDirFor } from "../../src/core/guard.js";
 import { connectEngineClient, serveEngineSocket } from "../../src/mcp/index.js";
 import { cleanupDirs, git, writeFile } from "../helpers/repo.js";
 import {
@@ -362,5 +363,37 @@ describe("Lead-only tools from role sessions (spine §7, until the Codex isolati
       await server.close();
       await h.release();
     }
+  });
+  it("a role session that submitted never becomes the Lead (finding lead-only-tools-self-declared-client)", async () => {
+    const h = createHarness();
+    await start(h);
+    only(await next(h), "repo_cartographer");
+    await h.engine.settle();
+    const engine = h.reopen();
+    Object.assign(h, { engine });
+    const role = { host: "claude-code" as const, session: "S-role", client: "bridge" as const };
+    const lead = { host: "claude-code" as const, session: "S-lead", client: "bridge" as const };
+    const approve = {
+      gates: ["G1" as const],
+      decision: "approve" as const,
+      frozen: [{ path: ".vtc/spec/spec.md", sha256: "a".repeat(64) }],
+      waived_facts: [],
+    };
+    // after a restart no Lead is known: the role session submits first and stays a role session
+    const failure = SubmitInputSchema.parse({
+      kind: "failure",
+      action_id: "a-1",
+      outcome: { kind: "error", message: "x", retryable: true, tokens: null, cost_usd: null },
+    });
+    expect(await engine.submit(failure, role)).toMatchObject({ accepted: true });
+    await expect(engine.approve(approve, role)).rejects.toThrow(/Lead's tool/);
+    await engine.next({}, lead);
+    await expect(engine.approve(approve, lead)).rejects.toThrow(/no gate is awaiting/);
+    await expect(engine.approve(approve, role)).rejects.toThrow(/Lead's tool/);
+    // who claimed the Lead role is logged in the engine's private directory
+    const claims = readFileSync(join(guardDirFor(h.home, h.repo), "leads.jsonl"), "utf8");
+    expect(claims).toContain('"session":"S-lead"');
+    expect(claims).not.toContain('"session":"S-role"');
+    await h.release();
   });
 });

@@ -200,6 +200,14 @@ export class EngineWrites {
     return this.entries.has(rel);
   }
 
+  /** Every path the engine wrote and did not remove since (per the ledger), sorted. */
+  paths(): string[] {
+    return [...this.entries]
+      .filter(([, e]) => e.digest !== REMOVED)
+      .map(([p]) => p)
+      .sort();
+  }
+
   /** Is `rel` exactly what the engine last wrote? */
   check(rel: string): WriteCheck {
     const entry = this.entries.get(rel);
