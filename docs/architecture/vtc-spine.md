@@ -1061,8 +1061,13 @@ From the spec (§1.2, §20) and applied to VTC's own code. Any of these needs a 
 
 ## 5. Spec readings recorded here
 
-Points where the spec is silent or ambiguous, and the reading this spine uses. Each needs human
-confirmation before it is written back into the spec.
+Points where the spec is silent or ambiguous, and the reading this spine uses.
+
+**Status (2026-10-13, G2):** the human approved this spine at the architecture gate, which
+confirms readings 1–17. They explicitly confirmed reading 12 (plugin-only default: unattended
+engine-driven resume needs the per-project opt-in `headless_allowed`) and the concurrency rule
+(configurable per project, default 2, maximum 3). The readings are written back into the spec
+through the normal change process.
 
 1. **Write-scope check ownership** (§4.2 step 3 vs §19 sub-project 2): one implementation in
    the Gate Runner, invoked by engine core on submit and by the Gate Runner as L5 (AD-13 rule 3).
