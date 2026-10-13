@@ -236,8 +236,8 @@ export const claudeHeadlessCommand = (
       JSON.stringify(request.outputSchema),
       "--agent",
       claudeSubagentName(agentNameFor(request.role, request.mode)),
-      "--model",
-      request.model.model,
+      // no resolved id (D-ae): the session's default model runs, only the effort is set
+      ...(request.model.model === undefined ? [] : ["--model", request.model.model]),
       "--effort",
       request.model.effort,
       // the allowlist decides whatever mode the user's settings choose, and nobody is ever asked

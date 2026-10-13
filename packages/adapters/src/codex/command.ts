@@ -113,8 +113,8 @@ export const codexHeadlessCommand = (
       ...request.sandbox.cliArgs,
       "--output-schema",
       codexSchemaFile(options.scratchDir, request.outputSchema),
-      "--model",
-      request.model.model,
+      // no resolved id (D-ae): the session's default model runs, only the effort is set
+      ...(request.model.model === undefined ? [] : ["--model", request.model.model]),
       "--config",
       `model_reasoning_effort="${request.model.effort}"`,
       "--",
