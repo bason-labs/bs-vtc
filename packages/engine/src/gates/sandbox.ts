@@ -829,6 +829,8 @@ export interface GateSandboxDetection {
   readonly sandbox: GateSandbox | null;
   /** One line for `vtc doctor`: the tool in use, or `GATE_SANDBOX.noSandboxReason` and why. */
   readonly detail: string;
+  /** With no sandbox: why there is none (the middle of `detail`, for callers that word the rest). */
+  readonly reason?: string;
 }
 
 export interface DetectGateSandboxOptions {
@@ -863,6 +865,7 @@ export const detectGateSandbox = (options: DetectGateSandboxOptions = {}): GateS
     kind: null,
     sandbox: null,
     detail: `${GATE_SANDBOX.noSandboxReason}: ${why}; ${NO_SANDBOX_HINT}`,
+    reason: why,
   });
   try {
     if (platform === "darwin") {

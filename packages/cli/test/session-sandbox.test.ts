@@ -23,7 +23,6 @@ import { ADAPTER_FACTORIES } from "@vtc/adapters";
 import { claudeSessionSandboxSettings, type HostAdapter } from "@vtc/shared";
 import { createInstallCommand, defaultInstallDeps } from "../src/commands/install.js";
 import { checkSessionSandbox, detectGateSandbox } from "../src/doctor-checks.js";
-import type { Exec, ExecResult } from "../src/process.js";
 import {
   CLAUDE_LOCAL_SETTINGS,
   CLAUDE_PROJECT_SETTINGS,
@@ -332,7 +331,7 @@ describe("vtc install --host claude-code with the real Claude adapter: one write
     const plugins = writePluginTrees(tempDir("vtc-plugins-"));
     const cmd = createInstallCommand(() => ({
       ...defaultInstallDeps(),
-      factories: { "claude-code": ADAPTER_FACTORIES["claude-code"] },
+      factories: ADAPTER_FACTORIES,
       home: () => env.homeDir,
       pluginDir: (host) => plugins[`plugin:${host}`],
       platform: "darwin",
@@ -401,38 +400,47 @@ describe("the bridge reads the state again for every hello", () => {
   });
 });
 
-const result = (over: Partial<ExecResult> = {}): ExecResult => ({
-  code: 0,
-  stdout: "",
-  stderr: "",
-  ...over,
-});
-
 describe("vtc doctor's gate sandbox check runs a confined no-op, not a version probe", () => {
-  it("reports bwrap only when it can create its namespaces, sandbox-exec only when it starts", async () => {
+  it("reports bwrap only when it can create its namespaces, sandbox-exec only when it starts", () => {
     const seen: string[] = [];
-    const execOf =
-      (ok: Record<string, boolean>): Exec =>
-      (command, args) => {
-        const line = [command, ...args].join(" ");
+    const probeOf =
+      (ok: Record<string, boolean>) =>
+      (argv: readonly string[]): boolean => {
+        const line = argv.join(" ");
         seen.push(line);
-        return Promise.resolve(result({ code: ok[line] === true ? 0 : 1 }));
+        return ok[line] === true;
       };
     const BWRAP =
-      "bwrap --ro-bind / / --dev /dev --proc /proc --unshare-pid --unshare-net --die-with-parent -- true";
+      "/usr/bin/bwrap --ro-bind / / --dev /dev --proc /proc --unshare-pid --unshare-net --die-with-parent -- true";
     const SEATBELT = "/usr/bin/sandbox-exec -p (version 1)(allow default) -- /usr/bin/true";
+    const linux = { platform: "linux" as const, env: { PATH: "" } };
+    const bwrapOnly = (p: string): boolean => p === "/usr/bin/bwrap";
     // installed, but namespaces are refused (AppArmor userns restriction, userns disabled)
-    expect(await detectGateSandbox("linux", () => false, execOf({ "bwrap --version": true }))).toBe(
-      null,
-    );
+    expect(
+      detectGateSandbox({
+        ...linux,
+        exists: bwrapOnly,
+        probe: probeOf({ "/usr/bin/bwrap --version": true }),
+      }).kind,
+    ).toBeNull();
     expect(seen).toContain(BWRAP);
-    expect(await detectGateSandbox("linux", () => false, execOf({ [BWRAP]: true }))).toBe("bwrap");
+    expect(seen.some((line) => line.endsWith("--version"))).toBe(false);
+    // namespaces work, but there is no pasta for the install phase: none, as for the Gate Runner
+    expect(
+      detectGateSandbox({ ...linux, exists: bwrapOnly, probe: probeOf({ [BWRAP]: true }) }).kind,
+    ).toBeNull();
     const exists = (p: string): boolean => p === "/usr/bin/sandbox-exec";
-    expect(await detectGateSandbox("darwin", exists, execOf({}))).toBeNull();
-    expect(await detectGateSandbox("darwin", exists, execOf({ [SEATBELT]: true }))).toBe(
-      "sandbox-exec",
-    );
-    expect(await detectGateSandbox("darwin", () => false, execOf({ [SEATBELT]: true }))).toBeNull();
+    expect(detectGateSandbox({ platform: "darwin", exists, probe: probeOf({}) }).kind).toBeNull();
+    expect(
+      detectGateSandbox({ platform: "darwin", exists, probe: probeOf({ [SEATBELT]: true }) }).kind,
+    ).toBe("sandbox-exec");
+    expect(
+      detectGateSandbox({
+        platform: "darwin",
+        exists: () => false,
+        probe: probeOf({ [SEATBELT]: true }),
+      }).kind,
+    ).toBeNull();
   });
 });
 
