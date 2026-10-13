@@ -15,6 +15,7 @@
  * - Not built yet (gates/README.md): the two-phase network sandbox of §7.2 (install: registries
  *   only; verify: no network). Gates run with the user's network and file access.
  */
+import { createHash } from "node:crypto";
 import { copyFileSync, existsSync, readdirSync, readFileSync, realpathSync, rmSync } from "node:fs";
 import { join, relative, sep } from "node:path";
 import {
@@ -23,6 +24,7 @@ import {
   gateCommandAllowed,
   gateReportVerdict,
   GateReportSchema,
+  GateRunRequestSchema,
   HIDDEN_TESTS,
   TestInventorySchema,
   isAtLeast,
@@ -61,18 +63,28 @@ import {
   type PendingWrite,
 } from "./evidence.js";
 import { gateEnv, runCommand, type ExecResult } from "./exec.js";
-import { matchesAny } from "./globs.js";
+import { matchesAny, matchesAnyCaseless } from "./globs.js";
 import { countsOf, inventoryOf, monotonicViolations } from "./metrics.js";
 import { guardedSections, isMixedConfig, withBaseSections } from "./mixed-configs.js";
 import { diffCoveragePct, parseJsonFindings } from "./parsers/json-reports.js";
 import { parseJunit, type JunitCase } from "./parsers/junit.js";
 import { isSarif, parseSarif } from "./parsers/sarif.js";
 import type { ParsedFinding } from "./parsers/types.js";
-import { DEFAULT_PROTECTED_GLOBS, SCANNER_CONFIG_GLOBS } from "./protected-globs.js";
+import {
+  DEFAULT_PROTECTED_GLOBS,
+  isGateCommandFile,
+  SCANNER_CONFIG_GLOBS,
+} from "./protected-globs.js";
 import { ensureRules } from "./rules.js";
 import { OSV_DB_ENV, osvDatabaseDir, osvDatabaseReady } from "./osv-db.js";
 import { checkScannerArgs, scannerExtraArgs } from "./scanner-args.js";
-import { createScannerStore, type ScannerStore } from "./scanners.js";
+import {
+  createScannerStore,
+  findUserInstalled,
+  ScannerUnavailableError,
+  USER_INSTALLED_SCANNERS,
+  type ScannerStore,
+} from "./scanners.js";
 import { buildTraceability } from "./traceability.js";
 import { checkWriteScope } from "./write-scope.js";
 
@@ -218,14 +230,28 @@ class Run {
     return this.deps.now?.() ?? new Date();
   }
 
-  /** The base commit's calibrated gates (§7.1); calibration alone reads the working tree. */
+  /**
+   * The base commit's calibrated gates (§7.1); calibration alone reads the working tree. With
+   * `gates_config_hash`, the base's bytes must be the `gates.yml` the run started with (spine §5
+   * readings 20 and 46b): otherwise nothing runs.
+   */
   private async loadConfig(): Promise<GatesConfig | null> {
     if (this.request.reason === "calibration") return loadGatesConfig(this.deps.repoRoot);
+    const base = this.request.base.slice(0, 12);
     const bytes = await this.deps.git.readFileAtCommit(this.request.base, GATES_CONFIG_PATH);
     if (bytes === undefined) {
       throw new Error(
-        `${GATES_CONFIG_PATH} is not committed at the base commit ${this.request.base.slice(0, 12)}: run vtc calibrate and commit the file it writes`,
+        `${GATES_CONFIG_PATH} is not committed at the base commit ${base}: run vtc calibrate and commit the file it writes`,
       );
+    }
+    const expected = this.request.gates_config_hash;
+    if (expected !== undefined) {
+      const actual = createHash("sha256").update(bytes).digest("hex");
+      if (actual !== expected) {
+        throw new Error(
+          `${GATES_CONFIG_PATH} at the base commit ${base} (sha256 ${actual.slice(0, 12)}) does not match the gates.yml this run started with (sha256 ${expected.slice(0, 12)}): a run keeps its gates, so nothing ran`,
+        );
+      }
     }
     return parseGatesConfig(new TextDecoder().decode(bytes));
   }
@@ -416,7 +442,20 @@ class Run {
         const binary = await this.scanners.ensure(argv0);
         argv0 = binary;
       } catch (error) {
-        return { refused: `not run: ${errorText(error)}` };
+        if (!(error instanceof ScannerUnavailableError) || !USER_INSTALLED_SCANNERS.includes(argv0))
+          return { refused: `not run: ${errorText(error)}` };
+        // D-u (spine §5 reading 41): no native build here, so the user installs it themselves.
+        const own = findUserInstalled(argv0, this.env.PATH, [this.deps.repoRoot, checkoutAbs]);
+        if (own === null) {
+          return {
+            skipped: `${argv0} has no pinned build for ${error.platform} and is not installed on this machine, so this gate did not run; install ${argv0} yourself (vtc doctor warns about it) to enable it`,
+          };
+        }
+        this.note(
+          `${gate.id}-scanner`,
+          `${argv0}: no pinned build for ${error.platform}; ran the user-installed ${own} (not SHA-verified by VTC)`,
+        );
+        argv0 = own;
       }
     }
     const needsRules = gate.command.some((t) => t.includes("{rules}"));
@@ -503,16 +542,18 @@ class Run {
    * L1 lints with the base commit's config (§7.2), and the scanners scan with the base commit's
    * scanner configs: config files the diff changed are put back to their base version for the
    * gate and restored afterwards, so a diff cannot silence the gates that verify it. With
-   * `toolSections` (L1), a changed `pyproject.toml` or `package.json` keeps the head version
-   * except for its tool sections, which come from the base (`mixed-configs.ts`).
+   * `toolSections` (L1), task-runner files and package-manager configs are always put back, and
+   * a changed `pyproject.toml`, `package.json` or `pnpm-workspace.yaml` keeps the head version
+   * except for its tool sections or settings, which come from the base (`mixed-configs.ts`).
    */
   private async useBaseConfigs(
     checkoutAbs: string,
     globs: readonly string[],
     toolSections: boolean,
   ): Promise<(() => void) | null> {
-    const pinned = (path: string): boolean =>
-      matchesAny(globs, path) || (toolSections && isMixedConfig(path));
+    const whole = (path: string): boolean =>
+      matchesAnyCaseless(globs, path) || (toolSections && isGateCommandFile(path));
+    const pinned = (path: string): boolean => whole(path) || (toolSections && isMixedConfig(path));
     const touched = this.changed.filter(
       (f) => pinned(f.path) || (f.oldPath !== undefined && pinned(f.oldPath)),
     );
@@ -524,7 +565,7 @@ class Run {
       for (const path of file.oldPath === undefined ? [file.path] : [file.path, file.oldPath]) {
         const head = await this.deps.git.readFileAtCommit(this.request.head, path);
         let base = await this.deps.git.readFileAtCommit(this.request.base, path);
-        if (!matchesAny(globs, path)) {
+        if (!whole(path)) {
           if (!isMixedConfig(path)) continue;
           const headText = head === undefined ? undefined : decoder.decode(head);
           const baseText = base === undefined ? undefined : decoder.decode(base);
@@ -1034,6 +1075,8 @@ class Run {
               isAtLeast(
                 normalizeSeverity({
                   source: "tool",
+                  // AD-8 rule 7: outside the security class the cap is medium (contracts 4.2.0).
+                  category: f.category,
                   ...(f.score === undefined ? {} : { score: f.score }),
                   ...(f.label === undefined ? {} : { label: f.label }),
                   ...(f.sarif_level === undefined ? {} : { sarifLevel: f.sarif_level }),
@@ -1157,24 +1200,33 @@ class Run {
 
   /**
    * Copies the hidden acceptance tests (§7.3) of the run's tasks into the checkout, regular files
-   * only. A task run copies its own task's. A feature run (Final Review) would copy every task's
-   * of the feature, but `GateRunRequest` does not name them yet (contract proposal), so it copies
-   * none and says so in evidence; `finalReviewStepsCovered` then does not report step 2.
+   * only. A task run copies its own task's. A feature run (Final Review, §6.7a step 2) copies the
+   * tasks `hidden_tasks` names (engine core passes the feature's tasks); with none named it copies
+   * nothing and says so in evidence, and `finalReviewStepsCovered` then does not report step 2.
    */
   private copyHidden(): void {
     const r = this.request;
     if (!r.include_hidden) return;
-    if (r.task === undefined) {
+    const tasks = [
+      ...new Set([...(r.task === undefined ? [] : [r.task]), ...(r.hidden_tasks ?? [])]),
+    ];
+    if (tasks.length === 0) {
       this.note(
         "hidden-tests",
-        "hidden acceptance tests were not copied: the request does not name the feature's tasks, so this run is not a full acceptance run (§6.7a step 2)",
+        "hidden acceptance tests were not copied: the request names no tasks (hidden_tasks), so this run is not a full acceptance run (§6.7a step 2)",
       );
       return;
     }
-    this.copyHiddenOf(r.task);
+    const owners = new Map<string, string>();
+    for (const task of tasks) this.copyHiddenOf(task, owners);
   }
 
-  private copyHiddenOf(task: string): void {
+  /**
+   * Copies one task's hidden tests. `owners` maps each copied path to its task: two tasks' tests
+   * at the same path would silently replace one another, so that is an error (the run reports
+   * infra) rather than a smaller acceptance run.
+   */
+  private copyHiddenOf(task: string, owners: Map<string, string>): void {
     const dir = join(
       this.deps.vtcHome,
       HIDDEN_TESTS.homeDir,
@@ -1187,6 +1239,13 @@ class Run {
         const childRel = rel === "" ? entry.name : `${rel}/${entry.name}`;
         if (entry.isDirectory()) walk(join(abs, entry.name), childRel);
         else if (entry.isFile()) {
+          const owner = owners.get(childRel);
+          if (owner !== undefined) {
+            throw new Error(
+              `hidden acceptance tests of ${owner} and ${task} both have ${childRel}; neither may replace the other, so the acceptance run did not start`,
+            );
+          }
+          owners.set(childRel, task);
           // Never through a symlink the diff planted: hidden tests must not land outside the checkout.
           assertNoSymlinks(this.checkoutAbs, childRel);
           const parent = childRel.includes("/") ? childRel.slice(0, childRel.lastIndexOf("/")) : "";
@@ -1333,6 +1392,75 @@ class Run {
 }
 
 /**
+ * A request that does not satisfy {@link GateRunRequestSchema} runs nothing: the Gate Runner is
+ * the trust boundary for test material, and a malformed id (`../T-1`) would otherwise be joined
+ * into hidden-test and evidence paths. The report is `error` / `infra` with the reasons in a log
+ * under `.vtc/state/gates/rejected/`, a path built from no request field. Never throws.
+ */
+const rejectedRequest = (
+  deps: GateRunnerDeps,
+  request: GateRunRequest,
+  issues: readonly { readonly path: readonly PropertyKey[]; readonly message: string }[],
+): GateReport => {
+  const now = (): Date => deps.now?.() ?? new Date();
+  const started = now();
+  const dir = `${GATES_STATE_DIR}/rejected`;
+  const log = `${dir}/${attemptId(deps.repoRoot, [dir], "request", "rejected", started)}/gate-runner.log`;
+  const reasons = issues.map((i) => `${i.path.map(String).join(".") || "request"}: ${i.message}`);
+  try {
+    writeRepoFile(
+      deps.repoRoot,
+      log,
+      `request rejected, no gate ran:\n${reasons.map((r) => `  ${r}`).join("\n")}\n`,
+    );
+  } catch {
+    // nothing more to do: the report below says what happened
+  }
+  const results: GateResult[] = [
+    {
+      gate_id: "gate-runner",
+      layer: "L0",
+      phase: "verify",
+      status: "error",
+      blocking: true,
+      new_violations: 0,
+      baseline_violations: 0,
+      monotonic: [],
+      findings: [],
+      failure_class: "infra",
+      evidence: [{ type: "command_output", ref: log }],
+      duration_ms: 0,
+    },
+  ];
+  const r = request as Partial<GateRunRequest>;
+  return {
+    run: r.run ?? "",
+    ...(r.task === undefined ? {} : { task: r.task }),
+    ...(r.feature === undefined ? {} : { feature: r.feature }),
+    reason: r.reason ?? "round",
+    scope: r.scope ?? "full",
+    base: r.base ?? "",
+    head: r.head ?? "",
+    expect: r.expect ?? "pass",
+    results,
+    verdict: gateReportVerdict(results),
+    started_at: started.toISOString(),
+    finished_at: now().toISOString(),
+  };
+};
+
+/** The checked request, or the report that rejects it. */
+const checkRequest = (
+  deps: GateRunnerDeps,
+  request: GateRunRequest,
+): { request: GateRunRequest } | { report: GateReport } => {
+  const parsed = GateRunRequestSchema.safeParse(request);
+  return parsed.success
+    ? { request: parsed.data }
+    : { report: rejectedRequest(deps, request, parsed.error.issues) };
+};
+
+/**
  * One run against an explicit config instead of `.vtc/gates.yml`: `vtc calibrate` runs the
  * proposed gates before anything is written (the allowlist still applies).
  */
@@ -1341,14 +1469,17 @@ export const runWithConfig = (
   options: GateRunnerOptions,
   request: GateRunRequest,
   config: GatesConfig,
-): Promise<GateReport> =>
-  new Run(
+): Promise<GateReport> => {
+  const checked = checkRequest(deps, request);
+  if ("report" in checked) return Promise.resolve(checked.report);
+  return new Run(
     deps,
     options.scanners ?? createScannerStore({ vtcHome: deps.vtcHome }),
     options.env ?? process.env,
-    request,
+    checked.request,
     config,
   ).execute();
+};
 
 /** The Gate Runner with explicit options (tests inject fake scanners). */
 export const createGateRunnerWith = (
@@ -1358,7 +1489,11 @@ export const createGateRunnerWith = (
   const scanners = options.scanners ?? createScannerStore({ vtcHome: deps.vtcHome });
   const env = options.env ?? process.env;
   return {
-    run: (request) => new Run(deps, scanners, env, request).execute(),
+    run: (request) => {
+      const checked = checkRequest(deps, request);
+      if ("report" in checked) return Promise.resolve(checked.report);
+      return new Run(deps, scanners, env, checked.request).execute();
+    },
     checkWriteScope: async (request) => {
       // The project's protected configs as calibrated at the base commit, plus the defaults.
       let globs: readonly string[] = [];

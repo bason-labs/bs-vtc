@@ -7,17 +7,20 @@
 import { spawnSync } from "node:child_process";
 import { createHash, randomBytes } from "node:crypto";
 import {
+  accessSync,
   chmodSync,
+  constants,
   existsSync,
   mkdirSync,
   readdirSync,
   readFileSync,
+  realpathSync,
   renameSync,
   rmSync,
   statSync,
   writeFileSync,
 } from "node:fs";
-import { join } from "node:path";
+import { delimiter, isAbsolute, join, relative } from "node:path";
 import type { Platform, ScannerPin, ScannerPins } from "@vtc/shared";
 import { SCANNER_ASSETS, SCANNER_PINS, type ScannerAssets } from "./scanner-pins.js";
 
@@ -31,6 +34,79 @@ export class ScannerError extends Error {
   }
 }
 
+/**
+ * A pinned scanner with no build for this machine's platform (no pin, or no platform VTC knows).
+ * Where a scanner is user-installed on such a platform (Checkov on darwin-arm64, D-u, spine §5
+ * reading 41), the Gate Runner looks for the user's own install instead and otherwise skips the
+ * gate with a visible reason; `vtc doctor` warns.
+ */
+export class ScannerUnavailableError extends ScannerError {
+  constructor(
+    scanner: string,
+    /** The platform without a build (`os-arch` as Node names it when VTC knows no target). */
+    readonly platform: string,
+  ) {
+    super(
+      scanner,
+      USER_INSTALLED_SCANNERS.includes(scanner)
+        ? `no pinned build for ${platform}; install it yourself: the Gate Runner then runs the first ${scanner} on an absolute PATH entry outside the repo, which VTC does not checksum-verify`
+        : `no pinned build for ${platform}`,
+    );
+    this.name = "ScannerUnavailableError";
+  }
+}
+
+/**
+ * Scanners a user installs on a platform without a pinned build (D-u: Checkov has no darwin-arm64
+ * build and VTC pins no Rosetta one). Elsewhere every pinned scanner comes only from the store.
+ */
+export const USER_INSTALLED_SCANNERS: readonly string[] = ["checkov"];
+
+const isInsideDir = (root: string, path: string): boolean => {
+  const rel = relative(root, path);
+  return rel === "" || (!rel.startsWith("..") && !isAbsolute(rel));
+};
+
+/**
+ * A user-installed scanner on `PATH`: the first executable regular file named `name` in an
+ * absolute `PATH` entry that is not inside any of `untrusted` (the repo and its checkouts, which
+ * a diff controls), symlinks resolved. Relative entries are ignored for the same reason. `null`
+ * when there is none. It is not SHA-verified and nothing records or confirms its path: whatever
+ * the user's `PATH` resolves to at gate time runs, and the gate's evidence names it.
+ */
+export const findUserInstalled = (
+  name: string,
+  pathValue: string | undefined,
+  untrusted: readonly string[],
+  platform: string = process.platform,
+): string | null => {
+  const names = platform === "win32" ? [`${name}.exe`, `${name}.cmd`, `${name}.bat`] : [name];
+  const roots = untrusted.flatMap((root) => {
+    try {
+      return [realpathSync(root)];
+    } catch {
+      return [];
+    }
+  });
+  for (const dir of (pathValue ?? "").split(delimiter)) {
+    if (dir === "" || !isAbsolute(dir)) continue;
+    for (const file of names) {
+      let real: string;
+      try {
+        real = realpathSync(join(dir, file));
+        if (!statSync(real).isFile()) continue;
+        accessSync(real, constants.X_OK);
+      } catch {
+        continue;
+      }
+      if (roots.some((root) => isInsideDir(root, real) || isInsideDir(root, join(dir, file))))
+        continue;
+      return real;
+    }
+  }
+  return null;
+};
+
 /** Downloads bytes over https (following redirects). Injected in tests: they never download. */
 export type Download = (url: string) => Promise<Uint8Array>;
 
@@ -38,6 +114,7 @@ export type Download = (url: string) => Promise<Uint8Array>;
 export type Extract = (archive: string, kind: "tar.gz" | "zip", into: string) => void;
 
 export interface ScannerStoreOptions {
+  /** Absolute VTC home: installs go to `<vtcHome>/scanners/<name>/<version>/<platform>/`. */
   readonly vtcHome: string;
   readonly platform?: Platform | null;
   readonly pins?: ScannerPins;
@@ -135,14 +212,27 @@ const readManifest = (dir: string): Manifest | null => {
   }
 };
 
+/**
+ * The pinned scanner store the cli opens for `vtc doctor` and the Gate Runner uses for L4
+ * (AD-13 rule 2: `gates/` owns it).
+ */
 export interface ScannerStore {
   /** Names of the pinned scanners (allowed by name, `gateCommandAllowed`). */
   readonly names: readonly string[];
-  /** The verified executable of a pinned scanner, downloading it first when missing. */
+  /**
+   * The verified executable of a pinned scanner. A verified install is used as it is; only a
+   * missing or no longer verifying one is downloaded (through `options.download`) and checked
+   * against the pinned SHA-256 before anything is unpacked. Rejects with
+   * {@link ScannerUnavailableError} when there is no build for this platform, and with
+   * {@link ScannerError} for an unknown name or a checksum mismatch.
+   */
   ensure(name: string): Promise<string>;
 }
 
-export const createScannerStore = (options: ScannerStoreOptions): ScannerStore => {
+/** `gates.createScannerStore`: the typed factory the cli wires (doctor, Gate Runner). */
+export type CreateScannerStore = (options: ScannerStoreOptions) => ScannerStore;
+
+export const createScannerStore: CreateScannerStore = (options) => {
   const pins = options.pins ?? SCANNER_PINS;
   const assets = options.assets ?? SCANNER_ASSETS;
   const platform = options.platform === undefined ? currentPlatform() : options.platform;
@@ -228,18 +318,13 @@ export const createScannerStore = (options: ScannerStoreOptions): ScannerStore =
     if (pin === undefined) return Promise.reject(new ScannerError(name, "not a pinned scanner"));
     if (platform === null) {
       return Promise.reject(
-        new ScannerError(name, `no pinned build for ${process.platform}-${process.arch}`),
+        new ScannerUnavailableError(name, `${process.platform}-${process.arch}`),
       );
     }
     const asset = assets[name]?.platforms[platform];
     const expected = pin.sha256[platform];
     if (asset === undefined || expected === undefined) {
-      return Promise.reject(
-        new ScannerError(
-          name,
-          `no pinned build for ${platform}; install it yourself and confirm it in vtc calibrate`,
-        ),
-      );
+      return Promise.reject(new ScannerUnavailableError(name, platform));
     }
     const dir = join(options.vtcHome, SCANNERS_DIR, name, pin.version, platform);
     const ok = verified(dir, pin, expected);

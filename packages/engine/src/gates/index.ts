@@ -45,9 +45,13 @@ export {
   currentPlatform,
   defaultDownload,
   defaultExtract,
+  findUserInstalled,
   scannerUrl,
   ScannerError,
+  ScannerUnavailableError,
   SCANNERS_DIR,
+  USER_INSTALLED_SCANNERS,
+  type CreateScannerStore,
   type Download,
   type Extract,
   type ScannerStore,
@@ -85,8 +89,13 @@ export {
 } from "./osv-db.js";
 export {
   DEFAULT_PROTECTED_GLOBS,
+  isGateCommandFile,
+  isPackageManagerConfig,
+  isTaskRunnerFile,
   LINT_TEST_CONFIG_GLOBS,
+  PACKAGE_MANAGER_CONFIG_GLOBS,
   SCANNER_CONFIG_GLOBS,
+  TASK_RUNNER_GLOBS,
 } from "./protected-globs.js";
 export { guardedSections, isMixedConfig, withBaseSections } from "./mixed-configs.js";
 export { classifyFailure, environmentSignatureLine, ENVIRONMENT_SIGNATURES } from "./classify.js";
@@ -99,7 +108,8 @@ export {
   toJunitXml,
   traceabilityPath,
 } from "./evidence.js";
-export { finalReviewStepsCovered } from "./final-review.js";
+/** Moved to @vtc/shared in contracts 4.2.0 (D-z e); re-exported for existing callers. */
+export { finalReviewStepsCovered } from "@vtc/shared";
 export { runWithConfig } from "./runner.js";
 export {
   allowlistPrefix,
