@@ -5,6 +5,7 @@
  * implementation. Worktrees, branches, the submit snapshot commit and merges stay internal to
  * engine core. Every call uses the user's own git and auth (AD-9).
  */
+import type { PullRequestRef } from "../feature.js";
 import type { GitSha, RelPath } from "../primitives.js";
 
 /** One changed file between two commits (renames detected). */
@@ -44,3 +45,29 @@ export interface GitOpsDeps {
 
 /** Implemented by the engine-core team in `@vtc/engine` (`git.createGitOps`). */
 export type CreateGitOps = (deps: GitOpsDeps) => GitOps;
+
+/** What the engine asks for when it opens or updates the feature's PR (§6.7 Level 2). */
+export interface PullRequestRequest {
+  /** The integration branch, `vtc/F-n` (`integrationBranchFor`). */
+  readonly branch: string;
+  /** The branch the PR targets (the repo's default branch). */
+  readonly base: string;
+  readonly title: string;
+  /** The PR description (the feature evidence bundle summary at release, §6.7a). */
+  readonly body: string;
+}
+
+/**
+ * The feature's PR (§6.7), behind an interface so engine core and its tests never need the
+ * network. The default implementation drives the user's own `gh` CLI with the user's existing
+ * auth (AD-9, §15); VTC never handles a token. Errors reject; the engine records them as
+ * `feature.pr_failed`.
+ */
+export interface PullRequestService {
+  /** Opens the draft PR for `request.branch`, or returns (and re-describes) the open one. */
+  upsertDraft(request: PullRequestRequest): Promise<PullRequestRef>;
+  /** Marks the PR ready for review (after Final Review passes). */
+  markReady(branch: string): Promise<PullRequestRef>;
+  /** The PR as it is now (state, head, CI), or `null` when there is none. */
+  view(branch: string): Promise<PullRequestRef | null>;
+}

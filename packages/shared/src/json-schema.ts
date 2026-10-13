@@ -6,6 +6,8 @@ import {
   ArtifactContentSchema,
   ChangeRequestInputSchema,
   ChangeRequestResultSchema,
+  ConsultInputSchema,
+  ConsultResultSchema,
   DesignReviewCommentInputSchema,
   DesignReviewResultSchema,
   EscalationListSchema,
@@ -36,6 +38,7 @@ import {
   EngineSocketHelloSchema,
   EngineSocketWelcomeSchema,
 } from "./engine-instance.js";
+import { DesignScreensFileSchema } from "./design.js";
 import { EscalationSchema } from "./escalation.js";
 import { EVENT_PAYLOAD_SCHEMAS } from "./event-payloads.js";
 import { EventSchema } from "./event.js";
@@ -50,6 +53,7 @@ import {
 } from "./gate-result.js";
 import { GateAllowlistSchema, GatesConfigSchema, ScannerPinsSchema } from "./gates-config.js";
 import { HostOutcomeSchema, SubagentInstructionSchema } from "./interfaces/host-adapter.js";
+import { PluginManifestSchema } from "./plugin-manifest.js";
 import { ProjectConfigSchema } from "./project-config.js";
 import { QuestionSchema } from "./question.js";
 import { RoleContractSchema } from "./role-contract.js";
@@ -85,6 +89,8 @@ export const CONTRACT_SCHEMAS = {
   TaskPack: TaskPackSchema,
   TraceabilityReport: TraceabilityReportSchema,
   EvidenceBundle: EvidenceBundleSchema,
+  DesignScreensFile: DesignScreensFileSchema,
+  PluginManifest: PluginManifestSchema,
   // config files
   ProjectConfig: ProjectConfigSchema,
   GatesConfig: GatesConfigSchema,
@@ -125,6 +131,8 @@ export const CONTRACT_SCHEMAS = {
   ApproveInput: ApproveInputSchema,
   ChangeRequestInput: ChangeRequestInputSchema,
   ChangeRequestResult: ChangeRequestResultSchema,
+  ConsultInput: ConsultInputSchema,
+  ConsultResult: ConsultResultSchema,
   RunControlResult: RunControlResultSchema,
   // HTTP (AD-5)
   HealthResult: HealthResultSchema,
@@ -159,7 +167,9 @@ export interface JsonSchemaOptions {
   /**
    * `contract` (default): the plain export. `structured-output`: the form handed to hosts as
    * `--output-schema` / `--json-schema` (AD-3 rule 8): an object root (a root union is merged
-   * into one object), every property required (optional ones become nullable), no `default`.
+   * into one object), every property required (optional ones become nullable), no `default`,
+   * and no `$schema` or `$id` (Claude Code's `--json-schema` rejects a document that names the
+   * draft-2020-12 meta-schema; spike 2026-10-13, spine §7), so both hosts take the same form.
    * Parse what the host returns with {@link fromStructuredOutput}, which re-validates with Zod.
    */
   readonly target?: "contract" | "structured-output";
@@ -273,9 +283,11 @@ export const jsonSchemaFor = (name: ContractName, options: JsonSchemaOptions = {
     io: options.io ?? "input",
     unrepresentable: "any",
   }) as JsonSchema;
-  const body =
-    options.target === "structured-output" ? (toStructured(schema) as JsonSchema) : schema;
-  return { $id: `https://vtc.local/schemas/${name}.json`, title: name, ...body };
+  if (options.target === "structured-output") {
+    const { $schema: _schema, $id: _id, ...body } = toStructured(schema) as JsonSchema;
+    return { title: name, ...body };
+  }
+  return { $id: `https://vtc.local/schemas/${name}.json`, title: name, ...schema };
 };
 
 /** JSON Schemas for every contract, keyed by name. */

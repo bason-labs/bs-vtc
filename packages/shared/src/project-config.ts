@@ -42,6 +42,11 @@ export const ProjectConfigSchema = z.strictObject({
         })
         .prefault({}),
       final_review_share: z.number().gt(0).lt(1).default(DEFAULT_FINAL_REVIEW_SHARE),
+      /**
+       * Advisor spend per run (§5.4 through the `consult` tool): the engine refuses a consult
+       * once the run's advisor calls have spent this much (spine §5 reading 25).
+       */
+      advisor_usd: z.number().positive().default(5),
     })
     .prefault({}),
   /** Risk rules that park a task (§7.6). Built-in rules always apply; these add to them. */
@@ -72,7 +77,12 @@ export const ProjectConfigSchema = z.strictObject({
       dispatch: DispatchModeSchema.default("plugin_only"),
       /** Opt-in cross-family review for high-risk tasks (D10, §12.4). */
       cross_family_review: z.boolean().default(false),
-      /** Model id per tier per host, overriding the built-in mapping. */
+      /**
+       * Model id per tier per host, overriding the built-in mapping, e.g.
+       * `models: { codex: { top: "<model id>" } }`. The built-in Codex mapping lives in the Codex
+       * adapter's defaults; until it names model ids, compiled Codex agents set only the reasoning
+       * effort and run on the session's model (spine §5 reading 26).
+       */
       models: z
         .partialRecord(HostIdSchema, z.partialRecord(ModelTierSchema, z.string().min(1)))
         .optional(),
@@ -84,6 +94,17 @@ export const ProjectConfigSchema = z.strictObject({
     .strictObject({
       /** Below this % of the 5-hour window, start only steps already in flight (§6.9). */
       reserve_pct: z.number().min(0).max(100).default(10),
+    })
+    .prefault({}),
+  git: z
+    .strictObject({
+      /**
+       * Sign the engine's commits and merges with the user's existing git signing setup (for
+       * repos whose branch protection requires signed commits). Default false: engine git forces
+       * `commit.gpgsign=false`. Even when true, a signing program or key that is set or changed
+       * during a run is refused (spine §5 reading 22).
+       */
+      sign_commits: z.boolean().default(false),
     })
     .prefault({}),
   auto_merge: z

@@ -21,6 +21,10 @@ export * from "./usage.js";
 export * from "./workflow.js";
 export * from "./traceability.js";
 export * from "./task-pack.js";
+export * from "./artifact-types.js";
+export * from "./design.js";
+export * from "./plugin-manifest.js";
+export * from "./hook.js";
 export * from "./engine-instance.js";
 export * from "./engine-api.js";
 export * from "./asset-paths.js";
@@ -59,5 +63,12 @@ export * from "./json-schema.js";
  * dependency rules; submit snapshot commits; push, PR state and CI; park risk rules; the test
  * layout, gate allowlist and socket protocol; tolerant readers of persisted data). Nothing
  * consumed 3.x.
+ * 4.1.0 (MINOR): wave-1 proposals. The `consult` tool for advisors, the resolved `model` on
+ * `spawn_role`, `session_ref` on a submitted result, typed `branch.push_failed` and
+ * `feature.pr_failed`, incident kinds `config_changed` and `checkout_write`, merge-level reason
+ * `no_remote`, `final_review.steps_run`, project.yaml `git.sign_commits` and
+ * `budgets.advisor_usd`, task-pack depths and design constraints, `PluginManifest`,
+ * `DesignScreensFile`, the role-contracts asset path, the `vtc hook` command contract, known
+ * artifact types, the `PullRequestService` seam, and a host-neutral structured-output form.
  */
-export const CONTRACTS_VERSION = "4.0.0";
+export const CONTRACTS_VERSION = "4.1.0";
