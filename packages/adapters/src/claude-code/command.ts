@@ -308,6 +308,9 @@ export const claudeSandboxProfile = (
     },
     sandbox: {
       enabled: true,
+      // without it a sandbox that cannot start (Linux/WSL without bubblewrap or socat, an
+      // unsupported platform) runs Bash unsandboxed: the run exits with an error instead
+      failIfUnavailable: true,
       autoAllowBashIfSandboxed: tools.profile === "code_sandboxed",
       allowUnsandboxedCommands: false,
       filesystem: {

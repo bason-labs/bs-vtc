@@ -8,6 +8,7 @@ import { createGitOps } from "../../src/git/index.js";
 import {
   allowlistPrefix,
   calibrate,
+  LOOPBACK_QUESTION,
   DEFAULT_PROTECTED_GLOBS,
   detectToolchain,
   flakyBetween,
@@ -298,6 +299,7 @@ describe("calibrate", () => {
     const outcome = await calibrate(s.deps(() => true));
     expect(s.answers).toEqual([
       "Allow these commands for this repo on this machine?",
+      LOOPBACK_QUESTION,
       "Freeze this as the baseline?",
     ]);
     expect(gateCommandAllowed([NODE, "tools/install.mjs"], readAllowlist(s.home, s.repo))).toBe(
@@ -316,6 +318,25 @@ describe("calibrate", () => {
     expect(s.lines.join("\n")).toMatch(
       /Commit \.vtc\/gates\.yml now: runs read it at their base commit and park until it is committed/,
     );
+  });
+
+  it("asks whether the suite needs the loopback, and records only a yes in gates.yml (D-av)", async () => {
+    const yes = setup();
+    await calibrate(yes.deps(() => true));
+    const on = parseGatesConfig(readFileSync(join(yes.repo, ".vtc/gates.yml"), "utf8"));
+    expect(on.sandbox).toEqual({ verify_loopback: true });
+    // both calibration runs already used it, in the verify phase only
+    expect(yes.specs.filter((x) => x.phase === "verify").every((x) => x.loopback === true)).toBe(
+      true,
+    );
+    expect(yes.specs.filter((x) => x.phase === "install").some((x) => x.loopback === true)).toBe(
+      false,
+    );
+    const no = setup();
+    await calibrate(no.deps((q) => q !== LOOPBACK_QUESTION));
+    const off = parseGatesConfig(readFileSync(join(no.repo, ".vtc/gates.yml"), "utf8"));
+    expect(off.sandbox).toBeUndefined();
+    expect(no.specs.some((x) => x.loopback === true)).toBe(false);
   });
 
   it("runs nothing and writes nothing when the human declines the commands", async () => {
@@ -352,6 +373,7 @@ describe("calibrate", () => {
     const outcome = await calibrate(s.deps(() => true));
     expect(s.answers).toEqual([
       "Allow these commands for this repo on this machine?",
+      LOOPBACK_QUESTION,
       "Download the OSV offline vulnerability database now (network)?",
       "Freeze this as the baseline?",
     ]);

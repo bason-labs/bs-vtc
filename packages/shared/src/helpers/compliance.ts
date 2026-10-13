@@ -302,16 +302,98 @@ const underRoot = (root: string, rel: string, what: string): string => {
 };
 
 /**
- * The Claude Code session sandbox a Lead session needs before the engine runs a code-running
- * role in it (D-an, spine §5 readings 71 and 79). In plugin-only dispatch (AD-17) an
- * Engineer-family role is a subagent of the human's Lead session, so its shell is confined only by
- * that session's own sandbox. `vtc install --host claude-code` (an explicit user command) shows
- * the user and then writes these keys into the project's gitignored `.claude/settings.local.json`;
- * {@link claudeSessionSandboxState} reads them back. Reads are denied on `homeReadDeny`, on each
- * host's credential files and {@link HOME_CREDENTIAL_LOCATIONS} (what the gate sandbox and the
- * headless profiles already deny) and on {@link REPO_ROLE_DENIED}`.readDeny`; writes on
- * `homeWriteDeny` and `REPO_ROLE_DENIED.writeDeny`. Absolute POSIX paths, pure string joins:
- * nothing is opened (D-ad).
+ * How a shell command may spell a path under the default VTC home, or under `$VTC_HOME` (the
+ * cli's override). Claude Code matches a Bash rule against the command text as written, so each
+ * spelling needs its own rule ({@link claudeSessionPermissionDeny}).
+ */
+export const VTC_HOME_SHELL_SPELLINGS: readonly string[] = [
+  "~/.vtc",
+  "$HOME/.vtc",
+  "${HOME}/.vtc",
+  "$VTC_HOME",
+  "${VTC_HOME}",
+];
+
+/** `Read`/`Edit` rules for one absolute path: the path and, unless it is a credential file, below it. */
+const pathRules = (tool: "Read" | "Edit", path: string): string[] =>
+  isHostCredentialDenyRead(path)
+    ? [`${tool}(/${path})`]
+    : [`${tool}(/${path})`, `${tool}(/${path}/**)`];
+
+/**
+ * The `permissions.deny` rules of the Lead session's settings (spine §5 reading 81). Claude Code's
+ * sandbox lists (`sandbox.filesystem.denyRead`/`denyWrite`) confine shell commands only; its
+ * built-in file tools (`Read`, `Edit`, `Write`, and on a best-effort basis `Grep`/`Glob`) follow
+ * permission rules instead, for the Lead and for every in-session role subagent. So every
+ * sandbox path is repeated as a `Read(//<abs>)` (read deny) or `Edit(//<abs>)` (write deny; Edit
+ * rules cover every file-editing tool) rule, plus `/**` for directories; `vtc calibrate` is denied
+ * as a command; and the shell spellings of each guarded VTC home path ({@link
+ * VTC_HOME_SHELL_SPELLINGS}) are denied as Bash text, a best-effort first line behind the
+ * sandbox. Deny rules win over every allow rule, so no allow entry can widen them. Pure string
+ * joins; credential files appear only as single-file `Read(...)` rules, which the D-ad
+ * exemption covers.
+ */
+export const claudeSessionPermissionDeny = (
+  vtcHome: string,
+  scope: SessionSandboxScope,
+): string[] => {
+  const { denyRead, denyWrite } = claudeSessionSandboxLists(vtcHome, scope);
+  const homeRoots = [
+    ...new Set(
+      [...ROLE_DENIED_VTC.homeWriteDeny, ...ROLE_DENIED_VTC.homeReadDeny].map((g) =>
+        g.replace(/\/\*\*$/, ""),
+      ),
+    ),
+  ];
+  return [
+    ...new Set([
+      ...denyRead.flatMap((p) => pathRules("Read", p)),
+      ...denyWrite.flatMap((p) => pathRules("Edit", p)),
+      ...ROLE_DENIED_VTC.subcommands.flatMap((sub) => [`Bash(vtc ${sub})`, `Bash(vtc ${sub} *)`]),
+      ...homeRoots.flatMap((root) =>
+        VTC_HOME_SHELL_SPELLINGS.map((home) => `Bash(*${home}/${root}*)`),
+      ),
+    ]),
+  ];
+};
+
+const claudeSessionSandboxLists = (
+  vtcHome: string,
+  scope: SessionSandboxScope,
+): { readonly denyRead: string[]; readonly denyWrite: string[] } => ({
+  denyRead: [
+    ...new Set([
+      ...ROLE_DENIED_VTC.homeReadDeny.map((glob) => vtcHomePath(vtcHome, glob)),
+      ...hostCredentialDenyReadPaths(scope.hostConfigDirs),
+      ...HOME_CREDENTIAL_LOCATIONS.map((rel) => underRoot(scope.homeDir, rel, "home")),
+      ...REPO_ROLE_DENIED.readDeny.map((glob) =>
+        underRoot(scope.projectRoot, glob, "project root"),
+      ),
+    ]),
+  ],
+  denyWrite: [
+    ...new Set([
+      ...ROLE_DENIED_VTC.homeWriteDeny.map((glob) => vtcHomePath(vtcHome, glob)),
+      ...REPO_ROLE_DENIED.writeDeny.map((glob) =>
+        underRoot(scope.projectRoot, glob, "project root"),
+      ),
+    ]),
+  ],
+});
+
+/**
+ * The Claude Code session settings a Lead session needs before the engine runs a role in it
+ * (D-an, spine §5 readings 71, 79 and 81). In plugin-only dispatch (AD-17) every role is a
+ * subagent of the human's Lead session, so its shell is confined only by that session's own
+ * sandbox and its file tools only by that session's permission rules. `vtc install --host
+ * claude-code` (an explicit user command) shows the user and then writes these keys into the
+ * project's gitignored `.claude/settings.local.json`; {@link claudeSessionSandboxState} reads
+ * them back. Sandbox reads are denied on `homeReadDeny`, on each host's credential files and
+ * {@link HOME_CREDENTIAL_LOCATIONS} (what the gate sandbox and the headless profiles already
+ * deny) and on {@link REPO_ROLE_DENIED}`.readDeny`; writes on `homeWriteDeny` and
+ * `REPO_ROLE_DENIED.writeDeny`. `permissions.deny` ({@link claudeSessionPermissionDeny}) repeats
+ * them for the file tools, which the sandbox does not cover. Absolute POSIX paths, pure string
+ * joins: nothing is opened (D-ad).
  */
 export const claudeSessionSandboxSettings = (
   vtcHome: string,
@@ -322,39 +404,23 @@ export const claudeSessionSandboxSettings = (
     readonly allowUnsandboxedCommands: false;
     readonly filesystem: { readonly denyRead: string[]; readonly denyWrite: string[] };
   };
+  readonly permissions: { readonly deny: string[] };
 } => ({
   sandbox: {
     enabled: true,
     allowUnsandboxedCommands: false,
-    filesystem: {
-      denyRead: [
-        ...new Set([
-          ...ROLE_DENIED_VTC.homeReadDeny.map((glob) => vtcHomePath(vtcHome, glob)),
-          ...hostCredentialDenyReadPaths(scope.hostConfigDirs),
-          ...HOME_CREDENTIAL_LOCATIONS.map((rel) => underRoot(scope.homeDir, rel, "home")),
-          ...REPO_ROLE_DENIED.readDeny.map((glob) =>
-            underRoot(scope.projectRoot, glob, "project root"),
-          ),
-        ]),
-      ],
-      denyWrite: [
-        ...new Set([
-          ...ROLE_DENIED_VTC.homeWriteDeny.map((glob) => vtcHomePath(vtcHome, glob)),
-          ...REPO_ROLE_DENIED.writeDeny.map((glob) =>
-            underRoot(scope.projectRoot, glob, "project root"),
-          ),
-        ]),
-      ],
-    },
+    filesystem: claudeSessionSandboxLists(vtcHome, scope),
   },
+  permissions: { deny: claudeSessionPermissionDeny(vtcHome, scope) },
 });
 
 /**
  * Pure: whether parsed Claude settings (the project's `.claude/settings.local.json`) turn the
  * session sandbox on with every entry of {@link claudeSessionSandboxSettings}: `sandbox.enabled`
- * true, `allowUnsandboxedCommands` false, and every read and write deny present. `missing` lists
- * what is not there (`sandbox.enabled`, `sandbox.allowUnsandboxedCommands`, or a path). Settings
- * that cannot be read are `unknown`, which the engine treats like `off` (fail closed).
+ * true, `allowUnsandboxedCommands` false, every read and write deny path present, and every
+ * `permissions.deny` rule present. `missing` lists what is not there (`sandbox.enabled`,
+ * `sandbox.allowUnsandboxedCommands`, a path or a rule). Settings that cannot be read are
+ * `unknown`, which the engine treats like `off` (fail closed).
  */
 export const claudeSessionSandboxState = (
   settings: unknown,
@@ -362,15 +428,17 @@ export const claudeSessionSandboxState = (
   scope: SessionSandboxScope,
 ): { readonly state: SessionSandboxState; readonly missing: readonly string[] } => {
   if (!isRecord(settings)) return { state: "unknown", missing: ["sandbox"] };
-  const wanted = claudeSessionSandboxSettings(vtcHome, scope).sandbox;
+  const wanted = claudeSessionSandboxSettings(vtcHome, scope);
   const sandbox = isRecord(settings.sandbox) ? settings.sandbox : {};
   const filesystem = isRecord(sandbox.filesystem) ? sandbox.filesystem : {};
+  const permissions = isRecord(settings.permissions) ? settings.permissions : {};
   const listed = (list: unknown): readonly unknown[] => (Array.isArray(list) ? list : []);
   const missing = [
     ...(sandbox.enabled === true ? [] : ["sandbox.enabled"]),
     ...(sandbox.allowUnsandboxedCommands === false ? [] : ["sandbox.allowUnsandboxedCommands"]),
-    ...wanted.filesystem.denyRead.filter((p) => !listed(filesystem.denyRead).includes(p)),
-    ...wanted.filesystem.denyWrite.filter((p) => !listed(filesystem.denyWrite).includes(p)),
+    ...wanted.sandbox.filesystem.denyRead.filter((p) => !listed(filesystem.denyRead).includes(p)),
+    ...wanted.sandbox.filesystem.denyWrite.filter((p) => !listed(filesystem.denyWrite).includes(p)),
+    ...wanted.permissions.deny.filter((r) => !listed(permissions.deny).includes(r)),
   ];
   return { state: missing.length === 0 ? "on" : "off", missing };
 };

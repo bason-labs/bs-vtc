@@ -502,15 +502,28 @@ export const sandboxExecProfile = (
     `(deny file-read* ${READ_OPS} (literal "/dev/tty") (regex #"^/dev/ttys[0-9]+$"))`,
     ...(sentinel === undefined ? [] : [`(deny ${HIDE_OPS} (literal (param "SENTINEL")))`]),
   ];
-  if (spec.phase === "verify") {
+  if (spec.phase === "verify" && spec.loopback === true) {
+    // D-av: the human said at calibration that the suite needs the loopback (gates.yml
+    // `sandbox.verify_loopback`): sockets to 127.0.0.1 / ::1 only, never another host. The engine
+    // token stays unreadable, so the engine API is still closed to the gate.
+    lines.push(
+      "(allow system-socket)",
+      '(allow network-outbound (remote ip "localhost:*"))',
+      '(allow network-bind network-inbound (local ip "localhost:*"))',
+      ...unixSockets,
+    );
+  } else if (spec.phase === "verify") {
     // No network at all; Unix sockets only inside the writable directories (test runners' IPC).
     lines.push("(allow system-socket (socket-domain AF_UNIX))", ...unixSockets);
   } else {
     // IP networking for the registries; of the Unix sockets only DNS and the writable directories
-    // (never the engine socket, an ssh or gpg agent, or Docker).
+    // (never the engine socket, an ssh or gpg agent, or Docker). Never the host's loopback (the
+    // engine API, the prototype origin, local databases): the deny follows the allow, so it wins,
+    // as on Linux, where pasta maps no loopback.
     lines.push(
       "(allow system-socket)",
       "(allow network-outbound (remote ip))",
+      '(deny network-outbound (remote ip "localhost:*"))',
       "(allow network-bind network-inbound (local ip))",
       '(allow network-outbound (remote unix-socket (path-literal "/private/var/run/mDNSResponder")))',
       ...unixSockets,
@@ -715,6 +728,13 @@ export const PASTA_ARGS: readonly string[] = [
 ];
 
 /**
+ * Why a Linux install-phase gate does not run (D-aw, spine §5 reading 85): without pasta it would
+ * share the host's network namespace, loopback included. Verify-phase gates need no pasta.
+ */
+export const PASTA_MISSING_INSTALL =
+  "pasta (passt) is not installed or cannot start here, so install-phase gates cannot run in a network namespace of their own; install passt (verify-phase gates run without it)";
+
+/**
  * `bwrap` (Linux), never in the host's network namespace: the verify phase in bwrap's own, the
  * install phase in pasta's (`pasta {@link PASTA_ARGS} -- bwrap …`). Inside pasta's user
  * namespace the caller is root, so bwrap starts a nested user namespace with the real `uid` and
@@ -724,7 +744,8 @@ export const PASTA_ARGS: readonly string[] = [
 export const createBwrapSandbox = (
   options: {
     readonly binary: string;
-    readonly pasta: string;
+    /** Absent (D-aw): verify-phase commands still run; install-phase ones refuse. */
+    readonly pasta?: string;
     readonly uid?: number;
     readonly gid?: number;
   } & Partial<BwrapFs>,
@@ -742,6 +763,7 @@ export const createBwrapSandbox = (
       if (spec.phase === "verify") {
         return { command: options.binary, args: bwrapArgs(argv, spec, fs), network: "none" };
       }
+      if (options.pasta === undefined) throw new Error(PASTA_MISSING_INSTALL);
       if (extrasOf(spec).resolvConf === undefined) {
         throw new Error("gate sandbox: an install-phase command needs the jail's resolv.conf");
       }
@@ -798,6 +820,8 @@ export interface GateSandboxDetection {
   readonly detail: string;
   /** With no sandbox: why there is none (the middle of `detail`, for callers that word the rest). */
   readonly reason?: string;
+  /** With a sandbox that cannot run every phase (Linux without pasta, D-aw): what does not run. */
+  readonly warning?: string;
 }
 
 export interface DetectGateSandboxOptions {
@@ -873,11 +897,14 @@ export const detectGateSandbox = (options: DetectGateSandboxOptions = {}): GateS
         );
       }
       const pasta = found("pasta");
-      if (pasta === undefined) {
-        return none(
-          "pasta (passt) is not installed; the install phase needs it for a network namespace of its own",
-        );
-      }
+      // D-aw: without a working pasta only install-phase gates are refused; verify ones run
+      const withoutPasta = (): GateSandboxDetection => ({
+        kind: "bwrap",
+        sandbox: createBwrapSandbox({ binary }),
+        detail: `bwrap (${binary}, own network namespace; no pasta, so install-phase gates do not run)`,
+        warning: PASTA_MISSING_INSTALL,
+      });
+      if (pasta === undefined) return withoutPasta();
       if (
         !probe([
           pasta,
@@ -892,7 +919,7 @@ export const detectGateSandbox = (options: DetectGateSandboxOptions = {}): GateS
           "true",
         ])
       ) {
-        return none(`${pasta} cannot start ${binary} in a network namespace of its own here`);
+        return withoutPasta();
       }
       return {
         kind: "bwrap",
@@ -909,6 +936,8 @@ export const detectGateSandbox = (options: DetectGateSandboxOptions = {}): GateS
 /** One sandboxed command: where it runs, in which phase, with what. */
 export interface JailedRequest extends ExecRequest {
   readonly phase: GatePhase;
+  /** Verify phase: the loopback is reachable (gates.yml `sandbox.verify_loopback`, D-av). */
+  readonly loopback?: boolean;
   /** Absolute checkout the command may write. */
   readonly checkout: string;
 }
@@ -988,6 +1017,7 @@ export class GateCommandJail {
       allowRead: this.read.allowRead ?? [],
       reapSentinel: this.sentinel,
       resolvConf: this.resolvConf,
+      ...(request.loopback === true && request.phase === "verify" ? { loopback: true } : {}),
     };
     const wrapped = this.sandbox.wrap(request.argv, spec);
     const reaper = isReaped(wrapped);

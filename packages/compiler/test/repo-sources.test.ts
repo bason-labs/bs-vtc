@@ -23,7 +23,6 @@ import {
   PrototypeThemeSchema,
   prototypeStatePath,
   ROLE_CONTRACTS_ASSET,
-  ROLE_DENIED_VTC,
   RoleContractSchema,
   VerdictQuestionTypeSchema,
   type RoleContract,
@@ -93,7 +92,7 @@ describe("the repo's sources compile (AD-16 Check)", () => {
     for (const f of output().targets.codex.filter((t) => t.path.endsWith(".toml"))) {
       const toml = parseToml(f.text);
       expect(typeof toml.developer_instructions).toBe("string");
-      expect(["read-only", "workspace-write"]).toContain(toml.sandbox_mode);
+      expect(toml.sandbox_mode).toBeUndefined();
     }
   });
 });
@@ -145,36 +144,11 @@ describe("role agents get only what their contract allows (AD-4, AD-8 rule 3)", 
         agent.path,
       ).toEqual([]);
     }
-    const entry = engineMcpServer("codex");
+    // a Codex agent inherits the session's bridge (reading 82): it names no engine tool at all,
+    // and the engine refuses human-only and Lead-only calls from role sessions (reading 71)
     const codex = output().targets.codex.filter((t) => t.path.startsWith("agents/"));
     expect(codex.length).toBe(roles.flatMap(compiledAgentNames).length);
-    for (const f of codex) {
-      const server = (parseToml(f.text).mcp_servers as Record<string, Record<string, unknown>>)[
-        entry.name
-      ];
-      // the bridge must be either off or narrowed; an open bridge would serve every tool
-      expect(server?.enabled === false || Array.isArray(server?.enabled_tools), f.path).toBe(true);
-      const enabled = (server?.enabled_tools ?? []) as string[];
-      expect(
-        enabled.filter((t) => human.includes(t)),
-        f.path,
-      ).toEqual([]);
-    }
-  });
-
-  it("keeps the engine bridge off, or limited to role-facing tools, in every Codex role agent", () => {
-    const entry = engineMcpServer("codex");
-    for (const f of output().targets.codex.filter((t) => t.path.startsWith("agents/"))) {
-      const server = (parseToml(f.text).mcp_servers as Record<string, Record<string, unknown>>)[
-        entry.name
-      ];
-      if (server?.enabled === false) continue;
-      const enabled = (server?.enabled_tools ?? ["(all)"]) as string[];
-      expect(
-        enabled.filter((t) => !ROLE_FACING_ENGINE_TOOLS.includes(t)),
-        f.path,
-      ).toEqual([]);
-    }
+    for (const f of codex) expect(parseToml(f.text).mcp_servers, f.path).toBeUndefined();
   });
 
   it("never tells an agent without a shell to run tests or commands", () => {
@@ -190,41 +164,36 @@ describe("no role touches VTC's own guard rails (D-w, spine §5 reading 43)", ()
   const agentFiles = (host: "claude-code" | "codex") =>
     output().targets[host].filter((f) => f.path.startsWith("agents/"));
 
-  it("every Claude Code agent denies `vtc calibrate` and writes to the guarded VTC home globs", () => {
+  it("every Claude Code agent names only bare tools in disallowedTools (reading 81)", () => {
+    // a specifier there removes the whole tool; the path and command rules are permissions.deny
     const files = agentFiles("claude-code");
     expect(files.length).toBe(roles.flatMap(compiledAgentNames).length);
     for (const f of files) {
       const match = /^---\n([\s\S]*?)\n---\n/.exec(f.text);
-      const front = parseYaml(match?.[1] ?? "") as { disallowedTools?: string };
+      const front = parseYaml(match?.[1] ?? "") as { disallowedTools?: string; tools?: string };
       const denied = (front.disallowedTools ?? "").split(", ");
-      for (const sub of ROLE_DENIED_VTC.subcommands) {
-        expect(denied, f.path).toContain(`Bash(vtc ${sub}:*)`);
-      }
-      for (const glob of ROLE_DENIED_VTC.homeWriteDeny) {
-        expect(denied, f.path).toContain(`Edit(~/.vtc/${glob})`);
-        expect(denied, f.path).toContain(`Write(~/.vtc/${glob})`);
-        expect(denied, f.path).toContain(`Bash(*~/.vtc/${glob.replace(/\/\*\*$/, "")}*)`);
-      }
-      for (const glob of ROLE_DENIED_VTC.homeReadDeny) {
-        expect(denied, f.path).toContain(`Read(~/.vtc/${glob})`);
-        expect(denied, f.path).toContain(`Bash(*~/.vtc/${glob.replace(/\/\*\*$/, "")}*)`);
-      }
       expect(denied, f.path).toEqual(CLAUDE_DENIED_TOOLS);
+      expect(
+        denied.filter((t) => /[()]/.test(t)),
+        f.path,
+      ).toEqual([]);
+      expect((front.tools ?? "").split(", "), f.path).toContain("Read");
     }
   });
 
-  it("every Codex agent keeps the VTC home outside its sandbox: no writable roots, no wider mode", () => {
-    // A Codex agent file cannot deny one command (execpolicy rules are session-level, not
-    // per-agent), so the barrier on Codex is the sandbox: read-only, or workspace-write with no
-    // extra writable root, so neither `vtc calibrate` nor a role can write under ~/.vtc/.
+  it("every Codex agent sets no sandbox key it cannot set, and turns off what it may (reading 82)", () => {
+    // a Codex custom agent file cannot override sandbox_mode, approval_policy or mcp_servers; the
+    // only per-agent reductions are features.* = false and skills.*
     const files = agentFiles("codex");
     expect(files.length).toBe(roles.flatMap(compiledAgentNames).length);
     for (const f of files) {
       const toml = parseToml(f.text);
-      expect(["read-only", "workspace-write"], f.path).toContain(toml.sandbox_mode);
-      // the one sandbox table pins the network off (spine §5 reading 79), and widens nothing
-      expect(toml.sandbox_workspace_write, f.path).toEqual({ network_access: false });
-      expect(f.text, f.path).not.toMatch(/writable_roots|network_access\s*=\s*true/);
+      expect(f.text, f.path).not.toMatch(
+        /sandbox_mode|sandbox_workspace_write|mcp_servers|approval_policy/,
+      );
+      expect((toml.features as Record<string, unknown>).request_permissions_tool, f.path).toBe(
+        false,
+      );
     }
   });
 });
@@ -263,10 +232,8 @@ describe("host identity of the compiled agents (D-aa, D-ae; spine §5 readings 2
       "name",
       "description",
       "model_reasoning_effort",
-      "sandbox_mode",
       "developer_instructions",
-      "sandbox_workspace_write",
-      "mcp_servers",
+      "features",
     ]);
     for (const f of output().targets.codex.filter((t) => t.path.startsWith("agents/"))) {
       expect(

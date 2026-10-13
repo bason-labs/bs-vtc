@@ -234,6 +234,7 @@ export const createInstallCommand = (
             home: d.home(),
             pluginDir,
             scope: scope ?? DEFAULT_INSTALL_SCOPE[host.data],
+            vtcHome: ctx.vtcHome,
           });
           ctx.io.out(`Installed the VTC plugin for ${host.data}.`);
           for (const path of result.written) ctx.io.out(`  wrote ${path}`);

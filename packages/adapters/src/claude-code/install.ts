@@ -1,7 +1,9 @@
 /**
  * Claude Code `install` (§4.4, AD-6 rule 5, AD-16 rule 4; spine §5 reading 6). Places and
  * registers what the compiler emitted, authoring no plugin content:
- * 1. copies the compiled plugin into a local marketplace under `<home>/.vtc/claude-marketplace`
+ * 1. copies the compiled plugin into a local marketplace under `<vtcHome>/claude-marketplace`
+ *    (`InstallRequest.vtcHome`, default `<home>/.vtc`; spine §5 reading 83, so it sits where
+ *    `ROLE_DENIED_VTC.homeWriteDeny` and every sandbox deny list built from the VTC home point)
  *    and writes that marketplace's index (`.claude-plugin/marketplace.json`);
  * 2. registers the marketplace and enables the plugin in Claude Code settings
  *    (`extraKnownMarketplaces`, `enabledPlugins`): `~/.claude/settings.json` for the user scope,
@@ -17,7 +19,7 @@
  * here: it has one writer, the cli's `vtc install`, which shows the user the settings and the
  * entries it would drop and writes them only after the user confirms (`cli/src/session-sandbox.ts`).
  * Both scopes are accepted (the cli picks the default, `DEFAULT_INSTALL_SCOPE`, D-ah), and the
- * marketplace always lives under `InstallRequest.home` (spine §5 reading 60).
+ * marketplace always lives under the VTC home (spine §5 readings 60 and 83).
  * The exact marketplace form is provisional until the spike tries it on a real install (spine §7).
  */
 import { existsSync, readdirSync } from "node:fs";
@@ -112,7 +114,8 @@ export const installClaudeCode = (request: InstallRequest): InstallResult => {
     throw new Error(`no ${CLAUDE_PLUGIN_MANIFEST} in ${request.pluginDir}`);
   }
   const pluginJson = readJsonSettings(pluginJsonPath);
-  const marketplace = join(request.home, ".vtc", "claude-marketplace");
+  // under the VTC home the role deny lists are built from (reading 83), not a fixed ~/.vtc
+  const marketplace = join(request.vtcHome ?? join(request.home, ".vtc"), "claude-marketplace");
 
   // every settings file is read and built first, so a refusal leaves everything as it was
   const userSettingsPath = join(request.home, ".claude", "settings.json");

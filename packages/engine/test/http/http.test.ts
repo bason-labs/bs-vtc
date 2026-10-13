@@ -600,6 +600,37 @@ describe("AD-5 rule 9: the prototype origin", () => {
     expect(replies[0]?.body).toBe("<h1>proto</h1>");
     expect(replies.some((r) => r.body.includes("raw"))).toBe(false);
   });
+  it("serves nothing when the root, or a directory above it, is a symlink out of place", async () => {
+    // a cloned repo or a role can commit `.vtc/design/prototype` (or `.vtc/design`) as a link
+    const outside = tempDir("vtc-proto-home-");
+    writeFile(outside, ".vtc/token", "SECRET-TOKEN");
+    writeFile(outside, "index.html", "<h1>outside</h1>");
+    const linkedRoot = tempDir("vtc-proto-");
+    mkdirSync(join(linkedRoot, ".vtc/design"), { recursive: true });
+    symlinkSync(outside, join(linkedRoot, ".vtc/design/prototype"));
+    const relative = tempDir("vtc-proto-");
+    writeFile(relative, ".vtc/state/t.jsonl", "TRANSCRIPT");
+    mkdirSync(join(relative, ".vtc/design"), { recursive: true });
+    symlinkSync("../state", join(relative, ".vtc/design/prototype"));
+    const linkedDesign = tempDir("vtc-proto-");
+    mkdirSync(join(outside, "prototype"), { recursive: true });
+    writeFile(outside, "prototype/index.html", "<h1>outside</h1>");
+    mkdirSync(join(linkedDesign, ".vtc"), { recursive: true });
+    symlinkSync(outside, join(linkedDesign, ".vtc/design"));
+    for (const [repo, paths] of [
+      [linkedRoot, ["/.vtc/token", "/", "/index.html"]],
+      [relative, ["/t.jsonl"]],
+      [linkedDesign, ["/", "/index.html"]],
+    ] as const) {
+      const proto = await createPrototypeServer(repo);
+      servers.push(proto);
+      for (const path of paths) {
+        const reply = await call(proto.port, path);
+        expect(reply.status, `${repo} ${path}`).toBe(404);
+        expect(reply.body).not.toMatch(/SECRET|TRANSCRIPT|outside/);
+      }
+    }
+  });
   it("answers an unreadable file, a symlink loop and a vanished file without dying", async () => {
     const repo = tempDir("vtc-proto-");
     writeFile(repo, ".vtc/design/prototype/index.html", "<h1>proto</h1>");

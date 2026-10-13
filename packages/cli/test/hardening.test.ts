@@ -275,10 +275,11 @@ describe("the session sandbox the bridge reports (D-an, reading 71)", () => {
 
   it("merges the settings, keeping the user's other keys and deny entries", () => {
     const home = "/home/u/.vtc";
-    const wanted = claudeSessionSandboxSettings(home, sandboxScopeOf("/r", SANDBOX_ENV)).sandbox;
+    const shared = claudeSessionSandboxSettings(home, sandboxScopeOf("/r", SANDBOX_ENV));
+    const wanted = shared.sandbox;
     const merged = mergeSessionSandboxSettings(
       {
-        permissions: { allow: ["Bash(ls)"] },
+        permissions: { allow: ["Bash(ls)"], deny: ["Bash(rm -rf *)"] },
         sandbox: {
           enabled: false,
           allowUnsandboxedCommands: true,
@@ -289,7 +290,7 @@ describe("the session sandbox the bridge reports (D-an, reading 71)", () => {
       home,
     );
     expect(merged).toEqual({
-      permissions: { allow: ["Bash(ls)"] },
+      permissions: { allow: ["Bash(ls)"], deny: ["Bash(rm -rf *)", ...shared.permissions.deny] },
       sandbox: {
         enabled: true,
         allowUnsandboxedCommands: false,
@@ -520,14 +521,18 @@ describe("the gate sandbox (D-al, reading 69)", () => {
         probe: probeOf(["/opt/bin/bwrap", "/usr/bin/pasta"]),
       }),
     ).toMatchObject({ kind: "bwrap" });
-    // bwrap alone is not enough: the install phase needs pasta, so gate runs would park
+    // bwrap alone runs verify-phase gates; only install-phase gates need pasta (D-aw)
     const noPasta = detectGateSandbox({
       ...linux,
       exists: on("/opt/bin/bwrap"),
       probe: probeOf(["/opt/bin/bwrap"]),
     });
-    expect(noPasta.kind).toBeNull();
-    expect(noPasta.reason).toMatch(/pasta \(passt\) is not installed/);
+    expect(noPasta.kind).toBe("bwrap");
+    expect(noPasta.warning).toMatch(/pasta \(passt\) is not installed/);
+    expect(checkGateSandbox(noPasta, null)).toMatchObject({
+      status: "warn",
+      detail: expect.stringMatching(/install-phase gates cannot run/) as string,
+    });
     // installed is not enough: a bwrap that cannot create namespaces is none
     expect(
       detectGateSandbox({ ...linux, exists: on("/opt/bin/bwrap"), probe: probeOf([]) }).reason,

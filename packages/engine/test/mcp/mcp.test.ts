@@ -416,7 +416,13 @@ s.on("data", (c) => {
     const stdout = new PassThrough();
     let out = "";
     stdout.on("data", (c: Buffer) => (out += c.toString("utf8")));
-    const bridge = runStdioBridge({ path: server.path, host: "claude-code", stdin, stdout });
+    const bridge = runStdioBridge({
+      path: server.path,
+      host: "claude-code",
+      stdin,
+      stdout,
+      sessionSandbox: "on",
+    });
     stdin.write(
       `${JSON.stringify({ jsonrpc: "2.0", id: 1, method: "tools/call", params: { name: "next", arguments: {} } })}\n`,
     );

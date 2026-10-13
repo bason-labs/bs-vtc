@@ -323,6 +323,7 @@ describe("Lead-only tools from role sessions (spine §7, until the Codex isolati
     });
     const lead = await connectEngineClient(server.path, CONTRACTS_VERSION, {
       bridge: "claude-code",
+      sessionSandbox: "on",
     });
     const role = await connectEngineClient(server.path, CONTRACTS_VERSION, {
       bridge: "claude-code",

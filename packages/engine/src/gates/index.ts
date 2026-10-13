@@ -162,6 +162,7 @@ export {
 export {
   calibrate,
   flakyBetween,
+  LOOPBACK_QUESTION,
   type CalibrateDeps,
   type CalibrateOutcome,
 } from "./calibrate/calibrate.js";

@@ -37,6 +37,7 @@ import {
   draft,
   only,
   SPEC_ONE,
+  spawns,
   submitResult,
   throughPlan,
   toPlanner,
@@ -115,22 +116,18 @@ describe("Codex runs on the session's model (D-ae, spine §5 reading 51)", () =>
     expect(overridden.model).toBe("gpt-x");
     expect(core.resolveModel(engineer, "claude-code", hosts).model).toBe("sonnet");
   });
-  it("omits spawn_role.model, records session-default, and never prints 'model undefined'", async () => {
+  it("dispatches no Codex role in-session at all, so no spawn names an undefined model (reading 82)", async () => {
     const h = createHarness();
     await start(h, CODEX);
-    const carto = only(await next(h, CODEX), "repo_cartographer");
-    expect("model" in carto).toBe(false);
-    expect(carto.prompt).not.toContain("undefined");
-    expect(carto.prompt).toContain("the session's model");
-    const dispatched = events(h).find((e) => e.type === "role.dispatched");
-    expect(dispatched?.model).toBe(SESSION_DEFAULT_MODEL);
-    expect(h.engine.status({}).run.id).toBeTruthy();
+    expect(spawns(await next(h, CODEX))).toEqual([]);
+    expect(events(h).some((e) => e.type === "role.dispatched")).toBe(false);
+    expect(SESSION_DEFAULT_MODEL).toBeTruthy();
     await h.release();
   });
   it("keeps the cost the host reports though it names no model", async () => {
     const h = createHarness();
-    await start(h, CODEX);
-    const carto = only(await next(h, CODEX), "repo_cartographer");
+    await start(h, CLAUDE);
+    const carto = only(await next(h, CLAUDE), "repo_cartographer");
     writeFile(workdir(carto), ".vtc/research/repo-map/map.md", "# map\n");
     const out = await h.engine.submit(
       SubmitInputSchema.parse({
@@ -144,12 +141,12 @@ describe("Codex runs on the session's model (D-ae, spine §5 reading 51)", () =>
         },
         usage: { model: null, tokens: null, cost_usd: 0.4 },
       }),
-      CODEX,
+      CLAUDE,
     );
     expect(out.accepted).toBe(true);
     const submitted = events(h).find((e) => e.type === "role.submitted");
     // a host-computed cost does not depend on VTC knowing the model id (§11 caps count it)
-    expect(submitted).toMatchObject({ model: SESSION_DEFAULT_MODEL, cost_usd: 0.4 });
+    expect(submitted).toMatchObject({ cost_usd: 0.4 });
     await h.release();
   });
 });

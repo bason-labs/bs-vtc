@@ -1,7 +1,8 @@
 /**
  * The prototype origin (AD-5 rule 9): agent-written HTML/JS under `.vtc/design/prototype/` served
  * from its own 127.0.0.1 port, never the API's origin. No token (git-tracked files, no run data),
- * Host checked, `PROTOTYPE_CSP` on every response, no `/api/` route, nothing outside the root.
+ * so a symlink anywhere on the root's path inside the repo serves nothing (it would move the
+ * trust root to its target: the user's home, `.vtc/state`). Host checked, `PROTOTYPE_CSP` on every response, no `/api/` route, nothing outside the root.
  * The files are agent-written, so every filesystem error (an unreadable file, a symlink loop, a
  * file removed mid-request) answers 404 or 500; none may escape and stop the daemon. Nothing but a
  * regular file is opened, and the open never blocks (`O_NONBLOCK`): a FIFO or device planted under
@@ -18,7 +19,7 @@ import {
   statSync,
 } from "node:fs";
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
-import { join, sep } from "node:path";
+import { join, resolve, sep } from "node:path";
 import { dashboardAssetHeaders, ENGINE_HTTP } from "@vtc/shared";
 
 /** The largest prototype file served (a prototype page, script or image). */
@@ -48,6 +49,10 @@ export const createPrototypeServer = async (
     let realRoot: string;
     try {
       realRoot = realpathSync(root);
+      // The trust root is the prototype directory where it stands in the repo: if it, or
+      // `.vtc/design` or `.vtc` above it, is a symlink (a cloned repo or a role can commit one),
+      // its target is not the prototype and nothing is served from it.
+      if (realRoot !== resolve(realpathSync(repoRoot), ENGINE_HTTP.prototype.root)) return null;
     } catch {
       return null;
     }

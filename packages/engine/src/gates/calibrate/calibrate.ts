@@ -89,6 +89,13 @@ export const flakyBetween = (
   return [...ids].filter((id) => first.get(id) !== second.get(id)).sort();
 };
 
+/**
+ * The loopback question (D-av, spine §5 reading 84): asked at the terminal confirmation, before
+ * anything runs; a yes is recorded as `sandbox.verify_loopback: true` in `.vtc/gates.yml`.
+ */
+export const LOOPBACK_QUESTION =
+  "Does the test suite need sockets to this machine's loopback (127.0.0.1, ::1)? Without it, verify-phase gates get no network at all";
+
 export const calibrate = async (
   deps: CalibrateDeps,
   options: { readonly dryRun?: boolean } = {},
@@ -110,7 +117,7 @@ export const calibrate = async (
       "no gate commands detected; write .vtc/gates.yml by hand and run vtc calibrate again",
     );
 
-  const proposed = GatesConfigSchema.parse({
+  const detected = GatesConfigSchema.parse({
     version: 1,
     baseline: {
       revision: deps.revision,
@@ -122,7 +129,7 @@ export const calibrate = async (
     tests: detection.tests,
     gates: detection.gates,
   });
-  if (options.dryRun === true) return { status: "dry_run", yaml: stringifyGatesConfig(proposed) };
+  if (options.dryRun === true) return { status: "dry_run", yaml: stringifyGatesConfig(detected) };
 
   // Nothing runs outside the gate sandbox unless the user opted in (D-al, spine §5 reading 69).
   let detail = "";
@@ -149,7 +156,7 @@ export const calibrate = async (
   }
 
   // Pinned scanners need no allowlist entry, but the human sees exactly how they will run.
-  const scannerGates = proposed.gates.filter((g) => scanners.names.includes(g.command[0] ?? ""));
+  const scannerGates = detected.gates.filter((g) => scanners.names.includes(g.command[0] ?? ""));
   if (scannerGates.length > 0) {
     deps.out(
       "Pinned scanners run as (vtc refuses unknown flags, network use and paths outside the checkout):",
@@ -160,7 +167,7 @@ export const calibrate = async (
   // 1. Every command a human has not confirmed on this machine, before anything runs (§15).
   const allowlist = readAllowlist(deps.vtcHome, deps.repoRoot);
   const pending: string[][] = [];
-  for (const gate of proposed.gates) {
+  for (const gate of detected.gates) {
     if (gateCommandAllowed(gate.command, allowlist, scanners.names)) continue;
     const prefix = allowlistPrefix(gate.command);
     if (!pending.some((p) => p.join("\u0000") === prefix.join("\u0000"))) pending.push(prefix);
@@ -173,6 +180,14 @@ export const calibrate = async (
     }
     addToAllowlist(deps.vtcHome, deps.repoRoot, pending, now());
   }
+
+  // The loopback (D-av): only the human's answer here turns it on; gates.yml is human-calibrated.
+  const loopback =
+    detected.gates.some((g) => g.phase === "verify") && (await deps.confirm(LOOPBACK_QUESTION));
+  const proposed = GatesConfigSchema.parse({
+    ...detected,
+    ...(loopback ? { sandbox: { verify_loopback: true } } : {}),
+  });
 
   const stamp = now()
     .toISOString()

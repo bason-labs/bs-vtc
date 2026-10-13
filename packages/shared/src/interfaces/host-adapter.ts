@@ -108,6 +108,13 @@ export interface InstallRequest {
   readonly pluginDir: string;
   /** Where host files go; `vtc install` defaults per host to {@link DEFAULT_INSTALL_SCOPE}. */
   readonly scope: InstallScope;
+  /**
+   * Absolute VTC home (`$VTC_HOME`, default `<home>/.vtc`), where VTC-owned files such as the
+   * Claude Code local marketplace go (spine §5 reading 83): the role deny lists
+   * (`ROLE_DENIED_VTC.homeWriteDeny`) are built from it, so the plugin the Lead loads sits where
+   * they point. Absent: `<home>/.vtc`. New in contracts 4.4.0.
+   */
+  readonly vtcHome?: string;
 }
 
 export type InstallScope = "user" | "project";

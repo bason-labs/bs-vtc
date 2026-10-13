@@ -170,7 +170,10 @@ export const sandboxToolsMissing = (
   return [`a Claude Code sandbox on ${platform}`];
 };
 
-/** The settings `vtc install --host claude-code` writes: the shared ones and `failIfUnavailable`. */
+/**
+ * The settings `vtc install --host claude-code` writes: the shared ones (the sandbox and the
+ * file-tool `permissions.deny` rules, spine §5 reading 81) and `failIfUnavailable`.
+ */
 export const sessionSandboxSettings = (
   vtcHome: string,
   scope: SessionSandboxScope,
@@ -178,9 +181,14 @@ export const sessionSandboxSettings = (
   readonly sandbox: ReturnType<typeof claudeSessionSandboxSettings>["sandbox"] & {
     readonly failIfUnavailable: true;
   };
-} => ({
-  sandbox: { ...claudeSessionSandboxSettings(vtcHome, scope).sandbox, failIfUnavailable: true },
-});
+  readonly permissions: ReturnType<typeof claudeSessionSandboxSettings>["permissions"];
+} => {
+  const shared = claudeSessionSandboxSettings(vtcHome, scope);
+  return {
+    sandbox: { ...shared.sandbox, failIfUnavailable: true },
+    permissions: shared.permissions,
+  };
+};
 
 /**
  * Where a settings file's sandbox paths resolve: relative ones against `base` (and, failing
@@ -614,11 +622,14 @@ export const mergeSessionSandboxSettings = (
     guardedRoots(vtcHome, scope),
     paths.platform ?? process.platform,
   ).reduce((settings, w) => without(settings, w.keys, w.entries), { ...existing });
-  const wanted = sessionSandboxSettings(vtcHome, scope).sandbox;
+  const settings = sessionSandboxSettings(vtcHome, scope);
+  const wanted = settings.sandbox;
   const sandbox = isRecord(kept.sandbox) ? kept.sandbox : {};
   const filesystem = isRecord(sandbox.filesystem) ? sandbox.filesystem : {};
+  const permissions = isRecord(kept.permissions) ? kept.permissions : {};
   return {
     ...kept,
+    permissions: { ...permissions, deny: union(permissions.deny, settings.permissions.deny) },
     sandbox: {
       ...sandbox,
       enabled: wanted.enabled,

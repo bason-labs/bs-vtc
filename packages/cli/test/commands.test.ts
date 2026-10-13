@@ -164,7 +164,8 @@ describe("vtc install", () => {
     );
     expect(await cmd.run(["--host", "codex", "--scope", "user"], ctx)).toBe(0);
     expect(requests).toEqual([
-      { projectRoot: repo, home: "/h", pluginDir: "/plugins/codex", scope: "user" },
+      // the VTC home goes with the request, so VTC-owned host files sit where the deny lists point
+      { projectRoot: repo, home: "/h", pluginDir: "/plugins/codex", scope: "user", vtcHome },
     ]);
     expect(options).toEqual([{ pluginDir: "/plugins/codex", vtcHome, vtcVersion: VERSION }]);
     expect(disposed).toBe(1);

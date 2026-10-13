@@ -169,6 +169,14 @@ export const GatesConfigSchema = z
     sources: z.array(CalibrationSourceSchema).default([]),
     tests: TestLayoutSchema,
     gates: z.array(GateSchema).min(1),
+    /**
+     * The gate sandbox's per-repo settings (D-av, spine §5 reading 84). `verify_loopback`: the
+     * human answered yes at `vtc calibrate`'s confirmation that the test suite needs sockets to
+     * the loopback, so verify-phase gates may reach 127.0.0.1 / ::1 (never another host). This
+     * file is protected and human-calibrated: no role may write it (`REPO_ROLE_DENIED`, L5), and
+     * a run takes it from the commit it starts on. Absent: no loopback. New in contracts 4.4.0.
+     */
+    sandbox: z.strictObject({ verify_loopback: z.boolean() }).optional(),
   })
   .superRefine((config, ctx) => {
     const ids = config.gates.map((g) => g.id);
