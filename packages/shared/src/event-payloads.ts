@@ -61,7 +61,16 @@ export const RejectReasonSchema = z.enum([
 ]);
 export type RejectReason = z.infer<typeof RejectReasonSchema>;
 
-/** What kind of unclean end an incident report describes (§15 incident reports). */
+/**
+ * What an incident report describes (§15 incident reports): an unclean end, or an event the
+ * human must see without the run stopping.
+ * - `config_changed`: `project.yaml` or `gates.yml` changed during a run. The run keeps the
+ *   config it started with (`run.started.pipeline_config_hash`) and does not pause; the new
+ *   config applies to the next run (spine §5 reading 20).
+ * - `checkout_write`: a write the engine's checkout or log check found that no role and no engine
+ *   write explains (AD-7 rule 7), logged in full with its paths as evidence; the pause reason
+ *   only summarises it.
+ */
 export const IncidentKindSchema = z.enum([
   "crash",
   "kill",
@@ -69,6 +78,8 @@ export const IncidentKindSchema = z.enum([
   "gate_infra",
   "log_corruption",
   "stale_lock",
+  "config_changed",
+  "checkout_write",
 ]);
 export type IncidentKind = z.infer<typeof IncidentKindSchema>;
 
@@ -131,12 +142,16 @@ export const EVENT_PAYLOAD_SCHEMAS = {
     outcome: z.enum(["done", "aborted"]),
     summary: RelPathSchema.optional(),
   }),
-  /** Auto-downgrade after a revert or post-merge CI failure, or a human change (§6.7). */
+  /**
+   * Auto-downgrade after a revert or post-merge CI failure, or a human change (§6.7).
+   * `no_remote`: Level 2+ in a repo without the push remote; the engine downgrades the run to
+   * Level 1 and its tasks reach `done` under the Level-1 rule (spine §5 reading 18).
+   */
   "run.merge_level_changed": z
     .strictObject({
       from: MergeLevelSchema,
       to: MergeLevelSchema,
-      reason: z.enum(["revert", "post_merge_ci_failure", "human"]),
+      reason: z.enum(["revert", "post_merge_ci_failure", "human", "no_remote"]),
     })
     .refine((v) => v.from !== v.to, { message: "the level must change", path: ["to"] }),
   "gate.approved": z.strictObject({
@@ -211,6 +226,16 @@ export const EVENT_PAYLOAD_SCHEMAS = {
     branch: z.string().regex(/^vtc\/F-[1-9]\d*$/, "expected integration branch vtc/F-n"),
     commit: GitShaSchema,
   }),
+  /**
+   * A Level-2+ push of the integration branch failed (§6.7). Its merged tasks stay `merged`;
+   * the next push retries. `detail` is git's redacted message.
+   */
+  "branch.push_failed": z.strictObject({
+    branch: z.string().regex(/^vtc\/F-[1-9]\d*$/, "expected integration branch vtc/F-n"),
+    detail: z.string().min(1).max(2000),
+  }),
+  /** Opening, updating or readying the feature's PR failed (§6.7); `detail` is redacted. */
+  "feature.pr_failed": z.strictObject({ detail: z.string().min(1).max(2000) }),
   "role.dispatched": z.strictObject({
     action_id: SlugSchema,
     mode: SlugSchema.optional(),
@@ -368,6 +393,8 @@ export const EVENT_ENVELOPE_REQUIREMENTS: Readonly<
   "feature.status_changed": ["feature"],
   "feature.pr_updated": ["feature"],
   "branch.pushed": ["feature"],
+  "branch.push_failed": ["feature"],
+  "feature.pr_failed": ["feature"],
   "role.dispatched": ["role", "prompt_sha", "host", "model"],
   "role.submitted": ["role", "prompt_sha", "host", "model", "tokens", "cost_usd"],
   "role.rejected": ["role"],
