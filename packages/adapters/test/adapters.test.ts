@@ -32,6 +32,42 @@ for (const host of HOST_IDS) {
   if (factory !== undefined) runHostAdapterSafetyContract(factory());
 }
 
+describe("adapter registry (AD-6 rule 6)", () => {
+  it("registers both hosts, each declaring the capabilities recorded for it", () => {
+    expect(Object.keys(ADAPTER_FACTORIES).sort()).toEqual([...HOST_IDS].sort());
+    for (const host of HOST_IDS) {
+      expect(ADAPTER_FACTORIES[host]?.().capabilities).toEqual(HOST_CAPABILITIES[host]);
+    }
+  });
+  it("only Codex pulls usage itself; Claude usage is pushed (AD-6 rule 4)", () => {
+    const codex = ADAPTER_FACTORIES.codex!();
+    const claude = ADAPTER_FACTORIES["claude-code"]!();
+    expect("readUsage" in codex && "watchUsage" in codex).toBe(true);
+    expect("readUsage" in claude || "watchUsage" in claude).toBe(false);
+  });
+  it("hands the project's Codex tier models to the Codex adapter", () => {
+    const adapter = ADAPTER_FACTORIES.codex?.({ models: { mid: "model-m" } });
+    const sandbox = adapter!.sandboxProfile({
+      tools: { profile: "read_only", write_paths: [], engine_tools: [] },
+      cwd: "/w",
+      writablePaths: [],
+      protectedPaths: [],
+      network: "none",
+    });
+    const args = adapter!.headlessCommand({
+      role: "qa",
+      model: { tier: "mid", effort: "low", model: "ignored" },
+      dispatch: "headless",
+      cwd: "/w",
+      prompt: "p",
+      outputSchema: {},
+      sandbox,
+      timeoutMs: 1000,
+    }).args;
+    expect(args[args.indexOf("--model") + 1]).toBe("model-m");
+  });
+});
+
 describe("HostAdapter safety contract (AD-9)", () => {
   it("runs for every registered adapter, and only known hosts can register", () => {
     for (const host of Object.keys(ADAPTER_FACTORIES)) expect(HOST_IDS).toContain(host);

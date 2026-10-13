@@ -1,0 +1,3 @@
+{"type":"system","subtype":"init","session_id":"5f1c2a9e-0d3b-4e7a-9c61-2b8d4f0e7a13","model":"claude-opus-5-5","tools":["Read"],"cwd":"/work/app"}
+{"type":"rate_limit_event","rate_limit_info":{"status":"rejected","rateLimitType":"seven_day_opus","resetsAt":1792454400},"uuid":"7d0e1f2a-0003-4000-8000-000000000003","session_id":"5f1c2a9e-0d3b-4e7a-9c61-2b8d4f0e7a13"}
+{"type":"result","subtype":"success","is_error":true,"duration_ms":900,"num_turns":1,"result":"You've reached your Opus limit · resets Oct 20, 9am","session_id":"5f1c2a9e-0d3b-4e7a-9c61-2b8d4f0e7a13","total_cost_usd":0,"usage":{"input_tokens":0,"cache_creation_input_tokens":0,"cache_read_input_tokens":0,"output_tokens":0}}

@@ -18,7 +18,8 @@
     "build": "tsc -p tsconfig.build.json",
     "typecheck": "tsc -p tsconfig.json",
     "lint": "eslint .",
-    "test": "vitest run"
+    "test": "vitest run",
+    "live:check": "bun --conditions=@vtc/source scripts/live-check.ts"
   },
   "dependencies": {
     "@vtc/shared": "workspace:*"
