@@ -998,6 +998,50 @@ process.exit(results.some((r) => r.messages.length > 0) ? 1 : 0);
   });
 });
 
+describe("package-manager configs a diff adds (§7.2 L1/L5)", () => {
+  /**
+   * A fake lint run through a package manager: like `npm run lint` under a planted
+   * `script-shell=true`, it reports nothing when the checkout's .npmrc says so.
+   */
+  const FAKE_NPM_LINT = `
+import { existsSync, readFileSync, writeFileSync, mkdirSync } from "node:fs";
+const [out, ...files] = process.argv.slice(2);
+const off = existsSync(".npmrc") && readFileSync(".npmrc", "utf8").includes("script-shell=true");
+const results = files.filter((f) => f.endsWith(".ts")).map((f) => ({
+  filePath: f,
+  messages: off ? [] : readFileSync(f, "utf8").split("\\n").flatMap((l, i) =>
+    l.includes("TODO") ? [{ ruleId: "no-todo", severity: 2, message: "TODO left", line: i + 1 }] : []),
+}));
+mkdirSync(".vtc/state/gates", { recursive: true });
+writeFileSync(out, JSON.stringify(results));
+process.exit(results.some((r) => r.messages.length > 0) ? 1 : 0);
+`;
+  const npmLintGate = {
+    id: "lint",
+    layer: "L1" as const,
+    command: [NODE, "tools/npm-lint.mjs", ".vtc/state/gates/lint.json", "{changed}"],
+    report: { format: "json" as const, path: ".vtc/state/gates/lint.json" },
+  };
+
+  it("lints without a .npmrc the diff added, and flags it in L5", async () => {
+    // The project's own protected_configs (.lintrc only) predate the package-manager globs.
+    const h = harness(
+      { "tools/npm-lint.mjs": FAKE_NPM_LINT, "src/a.ts": "ok\n" },
+      config([npmLintGate]),
+    );
+    writeFile(h.repo, ".npmrc", "script-shell=true\n");
+    writeFile(h.repo, "src/a.ts", "// TODO later\n");
+    const head = commitAll(h.repo);
+    const report = await h.run({ head, files_scope: ["**"] });
+    expect(gate(report, "lint")).toMatchObject({ status: "fail", new_violations: 1 });
+    expect(gate(report, "write-scope").findings).toEqual([
+      expect.objectContaining({ rule_id: "protected_modified", location: { path: ".npmrc" } }),
+    ]);
+    // The checkout is the head commit again afterwards.
+    expect(read(h.repo, ".npmrc")).toBe("script-shell=true\n");
+  });
+});
+
 describe("the osv-scanner offline database (§7.2, §15)", () => {
   it("does not start the dependency gate without the database", async () => {
     const h = harness({}, config([osvGate]));

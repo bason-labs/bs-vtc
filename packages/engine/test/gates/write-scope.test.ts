@@ -178,6 +178,114 @@ describe("standalone tox and hatch configs", () => {
   });
 });
 
+describe("package-manager configs (a gate runs through npm, pnpm, yarn or bun)", () => {
+  it("flags an added .npmrc, .yarnrc.yml, bunfig.toml, pnpmfile or yarn release under a ** files_scope", async () => {
+    const repo = initRepo({ "src/app.ts": "export const f = () => 1;\n" });
+    const base = git(repo, "rev-parse", "HEAD");
+    // script-shell=true makes `npm run test` and `pnpm run test` run `true -c "vitest"`.
+    writeFile(repo, ".npmrc", "script-shell=true\n");
+    writeFile(repo, "packages/x/.NPMRC", "node-options=--require ./x.cjs\n");
+    writeFile(repo, ".yarnrc.yml", "yarnPath: ./evil.cjs\n");
+    writeFile(repo, ".yarnrc", "yarn-path ./evil.cjs\n");
+    writeFile(repo, ".yarn/releases/yarn-4.9.0.cjs", "process.exit(0);\n");
+    writeFile(repo, ".yarn/plugins/p.cjs", "process.exit(0);\n");
+    writeFile(repo, "bunfig.toml", '[test]\npreload = ["./x.ts"]\n');
+    writeFile(repo, ".pnpmfile.cjs", "module.exports = {};\n");
+    writeFile(repo, "src/app.ts", "export const f = () => 2;\n");
+    const head = commitAll(repo, "package-manager games");
+    const ops = createGitOps({ repoRoot: repo });
+    const scope = { ...request(base, head), protected: [], filesScope: ["**"] };
+    const expected = [
+      { kind: "protected_modified", path: ".npmrc" },
+      { kind: "protected_modified", path: ".pnpmfile.cjs" },
+      { kind: "protected_modified", path: ".yarn/plugins/p.cjs" },
+      { kind: "protected_modified", path: ".yarn/releases/yarn-4.9.0.cjs" },
+      { kind: "protected_modified", path: ".yarnrc" },
+      { kind: "protected_modified", path: ".yarnrc.yml" },
+      { kind: "protected_modified", path: "bunfig.toml" },
+      { kind: "protected_modified", path: "packages/x/.NPMRC" },
+    ];
+    expect((await checkWriteScope(ops, scope)).violations).toEqual(expected);
+    // Guarded like task-runner files, even when a project's own protected globs leave them out.
+    expect((await checkWriteScope(ops, scope, ["**/conftest.py"])).violations).toEqual(expected);
+    // Only the exact path named in files_scope allows the change.
+    const planned = { ...scope, filesScope: ["**", ".npmrc"] };
+    const left = (await checkWriteScope(ops, planned)).violations.map((v) => v.path);
+    expect(left).not.toContain(".npmrc");
+    expect(left).toContain("bunfig.toml");
+  });
+
+  it("flags settings in pnpm-workspace.yaml, never its packages or catalogs", async () => {
+    const WS = "packages:\n  - packages/*\ncatalog:\n  zod: 4.0.0\n";
+    const repo = initRepo({ "pnpm-workspace.yaml": WS, "src/app.ts": "x\n" });
+    const base = git(repo, "rev-parse", "HEAD");
+    const ops = createGitOps({ repoRoot: repo });
+    const scope = (head: string) => ({
+      ...request(base, head),
+      protected: [],
+      filesScope: ["**"],
+    });
+
+    writeFile(
+      repo,
+      "pnpm-workspace.yaml",
+      "packages:\n  - packages/*\n  - apps/*\ncatalog:\n  zod: 4.1.0\n  yaml: 2.9.1\ncatalogs:\n  next:\n    react: 19.0.0\n",
+    );
+    const deps = commitAll(repo, "workspace packages and catalogs");
+    expect((await checkWriteScope(ops, scope(deps))).violations).toEqual([]);
+
+    writeFile(repo, "pnpm-workspace.yaml", `${WS}scriptShell: "true"\n`);
+    const shell = commitAll(repo, "script shell");
+    expect((await checkWriteScope(ops, scope(shell))).violations).toEqual([
+      { kind: "protected_modified", path: "pnpm-workspace.yaml" },
+    ]);
+
+    // A file pnpm could read differently from this parser fails closed.
+    writeFile(repo, "pnpm-workspace.yaml", `${WS}catalog:\n  zod: 5.0.0\n`);
+    const duplicate = commitAll(repo, "duplicate key");
+    expect((await checkWriteScope(ops, scope(duplicate))).violations).toEqual([
+      { kind: "protected_modified", path: "pnpm-workspace.yaml" },
+    ]);
+  });
+
+  it("guards the packageManager field of package.json", async () => {
+    const PKG = '{ "name": "a", "packageManager": "pnpm@10.0.0" }\n';
+    const repo = initRepo({ "package.json": PKG });
+    const base = git(repo, "rev-parse", "HEAD");
+    writeFile(repo, "package.json", PKG.replace("pnpm@10.0.0", "yarn@https://example.test/y.tgz"));
+    const head = commitAll(repo, "package manager");
+    const ops = createGitOps({ repoRoot: repo });
+    const scope = { ...request(base, head), protected: [], filesScope: ["**"] };
+    expect((await checkWriteScope(ops, scope)).violations).toEqual([
+      { kind: "protected_modified", path: "package.json" },
+    ]);
+  });
+});
+
+describe("pnpm-workspace.yaml settings (§7.2 L1)", () => {
+  const WS =
+    "packages:\n  - packages/*\ncatalog:\n  zod: 4.0.0\nnodeOptions: --max-old-space-size=4096\n";
+
+  it("keeps head packages and catalogs and takes every setting from the base", () => {
+    const head =
+      "packages:\n  - packages/*\n  - apps/*\ncatalog:\n  zod: 4.1.0\nscriptShell: 'true'\n";
+    const merged = withBaseSections("pnpm-workspace.yaml", head, WS);
+    expect(guardedSections("pnpm-workspace.yaml", merged)).toBe(
+      guardedSections("pnpm-workspace.yaml", WS),
+    );
+    expect(merged).toContain("apps/*");
+    expect(merged).toContain("4.1.0");
+    expect(merged).not.toContain("scriptShell");
+    expect(merged).toContain("nodeOptions");
+  });
+
+  it("runs with the base file when either side does not parse", () => {
+    expect(withBaseSections("pnpm-workspace.yaml", "a: [\n", WS)).toBe(WS);
+    expect(withBaseSections("pnpm-workspace.yaml", WS, "a: [\n")).toBe("a: [\n");
+    expect(guardedSections("pnpm-workspace.yaml", "a: [\n")).toContain("a: [");
+  });
+});
+
 describe("tool sections of pyproject.toml and package.json (§7.2 L1/L5)", () => {
   const PY = [
     "[project]",

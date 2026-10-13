@@ -89,8 +89,11 @@ export {
 } from "./osv-db.js";
 export {
   DEFAULT_PROTECTED_GLOBS,
+  isGateCommandFile,
+  isPackageManagerConfig,
   isTaskRunnerFile,
   LINT_TEST_CONFIG_GLOBS,
+  PACKAGE_MANAGER_CONFIG_GLOBS,
   SCANNER_CONFIG_GLOBS,
   TASK_RUNNER_GLOBS,
 } from "./protected-globs.js";

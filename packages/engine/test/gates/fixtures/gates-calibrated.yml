@@ -68,6 +68,14 @@ tests:
     - "**/Taskfile.dist.y*ml"
     - "**/taskfile.dist.y*ml"
     - "**/noxfile.py"
+    - "**/.npmrc"
+    - "**/.yarnrc"
+    - "**/.yarnrc.yml"
+    - "**/.yarn/releases/**"
+    - "**/.yarn/plugins/**"
+    - "**/.pnpmfile.*"
+    - "**/bunfig.toml"
+    - "**/.bunfig.toml"
 gates:
   - id: install
     layer: L0

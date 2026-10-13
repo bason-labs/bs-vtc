@@ -72,7 +72,7 @@ import { isSarif, parseSarif } from "./parsers/sarif.js";
 import type { ParsedFinding } from "./parsers/types.js";
 import {
   DEFAULT_PROTECTED_GLOBS,
-  isTaskRunnerFile,
+  isGateCommandFile,
   SCANNER_CONFIG_GLOBS,
 } from "./protected-globs.js";
 import { ensureRules } from "./rules.js";
@@ -542,8 +542,9 @@ class Run {
    * L1 lints with the base commit's config (§7.2), and the scanners scan with the base commit's
    * scanner configs: config files the diff changed are put back to their base version for the
    * gate and restored afterwards, so a diff cannot silence the gates that verify it. With
-   * `toolSections` (L1), a changed `pyproject.toml` or `package.json` keeps the head version
-   * except for its tool sections, which come from the base (`mixed-configs.ts`).
+   * `toolSections` (L1), task-runner files and package-manager configs are always put back, and
+   * a changed `pyproject.toml`, `package.json` or `pnpm-workspace.yaml` keeps the head version
+   * except for its tool sections or settings, which come from the base (`mixed-configs.ts`).
    */
   private async useBaseConfigs(
     checkoutAbs: string,
@@ -551,7 +552,7 @@ class Run {
     toolSections: boolean,
   ): Promise<(() => void) | null> {
     const whole = (path: string): boolean =>
-      matchesAnyCaseless(globs, path) || (toolSections && isTaskRunnerFile(path));
+      matchesAnyCaseless(globs, path) || (toolSections && isGateCommandFile(path));
     const pinned = (path: string): boolean => whole(path) || (toolSections && isMixedConfig(path));
     const touched = this.changed.filter(
       (f) => pinned(f.path) || (f.oldPath !== undefined && pinned(f.oldPath)),
