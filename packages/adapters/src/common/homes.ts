@@ -1,6 +1,7 @@
 /** Default host and VTC directories, resolved the way the cli and the hosts resolve them. */
+import { realpathSync } from "node:fs";
 import { homedir } from "node:os";
-import { join, resolve } from "node:path";
+import nodePath, { basename, dirname, join, resolve, type PlatformPath } from "node:path";
 import { ROLE_DENIED_VTC } from "@vtc/shared";
 
 /** `$<name>` when set and non-empty, else `<home>/<fallback>`. A path only: nothing is read. */
@@ -11,7 +12,27 @@ export const envHome = (name: string, fallback: string): string => {
 
 /**
  * D-w: the VTC home's directories no role may write, from `ROLE_DENIED_VTC.homeWriteDeny`
- * (`allowlists/**` → `<vtcHome>/allowlists`), as absolute paths.
+ * (`allowlists/**` → `<vtcHome>/allowlists`), as absolute paths of the given platform.
  */
-export const vtcHomeWriteDeniedDirs = (vtcHome: string): string[] =>
-  ROLE_DENIED_VTC.homeWriteDeny.map((glob) => resolve(vtcHome, glob.replace(/\/\*\*$/u, "")));
+export const vtcHomeWriteDeniedDirs = (vtcHome: string, path: PlatformPath = nodePath): string[] =>
+  ROLE_DENIED_VTC.homeWriteDeny.map((glob) => path.resolve(vtcHome, glob.replace(/\/\*\*$/u, "")));
+
+/**
+ * The absolute path with every symlink in its longest existing prefix resolved (the part that
+ * does not exist yet is kept as given), so two paths compare by where they really are. It only
+ * resolves links: no file is opened or read.
+ */
+export const canonicalPath = (path: string): string => {
+  const missing: string[] = [];
+  let current = resolve(path);
+  for (;;) {
+    try {
+      return join(realpathSync.native(current), ...missing);
+    } catch {
+      const parent = dirname(current);
+      if (parent === current) return resolve(path);
+      missing.unshift(basename(current));
+      current = parent;
+    }
+  }
+};

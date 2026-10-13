@@ -18,6 +18,7 @@ import {
   type RoleTools,
   type SpawnRoleRequest,
 } from "@vtc/shared";
+import { codexSandboxProfile } from "../../src/codex/command.js";
 import { ADAPTER_FACTORIES, createCodexAdapter } from "../../src/index.js";
 import { fakeSpawner } from "../support/fake-spawner.js";
 import { fixtureLines } from "../support/fixtures.js";
@@ -41,7 +42,8 @@ const scratch = (): string => {
   return dir;
 };
 
-const VTC_HOME = "/home/dev/.vtc";
+// not under /home: on macOS that is an automount, and the overlap check resolves real paths
+const VTC_HOME = "/users-dev/.vtc";
 const profile = (tools: RoleTools, network: "none" | "registries" = "none") =>
   createCodexAdapter({ vtcHome: VTC_HOME }).sandboxProfile({
     tools,
@@ -127,7 +129,7 @@ describe("Codex sandboxProfile (§12.1, AD-9)", () => {
       expect(at("/v", tools, "/v/hidden/T-1")).toThrow(/VTC home/);
       expect(at("/v", tools, "/v")).toThrow(/VTC home/);
       // a repo whose own .vtc is the VTC home (a dotfiles repo at ~) keeps its worktrees writable
-      expect(at("/home/dev/.vtc", tools, "/home/dev/.vtc/state/worktrees/T-1")).not.toThrow();
+      expect(at(VTC_HOME, tools, `${VTC_HOME}/state/worktrees/T-1`)).not.toThrow();
     }
     // a reviewer writes nothing, wherever the VTC home is
     expect(() =>
@@ -140,6 +142,78 @@ describe("Codex sandboxProfile (§12.1, AD-9)", () => {
       }),
     ).not.toThrow();
   });
+
+  it("drops the OS temp roots from the writable set when the VTC home lies under one (D-w)", () => {
+    const request = (tools: RoleTools) => ({
+      tools,
+      cwd: CWD,
+      writablePaths: [],
+      protectedPaths: [],
+      network: "none" as const,
+    });
+    const excluded = [
+      "--config",
+      "sandbox_workspace_write.exclude_tmpdir_env_var=true",
+      "--config",
+      "sandbox_workspace_write.exclude_slash_tmp=true",
+    ];
+    for (const tools of [WRITE_SCOPED, ENGINEER]) {
+      const p = codexSandboxProfile(request(tools), {
+        vtcHome: "/scratch-tmp/vtc",
+        tempRoots: ["/scratch-tmp"],
+      });
+      expect(p.cliArgs.slice(-4)).toEqual(excluded);
+      expect(p.settings).toEqual({
+        sandbox_mode: "workspace-write",
+        sandbox_workspace_write: {
+          network_access: false,
+          writable_roots: [],
+          exclude_tmpdir_env_var: true,
+          exclude_slash_tmp: true,
+        },
+      });
+      // a VTC home outside every temp root keeps the temp directory writable (D-ag)
+      expect(
+        codexSandboxProfile(request(tools), { vtcHome: VTC_HOME, tempRoots: ["/scratch-tmp"] })
+          .cliArgs,
+      ).not.toContain("sandbox_workspace_write.exclude_slash_tmp=true");
+      // the real temp directory, as the adapter finds it
+      expect(
+        createCodexAdapter({ vtcHome: join(scratch(), "vtc") }).sandboxProfile(request(tools))
+          .cliArgs,
+      ).toEqual(expect.arrayContaining(excluded));
+    }
+    // a reviewer writes nothing, so it needs no exclusion
+    expect(
+      codexSandboxProfile(request(READ_ONLY), {
+        vtcHome: "/scratch-tmp/vtc",
+        tempRoots: ["/scratch-tmp"],
+      }).cliArgs,
+    ).toEqual(["--config", 'sandbox_mode="read-only"']);
+  });
+
+  it.skipIf(process.platform === "win32")(
+    "compares real paths, so a symlinked worktree or VTC home cannot hide an overlap (D-w)",
+    () => {
+      const root = scratch();
+      const vtcHome = join(root, "vtc");
+      mkdirSync(join(vtcHome, "hidden", "T-1"), { recursive: true });
+      symlinkSync(join(vtcHome, "hidden", "T-1"), join(root, "worktree-link"));
+      const at = (home: string, cwd: string) => () =>
+        createCodexAdapter({ vtcHome: home }).sandboxProfile({
+          tools: ENGINEER,
+          cwd,
+          writablePaths: [],
+          protectedPaths: [],
+          network: "none",
+        });
+      expect(at(vtcHome, join(root, "worktree-link"))).toThrow(/VTC home/);
+      const worktree = join(root, "repo", "wt");
+      mkdirSync(join(worktree, "nested"), { recursive: true });
+      symlinkSync(join(worktree, "nested"), join(root, "vtc-link"));
+      expect(at(join(root, "vtc-link"), worktree)).toThrow(/VTC home/);
+    },
+  );
 
   it("records what Codex cannot express of the role deny list (D-w): no command deny for `vtc calibrate`, no per-path write deny", () => {
     // Gap: Codex has no per-command deny for a headless run, so `vtc calibrate` cannot be denied
