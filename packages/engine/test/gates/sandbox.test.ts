@@ -13,6 +13,7 @@ import {
   writeFileSync,
 } from "node:fs";
 import { join } from "node:path";
+import { git, initRepo } from "../helpers/repo.js";
 import {
   GATE_SANDBOX,
   hostCredentialDenyReadPaths,
@@ -25,17 +26,25 @@ import {
   createBwrapSandbox,
   createSandboxExecSandbox,
   detectGateSandbox,
+  GATE_MACH_SERVICES,
   GATE_READABLE_VTC_HOME,
   GateCommandJail,
   gateDenyReadPaths,
+  gateReadPolicy,
+  gateToolchainRoots,
+  gitCommonDir,
   OSV_DB_DIR,
+  REAPER_SCRIPT,
   RULES_DIR,
   SANDBOX_EXEC,
   sandboxEnv,
   sandboxExecProfile,
   SCANNERS_DIR,
   UNSANDBOXED,
+  type GateJailSpec,
+  type ReapedGateCommand,
 } from "../../src/gates/index.js";
+import { fakeReaperSandbox } from "./fixture.js";
 import { cleanupDirs, tempDir } from "../helpers/repo.js";
 
 afterEach(cleanupDirs);
@@ -62,8 +71,60 @@ const paramsOf = (args: readonly string[]): Record<string, string> => {
   return out;
 };
 
+/** The profile's rules, one per line, without the `(version 1)` header. */
+const rulesOf = (profile: string): string[] => profile.split("\n").slice(1);
+
+/** Every `global-name` a profile lets the command look up. */
+const machNames = (profile: string): string[] =>
+  [...profile.matchAll(/\(global-name "([^"]+)"\)/g)].map((m) => m[1] ?? "");
+
 describe("the macOS sandbox-exec profile", () => {
-  it("denies the network in the verify phase, writes outside the checkout and temp, and reads of denied paths", () => {
+  it("starts from deny default: nothing is allowed that the profile does not name", () => {
+    for (const phase of ["verify", "install"] as const) {
+      const { profile } = sandboxExecProfile(spec({ phase }), same);
+      const rules = rulesOf(profile);
+      expect(profile.startsWith("(version 1)\n(deny default)\n")).toBe(true);
+      expect(profile).not.toContain("(allow default)");
+      // No operation is allowed wholesale except reading files (narrowed by the deny rules).
+      expect(rules.filter((r) => /^\(allow [a-z*-]+\)$/.test(r)).sort()).toEqual(
+        [
+          "(allow file-read*)",
+          "(allow ipc-posix-sem)",
+          "(allow process-exec)",
+          "(allow process-fork)",
+          "(allow sysctl-read)",
+          ...(phase === "install" ? ["(allow system-socket)"] : []),
+        ].sort(),
+      );
+      expect(profile).not.toMatch(/\(allow (network\*|mach\*|appleevent|iokit|pseudo-tty)/);
+    }
+  });
+
+  it("reaches only the system services a toolchain needs, never LaunchServices, AppleEvents, background downloads, the pasteboard or the keychain", () => {
+    const verify = machNames(sandboxExecProfile(spec(), same).profile);
+    const install = machNames(sandboxExecProfile(spec({ phase: "install" }), same).profile);
+    expect(verify).toEqual([...GATE_MACH_SERVICES.always]);
+    expect(install).toEqual([...GATE_MACH_SERVICES.always, ...GATE_MACH_SERVICES.install]);
+    for (const name of install) {
+      expect(name).not.toMatch(
+        /launchservices|lsd|appleevents|nsurlsession|pboard|pasteboard|SecurityServer|securityd|coreservicesd|xpc\.launchd|tccd|windowserver/i,
+      );
+    }
+    // Only the per-user-lookup, logging and notification services are reachable in the verify phase.
+    expect(GATE_MACH_SERVICES.always).toContain("com.apple.system.opendirectoryd.libinfo");
+    // DNS and certificate checks only where the network is.
+    expect(GATE_MACH_SERVICES.install).toContain("com.apple.dnssd.service");
+    expect(verify).not.toContain("com.apple.dnssd.service");
+  });
+
+  it("lets processes signal and inspect only their own sandbox", () => {
+    const rules = rulesOf(sandboxExecProfile(spec(), same).profile);
+    expect(rules).toContain("(allow signal (target same-sandbox))");
+    expect(rules).toContain("(allow process-info* (target same-sandbox))");
+    expect(rules.filter((r) => r.startsWith("(allow signal"))).toHaveLength(1);
+  });
+
+  it("denies the network in the verify phase except Unix sockets inside the writable directories", () => {
     const wrapped = createSandboxExecSandbox({ realpath: same }).wrap(
       ["node", "test.mjs", "--x"],
       spec(),
@@ -72,13 +133,18 @@ describe("the macOS sandbox-exec profile", () => {
     expect(wrapped.network).toBe("none");
     const args = wrapped.args;
     expect(args[0]).toBe("-p");
-    const profile = args[1] ?? "";
-    expect(profile).toContain("(deny network*)");
-    expect(profile).toContain("(deny file-write*)");
-    expect(profile).toMatch(/\(deny file-read\*/);
+    const rules = rulesOf(args[1] ?? "");
+    const network = rules.filter((r) => /^\(allow (network|system-socket)/.test(r));
+    expect(network).toEqual([
+      "(allow system-socket (socket-domain AF_UNIX))",
+      ...["CHECKOUT", "TEMP", "HOME"].flatMap((k) => [
+        `(allow network-bind network-inbound (local unix-socket (subpath (param "${k}"))))`,
+        `(allow network-outbound (remote unix-socket (subpath (param "${k}"))))`,
+      ]),
+    ]);
     // Paths travel as -D parameters, never spliced into the profile text.
-    expect(profile).not.toContain("/work/repo");
-    expect(profile).not.toContain("/home/u");
+    expect(args[1]).not.toContain("/work/repo");
+    expect(args[1]).not.toContain("/home/u");
     const params = paramsOf(args);
     expect(params.CHECKOUT).toBe("/work/repo/.vtc/state/checkouts/abc");
     expect(params.TEMP).toBe("/tmp/vtc-gate-1/tmp-0");
@@ -88,20 +154,80 @@ describe("the macOS sandbox-exec profile", () => {
         .filter(([k]) => k.startsWith("DENY_"))
         .map(([, v]) => v),
     ).toEqual(["/home/u/.vtc/token", "/home/u/.claude"]);
-    // The gate's own argv follows `--` unchanged.
+    // Without the jail's sentinel there is no reaper: the gate's own argv follows `--` unchanged.
     expect(args.slice(args.indexOf("--") + 1)).toEqual(["node", "test.mjs", "--x"]);
   });
 
-  it("gives the install phase the full network (sandbox-exec cannot filter by registry) with the same file rules", () => {
+  it("gives the install phase IP networking but no Unix socket outside the writable directories except DNS", () => {
     const wrapped = createSandboxExecSandbox({ realpath: same }).wrap(
       ["pnpm", "install"],
       spec({ phase: "install" }),
     );
     expect(wrapped.network).toBe("full");
-    const profile = wrapped.args[1] ?? "";
-    expect(profile).not.toContain("(deny network*)");
-    expect(profile).toContain("(deny file-write*)");
-    expect(profile).toMatch(/\(deny file-read\*/);
+    const rules = rulesOf(wrapped.args[1] ?? "");
+    const network = rules.filter((r) => /^\(allow (network|system-socket)/.test(r));
+    expect(network).toEqual([
+      "(allow system-socket)",
+      "(allow network-outbound (remote ip))",
+      "(allow network-bind network-inbound (local ip))",
+      '(allow network-outbound (remote unix-socket (path-literal "/private/var/run/mDNSResponder")))',
+      ...["CHECKOUT", "TEMP", "HOME"].flatMap((k) => [
+        `(allow network-bind network-inbound (local unix-socket (subpath (param "${k}"))))`,
+        `(allow network-outbound (remote unix-socket (subpath (param "${k}"))))`,
+      ]),
+    ]);
+    // The engine socket (~/.vtc/run), agent sockets and Docker are Unix sockets: none is reachable.
+    expect(rules).not.toContain("(allow network-outbound)");
+  });
+
+  it("writes only the checkout, temp and home, /dev/null and /dev/zero and its own descriptors, never a terminal", () => {
+    const rules = rulesOf(sandboxExecProfile(spec(), same).profile);
+    const writes = rules.filter((r) => r.includes("file-write"));
+    expect(writes).toEqual([
+      '(allow file-read-data file-read-metadata file-read-xattr file-write* (subpath (param "CHECKOUT")) (subpath (param "TEMP")) (subpath (param "HOME")))',
+      '(allow file-write-data (literal "/dev/null") (literal "/dev/zero") (subpath "/dev/fd"))',
+    ]);
+    expect(rules.filter((r) => r.startsWith("(allow") && r.includes("tty"))).toEqual([]);
+    // The user's terminals cannot even be opened for reading.
+    expect(rules).toContain(
+      '(deny file-read* file-read-data file-read-metadata file-read-xattr (literal "/dev/tty") (regex #"^/dev/ttys[0-9]+$"))',
+    );
+  });
+
+  it("hides the contents of the masked directories, re-allows the readable roots inside them, and denies the deny list last", () => {
+    const jailSpec: GateJailSpec = {
+      ...spec(),
+      hideRead: ["/home/u", "/work/repo/.vtc/state"],
+      allowRead: ["/home/u/.nvm", "/work/repo/.git"],
+    };
+    const { profile, params } = sandboxExecProfile(jailSpec, same);
+    const p = Object.fromEntries(params);
+    expect([p.HIDE_0, p.HIDE_1, p.READ_0, p.READ_1]).toEqual([
+      "/home/u",
+      "/work/repo/.vtc/state",
+      "/home/u/.nvm",
+      "/work/repo/.git",
+    ]);
+    const rules = rulesOf(profile);
+    const at = (rule: string): number => {
+      const i = rules.indexOf(rule);
+      expect(i, rule).toBeGreaterThanOrEqual(0);
+      return i;
+    };
+    // Names and metadata stay visible (tools resolve paths through these directories), contents not.
+    const hide = at('(deny file-read-data file-read-xattr (subpath (param "HIDE_0")))');
+    // The same operations as the hide rule: a rule for file-read* would lose to the specific one.
+    const read = at(
+      '(allow file-read-data file-read-metadata file-read-xattr (subpath (param "READ_0")))',
+    );
+    const writable = rules.findIndex((r) => r.includes('(subpath (param "CHECKOUT"))'));
+    const deny = at(
+      '(deny file-read* file-read-data file-read-metadata file-read-xattr (subpath (param "DENY_0")))',
+    );
+    expect(at("(allow file-read*)")).toBeLessThan(hide);
+    expect(hide).toBeLessThan(read);
+    expect(read).toBeLessThan(writable);
+    expect(writable).toBeLessThan(deny);
   });
 
   it("denies both the given and the resolved path of a symlinked deny entry", () => {
@@ -114,54 +240,164 @@ describe("the macOS sandbox-exec profile", () => {
     ]);
   });
 
+  it("runs the command under the in-sandbox reaper when the jail gives a sentinel", () => {
+    const jailSpec: GateJailSpec = { ...spec(), reapSentinel: "/tmp/vtc-gate-1/sandboxed" };
+    const wrapped = createSandboxExecSandbox({ realpath: same }).wrap(["node", "t.mjs"], jailSpec);
+    const after = wrapped.args.slice(wrapped.args.indexOf("--") + 1);
+    expect(after).toEqual([
+      "/bin/sh",
+      "-c",
+      REAPER_SCRIPT,
+      "vtc-gate",
+      "/tmp/vtc-gate-1/sandboxed",
+      "node",
+      "t.mjs",
+    ]);
+    expect(paramsOf(wrapped.args).SENTINEL).toBe("/tmp/vtc-gate-1/sandboxed");
+    // The sentinel's contents are unreadable inside the sandbox only: the reaper kills nothing outside one.
+    expect(wrapped.args[1]).toContain(
+      '(deny file-read-data file-read-xattr (literal (param "SENTINEL")))',
+    );
+    expect(REAPER_SCRIPT).toContain("kill -KILL -1");
+    expect(REAPER_SCRIPT).toMatch(/\[ -e "\$s" \] && ! \(: <"\$s"\)/);
+  });
+
   it("refuses an empty argv and relative paths", () => {
     const sandbox = createSandboxExecSandbox({ realpath: same });
     expect(() => sandbox.wrap([], spec())).toThrow(/empty/);
     expect(() => sandbox.wrap(["x"], spec({ checkout: "rel/path" }))).toThrow(/absolute/);
+    const relativeHide: GateJailSpec = { ...spec(), hideRead: ["rel"] };
+    expect(() => sandbox.wrap(["x"], relativeHide)).toThrow(/absolute/);
   });
 });
 
 describe("the Linux bwrap argv", () => {
   const kinds: Record<string, "dir" | "file"> = {
+    "/usr": "dir",
+    "/bin": "dir",
+    "/lib": "dir",
+    "/lib64": "dir",
+    "/etc": "dir",
+    "/etc/resolv.conf": "file",
+    "/opt": "dir",
+    "/sys": "dir",
     "/home/u/.vtc/token": "file",
     "/home/u/.claude": "dir",
+    "/home/u/.nvm": "dir",
+    "/opt/repo/.git": "dir",
+    "/opt/repo/.vtc/state": "dir",
+    "/opt/repo/.vtc/state/checkouts/abc": "dir",
+    "/tmp/vtc-gate-1/home": "dir",
+    "/tmp/vtc-gate-1/tmp-0": "dir",
+    "/work/repo/.vtc/state/checkouts/abc": "dir",
   };
-  const fs = { realpath: same, kind: (p: string) => kinds[p] ?? null };
+  const links: Record<string, string> = {
+    "/bin": "/usr/bin",
+    "/lib": "/usr/lib",
+    "/etc/resolv.conf": "/run/systemd/resolve/stub-resolv.conf",
+  };
+  const fs = { realpath: (p: string) => links[p] ?? p, kind: (p: string) => kinds[p] ?? null };
+  const pairs = (args: readonly string[], flag: string): string[][] =>
+    args.flatMap((a, i) => (a === flag ? [[args[i + 1] ?? "", args[i + 2] ?? ""]] : []));
+  const mountsOf = (args: readonly string[]): string[] => {
+    const out: string[] = [];
+    for (let i = 0; i < args.length; i += 1) {
+      const a = args[i] ?? "";
+      if (a === "--") break;
+      if (["--ro-bind", "--bind", "--symlink"].includes(a)) out.push(`${a} ${args[i + 2] ?? ""}`);
+      if (a === "--tmpfs") out.push(`${a} ${args[i + 1] ?? ""}`);
+    }
+    return out;
+  };
 
-  it("unshares the network in the verify phase, binds only the checkout and temp dirs writable and hides denied paths", () => {
+  it("builds a minimal root: system directories read-only, no host root, no host /tmp, /run or /var", () => {
     const args = bwrapArgs(["node", "t.mjs"], spec(), fs);
     expect(args).toContain("--unshare-net");
     expect(args).toContain("--die-with-parent");
-    const pairs = (flag: string): string[][] =>
-      args.flatMap((a, i) => (a === flag ? [[args[i + 1] ?? "", args[i + 2] ?? ""]] : []));
-    expect(pairs("--ro-bind")).toContainEqual(["/", "/"]);
-    expect(pairs("--bind")).toEqual([
-      ["/work/repo/.vtc/state/checkouts/abc", "/work/repo/.vtc/state/checkouts/abc"],
-      ["/tmp/vtc-gate-1/home", "/tmp/vtc-gate-1/home"],
-      ["/tmp/vtc-gate-1/tmp-0", "/tmp/vtc-gate-1/tmp-0"],
-    ]);
-    // A denied file is replaced by /dev/null, a denied directory by an empty read-only tmpfs.
-    expect(pairs("--ro-bind")).toContainEqual(["/dev/null", "/home/u/.vtc/token"]);
-    expect(args.join(" ")).toContain("--tmpfs /home/u/.claude --remount-ro /home/u/.claude");
-    // The denials come after the writable binds, so nothing re-exposes them.
-    expect(args.indexOf("/home/u/.claude")).toBeGreaterThan(
-      args.lastIndexOf("/tmp/vtc-gate-1/tmp-0"),
-    );
+    expect(args).toContain("--new-session");
+    expect(pairs(args, "--ro-bind")).not.toContainEqual(["/", "/"]);
+    expect(pairs(args, "--ro-bind")).toContainEqual(["/usr", "/usr"]);
+    expect(pairs(args, "--ro-bind")).toContainEqual(["/etc", "/etc"]);
+    // Merged-/usr links stay links.
+    expect(pairs(args, "--symlink")).toContainEqual(["/usr/bin", "/bin"]);
+    const mounts = mountsOf(args);
+    // Host IPC endpoints (the D-Bus session bus under /run/user, X11 under /tmp/.X11-unix, Docker
+    // under /var/run, agent sockets) are never mounted: /tmp is a fresh tmpfs, /run and /var absent.
+    expect(mounts).toContain("--tmpfs /tmp");
+    for (const m of mounts) {
+      expect(m).not.toMatch(/ \/run(\/|$)| \/var\/run| \/tmp\/\.X11-unix| \/home(\/|$)/);
+    }
     expect(args.slice(args.indexOf("--") + 1)).toEqual(["node", "t.mjs"]);
   });
 
-  it("keeps the network in the install phase (bwrap cannot filter by registry)", () => {
+  it("binds the checkout, home and temp dir writable after the /tmp tmpfs, and hides denied paths that are visible", () => {
+    const args = bwrapArgs(
+      ["node", "t.mjs"],
+      { ...spec(), allowRead: ["/home/u/.nvm"], denyRead: ["/home/u/.nvm/token", "/etc/shadow"] },
+      {
+        ...fs,
+        kind: (p) => (p === "/home/u/.nvm/token" || p === "/etc/shadow" ? "file" : fs.kind(p)),
+      },
+    );
+    expect(pairs(args, "--bind")).toEqual([
+      ["/tmp/vtc-gate-1/home", "/tmp/vtc-gate-1/home"],
+      ["/tmp/vtc-gate-1/tmp-0", "/tmp/vtc-gate-1/tmp-0"],
+      ["/work/repo/.vtc/state/checkouts/abc", "/work/repo/.vtc/state/checkouts/abc"],
+    ]);
+    const mounts = mountsOf(args);
+    expect(mounts.indexOf("--tmpfs /tmp")).toBeLessThan(
+      mounts.indexOf("--bind /tmp/vtc-gate-1/home"),
+    );
+    expect(pairs(args, "--ro-bind")).toContainEqual(["/home/u/.nvm", "/home/u/.nvm"]);
+    // A denied file inside a bound root is replaced by /dev/null, after every bind.
+    expect(mounts.slice(-2)).toEqual(["--ro-bind /home/u/.nvm/token", "--ro-bind /etc/shadow"]);
+    expect(pairs(args, "--ro-bind")).toContainEqual(["/dev/null", "/etc/shadow"]);
+    // A denied path that is not mounted at all needs nothing: /home/u/.claude is simply absent.
+    expect(args.join(" ")).not.toContain("/home/u/.claude");
+  });
+
+  it("hides a masked directory that a bound root would show, and binds the readable roots and checkout inside it again", () => {
+    const args = bwrapArgs(
+      ["x"],
+      {
+        ...spec({ checkout: "/opt/repo/.vtc/state/checkouts/abc" }),
+        hideRead: ["/opt/repo/.vtc/state", "/home/u"],
+        allowRead: ["/opt/repo/.git"],
+      },
+      fs,
+    );
+    const mounts = mountsOf(args);
+    const hide = mounts.indexOf("--tmpfs /opt/repo/.vtc/state");
+    expect(hide).toBeGreaterThan(mounts.indexOf("--ro-bind /opt"));
+    expect(hide).toBeLessThan(mounts.indexOf("--bind /opt/repo/.vtc/state/checkouts/abc"));
+    expect(mounts).toContain("--ro-bind /opt/repo/.git");
+    // /home/u is not under any bound root: nothing to hide.
+    expect(mounts.join(" ")).not.toContain("/home/u");
+  });
+
+  it("keeps the network in the install phase (bwrap cannot filter by registry) and makes DNS resolvable", () => {
     const sandbox = createBwrapSandbox({ binary: "/usr/bin/bwrap", ...fs });
     const wrapped = sandbox.wrap(["pnpm", "install"], spec({ phase: "install" }));
     expect(wrapped.command).toBe("/usr/bin/bwrap");
     expect(wrapped.network).toBe("full");
     expect(wrapped.args).not.toContain("--unshare-net");
     expect(wrapped.args).toContain("--unshare-pid");
+    // /etc/resolv.conf often points into /run, which is otherwise absent.
+    expect(pairs(wrapped.args, "--ro-bind")).toContainEqual([
+      "/run/systemd/resolve/stub-resolv.conf",
+      "/run/systemd/resolve/stub-resolv.conf",
+    ]);
+    expect(pairs(bwrapArgs(["x"], spec(), fs), "--ro-bind")).not.toContainEqual([
+      "/run/systemd/resolve/stub-resolv.conf",
+      "/run/systemd/resolve/stub-resolv.conf",
+    ]);
   });
 
-  it("skips denied paths that do not exist (there is nothing to read)", () => {
-    const args = bwrapArgs(["x"], spec({ denyRead: ["/nope"] }), fs);
+  it("skips paths that do not exist (there is nothing to read, and bwrap cannot mount over them)", () => {
+    const args = bwrapArgs(["x"], { ...spec({ denyRead: ["/nope"] }), allowRead: ["/gone"] }, fs);
     expect(args).not.toContain("/nope");
+    expect(args).not.toContain("/gone");
+    expect(pairs(args, "--ro-bind")).not.toContainEqual(["/nix", "/nix"]);
   });
 });
 
@@ -254,6 +490,102 @@ describe("what a gate may not read", () => {
     // Nothing under the VTC home is opened to build the list.
     expect(deny).toContain("/nowhere/.vtc/token");
   });
+
+  it("denies the credential stores of common package managers, registries and tools", () => {
+    const deny = gateDenyReadPaths("/nowhere/.vtc", { HOME: "/home/u" });
+    for (const p of [
+      ".cargo/credentials.toml",
+      ".yarnrc.yml",
+      ".bunfig.toml",
+      ".gradle/gradle.properties",
+      ".m2/settings.xml",
+      ".terraform.d/credentials.tfrc.json",
+      ".vault-token",
+      ".pgpass",
+      ".config/op",
+      ".config/hub",
+      ".config/containers",
+      ".local/share/keyrings",
+      ".gem/credentials",
+    ]) {
+      expect(deny).toContain(join("/home/u", p));
+    }
+  });
+});
+
+describe("what a gate may read (the read policy)", () => {
+  it("hides the whole real home and the repo's .vtc/state, and denies the repo's evidence", () => {
+    const policy = gateReadPolicy({
+      vtcHome: "/home/u/.vtc",
+      env: { HOME: "/home/u", PATH: "/usr/bin" },
+      repoRoot: "/work/repo",
+      homedir: "/home/u",
+    });
+    expect(policy.hideRead).toEqual(["/home/u", "/work/repo/.vtc/state"]);
+    expect(policy.denyRead).toContain("/work/repo/.vtc/evidence");
+    expect(policy.denyRead).toEqual(
+      expect.arrayContaining(gateDenyReadPaths("/home/u/.vtc", { HOME: "/home/u" })),
+    );
+    // The VTC home entries the gates run with stay readable inside the hidden home.
+    for (const name of GATE_READABLE_VTC_HOME) {
+      expect(policy.allowRead).toContain(join("/home/u/.vtc", name));
+    }
+  });
+
+  it("hides the account's home as well when HOME was moved", () => {
+    const policy = gateReadPolicy({
+      vtcHome: "/v",
+      env: { HOME: "/elsewhere/home" },
+      homedir: "/home/u",
+    });
+    expect(policy.hideRead).toEqual(["/elsewhere/home", "/home/u"]);
+  });
+
+  it("keeps the toolchains on PATH and in the toolchain variables readable, never the home itself or a parent of it", () => {
+    const roots = gateToolchainRoots(
+      {
+        HOME: "/home/u",
+        PATH: [
+          "/home/u/.nvm/versions/node/v22.17.1/bin",
+          "/home/u/.local/bin",
+          "/home/u/bin",
+          "/home/u/.pyenv/shims",
+          "/home/u/Library/pnpm",
+          "/home/u",
+          "/home",
+          "/",
+          "relative/bin",
+          "/usr/bin",
+        ].join(":"),
+        NVM_DIR: "/home/u/.nvm",
+        RUSTUP_HOME: "/home/u/.rustup",
+        JAVA_HOME: "relative/jdk",
+      },
+      ["/home/u"],
+    );
+    expect(roots).toEqual([
+      "/home/u/.nvm/versions/node/v22.17.1",
+      "/home/u/.local/bin",
+      "/home/u/bin",
+      "/home/u/.pyenv",
+      "/home/u/Library/pnpm",
+      "/usr",
+      "/home/u/.nvm",
+      "/home/u/.rustup",
+    ]);
+  });
+
+  it("keeps the repo's git directory readable (a verification checkout is a linked worktree)", () => {
+    const repo = realpathSync(initRepo());
+    expect(gitCommonDir(repo)).toBe(join(repo, ".git"));
+    const linked = join(repo, ".vtc/state/checkouts/x");
+    git(repo, "worktree", "add", "--detach", "--quiet", linked);
+    // From a linked worktree, the common directory is the main repo's .git.
+    expect(gitCommonDir(linked)).toBe(join(repo, ".git"));
+    expect(gitCommonDir(join(repo, "nope"))).toBeNull();
+    const policy = gateReadPolicy({ vtcHome: "/v", env: {}, repoRoot: repo, homedir: "/home/u" });
+    expect(policy.allowRead).toContain(join(repo, ".git"));
+  });
 });
 
 describe("the gate environment in the sandbox", () => {
@@ -326,6 +658,38 @@ describe("a jail: per-run home, per-command temp dirs", () => {
     expect(existsSync(home)).toBe(false);
   });
 
+  it("hands the sandbox the hidden and readable roots and, for a reaper, a sentinel it cannot read", async () => {
+    const work = tempDir("vtc-jail-");
+    const checkout = join(work, "checkout");
+    mkdirSync(checkout);
+    const { sandbox, specs } = recording();
+    const jail = new GateCommandJail(sandbox, ["/denied"], {
+      hideRead: ["/home/u"],
+      allowRead: ["/home/u/.nvm"],
+    });
+    const result = await jail.run({
+      phase: "verify",
+      checkout,
+      argv: [process.execPath, "-e", ""],
+      cwd: checkout,
+      env: sandboxEnvInput(),
+      timeoutMs: 20_000,
+      stdoutPath: join(work, "o"),
+      stderrPath: join(work, "e"),
+    });
+    expect(result.code).toBe(0);
+    const s = specs[0] as GateJailSpec;
+    expect(s.hideRead).toEqual(["/home/u"]);
+    expect(s.allowRead).toEqual(["/home/u/.nvm"]);
+    // The sentinel sits in the run's private root, outside every writable directory.
+    expect(s.reapSentinel).toBeDefined();
+    expect(existsSync(s.reapSentinel ?? "")).toBe(true);
+    for (const dir of [s.home, s.tempDir, s.checkout]) {
+      expect((s.reapSentinel ?? "").startsWith(`${dir}/`)).toBe(false);
+    }
+    jail.dispose();
+  });
+
   it("an unsandboxed jail runs the argv unchanged with the full network", () => {
     expect(UNSANDBOXED.kind).toBe("none");
     expect(UNSANDBOXED.wrap(["a", "b"], spec())).toEqual({
@@ -335,6 +699,112 @@ describe("a jail: per-run home, per-command temp dirs", () => {
     });
   });
 });
+
+/** Starts a detached child in its own session that writes `late` after 1.5 s, then exits. */
+const ORPHAN = `
+const { spawn } = require("child_process");
+const c = spawn(process.execPath, ["-e", "setTimeout(() => require('fs').writeFileSync('late', 'still here'), 1500)"], { detached: true, stdio: "ignore" });
+require("fs").writeFileSync("orphan.pid", String(c.pid));
+c.unref();
+`;
+
+describe.skipIf(process.platform === "win32")(
+  "the reaper protocol (macOS: no PID namespace)",
+  () => {
+    const runOrphan = async (
+      sandbox: GateSandbox,
+    ): Promise<{ jail: GateCommandJail; checkout: string; work: string; leftover?: string }> => {
+      const work = tempDir("vtc-reap-");
+      const checkout = join(work, "checkout");
+      mkdirSync(checkout);
+      const jail = new GateCommandJail(sandbox, []);
+      const result = await jail.run({
+        phase: "install",
+        checkout,
+        argv: [process.execPath, "-e", ORPHAN],
+        cwd: checkout,
+        env: sandboxEnvInput(),
+        timeoutMs: 20_000,
+        stdoutPath: join(work, "o"),
+        stderrPath: join(work, "e"),
+      });
+      expect(result.code, readFileSync(join(work, "e"), "utf8")).toBe(0);
+      return {
+        jail,
+        checkout,
+        work,
+        ...(result.leftover === undefined ? {} : { leftover: result.leftover }),
+      };
+    };
+
+    it("stops what the command left behind before the run returns", async () => {
+      const { jail, checkout, leftover } = await runOrphan(fakeReaperSandbox(true));
+      expect(leftover).toBeUndefined();
+      await new Promise((r) => setTimeout(r, 2_500));
+      expect(existsSync(join(checkout, "late"))).toBe(false);
+      jail.dispose();
+    });
+
+    it("waits for a slow reaper's confirmation (Bun closes the child before its extra pipes)", async () => {
+      const work = tempDir("vtc-reap-");
+      const checkout = join(work, "checkout");
+      mkdirSync(checkout);
+      const slow: GateSandbox = {
+        kind: "sandbox-exec",
+        wrap: (argv, s): ReapedGateCommand => ({
+          command: "/bin/sh",
+          args: [
+            "-c",
+            `exec 4<&0 0</dev/null
+set -m
+{ read -r _ <&4; sleep 1; printf R >&3; } >/dev/null 2>&1 &
+set +m
+exec 3>&- 4<&-
+"$@"`,
+            "vtc-gate",
+            ...argv,
+          ],
+          network: s.phase === "verify" ? "none" : "full",
+          reaper: true,
+        }),
+      };
+      const jail = new GateCommandJail(slow, []);
+      const started = Date.now();
+      const result = await jail.run({
+        phase: "verify",
+        checkout,
+        argv: [process.execPath, "-e", ""],
+        cwd: checkout,
+        env: sandboxEnvInput(),
+        timeoutMs: 20_000,
+        stdoutPath: join(work, "o"),
+        stderrPath: join(work, "e"),
+      });
+      expect(result.leftover).toBeUndefined();
+      expect(result.reaped).toBe(true);
+      expect(Date.now() - started).toBeGreaterThanOrEqual(900);
+      jail.dispose();
+    });
+
+    it("reports a reaper that never confirmed, and the jail then runs nothing more", async () => {
+      const { jail, checkout, work, leftover } = await runOrphan(fakeReaperSandbox(false));
+      expect(leftover).toMatch(/reaper/);
+      await expect(
+        jail.run({
+          phase: "verify",
+          checkout,
+          argv: [process.execPath, "-e", ""],
+          cwd: checkout,
+          env: sandboxEnvInput(),
+          timeoutMs: 20_000,
+          stdoutPath: join(work, "o2"),
+          stderrPath: join(work, "e2"),
+        }),
+      ).rejects.toThrow(/reaper/);
+      jail.dispose();
+    });
+  },
+);
 
 const sandboxEnvInput = (): Record<string, string> => ({
   PATH: process.env.PATH ?? "",
@@ -405,5 +875,156 @@ const loopback = () => {
       loopback: "EPERM",
     });
     expect(readdirSync(outside)).toEqual([]);
+  });
+
+  it("starts nothing outside the sandbox: no app through LaunchServices, no AppleEvent, no launchd job", async () => {
+    const work = realpathSync(tempDir("vtc-live-"));
+    const checkout = join(work, "checkout");
+    const secret = join(work, "secret");
+    for (const d of [checkout, secret]) mkdirSync(d);
+    writeFileSync(join(secret, "f"), "SECRET-MARKER\n");
+    const leak = (name: string): string => join(work, `leaked-${name}`);
+    const script = `
+const fs = require("fs"), cp = require("child_process"), path = require("path");
+const app = path.join(process.cwd(), "q.app", "Contents");
+fs.mkdirSync(path.join(app, "MacOS"), { recursive: true });
+fs.writeFileSync(path.join(app, "Info.plist"), '<?xml version="1.0"?><plist version="1.0"><dict><key>CFBundleExecutable</key><string>q</string><key>CFBundleIdentifier</key><string>dev.vtc.live-probe</string><key>CFBundlePackageType</key><string>APPL</string><key>LSUIElement</key><true/></dict></plist>');
+fs.writeFileSync(path.join(app, "MacOS", "q"), "#!/bin/sh\\n/bin/cat ${join(secret, "f")} > ${leak("open")}\\n", { mode: 0o755 });
+const out = {};
+out.open = cp.spawnSync("/usr/bin/open", ["-g", "-n", path.join(process.cwd(), "q.app")]).status;
+out.osascript = cp.spawnSync("/usr/bin/osascript", ["-e", 'do shell script "/bin/cat ${join(secret, "f")} > ${leak("osa")}"']).status;
+out.launchctl = cp.spawnSync("/bin/launchctl", ["submit", "-l", "dev.vtc.live-probe", "--", "/bin/sh", "-c", "/bin/cat ${join(secret, "f")} > ${leak("launchd")}"]).status;
+try { fs.closeSync(fs.openSync("/dev/tty", "r")); out.tty = "ok"; } catch (e) { out.tty = e.code; }
+fs.writeFileSync("out.json", JSON.stringify(out));
+`;
+    const jail = new GateCommandJail(detectGateSandbox().sandbox ?? UNSANDBOXED, [secret]);
+    try {
+      const result = await jail.run({
+        phase: "verify",
+        checkout,
+        argv: [process.execPath, "-e", script],
+        cwd: checkout,
+        env: { PATH: process.env.PATH ?? "" },
+        timeoutMs: 30_000,
+        stdoutPath: join(work, "o.log"),
+        stderrPath: join(work, "e.log"),
+      });
+      expect(result.code, readFileSync(join(work, "e.log"), "utf8")).toBe(0);
+    } finally {
+      jail.dispose();
+    }
+    const out = JSON.parse(readFileSync(join(checkout, "out.json"), "utf8")) as Record<
+      string,
+      unknown
+    >;
+    expect(out.open).not.toBe(0);
+    expect(out.osascript).not.toBe(0);
+    expect(out.launchctl).not.toBe(0);
+    expect(out.tty).toBe("EPERM");
+    // Give anything that did get started time to write.
+    await new Promise((r) => setTimeout(r, 2_000));
+    expect(readdirSync(work).filter((f) => f.startsWith("leaked-"))).toEqual([]);
+  }, 40_000);
+
+  it("refuses an install-phase connect to a Unix socket in a denied directory (the engine socket)", async () => {
+    const { createServer } = await import("node:net");
+    const work = realpathSync(tempDir("vtc-live-"));
+    const checkout = join(work, "checkout");
+    const run = join(work, "run");
+    for (const d of [checkout, run]) mkdirSync(d);
+    const sock = join(run, "e.sock");
+    const server = createServer((c) => c.end("HELLO-FROM-ENGINE\n"));
+    await new Promise<void>((resolve) => server.listen(sock, resolve));
+    const script = `
+const s = require("net").connect(${JSON.stringify(sock)});
+s.on("data", (d) => { require("fs").writeFileSync("out.txt", "got " + d); process.exit(0); });
+s.on("error", (e) => { require("fs").writeFileSync("out.txt", e.code); process.exit(0); });
+`;
+    const jail = new GateCommandJail(detectGateSandbox().sandbox ?? UNSANDBOXED, [run]);
+    try {
+      await jail.run({
+        phase: "install",
+        checkout,
+        argv: [process.execPath, "-e", script],
+        cwd: checkout,
+        env: { PATH: process.env.PATH ?? "" },
+        timeoutMs: 20_000,
+        stdoutPath: join(work, "o.log"),
+        stderrPath: join(work, "e.log"),
+      });
+    } finally {
+      jail.dispose();
+      server.close();
+    }
+    expect(readFileSync(join(checkout, "out.txt"), "utf8")).toBe("EPERM");
+  });
+
+  it("stops a setsid orphan that closed its stdio before the next gate runs", async () => {
+    const work = realpathSync(tempDir("vtc-live-"));
+    const checkout = join(work, "checkout");
+    mkdirSync(checkout);
+    const jail = new GateCommandJail(detectGateSandbox().sandbox ?? UNSANDBOXED, []);
+    try {
+      const result = await jail.run({
+        phase: "install",
+        checkout,
+        argv: [process.execPath, "-e", ORPHAN],
+        cwd: checkout,
+        env: { PATH: process.env.PATH ?? "" },
+        timeoutMs: 20_000,
+        stdoutPath: join(work, "o.log"),
+        stderrPath: join(work, "e.log"),
+      });
+      expect(result.code, readFileSync(join(work, "e.log"), "utf8")).toBe(0);
+      expect(result.leftover).toBeUndefined();
+    } finally {
+      jail.dispose();
+    }
+    await new Promise((r) => setTimeout(r, 2_500));
+    expect(existsSync(join(checkout, "late"))).toBe(false);
+  });
+
+  it("hides a masked directory's contents but keeps its readable roots, and toolchains still start", async () => {
+    const work = realpathSync(tempDir("vtc-live-"));
+    const checkout = join(work, "checkout");
+    const masked = join(work, "home");
+    const tool = join(masked, "tool");
+    for (const d of [checkout, masked, tool]) mkdirSync(d);
+    writeFileSync(join(masked, "private"), "x");
+    writeFileSync(join(tool, "lib.js"), "module.exports = 42;\n");
+    const script = `
+const fs = require("fs"), out = {};
+const tryIt = (k, f) => { try { out[k] = f(); } catch (e) { out[k] = e.code; } };
+tryIt("list", () => fs.readdirSync(${JSON.stringify(masked)}).length);
+tryIt("private", () => fs.readFileSync(${JSON.stringify(join(masked, "private"))}, "utf8"));
+tryIt("tool", () => require(${JSON.stringify(join(tool, "lib.js"))}));
+tryIt("shell", () => require("child_process").execFileSync("/usr/bin/env", ["sh", "-c", "echo ok"], { encoding: "utf8" }).trim());
+fs.writeFileSync("out.json", JSON.stringify(out));
+`;
+    const jail = new GateCommandJail(detectGateSandbox().sandbox ?? UNSANDBOXED, [], {
+      hideRead: [masked],
+      allowRead: [tool],
+    });
+    try {
+      const result = await jail.run({
+        phase: "verify",
+        checkout,
+        argv: [process.execPath, "-e", script],
+        cwd: checkout,
+        env: { PATH: process.env.PATH ?? "" },
+        timeoutMs: 20_000,
+        stdoutPath: join(work, "o.log"),
+        stderrPath: join(work, "e.log"),
+      });
+      expect(result.code, readFileSync(join(work, "e.log"), "utf8")).toBe(0);
+    } finally {
+      jail.dispose();
+    }
+    expect(JSON.parse(readFileSync(join(checkout, "out.json"), "utf8"))).toEqual({
+      list: "EPERM",
+      private: "EPERM",
+      tool: 42,
+      shell: "ok",
+    });
   });
 });

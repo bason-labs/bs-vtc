@@ -92,8 +92,9 @@ import {
 import {
   detectGateSandbox,
   GateCommandJail,
-  gateDenyReadPaths,
+  gateReadPolicy,
   resolveGateSandbox,
+  type JailedResult,
 } from "./sandbox.js";
 import { buildTraceability } from "./traceability.js";
 import { checkWriteScope } from "./write-scope.js";
@@ -230,8 +231,11 @@ class Run {
     sandbox: GateSandbox | null,
     private readonly configOverride?: GatesConfig,
   ) {
-    this.jail =
-      sandbox === null ? null : new GateCommandJail(sandbox, gateDenyReadPaths(deps.vtcHome, env));
+    if (sandbox === null) this.jail = null;
+    else {
+      const policy = gateReadPolicy({ vtcHome: deps.vtcHome, env, repoRoot: deps.repoRoot });
+      this.jail = new GateCommandJail(sandbox, policy.denyRead, policy);
+    }
     this.started = this.now();
     const owner = ownerOf(request);
     const evidenceBase = owner === undefined ? null : `${EVIDENCE_DIR}/${owner}/gates`;
@@ -304,7 +308,6 @@ class Run {
           ...(await this.deps.git.changedFiles(this.request.base, this.request.head)),
         ];
       }
-      this.copyHidden();
       await this.runGates(config);
     } catch (error) {
       // Never throw for a gate problem (GateRunner.run): an unexpected one is gate infrastructure.
@@ -352,12 +355,22 @@ class Run {
     return [...install, ...[...verify].sort((a, b) => order(a) - order(b))];
   }
 
+  /**
+   * Install-phase gates run first, as one batch; the hidden acceptance tests are copied in only
+   * after all of them, so no command with network access ever runs while they are in the
+   * checkout (and the reaper has stopped whatever the install commands left).
+   */
   private async runGates(config: GatesConfig): Promise<void> {
     let installFailed: string | null = null;
+    let hiddenCopied = false;
     for (const gate of this.selectGates(config)) {
       if (installFailed !== null) {
         this.results.push(this.skippedResult(gate, `install gate ${installFailed} did not pass`));
         continue;
+      }
+      if (gate.phase !== "install" && !hiddenCopied) {
+        hiddenCopied = true;
+        this.copyHidden();
       }
       const result = await this.runGate(gate, config);
       this.results.push(result);
@@ -550,7 +563,7 @@ class Run {
       (baseGlobs.length > 0 || gate.layer === "L1") && checkoutAbs === this.checkoutAbs
         ? await this.useBaseConfigs(checkoutAbs, baseGlobs, gate.layer === "L1")
         : null;
-    let exec: ExecResult;
+    let exec: JailedResult;
     try {
       exec = await jail.run({
         phase: gate.phase,
@@ -567,6 +580,7 @@ class Run {
     } finally {
       restore?.();
     }
+    if (exec.leftover !== undefined) return { refused: `stopped: ${exec.leftover}` };
     if (reportAbs === null || exec.spawnError !== undefined || exec.timedOut) return { exec };
     if (!existsSync(reportAbs) || !resolvesInside(checkoutAbs, reportAbs)) {
       return { exec, reportProblem: `report ${gate.report?.path ?? ""} was not written` };

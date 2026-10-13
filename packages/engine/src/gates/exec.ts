@@ -73,6 +73,13 @@ export interface ExecRequest {
   /** Absolute paths of the raw logs (created with their directories). */
   readonly stdoutPath: string;
   readonly stderrPath: string;
+  /**
+   * The command runs under the macOS sandbox's reaper (`sandbox.ts` `REAPER_SCRIPT`): stdin is
+   * the control pipe, closed as soon as the command's process exits or times out, and fd 3 is a
+   * pipe on which the reaper confirms (`R`) before it kills everything left in the sandbox. The
+   * result waits until fd 3 closes, i.e. until the reaper and everything it killed are gone.
+   */
+  readonly reaper?: boolean;
 }
 
 export interface ExecResult {
@@ -84,10 +91,14 @@ export interface ExecResult {
   readonly durationMs: number;
   /** The last bytes of stdout and stderr, for failure classification (raw, never written to git). */
   readonly tail: string;
+  /** With `reaper`: whether the reaper confirmed that it stopped what the command left behind. */
+  readonly reaped?: boolean;
 }
 
 const TAIL_BYTES = 64 * 1024;
 const KILL_GRACE_MS = 2_000;
+/** How long a result waits for the reaper after the command ended (it normally takes ms). */
+const REAPER_WAIT_MS = 10_000;
 
 export const runCommand = (request: ExecRequest): Promise<ExecResult> => {
   const started = Date.now();
@@ -114,16 +125,54 @@ export const runCommand = (request: ExecRequest): Promise<ExecResult> => {
       return;
     }
     const windows = process.platform === "win32";
+    const reaper = request.reaper === true;
     const child = spawn(command, args, {
       cwd: request.cwd,
       env: request.env,
       shell: false,
       detached: !windows,
-      stdio: ["ignore", "pipe", "pipe"],
+      stdio: reaper ? ["pipe", "pipe", "pipe", "pipe"] : ["ignore", "pipe", "pipe"],
       windowsHide: true,
     });
     let timedOut = false;
     let settled = false;
+    let confirmation = "";
+    let releasedAt: number | null = null;
+    // Closing the control pipe tells the reaper the command has ended.
+    const release = (): void => {
+      releasedAt ??= Date.now();
+      child.stdin?.destroy();
+    };
+    // Settles once the reaper's pipe closes: the reaper, and everything it killed, are gone. Bun
+    // emits `close` for the child before its extra pipes close, so this is awaited explicitly.
+    let reaperGone: Promise<void> = Promise.resolve();
+    if (reaper) {
+      child.stdin?.on("error", () => undefined);
+      const confirm = child.stdio[3];
+      if (confirm !== undefined && confirm !== null && "on" in confirm) {
+        reaperGone = new Promise<void>((done) => {
+          confirm.on("close", () => {
+            done();
+          });
+          confirm.on("error", () => {
+            done();
+          });
+        });
+        confirm.on("data", (chunk: Buffer) => {
+          confirmation = (confirmation + chunk.toString("utf8")).slice(-16);
+        });
+      }
+      child.on("exit", release);
+    }
+    /** The reaper's pipe closing, but never longer than {@link REAPER_WAIT_MS} after release. */
+    const awaitReaper = (): Promise<void> =>
+      Promise.race([
+        reaperGone,
+        new Promise<void>((done) => {
+          const left = REAPER_WAIT_MS - (Date.now() - (releasedAt ?? Date.now()));
+          setTimeout(done, Math.max(0, left)).unref();
+        }),
+      ]);
     const killTree = (signal: NodeJS.Signals): void => {
       if (child.pid === undefined) return;
       try {
@@ -138,13 +187,14 @@ export const runCommand = (request: ExecRequest): Promise<ExecResult> => {
       killTree("SIGTERM");
       setTimeout(() => {
         killTree("SIGKILL");
+        if (reaper) release();
       }, KILL_GRACE_MS).unref();
     }, request.timeoutMs);
-    child.stdout.on("data", (chunk: Buffer) => {
+    child.stdout?.on("data", (chunk: Buffer) => {
       out.write(chunk);
       keep(chunk);
     });
-    child.stderr.on("data", (chunk: Buffer) => {
+    child.stderr?.on("data", (chunk: Buffer) => {
       err.write(chunk);
       keep(chunk);
     });
@@ -154,13 +204,15 @@ export const runCommand = (request: ExecRequest): Promise<ExecResult> => {
       clearTimeout(timer);
       // Reap anything the command left behind in its process group (§15: no orphans).
       if (!windows) killTree("SIGKILL");
-      void closeLogs().then(() => {
+      if (reaper) release();
+      void Promise.all([closeLogs(), awaitReaper()]).then(() => {
         resolve({
           code,
           timedOut,
           durationMs: Date.now() - started,
           tail,
           ...(spawnError === undefined ? {} : { spawnError }),
+          ...(reaper ? { reaped: confirmation.includes("R") } : {}),
         });
       });
     };

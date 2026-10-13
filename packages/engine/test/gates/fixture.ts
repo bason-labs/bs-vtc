@@ -19,6 +19,8 @@ import {
   addToAllowlist,
   createGateRunnerWith,
   stringifyGatesConfig,
+  type GateJailSpec,
+  type ReapedGateCommand,
   type ScannerStore,
 } from "../../src/gates/index.js";
 import { git, initRepo, tempDir, writeFile } from "../helpers/repo.js";
@@ -221,6 +223,31 @@ export const recordingSandbox = (
     },
   };
 };
+
+/**
+ * A stand-in for the macOS in-sandbox reaper (`sandbox.ts` `REAPER_SCRIPT`) that is safe to run
+ * unsandboxed: instead of `kill -KILL -1` it kills only the pid the command wrote to
+ * `orphan.pid` in its working directory, then confirms with `R` on fd 3. With
+ * `confirm = false` it never confirms, like a reaper the gate killed.
+ */
+export const fakeReaperSandbox = (confirm: boolean): GateSandbox => ({
+  kind: "sandbox-exec",
+  wrap: (argv, spec): ReapedGateCommand => {
+    const script = `s=$1; shift
+exec 4<&0 0</dev/null
+set -m
+{ read -r _ <&4; [ -f orphan.pid ] && kill -KILL "$(cat orphan.pid)"; ${confirm ? '[ -e "$s" ] && printf R >&3;' : ":;"} } >/dev/null 2>&1 &
+set +m
+exec 3>&- 4<&-
+"$@"`;
+    return {
+      command: "/bin/sh",
+      args: ["-c", script, "vtc-gate", (spec as GateJailSpec).reapSentinel ?? "", ...argv],
+      network: spec.phase === "verify" ? "none" : "full",
+      reaper: true,
+    };
+  },
+});
 
 export interface Harness {
   readonly repo: string;

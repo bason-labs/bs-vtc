@@ -13,7 +13,7 @@ import { cpSync, existsSync, lstatSync, readdirSync, rmSync, writeFileSync } fro
 import { join } from "node:path";
 import { GATE_SANDBOX, type GateSandbox } from "@vtc/shared";
 import { gateEnv, type ExecResult } from "./exec.js";
-import { GateCommandJail, gateDenyReadPaths, resolveGateSandbox } from "./sandbox.js";
+import { GateCommandJail, gateReadPolicy, resolveGateSandbox } from "./sandbox.js";
 import type { ScannerStore } from "./scanners.js";
 
 export const OSV_DB_DIR = "osv-db";
@@ -82,7 +82,8 @@ export const downloadOsvDatabase = async (
     return { ok: false, detail: error instanceof Error ? error.message : String(error) };
   }
   const dir = osvDatabaseDir(request.vtcHome);
-  const jail = new GateCommandJail(sandbox, gateDenyReadPaths(request.vtcHome, request.env));
+  const policy = gateReadPolicy({ vtcHome: request.vtcHome, env: request.env });
+  const jail = new GateCommandJail(sandbox, policy.denyRead, policy);
   try {
     const staging = join(jail.homeDir(), "osv-db");
     const exec: ExecResult = await jail.run({
