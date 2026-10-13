@@ -15,10 +15,8 @@ inputs: [request, research_brief, repo_map]
 output: { artifacts: [spec], verdicts: [] }
 exits: [done, blocked, spec_conflict]
 success_criteria:
-  - {
-      id: spec_ids,
-      description: "Every requirement has a unique REQ-n id and every criterion a REQ-n.AC-m id.",
-    }
+  - id: spec_ids
+    description: "Every requirement has a unique REQ-n id and every criterion a REQ-n.AC-m id."
 reviewer: spec_verifier
 models:
   claude-code: { tier: top, effort: high }

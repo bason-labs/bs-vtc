@@ -10,7 +10,8 @@ inputs: [task, diff, gate_report, threat_model]
 output: { artifacts: [], verdicts: [pass, fail, unknown] }
 exits: [done]
 success_criteria:
-  - { id: claim_check, description: "Every finding cites a changed line that exists." }
+  - id: claim_check
+    description: "Every finding cites a changed line that exists."
 reviewer: engine
 models:
   claude-code: { tier: mid, effort: high }

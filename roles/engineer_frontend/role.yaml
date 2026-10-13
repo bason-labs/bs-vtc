@@ -28,14 +28,10 @@ inputs:
 output: { artifacts: [interface_contract], verdicts: [] }
 exits: [built, spec_conflict, blocked, out_of_scope_fault]
 success_criteria:
-  - {
-      id: write_scope,
-      description: "Every changed file is inside the task's files_scope; protected files are unchanged.",
-    }
-  - {
-      id: gates_green,
-      description: "Gates L0 to L5 and the discipline's gates pass on the submitted head.",
-    }
+  - id: write_scope
+    description: "Every changed file is inside the task's files_scope; protected files are unchanged."
+  - id: gates_green
+    description: "Gates L0 to L5 and the discipline's gates pass on the submitted head."
 reviewer: qa
 models:
   claude-code: { tier: mid, effort: medium }

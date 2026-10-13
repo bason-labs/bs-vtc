@@ -19,10 +19,8 @@ output:
   { artifacts: [design_flows, screens, design_tokens, component_specs, prototype], verdicts: [] }
 exits: [done, blocked, spec_conflict]
 success_criteria:
-  - {
-      id: screen_coverage,
-      description: "Every user-facing REQ-n maps to a screen, and every screen lists its states.",
-    }
+  - id: screen_coverage
+    description: "Every user-facing REQ-n maps to a screen, and every screen lists its states."
 reviewer: visual_qa
 models:
   claude-code: { tier: mid, effort: high }

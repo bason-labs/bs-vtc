@@ -268,6 +268,15 @@ describe("compilePlugins: errors", () => {
     ).toContain("plugins/common/commands/vtc.md: command vtc collides with a skill of that name");
   });
 
+  it("rejects a hand-written plugin file that shadows a generated one", () => {
+    expect(
+      errorsOf({ "plugins/claude-code/agents/vtc-qa-judge.md": "---\nname: x\n---\n" }),
+    ).toContain("claude-code:agents/vtc-qa-judge.md: emitted twice");
+    expect(errorsOf({ "plugins/codex/vtc-manifest.json": "{}" })).toContain(
+      "codex:vtc-manifest.json: emitted twice",
+    );
+  });
+
   it("collects every error instead of stopping at the first", () => {
     const result = compilePlugins(
       fixtureFiles({ "roles/qa/notes.md": "x", "skills/lens-db/SKILL.md": "nope\n" }),

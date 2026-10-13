@@ -17,16 +17,14 @@ inputs: [spec, architecture, threat_model, design_flows, screens, repo_map]
 output: { artifacts: [tasks], verdicts: [] }
 exits: [done, blocked, spec_conflict]
 success_criteria:
-  - { id: req_coverage, description: "Every REQ-n and SEC-n is covered by at least one task." }
-  - { id: dag_acyclic, description: "The after and consumes_contracts graph has no cycle." }
-  - {
-      id: disjoint_parallel_scopes,
-      description: "Tasks that can run in parallel have disjoint files_scope.",
-    }
-  - {
-      id: task_size_cap,
-      description: "Every task is within the size cap and has an architecture triage.",
-    }
+  - id: req_coverage
+    description: "Every REQ-n and SEC-n is covered by at least one task."
+  - id: dag_acyclic
+    description: "The after and consumes_contracts graph has no cycle."
+  - id: disjoint_parallel_scopes
+    description: "Tasks that can run in parallel have disjoint files_scope."
+  - id: task_size_cap
+    description: "Every task is within the size cap and has an architecture triage."
 reviewer: engine
 models:
   claude-code: { tier: mid, effort: high }
