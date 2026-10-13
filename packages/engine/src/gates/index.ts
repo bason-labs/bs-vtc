@@ -57,7 +57,28 @@ export {
   type ScannerStore,
   type ScannerStoreOptions,
 } from "./scanners.js";
-export { ensureRules, PRODUCT_RULES, rulesHash } from "./rules.js";
+export { ensureRules, PRODUCT_RULES, RULES_DIR, rulesHash } from "./rules.js";
+export {
+  bwrapArgs,
+  createBwrapSandbox,
+  createSandboxExecSandbox,
+  detectGateSandbox,
+  GATE_READABLE_VTC_HOME,
+  GateCommandJail,
+  gateDenyReadPaths,
+  HOME_CREDENTIAL_LOCATIONS,
+  resolveGateSandbox,
+  SANDBOX_DROPPED_ENV,
+  SANDBOX_EXEC,
+  sandboxEnv,
+  sandboxExecProfile,
+  UNSANDBOXED,
+  type BwrapFs,
+  type DetectGateSandboxOptions,
+  type GateSandboxDetection,
+  type JailedRequest,
+  type JailedResult,
+} from "./sandbox.js";
 export {
   addToAllowlist,
   allowlistPath,
@@ -69,7 +90,7 @@ export {
   stringifyGatesConfig,
 } from "./config.js";
 export { gateEnv, runCommand, PASSED_ENV, type ExecRequest, type ExecResult } from "./exec.js";
-export { createGateRunnerWith, type GateRunnerOptions } from "./runner.js";
+export { createGateRunnerWith, NO_SANDBOX_REFUSAL, type GateRunnerOptions } from "./runner.js";
 export {
   checkScannerArgs,
   scannerArgsProblem,

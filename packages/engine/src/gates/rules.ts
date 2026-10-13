@@ -21,12 +21,15 @@ export const rulesHash = (rules: Readonly<Record<string, string>> = PRODUCT_RULE
   return hash.digest("hex").slice(0, 16);
 };
 
+/** The rules directory under the VTC home. */
+export const RULES_DIR = "rules";
+
 /** Writes the ruleset under `<vtcHome>/rules/<hash>/` (once) and returns that directory. */
 export const ensureRules = (
   vtcHome: string,
   rules: Readonly<Record<string, string>> = PRODUCT_RULES,
 ): string => {
-  const dir = join(vtcHome, "rules", rulesHash(rules));
+  const dir = join(vtcHome, RULES_DIR, rulesHash(rules));
   for (const [name, content] of Object.entries(rules)) {
     const file = join(dir, name);
     if (existsSync(file) && readFileSync(file, "utf8") === content) continue;

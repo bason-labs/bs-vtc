@@ -9,6 +9,7 @@ import {
   mkdirSync,
   readFileSync,
   readdirSync,
+  realpathSync,
   rmSync,
   symlinkSync,
   writeFileSync,
@@ -18,6 +19,7 @@ import { join } from "node:path";
 import {
   engineRepoKey,
   finalReviewStepsCovered,
+  GATE_SANDBOX,
   gateExpectationMet,
   GateReportSchema,
   TestInventorySchema,
@@ -696,6 +698,27 @@ writeFileSync(join(dir, "results_sarif.sarif"), JSON.stringify({ version: "2.1.0
     expect(gate(inside, "iac")).toMatchObject({ status: "skipped" });
   });
 
+  it("never falls back to a user-installed copy of any other scanner: no build there is infra (D-ar)", async () => {
+    const bin = tempDir("vtc-path-");
+    const marker = join(tempDir("vtc-marker-"), "ran");
+    writeFileSync(join(bin, "gitleaks"), `#!/bin/sh\necho ran > ${JSON.stringify(marker)}\n`, {
+      mode: 0o755,
+    });
+    const h = harness({}, config([leaksGate]), {
+      scanners: () => ({
+        names: ["gitleaks", "osv-scanner", "opengrep", "checkov"],
+        ensure: (name) => Promise.reject(new ScannerUnavailableError(name, "freebsd-x64")),
+      }),
+      env: { ...process.env, PATH: `${bin}:${process.env.PATH ?? ""}` },
+    });
+    const report = await h.run({ head: h.base, layers: ["L4"] });
+    expect(gate(report, "secrets")).toMatchObject({ status: "error", failure_class: "infra" });
+    expect(read(h.repo, gate(report, "secrets").evidence[0]?.ref ?? "")).toMatch(
+      /no pinned build for freebsd-x64/,
+    );
+    expect(existsSync(marker)).toBe(false);
+  });
+
   it("keeps refusing a pinned scanner that fails for any other reason", async () => {
     const h = harness({ "infra/main.tf": "resource {}\n" }, config([iacGate]), {
       scanners: () => ({
@@ -1042,6 +1065,63 @@ process.exit(results.some((r) => r.messages.length > 0) ? 1 : 0);
   });
 });
 
+describe("dotenv files a diff adds (D-am, spine §5 reading 70)", () => {
+  /**
+   * A fake lint run through Yarn 4: like `yarn run lint`, it takes NODE_OPTIONS from the
+   * checkout's .env.yarn, and a planted preload there silences it.
+   */
+  const FAKE_YARN_LINT = `
+import { existsSync, readFileSync, writeFileSync, mkdirSync } from "node:fs";
+const [out, ...files] = process.argv.slice(2);
+const dotenv = existsSync(".env.yarn") ? readFileSync(".env.yarn", "utf8") : "";
+const preloaded = /^NODE_OPTIONS=.*--require/m.test(dotenv);
+const results = files.filter((f) => f.endsWith(".ts")).map((f) => ({
+  filePath: f,
+  messages: preloaded ? [] : readFileSync(f, "utf8").split("\\n").flatMap((l, i) =>
+    l.includes("TODO") ? [{ ruleId: "no-todo", severity: 2, message: "TODO left", line: i + 1 }] : []),
+}));
+mkdirSync(".vtc/state/gates", { recursive: true });
+writeFileSync(out, JSON.stringify(results));
+process.exit(results.some((r) => r.messages.length > 0) ? 1 : 0);
+`;
+  const yarnLintGate = {
+    id: "lint",
+    layer: "L1" as const,
+    command: [NODE, "tools/yarn-lint.mjs", ".vtc/state/gates/lint.json", "{changed}"],
+    report: { format: "json" as const, path: ".vtc/state/gates/lint.json" },
+  };
+
+  it("lints without a .env.yarn the diff added that sets NODE_OPTIONS, and flags it in L5", async () => {
+    const h = harness(
+      { "tools/yarn-lint.mjs": FAKE_YARN_LINT, "src/a.ts": "ok\n" },
+      config([yarnLintGate]),
+    );
+    writeFile(h.repo, ".env.yarn", "NODE_OPTIONS=--require ./silence.cjs\n");
+    writeFile(h.repo, "src/a.ts", "// TODO later\n");
+    const head = commitAll(h.repo);
+    const report = await h.run({ head, files_scope: ["**"] });
+    expect(gate(report, "lint")).toMatchObject({ status: "fail", new_violations: 1 });
+    expect(gate(report, "write-scope").findings).toEqual([
+      expect.objectContaining({ rule_id: "protected_modified", location: { path: ".env.yarn" } }),
+    ]);
+    expect(read(h.repo, ".env.yarn")).toBe("NODE_OPTIONS=--require ./silence.cjs\n");
+  });
+
+  it("lints with the base version of a .env.yarn the diff changed", async () => {
+    const h = harness(
+      { "tools/yarn-lint.mjs": FAKE_YARN_LINT, "src/a.ts": "ok\n", ".env.yarn": "A=1\n" },
+      config([yarnLintGate]),
+    );
+    writeFile(h.repo, ".env.yarn", "A=1\nNODE_OPTIONS=--require ./silence.cjs\n");
+    writeFile(h.repo, "src/a.ts", "// TODO later\n");
+    const head = commitAll(h.repo);
+    const report = await h.run({ head, files_scope: ["src/**", ".env.yarn"] });
+    expect(gate(report, "lint")).toMatchObject({ status: "fail", new_violations: 1 });
+    // files_scope names the exact path: L5 allows the change, L1 still lints with the base.
+    expect(gate(report, "write-scope")).toMatchObject({ status: "pass" });
+  });
+});
+
 describe("the osv-scanner offline database (§7.2, §15)", () => {
   it("does not start the dependency gate without the database", async () => {
     const h = harness({}, config([osvGate]));
@@ -1067,9 +1147,119 @@ describe("a report that cannot be written (GateRunner.run never throws)", () => 
   });
 });
 
-describe("not built yet (gates/README.md, follow-up increments)", () => {
-  // §7.2 sandbox, two phases: install reaches package registries only; test/scan has no network.
-  // Today every gate runs with the user's network and file access (exec.ts runCommand).
-  it.todo("runs verify-phase gates without network access (§7.2 two-phase sandbox)");
-  it.todo("lets install-phase gates reach package registries only (§7.2 two-phase sandbox)");
+describe("the gate sandbox (D-al, spine §5 reading 69)", () => {
+  /** Exits 0 only when HOME is an empty directory, TMPDIR is set and no engine secret leaked. */
+  const ENV_CHECK = `
+import { readdirSync } from "node:fs";
+const e = process.env;
+const problems = [];
+if (e.HOME === undefined || readdirSync(e.HOME).length !== 0) problems.push("HOME " + e.HOME);
+if (e.HOME === ${JSON.stringify(process.env.HOME ?? "")}) problems.push("real HOME");
+if (e.TMPDIR === undefined || e.TMPDIR === e.HOME) problems.push("TMPDIR " + e.TMPDIR);
+for (const k of ["VTC_HOME", "GITHUB_TOKEN", "GOCACHE"]) if (e[k] !== undefined) problems.push(k);
+console.log(problems.join("; "));
+process.exit(problems.length === 0 ? 0 : 1);
+`;
+  const envGate = { id: "env", layer: "L0" as const, command: [NODE, "tools/env-check.mjs"] };
+
+  it("wraps every command, install first, with the run's checkout, an empty HOME and the read-deny list", async () => {
+    const h = harness(
+      { "tests/unit.json": cases([{ name: "ok" }]), "tools/env-check.mjs": ENV_CHECK },
+      config([testsGate, installGate, envGate]),
+      {
+        env: {
+          ...process.env,
+          VTC_HOME: "/somewhere/.vtc",
+          GITHUB_TOKEN: "ghp_not_a_real_token",
+          GOCACHE: "/somewhere/go-cache",
+        },
+      },
+    );
+    const report = await h.run({ head: h.base });
+    expect(report.results.map((r) => [r.gate_id, r.status])).toEqual([
+      ["install", "pass"],
+      ["env", "pass"],
+      ["tests", "pass"],
+      ["write-scope", "pass"],
+    ]);
+    expect(report.sandbox).toBe("sandbox-exec");
+    expect(h.specs.map((s) => s.phase)).toEqual(["install", "verify", "verify"]);
+    // One empty HOME for the run, a private temp dir per command, all outside the repo.
+    expect(new Set(h.specs.map((s) => s.home)).size).toBe(1);
+    expect(new Set(h.specs.map((s) => s.tempDir)).size).toBe(3);
+    for (const s of h.specs) {
+      expect(s.checkout.startsWith(realpathSync(h.repo))).toBe(true);
+      expect(s.home.startsWith(realpathSync(h.repo))).toBe(false);
+      expect(s.denyRead).toContain(join(h.home, "token"));
+      expect(s.denyRead).toContain(join(h.home, "allowlists"));
+      expect(s.denyRead).not.toContain(join(h.home, "scanners"));
+    }
+    // The run removes its home and temp dirs.
+    expect(existsSync(h.specs[0]?.home ?? "")).toBe(false);
+  });
+
+  it("wraps the baseline run on the base checkout too", async () => {
+    const h = harness({ "tests/unit.json": cases([{ name: "ok" }]) }, config([testsGate]));
+    writeFile(h.repo, "tests/unit.json", cases([{ name: "ok", status: "fail" }]));
+    const head = commitAll(h.repo);
+    const report = await h.run({ head, layers: ["L2"] });
+    expect(gate(report, "tests")).toMatchObject({ status: "fail", new_violations: 1 });
+    expect(new Set(h.specs.map((s) => s.checkout)).size).toBe(2);
+  });
+
+  it("runs nothing without a sandbox and reports infra with the visible reason", async () => {
+    const marker = join(tempDir("vtc-marker-"), "ran");
+    const h = harness(
+      {
+        "tools/touch.mjs": `import { writeFileSync } from "node:fs"; writeFileSync(${JSON.stringify(marker)}, "x");\n`,
+      },
+      config([installGate, { id: "touch", layer: "L2", command: [NODE, "tools/touch.mjs"] }]),
+      { sandbox: null },
+    );
+    const report = await h.run({ head: h.base, layers: ["L2"] });
+    expect(report.results.map((r) => [r.gate_id, r.status, r.failure_class])).toEqual([
+      ["install", "error", "infra"],
+      ["touch", "skipped", undefined],
+    ]);
+    expect(report.verdict).toBe("infra_error");
+    expect(report.sandbox).toBeUndefined();
+    expect(read(h.repo, gate(report, "install").evidence[0]?.ref ?? "")).toContain(
+      GATE_SANDBOX.noSandboxReason,
+    );
+    expect(existsSync(marker)).toBe(false);
+  });
+
+  it("runs unconfined under the user-level opt-in, and the report says so", async () => {
+    const h = harness(
+      { "tests/unit.json": cases([{ name: "ok" }]), "tools/env-check.mjs": ENV_CHECK },
+      config([testsGate, envGate]),
+      { sandbox: null, allowUnsandboxed: true, env: { ...process.env, VTC_HOME: "/x/.vtc" } },
+    );
+    const report = await h.run({ head: h.base });
+    expect(gate(report, "tests")).toMatchObject({ status: "pass" });
+    // The environment rules hold without a sandbox too.
+    expect(gate(report, "env")).toMatchObject({ status: "pass" });
+    expect(report.sandbox).toBe("none");
+  });
+
+  it("names no sandbox when no command ran", async () => {
+    const h = harness({}, config([{ ...testsGate, when_changed: ["nothing/**"] }]));
+    const report = await h.run({ head: h.base, layers: ["L2"] });
+    expect(gate(report, "tests")).toMatchObject({ status: "skipped" });
+    expect(report.sandbox).toBeUndefined();
+  });
+
+  it("reports infra when the sandbox cannot wrap a command", async () => {
+    const h = harness({ "tests/unit.json": cases([{ name: "ok" }]) }, config([testsGate]), {
+      sandbox: {
+        kind: "bwrap",
+        wrap: () => {
+          throw new Error("bwrap: cannot mount");
+        },
+      },
+    });
+    const report = await h.run({ head: h.base, layers: ["L2"] });
+    expect(gate(report, "tests")).toMatchObject({ status: "error", failure_class: "infra" });
+    expect(read(h.repo, gate(report, "tests").evidence[0]?.ref ?? "")).toMatch(/cannot mount/);
+  });
 });
