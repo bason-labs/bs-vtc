@@ -1,8 +1,9 @@
 import { parse as parseToml } from "smol-toml";
 import { parse as parseYaml } from "yaml";
 import { describe, expect, it } from "vitest";
-import { engineMcpServer, type RoleTools } from "@vtc/shared";
+import { engineMcpServer, ROLE_DENIED_VTC, type RoleTools } from "@vtc/shared";
 import {
+  CLAUDE_DENIED_TOOLS,
   CLAUDE_MODEL_ALIASES,
   claudeEngineToolName,
   claudeToolsFor,
@@ -72,11 +73,32 @@ describe("Claude Code agent (.md)", () => {
       name: "vtc-qa-author",
       description: 'VTC role agent "qa" (author mode). Writes acceptance tests.',
       tools: "Read, Grep, Glob, Write, Edit",
+      disallowedTools: CLAUDE_DENIED_TOOLS.join(", "),
       model: CLAUDE_MODEL_ALIASES.mid,
       effort: "medium",
     });
     expect(md.endsWith("# Mission\n\nWrite tests.\n")).toBe(true);
     expect(md).not.toContain("permissionMode");
+  });
+
+  it("denies running `vtc calibrate` and writing the guarded VTC home globs (D-w, reading 43)", () => {
+    expect(CLAUDE_DENIED_TOOLS).toEqual([
+      "Bash(vtc calibrate:*)",
+      "Edit(~/.vtc/allowlists/**)",
+      "Write(~/.vtc/allowlists/**)",
+      "Edit(~/.vtc/osv-db/**)",
+      "Write(~/.vtc/osv-db/**)",
+      "Edit(~/.vtc/hidden/**)",
+      "Write(~/.vtc/hidden/**)",
+    ]);
+    // derived from the shared list, so a new entry there reaches every agent
+    expect(CLAUDE_DENIED_TOOLS).toHaveLength(
+      ROLE_DENIED_VTC.subcommands.length + 2 * ROLE_DENIED_VTC.homeWriteDeny.length,
+    );
+    for (const profile of ["read_only", "write_scoped", "code_sandboxed"] as const) {
+      const front = frontmatter(renderClaudeAgent(agent({ tools: tools(profile) })));
+      expect(String(front.disallowedTools).split(", "), profile).toEqual(CLAUDE_DENIED_TOOLS);
+    }
   });
 
   it("maps tiers to model aliases and honours an explicit model id", () => {
