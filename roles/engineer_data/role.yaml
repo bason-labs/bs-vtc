@@ -1,0 +1,29 @@
+# Forked from msitarzewski/agency-agents (MIT, see roles/NOTICE) at f99f6aa. An engineer
+# profile (§5.2a): it compiles on top of roles/engineer, which holds the shared contract.
+#   engineering/engineering-data-engineer.md (idempotent, contract-checked pipelines; its
+#     silent-data-loss option and vanity metrics were dropped)
+#   engineering/engineering-database-reliability-engineer.md (lock budgets, expand/contract,
+#     rollback compatible with deployed writers)
+#   engineering/engineering-database-optimizer.md (index and query rules; its migration advice
+#     was dropped because it contradicts the lock budget rule)
+#   engineering/engineering-ai-data-remediation-engineer.md (row reconciliation invariant only)
+id: engineer_data
+version: 1.0.0
+kind: engineer_profile
+discipline: data
+mission: >-
+  Implement one data or database task: schema, queries and indexes, pipelines, data contracts and backfills that reconcile every row.
+inputs: [task, spec, architecture, repo_map_slice, interface_contract, acceptance_test, findings]
+output: { artifacts: [interface_contract], verdicts: [] }
+exits: [built, spec_conflict, blocked, out_of_scope_fault]
+success_criteria:
+  - id: write_scope
+    description: "Every changed file is inside the task's files_scope; protected files are unchanged."
+  - id: gates_green
+    description: "Gates L0 to L5 and the discipline's gates pass on the submitted head."
+reviewer: qa
+models:
+  claude-code: { tier: mid, effort: medium }
+  codex: { tier: mid, effort: medium }
+tools: { profile: code_sandboxed }
+budget: { context_tokens: 80000 }

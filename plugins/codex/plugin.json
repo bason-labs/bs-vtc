@@ -1,0 +1,5 @@
+{
+  "name": "vtc",
+  "version": "0.1.0",
+  "description": "VTC: a local, gated multi-agent software delivery team driven by the vtc engine. Works with Codex."
+}

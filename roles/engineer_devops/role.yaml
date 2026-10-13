@@ -1,0 +1,27 @@
+# Forked from msitarzewski/agency-agents (MIT, see roles/NOTICE) at f99f6aa. An engineer
+# profile (§5.2a): it compiles on top of roles/engineer, which holds the shared contract.
+#   engineering/engineering-devops-automator.md (rewritten: its automatic deploy to production
+#     and its broken blue-green example were removed)
+#   engineering/engineering-sre.md (SLOs, multi-window burn-rate alerts, golden signals)
+#   support/support-infrastructure-maintainer.md (every change ships rollback and validation)
+#   security/security-cloud-security-architect.md (least-privilege and posture rules)
+id: engineer_devops
+version: 1.0.0
+kind: engineer_profile
+discipline: devops
+mission: >-
+  Implement one CI/CD, infrastructure-as-code, container or observability task with a plan, a rollback and no change applied to a live environment.
+inputs: [task, spec, architecture, repo_map_slice, acceptance_test, findings, threat_model]
+output: { artifacts: [interface_contract], verdicts: [] }
+exits: [built, spec_conflict, blocked, out_of_scope_fault]
+success_criteria:
+  - id: write_scope
+    description: "Every changed file is inside the task's files_scope; protected files are unchanged."
+  - id: gates_green
+    description: "Gates L0 to L5 and the discipline's gates pass on the submitted head."
+reviewer: qa
+models:
+  claude-code: { tier: mid, effort: medium }
+  codex: { tier: mid, effort: medium }
+tools: { profile: code_sandboxed }
+budget: { context_tokens: 80000 }

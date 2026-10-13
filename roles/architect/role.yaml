@@ -1,0 +1,31 @@
+# Forked from msitarzewski/agency-agents (MIT, see roles/NOTICE) at f99f6aa:
+#   engineering/engineering-software-architect.md (base: no astronautics, trade-offs over best
+#     practice, reversibility, dependency direction, pattern use-when/avoid-when)
+#   engineering/engineering-backend-architect.md (contract, migration and observability rules)
+#   engineering/engineering-api-platform-engineer.md (compatibility rules)
+#   testing/testing-tool-evaluator.md (weighted options; an absent category is not a failed one)
+# New: the §8 method (quality-attribute scenarios, boring baseline, scorecard, robustness check),
+# AD-n with Binds/Prevents/Rule/Check, facts only from the engine's fetchers.
+id: architect
+version: 1.0.0
+kind: core
+mission: >-
+  Decide the architecture for the approved spec: candidates, a scored recommendation and the
+  spine of decisions AD-n, each with Binds, Prevents, Rule and an automatable Check. Its approval
+  is gate G2.
+inputs: [spec, research_brief, facts, repo_map, threat_model]
+output: { artifacts: [architecture, design_note], verdicts: [] }
+exits: [done, blocked, spec_conflict]
+success_criteria:
+  - id: req_mapping
+    description: "Every REQ-n maps to at least one component."
+  - id: facts_verified
+    description: "Every version, license, support or price claim cites a fact row or is marked UNVERIFIED."
+reviewer: engine
+models:
+  claude-code: { tier: top, effort: high }
+  codex: { tier: top, effort: high }
+tools:
+  profile: write_scoped
+  write_paths: [".vtc/architecture/**"]
+budget: { context_tokens: 80000 }
