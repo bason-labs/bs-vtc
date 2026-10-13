@@ -16,9 +16,20 @@
  *   in the verify phase, writes only to the checkout and private temp dirs, the VTC home and host
  *   credentials unreadable, an empty `HOME`. Without one nothing runs (`GATE_SANDBOX
  *   .noSandboxReason`), unless the user opted in with `gates.allow_unsandboxed`.
+ * - Nothing an earlier gate wrote in the checkout feeds a later verifying gate (spine §5 reading
+ *   80): pinned scanners run in a clean checkout of their own (head, and base for the baseline),
+ *   and L1 runs after every file it guards was put back to the head commit.
  */
 import { createHash } from "node:crypto";
-import { copyFileSync, existsSync, readdirSync, readFileSync, realpathSync, rmSync } from "node:fs";
+import {
+  copyFileSync,
+  existsSync,
+  lstatSync,
+  readdirSync,
+  readFileSync,
+  realpathSync,
+  rmSync,
+} from "node:fs";
 import { join, relative, sep } from "node:path";
 import {
   engineRepoKey,
@@ -195,6 +206,63 @@ const checkoutRel = (checkoutAbs: string, abs: string): string | null => {
 const errorText = (error: unknown): string =>
   error instanceof Error ? error.message : String(error);
 
+/** What a walk of a checkout found: its directories and the guarded files in them. */
+interface GuardedTree {
+  /** Checkout-relative directories, `""` for the top. */
+  readonly dirs: ReadonlySet<string>;
+  /** Checkout-relative paths `guarded` matched (files, symlinks or anything else but a directory). */
+  readonly files: readonly string[];
+}
+
+/**
+ * Walks `root` without following a symlink and without entering a `.git`. With `within`, only
+ * directories that were there before are entered: a directory a gate created (`node_modules`,
+ * a build output) holds no file of the commit, and a config there governs only files that are
+ * not the commit's either.
+ */
+const walkGuarded = (
+  root: string,
+  guarded: (path: string) => boolean,
+  within?: ReadonlySet<string>,
+): GuardedTree => {
+  const dirs = new Set<string>([""]);
+  const files: string[] = [];
+  const visit = (dir: string): void => {
+    for (const entry of readdirSync(join(root, dir), { withFileTypes: true })) {
+      if (entry.name === ".git") continue;
+      const rel = dir === "" ? entry.name : `${dir}/${entry.name}`;
+      if (entry.isDirectory()) {
+        if (within !== undefined && !within.has(rel)) continue;
+        dirs.add(rel);
+        visit(rel);
+      } else if (guarded(rel)) files.push(rel);
+    }
+  };
+  visit("");
+  return { dirs, files };
+};
+
+/** True when anything (a symlink included, not followed) is at `abs`. */
+const present = (abs: string): boolean => {
+  try {
+    lstatSync(abs);
+    return true;
+  } catch {
+    return false;
+  }
+};
+
+/** True when `abs` is a regular file (not followed through a symlink) holding exactly `bytes`. */
+const holdsExactly = (abs: string, bytes: Uint8Array): boolean => {
+  try {
+    const stat = lstatSync(abs);
+    if (!stat.isFile() || stat.size !== bytes.length) return false;
+    return Buffer.from(bytes).equals(readFileSync(abs));
+  } catch {
+    return false;
+  }
+};
+
 /** A redacted inventory, sorted and de-duplicated again by its redacted ids (TestInventorySchema). */
 const redactedInventory = (tests: readonly TestRecord[], known: readonly string[]): TestInventory =>
   inventoryOf(redactJson(inventoryOf(tests).tests, known));
@@ -214,6 +282,16 @@ class Run {
   private config: GatesConfig | null = null;
   private changed: GitChangedFile[] = [];
   private baseCheckout: { rel: string; abs: string; installed: boolean } | null = null;
+  /**
+   * Clean checkouts the pinned scanners run in, by commit: no other gate ever runs there, so
+   * nothing an install script, a build or a test wrote can reach a scanner (its configs, the
+   * lockfiles, the sources or the checkout's `.git` link).
+   */
+  private readonly scannerCheckouts = new Map<string, Promise<{ rel: string; abs: string }>>();
+  /** The run checkout's directories and L1-guarded files before any gate ran (L1 only). */
+  private guardedAtStart: GuardedTree | null = null;
+  /** Bytes of files at the head commit, read once per path. */
+  private readonly headFiles = new Map<string, Promise<Uint8Array | undefined>>();
   private readonly baselines = new Map<string, Promise<BaselineFacts>>();
   private readonly attempt: string;
   private readonly evidenceRoot: string;
@@ -332,6 +410,14 @@ class Run {
       } catch (error) {
         this.note("cleanup", `cleanup after the gates failed: ${errorText(error)}`);
       }
+      for (const made of this.scannerCheckouts.values()) {
+        try {
+          const checkout = await made.catch(() => null);
+          if (checkout !== null) await this.deps.git.removeCheckout(checkout.rel);
+        } catch (error) {
+          this.note("cleanup", `cleanup of a scanner checkout failed: ${errorText(error)}`);
+        }
+      }
     }
     if (this.jail?.ran === true && this.jail.kind === "none") {
       this.note(
@@ -363,7 +449,12 @@ class Run {
   private async runGates(config: GatesConfig): Promise<void> {
     let installFailed: string | null = null;
     let hiddenCopied = false;
-    for (const gate of this.selectGates(config)) {
+    const gates = this.selectGates(config);
+    if (gates.some((g) => g.phase === "verify" && g.layer === "L1")) {
+      // Before any command ran: the checkout is still the clean head commit.
+      this.guardedAtStart = walkGuarded(this.checkoutAbs, this.lintGuarded);
+    }
+    for (const gate of gates) {
       if (installFailed !== null) {
         this.results.push(this.skippedResult(gate, `install gate ${installFailed} did not pass`));
         continue;
@@ -522,12 +613,17 @@ class Run {
     return { argv, env: gateEnv(this.env, extraEnv), scanner, outputs, configs };
   }
 
-  /** Runs one command gate in a checkout; nothing here writes evidence. */
+  /**
+   * Runs one command gate in a checkout; nothing here writes evidence except a note naming the
+   * L1 configs an earlier gate had changed. `head`: the gate verifies the head commit (the run
+   * checkout or a scanner checkout of the head), so the base's configs are pinned for it.
+   */
   private async executeIn(
     gate: Gate,
     checkoutAbs: string,
     logPrefix: string,
     changed: readonly string[],
+    head: boolean,
   ): Promise<Execution> {
     const cwd = join(checkoutAbs, gate.cwd ?? "");
     if (!existsSync(cwd) || !resolvesInside(checkoutAbs, cwd)) {
@@ -553,6 +649,22 @@ class Run {
     } catch (error) {
       return { refused: `not run: ${errorText(error)}` };
     }
+    if (head && gate.layer === "L1" && checkoutAbs === this.checkoutAbs) {
+      // Install scripts and L0 builds ran role code in this checkout: L1 reads the commit's configs.
+      try {
+        const put = await this.restoreLintConfigs();
+        if (put.length > 0) {
+          this.note(
+            `${gate.id}-configs`,
+            `an earlier gate changed these lint configs in the checkout; ${gate.id} ran with the commit's version:\n${put.join("\n")}`,
+          );
+        }
+      } catch (error) {
+        return {
+          refused: `not run: the lint configs an earlier gate changed could not be put back: ${errorText(error)}`,
+        };
+      }
+    }
     const baseGlobs =
       gate.layer === "L1"
         ? (this.config?.tests.protected_configs ?? [])
@@ -560,7 +672,7 @@ class Run {
           ? [...SCANNER_CONFIG_GLOBS, ...prepared.configs]
           : [];
     const restore =
-      (baseGlobs.length > 0 || gate.layer === "L1") && checkoutAbs === this.checkoutAbs
+      (baseGlobs.length > 0 || gate.layer === "L1") && head
         ? await this.useBaseConfigs(checkoutAbs, baseGlobs, gate.layer === "L1")
         : null;
     let exec: JailedResult;
@@ -586,6 +698,85 @@ class Run {
       return { exec, reportProblem: `report ${gate.report?.path ?? ""} was not written` };
     }
     return { exec, reportText: readFileSync(reportAbs, "utf8") };
+  }
+
+  /** Files L1 reads with the commit's (or, where the diff changed them, the base's) version. */
+  private readonly lintGuarded = (path: string): boolean =>
+    matchesAnyCaseless(this.config?.tests.protected_configs ?? [], path) ||
+    isGateCommandFile(path) ||
+    isMixedConfig(path);
+
+  private headFile(path: string): Promise<Uint8Array | undefined> {
+    let read = this.headFiles.get(path);
+    if (read === undefined) {
+      read = this.deps.git.readFileAtCommit(this.request.head, path);
+      this.headFiles.set(path, read);
+    }
+    return read;
+  }
+
+  /**
+   * Puts every L1-guarded file of the run checkout back to the head commit, whether or not the
+   * diff touched it: an install script, an L0 build or anything else an earlier gate ran may have
+   * edited, added, deleted or replaced one, and L5 sees only the diff. Files the head does not
+   * have are removed; the hidden tests stay. Returns the paths it changed, sorted.
+   */
+  private async restoreLintConfigs(): Promise<string[]> {
+    const start = this.guardedAtStart;
+    if (start === null) return [];
+    const now = walkGuarded(this.checkoutAbs, this.lintGuarded, start.dirs);
+    const hidden = new Set(this.hiddenFiles);
+    const paths = [...new Set([...start.files, ...now.files])].filter((p) => !hidden.has(p)).sort();
+    const rel = relative(this.deps.repoRoot, this.checkoutAbs).split(sep).join("/");
+    const wanted = new Map<string, Uint8Array | undefined>();
+    for (const path of paths) wanted.set(path, await this.headFile(path));
+    const put: string[] = [];
+    const clear = (path: string): void => {
+      const abs = join(this.checkoutAbs, path);
+      if (path.includes("/"))
+        assertNoSymlinks(this.checkoutAbs, path.slice(0, path.lastIndexOf("/")));
+      let stat;
+      try {
+        stat = lstatSync(abs);
+      } catch {
+        return;
+      }
+      if (stat.isDirectory()) rmSync(abs, { recursive: true, force: true });
+      else removeRepoFile(this.deps.repoRoot, `${rel}/${path}`);
+    };
+    // Removals first: on a case-insensitive file system a stray `.ESLintrc.json` is the same
+    // entry as the `.eslintrc.json` restored after it.
+    for (const [path, bytes] of wanted) {
+      if (bytes !== undefined) continue;
+      if (present(join(this.checkoutAbs, path))) {
+        clear(path);
+        put.push(path);
+      }
+    }
+    for (const [path, bytes] of wanted) {
+      if (bytes === undefined || holdsExactly(join(this.checkoutAbs, path), bytes)) continue;
+      clear(path);
+      writeRepoFile(this.deps.repoRoot, `${rel}/${path}`, bytes);
+      put.push(path);
+    }
+    return [...new Set(put)].sort();
+  }
+
+  /** Whether a gate runs a pinned scanner (it then runs in a scanner checkout). */
+  private isPinnedScanner(gate: Gate): boolean {
+    return this.scanners.names.includes(gate.command[0] ?? "");
+  }
+
+  /** The absolute path of the clean scanner checkout of `commit`, made on first use. */
+  private async scannerCheckout(commit: string): Promise<string> {
+    let made = this.scannerCheckouts.get(commit);
+    if (made === undefined) {
+      made = this.deps.git
+        .createCleanCheckout(commit)
+        .then((rel) => ({ rel, abs: join(this.deps.repoRoot, rel) }));
+      this.scannerCheckouts.set(commit, made);
+    }
+    return (await made).abs;
   }
 
   /**
@@ -647,13 +838,26 @@ class Run {
       return this.skippedResult(gate, "when_changed did not match the diff");
     }
     const started = Date.now();
+    const logRel = `${this.evidenceRoot}/${gate.id}.log`;
+    let checkoutAbs = this.checkoutAbs;
+    if (this.isPinnedScanner(gate)) {
+      try {
+        checkoutAbs = await this.scannerCheckout(this.request.head);
+      } catch (error) {
+        this.note(
+          gate.id,
+          `not run: the clean checkout of the head commit for the scanner could not be made: ${errorText(error)}`,
+        );
+        return this.infraResult(gate.id, gate.layer, gate.phase, gate.blocking, logRel);
+      }
+    }
     const execution = await this.executeIn(
       gate,
-      this.checkoutAbs,
+      checkoutAbs,
       `${this.stateRoot}/${gate.id}`,
       this.changedExisting(),
+      true,
     );
-    const logRel = `${this.evidenceRoot}/${gate.id}.log`;
     if (execution.skipped !== undefined) return this.skippedResult(gate, execution.skipped);
     if (execution.refused !== undefined) {
       this.note(gate.id, execution.refused);
@@ -754,6 +958,7 @@ class Run {
       ) {
         return await this.findingsResult(
           gate,
+          checkoutAbs,
           common,
           execution.reportText,
           reportRel,
@@ -1076,6 +1281,7 @@ class Run {
 
   private async findingsResult(
     gate: Gate,
+    checkoutAbs: string,
     common: Omit<
       GateResult,
       "status" | "new_violations" | "baseline_violations" | "monotonic" | "findings" | "evidence"
@@ -1090,7 +1296,7 @@ class Run {
     const coverage = diffCoveragePct(doc);
     if (coverage !== null) this.diffCoverage = coverage;
     const ctx = {
-      checkoutAbs: this.checkoutAbs,
+      checkoutAbs,
       defaultCategory: gate.layer === "L1" ? ("maintainability" as const) : ("security" as const),
       fallbackPath: reportRel,
     };
@@ -1197,11 +1403,17 @@ class Run {
       unusable: why,
     });
     try {
-      if (this.baseCheckout === null) {
-        const rel = await this.deps.git.createCleanCheckout(this.request.base);
-        this.baseCheckout = { rel, abs: join(this.deps.repoRoot, rel), installed: false };
+      // A pinned scanner scans a clean checkout of the base, as it scans one of the head.
+      let checkout: { abs: string; installed: boolean };
+      if (this.isPinnedScanner(gate)) {
+        checkout = { abs: await this.scannerCheckout(this.request.base), installed: true };
+      } else {
+        if (this.baseCheckout === null) {
+          const rel = await this.deps.git.createCleanCheckout(this.request.base);
+          this.baseCheckout = { rel, abs: join(this.deps.repoRoot, rel), installed: false };
+        }
+        checkout = this.baseCheckout;
       }
-      const checkout = this.baseCheckout;
       const config = this.config;
       if (!checkout.installed && config !== null) {
         for (const install of config.gates.filter((g) => g.phase === "install")) {
@@ -1210,6 +1422,7 @@ class Run {
             checkout.abs,
             `${this.stateRoot}/base/${install.id}`,
             [],
+            false,
           );
           if (done.exec?.code !== 0)
             return unusable(`install gate ${install.id} failed on the base`);
@@ -1221,6 +1434,7 @@ class Run {
         checkout.abs,
         `${this.stateRoot}/base/${gate.id}`,
         this.changedExisting(),
+        false,
       );
       if (execution.reportText === undefined || gate.report === undefined)
         return unusable("no report on the base");
