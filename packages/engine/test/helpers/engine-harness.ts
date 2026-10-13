@@ -75,6 +75,8 @@ type Verdict = "pass" | "fail" | "infra" | { readonly fail: readonly ToolFinding
 
 export interface FakeGates extends GateRunner {
   readonly requests: GateRunRequest[];
+  /** Holds every run until the returned function is called (a gate run in progress). */
+  hold(): () => void;
   /** Verdicts to return next for a reason (queue); default: pass, and fail for base_fail_check. */
   queue(reason: GateRunRequest["reason"], ...verdicts: Verdict[]): void;
 }
@@ -116,16 +118,28 @@ export const fakeGates = (repoRoot: string, now: () => Date): FakeGates => {
   const git = createGitOps({ repoRoot });
   const queues = new Map<string, Verdict[]>();
   const requests: GateRunRequest[] = [];
+  let held: Promise<void> | null = null;
   return {
     requests,
+    hold: () => {
+      let release: () => void = () => undefined;
+      held = new Promise((resolve) => {
+        release = () => {
+          held = null;
+          resolve();
+        };
+      });
+      return release;
+    },
     queue: (reason, ...verdicts) => {
       queues.set(reason, [...(queues.get(reason) ?? []), ...verdicts]);
     },
-    run: (request) => {
+    run: async (request) => {
       requests.push(request);
+      if (held !== null) await held;
       const queued = queues.get(request.reason)?.shift();
       const verdict = queued ?? (request.reason === "base_fail_check" ? "fail" : "pass");
-      return Promise.resolve(report(request, verdict, now()));
+      return report(request, verdict, now());
     },
     checkWriteScope: async (request): Promise<WriteScopeReport> => {
       const violations: WriteScopeReport["violations"] = [];
@@ -390,12 +404,8 @@ export const draft = (id: string, over: Record<string, unknown> = {}) => ({
   ...over,
 });
 
-/** Drives the front half (discover, specify, G1, design, G2, plan) with the given task drafts. */
-export const throughPlan = async (
-  h: Harness,
-  drafts: readonly Record<string, unknown>[],
-  spec: string = SPEC,
-): Promise<LeadAction[]> => {
+/** Drives the front half (discover, specify, G1, design, G2) up to the Planner's dispatch. */
+export const toPlanner = async (h: Harness, spec: string = SPEC): Promise<SpawnAction> => {
   await h.engine.start(
     {
       request: "Password reset\n\nUsers reset forgotten passwords.",
@@ -447,7 +457,16 @@ export const throughPlan = async (
       CLAUDE,
     )
   ).actions;
-  const planner = only(actions, "planner");
+  return only(actions, "planner");
+};
+
+/** The front half, then the plan with the given task drafts; returns the next actions. */
+export const throughPlan = async (
+  h: Harness,
+  drafts: readonly Record<string, unknown>[],
+  spec: string = SPEC,
+): Promise<LeadAction[]> => {
+  const planner = await toPlanner(h, spec);
   const planned = await submitResult(h, planner, { exit: "done", tasks: drafts as never });
   if (!planned.accepted) throw new Error(`plan rejected: ${JSON.stringify(planned.rejection)}`);
   await h.engine.settle();

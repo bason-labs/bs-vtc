@@ -141,6 +141,13 @@ const resumeTarget = (
     return "fixing";
   }
   if (reason === "risk_rule" && effect === "hint") return "fixing";
+  // A question or conflict found while verifying: the Engineer continues with the answer.
+  if (
+    checkpoint === "verifying" &&
+    ["spec_conflict", "blocked", "spec_question"].includes(reason)
+  ) {
+    return "fixing";
+  }
   return checkpoint;
 };
 

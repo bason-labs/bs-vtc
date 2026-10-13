@@ -29,7 +29,9 @@ import {
   lastQaAuthor,
   lastSubmitted,
   nextActionId,
+  pendingBaseCheck,
   phaseEnteredSeq,
+  roundVerdict,
   planOrder,
   runsOf,
   statusEnteredSeq,
@@ -144,8 +146,21 @@ const taskSteps = (k: Kernel, h: RunHandle, taskId: string, host: HostId): StepS
   const steps: StepSpec[] = [];
   if (task.status === "ready") {
     const step = { role: "qa", mode: "author", task: taskId };
-    if (!busyStep(h, step) && !k.isRunning(`gates:${taskId}`)) {
-      const note = rejectionNote(h, step);
+    const waiting = pendingBaseCheck(h.state, taskId) !== undefined;
+    if (!busyStep(h, step) && !k.isRunning(`gates:${taskId}`) && !waiting) {
+      const qa = lastQaAuthor(h.state, taskId);
+      const missed = h.state.gateReports.some(
+        (r) =>
+          r.seq > (qa?.closedSeq ?? Number.MAX_SAFE_INTEGER) &&
+          r.report.task === taskId &&
+          r.report.reason === "base_fail_check" &&
+          r.report.verdict !== "infra_error",
+      );
+      const note =
+        rejectionNote(h, step) ??
+        (missed
+          ? "Your acceptance tests passed on the base commit. They must fail before the implementation exists (§6.3 step 2): test the new behaviour."
+          : undefined);
       steps.push({ key: `qa:${taskId}`, ...step, ...(note === undefined ? {} : { note }) });
     }
     return steps;
@@ -208,14 +223,7 @@ const taskSteps = (k: Kernel, h: RunHandle, taskId: string, host: HostId): StepS
   if (task.status === "verifying") {
     const built = lastBuilt(h.state, taskId);
     if (built?.head === undefined || k.isRunning(`gates:${taskId}`)) return [];
-    const gated = h.state.gateReports.some(
-      (r) =>
-        r.report.task === taskId &&
-        r.report.reason === "round" &&
-        r.report.head === built.head &&
-        r.report.verdict === "pass",
-    );
-    if (!gated) return [];
+    if (roundVerdict(h.state, taskId)?.verdict !== "pass") return [];
     const drop = budgetState(task.spent_usd, task.budget_usd) === "reviewers_drop";
     for (const slot of reviewersFor(
       task,
