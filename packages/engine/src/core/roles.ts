@@ -1,0 +1,207 @@
+/**
+ * The role contracts the engine dispatches against (§5, AD-14). The neutral role sources in
+ * `roles/` (sub-project 3) are the source of truth once the cli injects them; until then the
+ * engine uses these built-in contracts, which declare exactly what each role may return, so
+ * `checkResultAgainstContract` (AD-8 rule 9) has something to enforce. Model ids come from the
+ * engine (AD-6 rule 2): role tier → project override → built-in tier map.
+ */
+import {
+  HOST_IDS,
+  RoleContractSchema,
+  type HostId,
+  type ModelTier,
+  type ProjectConfig,
+  type ResolvedModel,
+  type RoleContract,
+  type RoleContractInput,
+} from "@vtc/shared";
+
+/** Model id per tier and host, used when `project.yaml` sets none (`hosts.models`). */
+export const DEFAULT_TIER_MODELS: Readonly<Record<HostId, Readonly<Record<ModelTier, string>>>> = {
+  "claude-code": { top: "opus", mid: "sonnet", low: "haiku" },
+  codex: { top: "gpt-5-codex", mid: "gpt-5-codex", low: "gpt-5-codex-mini" },
+};
+
+const VERDICTS = ["pass", "fail", "unknown", "unchecked"] as const;
+
+const both = (tier: ModelTier, effort: "low" | "medium" | "high" = "medium") =>
+  Object.fromEntries(HOST_IDS.map((h) => [h, { tier, effort }])) as RoleContractInput["models"];
+
+const role = (input: Omit<RoleContractInput, "version" | "budget"> & { readonly budget?: RoleContractInput["budget"] }): RoleContract =>
+  RoleContractSchema.parse({ version: "1.0.0", budget: { context_tokens: 60_000 }, ...input });
+
+export const BUILTIN_ROLES: readonly RoleContract[] = [
+  role({
+    id: "repo_cartographer",
+    kind: "core",
+    mission: "Map an existing repository for the run.",
+    inputs: ["request"],
+    output: { artifacts: ["repo_map"], verdicts: [] },
+    exits: ["done", "blocked", "unknown"],
+    reviewer: "engine",
+    models: both("low"),
+    tools: { profile: "write_scoped", write_paths: [".vtc/research/**"] },
+  }),
+  role({
+    id: "research_analyst",
+    kind: "core",
+    mission: "Research a new idea or a large feature with cited sources.",
+    inputs: ["request"],
+    output: { artifacts: ["research_brief"], verdicts: [] },
+    exits: ["done", "blocked", "unknown"],
+    reviewer: "engine",
+    models: both("mid"),
+    tools: { profile: "write_scoped", write_paths: [".vtc/research/**"] },
+  }),
+  role({
+    id: "ba",
+    kind: "core",
+    mission: "Write the spec with REQ-n requirements and acceptance criteria.",
+    inputs: ["request"],
+    output: { artifacts: ["spec"], verdicts: [] },
+    exits: ["done", "blocked", "spec_conflict", "unknown"],
+    reviewer: "spec_verifier",
+    models: both("top", "high"),
+    tools: { profile: "write_scoped", write_paths: [".vtc/spec/**"] },
+  }),
+  role({
+    id: "architect",
+    kind: "core",
+    mission: "Propose the architecture spine for the approved spec.",
+    inputs: ["spec"],
+    output: { artifacts: ["architecture"], verdicts: [] },
+    exits: ["done", "blocked", "spec_conflict", "unknown"],
+    reviewer: "security",
+    models: both("top", "high"),
+    tools: { profile: "write_scoped", write_paths: [".vtc/architecture/**"] },
+  }),
+  role({
+    id: "designer",
+    kind: "core",
+    mission: "Design flows, screens and tokens for the approved spec.",
+    inputs: ["spec"],
+    output: { artifacts: ["design"], verdicts: [] },
+    exits: ["done", "blocked", "spec_conflict", "unknown"],
+    reviewer: "visual_qa",
+    models: both("top"),
+    tools: { profile: "write_scoped", write_paths: [".vtc/design/**"] },
+  }),
+  role({
+    id: "planner",
+    kind: "core",
+    mission: "Split the approved design into tasks with intent contracts.",
+    inputs: ["spec", "architecture"],
+    output: { artifacts: ["tasks"], verdicts: [] },
+    exits: ["done", "blocked", "spec_conflict", "unknown"],
+    reviewer: "engine",
+    models: both("top", "high"),
+    tools: { profile: "read_only" },
+  }),
+  role({
+    id: "qa",
+    kind: "core",
+    mission: "Author acceptance tests, or judge test adequacy.",
+    inputs: ["spec"],
+    output: { artifacts: [], verdicts: [] },
+    exits: ["done", "blocked", "unknown"],
+    reviewer: "engine",
+    models: both("mid"),
+    tools: { profile: "read_only" },
+    modes: {
+      author: {
+        output: { artifacts: ["acceptance_test", "hidden_acceptance_test", "scenario"], verdicts: [] },
+        tools: { profile: "write_scoped", write_paths: ["tests/**"] },
+      },
+      judge: {
+        output: { artifacts: [], verdicts: [...VERDICTS] },
+        exits: ["done", "unknown"],
+      },
+    },
+  }),
+  role({
+    id: "engineer",
+    kind: "core",
+    mission: "Implement the task inside its files_scope until the acceptance tests pass.",
+    inputs: ["spec", "acceptance_test"],
+    output: { artifacts: ["interface_contract"], verdicts: [] },
+    exits: ["built", "blocked", "spec_conflict", "out_of_scope_fault"],
+    reviewer: "qa",
+    models: both("mid", "high"),
+    tools: { profile: "code_sandboxed" },
+  }),
+  role({
+    id: "spec_verifier",
+    kind: "core",
+    mission: "Judge one acceptance criterion against the built code, with evidence.",
+    inputs: ["spec", "diff"],
+    output: { artifacts: [], verdicts: [...VERDICTS] },
+    exits: ["done", "unknown"],
+    reviewer: "engine",
+    models: both("mid"),
+    tools: { profile: "read_only" },
+  }),
+  role({
+    id: "security",
+    kind: "core",
+    mission: "Threat-model the design, or verify the built diff.",
+    inputs: ["spec"],
+    output: { artifacts: [], verdicts: [] },
+    exits: ["done", "unknown"],
+    reviewer: "engine",
+    models: both("top"),
+    tools: { profile: "read_only" },
+    modes: {
+      design: {
+        output: { artifacts: ["threat_model"], verdicts: [] },
+        tools: { profile: "write_scoped", write_paths: [".vtc/architecture/**"] },
+      },
+      verify: { output: { artifacts: [], verdicts: [...VERDICTS] } },
+    },
+  }),
+  role({
+    id: "visual_qa",
+    kind: "core",
+    mission: "Judge the rendered UI against the design criteria V1–V8.",
+    inputs: ["design_md"],
+    output: { artifacts: [], verdicts: [...VERDICTS] },
+    exits: ["done", "unknown"],
+    reviewer: "engine",
+    models: both("mid"),
+    tools: { profile: "read_only" },
+  }),
+];
+
+export interface RoleRegistry {
+  get(role: string): RoleContract | undefined;
+}
+
+/** Built-ins, with injected contracts (from `roles/`) taking precedence by id. */
+export const createRoleRegistry = (contracts: readonly RoleContract[] = []): RoleRegistry => {
+  const byId = new Map<string, RoleContract>(BUILTIN_ROLES.map((r) => [r.id, r]));
+  for (const contract of contracts) byId.set(contract.id, contract);
+  return { get: (id) => byId.get(id) };
+};
+
+/** The tier a role runs at on a host (mode overrides first). */
+export const roleTier = (contract: RoleContract, host: HostId, mode?: string): ModelTier => {
+  const models = (mode === undefined ? undefined : contract.modes?.[mode]?.models) ?? contract.models;
+  return models[host].tier;
+};
+
+/** A concrete model for a role run (AD-6 rule 2): explicit role model, project map, built-in map. */
+export const resolveModel = (
+  contract: RoleContract,
+  host: HostId,
+  config: Pick<ProjectConfig, "hosts">,
+  options: { readonly mode?: string; readonly tier?: ModelTier } = {},
+): ResolvedModel => {
+  const models = (options.mode === undefined ? undefined : contract.modes?.[options.mode]?.models) ?? contract.models;
+  const entry = models[host];
+  const tier = options.tier ?? entry.tier;
+  const explicit = options.tier === undefined || options.tier === entry.tier ? entry.model : undefined;
+  return {
+    tier,
+    effort: entry.effort,
+    model: explicit ?? config.hosts.models?.[host]?.[tier] ?? DEFAULT_TIER_MODELS[host][tier],
+  };
+};

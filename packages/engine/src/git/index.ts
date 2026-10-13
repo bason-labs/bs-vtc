@@ -5,8 +5,13 @@
  * worktrees, the submit snapshot commit (`role.submitted.head`) and the merge queue. Imports no
  * other engine module. Uses the user's own git auth (AD-9).
  */
-import type { CreateGitOps } from "@vtc/shared";
-
-export const createGitOps: CreateGitOps = () => {
-  throw new Error("createGitOps is not implemented yet (engine core, sub-project 1)");
-};
+export { createGitOps, parseNameStatus, CHECKOUTS_DIR } from "./git-ops.js";
+export { createWorkspace, WORKTREES_DIR, type MergeOutcome, type Workspace } from "./workspace.js";
+export {
+  ciFromRollup,
+  createGhPullRequests,
+  pullRequestFromGh,
+  type PullRequestRequest,
+  type PullRequestService,
+} from "./pull-requests.js";
+export { GitError, gitText, runGit, type GitResult, type GitRunOptions } from "./exec.js";
