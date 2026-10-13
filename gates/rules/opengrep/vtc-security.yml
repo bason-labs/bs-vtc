@@ -1,0 +1,83 @@
+# VTC baseline security rules for Opengrep (spec §7.2 L4). Written for VTC and licensed MIT;
+# no Semgrep-maintained rules are bundled (§7.2 licensing). Embedded in the binary
+# (packages/engine/src/gates/rules.ts mirrors this file; a test keeps them equal).
+rules:
+  - id: vtc.js.eval
+    languages: [javascript, typescript]
+    severity: ERROR
+    message: eval() runs a string as code. Parse the data instead.
+    metadata:
+      category: security
+      cwe: ["CWE-95: Eval Injection"]
+      license: MIT
+    pattern: eval($X)
+  - id: vtc.js.new-function
+    languages: [javascript, typescript]
+    severity: ERROR
+    message: new Function() runs a string as code. Parse the data instead.
+    metadata:
+      category: security
+      cwe: ["CWE-95: Eval Injection"]
+      license: MIT
+    pattern: new Function(...)
+  - id: vtc.js.inner-html
+    languages: [javascript, typescript]
+    severity: WARNING
+    message: Assigning dynamic content to innerHTML allows script injection. Use textContent or a sanitiser.
+    metadata:
+      category: security
+      cwe: ["CWE-79: Cross-site Scripting"]
+      license: MIT
+    patterns:
+      - pattern: $EL.innerHTML = $X
+      - pattern-not: $EL.innerHTML = "..."
+  - id: vtc.js.tls-reject-unauthorized
+    languages: [javascript, typescript]
+    severity: ERROR
+    message: rejectUnauthorized false disables TLS certificate checks.
+    metadata:
+      category: security
+      cwe: ["CWE-295: Improper Certificate Validation"]
+      license: MIT
+    pattern: "{..., rejectUnauthorized: false, ...}"
+  - id: vtc.py.subprocess-shell
+    languages: [python]
+    severity: ERROR
+    message: shell=True passes the command through a shell. Pass an argument list without a shell.
+    metadata:
+      category: security
+      cwe: ["CWE-78: OS Command Injection"]
+      license: MIT
+    pattern: subprocess.$FUNC(..., shell=True, ...)
+  - id: vtc.py.yaml-unsafe-load
+    languages: [python]
+    severity: ERROR
+    message: yaml.load without a safe Loader can construct arbitrary objects. Use yaml.safe_load.
+    metadata:
+      category: security
+      cwe: ["CWE-502: Deserialization of Untrusted Data"]
+      license: MIT
+    patterns:
+      - pattern: yaml.load(...)
+      - pattern-not: yaml.load(..., Loader=yaml.SafeLoader, ...)
+      - pattern-not: yaml.load(..., Loader=yaml.CSafeLoader, ...)
+  - id: vtc.py.pickle-loads
+    languages: [python]
+    severity: WARNING
+    message: Unpickling untrusted data runs arbitrary code.
+    metadata:
+      category: security
+      cwe: ["CWE-502: Deserialization of Untrusted Data"]
+      license: MIT
+    pattern-either:
+      - pattern: pickle.loads(...)
+      - pattern: pickle.load(...)
+  - id: vtc.go.tls-insecure-skip-verify
+    languages: [go]
+    severity: ERROR
+    message: InsecureSkipVerify disables TLS certificate checks.
+    metadata:
+      category: security
+      cwe: ["CWE-295: Improper Certificate Validation"]
+      license: MIT
+    pattern: "tls.Config{..., InsecureSkipVerify: true, ...}"
