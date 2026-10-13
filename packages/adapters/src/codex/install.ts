@@ -38,9 +38,34 @@ const headerName = (line: string): string | null => {
 };
 
 /**
+ * The multi-line string delimiter (`"""` or `'''`) still open after `line`, given the one open
+ * before it (null = none). Approximate (escaped quotes are not tracked), which is enough to keep
+ * a header-like line inside a string from being read as a table.
+ */
+const openStringAfter = (line: string, open: string | null): string | null => {
+  let current = open;
+  let index = 0;
+  for (;;) {
+    if (current === null) {
+      const basic = line.indexOf('"""', index);
+      const literal = line.indexOf("'''", index);
+      if (basic < 0 && literal < 0) return null;
+      const at = basic < 0 ? literal : literal < 0 ? basic : Math.min(basic, literal);
+      current = at === basic ? '"""' : "'''";
+      index = at + 3;
+    } else {
+      const at = line.indexOf(current, index);
+      if (at < 0) return current;
+      current = null;
+      index = at + 3;
+    }
+  }
+};
+
+/**
  * `config` with the `[mcp_servers.<name>]` table (and its sub-tables) replaced by `table`.
- * Refuses a config that defines the server some other way (inline or as dotted keys), since
- * rewriting that safely needs a full TOML parser.
+ * Refuses a config that defines the server some other way (inline, as dotted keys, or inside an
+ * inline `mcp_servers = {...}`), since rewriting that safely needs a full TOML parser.
  */
 export const upsertMcpServerTable = (config: string, name: string, table: string): string => {
   const own = `mcp_servers.${name}`;
@@ -48,16 +73,22 @@ export const upsertMcpServerTable = (config: string, name: string, table: string
   const kept: string[] = [];
   let current: string | null = null;
   let skipping = false;
+  let openString: string | null = null;
   for (const line of lines) {
-    const header = headerName(line);
+    const inString = openString !== null;
+    openString = openStringAfter(line, openString);
+    const header = inString ? null : headerName(line);
     if (header !== null) {
       current = header;
       skipping = header === own || header.startsWith(`${own}.`);
       if (skipping && kept.at(-1) === MANAGED_MARK) kept.pop();
-    } else if (!skipping) {
+    } else if (!skipping && !inString) {
       const key = /^\s*([A-Za-z0-9_."'-]+)\s*=/.exec(line)?.[1]?.replace(/["'\s]/g, "");
       const fullKey = key === undefined ? null : current === null ? key : `${current}.${key}`;
-      if (fullKey !== null && (fullKey === own || fullKey.startsWith(`${own}.`))) {
+      if (
+        fullKey !== null &&
+        (fullKey === own || fullKey.startsWith(`${own}.`) || own.startsWith(`${fullKey}.`))
+      ) {
         throw new Error(
           `config.toml defines ${own} outside a [${own}] table; remove it, then install again`,
         );

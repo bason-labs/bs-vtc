@@ -28,3 +28,28 @@ export const resetFromLimitText = (text: string): string | null => {
   if (match?.[1] === undefined) return null;
   return new Date(Number(match[1]) * 1000).toISOString();
 };
+
+const UNIT_MS: Readonly<Record<string, number>> = {
+  day: 86_400_000,
+  hour: 3_600_000,
+  minute: 60_000,
+  second: 1000,
+};
+
+/**
+ * The reset time a limit message gives as a wait (`try again in 2 hours 13 minutes`, Codex),
+ * counted from `endedAt` (when the run ended), as ISO; `null` when the text gives no wait.
+ */
+export const resetFromWaitText = (text: string, endedAt: string): string | null => {
+  const wait =
+    /try again in ((?:\s*(?:,|and)?\s*\d+\s*(?:days?|hours?|minutes?|seconds?)\b)+)/i.exec(
+      text,
+    )?.[1];
+  const start = Date.parse(endedAt);
+  if (wait === undefined || Number.isNaN(start)) return null;
+  let ms = 0;
+  for (const part of wait.matchAll(/(\d+)\s*(day|hour|minute|second)s?/gi)) {
+    ms += Number(part[1]) * (UNIT_MS[(part[2] ?? "").toLowerCase()] ?? 0);
+  }
+  return ms === 0 ? null : new Date(start + ms).toISOString();
+};

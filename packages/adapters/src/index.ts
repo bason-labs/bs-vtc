@@ -1,5 +1,5 @@
 /** @vtc/adapters: host adapters implementing HostAdapter from @vtc/shared (AD-1, AD-6). */
-import type { HostAdapter, HostCapabilities, HostId, ModelTier } from "@vtc/shared";
+import type { HostAdapter, HostCapabilities, HostId } from "@vtc/shared";
 import { claudeCodeCapabilities, createClaudeCodeAdapter } from "./claude-code/index.js";
 import { codexCapabilities, createCodexAdapter } from "./codex/index.js";
 
@@ -13,9 +13,7 @@ export {
   type ClaudeCodeAdapterOptions,
 } from "./claude-code/index.js";
 export {
-  CODEX_DEFAULT_TIER_MODELS,
   codexCapabilities,
-  codexModelFor,
   codexUsageFromRateLimits,
   createCodexAdapter,
   type CodexAdapterOptions,
@@ -27,12 +25,18 @@ export const HOST_CAPABILITIES: Readonly<Record<HostId, HostCapabilities>> = {
   codex: codexCapabilities,
 };
 
-/** What the cli passes when it constructs an adapter. */
+/**
+ * What the cli may pass when it constructs an adapter. Models are not here: the engine resolves
+ * every model id (`SpawnRoleRequest.model`, AD-6 rule 2), the Codex tier map included.
+ */
 export interface AdapterFactoryOptions {
-  /** `project.yaml` `hosts.models.<host>`: the project's tier → model overrides for this host. */
-  readonly models?: Readonly<Partial<Record<ModelTier, string>>>;
   /** The running vtc version (reported to host servers the adapter talks to). */
   readonly vtcVersion?: string;
+  /**
+   * This host's compiled plugin on disk (the cli's extracted `plugin:<host>`). Claude Code loads
+   * it into headless runs with `--plugin-dir`, isolated from the user's own settings.
+   */
+  readonly pluginDir?: string;
 }
 
 /**
@@ -45,11 +49,12 @@ export interface AdapterFactoryOptions {
 export const ADAPTER_FACTORIES: Readonly<
   Partial<Record<HostId, (options?: AdapterFactoryOptions) => HostAdapter>>
 > = {
-  // Claude model ids come resolved from the engine (aliases), so it needs no tier map
-  "claude-code": () => createClaudeCodeAdapter(),
+  "claude-code": (options = {}) =>
+    createClaudeCodeAdapter(
+      options.pluginDir === undefined ? {} : { pluginDir: options.pluginDir },
+    ),
   codex: (options = {}) =>
-    createCodexAdapter({
-      ...(options.models === undefined ? {} : { models: options.models }),
-      ...(options.vtcVersion === undefined ? {} : { clientVersion: options.vtcVersion }),
-    }),
+    createCodexAdapter(
+      options.vtcVersion === undefined ? {} : { clientVersion: options.vtcVersion },
+    ),
 };

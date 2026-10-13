@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import type { HostOutcome } from "@vtc/shared";
 import { startHeadlessRun, type RunExit } from "../src/common/headless-run.js";
-import { nodeSpawner } from "../src/common/process.js";
+import { createNodeSpawner, nodeSpawner } from "../src/common/process.js";
 import { fakeSpawner } from "./support/fake-spawner.js";
 
 const COMMAND = { command: "host", args: ["run"], env: {} };
@@ -90,6 +90,46 @@ describe("headless launcher (§15 hardened launcher)", () => {
     expect(settled).toEqual(["done"]);
   });
 
+  it("writes the input to stdin and closes it, and stamps when the run ended", async () => {
+    const { spawner, processes } = fakeSpawner();
+    let seen: RunExit | null = null;
+    const run = startHeadlessRun({
+      command: COMMAND,
+      cwd: "/w",
+      timeoutMs: 5_000,
+      spawner,
+      input: "the task pack",
+      now: () => new Date("2026-10-13T08:00:00Z"),
+      outcome: (lines, exit) => {
+        seen = exit;
+        return echoOutcome(lines, exit);
+      },
+    });
+    const proc = processes[0]!;
+    expect(proc.options.stdin).toBe("pipe");
+    expect(await proc.stdinText()).toBe("the task pack");
+    proc.exit(0);
+    await run.wait();
+    expect(seen).toMatchObject({ endedAt: "2026-10-13T08:00:00.000Z" });
+  });
+
+  it("does not wait forever for a stdout something else still holds after the exit", async () => {
+    const { spawner, processes } = fakeSpawner();
+    const run = startHeadlessRun({
+      command: COMMAND,
+      cwd: "/w",
+      timeoutMs: 5_000,
+      killGraceMs: 20,
+      spawner,
+      outcome: echoOutcome,
+    });
+    const proc = processes[0]!;
+    proc.emit("a");
+    // the leader is gone, but its stdout never closes
+    proc.settleOnly(0);
+    expect(details(await run.wait()).lines).toEqual(["a"]);
+  });
+
   it("a process that cannot start settles with its start error", async () => {
     const { spawner } = fakeSpawner((p) => {
       p.failToStart(new Error("spawn host ENOENT"));
@@ -148,6 +188,56 @@ describe.skipIf(process.platform === "win32")("Node spawner (no orphans, §15)",
     await expect.poll(alive, { timeout: 3_000 }).toBe(false);
   });
 
+  it("kills what the host left running in its group once the host has exited", async () => {
+    const run = startHeadlessRun({
+      // the leader exits at once, leaving a group member that no longer holds stdout
+      command: {
+        command: "/bin/sh",
+        args: ["-c", 'sleep 30 >/dev/null 2>&1 & echo "$!"'],
+        env: {},
+      },
+      cwd: process.cwd(),
+      timeoutMs: 10_000,
+      spawner: nodeSpawner,
+      outcome: echoOutcome,
+    });
+    const leftover = Number(details(await run.wait()).lines[0]);
+    expect(leftover).toBeGreaterThan(0);
+    const alive = (): boolean => {
+      try {
+        process.kill(leftover, 0);
+        return true;
+      } catch {
+        return false;
+      }
+    };
+    await expect.poll(alive, { timeout: 3_000 }).toBe(false);
+  });
+
+  it("settles even when a process that left the group keeps stdout open", async () => {
+    const started = Date.now();
+    const run = startHeadlessRun({
+      // the leader starts a detached (new session) grandchild that inherits stdout, then exits
+      command: {
+        command: process.execPath,
+        args: [
+          "-e",
+          "require('node:child_process').spawn('sleep', ['3'], { detached: true, stdio: ['ignore', 'inherit', 'ignore'] }).unref(); console.log('started');",
+        ],
+        env: {},
+      },
+      cwd: process.cwd(),
+      timeoutMs: 10_000,
+      killGraceMs: 200,
+      spawner: createNodeSpawner({ drainMs: 200 }),
+      outcome: echoOutcome,
+    });
+    const outcome = details(await run.wait());
+    expect(outcome.lines).toEqual(["started"]);
+    expect(outcome.code).toBe(0);
+    expect(Date.now() - started).toBeLessThan(2_500);
+  });
+
   it("reports a missing binary as a start error, not a crash", async () => {
     const run = startHeadlessRun({
       command: { command: "vtc-no-such-host-binary", args: [], env: {} },
@@ -165,4 +255,8 @@ describe.skipIf(process.platform === "win32")("Node spawner (no orphans, §15)",
     const outcome = await run.wait();
     expect(outcome.kind === "error" && outcome.message).toContain("ENOENT");
   });
+});
+
+describe("Node spawner on Windows (known gap, spec §4.4 windows-x64)", () => {
+  it.todo("starts npm .cmd shims (PATHEXT lookup, no shell) and kills the whole process tree");
 });

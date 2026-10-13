@@ -51,6 +51,8 @@ interface ClaudeScan {
   readonly rejected: RateLimitInfo | null;
   readonly retry: StreamRetry | null;
   readonly retriedForRateLimit: boolean;
+  /** The last retry was for a rate limit and nothing ran after it: the host gave up waiting. */
+  readonly rateLimitRetryUnrecovered: boolean;
   readonly result: Record<string, unknown> | null;
   readonly unrecognized: number;
 }
@@ -86,6 +88,7 @@ const scan = (lines: readonly string[]): ClaudeScan => {
   let rejected: RateLimitInfo | null = null;
   let retry: StreamRetry | null = null;
   let retriedForRateLimit = false;
+  let rateLimitRetryUnrecovered = false;
   let result: Record<string, unknown> | null = null;
   for (const event of events) {
     const type = text(event.type);
@@ -99,6 +102,7 @@ const scan = (lines: readonly string[]): ClaudeScan => {
     } else if (type === "system" && event.subtype === "api_retry") {
       const reason = retryReason(event);
       retriedForRateLimit ||= reason === "rate_limit";
+      rateLimitRetryUnrecovered = reason === "rate_limit";
       retry = {
         attempt: count(event.attempt),
         reason,
@@ -115,6 +119,9 @@ const scan = (lines: readonly string[]): ClaudeScan => {
       if (info.status === "rejected") rejected = info;
     } else if (type === "result") {
       result = event;
+    } else if (type !== "system") {
+      // an assistant or tool turn after a retry: the retried request went through
+      rateLimitRetryUnrecovered = false;
     }
   }
   return {
@@ -124,6 +131,7 @@ const scan = (lines: readonly string[]): ClaudeScan => {
     rejected,
     retry,
     retriedForRateLimit,
+    rateLimitRetryUnrecovered,
     result,
     unrecognized,
   };
@@ -177,7 +185,8 @@ const limitOutcome = (
     session_ref: sessionRef(s),
     resets_at: hit?.resetsAt ?? resetFromLimitText(message),
     window: type === null ? null : (WINDOW_KINDS[type]?.kind ?? null),
-    model: family === null ? null : (s.model ?? family),
+    // the limited family, or the session's model when it is of that family
+    model: family === null ? null : s.model?.includes(family) === true ? s.model : family,
     message,
     tokens,
     cost_usd: cost,
@@ -223,7 +232,8 @@ const outcomeFromResult = (s: ClaudeScan, result: Record<string, unknown>): Host
     return { kind: "error", message, retryable: false, tokens, cost_usd: cost };
   }
   const failure = classifyFailureText(message);
-  if (s.rejected !== null || s.retriedForRateLimit || failure === "limit") {
+  // a rate-limit retry the run recovered from says nothing about a later, unrelated error
+  if (s.rejected !== null || s.rateLimitRetryUnrecovered || failure === "limit") {
     return limitOutcome(s, message, tokens, cost);
   }
   if (failure === "auth") return { kind: "auth", message };

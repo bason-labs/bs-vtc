@@ -1,4 +1,16 @@
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { execFileSync } from "node:child_process";
+import {
+  chmodSync,
+  existsSync,
+  lstatSync,
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  rmSync,
+  statSync,
+  symlinkSync,
+  writeFileSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
@@ -73,9 +85,72 @@ describe("Claude install (AD-6 rule 5, AD-16 rule 4)", () => {
     expect(settings.enabledPlugins).toEqual({ "other@market": true, "vtc@vtc-local": true });
     expect(settings.statusLine).toEqual({
       type: "command",
-      command: `vtc statusline-tee --wrap '~/bin/my line.sh '\\''x'\\'''`,
+      command: `vtc statusline-tee -- '~/bin/my line.sh '\\''x'\\'''`,
       padding: 1,
     });
+  });
+
+  it.skipIf(process.platform === "win32")(
+    "the shell hands the shim the user's command unchanged as the one word after -- (`vtc statusline-tee [-- <cmd>]`)",
+    () => {
+      const user = `~/bin/my line.sh 'x' "$HOME" | tr a b; echo \\ done`;
+      const wired = statuslineTeeCommand(user);
+      expect(wired.startsWith("vtc statusline-tee -- ")).toBe(true);
+      // run the wired line with a stand-in for `vtc statusline-tee` that prints its arguments
+      const printed = execFileSync("/bin/sh", [
+        "-c",
+        wired.replace("vtc statusline-tee", "printf '%s\\0'"),
+      ]).toString("utf8");
+      expect(printed.split("\0").slice(0, -1)).toEqual(["--", user]);
+    },
+  );
+
+  it.skipIf(process.platform === "win32")(
+    "keeps a 0600 settings file 0600 and rewrites a symlinked one through the link",
+    async () => {
+      const env = setup();
+      const settingsPath = join(env.home, ".claude", "settings.json");
+      writeJsonFile(settingsPath, { model: "opus" });
+      chmodSync(settingsPath, 0o600);
+      await createClaudeCodeAdapter().install({ ...env, scope: "user" });
+      expect(statSync(settingsPath).mode & 0o777).toBe(0o600);
+
+      const other = setup();
+      const dotfiles = temp("vtc-dotfiles-");
+      const real = join(dotfiles, "claude-settings.json");
+      writeFileSync(real, JSON.stringify({ model: "haiku" }));
+      chmodSync(real, 0o640);
+      mkdirSync(join(other.home, ".claude"));
+      const link = join(other.home, ".claude", "settings.json");
+      symlinkSync(real, link);
+      await createClaudeCodeAdapter().install({ ...other, scope: "user" });
+      expect(lstatSync(link).isSymbolicLink()).toBe(true);
+      expect(readJson(real)).toMatchObject({
+        model: "haiku",
+        enabledPlugins: { "vtc@vtc-local": true },
+      });
+      expect(statSync(real).mode & 0o777).toBe(0o640);
+    },
+  );
+
+  it.skipIf(process.platform === "win32")(
+    "creates a new settings file 0600 (it may later hold MCP env tokens)",
+    async () => {
+      const env = setup();
+      await createClaudeCodeAdapter().install({ ...env, scope: "user" });
+      expect(statSync(join(env.home, ".claude", "settings.json")).mode & 0o777).toBe(0o600);
+    },
+  );
+
+  it("refuses to replace a settings link that points at nothing", async () => {
+    const env = setup();
+    mkdirSync(join(env.home, ".claude"));
+    const link = join(env.home, ".claude", "settings.json");
+    symlinkSync(join(env.home, "missing.json"), link);
+    await expect(createClaudeCodeAdapter().install({ ...env, scope: "user" })).rejects.toThrow(
+      /link to a missing file/,
+    );
+    expect(lstatSync(link).isSymbolicLink()).toBe(true);
   });
 
   it("is idempotent: a second install never wraps the shim twice", async () => {
@@ -108,7 +183,7 @@ describe("Claude install (AD-6 rule 5, AD-16 rule 4)", () => {
     });
     expect(readJson(local).statusLine).toEqual({
       type: "command",
-      command: "vtc statusline-tee --wrap 'user-line'",
+      command: "vtc statusline-tee -- 'user-line'",
     });
     expect(result.notes.join(" ")).toContain("out of git");
   });

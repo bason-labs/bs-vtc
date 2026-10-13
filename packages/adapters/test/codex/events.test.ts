@@ -10,11 +10,13 @@ const valid = (outcome: HostOutcome | null): HostOutcome => {
   expect(outcome).not.toBeNull();
   return HostOutcomeSchema.parse(outcome);
 };
+const ENDED_AT = "2026-10-13T08:00:00.000Z";
 const exit = (code: number | null, stderrTail = "") => ({
   code,
   signal: null,
   error: null,
   stderrTail,
+  endedAt: ENDED_AT,
 });
 const THREAD = "0199a7c2-4b1e-7d30-a5f2-6c8e9d1b3a47";
 
@@ -116,6 +118,23 @@ describe("Codex parseEvents: limits and auth (synthetic, documented shapes, §6.
 });
 
 describe("Codex outcome after the process exits", () => {
+  it("turns the limit message's wait into a reset time counted from when the run ended (§12.1)", () => {
+    const lines = fixtureLines("codex/exec-usage-limit.synthetic.jsonl");
+    // the pure reader has no clock: the reset stays unknown there
+    expect(parse(lines).outcome).toMatchObject({ kind: "limit", resets_at: null });
+    expect(codexOutcomeAfterExit(lines, exit(1))).toMatchObject({
+      kind: "limit",
+      resets_at: "2026-10-13T10:13:00.000Z",
+    });
+    const noWait = [
+      JSON.stringify({ type: "turn.failed", error: { message: "usage limit reached" } }),
+    ];
+    expect(codexOutcomeAfterExit(noWait, exit(1))).toMatchObject({
+      kind: "limit",
+      resets_at: null,
+    });
+  });
+
   it("an error event decides when no turn ended", () => {
     const lines = fixtureLines("codex/exec-usage-limit.synthetic.jsonl").slice(0, 3);
     expect(codexOutcomeAfterExit(lines, exit(1)).kind).toBe("limit");
@@ -137,6 +156,7 @@ describe("Codex outcome after the process exits", () => {
       signal: null,
       error: new Error("spawn codex ENOENT"),
       stderrTail: "",
+      endedAt: ENDED_AT,
     });
     expect(outcome).toMatchObject({ kind: "error", retryable: false });
   });

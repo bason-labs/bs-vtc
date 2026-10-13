@@ -22,11 +22,15 @@ import { shellQuote } from "../common/shell.js";
 export const CLAUDE_MARKETPLACE = "vtc-local";
 const CLAUDE_PLUGIN_MANIFEST = ".claude-plugin/plugin.json";
 
-/** The statusline shim (cli+binary team): `vtc statusline-tee [--wrap '<user command>']`. */
+/**
+ * The statusline shim (cli+binary team): `vtc statusline-tee [-- <user command>]`. The shim runs
+ * the words after `--`, joined with spaces, as one shell command line; the user's command is
+ * passed as one single-quoted word, so the shell hands it over unchanged.
+ */
 export const STATUSLINE_TEE = "vtc statusline-tee";
 
 export const statuslineTeeCommand = (wrapped: string | null): string =>
-  wrapped === null ? STATUSLINE_TEE : `${STATUSLINE_TEE} --wrap ${shellQuote(wrapped)}`;
+  wrapped === null ? STATUSLINE_TEE : `${STATUSLINE_TEE} -- ${shellQuote(wrapped)}`;
 
 const isTee = (command: string): boolean =>
   command === STATUSLINE_TEE || command.startsWith(`${STATUSLINE_TEE} `);

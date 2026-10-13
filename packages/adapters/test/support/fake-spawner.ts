@@ -28,6 +28,19 @@ export class FakeProcess implements SpawnedProcess {
     });
   }
 
+  /** Everything written to stdin, once the writer has closed it. */
+  stdinText(): Promise<string> {
+    const stdin = this.stdin;
+    if (stdin === null) return Promise.resolve("");
+    return new Promise((resolve) => {
+      let text = "";
+      stdin.on("data", (chunk: Buffer) => (text += chunk.toString("utf8")));
+      stdin.once("end", () => {
+        resolve(text);
+      });
+    });
+  }
+
   get finished(): boolean {
     return this.done;
   }
@@ -47,6 +60,13 @@ export class FakeProcess implements SpawnedProcess {
     this.stderr.end();
     this.stdin?.end();
     this.settle({ code, signal, error: null });
+  }
+
+  /** The process exits, but its stdout stays open (something it started still holds it). */
+  settleOnly(code: number): void {
+    if (this.done) return;
+    this.done = true;
+    this.settle({ code, signal: null, error: null });
   }
 
   failToStart(error: Error): void {
