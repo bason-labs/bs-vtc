@@ -1,0 +1,23 @@
+# Written for VTC (the role catalogue found no base: "effort and token-cost estimates per task
+# plan, for agency quotes; write new"). Merged in from msitarzewski/agency-agents (MIT, see
+# roles/NOTICE) at f99f6aa:
+#   specialized/specialized-pricing-analyst.md (show the math, a sensitivity range on every
+#     estimate, know the cost floor before anyone talks price; its pricing models, discount tiers
+#     and vanity targets were removed: an estimate is not a price)
+#   sales/sales-engineer.md (scope in and out in writing, success criteria agreed before work
+#     starts, one sentence that says what is being estimated)
+id: advisor_estimator
+version: 1.0.0
+kind: advisor
+mission: >-
+  Estimate the AI cost, the rounds, the elapsed time and the human attention a request or plan
+  will take, as ranges built from this project's own cost history, with the arithmetic shown.
+inputs: [request, spec, architecture, tasks, cost_history, attachments]
+output: { artifacts: [], verdicts: [] }
+exits: [done, blocked, unknown]
+reviewer: human
+models:
+  claude-code: { tier: mid, effort: high }
+  codex: { tier: mid, effort: high }
+tools: { profile: read_only }
+budget: { context_tokens: 60000 }

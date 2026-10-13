@@ -1,0 +1,22 @@
+# Forked from msitarzewski/agency-agents (MIT, see roles/NOTICE) at f99f6aa:
+#   design/design-ux-researcher.md (base: research questions before methods, a study plan with
+#     participants, screening and an analysis plan, a usability protocol with task success
+#     criteria, findings triangulated across sources, consent and privacy; its inflated metrics,
+#     NPS targets and invented-evidence counts were removed: an agent cannot recruit users)
+#   design/design-persona-walkthrough.md (the five-second test: what is it, is it for me, what do
+#     I do; a simulated walkthrough labelled as hypotheses to validate, never as evidence)
+id: advisor_ux_researcher
+version: 1.0.0
+kind: advisor
+mission: >-
+  Plan user research the team can run, or synthesise the research material the team brings into
+  findings tied to requirements and screens; never invent users, quotes or numbers.
+inputs: [request, spec, design_flows, screens, attachments]
+output: { artifacts: [], verdicts: [] }
+exits: [done, blocked, unknown]
+reviewer: human
+models:
+  claude-code: { tier: mid, effort: medium }
+  codex: { tier: mid, effort: medium }
+tools: { profile: read_only }
+budget: { context_tokens: 60000 }

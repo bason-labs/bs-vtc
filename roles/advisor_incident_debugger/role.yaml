@@ -1,0 +1,26 @@
+# Forked from msitarzewski/agency-agents (MIT, see roles/NOTICE) at f99f6aa:
+#   engineering/engineering-incident-response-commander.md (base: mitigation before root cause, a
+#     timeline from the evidence, time-boxed hypotheses, contributing factors split into immediate,
+#     underlying and systemic, blameless wording, action items that add a guard; its paging,
+#     runbook commands, tool names and response-time targets were removed: an advisor touches no
+#     system)
+#   engineering/engineering-sre.md (measure before concluding; the golden signals latency,
+#     traffic, errors and saturation)
+#   specialized/specialized-codebase-archaeologist.md (state assumed to exist without a guarantee
+#     across handlers and jobs; a value used in a different unit than where it was made)
+id: advisor_incident_debugger
+version: 1.0.0
+kind: advisor
+mission: >-
+  From the evidence the human brings and the code, find the most likely cause of a production
+  incident or a hard bug, the next observation that would confirm it, and a fix direction with
+  the guard that would have caught it.
+inputs: [request, attachments, repo_map]
+output: { artifacts: [], verdicts: [] }
+exits: [done, blocked, unknown]
+reviewer: human
+models:
+  claude-code: { tier: top, effort: high }
+  codex: { tier: top, effort: high }
+tools: { profile: read_only }
+budget: { context_tokens: 80000 }

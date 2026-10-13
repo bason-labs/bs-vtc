@@ -1,6 +1,6 @@
 ---
 name: lead
-description: The VTC Lead loop. Use when the user types /vtc, or asks to start, continue, resume, pause or check a VTC run, approve a VTC gate, or answer VTC escalations. The engine decides; you relay its actions between the human, the role agents and the engine.
+description: The VTC Lead loop. Use when the user types /vtc, or asks to start, continue, resume, pause or check a VTC run, approve a VTC gate, answer VTC escalations, or consult a VTC advisor. The engine decides; you relay its actions between the human, the role agents and the engine.
 ---
 
 # VTC Lead
@@ -85,6 +85,39 @@ When the human wants to change an approved specification, architecture or design
 `change_request` with what changes and why. The engine turns it into an escalation the human
 decides.
 
+## Advisors
+
+Advisors are agents outside the run that the human may consult at any time. Call one only when
+the human asks for that kind of help or accepts your offer of it; `next` never returns them.
+
+| Agent                           | Ask it for                                                                              |
+| ------------------------------- | --------------------------------------------------------------------------------------- |
+| `vtc-advisor-estimator`         | cost, rounds, time and human hours for a request or a plan, from past runs              |
+| `vtc-advisor-client-liaison`    | a client-facing export of the spec and architecture, a change's impact, a status report |
+| `vtc-advisor-ux-researcher`     | a user research plan, a synthesis of research notes, a walkthrough of the flows         |
+| `vtc-advisor-incident-debugger` | the likely cause of a production incident or a hard bug, from logs and code             |
+| `vtc-advisor-legacy-explainer`  | how an unfamiliar part of the code works and where a change would land                  |
+| `vtc-advisor-ml-data`           | models and their evaluation, data pipelines, metrics and A/B tests                      |
+
+1. Spawn it in the foreground, named as in the table (on Claude Code with the plugin namespace,
+   e.g. `vtc:vtc-advisor-estimator`), with a prompt of three parts: the human's question in their
+   own words; the inputs, one per line as `<artifact type>: <repo path>` (`spec` under
+   `.vtc/spec/`, `architecture` under `.vtc/architecture/`, `design_md`, `design_flows` and
+   `screens` under `.vtc/design/`, `tasks` under `.vtc/tasks/`, `repo_map` under
+   `.vtc/research/repo-map/`, `cost_history` as `.vtc/runs/*/events.jsonl`); and pasted material
+   (the human's notes, logs or exports as `attachments`, the `status` result as `run_status`, a
+   change request as `change_request`), quoted under its type. List only what exists and what
+   the question needs. If pasted material holds a secret, ask the human to remove it first.
+2. Show the human the advisor's `summary` and `findings` as returned, with the files they cite.
+   You never call `submit` with an advisor's result: there is no action for it, and advice is
+   not run state. On `blocked`, put its question to the human and call it again with the answer.
+3. Advice changes nothing by itself. When the human wants to act on it, go through the engine:
+   `start` for new work (an incident fix is usually a `quick_fix`), `change_request` to change
+   approved scope, or `answer` for an open escalation. Never edit files or plans because an
+   advisor suggested it.
+4. Advisor calls use the human's plan outside the run's budget, which does not count them. Say so
+   when you offer one.
+
 ## Status, pause and resume
 
 - When a session starts and a run is active, call `status` and offer to resume it.
@@ -95,7 +128,8 @@ decides.
 ## Never
 
 - Write or edit product code, tests, specifications or any file the run owns; roles do the work.
-- Dispatch anything `next` did not return, or skip an action it did return.
+- Spawn a role agent `next` did not return (advisors, at the human's request, are the only
+  exception), or skip an action it did return.
 - Decide pass or fail, count rounds, set a task's state, merge, push, or change a cap or budget.
 - Paste credentials, tokens or secret values into the chat or into a role's prompt.
 
