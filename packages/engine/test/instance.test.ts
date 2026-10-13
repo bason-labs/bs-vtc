@@ -19,7 +19,9 @@ import {
 import {
   acquireEngineLock,
   EngineLockedError,
+  LOCK_STARTUP_GRACE_MS,
   openEventLog,
+  takeEngineLock,
   readEngineDiscovery,
   removeEngineDiscovery,
   writeEngineDiscovery,
@@ -64,6 +66,80 @@ describe("engine lock (AD-12: one engine per repo)", () => {
     });
     expect(stale).toEqual([999_999]);
     expect(lock.isHeld()).toBe(true);
+    lock.release();
+  });
+  it("records the holder's socket and start time in the lock", () => {
+    const repo = tempDir();
+    const lock = acquireEngineLock(repo, { socket: "/tmp/x.sock", now: () => NOW });
+    expect(JSON.parse(readFileSync(lock.path, "utf8"))).toEqual({
+      pid: process.pid,
+      acquired_at: NOW.toISOString(),
+      socket: "/tmp/x.sock",
+    });
+    lock.release();
+  });
+  it("takes over a lock whose pid lives but whose socket does not answer (pid reuse)", async () => {
+    const repo = tempDir();
+    const old = new Date(NOW.getTime() - LOCK_STARTUP_GRACE_MS - 1);
+    acquireEngineLock(repo, { socket: "/tmp/gone.sock", now: () => old });
+    const asked: string[] = [];
+    const stale: [number | null, string][] = [];
+    const lock = await takeEngineLock(repo, {
+      socket: "/tmp/mine.sock",
+      now: () => NOW,
+      holderAnswers: (socket) => {
+        asked.push(socket);
+        return Promise.resolve(false);
+      },
+      onStaleLock: (pid, reason) => stale.push([pid, reason]),
+    });
+    expect(asked).toEqual(["/tmp/gone.sock"]);
+    expect(stale).toEqual([[process.pid, "silent"]]);
+    expect(lock.isHeld()).toBe(true);
+    expect(JSON.parse(readFileSync(lock.path, "utf8"))).toMatchObject({ socket: "/tmp/mine.sock" });
+    lock.release();
+  });
+  it("keeps a lock whose holder answers, or that is still within the startup grace", async () => {
+    const repo = tempDir();
+    const old = new Date(NOW.getTime() - LOCK_STARTUP_GRACE_MS - 1);
+    const held = acquireEngineLock(repo, { socket: "/tmp/live.sock", now: () => old });
+    await expect(
+      takeEngineLock(repo, { now: () => NOW, holderAnswers: () => Promise.resolve(true) }),
+    ).rejects.toThrow(EngineLockedError);
+    held.release();
+    const fresh = acquireEngineLock(repo, { socket: "/tmp/starting.sock", now: () => NOW });
+    const asked: string[] = [];
+    await expect(
+      takeEngineLock(repo, {
+        now: () => new Date(NOW.getTime() + 1_000),
+        holderAnswers: (socket) => {
+          asked.push(socket);
+          return Promise.resolve(false);
+        },
+      }),
+    ).rejects.toThrow(EngineLockedError);
+    expect(asked).toEqual([]);
+    expect(fresh.isHeld()).toBe(true);
+    fresh.release();
+  });
+  it("asks the repo's own socket when an older lock records none", async () => {
+    const repo = tempDir();
+    const path = join(repo, ENGINE_INSTANCE.lockFile);
+    acquireEngineLock(repo).release();
+    writeFileSync(
+      path,
+      `${JSON.stringify({ pid: process.pid, acquired_at: "2020-01-01T00:00:00.000Z" })}\n`,
+    );
+    const asked: string[] = [];
+    const lock = await takeEngineLock(repo, {
+      socket: "/tmp/repo.sock",
+      now: () => NOW,
+      holderAnswers: (socket) => {
+        asked.push(socket);
+        return Promise.resolve(false);
+      },
+    });
+    expect(asked).toEqual(["/tmp/repo.sock"]);
     lock.release();
   });
   it("keeps the lock under .vtc/state/", () => {

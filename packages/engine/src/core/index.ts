@@ -6,8 +6,14 @@
 export {
   acquireEngineLock,
   EngineLockedError,
+  LOCK_STARTUP_GRACE_MS,
+  readLockHolder,
+  takeEngineLock,
   type AcquireLockOptions,
   type EngineLock,
+  type LockHolder,
+  type StaleLockReason,
+  type TakeLockOptions,
 } from "./lock.js";
 export {
   openEventLog,
@@ -78,13 +84,28 @@ export { guardDirFor, GUARD_DIR } from "./guard.js";
 export { EngineWrites, type WriteCheck } from "./engine-writes.js";
 export { ENGINE_FILE_DIRS, FORENSICS_DIR, type DispatchRecord } from "./dispatch-guard.js";
 export { roleWorktreeId, ROLE_INPUT_DIRS } from "./role-worktree.js";
-export { FINAL_REVIEW_STEPS_RUN } from "./projections.js";
+export { globMatch, globToRegExp, matchesAny } from "./globs.js";
+export {
+  dispatchWorktree,
+  dispatchWriteScope,
+  isCheckoutScopeEntry,
+  readDispatchPack,
+  splitWriteScope,
+  taskPackJsonPath,
+  type DispatchWriteScope,
+} from "./dispatch-scope.js";
+export { roleSandboxProblem, roleSandboxRequest } from "./sandbox.js";
+export { finalReviewScopeNote, finalReviewStepsRun } from "./projections.js";
 export { architectDepth, dealDesignConstraints, LOTTERY_POOLS, researchDepth } from "./lottery.js";
 export {
+  committedGatesConfig,
   ConfigError,
   DEFAULT_ACCEPTANCE_GLOBS,
+  gatesConfigHash,
   GATES_CONFIG_PATH,
   loadGatesConfig,
+  parseGatesConfig,
+  type CommittedGates,
   loadProjectConfig,
   pipelineConfigHash,
   PROJECT_CONFIG_PATH,

@@ -42,12 +42,15 @@ import {
   type VtcEvent,
 } from "@vtc/shared";
 import {
+  committedGatesConfig,
   ConfigError,
+  gatesConfigHash,
   GATES_CONFIG_PATH,
   loadGatesConfig,
   loadProjectConfig,
   pipelineConfigHash,
   PROJECT_CONFIG_PATH,
+  type CommittedGates,
 } from "./config.js";
 import { dispatchGuarded, dispatchNow, phaseRoles } from "./dispatch.js";
 import { parkEscalation } from "./escalations.js";
@@ -133,6 +136,35 @@ const significant = (before: UsageSnapshot | undefined, after: UsageSnapshot): b
   return key(before) !== key(after);
 };
 
+const WINDOW_ORDER: Readonly<Record<UsageSnapshot["windows"][number]["kind"], number>> = {
+  five_hour: 0,
+  weekly: 1,
+  other: 2,
+};
+
+/** An `sdk_event` reading merged into the stored snapshot (see `Engine.ingestUsage`). */
+export const mergeSdkUsage = (
+  stored: UsageSnapshot | undefined,
+  incoming: UsageSnapshot,
+  receivedAt: Date,
+): UsageSnapshot => {
+  const kinds = new Set(incoming.windows.map((w) => w.kind));
+  const models = new Set(incoming.model_limits.map((m) => m.model));
+  return {
+    host: incoming.host,
+    source: incoming.source,
+    windows: [...(stored?.windows ?? []).filter((w) => !kinds.has(w.kind)), ...incoming.windows]
+      .map((w, i) => ({ w, i }))
+      .sort((a, b) => WINDOW_ORDER[a.w.kind] - WINDOW_ORDER[b.w.kind] || a.i - b.i)
+      .map(({ w }) => w),
+    model_limits: [
+      ...(stored?.model_limits ?? []).filter((m) => !models.has(m.model)),
+      ...incoming.model_limits,
+    ],
+    updated_at: receivedAt.toISOString(),
+  };
+};
+
 export type EventListener = (event: VtcEvent) => void;
 
 /** The config a run started with (AD-4 Prevents, AD-8 rule 5: agents never set caps or budgets). */
@@ -140,6 +172,11 @@ interface FrozenConfig {
   readonly run: string;
   readonly project: ProjectConfig;
   readonly gates: GatesConfig | null;
+  /**
+   * SHA-256 of the committed `gates.yml` bytes the run started with (`gates_config_hash`, spine
+   * §5 reading 46b), or `null` when the start commit had none.
+   */
+  readonly gatesSha: string | null;
   /** `pipelineConfigHash(project, gates)`. */
   readonly hash: string;
 }
@@ -395,21 +432,34 @@ export class Engine implements Kernel {
     return this.activeFrozen()?.project ?? this.diskProject();
   }
 
-  /** `gates.yml` as the active run started with it (see {@link config}). */
+  /**
+   * `gates.yml` as the active run started with it: the file committed at the commit the run
+   * started on, never the working tree (spine §5 reading 46f); `null` without an active run or
+   * when that commit had none. Gate runs check the baseline's committed file against it.
+   */
   gatesConfig(): GatesConfig | null {
-    const frozen = this.activeFrozen();
-    return frozen === null ? this.diskGates() : frozen.gates;
+    return this.activeFrozen()?.gates ?? null;
+  }
+
+  /** The hash of the active run's frozen `gates.yml` bytes (`gates_config_hash`), or `null`. */
+  gatesConfigHash(): string | null {
+    return this.activeFrozen()?.gatesSha ?? null;
   }
 
   /** Freezes `project` and `gates` for `run` and keeps a copy for a restart. */
-  private freezeConfig(run: string, project: ProjectConfig, gates: GatesConfig | null): void {
-    this.frozen = { run, project, gates, hash: pipelineConfigHash(project, gates) };
+  private freezeConfig(
+    run: string,
+    project: ProjectConfig,
+    gates: GatesConfig | null,
+    gatesSha: string | null,
+  ): void {
+    this.frozen = { run, project, gates, gatesSha, hash: pipelineConfigHash(project, gates) };
     this.driftStamps = this.configStamps();
     try {
       writeRepoFile(
         this.deps.repoRoot,
         frozenConfigPath(run),
-        `${JSON.stringify({ project, gates })}\n`,
+        `${JSON.stringify({ project, gates, gates_sha256: gatesSha })}\n`,
         0o600,
       );
     } catch {
@@ -429,17 +479,26 @@ export class Engine implements Kernel {
     try {
       const kept = JSON.parse(
         readFileSync(join(this.deps.repoRoot, frozenConfigPath(handle.state.id)), "utf8"),
-      ) as { project?: unknown; gates?: unknown };
+      ) as { project?: unknown; gates?: unknown; gates_sha256?: unknown };
       const project = ProjectConfigSchema.parse(kept.project);
       const gates = kept.gates === null ? null : GatesConfigSchema.parse(kept.gates);
+      const gatesSha = typeof kept.gates_sha256 === "string" ? kept.gates_sha256 : null;
       if (pipelineConfigHash(project, gates) === run.pipeline_config_hash) {
-        this.frozen = { run: handle.state.id, project, gates, hash: run.pipeline_config_hash };
+        this.frozen = {
+          run: handle.state.id,
+          project,
+          gates,
+          gatesSha,
+          hash: run.pipeline_config_hash,
+        };
         this.driftStamps = "";
         return;
       }
     } catch {
       // no usable copy: fall back to the files
     }
+    // No usable copy (rare: it lives in the git-ignored state dir): the working tree's files are
+    // the best evidence left; a difference is reported below and the gate runs check the bytes.
     let project: ProjectConfig;
     let gates: GatesConfig | null;
     try {
@@ -448,7 +507,7 @@ export class Engine implements Kernel {
     } catch {
       return; // the files do not parse: config() reports it until they are fixed
     }
-    this.freezeConfig(handle.state.id, project, gates);
+    this.freezeConfig(handle.state.id, project, gates, this.diskGatesSha());
     const hash = pipelineConfigHash(project, gates);
     if (hash !== run.pipeline_config_hash) this.reportConfigDrift(handle, hash, "restart");
   }
@@ -871,6 +930,8 @@ export class Engine implements Kernel {
   }
 
   async start(input: StartInput, call: CallContext): Promise<StartResult> {
+    // read before the checks: nothing awaits between them and registering the run
+    const committed = await this.startGates();
     if ([...this.handles.values()].some((h) => h.state.run.finished_at === undefined)) {
       throw new EngineError(
         "run_active",
@@ -887,7 +948,7 @@ export class Engine implements Kernel {
       );
     }
     const config = this.diskProject();
-    const gates = this.diskGates();
+    const gates = committed?.config ?? null;
     const track = config.track_default ?? input.track;
     const id = this.newRunId();
     const log = openEventLog(this.deps.repoRoot, id, this.deps.lock, {
@@ -896,7 +957,7 @@ export class Engine implements Kernel {
     });
     const handle: RunHandle = { state: emptyRunState(id, this.now().toISOString()), log };
     this.handles.set(id, handle);
-    this.freezeConfig(id, config, gates);
+    this.freezeConfig(id, config, gates, committed?.sha256 ?? null);
     if (call.client === "bridge" && call.session !== undefined) this.setLead(id, call, "started");
     const noRemote =
       config.merge_level >= 2 &&
@@ -921,6 +982,35 @@ export class Engine implements Kernel {
       this.advance(handle);
       return Promise.resolve({ run: id, track, phase: handle.state.run.phase });
     });
+  }
+
+  /**
+   * The `gates.yml` committed at the commit the run starts on (spine §5 reading 46f): `vtc
+   * calibrate` tells the user to commit it. `null` when HEAD has none (or no commit yet): the run
+   * starts, and its first gate run parks (`gate_infra`) unless the task's baseline has one.
+   */
+  private async startGates(): Promise<CommittedGates | null> {
+    let head: string;
+    try {
+      head = await this.deps.workspace.resolve("HEAD");
+    } catch {
+      return null;
+    }
+    try {
+      return await committedGatesConfig(this.deps.git, head);
+    } catch (error) {
+      if (error instanceof ConfigError) throw new EngineError("config", error.message);
+      throw error;
+    }
+  }
+
+  /** The hash of the working tree's `gates.yml` bytes (a restart without a kept copy), or `null`. */
+  private diskGatesSha(): string | null {
+    try {
+      return gatesConfigHash(readFileSync(join(this.deps.repoRoot, GATES_CONFIG_PATH)));
+    } catch {
+      return null;
+    }
   }
 
   private newRunId(): string {
@@ -1489,9 +1579,18 @@ export class Engine implements Kernel {
     });
   }
 
-  /** Stores a usage reading (statusline ingest, SDK events, Codex app-server; §6.9). */
-  ingestUsage(snapshot: UsageSnapshot): void {
-    const before = this.usage.get(snapshot.host);
+  /**
+   * Stores a usage reading (§6.9): statusline ingest, the adapter's `watchUsage` (Codex
+   * app-server), and the usage of an engine-launched run's stream. A stream's `sdk_event`
+   * snapshot (`parseEvents` is pure, so it carries `updated_at: null` and only the windows the
+   * stream reported) is merged into the host's stored snapshot by window kind (and model limits
+   * by model) and stamped with the receive time, so the statusline's other windows survive
+   * (spine §5 reading 67).
+   */
+  ingestUsage(incoming: UsageSnapshot): void {
+    const before = this.usage.get(incoming.host);
+    const snapshot =
+      incoming.source === "sdk_event" ? mergeSdkUsage(before, incoming, this.now()) : incoming;
     this.usage.set(snapshot.host, snapshot);
     if (!significant(before, snapshot)) return;
     const state = activeRun([...this.handles.values()].map((h) => h.state));

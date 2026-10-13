@@ -12,6 +12,7 @@ import {
   PACK_INPUT_TYPES,
   planDispatch,
   resolveRoleMode,
+  SESSION_DEFAULT_MODEL,
   type ArtifactRef,
   type EscalationAnswer,
   type Finding,
@@ -556,7 +557,8 @@ export const dispatchStep = (
     ...(step.task === undefined ? {} : { task: step.task, feature: task?.feature }),
     prompt_sha: k.deps.plugins.promptSha(agent, host),
     host,
-    model: model.model,
+    // D-ae: no resolved id means the host session's model, recorded as such
+    model: model.model ?? SESSION_DEFAULT_MODEL,
     data: {
       action_id: actionId,
       ...(step.mode === undefined ? {} : { mode: step.mode }),
@@ -574,7 +576,7 @@ export const dispatchStep = (
       ? []
       : k.deps.plugins.skillsFor(host, [...task.stack_packs, task.discipline]);
   const prompt = [
-    `VTC dispatch ${actionId}: you are ${agent} (model ${model.model}, effort ${model.effort}).`,
+    `VTC dispatch ${actionId}: you are ${agent} (${model.model === undefined ? "the session's model" : `model ${model.model}`}, effort ${model.effort}).`,
     `Work in: ${cwd}`,
     `Read your task pack: ${join(k.deps.repoRoot, pack)}`,
     ...(skills.length === 0 ? [] : [`Use these skills: ${skills.join(", ")}`]),
@@ -594,7 +596,7 @@ export const dispatchStep = (
     agent: k.deps.adapters[host]?.subagentName?.(agent) ?? agent,
     prompt: prompt.slice(0, 8000),
     background: capabilities?.backgroundSubagents ?? false,
-    model: model.model,
+    ...(model.model === undefined ? {} : { model: model.model }),
     ...(resume === undefined ? {} : { resume }),
   };
 };
