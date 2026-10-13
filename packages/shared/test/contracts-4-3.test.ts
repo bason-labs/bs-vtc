@@ -5,6 +5,7 @@ import { describe, expect, it } from "vitest";
 import {
   claudeSessionSandboxSettings,
   claudeSessionSandboxState,
+  VTC_HOME_SHELL_SPELLINGS,
   CODEX_IN_SESSION_REFUSED_REASON,
   CODEX_UNIX_CONNECT_BLOCKED_PLATFORMS,
   ENGINE_INSTANCE,
@@ -144,27 +145,108 @@ describe("the Lead session's Claude sandbox (D-an)", () => {
     expect(denyWrite.some((p) => p.startsWith("/work/app/.vtc/state/worktrees"))).toBe(false);
     expect(denyWrite).not.toContain("/work/app/.vtc/state");
   });
+  it("denies the file tools every path the sandbox denies the shell (reading 81)", () => {
+    const { sandbox, permissions } = claudeSessionSandboxSettings(HOME, SCOPE);
+    // the sandbox confines shell commands only; Read/Edit/Write follow permission rules
+    for (const path of sandbox.filesystem.denyRead) {
+      expect(permissions.deny, path).toContain(`Read(/${path})`);
+    }
+    for (const path of sandbox.filesystem.denyWrite) {
+      expect(permissions.deny, path).toContain(`Edit(/${path})`);
+      expect(permissions.deny, path).toContain(`Edit(/${path}/**)`);
+    }
+    expect(permissions.deny).toEqual(
+      expect.arrayContaining([
+        `Read(/${HOME}/token)`,
+        "Read(//home/u/.ssh)",
+        "Read(//home/u/.ssh/**)",
+        "Read(//home/u/.config/gh/**)",
+        "Read(//work/app/.vtc/state/checkouts/**)",
+        "Edit(//work/app/.vtc/project.yaml)",
+        "Bash(vtc calibrate)",
+        "Bash(vtc calibrate *)",
+        "Bash(*~/.vtc/token*)",
+        "Bash(*$VTC_HOME/run*)",
+      ]),
+    );
+    // a credential file is named only as a single-file rule (the D-ad exemption's form)
+    for (const file of hostCredentialDenyReadPaths(SCOPE.hostConfigDirs)) {
+      expect(permissions.deny).toContain(`Read(/${file})`);
+      expect(permissions.deny).not.toContain(`Read(/${file}/**)`);
+    }
+    // every rule is absolute (`//`), a Bash rule, never relative to the settings file
+    for (const rule of permissions.deny) expect(rule).toMatch(/^(Read\(\/\/|Edit\(\/\/|Bash\()/);
+    expect(new Set(permissions.deny).size).toBe(permissions.deny.length);
+  });
+  it("denies shell commands that name a guarded VTC home path, by every spelling, and not the project's .vtc/", () => {
+    // Claude Code Bash rules: `*` is any text; a trailing ` *` that is the only `*` also matches
+    // the bare command.
+    const escape = (text: string): string => text.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+    const matches = (rule: string, command: string): boolean => {
+      const body = /^Bash\((.*)\)$/.exec(rule)?.[1];
+      if (body === undefined) return false;
+      if (body.endsWith(" *") && body.indexOf("*") === body.length - 1) {
+        return new RegExp(`^${escape(body.slice(0, -2))}( .*)?$`).test(command);
+      }
+      return new RegExp(`^${body.split("*").map(escape).join(".*")}$`).test(command);
+    };
+    const { deny } = claudeSessionSandboxSettings(HOME, SCOPE).permissions;
+    const denied = (command: string): boolean => deny.some((rule) => matches(rule, command));
+    expect(VTC_HOME_SHELL_SPELLINGS).toEqual([
+      "~/.vtc",
+      "$HOME/.vtc",
+      "${HOME}/.vtc",
+      "$VTC_HOME",
+      "${VTC_HOME}",
+    ]);
+    for (const command of [
+      "cat ~/.vtc/token",
+      "base64 < $HOME/.vtc/token",
+      "nc -U ~/.vtc/run/abc.sock",
+      'echo \'{"client":"cli"}\' | socat - UNIX-CONNECT:${HOME}/.vtc/run/abc.sock',
+      "echo '{}' > ~/.vtc/allowlists/k.json",
+      "cp evil ~/.vtc/scanners/semgrep/semgrep",
+      "sed -i s/a/b/ $VTC_HOME/config.yaml",
+      "rm -rf ${VTC_HOME}/osv-db",
+      "tee ~/.vtc/claude-marketplace/plugins/vtc/hooks/hooks.json",
+      "vtc calibrate",
+      "vtc calibrate --yes",
+    ]) {
+      expect(denied(command), command).toBe(true);
+    }
+    for (const command of ["pnpm test", "cat .vtc/config.yaml", "ls .vtc/runs", "vtc status"]) {
+      expect(denied(command), command).toBe(false);
+    }
+  });
   it("is on only when every key and path is there", () => {
     const wanted = claudeSessionSandboxSettings(HOME, SCOPE);
     expect(claudeSessionSandboxState(wanted, HOME, SCOPE)).toEqual({ state: "on", missing: [] });
     expect(
-      claudeSessionSandboxState({ permissions: { allow: [] }, ...wanted, other: 1 }, HOME, SCOPE)
-        .state,
+      claudeSessionSandboxState(
+        {
+          ...wanted,
+          permissions: { allow: [], deny: ["Bash(x)", ...wanted.permissions.deny] },
+          other: 1,
+        },
+        HOME,
+        SCOPE,
+      ).state,
     ).toBe("on");
     const off = claudeSessionSandboxState(
-      { sandbox: { ...wanted.sandbox, enabled: false } },
+      { ...wanted, sandbox: { ...wanted.sandbox, enabled: false } },
       HOME,
       SCOPE,
     );
     expect(off).toEqual({ state: "off", missing: ["sandbox.enabled"] });
     const escape = claudeSessionSandboxState(
-      { sandbox: { ...wanted.sandbox, allowUnsandboxedCommands: true } },
+      { ...wanted, sandbox: { ...wanted.sandbox, allowUnsandboxedCommands: true } },
       HOME,
       SCOPE,
     );
     expect(escape.missing).toEqual(["sandbox.allowUnsandboxedCommands"]);
     const partial = claudeSessionSandboxState(
       {
+        ...wanted,
         sandbox: {
           ...wanted.sandbox,
           filesystem: {
@@ -182,6 +264,7 @@ describe("the Lead session's Claude sandbox (D-an)", () => {
     expect(partial.missing).toEqual([`${HOME}/run`, `${HOME}/hidden`, "/home/u/.ssh"]);
     // settings written before reading 79 (VTC-home denies only) read as off
     const older = {
+      ...wanted,
       sandbox: {
         ...wanted.sandbox,
         filesystem: {
@@ -191,32 +274,37 @@ describe("the Lead session's Claude sandbox (D-an)", () => {
       },
     };
     expect(claudeSessionSandboxState(older, HOME, SCOPE).state).toBe("off");
+    // settings written before reading 81 (sandbox lists only, no file-tool rules) read as off
+    const sandboxOnly = { sandbox: wanted.sandbox };
+    const before81 = claudeSessionSandboxState(sandboxOnly, HOME, SCOPE);
+    expect(before81.state).toBe("off");
+    expect(before81.missing).toEqual(wanted.permissions.deny);
     expect(claudeSessionSandboxState(null, HOME, SCOPE).state).toBe("unknown");
     expect(claudeSessionSandboxState("{}", HOME, SCOPE).state).toBe("unknown");
     expect(claudeSessionSandboxState({}, HOME, SCOPE).state).toBe("off");
   });
-  it("gates code-running roles in a Claude Code Lead session, and every Codex role off macOS", () => {
-    expect(inSessionDispatchAllowed("claude-code", "code_sandboxed", "on", "linux")).toBe(true);
-    for (const state of ["off", "unknown", undefined] as const) {
-      expect(inSessionDispatchAllowed("claude-code", "code_sandboxed", state, "darwin")).toBe(
-        false,
-      );
-      expect(inSessionDispatchRefusal("claude-code", "code_sandboxed", state, "darwin")).toBe(
-        SESSION_SANDBOX_OFF_REASON,
-      );
-      expect(inSessionDispatchAllowed("claude-code", "write_scoped", state, "linux")).toBe(true);
-      // Codex: the token is readable, so only where the network-off sandbox blocks the socket
-      for (const profile of ["read_only", "write_scoped", "code_sandboxed"] as const) {
-        expect(inSessionDispatchAllowed("codex", profile, state, "darwin")).toBe(true);
-        expect(inSessionDispatchRefusal("codex", profile, state, "linux")).toBe(
-          CODEX_IN_SESSION_REFUSED_REASON,
+  it("gates every role on the Lead session's settings, and refuses Codex roles in-session (readings 81, 82)", () => {
+    for (const profile of ["read_only", "write_scoped", "code_sandboxed"] as const) {
+      expect(inSessionDispatchAllowed("claude-code", profile, "on", "linux")).toBe(true);
+      for (const state of ["off", "unknown", undefined] as const) {
+        // the file-tool deny rules live in the session settings, not in the agent: no profile
+        // runs without them
+        expect(inSessionDispatchRefusal("claude-code", profile, state, "darwin")).toBe(
+          SESSION_SANDBOX_OFF_REASON,
         );
-        expect(inSessionDispatchAllowed("codex", profile, "on", "win32")).toBe(false);
-        expect(inSessionDispatchAllowed("codex", profile, "on", undefined)).toBe(false);
+      }
+      // a Codex agent inherits the Lead session's sandbox and network, which VTC cannot confirm
+      for (const state of ["on", "off", "unknown", undefined] as const) {
+        for (const platform of ["darwin", "linux", "win32", undefined]) {
+          expect(inSessionDispatchRefusal("codex", profile, state, platform)).toBe(
+            CODEX_IN_SESSION_REFUSED_REASON,
+          );
+        }
       }
     }
     expect(CODEX_UNIX_CONNECT_BLOCKED_PLATFORMS).toEqual(["darwin"]);
     expect(SESSION_SANDBOX_OFF_REASON).toContain("vtc install --host claude-code");
+    expect(CODEX_IN_SESSION_REFUSED_REASON).toMatch(/cannot narrow them/);
   });
   it("a run starts only on a committed project.yaml (reading 79)", () => {
     expect(PROJECT_CONFIG_FILE).toBe(".vtc/project.yaml");

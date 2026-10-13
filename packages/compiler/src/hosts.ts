@@ -5,18 +5,14 @@
  * comes from tool allowlists, the Codex sandbox, the OS sandbox and the engine's write-scope check.
  */
 import {
-  engineMcpServer,
-  HOST_CREDENTIAL_DENY_READ,
   humanChannelRequired,
   isHumanOnlyTool,
   HUMAN_ONLY_TOOLS,
-  REPO_ROLE_DENIED,
-  ROLE_DENIED_VTC,
   type ModelTier,
   type RoleTools,
 } from "@vtc/shared";
 import { renderFrontmatter } from "./frontmatter.js";
-import { tomlMultiline, tomlString, tomlStringArray } from "./toml.js";
+import { tomlMultiline, tomlString } from "./toml.js";
 import type { CompiledAgent } from "./types.js";
 
 /**
@@ -67,168 +63,91 @@ export const claudeToolsFor = (tools: RoleTools): string[] => [
   ...roleEngineTools(tools).map(claudeEngineToolName),
 ];
 
-/** A guarded glob under the VTC home without its trailing `/**`: the path a command names. */
-const homeRoot = (glob: string): string => glob.replace(/\/\*\*$/, "");
-
 /**
- * How a shell command may spell a path under the default VTC home, or under `$VTC_HOME` (the
- * cli's override, `project-config.ts`). Claude Code matches a Bash rule against the command text
- * as written, so each spelling needs its own rule.
+ * What every Claude Code role agent's frontmatter `disallowedTools` names: every human-only
+ * engine tool (`HUMAN_ONLY_TOOLS`) by its plugin name, on top of the `tools` allowlist that
+ * never names one (D-an, spine §5 reading 71). Bare tool names only (spine §5 reading 81): in
+ * subagent frontmatter an entry with a specifier, such as `Bash(vtc calibrate *)` or
+ * `Read(~/.vtc/token)`, removes the whole tool, not the matching calls
+ * (code.claude.com/docs/en/sub-agents, "disallowedTools"), and with `--agent` the main thread
+ * takes on the same restriction. The path and command rules that used to sit here (the VTC home,
+ * the Codex home, the repo's gate files, `vtc calibrate`, the shell spellings of the home) are
+ * `permissions.deny` rules now: in the Lead session's `.claude/settings.local.json`, which
+ * `vtc install` writes (`claudeSessionPermissionDeny`, absolute paths, so they also cover a
+ * `$VTC_HOME` elsewhere), and in a headless run's `--settings` (the adapter's profile).
  */
-export const VTC_HOME_SHELL_SPELLINGS: readonly string[] = [
-  "~/.vtc",
-  "$HOME/.vtc",
-  "${HOME}/.vtc",
-  "$VTC_HOME",
-  "${VTC_HOME}",
-];
+export const CLAUDE_DENIED_TOOLS: readonly string[] = HUMAN_ONLY_TOOLS.map(claudeEngineToolName);
 
-/**
- * Shell-level denies for every guarded VTC home path, read or write (D-an, D-ap; spine §5
- * readings 71 and 73): `Bash(*<home>/<path>*)` for each path in `ROLE_DENIED_VTC.homeWriteDeny`
- * and `homeReadDeny` and each {@link VTC_HOME_SHELL_SPELLINGS} spelling. In a Claude Code Bash
- * rule `*` matches any text, so any command that names one of those paths is refused, whatever
- * the program. The `Read`/`Edit`/`Write` rules already cover the file commands Claude Code
- * recognises (`cat`, `sed`, `tee`, redirections); these catch the rest that name the path
- * (`cp`, `nc -U`, `socat`, a script given the path). They are best effort by construction: a
- * command that reaches the path without naming it (`cd ~/.vtc && cat token`, a script that
- * builds the path itself, an absolute `/Users/<me>/.vtc`) is not matched. The barrier for a
- * code-running role in-session is the Lead session's own sandbox, which `vtc install` writes and
- * the engine requires before such a dispatch (`claudeSessionSandboxSettings`,
- * `inSessionDispatchAllowed`); the remainder is the spine §7 residual "Plugin-only in-session
- * roles". A role never needs a shell on these paths, so the rules cost no legitimate command.
- * They name only VTC-home spellings, never a bare `.vtc/`, so the project's own `.vtc/` (its
- * `config.yaml`, `runs/`, `state/`) stays reachable.
- */
-export const CLAUDE_SHELL_HOME_DENIES: readonly string[] = [
-  ...new Set([...ROLE_DENIED_VTC.homeWriteDeny, ...ROLE_DENIED_VTC.homeReadDeny].map(homeRoot)),
-].flatMap((root) => VTC_HOME_SHELL_SPELLINGS.map((home) => `Bash(*${home}/${root}*)`));
-
-/**
- * What every Claude Code role agent is denied, whatever its profile (D-w, spine §5 reading 43;
- * D-an and D-ap, readings 71 and 73), in this order:
- * - running each `ROLE_DENIED_VTC` subcommand of `vtc`;
- * - file writes (`Edit`, `Write`) to each `ROLE_DENIED_VTC.homeWriteDeny` glob under the VTC home;
- * - reads of each `ROLE_DENIED_VTC.homeReadDeny` glob (the install token, the daemons' sockets,
- *   the hidden acceptance tests, §7.3) and of the Codex home: in plugin-only mode (AD-17) no
- *   adapter sandbox profile is built, so the agent carries its own read denies;
- * - reads of the repo's engine gate files and writes to them and to the run config
- *   (`REPO_ROLE_DENIED`, spine §5 reading 79: the verification checkouts hold the hidden tests
- *   during a gate run, the raw gate output what hidden runs printed). The paths are relative to
- *   the session's directory with a leading `**` so any checkout depth matches; the absolute,
- *   shell-proof form is in the Lead session's sandbox (`claudeSessionSandboxSettings`);
- * - {@link CLAUDE_SHELL_HOME_DENIES}, the shell-level denies for those paths;
- * - every human-only engine tool (`HUMAN_ONLY_TOOLS`) by its plugin name, on top of the `tools`
- *   allowlist that never names one.
- * Claude's own credential file is not named here: an emitted plugin file may not carry a
- * credential marker (AD-9; the D-ad exemption covers only the host settings VTC writes), so in
- * this mode it rests on the Lead session's sandbox, whose settings (`vtc install`) read-deny both
- * hosts' credential files and the home credential stores (spine §5 reading 79). The file rules name the
- * default homes `~/.vtc/` and `~/.codex/`; a `$VTC_HOME` or `$CODEX_HOME` elsewhere is not known
- * when the plugin is compiled, and the session sandbox (in-session) or the adapter's sandbox
- * profile (headless), which resolve them, stay the barrier. A read-only agent has none of the
- * write tools, but gets the same list so no agent depends on its allowlist alone.
- */
-export const CLAUDE_DENIED_TOOLS: readonly string[] = [
-  ...ROLE_DENIED_VTC.subcommands.map((sub) => `Bash(vtc ${sub}:*)`),
-  ...ROLE_DENIED_VTC.homeWriteDeny.flatMap((glob) =>
-    ["Edit", "Write"].map((tool) => `${tool}(~/.vtc/${glob})`),
-  ),
-  ...ROLE_DENIED_VTC.homeReadDeny.map((glob) => `Read(~/.vtc/${glob})`),
-  `Read(~/${HOST_CREDENTIAL_DENY_READ.codex.defaultConfigDir}/**)`,
-  ...REPO_ROLE_DENIED.readDeny.map((glob) => `Read(**/${glob})`),
-  ...REPO_ROLE_DENIED.writeDeny.flatMap((glob) =>
-    ["Edit", "Write"].map((tool) => `${tool}(**/${glob})`),
-  ),
-  ...CLAUDE_SHELL_HOME_DENIES,
-  ...HUMAN_ONLY_TOOLS.map(claudeEngineToolName),
-];
-
-/** Where the file-path denies of {@link CLAUDE_DENIED_TOOLS} end (its shell denies follow). */
-export const CLAUDE_HOME_FILE_DENIES_END: number =
-  ROLE_DENIED_VTC.subcommands.length +
-  2 * ROLE_DENIED_VTC.homeWriteDeny.length +
-  ROLE_DENIED_VTC.homeReadDeny.length +
-  1 +
-  REPO_ROLE_DENIED.readDeny.length +
-  2 * REPO_ROLE_DENIED.writeDeny.length;
+/** A frontmatter tool list entry is a bare tool name: a specifier would remove the whole tool. */
+const assertBareToolNames = (field: string, entries: readonly string[]): readonly string[] => {
+  const scoped = entries.find((e) => /[()]/.test(e));
+  if (scoped !== undefined) {
+    throw new TypeError(
+      `agent frontmatter ${field} may name only bare tools; ${scoped} would remove the whole tool (put path and command rules in permissions.deny)`,
+    );
+  }
+  return entries;
+};
 
 export const renderClaudeAgent = (agent: CompiledAgent): string =>
   renderFrontmatter(
     {
       name: agent.name,
       description: agent.description,
-      tools: claudeToolsFor(agent.tools).join(", "),
-      disallowedTools: CLAUDE_DENIED_TOOLS.join(", "),
+      tools: assertBareToolNames("tools", claudeToolsFor(agent.tools)).join(", "),
+      disallowedTools: assertBareToolNames("disallowedTools", CLAUDE_DENIED_TOOLS).join(", "),
       model: agent.model.model ?? CLAUDE_MODEL_ALIASES[agent.model.tier],
       effort: agent.model.effort,
     },
     agent.instructions,
   );
 
-/** Codex sandbox per profile; reviewers stay read-only (§12.1 "sandbox_mode per agent"). */
-export const codexSandboxFor = (tools: RoleTools): "read-only" | "workspace-write" =>
-  tools.profile === "read_only" ? "read-only" : "workspace-write";
+/**
+ * The Codex `[features]` a role agent turns off (spine §5 reading 82). A Codex custom agent file
+ * cannot set `sandbox_mode`, `approval_policy` or `mcp_servers`: "They inherit the parent's
+ * permissions, provider, and MCP servers; a custom agent file can't override those settings"
+ * (developers.openai.com/codex/subagents, "Custom agents"). The only per-agent reductions it
+ * offers are `features.<key> = false` (`shell_tool`, `apps`, `plugins`, `memories`,
+ * `request_permissions_tool`) and `skills.*`. So a role agent turns off what its profile does not
+ * need: the shell for every role but the Engineer family (Claude's `Bash` allowlist), and the
+ * permission-request tool for every role (no role asks the human for a wider sandbox). The
+ * sandbox, the network and the engine bridge a Codex role gets are the parent session's; that is
+ * why the engine dispatches no Codex role in-session (`inSessionDispatchRefusal`) until the
+ * session's own sandbox is shown network-off.
+ */
+export const codexFeaturesFor = (tools: RoleTools): Readonly<Record<string, false>> => ({
+  ...(tools.profile === "code_sandboxed" ? {} : { shell_tool: false }),
+  request_permissions_tool: false,
+});
 
 /**
- * The agent's own `[mcp_servers.vtc]` table. The plugin registers the engine bridge for the whole
- * session, and it serves the Lead's run-driving tools; a role agent must not reach them (AD-8
- * rule 3: not a prompt rule). A role with no engine tools gets the server disabled, otherwise only
- * its tools enabled. The entry repeats the full `engineMcpServer("codex")` command so it is valid
- * whether Codex merges or replaces the session's entry. A human-only tool never reaches
- * `enabled_tools` (D-an: it throws). Unverified: whether spawned Codex agents honour a per-agent
- * `mcp_servers` table is the spine §7 spike row "Codex per-agent MCP isolation"; until it passes,
- * the engine's Lead-only and human-channel checks (reading 71) are the other barrier on Codex.
+ * A Codex agent file: `name`, `description`, `developer_instructions` (required), the reasoning
+ * effort, and `[features]` ({@link codexFeaturesFor}). It sets only `model_reasoning_effort`,
+ * never a model (spine §5 readings 26 and 51, D-h, D-ae): the engine is the only model resolver,
+ * its built-in Codex map names no ids until the spike does, and `spawn_role.model` is then
+ * absent, so every Codex agent runs on the session's model and `role.yaml` may not pin one for
+ * Codex (`codexModelErrors`).
+ *
+ * No `sandbox_mode`, `[sandbox_workspace_write]` or `[mcp_servers]` (spine §5 reading 82): Codex
+ * ignores them in a custom agent file and the agent inherits the parent session's, so emitting
+ * them would only suggest a barrier that is not there. The engine's Lead-only and human-channel
+ * checks (reading 71) are the barrier on the bridge; a headless `codex exec` role run sets its
+ * sandbox with `-c` overrides (the adapter's profile).
  */
-export const codexMcpTable = (tools: RoleTools): string[] => {
-  const entry = engineMcpServer("codex");
-  const engineTools = roleEngineTools(tools);
+export const renderCodexAgent = (agent: CompiledAgent): string => {
+  // a human-only engine tool in a role contract is refused on this host too (D-an)
+  roleEngineTools(agent.tools);
   return [
-    `[mcp_servers.${entry.name}]`,
-    `command = ${tomlString(entry.command)}`,
-    `args = ${tomlStringArray(entry.args)}`,
-    engineTools.length === 0
-      ? "enabled = false"
-      : `enabled_tools = ${tomlStringArray(engineTools)}`,
-  ];
-};
-
-/** The table every Codex agent carries: no network for its sandbox (spine §5 reading 79). */
-export const CODEX_AGENT_NETWORK_OFF: readonly string[] = [
-  "[sandbox_workspace_write]",
-  "network_access = false",
-];
-
-/**
- * A Codex agent file. It sets only `model_reasoning_effort`, never a model (spine §5 readings 26
- * and 51, D-h, D-ae): the engine is the only model resolver, its built-in Codex map names no ids
- * until the spike does, and `spawn_role.model` is then absent, so every Codex agent runs on the
- * session's model and `role.yaml` may not pin one for Codex (`codexModelErrors`).
- *
- * The VTC guard rails (D-w, `ROLE_DENIED_VTC`) cannot be named per agent on Codex: a command
- * deny is a session-level execpolicy rule, not an agent key. The barrier is the sandbox: a
- * read-only or workspace-write `sandbox_mode` with no writable roots of its own keeps the VTC
- * home outside every role's writes, `vtc calibrate`'s included; the adapter's sandbox profile
- * covers the rest. Every key is a Codex config key, so whichever way the headless role identity
- * spike loads a role (`codex exec` has no `--agent`), this file carries over as is.
- *
- * Every agent pins `[sandbox_workspace_write] network_access = false` ({@link
- * CODEX_AGENT_NETWORK_OFF}; spine §5 reading 79), so it never inherits a network the user's own
- * Codex config opens: a Codex role can read the VTC install token, and only the network-off
- * sandbox is shown (macOS) to keep it from the engine's socket. A read-only agent has no network
- * either way; the table is there so no agent depends on its mode alone.
- */
-export const renderCodexAgent = (agent: CompiledAgent): string =>
-  [
     `# Generated by @vtc/compiler from roles/${agent.role}${agent.mode === undefined ? "" : ` (mode ${agent.mode})`} v${agent.roleVersion}. Do not edit.`,
     `name = ${tomlString(agent.name)}`,
     `description = ${tomlString(agent.description)}`,
     `model_reasoning_effort = ${tomlString(agent.model.effort)}`,
-    `sandbox_mode = ${tomlString(codexSandboxFor(agent.tools))}`,
     `developer_instructions = ${tomlMultiline(agent.instructions)}`,
     "",
-    ...CODEX_AGENT_NETWORK_OFF,
-    "",
-    ...codexMcpTable(agent.tools),
+    "[features]",
+    ...Object.entries(codexFeaturesFor(agent.tools)).map(
+      ([key, value]) => `${key} = ${String(value)}`,
+    ),
     "",
   ].join("\n");
+};

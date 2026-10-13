@@ -55,6 +55,14 @@ export interface GateSandboxSpec {
    * locations (`hostCredentialDenyReadPaths` and the host config directories). Never opened.
    */
   readonly denyRead: readonly string[];
+  /**
+   * Verify phase only (D-av, spine §5 reading 84): the test suite may open sockets to the
+   * loopback (127.0.0.1 / ::1) and nothing else, as `.vtc/gates.yml` `sandbox.verify_loopback`
+   * records after the human said so at `vtc calibrate`'s confirmation. The macOS profile honours
+   * it; on Linux bwrap's private network namespace already has a loopback of its own. The install
+   * phase never reaches the host loopback. New in contracts 4.4.0.
+   */
+  readonly loopback?: boolean;
 }
 
 /** The argv to spawn instead of the gate's own, and the network it really gets. */

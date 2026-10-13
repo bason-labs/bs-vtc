@@ -267,7 +267,10 @@ export const checkEnvPassthrough = (read: UserConfigRead): DoctorCheck => {
 };
 
 /** What `vtc doctor` reports about the gate sandbox: the Gate Runner's own detection. */
-export type GateSandboxReport = Pick<gates.GateSandboxDetection, "kind" | "detail" | "reason">;
+export type GateSandboxReport = Pick<
+  gates.GateSandboxDetection,
+  "kind" | "detail" | "reason" | "warning"
+>;
 
 /**
  * The OS sandbox gate commands run in on this machine (D-al, spine §5 reading 69). This is the
@@ -278,8 +281,13 @@ export type GateSandboxReport = Pick<gates.GateSandboxDetection, "kind" | "detai
 export const detectGateSandbox = (
   options: gates.DetectGateSandboxOptions = {},
 ): GateSandboxReport => {
-  const { kind, detail, reason } = gates.detectGateSandbox(options);
-  return reason === undefined ? { kind, detail } : { kind, detail, reason };
+  const { kind, detail, reason, warning } = gates.detectGateSandbox(options);
+  return {
+    kind,
+    detail,
+    ...(reason === undefined ? {} : { reason }),
+    ...(warning === undefined ? {} : { warning }),
+  };
 };
 
 /**
@@ -294,6 +302,13 @@ export const checkGateSandbox = (
   const name = "gate sandbox";
   const optIn = config !== null && allowUnsandboxedOf(config);
   const where = config?.path ?? "~/.vtc/config.yaml";
+  if (kind !== null && found.warning !== undefined && !optIn)
+    // D-aw: Linux without pasta runs verify-phase gates; install-phase ones park as infra
+    return {
+      name,
+      status: "warn",
+      detail: `gate commands run in ${found.detail}: ${found.warning}`,
+    };
   if (kind !== null)
     return optIn
       ? {

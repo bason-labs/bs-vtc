@@ -399,6 +399,14 @@ describe("Claude sandboxProfile (§12.1, AD-9)", () => {
     ]);
   });
 
+  it("every role's sandbox fails closed when it cannot start, instead of running Bash unsandboxed", () => {
+    // code.claude.com settings: without failIfUnavailable, a sandbox that cannot start runs
+    // commands unsandboxed
+    for (const role of [ENGINEER, WRITE_SCOPED, READ_ONLY]) {
+      expect(profile(role).settings).toMatchObject({ sandbox: { failIfUnavailable: true } });
+    }
+  });
+
   it("engineers get Bash inside the OS sandbox, with no unsandboxed escape", () => {
     const p = profile(ENGINEER);
     expect(argAfter(p.cliArgs, "--allowedTools")?.split(",")).toContain("Bash");

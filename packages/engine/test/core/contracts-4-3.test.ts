@@ -45,7 +45,6 @@ import {
   SPEC_ONE,
   submitResult,
   throughPlan,
-  toPlanner,
   workdir,
   worktreeOf,
   type Harness,
@@ -305,61 +304,36 @@ describe(
       expect(h.engine.status({}).parked).toEqual([]);
       await h.release();
     });
-    it("write_scoped and read_only roles run in-session with the sandbox off", async () => {
-      const h = createHarness();
-      const off = sandboxed("off");
-      await start(h, off);
-      const carto = only(await next(h, off), "repo_cartographer");
-      writeFile(workdir(carto), ".vtc/research/repo-map/map.md", "# map\n");
-      const out = await submitResult(
-        h,
-        carto,
-        { exit: "done", artifacts: [{ type: "repo_map", path: ".vtc/research/repo-map/map.md" }] },
-        0.1,
-        off,
-      );
-      expect(only(out.actions, "ba").role).toBe("ba");
-      expect(h.engine.status({}).parked).toEqual([]);
-      await h.release();
+    it("read_only and write_scoped roles also need the Lead session's settings on (reading 81)", async () => {
+      // their Read/Edit/Write path denies are the session's permissions.deny, not the agent's
+      for (const state of ["off", undefined] as const) {
+        const h = createHarness();
+        const call = sandboxed(state);
+        await start(h, call);
+        expect(spawns(await next(h, call))).toEqual([]);
+        const escalation = events(h).findLast((e) => e.type === "escalation.opened");
+        expect(escalation?.data).toMatchObject({
+          escalation: { reason: "blocked", detail: SESSION_SANDBOX_OFF_REASON },
+        });
+        expect(events(h).some((e) => e.type === "role.dispatched")).toBe(false);
+        await h.release();
+      }
     });
-    it("a QA author (write_scoped) is dispatched with the sandbox off", async () => {
-      const h = createHarness();
-      const planner = await toPlanner(h, SPEC_ONE);
-      const out = await submitResult(
-        h,
-        planner,
-        { exit: "done", tasks: [draft("T-1")] as never },
-        0.1,
-        sandboxed("off"),
-      );
-      expect(out.accepted).toBe(true);
-      await h.engine.settle();
-      expect(only(await next(h, sandboxed("off")), "qa").task).toBe("T-1");
-      await h.release();
-    });
-    it("codex off macOS: no Codex role runs in-session; the task parks with the reason (reading 79)", async () => {
-      const h = createHarness({ platform: "linux" });
-      await start(h, sandboxed("on", "codex"));
-      expect(await next(h, sandboxed("on", "codex"))).toEqual([
-        { type: "ask_human", escalations: ["E-1"] },
-      ]);
-      const escalation = events(h).findLast((e) => e.type === "escalation.opened");
-      expect(escalation?.data).toMatchObject({
-        escalation: { reason: "blocked", detail: CODEX_IN_SESSION_REFUSED_REASON },
+    for (const platform of ["linux", "darwin"] as const) {
+      it(`codex on ${platform}: no Codex role runs in-session; the task parks with the reason (reading 82)`, async () => {
+        const h = createHarness({ platform });
+        await start(h, sandboxed("on", "codex"));
+        expect(await next(h, sandboxed("on", "codex"))).toEqual([
+          { type: "ask_human", escalations: ["E-1"] },
+        ]);
+        const escalation = events(h).findLast((e) => e.type === "escalation.opened");
+        expect(escalation?.data).toMatchObject({
+          escalation: { reason: "blocked", detail: CODEX_IN_SESSION_REFUSED_REASON },
+        });
+        expect(events(h).some((e) => e.type === "role.dispatched")).toBe(false);
+        await h.release();
       });
-      expect(events(h).some((e) => e.type === "role.dispatched")).toBe(false);
-      await h.release();
-    });
-    it("codex on macOS: an Engineer runs as a Codex subagent with its own sandbox_mode, whatever the session reports", async () => {
-      const h = createHarness();
-      const actions = await toQaSubmit(h, sandboxed("off", "codex"));
-      expect(only(actions, "engineer").task).toBe("T-1");
-      expect(events(h).findLast((e) => e.type === "role.dispatched")).toMatchObject({
-        role: "engineer",
-        host: "codex",
-      });
-      await h.release();
-    });
+    }
     it("refuses to consult an advisor with a shell from an unsandboxed Lead session", async () => {
       const shelled = ALL_FIXTURE_ROLES.map((r) =>
         r.id === "advisor_estimator"
@@ -370,7 +344,7 @@ describe(
       await start(h, sandboxed("off"));
       const ask = (call: CallContext) =>
         h.engine.consult({ advisor: "advisor_estimator", question: "How long?", inputs: [] }, call);
-      await expect(ask(sandboxed("off"))).rejects.toThrow(/sandbox is not on/);
+      await expect(ask(sandboxed("off"))).rejects.toThrow(/deny rules are not on/);
       await expect(ask(sandboxed(undefined))).rejects.toMatchObject({ code: "conflict" });
       expect((await ask(CLAUDE)).action.role).toBe("advisor_estimator");
       await h.release();
@@ -697,20 +671,24 @@ describe(
     });
     it("notes 'model unknown' in the run summary for runs on the session's default model", async () => {
       const h = createHarness();
-      await start(h, { host: "codex" });
-      const carto = only(await next(h, { host: "codex" }), "repo_cartographer");
+      await start(h, CLAUDE);
+      const carto = only(await next(h, CLAUDE), "repo_cartographer");
       writeFile(workdir(carto), ".vtc/research/repo-map/map.md", "# map\n");
       await submitResult(
         h,
         carto,
         { exit: "done", artifacts: [{ type: "repo_map", path: ".vtc/research/repo-map/map.md" }] },
         0.4,
-        { host: "codex" },
+        CLAUDE,
         SESSION_DEFAULT_MODEL,
       );
       const run = h.engine.status({}).run.id;
       const state = h.engine.states().at(-1);
       if (state === undefined) throw new Error("no run");
+      // a Codex role run has no resolved model id (D-ae); Codex roles no longer run in-session
+      // (reading 82), so the run is recorded as one here
+      for (const r of state.roleRuns.values())
+        (r as { model: string }).model = SESSION_DEFAULT_MODEL;
       writeRunSummary(h.repo, state, [], []);
       const summary = readFileSync(join(h.repo, `.vtc/runs/${run}/summary.md`), "utf8");
       expect(summary).toContain("model unknown");

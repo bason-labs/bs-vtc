@@ -194,6 +194,22 @@ describe("Claude install (AD-6 rule 5, AD-16 rule 4)", () => {
     });
   });
 
+  it("puts the local marketplace under the request's VTC home, where the role deny lists point (reading 83)", async () => {
+    const env = setup();
+    const vtcHome = temp("vtc-vtchome-");
+    const result = await createClaudeCodeAdapter().install({ ...env, vtcHome, scope: "user" });
+    const marketplace = join(vtcHome, "claude-marketplace");
+    expect(existsSync(join(marketplace, "plugins/vtc/agents/vtc-qa-judge.md"))).toBe(true);
+    expect(existsSync(join(env.home, ".vtc", "claude-marketplace"))).toBe(false);
+    for (const path of result.written.filter((p) => !p.includes(".claude"))) {
+      expect(path.startsWith(marketplace), path).toBe(true);
+    }
+    const settings = readJson(join(env.home, ".claude", "settings.json"));
+    expect(settings.extraKnownMarketplaces).toEqual({
+      "vtc-local": { source: { source: "directory", path: marketplace } },
+    });
+  });
+
   it("installs both scopes and keeps the local marketplace under the request's home (reading 60, D-ah)", async () => {
     for (const scope of ["user", "project"] as const) {
       const env = setup();

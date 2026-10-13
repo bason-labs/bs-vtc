@@ -178,6 +178,42 @@ describe("the macOS sandbox-exec profile", () => {
     ]);
     // The engine socket (~/.vtc/run), agent sockets and Docker are Unix sockets: none is reachable.
     expect(rules).not.toContain("(allow network-outbound)");
+    // Nor is the host's loopback (the engine's API, the prototype origin, local databases): the
+    // deny follows the allow, so it wins (Linux: pasta maps no loopback).
+    const allowIp = rules.indexOf("(allow network-outbound (remote ip))");
+    const denyLoopback = rules.indexOf('(deny network-outbound (remote ip "localhost:*"))');
+    expect(denyLoopback).toBeGreaterThan(allowIp);
+  });
+
+  it("gives the verify phase no IP socket at all by default (D-av)", () => {
+    const rules = rulesOf(sandboxExecProfile(spec(), same).profile);
+    expect(rules.filter((r) => r.includes("remote ip") || r.includes("local ip"))).toEqual([]);
+    expect(rules).not.toContain("(allow system-socket)");
+  });
+
+  it("with gates.yml sandbox.verify_loopback, the verify phase reaches the loopback only (D-av)", () => {
+    const wrapped = createSandboxExecSandbox({ realpath: same }).wrap(["node", "test.mjs"], {
+      ...spec(),
+      loopback: true,
+    });
+    expect(wrapped.network).toBe("none");
+    const rules = rulesOf(wrapped.args[1] ?? "");
+    const network = rules.filter((r) => /^\((allow|deny) (network|system-socket)/.test(r));
+    expect(network).toEqual([
+      "(allow system-socket)",
+      '(allow network-outbound (remote ip "localhost:*"))',
+      '(allow network-bind network-inbound (local ip "localhost:*"))',
+      ...["CHECKOUT", "TEMP", "HOME"].flatMap((k) => [
+        `(allow network-bind network-inbound (local unix-socket (subpath (param "${k}"))))`,
+        `(allow network-outbound (remote unix-socket (subpath (param "${k}"))))`,
+      ]),
+    ]);
+    expect(rules).not.toContain("(allow network-outbound (remote ip))");
+    // the install phase ignores it: it never reaches the host loopback
+    const install = rulesOf(
+      sandboxExecProfile({ ...spec({ phase: "install" }), loopback: true }, same).profile,
+    );
+    expect(install).toContain('(deny network-outbound (remote ip "localhost:*"))');
   });
 
   it("writes only the checkout, temp and home, /dev/null and /dev/zero and its own descriptors, never a terminal", () => {
@@ -520,25 +556,33 @@ describe("detection (vtc doctor)", () => {
     expect(wrapped?.command).toBe("/opt/bin/pasta");
   });
 
-  it("reports no sandbox on Linux without pasta: the install phase would share the host's network namespace", () => {
+  it("on Linux without pasta, verify-phase gates still run in bwrap and only install-phase gates refuse (D-aw)", () => {
     const noPasta = detectGateSandbox({
       platform: "linux",
       env: { PATH: "/usr/bin" },
       exists: (p) => p === "/usr/bin/bwrap",
       probe: () => true,
     });
-    expect(noPasta.kind).toBeNull();
-    expect(noPasta.sandbox).toBeNull();
-    expect(noPasta.detail).toContain(GATE_SANDBOX.noSandboxReason);
-    expect(noPasta.detail).toMatch(/pasta/);
+    expect(noPasta.kind).toBe("bwrap");
+    expect(noPasta.warning).toMatch(/pasta/);
+    expect(noPasta.warning).toMatch(/install-phase gates/);
+    const sandbox = noPasta.sandbox;
+    if (sandbox === null) throw new Error("expected a sandbox");
+    expect(sandbox.wrap(["x"], spec()).command).toBe("/usr/bin/bwrap");
+    expect(() =>
+      sandbox.wrap(["pnpm", "install"], {
+        ...spec({ phase: "install" }),
+        resolvConf: "/tmp/vtc-gate-1/resolv.conf",
+      } as GateJailSpec),
+    ).toThrow(/pasta/);
     const pastaBroken = detectGateSandbox({
       platform: "linux",
       env: { PATH: "/usr/bin" },
       exists: (p) => p === "/usr/bin/bwrap" || p === "/usr/bin/pasta",
       probe: (argv) => argv[0] === "/usr/bin/bwrap",
     });
-    expect(pastaBroken.kind).toBeNull();
-    expect(pastaBroken.detail).toMatch(/pasta/);
+    expect(pastaBroken.kind).toBe("bwrap");
+    expect(pastaBroken.warning).toMatch(/pasta/);
   });
 
   it("reports no sandbox, with the visible reason, when the tool is missing or cannot start", () => {

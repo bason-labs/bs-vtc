@@ -159,13 +159,11 @@ describe("compilePlugins: agent instructions", () => {
     expect(claude("vtc-engineer")).not.toContain("run no shell command");
   });
 
-  it("disables the engine bridge inside every Codex role agent (no Lead tools)", () => {
+  it("sets no per-agent MCP table in a Codex role agent: Codex would ignore it (reading 82)", () => {
     for (const name of ["vtc-qa-author", "vtc-engineer", "vtc-lens-db"]) {
       const toml = parseToml(file(output, "codex", `agents/${name}.toml`));
-      const entry = engineMcpServer("codex");
-      expect(toml.mcp_servers).toEqual({
-        [entry.name]: { command: entry.command, args: entry.args, enabled: false },
-      });
+      expect(toml.mcp_servers).toBeUndefined();
+      expect(toml.sandbox_mode).toBeUndefined();
     }
   });
 
@@ -209,7 +207,7 @@ describe("compilePlugins: agent instructions", () => {
   it("uses each host's model settings", () => {
     const toml = parseToml(file(output, "codex", "agents/vtc-engineer.toml"));
     expect(toml.model_reasoning_effort).toBe("high");
-    expect(toml.sandbox_mode).toBe("workspace-write");
+    expect(toml.features).toEqual({ request_permissions_tool: false });
     expect(file(output, "claude-code", "agents/vtc-engineer.md")).toContain("effort: medium");
   });
 });

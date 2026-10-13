@@ -69,9 +69,11 @@ describe("the session sandbox needs sandbox.failIfUnavailable", () => {
   it("is part of what vtc install writes, on top of the shared settings", () => {
     const vtcHome = "/home/u/.vtc";
     const scope = sandboxScopeOf("/r", { homeDir: "/home/u" });
-    const shared = claudeSessionSandboxSettings(vtcHome, scope).sandbox;
+    const shared = claudeSessionSandboxSettings(vtcHome, scope);
     expect(sessionSandboxSettings(vtcHome, scope)).toEqual({
-      sandbox: { ...shared, failIfUnavailable: true },
+      sandbox: { ...shared.sandbox, failIfUnavailable: true },
+      // the file tools follow permission rules, not the sandbox (reading 81)
+      permissions: shared.permissions,
     });
     expect(
       mergeSessionSandboxSettings({}, vtcHome, { projectRoot: "/r", homeDir: "/home/u" }),
@@ -85,6 +87,7 @@ describe("the session sandbox needs sandbox.failIfUnavailable", () => {
     expect(report.state).toBe("off");
     expect(report.missing).toEqual(["sandbox.failIfUnavailable"]);
     write(CLAUDE_LOCAL_SETTINGS, {
+      ...sessionSandboxSettings(vtcHome, sandboxScopeOf(repo, env)),
       sandbox: {
         ...sessionSandboxSettings(vtcHome, sandboxScopeOf(repo, env)).sandbox,
         failIfUnavailable: false,
@@ -256,12 +259,14 @@ describe("settings that widen the sandbox turn it off", () => {
       vtcHome,
       paths,
     );
-    const wanted = sessionSandboxSettings(
-      vtcHome,
-      sandboxScopeOf(paths.projectRoot, paths),
-    ).sandbox;
+    const settings = sessionSandboxSettings(vtcHome, sandboxScopeOf(paths.projectRoot, paths));
+    const wanted = settings.sandbox;
     expect(merged).toEqual({
-      permissions: { allow: ["Bash(ls)"], additionalDirectories: ["/data"] },
+      permissions: {
+        allow: ["Bash(ls)"],
+        additionalDirectories: ["/data"],
+        deny: settings.permissions.deny,
+      },
       sandbox: {
         enabled: true,
         allowUnsandboxedCommands: false,
@@ -657,11 +662,10 @@ describe("fix round 2: sandbox keys VTC does not know to be safe turn it off", (
       vtcHome,
       paths,
     );
-    const wanted = sessionSandboxSettings(
-      vtcHome,
-      sandboxScopeOf(paths.projectRoot, paths),
-    ).sandbox;
+    const settings = sessionSandboxSettings(vtcHome, sandboxScopeOf(paths.projectRoot, paths));
+    const wanted = settings.sandbox;
     expect(merged).toEqual({
+      permissions: { deny: settings.permissions.deny },
       sandbox: {
         autoAllowBashIfSandboxed: true,
         enabled: true,

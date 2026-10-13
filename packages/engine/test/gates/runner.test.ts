@@ -1293,6 +1293,22 @@ process.exit(problems.length === 0 ? 0 : 1);
     expect(existsSync(h.specs[0]?.home ?? "")).toBe(false);
   });
 
+  it("passes gates.yml sandbox.verify_loopback to verify-phase commands only (D-av)", async () => {
+    const files = { "tests/unit.json": cases([{ name: "ok" }]) };
+    const off = harness(files, config([testsGate, installGate]));
+    await off.run({ head: off.base });
+    expect(off.specs.map((s) => s.loopback)).toEqual([undefined, undefined]);
+    const on = harness(
+      files,
+      config([testsGate, installGate], { sandbox: { verify_loopback: true } }),
+    );
+    await on.run({ head: on.base });
+    expect(on.specs.map((s) => [s.phase, s.loopback])).toEqual([
+      ["install", undefined],
+      ["verify", true],
+    ]);
+  });
+
   it("hides the user's home and the repo's state from every command, keeps its own checkout and the git directory readable, and denies evidence", async () => {
     const h = harness({ "tests/unit.json": cases([{ name: "ok" }]) }, config([testsGate]), {
       env: { ...process.env, HOME: "/home/someone" },

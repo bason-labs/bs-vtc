@@ -61,8 +61,8 @@ describe("advisor agents (§5.4)", () => {
 
   it("compiles one read-only agent per advisor on both hosts", () => {
     expect(claude).toMatch(/^tools: Read, Grep, Glob$/m);
-    expect(codex.sandbox_mode).toBe("read-only");
-    expect((codex.mcp_servers as Record<string, { enabled?: boolean }>).vtc?.enabled).toBe(false);
+    // a Codex agent file cannot set its sandbox (reading 82): only the shell is turned off
+    expect(codex.features).toEqual({ shell_tool: false, request_permissions_tool: false });
   });
 
   it("tells the host the agent runs only at the human's request, through the engine's consult", () => {
@@ -120,7 +120,7 @@ describe("advisor agents (§5.4)", () => {
     expect(md).toContain("- Write paths (role.yaml): .vtc/exports/**");
     expect(md).toContain("- Output artifact types: client_export");
     const toml = parseToml(text(liaison, "codex", "agents/vtc-advisor-estimator.toml"));
-    expect(toml.sandbox_mode).toBe("workspace-write");
+    expect(toml.features).toEqual({ shell_tool: false, request_permissions_tool: false });
   });
 
   it("needs the shared advisor protocol", () => {

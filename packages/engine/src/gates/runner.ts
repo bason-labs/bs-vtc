@@ -679,6 +679,7 @@ class Run {
     try {
       exec = await jail.run({
         phase: gate.phase,
+        ...(this.config?.sandbox?.verify_loopback === true ? { loopback: true } : {}),
         checkout: checkoutAbs,
         argv: prepared.argv,
         cwd,
