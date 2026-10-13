@@ -1,0 +1,35 @@
+{
+  "name": "@vtc/cli",
+  "version": "0.0.0",
+  "private": true,
+  "description": "The vtc command: composition root that wires engine, adapters and compiler.",
+  "type": "module",
+  "exports": {
+    ".": {
+      "@vtc/source": "./src/index.ts",
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
+    }
+  },
+  "files": [
+    "dist"
+  ],
+  "scripts": {
+    "build": "tsc -p tsconfig.build.json",
+    "typecheck": "tsc -p tsconfig.json",
+    "lint": "eslint .",
+    "test": "vitest run"
+  },
+  "dependencies": {
+    "@vtc/shared": "workspace:*",
+    "@vtc/engine": "workspace:*",
+    "@vtc/adapters": "workspace:*",
+    "@vtc/compiler": "workspace:*"
+  },
+  "bin": {
+    "vtc": "./dist/bin.js"
+  },
+  "devDependencies": {
+    "vitest": "5.0.4"
+  }
+}
