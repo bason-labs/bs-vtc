@@ -9,10 +9,12 @@ import { join } from "node:path";
 import {
   agentNameFor,
   HIDDEN_TESTS,
+  inSessionDispatchAllowed,
   PACK_INPUT_TYPES,
   planDispatch,
   resolveRoleMode,
   SESSION_DEFAULT_MODEL,
+  SESSION_SANDBOX_OFF_REASON,
   type ArtifactRef,
   type EscalationAnswer,
   type Finding,
@@ -24,6 +26,7 @@ import {
   type SpawnRoleAction,
   type TaskPackInput,
 } from "@vtc/shared";
+import { restoreHostConfig } from "../git/index.js";
 import { budgetState, sharesExceeded } from "./budget.js";
 import { DEFAULT_ACCEPTANCE_GLOBS } from "./config.js";
 import { EngineError, type CallContext, type Kernel, type RunHandle } from "./kernel.js";
@@ -35,6 +38,7 @@ import {
   lastQaAuthor,
   lastSubmitted,
   nextActionId,
+  nextEscalationId,
   shareSpend,
   pendingBaseCheck,
   phaseEnteredSeq,
@@ -48,7 +52,8 @@ import { frozenSpecItems, taskAcceptanceCriteria } from "./read-model.js";
 import { resolveModel, roleTier } from "./roles.js";
 import { reviewersFor } from "./router.js";
 import { limitWait } from "./limits.js";
-import { setTaskStatus } from "./parking.js";
+import { parkTask, setTaskStatus } from "./parking.js";
+import { parkEscalation } from "./escalations.js";
 import {
   checkGitNow,
   recordDispatch,
@@ -602,9 +607,116 @@ export const dispatchStep = (
 };
 
 /**
+ * Host config in the worktree (D-ao, spine §5 reading 72): before every dispatch or resume there,
+ * `.claude/**`, `.codex/**` and `.mcp.json` go back to the worktree's base commit, so nothing a
+ * role wrote there reaches the next host start (on both hosts, whatever the dispatch mode). What
+ * was restored is a `host_config_restored` incident with the paths as evidence. When the restore
+ * fails the run pauses and nothing is dispatched.
+ */
+const guardHostConfig = async (
+  k: Kernel,
+  h: RunHandle,
+  step: StepSpec,
+  where: { readonly path: string; readonly base: string },
+): Promise<boolean> => {
+  const who = `${step.role}${step.task === undefined ? "" : ` (${step.task})`}`;
+  let restored: string[];
+  try {
+    restored = await restoreHostConfig(k.deps.repoRoot, where.path, where.base);
+  } catch (error) {
+    k.emit(h, {
+      type: "run.paused",
+      actor: "engine",
+      data: {
+        reason:
+          `the engine could not check the host config in ${where.path} before dispatching ${who}: ${error instanceof Error ? error.message : String(error)}`.slice(
+            0,
+            300,
+          ),
+      },
+    });
+    return false;
+  }
+  if (restored.length === 0) return true;
+  k.emit(h, {
+    type: "incident.recorded",
+    actor: "engine",
+    ...(step.task === undefined ? {} : { task: step.task }),
+    data: {
+      kind: "host_config_restored",
+      detail:
+        `before dispatching ${who} in ${where.path}: ${restored.join(", ")} differed from the worktree's base ${where.base.slice(0, 12)} and were restored, so no host loads them`.slice(
+          0,
+          2000,
+        ),
+      evidence: restored.slice(0, 20).map((path) => ({
+        type: "file" as const,
+        ref: `${where.path}/${path}`,
+      })),
+    },
+  });
+  return true;
+};
+
+/**
+ * Whether the step may run as a subagent of the Lead session (D-an, spine §5 reading 71): on
+ * Claude Code a code-running role (`code_sandboxed`, it has a shell) needs the run's Lead session
+ * to report its OS sandbox `on`; absent or `unknown` refuses (`inSessionDispatchAllowed`).
+ */
+export const inSessionAllowed = (
+  k: Kernel,
+  h: RunHandle,
+  step: Pick<StepSpec, "role" | "mode">,
+  host: HostId,
+  call: CallContext,
+): boolean => {
+  const contract = k.deps.roles.get(step.role);
+  if (contract === undefined) return true;
+  const effective = resolveRoleMode(contract, step.mode);
+  const profile = effective.ok ? effective.contract.tools.profile : contract.tools.profile;
+  return inSessionDispatchAllowed(host, profile, k.sessionSandboxFor(h.state.id, call));
+};
+
+/**
+ * Why an in-session step with a shell waits (D-an): no session holds the run's Lead, and the
+ * caller cannot (a cli connection, or a bridge session bound to a role action). Nothing parks:
+ * the Lead's sandbox, not this caller's, decides once a Lead session calls `next`.
+ */
+export const NO_LEAD_WAIT_REASON =
+  "no Lead session holds this run, so a role with a shell cannot be dispatched in-session yet: call next from the Lead session (the Claude Code or Codex session running the vtc plugin)";
+
+/**
+ * A step refused in-session (D-an): its task parks as `blocked` with `SESSION_SANDBOX_OFF_REASON`
+ * (the escalation names the fix; answering it retries the dispatch). A phase step opens the same
+ * escalation for its phase, which holds the phase until it is answered.
+ */
+const refuseInSession = (k: Kernel, h: RunHandle, step: StepSpec): void => {
+  if (step.task !== undefined) {
+    parkTask(k, h, step.task, {
+      reason: "blocked",
+      detail: SESSION_SANDBOX_OFF_REASON,
+      evidence: [],
+    });
+    return;
+  }
+  const escalation = parkEscalation({
+    id: nextEscalationId(h.state),
+    run: h.state.id,
+    phase: h.state.run.phase,
+    reason: "blocked",
+    detail: SESSION_SANDBOX_OFF_REASON,
+    evidence: [],
+    blocks: [],
+    now: k.now(),
+  });
+  k.emit(h, { type: "escalation.opened", actor: "engine", data: { escalation } });
+};
+
+/**
  * Records the dispatch (every role: the git baseline and the engine files, `dispatch-guard.ts`),
- * prepares a front-half role's or advisor's own worktree (spine §5 reading 21), and hands the
- * step out. A worktree that cannot be made pauses the run instead.
+ * prepares a front-half role's or advisor's own worktree (spine §5 reading 21), restores the
+ * worktree's host config (D-ao), and hands the step out. A worktree that cannot be made pauses
+ * the run instead.
  */
 export const dispatchGuarded = async (
   k: Kernel,
@@ -633,6 +745,12 @@ export const dispatchGuarded = async (
       return null;
     }
   }
+  const where =
+    worktree ??
+    (task?.worktree === undefined || task.baseline_revision === undefined
+      ? undefined
+      : { path: task.worktree, base: task.baseline_revision });
+  if (where !== undefined && !(await guardHostConfig(k, h, step, where))) return null;
   recordDispatch(k, h.state.id, actionId, worktree);
   const cwd =
     worktree !== undefined
@@ -653,6 +771,7 @@ export const dispatchNow = async (
   k: Kernel,
   h: RunHandle,
   call: CallContext,
+  held: { noLead: number } = { noLead: 0 },
 ): Promise<LeadAction[]> => {
   if (h.state.run.paused || h.state.run.finished_at !== undefined) return [];
   // Runs that ended without a check (a failure, a limit, a restart) are checked before a new
@@ -682,6 +801,13 @@ export const dispatchNow = async (
   let free = config.concurrency - inFlight(h.state).length;
   for (const step of pendingSteps(k, h, host)) {
     if (free <= 0) break;
+    if (!inSessionAllowed(k, h, step, host, call)) {
+      // only the run's Lead reporting its sandbox off or unknown parks the step; a caller that
+      // is not the Lead, with no Lead to ask, leaves it pending ({@link NO_LEAD_WAIT_REASON})
+      if (k.leadless(h.state.id, call)) held.noLead += 1;
+      else refuseInSession(k, h, step);
+      continue;
+    }
     const action = await dispatchGuarded(k, h, step, host);
     if (action === null) break;
     actions.push(action);

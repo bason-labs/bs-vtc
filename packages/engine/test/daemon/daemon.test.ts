@@ -7,7 +7,7 @@ import { existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from 
 import { request } from "node:http";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   CONTRACTS_VERSION,
   ENGINE_INSTANCE,
@@ -23,8 +23,17 @@ import { loadNodeSqliteStorage } from "../../src/index.js";
 import { connectEngineClient } from "../../src/mcp/index.js";
 import { openNodeSqlite } from "../../src/storage/node-sqlite.js";
 import { cleanupDirs, initRepo, tempDir } from "../helpers/repo.js";
-import { fakeGates } from "../helpers/engine-harness.js";
+import { DEFAULT_GATES_YML, fakeGates } from "../helpers/engine-harness.js";
+
+/** A repo `vtc calibrate` set up: a run starts only on a committed gates.yml (reading 78). */
+const calibratedRepo = (): string =>
+  initRepo({ "README.md": "# app\n", ".vtc/gates.yml": `${JSON.stringify(DEFAULT_GATES_YML)}\n` });
 import { ALL_FIXTURE_ROLES } from "../fixtures/roles.js";
+
+// Whole engine flows on a real repo spawn a few hundred git processes per test: under turbo's
+// parallel load the 5 s default is too tight, so they get room on a loaded machine. A real hang
+// still fails, and no assertion changes.
+vi.setConfig({ testTimeout: 20_000 });
 
 afterEach(cleanupDirs);
 
@@ -79,7 +88,7 @@ const get = (port: number, path: string): Promise<{ status: number; body: string
 
 describe("runDaemon (AD-12, AD-19)", () => {
   it("serves HTTP and MCP, publishes discovery, refuses a second daemon, and cleans up on close", async () => {
-    const repo = initRepo();
+    const repo = calibratedRepo();
     const home = shortHome();
     const daemon = await runDaemon(depsFor(repo, home), { wake: false });
     try {
@@ -132,7 +141,7 @@ describe("runDaemon (AD-12, AD-19)", () => {
     await again.close();
   });
   it("serves the prototype origin once the Designer writes it mid-run (AD-5 rule 9)", async () => {
-    const repo = initRepo();
+    const repo = calibratedRepo();
     const home = shortHome();
     const daemon = await runDaemon(depsFor(repo, home), { wake: false });
     try {
@@ -156,7 +165,7 @@ describe("runDaemon (AD-12, AD-19)", () => {
     }
   });
   it("takes over a stale lock and records the incident in the active run", async () => {
-    const repo = initRepo();
+    const repo = calibratedRepo();
     const home = shortHome();
     const first = await runDaemon(depsFor(repo, home), { wake: false });
     const client = await connectEngineClient(first.discovery.mcp_socket);
@@ -176,7 +185,7 @@ describe("runDaemon (AD-12, AD-19)", () => {
     expect(log).toContain('"kind":"stale_lock"');
   });
   it("takes over a lock whose pid lives but whose socket is silent (pid reuse, AD-12 rule 1)", async () => {
-    const repo = initRepo();
+    const repo = calibratedRepo();
     const home = shortHome();
     const first = await runDaemon(depsFor(repo, home), { wake: false });
     const lockFile = JSON.parse(readFileSync(join(repo, ENGINE_INSTANCE.lockFile), "utf8")) as {
@@ -208,7 +217,7 @@ describe("runDaemon (AD-12, AD-19)", () => {
     expect(log).toContain("did not answer");
   });
   it("refuses to start without the compiled role contracts (AD-14 rule 6), and frees the lock", async () => {
-    const repo = initRepo();
+    const repo = calibratedRepo();
     const home = shortHome();
     await expect(
       runDaemon({ ...depsFor(repo, home), assets: emptyAssets }, { wake: false }),

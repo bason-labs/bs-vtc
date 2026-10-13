@@ -15,6 +15,7 @@ import {
   redactSecrets,
   renderTaskPack,
   runRequestPath,
+  SESSION_DEFAULT_MODEL,
   taskPackPath,
   TaskPackSchema,
   TraceabilityReportSchema,
@@ -169,7 +170,11 @@ const addTokens = (a: TokenUsage, b: TokenUsage | null): TokenUsage =>
         cache_w: a.cache_w + b.cache_w,
       };
 
-/** Spend of a set of role runs; `usd` is `null` when any run was unpriced (§11). */
+/**
+ * Spend of a set of role runs; `usd` is `null` when any submitted run was unpriced (§11). A
+ * failed or limit-interrupted run's host-reported cost counts too, as it does toward the budgets
+ * (D-at, spine §5 reading 77); one that reported none adds nothing and is not "unpriced".
+ */
 export const spendOf = (
   runs: readonly {
     readonly tokens: TokenUsage | null;
@@ -178,12 +183,15 @@ export const spendOf = (
   }[],
 ): { usd: number | null; tokens: TokenUsage } => {
   const done = runs.filter((r) => r.status === "submitted");
+  const ended = runs.filter(
+    (r) => (r.status === "failed" || r.status === "interrupted") && r.costUsd !== null,
+  );
   const unpriced = done.some((r) => r.costUsd === null);
   return {
     usd: unpriced
       ? null
-      : Math.round(done.reduce((s, r) => s + (r.costUsd ?? 0), 0) * 10_000) / 10_000,
-    tokens: done.reduce((t, r) => addTokens(t, r.tokens), ZERO_TOKENS),
+      : Math.round([...done, ...ended].reduce((s, r) => s + (r.costUsd ?? 0), 0) * 10_000) / 10_000,
+    tokens: [...done, ...ended].reduce((t, r) => addTokens(t, r.tokens), ZERO_TOKENS),
   };
 };
 
@@ -376,6 +384,11 @@ export const writeRunSummary = (
   const unpriced = [...state.roleRuns.values()].filter(
     (r) => r.status === "submitted" && r.costUsd === null,
   );
+  // D-at (spine §5 reading 77): a host-reported cost counts whatever the model; the summary
+  // still says which runs VTC could not name a model for
+  const unknownModel = [...state.roleRuns.values()].filter(
+    (r) => r.status === "submitted" && r.model === SESSION_DEFAULT_MODEL,
+  );
   const clarified = state.events.filter((e) => e.type === "spec.clarified").length;
   const lines = [
     `# Run ${state.id}`,
@@ -391,7 +404,12 @@ export const writeRunSummary = (
     "",
     `Role runs: ${String(roleRuns.length)}.`,
     ...(unpriced.length > 0
-      ? [`Unpriced role runs (model missing from the price table): ${String(unpriced.length)}.`]
+      ? [`Unpriced role runs (no cost reported): ${String(unpriced.length)}.`]
+      : []),
+    ...(unknownModel.length > 0
+      ? [
+          `Role runs on the session's default model (model unknown): ${String(unknownModel.length)}; their host-reported cost is counted toward the budgets.`,
+        ]
       : []),
     ...(clarified > 0 ? [`Wording-only spec clarifications: ${String(clarified)}.`] : []),
     "",

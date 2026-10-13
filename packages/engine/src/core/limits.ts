@@ -50,6 +50,10 @@ export const recordLimit = (
     type: "limit.hit",
     actor: "engine",
     ...(run.task === undefined ? {} : { task: run.task }),
+    // D-at (spine §5 reading 77): what the host reports the run cost before the limit counts,
+    // on the event like a failed run's, so the run's shares and the advisor budget include it
+    role: run.role,
+    ...(outcome.cost_usd === null ? {} : { cost_usd: outcome.cost_usd }),
     data: {
       host: run.host,
       window: outcome.window,

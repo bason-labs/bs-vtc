@@ -34,6 +34,7 @@ export {
   writeRepoFile,
   type RepoWrite,
   type RepoWriteObserver,
+  type WriteRepoFileOptions,
 } from "./repo-files.js";
 export {
   ciFromRollup,
@@ -51,3 +52,4 @@ export {
   type GitResult,
   type GitRunOptions,
 } from "./exec.js";
+export { HOST_CONFIG_PATHS, restoreHostConfig } from "./host-config.js";

@@ -24,6 +24,7 @@ import {
   createPluginCatalog,
   Engine,
   createRoleRegistry,
+  type CallContext,
   type EngineCoreDeps,
   type PluginCatalog,
 } from "../../src/core/index.js";
@@ -378,7 +379,11 @@ export const createHarness = (options: HarnessOptions = {}): Harness => {
 
 // ------------------------------------------------------------------ the Lead
 
-export const CLAUDE = { host: "claude-code" as const };
+/**
+ * The Lead on Claude Code, in-process: its session reports the OS sandbox `on` (D-an, spine §5
+ * reading 71), so code-running roles may run in it.
+ */
+export const CLAUDE: CallContext = { host: "claude-code", sessionSandbox: "on" };
 
 export const spawns = (actions: readonly LeadAction[]): SpawnAction[] =>
   actions.filter((a): a is SpawnAction => a.type === "spawn_role");
@@ -417,6 +422,8 @@ export const submitResult = (
   action: SpawnAction,
   body: Partial<RoleResultInput> & Pick<RoleResultInput, "exit">,
   cost: number | null = 0.1,
+  call: CallContext = CLAUDE,
+  model = "sonnet",
 ) =>
   h.engine.submit(
     SubmitInputSchema.parse({
@@ -424,12 +431,12 @@ export const submitResult = (
       action_id: action.action_id,
       result: result(action, body),
       usage: {
-        model: "sonnet",
+        model,
         tokens: { in: 100, out: 50, cache_r: 0, cache_w: 0 },
         cost_usd: cost,
       },
     }),
-    CLAUDE,
+    call,
   );
 
 export const draft = (id: string, over: Record<string, unknown> = {}) => ({

@@ -12,6 +12,7 @@ import type {
   HostId,
   ProjectConfig,
   PullRequestService,
+  SessionSandboxState,
   UsageSnapshot,
   VtcEvent,
 } from "@vtc/shared";
@@ -60,12 +61,25 @@ export interface RunHandle {
  * Who is calling a tool: the bridge's host (AD-12 rule 3), or `null` for the cli; and, over the
  * socket, the connection's session id and client kind. A bridge session other than the run's
  * Lead session is treated as a role session (spine §7: until the Codex per-agent MCP isolation
- * spike passes, Lead-only tools are refused from role sessions).
+ * spike passes, Lead-only tools are refused from role sessions). No `client` means an in-process
+ * caller (the composition and tests), never a socket connection.
  */
 export interface CallContext {
   readonly host: HostId | null;
   readonly session?: string;
   readonly client?: "bridge" | "cli";
+  /**
+   * A cli connection whose `EngineSocketHello.install_token` matched the daemon's (compared in
+   * constant time): a human channel for the human-only tools (D-an, spine §5 reading 71). Only
+   * the socket sets it; a bare `{client: "cli"}` hello never does.
+   */
+  readonly human?: boolean;
+  /**
+   * What the caller's host session reported about its OS sandbox (`EngineSocketHello
+   * .session_sandbox`, bridge only; absent = unknown). The engine keeps the run's Lead session's
+   * report to decide in-session dispatch of code-running roles (D-an, `inSessionDispatchAllowed`).
+   */
+  readonly sessionSandbox?: SessionSandboxState;
 }
 
 export class EngineError extends Error {
@@ -107,6 +121,18 @@ export interface Kernel {
   serial<T>(handle: RunHandle, fn: () => Promise<T>): Promise<T>;
   /** The host a dispatch runs on. */
   hostFor(call: CallContext): HostId;
+  /**
+   * The sandbox state of the session an in-session role of `run` would run in (D-an): the run's
+   * Lead session's report when the run has a Lead session; an in-process caller's own otherwise;
+   * `undefined` (unknown, which refuses) for a socket caller of a run with no Lead session.
+   */
+  sessionSandboxFor(run: string, call: CallContext): SessionSandboxState | undefined;
+  /**
+   * True when no session holds `run`'s Lead and `call` is a socket caller (a cli connection, or a
+   * bridge session bound to a role action), so there is no Lead session whose sandbox could
+   * decide: an in-session step waits for the Lead instead of parking (`dispatchNow`).
+   */
+  leadless(run: string, call: CallContext): boolean;
   /** Every run of the repo (ids are repo-wide: plan files, features). */
   allStates(): Iterable<RunState>;
   /** In-memory per-task hint: the round's head has the same tree as the previous round's. */

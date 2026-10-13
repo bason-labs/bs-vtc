@@ -13,6 +13,7 @@ import { randomBytes } from "node:crypto";
 import {
   closeSync,
   constants,
+  fchmodSync,
   fstatSync,
   lstatSync,
   mkdirSync,
@@ -130,12 +131,22 @@ const parentOf = (rel: string): string | null => {
   return dir === "." ? null : dir;
 };
 
+export interface WriteRepoFileOptions {
+  /**
+   * Give the file exactly `mode`, whatever the umask: set on the temp file's own descriptor
+   * before the rename, so nothing is changed by path once the file is in place (a path a
+   * concurrent writer could have swapped for a symlink). Default `false`: the umask applies.
+   */
+  readonly exactMode?: boolean;
+}
+
 /** Replaces `rel` under `root` with `content` (temp file + rename; never through a symlink). */
 export const writeRepoFile = (
   root: string,
   rel: string,
   content: string | Uint8Array,
   mode = 0o644,
+  options: WriteRepoFileOptions = {},
 ): void => {
   segmentsOf(rel);
   const parent = parentOf(rel);
@@ -144,8 +155,19 @@ export const writeRepoFile = (
   if (kindOf(target) === "dir") throw new UnsafePathError(rel, "is a directory");
   const temp = `${target}.vtc-${randomBytes(6).toString("hex")}.tmp`;
   const bytes = bytesOf(content);
+  const noFollow = (constants as { O_NOFOLLOW?: number }).O_NOFOLLOW ?? 0;
   try {
-    writeFileSync(temp, bytes, { flag: "wx", mode });
+    const fd = openSync(
+      temp,
+      constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL | noFollow,
+      mode,
+    );
+    try {
+      writeFileSync(fd, bytes);
+      if (options.exactMode === true) fchmodSync(fd, mode);
+    } finally {
+      closeSync(fd);
+    }
     renameSync(temp, target);
   } catch (error) {
     rmSync(temp, { force: true });
