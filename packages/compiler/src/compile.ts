@@ -8,6 +8,7 @@ import { createHash } from "node:crypto";
 import {
   CONTRACTS_VERSION,
   DOMAIN_PACKS,
+  ENGINE_MCP_TOOLS,
   engineMcpServer,
   findForbiddenInText,
   type HostId,
@@ -59,7 +60,14 @@ const KIND_LABEL: Readonly<Record<RoleContract["kind"], string>> = {
 const describeAgent = (role: RoleContract, mode: string | undefined): string =>
   `VTC ${KIND_LABEL[role.kind]} ${role.id}${mode === undefined ? "" : ` (${mode} mode)`}: ${role.mission.trim()} Runs only when the VTC Lead dispatches it for the engine.`;
 
-const sha256 = (text: string): string => createHash("sha256").update(text, "utf8").digest("hex");
+/**
+ * The prompt content SHA of a compiled agent (§13, `role.dispatched.prompt_sha`): lower-case hex
+ * SHA-256 of the UTF-8 bytes of its instructions, exactly as emitted: the body after the
+ * frontmatter of a Claude Code agent file, equal to `developer_instructions` of the Codex agent.
+ * Host frontmatter and TOML keys are not hashed.
+ */
+export const promptSha256 = (instructions: string): string =>
+  createHash("sha256").update(instructions, "utf8").digest("hex");
 
 const skillKind = (skill: Skill): { kind: SkillKind; pack: string | null } => {
   if (skill.origin === "plugin") return { kind: "plugin", pack: null };
@@ -171,10 +179,24 @@ const collectCommands = (files: readonly SourceFile[], errors: CompileError[]): 
   return commands.sort((a, b) => (a.name < b.name ? -1 : 1));
 };
 
+/** Hand-written files each host directory may hold (AD-16 rule 1); anything else is an error. */
+export const HOST_PLUGIN_FILES: Readonly<Record<HostId, readonly string[]>> = {
+  "claude-code": [".claude-plugin/plugin.json", ".mcp.json"],
+  codex: ["plugin.json"],
+};
+
+/** A clean relative POSIX path: no empty, `.` or `..` segment, no backslash, not absolute. */
+const isCleanPath = (path: string): boolean =>
+  !path.includes("\\") && path.split("/").every((seg) => seg !== "" && seg !== "." && seg !== "..");
+
 /** Unknown files at fixed places are errors, so nothing is silently left out of a plugin. */
 const checkLayout = (files: readonly SourceFile[], errors: CompileError[]): void => {
   for (const file of files) {
     const { path } = file;
+    if (!isCleanPath(path)) {
+      errors.push({ path, message: "source paths are relative POSIX paths without . or .." });
+      continue;
+    }
     if (IGNORED.has(path) || path === "roles/NOTICE") continue;
     const shared = /^roles\/_shared\/(.+)$/.exec(path);
     if (shared?.[1] !== undefined) {
@@ -183,18 +205,29 @@ const checkLayout = (files: readonly SourceFile[], errors: CompileError[]): void
       }
       continue;
     }
+    const host = /^plugins\/(claude-code|codex)\/(.+)$/.exec(path);
+    if (host?.[1] !== undefined && host[2] !== undefined) {
+      if (path === "plugins/codex/.mcp.json") {
+        errors.push({
+          path,
+          message: "the Codex MCP entry is generated from engineMcpServer; do not hand-write it",
+        });
+      } else if (host[2].startsWith("hooks/")) {
+        errors.push({
+          path,
+          message:
+            "hooks need a cli contract for the command they run first (AD-8 rule 3: an extra layer only)",
+        });
+      } else if (!HOST_PLUGIN_FILES[host[1] as HostId].includes(host[2])) {
+        errors.push({ path, message: "unexpected host plugin file; see plugins/README.md" });
+      }
+      continue;
+    }
     const known =
       /^roles\/[^_/][^/]*\/.+$/.test(path) ||
       /^skills\/[^/]+\/.+$/.test(path) ||
-      /^plugins\/common\/(skills|commands)\/.+$/.test(path) ||
-      /^plugins\/(claude-code|codex)\/.+$/.test(path);
+      /^plugins\/common\/(skills|commands)\/.+$/.test(path);
     if (!known) errors.push({ path, message: "unexpected file; see the README of its directory" });
-  }
-  if (files.some((f) => f.path === "plugins/codex/.mcp.json")) {
-    errors.push({
-      path: "plugins/codex/.mcp.json",
-      message: "the Codex MCP entry is generated from engineMcpServer; do not hand-write it",
-    });
   }
 };
 
@@ -227,6 +260,30 @@ const requireFile = (files: readonly SourceFile[], path: string, errors: Compile
     errors.push({ path, message: "required file is missing" });
 };
 
+/**
+ * Role-facing engine MCP tools in the frozen contract. None yet: the frozen surface
+ * (`ENGINE_MCP_TOOLS`) holds the Lead's tools only, and AD-4 rule 3 adds role-facing ones (repo
+ * map, research fetchers, fact lookups) as a MINOR change to @vtc/shared. Until then a role that
+ * names an engine tool does not compile, so no agent is built against a tool nobody serves.
+ */
+export const ROLE_FACING_ENGINE_TOOLS: readonly string[] = [];
+
+const LEAD_TOOLS: readonly string[] = ENGINE_MCP_TOOLS.map((tool) => tool.name);
+
+/** Errors for engine tools a role may not call (unknown, or one of the Lead's run-driving tools). */
+export const engineToolErrors = (tools: readonly string[]): string[] =>
+  tools.flatMap((tool) => {
+    if (LEAD_TOOLS.includes(tool)) {
+      return [`engine tool ${tool} drives the run; only the Lead may call it`];
+    }
+    if (!ROLE_FACING_ENGINE_TOOLS.includes(tool)) {
+      return [
+        `engine tool ${tool} is not a role-facing tool in @vtc/shared (AD-4 rule 3: added as a MINOR contract change)`,
+      ];
+    }
+    return [];
+  });
+
 const compileAgents = (
   roles: readonly LoadedRole[],
   host: HostId,
@@ -240,8 +297,11 @@ const compileAgents = (
     const names = compiledAgentNames(role);
     modes.forEach((mode, index) => {
       const built = buildInstructions(loaded, mode, host, sources);
-      if (!built.ok) {
-        for (const message of built.errors) {
+      const messages = built.ok
+        ? engineToolErrors(built.contract.tools.engine_tools)
+        : [...built.errors];
+      if (!built.ok || messages.length > 0) {
+        for (const message of messages) {
           if (!errors.some((e) => e.path === `roles/${loaded.dir}` && e.message === message)) {
             errors.push({ path: `roles/${loaded.dir}`, message });
           }
@@ -273,7 +333,7 @@ const manifestAgent = (agent: CompiledAgent, file: string): ManifestAgent => ({
   discipline: agent.discipline ?? null,
   role_version: agent.roleVersion,
   file,
-  prompt_sha256: sha256(agent.instructions),
+  prompt_sha256: promptSha256(agent.instructions),
   tier: agent.model.tier,
   effort: agent.model.effort,
 });
@@ -347,18 +407,28 @@ const emitTarget = (host: HostId, input: TargetInput, errors: CompileError[]): E
     }),
   );
   const sorted = emitted.sort(byPath);
-  sorted.forEach((file, index) => {
-    if (sorted[index + 1]?.path === file.path) {
+  errors.push(...checkEmitted(host, sorted));
+  return sorted;
+};
+
+/**
+ * The gate on one host's emitted tree: no path emitted twice, and no AD-9 marker in any emitted
+ * file (AD-16 rule 2). `files` must be sorted by path.
+ */
+export const checkEmitted = (host: HostId, files: readonly EmittedFile[]): CompileError[] => {
+  const errors: CompileError[] = [];
+  files.forEach((file, index) => {
+    if (files[index + 1]?.path === file.path) {
       errors.push({ path: `${host}:${file.path}`, message: "emitted twice" });
     }
   });
-  for (const v of checkPluginFiles(sorted)) {
+  for (const v of checkPluginFiles(files)) {
     errors.push({
       path: `${host}:${v.path}`,
       message: `line ${String(v.line)}: AD-9 marker ${v.marker} in emitted file`,
     });
   }
-  return sorted;
+  return errors;
 };
 
 /** Compiles the sources (every file under `roles/`, `skills/` and `plugins/`). */

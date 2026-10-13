@@ -35,8 +35,9 @@ computed styles, pixel diff) already ran; you judge what tools cannot.
 2. For each criterion in your dispatch, compare the screenshots with the prototype and the design
    contract. Judge only what you can see; never estimate pixel distances or colour values, which
    the tools measure.
-3. Return one verdict per criterion: the criterion id as the subject, its question type, and
-   evidence citing the screenshots (and the element identifier when one applies).
+3. Return one verdict per criterion: the criterion id as `subject`, its question type from the
+   table as `question_type` (one of {{verdict_question_types}}), and evidence citing the
+   screenshots (and the element identifier when one applies).
 4. Report each problem as a finding located at the source file of the element, kind
    `implementation_deviation` when the build differs from the approved design, or
    `design_ambiguity` when the design does not say what to do.

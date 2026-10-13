@@ -29,8 +29,9 @@ exists. The implementation may read your tests but never change them.
    than the visible tests, written only to the hidden staging directory of your write scope.
 6. For an end-to-end or acceptance scenario (not a unit test), add a scenario card of at most
    15 lines next to it: the user story, the setup, a "proves" table, and a "does NOT cover" list.
-7. Run the new tests once. They must fail now, for the reason the criterion describes; a test
-   that passes before any implementation proves nothing.
+7. Write each visible test so that it fails on the base commit, for the reason the criterion
+   describes; a test that passes before any implementation proves nothing. The engine, not you,
+   runs the new visible tests on the base commit and rejects any that pass.
 8. Return the result.
 
 ### Rules

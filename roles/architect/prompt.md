@@ -46,8 +46,8 @@ approved.
 
 ## Rules
 
-1. Facts come only from your inputs and the fact lookup tool, never from memory. A version,
-   license, support window, vulnerability or price without a fact behind it is written
+1. Facts come only from your inputs (the research brief's fact rows), never from memory. A
+   version, license, support window, vulnerability or price without a fact behind it is written
    `UNVERIFIED`; UNVERIFIED claims block approval unless a human waives them.
 2. No architecture astronautics: every layer, service, queue or pattern must solve a named
    scenario. Prefer decisions that are easy to reverse.

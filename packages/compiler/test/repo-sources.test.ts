@@ -5,27 +5,33 @@
 import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { parse as parseToml } from "smol-toml";
+import { parse as parseYaml } from "yaml";
 import { describe, expect, it } from "vitest";
 import {
   CORE_DISCIPLINES,
   CORE_ROLES,
   DOMAIN_PACKS,
+  ENGINE_MCP_TOOLS,
   engineMcpServer,
   HOST_IDS,
+  VerdictQuestionTypeSchema,
   type RoleContract,
 } from "@vtc/shared";
 import {
   checkPluginFiles,
+  claudeEngineToolName,
   compiledAgentNames,
   compilePlugins,
   KNOWN_ARTIFACT_TYPES,
   loadRoles,
   readSources,
+  ROLE_FACING_ENGINE_TOOLS,
   type CompileOutput,
 } from "../src/index.js";
 
 const ROOT = fileURLToPath(new URL("../../../", import.meta.url));
-const sources = readSources(ROOT);
+const read = readSources(ROOT);
+const sources = read.files;
 const compiled = compilePlugins(sources);
 
 const output = (): CompileOutput => {
@@ -42,6 +48,7 @@ const promptOf = (id: string): string => readFileSync(`${ROOT}roles/${id}/prompt
 
 describe("the repo's sources compile (AD-16 Check)", () => {
   it("compiles without errors", () => {
+    expect(read.errors).toEqual([]);
     expect(compiled.ok ? [] : compiled.errors).toEqual([]);
     expect(loaded.ok ? [] : loaded.errors).toEqual([]);
   });
@@ -72,6 +79,65 @@ describe("the repo's sources compile (AD-16 Check)", () => {
       const toml = parseToml(f.text);
       expect(typeof toml.developer_instructions).toBe("string");
       expect(["read-only", "workspace-write"]).toContain(toml.sandbox_mode);
+    }
+  });
+});
+
+/** Frontmatter and body of an emitted Claude Code agent file. */
+const claudeAgent = (text: string): { tools: string[]; body: string } => {
+  const match = /^---\n([\s\S]*?)\n---\n\n?([\s\S]*)$/.exec(text);
+  const front = parseYaml(match?.[1] ?? "") as { tools?: string };
+  return { tools: (front.tools ?? "").split(", "), body: match?.[2] ?? "" };
+};
+
+/** An instruction to run something, which an agent without a shell cannot follow. */
+const RUN_INSTRUCTION =
+  /\b(run|execute)\s+((the|your|each|every|all|a|an|new|visible|hidden)\s+)*(tests?|commands?|scripts?|suites?|shell|builds?|linters?)\b/i;
+
+describe("role agents get only what their contract allows (AD-4, AD-8 rule 3)", () => {
+  const claudeAgents = (): { path: string; tools: string[]; body: string }[] =>
+    output()
+      .targets["claude-code"].filter((f) => f.path.startsWith("agents/"))
+      .map((f) => ({ path: f.path, ...claudeAgent(f.text) }));
+
+  it("names only role-facing engine tools in role.yaml", () => {
+    const named = roles.flatMap((r) => [
+      ...r.tools.engine_tools,
+      ...Object.values(r.modes ?? {}).flatMap((m) => m.tools?.engine_tools ?? []),
+    ]);
+    expect(named.filter((t) => !ROLE_FACING_ENGINE_TOOLS.includes(t))).toEqual([]);
+  });
+
+  it("never gives a Claude Code role agent a tool that drives the run", () => {
+    const lead = ENGINE_MCP_TOOLS.map((t) => claudeEngineToolName(t.name));
+    for (const agent of claudeAgents()) {
+      expect(
+        agent.tools.filter((t) => lead.includes(t)),
+        agent.path,
+      ).toEqual([]);
+    }
+  });
+
+  it("keeps the engine bridge off, or limited to role-facing tools, in every Codex role agent", () => {
+    const entry = engineMcpServer("codex");
+    for (const f of output().targets.codex.filter((t) => t.path.startsWith("agents/"))) {
+      const server = (parseToml(f.text).mcp_servers as Record<string, Record<string, unknown>>)[
+        entry.name
+      ];
+      if (server?.enabled === false) continue;
+      const enabled = (server?.enabled_tools ?? ["(all)"]) as string[];
+      expect(
+        enabled.filter((t) => !ROLE_FACING_ENGINE_TOOLS.includes(t)),
+        f.path,
+      ).toEqual([]);
+    }
+  });
+
+  it("never tells an agent without a shell to run tests or commands", () => {
+    const noShell = claudeAgents().filter((a) => !a.tools.includes("Bash"));
+    expect(noShell.length).toBeGreaterThan(0);
+    for (const agent of noShell) {
+      expect(RUN_INSTRUCTION.exec(agent.body)?.[0], agent.path).toBeUndefined();
     }
   });
 });
@@ -149,6 +215,12 @@ describe("the v1 roster (§5.2, §5.2a, §5.3)", () => {
     for (const lens of reviewerLenses) expect(role(`lens_${lens}`)?.kind).toBe("lens");
   });
 
+  it("gives each Visual QA criterion V1 to V8 a question type from the contract", () => {
+    const rows = [...promptOf("visual_qa").matchAll(/^\| (V\d) +\|.*\| ([a-z_]+) +\|$/gm)];
+    expect(rows.map((r) => r[1])).toEqual(["V1", "V2", "V3", "V4", "V5", "V6", "V7", "V8"]);
+    for (const row of rows) expect(VerdictQuestionTypeSchema.options).toContain(row[2]);
+  });
+
   it("declares the QA and Security modes (AD-14 rule 1)", () => {
     expect(Object.keys(role("qa")?.modes ?? {})).toEqual(["author", "judge"]);
     expect(Object.keys(role("security")?.modes ?? {})).toEqual(["design", "verify"]);
@@ -217,10 +289,55 @@ describe("attribution (spec §5.1: the MIT notice is kept)", () => {
     expect(notice).toContain("Permission is hereby granted, free of charge");
   });
 
-  it("names its upstream sources in every forked role", () => {
-    const forked = roles.filter((r) =>
-      readFileSync(`${ROOT}roles/${r.id}/role.yaml`, "utf8").includes("# Forked from"),
+  /** Roles the catalogue (§7.1, §7.2) forks from an upstream base. */
+  const FORKED = [
+    "architect",
+    "ba",
+    "designer",
+    "engineer",
+    "engineer_ai_llm",
+    "engineer_backend",
+    "engineer_data",
+    "engineer_devops",
+    "engineer_frontend",
+    "engineer_mobile",
+    "lens_api",
+    "lens_auth",
+    "lens_db",
+    "lens_infra",
+    "lens_payments",
+    "lens_secrets",
+    "planner",
+    "qa",
+    "repo_cartographer",
+    "research_analyst",
+    "security",
+    "visual_qa",
+  ];
+  /** Roles the catalogue says to write new, with upstream material merged in. */
+  const WRITTEN = ["lens_supply_chain", "lookback", "spec_verifier"];
+  const roleYaml = (id: string): string => readFileSync(`${ROOT}roles/${id}/role.yaml`, "utf8");
+
+  it("classifies every role as forked or written for VTC", () => {
+    expect(roles.map((r) => r.id).sort()).toEqual([...FORKED, ...WRITTEN].sort());
+  });
+
+  it.each(FORKED)("%s names its upstream base in a '# Forked from' line", (id) => {
+    expect(roleYaml(id)).toMatch(/^# Forked from msitarzewski\/agency-agents \(MIT/m);
+  });
+
+  it.each(WRITTEN)("%s says it was written for VTC and names what it merged in", (id) => {
+    expect(roleYaml(id)).toMatch(/^# Written for VTC/m);
+    expect(roleYaml(id)).toContain("msitarzewski/agency-agents");
+  });
+
+  it("names the sources of every lens and domain pack and of the Lead skill", () => {
+    const skills = sources.filter((f) =>
+      /^(skills\/(lens|domain)-[^/]+|plugins\/common\/skills\/lead)\/SKILL\.md$/.test(f.path),
     );
-    expect(forked.length).toBeGreaterThanOrEqual(15);
+    expect(skills.length).toBe(15 + DOMAIN_PACKS.length + 1);
+    for (const skill of skills) {
+      expect(skill.text, skill.path).toMatch(/^Sources: .*(agency-agents|written for VTC)/m);
+    }
   });
 });

@@ -26,3 +26,7 @@ export const tomlString = (value: string): string => `"${escapeBasic(value, fals
  * string early; the newline after the opening delimiter is trimmed by TOML parsers.
  */
 export const tomlMultiline = (value: string): string => `"""\n${escapeBasic(value, true)}"""`;
+
+/** A TOML array of basic strings, e.g. `["a", "b"]`. */
+export const tomlStringArray = (values: readonly string[]): string =>
+  `[${values.map(tomlString).join(", ")}]`;

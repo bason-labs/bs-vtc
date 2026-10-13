@@ -104,9 +104,7 @@ budget: { context_tokens: 20000 }
   "plugins/claude-code/.claude-plugin/plugin.json": '{ "name": "vtc", "version": "0.1.0" }\n',
   "plugins/claude-code/.mcp.json":
     '{ "mcpServers": { "vtc": { "command": "vtc", "args": ["engine", "--mcp", "--host", "claude-code"] } } }\n',
-  "plugins/claude-code/hooks/hooks.json": '{ "hooks": {} }\n',
   "plugins/codex/plugin.json": '{ "name": "vtc", "version": "0.1.0" }\n',
-  "plugins/codex/hooks/hooks.json": '{ "hooks": {} }\n',
 };
 
 export const fixtureFiles = (

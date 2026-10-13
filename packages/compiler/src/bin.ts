@@ -7,14 +7,17 @@
 import { resolve } from "node:path";
 import { compilePlugins } from "./compile.js";
 import { readSources, writeTargets } from "./io.js";
+import type { CompileError } from "./types.js";
 
 const args = process.argv.slice(2);
 const rootIndex = args.indexOf("--root");
 const root = resolve(rootIndex >= 0 ? (args[rootIndex + 1] ?? ".") : ".");
-const result = compilePlugins(readSources(root));
-if (!result.ok) {
-  for (const error of result.errors) console.error(`${error.path}: ${error.message}`);
-  console.error(`vtc compiler: ${String(result.errors.length)} error(s); nothing written.`);
+const read = readSources(root);
+const result = compilePlugins(read.files);
+const errors: readonly CompileError[] = [...read.errors, ...(result.ok ? [] : result.errors)];
+if (!result.ok || errors.length > 0) {
+  for (const error of errors) console.error(`${error.path}: ${error.message}`);
+  console.error(`vtc compiler: ${String(errors.length)} error(s); nothing written.`);
   process.exitCode = 1;
 } else if (args.includes("--check")) {
   process.stdout.write("vtc compiler: sources compile.\n");

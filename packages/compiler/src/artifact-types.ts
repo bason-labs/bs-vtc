@@ -2,6 +2,10 @@
  * The artifact types role contracts name (principle 2: prompts and ports name artifact types,
  * never roles or paths). The vocabulary is open in `@vtc/shared` (AD-3 rule 5); this list makes
  * the compiler's repo test catch a typo that would silently disconnect a port.
+ *
+ * Provisional: the engine routes artifacts by these names and cannot import this package (AD-1),
+ * so the list is proposed to the integrator as a `KNOWN_ARTIFACT_TYPES` constant in @vtc/shared
+ * (MINOR); once it lands this module re-exports it. No other package may rely on this copy.
  */
 import { ACCEPTANCE_TESTS, HIDDEN_TESTS, PACK_INPUT_TYPES, TASKS_ARTIFACT } from "@vtc/shared";
 
