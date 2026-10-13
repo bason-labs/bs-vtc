@@ -7,33 +7,43 @@
  *    (`extraKnownMarketplaces`, `enabledPlugins`): `~/.claude/settings.json` for the user scope,
  *    the repo's personal `.claude/settings.local.json` for the project scope (the marketplace
  *    path is machine-local, so it never goes into the shared `.claude/settings.json`);
- * 3. wires the statusline tee shim (`vtc statusline-tee`) around the user's own statusline
- *    command, which keeps running unchanged (§6.9).
+ * 3. wires the statusline tee shim around the user's own statusline command, which keeps running
+ *    unchanged (§6.9): `statusLine.command` is `statuslineTeeCommand(<user command>)` from
+ *    `@vtc/shared` (spine §5 reading 61), the frozen line the cli's `vtc statusline-tee` reads.
+ * Both scopes are accepted (the cli picks the default, `DEFAULT_INSTALL_SCOPE`, D-ah), and the
+ * marketplace always lives under `InstallRequest.home` (spine §5 reading 60).
  * The exact marketplace form is provisional until the spike tries it on a real install (spine §7).
  */
 import { existsSync, readdirSync } from "node:fs";
 import { join } from "node:path";
-import type { InstallRequest, InstallResult } from "@vtc/shared";
+import {
+  STATUSLINE_TEE,
+  statuslineTeeCommand,
+  type InstallRequest,
+  type InstallResult,
+} from "@vtc/shared";
 import { readJsonSettings, replaceDirectory, writeJson } from "../common/files.js";
 import { isRecord, text } from "../common/json.js";
 import { insidePlugin, readPluginManifest } from "../common/plugin.js";
-import { shellQuote } from "../common/shell.js";
 
 export const CLAUDE_MARKETPLACE = "vtc-local";
 const CLAUDE_PLUGIN_MANIFEST = ".claude-plugin/plugin.json";
 
+/** `vtc statusline-tee`, the shim's command line with no user command. */
+const TEE = `${STATUSLINE_TEE.command} ${STATUSLINE_TEE.subcommand}`;
+/** The pre-4.2 form an earlier install may have written: `vtc statusline-tee --wrap '<cmd>'`. */
+const LEGACY_WRAP = `${TEE} --wrap `;
+
+const isTee = (command: string): boolean => command === TEE || command.startsWith(`${TEE} `);
+
 /**
- * The statusline shim (cli+binary team): `vtc statusline-tee [-- <user command>]`. The shim runs
- * the words after `--`, joined with spaces, as one shell command line; the user's command is
- * passed as one single-quoted word, so the shell hands it over unchanged.
+ * A shim line already in place, in the frozen form: an earlier `--wrap '<cmd>'` carries the same
+ * single shell word, so only the separator changes.
  */
-export const STATUSLINE_TEE = "vtc statusline-tee";
-
-export const statuslineTeeCommand = (wrapped: string | null): string =>
-  wrapped === null ? STATUSLINE_TEE : `${STATUSLINE_TEE} -- ${shellQuote(wrapped)}`;
-
-const isTee = (command: string): boolean =>
-  command === STATUSLINE_TEE || command.startsWith(`${STATUSLINE_TEE} `);
+const frozenTee = (command: string): string =>
+  command.startsWith(LEGACY_WRAP)
+    ? `${TEE} ${STATUSLINE_TEE.separator} ${command.slice(LEGACY_WRAP.length)}`
+    : command;
 
 const filesUnder = (dir: string): string[] =>
   readdirSync(dir, { withFileTypes: true }).flatMap((entry) => {
@@ -57,7 +67,7 @@ const wiredStatusLine = (
   const own = target.statusLine;
   const current = [target, ...fallbacks].map(statusLineCommand).find((c) => c !== null) ?? null;
   const command =
-    current !== null && isTee(current) ? current : statuslineTeeCommand(current ?? null);
+    current !== null && isTee(current) ? frozenTee(current) : statuslineTeeCommand(current);
   return { ...(isRecord(own) ? own : {}), type: "command", command };
 };
 

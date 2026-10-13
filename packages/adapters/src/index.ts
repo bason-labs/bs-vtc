@@ -7,9 +7,7 @@ export {
   claudeCodeCapabilities,
   claudeSubagentName,
   createClaudeCodeAdapter,
-  STATUSLINE_TEE,
   statuslineIngestFromClaude,
-  statuslineTeeCommand,
   type ClaudeCodeAdapterOptions,
 } from "./claude-code/index.js";
 export {
@@ -26,8 +24,9 @@ export const HOST_CAPABILITIES: Readonly<Record<HostId, HostCapabilities>> = {
 };
 
 /**
- * What the cli may pass when it constructs an adapter. Models are not here: the engine resolves
- * every model id (`SpawnRoleRequest.model`, AD-6 rule 2), the Codex tier map included.
+ * What the cli passes when it constructs an adapter: `{ pluginDir, vtcHome, vtcVersion }`.
+ * Models are not here: the engine resolves every model id (`SpawnRoleRequest.model`, AD-6
+ * rule 2), and with none resolved the host session's default model runs (D-ae).
  */
 export interface AdapterFactoryOptions {
   /** The running vtc version (reported to host servers the adapter talks to). */
@@ -38,7 +37,10 @@ export interface AdapterFactoryOptions {
    * a headless run without it.
    */
   readonly pluginDir?: string;
-  /** The absolute VTC home the cli resolved (`$VTC_HOME` or `~/.vtc`); its token stays unreadable. */
+  /**
+   * The absolute VTC home the cli resolved (`$VTC_HOME` or `~/.vtc`): its token stays unreadable,
+   * and no role writes its allowlists, scanner database or hidden tests (D-w).
+   */
   readonly vtcHome?: string;
 }
 
@@ -58,7 +60,8 @@ export const ADAPTER_FACTORIES: Readonly<
       ...(options.vtcHome === undefined ? {} : { vtcHome: options.vtcHome }),
     }),
   codex: (options = {}) =>
-    createCodexAdapter(
-      options.vtcVersion === undefined ? {} : { clientVersion: options.vtcVersion },
-    ),
+    createCodexAdapter({
+      ...(options.vtcVersion === undefined ? {} : { clientVersion: options.vtcVersion }),
+      ...(options.vtcHome === undefined ? {} : { vtcHome: options.vtcHome }),
+    }),
 };

@@ -6,10 +6,12 @@
  *   pnpm --filter @vtc/adapters live:check [claude-code|codex|codex-usage] [--resume] [--model <id>]
  *     [--plugin-dir <dir>]
  *
- * The model defaults to the engine's built-in low tier for the host (`haiku`, `gpt-5-codex-mini`);
- * `--model` runs another id, as the engine would after a `project.yaml` override. Claude runs
- * load the compiled plugin from `--plugin-dir` (default: the repo's `ASSET_SOURCES` build,
- * `dist/claude-plugin`), as every engine-launched Claude run does.
+ * The model defaults to the engine's built-in low tier for the host: `haiku` on Claude Code, and
+ * none on Codex, whose built-in map names no ids until the spike does (D-ae), so the run uses the
+ * session's default model with only the effort set. `--model` runs another id, as the engine
+ * would after a `project.yaml` override. Claude runs load the compiled plugin from `--plugin-dir`
+ * (default: the repo's `ASSET_SOURCES` build, `dist/claude-plugin`) under `--restricted`, as
+ * every engine-launched Claude run does.
  *
  * Each run happens in a fresh temp git repo with a read-only sandbox and a prompt that asks for
  * a bare RoleResult. It prints the exact command, the normalised outcome and whether the output
@@ -34,16 +36,19 @@ const PROMPT =
   'Do not read or change any file. Reply only with a RoleResult: role "qa", exit "done", summary "live ok", and every other field null.';
 
 /** The engine's built-in low-tier ids (engine `DEFAULT_TIER_MODELS`), for a cheap check. */
-const LOW_TIER_MODEL = { "claude-code": "haiku", codex: "gpt-5-codex-mini" } as const;
+const LOW_TIER_MODEL: Readonly<Partial<Record<HostAdapter["host"], string>>> = {
+  "claude-code": "haiku",
+};
 
 const run = async (adapter: HostAdapter, resume: boolean, model?: string): Promise<void> => {
   const cwd = mkdtempSync(join(tmpdir(), "vtc-live-"));
+  const id = model ?? LOW_TIER_MODEL[adapter.host];
   try {
     execFileSync("git", ["init", "-q"], { cwd });
     const request: SpawnRoleRequest = {
       role: "qa",
       mode: "judge",
-      model: { tier: "low", effort: "low", model: model ?? LOW_TIER_MODEL[adapter.host] },
+      model: { tier: "low", effort: "low", ...(id === undefined ? {} : { model: id }) },
       dispatch: "headless",
       cwd,
       prompt: PROMPT,

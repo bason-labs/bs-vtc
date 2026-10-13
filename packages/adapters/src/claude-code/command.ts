@@ -2,18 +2,34 @@
  * Claude Code sandbox profiles and headless commands (§12.1, AD-6, AD-9). Pure.
  * Read-only roles get read tools only; write-scoped roles get file edits limited to their paths;
  * only the Engineer family gets Bash, and Bash runs inside Claude Code's OS sandbox with no
- * unsandboxed escape. Protected paths are denied twice: edit rules and `sandbox.filesystem.denyWrite`.
- * The permission mode is pinned to `dontAsk`, so the allowlist decides and anything not on it is
- * denied, whatever mode the user's own settings choose; host config files are never writable.
- * The VTC install token and the Codex home (its credentials) are never readable, from a tool or
- * from the shell. A headless run always loads the compiled plugin from disk with only the repo's
- * project settings, so the user's own allow rules, hooks, plugins and MCP servers never reach a
- * role run. Nothing here ever sets a bypass; the engine's write-scope check always runs.
+ * unsandboxed escape. The built-in tool set itself (`--tools`) is exactly the profile's, so no
+ * settings file can bring another built-in tool in. Protected paths are denied twice: edit rules
+ * and `sandbox.filesystem.denyWrite`. The permission mode is pinned to `dontAsk`, so the
+ * allowlist decides and anything not on it is denied; host config files are never writable.
+ * The VTC install token, the Codex home and Claude's own credential file are never readable,
+ * from a tool or from the shell (D-ad). No role may run `vtc calibrate` or write the VTC home's
+ * allowlists, scanner database or hidden tests (D-w).
+ *
+ * Settings isolation (D-ab, spine §5 reading 48): a headless run passes `--restricted`, which
+ * (per `claude --help`) ignores the user, project and local settings files and keeps only
+ * managed settings and the VTC-authored `--settings`. So neither the user's settings nor a
+ * committed `.claude/settings.json` (allow rules, hooks, MCP enablement) reach a role run. It
+ * also confines the file tools to the working directory. The compiled plugin loads from disk
+ * (`--plugin-dir`). What the spike still has to confirm (spine §7, "Claude settings-source
+ * isolation"): that `--plugin-dir`, `--agent vtc:<agent>`, the plugin's hooks and its MCP server
+ * load under `--restricted`; that MCP servers from the user's `~/.claude.json` (not a settings
+ * file) may still start, though their tools are denied (not on the allowlist under `dontAsk`);
+ * and that `--restricted`'s own guard on settings, git and tool-configuration files does not
+ * stop a write the role's scope allows. Nothing here ever sets a bypass; the engine's
+ * write-scope check always runs.
  */
 import { isAbsolute, join, resolve } from "node:path";
 import {
   agentNameFor,
   ENGINE_INSTANCE,
+  hostCredentialDenyReadPaths,
+  isHostCredentialDenyRead,
+  ROLE_DENIED_VTC,
   type HostCommand,
   type RoleTools,
   type SandboxProfile,
@@ -21,6 +37,7 @@ import {
   type SessionRef,
   type SpawnRoleRequest,
 } from "@vtc/shared";
+import { vtcHomeWriteDeniedDirs } from "../common/homes.js";
 
 export const CLAUDE_BINARY = "claude";
 export const HOST = "claude-code";
@@ -115,6 +132,13 @@ const absoluteRulePath = (path: string): string => {
   return `//${(drive.letter ?? "").toLowerCase()}${drive.rest ?? "/"}`;
 };
 
+/** The built-in tools a profile has at all (`--tools`); anything else does not exist in the run. */
+const builtInTools = (tools: RoleTools): string[] => [
+  ...READ_TOOLS,
+  ...(tools.profile === "read_only" ? [] : WRITE_TOOL_NAMES),
+  ...(tools.profile === "code_sandboxed" ? ["Bash"] : []),
+];
+
 const allowedTools = (tools: RoleTools, writable: readonly string[]): string[] => [
   ...READ_TOOLS,
   ...(tools.profile === "read_only" ? [] : toolRules(writable, anchoredRulePath)),
@@ -140,13 +164,59 @@ export interface ClaudeProfileOptions {
   readonly vtcHome: string;
   /** The absolute Codex home (`~/.codex`, or `$CODEX_HOME`): Codex's config and credentials. */
   readonly codexHome: string;
+  /** Claude's own config directory (`$CLAUDE_CONFIG_DIR`, or `~/.claude`), never read here. */
+  readonly claudeConfigDir: string;
 }
 
-/** What no role may read, as absolute paths: the install token and the whole Codex home. */
+const posixAbsolute = (path: string): string => resolve(path).replaceAll("\\", "/");
+
+/**
+ * Claude's credential file, built only through the shared deny helper (D-ad): a path string for
+ * the deny lists, never opened. Refused when the deny entry could name anything else (wildcards,
+ * brackets, commas), because then it would not be the sanctioned deny-only form (AD-9).
+ */
+const claudeCredentialPath = (configDir: string): string => {
+  const paths = hostCredentialDenyReadPaths({ "claude-code": posixAbsolute(configDir) });
+  for (const path of paths) {
+    if (
+      !isHostCredentialDenyRead(path) ||
+      !isHostCredentialDenyRead(`Read(${absoluteRulePath(path)})`)
+    ) {
+      throw new Error(
+        `refusing a Claude role profile: cannot deny reading the credential file in ${JSON.stringify(configDir)} with a rule that names only that file`,
+      );
+    }
+  }
+  const [path] = paths;
+  if (path === undefined) throw new Error("no Claude credential file to deny");
+  return path;
+};
+
+/**
+ * What no role may read, as absolute paths: the install token, the whole Codex home and Claude's
+ * own credential file.
+ */
 const unreadablePaths = (options: ClaudeProfileOptions) => ({
   token: resolve(options.vtcHome, ENGINE_INSTANCE.tokenFile),
   codexHome: resolve(options.codexHome),
+  claudeCredentials: claudeCredentialPath(options.claudeConfigDir),
 });
+
+/**
+ * How a role could start `vtc`: directly or through a package runner. Bash rules match a
+ * command's prefix, so these are a first line; the barrier for what `vtc calibrate` protects is
+ * the sandbox's write deny on the VTC home (below), and calibrate confirms only in a terminal.
+ */
+const VTC_LAUNCHERS = ["", "npx ", "pnpm ", "pnpm exec ", "pnpm dlx ", "bunx ", "yarn "] as const;
+
+/** D-w: `Bash(...)` deny rules for every `vtc` subcommand no role may run. */
+const deniedVtcCommands = (): string[] =>
+  ROLE_DENIED_VTC.subcommands.flatMap((sub) =>
+    VTC_LAUNCHERS.flatMap((launcher) => [
+      `Bash(${launcher}vtc ${sub})`,
+      `Bash(${launcher}vtc ${sub}:*)`,
+    ]),
+  );
 
 export const claudeSandboxProfile = (
   request: SandboxProfileRequest,
@@ -157,12 +227,19 @@ export const claudeSandboxProfile = (
   const allow = allowedTools(tools, writable);
   const deny = disallowedTools(tools, request.protectedPaths);
   const unreadable = unreadablePaths(options);
+  const vtcHomeRule = absoluteRulePath(options.vtcHome);
+  // every rule here is one JSON array entry, so no character in a home path can end a rule
   const settings = {
     permissions: {
       defaultMode: CLAUDE_ROLE_PERMISSION_MODE,
       deny: [
         `Read(${absoluteRulePath(unreadable.token)})`,
         `Read(${absoluteRulePath(unreadable.codexHome)}/**)`,
+        `Read(${absoluteRulePath(unreadable.claudeCredentials)})`,
+        ...deniedVtcCommands(),
+        ...ROLE_DENIED_VTC.homeWriteDeny.flatMap((glob) =>
+          WRITE_TOOL_NAMES.map((tool) => `${tool}(${vtcHomeRule}/${glob})`),
+        ),
       ],
     },
     sandbox: {
@@ -170,19 +247,30 @@ export const claudeSandboxProfile = (
       autoAllowBashIfSandboxed: tools.profile === "code_sandboxed",
       allowUnsandboxedCommands: false,
       filesystem: {
-        denyWrite: [...request.protectedPaths, ...HOST_CONFIG_PATHS].map((p) => absolute(cwd, p)),
-        denyRead: [unreadable.token, unreadable.codexHome],
+        denyWrite: [
+          ...[...request.protectedPaths, ...HOST_CONFIG_PATHS].map((p) => absolute(cwd, p)),
+          ...vtcHomeWriteDeniedDirs(options.vtcHome),
+        ],
+        denyRead: [unreadable.token, unreadable.codexHome, unreadable.claudeCredentials],
       },
       network: { allowedDomains: request.network === "registries" ? [...REGISTRY_DOMAINS] : [] },
     },
   };
   return {
     host: HOST,
-    enforced: { readOnly: tools.profile === "read_only", perPathWriteDeny: true, network: true },
+    enforced: {
+      readOnly: tools.profile === "read_only",
+      perPathWriteDeny: true,
+      network: true,
+      // read-deny rules plus `sandbox.filesystem.denyRead` (D-ad, spine §5 reading 49)
+      secretsUnreadable: true,
+    },
     settings,
     cliArgs: [
       "--settings",
       JSON.stringify(settings),
+      "--tools",
+      builtInTools(tools).join(","),
       "--allowedTools",
       allow.join(","),
       "--disallowedTools",
@@ -194,10 +282,10 @@ export const claudeSandboxProfile = (
 export interface ClaudeCommandOptions {
   /**
    * The compiled Claude plugin on disk (the cli's extracted `plugin:claude-code`). Every headless
-   * run loads the plugin from it (`--plugin-dir`) and reads only the repo's project settings
-   * (`--setting-sources project`): the user's own settings, plugins, hooks and MCP servers cannot
-   * widen a role run, and the plugin resolves in any worktree whatever the install scope. Without
-   * it there is no isolated run, so `claudeHeadlessCommand` refuses to build one (fail closed).
+   * run loads the plugin from it (`--plugin-dir`) and no settings file (`--restricted`): the
+   * user's and the repo's settings, plugins and hooks cannot widen a role run, and the plugin
+   * resolves in any worktree whatever the install scope. Without it there is no isolated run, so
+   * `claudeHeadlessCommand` refuses to build one (fail closed).
    */
   readonly pluginDir?: string;
 }
@@ -250,9 +338,9 @@ export const claudeHeadlessCommand = (
         ? []
         : ["--max-budget-usd", String(request.maxBudgetUsd)]),
       ...(session === undefined ? [] : ["--resume", session.id]),
-      // the user's settings (allow rules, hooks, plugins, MCP servers) never reach a role run
-      "--setting-sources",
-      "project",
+      // no settings file (user, project or local: allow rules, hooks, MCP enablement) reaches a
+      // role run; only managed settings and the VTC-authored --settings apply (D-ab)
+      "--restricted",
       "--plugin-dir",
       options.pluginDir,
       ...request.sandbox.cliArgs,

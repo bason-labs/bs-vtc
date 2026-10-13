@@ -1,28 +1,34 @@
 /**
  * Codex sandbox profiles and headless commands (§12.1, AD-6, AD-9). Pure.
  * Reviewers run in the `read-only` sandbox; write-scoped roles and engineers in `workspace-write`
- * (writes limited to the worktree, never any network). Codex has no per-path write-deny, so the engine's write-scope check is the only path enforcement
- * (§12.1). Every sandbox key a profile relies on is set explicitly on the command line, so the
- * user's `config.toml` cannot widen it (network access, extra writable roots). Nothing here ever
- * names a full-access sandbox or a bypass.
+ * (writes limited to the worktree, never any network). Codex has no per-path write-deny, so the
+ * engine's write-scope check is the only path enforcement (§12.1). Every sandbox key a profile
+ * relies on is set explicitly on the command line, so the user's `config.toml` cannot widen it
+ * (network access, extra writable roots). Nothing here ever names a full-access sandbox or a
+ * bypass.
  *
- * The install phase's registry network (§7.2) is refused: Codex can only open the whole network,
- * and Codex sandboxes allow reads everywhere, so a role could read the VTC install token and the
- * host credentials and use the token against the engine's localhost API. The engine runs the
- * install phase on a host that scopes the network (Claude Code) until it has a mitigation that
- * makes the install token useless to role processes.
+ * The registry network (§7.2) is refused for every role (D-ac, spine §5 reading 49): Codex can
+ * only open the whole network, and Codex sandboxes allow reads everywhere, so a role could read
+ * the VTC install token and the host credentials and use the token against the engine's
+ * localhost API. Dependency installs are an engine-run step, never a role action.
  *
- * Known gaps, recorded for the engine:
+ * Known gaps, recorded for the engine (and in the tests):
  * - Codex sandboxes allow reads everywhere, so a role process can read the VTC install token and
- *   the host credential files; there is no per-path read deny to set. With the network always
- *   off the process cannot send them anywhere, but it can copy them into its output or worktree.
+ *   the host credential files; there is no per-path read deny to set (D-ad), so
+ *   `enforced.secretsUnreadable` is false. With the network always off the process cannot send
+ *   them anywhere, but it can copy them into its output or worktree.
+ * - The role deny list (D-w): Codex has no per-command deny for a headless run, so `vtc
+ *   calibrate` cannot be denied here (it confirms only in an interactive terminal, which a role
+ *   run never has). Writes to the VTC home's allowlists, scanner database and hidden tests are
+ *   blocked because `workspace-write` writes only the worktree (and the OS temp directory), so a
+ *   profile whose worktree would contain the VTC home is refused.
  * - `codex exec` has no agent flag: a headless run gets no compiled role instructions
  *   (`developer_instructions` of `.codex/agents/vtc-*.toml`), so the role rests on the prompt
  *   (the task pack). Engine-launched Codex runs (cross-family review, auto-resume) must carry the
  *   role's instructions in the prompt until the spike settles how to load them.
  */
 import { createHash } from "node:crypto";
-import { join } from "node:path";
+import { join, relative, resolve } from "node:path";
 import type {
   HostCommand,
   SandboxProfile,
@@ -30,18 +36,41 @@ import type {
   SessionRef,
   SpawnRoleRequest,
 } from "@vtc/shared";
+import { vtcHomeWriteDeniedDirs } from "../common/homes.js";
 
 export const CODEX_BINARY = "codex";
 export const HOST = "codex";
 
 type CodexSandboxMode = "read-only" | "workspace-write";
 
-export const codexSandboxProfile = (request: SandboxProfileRequest): SandboxProfile => {
+export interface CodexProfileOptions {
+  /** The absolute VTC home (`~/.vtc`, or `$VTC_HOME`), which no role may write (D-w). */
+  readonly vtcHome: string;
+}
+
+/** True when `inner` is `outer` or below it. */
+const within = (outer: string, inner: string): boolean => {
+  const rel = relative(resolve(outer), resolve(inner));
+  return rel === "" || (!rel.startsWith("..") && !rel.startsWith("/") && !/^[A-Za-z]:/.test(rel));
+};
+
+export const codexSandboxProfile = (
+  request: SandboxProfileRequest,
+  options: CodexProfileOptions,
+): SandboxProfile => {
   const mode: CodexSandboxMode =
     request.tools.profile === "read_only" ? "read-only" : "workspace-write";
-  if (mode === "workspace-write" && request.network === "registries") {
+  if (request.network === "registries") {
     throw new Error(
-      "refusing the registries network on Codex: it cannot limit the network to package registries (§7.2), and an open network lets a role use the readable VTC install token against the engine; run the install phase on Claude Code",
+      "refusing the registries network on Codex: it cannot limit the network to package registries (§7.2), and an open network lets a role use the readable VTC install token against the engine; dependency installs are an engine-run step (D-ac)",
+    );
+  }
+  const exposed = vtcHomeWriteDeniedDirs(options.vtcHome).find(
+    (dir) => within(request.cwd, dir) || within(dir, request.cwd),
+  );
+  if (mode === "workspace-write" && exposed !== undefined) {
+    throw new Error(
+      `refusing a workspace-write Codex role in ${request.cwd}: ${exposed} in the VTC home would be writable, and Codex cannot deny writes there (D-w)`,
     );
   }
   return {
@@ -50,6 +79,8 @@ export const codexSandboxProfile = (request: SandboxProfileRequest): SandboxProf
       readOnly: mode === "read-only",
       perPathWriteDeny: false,
       network: true,
+      // no per-path read deny on Codex: the token and host credentials stay readable (D-ad)
+      secretsUnreadable: false,
     },
     settings: {
       sandbox_mode: mode,

@@ -14,7 +14,9 @@ import {
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
-import { createClaudeCodeAdapter, statuslineTeeCommand } from "../../src/index.js";
+import { STATUSLINE_TEE, statuslineTeeCommand } from "@vtc/shared";
+import * as adapters from "../../src/index.js";
+import { createClaudeCodeAdapter } from "../../src/index.js";
 import { writeFixturePlugin } from "../support/plugin-fixture.js";
 
 const dirs: string[] = [];
@@ -151,6 +153,52 @@ describe("Claude install (AD-6 rule 5, AD-16 rule 4)", () => {
       /link to a missing file/,
     );
     expect(lstatSync(link).isSymbolicLink()).toBe(true);
+  });
+
+  it("writes the shared shim command line and keeps no local copy of it (spine §5 reading 61)", async () => {
+    expect(adapters).not.toHaveProperty("STATUSLINE_TEE");
+    expect(adapters).not.toHaveProperty("statuslineTeeCommand");
+    for (const [userLine, expected] of [
+      [undefined, `${STATUSLINE_TEE.command} ${STATUSLINE_TEE.subcommand}`],
+      ["   ", "vtc statusline-tee"],
+      ["starship prompt", "vtc statusline-tee -- 'starship prompt'"],
+    ] as const) {
+      const env = setup();
+      const settingsPath = join(env.home, ".claude", "settings.json");
+      if (userLine !== undefined) {
+        writeJsonFile(settingsPath, { statusLine: { type: "command", command: userLine } });
+      }
+      await createClaudeCodeAdapter().install({ ...env, scope: "user" });
+      const command = (readJson(settingsPath).statusLine as { command: string }).command;
+      expect(command).toBe(expected);
+      expect(command).toBe(statuslineTeeCommand(userLine));
+      expect(command).not.toContain("--wrap");
+    }
+  });
+
+  it("rewrites an earlier `--wrap` shim to the frozen `--` form, keeping the user's command", async () => {
+    const env = setup();
+    const settingsPath = join(env.home, ".claude", "settings.json");
+    writeJsonFile(settingsPath, {
+      statusLine: { type: "command", command: "vtc statusline-tee --wrap 'my line'" },
+    });
+    await createClaudeCodeAdapter().install({ ...env, scope: "user" });
+    expect(readJson(settingsPath).statusLine).toEqual({
+      type: "command",
+      command: "vtc statusline-tee -- 'my line'",
+    });
+  });
+
+  it("installs both scopes and keeps the local marketplace under the request's home (reading 60, D-ah)", async () => {
+    for (const scope of ["user", "project"] as const) {
+      const env = setup();
+      const result = await createClaudeCodeAdapter().install({ ...env, scope });
+      const marketplace = join(env.home, ".vtc", "claude-marketplace");
+      expect(existsSync(join(marketplace, ".claude-plugin", "marketplace.json"))).toBe(true);
+      for (const path of result.written) {
+        expect(path.startsWith(marketplace) || path.includes(".claude"), path).toBe(true);
+      }
+    }
   });
 
   it("is idempotent: a second install never wraps the shim twice", async () => {
