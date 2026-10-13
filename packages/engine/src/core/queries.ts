@@ -4,7 +4,8 @@ import type { RoleRunRecord, RunState } from "./state.js";
 
 export const nextActionId = (state: RunState): string => `a-${String(state.roleRuns.size + 1)}`;
 
-export const nextEscalationId = (state: RunState): string => `E-${String(state.escalations.size + 1)}`;
+export const nextEscalationId = (state: RunState): string =>
+  `E-${String(state.escalations.size + 1)}`;
 
 export const inFlight = (state: RunState): RoleRunRecord[] =>
   [...state.roleRuns.values()].filter((r) => r.status === "in_flight");
@@ -25,7 +26,11 @@ export const phaseEnteredSeq = (state: RunState, phase: Phase): number | null =>
 export const statusEnteredSeq = (state: RunState, task: string, status: string): number | null => {
   for (let i = state.events.length - 1; i >= 0; i -= 1) {
     const e = state.events[i];
-    if (e?.task === task && e.type === "task.status_changed" && (e.data as { to?: string }).to === status) {
+    if (
+      e?.task === task &&
+      e.type === "task.status_changed" &&
+      (e.data as { to?: string }).to === status
+    ) {
       return e.seq;
     }
   }
@@ -71,7 +76,11 @@ export const consecutiveFailures = (
   step: { role: string; mode?: string; task?: string; subject?: string },
 ): number => {
   const runs = [...state.roleRuns.values()].filter(
-    (r) => r.role === step.role && r.mode === step.mode && r.task === step.task && r.subject === step.subject,
+    (r) =>
+      r.role === step.role &&
+      r.mode === step.mode &&
+      r.task === step.task &&
+      r.subject === step.subject,
   );
   let count = 0;
   for (let i = runs.length - 1; i >= 0; i -= 1) {

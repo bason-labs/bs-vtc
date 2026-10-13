@@ -13,7 +13,8 @@ export interface SpecItem {
 }
 
 const HEADING = /^#{1,6}\s+((?:REQ|SEC)-[1-9]\d*)\b[\s:.-]*(.*)$/;
-const ITEM = /^\s*(?:[-*+]\s+)?(?:\*\*)?((?:REQ|SEC)-[1-9]\d*(?:\.AC-[1-9]\d*)?)(?:\*\*)?\s*[:.)-]\s*(.+)$/;
+const ITEM =
+  /^\s*(?:[-*+]\s+)?(?:\*\*)?((?:REQ|SEC)-[1-9]\d*(?:\.AC-[1-9]\d*)?)(?:\*\*)?\s*[:.)-]\s*(.+)$/;
 
 /** Every REQ/SEC and AC the spec defines, in document order, first definition wins. */
 export const parseSpecItems = (text: string): SpecItem[] => {

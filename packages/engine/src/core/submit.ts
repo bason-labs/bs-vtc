@@ -58,12 +58,15 @@ export interface Rejection {
 }
 
 export type SubmitOutcome =
-  | { readonly accepted: true }
-  | { readonly accepted: false; readonly rejection: Rejection };
+  { readonly accepted: true } | { readonly accepted: false; readonly rejection: Rejection };
 
 /** A role step's verdict before anything is logged. */
 type StepOutcome =
-  | { readonly kind: "reject"; readonly rejection: Rejection; readonly findings?: readonly Finding[] }
+  | {
+      readonly kind: "reject";
+      readonly rejection: Rejection;
+      readonly findings?: readonly Finding[];
+    }
   | {
       readonly kind: "accept";
       readonly head?: string;
@@ -149,7 +152,9 @@ const recordSpend = (k: Kernel, h: RunHandle, run: RoleRunRecord, cost: number |
   }
   const features = [...h.state.features.values()];
   if (features.length > 0) {
-    const previous = h.state.runBudget?.spent_usd ?? features.reduce((s, f) => s + f.spent_usd, 0) - (task === undefined ? 0 : cost);
+    const previous =
+      h.state.runBudget?.spent_usd ??
+      features.reduce((s, f) => s + f.spent_usd, 0) - (task === undefined ? 0 : cost);
     k.emit(h, {
       type: "budget.updated",
       actor: "engine",
@@ -166,7 +171,10 @@ const recordSpend = (k: Kernel, h: RunHandle, run: RoleRunRecord, cost: number |
 const checkBudget = (k: Kernel, h: RunHandle, taskId: string | undefined): void => {
   const task = taskId === undefined ? undefined : h.state.tasks.get(taskId);
   if (task === undefined) return;
-  if (["parked", "dropped", "done", "merged", "queued", "built", "interrupted"].includes(task.status)) return;
+  if (
+    ["parked", "dropped", "done", "merged", "queued", "built", "interrupted"].includes(task.status)
+  )
+    return;
   if (budgetState(task.spent_usd, task.budget_usd) !== "exhausted") return;
   parkTask(k, h, task.id, {
     reason: "budget",
@@ -320,12 +328,21 @@ const planTasks = (
 };
 
 /** PLAN (§6.1, AD-8 rule 11): the tasks, then the run's one feature, then BUILD. */
-const createPlan = (k: Kernel, h: RunHandle, tasks: readonly { task: Task; draft: TaskDraft }[]): void => {
+const createPlan = (
+  k: Kernel,
+  h: RunHandle,
+  tasks: readonly { task: Task; draft: TaskDraft }[],
+): void => {
   const first = tasks[0];
   if (first === undefined) return;
   const featureId = first.task.feature;
   for (const { task, draft } of tasks) {
-    k.emit(h, { type: "task.created", actor: "engine", task: task.id, data: { task, intent: draft.intent } });
+    k.emit(h, {
+      type: "task.created",
+      actor: "engine",
+      task: task.id,
+      data: { task, intent: draft.intent },
+    });
   }
   const budget = usd(tasks.reduce((s, t) => s + t.task.budget_usd, 0));
   const title = (h.state.request.split("\n").find((l) => l.trim() !== "") ?? featureId)
@@ -349,7 +366,11 @@ const createPlan = (k: Kernel, h: RunHandle, tasks: readonly { task: Task; draft
       },
     },
   });
-  k.emit(h, { type: "run.phase_changed", actor: "engine", data: { from: h.state.run.phase, to: "build" } });
+  k.emit(h, {
+    type: "run.phase_changed",
+    actor: "engine",
+    data: { from: h.state.run.phase, to: "build" },
+  });
 };
 
 const acceptPhaseRole = async (
@@ -363,7 +384,8 @@ const acceptPhaseRole = async (
   const issues: string[] = [];
   const artifacts: ArtifactRef[] = [];
   for (const artifact of result.artifacts) {
-    if (!matchesAny(writePaths, artifact.path)) issues.push(`${artifact.path} is outside the role's write paths`);
+    if (!matchesAny(writePaths, artifact.path))
+      issues.push(`${artifact.path} is outside the role's write paths`);
     const sha = fileSha(k.deps.repoRoot, artifact.path);
     if (sha === undefined) issues.push(`${artifact.path} does not exist`);
     else artifacts.push({ ...artifact, sha256: sha });
@@ -373,9 +395,18 @@ const acceptPhaseRole = async (
     ...result.claims,
     ...result.verdicts.flatMap((v) => v.evidence),
   ]);
-  if (missing.length > 0) return reject("claim_check", missing.map((m) => `does not resolve: ${m}`));
+  if (missing.length > 0)
+    return reject(
+      "claim_check",
+      missing.map((m) => `does not resolve: ${m}`),
+    );
   const declared = contract?.output.artifacts ?? [];
-  if (result.exit === "done" && run.role !== "planner" && declared.length > 0 && artifacts.length === 0) {
+  if (
+    result.exit === "done" &&
+    run.role !== "planner" &&
+    declared.length > 0 &&
+    artifacts.length === 0
+  ) {
     return reject("claim_check", [`a done result returns its ${declared.join("/")} artifact`]);
   }
   const phase = PHASE_OF_ROLE[run.role] ?? h.state.run.phase;
@@ -383,22 +414,36 @@ const acceptPhaseRole = async (
     if (result.tasks === undefined) return reject("claim_check", ["the Planner returns its tasks"]);
     const planned = planTasks(k, h, result.tasks);
     if ("issues" in planned) return reject("claim_check", planned.issues);
-    return { kind: "accept", artifacts, after: () => { createPlan(k, h, planned.tasks); } };
+    return {
+      kind: "accept",
+      artifacts,
+      after: () => {
+        createPlan(k, h, planned.tasks);
+      },
+    };
   }
   return {
     kind: "accept",
     artifacts,
     after: () => {
       openQuestions(k, h, run, result);
-      if (result.exit === "blocked") phaseEscalation(k, h, result.question, "blocked", phase, run.role);
+      if (result.exit === "blocked")
+        phaseEscalation(k, h, result.question, "blocked", phase, run.role);
       if (result.exit === "spec_conflict") {
         phaseEscalation(
           k,
           h,
           {
-            question: `${run.role} found a conflict in the spec: ${result.conflict.detail}`.slice(0, 1000),
+            question: `${run.role} found a conflict in the spec: ${result.conflict.detail}`.slice(
+              0,
+              1000,
+            ),
             options: [
-              { id: "clarify", label: "Answer with a clarification and continue", effect: "clarify" },
+              {
+                id: "clarify",
+                label: "Answer with a clarification and continue",
+                effect: "clarify",
+              },
               { id: "hint", label: "Give a hint and continue", effect: "hint" },
             ],
             recommended: "clarify",
@@ -432,9 +477,14 @@ const acceptQaAuthor = async (
   }
   const authoring = task.status === "ready";
   if (authoring && result.exit === "done" && result.acceptance_tests === undefined) {
-    return reject("claim_check", ["QA author mode names its new acceptance tests (acceptance_tests)"]);
+    return reject("claim_check", [
+      "QA author mode names its new acceptance tests (acceptance_tests)",
+    ]);
   }
-  const head = await k.deps.workspace.snapshot(task.worktree, `vtc: ${task.id} acceptance tests (${run.action_id})`);
+  const head = await k.deps.workspace.snapshot(
+    task.worktree,
+    `vtc: ${task.id} acceptance tests (${run.action_id})`,
+  );
   const scope = await k.deps.gateRunner.checkWriteScope({
     worktree: task.worktree,
     base: task.baseline_revision,
@@ -442,7 +492,11 @@ const acceptQaAuthor = async (
     filesScope: qaWriteScope(k, task.id),
     protected: [],
   });
-  if (!scope.ok) return reject("write_scope", scope.violations.map((v) => `${v.kind}: ${v.path}`));
+  if (!scope.ok)
+    return reject(
+      "write_scope",
+      scope.violations.map((v) => `${v.kind}: ${v.path}`),
+    );
   const missing: string[] = [];
   for (const artifact of result.artifacts) {
     const exists =
@@ -485,22 +539,32 @@ const outOfScopeGuards = async (
   task: Task,
   fault: Fault,
 ): Promise<string[]> => {
-  if (matchesAny(task.files_scope, fault.path)) return [`${fault.path} is inside the task's files_scope`];
+  if (matchesAny(task.files_scope, fault.path))
+    return [`${fault.path} is inside the task's files_scope`];
   const claimed = [...h.state.findings.values()].some(
-    (r) => r.finding.task === task.id && r.finding.route === "out_of_scope" && r.finding.round_first_seen === task.round,
+    (r) =>
+      r.finding.task === task.id &&
+      r.finding.route === "out_of_scope" &&
+      r.finding.round_first_seen === task.round,
   );
   const rejectedClaims = h.state.events.filter(
     (e) =>
       e.task === task.id &&
       e.type === "role.rejected" &&
-      (e.data as { issues?: string[] }).issues?.some((i) => i.includes("(out_of_scope claim)")) === true &&
-      e.seq > (h.state.events.findLast((x) => x.task === task.id && x.type === "task.status_changed")?.seq ?? 0),
+      (e.data as { issues?: string[] }).issues?.some((i) => i.includes("(out_of_scope claim)")) ===
+        true &&
+      e.seq >
+        (h.state.events.findLast((x) => x.task === task.id && x.type === "task.status_changed")
+          ?.seq ?? 0),
   );
-  if (claimed || rejectedClaims.length > 0) return ["at most one out_of_scope_fault claim per round (out_of_scope claim)"];
+  if (claimed || rejectedClaims.length > 0)
+    return ["at most one out_of_scope_fault claim per round (out_of_scope claim)"];
   const base = task.baseline_revision;
   if (base === undefined) return ["the task has no baseline"];
   if (!(await resolves(evidenceContext(k, h, base), fault.evidence))) {
-    return [`the fault's evidence does not resolve on the base (out_of_scope claim): ${fault.evidence.type} ${fault.evidence.ref}`];
+    return [
+      `the fault's evidence does not resolve on the base (out_of_scope claim): ${fault.evidence.type} ${fault.evidence.ref}`,
+    ];
   }
   const checkout = await k.deps.git.createCleanCheckout(base);
   try {
@@ -519,8 +583,11 @@ const outOfScopeGuards = async (
       include_hidden: false,
     });
     k.emit(h, { type: "gate.result", actor: "engine", task: task.id, data: report });
-    if (report.verdict === "infra_error") return ["the fault could not be reproduced: the gates failed to run (out_of_scope claim)"];
-    return report.verdict === "fail" ? [] : ["the fault does not reproduce on the base without this task's diff (out_of_scope claim)"];
+    if (report.verdict === "infra_error")
+      return ["the fault could not be reproduced: the gates failed to run (out_of_scope claim)"];
+    return report.verdict === "fail"
+      ? []
+      : ["the fault does not reproduce on the base without this task's diff (out_of_scope claim)"];
   } finally {
     await k.deps.git.removeCheckout(checkout);
   }
@@ -555,7 +622,9 @@ const routeOutOfScope = (k: Kernel, h: RunHandle, task: Task, fault: Fault): voi
   if (owner === undefined) {
     const config = k.config();
     const id = nextNumberedId("T", usedTaskIds(k.allStates()));
-    const scope = fault.path.includes("/") ? `${fault.path.slice(0, fault.path.lastIndexOf("/"))}/**` : fault.path;
+    const scope = fault.path.includes("/")
+      ? `${fault.path.slice(0, fault.path.lastIndexOf("/"))}/**`
+      : fault.path;
     const created: Task = {
       id,
       title: `Out-of-scope fault: ${fault.path}`.slice(0, 200),
@@ -580,7 +649,12 @@ const routeOutOfScope = (k: Kernel, h: RunHandle, task: Task, fault: Fault): voi
       deferred: [],
     };
     k.emit(h, { type: "task.created", actor: "engine", task: id, data: { task: created } });
-    k.emit(h, { type: "feature.task_added", actor: "engine", feature: task.feature, data: { task: id } });
+    k.emit(h, {
+      type: "feature.task_added",
+      actor: "engine",
+      feature: task.feature,
+      data: { task: id },
+    });
   }
   // The round ends early and does not count as stuck (§6.3 step 3).
   const current = h.state.tasks.get(task.id);
@@ -609,7 +683,12 @@ const acceptEngineer = async (
   if (result.exit === "out_of_scope_fault") {
     const issues = await outOfScopeGuards(k, h, task, result.fault);
     if (issues.length > 0) return reject("claim_check", issues);
-    return { kind: "accept", after: () => { routeOutOfScope(k, h, task, result.fault); } };
+    return {
+      kind: "accept",
+      after: () => {
+        routeOutOfScope(k, h, task, result.fault);
+      },
+    };
   }
   if (result.exit === "blocked") {
     return {
@@ -653,12 +732,19 @@ const acceptEngineer = async (
   if (!scope.ok) {
     return {
       kind: "reject",
-      rejection: rejection("write_scope", scope.violations.map((v) => `${v.kind}: ${v.path}`)),
+      rejection: rejection(
+        "write_scope",
+        scope.violations.map((v) => `${v.kind}: ${v.path}`),
+      ),
       findings: findingsFromWriteScope(scope, { task: task.id, round: Math.max(1, task.round) }),
     };
   }
   const missing = await unresolved(evidenceContext(k, h, head), result.claims);
-  if (missing.length > 0) return reject("claim_check", missing.map((m) => `does not resolve: ${m}`));
+  if (missing.length > 0)
+    return reject(
+      "claim_check",
+      missing.map((m) => `does not resolve: ${m}`),
+    );
   const identical =
     previous !== undefined &&
     (await k.deps.workspace.treeOf(previous)) === (await k.deps.workspace.treeOf(head));
@@ -671,6 +757,15 @@ const acceptEngineer = async (
     kind: "accept",
     head,
     after: () => {
+      if (identical && task.round > 1) {
+        // Stuck (§6.3 step 9): the same tree as the failed round; re-running the gates cannot help.
+        parkTask(k, h, task.id, {
+          reason: "stuck",
+          detail: "the Engineer submitted an identical diff",
+          evidence: [{ type: "commit", ref: head }],
+        });
+        return;
+      }
       k.identicalTree.set(task.id, identical);
       if (contractSha !== undefined && task.provides_contract !== undefined) {
         k.emit(h, {
@@ -687,19 +782,31 @@ const acceptEngineer = async (
 };
 
 /** Once every reviewer of this head reported (§6.3 step 7), triage the round (step 8). */
-const triageIfComplete = async (k: Kernel, h: RunHandle, taskId: string, ctx: EvidenceContext): Promise<void> => {
+const triageIfComplete = async (
+  k: Kernel,
+  h: RunHandle,
+  taskId: string,
+  ctx: EvidenceContext,
+): Promise<void> => {
   const task = h.state.tasks.get(taskId);
   const built = lastBuilt(h.state, taskId);
   if (task?.status !== "verifying" || built === undefined) return;
   const since = built.closedSeq ?? 0;
-  const slots = reviewersFor(task, h.state.run, taskAcceptanceCriteria(k.deps.repoRoot, h.state, taskId));
+  const slots = reviewersFor(
+    task,
+    h.state.run,
+    taskAcceptanceCriteria(k.deps.repoRoot, h.state, taskId),
+  );
   const runs = [...h.state.roleRuns.values()].filter(
-    (r) => r.task === taskId && isReviewer(r) && r.status === "submitted" && (r.closedSeq ?? 0) > since,
+    (r) =>
+      r.task === taskId && isReviewer(r) && r.status === "submitted" && (r.closedSeq ?? 0) > since,
   );
   const complete = slots.every((slot) =>
     slot.role === "visual_qa"
       ? runs.filter((r) => r.role === "visual_qa").length >= VISUAL_QA_CALLS
-      : runs.some((r) => r.role === slot.role && r.mode === slot.mode && r.subject === slot.subject),
+      : runs.some(
+          (r) => r.role === slot.role && r.mode === slot.mode && r.subject === slot.subject,
+        ),
   );
   if (!complete) return;
   const round = Math.max(1, task.round);
@@ -709,10 +816,12 @@ const triageIfComplete = async (k: Kernel, h: RunHandle, taskId: string, ctx: Ev
     const result = loadResult(k.deps.repoRoot, r.action_id);
     if (result === undefined) continue;
     const drafts = result.findings.map((d) => findingFromDraft(d, r.role, { task: taskId, round }));
-    for (const f of drafts) fresh.push((await resolves(ctx, f.evidence)) ? f : { ...f, status: "discarded" });
+    for (const f of drafts)
+      fresh.push((await resolves(ctx, f.evidence)) ? f : { ...f, status: "discarded" });
     if (r.role !== "visual_qa" && drafts.length === 0) {
       for (const v of result.verdicts) {
-        if (v.verdict !== "pass") fresh.push(findingFromVerdict(v, r.role, { task: taskId, round, fallbackPath }));
+        if (v.verdict !== "pass")
+          fresh.push(findingFromVerdict(v, r.role, { task: taskId, round, fallbackPath }));
       }
     }
   }
@@ -738,14 +847,24 @@ const acceptReviewer = async (
   result: RoleResult,
 ): Promise<StepOutcome> => {
   const built = lastBuilt(h.state, task.id);
-  if (task.worktree === undefined || built?.head === undefined) return reject("out_of_order", ["no built head to review"]);
+  if (task.worktree === undefined || built?.head === undefined)
+    return reject("out_of_order", ["no built head to review"]);
   if (await k.deps.workspace.isDirty(task.worktree)) {
     await k.deps.workspace.discard(task.worktree, built.head);
-    return reject("write_scope", ["a read-only reviewer changed files in the task worktree (discarded)"]);
+    return reject("write_scope", [
+      "a read-only reviewer changed files in the task worktree (discarded)",
+    ]);
   }
   const ctx = evidenceContext(k, h, built.head);
-  const missing = await unresolved(ctx, [...result.claims, ...result.verdicts.flatMap((v) => v.evidence)]);
-  if (missing.length > 0) return reject("claim_check", missing.map((m) => `does not resolve: ${m}`));
+  const missing = await unresolved(ctx, [
+    ...result.claims,
+    ...result.verdicts.flatMap((v) => v.evidence),
+  ]);
+  if (missing.length > 0)
+    return reject(
+      "claim_check",
+      missing.map((m) => `does not resolve: ${m}`),
+    );
   return { kind: "accept", after: () => triageIfComplete(k, h, task.id, ctx) };
 };
 
@@ -754,7 +873,9 @@ const outOfOrder = (h: RunHandle, run: RoleRunRecord, task: Task | undefined): s
   if (h.state.run.finished_at !== undefined) return "the run has finished";
   if (run.task === undefined) {
     const phase = PHASE_OF_ROLE[run.role];
-    return phase !== undefined && h.state.run.phase !== phase ? `the run is in ${h.state.run.phase}, not ${phase}` : null;
+    return phase !== undefined && h.state.run.phase !== phase
+      ? `the run is in ${h.state.run.phase}, not ${phase}`
+      : null;
   }
   if (task === undefined) return `no task ${run.task}`;
   const expected: readonly string[] =
@@ -767,7 +888,12 @@ const outOfOrder = (h: RunHandle, run: RoleRunRecord, task: Task | undefined): s
 };
 
 /** A subagent that hit a limit, lost auth or crashed (§6.9, AD-4 rule 5). */
-const handleFailure = (k: Kernel, h: RunHandle, run: RoleRunRecord, outcome: HostFailureOutcome): void => {
+const handleFailure = (
+  k: Kernel,
+  h: RunHandle,
+  run: RoleRunRecord,
+  outcome: HostFailureOutcome,
+): void => {
   if (outcome.kind === "limit") {
     recordLimit(k, h, run, outcome);
     recordSpend(k, h, run, outcome.cost_usd);
@@ -799,16 +925,29 @@ const handleFailure = (k: Kernel, h: RunHandle, run: RoleRunRecord, outcome: Hos
 };
 
 /** Handles a `submit`. Callers run it inside the run's lock. */
-export const handleSubmit = async (k: Kernel, h: RunHandle, input: SubmitInput): Promise<SubmitOutcome> => {
+export const handleSubmit = async (
+  k: Kernel,
+  h: RunHandle,
+  input: SubmitInput,
+): Promise<SubmitOutcome> => {
   const run = h.state.roleRuns.get(input.action_id);
   if (run === undefined) {
-    return { accepted: false, rejection: rejection("unknown_action", [`no dispatched action ${input.action_id}`]) };
+    return {
+      accepted: false,
+      rejection: rejection("unknown_action", [`no dispatched action ${input.action_id}`]),
+    };
   }
   if (run.status === "submitted") {
-    return { accepted: false, rejection: rejection("duplicate", [`action ${input.action_id} was already submitted`]) };
+    return {
+      accepted: false,
+      rejection: rejection("duplicate", [`action ${input.action_id} was already submitted`]),
+    };
   }
   if (run.status !== "in_flight") {
-    return { accepted: false, rejection: rejection("stale_action", [`action ${input.action_id} is ${run.status}`]) };
+    return {
+      accepted: false,
+      rejection: rejection("stale_action", [`action ${input.action_id} is ${run.status}`]),
+    };
   }
   if (input.kind === "failure") {
     handleFailure(k, h, run, input.outcome);
@@ -819,7 +958,12 @@ export const handleSubmit = async (k: Kernel, h: RunHandle, input: SubmitInput):
     logRejection(k, h, run, outcome.rejection);
     const task = run.task;
     if (outcome.findings !== undefined && task !== undefined) {
-      settleRound(k, h, task, recordRoundFindings(k, h, task, outcome.findings, new Set(["write_scope"])));
+      settleRound(
+        k,
+        h,
+        task,
+        recordRoundFindings(k, h, task, outcome.findings, new Set(["write_scope"])),
+      );
     } else {
       stepFailed(k, h, run);
     }
@@ -836,9 +980,15 @@ export const handleSubmit = async (k: Kernel, h: RunHandle, input: SubmitInput):
   return { accepted: true };
 };
 
-const evaluate = async (k: Kernel, h: RunHandle, run: RoleRunRecord, result: RoleResult): Promise<StepOutcome> => {
+const evaluate = async (
+  k: Kernel,
+  h: RunHandle,
+  run: RoleRunRecord,
+  result: RoleResult,
+): Promise<StepOutcome> => {
   const contract = k.deps.roles.get(run.role);
-  if (contract === undefined) return reject("dispatch_mismatch", [`no contract for role ${run.role}`]);
+  if (contract === undefined)
+    return reject("dispatch_mismatch", [`no contract for role ${run.role}`]);
   const effective = resolveRoleMode(contract, run.mode);
   if (!effective.ok) return reject("undeclared_mode", [effective.error]);
   const conformance = checkResultAgainstContract(result, effective.contract, {

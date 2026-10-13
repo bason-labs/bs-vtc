@@ -31,10 +31,18 @@ interface GhPr {
   readonly state?: string;
   readonly headRefOid?: string;
   readonly mergeCommit?: { readonly oid?: string } | null;
-  readonly statusCheckRollup?: readonly { readonly conclusion?: string; readonly status?: string; readonly state?: string }[];
+  readonly statusCheckRollup?: readonly {
+    readonly conclusion?: string;
+    readonly status?: string;
+    readonly state?: string;
+  }[];
 }
 
-const run = (cwd: string, command: string, args: readonly string[]): Promise<{ code: number; stdout: string; stderr: string }> =>
+const run = (
+  cwd: string,
+  command: string,
+  args: readonly string[],
+): Promise<{ code: number; stdout: string; stderr: string }> =>
   new Promise((resolve, reject) => {
     const child = spawn(command, [...args], {
       cwd,
@@ -55,7 +63,11 @@ const run = (cwd: string, command: string, args: readonly string[]): Promise<{ c
 export const ciFromRollup = (rollup: GhPr["statusCheckRollup"]): PullRequestCi => {
   if (rollup === undefined || rollup.length === 0) return "unknown";
   const values = rollup.map((c) => (c.conclusion ?? c.state ?? c.status ?? "").toUpperCase());
-  if (values.some((v) => ["FAILURE", "ERROR", "CANCELLED", "TIMED_OUT", "ACTION_REQUIRED"].includes(v))) {
+  if (
+    values.some((v) =>
+      ["FAILURE", "ERROR", "CANCELLED", "TIMED_OUT", "ACTION_REQUIRED"].includes(v),
+    )
+  ) {
     return "red";
   }
   if (values.every((v) => ["SUCCESS", "NEUTRAL", "SKIPPED"].includes(v))) return "green";
@@ -93,14 +105,29 @@ export const createGhPullRequests = (repoRoot: string, command = "gh"): PullRequ
   };
   const checked = async (args: readonly string[]): Promise<void> => {
     const result = await run(repoRoot, command, args);
-    if (result.code !== 0) throw new Error(`${command} ${args[0] ?? ""} ${args[1] ?? ""} failed: ${result.stderr.trim().slice(0, 300)}`);
+    if (result.code !== 0)
+      throw new Error(
+        `${command} ${args[0] ?? ""} ${args[1] ?? ""} failed: ${result.stderr.trim().slice(0, 300)}`,
+      );
   };
   return {
     view,
     upsertDraft: async (request) => {
       const existing = await view(request.branch);
       if (existing === null) {
-        await checked(["pr", "create", "--draft", "--base", request.base, "--head", request.branch, "--title", request.title, "--body", request.body]);
+        await checked([
+          "pr",
+          "create",
+          "--draft",
+          "--base",
+          request.base,
+          "--head",
+          request.branch,
+          "--title",
+          request.title,
+          "--body",
+          request.body,
+        ]);
       } else if (existing.state === "open") {
         await checked(["pr", "edit", request.branch, "--body", request.body]);
       }

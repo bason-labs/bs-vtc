@@ -13,7 +13,12 @@ import {
   type ArtifactContent,
   type GitOps,
 } from "@vtc/shared";
-import { createReadModel, loadRuns, type ReadModel, type ReadResult } from "../../src/core/index.js";
+import {
+  createReadModel,
+  loadRuns,
+  type ReadModel,
+  type ReadResult,
+} from "../../src/core/index.js";
 
 const fixture = new URL("../../../../fixtures/golden-run/", import.meta.url);
 const api = (name: string): unknown =>
@@ -153,8 +158,14 @@ describe("golden replay: events.jsonl rebuilds every read route's snapshot (AD-7
   it("answers unknown runs, tasks and scopes with not_found or bad_request", () => {
     expect(model.tasks("nope")).toMatchObject({ ok: false, code: "not_found" });
     expect(model.task("golden-1", "T-9")).toMatchObject({ ok: false, code: "not_found" });
-    expect(model.graph("golden-1", "bogus", undefined)).toMatchObject({ ok: false, code: "bad_request" });
-    expect(model.graph("golden-1", "task", undefined)).toMatchObject({ ok: false, code: "bad_request" });
+    expect(model.graph("golden-1", "bogus", undefined)).toMatchObject({
+      ok: false,
+      code: "bad_request",
+    });
+    expect(model.graph("golden-1", "task", undefined)).toMatchObject({
+      ok: false,
+      code: "bad_request",
+    });
     expect(model.events("golden-1", -1, 10)).toMatchObject({ ok: false, code: "bad_request" });
   });
   it("a replay with tampered plan-file frontmatter produces the same state (AD-7 rule 8)", () => {

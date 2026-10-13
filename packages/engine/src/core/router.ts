@@ -78,7 +78,8 @@ export const reviewersFor = (
     });
   }
   const tags = [...task.risk_tags];
-  const security = task.risk === "high" || tags.some((t) => (SECURITY_TAGS as readonly string[]).includes(t));
+  const security =
+    task.risk === "high" || tags.some((t) => (SECURITY_TAGS as readonly string[]).includes(t));
   if (security) {
     slots.push({
       id: "security-verify",
@@ -170,16 +171,26 @@ export interface RiskHit {
  */
 export const diffRiskHits = (input: DiffRiskInput): RiskHit[] => {
   const hits: RiskHit[] = [];
-  const paths = input.files.flatMap((f) => (f.oldPath === undefined ? [f.path] : [f.path, f.oldPath]));
+  const paths = input.files.flatMap((f) =>
+    f.oldPath === undefined ? [f.path] : [f.path, f.oldPath],
+  );
   const matching = (globs: readonly string[]): string[] =>
     paths.filter((p) => globs.some((g) => globMatch(g, p)));
   const sensitive = matching([...SENSITIVE_AREA_GLOBS, ...input.riskRules.paths]);
   if (sensitive.length > 0) {
-    hits.push({ rule: "sensitive_area", detail: "changes auth, RBAC, crypto, payments or a configured risk path", paths: sensitive });
+    hits.push({
+      rule: "sensitive_area",
+      detail: "changes auth, RBAC, crypto, payments or a configured risk path",
+      paths: sensitive,
+    });
   }
   const migrations = matching(MIGRATION_GLOBS);
   if (migrations.length > 0) {
-    hits.push({ rule: "db_migration", detail: "adds or changes a database migration", paths: migrations });
+    hits.push({
+      rule: "db_migration",
+      detail: "adds or changes a database migration",
+      paths: migrations,
+    });
   }
   if (input.newDependencies.length > 0) {
     hits.push({
@@ -190,9 +201,16 @@ export const diffRiskHits = (input: DiffRiskInput): RiskHit[] => {
   }
   const protectedConfig = matching(PROTECTED_CONFIG_GLOBS);
   if (protectedConfig.length > 0) {
-    hits.push({ rule: "protected_config", detail: "edits CI/CD, IaC, Docker, hooks, host/VTC, lint or test config", paths: protectedConfig });
+    hits.push({
+      rule: "protected_config",
+      detail: "edits CI/CD, IaC, Docker, hooks, host/VTC, lint or test config",
+      paths: protectedConfig,
+    });
   }
-  if (input.changedLines > input.riskRules.max_diff_lines || input.files.length > input.riskRules.max_diff_files) {
+  if (
+    input.changedLines > input.riskRules.max_diff_lines ||
+    input.files.length > input.riskRules.max_diff_files
+  ) {
     hits.push({
       rule: "large_diff",
       detail: `${String(input.changedLines)} lines in ${String(input.files.length)} files exceeds ${String(input.riskRules.max_diff_lines)} lines or ${String(input.riskRules.max_diff_files)} files`,

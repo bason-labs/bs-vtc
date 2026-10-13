@@ -49,8 +49,7 @@ export const projectGraph = (state: RunState): WorkflowGraph => {
   const nodes: WorkflowNode[] = PHASES.map((phase, index) => {
     const id = nodeId(phase);
     const human = phase === "g1" || phase === "g2";
-    const skipped =
-      phase === "discover" && state.run.track === "quick_fix" && index < current;
+    const skipped = phase === "discover" && state.run.track === "quick_fix" && index < current;
     const nodeState: WorkflowNodeState = skipped
       ? "skipped"
       : index < current || (finished && index === current)
@@ -69,9 +68,7 @@ export const projectGraph = (state: RunState): WorkflowGraph => {
       ...(human ? {} : { subflow: `phase-${id}` }),
     };
   });
-  const edges = PHASES.slice(1).map((phase, i) =>
-    edge(nodeId(PHASES[i] ?? phase), nodeId(phase)),
-  );
+  const edges = PHASES.slice(1).map((phase, i) => edge(nodeId(PHASES[i] ?? phase), nodeId(phase)));
   return { id: `${nodeId(state.id)}-phases`, scope: "project", nodes, edges };
 };
 
@@ -211,7 +208,9 @@ const stageStates = (state: RunState, task: Task): StageView => {
   const at = (stage: Stage): number => STAGES.indexOf(stage);
   const runs = [...state.roleRuns.values()].filter((r) => r.task === task.id);
   const reviewerRun = (slot: ReviewerSlot) =>
-    runs.filter((r) => r.role === slot.role && r.subject === slot.subject && r.mode === slot.mode).at(-1);
+    runs
+      .filter((r) => r.role === slot.role && r.subject === slot.subject && r.mode === slot.mode)
+      .at(-1);
   const linear = (current: number, currentState: WorkflowNodeState) => (stage: Stage) => {
     const index = at(stage);
     if (index < current) return "passed";
@@ -245,7 +244,10 @@ const stageStates = (state: RunState, task: Task): StageView => {
       };
     case "verifying": {
       const gated = state.gateReports.some(
-        (r) => r.report.task === task.id && r.report.reason === "round" && r.seq > lastSubmitSeq(state, task.id),
+        (r) =>
+          r.report.task === task.id &&
+          r.report.reason === "round" &&
+          r.seq > lastSubmitSeq(state, task.id),
       );
       const current = gated ? at("reviewers") : at("gates");
       return {

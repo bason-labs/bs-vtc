@@ -4,4 +4,6 @@
  * same routes in read-only snapshot mode (AD-12). Dashboard files come from an injected
  * `AssetBundle`. A transport: it calls engine core, never the reverse.
  */
-export {};
+export { checkHostAndOrigin, createHttpApi, type HttpApi, type HttpApiOptions } from "./server.js";
+export { createPrototypeServer, type PrototypeServer } from "./prototype.js";
+export { createSessionStore, randomToken, sameSecret, type SessionStore } from "./sessions.js";

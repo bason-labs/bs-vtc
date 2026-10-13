@@ -6,7 +6,7 @@
  */
 import { existsSync, mkdirSync, rmSync } from "node:fs";
 import { join } from "node:path";
-import { gitText, runGit } from "./exec.js";
+import { gitText, runGit, withRepoLock } from "./exec.js";
 
 export const WORKTREES_DIR = ".vtc/state/worktrees";
 
@@ -27,9 +27,17 @@ export interface Workspace {
    * The feature's integration branch and its worktree: creates `branch` at `base` and checks it out
    * in `.vtc/state/worktrees/<id>` when missing. Returns the worktree and the branch head.
    */
-  ensureIntegration(id: string, branch: string, base: string): Promise<{ worktree: string; head: string }>;
+  ensureIntegration(
+    id: string,
+    branch: string,
+    base: string,
+  ): Promise<{ worktree: string; head: string }>;
   /** The task's worktree on a new branch at `base` (or the existing one). */
-  ensureTaskWorktree(id: string, branch: string, base: string): Promise<{ worktree: string; head: string }>;
+  ensureTaskWorktree(
+    id: string,
+    branch: string,
+    base: string,
+  ): Promise<{ worktree: string; head: string }>;
   /**
    * Commits everything in the worktree (AD-8 rule 14: roles never need to commit) and returns the
    * new head; the current head when nothing changed.
@@ -68,6 +76,10 @@ export const createWorkspace = (repoRoot: string): Workspace => {
       };
     })());
   const abs = (rel: string): string => join(repoRoot, rel);
+  const locked =
+    <A extends unknown[], R>(fn: (...args: A) => Promise<R>) =>
+    (...args: A): Promise<R> =>
+      withRepoLock(repoRoot, () => fn(...args));
   const ensureWorktree = async (
     id: string,
     branch: string,
@@ -96,9 +108,9 @@ export const createWorkspace = (repoRoot: string): Workspace => {
     repoRoot,
     resolve: (ref) => gitText(repoRoot, ["rev-parse", "--verify", `${ref}^{commit}`]),
     branchExists,
-    ensureIntegration: ensureWorktree,
-    ensureTaskWorktree: ensureWorktree,
-    snapshot: async (worktree, message) => {
+    ensureIntegration: locked(ensureWorktree),
+    ensureTaskWorktree: locked(ensureWorktree),
+    snapshot: locked(async (worktree: string, message: string) => {
       const cwd = abs(worktree);
       await runGit(cwd, ["add", "--all"]);
       const staged = await runGit(cwd, ["diff", "--cached", "--quiet"], { allowFailure: true });
@@ -108,15 +120,15 @@ export const createWorkspace = (repoRoot: string): Workspace => {
         });
       }
       return gitText(cwd, ["rev-parse", "HEAD"]);
-    },
+    }),
     isDirty: async (worktree) =>
       (await gitText(abs(worktree), ["status", "--porcelain", "--untracked-files=all"])) !== "",
-    discard: async (worktree, head) => {
+    discard: locked(async (worktree: string, head: string) => {
       await runGit(abs(worktree), ["reset", "--hard", "--quiet", head]);
       await runGit(abs(worktree), ["clean", "-fd", "--quiet"]);
-    },
+    }),
     treeOf: (commit) => gitText(repoRoot, ["rev-parse", `${commit}^{tree}`]),
-    rebase: async (worktree, onto) => {
+    rebase: locked(async (worktree: string, onto: string): Promise<MergeOutcome> => {
       const cwd = abs(worktree);
       const result = await runGit(cwd, ["rebase", "--quiet", onto], {
         allowFailure: true,
@@ -127,40 +139,42 @@ export const createWorkspace = (repoRoot: string): Workspace => {
         return { ok: false, conflict: true, detail: result.stderr.trim().slice(0, 500) };
       }
       return { ok: true, commit: await gitText(cwd, ["rev-parse", "HEAD"]) };
-    },
-    merge: async (worktree, branch, message) => {
-      const cwd = abs(worktree);
-      const result = await runGit(
-        cwd,
-        ["merge", "--no-ff", "--no-verify", "--quiet", "-m", message, branch],
-        { allowFailure: true, env: await commitEnv() },
-      );
-      if (result.code !== 0) {
-        await runGit(cwd, ["merge", "--abort"], { allowFailure: true });
-        return { ok: false, conflict: true, detail: result.stderr.trim().slice(0, 500) };
-      }
-      return { ok: true, commit: await gitText(cwd, ["rev-parse", "HEAD"]) };
-    },
+    }),
+    merge: locked(
+      async (worktree: string, branch: string, message: string): Promise<MergeOutcome> => {
+        const cwd = abs(worktree);
+        const result = await runGit(
+          cwd,
+          ["merge", "--no-ff", "--no-verify", "--quiet", "-m", message, branch],
+          { allowFailure: true, env: await commitEnv() },
+        );
+        if (result.code !== 0) {
+          await runGit(cwd, ["merge", "--abort"], { allowFailure: true });
+          return { ok: false, conflict: true, detail: result.stderr.trim().slice(0, 500) };
+        }
+        return { ok: true, commit: await gitText(cwd, ["rev-parse", "HEAD"]) };
+      },
+    ),
     isAncestor: async (ancestor, commit) =>
       (
         await runGit(repoRoot, ["merge-base", "--is-ancestor", ancestor, commit], {
           allowFailure: true,
         })
       ).code === 0,
-    push: async (remote, branch) => {
+    push: locked(async (remote: string, branch: string) => {
       const result = await runGit(repoRoot, ["push", "--quiet", remote, `${branch}:${branch}`], {
         allowFailure: true,
       });
       return { ok: result.code === 0, detail: result.stderr.trim().slice(0, 500) };
-    },
+    }),
     remoteUrl: async (remote) => {
       const url = await gitText(repoRoot, ["remote", "get-url", remote], { allowFailure: true });
       return url === "" ? null : url;
     },
-    removeWorktree: async (worktree) => {
+    removeWorktree: locked(async (worktree: string) => {
       await runGit(repoRoot, ["worktree", "remove", "--force", worktree], { allowFailure: true });
       if (existsSync(abs(worktree))) rmSync(abs(worktree), { recursive: true, force: true });
       await runGit(repoRoot, ["worktree", "prune"], { allowFailure: true });
-    },
+    }),
   };
 };

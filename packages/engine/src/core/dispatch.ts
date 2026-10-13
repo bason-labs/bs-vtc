@@ -61,7 +61,9 @@ export const phaseRoles = (h: RunHandle, phase: Phase): { role: string; mode?: s
   const run = h.state.run;
   switch (phase) {
     case "discover":
-      return run.track === "quick_fix" ? [] : [{ role: run.repo === "existing" ? "repo_cartographer" : "research_analyst" }];
+      return run.track === "quick_fix"
+        ? []
+        : [{ role: run.repo === "existing" ? "repo_cartographer" : "research_analyst" }];
     case "specify":
       return [{ role: "ba" }];
     case "design":
@@ -74,9 +76,16 @@ export const phaseRoles = (h: RunHandle, phase: Phase): { role: string; mode?: s
 };
 
 /** The latest answer to an escalation of this task given after `afterSeq`. */
-const freshAnswer = (h: RunHandle, task: string, afterSeq: number): EscalationAnswer | undefined => {
+const freshAnswer = (
+  h: RunHandle,
+  task: string,
+  afterSeq: number,
+): EscalationAnswer | undefined => {
   const answered = h.state.events.filter(
-    (e) => e.type === "escalation.answered" && e.seq > afterSeq && h.state.escalations.get((e.data as { escalation: string }).escalation)?.task === task,
+    (e) =>
+      e.type === "escalation.answered" &&
+      e.seq > afterSeq &&
+      h.state.escalations.get((e.data as { escalation: string }).escalation)?.task === task,
   );
   const last = answered.at(-1);
   return last === undefined ? undefined : (last.data as { answer: EscalationAnswer }).answer;
@@ -88,23 +97,44 @@ const lastDispatchSeq = (h: RunHandle, task: string, role: string): number =>
     .reduce((max, r) => Math.max(max, r.seq), 0);
 
 /** Rejection issues of the step's last run, so the re-dispatch can fix them. */
-const rejectionNote = (h: RunHandle, filter: { role: string; mode?: string; task?: string; subject?: string }): string | undefined => {
+const rejectionNote = (
+  h: RunHandle,
+  filter: { role: string; mode?: string; task?: string; subject?: string },
+): string | undefined => {
   const last = [...h.state.roleRuns.values()]
-    .filter((r) => r.role === filter.role && r.mode === filter.mode && r.task === filter.task && r.subject === filter.subject)
+    .filter(
+      (r) =>
+        r.role === filter.role &&
+        r.mode === filter.mode &&
+        r.task === filter.task &&
+        r.subject === filter.subject,
+    )
     .at(-1);
   if (last?.status !== "rejected" || last.rejection === undefined) return undefined;
   return `Your previous result was rejected (${last.rejection.reason}): ${last.rejection.issues.join("; ")}`;
 };
 
-const interruptedSession = (h: RunHandle, filter: { role: string; task?: string }): SessionRef | undefined => {
-  const last = [...h.state.roleRuns.values()].filter((r) => r.role === filter.role && r.task === filter.task).at(-1);
+const interruptedSession = (
+  h: RunHandle,
+  filter: { role: string; task?: string },
+): SessionRef | undefined => {
+  const last = [...h.state.roleRuns.values()]
+    .filter((r) => r.role === filter.role && r.task === filter.task)
+    .at(-1);
   if (last?.status !== "interrupted") return undefined;
   return h.state.limit?.sessionRef ?? undefined;
 };
 
-const busyStep = (h: RunHandle, step: { role: string; mode?: string; task?: string; subject?: string }): boolean =>
+const busyStep = (
+  h: RunHandle,
+  step: { role: string; mode?: string; task?: string; subject?: string },
+): boolean =>
   inFlight(h.state).some(
-    (r) => r.role === step.role && r.mode === step.mode && r.task === step.task && r.subject === step.subject,
+    (r) =>
+      r.role === step.role &&
+      r.mode === step.mode &&
+      r.task === step.task &&
+      r.subject === step.subject,
   );
 
 /** Steps of one task that need a role run now. */
@@ -121,12 +151,28 @@ const taskSteps = (k: Kernel, h: RunHandle, taskId: string, host: HostId): StepS
     return steps;
   }
   if (task.status === "tests_authored" || task.status === "building" || task.status === "fixing") {
-    if (busyStep(h, { role: "engineer", task: taskId }) || busyStep(h, { role: "qa", mode: "author", task: taskId })) return [];
+    if (
+      busyStep(h, { role: "engineer", task: taskId }) ||
+      busyStep(h, { role: "qa", mode: "author", task: taskId })
+    )
+      return [];
     const fixingSince = statusEnteredSeq(h.state, taskId, "fixing") ?? 0;
-    const badTests = taskFindings(h.state, taskId).filter((f) => f.status === "open" && f.route === "bad_test");
-    const qaSince = lastSubmitted(h.state, { role: "qa", mode: "author", task: taskId }, fixingSince);
+    const badTests = taskFindings(h.state, taskId).filter(
+      (f) => f.status === "open" && f.route === "bad_test",
+    );
+    const qaSince = lastSubmitted(
+      h.state,
+      { role: "qa", mode: "author", task: taskId },
+      fixingSince,
+    );
     if (task.status === "fixing" && badTests.length > 0 && qaSince === undefined) {
-      steps.push({ key: `qa-fix:${taskId}`, role: "qa", mode: "author", task: taskId, findings: badTests });
+      steps.push({
+        key: `qa-fix:${taskId}`,
+        role: "qa",
+        mode: "author",
+        task: taskId,
+        findings: badTests,
+      });
       return steps;
     }
     const round = task.status === "tests_authored" ? 1 : Math.max(1, task.round);
@@ -144,11 +190,17 @@ const taskSteps = (k: Kernel, h: RunHandle, taskId: string, host: HostId): StepS
       task: taskId,
       tier: plan.tier,
       ...(resume === undefined ? {} : { resume }),
-      findings: taskFindings(h.state, taskId).filter((f) => f.status === "open" && (f.route === "patch" || f.route === "out_of_scope")),
+      findings: taskFindings(h.state, taskId).filter(
+        (f) => f.status === "open" && (f.route === "patch" || f.route === "out_of_scope"),
+      ),
       ...(answer === undefined ? {} : { answer }),
       ...(note === undefined ? {} : { note }),
       ...(task.status === "tests_authored"
-        ? { onDispatch: () => { setTaskStatus(k, h, taskId, "building", { round: 1 }); } }
+        ? {
+            onDispatch: () => {
+              setTaskStatus(k, h, taskId, "building", { round: 1 });
+            },
+          }
         : {}),
     });
     return steps;
@@ -157,11 +209,19 @@ const taskSteps = (k: Kernel, h: RunHandle, taskId: string, host: HostId): StepS
     const built = lastBuilt(h.state, taskId);
     if (built?.head === undefined || k.isRunning(`gates:${taskId}`)) return [];
     const gated = h.state.gateReports.some(
-      (r) => r.report.task === taskId && r.report.reason === "round" && r.report.head === built.head && r.report.verdict === "pass",
+      (r) =>
+        r.report.task === taskId &&
+        r.report.reason === "round" &&
+        r.report.head === built.head &&
+        r.report.verdict === "pass",
     );
     if (!gated) return [];
     const drop = budgetState(task.spent_usd, task.budget_usd) === "reviewers_drop";
-    for (const slot of reviewersFor(task, h.state.run, taskAcceptanceCriteria(k.deps.repoRoot, h.state, taskId))) {
+    for (const slot of reviewersFor(
+      task,
+      h.state.run,
+      taskAcceptanceCriteria(k.deps.repoRoot, h.state, taskId),
+    )) {
       const filter = {
         role: slot.role,
         ...(slot.mode === undefined ? {} : { mode: slot.mode }),
@@ -170,8 +230,15 @@ const taskSteps = (k: Kernel, h: RunHandle, taskId: string, host: HostId): StepS
       };
       if (slot.role === "visual_qa") {
         // three independent calls: count the accepted ones since the head was built
-        const done = runsOf(h.state, taskId).filter((r) => r.role === "visual_qa" && r.status === "submitted" && (r.closedSeq ?? 0) > (built.closedSeq ?? 0)).length;
-        const flying = inFlight(h.state).filter((r) => r.role === "visual_qa" && r.task === taskId).length;
+        const done = runsOf(h.state, taskId).filter(
+          (r) =>
+            r.role === "visual_qa" &&
+            r.status === "submitted" &&
+            (r.closedSeq ?? 0) > (built.closedSeq ?? 0),
+        ).length;
+        const flying = inFlight(h.state).filter(
+          (r) => r.role === "visual_qa" && r.task === taskId,
+        ).length;
         const index = Number(slot.id.split("-").at(-1));
         if (index <= done + flying) continue;
       } else {
@@ -179,7 +246,8 @@ const taskSteps = (k: Kernel, h: RunHandle, taskId: string, host: HostId): StepS
         if (lastSubmitted(h.state, filter, built.closedSeq ?? 0) !== undefined) continue;
       }
       const contract = k.deps.roles.get(slot.role);
-      const tier = contract !== undefined && drop ? tierDown(roleTier(contract, host, slot.mode)) : undefined;
+      const tier =
+        contract !== undefined && drop ? tierDown(roleTier(contract, host, slot.mode)) : undefined;
       const note = rejectionNote(h, filter);
       steps.push({
         key: `review:${taskId}:${slot.id}`,
@@ -200,7 +268,9 @@ export const pendingSteps = (k: Kernel, h: RunHandle, host: HostId): StepSpec[] 
   const phaseRoleList = phaseRoles(h, phase);
   if (phaseRoleList.length > 0) {
     const entered = phaseEnteredSeq(state, phase) ?? 0;
-    const blocked = [...state.escalations.values()].some((e) => e.phase === phase && e.answer === undefined);
+    const blocked = [...state.escalations.values()].some(
+      (e) => e.phase === phase && e.answer === undefined,
+    );
     if (blocked) return [];
     return phaseRoleList.flatMap(({ role, mode }) => {
       const filter = { role, ...(mode === undefined ? {} : { mode }) };
@@ -242,7 +312,9 @@ const phaseAnswer = (h: RunHandle, phase: Phase, role: string): EscalationAnswer
   if (last?.answer === undefined) return undefined;
   const answeredSeq =
     h.state.events.find(
-      (e) => e.type === "escalation.answered" && (e.data as { escalation: string }).escalation === last.id,
+      (e) =>
+        e.type === "escalation.answered" &&
+        (e.data as { escalation: string }).escalation === last.id,
     )?.seq ?? 0;
   return answeredSeq > since ? last.answer : undefined;
 };
@@ -264,7 +336,10 @@ const packFor = (k: Kernel, h: RunHandle, step: StepSpec, actionId: string): Tas
     step.role === "engineer"
       ? (task?.files_scope ?? [])
       : step.role === "qa" && step.mode === "author"
-        ? [...(gates?.tests.acceptance_globs ?? DEFAULT_ACCEPTANCE_GLOBS), `${HIDDEN_TESTS.stagingDir}/${step.task ?? ""}/**`]
+        ? [
+            ...(gates?.tests.acceptance_globs ?? DEFAULT_ACCEPTANCE_GLOBS),
+            `${HIDDEN_TESTS.stagingDir}/${step.task ?? ""}/**`,
+          ]
         : (contract?.tools.write_paths ?? []);
   const inputs: TaskPackInput["inputs"] = [];
   if (task === undefined && ["discover", "specify"].includes(state.run.phase)) {
@@ -272,14 +347,26 @@ const packFor = (k: Kernel, h: RunHandle, step: StepSpec, actionId: string): Tas
   }
   if (task !== undefined && step.role === "engineer") {
     const qa = lastQaAuthor(state, task.id);
-    for (const a of (state.events.find((e) => e.type === "role.submitted" && (e.data as { action_id?: string }).action_id === qa?.action_id)?.data as { artifacts?: { type: string; path: string }[] } | undefined)?.artifacts ?? []) {
+    for (const a of (
+      state.events.find(
+        (e) =>
+          e.type === "role.submitted" &&
+          (e.data as { action_id?: string }).action_id === qa?.action_id,
+      )?.data as { artifacts?: { type: string; path: string }[] } | undefined
+    )?.artifacts ?? []) {
       if (a.type === "acceptance_test") inputs.push({ type: a.type, path: a.path });
     }
   }
-  for (const consumed of task?.consumes_contracts ?? []) inputs.push({ type: "interface_contract", path: consumed.path });
+  for (const consumed of task?.consumes_contracts ?? [])
+    inputs.push({ type: "interface_contract", path: consumed.path });
   for (const gate of state.run.gates.G1.frozen.concat(state.run.gates.G2.frozen)) {
-    const type = gate.path.startsWith(".vtc/spec/") ? "spec" : gate.path.startsWith(".vtc/architecture/") ? "architecture" : "design";
-    if (task !== undefined || state.run.phase === "plan" || state.run.phase === "design") inputs.push({ type, path: gate.path });
+    const type = gate.path.startsWith(".vtc/spec/")
+      ? "spec"
+      : gate.path.startsWith(".vtc/architecture/")
+        ? "architecture"
+        : "design";
+    if (task !== undefined || state.run.phase === "plan" || state.run.phase === "design")
+      inputs.push({ type, path: gate.path });
   }
   return {
     v: 1,
@@ -290,7 +377,9 @@ const packFor = (k: Kernel, h: RunHandle, step: StepSpec, actionId: string): Tas
     ...(step.task === undefined ? {} : { task: step.task }),
     ...(task === undefined ? {} : { feature: task.feature }),
     ...(step.subject === undefined ? {} : { subject: step.subject }),
-    ...(step.task === undefined || state.intents.get(step.task) === undefined ? {} : { intent: state.intents.get(step.task) }),
+    ...(step.task === undefined || state.intents.get(step.task) === undefined
+      ? {}
+      : { intent: state.intents.get(step.task) }),
     requirements,
     decisions: [],
     inputs,

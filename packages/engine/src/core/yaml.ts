@@ -91,7 +91,10 @@ export const parseScalar = (raw: string, line: number): unknown => {
     for (const part of splitFlow(text.slice(1, -1), line)) {
       const colon = findColon(part);
       if (colon < 0) throw new YamlError(`expected key: value in ${part}`, line);
-      out[String(parseScalar(part.slice(0, colon), line))] = parseScalar(part.slice(colon + 1), line);
+      out[String(parseScalar(part.slice(0, colon), line))] = parseScalar(
+        part.slice(colon + 1),
+        line,
+      );
     }
     return out;
   }
@@ -133,7 +136,11 @@ const parseBlock = (lines: readonly Line[], start: number, indent: number): [unk
           items.push(value);
           i = after;
         }
-      } else if (findColon(rest) >= 0 && !rest.trim().startsWith("[") && !rest.trim().startsWith("{")) {
+      } else if (
+        findColon(rest) >= 0 &&
+        !rest.trim().startsWith("[") &&
+        !rest.trim().startsWith("{")
+      ) {
         // A mapping that starts on the dash line: re-read it with the dash as indentation.
         const inner: Line[] = [{ indent: indent + 2, text: rest, number: line.number }];
         let j = i + 1;
@@ -165,7 +172,10 @@ const parseBlock = (lines: readonly Line[], start: number, indent: number): [unk
     const rest = line.text.slice(colon + 1).trim();
     if (rest === "") {
       const next = lines[i + 1];
-      if (next !== undefined && (next.indent > indent || (next.indent === indent && next.text.startsWith("- ")))) {
+      if (
+        next !== undefined &&
+        (next.indent > indent || (next.indent === indent && next.text.startsWith("- ")))
+      ) {
         const [value, after] = parseBlock(lines, i + 1, next.indent);
         map[key] = value;
         i = after;
@@ -193,17 +203,22 @@ export const parseYaml = (text: string): unknown => {
     }
   }
   const lines: Line[] = [];
-  text.replace(/\r\n/g, "\n").split("\n").forEach((raw, index) => {
-    if (raw.includes("\t") && /^\s*\t/.test(raw)) throw new YamlError("tabs are not allowed for indentation", index + 1);
-    const content = stripComment(raw);
-    if (content.trim() === "" ) return;
-    if (content.trim() === "---" || content.trim() === "...") {
-      if (lines.length > 0) throw new YamlError("multiple documents are not supported", index + 1);
-      return;
-    }
-    const indent = content.length - content.trimStart().length;
-    lines.push({ indent, text: content.trim(), number: index + 1 });
-  });
+  text
+    .replace(/\r\n/g, "\n")
+    .split("\n")
+    .forEach((raw, index) => {
+      if (raw.includes("\t") && /^\s*\t/.test(raw))
+        throw new YamlError("tabs are not allowed for indentation", index + 1);
+      const content = stripComment(raw);
+      if (content.trim() === "") return;
+      if (content.trim() === "---" || content.trim() === "...") {
+        if (lines.length > 0)
+          throw new YamlError("multiple documents are not supported", index + 1);
+        return;
+      }
+      const indent = content.length - content.trimStart().length;
+      lines.push({ indent, text: content.trim(), number: index + 1 });
+    });
   if (lines.length === 0) return null;
   const [value, end] = parseBlock(lines, 0, lines[0]?.indent ?? 0);
   const leftover = lines[end];
@@ -240,13 +255,20 @@ export const toYaml = (value: unknown, indent = 0): string => {
       .join("");
   }
   if (value !== null && typeof value === "object") {
-    const entries = Object.entries(value as Record<string, unknown>).filter(([, v]) => v !== undefined);
+    const entries = Object.entries(value as Record<string, unknown>).filter(
+      ([, v]) => v !== undefined,
+    );
     if (entries.length === 0) return `${pad}{}\n`;
     return entries
       .map(([key, v]) => {
         const k = plain.test(key) ? key : JSON.stringify(key);
         if (Array.isArray(v) && v.length === 0) return `${pad}${k}: []\n`;
-        if (v !== null && typeof v === "object" && !Array.isArray(v) && Object.keys(v).length === 0) {
+        if (
+          v !== null &&
+          typeof v === "object" &&
+          !Array.isArray(v) &&
+          Object.keys(v).length === 0
+        ) {
           return `${pad}${k}: {}\n`;
         }
         if (v !== null && typeof v === "object") return `${pad}${k}:\n${toYaml(v, indent + 2)}`;

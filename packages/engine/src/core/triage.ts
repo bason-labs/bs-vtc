@@ -126,7 +126,11 @@ export const findingFromGateFailure = (result: GateResult, ctx: TriageContext): 
     title: `Gate ${result.gate_id} (${result.layer}) ${result.status === "error" ? "errored" : "failed"}`,
     ...(result.monotonic.length > 0
       ? {
-          message: `metrics got worse: ${result.monotonic.map((m) => `${m.kind}${m.test === undefined ? "" : ` ${m.test}`}`).join(", ")}`.slice(0, 4000),
+          message:
+            `metrics got worse: ${result.monotonic.map((m) => `${m.kind}${m.test === undefined ? "" : ` ${m.test}`}`).join(", ")}`.slice(
+              0,
+              4000,
+            ),
         }
       : {}),
     severity,
@@ -135,6 +139,38 @@ export const findingFromGateFailure = (result: GateResult, ctx: TriageContext): 
     evidence,
     req_ids: [],
     route: routeForFinding({ source: "tool", category, severity }),
+    ...scope(ctx),
+    round_first_seen: ctx.round,
+    status: "open",
+  };
+};
+
+/** One failing test of an L2 run (from the Gate Runner's test inventory). */
+export const findingFromFailingTest = (
+  result: GateResult,
+  testId: string,
+  inventory: string,
+  ctx: TriageContext,
+): Finding => {
+  const severity = normalizeSeverity({ source: "role", category: "correctness" });
+  const rule = `test.${result.gate_id}`;
+  return {
+    fingerprint: fingerprintFinding({
+      rule_id: rule,
+      path: `tests/${result.gate_id}`,
+      symbol: testId,
+    }),
+    source: "tool",
+    source_name: result.gate_id,
+    rule_id: rule,
+    category: "correctness",
+    title: `Failing test: ${testId}`.slice(0, 200),
+    severity,
+    confidence: 1,
+    location: { path: inventory, symbol: testId.slice(0, 512) },
+    evidence: { type: "test", ref: testId },
+    req_ids: [],
+    route: routeForFinding({ source: "tool", category: "correctness", severity }),
     ...scope(ctx),
     round_first_seen: ctx.round,
     status: "open",
@@ -166,7 +202,8 @@ export const findingFromVerdict = (
   const category = VERDICT_CATEGORY[role] ?? "spec_mismatch";
   const severity = normalizeSeverity({ source: "role", category });
   const evidence = verdict.evidence[0] ?? { type: "spec_ref", ref: verdict.subject };
-  const path = verdict.evidence.map(pathOfEvidence).find((p) => p !== undefined) ?? ctx.fallbackPath;
+  const path =
+    verdict.evidence.map(pathOfEvidence).find((p) => p !== undefined) ?? ctx.fallbackPath;
   const rule = `verdict.${verdict.subject}`;
   return {
     fingerprint: fingerprintFinding({ rule_id: rule, path, symbol: verdict.subject }),
@@ -181,7 +218,12 @@ export const findingFromVerdict = (
     location: { path, symbol: verdict.subject },
     evidence,
     req_ids: /^(REQ|SEC)-/.test(verdict.subject) ? [verdict.subject] : [],
-    route: routeForFinding({ source: "role", category, kind: "implementation_deviation", severity }),
+    route: routeForFinding({
+      source: "role",
+      category,
+      kind: "implementation_deviation",
+      severity,
+    }),
     ...scope(ctx),
     round_first_seen: ctx.round,
     status: "open",

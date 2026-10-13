@@ -56,7 +56,13 @@ import { limitWait, maybeAutoResume } from "./limits.js";
 import { ACTIVE_TASK_STATUSES } from "./machines.js";
 import { applyAnswer, setTaskStatus } from "./parking.js";
 import { writePlanFile, writeRequestFile } from "./projections.js";
-import { inFlight, lastBuilt, lastSubmitted, nextEscalationId, phaseEnteredSeq } from "./queries.js";
+import {
+  inFlight,
+  lastBuilt,
+  lastSubmitted,
+  nextEscalationId,
+  phaseEnteredSeq,
+} from "./queries.js";
 import { activeRun } from "./read-model.js";
 import { loadRuns } from "./run-store.js";
 import { schedule } from "./scheduler.js";
@@ -71,7 +77,15 @@ const sha256File = (path: string): string | undefined =>
 const significant = (before: UsageSnapshot | undefined, after: UsageSnapshot): boolean => {
   if (before === undefined) return true;
   const key = (s: UsageSnapshot): string =>
-    JSON.stringify([s.source, s.windows.map((w) => [w.kind, w.used_pct === null ? null : Math.floor(w.used_pct), w.resets_at]), s.model_limits.map((m) => [m.model, m.resets_at])]);
+    JSON.stringify([
+      s.source,
+      s.windows.map((w) => [
+        w.kind,
+        w.used_pct === null ? null : Math.floor(w.used_pct),
+        w.resets_at,
+      ]),
+      s.model_limits.map((m) => [m.model, m.resets_at]),
+    ]);
   return key(before) !== key(after);
 };
 
@@ -98,18 +112,29 @@ export class Engine implements Kernel {
         engine.finished.set(state.id, state);
         continue;
       }
-      const log = openEventLog(deps.repoRoot, state.id, deps.lock, { now: deps.now, secrets: () => engine.secrets() });
+      const log = openEventLog(deps.repoRoot, state.id, deps.lock, {
+        now: deps.now,
+        secrets: () => engine.secrets(),
+      });
       const handle: RunHandle = { state, log };
       engine.handles.set(state.id, handle);
       const damaged = log.recovered.invalidLines.length > 0 || log.recovered.truncatedTail;
-      const reported = state.events.some((e) => e.type === "incident.recorded" && (e.data as { kind?: string }).kind === "log_corruption" && JSON.stringify((e.data as { invalid_lines?: number[] }).invalid_lines ?? []) === JSON.stringify(log.recovered.invalidLines));
+      const reported = state.events.some(
+        (e) =>
+          e.type === "incident.recorded" &&
+          (e.data as { kind?: string }).kind === "log_corruption" &&
+          JSON.stringify((e.data as { invalid_lines?: number[] }).invalid_lines ?? []) ===
+            JSON.stringify(log.recovered.invalidLines),
+      );
       if (damaged && !reported) {
         engine.emit(handle, {
           type: "incident.recorded",
           actor: "engine",
           data: {
             kind: "log_corruption",
-            detail: log.recovered.truncatedTail ? "the log ended in a torn line (an unclean stop); it was fenced off" : "the log has lines that do not parse",
+            detail: log.recovered.truncatedTail
+              ? "the log ended in a torn line (an unclean stop); it was fenced off"
+              : "the log has lines that do not parse",
             invalid_lines: [...log.recovered.invalidLines],
           },
         });
@@ -151,7 +176,8 @@ export class Engine implements Kernel {
   emit(handle: RunHandle, draft: EventDraft): VtcEvent {
     const event = handle.log.append(draft);
     applyEvent(handle.state, event);
-    if (event.type === "run.started") writeRequestFile(this.deps.repoRoot, handle.state, this.secrets());
+    if (event.type === "run.started")
+      writeRequestFile(this.deps.repoRoot, handle.state, this.secrets());
     if (event.task !== undefined && handle.state.tasks.has(event.task)) {
       writePlanFile(this.deps.repoRoot, handle.state, event.task, this.secrets());
     }
@@ -179,7 +205,14 @@ export class Engine implements Kernel {
           this.emit(handle, {
             type: "incident.recorded",
             actor: "engine",
-            data: { kind: "crash", detail: `background job ${key} failed: ${error instanceof Error ? error.message : String(error)}`.slice(0, 2000) },
+            data: {
+              kind: "crash",
+              detail:
+                `background job ${key} failed: ${error instanceof Error ? error.message : String(error)}`.slice(
+                  0,
+                  2000,
+                ),
+            },
           });
           return Promise.resolve();
         });
@@ -203,7 +236,10 @@ export class Engine implements Kernel {
   serial<T>(handle: RunHandle, fn: () => Promise<T>): Promise<T> {
     const previous = this.chains.get(handle.state.id) ?? Promise.resolve();
     const next = previous.then(fn, fn);
-    this.chains.set(handle.state.id, next.catch(() => undefined));
+    this.chains.set(
+      handle.state.id,
+      next.catch(() => undefined),
+    );
     return next;
   }
 
@@ -221,7 +257,9 @@ export class Engine implements Kernel {
 
   /** Every run, oldest first (the read model's source). */
   states(): RunState[] {
-    return [...this.allStates()].sort((a, b) => a.run.started_at.localeCompare(b.run.started_at) || a.id.localeCompare(b.id));
+    return [...this.allStates()].sort(
+      (a, b) => a.run.started_at.localeCompare(b.run.started_at) || a.id.localeCompare(b.id),
+    );
   }
 
   onEvent(listener: EventListener): () => void {
@@ -237,12 +275,39 @@ export class Engine implements Kernel {
 
   /** True while a run has work or a job runs (the daemon's idle exit waits for this, AD-12 rule 4). */
   hasWork(): boolean {
-    return this.jobs.size > 0 || [...this.handles.values()].some((h) => h.state.run.finished_at === undefined);
+    return (
+      this.jobs.size > 0 ||
+      [...this.handles.values()].some((h) => h.state.run.finished_at === undefined)
+    );
+  }
+
+  /** Background work or role runs in flight: the daemon does not idle out (AD-12 rule 4). */
+  busy(): boolean {
+    return (
+      this.jobs.size > 0 || [...this.handles.values()].some((h) => inFlight(h.state).length > 0)
+    );
+  }
+
+  /**
+   * An incident report (§15): an unclean end found on start (a stale lock, a torn log). Recorded
+   * in the active run's log, so the run summary and the dashboard show it.
+   */
+  recordIncident(kind: "crash" | "kill" | "stale_lock", detail: string): void {
+    const state = activeRun([...this.handles.values()].map((h) => h.state));
+    const handle = state === undefined ? undefined : this.handles.get(state.id);
+    if (handle === undefined) return;
+    this.emit(handle, {
+      type: "incident.recorded",
+      actor: "engine",
+      data: { kind, detail: detail.slice(0, 2000) },
+    });
   }
 
   /** The next scheduled auto-resume across runs, if any (the daemon keeps the timer, §6.9). */
   autoResumeAt(): string | null {
-    const times = [...this.handles.values()].map((h) => h.state.limit?.autoResumeAt ?? null).filter((t): t is string => t !== null);
+    const times = [...this.handles.values()]
+      .map((h) => h.state.limit?.autoResumeAt ?? null)
+      .filter((t): t is string => t !== null);
     return times.sort()[0] ?? null;
   }
 
@@ -257,7 +322,11 @@ export class Engine implements Kernel {
   }
 
   private phaseTo(handle: RunHandle, to: Phase): void {
-    this.emit(handle, { type: "run.phase_changed", actor: "engine", data: { from: handle.state.run.phase, to } });
+    this.emit(handle, {
+      type: "run.phase_changed",
+      actor: "engine",
+      data: { from: handle.state.run.phase, to },
+    });
   }
 
   /** One pass of `advance`; true when something changed. */
@@ -267,34 +336,58 @@ export class Engine implements Kernel {
     const roles = phaseRoles(handle, phase);
     if (["discover", "specify", "design"].includes(phase)) {
       const entered = phaseEnteredSeq(state, phase) ?? 0;
-      const done = roles.every(({ role, mode }) => lastSubmitted(state, { role, ...(mode === undefined ? {} : { mode }) }, entered)?.exit === "done");
+      const done = roles.every(
+        ({ role, mode }) =>
+          lastSubmitted(state, { role, ...(mode === undefined ? {} : { mode }) }, entered)?.exit ===
+          "done",
+      );
       if (!done) return false;
       if (phase === "discover") this.phaseTo(handle, "specify");
-      else if (phase === "specify") this.phaseTo(handle, state.run.track === "quick_fix" ? "design" : "g1");
+      else if (phase === "specify")
+        this.phaseTo(handle, state.run.track === "quick_fix" ? "design" : "g1");
       else this.phaseTo(handle, "g2");
       return true;
     }
     if (!["build", "integrate", "final_review", "release"].includes(phase)) return false;
     let changed = this.scheduleTasks(handle);
     for (const task of state.tasks.values()) {
-      if (task.status === "ready" && task.worktree === undefined && !this.isRunning(`ws:${task.id}`)) ensureWorkspace(this, handle, task.id);
+      if (
+        task.status === "ready" &&
+        task.worktree === undefined &&
+        !this.isRunning(`ws:${task.id}`)
+      )
+        ensureWorkspace(this, handle, task.id);
       if (task.status === "verifying" && !this.isRunning(`gates:${task.id}`)) {
         const built = lastBuilt(state, task.id);
-        const gated = state.gateReports.some((r) => r.report.task === task.id && r.report.reason === "round" && r.report.head === built?.head);
+        const gated = state.gateReports.some(
+          (r) =>
+            r.report.task === task.id &&
+            r.report.reason === "round" &&
+            r.report.head === built?.head,
+        );
         if (built?.head !== undefined && !gated) startRoundGates(this, handle, task.id, built.head);
       }
     }
-    if ([...state.tasks.values()].some((t) => t.status === "queued") && !state.run.paused) startMergeQueue(this, handle);
+    if ([...state.tasks.values()].some((t) => t.status === "queued") && !state.run.paused)
+      startMergeQueue(this, handle);
     for (const feature of state.features.values()) {
-      const tasks = feature.tasks.map((id) => state.tasks.get(id)).filter((t) => t !== undefined && t.status !== "dropped");
+      const tasks = feature.tasks
+        .map((id) => state.tasks.get(id))
+        .filter((t) => t !== undefined && t.status !== "dropped");
       if (tasks.length === 0) {
         if (feature.tasks.length > 0 && state.run.finished_at === undefined) {
-          this.emit(handle, { type: "run.finished", actor: "engine", data: { outcome: "aborted" } });
+          this.emit(handle, {
+            type: "run.finished",
+            actor: "engine",
+            data: { outcome: "aborted" },
+          });
           return false;
         }
         continue;
       }
-      const codeComplete = tasks.every((t) => ["built", "queued", "merged", "done"].includes(t?.status ?? ""));
+      const codeComplete = tasks.every((t) =>
+        ["built", "queued", "merged", "done"].includes(t?.status ?? ""),
+      );
       const merged = tasks.every((t) => ["merged", "done"].includes(t?.status ?? ""));
       if (feature.status === "building" && codeComplete) {
         setFeatureStatus(this, handle, feature.id, "integrating");
@@ -302,15 +395,27 @@ export class Engine implements Kernel {
         changed = true;
       }
       const current = state.features.get(feature.id);
-      if ((current?.status === "integrating" || current?.status === "fixing") && merged && !state.run.paused) {
+      if (
+        (current?.status === "integrating" || current?.status === "fixing") &&
+        merged &&
+        !state.run.paused
+      ) {
         setFeatureStatus(this, handle, feature.id, "final_review");
         if (state.run.phase !== "final_review") this.phaseTo(handle, "final_review");
         startFinalReview(this, handle, feature.id);
         changed = true;
-      } else if (current?.status === "final_review" && !this.isRunning(`final:${feature.id}`) && !state.run.paused) {
+      } else if (
+        current?.status === "final_review" &&
+        !this.isRunning(`final:${feature.id}`) &&
+        !state.run.paused
+      ) {
         startFinalReview(this, handle, feature.id);
       }
-      if (state.features.get(feature.id)?.status === "ready_to_ship" && !this.isRunning(`release:${feature.id}`) && !state.run.paused) {
+      if (
+        state.features.get(feature.id)?.status === "ready_to_ship" &&
+        !this.isRunning(`release:${feature.id}`) &&
+        !state.run.paused
+      ) {
         if (state.run.phase !== "release") {
           this.phaseTo(handle, "release");
           changed = true;
@@ -324,7 +429,12 @@ export class Engine implements Kernel {
   /** The scheduler (§6.6): waiting tasks start when a slot, scopes and dependencies allow. */
   private scheduleTasks(handle: RunHandle): boolean {
     const state = handle.state;
-    if (state.run.phase !== "build" && state.run.phase !== "integrate" && state.run.phase !== "final_review") return false;
+    if (
+      state.run.phase !== "build" &&
+      state.run.phase !== "integrate" &&
+      state.run.phase !== "final_review"
+    )
+      return false;
     const config = this.config();
     const host = this.hostFor({ host: null });
     const fiveHour = this.usage.get(host)?.windows.find((w) => w.kind === "five_hour");
@@ -374,13 +484,19 @@ export class Engine implements Kernel {
 
   async start(input: StartInput, _call: CallContext): Promise<StartResult> {
     if ([...this.handles.values()].some((h) => h.state.run.finished_at === undefined)) {
-      throw new EngineError("run_active", "a run is already active in this repo; finish or pause it first");
+      throw new EngineError(
+        "run_active",
+        "a run is already active in this repo; finish or pause it first",
+      );
     }
     const config = this.config();
     const gates = this.gatesConfig();
     const track = config.track_default ?? input.track;
     const id = this.newRunId();
-    const log = openEventLog(this.deps.repoRoot, id, this.deps.lock, { now: this.deps.now, secrets: () => this.secrets() });
+    const log = openEventLog(this.deps.repoRoot, id, this.deps.lock, {
+      now: this.deps.now,
+      secrets: () => this.secrets(),
+    });
     const handle: RunHandle = { state: emptyRunState(id, this.now().toISOString()), log };
     this.handles.set(id, handle);
     return this.serial(handle, () => {
@@ -404,26 +520,48 @@ export class Engine implements Kernel {
   }
 
   private newRunId(): string {
-    const stamp = this.now().toISOString().replace(/[-:]/g, "").replace(/\..*$/, "").replace("T", "-");
+    const stamp = this.now()
+      .toISOString()
+      .replace(/[-:]/g, "")
+      .replace(/\..*$/, "")
+      .replace("T", "-");
     let id = `r${stamp}`;
-    for (let n = 2; this.handles.has(id) || this.finished.has(id) || existsSync(join(this.deps.repoRoot, ".vtc/runs", id)); n += 1) {
+    for (
+      let n = 2;
+      this.handles.has(id) ||
+      this.finished.has(id) ||
+      existsSync(join(this.deps.repoRoot, ".vtc/runs", id));
+      n += 1
+    ) {
       id = `r${stamp}-${String(n)}`;
     }
     return id;
   }
 
   /** The gates awaiting the human in this phase, with what to show (§6.2). */
-  private awaitingGates(handle: RunHandle): { gates: HumanGateId[]; artifacts: FrozenArtifact[] } | null {
+  private awaitingGates(
+    handle: RunHandle,
+  ): { gates: HumanGateId[]; artifacts: FrozenArtifact[] } | null {
     const state = handle.state;
     const phase = state.run.phase;
     if (phase !== "g1" && phase !== "g2") return null;
-    const gates: HumanGateId[] = phase === "g1" ? ["G1"] : state.run.track === "quick_fix" ? ["G1", "G2"] : ["G2"];
-    const roles = [...(gates.includes("G1") ? ["ba"] : []), ...(gates.includes("G2") ? ["architect", "designer"] : [])];
+    const gates: HumanGateId[] =
+      phase === "g1" ? ["G1"] : state.run.track === "quick_fix" ? ["G1", "G2"] : ["G2"];
+    const roles = [
+      ...(gates.includes("G1") ? ["ba"] : []),
+      ...(gates.includes("G2") ? ["architect", "designer"] : []),
+    ];
     const paths = new Set<string>();
     for (const role of roles) {
       const run = lastSubmitted(state, { role });
-      const submitted = state.events.find((e) => e.type === "role.submitted" && (e.data as { action_id?: string }).action_id === run?.action_id);
-      for (const a of (submitted?.data as { artifacts?: { path: string }[] } | undefined)?.artifacts ?? []) paths.add(a.path);
+      const submitted = state.events.find(
+        (e) =>
+          e.type === "role.submitted" &&
+          (e.data as { action_id?: string }).action_id === run?.action_id,
+      );
+      for (const a of (submitted?.data as { artifacts?: { path: string }[] } | undefined)
+        ?.artifacts ?? [])
+        paths.add(a.path);
     }
     const artifacts = [...paths].flatMap((path) => {
       const sha256 = sha256File(join(this.deps.repoRoot, path));
@@ -445,7 +583,13 @@ export class Engine implements Kernel {
     const actions: LeadAction[] = dispatchNow(this, handle, call);
     const gate = this.awaitingGates(handle);
     if (gate !== null) {
-      actions.push({ type: "approve_gate", gates: gate.gates, artifacts: gate.artifacts, design_directions: [], unverified_facts: [] });
+      actions.push({
+        type: "approve_gate",
+        gates: gate.gates,
+        artifacts: gate.artifacts,
+        design_directions: [],
+        unverified_facts: [],
+      });
     }
     const open = openEscalations(state);
     if (open.length > 0) actions.push({ type: "ask_human", escalations: open.map((e) => e.id) });
@@ -455,15 +599,36 @@ export class Engine implements Kernel {
 
   private waitAction(handle: RunHandle): LeadAction {
     const state = handle.state;
-    if (state.run.paused) return { type: "wait", reason: "the run is paused (vtc resume to continue)", until: null };
+    if (state.run.paused)
+      return { type: "wait", reason: "the run is paused (vtc resume to continue)", until: null };
     const limit = limitWait(this, handle);
-    if (limit !== null) return { type: "wait", reason: "a usage limit was hit; the engine resumes after the reset", until: limit };
+    if (limit !== null)
+      return {
+        type: "wait",
+        reason: "a usage limit was hit; the engine resumes after the reset",
+        until: limit,
+      };
     const flying = inFlight(state).length;
-    if (flying > 0) return { type: "wait", reason: `${String(flying)} role run(s) in flight; submit their results`, until: null };
-    const jobs = [...this.jobs.keys()].filter((k) => k.endsWith(state.id) || [...state.tasks.keys(), ...state.features.keys()].some((id) => k.endsWith(`:${id}`)));
-    if (jobs.length > 0) return { type: "wait", reason: `the engine is working (${jobs.join(", ")})`, until: null };
+    if (flying > 0)
+      return {
+        type: "wait",
+        reason: `${String(flying)} role run(s) in flight; submit their results`,
+        until: null,
+      };
+    const jobs = [...this.jobs.keys()].filter(
+      (k) =>
+        k.endsWith(state.id) ||
+        [...state.tasks.keys(), ...state.features.keys()].some((id) => k.endsWith(`:${id}`)),
+    );
+    if (jobs.length > 0)
+      return { type: "wait", reason: `the engine is working (${jobs.join(", ")})`, until: null };
     const parked = [...state.tasks.values()].filter((t) => t.status === "parked").length;
-    if (parked > 0) return { type: "wait", reason: `${String(parked)} task(s) parked; answer their escalations`, until: null };
+    if (parked > 0)
+      return {
+        type: "wait",
+        reason: `${String(parked)} task(s) parked; answer their escalations`,
+        until: null,
+      };
     return { type: "wait", reason: "nothing to dispatch right now", until: null };
   }
 
@@ -471,7 +636,9 @@ export class Engine implements Kernel {
     const state = this.stateOf(input.run);
     const handle = this.handles.get(state.id);
     if (handle === undefined) return { run: state.id, actions: this.actionsForFinished(state) };
-    return this.serial(handle, () => Promise.resolve({ run: state.id, actions: this.actionsFor(handle, call) }));
+    return this.serial(handle, () =>
+      Promise.resolve({ run: state.id, actions: this.actionsFor(handle, call) }),
+    );
   }
 
   private actionsForFinished(state: RunState): LeadAction[] {
@@ -496,7 +663,12 @@ export class Engine implements Kernel {
    * A `submit` whose input failed the schema (AD-4 Check): logged as `role.rejected` `schema`
    * when it names an open action, so the step is re-dispatched; `null` when it names none.
    */
-  async rejectMalformedSubmit(runId: string | undefined, actionId: string, issues: readonly string[], call: CallContext): Promise<SubmitResult | null> {
+  async rejectMalformedSubmit(
+    runId: string | undefined,
+    actionId: string,
+    issues: readonly string[],
+    call: CallContext,
+  ): Promise<SubmitResult | null> {
     let handle: RunHandle;
     try {
       handle = this.resolve(runId);
@@ -506,7 +678,10 @@ export class Engine implements Kernel {
     const run = handle.state.roleRuns.get(actionId);
     if (run?.status !== "in_flight") return null;
     return this.serial(handle, () => {
-      const rejection = { reason: "schema" as const, issues: issues.slice(0, 20).map((i) => i.slice(0, 500)) };
+      const rejection = {
+        reason: "schema" as const,
+        issues: issues.slice(0, 20).map((i) => i.slice(0, 500)),
+      };
       this.emit(handle, {
         type: "role.rejected",
         actor: "engine",
@@ -514,7 +689,12 @@ export class Engine implements Kernel {
         ...(run.task === undefined ? {} : { task: run.task }),
         data: { action_id: actionId, ...rejection },
       });
-      return Promise.resolve({ run: handle.state.id, accepted: false, rejection, actions: this.actionsFor(handle, call) });
+      return Promise.resolve({
+        run: handle.state.id,
+        accepted: false,
+        rejection,
+        actions: this.actionsFor(handle, call),
+      });
     });
   }
 
@@ -530,10 +710,15 @@ export class Engine implements Kernel {
     const handle = this.resolve(input.run);
     return this.serial(handle, () => {
       const escalation = handle.state.escalations.get(input.escalation);
-      if (escalation === undefined) throw new EngineError("invalid", `no escalation ${input.escalation}`);
-      if (escalation.answer !== undefined) throw new EngineError("conflict", `${input.escalation} is already answered`);
+      if (escalation === undefined)
+        throw new EngineError("invalid", `no escalation ${input.escalation}`);
+      if (escalation.answer !== undefined)
+        throw new EngineError("conflict", `${input.escalation} is already answered`);
       if (!escalation.options.some((o) => o.id === input.answer.option)) {
-        throw new EngineError("invalid", `option ${input.answer.option} is not one of ${escalation.options.map((o) => o.id).join(", ")}`);
+        throw new EngineError(
+          "invalid",
+          `option ${input.answer.option} is not one of ${escalation.options.map((o) => o.id).join(", ")}`,
+        );
       }
       this.emit(handle, {
         type: "escalation.answered",
@@ -557,7 +742,11 @@ export class Engine implements Kernel {
           },
         });
       }
-      if (escalation.feature !== undefined && escalation.task === undefined && handle.state.features.get(escalation.feature)?.status === "parked") {
+      if (
+        escalation.feature !== undefined &&
+        escalation.task === undefined &&
+        handle.state.features.get(escalation.feature)?.status === "parked"
+      ) {
         this.resumeFeature(handle, escalation.feature, effect);
       }
       applyAnswer(this, handle, escalation, input.answer);
@@ -571,21 +760,41 @@ export class Engine implements Kernel {
       this.emit(handle, { type: "run.finished", actor: "engine", data: { outcome: "aborted" } });
       return;
     }
-    const before = handle.state.events.findLast((e) => e.feature === featureId && e.type === "feature.status_changed" && (e.data as { to?: string }).to === "parked");
+    const before = handle.state.events.findLast(
+      (e) =>
+        e.feature === featureId &&
+        e.type === "feature.status_changed" &&
+        (e.data as { to?: string }).to === "parked",
+    );
     const from = (before?.data as { from?: string } | undefined)?.from;
-    setFeatureStatus(this, handle, featureId, from === "fixing" || from === "final_review" ? "final_review" : "integrating");
+    setFeatureStatus(
+      this,
+      handle,
+      featureId,
+      from === "fixing" || from === "final_review" ? "final_review" : "integrating",
+    );
   }
 
   async approve(input: ApproveInput, call: CallContext): Promise<NextResult> {
     const handle = this.resolve(input.run);
     return this.serial(handle, () => {
       const awaiting = this.awaitingGates(handle);
-      if (awaiting === null) throw new EngineError("conflict", `no gate is awaiting approval (phase ${handle.state.run.phase})`);
+      if (awaiting === null)
+        throw new EngineError(
+          "conflict",
+          `no gate is awaiting approval (phase ${handle.state.run.phase})`,
+        );
       const want = [...awaiting.gates].sort().join(",");
-      if ([...input.gates].sort().join(",") !== want) throw new EngineError("invalid", `the gates awaiting a decision are ${want}`);
+      if ([...input.gates].sort().join(",") !== want)
+        throw new EngineError("invalid", `the gates awaiting a decision are ${want}`);
       const shown = new Map(awaiting.artifacts.map((a) => [a.path, a.sha256]));
-      const problems = input.frozen.flatMap((f) => (shown.get(f.path) === f.sha256 ? [] : [`${f.path} is not shown at ${f.sha256.slice(0, 12)} (it changed or was not shown)`]));
-      for (const path of shown.keys()) if (!input.frozen.some((f) => f.path === path)) problems.push(`${path} must be frozen too`);
+      const problems = input.frozen.flatMap((f) =>
+        shown.get(f.path) === f.sha256
+          ? []
+          : [`${f.path} is not shown at ${f.sha256.slice(0, 12)} (it changed or was not shown)`],
+      );
+      for (const path of shown.keys())
+        if (!input.frozen.some((f) => f.path === path)) problems.push(`${path} must be frozen too`);
       if (problems.length > 0) throw new EngineError("conflict", problems.join("; "));
       const back: Phase = handle.state.run.phase === "g1" ? "specify" : "design";
       if (input.decision === "approve") {
@@ -595,7 +804,9 @@ export class Engine implements Kernel {
           data: {
             gates: input.gates,
             frozen: input.frozen,
-            ...(input.design_direction === undefined ? {} : { design_direction: input.design_direction }),
+            ...(input.design_direction === undefined
+              ? {}
+              : { design_direction: input.design_direction }),
             waived_facts: input.waived_facts,
             ...(input.note === undefined ? {} : { note: input.note }),
           },
@@ -621,12 +832,20 @@ export class Engine implements Kernel {
       let frozen: FrozenArtifact | undefined;
       if (input.artifact === "interface_contract") {
         const contract = input.task === undefined ? undefined : state.contracts.get(input.task);
-        frozen = contract === undefined ? undefined : { path: contract.path, sha256: contract.sha256 };
+        frozen =
+          contract === undefined ? undefined : { path: contract.path, sha256: contract.sha256 };
       } else {
-        const prefix = { spec: ".vtc/spec/", architecture: ".vtc/architecture/", design: ".vtc/design/" }[input.artifact];
-        frozen = [...state.run.gates.G1.frozen, ...state.run.gates.G2.frozen].find((f) => f.path.startsWith(prefix));
+        const prefix = {
+          spec: ".vtc/spec/",
+          architecture: ".vtc/architecture/",
+          design: ".vtc/design/",
+        }[input.artifact];
+        frozen = [...state.run.gates.G1.frozen, ...state.run.gates.G2.frozen].find((f) =>
+          f.path.startsWith(prefix),
+        );
       }
-      if (frozen === undefined) throw new EngineError("conflict", `no frozen ${input.artifact} to change`);
+      if (frozen === undefined)
+        throw new EngineError("conflict", `no frozen ${input.artifact} to change`);
       const id = nextEscalationId(state);
       const escalation = parkEscalation({
         id,
@@ -638,7 +857,17 @@ export class Engine implements Kernel {
         blocks: [],
         now: this.now(),
       });
-      this.emit(handle, { type: "escalation.opened", actor: "engine", ...(input.task === undefined ? {} : { task: input.task }), data: { escalation: { ...escalation, question: `Approve this change request? ${input.summary}`.slice(0, 1000) } } });
+      this.emit(handle, {
+        type: "escalation.opened",
+        actor: "engine",
+        ...(input.task === undefined ? {} : { task: input.task }),
+        data: {
+          escalation: {
+            ...escalation,
+            question: `Approve this change request? ${input.summary}`.slice(0, 1000),
+          },
+        },
+      });
       this.emit(handle, {
         type: "change_request.opened",
         actor: "human",
@@ -658,7 +887,11 @@ export class Engine implements Kernel {
     const handle = this.resolve(input.run);
     return this.serial(handle, () => {
       if (!handle.state.run.paused) {
-        this.emit(handle, { type: "run.paused", actor: "human", data: { reason: "vtc pause (kill switch)" } });
+        this.emit(handle, {
+          type: "run.paused",
+          actor: "human",
+          data: { reason: "vtc pause (kill switch)" },
+        });
       }
       return Promise.resolve({ run: handle.state.id, paused: true, phase: handle.state.run.phase });
     });
@@ -678,10 +911,16 @@ export class Engine implements Kernel {
           actor: "engine",
           role: run.role,
           ...(run.task === undefined ? {} : { task: run.task }),
-          data: { action_id: run.action_id, kind: "error", message: "superseded: the run was resumed", retryable: true },
+          data: {
+            action_id: run.action_id,
+            kind: "error",
+            message: "superseded: the run was resumed",
+            retryable: true,
+          },
         });
       }
-      if (state.run.paused) this.emit(handle, { type: "run.resumed", actor: "human", data: { auto: false } });
+      if (state.run.paused)
+        this.emit(handle, { type: "run.resumed", actor: "human", data: { auto: false } });
       maybeAutoResume(this, handle);
       this.advance(handle);
       return Promise.resolve({ run: state.id, paused: state.run.paused, phase: state.run.phase });
@@ -715,6 +954,11 @@ export class Engine implements Kernel {
 
   /** Active (non-terminal, non-waiting) tasks: the daemon stays up for them. */
   activeTasks(): number {
-    return [...this.handles.values()].reduce((n, h) => n + [...h.state.tasks.values()].filter((t) => ACTIVE_TASK_STATUSES.includes(t.status)).length, 0);
+    return [...this.handles.values()].reduce(
+      (n, h) =>
+        n +
+        [...h.state.tasks.values()].filter((t) => ACTIVE_TASK_STATUSES.includes(t.status)).length,
+      0,
+    );
   }
 }

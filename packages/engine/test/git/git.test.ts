@@ -125,14 +125,29 @@ describe("workspace: worktrees, snapshots, merges and pushes", () => {
 describe("pull requests via gh (parsing only; no network in tests)", () => {
   it("maps gh JSON to a PullRequestRef", () => {
     const sha = "a".repeat(40);
-    expect(pullRequestFromGh({ url: "https://github.com/o/r/pull/1", isDraft: true, state: "OPEN", headRefOid: sha, statusCheckRollup: [] })).toEqual({
+    expect(
+      pullRequestFromGh({
+        url: "https://github.com/o/r/pull/1",
+        isDraft: true,
+        state: "OPEN",
+        headRefOid: sha,
+        statusCheckRollup: [],
+      }),
+    ).toEqual({
       url: "https://github.com/o/r/pull/1",
       draft: true,
       state: "open",
       head_sha: sha,
       ci: "unknown",
     });
-    expect(pullRequestFromGh({ url: "https://x/1", state: "MERGED", headRefOid: sha, mergeCommit: { oid: "b".repeat(40) } })).toMatchObject({ state: "merged", merge_commit: "b".repeat(40) });
+    expect(
+      pullRequestFromGh({
+        url: "https://x/1",
+        state: "MERGED",
+        headRefOid: sha,
+        mergeCommit: { oid: "b".repeat(40) },
+      }),
+    ).toMatchObject({ state: "merged", merge_commit: "b".repeat(40) });
     expect(pullRequestFromGh({})).toBeNull();
   });
   it("reads CI from the status rollup", () => {

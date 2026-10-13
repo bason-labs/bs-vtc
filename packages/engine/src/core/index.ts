@@ -57,7 +57,13 @@ export {
 export { projectGraph, taskDagGraph, taskNodeState, taskPipelineGraph } from "./graph.js";
 export { Engine, type EventListener } from "./engine.js";
 export { EngineError, type CallContext, type EngineCoreDeps, type RunHandle } from "./kernel.js";
-export { BUILTIN_ROLES, createRoleRegistry, DEFAULT_TIER_MODELS, resolveModel, type RoleRegistry } from "./roles.js";
+export {
+  BUILTIN_ROLES,
+  createRoleRegistry,
+  DEFAULT_TIER_MODELS,
+  resolveModel,
+  type RoleRegistry,
+} from "./roles.js";
 export {
   ConfigError,
   DEFAULT_ACCEPTANCE_GLOBS,
@@ -70,3 +76,4 @@ export {
 export { parseYaml, toYaml, YamlError } from "./yaml.js";
 export { MAX_STEP_FAILURES } from "./submit.js";
 export { RESUME_JITTER_MS, MAX_LIMIT_BACKOFFS } from "./limits.js";
+export { INDEX_PATH, openEventIndex, type EventIndex } from "./event-index.js";

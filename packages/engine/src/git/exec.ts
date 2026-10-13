@@ -80,3 +80,21 @@ export const gitText = async (
   args: readonly string[],
   options: GitRunOptions = {},
 ): Promise<string> => (await runGit(cwd, args, options)).stdout.toString("utf8").trim();
+
+const repoLocks = new Map<string, Promise<unknown>>();
+
+/**
+ * Runs `fn` exclusively for one repository: worktree creation, commits, rebases, merges and
+ * pushes touch shared files under `.git/` (worktree list, refs, config), so concurrent jobs of
+ * one engine take turns.
+ */
+export const withRepoLock = <T>(repoRoot: string, fn: () => Promise<T>): Promise<T> => {
+  const previous = repoLocks.get(repoRoot) ?? Promise.resolve();
+  const next = previous.then(fn, fn);
+  const settled = next.catch(() => undefined);
+  repoLocks.set(repoRoot, settled);
+  void settled.then(() => {
+    if (repoLocks.get(repoRoot) === settled) repoLocks.delete(repoRoot);
+  });
+  return next;
+};

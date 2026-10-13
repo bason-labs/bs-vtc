@@ -34,7 +34,11 @@ const write = (repoRoot: string, path: string, content: string): void => {
 };
 
 /** `.vtc/runs/<run>/request.md` from `run.started.request`. */
-export const writeRequestFile = (repoRoot: string, state: RunState, secrets: readonly string[]): string => {
+export const writeRequestFile = (
+  repoRoot: string,
+  state: RunState,
+  secrets: readonly string[],
+): string => {
   const path = runRequestPath(state.id);
   write(repoRoot, path, `${redactSecrets(state.request, secrets).trimEnd()}\n`);
   return path;
@@ -73,7 +77,9 @@ export const writePlanFile = (
     `# ${task.id} ${task.title}`,
     "",
     "<intent-contract>",
-    intent === undefined ? "(engine-created task: see its source finding)" : toYaml(redactJson(intent, secrets)).trimEnd(),
+    intent === undefined
+      ? "(engine-created task: see its source finding)"
+      : toYaml(redactJson(intent, secrets)).trimEnd(),
     "</intent-contract>",
     "",
     "## Change log",
@@ -102,16 +108,27 @@ const ZERO_TOKENS: TokenUsage = { in: 0, out: 0, cache_r: 0, cache_w: 0 };
 const addTokens = (a: TokenUsage, b: TokenUsage | null): TokenUsage =>
   b === null
     ? a
-    : { in: a.in + b.in, out: a.out + b.out, cache_r: a.cache_r + b.cache_r, cache_w: a.cache_w + b.cache_w };
+    : {
+        in: a.in + b.in,
+        out: a.out + b.out,
+        cache_r: a.cache_r + b.cache_r,
+        cache_w: a.cache_w + b.cache_w,
+      };
 
 /** Spend of a set of role runs; `usd` is `null` when any run was unpriced (§11). */
 export const spendOf = (
-  runs: readonly { readonly tokens: TokenUsage | null; readonly costUsd: number | null; readonly status: string }[],
+  runs: readonly {
+    readonly tokens: TokenUsage | null;
+    readonly costUsd: number | null;
+    readonly status: string;
+  }[],
 ): { usd: number | null; tokens: TokenUsage } => {
   const done = runs.filter((r) => r.status === "submitted");
   const unpriced = done.some((r) => r.costUsd === null);
   return {
-    usd: unpriced ? null : Math.round(done.reduce((s, r) => s + (r.costUsd ?? 0), 0) * 10_000) / 10_000,
+    usd: unpriced
+      ? null
+      : Math.round(done.reduce((s, r) => s + (r.costUsd ?? 0), 0) * 10_000) / 10_000,
     tokens: done.reduce((t, r) => addTokens(t, r.tokens), ZERO_TOKENS),
   };
 };
@@ -143,7 +160,10 @@ export const readTraceability = (
     .at(-1);
   if (report !== undefined) {
     try {
-      const parsed = parsePersisted(TraceabilityReportSchema, JSON.parse(readFileSync(join(repoRoot, report), "utf8")));
+      const parsed = parsePersisted(
+        TraceabilityReportSchema,
+        JSON.parse(readFileSync(join(repoRoot, report), "utf8")),
+      );
       if (parsed.success) return parsed.data;
     } catch {
       // fall through to the gap report
@@ -169,7 +189,9 @@ export const writeTaskEvidenceBundle = (
   const task = state.tasks.get(taskId);
   if (task === undefined) return null;
   const runs = [...state.roleRuns.values()].filter((r) => r.task === taskId);
-  const findings = [...state.findings.values()].filter((r) => r.finding.task === taskId).map((r) => r.finding);
+  const findings = [...state.findings.values()]
+    .filter((r) => r.finding.task === taskId)
+    .map((r) => r.finding);
   const bundle = EvidenceBundleSchema.parse({
     kind: "task",
     run: state.id,
@@ -182,9 +204,16 @@ export const writeTaskEvidenceBundle = (
     findings: countFindings(findings),
     gate_reports: state.gateReports
       .filter((r) => r.report.task === taskId)
-      .flatMap((r) => r.report.results.flatMap((g) => (g.report === undefined ? [] : [g.report.path]))),
+      .flatMap((r) =>
+        r.report.results.flatMap((g) => (g.report === undefined ? [] : [g.report.path])),
+      ),
     verdicts: runs.flatMap((r) =>
-      r.verdicts.map((v) => ({ role: r.role, subject: v.subject, verdict: v.verdict, prompt_sha: r.prompt_sha })),
+      r.verdicts.map((v) => ({
+        role: r.role,
+        subject: v.subject,
+        verdict: v.verdict,
+        prompt_sha: r.prompt_sha,
+      })),
     ),
     spend: spendOf(runs),
     written_at: now.toISOString(),
@@ -219,12 +248,23 @@ export const writeFeatureEvidenceBundle = (
     kind: "feature",
     run: state.id,
     feature: featureId,
-    tasks: tasks.map((t) => ({ task: t.id, discipline: t.discipline, rounds: t.round, spend: spendOf(runsOf(t.id)) })),
+    tasks: tasks.map((t) => ({
+      task: t.id,
+      discipline: t.discipline,
+      rounds: t.round,
+      spend: spendOf(runsOf(t.id)),
+    })),
     by_discipline: disciplines.map((d) => ({
       discipline: d,
       spend: spendOf(tasks.filter((t) => t.discipline === d).flatMap((t) => runsOf(t.id))),
     })),
-    traceability: readTraceability(repoRoot, state, { feature: featureId }, [...new Set(tasks.flatMap((t) => t.covers))], now),
+    traceability: readTraceability(
+      repoRoot,
+      state,
+      { feature: featureId },
+      [...new Set(tasks.flatMap((t) => t.covers))],
+      now,
+    ),
     findings: countFindings(findings),
     deferred: findings.filter((f) => f.status === "deferred").map((f) => f.fingerprint),
     final_review: { verdict, rounds: feature.round },
@@ -247,10 +287,14 @@ export const bundleMarkdown = (bundle: EvidenceBundle): string => {
     "",
     "| Task | Discipline | Rounds | Spend |",
     "| --- | --- | --- | --- |",
-    ...bundle.tasks.map((t) => `| ${t.task} | ${t.discipline} | ${String(t.rounds)} | ${usd(t.spend.usd)} |`),
+    ...bundle.tasks.map(
+      (t) => `| ${t.task} | ${t.discipline} | ${String(t.rounds)} | ${usd(t.spend.usd)} |`,
+    ),
     "",
     `Requirements covered: ${String(bundle.traceability.rows.filter((r) => r.covered).length)}/${String(bundle.traceability.rows.length)}` +
-      (bundle.traceability.gaps.length > 0 ? ` (gaps: ${bundle.traceability.gaps.join(", ")})` : ""),
+      (bundle.traceability.gaps.length > 0
+        ? ` (gaps: ${bundle.traceability.gaps.join(", ")})`
+        : ""),
     `Findings: ${String(bundle.findings.open)} open, ${String(bundle.findings.resolved)} resolved, ${String(bundle.findings.deferred)} deferred, ${String(bundle.findings.waived)} waived`,
     `Spend: ${usd(bundle.spend.usd)}`,
     "",
@@ -267,7 +311,9 @@ export const writeRunSummary = (
   secrets: readonly string[],
 ): string => {
   const tasks = [...state.tasks.values()];
-  const unpriced = [...state.roleRuns.values()].filter((r) => r.status === "submitted" && r.costUsd === null);
+  const unpriced = [...state.roleRuns.values()].filter(
+    (r) => r.status === "submitted" && r.costUsd === null,
+  );
   const clarified = state.events.filter((e) => e.type === "spec.clarified").length;
   const lines = [
     `# Run ${state.id}`,
@@ -276,10 +322,15 @@ export const writeRunSummary = (
     "",
     "## Tasks",
     "",
-    ...tasks.map((t) => `- ${t.id} ${t.title}: ${t.status} (round ${String(t.round)}/${String(t.cap)}, $${t.spent_usd.toFixed(2)} of $${t.budget_usd.toFixed(2)})`),
+    ...tasks.map(
+      (t) =>
+        `- ${t.id} ${t.title}: ${t.status} (round ${String(t.round)}/${String(t.cap)}, $${t.spent_usd.toFixed(2)} of $${t.budget_usd.toFixed(2)})`,
+    ),
     "",
     `Role runs: ${String(roleRuns.length)}.`,
-    ...(unpriced.length > 0 ? [`Unpriced role runs (model missing from the price table): ${String(unpriced.length)}.`] : []),
+    ...(unpriced.length > 0
+      ? [`Unpriced role runs (model missing from the price table): ${String(unpriced.length)}.`]
+      : []),
     ...(clarified > 0 ? [`Wording-only spec clarifications: ${String(clarified)}.`] : []),
     "",
   ];

@@ -39,11 +39,14 @@ const readDoc = (repoRoot: string, path: string): unknown => {
   }
 };
 
-const issues = (error: { issues: readonly { path: readonly PropertyKey[]; message: string }[] }): string =>
+const issues = (error: {
+  issues: readonly { path: readonly PropertyKey[]; message: string }[];
+}): string =>
   error.issues.map((i) => `${i.path.map(String).join(".") || "(root)"}: ${i.message}`).join("; ");
 
 export const loadProjectConfig = (repoRoot: string): ProjectConfig => {
-  if (!existsSync(join(repoRoot, PROJECT_CONFIG_PATH))) return ProjectConfigSchema.parse({ version: 1 });
+  if (!existsSync(join(repoRoot, PROJECT_CONFIG_PATH)))
+    return ProjectConfigSchema.parse({ version: 1 });
   const parsed = parsePersisted(ProjectConfigSchema, readDoc(repoRoot, PROJECT_CONFIG_PATH) ?? {});
   if (!parsed.success) throw new ConfigError(PROJECT_CONFIG_PATH, issues(parsed.error));
   return parsed.data;
