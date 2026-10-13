@@ -6,12 +6,14 @@
  */
 import { createHash } from "node:crypto";
 import type {
+  GitChangedFile,
   GitOps,
   WriteScopeCheckRequest,
   WriteScopeReport,
   WriteScopeViolationKind,
 } from "@vtc/shared";
 import { matchesAny } from "./globs.js";
+import { guardedSections, isMixedConfig } from "./mixed-configs.js";
 import { DEFAULT_PROTECTED_GLOBS, SCANNER_CONFIG_GLOBS } from "./protected-globs.js";
 
 /** Test-skip markers on added lines: JS/TS runners, pytest/unittest, Go, JUnit, Rust (§7.2 L5). */
@@ -109,6 +111,27 @@ export const scanAddedLines = (diff: string): [WriteScopeViolationKind, string][
 
 type ScopeGit = Pick<GitOps, "changedFiles" | "diff" | "readFileAtCommit">;
 
+const decode = (bytes: Uint8Array | undefined): string | undefined =>
+  bytes === undefined ? undefined : new TextDecoder().decode(bytes);
+
+/**
+ * Whether a diff changed the tool sections of a `pyproject.toml` or `package.json` at `path` (one
+ * side of `file`): the base side is the path before a rename, the head side the path after it.
+ */
+const toolSectionsChanged = async (
+  git: ScopeGit,
+  request: WriteScopeCheckRequest,
+  file: GitChangedFile,
+  path: string,
+): Promise<boolean> => {
+  const isOld = file.oldPath === path;
+  const base = file.status === "added" || (file.oldPath !== undefined && !isOld) ? undefined : path;
+  const head = file.status === "deleted" || isOld ? undefined : path;
+  const before = base === undefined ? undefined : await git.readFileAtCommit(request.base, base);
+  const after = head === undefined ? undefined : await git.readFileAtCommit(request.head, head);
+  return guardedSections(path, decode(before)) !== guardedSections(path, decode(after));
+};
+
 /**
  * Runs the check. Violations are unique and sorted by path, then kind.
  *
@@ -116,8 +139,9 @@ type ScopeGit = Pick<GitOps, "changedFiles" | "diff" | "readFileAtCommit">;
  * `protectedGlobs` (lint, test and scanner configuration; default {@link DEFAULT_PROTECTED_GLOBS},
  * the runner adds the project's `tests.protected_configs`) is a violation, added files included:
  * a new nested `vitest.config.ts` or `.gitleaksignore` can weaken the gates as much as an edit.
- * A changed scanner config is a `new_suppression`. The only exception is a file the task's
- * `files_scope` names exactly (no wildcard), which is how a plan allows a config change.
+ * A changed scanner config is a `new_suppression`. A `pyproject.toml` or `package.json` is a
+ * violation only when its tool sections changed (`mixed-configs.ts`). The only exception is a file
+ * the task's `files_scope` names exactly (no wildcard), which is how a plan allows a config change.
  */
 export const checkWriteScope = async (
   git: ScopeGit,
@@ -142,7 +166,13 @@ export const checkWriteScope = async (
     for (const path of touched) {
       if (protectedPaths.has(path)) continue;
       if (!matchesAny(request.filesScope, path)) add("out_of_scope_write", path);
-      if (!matchesAny(protectedGlobs, path) || request.filesScope.includes(path)) continue;
+      if (request.filesScope.includes(path)) continue;
+      if (!matchesAny(protectedGlobs, path)) {
+        if (isMixedConfig(path) && (await toolSectionsChanged(git, request, file, path))) {
+          add(file.status === "deleted" ? "protected_deleted" : "protected_modified", path);
+        }
+        continue;
+      }
       const gone = file.status === "deleted" || file.oldPath === path;
       add(
         gone

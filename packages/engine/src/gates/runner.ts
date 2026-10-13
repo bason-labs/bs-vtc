@@ -63,6 +63,7 @@ import {
 import { gateEnv, runCommand, type ExecResult } from "./exec.js";
 import { matchesAny } from "./globs.js";
 import { countsOf, inventoryOf, monotonicViolations } from "./metrics.js";
+import { guardedSections, isMixedConfig, withBaseSections } from "./mixed-configs.js";
 import { diffCoveragePct, parseJsonFindings } from "./parsers/json-reports.js";
 import { parseJunit, type JunitCase } from "./parsers/junit.js";
 import { isSarif, parseSarif } from "./parsers/sarif.js";
@@ -475,8 +476,8 @@ class Run {
           ? [...SCANNER_CONFIG_GLOBS, ...prepared.configs]
           : [];
     const restore =
-      baseGlobs.length > 0 && checkoutAbs === this.checkoutAbs
-        ? await this.useBaseConfigs(checkoutAbs, baseGlobs)
+      (baseGlobs.length > 0 || gate.layer === "L1") && checkoutAbs === this.checkoutAbs
+        ? await this.useBaseConfigs(checkoutAbs, baseGlobs, gate.layer === "L1")
         : null;
     let exec: ExecResult;
     try {
@@ -501,27 +502,44 @@ class Run {
   /**
    * L1 lints with the base commit's config (§7.2), and the scanners scan with the base commit's
    * scanner configs: config files the diff changed are put back to their base version for the
-   * gate and restored afterwards, so a diff cannot silence the gates that verify it.
+   * gate and restored afterwards, so a diff cannot silence the gates that verify it. With
+   * `toolSections` (L1), a changed `pyproject.toml` or `package.json` keeps the head version
+   * except for its tool sections, which come from the base (`mixed-configs.ts`).
    */
   private async useBaseConfigs(
     checkoutAbs: string,
     globs: readonly string[],
+    toolSections: boolean,
   ): Promise<(() => void) | null> {
+    const pinned = (path: string): boolean =>
+      matchesAny(globs, path) || (toolSections && isMixedConfig(path));
     const touched = this.changed.filter(
-      (f) => matchesAny(globs, f.path) || (f.oldPath !== undefined && matchesAny(globs, f.oldPath)),
+      (f) => pinned(f.path) || (f.oldPath !== undefined && pinned(f.oldPath)),
     );
     if (touched.length === 0 || this.request.base === this.request.head) return null;
     const rel = relative(this.deps.repoRoot, checkoutAbs).split(sep).join("/");
     const saved: { path: string; head: Uint8Array | undefined }[] = [];
+    const decoder = new TextDecoder();
     for (const file of touched) {
       for (const path of file.oldPath === undefined ? [file.path] : [file.path, file.oldPath]) {
         const head = await this.deps.git.readFileAtCommit(this.request.head, path);
-        const base = await this.deps.git.readFileAtCommit(this.request.base, path);
+        let base = await this.deps.git.readFileAtCommit(this.request.base, path);
+        if (!matchesAny(globs, path)) {
+          if (!isMixedConfig(path)) continue;
+          const headText = head === undefined ? undefined : decoder.decode(head);
+          const baseText = base === undefined ? undefined : decoder.decode(base);
+          if (guardedSections(path, headText) === guardedSections(path, baseText)) continue;
+          // A deleted file comes back whole; otherwise only its tool sections change.
+          if (headText !== undefined) {
+            base = new TextEncoder().encode(withBaseSections(path, headText, baseText));
+          }
+        }
         saved.push({ path, head });
         if (base === undefined) removeRepoFile(this.deps.repoRoot, `${rel}/${path}`);
         else writeRepoFile(this.deps.repoRoot, `${rel}/${path}`, base);
       }
     }
+    if (saved.length === 0) return null;
     return () => {
       for (const { path, head } of saved) {
         if (head === undefined) removeRepoFile(this.deps.repoRoot, `${rel}/${path}`);

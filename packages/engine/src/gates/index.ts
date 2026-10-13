@@ -88,6 +88,7 @@ export {
   LINT_TEST_CONFIG_GLOBS,
   SCANNER_CONFIG_GLOBS,
 } from "./protected-globs.js";
+export { guardedSections, isMixedConfig, withBaseSections } from "./mixed-configs.js";
 export { classifyFailure, environmentSignatureLine, ENVIRONMENT_SIGNATURES } from "./classify.js";
 export {
   attemptId,

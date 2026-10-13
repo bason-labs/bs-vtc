@@ -2,7 +2,8 @@
  * Configuration files a diff could use to weaken the gates (§7.2 L1/L4/L5, §7.3, §7.6 rule 5).
  * `vtc calibrate` always writes all of them to `tests.protected_configs`, whether or not a match
  * exists yet; L5 flags every changed file that matches; L1 and the scanners run with the base
- * commit's version of any that the diff changed. Pure data.
+ * commit's version of any that the diff changed. Pure data. `pyproject.toml` and `package.json`
+ * also hold dependencies, so only their tool sections are guarded (`mixed-configs.ts`).
  */
 
 /** Lint, type-check and test configuration. */
@@ -13,14 +14,27 @@ export const LINT_TEST_CONFIG_GLOBS: readonly string[] = [
   "**/biome.jsonc",
   "**/vitest.config.*",
   "**/vitest.workspace.*",
+  // Vitest reads `test.include`/`exclude` from the Vite config when there is no vitest.config.
+  "**/vite.config.*",
   "**/jest.config.*",
+  "**/.mocharc*",
+  "**/.nycrc*",
+  "**/.c8rc*",
   "**/playwright.config.*",
   "**/tsconfig*.json",
   "**/pytest.ini",
   "**/conftest.py",
   "**/tox.ini",
+  "**/setup.cfg",
+  "**/.flake8",
   "**/ruff.toml",
   "**/.ruff.toml",
+  "**/mypy.ini",
+  "**/.mypy.ini",
+  "**/pyrightconfig.json",
+  "**/.pylintrc",
+  "**/pylintrc",
+  "**/.coveragerc",
   "**/.golangci.y*ml",
   "**/.dependency-cruiser.*",
 ];
