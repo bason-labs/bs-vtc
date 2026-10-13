@@ -51,7 +51,15 @@ export const runHostAdapterSafetyContract = (adapter: SafetyContractAdapter): vo
       "sandboxProfile(%s) never carries a bypass flag or credential marker (AD-9)",
       (_profile, tools) => {
         for (const network of ["none", "registries"] as const) {
-          const profile = profileFor(tools, network);
+          // a host may refuse a network it cannot scope (§7.2); what it returns must be clean
+          let profile: ReturnType<typeof profileFor>;
+          try {
+            profile = profileFor(tools, network);
+          } catch (error) {
+            expect(network).toBe("registries");
+            expect(String(error)).toMatch(/refusing/);
+            continue;
+          }
           expect(profile.host).toBe(adapter.host);
           expect(findForbiddenHostArgs(profile.cliArgs)).toEqual([]);
           expect(findForbiddenHostArgs([JSON.stringify(profile.settings)])).toEqual([]);

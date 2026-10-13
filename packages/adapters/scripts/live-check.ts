@@ -4,9 +4,12 @@
  * own quota, so it never runs in `pnpm verify` or in tests; run it by hand:
  *
  *   pnpm --filter @vtc/adapters live:check [claude-code|codex|codex-usage] [--resume] [--model <id>]
+ *     [--plugin-dir <dir>]
  *
  * The model defaults to the engine's built-in low tier for the host (`haiku`, `gpt-5-codex-mini`);
- * `--model` runs another id, as the engine would after a `project.yaml` override.
+ * `--model` runs another id, as the engine would after a `project.yaml` override. Claude runs
+ * load the compiled plugin from `--plugin-dir` (default: the repo's `ASSET_SOURCES` build,
+ * `dist/claude-plugin`), as every engine-launched Claude run does.
  *
  * Each run happens in a fresh temp git repo with a read-only sandbox and a prompt that asks for
  * a bare RoleResult. It prints the exact command, the normalised outcome and whether the output
@@ -15,8 +18,9 @@
 import { execFileSync } from "node:child_process";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { join, resolve } from "node:path";
 import {
+  ASSET_SOURCES,
   findForbiddenHostArgs,
   fromStructuredOutput,
   HostOutcomeSchema,
@@ -88,7 +92,12 @@ const main = async (): Promise<void> => {
   const resume = flags.includes("--resume");
   const at = flags.indexOf("--model");
   const model = at < 0 ? undefined : flags[at + 1];
-  if (target === "claude-code") await run(createClaudeCodeAdapter(), resume, model);
+  const pluginAt = flags.indexOf("--plugin-dir");
+  const pluginDir = resolve(
+    (pluginAt < 0 ? undefined : flags[pluginAt + 1]) ??
+      join(import.meta.dirname, "..", "..", "..", ASSET_SOURCES["plugin:claude-code"]),
+  );
+  if (target === "claude-code") await run(createClaudeCodeAdapter({ pluginDir }), resume, model);
   else if (target === "codex") await run(createCodexAdapter(), resume, model);
   else if (target === "codex-usage") {
     const adapter = createCodexAdapter();
