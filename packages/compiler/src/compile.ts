@@ -10,7 +10,6 @@ import {
   DOMAIN_PACKS,
   engineMcpServer,
   findForbiddenInText,
-  HOST_IDS,
   type HostId,
   type RoleContract,
 } from "@vtc/shared";
@@ -298,8 +297,69 @@ const manifestFile = (manifest: PluginManifest): EmittedFile => ({
   text: `${JSON.stringify(manifest, null, 2)}\n`,
 });
 
-const sortFiles = (files: EmittedFile[]): EmittedFile[] =>
-  files.sort((a, b) => (a.path < b.path ? -1 : a.path > b.path ? 1 : 0));
+const byPath = (a: { path: string }, b: { path: string }): number =>
+  a.path < b.path ? -1 : a.path > b.path ? 1 : 0;
+
+interface TargetInput {
+  readonly files: readonly SourceFile[];
+  readonly roles: readonly LoadedRole[];
+  readonly skills: readonly Skill[];
+  readonly commands: readonly Command[];
+  readonly sources: InstructionSources;
+  readonly notice: string;
+}
+
+/**
+ * One host's plugin tree: NOTICE, skills, agents, the host's hand-written files, commands (a
+ * Claude Code command, a Codex skill), the MCP entry (hand-written and checked for Claude Code,
+ * generated for Codex) and `vtc-manifest.json`. A path emitted twice is an error, so a
+ * hand-written file can never silently shadow a generated one.
+ */
+const emitTarget = (host: HostId, input: TargetInput, errors: CompileError[]): EmittedFile[] => {
+  const agents = compileAgents(input.roles, host, input.sources, errors);
+  const ext = host === "codex" ? "toml" : "md";
+  const render = host === "codex" ? renderCodexAgent : renderClaudeAgent;
+  const emitted: EmittedFile[] = [
+    { path: "NOTICE", text: input.notice },
+    ...skillFiles(input.skills),
+    ...agents.map((a) => ({ path: `agents/${a.name}.${ext}`, text: render(a) })),
+    ...verbatim(input.files, `plugins/${host}/`),
+  ];
+  const skills: ManifestSkill[] = input.skills.map((s) => ({
+    name: s.name,
+    ...skillKind(s),
+    file: `skills/${s.name}/SKILL.md`,
+  }));
+  for (const c of input.commands) {
+    const file = host === "codex" ? `skills/${c.name}/SKILL.md` : `commands/${c.name}.md`;
+    emitted.push({ path: file, text: host === "codex" ? codexCommandSkill(c) : c.source.text });
+    skills.push({ name: c.name, kind: "command", pack: null, file });
+  }
+  if (host === "codex") emitted.push({ path: ".mcp.json", text: mcpJson(host) });
+  emitted.push(
+    manifestFile({
+      v: 1,
+      host,
+      plugin: PLUGIN_NAME,
+      contracts_version: CONTRACTS_VERSION,
+      agents: agents.map((a) => manifestAgent(a, `agents/${a.name}.${ext}`)),
+      skills: skills.sort((a, b) => (a.name < b.name ? -1 : 1)),
+    }),
+  );
+  const sorted = emitted.sort(byPath);
+  sorted.forEach((file, index) => {
+    if (sorted[index + 1]?.path === file.path) {
+      errors.push({ path: `${host}:${file.path}`, message: "emitted twice" });
+    }
+  });
+  for (const v of checkPluginFiles(sorted)) {
+    errors.push({
+      path: `${host}:${v.path}`,
+      message: `line ${String(v.line)}: AD-9 marker ${v.marker} in emitted file`,
+    });
+  }
+  return sorted;
+};
 
 /** Compiles the sources (every file under `roles/`, `skills/` and `plugins/`). */
 export const compilePlugins = (files: readonly SourceFile[]): CompileResult => {
@@ -344,68 +404,18 @@ export const compilePlugins = (files: readonly SourceFile[]): CompileResult => {
       lenses: packList(skills, "lens"),
     },
   };
-  const notice = text("roles/NOTICE") ?? "";
-  const targets = {} as Record<HostId, EmittedFile[]>;
-
-  for (const host of HOST_IDS) {
-    const agents = compileAgents(loaded.roles, host, sources, errors);
-    const ext = host === "codex" ? "toml" : "md";
-    const render = host === "codex" ? renderCodexAgent : renderClaudeAgent;
-    const emitted: EmittedFile[] = [
-      { path: "NOTICE", text: notice },
-      ...skillFiles(skills),
-      ...agents.map((a) => ({ path: `agents/${a.name}.${ext}`, text: render(a) })),
-    ];
-    const manifestSkills: ManifestSkill[] = skills.map((s) => ({
-      name: s.name,
-      ...skillKind(s),
-      file: `skills/${s.name}/SKILL.md`,
-    }));
-    if (host === "claude-code") {
-      emitted.push(...verbatim(files, "plugins/claude-code/"));
-      for (const c of commands) {
-        emitted.push({ path: `commands/${c.name}.md`, text: c.source.text });
-        manifestSkills.push({
-          name: c.name,
-          kind: "command",
-          pack: null,
-          file: `commands/${c.name}.md`,
-        });
-      }
-    } else {
-      emitted.push(...verbatim(files, "plugins/codex/"), {
-        path: ".mcp.json",
-        text: mcpJson(host),
-      });
-      for (const c of commands) {
-        emitted.push({ path: `skills/${c.name}/SKILL.md`, text: codexCommandSkill(c) });
-        manifestSkills.push({
-          name: c.name,
-          kind: "command",
-          pack: null,
-          file: `skills/${c.name}/SKILL.md`,
-        });
-      }
-    }
-    manifestSkills.sort((a, b) => (a.name < b.name ? -1 : 1));
-    emitted.push(
-      manifestFile({
-        v: 1,
-        host,
-        plugin: PLUGIN_NAME,
-        contracts_version: CONTRACTS_VERSION,
-        agents: agents.map((a) => manifestAgent(a, `agents/${a.name}.${ext}`)),
-        skills: manifestSkills,
-      }),
-    );
-    targets[host] = sortFiles(emitted);
-    for (const v of checkPluginFiles(targets[host])) {
-      errors.push({
-        path: `${host}:${v.path}`,
-        message: `line ${String(v.line)}: AD-9 marker ${v.marker} in emitted file`,
-      });
-    }
-  }
+  const input: TargetInput = {
+    files,
+    roles: loaded.roles,
+    skills,
+    commands,
+    sources,
+    notice: text("roles/NOTICE") ?? "",
+  };
+  const targets = {
+    "claude-code": emitTarget("claude-code", input, errors),
+    codex: emitTarget("codex", input, errors),
+  };
 
   const unique = errors.filter(
     (e, i) => errors.findIndex((o) => o.path === e.path && o.message === e.message) === i,

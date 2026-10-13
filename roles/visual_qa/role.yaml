@@ -16,7 +16,8 @@ inputs: [task, screens, design_tokens, design_md, screenshots, visual_report, di
 output: { artifacts: [], verdicts: [pass, fail, unknown, unchecked] }
 exits: [done]
 success_criteria:
-  - { id: claim_check, description: "Every verdict cites a screenshot or element that exists." }
+  - id: claim_check
+    description: "Every verdict cites a screenshot or element that exists."
 reviewer: engine
 models:
   claude-code: { tier: mid, effort: medium }

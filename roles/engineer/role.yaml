@@ -16,18 +16,12 @@ inputs: [task, spec, architecture, repo_map_slice, interface_contract, acceptanc
 output: { artifacts: [interface_contract], verdicts: [] }
 exits: [built, spec_conflict, blocked, out_of_scope_fault]
 success_criteria:
-  - {
-      id: write_scope,
-      description: "Every changed file is inside the task's files_scope; protected files are unchanged.",
-    }
-  - {
-      id: gates_green,
-      description: "Gates L0 to L5 pass on a clean verification checkout of the submitted head.",
-    }
-  - {
-      id: acceptance_tests_pass,
-      description: "The task's visible and hidden acceptance tests pass.",
-    }
+  - id: write_scope
+    description: "Every changed file is inside the task's files_scope; protected files are unchanged."
+  - id: gates_green
+    description: "Gates L0 to L5 pass on a clean verification checkout of the submitted head."
+  - id: acceptance_tests_pass
+    description: "The task's visible and hidden acceptance tests pass."
 reviewer: qa
 models:
   claude-code: { tier: mid, effort: medium }

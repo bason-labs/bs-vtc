@@ -17,11 +17,10 @@ inputs: [spec, research_brief, facts, repo_map, threat_model]
 output: { artifacts: [architecture, design_note], verdicts: [] }
 exits: [done, blocked, spec_conflict]
 success_criteria:
-  - { id: req_mapping, description: "Every REQ-n maps to at least one component." }
-  - {
-      id: facts_verified,
-      description: "Every version, license, support or price claim cites a fact row or is marked UNVERIFIED.",
-    }
+  - id: req_mapping
+    description: "Every REQ-n maps to at least one component."
+  - id: facts_verified
+    description: "Every version, license, support or price claim cites a fact row or is marked UNVERIFIED."
 reviewer: engine
 models:
   claude-code: { tier: top, effort: high }

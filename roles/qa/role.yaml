@@ -32,11 +32,7 @@ modes:
     exits: [done, blocked]
     tools: { profile: read_only }
 success_criteria:
-  - {
-      id: base_fail_check,
-      description: "Author mode: every new visible acceptance test fails on the base commit.",
-    }
-  - {
-      id: req_tags,
-      description: "Author mode: every acceptance test name carries the REQ or AC id it proves.",
-    }
+  - id: base_fail_check
+    description: "Author mode: every new visible acceptance test fails on the base commit."
+  - id: req_tags
+    description: "Author mode: every acceptance test name carries the REQ or AC id it proves."

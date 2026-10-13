@@ -14,7 +14,8 @@ inputs: [request, repo_map]
 output: { artifacts: [repo_map], verdicts: [] }
 exits: [done, blocked]
 success_criteria:
-  - { id: citations_resolve, description: "Every statement cites a file or file_line that exists." }
+  - id: citations_resolve
+    description: "Every statement cites a file or file_line that exists."
 reviewer: engine
 models:
   claude-code: { tier: mid, effort: medium }

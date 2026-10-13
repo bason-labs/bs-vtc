@@ -14,10 +14,8 @@ inputs: [request, repo_map]
 output: { artifacts: [research_brief], verdicts: [] }
 exits: [done, blocked]
 success_criteria:
-  - {
-      id: citations_resolve,
-      description: "Every claim cites a url or fact row the engine fetched.",
-    }
+  - id: citations_resolve
+    description: "Every claim cites a url or fact row the engine fetched."
 reviewer: engine
 models:
   claude-code: { tier: mid, effort: high }

@@ -15,7 +15,8 @@ inputs: [acceptance_criterion, traceability_report, test_results, diff, spec]
 output: { artifacts: [], verdicts: [pass, fail, unknown] }
 exits: [done]
 success_criteria:
-  - { id: claim_check, description: "Every cited test, report entry and code line resolves." }
+  - id: claim_check
+    description: "Every cited test, report entry and code line resolves."
 reviewer: engine
 models:
   claude-code: { tier: low, effort: medium }
