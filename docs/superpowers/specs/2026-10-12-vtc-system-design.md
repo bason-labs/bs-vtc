@@ -62,6 +62,10 @@ VTC turns an idea or a change request into reviewed, tested, merged code. It wor
 | D10 | Either host per user; **cross-family review is opt-in** for high-risk tasks | User requirement |
 | D11 | **Deterministic first.** If code can decide it, code decides it. The token budget is a hard constraint. | User requirement; token-economy research |
 | D12 | The Architect **researches before proposing**; per-project and per-task depth | User requirement; architecture research |
+| D13 | **All TypeScript** (pnpm + turbo monorepo), **shipped as a single-file binary** `vtc` (Bun `--compile`) from v1 | User decision 2026-10-13 |
+| D14 | Flow Studio reuses the **Deep Sea theme, ui kit and React Flow canvas from `bs-job-agents/apps/web`** | User requirement |
+| D15 | The dashboard shows **5-hour and weekly usage for each host**. The engine **auto-continues after a reset.** | User requirement |
+| D16 | Designer output must be **distinct per project, even on the same topic.** The direction is chosen by a code-seeded roll plus a novelty check plus human selection. | User requirement; impeccable research |
 
 ---
 
@@ -145,6 +149,57 @@ VTC turns an idea or a change request into reviewed, tested, merged code. It wor
 | `.vtc/lookback/` | Scorecards per machine, `pins.yaml`, the changelog | git |
 | `.vtc/state/` | SQLite index, full transcripts, blobs | gitignored |
 | `~/.vtc/` | Hidden acceptance tests, the research cache, the pinned scanner store | local only |
+
+### 4.4 Product source layout, formats, build and distribution
+```
+vtc/                         pnpm + turbo monorepo, TypeScript everywhere
+├─ packages/shared/          Zod schemas = JSON Schemas (task, finding, escalation, event, role result)
+├─ packages/engine/          deterministic core + MCP server (stdio) + HTTP/SSE for the dashboard
+├─ packages/adapters/        claude-code/, codex/   (spawn, parse_events, resume, sandbox, usage)
+├─ packages/compiler/        roles/ + skills/ → dist/claude-plugin, dist/codex-plugin
+├─ packages/cli/             `vtc` entry: init, calibrate, dashboard, pause/resume, install, doctor, engine
+├─ apps/dashboard/           Flow Studio (Next.js 16 static export, React 19, Tailwind v4, Radix, React Flow)
+├─ roles/<role>/             role.yaml (contract) + prompt.md (locked core + editable section)
+├─ skills/                   SKILL.md packs shared by both hosts (architect refs, lenses, designer, mobile…)
+├─ gates/                    gate definitions, scanner pins (version + SHA-256), MIT rulesets
+└─ dist/                     GENERATED plugins and binaries (never hand-edited)
+```
+
+**Formats:**
+
+| Format | Used for |
+|---|---|
+| TypeScript | Everything deterministic |
+| YAML / JSON validated by schemas | Contracts, config and every AI output |
+| Markdown | Prompts, skills and human-facing documents |
+| HTML / CSS | Prototypes |
+| DTCG JSON | Design tokens |
+
+**Build and distribution: a single file.**
+- `bun build --compile` produces **one executable `vtc`** containing:
+  - the runtime;
+  - the engine and CLI;
+  - the dashboard's static assets;
+  - the compiled plugin templates.
+- **Targets:** darwin-arm64/x64, linux-x64/arm64, windows-x64.
+- **Runtime choices that keep the binary self-contained:**
+  - The engine runs on the Bun runtime.
+  - SQLite through `bun:sqlite`, with no native addon.
+  - tree-sitter through WASM.
+  - The dashboard is a **static export**: no Next server; the engine serves the files plus an SSE stream.
+- **Downloaded on demand by `vtc doctor`, into `~/.vtc/`, pinned by checksum:**
+  - Playwright's Chromium;
+  - the scanner binaries (Opengrep, Gitleaks, osv-scanner…).
+- **Release channels:** GitHub Releases, a Homebrew tap, and a `curl | sh` installer. Each release carries checksums and signatures.
+- **macOS builds are code-signed and notarized.**
+- **Optional:** an npm wrapper package for teams that prefer npm.
+
+**Getting it running:**
+1. Install `vtc`.
+2. Claude Code: `/plugin marketplace add <org>/vtc` then `/plugin install vtc`. The plugin's MCP entry runs `vtc engine --mcp`.
+3. Codex: add the same marketplace, then `vtc install codex`, which also writes `.codex/agents/*.toml`.
+4. In a repo: `vtc init && vtc calibrate`, then `/vtc start "…"` in either host, then `vtc dashboard`.
+5. During VTC's own development, test with `claude --plugin-dir ./dist/claude-plugin`.
 
 ---
 
@@ -438,6 +493,38 @@ A conflict or failure sends the task back to the Engineer as a rebase round. It 
   - meanwhile, the main interactive session waits on its own.
 - **Gate infrastructure failure never passes silently.** It parks the task with the reason `gate_infra`.
 
+### 6.9 Usage readout and auto-resume
+Research: `2026-10-13-usage-limits-auto-resume.md`.
+
+**Reading usage.** Only sanctioned sources are used; VTC never reads credentials and never calls undocumented endpoints.
+- **Claude Code:**
+  - The plugin installs a **statusline tee shim**. It wraps the user's existing statusline command rather than replacing it, and forwards `rate_limits.five_hour` / `seven_day` (used %, `resets_at`) to the engine's localhost endpoint.
+  - For runs the engine starts itself, it also reads SDK `rate_limit_event` and `api_retry` events.
+- **Codex:**
+  - The engine runs `codex app-server` as a managed child process and calls `account/rateLimits/read`.
+  - It subscribes to `account/rateLimits/updated` for changes.
+  - Windows are labelled from `windowDurationMins`.
+- **Missing data:** shown as **unknown**, never as 0%.
+- **Per-model limits** (e.g. the Claude Opus vs Sonnet weekly limit) are shown only as "limit reached, resets X", taken from rejection events.
+
+**Auto-resume.** The engine owns it on both hosts:
+1. **Detect** a limit hit:
+   - Claude: `rate_limit_event` with status `rejected`, `api_retry` with `rate_limit`, or a non-zero `-p` exit.
+   - Codex: `UsageLimitExceeded`.
+2. **Persist** the reset time, the session ID and the pending steps.
+3. **Mark the affected steps `interrupted`.**
+4. **Schedule** a timer that survives restarts (on macOS, a launchd agent installed by `vtc install`). It fires at the reset time plus 1–2 minutes of jitter.
+5. **Re-read usage.** If the host is still limited, back off and re-park, up to a cap.
+6. **Otherwise re-dispatch:**
+   - Claude: `claude -p --resume <id> … --permission-prompts none` with an explicit tool allowlist.
+   - Codex: `codex exec resume <id> …`.
+
+The Lead chat session doesn't need to be alive; only the engine does. If the user is chatting in an interactive Claude session, Claude Code's own auto-continue handles that session.
+
+**Scheduling around limits:** before starting a new task, the scheduler checks the remaining quota.
+- **Below a reserve** (default 10% of the 5-hour window): it starts only steps that are already in flight.
+- **Lookback** never starts when less than 30% of the weekly window remains.
+
 ---
 
 ## 7. Verification gates
@@ -644,6 +731,44 @@ Each Check runs in gate L6, as blocking or warn. Waivers are human-only and expi
 
 **Figma:** an optional mirror via `generate_figma_design`.
 
+### 9.1 Distinct directions per project (D16)
+Research: `2026-10-13-impeccable-style.md`. Language models collapse toward the same few answers ("Artificial Hivemind", NeurIPS 2025), so **variation must come from code, and the choice from a human.**
+
+**Fork from impeccable** (Apache-2.0). Keep LICENSE and NOTICE, mark every file we modify, and don't use the "Impeccable" brand. The parts we fork:
+- the detector rules (about 59 anti-pattern rules);
+- the craft floor;
+- "new-work" steps 1–5;
+- the per-screen **Direction contract** (THESIS, OWN-WORLD, STORY, FIRST VIEWPORT, FORM, FINISH) and screen modes (Persuade/Operate/Read/Experience);
+- the critique heuristics;
+- the typeset, colorize and layout playbooks;
+- the font blocklist.
+
+**Rewritten locally:** the direction roll. **No network calls and no telemetry.**
+
+**Designer flow:**
+1. **Name the rut.** State the category default and its predictable opposite. List 7 candidate visual worlds drawn from the audience's culture. Use verbalized sampling to drop the most probable ones.
+2. **Constraints lottery.** A local RNG, seeded by project and run, deals:
+   - a colour strategy (Restrained / Committed / Full / Drenched, in OKLCH);
+   - a type pairing from a curated pool;
+   - density and grid;
+   - radius and elevation;
+   - motion style;
+   - one signature interaction.
+3. **Build 2–3 directions** as first-viewport prototypes.
+4. **Novelty check (engine).**
+   - Render each direction's first viewport.
+   - Embed the screenshot (DreamSim/DINOv2, or UIClip) and the token vector.
+   - Compare against the **design library** of past projects in `~/.vtc/design-library`, kept per client.
+   - Reject anything too similar.
+5. **Choose at G2.** The human picks one of the 2–3 directions. Re-roll and a "category standard" exit are also offered.
+6. **Record the choice.** The chosen direction enters the library, so later projects steer away from it.
+
+**Visual QA (§7.5) gains two checks:**
+- the forked detector runs in the deterministic lint layer;
+- a "design specificity" criterion is added to the vision judge.
+
+**Routing:** slop findings hold the Designer step; quality and design-system findings go to the Engineer.
+
 ---
 
 ## 10. Research Analyst
@@ -832,7 +957,24 @@ It is capped at 1–2 rounds and costs both quotas.
 - **Data sources:**
   - **live:** the engine's event stream, when the engine is running on that machine;
   - **otherwise:** the committed `.vtc/` snapshot. Teammates can open it from their own clone.
-- **Tech:** a local web app served by `vtc dashboard`, graph rendering with React Flow (xyflow, MIT) plus ELK/dagre layout. A desktop wrapper (Tauri) is a later option.
+- **Tech:**
+  - Next.js 16 **static export**, React 19, Tailwind v4, Radix, lucide, React Flow (`@xyflow/react` 12), with ELK/dagre layout.
+  - The `vtc` binary serves it, with live updates over SSE.
+  - A desktop wrapper is a later option.
+- **Theme (D14):** reuse `bs-job-agents/apps/web`:
+  - the **Deep Sea tokens** from `app/globals.css`: light by default, `data-theme="dark"`, with the `@theme inline` bridge, gradient-brand/glow utilities, the focus ring and reduced-motion rules;
+  - fonts Be Vietnam Pro and Space Grotesk;
+  - the `components/ui` kit;
+  - the flow canvas from `components/flows` (FlowCanvas, StepNode, StepDrawer, Edges, plus the running ring/dash animation and status minimap). Node states are extended to cover VTC's states.
+  
+  Copy these in v1. A shared theme/UI package between the two apps is a later option.
+- **Usage panel (D15):** one card per host (Claude, Codex). Each window shows:
+  - used % and remaining %;
+  - the local reset time;
+  - when the data was last updated;
+  - "unknown" when data is missing.
+  
+  The card also shows per-model "limit reached" rows when they are reported, the number of tasks `interrupted` by limits, and a countdown to auto-resume.
 
 ---
 
@@ -857,7 +999,7 @@ Each sub-project below gets its own spec → plan → implementation.
 
 | # | Sub-project | Delivers | Depends on |
 |---|---|---|---|
-| **0** | **Feasibility spike** (throwaway) | Verifies on real accounts: plugin hooks and per-role limits; the sandbox write-deny; headless `claude -p` and `codex exec` events, including limit hits; Codex agent spawning and sandbox inheritance; prompt-cache behaviour in worktrees; token calibration on 5 tasks | — |
+| **0** | **Feasibility spike** (throwaway) | Verifies on real accounts: plugin hooks and per-role limits; the sandbox write-deny; headless `claude -p` and `codex exec` events, including limit hits; Codex agent spawning and sandbox inheritance; prompt-cache behaviour in worktrees; token calibration on 5 tasks; **single-binary feasibility**: Bun `--compile` with `bun:sqlite`, an MCP stdio server, the embedded Next static export, on-demand Playwright/scanner downloads, and macOS signing/notarization; **usage readout**: the statusline tee shim and the `codex app-server` rate-limit calls; `--resume` working after a long gap | — |
 | 1 | **Engine core + build loop** | State/events, scheduler, per-task pipeline, loop controller, triage, escalation, budget controller, merge queue (Levels 1–2), MCP tools | 0 |
 | 2 | **Gate Runner + calibration** | Toolchain detection, baseline, L0–L5, write-scope check, hidden tests, pinned scanner store | 1 |
 | 3 | **Role library + compiler + host adapters** | Neutral role sources (forked and rewritten), compiler, Claude Code plugin, Codex plugin/agents | 1 |
@@ -872,7 +1014,10 @@ Each sub-project below gets its own spec → plan → implementation.
 ---
 
 ## 20. Open questions and risks
-1. **"Jev library":** the user asked to evaluate it. The link or identity is pending, so it hasn't been researched.
+1. **Laya / Jev typed-decision models** (`2026-10-13-laya-vs-jev.md`):
+   - **Not in v1.**
+   - **Jev** is rejected. It is cloud-only and needs its own API key, which conflicts with D1 and D2.
+   - **Laya** (local, Apache-2.0) is a **v2 option**: an opt-in advisory classifier for intake, risk hints, escalation category and Lookback attribution. It is enabled only after it is fine-tuned on VTC's labelled history and matches host-LLM accuracy for fewer tokens. It may add caution but can never relax a risk rule.
 2. **Vendor terms:** written confirmation is needed before distributing headless spawning (Anthropic). OpenAI's terms quotes came from a mirror and must be re-checked on openai.com. Both vendors changed policy several times in 2026.
 3. **Subscription meters are opaque.** We don't know how cached tokens count against plan limits, and there is no structured readout of remaining usage. Budgets are therefore list-price equivalents.
 4. **Codex gaps:**
@@ -897,3 +1042,7 @@ Each sub-project below gets its own spec → plan → implementation.
 - `docs/research/2026-10-12-architecture-practice.md`: Architect knowledge, process, research, enforcement.
 - `docs/research/2026-10-12-token-economy.md`: the token playbook and budget policy.
 - `docs/research/2026-10-12-multi-host-codex-claude.md`: Codex policy and capabilities; adapter design.
+- `docs/research/2026-10-13-laya-vs-jev.md`: typed-decision models; v2 option.
+- `docs/research/2026-10-13-impeccable-style.md`: making designs distinct; what to fork; the novelty check.
+- `docs/research/2026-10-13-usage-limits-auto-resume.md`: usage readout per host; auto-resume.
+- Theme source: `/Users/bason/Documents/bason-labs/bs-job-agents/apps/web` (`app/globals.css`, `components/ui`, `components/flows`).
