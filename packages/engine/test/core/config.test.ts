@@ -114,10 +114,25 @@ describe("YAML reader", () => {
   });
   it("accepts JSON and refuses what it does not support, with a line number", () => {
     expect(parseYaml('{"version": 1}')).toEqual({ version: 1 });
-    expect(() => parseYaml("a: &anchor 1")).toThrow(YamlError);
-    expect(() => parseYaml("a: 1\na: 2")).toThrow(/duplicate key a/);
+    expect(() => parseYaml("a: 1\na: 2")).toThrow(/line 2: Map keys must be unique/);
     expect(() => parseYaml("a:\n  b: 1\n c: 2")).toThrow(/line 3/);
     expect(() => parseYaml("a: 1\n---\nb: 2")).toThrow(/multiple documents/);
+    expect(() => parseYaml("a: !!js/function x")).toThrow(YamlError);
+    const bomb = ["a: &a [x, x, x, x, x, x, x, x, x, x]"];
+    for (const n of ["b", "c", "d", "e", "f"])
+      bomb.push(
+        `${n}: &${n} [${Array(10)
+          .fill(`*${String.fromCharCode(n.charCodeAt(0) - 1)}`)
+          .join(", ")}]`,
+      );
+    expect(() => parseYaml(bomb.join("\n"))).toThrow(YamlError);
+  });
+  it("reads full YAML: block scalars, anchors and aliases (the yaml library, spine §5 reading 24)", () => {
+    expect(parseYaml("a: &x [1, 2]\nb: *x\nnote: |\n  two\n  lines\n")).toEqual({
+      a: [1, 2],
+      b: [1, 2],
+      note: "two\nlines\n",
+    });
   });
   it("refuses a __proto__ key instead of replacing the object's prototype", () => {
     expect(() => parseYaml("__proto__:\n  polluted: true")).toThrow(/__proto__/);

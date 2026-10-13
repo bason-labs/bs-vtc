@@ -5,7 +5,7 @@
  */
 import { createHash } from "node:crypto";
 import { existsSync, readFileSync, statSync } from "node:fs";
-import { setGitPreflight, writeRepoFile } from "../git/index.js";
+import { setGitPreflight, setGitSigning, writeRepoFile } from "../git/index.js";
 import { join } from "node:path";
 import {
   dotenvValues,
@@ -17,6 +17,8 @@ import {
   type AnswerInput,
   type ChangeRequestInput,
   type ChangeRequestResult,
+  type ConsultInput,
+  type ConsultResult,
   type EscalationList,
   type FrozenArtifact,
   type GatesConfig,
@@ -46,20 +48,26 @@ import {
   pipelineConfigHash,
   PROJECT_CONFIG_PATH,
 } from "./config.js";
-import { dispatchNow, phaseRoles } from "./dispatch.js";
+import { dispatchGuarded, dispatchNow, phaseRoles } from "./dispatch.js";
 import { parkEscalation } from "./escalations.js";
 import {
   acceptCheckout,
+  dropDispatch,
   FORENSICS_DIR,
   gitPreflight,
-  restoreCheckoutRecords,
+  loadGitHold,
+  removeRoleWorktree,
+  reportUnverifiable,
+  restoreDispatches,
   restoreLog,
-  sweepCheckouts,
-} from "./checkout-guard.js";
-import { EngineWrites } from "./engine-writes.js";
-import { loadGitHold, type CheckoutRecord } from "./phase-scope.js";
+  sweepDispatches,
+  type DispatchRecord,
+} from "./dispatch-guard.js";
+import { EngineWrites, NEVER_WROTE } from "./engine-writes.js";
+import { ensurePrivateDir, guardDirFor } from "./guard.js";
 import { openEventLog, type EventDraft } from "./event-log.js";
 import {
+  downgradeNoRemote,
   ensureWorkspace,
   setFeatureStatus,
   startBaseCheck,
@@ -94,6 +102,7 @@ import { activeRun } from "./read-model.js";
 import { loadRuns } from "./run-store.js";
 import { schedule } from "./scheduler.js";
 import { applyEvent, emptyRunState, projectRun, type RunState } from "./state.js";
+import { ArtifactRefSchema } from "@vtc/shared";
 import { checkEngineerShare, handleSubmit } from "./submit.js";
 import { escalationListView, openEscalations, statusView } from "./views.js";
 
@@ -133,8 +142,14 @@ const frozenConfigPath = (run: string): string => `.vtc/state/runs/${run}/config
 export class Engine implements Kernel {
   readonly usage = new Map<HostId, UsageSnapshot>();
   readonly identicalTree = new Map<string, boolean>();
-  readonly checkouts = new Map<string, CheckoutRecord>();
+  readonly dispatches = new Map<string, DispatchRecord>();
+  readonly guardDir: string;
   readonly writes: EngineWrites;
+  /**
+   * What `open` found and could not record in a run's log (a finished run's log cut back to its
+   * verified prefix, a log with nothing verified left): the daemon prints them.
+   */
+  readonly notices: string[] = [];
   gitHold: Readonly<Record<string, string>> | null = null;
   private readonly handles = new Map<string, RunHandle>();
   private readonly finished = new Map<string, RunState>();
@@ -145,57 +160,72 @@ export class Engine implements Kernel {
   private frozen: FrozenConfig | null = null;
   /** Modification stamps of the config files when drift was last checked. */
   private driftStamps = "";
+  /** The Lead's MCP session per run (spine §7: Lead-only tools are refused from role sessions). */
+  private readonly leads = new Map<string, string>();
+  /** A role session's one action (`run/action`): it may submit nothing else. */
+  private readonly bound = new Map<string, string>();
 
   private constructor(readonly deps: EngineCoreDeps) {
-    this.writes = EngineWrites.open(deps.repoRoot);
+    this.guardDir = guardDirFor(deps.vtcHome, deps.repoRoot);
+    ensurePrivateDir(this.guardDir);
+    this.writes = EngineWrites.open(deps.repoRoot, join(this.guardDir, "engine-writes.jsonl"));
   }
 
   /**
-   * Opens the engine on a repo: replays every run's log (AD-7 rule 5) and recovers its work. A
-   * log that is not what the engine wrote (`EngineWrites`) is replayed only as far as it is (the
-   * rest is never applied), and its run pauses with the reason.
+   * Opens the engine on a repo: replays every run's log (AD-7 rule 5) and recovers its work. A log
+   * is replayed only as far as the engine's ledger vouches for it (`EngineWrites.verifiedPrefix`):
+   * anything else (an in-place edit, an inserted or appended line, a cut) is moved aside to
+   * {@link FORENSICS_DIR}, the log is cut back to that prefix, and the run pauses saying so, a
+   * finished one included (it is finished only if its verified prefix says so). An unfinished
+   * log this engine never wrote (another clone's, or a planted one) pauses too. A role run in
+   * flight without its dispatch record cannot be verified and pauses its run.
    */
   static open(deps: EngineCoreDeps): Engine {
     const engine = new Engine(deps);
-    restoreCheckoutRecords(engine);
-    engine.gitHold = loadGitHold(deps.repoRoot);
+    restoreDispatches(engine);
+    engine.gitHold = loadGitHold(engine);
     setGitPreflight(deps.repoRoot, () => {
       gitPreflight(engine);
+    });
+    setGitSigning(deps.repoRoot, () => {
+      try {
+        return engine.config().git.sign_commits;
+      } catch {
+        return false;
+      }
     });
     for (const loaded of loadRuns(deps.repoRoot)) {
       let state = loaded.state;
       const rel = eventLogPath(state.id);
-      const verdict = engine.writes.check(rel, { tolerateTail: true });
+      const verdict = engine.writes.check(rel);
       let tampered: string | undefined;
-      if (verdict.ok) {
-        if (verdict.tolerated === true) engine.writes.accept(rel); // a crash cut its ledger line
-      } else if (verdict.detail === "the engine never wrote it") {
-        engine.writes.accept(rel); // no ledger entry yet: taken as it is
-      } else {
-        tampered = verdict.detail;
+      if (!verdict.ok && verdict.detail === NEVER_WROTE) {
+        engine.writes.accept(rel);
+        if (state.run.finished_at === undefined)
+          tampered = `${rel} was not written by this engine install (another clone's log, or one written by hand); it was replayed as it is`;
+      } else if (!verdict.ok) {
         const bytes = readFileSync(join(deps.repoRoot, rel));
-        const prefix = bytes.subarray(0, verdict.intactPrefix ?? bytes.byteLength);
-        const events = parseEventLog(prefix.toString("utf8")).events.filter(
-          (e) => e.run === state.id,
+        const verified = engine.writes.verifiedPrefix(rel);
+        const prefix = bytes.subarray(0, verified);
+        const kept = `${FORENSICS_DIR}/${state.id}-open-${String(Date.now())}.jsonl`;
+        writeRepoFile(deps.repoRoot, kept, bytes, 0o600);
+        writeRepoFile(deps.repoRoot, rel, prefix);
+        state = projectRun(
+          parseEventLog(prefix.toString("utf8")).events.filter((e) => e.run === state.id),
         );
-        if (verdict.intactPrefix !== undefined && events.length > 0) {
-          // Only the engine's bytes are replayed; the rest is kept aside, never applied.
-          writeRepoFile(
-            deps.repoRoot,
-            `${FORENSICS_DIR}/${state.id}-open-${String(Date.now())}.jsonl`,
-            bytes,
-            0o600,
-          );
-          writeRepoFile(deps.repoRoot, rel, prefix);
-          state = projectRun(events);
-        } else {
-          engine.writes.accept(rel); // rewritten as a whole: rebuilt from it as it is
+        const events = state.events.length;
+        tampered = `${rel} was changed outside the engine (${verdict.detail}); the engine replayed only its first ${String(events)} event(s), the ${String(verified)} bytes its ledger vouches for, and cut the log back to them. The changed file (${String(bytes.byteLength)} bytes) is kept at ${kept}`;
+        if (events === 0) {
+          // nothing the engine wrote is left: the run cannot be rebuilt
+          engine.notices.push(tampered);
+          continue;
         }
       }
       for (const [host, snapshot] of state.usage) engine.usage.set(host, snapshot);
       if (state.run.finished_at !== undefined) {
-        // (a finished run's log, if changed, is back to the engine's bytes: nothing to resume)
+        // the verified prefix finished the run: nothing to resume (a cut forged tail is reported)
         engine.finished.set(state.id, state);
+        if (tampered !== undefined) engine.notices.push(tampered);
         continue;
       }
       const log = openEventLog(deps.repoRoot, state.id, deps.lock, {
@@ -206,6 +236,7 @@ export class Engine implements Kernel {
       engine.handles.set(state.id, handle);
       if (tampered !== undefined) engine.reportLogOnOpen(handle, tampered);
       engine.restoreFrozenConfig(handle);
+      reportUnverifiable(engine, handle);
       const damaged = log.recovered.invalidLines.length > 0 || log.recovered.truncatedTail;
       const reported = state.events.some(
         (e) =>
@@ -227,6 +258,12 @@ export class Engine implements Kernel {
           },
         });
       }
+    }
+    // Records of runs that are no longer active have nothing left to check.
+    for (const record of [...engine.dispatches.values()]) {
+      if (engine.handles.has(record.run)) continue;
+      void removeRoleWorktree(engine, record);
+      dropDispatch(engine, record.run, record.action_id);
     }
     for (const handle of engine.handles.values()) engine.advance(handle);
     return engine;
@@ -355,10 +392,13 @@ export class Engine implements Kernel {
       .join("|");
   }
 
-  /** A config change during the active run pauses it with the reason (once per change). */
+  /**
+   * A config change during the active run (spine §5 reading 20): recorded as an incident of kind
+   * `config_changed` (once per change); the run keeps its frozen config and does not pause.
+   */
   private checkConfigDrift(handle: RunHandle): void {
     const frozen = this.activeFrozen();
-    if (frozen?.run !== handle.state.id || handle.state.run.paused) return;
+    if (frozen?.run !== handle.state.id) return;
     const stamps = this.configStamps();
     if (stamps === this.driftStamps) return;
     this.driftStamps = stamps;
@@ -375,17 +415,24 @@ export class Engine implements Kernel {
     const tag = `config ${hash.slice(0, 12)}`;
     const reported = handle.state.events.some(
       (e) =>
-        e.type === "run.paused" && ((e.data as { reason?: string }).reason ?? "").includes(tag),
+        e.type === "incident.recorded" &&
+        (e.data as { kind?: string; detail?: string }).kind === "config_changed" &&
+        ((e.data as { detail?: string }).detail ?? "").includes(tag),
     );
     if (reported) return;
     this.emit(handle, {
-      type: "run.paused",
+      type: "incident.recorded",
       actor: "engine",
       data: {
-        reason: (when === "edit"
-          ? `project.yaml or gates.yml changed during the run (${tag}${hash === "unreadable" ? ", unreadable" : ""}); the run keeps the config it started with. Restore the file or let it apply to the next run, then vtc resume`
-          : `project.yaml or gates.yml differ from the config this run started with (${tag}) and no copy was kept; the run continues with the current files after vtc resume`
-        ).slice(0, 300),
+        kind: "config_changed",
+        detail: (when === "edit"
+          ? `project.yaml or gates.yml changed during the run (${tag}${hash === "unreadable" ? ", unreadable" : ""}); the run keeps the config it started with (${handle.state.run.pipeline_config_hash.slice(0, 12)}) and the change applies to the next run`
+          : `project.yaml or gates.yml differ from the config this run started with (${tag}) and no copy of it was kept; the run continues with the current files`
+        ).slice(0, 2000),
+        evidence: [
+          { type: "file", ref: PROJECT_CONFIG_PATH },
+          { type: "file", ref: GATES_CONFIG_PATH },
+        ],
       },
     });
   }
@@ -402,21 +449,14 @@ export class Engine implements Kernel {
     this.emit(handle, {
       type: "incident.recorded",
       actor: "engine",
-      data: {
-        kind: "log_corruption",
-        detail:
-          `${eventLogPath(handle.state.id)} was changed outside the engine while it was stopped (${detail}); only what the engine wrote was replayed (the changed file is kept under ${FORENSICS_DIR})`.slice(
-            0,
-            2000,
-          ),
-      },
+      data: { kind: "log_corruption", detail: detail.slice(0, 2000) },
     });
     this.emit(handle, {
       type: "run.paused",
       actor: "engine",
       data: {
         reason:
-          "the run's event log was changed outside the engine while it was stopped; only what the engine wrote was replayed (see the incident). Check the checkout, then vtc resume",
+          "the run's event log was not what the engine wrote when it opened; only what its ledger vouches for was replayed (see the incident). Check the repo, then vtc resume",
       },
     });
   }
@@ -484,6 +524,10 @@ export class Engine implements Kernel {
 
   isRunning(key: string): boolean {
     return this.jobs.has(key);
+  }
+
+  jobRunningFor(id: string): boolean {
+    return [...this.jobs.keys()].some((key) => key.endsWith(`:${id}`));
   }
 
   serial<T>(handle: RunHandle, fn: () => Promise<T>): Promise<T> {
@@ -752,7 +796,7 @@ export class Engine implements Kernel {
     return this.resolve(run).state;
   }
 
-  async start(input: StartInput, _call: CallContext): Promise<StartResult> {
+  async start(input: StartInput, call: CallContext): Promise<StartResult> {
     if ([...this.handles.values()].some((h) => h.state.run.finished_at === undefined)) {
       throw new EngineError(
         "run_active",
@@ -770,6 +814,10 @@ export class Engine implements Kernel {
     const handle: RunHandle = { state: emptyRunState(id, this.now().toISOString()), log };
     this.handles.set(id, handle);
     this.freezeConfig(id, config, gates);
+    if (call.client === "bridge" && call.session !== undefined) this.leads.set(id, call.session);
+    const noRemote =
+      config.merge_level >= 2 &&
+      (await this.deps.workspace.remoteUrl(this.deps.remote).catch(() => null)) === null;
     return this.serial(handle, () => {
       this.emit(handle, {
         type: "run.started",
@@ -784,6 +832,8 @@ export class Engine implements Kernel {
           pipeline_config_hash: pipelineConfigHash(config, gates),
         },
       });
+      // Level 2+ needs the push remote (spine §5 reading 18).
+      if (noRemote) downgradeNoRemote(this, handle);
       this.phaseTo(handle, track === "quick_fix" ? "specify" : "discover");
       this.advance(handle);
       return Promise.resolve({ run: id, track, phase: handle.state.run.phase });
@@ -907,6 +957,7 @@ export class Engine implements Kernel {
     const state = this.stateOf(input.run);
     const handle = this.handles.get(state.id);
     if (handle === undefined) return { run: state.id, actions: this.actionsForFinished(state) };
+    this.claimLead(state.id, call);
     return this.serial(handle, async () => ({
       run: state.id,
       actions: await this.actionsFor(handle, call),
@@ -921,6 +972,7 @@ export class Engine implements Kernel {
 
   async submit(input: SubmitInput, call: CallContext): Promise<SubmitResult> {
     const handle = this.resolve(input.run);
+    this.assertOwnSubmit(handle.state.id, input.action_id, call);
     return this.serial(handle, async () => {
       const outcome = await handleSubmit(this, handle, input);
       this.advance(handle);
@@ -980,6 +1032,7 @@ export class Engine implements Kernel {
 
   async answer(input: AnswerInput, call: CallContext): Promise<NextResult> {
     const handle = this.resolve(input.run);
+    this.assertLead(handle.state.id, call, "answer");
     return this.serial(handle, async () => {
       const escalation = handle.state.escalations.get(input.escalation);
       if (escalation === undefined)
@@ -1049,6 +1102,7 @@ export class Engine implements Kernel {
 
   async approve(input: ApproveInput, call: CallContext): Promise<NextResult> {
     const handle = this.resolve(input.run);
+    this.assertLead(handle.state.id, call, "approve");
     return this.serial(handle, async () => {
       const awaiting = this.awaitingGates(handle);
       if (awaiting === null)
@@ -1097,8 +1151,12 @@ export class Engine implements Kernel {
     });
   }
 
-  async changeRequest(input: ChangeRequestInput): Promise<ChangeRequestResult> {
+  async changeRequest(
+    input: ChangeRequestInput,
+    call: CallContext = { host: null },
+  ): Promise<ChangeRequestResult> {
     const handle = this.resolve(input.run);
+    this.assertLead(handle.state.id, call, "change_request");
     return this.serial(handle, () => {
       const state = handle.state;
       let frozen: FrozenArtifact | undefined;
@@ -1155,6 +1213,117 @@ export class Engine implements Kernel {
     });
   }
 
+  // ------------------------------------------------------------ sessions
+
+  /**
+   * The run's Lead session: the bridge session that started the run, or else the first bridge
+   * session to drive it (a Lead whose bridge reconnected). The cli (`client: cli`) is the human.
+   */
+  private claimLead(run: string, call: CallContext): void {
+    if (call.client !== "bridge" || call.session === undefined) return;
+    if (!this.leads.has(run)) this.leads.set(run, call.session);
+  }
+
+  /**
+   * Lead-only tools (`approve`, `answer`, `change_request`) are refused from any other bridge
+   * session: a role session until the Codex per-agent MCP isolation spike passes (spine §7).
+   */
+  private assertLead(run: string, call: CallContext, tool: string): void {
+    this.claimLead(run, call);
+    if (call.client !== "bridge" || call.session === undefined) return;
+    if (this.leads.get(run) !== call.session)
+      throw new EngineError(
+        "forbidden",
+        `${tool} is the Lead's tool; a role session may only submit its own result`,
+      );
+  }
+
+  /** A role session may submit one action only: the first it submits (spine §7). */
+  private assertOwnSubmit(run: string, actionId: string, call: CallContext): void {
+    this.claimLead(run, call);
+    if (call.client !== "bridge" || call.session === undefined) return;
+    if (this.leads.get(run) === call.session) return;
+    const key = `${run}/${actionId}`;
+    const own = this.bound.get(call.session);
+    if (own === undefined) this.bound.set(call.session, key);
+    else if (own !== key)
+      throw new EngineError(
+        "forbidden",
+        `a role session may only submit its own result (${own.split("/").at(-1) ?? own}), not ${actionId}`,
+      );
+  }
+
+  /** A connection closed: it is no longer any run's Lead, nor bound to an action. */
+  sessionClosed(session: string): void {
+    for (const [run, lead] of [...this.leads]) if (lead === session) this.leads.delete(run);
+    this.bound.delete(session);
+  }
+
+  // ------------------------------------------------------------- advisors
+
+  /** The run's advisor spend so far (accepted and failed advisor runs, priced). */
+  private advisorSpend(state: RunState): number {
+    return state.events
+      .filter(
+        (e) =>
+          (e.type === "role.submitted" || e.type === "role.failed") &&
+          e.role !== undefined &&
+          this.deps.roles.get(e.role)?.kind === "advisor",
+      )
+      .reduce((sum, e) => sum + (e.cost_usd ?? 0), 0);
+  }
+
+  /**
+   * `consult` (§5.4; spine §5 reading 25): the human asked the Lead for an advisor. The engine
+   * checks the role is an advisor and the run's advisor budget (`budgets.advisor_usd`) is not
+   * spent, writes the pack (the question and the inputs), records the dispatch like any role's
+   * (prompt SHA, model, its own worktree, the dispatch guard) and returns the one `spawn_role`.
+   * The Lead submits the advisor's result with `submit`, outside the phase flow.
+   */
+  async consult(input: ConsultInput, call: CallContext): Promise<ConsultResult> {
+    const handle = this.resolve(input.run);
+    return this.serial(handle, async () => {
+      const state = handle.state;
+      const contract = this.deps.roles.get(input.advisor);
+      if (contract?.kind !== "advisor")
+        throw new EngineError("invalid", `${input.advisor} is not an advisor role`);
+      if (state.run.paused)
+        throw new EngineError("conflict", "the run is paused (vtc resume to continue)");
+      const budget = this.config().budgets.advisor_usd;
+      const spent = this.advisorSpend(state);
+      if (spent >= budget)
+        throw new EngineError(
+          "conflict",
+          `the run's advisor budget is spent ($${spent.toFixed(2)} of $${budget.toFixed(2)}, budgets.advisor_usd)`,
+        );
+      const question = `${state.id}-${String(state.roleRuns.size + 1)}`;
+      const path = `.vtc/state/packs/${state.id}/consult-${question}.md`;
+      writeRepoFile(
+        this.deps.repoRoot,
+        path,
+        `# Question for ${input.advisor}\n\n${input.question}\n`,
+      );
+      const host = this.hostFor(call);
+      const action = await dispatchGuarded(
+        this,
+        handle,
+        {
+          key: `consult:${input.advisor}`,
+          role: input.advisor,
+          note: `The human asks: ${input.question}`.slice(0, 4000),
+          inputs: [
+            ArtifactRefSchema.parse({ type: "question", path }),
+            ...input.inputs.map((i) => ArtifactRefSchema.parse(i)),
+          ],
+        },
+        host,
+      );
+      if (action === null)
+        throw new EngineError("conflict", "the advisor's worktree could not be prepared");
+      return { run: state.id, action };
+    });
+  }
+
   async pause(input: RunScopedInput): Promise<RunControlResult> {
     const handle = this.resolve(input.run);
     return this.serial(handle, () => {
@@ -1171,9 +1340,9 @@ export class Engine implements Kernel {
 
   /**
    * Resumes a paused or interrupted run (AD-4): role runs still marked in flight belong to a
-   * session that is gone, so they are closed and their steps re-dispatched. Their writes in the
-   * checkout are checked first; anything found keeps the run paused with the reason. Otherwise
-   * the human's resume takes the checkout as it is (`acceptCheckout`): the run's log is rewritten
+   * session that is gone, so they are closed and their steps re-dispatched. Their dispatch
+   * records are checked first; anything found keeps the run paused with the reason. Otherwise
+   * the human's resume takes the repo as it is (`acceptCheckout`): the run's log is rewritten
    * from the engine's own events, any other file the engine wrote is taken as it now is.
    */
   async resume(input: RunScopedInput): Promise<RunControlResult> {
@@ -1195,7 +1364,7 @@ export class Engine implements Kernel {
         });
       }
       // The superseded runs are checked first: what they wrote is said before anything is taken.
-      const found = await sweepCheckouts(this, handle);
+      const found = await sweepDispatches(this, handle);
       if (found.issues.length === 0 && state.run.paused) {
         acceptCheckout(this);
         this.emit(handle, { type: "run.resumed", actor: "human", data: { auto: false } });

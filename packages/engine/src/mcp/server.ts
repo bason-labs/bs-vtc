@@ -1,66 +1,33 @@
 /**
- * The engine's MCP server (AD-4): the Lead-facing tools of `ENGINE_MCP_TOOLS`, each validated
- * against its input contract before the engine sees it and against its output contract before it
- * leaves. JSON-RPC 2.0, MCP methods `initialize`, `ping`, `tools/list`, `tools/call`.
- *
- * Deviation from AD-4 (tracked): AD-4 names the pinned official MCP TypeScript SDK. The engine
- * package's dependencies belong to the integrator (AD-15 rule 2); the SDK addition is proposed
- * there, and this module is replaced by the SDK's server once it lands. Until then it keeps the
- * same wire format and negotiates the protocol version against a fixed supported list.
+ * The engine's MCP server (AD-4), on the pinned official TypeScript SDK
+ * (`@modelcontextprotocol/sdk`, spine §5 reading 24): the Lead-facing tools of
+ * `ENGINE_MCP_TOOLS`, each validated against its input contract before the engine sees it and
+ * against its output contract before it leaves. The SDK owns JSON-RPC, `initialize` (protocol
+ * version negotiation), `ping` and the method table; this module only registers `tools/list` and
+ * `tools/call`. Transports are the socket's line framing (`socket.ts`) or any SDK transport.
  */
+import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
+import {
+  CallToolRequestSchema,
+  LATEST_PROTOCOL_VERSION,
+  ListToolsRequestSchema,
+  SUPPORTED_PROTOCOL_VERSIONS,
+  type CallToolResult,
+} from "@modelcontextprotocol/sdk/types.js";
 import {
   CONTRACT_SCHEMAS,
   ENGINE_MCP_TOOLS,
   jsonSchemaFor,
   type ContractName,
   type EngineMcpToolName,
-  type HostId,
 } from "@vtc/shared";
 import { EngineError, type CallContext, type Engine } from "../core/index.js";
 
-/** The newest MCP protocol revision this server speaks. */
-export const MCP_PROTOCOL_VERSION = "2025-06-18";
+/** The newest MCP protocol revision this server speaks (the SDK's). */
+export const MCP_PROTOCOL_VERSION: string = LATEST_PROTOCOL_VERSION;
 
-/**
- * Protocol versions this server speaks (newest first). `initialize` answers the client's version
- * when it is one of these, otherwise the newest one (MCP version negotiation: the client then
- * decides whether it can continue).
- */
-export const SUPPORTED_MCP_PROTOCOL_VERSIONS = [
-  MCP_PROTOCOL_VERSION,
-  "2025-03-26",
-  "2024-11-05",
-] as const;
-
-export const negotiateProtocolVersion = (requested: unknown): string =>
-  typeof requested === "string" &&
-  (SUPPORTED_MCP_PROTOCOL_VERSIONS as readonly string[]).includes(requested)
-    ? requested
-    : MCP_PROTOCOL_VERSION;
-
-export type JsonRpcId = string | number | null;
-
-export interface JsonRpcRequest {
-  readonly jsonrpc: "2.0";
-  readonly id?: JsonRpcId;
-  readonly method: string;
-  readonly params?: unknown;
-}
-
-export interface JsonRpcResponse {
-  readonly jsonrpc: "2.0";
-  readonly id: JsonRpcId;
-  readonly result?: unknown;
-  readonly error?: { readonly code: number; readonly message: string; readonly data?: unknown };
-}
-
-export const RPC_ERRORS = {
-  parse: -32700,
-  invalidRequest: -32600,
-  methodNotFound: -32601,
-  invalidParams: -32602,
-  internal: -32603,
-} as const;
+/** Protocol versions this server negotiates (newest first), from the SDK. */
+export const SUPPORTED_MCP_PROTOCOL_VERSIONS: readonly string[] = SUPPORTED_PROTOCOL_VERSIONS;
 
 /** The engine surface the tools call (the `Engine` class implements it). */
 export type ToolHost = Pick<
@@ -73,10 +40,14 @@ export type ToolHost = Pick<
   | "answer"
   | "approve"
   | "changeRequest"
+  | "consult"
   | "pause"
   | "resume"
   | "rejectMalformedSubmit"
->;
+> & {
+  /** A connection closed: its session can no longer be the Lead's (see `CallContext.session`). */
+  sessionClosed?(session: string): void;
+};
 
 const isRecord = (value: unknown): value is Record<string, unknown> =>
   typeof value === "object" && value !== null && !Array.isArray(value);
@@ -87,26 +58,29 @@ const objectSchema = (name: ContractName): Record<string, unknown> => {
   return schema.type === "object" ? schema : { type: "object", ...schema };
 };
 
-export const toolDefinitions = (): Record<string, unknown>[] =>
+export interface ToolDefinition {
+  readonly name: EngineMcpToolName;
+  readonly description: string;
+  readonly inputSchema: { type: "object" } & Record<string, unknown>;
+  readonly outputSchema: { type: "object" } & Record<string, unknown>;
+}
+
+export const toolDefinitions = (): ToolDefinition[] =>
   ENGINE_MCP_TOOLS.map((tool) => ({
     name: tool.name,
     description: tool.purpose,
-    inputSchema: objectSchema(tool.input),
-    outputSchema: objectSchema(tool.output),
+    inputSchema: objectSchema(tool.input) as ToolDefinition["inputSchema"],
+    outputSchema: objectSchema(tool.output) as ToolDefinition["outputSchema"],
   }));
 
 const toolText = (value: unknown): { content: { type: "text"; text: string }[] } => ({
   content: [{ type: "text", text: JSON.stringify(value) }],
 });
 
-const toolError = (message: string): Record<string, unknown> => ({
+const toolError = (message: string): CallToolResult => ({
   ...toolText({ error: message }),
   isError: true,
 });
-
-type ToolInput<N extends EngineMcpToolName> = Parameters<
-  ToolHost[N extends "change_request" ? "changeRequest" : N]
->[0];
 
 const invoke = async (
   host: ToolHost,
@@ -116,25 +90,27 @@ const invoke = async (
 ): Promise<unknown> => {
   switch (name) {
     case "start":
-      return host.start(input as ToolInput<"start">, call);
+      return host.start(input as Parameters<ToolHost["start"]>[0], call);
     case "next":
-      return host.next(input as ToolInput<"next">, call);
+      return host.next(input as Parameters<ToolHost["next"]>[0], call);
     case "submit":
-      return host.submit(input as ToolInput<"submit">, call);
+      return host.submit(input as Parameters<ToolHost["submit"]>[0], call);
     case "status":
-      return host.status(input as ToolInput<"status">);
+      return host.status(input as Parameters<ToolHost["status"]>[0]);
     case "escalations":
-      return host.escalations(input as ToolInput<"escalations">);
+      return host.escalations(input as Parameters<ToolHost["escalations"]>[0]);
     case "answer":
-      return host.answer(input as ToolInput<"answer">, call);
+      return host.answer(input as Parameters<ToolHost["answer"]>[0], call);
     case "approve":
-      return host.approve(input as ToolInput<"approve">, call);
+      return host.approve(input as Parameters<ToolHost["approve"]>[0], call);
     case "change_request":
-      return host.changeRequest(input as ToolInput<"change_request">);
+      return host.changeRequest(input as Parameters<ToolHost["changeRequest"]>[0], call);
+    case "consult":
+      return host.consult(input as Parameters<ToolHost["consult"]>[0], call);
     case "pause":
-      return host.pause(input as ToolInput<"pause">);
+      return host.pause(input as Parameters<ToolHost["pause"]>[0]);
     case "resume":
-      return host.resume(input as ToolInput<"resume">);
+      return host.resume(input as Parameters<ToolHost["resume"]>[0]);
   }
 };
 
@@ -149,7 +125,7 @@ export const callTool = async (
   name: string,
   args: unknown,
   call: CallContext,
-): Promise<Record<string, unknown>> => {
+): Promise<CallToolResult> => {
   const tool = ENGINE_MCP_TOOLS.find((t) => t.name === name);
   if (tool === undefined) return toolError(`unknown tool ${name}`);
   const parsed = CONTRACT_SCHEMAS[tool.input].safeParse(args ?? {});
@@ -173,82 +149,31 @@ export const callTool = async (
       return toolError(
         `internal: ${tool.output} did not validate: ${issuesOf(checked.error).join("; ")}`,
       );
-    return { ...toolText(output), structuredContent: output };
+    return { ...toolText(output), structuredContent: output as Record<string, unknown> };
   } catch (error) {
     if (error instanceof EngineError) return toolError(`${error.code}: ${error.message}`);
     return toolError(`internal: ${error instanceof Error ? error.message : String(error)}`);
   }
 };
 
-export interface McpSession {
-  /** Handles one parsed message; resolves with the response, or `null` for a notification. */
-  handle(message: unknown): Promise<JsonRpcResponse | null>;
-}
-
-export const createMcpSession = (
+/**
+ * One MCP server per connection (the SDK binds a server to one transport). `call` says who is
+ * calling: the bridge's host and the connection's session id (AD-12 rule 3). The tools' schemas
+ * are the frozen JSON Schemas of `@vtc/shared` (`jsonSchemaFor`), so `tools/list` and
+ * `tools/call` are registered on the SDK server's request handlers directly rather than through
+ * `registerTool`, which would derive its own schemas.
+ */
+export const createMcpServer = (
   host: ToolHost,
-  options: { readonly host: HostId | null; readonly serverVersion: string },
-): McpSession => {
-  const call: CallContext = { host: options.host };
-  return {
-    handle: async (message) => {
-      if (!isRecord(message) || message.jsonrpc !== "2.0" || typeof message.method !== "string") {
-        const id =
-          isRecord(message) && (typeof message.id === "string" || typeof message.id === "number")
-            ? message.id
-            : null;
-        return {
-          jsonrpc: "2.0",
-          id,
-          error: { code: RPC_ERRORS.invalidRequest, message: "invalid JSON-RPC request" },
-        };
-      }
-      const id = (message.id ?? null) as JsonRpcId;
-      const notification = !("id" in message);
-      const reply = (result: unknown): JsonRpcResponse | null =>
-        notification ? null : { jsonrpc: "2.0", id, result };
-      const params = isRecord(message.params) ? message.params : {};
-      switch (message.method) {
-        case "initialize":
-          return reply({
-            protocolVersion: negotiateProtocolVersion(params.protocolVersion),
-            capabilities: { tools: { listChanged: false } },
-            serverInfo: { name: "vtc", version: options.serverVersion },
-          });
-        case "notifications/initialized":
-        case "notifications/cancelled":
-          return null;
-        case "ping":
-          return reply({});
-        case "tools/list":
-          return reply({ tools: toolDefinitions() });
-        case "tools/call": {
-          if (typeof params.name !== "string") {
-            return notification
-              ? null
-              : {
-                  jsonrpc: "2.0",
-                  id,
-                  error: {
-                    code: RPC_ERRORS.invalidParams,
-                    message: "tools/call needs a tool name",
-                  },
-                };
-          }
-          return reply(await callTool(host, params.name, params.arguments, call));
-        }
-        default:
-          return notification
-            ? null
-            : {
-                jsonrpc: "2.0",
-                id,
-                error: {
-                  code: RPC_ERRORS.methodNotFound,
-                  message: `unknown method ${message.method}`,
-                },
-              };
-      }
-    },
-  };
+  options: { readonly call: CallContext; readonly serverVersion: string },
+): McpServer => {
+  const mcp = new McpServer(
+    { name: "vtc", version: options.serverVersion },
+    { capabilities: { tools: { listChanged: false } } },
+  );
+  mcp.server.setRequestHandler(ListToolsRequestSchema, () => ({ tools: toolDefinitions() }));
+  mcp.server.setRequestHandler(CallToolRequestSchema, (request) =>
+    callTool(host, request.params.name, request.params.arguments, options.call),
+  );
+  return mcp;
 };

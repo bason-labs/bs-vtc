@@ -5,17 +5,14 @@
  */
 export {
   callTool,
-  createMcpSession,
+  createMcpServer,
   MCP_PROTOCOL_VERSION,
-  negotiateProtocolVersion,
-  RPC_ERRORS,
   SUPPORTED_MCP_PROTOCOL_VERSIONS,
   toolDefinitions,
-  type JsonRpcRequest,
-  type JsonRpcResponse,
-  type McpSession,
+  type ToolDefinition,
   type ToolHost,
 } from "./server.js";
+export { LineTransport } from "./transport.js";
 export {
   serveEngineSocket,
   SocketPathTooLongError,

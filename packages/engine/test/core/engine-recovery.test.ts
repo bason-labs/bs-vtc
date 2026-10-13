@@ -22,6 +22,7 @@ import {
   throughPlan,
   toPlanner,
   verdictPass,
+  workdir,
   worktreeOf,
   type Harness,
 } from "../helpers/engine-harness.js";
@@ -248,15 +249,18 @@ describe("questions, plans and the design phase", () => {
       CLAUDE,
     );
     const ba = only(await next(h), "ba");
-    writeFile(h.repo, ".vtc/spec/spec.md", SPEC_ONE);
+    writeFile(workdir(ba), ".vtc/spec/spec.md", SPEC_ONE);
     const design = await submitResult(h, ba, {
       exit: "done",
       artifacts: [{ type: "spec", path: ".vtc/spec/spec.md" }],
     });
     expect(spawns(design.actions).map((a) => a.role)).toEqual(["architect", "designer"]);
-    writeFile(h.repo, ".vtc/architecture/spine.md", "# spine\n");
-    writeFile(h.repo, ".vtc/design/DESIGN.md", "# design\n");
     const [architect, designer] = spawns(design.actions);
+    writeFile(workdir(architect!), ".vtc/architecture/spine.md", "# spine\n");
+    writeFile(workdir(designer!), ".vtc/design/DESIGN.md", "# design\n");
+    // the Designer's pack carries its dealt constraints (§9.1 step 2), the Architect's its depth
+    expect(readFileSync(join(h.repo, designer!.pack), "utf8")).toContain("design constraints:");
+    expect(readFileSync(join(h.repo, architect!.pack), "utf8")).toContain("architect depth: S");
     await submitResult(h, architect!, {
       exit: "done",
       artifacts: [{ type: "architecture", path: ".vtc/architecture/spine.md" }],

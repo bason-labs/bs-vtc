@@ -4,11 +4,13 @@
  * dispatch is a `role.dispatched` event with its pack, model and prompt version, so `submit` can
  * reject anything the engine did not ask for.
  */
+import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import {
   agentNameFor,
   HIDDEN_TESTS,
   planDispatch,
+  type ArtifactRef,
   type EscalationAnswer,
   type Finding,
   type HostId,
@@ -16,6 +18,7 @@ import {
   type ModelTier,
   type Phase,
   type SessionRef,
+  type SpawnRoleAction,
   type TaskPackInput,
 } from "@vtc/shared";
 import { budgetState, sharesExceeded } from "./budget.js";
@@ -43,14 +46,14 @@ import { resolveModel, roleTier } from "./roles.js";
 import { reviewersFor } from "./router.js";
 import { limitWait } from "./limits.js";
 import { setTaskStatus } from "./parking.js";
-import { checkGitNow, sweepCheckouts } from "./checkout-guard.js";
-import { CLARIFIER_OF, openGaps } from "./clarify.js";
 import {
-  recordCheckout,
-  runsInCheckout,
-  saveCheckoutRecord,
-  type CheckoutRecord,
-} from "./phase-scope.js";
+  checkGitNow,
+  recordDispatch,
+  sweepDispatches,
+  type DispatchRecord,
+} from "./dispatch-guard.js";
+import { architectDepth, dealDesignConstraints, researchDepth } from "./lottery.js";
+import { prepareRoleWorktree } from "./role-worktree.js";
 
 export interface StepSpec {
   readonly key: string;
@@ -63,6 +66,8 @@ export interface StepSpec {
   readonly findings?: readonly Finding[];
   readonly answer?: EscalationAnswer;
   readonly note?: string;
+  /** Extra pack inputs (an advisor's, `consult`). */
+  readonly inputs?: readonly ArtifactRef[];
   /** Engine transition that happens as the step is handed out (e.g. → building). */
   readonly onDispatch?: () => void;
 }
@@ -180,31 +185,6 @@ const taskSteps = (k: Kernel, h: RunHandle, taskId: string, host: HostId): StepS
       busyStep(h, { role: "qa", mode: "author", task: taskId })
     )
       return [];
-    // A spec or design gap is answered first, by the BA or the Designer (§6.3 steps 3 and 8).
-    const gaps = openGaps(h.state, taskId);
-    const first = gaps[0];
-    const clarifier = first === undefined ? undefined : CLARIFIER_OF[first.route];
-    if (clarifier !== undefined) {
-      const step = { role: clarifier, task: taskId };
-      if (busyStep(h, step)) return [];
-      const answer = freshAnswer(h, taskId, lastDispatchSeq(h, taskId, clarifier));
-      const note = [
-        rejectionNote(h, step),
-        clarifier === "ba"
-          ? "Answer the spec gap(s) in your pack's findings for this task. A wording-only fix of the frozen spec (no requirement or acceptance criterion added, removed or renamed): edit it and exit done. A change in meaning: write it into the spec and exit spec_conflict; it goes to the human as a change request. If the spec already answers it, exit done and say how in your summary."
-          : "Answer the design gap(s) in your pack's findings for this task. Additions outside the frozen design artifacts: exit done. A change to a frozen design artifact goes to the human as a change request: write it and exit spec_conflict.",
-      ]
-        .filter((n) => n !== undefined)
-        .join("\n");
-      steps.push({
-        key: `clarify:${taskId}`,
-        ...step,
-        findings: gaps.filter((f) => CLARIFIER_OF[f.route] === clarifier),
-        note,
-        ...(answer === undefined ? {} : { answer }),
-      });
-      return steps;
-    }
     const fixingSince = statusEnteredSeq(h.state, taskId, "fixing") ?? 0;
     const badTests = taskFindings(h.state, taskId).filter(
       (f) => f.status === "open" && f.route === "bad_test",
@@ -376,6 +356,45 @@ const phaseAnswer = (h: RunHandle, phase: Phase, role: string): EscalationAnswer
   return answeredSeq > since ? last.answer : undefined;
 };
 
+/**
+ * What the engine decides for the pack (§6.2, §8.3, §9.1 step 2): the Architect's depth from the
+ * frozen spec, DISCOVER's research depth from the track, and a Designer direction's constraints
+ * from the seeded lottery (one deal per Designer dispatch of the run, in order).
+ */
+const depthsFor = (
+  k: Kernel,
+  h: RunHandle,
+  step: StepSpec,
+): Pick<TaskPackInput, "architect_depth" | "research_depth" | "design_constraints"> => {
+  if (step.task !== undefined) return {};
+  const run = h.state.run;
+  if (step.role === "architect") {
+    const spec = run.gates.G1.frozen
+      .filter((f) => f.path.startsWith(".vtc/spec/"))
+      .map((f) => {
+        try {
+          return readFileSync(join(k.deps.repoRoot, f.path), "utf8");
+        } catch {
+          return "";
+        }
+      })
+      .join("\n");
+    const requirements = new Set(
+      frozenSpecItems(k.deps.repoRoot, h.state).map((i) => i.id.split(".")[0]),
+    ).size;
+    return { architect_depth: architectDepth(run.track, spec, requirements) };
+  }
+  if (step.role === "repo_cartographer" || step.role === "research_analyst")
+    return { research_depth: researchDepth(run.track) };
+  if (step.role === "designer") {
+    const direction = [...h.state.roleRuns.values()].filter(
+      (r) => r.role === "designer" && r.task === undefined,
+    ).length;
+    return { design_constraints: dealDesignConstraints(k.deps.repoRoot, h.state.id, direction) };
+  }
+  return {};
+};
+
 /** Renders the pack for a step and writes it under `.vtc/state/packs/` (AD-14 rule 5). */
 const packFor = (k: Kernel, h: RunHandle, step: StepSpec, actionId: string): TaskPackInput => {
   const state = h.state;
@@ -398,7 +417,7 @@ const packFor = (k: Kernel, h: RunHandle, step: StepSpec, actionId: string): Tas
             `${HIDDEN_TESTS.stagingDir}/${step.task ?? ""}/**`,
           ]
         : (contract?.tools.write_paths ?? []);
-  const inputs: TaskPackInput["inputs"] = [];
+  const inputs: TaskPackInput["inputs"] = [...(step.inputs ?? [])];
   if (task === undefined && ["discover", "specify"].includes(state.run.phase)) {
     inputs.push({ type: "request", path: `.vtc/runs/${state.id}/request.md` });
   }
@@ -434,6 +453,7 @@ const packFor = (k: Kernel, h: RunHandle, step: StepSpec, actionId: string): Tas
     ...(step.task === undefined ? {} : { task: step.task }),
     ...(task === undefined ? {} : { feature: task.feature }),
     ...(step.subject === undefined ? {} : { subject: step.subject }),
+    ...depthsFor(k, h, step),
     ...(step.task === undefined || state.intents.get(step.task) === undefined
       ? {}
       : { intent: state.intents.get(step.task) }),
@@ -447,8 +467,17 @@ const packFor = (k: Kernel, h: RunHandle, step: StepSpec, actionId: string): Tas
   };
 };
 
-/** Hands out one step: writes its pack, logs `role.dispatched`, returns the Lead action. */
-export const dispatchStep = (k: Kernel, h: RunHandle, step: StepSpec, host: HostId): LeadAction => {
+/**
+ * Hands out one step: writes its pack, logs `role.dispatched` (prompt SHA and the resolved
+ * model), returns the Lead action. `cwd` is where the role works (its worktree).
+ */
+export const dispatchStep = (
+  k: Kernel,
+  h: RunHandle,
+  step: StepSpec,
+  host: HostId,
+  cwd: string,
+): SpawnRoleAction => {
   const contract = k.deps.roles.get(step.role);
   if (contract === undefined) throw new EngineError("invalid", `no contract for role ${step.role}`);
   const actionId = nextActionId(h.state);
@@ -460,10 +489,6 @@ export const dispatchStep = (k: Kernel, h: RunHandle, step: StepSpec, host: Host
   const agent = agentNameFor(step.role, step.mode);
   const pack = writeTaskPack(k.deps.repoRoot, packFor(k, h, step, actionId));
   const task = step.task === undefined ? undefined : h.state.tasks.get(step.task);
-  const cwd =
-    task?.worktree === undefined || runsInCheckout(step.role)
-      ? k.deps.repoRoot
-      : join(k.deps.repoRoot, task.worktree);
   const resume = step.resume !== undefined && step.resume.host === host ? step.resume : undefined;
   step.onDispatch?.();
   k.emit(h, {
@@ -471,7 +496,7 @@ export const dispatchStep = (k: Kernel, h: RunHandle, step: StepSpec, host: Host
     actor: "engine",
     role: step.role,
     ...(step.task === undefined ? {} : { task: step.task, feature: task?.feature }),
-    prompt_sha: k.deps.promptSha(agent, host),
+    prompt_sha: k.deps.plugins.promptSha(agent, host),
     host,
     model: model.model,
     data: {
@@ -485,10 +510,18 @@ export const dispatchStep = (k: Kernel, h: RunHandle, step: StepSpec, host: Host
     },
   });
   const capabilities = k.deps.adapters[host]?.capabilities;
+  // §5.2a / §5.3: the compiled discipline profile and the skills of the task's stack packs.
+  const profile = task === undefined ? undefined : k.deps.plugins.profileFor(host, task.discipline);
+  const skills =
+    task === undefined
+      ? []
+      : k.deps.plugins.skillsFor(host, [...task.stack_packs, task.discipline]);
   const prompt = [
     `VTC dispatch ${actionId}: you are ${agent} (model ${model.model}, effort ${model.effort}).`,
     `Work in: ${cwd}`,
     `Read your task pack: ${join(k.deps.repoRoot, pack)}`,
+    ...(profile === undefined ? [] : [`Apply the ${task?.discipline ?? ""} profile: ${profile}`]),
+    ...(skills.length === 0 ? [] : [`Use these skills: ${skills.join(", ")}`]),
     ...(step.note === undefined ? [] : [step.note]),
     `Finish with exactly one RoleResult JSON object as your final message (role "${step.role}"${step.mode === undefined ? "" : `, mode "${step.mode}"`}${step.task === undefined ? "" : `, task "${step.task}"`}${step.subject === undefined ? "" : `, verdict subject "${step.subject}"`}). The Lead submits it with action_id ${actionId}.`,
   ].join("\n");
@@ -504,8 +537,51 @@ export const dispatchStep = (k: Kernel, h: RunHandle, step: StepSpec, host: Host
     agent,
     prompt: prompt.slice(0, 8000),
     background: capabilities?.backgroundSubagents ?? false,
+    model: model.model,
     ...(resume === undefined ? {} : { resume }),
   };
+};
+
+/**
+ * Records the dispatch (every role: the git baseline and the engine files, `dispatch-guard.ts`),
+ * prepares a front-half role's or advisor's own worktree (spine §5 reading 21), and hands the
+ * step out. A worktree that cannot be made pauses the run instead.
+ */
+export const dispatchGuarded = async (
+  k: Kernel,
+  h: RunHandle,
+  step: StepSpec,
+  host: HostId,
+): Promise<SpawnRoleAction | null> => {
+  const actionId = nextActionId(h.state);
+  const task = step.task === undefined ? undefined : h.state.tasks.get(step.task);
+  let worktree: DispatchRecord["worktree"];
+  if (task === undefined) {
+    try {
+      worktree = await prepareRoleWorktree(k, h.state.id, actionId);
+    } catch (error) {
+      k.emit(h, {
+        type: "run.paused",
+        actor: "engine",
+        data: {
+          reason:
+            `the engine could not prepare ${step.role}'s worktree: ${error instanceof Error ? error.message : String(error)}`.slice(
+              0,
+              300,
+            ),
+        },
+      });
+      return null;
+    }
+  }
+  recordDispatch(k, h.state.id, actionId, worktree);
+  const cwd =
+    worktree !== undefined
+      ? join(k.deps.repoRoot, worktree.path)
+      : task?.worktree === undefined
+        ? k.deps.repoRoot
+        : join(k.deps.repoRoot, task.worktree);
+  return dispatchStep(k, h, step, host, cwd);
 };
 
 /**
@@ -522,7 +598,7 @@ export const dispatchNow = async (
   if (h.state.run.paused || h.state.run.finished_at !== undefined) return [];
   // Runs that ended without a check (a failure, a limit, a restart) are checked before a new
   // baseline is recorded; a git change made while a role runs stops everything (AD-7 rule 7).
-  if ((await sweepCheckouts(k, h)).issues.length > 0 || checkGitNow(k, h)) return [];
+  if ((await sweepDispatches(k, h)).issues.length > 0 || checkGitNow(k, h)) return [];
   if (limitWait(k, h) !== null) return [];
   const host = k.hostFor(call);
   const config = k.config();
@@ -545,25 +621,10 @@ export const dispatchNow = async (
   }
   const actions: LeadAction[] = [];
   let free = config.concurrency - inFlight(h.state).length;
-  // Checkout roles write in the user's checkout: record it before the Lead can start one, so
-  // every write can be verified when the run ends (AD-7 rule 7).
-  let checkout: CheckoutRecord | undefined;
   for (const step of pendingSteps(k, h, host)) {
     if (free <= 0) break;
-    const inCheckout = runsInCheckout(step.role);
-    if (inCheckout) checkout ??= await recordCheckout(k.deps.repoRoot);
-    const action = dispatchStep(k, h, step, host);
-    if (inCheckout && checkout !== undefined && action.type === "spawn_role") {
-      // A BA answering a task's gap: the spec's ids now, to tell wording from meaning (§6.2).
-      const record =
-        step.role === "ba" && step.task !== undefined
-          ? {
-              ...checkout,
-              spec_ids: frozenSpecItems(k.deps.repoRoot, h.state).map((i) => i.id),
-            }
-          : checkout;
-      saveCheckoutRecord(k.deps.repoRoot, k.checkouts, action.action_id, record);
-    }
+    const action = await dispatchGuarded(k, h, step, host);
+    if (action === null) break;
     actions.push(action);
     free -= 1;
   }

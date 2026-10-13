@@ -58,15 +58,28 @@ export { projectGraph, taskDagGraph, taskNodeState, taskPipelineGraph } from "./
 export { Engine, type EventListener } from "./engine.js";
 export { EngineError, type CallContext, type EngineCoreDeps, type RunHandle } from "./kernel.js";
 export {
-  BUILTIN_ROLES,
   compiledRoleContracts,
   createRoleRegistry,
   DEFAULT_TIER_MODELS,
+  REQUIRED_ROLES,
   resolveModel,
-  ROLE_CONTRACTS_ASSET,
   RoleContractsError,
+  writePathsOf,
   type RoleRegistry,
 } from "./roles.js";
+export {
+  createPluginCatalog,
+  pluginCatalogFrom,
+  pluginManifest,
+  PluginManifestError,
+  type PluginCatalog,
+} from "./plugins.js";
+export { guardDirFor, GUARD_DIR } from "./guard.js";
+export { EngineWrites, type WriteCheck } from "./engine-writes.js";
+export { ENGINE_FILE_DIRS, FORENSICS_DIR, type DispatchRecord } from "./dispatch-guard.js";
+export { roleWorktreeId, ROLE_INPUT_DIRS } from "./role-worktree.js";
+export { FINAL_REVIEW_STEPS_RUN } from "./projections.js";
+export { architectDepth, dealDesignConstraints, LOTTERY_POOLS, researchDepth } from "./lottery.js";
 export {
   ConfigError,
   DEFAULT_ACCEPTANCE_GLOBS,

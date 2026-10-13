@@ -200,27 +200,7 @@ export const applyAnswer = (
     throw new EngineError("invalid", `option ${answer.option} is not offered`);
   const taskId = escalation.task;
   const task = taskId === undefined ? undefined : h.state.tasks.get(taskId);
-  if (option.effect === "approve_change" || option.effect === "reject_change") {
-    // A task's change request from a BA or Designer (§6.2): the human decided the gap, so it is
-    // resolved and the task continues from its checkpoint with the answer.
-    if (
-      task?.status === "parked" &&
-      taskId !== undefined &&
-      escalation.reason === "change_request"
-    ) {
-      for (const f of taskFindings(h.state, taskId)) {
-        if (f.status !== "open" || (f.route !== "spec_gap" && f.route !== "design_gap")) continue;
-        k.emit(h, {
-          type: "finding.status_changed",
-          actor: "human",
-          task: taskId,
-          data: { fingerprint: f.fingerprint, from: "open", to: "resolved" },
-        });
-      }
-      setTaskStatus(k, h, taskId, resumeTarget(h, taskId, escalation.reason, option.effect));
-    }
-    return;
-  }
+  if (option.effect === "approve_change" || option.effect === "reject_change") return;
   if (taskId === undefined || task === undefined) return;
   if (option.effect === "drop" || option.effect === "replan") {
     dropTask(k, h, taskId);

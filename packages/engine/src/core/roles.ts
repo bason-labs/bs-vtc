@@ -1,15 +1,15 @@
 /**
  * The role contracts the engine dispatches against (§5, AD-14). The neutral role sources in
- * `roles/` (sub-project 3) are the source of truth: the compiler emits them into each host
- * plugin as {@link ROLE_CONTRACTS_ASSET}, and the daemon loads them from its `AssetBundle`
- * (`compiledRoleContracts`). A broken or incomplete set stops the daemon. Until the plugins carry
- * the file, the engine uses these built-in contracts and the daemon says so on stderr; a test
- * compares them with `roles/<role>/role.yaml` once those exist, so the two cannot drift
- * unnoticed. Model ids come from the engine (AD-6 rule 2): role tier → project override →
+ * `roles/` (sub-project 3) are the only source: the compiler emits them into each host plugin as
+ * `ROLE_CONTRACTS_ASSET` (`@vtc/shared`), and the daemon loads them from its `AssetBundle`
+ * (`compiledRoleContracts`). A missing, broken or incomplete set stops the daemon: write scopes,
+ * exits, verdicts and models come from these contracts (AD-8 rule 9), never from a second copy in
+ * the engine. Model ids come from the engine (AD-6 rule 2): role tier → project override →
  * built-in tier map.
  */
 import {
-  HOST_IDS,
+  resolveRoleMode,
+  ROLE_CONTRACTS_ASSET,
   RoleContractSchema,
   type AssetBundle,
   type AssetNamespace,
@@ -18,7 +18,6 @@ import {
   type ProjectConfig,
   type ResolvedModel,
   type RoleContract,
-  type RoleContractInput,
 } from "@vtc/shared";
 
 /** Model id per tier and host, used when `project.yaml` sets none (`hosts.models`). */
@@ -27,182 +26,41 @@ export const DEFAULT_TIER_MODELS: Readonly<Record<HostId, Readonly<Record<ModelT
   codex: { top: "gpt-5-codex", mid: "gpt-5-codex", low: "gpt-5-codex-mini" },
 };
 
-const VERDICTS = ["pass", "fail", "unknown", "unchecked"] as const;
-
-const both = (tier: ModelTier, effort: "low" | "medium" | "high" = "medium") =>
-  Object.fromEntries(HOST_IDS.map((h) => [h, { tier, effort }])) as RoleContractInput["models"];
-
-const role = (
-  input: Omit<RoleContractInput, "version" | "budget"> & {
-    readonly budget?: RoleContractInput["budget"];
-  },
-): RoleContract =>
-  RoleContractSchema.parse({ version: "1.0.0", budget: { context_tokens: 60_000 }, ...input });
-
-export const BUILTIN_ROLES: readonly RoleContract[] = [
-  role({
-    id: "repo_cartographer",
-    kind: "core",
-    mission: "Map an existing repository for the run.",
-    inputs: ["request"],
-    output: { artifacts: ["repo_map"], verdicts: [] },
-    exits: ["done", "blocked", "unknown"],
-    reviewer: "engine",
-    models: both("low"),
-    tools: { profile: "write_scoped", write_paths: [".vtc/research/**"] },
-  }),
-  role({
-    id: "research_analyst",
-    kind: "core",
-    mission: "Research a new idea or a large feature with cited sources.",
-    inputs: ["request"],
-    output: { artifacts: ["research_brief"], verdicts: [] },
-    exits: ["done", "blocked", "unknown"],
-    reviewer: "engine",
-    models: both("mid"),
-    tools: { profile: "write_scoped", write_paths: [".vtc/research/**"] },
-  }),
-  role({
-    id: "ba",
-    kind: "core",
-    mission: "Write the spec with REQ-n requirements and acceptance criteria.",
-    inputs: ["request"],
-    output: { artifacts: ["spec"], verdicts: [] },
-    exits: ["done", "blocked", "spec_conflict", "unknown"],
-    reviewer: "spec_verifier",
-    models: both("top", "high"),
-    tools: { profile: "write_scoped", write_paths: [".vtc/spec/**"] },
-  }),
-  role({
-    id: "architect",
-    kind: "core",
-    mission: "Propose the architecture spine for the approved spec.",
-    inputs: ["spec"],
-    output: { artifacts: ["architecture"], verdicts: [] },
-    exits: ["done", "blocked", "spec_conflict", "unknown"],
-    reviewer: "security",
-    models: both("top", "high"),
-    tools: { profile: "write_scoped", write_paths: [".vtc/architecture/**"] },
-  }),
-  role({
-    id: "designer",
-    kind: "core",
-    mission: "Design flows, screens and tokens for the approved spec.",
-    inputs: ["spec"],
-    output: { artifacts: ["design"], verdicts: [] },
-    exits: ["done", "blocked", "spec_conflict", "unknown"],
-    reviewer: "visual_qa",
-    models: both("top"),
-    tools: { profile: "write_scoped", write_paths: [".vtc/design/**"] },
-  }),
-  role({
-    id: "planner",
-    kind: "core",
-    mission: "Split the approved design into tasks with intent contracts.",
-    inputs: ["spec", "architecture"],
-    output: { artifacts: ["tasks"], verdicts: [] },
-    exits: ["done", "blocked", "spec_conflict", "unknown"],
-    reviewer: "engine",
-    models: both("top", "high"),
-    tools: { profile: "read_only" },
-  }),
-  role({
-    id: "qa",
-    kind: "core",
-    mission: "Author acceptance tests, or judge test adequacy.",
-    inputs: ["spec"],
-    output: { artifacts: [], verdicts: [] },
-    exits: ["done", "blocked", "unknown"],
-    reviewer: "engine",
-    models: both("mid"),
-    tools: { profile: "read_only" },
-    modes: {
-      author: {
-        output: {
-          artifacts: ["acceptance_test", "hidden_acceptance_test", "scenario"],
-          verdicts: [],
-        },
-        tools: { profile: "write_scoped", write_paths: ["tests/**"] },
-      },
-      judge: {
-        output: { artifacts: [], verdicts: [...VERDICTS] },
-        exits: ["done", "unknown"],
-      },
-    },
-  }),
-  role({
-    id: "engineer",
-    kind: "core",
-    mission: "Implement the task inside its files_scope until the acceptance tests pass.",
-    inputs: ["spec", "acceptance_test"],
-    output: { artifacts: ["interface_contract"], verdicts: [] },
-    exits: ["built", "blocked", "spec_conflict", "out_of_scope_fault"],
-    reviewer: "qa",
-    models: both("mid", "high"),
-    tools: { profile: "code_sandboxed" },
-  }),
-  role({
-    id: "spec_verifier",
-    kind: "core",
-    mission: "Judge one acceptance criterion against the built code, with evidence.",
-    inputs: ["spec", "diff"],
-    output: { artifacts: [], verdicts: [...VERDICTS] },
-    exits: ["done", "unknown"],
-    reviewer: "engine",
-    models: both("mid"),
-    tools: { profile: "read_only" },
-  }),
-  role({
-    id: "security",
-    kind: "core",
-    mission: "Threat-model the design, or verify the built diff.",
-    inputs: ["spec"],
-    output: { artifacts: [], verdicts: [] },
-    exits: ["done", "unknown"],
-    reviewer: "engine",
-    models: both("top"),
-    tools: { profile: "read_only" },
-    modes: {
-      design: {
-        output: { artifacts: ["threat_model"], verdicts: [] },
-        tools: { profile: "write_scoped", write_paths: [".vtc/architecture/**"] },
-      },
-      verify: { output: { artifacts: [], verdicts: [...VERDICTS] } },
-    },
-  }),
-  role({
-    id: "visual_qa",
-    kind: "core",
-    mission: "Judge the rendered UI against the design criteria V1–V8.",
-    inputs: ["design_md"],
-    output: { artifacts: [], verdicts: [...VERDICTS] },
-    exits: ["done", "unknown"],
-    reviewer: "engine",
-    models: both("mid"),
-    tools: { profile: "read_only" },
-  }),
-];
+/** The roles the engine's flow dispatches by id (§6.1, §6.3): a compiled set must cover them. */
+export const REQUIRED_ROLES = [
+  "repo_cartographer",
+  "research_analyst",
+  "ba",
+  "architect",
+  "designer",
+  "planner",
+  "qa",
+  "engineer",
+  "spec_verifier",
+  "security",
+  "visual_qa",
+] as const;
 
 export interface RoleRegistry {
   get(role: string): RoleContract | undefined;
 }
 
-/**
- * The registry: the compiled contracts when given (they must cover every role the engine
- * dispatches, `compiledRoleContracts` checks it), else the built-ins.
- */
-export const createRoleRegistry = (contracts: readonly RoleContract[] = []): RoleRegistry => {
-  const byId = new Map<string, RoleContract>(
-    (contracts.length > 0 ? contracts : BUILTIN_ROLES).map((r) => [r.id, r]),
-  );
+/** The registry over the compiled contracts (`compiledRoleContracts`; tests inject fixtures). */
+export const createRoleRegistry = (contracts: readonly RoleContract[]): RoleRegistry => {
+  const byId = new Map<string, RoleContract>(contracts.map((r) => [r.id, r]));
   return { get: (id) => byId.get(id) };
 };
 
-/**
- * Where the compiler writes the compiled role contracts in each host plugin (a JSON array of
- * `RoleContract`). Proposed to shared as a contract constant (AD-14, AD-15 rule 2).
- */
-export const ROLE_CONTRACTS_ASSET = "vtc/role-contracts.json";
+/** A role run's effective write paths (its mode's, else the role's); none for an unknown role. */
+export const writePathsOf = (
+  roles: RoleRegistry,
+  run: { readonly role: string; readonly mode?: string | undefined },
+): readonly string[] => {
+  const contract = roles.get(run.role);
+  if (contract === undefined) return [];
+  const effective = resolveRoleMode(contract, run.mode);
+  return effective.ok ? effective.contract.tools.write_paths : [];
+};
 
 export class RoleContractsError extends Error {
   constructor(detail: string) {
@@ -212,12 +70,12 @@ export class RoleContractsError extends Error {
 }
 
 /**
- * The compiled role contracts a plugin namespace carries, validated against `RoleContractSchema`
- * and checked to cover every role the engine dispatches; `null` when no plugin carries them.
- * Throws {@link RoleContractsError} on a broken or incomplete set (the daemon must not start on
- * one: write scopes and result checks come from these contracts).
+ * The compiled role contracts the plugin assets carry (the first plugin namespace that has them),
+ * validated against `RoleContractSchema` and checked to cover {@link REQUIRED_ROLES}. Throws
+ * {@link RoleContractsError} when no plugin carries them, or on a broken or incomplete set (the
+ * daemon must not start on one).
  */
-export const compiledRoleContracts = (assets: AssetBundle): RoleContract[] | null => {
+export const compiledRoleContracts = (assets: AssetBundle): RoleContract[] => {
   for (const namespace of [
     "plugin:claude-code",
     "plugin:codex",
@@ -241,14 +99,16 @@ export const compiledRoleContracts = (assets: AssetBundle): RoleContract[] | nul
         );
       return parsed.data;
     });
-    const missing = BUILTIN_ROLES.map((r) => r.id).filter(
-      (id) => !contracts.some((c) => c.id === id),
-    );
+    const ids = contracts.map((c) => c.id);
+    const duplicate = ids.find((id, i) => ids.indexOf(id) !== i);
+    if (duplicate !== undefined)
+      throw new RoleContractsError(`${namespace}: ${duplicate} is listed twice`);
+    const missing = REQUIRED_ROLES.filter((id) => !ids.includes(id));
     if (missing.length > 0)
       throw new RoleContractsError(`${namespace}: no contract for ${missing.join(", ")}`);
     return contracts;
   }
-  return null;
+  throw new RoleContractsError("no plugin in the asset bundle carries them");
 };
 
 /** The tier a role runs at on a host (mode overrides first). */

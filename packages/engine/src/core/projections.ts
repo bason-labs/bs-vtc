@@ -28,6 +28,9 @@ import type { RunState } from "./state.js";
 import { planFilePath } from "./views.js";
 import { toYaml } from "./yaml.js";
 
+/** The §6.7a steps this engine's Final Review runs (step 1: full gates on the integrated branch). */
+export const FINAL_REVIEW_STEPS_RUN: readonly number[] = [1];
+
 /** Agents write in the repo too: a planted symlink is refused, never followed (AD-18). */
 const write = (repoRoot: string, path: string, content: string): void => {
   writeRepoFile(repoRoot, path, content);
@@ -267,7 +270,8 @@ export const writeFeatureEvidenceBundle = (
     ),
     findings: countFindings(findings),
     deferred: findings.filter((f) => f.status === "deferred").map((f) => f.fingerprint),
-    final_review: { verdict, rounds: feature.round },
+    // This engine's Final Review runs §6.7a step 1 only (`FINAL_REVIEW_SCOPE_NOTE`).
+    final_review: { verdict, rounds: feature.round, steps_run: FINAL_REVIEW_STEPS_RUN },
     spend: spendOf(tasks.flatMap((t) => runsOf(t.id))),
     written_at: now.toISOString(),
   });

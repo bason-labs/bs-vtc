@@ -21,7 +21,6 @@ import {
 import {
   callTool,
   connectEngineClient,
-  createMcpSession,
   MCP_PROTOCOL_VERSION,
   runStdioBridge,
   SUPPORTED_MCP_PROTOCOL_VERSIONS,
@@ -72,6 +71,7 @@ describe("tool surface (AD-4)", () => {
     answer: { escalation: "X-1" },
     approve: { gates: [], decision: "maybe" },
     change_request: { artifact: "interface_contract", summary: "x", detail: "y" },
+    consult: { advisor: "cost_analyst" },
     pause: { run: "" },
     resume: { nope: 1 },
   };
@@ -164,45 +164,74 @@ describe("tool surface (AD-4)", () => {
     await h.release();
   });
 
-  it("speaks JSON-RPC: initialize, ping, tools/list, unknown methods, notifications", async () => {
+  it("speaks MCP through the official SDK: initialize, ping, tools/list, errors", async () => {
     const h = createHarness();
-    const session = createMcpSession(h.engine, { host: "claude-code", serverVersion: "0.0.0" });
-    expect(
-      await session.handle({
-        jsonrpc: "2.0",
-        id: 1,
-        method: "initialize",
-        params: { protocolVersion: "2025-03-26" },
-      }),
-    ).toMatchObject({
-      id: 1,
+    const server = await socketFor(h);
+    const hello = { v: 1, client: "cli", host: null, contracts_version: CONTRACTS_VERSION };
+    const replies = (
+      await rawExchange(server.path, [
+        hello,
+        {
+          jsonrpc: "2.0",
+          id: 1,
+          method: "initialize",
+          params: {
+            protocolVersion: "2025-03-26",
+            capabilities: {},
+            clientInfo: { name: "t", version: "0" },
+          },
+        },
+        { jsonrpc: "2.0", method: "notifications/initialized" },
+        { jsonrpc: "2.0", id: 2, method: "ping" },
+        { jsonrpc: "2.0", id: 3, method: "tools/list" },
+        { jsonrpc: "2.0", id: 4, method: "nope" },
+        { hello: 1 },
+        "not json",
+      ])
+    ).map((l) => JSON.parse(l) as Record<string, unknown>);
+    const byId = (id: number) => replies.find((r) => r.id === id);
+    expect(byId(1)).toMatchObject({
       result: { protocolVersion: "2025-03-26", serverInfo: { name: "vtc" } },
     });
-    expect(
-      await session.handle({ jsonrpc: "2.0", method: "notifications/initialized" }),
-    ).toBeNull();
-    expect(await session.handle({ jsonrpc: "2.0", id: 2, method: "ping" })).toEqual({
-      jsonrpc: "2.0",
-      id: 2,
-      result: {},
-    });
-    expect(await session.handle({ jsonrpc: "2.0", id: 3, method: "nope" })).toMatchObject({
-      error: { code: -32601 },
-    });
-    expect(await session.handle({ hello: 1 })).toMatchObject({ error: { code: -32600 } });
+    expect(byId(2)).toEqual({ jsonrpc: "2.0", id: 2, result: {} });
+    expect((byId(3)?.result as { tools: { name: string }[] }).tools.map((t) => t.name)).toEqual(
+      ENGINE_MCP_TOOLS.map((t) => t.name),
+    );
+    expect(byId(4)).toMatchObject({ error: { code: -32601 } });
+    expect(replies.some((r) => (r.error as { code?: number } | undefined)?.code === -32600)).toBe(
+      true,
+    );
+    expect(replies.some((r) => (r.error as { code?: number } | undefined)?.code === -32700)).toBe(
+      true,
+    );
     await h.release();
   });
-  it("negotiates the protocol version against the versions it supports", async () => {
+  it("negotiates the protocol version against the versions the SDK supports", async () => {
     const h = createHarness();
-    const session = createMcpSession(h.engine, { host: "claude-code", serverVersion: "0.0.0" });
-    const init = (protocolVersion: unknown) =>
-      session.handle({ jsonrpc: "2.0", id: 1, method: "initialize", params: { protocolVersion } });
+    const server = await socketFor(h);
+    const hello = { v: 1, client: "cli", host: null, contracts_version: CONTRACTS_VERSION };
+    const init = async (protocolVersion: string) =>
+      JSON.parse(
+        (
+          await rawExchange(server.path, [
+            hello,
+            {
+              jsonrpc: "2.0",
+              id: 1,
+              method: "initialize",
+              params: {
+                protocolVersion,
+                capabilities: {},
+                clientInfo: { name: "t", version: "0" },
+              },
+            },
+          ])
+        )[1] ?? "{}",
+      ) as { result?: { protocolVersion?: string } };
     for (const version of SUPPORTED_MCP_PROTOCOL_VERSIONS)
-      expect(await init(version)).toMatchObject({ result: { protocolVersion: version } });
-    for (const unknown of ["1999-01-01", "2099-12-31", 7, undefined])
-      expect(await init(unknown)).toMatchObject({
-        result: { protocolVersion: MCP_PROTOCOL_VERSION },
-      });
+      expect((await init(version)).result?.protocolVersion).toBe(version);
+    for (const unknown of ["1999-01-01", "2099-12-31"])
+      expect((await init(unknown)).result?.protocolVersion).toBe(MCP_PROTOCOL_VERSION);
     await h.release();
   });
 });
@@ -313,7 +342,7 @@ s.on("data", (c) => {
   const lines = buf.split("\\n"); buf = lines.pop();
   for (const line of lines) {
     const m = JSON.parse(line);
-    if ("ok" in m) { send({ jsonrpc: "2.0", id: 1, method: "initialize", params: {} }); continue; }
+    if ("ok" in m) { send({ jsonrpc: "2.0", id: 1, method: "initialize", params: { protocolVersion: "2025-06-18", capabilities: {}, clientInfo: { name: "child", version: "0" } } }); continue; }
     if (m.id === 1) { send({ jsonrpc: "2.0", id: 2, method: "tools/call", params: { name: "status", arguments: {} } }); continue; }
     if (m.id === 2) { process.stdout.write(JSON.stringify(m.result.structuredContent.run.id)); s.end(); }
   }

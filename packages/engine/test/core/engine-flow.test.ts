@@ -231,8 +231,8 @@ describe("engine: tool contract (AD-4 rule 1)", () => {
     );
     const ba = only((await h.engine.next({}, CLAUDE)).actions, "ba");
     const { writeFile } = await import("../helpers/repo.js");
-    writeFile(h.repo, ".vtc/spec/spec.md", "# spec\n\n## REQ-1 x\n");
-    const { submitResult } = await import("../helpers/engine-harness.js");
+    const { submitResult, workdir } = await import("../helpers/engine-harness.js");
+    writeFile(workdir(ba), ".vtc/spec/spec.md", "# spec\n\n## REQ-1 x\n");
     const architect = only(
       (
         await submitResult(h, ba, {
@@ -242,7 +242,7 @@ describe("engine: tool contract (AD-4 rule 1)", () => {
       ).actions,
       "architect",
     );
-    writeFile(h.repo, ".vtc/architecture/spine.md", "# spine\n");
+    writeFile(workdir(architect), ".vtc/architecture/spine.md", "# spine\n");
     const actions = (
       await submitResult(h, architect, {
         exit: "done",

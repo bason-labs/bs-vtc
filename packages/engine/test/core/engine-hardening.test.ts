@@ -30,6 +30,7 @@ import {
   submitResult,
   throughPlan,
   verdictPass,
+  workdir,
   worktreeOf,
   type Harness,
   type SpawnAction,
@@ -69,62 +70,102 @@ const until = async (check: () => boolean): Promise<void> => {
   if (!check()) throw new Error("condition never held");
 };
 
-describe("phase roles: every write verified, the run's config frozen (AD-7 rule 7, AD-8)", () => {
-  it("rejects a phase role's undeclared writes and keeps the config the run started with", async () => {
+describe("phase roles in their own worktree, the run's config frozen (spine §5 readings 20, 21)", () => {
+  it("rejects a phase role's writes outside its paths; the user's checkout never sees them", async () => {
     const h = createHarness({ project: { concurrency: 2 } });
     await start(h);
     const carto = only(await next(h), "repo_cartographer");
-    writeFile(h.repo, ".vtc/research/repo-map.md", "# map\n");
-    writeFile(h.repo, "src/backdoor.ts", "export const x = 1;\n");
-    writeFile(h.repo, ".vtc/project.yaml", '{"version": 1, "concurrency": 3, "merge_level": 3}\n');
+    const dir = workdir(carto);
+    expect(dir).toBe(join(h.repo, ".vtc/state/worktrees", `R-${h.engine.status({}).run.id}-a-1`));
+    writeFile(dir, ".vtc/research/repo-map.md", "# map\n");
+    writeFile(dir, "src/backdoor.ts", "export const x = 1;\n");
+    writeFile(dir, ".vtc/tasks/T-9.md", "forged plan\n");
     const out = await submitResult(h, carto, {
       exit: "done",
       artifacts: [{ type: "repo_map", path: ".vtc/research/repo-map.md" }],
     });
     expect(out).toMatchObject({ accepted: false, rejection: { reason: "write_scope" } });
     const issues = (out.rejection?.issues ?? []).join("\n");
-    expect(issues).toContain("src/backdoor.ts was written outside");
-    expect(issues).toContain(".vtc/project.yaml was written outside");
-    // nothing is re-dispatched over writes no one has looked at: the run pauses with the paths
-    expect(h.engine.config()).toMatchObject({ concurrency: 2, merge_level: 2 });
-    expect(h.engine.status({}).run.paused).toBe(true);
-    const pauses = JSON.stringify(events(h).filter((e) => e.type === "run.paused"));
-    expect(pauses).toContain("src/backdoor.ts was written outside");
-    expect(spawns(await next(h))).toEqual([]);
-    // a restart keeps the frozen config (from the kept copy) and the pause
-    await h.engine.settle();
-    const engine = h.reopen();
-    Object.assign(h, { engine });
-    expect(engine.config()).toMatchObject({ concurrency: 2, merge_level: 2 });
-    expect(engine.status({}).run.paused).toBe(true);
-    // the human resumes: the checkout is taken as it is; the config edit is then said on its own
-    await engine.resume({});
-    expect(JSON.stringify(events(h).filter((e) => e.type === "run.paused"))).toContain(
-      "keeps the config it started with",
-    );
-    expect(engine.config()).toMatchObject({ concurrency: 2, merge_level: 2 });
-    await engine.resume({});
-    const again = only(await next(h), "repo_cartographer");
+    expect(issues).toContain("src/backdoor.ts was written outside the role's write paths");
+    expect(issues).toContain(".vtc/tasks/T-9.md was written where only the engine writes");
+    expect(existsSync(join(h.repo, "src/backdoor.ts"))).toBe(false);
+    expect(existsSync(join(h.repo, ".vtc/research/repo-map.md"))).toBe(false);
+    // the worktree is gone; the step is simply re-dispatched (the checkout was never touched)
+    expect(existsSync(dir)).toBe(false);
     expect(h.engine.status({}).run.paused).toBe(false);
+    const again = only(out.actions, "repo_cartographer");
+    writeFile(workdir(again), ".vtc/research/repo-map.md", "# map\n");
     const accepted = await submitResult(h, again, {
       exit: "done",
       artifacts: [{ type: "repo_map", path: ".vtc/research/repo-map.md" }],
     });
     expect(accepted.accepted).toBe(true);
-    expect(only(accepted.actions, "ba").role).toBe("ba");
+    expect(readFileSync(join(h.repo, ".vtc/research/repo-map.md"), "utf8")).toBe("# map\n");
     await h.release();
   });
-  it("lets a phase role write anywhere in its own write paths", async () => {
+  it("records a config change as an incident and keeps the run's config, without pausing", async () => {
+    const h = createHarness({ project: { concurrency: 2 } });
+    await start(h);
+    only(await next(h), "repo_cartographer");
+    writeFile(h.repo, ".vtc/project.yaml", '{"version": 1, "concurrency": 3, "merge_level": 3}\n');
+    await next(h);
+    expect(h.engine.config()).toMatchObject({ concurrency: 2, merge_level: 2 });
+    expect(h.engine.status({}).run.paused).toBe(false);
+    const incidents = events(h).filter(
+      (e) => e.type === "incident.recorded" && e.data.kind === "config_changed",
+    );
+    expect(incidents).toHaveLength(1);
+    expect(JSON.stringify(incidents)).toContain("keeps the config it started with");
+    await next(h); // said once per change
+    expect(
+      events(h).filter((e) => e.type === "incident.recorded" && e.data.kind === "config_changed"),
+    ).toHaveLength(1);
+    // a restart keeps the frozen config (from the kept copy)
+    await h.engine.settle();
+    const engine = h.reopen();
+    Object.assign(h, { engine });
+    expect(engine.config()).toMatchObject({ concurrency: 2, merge_level: 2 });
+    expect(engine.status({}).run.paused).toBe(false);
+    await h.release();
+  });
+  it("merges a phase role's writes anywhere in its own paths; the user's own edits never count", async () => {
     const h = createHarness();
     await start(h);
     const carto = only(await next(h), "repo_cartographer");
-    writeFile(h.repo, ".vtc/research/repo-map.md", "# map\n");
-    writeFile(h.repo, ".vtc/research/notes/extra.md", "notes\n");
+    writeFile(workdir(carto), ".vtc/research/repo-map.md", "# map\n");
+    writeFile(workdir(carto), ".vtc/research/notes/extra.md", "notes\n");
+    // the user keeps working in the checkout meanwhile
+    writeFile(h.repo, "src/mine.ts", "export const mine = 1;\n");
     const out = await submitResult(h, carto, {
       exit: "done",
       artifacts: [{ type: "repo_map", path: ".vtc/research/repo-map.md" }],
     });
     expect(out.accepted).toBe(true);
+    expect(readFileSync(join(h.repo, ".vtc/research/notes/extra.md"), "utf8")).toBe("notes\n");
+    expect(readFileSync(join(h.repo, "src/mine.ts"), "utf8")).toBe("export const mine = 1;\n");
+    expect(h.engine.status({}).run.paused).toBe(false);
+    // the next role sees the documents of the ones before it
+    const ba = only(out.actions, "ba");
+    expect(readFileSync(join(workdir(ba), ".vtc/research/repo-map.md"), "utf8")).toBe("# map\n");
+    await h.release();
+  });
+  it("never overwrites a file the user changed while the role worked", async () => {
+    const h = createHarness();
+    await start(h);
+    const carto = only(await next(h), "repo_cartographer");
+    writeFile(workdir(carto), ".vtc/research/repo-map.md", "# the role's map\n");
+    writeFile(h.repo, ".vtc/research/repo-map.md", "# the user's map\n");
+    const out = await submitResult(h, carto, {
+      exit: "done",
+      artifacts: [{ type: "repo_map", path: ".vtc/research/repo-map.md" }],
+    });
+    expect(out).toMatchObject({ accepted: false, rejection: { reason: "out_of_order" } });
+    expect(readFileSync(join(h.repo, ".vtc/research/repo-map.md"), "utf8")).toBe(
+      "# the user's map\n",
+    );
+    expect(h.engine.status({}).run.paused).toBe(true);
+    // the role's work is kept on its branch for the human
+    expect(existsSync(workdir(carto))).toBe(true);
     await h.release();
   });
 });
