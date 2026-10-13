@@ -6,7 +6,7 @@
  */
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   agentNameFor,
   PluginManifestSchema,
@@ -26,6 +26,11 @@ import {
   throughPlan,
   type Harness,
 } from "../helpers/engine-harness.js";
+
+// Whole engine flows on a real repo spawn a few hundred git processes per test: under turbo's
+// parallel load the 5 s default is too tight, so they get room on a loaded machine. A real hang
+// still fails, and no assertion changes.
+vi.setConfig({ testTimeout: 20_000 });
 
 afterEach(cleanupDirs);
 

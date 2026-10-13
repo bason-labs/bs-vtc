@@ -86,23 +86,31 @@ const inventoryReader =
     }
   };
 
-/**
- * Logs a gate run's report. One whose commands ran with no OS sandbox (`sandbox: "none"`, only
- * under the user-level `gates.allow_unsandboxed`) is also an `unsandboxed_gate` incident, every
- * time (D-al, spine §5 reading 69; the §7 Accepted residuals row "Unsandboxed gates by user
- * opt-in").
- */
+/** Logs a gate run's report (`gate.result`). */
 export const emitGateResult = (k: Kernel, h: RunHandle, report: GateReport): void => {
-  const scope = {
+  k.emit(h, {
+    type: "gate.result",
+    actor: "engine",
     ...(report.task === undefined ? {} : { task: report.task }),
     ...(report.feature === undefined ? {} : { feature: report.feature }),
-  };
-  k.emit(h, { type: "gate.result", actor: "engine", ...scope, data: report });
+    data: report,
+  });
+};
+
+/**
+ * A gate run whose commands ran with no OS sandbox (`sandbox: "none"`, only under the user-level
+ * `gates.allow_unsandboxed`) is an `unsandboxed_gate` incident, every time (D-al, spine §5
+ * reading 69; the §7 Accepted residuals row "Unsandboxed gates by user opt-in"). Recorded where
+ * the gate is known to have run, whether or not its report is used afterwards: a run whose
+ * unconfined code changed git config has its report dropped, and is the run that most needs it.
+ */
+export const recordUnsandboxedGate = (k: Kernel, h: RunHandle, report: GateReport): void => {
   if (report.sandbox !== "none") return;
   k.emit(h, {
     type: "incident.recorded",
     actor: "engine",
-    ...scope,
+    ...(report.task === undefined ? {} : { task: report.task }),
+    ...(report.feature === undefined ? {} : { feature: report.feature }),
     data: {
       kind: "unsandboxed_gate",
       detail:
@@ -188,14 +196,27 @@ const runGates = async (
   const gates = await baselineGates(k, h, input.base);
   const request = { ...input, gates_config_hash: gates.sha256 };
   const label = `${request.reason} ${request.task ?? request.feature ?? request.run}`;
-  const report = await guardGateRun(k, h, label, async () => {
-    const checkout = await k.deps.git.createCleanCheckout(request.head);
-    try {
-      return await k.deps.gateRunner.run(GateRunRequestSchema.parse({ ...request, checkout }));
-    } finally {
-      await k.deps.git.removeCheckout(checkout);
-    }
-  });
+  let ran: GateReport | undefined;
+  let report: GateReport;
+  try {
+    report = await guardGateRun(k, h, label, async () => {
+      const checkout = await k.deps.git.createCleanCheckout(request.head);
+      try {
+        ran = await k.deps.gateRunner.run(GateRunRequestSchema.parse({ ...request, checkout }));
+        return ran;
+      } finally {
+        await k.deps.git.removeCheckout(checkout);
+      }
+    });
+  } finally {
+    // the gate ran, adopted or not ({@link recordUnsandboxedGate})
+    const done = ran;
+    if (done !== undefined)
+      await k.serial(h, () => {
+        recordUnsandboxedGate(k, h, done);
+        return Promise.resolve();
+      });
+  }
   adoptGateOutput(k, report);
   return report;
 };

@@ -34,6 +34,7 @@ export {
   writeRepoFile,
   type RepoWrite,
   type RepoWriteObserver,
+  type WriteRepoFileOptions,
 } from "./repo-files.js";
 export {
   ciFromRollup,

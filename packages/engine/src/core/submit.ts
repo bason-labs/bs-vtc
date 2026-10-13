@@ -35,6 +35,7 @@ import {
   adoptGateOutput,
   baselineGates,
   emitGateResult,
+  recordUnsandboxedGate,
   protectedFiles,
   startBaseCheck,
   startRoundGates,
@@ -705,6 +706,7 @@ const outOfScopeGuards = async (
       include_hidden: false,
     });
     adoptGateOutput(k, report);
+    recordUnsandboxedGate(k, h, report);
     emitGateResult(k, h, report);
     if (report.verdict === "infra_error")
       return ["the fault could not be reproduced: the gates failed to run (out_of_scope claim)"];

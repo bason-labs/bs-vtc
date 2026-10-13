@@ -3,6 +3,7 @@
  * in an engine worktree are compared with the worktree's base commit and restored, whatever a
  * role left there (edited, added, deleted, committed, ignored, or a symlink out of the worktree).
  */
+import { execFileSync } from "node:child_process";
 import {
   chmodSync,
   existsSync,
@@ -13,11 +14,18 @@ import {
   rmSync,
   statSync,
   symlinkSync,
+  truncateSync,
   writeFileSync,
 } from "node:fs";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
-import { createWorkspace, HOST_CONFIG_PATHS, restoreHostConfig } from "../../src/git/index.js";
+import {
+  createWorkspace,
+  HOST_CONFIG_PATHS,
+  restoreHostConfig,
+  setGitPreflight,
+  writeRepoFile,
+} from "../../src/git/index.js";
 import { cleanupDirs, git, initRepo, tempDir, writeFile } from "../helpers/repo.js";
 
 afterEach(cleanupDirs);
@@ -140,5 +148,81 @@ describe("restoreHostConfig (D-ao)", () => {
     await expect(restoreHostConfig(repo, ".vtc/state/worktrees/T-1", "HEAD")).rejects.toThrow(
       /sha/,
     );
+  });
+  it("restores a file far larger than the base's without reading it (a sparse 3 GiB plant)", async () => {
+    const { repo, base, worktree, root } = await setup();
+    // sparse: no disk is used, but reading it whole would buffer 3 GiB
+    truncateSync(join(root, ".claude/agents/helper.md"), 3 * 1024 ** 3);
+    expect(await restoreHostConfig(repo, worktree, base)).toEqual([".claude/agents/helper.md"]);
+    expect(readFileSync(join(root, ".claude/agents/helper.md"), "utf8")).toBe("base agent\n");
+  });
+  it("restores a same-size edit, and a FIFO in place of a base file without blocking on it", async () => {
+    const { repo, base, worktree, root } = await setup();
+    writeFile(root, ".claude/agents/helper.md", "evil agent\n");
+    rmSync(join(root, ".codex/keep.toml"));
+    execFileSync("mkfifo", [join(root, ".codex/keep.toml")]);
+    expect(await restoreHostConfig(repo, worktree, base)).toEqual([
+      ".claude/agents/helper.md",
+      ".codex/keep.toml",
+    ]);
+    expect(readFileSync(join(root, ".claude/agents/helper.md"), "utf8")).toBe("base agent\n");
+    expect(lstatSync(join(root, ".codex/keep.toml")).isFile()).toBe(true);
+  });
+  it("costs no git call for a base already read whose worktree has no host config", async () => {
+    const repo = initRepo({ "README.md": "# app\n" });
+    const ws = createWorkspace(repo);
+    const base = await ws.resolve("HEAD");
+    const { worktree } = await ws.ensureTaskWorktree("T-1", "vtc/T-1", base);
+    let calls = 0;
+    setGitPreflight(repo, () => {
+      calls += 1;
+    });
+    try {
+      expect(await restoreHostConfig(repo, worktree, base)).toEqual([]);
+      expect(calls).toBeLessThanOrEqual(1);
+      calls = 0;
+      expect(await restoreHostConfig(repo, worktree, base)).toEqual([]);
+      expect(calls).toBe(0);
+      // a planted file is still found and removed, from the cached base listing
+      writeFile(join(repo, worktree), ".mcp.json", "{}\n");
+      expect(await restoreHostConfig(repo, worktree, base)).toEqual([".mcp.json"]);
+      expect(existsSync(join(repo, worktree, ".mcp.json"))).toBe(false);
+    } finally {
+      setGitPreflight(repo, null);
+    }
+  });
+});
+
+describe("writeRepoFile's exact mode (finding host-config-restore-toctou)", () => {
+  it("sets the mode on the file before it is renamed into place, whatever the umask", () => {
+    const root = tempDir("vtc-mode-");
+    let previous: number;
+    try {
+      previous = process.umask(0o077);
+    } catch {
+      return; // a worker thread cannot change the umask; the fork pool can
+    }
+    try {
+      writeRepoFile(root, "a/run.sh", "#!/bin/sh\n", 0o755, { exactMode: true });
+      writeRepoFile(root, "a/plain.txt", "x\n", 0o644, { exactMode: true });
+      writeRepoFile(root, "a/umasked.txt", "x\n", 0o644);
+    } finally {
+      process.umask(previous);
+    }
+    expect(statSync(join(root, "a/run.sh")).mode & 0o777).toBe(0o755);
+    expect(statSync(join(root, "a/plain.txt")).mode & 0o777).toBe(0o644);
+    // without exactMode the umask still applies, as before
+    expect(statSync(join(root, "a/umasked.txt")).mode & 0o777).toBe(0o600);
+  });
+  it("never follows a symlink planted at the target", () => {
+    const root = tempDir("vtc-mode-");
+    const outside = tempDir("vtc-outside-");
+    writeFileSync(join(outside, "victim"), "victim\n");
+    chmodSync(join(outside, "victim"), 0o600);
+    symlinkSync(join(outside, "victim"), join(root, "f"));
+    writeRepoFile(root, "f", "mine\n", 0o755, { exactMode: true });
+    expect(lstatSync(join(root, "f")).isFile()).toBe(true);
+    expect(statSync(join(outside, "victim")).mode & 0o777).toBe(0o600);
+    expect(readFileSync(join(outside, "victim"), "utf8")).toBe("victim\n");
   });
 });

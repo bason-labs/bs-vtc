@@ -450,6 +450,8 @@ export const applyEvent = (state: RunState, event: VtcEvent): void => {
       if (run?.status === "in_flight") {
         run.status = "interrupted";
         run.closedSeq = event.seq;
+        // the cost the host reported before the limit (D-at), on the hit that closed the run
+        if (event.cost_usd !== undefined) run.costUsd = event.cost_usd;
       }
     }
   } else if (isEventOfType(event, "merge.completed")) {

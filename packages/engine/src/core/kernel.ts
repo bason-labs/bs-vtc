@@ -127,6 +127,12 @@ export interface Kernel {
    * `undefined` (unknown, which refuses) for a socket caller of a run with no Lead session.
    */
   sessionSandboxFor(run: string, call: CallContext): SessionSandboxState | undefined;
+  /**
+   * True when no session holds `run`'s Lead and `call` is a socket caller (a cli connection, or a
+   * bridge session bound to a role action), so there is no Lead session whose sandbox could
+   * decide: an in-session step waits for the Lead instead of parking (`dispatchNow`).
+   */
+  leadless(run: string, call: CallContext): boolean;
   /** Every run of the repo (ids are repo-wide: plan files, features). */
   allStates(): Iterable<RunState>;
   /** In-memory per-task hint: the round's head has the same tree as the previous round's. */

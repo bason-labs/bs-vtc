@@ -678,6 +678,14 @@ export const inSessionAllowed = (
 };
 
 /**
+ * Why an in-session step with a shell waits (D-an): no session holds the run's Lead, and the
+ * caller cannot (a cli connection, or a bridge session bound to a role action). Nothing parks:
+ * the Lead's sandbox, not this caller's, decides once a Lead session calls `next`.
+ */
+export const NO_LEAD_WAIT_REASON =
+  "no Lead session holds this run, so a role with a shell cannot be dispatched in-session yet: call next from the Lead session (the Claude Code or Codex session running the vtc plugin)";
+
+/**
  * A step refused in-session (D-an): its task parks as `blocked` with `SESSION_SANDBOX_OFF_REASON`
  * (the escalation names the fix; answering it retries the dispatch). A phase step opens the same
  * escalation for its phase, which holds the phase until it is answered.
@@ -763,6 +771,7 @@ export const dispatchNow = async (
   k: Kernel,
   h: RunHandle,
   call: CallContext,
+  held: { noLead: number } = { noLead: 0 },
 ): Promise<LeadAction[]> => {
   if (h.state.run.paused || h.state.run.finished_at !== undefined) return [];
   // Runs that ended without a check (a failure, a limit, a restart) are checked before a new
@@ -793,7 +802,10 @@ export const dispatchNow = async (
   for (const step of pendingSteps(k, h, host)) {
     if (free <= 0) break;
     if (!inSessionAllowed(k, h, step, host, call)) {
-      refuseInSession(k, h, step);
+      // only the run's Lead reporting its sandbox off or unknown parks the step; a caller that
+      // is not the Lead, with no Lead to ask, leaves it pending ({@link NO_LEAD_WAIT_REASON})
+      if (k.leadless(h.state.id, call)) held.noLead += 1;
+      else refuseInSession(k, h, step);
       continue;
     }
     const action = await dispatchGuarded(k, h, step, host);
