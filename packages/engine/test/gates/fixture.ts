@@ -8,6 +8,8 @@ import {
   GateRunRequestSchema,
   type GateReport,
   type GateRunRequestInput,
+  type GateSandbox,
+  type GateSandboxSpec,
   type GatesConfigInput,
 } from "@vtc/shared";
 
@@ -17,6 +19,8 @@ import {
   addToAllowlist,
   createGateRunnerWith,
   stringifyGatesConfig,
+  type GateJailSpec,
+  type ReapedGateCommand,
   type ScannerStore,
 } from "../../src/gates/index.js";
 import { git, initRepo, tempDir, writeFile } from "../helpers/repo.js";
@@ -196,10 +200,61 @@ export const commitAll = (repo: string, message = "change"): string => {
   return git(repo, "rev-parse", "HEAD");
 };
 
+/**
+ * A fake gate sandbox: runs the argv as it is and records every spec it was asked to wrap, so
+ * tests see that each command went through the sandbox and with what (D-al).
+ */
+export const recordingSandbox = (
+  kind: GateSandbox["kind"] = "sandbox-exec",
+): { readonly sandbox: GateSandbox; readonly specs: GateSandboxSpec[] } => {
+  const specs: GateSandboxSpec[] = [];
+  return {
+    specs,
+    sandbox: {
+      kind,
+      wrap: (argv, spec) => {
+        specs.push(spec);
+        return {
+          command: argv[0] ?? "",
+          args: argv.slice(1),
+          network: spec.phase === "verify" ? "none" : "full",
+        };
+      },
+    },
+  };
+};
+
+/**
+ * A stand-in for the macOS in-sandbox reaper (`sandbox.ts` `REAPER_SCRIPT`) that is safe to run
+ * unsandboxed: instead of `kill -KILL -1` it kills only the pid the command wrote to
+ * `orphan.pid` in its working directory, then confirms with `R` on fd 3. With
+ * `confirm = false` it never confirms, like a reaper the gate killed.
+ */
+export const fakeReaperSandbox = (confirm: boolean): GateSandbox => ({
+  kind: "sandbox-exec",
+  wrap: (argv, spec): ReapedGateCommand => {
+    const script = `s=$1; shift
+exec 4<&0 0</dev/null
+set -m
+{ read -r _ <&4; [ -f orphan.pid ] && kill -KILL "$(cat orphan.pid)"; ${confirm ? '[ -e "$s" ] && printf R >&3;' : ":;"} } >/dev/null 2>&1 &
+set +m
+exec 3>&- 4<&-
+"$@"`;
+    return {
+      command: "/bin/sh",
+      args: ["-c", script, "vtc-gate", (spec as GateJailSpec).reapSentinel ?? "", ...argv],
+      network: spec.phase === "verify" ? "none" : "full",
+      reaper: true,
+    };
+  },
+});
+
 export interface Harness {
   readonly repo: string;
   readonly home: string;
   readonly base: string;
+  /** Every spec the harness's fake sandbox wrapped, in order. */
+  readonly specs: readonly GateSandboxSpec[];
   readonly run: (request: Partial<GateRunRequestInput> & { head: string }) => Promise<GateReport>;
   /** Like `run`, but hands the request to the runner unparsed (a malformed caller). */
   readonly runUnparsed: (
@@ -260,6 +315,13 @@ export const harness = (
     scanners?: (home: string) => ScannerStore;
     /** The engine environment the runner scrubs (default `process.env`). */
     env?: Readonly<Record<string, string | undefined>>;
+    /**
+     * The gate sandbox (default {@link recordingSandbox}). `null`: none injected and none
+     * detected, as on a machine without sandbox-exec or bwrap.
+     */
+    sandbox?: GateSandbox | null;
+    /** `gates.allow_unsandboxed` from the user config. */
+    allowUnsandboxed?: boolean;
   } = {},
 ): Harness => {
   const repo = initRepo({ ...TOOLS, ".lintrc": "strict\n", ...files });
@@ -268,19 +330,30 @@ export const harness = (
   const home = tempDir("vtc-home-");
   addToAllowlist(home, repo, options.allow ?? [[NODE]], new Date("2026-10-13T08:00:00.000Z"));
   const gitOps = createGitOps({ repoRoot: repo });
+  const recording = recordingSandbox();
+  const sandbox = options.sandbox === undefined ? recording.sandbox : options.sandbox;
   const runner = createGateRunnerWith(
     {
       repoRoot: repo,
       vtcHome: home,
       git: gitOps,
       ...(options.now === undefined ? {} : { now: options.now }),
+      ...(sandbox === null ? {} : { sandbox }),
+      ...(options.allowUnsandboxed === undefined
+        ? {}
+        : { allowUnsandboxed: options.allowUnsandboxed }),
     },
-    { scanners: (options.scanners ?? fakeScanners)(home), env: options.env ?? process.env },
+    {
+      scanners: (options.scanners ?? fakeScanners)(home),
+      env: options.env ?? process.env,
+      detectSandbox: () => null,
+    },
   );
   return {
     repo,
     home,
     base,
+    specs: recording.specs,
     run: async (partial) => {
       const checkout = await gitOps.createCleanCheckout(partial.head);
       try {

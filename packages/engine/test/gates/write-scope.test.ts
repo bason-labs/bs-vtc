@@ -236,6 +236,38 @@ describe("package-manager configs (a gate runs through npm, pnpm, yarn or bun)",
     expect(left).toContain("bunfig.toml");
   });
 
+  it("flags dotenv files package managers load (.env.yarn, .env, .env.local, …) but not .env.example", async () => {
+    const repo = initRepo({ "src/app.ts": "export const f = () => 1;\n" });
+    const base = git(repo, "rev-parse", "HEAD");
+    // Yarn 4 injects .env.yarn into every `yarn run`; Bun loads the others for `bun run`/`bun test`.
+    writeFile(repo, ".env.yarn", "NODE_OPTIONS=--require ./evil.cjs\n");
+    writeFile(repo, ".env", "NODE_OPTIONS=--require ./evil.cjs\n");
+    writeFile(repo, "packages/x/.ENV.Local", "A=1\n");
+    writeFile(repo, ".env.test.local", "A=1\n");
+    writeFile(repo, ".env.development", "A=1\n");
+    writeFile(repo, "apps/web/.env.production.local", "A=1\n");
+    writeFile(repo, ".env.example", "A=\n");
+    writeFile(repo, ".envrc", "export A=1\n");
+    const head = commitAll(repo, "dotenv games");
+    const ops = createGitOps({ repoRoot: repo });
+    const scope = { ...request(base, head), protected: [], filesScope: ["**"] };
+    const expected = [
+      { kind: "protected_modified", path: ".env" },
+      { kind: "protected_modified", path: ".env.development" },
+      { kind: "protected_modified", path: ".env.test.local" },
+      { kind: "protected_modified", path: ".env.yarn" },
+      { kind: "protected_modified", path: "apps/web/.env.production.local" },
+      { kind: "protected_modified", path: "packages/x/.ENV.Local" },
+    ];
+    expect((await checkWriteScope(ops, scope)).violations).toEqual(expected);
+    expect((await checkWriteScope(ops, scope, ["**/conftest.py"])).violations).toEqual(expected);
+    // Only the exact path named in files_scope allows the change.
+    const planned = { ...scope, filesScope: ["**", ".env"] };
+    const left = (await checkWriteScope(ops, planned)).violations.map((v) => v.path);
+    expect(left).not.toContain(".env");
+    expect(left).toContain(".env.yarn");
+  });
+
   it("flags settings in pnpm-workspace.yaml, never its packages or catalogs", async () => {
     const WS = "packages:\n  - packages/*\ncatalog:\n  zod: 4.0.0\n";
     const repo = initRepo({ "pnpm-workspace.yaml": WS, "src/app.ts": "x\n" });
