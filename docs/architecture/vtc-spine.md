@@ -184,7 +184,8 @@ flowchart TB
   `no-restricted-properties` on `packages/shared/src` (proven by `tooling/arch-tests`); the
   storage contract suite `packages/engine/test/storage-contract.ts` (`runStorageContract`), which
   **every driver must pass unchanged** (node:sqlite now; bun:sqlite in the binary's own test job,
-  sub-project 0); `cli.test.ts` asserts Node selects `node:sqlite`. Rule 8:
+  sub-project 0), exported to other packages only as `@vtc/engine/test-support` (§5 reading 68,
+  `AD1-test-support-through-the-sanctioned-entry`); `cli.test.ts` asserts Node selects `node:sqlite`. Rule 8:
   `tooling/arch-tests/test/supply-chain.test.ts` walks every workspace package's production
   dependency closure and fails on a native file or an install script.
 
@@ -194,7 +195,8 @@ flowchart TB
   is `CONTRACT_SCHEMAS` (`json-schema.ts`): Run, Task, TaskDraft, PlanFileFrontmatter, Feature,
   Finding, FindingDraft, Question, Escalation, Event, EventPayloads, RoleResult, RoleContract,
   AssertionProvenance, TaskPack, TraceabilityReport, EvidenceBundle, DesignScreensFile
-  (`.vtc/design/screens.yaml`), PluginManifest (`vtc-manifest.json`), ProjectConfig, GatesConfig,
+  (`.vtc/design/screens.yaml`), PluginManifest (`vtc-manifest.json`), ProjectConfig, UserConfig
+  (`~/.vtc/config.yaml`), GatesConfig,
   ScannerPins, GateAllowlist, GateRunRequest, GateResult (incl. `ToolFinding`), GateReport,
   WriteScopeReport, TestInventory, UsageSnapshot, UsageReport, StatuslineIngest,
   WorkflowNode/Edge/Graph, HostOutcome, SubagentInstruction, EngineDiscovery, EngineSocketHello,
@@ -227,7 +229,9 @@ flowchart TB
      `packages/shared/schemas/contracts-ledger.json` by hand: a schema change without a new
      version entry fails the test even after `vitest -u`. (2.0.0 = fix round 1, 3.0.0 = fix
      round 2, 4.0.0 = fix round 3; nothing consumed the earlier versions; 4.1.0 = the wave-1
-     proposals, additive.)
+     proposals, additive; 4.2.0 = the wave-2 proposals, additive except an optional
+     `ResolvedModel.model` and the narrower write-scope globs, which §5 readings 51 and 63
+     justify as MINOR.)
   5. Open vocabularies stay open on purpose: event `type` (pattern `<entity>.<verb>`; the core
      set has typed payloads, AD-7), role ids, artifact types, stack packs. Consumers ignore unknown
      values.
@@ -244,9 +248,13 @@ flowchart TB
      `checkParkRiskRule`, `integrationBranchFor`, `runRequestPath`, `gateCommandAllowed`,
      `gateAllowlistFile`, `contractsCompatible`, `encodeSocketLine`, `resolveDashboardAsset`,
      `dashboardAssetHeaders`, `extractedPluginDir`, `promptShaFor` (the prompt version, §13),
-     `prototypeStatePath`, `vtcHookCommand`, `isKnownArtifactType`. Shared paths and constants:
+     `prototypeStatePath`, `vtcHookCommand`, `isKnownArtifactType`, `finalReviewStepsCovered`,
+     `statuslineTeeCommand` / `shellQuoteWord`, `hostCredentialDenyReadPaths` /
+     `isHostCredentialDenyRead`, `isSecurityClass`. Shared paths and constants:
      `ROLE_CONTRACTS_ASSET`, `PLUGIN_MANIFEST_ASSET`, `DESIGN_SCREENS_PATH`, `VTC_HOOK`,
-     `KNOWN_ARTIFACT_TYPES` (the known names of the open artifact vocabulary, rule 5).
+     `KNOWN_ARTIFACT_TYPES` (the known names of the open artifact vocabulary, rule 5),
+     `STATUSLINE_TEE`, `HOST_CREDENTIAL_DENY_READ`, `ROLE_DENIED_VTC`, `SECURITY_CLASS_CATEGORIES`,
+     `DEFAULT_INSTALL_SCOPE`, `USER_CONFIG_FILE`, `SESSION_DEFAULT_MODEL`.
   7. Spine extensions to §16 are named here: the finding route `out_of_scope` (an Engineer
      `out_of_scope_fault` whose guards passed, §6.3 step 3); `RequirementRef` (`REQ-3.AC-2`)
      in `Finding.req_ids`; the Visual QA verdict `unchecked` (§7.5); `FindingDraft.kind` (the
@@ -451,16 +459,20 @@ flowchart TB
      (`ParsedStream.usage`, `source: "sdk_event"`) and retry notice, so the host-agnostic engine
      never parses host events itself.
   2. Model ids come from the engine (role tier/effort + project overrides): `SpawnRoleRequest.model`
-     is a `ResolvedModel` with a concrete `model` id. Adapters do not pick models.
+     is a `ResolvedModel` with the engine's `model` id, or none when nothing names one for the
+     host and tier (the session's default, §5 readings 26 and 51). Adapters do not pick models.
   3. Adapters never read credentials and never pass permission-bypass flags (AD-9).
   4. **Usage ownership.** The engine owns the usage store (`UsageReport`). Claude usage arrives
      as a push: `vtc statusline-tee` turns the statusline JSON into a `StatuslineIngest` body with
      the adapter's pure `statuslineIngestFromClaude` and POSTs it; the engine stores
      `usageFromStatuslineIngest(body)` and merges SDK events from runs it launched. Codex usage
      comes from the adapter's managed `codex app-server` child (`watchUsage`, stopped by
-     `dispose`). The auto-resume timer is the `AutoResumeScheduler` interface: the engine decides
-     when; the cli implements it (launchd on macOS, installed by `vtc install`). A `HostAdapter`
-     never installs the timer or any other non-host file.
+     `dispose`). The shim's command line is frozen as `statuslineTeeCommand` (§5 reading 61). The
+     auto-resume timer is the `AutoResumeScheduler` interface: the engine decides when; the cli
+     implements it (wake records plus one launchd agent on macOS, installed only by
+     `vtc install --auto-resume`, §5 reading 59). A `HostAdapter` never installs the timer or any
+     other non-host file; the Claude local marketplace under `<home>/.vtc/claude-marketplace/` is
+     the host's registration form (§5 reading 60).
   5. `install` writes user-scope files only under `InstallRequest.home` (injected, so tests use a
      temp directory) and project files under `projectRoot`. It places or registers what the
      compiler emitted (AD-16) and authors no plugin content. `pluginDir` is always on disk: in
@@ -643,7 +655,9 @@ flowchart TB
   files and the keychain call) and asserts the two lists are equal. A literal split across a
   concatenation is out of a lint rule's reach; the runtime checks cover it: the adapter safety
   contract runs `findForbiddenHostArgs` on every `headlessCommand` argv and env and
-  `findForbiddenInText` on every installed file (AD-6); `compiler.test.ts` proves
+  `findForbiddenInText` on every installed file (AD-6). Host credential locations may appear
+  only as read-deny entries built by `hostCredentialDenyReadPaths`, which `findForbiddenHostArgs`
+  skips in exactly two deny lists of a JSON settings argument (§5 reading 50, `compliance.test.ts`); `compiler.test.ts` proves
   `checkPluginFiles` (the compile step's gate on every emitted file) catches planted markers;
   `tooling/arch-tests/test/supply-chain.test.ts` scans every file under `roles/`, `skills/` and
   `plugins/`.
@@ -661,7 +675,8 @@ flowchart TB
   2. Each package exports `{"@vtc/source": src/index.ts, types: dist/index.d.ts, default:
 dist/index.js}`. Typecheck (`customConditions`), tests (Vitest aliases) and
      dependency-cruiser resolve workspace packages **to source**; `tsc -p tsconfig.build.json`
-     emits `dist/` in dependency order (`^build`).
+     emits `dist/` in dependency order (`^build`). One extra entry exists: `@vtc/engine`'s
+     `./test-support` (source condition only, never built), §5 reading 68.
   3. ESLint flat config with `typescript-eslint` `strictTypeChecked`; Prettier for formatting.
   4. The single-file binary is built later with `bun build --compile` (sub-project 0 spike, then
      1); the engine serves the dashboard's static export from the cli-provided `AssetBundle`
@@ -671,7 +686,9 @@ dist/index.js}`. Typecheck (`customConditions`), tests (Vitest aliases) and
   6. **Merge gate.** `pnpm verify` (= `pnpm check && pnpm build`) must be green before any branch
      merges into an integration branch or `main`. The orchestrator runs it as a required merge
      step for every team branch; locally, `pnpm hooks:install` enables `.githooks/pre-push`,
-     which runs it on every push. A CI workflow runs it once the repo has a remote. Each team
+     which runs it on every push. A CI workflow runs it once the repo has a remote, with Bun 1.4.3
+     installed so the single-binary tests run instead of skipping (release-pipeline todo; this
+     local build has no CI). Each team
      branch also passes `pnpm verify:scope <team> --base <integration-branch>` (AD-15).
 - **Check:** `pnpm check` = `typecheck` + `lint` + `deps:check` + `test` + `format:check`, all
   blocking; `pnpm build` must succeed; `pnpm verify` runs both.
@@ -709,15 +726,16 @@ dist/index.js}`. Typecheck (`customConditions`), tests (Vitest aliases) and
   Lead session (§6.9: "only the engine" must be alive).
 - **Rule:**
   1. **One engine daemon per repo.** It holds the exclusive lock `.vtc/state/engine.lock`
-     (`acquireEngineLock`; exclusive create; a lock whose holder pid is dead is taken over once and
+     (`acquireEngineLock`; exclusive create; a lock whose holder is gone, i.e. its pid is dead or
+     its socket does not answer the hello (pid reuse, §5 reading 67), is taken over once and
      recorded as an `incident.recorded` `stale_lock`). Only the lock holder can open or append to a
      run's log.
   2. **Discovery:** the daemon writes `~/.vtc/engines/<repo-key>.json` (`EngineDiscovery`: pid,
      HTTP port, local MCP socket, repo root, versions; mode 0600, atomic write; no token) and
      removes it on a clean exit. `repo-key` = `engineRepoKey(absolute repo root)`.
   3. **`vtc engine --mcp`** (what host plugins run) is a stdio MCP bridge. It reads the discovery
-     file; if no live daemon answers, it starts `vtc engine --daemon` detached and waits for the
-     file; then it relays MCP to the daemon's local socket: `~/.vtc/run/<repo-key>.sock`
+     file; if no live daemon answers, it starts `vtc engine --daemon` detached (only in a repo that
+     `vtc init` set up, §5 reading 58) and waits for the file; then it relays MCP to the daemon's local socket: `~/.vtc/run/<repo-key>.sock`
      (`engineSocketFile`; directory 0700, socket 0600) or the per-user pipe
      `\\.\pipe\vtc-<repo-key>` on Windows. Not `.vtc/state/`: a Unix socket path must fit
      `sun_path` (104 bytes on macOS, 108 on Linux) and repos can be arbitrarily deep; the daemon
@@ -733,7 +751,9 @@ dist/index.js}`. Typecheck (`customConditions`), tests (Vitest aliases) and
   4. **Lifetime:** the daemon is not a child of any host session. It stays up while a run has
      work, a bridge is connected or an auto-resume is scheduled, and exits after
      `ENGINE_INSTANCE.idleExitMs` (30 min) otherwise. The auto-resume timer starts
-     `vtc engine --daemon --wake` at the reset time (§6.9 step 4).
+     `vtc engine --daemon --wake` at the reset time (§6.9 step 4): wake records plus
+     `vtc engine --wake-due` from one launchd agent (§5 reading 59); no timer on Windows in v1
+     (§5 reading 56).
   5. The HTTP API (AD-5) is served by the daemon on `127.0.0.1:<port>`; the MCP socket is never
      exposed over HTTP, so a browser cannot reach a mutating tool. The cli control commands
      (`vtc pause`, `resume`, `status`) are MCP clients of the socket (`EngineClient`, AD-19).
@@ -801,7 +821,9 @@ dist/index.js}`. Typecheck (`customConditions`), tests (Vitest aliases) and
   10. **Gate allowlist** (§15). The Gate Runner runs a gate only if `gateCommandAllowed` accepts
       its argv against `~/.vtc/` + `gateAllowlistFile(repo)` (`GateAllowlist`, argv prefixes a
       human confirmed in `vtc calibrate`) or it names a pinned scanner. Repo content (`gates.yml`,
-      a PR) cannot widen it. A disallowed gate is not run: it reports `error` / `infra`, which
+      a PR) cannot widen it, and no role can: every role profile denies running `vtc calibrate`
+      and writing the allowlists, the osv database and the hidden tests (`ROLE_DENIED_VTC`, §5
+      reading 43). A disallowed gate is not run: it reports `error` / `infra`, which
       parks with `gate_infra` until the human confirms it.
 - **Check:** dependency-cruiser `AD13-engine-modules-use-each-others-entry`,
   `AD13-core-uses-the-gate-runner-interface`, `AD13-gates-never-import-engine-core`,
@@ -1201,11 +1223,14 @@ the integrator's, also pending human review. G2 did not cover them. Each is reve
     integrator's default). Advisors' `reviewer` is `human`. Advice changes nothing by itself:
     acting on it goes through `start`, `change_request` or `answer`.
 26. **Codex model tiers** (§5.2 footnote, §12.3: tiers map per host). _Lead decision
-    2026-10-13, pending human review._ The Codex top/mid/low → model mapping lives in the Codex
-    adapter's defaults and is overridden by `project.yaml` `hosts.models.codex` (the existing
-    per-host map). Until the spike names Codex model ids (§7), compiled Codex agents set only
-    `model_reasoning_effort` and run on the session's model, and Lookback must not assume tiers
-    differ on Codex.
+    2026-10-13, reworded by Lead decision 2026-10-14 (D-ae, reading 51), pending human review._
+    The engine is the only model resolver (AD-6 rule 2): `resolveModel` takes the role's explicit
+    model, then `project.yaml` `hosts.models.<host>`, then the engine's built-in
+    `DEFAULT_TIER_MODELS`; adapters never map tiers. The built-in Codex map names no model ids until
+    the spike does (§7). With no id, `ResolvedModel.model` is absent: the Codex run uses the
+    session's model with only the reasoning effort set (compiled Codex agents set only
+    `model_reasoning_effort`), the adapter passes no model flag, and the logs record
+    `SESSION_DEFAULT_MODEL`. Lookback must not assume tiers differ on Codex.
 27. **Research roles write their own documents** (§5.2 lists the Repo Cartographer and the
     Research Analyst as read-only). _Lead decision 2026-10-13, pending human review (confirmed
     the roles team's reading)._ The Repo Cartographer is `write_scoped` to
@@ -1277,6 +1302,191 @@ into the engine.
     `HealthResult.prototype_url` is non-null once the directory exists. The dashboard re-reads
     health when the Designer submits.
 
+**Readings 40–68 (2026-10-14, wave-2 integration).** The wave-2 teams asked these questions while
+building. Readings 40–57 are the Lead's decisions D-t to D-ak; readings 58–68 are the Lead's
+cross-team integration list and the readings the teams asked for. All are **Lead decision
+2026-10-14, pending human review**; G2 did not cover them. Each is reversible through §6.
+Contracts 4.2.0 carry them.
+
+40. **Opengrep's licence** (§7.2 bars GPL/AGPL scanners; Opengrep's engine is LGPL-2.1). _Lead
+    decision 2026-10-14, pending human review._ Acceptable: VTC downloads Opengrep on demand,
+    verifies it by SHA-256 and runs it only as a separate program; it is never linked or bundled.
+    The rules VTC ships stay MIT.
+41. **Checkov on darwin-arm64** (§4.4 pinned scanners). _Lead decision 2026-10-14, pending human
+    review._ No Rosetta pin. Where Checkov has no native build it is user-installed: `vtc doctor`
+    warns, and the L4 IaC gate is `skipped` with a visible `skipped_reason` when Checkov is
+    absent. Platforms with a native build keep their pins in `gates/scanners.json`.
+42. **The `secret_assignment` redaction rule** (§7.2, AD-18). _Lead decision 2026-10-14, pending
+    human review._ Kept: the value of a secret-named key (password, secret, api_key, access or
+    auth token, client_secret, private_key) with a letter and a digit and 8+ characters is
+    redacted from evidence. Safety beats snippet context.
+43. **Only a human widens the gate allowlist** (§15, AD-13 rule 10). _Lead decision 2026-10-14,
+    pending human review._ `vtc calibrate` confirms only in an interactive terminal; there is no
+    `--yes` flag. A pty is not proof of a human, so every compiled role profile and every adapter
+    sandbox profile, on both hosts, also denies running `vtc calibrate` and writing
+    `~/.vtc/allowlists/**`, `~/.vtc/osv-db/**` and `~/.vtc/hidden/**` (`ROLE_DENIED_VTC`).
+44. **L5 config-file policy** (§7.2 L5, §7.6 rule 5). _Lead decision 2026-10-14, pending human
+    review._ A lint, test or scanner config changes only when the task's `files_scope` names that
+    exact path (no wildcard). The Planner lists exact config paths when a task scaffolds (e.g.
+    `packages/foo/tsconfig.json`); `roles/planner/prompt.md` says so. No extra TaskPack field.
+45. **Task-runner files** (§7.2 L5). _Lead decision 2026-10-14, pending human review._
+    `Makefile`, `justfile` and `*.mk` are guarded like `package.json` `scripts`: any change is
+    flagged in L5 unless `files_scope` names the file exactly, because calibrate proposes `make`
+    and `just` targets as gate commands. Other files that define a calibrated gate command
+    (`Taskfile.y*ml`, `noxfile.py`, pyproject `[tool.tox]` and `[tool.hatch.envs.*.scripts]`) are
+    the same class of gap; the gate-runner team closes them with its open finding.
+46. **Gate Runner contracts** (D-z; §6.7a, §7.3, AD-8 rule 7, AD-13). _Lead decision 2026-10-14,
+    pending human review._ (a) `normalizeSeverity` caps a tool finding outside the security class
+    at `medium` (`ToolSeverityInput.category`, `SECURITY_CLASS_CATEGORIES`), so an ESLint `error`
+    or a SARIF `error` on a lint finding never trips §7.6 rule 9; triage always passes the
+    category. (b) `GateRunRequest.gates_config_hash`: the SHA-256 of the `gates.yml` bytes the run
+    started with (reading 20); a base whose `gates.yml` hashes differently runs nothing and
+    reports `error`/`infra`. (c) `GateRunRequest.hidden_tasks`: the feature's tasks whose hidden
+    tests a Final Review run copies in (§6.7a step 2). (d) With several L2 gates, the last L2
+    result's `tests` are the run's combined L2 metrics, which engine core keeps and passes back as
+    `compare_to` (`TestMetricsSchema` doc). (e) `finalReviewStepsCovered` is a pure shared helper;
+    engine core fills `final_review.steps_run` from it instead of a constant. (f) Engine core
+    reads `.vtc/gates.yml` at the run's baseline commit (`GitOps.readFileAtCommit`), like the Gate
+    Runner, never from the working tree; `vtc calibrate` tells the user to commit it, and a run
+    whose baseline has no committed `gates.yml` parks (`gate_infra`) with that reason.
+47. **Claude headless role identity** (§4.2 step 2, AD-6). _Lead decision 2026-10-14, pending
+    human review._ An engine-launched Claude run is the compiled plugin agent:
+    `claude -p --agent vtc:<agent> --plugin-dir <extracted plugin:claude-code>`, with the prompt
+    on stdin (reading 62). A §7 spike item confirms the namespace and flags.
+48. **Settings sources of a Claude role run** (AD-9, D2). _Lead decision 2026-10-14, pending human
+    review._ Role runs ignore the user's settings (`--setting-sources project`). VTC runs on the
+    user's own subscription login, so `apiKeyHelper`-only setups are out of scope for v1; `vtc
+doctor` warns when `claude auth status --json` shows one (it never reads credentials). Role
+    runs must not rely on the repo's project settings either, because a committed
+    `.claude/settings.json` can pre-approve tools, run hooks or enable MCP servers. If the installed
+    Claude CLI takes an empty or explicit settings source (checked with `claude --help` only), the
+    adapter passes VTC-authored settings with `--settings <file>` and loads no project or user
+    source. Otherwise it keeps `project` and passes an explicit, minimal `--allowedTools` /
+    `--disallowedTools` set that overrides broad project allows, and the remaining gap stays a §7
+    spike item.
+49. **Dependency installs and role networks** (§7.2 two-phase sandbox, AD-5). _Lead decision
+    2026-10-14, pending human review._ A dependency install is an engine-run deterministic step
+    (the Gate Runner's install phase), never a role action, on both hosts. No role on either host
+    gets a network profile that can reach the engine's localhost API with the install token: the
+    engine requests `SandboxProfileRequest.network: "none"` for every role run, and Codex keeps
+    refusing `registries`. `SandboxProfile.enforced.secretsUnreadable` reports whether the host
+    itself hides the token and the host credential files from the role (Claude Code yes, Codex no).
+50. **Host credential locations in deny rules** (AD-9). _Lead decision 2026-10-14, pending human
+    review._ Host credential locations may be named only inside deny rules, built with
+    `hostCredentialDenyReadPaths` from `HOST_CREDENTIAL_DENY_READ` in
+    `packages/shared/src/helpers/compliance.ts` (the one file the AD-9 lint exempts).
+    `findForbiddenHostArgs` ignores exactly those entries (`isHostCredentialDenyRead`) in a JSON
+    settings argument's `permissions.deny` and `sandbox.filesystem.denyRead`, and still reports the
+    names anywhere else, an allow list included. Claude roles deny reading the Claude credential
+    file and the Codex home; Codex roles deny what Codex can deny (no per-path read deny, so
+    reading 49's no-network rule is their barrier). The helper only joins strings: nothing in VTC
+    reads, stats or copies these files.
+51. **Codex model ids** (§5.2 footnote, AD-6 rule 2). _Lead decision 2026-10-14, pending human
+    review._ The invented Codex ids leave the engine's `DEFAULT_TIER_MODELS.codex`, and
+    `ResolvedModel.model` is optional: absent means the host session's default model with only
+    the resolved effort (reading 26). The adapter then passes no model flag, the Lead passes no
+    `model` to the spawn, and `role.dispatched` / `RoleRunSummary.model` record
+    `SESSION_DEFAULT_MODEL` (`"session-default"`). Making a required interface field optional is
+    not "adding an optional field" (AD-3 rule 4); it ships in MINOR 4.2.0 because no persisted
+    shape changes and the only consumers that read the id (the adapters) update in this wave.
+52. **The resume hint without a daemon** (§6.8, hook rule 3). _Lead decision 2026-10-14, pending
+    human review._ `session-start` prints the "Resume run?" hint whenever the committed event log
+    shows an unfinished run, even if the daemon is not up yet (after a reboot the bridge starts it
+    at the same moment). It reads `events.jsonl` read-only, fails open and stays within
+    `VTC_HOOK.timeoutMs`.
+53. **Where the hook lets a role agent write** (hook rule 4, reading 21). _Lead decision
+    2026-10-14, pending human review._ A role agent may write inside its own worktree (within its
+    dispatch's write scope), its main-checkout staging entries (reading 65) and the OS temp
+    directory (`$TMPDIR`, `/tmp`, `/private/tmp`, `/var/folders` on macOS). Writes anywhere else
+    stay blocked. The engine's write-scope check on submit is still the enforcement point.
+54. **`vtc install` scope defaults** (AD-6 rule 5). _Lead decision 2026-10-14, pending human
+    review._ Project scope for Codex (it writes `.codex/agents/*.toml` into the repo) and user
+    scope for Claude Code (`DEFAULT_INSTALL_SCOPE`); `--scope` overrides.
+55. **Playwright Chromium pin** (§4.4). _Lead decision 2026-10-14, pending human review._ Deferred
+    until Visual QA has a consumer; `vtc doctor` only warns. Playwright's CDN publishes no
+    SHA-256, so the pin will be the hash of a reviewed download.
+56. **Windows auto-resume** (§6.9 step 4). _Lead decision 2026-10-14, pending human review._ No
+    timer in v1: a run waiting for a reset resumes when the engine next runs on that repo.
+    Documented as a v1 limitation.
+57. **Credential variables and the daemon** (AD-9, AD-12). _Lead decision 2026-10-14, pending human
+    review._ The detached daemon drops credential environment variables by default. A user may
+    list variable names to pass through in the user-level `~/.vtc/config.yaml` `env_passthrough`
+    (`UserConfigSchema`, `USER_CONFIG_FILE`), never in the repo's `project.yaml`
+    (`ProjectConfigSchema` rejects the key), so a repo cannot request secrets. `vtc doctor` shows
+    which names pass.
+58. **`vtc engine --mcp` outside an initialised repo** (AD-12 rule 3). _Lead decision 2026-10-14,
+    pending human review._ The plugins are user-scoped, so the bridge runs in every repo a host
+    session opens. It starts the daemon only in a repo that `vtc init` set up (`.vtc/project.yaml`
+    is a regular file). Otherwise it answers `initialize`, `ping` and `tools/list` itself and
+    returns a tool error saying to run `vtc init` for every `tools/call`; the first `tools/call`
+    after `vtc init` starts the daemon, replays the session's `initialize` and becomes the byte
+    relay. Control commands, `ensureDaemon`, `vtc engine --daemon` and `--wake-due` refuse or skip
+    uninitialised repos, so no `.vtc/state/` appears in unrelated repos.
+59. **Auto-resume wake records** (AD-12 rule 4, AD-6 rule 4, §6.9 step 4). _Lead decision
+    2026-10-14, pending human review._ The cli's `AutoResumeScheduler` persists one wake record per
+    repo in `~/.vtc/wake/<repo-key>.json`. One launchd agent on macOS, installed only by an
+    explicit `vtc install --auto-resume` (never silently), runs `vtc engine --wake-due` every 60 s,
+    which starts `vtc engine --daemon --wake` for each initialised repo that is due. The daemon
+    never runs `launchctl`. Windows: reading 56. Engine-driven resume also needs
+    `headless_allowed` (reading 12).
+60. **Claude plugin registration through a local marketplace** (AD-6 rules 4–5, AD-16). _Lead
+    decision 2026-10-14, pending human review._ Claude `install` registers the compiled plugin
+    through a local marketplace under `<home>/.vtc/claude-marketplace/`: a copy of the plugin
+    plus an adapter-authored `marketplace.json`. It counts as the host's registration form (the
+    one non-host file an adapter writes), always under `InstallRequest.home`. A copy, not a pointer
+    to `pluginDir`, because in development `pluginDir` is the repo's `ASSET_SOURCES` path, which
+    changes with checkouts. Release publishing stays AD-16 rule 5 (§7 row).
+61. **The statusline shim form** (reading 6, AD-6 rule 4). _Lead decision 2026-10-14, pending human
+    review._ Frozen as `STATUSLINE_TEE` / `statuslineTeeCommand`: the Claude adapter writes
+    `vtc statusline-tee -- <the user's original command, shell-quoted as one word>`, or bare
+    `vtc statusline-tee` when there was none; the cli's shim runs that one word through the shell
+    exactly once with the same stdin and prints its output unchanged.
+62. **Where a headless prompt goes** (AD-6, `HostCommand`). _Lead decision 2026-10-14, pending
+    human review._ The launcher writes `SpawnRoleRequest.prompt` to the child's stdin and closes it;
+    the prompt is never in argv (size limit, visible in `ps`). `args`, `env` and that stdin are the
+    whole run.
+63. **Write-scope glob characters** (AD-3, AD-6). _Lead decision 2026-10-14, pending human
+    review._ `files_scope` and `write_paths` use `WriteScopeGlobSchema`: no parentheses, commas,
+    quotes, backticks, whitespace or control characters, because these LLM-authored globs end up
+    inside host permission rules (Claude's comma-separated `Edit(<glob>)` list). Write scopes
+    therefore have no `{a,b}` alternatives (one entry each); other globs (`when_changed`,
+    `acceptance_globs`, risk paths) keep the full dialect. Narrowing a schema is not additive
+    (AD-3 rule 4); it ships in MINOR 4.2.0 because no persisted task or role contract uses those
+    characters, and a bad Planner draft now fails at validation instead of at spawn.
+64. **Git writes the hook blocks** (hook rule 4, AD-7 rule 7, reading 23). _Lead decision
+    2026-10-14, pending human review._ "Commits, pushes, merges, rebases, resets or changes
+    config" also covers ref writes (branches, tags, stash entries, symbolic refs, worktrees, notes,
+    replacements, `filter-branch`) and per-call config overrides (`git -c`, `--config-env`), except
+    output-only keys (`color.*`, `column.*`, `advice.*`, `log.*`, `grep.*`, `status.*`, `i18n.*`,
+    `core.quotepath`, `core.abbrev`, diff display keys, and pager keys set to a plain pager such
+    as `cat` or `less`). The engine owns every commit and ref of a run.
+65. **Hidden-test staging is in the main checkout** (AD-13 rule 8). _Lead decision 2026-10-14,
+    pending human review._ `HIDDEN_TESTS.stagingDir` is relative to the main checkout (the repo
+    root), not the role's worktree. QA's pack lists `<stagingDir>/<task>/**` as a write scope,
+    engine core checks the artifacts there on submit, and `vtc hook` counts that main-checkout
+    entry as part of the dispatch's effective write scope.
+66. **Adapter and Gate Runner wiring** (AD-6 rule 6, AD-19). _Lead decision 2026-10-14, pending
+    human review._ The cli constructs each adapter as `ADAPTER_FACTORIES[host]({ pluginDir,
+vtcHome, vtcVersion })`; factories are typed `(options?: AdapterFactoryOptions) =>
+HostAdapter` (`@vtc/adapters`); models come from the engine's `ResolvedModel`, never from the
+    factory; `dispose()` runs on shutdown. A headless Claude run without `pluginDir` is refused
+    (fail closed). The cli wires `gates.createGateRunner({ repoRoot, vtcHome, git })`, and `vtc
+doctor` provisions scanners through the typed `gates.createScannerStore` and refreshes the
+    osv-scanner offline database; the cli's duck-typed scanner store goes.
+67. **Engine core surfaces the cli needs** (AD-12, AD-13, §6.9). _Lead decision 2026-10-14, pending
+    human review._ Engine core exports its glob dialect (`core.matchesAny`, `core.globToRegExp`)
+    and a structured per-dispatch write scope, so `vtc hook` drops its copy of the dialect and its
+    parsing of the rendered Markdown pack. Stale-lock detection checks that the holder's socket
+    answers the hello, not only that its pid is alive (pid reuse after a reboot or `SIGKILL`).
+    `ingestUsage` merges an `sdk_event` snapshot's windows into the host's stored snapshot by kind
+    and stamps `updated_at` with the receive time, so statusline readings survive.
+68. **Sanctioned engine test support** (AD-1, AD-2 Check). _Lead decision 2026-10-14, pending human
+    review._ `@vtc/engine/test-support` (an `exports` entry with only the `@vtc/source`
+    condition) is the Storage contract suite `runStorageContract`, so the binary build runs it
+    unchanged against `bun:sqlite` without reaching into engine-core's test layout. Any other
+    cross-package import of a `test/` file fails dependency-cruiser
+    (`AD1-test-support-through-the-sanctioned-entry`).
+
 ## 6. Change process for this spine
 
 - Changing an AD, adding one, or changing a frozen contract (AD-3) needs an architecture review
@@ -1317,20 +1527,27 @@ reasoning_output_tokens}`: `thread_id` is the `SessionRef` for `codex exec resum
   `node:sqlite` inside the binary, so a hoisted `node:sqlite` import no longer stops it starting;
   `bun:sqlite` stays the binary's driver.
 
-| Contract                                                                                                                                               | Spike check that unfreezes it                                                                                                                                                          | Status after round 1                                                                                                                                            | Needs a human account |
-| ------------------------------------------------------------------------------------------------------------------------------------------------------ | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------- | --------------------- |
-| Structured-output form (`jsonSchemaFor(..., { target: "structured-output" })`, AD-3 rule 8)                                                            | `claude -p --json-schema` and `codex exec --output-schema` accept it and return a `RoleResult` that re-validates                                                                       | Claude: verified on the form without `$schema`/`$id` (now the shared form). Codex: verified with `$schema`; re-run on the new form in round 2                   | yes                   |
-| `HostOutcome` limit/auth signals, `ParsedStream.usage` / `retry` (AD-6)                                                                                | recorded `claude -p` and `codex exec` streams with a real limit hit, an auth error and SDK `rate_limit_event`/`api_retry`                                                              | Codex success stream and per-turn usage recorded; limit and auth streams pending                                                                                | yes                   |
-| `StatuslineIngest` field names (`rate_limits.five_hour` / `seven_day`, `used_percentage`, `resets_at`)                                                 | the statusline payload of a signed-in Claude Code session                                                                                                                              | pending (needs a statusline config change on the owner's install)                                                                                               | yes                   |
-| Codex `UsageWindow` labels from `windowDurationMins` (`codex app-server` `account/rateLimits/read`)                                                    | a real `account/rateLimits/read` and `updated` notification                                                                                                                            | `read` verified (shape above); the rate-limit `updated` notification not yet observed                                                                           | yes                   |
-| `HostCapabilities` of both hosts, incl. Codex `sandbox_mode` inheritance for spawned agents (§12.1)                                                    | Codex agent spawning with per-agent `sandbox_mode`; Claude plugin agents and `sandbox.filesystem.denyWrite`                                                                            | pending                                                                                                                                                         | yes                   |
-| `resume` after a long gap (`SessionRef`, AD-6)                                                                                                         | `--resume` / `exec resume` work after hours                                                                                                                                            | started: a Claude session and a Codex thread were recorded at 2026-10-13T11:50Z; re-tried after several hours                                                   | yes                   |
-| Marketplace publishing (AD-16 rule 5)                                                                                                                  | `/plugin marketplace add` from a release branch installs the generated plugin                                                                                                          | pending                                                                                                                                                         | yes                   |
-| `Storage` contract on `bun:sqlite`, the `AssetBundle` from Bun-embedded files, the MCP stdio bridge (AD-2, AD-12)                                      | the storage contract suite passes under `bun build --compile`; the binary serves the static export and MCP over stdio                                                                  | building blocks verified (`bun:sqlite` and an embedded file in a compiled binary); the full suite, static export and stdio bridge wait for the cli+binary team  | no                    |
-| Lazy storage-driver import survives bundling (AD-2 rule 3)                                                                                             | the compiled binary starts and opens storage without loading `node:sqlite`; otherwise apply the named stub-plugin fallback                                                             | low risk: Bun 1.4.3 loads `node:sqlite` inside the binary too, so the fallback is not needed; keep the lazy import                                              | no                    |
-| Codex per-agent MCP isolation: each compiled role agent's own `[mcp_servers.vtc]` table with `enabled = false` or `enabled_tools`                      | a spawned Codex agent honours its per-agent `mcp_servers` table (a disabled server is unreachable; `enabled_tools` limits the list) whether Codex merges or replaces the session entry | pending. Until it passes, the engine must also refuse Lead-only tools (`approve`, `answer`, `change_request`, a `submit` for another action) from role sessions | yes                   |
-| Claude Code plugin agent names (`vtc:<agent>`)                                                                                                         | a plugin agent spawns under the namespaced name the adapter derives from `agentNameFor`                                                                                                | pending                                                                                                                                                         | yes                   |
-| Codex write-scoped agents can run a shell under `workspace-write`                                                                                      | a spawned write-scoped Codex agent runs a shell command inside its sandbox                                                                                                             | pending                                                                                                                                                         | yes                   |
-| Codex model ids per tier (§5 reading 26)                                                                                                               | name the Codex models for top/mid/low; then the adapter's default map is filled                                                                                                        | pending; agents set only reasoning effort meanwhile                                                                                                             | yes                   |
-| Codex plugin manifest fields (`plugins/codex/plugin.json`)                                                                                             | Codex installs the generated plugin from these fields                                                                                                                                  | pending                                                                                                                                                         | yes                   |
-| Host hook wiring for `vtc hook` (§5 reading 31): event names and the input fields `VtcHookInputSchema` reads (`agent_type`, `tool_name`, `tool_input`) | each host runs the hook for session start, pre-tool-use and subagent stop with these fields, and honours exit 2 as a block                                                             | pending                                                                                                                                                         | yes                   |
+| Contract                                                                                                                                               | Spike check that unfreezes it                                                                                                                                                                                                                                                                                                          | Status after round 1                                                                                                                                                                                             | Needs a human account |
+| ------------------------------------------------------------------------------------------------------------------------------------------------------ | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | --------------------- |
+| Structured-output form (`jsonSchemaFor(..., { target: "structured-output" })`, AD-3 rule 8)                                                            | `claude -p --json-schema` and `codex exec --output-schema` accept it and return a `RoleResult` that re-validates                                                                                                                                                                                                                       | verified on both hosts: Claude in round 1, Codex on the same form (no `$schema`/`$id`) in round 2                                                                                                                | yes                   |
+| `HostOutcome` limit/auth signals, `ParsedStream.usage` / `retry` (AD-6)                                                                                | recorded `claude -p` and `codex exec` streams with a real limit hit, an auth error and SDK `rate_limit_event`/`api_retry`                                                                                                                                                                                                              | Codex success stream and per-turn usage recorded; limit and auth streams pending                                                                                                                                 | yes                   |
+| `StatuslineIngest` field names (`rate_limits.five_hour` / `seven_day`, `used_percentage`, `resets_at`)                                                 | the statusline payload of a signed-in Claude Code session                                                                                                                                                                                                                                                                              | pending (needs a statusline config change on the owner's install)                                                                                                                                                | yes                   |
+| Codex `UsageWindow` labels from `windowDurationMins` (`codex app-server` `account/rateLimits/read`)                                                    | a real `account/rateLimits/read` and `updated` notification                                                                                                                                                                                                                                                                            | `read` verified (shape above); the rate-limit `updated` notification not yet observed                                                                                                                            | yes                   |
+| `HostCapabilities` of both hosts, incl. Codex `sandbox_mode` inheritance for spawned agents (§12.1)                                                    | Codex agent spawning with per-agent `sandbox_mode`; Claude plugin agents and `sandbox.filesystem.denyWrite`                                                                                                                                                                                                                            | pending                                                                                                                                                                                                          | yes                   |
+| `resume` after a long gap (`SessionRef`, AD-6)                                                                                                         | `--resume` / `exec resume` work after hours                                                                                                                                                                                                                                                                                            | verified on both hosts after 4h12m (same session/thread id, earlier answer recalled); a resumed Codex turn reloads the whole prior context (about 2x a fresh call), so budgets price resumes accordingly         | yes                   |
+| Marketplace publishing (AD-16 rule 5)                                                                                                                  | `/plugin marketplace add` from a release branch installs the generated plugin                                                                                                                                                                                                                                                          | pending                                                                                                                                                                                                          | yes                   |
+| `Storage` contract on `bun:sqlite`, the `AssetBundle` from Bun-embedded files, the MCP stdio bridge (AD-2, AD-12)                                      | the storage contract suite passes under `bun build --compile`; the binary serves the static export and MCP over stdio                                                                                                                                                                                                                  | verified on `team/cli-binary` (`packages/cli/test/binary.test.ts`, Bun 1.4.3); closes on the integration branch once that branch merges and imports the suite through `@vtc/engine/test-support` (§5 reading 68) | no                    |
+| Lazy storage-driver import survives bundling (AD-2 rule 3)                                                                                             | the compiled binary starts and opens storage without loading `node:sqlite`; otherwise apply the named stub-plugin fallback                                                                                                                                                                                                             | low risk: Bun 1.4.3 loads `node:sqlite` inside the binary too, so the fallback is not needed; keep the lazy import                                                                                               | no                    |
+| Codex per-agent MCP isolation: each compiled role agent's own `[mcp_servers.vtc]` table with `enabled = false` or `enabled_tools`                      | a spawned Codex agent honours its per-agent `mcp_servers` table (a disabled server is unreachable; `enabled_tools` limits the list) whether Codex merges or replaces the session entry                                                                                                                                                 | pending. Until it passes, the engine must also refuse Lead-only tools (`approve`, `answer`, `change_request`, a `submit` for another action) from role sessions                                                  | yes                   |
+| Claude Code plugin agent names (`vtc:<agent>`)                                                                                                         | a plugin agent spawns under the namespaced name the adapter derives from `agentNameFor`                                                                                                                                                                                                                                                | pending                                                                                                                                                                                                          | yes                   |
+| Codex write-scoped agents can run a shell under `workspace-write`                                                                                      | a spawned write-scoped Codex agent runs a shell command inside its sandbox                                                                                                                                                                                                                                                             | pending                                                                                                                                                                                                          | yes                   |
+| Codex model ids per tier (§5 readings 26, 51)                                                                                                          | name the Codex models for top/mid/low; then the engine's `DEFAULT_TIER_MODELS.codex` is filled                                                                                                                                                                                                                                         | pending; `ResolvedModel.model` is absent for Codex meanwhile and agents set only reasoning effort                                                                                                                | yes                   |
+| Codex plugin manifest fields (`plugins/codex/plugin.json`)                                                                                             | Codex installs the generated plugin from these fields                                                                                                                                                                                                                                                                                  | pending                                                                                                                                                                                                          | yes                   |
+| Host hook wiring for `vtc hook` (§5 reading 31): event names and the input fields `VtcHookInputSchema` reads (`agent_type`, `tool_name`, `tool_input`) | each host runs the hook for session start, pre-tool-use and subagent stop with these fields, and honours exit 2 as a block                                                                                                                                                                                                             | pending                                                                                                                                                                                                          | yes                   |
+| Claude headless role run (§5 readings 47, 62)                                                                                                          | `claude -p --agent vtc:<agent> --plugin-dir <extracted plugin> --setting-sources project --permission-mode dontAsk` with the prompt on stdin runs the compiled plugin agent and returns `structured_output`                                                                                                                            | pending                                                                                                                                                                                                          | yes                   |
+| Codex headless role identity                                                                                                                           | how a headless `codex exec` run (which has no `--agent` flag) loads the compiled role agent's `developer_instructions` and per-agent sandbox; until it passes, a headless Codex role run gets no compiled role instructions                                                                                                            | pending                                                                                                                                                                                                          | yes                   |
+| Claude settings-source isolation (§5 reading 48, D-ab)                                                                                                 | whether `claude --help` offers an empty or explicit settings source, so a role run loads only VTC-authored `--settings` and no committed `.claude/settings.json` allow rules, hooks or MCP enablement; otherwise confirm the explicit `--allowedTools`/`--disallowedTools` override and record what project settings still reach a run | pending                                                                                                                                                                                                          | yes                   |
+
+**Release-pipeline todo.** This local build has no CI. When the repo gets one, the merge-gate job
+installs Bun 1.4.3, so the single-binary tests (`packages/cli/test/binary.test.ts`) run instead of
+skipping with a reason (AD-10 rule 6).

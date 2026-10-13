@@ -54,7 +54,7 @@ import {
 import { GateAllowlistSchema, GatesConfigSchema, ScannerPinsSchema } from "./gates-config.js";
 import { HostOutcomeSchema, SubagentInstructionSchema } from "./interfaces/host-adapter.js";
 import { PluginManifestSchema } from "./plugin-manifest.js";
-import { ProjectConfigSchema } from "./project-config.js";
+import { ProjectConfigSchema, UserConfigSchema } from "./project-config.js";
 import { QuestionSchema } from "./question.js";
 import { RoleContractSchema } from "./role-contract.js";
 import { RoleResultSchema } from "./role-result.js";
@@ -93,6 +93,7 @@ export const CONTRACT_SCHEMAS = {
   PluginManifest: PluginManifestSchema,
   // config files
   ProjectConfig: ProjectConfigSchema,
+  UserConfig: UserConfigSchema,
   GatesConfig: GatesConfigSchema,
   ScannerPins: ScannerPinsSchema,
   GateAllowlist: GateAllowlistSchema,

@@ -13,7 +13,7 @@ import { FindingSchema } from "./finding.js";
 import { GateLayerSchema } from "./gates-config.js";
 import {
   FeatureIdSchema,
-  GlobSchema,
+  WriteScopeGlobSchema,
   RequirementRefSchema,
   RoleIdSchema,
   RunIdSchema,
@@ -107,7 +107,7 @@ export const TaskPackSchema = z.strictObject({
   /** Input artifacts by type: repo-map slice, DESIGN.md and component manifest for UI, … */
   inputs: z.array(ArtifactRefSchema).default([]),
   /** Where the role may write (the task's files_scope or the role's write paths). */
-  files_scope: z.array(GlobSchema).default([]),
+  files_scope: z.array(WriteScopeGlobSchema).default([]),
   /** Gate commands the role may run locally to check its work (§6.3 step 1). */
   gates: z
     .array(

@@ -147,6 +147,21 @@ export type RelPath = z.infer<typeof RelPathSchema>;
 export const GlobSchema = RelPathSchema;
 export type Glob = z.infer<typeof GlobSchema>;
 
+/**
+ * A glob that grants writes (`files_scope`, a role's `write_paths`): a {@link GlobSchema} without
+ * parentheses, commas, quotes, backticks, whitespace or control characters (spine §5 reading 63).
+ * These globs are LLM-authored (Planner task drafts) and end up inside host permission rules such
+ * as Claude's comma-separated `Edit(<glob>)` allow list, where those characters could close a rule
+ * and open another. So write-scope globs have no `{a,b}` alternatives: list each alternative as
+ * its own entry. A bad draft fails at validation, not at spawn.
+ */
+export const WriteScopeGlobSchema = GlobSchema.regex(
+  // eslint-disable-next-line no-control-regex -- control characters are what this rejects
+  /^[^\s(),'"`\u0000-\u001f\u007f]+$/,
+  "write-scope globs have no parentheses, commas, quotes, backticks, whitespace or control characters",
+);
+export type WriteScopeGlob = z.infer<typeof WriteScopeGlobSchema>;
+
 // -------------------------------------------------------------- value objects
 
 /** Normalised severity (§6.3 step 8: the engine normalises, reviewers do not). */

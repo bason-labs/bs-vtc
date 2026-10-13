@@ -39,7 +39,8 @@
         "$TURBO_DEFAULT$",
         "$TURBO_ROOT$/roles/**",
         "$TURBO_ROOT$/skills/**",
-        "$TURBO_ROOT$/plugins/**"
+        "$TURBO_ROOT$/plugins/**",
+        "$TURBO_ROOT$/fixtures/**"
       ]
     },
     "@vtc/shared#test": {

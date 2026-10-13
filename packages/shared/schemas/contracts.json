@@ -1,5 +1,5 @@
 {
-  "contracts_version": "4.1.0",
+  "contracts_version": "4.2.0",
   "schemas": {
     "Run": {
       "$id": "https://vtc.local/schemas/Run.json",
@@ -256,7 +256,8 @@
           "items": {
             "type": "string",
             "minLength": 1,
-            "maxLength": 1024
+            "maxLength": 1024,
+            "pattern": "^[^\\s(),'\"`\\u0000-\\u001f\\u007f]+$"
           }
         },
         "discipline": {
@@ -551,7 +552,8 @@
           "items": {
             "type": "string",
             "minLength": 1,
-            "maxLength": 1024
+            "maxLength": 1024,
+            "pattern": "^[^\\s(),'\"`\\u0000-\\u001f\\u007f]+$"
           }
         },
         "discipline": {
@@ -807,7 +809,8 @@
           "items": {
             "type": "string",
             "minLength": 1,
-            "maxLength": 1024
+            "maxLength": 1024,
+            "pattern": "^[^\\s(),'\"`\\u0000-\\u001f\\u007f]+$"
           }
         },
         "discipline": {
@@ -2442,7 +2445,8 @@
                   "items": {
                     "type": "string",
                     "minLength": 1,
-                    "maxLength": 1024
+                    "maxLength": 1024,
+                    "pattern": "^[^\\s(),'\"`\\u0000-\\u001f\\u007f]+$"
                   }
                 },
                 "discipline": {
@@ -5546,7 +5550,8 @@
                     "items": {
                       "type": "string",
                       "minLength": 1,
-                      "maxLength": 1024
+                      "maxLength": 1024,
+                      "pattern": "^[^\\s(),'\"`\\u0000-\\u001f\\u007f]+$"
                     }
                   },
                   "discipline": {
@@ -6238,7 +6243,8 @@
                     "items": {
                       "type": "string",
                       "minLength": 1,
-                      "maxLength": 1024
+                      "maxLength": 1024,
+                      "pattern": "^[^\\s(),'\"`\\u0000-\\u001f\\u007f]+$"
                     }
                   },
                   "discipline": {
@@ -7034,7 +7040,8 @@
                     "items": {
                       "type": "string",
                       "minLength": 1,
-                      "maxLength": 1024
+                      "maxLength": 1024,
+                      "pattern": "^[^\\s(),'\"`\\u0000-\\u001f\\u007f]+$"
                     }
                   },
                   "discipline": {
@@ -7746,7 +7753,8 @@
                     "items": {
                       "type": "string",
                       "minLength": 1,
-                      "maxLength": 1024
+                      "maxLength": 1024,
+                      "pattern": "^[^\\s(),'\"`\\u0000-\\u001f\\u007f]+$"
                     }
                   },
                   "discipline": {
@@ -8320,7 +8328,8 @@
               "items": {
                 "type": "string",
                 "minLength": 1,
-                "maxLength": 1024
+                "maxLength": 1024,
+                "pattern": "^[^\\s(),'\"`\\u0000-\\u001f\\u007f]+$"
               }
             },
             "engine_tools": {
@@ -8413,7 +8422,8 @@
                     "items": {
                       "type": "string",
                       "minLength": 1,
-                      "maxLength": 1024
+                      "maxLength": 1024,
+                      "pattern": "^[^\\s(),'\"`\\u0000-\\u001f\\u007f]+$"
                     }
                   },
                   "engine_tools": {
@@ -8852,7 +8862,8 @@
           "items": {
             "type": "string",
             "minLength": 1,
-            "maxLength": 1024
+            "maxLength": 1024,
+            "pattern": "^[^\\s(),'\"`\\u0000-\\u001f\\u007f]+$"
           }
         },
         "gates": {
@@ -10586,6 +10597,31 @@
       ],
       "additionalProperties": false
     },
+    "UserConfig": {
+      "$id": "https://vtc.local/schemas/UserConfig.json",
+      "title": "UserConfig",
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "type": "object",
+      "properties": {
+        "version": {
+          "type": "number",
+          "const": 1
+        },
+        "env_passthrough": {
+          "default": [],
+          "maxItems": 64,
+          "type": "array",
+          "items": {
+            "type": "string",
+            "pattern": "^[A-Za-z_][A-Za-z0-9_]{0,127}$"
+          }
+        }
+      },
+      "required": [
+        "version"
+      ],
+      "additionalProperties": false
+    },
     "GatesConfig": {
       "$id": "https://vtc.local/schemas/GatesConfig.json",
       "title": "GatesConfig",
@@ -10954,7 +10990,8 @@
           "items": {
             "type": "string",
             "minLength": 1,
-            "maxLength": 1024
+            "maxLength": 1024,
+            "pattern": "^[^\\s(),'\"`\\u0000-\\u001f\\u007f]+$"
           }
         },
         "protected": {
@@ -11065,6 +11102,17 @@
         "include_hidden": {
           "default": false,
           "type": "boolean"
+        },
+        "hidden_tasks": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "pattern": "^T-[1-9]\\d*$"
+          }
+        },
+        "gates_config_hash": {
+          "type": "string",
+          "pattern": "^[a-f0-9]{64}$"
         }
       },
       "required": [
@@ -14372,7 +14420,8 @@
                             "items": {
                               "type": "string",
                               "minLength": 1,
-                              "maxLength": 1024
+                              "maxLength": 1024,
+                              "pattern": "^[^\\s(),'\"`\\u0000-\\u001f\\u007f]+$"
                             }
                           },
                           "discipline": {
@@ -15064,7 +15113,8 @@
                             "items": {
                               "type": "string",
                               "minLength": 1,
-                              "maxLength": 1024
+                              "maxLength": 1024,
+                              "pattern": "^[^\\s(),'\"`\\u0000-\\u001f\\u007f]+$"
                             }
                           },
                           "discipline": {
@@ -15860,7 +15910,8 @@
                             "items": {
                               "type": "string",
                               "minLength": 1,
-                              "maxLength": 1024
+                              "maxLength": 1024,
+                              "pattern": "^[^\\s(),'\"`\\u0000-\\u001f\\u007f]+$"
                             }
                           },
                           "discipline": {
@@ -16572,7 +16623,8 @@
                             "items": {
                               "type": "string",
                               "minLength": 1,
-                              "maxLength": 1024
+                              "maxLength": 1024,
+                              "pattern": "^[^\\s(),'\"`\\u0000-\\u001f\\u007f]+$"
                             }
                           },
                           "discipline": {
@@ -19173,7 +19225,8 @@
                 "items": {
                   "type": "string",
                   "minLength": 1,
-                  "maxLength": 1024
+                  "maxLength": 1024,
+                  "pattern": "^[^\\s(),'\"`\\u0000-\\u001f\\u007f]+$"
                 }
               },
               "discipline": {
@@ -19499,7 +19552,8 @@
               "items": {
                 "type": "string",
                 "minLength": 1,
-                "maxLength": 1024
+                "maxLength": 1024,
+                "pattern": "^[^\\s(),'\"`\\u0000-\\u001f\\u007f]+$"
               }
             },
             "discipline": {

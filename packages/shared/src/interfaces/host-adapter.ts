@@ -106,8 +106,21 @@ export interface InstallRequest {
    * `plugin:<host>` to `~/.vtc/` + `extractedPluginDir(version, host)` (AD-2 rule 7).
    */
   readonly pluginDir: string;
-  readonly scope: "user" | "project";
+  /** Where host files go; `vtc install` defaults per host to {@link DEFAULT_INSTALL_SCOPE}. */
+  readonly scope: InstallScope;
 }
+
+export type InstallScope = "user" | "project";
+
+/**
+ * `vtc install`'s scope when the user names none (D-ah, spine §5 reading 54): Claude Code installs
+ * the plugin for the user (it is user-scoped and the bridge then serves any repo, AD-12 rule 3);
+ * Codex installs into the project, because it writes `.codex/agents/*.toml` into the repo.
+ */
+export const DEFAULT_INSTALL_SCOPE: Readonly<Record<HostId, InstallScope>> = {
+  "claude-code": "user",
+  codex: "project",
+};
 
 export interface InstallResult {
   /** Absolute paths written or updated. */
@@ -124,7 +137,12 @@ export interface SandboxProfileRequest {
   readonly writablePaths: readonly string[];
   /** Repo-relative paths that must not change (QA-owned tests, configs; §7.3). */
   readonly protectedPaths: readonly string[];
-  /** §7.2: install phase may reach registries only; everything else has no network. */
+  /**
+   * §7.2: install phase may reach registries only; everything else has no network. Role runs are
+   * always `none`: dependency installs are an engine-run deterministic step (the Gate Runner's
+   * install phase), never a role action, on both hosts (D-ac, spine §5 reading 49). An adapter that
+   * cannot keep `registries` away from the engine's localhost API refuses it (Codex does).
+   */
   readonly network: "none" | "registries";
 }
 
@@ -135,6 +153,14 @@ export interface SandboxProfile {
     readonly readOnly: boolean;
     readonly perPathWriteDeny: boolean;
     readonly network: boolean;
+    /**
+     * The host itself keeps the role from reading the VTC install token (`ENGINE_INSTANCE.tokenFile`
+     * under the VTC home) and the host credential files (`hostCredentialDenyReadPaths`, D-ad).
+     * Claude Code: true (read-deny rules plus `sandbox.filesystem.denyRead`). Codex: false (no
+     * per-path read deny). Absent = false. When false, the engine must give the role no route to
+     * anything the token unlocks: no network at all (D-ac, spine §5 reading 49).
+     */
+    readonly secretsUnreadable?: boolean;
   };
   /** Host-specific settings (e.g. Claude `sandbox.filesystem.denyWrite`, Codex `sandbox_mode`). */
   readonly settings: Readonly<Record<string, unknown>>;
@@ -151,7 +177,10 @@ export interface SandboxProfile {
 export interface SpawnRoleRequest {
   readonly role: RoleId;
   readonly mode?: string;
-  /** Concrete model, resolved by the engine from role.yaml + project.yaml (AD-6 rule 2). */
+  /**
+   * The model, resolved by the engine from role.yaml + project.yaml (AD-6 rule 2). Without a
+   * `model` id the run uses the host session's default model: pass no model flag (D-ae).
+   */
   readonly model: ResolvedModel;
   readonly dispatch: "subagent" | "headless";
   /** Absolute working directory (the task's worktree). */
@@ -175,6 +204,12 @@ export interface SpawnRoleRequest {
  * The exact process a headless run starts: what `spawnRole` / `resume` execute and what the
  * safety contract checks with `findForbiddenHostArgs` (AD-9). `env` holds only the variables
  * the adapter adds; never credentials.
+ *
+ * **Stdin** (spine §5 reading 62): the launcher writes `SpawnRoleRequest.prompt` (on a resume, the
+ * new input) to the child's stdin and then closes it. The prompt is never in `args`: argv is
+ * size-limited (`E2BIG`) and visible to every local user in `ps`. A host that waits on stdin
+ * (`codex exec`, spike round 1) therefore always sees it closed. `args` + `env` + that stdin are
+ * the whole run.
  */
 export interface HostCommand {
   readonly command: string;

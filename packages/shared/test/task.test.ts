@@ -49,6 +49,7 @@ describe("TaskSchema", () => {
     ["covers", { covers: [] }],
     ["files_scope", { files_scope: [] }],
     ["files_scope.0", { files_scope: ["/abs/**"] }],
+    ["files_scope.0", { files_scope: ["src/**),Edit(/**"] }],
     ["stack_packs", { stack_packs: ["a", "b", "c", "d"] }],
     ["cap", { cap: 6 }],
     ["cap", { cap: 2 }],

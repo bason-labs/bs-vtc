@@ -185,7 +185,8 @@ export const SpawnRoleActionSchema = z.strictObject({
   /**
    * The model id the engine resolved for this run (AD-6 rule 2), after a tier escalation
    * (§6.3 step 9) or a budget drop (§11). The Lead passes it to the host's subagent spawn where
-   * the host takes a model; the `role.dispatched` envelope records the same id.
+   * the host takes a model; the `role.dispatched` envelope records the same id. Absent when the
+   * engine resolved no id (`ResolvedModel.model`, D-ae): the spawn uses the session's model.
    */
   model: z.string().min(1).max(200).optional(),
   /** Resume this host session (patch rounds, answers: §6.3 step 8, §6.5), when the host can. */
@@ -486,6 +487,7 @@ export const RoleRunSummarySchema = z.strictObject({
   /** Prompt version: content SHA of the compiled agent prompt (§13). */
   prompt_sha: Sha256HexSchema,
   host: HostIdSchema,
+  /** The dispatched model id, or `SESSION_DEFAULT_MODEL` when none was resolved (D-ae). */
   model: z.string().min(1).max(200),
   dispatched_at: IsoDateTimeSchema,
   /** `null` while the run is in flight, failed or was rejected. */

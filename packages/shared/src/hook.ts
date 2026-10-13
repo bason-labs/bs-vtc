@@ -9,15 +9,34 @@
  * 1. Input: the host's hook JSON on stdin, at most `VTC_HOOK.maxStdinBytes`, parsed with
  *    {@link VtcHookInputSchema} (the host's own format, read tolerantly: unknown keys are kept and
  *    ignored).
- * 2. Exit `VTC_HOOK.exit.allow` (0) with no output when no VTC run is active for the repo, when no
- *    daemon answers, on unparseable or oversized input, and on any internal error (fail open).
- * 3. `session-start`: when a run is active, print a one-paragraph resume hint (`next` /
- *    `status`) on stdout, which the host adds to the Lead's context. Never blocks.
+ * 2. Exit `VTC_HOOK.exit.allow` (0) with no output when no VTC run is active for the repo, on
+ *    unparseable or oversized input, and on any internal error (fail open). `pre-tool-use` and
+ *    `subagent-stop` also allow silently when no daemon answers; `session-start` does not need
+ *    one (rule 3).
+ * 3. `session-start`: when a run is unfinished, print a one-paragraph resume hint ("Resume run?",
+ *    `next` / `status`) on stdout, which the host adds to the Lead's context. Never blocks. The
+ *    hint does not wait for the daemon (D-af, spine §5 reading 52): after a reboot the bridge
+ *    starts the daemon at the same moment the Lead session starts, so the hook also prints it when
+ *    the committed event log (`.vtc/runs/<run>/events.jsonl`, read only, never written) shows a
+ *    run with no `run.finished`. Reading the log fails open like everything else, within
+ *    `VTC_HOOK.timeoutMs`.
  * 4. `pre-tool-use`: blocks (exit `VTC_HOOK.exit.block` (2), the reason on stderr, at most
  *    `VTC_HOOK.maxReasonChars`) only when the caller is a VTC role agent (`agent_type` starting
- *    with `AGENT_NAME_PREFIX`, after the host's namespace) and the call is a git command that
- *    commits, pushes, merges, rebases, resets or changes config, or a write outside the effective
- *    write scope of that agent's in-flight dispatch. Everything else is allowed.
+ *    with `AGENT_NAME_PREFIX`, after the host's namespace) and the call is either
+ *    - a git command that commits, pushes, merges, rebases, resets or changes config. The engine
+ *      owns every commit and ref of a run, so this reads as also covering ref writes (creating,
+ *      moving or deleting branches, tags, stash entries, symbolic refs, worktrees, notes and
+ *      replacements; `filter-branch`) and per-call config overrides (`git -c`, `--config-env`),
+ *      because an override such as an `alias.*` or `core.fsmonitor` value can hide a write. An
+ *      override of an output-only key is allowed: `color.*`, `column.*`, `advice.*`, `log.*`,
+ *      `grep.*`, `status.*`, `i18n.*`, `core.quotepath`, `core.abbrev`, diff display keys, and
+ *      pager keys whose value is a plain pager such as `cat` or `less` (spine §5 reading 64); or
+ *    - a write outside the agent's effective write scope (D-ag, spine §5 reading 53), which is:
+ *      its own worktree, within its in-flight dispatch's write scope; its main-checkout staging
+ *      entries (`HIDDEN_TESTS.stagingDir/<task>/`, relative to the main checkout, spine §5
+ *      reading 65); and the OS temp directory (`$TMPDIR`, `/tmp`, `/private/tmp`, and
+ *      `/var/folders` on macOS). A write anywhere else stays blocked.
+ *    Everything else is allowed.
  * 5. `subagent-stop`: for a VTC role agent, print a reminder on stdout that the Lead must
  *    `submit` its result (or failure). Never blocks.
  * 6. The command finishes within `VTC_HOOK.timeoutMs`; the plugin's hook timeout is set to it.

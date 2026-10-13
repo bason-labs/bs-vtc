@@ -46,6 +46,7 @@ export * from "./helpers/redaction.js";
 export * from "./helpers/routing.js";
 export * from "./helpers/dispatch.js";
 export * from "./helpers/conformance.js";
+export * from "./helpers/final-review.js";
 export * from "./json-schema.js";
 
 /**
@@ -70,5 +71,14 @@ export * from "./json-schema.js";
  * `budgets.advisor_usd`, task-pack depths and design constraints, `PluginManifest`,
  * `DesignScreensFile`, the role-contracts asset path, the `vtc hook` command contract, known
  * artifact types, the `PullRequestService` seam, and a host-neutral structured-output form.
+ * 4.2.0 (MINOR): wave-2 proposals (spine §5 readings 40–68). `GateRunRequest.hidden_tasks` and
+ * `gates_config_hash`; `UserConfig` (`~/.vtc/config.yaml` `env_passthrough`); the tool-severity
+ * cap outside the security class (`ToolSeverityInput.category`); `finalReviewStepsCovered`;
+ * `STATUSLINE_TEE` / `statuslineTeeCommand`; `HOST_CREDENTIAL_DENY_READ` and its deny-list
+ * exemption in `findForbiddenHostArgs`; `ROLE_DENIED_VTC`; `SandboxProfile.enforced
+ * .secretsUnreadable`; `DEFAULT_INSTALL_SCOPE`; an optional `ResolvedModel.model`; and
+ * `WriteScopeGlobSchema` for `files_scope` and `write_paths`. Two of these narrow or widen an
+ * existing shape, which AD-3 rule 4 would call MAJOR; they ship as MINOR because nothing has
+ * persisted or consumed the affected values yet (reading 51 and 63 say why).
  */
-export const CONTRACTS_VERSION = "4.1.0";
+export const CONTRACTS_VERSION = "4.2.0";

@@ -40,6 +40,20 @@ export const ROLE_CATEGORY_SEVERITY: Readonly<Record<FindingCategory, Severity>>
   docs: "info",
 };
 
+/**
+ * Categories whose findings may normalise to `high` or above (AD-8 rule 7). A tool finding in any
+ * other category is capped at `medium` ({@link normalizeSeverity}).
+ */
+export const SECURITY_CLASS_CATEGORIES: readonly FindingCategory[] = [
+  "secret",
+  "security",
+  "supply_chain",
+  "test_integrity",
+];
+
+export const isSecurityClass = (category: FindingCategory): boolean =>
+  SECURITY_CLASS_CATEGORIES.includes(category);
+
 /** SARIF 2.1.0 `result.level`. */
 export type SarifLevel = "error" | "warning" | "note" | "none";
 
@@ -98,6 +112,12 @@ export interface ToolSeverityInput {
   readonly label?: string;
   /** SARIF `level`. Used when there is neither a score nor a known label. */
   readonly sarifLevel?: SarifLevel;
+  /**
+   * The finding's category (`ToolFinding.category`). When it is not security-class, the result is
+   * capped at `medium` (AD-8 rule 7): an ESLint `error` or a SARIF `error` on a lint finding must
+   * not trip §7.6 rule 9. Triage always passes it; absent = no cap (callers before 4.2.0).
+   */
+  readonly category?: FindingCategory;
 }
 
 export interface RoleSeverityInput {
@@ -111,10 +131,17 @@ export type SeverityInput = ToolSeverityInput | RoleSeverityInput;
  * Deterministic severity for any finding.
  * - Role findings: from the category table; the reviewer's claim is never an input.
  * - Tool findings: score, then known label, then SARIF level; anything unrecognised is
- *   `medium`, so an unknown never silently passes the default auto-merge threshold (§6.7).
+ *   `medium`, so an unknown never silently passes the default auto-merge threshold (§6.7). A
+ *   finding whose `category` is not security-class is capped at `medium` (AD-8 rule 7).
  */
 export const normalizeSeverity = (input: SeverityInput): Severity => {
   if (input.source === "role") return ROLE_CATEGORY_SEVERITY[input.category];
+  const raw = toolSeverity(input);
+  if (input.category === undefined || isSecurityClass(input.category)) return raw;
+  return isAtLeast(raw, "high") ? "medium" : raw;
+};
+
+const toolSeverity = (input: ToolSeverityInput): Severity => {
   if (input.score !== undefined) return severityFromScore(input.score);
   if (input.label !== undefined) {
     const mapped = LABEL_SEVERITY[input.label.trim().toLowerCase()];
