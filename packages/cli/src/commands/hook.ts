@@ -50,7 +50,7 @@ const decide = async (
   if (!event.success || flag !== "--host" || !host.success || rest.length > 0) return ALLOW;
   const stdin = await d.stdin(VTC_HOOK.maxStdinBytes, Math.max(0, deadline - Date.now()));
   if (stdin === null || stdin.trim() === "") return ALLOW;
-  return runHook(event.data, host.data, stdin, d.deps(ctx));
+  return runHook(event.data, host.data, stdin, { ...d.deps(ctx), deadline });
 };
 
 export const createHookCommand = (

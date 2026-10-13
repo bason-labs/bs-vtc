@@ -11,7 +11,7 @@
  * it (`vtc engine --stop`), never counted live.
  */
 import { spawn, type ChildProcess } from "node:child_process";
-import { closeSync, mkdirSync, openSync, readFileSync } from "node:fs";
+import { closeSync, mkdirSync, openSync, readFileSync, writeSync } from "node:fs";
 import { connect } from "node:net";
 import { join } from "node:path";
 import { core } from "@vtc/engine";
@@ -25,6 +25,7 @@ import {
   type EngineSocketWelcome,
 } from "@vtc/shared";
 import { requireVtcProject } from "./repo.js";
+import { passthroughOf, readUserConfig } from "./user-config.js";
 
 /** True when a process with this pid exists (signal 0 only checks; EPERM means it exists). */
 export const pidAlive = (pid: number): boolean => {
@@ -172,7 +173,8 @@ export interface EnsureDaemonOptions {
  * shared by every later session of either host, so it does not inherit one session's whole
  * environment (`CLAUDECODE`, a host's entrypoint markers, secrets the user exported): only what
  * the runtime, git, gh and the host CLIs need to find the user's own installation, configuration,
- * proxies and locale. Credentials stay with the hosts' own logins (AD-9).
+ * proxies and locale. Credentials stay with the hosts' own logins (AD-9), except the names the
+ * user lists in `~/.vtc/config.yaml` `env_passthrough` (D-ak, never the repo's project.yaml).
  */
 const DAEMON_ENV = new Set([
   "PATH",
@@ -225,16 +227,23 @@ const DAEMON_ENV = new Set([
 /** `LC_*` and `XDG_*`: locale and the XDG base directories. */
 const DAEMON_ENV_PREFIXES = ["LC_", "XDG_"];
 
-/** The detached daemon's environment: {@link DAEMON_ENV} from `env`, plus `VTC_HOME`. */
+/**
+ * The detached daemon's environment: {@link DAEMON_ENV} from `env`, the names the user lists in
+ * `~/.vtc/config.yaml` `env_passthrough` (D-ak, `user-config.ts`; credential variables are
+ * dropped otherwise, AD-9), plus `VTC_HOME`.
+ */
 export const daemonEnv = (
   env: Readonly<Record<string, string | undefined>>,
   vtcHome: string,
+  passthrough: readonly string[] = [],
 ): Record<string, string> => {
+  const fold = (name: string): string => (process.platform === "win32" ? name.toUpperCase() : name);
+  const extra = new Set(passthrough.map(fold));
   const out: Record<string, string> = {};
   for (const [name, value] of Object.entries(env)) {
     if (value === undefined) continue;
-    const key = process.platform === "win32" ? name.toUpperCase() : name;
-    if (DAEMON_ENV.has(key) || DAEMON_ENV_PREFIXES.some((p) => key.startsWith(p)))
+    const key = fold(name);
+    if (DAEMON_ENV.has(key) || extra.has(key) || DAEMON_ENV_PREFIXES.some((p) => key.startsWith(p)))
       out[name] = value;
   }
   return { ...out, VTC_HOME: vtcHome };
@@ -248,11 +257,17 @@ export const spawnDetachedDaemon = (options: EnsureDaemonOptions): ChildProcess 
   mkdirSync(join(options.vtcHome, "logs"), { recursive: true, mode: 0o700 });
   const fd = openSync(log, "a", 0o600);
   try {
+    const config = readUserConfig(options.vtcHome);
+    if (!config.ok)
+      writeSync(
+        fd,
+        `${new Date().toISOString()} vtc: ${config.path} does not parse (${config.error}); no env_passthrough names pass\n`,
+      );
     const child = spawn(command, [...prefix, "engine", "--daemon", ...(options.flags ?? [])], {
       cwd: options.repoRoot,
       detached: true,
       stdio: ["ignore", fd, fd],
-      env: daemonEnv(process.env, options.vtcHome),
+      env: daemonEnv(process.env, options.vtcHome, passthroughOf(config)),
       windowsHide: true,
     });
     child.on("error", () => undefined);

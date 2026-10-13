@@ -16,10 +16,14 @@ import {
   ENGINE_INSTANCE,
   ENGINE_MCP_TOOLS,
   engineDiscoveryFile,
+  ProjectConfigSchema,
+  USER_CONFIG_FILE,
+  type CreateGateRunner,
   type GateRunner,
   type HostAdapter,
   type RunningDaemon,
 } from "@vtc/shared";
+import type { AdapterFactoryOptions } from "@vtc/adapters";
 import { createDiskAssetBundle } from "../src/assets.js";
 import { runBridge } from "../src/bridge.js";
 import {
@@ -29,20 +33,24 @@ import {
   ensureDaemon,
   liveDaemon,
   pidAlive,
+  spawnDetachedDaemon,
   stopDaemon,
 } from "../src/daemon.js";
 import { checkEngine } from "../src/doctor-checks.js";
 import { isVtcProject } from "../src/repo.js";
+import { passthroughOf, readUserConfig } from "../src/user-config.js";
 import {
   buildEngineParts,
   composeEngineDeps,
   connectToRepoEngine,
   createAdapters,
+  disposeAdapters,
   lazyGateRunner,
   resolveVtcHome,
   startDaemon,
   type EngineParts,
 } from "../src/wiring.js";
+import { VERSION } from "../src/version.js";
 import {
   cleanupDirs,
   DASHBOARD_FIXTURE,
@@ -151,10 +159,72 @@ describe("buildEngineParts and composeEngineDeps (AD-19)", () => {
     expect(created).toBe(1);
   });
 
-  it("constructs one adapter per registered factory (AD-6 rule 6)", () => {
+  it("constructs one adapter per registered factory, with its plugin, home and version (AD-6 rule 6)", () => {
     const a = { host: "claude-code" } as HostAdapter;
-    expect(createAdapters({ "claude-code": () => a })).toEqual({ "claude-code": a });
-    expect(createAdapters({})).toEqual({});
+    const c = { host: "codex" } as HostAdapter;
+    const seen: [string, AdapterFactoryOptions | undefined][] = [];
+    const adapters = createAdapters(
+      {
+        "claude-code": (o) => (seen.push(["claude-code", o]), a),
+        codex: (o) => (seen.push(["codex", o]), c),
+      },
+      { vtcHome: "/vh", pluginDir: (host, vtcHome) => `${vtcHome}/plugins/${host}` },
+    );
+    expect(adapters).toEqual({ "claude-code": a, codex: c });
+    // models never come from the factory: the engine resolves them (reading 66)
+    expect(seen).toEqual([
+      [
+        "claude-code",
+        { pluginDir: "/vh/plugins/claude-code", vtcHome: "/vh", vtcVersion: VERSION },
+      ],
+      ["codex", { pluginDir: "/vh/plugins/codex", vtcHome: "/vh", vtcVersion: VERSION }],
+    ]);
+    expect(createAdapters({}, { vtcHome: "/vh", pluginDir: () => "/p" })).toEqual({});
+  });
+
+  it("threads the plugin dir into the daemon's adapters and builds the Gate Runner on its git", async () => {
+    const seen: (AdapterFactoryOptions | undefined)[] = [];
+    const gateDeps: Parameters<CreateGateRunner>[0][] = [];
+    const repo = initRepo();
+    const parts = await buildEngineParts({
+      repoRoot: repo,
+      vtcHome: "/vh",
+      installToken: TOKEN,
+      assets: createDiskAssetBundle({}),
+      pullRequests: fakePullRequests(),
+      pluginDir: (host) => `/extracted/${host}`,
+      adapterFactories: {
+        "claude-code": (o) => {
+          seen.push(o);
+          return { host: "claude-code", dispose: () => Promise.resolve() } as never;
+        },
+      },
+      createGateRunner: (deps) => {
+        gateDeps.push(deps);
+        return fakeGateRunner();
+      },
+    });
+    expect(seen).toEqual([
+      { pluginDir: "/extracted/claude-code", vtcHome: "/vh", vtcVersion: VERSION },
+    ]);
+    expect(gateDeps).toEqual([]); // built on first use
+    await parts.gateRunner.checkWriteScope({} as never).catch(() => undefined);
+    expect(gateDeps).toHaveLength(1);
+    expect(gateDeps[0]).toMatchObject({ repoRoot: repo, vtcHome: "/vh" });
+    expect(typeof gateDeps[0]?.git.readFileAtCommit).toBe("function");
+  });
+
+  it("disposes every adapter on shutdown, even when one fails to", async () => {
+    const disposed: string[] = [];
+    await disposeAdapters({
+      adapters: {
+        "claude-code": {
+          dispose: () => (disposed.push("claude-code"), Promise.reject(new Error("x"))),
+        } as never,
+        codex: { dispose: () => (disposed.push("codex"), Promise.resolve()) } as never,
+      },
+    });
+    expect(disposed.sort()).toEqual(["claude-code", "codex"]);
   });
 });
 
@@ -452,6 +522,87 @@ describe("the daemon's environment, home and start-up race", () => {
     });
   });
 
+  it("passes only the credential variables the user lists in ~/.vtc/config.yaml (D-ak)", () => {
+    const home = tempHome();
+    const source = {
+      PATH: "/usr/bin",
+      ANTHROPIC_API_KEY: "sk-secret",
+      GITHUB_TOKEN: "ghp_secret",
+      OPENAI_API_KEY: "sk-other",
+    };
+    // no config file: { version: 1 }, nothing passes
+    expect(readUserConfig(home)).toEqual({
+      ok: true,
+      path: join(home, USER_CONFIG_FILE),
+      config: { version: 1, env_passthrough: [] },
+    });
+    expect(daemonEnv(source, home, [])).toEqual({ PATH: "/usr/bin", VTC_HOME: home });
+    writeFileSync(
+      join(home, USER_CONFIG_FILE),
+      "version: 1\nenv_passthrough:\n  - GITHUB_TOKEN\n  - NOT_SET\n",
+    );
+    const read = readUserConfig(home);
+    expect(read).toMatchObject({
+      ok: true,
+      config: { env_passthrough: ["GITHUB_TOKEN", "NOT_SET"] },
+    });
+    expect(daemonEnv(source, home, passthroughOf(read))).toEqual({
+      PATH: "/usr/bin",
+      GITHUB_TOKEN: "ghp_secret",
+      VTC_HOME: home,
+    });
+    // a file that does not parse passes nothing and says why
+    writeFileSync(join(home, USER_CONFIG_FILE), 'version: 1\nenv_passthrough: ["bad name"]\n');
+    const bad = readUserConfig(home);
+    expect(bad.ok).toBe(false);
+    expect(passthroughOf(bad)).toEqual([]);
+    expect(bad.ok ? "" : bad.error).toMatch(/env_passthrough/);
+    // VTC_HOME is always the daemon's own, whatever is listed
+    expect(daemonEnv({ VTC_HOME: "/elsewhere" }, home, ["VTC_HOME"])).toEqual({ VTC_HOME: home });
+  });
+
+  it("starts the detached daemon with the user's passthrough names", async () => {
+    const home = tempHome();
+    const repo = initVtcRepo();
+    const out = join(tempDir(), "env.json");
+    writeFileSync(join(home, USER_CONFIG_FILE), "version: 1\nenv_passthrough: [VTC_TEST_PASS]\n");
+    process.env.VTC_TEST_PASS = "pass-me";
+    process.env.VTC_TEST_DROP = "drop-me";
+    try {
+      const child = spawnDetachedDaemon({
+        vtcHome: home,
+        repoRoot: repo,
+        selfCommand: [
+          process.execPath,
+          "-e",
+          `require("node:fs").writeFileSync(${JSON.stringify(out)}, JSON.stringify(process.env))`,
+        ],
+      });
+      await new Promise((resolve) => child.once("exit", resolve));
+    } finally {
+      delete process.env.VTC_TEST_PASS;
+      delete process.env.VTC_TEST_DROP;
+    }
+    const env = JSON.parse(readFileSync(out, "utf8")) as Record<string, string>;
+    expect(env.VTC_TEST_PASS).toBe("pass-me");
+    expect(env.VTC_TEST_DROP).toBeUndefined();
+    expect(env.VTC_HOME).toBe(home);
+  });
+
+  it("never takes env_passthrough from the repo's project.yaml", () => {
+    const repo = initRepo();
+    mkdirSync(join(repo, ".vtc"), { recursive: true });
+    writeFileSync(
+      join(repo, ".vtc/project.yaml"),
+      "version: 1\nenv_passthrough:\n  - GITHUB_TOKEN\n",
+    );
+    // ProjectConfigSchema has no such key; the daemon reads only the user's file
+    expect(ProjectConfigSchema.safeParse({ version: 1, env_passthrough: ["X"] }).success).toBe(
+      false,
+    );
+    expect(passthroughOf(readUserConfig(tempHome()))).toEqual([]);
+  });
+
   it("resolves a relative VTC_HOME against the caller's cwd", () => {
     expect(resolveVtcHome({ VTC_HOME: "rel/home" }, "/work")).toBe("/work/rel/home");
     expect(resolveVtcHome({ VTC_HOME: "/abs" }, "/work")).toBe("/abs");
@@ -478,11 +629,14 @@ describe("the daemon's environment, home and start-up race", () => {
       selfCommand: [process.execPath, "-e", "process.exit(1)"],
       timeoutMs: 15_000,
     });
+    // built before the lock is released, so the winner publishes within the exit grace even
+    // when this test runs alone (cold module loads)
+    const parts = await partsFor(repo, home);
     await new Promise((r) => setTimeout(r, 3_000));
     // the holder turns out to be the winner: it publishes its discovery record
     holder.kill("SIGKILL");
     unlinkSync(lock);
-    const daemon = await startDaemon(await partsFor(repo, home), { wake: false });
+    const daemon = await startDaemon(parts, { wake: false });
     daemons.push(daemon);
     expect(await ensured).toEqual(daemon.discovery);
     expect(Date.now() - began).toBeGreaterThan(2_500);

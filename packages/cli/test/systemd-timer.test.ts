@@ -1,6 +1,7 @@
 /**
  * The auto-resume timer on Linux (§6.9 step 4, AD-6 rule 4): a systemd user timer that runs
- * `vtc engine --wake-due` every minute, installed by `vtc install` like the macOS launchd agent.
+ * `vtc engine --wake-due` every minute, installed only by `vtc install --auto-resume` like the
+ * macOS launchd agent (spine §5 reading 59).
  * `systemctl` is never run for real here: a recorder stands in for it.
  */
 import { existsSync, readFileSync } from "node:fs";
@@ -102,7 +103,7 @@ describe("vtc install on Linux", () => {
       factories: { codex: () => adapter },
     });
 
-  it("installs and enables the systemd timer with the host and on --auto-resume, and removes it", async () => {
+  it("installs and enables the systemd timer only on --auto-resume, and removes it", async () => {
     const home = tempDir();
     const { calls, exec } = recorder();
     const host: TimerHost = { home, uid: 1000, exec, configHome: null };
@@ -111,7 +112,13 @@ describe("vtc install on Linux", () => {
     const cmd = createInstallCommand(deps(host));
     const dir = join(home, ".config/systemd/user");
 
+    // the host alone installs no timer (spine §5 reading 59): it says how to get one
     expect(await cmd.run(["codex"], ctx)).toBe(0);
+    expect(existsSync(join(dir, SYSTEMD_TIMER))).toBe(false);
+    expect(calls).toEqual([]);
+    expect(out.join("\n")).toMatch(/run vtc install --auto-resume to install the systemd timer/);
+
+    expect(await cmd.run(["codex", "--auto-resume"], ctx)).toBe(0);
     const service = readFileSync(join(dir, SYSTEMD_SERVICE), "utf8");
     expect(service).toContain('ExecStart="/opt/vtc" "engine" "--wake-due"');
     expect(service).toContain(`Environment="VTC_HOME=${vtcHome}"`);
@@ -146,26 +153,28 @@ describe("vtc install on Linux", () => {
     const host: TimerHost = { home, uid: 1000, exec, configHome: join(home, "cfg") };
     const { ctx, out, err } = capture(initRepo(), tempHome());
     const cmd = createInstallCommand(deps(host));
-    // implied by `vtc install <host>`: the plugin is installed, the timer is reported as missing
-    expect(await cmd.run(["codex"], ctx)).toBe(0);
+    // asked for with the host: the plugin is installed, the timer failure fails the command
+    expect(await cmd.run(["codex", "--auto-resume"], ctx)).toBe(1);
     expect(out.join("\n")).toMatch(/Installed the VTC plugin for codex/);
     expect(err.join("\n")).toMatch(
       /auto-resume timer was not installed: systemctl --user daemon-reload failed: Failed to connect to bus.*vtc install --auto-resume/,
     );
     // nothing half-installed is left behind
     expect(existsSync(join(home, "cfg/systemd/user", SYSTEMD_TIMER))).toBe(false);
-    // asked for explicitly: a failure
+    // asked for alone: a failure too
     expect(await cmd.run(["--auto-resume"], ctx)).toBe(1);
     expect(err.at(-1)).toMatch(/Failed to connect to bus/);
   });
 
-  it("has no timer on Windows yet: a note with the host, an error when asked for", async () => {
+  it("has no timer on Windows in v1 (D-aj): a note with the host, an error when asked for", async () => {
     const { exec, calls } = recorder();
     const host: TimerHost = { home: tempDir(), uid: 0, exec, configHome: null };
     const { ctx, out } = capture(initRepo(), tempHome());
     const cmd = createInstallCommand(deps(host, "win32"));
     expect(await cmd.run(["codex"], ctx)).toBe(0);
-    expect(out.join("\n")).toMatch(/Auto-resume has no timer on this platform yet/);
+    expect(out.join("\n")).toMatch(
+      /no auto-resume timer on this platform in v1: a run parked on a usage limit resumes when its engine next runs/,
+    );
     expect(await cmd.run(["--auto-resume"], ctx)).toBe(1);
     expect(await cmd.run(["--no-auto-resume"], ctx)).toBe(0);
     expect(calls).toEqual([]);

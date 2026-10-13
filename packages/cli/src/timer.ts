@@ -1,8 +1,9 @@
 /**
  * The OS timer behind auto-resume (§6.9 step 4, AD-6 rule 4), per platform: a launchd agent on
  * macOS (`launchd.ts`), a systemd user timer on Linux (`systemd.ts`). Both run
- * `vtc engine --wake-due` every minute; `vtc install` installs and removes them, `vtc doctor`
- * checks them. Windows has no timer yet: there a parked run resumes when its engine is running.
+ * `vtc engine --wake-due` every minute; only `vtc install --auto-resume` installs them (spine §5
+ * reading 59), `--no-auto-resume` removes them, `vtc doctor` checks them. Windows has no timer in
+ * v1 (D-aj, reading 56): there a parked run resumes when its engine next runs.
  */
 import { homedir } from "node:os";
 import { isAbsolute, join } from "node:path";
