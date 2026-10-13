@@ -103,13 +103,17 @@ const has = (root: string, rel: string): boolean => existsSync(join(root, rel));
 
 type NodePm = "pnpm" | "npm" | "yarn" | "bun";
 
-const nodePm = (root: string): NodePm | null => {
+/** The package manager a Node lockfile names, or null when the repo has no Node lockfile. */
+const nodeLockfilePm = (root: string): NodePm | null => {
   if (has(root, "pnpm-lock.yaml")) return "pnpm";
   if (has(root, "bun.lock") || has(root, "bun.lockb")) return "bun";
   if (has(root, "yarn.lock")) return "yarn";
-  if (has(root, "package-lock.json")) return "npm";
-  return has(root, "package.json") ? "npm" : null;
+  if (has(root, "package-lock.json") || has(root, "npm-shrinkwrap.json")) return "npm";
+  return null;
 };
+
+const nodePm = (root: string): NodePm | null =>
+  nodeLockfilePm(root) ?? (has(root, "package.json") ? "npm" : null);
 
 const NODE_INSTALL: Readonly<Record<NodePm, string[]>> = {
   pnpm: ["pnpm", "install", "--frozen-lockfile"],
@@ -267,7 +271,9 @@ const fromDevcontainer = (root: string): Candidate[] => {
 
 const fromLockfiles = (root: string): Candidate[] => {
   const out: Candidate[] = [];
-  const pm = has(root, "package.json") ? nodePm(root) : null;
+  // Only a lockfile proposes a frozen install: `npm ci` (and the other frozen installs) refuse
+  // to run without one, so a package.json alone proposes no install gate (a note says so).
+  const pm = has(root, "package.json") ? nodeLockfilePm(root) : null;
   if (pm !== null)
     out.push({ slot: "install", gate: gateFor("install", NODE_INSTALL[pm]), source: "lockfile" });
   if (has(root, "uv.lock"))
@@ -644,6 +650,10 @@ export const detectToolchain = (root: string, options: DetectOptions): Detection
     if (c === undefined) continue;
     gates.push(withReport(root, c));
   }
+  if (!chosen.has("install") && has(root, "package.json") && nodeLockfilePm(root) === null)
+    notes.push(
+      "package.json has no lockfile: no install gate proposed (a frozen install such as npm ci needs one); commit a lockfile or add an install gate to .vtc/gates.yml",
+    );
   if (!chosen.has("test"))
     notes.push("no test command found: L2 has no gate; add one to .vtc/gates.yml");
   if (gates.some((g) => g.layer === "L2" && g.report === undefined)) {

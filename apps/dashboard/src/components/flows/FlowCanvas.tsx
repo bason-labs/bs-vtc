@@ -121,23 +121,18 @@ export function FlowCanvas({ graph, selected, onSelect, label }: FlowCanvasProps
       )?.id ?? null,
     [flow],
   );
-  const nodes: Node<FlowNodeData & { onSelect: () => void }, "step">[] = useMemo(
+  const nodes: Node<FlowNodeData, "step">[] = useMemo(
     () =>
       flow.nodes.map((n) => ({
         id: n.id,
         type: "step" as const,
         position: n.position,
-        data: {
-          ...n.data,
-          onSelect: () => {
-            onSelect(n.id);
-          },
-        },
+        data: n.data,
         selected: n.id === selected,
         initialWidth: n.width,
         initialHeight: n.height,
       })),
-    [flow, selected, onSelect],
+    [flow, selected],
   );
   const edges: Edge<FlowEdgeData>[] = useMemo(
     () =>
@@ -179,6 +174,12 @@ export function FlowCanvas({ graph, selected, onSelect, label }: FlowCanvasProps
           onMoveStart={(event) => {
             // A pan or zoom by the viewer (programmatic moves have no event) stops following.
             if (event) following.current = false;
+          }}
+          // The click handler is what makes React Flow give node wrappers `pointer-events: all`;
+          // without it (nodes neither draggable nor selectable) mouse clicks fall through to the
+          // pane. Enter on the focused node card bubbles the same click.
+          onNodeClick={(_, node) => {
+            onSelect(node.id);
           }}
           nodesDraggable={false}
           nodesConnectable={false}

@@ -86,9 +86,22 @@ const windowModel = (
   now: number,
   options: TimeFormatOptions,
 ): UsageWindowModel => {
+  const resets = window?.resets_at ?? null;
+  if (resets !== null && Date.parse(resets) <= now) {
+    // The window has reset since this reading, so its used % is no longer known (§17, D15:
+    // missing data is "unknown"); showing the old reading would call a reset host blocked.
+    return {
+      key,
+      title,
+      usedPct: null,
+      usedText: "unknown",
+      remainingText: "reset since last reading",
+      resetText: `reset at ${formatLocalTime(resets, now, options)}`,
+      tone: "unknown",
+    };
+  }
   const used = window?.used_pct ?? null;
   const left = window === undefined ? null : remainingPct(window);
-  const resets = window?.resets_at ?? null;
   return {
     key,
     title,

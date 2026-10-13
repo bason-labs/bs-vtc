@@ -114,7 +114,7 @@ export function StepNodeCard({
   );
 }
 
-export type StepFlowNode = Node<FlowNodeData & { onSelect: () => void }, "step">;
+export type StepFlowNode = Node<FlowNodeData, "step">;
 
 /** React Flow wrapper: in/out handles, and the bottom handles loop edges use. */
 export function StepNode({ data, selected }: NodeProps<StepFlowNode>) {
@@ -126,7 +126,8 @@ export function StepNode({ data, selected }: NodeProps<StepFlowNode>) {
         position={Position.Left}
         className="!size-2 !min-h-0 !min-w-0 !opacity-0"
       />
-      <StepNodeCard data={data} selected={selected} onSelect={data.onSelect} />
+      {/* No onSelect: the canvas's onNodeClick handles the click (mouse, or Enter on the card). */}
+      <StepNodeCard data={data} selected={selected} />
       <Handle
         type="source"
         position={Position.Right}

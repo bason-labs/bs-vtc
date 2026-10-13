@@ -170,6 +170,16 @@ describe("detectToolchain (§7.1 sources in order)", () => {
     expect(goDetection.notes.join("\n")).toMatch(/no JUnit report/);
   });
 
+  it("proposes no frozen install for a package.json without a lockfile", () => {
+    const repo = tempDir();
+    writeFile(repo, "package.json", JSON.stringify({ scripts: { test: "node --test" } }));
+    const detection = detectToolchain(repo, { scanners: [] });
+    expect(detection.gates.map((g) => g.id)).not.toContain("install");
+    expect(detection.gates.flatMap((g) => g.command)).not.toContain("ci");
+    expect(detection.sources).toEqual(["task_runner"]);
+    expect(detection.notes.join("\n")).toMatch(/no lockfile: no install gate proposed/);
+  });
+
   it("keeps the gates of an existing gates.yml (source 1)", () => {
     const existing = parseGatesConfig(config([testsGate]));
     const detection = detectToolchain(nodeRepo(), { existing, scanners: SCANNERS });

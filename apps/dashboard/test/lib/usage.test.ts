@@ -45,6 +45,26 @@ describe("usagePanelModel", () => {
     expect(codex.updated).toEqual({ text: "never updated", tone: "never" });
   });
 
+  it("shows a window whose reset has passed as unknown, not as the stale reading", () => {
+    const report = golden();
+    const later = Date.parse("2026-10-13T23:02:00.000Z");
+    const claude = report.hosts.find((h) => h.host === "claude-code")!;
+    const five = claude.windows.find((w) => w.kind === "five_hour")!;
+    const hosts = report.hosts.map((h) =>
+      h.host === "claude-code"
+        ? { ...h, windows: h.windows.map((w) => (w === five ? { ...w, used_pct: 97 } : w)) }
+        : h,
+    );
+    const [card] = usagePanelModel({ ...report, hosts }, later, opts).cards;
+    expect(card!.windows[0]).toMatchObject({
+      usedPct: null,
+      usedText: "unknown",
+      remainingText: "reset since last reading",
+      resetText: "reset at 13:00",
+      tone: "unknown",
+    });
+  });
+
   it("adds a card for a host the report leaves out", () => {
     const model = usagePanelModel(
       { hosts: [], interrupted_tasks: [], auto_resume_at: null },

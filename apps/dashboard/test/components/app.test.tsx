@@ -1,9 +1,15 @@
 import userEvent from "@testing-library/user-event";
-import { describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { act, eventLines, openStream, renderApp, screen, within } from "./render";
+
+afterEach(() => {
+  vi.useRealTimers();
+});
 
 describe("Flow Studio against the golden run", () => {
   it("lists runs and shows the usage panel with unknown for a host without data", async () => {
+    // The golden usage reading resets at 13:00Z; after that it reads as unknown.
+    vi.useFakeTimers({ toFake: ["Date"], now: Date.parse("2026-10-13T09:41:00.000Z") });
     renderApp("/");
     const runs = await screen.findByRole("list", { name: "Runs" });
     expect(within(runs).getByRole("link", { name: /golden-1/ })).toHaveAttribute(
@@ -46,6 +52,30 @@ describe("Flow Studio against the golden run", () => {
     await user.click(within(drawer).getByRole("link", { name: /Open pipeline/ }));
     expect(window.location.pathname).toBe("/task/");
     expect(await screen.findByRole("heading", { name: "T-2 Reset endpoint" })).toBeInTheDocument();
+  });
+
+  it("opens a node's drawer with a mouse click on the canvas itself", async () => {
+    // React Flow sets `pointer-events: none` on a node wrapper that is neither selectable,
+    // draggable nor clickable; user-event refuses a click such an element would not receive.
+    const user = userEvent.setup();
+    renderApp("/run/?run=golden-1&zoom=tasks");
+    const canvas = await screen.findByTestId("flow-canvas");
+    const node = await within(canvas).findByTestId("node-t-2");
+    const wrapper = node.closest(".react-flow__node") as HTMLElement;
+    expect(wrapper.style.pointerEvents).toBe("all");
+    await user.click(node);
+    expect(await screen.findByTestId("run-node-drawer")).toBeInTheDocument();
+    expect(window.location.search).toContain("node=t-2");
+  });
+
+  it("opens a canvas node's drawer with Enter on the focused node", async () => {
+    const user = userEvent.setup();
+    renderApp("/run/?run=golden-1&zoom=tasks");
+    const canvas = await screen.findByTestId("flow-canvas");
+    within(canvas).getByTestId("node-t-2").focus();
+    await user.keyboard("{Enter}");
+    expect(await screen.findByTestId("run-node-drawer")).toBeInTheDocument();
+    expect(window.location.search).toContain("node=t-2");
   });
 
   it("drills into a pipeline node: round n/cap, findings, evidence and transcript location", async () => {
