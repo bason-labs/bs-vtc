@@ -83,7 +83,10 @@ export interface Kernel {
   readonly deps: EngineCoreDeps;
   now(): Date;
   config(): ProjectConfig;
+  /** The active run's frozen `gates.yml` (committed at its start commit, reading 46f). */
   gatesConfig(): GatesConfig | null;
+  /** SHA-256 of that file's bytes: every `GateRunRequest.gates_config_hash` (reading 46b). */
+  gatesConfigHash(): string | null;
   /** Known secret values (the repo's `.env` values) for redaction (AD-18). */
   secrets(): readonly string[];
   /** Latest usage per host (§6.9). */

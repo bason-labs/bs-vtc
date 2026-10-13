@@ -5,7 +5,10 @@ import { afterEach, describe, expect, it } from "vitest";
 import { GatesConfigSchema, ProjectConfigSchema, type Task } from "@vtc/shared";
 import {
   ConfigError,
+  committedGatesConfig,
+  gatesConfigHash,
   loadGatesConfig,
+  parseGatesConfig,
   loadProjectConfig,
   parseYaml,
   pipelineConfigHash,
@@ -20,62 +23,101 @@ import { DEFAULT_GATES_YML } from "../helpers/engine-harness.js";
 
 afterEach(cleanupDirs);
 
-describe("gates.yml as vtc calibrate writes it (block YAML of a YAML library)", () => {
-  it("reads the calibrated fixture into exactly the config it describes", () => {
-    const repo = initRepo({
-      ".vtc/gates.yml": readFileSync(
-        fileURLToPath(new URL("../fixtures/gates-calibrated.yml", import.meta.url)),
+const CALIBRATED = readFileSync(
+  fileURLToPath(new URL("../fixtures/gates-calibrated.yml", import.meta.url)),
+  "utf8",
+);
+
+describe("gates.yml as vtc calibrate writes it (the gate runner's real calibrate output)", () => {
+  it("is the gate runner's fixture, byte for byte", () => {
+    expect(CALIBRATED).toBe(
+      readFileSync(
+        fileURLToPath(new URL("../gates/fixtures/gates-calibrated.yml", import.meta.url)),
         "utf8",
       ),
-    });
-    const config = loadGatesConfig(repo);
-    expect(config).toEqual(
-      GatesConfigSchema.parse({
-        version: 1,
-        baseline: {
-          revision: "4f1c2a9e8b7d6c5f4e3d2c1b0a9f8e7d6c5b4a39",
-          calibrated_at: "2026-10-13T08:00:00.000Z",
-          confirmed: true,
-          flaky_tests: ["tests/api.test.ts > reset > retries: twice", "tests/ui.test.ts"],
-        },
-        sources: ["gates_yml", "task_runner", "ci"],
-        tests: {
-          acceptance_globs: ["tests/acceptance/**", "**/*.acceptance.test.ts"],
-          protected_configs: ["vitest.config.ts", "eslint.config.js"],
-        },
-        gates: [
-          {
-            id: "install",
-            layer: "L0",
-            command: ["pnpm", "install", "--frozen-lockfile"],
-            phase: "install",
-            timeout_s: 600,
-          },
-          { id: "typecheck", layer: "L0", command: ["pnpm", "typecheck"] },
-          {
-            id: "tests",
-            layer: "L2",
-            command: [
-              "pnpm",
-              "vitest",
-              "run",
-              "--reporter=junit",
-              "--outputFile=.vtc/state/gates/junit #1.xml",
-            ],
-            cwd: "packages/app",
-            timeout_s: 1800,
-            report: { format: "junit", path: ".vtc/state/gates/junit.xml" },
-          },
-          {
-            id: "checkov",
-            layer: "L4",
-            command: ["checkov", "-d", "infra"],
-            when_changed: ["*.tf", "infra/**"],
-          },
-          { id: "arch", layer: "L6", command: ["pnpm", "depcruise"], blocking: false },
-        ],
-      }),
     );
+  });
+  it("reads the calibrated fixture into the config it describes", () => {
+    const repo = initRepo({ ".vtc/gates.yml": CALIBRATED });
+    const config = loadGatesConfig(repo);
+    expect(config).toEqual(GatesConfigSchema.parse(parseYaml(CALIBRATED)));
+    expect(config?.baseline).toMatchObject({ confirmed: true, flaky_tests: [] });
+    expect(config?.sources).toEqual(["agents_md", "task_runner", "ci"]);
+    expect(config?.tests.acceptance_globs).toEqual(["tests/acceptance/**"]);
+    // every lint, test and scanner config is protected
+    expect(config?.tests.protected_configs).toEqual(
+      expect.arrayContaining([
+        "**/eslint.config.*",
+        "**/vitest.config.*",
+        "**/tsconfig*.json",
+        "**/.gitleaks.toml",
+      ]),
+    );
+    expect(config?.gates.map((g) => [g.id, g.layer])).toEqual([
+      ["install", "L0"],
+      ["build", "L0"],
+      ["typecheck", "L0"],
+      ["lint", "L1"],
+      ["test", "L2"],
+      ["arch", "L6"],
+      ["secrets", "L4"],
+      ["sast", "L4"],
+      ["dependencies", "L4"],
+      ["iac", "L4"],
+    ]);
+    expect(config?.gates.find((g) => g.id === "install")).toMatchObject({
+      phase: "install",
+      timeout_s: 1200,
+    });
+    expect(config?.gates.find((g) => g.id === "test")?.report).toEqual({
+      format: "junit",
+      path: ".vtc/state/gates/junit.xml",
+    });
+    expect(config?.gates.find((g) => g.id === "iac")?.when_changed).toContain("**/*.tf");
+  });
+  it("reads the same config from the commit (reading 46f) and hashes its bytes", async () => {
+    const repo = initRepo({ ".vtc/gates.yml": CALIBRATED });
+    const committed = await committedGatesConfig(
+      createGitOps({ repoRoot: repo }),
+      git(repo, "rev-parse", "HEAD"),
+    );
+    expect(committed?.config).toEqual(loadGatesConfig(repo));
+    expect(committed?.sha256).toBe(gatesConfigHash(CALIBRATED));
+    expect(
+      await committedGatesConfig(
+        createGitOps({ repoRoot: initRepo() }),
+        git(repo, "rev-parse", "HEAD"),
+      ),
+    ).toBeNull();
+  });
+  it("keeps quoted values with '#', ':' and spaces (block YAML of a YAML library)", () => {
+    const config = parseGatesConfig(
+      [
+        "version: 1",
+        "baseline:",
+        "  revision: 4f1c2a9e8b7d6c5f4e3d2c1b0a9f8e7d6c5b4a39",
+        "  calibrated_at: 2026-10-13T08:00:00.000Z",
+        "  confirmed: true",
+        "  flaky_tests:",
+        '    - "tests/api.test.ts > reset > retries: twice"',
+        "tests:",
+        "  acceptance_globs:",
+        '    - "**/*.acceptance.test.ts"',
+        "gates:",
+        "  - id: tests",
+        "    layer: L2",
+        "    command:",
+        "      - pnpm",
+        '      - "--outputFile=.vtc/state/gates/junit #1.xml"',
+        "",
+      ].join("\n"),
+    );
+    expect(config.baseline.flaky_tests).toEqual(["tests/api.test.ts > reset > retries: twice"]);
+    expect(config.tests.acceptance_globs).toEqual(["**/*.acceptance.test.ts"]);
+    expect(config.gates[0]?.command).toEqual([
+      "pnpm",
+      "--outputFile=.vtc/state/gates/junit #1.xml",
+    ]);
   });
 });
 

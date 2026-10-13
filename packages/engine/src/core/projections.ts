@@ -9,12 +9,14 @@ import { join } from "node:path";
 import {
   EvidenceBundleSchema,
   evidenceBundlePath,
+  finalReviewStepsCovered,
   parsePersisted,
   redactJson,
   redactSecrets,
   renderTaskPack,
   runRequestPath,
   taskPackPath,
+  TaskPackSchema,
   TraceabilityReportSchema,
   type EvidenceBundle,
   type Finding,
@@ -24,12 +26,53 @@ import {
   type TraceabilityReport,
 } from "@vtc/shared";
 import { writeRepoFile } from "../git/index.js";
+import { taskPackJsonPath } from "./dispatch-scope.js";
 import type { RunState } from "./state.js";
 import { planFilePath } from "./views.js";
 import { toYaml } from "./yaml.js";
 
-/** The §6.7a steps this engine's Final Review runs (step 1: full gates on the integrated branch). */
-export const FINAL_REVIEW_STEPS_RUN: readonly number[] = [1];
+/** What each §6.7a step is, for the PR note on what Final Review covered. */
+const FINAL_REVIEW_STEPS: Readonly<Record<number, string>> = {
+  1: "full gates on the integrated branch",
+  2: "the full acceptance run with every hidden test",
+  3: "a fresh-eyes review of the whole feature",
+  4: "a security review of the whole feature",
+  5: "a design and accessibility review",
+  6: "architecture conformance",
+  7: "release readiness",
+};
+
+/**
+ * The §6.7a steps the feature's latest Final Review gate run covered (`final_review.steps_run`,
+ * spine §5 reading 46e): the shared `finalReviewStepsCovered` over the engine's own request shape
+ * (`finalReviewRequest`: full scope, every layer, hidden tests), the report and its traceability.
+ * Empty when no Final Review gate run is logged.
+ */
+export const finalReviewStepsRun = (
+  repoRoot: string,
+  state: RunState,
+  featureId: string,
+): number[] => {
+  const report = state.gateReports
+    .map((r) => r.report)
+    .filter((r) => r.reason === "final_review" && r.feature === featureId)
+    .at(-1);
+  if (report === undefined) return [];
+  return finalReviewStepsCovered(
+    { reason: report.reason, scope: report.scope, layers: undefined, include_hidden: true },
+    report,
+    report.traceability === undefined ? null : readTraceabilityFile(repoRoot, report.traceability),
+  );
+};
+
+/** The note on what Final Review covered, stated wherever its verdict is shown (the PR body). */
+export const finalReviewScopeNote = (steps: readonly number[]): string => {
+  const ran = steps.map((n) => `${String(n)} (${FINAL_REVIEW_STEPS[n] ?? "?"})`);
+  const missing = [1, 2, 3, 4, 5, 6, 7].filter((n) => !steps.includes(n));
+  const head = `Final Review ran ${ran.length === 0 ? "no step" : `step${ran.length > 1 ? "s" : ""} ${ran.join(", ")}`} of §6.7a`;
+  if (missing.length === 0) return `${head}.`;
+  return `${head}; step${missing.length > 1 ? "s" : ""} ${missing.join(", ")} did not run in this VTC version, so review the PR with that in mind.`;
+};
 
 /** Agents write in the repo too: a planted symlink is refused, never followed (AD-18). */
 const write = (repoRoot: string, path: string, content: string): void => {
@@ -99,9 +142,17 @@ export const writePlanFile = (
   return path;
 };
 
-/** Renders and writes one task pack (gitignored, AD-14 rule 5). */
+/**
+ * Renders and writes one task pack (gitignored, AD-14 rule 5), plus the same pack as `TaskPack`
+ * JSON next to it (`taskPackJsonPath`): the structured write scope `vtc hook` reads (reading 67).
+ */
 export const writeTaskPack = (repoRoot: string, pack: TaskPackInput): string => {
   const path = taskPackPath(pack.action_id);
+  write(
+    repoRoot,
+    taskPackJsonPath(pack.action_id),
+    `${JSON.stringify(TaskPackSchema.parse(pack))}\n`,
+  );
   write(repoRoot, path, renderTaskPack(pack));
   return path;
 };
@@ -148,6 +199,19 @@ const countFindings = (findings: readonly Finding[]): EvidenceBundle["findings"]
  * The traceability report the Gate Runner wrote for `id`, or, when it wrote none, an honest one
  * built from the covered requirements with no tests (every REQ is then a gap).
  */
+/** A traceability report the Gate Runner wrote, or `null` when it is missing or invalid. */
+const readTraceabilityFile = (repoRoot: string, path: string): TraceabilityReport | null => {
+  try {
+    const parsed = parsePersisted(
+      TraceabilityReportSchema,
+      JSON.parse(readFileSync(join(repoRoot, path), "utf8")),
+    );
+    return parsed.success ? parsed.data : null;
+  } catch {
+    return null;
+  }
+};
+
 export const readTraceability = (
   repoRoot: string,
   state: RunState,
@@ -161,17 +225,8 @@ export const readTraceability = (
     .map((r) => r.report.traceability)
     .filter((p): p is string => p !== undefined)
     .at(-1);
-  if (report !== undefined) {
-    try {
-      const parsed = parsePersisted(
-        TraceabilityReportSchema,
-        JSON.parse(readFileSync(join(repoRoot, report), "utf8")),
-      );
-      if (parsed.success) return parsed.data;
-    } catch {
-      // fall through to the gap report
-    }
-  }
+  const read = report === undefined ? null : readTraceabilityFile(repoRoot, report);
+  if (read !== null) return read;
   return TraceabilityReportSchema.parse({
     run: state.id,
     ...scope,
@@ -270,8 +325,11 @@ export const writeFeatureEvidenceBundle = (
     ),
     findings: countFindings(findings),
     deferred: findings.filter((f) => f.status === "deferred").map((f) => f.fingerprint),
-    // This engine's Final Review runs §6.7a step 1 only (`FINAL_REVIEW_SCOPE_NOTE`).
-    final_review: { verdict, rounds: feature.round, steps_run: FINAL_REVIEW_STEPS_RUN },
+    final_review: {
+      verdict,
+      rounds: feature.round,
+      steps_run: finalReviewStepsRun(repoRoot, state, featureId),
+    },
     spend: spendOf(tasks.flatMap((t) => runsOf(t.id))),
     written_at: now.toISOString(),
   });

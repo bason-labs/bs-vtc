@@ -88,6 +88,8 @@ export interface FakeGates extends GateRunner {
   hold(): () => void;
   /** Verdicts to return next for a reason (queue); default: pass, and fail for base_fail_check. */
   queue(reason: GateRunRequest["reason"], ...verdicts: Verdict[]): void;
+  /** Rewrites every report before it is returned (results, traceability); `null` stops it. */
+  reshape(fn: ((request: GateRunRequest, report: GateReport) => GateReport) | null): void;
 }
 
 const report = (request: GateRunRequest, verdict: Verdict, now: Date): GateReport => {
@@ -133,8 +135,12 @@ export const fakeGates = (repoRoot: string, now: () => Date): FakeGates => {
   const queues = new Map<string, Verdict[]>();
   const requests: GateRunRequest[] = [];
   let held: Promise<void> | null = null;
+  let reshaper: ((request: GateRunRequest, report: GateReport) => GateReport) | null = null;
   return {
     requests,
+    reshape: (fn) => {
+      reshaper = fn;
+    },
     hold: () => {
       let release: () => void = () => undefined;
       held = new Promise((resolve) => {
@@ -153,7 +159,8 @@ export const fakeGates = (repoRoot: string, now: () => Date): FakeGates => {
       if (held !== null) await held;
       const queued = queues.get(request.reason)?.shift();
       const verdict = queued ?? (request.reason === "base_fail_check" ? "fail" : "pass");
-      return report(request, verdict, now());
+      const out = report(request, verdict, now());
+      return reshaper === null ? out : reshaper(request, out);
     },
     checkWriteScope: async (request): Promise<WriteScopeReport> => {
       const violations: WriteScopeReport["violations"] = [];

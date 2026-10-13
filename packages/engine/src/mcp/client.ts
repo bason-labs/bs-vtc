@@ -85,6 +85,64 @@ export const handshake = (
     socket.on("data", onData);
   });
 
+/** How long {@link engineSocketAnswers} waits for a welcome. */
+export const SOCKET_PROBE_TIMEOUT_MS = 3_000;
+
+/**
+ * True when an engine answers the hello on `path` within the timeout: any well-formed welcome,
+ * a refusal (`ok: false`, another contracts MAJOR) included, means the holder lives. A refused
+ * connection, a missing path, a close, a malformed line or silence is `false`. Used by the lock's
+ * stale check (AD-12 rule 1, spine §5 reading 67); never throws.
+ */
+export const engineSocketAnswers = (
+  path: string,
+  options: { readonly timeoutMs?: number; readonly contractsVersion?: string } = {},
+): Promise<boolean> =>
+  new Promise((resolve) => {
+    let settled = false;
+    let buffer = Buffer.alloc(0);
+    const socket = connect(path);
+    const done = (answer: boolean): void => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      socket.destroy();
+      resolve(answer);
+    };
+    const timer = setTimeout(() => {
+      done(false);
+    }, options.timeoutMs ?? SOCKET_PROBE_TIMEOUT_MS);
+    socket.on("error", () => {
+      done(false);
+    });
+    socket.on("close", () => {
+      done(false);
+    });
+    socket.once("connect", () => {
+      const hello: EngineSocketHello = {
+        v: 1,
+        client: "cli",
+        host: null,
+        contracts_version: options.contractsVersion ?? CONTRACTS_VERSION,
+      };
+      socket.write(encodeSocketLine(hello));
+    });
+    socket.on("data", (chunk: Buffer) => {
+      buffer = Buffer.concat([buffer, chunk]);
+      const at = buffer.indexOf(0x0a);
+      if (at < 0) {
+        if (buffer.length > ENGINE_SOCKET.maxLineBytes) done(false);
+        return;
+      }
+      try {
+        const line: unknown = JSON.parse(buffer.subarray(0, at).toString("utf8"));
+        done(EngineSocketWelcomeSchema.safeParse(line).success);
+      } catch {
+        done(false);
+      }
+    });
+  });
+
 /**
  * The cli's typed client (`EngineClient`): `call(tool, input)` with per-tool types, on the SDK's
  * client. `bridge` connects as a host's bridge session instead (tests and tooling that act as a

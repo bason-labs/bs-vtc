@@ -13,6 +13,7 @@ import {
   checkResultAgainstContract,
   escalationFromQuestion,
   HIDDEN_TESTS,
+  SESSION_DEFAULT_MODEL,
   resolveRoleMode,
   type ArtifactRef,
   type Finding,
@@ -31,7 +32,13 @@ import { budgetState, sharesExceeded, taskBudgetFor, usd } from "./budget.js";
 import { DEFAULT_ACCEPTANCE_GLOBS } from "./config.js";
 import { resolves, unresolved } from "./evidence.js";
 import { matchesAny } from "./globs.js";
-import { adoptGateOutput, protectedFiles, startBaseCheck, startRoundGates } from "./jobs.js";
+import {
+  adoptGateOutput,
+  baselineGates,
+  protectedFiles,
+  startBaseCheck,
+  startRoundGates,
+} from "./jobs.js";
 import type { Kernel, RunHandle } from "./kernel.js";
 import { recordLimit } from "./limits.js";
 import { openTaskEscalation, parkTask, setTaskStatus } from "./parking.js";
@@ -117,6 +124,21 @@ const bytesSha = (bytes: Uint8Array): string => createHash("sha256").update(byte
 // ---------------------------------------------------------------- bookkeeping
 
 /** Records the spend of a run (§11): task, feature and run budgets. Unpriced spend stays unknown. */
+/**
+ * The spend of a run as the engine counts it (§11). A run dispatched on the host session's model
+ * (`SESSION_DEFAULT_MODEL`, D-ae) is priced only when the host names the model that ran: an
+ * unknown model stays unpriced (`null`), never a guess.
+ */
+export const pricedCost = (
+  run: Pick<RoleRunRecord, "model">,
+  reportedModel: string | null | undefined,
+  cost: number | null | undefined,
+): number | null => {
+  if (cost === undefined || cost === null) return null;
+  const unknown = run.model === SESSION_DEFAULT_MODEL && (reportedModel ?? null) === null;
+  return unknown ? null : cost;
+};
+
 const recordSpend = (k: Kernel, h: RunHandle, run: RoleRunRecord, cost: number | null): void => {
   if (cost === null || cost === 0) return;
   const task = run.task === undefined ? undefined : h.state.tasks.get(run.task);
@@ -248,7 +270,7 @@ const emitSubmitted = (
     host: run.host,
     model: usage?.model ?? run.model,
     tokens: usage?.tokens ?? null,
-    cost_usd: usage?.cost_usd ?? null,
+    cost_usd: pricedCost(run, usage?.model, usage?.cost_usd),
     data: {
       action_id: run.action_id,
       exit: result.exit,
@@ -664,12 +686,21 @@ const outOfScopeGuards = async (
       `the fault's evidence does not resolve on the base (out_of_scope claim): ${fault.evidence.type} ${fault.evidence.ref}`,
     ];
   }
+  let gatesHash: string;
+  try {
+    gatesHash = (await baselineGates(k, base)).sha256;
+  } catch (error) {
+    return [
+      `the fault cannot be reproduced: ${error instanceof Error ? error.message : String(error)}`,
+    ];
+  }
   const checkout = await k.deps.git.createCleanCheckout(base);
   try {
     const report = await k.deps.gateRunner.run({
       run: h.state.id,
       task: task.id,
       reason: "fault_repro",
+      gates_config_hash: gatesHash,
       scope: "affected",
       base,
       head: base,
@@ -972,7 +1003,7 @@ const handleFailure = (
 ): void => {
   if (outcome.kind === "limit") {
     recordLimit(k, h, run, outcome);
-    recordSpend(k, h, run, outcome.cost_usd);
+    recordSpend(k, h, run, pricedCost(run, outcome.model, outcome.cost_usd));
     return;
   }
   k.emit(h, {
@@ -996,7 +1027,7 @@ const handleFailure = (
     });
     return;
   }
-  recordSpend(k, h, run, outcome.cost_usd);
+  recordSpend(k, h, run, pricedCost(run, null, outcome.cost_usd));
   stepFailed(k, h, run);
 };
 
@@ -1085,7 +1116,7 @@ export const handleSubmit = async (
       data: { session_ref: input.session_ref },
     });
   }
-  recordSpend(k, h, run, input.usage?.cost_usd ?? null);
+  recordSpend(k, h, run, pricedCost(run, input.usage?.model, input.usage?.cost_usd));
   await outcome.after();
   checkBudget(k, h, run.task);
   return { accepted: true };

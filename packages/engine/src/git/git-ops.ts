@@ -6,7 +6,7 @@ import { randomBytes } from "node:crypto";
 import { existsSync, mkdirSync, rmSync } from "node:fs";
 import { join } from "node:path";
 import type { CreateGitOps, GitChangedFile, GitOps, GitSha, RelPath } from "@vtc/shared";
-import { gitText, runGit, withRepoLock } from "./exec.js";
+import { runGit, withRepoLock } from "./exec.js";
 
 /** Clean verification checkouts live here (gitignored, §6.3 step 5). */
 export const CHECKOUTS_DIR = ".vtc/state/checkouts";
@@ -66,10 +66,9 @@ export const createGitOps: CreateGitOps = ({ repoRoot }): GitOps => ({
   readFileAtCommit: async (commit: GitSha, path: RelPath) => {
     assertSha(commit);
     const spec = `${commit}:${path}`;
-    const exists = await runGit(repoRoot, ["cat-file", "-e", spec], { allowFailure: true });
-    if (exists.code !== 0) return undefined;
-    const type = await gitText(repoRoot, ["cat-file", "-t", spec]);
-    if (type !== "blob") return undefined;
+    // `-t` fails for a missing object, so it also answers "does it exist" (one process less)
+    const type = await runGit(repoRoot, ["cat-file", "-t", spec], { allowFailure: true });
+    if (type.code !== 0 || type.stdout.toString("utf8").trim() !== "blob") return undefined;
     return new Uint8Array((await runGit(repoRoot, ["cat-file", "blob", spec])).stdout);
   },
   createCleanCheckout: (commit: GitSha) => {

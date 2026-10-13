@@ -19,5 +19,12 @@ export {
   type EngineSocketOptions,
   type EngineSocketServer,
 } from "./socket.js";
-export { connectEngineClient, EngineConnectError, handshake, runStdioBridge } from "./client.js";
+export {
+  connectEngineClient,
+  EngineConnectError,
+  engineSocketAnswers,
+  handshake,
+  runStdioBridge,
+  SOCKET_PROBE_TIMEOUT_MS,
+} from "./client.js";
 export { createLineReader, type LineReader } from "./lines.js";
