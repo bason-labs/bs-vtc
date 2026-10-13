@@ -40,6 +40,7 @@ import { openEventLog, type EventDraft } from "./event-log.js";
 import {
   ensureWorkspace,
   setFeatureStatus,
+  startBaseCheck,
   startFinalReview,
   startMergeQueue,
   startRelease,
@@ -61,8 +62,12 @@ import {
   lastBuilt,
   lastSubmitted,
   nextEscalationId,
+  pendingBaseCheck,
   phaseEnteredSeq,
+  roundVerdict,
 } from "./queries.js";
+import { loadResult } from "./results.js";
+import { completedReviews, startTriage } from "./review.js";
 import { activeRun } from "./read-model.js";
 import { loadRuns } from "./run-store.js";
 import { schedule } from "./scheduler.js";
@@ -201,6 +206,7 @@ export class Engine implements Kernel {
       try {
         await job();
       } catch (error) {
+        if (!this.deps.lock.isHeld()) return; // another engine took over: this one stops (AD-12)
         await this.serial(handle, () => {
           this.emit(handle, {
             type: "incident.recorded",
@@ -219,13 +225,13 @@ export class Engine implements Kernel {
       } finally {
         this.jobs.delete(key);
       }
-      if (this.handles.has(handle.state.id)) {
+      if (this.handles.has(handle.state.id) && this.deps.lock.isHeld()) {
         await this.serial(handle, () => {
           this.advance(handle);
           return Promise.resolve();
         });
       }
-    })();
+    })().catch(() => undefined);
     this.jobs.set(key, promise);
   }
 
@@ -351,21 +357,36 @@ export class Engine implements Kernel {
     if (!["build", "integrate", "final_review", "release"].includes(phase)) return false;
     let changed = this.scheduleTasks(handle);
     for (const task of state.tasks.values()) {
+      const gating = this.isRunning(`gates:${task.id}`);
       if (
         task.status === "ready" &&
         task.worktree === undefined &&
         !this.isRunning(`ws:${task.id}`)
-      )
+      ) {
         ensureWorkspace(this, handle, task.id);
-      if (task.status === "verifying" && !this.isRunning(`gates:${task.id}`)) {
+      }
+      if (task.status === "ready" && !gating) {
+        // recovery: QA's tests are in but their base-fail check never concluded (restart, retry)
+        const qa = pendingBaseCheck(state, task.id);
+        const tests =
+          qa === undefined
+            ? undefined
+            : loadResult(this.deps.repoRoot, qa.action_id)?.acceptance_tests;
+        if (qa?.head !== undefined && tests !== undefined) {
+          startBaseCheck(this, handle, task.id, qa.head, tests);
+        }
+      }
+      if (task.status === "verifying" && !gating) {
         const built = lastBuilt(state, task.id);
-        const gated = state.gateReports.some(
-          (r) =>
-            r.report.task === task.id &&
-            r.report.reason === "round" &&
-            r.report.head === built?.head,
-        );
-        if (built?.head !== undefined && !gated) startRoundGates(this, handle, task.id, built.head);
+        const verdict = roundVerdict(state, task.id);
+        if (built?.head !== undefined && verdict === undefined) {
+          startRoundGates(this, handle, task.id, built.head);
+        } else if (
+          verdict?.verdict === "pass" &&
+          completedReviews(this, handle, task.id) !== null
+        ) {
+          startTriage(this, handle, task.id);
+        }
       }
     }
     if ([...state.tasks.values()].some((t) => t.status === "queued") && !state.run.paused)

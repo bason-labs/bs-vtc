@@ -1,5 +1,5 @@
 /** Pure queries over a run's projected state, shared by the engine's modules. */
-import type { Finding, Phase, Task } from "@vtc/shared";
+import type { Finding, GateReport, Phase, Task } from "@vtc/shared";
 import type { RoleRunRecord, RunState } from "./state.js";
 
 export const nextActionId = (state: RunState): string => `a-${String(state.roleRuns.size + 1)}`;
@@ -117,3 +117,40 @@ export const nextNumberedId = (prefix: "T" | "F", used: ReadonlySet<string>): st
 export const planOrder = (state: RunState): Task[] => [...state.tasks.values()];
 
 export const featureOf = (state: RunState, task: Task) => state.features.get(task.feature);
+
+/**
+ * The gate report that concluded the task's current verification: a `round` report for its built
+ * head with a verdict other than `infra_error`, logged after the task last entered `verifying`.
+ */
+export const roundVerdict = (state: RunState, task: string): GateReport | undefined => {
+  const head = lastBuilt(state, task)?.head;
+  const since = statusEnteredSeq(state, task, "verifying") ?? 0;
+  return state.gateReports
+    .filter(
+      (r) =>
+        r.seq > since &&
+        r.report.task === task &&
+        r.report.reason === "round" &&
+        r.report.head === head &&
+        r.report.verdict !== "infra_error",
+    )
+    .at(-1)?.report;
+};
+
+/**
+ * QA's tests waiting for their base-fail check: QA submitted since the task became ready and no
+ * conclusive `base_fail_check` report followed. Returns that run.
+ */
+export const pendingBaseCheck = (state: RunState, task: string): RoleRunRecord | undefined => {
+  const qa = lastQaAuthor(state, task);
+  const since = statusEnteredSeq(state, task, "ready") ?? 0;
+  if (qa === undefined || (qa.closedSeq ?? 0) < since || qa.head === undefined) return undefined;
+  const checked = state.gateReports.some(
+    (r) =>
+      r.seq > (qa.closedSeq ?? 0) &&
+      r.report.task === task &&
+      r.report.reason === "base_fail_check" &&
+      r.report.verdict !== "infra_error",
+  );
+  return checked ? undefined : qa;
+};

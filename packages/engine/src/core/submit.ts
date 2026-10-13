@@ -28,7 +28,7 @@ import {
 } from "@vtc/shared";
 import { budgetState, taskBudgetFor, usd } from "./budget.js";
 import { DEFAULT_ACCEPTANCE_GLOBS } from "./config.js";
-import { resolves, unresolved, type EvidenceContext } from "./evidence.js";
+import { resolves, unresolved } from "./evidence.js";
 import { matchesAny } from "./globs.js";
 import { protectedFiles, startBaseCheck, startRoundGates } from "./jobs.js";
 import type { Kernel, RunHandle } from "./kernel.js";
@@ -44,12 +44,12 @@ import {
   usedFeatureIds,
   usedTaskIds,
 } from "./queries.js";
-import { frozenSpecItems, taskAcceptanceCriteria } from "./read-model.js";
-import { loadResult, saveResult } from "./results.js";
-import { reviewersFor, VISUAL_QA_CALLS } from "./router.js";
+import { frozenSpecItems } from "./read-model.js";
+import { saveResult } from "./results.js";
+import { completedReviews, evidenceContext, isReviewer, startTriage } from "./review.js";
 import { specRequirementIds } from "./spec.js";
 import type { RoleRunRecord } from "./state.js";
-import { findingFromDraft, findingFromVerdict, findingsFromWriteScope } from "./triage.js";
+import { findingFromDraft, findingsFromWriteScope } from "./triage.js";
 import { recordRoundFindings, settleRound } from "./verify.js";
 
 export interface Rejection {
@@ -87,12 +87,6 @@ const PHASE_OF_ROLE: Readonly<Record<string, Phase>> = {
   planner: "plan",
 };
 
-export const isReviewer = (run: Pick<RoleRunRecord, "role" | "mode">): boolean =>
-  run.role === "spec_verifier" ||
-  run.role === "visual_qa" ||
-  (run.role === "qa" && run.mode === "judge") ||
-  (run.role === "security" && run.mode === "verify");
-
 const rejection = (reason: RejectReason, issues: readonly string[]): Rejection => ({
   reason,
   issues: issues.slice(0, 20).map((i) => i.slice(0, 500)),
@@ -107,21 +101,6 @@ const fileSha = (repoRoot: string, path: string): string | undefined => {
   const abs = join(repoRoot, path);
   return existsSync(abs) ? createHash("sha256").update(readFileSync(abs)).digest("hex") : undefined;
 };
-
-const evidenceContext = (k: Kernel, h: RunHandle, head: string | null): EvidenceContext => ({
-  repoRoot: k.deps.repoRoot,
-  git: k.deps.git,
-  head,
-  specIds: frozenSpecItems(k.deps.repoRoot, h.state).map((i) => i.id),
-  commitExists: async (sha) => {
-    try {
-      await k.deps.workspace.resolve(sha);
-      return true;
-    } catch {
-      return false;
-    }
-  },
-});
 
 // ---------------------------------------------------------------- bookkeeping
 
@@ -781,68 +760,10 @@ const acceptEngineer = async (
   };
 };
 
-/** Once every reviewer of this head reported (§6.3 step 7), triage the round (step 8). */
-const triageIfComplete = async (
-  k: Kernel,
-  h: RunHandle,
-  taskId: string,
-  ctx: EvidenceContext,
-): Promise<void> => {
-  const task = h.state.tasks.get(taskId);
-  const built = lastBuilt(h.state, taskId);
-  if (task?.status !== "verifying" || built === undefined) return;
-  const since = built.closedSeq ?? 0;
-  const slots = reviewersFor(
-    task,
-    h.state.run,
-    taskAcceptanceCriteria(k.deps.repoRoot, h.state, taskId),
-  );
-  const runs = [...h.state.roleRuns.values()].filter(
-    (r) =>
-      r.task === taskId && isReviewer(r) && r.status === "submitted" && (r.closedSeq ?? 0) > since,
-  );
-  const complete = slots.every((slot) =>
-    slot.role === "visual_qa"
-      ? runs.filter((r) => r.role === "visual_qa").length >= VISUAL_QA_CALLS
-      : runs.some(
-          (r) => r.role === slot.role && r.mode === slot.mode && r.subject === slot.subject,
-        ),
-  );
-  if (!complete) return;
-  const round = Math.max(1, task.round);
-  const fallbackPath = `.vtc/tasks/${taskId}.md`;
-  const fresh: Finding[] = [];
-  for (const r of runs) {
-    const result = loadResult(k.deps.repoRoot, r.action_id);
-    if (result === undefined) continue;
-    const drafts = result.findings.map((d) => findingFromDraft(d, r.role, { task: taskId, round }));
-    for (const f of drafts)
-      fresh.push((await resolves(ctx, f.evidence)) ? f : { ...f, status: "discarded" });
-    if (r.role !== "visual_qa" && drafts.length === 0) {
-      for (const v of result.verdicts) {
-        if (v.verdict !== "pass")
-          fresh.push(findingFromVerdict(v, r.role, { task: taskId, round, fallbackPath }));
-      }
-    }
-  }
-  // Visual QA: three calls, a 2-of-3 vote per criterion (AD-8 rule 2).
-  const visual = runs
-    .filter((r) => r.role === "visual_qa")
-    .flatMap((r) => loadResult(k.deps.repoRoot, r.action_id)?.verdicts ?? []);
-  for (const subject of [...new Set(visual.map((v) => v.subject))]) {
-    const failing = visual.filter((v) => v.subject === subject && v.verdict !== "pass");
-    const first = failing[0];
-    if (failing.length >= 2 && first !== undefined) {
-      fresh.push(findingFromVerdict(first, "visual_qa", { task: taskId, round, fallbackPath }));
-    }
-  }
-  const merge = recordRoundFindings(k, h, taskId, fresh, new Set(runs.map((r) => r.role)));
-  settleRound(k, h, taskId, merge);
-};
-
 const acceptReviewer = async (
   k: Kernel,
   h: RunHandle,
+  run: RoleRunRecord,
   task: Task,
   result: RoleResult,
 ): Promise<StepOutcome> => {
@@ -855,17 +776,23 @@ const acceptReviewer = async (
       "a read-only reviewer changed files in the task worktree (discarded)",
     ]);
   }
-  const ctx = evidenceContext(k, h, built.head);
-  const missing = await unresolved(ctx, [
+  const missing = await unresolved(evidenceContext(k, h, built.head), [
     ...result.claims,
     ...result.verdicts.flatMap((v) => v.evidence),
   ]);
-  if (missing.length > 0)
+  if (missing.length > 0) {
     return reject(
       "claim_check",
       missing.map((m) => `does not resolve: ${m}`),
     );
-  return { kind: "accept", after: () => triageIfComplete(k, h, task.id, ctx) };
+  }
+  return {
+    kind: "accept",
+    after: () => {
+      openQuestions(k, h, run, result);
+      if (completedReviews(k, h, task.id) !== null) startTriage(k, h, task.id);
+    },
+  };
 };
 
 /** Is the result arriving where the flow expects it (§4.2 step 4)? `null` when it is. */
@@ -1005,6 +932,6 @@ const evaluate = async (
   if (task === undefined) return acceptPhaseRole(k, h, run, result);
   if (run.role === "engineer") return acceptEngineer(k, h, run, task, result);
   if (run.role === "qa" && run.mode === "author") return acceptQaAuthor(k, h, run, task, result);
-  if (isReviewer(run)) return acceptReviewer(k, h, task, result);
+  if (isReviewer(run)) return acceptReviewer(k, h, run, task, result);
   return reject("dispatch_mismatch", [`role ${run.role} has no task step`]);
 };

@@ -190,7 +190,10 @@ describe("risk router (§6.3 step 6, §7.6)", () => {
       CLAUDE,
     );
     expect(statusChanges(h).at(-1)).toBe("verifying@1");
-    expect(only(answered.actions, "spec_verifier").subject).toBe("REQ-1.AC-1");
+    expect(answered.actions[0]).toMatchObject({ type: "wait" });
+    // the gates re-run on resume; the waived rule does not park the same head again
+    await h.engine.settle();
+    expect(only(await next(h), "spec_verifier").subject).toBe("REQ-1.AC-1");
     await h.release();
   });
   it("skips reviewers on a documentation-only diff", async () => {
@@ -240,6 +243,7 @@ describe("reviewers and triage (§6.3 steps 7–8)", () => {
       ],
     });
     expect(out.accepted).toBe(true);
+    await h.engine.settle();
     const recorded = eventsOf(h)
       .filter((e) => e.type === "finding.recorded")
       .map(
@@ -250,7 +254,7 @@ describe("reviewers and triage (§6.3 steps 7–8)", () => {
       ["Made up", "discarded", "medium", "patch"],
     ]);
     expect(statusChanges(h).at(-1)).toBe("fixing@2");
-    expect(spawns(out.actions).map((a) => a.role)).toEqual(["engineer"]);
+    expect(spawns(await next(h)).map((a) => a.role)).toEqual(["engineer"]);
     await h.release();
   });
   it("rejects a verdict whose evidence does not resolve (claim_check)", async () => {
@@ -286,6 +290,7 @@ describe("reviewers and triage (§6.3 steps 7–8)", () => {
         },
       ],
     });
+    await h.engine.settle();
     expect(taskOf(h, "T-1").parked).toEqual({
       task: "T-1",
       reason: "risk_rule",
