@@ -145,6 +145,9 @@ importers:
       '@vtc/shared':
         specifier: workspace:*
         version: link:../shared
+      zod:
+        specifier: 4.6.7
+        version: 4.6.7
     devDependencies:
       vitest:
         specifier: 5.0.4
