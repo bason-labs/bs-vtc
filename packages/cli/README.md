@@ -38,10 +38,18 @@ records an `unsandboxed_gate` incident. A repo's `.vtc/project.yaml` can set nei
   use. It fails when there is none and the user has not opted in, and warns when the opt-in is on.
 - **The Claude Code session** (D-an, reading 71): in plugin-only dispatch, code-running roles run
   inside your Lead session, so the engine runs them there only when that session's sandbox is on.
-  `vtc install claude-code` shows the settings, writes them into the repo's
-  `.claude/settings.local.json` once you confirm at the terminal, and makes git ignore that file
-  through the repo's `info/exclude`. The bridge reports the state to the engine; `vtc doctor`
-  shows it and anything missing.
+  `vtc install claude-code` shows the settings (the sandbox on, no unsandboxed retry,
+  `failIfUnavailable` so Claude Code refuses to start rather than run commands unsandboxed, and the
+  VTC home denies), writes them into the repo's `.claude/settings.local.json` once you confirm at
+  the terminal, dropping the local entries that let commands past the sandbox, and makes git ignore
+  that file through the repo's `info/exclude`. The sandbox counts as on only when nothing widens
+  it in the local file, the repo's committed `.claude/settings.json` or your own Claude
+  `settings.json` (`excludedCommands`, an allow entry reaching the VTC home,
+  `filesystem.disabled`, `network.allowAllUnixSockets`, `enableWeakerNestedSandbox`), and when the
+  machine has what Claude Code's sandbox needs (Seatbelt; `bwrap` and `socat` on Linux). The
+  bridge reads the state afresh for every hello to the engine, so a mid-session edit counts;
+  `vtc doctor` shows it and anything missing or widening it. Managed settings, `--settings` and
+  `--setting-sources` are beyond what VTC reads (spine §7).
 - **Human-only tools** (`approve`, `answer`, `change_request`): the cli's engine client refuses
   them. The install token goes into a hello only after you confirm at an interactive terminal
   (`human-channel.ts`). No cli command calls these tools today.

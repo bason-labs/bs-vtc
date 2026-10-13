@@ -268,19 +268,47 @@ export const checkEnvPassthrough = (read: UserConfigRead): DoctorCheck => {
 /** Where macOS ships `sandbox-exec`. */
 export const SANDBOX_EXEC = "/usr/bin/sandbox-exec";
 
+/** The no-op `sandbox-exec` run that shows Seatbelt can start a sandbox here. */
+const SEATBELT_PROBE = ["-p", "(version 1)(allow default)", "--", "/usr/bin/true"] as const;
+/**
+ * The no-op `bwrap` run that shows it can create the namespaces a gate run needs: an installed
+ * bwrap often cannot (unprivileged user namespaces disabled, Ubuntu's AppArmor userns rule).
+ */
+const BWRAP_PROBE = [
+  "--ro-bind",
+  "/",
+  "/",
+  "--dev",
+  "/dev",
+  "--proc",
+  "/proc",
+  "--unshare-pid",
+  "--unshare-net",
+  "--die-with-parent",
+  "--",
+  "true",
+] as const;
+
 /**
  * The OS sandbox gate commands can run in on this machine (D-al, spine §5 reading 69):
- * `sandbox-exec` on macOS, `bwrap` (bubblewrap) on Linux, `null` when there is none. A presence
- * probe only (`bwrap --version`); the Gate Runner detects and uses its own when it runs gates.
+ * `sandbox-exec` on macOS, `bwrap` (bubblewrap) on Linux, `null` when there is none. Each is
+ * checked with the same confined no-op run the Gate Runner's own detection uses, so a sandbox
+ * that is installed but cannot start reads as none, as it does for the Gate Runner.
  */
 export const detectGateSandbox = async (
   platform: NodeJS.Platform,
   exists: (path: string) => boolean,
   exec: Exec,
 ): Promise<Exclude<GateSandboxKind, "none"> | null> => {
-  if (platform === "darwin") return exists(SANDBOX_EXEC) ? "sandbox-exec" : null;
+  if (platform === "darwin") {
+    if (!exists(SANDBOX_EXEC)) return null;
+    const probe = await exec(SANDBOX_EXEC, [...SEATBELT_PROBE], { timeoutMs: 10_000 });
+    return probe.code === 0 ? "sandbox-exec" : null;
+  }
   if (platform === "linux")
-    return (await exec("bwrap", ["--version"], { timeoutMs: 10_000 })).code === 0 ? "bwrap" : null;
+    return (await exec("bwrap", [...BWRAP_PROBE], { timeoutMs: 10_000 })).code === 0
+      ? "bwrap"
+      : null;
   return null;
 };
 
@@ -327,6 +355,10 @@ export const checkSessionSandbox = (report: SessionSandboxReport): DoctorCheck =
   if (report.state === "on")
     return { name, status: "ok", detail: `the Claude session sandbox is on (${report.path})` };
   const refused = "code-running roles are refused in a Claude Code session";
+  const widened =
+    report.widening.length === 0
+      ? ""
+      : `; these settings let commands past it: ${report.widening.join("; ")} (remove them)`;
   switch (report.file) {
     case "absent":
       return {
@@ -341,10 +373,16 @@ export const checkSessionSandbox = (report: SessionSandboxReport): DoctorCheck =
         detail: `${report.path} cannot be read (not a plain JSON file): ${refused}; fix or remove it, then ${fix}`,
       };
     case "ok":
+      if (report.missing.length === 0 && report.widening.length === 0)
+        return {
+          name,
+          status: "warn",
+          detail: `Claude Code cannot sandbox commands on this machine (missing: ${report.unavailable.join(", ")}): ${refused}`,
+        };
       return {
         name,
         status: "warn",
-        detail: `the Claude session sandbox in ${report.path} is off; missing: ${report.missing.join(", ")}: ${refused}; ${fix}`,
+        detail: `the Claude session sandbox in ${report.path} is ${report.state}${report.missing.length === 0 ? "" : `; missing: ${report.missing.join(", ")}`}${widened}: ${refused}; ${fix}`,
       };
   }
 };
