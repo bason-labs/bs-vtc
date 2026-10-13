@@ -1,4 +1,6 @@
 /** Report parsers (§18: unit tests for every parser; AD-13 rule 9). */
+import { symlinkSync } from "node:fs";
+import { join } from "node:path";
 import { ToolFindingSchema, normalizeSeverity, TestRecordSchema } from "@vtc/shared";
 import { describe, expect, it } from "vitest";
 import {
@@ -9,6 +11,8 @@ import {
   parseSarif,
   parseXml,
 } from "../../src/gates/index.js";
+import { relativeLocation } from "../../src/gates/parsers/types.js";
+import { cleanupDirs, tempDir, writeFile } from "../helpers/repo.js";
 
 const ctx = {
   checkoutAbs: "/repo/.vtc/state/checkouts/abc",
@@ -287,5 +291,37 @@ describe("tool JSON reports", () => {
     expect(diffCoveragePct(doc)).toBe(81);
     expect(diffCoveragePct({})).toBeNull();
     expect(parseJsonFindings({ whatever: 1 }, ctx).findings).toEqual([]);
+  });
+});
+
+describe("tool-reported locations", () => {
+  it("falls back for paths RelPathSchema would reject, so the report stays valid", () => {
+    expect(relativeLocation("a/".repeat(600), ctx)).toBe(ctx.fallbackPath);
+    expect(relativeLocation("src/a\0.ts", ctx)).toBe(ctx.fallbackPath);
+    expect(relativeLocation("/etc/passwd", ctx)).toBe(ctx.fallbackPath);
+    expect(relativeLocation("src/a.ts", ctx)).toBe("src/a.ts");
+  });
+
+  it("anchors snippet-less lint findings on their source line, read inside the checkout only", () => {
+    const root = tempDir("vtc-src-");
+    writeFile(root, "src/a.ts", "const a = 1;\n  // TODO later  \n");
+    const outside = tempDir("vtc-outside-");
+    writeFile(outside, "secret.ts", "line one\n");
+    symlinkSync(join(outside, "secret.ts"), join(root, "src/link.ts"));
+    const local = { ...ctx, checkoutAbs: root };
+    const doc = [
+      {
+        filePath: join(root, "src/a.ts"),
+        messages: [{ ruleId: "no-todo", severity: 2, message: "TODO", line: 2 }],
+      },
+      {
+        filePath: "src/link.ts",
+        messages: [{ ruleId: "no-todo", severity: 2, message: "TODO", line: 1 }],
+      },
+    ];
+    const [inside, linked] = parseJsonFindings(doc, local).findings;
+    expect(inside?.snippet).toBe("// TODO later");
+    expect(linked?.snippet).toBeUndefined();
+    cleanupDirs();
   });
 });

@@ -48,6 +48,34 @@ describe("redactSecrets: gate evidence formats", () => {
   });
 });
 
+describe("redactSecrets: linear time on agent-controlled text", () => {
+  const SIZE = 200_000;
+  const inputs: readonly (readonly [string, string])[] = [
+    ["whitespace", " ".repeat(SIZE)],
+    ["tabs and newlines", "\t \n".repeat(SIZE / 3)],
+    ["a bearer prefix before whitespace", `Authorization: Bearer${" ".repeat(SIZE)}x`],
+    ["a secret key before whitespace", `password${" ".repeat(SIZE)}= value123456`],
+    ["repeated secret keys", "password=".repeat(SIZE / 9)],
+    ["repeated key headers", "-----BEGIN RSA PRIVATE KEY-----\n".repeat(SIZE / 32)],
+    ["repeated url schemes", "a://".repeat(SIZE / 4)],
+  ];
+  it.each(inputs)("redacts 200 KB of %s in under 100 ms", (_name, text) => {
+    redactSecrets("warm-up password=abc123def456 Bearer abcdefghijklmnopqrstuvwxyz");
+    const started = performance.now();
+    redactSecrets(text);
+    expect(performance.now() - started).toBeLessThan(100);
+  });
+
+  it("still redacts bearer tokens and assignments with bounded separators", () => {
+    expect(redactSecrets("Bearer\tabcdefghijklmnopqrstuvwxyz0123")).toBe(
+      "Bearer\t[REDACTED:bearer_token]",
+    );
+    expect(redactSecrets("api_key :  'abc123def456'")).toBe(
+      "api_key :  '[REDACTED:secret_assignment]'",
+    );
+  });
+});
+
 describe("knownSecretValues", () => {
   it("collects .env* values from the repo and checkout tops plus scanner matches", () => {
     const repo = tempDir();

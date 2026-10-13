@@ -15,8 +15,32 @@ tests:
     - tests/acceptance/**
   protected_configs:
     - "**/eslint.config.*"
+    - "**/.eslintrc*"
+    - "**/biome.json"
+    - "**/biome.jsonc"
     - "**/vitest.config.*"
+    - "**/vitest.workspace.*"
+    - "**/jest.config.*"
+    - "**/playwright.config.*"
     - "**/tsconfig*.json"
+    - "**/pytest.ini"
+    - "**/conftest.py"
+    - "**/tox.ini"
+    - "**/ruff.toml"
+    - "**/.ruff.toml"
+    - "**/.golangci.y*ml"
+    - "**/.dependency-cruiser.*"
+    - "**/.gitleaks.toml"
+    - "**/.gitleaksignore"
+    - "**/osv-scanner.toml"
+    - "**/.osv-scanner.toml"
+    - "**/.semgrepignore"
+    - "**/.opengrepignore"
+    - "**/.semgrep.yml"
+    - "**/.semgrep.yaml"
+    - "**/.semgrep/**"
+    - "**/.checkov.yaml"
+    - "**/.checkov.yml"
 gates:
   - id: install
     layer: L0

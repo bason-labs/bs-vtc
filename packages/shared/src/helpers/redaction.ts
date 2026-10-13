@@ -12,12 +12,23 @@ export const redactionMarker = (kind: string): string => `[REDACTED:${kind}]`;
 
 /**
  * Known token formats. Each pattern matches only the secret part, so surrounding text (e.g.
- * `Bearer `, a URL's scheme and host) stays readable.
+ * `Bearer `, a URL's scheme and host) stays readable. A pattern with `keepPrefix` matches the
+ * readable prefix as its first capture group, which is kept.
+ *
+ * Every pattern runs on agent-controlled text (gate logs, reports, the event log), so none may
+ * backtrack over an unbounded run: no variable-length lookbehind, every repetition before the
+ * secret is bounded (`[ \t]{0,8}`, not `\s*`). `redaction.test.ts` times them on 200 KB inputs.
  */
-export const SECRET_PATTERNS: readonly { readonly kind: string; readonly pattern: RegExp }[] = [
+export const SECRET_PATTERNS: readonly {
+  readonly kind: string;
+  readonly pattern: RegExp;
+  readonly keepPrefix?: true;
+}[] = [
   {
     kind: "private_key",
-    pattern: /-----BEGIN [A-Z ]*PRIVATE KEY-----[\s\S]*?-----END [A-Z ]*PRIVATE KEY-----/g,
+    // A body never runs past the next BEGIN line, so BEGIN lines without an END cost linear time.
+    pattern:
+      /-----BEGIN [A-Z ]{0,40}PRIVATE KEY-----(?:(?!-----BEGIN )[\s\S]){0,16384}?-----END [A-Z ]{0,40}PRIVATE KEY-----/g,
   },
   { kind: "aws_access_key", pattern: /\b(?:AKIA|ASIA)[0-9A-Z]{16}\b/g },
   { kind: "github_token", pattern: /\b(?:gh[pousr]_[A-Za-z0-9]{36,255}|github_pat_\w{22,255})/g },
@@ -35,17 +46,22 @@ export const SECRET_PATTERNS: readonly { readonly kind: string; readonly pattern
   { kind: "pypi_token", pattern: /\bpypi-AgE[A-Za-z0-9_-]{50,}/g },
   { kind: "huggingface_token", pattern: /\bhf_[A-Za-z0-9]{34,}\b/g },
   { kind: "sendgrid_key", pattern: /\bSG\.[A-Za-z0-9_-]{22}\.[A-Za-z0-9_-]{43}\b/g },
-  { kind: "bearer_token", pattern: /(?<=\b[Bb]earer\s+)[A-Za-z0-9._~+/-]{20,}=*/g },
+  {
+    kind: "bearer_token",
+    pattern: /(\b[Bb]earer[ \t]{1,8})[A-Za-z0-9._~+/-]{20,}=*/g,
+    keepPrefix: true,
+  },
   { kind: "url_credentials", pattern: /(?<=\b[a-z][a-z0-9+.-]*:\/\/)[^/\s:@]+:[^/\s@]+(?=@)/gi },
   /**
    * A value assigned to a secret-named key (`password=…`, `api_key: "…"`, `client_secret=…`) in
-   * logs and configs. Only values with both a letter and a digit, so code such as
-   * `apiKey: config.apiKey` stays readable.
+   * logs and configs. Only values with both a letter and a digit (within their first 256
+   * characters), so code such as `apiKey: config.apiKey` stays readable.
    */
   {
     kind: "secret_assignment",
     pattern:
-      /(?<=(?<![A-Za-z0-9])(?:password|passwd|secret|api[_-]?key|access[_-]?token|auth[_-]?token|client[_-]?secret|private[_-]?key)["']?\s*[:=]\s*["']?)(?=[^\s"'`,;(){}<>[\]]*\d)(?=[^\s"'`,;(){}<>[\]]*[A-Za-z])[^\s"'`,;(){}<>[\]]{8,}/gi,
+      /((?<![A-Za-z0-9])(?:password|passwd|secret|api[_-]?key|access[_-]?token|auth[_-]?token|client[_-]?secret|private[_-]?key)["']?[ \t]{0,8}[:=][ \t]{0,8}["']?)(?=[^\s"'`,;(){}<>[\]]{0,256}\d)(?=[^\s"'`,;(){}<>[\]]{0,256}[A-Za-z])[^\s"'`,;(){}<>[\]]{8,}/gi,
+    keepPrefix: true,
   },
 ];
 
@@ -63,8 +79,13 @@ export const redactSecrets = (text: string, knownValues: readonly string[] = [])
     .filter((v) => v.length >= MIN_KNOWN_SECRET_LENGTH)
     .sort((a, b) => b.length - a.length);
   for (const value of known) out = out.split(value).join(redactionMarker("known_value"));
-  for (const { kind, pattern } of SECRET_PATTERNS)
-    out = out.replace(pattern, redactionMarker(kind));
+  for (const { kind, pattern, keepPrefix } of SECRET_PATTERNS) {
+    const marker = redactionMarker(kind);
+    out =
+      keepPrefix === true
+        ? out.replace(pattern, (_match, prefix: string) => `${prefix}${marker}`)
+        : out.replace(pattern, marker);
+  }
   return out;
 };
 

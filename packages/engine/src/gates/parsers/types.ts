@@ -3,6 +3,8 @@
  * adds it once the redacted report has its evidence path) and the secret values a secret scanner
  * matched (redacted everywhere before evidence is written, §7.2).
  */
+import { readFileSync, realpathSync, statSync } from "node:fs";
+import { join, relative, sep } from "node:path";
 import type { FindingCategory, ToolFinding } from "@vtc/shared";
 
 export type ParsedFinding = Omit<ToolFinding, "evidence"> & {
@@ -65,7 +67,52 @@ export const relativeLocation = (raw: string | undefined, ctx: ParseContext): st
   else if (/^(\/|[A-Za-z]:\/)/.test(path)) return ctx.fallbackPath;
   while (path.startsWith("./")) path = path.slice(2);
   if (path === "" || path.split("/").includes("..")) return ctx.fallbackPath;
+  // What `RelPathSchema` accepts: a report must never make the whole GateReport invalid.
+  if (path.length > 1024 || path.includes("\0")) return ctx.fallbackPath;
   return path;
+};
+
+const MAX_SOURCE_BYTES = 2 * 1024 * 1024;
+const sourceCache = new WeakMap<ParseContext, Map<string, readonly string[] | null>>();
+
+const linesOf = (ctx: ParseContext, path: string): readonly string[] | null => {
+  let cache = sourceCache.get(ctx);
+  if (cache === undefined) {
+    cache = new Map();
+    sourceCache.set(ctx, cache);
+  }
+  const hit = cache.get(path);
+  if (hit !== undefined) return hit;
+  let lines: readonly string[] | null = null;
+  try {
+    const root = realpathSync(ctx.checkoutAbs);
+    const abs = realpathSync(join(ctx.checkoutAbs, path));
+    const rel = relative(root, abs);
+    const stat = statSync(abs);
+    if (!rel.startsWith("..") && !rel.startsWith(sep) && stat.isFile()) {
+      if (stat.size <= MAX_SOURCE_BYTES) lines = readFileSync(abs, "utf8").split(/\r?\n/);
+    }
+  } catch {
+    lines = null;
+  }
+  cache.set(path, lines);
+  return lines;
+};
+
+/**
+ * The trimmed source line a finding points at, read from the checkout the tool ran in: a
+ * line-independent anchor for findings that carry no snippet or symbol (ESLint, Ruff), so a
+ * baseline violation keeps its fingerprint when the diff shifts lines above it (§7.1). Never for
+ * paths outside the checkout (symlinks resolved) or files over 2 MB.
+ */
+export const sourceLine = (
+  ctx: ParseContext,
+  path: string,
+  line: number | undefined,
+): string | undefined => {
+  if (line === undefined || path === ctx.fallbackPath) return undefined;
+  const text = linesOf(ctx, path)?.[line - 1]?.trim();
+  return text === undefined || text === "" ? undefined : clip(text, 500);
 };
 
 /** A `CWE-n` id from a tag such as `CWE-79: XSS` or `external/cwe/cwe-079`. */

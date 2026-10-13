@@ -75,16 +75,23 @@ writeFileSync(out, JSON.stringify(results));
 process.exit(results.some((r) => r.messages.length > 0) ? 1 : 0);
 `;
 
-/** A fake Gitleaks: reports every line of every file that contains "SECRET=". */
+/**
+ * A fake Gitleaks: reports every line of every file that contains "SECRET=", except in files
+ * that a \`.gitleaksignore\` at the top lists (like the real one, it reads that file on its own).
+ */
 const FAKE_LEAKS = `#!/usr/bin/env node
-const { readdirSync, readFileSync, writeFileSync, statSync, mkdirSync } = require("node:fs");
+const { existsSync, readdirSync, readFileSync, writeFileSync, statSync, mkdirSync } = require("node:fs");
 const { join, dirname } = require("node:path");
 const out = process.argv[process.argv.indexOf("--report-path") + 1];
+const ignored = existsSync(".gitleaksignore")
+  ? readFileSync(".gitleaksignore", "utf8").split("\\n").map((l) => l.trim()).filter(Boolean)
+  : [];
 const found = [];
 const walk = (dir) => {
   for (const name of readdirSync(dir)) {
     if (name === ".git" || name === ".vtc" || name === "node_modules") continue;
     const p = join(dir, name);
+    if (ignored.includes(p)) continue;
     if (statSync(p).isDirectory()) { walk(p); continue; }
     readFileSync(p, "utf8").split("\\n").forEach((l, i) => {
       const m = /SECRET=(\\S+)/.exec(l);
@@ -95,6 +102,24 @@ const walk = (dir) => {
 walk(".");
 mkdirSync(dirname(out), { recursive: true });
 writeFileSync(out, JSON.stringify(found));
+`;
+
+/**
+ * A fake osv-scanner: \`--download-offline-databases\` fills the database directory; a scan
+ * writes an empty JSON report (no vulnerabilities).
+ */
+const FAKE_OSV = `#!/usr/bin/env node
+const { mkdirSync, writeFileSync } = require("node:fs");
+const { dirname, join } = require("node:path");
+const args = process.argv.slice(2);
+const db = process.env.OSV_SCANNER_LOCAL_DB_CACHE_DIRECTORY;
+if (args.includes("--download-offline-databases")) {
+  mkdirSync(join(db, "npm"), { recursive: true });
+  writeFileSync(join(db, "npm", "all.zip"), "fake advisories");
+}
+const out = args[args.indexOf("--output") + 1];
+mkdirSync(dirname(out), { recursive: true });
+writeFileSync(out, JSON.stringify({ results: [] }));
 `;
 
 export const TOOLS: Record<string, string> = {
@@ -178,17 +203,46 @@ export interface Harness {
   readonly run: (request: Partial<GateRunRequestInput> & { head: string }) => Promise<GateReport>;
 }
 
-/** A fake scanner store: `gitleaks` is the fake script above; nothing is downloaded. */
+export const osvGate: Gate = {
+  id: "dependencies",
+  layer: "L4",
+  command: [
+    "osv-scanner",
+    "scan",
+    "source",
+    "--offline",
+    "--format",
+    "json",
+    "--output",
+    ".vtc/state/gates/osv.json",
+    "-r",
+    ".",
+  ],
+  report: { format: "json", path: ".vtc/state/gates/osv.json" },
+};
+
+/** A fake scanner store: `gitleaks` and `osv-scanner` are the fake scripts above; nothing is downloaded. */
 export const fakeScanners = (home: string): ScannerStore => {
   const dir = join(home, "fake-scanners");
   mkdirSync(dir, { recursive: true });
-  const leaks = join(dir, "gitleaks");
-  writeFileSync(leaks, FAKE_LEAKS);
-  chmodSync(leaks, 0o755);
+  const fakes: Record<string, string> = {};
+  for (const [name, script] of [
+    ["gitleaks", FAKE_LEAKS],
+    ["osv-scanner", FAKE_OSV],
+  ] as const) {
+    const path = join(dir, name);
+    writeFileSync(path, script);
+    chmodSync(path, 0o755);
+    fakes[name] = path;
+  }
   return {
     names: ["gitleaks", "osv-scanner", "opengrep", "checkov"],
-    ensure: (name) =>
-      name === "gitleaks" ? Promise.resolve(leaks) : Promise.reject(new Error(`no fake ${name}`)),
+    ensure: (name) => {
+      const path = fakes[name];
+      return path === undefined
+        ? Promise.reject(new Error(`no fake ${name}`))
+        : Promise.resolve(path);
+    },
   };
 };
 

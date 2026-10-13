@@ -10,6 +10,10 @@
  * - Hidden acceptance tests are copied in only for `include_hidden` runs and never reach evidence.
  * - Evidence is written redacted under `.vtc/evidence/<T-n|F-n>/`; raw output stays under
  *   `.vtc/state/gates/` (AD-18).
+ * - The gates are the base commit's `.vtc/gates.yml`, never the working tree's, so a run is
+ *   reproducible and a diff cannot change the gates that verify it.
+ * - Not built yet (gates/README.md): the two-phase network sandbox of §7.2 (install: registries
+ *   only; verify: no network). Gates run with the user's network and file access.
  */
 import { copyFileSync, existsSync, readdirSync, readFileSync, realpathSync, rmSync } from "node:fs";
 import { join, relative, sep } from "node:path";
@@ -20,9 +24,11 @@ import {
   gateReportVerdict,
   GateReportSchema,
   HIDDEN_TESTS,
+  TestInventorySchema,
   isAtLeast,
   normalizeSeverity,
   redactJson,
+  redactSecrets,
   type Evidence,
   type FailureClass,
   type Gate,
@@ -35,13 +41,15 @@ import {
   type GatesConfig,
   type GitChangedFile,
   type MonotonicViolation,
+  type TestInventory,
   type TestMetrics,
+  type TestRecord,
   type ToolFinding,
   type WriteScopeCheckRequest,
 } from "@vtc/shared";
 import { assertNoSymlinks, ensureRepoDir, removeRepoFile, writeRepoFile } from "../git/index.js";
 import { classifyFailure, environmentSignatureLine } from "./classify.js";
-import { loadGatesConfig, readAllowlist } from "./config.js";
+import { GATES_CONFIG_PATH, loadGatesConfig, parseGatesConfig, readAllowlist } from "./config.js";
 import {
   attemptId,
   EVIDENCE_DIR,
@@ -59,7 +67,10 @@ import { diffCoveragePct, parseJsonFindings } from "./parsers/json-reports.js";
 import { parseJunit, type JunitCase } from "./parsers/junit.js";
 import { isSarif, parseSarif } from "./parsers/sarif.js";
 import type { ParsedFinding } from "./parsers/types.js";
+import { DEFAULT_PROTECTED_GLOBS, SCANNER_CONFIG_GLOBS } from "./protected-globs.js";
 import { ensureRules } from "./rules.js";
+import { OSV_DB_ENV, osvDatabaseDir, osvDatabaseReady } from "./osv-db.js";
+import { checkScannerArgs, scannerExtraArgs } from "./scanner-args.js";
 import { createScannerStore, type ScannerStore } from "./scanners.js";
 import { buildTraceability } from "./traceability.js";
 import { checkWriteScope } from "./write-scope.js";
@@ -79,32 +90,6 @@ const MAX_EVIDENCE = 20;
 
 /** Reasons whose failures are compared with the base commit (only new problems block, §7.1). */
 const BASELINE_REASONS: ReadonlySet<string> = new Set(["round", "merge_queue", "final_review"]);
-
-/** Arguments that would let repo content run code or fetch unpinned rules through a scanner. */
-export const scannerArgsProblem = (scanner: string, args: readonly string[]): string | null => {
-  if (scanner === "checkov" && args.some((a) => /^--external-checks-(dir|git)\b/.test(a))) {
-    return "checkov external checks run repository code";
-  }
-  if (scanner === "opengrep") {
-    for (const [i, a] of args.entries()) {
-      const value = a.startsWith("--config=")
-        ? a.slice(9)
-        : a === "--config" || a === "-c"
-          ? args[i + 1]
-          : undefined;
-      if (value !== undefined && /^(https?:|p\/|r\/|auto$)/.test(value)) {
-        return "opengrep rules must come from a local path, never the network";
-      }
-    }
-  }
-  if (
-    scanner === "osv-scanner" &&
-    !args.some((a) => a === "--offline" || a.startsWith("--offline="))
-  ) {
-    return "osv-scanner runs only with --offline (§7.2)";
-  }
-  return null;
-};
 
 const ownerOf = (request: Pick<GateRunRequest, "task" | "feature">): string | undefined =>
   request.task ?? request.feature;
@@ -129,6 +114,12 @@ const resolvesInside = (root: string, path: string): boolean => {
 interface Prepared {
   readonly argv: string[];
   readonly env: Record<string, string>;
+  /** Set for a pinned scanner: it runs with the base version of changed scanner configs. */
+  readonly scanner: boolean;
+  /** Checkout-relative paths the command writes besides its report (pinned scanners). */
+  readonly outputs: readonly string[];
+  /** Checkout-relative rule files a pinned scanner reads. */
+  readonly configs: readonly string[];
 }
 
 interface Execution {
@@ -141,7 +132,8 @@ interface Execution {
 
 interface BaselineFacts {
   readonly failingTests: ReadonlySet<string>;
-  readonly findingKeys: ReadonlySet<string>;
+  /** How often each finding key occurs on the base: a second identical finding is new. */
+  readonly findingKeys: ReadonlyMap<string, number>;
   /** Set when the base run could not be used: every problem then counts as new. */
   readonly unusable?: string;
 }
@@ -158,7 +150,27 @@ const findingKey = (f: Pick<ParsedFinding, "tool" | "rule_id" | "location" | "sn
 interface L2Outcome {
   readonly index: number;
   readonly cases: readonly JunitCase[];
+  readonly reportRel: string;
 }
+
+/** A checkout-relative POSIX path for `abs`, or `null` when it is outside the checkout. */
+const checkoutRel = (checkoutAbs: string, abs: string): string | null => {
+  if (!isInside(checkoutAbs, abs)) return null;
+  const rel = relative(checkoutAbs, abs).split(sep).join("/");
+  return rel === "" ? null : rel;
+};
+
+const errorText = (error: unknown): string =>
+  error instanceof Error ? error.message : String(error);
+
+/** A redacted inventory, sorted and de-duplicated again by its redacted ids (TestInventorySchema). */
+const redactedInventory = (tests: readonly TestRecord[], known: readonly string[]): TestInventory =>
+  inventoryOf(redactJson(inventoryOf(tests).tests, known));
+
+const renormalize = (redacted: unknown): unknown => inventoryOf((redacted as TestInventory).tests);
+
+/** Failure classes a monotonic violation must not overwrite (§6.8: not the Engineer's fault). */
+const KEPT_CLASSES: ReadonlySet<FailureClass> = new Set(["environment", "infra", "flaky"]);
 
 class Run {
   private readonly writes: PendingWrite[] = [];
@@ -205,10 +217,22 @@ class Run {
     return this.deps.now?.() ?? new Date();
   }
 
+  /** The base commit's calibrated gates (§7.1); calibration alone reads the working tree. */
+  private async loadConfig(): Promise<GatesConfig | null> {
+    if (this.request.reason === "calibration") return loadGatesConfig(this.deps.repoRoot);
+    const bytes = await this.deps.git.readFileAtCommit(this.request.base, GATES_CONFIG_PATH);
+    if (bytes === undefined) {
+      throw new Error(
+        `${GATES_CONFIG_PATH} is not committed at the base commit ${this.request.base.slice(0, 12)}: run vtc calibrate and commit the file it writes`,
+      );
+    }
+    return parseGatesConfig(new TextDecoder().decode(bytes));
+  }
+
   async execute(): Promise<GateReport> {
     let config: GatesConfig | null;
     try {
-      config = this.configOverride ?? loadGatesConfig(this.deps.repoRoot);
+      config = this.configOverride ?? (await this.loadConfig());
       if (config === null) throw new Error(".vtc/gates.yml is missing: run vtc calibrate");
       if (!config.baseline.confirmed && this.request.reason !== "calibration") {
         throw new Error(".vtc/gates.yml is not confirmed: run vtc calibrate in a terminal");
@@ -248,8 +272,12 @@ class Run {
         ),
       );
     } finally {
-      this.removeHidden();
-      if (this.baseCheckout !== null) await this.deps.git.removeCheckout(this.baseCheckout.rel);
+      try {
+        this.removeHidden();
+        if (this.baseCheckout !== null) await this.deps.git.removeCheckout(this.baseCheckout.rel);
+      } catch (error) {
+        this.note("cleanup", `cleanup after the gates failed: ${errorText(error)}`);
+      }
     }
     return this.finish();
   }
@@ -350,6 +378,7 @@ class Run {
   private async prepare(
     gate: Gate,
     checkoutAbs: string,
+    cwd: string,
     changed: readonly string[],
   ): Promise<Prepared | { refused: string } | { skipped: string }> {
     const allowlist = readAllowlist(this.deps.vtcHome, this.deps.repoRoot);
@@ -361,17 +390,32 @@ class Run {
     const [first, ...rest] = gate.command;
     let argv0 = first ?? "";
     const extraEnv: Record<string, string> = {};
-    if (this.scanners.names.includes(argv0)) {
-      const problem = scannerArgsProblem(argv0, rest);
-      if (problem !== null) return { refused: `not run: ${problem}` };
+    const scanner = this.scanners.names.includes(argv0);
+    let outputs: readonly string[] = [];
+    let configs: readonly string[] = [];
+    let extraArgs: string[] = [];
+    if (scanner) {
+      // A pinned scanner passed the allowlist by name: its arguments are repo content.
+      const check = checkScannerArgs(argv0, rest, { checkoutAbs, cwd });
+      if (!check.ok) return { refused: `not run: ${check.problem}` };
+      outputs = check.outputs;
+      configs = check.configs;
+      extraArgs = scannerExtraArgs(argv0, rest);
+      if (argv0 === "osv-scanner") {
+        // Offline with no database loads no advisories: never a silent pass (§6.8).
+        if (!osvDatabaseReady(this.deps.vtcHome)) {
+          return {
+            refused:
+              "not run: the osv-scanner offline vulnerability database is not on this machine; vtc calibrate downloads it when you confirm",
+          };
+        }
+        extraEnv[OSV_DB_ENV] = osvDatabaseDir(this.deps.vtcHome);
+      }
       try {
         const binary = await this.scanners.ensure(argv0);
-        if (argv0 === "osv-scanner") {
-          extraEnv.OSV_SCANNER_LOCAL_DB_CACHE_DIRECTORY = join(this.deps.vtcHome, "osv-db");
-        }
         argv0 = binary;
       } catch (error) {
-        return { refused: `not run: ${error instanceof Error ? error.message : String(error)}` };
+        return { refused: `not run: ${errorText(error)}` };
       }
     }
     const needsRules = gate.command.some((t) => t.includes("{rules}"));
@@ -391,7 +435,8 @@ class Run {
           .replaceAll("{rules}", rules),
       );
     }
-    return { argv, env: gateEnv(this.env, extraEnv) };
+    argv.push(...extraArgs);
+    return { argv, env: gateEnv(this.env, extraEnv), scanner, outputs, configs };
   }
 
   /** Runs one command gate in a checkout; nothing here writes evidence. */
@@ -401,19 +446,37 @@ class Run {
     logPrefix: string,
     changed: readonly string[],
   ): Promise<Execution> {
-    const prepared = await this.prepare(gate, checkoutAbs, changed);
-    if ("refused" in prepared) return { refused: prepared.refused };
-    if ("skipped" in prepared) return { skipped: prepared.skipped };
     const cwd = join(checkoutAbs, gate.cwd ?? "");
     if (!existsSync(cwd) || !resolvesInside(checkoutAbs, cwd)) {
       return { refused: `not run: working directory ${gate.cwd ?? "."} is not in the checkout` };
     }
+    const prepared = await this.prepare(gate, checkoutAbs, cwd, changed);
+    if ("refused" in prepared) return { refused: prepared.refused };
+    if ("skipped" in prepared) return { skipped: prepared.skipped };
     // A report path is relative to the gate's working directory, as the tool sees it.
     const reportAbs = gate.report === undefined ? null : join(cwd, gate.report.path);
-    if (reportAbs !== null) rmSync(reportAbs, { force: true });
+    const reportRel = reportAbs === null ? null : checkoutRel(checkoutAbs, reportAbs);
+    if (reportAbs !== null && reportRel === null) {
+      return { refused: `not run: report ${gate.report?.path ?? ""} is not inside the checkout` };
+    }
+    try {
+      // Nothing is removed or written through a symlink the diff planted (e.g. `.vtc/state`).
+      for (const rel of [...(reportRel === null ? [] : [reportRel]), ...prepared.outputs]) {
+        assertNoSymlinks(checkoutAbs, rel);
+      }
+      if (reportAbs !== null) rmSync(reportAbs, { force: true });
+    } catch (error) {
+      return { refused: `not run: ${errorText(error)}` };
+    }
+    const baseGlobs =
+      gate.layer === "L1"
+        ? (this.config?.tests.protected_configs ?? [])
+        : prepared.scanner
+          ? [...SCANNER_CONFIG_GLOBS, ...prepared.configs]
+          : [];
     const restore =
-      gate.layer === "L1" && checkoutAbs === this.checkoutAbs
-        ? await this.useBaseConfigs(checkoutAbs)
+      baseGlobs.length > 0 && checkoutAbs === this.checkoutAbs
+        ? await this.useBaseConfigs(checkoutAbs, baseGlobs)
         : null;
     let exec: ExecResult;
     try {
@@ -436,11 +499,14 @@ class Run {
   }
 
   /**
-   * L1 lints with the base commit's config (§7.2): protected configs the diff changed are put back
-   * to their base version for the lint and restored afterwards.
+   * L1 lints with the base commit's config (§7.2), and the scanners scan with the base commit's
+   * scanner configs: config files the diff changed are put back to their base version for the
+   * gate and restored afterwards, so a diff cannot silence the gates that verify it.
    */
-  private async useBaseConfigs(checkoutAbs: string): Promise<(() => void) | null> {
-    const globs = this.config?.tests.protected_configs ?? [];
+  private async useBaseConfigs(
+    checkoutAbs: string,
+    globs: readonly string[],
+  ): Promise<(() => void) | null> {
     const touched = this.changed.filter(
       (f) => matchesAny(globs, f.path) || (f.oldPath !== undefined && matchesAny(globs, f.oldPath)),
     );
@@ -708,29 +774,12 @@ class Run {
       findings: [] as ToolFinding[],
     };
 
+    this.l2.push({ index: this.results.length, cases, reportRel });
     if (r.reason === "base_fail_check") {
-      this.l2.push({ index: this.results.length, cases });
-      const named = r.tests ?? [];
-      const allFail = named.length > 0 && named.every((id) => failing.includes(id));
-      return allFail
-        ? {
-            ...base,
-            status: "fail",
-            new_violations: failing.length,
-            baseline_violations: 0,
-            failure_class: "product",
-            evidence: junitEvidence(failing),
-          }
-        : {
-            ...base,
-            status: "pass",
-            new_violations: 0,
-            baseline_violations: 0,
-            evidence: junitEvidence(named.filter((id) => !failing.includes(id))),
-          };
+      // Decided once over every L2 gate in finishBaseFail: QA's tests may span several gates.
+      return { ...base, status: "pass", new_violations: 0, baseline_violations: 0, evidence: [] };
     }
 
-    this.l2.push({ index: this.results.length, cases });
     let newFailing = failing;
     let baselineCount = 0;
     if (failing.length > 0 && this.baselineApplies(gate)) {
@@ -739,12 +788,18 @@ class Run {
       baselineCount = failing.length - newFailing.length;
     }
     if (newFailing.length > 0) {
+      // Calibration recorded flaky ids from redacted inventories: compare in the same space.
+      const flakySet = new Set(config.baseline.flaky_tests);
+      const known = this.knownValues();
+      const flaky = newFailing.filter(
+        (id) => flakySet.has(id) || flakySet.has(redactSecrets(id, known)),
+      );
       const result = this.failed(
         base,
         exec,
         () => ({ type: "junit", ref: reportRel }),
         newFailing,
-        config.baseline.flaky_tests,
+        flaky,
       );
       return {
         ...result,
@@ -771,15 +826,69 @@ class Run {
     cases: readonly JunitCase[],
   ): Pick<TestMetrics, "inventory" | "line_coverage_pct" | "diff_coverage_pct"> {
     const rel = `${this.evidenceRoot}/${gate.id}.inventory.json`;
-    this.writes.push({ rel, redact: true, json: inventoryOf(cases) });
+    this.writes.push({ rel, redact: true, json: inventoryOf(cases), normalize: renormalize });
     return { inventory: rel, line_coverage_pct: null, diff_coverage_pct: null };
+  }
+
+  /** Values redacted by value from evidence: `.env` values and secret-scanner matches so far. */
+  private knownValues(): string[] {
+    return knownSecretValues([this.deps.repoRoot, this.checkoutAbs], this.secrets);
+  }
+
+  /**
+   * The base-fail rule (§6.3 step 2, §7.3), decided once over every L2 gate: QA's named tests
+   * must all fail on the base, wherever they ran. A named test no gate executed does not fail.
+   */
+  private finishBaseFail(): void {
+    const named = this.request.tests ?? [];
+    const failingAll = new Set(
+      this.l2.flatMap((o) =>
+        o.cases.filter((c) => c.status === "fail" || c.status === "error").map((c) => c.id),
+      ),
+    );
+    const allFail = named.length > 0 && named.every((id) => failingAll.has(id));
+    for (const outcome of this.l2) {
+      const result = this.results[outcome.index];
+      if (result === undefined) continue;
+      const ids = new Set(outcome.cases.map((c) => c.id));
+      const evidence = (list: readonly string[]): Evidence[] =>
+        list
+          .slice(0, MAX_EVIDENCE)
+          .map((id) => ({ type: "junit", ref: `${outcome.reportRel}#${id}` }));
+      const failingHere = named.filter((id) => ids.has(id) && failingAll.has(id));
+      this.results[outcome.index] =
+        allFail && failingHere.length > 0
+          ? {
+              ...result,
+              status: "fail",
+              new_violations: failingHere.length,
+              failure_class: "product",
+              evidence: evidence(failingHere),
+            }
+          : allFail
+            ? result
+            : {
+                ...result,
+                evidence: evidence(named.filter((id) => ids.has(id) && !failingAll.has(id))),
+              };
+    }
+    const executed = new Set(this.l2.flatMap((o) => o.cases.map((c) => c.id)));
+    const missing = named.filter((id) => !executed.has(id));
+    if (missing.length > 0) {
+      this.note("base-fail", `named tests no L2 gate executed: ${missing.join(", ")}`);
+    }
   }
 
   /**
    * Monotonic metrics (§7.3) on the run's combined L2 inventory, carried by the last L2 result
-   * (what engine core passes back as the next run's `compare_to`).
+   * (what engine core passes back as the next run's `compare_to`). The previous inventory is
+   * evidence, so it was redacted: the comparison runs on redacted ids on both sides.
    */
   private finishL2(): void {
+    if (this.request.reason === "base_fail_check") {
+      this.finishBaseFail();
+      return;
+    }
     const last = this.l2.at(-1);
     if (last === undefined) return;
     const result = this.results[last.index];
@@ -788,17 +897,27 @@ class Run {
     let tests: TestMetrics = { ...result.tests, diff_coverage_pct: this.diffCoverage };
     if (this.l2.length > 1) {
       const rel = `${this.evidenceRoot}/l2-combined.inventory.json`;
-      this.writes.push({ rel, redact: true, json: inventoryOf(combined) });
+      this.writes.push({ rel, redact: true, json: inventoryOf(combined), normalize: renormalize });
       tests = { ...tests, ...countsOf(inventoryOf(combined).tests), inventory: rel };
     }
     let monotonic: MonotonicViolation[] = [];
     const previous = this.request.compare_to;
-    if (previous !== undefined && this.request.reason !== "base_fail_check") {
-      const before = this.readInventory(previous.inventory);
-      if (before !== null) {
+    if (previous !== undefined) {
+      const known = this.knownValues();
+      const before = this.readInventory(previous.inventory, known);
+      if (before === null) {
+        // §6.8: a comparison that cannot run never passes silently.
+        this.note(
+          "monotonic",
+          `monotonic metrics not compared: the previous inventory ${previous.inventory} is missing or not a valid test inventory`,
+        );
+        this.results.push(
+          this.infraResult("monotonic", "L2", "verify", true, `${this.evidenceRoot}/monotonic.log`),
+        );
+      } else {
         monotonic = monotonicViolations(
           {
-            inventory: inventoryOf(combined),
+            inventory: redactedInventory(combined, known),
             line_coverage_pct: tests.line_coverage_pct,
             diff_coverage_pct: tests.diff_coverage_pct,
           },
@@ -807,10 +926,16 @@ class Run {
             line_coverage_pct: previous.line_coverage_pct,
             diff_coverage_pct: previous.diff_coverage_pct,
           },
-          this.request.tests === undefined ? null : new Set(this.request.tests),
+          this.request.tests === undefined
+            ? null
+            : new Set(this.request.tests.map((id) => redactSecrets(id, known))),
         );
       }
     }
+    const keep =
+      result.status === "fail" &&
+      result.failure_class !== undefined &&
+      KEPT_CLASSES.has(result.failure_class);
     const updated: GateResult =
       monotonic.length === 0
         ? { ...result, tests }
@@ -820,21 +945,19 @@ class Run {
             status: "fail",
             monotonic,
             new_violations: result.new_violations + monotonic.length,
-            failure_class: "product",
+            failure_class: keep ? (result.failure_class ?? "product") : "product",
             evidence: [...result.evidence, { type: "command_output", ref: tests.inventory }],
           };
     this.results[last.index] = updated;
   }
 
-  private readInventory(rel: string): ReturnType<typeof inventoryOf> | null {
+  /** A previous run's inventory (evidence, so redacted), redacted again with today's values. */
+  private readInventory(rel: string, known: readonly string[]): TestInventory | null {
+    const abs = join(this.deps.repoRoot, rel);
+    if (!resolvesInside(this.deps.repoRoot, abs)) return null;
     try {
-      const raw = JSON.parse(readFileSync(join(this.deps.repoRoot, rel), "utf8")) as {
-        tests?: unknown;
-      };
-      const tests = Array.isArray(raw.tests)
-        ? (raw.tests as ReturnType<typeof inventoryOf>["tests"])
-        : [];
-      return inventoryOf(tests);
+      const parsed = TestInventorySchema.safeParse(JSON.parse(readFileSync(abs, "utf8")));
+      return parsed.success ? redactedInventory(parsed.data.tests, known) : null;
     } catch {
       return null;
     }
@@ -867,7 +990,14 @@ class Run {
     let fresh = parsed.findings;
     if (fresh.length > 0 && this.baselineApplies(gate)) {
       const facts = await this.baseline(gate);
-      fresh = fresh.filter((f) => !facts.findingKeys.has(findingKey(f)));
+      const remaining = new Map(facts.findingKeys);
+      fresh = fresh.filter((f) => {
+        const key = findingKey(f);
+        const left = remaining.get(key) ?? 0;
+        if (left === 0) return true;
+        remaining.set(key, left - 1);
+        return false;
+      });
     }
     const baselineCount = parsed.findings.length - fresh.length;
     const sarif = isSarif(doc);
@@ -952,7 +1082,7 @@ class Run {
   private async computeBaseline(gate: Gate): Promise<BaselineFacts> {
     const unusable = (why: string): BaselineFacts => ({
       failingTests: new Set(),
-      findingKeys: new Set(),
+      findingKeys: new Map(),
       unusable: why,
     });
     try {
@@ -987,7 +1117,7 @@ class Run {
         const failing = parseJunit(execution.reportText).filter(
           (c) => c.status === "fail" || c.status === "error",
         );
-        return { failingTests: new Set(failing.map((c) => c.id)), findingKeys: new Set() };
+        return { failingTests: new Set(failing.map((c) => c.id)), findingKeys: new Map() };
       }
       const doc: unknown = JSON.parse(execution.reportText);
       const ctx = {
@@ -997,7 +1127,9 @@ class Run {
       };
       const parsed = isSarif(doc) ? parseSarif(doc, ctx) : parseJsonFindings(doc, ctx);
       this.secrets.push(...parsed.secrets);
-      return { failingTests: new Set(), findingKeys: new Set(parsed.findings.map(findingKey)) };
+      const keys = new Map<string, number>();
+      for (const f of parsed.findings) keys.set(findingKey(f), (keys.get(findingKey(f)) ?? 0) + 1);
+      return { failingTests: new Set(), findingKeys: keys };
     } catch (error) {
       return unusable(error instanceof Error ? error.message : String(error));
     }
@@ -1005,15 +1137,31 @@ class Run {
 
   // ------------------------------------------------------------ hidden tests
 
-  /** Copies the task's hidden acceptance tests into the checkout (§7.3), regular files only. */
+  /**
+   * Copies the hidden acceptance tests (§7.3) of the run's tasks into the checkout, regular files
+   * only. A task run copies its own task's. A feature run (Final Review) would copy every task's
+   * of the feature, but `GateRunRequest` does not name them yet (contract proposal), so it copies
+   * none and says so in evidence; `finalReviewStepsCovered` then does not report step 2.
+   */
   private copyHidden(): void {
     const r = this.request;
-    if (!r.include_hidden || r.task === undefined) return;
+    if (!r.include_hidden) return;
+    if (r.task === undefined) {
+      this.note(
+        "hidden-tests",
+        "hidden acceptance tests were not copied: the request does not name the feature's tasks, so this run is not a full acceptance run (§6.7a step 2)",
+      );
+      return;
+    }
+    this.copyHiddenOf(r.task);
+  }
+
+  private copyHiddenOf(task: string): void {
     const dir = join(
       this.deps.vtcHome,
       HIDDEN_TESTS.homeDir,
       engineRepoKey(this.deps.repoRoot),
-      r.task,
+      task,
     );
     if (!existsSync(dir)) return;
     const walk = (abs: string, rel: string): void => {
@@ -1049,7 +1197,10 @@ class Run {
       filesScope: r.files_scope,
       protected: r.protected,
     };
-    const report = await checkWriteScope(this.deps.git, scopeRequest);
+    const report = await checkWriteScope(this.deps.git, scopeRequest, [
+      ...DEFAULT_PROTECTED_GLOBS,
+      ...(this.config?.tests.protected_configs ?? []),
+    ]);
     const findings: ToolFinding[] = report.violations.slice(0, MAX_FINDINGS).map((v) => ({
       tool: "vtc-write-scope",
       rule_id: v.kind,
@@ -1077,7 +1228,45 @@ class Run {
 
   // -------------------------------------------------------------- finishing
 
+  /**
+   * The report. Never throws (GateRunner.run): if writing evidence or validating the report
+   * fails, the result is a minimal `infra_error` report without evidence.
+   */
   private finish(): GateReport {
+    try {
+      return this.buildReport();
+    } catch (error) {
+      try {
+        writeRepoFile(
+          this.deps.repoRoot,
+          `${this.stateRoot}/gate-runner.log`,
+          `report could not be written: ${errorText(error)}\n`,
+        );
+      } catch {
+        // nothing more to do: the report below says what happened
+      }
+      const r = this.request;
+      const results = [
+        this.infraResult("gate-runner", "L0", "verify", true, `${this.stateRoot}/gate-runner.log`),
+      ];
+      return {
+        run: r.run,
+        ...(r.task === undefined ? {} : { task: r.task }),
+        ...(r.feature === undefined ? {} : { feature: r.feature }),
+        reason: r.reason,
+        scope: r.scope,
+        base: r.base,
+        head: r.head,
+        expect: r.expect,
+        results,
+        verdict: gateReportVerdict(results),
+        started_at: this.started.toISOString(),
+        finished_at: this.now().toISOString(),
+      };
+    }
+  }
+
+  private buildReport(): GateReport {
     const r = this.request;
     const owner = ownerOf(r);
     let traceability: string | undefined;
@@ -1099,6 +1288,10 @@ class Run {
           builtAt: this.now().toISOString(),
         }),
       });
+      this.note(
+        "traceability",
+        "scope_creep is not computed yet: it needs per-test coverage contexts (§7.4), so an empty list means not computed, not none found",
+      );
     }
     const known = knownSecretValues([this.deps.repoRoot, this.checkoutAbs], this.secrets);
     flushWrites(this.deps.repoRoot, this.writes, known);
@@ -1148,6 +1341,18 @@ export const createGateRunnerWith = (
   const env = options.env ?? process.env;
   return {
     run: (request) => new Run(deps, scanners, env, request).execute(),
-    checkWriteScope: (request) => checkWriteScope(deps.git, request),
+    checkWriteScope: async (request) => {
+      // The project's protected configs as calibrated at the base commit, plus the defaults.
+      let globs: readonly string[] = [];
+      try {
+        const bytes = await deps.git.readFileAtCommit(request.base, GATES_CONFIG_PATH);
+        if (bytes !== undefined) {
+          globs = parseGatesConfig(new TextDecoder().decode(bytes)).tests.protected_configs;
+        }
+      } catch {
+        // an unreadable gates.yml: the defaults still apply
+      }
+      return checkWriteScope(deps.git, request, [...DEFAULT_PROTECTED_GLOBS, ...globs]);
+    },
   };
 };

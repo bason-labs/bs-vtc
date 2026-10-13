@@ -10,6 +10,7 @@ import {
   clipRule,
   clipTitle,
   relativeLocation,
+  sourceLine,
   type ParseContext,
   type ParsedFinding,
   type ParsedFindings,
@@ -67,6 +68,13 @@ const base = (
     fields.endLine !== undefined && start !== undefined && fields.endLine >= start
       ? fields.endLine
       : undefined;
+  const path = relativeLocation(fields.path, ctx);
+  const snippet =
+    fields.snippet === undefined || fields.snippet === ""
+      ? fields.symbol === undefined
+        ? sourceLine(ctx, path, start)
+        : undefined
+      : fields.snippet;
   return {
     tool,
     rule_id: clipRule(fields.rule),
@@ -76,14 +84,12 @@ const base = (
       ? {}
       : { message: clipMessage(fields.message) }),
     location: {
-      path: relativeLocation(fields.path, ctx),
+      path,
       ...(fields.symbol === undefined ? {} : { symbol: fields.symbol.slice(0, 512) }),
       ...(start === undefined ? {} : { line: start }),
       ...(end === undefined ? {} : { end_line: end }),
     },
-    ...(fields.snippet === undefined || fields.snippet === ""
-      ? {}
-      : { snippet: clipMessage(fields.snippet) }),
+    ...(snippet === undefined ? {} : { snippet: clipMessage(snippet) }),
     index,
   };
 };
