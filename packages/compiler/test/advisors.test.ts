@@ -17,6 +17,7 @@ import {
 import {
   ADVISOR_EXITS,
   ADVISOR_EXPORT_ARTIFACT,
+  ADVISOR_QUESTION_ARTIFACT,
   ADVISOR_REVIEWER,
   ADVISOR_WRITE_PATHS,
   advisorContractErrors,
@@ -24,7 +25,7 @@ import {
   loadRoles,
   type CompileOutput,
 } from "../src/index.js";
-import { ADVISOR_FIXTURE, fixtureFiles } from "./fixtures.js";
+import { ADVISOR_FIXTURE, FIXTURE, fixtureFiles } from "./fixtures.js";
 
 const withAdvisor = (overrides: Record<string, string | null> = {}) =>
   fixtureFiles({ ...ADVISOR_FIXTURE, ...overrides });
@@ -87,7 +88,9 @@ describe("advisor agents (§5.4)", () => {
     expect([...at].sort((a, b) => a - b)).toEqual(at);
     expect(body).toContain("The engine checks your result against it");
     expect(body).toContain("the human who asked reads your advice");
-    expect(body).toContain("- Inputs (artifact types in your task pack): request");
+    expect(body).toContain(
+      "- Inputs (artifact types in your task pack): advisor_question, request, cost_history",
+    );
     expect(body).not.toContain("the Lead's request may list");
     expect(body.indexOf("ESTIMATOR-EDITABLE")).toBeGreaterThan(at[2] ?? 0);
   });
@@ -133,6 +136,7 @@ describe("advisor contract rules", () => {
     expect(ADVISOR_EXITS).toEqual(["done", "blocked", "unknown"]);
     expect(ADVISOR_WRITE_PATHS).toEqual([".vtc/exports/**"]);
     expect(ADVISOR_EXPORT_ARTIFACT).toBe("client_export");
+    expect(ADVISOR_QUESTION_ARTIFACT).toBe("advisor_question");
   });
 
   it.each([
@@ -224,6 +228,35 @@ describe("advisor contract rules", () => {
         'success_criteria:\n  - { id: math, description: "Sums add up." }\nreviewer: human',
       ),
       "roles/advisor_estimator: advisors declare no success_criteria: the engine runs no success checks on advice",
+    ],
+    [
+      "an advisor that does not read the human's question as advisor_question",
+      {},
+      estimator(
+        "inputs: [advisor_question, request, cost_history]",
+        "inputs: [request, cost_history]",
+      ),
+      "roles/advisor_estimator: advisors read the human's question as their first input, advisor_question (the run's request is `request`, not the question)",
+    ],
+    [
+      "an advisor that lists advisor_question after another input",
+      {},
+      estimator(
+        "inputs: [advisor_question, request, cost_history]",
+        "inputs: [request, advisor_question, cost_history]",
+      ),
+      "roles/advisor_estimator: advisors read the human's question as their first input, advisor_question (the run's request is `request`, not the question)",
+    ],
+    [
+      "a run role that reads advisor_question",
+      {},
+      {
+        "roles/qa/role.yaml": (FIXTURE["roles/qa/role.yaml"] ?? "").replace(
+          "inputs: [spec, task]",
+          "inputs: [advisor_question, spec, task]",
+        ),
+      },
+      "roles/qa: only advisors read advisor_question (the consult question)",
     ],
     [
       "an advisor with modes",

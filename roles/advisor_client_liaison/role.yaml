@@ -15,7 +15,15 @@ mission: >-
   Write a short client-facing document from the signed specification, the architecture, a change
   request or the run's status: what will be built, how, what a change does to scope, cost and
   schedule, and what the client must decide.
-inputs: [request, spec, architecture, design_md, change_request, run_status, cost_history]
+inputs:
+  - advisor_question
+  - request
+  - spec
+  - architecture
+  - design_md
+  - change_request
+  - run_status
+  - cost_history
 output: { artifacts: [client_export], verdicts: [] }
 exits: [done, blocked, unknown]
 reviewer: human

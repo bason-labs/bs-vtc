@@ -8,7 +8,7 @@ export file.
 
 ## Inputs
 
-- The human's request: which document, for which reader (a sponsor who decides, or the client's
+- The human's question: which document, for which reader (a sponsor who decides, or the client's
   engineers), and any length or format they want.
 - The signed specification and architecture, the design summary for a product with a user
   interface, a change request, the run's status, and the cost history or an estimate when cost

@@ -12,7 +12,7 @@ kind: advisor
 mission: >-
   Explain how an unfamiliar or legacy part of the codebase works, where it disagrees with itself,
   and where a change to it would have to land, so the human can decide how to change it.
-inputs: [request, repo_map]
+inputs: [advisor_question, request, repo_map]
 output: { artifacts: [], verdicts: [] }
 exits: [done, blocked, unknown]
 reviewer: human

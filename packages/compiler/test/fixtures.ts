@@ -124,7 +124,7 @@ export const ADVISOR_FIXTURE: Readonly<Record<string, string>> = {
 version: 1.0.0
 kind: advisor
 mission: Estimate effort and cost from the cost history.
-inputs: [request, cost_history]
+inputs: [advisor_question, request, cost_history]
 output: { artifacts: [], verdicts: [] }
 exits: [done, blocked, unknown]
 reviewer: human

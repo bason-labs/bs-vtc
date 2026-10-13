@@ -15,7 +15,7 @@ mission: >-
   From the evidence the human brings and the code, find the most likely cause of a production
   incident or a hard bug, the next observation that would confirm it, and a fix direction with
   the guard that would have caught it.
-inputs: [request, attachments, repo_map]
+inputs: [advisor_question, request, attachments, repo_map]
 output: { artifacts: [], verdicts: [] }
 exits: [done, blocked, unknown]
 reviewer: human

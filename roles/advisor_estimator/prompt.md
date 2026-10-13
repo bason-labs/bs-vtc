@@ -8,8 +8,9 @@ actually spent before. An estimate is not a price and not a promise.
 
 ## Inputs
 
-- The request or change request to estimate, and the specification, architecture and task plan
-  when they exist.
+- The human's question, which says what to estimate: work it describes, or the run's request, a
+  change request or the task plan it points at. Then the specification, architecture and task
+  plan when they exist.
 - The cost history: the event logs of past runs. Completed role calls carry their tokens and cost,
   tasks carry their size and risk, and status changes show rounds, parks and elapsed time.
 - Anything the human attached, such as a client brief or a scope list.

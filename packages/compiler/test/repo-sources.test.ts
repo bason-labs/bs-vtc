@@ -26,12 +26,14 @@ import {
   type RoleContract,
 } from "@vtc/shared";
 import {
+  ADVISOR_QUESTION_ARTIFACT,
   checkPluginFiles,
   claudeEngineToolName,
   compiledAgentNames,
   compilePlugins,
   HOOKS_FILE,
   loadRoles,
+  PROPOSED_ARTIFACT_TYPES,
   readSources,
   ROLE_FACING_ENGINE_TOOLS,
   type CompileOutput,
@@ -269,7 +271,12 @@ describe("the v1 roster (§5.2, §5.2a, §5.3)", () => {
         ...(m.output?.artifacts ?? []),
       ]),
     ]);
-    expect(used.filter((t) => !isKnownArtifactType(t))).toEqual([]);
+    const proposed: readonly string[] = PROPOSED_ARTIFACT_TYPES;
+    expect(used.filter((t) => !isKnownArtifactType(t) && !proposed.includes(t))).toEqual([]);
+  });
+
+  it("allows only the advisor question as a type still proposed to @vtc/shared", () => {
+    expect(PROPOSED_ARTIFACT_TYPES).toEqual([ADVISOR_QUESTION_ARTIFACT]);
   });
 });
 
@@ -290,6 +297,14 @@ describe("the compiled role contracts the engine loads (ROLE_CONTRACTS_ASSET)", 
     for (const event of ["session-start", "pre-tool-use", "subagent-stop"]) {
       expect(hooks).toContain(`vtc hook ${event} --host ${host}`);
     }
+  });
+
+  it("documents that the hooks run the `vtc` binary from PATH and what happens without it", () => {
+    const readme = readFileSync(`${ROOT}plugins/README.md`, "utf8");
+    const hooks = /^- `hooks\/hooks\.json`:[\s\S]*?(?=\n\n)/m.exec(readme)?.[0] ?? "";
+    expect(hooks).toMatch(/`vtc` binary on `PATH`/);
+    expect(hooks).toMatch(/hook error/);
+    expect(hooks).toMatch(/spine §7/);
   });
 });
 
@@ -412,6 +427,22 @@ describe("the advisors (§5.4: Tier 3; called through the engine's consult, spin
     expect(command).toMatch(/advise "<question>"/);
     const never = /## Never\n([\s\S]*?)\n\n/.exec(lead())?.[1] ?? "";
     expect(never).toMatch(/Spawn an agent that neither `next` nor `consult` returned/);
+  });
+
+  it("gives every advisor the human's question as advisor_question, apart from the run's request", () => {
+    for (const id of ADVISORS) expect(role(id)?.inputs[0], id).toBe(ADVISOR_QUESTION_ARTIFACT);
+    const protocol = readFileSync(`${ROOT}roles/_shared/advisor-protocol.md`, "utf8");
+    expect(protocol.replace(/\s+/g, " ")).toContain(
+      `is the \`${ADVISOR_QUESTION_ARTIFACT}\` input`,
+    );
+    expect(protocol).toMatch(/`request`[^.]*the run's idea or change request/);
+    expect(protocol).not.toMatch(/question[^.]*is the `request` input/);
+    expect(promptOf("advisor_estimator")).not.toMatch(
+      /^- The request or change request to estimate/m,
+    );
+    const readme = readFileSync(`${ROOT}roles/README.md`, "utf8");
+    expect(readme).not.toMatch(/question is its `request` input/);
+    expect(readme).toMatch(/`advisor_question`[\s\S]*provisional/);
   });
 
   it("drops the outside-the-engine reading from the READMEs", () => {

@@ -18,7 +18,7 @@ mission: >-
   Advise on a machine-learning, data or experiment question (model choice and evaluation, data
   pipelines and quality, metrics and A/B tests) from the code and the material the human brings,
   with the uncertainty stated.
-inputs: [request, spec, architecture, repo_map, attachments]
+inputs: [advisor_question, request, spec, architecture, repo_map, attachments]
 output: { artifacts: [], verdicts: [] }
 exits: [done, blocked, unknown]
 reviewer: human

@@ -12,7 +12,7 @@ kind: advisor
 mission: >-
   Estimate the AI cost, the rounds, the elapsed time and the human attention a request or plan
   will take, as ranges built from this project's own cost history, with the arithmetic shown.
-inputs: [request, spec, architecture, tasks, cost_history, attachments]
+inputs: [advisor_question, request, spec, architecture, tasks, cost_history, attachments]
 output: { artifacts: [], verdicts: [] }
 exits: [done, blocked, unknown]
 reviewer: human
