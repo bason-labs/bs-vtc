@@ -1,5 +1,6 @@
 /**
- * Codex sandbox profiles and headless commands (§12.1, AD-6, AD-9). Pure.
+ * Codex sandbox profiles and headless commands (§12.1, AD-6, AD-9). Pure, except that the
+ * VTC-home overlap check resolves symlinks in the paths it compares (no file is read).
  * Reviewers run in the `read-only` sandbox; write-scoped roles and engineers in `workspace-write`
  * (writes limited to the worktree, never any network). Codex has no per-path write-deny, so the
  * engine's write-scope check is the only path enforcement (§12.1). Every sandbox key a profile
@@ -20,15 +21,20 @@
  * - The role deny list (D-w): Codex has no per-command deny for a headless run, so `vtc
  *   calibrate` cannot be denied here (it confirms only in an interactive terminal, which a role
  *   run never has). Writes to the VTC home's allowlists, scanner database and hidden tests are
- *   blocked because `workspace-write` writes only the worktree (and the OS temp directory), so a
- *   profile whose worktree would contain the VTC home is refused.
+ *   blocked because `workspace-write` writes only the worktree and the OS temp roots (`$TMPDIR`,
+ *   `/tmp`; D-ag lets roles write there). So a profile whose worktree overlaps one of those
+ *   directories is refused, and when one lies under a temp root (a VTC home in the temp
+ *   directory, as in test setups) the profile takes both temp roots out of the writable set
+ *   (`exclude_tmpdir_env_var`, `exclude_slash_tmp`). Paths compare by real location, so a
+ *   symlinked worktree or VTC home cannot hide an overlap.
  * - `codex exec` has no agent flag: a headless run gets no compiled role instructions
  *   (`developer_instructions` of `.codex/agents/vtc-*.toml`), so the role rests on the prompt
  *   (the task pack). Engine-launched Codex runs (cross-family review, auto-resume) must carry the
  *   role's instructions in the prompt until the spike settles how to load them.
  */
 import { createHash } from "node:crypto";
-import { join, relative, resolve } from "node:path";
+import { tmpdir } from "node:os";
+import { join, relative } from "node:path";
 import type {
   HostCommand,
   SandboxProfile,
@@ -36,7 +42,7 @@ import type {
   SessionRef,
   SpawnRoleRequest,
 } from "@vtc/shared";
-import { vtcHomeWriteDeniedDirs } from "../common/homes.js";
+import { canonicalPath, vtcHomeWriteDeniedDirs } from "../common/homes.js";
 
 export const CODEX_BINARY = "codex";
 export const HOST = "codex";
@@ -46,11 +52,21 @@ type CodexSandboxMode = "read-only" | "workspace-write";
 export interface CodexProfileOptions {
   /** The absolute VTC home (`~/.vtc`, or `$VTC_HOME`), which no role may write (D-w). */
   readonly vtcHome: string;
+  /**
+   * The OS temp roots a `workspace-write` sandbox can write besides the worktree. Default:
+   * `$TMPDIR`, `os.tmpdir()` and `/tmp`; tests pass their own.
+   */
+  readonly tempRoots?: readonly string[];
 }
 
-/** True when `inner` is `outer` or below it. */
+const defaultTempRoots = (): string[] =>
+  [process.env.TMPDIR, tmpdir(), "/tmp"].filter(
+    (root): root is string => root !== undefined && root !== "",
+  );
+
+/** True when `inner` is `outer` or below it (both already canonical). */
 const within = (outer: string, inner: string): boolean => {
-  const rel = relative(resolve(outer), resolve(inner));
+  const rel = relative(outer, inner);
   return rel === "" || (!rel.startsWith("..") && !rel.startsWith("/") && !/^[A-Za-z]:/.test(rel));
 };
 
@@ -65,14 +81,20 @@ export const codexSandboxProfile = (
       "refusing the registries network on Codex: it cannot limit the network to package registries (§7.2), and an open network lets a role use the readable VTC install token against the engine; dependency installs are an engine-run step (D-ac)",
     );
   }
-  const exposed = vtcHomeWriteDeniedDirs(options.vtcHome).find(
-    (dir) => within(request.cwd, dir) || within(dir, request.cwd),
-  );
-  if (mode === "workspace-write" && exposed !== undefined) {
+  // compared by real location, each path resolved once
+  const denied =
+    mode === "workspace-write" ? vtcHomeWriteDeniedDirs(options.vtcHome).map(canonicalPath) : [];
+  const cwd = denied.length === 0 ? request.cwd : canonicalPath(request.cwd);
+  const exposed = denied.find((dir) => within(cwd, dir) || within(dir, cwd));
+  if (exposed !== undefined) {
     throw new Error(
       `refusing a workspace-write Codex role in ${request.cwd}: ${exposed} in the VTC home would be writable, and Codex cannot deny writes there (D-w)`,
     );
   }
+  // the temp roots are writable too (D-ag); a denied directory under one takes them out
+  const tempRoots =
+    denied.length === 0 ? [] : (options.tempRoots ?? defaultTempRoots()).map(canonicalPath);
+  const noTemp = denied.some((dir) => tempRoots.some((root) => within(root, dir)));
   return {
     host: HOST,
     enforced: {
@@ -85,7 +107,13 @@ export const codexSandboxProfile = (
     settings: {
       sandbox_mode: mode,
       ...(mode === "workspace-write"
-        ? { sandbox_workspace_write: { network_access: false, writable_roots: [] } }
+        ? {
+            sandbox_workspace_write: {
+              network_access: false,
+              writable_roots: [],
+              ...(noTemp ? { exclude_tmpdir_env_var: true, exclude_slash_tmp: true } : {}),
+            },
+          }
         : {}),
     },
     // config overrides, not `--sandbox`: `codex exec resume` takes only `--config` (0.162.1)
@@ -98,6 +126,14 @@ export const codexSandboxProfile = (
             "sandbox_workspace_write.network_access=false",
             "--config",
             "sandbox_workspace_write.writable_roots=[]",
+          ]
+        : []),
+      ...(noTemp
+        ? [
+            "--config",
+            "sandbox_workspace_write.exclude_tmpdir_env_var=true",
+            "--config",
+            "sandbox_workspace_write.exclude_slash_tmp=true",
           ]
         : []),
     ],

@@ -1,5 +1,5 @@
 import { homedir } from "node:os";
-import { join } from "node:path";
+import { join, win32 } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   findForbiddenHostArgs,
@@ -11,6 +11,7 @@ import {
   type SandboxProfile,
   type SpawnRoleRequest,
 } from "@vtc/shared";
+import { claudeSandboxProfile } from "../../src/claude-code/command.js";
 import { ADAPTER_FACTORIES, createClaudeCodeAdapter } from "../../src/index.js";
 import { fakeSpawner } from "../support/fake-spawner.js";
 import { fixtureText } from "../support/fixtures.js";
@@ -93,9 +94,10 @@ describe("Claude sandboxProfile (§12.1, AD-9)", () => {
       network: true,
       secretsUnreadable: true,
     });
-    expect(argAfter(p.cliArgs, "--allowedTools")).toBe("Read,Grep,Glob");
-    // the built-in tool set itself is minimal, so no settings file can bring another tool in
-    expect(argAfter(p.cliArgs, "--tools")).toBe("Read,Grep,Glob");
+    expect(argAfter(p.cliArgs, "--allowedTools")).toBe("Read,Grep,Glob,ToolSearch");
+    // the built-in tool set itself is minimal, so no settings file can bring another tool in;
+    // ToolSearch only loads deferred tool definitions (the engine MCP tools may be deferred)
+    expect(argAfter(p.cliArgs, "--tools")).toBe("Read,Grep,Glob,ToolSearch");
     expect(argAfter(p.cliArgs, "--disallowedTools")?.split(",")).toEqual([
       "Edit",
       "Write",
@@ -215,6 +217,42 @@ describe("Claude sandboxProfile (§12.1, AD-9)", () => {
     });
   });
 
+  describe("on Windows (spec §4.4 windows-x64)", () => {
+    const WINDOWS = {
+      vtcHome: "C:\\Users\\u\\.vtc",
+      codexHome: "C:\\Users\\u\\.codex",
+      claudeConfigDir: "C:\\Users\\u\\.claude",
+      platformPath: win32,
+    };
+    const windowsProfile = (tools: RoleTools) =>
+      claudeSandboxProfile({ ...profileRequest(tools), cwd: "C:\\work\\app\\wt\\T-1" }, WINDOWS);
+    const credentials = credentialsIn("C:/Users/u/.claude");
+
+    it("file-tool roles deny Claude's credential file by an absolute drive rule", () => {
+      for (const tools of [READ_ONLY, WRITE_SCOPED]) {
+        const p = windowsProfile(tools);
+        expect(p.enforced.secretsUnreadable).toBe(true);
+        const settings = settingsOf(p);
+        expect(settings.permissions.deny).toEqual(
+          expect.arrayContaining([
+            "Read(//c/Users/u/.vtc/token)",
+            "Read(//c/Users/u/.codex/**)",
+            `Read(//c${credentials.slice("C:".length)})`,
+          ]),
+        );
+        // a bare `C:/…` entry is not an AD-9 deny-list form yet, so the sandbox list (which
+        // only a shell would use) does not carry it
+        expect(settings.sandbox.filesystem.denyRead).not.toContain(credentials);
+        expect(findForbiddenHostArgs(p.cliArgs)).toEqual([]);
+        expect(findForbiddenHostArgs([JSON.stringify(p.settings)])).toEqual([]);
+      }
+    });
+
+    it("refuses a shell role explicitly until the sandbox can deny the credential file there", () => {
+      expect(() => windowsProfile(ENGINEER)).toThrow(/Windows drive path/);
+    });
+  });
+
   it("refuses a Claude config directory whose credential deny could name something else", () => {
     expect(() =>
       createClaudeCodeAdapter({ ...HOMES, claudeConfigDir: "/srv/a(b)" }).sandboxProfile(
@@ -262,6 +300,7 @@ describe("Claude sandboxProfile (§12.1, AD-9)", () => {
       "Read",
       "Grep",
       "Glob",
+      "ToolSearch",
       "Edit(./src/**)",
       "Write(./src/**)",
       "NotebookEdit(./src/**)",
@@ -299,12 +338,14 @@ describe("Claude sandboxProfile (§12.1, AD-9)", () => {
       },
     });
     expect(JSON.parse(argAfter(p.cliArgs, "--settings") ?? "")).toEqual(p.settings);
-    expect(argAfter(p.cliArgs, "--tools")).toBe("Read,Grep,Glob,Edit,Write,NotebookEdit,Bash");
+    expect(argAfter(p.cliArgs, "--tools")).toBe(
+      "Read,Grep,Glob,ToolSearch,Edit,Write,NotebookEdit,Bash",
+    );
   });
 
   it("write-scoped roles get the edit tools but no shell in the built-in tool set", () => {
     expect(argAfter(profile(WRITE_SCOPED).cliArgs, "--tools")).toBe(
-      "Read,Grep,Glob,Edit,Write,NotebookEdit",
+      "Read,Grep,Glob,ToolSearch,Edit,Write,NotebookEdit",
     );
   });
 
@@ -368,7 +409,7 @@ describe("Claude headlessCommand", () => {
       expect(args).toContain("--restricted");
       expect(args).not.toContain("--setting-sources");
       expect(args.filter((a) => a === "--settings")).toHaveLength(1);
-      expect(argAfter(args, "--tools")).toBe("Read,Grep,Glob");
+      expect(argAfter(args, "--tools")).toBe("Read,Grep,Glob,ToolSearch");
     }
   });
 
