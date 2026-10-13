@@ -1,9 +1,12 @@
 /**
  * The engine's MCP server (AD-4): the Lead-facing tools of `ENGINE_MCP_TOOLS`, each validated
  * against its input contract before the engine sees it and against its output contract before it
- * leaves. JSON-RPC 2.0, MCP methods `initialize`, `ping`, `tools/list`, `tools/call`. The official
- * MCP SDK can replace this module once the engine package may declare it (AD-15 rule 2); the wire
- * format is the same.
+ * leaves. JSON-RPC 2.0, MCP methods `initialize`, `ping`, `tools/list`, `tools/call`.
+ *
+ * Deviation from AD-4 (tracked): AD-4 names the pinned official MCP TypeScript SDK. The engine
+ * package's dependencies belong to the integrator (AD-15 rule 2); the SDK addition is proposed
+ * there, and this module is replaced by the SDK's server once it lands. Until then it keeps the
+ * same wire format and negotiates the protocol version against a fixed supported list.
  */
 import {
   CONTRACT_SCHEMAS,
@@ -15,8 +18,25 @@ import {
 } from "@vtc/shared";
 import { EngineError, type CallContext, type Engine } from "../core/index.js";
 
-/** MCP protocol revision this server speaks (it echoes a client's supported revision). */
+/** The newest MCP protocol revision this server speaks. */
 export const MCP_PROTOCOL_VERSION = "2025-06-18";
+
+/**
+ * Protocol versions this server speaks (newest first). `initialize` answers the client's version
+ * when it is one of these, otherwise the newest one (MCP version negotiation: the client then
+ * decides whether it can continue).
+ */
+export const SUPPORTED_MCP_PROTOCOL_VERSIONS = [
+  MCP_PROTOCOL_VERSION,
+  "2025-03-26",
+  "2024-11-05",
+] as const;
+
+export const negotiateProtocolVersion = (requested: unknown): string =>
+  typeof requested === "string" &&
+  (SUPPORTED_MCP_PROTOCOL_VERSIONS as readonly string[]).includes(requested)
+    ? requested
+    : MCP_PROTOCOL_VERSION;
 
 export type JsonRpcId = string | number | null;
 
@@ -191,10 +211,7 @@ export const createMcpSession = (
       switch (message.method) {
         case "initialize":
           return reply({
-            protocolVersion:
-              typeof params.protocolVersion === "string"
-                ? params.protocolVersion
-                : MCP_PROTOCOL_VERSION,
+            protocolVersion: negotiateProtocolVersion(params.protocolVersion),
             capabilities: { tools: { listChanged: false } },
             serverInfo: { name: "vtc", version: options.serverVersion },
           });

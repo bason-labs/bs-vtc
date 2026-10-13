@@ -73,8 +73,11 @@ export const failRound = (k: Kernel, h: RunHandle, taskId: string, reappeared: b
 
 /**
  * The outcome of a round once its findings are recorded: a secret or a §7.6 rule 8/9 finding
- * parks; a spec or design gap parks for the human (the BA/Designer loop is the front half's);
- * open patch or test findings fail the round; otherwise the task is built and queued.
+ * parks; a spec or design gap parks for the human (the BA/Designer loop of §6.3 step 8 is not
+ * built yet: see the delivery report); open patch or test findings fail the round; otherwise the
+ * task is built and queued. A guarded out-of-scope fault went to its owning or a new task (§6.3
+ * step 3), so it never fails the claimer's round: it is resolved on the claimer once the
+ * claimer's own gates and reviews pass.
  */
 export const settleRound = (k: Kernel, h: RunHandle, taskId: string, merge: RoundMerge): void => {
   const task = h.state.tasks.get(taskId);
@@ -109,11 +112,17 @@ export const settleRound = (k: Kernel, h: RunHandle, taskId: string, merge: Roun
     });
     return;
   }
-  if (
-    open.some((f) => f.route === "patch" || f.route === "bad_test" || f.route === "out_of_scope")
-  ) {
+  if (open.some((f) => f.route === "patch" || f.route === "bad_test")) {
     failRound(k, h, taskId, merge.reappeared);
     return;
+  }
+  for (const f of open.filter((x) => x.route === "out_of_scope")) {
+    k.emit(h, {
+      type: "finding.status_changed",
+      actor: "engine",
+      task: taskId,
+      data: { fingerprint: f.fingerprint, from: "open", to: "resolved" },
+    });
   }
   markBuilt(k, h, taskId);
 };

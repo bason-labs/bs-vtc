@@ -3,6 +3,7 @@
  * design-review pins, snapshot mode and static serving of `fixtures/dashboard-export/` (AD-20).
  */
 import {
+  chmodSync,
   mkdirSync,
   readdirSync,
   readFileSync,
@@ -376,6 +377,17 @@ describe("AD-5: localhost hardening", () => {
       });
       expect(bad.status).toBe(400);
     }
+    // a Designer can plant a symlink at a reviews path: the append is refused, never followed
+    const outside = tempDir("vtc-outside-");
+    writeFileSync(join(outside, "victim.txt"), "original\n");
+    symlinkSync(join(outside, "victim.txt"), join(repo, ".vtc/design/reviews/signup.jsonl"));
+    const planted = await call(api.port, "/api/design/reviews", {
+      method: "POST",
+      headers: auth(INSTALL),
+      body: JSON.stringify({ ...pin, screen: "signup" }),
+    });
+    expect(planted.status).toBe(400);
+    expect(readFileSync(join(outside, "victim.txt"), "utf8")).toBe("original\n");
   });
   it("the artifacts route refuses .vtc/state/, `..`, `.` segments and a symlink leaving .vtc/", async () => {
     const { api, repo } = await setup();
@@ -523,5 +535,29 @@ describe("AD-5 rule 9: the prototype origin", () => {
     expect(replies.map((r) => r.status)).toEqual([200, 200, 404, 404, 404, 403]);
     expect(replies[0]?.body).toBe("<h1>proto</h1>");
     expect(replies.some((r) => r.body.includes("raw"))).toBe(false);
+  });
+  it("answers an unreadable file, a symlink loop and a vanished file without dying", async () => {
+    const repo = tempDir("vtc-proto-");
+    writeFile(repo, ".vtc/design/prototype/index.html", "<h1>proto</h1>");
+    writeFile(repo, ".vtc/design/prototype/locked.js", "secret();");
+    chmodSync(join(repo, ".vtc/design/prototype/locked.js"), 0o000);
+    symlinkSync("loop-b", join(repo, ".vtc/design/prototype/loop-a"));
+    symlinkSync("loop-a", join(repo, ".vtc/design/prototype/loop-b"));
+    symlinkSync("gone.html", join(repo, ".vtc/design/prototype/dangling.html"));
+    const proto = await createPrototypeServer(repo);
+    servers.push(proto);
+    const replies = [
+      await call(proto.port, "/locked.js"),
+      await call(proto.port, "/loop-a"),
+      await call(proto.port, "/dangling.html"),
+    ];
+    for (const reply of replies) {
+      expect([404, 500]).toContain(reply.status);
+      expect(reply.headers["content-security-policy"]).toBe(PROTOTYPE_CSP);
+    }
+    // a root process can read mode-000 files; elsewhere the read is refused
+    if (process.getuid?.() !== 0) expect(replies[0]?.status).toBe(500);
+    expect((await call(proto.port, "/")).body).toBe("<h1>proto</h1>");
+    chmodSync(join(repo, ".vtc/design/prototype/locked.js"), 0o644);
   });
 });

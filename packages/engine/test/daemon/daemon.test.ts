@@ -204,4 +204,53 @@ describe("serveSnapshot (AD-5 rule 7)", () => {
       await snapshot.close();
     }
   });
+  it("redacts the repo's .env values in design-review pins it appends (AD-18 rule 1)", async () => {
+    const repo = tempDir("vtc-snap-");
+    writeFileSync(join(repo, ".env"), "DB_PASSWORD=correct-horse-battery\n");
+    const snapshot = await serveSnapshot({
+      repoRoot: repo,
+      vtcHome: shortHome(),
+      installToken: TOKEN,
+      assets: emptyAssets,
+      versions: { engine: "0.0.0", contracts: CONTRACTS_VERSION },
+    });
+    try {
+      const status = await new Promise<number>((resolve, reject) => {
+        const req = request(
+          {
+            host: "127.0.0.1",
+            port: snapshot.port,
+            path: "/api/design/reviews",
+            method: "POST",
+            headers: {
+              host: `127.0.0.1:${String(snapshot.port)}`,
+              authorization: `Bearer ${TOKEN}`,
+            },
+          },
+          (res) => {
+            res.resume();
+            resolve(res.statusCode ?? 0);
+          },
+        );
+        req.on("error", reject);
+        req.end(
+          JSON.stringify({
+            screen: "login",
+            state: "empty",
+            viewport: 1280,
+            theme: "light",
+            x_pct: 1,
+            y_pct: 2,
+            comment: "the password correct-horse-battery shows",
+          }),
+        );
+      });
+      expect(status).toBe(200);
+      const pins = readFileSync(join(repo, ".vtc/design/reviews/login.jsonl"), "utf8");
+      expect(pins).not.toContain("correct-horse-battery");
+      expect(pins).toContain("[REDACTED:known_value]");
+    } finally {
+      await snapshot.close();
+    }
+  });
 });

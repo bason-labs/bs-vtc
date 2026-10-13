@@ -18,7 +18,7 @@ import { raisedBudget, usd } from "./budget.js";
 import { parkEscalation } from "./escalations.js";
 import { EngineError, type Kernel, type RunHandle } from "./kernel.js";
 import { assertTaskTransition } from "./machines.js";
-import { nextEscalationId, taskFindings } from "./queries.js";
+import { lastBuilt, nextEscalationId, taskFindings } from "./queries.js";
 import { transitiveDependents } from "./scheduler.js";
 
 export interface StatusOptions {
@@ -136,7 +136,10 @@ const resumeTarget = (
   if (reason === "cap" || reason === "stuck") {
     if (effect === "waive") {
       const open = taskFindings(h.state, taskId).filter((f) => f.status === "open");
-      return open.length === 0 ? "built" : "fixing";
+      if (open.length > 0) return "fixing";
+      // Nothing left open: the last built head goes to the merge queue; a task that never built
+      // (e.g. stuck in QA's base check) retries from its checkpoint.
+      return lastBuilt(h.state, taskId)?.head === undefined ? checkpoint : "built";
     }
     return "fixing";
   }
@@ -219,5 +222,8 @@ export const applyAnswer = (
   }
   if (task.status !== "parked") return;
   if (escalation.reason === "spec_question") return;
-  setTaskStatus(k, h, taskId, resumeTarget(h, taskId, escalation.reason, option.effect));
+  const target = resumeTarget(h, taskId, escalation.reason, option.effect);
+  setTaskStatus(k, h, taskId, target);
+  // All clear (§6.3 step 10): a built task always continues into the merge queue.
+  if (target === "built") setTaskStatus(k, h, taskId, "queued");
 };

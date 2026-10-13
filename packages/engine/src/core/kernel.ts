@@ -17,6 +17,7 @@ import type {
 import type { PullRequestService, Workspace } from "../git/index.js";
 import type { EventDraft, EventLogWriter } from "./event-log.js";
 import type { EngineLock } from "./lock.js";
+import type { CheckoutRecord } from "./phase-scope.js";
 import type { RoleRegistry } from "./roles.js";
 import type { RunState } from "./state.js";
 
@@ -86,4 +87,6 @@ export interface Kernel {
   allStates(): Iterable<RunState>;
   /** In-memory per-task hint: the round's head has the same tree as the previous round's. */
   readonly identicalTree: Map<string, boolean>;
+  /** The user's checkout as it was when each phase role was dispatched (AD-7 rule 7). */
+  readonly checkouts: Map<string, CheckoutRecord>;
 }

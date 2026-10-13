@@ -71,7 +71,13 @@ export const SPEC_ONE = [
   "",
 ].join("\n");
 
-type Verdict = "pass" | "fail" | "infra" | { readonly fail: readonly ToolFindingInput[] };
+type Verdict =
+  | "pass"
+  | "fail"
+  | "infra"
+  /** A failure the Gate Runner classified `flaky` (§6.3 step 8: one re-run). */
+  | "flaky"
+  | { readonly fail: readonly ToolFindingInput[] };
 
 export interface FakeGates extends GateRunner {
   readonly requests: GateRunRequest[];
@@ -103,7 +109,12 @@ const report = (request: GateRunRequest, verdict: Verdict, now: Date): GateRepor
         new_violations: findings.length,
         baseline_violations: 0,
         findings,
-        ...(failed ? { failure_class: verdict === "infra" ? "infra" : "product" } : {}),
+        ...(failed
+          ? {
+              failure_class:
+                verdict === "infra" ? "infra" : verdict === "flaky" ? "flaky" : "product",
+            }
+          : {}),
         evidence: [],
         duration_ms: 5,
       },
@@ -210,6 +221,8 @@ export interface Harness {
 
 export interface HarnessOptions {
   readonly project?: Record<string, unknown>;
+  /** Overrides of the fake Claude Code adapter's capabilities. */
+  readonly capabilities?: Partial<HostAdapter["capabilities"]>;
   readonly gatesYml?: Record<string, unknown> | null;
   readonly files?: Record<string, string>;
 }
@@ -253,6 +266,7 @@ export const createHarness = (options: HarnessOptions = {}): Harness => {
       headless: true,
       turnCap: true,
       budgetCap: true,
+      ...options.capabilities,
     },
     install: () => Promise.reject(new Error("not in tests")),
     spawnRole: (request) => {

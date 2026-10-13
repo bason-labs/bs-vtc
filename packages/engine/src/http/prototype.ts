@@ -2,9 +2,11 @@
  * The prototype origin (AD-5 rule 9): agent-written HTML/JS under `.vtc/design/prototype/` served
  * from its own 127.0.0.1 port, never the API's origin. No token (git-tracked files, no run data),
  * Host checked, `PROTOTYPE_CSP` on every response, no `/api/` route, nothing outside the root.
+ * The files are agent-written, so every filesystem error (an unreadable file, a symlink loop, a
+ * file removed mid-request) answers 404 or 500; none may escape and stop the daemon.
  */
-import { existsSync, readFileSync, realpathSync, statSync } from "node:fs";
-import { createServer, type Server, type ServerResponse } from "node:http";
+import { closeSync, fstatSync, openSync, readSync, realpathSync } from "node:fs";
+import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
 import { join, sep } from "node:path";
 import { dashboardAssetHeaders, ENGINE_HTTP } from "@vtc/shared";
 
@@ -27,7 +29,47 @@ export const createPrototypeServer = async (
     });
     res.end(text);
   };
-  const server: Server = createServer((req, res) => {
+  /** The resolved file under the root, opened once (`null` = 404). */
+  const open = (segments: readonly string[]): { fd: number } | null => {
+    let realRoot: string;
+    try {
+      realRoot = realpathSync(root);
+    } catch {
+      return null;
+    }
+    for (const candidate of [join(root, ...segments), join(root, ...segments, "index.html")]) {
+      let real: string;
+      try {
+        real = realpathSync(candidate);
+      } catch {
+        continue;
+      }
+      if (real === realRoot) continue; // the root itself: try its index.html
+      if (!real.startsWith(`${realRoot}${sep}`)) return null;
+      let fd: number;
+      try {
+        fd = openSync(real, "r");
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code === "EISDIR") continue;
+        throw error;
+      }
+      if (fstatSync(fd).isFile()) return { fd };
+      closeSync(fd);
+    }
+    return null;
+  };
+  const readAll = (fd: number): Buffer => {
+    const size = fstatSync(fd).size;
+    const buffer = Buffer.alloc(size);
+    let read = 0;
+    while (read < size) {
+      const n = readSync(fd, buffer, read, size - read, read);
+      if (n === 0) break;
+      read += n;
+    }
+    return buffer.subarray(0, read);
+  };
+  const handle = (req: IncomingMessage, res: ServerResponse): void => {
     const host = req.headers.host?.toLowerCase();
     if (host !== `127.0.0.1:${String(bound)}` && host !== `localhost:${String(bound)}`) {
       fail(res, 403, "forbidden");
@@ -54,17 +96,16 @@ export const createPrototypeServer = async (
       fail(res, 400, "bad path");
       return;
     }
-    let file = join(root, ...segments);
-    if (existsSync(file) && statSync(file).isDirectory()) file = join(file, "index.html");
-    if (!existsSync(root) || !existsSync(file)) {
+    const opened = open(segments);
+    if (opened === null) {
       fail(res, 404, "not found");
       return;
     }
-    const real = realpathSync(file);
-    const realRoot = realpathSync(root);
-    if (!real.startsWith(`${realRoot}${sep}`) || !statSync(real).isFile()) {
-      fail(res, 404, "not found");
-      return;
+    let body: Buffer;
+    try {
+      body = readAll(opened.fd);
+    } finally {
+      closeSync(opened.fd);
     }
     const headers = dashboardAssetHeaders(segments.join("/") || "index.html");
     res.writeHead(200, {
@@ -73,7 +114,15 @@ export const createPrototypeServer = async (
       "cache-control": "no-cache",
       "content-security-policy": ENGINE_HTTP.prototype.csp,
     });
-    res.end(readFileSync(real));
+    res.end(body);
+  };
+  const server: Server = createServer((req, res) => {
+    try {
+      handle(req, res);
+    } catch {
+      if (res.headersSent) res.destroy();
+      else fail(res, 500, "the file could not be read");
+    }
   });
   await new Promise<void>((resolve, reject) => {
     server.once("error", reject);

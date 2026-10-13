@@ -8,9 +8,10 @@
  * driver (the cli injects `openStorage`).
  */
 import { createHash } from "node:crypto";
-import { existsSync, mkdirSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, statSync } from "node:fs";
 import { dirname, join } from "node:path";
 import {
+  dotenvValues,
   ENGINE_HTTP,
   ENGINE_INSTANCE,
   engineSocketFile,
@@ -44,6 +45,35 @@ import {
   type PrototypeServer,
 } from "../http/index.js";
 import { serveEngineSocket } from "../mcp/index.js";
+
+/**
+ * The repo's `.env` values (AD-18 rule 1), re-read when the file changes: snapshot mode still
+ * appends design-review pins to git-tracked `.vtc/design/reviews/`, redacted like the engine's.
+ */
+export const dotenvSecrets = (repoRoot: string): (() => readonly string[]) => {
+  let cached: { stamp: number; values: readonly string[] } | null = null;
+  return () => {
+    const path = join(repoRoot, ".env");
+    const stamp = ((): number => {
+      try {
+        return statSync(path).mtimeMs;
+      } catch {
+        return -1;
+      }
+    })();
+    if (cached?.stamp !== stamp) {
+      const values = ((): readonly string[] => {
+        try {
+          return stamp < 0 ? [] : dotenvValues(readFileSync(path, "utf8"));
+        } catch {
+          return [];
+        }
+      })();
+      cached = { stamp, values };
+    }
+    return cached.values;
+  };
+};
 
 /** How often the daemon checks whether it is idle (AD-12 rule 4). */
 export const IDLE_CHECK_MS = 60_000;
@@ -267,7 +297,7 @@ export const serveSnapshot: ServeSnapshot = async (deps) => {
     repoRoot: deps.repoRoot,
     ingest: null,
     subscribe: null,
-    secrets: () => [],
+    secrets: dotenvSecrets(deps.repoRoot),
     now,
   });
   let resolveClosed: () => void = () => undefined;

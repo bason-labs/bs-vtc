@@ -1,16 +1,33 @@
 /**
  * Budget controller (§11; AD-8 rules 1 and 5). Pure. Unit: list-price-equivalent USD. Initial
- * task budgets come from `project.yaml` by size (S $1.50, M $5, L $15 by default); at 70% the
- * reviewers drop one tier; at 100% the task finishes its current turn and parks with evidence;
- * there are no automatic raises, and a human may raise a budget to at most 2× (§6.5).
+ * task budgets come from `project.yaml` by size (S $1.50, M $5, L $15 by default); within a task
+ * the Engineer may spend at most 45% and all reviewers together at most 25% (over its share the
+ * Engineer is not dispatched again and the task parks; over theirs the reviewers drop one tier);
+ * at 70% the reviewers drop one tier; at 100% the task finishes its current turn and parks with
+ * evidence; there are no automatic raises, and a human may raise a budget to at most 2× (§6.5).
  */
 import { MAX_BUDGET_RAISE_FACTOR, type ProjectConfig, type TaskSize } from "@vtc/shared";
 
 /** At this share of its budget a task's reviewers drop one model tier (§11). */
 export const REVIEWER_DROP_SHARE = 0.7;
 
-/** Planned shares within a task (§11): Engineer at most 45%, all reviewers at most 25%. */
+/** Shares within a task (§11): Engineer at most 45%, all reviewers at most 25%. */
 export const TASK_SHARES = { engineer: 0.45, reviewers: 0.25 } as const;
+
+/** Priced spend of a task's runs by share (unpriced runs count 0 here; they are flagged in the summary). */
+export interface ShareSpend {
+  readonly engineer: number;
+  readonly reviewers: number;
+}
+
+/** Which shares a task has used up (spend strictly over its share of the budget). */
+export const sharesExceeded = (
+  spend: ShareSpend,
+  budget: number,
+): { readonly engineer: boolean; readonly reviewers: boolean } => ({
+  engineer: spend.engineer > budget * TASK_SHARES.engineer,
+  reviewers: spend.reviewers > budget * TASK_SHARES.reviewers,
+});
 
 export const taskBudgetFor = (size: TaskSize, config: Pick<ProjectConfig, "budgets">): number =>
   config.budgets.task_usd[size];

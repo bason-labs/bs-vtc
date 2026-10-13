@@ -4,19 +4,18 @@
  * drafts, verdict evidence) is what triage reads when the last reviewer of a round reports, even
  * across an engine restart.
  */
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
-import { dirname, join } from "node:path";
+import { existsSync, readFileSync } from "node:fs";
+import { join } from "node:path";
 import { RoleResultSchema, SlugSchema, type RoleResult } from "@vtc/shared";
+import { writeRepoFile } from "../git/index.js";
 
 export const RESULTS_DIR = ".vtc/state/results";
 
-const pathOf = (repoRoot: string, actionId: string): string =>
-  join(repoRoot, RESULTS_DIR, `${SlugSchema.parse(actionId)}.json`);
+const relOf = (actionId: string): string => `${RESULTS_DIR}/${SlugSchema.parse(actionId)}.json`;
+const pathOf = (repoRoot: string, actionId: string): string => join(repoRoot, relOf(actionId));
 
 export const saveResult = (repoRoot: string, actionId: string, result: RoleResult): void => {
-  const path = pathOf(repoRoot, actionId);
-  mkdirSync(dirname(path), { recursive: true });
-  writeFileSync(path, `${JSON.stringify(result)}\n`, { mode: 0o600 });
+  writeRepoFile(repoRoot, relOf(actionId), `${JSON.stringify(result)}\n`, 0o600);
 };
 
 export const loadResult = (repoRoot: string, actionId: string): RoleResult | undefined => {

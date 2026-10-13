@@ -6,7 +6,7 @@
 import type { Finding } from "@vtc/shared";
 import { resolves, type EvidenceContext } from "./evidence.js";
 import type { Kernel, RunHandle } from "./kernel.js";
-import { lastBuilt } from "./queries.js";
+import { isReviewer, lastBuilt } from "./queries.js";
 import { frozenSpecItems, taskAcceptanceCriteria } from "./read-model.js";
 import { loadResult } from "./results.js";
 import { reviewersFor, VISUAL_QA_CALLS } from "./router.js";
@@ -14,11 +14,7 @@ import type { RoleRunRecord } from "./state.js";
 import { findingFromDraft, findingFromVerdict } from "./triage.js";
 import { recordRoundFindings, settleRound } from "./verify.js";
 
-export const isReviewer = (run: Pick<RoleRunRecord, "role" | "mode">): boolean =>
-  run.role === "spec_verifier" ||
-  run.role === "visual_qa" ||
-  (run.role === "qa" && run.mode === "judge") ||
-  (run.role === "security" && run.mode === "verify");
+export { isReviewer };
 
 /** Resolves evidence against a commit (or the working tree), the frozen spec and git. */
 export const evidenceContext = (k: Kernel, h: RunHandle, head: string | null): EvidenceContext => ({
@@ -36,7 +32,11 @@ export const evidenceContext = (k: Kernel, h: RunHandle, head: string | null): E
   },
 });
 
-/** The reviewer runs accepted for the task's built head, when every attached slot reported. */
+/**
+ * The reviewer runs accepted for the task's built head, when every attached slot reported. A task
+ * the router attaches no reviewer to (an engine-created task with no ACs, low risk, no UI) is
+ * complete with no runs, so triage settles its round on the gates alone.
+ */
 export const completedReviews = (
   k: Kernel,
   h: RunHandle,
@@ -62,7 +62,7 @@ export const completedReviews = (
           (r) => r.role === slot.role && r.mode === slot.mode && r.subject === slot.subject,
         ),
   );
-  return complete && slots.length > 0 ? runs : null;
+  return complete ? runs : null;
 };
 
 /** The round's findings from its reviews (evidence checked; failing verdicts without findings). */

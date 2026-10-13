@@ -4,9 +4,7 @@
  * the Authorization header, never cookies; no CORS headers; two size-limited, validated data
  * writes; the dashboard's static export at `/` (AD-20). A transport over the engine's read model.
  */
-import { appendFileSync, mkdirSync } from "node:fs";
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
-import { dirname, join } from "node:path";
 import {
   CONTRACT_SCHEMAS,
   dashboardAssetHeaders,
@@ -24,6 +22,7 @@ import {
   type VtcEvent,
 } from "@vtc/shared";
 import type { ReadModel, ReadResult } from "../core/index.js";
+import { appendRepoFile, UnsafePathError } from "../git/index.js";
 import { sameSecret, type SessionStore } from "./sessions.js";
 
 type RouteName = keyof typeof ENGINE_HTTP.routes;
@@ -115,9 +114,14 @@ const matchRoute = (
 const readBody = (req: IncomingMessage, limit: number): Promise<string> =>
   new Promise((resolve, reject) => {
     const declared = Number(req.headers["content-length"] ?? "0");
-    if (Number.isFinite(declared) && declared > limit) {
+    // Over the limit: stop reading, answer 413, then close the connection (see the server).
+    const tooLarge = (): void => {
+      req.pause();
+      req.removeAllListeners("data");
       reject(new HttpFailure(413, "payload_too_large", `body larger than ${String(limit)} bytes`));
-      req.resume();
+    };
+    if (Number.isFinite(declared) && declared > limit) {
+      tooLarge();
       return;
     }
     const chunks: Buffer[] = [];
@@ -125,11 +129,8 @@ const readBody = (req: IncomingMessage, limit: number): Promise<string> =>
     req.on("data", (chunk: Buffer) => {
       size += chunk.length;
       if (size > limit) {
-        // Answer 413 at once and discard the rest; nothing over the limit is kept.
         chunks.length = 0;
-        reject(
-          new HttpFailure(413, "payload_too_large", `body larger than ${String(limit)} bytes`),
-        );
+        tooLarge();
         return;
       }
       chunks.push(chunk);
@@ -327,12 +328,18 @@ export const createHttpApi = async (options: HttpApiOptions): Promise<HttpApi> =
           "DesignReviewCommentInput",
         ) as DesignReviewCommentInput;
         const path = `.vtc/design/reviews/${body.screen}.jsonl`;
-        const abs = join(options.repoRoot, path);
-        mkdirSync(dirname(abs), { recursive: true });
-        appendFileSync(
-          abs,
-          `${JSON.stringify(redactJson({ ...body, at: now().toISOString() }, options.secrets()))}\n`,
-        );
+        try {
+          // An agent can plant a symlink under .vtc/design/: refused, never followed.
+          appendRepoFile(
+            options.repoRoot,
+            path,
+            `${JSON.stringify(redactJson({ ...body, at: now().toISOString() }, options.secrets()))}\n`,
+          );
+        } catch (error) {
+          if (error instanceof UnsafePathError)
+            throw new HttpFailure(400, "bad_request", "the review file is not a plain file");
+          throw error;
+        }
         send(res, 200, { ok: true, path });
         return;
       }
@@ -362,6 +369,11 @@ export const createHttpApi = async (options: HttpApiOptions): Promise<HttpApi> =
           await handleApi(req, res, url);
         else handleAsset(req, res, url);
       } catch (error) {
+        if (error instanceof HttpFailure && error.status === 413) {
+          // The unread rest of an oversized body is never drained: close once 413 is out.
+          if (!res.headersSent) res.setHeader("connection", "close");
+          res.once("finish", () => req.destroy());
+        }
         sendError(
           res,
           error instanceof HttpFailure

@@ -2,8 +2,9 @@
  * A small, strict YAML reader for VTC's own config files (`.vtc/project.yaml`, `.vtc/gates.yml`):
  * block mappings and sequences, flow sequences and mappings of scalars, quoted and plain scalars,
  * comments. Anything else (anchors, tags, multi-document streams, block scalars) is an error,
- * never a guess. JSON, a subset of YAML, is accepted as is. A YAML library would replace this
- * once the engine package may declare one (AD-15 rule 2).
+ * never a guess. JSON, a subset of YAML, is accepted as is. A `__proto__` key is an error (it
+ * would set the object's prototype). A YAML library would replace this once the engine package
+ * declares one: the dependency is proposed to the integrator (AD-15 rule 2).
  */
 
 export class YamlError extends Error {
@@ -15,6 +16,13 @@ export class YamlError extends Error {
     this.name = "YamlError";
   }
 }
+
+/** A mapping key, refusing `__proto__` (assigning it would replace the prototype). */
+const mapKey = (raw: string, line: number): string => {
+  const key = String(parseScalar(raw, line));
+  if (key === "__proto__") throw new YamlError("the key __proto__ is not allowed", line);
+  return key;
+};
 
 interface Line {
   readonly indent: number;
@@ -91,10 +99,7 @@ export const parseScalar = (raw: string, line: number): unknown => {
     for (const part of splitFlow(text.slice(1, -1), line)) {
       const colon = findColon(part);
       if (colon < 0) throw new YamlError(`expected key: value in ${part}`, line);
-      out[String(parseScalar(part.slice(0, colon), line))] = parseScalar(
-        part.slice(colon + 1),
-        line,
-      );
+      out[mapKey(part.slice(0, colon), line)] = parseScalar(part.slice(colon + 1), line);
     }
     return out;
   }
@@ -167,7 +172,7 @@ const parseBlock = (lines: readonly Line[], start: number, indent: number): [unk
     if (line.indent > indent) throw new YamlError("unexpected indentation", line.number);
     const colon = findColon(line.text);
     if (colon < 0) throw new YamlError(`expected key: value, got ${line.text}`, line.number);
-    const key = String(parseScalar(line.text.slice(0, colon), line.number));
+    const key = mapKey(line.text.slice(0, colon), line.number);
     if (Object.hasOwn(map, key)) throw new YamlError(`duplicate key ${key}`, line.number);
     const rest = line.text.slice(colon + 1).trim();
     if (rest === "") {
