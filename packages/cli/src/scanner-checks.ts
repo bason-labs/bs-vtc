@@ -40,7 +40,11 @@ class NotDownloaded extends Error {
 const message = (error: unknown): string =>
   error instanceof Error ? error.message : String(error);
 
-/** The store has no pinned build of the scanner for this machine. */
+/**
+ * The store has no pinned build of the scanner for this machine. TODO(gate-runner): switch to a
+ * typed discriminator (a `ScannerError` code, or a store query) once `gates/` exports one; until
+ * then doctor-scanners.test.ts runs this against the real store, so a reworded message fails there.
+ */
 const noPinnedBuild = (error: unknown): boolean =>
   error instanceof gates.ScannerError && /no pinned build/.test(error.message);
 

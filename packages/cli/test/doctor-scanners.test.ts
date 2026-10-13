@@ -131,6 +131,29 @@ describe("vtc doctor: the pinned scanners", () => {
     expect(installed?.detail).toMatch(/user-installed \(checkov 3\.3\.20\)/);
   });
 
+  it("recognises the real store's no-pinned-build error (D-u), not only the fake's", async () => {
+    // the Gate Runner's own store and wording: a reworded error fails here, not silently in doctor
+    const onPath = (name: string) => Promise.resolve(name === "checkov" ? "checkov 3.3.20" : null);
+    for (const platform of ["darwin-arm64", null] as const) {
+      const checks = await checkScanners(
+        {
+          open: (options) => gates.createScannerStore({ ...options, platform }),
+          vtcHome: tempHome(),
+          onPath,
+        },
+        "check",
+        () => undefined,
+      );
+      const checkov = checks.find((c) => c.name === "checkov");
+      expect(checkov?.status).toBe("ok");
+      expect(checkov?.detail).toMatch(/^user-installed \(checkov 3\.3\.20\)/);
+      const others = checks.filter((c) => c.name !== "checkov");
+      if (platform === null)
+        for (const c of others) expect(c.detail).toMatch(/not on PATH either, so its L4 gate/);
+      else for (const c of others) expect(c.detail).toMatch(/not downloaded yet/);
+    }
+  });
+
   it("--download fetches only the missing ones through the store, which verifies the pin", async () => {
     const state = freshState({ tampered: ["opengrep"] });
     const progress: string[] = [];
