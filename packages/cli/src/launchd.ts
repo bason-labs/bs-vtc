@@ -1,5 +1,6 @@
 /**
- * The macOS launchd agent behind auto-resume (§6.9 step 4, AD-6 rule 4). Installed by
+ * The macOS launchd agent behind auto-resume (§6.9 step 4, AD-6 rule 4); Linux uses a systemd
+ * user timer (`systemd.ts`), both behind `timer.ts`. Installed by
  * `vtc install <host>` (which says so) or `vtc install --auto-resume`, and removed by
  * `vtc install --no-auto-resume`; the engine's scheduler only writes wake records
  * (`scheduler.ts`). The plist pins the running binary's path; `vtc doctor` flags it when an
@@ -32,6 +33,20 @@ export interface LaunchAgentSpec {
   /** The PATH the agent runs with, so `git`, `gh` and the host CLIs resolve as in the shell. */
   readonly path: string;
 }
+
+const unxml = (text: string): string =>
+  text
+    .replace(/&lt;/g, "<")
+    .replace(/&gt;/g, ">")
+    .replace(/&quot;/g, '"')
+    .replace(/&apos;/g, "'")
+    .replace(/&amp;/g, "&");
+
+/** The program a launchd plist runs: the first string of its `ProgramArguments`. */
+export const plistProgram = (plist: string): string | null => {
+  const match = /<key>ProgramArguments<\/key>\s*<array>\s*<string>([^<]*)<\/string>/.exec(plist);
+  return match?.[1] === undefined ? null : unxml(match[1]);
+};
 
 /** The agent's property list. */
 export const renderLaunchAgent = (spec: LaunchAgentSpec): string => {
@@ -79,7 +94,10 @@ export interface LaunchdDeps {
   readonly exec: Exec;
 }
 
-/** Writes the agent and (re)loads it into the user's GUI domain. Returns the plist path. */
+/**
+ * Writes the agent and (re)loads it into the user's GUI domain; on failure nothing stays
+ * installed. Returns the plist path.
+ */
 export const installLaunchAgent = async (
   deps: LaunchdDeps,
   spec: LaunchAgentSpec,
@@ -91,10 +109,12 @@ export const installLaunchAgent = async (
   const domain = `gui/${String(deps.uid)}`;
   await deps.exec("launchctl", ["bootout", `${domain}/${LAUNCHD_LABEL}`], { timeoutMs: 10_000 });
   const loaded = await deps.exec("launchctl", ["bootstrap", domain, plist], { timeoutMs: 10_000 });
-  if (loaded.code !== 0)
+  if (loaded.code !== 0) {
+    rmSync(plist, { force: true });
     throw new Error(
       `launchctl bootstrap failed: ${(loaded.stderr || loaded.error || "").trim().slice(0, 300)}`,
     );
+  }
   return plist;
 };
 

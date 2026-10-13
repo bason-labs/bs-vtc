@@ -2,8 +2,8 @@
  * The auto-resume timer (§6.9 step 4, AD-6 rule 4, AD-12 rule 4): the cli's
  * `AutoResumeScheduler`. The engine decides when to wake; this module persists the single
  * wake-up per repo as `~/.vtc/wake/<repo-key>.json` (mode 0600), so it survives the daemon and a
- * reboot. Nothing is installed in the OS here: the launchd agent that acts on these records
- * (`launchd.ts`) is installed by `vtc install`. Every minute it
+ * reboot. Nothing is installed in the OS here: the OS timer that acts on these records
+ * (`timer.ts`: launchd on macOS, systemd on Linux) is installed by `vtc install`. Every minute it
  * runs `vtc engine --wake-due`, which starts `vtc engine --daemon --wake` for each repo whose
  * time has come ({@link dueWakeups}).
  */
