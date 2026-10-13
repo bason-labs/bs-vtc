@@ -56,7 +56,9 @@ const UNREADABLE_RULES = [
   "Read(//home/dev/.codex/**)",
   `Read(/${CLAUDE_CREDENTIALS})`,
 ];
-const UNREADABLE = [`${VTC_HOME}/token`, CODEX_HOME, CLAUDE_CREDENTIALS];
+/** The VTC home's hidden acceptance tests and daemon sockets (§7.3; spine §7). */
+const UNREADABLE_VTC_DIRS = [`${VTC_HOME}/hidden`, `${VTC_HOME}/run`];
+const UNREADABLE = [`${VTC_HOME}/token`, CODEX_HOME, CLAUDE_CREDENTIALS, ...UNREADABLE_VTC_DIRS];
 /** D-w: what no role may write under the VTC home, as sandbox directories. */
 const VTC_HOME_DENIED_DIRS = ["allowlists", "osv-db", "hidden"].map((d) => `${VTC_HOME}/${d}`);
 
@@ -132,6 +134,18 @@ describe("Claude sandboxProfile (§12.1, AD-9)", () => {
     }
   });
 
+  it("no role may read the hidden acceptance tests or reach the daemon sockets under the VTC home (§7.3)", () => {
+    for (const tools of [READ_ONLY, WRITE_SCOPED, ENGINEER]) {
+      const settings = settingsOf(profile(tools));
+      expect(settings.permissions.deny).toEqual(
+        expect.arrayContaining(["Read(//home/dev/.vtc/hidden/**)", "Read(//home/dev/.vtc/run/**)"]),
+      );
+      expect(settings.sandbox.filesystem.denyRead).toEqual(
+        expect.arrayContaining(UNREADABLE_VTC_DIRS),
+      );
+    }
+  });
+
   it("denies every role running `vtc calibrate` and writing the VTC home's allowlists, scanner DB and hidden tests (D-w)", () => {
     expect(ROLE_DENIED_VTC.subcommands).toEqual(["calibrate"]);
     for (const tools of [READ_ONLY, WRITE_SCOPED, ENGINEER]) {
@@ -177,7 +191,12 @@ describe("Claude sandboxProfile (§12.1, AD-9)", () => {
       "/srv/vtc home/token",
       "/srv/codex",
       credentials,
+      "/srv/vtc home/hidden",
+      "/srv/vtc home/run",
     ]);
+    expect(settings.permissions.deny).toEqual(
+      expect.arrayContaining(["Read(//srv/vtc home/hidden/**)", "Read(//srv/vtc home/run/**)"]),
+    );
     expect(findForbiddenHostArgs([JSON.stringify(p.settings)])).toEqual([]);
     // the rules travel as JSON array entries, never through the comma-separated tool lists
     expect(argAfter(p.cliArgs, "--disallowedTools")).not.toContain("token");
@@ -194,7 +213,13 @@ describe("Claude sandboxProfile (§12.1, AD-9)", () => {
       expect(
         settingsOf(createClaudeCodeAdapter().sandboxProfile(profileRequest(READ_ONLY))).sandbox
           .filesystem.denyRead,
-      ).toEqual(["/env/vtc/token", "/env/codex", credentialsIn("/env/claude")]);
+      ).toEqual([
+        "/env/vtc/token",
+        "/env/codex",
+        credentialsIn("/env/claude"),
+        "/env/vtc/hidden",
+        "/env/vtc/run",
+      ]);
       const wired = ADAPTER_FACTORIES["claude-code"]!({ vtcHome: "/cli/vtc" });
       expect(
         settingsOf(wired.sandboxProfile(profileRequest(READ_ONLY))).permissions.deny.slice(0, 3),

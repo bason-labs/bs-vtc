@@ -89,6 +89,7 @@ export {
 } from "./osv-db.js";
 export {
   DEFAULT_PROTECTED_GLOBS,
+  HOST_CONFIG_GLOBS,
   isGateCommandFile,
   isPackageManagerConfig,
   isTaskRunnerFile,

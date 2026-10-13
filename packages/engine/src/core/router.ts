@@ -119,6 +119,7 @@ export const PROTECTED_CONFIG_GLOBS = [
   ".githooks/**",
   ".husky/**",
   ".claude/**",
+  ".mcp.json",
   ".codex/**",
   ".vtc/**",
   "**/.eslintrc*",
