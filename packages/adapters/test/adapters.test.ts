@@ -26,11 +26,56 @@ describe("@vtc/adapters smoke", () => {
 /**
  * Trip-wire (AD-6, AD-9): the cli constructs adapters only from ADAPTER_FACTORIES, and every
  * registered adapter runs the safety contract here, so no adapter is wired without passing it.
+ * Each factory gets what the cli's engine wiring passes (the extracted plugin and the VTC home).
  */
 for (const host of HOST_IDS) {
   const factory = ADAPTER_FACTORIES[host];
-  if (factory !== undefined) runHostAdapterSafetyContract(factory());
+  if (factory !== undefined) {
+    runHostAdapterSafetyContract(
+      factory({
+        pluginDir: `/opt/vtc/plugins/${host}`,
+        vtcHome: "/home/dev/.vtc",
+        vtcVersion: "0.0.0",
+      }),
+    );
+  }
 }
+
+describe("adapter registry (AD-6 rule 6)", () => {
+  it("registers both hosts, each declaring the capabilities recorded for it", () => {
+    expect(Object.keys(ADAPTER_FACTORIES).sort()).toEqual([...HOST_IDS].sort());
+    for (const host of HOST_IDS) {
+      expect(ADAPTER_FACTORIES[host]?.().capabilities).toEqual(HOST_CAPABILITIES[host]);
+    }
+  });
+  it("only Codex pulls usage itself; Claude usage is pushed (AD-6 rule 4)", () => {
+    const codex = ADAPTER_FACTORIES.codex!();
+    const claude = ADAPTER_FACTORIES["claude-code"]!();
+    expect("readUsage" in codex && "watchUsage" in codex).toBe(true);
+    expect("readUsage" in claude || "watchUsage" in claude).toBe(false);
+  });
+  it("Codex runs the model the engine resolved (AD-6 rule 2)", () => {
+    const adapter = ADAPTER_FACTORIES.codex?.();
+    const sandbox = adapter!.sandboxProfile({
+      tools: { profile: "read_only", write_paths: [], engine_tools: [] },
+      cwd: "/w",
+      writablePaths: [],
+      protectedPaths: [],
+      network: "none",
+    });
+    const args = adapter!.headlessCommand({
+      role: "qa",
+      model: { tier: "mid", effort: "low", model: "engine-model" },
+      dispatch: "headless",
+      cwd: "/w",
+      prompt: "p",
+      outputSchema: {},
+      sandbox,
+      timeoutMs: 1000,
+    }).args;
+    expect(args[args.indexOf("--model") + 1]).toBe("engine-model");
+  });
+});
 
 describe("HostAdapter safety contract (AD-9)", () => {
   it("runs for every registered adapter, and only known hosts can register", () => {
