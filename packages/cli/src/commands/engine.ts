@@ -5,7 +5,7 @@
  * - `vtc engine --mcp --host <host>` is the stdio bridge, the MCP entry of every host plugin
  *   (AD-16): it finds the repo's daemon (starting one detached when none is live), sends its
  *   hello and then relays bytes. Nothing but MCP is ever written to its stdout.
- * - `vtc engine --wake-due` is what the auto-resume launchd agent runs every minute: it starts
+ * - `vtc engine --wake-due` is what the auto-resume timer (launchd or systemd) runs every minute: it starts
  *   `vtc engine --daemon --wake` for each repo whose persisted wake-up is due (§6.9 step 4).
  */
 import { existsSync } from "node:fs";

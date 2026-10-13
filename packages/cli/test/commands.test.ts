@@ -28,8 +28,9 @@ import {
   defaultInstallDeps,
   type InstallDeps,
 } from "../src/commands/install.js";
-import { renderLaunchAgent } from "../src/launchd.js";
+import { plistProgram, renderLaunchAgent } from "../src/launchd.js";
 import type { Exec, ExecResult } from "../src/process.js";
+import { renderSystemdService, systemdProgram } from "../src/systemd.js";
 import { installTokenPath } from "../src/token.js";
 import { capture, cleanupDirs, DASHBOARD_FIXTURE, initRepo, tempDir, tempHome } from "./helpers.js";
 
@@ -124,9 +125,9 @@ describe("vtc install", () => {
       ...defaultInstallDeps(),
       home: () => home,
       pluginDir: (host) => `/plugins/${host}`,
-      platform: "linux",
-      launchd: () => {
-        throw new Error("the real launchd is never touched in tests");
+      platform: "win32",
+      timerHost: () => {
+        throw new Error("the real launchd or systemd is never touched in tests");
       },
       ...over,
     });
@@ -186,7 +187,7 @@ describe("vtc install", () => {
       installDeps(
         {
           platform: "darwin",
-          launchd: () => ({ home, uid: 501, exec }),
+          timerHost: () => ({ home, uid: 501, exec, configHome: null }),
           agentSpec: (h) => ({ selfCommand: ["/opt/vtc"], vtcHome: h, path: "/usr/bin:/bin" }),
           factories: {},
         },
@@ -216,7 +217,7 @@ describe("vtc install", () => {
       installDeps(
         {
           platform: "darwin",
-          launchd: () => ({ home, uid: 501, exec }),
+          timerHost: () => ({ home, uid: 501, exec, configHome: null }),
           agentSpec: (h) => ({ selfCommand: ["/opt/vtc"], vtcHome: h, path: "/usr/bin:/bin" }),
           factories: { codex: () => adapter },
         },
@@ -229,11 +230,23 @@ describe("vtc install", () => {
     expect(out.join("\n")).toMatch(/Installed the auto-resume timer/);
     expect(await withHost.run(["--host", "codex", "--no-auto-resume"], hostCtx)).toBe(0);
     expect(existsSync(plist)).toBe(false);
-    const linux = createInstallCommand(
-      installDeps({ platform: "linux", launchd: () => ({ home, uid: 1, exec }) }, home),
+    // a launchctl failure leaves no plist behind
+    const failing = recorder({
+      [`launchctl bootstrap gui/501 ${plist}`]: { code: 5, stderr: "Bootstrap failed: 5\n" },
+    });
+    const broken = createInstallCommand(
+      installDeps(
+        {
+          platform: "darwin",
+          timerHost: () => ({ home, uid: 501, exec: failing.exec, configHome: null }),
+          agentSpec: (h) => ({ selfCommand: ["/opt/vtc"], vtcHome: h, path: "/usr/bin:/bin" }),
+          factories: {},
+        },
+        home,
+      ),
     );
-    expect(await linux.run(["--auto-resume"], ctx)).toBe(1);
-    expect(await linux.run(["--no-auto-resume"], ctx)).toBe(0);
+    expect(await broken.run(["--auto-resume"], ctx)).toBe(1);
+    expect(existsSync(plist)).toBe(false);
   });
 });
 
@@ -444,11 +457,12 @@ describe("vtc doctor", () => {
     expect(await bun.run([], capture("/w", "/h").ctx)).toBe(0);
   });
 
-  it("checks the macOS auto-resume timer: installed, and its program still there", async () => {
+  it("checks the auto-resume timer (launchd, systemd): installed, and its program still there", async () => {
     const base = { exec: recorder().exec, versions: { node: "22.17.1" } };
     const timer = {
-      platform: "darwin" as NodeJS.Platform,
-      plist: () => null as string | null,
+      kind: "launchd timer",
+      read: () => null as string | null,
+      program: plistProgram,
       exists: (p: string) => p === "/opt/vtc",
       wakeups: () => [] as { repo_root: string; at: string }[],
     };
@@ -461,10 +475,10 @@ describe("vtc doctor", () => {
     expect(
       await run({ ...timer, wakeups: () => [{ repo_root: "/r", at: "2026-10-13T10:00:00Z" }] }),
     ).toMatch(
-      /a run in \/r waits to auto-resume at 2026-10-13T10:00:00Z, but the launchd timer is not installed/,
+      /a run in \/r waits to auto-resume at 2026-10-13T10:00:00Z, but the launchd timer is not installed: run vtc install --auto-resume/,
     );
     const plist = renderLaunchAgent({ selfCommand: ["/opt/vtc"], vtcHome: "/h", path: "/usr/bin" });
-    expect(await run({ ...timer, plist: () => plist })).toMatch(
+    expect(await run({ ...timer, read: () => plist })).toMatch(
       /ok +auto-resume +launchd timer installed \(\/opt\/vtc\)/,
     );
     const moved = renderLaunchAgent({
@@ -472,9 +486,23 @@ describe("vtc doctor", () => {
       vtcHome: "/h",
       path: "/usr/bin",
     });
-    expect(await run({ ...timer, plist: () => moved })).toMatch(
+    expect(await run({ ...timer, read: () => moved })).toMatch(
       /warn +auto-resume +the launchd timer runs \/opt\/homebrew\/Cellar\/vtc\/0\.1\/bin\/vtc, which no longer exists/,
     );
-    expect(await run({ ...timer, platform: "linux" })).not.toMatch(/auto-resume/);
+    // Linux: the systemd service names the program
+    const systemd = { ...timer, kind: "systemd timer", program: systemdProgram };
+    const service = renderSystemdService({
+      selfCommand: ["/opt/vtc"],
+      vtcHome: "/h",
+      path: "/usr/bin",
+    });
+    expect(await run({ ...systemd, read: () => service })).toMatch(
+      /ok +auto-resume +systemd timer installed \(\/opt\/vtc\)/,
+    );
+    expect(await run(systemd)).toMatch(/warn +auto-resume +the systemd timer is not installed/);
+    // no timer on this platform: no check
+    const { ctx, out } = capture("/w", "/h");
+    expect(await createDoctorCommand(() => base).run([], ctx)).toBe(0);
+    expect(out.join("\n")).not.toMatch(/auto-resume/);
   });
 });
