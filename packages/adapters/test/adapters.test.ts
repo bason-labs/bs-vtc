@@ -26,10 +26,19 @@ describe("@vtc/adapters smoke", () => {
 /**
  * Trip-wire (AD-6, AD-9): the cli constructs adapters only from ADAPTER_FACTORIES, and every
  * registered adapter runs the safety contract here, so no adapter is wired without passing it.
+ * Each factory gets what the cli's engine wiring passes (the extracted plugin and the VTC home).
  */
 for (const host of HOST_IDS) {
   const factory = ADAPTER_FACTORIES[host];
-  if (factory !== undefined) runHostAdapterSafetyContract(factory());
+  if (factory !== undefined) {
+    runHostAdapterSafetyContract(
+      factory({
+        pluginDir: `/opt/vtc/plugins/${host}`,
+        vtcHome: "/home/dev/.vtc",
+        vtcVersion: "0.0.0",
+      }),
+    );
+  }
 }
 
 describe("adapter registry (AD-6 rule 6)", () => {

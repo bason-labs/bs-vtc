@@ -34,9 +34,12 @@ export interface AdapterFactoryOptions {
   readonly vtcVersion?: string;
   /**
    * This host's compiled plugin on disk (the cli's extracted `plugin:<host>`). Claude Code loads
-   * it into headless runs with `--plugin-dir`, isolated from the user's own settings.
+   * it into headless runs with `--plugin-dir`, isolated from the user's own settings, and refuses
+   * a headless run without it.
    */
   readonly pluginDir?: string;
+  /** The absolute VTC home the cli resolved (`$VTC_HOME` or `~/.vtc`); its token stays unreadable. */
+  readonly vtcHome?: string;
 }
 
 /**
@@ -50,9 +53,10 @@ export const ADAPTER_FACTORIES: Readonly<
   Partial<Record<HostId, (options?: AdapterFactoryOptions) => HostAdapter>>
 > = {
   "claude-code": (options = {}) =>
-    createClaudeCodeAdapter(
-      options.pluginDir === undefined ? {} : { pluginDir: options.pluginDir },
-    ),
+    createClaudeCodeAdapter({
+      ...(options.pluginDir === undefined ? {} : { pluginDir: options.pluginDir }),
+      ...(options.vtcHome === undefined ? {} : { vtcHome: options.vtcHome }),
+    }),
   codex: (options = {}) =>
     createCodexAdapter(
       options.vtcVersion === undefined ? {} : { clientVersion: options.vtcVersion },

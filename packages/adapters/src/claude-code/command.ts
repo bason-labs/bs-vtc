@@ -4,11 +4,13 @@
  * only the Engineer family gets Bash, and Bash runs inside Claude Code's OS sandbox with no
  * unsandboxed escape. Protected paths are denied twice: edit rules and `sandbox.filesystem.denyWrite`.
  * The permission mode is pinned to `dontAsk`, so the allowlist decides and anything not on it is
- * denied, whatever mode the user's own settings choose; host config files are never writable and
- * the VTC install token is never readable. Nothing here ever sets a bypass; the engine's
- * write-scope check always runs.
+ * denied, whatever mode the user's own settings choose; host config files are never writable.
+ * The VTC install token and the Codex home (its credentials) are never readable, from a tool or
+ * from the shell. A headless run always loads the compiled plugin from disk with only the repo's
+ * project settings, so the user's own allow rules, hooks, plugins and MCP servers never reach a
+ * role run. Nothing here ever sets a bypass; the engine's write-scope check always runs.
  */
-import { isAbsolute, join } from "node:path";
+import { isAbsolute, join, resolve } from "node:path";
 import {
   agentNameFor,
   ENGINE_INSTANCE,
@@ -56,9 +58,6 @@ const WEB_TOOLS = ["WebFetch", "WebSearch"] as const;
 /** Host config a role must never change: it would load into later runs in the same worktree. */
 export const HOST_CONFIG_PATHS = [".claude/**", ".mcp.json", ".codex/**"] as const;
 
-/** The VTC install token (AD-5 rule 2), as a Claude permission-rule path. */
-const TOKEN_RULE_PATH = `~/.vtc/${ENGINE_INSTANCE.tokenFile}`;
-
 /**
  * Characters that would end a permission rule or start another in Claude's rule lists (comma or
  * space separated, `Tool(path)`), plus quotes and control characters. Write scopes come partly
@@ -73,21 +72,52 @@ const hasControl = (path: string): boolean => {
   return false;
 };
 
+const refuseRulePath = (path: string, why: string): never => {
+  throw new Error(`refusing the path ${JSON.stringify(path)} in a Claude permission rule: ${why}`);
+};
+
+/**
+ * A repo-relative path as a Claude rule path. Claude reads a leading `~` as the user's home and a
+ * leading `/` as an anchor outside the working directory, so both are refused; what is left is
+ * relative to the role's worktree.
+ */
 const rulePath = (path: string): string => {
   if (path === "" || UNSAFE_RULE_PATH.test(path) || hasControl(path)) {
-    throw new Error(
-      `refusing the path ${JSON.stringify(path)} in a Claude permission rule: paths may not contain parentheses, commas, quotes, spaces or control characters`,
+    refuseRulePath(
+      path,
+      "paths may not contain parentheses, commas, quotes, spaces or control characters",
     );
+  }
+  if (path.startsWith("~") || path.startsWith("/")) {
+    refuseRulePath(path, "paths must be relative to the worktree (no leading `~` or `/`)");
   }
   return path;
 };
 
-const pathRules = (paths: readonly string[]): string[] =>
-  paths.flatMap((path) => WRITE_TOOL_NAMES.map((tool) => `${tool}(${rulePath(path)})`));
+/** Allow rules are anchored to the worktree (`./`), so no other prefix syntax can apply. */
+const anchoredRulePath = (path: string): string => {
+  const checked = rulePath(path);
+  return checked.startsWith("./") ? checked : `./${checked}`;
+};
+
+const toolRules = (paths: readonly string[], rule: (path: string) => string): string[] =>
+  paths.flatMap((path) => WRITE_TOOL_NAMES.map((tool) => `${tool}(${rule(path)})`));
+
+/**
+ * An absolute path in Claude's rule form (`//abs/path`; Windows `C:\x` as `//c/x`). These rules go
+ * into the `--settings` JSON, one array entry each, so no character in the path can end a rule.
+ */
+const absoluteRulePath = (path: string): string => {
+  if (hasControl(path)) refuseRulePath(path, "paths may not contain control characters");
+  const posix = resolve(path).replaceAll("\\", "/");
+  const drive = /^(?<letter>[A-Za-z]):(?<rest>\/.*)?$/u.exec(posix)?.groups;
+  if (drive === undefined) return `/${posix}`;
+  return `//${(drive.letter ?? "").toLowerCase()}${drive.rest ?? "/"}`;
+};
 
 const allowedTools = (tools: RoleTools, writable: readonly string[]): string[] => [
   ...READ_TOOLS,
-  ...(tools.profile === "read_only" ? [] : pathRules(writable)),
+  ...(tools.profile === "read_only" ? [] : toolRules(writable, anchoredRulePath)),
   ...(tools.profile === "code_sandboxed" ? ["Bash"] : []),
   ...tools.engine_tools.map(claudeEngineToolName),
 ];
@@ -95,10 +125,9 @@ const allowedTools = (tools: RoleTools, writable: readonly string[]): string[] =
 const disallowedTools = (tools: RoleTools, protectedPaths: readonly string[]): string[] => [
   ...(tools.profile === "read_only"
     ? [...WRITE_TOOL_NAMES]
-    : pathRules([...protectedPaths, ...HOST_CONFIG_PATHS])),
+    : toolRules([...protectedPaths, ...HOST_CONFIG_PATHS], rulePath)),
   ...(tools.profile === "code_sandboxed" ? [] : ["Bash"]),
   ...WEB_TOOLS,
-  `Read(${TOKEN_RULE_PATH})`,
 ];
 
 const absolute = (cwd: string, path: string): string => (isAbsolute(path) ? path : join(cwd, path));
@@ -107,9 +136,17 @@ const absolute = (cwd: string, path: string): string => (isAbsolute(path) ? path
 export const CLAUDE_ROLE_PERMISSION_MODE = "dontAsk";
 
 export interface ClaudeProfileOptions {
-  /** The user's home, where the VTC home (`~/.vtc`) and its install token live. */
-  readonly home: string;
+  /** The absolute VTC home (`~/.vtc`, or `$VTC_HOME`), where the install token lives (AD-5). */
+  readonly vtcHome: string;
+  /** The absolute Codex home (`~/.codex`, or `$CODEX_HOME`): Codex's config and credentials. */
+  readonly codexHome: string;
 }
+
+/** What no role may read, as absolute paths: the install token and the whole Codex home. */
+const unreadablePaths = (options: ClaudeProfileOptions) => ({
+  token: resolve(options.vtcHome, ENGINE_INSTANCE.tokenFile),
+  codexHome: resolve(options.codexHome),
+});
 
 export const claudeSandboxProfile = (
   request: SandboxProfileRequest,
@@ -119,15 +156,22 @@ export const claudeSandboxProfile = (
   const writable = tools.profile === "read_only" ? [] : request.writablePaths;
   const allow = allowedTools(tools, writable);
   const deny = disallowedTools(tools, request.protectedPaths);
+  const unreadable = unreadablePaths(options);
   const settings = {
-    permissions: { defaultMode: CLAUDE_ROLE_PERMISSION_MODE },
+    permissions: {
+      defaultMode: CLAUDE_ROLE_PERMISSION_MODE,
+      deny: [
+        `Read(${absoluteRulePath(unreadable.token)})`,
+        `Read(${absoluteRulePath(unreadable.codexHome)}/**)`,
+      ],
+    },
     sandbox: {
       enabled: true,
       autoAllowBashIfSandboxed: tools.profile === "code_sandboxed",
       allowUnsandboxedCommands: false,
       filesystem: {
         denyWrite: [...request.protectedPaths, ...HOST_CONFIG_PATHS].map((p) => absolute(cwd, p)),
-        denyRead: [join(options.home, ".vtc", ENGINE_INSTANCE.tokenFile)],
+        denyRead: [unreadable.token, unreadable.codexHome],
       },
       network: { allowedDomains: request.network === "registries" ? [...REGISTRY_DOMAINS] : [] },
     },
@@ -149,12 +193,11 @@ export const claudeSandboxProfile = (
 
 export interface ClaudeCommandOptions {
   /**
-   * The compiled Claude plugin on disk (the cli's extracted `plugin:claude-code`). When given, a
+   * The compiled Claude plugin on disk (the cli's extracted `plugin:claude-code`). Every headless
    * run loads the plugin from it (`--plugin-dir`) and reads only the repo's project settings
-   * (`--setting-sources project`): the user's own settings, plugins and hooks cannot widen a role
-   * run, and the plugin resolves in any worktree whatever the install scope. Without it the run
-   * relies on the installed plugin and the user's settings (the pinned mode and explicit denies
-   * still apply).
+   * (`--setting-sources project`): the user's own settings, plugins, hooks and MCP servers cannot
+   * widen a role run, and the plugin resolves in any worktree whatever the install scope. Without
+   * it there is no isolated run, so `claudeHeadlessCommand` refuses to build one (fail closed).
    */
   readonly pluginDir?: string;
 }
@@ -176,6 +219,11 @@ export const claudeHeadlessCommand = (
   }
   if (session !== undefined && session.host !== HOST) {
     throw new Error(`cannot resume a ${session.host} session on ${HOST}`);
+  }
+  if (options.pluginDir === undefined) {
+    throw new Error(
+      "refusing a headless Claude role run without the compiled plugin on disk: pass `pluginDir` to the adapter so the run loads it isolated from the user's settings",
+    );
   }
   return {
     command: CLAUDE_BINARY,
@@ -202,9 +250,11 @@ export const claudeHeadlessCommand = (
         ? []
         : ["--max-budget-usd", String(request.maxBudgetUsd)]),
       ...(session === undefined ? [] : ["--resume", session.id]),
-      ...(options.pluginDir === undefined
-        ? []
-        : ["--setting-sources", "project", "--plugin-dir", options.pluginDir]),
+      // the user's settings (allow rules, hooks, plugins, MCP servers) never reach a role run
+      "--setting-sources",
+      "project",
+      "--plugin-dir",
+      options.pluginDir,
       ...request.sandbox.cliArgs,
     ],
     env: {},

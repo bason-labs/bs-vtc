@@ -92,17 +92,11 @@ describe("Codex sandboxProfile (§12.1, AD-9)", () => {
     }
   });
 
-  it("opens the network only for the install phase, and then says the host does not scope it", () => {
-    const p = profile(ENGINEER, "registries");
-    expect(p.cliArgs).toEqual([
-      "--config",
-      'sandbox_mode="workspace-write"',
-      "--config",
-      "sandbox_workspace_write.network_access=true",
-      "--config",
-      "sandbox_workspace_write.writable_roots=[]",
-    ]);
-    expect(p.enforced.network).toBe(false);
+  it("refuses the install phase's registry network: Codex could only open all of it, engine API included", () => {
+    for (const tools of [WRITE_SCOPED, ENGINEER]) {
+      expect(() => profile(tools, "registries")).toThrow(/registries network on Codex/);
+    }
+    // a reviewer never gets network anyway, so its profile is unchanged
     expect(profile(READ_ONLY, "registries").cliArgs).toEqual([
       "--config",
       'sandbox_mode="read-only"',

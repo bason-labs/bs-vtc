@@ -4,6 +4,7 @@
  * returns the SDK rate-limit readings of runs the engine launched. So there is no `readUsage`.
  */
 import { homedir } from "node:os";
+import { join } from "node:path";
 import type { HostAdapter, HostCapabilities, SessionRef, SpawnRoleRequest } from "@vtc/shared";
 import { createRunLauncher, subagentSpawn } from "../common/dispatch.js";
 import { nodeSpawner, type Spawner } from "../common/process.js";
@@ -30,11 +31,24 @@ export interface ClaudeCodeAdapterOptions {
   /** Starts host processes; tests inject a fake (never the real `claude`). */
   readonly spawner?: Spawner;
   readonly killGraceMs?: number;
-  /** The user's home (the VTC install token a role may never read lives under it). Default: `os.homedir()`. */
-  readonly home?: string;
-  /** The compiled Claude plugin on disk; see `ClaudeCommandOptions.pluginDir`. */
+  /**
+   * The absolute VTC home, whose install token no role may read. Default: `$VTC_HOME`, else
+   * `~/.vtc` (the cli's own rule); the cli passes the one it resolved.
+   */
+  readonly vtcHome?: string;
+  /** The absolute Codex home, which no role may read. Default: `$CODEX_HOME`, else `~/.codex`. */
+  readonly codexHome?: string;
+  /**
+   * The compiled Claude plugin on disk; see `ClaudeCommandOptions.pluginDir`. Required for
+   * headless runs: without it `headlessCommand`, `spawnRole` (headless) and `resume` refuse.
+   */
   readonly pluginDir?: string;
 }
+
+const envHome = (name: string, fallback: string): string => {
+  const value = process.env[name];
+  return value === undefined || value === "" ? join(homedir(), fallback) : value;
+};
 
 export const createClaudeCodeAdapter = (options: ClaudeCodeAdapterOptions = {}): HostAdapter => {
   const runs = createRunLauncher({
@@ -42,7 +56,10 @@ export const createClaudeCodeAdapter = (options: ClaudeCodeAdapterOptions = {}):
     outcome: claudeOutcomeAfterExit,
     ...(options.killGraceMs === undefined ? {} : { killGraceMs: options.killGraceMs }),
   });
-  const profileOptions = { home: options.home ?? homedir() };
+  const profileOptions = {
+    vtcHome: options.vtcHome ?? envHome("VTC_HOME", ".vtc"),
+    codexHome: options.codexHome ?? envHome("CODEX_HOME", ".codex"),
+  };
   const commandOptions = options.pluginDir === undefined ? {} : { pluginDir: options.pluginDir };
   const headlessCommand = (request: SpawnRoleRequest, session?: SessionRef) =>
     claudeHeadlessCommand(request, session, commandOptions);

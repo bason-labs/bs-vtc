@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   findForbiddenHostArgs,
   HostOutcomeSchema,
@@ -6,7 +6,7 @@ import {
   type RoleTools,
   type SpawnRoleRequest,
 } from "@vtc/shared";
-import { createClaudeCodeAdapter } from "../../src/index.js";
+import { ADAPTER_FACTORIES, createClaudeCodeAdapter } from "../../src/index.js";
 import { fakeSpawner } from "../support/fake-spawner.js";
 import { fixtureText } from "../support/fixtures.js";
 
@@ -19,22 +19,22 @@ const WRITE_SCOPED: RoleTools = {
 };
 const ENGINEER: RoleTools = { profile: "code_sandboxed", write_paths: [], engine_tools: [] };
 
-const HOME = "/home/dev";
-const profile = (
+const VTC_HOME = "/home/dev/.vtc";
+const CODEX_HOME = "/home/dev/.codex";
+const PLUGIN_DIR = "/opt/vtc/plugin";
+const HOMES = { vtcHome: VTC_HOME, codexHome: CODEX_HOME };
+const profileRequest = (
   tools: RoleTools,
   network: "none" | "registries" = "none",
   writablePaths: readonly string[] = ["src/**"],
-) =>
-  createClaudeCodeAdapter({ home: HOME }).sandboxProfile({
-    tools,
-    cwd: CWD,
-    writablePaths,
-    protectedPaths: ["test/acceptance/**"],
-    network,
-  });
+) => ({ tools, cwd: CWD, writablePaths, protectedPaths: ["test/acceptance/**"], network });
+const profile = (...args: Parameters<typeof profileRequest>) =>
+  createClaudeCodeAdapter(HOMES).sandboxProfile(profileRequest(...args));
 
-/** Denied to every role: the web tools (engine tools only) and the VTC install token. */
-const ALWAYS_DENIED = ["WebFetch", "WebSearch", "Read(~/.vtc/token)"];
+/** Denied to every role: the web tools (engine tools only). */
+const ALWAYS_DENIED = ["WebFetch", "WebSearch"];
+/** Never readable, as absolute rules in the settings: the install token and the Codex home. */
+const UNREADABLE_RULES = ["Read(//home/dev/.vtc/token)", "Read(//home/dev/.codex/**)"];
 const HOST_CONFIG_DENIED = [".claude/**", ".mcp.json", ".codex/**"].flatMap((path) =>
   ["Edit", "Write", "NotebookEdit"].map((tool) => `${tool}(${path})`),
 );
@@ -75,16 +75,49 @@ describe("Claude sandboxProfile (§12.1, AD-9)", () => {
     });
   });
 
-  it("no role may read the VTC install token, from a tool or from the sandboxed shell (AD-5)", () => {
+  it("no role may read the VTC install token or the Codex home, from a tool or from the sandboxed shell (AD-5)", () => {
     for (const tools of [READ_ONLY, WRITE_SCOPED, ENGINEER]) {
       const p = profile(tools);
       expect(argAfter(p.cliArgs, "--disallowedTools")?.split(",")).toEqual(
         expect.arrayContaining(ALWAYS_DENIED),
       );
       expect(p.settings).toMatchObject({
-        sandbox: { filesystem: { denyRead: [`${HOME}/.vtc/token`] } },
+        permissions: { deny: UNREADABLE_RULES },
+        sandbox: { filesystem: { denyRead: [`${VTC_HOME}/token`, CODEX_HOME] } },
       });
     }
+  });
+
+  it("protects the token of the VTC home actually in use, even with spaces in its path", () => {
+    const p = createClaudeCodeAdapter({
+      vtcHome: "/srv/vtc home",
+      codexHome: "/srv/codex",
+    }).sandboxProfile(profileRequest(ENGINEER));
+    expect(p.settings).toMatchObject({
+      permissions: { deny: ["Read(//srv/vtc home/token)", "Read(//srv/codex/**)"] },
+      sandbox: { filesystem: { denyRead: ["/srv/vtc home/token", "/srv/codex"] } },
+    });
+    // the rules travel as JSON array entries, never through the comma-separated tool lists
+    expect(argAfter(p.cliArgs, "--disallowedTools")).not.toContain("token");
+  });
+
+  describe("default homes", () => {
+    afterEach(() => {
+      vi.unstubAllEnvs();
+    });
+    it("follow $VTC_HOME and $CODEX_HOME like the cli, and the factory takes the cli's VTC home", () => {
+      vi.stubEnv("VTC_HOME", "/env/vtc");
+      vi.stubEnv("CODEX_HOME", "/env/codex");
+      expect(
+        createClaudeCodeAdapter().sandboxProfile(profileRequest(READ_ONLY)).settings,
+      ).toMatchObject({
+        sandbox: { filesystem: { denyRead: ["/env/vtc/token", "/env/codex"] } },
+      });
+      const wired = ADAPTER_FACTORIES["claude-code"]!({ vtcHome: "/cli/vtc" });
+      expect(wired.sandboxProfile(profileRequest(READ_ONLY)).settings).toMatchObject({
+        permissions: { deny: ["Read(//cli/vtc/token)", "Read(//env/codex/**)"] },
+      });
+    });
   });
 
   it("refuses a write path that would inject permission rules", () => {
@@ -100,15 +133,35 @@ describe("Claude sandboxProfile (§12.1, AD-9)", () => {
     expect(() => profile(WRITE_SCOPED, "none", ["src/**/*.ts", ".vtc/spec/**"])).not.toThrow();
   });
 
+  it("refuses a write path Claude would read outside the worktree (home or absolute prefix)", () => {
+    for (const outside of ["~/**", "~/.ssh/authorized_keys", "~user/x", "~", "/etc/x", "//etc/x"]) {
+      expect(() => profile(WRITE_SCOPED, "none", [outside])).toThrow(/relative to the worktree/);
+      expect(() =>
+        createClaudeCodeAdapter(HOMES).sandboxProfile({
+          ...profileRequest(ENGINEER),
+          protectedPaths: [outside],
+        }),
+      ).toThrow(/relative to the worktree/);
+    }
+  });
+
+  it("anchors every allow rule to the worktree", () => {
+    const allowed = argAfter(
+      profile(WRITE_SCOPED, "none", ["docs/x.md", "./notes/**"]).cliArgs,
+      "--allowedTools",
+    )?.split(",");
+    expect(allowed).toEqual(expect.arrayContaining(["Edit(./docs/x.md)", "Write(./notes/**)"]));
+  });
+
   it("write-scoped roles may edit only their paths, plus their engine tools", () => {
     const allowed = argAfter(profile(WRITE_SCOPED).cliArgs, "--allowedTools")?.split(",");
     expect(allowed).toEqual([
       "Read",
       "Grep",
       "Glob",
-      "Edit(src/**)",
-      "Write(src/**)",
-      "NotebookEdit(src/**)",
+      "Edit(./src/**)",
+      "Write(./src/**)",
+      "NotebookEdit(./src/**)",
       "mcp__plugin_vtc_vtc__research_fetch",
     ]);
     expect(argAfter(profile(WRITE_SCOPED).cliArgs, "--disallowedTools")?.split(",")).toEqual([
@@ -166,7 +219,7 @@ describe("Claude sandboxProfile (§12.1, AD-9)", () => {
 });
 
 describe("Claude headlessCommand", () => {
-  const adapter = createClaudeCodeAdapter();
+  const adapter = createClaudeCodeAdapter({ ...HOMES, pluginDir: PLUGIN_DIR });
 
   it("runs claude -p as the role's plugin agent with stream-json, the host schema form and the prompt on stdin", () => {
     const command = adapter.headlessCommand(request({ maxTurns: 30, maxBudgetUsd: 2.5 }));
@@ -189,16 +242,33 @@ describe("Claude headlessCommand", () => {
     expect(schema).not.toHaveProperty("$id");
     expect(args.join(" ")).not.toContain("Read the task pack");
     expect(args).not.toContain("--resume");
-    expect(args).not.toContain("--plugin-dir");
     expect(findForbiddenHostArgs(args)).toEqual([]);
   });
 
-  it("with the compiled plugin on disk, loads it directly and ignores the user's settings", () => {
-    const isolated = createClaudeCodeAdapter({ home: HOME, pluginDir: "/opt/vtc/plugin" });
-    const args = isolated.headlessCommand(request()).args;
-    expect(argAfter(args, "--plugin-dir")).toBe("/opt/vtc/plugin");
-    expect(argAfter(args, "--setting-sources")).toBe("project");
-    expect(findForbiddenHostArgs(args)).toEqual([]);
+  it("loads the compiled plugin from disk and ignores the user's settings, fresh and resumed", () => {
+    for (const session of [undefined, { host: "claude-code" as const, id: "sess-9" }]) {
+      const args = adapter.headlessCommand(request(), session).args;
+      expect(argAfter(args, "--plugin-dir")).toBe(PLUGIN_DIR);
+      expect(argAfter(args, "--setting-sources")).toBe("project");
+    }
+  });
+
+  it("refuses a headless run without the compiled plugin, as the bare factory builds it (fail closed)", async () => {
+    const { spawner, processes } = fakeSpawner();
+    for (const bare of [
+      createClaudeCodeAdapter({ spawner }),
+      ADAPTER_FACTORIES["claude-code"]!(),
+    ]) {
+      expect(() => bare.headlessCommand(request())).toThrow(/compiled plugin/);
+      await expect(bare.spawnRole(request())).rejects.toThrow(/compiled plugin/);
+      await expect(bare.resume({ host: "claude-code", id: "s" }, request())).rejects.toThrow(
+        /compiled plugin/,
+      );
+      await bare.dispose();
+    }
+    expect(processes).toEqual([]);
+    const wired = ADAPTER_FACTORIES["claude-code"]!({ pluginDir: PLUGIN_DIR });
+    expect(argAfter(wired.headlessCommand(request()).args, "--plugin-dir")).toBe(PLUGIN_DIR);
   });
 
   it("resumes the same session with --resume (spike: works after 4h)", () => {
@@ -219,6 +289,7 @@ describe("Claude headlessCommand", () => {
 
 describe("Claude spawnRole and resume", () => {
   it("a subagent dispatch is a background spawn_role instruction for the Lead", async () => {
+    // in-session subagents need no plugin dir: the Lead's session already has the plugin
     const result = await createClaudeCodeAdapter().spawnRole(request({ dispatch: "subagent" }));
     expect(result).toEqual({
       dispatch: "subagent",
@@ -232,7 +303,7 @@ describe("Claude spawnRole and resume", () => {
 
   it("a headless run starts exactly headlessCommand, streams lines and ends with the outcome", async () => {
     const { spawner, processes } = fakeSpawner();
-    const adapter = createClaudeCodeAdapter({ spawner });
+    const adapter = createClaudeCodeAdapter({ spawner, pluginDir: PLUGIN_DIR });
     const spawned = await adapter.spawnRole(request());
     if (spawned.dispatch !== "headless") throw new Error("expected a headless run");
     const proc = processes[0]!;
@@ -255,7 +326,7 @@ describe("Claude spawnRole and resume", () => {
     const { spawner, processes } = fakeSpawner((p) => {
       p.exit(1);
     });
-    const adapter = createClaudeCodeAdapter({ spawner });
+    const adapter = createClaudeCodeAdapter({ spawner, pluginDir: PLUGIN_DIR });
     const session = { host: "claude-code" as const, id: "sess-1" };
     const resumed = await adapter.resume(session, request());
     if (resumed.dispatch !== "headless") throw new Error("expected a headless run");
@@ -266,7 +337,7 @@ describe("Claude spawnRole and resume", () => {
 
   it("dispose kills live runs and refuses new ones", async () => {
     const { spawner, processes } = fakeSpawner();
-    const adapter = createClaudeCodeAdapter({ spawner });
+    const adapter = createClaudeCodeAdapter({ spawner, pluginDir: PLUGIN_DIR });
     const spawned = await adapter.spawnRole(request());
     if (spawned.dispatch !== "headless") throw new Error("expected a headless run");
     await adapter.dispose();
