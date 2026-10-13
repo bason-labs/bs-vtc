@@ -1,12 +1,14 @@
 /**
  * Files that hold both dependencies and lint/test configuration: `pyproject.toml` (`[tool.ruff]`,
- * `[tool.pytest.ini_options]`, `[tool.mypy]`, `[tool.coverage]`, …) and `package.json` (`scripts`,
- * `jest`, `eslintConfig`, `mocha`, …). Protecting them whole would flag every dependency change,
- * so only their tool sections are guarded (§7.2 L1/L5, §7.6 rule 5): L5 flags a diff that changes
- * a tool section, and L1 runs with the head file whose tool sections are put back to the base
- * version. Pure functions over file text.
+ * `[tool.pytest.ini_options]`, `[tool.mypy]`, `[tool.coverage]`, …), `package.json` (`scripts`,
+ * `jest`, `eslintConfig`, `mocha`, `packageManager`, …) and `pnpm-workspace.yaml` (its settings,
+ * such as `scriptShell` and `nodeOptions`, next to `packages` and the catalogs). Protecting them
+ * whole would flag every dependency change, so only their tool sections are guarded (§7.2 L1/L5,
+ * §7.6 rule 5): L5 flags a diff that changes a tool section, and L1 runs with the head file whose
+ * tool sections are put back to the base version. Pure functions over file text.
  */
 import { posix } from "node:path";
+import { parse as parseYaml, stringify as stringifyYaml } from "yaml";
 
 /**
  * pyproject.toml tables that configure a lint, type-check or test tool, or define a command a
@@ -33,17 +35,38 @@ const PYPROJECT_GUARDED: readonly (readonly string[])[] = [
 
 /**
  * Top-level package.json keys that configure a gate. `scripts` is guarded whole: a gate command is
- * often `pnpm run test`, and a guarded script can call any other one.
+ * often `pnpm run test`, and a guarded script can call any other one. `packageManager` picks the
+ * npm, pnpm or yarn build (or URL) that Corepack runs for such a command.
  */
-const PACKAGE_JSON_KEYS = ["scripts", "jest", "eslintConfig", "mocha", "ava", "c8", "nyc"];
+const PACKAGE_JSON_KEYS = [
+  "scripts",
+  "jest",
+  "eslintConfig",
+  "mocha",
+  "ava",
+  "c8",
+  "nyc",
+  "packageManager",
+];
 
-type Kind = "pyproject" | "package_json";
+/**
+ * The top-level pnpm-workspace.yaml keys that are not settings: the workspace packages and the
+ * dependency catalogs. Every other key is a pnpm setting (`scriptShell`, `nodeOptions`,
+ * `pnpmfile`, …, and any key pnpm adds later) and is guarded.
+ */
+const PNPM_WORKSPACE_UNGUARDED: ReadonlySet<string> = new Set(["packages", "catalog", "catalogs"]);
 
-const kindOf = (path: string): Kind | null => {
-  // Any letter case: a case-insensitive file system finds PyProject.toml as pyproject.toml.
-  const name = posix.basename(path).toLowerCase();
-  return name === "pyproject.toml" ? "pyproject" : name === "package.json" ? "package_json" : null;
+type Kind = "pyproject" | "package_json" | "pnpm_workspace";
+
+const KINDS: Readonly<Record<string, Kind>> = {
+  "pyproject.toml": "pyproject",
+  "package.json": "package_json",
+  "pnpm-workspace.yaml": "pnpm_workspace",
 };
+
+const kindOf = (path: string): Kind | null =>
+  // Any letter case: a case-insensitive file system finds PyProject.toml as pyproject.toml.
+  KINDS[posix.basename(path).toLowerCase()] ?? null;
 
 /** Whether a path is a file whose tool sections are guarded. */
 export const isMixedConfig = (path: string): boolean => kindOf(path) !== null;
@@ -287,6 +310,50 @@ const packageJsonWithBase = (head: string, base: string | undefined): string => 
   return `${JSON.stringify(merged, null, 2)}\n`;
 };
 
+// --------------------------------------------------------- pnpm-workspace.yaml
+
+/**
+ * The top-level mapping of a pnpm-workspace.yaml (an empty file is `{}`); `null` when it does not
+ * parse strictly (duplicate keys included) or is not a mapping, so the caller fails closed.
+ */
+const parseWorkspace = (text: string): Record<string, unknown> | null => {
+  try {
+    const value: unknown = parseYaml(text);
+    if (value === null || value === undefined) return {};
+    return typeof value === "object" && !Array.isArray(value)
+      ? (value as Record<string, unknown>)
+      : null;
+  } catch {
+    return null;
+  }
+};
+
+const workspaceSettings = (ws: Record<string, unknown>): [string, unknown][] =>
+  Object.keys(ws)
+    .filter((k) => !PNPM_WORKSPACE_UNGUARDED.has(k))
+    .sort()
+    .map((k) => [k, ws[k]]);
+
+const pnpmWorkspaceSections = (text: string): string => {
+  const ws = parseWorkspace(text);
+  // Unparseable: the whole text counts, so any change is flagged.
+  if (ws === null) return `unparseable\u0000${text}`;
+  return JSON.stringify(workspaceSettings(ws));
+};
+
+const pnpmWorkspaceWithBase = (head: string, base: string | undefined): string => {
+  const ws = parseWorkspace(head);
+  const baseWs = base === undefined ? {} : parseWorkspace(base);
+  // Fail closed: when either side does not parse, L1 runs with the base file as it was.
+  if (ws === null || baseWs === null) return base ?? "";
+  const merged: Record<string, unknown> = {};
+  for (const key of Object.keys(ws)) {
+    if (PNPM_WORKSPACE_UNGUARDED.has(key)) merged[key] = ws[key];
+  }
+  for (const [key, value] of workspaceSettings(baseWs)) merged[key] = value;
+  return stringifyYaml(merged);
+};
+
 // ---------------------------------------------------------------------- public
 
 /**
@@ -299,6 +366,7 @@ export const guardedSections = (path: string, text: string | undefined): string 
   const kind = kindOf(path);
   if (kind === "pyproject") return pyprojectSections(text);
   if (kind === "package_json") return packageJsonSections(text);
+  if (kind === "pnpm_workspace") return pnpmWorkspaceSections(text);
   return text;
 };
 
@@ -307,5 +375,6 @@ export const withBaseSections = (path: string, head: string, base: string | unde
   const kind = kindOf(path);
   if (kind === "pyproject") return pyprojectWithBase(head, base);
   if (kind === "package_json") return packageJsonWithBase(head, base);
+  if (kind === "pnpm_workspace") return pnpmWorkspaceWithBase(head, base);
   return base ?? head;
 };

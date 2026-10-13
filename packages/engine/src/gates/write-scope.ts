@@ -16,7 +16,7 @@ import { matchesAny, matchesAnyCaseless } from "./globs.js";
 import { guardedSections, isMixedConfig } from "./mixed-configs.js";
 import {
   DEFAULT_PROTECTED_GLOBS,
-  isTaskRunnerFile,
+  isGateCommandFile,
   SCANNER_CONFIG_GLOBS,
 } from "./protected-globs.js";
 
@@ -147,8 +147,9 @@ const toolSectionsChanged = async (
  * violation only when its tool sections changed (`mixed-configs.ts`). All of these match in any
  * letter case, because tools find their configs by the canonical name and a case-insensitive file
  * system finds `Vitest.config.ts` under `vitest.config.ts`. A task-runner file (Makefile,
- * justfile, `*.mk`, Taskfile, noxfile.py, in any letter case) is always guarded, like package.json
- * `scripts`, whatever `protectedGlobs` holds (D-y). The only exception is a file
+ * justfile, `*.mk`, Taskfile, noxfile.py) or package-manager config (`.npmrc`, `.yarnrc.yml`,
+ * `bunfig.toml`, …), in any letter case, is always guarded, like package.json `scripts`, whatever
+ * `protectedGlobs` holds (D-y); so are the settings of `pnpm-workspace.yaml`. The only exception is a file
  * the task's `files_scope` names exactly (no wildcard), which is how a plan allows a config change.
  */
 export const checkWriteScope = async (
@@ -175,7 +176,7 @@ export const checkWriteScope = async (
       if (protectedPaths.has(path)) continue;
       if (!matchesAny(request.filesScope, path)) add("out_of_scope_write", path);
       if (request.filesScope.includes(path)) continue;
-      if (!matchesAnyCaseless(protectedGlobs, path) && !isTaskRunnerFile(path)) {
+      if (!matchesAnyCaseless(protectedGlobs, path) && !isGateCommandFile(path)) {
         if (isMixedConfig(path) && (await toolSectionsChanged(git, request, file, path))) {
           add(file.status === "deleted" ? "protected_deleted" : "protected_modified", path);
         }

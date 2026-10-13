@@ -56,12 +56,16 @@ differently, nothing runs and the run reports `error` / `infra` with that reason
 (`packages/engine/src/gates/protected-globs.ts`): L5 reports a changed or added file matching one
 unless the task's `files_scope` names that exact path. Task-runner files that define a gate
 command (`Makefile`, `GNUmakefile`, `*.mk`, `justfile`/`Justfile`/`.justfile`, `*.just`,
-`Taskfile.y*ml`, `noxfile.py`; spine §5 reading 45) are guarded the same way, matched in any letter
-case, even when a project's own `protected_configs` leaves them out, and L1 runs with their base
-version. `pyproject.toml` and `package.json` also hold dependencies, so only their tool sections
-are guarded (`mixed-configs.ts`: `[tool.ruff]`, `[tool.pytest]`, `[tool.mypy]`, `[tool.coverage]`,
-…, the task runners `[tool.tox]`, `[tool.hatch.envs.*]`, `[tool.pdm.scripts]`, `[tool.poe]`, and
-`scripts`, `jest`, `eslintConfig`, `mocha`, …): L5 reports a diff that changes one, and L1 runs
+`Taskfile.y*ml`, `noxfile.py`; spine §5 reading 45) and the package-manager configs a gate run
+through `npm`/`pnpm`/`yarn`/`bun` reads (`.npmrc` with `script-shell` or `node-options`, `.yarnrc`,
+`.yarnrc.yml` and `.yarn/releases/**`/`.yarn/plugins/**`, `.pnpmfile.*`, `bunfig.toml`) are guarded
+the same way, matched in any letter case, even when a project's own `protected_configs` leaves them
+out, and L1 runs with their base version. `pyproject.toml`, `package.json` and
+`pnpm-workspace.yaml` also hold dependencies, so only their tool sections are guarded
+(`mixed-configs.ts`: `[tool.ruff]`, `[tool.pytest]`, `[tool.mypy]`, `[tool.coverage]`, …, the task
+runners `[tool.tox]`, `[tool.hatch.envs.*]`, `[tool.pdm.scripts]`, `[tool.poe]`; `scripts`,
+`jest`, `eslintConfig`, `mocha`, `packageManager`, …; every pnpm setting, that is every top-level
+key but `packages`, `catalog` and `catalogs`): L5 reports a diff that changes one, and L1 runs
 with the head file whose tool sections are put back to the base version. Table headers are decoded
 the way TOML decodes them (quoted keys, `\uXXXX` escapes), and a header line that does not decode
 makes the whole file guarded (fail closed).
