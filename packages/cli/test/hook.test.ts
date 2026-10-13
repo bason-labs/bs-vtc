@@ -34,6 +34,7 @@ import {
   cleanupDirs,
   fakeGateRunner,
   fakePullRequests,
+  commitGatesConfig,
   initVtcRepo,
   tempDir,
   tempHome,
@@ -881,7 +882,7 @@ describe("against a live daemon with a role in flight", () => {
   let inScope: string;
 
   beforeAll(async () => {
-    repo = initVtcRepo();
+    repo = commitGatesConfig(initVtcRepo());
     home = tempHome();
     const parts = await buildEngineParts({
       repoRoot: repo,
