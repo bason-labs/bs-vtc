@@ -3,8 +3,8 @@
  * 0600). What the engine must be able to trust after a restart lives here, outside every path a
  * role can write (AD-7 rules 2 and 7; the repo and its worktrees are agent-writable): the ledger
  * of its own repo writes (`engine-writes.jsonl`, with a digest per event-log append), the record
- * of every dispatch (`dispatches/`, the git baseline and the engine files at dispatch), a
- * held git change awaiting the human (`git-hold.json`), the runs the engine could not verify when
+ * of every dispatch (`dispatches/`, the git baseline and the engine files at dispatch), the git
+ * baseline of every gate run still running (`gates/`), a held git change awaiting the human (`git-hold.json`), the runs the engine could not verify when
  * it opened (`held-runs.json`), and who claimed each run's Lead role (`leads.jsonl`).
  *
  * Residual: a role whose host sandbox lets it write the user's home directory could still reach

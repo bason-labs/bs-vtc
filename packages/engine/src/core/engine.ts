@@ -52,7 +52,9 @@ import { dispatchGuarded, dispatchNow, phaseRoles } from "./dispatch.js";
 import { parkEscalation } from "./escalations.js";
 import {
   acceptCheckout,
+  checkLeftoverGates,
   checkLeftoverRecords,
+  dropGates,
   findLostLogs,
   FORENSICS_DIR,
   gitPreflight,
@@ -62,6 +64,7 @@ import {
   removeLostLogs,
   reportUnverifiable,
   restoreDispatches,
+  restoreGates,
   restoreLog,
   saveHeldRuns,
   sweepDispatches,
@@ -155,7 +158,7 @@ export class Engine implements Kernel {
    */
   readonly notices: string[] = [];
   gitHold: Readonly<Record<string, string>> | null = null;
-  readonly gateBaselines = new Set<Readonly<Record<string, string>>>();
+  readonly gateBaselines = new Map<string, Readonly<Record<string, string>>>();
   /** Runs `open` could not verify, run → reason (`checkLeftoverRecords`, `findLostLogs`). */
   private held = new Map<string, string>();
   private readonly handles = new Map<string, RunHandle>();
@@ -191,11 +194,16 @@ export class Engine implements Kernel {
    * said, kept aside, and its run is held. Every record of a run that is not active is checked
    * before it is dropped (a git change is held); a record whose check finds anything holds its
    * run too. While a run is held, no run starts, an active run pauses, and the held runs'
-   * records keep holding engine git until the human's `vtc resume`.
+   * records keep holding engine git until the human's `vtc resume`. A gate run the daemon stopped
+   * in the middle of left its git baseline in the guard directory: it holds engine git from the
+   * start of `open`, and is checked before anything runs git (a change is held and reported,
+   * its run paused or held) and dropped (`checkLeftoverGates`).
    */
   static open(deps: EngineCoreDeps): Engine {
     const engine = new Engine(deps);
     restoreDispatches(engine);
+    // gate runs the daemon stopped in the middle of: their baselines hold engine git from here on
+    const gates = restoreGates(engine);
     engine.gitHold = loadGitHold(engine);
     engine.held = loadHeldRuns(engine);
     const wasHeld = new Map(engine.held);
@@ -284,10 +292,18 @@ export class Engine implements Kernel {
       engine.held.set(run, reason);
     }
     // A record is dropped only after its check, whatever became of its run.
+    const checkedGates = checkLeftoverGates(
+      engine,
+      gates,
+      engine.handles,
+      engine.held,
+      engine.notices,
+    );
     checkLeftoverRecords(engine, new Set(engine.handles.keys()), engine.held, engine.notices);
     for (const [run, reason] of wasHeld)
       if (!lost.has(run)) engine.notices.push(`run ${run} is held until vtc resume: ${reason}`);
     saveHeldRuns(engine, engine.held);
+    dropGates(engine, checkedGates);
     // only once the hold is kept: a crash before this finds the logs lost again
     removeLostLogs(engine, lost);
     const fresh = [...engine.held].filter(([run]) => !wasHeld.has(run));
