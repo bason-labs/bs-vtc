@@ -7,6 +7,11 @@
  *   pnpm build && pnpm dev:fixtures --static out      # the real export on http://127.0.0.1:4310/
  *   pnpm dev:fixtures & pnpm dev                       # next dev proxies /api/* here
  *
+ * It also serves the dashboard's own dev fixtures (`dev-fixtures/`, `dev-fixtures.ts`): an evidence
+ * bundle, `screens.yaml` and the design-review pins through the artifacts route, takes
+ * `POST /api/design/reviews` (validated, kept in memory), and serves the sample prototype on its
+ * own origin (port + 1) with `PROTOTYPE_CSP`, reported as `HealthResult.prototype_url`.
+ *
  * Flags: --port <n> (4310), --static <dir>, --live (report `mode: live` instead of the recorded
  * snapshot), --replay-ms <n> (delay between replayed events, 600). Binds 127.0.0.1 only. Dev only:
  * it checks no token and is never part of the build.
@@ -14,9 +19,22 @@
 import { randomBytes } from "node:crypto";
 import { existsSync, readFileSync, statSync } from "node:fs";
 import { createServer, type ServerResponse } from "node:http";
-import { join, resolve } from "node:path";
-import { dashboardAssetHeaders, resolveDashboardAsset } from "@vtc/shared";
-import { fixtureNameFor } from "./fixture-routes.ts";
+import { join, normalize, resolve, sep } from "node:path";
+import {
+  dashboardAssetHeaders,
+  DESIGN_REVIEW_MAX_BYTES,
+  DesignReviewCommentInputSchema,
+  PROTOTYPE_CSP,
+  resolveDashboardAsset,
+} from "@vtc/shared";
+import {
+  artifactContent,
+  DEV_PROTOTYPE_DIR,
+  devArtifact,
+  devArtifactFile,
+  mediaTypeFor,
+} from "./dev-fixtures.ts";
+import { fixtureNameFor, GOLDEN_RUN } from "./fixture-routes.ts";
 
 const args = process.argv.slice(2);
 const flag = (name: string): string | undefined => {
@@ -28,6 +46,7 @@ const staticDir =
   flag("static") === undefined ? null : resolve(process.cwd(), flag("static") ?? "");
 const replayMs = Number(flag("replay-ms") ?? "600");
 const live = args.includes("--live");
+const prototypePort = port + 1;
 const fixtures = resolve(import.meta.dirname, "../../../fixtures/golden-run");
 
 const sendJson = (res: ServerResponse, status: number, body: unknown): void => {
@@ -88,6 +107,67 @@ const serveStatic = (res: ServerResponse, pathname: string): void => {
   res.end(readFileSync(join(staticDir, asset)));
 };
 
+/** Design-review pins posted in this session, by screen (appended to the fixture's file). */
+const pins = new Map<string, string[]>();
+
+const designReviewsArtifact = (path: string): ReturnType<typeof devArtifact> => {
+  const match = /^\.vtc\/design\/reviews\/([a-z0-9][a-z0-9._-]{0,63})\.jsonl$/.exec(path);
+  if (match?.[1] === undefined) return null;
+  const file = devArtifactFile(path);
+  const lines = [
+    ...(file === null
+      ? []
+      : readFileSync(file, "utf8")
+          .split("\n")
+          .filter((l) => l !== "")),
+    ...(pins.get(match[1]) ?? []),
+  ];
+  return lines.length === 0 ? null : artifactContent(GOLDEN_RUN, path, `${lines.join("\n")}\n`);
+};
+
+const postDesignReview = (body: string, res: ServerResponse): void => {
+  if (Buffer.byteLength(body) > DESIGN_REVIEW_MAX_BYTES) {
+    sendJson(res, 413, { error: { code: "payload_too_large", message: "body too large" } });
+    return;
+  }
+  let raw: unknown;
+  try {
+    raw = JSON.parse(body);
+  } catch {
+    raw = null;
+  }
+  const parsed = DesignReviewCommentInputSchema.safeParse(raw);
+  if (!parsed.success) {
+    sendJson(res, 400, { error: { code: "bad_request", message: "not a design review comment" } });
+    return;
+  }
+  const { screen } = parsed.data;
+  pins.set(screen, [...(pins.get(screen) ?? []), JSON.stringify(parsed.data)]);
+  sendJson(res, 200, { ok: true, path: `.vtc/design/reviews/${screen}.jsonl` });
+};
+
+/** The sample prototype: any path serves its file, or `index.html` (one page per screen route). */
+const prototypeServer = createServer((req, res) => {
+  const pathname = new URL(req.url ?? "/", "http://127.0.0.1").pathname;
+  const file = normalize(join(DEV_PROTOTYPE_DIR, decodeURIComponent(pathname)));
+  const inside = file.startsWith(`${DEV_PROTOTYPE_DIR}${sep}`) || file === DEV_PROTOTYPE_DIR;
+  const served =
+    inside && existsSync(file) && statSync(file).isFile()
+      ? file
+      : join(DEV_PROTOTYPE_DIR, "index.html");
+  if (req.method !== "GET" || pathname.startsWith("/api/")) {
+    res.writeHead(404, { "content-security-policy": PROTOTYPE_CSP });
+    res.end();
+    return;
+  }
+  res.writeHead(200, {
+    "content-type": mediaTypeFor(served),
+    "content-security-policy": PROTOTYPE_CSP,
+    "x-content-type-options": "nosniff",
+  });
+  res.end(readFileSync(served));
+});
+
 const server = createServer((req, res) => {
   const url = new URL(req.url ?? "/", "http://127.0.0.1");
   const method = req.method ?? "GET";
@@ -97,6 +177,22 @@ const server = createServer((req, res) => {
       expires_at: new Date(Date.now() + 12 * 3_600_000).toISOString(),
     });
     return;
+  }
+  if (method === "POST" && url.pathname === "/api/design/reviews") {
+    let body = "";
+    req.on("data", (chunk: Buffer) => (body += chunk.toString()));
+    req.on("end", () => {
+      postDesignReview(body, res);
+    });
+    return;
+  }
+  if (method === "GET" && url.pathname === `/api/runs/${GOLDEN_RUN}/artifacts`) {
+    const path = url.searchParams.get("path") ?? "";
+    const extra = designReviewsArtifact(path) ?? devArtifact(GOLDEN_RUN, path);
+    if (extra !== null) {
+      sendJson(res, 200, extra);
+      return;
+    }
   }
   if (method === "GET" && url.pathname === "/api/stream") {
     stream(res, lastSeq(req.headers["last-event-id"]));
@@ -110,7 +206,12 @@ const server = createServer((req, res) => {
       return;
     }
     const body = JSON.parse(readFileSync(file, "utf8")) as Record<string, unknown>;
-    sendJson(res, 200, name === "health" && live ? { ...body, mode: "live" } : body);
+    const health = {
+      ...body,
+      ...(live ? { mode: "live" } : {}),
+      prototype_url: `http://127.0.0.1:${String(prototypePort)}/`,
+    };
+    sendJson(res, 200, name === "health" ? health : body);
     return;
   }
   if (method !== "GET") {
@@ -120,8 +221,10 @@ const server = createServer((req, res) => {
   serveStatic(res, url.pathname);
 });
 
+prototypeServer.listen(prototypePort, "127.0.0.1");
+
 server.listen(port, "127.0.0.1", () => {
   console.warn(
-    `fixture server on http://127.0.0.1:${String(port)}/ (golden-1${live ? ", live" : ""}${staticDir === null ? "" : `, static ${staticDir}`})`,
+    `fixture server on http://127.0.0.1:${String(port)}/ (golden-1${live ? ", live" : ""}${staticDir === null ? "" : `, static ${staticDir}`}), prototype on :${String(prototypePort)}`,
   );
 });

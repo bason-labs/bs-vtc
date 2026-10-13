@@ -6,6 +6,7 @@ import type { RunZoom } from "@/lib/router";
 import { ThemeProvider } from "@/components/theme/ThemeProvider";
 import { AppShell } from "@/components/shell/AppShell";
 import { ArtifactView } from "@/components/views/ArtifactView";
+import { DesignReviewView } from "@/components/views/DesignReviewView";
 import { EscalationsView } from "@/components/views/EscalationsView";
 import { FeatureView } from "@/components/views/FeatureView";
 import { RunsView } from "@/components/views/RunsView";
@@ -53,6 +54,9 @@ function Views({ serverPath }: { serverPath: string }) {
       break;
     case "artifact":
       view = <ArtifactView run={p("run")} path={p("path")} />;
+      break;
+    case "design":
+      view = <DesignReviewView run={p("run")} params={route.params} />;
       break;
     case "not_found":
       view = (

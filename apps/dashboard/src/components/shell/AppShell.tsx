@@ -70,7 +70,7 @@ function NavLink({
   );
 }
 
-const RUN_VIEWS: readonly View[] = ["run", "task", "feature", "escalations", "artifact"];
+const RUN_VIEWS: readonly View[] = ["run", "task", "feature", "escalations", "artifact", "design"];
 
 function RunNav({ run, view }: { run: string; view: View }) {
   const escalations = useResource(`shell-esc:${run}`, (c, s) => c.escalations(run, s), [
@@ -96,6 +96,9 @@ function RunNav({ run, view }: { run: string; view: View }) {
             {open}
           </span>
         ) : null}
+      </NavLink>
+      <NavLink href={hrefs.design(run)} current={view === "design"}>
+        Design
       </NavLink>
     </nav>
   );

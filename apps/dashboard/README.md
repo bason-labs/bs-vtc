@@ -1,12 +1,14 @@
 # Flow Studio (apps/dashboard)
 
-Read-only local dashboard (spec §17), sub-project 6. Increment 1 is built: runs list, the flow
-graph at all three zoom levels (phases, task DAG, one task's pipeline with its fix loop) live over
-SSE, the node drawer, escalations (read-only), the per-host usage panel, the feature view with
-Final Review and PR state, and a plain-text artifact view.
+Read-only local dashboard (spec §17), sub-project 6: runs list, the flow graph at all three zoom
+levels (phases, task DAG, one task's pipeline with its fix loop) live over SSE, the node drawer
+(with gate reports per layer L0–L6), escalations (read-only), the per-host usage panel, the
+feature view with Final Review and PR state, the artifact view (evidence bundles and traceability
+reports as a REQ → test → result matrix, everything else as plain text), and the design review.
 
 Pages (fixed, AD-20): `/`, `/run/?run=&zoom=phases|tasks&node=`, `/task/?run=&task=&node=`,
-`/feature/?run=&feature=`, `/escalations/?run=`, `/usage/`, `/artifact/?run=&path=`. Every page
+`/feature/?run=&feature=`, `/escalations/?run=`, `/usage/`, `/artifact/?run=&path=`,
+`/design/?run=&screen=&state=&viewport=390|768|1440&theme=light|dark`. Every page
 renders the same client app (`src/components/app/FlowStudio.tsx`), which picks the view from the
 address and switches views with `history.pushState` (`src/lib/router.ts`).
 
@@ -33,24 +35,37 @@ binaries must stay out of the production dependency closure (AD-2, `supply-chain
   request, reading the SSE stream with `fetch` streaming (EventSource cannot send headers).
 - Artifacts (spec, design, evidence bundles) come from `GET /api/runs/:run/artifacts?path=` as
   JSON; diffs from `/tasks/:task/diff`; features from `/features`.
-- Design review: the prototype comes from the separate prototype origin
-  (`HealthResult.prototype_url`) and is embedded only in `<iframe sandbox="allow-scripts">`
-  (`ENGINE_HTTP.prototype.iframeSandbox`), never with `allow-same-origin`.
+- Design review: the screens come from `.vtc/design/screens.yaml`
+  (`screens: [{ id, route, states, reqs }]`, read through the artifacts route); the prototype comes
+  from the separate prototype origin (`HealthResult.prototype_url`) at the screen's route with
+  `?state=<state>&theme=<light|dark>`, embedded only in `<iframe sandbox="allow-scripts">`
+  (`ENGINE_HTTP.prototype.iframeSandbox`), never with `allow-same-origin`, and scaled to fit at
+  the §7.5 widths. Pins are read from `.vtc/design/reviews/<screen>.jsonl` and written with
+  `POST /api/design/reviews`; a pin is a percentage of the frame, so it only lines up on the
+  state, width and theme it was made on (the others are listed, not drawn). Keyboard users place
+  a pin with Enter and the position fields.
 - Without a running engine, `vtc dashboard` serves the same routes read-only from the committed
   `.vtc/` snapshot.
 
 Development (AD-5 rule 8):
 
 - `pnpm dev:fixtures` serves the golden run (`scripts/fixture-server.ts`: recorded routes, the
-  event log replayed as SSE, any well-formed nonce accepted); `pnpm dev` proxies `/api/*` to it
-  (`VTC_DEV_API` overrides the target). `pnpm build && pnpm dev:fixtures --static out [--live]`
+  event log replayed as SSE, any well-formed nonce accepted), plus the dashboard's own
+  `dev-fixtures/` (an evidence bundle and traceability report for T-1, `screens.yaml`, pins, and a
+  sample prototype on port 4311 with `PROTOTYPE_CSP`); it keeps posted pins in memory. `pnpm dev`
+  proxies `/api/*` to it (`VTC_DEV_API` overrides the target). Open the dashboard on
+  `http://127.0.0.1:…`, not `localhost`: the prototype's CSP allows framing by `127.0.0.1` only. `pnpm build && pnpm dev:fixtures --static out [--live]`
   serves the real export by the engine's AD-20 rules on `http://127.0.0.1:4310/`.
 - Tests: `pnpm test` (vitest + Testing Library in jsdom) against the same fixture.
 
 - Build against `fixtures/golden-run/`: `events.jsonl` (replay it as the SSE stream) and `api/*.json`
   (the exact response of every read route).
-- Not built yet: against a live engine, `next dev` proxies `/api/*` to the engine found in
-  `~/.vtc/engines/<repo-key>.json`, injecting the token, setting `Host` and dropping `Origin`. The
-  engine never sends CORS headers.
+- Against a live engine: `pnpm dev:engine --repo <abs path of the target repo>` starts
+  `scripts/engine-proxy.ts` on `127.0.0.1:4320`, then `VTC_DEV_API=http://127.0.0.1:4320 pnpm dev`.
+  The proxy finds the engine in `$VTC_HOME/engines/<repo-key>.json` (`~/.vtc` by default) on
+  every request, injects the install token (refusing a token file others can read), sets `Host`
+  and drops `Origin`, cookies and the browser's own `Authorization`. It forwards only the routes
+  whose `auth` is `token`, never the nonce mint or the statusline ingest. The engine never sends
+  CORS headers.
 
 See `docs/architecture/vtc-spine.md`.

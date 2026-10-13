@@ -1,0 +1,80 @@
+{
+  "kind": "task",
+  "run": "golden-1",
+  "task": "T-1",
+  "feature": "F-1",
+  "discipline": "backend",
+  "rounds": 1,
+  "cap": 4,
+  "traceability": {
+    "run": "golden-1",
+    "task": "T-1",
+    "rows": [
+      {
+        "req": "REQ-1",
+        "tests": [
+          {
+            "id": "token store [REQ-1] binds a token to one user",
+            "status": "pass",
+            "hidden": false,
+            "provenance": "spec"
+          }
+        ],
+        "covered": true
+      },
+      {
+        "req": "REQ-1.AC-1",
+        "tests": [
+          {
+            "id": "token store [REQ-1.AC-1] stores only the hash",
+            "status": "pass",
+            "hidden": false,
+            "provenance": "spec"
+          },
+          {
+            "id": "acceptance [REQ-1.AC-1] hash survives restart",
+            "status": "pass",
+            "hidden": true,
+            "provenance": "mixed"
+          }
+        ],
+        "covered": true
+      }
+    ],
+    "gaps": [],
+    "scope_creep": [],
+    "built_at": "2026-10-13T09:19:00.000Z"
+  },
+  "findings": {
+    "open": 0,
+    "resolved": 1,
+    "deferred": 0,
+    "waived": 0,
+    "discarded": 0
+  },
+  "gate_reports": [".vtc/evidence/T-1/round-1/junit.xml"],
+  "verdicts": [
+    {
+      "role": "spec_verifier",
+      "subject": "REQ-1.AC-1",
+      "verdict": "pass",
+      "prompt_sha": "6666666666666666666666666666666666666666666666666666666666666666"
+    },
+    {
+      "role": "qa",
+      "subject": "REQ-1",
+      "verdict": "pass",
+      "prompt_sha": "7777777777777777777777777777777777777777777777777777777777777777"
+    }
+  ],
+  "spend": {
+    "usd": 1.2,
+    "tokens": {
+      "in": 182000,
+      "out": 24100,
+      "cache_r": 610000,
+      "cache_w": 40200
+    }
+  },
+  "written_at": "2026-10-13T09:21:00.000Z"
+}

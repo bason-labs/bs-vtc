@@ -1,0 +1,2 @@
+{"screen":"reset-request","state":"empty","viewport":1440,"theme":"light","x_pct":50,"y_pct":30,"comment":"The heading competes with the form; make the email field the first thing you see.","author":"Ba","at":"2026-10-13T09:05:00.000Z"}
+{"screen":"reset-request","state":"error","viewport":390,"theme":"dark","x_pct":12.5,"y_pct":61,"comment":"Error text is too low-contrast in dark mode."}
