@@ -11,6 +11,7 @@ import {
   symlinkSync,
   writeFileSync,
 } from "node:fs";
+import { execFileSync } from "node:child_process";
 import { request } from "node:http";
 import { join, relative } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
@@ -560,4 +561,20 @@ describe("AD-5 rule 9: the prototype origin", () => {
     expect((await call(proto.port, "/")).body).toBe("<h1>proto</h1>");
     chmodSync(join(repo, ".vtc/design/prototype/locked.js"), 0o644);
   });
+  it.skipIf(process.platform === "win32")(
+    "never opens a FIFO planted under the root: 404, and the daemon stays responsive",
+    async () => {
+      const repo = tempDir("vtc-proto-");
+      writeFile(repo, ".vtc/design/prototype/index.html", "<h1>proto</h1>");
+      execFileSync("mkfifo", [join(repo, ".vtc/design/prototype/pipe.html")]);
+      mkdirSync(join(repo, ".vtc/design/prototype/dir"));
+      execFileSync("mkfifo", [join(repo, ".vtc/design/prototype/dir/index.html")]);
+      const proto = await createPrototypeServer(repo);
+      servers.push(proto);
+      expect((await call(proto.port, "/pipe.html")).status).toBe(404);
+      expect((await call(proto.port, "/dir/")).status).toBe(404);
+      // the event loop was never blocked: the next request is answered
+      expect((await call(proto.port, "/")).body).toBe("<h1>proto</h1>");
+    },
+  );
 });

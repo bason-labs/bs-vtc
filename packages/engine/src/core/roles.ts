@@ -1,13 +1,18 @@
 /**
  * The role contracts the engine dispatches against (§5, AD-14). The neutral role sources in
- * `roles/` (sub-project 3) are the source of truth once the cli injects them; until then the
- * engine uses these built-in contracts, which declare exactly what each role may return, so
- * `checkResultAgainstContract` (AD-8 rule 9) has something to enforce. Model ids come from the
- * engine (AD-6 rule 2): role tier → project override → built-in tier map.
+ * `roles/` (sub-project 3) are the source of truth: the compiler emits them into each host
+ * plugin as {@link ROLE_CONTRACTS_ASSET}, and the daemon loads them from its `AssetBundle`
+ * (`compiledRoleContracts`). A broken or incomplete set stops the daemon. Until the plugins carry
+ * the file, the engine uses these built-in contracts and the daemon says so on stderr; a test
+ * compares them with `roles/<role>/role.yaml` once those exist, so the two cannot drift
+ * unnoticed. Model ids come from the engine (AD-6 rule 2): role tier → project override →
+ * built-in tier map.
  */
 import {
   HOST_IDS,
   RoleContractSchema,
+  type AssetBundle,
+  type AssetNamespace,
   type HostId,
   type ModelTier,
   type ProjectConfig,
@@ -182,11 +187,68 @@ export interface RoleRegistry {
   get(role: string): RoleContract | undefined;
 }
 
-/** Built-ins, with injected contracts (from `roles/`) taking precedence by id. */
+/**
+ * The registry: the compiled contracts when given (they must cover every role the engine
+ * dispatches, `compiledRoleContracts` checks it), else the built-ins.
+ */
 export const createRoleRegistry = (contracts: readonly RoleContract[] = []): RoleRegistry => {
-  const byId = new Map<string, RoleContract>(BUILTIN_ROLES.map((r) => [r.id, r]));
-  for (const contract of contracts) byId.set(contract.id, contract);
+  const byId = new Map<string, RoleContract>(
+    (contracts.length > 0 ? contracts : BUILTIN_ROLES).map((r) => [r.id, r]),
+  );
   return { get: (id) => byId.get(id) };
+};
+
+/**
+ * Where the compiler writes the compiled role contracts in each host plugin (a JSON array of
+ * `RoleContract`). Proposed to shared as a contract constant (AD-14, AD-15 rule 2).
+ */
+export const ROLE_CONTRACTS_ASSET = "vtc/role-contracts.json";
+
+export class RoleContractsError extends Error {
+  constructor(detail: string) {
+    super(`the compiled role contracts (${ROLE_CONTRACTS_ASSET}) are unusable: ${detail}`);
+    this.name = "RoleContractsError";
+  }
+}
+
+/**
+ * The compiled role contracts a plugin namespace carries, validated against `RoleContractSchema`
+ * and checked to cover every role the engine dispatches; `null` when no plugin carries them.
+ * Throws {@link RoleContractsError} on a broken or incomplete set (the daemon must not start on
+ * one: write scopes and result checks come from these contracts).
+ */
+export const compiledRoleContracts = (assets: AssetBundle): RoleContract[] | null => {
+  for (const namespace of [
+    "plugin:claude-code",
+    "plugin:codex",
+  ] as const satisfies readonly AssetNamespace[]) {
+    const bytes = assets.read(namespace, ROLE_CONTRACTS_ASSET);
+    if (bytes === undefined) continue;
+    let raw: unknown;
+    try {
+      raw = JSON.parse(Buffer.from(bytes).toString("utf8"));
+    } catch (error) {
+      throw new RoleContractsError(
+        `${namespace}: ${error instanceof Error ? error.message : String(error)}`,
+      );
+    }
+    if (!Array.isArray(raw)) throw new RoleContractsError(`${namespace}: not an array`);
+    const contracts = raw.map((entry, i) => {
+      const parsed = RoleContractSchema.safeParse(entry);
+      if (!parsed.success)
+        throw new RoleContractsError(
+          `${namespace}[${String(i)}]: ${parsed.error.issues.map((x) => `${x.path.join(".")} ${x.message}`).join("; ")}`,
+        );
+      return parsed.data;
+    });
+    const missing = BUILTIN_ROLES.map((r) => r.id).filter(
+      (id) => !contracts.some((c) => c.id === id),
+    );
+    if (missing.length > 0)
+      throw new RoleContractsError(`${namespace}: no contract for ${missing.join(", ")}`);
+    return contracts;
+  }
+  return null;
 };
 
 /** The tier a role runs at on a host (mode overrides first). */

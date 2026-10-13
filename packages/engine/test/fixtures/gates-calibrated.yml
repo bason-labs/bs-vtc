@@ -1,0 +1,60 @@
+# Written by vtc calibrate. Review the commands; they run only once confirmed.
+version: 1
+baseline:
+  revision: 4f1c2a9e8b7d6c5f4e3d2c1b0a9f8e7d6c5b4a39
+  calibrated_at: 2026-10-13T08:00:00.000Z
+  confirmed: true
+  flaky_tests:
+    - "tests/api.test.ts > reset > retries: twice"
+    - tests/ui.test.ts
+sources:
+  - gates_yml
+  - task_runner
+  - ci
+tests:
+  acceptance_globs:
+    - tests/acceptance/**
+    - "**/*.acceptance.test.ts"
+  protected_configs:
+    - vitest.config.ts
+    - eslint.config.js
+gates:
+  - id: install
+    layer: L0
+    command:
+      - pnpm
+      - install
+      - --frozen-lockfile
+    phase: install
+    timeout_s: 600
+  - id: typecheck
+    layer: L0
+    command: [pnpm, typecheck]
+  - id: tests
+    layer: L2
+    command:
+      - pnpm
+      - vitest
+      - run
+      - --reporter=junit
+      - "--outputFile=.vtc/state/gates/junit #1.xml"
+    cwd: packages/app
+    timeout_s: 1800
+    report:
+      format: junit
+      path: .vtc/state/gates/junit.xml
+  - id: checkov
+    layer: L4
+    command:
+      - checkov
+      - -d
+      - infra
+    when_changed:
+      - "*.tf"
+      - infra/**
+  - id: arch
+    layer: L6
+    command:
+      - pnpm
+      - depcruise
+    blocking: false

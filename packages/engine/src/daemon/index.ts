@@ -28,8 +28,10 @@ import {
 } from "@vtc/shared";
 import {
   acquireEngineLock,
+  compiledRoleContracts,
   createReadModel,
   createRoleRegistry,
+  ROLE_CONTRACTS_ASSET,
   Engine,
   INDEX_PATH,
   loadRuns,
@@ -131,6 +133,13 @@ export const runDaemon: RunDaemon = async (deps: EngineDeps, options) => {
   };
   try {
     const git = createGitOps({ repoRoot: deps.repoRoot });
+    // The role contracts compiled from `roles/` (AD-14); a broken set stops the start.
+    const compiled = compiledRoleContracts(deps.assets);
+    if (compiled === null) {
+      process.stderr.write(
+        `vtc engine: the plugin assets carry no ${ROLE_CONTRACTS_ASSET}; using the engine's built-in role contracts\n`,
+      );
+    }
     const engine = Engine.open({
       repoRoot: deps.repoRoot,
       vtcHome: deps.vtcHome,
@@ -141,7 +150,7 @@ export const runDaemon: RunDaemon = async (deps: EngineDeps, options) => {
       pullRequests: createGhPullRequests(deps.repoRoot),
       adapters: deps.adapters,
       autoResume: deps.scheduler,
-      roles: createRoleRegistry(),
+      roles: createRoleRegistry(compiled ?? []),
       now,
       random: Math.random,
       promptSha: promptShaFrom(deps.assets),

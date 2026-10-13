@@ -85,6 +85,16 @@ const emitGateResult = (k: Kernel, h: RunHandle, report: GateReport): void => {
   });
 };
 
+/**
+ * What the Gate Runner wrote under `.vtc/evidence/` through its own file calls (reports,
+ * inventories) is the engine's: recorded as such, so a role working in the checkout at the same
+ * time is not blamed for it, and a later change to it is (AD-7 rule 7).
+ */
+export const adoptGateOutput = (k: Kernel, report: GateReport): void => {
+  const owner = report.task ?? report.feature;
+  if (owner !== undefined) k.writes.adopt(`.vtc/evidence/${owner}`);
+};
+
 /** Runs the Gate Runner on a clean checkout of `head` (§6.3 step 5); never throws for a failing gate. */
 const runGates = async (
   k: Kernel,
@@ -92,7 +102,11 @@ const runGates = async (
 ): Promise<GateReport> => {
   const checkout = await k.deps.git.createCleanCheckout(request.head);
   try {
-    return await k.deps.gateRunner.run(GateRunRequestSchema.parse({ ...request, checkout }));
+    const report = await k.deps.gateRunner.run(
+      GateRunRequestSchema.parse({ ...request, checkout }),
+    );
+    adoptGateOutput(k, report);
+    return report;
   } finally {
     await k.deps.git.removeCheckout(checkout);
   }

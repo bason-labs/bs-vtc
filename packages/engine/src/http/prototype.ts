@@ -3,12 +3,26 @@
  * from its own 127.0.0.1 port, never the API's origin. No token (git-tracked files, no run data),
  * Host checked, `PROTOTYPE_CSP` on every response, no `/api/` route, nothing outside the root.
  * The files are agent-written, so every filesystem error (an unreadable file, a symlink loop, a
- * file removed mid-request) answers 404 or 500; none may escape and stop the daemon.
+ * file removed mid-request) answers 404 or 500; none may escape and stop the daemon. Nothing but a
+ * regular file is opened, and the open never blocks (`O_NONBLOCK`): a FIFO or device planted under
+ * the root would otherwise hold the daemon's one event loop. Files over {@link MAX_FILE_BYTES}
+ * are not served.
  */
-import { closeSync, fstatSync, openSync, readSync, realpathSync } from "node:fs";
+import {
+  closeSync,
+  constants,
+  fstatSync,
+  openSync,
+  readSync,
+  realpathSync,
+  statSync,
+} from "node:fs";
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
 import { join, sep } from "node:path";
 import { dashboardAssetHeaders, ENGINE_HTTP } from "@vtc/shared";
+
+/** The largest prototype file served (a prototype page, script or image). */
+export const MAX_FILE_BYTES = 16 * 1024 * 1024;
 
 export interface PrototypeServer {
   readonly port: number;
@@ -46,15 +60,15 @@ export const createPrototypeServer = async (
       }
       if (real === realRoot) continue; // the root itself: try its index.html
       if (!real.startsWith(`${realRoot}${sep}`)) return null;
-      let fd: number;
-      try {
-        fd = openSync(real, "r");
-      } catch (error) {
-        if ((error as NodeJS.ErrnoException).code === "EISDIR") continue;
-        throw error;
-      }
-      if (fstatSync(fd).isFile()) return { fd };
+      const stat = statSync(real);
+      if (stat.isDirectory()) continue;
+      if (!stat.isFile()) return null; // a FIFO, socket or device: never opened
+      // Non-blocking: the path may have been swapped for a FIFO since the stat.
+      const fd = openSync(real, constants.O_RDONLY | constants.O_NONBLOCK);
+      const opened = fstatSync(fd);
+      if (opened.isFile() && opened.size <= MAX_FILE_BYTES) return { fd };
       closeSync(fd);
+      return null;
     }
     return null;
   };

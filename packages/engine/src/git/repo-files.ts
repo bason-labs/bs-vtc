@@ -4,11 +4,16 @@
  * have been replaced by a symlink pointing outside the repo. Every component below the repo root
  * is checked with `lstat`; files are written to a temp file and renamed into place (a rename
  * replaces a symlink, never its target); appends open with `O_NOFOLLOW`.
+ *
+ * Every write is reported to the root's {@link RepoWriteObserver}, if one is registered: engine
+ * core keeps a ledger of what the engine wrote, so a later change to those files by anyone else
+ * is detected (AD-7 rule 7).
  */
 import { randomBytes } from "node:crypto";
 import {
   closeSync,
   constants,
+  fstatSync,
   lstatSync,
   mkdirSync,
   openSync,
@@ -28,6 +33,33 @@ export class UnsafePathError extends Error {
     this.name = "UnsafePathError";
   }
 }
+
+/** What an engine write did to a repo file. */
+export type RepoWrite =
+  | { readonly kind: "write"; readonly rel: string; readonly content: Uint8Array }
+  | { readonly kind: "remove"; readonly rel: string }
+  | {
+      readonly kind: "append";
+      readonly rel: string;
+      /** The file's size right before the append. */
+      readonly sizeBefore: number;
+      readonly content: Uint8Array;
+    };
+
+export type RepoWriteObserver = (write: RepoWrite) => void;
+
+const observers = new Map<string, RepoWriteObserver>();
+
+/** Registers the observer of every write under `root` (one per root); returns the removal. */
+export const observeRepoWrites = (root: string, observer: RepoWriteObserver): (() => void) => {
+  observers.set(root, observer);
+  return () => {
+    if (observers.get(root) === observer) observers.delete(root);
+  };
+};
+
+const bytesOf = (content: string | Uint8Array): Uint8Array =>
+  typeof content === "string" ? Buffer.from(content, "utf8") : content;
 
 const segmentsOf = (rel: string): string[] => {
   const parts = rel.split("/");
@@ -111,13 +143,15 @@ export const writeRepoFile = (
   const target = join(root, rel);
   if (kindOf(target) === "dir") throw new UnsafePathError(rel, "is a directory");
   const temp = `${target}.vtc-${randomBytes(6).toString("hex")}.tmp`;
+  const bytes = bytesOf(content);
   try {
-    writeFileSync(temp, content, { flag: "wx", mode });
+    writeFileSync(temp, bytes, { flag: "wx", mode });
     renameSync(temp, target);
   } catch (error) {
     rmSync(temp, { force: true });
     throw error;
   }
+  observers.get(root)?.({ kind: "write", rel, content: bytes });
 };
 
 /** Appends to `rel` under `root`, creating it; refuses a symlink at any component. */
@@ -134,9 +168,22 @@ export const appendRepoFile = (root: string, rel: string, content: string): void
     constants.O_WRONLY | constants.O_APPEND | constants.O_CREAT | noFollow,
     0o644,
   );
+  const bytes = bytesOf(content);
+  let sizeBefore: number;
   try {
-    writeSync(fd, content);
+    sizeBefore = fstatSync(fd).size;
+    writeSync(fd, bytes);
   } finally {
     closeSync(fd);
   }
+  observers.get(root)?.({ kind: "append", rel, sizeBefore, content: bytes });
+};
+
+/** Removes `rel` under `root` if it exists (never through a symlinked parent). */
+export const removeRepoFile = (root: string, rel: string): void => {
+  segmentsOf(rel);
+  const parent = parentOf(rel);
+  if (parent !== null) assertNoSymlinks(root, parent);
+  rmSync(join(root, rel), { force: true });
+  observers.get(root)?.({ kind: "remove", rel });
 };
