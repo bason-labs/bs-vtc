@@ -14,3 +14,5 @@ out/
 .turbo/
 coverage/
 *.tsbuildinfo
+# Claude Code runtime state of a local session (not repo content)
+.claude/scheduled_tasks.lock

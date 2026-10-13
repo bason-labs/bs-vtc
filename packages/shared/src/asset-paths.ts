@@ -19,6 +19,16 @@ export const ASSET_SOURCES = {
 } as const;
 
 /**
+ * Where the compiler writes the compiled role contracts inside each plugin namespace
+ * (`plugin:claude-code`, `plugin:codex`): a JSON array of `RoleContract`, one per role, built from
+ * `roles/<role>/role.yaml` (AD-14). The daemon loads them from its `AssetBundle` and refuses to
+ * start on a broken or incomplete set: write scopes, exits, verdicts and models come from these
+ * contracts (AD-8 rule 9), never from a second copy in the engine. The plugin manifest sits next
+ * to it (`PLUGIN_MANIFEST_ASSET`).
+ */
+export const ROLE_CONTRACTS_ASSET = "vtc/role-contracts.json";
+
+/**
  * Pure: the dashboard asset that answers `urlPath` (the request's pathname), or `null` (404).
  * `has` says whether the bundle holds a path (`AssetBundle.read(...) !== undefined`). Order:
  * 1. `/api` and `/api/...` are never assets;

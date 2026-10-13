@@ -4,7 +4,8 @@
  *   `daemon/`);
  * - the gate-runner team implements `createGateRunner` (`@vtc/engine`, module `gates/`);
  * - the cli+binary team builds {@link EngineDeps} (storage driver, Gate Runner, adapters, asset
- *   bundle, timer) and calls them, and talks to a running daemon only through {@link EngineClient}.
+ *   bundle with the compiled role contracts (`ROLE_CONTRACTS_ASSET`), timer, PR service) and
+ *   calls them, and talks to a running daemon only through {@link EngineClient}.
  *
  * Transports: the Lead's host reaches the daemon through `vtc engine --mcp --host <host>` (stdio
  * bridge); the cli control commands (`vtc pause`, `resume`, `status`) are MCP clients of the same
@@ -19,6 +20,7 @@ import type { HostId } from "../primitives.js";
 import type { AssetBundle } from "./assets.js";
 import type { AutoResumeScheduler } from "./auto-resume.js";
 import type { GateRunner } from "./gate-runner.js";
+import type { PullRequestService } from "./git.js";
 import type { HostAdapter } from "./host-adapter.js";
 import type { StorageFactory } from "./storage.js";
 
@@ -46,6 +48,11 @@ export interface EngineDeps {
   /** The dashboard's static export (AD-2 rule 7). */
   readonly assets: AssetBundle;
   readonly scheduler: AutoResumeScheduler;
+  /**
+   * The feature PR service (§6.7 Level 2+). The cli injects the `gh`-backed one; tests inject a
+   * fake. When absent the engine uses its own `gh`-backed default.
+   */
+  readonly pullRequests?: PullRequestService;
   readonly versions: EngineVersions;
   /** Clock override for tests. */
   readonly now?: () => Date;
