@@ -20,7 +20,7 @@ import { pidAlive } from "../src/daemon.js";
 import {
   cleanupDirs,
   DASHBOARD_FIXTURE,
-  commitGatesConfig,
+  commitVtcConfig,
   initRepo,
   tempDir,
   tempHome,
@@ -236,7 +236,7 @@ describe.skipIf(!HAS_BUN)(
         spawnSync(vtc, ["init"], { cwd: repo, env: { ...process.env, VTC_HOME: home } }).status,
       ).toBe(0);
       // a run starts only on a committed gates.yml (D-au)
-      commitGatesConfig(repo);
+      commitVtcConfig(repo);
       // set up now: the next call starts the daemon detached
       send(a, {
         jsonrpc: "2.0",

@@ -202,15 +202,120 @@ const vtcHomePath = (vtcHome: string, glob: string): string => {
 };
 
 /**
+ * Credential stores under the user's home that no role or gate needs: SSH and cloud keys,
+ * registry and git credentials, the Docker and Kubernetes configs, the user's keychains and Claude
+ * Code's own config file. Relative to the user's home; never opened, only written into deny rules
+ * (the gate sandbox, D-al, and the Lead session's sandbox, {@link claudeSessionSandboxSettings}).
+ */
+export const HOME_CREDENTIAL_LOCATIONS: readonly string[] = [
+  ".ssh",
+  ".aws",
+  ".azure",
+  ".config/gcloud",
+  ".config/gh",
+  ".config/hub",
+  ".config/op",
+  ".config/git/credentials",
+  ".config/containers",
+  ".git-credentials",
+  ".netrc",
+  ".npmrc",
+  ".yarnrc",
+  ".yarnrc.yml",
+  ".bunfig.toml",
+  ".pypirc",
+  ".cargo/credentials",
+  ".cargo/credentials.toml",
+  ".gem/credentials",
+  ".gradle/gradle.properties",
+  ".m2/settings.xml",
+  ".m2/settings-security.xml",
+  ".terraform.d/credentials.tfrc.json",
+  ".vault-token",
+  ".pgpass",
+  ".docker",
+  ".kube",
+  ".gnupg",
+  ".password-store",
+  ".local/share/keyrings",
+  ".claude.json",
+  "Library/Keychains",
+];
+
+/**
+ * What no role may do with the project's own engine files, relative to the repo's main checkout
+ * (spine §5 reading 79). `readDeny`: the engine's verification checkouts, which hold the hidden
+ * acceptance tests during a gate run (§7.3), and the raw gate output, which holds what the hidden
+ * runs printed. `writeDeny`: the same, plus the run config a role must not widen for the next
+ * run (`project.yaml`: merge level, allowlists, risk rules; `gates.yml`). Role worktrees
+ * (`.vtc/state/worktrees/`) stay writable.
+ */
+export const REPO_ROLE_DENIED = {
+  readDeny: [".vtc/state/checkouts/**", ".vtc/state/gates/**"],
+  writeDeny: [
+    ".vtc/state/checkouts/**",
+    ".vtc/state/gates/**",
+    ".vtc/project.yaml",
+    ".vtc/gates.yml",
+  ],
+} as const;
+
+/**
+ * Where the Lead session's sandbox settings resolve the paths beyond the VTC home: the repo they
+ * are written for, the user's home ({@link HOME_CREDENTIAL_LOCATIONS}) and each host's config
+ * directory (its credential files, `hostCredentialDenyReadPaths`). Absolute POSIX paths.
+ */
+export interface SessionSandboxScope {
+  /** The repo's main checkout, where `vtc install` writes `.claude/settings.local.json`. */
+  readonly projectRoot: string;
+  /** The user's home. */
+  readonly homeDir: string;
+  /** Each host's config directory: `$CLAUDE_CONFIG_DIR` / `$CODEX_HOME`, or the default. */
+  readonly hostConfigDirs: Readonly<Partial<Record<HostId, string>>>;
+}
+
+/**
+ * Each host's config directory as the host itself resolves it: the absolute value of its
+ * `configDirEnv` variable, or its default directory under `homeDir`. Pure string joins.
+ */
+export const hostConfigDirsOf = (
+  env: Readonly<Record<string, string | undefined>>,
+  homeDir: string,
+): Record<HostId, string> => {
+  const home = homeDir.length > 1 ? homeDir.replace(/\/+$/, "") : homeDir;
+  const dirOf = (host: HostId): string => {
+    const entry = HOST_CREDENTIAL_DENY_READ[host];
+    const moved = env[entry.configDirEnv];
+    return moved !== undefined && moved.startsWith("/")
+      ? moved
+      : `${home}/${entry.defaultConfigDir}`;
+  };
+  return { "claude-code": dirOf("claude-code"), codex: dirOf("codex") };
+};
+
+const underRoot = (root: string, rel: string, what: string): string => {
+  if (!root.startsWith("/") || root.includes("\\")) {
+    throw new TypeError(`expected an absolute POSIX ${what}, got ${root}`);
+  }
+  const base = root.length > 1 ? root.replace(/\/+$/, "") : "";
+  return `${base}/${rel.replace(/\/\*\*$/, "")}`;
+};
+
+/**
  * The Claude Code session sandbox a Lead session needs before the engine runs a code-running
- * role in it (D-an, spine §5 reading 71). In plugin-only dispatch (AD-17) an Engineer-family
- * role is a subagent of the human's Lead session, so its shell is confined only by that
- * session's own sandbox. `vtc install --host claude-code` (an explicit user command) shows the
- * user and then writes these keys into the project's gitignored `.claude/settings.local.json`;
- * {@link claudeSessionSandboxState} reads them back. Absolute POSIX paths, pure string joins.
+ * role in it (D-an, spine §5 readings 71 and 79). In plugin-only dispatch (AD-17) an
+ * Engineer-family role is a subagent of the human's Lead session, so its shell is confined only by
+ * that session's own sandbox. `vtc install --host claude-code` (an explicit user command) shows
+ * the user and then writes these keys into the project's gitignored `.claude/settings.local.json`;
+ * {@link claudeSessionSandboxState} reads them back. Reads are denied on `homeReadDeny`, on each
+ * host's credential files and {@link HOME_CREDENTIAL_LOCATIONS} (what the gate sandbox and the
+ * headless profiles already deny) and on {@link REPO_ROLE_DENIED}`.readDeny`; writes on
+ * `homeWriteDeny` and `REPO_ROLE_DENIED.writeDeny`. Absolute POSIX paths, pure string joins:
+ * nothing is opened (D-ad).
  */
 export const claudeSessionSandboxSettings = (
   vtcHome: string,
+  scope: SessionSandboxScope,
 ): {
   readonly sandbox: {
     readonly enabled: true;
@@ -222,8 +327,24 @@ export const claudeSessionSandboxSettings = (
     enabled: true,
     allowUnsandboxedCommands: false,
     filesystem: {
-      denyRead: ROLE_DENIED_VTC.homeReadDeny.map((glob) => vtcHomePath(vtcHome, glob)),
-      denyWrite: ROLE_DENIED_VTC.homeWriteDeny.map((glob) => vtcHomePath(vtcHome, glob)),
+      denyRead: [
+        ...new Set([
+          ...ROLE_DENIED_VTC.homeReadDeny.map((glob) => vtcHomePath(vtcHome, glob)),
+          ...hostCredentialDenyReadPaths(scope.hostConfigDirs),
+          ...HOME_CREDENTIAL_LOCATIONS.map((rel) => underRoot(scope.homeDir, rel, "home")),
+          ...REPO_ROLE_DENIED.readDeny.map((glob) =>
+            underRoot(scope.projectRoot, glob, "project root"),
+          ),
+        ]),
+      ],
+      denyWrite: [
+        ...new Set([
+          ...ROLE_DENIED_VTC.homeWriteDeny.map((glob) => vtcHomePath(vtcHome, glob)),
+          ...REPO_ROLE_DENIED.writeDeny.map((glob) =>
+            underRoot(scope.projectRoot, glob, "project root"),
+          ),
+        ]),
+      ],
     },
   },
 });
@@ -238,9 +359,10 @@ export const claudeSessionSandboxSettings = (
 export const claudeSessionSandboxState = (
   settings: unknown,
   vtcHome: string,
+  scope: SessionSandboxScope,
 ): { readonly state: SessionSandboxState; readonly missing: readonly string[] } => {
   if (!isRecord(settings)) return { state: "unknown", missing: ["sandbox"] };
-  const wanted = claudeSessionSandboxSettings(vtcHome).sandbox;
+  const wanted = claudeSessionSandboxSettings(vtcHome, scope).sandbox;
   const sandbox = isRecord(settings.sandbox) ? settings.sandbox : {};
   const filesystem = isRecord(sandbox.filesystem) ? sandbox.filesystem : {};
   const listed = (list: unknown): readonly unknown[] => (Array.isArray(list) ? list : []);

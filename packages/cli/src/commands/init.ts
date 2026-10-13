@@ -94,7 +94,9 @@ export const command: CommandSpec = {
       if (!hasIgnore)
         writeFileSync(ignore, "# local engine state (§4.3)\n/state/\n", { flag: "wx" });
       ctx.io.out(`Wrote ${path}`);
-      ctx.io.out("Next: vtc calibrate, then /vtc start in Claude Code or Codex.");
+      ctx.io.out(
+        "Next: vtc calibrate, commit .vtc/project.yaml and .vtc/gates.yml (a run starts only on the committed copies), then /vtc start in Claude Code or Codex.",
+      );
       return EXIT.ok;
     }),
 };

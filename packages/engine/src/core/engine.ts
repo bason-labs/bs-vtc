@@ -11,6 +11,7 @@ import {
   dotenvValues,
   eventLogPath,
   gatesConfigNotCommitted,
+  projectConfigNotCommitted,
   HOST_IDS,
   humanChannelRequired,
   PACK_INPUT_TYPES,
@@ -47,6 +48,7 @@ import {
 } from "@vtc/shared";
 import {
   committedGatesConfig,
+  startProjectConfig,
   ConfigError,
   GATES_CONFIG_PATH,
   loadGatesConfig,
@@ -58,7 +60,7 @@ import {
 import {
   dispatchGuarded,
   dispatchNow,
-  inSessionAllowed,
+  inSessionRefusal,
   NO_LEAD_WAIT_REASON,
   phaseRoles,
 } from "./dispatch.js";
@@ -954,7 +956,7 @@ export class Engine implements Kernel {
 
   async start(input: StartInput, call: CallContext): Promise<StartResult> {
     // read before the checks: nothing awaits between them and registering the run
-    const { head, gates: committed } = await this.startGates();
+    const { head, gates: committed, project } = await this.startGates();
     if ([...this.handles.values()].some((h) => h.state.run.finished_at === undefined)) {
       throw new EngineError(
         "run_active",
@@ -972,7 +974,10 @@ export class Engine implements Kernel {
     }
     // spine §5 reading 78 (D-au): a run verifies only with the gates.yml committed where it starts
     if (committed === null) throw new EngineError("config", gatesConfigNotCommitted(head));
-    const config = this.diskProject();
+    // reading 79: and with the project.yaml committed there, never an uncommitted edit
+    if (project === null || !project.committed)
+      throw new EngineError("config", projectConfigNotCommitted(head));
+    const config = project.config;
     const gates = committed.config;
     const track = config.track_default ?? input.track;
     const id = this.newRunId();
@@ -1015,15 +1020,23 @@ export class Engine implements Kernel {
    * commit yet, `head` is then `HEAD`): `start` refuses (reading 78, D-au), since the run never
    * takes up a `gates.yml` committed later (reading 20).
    */
-  private async startGates(): Promise<{ head: string; gates: CommittedGates | null }> {
+  private async startGates(): Promise<{
+    head: string;
+    gates: CommittedGates | null;
+    project: { readonly config: ProjectConfig; readonly committed: boolean } | null;
+  }> {
     let head: string;
     try {
       head = await this.deps.workspace.resolve("HEAD");
     } catch {
-      return { head: "HEAD", gates: null };
+      return { head: "HEAD", gates: null, project: null };
     }
     try {
-      return { head, gates: await committedGatesConfig(this.deps.git, head) };
+      return {
+        head,
+        gates: await committedGatesConfig(this.deps.git, head),
+        project: await startProjectConfig(this.deps.git, this.deps.repoRoot, head),
+      };
     } catch (error) {
       if (error instanceof ConfigError) throw new EngineError("config", error.message);
       throw error;
@@ -1530,13 +1543,14 @@ export class Engine implements Kernel {
           `the run's advisor budget is spent ($${spent.toFixed(2)} of $${budget.toFixed(2)}, budgets.advisor_usd)`,
         );
       const host = this.hostFor(call);
-      // D-an (spine §5 reading 71): an advisor with a shell runs in-session only when sandboxed
-      if (!inSessionAllowed(this, handle, { role: input.advisor }, host, call))
+      // D-an (spine §5 readings 71 and 79): an advisor runs in-session only where it is confined
+      const refusal = inSessionRefusal(this, handle, { role: input.advisor }, host, call);
+      if (refusal !== null)
         throw new EngineError(
           "conflict",
           this.leadless(state.id, call)
-            ? `${input.advisor} runs a shell, and ${NO_LEAD_WAIT_REASON}`
-            : `${input.advisor} runs a shell, and the Lead session's OS sandbox is not on: run \`vtc install --host claude-code\` in this repo, restart the Claude Code session, then ask again`,
+            ? `${input.advisor} cannot run in-session yet: ${NO_LEAD_WAIT_REASON}`
+            : `${input.advisor} cannot run in-session: ${refusal.replace(/then answer this escalation to retry$/, "then ask again")}`,
         );
       const question = `${state.id}-${String(state.roleRuns.size + 1)}`;
       const path = `.vtc/state/packs/${state.id}/consult-${question}.md`;

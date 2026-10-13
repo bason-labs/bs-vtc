@@ -53,6 +53,48 @@ export const loadProjectConfig = (repoRoot: string): ProjectConfig => {
   return parsed.data;
 };
 
+/** Parses `project.yaml` text; throws {@link ConfigError}. */
+export const parseProjectConfig = (text: string): ProjectConfig => {
+  let doc: unknown;
+  try {
+    doc = parseYaml(text);
+  } catch (error) {
+    throw new ConfigError(
+      PROJECT_CONFIG_PATH,
+      error instanceof Error ? error.message : String(error),
+    );
+  }
+  const parsed = parsePersisted(ProjectConfigSchema, doc ?? {});
+  if (!parsed.success) throw new ConfigError(PROJECT_CONFIG_PATH, issues(parsed.error));
+  return parsed.data;
+};
+
+/**
+ * `.vtc/project.yaml` as a run starts with it (spine §5 reading 79): the copy committed at
+ * `commit`, every default when that commit has none. `committed: false` when the working tree's
+ * copy differs from it (edited, added or deleted), and `start` then refuses: a change, the user's
+ * or one a role made in a Lead session's checkout, reaches a run only once someone commits it.
+ * Throws {@link ConfigError} when the committed copy does not parse.
+ */
+export const startProjectConfig = async (
+  git: Pick<GitOps, "readFileAtCommit">,
+  repoRoot: string,
+  commit: string,
+): Promise<{ readonly config: ProjectConfig; readonly committed: boolean }> => {
+  const bytes = await git.readFileAtCommit(commit, PROJECT_CONFIG_PATH);
+  const abs = join(repoRoot, PROJECT_CONFIG_PATH);
+  const disk = existsSync(abs) ? readFileSync(abs) : undefined;
+  const committed =
+    bytes === undefined || disk === undefined
+      ? bytes === disk
+      : Buffer.compare(Buffer.from(bytes), disk) === 0;
+  const config =
+    bytes === undefined
+      ? ProjectConfigSchema.parse({ version: 1 })
+      : parseProjectConfig(new TextDecoder().decode(bytes));
+  return { config, committed };
+};
+
 /** Parses `gates.yml` text (as `vtc calibrate` writes it); throws {@link ConfigError}. */
 export const parseGatesConfig = (text: string): GatesConfig => {
   let doc: unknown;

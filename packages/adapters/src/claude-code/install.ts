@@ -23,6 +23,7 @@
 import { existsSync, readdirSync } from "node:fs";
 import { join } from "node:path";
 import {
+  findForbiddenHostArgs,
   findForbiddenInText,
   STATUSLINE_TEE,
   statuslineTeeCommand,
@@ -86,8 +87,14 @@ const wiredStatusLine = (
 /** The text `writeJson` would write. */
 const jsonText = (value: unknown): string => `${JSON.stringify(value, null, 2)}\n`;
 
-/** Refuses settings text that carries a bypass flag or a credential marker (AD-9). */
+/**
+ * Refuses settings text that carries a bypass flag or a credential marker (AD-9). The D-ad
+ * exemption holds: a credential file named only in `sandbox.filesystem.denyRead` or as a
+ * `permissions.deny` `Read(...)` rule (what `vtc install` writes for the session sandbox, spine
+ * §5 reading 79) is a deny, not a use.
+ */
 const refuseForbidden = (path: string, settingsText: string): void => {
+  if (findForbiddenHostArgs([settingsText]).length === 0) return;
   const hits = findForbiddenInText(settingsText);
   if (hits.length > 0) {
     const found = hits.map((hit) => `line ${hit.line}: ${hit.marker}`).join(", ");

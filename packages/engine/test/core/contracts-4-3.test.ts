@@ -6,7 +6,7 @@
  * gate run is an incident (D-al), a host-reported cost counts whatever the model (D-at), and a run
  * needs a committed `gates.yml` (D-au).
  */
-import { existsSync, mkdtempSync, readFileSync } from "node:fs";
+import { existsSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
@@ -15,7 +15,10 @@ import {
   engineSocketFile,
   GateReportSchema,
   gatesConfigNotCommitted,
+  CODEX_IN_SESSION_REFUSED_REASON,
   humanChannelRequired,
+  projectConfigNotCommitted,
+  ProjectConfigSchema,
   SESSION_DEFAULT_MODEL,
   SESSION_SANDBOX_OFF_REASON,
   SubmitInputSchema,
@@ -334,7 +337,20 @@ describe(
       expect(only(await next(h, sandboxed("off")), "qa").task).toBe("T-1");
       await h.release();
     });
-    it("codex: an Engineer runs as a Codex subagent with its own sandbox_mode, whatever the session reports", async () => {
+    it("codex off macOS: no Codex role runs in-session; the task parks with the reason (reading 79)", async () => {
+      const h = createHarness({ platform: "linux" });
+      await start(h, sandboxed("on", "codex"));
+      expect(await next(h, sandboxed("on", "codex"))).toEqual([
+        { type: "ask_human", escalations: ["E-1"] },
+      ]);
+      const escalation = events(h).findLast((e) => e.type === "escalation.opened");
+      expect(escalation?.data).toMatchObject({
+        escalation: { reason: "blocked", detail: CODEX_IN_SESSION_REFUSED_REASON },
+      });
+      expect(events(h).some((e) => e.type === "role.dispatched")).toBe(false);
+      await h.release();
+    });
+    it("codex on macOS: an Engineer runs as a Codex subagent with its own sandbox_mode, whatever the session reports", async () => {
       const h = createHarness();
       const actions = await toQaSubmit(h, sandboxed("off", "codex"));
       expect(only(actions, "engineer").task).toBe("T-1");
@@ -725,6 +741,41 @@ describe("a run needs a committed gates.yml (D-au, reading 78)", () => {
   it("refuses with no gates.yml at all", async () => {
     const h = createHarness({ gatesYml: null });
     await expect(start(h)).rejects.toThrow(/run vtc calibrate, commit \.vtc\/gates\.yml/);
+    await h.release();
+  });
+});
+
+describe("a run starts on the committed project.yaml (reading 79)", () => {
+  const startedWith = (h: Harness): Record<string, unknown> =>
+    events(h).find((e) => e.type === "run.started")?.data ?? {};
+  it("refuses an uncommitted edit, so a role cannot widen the next run's config", async () => {
+    const h = createHarness();
+    const head = git(h.repo, "rev-parse", "HEAD");
+    // what a role in the Lead's checkout could write: auto-merge, no human approve
+    writeFile(h.repo, ".vtc/project.yaml", `${JSON.stringify({ version: 1, merge_level: 3 })}\n`);
+    await expect(start(h)).rejects.toMatchObject({
+      code: "config",
+      message: projectConfigNotCommitted(head),
+    });
+    expect(h.engine.states()).toEqual([]);
+    // committed by someone, the run starts with it
+    git(h.repo, "add", ".vtc/project.yaml");
+    git(h.repo, "commit", "--quiet", "-m", "merge level 3");
+    expect((await start(h)).phase).toBe("discover");
+    expect(startedWith(h).merge_level).toBe(3);
+    await h.release();
+  });
+  it("refuses a working tree that deleted or added the file, and starts on defaults with neither", async () => {
+    const h = createHarness();
+    rmSync(join(h.repo, ".vtc/project.yaml"));
+    await expect(start(h)).rejects.toThrow(/project\.yaml differs from the copy committed/);
+    git(h.repo, "rm", "--quiet", "--cached", ".vtc/project.yaml");
+    git(h.repo, "commit", "--quiet", "-m", "defaults");
+    writeFile(h.repo, ".vtc/project.yaml", `${JSON.stringify({ version: 1 })}\n`);
+    await expect(start(h)).rejects.toThrow(/project\.yaml differs from the copy committed/);
+    rmSync(join(h.repo, ".vtc/project.yaml"));
+    expect((await start(h)).phase).toBe("discover");
+    expect(startedWith(h).merge_level).toBe(ProjectConfigSchema.parse({ version: 1 }).merge_level);
     await h.release();
   });
 });

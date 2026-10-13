@@ -61,6 +61,7 @@ import { homedir, tmpdir } from "node:os";
 import { basename, delimiter, dirname, isAbsolute, join, resolve as resolvePath } from "node:path";
 import {
   GATE_SANDBOX,
+  HOME_CREDENTIAL_LOCATIONS,
   HOST_CREDENTIAL_DENY_READ,
   hostCredentialDenyReadPaths,
   ROLE_DENIED_VTC,
@@ -86,44 +87,10 @@ export const SANDBOX_EXEC = "/usr/bin/sandbox-exec";
 export const GATE_READABLE_VTC_HOME: readonly string[] = ["scanners", "rules", "osv-db"];
 
 /**
- * Credential stores under the user's home that no gate needs: SSH and cloud keys, registry and git
- * credentials, the Docker and Kubernetes configs, the user's keychains and Claude Code's own
- * config file. Never opened; only written into deny rules.
+ * Credential stores under the user's home that no gate needs (the shared list, which the Lead
+ * session's sandbox denies too, spine §5 reading 79). Never opened; only written into deny rules.
  */
-export const HOME_CREDENTIAL_LOCATIONS: readonly string[] = [
-  ".ssh",
-  ".aws",
-  ".azure",
-  ".config/gcloud",
-  ".config/gh",
-  ".config/hub",
-  ".config/op",
-  ".config/git/credentials",
-  ".config/containers",
-  ".git-credentials",
-  ".netrc",
-  ".npmrc",
-  ".yarnrc",
-  ".yarnrc.yml",
-  ".bunfig.toml",
-  ".pypirc",
-  ".cargo/credentials",
-  ".cargo/credentials.toml",
-  ".gem/credentials",
-  ".gradle/gradle.properties",
-  ".m2/settings.xml",
-  ".m2/settings-security.xml",
-  ".terraform.d/credentials.tfrc.json",
-  ".vault-token",
-  ".pgpass",
-  ".docker",
-  ".kube",
-  ".gnupg",
-  ".password-store",
-  ".local/share/keyrings",
-  ".claude.json",
-  "Library/Keychains",
-];
+export { HOME_CREDENTIAL_LOCATIONS };
 
 /** Variables of the gate allowlist that point a tool's writable cache outside the sandbox. */
 export const SANDBOX_DROPPED_ENV: readonly string[] = [

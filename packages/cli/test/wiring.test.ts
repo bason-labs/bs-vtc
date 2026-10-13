@@ -56,7 +56,7 @@ import {
   fakeGateRunner,
   fakePullRequests,
   initProject,
-  commitGatesConfig,
+  commitVtcConfig,
   initRepo,
   initVtcRepo,
   lineSink,
@@ -232,7 +232,7 @@ describe("buildEngineParts and composeEngineDeps (AD-19)", () => {
 
 describe("the daemon the cli wires (AD-12, AD-20)", () => {
   it("starts on the compiled role contracts, serves the dashboard and is found by discovery", async () => {
-    const repo = commitGatesConfig(initVtcRepo());
+    const repo = commitVtcConfig(initVtcRepo());
     const home = tempHome();
     const daemon = await startDaemon(await partsFor(repo, home), { wake: false });
     daemons.push(daemon);
@@ -447,7 +447,7 @@ describe("repos vtc init never set up (the plugins are user-scoped)", () => {
     expect(existsSync(join(repo, ".vtc"))).toBe(false);
     // the user runs vtc init and commits a calibrated gates.yml (D-au): the next call reaches a
     // daemon, relayed byte for byte from then on
-    commitGatesConfig(initProject(repo));
+    commitVtcConfig(initProject(repo));
     stdin.write(rpc(4, "tools/call", { name: "status", arguments: {} }));
     stdin.write(
       rpc(5, "tools/call", {

@@ -46,6 +46,7 @@ import {
   CLAUDE_LOCAL_SETTINGS,
   claudeSessionSandboxOf as sandboxOfWith,
   mergeSessionSandboxSettings as mergeWith,
+  sandboxScopeOf,
   sessionSandboxSettings,
   type SessionSandboxEnv,
 } from "../src/session-sandbox.js";
@@ -80,8 +81,11 @@ const SANDBOX_ENV: SessionSandboxEnv = {
 };
 const claudeSessionSandboxOf = (repo: string, vtcHome: string) =>
   sandboxOfWith(repo, vtcHome, SANDBOX_ENV);
-const mergeSessionSandboxSettings = (existing: Record<string, unknown>, vtcHome: string) =>
-  mergeWith(existing, vtcHome, { projectRoot: "/r", homeDir: NO_USER });
+const mergeSessionSandboxSettings = (
+  existing: Record<string, unknown>,
+  vtcHome: string,
+  projectRoot = "/r",
+) => mergeWith(existing, vtcHome, { projectRoot, homeDir: NO_USER });
 
 const initialize = (id: number): string =>
   rpc(id, "initialize", {
@@ -242,7 +246,7 @@ describe("the session sandbox the bridge reports (D-an, reading 71)", () => {
     expect(partial.missing).toContain(join(home, "token"));
     writeFileSync(
       settingsPath,
-      JSON.stringify(mergeSessionSandboxSettings({ sandbox: { enabled: false } }, home)),
+      JSON.stringify(mergeSessionSandboxSettings({ sandbox: { enabled: false } }, home, repo)),
     );
     expect(claudeSessionSandboxOf(repo, home)).toEqual({
       state: "on",
@@ -271,7 +275,7 @@ describe("the session sandbox the bridge reports (D-an, reading 71)", () => {
 
   it("merges the settings, keeping the user's other keys and deny entries", () => {
     const home = "/home/u/.vtc";
-    const wanted = claudeSessionSandboxSettings(home).sandbox;
+    const wanted = claudeSessionSandboxSettings(home, sandboxScopeOf("/r", SANDBOX_ENV)).sandbox;
     const merged = mergeSessionSandboxSettings(
       {
         permissions: { allow: ["Bash(ls)"] },
@@ -349,7 +353,7 @@ describe("vtc install --host claude-code writes the session sandbox (D-an)", () 
     const text = out.join("\n");
     // what is written is shown before the question
     expect(text).toContain(
-      JSON.stringify(sessionSandboxSettings(home), null, 2)
+      JSON.stringify(sessionSandboxSettings(home, sandboxScopeOf(repo, SANDBOX_ENV)), null, 2)
         .split("\n")
         .map((line) => `  ${line}`)
         .join("\n"),
@@ -359,7 +363,7 @@ describe("vtc install --host claude-code writes the session sandbox (D-an)", () 
     expect(questions[0]).toContain(path);
     const written = JSON.parse(readFileSync(path, "utf8")) as Record<string, unknown>;
     expect(written).toEqual(
-      mergeSessionSandboxSettings({ permissions: { allow: ["Bash(ls)"] } }, home),
+      mergeSessionSandboxSettings({ permissions: { allow: ["Bash(ls)"] } }, home, repo),
     );
     expect(claudeSessionSandboxOf(repo, home).state).toBe("on");
     // gitignored, without touching a tracked file
@@ -620,7 +624,7 @@ describe("the gate sandbox (D-al, reading 69)", () => {
     );
     writeFileSync(
       join(repo, CLAUDE_LOCAL_SETTINGS),
-      JSON.stringify(mergeSessionSandboxSettings({}, home)),
+      JSON.stringify(mergeSessionSandboxSettings({}, home, repo)),
     );
     expect(await run()).toMatch(/ok +session +the Claude session sandbox is on/);
   });

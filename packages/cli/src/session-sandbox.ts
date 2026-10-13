@@ -36,7 +36,9 @@ import { delimiter, dirname, isAbsolute, join, posix, resolve } from "node:path"
 import {
   claudeSessionSandboxSettings,
   claudeSessionSandboxState,
+  hostConfigDirsOf,
   type HostId,
+  type SessionSandboxScope,
   type SessionSandboxState,
 } from "@vtc/shared";
 import { exec as defaultExec, type Exec } from "./process.js";
@@ -114,7 +116,23 @@ export interface SessionSandboxEnv {
   /** `PATH`, searched (absolute entries only) for the Linux sandbox's `bwrap` and `socat`. */
   readonly pathEnv: string;
   readonly exists: (path: string) => boolean;
+  /**
+   * Each host's config directory, whose credential files the sandbox read-denies (reading 79):
+   * `$CLAUDE_CONFIG_DIR` / `$CODEX_HOME` when absolute. Default: the hosts' defaults under
+   * `homeDir`.
+   */
+  readonly hostConfigDirs?: Readonly<Partial<Record<HostId, string>>>;
 }
+
+/** Where the shared settings resolve their paths for `repoRoot` on this machine (reading 79). */
+export const sandboxScopeOf = (
+  repoRoot: string,
+  env: Pick<SessionSandboxEnv, "homeDir" | "hostConfigDirs">,
+): SessionSandboxScope => ({
+  projectRoot: repoRoot,
+  homeDir: env.homeDir,
+  hostConfigDirs: env.hostConfigDirs ?? hostConfigDirsOf({}, env.homeDir),
+});
 
 /** The real machine: `$CLAUDE_CONFIG_DIR/settings.json` (absolute) or `~/.claude/settings.json`. */
 export const defaultSessionSandboxEnv = (): SessionSandboxEnv => {
@@ -127,6 +145,7 @@ export const defaultSessionSandboxEnv = (): SessionSandboxEnv => {
     platform: process.platform,
     pathEnv: process.env.PATH ?? "",
     exists: existsSync,
+    hostConfigDirs: hostConfigDirsOf(process.env, homedir()),
   };
 };
 
@@ -154,12 +173,13 @@ export const sandboxToolsMissing = (
 /** The settings `vtc install --host claude-code` writes: the shared ones and `failIfUnavailable`. */
 export const sessionSandboxSettings = (
   vtcHome: string,
+  scope: SessionSandboxScope,
 ): {
   readonly sandbox: ReturnType<typeof claudeSessionSandboxSettings>["sandbox"] & {
     readonly failIfUnavailable: true;
   };
 } => ({
-  sandbox: { ...claudeSessionSandboxSettings(vtcHome).sandbox, failIfUnavailable: true },
+  sandbox: { ...claudeSessionSandboxSettings(vtcHome, scope).sandbox, failIfUnavailable: true },
 });
 
 /**
@@ -191,17 +211,35 @@ const expand = (entry: string, source: PathBase): string => {
 };
 
 /**
- * Whether a sandbox path entry reaches into the VTC home: at or under it, or a glob whose literal
- * directory is an ancestor or descendant of it (it could match a denied path). A plain ancestor
- * (`~/`) does not: the narrower deny keeps holding inside a wider allow.
+ * Whether a sandbox path entry reaches into a guarded root (the VTC home, or another path the
+ * sandbox denies): at or under it, or a glob whose literal directory is an ancestor or descendant
+ * of it (it could match a denied path). A plain ancestor (`~/`) does not: the narrower deny keeps
+ * holding inside a wider allow.
  */
-const reachesVtcHome = (entry: string, source: PathBase, vtcHome: string): boolean => {
-  const home = posix.resolve(vtcHome);
+const reachesGuarded = (entry: string, source: PathBase, roots: readonly string[]): boolean => {
   const glob = entry.search(GLOB);
-  if (glob === -1) return within(expand(entry, source), home);
-  const literal = entry.slice(0, glob);
-  const dir = expand(literal.slice(0, literal.lastIndexOf("/") + 1) || ".", source);
-  return within(dir, home) || within(home, dir);
+  const literal = glob === -1 ? "" : entry.slice(0, glob);
+  const target =
+    glob === -1
+      ? expand(entry, source)
+      : expand(literal.slice(0, literal.lastIndexOf("/") + 1) || ".", source);
+  return roots.some((root) => {
+    const guarded = posix.resolve(root);
+    return glob === -1
+      ? within(target, guarded)
+      : within(target, guarded) || within(guarded, target);
+  });
+};
+
+/**
+ * The roots no allow entry may reach: the VTC home and, with a `scope`, every other path the
+ * shared settings deny (credential stores, the engine's gate checkouts and output, the run
+ * config; spine §5 reading 79).
+ */
+export const guardedRoots = (vtcHome: string, scope?: SessionSandboxScope): string[] => {
+  if (scope === undefined) return [vtcHome];
+  const { denyRead, denyWrite } = claudeSessionSandboxSettings(vtcHome, scope).sandbox.filesystem;
+  return [...new Set([vtcHome, ...denyRead, ...denyWrite])];
 };
 
 const jsonOf = (value: unknown): string => JSON.stringify(value);
@@ -281,11 +319,11 @@ const at = (value: unknown, keys: readonly string[]): unknown =>
 const isStringList = (value: unknown): value is string[] =>
   Array.isArray(value) && value.every((e) => typeof e === "string");
 
-/** The entries of a path list that reach the VTC home; a value that is not a string list counts whole. */
+/** The entries of a path list that reach a guarded root; a value that is not a string list counts whole. */
 const reaching = (
   value: unknown,
   source: Pick<SettingsSource, "base" | "homeDir" | "also">,
-  vtcHome: string,
+  roots: readonly string[],
 ): { readonly whole: boolean; readonly entries: readonly string[] } => {
   if (value === undefined) return { whole: false, entries: [] };
   if (!isStringList(value)) return { whole: true, entries: [] };
@@ -293,7 +331,7 @@ const reaching = (
   return {
     whole: false,
     entries: value.filter((e) =>
-      bases.some((base) => reachesVtcHome(e, { base, homeDir: source.homeDir }, vtcHome)),
+      bases.some((base) => reachesGuarded(e, { base, homeDir: source.homeDir }, roots)),
     ),
   };
 };
@@ -310,7 +348,7 @@ const UNKNOWN = "(not known to keep the sandbox closed)";
 const findWidening = (
   settings: unknown,
   source: Pick<SettingsSource, "base" | "homeDir" | "also">,
-  vtcHome: string,
+  roots: readonly string[],
   platform: NodeJS.Platform,
 ): Widening[] => {
   const out: Widening[] = [];
@@ -331,7 +369,7 @@ const findWidening = (
       if (left.length > 0)
         out.push({ keys, text: `${name} ${jsonOf(value)} (leaves out ${left.join(", ")})` });
     } else {
-      const hit = reaching(value, source, vtcHome);
+      const hit = reaching(value, source, roots);
       if (hit.whole) out.push({ keys, text: `${name} ${jsonOf(value)}` });
       else if (hit.entries.length > 0)
         out.push({ keys, entries: hit.entries, text: `${name} ${jsonOf(hit.entries)}` });
@@ -372,8 +410,11 @@ export const wideningOf = (
   source: SettingsSource,
   vtcHome: string,
   platform: NodeJS.Platform = process.platform,
+  scope?: SessionSandboxScope,
 ): string[] =>
-  findWidening(settings, source, vtcHome, platform).map((w) => `${w.text} in ${source.path}`);
+  findWidening(settings, source, guardedRoots(vtcHome, scope), platform).map(
+    (w) => `${w.text} in ${source.path}`,
+  );
 
 /** The values the main local file must hold; another value elsewhere may win over it. */
 const REQUIRED: readonly (readonly [string, boolean])[] = [
@@ -444,9 +485,11 @@ export const claudeSessionSandboxOf = (
   cwd: string = repoRoot,
 ): SessionSandboxReport => {
   const local = readClaudeLocalSettings(repoRoot);
+  const scope = sandboxScopeOf(repoRoot, env);
   const shared = claudeSessionSandboxState(
     local.kind === "ok" ? local.settings : undefined,
     vtcHome,
+    scope,
   );
   const missing = [...shared.missing];
   if (local.kind === "ok" && at(local.settings, ["sandbox", "failIfUnavailable"]) !== true)
@@ -488,7 +531,7 @@ export const claudeSessionSandboxOf = (
       unreadable = true;
       widening.push(`${read.path} cannot be read (${read.error})`);
     } else if (read.kind === "ok") {
-      widening.push(...wideningOf(read.settings, from, vtcHome, env.platform));
+      widening.push(...wideningOf(read.settings, from, vtcHome, env.platform, scope));
       if (otherLocal) widening.push(...requiredOverridesOf(read.settings, read.path));
     }
   }
@@ -560,14 +603,18 @@ export const mergeSessionSandboxSettings = (
     readonly projectRoot: string;
     readonly homeDir: string;
     readonly platform?: NodeJS.Platform;
+    readonly hostConfigDirs?: Readonly<Partial<Record<HostId, string>>>;
   },
 ): Record<string, unknown> => {
   const source = { base: paths.projectRoot, homeDir: paths.homeDir };
-  const kept = findWidening(existing, source, vtcHome, paths.platform ?? process.platform).reduce(
-    (settings, w) => without(settings, w.keys, w.entries),
-    { ...existing },
-  );
-  const wanted = sessionSandboxSettings(vtcHome).sandbox;
+  const scope = sandboxScopeOf(paths.projectRoot, paths);
+  const kept = findWidening(
+    existing,
+    source,
+    guardedRoots(vtcHome, scope),
+    paths.platform ?? process.platform,
+  ).reduce((settings, w) => without(settings, w.keys, w.entries), { ...existing });
+  const wanted = sessionSandboxSettings(vtcHome, scope).sandbox;
   const sandbox = isRecord(kept.sandbox) ? kept.sandbox : {};
   const filesystem = isRecord(sandbox.filesystem) ? sandbox.filesystem : {};
   return {

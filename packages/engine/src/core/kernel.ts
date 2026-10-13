@@ -50,6 +50,11 @@ export interface EngineCoreDeps {
   readonly random: () => number;
   /** The remote Level 2 pushes to. */
   readonly remote: string;
+  /**
+   * The platform roles run on (default `process.platform`): Codex roles run in-session only where
+   * Codex's network-off sandbox is shown to block a Unix-socket connect (spine §5 reading 79).
+   */
+  readonly platform?: NodeJS.Platform;
 }
 
 export interface RunHandle {

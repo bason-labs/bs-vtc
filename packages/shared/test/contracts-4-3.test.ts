@@ -5,6 +5,8 @@ import { describe, expect, it } from "vitest";
 import {
   claudeSessionSandboxSettings,
   claudeSessionSandboxState,
+  CODEX_IN_SESSION_REFUSED_REASON,
+  CODEX_UNIX_CONNECT_BLOCKED_PLATFORMS,
   ENGINE_INSTANCE,
   ENGINE_MCP_TOOLS,
   EngineSocketHelloSchema,
@@ -14,13 +16,21 @@ import {
   GATES_CONFIG_FILE,
   gatesAllowUnsandboxed,
   gatesConfigNotCommitted,
+  findForbiddenHostArgs,
   HIDDEN_TESTS,
+  HOME_CREDENTIAL_LOCATIONS,
+  hostConfigDirsOf,
+  hostCredentialDenyReadPaths,
   HUMAN_ONLY_TOOLS,
   humanChannelRequired,
   inSessionDispatchAllowed,
+  inSessionDispatchRefusal,
   isHumanOnlyTool,
   parsePersisted,
+  PROJECT_CONFIG_FILE,
+  projectConfigNotCommitted,
   ProjectConfigSchema,
+  REPO_ROLE_DENIED,
   ROLE_DENIED_VTC,
   ScannerPinSchema,
   SESSION_SANDBOX_OFF_REASON,
@@ -65,8 +75,13 @@ describe("ROLE_DENIED_VTC (D-ap, D-an)", () => {
 });
 
 describe("the Lead session's Claude sandbox (D-an)", () => {
+  const SCOPE = {
+    projectRoot: "/work/app",
+    homeDir: "/home/u",
+    hostConfigDirs: hostConfigDirsOf({}, "/home/u"),
+  };
   it("builds absolute deny paths from the VTC home", () => {
-    const { sandbox } = claudeSessionSandboxSettings(`${HOME}/`);
+    const { sandbox } = claudeSessionSandboxSettings(`${HOME}/`, SCOPE);
     expect(sandbox.enabled).toBe(true);
     expect(sandbox.allowUnsandboxedCommands).toBe(false);
     expect(sandbox.filesystem.denyRead).toEqual(
@@ -75,45 +90,139 @@ describe("the Lead session's Claude sandbox (D-an)", () => {
     expect(sandbox.filesystem.denyWrite).toEqual(
       expect.arrayContaining([`${HOME}/token`, `${HOME}/config.yaml`, `${HOME}/scanners`]),
     );
-    expect(sandbox.filesystem.denyWrite).toHaveLength(ROLE_DENIED_VTC.homeWriteDeny.length);
-    expect(() => claudeSessionSandboxSettings(".vtc")).toThrow(TypeError);
+    expect(sandbox.filesystem.denyWrite).toHaveLength(
+      ROLE_DENIED_VTC.homeWriteDeny.length + REPO_ROLE_DENIED.writeDeny.length,
+    );
+    expect(() => claudeSessionSandboxSettings(".vtc", SCOPE)).toThrow(TypeError);
+    expect(() => claudeSessionSandboxSettings(HOME, { ...SCOPE, projectRoot: "app" })).toThrow(
+      TypeError,
+    );
+  });
+  it("denies reading the host credential files and home credential stores (reading 79)", () => {
+    const { denyRead } = claudeSessionSandboxSettings(HOME, SCOPE).sandbox.filesystem;
+    expect(denyRead).toEqual(
+      expect.arrayContaining([
+        ...hostCredentialDenyReadPaths(SCOPE.hostConfigDirs),
+        "/home/u/.ssh",
+        "/home/u/.aws",
+        "/home/u/.npmrc",
+        "/home/u/.netrc",
+      ]),
+    );
+    expect(denyRead).toHaveLength(
+      ROLE_DENIED_VTC.homeReadDeny.length +
+        hostCredentialDenyReadPaths(SCOPE.hostConfigDirs).length +
+        HOME_CREDENTIAL_LOCATIONS.length +
+        REPO_ROLE_DENIED.readDeny.length,
+    );
+    // a relocated host config directory is where its credential file is denied
+    const moved = hostConfigDirsOf({ CLAUDE_CONFIG_DIR: "/cfg/claude", CODEX_HOME: "rel" }, "/h");
+    expect(moved).toEqual({ "claude-code": "/cfg/claude", codex: "/h/.codex" });
+    expect(
+      claudeSessionSandboxSettings(HOME, { ...SCOPE, hostConfigDirs: moved }).sandbox.filesystem
+        .denyRead,
+    ).toEqual(expect.arrayContaining(hostCredentialDenyReadPaths(moved)));
+    // the settings carry credential paths only in the sanctioned deny list (AD-9, D-ad)
+    expect(
+      findForbiddenHostArgs([JSON.stringify(claudeSessionSandboxSettings(HOME, SCOPE))]),
+    ).toEqual([]);
+  });
+  it("denies roles the engine's gate checkouts and raw gate output, and writes to the run config", () => {
+    const { denyRead, denyWrite } = claudeSessionSandboxSettings(HOME, SCOPE).sandbox.filesystem;
+    expect(denyRead).toEqual(
+      expect.arrayContaining(["/work/app/.vtc/state/checkouts", "/work/app/.vtc/state/gates"]),
+    );
+    expect(denyWrite).toEqual(
+      expect.arrayContaining([
+        "/work/app/.vtc/state/checkouts",
+        "/work/app/.vtc/state/gates",
+        "/work/app/.vtc/project.yaml",
+        "/work/app/.vtc/gates.yml",
+      ]),
+    );
+    // role worktrees stay writable
+    expect(denyWrite.some((p) => p.startsWith("/work/app/.vtc/state/worktrees"))).toBe(false);
+    expect(denyWrite).not.toContain("/work/app/.vtc/state");
   });
   it("is on only when every key and path is there", () => {
-    const wanted = claudeSessionSandboxSettings(HOME);
-    expect(claudeSessionSandboxState(wanted, HOME)).toEqual({ state: "on", missing: [] });
+    const wanted = claudeSessionSandboxSettings(HOME, SCOPE);
+    expect(claudeSessionSandboxState(wanted, HOME, SCOPE)).toEqual({ state: "on", missing: [] });
     expect(
-      claudeSessionSandboxState({ permissions: { allow: [] }, ...wanted, other: 1 }, HOME).state,
+      claudeSessionSandboxState({ permissions: { allow: [] }, ...wanted, other: 1 }, HOME, SCOPE)
+        .state,
     ).toBe("on");
-    const off = claudeSessionSandboxState({ sandbox: { ...wanted.sandbox, enabled: false } }, HOME);
+    const off = claudeSessionSandboxState(
+      { sandbox: { ...wanted.sandbox, enabled: false } },
+      HOME,
+      SCOPE,
+    );
     expect(off).toEqual({ state: "off", missing: ["sandbox.enabled"] });
     const escape = claudeSessionSandboxState(
       { sandbox: { ...wanted.sandbox, allowUnsandboxedCommands: true } },
       HOME,
+      SCOPE,
     );
     expect(escape.missing).toEqual(["sandbox.allowUnsandboxedCommands"]);
     const partial = claudeSessionSandboxState(
       {
         sandbox: {
           ...wanted.sandbox,
-          filesystem: { ...wanted.sandbox.filesystem, denyRead: [`${HOME}/token`] },
+          filesystem: {
+            ...wanted.sandbox.filesystem,
+            denyRead: wanted.sandbox.filesystem.denyRead.filter(
+              (p) => p !== `${HOME}/run` && p !== `${HOME}/hidden` && p !== "/home/u/.ssh",
+            ),
+          },
         },
       },
       HOME,
+      SCOPE,
     );
     expect(partial.state).toBe("off");
-    expect(partial.missing).toEqual([`${HOME}/run`, `${HOME}/hidden`]);
-    expect(claudeSessionSandboxState(null, HOME).state).toBe("unknown");
-    expect(claudeSessionSandboxState("{}", HOME).state).toBe("unknown");
-    expect(claudeSessionSandboxState({}, HOME).state).toBe("off");
+    expect(partial.missing).toEqual([`${HOME}/run`, `${HOME}/hidden`, "/home/u/.ssh"]);
+    // settings written before reading 79 (VTC-home denies only) read as off
+    const older = {
+      sandbox: {
+        ...wanted.sandbox,
+        filesystem: {
+          denyRead: ROLE_DENIED_VTC.homeReadDeny.map((g) => `${HOME}/${g.replace("/**", "")}`),
+          denyWrite: ROLE_DENIED_VTC.homeWriteDeny.map((g) => `${HOME}/${g.replace("/**", "")}`),
+        },
+      },
+    };
+    expect(claudeSessionSandboxState(older, HOME, SCOPE).state).toBe("off");
+    expect(claudeSessionSandboxState(null, HOME, SCOPE).state).toBe("unknown");
+    expect(claudeSessionSandboxState("{}", HOME, SCOPE).state).toBe("unknown");
+    expect(claudeSessionSandboxState({}, HOME, SCOPE).state).toBe("off");
   });
-  it("gates only code-running roles in a Claude Code Lead session", () => {
-    expect(inSessionDispatchAllowed("claude-code", "code_sandboxed", "on")).toBe(true);
+  it("gates code-running roles in a Claude Code Lead session, and every Codex role off macOS", () => {
+    expect(inSessionDispatchAllowed("claude-code", "code_sandboxed", "on", "linux")).toBe(true);
     for (const state of ["off", "unknown", undefined] as const) {
-      expect(inSessionDispatchAllowed("claude-code", "code_sandboxed", state)).toBe(false);
-      expect(inSessionDispatchAllowed("claude-code", "write_scoped", state)).toBe(true);
-      expect(inSessionDispatchAllowed("codex", "code_sandboxed", state)).toBe(true);
+      expect(inSessionDispatchAllowed("claude-code", "code_sandboxed", state, "darwin")).toBe(
+        false,
+      );
+      expect(inSessionDispatchRefusal("claude-code", "code_sandboxed", state, "darwin")).toBe(
+        SESSION_SANDBOX_OFF_REASON,
+      );
+      expect(inSessionDispatchAllowed("claude-code", "write_scoped", state, "linux")).toBe(true);
+      // Codex: the token is readable, so only where the network-off sandbox blocks the socket
+      for (const profile of ["read_only", "write_scoped", "code_sandboxed"] as const) {
+        expect(inSessionDispatchAllowed("codex", profile, state, "darwin")).toBe(true);
+        expect(inSessionDispatchRefusal("codex", profile, state, "linux")).toBe(
+          CODEX_IN_SESSION_REFUSED_REASON,
+        );
+        expect(inSessionDispatchAllowed("codex", profile, "on", "win32")).toBe(false);
+        expect(inSessionDispatchAllowed("codex", profile, "on", undefined)).toBe(false);
+      }
     }
+    expect(CODEX_UNIX_CONNECT_BLOCKED_PLATFORMS).toEqual(["darwin"]);
     expect(SESSION_SANDBOX_OFF_REASON).toContain("vtc install --host claude-code");
+  });
+  it("a run starts only on a committed project.yaml (reading 79)", () => {
+    expect(PROJECT_CONFIG_FILE).toBe(".vtc/project.yaml");
+    expect(projectConfigNotCommitted(COMMIT)).toBe(
+      `.vtc/project.yaml differs from the copy committed at ${COMMIT.slice(0, 12)}: commit the change (or undo it), then start the run again`,
+    );
   });
 });
 

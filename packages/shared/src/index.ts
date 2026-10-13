@@ -93,5 +93,11 @@ export * from "./json-schema.js";
  * `GATES_CONFIG_FILE` / `gatesConfigNotCommitted`; budget semantics for a host-reported cost
  * (doc only). All additive: optional fields, enum values, new constants and helpers. Widening a
  * deny list narrows what roles may do, not what a contract accepts (spine §5 reading 73).
+ * The integration of that round (spine §5 reading 79) added helpers and constants only, with no
+ * schema change, before anything outside the integration branch consumed 4.3.0:
+ * `SessionSandboxScope` as a parameter of `claudeSessionSandboxSettings` / `State`,
+ * `hostConfigDirsOf`, `HOME_CREDENTIAL_LOCATIONS`, `REPO_ROLE_DENIED`, `inSessionDispatchRefusal`
+ * and a `platform` parameter of `inSessionDispatchAllowed`, `CODEX_UNIX_CONNECT_BLOCKED_PLATFORMS`,
+ * `CODEX_IN_SESSION_REFUSED_REASON`, `PROJECT_CONFIG_FILE` / `projectConfigNotCommitted`.
  */
 export const CONTRACTS_VERSION = "4.3.0";
