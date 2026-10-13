@@ -1670,6 +1670,28 @@ reversible through §6. Contracts 4.3.0 carry them.
     pasta on Linux), so doctor and the gate runs never disagree.
     Helpers and constants only; no schema changes, so contracts stay 4.3.0 (nothing has consumed
     4.3.0 outside this integration branch).
+80. **Files an earlier gate wrote in the checkout** (§7.2 L1/L4, AD-13; readings 45, 69, 70).
+    _Integrator decision 2026-10-14, pending human review._ The gates of a run share one writable
+    checkout, and install-phase lifecycle scripts, L0 builds and L2 tests run role-controlled
+    code there before L1 and L4. Pinning configs to the base only where the diff changed them
+    (readings 45 and 70) left anything those commands wrote unchecked, and L5 sees only the diff.
+    (a) Every pinned scanner runs in a clean checkout of the head (`createCleanCheckout`), made
+    for the scanners alone; no other gate runs there, so nothing a gate wrote (scanner configs
+    such as `.gitleaks.toml` or `osv-scanner.toml`, lockfiles, sources, the checkout's `.git`
+    link) reaches a scanner. Scanner configs the diff changed are still pinned to the base there.
+    Their baseline runs likewise in a clean checkout of the base, with no install gate run. The
+    scanners need no installed dependencies. Hidden tests are never copied into these checkouts.
+    (b) Before each L1 gate, every file of the run checkout that L1 guards (`protected_configs`,
+    gate-command files and the mixed configs) is put back to the head commit whether or not the
+    diff touched it: edited or replaced (a symlink included) files are rewritten, missing ones
+    restored, and guarded files the head lacks in any directory the clean checkout had are
+    removed (new directories such as `node_modules` hold no file of the commit, and a config
+    there governs none). Then the base pinning of reading 45 applies as before. The paths put
+    back are noted in the gate's evidence (`<gate>-configs.log`); they do not fail the gate.
+    (c) Open: install-phase code the role controls (a dependency or local workspace package
+    lifecycle script) can still replace the lint tool itself under `node_modules` before L1, or
+    rewrite sources; restoring configs cannot stop that. Pending a human decision.
+    Gate Runner only; no contract change.
 
 ## 6. Change process for this spine
 

@@ -931,6 +931,99 @@ describe("scanner configs in another letter case (case-insensitive file systems)
   });
 });
 
+describe("files an earlier gate wrote in the checkout (install scripts, builds, tests)", () => {
+  /** An install-phase "postinstall" that silences Gitleaks and hides the secret it would find. */
+  const SILENCE_SCANNER = `import { rmSync, writeFileSync } from "node:fs";
+writeFileSync(".gitleaksignore", "./src/new.ts\\nsrc/new.ts\\n");
+writeFileSync(".gitleaks.toml", "[allowlist]\\npaths = ['.*']\\n");
+rmSync("src/new.ts");
+`;
+
+  it("scans a clean checkout of the head: a .gitleaksignore an install script wrote never reaches L4", async () => {
+    const h = harness(
+      { "src/old.ts": "export const a = 1;\n", "tools/silence.mjs": SILENCE_SCANNER },
+      config([{ ...installGate, command: [NODE, "tools/silence.mjs"] }, leaksGate]),
+    );
+    writeFile(h.repo, "src/new.ts", "SECRET=newvalue654321\n");
+    const head = commitAll(h.repo);
+    const report = await h.run({ head, layers: ["L4"] });
+    expect(gate(report, "install")).toMatchObject({ status: "pass" });
+    expect(gate(report, "secrets")).toMatchObject({ status: "fail", new_violations: 1 });
+    expect(gate(report, "secrets").findings[0]).toMatchObject({
+      location: { path: "src/new.ts", line: 1 },
+    });
+    // The scanner ran in a checkout of its own, which no other command was given.
+    const [install, scan] = h.specs;
+    expect(scan?.checkout).not.toBe(install?.checkout);
+    expect(scan?.checkout.startsWith(join(realpathSync(h.repo), ".vtc/state/checkouts/"))).toBe(
+      true,
+    );
+    // ... and that checkout is gone after the run.
+    expect(existsSync(scan?.checkout ?? "")).toBe(false);
+  });
+
+  it("scans the base on a clean checkout too: base findings still count as baseline", async () => {
+    const h = harness(
+      { "src/old.ts": "SECRET=oldvalue123456\n", "tools/silence.mjs": SILENCE_SCANNER },
+      config([{ ...installGate, command: [NODE, "tools/silence.mjs"] }, testsGate, leaksGate]),
+    );
+    writeFile(h.repo, "src/new.ts", "SECRET=newvalue654321\n");
+    writeFile(h.repo, "tests/unit.json", cases([{ name: "ok", status: "fail" }]));
+    const head = commitAll(h.repo);
+    const report = await h.run({ head, layers: ["L2", "L4"] });
+    expect(gate(report, "secrets")).toMatchObject({
+      status: "fail",
+      new_violations: 1,
+      baseline_violations: 1,
+    });
+    // Head run, base install + tests, head scanner, base scanner: four checkouts.
+    expect(new Set(h.specs.map((s) => s.checkout)).size).toBe(4);
+  });
+
+  it("lints with the commit's config when an install script rewrote a tracked lint config", async () => {
+    const h = harness(
+      {
+        "src/a.ts": "ok\n",
+        "tools/loosen.mjs": `import { writeFileSync } from "node:fs";\nwriteFileSync(".lintrc", "off\\n");\n`,
+      },
+      config([{ ...installGate, command: [NODE, "tools/loosen.mjs"] }, lintGate]),
+    );
+    writeFile(h.repo, "src/a.ts", "// TODO later\n");
+    const head = commitAll(h.repo);
+    const report = await h.run({ head, layers: ["L1"] });
+    expect(gate(report, "install")).toMatchObject({ status: "pass" });
+    expect(gate(report, "lint")).toMatchObject({ status: "fail", new_violations: 1 });
+    const note = readdirSync(join(h.repo, ".vtc/evidence/T-1/gates"), { recursive: true })
+      .map(String)
+      .find((f) => f.endsWith("lint-configs.log"));
+    expect(read(h.repo, `.vtc/evidence/T-1/gates/${note ?? ""}`)).toContain(".lintrc");
+  });
+
+  it("lints with the commit's config when an earlier gate swapped it for a symlink or added a guarded file", async () => {
+    const loosen = `import { rmSync, symlinkSync, writeFileSync } from "node:fs";
+writeFileSync("loose.txt", "off\\n");
+rmSync(".lintrc");
+symlinkSync("loose.txt", ".lintrc");
+writeFileSync("src/.npmrc", "script-shell=/bin/true\\n");
+`;
+    const h = harness(
+      { "src/a.ts": "ok\n", "tools/loosen.mjs": loosen },
+      config([{ id: "build", layer: "L0", command: [NODE, "tools/loosen.mjs"] }, lintGate]),
+    );
+    writeFile(h.repo, "src/a.ts", "// TODO later\n");
+    const head = commitAll(h.repo);
+    const report = await h.run({ head, layers: ["L0", "L1"] });
+    expect(gate(report, "build")).toMatchObject({ status: "pass" });
+    expect(gate(report, "lint")).toMatchObject({ status: "fail", new_violations: 1 });
+    const note = readdirSync(join(h.repo, ".vtc/evidence/T-1/gates"), { recursive: true })
+      .map(String)
+      .find((f) => f.endsWith("lint-configs.log"));
+    const text = read(h.repo, `.vtc/evidence/T-1/gates/${note ?? ""}`);
+    expect(text).toContain(".lintrc");
+    expect(text).toContain("src/.npmrc");
+  });
+});
+
 describe("a malformed request (the Gate Runner is the trust boundary for test material)", () => {
   it("validates the request first and never joins a bad task id into a hidden-tests path", async () => {
     const h = harness({ "tests/unit.json": cases([{ name: "[REQ-1] ok" }]) }, config([testsGate]));
