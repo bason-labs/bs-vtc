@@ -10,6 +10,7 @@ import {
   ENGINE_MCP_TOOLS,
   engineMcpServer,
   findForbiddenInText,
+  isHumanOnlyTool,
   PLUGIN_MANIFEST_ASSET,
   PluginManifestSchema,
   promptShaFor,
@@ -273,9 +274,13 @@ export const ROLE_FACING_ENGINE_TOOLS: readonly string[] = [];
 
 const LEAD_TOOLS: readonly string[] = ENGINE_MCP_TOOLS.map((tool) => tool.name);
 
-/** Errors for engine tools a role may not call (unknown, or one of the Lead's run-driving tools). */
+/** Errors for engine tools a role may not call (human-only, one of the Lead's run-driving tools, or unknown). */
 export const engineToolErrors = (tools: readonly string[]): string[] =>
   tools.flatMap((tool) => {
+    if (isHumanOnlyTool(tool)) {
+      // D-an (spine §5 reading 71): these need a human channel, never a role session
+      return [`engine tool ${tool} records a human decision; no role may call it`];
+    }
     if (LEAD_TOOLS.includes(tool)) {
       return [`engine tool ${tool} drives the run; only the Lead may call it`];
     }

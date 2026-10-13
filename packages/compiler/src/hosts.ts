@@ -5,10 +5,11 @@
  * comes from tool allowlists, the Codex sandbox, the OS sandbox and the engine's write-scope check.
  */
 import {
-  ENGINE_INSTANCE,
   engineMcpServer,
-  HIDDEN_TESTS,
   HOST_CREDENTIAL_DENY_READ,
+  humanChannelRequired,
+  isHumanOnlyTool,
+  HUMAN_ONLY_TOOLS,
   ROLE_DENIED_VTC,
   type ModelTier,
   type RoleTools,
@@ -39,40 +40,105 @@ const READ_TOOLS = ["Read", "Grep", "Glob"] as const;
 const WRITE_TOOLS = ["Write", "Edit"] as const;
 
 /**
+ * A role's engine tools, refusing any human-only one (D-an, spine §5 reading 71): `approve`,
+ * `answer` and `change_request` record a human decision, so no compiled agent may name one in
+ * its `tools` (Claude Code) or `enabled_tools` (Codex), whatever its contract says. The compile
+ * step already rejects such a `role.yaml` (`engineToolErrors`); this keeps the renderers safe on
+ * their own.
+ */
+const roleEngineTools = (tools: RoleTools): readonly string[] => {
+  const human = tools.engine_tools.find(isHumanOnlyTool);
+  if (human !== undefined) {
+    throw new TypeError(`no role agent may name ${human}: ${humanChannelRequired(human)}`);
+  }
+  return tools.engine_tools;
+};
+
+/**
  * Explicit tool allowlist per profile: read-only roles get no write or shell tool; write-scoped
  * roles get file writes (the engine checks the paths); only the Engineer family gets Bash.
- * The engine MCP tools a role declares are added by their plugin names.
+ * The engine MCP tools a role declares are added by their plugin names; a human-only one throws.
  */
 export const claudeToolsFor = (tools: RoleTools): string[] => [
   ...READ_TOOLS,
   ...(tools.profile === "read_only" ? [] : WRITE_TOOLS),
   ...(tools.profile === "code_sandboxed" ? ["Bash"] : []),
-  ...tools.engine_tools.map(claudeEngineToolName),
+  ...roleEngineTools(tools).map(claudeEngineToolName),
+];
+
+/** A guarded glob under the VTC home without its trailing `/**`: the path a command names. */
+const homeRoot = (glob: string): string => glob.replace(/\/\*\*$/, "");
+
+/**
+ * How a shell command may spell a path under the default VTC home, or under `$VTC_HOME` (the
+ * cli's override, `project-config.ts`). Claude Code matches a Bash rule against the command text
+ * as written, so each spelling needs its own rule.
+ */
+export const VTC_HOME_SHELL_SPELLINGS: readonly string[] = [
+  "~/.vtc",
+  "$HOME/.vtc",
+  "${HOME}/.vtc",
+  "$VTC_HOME",
+  "${VTC_HOME}",
 ];
 
 /**
- * What every Claude Code role agent is denied, whatever its profile (D-w, spine §5 reading 43):
- * running each `ROLE_DENIED_VTC` subcommand of `vtc`, and file writes (`Edit`, `Write`) to each
- * guarded glob under the VTC home. In plugin-only mode (AD-17) no adapter sandbox profile is
- * built, so the agent also carries its own read denies: the install token, the hidden acceptance
- * tests (§7.3), the daemons' socket directory and the Codex home. Claude's own credential file is
- * not named here: an emitted plugin file may not carry a credential marker (AD-9; the D-ad
- * exemption covers only the adapter's settings), so in this mode it rests on the Lead session's
- * own permissions. The rules name the default homes `~/.vtc/` and `~/.codex/`; a `$VTC_HOME` or
- * `$CODEX_HOME` elsewhere is not known when the plugin is compiled, and the adapter's sandbox
- * profile, which resolves them, stays the barrier for headless runs. A read-only agent has none of
- * the write tools, but gets the same list so no agent depends on its allowlist alone.
+ * Shell-level denies for every guarded VTC home path, read or write (D-an, D-ap; spine §5
+ * readings 71 and 73): `Bash(*<home>/<path>*)` for each path in `ROLE_DENIED_VTC.homeWriteDeny`
+ * and `homeReadDeny` and each {@link VTC_HOME_SHELL_SPELLINGS} spelling. In a Claude Code Bash
+ * rule `*` matches any text, so any command that names one of those paths is refused, whatever
+ * the program. The `Read`/`Edit`/`Write` rules already cover the file commands Claude Code
+ * recognises (`cat`, `sed`, `tee`, redirections); these catch the rest that name the path
+ * (`cp`, `nc -U`, `socat`, a script given the path). They are best effort by construction: a
+ * command that reaches the path without naming it (`cd ~/.vtc && cat token`, a script that
+ * builds the path itself, an absolute `/Users/<me>/.vtc`) is not matched. The barrier for a
+ * code-running role in-session is the Lead session's own sandbox, which `vtc install` writes and
+ * the engine requires before such a dispatch (`claudeSessionSandboxSettings`,
+ * `inSessionDispatchAllowed`); the remainder is the spine §7 residual "Plugin-only in-session
+ * roles". A role never needs a shell on these paths, so the rules cost no legitimate command.
+ * They name only VTC-home spellings, never a bare `.vtc/`, so the project's own `.vtc/` (its
+ * `config.yaml`, `runs/`, `state/`) stays reachable.
+ */
+export const CLAUDE_SHELL_HOME_DENIES: readonly string[] = [
+  ...new Set([...ROLE_DENIED_VTC.homeWriteDeny, ...ROLE_DENIED_VTC.homeReadDeny].map(homeRoot)),
+].flatMap((root) => VTC_HOME_SHELL_SPELLINGS.map((home) => `Bash(*${home}/${root}*)`));
+
+/**
+ * What every Claude Code role agent is denied, whatever its profile (D-w, spine §5 reading 43;
+ * D-an and D-ap, readings 71 and 73), in this order:
+ * - running each `ROLE_DENIED_VTC` subcommand of `vtc`;
+ * - file writes (`Edit`, `Write`) to each `ROLE_DENIED_VTC.homeWriteDeny` glob under the VTC home;
+ * - reads of each `ROLE_DENIED_VTC.homeReadDeny` glob (the install token, the daemons' sockets,
+ *   the hidden acceptance tests, §7.3) and of the Codex home: in plugin-only mode (AD-17) no
+ *   adapter sandbox profile is built, so the agent carries its own read denies;
+ * - {@link CLAUDE_SHELL_HOME_DENIES}, the shell-level denies for those paths;
+ * - every human-only engine tool (`HUMAN_ONLY_TOOLS`) by its plugin name, on top of the `tools`
+ *   allowlist that never names one.
+ * Claude's own credential file is not named here: an emitted plugin file may not carry a
+ * credential marker (AD-9; the D-ad exemption covers only the adapter's settings), so in this
+ * mode it rests on the Lead session's own permissions and sandbox. The file rules name the
+ * default homes `~/.vtc/` and `~/.codex/`; a `$VTC_HOME` or `$CODEX_HOME` elsewhere is not known
+ * when the plugin is compiled, and the session sandbox (in-session) or the adapter's sandbox
+ * profile (headless), which resolve them, stay the barrier. A read-only agent has none of the
+ * write tools, but gets the same list so no agent depends on its allowlist alone.
  */
 export const CLAUDE_DENIED_TOOLS: readonly string[] = [
   ...ROLE_DENIED_VTC.subcommands.map((sub) => `Bash(vtc ${sub}:*)`),
   ...ROLE_DENIED_VTC.homeWriteDeny.flatMap((glob) =>
     ["Edit", "Write"].map((tool) => `${tool}(~/.vtc/${glob})`),
   ),
-  `Read(~/.vtc/${ENGINE_INSTANCE.tokenFile})`,
-  `Read(~/.vtc/${HIDDEN_TESTS.homeDir}/**)`,
-  `Read(~/.vtc/${ENGINE_INSTANCE.socketDir}/**)`,
+  ...ROLE_DENIED_VTC.homeReadDeny.map((glob) => `Read(~/.vtc/${glob})`),
   `Read(~/${HOST_CREDENTIAL_DENY_READ.codex.defaultConfigDir}/**)`,
+  ...CLAUDE_SHELL_HOME_DENIES,
+  ...HUMAN_ONLY_TOOLS.map(claudeEngineToolName),
 ];
+
+/** Where the file-path denies of {@link CLAUDE_DENIED_TOOLS} end (its shell denies follow). */
+export const CLAUDE_HOME_FILE_DENIES_END: number =
+  ROLE_DENIED_VTC.subcommands.length +
+  2 * ROLE_DENIED_VTC.homeWriteDeny.length +
+  ROLE_DENIED_VTC.homeReadDeny.length +
+  1;
 
 export const renderClaudeAgent = (agent: CompiledAgent): string =>
   renderFrontmatter(
@@ -96,21 +162,21 @@ export const codexSandboxFor = (tools: RoleTools): "read-only" | "workspace-writ
  * session, and it serves the Lead's run-driving tools; a role agent must not reach them (AD-8
  * rule 3: not a prompt rule). A role with no engine tools gets the server disabled, otherwise only
  * its tools enabled. The entry repeats the full `engineMcpServer("codex")` command so it is valid
- * whether Codex merges or replaces the session's entry. Unverified: spine §7 does not yet list
- * the check that spawned Codex agents honour a per-agent `mcp_servers` table with `enabled` and
- * `enabled_tools`. That spike item, and an engine-side guard so that a role agent's session cannot
- * approve a gate or answer an escalation, are proposed to the integrator; until both land this
- * table is the only barrier on Codex.
+ * whether Codex merges or replaces the session's entry. A human-only tool never reaches
+ * `enabled_tools` (D-an: it throws). Unverified: whether spawned Codex agents honour a per-agent
+ * `mcp_servers` table is the spine §7 spike row "Codex per-agent MCP isolation"; until it passes,
+ * the engine's Lead-only and human-channel checks (reading 71) are the other barrier on Codex.
  */
 export const codexMcpTable = (tools: RoleTools): string[] => {
   const entry = engineMcpServer("codex");
+  const engineTools = roleEngineTools(tools);
   return [
     `[mcp_servers.${entry.name}]`,
     `command = ${tomlString(entry.command)}`,
     `args = ${tomlStringArray(entry.args)}`,
-    tools.engine_tools.length === 0
+    engineTools.length === 0
       ? "enabled = false"
-      : `enabled_tools = ${tomlStringArray(tools.engine_tools)}`,
+      : `enabled_tools = ${tomlStringArray(engineTools)}`,
   ];
 };
 
