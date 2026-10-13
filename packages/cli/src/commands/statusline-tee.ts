@@ -1,9 +1,11 @@
 /**
- * Owner: cli+binary team. The Claude statusline tee shim (§6.9, spine §5 reading 6):
- * `vtc statusline-tee [-- '<the user's statusline command>']` (one argument: the command string). It runs the user's own statusline
- * command unchanged and forwards `statuslineIngestFromClaude(stdin)` to the running engine found
- * through the discovery file (AD-12) with the install token (`statusline.ts`). The Claude
- * adapter's `install` wires it in.
+ * Owner: cli+binary team. The Claude statusline tee shim (§6.9, spine §5 readings 6 and 61):
+ * exactly `vtc statusline-tee [-- '<the user's statusline command>']`, the frozen
+ * `STATUSLINE_TEE` form the Claude adapter's `install` writes with `statuslineTeeCommand` (the
+ * user's command shell-quoted as one word). It runs that word through the shell once with the same
+ * stdin, prints its output unchanged, and forwards `statuslineIngestFromClaude(stdin)` to the
+ * running engine found through the discovery file (AD-12) with the install token
+ * (`statusline.ts`), whatever the arguments.
  */
 import { liveDaemon } from "../daemon.js";
 import { postToEngine } from "../engine-http.js";

@@ -9,7 +9,7 @@
  * (creating, moving or deleting branches, tags, stash entries, symbolic refs, worktrees, notes)
  * and per-call config overrides (`git -c`) except the output-only keys. The engine owns every
  * commit and ref of a run, and `-c alias.x='!git push'` or `-c core.fsmonitor=…` would
- * hide a write. This reading is proposed for the contract (hook.ts rule 4).
+ * hide a write (spine §5 reading 64, hook.ts rule 4).
  */
 import { isAbsolute, resolve } from "node:path";
 import { AGENT_NAME_PREFIX } from "@vtc/shared";
@@ -458,6 +458,12 @@ export const writeTargets = (
 };
 
 // ------------------------------------------------------------------ globs
+//
+// TODO(engine-core, spine §5 reading 67): this is a copy of engine core's files_scope glob
+// dialect, and `packWriteScopes` parses the rendered Markdown pack. Engine core is to export
+// `core.matchesAny` / `core.globToRegExp` and a structured per-dispatch write scope; build/
+// foundation has neither yet (only the Gate Runner's own `gates.matchesAny`, a different module).
+// When they land, `hook.ts` calls them and everything below this line is deleted.
 
 const escape = (c: string): string => c.replace(/[.+^${}()|[\]\\]/g, "\\$&");
 

@@ -2,11 +2,15 @@
  * Owner: cli+binary team; the scanner pins and store come from the Gate Runner (gate-runner
  * team). `vtc doctor [--download]` checks the prerequisites (§4.4): the runtime, git, the host
  * CLIs and their logins (through `claude auth status --json` and `codex login status` only,
- * AD-9), gh, the auto-resume timer (launchd on macOS, systemd on Linux), the repo's running engine
- * (one of an incompatible `vtc` fails), Playwright's Chromium (not provisioned yet: a warning) and
- * the pinned scanners.
+ * AD-9; an apiKeyHelper-only Claude setup warns, D-ab), gh, the auto-resume timer (launchd on
+ * macOS, systemd on Linux, none on Windows in v1: D-aj), the credential variables the detached
+ * daemon passes (`~/.vtc/config.yaml` `env_passthrough`, D-ak), the repo's running engine (one
+ * of an incompatible `vtc` fails), Playwright's Chromium (pin deferred: a warning, D-ai), the
+ * pinned scanners (`gates.createScannerStore`; Checkov without a native build warns, D-u) and the
+ * osv-scanner offline database.
  * `--download` fetches the missing scanners into `~/.vtc/`, each verified against its pinned
- * SHA-256 (§4.4). Exits 1 when a required check fails.
+ * SHA-256 (§4.4), and refreshes the osv-scanner database into `~/.vtc/osv-db/` for the repo's
+ * lockfiles. Exits 1 when a required check fails.
  */
 import { existsSync, readFileSync } from "node:fs";
 import { gates } from "@vtc/engine";
@@ -14,15 +18,24 @@ import { daemonState } from "../daemon.js";
 import {
   checkChromium,
   checkEngine,
+  checkEnvPassthrough,
   runDoctorChecks,
   type DoctorCheck,
   type DoctorEnv,
 } from "../doctor-checks.js";
 import { exec } from "../process.js";
 import { findRepoRoot } from "../repo.js";
-import { checkScanners, engineScannerStore, type ScannerEnv } from "../scanner-checks.js";
+import {
+  checkOsvDatabase,
+  checkScanners,
+  downloadOsvDatabase,
+  osvFetchedAt,
+  type OsvEnv,
+  type ScannerEnv,
+} from "../scanner-checks.js";
 import { wakeRecords } from "../scheduler.js";
 import { autoResumeTimer, defaultTimerHost } from "../timer.js";
+import { readUserConfig, type UserConfigRead } from "../user-config.js";
 import type { CommandContext, CommandSpec } from "./types.js";
 import { EXIT, guarded, parseFlags } from "./util.js";
 
@@ -39,11 +52,21 @@ const readOrNull = (path: string): string | null => {
 /** What `vtc doctor` checks; each optional part is skipped when absent. */
 export interface DoctorCommandEnv extends DoctorEnv {
   readonly scanners?: ScannerEnv;
+  /** The osv-scanner offline database; checked with the scanners. */
+  readonly osv?: OsvEnv;
+  /** `~/.vtc/config.yaml` (D-ak). */
+  readonly userConfig?: () => UserConfigRead;
   /** The running engine of the repo doctor runs in, or `null` (no repo, no daemon). */
   readonly engine?: () => Promise<DoctorCheck | null>;
   /** Playwright's Chromium for Visual QA (§4.4). */
   readonly chromium?: () => DoctorCheck;
 }
+
+/** `<name> --version` on PATH: a scanner the user installed where no pinned build exists. */
+const versionOnPath = async (name: string): Promise<string | null> => {
+  const result = await exec(name, ["--version"], { timeoutMs: 15_000 });
+  return result.code === 0 ? result.stdout.trim().split(/\r?\n/)[0] || name : null;
+};
 
 export const defaultDoctorEnv = (ctx: CommandContext): DoctorCommandEnv => {
   const timer = autoResumeTimer(process.platform);
@@ -51,7 +74,9 @@ export const defaultDoctorEnv = (ctx: CommandContext): DoctorCommandEnv => {
     exec,
     versions: process.versions,
     ...(timer === null
-      ? {}
+      ? process.platform === "win32"
+        ? { timer: "unsupported" as const }
+        : {}
       : {
           timer: {
             kind: timer.kind,
@@ -61,7 +86,13 @@ export const defaultDoctorEnv = (ctx: CommandContext): DoctorCommandEnv => {
             wakeups: () => wakeRecords(ctx.vtcHome),
           },
         }),
-    scanners: { open: engineScannerStore(gates), vtcHome: ctx.vtcHome },
+    scanners: { open: gates.createScannerStore, vtcHome: ctx.vtcHome, onPath: versionOnPath },
+    osv: {
+      fetchedAt: osvFetchedAt,
+      checkout: () => findRepoRoot(ctx.cwd),
+      download: downloadOsvDatabase,
+    },
+    userConfig: () => readUserConfig(ctx.vtcHome),
     engine: async () => {
       const repoRoot = await findRepoRoot(ctx.cwd);
       return repoRoot === null
@@ -77,12 +108,13 @@ export const createDoctorCommand = (
 ): CommandSpec => ({
   name: "doctor",
   summary:
-    "Check prerequisites (runtime, git, host CLIs and logins, gh, auto-resume timer, the repo's engine, pinned scanners); --download fetches missing scanners",
+    "Check prerequisites (runtime, git, host CLIs and logins, gh, auto-resume timer, env passthrough, the repo's engine, pinned scanners, osv database); --download fetches missing scanners and the osv database",
   run: (args, ctx) =>
     guarded("doctor", ctx, async () => {
       const { values } = parseFlags(args, { download: { type: "boolean" } });
       const e = env(ctx);
       const checks = await runDoctorChecks(e);
+      if (e.userConfig !== undefined) checks.push(checkEnvPassthrough(e.userConfig()));
       if (e.chromium !== undefined) checks.push(e.chromium());
       const engine = e.engine === undefined ? null : await e.engine();
       if (engine !== null) checks.push(engine);
@@ -93,6 +125,13 @@ export const createDoctorCommand = (
             ctx.io.out(line);
           })),
         );
+        if (e.osv !== undefined) {
+          if (mode === "download") ctx.io.out("Refreshing the osv-scanner offline database...");
+          const store = (e.scanners.open ?? gates.createScannerStore)({
+            vtcHome: e.scanners.vtcHome,
+          });
+          checks.push(await checkOsvDatabase(e.osv, e.scanners.vtcHome, store, mode));
+        }
       }
       for (const c of checks) ctx.io.out(`${MARK[c.status]}  ${c.name.padEnd(12)} ${c.detail}`);
       const failed = checks.filter((c) => c.status === "fail").length;

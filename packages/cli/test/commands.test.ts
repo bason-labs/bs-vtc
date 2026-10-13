@@ -6,7 +6,9 @@ import { existsSync, mkdirSync, readFileSync, symlinkSync, writeFileSync } from 
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import { core, serveSnapshot } from "@vtc/engine";
+import type { AdapterFactoryOptions } from "@vtc/adapters";
 import {
+  DEFAULT_INSTALL_SCOPE,
   ENGINE_HTTP,
   ProjectConfigSchema,
   type EngineClient,
@@ -21,17 +23,20 @@ import {
   defaultDashboardDeps,
 } from "../src/commands/dashboard.js";
 import { pause, resume, status, formatStatus, toolErrorMessage } from "../src/commands/control.js";
-import { createDoctorCommand } from "../src/commands/doctor.js";
+import { createDoctorCommand, defaultDoctorEnv } from "../src/commands/doctor.js";
 import { command as init, defaultProjectConfig } from "../src/commands/init.js";
 import {
   createInstallCommand,
   defaultInstallDeps,
   type InstallDeps,
 } from "../src/commands/install.js";
+import { checkChromium } from "../src/doctor-checks.js";
 import { plistProgram, renderLaunchAgent } from "../src/launchd.js";
 import type { Exec, ExecResult } from "../src/process.js";
 import { renderSystemdService, systemdProgram } from "../src/systemd.js";
 import { installTokenPath } from "../src/token.js";
+import type { UserConfigRead } from "../src/user-config.js";
+import { VERSION } from "../src/version.js";
 import { capture, cleanupDirs, DASHBOARD_FIXTURE, initRepo, tempDir, tempHome } from "./helpers.js";
 
 afterEach(cleanupDirs);
@@ -152,18 +157,27 @@ describe("vtc install", () => {
     const repo = initRepo();
     const vtcHome = tempHome();
     const { ctx, out } = capture(repo, vtcHome);
-    const cmd = createInstallCommand(installDeps({ factories: { codex: () => adapter } }, "/h"));
-    expect(await cmd.run(["--host", "codex", "--scope", "project"], ctx)).toBe(0);
+    const options: (AdapterFactoryOptions | undefined)[] = [];
+    const factory = (o?: AdapterFactoryOptions): HostAdapter => (options.push(o), adapter);
+    const cmd = createInstallCommand(
+      installDeps({ factories: { codex: factory, "claude-code": factory } }, "/h"),
+    );
+    expect(await cmd.run(["--host", "codex", "--scope", "user"], ctx)).toBe(0);
     expect(requests).toEqual([
-      { projectRoot: repo, home: "/h", pluginDir: "/plugins/codex", scope: "project" },
+      { projectRoot: repo, home: "/h", pluginDir: "/plugins/codex", scope: "user" },
     ]);
+    expect(options).toEqual([{ pluginDir: "/plugins/codex", vtcHome, vtcVersion: VERSION }]);
     expect(disposed).toBe(1);
     expect(existsSync(installTokenPath(vtcHome))).toBe(true);
     expect(out.join("\n")).toContain("note: trust the hooks");
-    expect(out.join("\n")).toMatch(/Auto-resume has no timer on this platform yet/);
-    // the spec's positional form (§4.4: `vtc install codex`)
+    expect(out.join("\n")).toMatch(/no auto-resume timer on this platform in v1/);
+    // the spec's positional form (§4.4: `vtc install codex`); with no --scope each host's default
+    // (D-ah): Codex in the project, Claude Code for the user
     expect(await cmd.run(["codex"], ctx)).toBe(0);
-    expect(requests.at(-1)).toMatchObject({ pluginDir: "/plugins/codex", scope: "user" });
+    expect(requests.at(-1)).toMatchObject({ pluginDir: "/plugins/codex", scope: "project" });
+    expect(await cmd.run(["claude-code"], ctx)).toBe(0);
+    expect(requests.at(-1)).toMatchObject({ pluginDir: "/plugins/claude-code", scope: "user" });
+    expect(DEFAULT_INSTALL_SCOPE).toEqual({ "claude-code": "user", codex: "project" });
     expect(await cmd.run(["codex", "claude-code"], ctx)).toBe(64);
     expect(await cmd.run(["codex", "--host", "codex"], ctx)).toBe(64);
   });
@@ -178,7 +192,7 @@ describe("vtc install", () => {
     expect(err.at(-1)).toMatch(/no claude-code adapter yet/);
   });
 
-  it("installs the launchd timer with the host on macOS (AD-6 rule 4) and on --auto-resume, and removes it", async () => {
+  it("installs the launchd timer only on --auto-resume (spine §5 reading 59), and removes it", async () => {
     const home = tempDir();
     const vtcHome = tempHome();
     const { calls, exec } = recorder();
@@ -208,7 +222,7 @@ describe("vtc install", () => {
     expect(await cmd.run(["--no-auto-resume"], ctx)).toBe(0);
     expect(existsSync(plist)).toBe(false);
     expect(await cmd.run(["--auto-resume", "--no-auto-resume"], ctx)).toBe(64);
-    // `vtc install <host>` installs the timer too, and says so; --no-auto-resume opts out
+    // `vtc install <host>` installs no timer, never silently: it says how; with --auto-resume it does
     const adapter = {
       install: () => Promise.resolve({ written: [], notes: [] }),
       dispose: () => Promise.resolve(),
@@ -226,6 +240,9 @@ describe("vtc install", () => {
     );
     const { ctx: hostCtx, out } = capture(initRepo(), vtcHome);
     expect(await withHost.run(["codex"], hostCtx)).toBe(0);
+    expect(existsSync(plist)).toBe(false);
+    expect(out.join("\n")).toMatch(/run vtc install --auto-resume to install the launchd timer/);
+    expect(await withHost.run(["codex", "--auto-resume"], hostCtx)).toBe(0);
     expect(existsSync(plist)).toBe(true);
     expect(out.join("\n")).toMatch(/Installed the auto-resume timer/);
     expect(await withHost.run(["--host", "codex", "--no-auto-resume"], hostCtx)).toBe(0);
@@ -504,5 +521,81 @@ describe("vtc doctor", () => {
     const { ctx, out } = capture("/w", "/h");
     expect(await createDoctorCommand(() => base).run([], ctx)).toBe(0);
     expect(out.join("\n")).not.toMatch(/auto-resume/);
+    // Windows in v1 (D-aj): no timer, and doctor says what that means
+    const win = capture("/w", "/h");
+    expect(
+      await createDoctorCommand(() => ({ ...base, timer: "unsupported" })).run([], win.ctx),
+    ).toBe(0);
+    expect(win.out.join("\n")).toMatch(
+      /warn +auto-resume +no auto-resume timer on this platform in v1: a run parked on a usage limit resumes when its engine next runs/,
+    );
+  });
+
+  it("warns about an apiKeyHelper-only Claude setup, read from claude auth status --json only (D-ab)", async () => {
+    for (const status of [
+      { loggedIn: true, authMethod: "apiKeyHelper" },
+      { loggedIn: true, authMethod: "api_key", apiKeySource: "apiKeyHelper" },
+    ]) {
+      const { calls, exec } = recorder({
+        "claude auth status --json": { stdout: JSON.stringify(status) },
+      });
+      const { ctx, out } = capture("/w", "/h");
+      expect(
+        await createDoctorCommand(() => ({ exec, versions: { node: "22.17.1" } })).run([], ctx),
+      ).toBe(0);
+      expect(out.join("\n")).toMatch(
+        /warn +claude-code +.*apiKeyHelper.*out of scope for v1.*subscription/,
+      );
+      expect(calls.filter((c) => c.startsWith("claude"))).toEqual([
+        "claude --version",
+        "claude auth status --json",
+      ]);
+    }
+  });
+
+  it("shows which credential variables pass to the detached daemon (D-ak)", async () => {
+    const base = { exec: recorder().exec, versions: { node: "22.17.1" } };
+    const run = async (read: UserConfigRead): Promise<{ code: number; text: string }> => {
+      const { ctx, out } = capture("/w", "/h");
+      const code = await createDoctorCommand(() => ({ ...base, userConfig: () => read })).run(
+        [],
+        ctx,
+      );
+      return { code, text: out.join("\n") };
+    };
+    const none = await run({
+      ok: true,
+      path: "/h/config.yaml",
+      config: { version: 1, env_passthrough: [] },
+    });
+    expect(none.text).toMatch(
+      /ok +env +the detached daemon drops credential variables; none pass \(env_passthrough in \/h\/config\.yaml\)/,
+    );
+    const some = await run({
+      ok: true,
+      path: "/h/config.yaml",
+      config: { version: 1, env_passthrough: ["GITHUB_TOKEN", "ANTHROPIC_API_KEY"] },
+    });
+    expect(some.text).toMatch(
+      /ok +env +passes GITHUB_TOKEN, ANTHROPIC_API_KEY to the detached daemon \(env_passthrough in \/h\/config\.yaml\)/,
+    );
+    const bad = await run({ ok: false, path: "/h/config.yaml", error: "env_passthrough.0: bad" });
+    expect(bad.code).toBe(1);
+    expect(bad.text).toMatch(
+      /FAIL +env +\/h\/config\.yaml does not parse \(env_passthrough\.0: bad\)/,
+    );
+    // the default reads the real file under the VTC home
+    const home = tempHome();
+    writeFileSync(join(home, "config.yaml"), "version: 1\nenv_passthrough: [GH_TOKEN]\n");
+    const { ctx } = capture("/w", home);
+    expect(defaultDoctorEnv(ctx).userConfig?.()).toMatchObject({
+      ok: true,
+      config: { env_passthrough: ["GH_TOKEN"] },
+    });
+  });
+
+  it("only warns about Playwright's Chromium until Visual QA has a pin (D-ai)", () => {
+    expect(checkChromium()).toMatchObject({ name: "chromium", status: "warn" });
+    expect(checkChromium().detail).toMatch(/deferred until Visual QA/);
   });
 });
