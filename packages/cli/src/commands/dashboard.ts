@@ -28,13 +28,17 @@ import { EXIT, guarded, parseFlags } from "./util.js";
 export const dashboardUrl = (port: number, nonce: string): string =>
   `http://${ENGINE_HTTP.bindHost}:${String(port)}/#nonce=${encodeURIComponent(nonce)}`;
 
-/** Opens `url` in the default browser; failures are ignored (the URL is printed anyway). */
+/**
+ * Opens `url` in the default browser; failures are ignored (the URL is printed anyway). Never
+ * through a shell: on Windows `rundll32 url.dll,FileProtocolHandler`, not `cmd /c start`, which
+ * would expand `%…%` in the URL.
+ */
 export const openInBrowser = (url: string, platform: NodeJS.Platform = process.platform): void => {
   const [command, args] =
     platform === "darwin"
       ? ["open", [url]]
       : platform === "win32"
-        ? ["cmd", ["/d", "/c", "start", '""', url]]
+        ? ["rundll32", ["url.dll,FileProtocolHandler", url]]
         : ["xdg-open", [url]];
   try {
     const child = spawn(command, args, { detached: true, stdio: "ignore", windowsHide: true });

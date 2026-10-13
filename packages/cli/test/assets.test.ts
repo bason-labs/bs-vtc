@@ -3,7 +3,15 @@
  * the binary; the engine resolves dashboard URLs against it; plugins are extracted to the VTC
  * home for `HostAdapter.install`.
  */
-import { existsSync, mkdirSync, readFileSync, symlinkSync, writeFileSync } from "node:fs";
+import {
+  existsSync,
+  mkdirSync,
+  readdirSync,
+  readFileSync,
+  statSync,
+  symlinkSync,
+  writeFileSync,
+} from "node:fs";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import { core } from "@vtc/engine";
@@ -138,5 +146,24 @@ describe("the embedded bundle (binary)", () => {
     expect(() =>
       extractNamespace(createEmbeddedAssetBundle({}), "plugin:codex", join(home, "x")),
     ).toThrow(/no plugin:codex assets/);
+  });
+
+  it("leaves an identical extracted plugin in place, so a running host never loses it", () => {
+    const home = tempDir();
+    const disk = createDiskAssetBundle(writePluginTrees(tempDir()));
+    const dest = join(home, "plugin");
+    extractNamespace(disk, "plugin:codex", dest);
+    const before = statSync(dest).ino;
+    expect(extractNamespace(disk, "plugin:codex", dest)).toBe(dest);
+    expect(statSync(dest).ino).toBe(before);
+    expect(readdirSync(home)).toEqual(["plugin"]);
+    // a changed or extra file is replaced by the bundle's tree
+    const [first = ""] = disk.list("plugin:codex");
+    writeFileSync(join(dest, first), "tampered");
+    writeFileSync(join(dest, "extra.txt"), "x");
+    extractNamespace(disk, "plugin:codex", dest);
+    expect(statSync(dest).ino).not.toBe(before);
+    expect(readFileSync(join(dest, first), "utf8")).toBe(text(disk.read("plugin:codex", first)));
+    expect(existsSync(join(dest, "extra.txt"))).toBe(false);
   });
 });

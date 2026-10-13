@@ -5,6 +5,12 @@
  * the reason on stderr) only a VTC role agent's git write, or a write outside the write scope of
  * that agent's in-flight dispatch: its worktree's scope entries, plus the entries it writes in the
  * main checkout (QA author mode's hidden-test staging). The engine stays the enforcement point.
+ *
+ * Known limit: the host's hook input names the calling agent but not which of its dispatches it
+ * serves. With concurrency 2-3, two in-flight dispatches can share an agent (two `vtc-engineer`
+ * tasks). When the input's `cwd` lies in one of their worktrees, only that dispatch counts;
+ * otherwise a write into either worktree, inside that worktree's own scope, is allowed. The
+ * engine still attributes and checks each worktree's diff against its own task (L5).
  */
 import { readFileSync, realpathSync } from "node:fs";
 import { basename, dirname, isAbsolute, join, relative, sep } from "node:path";
@@ -20,9 +26,9 @@ import {
 import {
   agentBaseName,
   gitWriteIn,
+  inAllScopes,
   isVtcRoleAgent,
-  matchesAnyGlob,
-  packWriteScope,
+  packWriteScopes,
   shellCommandOf,
   writeTargets,
 } from "./hook-rules.js";
@@ -97,20 +103,33 @@ const below = (rel: string): string | null =>
 const isCheckoutEntry = (entry: string): boolean =>
   entry.startsWith(".vtc/state/") && !entry.startsWith(`${git.WORKTREES_DIR}/`);
 
-/** Each dispatch's write scope from its task pack, or `null` when a pack is unreadable. */
+/**
+ * Each dispatch's write-scope lists from its task pack (`packWriteScopes`: a path must be in all
+ * of them), or `null` when a pack is unreadable.
+ */
 const scopesOf = (
   repoRoot: string,
   dispatches: readonly core.RoleRunRecord[],
-): Map<core.RoleRunRecord, string[]> | null => {
-  const scopes = new Map<core.RoleRunRecord, string[]>();
+): Map<core.RoleRunRecord, string[][]> | null => {
+  const scopes = new Map<core.RoleRunRecord, string[][]>();
   for (const d of dispatches) {
     const pack = readText(join(repoRoot, d.pack));
-    const own = pack === null ? null : packWriteScope(pack);
+    const own = pack === null ? null : packWriteScopes(pack);
     if (own === null) return null;
     scopes.set(d, own);
   }
   return scopes;
 };
+
+/** The worktree id (first segment under `WORKTREES_DIR`) that `abs` lies in, or `null`. */
+const worktreeIdOf = (repoRoot: string, abs: string): string | null => {
+  const rel = below(relative(realish(join(repoRoot, git.WORKTREES_DIR)), realish(abs)));
+  return rel === null ? null : (rel.split(sep)[0] ?? null);
+};
+
+/** True when the dispatch's worktree is `id`. */
+const ownsWorktree = (run: RunState, d: core.RoleRunRecord, id: string): boolean =>
+  d.task === id || core.roleWorktreeId(run.id, d.action_id) === id;
 
 /** Why writing `target` is outside the dispatch's scope, or `null` when it is allowed. */
 const writeViolation = (
@@ -125,18 +144,22 @@ const writeViolation = (
   const inWorktrees = below(relative(realish(join(repoRoot, git.WORKTREES_DIR)), real));
   if (inWorktrees === null) {
     const inRepo = below(relative(realish(repoRoot), real));
-    const checkout = [...scopes.values()].flat().filter(isCheckoutEntry);
-    if (inRepo !== null && matchesAnyGlob(checkout, posix(inRepo))) return null;
-    return `${target} is outside your worktree under ${git.WORKTREES_DIR}/`;
+    const allowed =
+      inRepo !== null &&
+      dispatches.some((d) =>
+        inAllScopes(
+          (scopes.get(d) ?? []).map((scope) => scope.filter(isCheckoutEntry)),
+          posix(inRepo),
+        ),
+      );
+    return allowed ? null : `${target} is outside your worktree under ${git.WORKTREES_DIR}/`;
   }
   const [id = "", ...rest] = inWorktrees.split(sep);
   const path = rest.join("/");
-  const mine = dispatches.filter(
-    (d) => d.task === id || core.roleWorktreeId(run.id, d.action_id) === id,
-  );
+  const mine = dispatches.filter((d) => ownsWorktree(run, d, id));
   if (mine.length === 0) return `${target} is in a worktree that is not yours (${id})`;
-  const scope = mine.flatMap((d) => scopes.get(d) ?? []);
-  if (path !== "" && matchesAnyGlob(scope, path)) return null;
+  if (path !== "" && mine.some((d) => inAllScopes(scopes.get(d) ?? [], path))) return null;
+  const scope = [...new Set(mine.flatMap((d) => scopes.get(d)?.[0] ?? []))];
   return `${path || target} is outside your write scope (${scope.length === 0 ? "read-only" : scope.join(", ")})`;
 };
 
@@ -154,10 +177,18 @@ const preToolUse = async (input: VtcHookInput, deps: HookDeps): Promise<HookOutc
     return block(
       `VTC: role agents never run git ${gitWrite}. Leave your changes in the worktree; the engine commits, merges and pushes them after the Lead submits your result.`,
     );
-  const dispatches = [...active.run.roleRuns.values()].filter(
+  const sameAgent = [...active.run.roleRuns.values()].filter(
     (r) => r.status === "in_flight" && agentBaseName(r.agent) === agent,
   );
-  if (dispatches.length === 0) return ALLOW;
+  if (sameAgent.length === 0) return ALLOW;
+  // several dispatches of this agent: the one whose worktree the caller runs in, when known
+  const cwdWorktree =
+    sameAgent.length > 1 && input.cwd !== undefined
+      ? worktreeIdOf(active.repoRoot, input.cwd)
+      : null;
+  const own =
+    cwdWorktree === null ? [] : sameAgent.filter((d) => ownsWorktree(active.run, d, cwdWorktree));
+  const dispatches = own.length > 0 ? own : sameAgent;
   for (const target of targets) {
     const violation = writeViolation(target, active.repoRoot, active.run, dispatches);
     if (violation !== null)

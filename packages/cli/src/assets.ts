@@ -124,9 +124,54 @@ export const createEmbeddedAssetBundle = (
   };
 };
 
+/** Every regular file under `dir` as a POSIX relative path, or `null` when `dir` is unreadable or holds anything else. */
+const filesUnder = (dir: string, prefix = ""): string[] | null => {
+  let entries;
+  try {
+    entries = readdirSync(dir, { withFileTypes: true });
+  } catch {
+    return null;
+  }
+  const files: string[] = [];
+  for (const entry of entries) {
+    const rel = prefix === "" ? entry.name : `${prefix}/${entry.name}`;
+    if (entry.isFile()) files.push(rel);
+    else if (entry.isDirectory()) {
+      const inner = filesUnder(join(dir, entry.name), rel);
+      if (inner === null) return null;
+      files.push(...inner);
+    } else return null;
+  }
+  return files;
+};
+
+/** True when `dest` already holds exactly the namespace's files, byte for byte. */
+const sameTree = (
+  bundle: AssetBundle,
+  namespace: AssetNamespace,
+  paths: readonly string[],
+  dest: string,
+): boolean => {
+  const existing = filesUnder(dest);
+  if (existing === null || existing.length !== paths.length) return false;
+  const wanted = new Set(paths);
+  if (!existing.every((p) => wanted.has(p))) return false;
+  return paths.every((path) => {
+    const bytes = bundle.read(namespace, path);
+    if (bytes === undefined) return false;
+    try {
+      return Buffer.from(bytes).equals(readFileSync(join(dest, ...path.split("/"))));
+    } catch {
+      return false;
+    }
+  });
+};
+
 /**
  * Writes every asset of `namespace` under `dest` (AD-20 rule 5: the binary's plugins must be on
- * disk for `HostAdapter.install`). The tree is built in a uniquely named staging directory beside
+ * disk for `HostAdapter.install`). A `dest` that already holds the same files is left alone, so
+ * re-running `vtc install` never takes the plugin away from a running host (`dest` is per `vtc`
+ * version, so only a changed bundle of the same version is ever replaced). The tree is built in a uniquely named staging directory beside
  * `dest`, the old tree (if any) is renamed aside and the new one renamed into place, so a reader
  * never sees half a plugin and two concurrent extractions do not collide; the loser of a race
  * leaves the winner's identical tree in place. Files are written 0644: the `AssetBundle` contract
@@ -139,11 +184,13 @@ export const extractNamespace = (
 ): string => {
   const paths = bundle.list(namespace);
   if (paths.length === 0) throw new Error(`the bundle has no ${namespace} assets`);
+  const unsafe = paths.find((p) => !isSafeAssetPath(p));
+  if (unsafe !== undefined) throw new Error(`unsafe asset path ${unsafe}`);
+  if (sameTree(bundle, namespace, paths, dest)) return dest;
   mkdirSync(dirname(dest), { recursive: true, mode: 0o700 });
   const unique = `${String(process.pid)}-${randomBytes(4).toString("hex")}`;
   const staging = `${dest}.${unique}.tmp`;
   for (const path of paths) {
-    if (!isSafeAssetPath(path)) throw new Error(`unsafe asset path ${path}`);
     const bytes = bundle.read(namespace, path);
     if (bytes === undefined) throw new Error(`asset ${namespace}/${path} is unreadable`);
     const abs = join(staging, ...path.split("/"));

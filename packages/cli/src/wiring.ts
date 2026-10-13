@@ -4,7 +4,7 @@
  * adapters, the asset bundle, the auto-resume timer and the `gh`-backed PR service.
  */
 import { homedir } from "node:os";
-import { join } from "node:path";
+import { join, resolve } from "node:path";
 import { ADAPTER_FACTORIES } from "@vtc/adapters";
 import { ENGINE_NAME, gates, git, mcp, runDaemon } from "@vtc/engine";
 import {
@@ -24,7 +24,7 @@ import {
 } from "@vtc/shared";
 import type { CliIo, CommandContext } from "./commands/types.js";
 import { ensureDaemon } from "./daemon.js";
-import { requireRepoRoot } from "./repo.js";
+import { requireRepoRoot, requireVtcProject } from "./repo.js";
 import { runtime } from "./runtime.js";
 import { createWakeScheduler } from "./scheduler.js";
 import { loadStorage } from "./storage.js";
@@ -127,16 +127,25 @@ export const disposeAdapters = async (parts: Pick<EngineParts, "adapters">): Pro
 export const startDaemon = (parts: EngineParts, options: DaemonOptions): Promise<RunningDaemon> =>
   runDaemon(composeEngineDeps(parts), options);
 
-/** `$VTC_HOME`, or `~/.vtc`. */
-export const resolveVtcHome = (env: Readonly<Record<string, string | undefined>>): string =>
-  env.VTC_HOME ?? join(homedir(), ".vtc");
+/**
+ * `$VTC_HOME` made absolute, or `~/.vtc`. A relative value resolves against the caller's cwd
+ * once, here: the detached daemon runs in the repo root and must see the same home.
+ */
+export const resolveVtcHome = (
+  env: Readonly<Record<string, string | undefined>>,
+  cwd: string = process.cwd(),
+): string =>
+  env.VTC_HOME === undefined || env.VTC_HOME === ""
+    ? join(homedir(), ".vtc")
+    : resolve(cwd, env.VTC_HOME);
 
 /**
  * The control commands' client: an MCP client of the repo's daemon socket (AD-19 rule 4),
- * starting the daemon when none is running.
+ * starting the daemon when none is running. Refuses a repo `vtc init` never set up.
  */
 export const connectToRepoEngine = async (cwd: string, vtcHome: string): Promise<EngineClient> => {
   const repoRoot = await requireRepoRoot(cwd);
+  requireVtcProject(repoRoot);
   const discovery = await ensureDaemon({
     vtcHome,
     repoRoot,

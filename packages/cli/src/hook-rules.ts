@@ -1,9 +1,15 @@
 /**
  * Pure rules behind `vtc hook pre-tool-use` (`@vtc/shared` hook.ts rule 4): who is a VTC role
- * agent, which shell commands are git writes (commits, pushes, merges, rebases, resets, ref moves
- * and config changes), which files a tool call writes, and whether a path
+ * agent, which shell commands are git writes, which files a tool call writes, and whether a path
  * is inside a dispatch's write scope. Hooks are an extra layer of defence only; the engine checks
  * every write and every submit, so these rules lean towards allowing what they cannot read.
+ *
+ * Git writes are the contract's commits, pushes, merges, rebases, resets and config changes, read
+ * as everything that writes the repository's history, refs or configuration: so also ref writes
+ * (creating, moving or deleting branches, tags, stash entries, symbolic refs, worktrees, notes)
+ * and per-call config overrides (`git -c`) except the output-only keys. The engine owns every
+ * commit and ref of a run, and `-c alias.x='!git push'` or `-c core.fsmonitor=…` would
+ * hide a write. This reading is proposed for the contract (hook.ts rule 4).
  */
 import { isAbsolute, resolve } from "node:path";
 import { AGENT_NAME_PREFIX } from "@vtc/shared";
@@ -31,6 +37,7 @@ const GIT_WRITE_SUBCOMMANDS = new Set([
   "rebase",
   "reset",
   "update-ref",
+  "filter-branch",
 ]);
 
 /** Global git options that take the next word as their value. */
@@ -203,45 +210,136 @@ const configWrites = (args: readonly string[]): boolean => {
   return positionals.length >= 2 || (first !== undefined && !first.includes("."));
 };
 
-/** The ref-moving forms of `branch`, `tag`, `checkout` and `switch`. */
+/** `git branch` flags that only list or show branches. */
+const BRANCH_READ_FLAGS = new Set([
+  "-l",
+  "--list",
+  "-a",
+  "--all",
+  "-r",
+  "--remotes",
+  "-v",
+  "-vv",
+  "--verbose",
+  "--show-current",
+  "--contains",
+  "--no-contains",
+  "--merged",
+  "--no-merged",
+  "--points-at",
+  "--format",
+  "--sort",
+]);
+
+/** `git tag` flags that only list, show or verify tags. */
+const TAG_READ_FLAGS = new Set([
+  "-l",
+  "--list",
+  "-v",
+  "--verify",
+  "-n",
+  "--contains",
+  "--no-contains",
+  "--merged",
+  "--no-merged",
+  "--points-at",
+]);
+
+/** The words of `args` that are not options. */
+const positionalsOf = (args: readonly string[]): string[] => args.filter((a) => !a.startsWith("-"));
+
+/**
+ * The ref-writing forms of `branch`, `tag`, `checkout`, `switch`, `stash`, `symbolic-ref`,
+ * `worktree`, `notes` and `replace`: creating, moving or deleting a branch, tag, stash entry,
+ * symbolic ref, worktree, note or replacement. Listing and showing pass.
+ */
 const refWrite = (sub: string, args: readonly string[]): boolean => {
-  const flags = args.filter((a) => a.startsWith("-"));
+  const flags = args.filter((a) => a.startsWith("-")).map((f) => f.split("=")[0] ?? f);
   const has = (...names: string[]): boolean => flags.some((f) => names.includes(f));
+  const [verb] = positionalsOf(args);
   switch (sub) {
     case "branch":
-      return has(
-        "-f",
-        "--force",
-        "-d",
-        "-D",
-        "--delete",
-        "-m",
-        "-M",
-        "--move",
-        "-c",
-        "-C",
-        "--copy",
-      );
+      if (
+        has(
+          "-f",
+          "--force",
+          "-d",
+          "-D",
+          "--delete",
+          "-m",
+          "-M",
+          "--move",
+          "-c",
+          "-C",
+          "--copy",
+          "-u",
+          "--set-upstream-to",
+          "--unset-upstream",
+          "--edit-description",
+          "-t",
+          "--track",
+        )
+      )
+        return true;
+      // `git branch <name> [<start>]` creates a branch; with a listing flag the words are patterns
+      return !flags.some((f) => BRANCH_READ_FLAGS.has(f)) && verb !== undefined;
     case "tag":
-      return (
-        !has("-l", "--list", "-v", "--verify") &&
-        (args.some((a) => !a.startsWith("-")) || has("-d", "--delete"))
-      );
+      if (has("-d", "--delete", "-f", "--force", "-a", "-s", "-m", "-F")) return true;
+      return !flags.some((f) => TAG_READ_FLAGS.has(f)) && verb !== undefined;
     case "checkout":
-      return has("-B");
+      return has("-b", "-B", "--orphan");
     case "switch":
-      return has("-C", "--force-create");
+      return has("-c", "-C", "--create", "--force-create", "--orphan");
+    case "stash":
+      return verb === undefined || !["list", "show"].includes(verb);
+    case "symbolic-ref":
+      return has("-d", "--delete") || positionalsOf(args).length >= 2;
+    case "worktree":
+      return verb !== undefined && verb !== "list";
+    case "notes":
+      return verb !== undefined && !["list", "show", "get-ref"].includes(verb);
+    case "replace":
+      return !has("-l", "--list") && (verb !== undefined || has("-d", "--delete"));
     default:
       return false;
   }
+};
+
+/**
+ * Config keys a role may set for one call with `git -c <key>=<value>` (or `--config-env`):
+ * output formatting only. Every other key is blocked, since a per-call override can run a
+ * program or a hidden git write (`alias.*`, `core.fsmonitor`, `core.sshCommand`, `core.hooksPath`,
+ * `filter.*`, `diff.external`, `credential.*`, `include.path`, …). Keys compare lowercased.
+ */
+const SAFE_CONFIG_KEY =
+  /^(?:color(?:\..+)?|column\..+|advice\..+|core\.(?:quotepath|abbrev)|log\..+|grep\..+|i18n\..+|status\..+|diff\.(?:noprefix|mnemonicprefix|renames|renamelimit|algorithm|relative|context|interhunkcontext|indentheuristic|colormoved|colormovedws|statgraphwidth|dirstat|suppressblankempty|wserrorhighlight|srcprefix|dstprefix))$/;
+
+/** Pager keys: safe only with a plain pager value (a pager is a program git runs). */
+const PAGER_KEY = /^(?:core\.pager|pager\..+)$/;
+const SAFE_PAGER_VALUE = /^(?:|cat|less|more|true|false|yes|no|on|off|0|1)$/;
+
+/** True when `git -c <setting>` (`key=value`, or `key` alone for `true`) only changes output. */
+const safeConfigOverride = (setting: string, fromEnv: boolean): boolean => {
+  const at = setting.indexOf("=");
+  const key = (at < 0 ? setting : setting.slice(0, at)).toLowerCase();
+  const value = at < 0 ? "true" : setting.slice(at + 1);
+  if (PAGER_KEY.test(key)) return !fromEnv && SAFE_PAGER_VALUE.test(value.trim());
+  return SAFE_CONFIG_KEY.test(key);
 };
 
 /** The git write of one git invocation's arguments (after `git`), or `null`. */
 const gitWriteOf = (args: readonly string[]): string | null => {
   for (let i = 0; i < args.length; i += 1) {
     const word = args[i] ?? "";
-    const option = word.split("=")[0] ?? word;
-    if (option === "-c" || option === "--config-env") return option;
+    if (word === "-c" || word === "--config-env") {
+      i += 1;
+      if (!safeConfigOverride(args[i] ?? "", word === "--config-env")) return word;
+      continue;
+    }
+    if (word.startsWith("--config-env=")) {
+      if (!safeConfigOverride(word.slice("--config-env=".length), true)) return "--config-env";
+      continue;
+    }
     if (GIT_VALUE_OPTIONS.has(word)) {
       i += 1;
       continue;
@@ -300,7 +398,7 @@ const gitWriteInLine = (commandLine: string, depth: number): string | null => {
  * (after `VAR=value` prefixes and wrappers such as `sudo` or `env`), inside `bash -c '…'` or
  * `eval`, and inside `$(…)` or backticks. A quoted argument that merely mentions git
  * (`grep "git commit" src`) is not a git call. Read-only forms (`git config --get`, `git tag -l`,
- * `git branch`) pass.
+ * `git branch`, `git stash list`, `git -c color.ui=never diff`) pass.
  */
 export const gitWriteIn = (commandLine: string): string | null => gitWriteInLine(commandLine, 0);
 
@@ -405,17 +503,26 @@ export const matchesAnyGlob = (globs: readonly string[], path: string): boolean 
   globs.some((g) => globToRegExp(g).test(path));
 
 /**
- * The `## Write scope` list of a rendered task pack (`renderTaskPack`), or `null` when the pack
- * has no such section. `(none)` is an empty scope.
+ * Every `## Write scope` list of a rendered task pack (`renderTaskPack`), or `null` when the pack
+ * has none. `(none)` is an empty scope. A rendered pack has exactly one such section, but text
+ * from other sections (requirements, findings, the human's answer) is not escaped and can contain
+ * a line `## Write scope` of its own: the caller allows a path only when every list allows it, so
+ * a forged section can only narrow the scope, never widen it.
  */
-export const packWriteScope = (markdown: string): string[] | null => {
+export const packWriteScopes = (markdown: string): string[][] | null => {
   const lines = markdown.split(/\r?\n/);
-  const start = lines.findIndex((l) => l.trim() === "## Write scope");
-  if (start < 0) return null;
-  const scope: string[] = [];
-  for (const line of lines.slice(start + 1)) {
-    if (line.startsWith("## ")) break;
-    if (line.startsWith("- ")) scope.push(line.slice(2).trim());
+  const scopes: string[][] = [];
+  let current: string[] | null = null;
+  for (const line of lines) {
+    if (line.trim() === "## Write scope") {
+      current = [];
+      scopes.push(current);
+    } else if (line.startsWith("## ")) current = null;
+    else if (current !== null && line.startsWith("- ")) current.push(line.slice(2).trim());
   }
-  return scope;
+  return scopes.length === 0 ? null : scopes;
 };
+
+/** True when `path` is inside every one of `scopes` (see {@link packWriteScopes}). */
+export const inAllScopes = (scopes: readonly (readonly string[])[], path: string): boolean =>
+  scopes.length > 0 && scopes.every((scope) => matchesAnyGlob(scope, path));

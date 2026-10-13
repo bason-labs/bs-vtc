@@ -180,7 +180,7 @@ describe.skipIf(!HAS_BUN)(
       expect(await exited(child)).toBe(0);
     }, 30_000);
 
-    it("bridges MCP over stdio to one daemon that it starts detached (AD-12)", async () => {
+    it("bridges MCP over stdio to one daemon that it starts detached once the repo is set up (AD-12)", async () => {
       const repo = initRepo();
       const home = tempHome();
       const send = (child: ChildProcessWithoutNullStreams, message: unknown): void => {
@@ -202,16 +202,48 @@ describe.skipIf(!HAS_BUN)(
       const a = run(["engine", "--mcp", "--host", "claude-code"], repo, home);
       const aOut = lines(a);
       initialize(a, 1);
-      expect(JSON.parse(await aOut.next(/"id":1/))).toMatchObject({
+      expect(JSON.parse(await aOut.next(/"id":1\b/))).toMatchObject({
         result: { serverInfo: { name: "vtc" } },
       });
       send(a, { jsonrpc: "2.0", id: 2, method: "tools/list" });
-      const tools = JSON.parse(await aOut.next(/"id":2/)) as {
+      const tools = JSON.parse(await aOut.next(/"id":2\b/)) as {
         result: { tools: { name: string }[] };
       };
       expect(tools.result.tools.map((t) => t.name).sort()).toEqual(
         ENGINE_MCP_TOOLS.map((t) => t.name).sort(),
       );
+      // a repo vtc init never set up: the bridge answers, starts no daemon, writes nothing there
+      send(a, {
+        jsonrpc: "2.0",
+        id: 3,
+        method: "tools/call",
+        params: { name: "status", arguments: {} },
+      });
+      expect(JSON.parse(await aOut.next(/"id":3\b/))).toMatchObject({
+        result: { isError: true, content: [{ text: expect.stringMatching(/vtc init/) as string }] },
+      });
+      expect(existsSync(join(repo, ".vtc"))).toBe(false);
+      expect(existsSync(join(home, engineDiscoveryFile(repo)))).toBe(false);
+      const status0 = spawnSync(vtc, ["status"], {
+        cwd: repo,
+        env: { ...process.env, VTC_HOME: home },
+        encoding: "utf8",
+      });
+      expect(status0.status).toBe(1);
+      expect(status0.stderr).toMatch(/run `vtc init` there first/);
+      expect(
+        spawnSync(vtc, ["init"], { cwd: repo, env: { ...process.env, VTC_HOME: home } }).status,
+      ).toBe(0);
+      // set up now: the next call starts the daemon detached
+      send(a, {
+        jsonrpc: "2.0",
+        id: 4,
+        method: "tools/call",
+        params: { name: "status", arguments: {} },
+      });
+      expect(JSON.parse(await aOut.next(/"id":4\b/))).toMatchObject({
+        result: { isError: true, content: [{ text: expect.stringMatching(/no_run/) as string }] },
+      });
       const discovery = JSON.parse(readFileSync(join(home, engineDiscoveryFile(repo)), "utf8")) as {
         pid: number;
         contracts_version: string;
@@ -243,11 +275,11 @@ describe.skipIf(!HAS_BUN)(
       };
       send(a, {
         jsonrpc: "2.0",
-        id: 3,
+        id: 5,
         method: "tools/call",
         params: { name: "status", arguments: {} },
       });
-      const status = JSON.parse(await aOut.next(/"id":3/)) as {
+      const status = JSON.parse(await aOut.next(/"id":5\b/)) as {
         result: { structuredContent: { run: { id: string } } };
       };
       expect(status.result.structuredContent.run.id).toBe(started.result.structuredContent.run);
