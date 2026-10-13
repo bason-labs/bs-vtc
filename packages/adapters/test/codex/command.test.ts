@@ -128,6 +128,18 @@ describe("Codex sandboxProfile (§12.1, AD-9)", () => {
       expect(at(`${CWD}/.home/.vtc`, tools)).toThrow(/VTC home/);
       expect(at("/v", tools, "/v/hidden/T-1")).toThrow(/VTC home/);
       expect(at("/v", tools, "/v")).toThrow(/VTC home/);
+      // D-ap: everything under the VTC home that is later run or trusted with full privileges
+      for (const inside of [
+        "/v/scanners/osv",
+        "/v/claude-marketplace/plugins",
+        "/v/plugins/0.1.0",
+        "/v/engines",
+        "/v/run",
+        "/v/config.yaml",
+        "/v/token",
+      ]) {
+        expect(at("/v", tools, inside), inside).toThrow(/VTC home/);
+      }
       // a repo whose own .vtc is the VTC home (a dotfiles repo at ~) keeps its worktrees writable
       expect(at(VTC_HOME, tools, `${VTC_HOME}/state/worktrees/T-1`)).not.toThrow();
     }
@@ -276,6 +288,38 @@ describe("Codex headlessCommand", () => {
       expect(args).not.toContain("-m");
       expect(args.some((a) => a.startsWith("model="))).toBe(false);
       expect(args).toContain('model_reasoning_effort="medium"');
+    }
+  });
+
+  it("turns off `notify` for every role run, fresh or resumed, so no planted or user notify command runs outside the sandbox (D-ao)", () => {
+    const adapter = createCodexAdapter({ vtcHome: VTC_HOME });
+    for (const session of [undefined, { host: "codex" as const, id: "thr-1" }]) {
+      for (const tools of [READ_ONLY, WRITE_SCOPED, ENGINEER]) {
+        const args = adapter.headlessCommand(request({ sandbox: profile(tools) }), session).args;
+        const at = args.indexOf("notify=[]");
+        expect(at).toBeGreaterThan(0);
+        expect(args[at - 1]).toBe("--config");
+        // an option, never after the `--` that ends them
+        expect(at).toBeLessThan(args.indexOf("--"));
+      }
+    }
+  });
+
+  it("records what `codex exec --help` (0.162.1) offers no override for: project MCP servers (D-ao, spine §7)", () => {
+    // Gap: `-c` sets one dotted key and its help does not say whether a table value replaces or
+    // merges into the project layer, and no flag skips the project `.codex/config.toml`
+    // (`--ignore-user-config` covers only `$CODEX_HOME/config.toml`). A blanket
+    // `-c mcp_servers={}` would also drop the engine bridge `[mcp_servers.vtc]` that roles use
+    // for engine tools, if it replaced the table. So no MCP override is passed; the engine's
+    // pre-dispatch restore of `.codex/**` (spine §5 reading 72) keeps a planted server from
+    // reaching the next start, and the §7 spike row settles the override.
+    for (const session of [undefined, { host: "codex" as const, id: "thr-1" }]) {
+      const args = createCodexAdapter({ vtcHome: VTC_HOME }).headlessCommand(
+        request(),
+        session,
+      ).args;
+      expect(args.some((a) => a.startsWith("mcp_servers"))).toBe(false);
+      expect(args).not.toContain("--dangerously-bypass-hook-trust");
     }
   });
 

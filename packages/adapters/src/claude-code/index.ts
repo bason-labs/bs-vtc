@@ -37,8 +37,9 @@ export interface ClaudeCodeAdapterOptions {
   readonly spawner?: Spawner;
   readonly killGraceMs?: number;
   /**
-   * The absolute VTC home, whose install token no role may read. Default: `$VTC_HOME`, else
-   * `~/.vtc` (the cli's own rule); the cli passes the one it resolved.
+   * The absolute VTC home, whose `ROLE_DENIED_VTC` paths the profiles and the session sandbox
+   * written by `install` deny. Default: `$VTC_HOME`, else `~/.vtc` (the cli's own rule); the cli
+   * passes the one it resolved.
    */
   readonly vtcHome?: string;
   /** The absolute Codex home, which no role may read. Default: `$CODEX_HOME`, else `~/.codex`. */
@@ -84,7 +85,8 @@ export const createClaudeCodeAdapter = (options: ClaudeCodeAdapterOptions = {}):
   return {
     host: HOST,
     capabilities: claudeCodeCapabilities,
-    install: (request) => Promise.resolve().then(() => installClaudeCode(request)),
+    install: (request) =>
+      Promise.resolve().then(() => installClaudeCode(request, { vtcHome: profileOptions.vtcHome })),
     spawnRole: (request) => spawn(request),
     subagentName: claudeSubagentName,
     parseEvents: parseClaudeEvents,

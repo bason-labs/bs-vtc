@@ -10,6 +10,14 @@
  * 3. wires the statusline tee shim around the user's own statusline command, which keeps running
  *    unchanged (§6.9): `statusLine.command` is `statuslineTeeCommand(<user command>)` from
  *    `@vtc/shared` (spine §5 reading 61), the frozen line the cli's `vtc statusline-tee` reads.
+ * 4. turns on the Claude Code session sandbox for in-session roles (D-an, spine §5 reading 71): in
+ *    either scope, the project's personal `.claude/settings.local.json` gets
+ *    `claudeSessionSandboxSettings(vtcHome)` from `@vtc/shared`, merged into what is there (the
+ *    user's own keys and deny entries stay; `enabled` and `allowUnsandboxedCommands` are set).
+ *    The cli shows the user that block before it calls `install`, and the result's notes repeat
+ *    it. Only in a git checkout (a `.git` in the project root); elsewhere a note says how to turn
+ *    it on. The file to write is checked with `findForbiddenInText` first, and a hit refuses the
+ *    whole install before anything is written (AD-9).
  * Both scopes are accepted (the cli picks the default, `DEFAULT_INSTALL_SCOPE`, D-ah), and the
  * marketplace always lives under `InstallRequest.home` (spine §5 reading 60).
  * The exact marketplace form is provisional until the spike tries it on a real install (spine §7).
@@ -17,12 +25,14 @@
 import { existsSync, readdirSync } from "node:fs";
 import { join } from "node:path";
 import {
+  claudeSessionSandboxSettings,
+  findForbiddenInText,
   STATUSLINE_TEE,
   statuslineTeeCommand,
   type InstallRequest,
   type InstallResult,
 } from "@vtc/shared";
-import { readJsonSettings, replaceDirectory, writeJson } from "../common/files.js";
+import { readJsonSettings, replaceDirectory, writeFileAtomic, writeJson } from "../common/files.js";
 import { isRecord, text } from "../common/json.js";
 import { insidePlugin, readPluginManifest } from "../common/plugin.js";
 
@@ -71,16 +81,116 @@ const wiredStatusLine = (
   return { ...(isRecord(own) ? own : {}), type: "command", command };
 };
 
+/** The entries of `list` (when it is a list), then each of `add` not already in it. */
+const union = (list: unknown, add: readonly string[]): unknown[] => {
+  const kept: unknown[] = Array.isArray(list) ? list : [];
+  return [...kept, ...add.filter((entry) => !kept.includes(entry))];
+};
+
+/**
+ * `settings` with the session sandbox of {@link claudeSessionSandboxSettings} merged in: the
+ * sandbox is on with no unsandboxed escape, and every VTC deny entry is present after the user's
+ * own. Every other key, in `sandbox` and outside it, stays as it was.
+ */
+const withSessionSandbox = (
+  settings: Record<string, unknown>,
+  vtcHome: string,
+): Record<string, unknown> => {
+  const wanted = claudeSessionSandboxSettings(vtcHome).sandbox;
+  const sandbox = isRecord(settings.sandbox) ? settings.sandbox : {};
+  const filesystem = isRecord(sandbox.filesystem) ? sandbox.filesystem : {};
+  return {
+    ...settings,
+    sandbox: {
+      ...sandbox,
+      enabled: wanted.enabled,
+      allowUnsandboxedCommands: wanted.allowUnsandboxedCommands,
+      filesystem: {
+        ...filesystem,
+        denyRead: union(filesystem.denyRead, wanted.filesystem.denyRead),
+        denyWrite: union(filesystem.denyWrite, wanted.filesystem.denyWrite),
+      },
+    },
+  };
+};
+
+/** The text `writeJson` would write. */
+const jsonText = (value: unknown): string => `${JSON.stringify(value, null, 2)}\n`;
+
+/** Refuses settings text that carries a bypass flag or a credential marker (AD-9). */
+const refuseForbidden = (path: string, settingsText: string): void => {
+  const hits = findForbiddenInText(settingsText);
+  if (hits.length > 0) {
+    const found = hits.map((hit) => `line ${hit.line}: ${hit.marker}`).join(", ");
+    throw new Error(
+      `refusing to write ${path}: it would carry what VTC never writes into host settings (${found}); remove that from the file, then install again`,
+    );
+  }
+};
+
+export interface ClaudeInstallOptions {
+  /**
+   * The absolute VTC home the cli resolved (`$VTC_HOME` or `~/.vtc`), whose token and sockets
+   * the session sandbox read-denies and whose `homeWriteDeny` it write-denies (D-an).
+   */
+  readonly vtcHome: string;
+}
+
 /** Synchronous; the adapter wraps it so a failure is a rejected promise. */
-export const installClaudeCode = (request: InstallRequest): InstallResult => {
+export const installClaudeCode = (
+  request: InstallRequest,
+  options: ClaudeInstallOptions,
+): InstallResult => {
   const manifest = readPluginManifest(request.pluginDir, "claude-code");
   const pluginJsonPath = insidePlugin(request.pluginDir, CLAUDE_PLUGIN_MANIFEST);
   if (!existsSync(pluginJsonPath)) {
     throw new Error(`no ${CLAUDE_PLUGIN_MANIFEST} in ${request.pluginDir}`);
   }
   const pluginJson = readJsonSettings(pluginJsonPath);
-
   const marketplace = join(request.home, ".vtc", "claude-marketplace");
+
+  // every settings file is read and built first, so a refusal leaves everything as it was
+  const userSettingsPath = join(request.home, ".claude", "settings.json");
+  const localSettingsPath = join(request.projectRoot, ".claude", "settings.local.json");
+  const settingsPath = request.scope === "user" ? userSettingsPath : localSettingsPath;
+  const settings = readJsonSettings(settingsPath);
+  const fallbacks =
+    request.scope === "user"
+      ? []
+      : [
+          readJsonSettings(join(request.projectRoot, ".claude", "settings.json")),
+          readJsonSettings(userSettingsPath),
+        ];
+  const marketplaces = isRecord(settings.extraKnownMarketplaces)
+    ? settings.extraKnownMarketplaces
+    : {};
+  const enabled = isRecord(settings.enabledPlugins) ? settings.enabledPlugins : {};
+  const registered: Record<string, unknown> = {
+    ...settings,
+    extraKnownMarketplaces: {
+      ...marketplaces,
+      [CLAUDE_MARKETPLACE]: { source: { source: "directory", path: marketplace } },
+    },
+    enabledPlugins: { ...enabled, [`${manifest.plugin}@${CLAUDE_MARKETPLACE}`]: true },
+    statusLine: wiredStatusLine(settings, fallbacks),
+  };
+
+  // the session sandbox goes into the project's local file, in a git checkout only (D-an); Claude
+  // Code's sandbox (and the shared settings builder) takes POSIX paths only, so not on Windows
+  const posixHome = options.vtcHome.startsWith("/");
+  const gitCheckout = existsSync(join(request.projectRoot, ".git"));
+  const sandboxed = posixHome && gitCheckout;
+  const writes = new Map<string, Record<string, unknown>>([[settingsPath, registered]]);
+  if (sandboxed) {
+    const local = writes.get(localSettingsPath) ?? readJsonSettings(localSettingsPath);
+    writes.set(localSettingsPath, withSessionSandbox(local, options.vtcHome));
+  }
+  const texts = [...writes].map(([path, value]) => [path, jsonText(value)] as const);
+  if (sandboxed) {
+    const localText = texts.find(([path]) => path === localSettingsPath)?.[1] ?? "";
+    refuseForbidden(localSettingsPath, localText);
+  }
+
   const pluginTarget = join(marketplace, "plugins", manifest.plugin);
   replaceDirectory(request.pluginDir, pluginTarget);
   const index = join(marketplace, ".claude-plugin", "marketplace.json");
@@ -96,42 +206,20 @@ export const installClaudeCode = (request: InstallRequest): InstallResult => {
       },
     ],
   });
+  for (const [path, settingsText] of texts) writeFileAtomic(path, settingsText);
 
-  const userSettingsPath = join(request.home, ".claude", "settings.json");
-  const settingsPath =
-    request.scope === "user"
-      ? userSettingsPath
-      : join(request.projectRoot, ".claude", "settings.local.json");
-  const settings = readJsonSettings(settingsPath);
-  const fallbacks =
-    request.scope === "user"
-      ? []
-      : [
-          readJsonSettings(join(request.projectRoot, ".claude", "settings.json")),
-          readJsonSettings(userSettingsPath),
-        ];
-  const marketplaces = isRecord(settings.extraKnownMarketplaces)
-    ? settings.extraKnownMarketplaces
-    : {};
-  const enabled = isRecord(settings.enabledPlugins) ? settings.enabledPlugins : {};
-  writeJson(settingsPath, {
-    ...settings,
-    extraKnownMarketplaces: {
-      ...marketplaces,
-      [CLAUDE_MARKETPLACE]: { source: { source: "directory", path: marketplace } },
-    },
-    enabledPlugins: { ...enabled, [`${manifest.plugin}@${CLAUDE_MARKETPLACE}`]: true },
-    statusLine: wiredStatusLine(settings, fallbacks),
-  });
-
+  const local = sandboxed || request.scope === "project";
   return {
-    written: [...filesUnder(pluginTarget), index, settingsPath],
+    written: [...filesUnder(pluginTarget), index, ...texts.map(([path]) => path)],
     notes: [
       `Restart Claude Code, then confirm the ${manifest.plugin} plugin from the ${CLAUDE_MARKETPLACE} marketplace if /plugin asks.`,
       "Your statusline now runs through `vtc statusline-tee`, which shows it unchanged and forwards only the usage windows to the local engine.",
-      ...(request.scope === "project"
-        ? [`Keep ${settingsPath} out of git: it names paths on this machine.`]
-        : []),
+      sandboxed
+        ? `Turned on the Claude Code session sandbox for roles that run in this project's sessions, in ${localSettingsPath}: ${JSON.stringify(claudeSessionSandboxSettings(options.vtcHome))}`
+        : !posixHome
+          ? "No session sandbox written: Claude Code has no session sandbox on this platform, so the engine will not run code-running roles inside your Claude Code session."
+          : `No session sandbox written: ${request.projectRoot} is not a git checkout. Run vtc install --host claude-code in the repo, or the engine will not run code-running roles inside your Claude Code session.`,
+      ...(local ? [`Keep ${localSettingsPath} out of git: it names paths on this machine.`] : []),
     ],
   };
 };
