@@ -19,6 +19,7 @@ import {
 import {
   acquireEngineLock,
   EngineLockedError,
+  LOCK_PROBE_DELAYS_MS,
   LOCK_STARTUP_GRACE_MS,
   openEventLog,
   takeEngineLock,
@@ -84,16 +85,24 @@ describe("engine lock (AD-12: one engine per repo)", () => {
     acquireEngineLock(repo, { socket: "/tmp/gone.sock", now: () => old });
     const asked: string[] = [];
     const stale: [number | null, string][] = [];
+    const waits: number[] = [];
     const lock = await takeEngineLock(repo, {
       socket: "/tmp/mine.sock",
       now: () => NOW,
+      sleep: (ms) => {
+        waits.push(ms);
+        return Promise.resolve();
+      },
       holderAnswers: (socket) => {
         asked.push(socket);
         return Promise.resolve(false);
       },
       onStaleLock: (pid, reason) => stale.push([pid, reason]),
     });
-    expect(asked).toEqual(["/tmp/gone.sock"]);
+    // asked several times, with backoff, before a live pid's lock counts as stale
+    expect(asked).toEqual(["/tmp/gone.sock", "/tmp/gone.sock", "/tmp/gone.sock"]);
+    expect(waits).toEqual([...LOCK_PROBE_DELAYS_MS]);
+    expect(waits.reduce((a, b) => a + b, 0)).toBeGreaterThanOrEqual(3_000);
     expect(stale).toEqual([[process.pid, "silent"]]);
     expect(lock.isHeld()).toBe(true);
     expect(JSON.parse(readFileSync(lock.path, "utf8"))).toMatchObject({ socket: "/tmp/mine.sock" });
@@ -134,13 +143,61 @@ describe("engine lock (AD-12: one engine per repo)", () => {
     const lock = await takeEngineLock(repo, {
       socket: "/tmp/repo.sock",
       now: () => NOW,
+      sleep: () => Promise.resolve(),
       holderAnswers: (socket) => {
         asked.push(socket);
         return Promise.resolve(false);
       },
     });
-    expect(asked).toEqual(["/tmp/repo.sock"]);
+    expect(asked).toEqual(["/tmp/repo.sock", "/tmp/repo.sock", "/tmp/repo.sock"]);
     lock.release();
+  });
+  it("keeps a lock whose holder answers late, on a later probe", async () => {
+    const repo = tempDir();
+    const old = new Date(NOW.getTime() - LOCK_STARTUP_GRACE_MS - 1);
+    const held = acquireEngineLock(repo, { socket: "/tmp/busy.sock", now: () => old });
+    let probes = 0;
+    const stale: (number | null)[] = [];
+    await expect(
+      takeEngineLock(repo, {
+        now: () => NOW,
+        sleep: () => Promise.resolve(),
+        // a briefly blocked event loop: silent at first, then it answers
+        holderAnswers: () => Promise.resolve((probes += 1) >= 2),
+        onStaleLock: (pid) => stale.push(pid),
+      }),
+    ).rejects.toThrow(EngineLockedError);
+    expect(probes).toBe(2);
+    expect(stale).toEqual([]);
+    expect(held.isHeld()).toBe(true);
+    held.release();
+  });
+  it("stops probing when the lock changes hands between probes", async () => {
+    const repo = tempDir();
+    const old = new Date(NOW.getTime() - LOCK_STARTUP_GRACE_MS - 1);
+    const first = acquireEngineLock(repo, { socket: "/tmp/old.sock", now: () => old });
+    let probes = 0;
+    let next: ReturnType<typeof acquireEngineLock> | undefined;
+    await expect(
+      takeEngineLock(repo, {
+        now: () => NOW,
+        sleep: () => {
+          // another engine took over meanwhile (the old holder released)
+          if (next === undefined) {
+            first.release();
+            next = acquireEngineLock(repo, { socket: "/tmp/new.sock", now: () => NOW });
+          }
+          return Promise.resolve();
+        },
+        holderAnswers: () => {
+          probes += 1;
+          return Promise.resolve(false);
+        },
+      }),
+    ).rejects.toThrow(EngineLockedError);
+    expect(probes).toBe(1);
+    expect(next?.isHeld()).toBe(true);
+    next?.release();
   });
   it("keeps the lock under .vtc/state/", () => {
     const repo = tempDir();

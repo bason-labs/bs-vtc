@@ -6,6 +6,7 @@
 export {
   acquireEngineLock,
   EngineLockedError,
+  LOCK_PROBE_DELAYS_MS,
   LOCK_STARTUP_GRACE_MS,
   readLockHolder,
   takeEngineLock,
@@ -93,6 +94,7 @@ export {
   splitWriteScope,
   taskPackJsonPath,
   type DispatchWriteScope,
+  type ScopeOwner,
 } from "./dispatch-scope.js";
 export { roleSandboxProblem, roleSandboxRequest } from "./sandbox.js";
 export { finalReviewScopeNote, finalReviewStepsRun } from "./projections.js";

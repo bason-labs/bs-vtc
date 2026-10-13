@@ -8,7 +8,7 @@
  * network (reading 49).
  */
 import { createHash } from "node:crypto";
-import { readFileSync } from "node:fs";
+import { readFileSync, rmSync } from "node:fs";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import {
@@ -39,6 +39,7 @@ import {
   SPEC_ONE,
   submitResult,
   throughPlan,
+  spawns,
   toPlanner,
   toolFinding,
   verdictPass,
@@ -122,7 +123,7 @@ describe("Codex runs on the session's model (D-ae, spine §5 reading 51)", () =>
     expect(h.engine.status({}).run.id).toBeTruthy();
     await h.release();
   });
-  it("leaves the run unpriced unless the host reports a model", async () => {
+  it("keeps the cost the host reports though it names no model", async () => {
     const h = createHarness();
     await start(h, CODEX);
     const carto = only(await next(h, CODEX), "repo_cartographer");
@@ -143,7 +144,8 @@ describe("Codex runs on the session's model (D-ae, spine §5 reading 51)", () =>
     );
     expect(out.accepted).toBe(true);
     const submitted = events(h).find((e) => e.type === "role.submitted");
-    expect(submitted).toMatchObject({ model: SESSION_DEFAULT_MODEL, cost_usd: null });
+    // a host-computed cost does not depend on VTC knowing the model id (§11 caps count it)
+    expect(submitted).toMatchObject({ model: SESSION_DEFAULT_MODEL, cost_usd: 0.4 });
     await h.release();
   });
 });
@@ -245,16 +247,27 @@ describe("gate requests carry the run's committed gates.yml (reading 46b, c, e, 
     expect(core.finalReviewScopeNote([1, 2, 6])).toContain("3, 4, 5, 7 did not run");
     await h.release();
   });
-  it("parks the task (gate_infra) when its baseline has no committed gates.yml", async () => {
+  it("parks a task of a run that started with no committed gates.yml before its worktree, and never adopts one later", async () => {
     const h = createHarness({ gatesYml: null });
-    // present in the working tree, but never committed
+    // present in the working tree, but not committed when the run starts
     writeFile(h.repo, ".vtc/gates.yml", JSON.stringify(DEFAULT_GATES_YML));
-    const actions = await throughPlan(h, [draft("T-1")], SPEC_ONE);
-    await authorTests(h, only(actions, "qa"));
+    const planner = await toPlanner(h, SPEC_ONE);
+    // committed mid-run: the task's base would have it, but the run never takes it (reading 20)
+    git(h.repo, "add", ".vtc/gates.yml");
+    git(h.repo, "commit", "--quiet", "-m", "calibrate");
+    const planned = await submitResult(h, planner, {
+      exit: "done",
+      tasks: [draft("T-1")] as never,
+    });
+    expect(planned.accepted).toBe(true);
     await h.engine.settle();
     const parked = h.engine.status({}).parked.find((p) => p.task === "T-1");
     expect(parked).toMatchObject({ reason: "gate_infra" });
-    expect(escalations(h)).toContain("no committed .vtc/gates.yml");
+    expect(escalations(h)).toContain("started on a commit with no committed .vtc/gates.yml");
+    expect(escalations(h)).toContain("start a new run");
+    // parked before any worktree or QA dispatch: nothing is spent on a task that cannot verify
+    expect(h.engine.states().at(-1)?.tasks.get("T-1")?.worktree).toBeUndefined();
+    expect(spawns(await next(h)).map((a) => a.role)).not.toContain("qa");
     expect(h.gates.requests).toEqual([]);
     await h.release();
   });
@@ -282,6 +295,83 @@ describe("gate requests carry the run's committed gates.yml (reading 46b, c, e, 
     expect(parked).toMatchObject({ reason: "gate_infra" });
     expect(escalations(h)).toContain("not the one this run started with");
     expect(h.gates.requests).toEqual([]);
+    await h.release();
+  });
+});
+
+/** The run's kept frozen config (`.vtc/state/runs/<run>/config.json`), as an older engine wrote it. */
+const keptConfig = (h: Harness): string =>
+  join(h.repo, `.vtc/state/runs/${h.engine.status({}).run.id}/config.json`);
+const reopen = async (h: Harness): Promise<void> => {
+  await h.engine.settle();
+  Object.assign(h, { engine: h.reopen() });
+};
+
+describe("a restarted engine checks the committed gates.yml of the run's start (reading 46f)", () => {
+  const recalibrate = (h: Harness): void => {
+    writeFile(
+      h.repo,
+      ".vtc/gates.yml",
+      JSON.stringify({
+        ...DEFAULT_GATES_YML,
+        gates: [{ id: "x", layer: "L0", command: ["true"] }],
+      }),
+    );
+    git(h.repo, "commit", "--quiet", "-am", "recalibrate");
+  };
+  /** Plans T-1 and lets its worktree be made; no dispatch is in flight afterwards. */
+  const plan = async (h: Harness, planner: SpawnAction): Promise<void> => {
+    const planned = await submitResult(h, planner, {
+      exit: "done",
+      tasks: [draft("T-1")] as never,
+    });
+    expect(planned.accepted).toBe(true);
+    await h.engine.settle();
+  };
+  /** What an older engine kept: the frozen config with no `gates_sha256`. */
+  const keepWithoutSha = (h: Harness): void => {
+    const kept = JSON.parse(readFileSync(keptConfig(h), "utf8")) as Record<string, unknown>;
+    expect(kept.gates_sha256).toMatch(/^[a-f0-9]{64}$/);
+    delete kept.gates_sha256;
+    writeFile(h.repo, keptConfig(h).slice(h.repo.length + 1), JSON.stringify(kept));
+  };
+  it("a kept copy with no gates_sha256 still verifies with the run's file", async () => {
+    const h = createHarness();
+    const started = sha256(`${committedGates(h)}\n`);
+    await plan(h, await toPlanner(h, SPEC_ONE));
+    keepWithoutSha(h);
+    await reopen(h);
+    await authorTests(h, only(await next(h), "qa"));
+    expect(h.engine.status({}).parked).toEqual([]);
+    expect(h.gates.requests.map((r) => r.gates_config_hash)).toEqual([started]);
+    await h.release();
+  });
+  it("a kept copy with no gates_sha256 never adopts a recalibrated base's gates.yml", async () => {
+    const h = createHarness();
+    const planner = await toPlanner(h, SPEC_ONE);
+    recalibrate(h); // before T-1's worktree: its base has the new file
+    await plan(h, planner);
+    keepWithoutSha(h);
+    await reopen(h);
+    await authorTests(h, only(await next(h), "qa"));
+    expect(h.engine.status({}).parked.find((p) => p.task === "T-1")).toMatchObject({
+      reason: "gate_infra",
+    });
+    expect(escalations(h)).toContain("not the one this run started with");
+    expect(h.gates.requests).toEqual([]);
+    await h.release();
+  });
+  it("with no kept copy, the working tree's bytes never stand in for the committed file's hash", async () => {
+    const h = createHarness();
+    const started = sha256(`${committedGates(h)}\n`);
+    await plan(h, await toPlanner(h, SPEC_ONE));
+    // the same config in other bytes, uncommitted: the run's config is unchanged
+    writeFile(h.repo, ".vtc/gates.yml", JSON.stringify(DEFAULT_GATES_YML));
+    rmSync(keptConfig(h));
+    await reopen(h);
+    await authorTests(h, only(await next(h), "qa"));
+    expect(h.engine.status({}).parked).toEqual([]);
+    expect(h.gates.requests.map((r) => r.gates_config_hash)).toEqual([started]);
     await h.release();
   });
 });
@@ -354,6 +444,88 @@ describe("the per-dispatch write scope for vtc hook (reading 67, reading 65)", (
     expect(core.dispatchWriteScope(h.repo, state, run)).toBeNull();
     writeFile(h.repo, core.taskPackJsonPath(carto.action_id), "{");
     expect(core.dispatchWriteScope(h.repo, state, run)).toBeNull();
+    await h.release();
+  });
+  it("gives an Engineer no main-checkout entries, whatever its files_scope names under .vtc/state/", async () => {
+    const h = createHarness();
+    const engineer = await toEngineer(h);
+    const path = core.taskPackJsonPath(engineer.action_id);
+    const pack = JSON.parse(readFileSync(join(h.repo, path), "utf8")) as Record<string, unknown>;
+    writeFile(
+      h.repo,
+      path,
+      JSON.stringify({
+        ...pack,
+        files_scope: [
+          "src/t-1/**",
+          ".vtc/state/**",
+          ".vtc/state/engine.lock",
+          ".vtc/state/checkouts/**",
+          `${HIDDEN_TESTS.stagingDir}/**`,
+          `${HIDDEN_TESTS.stagingDir}/T-1/**`,
+        ],
+      }),
+    );
+    const state = h.engine.states().at(-1);
+    const run = state?.roleRuns.get(engineer.action_id);
+    if (state === undefined || run === undefined) throw new Error("no Engineer run");
+    expect(core.dispatchWriteScope(h.repo, state, run)).toEqual({
+      action_id: engineer.action_id,
+      worktree: ".vtc/state/worktrees/T-1",
+      worktree_globs: ["src/t-1/**"],
+      checkout_globs: [],
+    });
+    await h.release();
+  });
+  it("splits a scope: only QA author mode's own staging entry is a main-checkout entry", () => {
+    const staging = (task: string) => `${HIDDEN_TESTS.stagingDir}/${task}/**`;
+    const scope = ["tests/acceptance/**", staging("T-1"), staging("T-2"), ".vtc/state/**"];
+    expect(core.splitWriteScope(scope, { role: "qa", mode: "author", task: "T-1" })).toEqual({
+      worktree: ["tests/acceptance/**"],
+      checkout: [staging("T-1")],
+    });
+    expect(core.splitWriteScope(scope, { role: "qa", mode: "review", task: "T-1" })).toEqual({
+      worktree: ["tests/acceptance/**"],
+      checkout: [],
+    });
+    expect(core.splitWriteScope(scope, { role: "engineer", task: "T-1" })).toEqual({
+      worktree: ["tests/acceptance/**"],
+      checkout: [],
+    });
+    expect(
+      core.isCheckoutScopeEntry(staging("T-1"), { role: "qa", mode: "author", task: "T-1" }),
+    ).toBe(true);
+    expect(core.isCheckoutScopeEntry(staging("T-1"), { role: "qa", mode: "author" })).toBe(false);
+  });
+  it("rejects a plan whose files_scope names a .vtc/ path", async () => {
+    const h = createHarness();
+    const planner = await toPlanner(h, SPEC_ONE);
+    const planned = await submitResult(h, planner, {
+      exit: "done",
+      tasks: [draft("T-1", { files_scope: ["src/t-1/**", ".vtc/state/**"] })] as never,
+    });
+    expect(planned.accepted).toBe(false);
+    expect(JSON.stringify(planned.rejection)).toContain(
+      "T-1 files_scope names .vtc/state/**, which the engine owns",
+    );
+    await h.release();
+  });
+  it("refuses an out-of-scope fault under .vtc/, so no task is made to write there", async () => {
+    const h = createHarness({ files: { ".vtc/notes.md": "x\n" } });
+    const engineer = await toEngineer(h);
+    h.gates.queue("fault_repro", "fail");
+    const claim = await submitResult(h, engineer, {
+      exit: "out_of_scope_fault",
+      fault: {
+        path: ".vtc/notes.md",
+        line: 1,
+        evidence: { type: "file_line", ref: ".vtc/notes.md:1" },
+        detail: "the notes are wrong",
+      },
+    });
+    expect(claim.accepted).toBe(false);
+    expect(JSON.stringify(claim)).toContain(".vtc/notes.md is under .vtc/");
+    expect([...(h.engine.states().at(-1)?.tasks.keys() ?? [])]).toEqual(["T-1"]);
     await h.release();
   });
   it("exports the engine's glob dialect", () => {

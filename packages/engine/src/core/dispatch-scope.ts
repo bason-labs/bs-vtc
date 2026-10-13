@@ -8,7 +8,13 @@
  */
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
-import { parsePersisted, taskPackPath, TaskPackSchema, type TaskPack } from "@vtc/shared";
+import {
+  HIDDEN_TESTS,
+  parsePersisted,
+  taskPackPath,
+  TaskPackSchema,
+  type TaskPack,
+} from "@vtc/shared";
 import { WORKTREES_DIR } from "../git/index.js";
 import { roleWorktreeId } from "./role-worktree.js";
 import type { RoleRunRecord, RunState } from "./state.js";
@@ -28,23 +34,42 @@ export interface DispatchWriteScope {
   /** Globs the role may write, relative to its worktree root. */
   readonly worktree_globs: readonly string[];
   /**
-   * Globs the role writes in the main checkout, relative to the repo root: entries under the
-   * git-ignored `.vtc/state/` outside the worktrees, i.e. QA author mode's
-   * `HIDDEN_TESTS.stagingDir/<task>/**` (reading 65).
+   * Globs the role writes in the main checkout, relative to the repo root: only QA author mode's
+   * own `HIDDEN_TESTS.stagingDir/<task>/**` (readings 53 and 65), never another entry.
    */
   readonly checkout_globs: readonly string[];
 }
 
-/** True for a scope entry written in the main checkout rather than in the role's worktree. */
-export const isCheckoutScopeEntry = (glob: string): boolean =>
-  glob.startsWith(".vtc/state/") && !glob.startsWith(`${WORKTREES_DIR}/`);
+/** Who a scope belongs to: the dispatch's role, mode and task. */
+export type ScopeOwner = Pick<RoleRunRecord, "role" | "mode" | "task">;
 
-/** Splits a pack's `files_scope` into worktree globs and main-checkout entries. */
+/**
+ * True for the one scope entry a role writes in the main checkout rather than in its worktree:
+ * QA author mode's staging entry for its own task, `HIDDEN_TESTS.stagingDir/<task>/**` (readings
+ * 53 and 65). Any other entry under the engine's `.vtc/state/` (the lock, the index, the clean
+ * checkouts, another task's staging) is neither: a Planner-authored `files_scope` never reaches
+ * the engine's files.
+ */
+export const isCheckoutScopeEntry = (glob: string, owner: ScopeOwner): boolean =>
+  owner.role === "qa" &&
+  owner.mode === "author" &&
+  owner.task !== undefined &&
+  glob === `${HIDDEN_TESTS.stagingDir}/${owner.task}/**`;
+
+/** True for an entry under the engine's state directory (never a role's to write). */
+const isEngineStateEntry = (glob: string): boolean =>
+  glob === ".vtc/state" || glob.startsWith(".vtc/state/");
+
+/**
+ * Splits a pack's `files_scope` into worktree globs and main-checkout entries
+ * ({@link isCheckoutScopeEntry}); every other `.vtc/state/` entry goes in neither list.
+ */
 export const splitWriteScope = (
   filesScope: readonly string[],
+  owner: ScopeOwner,
 ): { worktree: string[]; checkout: string[] } => ({
-  worktree: filesScope.filter((g) => !isCheckoutScopeEntry(g)),
-  checkout: filesScope.filter(isCheckoutScopeEntry),
+  worktree: filesScope.filter((g) => !isEngineStateEntry(g)),
+  checkout: filesScope.filter((g) => isCheckoutScopeEntry(g, owner)),
 });
 
 /** The worktree a role run works in (see {@link DispatchWriteScope.worktree}). */
@@ -91,7 +116,7 @@ export const dispatchWriteScope = (
 ): DispatchWriteScope | null => {
   const pack = readDispatchPack(repoRoot, run, roleRun);
   if (pack === null) return null;
-  const split = splitWriteScope(pack.files_scope);
+  const split = splitWriteScope(pack.files_scope, roleRun);
   return {
     action_id: roleRun.action_id,
     worktree: dispatchWorktree(run, roleRun),

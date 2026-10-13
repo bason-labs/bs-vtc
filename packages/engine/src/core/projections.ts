@@ -195,10 +195,6 @@ const countFindings = (findings: readonly Finding[]): EvidenceBundle["findings"]
   discarded: findings.filter((f) => f.status === "discarded").length,
 });
 
-/**
- * The traceability report the Gate Runner wrote for `id`, or, when it wrote none, an honest one
- * built from the covered requirements with no tests (every REQ is then a gap).
- */
 /** A traceability report the Gate Runner wrote, or `null` when it is missing or invalid. */
 const readTraceabilityFile = (repoRoot: string, path: string): TraceabilityReport | null => {
   try {
@@ -212,6 +208,10 @@ const readTraceabilityFile = (repoRoot: string, path: string): TraceabilityRepor
   }
 };
 
+/**
+ * The traceability report the Gate Runner wrote for `id`, or, when it wrote none, an honest one
+ * built from the covered requirements with no tests (every REQ is then a gap).
+ */
 export const readTraceability = (
   repoRoot: string,
   state: RunState,
