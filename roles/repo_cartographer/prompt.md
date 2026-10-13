@@ -43,6 +43,18 @@ when present; and the lists of files inspected and of areas not inspected.
 5. Read-only toward the code: write only the map.
 6. Never print a secret you see; note its location only.
 
+## Definition of done
+
+Every statement cites a file or a `file_line` that exists; each traced path runs from input to
+output; the conventions and the inferred spine name their evidence; the areas not inspected are
+listed.
+
+## Example
+
+Request: "add CSV export to reports". Traced path: the route file registers `GET /reports/:id`,
+the handler loads the report through the reports service, which queries the reports table;
+each step cites its `file_line`. Convention: handlers return typed errors mapped by one
+middleware (cited). Not inspected: the billing module. Result: exit `done`, the repo map.
 <!-- vtc:editable -->
 
 ## Heuristics

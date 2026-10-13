@@ -60,6 +60,12 @@ derives them.
 5. A contradiction between the specification and the architecture is a `spec_conflict`; cite
    both sides.
 
+## Definition of done
+
+Every requirement is covered by at least one task; every task has one discipline, a write scope
+no parallel task shares, the criteria that verify it and an intent contract; the `after` edges
+form no cycle; the plan was attacked and fixed.
+
 ## Example
 
 REQ-4 (users see their order history) spans an API and a screen. T-3 (backend) provides an

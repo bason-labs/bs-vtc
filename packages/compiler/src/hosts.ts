@@ -59,8 +59,11 @@ export const codexSandboxFor = (tools: RoleTools): "read-only" | "workspace-writ
  * session, and it serves the Lead's run-driving tools; a role agent must not reach them (AD-8
  * rule 3: not a prompt rule). A role with no engine tools gets the server disabled, otherwise only
  * its tools enabled. The entry repeats the full `engineMcpServer("codex")` command so it is valid
- * whether Codex merges or replaces the session's entry. Provisional until the spike confirms that
- * Codex agent files honour per-agent `mcp_servers` (spine §7).
+ * whether Codex merges or replaces the session's entry. Unverified: spine §7 does not yet list
+ * the check that spawned Codex agents honour a per-agent `mcp_servers` table with `enabled` and
+ * `enabled_tools`. That spike item, and an engine-side guard so that a role agent's session cannot
+ * approve a gate or answer an escalation, are proposed to the integrator; until both land this
+ * table is the only barrier on Codex.
  */
 export const codexMcpTable = (tools: RoleTools): string[] => {
   const entry = engineMcpServer("codex");
@@ -76,7 +79,9 @@ export const codexMcpTable = (tools: RoleTools): string[] => {
 
 /**
  * A Codex agent file. The model is pinned only when role.yaml names one for Codex; otherwise the
- * agent runs on the session's model at the role's reasoning effort.
+ * agent runs on the session's model at the role's reasoning effort, so on Codex the tier (§5.2
+ * footnote, §12.3) maps to an effort, not to a model. A provisional reading recorded in
+ * plugins/README.md until the spike names the Codex models per tier.
  */
 export const renderCodexAgent = (agent: CompiledAgent): string =>
   [

@@ -9,10 +9,9 @@ import {
   type HostId,
 } from "@vtc/shared";
 import {
-  assetEntries,
   checkEmitted,
   compilePlugins,
-  createMemoryAssetBundle,
+  EXIT_MEANINGS,
   type CompileOutput,
   type EmittedFile,
   type PluginManifest,
@@ -129,6 +128,10 @@ describe("compilePlugins: agent instructions", () => {
 
   it("renders the effective contract of each mode", () => {
     expect(claude("vtc-qa-author")).toContain("- Exits: done, blocked, spec_conflict");
+    expect(claude("vtc-qa-author")).toContain(
+      `  - \`spec_conflict\`: ${EXIT_MEANINGS.spec_conflict}`,
+    );
+    expect(claude("vtc-qa-judge")).not.toContain("  - `spec_conflict`:");
     expect(claude("vtc-qa-author")).toContain("- Output artifact types: acceptance_test");
     expect(claude("vtc-qa-judge")).toContain("- Verdicts: pass, fail, unknown");
     expect(claude("vtc-qa-judge")).toContain("- Tools: read-only");
@@ -385,17 +388,20 @@ describe("checkEmitted: the gate on emitted trees (AD-16 rule 2)", () => {
     ]);
     expect(checkEmitted("claude-code", compileOk().targets["claude-code"])).toEqual([]);
   });
-});
 
-describe("asset bundle entries (AD-16 rule 2, AD-20)", () => {
-  it("exposes each target as the plugin:<host> namespace", () => {
-    const output = compileOk();
-    const bundle = createMemoryAssetBundle(assetEntries(output));
-    expect(bundle.list("plugin:codex")).toEqual(output.targets.codex.map((f) => f.path));
-    expect(bundle.list("dashboard")).toEqual([]);
-    const bytes = bundle.read("plugin:claude-code", ".mcp.json");
-    expect(bytes).toBeInstanceOf(Uint8Array);
-    expect(new TextDecoder().decode(bytes)).toBe(file(output, "claude-code", ".mcp.json"));
-    expect(bundle.read("plugin:claude-code", "missing")).toBeUndefined();
+  it("rejects two emitted paths that differ only in case", () => {
+    const result = compilePlugins(
+      fixtureFiles({
+        "skills/stack-react-next/references/Notes.md": "upper\n",
+        "skills/stack-react-next/references/notes.md": "lower\n",
+      }),
+    );
+    expect(result.ok).toBe(false);
+    const messages = result.ok ? [] : result.errors.map((e) => `${e.path}: ${e.message}`);
+    for (const host of ["claude-code", "codex"]) {
+      expect(messages).toContain(
+        `${host}:skills/stack-react-next/references/notes.md: differs from skills/stack-react-next/references/Notes.md only in case; a case-insensitive file system keeps one`,
+      );
+    }
   });
 });

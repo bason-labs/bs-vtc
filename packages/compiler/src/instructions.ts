@@ -30,6 +30,7 @@ import {
   type EffectiveRoleContract,
   type HostId,
   type RoleContract,
+  type RoleExit,
 } from "@vtc/shared";
 import { renderTemplate, selectMode } from "./role-source.js";
 import type { LoadedRole } from "./role-source.js";
@@ -63,6 +64,22 @@ const TOOL_LINES: Readonly<Record<EffectiveRoleContract["tools"]["profile"], str
     "files and shell in a sandboxed worktree; write only inside the Write scope of your task pack",
 };
 
+/**
+ * When to use each exit (§5.1: the prompt's exits). The contract lists only the role's own exits,
+ * each with its meaning, so every agent knows when to take each one.
+ */
+export const EXIT_MEANINGS: Readonly<Record<RoleExit, string>> = {
+  built:
+    "the change is complete: the acceptance tests and gate commands pass and every finding to address is resolved",
+  done: "the work this contract asks for is complete and in your result",
+  spec_conflict: "two frozen inputs cannot both hold; cite both sides in `conflict`",
+  blocked:
+    "one human decision is needed before useful work can go on; ask it as `question` with options",
+  out_of_scope_fault:
+    "a failure comes from code outside your write scope and also occurs without your change; cite it in `fault`",
+  unknown: "your inputs cannot answer the question; say in `summary` what would",
+};
+
 /** Who reads the result, and where the inputs come from: the engine for run roles, the human for advisors. */
 const CONTRACT_INTRO: Readonly<Record<"run" | "advisor", { checked: string; inputs: string }>> = {
   run: {
@@ -88,6 +105,7 @@ export const renderContract = (role: RoleContract, contract: EffectiveRoleContra
     `- Role: ${role.id}${contract.mode === undefined ? "" : `, mode ${contract.mode}`} (version ${role.version})`,
     `- Inputs (${intro.inputs}): ${list(contract.inputs)}`,
     `- Exits: ${list(contract.exits)}`,
+    ...contract.exits.map((exit) => `  - \`${exit}\`: ${EXIT_MEANINGS[exit]}`),
     `- Verdicts: ${list(contract.output.verdicts)}`,
     `- Output artifact types: ${list(contract.output.artifacts)}`,
     `- Tools: ${TOOL_LINES[contract.tools.profile]}`,
