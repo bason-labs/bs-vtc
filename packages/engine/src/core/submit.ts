@@ -34,6 +34,7 @@ import { matchesAny } from "./globs.js";
 import {
   adoptGateOutput,
   baselineGates,
+  emitGateResult,
   protectedFiles,
   startBaseCheck,
   startRoundGates,
@@ -124,8 +125,10 @@ const bytesSha = (bytes: Uint8Array): string => createHash("sha256").update(byte
 
 /**
  * Records the spend of a run (§11): task, feature and run budgets. The cost is the one the host
- * reported, kept also when it names no model (a run on the session's model, D-ae): the host
- * computed it, so it does not depend on VTC knowing the model id. Unpriced spend stays unknown.
+ * reported, kept also when it names no model or one VTC has no price for (a run on the session's
+ * model, D-ae; D-at, spine §5 reading 77): the host computed it, so it does not depend on VTC
+ * knowing the model id, and being conservative about budget beats being precise about price.
+ * Only a run with no reported cost (`null`) counts 0, and it is flagged unpriced.
  */
 const recordSpend = (k: Kernel, h: RunHandle, run: RoleRunRecord, cost: number | null): void => {
   if (cost === null || cost === 0) return;
@@ -702,7 +705,7 @@ const outOfScopeGuards = async (
       include_hidden: false,
     });
     adoptGateOutput(k, report);
-    k.emit(h, { type: "gate.result", actor: "engine", task: task.id, data: report });
+    emitGateResult(k, h, report);
     if (report.verdict === "infra_error")
       return ["the fault could not be reproduced: the gates failed to run (out_of_scope claim)"];
     return report.verdict === "fail"
@@ -996,11 +999,15 @@ const handleFailure = (
     recordSpend(k, h, run, outcome.cost_usd ?? null);
     return;
   }
+  // D-at (spine §5 reading 77): what the host reports a failed run cost counts too, whatever
+  // the model; on the event, so the run's and the advisor budget's spend include it
+  const cost = outcome.kind === "auth" ? null : outcome.cost_usd;
   k.emit(h, {
     type: "role.failed",
     actor: "engine",
     role: run.role,
     ...(run.task === undefined ? {} : { task: run.task }),
+    ...(cost === null ? {} : { cost_usd: cost }),
     data: {
       action_id: run.action_id,
       kind: outcome.kind,
@@ -1008,6 +1015,7 @@ const handleFailure = (
       retryable: outcome.kind === "error" ? outcome.retryable : false,
     },
   });
+  recordSpend(k, h, run, cost);
   if (outcome.kind === "auth") {
     // The user must sign in again; VTC never touches credentials (AD-9).
     k.emit(h, {
@@ -1017,7 +1025,6 @@ const handleFailure = (
     });
     return;
   }
-  recordSpend(k, h, run, outcome.cost_usd ?? null);
   stepFailed(k, h, run);
 };
 

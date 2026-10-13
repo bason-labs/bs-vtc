@@ -5,7 +5,14 @@
  * connection is closed. After that the connection is plain MCP, served by the official SDK's
  * server over {@link LineTransport}; each connection is its own MCP session (`CallContext.session`).
  * Never exposed over HTTP.
+ *
+ * Human channel (D-an, spine §5 reading 71): a cli hello may carry the install token, which the
+ * cli sends only for a human-only tool after a TTY confirmation. It is compared in constant time
+ * with the daemon's; a mismatch refuses the connection, a match marks every call of the
+ * connection `CallContext.human`. A bridge's `session_sandbox` report is passed on per call
+ * (`CallContext.sessionSandbox`) for the engine to keep as its run's Lead session's.
  */
+import { createHash, timingSafeEqual } from "node:crypto";
 import { chmodSync, existsSync, mkdirSync, unlinkSync } from "node:fs";
 import { createServer, type Server, type Socket } from "node:net";
 import { dirname } from "node:path";
@@ -41,9 +48,18 @@ export interface EngineSocketOptions {
   readonly path: string;
   readonly host: ToolHost;
   readonly versions: EngineVersions;
+  /** The per-install token (`EngineDeps.installToken`) a cli hello's `install_token` must match. */
+  readonly installToken: string;
   /** Called whenever a connection opens or closes (the daemon's idle timer). */
   readonly onActivity?: () => void;
 }
+
+/** Constant-time equality of two secrets of any length (digests are compared, not the bytes). */
+const sameSecret = (a: string, b: string): boolean =>
+  timingSafeEqual(
+    createHash("sha256").update(a, "utf8").digest(),
+    createHash("sha256").update(b, "utf8").digest(),
+  );
 
 const welcome = (versions: EngineVersions, error?: string): EngineSocketWelcome => ({
   v: 1,
@@ -109,12 +125,25 @@ export const serveEngineSocket = async (
           );
           return;
         }
+        const token = parsed.data.install_token;
+        if (token !== undefined && !sameSecret(token, options.installToken)) {
+          refuse("the install token does not match this engine's");
+          return;
+        }
         hello = parsed.data;
         counts[hello.client] += 1;
         options.onActivity?.();
         sendLine(welcome(options.versions));
         void createMcpServer(options.host, {
-          call: { host: hello.host, session, client: hello.client },
+          call: {
+            host: hello.host,
+            session,
+            client: hello.client,
+            ...(token === undefined ? {} : { human: true }),
+            ...(hello.session_sandbox === undefined
+              ? {}
+              : { sessionSandbox: hello.session_sandbox }),
+          },
           serverVersion: options.versions.engine,
         }).connect(transport);
         return;

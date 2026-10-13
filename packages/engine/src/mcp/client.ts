@@ -20,6 +20,7 @@ import {
   type EngineSocketWelcome,
   type EngineToolOutput,
   type HostId,
+  type SessionSandboxState,
 } from "@vtc/shared";
 import { createLineReader } from "./lines.js";
 import { LineTransport } from "./transport.js";
@@ -146,18 +147,39 @@ export const engineSocketAnswers = (
 /**
  * The cli's typed client (`EngineClient`): `call(tool, input)` with per-tool types, on the SDK's
  * client. `bridge` connects as a host's bridge session instead (tests and tooling that act as a
- * Lead or a role session).
+ * Lead or a role session), reporting `sessionSandbox` when given. `installToken` (cli only) makes
+ * the connection a human channel for the human-only tools (D-an, spine §5 reading 71): the cli
+ * passes it only after the human confirmed in an interactive terminal, and only to a daemon of
+ * contracts 4.3.0 or later (an older one refuses the field).
  */
 export const connectEngineClient = async (
   path: string,
   contractsVersion = CONTRACTS_VERSION,
-  options: { readonly bridge?: HostId } = {},
+  options: {
+    readonly bridge?: HostId;
+    readonly sessionSandbox?: SessionSandboxState;
+    readonly installToken?: string;
+  } = {},
 ): Promise<EngineClient> => {
   const { socket, rest } = await handshake(
     path,
     options.bridge === undefined
-      ? { v: 1, client: "cli", host: null, contracts_version: contractsVersion }
-      : { v: 1, client: "bridge", host: options.bridge, contracts_version: contractsVersion },
+      ? {
+          v: 1,
+          client: "cli",
+          host: null,
+          contracts_version: contractsVersion,
+          ...(options.installToken === undefined ? {} : { install_token: options.installToken }),
+        }
+      : {
+          v: 1,
+          client: "bridge",
+          host: options.bridge,
+          contracts_version: contractsVersion,
+          ...(options.sessionSandbox === undefined
+            ? {}
+            : { session_sandbox: options.sessionSandbox }),
+        },
   );
   const transport = new LineTransport(
     (line) => {
@@ -223,12 +245,15 @@ export const runStdioBridge = async (options: {
   readonly stdin: Readable;
   readonly stdout: Writable;
   readonly contractsVersion?: string;
+  /** The host session's sandbox state (D-an), e.g. from `claudeSessionSandboxState`. */
+  readonly sessionSandbox?: SessionSandboxState;
 }): Promise<void> => {
   const { socket, rest } = await handshake(options.path, {
     v: 1,
     client: "bridge",
     host: options.host,
     contracts_version: options.contractsVersion ?? CONTRACTS_VERSION,
+    ...(options.sessionSandbox === undefined ? {} : { session_sandbox: options.sessionSandbox }),
   });
   if (rest.length > 0) options.stdout.write(rest);
   options.stdin.pipe(socket);

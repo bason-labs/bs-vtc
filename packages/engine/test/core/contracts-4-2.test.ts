@@ -39,7 +39,6 @@ import {
   SPEC_ONE,
   submitResult,
   throughPlan,
-  spawns,
   toPlanner,
   toolFinding,
   verdictPass,
@@ -247,27 +246,15 @@ describe("gate requests carry the run's committed gates.yml (reading 46b, c, e, 
     expect(core.finalReviewScopeNote([1, 2, 6])).toContain("3, 4, 5, 7 did not run");
     await h.release();
   });
-  it("parks a task of a run that started with no committed gates.yml before its worktree, and never adopts one later", async () => {
+  it("refuses to start a run on a commit with no committed gates.yml (reading 78 supersedes 46f's park)", async () => {
     const h = createHarness({ gatesYml: null });
-    // present in the working tree, but not committed when the run starts
+    // present in the working tree, but not committed where the run would start
     writeFile(h.repo, ".vtc/gates.yml", JSON.stringify(DEFAULT_GATES_YML));
-    const planner = await toPlanner(h, SPEC_ONE);
-    // committed mid-run: the task's base would have it, but the run never takes it (reading 20)
-    git(h.repo, "add", ".vtc/gates.yml");
-    git(h.repo, "commit", "--quiet", "-m", "calibrate");
-    const planned = await submitResult(h, planner, {
-      exit: "done",
-      tasks: [draft("T-1")] as never,
+    await expect(start(h)).rejects.toMatchObject({
+      code: "config",
+      message: expect.stringContaining("run vtc calibrate, commit .vtc/gates.yml") as unknown,
     });
-    expect(planned.accepted).toBe(true);
-    await h.engine.settle();
-    const parked = h.engine.status({}).parked.find((p) => p.task === "T-1");
-    expect(parked).toMatchObject({ reason: "gate_infra" });
-    expect(escalations(h)).toContain("started on a commit with no committed .vtc/gates.yml");
-    expect(escalations(h)).toContain("start a new run");
-    // parked before any worktree or QA dispatch: nothing is spent on a task that cannot verify
-    expect(h.engine.states().at(-1)?.tasks.get("T-1")?.worktree).toBeUndefined();
-    expect(spawns(await next(h)).map((a) => a.role)).not.toContain("qa");
+    expect(h.engine.states()).toEqual([]);
     expect(h.gates.requests).toEqual([]);
     await h.release();
   });

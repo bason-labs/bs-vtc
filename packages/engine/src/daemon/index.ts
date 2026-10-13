@@ -211,6 +211,7 @@ export const runDaemon: RunDaemon = async (deps: EngineDeps, options) => {
       path: ownSocket,
       host: engine,
       versions: deps.versions,
+      installToken: deps.installToken,
       onActivity: touch,
     });
     cleanups.push(() => socket.close());

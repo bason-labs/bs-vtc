@@ -357,6 +357,7 @@ export const applyEvent = (state: RunState, event: VtcEvent): void => {
     if (run?.status === "in_flight") {
       run.status = "failed";
       run.closedSeq = event.seq;
+      run.costUsd = event.cost_usd ?? null;
     }
   } else if (isEventOfType(event, "gate.result")) {
     state.gateReports.push({
