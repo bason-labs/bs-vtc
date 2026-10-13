@@ -12,15 +12,20 @@
  *   The command runs under an in-sandbox reaper ({@link REAPER_SCRIPT}) that kills everything left
  *   in the sandbox when the command ends (macOS has no PID namespace).
  * - Linux: `bwrap` ({@link bwrapArgs}): a minimal root of read-only system directories and
- *   toolchains (never the host root, so no host `/run`, `/tmp` or `/var/run` and none of the IPC
- *   sockets in them), the checkout and the private directories bound writable, its own PID
- *   namespace (everything dies with the command) and, in the verify phase, its own network
- *   namespace (a private loopback only).
+ *   toolchains (never the host root, so no host `/run`, `/tmp` or `/var/run` and none of the
+ *   pathname IPC sockets in them), the checkout and the private directories bound writable, its
+ *   own PID namespace (everything dies with the command) and always a network namespace of its
+ *   own, so the host's abstract Unix sockets (an X server's `@/tmp/.X11-unix/X0`, a
+ *   `unix:abstract=` D-Bus bus), which belong to a network namespace and not to the filesystem,
+ *   do not exist inside: in the verify phase bwrap's own (a private loopback only), in the install
+ *   phase the one `pasta` ({@link PASTA_ARGS}) creates, with user-mode IP networking, no port
+ *   forwarding in either direction and no gateway mapped to the host's loopback.
  *
  * Rules, the same in both: the verify phase has no network; the install phase gets IP networking
  * (neither tool can filter by registry host, so `WrappedGateCommand.network` says `full`) with the
  * same filesystem rules and no Unix socket outside the writable directories (on macOS DNS goes
- * through mDNSResponder); writes only to the checkout, the command's private temp directory and
+ * through mDNSResponder, on Linux through pasta's forwarder); writes only to the checkout, the
+ * command's private temp directory and
  * the run's empty `HOME`. Reads follow {@link gateReadPolicy}: the real home and the repo's
  * `.vtc/state` are hidden except the toolchains, the VTC home entries the gates run with, the
  * repo's git directory and the command's own checkout; the deny list (VTC home, host config and
@@ -324,6 +329,13 @@ export interface GateJailSpec extends GateSandboxSpec {
    * never kills anything outside a sandbox.
    */
   readonly reapSentinel?: string;
+  /**
+   * A `resolv.conf` in the run's private root naming pasta's DNS forwarder
+   * ({@link PASTA_DNS_FORWARD}); the Linux install phase mounts it where `/etc/resolv.conf`
+   * points, since the host's resolver is often on its loopback, which pasta's namespace does not
+   * share.
+   */
+  readonly resolvConf?: string;
 }
 
 /** A wrapped command that runs under {@link REAPER_SCRIPT} (see `exec.ts` `ExecRequest.reaper`). */
@@ -336,12 +348,18 @@ const isReaped = (wrapped: WrappedGateCommand): wrapped is ReapedGateCommand =>
 
 const extrasOf = (
   spec: GateSandboxSpec,
-): { hideRead: readonly string[]; allowRead: readonly string[]; reapSentinel?: string } => {
+): {
+  hideRead: readonly string[];
+  allowRead: readonly string[];
+  reapSentinel?: string;
+  resolvConf?: string;
+} => {
   const extra = spec as GateJailSpec;
   return {
     hideRead: extra.hideRead ?? [],
     allowRead: extra.allowRead ?? [],
     ...(extra.reapSentinel === undefined ? {} : { reapSentinel: extra.reapSentinel }),
+    ...(extra.resolvConf === undefined ? {} : { resolvConf: extra.resolvConf }),
   };
 };
 
@@ -379,6 +397,7 @@ const checkSpec = (argv: readonly string[], spec: GateSandboxSpec): void => {
     ...extra.hideRead,
     ...extra.allowRead,
     ...(extra.reapSentinel === undefined ? [] : [extra.reapSentinel]),
+    ...(extra.resolvConf === undefined ? [] : [extra.resolvConf]),
   ]) {
     if (!isAbsolute(p)) throw new Error(`gate sandbox: expected an absolute path, got ${p}`);
   }
@@ -607,12 +626,14 @@ const depthOf = (path: string): number => path.split("/").filter((part) => part 
 
 /**
  * The `bwrap` arguments (before the gate's argv) for one command: new PID, IPC and UTS
- * namespaces, its own network namespace in the verify phase, and a minimal root:
+ * namespaces, its own network namespace in the verify phase (the install phase's argv runs inside
+ * the namespace pasta creates, see {@link createBwrapSandbox}), and a minimal root:
  * {@link BWRAP_SYSTEM_ROOTS} read-only (a symlinked one, like merged-`/usr` `/bin`, stays a
  * link), a fresh `/tmp`, the readable roots read-only, an empty tmpfs over each hidden directory
  * a bound root would show, and the checkout, home and temp directory writable; mounts go
- * shallowest first, so a deeper one is never covered. The install phase also gets the file
- * `/etc/resolv.conf` points to. Last, every visible denied path is hidden (an empty read-only
+ * shallowest first, so a deeper one is never covered. The install phase also gets a resolver at the
+ * file `/etc/resolv.conf` points to: the jail's `resolvConf` when there is one, else the host's
+ * file. Last, every visible denied path is hidden (an empty read-only
  * tmpfs over a directory, `/dev/null` over a file). Paths that do not exist are skipped: there is
  * nothing to read, and bwrap cannot mount over them.
  */
@@ -646,7 +667,11 @@ export const bwrapArgs = (
   const visible = (path: string): boolean => binds().some((dest) => within(path, dest));
   if (spec.phase === "install" && fs.kind("/etc/resolv.conf") !== null) {
     const resolv = fs.realpath("/etc/resolv.conf");
-    if (!visible(resolv)) add({ op: "--ro-bind", src: resolv, dest: resolv });
+    if (extra.resolvConf !== undefined) {
+      add({ op: "--ro-bind", src: extra.resolvConf, dest: resolv });
+    } else if (!visible(resolv)) {
+      add({ op: "--ro-bind", src: resolv, dest: resolv });
+    }
   }
   for (const path of extra.allowRead) readOnly(path);
   for (const dir of [spec.checkout, spec.home, spec.tempDir]) {
@@ -691,22 +716,82 @@ export const bwrapArgs = (
   return [...args, "--", ...argv];
 };
 
-/** `bwrap` with its own network namespace in the verify phase (Linux). */
+/** The address pasta forwards DNS queries from (to the host's first resolver). */
+export const PASTA_DNS_FORWARD = "169.254.1.1";
+
+/** The jail's `resolv.conf` for the Linux install phase: pasta's DNS forwarder only. */
+export const PASTA_RESOLV_CONF = `nameserver ${PASTA_DNS_FORWARD}\n`;
+
+/**
+ * The `pasta` options of a Linux install-phase command: a new user and network namespace with
+ * its interface configured from the host's (`--config-net`), in the foreground, quiet, with no
+ * port forwarding in either direction (`-t`/`-u` host to namespace, `-T`/`-U` namespace to host,
+ * whose `auto` default would mirror the host's loopback listeners, the engine among them), the
+ * gateway never mapped to the host's loopback (`--no-map-gw`), and DNS forwarded from
+ * {@link PASTA_DNS_FORWARD}.
+ */
+export const PASTA_ARGS: readonly string[] = [
+  "--config-net",
+  "--foreground",
+  "--quiet",
+  "-t",
+  "none",
+  "-u",
+  "none",
+  "-T",
+  "none",
+  "-U",
+  "none",
+  "--no-map-gw",
+  "--dns-forward",
+  PASTA_DNS_FORWARD,
+];
+
+/**
+ * `bwrap` (Linux), never in the host's network namespace: the verify phase in bwrap's own, the
+ * install phase in pasta's (`pasta {@link PASTA_ARGS} -- bwrap …`). Inside pasta's user
+ * namespace the caller is root, so bwrap starts a nested user namespace with the real `uid` and
+ * `gid` (package managers act differently as root). An install-phase command needs the jail's
+ * `resolvConf`.
+ */
 export const createBwrapSandbox = (
-  options: { readonly binary: string } & Partial<BwrapFs>,
+  options: {
+    readonly binary: string;
+    readonly pasta: string;
+    readonly uid?: number;
+    readonly gid?: number;
+  } & Partial<BwrapFs>,
 ): GateSandbox => {
   const fs: BwrapFs = {
     realpath: options.realpath ?? hostFs.realpath,
     kind: options.kind ?? hostFs.kind,
   };
+  const uid = String(options.uid ?? process.getuid?.() ?? 0);
+  const gid = String(options.gid ?? process.getgid?.() ?? 0);
   return {
     kind: "bwrap",
     wrap: (argv, spec): WrappedGateCommand => {
       checkSpec(argv, spec);
+      if (spec.phase === "verify") {
+        return { command: options.binary, args: bwrapArgs(argv, spec, fs), network: "none" };
+      }
+      if (extrasOf(spec).resolvConf === undefined) {
+        throw new Error("gate sandbox: an install-phase command needs the jail's resolv.conf");
+      }
       return {
-        command: options.binary,
-        args: bwrapArgs(argv, spec, fs),
-        network: spec.phase === "verify" ? "none" : "full",
+        command: options.pasta,
+        args: [
+          ...PASTA_ARGS,
+          "--",
+          options.binary,
+          "--unshare-user",
+          "--uid",
+          uid,
+          "--gid",
+          gid,
+          ...bwrapArgs(argv, spec, fs),
+        ],
+        network: "full",
       };
     },
   };
@@ -748,7 +833,7 @@ export interface GateSandboxDetection {
 
 export interface DetectGateSandboxOptions {
   readonly platform?: NodeJS.Platform;
-  /** The environment whose `PATH` is searched for `bwrap` (absolute entries only). */
+  /** The environment whose `PATH` is searched for `bwrap` and `pasta` (absolute entries only). */
   readonly env?: Env;
   readonly exists?: (path: string) => boolean;
   /** Runs a no-op command in the sandbox; true when it exits 0. */
@@ -796,8 +881,10 @@ export const detectGateSandbox = (options: DetectGateSandboxOptions = {}): GateS
       const candidates = [
         ...path.split(delimiter).filter((d) => d !== "" && isAbsolute(d)),
         "/usr/bin",
-      ].map((d) => join(d, "bwrap"));
-      const binary = candidates.find((c) => exists(c));
+      ];
+      const found = (name: string): string | undefined =>
+        candidates.map((d) => join(d, name)).find((c) => exists(c));
+      const binary = found("bwrap");
       if (binary === undefined) return none("bwrap (bubblewrap) is not installed");
       const args = ["--ro-bind", "/", "/", "--dev", "/dev", "--proc", "/proc"];
       if (
@@ -815,10 +902,32 @@ export const detectGateSandbox = (options: DetectGateSandboxOptions = {}): GateS
           `${binary} cannot create namespaces here (are unprivileged user namespaces disabled?)`,
         );
       }
+      const pasta = found("pasta");
+      if (pasta === undefined) {
+        return none(
+          "pasta (passt) is not installed; the install phase needs it for a network namespace of its own",
+        );
+      }
+      if (
+        !probe([
+          pasta,
+          ...PASTA_ARGS,
+          "--",
+          binary,
+          "--unshare-user",
+          ...args,
+          "--unshare-pid",
+          "--die-with-parent",
+          "--",
+          "true",
+        ])
+      ) {
+        return none(`${pasta} cannot start ${binary} in a network namespace of its own here`);
+      }
       return {
         kind: "bwrap",
-        sandbox: createBwrapSandbox({ binary }),
-        detail: `bwrap (${binary}, own network namespace in the verify phase)`,
+        sandbox: createBwrapSandbox({ binary, pasta }),
+        detail: `bwrap (${binary}, own network namespace; install phase through pasta, ${pasta})`,
       };
     }
     return none(`no gate sandbox is implemented for ${platform}`);
@@ -857,6 +966,7 @@ export class GateCommandJail {
   private root: string | null = null;
   private home = "";
   private sentinel = "";
+  private resolvConf = "";
   private count = 0;
   private broken: string | null = null;
   ran = false;
@@ -881,6 +991,8 @@ export class GateCommandJail {
       mkdirSync(this.home, { mode: 0o700 });
       this.sentinel = join(root, "sandboxed");
       writeFileSync(this.sentinel, "", { mode: 0o600 });
+      this.resolvConf = join(root, "resolv.conf");
+      writeFileSync(this.resolvConf, PASTA_RESOLV_CONF, { mode: 0o644 });
     }
     return this.home;
   }
@@ -905,6 +1017,7 @@ export class GateCommandJail {
       hideRead: this.read.hideRead ?? [],
       allowRead: this.read.allowRead ?? [],
       reapSentinel: this.sentinel,
+      resolvConf: this.resolvConf,
     };
     const wrapped = this.sandbox.wrap(request.argv, spec);
     const reaper = isReaped(wrapped);

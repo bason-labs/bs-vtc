@@ -375,22 +375,97 @@ describe("the Linux bwrap argv", () => {
     expect(mounts.join(" ")).not.toContain("/home/u");
   });
 
-  it("keeps the network in the install phase (bwrap cannot filter by registry) and makes DNS resolvable", () => {
-    const sandbox = createBwrapSandbox({ binary: "/usr/bin/bwrap", ...fs });
-    const wrapped = sandbox.wrap(["pnpm", "install"], spec({ phase: "install" }));
+  const linux = {
+    binary: "/usr/bin/bwrap",
+    pasta: "/usr/bin/pasta",
+    uid: 1000,
+    gid: 1000,
+    ...fs,
+  };
+  /** The argv before the first `--` (a pasta or bwrap option list). */
+  const head = (args: readonly string[]): string[] =>
+    args.includes("--") ? args.slice(0, args.indexOf("--")) : [...args];
+  const resolvConf = "/tmp/vtc-gate-1/resolv.conf";
+
+  it("runs the verify phase in bwrap's own network namespace, with no pasta", () => {
+    const wrapped = createBwrapSandbox(linux).wrap(["node", "t.mjs"], spec());
     expect(wrapped.command).toBe("/usr/bin/bwrap");
+    expect(wrapped.network).toBe("none");
+    expect(head(wrapped.args)).toContain("--unshare-net");
+    expect(wrapped.args).not.toContain("/usr/bin/pasta");
+  });
+
+  it("runs the install phase in a network namespace of its own (pasta), so abstract Unix sockets and host loopback stay out of reach", () => {
+    const sandbox = createBwrapSandbox(linux);
+    const wrapped = sandbox.wrap(["pnpm", "install"], {
+      ...spec({ phase: "install" }),
+      resolvConf,
+    } as GateJailSpec);
+    // pasta starts a new user and network namespace with user-mode IP networking; the host's
+    // abstract AF_UNIX names (X11's @/tmp/.X11-unix/X0, a unix:abstract= D-Bus bus) belong to
+    // the host's network namespace and do not exist in it.
+    expect(wrapped.command).toBe("/usr/bin/pasta");
     expect(wrapped.network).toBe("full");
-    expect(wrapped.args).not.toContain("--unshare-net");
-    expect(wrapped.args).toContain("--unshare-pid");
-    // /etc/resolv.conf often points into /run, which is otherwise absent.
-    expect(pairs(wrapped.args, "--ro-bind")).toContainEqual([
-      "/run/systemd/resolve/stub-resolv.conf",
+    const pasta = head(wrapped.args);
+    expect(pasta).toContain("--config-net");
+    expect(pasta).not.toContain("--netns-only");
+    expect(pasta).not.toContain("--netns");
+    // No port forwarding in either direction: a namespace port never reaches a host loopback
+    // service (the engine, a database), and the host never reaches into the sandbox.
+    for (const flag of ["-t", "-u", "-T", "-U"]) {
+      expect(pairs(["", ...pasta], flag)).toContainEqual(["none", expect.any(String)]);
+    }
+    // The gateway address is not the host's loopback.
+    expect(pasta).toContain("--no-map-gw");
+    expect(pairs(["", ...pasta], "--dns-forward")).toContainEqual([
+      "169.254.1.1",
+      expect.any(String),
+    ]);
+    // After pasta: bwrap, in pasta's namespace (no --unshare-net, which would drop the network),
+    // as the real uid rather than pasta's namespace root.
+    const rest = wrapped.args.slice(wrapped.args.indexOf("--") + 1);
+    expect(rest[0]).toBe("/usr/bin/bwrap");
+    const bwrap = head(rest.slice(1));
+    expect(bwrap).not.toContain("--unshare-net");
+    expect(bwrap).toContain("--unshare-pid");
+    expect(bwrap).toContain("--unshare-user");
+    expect(pairs(["", ...bwrap], "--uid")).toContainEqual(["1000", expect.any(String)]);
+    expect(pairs(["", ...bwrap], "--gid")).toContainEqual(["1000", expect.any(String)]);
+    expect(rest.slice(rest.indexOf("--") + 1)).toEqual(["pnpm", "install"]);
+    // DNS goes to pasta's forwarder: the jail's resolv.conf sits where /etc/resolv.conf points
+    // (often into /run, which is otherwise absent).
+    expect(pairs(bwrap, "--ro-bind")).toContainEqual([
+      resolvConf,
       "/run/systemd/resolve/stub-resolv.conf",
     ]);
     expect(pairs(bwrapArgs(["x"], spec(), fs), "--ro-bind")).not.toContainEqual([
-      "/run/systemd/resolve/stub-resolv.conf",
+      resolvConf,
       "/run/systemd/resolve/stub-resolv.conf",
     ]);
+  });
+
+  it("never shares the host's network namespace, in either phase", () => {
+    const sandbox = createBwrapSandbox(linux);
+    for (const phase of ["install", "verify"] as const) {
+      const wrapped = sandbox.wrap(["x"], { ...spec({ phase }), resolvConf } as GateJailSpec);
+      const ownNet =
+        (wrapped.command === "/usr/bin/bwrap" && head(wrapped.args).includes("--unshare-net")) ||
+        (wrapped.command === "/usr/bin/pasta" && head(wrapped.args).includes("--config-net"));
+      expect(ownNet, phase).toBe(true);
+    }
+  });
+
+  it("refuses an install-phase command without the jail's resolv.conf", () => {
+    const sandbox = createBwrapSandbox(linux);
+    expect(() => sandbox.wrap(["pnpm", "install"], spec({ phase: "install" }))).toThrow(
+      /resolv\.conf/,
+    );
+    expect(() =>
+      sandbox.wrap(["pnpm", "install"], {
+        ...spec({ phase: "install" }),
+        resolvConf: "rel",
+      } as GateJailSpec),
+    ).toThrow(/absolute/);
   });
 
   it("skips paths that do not exist (there is nothing to read, and bwrap cannot mount over them)", () => {
@@ -418,15 +493,52 @@ describe("detection (vtc doctor)", () => {
     expect(found.detail).toMatch(/sandbox-exec/);
   });
 
-  it("uses bwrap on Linux from an absolute PATH entry when a probe run succeeds", () => {
+  it("uses bwrap and pasta on Linux from absolute PATH entries when both probe runs succeed", () => {
+    const probes: string[][] = [];
     const found = detectGateSandbox({
       platform: "linux",
       env: { PATH: "relative/bin:/opt/bin:/usr/bin" },
-      exists: (p) => p === "/usr/bin/bwrap" || p === "relative/bin/bwrap",
-      probe: (argv) => argv[0] === "/usr/bin/bwrap" && argv.includes("--unshare-net"),
+      exists: (p) => p === "/usr/bin/bwrap" || p === "relative/bin/bwrap" || p === "/opt/bin/pasta",
+      probe: (argv) => {
+        probes.push([...argv]);
+        return (
+          (argv[0] === "/usr/bin/bwrap" && argv.includes("--unshare-net")) ||
+          (argv[0] === "/opt/bin/pasta" &&
+            argv.includes("--config-net") &&
+            argv.includes("/usr/bin/bwrap"))
+        );
+      },
     });
     expect(found.kind).toBe("bwrap");
     expect(found.detail).toContain("/usr/bin/bwrap");
+    expect(found.detail).toContain("/opt/bin/pasta");
+    expect(probes.map((p) => p[0])).toEqual(["/usr/bin/bwrap", "/opt/bin/pasta"]);
+    const wrapped = found.sandbox?.wrap(["x"], {
+      ...spec({ phase: "install" }),
+      resolvConf: "/tmp/vtc-gate-1/resolv.conf",
+    } as GateJailSpec);
+    expect(wrapped?.command).toBe("/opt/bin/pasta");
+  });
+
+  it("reports no sandbox on Linux without pasta: the install phase would share the host's network namespace", () => {
+    const noPasta = detectGateSandbox({
+      platform: "linux",
+      env: { PATH: "/usr/bin" },
+      exists: (p) => p === "/usr/bin/bwrap",
+      probe: () => true,
+    });
+    expect(noPasta.kind).toBeNull();
+    expect(noPasta.sandbox).toBeNull();
+    expect(noPasta.detail).toContain(GATE_SANDBOX.noSandboxReason);
+    expect(noPasta.detail).toMatch(/pasta/);
+    const pastaBroken = detectGateSandbox({
+      platform: "linux",
+      env: { PATH: "/usr/bin" },
+      exists: (p) => p === "/usr/bin/bwrap" || p === "/usr/bin/pasta",
+      probe: (argv) => argv[0] === "/usr/bin/bwrap",
+    });
+    expect(pastaBroken.kind).toBeNull();
+    expect(pastaBroken.detail).toMatch(/pasta/);
   });
 
   it("reports no sandbox, with the visible reason, when the tool is missing or cannot start", () => {
@@ -686,6 +798,13 @@ describe("a jail: per-run home, per-command temp dirs", () => {
     expect(existsSync(s.reapSentinel ?? "")).toBe(true);
     for (const dir of [s.home, s.tempDir, s.checkout]) {
       expect((s.reapSentinel ?? "").startsWith(`${dir}/`)).toBe(false);
+    }
+    // The resolv.conf a Linux install phase uses (pasta's DNS forwarder), in the same private
+    // root, outside every writable directory.
+    expect(s.resolvConf).toBeDefined();
+    expect(readFileSync(s.resolvConf ?? "", "utf8")).toBe("nameserver 169.254.1.1\n");
+    for (const dir of [s.home, s.tempDir, s.checkout]) {
+      expect((s.resolvConf ?? "").startsWith(`${dir}/`)).toBe(false);
     }
     jail.dispose();
   });
