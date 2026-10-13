@@ -22,10 +22,11 @@
  * open, a run still in flight with no record cannot be verified: its run pauses. A record whose
  * run is not active (finished, or its log lost) is checked on open too, and a log the ledger
  * knows that is gone or holds nothing it vouches for holds its run until the human resumes.
- * Gate runs execute agent-authored code, so each arms a git baseline of its own
- * ({@link guardGateRun}).
+ * Gate runs execute agent-authored code, so each arms a git baseline of its own, kept in the
+ * private directory too until it is checked ({@link guardGateRun}); one left by a restart is
+ * checked on open ({@link checkLeftoverGates}).
  */
-import { createHash } from "node:crypto";
+import { createHash, randomBytes } from "node:crypto";
 import { existsSync, lstatSync, readdirSync, readFileSync, readlinkSync } from "node:fs";
 import { join } from "node:path";
 import { eventLogPath, SlugSchema, toEventLine } from "@vtc/shared";
@@ -475,13 +476,146 @@ export const checkGitNow = (k: Kernel, h: RunHandle): boolean => {
   return false;
 };
 
+// ------------------------------------------------------------- gate runs
+
+/** A gate run's git baseline, kept from before the gate starts until it is checked. */
+export interface GateRecord {
+  readonly v: 1;
+  /** The record's id (its file name). */
+  readonly id: string;
+  readonly run: string;
+  /** What the gate run was (`round T-1`, ...). */
+  readonly label: string;
+  readonly git: Readonly<Record<string, string>>;
+}
+
+const GATE_ID = /^[0-9a-f]{24}$/;
+
+const gatesDir = (k: Kernel): string => join(k.guardDir, "gates");
+
+const gateFile = (k: Kernel, id: string): string => join(gatesDir(k), `${id}.json`);
+
+const isGateRecord = (value: unknown): value is GateRecord => {
+  if (value === null || typeof value !== "object") return false;
+  const r = value as Record<string, unknown>;
+  return (
+    r.v === 1 &&
+    typeof r.id === "string" &&
+    GATE_ID.test(r.id) &&
+    typeof r.run === "string" &&
+    typeof r.label === "string" &&
+    isHashes(r.git)
+  );
+};
+
+/** Records a gate run's git baseline now, before its code can run (memory and file). */
+const recordGate = (k: Kernel, run: string, label: string): GateRecord => {
+  const record: GateRecord = {
+    v: 1,
+    id: randomBytes(12).toString("hex"),
+    run,
+    label,
+    git: gitConfigFingerprint(k.deps.repoRoot),
+  };
+  ensurePrivateDir(gatesDir(k));
+  writePrivateFile(gateFile(k, record.id), `${JSON.stringify(record)}\n`);
+  k.gateBaselines.set(record.id, record.git);
+  return record;
+};
+
+/** Drops a checked gate record (memory and file). */
+const dropGate = (k: Kernel, id: string): void => {
+  k.gateBaselines.delete(id);
+  removePrivateFile(gateFile(k, id));
+};
+
+/**
+ * Gate records kept for a restart (the daemon stopped while gate code ran), back in memory so
+ * engine git is held to their baselines until {@link checkLeftoverGates} has checked them.
+ * Unreadable ones are dropped (no record), like dispatch records.
+ */
+export const restoreGates = (k: Kernel): GateRecord[] => {
+  let names: string[];
+  try {
+    names = readdirSync(gatesDir(k));
+  } catch {
+    return [];
+  }
+  const out: GateRecord[] = [];
+  for (const name of names) {
+    if (!name.endsWith(".json")) continue;
+    const text = readPrivateFile(join(gatesDir(k), name));
+    try {
+      const parsed: unknown = text === null ? null : JSON.parse(text);
+      if (isGateRecord(parsed) && name === `${parsed.id}.json`) {
+        k.gateBaselines.set(parsed.id, parsed.git);
+        out.push(parsed);
+      } else removePrivateFile(join(gatesDir(k), name));
+    } catch {
+      removePrivateFile(join(gatesDir(k), name));
+    }
+  }
+  return out;
+};
+
+const gitIssues = (changed: readonly string[]): WriteFindings => ({
+  issues: changed.map((key) => `${key} was changed (git configuration that can run code)`),
+  paths: [...changed],
+  git: [...changed],
+});
+
+/**
+ * On open, before anything runs git: every gate run the daemon stopped in the middle of is
+ * checked against its kept baseline. A change holds engine git (kept for a restart) and is
+ * reported like a gate run's own check: on an active run, an incident and a pause; on any other,
+ * a notice and the run held until the human resumes (`held`). The gate's code is no longer
+ * running, so the record is then dropped: the hold, not the record, keeps engine git refused.
+ * Returns the ids to drop once `held` is kept (`dropGates`).
+ */
+export const checkLeftoverGates = (
+  k: Kernel,
+  records: readonly GateRecord[],
+  handles: ReadonlyMap<string, RunHandle>,
+  held: Map<string, string>,
+  notices: string[],
+): string[] => {
+  const now = gitConfigFingerprint(k.deps.repoRoot);
+  for (const record of records) {
+    const changed = fingerprintChanges(record.git, now);
+    if (changed.length === 0) continue;
+    holdGit(k, record.git);
+    const handle = handles.get(record.run);
+    const who = { role: "the Gate Runner", action_id: record.label };
+    if (handle !== undefined && handle.state.run.finished_at === undefined) {
+      reportFindings(k, handle, who, gitIssues(changed), record.git);
+      continue;
+    }
+    const what =
+      `while the Gate Runner (${record.label}) of run ${record.run} ran: ${gitIssues(changed).issues.join("; ")}`.slice(
+        0,
+        2000,
+      );
+    notices.push(`${what}; held until vtc resume`);
+    if (!held.has(record.run)) held.set(record.run, what);
+  }
+  return records.map((r) => r.id);
+};
+
+/** Drops gate records checked on open ({@link checkLeftoverGates}). */
+export const dropGates = (k: Kernel, ids: readonly string[]): void => {
+  for (const id of ids) dropGate(k, id);
+};
+
 /**
  * The Gate Runner runs agent-authored code (tests, builds) in a checkout under the repo (§6.3
  * step 5), which can write the repo's git config or hooks like a role can: the held git state is
- * fingerprinted before each gate run and holds engine git for the run's length (the checkout's
- * own git calls included), and is compared once the run ends, before its results are adopted
- * or anything else runs git. A change is reported like a role's (`checkout_write`, a pause, a
- * git hold until the human resumes) and throws, so the gate run's results are never used.
+ * fingerprinted before each gate run and kept, in memory and in the private directory (a restart
+ * while the gate's code runs finds it, {@link checkLeftoverGates}). It holds engine git for the
+ * run's length (the checkout's own git calls included), and is compared once the run ends,
+ * before its results are adopted or anything else runs git. A change is reported like a role's
+ * (`checkout_write`, a pause, a git hold until the human resumes) and throws, so the gate run's
+ * results are never used. The record is dropped only after that check (and its report); a check
+ * that could not report keeps it, so engine git stays refused and the next open checks it.
  */
 export const guardGateRun = async <T>(
   k: Kernel,
@@ -489,49 +623,47 @@ export const guardGateRun = async <T>(
   label: string,
   run: () => Promise<T>,
 ): Promise<T> => {
-  const baseline = gitConfigFingerprint(k.deps.repoRoot);
-  k.gateBaselines.add(baseline);
+  const record = recordGate(k, h.state.id, label);
+  let outcome:
+    { readonly ok: true; readonly value: T } | { readonly ok: false; readonly error: unknown };
   try {
-    return await run();
-  } finally {
-    try {
-      await assertGateGit(k, h, label, baseline);
-    } finally {
-      k.gateBaselines.delete(baseline);
-    }
+    outcome = { ok: true, value: await run() };
+  } catch (error) {
+    outcome = { ok: false, error };
   }
+  const changed = await assertGateGit(k, h, label, record.git);
+  dropGate(k, record.id);
+  if (changed.length > 0) throw new GitConfigChangedError(changed);
+  if (!outcome.ok) throw outcome.error;
+  return outcome.value;
 };
 
-/** A gate run's git change, reported and held (see {@link guardGateRun}); throws when found. */
+/** A gate run's git change, reported and held (see {@link guardGateRun}); the changed keys. */
 const assertGateGit = async (
   k: Kernel,
   h: RunHandle,
   label: string,
   baseline: Readonly<Record<string, string>>,
-): Promise<void> => {
+): Promise<string[]> => {
   const changed = fingerprintChanges(baseline, gitConfigFingerprint(k.deps.repoRoot));
-  if (changed.length === 0) return;
+  if (changed.length === 0) return [];
   await k.serial(h, () => {
     reportFindings(
       k,
       h,
       { role: "the Gate Runner", action_id: label },
-      {
-        issues: changed.map((key) => `${key} was changed (git configuration that can run code)`),
-        paths: changed,
-        git: changed,
-      },
+      gitIssues(changed),
       baseline,
     );
     return Promise.resolve();
   });
-  throw new GitConfigChangedError(changed);
+  return changed;
 };
 
 /** The git baselines engine git must match now (open records, gate runs, a held change). */
 export const gitBaselines = (k: Kernel): Readonly<Record<string, string>>[] => [
   ...[...k.dispatches.values()].map((r) => r.git),
-  ...k.gateBaselines,
+  ...k.gateBaselines.values(),
   ...(k.gitHold === null ? [] : [k.gitHold]),
 ];
 

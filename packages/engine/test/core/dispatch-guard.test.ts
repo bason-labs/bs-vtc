@@ -656,4 +656,71 @@ describe("the Gate Runner's run arms the git baseline (finding gate-run-git-base
     expect(existsSync(marker)).toBe(false);
     await h.release();
   });
+  it("a restart while gate code runs: the gate's baseline is kept, checked on open, the change held (finding gate-run-git-baseline-lost-on-restart)", async () => {
+    const h = createHarness();
+    const engineer = await toEngineer(h);
+    const run = runId(h);
+    h.gates.hold(); // never released: the daemon is killed while the gate's code runs
+    writeFile(worktreeOf(h, "T-1"), "src/t-1/impl.ts", "export const x = 1;\n");
+    expect((await submitResult(h, engineer, { exit: "built" })).accepted).toBe(true);
+    const guard = guardDirFor(h.home, h.repo);
+    expect(readdirSync(join(guard, "dispatches"))).toEqual([]);
+    await vi.waitFor(() => {
+      expect(h.gates.requests.some((r) => r.reason === "round")).toBe(true);
+    });
+    // the gate run's baseline is kept in the engine's private directory, 0600
+    const gates = readdirSync(join(guard, "gates"));
+    expect(gates).toHaveLength(1);
+    expect(statSync(join(guard, "gates", gates[0] ?? "")).mode & 0o777).toBe(0o600);
+    // the gate's code plants a filter driver through the repo's own git config and attributes
+    const marker = join(h.repo, "filtered");
+    git(h.repo, "config", "filter.evil.clean", `touch "${marker}"; cat`);
+    git(h.repo, "config", "filter.evil.smudge", `touch "${marker}"; cat`);
+    writeFileSync(join(h.repo, ".git/info/attributes"), "* filter=evil\n");
+    // ... and the daemon is killed before the gate run ends
+    const engine = reopen(h);
+    await expect(runGit(h.repo, ["status"])).rejects.toBeInstanceOf(GitConfigChangedError);
+    expect(engine.gitHold).not.toBeNull();
+    expect(engine.status({ run }).run.paused).toBe(true);
+    const incident = incidents(h, "checkout_write");
+    expect(incident).toContain("filter.evil.clean");
+    expect(incident).toContain("Gate Runner");
+    await engine.settle();
+    expect(existsSync(marker)).toBe(false);
+    expect(readdirSync(join(guard, "gates"))).toEqual([]);
+    await expect(runGit(h.repo, ["status"])).rejects.toBeInstanceOf(GitConfigChangedError);
+    // the hold survives another restart; the human removes the driver and resumes
+    const again = reopen(h);
+    await expect(runGit(h.repo, ["status"])).rejects.toBeInstanceOf(GitConfigChangedError);
+    expect(existsSync(marker)).toBe(false);
+    git(h.repo, "config", "--remove-section", "filter.evil");
+    rmSync(join(h.repo, ".git/info/attributes"));
+    await again.resume({});
+    expect(again.gitHold).toBeNull();
+    expect((await runGit(h.repo, ["status"])).code).toBe(0);
+    expect(existsSync(marker)).toBe(false);
+  });
+  it("a restart while gate code runs that changed nothing: the gate's record is checked and dropped", async () => {
+    const h = createHarness();
+    const engineer = await toEngineer(h);
+    h.gates.hold();
+    writeFile(worktreeOf(h, "T-1"), "src/t-1/impl.ts", "export const x = 1;\n");
+    expect((await submitResult(h, engineer, { exit: "built" })).accepted).toBe(true);
+    await vi.waitFor(() => {
+      expect(h.gates.requests.some((r) => r.reason === "round")).toBe(true);
+    });
+    const guard = guardDirFor(h.home, h.repo);
+    expect(readdirSync(join(guard, "gates"))).toHaveLength(1);
+    const before = h.gates.requests.length;
+    const engine = reopen(h);
+    expect(engine.gitHold).toBeNull();
+    expect(engine.notices).toEqual([]);
+    expect(incidents(h, "checkout_write")).toBe("[]");
+    expect((await runGit(h.repo, ["status"])).code).toBe(0);
+    // the round's gates start again (and wait on the held gate runner): one record, the new run's
+    await vi.waitFor(() => {
+      expect(h.gates.requests.length).toBeGreaterThan(before);
+    });
+    expect(readdirSync(join(guard, "gates"))).toHaveLength(1);
+  });
 });
