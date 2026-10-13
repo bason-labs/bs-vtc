@@ -116,12 +116,22 @@ submit`). Every command runs under an in-sandbox reaper (`REAPER_SCRIPT`): when 
   the checkout and private directories writable; never the host root, so the host's `/run`
   (D-Bus session bus, `systemd --user`), `/tmp/.X11-unix`, `/var/run/docker.sock` and agent
   sockets do not exist inside. Its own PID, IPC and UTS namespaces (everything dies with the
-  command) and, in the verify phase, its own network namespace.
+  command) and never the host's network namespace, so the host's abstract Unix sockets (an X
+  server's `@/tmp/.X11-unix/X0`, a `unix:abstract=` D-Bus bus), which belong to a network
+  namespace rather than to the filesystem, do not exist inside: the verify phase gets bwrap's own
+  (`--unshare-net`, a private loopback only), the install phase runs as
+  `pasta PASTA_ARGS -- bwrap --unshare-user --uid <uid> --gid <gid> …`, in the namespace pasta
+  creates with user-mode IP networking, no port forwarding either way (`-t`/`-u`/`-T`/`-U none`,
+  so no host loopback listener such as the engine is mirrored in), no gateway mapped to the host's
+  loopback (`--no-map-gw`), and DNS through pasta's forwarder (`--dns-forward 169.254.1.1`, named
+  by a jail-written `resolv.conf` mounted where `/etc/resolv.conf` points). Without `pasta`
+  (package `passt`), or when it cannot start bwrap, there is no gate sandbox on Linux (see "No
+  sandbox" below).
 - Verify phase: no network (Unix sockets only inside the writable directories). Install phase:
   IP networking (neither tool can filter by registry host; `WrappedGateCommand.network` says
   `full`) with the same filesystem rules; on macOS no Unix socket outside the writable
   directories except DNS (`mDNSResponder`), so not the engine socket under `~/.vtc/run`, an ssh
-  or gpg agent, or Docker.
+  or gpg agent, or Docker; on Linux no host Unix socket at all, pathname or abstract.
 - Install-phase gates run first, as one batch, and the hidden acceptance tests are copied into
   the checkout only after all of them: no command with network access runs while they are there.
 - Writes only to the verification checkout, the command's private temp directory and the run's
@@ -158,9 +168,9 @@ submit`). Every command runs under an in-sandbox reaper (`REAPER_SCRIPT`): when 
   writable directories work. A gate cannot write the repo's shared git directory, and private
   registries that need credentials from the user's `.npmrc` or environment do not install. On
   macOS, file watching through FSEvents and anything else that needs an unlisted system service
-  fails in a gate. On Linux the install phase shares the host's network namespace, so abstract
-  Unix sockets (for example an X11 server's) stay reachable there; the verify phase has none.
-  The reaper confirms before its `kill`, so a gate that kills it in the microseconds between the
+  fails in a gate. On Linux the install phase cannot reach the host's loopback services (pasta
+  maps none), while on macOS it can. The pasta path has unit tests of its argv only; no live
+  test runs it. The reaper confirms before its `kill`, so a gate that kills it in the microseconds between the
   two is not detected. Under `gates.allow_unsandboxed` nothing of this applies.
 
 ## Not built yet (tracked follow-up increments)
