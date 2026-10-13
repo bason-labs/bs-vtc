@@ -3,8 +3,9 @@
  * 0600). What the engine must be able to trust after a restart lives here, outside every path a
  * role can write (AD-7 rules 2 and 7; the repo and its worktrees are agent-writable): the ledger
  * of its own repo writes (`engine-writes.jsonl`, with a digest per event-log append), the record
- * of every dispatch (`dispatches/`, the git baseline and the engine files at dispatch), and a
- * held git change awaiting the human (`git-hold.json`).
+ * of every dispatch (`dispatches/`, the git baseline and the engine files at dispatch), a
+ * held git change awaiting the human (`git-hold.json`), the runs the engine could not verify when
+ * it opened (`held-runs.json`), and who claimed each run's Lead role (`leads.jsonl`).
  *
  * Residual: a role whose host sandbox lets it write the user's home directory could still reach
  * this directory; the host's per-path write deny (AD-8 rule 3) is what keeps roles to their
@@ -63,4 +64,19 @@ export const readPrivateFile = (abs: string): string | null => {
 
 export const removePrivateFile = (abs: string): void => {
   rmSync(abs, { force: true });
+};
+
+/** Appends `line` to `abs` (created 0600; never through a symlink). */
+export const appendPrivateFile = (abs: string, line: string): void => {
+  const noFollow = (constants as { O_NOFOLLOW?: number }).O_NOFOLLOW ?? 0;
+  const fd = openSync(
+    abs,
+    constants.O_WRONLY | constants.O_APPEND | constants.O_CREAT | noFollow,
+    0o600,
+  );
+  try {
+    writeSync(fd, Buffer.from(line, "utf8"));
+  } finally {
+    closeSync(fd);
+  }
 };

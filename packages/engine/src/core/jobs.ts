@@ -41,6 +41,7 @@ import {
   taskFindings,
   usedTaskIds,
 } from "./queries.js";
+import { guardGateRun } from "./dispatch-guard.js";
 import { diffLineCounts } from "./read-model.js";
 import { diffRiskHits, isTrivialDiff } from "./router.js";
 import { parkEscalation } from "./escalations.js";
@@ -96,21 +97,27 @@ export const adoptGateOutput = (k: Kernel, report: GateReport): void => {
   if (owner !== undefined) k.writes.adopt(`.vtc/evidence/${owner}`);
 };
 
-/** Runs the Gate Runner on a clean checkout of `head` (§6.3 step 5); never throws for a failing gate. */
+/**
+ * Runs the Gate Runner on a clean checkout of `head` (§6.3 step 5); never throws for a failing
+ * gate. The gate run is guarded like a role's dispatch (`guardGateRun`): a git config or hook
+ * change it made is reported and held, and its results are not used.
+ */
 const runGates = async (
   k: Kernel,
+  h: RunHandle,
   request: Omit<GateRunRequestInput, "checkout">,
 ): Promise<GateReport> => {
-  const checkout = await k.deps.git.createCleanCheckout(request.head);
-  try {
-    const report = await k.deps.gateRunner.run(
-      GateRunRequestSchema.parse({ ...request, checkout }),
-    );
-    adoptGateOutput(k, report);
-    return report;
-  } finally {
-    await k.deps.git.removeCheckout(checkout);
-  }
+  const label = `${request.reason} ${request.task ?? request.feature ?? request.run}`;
+  const report = await guardGateRun(k, h, label, async () => {
+    const checkout = await k.deps.git.createCleanCheckout(request.head);
+    try {
+      return await k.deps.gateRunner.run(GateRunRequestSchema.parse({ ...request, checkout }));
+    } finally {
+      await k.deps.git.removeCheckout(checkout);
+    }
+  });
+  adoptGateOutput(k, report);
+  return report;
 };
 
 /** A failed report whose every failing blocking gate the Gate Runner classified `flaky`. */
@@ -131,10 +138,11 @@ export const onlyFlaky = (report: GateReport): boolean => {
  */
 const runGatesRetryingFlaky = async (
   k: Kernel,
+  h: RunHandle,
   request: Omit<GateRunRequestInput, "checkout">,
 ): Promise<GateReport[]> => {
-  const first = await runGates(k, request);
-  return onlyFlaky(first) ? [first, await runGates(k, request)] : [first];
+  const first = await runGates(k, h, request);
+  return onlyFlaky(first) ? [first, await runGates(k, h, request)] : [first];
 };
 
 const parkInfra = (
@@ -280,7 +288,7 @@ export const startBaseCheck = (
     if (task?.baseline_revision === undefined) return;
     let report: GateReport;
     try {
-      report = await runGates(k, {
+      report = await runGates(k, h, {
         run: h.state.id,
         task: taskId,
         reason: "base_fail_check",
@@ -408,7 +416,7 @@ export const startRoundGates = (k: Kernel, h: RunHandle, taskId: string, head: s
     try {
       const protectedList = await protectedFiles(k, h, task);
       const compare = previousMetrics(h, taskId);
-      reports = await runGatesRetryingFlaky(k, {
+      reports = await runGatesRetryingFlaky(k, h, {
         run: h.state.id,
         task: taskId,
         reason: "round",
@@ -695,7 +703,7 @@ const mergeOne = async (k: Kernel, h: RunHandle, taskId: string): Promise<void> 
   const integrationHead = await ws.resolve(branch);
   const rebased = await ws.rebase(task.worktree, integrationHead);
   if (!rebased.ok) return sendBack(rebased.detail);
-  const reports = await runGatesRetryingFlaky(k, {
+  const reports = await runGatesRetryingFlaky(k, h, {
     run: h.state.id,
     task: taskId,
     feature: feature.id,
@@ -938,7 +946,7 @@ export const startFinalReview = (k: Kernel, h: RunHandle, featureId: string): vo
           .toString("utf8")
           .trim() || head;
       const covers = [...new Set(feature.tasks.flatMap((t) => h.state.tasks.get(t)?.covers ?? []))];
-      reports = await runGatesRetryingFlaky(k, {
+      reports = await runGatesRetryingFlaky(k, h, {
         run: h.state.id,
         feature: featureId,
         reason: "final_review",

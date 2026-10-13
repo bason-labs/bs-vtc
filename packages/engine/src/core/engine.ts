@@ -52,19 +52,23 @@ import { dispatchGuarded, dispatchNow, phaseRoles } from "./dispatch.js";
 import { parkEscalation } from "./escalations.js";
 import {
   acceptCheckout,
-  dropDispatch,
+  checkLeftoverRecords,
+  findLostLogs,
   FORENSICS_DIR,
   gitPreflight,
   loadGitHold,
-  removeRoleWorktree,
+  loadHeldRuns,
+  releaseHeldRuns,
+  removeLostLogs,
   reportUnverifiable,
   restoreDispatches,
   restoreLog,
+  saveHeldRuns,
   sweepDispatches,
   type DispatchRecord,
 } from "./dispatch-guard.js";
 import { EngineWrites, NEVER_WROTE } from "./engine-writes.js";
-import { ensurePrivateDir, guardDirFor } from "./guard.js";
+import { appendPrivateFile, ensurePrivateDir, guardDirFor } from "./guard.js";
 import { openEventLog, type EventDraft } from "./event-log.js";
 import {
   downgradeNoRemote,
@@ -151,6 +155,9 @@ export class Engine implements Kernel {
    */
   readonly notices: string[] = [];
   gitHold: Readonly<Record<string, string>> | null = null;
+  readonly gateBaselines = new Set<Readonly<Record<string, string>>>();
+  /** Runs `open` could not verify, run → reason (`checkLeftoverRecords`, `findLostLogs`). */
+  private held = new Map<string, string>();
   private readonly handles = new Map<string, RunHandle>();
   private readonly finished = new Map<string, RunState>();
   private readonly jobs = new Map<string, Promise<void>>();
@@ -179,11 +186,20 @@ export class Engine implements Kernel {
    * finished one included (it is finished only if its verified prefix says so). An unfinished
    * log this engine never wrote (another clone's, or a planted one) pauses too. A role run in
    * flight without its dispatch record cannot be verified and pauses its run.
+   *
+   * A log the ledger knows that is gone, holds no event, or nothing it vouches for is lost: it is
+   * said, kept aside, and its run is held. Every record of a run that is not active is checked
+   * before it is dropped (a git change is held); a record whose check finds anything holds its
+   * run too. While a run is held, no run starts, an active run pauses, and the held runs'
+   * records keep holding engine git until the human's `vtc resume`.
    */
   static open(deps: EngineCoreDeps): Engine {
     const engine = new Engine(deps);
     restoreDispatches(engine);
     engine.gitHold = loadGitHold(engine);
+    engine.held = loadHeldRuns(engine);
+    const wasHeld = new Map(engine.held);
+    const lost = new Map<string, string>();
     setGitPreflight(deps.repoRoot, () => {
       gitPreflight(engine);
     });
@@ -209,17 +225,20 @@ export class Engine implements Kernel {
         const prefix = bytes.subarray(0, verified);
         const kept = `${FORENSICS_DIR}/${state.id}-open-${String(Date.now())}.jsonl`;
         writeRepoFile(deps.repoRoot, kept, bytes, 0o600);
-        writeRepoFile(deps.repoRoot, rel, prefix);
-        state = projectRun(
-          parseEventLog(prefix.toString("utf8")).events.filter((e) => e.run === state.id),
+        const events = parseEventLog(prefix.toString("utf8")).events.filter(
+          (e) => e.run === state.id,
         );
-        const events = state.events.length;
-        tampered = `${rel} was changed outside the engine (${verdict.detail}); the engine replayed only its first ${String(events)} event(s), the ${String(verified)} bytes its ledger vouches for, and cut the log back to them. The changed file (${String(bytes.byteLength)} bytes) is kept at ${kept}`;
-        if (events === 0) {
-          // nothing the engine wrote is left: the run cannot be rebuilt
-          engine.notices.push(tampered);
+        if (events.length === 0) {
+          // nothing the engine wrote is left: the run cannot be rebuilt, it is lost
+          lost.set(
+            state.id,
+            `${rel} was changed outside the engine (${verdict.detail}); none of it is what the engine wrote, so the run cannot be rebuilt. The changed file (${String(bytes.byteLength)} bytes) is kept at ${kept}`,
+          );
           continue;
         }
+        writeRepoFile(deps.repoRoot, rel, prefix);
+        state = projectRun(events);
+        tampered = `${rel} was changed outside the engine (${verdict.detail}); the engine replayed only its first ${String(events.length)} event(s), the ${String(verified)} bytes its ledger vouches for, and cut the log back to them. The changed file (${String(bytes.byteLength)} bytes) is kept at ${kept}`;
       }
       for (const [host, snapshot] of state.usage) engine.usage.set(host, snapshot);
       if (state.run.finished_at !== undefined) {
@@ -259,14 +278,52 @@ export class Engine implements Kernel {
         });
       }
     }
-    // Records of runs that are no longer active have nothing left to check.
-    for (const record of [...engine.dispatches.values()]) {
-      if (engine.handles.has(record.run)) continue;
-      void removeRoleWorktree(engine, record);
-      dropDispatch(engine, record.run, record.action_id);
+    findLostLogs(engine, new Set([...engine.handles.keys(), ...engine.finished.keys()]), lost);
+    for (const [run, reason] of lost) {
+      engine.notices.push(`${reason}; run ${run} is held until vtc resume`);
+      engine.held.set(run, reason);
     }
+    // A record is dropped only after its check, whatever became of its run.
+    checkLeftoverRecords(engine, new Set(engine.handles.keys()), engine.held, engine.notices);
+    for (const [run, reason] of wasHeld)
+      if (!lost.has(run)) engine.notices.push(`run ${run} is held until vtc resume: ${reason}`);
+    saveHeldRuns(engine, engine.held);
+    // only once the hold is kept: a crash before this finds the logs lost again
+    removeLostLogs(engine, lost);
+    const fresh = [...engine.held].filter(([run]) => !wasHeld.has(run));
+    if (fresh.length > 0)
+      for (const handle of engine.handles.values()) engine.reportHeld(handle, fresh);
     for (const handle of engine.handles.values()) engine.advance(handle);
     return engine;
+  }
+
+  /** Runs `open` could not verify: an active run pauses saying so (see `open`). */
+  private reportHeld(handle: RunHandle, held: readonly (readonly [string, string])[]): void {
+    if (handle.state.run.finished_at !== undefined) return;
+    const runs = held.map(([run]) => run).join(", ");
+    this.emit(handle, {
+      type: "incident.recorded",
+      actor: "engine",
+      data: {
+        kind: "checkout_write",
+        detail:
+          `the engine could not verify run(s) ${runs} when it opened: ${held.map(([, reason]) => reason).join("; ")}`.slice(
+            0,
+            2000,
+          ),
+      },
+    });
+    this.emit(handle, {
+      type: "run.paused",
+      actor: "engine",
+      data: {
+        reason:
+          `run(s) ${runs} could not be verified when the engine opened (see the incident); check the repo, then vtc resume`.slice(
+            0,
+            300,
+          ),
+      },
+    });
   }
 
   // ------------------------------------------------------------------ kernel
@@ -803,6 +860,15 @@ export class Engine implements Kernel {
         "a run is already active in this repo; finish or pause it first",
       );
     }
+    if (this.held.size > 0) {
+      throw new EngineError(
+        "conflict",
+        `run(s) ${[...this.held.keys()].join(", ")} could not be verified when the engine opened (${[...this.held.values()].join("; ")}`.slice(
+          0,
+          1500,
+        ) + "); check the repo, then vtc resume",
+      );
+    }
     const config = this.diskProject();
     const gates = this.diskGates();
     const track = config.track_default ?? input.track;
@@ -814,7 +880,7 @@ export class Engine implements Kernel {
     const handle: RunHandle = { state: emptyRunState(id, this.now().toISOString()), log };
     this.handles.set(id, handle);
     this.freezeConfig(id, config, gates);
-    if (call.client === "bridge" && call.session !== undefined) this.leads.set(id, call.session);
+    if (call.client === "bridge" && call.session !== undefined) this.setLead(id, call, "started");
     const noRemote =
       config.merge_level >= 2 &&
       (await this.deps.workspace.remoteUrl(this.deps.remote).catch(() => null)) === null;
@@ -851,6 +917,8 @@ export class Engine implements Kernel {
       let n = 2;
       this.handles.has(id) ||
       this.finished.has(id) ||
+      this.held.has(id) ||
+      this.writes.has(eventLogPath(id)) ||
       existsSync(join(this.deps.repoRoot, ".vtc/runs", id));
       n += 1
     ) {
@@ -1217,11 +1285,30 @@ export class Engine implements Kernel {
 
   /**
    * The run's Lead session: the bridge session that started the run, or else the first bridge
-   * session to drive it (a Lead whose bridge reconnected). The cli (`client: cli`) is the human.
+   * session to drive it (a Lead whose bridge reconnected, or after a restart) that is not bound
+   * to a role action. A `submit` never claims it. The cli (`client: cli`) is the human.
+   *
+   * Defence in depth only: `client` is what the connecting process declares, so a same-uid
+   * process that says `cli` is exempt, and a role with a shell can run the cli (spine §7). Each
+   * claim is logged in the engine's private directory (`leads.jsonl`) for the human.
    */
   private claimLead(run: string, call: CallContext): void {
     if (call.client !== "bridge" || call.session === undefined) return;
-    if (!this.leads.has(run)) this.leads.set(run, call.session);
+    if (this.leads.has(run) || this.bound.has(call.session)) return;
+    this.setLead(run, call, "claimed");
+  }
+
+  private setLead(run: string, call: CallContext, how: "started" | "claimed"): void {
+    if (call.session === undefined) return;
+    this.leads.set(run, call.session);
+    try {
+      appendPrivateFile(
+        join(this.guardDir, "leads.jsonl"),
+        `${JSON.stringify({ ts: this.now().toISOString(), run, session: call.session, host: call.host, how })}\n`,
+      );
+    } catch {
+      // the log is for the human; the claim stands without it
+    }
   }
 
   /**
@@ -1240,7 +1327,6 @@ export class Engine implements Kernel {
 
   /** A role session may submit one action only: the first it submits (spine §7). */
   private assertOwnSubmit(run: string, actionId: string, call: CallContext): void {
-    this.claimLead(run, call);
     if (call.client !== "bridge" || call.session === undefined) return;
     if (this.leads.get(run) === call.session) return;
     const key = `${run}/${actionId}`;
@@ -1346,6 +1432,16 @@ export class Engine implements Kernel {
    * from the engine's own events, any other file the engine wrote is taken as it now is.
    */
   async resume(input: RunScopedInput): Promise<RunControlResult> {
+    if (this.held.size > 0) {
+      const active = activeRun([...this.handles.values()].map((h) => h.state));
+      const run = input.run ?? (active === undefined ? [...this.held.keys()][0] : undefined);
+      if (run !== undefined && this.held.has(run)) {
+        // a held run that is not active (lost, or finished): the human takes the repo as it is
+        await releaseHeldRuns(this, this.held);
+        const phase: Phase = this.finished.get(run)?.run.phase ?? "intake";
+        return { run, paused: false, phase };
+      }
+    }
     const handle = this.resolve(input.run);
     return this.serial(handle, async () => {
       const state = handle.state;
@@ -1367,6 +1463,7 @@ export class Engine implements Kernel {
       const found = await sweepDispatches(this, handle);
       if (found.issues.length === 0 && state.run.paused) {
         acceptCheckout(this);
+        if (this.held.size > 0) await releaseHeldRuns(this, this.held);
         this.emit(handle, { type: "run.resumed", actor: "human", data: { auto: false } });
       }
       maybeAutoResume(this, handle);

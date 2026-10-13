@@ -112,4 +112,6 @@ export interface Kernel {
   readonly writes: EngineWrites;
   /** The git fingerprint engine git must match after a reported change, until the human resumes. */
   gitHold: Readonly<Record<string, string>> | null;
+  /** The git fingerprint at the start of each gate run still running (`guardGateRun`). */
+  readonly gateBaselines: Set<Readonly<Record<string, string>>>;
 }

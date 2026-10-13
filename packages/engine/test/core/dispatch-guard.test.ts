@@ -16,7 +16,7 @@ import {
   writeFileSync,
 } from "node:fs";
 import { join } from "node:path";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { engineRepoKey, SubmitInputSchema, toEventLine, type LeadAction } from "@vtc/shared";
 import { EngineWrites } from "../../src/core/engine-writes.js";
 import { guardDirFor } from "../../src/core/guard.js";
@@ -497,5 +497,163 @@ describe("git configuration (spine §5 readings 22, 23; finding task-role-git-co
     expect(existsSync(marker)).toBe(true);
     setGitSigning(signed.repo, null);
     await signed.release();
+  });
+});
+
+describe("a restart never drops a dispatch record unchecked (finding restart-drops-unchecked-dispatch-records)", () => {
+  /**
+   * The Engineer plants a filter driver, then loses its run's log (`lose`) and the daemon
+   * restarts: the record is checked, the git change held, the run's loss reported and held.
+   */
+  const plantedThenLost = async (
+    lose: (h: Harness, log: string) => void,
+    check: (h: Harness) => void = () => undefined,
+  ) => {
+    const h = createHarness();
+    await toEngineer(h);
+    const run = runId(h);
+    const marker = join(h.repo, "filtered");
+    git(h.repo, "config", "filter.evil.clean", `touch "${marker}"; cat`);
+    writeFile(worktreeOf(h, "T-1"), ".gitattributes", "* filter=evil\n");
+    writeFile(worktreeOf(h, "T-1"), "src/t-1/impl.ts", "export const x = 1;\n");
+    await h.engine.settle();
+    lose(h, logPath(h, run));
+    const engine = reopen(h);
+    check(h);
+    const notices = engine.notices.join("\n");
+    expect(notices).toContain(`.vtc/runs/${run}/events.jsonl`);
+    expect(notices).toContain("filter.evil.clean");
+    expect(engine.gitHold).not.toBeNull();
+    expect(readdirSync(join(guardDirFor(h.home, h.repo), "dispatches"))).not.toEqual([]);
+    await expect(
+      runGit(h.repo, ["-C", worktreeOf(h, "T-1"), "add", "--all"]),
+    ).rejects.toBeInstanceOf(GitConfigChangedError);
+    expect(existsSync(marker)).toBe(false);
+    await expect(start(h)).rejects.toThrow(/vtc resume/);
+    // the human removes the planted driver and resumes: the hold is released
+    git(h.repo, "config", "--unset", "filter.evil.clean");
+    rmSync(join(worktreeOf(h, "T-1"), ".gitattributes"));
+    const resumed = await engine.resume({});
+    expect(resumed).toMatchObject({ run, paused: false });
+    expect(engine.gitHold).toBeNull();
+    expect(readdirSync(join(guardDirFor(h.home, h.repo), "dispatches"))).toEqual([]);
+    expect((await runGit(h.repo, ["status"])).code).toBe(0);
+    expect(existsSync(marker)).toBe(false);
+    const again = reopen(h);
+    expect(again.notices).toEqual([]);
+    expect((await start(h)).run).not.toBe(run);
+    await h.release();
+  };
+  it("a deleted log", async () => {
+    await plantedThenLost((_h, log) => {
+      rmSync(log);
+    });
+  });
+  it("a log replaced with garbage (kept aside for the human)", async () => {
+    await plantedThenLost(
+      (_h, log) => {
+        writeFileSync(log, "garbage\n");
+      },
+      (h) => {
+        const forensics = join(h.repo, ".vtc/state/forensics");
+        const kept = readdirSync(forensics).map((f) => readFileSync(join(forensics, f), "utf8"));
+        expect(kept).toEqual(["garbage\n"]);
+        expect(existsSync(logPath(h, h.engine.notices[0]?.match(/runs\/([^/]+)\//)?.[1]))).toBe(
+          false,
+        );
+      },
+    );
+  });
+  it("a log cut to 0 verified events", async () => {
+    await plantedThenLost((_h, log) => {
+      const lines = readFileSync(log, "utf8").split("\n");
+      lines[0] = (lines[0] ?? "").replace("Password reset", "Password RESET");
+      writeFileSync(log, lines.join("\n"));
+    });
+  });
+  it("a lost log with no record in flight still holds new runs until the human resumes", async () => {
+    const h = createHarness();
+    await start(h);
+    await h.engine.settle();
+    const run = runId(h);
+    rmSync(join(h.repo, ".vtc/runs", run), { recursive: true });
+    const engine = reopen(h);
+    expect(engine.notices.join("\n")).toContain(`.vtc/runs/${run}/events.jsonl`);
+    await expect(start(h)).rejects.toThrow(/vtc resume/);
+    expect(await engine.resume({ run })).toMatchObject({ run, paused: false });
+    expect(reopen(h).notices).toEqual([]);
+    expect((await start(h)).run).not.toBe(run);
+    await h.release();
+  });
+  it("a finished run's left-over record: checked on open, a git change held", async () => {
+    const h = createHarness();
+    const engineer = await toEngineer(h);
+    const dispatches = join(guardDirFor(h.home, h.repo), "dispatches");
+    const name = readdirSync(dispatches)[0] ?? "";
+    const record = readFileSync(join(dispatches, name), "utf8");
+    await submitResult(h, engineer, {
+      exit: "spec_conflict",
+      conflict: { req_ids: ["REQ-1"], detail: "REQ-1 contradicts itself" },
+    });
+    const escalation = h.engine.escalations({}).escalations[0];
+    await h.engine.answer(
+      {
+        escalation: escalation?.id ?? "",
+        answer: { option: "drop", who_should_have_caught: "ba" },
+      },
+      CLAUDE,
+    );
+    await h.engine.settle();
+    const run = runId(h);
+    expect(h.engine.status({}).run.finished_at).toBeDefined();
+    // a crash between the run's end and the record's drop left the record; git changed since
+    writeFileSync(join(dispatches, name), record);
+    git(h.repo, "config", "core.hooksPath", join(h.repo, "evil-hooks"));
+    const engine = reopen(h);
+    expect(engine.status({ run }).run.finished_at).toBeDefined();
+    expect(engine.notices.join("\n")).toMatch(/core\.hookspath/i);
+    await expect(runGit(h.repo, ["status"])).rejects.toBeInstanceOf(GitConfigChangedError);
+    await expect(start(h)).rejects.toThrow(/vtc resume/);
+    git(h.repo, "config", "--unset", "core.hooksPath");
+    expect(await engine.resume({ run })).toMatchObject({ run, paused: false });
+    expect((await runGit(h.repo, ["status"])).code).toBe(0);
+    expect(readdirSync(dispatches)).toEqual([]);
+    await h.release();
+  });
+});
+
+describe("the Gate Runner's run arms the git baseline (finding gate-run-git-baseline-unarmed)", () => {
+  it("gate code that plants a filter driver: reported, held, never run by engine git", async () => {
+    const h = createHarness();
+    const engineer = await toEngineer(h);
+    const release = h.gates.hold();
+    writeFile(worktreeOf(h, "T-1"), "src/t-1/impl.ts", "export const x = 1;\n");
+    expect((await submitResult(h, engineer, { exit: "built" })).accepted).toBe(true);
+    expect(readdirSync(join(guardDirFor(h.home, h.repo), "dispatches"))).toEqual([]);
+    await vi.waitFor(() => {
+      expect(h.gates.requests.some((r) => r.reason === "round")).toBe(true);
+    });
+    // the gate's code runs now: it writes the repo's git config
+    const marker = join(h.repo, "filtered");
+    git(h.repo, "config", "filter.evil.clean", `touch "${marker}"; cat`);
+    writeFile(h.repo, ".gitattributes", "* filter=evil\n");
+    await expect(runGit(h.repo, ["status"])).rejects.toBeInstanceOf(GitConfigChangedError);
+    release();
+    await h.engine.settle();
+    expect(h.engine.status({}).run.paused).toBe(true);
+    const incident = incidents(h, "checkout_write");
+    expect(incident).toContain("filter.evil.clean");
+    expect(incident).toContain("Gate Runner");
+    expect(h.engine.gitHold).not.toBeNull();
+    await expect(runGit(h.repo, ["status"])).rejects.toBeInstanceOf(GitConfigChangedError);
+    // the hold survives a restart
+    const engine = reopen(h);
+    await expect(runGit(h.repo, ["status"])).rejects.toBeInstanceOf(GitConfigChangedError);
+    git(h.repo, "config", "--unset", "filter.evil.clean");
+    rmSync(join(h.repo, ".gitattributes"));
+    await engine.resume({});
+    expect((await runGit(h.repo, ["status"])).code).toBe(0);
+    expect(existsSync(marker)).toBe(false);
+    await h.release();
   });
 });
