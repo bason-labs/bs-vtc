@@ -44,10 +44,7 @@ const fakeStore =
       names: NAMES,
       ensure: async (name) => {
         if (state.unsupported.includes(name))
-          throw new gates.ScannerError(
-            name,
-            "no pinned build for darwin-arm64; install it yourself and confirm it in vtc calibrate",
-          );
+          throw new gates.ScannerUnavailableError(name, "darwin-arm64");
         const path = `${options.vtcHome}/scanners/${name}/bin/${name}`;
         if (state.installed.has(name)) return path;
         await download(`https://example.invalid/${name}`);

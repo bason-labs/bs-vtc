@@ -30,6 +30,8 @@ tests:
     - "**/pytest.ini"
     - "**/conftest.py"
     - "**/tox.ini"
+    - "**/tox.toml"
+    - "**/hatch.toml"
     - "**/setup.cfg"
     - "**/.flake8"
     - "**/ruff.toml"
@@ -53,6 +55,33 @@ tests:
     - "**/.semgrep/**"
     - "**/.checkov.yaml"
     - "**/.checkov.yml"
+    - "**/Makefile"
+    - "**/makefile"
+    - "**/GNUmakefile"
+    - "**/*.mk"
+    - "**/justfile"
+    - "**/Justfile"
+    - "**/.justfile"
+    - "**/*.just"
+    - "**/Taskfile.y*ml"
+    - "**/taskfile.y*ml"
+    - "**/Taskfile.dist.y*ml"
+    - "**/taskfile.dist.y*ml"
+    - "**/noxfile.py"
+    - "**/.npmrc"
+    - "**/.yarnrc"
+    - "**/.yarnrc.yml"
+    - "**/.yarn/releases/**"
+    - "**/.yarn/plugins/**"
+    - "**/.pnpmfile.*"
+    - "**/bunfig.toml"
+    - "**/.bunfig.toml"
+    - "**/.claude/**"
+    - "**/.mcp.json"
+    - "**/.codex/**"
+    - .githooks/**
+    - .husky/**
+    - .vtc/gates.yml
 gates:
   - id: install
     layer: L0
