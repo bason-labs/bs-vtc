@@ -4,12 +4,16 @@
  * No emitted file sets a permission mode or a full-access sandbox (AD-9): read-only enforcement
  * comes from tool allowlists, the Codex sandbox, the OS sandbox and the engine's write-scope check.
  */
-import { engineMcpServer, type ModelTier, type RoleTools } from "@vtc/shared";
+import { engineMcpServer, ROLE_DENIED_VTC, type ModelTier, type RoleTools } from "@vtc/shared";
 import { renderFrontmatter } from "./frontmatter.js";
 import { tomlMultiline, tomlString, tomlStringArray } from "./toml.js";
 import type { CompiledAgent } from "./types.js";
 
-/** Plugin name on both hosts. The MCP server it registers is also `vtc` (`engineMcpServer`). */
+/**
+ * Plugin name on both hosts. The MCP server it registers is also `vtc` (`engineMcpServer`).
+ * Claude Code lists plugin agents as `<plugin>:<agent>`, so an engine-launched headless run
+ * resolves `--agent vtc:<agent>` (D-aa, spine §5 reading 47); agent files carry the bare name.
+ */
 export const PLUGIN_NAME = "vtc";
 
 /** Claude Code model aliases per tier (§5.2 footnote: top/mid/low = Opus/Sonnet/Haiku). */
@@ -38,12 +42,28 @@ export const claudeToolsFor = (tools: RoleTools): string[] => [
   ...tools.engine_tools.map(claudeEngineToolName),
 ];
 
+/**
+ * What every Claude Code role agent is denied, whatever its profile (D-w, spine §5 reading 43):
+ * running each `ROLE_DENIED_VTC` subcommand of `vtc`, and file writes (`Edit`, `Write`) to each
+ * guarded glob under the VTC home. The rules name the default home `~/.vtc/`; a `$VTC_HOME`
+ * elsewhere is not known when the plugin is compiled, and the adapter's sandbox profile, which
+ * resolves it, stays the barrier for shell writes. A read-only agent has none of these tools,
+ * but gets the same list so no agent depends on its allowlist alone.
+ */
+export const CLAUDE_DENIED_TOOLS: readonly string[] = [
+  ...ROLE_DENIED_VTC.subcommands.map((sub) => `Bash(vtc ${sub}:*)`),
+  ...ROLE_DENIED_VTC.homeWriteDeny.flatMap((glob) =>
+    ["Edit", "Write"].map((tool) => `${tool}(~/.vtc/${glob})`),
+  ),
+];
+
 export const renderClaudeAgent = (agent: CompiledAgent): string =>
   renderFrontmatter(
     {
       name: agent.name,
       description: agent.description,
       tools: claudeToolsFor(agent.tools).join(", "),
+      disallowedTools: CLAUDE_DENIED_TOOLS.join(", "),
       model: agent.model.model ?? CLAUDE_MODEL_ALIASES[agent.model.tier],
       effort: agent.model.effort,
     },
@@ -78,11 +98,17 @@ export const codexMcpTable = (tools: RoleTools): string[] => {
 };
 
 /**
- * A Codex agent file. It sets only `model_reasoning_effort`, never a model (spine §5 reading 26,
- * D-h): the Codex top/mid/low → model map lives in the Codex adapter's defaults and
- * `project.yaml` `hosts.models.codex`, and the engine passes the resolved model on `spawn_role`.
- * Until the spike names Codex model ids, every Codex agent runs on the session's model, and
- * `role.yaml` may not pin one for Codex (`codexModelErrors`).
+ * A Codex agent file. It sets only `model_reasoning_effort`, never a model (spine §5 readings 26
+ * and 51, D-h, D-ae): the engine is the only model resolver, its built-in Codex map names no ids
+ * until the spike does, and `spawn_role.model` is then absent, so every Codex agent runs on the
+ * session's model and `role.yaml` may not pin one for Codex (`codexModelErrors`).
+ *
+ * The VTC guard rails (D-w, `ROLE_DENIED_VTC`) cannot be named per agent on Codex: a command
+ * deny is a session-level execpolicy rule, not an agent key. The barrier is the sandbox: a
+ * read-only or workspace-write `sandbox_mode` with no writable roots of its own keeps the VTC
+ * home outside every role's writes, `vtc calibrate`'s included; the adapter's sandbox profile
+ * covers the rest. Every key is a top-level Codex config key, so whichever way the headless role
+ * identity spike loads a role (`codex exec` has no `--agent`), this file carries over as is.
  */
 export const renderCodexAgent = (agent: CompiledAgent): string =>
   [
