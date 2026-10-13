@@ -92,4 +92,30 @@ describe("the compiled plugins load into the engine (AD-14 rule 6)", () => {
         expect(catalog.profileFor(host, p.discipline ?? "")).toBe(p.name);
     }
   });
+
+  it("an Engineer task runs as its profile agent under the Engineer's result contract (reading 38)", () => {
+    const catalog = core.pluginCatalogFrom(bundle());
+    const registry = core.createRoleRegistry(core.compiledRoleContracts(bundle()));
+    const engineer = registry.get("engineer");
+    for (const host of HOST_IDS) {
+      const profiles =
+        core.pluginManifest(bundle(), host)?.agents.filter((a) => a.kind === "engineer_profile") ??
+        [];
+      expect(profiles.length).toBeGreaterThan(0);
+      for (const p of profiles) {
+        // the engine spawns this agent for the discipline and records its own prompt SHA (§13)
+        const agent = catalog.profileFor(host, p.discipline ?? "");
+        expect(agent).toBe(p.name);
+        expect(catalog.promptSha(p.name, host)).toBe(p.prompt_sha256);
+        expect(p.prompt_sha256).not.toBe(catalog.promptSha(agentNameFor("engineer"), host));
+        // it reports role `engineer`, which the engine checks against the Engineer's contract
+        const text = compiled.targets[host].find((f) => f.path === p.file)?.text ?? "";
+        expect(text, `${host}: ${p.name}`).toContain("your result's `role` is `engineer`");
+        expect(text).not.toContain(`- Role: ${p.role}`);
+        const contract = registry.get(p.role);
+        expect(contract?.exits).toEqual(engineer?.exits);
+        expect(contract?.output).toEqual(engineer?.output);
+      }
+    }
+  });
 });

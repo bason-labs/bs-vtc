@@ -182,6 +182,16 @@ describe("compilePlugins: agent instructions", () => {
     expect([...positions].sort((a, b) => a - b)).toEqual(positions);
   });
 
+  it("has a profile report role engineer, the family's shared result contract (reading 38)", () => {
+    for (const text of [claude("vtc-engineer-frontend"), codex("vtc-engineer-frontend")]) {
+      expect(text).toContain(
+        "- Role: engineer, frontend profile engineer_frontend (version 1.0.0); your result's `role` is `engineer`",
+      );
+      expect(text).not.toContain("- Role: engineer_frontend");
+    }
+    expect(claude("vtc-engineer")).toContain("- Role: engineer (version 1.0.0)");
+  });
+
   it("builds a lens reviewer from the shared lens procedure and its lens skill (§5.3)", () => {
     const text = claude("vtc-lens-db");
     for (const needle of ["## Lens reviewer", "LENS-DB-LOCKED", "LENS-DB-CHECKLIST"]) {
