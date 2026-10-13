@@ -25,6 +25,7 @@ import {
   Engine,
   createRoleRegistry,
   type EngineCoreDeps,
+  type PluginCatalog,
 } from "../../src/core/index.js";
 import { createGitOps, createWorkspace, type PullRequestService } from "../../src/git/index.js";
 import { globMatch } from "../../src/core/globs.js";
@@ -235,6 +236,8 @@ export interface HarnessOptions {
   readonly subagentName?: (agent: string) => string;
   /** Role contracts in place of the fixture set (they mirror `roles/`). */
   readonly roles?: readonly RoleContract[];
+  /** The compiled plugins' catalog (prompt SHAs, discipline profiles); none by default. */
+  readonly plugins?: PluginCatalog;
 }
 
 export const DEFAULT_GATES_YML = {
@@ -339,7 +342,7 @@ export const createHarness = (options: HarnessOptions = {}): Harness => {
       },
     },
     roles: createRoleRegistry(options.roles ?? ALL_FIXTURE_ROLES),
-    plugins: createPluginCatalog({}),
+    plugins: options.plugins ?? createPluginCatalog({}),
     now,
     random: () => 0.5,
     remote: "origin",

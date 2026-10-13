@@ -111,6 +111,16 @@ const CONTRACT_INTRO: Readonly<Record<"run" | "advisor", { checked: string; inpu
   },
 };
 
+/**
+ * The contract's role line. An engineer profile reports role `engineer`: the engine dispatches
+ * the Engineer and spawns the profile agent for the task's discipline (§5.2a, spine §5 reading
+ * 38), so the whole family shares the Engineer's result contract.
+ */
+const roleLine = (role: RoleContract, contract: EffectiveRoleContract): string =>
+  role.kind === "engineer_profile"
+    ? `- Role: engineer, ${role.discipline ?? ""} profile ${role.id} (version ${role.version}); your result's \`role\` is \`engineer\``
+    : `- Role: ${role.id}${contract.mode === undefined ? "" : `, mode ${contract.mode}`} (version ${role.version})`;
+
 /** The `## Contract` section for one effective contract. */
 export const renderContract = (role: RoleContract, contract: EffectiveRoleContract): string => {
   const intro = CONTRACT_INTRO[role.kind === "advisor" ? "advisor" : "run"];
@@ -119,7 +129,7 @@ export const renderContract = (role: RoleContract, contract: EffectiveRoleContra
     "",
     intro.checked,
     "",
-    `- Role: ${role.id}${contract.mode === undefined ? "" : `, mode ${contract.mode}`} (version ${role.version})`,
+    roleLine(role, contract),
     `- Inputs (${intro.inputs}): ${list(contract.inputs)}`,
     `- Exits: ${list(contract.exits)}`,
     ...contract.exits.map((exit) => `  - \`${exit}\`: ${EXIT_MEANINGS[exit]}`),

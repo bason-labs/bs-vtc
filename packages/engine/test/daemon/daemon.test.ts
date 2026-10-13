@@ -88,7 +88,7 @@ describe("runDaemon (AD-12, AD-19)", () => {
         pid: process.pid,
         port: daemon.port,
         repo_root: repo,
-        prototype_port: null,
+        prototype_port: daemon.prototypePort,
       });
       expect(readEngineDiscovery(home, repo)).toEqual(daemon.discovery);
       expect(existsSync(join(repo, ENGINE_INSTANCE.lockFile))).toBe(true);
@@ -130,6 +130,30 @@ describe("runDaemon (AD-12, AD-19)", () => {
     expect((await client.call("status", {})).run.phase).toBe("discover");
     await client.close();
     await again.close();
+  });
+  it("serves the prototype origin once the Designer writes it mid-run (AD-5 rule 9)", async () => {
+    const repo = initRepo();
+    const home = shortHome();
+    const daemon = await runDaemon(depsFor(repo, home), { wake: false });
+    try {
+      // the listener runs from the start, so discovery and the health route can name it
+      const port = daemon.prototypePort;
+      expect(port).toEqual(expect.any(Number));
+      expect(daemon.discovery.prototype_port).toBe(port);
+      const health = async () =>
+        (JSON.parse((await get(daemon.port, "/api/health")).body) as { prototype_url: unknown })
+          .prototype_url;
+      // no prototype yet: no URL, and the origin answers 404
+      expect(await health()).toBeNull();
+      expect((await get(port ?? 0, "/")).status).toBe(404);
+      // the Designer creates .vtc/design/prototype/ after the daemon started
+      mkdirSync(join(repo, ".vtc/design/prototype"), { recursive: true });
+      writeFileSync(join(repo, ".vtc/design/prototype/index.html"), "<h1>proto</h1>");
+      expect(await health()).toBe(`http://127.0.0.1:${String(port)}/`);
+      expect(await get(port ?? 0, "/")).toMatchObject({ status: 200, body: "<h1>proto</h1>" });
+    } finally {
+      await daemon.close();
+    }
   });
   it("takes over a stale lock and records the incident in the active run", async () => {
     const repo = initRepo();
