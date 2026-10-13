@@ -47,6 +47,11 @@ export interface CodexAdapterOptions {
    * cli's own rule); the cli passes the one it resolved.
    */
   readonly vtcHome?: string;
+  /**
+   * The platform roles run on, which decides whether the sandbox profile can claim the network
+   * is enforced (see `CODEX_UNIX_CONNECT_BLOCKED_PLATFORMS`). Default: `process.platform`.
+   */
+  readonly platform?: NodeJS.Platform;
 }
 
 /** Per user, so two users of one machine never share it (and a planted one is refused). */
@@ -57,7 +62,10 @@ export const createCodexAdapter = (options: CodexAdapterOptions = {}): HostAdapt
   const spawner = options.spawner ?? nodeSpawner;
   const scratchDir = options.scratchDir ?? defaultScratchDir();
   const commandOptions = { scratchDir };
-  const profileOptions = { vtcHome: options.vtcHome ?? envHome("VTC_HOME", ".vtc") };
+  const profileOptions = {
+    vtcHome: options.vtcHome ?? envHome("VTC_HOME", ".vtc"),
+    ...(options.platform === undefined ? {} : { platform: options.platform }),
+  };
   const runs = createRunLauncher({
     spawner,
     outcome: codexOutcomeAfterExit,
