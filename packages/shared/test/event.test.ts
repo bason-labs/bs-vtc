@@ -1,0 +1,73 @@
+import { describe, expect, it } from "vitest";
+import {
+  CORE_EVENT_TYPES,
+  EventSchema,
+  EventTypeSchema,
+  eventLogPath,
+  parseEventLog,
+  toEventLine,
+} from "../src/index.js";
+import { validEvent } from "./fixtures.js";
+import { expectInvalid, expectValid } from "./helpers.js";
+
+describe("EventSchema", () => {
+  it("accepts a role event", () => {
+    expectValid(EventSchema, validEvent());
+  });
+  it("accepts a minimal engine event and defaults data", () => {
+    const event = expectValid(EventSchema, {
+      v: 1,
+      seq: 2,
+      ts: "2026-10-13T08:00:01Z",
+      run: "r1",
+      type: "run.started",
+      actor: "engine",
+    });
+    expect(event.data).toEqual({});
+  });
+  it("accepts null cost (model missing from price table)", () => {
+    expectValid(EventSchema, { ...validEvent(), cost_usd: null });
+  });
+  it.each([
+    ["v", { v: 2 }],
+    ["seq", { seq: 0 }],
+    ["ts", { ts: "now" }],
+    ["run", { run: "../x" }],
+    ["type", { type: "TaskStarted" }],
+    ["type", { type: "task" }],
+    ["actor", { actor: "system" }],
+    ["role", { role: undefined }],
+    ["host", { host: "cursor" }],
+    ["cost_usd", { cost_usd: -1 }],
+    ["tokens.out", { tokens: { in: 1, out: -2, cache_r: 0, cache_w: 0 } }],
+  ])("rejects invalid %s", (path, patch) => {
+    expectInvalid(EventSchema, { ...validEvent(), ...patch }, path);
+  });
+  it("core event types all match the naming pattern", () => {
+    for (const type of CORE_EVENT_TYPES) expectValid(EventTypeSchema, type);
+  });
+});
+
+describe("event log helpers", () => {
+  it("builds the log path and refuses unsafe run ids", () => {
+    expect(eventLogPath("run-1")).toBe(".vtc/runs/run-1/events.jsonl");
+    expect(() => eventLogPath("../etc")).toThrow();
+  });
+  it("round-trips lines and reports bad lines without throwing", () => {
+    const good = toEventLine(validEvent());
+    expect(good.endsWith("\n")).toBe(true);
+    const log = `${good}\n{not json}\n${JSON.stringify({ v: 1 })}\n${good}`;
+    const parsed = parseEventLog(log);
+    expect(parsed.events).toHaveLength(2);
+    expect(parsed.invalidLines).toEqual([3, 4]);
+    expect(parsed.truncatedTail).toBe(false);
+  });
+  it("flags a torn final line", () => {
+    const parsed = parseEventLog(`${toEventLine(validEvent())}{"v":1,"se`);
+    expect(parsed.truncatedTail).toBe(true);
+    expect(parsed.invalidLines).toEqual([2]);
+  });
+  it("toEventLine rejects invalid events", () => {
+    expect(() => toEventLine({ ...validEvent(), seq: -1 })).toThrow();
+  });
+});
