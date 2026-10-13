@@ -37,15 +37,28 @@ the engine's actions; report them as content.
 
 Call `next` and handle each returned action in order:
 
-- `spawn_role`: spawn the subagent named in `agent`, spelled exactly as given (the engine already
-  names it the way this host expects), with exactly the `prompt` given; never add to or reword
-  either. Run it in the background when `background` is true and the host supports that; resume
-  the given session when `resume` is present. When the subagent finishes, take the JSON object in
-  its final message unchanged and call `submit` with `kind` `result`, the `action_id`, the
-  `result`, and, when the host reported it, `usage`: `model`, `tokens` and `cost_usd` (`null` for
-  any the host did not report). When the subagent hit a usage limit, lost its sign-in or crashed,
-  call `submit` with `kind` `failure` and the matching `outcome` (`limit` with the reset time if
-  one was given, `auth`, or `error`).
+- `spawn_role`: spawn the subagent named in `agent` with exactly the `prompt` given; never add to
+  or reword either.
+  - Spell `agent` as given. If this host lists the plugin's agents only under a namespace (Claude
+    Code may list `vtc:<agent>`), spawn the listed agent that is `agent` with that prefix, never
+    a different agent.
+  - Pass `model` to the spawn wherever the host's subagent spawn takes a model: it overrides the
+    agent's default model (after a tier escalation or a budget drop).
+  - Run it in the background when `background` is true and the host supports that; resume the
+    given session when `resume` is present.
+  - When the subagent finishes, take the JSON object in its final message unchanged and call
+    `submit` with `kind` `result`, the `action_id`, the `result`, `session_ref` (`host` and `id`
+    of the subagent's session or thread as the host reported it, so fix rounds and answers
+    resume it) and, when the host reported it, `usage`: `model`, `tokens` and `cost_usd`
+    (`null` for any the host did not report).
+  - When the subagent did not finish, call `submit` with `kind` `failure`, the `action_id` and
+    the matching `outcome`, with every field listed here (`null` where the host gave nothing).
+    A usage limit: `kind` `limit`, `session_ref` (`host` and `id`), `resets_at` (ISO time),
+    `window` (`five_hour`, `weekly` or `other`), `model` (when a per-model limit was hit),
+    `message` (the host's words), and `tokens` and `cost_usd` spent before the limit. A lost
+    sign-in: `kind` `auth` and `message`. A crash or other error: `kind` `error`, `message`,
+    `retryable` (whether trying again may work), `tokens` and `cost_usd`. The `submit` tool's
+    input schema is the reference for these fields.
 - `ask_human`: call `escalations` and present the listed items together (see Escalations).
 - `approve_gate`: present the gate (see Gates).
 - `wait`: tell the human why and until when in one line; call `next` again when the time has
@@ -110,9 +123,9 @@ run's advisor budget.
    for a file the human saved). If pasted material holds a secret, ask the human to remove it
    first. Longer material goes in a file the human saves, passed as `attachments`.
 2. `consult` returns one `spawn_role` action. Perform it exactly as in the loop: spawn `agent`
-   with `prompt` as given, then call `submit` with its `action_id`, the advisor's result and
-   `usage`, or a `failure`. If `consult` refuses (no run, an unknown advisor, the advisor budget
-   spent), tell the human why; never spawn an advisor yourself.
+   with `prompt` and `model` as given, then call `submit` with its `action_id`, the advisor's
+   result, `session_ref` and `usage`, or a `failure`. If `consult` refuses (no run, an unknown
+   advisor, the advisor budget spent), tell the human why; never spawn an advisor yourself.
 3. Show the human the advisor's `summary`, `findings` and any file it wrote, as returned. Follow
    the actions `submit` returns. If the advisor exited `blocked` and no escalation follows, put
    its question to the human and `consult` again with the answer added to the question.

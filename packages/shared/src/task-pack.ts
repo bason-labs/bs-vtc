@@ -35,6 +35,11 @@ export const PACK_INPUT_TYPES = {
   designMd: "design_md",
   componentManifest: "component_manifest",
   interfaceContract: "interface_contract",
+  /**
+   * The human's question to an advisor (`consult`), written by the engine and listed first in
+   * the advisor's inputs (§5.4). `request` stays the run's request, never the question.
+   */
+  advisorQuestion: "advisor_question",
 } as const;
 
 /**

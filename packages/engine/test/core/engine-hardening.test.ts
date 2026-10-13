@@ -18,6 +18,7 @@ import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import { engineRepoKey, HIDDEN_TESTS, type LeadAction } from "@vtc/shared";
 import { cleanupDirs, git, tempDir, writeFile } from "../helpers/repo.js";
+import { ALL_FIXTURE_ROLES } from "../fixtures/roles.js";
 import {
   authorTests,
   build,
@@ -77,30 +78,30 @@ describe("phase roles in their own worktree, the run's config frozen (spine §5 
     const carto = only(await next(h), "repo_cartographer");
     const dir = workdir(carto);
     expect(dir).toBe(join(h.repo, ".vtc/state/worktrees", `R-${h.engine.status({}).run.id}-a-1`));
-    writeFile(dir, ".vtc/research/repo-map.md", "# map\n");
+    writeFile(dir, ".vtc/research/repo-map/map.md", "# map\n");
     writeFile(dir, "src/backdoor.ts", "export const x = 1;\n");
     writeFile(dir, ".vtc/tasks/T-9.md", "forged plan\n");
     const out = await submitResult(h, carto, {
       exit: "done",
-      artifacts: [{ type: "repo_map", path: ".vtc/research/repo-map.md" }],
+      artifacts: [{ type: "repo_map", path: ".vtc/research/repo-map/map.md" }],
     });
     expect(out).toMatchObject({ accepted: false, rejection: { reason: "write_scope" } });
     const issues = (out.rejection?.issues ?? []).join("\n");
     expect(issues).toContain("src/backdoor.ts was written outside the role's write paths");
     expect(issues).toContain(".vtc/tasks/T-9.md was written where only the engine writes");
     expect(existsSync(join(h.repo, "src/backdoor.ts"))).toBe(false);
-    expect(existsSync(join(h.repo, ".vtc/research/repo-map.md"))).toBe(false);
+    expect(existsSync(join(h.repo, ".vtc/research/repo-map/map.md"))).toBe(false);
     // the worktree is gone; the step is simply re-dispatched (the checkout was never touched)
     expect(existsSync(dir)).toBe(false);
     expect(h.engine.status({}).run.paused).toBe(false);
     const again = only(out.actions, "repo_cartographer");
-    writeFile(workdir(again), ".vtc/research/repo-map.md", "# map\n");
+    writeFile(workdir(again), ".vtc/research/repo-map/map.md", "# map\n");
     const accepted = await submitResult(h, again, {
       exit: "done",
-      artifacts: [{ type: "repo_map", path: ".vtc/research/repo-map.md" }],
+      artifacts: [{ type: "repo_map", path: ".vtc/research/repo-map/map.md" }],
     });
     expect(accepted.accepted).toBe(true);
-    expect(readFileSync(join(h.repo, ".vtc/research/repo-map.md"), "utf8")).toBe("# map\n");
+    expect(readFileSync(join(h.repo, ".vtc/research/repo-map/map.md"), "utf8")).toBe("# map\n");
     await h.release();
   });
   it("records a config change as an incident and keeps the run's config, without pausing", async () => {
@@ -132,35 +133,39 @@ describe("phase roles in their own worktree, the run's config frozen (spine §5 
     const h = createHarness();
     await start(h);
     const carto = only(await next(h), "repo_cartographer");
-    writeFile(workdir(carto), ".vtc/research/repo-map.md", "# map\n");
-    writeFile(workdir(carto), ".vtc/research/notes/extra.md", "notes\n");
+    writeFile(workdir(carto), ".vtc/research/repo-map/map.md", "# map\n");
+    writeFile(workdir(carto), ".vtc/research/repo-map/notes/extra.md", "notes\n");
     // the user keeps working in the checkout meanwhile
     writeFile(h.repo, "src/mine.ts", "export const mine = 1;\n");
     const out = await submitResult(h, carto, {
       exit: "done",
-      artifacts: [{ type: "repo_map", path: ".vtc/research/repo-map.md" }],
+      artifacts: [{ type: "repo_map", path: ".vtc/research/repo-map/map.md" }],
     });
     expect(out.accepted).toBe(true);
-    expect(readFileSync(join(h.repo, ".vtc/research/notes/extra.md"), "utf8")).toBe("notes\n");
+    expect(readFileSync(join(h.repo, ".vtc/research/repo-map/notes/extra.md"), "utf8")).toBe(
+      "notes\n",
+    );
     expect(readFileSync(join(h.repo, "src/mine.ts"), "utf8")).toBe("export const mine = 1;\n");
     expect(h.engine.status({}).run.paused).toBe(false);
     // the next role sees the documents of the ones before it
     const ba = only(out.actions, "ba");
-    expect(readFileSync(join(workdir(ba), ".vtc/research/repo-map.md"), "utf8")).toBe("# map\n");
+    expect(readFileSync(join(workdir(ba), ".vtc/research/repo-map/map.md"), "utf8")).toBe(
+      "# map\n",
+    );
     await h.release();
   });
   it("never overwrites a file the user changed while the role worked", async () => {
     const h = createHarness();
     await start(h);
     const carto = only(await next(h), "repo_cartographer");
-    writeFile(workdir(carto), ".vtc/research/repo-map.md", "# the role's map\n");
-    writeFile(h.repo, ".vtc/research/repo-map.md", "# the user's map\n");
+    writeFile(workdir(carto), ".vtc/research/repo-map/map.md", "# the role's map\n");
+    writeFile(h.repo, ".vtc/research/repo-map/map.md", "# the user's map\n");
     const out = await submitResult(h, carto, {
       exit: "done",
-      artifacts: [{ type: "repo_map", path: ".vtc/research/repo-map.md" }],
+      artifacts: [{ type: "repo_map", path: ".vtc/research/repo-map/map.md" }],
     });
     expect(out).toMatchObject({ accepted: false, rejection: { reason: "out_of_order" } });
-    expect(readFileSync(join(h.repo, ".vtc/research/repo-map.md"), "utf8")).toBe(
+    expect(readFileSync(join(h.repo, ".vtc/research/repo-map/map.md"), "utf8")).toBe(
       "# the user's map\n",
     );
     expect(h.engine.status({}).run.paused).toBe(true);
@@ -307,8 +312,20 @@ describe("§11 shares within a task", () => {
       "- REQ-1.AC-2: Given a stored token When it is read Then it is never logged.",
       "",
     ].join("\n");
+    // the shipped Spec Verifier already runs at the low tier; at mid it has a tier to drop
     const h = createHarness({
       project: { concurrency: 1, budgets: { task_usd: { S: 1, M: 1, L: 1 } } },
+      roles: ALL_FIXTURE_ROLES.map((r) =>
+        r.id === "spec_verifier"
+          ? {
+              ...r,
+              models: {
+                "claude-code": { tier: "mid", effort: "medium" },
+                codex: { tier: "mid", effort: "medium" },
+              },
+            }
+          : r,
+      ),
     });
     const actions = await throughPlan(h, [draft("T-1")], spec);
     await authorTests(h, only(actions, "qa"));

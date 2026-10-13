@@ -275,8 +275,9 @@ describe("the v1 roster (§5.2, §5.2a, §5.3)", () => {
     expect(used.filter((t) => !isKnownArtifactType(t) && !proposed.includes(t))).toEqual([]);
   });
 
-  it("allows only the advisor question as a type still proposed to @vtc/shared", () => {
-    expect(PROPOSED_ARTIFACT_TYPES).toEqual([ADVISOR_QUESTION_ARTIFACT]);
+  it("has no type still proposed to @vtc/shared: the advisor question is a known type now", () => {
+    expect(PROPOSED_ARTIFACT_TYPES).toEqual([]);
+    expect(isKnownArtifactType(ADVISOR_QUESTION_ARTIFACT)).toBe(true);
   });
 });
 
@@ -452,9 +453,22 @@ describe("the advisors (§5.4: Tier 3; called through the engine's consult, spin
     }
   });
 
-  it("tells the Lead to spawn the agent exactly as the engine names it (AD-14 rule 1)", () => {
-    expect(lead()).toMatch(/spelled exactly as given/);
-    expect(lead()).not.toMatch(/`vtc:/);
+  it("tells the Lead to spawn the agent the engine names, or its host-namespaced listing (AD-14 rule 1)", () => {
+    const loop = (/^## The loop\n([\s\S]*?)\n## /m.exec(lead())?.[1] ?? "").replace(/\s+/g, " ");
+    expect(loop).toContain("Spell `agent` as given.");
+    expect(loop).toContain("never a different agent");
+    // until the plugin-agent-name spike settles, the skill does not promise a host-ready name
+    expect(loop).not.toMatch(/already names it the way this host expects/);
+  });
+
+  it("tells the Lead to pass the model and report the session and full failure outcomes (AD-4)", () => {
+    const loop = (/^## The loop\n([\s\S]*?)\n## /m.exec(lead())?.[1] ?? "").replace(/\s+/g, " ");
+    expect(loop).toMatch(/Pass `model` to the spawn/);
+    expect(loop).toMatch(
+      /`submit` with `kind` `result`, the `action_id`, the `result`, `session_ref`/,
+    );
+    for (const field of ["resets_at", "window", "message", "retryable", "tokens", "cost_usd"])
+      expect(loop, field).toContain(`\`${field}\``);
   });
 });
 

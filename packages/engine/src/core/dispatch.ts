@@ -9,7 +9,9 @@ import { join } from "node:path";
 import {
   agentNameFor,
   HIDDEN_TESTS,
+  PACK_INPUT_TYPES,
   planDispatch,
+  resolveRoleMode,
   type ArtifactRef,
   type EscalationAnswer,
   type Finding,
@@ -395,6 +397,48 @@ const depthsFor = (
   return {};
 };
 
+/** The DISCOVER roles whose outputs later phase roles read (§6.1): the repo map, the brief. */
+const DISCOVER_ROLES = ["repo_cartographer", "research_analyst"] as const;
+
+type SubmittedArtifacts = { artifacts?: { type: string; path: string }[] } | undefined;
+
+/** The artifacts of a role's latest accepted (submitted) result in the run. */
+const lastSubmittedArtifacts = (
+  state: RunHandle["state"],
+  role: string,
+): readonly { type: string; path: string }[] =>
+  (
+    state.events.findLast((e) => e.type === "role.submitted" && e.role === role)
+      ?.data as SubmittedArtifacts
+  )?.artifacts ?? [];
+
+/** The type each artifact path was last submitted as, by any role of the run. */
+const submittedArtifactTypes = (state: RunHandle["state"]): Map<string, string> => {
+  const types = new Map<string, string>();
+  for (const e of state.events)
+    if (e.type === "role.submitted")
+      for (const a of (e.data as SubmittedArtifacts)?.artifacts ?? []) types.set(a.path, a.type);
+  return types;
+};
+
+/**
+ * The artifact type of a frozen G1/G2 file no role submitted (it was never named in a result):
+ * by the §3 layout of `.vtc/spec/`, `.vtc/architecture/` and `.vtc/design/`.
+ */
+const frozenTypeByPath = (path: string): string => {
+  if (path.startsWith(".vtc/spec/")) return "spec";
+  if (path.startsWith(".vtc/architecture/threat-model/")) return "threat_model";
+  if (path.startsWith(".vtc/architecture/")) return "architecture";
+  const design = path.startsWith(".vtc/design/") ? path.slice(".vtc/design/".length) : null;
+  if (design === null) return "spec";
+  if (design.startsWith("flows")) return "design_flows";
+  if (design.startsWith("screens")) return "screens";
+  if (design.startsWith("tokens")) return "design_tokens";
+  if (design === "DESIGN.md") return PACK_INPUT_TYPES.designMd;
+  if (design.startsWith("components/")) return "component_specs";
+  return "prototype";
+};
+
 /** Renders the pack for a step and writes it under `.vtc/state/packs/` (AD-14 rule 5). */
 const packFor = (k: Kernel, h: RunHandle, step: StepSpec, actionId: string): TaskPackInput => {
   const state = h.state;
@@ -435,12 +479,19 @@ const packFor = (k: Kernel, h: RunHandle, step: StepSpec, actionId: string): Tas
   }
   for (const consumed of task?.consumes_contracts ?? [])
     inputs.push({ type: "interface_contract", path: consumed.path });
+  // AD-14 rule 5: an input carries the type its producing role submitted it as, the type the
+  // reading role's contract declares (a path prefix is only the fallback for an unknown path)
+  const submitted = submittedArtifactTypes(state);
+  if (task === undefined && ["specify", "design", "plan"].includes(state.run.phase)) {
+    const effective = contract === undefined ? undefined : resolveRoleMode(contract, step.mode);
+    const declared = effective?.ok === true ? effective.contract.inputs : [];
+    for (const role of DISCOVER_ROLES) {
+      for (const a of lastSubmittedArtifacts(state, role))
+        if (declared.includes(a.type)) inputs.push({ type: a.type, path: a.path });
+    }
+  }
   for (const gate of state.run.gates.G1.frozen.concat(state.run.gates.G2.frozen)) {
-    const type = gate.path.startsWith(".vtc/spec/")
-      ? "spec"
-      : gate.path.startsWith(".vtc/architecture/")
-        ? "architecture"
-        : "design";
+    const type = submitted.get(gate.path) ?? frozenTypeByPath(gate.path);
     if (task !== undefined || state.run.phase === "plan" || state.run.phase === "design")
       inputs.push({ type, path: gate.path });
   }
@@ -534,7 +585,8 @@ export const dispatchStep = (
     ...(task === undefined ? {} : { feature: task.feature }),
     ...(step.subject === undefined ? {} : { subject: step.subject }),
     pack,
-    agent,
+    // AD-14 rule 1: the host's adapter adds its plugin namespace; the log keeps the base name
+    agent: k.deps.adapters[host]?.subagentName?.(agent) ?? agent,
     prompt: prompt.slice(0, 8000),
     background: capabilities?.backgroundSubagents ?? false,
     model: model.model,

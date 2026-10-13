@@ -206,17 +206,21 @@ export const createHttpApi = async (options: HttpApiOptions): Promise<HttpApi> =
         `id: ${sseEventId(event.run, event.seq)}\nevent: event\ndata: ${JSON.stringify(event)}\n\n`,
       );
     };
+    // AD-5 rule 6: `?run=` alone narrows the stream. Last-Event-ID (`<run>:<seq>`) only says
+    // where to resume that run's replay; a global stream stays global after a reconnect.
     const last = req.headers["last-event-id"];
     const resume = typeof last === "string" ? parseSseEventId(last) : null;
-    const run = query.get("run") ?? resume?.run ?? null;
-    if (run !== null) {
-      const page = options.readModel.events(
-        run,
-        resume?.run === run ? resume.seq : 0,
-        EVENT_PAGE_LIMIT.max,
-      );
-      if (page.ok) for (const event of page.body.events) write(event);
-    }
+    const run = query.get("run");
+    const replay = (from: string, after: number): void => {
+      for (let cursor: number | null = after; cursor !== null;) {
+        const page = options.readModel.events(from, cursor, EVENT_PAGE_LIMIT.max);
+        if (!page.ok) return;
+        for (const event of page.body.events) write(event);
+        cursor = page.body.events.length === 0 ? null : page.body.next_after;
+      }
+    };
+    if (run !== null) replay(run, resume?.run === run ? resume.seq : 0);
+    else if (resume !== null) replay(resume.run, resume.seq);
     streams.add(res);
     const unsubscribe = options.subscribe?.((event) => {
       if (run === null || event.run === run) write(event);
