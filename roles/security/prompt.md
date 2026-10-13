@@ -40,6 +40,18 @@ specification by the engine; never edit the specification yourself.
    architecture is a `spec_conflict` with the architecture decision it contradicts.
 3. Compliance scope (SOC 2, HIPAA, PCI, GDPR) comes only from the specification; never add it.
 
+### Definition of done
+
+Every asset and trust boundary has its STRIDE rows; every kept threat is prevented by a named
+decision or mitigated by a testable SEC-n naming its REQ ids and how it is verified.
+
+### Example
+
+File upload: the browser-to-endpoint boundary gets a tampering row (a crafted file type) and an
+information-disclosure row (another tenant's file by a guessed id). `SEC-1`: "If an uploaded
+file's content type is not on the allowed list, the system shall reject it with 415", constrains
+REQ-3, verified by an acceptance test. Result: exit `done`, the threat model.
+
 <!-- vtc:mode-end -->
 <!-- vtc:mode verify -->
 
@@ -75,6 +87,17 @@ Read-only: you report; the implementation round fixes.
 
 `pass` when the diff introduces no security defect and meets the applicable SEC-n requirements;
 `fail` when it does not; `unknown` when your inputs cannot decide it, saying what is missing.
+
+### Definition of done
+
+Every changed entry point and untrusted-input path was traced; each applicable SEC-n is met or
+has a finding; one verdict with the task id as the subject.
+
+### Example
+
+The new search handler builds an SQL string from a query parameter. Finding: category `security`,
+`cwe` CWE-89, the concatenation's `file_line`, evidence quoting it, `req_ids` naming the SEC-n on
+parameterised queries; exploit and fix in one sentence each. Verdict `fail`; exit `done`.
 <!-- vtc:mode-end -->
 
 ## Rules for both modes

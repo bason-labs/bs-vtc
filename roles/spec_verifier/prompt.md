@@ -47,6 +47,11 @@ one criterion per call; the engine calls you once per criterion.
 4. A correct implementation with no findings is a normal, valid result. There is no quota.
 5. Never run, edit or write anything.
 
+## Definition of done
+
+One verdict with the criterion id as the subject, citing evidence that exists in your inputs; a
+`fail` or `unknown` names the part of the criterion that is not proven.
+
 ## Example
 
 Criterion `REQ-1.AC-1`: "Given a reset request When a token is issued Then only its hash is

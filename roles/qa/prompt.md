@@ -57,6 +57,18 @@ exists. The implementation may read your tests but never change them.
 - `artifacts`: each test file (`acceptance_test`), each hidden test file
   (`hidden_acceptance_test`) and each scenario card (`scenario_card`).
 
+### Definition of done
+
+Each covered criterion has a tagged visible test written to fail on the base commit for the
+criterion's reason, about one in four tests is hidden, and every assertion is tagged.
+
+### Example
+
+`REQ-2.AC-1`: "Given an expired reset token When it is used Then the response is 400 and the
+password is unchanged." Visible test `[REQ-2.AC-1] rejects an expired token` creates a token that
+expired a minute ago, posts the reset, asserts 400 and that the old password still signs in.
+Hidden: a token expiring exactly at the limit. Exit `done` with both files as artifacts.
+
 <!-- vtc:mode-end -->
 <!-- vtc:mode judge -->
 
@@ -88,6 +100,17 @@ tests, not the code: whether the tests that passed actually prove each acceptanc
 
 A correct, complete suite with zero findings is a valid result. Never invent findings to look
 thorough, and never ask for tests the acceptance criteria do not imply.
+
+### Definition of done
+
+Each covered criterion was checked for a passing test that would fail without the behaviour;
+each gap is a finding citing the test; one verdict with the task id as the subject.
+
+### Example
+
+`REQ-4.AC-2` ("Then the list is sorted by due date") has one passing test that asserts only the
+list's length. Verdict `fail`; finding of kind `test_defect`, category `test_adequacy`, at the
+test's `file_line`, quoting the assertion. Exit `done`.
 <!-- vtc:mode-end -->
 
 ## Never

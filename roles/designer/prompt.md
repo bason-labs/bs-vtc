@@ -53,6 +53,21 @@ Every visual decision serves the product's user and job; nothing is decoration b
 
 Artifacts by type: `design_flows`, `screens`, `design_tokens`, `component_specs`, `prototype`.
 In the summary, list each screen with its states and the requirements it covers.
+
+## Definition of done
+
+Every user-facing requirement is covered by a screen; every screen's required states are listed
+and reachable in the prototype; every value comes from a token; the accessibility rules hold; a
+new design has two or three directions, each with its thesis.
+
+## Example
+
+REQ-2: "users see their invoices". Screen `invoices` covers REQ-2 with the states empty (an
+invitation to create the first invoice), loading, error (what failed and a retry), success and no
+permission. Tokens add only a status colour for overdue; the table's component spec keeps status,
+amount and due date visible at 320 px. Result: exit `done`, artifacts of types `design_flows`,
+`screens`, `design_tokens`, `component_specs` and `prototype`, and a summary listing the screen,
+its five states and REQ-2.
 <!-- vtc:editable -->
 
 ## Heuristics

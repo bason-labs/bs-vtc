@@ -25,7 +25,7 @@ roles/NOTICE           # the agency-agents MIT notice; copied into both compiled
 | Advisors (§5.4)   | advisor_estimator, advisor_client_liaison, advisor_ux_researcher, advisor_incident_debugger, advisor_legacy_explainer, advisor_ml_data (on demand, outside the run)            |
 
 The Lead is not a compiled agent: it is the main session, driven by the Lead skill in
-`plugins/common/skills/lead`, which also tells the Lead when and how to call an advisor.
+`plugins/common/skills/lead`.
 
 ## Prompt rules
 
@@ -53,28 +53,34 @@ The Lead is not a compiled agent: it is the main session, driven by the Lead ski
 
 ## Readings recorded here
 
-- **Advisors run outside the engine** (proposed to the integrator as a spine §5 reading;
-  provisional until recorded there). §5.4 says advisors are "called through the Lead" and the
-  role catalogue (§7.4) gives them a manual trigger outside the automated flow, but the frozen
-  engine surface has no advisor action. So the Lead calls an advisor directly when the human asks
-  (`plugins/common/skills/lead`, section Advisors) and shows the advice to the human; it never
-  submits it, and acting on advice goes through `start`, `change_request` or `answer`. Because
-  nothing in the engine sees an advisor, the compiler (`advisorContractErrors`) accepts an advisor
-  only when it is `read_only`, returns no output artifacts or verdicts, declares no success
-  criteria and no modes, exits `done`, `blocked` or `unknown`, has `reviewer: human`, and has an
-  `advisor_` id (agent `vtc-advisor-<name>`); only advisors may use that prefix, so the Lead can
-  tell them from run roles. A client export longer than the summary cap is returned section by
-  section rather than written to a file. An engine-mediated call (a `consult` action that records
-  the call, counts its cost and lets an advisor write an export under a checked path) is proposed
-  as a MINOR contract change; the advisor sources need no change for it.
+- **Advisors are compiled, not yet called** (proposed to the integrator; nothing is live until
+  one of the two options below is recorded). §5.4 says advisors are "called through the Lead" and
+  the role catalogue (§7.4) gives them a manual trigger outside the automated flow, but the
+  frozen engine surface has no advisor action, and a Lead that spawned one on its own would break
+  AD-4 rule 1 (only actions `next` returns), AD-7 rule 11 (every AI call traceable) and AD-8
+  rule 1 (budgets are engine code). So the advisor sources compile into agents, but the Lead
+  skill holds them out of the loop and declines a request for one. Proposed: either an
+  engine-mediated `consult` action (records the call with its prompt SHA and model, counts its
+  cost and lets an advisor write an export under a checked path; a MINOR contract change), or a
+  spine §5 reading that carves human-requested advisor calls out of those three rules. The
+  advisor sources need no change for either. Because nothing in the engine sees an advisor today,
+  the compiler (`advisorContractErrors`) accepts an advisor only when it is `read_only`, returns
+  no output artifacts or verdicts, declares no success criteria and no modes, exits `done`,
+  `blocked` or `unknown`, has `reviewer: human`, and has an `advisor_` id (agent
+  `vtc-advisor-<name>`); only advisors may use that prefix, so they stay distinguishable from run
+  roles. A client export longer than the summary cap is returned section by section rather than
+  written to a file.
 
 - **Write paths of DISCOVER roles** (proposed to the integrator as a spine §5 reading; provisional
   until recorded there). §5.2 lists the Repo Cartographer and the Research Analyst as read-only,
   but each must hand over a document longer than a result's summary. They are `write_scoped` to
   `.vtc/research/repo-map/**` and `.vtc/research/briefs/**` only (§15: research roles write
   nothing outside their sandbox).
-- **Security design mode** writes the threat model to `.vtc/architecture/threat-model/**`; the
-  engine merges its SEC-n requirements into the specification. Verify mode is read-only.
+- **Security design mode writes the threat model** (proposed to the integrator as a spine §5
+  reading; provisional until recorded there). §5.2 lists Security's tools as "Read-only + SARIF",
+  but design mode must hand over a threat model longer than a result's summary, so it is
+  `write_scoped` to `.vtc/architecture/threat-model/**` only; the engine merges its SEC-n
+  requirements into the specification. Verify mode is read-only.
 - **QA author mode** writes where `gates.yml` `tests.acceptance_globs` says (spine AD-7 rule 7);
   its `write_paths` hold the hidden-test staging directory only.
 - **Visual QA criteria V1 to V8** are defined in `visual_qa/prompt.md` (the spec names them

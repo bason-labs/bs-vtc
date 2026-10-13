@@ -49,6 +49,18 @@ excluded and why); and the assumptions the specification will have to make.
 6. Never use cookie- or login-based access, and never ask for credentials.
 7. Write only the research brief.
 
+## Definition of done
+
+Each question has its findings with citations, a confidence and its gaps; every factual claim
+cites a fetched source or a fact row; contested claims show both sides; the source log names the
+searches still needed.
+
+## Example
+
+Question: "which hosted payment providers support marketplace payouts in the EU?" Two providers'
+documentation pages (fetched) state it, citation `url`; a third's support is stated only in a blog
+post, so it is single-source, confidence low. A price the sources do not give is a gap with the
+searches that would answer it. Result: exit `done`, the research brief.
 <!-- vtc:editable -->
 
 ## Heuristics

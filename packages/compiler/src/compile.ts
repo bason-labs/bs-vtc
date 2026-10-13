@@ -420,16 +420,26 @@ const emitTarget = (host: HostId, input: TargetInput, errors: CompileError[]): E
 };
 
 /**
- * The gate on one host's emitted tree: no path emitted twice, and no AD-9 marker in any emitted
- * file (AD-16 rule 2). `files` must be sorted by path.
+ * The gate on one host's emitted tree: no path emitted twice, not even in a different case (a
+ * case-insensitive file system would silently keep only one), and no AD-9 marker in any emitted
+ * file (AD-16 rule 2).
  */
 export const checkEmitted = (host: HostId, files: readonly EmittedFile[]): CompileError[] => {
   const errors: CompileError[] = [];
-  files.forEach((file, index) => {
-    if (files[index + 1]?.path === file.path) {
+  const seen = new Map<string, string>();
+  for (const file of files) {
+    const key = file.path.toLowerCase();
+    const first = seen.get(key);
+    if (first === undefined) seen.set(key, file.path);
+    else if (first === file.path) {
       errors.push({ path: `${host}:${file.path}`, message: "emitted twice" });
+    } else {
+      errors.push({
+        path: `${host}:${file.path}`,
+        message: `differs from ${first} only in case; a case-insensitive file system keeps one`,
+      });
     }
-  });
+  }
   for (const v of checkPluginFiles(files)) {
     errors.push({
       path: `${host}:${v.path}`,

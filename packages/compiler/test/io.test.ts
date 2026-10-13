@@ -101,4 +101,33 @@ describe("writeTargets", () => {
     expect(existsSync(join(root, "escaped.txt"))).toBe(false);
     expect(existsSync(join(root, COMPILE_TARGETS["claude-code"]))).toBe(false);
   });
+
+  it("refuses to remove or write through a symbolically linked dist/", () => {
+    const root = tempRoot();
+    const outside = tempRoot();
+    plant(root, FIXTURE);
+    plant(outside, { "claude-plugin/keep.txt": "outside the repo\n" });
+    symlinkSync(outside, join(root, "dist"));
+    const result = compilePlugins(readSources(root).files);
+    if (!result.ok) throw new Error(JSON.stringify(result.errors));
+    expect(() => writeTargets(result.output, root)).toThrow(/dist: not a real directory/);
+    expect(readFileSync(join(outside, "claude-plugin/keep.txt"), "utf8")).toBe(
+      "outside the repo\n",
+    );
+    expect(existsSync(join(outside, "codex-plugin"))).toBe(false);
+  });
+
+  it("refuses a symbolically linked target directory and writes no target then", () => {
+    const root = tempRoot();
+    const outside = tempRoot();
+    plant(root, FIXTURE);
+    plant(outside, { "keep.txt": "outside the repo\n" });
+    mkdirSync(join(root, "dist"));
+    symlinkSync(outside, join(root, COMPILE_TARGETS.codex));
+    const result = compilePlugins(readSources(root).files);
+    if (!result.ok) throw new Error(JSON.stringify(result.errors));
+    expect(() => writeTargets(result.output, root)).toThrow(/dist\/codex-plugin: not a real/);
+    expect(existsSync(join(outside, "keep.txt"))).toBe(true);
+    expect(existsSync(join(root, COMPILE_TARGETS["claude-code"]))).toBe(false);
+  });
 });

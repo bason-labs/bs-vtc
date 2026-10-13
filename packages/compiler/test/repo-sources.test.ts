@@ -263,7 +263,7 @@ describe("the v1 roster (§5.2, §5.2a, §5.3)", () => {
   });
 });
 
-describe("the advisors (§5.4: Tier 3, called through the Lead)", () => {
+describe("the advisors (§5.4: Tier 3; compiled, held out of the Lead loop for now)", () => {
   /** Estimator / Solution Architect, Client-liaison writer, UX Researcher, Incident debugger,
    * Legacy explainer, ML/Data advisor. */
   const ADVISORS = [
@@ -287,22 +287,19 @@ describe("the advisors (§5.4: Tier 3, called through the Lead)", () => {
     for (const id of ADVISORS) expect(role(id)?.tools.profile).toBe("read_only");
   });
 
-  it("names every advisor agent in the Lead skill, so the Lead can call it", () => {
-    const named = [...lead().matchAll(/`(vtc-advisor-[a-z-]+)`/g)].map((m) => m[1]);
-    expect([...new Set(named)].sort()).toEqual(
-      roles
-        .filter((r) => r.kind === "advisor")
-        .flatMap(compiledAgentNames)
-        .sort(),
-    );
+  it("keeps advisors out of the Lead loop until the engine has an action for them (AD-4 rule 1)", () => {
+    const command = sources.find((s) => s.path === "plugins/common/commands/vtc.md")?.text ?? "";
+    expect(lead()).not.toMatch(/^## Advisors/m);
+    expect(lead()).not.toMatch(/`vtc-advisor-[a-z-]+`/);
+    expect(command).not.toMatch(/advise/);
+    const never = /## Never\n([\s\S]*?)\n\n/.exec(lead())?.[1] ?? "";
+    expect(never).toMatch(/Spawn an agent `next` did not return/);
+    expect(never).toMatch(/`vtc-advisor-\*`/);
   });
 
-  it("tells the Lead that advice never reaches the engine and changes nothing by itself", () => {
-    const section = /## Advisors\n([\s\S]*?)\n## /.exec(lead())?.[1] ?? "";
-    expect(section).toMatch(/never call `submit`/);
-    expect(section).toMatch(/`start`/);
-    expect(section).toMatch(/`change_request`/);
-    expect(section).toMatch(/`answer`/);
+  it("tells the Lead to spawn the agent exactly as the engine names it (AD-14 rule 1)", () => {
+    expect(lead()).toMatch(/spelled exactly as given/);
+    expect(lead()).not.toMatch(/`vtc:/);
   });
 });
 
@@ -321,6 +318,34 @@ describe("role prompts are contracts, not personas (principles 2 and 6)", () => 
   it.each(ids)("%s names no agent and no run-state path", (id) => {
     expect(promptOf(id)).not.toMatch(/vtc-[a-z]/);
     expect(promptOf(id)).not.toContain(".vtc/");
+  });
+});
+
+describe("every run agent's prompt has the §5.1 parts", () => {
+  /** The §5.1 parts each run agent's assembled instructions must carry, by heading or line. */
+  const PARTS: readonly [string, RegExp][] = [
+    ["inputs", /^- Inputs \(/m],
+    ["procedure", /^#{2,3} .*[Pp]rocedure$/m],
+    ["output contract", /^## Contract$/m],
+    ["definition of done", /^#{2,3} Definition of done$/m],
+    ["never-do list", /^#{2,3} Never\b/m],
+    ["exits, each with when to use it", /^- Exits: .+\n {2}- `[a-z_]+`: /m],
+    ["a canonical example", /^#{2,3} Example$/m],
+  ];
+  const runAgents = (): { path: string; body: string }[] =>
+    output()
+      .targets["claude-code"].filter(
+        (f) => f.path.startsWith("agents/") && !f.path.startsWith("agents/vtc-advisor-"),
+      )
+      .map((f) => ({ path: f.path, body: claudeAgent(f.text).body }));
+
+  it("covers every run agent", () => {
+    const advisors = roles.filter((r) => r.kind === "advisor").flatMap(compiledAgentNames);
+    expect(runAgents().length).toBe(roles.flatMap(compiledAgentNames).length - advisors.length);
+  });
+
+  it.each(PARTS)("every run agent has %s", (_part, pattern) => {
+    for (const agent of runAgents()) expect(agent.body, agent.path).toMatch(pattern);
   });
 });
 

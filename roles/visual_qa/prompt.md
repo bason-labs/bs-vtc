@@ -59,6 +59,18 @@ computed styles, pixel diff) already ran; you judge what tools cannot.
 4. A deviation the design itself allows is not a finding. Zero findings is a valid result.
 5. Never edit files.
 
+## Definition of done
+
+Every criterion in your dispatch has exactly one verdict citing screenshots; every route and state
+the visual report could not render is `unchecked` for the criteria it affects; every finding is
+located at the element's source file.
+
+## Example
+
+Dispatch: V4. The invoices screen's error state renders a blank table with no message, while the
+prototype shows the cause and a retry. Verdict: `fail` on subject V4, question type `state`,
+evidence the error-state screenshot at 390 and 1440. Finding: kind `implementation_deviation` at
+the table component's source file. Exit `done`.
 <!-- vtc:editable -->
 
 ## Heuristics

@@ -1,5 +1,17 @@
 /** Disk I/O around the pure compile step: read the sources, write `dist/<target>`. */
-import { lstatSync, mkdirSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import {
+  closeSync,
+  constants,
+  fstatSync,
+  lstatSync,
+  mkdirSync,
+  openSync,
+  readdirSync,
+  readFileSync,
+  realpathSync,
+  rmSync,
+  writeFileSync,
+} from "node:fs";
 import { dirname, isAbsolute, join, relative, resolve } from "node:path";
 import { COMPILE_TARGETS } from "./checks.js";
 import type { CompileError, CompileOutput, SourceFile } from "./types.js";
@@ -19,6 +31,25 @@ export interface SourceRead {
 const decoder = new TextDecoder("utf-8", { fatal: true });
 
 /**
+ * Reads a regular file without following a symbolic link: opened with `O_NOFOLLOW` and checked on
+ * the open descriptor, so a file swapped for a link after the directory walk saw it is refused
+ * rather than followed. Returns undefined for anything that is not a regular file.
+ */
+const readRegularFile = (path: string): Buffer | undefined => {
+  let fd: number;
+  try {
+    fd = openSync(path, constants.O_RDONLY | constants.O_NOFOLLOW);
+  } catch {
+    return undefined;
+  }
+  try {
+    return fstatSync(fd).isFile() ? readFileSync(fd) : undefined;
+  } finally {
+    closeSync(fd);
+  }
+};
+
+/**
  * Never follows a symbolic link: a link could pull a file from outside the repo (a credential,
  * say) into the plugin, or loop. Sources are text, so a file that is not UTF-8 is an error rather
  * than silently re-encoded.
@@ -35,8 +66,13 @@ const walk = (root: string, rel: string, out: SourceFile[], errors: CompileError
     } else if (!stat.isFile()) {
       errors.push({ path, message: "not a regular file" });
     } else {
+      const bytes = readRegularFile(join(root, path));
+      if (bytes === undefined) {
+        errors.push({ path, message: "not a regular file (symbolic links are not followed)" });
+        continue;
+      }
       try {
-        out.push({ path, text: decoder.decode(readFileSync(join(root, path))) });
+        out.push({ path, text: decoder.decode(bytes) });
       } catch {
         errors.push({ path, message: "not UTF-8 text; sources are text files" });
       }
@@ -63,14 +99,46 @@ export const readSources = (root: string): SourceRead => {
   return { files, errors };
 };
 
+/** `lstat`, or undefined when nothing is at `path`. */
+const lstatOrUndefined = (path: string): ReturnType<typeof lstatSync> | undefined => {
+  try {
+    return lstatSync(path);
+  } catch {
+    return undefined;
+  }
+};
+
+/**
+ * Throws unless every directory on the way from `root` to `dir` is a real directory inside `root`
+ * (or does not exist yet): removing or writing through a symbolic link would act outside the repo.
+ */
+const assertRealDirectoryPath = (root: string, dir: string): void => {
+  const realRoot = realpathSync(root);
+  let current = root;
+  for (const part of dir.split("/")) {
+    current = join(current, part);
+    const stat = lstatOrUndefined(current);
+    if (stat === undefined) return;
+    if (stat.isSymbolicLink() || !stat.isDirectory()) {
+      throw new Error(`refusing to write through ${relative(root, current)}: not a real directory`);
+    }
+    const inside = relative(realRoot, realpathSync(current));
+    if (inside === "" || inside.startsWith("..") || isAbsolute(inside)) {
+      throw new Error(`refusing to write through ${relative(root, current)}: outside the repo`);
+    }
+  }
+};
+
 /**
  * Replaces `dist/claude-plugin` and `dist/codex-plugin` under `root` with the compiled trees.
- * Throws before writing anything when a file path would land outside its target directory.
+ * Throws before removing or writing anything when a file path would land outside its target
+ * directory, or when `dist` or a target directory is a symbolic link or resolves outside `root`.
  * Returns the written paths relative to `root`.
  */
 export const writeTargets = (output: CompileOutput, root: string): string[] => {
   const targets = Object.entries(COMPILE_TARGETS) as [keyof typeof COMPILE_TARGETS, string][];
   for (const [host, dir] of targets) {
+    assertRealDirectoryPath(root, dir);
     const base = resolve(root, dir);
     for (const file of output.targets[host]) {
       const inside = relative(base, resolve(base, file.path));

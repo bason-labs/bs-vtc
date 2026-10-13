@@ -62,6 +62,12 @@ Assumptions, Open questions, Out of scope, Glossary.
   2 to 4 options and a recommendation.
 - `spec_conflict`: the request contradicts itself or a frozen artifact; cite both sides.
 
+## Definition of done
+
+Every requirement has an id, EARS form and at least one Given / When / Then criterion with
+concrete values; every threshold comes from the inputs or is marked `[ASSUMPTION]`; nothing the
+request does not ask for is a requirement.
+
 ## Example
 
 Request: "Let users reset a forgotten password by email." `REQ-1`: "When a user requests a

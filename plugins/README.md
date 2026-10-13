@@ -37,20 +37,33 @@ is in `@vtc/shared` (AD-3; proposed to the integrator).
 - **Role agents cannot reach the Lead's tools.** Claude Code agents get an explicit `tools:`
   allowlist without the engine's run-driving tools. Each Codex agent file carries its own
   `[mcp_servers.vtc]` entry: disabled, or limited to the role's engine tools with
-  `enabled_tools`. That per-agent entry is provisional until the spike confirms Codex honours it
-  (spine §7).
+  `enabled_tools`. Unverified: spine §7 does not yet list a check that spawned Codex agents honour
+  that per-agent entry, and the engine cannot tell a role agent's call from the Lead's (the bridge
+  tags only the host, AD-12 rule 3). Both the spike item and an engine-side guard on `approve`,
+  `answer`, `submit` and `change_request` are proposed to the integrator; until they land, this
+  entry is the only barrier on Codex.
 - **Codex sandbox gap.** A Codex `sandbox_mode` limits what an agent's commands may write, not
   whether it may run a shell, and write-scoped agents need `workspace-write`. So on Codex "run no
   shell command" is an instruction, not a host restriction, and the write paths are not a host
   deny; the engine's write-scope check is the enforcement point (spike item proposed for §7).
-- **Advisors.** `vtc-advisor-*` agents (§5.4) run outside the run: the Lead skill calls them
-  only at the human's request and never submits their advice to the engine (reading recorded in
-  `roles/README.md`). Their description says so, so a host does not pick them for other work.
-- **Agent names.** The engine names agents `agentNameFor(role, mode)` (`vtc-qa-judge`). Claude
-  Code exposes plugin agents under the plugin's namespace (`vtc:vtc-qa-judge`); the Lead skill
-  says so. To be confirmed by the spike.
-- The Codex manifest fields are provisional until the sub-project 0 spike confirms them
-  (spine §7).
+- **Advisors are compiled but held out of the Lead loop.** `vtc-advisor-*` agents (§5.4) are
+  emitted, but the Lead skill neither names nor spawns them and `/vtc` has no `advise`: AD-4
+  rule 1 lets the Lead dispatch only what `next` returns, and an advisor call would be invisible
+  to AD-7 rule 11 traceability and to the AD-8 budget. They become callable through an
+  engine-mediated `consult` action, or through a spine §5 reading that carves them out of those
+  rules; both are proposed to the integrator (see `roles/README.md`). Their description says
+  they run only when the Lead calls them, so a host does not pick them for other work.
+- **Agent names.** The engine names agents `agentNameFor(role, mode)` (`vtc-qa-judge`), and the
+  Lead spawns `spawn_role.agent` exactly as given on both hosts. A host that namespaces plugin
+  agents (Claude Code: `vtc:vtc-qa-judge`) gets the namespace from its adapter, inside the
+  `SubagentInstruction` (AD-14 rule 1), never from the Lead.
+- **Model tier on Codex.** Claude Code maps the role's tier to a model alias (top/mid/low =
+  opus/sonnet/haiku). A Codex agent pins a model only when `role.yaml` names one for Codex, and
+  none does: every Codex role runs on the session's model and the tier maps only to
+  `model_reasoning_effort`. Provisional until the spike names the Codex models per tier (proposed
+  to the integrator); until then per-host scoring must not assume tiers differ on Codex.
+- The Codex manifest fields are provisional until the sub-project 0 spike confirms them (spike
+  item proposed for spine §7).
 - AD-9 applies to every file here and every emitted file: no permission-bypass flag, no credential
   path or credential variable, not even in a "never do this" list. The compile step fails on one.
 - Host adapters' `install` only places or registers what the compiler emitted.

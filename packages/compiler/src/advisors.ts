@@ -5,8 +5,8 @@
  * compiles only when nothing about it needs the engine:
  *
  * - its id starts with `advisor_` (agent `vtc-advisor-<name>`), and only advisors use that
- *   prefix, so the Lead skill can tell the agents it may call at the human's request from the
- *   run's roles, which it spawns only when the engine returns them;
+ *   prefix, so advisor agents stay distinguishable from the run's roles (the Lead skill holds
+ *   them out of its loop until the engine has an action for them; see roles/README.md);
  * - it is read-only (nothing would check a write), returns advice rather than output artifacts or
  *   verdicts, and declares no engine-checked success criteria and no modes;
  * - its reviewer is the human, who reads the advice and decides whether to act on it through the
