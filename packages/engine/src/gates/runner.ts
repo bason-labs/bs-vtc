@@ -12,8 +12,10 @@
  *   `.vtc/state/gates/` (AD-18).
  * - The gates are the base commit's `.vtc/gates.yml`, never the working tree's, so a run is
  *   reproducible and a diff cannot change the gates that verify it.
- * - Not built yet (gates/README.md): the two-phase network sandbox of §7.2 (install: registries
- *   only; verify: no network). Gates run with the user's network and file access.
+ * - Every command runs in the gate sandbox (D-al, spine §5 reading 69, `sandbox.ts`): no network
+ *   in the verify phase, writes only to the checkout and private temp dirs, the VTC home and host
+ *   credentials unreadable, an empty `HOME`. Without one nothing runs (`GATE_SANDBOX
+ *   .noSandboxReason`), unless the user opted in with `gates.allow_unsandboxed`.
  */
 import { createHash } from "node:crypto";
 import { copyFileSync, existsSync, readdirSync, readFileSync, realpathSync, rmSync } from "node:fs";
@@ -21,6 +23,7 @@ import { join, relative, sep } from "node:path";
 import {
   engineRepoKey,
   fingerprintFinding,
+  GATE_SANDBOX,
   gateCommandAllowed,
   gateReportVerdict,
   GateReportSchema,
@@ -40,6 +43,7 @@ import {
   type GateRunner,
   type GateRunnerDeps,
   type GateRunRequest,
+  type GateSandbox,
   type GatesConfig,
   type GitChangedFile,
   type MonotonicViolation,
@@ -62,7 +66,7 @@ import {
   traceabilityPath,
   type PendingWrite,
 } from "./evidence.js";
-import { gateEnv, runCommand, type ExecResult } from "./exec.js";
+import { gateEnv, type ExecResult } from "./exec.js";
 import { matchesAny, matchesAnyCaseless } from "./globs.js";
 import { countsOf, inventoryOf, monotonicViolations } from "./metrics.js";
 import { guardedSections, isMixedConfig, withBaseSections } from "./mixed-configs.js";
@@ -85,6 +89,13 @@ import {
   USER_INSTALLED_SCANNERS,
   type ScannerStore,
 } from "./scanners.js";
+import {
+  detectGateSandbox,
+  GateCommandJail,
+  gateReadPolicy,
+  resolveGateSandbox,
+  type JailedResult,
+} from "./sandbox.js";
 import { buildTraceability } from "./traceability.js";
 import { checkWriteScope } from "./write-scope.js";
 
@@ -93,7 +104,15 @@ export interface GateRunnerOptions {
   readonly scanners?: ScannerStore;
   /** The engine's environment, scrubbed before any gate sees it (default `process.env`). */
   readonly env?: Readonly<Record<string, string | undefined>>;
+  /**
+   * Finds the machine's gate sandbox when `deps.sandbox` is absent (default
+   * {@link detectGateSandbox}). Tests pass `() => null` to stand for a machine without one.
+   */
+  readonly detectSandbox?: () => GateSandbox | null;
 }
+
+/** Visible text of a gate that did not run for want of a sandbox (D-al). */
+export const NO_SANDBOX_REFUSAL = `not run: ${GATE_SANDBOX.noSandboxReason} (macOS sandbox-exec or Linux bwrap); vtc doctor says why. To run gates unconfined anyway, set gates.allow_unsandboxed: true in ~/.vtc/config.yaml (an incident is recorded for every such gate run)`;
 
 /** The order layers run in; L5 (engine code) runs last. */
 const LAYER_ORDER: readonly GateLayer[] = ["L0", "L1", "L2", "L3", "L4", "L6", "L5"];
@@ -201,14 +220,22 @@ class Run {
   private readonly stateRoot: string;
   private readonly checkoutAbs: string;
   private readonly started: Date;
+  /** Runs every command in the gate sandbox; `null` when there is none (nothing runs). */
+  private readonly jail: GateCommandJail | null;
 
   constructor(
     private readonly deps: GateRunnerDeps,
     private readonly scanners: ScannerStore,
     private readonly env: Readonly<Record<string, string | undefined>>,
     private readonly request: GateRunRequest,
+    sandbox: GateSandbox | null,
     private readonly configOverride?: GatesConfig,
   ) {
+    if (sandbox === null) this.jail = null;
+    else {
+      const policy = gateReadPolicy({ vtcHome: deps.vtcHome, env, repoRoot: deps.repoRoot });
+      this.jail = new GateCommandJail(sandbox, policy.denyRead, policy);
+    }
     this.started = this.now();
     const owner = ownerOf(request);
     const evidenceBase = owner === undefined ? null : `${EVIDENCE_DIR}/${owner}/gates`;
@@ -281,7 +308,6 @@ class Run {
           ...(await this.deps.git.changedFiles(this.request.base, this.request.head)),
         ];
       }
-      this.copyHidden();
       await this.runGates(config);
     } catch (error) {
       // Never throw for a gate problem (GateRunner.run): an unexpected one is gate infrastructure.
@@ -299,12 +325,19 @@ class Run {
         ),
       );
     } finally {
+      this.jail?.dispose();
       try {
         this.removeHidden();
         if (this.baseCheckout !== null) await this.deps.git.removeCheckout(this.baseCheckout.rel);
       } catch (error) {
         this.note("cleanup", `cleanup after the gates failed: ${errorText(error)}`);
       }
+    }
+    if (this.jail?.ran === true && this.jail.kind === "none") {
+      this.note(
+        "sandbox",
+        "gate commands ran without an OS sandbox: the user-level gates.allow_unsandboxed is set (D-al)",
+      );
     }
     return this.finish();
   }
@@ -322,12 +355,22 @@ class Run {
     return [...install, ...[...verify].sort((a, b) => order(a) - order(b))];
   }
 
+  /**
+   * Install-phase gates run first, as one batch; the hidden acceptance tests are copied in only
+   * after all of them, so no command with network access ever runs while they are in the
+   * checkout (and the reaper has stopped whatever the install commands left).
+   */
   private async runGates(config: GatesConfig): Promise<void> {
     let installFailed: string | null = null;
+    let hiddenCopied = false;
     for (const gate of this.selectGates(config)) {
       if (installFailed !== null) {
         this.results.push(this.skippedResult(gate, `install gate ${installFailed} did not pass`));
         continue;
+      }
+      if (gate.phase !== "install" && !hiddenCopied) {
+        hiddenCopied = true;
+        this.copyHidden();
       }
       const result = await this.runGate(gate, config);
       this.results.push(result);
@@ -490,6 +533,8 @@ class Run {
     if (!existsSync(cwd) || !resolvesInside(checkoutAbs, cwd)) {
       return { refused: `not run: working directory ${gate.cwd ?? "."} is not in the checkout` };
     }
+    const jail = this.jail;
+    if (jail === null) return { refused: NO_SANDBOX_REFUSAL };
     const prepared = await this.prepare(gate, checkoutAbs, cwd, changed);
     if ("refused" in prepared) return { refused: prepared.refused };
     if ("skipped" in prepared) return { skipped: prepared.skipped };
@@ -518,9 +563,11 @@ class Run {
       (baseGlobs.length > 0 || gate.layer === "L1") && checkoutAbs === this.checkoutAbs
         ? await this.useBaseConfigs(checkoutAbs, baseGlobs, gate.layer === "L1")
         : null;
-    let exec: ExecResult;
+    let exec: JailedResult;
     try {
-      exec = await runCommand({
+      exec = await jail.run({
+        phase: gate.phase,
+        checkout: checkoutAbs,
         argv: prepared.argv,
         cwd,
         env: prepared.env,
@@ -528,9 +575,12 @@ class Run {
         stdoutPath: join(this.deps.repoRoot, `${logPrefix}.stdout.log`),
         stderrPath: join(this.deps.repoRoot, `${logPrefix}.stderr.log`),
       });
+    } catch (error) {
+      return { refused: `not run: the gate sandbox could not start it: ${errorText(error)}` };
     } finally {
       restore?.();
     }
+    if (exec.leftover !== undefined) return { refused: `stopped: ${exec.leftover}` };
     if (reportAbs === null || exec.spawnError !== undefined || exec.timedOut) return { exec };
     if (!existsSync(reportAbs) || !resolvesInside(checkoutAbs, reportAbs)) {
       return { exec, reportProblem: `report ${gate.report?.path ?? ""} was not written` };
@@ -1336,11 +1386,17 @@ class Run {
         head: r.head,
         expect: r.expect,
         results,
+        ...this.sandboxField(),
         verdict: gateReportVerdict(results),
         started_at: this.started.toISOString(),
         finished_at: this.now().toISOString(),
       };
     }
+  }
+
+  /** `GateReport.sandbox`: set when a command ran (D-al). */
+  private sandboxField(): Pick<GateReport, "sandbox"> {
+    return this.jail?.ran === true ? { sandbox: this.jail.kind } : {};
   }
 
   private buildReport(): GateReport {
@@ -1384,6 +1440,7 @@ class Run {
       expect: r.expect,
       results,
       ...(traceability === undefined ? {} : { traceability }),
+      ...this.sandboxField(),
       verdict: gateReportVerdict(results),
       started_at: this.started.toISOString(),
       finished_at: this.now().toISOString(),
@@ -1477,6 +1534,7 @@ export const runWithConfig = (
     options.scanners ?? createScannerStore({ vtcHome: deps.vtcHome }),
     options.env ?? process.env,
     checked.request,
+    resolveGateSandbox(deps, options.detectSandbox),
     config,
   ).execute();
 };
@@ -1488,11 +1546,25 @@ export const createGateRunnerWith = (
 ): GateRunner => {
   const scanners = options.scanners ?? createScannerStore({ vtcHome: deps.vtcHome });
   const env = options.env ?? process.env;
+  // Detected once, on the first run that needs it (a short probe process).
+  let detected: { readonly sandbox: GateSandbox | null } | null = null;
+  const detect = (): GateSandbox | null => {
+    detected ??= {
+      sandbox: (options.detectSandbox ?? (() => detectGateSandbox().sandbox))(),
+    };
+    return detected.sandbox;
+  };
   return {
     run: (request) => {
       const checked = checkRequest(deps, request);
       if ("report" in checked) return Promise.resolve(checked.report);
-      return new Run(deps, scanners, env, checked.request).execute();
+      return new Run(
+        deps,
+        scanners,
+        env,
+        checked.request,
+        resolveGateSandbox(deps, detect),
+      ).execute();
     },
     checkWriteScope: async (request) => {
       // The project's protected configs as calibrated at the base commit, plus the defaults.

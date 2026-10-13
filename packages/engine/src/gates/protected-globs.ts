@@ -102,6 +102,12 @@ export const isTaskRunnerFile = (path: string): boolean =>
  * change can replace the gate command or load code into it, so these are guarded like task-runner
  * files: always, in any letter case, and pinned to the base version in L1. The settings of
  * `pnpm-workspace.yaml` are guarded too, but not its packages or catalogs (`mixed-configs.ts`).
+ *
+ * The dotenv files package managers load on their own are gate-command files too (D-am, spine §5
+ * reading 70): Yarn 4 injects `.env.yarn` into every `yarn run`, and Bun loads `.env`,
+ * `.env.local`, `.env.test*`, `.env.development*` and `.env.production*` for `bun run`, `bunx` and
+ * `bun test`, so a `NODE_OPTIONS=--require …` there preloads diff-controlled code into a gate.
+ * `.env.example` and other templates are not loaded and stay unguarded.
  */
 export const PACKAGE_MANAGER_CONFIG_GLOBS: readonly string[] = [
   "**/.npmrc",
@@ -112,6 +118,12 @@ export const PACKAGE_MANAGER_CONFIG_GLOBS: readonly string[] = [
   "**/.pnpmfile.*",
   "**/bunfig.toml",
   "**/.bunfig.toml",
+  "**/.env.yarn",
+  "**/.env",
+  "**/.env.local",
+  "**/.env.test*",
+  "**/.env.development*",
+  "**/.env.production*",
 ];
 
 /** Whether a repo-relative path is a package-manager config (any letter case). */

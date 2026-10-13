@@ -57,7 +57,42 @@ export {
   type ScannerStore,
   type ScannerStoreOptions,
 } from "./scanners.js";
-export { ensureRules, PRODUCT_RULES, rulesHash } from "./rules.js";
+export { ensureRules, PRODUCT_RULES, RULES_DIR, rulesHash } from "./rules.js";
+export {
+  bwrapArgs,
+  BWRAP_SYSTEM_ROOTS,
+  createBwrapSandbox,
+  createSandboxExecSandbox,
+  detectGateSandbox,
+  GATE_MACH_SERVICES,
+  GATE_READABLE_VTC_HOME,
+  GateCommandJail,
+  gateDenyReadPaths,
+  gateReadPolicy,
+  gateToolchainRoots,
+  gitCommonDir,
+  HOME_CREDENTIAL_LOCATIONS,
+  PASTA_ARGS,
+  PASTA_DNS_FORWARD,
+  PASTA_RESOLV_CONF,
+  REAPER_SCRIPT,
+  REAPER_UNCONFIRMED,
+  resolveGateSandbox,
+  SANDBOX_DROPPED_ENV,
+  SANDBOX_EXEC,
+  sandboxEnv,
+  sandboxExecProfile,
+  TOOLCHAIN_ROOT_ENV,
+  UNSANDBOXED,
+  type BwrapFs,
+  type DetectGateSandboxOptions,
+  type GateJailSpec,
+  type GateReadPolicy,
+  type GateSandboxDetection,
+  type JailedRequest,
+  type JailedResult,
+  type ReapedGateCommand,
+} from "./sandbox.js";
 export {
   addToAllowlist,
   allowlistPath,
@@ -69,7 +104,7 @@ export {
   stringifyGatesConfig,
 } from "./config.js";
 export { gateEnv, runCommand, PASSED_ENV, type ExecRequest, type ExecResult } from "./exec.js";
-export { createGateRunnerWith, type GateRunnerOptions } from "./runner.js";
+export { createGateRunnerWith, NO_SANDBOX_REFUSAL, type GateRunnerOptions } from "./runner.js";
 export {
   checkScannerArgs,
   scannerArgsProblem,

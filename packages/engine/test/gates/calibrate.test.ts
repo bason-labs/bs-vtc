@@ -1,7 +1,7 @@
 /** Toolchain detection and `vtc calibrate` (§7.1, §15). */
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
-import { GatesConfigSchema, gateCommandAllowed } from "@vtc/shared";
+import { GATE_SANDBOX, GatesConfigSchema, gateCommandAllowed } from "@vtc/shared";
 import { afterEach, describe, expect, it } from "vitest";
 import { parseDocument, parseAllDocuments } from "yaml";
 import { createGitOps } from "../../src/git/index.js";
@@ -27,6 +27,7 @@ import {
   installGate,
   NODE,
   osvGate,
+  recordingSandbox,
   testsGate,
   TOOLS,
 } from "./fixture.js";
@@ -226,7 +227,9 @@ describe("calibrate", () => {
     const home = tempDir("vtc-home-");
     const lines: string[] = [];
     const answers: string[] = [];
+    const recording = recordingSandbox();
     const deps = (answer: (q: string) => boolean) => ({
+      sandbox: recording.sandbox,
       repoRoot: repo,
       vtcHome: home,
       git: createGitOps({ repoRoot: repo }),
@@ -240,8 +243,45 @@ describe("calibrate", () => {
       scanners: fakeScanners(home),
       env: process.env,
     });
-    return { repo, home, revision, lines, answers, deps };
+    return { repo, home, revision, lines, answers, deps, specs: recording.specs };
   };
+
+  it("runs every command in the gate sandbox, the OSV download in the install phase", async () => {
+    const s = setup([installGate, testsGate, osvGate]);
+    await calibrate(s.deps(() => true));
+    // The download, then twice: install, tests, dependencies.
+    expect(s.specs.map((x) => x.phase)).toEqual([
+      "install",
+      "install",
+      "verify",
+      "verify",
+      "install",
+      "verify",
+      "verify",
+    ]);
+    for (const x of s.specs) expect(x.denyRead).toContain(join(s.home, "allowlists"));
+  });
+
+  it("refuses to calibrate without a sandbox, before asking or running anything", async () => {
+    const s = setup();
+    const { sandbox: _unused, ...rest } = s.deps(() => true);
+    await expect(calibrate({ ...rest, detectSandbox: () => null })).rejects.toThrow(
+      GATE_SANDBOX.noSandboxReason,
+    );
+    expect(s.answers).toEqual([]);
+    expect(readAllowlist(s.home, s.repo).commands).toEqual([]);
+    // A dry run runs nothing, so it needs no sandbox.
+    const dry = await calibrate({ ...rest, detectSandbox: () => null }, { dryRun: true });
+    expect(dry.status).toBe("dry_run");
+  });
+
+  it("calibrates unconfined under the user-level opt-in and says so", async () => {
+    const s = setup();
+    const { sandbox: _unused, ...rest } = s.deps(() => true);
+    const outcome = await calibrate({ ...rest, detectSandbox: () => null, allowUnsandboxed: true });
+    expect(outcome).toMatchObject({ status: "frozen" });
+    expect(s.lines.join("\n")).toMatch(/WARNING: no OS sandbox for gates: .*unconfined/);
+  });
 
   it("asks before running anything, runs twice, records flaky tests and freezes the baseline", async () => {
     const s = setup();
