@@ -214,7 +214,7 @@ describe("vtc statusline-tee (§6.9)", () => {
     expect(statuslineTeeCommand(null)).toBe("vtc statusline-tee");
   });
 
-  it("forwards usage even when the arguments are not the frozen form, and says so", async () => {
+  it("forwards usage even when the arguments are not the frozen form, and says so in the statusline (D-as)", async () => {
     const posts: string[] = [];
     const deps: StatuslineDeps = {
       vtcHome: tempHome(),
@@ -229,10 +229,25 @@ describe("vtc statusline-tee (§6.9)", () => {
       runCommand: () => Promise.reject(new Error("never run")),
     };
     const output = await runStatuslineTee(["--", "printf", "x"], JSON.stringify(STATUSLINE), deps);
+    // strict refusal: no user command runs, exit 64, but the one statusline line says so
+    expect(output.code).toBe(STATUSLINE_TEE.usageExit);
     expect(output.code).toBe(64);
-    expect(output.stdout).toBe("");
+    expect(output.stdout).toBe(`${STATUSLINE_TEE.misconfiguredLine}\n`);
+    expect(output.stdout).toBe("vtc: statusline misconfigured — run vtc doctor\n");
     expect(output.stderr).toMatch(/usage: vtc statusline-tee \[-- '<your statusline command>'\]/);
     expect(posts).toEqual([ENGINE_HTTP.routes.statuslineIngest.path]);
+    // the same through the command, for every malformed form, with nothing run
+    for (const bad of [["cat"], ["--x", "--", "cat"], ["--", "a", "b"]]) {
+      const written: string[] = [];
+      const cmd = createStatuslineTeeCommand(() => ({
+        stdin: () => Promise.resolve(""),
+        write: (stdout, stderr) => written.push(stdout, stderr),
+        deps: () => deps,
+      }));
+      expect(await cmd.run(bad, capture("/", tempHome()).ctx)).toBe(64);
+      expect(written[0]).toBe(`${STATUSLINE_TEE.misconfiguredLine}\n`);
+      expect(written[1]).toMatch(/^usage: vtc statusline-tee/);
+    }
   });
 
   it("passes stdin of any size to the user's command, forwarding only a statusline-sized one", async () => {

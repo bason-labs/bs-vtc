@@ -1,14 +1,17 @@
 /**
  * `vtc doctor` prerequisite checks (§4.4), the auto-resume timer (§6.9 step 4; launchd on macOS,
- * systemd on Linux, `timer.ts`, none on Windows in v1) and the daemon's `env_passthrough` (D-ak).
- * The pinned scanners are checked in `scanner-checks.ts`. Host logins are read only through the hosts' own
+ * systemd on Linux, `timer.ts`, none on Windows in v1), the daemon's `env_passthrough` (D-ak),
+ * the gate sandbox (D-al) and the repo's Claude session sandbox (D-an). The pinned scanners are
+ * checked in `scanner-checks.ts`. Host logins are read only through the hosts' own
  * status commands (`claude auth status --json`, `codex login status`); VTC never reads a
  * credential file or the keychain (AD-9). Account details the status commands print (email,
  * organisation) are never echoed.
  */
+import { GATE_SANDBOX, type GateSandboxKind } from "@vtc/shared";
 import type { DaemonState } from "./daemon.js";
 import type { Exec } from "./process.js";
-import type { UserConfigRead } from "./user-config.js";
+import type { SessionSandboxReport } from "./session-sandbox.js";
+import { allowUnsandboxedOf, type UserConfigRead } from "./user-config.js";
 
 export type CheckStatus = "ok" | "warn" | "fail";
 
@@ -260,4 +263,126 @@ export const checkEnvPassthrough = (read: UserConfigRead): DoctorCheck => {
         ? `the detached daemon drops credential variables; none pass (env_passthrough in ${read.path})`
         : `passes ${names.join(", ")} to the detached daemon (env_passthrough in ${read.path})`,
   };
+};
+
+/** Where macOS ships `sandbox-exec`. */
+export const SANDBOX_EXEC = "/usr/bin/sandbox-exec";
+
+/** The no-op `sandbox-exec` run that shows Seatbelt can start a sandbox here. */
+const SEATBELT_PROBE = ["-p", "(version 1)(allow default)", "--", "/usr/bin/true"] as const;
+/**
+ * The no-op `bwrap` run that shows it can create the namespaces a gate run needs: an installed
+ * bwrap often cannot (unprivileged user namespaces disabled, Ubuntu's AppArmor userns rule).
+ */
+const BWRAP_PROBE = [
+  "--ro-bind",
+  "/",
+  "/",
+  "--dev",
+  "/dev",
+  "--proc",
+  "/proc",
+  "--unshare-pid",
+  "--unshare-net",
+  "--die-with-parent",
+  "--",
+  "true",
+] as const;
+
+/**
+ * The OS sandbox gate commands can run in on this machine (D-al, spine §5 reading 69):
+ * `sandbox-exec` on macOS, `bwrap` (bubblewrap) on Linux, `null` when there is none. Each is
+ * checked with the same confined no-op run the Gate Runner's own detection uses, so a sandbox
+ * that is installed but cannot start reads as none, as it does for the Gate Runner.
+ */
+export const detectGateSandbox = async (
+  platform: NodeJS.Platform,
+  exists: (path: string) => boolean,
+  exec: Exec,
+): Promise<Exclude<GateSandboxKind, "none"> | null> => {
+  if (platform === "darwin") {
+    if (!exists(SANDBOX_EXEC)) return null;
+    const probe = await exec(SANDBOX_EXEC, [...SEATBELT_PROBE], { timeoutMs: 10_000 });
+    return probe.code === 0 ? "sandbox-exec" : null;
+  }
+  if (platform === "linux")
+    return (await exec("bwrap", [...BWRAP_PROBE], { timeoutMs: 10_000 })).code === 0
+      ? "bwrap"
+      : null;
+  return null;
+};
+
+/**
+ * Which sandbox gate commands run in. None and no opt-in fails: every gate run parks (`infra`,
+ * `GATE_SANDBOX.noSandboxReason`). The user-level opt-in `gates.allow_unsandboxed` always warns.
+ */
+export const checkGateSandbox = (
+  kind: Exclude<GateSandboxKind, "none"> | null,
+  config: UserConfigRead | null,
+): DoctorCheck => {
+  const name = "gate sandbox";
+  const optIn = config !== null && allowUnsandboxedOf(config);
+  const where = config?.path ?? "~/.vtc/config.yaml";
+  if (kind !== null)
+    return optIn
+      ? {
+          name,
+          status: "warn",
+          detail: `gate commands run in ${kind}; gates.allow_unsandboxed is on in ${where}, so they would run unconfined if ${kind} went missing: remove it`,
+        }
+      : { name, status: "ok", detail: `gate commands run in ${kind}` };
+  return optIn
+    ? {
+        name,
+        status: "warn",
+        detail: `${GATE_SANDBOX.noSandboxReason}: gates run unconfined (gates.allow_unsandboxed in ${where}), and every gate run records an unsandboxed_gate incident`,
+      }
+    : {
+        name,
+        status: "fail",
+        detail: `${GATE_SANDBOX.noSandboxReason}: every gate run parks until there is one (macOS: sandbox-exec; Linux: install bubblewrap). To run gates unconfined instead, set gates.allow_unsandboxed: true in ${where}`,
+      };
+};
+
+/**
+ * The repo's Claude Code session sandbox (D-an, spine §5 reading 71): in plugin-only dispatch
+ * the engine runs code-running roles in a Claude Code Lead session only when it is on. A warning
+ * otherwise (Codex-only users and headless dispatch do not need it).
+ */
+export const checkSessionSandbox = (report: SessionSandboxReport): DoctorCheck => {
+  const name = "session";
+  const fix = "run vtc install --host claude-code in this repo";
+  if (report.state === "on")
+    return { name, status: "ok", detail: `the Claude session sandbox is on (${report.path})` };
+  const refused = "code-running roles are refused in a Claude Code session";
+  const widened =
+    report.widening.length === 0
+      ? ""
+      : `; these settings let commands past it: ${report.widening.join("; ")} (remove them)`;
+  switch (report.file) {
+    case "absent":
+      return {
+        name,
+        status: "warn",
+        detail: `no Claude session sandbox in ${report.path}: ${refused}; ${fix}`,
+      };
+    case "unreadable":
+      return {
+        name,
+        status: "warn",
+        detail: `${report.path} cannot be read (not a plain JSON file): ${refused}; fix or remove it, then ${fix}`,
+      };
+    case "ok":
+      if (report.missing.length === 0 && report.widening.length === 0)
+        return {
+          name,
+          status: "warn",
+          detail: `Claude Code cannot sandbox commands on this machine (missing: ${report.unavailable.join(", ")}): ${refused}`,
+        };
+      return {
+        name,
+        status: "warn",
+        detail: `the Claude session sandbox in ${report.path} is ${report.state}${report.missing.length === 0 ? "" : `; missing: ${report.missing.join(", ")}`}${widened}: ${refused}; ${fix}`,
+      };
+  }
 };
