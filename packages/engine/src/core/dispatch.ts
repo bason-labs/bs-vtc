@@ -537,9 +537,16 @@ export const dispatchStep = (
     ...(step.mode === undefined ? {} : { mode: step.mode }),
     ...(step.tier === undefined ? {} : { tier: step.tier }),
   });
-  const agent = agentNameFor(step.role, step.mode);
   const pack = writeTaskPack(k.deps.repoRoot, packFor(k, h, step, actionId));
   const task = step.task === undefined ? undefined : h.state.tasks.get(step.task);
+  // §5.2a, spine §5 reading 38: an Engineer task runs as its discipline's compiled profile agent
+  // when the host's plugin has one; the dispatched role stays `engineer` (the family shares the
+  // Engineer's result contract) and the prompt SHA is the profile's (§13).
+  const profile =
+    step.role === "engineer" && task !== undefined
+      ? k.deps.plugins.profileFor(host, task.discipline)
+      : undefined;
+  const agent = profile ?? agentNameFor(step.role, step.mode);
   const resume = step.resume !== undefined && step.resume.host === host ? step.resume : undefined;
   step.onDispatch?.();
   k.emit(h, {
@@ -561,8 +568,7 @@ export const dispatchStep = (
     },
   });
   const capabilities = k.deps.adapters[host]?.capabilities;
-  // §5.2a / §5.3: the compiled discipline profile and the skills of the task's stack packs.
-  const profile = task === undefined ? undefined : k.deps.plugins.profileFor(host, task.discipline);
+  // §5.3: the skills of the task's stack packs.
   const skills =
     task === undefined
       ? []
@@ -571,7 +577,6 @@ export const dispatchStep = (
     `VTC dispatch ${actionId}: you are ${agent} (model ${model.model}, effort ${model.effort}).`,
     `Work in: ${cwd}`,
     `Read your task pack: ${join(k.deps.repoRoot, pack)}`,
-    ...(profile === undefined ? [] : [`Apply the ${task?.discipline ?? ""} profile: ${profile}`]),
     ...(skills.length === 0 ? [] : [`Use these skills: ${skills.join(", ")}`]),
     ...(step.note === undefined ? [] : [step.note]),
     `Finish with exactly one RoleResult JSON object as your final message (role "${step.role}"${step.mode === undefined ? "" : `, mode "${step.mode}"`}${step.task === undefined ? "" : `, task "${step.task}"`}${step.subject === undefined ? "" : `, verdict subject "${step.subject}"`}). The Lead submits it with action_id ${actionId}.`,

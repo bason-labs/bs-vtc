@@ -82,11 +82,15 @@ const socketPath = (vtcHome: string, repoRoot: string): string =>
     ? engineWindowsPipe(repoRoot)
     : join(vtcHome, engineSocketFile(repoRoot));
 
-const prototypeIfAny = async (repoRoot: string): Promise<PrototypeServer | null> =>
-  existsSync(join(repoRoot, ENGINE_HTTP.prototype.root)) ? createPrototypeServer(repoRoot) : null;
-
-const prototypeUrl = (server: PrototypeServer | null): string | null =>
-  server === null ? null : `http://127.0.0.1:${String(server.port)}/`;
+/**
+ * The prototype origin (AD-5 rule 9) listens from the start: the Designer writes
+ * `.vtc/design/prototype/` mid-run, and the server answers 404 until it exists. The health
+ * route names it (`prototype_url`) only once the prototype is there.
+ */
+const prototypeUrl = (repoRoot: string, server: PrototypeServer) => (): string | null =>
+  existsSync(join(repoRoot, ENGINE_HTTP.prototype.root))
+    ? `http://127.0.0.1:${String(server.port)}/`
+    : null;
 
 export const runDaemon: RunDaemon = async (deps: EngineDeps, options) => {
   const now = deps.now ?? (() => new Date());
@@ -166,14 +170,14 @@ export const runDaemon: RunDaemon = async (deps: EngineDeps, options) => {
         }),
       );
     }
-    const prototype = await prototypeIfAny(deps.repoRoot);
-    if (prototype !== null) cleanups.push(() => prototype.close());
+    const prototype = await createPrototypeServer(deps.repoRoot);
+    cleanups.push(() => prototype.close());
     const http = await createHttpApi({
       readModel: createReadModel({
         repoRoot: deps.repoRoot,
         mode: "live",
         versions: deps.versions,
-        prototypeUrl: () => prototypeUrl(prototype),
+        prototypeUrl: prototypeUrl(deps.repoRoot, prototype),
         runs: () => engine.states(),
         usage: () => engine.usage,
         git,
@@ -205,7 +209,7 @@ export const runDaemon: RunDaemon = async (deps: EngineDeps, options) => {
       v: 1 as const,
       pid: process.pid,
       port: http.port,
-      prototype_port: prototype?.port ?? null,
+      prototype_port: prototype.port,
       mcp_socket: socket.path,
       repo_root: deps.repoRoot,
       started_at: now().toISOString(),
@@ -238,7 +242,7 @@ export const runDaemon: RunDaemon = async (deps: EngineDeps, options) => {
       })());
     const running: RunningDaemon = {
       port: http.port,
-      prototypePort: prototype?.port ?? null,
+      prototypePort: prototype.port,
       closed,
       close,
       discovery,
@@ -264,7 +268,7 @@ export const serveSnapshot: ServeSnapshot = async (deps) => {
     return cached.runs.map((r) => r.state);
   };
   const sessions = createSessionStore(now);
-  const prototype = await prototypeIfAny(deps.repoRoot);
+  const prototype = await createPrototypeServer(deps.repoRoot);
   const git = existsSync(join(deps.repoRoot, ".git"))
     ? createGitOps({ repoRoot: deps.repoRoot })
     : null;
@@ -273,7 +277,7 @@ export const serveSnapshot: ServeSnapshot = async (deps) => {
       repoRoot: deps.repoRoot,
       mode: "snapshot",
       versions: deps.versions,
-      prototypeUrl: () => prototypeUrl(prototype),
+      prototypeUrl: prototypeUrl(deps.repoRoot, prototype),
       runs,
       usage: () => runs().at(-1)?.usage ?? new Map(),
       git,
@@ -294,12 +298,12 @@ export const serveSnapshot: ServeSnapshot = async (deps) => {
   let closing: Promise<void> | null = null;
   const snapshot: RunningSnapshot = {
     port: http.port,
-    prototypePort: prototype?.port ?? null,
+    prototypePort: prototype.port,
     closed,
     close: () =>
       (closing ??= (async () => {
         await http.close();
-        await prototype?.close();
+        await prototype.close();
         resolveClosed();
       })()),
     mintNonce: () => sessions.mintNonce(),

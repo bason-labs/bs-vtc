@@ -111,6 +111,9 @@ export function EngineProvider({ children, fetchImpl }: EngineProviderProps) {
       openStream: (lastId, signal) => client.openStream(lastId, signal),
       onEvent: (event) => {
         bus.invalidate(topicKeysForEvent(event));
+        // The Designer writes the prototype mid-run; health names its origin once it exists.
+        if (event.type === "role.submitted" && event.role === "designer")
+          client.health(controller.signal).then(setHealth, () => undefined);
       },
       onStatus: setLive,
     });
