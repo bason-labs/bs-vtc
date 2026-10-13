@@ -61,6 +61,28 @@ export const initProject = (repo: string): string => {
   return repo;
 };
 
+/**
+ * What `vtc calibrate` plus the user's commit leave behind: a confirmed `.vtc/gates.yml` committed
+ * at HEAD. A run refuses to start without it (spine §5 reading 78, D-au).
+ */
+export const commitGatesConfig = (repo: string): string => {
+  mkdirSync(join(repo, ".vtc"), { recursive: true });
+  const gatesYml = {
+    version: 1,
+    baseline: {
+      revision: git(repo, "rev-parse", "HEAD"),
+      calibrated_at: "2026-10-13T08:00:00.000Z",
+      confirmed: true,
+    },
+    tests: { acceptance_globs: ["tests/acceptance/**"], protected_configs: [] },
+    gates: [{ id: "tests", layer: "L2", command: ["pnpm", "test"] }],
+  };
+  writeFileSync(join(repo, ".vtc/gates.yml"), `${JSON.stringify(gatesYml, null, 2)}\n`);
+  git(repo, "add", ".vtc/gates.yml");
+  git(repo, "commit", "-q", "-m", "vtc: calibrate gates");
+  return repo;
+};
+
 /** A git repo with one commit, set up for VTC as `vtc init` does. */
 export const initVtcRepo = (): string => initProject(initRepo());
 
