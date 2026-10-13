@@ -1,5 +1,10 @@
 import { describe, expect, it, vi } from "vitest";
-import { bootstrapSession, readNonce, SESSION_STORAGE_KEY } from "@/lib/api/session";
+import {
+  bootstrapSession,
+  clearStoredSession,
+  readNonce,
+  SESSION_STORAGE_KEY,
+} from "@/lib/api/session";
 
 const NONCE = "n".repeat(43);
 const SESSION = "s".repeat(43);
@@ -108,6 +113,37 @@ describe("bootstrapSession", () => {
     expect(storage.getItem(SESSION_STORAGE_KEY)).toBeNull();
     storage.setItem(SESSION_STORAGE_KEY, "not json");
     expect(await bootstrapSession(base)).toEqual({ status: "none", token: null });
+  });
+
+  it("shares an exchange in flight with a second bootstrap (StrictMode, remount)", async () => {
+    const fetch = exchangeOk();
+    const storage = memoryStorage();
+    let hash = `#nonce=${NONCE}`;
+    const deps = () => ({
+      hash,
+      replaceUrl: () => {
+        hash = "";
+      },
+      storage,
+      fetch,
+      now: () => NOW,
+    });
+    const first = bootstrapSession(deps());
+    const second = bootstrapSession(deps());
+    expect(await first).toEqual({ status: "exchanged", token: SESSION });
+    expect(await second).toEqual({ status: "exchanged", token: SESSION });
+    expect(fetch).toHaveBeenCalledOnce();
+    expect(await bootstrapSession(deps())).toEqual({ status: "restored", token: SESSION });
+  });
+
+  it("forgets a stored session on request", () => {
+    const storage = memoryStorage();
+    storage.setItem(SESSION_STORAGE_KEY, "{}");
+    clearStoredSession(storage);
+    expect(storage.getItem(SESSION_STORAGE_KEY)).toBeNull();
+    expect(() => {
+      clearStoredSession(null);
+    }).not.toThrow();
   });
 
   it("works when storage is blocked (keeps the token in memory)", async () => {

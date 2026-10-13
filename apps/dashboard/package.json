@@ -5,7 +5,7 @@
   "description": "Flow Studio: the read-only local dashboard (spec \u00a717), a Next.js static export served by the vtc binary.",
   "type": "module",
   "scripts": {
-    "dev": "next dev --port 4300",
+    "dev": "next dev --hostname 127.0.0.1 --port 4300",
     "dev:fixtures": "node --experimental-strip-types --disable-warning=ExperimentalWarning scripts/fixture-server.ts",
     "dev:engine": "node --experimental-strip-types --disable-warning=ExperimentalWarning scripts/engine-proxy.ts",
     "build": "next build && node -e \"require('node:fs').rmSync('next-env.d.ts',{force:true})\"",

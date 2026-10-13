@@ -5,8 +5,14 @@
  * engine's and `Origin` dropped, so the browser sees one origin and the engine's own checks stay
  * unchanged. It binds 127.0.0.1 only, forwards only the routes whose `auth` is `token`
  * (never the install-only nonce mint or statusline ingest), and never logs or returns the token.
+ *
+ * Because it drops `Origin` and rewrites `Host`, the engine's AD-5 rule 3 checks cannot see who
+ * asked, so the proxy makes them itself before anything else (`checkDevRequest`): `Host` must be
+ * the proxy's own loopback address, and `X-Forwarded-Host` (set by `next dev`) and `Origin`, when
+ * present, must be the `next dev` origin. A DNS-rebinding page or a LAN client gets `403` and the
+ * engine is never contacted.
  */
-import { readFileSync, statSync } from "node:fs";
+import { closeSync, constants, fstatSync, openSync, readFileSync } from "node:fs";
 import {
   createServer,
   request,
@@ -23,6 +29,7 @@ import {
   EngineDiscoverySchema,
   type EngineDiscovery,
 } from "@vtc/shared";
+import { DEV_DASHBOARD_PORT, isLoopbackHost, isLoopbackOrigin, oneHeader } from "./dev-http.ts";
 
 /** `$VTC_HOME`, else `~/.vtc` (the cli's rule). */
 export const resolveVtcHome = (env: Readonly<Record<string, string | undefined>>): string =>
@@ -48,16 +55,45 @@ const TOKEN = /^[A-Za-z0-9_-]{43}$/;
 
 /**
  * The install token, with the cli's checks: refused when group or others can read the file
- * (on POSIX) or when it does not hold a token. Errors never include the value.
+ * (on POSIX), when it is a symlink, or when it does not hold a token. The mode check and the read
+ * use one descriptor, so they see the same file. Errors never include the value.
  */
 export const readDevInstallToken = (vtcHome: string): string => {
   const path = join(vtcHome, ENGINE_INSTANCE.tokenFile);
-  if (process.platform !== "win32" && (statSync(path).mode & 0o077) !== 0) {
-    throw new Error(`${path} is readable by other users; remove it and run vtc install`);
+  // O_NOFOLLOW: a symlinked token file is refused (Windows has no such flag).
+  const noFollow = process.platform === "win32" ? 0 : constants.O_NOFOLLOW;
+  const fd = openSync(path, constants.O_RDONLY | noFollow);
+  try {
+    if (process.platform !== "win32" && (fstatSync(fd).mode & 0o077) !== 0) {
+      throw new Error(`${path} is readable by other users; remove it and run vtc install`);
+    }
+    const token = readFileSync(fd, "utf8").trim();
+    if (!TOKEN.test(token)) throw new Error(`${path} does not hold a vtc install token`);
+    return token;
+  } finally {
+    closeSync(fd);
   }
-  const token = readFileSync(path, "utf8").trim();
-  if (!TOKEN.test(token)) throw new Error(`${path} does not hold a vtc install token`);
-  return token;
+};
+
+/**
+ * AD-5 rule 3, made by the proxy on the engine's behalf (it drops `Origin` and sets `Host`):
+ * `null` when the request may be forwarded, else why it is refused.
+ */
+export const checkDevRequest = (
+  headers: IncomingHttpHeaders,
+  proxyPort: number,
+  devPort: number,
+): string | null => {
+  if (!isLoopbackHost(oneHeader(headers.host), proxyPort)) return "Host is not this proxy";
+  const forwardedHost = oneHeader(headers["x-forwarded-host"]);
+  if (forwardedHost !== undefined && !isLoopbackHost(forwardedHost, devPort)) {
+    return "X-Forwarded-Host is not the next dev origin";
+  }
+  const origin = oneHeader(headers.origin);
+  if (origin !== undefined && !isLoopbackOrigin(origin, devPort)) {
+    return "Origin is not the next dev origin";
+  }
+  return null;
 };
 
 const ROUTES = Object.values(ENGINE_HTTP.routes)
@@ -111,12 +147,14 @@ export interface EngineProxyOptions {
   readonly vtcHome: string;
   /** Absolute root of the repo whose engine to reach. */
   readonly repoRoot: string;
+  /** The `next dev` port whose origin may call (default {@link DEV_DASHBOARD_PORT}). */
+  readonly devPort?: number;
 }
 
 const sendError = (
   res: ServerResponse,
   status: number,
-  code: "not_found" | "internal",
+  code: "not_found" | "forbidden" | "internal",
   message: string,
 ): void => {
   res.writeHead(status, { "content-type": "application/json" });
@@ -127,6 +165,15 @@ const sendError = (
 export const createEngineProxy = (options: EngineProxyOptions): Server =>
   createServer((req, res) => {
     const method = req.method ?? "GET";
+    const refused = checkDevRequest(
+      req.headers,
+      req.socket.localPort ?? 0,
+      options.devPort ?? DEV_DASHBOARD_PORT,
+    );
+    if (refused !== null) {
+      sendError(res, 403, "forbidden", refused);
+      return;
+    }
     const url = new URL(req.url ?? "/", "http://127.0.0.1");
     if (!isProxiedRoute(method, url.pathname)) {
       sendError(res, 404, "not_found", "the dev proxy forwards only the dashboard's routes");

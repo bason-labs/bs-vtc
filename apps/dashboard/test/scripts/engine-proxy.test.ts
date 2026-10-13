@@ -1,12 +1,19 @@
 // @vitest-environment node
-import { chmodSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
-import { createServer, type IncomingHttpHeaders, type Server } from "node:http";
+import { chmodSync, mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import {
+  createServer,
+  request,
+  type IncomingHttpHeaders,
+  type OutgoingHttpHeaders,
+  type Server,
+} from "node:http";
 import type { AddressInfo } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { engineDiscoveryFile } from "@vtc/shared";
 import {
+  checkDevRequest,
   createEngineProxy,
   engineRequestHeaders,
   isProxiedRoute,
@@ -68,6 +75,27 @@ const writeToken = (mode = 0o600): void => {
 
 const call = (path: string, init: RequestInit = {}): Promise<Response> =>
   fetch(`http://127.0.0.1:${String(proxyPort)}${path}`, init);
+
+/** A request with exactly these headers (fetch would set Host itself). */
+const raw = (
+  path: string,
+  headers: OutgoingHttpHeaders,
+  method = "GET",
+): Promise<{ status: number; body: string }> =>
+  new Promise((done, fail) => {
+    const req = request(
+      { host: "127.0.0.1", port: proxyPort, path, method, headers, setHost: false },
+      (res) => {
+        let body = "";
+        res.on("data", (chunk: Buffer) => (body += chunk.toString()));
+        res.on("end", () => {
+          done({ status: res.statusCode ?? 0, body });
+        });
+      },
+    );
+    req.on("error", fail);
+    req.end();
+  });
 
 beforeEach(async () => {
   home = mkdtempSync(join(tmpdir(), "vtc-proxy-"));
@@ -163,6 +191,58 @@ describe("dev engine proxy (AD-5 rule 8)", () => {
     expect(down.status).toBe(502);
   });
 
+  it("forwards what next dev sends: its own Host rewritten, X-Forwarded-Host and Origin of the dev origin", async () => {
+    writeDiscovery(enginePort);
+    writeToken();
+    for (const dev of ["127.0.0.1:4300", "localhost:4300"]) {
+      const res = await raw("/api/health", {
+        host: `127.0.0.1:${String(proxyPort)}`,
+        "x-forwarded-host": dev,
+        origin: `http://${dev}`,
+      });
+      expect(res.status, dev).toBe(200);
+    }
+    const local = await raw("/api/health", { host: `localhost:${String(proxyPort)}` });
+    expect(local.status).toBe(200);
+    expect(seen).toHaveLength(3);
+  });
+
+  it("refuses a foreign Host, X-Forwarded-Host or Origin (DNS rebinding, LAN) without contacting the engine", async () => {
+    writeDiscovery(enginePort);
+    writeToken();
+    const own = `127.0.0.1:${String(proxyPort)}`;
+    const cases: [string, OutgoingHttpHeaders, string?][] = [
+      ["foreign Host", { host: `attacker.example:${String(proxyPort)}` }],
+      ["loopback Host on another port", { host: "127.0.0.1:1" }],
+      ["foreign X-Forwarded-Host", { host: own, "x-forwarded-host": "attacker.example:4300" }],
+      ["LAN X-Forwarded-Host", { host: own, "x-forwarded-host": "192.168.1.20:4300" }],
+      ["foreign Origin", { host: own, origin: "http://attacker.example:4300" }],
+      ["Origin on another port", { host: own, origin: "http://127.0.0.1:4301" }],
+      ["https Origin", { host: own, origin: "https://127.0.0.1:4300" }],
+      ["null Origin", { host: own, origin: "null" }],
+      ["foreign Origin on the write", { host: own, origin: "http://evil.test" }, "POST"],
+    ];
+    for (const [name, headers, method] of cases) {
+      const path = method === "POST" ? "/api/design/reviews" : "/api/runs";
+      const res = await raw(path, headers, method);
+      expect(res.status, name).toBe(403);
+      expect(JSON.parse(res.body), name).toMatchObject({ error: { code: "forbidden" } });
+      expect(res.body).not.toContain(TOKEN);
+    }
+    expect(seen).toHaveLength(0);
+  });
+
+  it("refuses a token file that is a symlink", async () => {
+    writeDiscovery(enginePort);
+    const real = join(home, "elsewhere");
+    writeFileSync(real, `${TOKEN}\n`, { mode: 0o600 });
+    symlinkSync(real, join(home, "token"));
+    const res = await call("/api/health");
+    expect(res.status).toBe(500);
+    expect(await res.text()).not.toContain(TOKEN);
+    expect(seen).toHaveLength(0);
+  });
+
   it("refuses a token file that other users can read", async () => {
     writeDiscovery(enginePort);
     writeToken(0o644);
@@ -190,6 +270,30 @@ describe("dev engine proxy helpers", () => {
     expect(readEngineDiscovery(home, REPO)?.port).toBe(1234);
     writeFileSync(join(home, "token"), "short\n", { mode: 0o600 });
     expect(() => readDevInstallToken(home)).toThrow(/does not hold a vtc install token/);
+  });
+
+  it("checks Host, X-Forwarded-Host and Origin against the proxy and the next dev origin", () => {
+    expect(checkDevRequest({ host: "127.0.0.1:4320" }, 4320, 4300)).toBeNull();
+    expect(checkDevRequest({ host: "LOCALHOST:4320" }, 4320, 4300)).toBeNull();
+    expect(
+      checkDevRequest(
+        {
+          host: "127.0.0.1:4320",
+          "x-forwarded-host": "localhost:4300",
+          origin: "http://localhost:4300",
+        },
+        4320,
+        4300,
+      ),
+    ).toBeNull();
+    expect(checkDevRequest({ host: "127.0.0.1:4320.evil.test" }, 4320, 4300)).not.toBeNull();
+    expect(checkDevRequest({}, 4320, 4300)).not.toBeNull();
+    expect(
+      checkDevRequest({ host: "127.0.0.1:4320", origin: "http://127.0.0.1:4300/x" }, 4320, 4300),
+    ).not.toBeNull();
+    expect(
+      checkDevRequest({ host: "127.0.0.1:4320", "x-forwarded-host": "127.0.0.1:4300" }, 4320, 9),
+    ).not.toBeNull();
   });
 
   it("proxies exactly the token routes", () => {

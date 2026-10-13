@@ -13,13 +13,14 @@
  * own origin (port + 1) with `PROTOTYPE_CSP`, reported as `HealthResult.prototype_url`.
  *
  * Flags: --port <n> (4310), --static <dir>, --live (report `mode: live` instead of the recorded
- * snapshot), --replay-ms <n> (delay between replayed events, 600). Binds 127.0.0.1 only. Dev only:
- * it checks no token and is never part of the build.
+ * snapshot), --replay-ms <n> (delay between replayed events, 600). Binds 127.0.0.1 only and, like
+ * the engine (AD-5 rules 3 and 9), refuses a foreign `Host` (both listeners) or `Origin` (the API:
+ * its own origin or `next dev`'s). Dev only: it checks no token and is never part of the build.
  */
 import { randomBytes } from "node:crypto";
 import { existsSync, readFileSync, statSync } from "node:fs";
 import { createServer, type ServerResponse } from "node:http";
-import { join, normalize, resolve, sep } from "node:path";
+import { join, resolve } from "node:path";
 import {
   dashboardAssetHeaders,
   DESIGN_REVIEW_MAX_BYTES,
@@ -34,6 +35,12 @@ import {
   devArtifactFile,
   mediaTypeFor,
 } from "./dev-fixtures.ts";
+import {
+  checkLoopbackRequest,
+  DEV_DASHBOARD_PORT,
+  prototypeFile,
+  readLimitedBody,
+} from "./dev-http.ts";
 import { fixtureNameFor, GOLDEN_RUN } from "./fixture-routes.ts";
 
 const args = process.argv.slice(2);
@@ -109,6 +116,8 @@ const serveStatic = (res: ServerResponse, pathname: string): void => {
 
 /** Design-review pins posted in this session, by screen (appended to the fixture's file). */
 const pins = new Map<string, string[]>();
+/** Pins kept per screen (oldest dropped first), so a long dev session cannot grow without bound. */
+const MAX_PINS_PER_SCREEN = 200;
 
 const designReviewsArtifact = (path: string): ReturnType<typeof devArtifact> => {
   const match = /^\.vtc\/design\/reviews\/([a-z0-9][a-z0-9._-]{0,63})\.jsonl$/.exec(path);
@@ -125,8 +134,8 @@ const designReviewsArtifact = (path: string): ReturnType<typeof devArtifact> => 
   return lines.length === 0 ? null : artifactContent(GOLDEN_RUN, path, `${lines.join("\n")}\n`);
 };
 
-const postDesignReview = (body: string, res: ServerResponse): void => {
-  if (Buffer.byteLength(body) > DESIGN_REVIEW_MAX_BYTES) {
+const postDesignReview = (body: string | null, res: ServerResponse): void => {
+  if (body === null) {
     sendJson(res, 413, { error: { code: "payload_too_large", message: "body too large" } });
     return;
   }
@@ -142,19 +151,27 @@ const postDesignReview = (body: string, res: ServerResponse): void => {
     return;
   }
   const { screen } = parsed.data;
-  pins.set(screen, [...(pins.get(screen) ?? []), JSON.stringify(parsed.data)]);
+  pins.set(
+    screen,
+    [...(pins.get(screen) ?? []), JSON.stringify(parsed.data)].slice(-MAX_PINS_PER_SCREEN),
+  );
   sendJson(res, 200, { ok: true, path: `.vtc/design/reviews/${screen}.jsonl` });
 };
 
 /** The sample prototype: any path serves its file, or `index.html` (one page per screen route). */
 const prototypeServer = createServer((req, res) => {
   const pathname = new URL(req.url ?? "/", "http://127.0.0.1").pathname;
-  const file = normalize(join(DEV_PROTOTYPE_DIR, decodeURIComponent(pathname)));
-  const inside = file.startsWith(`${DEV_PROTOTYPE_DIR}${sep}`) || file === DEV_PROTOTYPE_DIR;
-  const served =
-    inside && existsSync(file) && statSync(file).isFile()
-      ? file
-      : join(DEV_PROTOTYPE_DIR, "index.html");
+  if (checkLoopbackRequest({ host: req.headers.host }, prototypePort, []) !== null) {
+    res.writeHead(403, { "content-security-policy": PROTOTYPE_CSP });
+    res.end();
+    return;
+  }
+  const served = prototypeFile(DEV_PROTOTYPE_DIR, pathname);
+  if (served === null) {
+    res.writeHead(400, { "content-security-policy": PROTOTYPE_CSP });
+    res.end();
+    return;
+  }
   if (req.method !== "GET" || pathname.startsWith("/api/")) {
     res.writeHead(404, { "content-security-policy": PROTOTYPE_CSP });
     res.end();
@@ -169,6 +186,11 @@ const prototypeServer = createServer((req, res) => {
 });
 
 const server = createServer((req, res) => {
+  const refused = checkLoopbackRequest(req.headers, port, [port, DEV_DASHBOARD_PORT]);
+  if (refused !== null) {
+    sendJson(res, 403, { error: { code: "forbidden", message: refused } });
+    return;
+  }
   const url = new URL(req.url ?? "/", "http://127.0.0.1");
   const method = req.method ?? "GET";
   if (method === "POST" && url.pathname === "/api/session") {
@@ -179,11 +201,14 @@ const server = createServer((req, res) => {
     return;
   }
   if (method === "POST" && url.pathname === "/api/design/reviews") {
-    let body = "";
-    req.on("data", (chunk: Buffer) => (body += chunk.toString()));
-    req.on("end", () => {
-      postDesignReview(body, res);
-    });
+    readLimitedBody(req, DESIGN_REVIEW_MAX_BYTES).then(
+      (body) => {
+        postDesignReview(body, res);
+      },
+      () => {
+        res.destroy();
+      },
+    );
     return;
   }
   if (method === "GET" && url.pathname === `/api/runs/${GOLDEN_RUN}/artifacts`) {

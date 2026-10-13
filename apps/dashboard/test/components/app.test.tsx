@@ -73,6 +73,17 @@ describe("Flow Studio against the golden run", () => {
     expect(window.location.search).not.toContain("node=");
   });
 
+  it("shows a node's timeline in the drill-down", async () => {
+    const user = userEvent.setup();
+    renderApp("/task/?run=golden-1&task=T-2");
+    const nodes = await screen.findByRole("list", { name: "Nodes" });
+    await user.click(within(nodes).getByRole("button", { name: /Round cap/ }));
+    const drawer = await screen.findByTestId("node-drawer");
+    const timeline = await within(drawer).findByRole("list", { name: "Timeline" });
+    expect(within(timeline).getByText("E-1 raised")).toBeInTheDocument();
+    expect(timeline.querySelector("time")).toHaveAttribute("datetime", "2026-10-13T09:39:00.000Z");
+  });
+
   it("lists escalations read-only with the recommended option", async () => {
     renderApp("/escalations/?run=golden-1");
     const card = await screen.findByTestId("escalation-E-1");
@@ -153,10 +164,32 @@ describe("Flow Studio against the golden run", () => {
     expect(runs?.headers.get("authorization")).toBe(`Bearer ${session}`);
   });
 
-  it("tells the viewer to reopen the dashboard when the session is refused", async () => {
+  it("keeps the exchanged session when StrictMode runs the bootstrap twice", async () => {
+    const nonce = "n".repeat(43);
+    const session = "s".repeat(43);
+    const { requests } = renderApp(
+      `/#nonce=${nonce}`,
+      {
+        "/api/session": () => Response.json({ session, expires_at: "2099-01-01T00:00:00.000Z" }),
+      },
+      { strict: true },
+    );
+    await screen.findByRole("list", { name: "Runs" });
+    expect(requests.filter((r) => r.url === "/api/session")).toHaveLength(1);
+    const runs = requests.filter((r) => r.url === "/api/runs");
+    expect(runs.length).toBeGreaterThan(0);
+    for (const r of runs) expect(r.headers.get("authorization")).toBe(`Bearer ${session}`);
+  });
+
+  it("tells the viewer to reopen the dashboard when the session is refused, and forgets it", async () => {
+    window.sessionStorage.setItem(
+      "vtc.session",
+      JSON.stringify({ session: "s".repeat(43), expires_at: "2099-01-01T00:00:00.000Z" }),
+    );
     renderApp("/", { "/api/runs": () => new Response("{}", { status: 401 }) });
     expect(await screen.findByRole("alert")).toHaveTextContent("vtc dashboard");
     expect(screen.getByTestId("connection")).toHaveTextContent("Session expired");
+    expect(window.sessionStorage.getItem("vtc.session")).toBeNull();
   });
 
   it("shows a not-found view for an unknown page", async () => {

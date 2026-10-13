@@ -44,6 +44,11 @@ binaries must stay out of the production dependency closure (AD-2, `supply-chain
   `POST /api/design/reviews`; a pin is a percentage of the frame, so it only lines up on the
   state, width and theme it was made on (the others are listed, not drawn). Keyboard users place
   a pin with Enter and the position fields.
+- Open integration risk: the `screens.yaml` shape above is the dashboard's reading of spec §9
+  ("each screen's route, required states and the REQs it covers"); no contract in `@vtc/shared`
+  freezes it yet, and the Designer role (roles-compiler) writes the file. A contract proposal asks
+  the integrator for a frozen `DesignScreensFile` schema shared by both; until then a Designer
+  writing another shape shows "No screens to review yet" (`parseScreens` in `src/lib/design.ts`).
 - Without a running engine, `vtc dashboard` serves the same routes read-only from the committed
   `.vtc/` snapshot.
 
@@ -65,7 +70,11 @@ Development (AD-5 rule 8):
   The proxy finds the engine in `$VTC_HOME/engines/<repo-key>.json` (`~/.vtc` by default) on
   every request, injects the install token (refusing a token file others can read), sets `Host`
   and drops `Origin`, cookies and the browser's own `Authorization`. It forwards only the routes
-  whose `auth` is `token`, never the nonce mint or the statusline ingest. The engine never sends
-  CORS headers.
+  whose `auth` is `token`, never the nonce mint or the statusline ingest. Since it hides the
+  browser's `Origin` and `Host` from the engine, it checks them itself first (AD-5 rule 3): `Host`
+  must be the proxy's loopback address, and `Origin` and `X-Forwarded-Host`, when present, the
+  `next dev` origin (`127.0.0.1:4300` or `localhost:4300`; `--dev-port` changes it). Anything else
+  (a DNS-rebinding page, a LAN client) gets `403` before the engine or the token is touched.
+  `pnpm dev` binds `next dev` to 127.0.0.1 only. The engine never sends CORS headers.
 
 See `docs/architecture/vtc-spine.md`.

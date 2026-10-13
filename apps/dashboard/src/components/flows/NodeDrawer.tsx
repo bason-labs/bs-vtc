@@ -6,6 +6,7 @@ import { useMemo } from "react";
 import { nodeDrawerModel } from "@/lib/flows/drawer";
 import { hrefs } from "@/lib/router";
 import { nodeStateMeta } from "@/lib/states";
+import { formatLocalTime } from "@/lib/time";
 import { Link } from "@/components/app/Link";
 import { Drawer, StatusPill } from "@/components/ui";
 import { DiffSection } from "./DiffSection";
@@ -24,7 +25,8 @@ export interface NodeDrawerProps {
 /**
  * Drill-down for a node of one task's pipeline (§17): role, round n/cap, state and why it was
  * added, findings, evidence, role runs with prompt versions and verdicts, gate reports, the
- * escalation it raised, the transcript's location, the plan file, evidence bundle and diff.
+ * escalation it raised, its timeline, the transcript's location, the plan file, evidence bundle
+ * and diff.
  */
 export function NodeDrawer({ run, node, detail, onClose }: NodeDrawerProps) {
   const model = useMemo(
@@ -135,6 +137,30 @@ export function NodeDrawer({ run, node, detail, onClose }: NodeDrawerProps) {
               <p className="text-xs text-muted-fg">Answers happen in the Lead chat.</p>
             </Section>
           )}
+
+          <Section title="Timeline" count={model.timeline.length}>
+            {model.timeline.length === 0 ? (
+              <p className="text-xs text-muted-fg">
+                {detail === null ? "Loading…" : "Nothing has happened at this node yet."}
+              </p>
+            ) : (
+              <ol className="space-y-1.5 border-l border-border pl-3 text-xs" aria-label="Timeline">
+                {model.timeline.map((t, i) => (
+                  <li key={`${t.at}-${String(i)}`} className="space-y-0.5">
+                    <p>
+                      <time className="tabular text-muted-fg" dateTime={t.at} title={t.at}>
+                        {formatLocalTime(t.at, Date.now())}
+                      </time>{" "}
+                      <span className="font-medium">{t.label}</span>
+                    </p>
+                    {t.detail === null ? null : (
+                      <p className="break-words text-muted-fg">{t.detail}</p>
+                    )}
+                  </li>
+                ))}
+              </ol>
+            )}
+          </Section>
 
           <Section title="Transcript">
             <p className="text-xs">
