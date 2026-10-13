@@ -18,6 +18,7 @@ import {
   EffortSchema,
   engineMcpServer,
   HOST_IDS,
+  HUMAN_ONLY_TOOLS,
   isKnownArtifactType,
   PrototypeThemeSchema,
   prototypeStatePath,
@@ -134,6 +135,33 @@ describe("role agents get only what their contract allows (AD-4, AD-8 rule 3)", 
     }
   });
 
+  it("never gives any role agent a human-only engine tool, on either host (D-an, reading 71)", () => {
+    const agents = claudeAgents();
+    expect(agents.length).toBe(roles.flatMap(compiledAgentNames).length);
+    const human = HUMAN_ONLY_TOOLS.flatMap((t) => [t, claudeEngineToolName(t)]);
+    for (const agent of agents) {
+      expect(
+        agent.tools.filter((t) => human.includes(t)),
+        agent.path,
+      ).toEqual([]);
+    }
+    const entry = engineMcpServer("codex");
+    const codex = output().targets.codex.filter((t) => t.path.startsWith("agents/"));
+    expect(codex.length).toBe(roles.flatMap(compiledAgentNames).length);
+    for (const f of codex) {
+      const server = (parseToml(f.text).mcp_servers as Record<string, Record<string, unknown>>)[
+        entry.name
+      ];
+      // the bridge must be either off or narrowed; an open bridge would serve every tool
+      expect(server?.enabled === false || Array.isArray(server?.enabled_tools), f.path).toBe(true);
+      const enabled = (server?.enabled_tools ?? []) as string[];
+      expect(
+        enabled.filter((t) => human.includes(t)),
+        f.path,
+      ).toEqual([]);
+    }
+  });
+
   it("keeps the engine bridge off, or limited to role-facing tools, in every Codex role agent", () => {
     const entry = engineMcpServer("codex");
     for (const f of output().targets.codex.filter((t) => t.path.startsWith("agents/"))) {
@@ -175,6 +203,11 @@ describe("no role touches VTC's own guard rails (D-w, spine §5 reading 43)", ()
       for (const glob of ROLE_DENIED_VTC.homeWriteDeny) {
         expect(denied, f.path).toContain(`Edit(~/.vtc/${glob})`);
         expect(denied, f.path).toContain(`Write(~/.vtc/${glob})`);
+        expect(denied, f.path).toContain(`Bash(*~/.vtc/${glob.replace(/\/\*\*$/, "")}*)`);
+      }
+      for (const glob of ROLE_DENIED_VTC.homeReadDeny) {
+        expect(denied, f.path).toContain(`Read(~/.vtc/${glob})`);
+        expect(denied, f.path).toContain(`Bash(*~/.vtc/${glob.replace(/\/\*\*$/, "")}*)`);
       }
       expect(denied, f.path).toEqual(CLAUDE_DENIED_TOOLS);
     }

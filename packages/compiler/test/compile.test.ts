@@ -5,6 +5,7 @@ import {
   AD9_FORBIDDEN_MARKERS,
   engineMcpServer,
   EvidenceTypeSchema,
+  HUMAN_ONLY_TOOLS,
   PLUGIN_MANIFEST_ASSET,
   PluginManifestSchema,
   promptShaFor,
@@ -459,9 +460,24 @@ describe("compilePlugins: errors", () => {
     expect(errorsOf({ "roles/qa/role.yaml": withTools("repo_map") })).toContain(
       "roles/qa: engine tool repo_map is not a role-facing tool in @vtc/shared",
     );
-    expect(errorsOf({ "roles/qa/role.yaml": withTools("approve") })).toContain(
-      "roles/qa: engine tool approve drives the run; only the Lead may call it",
+    expect(errorsOf({ "roles/qa/role.yaml": withTools("start") })).toContain(
+      "roles/qa: engine tool start drives the run; only the Lead may call it",
     );
+  });
+
+  it("rejects every human-only engine tool in role.yaml (D-an, reading 71)", () => {
+    const qa = fixtureFiles().find((f) => f.path === "roles/qa/role.yaml")?.text ?? "";
+    for (const tool of HUMAN_ONLY_TOOLS) {
+      const errors = errorsOf({
+        "roles/qa/role.yaml": qa.replace(
+          'tools: { profile: write_scoped, write_paths: ["tests/acceptance/**"] }',
+          `tools: { profile: write_scoped, write_paths: ["tests/acceptance/**"], engine_tools: [${tool}] }`,
+        ),
+      });
+      expect(errors, tool).toContain(
+        `roles/qa: engine tool ${tool} records a human decision; no role may call it`,
+      );
+    }
   });
 
   it("rejects a Codex model id in role.yaml until the spike names Codex models (D-h, reading 26)", () => {
