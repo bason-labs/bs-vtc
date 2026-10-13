@@ -80,7 +80,7 @@ describe("consult: advisors through the engine (spine §5 readings 25, 30)", () 
     only(await next(h), "repo_cartographer");
     const out = await h.engine.consult(
       {
-        advisor: "client_liaison",
+        advisor: "advisor_client_liaison",
         question: "Summarise where the run stands for the client.",
         inputs: [{ type: "run_status", path: `.vtc/runs/${run}/request.md` }],
       },
@@ -88,13 +88,19 @@ describe("consult: advisors through the engine (spine §5 readings 25, 30)", () 
     );
     expect(out.run).toBe(run);
     const action = out.action;
-    expect(action).toMatchObject({ type: "spawn_role", role: "client_liaison", model: "sonnet" });
+    expect(action).toMatchObject({
+      type: "spawn_role",
+      role: "advisor_client_liaison",
+      model: "sonnet",
+    });
     const pack = readFileSync(join(h.repo, action.pack), "utf8");
     expect(pack).toContain("run_status");
-    expect(pack).toContain("question");
+    // the human's question is the advisor_question input, listed first (advisor protocol)
+    const inputs = (pack.split("## Inputs\n")[1] ?? "").split("\n## ")[0]?.trim().split("\n") ?? [];
+    expect(inputs[0]).toMatch(/^- advisor_question: \.vtc\/state\/packs\/.+\/consult-.+\.md$/);
     expect(action.prompt).toContain("The human asks: Summarise where the run stands");
     const dispatched = events(h).findLast((e) => e.type === "role.dispatched");
-    expect(dispatched).toMatchObject({ role: "client_liaison", model: "sonnet" });
+    expect(dispatched).toMatchObject({ role: "advisor_client_liaison", model: "sonnet" });
     expect(dispatched?.prompt_sha).toMatch(/^[a-f0-9]{64}$/);
     writeFile(workdir(action), ".vtc/exports/status.md", "# Status\n\nOn track.\n");
     const submitted = await submitResult(h, action, {
@@ -104,7 +110,7 @@ describe("consult: advisors through the engine (spine §5 readings 25, 30)", () 
     expect(submitted.accepted).toBe(true);
     expect(readFileSync(join(h.repo, ".vtc/exports/status.md"), "utf8")).toContain("On track.");
     expect(events(h).findLast((e) => e.type === "role.submitted")).toMatchObject({
-      role: "client_liaison",
+      role: "advisor_client_liaison",
       model: "sonnet",
     });
     // the phase flow is untouched: the Cartographer is still the step in flight
@@ -118,7 +124,7 @@ describe("consult: advisors through the engine (spine §5 readings 25, 30)", () 
       h.engine.consult({ advisor: "ba", question: "Rewrite the spec", inputs: [] }, CLAUDE),
     ).rejects.toThrow(/not an advisor/);
     const { action } = await h.engine.consult(
-      { advisor: "cost_analyst", question: "Why so expensive?", inputs: [] },
+      { advisor: "advisor_estimator", question: "Why so expensive?", inputs: [] },
       CLAUDE,
     );
     writeFile(workdir(action), "src/cheaper.ts", "export const x = 1;\n");
@@ -131,7 +137,7 @@ describe("consult: advisors through the engine (spine §5 readings 25, 30)", () 
     const h = createHarness({ project: { budgets: { advisor_usd: 0.15 } } });
     await start(h);
     const ask = () =>
-      h.engine.consult({ advisor: "cost_analyst", question: "Spend?", inputs: [] }, CLAUDE);
+      h.engine.consult({ advisor: "advisor_estimator", question: "Spend?", inputs: [] }, CLAUDE);
     expect((await submitResult(h, (await ask()).action, { exit: "done" }, 0.1)).accepted).toBe(
       true,
     );
@@ -394,6 +400,25 @@ describe("Lead-only tools from role sessions (spine §7, until the Codex isolati
     const claims = readFileSync(join(guardDirFor(h.home, h.repo), "leads.jsonl"), "utf8");
     expect(claims).toContain('"session":"S-lead"');
     expect(claims).not.toContain('"session":"S-role"');
+    await h.release();
+  });
+});
+
+describe("spawn_role.agent on a host that namespaces plugin agents (AD-14 rule 1)", () => {
+  it("names the agent as the host's adapter spawns it; the log keeps the base name", async () => {
+    const h = createHarness({ subagentName: (agent) => `vtc:${agent}` });
+    await start(h);
+    const carto = only(await next(h), "repo_cartographer");
+    expect(carto.agent).toBe("vtc:vtc-repo-cartographer");
+    const dispatched = events(h).findLast((e) => e.type === "role.dispatched");
+    expect(dispatched?.data.agent).toBe("vtc-repo-cartographer");
+    expect(dispatched?.prompt_sha).toMatch(/^[a-f0-9]{64}$/);
+    await h.release();
+  });
+  it("leaves the base name when the adapter adds no namespace", async () => {
+    const h = createHarness();
+    await start(h);
+    expect(only(await next(h), "repo_cartographer").agent).toBe("vtc-repo-cartographer");
     await h.release();
   });
 });

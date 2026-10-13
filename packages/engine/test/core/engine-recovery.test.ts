@@ -257,7 +257,7 @@ describe("questions, plans and the design phase", () => {
     expect(spawns(design.actions).map((a) => a.role)).toEqual(["architect", "designer"]);
     const [architect, designer] = spawns(design.actions);
     writeFile(workdir(architect!), ".vtc/architecture/spine.md", "# spine\n");
-    writeFile(workdir(designer!), ".vtc/design/DESIGN.md", "# design\n");
+    writeFile(workdir(designer!), ".vtc/design/flows.mmd", "flowchart LR\n");
     // the Designer's pack carries its dealt constraints (§9.1 step 2), the Architect's its depth
     expect(readFileSync(join(h.repo, designer!.pack), "utf8")).toContain("design constraints:");
     expect(readFileSync(join(h.repo, architect!.pack), "utf8")).toContain("architect depth: S");
@@ -268,14 +268,14 @@ describe("questions, plans and the design phase", () => {
     const gate = (
       await submitResult(h, designer!, {
         exit: "done",
-        artifacts: [{ type: "design", path: ".vtc/design/DESIGN.md" }],
+        artifacts: [{ type: "design_flows", path: ".vtc/design/flows.mmd" }],
       })
     ).actions.find((a) => a.type === "approve_gate");
     expect(gate).toMatchObject({ gates: ["G1", "G2"] });
     if (gate?.type === "approve_gate")
       expect(gate.artifacts.map((a) => a.path).sort()).toEqual([
         ".vtc/architecture/spine.md",
-        ".vtc/design/DESIGN.md",
+        ".vtc/design/flows.mmd",
         ".vtc/spec/spec.md",
       ]);
     await h.release();

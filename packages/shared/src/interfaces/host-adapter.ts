@@ -67,8 +67,10 @@ export const HostFailureOutcomeSchema = z.discriminatedUnion("kind", [
 export type HostFailureOutcome = z.infer<typeof HostFailureOutcomeSchema>;
 
 /**
- * What the Lead runs for a `spawn_role` action (subagent dispatch). `agent` is the compiled
- * agent name (`agentNameFor`), `prompt` the short instruction pointing at the task pack.
+ * What the Lead runs for a `spawn_role` action (subagent dispatch). `agent` is the name the host
+ * spawns the compiled agent under: `agentNameFor(role, mode)`, with the host's plugin namespace
+ * when its adapter adds one (`HostAdapter.subagentName`, AD-14 rule 1). `prompt` is the short
+ * instruction pointing at the task pack.
  */
 export const SubagentInstructionSchema = z.strictObject({
   agent: z.string().min(1).max(128),
@@ -228,6 +230,13 @@ export interface HostAdapter {
   install(request: InstallRequest): Promise<InstallResult>;
   /** Start a role as an in-session subagent instruction or a headless process. */
   spawnRole(request: SpawnRoleRequest): Promise<SpawnResult>;
+  /**
+   * Pure: the name this host spawns the compiled plugin agent `agent` (`agentNameFor`) under,
+   * e.g. with the plugin namespace a host puts in front of plugin agents (AD-14 rule 1; Claude
+   * Code `vtc:<agent>`, pending its spike). The engine puts it in `spawn_role.agent`; prompt
+   * SHAs and the manifest stay keyed by the base name. Absent: the host spawns the base name.
+   */
+  subagentName?(agent: string): string;
   /**
    * Pure: parse a recorded or live stream (JSONL lines) into a normalised outcome, usage and
    * retry state. The engine may call it repeatedly on the lines seen so far.

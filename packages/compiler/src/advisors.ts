@@ -17,7 +17,7 @@
  * - its first input is {@link ADVISOR_QUESTION_ARTIFACT}, the human's question, and only advisors
  *   read that type. `request` keeps its shared meaning, the run's idea or change request.
  */
-import type { RoleContract, RoleExit } from "@vtc/shared";
+import { PACK_INPUT_TYPES, type RoleContract, type RoleExit } from "@vtc/shared";
 
 export const ADVISOR_PREFIX = "advisor_";
 
@@ -34,18 +34,16 @@ export const ADVISOR_EXPORT_ARTIFACT = "client_export";
 
 /**
  * The artifact type of the human's consult question (`ConsultInput.question`), which the engine
- * writes to a file and lists first in the advisor's pack inputs. Provisional: proposed to
- * `@vtc/shared` (MINOR: a `KNOWN_ARTIFACT_TYPES` entry and a path helper next to `taskPackPath`);
- * until it lands the advisor prompts and role contracts already use this name, so the engine has
- * one reading to build to. `request` stays the run's request (`PACK_INPUT_TYPES.request`).
+ * writes to a file and lists first in the advisor's pack inputs (`PACK_INPUT_TYPES` in
+ * `@vtc/shared`). `request` stays the run's request (`PACK_INPUT_TYPES.request`).
  */
-export const ADVISOR_QUESTION_ARTIFACT = "advisor_question";
+export const ADVISOR_QUESTION_ARTIFACT = PACK_INPUT_TYPES.advisorQuestion;
 
 /**
  * Artifact types the roles use that are proposed to `@vtc/shared` but not in
  * `KNOWN_ARTIFACT_TYPES` yet. Drop an entry once shared adds it.
  */
-export const PROPOSED_ARTIFACT_TYPES: readonly string[] = [ADVISOR_QUESTION_ARTIFACT];
+export const PROPOSED_ARTIFACT_TYPES: readonly string[] = [];
 
 /** Every advisor rule `role` breaks; empty for a valid advisor and for every other role. */
 export const advisorContractErrors = (role: RoleContract): string[] => {

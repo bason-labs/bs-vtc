@@ -11,6 +11,7 @@ import {
   dotenvValues,
   eventLogPath,
   HOST_IDS,
+  PACK_INPUT_TYPES,
   parseEventLog,
   remainingPct,
   type ApproveInput,
@@ -1414,7 +1415,7 @@ export class Engine implements Kernel {
           role: input.advisor,
           note: `The human asks: ${input.question}`.slice(0, 4000),
           inputs: [
-            ArtifactRefSchema.parse({ type: "question", path }),
+            ArtifactRefSchema.parse({ type: PACK_INPUT_TYPES.advisorQuestion, path }),
             ...input.inputs.map((i) => ArtifactRefSchema.parse(i)),
           ],
         },

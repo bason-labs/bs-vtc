@@ -32,6 +32,16 @@
         "$TURBO_ROOT$/plugins/**"
       ]
     },
+    "@vtc/cli#test": {
+      "dependsOn": ["^typecheck"],
+      "outputs": [],
+      "inputs": [
+        "$TURBO_DEFAULT$",
+        "$TURBO_ROOT$/roles/**",
+        "$TURBO_ROOT$/skills/**",
+        "$TURBO_ROOT$/plugins/**"
+      ]
+    },
     "@vtc/shared#test": {
       "dependsOn": ["^typecheck"],
       "outputs": [],

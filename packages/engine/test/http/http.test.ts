@@ -495,6 +495,69 @@ describe("AD-5: localhost hardening", () => {
       "id: golden-1:45",
     ]);
   });
+  it("keeps a global stream global after a reconnect; only ?run= narrows it (AD-5 rule 6)", async () => {
+    const setupResult = await setup();
+    const { api } = setupResult;
+    const event = (run: string, seq: number) =>
+      ({
+        v: 1,
+        seq,
+        ts: "2026-10-13T10:00:00.000Z",
+        run,
+        type: "run.paused",
+        actor: "human",
+        data: { reason: "x" },
+      }) as const;
+    /** Opens /api/stream, emits `emitted` once connected, and collects ids until `until`. */
+    const ids = (path: string, emitted: ReturnType<typeof event>[], until: string) =>
+      new Promise<string[]>((resolve, reject) => {
+        const lines: string[] = [];
+        const done = () => lines.filter((l) => l.startsWith("id: "));
+        const req = request(
+          {
+            host: "127.0.0.1",
+            port: api.port,
+            path,
+            headers: {
+              host: `127.0.0.1:${String(api.port)}`,
+              ...auth(INSTALL),
+              "last-event-id": "golden-1:42",
+            },
+          },
+          (res) => {
+            res.on("data", (c: Buffer) => {
+              lines.push(...c.toString("utf8").split("\n"));
+              if (lines.includes(until)) {
+                req.destroy();
+                resolve(done());
+              }
+            });
+          },
+        );
+        req.on("error", (e) => {
+          if (!lines.includes(until)) reject(e);
+        });
+        req.end();
+        setTimeout(() => {
+          for (const e of emitted) setupResult.emit(e);
+        }, 100);
+      });
+    // a reconnect of the dashboard's global stream: golden-1 is replayed from 42, and a later
+    // run's events still arrive
+    expect(await ids("/api/stream", [event("golden-2", 1)], "id: golden-2:1")).toEqual([
+      "id: golden-1:43",
+      "id: golden-1:44",
+      "id: golden-2:1",
+    ]);
+    // an explicit ?run= filter narrows the stream to that run
+    expect(
+      await ids(
+        "/api/stream?run=golden-1",
+        [event("golden-2", 2), event("golden-1", 46)],
+        "id: golden-1:46",
+      ),
+    ).toEqual(["id: golden-1:43", "id: golden-1:44", "id: golden-1:46"]);
+  });
 });
 
 describe("AD-20: static dashboard serving through the AssetBundle", () => {

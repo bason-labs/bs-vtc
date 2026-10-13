@@ -82,7 +82,7 @@ const start = (h: Harness) =>
   );
 const repoMap = {
   exit: "done" as const,
-  artifacts: [{ type: "repo_map", path: ".vtc/research/repo-map.md" }],
+  artifacts: [{ type: "repo_map", path: ".vtc/research/repo-map/map.md" }],
 };
 const toEngineer = async (h: Harness): Promise<SpawnAction> => {
   const actions = await throughPlan(h, [draft("T-1")], SPEC_ONE);
@@ -299,7 +299,7 @@ describe("every role's dispatch is guarded (AD-7 rule 7)", () => {
     const h = createHarness();
     await start(h);
     const carto = only(await next(h), "repo_cartographer");
-    writeFile(workdir(carto), ".vtc/research/repo-map.md", "# map\n");
+    writeFile(workdir(carto), ".vtc/research/repo-map/map.md", "# map\n");
     // through the host, outside its worktree, into the user's checkout
     writeFile(h.repo, ".vtc/tasks/T-9.md", "forged plan\n");
     writeFileSync(join(h.repo, `.vtc/runs/${runId(h)}/request.md`), "a different request\n");

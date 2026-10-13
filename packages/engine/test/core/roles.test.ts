@@ -76,8 +76,8 @@ describe("compiled role contracts (AD-14 rule 6)", () => {
   it("cover every role the engine dispatches, advisors included in the fixture", () => {
     for (const id of REQUIRED_ROLES) expect(FIXTURE_ROLES.some((r) => r.id === id)).toBe(true);
     expect(ALL_FIXTURE_ROLES.filter((r) => r.kind === "advisor").map((r) => r.id)).toEqual([
-      "client_liaison",
-      "cost_analyst",
+      "advisor_client_liaison",
+      "advisor_estimator",
     ]);
   });
 });

@@ -14,6 +14,7 @@ import {
   type HostAdapter,
   type LeadAction,
   type PullRequestRef,
+  type RoleContract,
   type RoleResultInput,
   type ToolFinding,
   type WriteScopeReport,
@@ -230,6 +231,10 @@ export interface HarnessOptions {
   readonly files?: Record<string, string>;
   /** No `origin` remote (Level 2 then drops to Level 1, spine §5 reading 18). */
   readonly noRemote?: boolean;
+  /** The fake adapter's `subagentName` (a host that namespaces plugin agents, AD-14 rule 1). */
+  readonly subagentName?: (agent: string) => string;
+  /** Role contracts in place of the fixture set (they mirror `roles/`). */
+  readonly roles?: readonly RoleContract[];
 }
 
 export const DEFAULT_GATES_YML = {
@@ -275,6 +280,7 @@ export const createHarness = (options: HarnessOptions = {}): Harness => {
       ...options.capabilities,
     },
     install: () => Promise.reject(new Error("not in tests")),
+    ...(options.subagentName === undefined ? {} : { subagentName: options.subagentName }),
     spawnRole: (request) => {
       spawned.push(request.role);
       return Promise.reject(
@@ -332,7 +338,7 @@ export const createHarness = (options: HarnessOptions = {}): Harness => {
         return Promise.resolve();
       },
     },
-    roles: createRoleRegistry(ALL_FIXTURE_ROLES),
+    roles: createRoleRegistry(options.roles ?? ALL_FIXTURE_ROLES),
     plugins: createPluginCatalog({}),
     now,
     random: () => 0.5,
@@ -446,11 +452,11 @@ export const toPlanner = async (h: Harness, spec: string = SPEC): Promise<SpawnA
   );
   let actions = (await h.engine.next({}, CLAUDE)).actions;
   const carto = only(actions, "repo_cartographer");
-  writeFile(workdir(carto), ".vtc/research/repo-map.md", "# map\n");
+  writeFile(workdir(carto), ".vtc/research/repo-map/map.md", "# map\n");
   actions = (
     await submitResult(h, carto, {
       exit: "done",
-      artifacts: [{ type: "repo_map", path: ".vtc/research/repo-map.md" }],
+      artifacts: [{ type: "repo_map", path: ".vtc/research/repo-map/map.md" }],
     })
   ).actions;
   const ba = only(actions, "ba");
