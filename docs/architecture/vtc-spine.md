@@ -8,6 +8,10 @@
   before everything and recommends building only after it. This spine starts 1, 2, 3 and 6 in
   parallel with the spike instead (§5 reading 8). Every contract that rests on host behaviour the
   spike verifies is listed in §7 **Provisional contracts** with the spike check that unfreezes it.
+- **Wave-1 integration (2026-10-13):** the three wave-1 teams' contract proposals are merged
+  as `CONTRACTS_VERSION` 4.1.0 (MINOR, additive). The Lead's answers to their questions are §5
+  readings 18–37, marked "Lead decision 2026-10-13, pending human review". Round 1 of the spike
+  updated §7.
 - **Date:** 2026-10-13
 - **Source of truth:** `docs/superpowers/specs/2026-10-12-vtc-system-design.md` (the spec). Section
   numbers (§n) below refer to it. Where this document and the spec disagree, the spec wins, and
@@ -189,12 +193,14 @@ flowchart TB
 - **Binds:** every data shape that crosses a package, process, file or host boundary. The full list
   is `CONTRACT_SCHEMAS` (`json-schema.ts`): Run, Task, TaskDraft, PlanFileFrontmatter, Feature,
   Finding, FindingDraft, Question, Escalation, Event, EventPayloads, RoleResult, RoleContract,
-  AssertionProvenance, TaskPack, TraceabilityReport, EvidenceBundle, ProjectConfig, GatesConfig,
+  AssertionProvenance, TaskPack, TraceabilityReport, EvidenceBundle, DesignScreensFile
+  (`.vtc/design/screens.yaml`), PluginManifest (`vtc-manifest.json`), ProjectConfig, GatesConfig,
   ScannerPins, GateAllowlist, GateRunRequest, GateResult (incl. `ToolFinding`), GateReport,
   WriteScopeReport, TestInventory, UsageSnapshot, UsageReport, StatuslineIngest,
   WorkflowNode/Edge/Graph, HostOutcome, SubagentInstruction, EngineDiscovery, EngineSocketHello,
   EngineSocketWelcome, every MCP tool input and output (AD-4) and every HTTP request and response
-  (AD-5). Interfaces: `HostAdapter`, `Storage`, `GateRunner`, `GitOps` (AD-13), `AssetBundle`,
+  (AD-5). Interfaces: `HostAdapter`, `Storage`, `GateRunner`, `GitOps` (AD-13),
+  `PullRequestService`, `AssetBundle`,
   `AutoResumeScheduler`, and the composition seam (`EngineDeps`, `RunDaemon`, `ServeSnapshot`,
   `CreateGateRunner`, `CreateGitOps`, `EngineClient`; AD-19).
 - **Prevents:** parallel teams drifting apart; hand-written JSON Schemas diverging from runtime
@@ -220,7 +226,8 @@ flowchart TB
      updated in the same change. Every version's schema hash is appended to
      `packages/shared/schemas/contracts-ledger.json` by hand: a schema change without a new
      version entry fails the test even after `vitest -u`. (2.0.0 = fix round 1, 3.0.0 = fix
-     round 2, 4.0.0 = fix round 3; nothing consumed the earlier versions.)
+     round 2, 4.0.0 = fix round 3; nothing consumed the earlier versions; 4.1.0 = the wave-1
+     proposals, additive.)
   5. Open vocabularies stay open on purpose: event `type` (pattern `<entity>.<verb>`; the core
      set has typed payloads, AD-7), role ids, artifact types, stack packs. Consumers ignore unknown
      values.
@@ -236,7 +243,10 @@ flowchart TB
      `findForbiddenInText`, `capForRisk` (caps come only from `project.yaml`), `parsePersisted`,
      `checkParkRiskRule`, `integrationBranchFor`, `runRequestPath`, `gateCommandAllowed`,
      `gateAllowlistFile`, `contractsCompatible`, `encodeSocketLine`, `resolveDashboardAsset`,
-     `dashboardAssetHeaders`, `extractedPluginDir`.
+     `dashboardAssetHeaders`, `extractedPluginDir`, `promptShaFor` (the prompt version, §13),
+     `prototypeStatePath`, `vtcHookCommand`, `isKnownArtifactType`. Shared paths and constants:
+     `ROLE_CONTRACTS_ASSET`, `PLUGIN_MANIFEST_ASSET`, `DESIGN_SCREENS_PATH`, `VTC_HOOK`,
+     `KNOWN_ARTIFACT_TYPES` (the known names of the open artifact vocabulary, rule 5).
   7. Spine extensions to §16 are named here: the finding route `out_of_scope` (an Engineer
      `out_of_scope_fault` whose guards passed, §6.3 step 3); `RequirementRef` (`REQ-3.AC-2`)
      in `Finding.req_ids`; the Visual QA verdict `unchecked` (§7.5); `FindingDraft.kind` (the
@@ -245,9 +255,9 @@ flowchart TB
      dispatch (the AC of a Spec-Verifier call).
   8. Hosts receive the **structured-output** form, `jsonSchemaFor(name, { target:
 "structured-output" })`: object root (a root union is merged into one object with a
-     discriminator enum), every property required with optional ones nullable, no `default`.
-     Sub-project 0 verifies it against `claude -p --json-schema` and `codex exec --output-schema`
-     (provisional, §7).
+     discriminator enum), every property required with optional ones nullable, no `default`, and
+     no `$schema` or `$id` (Claude Code rejects a `--json-schema` that names the draft-2020-12
+     meta-schema; spike round 1, §7), so both hosts take the same document.
   9. **One evidence vocabulary.** Findings, claims, verdicts, questions and escalations all cite
      `Evidence` (`EvidenceTypeSchema`, whose doc comment defines each `ref` format and when it
      resolves). There is no second claim vocabulary.
@@ -287,22 +297,28 @@ flowchart TB
   | `answer`         | Record the human's answer (incl. `who_should_have_caught`) and resume           | `AnswerInput` → `NextResult`                 |
   | `approve`        | G1 / G2 decision; freezes each shown artifact at its own hash                   | `ApproveInput` → `NextResult`                |
   | `change_request` | Open a CR against a frozen spec, architecture or design (becomes an escalation) | `ChangeRequestInput` → `ChangeRequestResult` |
+  | `consult`        | Dispatch an advisor the human asked for (§5.4; logged, priced, budgeted)        | `ConsultInput` → `ConsultResult`             |
   | `pause`          | Kill switch: stop dispatching and merging                                       | `RunScopedInput` → `RunControlResult`        |
   | `resume`         | Resume a paused/interrupted run, rebuilding state from the event log            | `RunScopedInput` → `RunControlResult`        |
-  1. The Lead dispatches **only** actions returned by `next`. `submit` must echo the `action_id`;
+  1. The Lead dispatches **only** actions returned by `next`, plus the one `spawn_role` a
+     `consult` returns for an advisor (§5 reading 25). `submit` must echo the `action_id`;
      unknown, stale, duplicate or out-of-order results are rejected with a `RejectReason`
      (§4.2 step 4).
   2. Tool results are compact (§11: coarse tools, ≤ 1.5k-token returns).
   3. Role-facing tools (repo map, research fetchers, fact lookups) are added by the sub-projects
      that own them (3, 4) as a MINOR contract change.
   4. **Dispatch:** `spawn_role` is always a subagent spawn the Lead performs with the action's
-     `agent`, `prompt`, `background`, optional `resume` session and optional `subject` (the one
-     AC a Spec-Verifier call judges). Headless runs are **launched by the engine** through
+     `agent`, `prompt`, `background`, optional `resume` session, optional `subject` (the one
+     AC a Spec-Verifier call judges) and optional `model` (the model id the engine resolved,
+     after a tier escalation or a budget drop; the Lead passes it where the host's spawn takes
+     a model). Headless runs are **launched by the engine** through
      `HostAdapter.spawnRole`, are never Lead actions, show as `wait` to the Lead, and happen only
      where `planDispatch` allows them (AD-17: never in the default plugin-only mode).
   5. A subagent that hit a limit, lost auth or crashed is reported with `submit` `kind: failure`
      and the normalised outcome, so limit parking (§6.9) and spend capture (§11) cover subagent
-     runs too. Successful runs report `usage` (model, tokens, cost) alongside the result.
+     runs too. Successful runs report `usage` (model, tokens, cost) and the host `session_ref`
+     alongside the result; the engine records the session as `task.session_updated`, so fix
+     rounds and answers resume it (§6.3 step 8, §6.5).
 
 - **Check:** `engine-api.test.ts` in shared: tool names unique and include the §4.2 loop; every
   tool names existing input and output contracts; valid and invalid cases for every input and
@@ -323,7 +339,8 @@ flowchart TB
      framework.
   2. **Tokens, never cookies.** A per-install token (256 random bits, `~/.vtc/token` =
      `ENGINE_INSTANCE.tokenFile`, mode 0600, never in a repo, a discovery file or a URL)
-     authenticates the cli and the statusline shim. Only the cli touches the file
+     authenticates the cli and the statusline shim. Only the cli creates the file, and only the
+     cli and the dashboard's dev-only proxy (rule 8) read it
      (`ensureInstallToken`: one race-free exclusive create of a complete file; `readInstallToken`
      refuses a file group or others can read); the daemon receives the value as
      `EngineDeps.installToken` / `SnapshotDeps.installToken`.
@@ -378,7 +395,9 @@ flowchart TB
      `events.jsonl` + the expected response of every read route, all three graph zoom levels, an
      artifact and a diff). Against a live engine, `next dev` uses a dev-only proxy for `/api/*`
      that injects the token, sets `Host` and drops `Origin`, so the browser sees one origin and
-     the engine's checks stay unchanged.
+     the engine's checks stay unchanged. The proxy reads `~/.vtc/token` at runtime with the cli's
+     checks (mode 0600, format); it is dev tooling, never part of the shipped bundle, and the
+     bundle never reads the token (§5 reading 35).
   9. **Prototype origin.** Design review shows `.vtc/design/prototype/` (agent-written HTML/JS)
      from a **separate listener** on its own 127.0.0.1 port (`HealthResult.prototype_url`,
      `EngineDiscovery.prototype_port`). It serves only that directory, exposes no API, needs no
@@ -485,7 +504,8 @@ flowchart TB
      `strippedLines`, never as corruption (AD-3 rule 2).
   5. On start the engine rebuilds state from the log; SQLite is only an index (AD-2).
   6. File layout is §4.3: `.vtc/project.yaml`, `gates.yml`, `defaults.toml`, `research/`, `spec/`,
-     `architecture/`, `design/` (incl. `reviews/`), `tasks/T-n.md`, `evidence/T-n/` and
+     `architecture/`, `design/` (incl. `screens.yaml` and `reviews/`), `exports/` (client-liaison
+     exports, §5 reading 30), `tasks/T-n.md`, `evidence/T-n/` and
      `evidence/<feature>/`, `runs/<run>/events.jsonl`, `lookback/` are git-tracked. `.vtc/state/`
      (SQLite index, engine lock, worktrees, packs, transcripts, blobs, raw unredacted output) is
      gitignored. `~/.vtc/` holds hidden tests, the research cache (per client), the token, pinned
@@ -820,7 +840,13 @@ dist/index.js}`. Typecheck (`customConditions`), tests (Vitest aliases) and
      (`TaskPack`, rendered by `renderTaskPack`). Prompts are written against its fixed headings
      (`TASK_PACK_SECTIONS`) and name inputs by artifact type (`PACK_INPUT_TYPES` and the role's
      declared inputs), never by path.
-  6. Role contracts declare what a role may return: exits, verdict values (`output.verdicts`;
+  6. **Compiled contracts reach the engine as an asset.** The compiler writes every role's
+     `RoleContract` (from `roles/<role>/role.yaml`) as a JSON array at `ROLE_CONTRACTS_ASSET`
+     (`vtc/role-contracts.json`) and the `PluginManifest` at `PLUGIN_MANIFEST_ASSET`
+     (`vtc-manifest.json`, with each agent's `promptShaFor` SHA) in each plugin output; the
+     daemon loads both from its `AssetBundle` and refuses to start on a broken or incomplete
+     set. The engine keeps no second copy of write scopes, exits, verdicts or models.
+  7. Role contracts declare what a role may return: exits, verdict values (`output.verdicts`;
      declaring any means a `done` result carries at least one) and output artifact types (the
      Planner declares `tasks`). The Spec-Verifier is dispatched once per AC with that AC as the
      `subject`; Visual QA declares the criteria it judges.
@@ -901,7 +927,10 @@ dist/index.js}`. Typecheck (`customConditions`), tests (Vitest aliases) and
      namespaces `plugin:claude-code` and `plugin:codex` (AD-20), and fails on any AD-9 marker in an
      emitted file (`checkPluginFiles`).
   3. Every plugin registers the engine as `engineMcpServer(host)` = `vtc engine --mcp --host
-<host>`. The Codex installer writes the same entry.
+<host>`. The Codex installer writes the same entry. Plugin hooks run only
+     `vtcHookCommand(event, host)` = `vtc hook <event> --host <host>`, whose behaviour is frozen
+     in `@vtc/shared` (`hook.ts`: fail open; block only VTC role agents' git writes and
+     out-of-scope writes; AD-8 rule 3).
   4. `HostAdapter.install` only places or registers what the compiler emitted (plus the Codex
      agent TOML the compiler produced, and the statusline shim wiring); it authors nothing.
   5. **Marketplace.** The release job publishes the generated plugins (never hand-edited) with
@@ -981,8 +1010,9 @@ resume`). This is §5 reading 12, pending the human's confirmation.
      (`RunDaemon`, `ServeSnapshot`, `CreateGateRunner`, `CreateGitOps`, `EngineDeps`,
      `SnapshotDeps`, `GateRunnerDeps`, `RunningDaemon`).
   2. The cli builds `EngineDeps` (`composeEngineDeps`: install token, storage driver for the
-     runtime, Gate Runner with its `GitOps`, adapters from `ADAPTER_FACTORIES`, asset bundle,
-     timer, versions) and is the only caller.
+     runtime, Gate Runner with its `GitOps`, adapters from `ADAPTER_FACTORIES`, asset bundle
+     (incl. the compiled role contracts), timer, the `gh`-backed `PullRequestService`, versions)
+     and is the only caller.
   3. Commands are `CommandSpec { name, summary, run(args, ctx): Promise<number> }`; `main` is
      async. `CommandContext` carries io, cwd, the VTC home and a lazy `engine()` client.
   4. **Transport.** `vtc pause`, `resume` and `status` are MCP clients of the daemon's local socket
@@ -1119,6 +1149,113 @@ through the normal change process.
 17. **Where the gate allowlist lives** (§15 names it without a place): per machine and repo under
     `~/.vtc/allowlists/`, widened only by a human in `vtc calibrate` (AD-13 rule 10).
 
+**Readings 18–37 (2026-10-13, wave-1 integration).** The wave-1 teams asked these questions while
+building. Readings 18–36 are **Lead decision 2026-10-13, pending human review**; reading 37 is
+the integrator's, also pending human review. G2 did not cover them. Each is reversible through §6.
+
+18. **Merge Level 2 without a remote** (§6.4 Level-2 `done` needs a push included in an open
+    PR). _Lead decision 2026-10-13, pending human review._ When a run at Level 2 or 3 finds no
+    push remote (`origin`), the engine downgrades it to Level 1 and records
+    `run.merge_level_changed` with reason `no_remote`; its tasks then reach `done` under the
+    Level-1 rule. With a remote, a failed push is `branch.push_failed` and a failed PR call is
+    `feature.pr_failed` (typed, so Flow Studio shows them); merged tasks stay `merged` until a
+    later push includes them.
+19. **Gap findings and `spec_conflict` before sub-project 4** (§6.3 steps 3 and 8 route
+    `spec_gap` to the BA and `design_gap` to the Designer). _Lead decision 2026-10-13, pending
+    human review._ Until the front half (sub-project 4) lands, `spec_gap` and `design_gap`
+    findings and the Engineer's `spec_conflict` exit keep parking the task for the human. The
+    engine dispatches no task-scoped BA or Designer clarification yet.
+20. **Config changes during a run** (§4.3 is silent). _Lead decision 2026-10-13, pending human
+    review._ A run keeps the `project.yaml` and `gates.yml` it started with
+    (`run.started.pipeline_config_hash`). A change during the run is recorded as
+    `incident.recorded` kind `config_changed` and does **not** pause the run; the new config
+    applies to the next run.
+21. **Where front-half roles write** (§6.1 does not say where phase roles run). _Lead decision
+    2026-10-13, pending human review._ Phase roles (DISCOVER, SPECIFY, DESIGN, PLAN) run in their
+    own engine-managed worktree, like task roles. The engine merges their owned outputs back, so
+    the user's own edits in the checkout never count as a role's write.
+22. **Signed commits** (§15 is silent; engine git forces signing off). _Lead decision
+    2026-10-13, pending human review._ `project.yaml` `git.sign_commits` (default `false`): when
+    true the engine signs its commits and merges with the user's existing git signing setup. A
+    `gpg.program` or signing key set or changed during a run is still refused.
+23. **Git config strictness** (AD-7 rule 7, AD-9). _Lead decision 2026-10-13, pending human
+    review._ Hooks, `info/attributes` and every config key that can execute code stay held while
+    a role is in flight, e.g. `core.hooksPath`, `core.fsmonitor`, `core.sshCommand`, `gpg.*`,
+    `filter.*`, `diff.*.textconv`, `merge.*.driver`, `alias.*`, `credential.*`, `remote.*`,
+    `url.*` and `include*`; a change pauses the run. A small allow-list of keys that cannot
+    execute code (e.g. `user.name`, `user.email`, `color.*`, `init.*`, `pull.rebase`,
+    `push.default`, `branch.*.merge`) may change without pausing. Engine git runs with a clean,
+    controlled environment and explicit config overrides, for task roles' worktrees too.
+24. **The official MCP SDK and a YAML parser** (AD-4 names the pinned SDK; §4.3 files are YAML).
+    _Lead decision 2026-10-13, pending human review._ `packages/engine` depends on
+    `@modelcontextprotocol/sdk` 1.31.0 and `yaml` 2.9.1, pinned exactly (plus `zod` 4.6.7, the
+    version `@vtc/shared` uses, which the SDK takes as a peer). They replace the hand-written MCP
+    server and the YAML subset reader.
+25. **Advisors go through the engine** (§5.4 "called through the Lead" vs AD-4 rule 1, AD-7 rule
+    11, AD-8 rule 1). _Lead decision 2026-10-13, pending human review._ At the human's request
+    the Lead calls the `consult` tool (`ConsultInput` → `ConsultResult`); the engine checks the
+    role is an advisor, writes its pack and returns the one `spawn_role` to perform; the Lead
+    submits the advisor's `RoleResult` with `submit`. So every advisor call is logged
+    (`role.dispatched`/`role.submitted` with prompt SHA and model) and priced, and the run's
+    advisor spend is capped by `project.yaml` `budgets.advisor_usd` (default $5 per run, the
+    integrator's default). Advisors' `reviewer` is `human`. Advice changes nothing by itself:
+    acting on it goes through `start`, `change_request` or `answer`.
+26. **Codex model tiers** (§5.2 footnote, §12.3: tiers map per host). _Lead decision
+    2026-10-13, pending human review._ The Codex top/mid/low → model mapping lives in the Codex
+    adapter's defaults and is overridden by `project.yaml` `hosts.models.codex` (the existing
+    per-host map). Until the spike names Codex model ids (§7), compiled Codex agents set only
+    `model_reasoning_effort` and run on the session's model, and Lookback must not assume tiers
+    differ on Codex.
+27. **Research roles write their own documents** (§5.2 lists the Repo Cartographer and the
+    Research Analyst as read-only). _Lead decision 2026-10-13, pending human review (confirmed
+    the roles team's reading)._ The Repo Cartographer is `write_scoped` to
+    `.vtc/research/repo-map/**` and the Research Analyst to `.vtc/research/briefs/**`, nothing
+    else; the engine checks both on submit.
+28. **Visual QA criteria** (§7.5 names the judge without its criteria). _Lead decision
+    2026-10-13, pending human review._ V1–V8 as defined in `roles/visual_qa/prompt.md`:
+    legibility, hierarchy, content, states, responsive priority, design-system fidelity,
+    interaction and focus, product specificity.
+29. **SPECIFY's QA testability pass** (§6.1). _Lead decision 2026-10-13, pending human
+    review._ It is QA author mode's spec questions; there is no third QA mode (QA stays
+    `author`/`judge`).
+30. **Client-liaison exports** (§5.4 "exports"). _Lead decision 2026-10-13, pending human
+    review._ The client-liaison advisor is `write_scoped` to `.vtc/exports/**` (artifact type
+    `client_export`), checked by the engine on submit like every write-scoped role. Every other
+    advisor stays read-only.
+31. **Plugin hooks** (AD-8 rule 3, AD-16 rule 1). _Lead decision 2026-10-13, pending human
+    review._ Hooks call only `vtc hook <event> --host <host>` (`vtcHookCommand`; events
+    `session-start`, `pre-tool-use`, `subagent-stop`), frozen in `@vtc/shared` `hook.ts`: it fails
+    open (exit 0, no output, when no run is active or on any error) and blocks (exit 2) only a
+    VTC role agent's git commit/push/merge/rebase/reset/config call or a write outside its
+    dispatch's write scope. The compiler emits the wiring; the cli+binary team implements the
+    command in wave 2. Host event names and input fields are provisional (§7).
+32. **Contracts the roles needed** (D-s). _Lead decision 2026-10-13, pending human review._
+    `@vtc/shared` now holds `PluginManifestSchema` and `promptShaFor`, `ROLE_CONTRACTS_ASSET`
+    (the engine loads role contracts only from the asset bundle, AD-14 rule 6),
+    `KNOWN_ARTIFACT_TYPES`, the task-pack fields `architect_depth` (§8.3), `research_depth`
+    (§6.2) and `design_constraints` (§9.1 step 2, dealt by the engine's seeded RNG), and
+    `DesignScreensFileSchema` for `.vtc/design/screens.yaml` (§9) with the prototype query
+    `?state=<slug>&theme=light|dark` (`prototypeStatePath`).
+33. **Transcripts in Flow Studio** (§17 drill-down vs AD-5 rule 10). _Lead decision 2026-10-13,
+    pending human review._ No transcript route in v1: transcripts stay in `.vtc/state/`, which
+    the API never serves. The drawer shows the host session id and where the transcript is
+    stored.
+34. **Interrupted by a limit** (§17 node states). _Lead decision 2026-10-13, pending human
+    review._ A `WorkflowNode` in state `interrupted` because of a limit is drawn with the
+    `waiting_limit` style and labelled "Waiting for limit"; no new node state.
+35. **The dashboard dev proxy reads the install token** (AD-5 rules 2 and 8). _Lead decision
+    2026-10-13, pending human review._ The dev-only `/api` proxy (`pnpm dev:engine`) reads
+    `~/.vtc/token` at runtime with the cli's checks. It is never part of the shipped bundle,
+    which never reads the token. `ENGINE_INSTANCE.tokenFile` documents this.
+36. **Browser-check artifacts** (§18). _Lead decision 2026-10-13, pending human review._ Where
+    the Playwright tool writes its files is a tooling setting of the build orchestration, not a
+    product change; nothing in the repo depends on it.
+37. **Security design mode writes the threat model** (§5.2 lists Security as "Read-only +
+    SARIF"; §8.3 depth L outputs a threat model). _Integrator reading 2026-10-13, pending human
+    review._ Security `design` mode is `write_scoped` to `.vtc/architecture/threat-model/**`
+    only, because a threat model is longer than a result's summary; `verify` mode stays
+    read-only with SARIF findings.
+
 ## 6. Change process for this spine
 
 - Changing an AD, adding one, or changing a frozen contract (AD-3) needs an architecture review
@@ -1132,14 +1269,47 @@ These contracts rest on host behaviour that sub-project 0 verifies on real Claud
 accounts. Teams build against them as written; if a spike check fails, the integrator changes the
 contract through §6 and every consumer updates in the same change.
 
-| Contract                                                                                                          | Spike check that unfreezes it                                                                                              | Needs a human account |
-| ----------------------------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------- | --------------------- |
-| Structured-output form (`jsonSchemaFor(..., { target: "structured-output" })`, AD-3 rule 8)                       | `claude -p --json-schema` and `codex exec --output-schema` accept it and return a `RoleResult` that re-validates           | yes                   |
-| `HostOutcome` limit/auth signals, `ParsedStream.usage` / `retry` (AD-6)                                           | recorded `claude -p` and `codex exec` streams with a real limit hit, an auth error and SDK `rate_limit_event`/`api_retry`  | yes                   |
-| `StatuslineIngest` field names (`rate_limits.five_hour` / `seven_day`, `used_percentage`, `resets_at`)            | the statusline payload of a signed-in Claude Code session                                                                  | yes                   |
-| Codex `UsageWindow` labels from `windowDurationMins` (`codex app-server` `account/rateLimits/read`)               | a real `account/rateLimits/read` and `updated` notification                                                                | yes                   |
-| `HostCapabilities` of both hosts, incl. Codex `sandbox_mode` inheritance for spawned agents (§12.1)               | Codex agent spawning with per-agent `sandbox_mode`; Claude plugin agents and `sandbox.filesystem.denyWrite`                | yes                   |
-| `resume` after a long gap (`SessionRef`, AD-6)                                                                    | `--resume` / `exec resume` work after hours                                                                                | yes                   |
-| Marketplace publishing (AD-16 rule 5)                                                                             | `/plugin marketplace add` from a release branch installs the generated plugin                                              | yes                   |
-| `Storage` contract on `bun:sqlite`, the `AssetBundle` from Bun-embedded files, the MCP stdio bridge (AD-2, AD-12) | the storage contract suite passes under `bun build --compile`; the binary serves the static export and MCP over stdio      | no                    |
-| Lazy storage-driver import survives bundling (AD-2 rule 3)                                                        | the compiled binary starts and opens storage without loading `node:sqlite`; otherwise apply the named stub-plugin fallback | no                    |
+**Spike round 1 (2026-10-13)** ran on the owner's machine with their own signed-in CLIs (Claude
+Code 2.1.296, codex-cli 0.162.1 on a ChatGPT Plus plan, Bun 1.4.3); results and redacted captures
+are in `docs/research/2026-10-13-spike-results.md`. What it settled:
+
+- **Structured output, Claude.** `claude -p --json-schema` rejects the exported schema (`no
+schema with key or ref "https://json-schema.org/draft/2020-12/schema"`) and accepts it once
+  `$schema` and `$id` are removed; the reply is in `structured_output` and re-validates with
+  `fromStructuredOutput`. The structured-output form now omits both keys (AD-3 rule 8).
+- **Structured output, Codex.** `codex exec --json --sandbox read-only --output-schema <file> -o
+<file>` accepts the exported schema (with `$schema`); the final message is the JSON. `codex
+exec` waits on stdin (`Reading additional input from stdin...`), so the adapter must close
+  stdin. The stream is `thread.started {thread_id}` → `turn.started` → `item.completed` →
+  `turn.completed {usage: input_tokens, cached_input_tokens, output_tokens,
+reasoning_output_tokens}`: `thread_id` is the `SessionRef` for `codex exec resume`; the stream
+  carries no rate-limit data. A trivial call costs about 26k input tokens.
+- **Codex rate limits.** `codex app-server` `initialize` → `initialized` →
+  `account/rateLimits/read` returns `result.rateLimits.primary` and `secondary`, each
+  `{usedPercent (integer), windowDurationMins, resetsAt}` (300 = five hours, 10080 = weekly),
+  plus `planType`, `rateLimitReachedType`, `ordinaryUsageAllowed`, `spendControlReached`,
+  `credits` and `rateLimitsByLimitId`. Unprompted notifications arrive (`account/updated`,
+  `remoteControl/status/changed`). The parser labels windows from `windowDurationMins` and
+  ignores extra fields and unknown notifications.
+- **Bun binary.** `bun build --compile` with `bun:sqlite` and an embedded file (`import … with
+{ type: "file" }`, read with `Bun.file()`) works (68 MB arm64). Bun 1.4.3 also loads
+  `node:sqlite` inside the binary, so a hoisted `node:sqlite` import no longer stops it starting;
+  `bun:sqlite` stays the binary's driver.
+
+| Contract                                                                                                                                               | Spike check that unfreezes it                                                                                                                                                          | Status after round 1                                                                                                                                            | Needs a human account |
+| ------------------------------------------------------------------------------------------------------------------------------------------------------ | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------- | --------------------- |
+| Structured-output form (`jsonSchemaFor(..., { target: "structured-output" })`, AD-3 rule 8)                                                            | `claude -p --json-schema` and `codex exec --output-schema` accept it and return a `RoleResult` that re-validates                                                                       | Claude: verified on the form without `$schema`/`$id` (now the shared form). Codex: verified with `$schema`; re-run on the new form in round 2                   | yes                   |
+| `HostOutcome` limit/auth signals, `ParsedStream.usage` / `retry` (AD-6)                                                                                | recorded `claude -p` and `codex exec` streams with a real limit hit, an auth error and SDK `rate_limit_event`/`api_retry`                                                              | Codex success stream and per-turn usage recorded; limit and auth streams pending                                                                                | yes                   |
+| `StatuslineIngest` field names (`rate_limits.five_hour` / `seven_day`, `used_percentage`, `resets_at`)                                                 | the statusline payload of a signed-in Claude Code session                                                                                                                              | pending (needs a statusline config change on the owner's install)                                                                                               | yes                   |
+| Codex `UsageWindow` labels from `windowDurationMins` (`codex app-server` `account/rateLimits/read`)                                                    | a real `account/rateLimits/read` and `updated` notification                                                                                                                            | `read` verified (shape above); the rate-limit `updated` notification not yet observed                                                                           | yes                   |
+| `HostCapabilities` of both hosts, incl. Codex `sandbox_mode` inheritance for spawned agents (§12.1)                                                    | Codex agent spawning with per-agent `sandbox_mode`; Claude plugin agents and `sandbox.filesystem.denyWrite`                                                                            | pending                                                                                                                                                         | yes                   |
+| `resume` after a long gap (`SessionRef`, AD-6)                                                                                                         | `--resume` / `exec resume` work after hours                                                                                                                                            | started: a Claude session and a Codex thread were recorded at 2026-10-13T11:50Z; re-tried after several hours                                                   | yes                   |
+| Marketplace publishing (AD-16 rule 5)                                                                                                                  | `/plugin marketplace add` from a release branch installs the generated plugin                                                                                                          | pending                                                                                                                                                         | yes                   |
+| `Storage` contract on `bun:sqlite`, the `AssetBundle` from Bun-embedded files, the MCP stdio bridge (AD-2, AD-12)                                      | the storage contract suite passes under `bun build --compile`; the binary serves the static export and MCP over stdio                                                                  | building blocks verified (`bun:sqlite` and an embedded file in a compiled binary); the full suite, static export and stdio bridge wait for the cli+binary team  | no                    |
+| Lazy storage-driver import survives bundling (AD-2 rule 3)                                                                                             | the compiled binary starts and opens storage without loading `node:sqlite`; otherwise apply the named stub-plugin fallback                                                             | low risk: Bun 1.4.3 loads `node:sqlite` inside the binary too, so the fallback is not needed; keep the lazy import                                              | no                    |
+| Codex per-agent MCP isolation: each compiled role agent's own `[mcp_servers.vtc]` table with `enabled = false` or `enabled_tools`                      | a spawned Codex agent honours its per-agent `mcp_servers` table (a disabled server is unreachable; `enabled_tools` limits the list) whether Codex merges or replaces the session entry | pending. Until it passes, the engine must also refuse Lead-only tools (`approve`, `answer`, `change_request`, a `submit` for another action) from role sessions | yes                   |
+| Claude Code plugin agent names (`vtc:<agent>`)                                                                                                         | a plugin agent spawns under the namespaced name the adapter derives from `agentNameFor`                                                                                                | pending                                                                                                                                                         | yes                   |
+| Codex write-scoped agents can run a shell under `workspace-write`                                                                                      | a spawned write-scoped Codex agent runs a shell command inside its sandbox                                                                                                             | pending                                                                                                                                                         | yes                   |
+| Codex model ids per tier (§5 reading 26)                                                                                                               | name the Codex models for top/mid/low; then the adapter's default map is filled                                                                                                        | pending; agents set only reasoning effort meanwhile                                                                                                             | yes                   |
+| Codex plugin manifest fields (`plugins/codex/plugin.json`)                                                                                             | Codex installs the generated plugin from these fields                                                                                                                                  | pending                                                                                                                                                         | yes                   |
+| Host hook wiring for `vtc hook` (§5 reading 31): event names and the input fields `VtcHookInputSchema` reads (`agent_type`, `tool_name`, `tool_input`) | each host runs the hook for session start, pre-tool-use and subagent stop with these fields, and honours exit 2 as a block                                                             | pending                                                                                                                                                         | yes                   |

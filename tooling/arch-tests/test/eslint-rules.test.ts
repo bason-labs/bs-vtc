@@ -4,6 +4,7 @@
  * @vtc/shared. Rule options are imported from eslint.config.js, so this tests the real config.
  */
 import { ESLint, type Linter } from "eslint";
+import reactHooks from "eslint-plugin-react-hooks";
 import tseslint from "typescript-eslint";
 import { describe, expect, it } from "vitest";
 import { AD9_FORBIDDEN_MARKERS } from "@vtc/shared";
@@ -11,6 +12,7 @@ import {
   AD9_MARKERS,
   AD9_RESTRICTED_SYNTAX,
   ENGINE_RESTRICTED_SYNTAX,
+  REACT_HOOKS_RULES,
   SHARED_RESTRICTED_GLOBALS,
 } from "../../../eslint.config.js";
 
@@ -99,5 +101,47 @@ describe("AD-1 engine host-neutrality lint rule", () => {
   });
   it("flags the codex host id too: engine code never branches on one host", async () => {
     expect(await lint('export const b = adapters["codex"];', rules)).toEqual([1]);
+  });
+});
+
+describe("dashboard rules of hooks", () => {
+  const lintTsx = async (code: string): Promise<string[]> => {
+    const eslint = new ESLint({
+      overrideConfigFile: true,
+      overrideConfig: [
+        {
+          files: ["**/*.tsx"],
+          languageOptions: {
+            parser: tseslint.parser,
+            parserOptions: { ecmaFeatures: { jsx: true } },
+          },
+          // The plugin's own type does not fit ESLint's `Plugin` (its legacy `configs`); the
+          // rules are all this check needs.
+          plugins: { "react-hooks": { rules: reactHooks.rules } },
+          rules: REACT_HOOKS_RULES,
+        },
+      ],
+    });
+    const [result] = await eslint.lintText(code, { filePath: "planted.tsx" });
+    return (result?.messages ?? []).map((m) => m.ruleId ?? "");
+  };
+  it("flags a conditional hook and a missing effect dependency", async () => {
+    const code = [
+      'import { useEffect, useState } from "react";',
+      "export function Pane({ open, run }: { open: boolean; run: string }) {",
+      "  if (open) {",
+      "    const [x] = useState(0);",
+      "    void x;",
+      "  }",
+      "  useEffect(() => {",
+      "    console.warn(run);",
+      "  }, []);",
+      "  return <div />;",
+      "}",
+    ].join("\n");
+    expect((await lintTsx(code)).sort()).toEqual([
+      "react-hooks/exhaustive-deps",
+      "react-hooks/rules-of-hooks",
+    ]);
   });
 });

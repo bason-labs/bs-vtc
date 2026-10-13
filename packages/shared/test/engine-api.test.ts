@@ -5,6 +5,8 @@ import {
   ArtifactContentSchema,
   ChangeRequestInputSchema,
   ChangeRequestResultSchema,
+  ConsultInputSchema,
+  ConsultResultSchema,
   CONTRACT_SCHEMAS,
   DesignReviewCommentInputSchema,
   DesignReviewResultSchema,
@@ -54,7 +56,7 @@ describe("MCP tool surface", () => {
   it("exposes the §4.2 Lead loop tools with unique names", () => {
     const names = ENGINE_MCP_TOOLS.map((t) => t.name);
     expect(new Set(names).size).toBe(names.length);
-    for (const required of ["next", "submit", "status", "escalations", "answer"]) {
+    for (const required of ["next", "submit", "status", "escalations", "answer", "consult"]) {
       expect(names).toContain(required);
     }
     for (const tool of ENGINE_MCP_TOOLS) expect(tool.purpose.length).toBeGreaterThan(10);
@@ -75,6 +77,7 @@ describe("LeadActionSchema", () => {
       actions: [
         spawn(),
         { ...spawn(), action_id: "a-2", resume: { host: "claude-code", id: "s-1" } },
+        { ...spawn(), action_id: "a-4", model: "claude-opus-5-5" },
         {
           ...spawn(),
           action_id: "a-3",
@@ -105,6 +108,7 @@ describe("LeadActionSchema", () => {
     [{ ...spawn(), agent: "" }],
     [(({ prompt: _p, ...rest }) => rest)(spawn())],
     [{ ...spawn(), background: "yes" }],
+    [{ ...spawn(), model: "" }],
     [{ type: "ask_human", escalations: [] }],
     [{ type: "approve_gate", gates: ["G3"], artifacts: [{ path: "a.md", sha256: SHA }] }],
     [{ type: "approve_gate", gates: ["G1"], artifacts: ["a.md"] }],
@@ -143,7 +147,55 @@ describe("start", () => {
   });
 });
 
+describe("consult (§5.4 advisors through the engine)", () => {
+  it("takes an advisor, a question and inputs, and returns the advisor's spawn_role", () => {
+    expectValid(ConsultInputSchema, {
+      advisor: "advisor_estimator",
+      question: "What will the reporting feature cost?",
+      inputs: [{ type: "cost_history", path: ".vtc/runs/r1/events.jsonl" }],
+    });
+    expectValid(ConsultResultSchema, {
+      run: "r1",
+      action: { ...spawn(), role: "advisor_estimator", mode: undefined },
+    });
+  });
+  it.each([
+    ["question", { advisor: "advisor_estimator", question: "" }],
+    ["advisor", { advisor: "Estimator", question: "x" }],
+    [
+      "inputs.0.path",
+      { advisor: "advisor_estimator", question: "x", inputs: [{ type: "spec", path: "/a" }] },
+    ],
+  ])("rejects invalid %s", (path, input) => {
+    expectInvalid(ConsultInputSchema, input, path);
+  });
+  it("returns only a spawn_role action", () => {
+    expectInvalid(ConsultResultSchema, {
+      run: "r1",
+      action: { type: "wait", reason: "x", until: null },
+    });
+  });
+});
+
 describe("submit", () => {
+  it("carries the host session a result ran in (§6.3 step 8)", () => {
+    expectValid(SubmitInputSchema, {
+      kind: "result",
+      action_id: "a-1",
+      result: validRoleResult(),
+      session_ref: { host: "codex", id: "thread-1" },
+    });
+    expectInvalid(
+      SubmitInputSchema,
+      {
+        kind: "result",
+        action_id: "a-1",
+        result: validRoleResult(),
+        session_ref: { host: "cursor", id: "x" },
+      },
+      "session_ref.host",
+    );
+  });
   it("accepts a result with optional usage", () => {
     expectValid(SubmitInputSchema, { kind: "result", action_id: "a-1", result: validRoleResult() });
     expectValid(SubmitInputSchema, {
