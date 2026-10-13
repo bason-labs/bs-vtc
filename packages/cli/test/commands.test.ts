@@ -1,14 +1,12 @@
 /**
- * The cli+binary team's commands (§4.1, §4.4): init, install (adapter + the explicit auto-resume
- * timer), dashboard (session flow, live and snapshot), status/pause/resume over the typed client,
+ * The cli+binary team's commands (§4.1, §4.4): init, install (adapter + the auto-resume timer), dashboard (session flow, live and snapshot), status/pause/resume over the typed client,
  * doctor (host logins only through the hosts' status commands).
  */
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, symlinkSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import { core, serveSnapshot } from "@vtc/engine";
 import {
-  CONTRACTS_VERSION,
   ENGINE_HTTP,
   ProjectConfigSchema,
   type EngineClient,
@@ -30,6 +28,7 @@ import {
   defaultInstallDeps,
   type InstallDeps,
 } from "../src/commands/install.js";
+import { renderLaunchAgent } from "../src/launchd.js";
 import type { Exec, ExecResult } from "../src/process.js";
 import { installTokenPath } from "../src/token.js";
 import { capture, cleanupDirs, DASHBOARD_FIXTURE, initRepo, tempDir, tempHome } from "./helpers.js";
@@ -67,6 +66,35 @@ describe("vtc init", () => {
     expect(() => defaultProjectConfig(0)).toThrow();
   });
 
+  it("never writes through a planted symlink (a cloned repo can commit one)", async () => {
+    const outside = tempDir();
+    const victim = join(outside, "victim.txt");
+    writeFileSync(victim, "keep me\n");
+    // .vtc/project.yaml as a symlink: refused even with --force
+    const repo = initRepo();
+    mkdirSync(join(repo, ".vtc"));
+    symlinkSync(victim, join(repo, ".vtc/project.yaml"));
+    const { ctx, err } = capture(repo, tempHome());
+    expect(await init.run(["--force"], ctx)).toBe(1);
+    expect(err.at(-1)).toMatch(/project\.yaml is a symbolic link/);
+    // a dangling .gitignore symlink: refused, its target never created
+    const repo2 = initRepo();
+    mkdirSync(join(repo2, ".vtc"));
+    symlinkSync(join(outside, "created.txt"), join(repo2, ".vtc/.gitignore"));
+    const second = capture(repo2, tempHome());
+    expect(await init.run([], second.ctx)).toBe(1);
+    expect(second.err.at(-1)).toMatch(/\.gitignore is a symbolic link/);
+    expect(existsSync(join(outside, "created.txt"))).toBe(false);
+    // .vtc itself as a symlink to a directory outside the repo
+    const repo3 = initRepo();
+    symlinkSync(outside, join(repo3, ".vtc"));
+    const third = capture(repo3, tempHome());
+    expect(await init.run([], third.ctx)).toBe(1);
+    expect(third.err.at(-1)).toMatch(/\.vtc is a symbolic link/);
+    expect(existsSync(join(outside, "project.yaml"))).toBe(false);
+    expect(readFileSync(victim, "utf8")).toBe("keep me\n");
+  });
+
   it("works from a subdirectory and refuses outside a git repo", async () => {
     const repo = initRepo();
     mkdirSync(join(repo, "src"));
@@ -96,6 +124,10 @@ describe("vtc install", () => {
       ...defaultInstallDeps(),
       home: () => home,
       pluginDir: (host) => `/plugins/${host}`,
+      platform: "linux",
+      launchd: () => {
+        throw new Error("the real launchd is never touched in tests");
+      },
       ...over,
     });
 
@@ -127,6 +159,12 @@ describe("vtc install", () => {
     expect(disposed).toBe(1);
     expect(existsSync(installTokenPath(vtcHome))).toBe(true);
     expect(out.join("\n")).toContain("note: trust the hooks");
+    expect(out.join("\n")).toMatch(/Auto-resume has no timer on this platform yet/);
+    // the spec's positional form (§4.4: `vtc install codex`)
+    expect(await cmd.run(["codex"], ctx)).toBe(0);
+    expect(requests.at(-1)).toMatchObject({ pluginDir: "/plugins/codex", scope: "user" });
+    expect(await cmd.run(["codex", "claude-code"], ctx)).toBe(64);
+    expect(await cmd.run(["codex", "--host", "codex"], ctx)).toBe(64);
   });
 
   it("refuses unknown hosts, scopes and hosts without an adapter yet", async () => {
@@ -139,7 +177,7 @@ describe("vtc install", () => {
     expect(err.at(-1)).toMatch(/no claude-code adapter yet/);
   });
 
-  it("installs the launchd timer only on the explicit --auto-resume, and removes it", async () => {
+  it("installs the launchd timer with the host on macOS (AD-6 rule 4) and on --auto-resume, and removes it", async () => {
     const home = tempDir();
     const vtcHome = tempHome();
     const { calls, exec } = recorder();
@@ -169,10 +207,33 @@ describe("vtc install", () => {
     expect(await cmd.run(["--no-auto-resume"], ctx)).toBe(0);
     expect(existsSync(plist)).toBe(false);
     expect(await cmd.run(["--auto-resume", "--no-auto-resume"], ctx)).toBe(64);
+    // `vtc install <host>` installs the timer too, and says so; --no-auto-resume opts out
+    const adapter = {
+      install: () => Promise.resolve({ written: [], notes: [] }),
+      dispose: () => Promise.resolve(),
+    } as unknown as HostAdapter;
+    const withHost = createInstallCommand(
+      installDeps(
+        {
+          platform: "darwin",
+          launchd: () => ({ home, uid: 501, exec }),
+          agentSpec: (h) => ({ selfCommand: ["/opt/vtc"], vtcHome: h, path: "/usr/bin:/bin" }),
+          factories: { codex: () => adapter },
+        },
+        home,
+      ),
+    );
+    const { ctx: hostCtx, out } = capture(initRepo(), vtcHome);
+    expect(await withHost.run(["codex"], hostCtx)).toBe(0);
+    expect(existsSync(plist)).toBe(true);
+    expect(out.join("\n")).toMatch(/Installed the auto-resume timer/);
+    expect(await withHost.run(["--host", "codex", "--no-auto-resume"], hostCtx)).toBe(0);
+    expect(existsSync(plist)).toBe(false);
     const linux = createInstallCommand(
       installDeps({ platform: "linux", launchd: () => ({ home, uid: 1, exec }) }, home),
     );
     expect(await linux.run(["--auto-resume"], ctx)).toBe(1);
+    expect(await linux.run(["--no-auto-resume"], ctx)).toBe(0);
   });
 });
 
@@ -184,7 +245,7 @@ describe("vtc dashboard (AD-5 session flow)", () => {
     const opened: string[] = [];
     const cmd = createDashboardCommand(() => ({
       ...defaultDashboardDeps(),
-      liveDaemon: () => ({ port: 4711 }) as never,
+      liveDaemon: () => Promise.resolve({ port: 4711 } as never),
       post: (port, path, token) => {
         posts.push(`${String(port)} ${path} ${token.length}`);
         return Promise.resolve({
@@ -202,7 +263,7 @@ describe("vtc dashboard (AD-5 session flow)", () => {
     expect(out[0]).toContain("#nonce=");
     const refused = createDashboardCommand(() => ({
       ...defaultDashboardDeps(),
-      liveDaemon: () => ({ port: 4711 }) as never,
+      liveDaemon: () => Promise.resolve({ port: 4711 } as never),
       post: () => Promise.resolve({ status: 403, body: "" }),
       open: () => undefined,
     }));
@@ -215,7 +276,7 @@ describe("vtc dashboard (AD-5 session flow)", () => {
     const fetched: string[] = [];
     const cmd = createDashboardCommand(() => ({
       ...defaultDashboardDeps(),
-      liveDaemon: () => null,
+      liveDaemon: () => Promise.resolve(null),
       serveSnapshot,
       assets: () => createDiskAssetBundle({ dashboard: DASHBOARD_FIXTURE }),
       open: (url) => {
@@ -381,6 +442,39 @@ describe("vtc doctor", () => {
       versions: { node: "24.3.0", bun: "1.4.3" },
     }));
     expect(await bun.run([], capture("/w", "/h").ctx)).toBe(0);
-    expect(CONTRACTS_VERSION).toMatch(/^4\./);
+  });
+
+  it("checks the macOS auto-resume timer: installed, and its program still there", async () => {
+    const base = { exec: recorder().exec, versions: { node: "22.17.1" } };
+    const timer = {
+      platform: "darwin" as NodeJS.Platform,
+      plist: () => null as string | null,
+      exists: (p: string) => p === "/opt/vtc",
+      wakeups: () => [] as { repo_root: string; at: string }[],
+    };
+    const run = async (t: typeof timer): Promise<string> => {
+      const { ctx, out } = capture("/w", "/h");
+      expect(await createDoctorCommand(() => ({ ...base, timer: t })).run([], ctx)).toBe(0);
+      return out.join("\n");
+    };
+    expect(await run(timer)).toMatch(/warn +auto-resume +the launchd timer is not installed/);
+    expect(
+      await run({ ...timer, wakeups: () => [{ repo_root: "/r", at: "2026-10-13T10:00:00Z" }] }),
+    ).toMatch(
+      /a run in \/r waits to auto-resume at 2026-10-13T10:00:00Z, but the launchd timer is not installed/,
+    );
+    const plist = renderLaunchAgent({ selfCommand: ["/opt/vtc"], vtcHome: "/h", path: "/usr/bin" });
+    expect(await run({ ...timer, plist: () => plist })).toMatch(
+      /ok +auto-resume +launchd timer installed \(\/opt\/vtc\)/,
+    );
+    const moved = renderLaunchAgent({
+      selfCommand: ["/opt/homebrew/Cellar/vtc/0.1/bin/vtc"],
+      vtcHome: "/h",
+      path: "/usr/bin",
+    });
+    expect(await run({ ...timer, plist: () => moved })).toMatch(
+      /warn +auto-resume +the launchd timer runs \/opt\/homebrew\/Cellar\/vtc\/0\.1\/bin\/vtc, which no longer exists/,
+    );
+    expect(await run({ ...timer, platform: "linux" })).not.toMatch(/auto-resume/);
   });
 });

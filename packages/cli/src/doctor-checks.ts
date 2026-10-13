@@ -1,5 +1,5 @@
 /**
- * `vtc doctor` prerequisite checks (§4.4). Host logins are read only through the hosts' own
+ * `vtc doctor` prerequisite checks (§4.4), and the auto-resume timer (§6.9 step 4). Host logins are read only through the hosts' own
  * status commands (`claude auth status --json`, `codex login status`); VTC never reads a
  * credential file or the keychain (AD-9). Account details the status commands print (email,
  * organisation) are never echoed.
@@ -21,7 +21,64 @@ export interface DoctorEnv {
   readonly exec: Exec;
   /** `process.versions`: `bun` is set inside the binary, `node` always. */
   readonly versions: Readonly<Record<string, string | undefined>>;
+  /** The auto-resume timer's state; the check is skipped when absent. */
+  readonly timer?: TimerEnv;
 }
+
+/** What the auto-resume check reads (§6.9 step 4). */
+export interface TimerEnv {
+  readonly platform: NodeJS.Platform;
+  /** The installed launchd agent's plist, or `null` when none is installed. */
+  readonly plist: () => string | null;
+  readonly exists: (path: string) => boolean;
+  /** The persisted wake-ups (`~/.vtc/wake/`). */
+  readonly wakeups: () => readonly { readonly repo_root: string; readonly at: string }[];
+}
+
+const unxml = (text: string): string =>
+  text
+    .replace(/&lt;/g, "<")
+    .replace(/&gt;/g, ">")
+    .replace(/&quot;/g, '"')
+    .replace(/&apos;/g, "'")
+    .replace(/&amp;/g, "&");
+
+/** The program a launchd plist runs: the first string of its `ProgramArguments`. */
+export const plistProgram = (plist: string): string | null => {
+  const match = /<key>ProgramArguments<\/key>\s*<array>\s*<string>([^<]*)<\/string>/.exec(plist);
+  return match?.[1] === undefined ? null : unxml(match[1]);
+};
+
+/**
+ * The macOS auto-resume timer: installed, and pointing at a `vtc` that still exists (an upgrade
+ * can move the binary). A missing timer is a warning, louder when a run already waits on it.
+ * Skipped on other platforms, which have no timer yet.
+ */
+export const checkAutoResume = (env: TimerEnv): DoctorCheck | null => {
+  if (env.platform !== "darwin") return null;
+  const name = "auto-resume";
+  const fix = "run vtc install --auto-resume";
+  const plist = env.plist();
+  if (plist === null) {
+    const [waiting] = env.wakeups();
+    return {
+      name,
+      status: "warn",
+      detail:
+        waiting === undefined
+          ? `the launchd timer is not installed, so a run parked on a usage limit resumes only when its engine runs: ${fix}`
+          : `a run in ${waiting.repo_root} waits to auto-resume at ${waiting.at}, but the launchd timer is not installed: ${fix}`,
+    };
+  }
+  const program = plistProgram(plist);
+  if (program === null || !env.exists(program))
+    return {
+      name,
+      status: "warn",
+      detail: `the launchd timer runs ${program ?? "nothing"}, which no longer exists: ${fix}`,
+    };
+  return { name, status: "ok", detail: `launchd timer installed (${program})` };
+};
 
 const firstLine = (text: string): string => text.trim().split(/\r?\n/)[0] ?? "";
 
@@ -109,10 +166,12 @@ export const runDoctorChecks = async (env: DoctorEnv): Promise<DoctorCheck[]> =>
   ]);
   const hosts = [claude, codex];
   const anyHost = hosts.some((h) => h.status === "ok");
+  const timer = env.timer === undefined ? null : checkAutoResume(env.timer);
   return [
     checkRuntime(env.versions),
     git,
     ...hosts.map((h) => (anyHost && h.status === "fail" ? { ...h, status: "warn" as const } : h)),
     gh,
+    ...(timer === null ? [] : [timer]),
   ];
 };

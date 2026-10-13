@@ -3,7 +3,7 @@
  * `AutoResumeScheduler`. The engine decides when to wake; this module persists the single
  * wake-up per repo as `~/.vtc/wake/<repo-key>.json` (mode 0600), so it survives the daemon and a
  * reboot. Nothing is installed in the OS here: the launchd agent that acts on these records
- * (`launchd.ts`) is installed only by an explicit `vtc install --auto-resume`. Every minute it
+ * (`launchd.ts`) is installed by `vtc install`. Every minute it
  * runs `vtc engine --wake-due`, which starts `vtc engine --daemon --wake` for each repo whose
  * time has come ({@link dueWakeups}).
  */

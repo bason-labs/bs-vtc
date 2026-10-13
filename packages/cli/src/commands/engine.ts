@@ -80,6 +80,14 @@ const runBridge = async (ctx: CommandContext, hostName: string | undefined): Pro
   return EXIT.ok;
 };
 
+/**
+ * How long past its time a wake-up stays with the woken engine before `--wake-due` drops it. The
+ * engine cancels or moves its own wake-up when it acts on the wake; a record still unchanged this
+ * long after its time means the engine did neither (it failed, or found nothing to resume), so the
+ * next start drops it rather than waking the repo every minute forever.
+ */
+export const WAKE_GRACE_MS = 10 * 60_000;
+
 /** Starts the daemon of every repo whose wake-up is due; resolves how many were started. */
 export const wakeDue = async (
   ctx: CommandContext,
@@ -93,7 +101,7 @@ export const wakeDue = async (
       await scheduler.cancel(record.repo_root); // the repo is gone: nothing to resume
       continue;
     }
-    if (liveDaemon(ctx.vtcHome, record.repo_root) !== null) continue; // it owns its timer
+    if ((await liveDaemon(ctx.vtcHome, record.repo_root)) !== null) continue; // it owns its timer
     try {
       await start({
         vtcHome: ctx.vtcHome,
@@ -103,9 +111,10 @@ export const wakeDue = async (
       });
       started += 1;
       ctx.io.out(`vtc engine: woke the engine for ${record.repo_root} (due ${record.at})`);
-      // The woken engine cancels or moves the wake-up; drop it only if it did neither.
+      // The woken engine owns its wake-up: drop it only once the grace has passed unchanged.
       const after = wakeRecords(ctx.vtcHome).find((r) => r.repo_root === record.repo_root);
-      if (after?.at === record.at) await scheduler.cancel(record.repo_root);
+      if (after?.at === record.at && now.getTime() - Date.parse(record.at) >= WAKE_GRACE_MS)
+        await scheduler.cancel(record.repo_root);
     } catch (error) {
       ctx.io.err(
         `vtc engine: could not wake ${record.repo_root}: ${error instanceof Error ? error.message : String(error)}`,

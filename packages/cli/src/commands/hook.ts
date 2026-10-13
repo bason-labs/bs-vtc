@@ -32,7 +32,7 @@ export const defaultHookCommandDeps = (): HookCommandDeps => ({
     vtcHome: ctx.vtcHome,
     cwd: ctx.cwd,
     findRepoRoot: (cwd) => findRepoRoot(cwd),
-    liveDaemon,
+    liveDaemon: (vtcHome, repoRoot) => liveDaemon(vtcHome, repoRoot),
     loadRuns: (repoRoot) => core.loadRuns(repoRoot).map((r) => r.state),
   }),
   timeoutMs: VTC_HOOK.timeoutMs - MARGIN_MS,

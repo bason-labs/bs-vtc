@@ -3,7 +3,7 @@
  * block only a VTC role agent's git writes and writes outside its dispatch's write scope, a resume
  * hint at session start and a submit reminder when a role agent stops.
  */
-import { mkdirSync, readFileSync } from "node:fs";
+import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { core } from "@vtc/engine";
@@ -18,6 +18,7 @@ import {
   isVtcRoleAgent,
   matchesAnyGlob,
   packWriteScope,
+  shellCommandOf,
   writeTargets,
 } from "../src/hook-rules.js";
 import { findRepoRoot } from "../src/repo.js";
@@ -59,6 +60,22 @@ describe("hook rules", () => {
       ["GIT_DIR=.git git pull", "pull"],
       ["git cherry-pick abc", "cherry-pick"],
       ["git status; git am < p", "am"],
+      ['"git" push', "push"],
+      ["sudo -E git push", "push"],
+      ["env A=1 git reset --hard", "reset"],
+      ['sh -c "cd x && git commit -m y"', "commit"],
+      ["eval git push", "push"],
+      ["echo `git commit -m x`", "commit"],
+      ['echo "$(git push)"', "push"],
+      ["git branch -f main HEAD~1", "branch"],
+      ["git branch -D vtc/T-1", "branch"],
+      ["git tag v1.0", "tag"],
+      ["git tag -d v1.0", "tag"],
+      ["git checkout -B main", "checkout"],
+      ["git switch -C main", "switch"],
+      ["git config --unset user.name", "config"],
+      ["git config set user.name x", "config"],
+      ["git config --global user.email a@b.c", "config"],
     ];
     for (const [line, sub] of blocked) expect(gitWriteIn(line), line).toBe(sub);
     for (const line of [
@@ -69,8 +86,36 @@ describe("hook rules", () => {
       "npm test",
       "digit commit",
       "git -C dir status",
+      // a quoted mention of git is an argument, not a git call
+      'grep -rn "git commit" src',
+      'echo "git push later"',
+      "echo 'git reset --hard'",
+      'rg "git (push|commit)" -n',
+      // read-only forms
+      "git config --get user.name",
+      "git config --list --show-origin",
+      "git config -l",
+      "git config user.name",
+      "git config get user.name",
+      "git branch",
+      "git branch --list 'vtc/*'",
+      "git tag",
+      "git tag -l 'v*'",
+      "git checkout -- src/a.ts",
     ])
       expect(gitWriteIn(line), line).toBeNull();
+  });
+
+  it("reads an argv command as the argv it is", () => {
+    expect(shellCommandOf({ command: ["bash", "-lc", "git push origin main"] })).toBe(
+      "bash -lc 'git push origin main'",
+    );
+    expect(gitWriteIn(shellCommandOf({ command: ["bash", "-lc", "git push"] }) ?? "")).toBe("push");
+    expect(gitWriteIn(shellCommandOf({ command: ["grep", "-rn", "git push", "."] }) ?? "")).toBe(
+      null,
+    );
+    expect(shellCommandOf({ command: ["echo", "it's"] })).toBe("echo 'it'\\''s'");
+    expect(shellCommandOf({ cmd: 7 })).toBeNull();
   });
 
   it("finds the files a tool call writes", () => {
@@ -189,7 +234,10 @@ describe("fail open (contract rule 2)", () => {
         "pre-tool-use",
         "claude-code",
         agent,
-        failingDeps({ findRepoRoot: () => Promise.resolve("/r"), liveDaemon: () => null }),
+        failingDeps({
+          findRepoRoot: () => Promise.resolve("/r"),
+          liveDaemon: () => Promise.resolve(null),
+        }),
       ),
     );
     silentAllow(
@@ -199,7 +247,7 @@ describe("fail open (contract rule 2)", () => {
         "{}",
         failingDeps({
           findRepoRoot: () => Promise.resolve("/r"),
-          liveDaemon: () => ({}) as never,
+          liveDaemon: () => Promise.resolve({} as never),
           loadRuns: () => [],
         }),
       ),
@@ -239,6 +287,57 @@ describe("fail open (contract rule 2)", () => {
     expect(Date.now() - started).toBeLessThan(2_000);
     expect(written.every((o) => o.stdout === undefined && o.stderr === undefined)).toBe(true);
     expect(defaultHookCommandDeps().timeoutMs).toBeLessThan(VTC_HOOK.timeoutMs);
+  });
+});
+
+describe("QA author mode's hidden tests (§7.3, AD-13 rule 8)", () => {
+  it("allows writes into the task's hidden-test staging in the main checkout, nothing else there", async () => {
+    const repo = tempDir();
+    const pack = ".vtc/state/packs/a-7.md";
+    mkdirSync(join(repo, ".vtc/state/packs"), { recursive: true });
+    writeFileSync(
+      join(repo, pack),
+      "## Inputs\n\n- x\n\n## Write scope\n\n- tests/acceptance/**\n- .vtc/state/hidden-staging/T-1/**\n\n## Gate commands\n\n- y\n",
+    );
+    const run = {
+      id: "r1",
+      run: { id: "r1" },
+      roleRuns: new Map([
+        [
+          "a-7",
+          { action_id: "a-7", status: "in_flight", agent: "vtc-qa-author", pack, task: "T-1" },
+        ],
+      ]),
+    } as never;
+    const deps: HookDeps = {
+      vtcHome: "/nonexistent",
+      cwd: repo,
+      findRepoRoot: () => Promise.resolve(repo),
+      liveDaemon: () => Promise.resolve({} as never),
+      loadRuns: () => [run],
+    };
+    const write = (path: string) =>
+      runHook(
+        "pre-tool-use",
+        "claude-code",
+        JSON.stringify({
+          cwd: repo,
+          agent_type: "vtc:vtc-qa-author",
+          tool_name: "Write",
+          tool_input: { file_path: join(repo, path), content: "x" },
+        }),
+        deps,
+      );
+    expect(await write(".vtc/state/hidden-staging/T-1/h.test.ts")).toEqual({ code: 0 });
+    expect(await write(".vtc/state/hidden-staging/T-1/deep/h.test.ts")).toEqual({ code: 0 });
+    expect(await write(".vtc/state/worktrees/T-1/tests/acceptance/a.test.ts")).toEqual({
+      code: 0,
+    });
+    const otherTask = await write(".vtc/state/hidden-staging/T-2/h.test.ts");
+    expect(otherTask.code).toBe(VTC_HOOK.exit.block);
+    expect(otherTask.stderr).toMatch(/outside your worktree/);
+    expect((await write("tests/acceptance/a.test.ts")).code).toBe(VTC_HOOK.exit.block);
+    expect((await write(".vtc/state/packs/a-7.md")).code).toBe(VTC_HOOK.exit.block);
   });
 });
 
