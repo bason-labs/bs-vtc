@@ -4,8 +4,8 @@
  * AD-18) because the log is committed to git, is validated (`toEventLine`) and gets the next
  * per-run `seq`.
  */
-import { appendFileSync, existsSync, mkdirSync, readFileSync } from "node:fs";
-import { dirname, join } from "node:path";
+import { existsSync, readFileSync } from "node:fs";
+import { join } from "node:path";
 import {
   EVENT_SCHEMA_VERSION,
   EventSchema,
@@ -16,6 +16,7 @@ import {
   type VtcEvent,
   type VtcEventInput,
 } from "@vtc/shared";
+import { appendRepoFile, assertNoSymlinks } from "../git/index.js";
 import { EngineLockedError, type EngineLock } from "./lock.js";
 
 /** An event before the writer stamps `v`, `seq`, `run` and (by default) `ts`. */
@@ -53,14 +54,15 @@ export const openEventLog = (
   options: OpenEventLogOptions = {},
 ): EventLogWriter => {
   if (!lock.isHeld()) throw new EngineLockedError(lock.path, null);
-  const path = join(repoRoot, eventLogPath(run));
+  const rel = eventLogPath(run);
+  const path = join(repoRoot, rel);
   const now = options.now ?? (() => new Date());
   const secrets = options.secrets ?? (() => []);
-  mkdirSync(dirname(path), { recursive: true });
+  assertNoSymlinks(repoRoot, rel);
   const parsed = existsSync(path)
     ? parseEventLog(readFileSync(path, "utf8"))
     : { events: [], invalidLines: [], truncatedTail: false };
-  if (parsed.truncatedTail) appendFileSync(path, "\n");
+  if (parsed.truncatedTail) appendRepoFile(repoRoot, rel, "\n");
   let next = parsed.events.reduce((max, event) => Math.max(max, event.seq), 0) + 1;
   return {
     run,
@@ -77,7 +79,7 @@ export const openEventLog = (
         run,
         ts: draft.ts ?? now().toISOString(),
       });
-      appendFileSync(path, toEventLine(event));
+      appendRepoFile(repoRoot, rel, toEventLine(event));
       next += 1;
       return event;
     },
