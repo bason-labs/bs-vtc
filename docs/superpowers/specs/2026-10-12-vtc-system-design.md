@@ -242,7 +242,7 @@ Role sources are forked from the files listed in the role catalogue §7 and rewr
 | **Architect** | Always (depth S/M/L, §8) | Spine (AD-n: Binds/Prevents/Rule/Check), candidates, scorecard, C4 diagrams. **Gate G2.** | Top | Write `.vtc/architecture/` only + engine fact lookups |
 | **Security** | Design mode and verify mode | Design mode: threat model + SEC-n requirements. Verify mode: fingerprinted findings with CWE and a cited location. | Mid (top on a risk hit) | Read-only + SARIF |
 | **Designer** | When there is UI | Flows, `screens.yaml`, prototype, DTCG tokens, component specs. **Gate G2.** | Mid | Write `.vtc/design/` only |
-| **Planner** (PM + Lead Engineer) | Always | `tasks`: `covers[]`, `after[]`, `files_scope[]`, risk tags, architecture triage, size | Mid | Read |
+| **Planner** (PM + Lead Engineer) | Always | `tasks`: `covers[]`, `after[]`, `files_scope[]`, **one `discipline` per task** (cross-discipline features are split, joined by interface contracts, §5.2a), stack packs, risk tags, architecture triage, size | Mid | Read |
 | **Engineer** | Per task. **The only role that writes code.** | Diff + exit `built / spec_conflict / blocked` | Mid + skill packs | Read/Edit/Bash, sandboxed |
 | **QA** | Per task, in two modes. **Author mode** runs *before* the Engineer and writes acceptance tests tagged with REQ IDs. **Judge mode** runs after and checks test adequacy. | Tests, findings | Mid (**never the bottom tier when authoring**) | Author: write to acceptance-test paths only. Judge: read-only. |
 | **Spec-Verifier** | Per task, one call per acceptance criterion | PASS/FAIL/UNKNOWN plus cited evidence | Low/Mid | Read-only |
@@ -250,6 +250,61 @@ Role sources are forked from the files listed in the role catalogue §7 and rewr
 | **Lookback** | Offline or on demand | At most 3 changes to editable sections, plus replay results | Mid/Top, budget-capped | Read traces; write only `prompts/*/editable.md` proposals |
 
 \*Model tier (Top/Mid/Low) maps per host, set in `role.yaml`. For example, on Claude: Opus / Sonnet / Haiku.
+
+### 5.2a Engineer family: specialist profiles (v1)
+"Engineer" in §5.2 is a **family**. Every member shares the Engineer contract:
+- a single writer per task;
+- a worktree;
+- protected tests;
+- 3–5 round caps;
+- a budget.
+
+What changes per specialist is its **profile prompt** (about 1–2k tokens), **stack packs**, **tools**, **specialist gates**, and a **paired reviewer lens**.
+
+**How tasks get a specialist:**
+- The Planner gives each task exactly **one `discipline`**.
+- **A feature that spans disciplines is split into one task per discipline,** joined by an **interface contract**: OpenAPI/GraphQL/proto for APIs, an event schema for messages, a data contract for pipelines.
+- The provider task publishes the contract first. Consumer tasks build against it (`after: [provider]`).
+- **Contract tests in the gates** check both sides.
+
+| Specialist | Focus | Extra gates | Paired reviewer lens | Fork sources (rewritten to §5.1) |
+|---|---|---|---|---|
+| **Frontend Engineer** | Components, state, routing, forms, a11y, Core Web Vitals, design-system compliance | Playwright, axe, bundle size (size-limit), Lighthouse CI, token lint | Frontend lens + Visual QA | agency-agents `engineering-frontend-developer` (CWV/WCAG rules only); Designer rules; the rest new |
+| **Backend / API Engineer** | API design, validation, authn/z flows, transactions, idempotency, concurrency, observability, expand/contract migrations | Contract tests, integration tests, migration lint | Backend lens + DB lens | `engineering-backend-architect`, `engineering-api-platform-engineer`, DBRE rules |
+| **Mobile Engineer** (iOS/Android/RN/Flutter) | Lifecycle, offline/sync, permissions, push, on-device performance, store policies | Simulator/emulator build, Maestro/Detox, store-policy checks | Mobile lens | `engineering-mobile-app-builder` (rewrite), `engineering-mobile-release-engineer` |
+| **Data / Database Engineer** | Schema, queries and indexes, ETL/pipelines, data contracts, backfills (row-reconciliation invariant) | Migration dry-run, query-plan checks, dbt/data tests | DB lens | `engineering-data-engineer`, `engineering-database-reliability-engineer`, data-remediation invariants |
+| **DevOps / Platform Engineer** | CI/CD, IaC, containers, deploy and rollback, SLOs and burn-rate alerts | `terraform plan`, Checkov, actionlint, hadolint (user-installed) | Infra/SRE lens | `engineering-devops-automator` (rewrite; **remove auto-deploy to prod**), `engineering-sre` |
+| **AI / LLM Engineer** | Prompts, RAG, embeddings, agents, eval sets, guardrails, cost and latency | A golden-set eval suite, cost/latency budgets | LLM-feature lens | `engineering-multi-agent-systems-architect`, `engineering-rag-pipeline-engineer`, `engineering-prompt-engineer` |
+
+**Domain packs** load only when the Repo Cartographer or the spec detects the domain:
+- Desktop (Electron/Tauri)
+- Embedded/IoT
+- CMS (WordPress/Drupal)
+- Web3/Solidity
+- Search relevance
+- Realtime/collaboration
+- Video
+- Game development
+- CLI/dev-tooling
+- WebAssembly
+- WeChat Mini Program
+- US public sector (USWDS/508)
+
+The catalogue §3 lists sources for each pack.
+
+**Stack packs** are skills selected from the repo's detected stack, **at most about 3 per task**. For example:
+- web: React/Next, Vue/Nuxt, Angular, Svelte;
+- backend: Node/Nest, Django/FastAPI, Go, Spring, Laravel, .NET, Rails;
+- mobile: SwiftUI, Compose;
+- data: Postgres, MySQL, MongoDB;
+- infra: Terraform, Kubernetes, AWS/GCP/Azure.
+
+Each pack covers conventions, pitfalls, test commands, and version-pinned API notes that the engine fetches from official docs (§8.2), never from model memory.
+
+**Cost and scoring:**
+- A task carries one specialist profile plus its packs, which adds about 2–5k tokens of context.
+- The expected saving is fewer fix rounds.
+- Lookback scores each **specialist × stack pack × host** combination separately (§13).
 
 ### 5.3 Conditional specialists (Tier 2)
 Each specialist is a **lens skill**: a checklist plus a schema.
@@ -273,7 +328,7 @@ Each specialist is a **lens skill**: a checklist plus a schema.
 | Supply chain | A new dependency |
 | Docs | Public API, CLI or README changes |
 | Compliance mapper | The spec declares SOC2/HIPAA/PCI |
-| Mobile | iOS/Android/RN/Flutter. This is a **skill pack for the Engineer**, plus a simulator gate. |
+| Mobile review lens | Mobile repos or tasks (pairs with the Mobile Engineer specialist, §5.2a) |
 
 ### 5.4 Advisors (Tier 3, called through the Lead)
 - Estimator / Solution Architect (uses the cost history)
@@ -884,7 +939,9 @@ It is capped at 1–2 rounds and costs both quotas.
   - Credit is weighted toward the first failure upstream.
   - An AI tiebreaker is used only when the tree is inconclusive.
   - **Human labels at escalation** are the gold standard.
-- **Metrics:** role-specific outcome metrics plus quality per token (round2 §5).
+- **Metrics:**
+  - role-specific outcome metrics plus quality per token (round2 §5);
+  - Engineer metrics are broken down by **discipline × stack pack × host**, so weak combinations get targeted improvements.
 - **Improvement loop (v1):**
   1. Take 5–10 attributed failures from the training split, plus human edit diffs.
   2. Propose at most 3 small changes to the editable section.
@@ -928,6 +985,7 @@ It is capped at 1–2 rounds and costs both quotas.
 ## 16. Key data contracts (summary; full JSON Schemas live in the sub-project specs)
 - **Task:**
   - `id, title, covers[REQ], after[T], files_scope[glob], risk(low|med|high), cap, size(S|M|L), arch_triage(fits|extends|changes)`
+  - `discipline(frontend|backend|mobile|data|devops|ai_llm|<domain-pack>), stack_packs[], provides_contract?, consumes_contracts[]`
   - `budget_usd, spent_usd, status, round, worktree, branch, session_ref{host,id}, deferred[]`
 - **Finding:**
   - `fingerprint, source(tool|role), rule_id, category, severity(normalised), confidence, location{path,symbol}`
