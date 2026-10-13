@@ -1,6 +1,33 @@
 // Dependency rules for VTC's own code. Each rule names the AD in
 // docs/architecture/vtc-spine.md that it enforces (the AD's "Check").
-// Run: pnpm deps:check
+// Run: pnpm deps:check. Every rule is proven to fire by tooling/arch-tests (planted fixtures).
+
+/** Node built-ins that Bun also implements, so engine/cli/adapter code runs in the binary (AD-2 rule 6). */
+const RUNTIME_SAFE_BUILTINS = [
+  "assert",
+  "buffer",
+  "child_process",
+  "crypto",
+  "events",
+  "fs",
+  "fs/promises",
+  "http",
+  "net",
+  "os",
+  "path",
+  "process",
+  "readline",
+  "stream",
+  "stream/promises",
+  "string_decoder",
+  "timers",
+  "timers/promises",
+  "url",
+  "util",
+  "zlib",
+];
+const ENGINE_MODULES = "(core|gates|git|http|mcp)";
+
 /** @type {import('dependency-cruiser').IConfiguration} */
 module.exports = {
   forbidden: [
@@ -70,12 +97,12 @@ module.exports = {
     {
       name: "AD1-no-deep-imports-across-packages",
       comment:
-        "Cross-package imports go through the package entry point (src/index.ts), not into another package's internals.",
+        "Imports from another package (from packages/ or apps/) go through its entry point (src/index.ts), never into its internals.",
       severity: "error",
-      from: { path: "^packages/([^/]+)/" },
+      from: { path: "^(packages|apps)/([^/]+)/" },
       to: {
         path: "^packages/([^/]+)/src/.+",
-        pathNot: ["^packages/$1/", "^packages/[^/]+/src/index\\.ts$"],
+        pathNot: ["^$1/$2/", "^packages/[^/]+/src/index\\.ts$"],
       },
     },
     // ---- AD-2: runtime-agnostic code + storage abstraction ----------------
@@ -88,10 +115,15 @@ module.exports = {
       to: { dependencyTypes: ["core"] },
     },
     {
-      name: "AD2-shared-forbids-bun-builtins",
+      name: "AD2-runtime-builtins-allowlist",
+      comment:
+        "Engine, cli, adapters and compiler use only Node built-ins Bun also implements (RUNTIME_SAFE_BUILTINS); anything else goes behind an interface. node:sqlite and bun:* have their own rules.",
       severity: "error",
-      from: { path: "^packages/shared/src/" },
-      to: { path: "^bun:" },
+      from: { path: "^packages/(engine|adapters|compiler|cli)/src/" },
+      to: {
+        dependencyTypes: ["core"],
+        pathNot: `^((node:)?(${[...RUNTIME_SAFE_BUILTINS, "sqlite"].join("|")})|bun:.+)$`,
+      },
     },
     {
       name: "AD2-node-sqlite-only-in-its-driver",
@@ -103,23 +135,76 @@ module.exports = {
     {
       name: "AD2-bun-builtins-only-in-bun-driver",
       comment:
-        "bun:* modules are imported only by the Bun storage driver (added with the binary build).",
+        "bun:* modules are imported only by the Bun storage driver (it also keeps packages/shared Bun-free).",
       severity: "error",
       from: { pathNot: "^packages/engine/src/storage/bun-sqlite\\.ts$" },
       to: { path: "^bun:" },
+    },
+    {
+      name: "AD2-storage-drivers-loaded-by-the-entry-only",
+      comment:
+        "Only packages/engine/src/index.ts loads a storage driver (lazily); engine code uses the Storage interface.",
+      severity: "error",
+      from: {
+        path: "^packages/engine/src/",
+        pathNot: "^packages/engine/src/(index\\.ts|storage/)",
+      },
+      to: { path: "^packages/engine/src/storage/" },
+    },
+    // ---- AD-13: engine modules ---------------------------------------------
+    {
+      name: "AD13-engine-modules-use-each-others-entry",
+      comment:
+        "Engine modules (core, gates, git, http, mcp) import each other only through the other module's index.ts.",
+      severity: "error",
+      from: { path: `^packages/engine/src/([^/]+)/` },
+      to: {
+        path: `^packages/engine/src/${ENGINE_MODULES}/.+`,
+        pathNot: [`^packages/engine/src/$1/`, `^packages/engine/src/${ENGINE_MODULES}/index\\.ts$`],
+      },
+    },
+    {
+      name: "AD13-core-uses-the-gate-runner-interface",
+      comment:
+        "Engine core never imports the gates module: it calls the GateRunner interface from @vtc/shared, injected at wiring time.",
+      severity: "error",
+      from: { path: "^packages/engine/src/core/" },
+      to: { path: "^packages/engine/src/gates/" },
+    },
+    {
+      name: "AD13-gates-never-import-engine-core",
+      comment: "The Gate Runner never imports engine core or the transports (http, mcp).",
+      severity: "error",
+      from: { path: "^packages/engine/src/gates/" },
+      to: { path: "^packages/engine/src/(core|http|mcp)/" },
+    },
+    {
+      name: "AD13-git-imports-no-engine-module",
+      comment: "The git/worktree module is a leaf: it imports no other engine module.",
+      severity: "error",
+      from: { path: "^packages/engine/src/git/" },
+      to: { path: "^packages/engine/src/(core|gates|http|mcp|storage)/" },
+    },
+    {
+      name: "AD13-core-does-not-import-transports",
+      comment:
+        "http and mcp are transports that call engine core; core, gates and git never import them.",
+      severity: "error",
+      from: { path: "^packages/engine/src/(core|gates|git)/" },
+      to: { path: "^packages/engine/src/(http|mcp)/" },
     },
     // ---- AD-11: tests stay out of production code --------------------------
     {
       name: "AD11-no-test-code-in-production",
       severity: "error",
-      from: { pathNot: "(\\.test\\.ts$|/test/|vitest\\.)" },
-      to: { path: "(\\.test\\.ts$|/test/)" },
+      from: { pathNot: "(\\.test\\.tsx?$|/test/|vitest\\.)" },
+      to: { path: "(\\.test\\.tsx?$|/test/)" },
     },
     {
       name: "AD11-no-dev-deps-in-production",
-      comment: "Production code may not import devDependencies.",
+      comment: "Production code (packages and apps) may not import devDependencies.",
       severity: "error",
-      from: { path: "^packages/[^/]+/src/", pathNot: "\\.test\\.ts$" },
+      from: { path: "^(packages|apps)/[^/]+/src/", pathNot: "\\.test\\.tsx?$" },
       to: { dependencyTypes: ["npm-dev"] },
     },
     // ---- hygiene -----------------------------------------------------------
@@ -146,7 +231,7 @@ module.exports = {
   ],
   options: {
     doNotFollow: { path: "node_modules" },
-    exclude: { path: "^(packages|apps)/[^/]+/(dist|coverage|\\.turbo)/" },
+    exclude: { path: "^(packages|apps)/[^/]+/(dist|coverage|\\.turbo|\\.next|out)/" },
     tsPreCompilationDeps: true,
     combinedDependencies: false,
     tsConfig: { fileName: "tsconfig.depcruise.json" },
@@ -154,7 +239,7 @@ module.exports = {
       exportsFields: ["exports"],
       conditionNames: ["@vtc/source", "import", "types", "node", "default"],
       mainFields: ["module", "main", "types"],
-      extensions: [".ts", ".js", ".json"],
+      extensions: [".ts", ".tsx", ".d.ts", ".js", ".jsx", ".mjs", ".cjs", ".json"],
     },
     reporterOptions: {
       text: { highlightFocused: true },

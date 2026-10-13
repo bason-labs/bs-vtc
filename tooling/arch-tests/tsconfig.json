@@ -1,0 +1,11 @@
+{
+  "extends": "../../tsconfig.base.json",
+  "compilerOptions": {
+    "noEmit": true,
+    "allowJs": true,
+    "allowImportingTsExtensions": true,
+    "customConditions": ["@vtc/source"]
+  },
+  "include": ["test/**/*.ts", "vitest.config.ts"],
+  "exclude": ["fixtures/**"]
+}

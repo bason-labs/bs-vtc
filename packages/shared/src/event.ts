@@ -4,6 +4,14 @@
  */
 import { z } from "zod";
 import {
+  EVENT_ENVELOPE_REQUIREMENTS,
+  EVENT_PAYLOAD_SCHEMAS,
+  isCoreEventType,
+  validateEventData,
+  type CoreEventType,
+  type EventData,
+} from "./event-payloads.js";
+import {
   FeatureIdSchema,
   HostIdSchema,
   IsoDateTimeSchema,
@@ -27,32 +35,11 @@ export const EventTypeSchema = z
 export type EventType = z.infer<typeof EventTypeSchema>;
 
 /**
- * The initial event vocabulary. The set is open (new sub-projects add types without a schema
- * bump), so consumers must ignore types they do not know.
+ * The core event vocabulary, each with a typed payload (`EVENT_PAYLOAD_SCHEMAS`). The set is
+ * open: sub-projects add types (as a MINOR contract change), and consumers ignore types they do
+ * not know.
  */
-export const CORE_EVENT_TYPES = [
-  "run.started",
-  "run.resumed",
-  "run.paused",
-  "run.finished",
-  "gate.approved",
-  "task.created",
-  "task.status_changed",
-  "feature.status_changed",
-  "role.dispatched",
-  "role.submitted",
-  "role.rejected",
-  "gate.result",
-  "finding.recorded",
-  "finding.status_changed",
-  "escalation.opened",
-  "escalation.answered",
-  "budget.updated",
-  "usage.updated",
-  "limit.hit",
-  "merge.completed",
-  "incident.recorded",
-] as const satisfies readonly EventType[];
+export const CORE_EVENT_TYPES = Object.keys(EVENT_PAYLOAD_SCHEMAS) as CoreEventType[];
 
 export const EventActorSchema = z.enum(["engine", "role", "human"]);
 export type EventActor = z.infer<typeof EventActorSchema>;
@@ -70,6 +57,7 @@ export const EventSchema = z
     actor: EventActorSchema,
     /** Required when actor is `role`. */
     role: RoleIdSchema.optional(),
+    /** Typed per core type (`EVENT_PAYLOAD_SCHEMAS`); free-form for other types. */
     data: z.record(z.string(), z.unknown()).default({}),
     prompt_sha: Sha256HexSchema.optional(),
     host: HostIdSchema.optional(),
@@ -81,6 +69,26 @@ export const EventSchema = z
   .superRefine((event, ctx) => {
     if (event.actor === "role" && event.role === undefined) {
       ctx.addIssue({ code: "custom", path: ["role"], message: "role events must name the role" });
+    }
+    if (!isCoreEventType(event.type)) return;
+    for (const field of EVENT_ENVELOPE_REQUIREMENTS[event.type] ?? []) {
+      if (event[field] === undefined) {
+        ctx.addIssue({
+          code: "custom",
+          path: [field],
+          message: `${event.type} events must carry ${field}`,
+        });
+      }
+    }
+    const check = validateEventData(event.type, event.data);
+    if (!check.ok) {
+      for (const issue of check.issues) {
+        ctx.addIssue({
+          code: "custom",
+          path: ["data", ...issue.path],
+          message: issue.message,
+        });
+      }
     }
   });
 export type VtcEvent = z.infer<typeof EventSchema>;
@@ -125,4 +133,33 @@ export const parseEventLog = (text: string): ParsedEventLog => {
     else invalidLines.push(index + 1);
   });
   return { events, invalidLines, truncatedTail };
+};
+
+/** Narrows an event to a core type, so `data` can be read with {@link readEventData}. */
+export const isEventOfType = <T extends CoreEventType>(
+  event: VtcEvent,
+  type: T,
+): event is VtcEvent & { type: T } => event.type === type;
+
+/** The typed payload of a core event (defaults applied). Throws if the payload is invalid. */
+export const readEventData = <T extends CoreEventType>(
+  event: VtcEvent & { type: T },
+): EventData<T> => EVENT_PAYLOAD_SCHEMAS[event.type].parse(event.data) as EventData<T>;
+
+// ------------------------------------------------------------------ SSE ids
+
+/** SSE message id for an event (AD-5 rule 6): `<run>:<seq>`. */
+export const sseEventId = (run: string, seq: number): string => {
+  if (!Number.isInteger(seq) || seq < 1) throw new RangeError("seq must be a positive integer");
+  return `${RunIdSchema.parse(run)}:${String(seq)}`;
+};
+
+/** Parses a `Last-Event-ID` header; `null` when it is not a valid `<run>:<seq>`. */
+export const parseSseEventId = (id: string): { run: string; seq: number } | null => {
+  const at = id.lastIndexOf(":");
+  if (at <= 0) return null;
+  const run = RunIdSchema.safeParse(id.slice(0, at));
+  const digits = id.slice(at + 1);
+  if (!run.success || !/^[1-9]\d{0,15}$/.test(digits)) return null;
+  return { run: run.data, seq: Number(digits) };
 };

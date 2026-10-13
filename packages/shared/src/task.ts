@@ -128,7 +128,11 @@ export const TaskSchema = z
     park_reason: ParkReasonSchema.optional(),
     round: z.int().nonnegative().default(0),
     baseline_revision: GitShaSchema.optional(),
-    worktree: z.string().min(1).optional(),
+    /**
+     * Repo-relative worktree path, inside gitignored `.vtc/state/` (e.g. `.vtc/state/worktrees/T-7`).
+     * Never an absolute machine path: this record is projected into the git-tracked plan file.
+     */
+    worktree: RelPathSchema.optional(),
     branch: z
       .string()
       .regex(/^vtc\/T-[1-9]\d*$/, "expected branch vtc/T-n")
@@ -173,3 +177,76 @@ export const TaskSchema = z
   });
 export type Task = z.infer<typeof TaskSchema>;
 export type TaskInput = z.input<typeof TaskSchema>;
+
+// ------------------------------------------------------------ planner output
+
+/** One row of the intent contract's I/O and edge-case matrix (§6.3 plan file). */
+export const IoCaseSchema = z.strictObject({
+  case: z.string().min(1).max(200),
+  input: z.string().min(1).max(1000),
+  expected: z.string().min(1).max(1000),
+});
+export type IoCase = z.infer<typeof IoCaseSchema>;
+
+/**
+ * The immutable `<intent-contract>` block of a plan file (§6.3): the intent, Always/Never
+ * boundaries and the I/O and edge-case matrix. Written by the Planner, read by the Context
+ * Packer, never edited after PLAN (a change is a CR).
+ */
+export const IntentContractSchema = z.strictObject({
+  statement: z.string().min(1).max(2000),
+  always: z.array(z.string().min(1).max(500)).default([]),
+  never: z.array(z.string().min(1).max(500)).default([]),
+  io_matrix: z.array(IoCaseSchema).min(1),
+});
+export type IntentContract = z.infer<typeof IntentContractSchema>;
+
+/**
+ * What the Planner submits per task (§5.2 Planner output). Strict: engine-owned fields
+ * (`status`, `cap`, `budget_usd`, `round`, `spent_usd`, `worktree`, `branch`, `session_ref`,
+ * `deferred`, `baseline_revision`) are rejected, so a planner can never set them (§6.4).
+ * The engine derives `cap` from `risk` and `budget_usd` from `size` and project.yaml.
+ */
+export const TaskDraftSchema = z
+  .strictObject({
+    id: TaskIdSchema,
+    title: z.string().min(1).max(200),
+    feature: FeatureIdSchema.optional(),
+    covers: z.array(RequirementIdSchema).min(1),
+    after: z.array(TaskIdSchema).default([]),
+    files_scope: z.array(GlobSchema).min(1),
+    discipline: DisciplineSchema,
+    stack_packs: z.array(SlugSchema).max(MAX_STACK_PACKS).default([]),
+    provides_contract: ProvidedContractSchema.omit({ frozen_sha256: true }).optional(),
+    consumes_contracts: z.array(ConsumedContractSchema).default([]),
+    risk: RiskSchema,
+    /** Planner risk tags (§5.2); the §7.6 risk rules still decide parking. */
+    risk_tags: z.array(SlugSchema).default([]),
+    size: TaskSizeSchema,
+    arch_triage: ArchTriageSchema,
+    intent: IntentContractSchema,
+  })
+  .superRefine((draft, ctx) => {
+    if (draft.after.includes(draft.id)) {
+      ctx.addIssue({ code: "custom", path: ["after"], message: "a task cannot depend on itself" });
+    }
+    for (const [i, consumed] of draft.consumes_contracts.entries()) {
+      if (consumed.provider === draft.id) {
+        ctx.addIssue({
+          code: "custom",
+          path: ["consumes_contracts", i, "provider"],
+          message: "a task cannot consume its own contract",
+        });
+      }
+    }
+  });
+export type TaskDraft = z.infer<typeof TaskDraftSchema>;
+export type TaskDraftInput = z.input<typeof TaskDraftSchema>;
+
+/**
+ * Frontmatter of `.vtc/tasks/T-n.md` (§6.3). It is an engine-written **projection** of the task
+ * state rebuilt from the event log (AD-7 rule 8): the engine regenerates it and never reads it
+ * back as input, so a hand or agent edit cannot become a second source of truth.
+ */
+export const PlanFileFrontmatterSchema = TaskSchema;
+export type PlanFileFrontmatter = Task;

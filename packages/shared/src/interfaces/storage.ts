@@ -17,6 +17,10 @@ export interface SqlRunResult {
 
 export interface PreparedStatement {
   run(...params: SqlValue[]): SqlRunResult;
+  /**
+   * First row, or `undefined` when there is none. Drivers normalise: `bun:sqlite` returns
+   * `null` and must map it to `undefined` (checked by the storage contract suite).
+   */
   get(...params: SqlValue[]): SqlRow | undefined;
   all(...params: SqlValue[]): SqlRow[];
 }

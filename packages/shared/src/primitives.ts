@@ -28,6 +28,27 @@ export const RequirementIdSchema = z
 export type RequirementId = z.infer<typeof RequirementIdSchema>;
 
 /**
+ * Acceptance criterion id: `<requirement>.AC-n`, e.g. `REQ-3.AC-2` (§5.2 BA Given/When/Then;
+ * the Spec-Verifier runs one call per AC, §7.4).
+ */
+export const AcceptanceCriterionIdSchema = z
+  .string()
+  .regex(
+    /^(REQ|SEC)-[1-9]\d*\.AC-[1-9]\d*$/,
+    "expected an acceptance criterion id like REQ-3.AC-2",
+  );
+export type AcceptanceCriterionId = z.infer<typeof AcceptanceCriterionIdSchema>;
+
+/** A requirement or one of its acceptance criteria (`REQ-3` or `REQ-3.AC-2`). */
+export const RequirementRefSchema = z
+  .string()
+  .regex(
+    /^(REQ|SEC)-[1-9]\d*(\.AC-[1-9]\d*)?$/,
+    "expected a requirement or acceptance criterion id like REQ-3 or REQ-3.AC-2",
+  );
+export type RequirementRef = z.infer<typeof RequirementRefSchema>;
+
+/**
  * Run id. Used as a directory name under `.vtc/runs/<run>/`, so it is restricted to a
  * path-safe charset and may not start with a dot.
  */
@@ -65,6 +86,16 @@ export const HostIdSchema = z.enum(["claude-code", "codex"]);
 export type HostId = z.infer<typeof HostIdSchema>;
 export const HOST_IDS = HostIdSchema.options;
 
+/** Download targets of the single-file binary and of pinned scanners (§4.4). */
+export const PlatformSchema = z.enum([
+  "darwin-arm64",
+  "darwin-x64",
+  "linux-x64",
+  "linux-arm64",
+  "windows-x64",
+]);
+export type Platform = z.infer<typeof PlatformSchema>;
+
 /** Lower-case slug used for stack packs, artifact types, rule ids and similar open sets. */
 export const SlugSchema = z
   .string()
@@ -82,8 +113,14 @@ export const Sha256HexSchema = z
   .regex(/^[a-f0-9]{64}$/, "expected a lower-case hex SHA-256 digest");
 export type Sha256Hex = z.infer<typeof Sha256HexSchema>;
 
-/** Git object id (SHA-1 or SHA-256 repositories; abbreviations of 7+ allowed). */
-export const GitShaSchema = z.string().regex(/^[a-f0-9]{7,64}$/, "expected a git object id");
+/**
+ * Full git object id: 40 hex (SHA-1 repositories) or 64 hex (SHA-256 repositories).
+ * Abbreviations are rejected: they can become ambiguous as a repository grows, and baselines and
+ * merge records must stay resolvable forever.
+ */
+export const GitShaSchema = z
+  .string()
+  .regex(/^([a-f0-9]{40}|[a-f0-9]{64})$/, "expected a full 40- or 64-hex git object id");
 export type GitSha = z.infer<typeof GitShaSchema>;
 
 /** ISO-8601 timestamp with a `Z` or numeric offset. */
@@ -135,6 +172,27 @@ export const SessionRefSchema = z.strictObject({
   id: z.string().min(1).max(256),
 });
 export type SessionRef = z.infer<typeof SessionRefSchema>;
+
+/**
+ * The 13 risk rules of §7.6, in spec order. Each one parks the task and blocks Level-3
+ * auto-merge; escalations and workflow nodes name the rule that fired.
+ */
+export const RiskRuleIdSchema = z.enum([
+  "committed_secret",
+  "sensitive_area",
+  "db_migration",
+  "new_dependency",
+  "protected_config",
+  "breaking_api",
+  "large_diff",
+  "repeated_test_integrity",
+  "open_high_finding",
+  "stuck_or_cap",
+  "unresolved_spec_conflict",
+  "gate_infra_or_sandbox",
+  "budget_exhausted",
+]);
+export type RiskRuleId = z.infer<typeof RiskRuleIdSchema>;
 
 /** Kinds of evidence a finding, claim or escalation may cite. */
 export const EvidenceTypeSchema = z.enum([

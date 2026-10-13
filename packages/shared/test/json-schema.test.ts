@@ -2,10 +2,27 @@ import { describe, expect, it } from "vitest";
 import {
   CONTRACT_SCHEMAS,
   CONTRACTS_VERSION,
+  fromStructuredOutput,
   jsonSchemaFor,
   jsonSchemas,
+  STRUCTURED_OUTPUT_CONTRACTS,
   type ContractName,
 } from "../src/index.js";
+import { validRoleResult } from "./fixtures.js";
+
+/** Visits every sub-schema of a JSON Schema document. */
+const walk = (node: unknown, visit: (n: Record<string, unknown>) => void): void => {
+  if (Array.isArray(node)) {
+    node.forEach((n) => {
+      walk(n, visit);
+    });
+    return;
+  }
+  if (typeof node !== "object" || node === null) return;
+  const record = node as Record<string, unknown>;
+  visit(record);
+  for (const value of Object.values(record)) walk(value, visit);
+};
 
 describe("jsonSchemas", () => {
   it("exports a JSON Schema for every contract", () => {
@@ -36,6 +53,57 @@ describe("jsonSchemas", () => {
       expect(schema).toContain(exit);
     }
   });
+});
+
+describe("structured-output target (hosts' --output-schema / --json-schema)", () => {
+  const schema = jsonSchemaFor("RoleResult", { target: "structured-output" });
+  it("has an object root with no root union", () => {
+    expect(schema.type).toBe("object");
+    expect(schema.oneOf).toBeUndefined();
+    expect(schema.anyOf).toBeUndefined();
+    expect(schema.additionalProperties).toBe(false);
+    const exit = (schema.properties as Record<string, { enum?: string[] }>).exit;
+    expect([...(exit?.enum ?? [])].sort()).toEqual(
+      ["blocked", "built", "done", "out_of_scope_fault", "spec_conflict", "unknown"].sort(),
+    );
+  });
+  it("requires every property of every object and carries no defaults", () => {
+    walk(schema, (node) => {
+      expect(node).not.toHaveProperty("default");
+      if (node.type === "object" && typeof node.properties === "object" && node.properties) {
+        expect([...((node.required as string[] | undefined) ?? [])].sort()).toEqual(
+          Object.keys(node.properties).sort(),
+        );
+      }
+    });
+  });
+  it("caps the summary as a plain maxLength", () => {
+    const summary = (schema.properties as Record<string, unknown>).summary;
+    expect(JSON.stringify(summary)).toContain('"maxLength":6000');
+  });
+  it("round-trips a result through the host form and re-validates with Zod", () => {
+    const hostOutput = {
+      ...validRoleResult(),
+      question: null,
+      conflict: null,
+      fault: null,
+      tasks: null,
+      question_type: null,
+      feature: null,
+    };
+    const parsed = fromStructuredOutput("RoleResult", hostOutput);
+    expect(parsed.success).toBe(true);
+    const bad = fromStructuredOutput("RoleResult", { ...hostOutput, exit: "blocked" });
+    expect(bad.success).toBe(false);
+  });
+  it.each(STRUCTURED_OUTPUT_CONTRACTS)(
+    "%s has no nullable field, so null always means absent",
+    (name) => {
+      walk(jsonSchemaFor(name), (node) => {
+        expect(node.type).not.toBe("null");
+      });
+    },
+  );
 });
 
 describe("frozen contracts (AD-3)", () => {

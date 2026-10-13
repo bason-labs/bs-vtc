@@ -1,6 +1,12 @@
 import { describe, expect, it } from "vitest";
-import { GatesConfigSchema, GateSchema, ProjectConfigSchema } from "../src/index.js";
-import { validGatesConfig, validProjectConfig } from "./fixtures.js";
+import {
+  GatesConfigSchema,
+  GateSchema,
+  ProjectConfigSchema,
+  ScannerPinSchema,
+  ScannerPinsSchema,
+} from "../src/index.js";
+import { COMMIT, SHA, validGatesConfig, validProjectConfig } from "./fixtures.js";
 import { expectInvalid, expectValid } from "./helpers.js";
 
 describe("ProjectConfigSchema", () => {
@@ -76,23 +82,20 @@ describe("GatesConfigSchema", () => {
         ],
       },
     ],
-    [
-      "scanners",
-      {
-        scanners: [
-          { name: "g", version: "1", sha256: "a".repeat(64) },
-          { name: "g", version: "2", sha256: "b".repeat(64) },
-        ],
-      },
-    ],
-    ["scanners.0.sha256", { scanners: [{ name: "g", version: "1", sha256: "nope" }] }],
+    ["", { scanners: [] }],
     [
       "baseline.revision",
       { baseline: { revision: "HEAD", calibrated_at: "2026-10-13T00:00:00Z", confirmed: true } },
     ],
     [
       "baseline.confirmed",
-      { baseline: { revision: "abcdef1", calibrated_at: "2026-10-13T00:00:00Z" } },
+      { baseline: { revision: COMMIT, calibrated_at: "2026-10-13T00:00:00Z" } },
+    ],
+    [
+      "baseline.revision",
+      {
+        baseline: { revision: "abcdef1", calibrated_at: "2026-10-13T00:00:00Z", confirmed: true },
+      },
     ],
     ["sources.0", { sources: ["vibes"] }],
   ])("rejects invalid %s", (path, patch) => {
@@ -123,5 +126,31 @@ describe("GateSchema", () => {
       command: ["depcruise", "src"],
       blocking: false,
     });
+  });
+});
+
+describe("ScannerPinsSchema (product gates/scanners.json)", () => {
+  const pin = () => ({
+    name: "gitleaks",
+    version: "8.30.0",
+    url: "https://github.com/gitleaks/gitleaks/releases/download/v{version}/gitleaks_{platform}.tar.gz",
+    sha256: { "darwin-arm64": SHA, "linux-x64": "b".repeat(64) },
+    license: "MIT",
+  });
+  it("pins a checksum per platform", () => {
+    expectValid(ScannerPinsSchema, { version: 1, scanners: [pin()] });
+  });
+  it.each([
+    ["sha256", { sha256: {} }],
+    ["sha256", { sha256: { "solaris-sparc": SHA } }],
+    ["sha256.linux-x64", { sha256: { "linux-x64": "nope" } }],
+    ["url", { url: "http://example.com/{platform}" }],
+    ["url", { url: "https://example.com/gitleaks.tar.gz" }],
+    ["license", { license: "" }],
+  ])("rejects invalid %s", (path, patch) => {
+    expectInvalid(ScannerPinSchema, { ...pin(), ...patch }, path);
+  });
+  it("rejects duplicate pins", () => {
+    expectInvalid(ScannerPinsSchema, { version: 1, scanners: [pin(), pin()] }, "scanners");
   });
 });

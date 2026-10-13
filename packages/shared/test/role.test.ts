@@ -1,6 +1,23 @@
 import { describe, expect, it } from "vitest";
-import { estimateTokens, RoleContractSchema, RoleResultSchema } from "../src/index.js";
-import { validRoleContract, validRoleResult } from "./fixtures.js";
+import {
+  estimateTokens,
+  resolveRoleMode,
+  RoleContractSchema,
+  RoleResultSchema,
+  SUMMARY_MAX_CHARS,
+  type RoleContract,
+} from "../src/index.js";
+import { validRoleContract, validRoleResult, validTaskDraft } from "./fixtures.js";
+
+const question = () => ({
+  question: "Which locale formats the reset email?",
+  options: [
+    { id: "en", label: "English only", effect: "clarify" },
+    { id: "user", label: "The user's locale", effect: "clarify" },
+  ],
+  recommended: "user",
+  evidence: [{ type: "spec_ref", ref: "REQ-3.AC-2" }],
+});
 import { expectInvalid, expectValid } from "./helpers.js";
 
 describe("RoleResultSchema", () => {
@@ -11,7 +28,7 @@ describe("RoleResultSchema", () => {
     const base = { role: "engineer", task: "T-7", summary: "ok" };
     expectValid(RoleResultSchema, { ...base, exit: "built" });
     expectValid(RoleResultSchema, { ...base, exit: "unknown" });
-    expectValid(RoleResultSchema, { ...base, exit: "blocked", question: "Which locale?" });
+    expectValid(RoleResultSchema, { ...base, exit: "blocked", question: question() });
     expectValid(RoleResultSchema, {
       ...base,
       exit: "spec_conflict",
@@ -49,6 +66,47 @@ describe("RoleResultSchema", () => {
     expect(estimateTokens(atCap)).toBe(1500);
     expectValid(RoleResultSchema, { ...validRoleResult(), summary: atCap });
     expectInvalid(RoleResultSchema, { ...validRoleResult(), summary: `${atCap}x` }, "summary");
+  });
+  it("blocked carries a full question with options, not a bare string", () => {
+    expectInvalid(
+      RoleResultSchema,
+      { role: "engineer", summary: "x", exit: "blocked", question: "Which locale?" },
+      "question",
+    );
+  });
+  it("lets QA raise spec questions while finishing (exit done)", () => {
+    const result = expectValid(RoleResultSchema, {
+      ...validRoleResult(),
+      role: "qa",
+      mode: "author",
+      questions: [question()],
+    });
+    expect(result.questions).toHaveLength(1);
+    expect(expectValid(RoleResultSchema, validRoleResult()).questions).toEqual([]);
+  });
+  it("accepts planner task drafts", () => {
+    expectValid(RoleResultSchema, {
+      role: "planner",
+      exit: "done",
+      summary: "Two tasks.",
+      tasks: [validTaskDraft(), { ...validTaskDraft(), id: "T-8", after: ["T-7"] }],
+    });
+  });
+  it("represents Visual QA's unchecked verdict and question type", () => {
+    expectValid(RoleResultSchema, {
+      ...validRoleResult(),
+      role: "visual_qa",
+      verdict: "unchecked",
+      question_type: "state",
+    });
+    expectInvalid(
+      RoleResultSchema,
+      { ...validRoleResult(), question_type: "vibes" },
+      "question_type",
+    );
+  });
+  it("summary cap is also a plain maxLength", () => {
+    expect(SUMMARY_MAX_CHARS).toBe(6000);
   });
   it("out_of_scope_fault must cite a line", () => {
     expectInvalid(
@@ -106,7 +164,52 @@ describe("RoleContractSchema", () => {
   ])("rejects invalid %s", (path, patch) => {
     expectInvalid(RoleContractSchema, { ...validRoleContract(), ...patch }, path);
   });
+  it("rejects code_sandboxed in a mode of a non-engineer role", () => {
+    expectInvalid(
+      RoleContractSchema,
+      { ...validRoleContract(), modes: { hack: { tools: { profile: "code_sandboxed" } } } },
+      "modes.hack.tools.profile",
+    );
+    expectInvalid(RoleContractSchema, { ...validRoleContract(), modes: {} }, "modes");
+  });
   it("rejects persona sections (contracts, not personas)", () => {
     expectInvalid(RoleContractSchema, { ...validRoleContract(), emoji: "🤖", vibe: "chill" });
+  });
+});
+
+describe("role modes", () => {
+  const qa = (): RoleContract =>
+    RoleContractSchema.parse({
+      ...validRoleContract(),
+      id: "qa",
+      reviewer: "engineer",
+      mission: "Author acceptance tests before the Engineer; judge test adequacy after.",
+      inputs: ["task_pack"],
+      tools: { profile: "read_only" },
+      modes: {
+        author: {
+          tools: { profile: "write_scoped", write_paths: ["test/acceptance/**"] },
+          output: { artifacts: ["acceptance_tests"] },
+        },
+        judge: { output: { verdicts: ["pass", "fail", "unknown"] } },
+      },
+    });
+  it("QA author writes acceptance tests only; judge is read-only", () => {
+    const author = resolveRoleMode(qa(), "author");
+    const judge = resolveRoleMode(qa(), "judge");
+    expect(author.ok && author.contract.tools).toEqual({
+      profile: "write_scoped",
+      write_paths: ["test/acceptance/**"],
+      engine_tools: [],
+    });
+    expect(judge.ok && judge.contract.tools.profile).toBe("read_only");
+    expect(judge.ok && judge.contract.inputs).toEqual(["task_pack"]);
+  });
+  it("a role with modes needs a declared mode; a role without modes takes none", () => {
+    expect(resolveRoleMode(qa()).ok).toBe(false);
+    expect(resolveRoleMode(qa(), "reviewer").ok).toBe(false);
+    const ba = RoleContractSchema.parse(validRoleContract());
+    expect(resolveRoleMode(ba).ok).toBe(true);
+    expect(resolveRoleMode(ba, "author").ok).toBe(false);
   });
 });

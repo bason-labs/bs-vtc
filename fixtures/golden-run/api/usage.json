@@ -1,0 +1,35 @@
+{
+  "hosts": [
+    {
+      "host": "claude-code",
+      "source": "statusline",
+      "windows": [
+        {
+          "kind": "five_hour",
+          "label": "five_hour",
+          "window_minutes": 300,
+          "used_pct": 41,
+          "resets_at": "2026-10-13T13:00:00.000Z"
+        },
+        {
+          "kind": "weekly",
+          "label": "seven_day",
+          "window_minutes": 10080,
+          "used_pct": 18,
+          "resets_at": "2026-10-18T00:00:00.000Z"
+        }
+      ],
+      "model_limits": [],
+      "updated_at": "2026-10-13T09:41:00.000Z"
+    },
+    {
+      "host": "codex",
+      "source": "none",
+      "windows": [],
+      "model_limits": [],
+      "updated_at": null
+    }
+  ],
+  "interrupted_tasks": [],
+  "auto_resume_at": null
+}

@@ -1,0 +1,84 @@
+{
+  "run": "golden-1",
+  "task": {
+    "id": "T-2",
+    "title": "Reset endpoint",
+    "feature": "F-1",
+    "covers": ["REQ-2"],
+    "after": ["T-1"],
+    "files_scope": ["src/t-2/**"],
+    "discipline": "backend",
+    "stack_packs": [],
+    "consumes_contracts": [],
+    "risk": "med",
+    "cap": 4,
+    "size": "M",
+    "arch_triage": "fits",
+    "budget_usd": 5,
+    "spent_usd": 4.4,
+    "status": "parked",
+    "park_reason": "cap",
+    "round": 4,
+    "deferred": []
+  },
+  "plan_file": ".vtc/tasks/T-2.md",
+  "findings": [
+    {
+      "fingerprint": "5555555555555555555555555555555555555555555555555555555555555555",
+      "source": "role",
+      "source_name": "security",
+      "rule_id": "authz.token-not-bound",
+      "category": "security",
+      "title": "Reset token not bound to user",
+      "severity": "high",
+      "confidence": 0.8,
+      "location": {
+        "path": "src/t-2/reset.ts",
+        "symbol": "reset"
+      },
+      "evidence": {
+        "type": "file_line",
+        "ref": "src/t-2/reset.ts:31"
+      },
+      "req_ids": ["REQ-2.AC-1"],
+      "cwe": "CWE-639",
+      "route": "patch",
+      "task": "T-2",
+      "round_first_seen": 1,
+      "round_last_seen": 4,
+      "status": "open"
+    }
+  ],
+  "gate_reports": [],
+  "escalations": [
+    {
+      "id": "E-1",
+      "run": "golden-1",
+      "task": "T-2",
+      "reason": "cap",
+      "question": "T-2 hit its 4-round cap on the same authz finding. How should we proceed?",
+      "options": [
+        {
+          "id": "hint",
+          "label": "Give the Engineer a hint",
+          "effect": "hint"
+        },
+        {
+          "id": "budget",
+          "label": "Raise the budget 1.5x",
+          "effect": "raise_budget",
+          "budget_factor": 1.5
+        }
+      ],
+      "recommended": "hint",
+      "evidence": [
+        {
+          "type": "file_line",
+          "ref": "src/t-2/reset.ts:31"
+        }
+      ],
+      "blocks": ["T-2"],
+      "created_at": "2026-10-13T09:39:00.000Z"
+    }
+  ]
+}

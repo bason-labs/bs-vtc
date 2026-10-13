@@ -20,8 +20,17 @@ describe("FindingDraftSchema", () => {
     ["req_ids.0", { req_ids: ["AC-1"] }],
     ["title", { title: "" }],
     ["claimed_severity", { claimed_severity: "blocker" }],
+    ["cwe", { cwe: "79" }],
+    ["cwe", { cwe: "CWE-0" }],
   ])("rejects invalid %s", (path, patch) => {
     expectInvalid(FindingDraftSchema, { ...validFindingDraft(), ...patch }, path);
+  });
+  it("accepts a CWE and acceptance-criterion refs (Security verify, Spec-Verifier)", () => {
+    expectValid(FindingDraftSchema, {
+      ...validFindingDraft(),
+      cwe: "CWE-639",
+      req_ids: ["SEC-1", "REQ-3.AC-2"],
+    });
   });
   it("rejects engine-owned fields from reviewers", () => {
     expectInvalid(FindingDraftSchema, { ...validFindingDraft(), severity: "low" });

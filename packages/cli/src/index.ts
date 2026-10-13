@@ -6,21 +6,12 @@ import { HOST_CAPABILITIES } from "@vtc/adapters";
 import { COMPILE_TARGETS } from "@vtc/compiler";
 import { ENGINE_NAME } from "@vtc/engine";
 import { CONTRACTS_VERSION } from "@vtc/shared";
+import { COMMANDS } from "./commands/index.js";
 
 export const VERSION = "0.0.0";
 
-/** Commands from spec §4.1 / §4.4. Each is implemented by the sub-project that owns it. */
-export const COMMANDS = [
-  { name: "init", summary: "Create .vtc/ in this repo" },
-  { name: "calibrate", summary: "Detect the toolchain and freeze the gate baseline" },
-  { name: "dashboard", summary: "Serve Flow Studio on 127.0.0.1" },
-  { name: "pause", summary: "Kill switch: stop dispatching and merging" },
-  { name: "resume", summary: "Resume a paused or interrupted run" },
-  { name: "status", summary: "Show the current run" },
-  { name: "install", summary: "Install the plugin for a host (claude-code | codex)" },
-  { name: "doctor", summary: "Check prerequisites; download pinned browsers and scanners" },
-  { name: "engine", summary: "Run the engine (--mcp for stdio MCP)" },
-] as const;
+export { COMMANDS, type CommandSpec } from "./commands/index.js";
+export { detectRuntime, loadStorage, type Runtime } from "./storage.js";
 
 export interface CliIo {
   readonly out: (line: string) => void;
@@ -32,7 +23,7 @@ const helpText = (): string[] => [
   "",
   "Usage: vtc <command> [options]",
   "",
-  ...COMMANDS.map((c) => `  ${c.name.padEnd(10)} ${c.summary}`),
+  ...COMMANDS.map((c) => `  ${c.name.padEnd(15)} ${c.summary}`),
 ];
 
 /** Entry point. Returns the process exit code. */

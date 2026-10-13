@@ -5,11 +5,15 @@ import {
   FeatureIdSchema,
   IsoDateTimeSchema,
   LocationSchema,
-  RequirementIdSchema,
+  RequirementRefSchema,
   SeveritySchema,
   Sha256HexSchema,
   TaskIdSchema,
 } from "./primitives.js";
+
+/** CWE id, required on Security verify-mode findings by the role prompt (§5.2). */
+export const CweIdSchema = z.string().regex(/^CWE-[1-9]\d*$/, "expected a CWE id like CWE-79");
+export type CweId = z.infer<typeof CweIdSchema>;
 
 /** What kind of problem a finding describes. Role findings get their severity from this (§6.3). */
 export const FindingCategorySchema = z.enum([
@@ -32,7 +36,10 @@ export type FindingCategory = z.infer<typeof FindingCategorySchema>;
 /**
  * Where triage sends a finding (§6.3 step 8):
  * patch → Engineer; spec_gap → BA; design_gap → Designer; bad_test → QA; risky → park;
- * defer → `deferred[]`; out_of_scope → owning task or a new integration-fix task (§6.3 step 3).
+ * defer → `deferred[]`.
+ * `out_of_scope` is a spine extension (AD-3 rule 7), not a §6.3 step 8 route: it records an
+ * Engineer `out_of_scope_fault` whose guards passed, routed to the owning task or a new
+ * integration-fix task (§6.3 step 3, §6.7a).
  */
 export const FindingRouteSchema = z.enum([
   "patch",
@@ -64,9 +71,10 @@ export const FindingDraftSchema = z.strictObject({
   confidence: z.number().min(0).max(1),
   location: LocationSchema,
   evidence: EvidenceSchema,
-  req_ids: z.array(RequirementIdSchema).default([]),
+  req_ids: z.array(RequirementRefSchema).default([]),
   /** Code the finding is about; whitespace-normalised into the fingerprint. */
   snippet: z.string().max(4000).optional(),
+  cwe: CweIdSchema.optional(),
   claimed_severity: SeveritySchema.optional(),
 });
 export type FindingDraft = z.infer<typeof FindingDraftSchema>;
@@ -94,8 +102,9 @@ export const FindingSchema = z
     confidence: z.number().min(0).max(1),
     location: LocationSchema,
     evidence: EvidenceSchema,
-    req_ids: z.array(RequirementIdSchema).default([]),
+    req_ids: z.array(RequirementRefSchema).default([]),
     snippet: z.string().max(4000).optional(),
+    cwe: CweIdSchema.optional(),
     route: FindingRouteSchema,
     /** For `out_of_scope`: the task that owns the cited location; absent = open an integration-fix task. */
     owner_task: TaskIdSchema.optional(),

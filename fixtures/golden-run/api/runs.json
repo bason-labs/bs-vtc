@@ -1,0 +1,11 @@
+{
+  "runs": [
+    {
+      "id": "golden-1",
+      "track": "feature",
+      "phase": "build",
+      "paused": false,
+      "started_at": "2026-10-13T09:00:00.000Z"
+    }
+  ]
+}

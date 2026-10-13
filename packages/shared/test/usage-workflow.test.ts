@@ -2,8 +2,12 @@ import { describe, expect, it } from "vitest";
 import {
   findUnguardedCycle,
   remainingPct,
+  StatuslineIngestSchema,
   unknownUsage,
+  usageFromStatuslineIngest,
+  UsageReportSchema,
   UsageSnapshotSchema,
+  windowKindFromMinutes,
   WorkflowGraphSchema,
   WorkflowNodeSchema,
 } from "../src/index.js";
@@ -14,8 +18,8 @@ const snapshot = () => ({
   host: "claude-code",
   source: "statusline",
   windows: [
-    { label: "five_hour", window_minutes: 300, used_pct: 42.5, resets_at: NOW },
-    { label: "seven_day", window_minutes: 10080, used_pct: null, resets_at: null },
+    { kind: "five_hour", label: "five_hour", window_minutes: 300, used_pct: 42.5, resets_at: NOW },
+    { kind: "weekly", label: "seven_day", window_minutes: 10080, used_pct: null, resets_at: null },
   ],
   model_limits: [{ model: "claude-opus-5-5", resets_at: null, observed_at: NOW }],
   updated_at: NOW,
@@ -38,16 +42,90 @@ describe("UsageSnapshotSchema", () => {
     ["updated_at", { updated_at: undefined }],
     [
       "windows.0.used_pct",
-      { windows: [{ label: "x", window_minutes: 1, used_pct: 120, resets_at: null }] },
+      {
+        windows: [{ kind: "other", label: "x", window_minutes: 1, used_pct: 120, resets_at: null }],
+      },
     ],
-    ["windows.0.resets_at", { windows: [{ label: "x", window_minutes: 1, used_pct: 1 }] }],
+    [
+      "windows.0.resets_at",
+      { windows: [{ kind: "other", label: "x", window_minutes: 1, used_pct: 1 }] },
+    ],
+    [
+      "windows.0.kind",
+      { windows: [{ label: "x", window_minutes: 1, used_pct: 1, resets_at: null }] },
+    ],
+    [
+      "windows.0.kind",
+      { windows: [{ kind: "daily", label: "x", window_minutes: 1, used_pct: 1, resets_at: null }] },
+    ],
     [
       "windows.0.window_minutes",
-      { windows: [{ label: "x", window_minutes: 0, used_pct: 1, resets_at: null }] },
+      { windows: [{ kind: "other", label: "x", window_minutes: 0, used_pct: 1, resets_at: null }] },
     ],
     ["model_limits.0.observed_at", { model_limits: [{ model: "m", resets_at: null }] }],
   ])("rejects invalid %s", (path, patch) => {
     expectInvalid(UsageSnapshotSchema, { ...snapshot(), ...patch }, path);
+  });
+});
+
+describe("usage window kinds", () => {
+  it("classifies Codex windowDurationMins 300 / 10080 (never by label)", () => {
+    expect(windowKindFromMinutes(300)).toBe("five_hour");
+    expect(windowKindFromMinutes(10080)).toBe("weekly");
+    expect(windowKindFromMinutes(1440)).toBe("other");
+    expect(windowKindFromMinutes(null)).toBe("other");
+  });
+});
+
+describe("Claude statusline ingest", () => {
+  const body = () => ({
+    v: 1,
+    session_id: "sess-1",
+    model: "claude-opus-5-5",
+    rate_limits: {
+      five_hour: { used_percentage: 42, resets_at: 1792022400 },
+      seven_day: null,
+    },
+  });
+  it("turns an ingest body into a snapshot; a missing window stays unknown", () => {
+    const snapshot = usageFromStatuslineIngest(expectValid(StatuslineIngestSchema, body()), NOW);
+    expectValid(UsageSnapshotSchema, snapshot);
+    expect(snapshot.windows).toEqual([
+      {
+        kind: "five_hour",
+        label: "five_hour",
+        window_minutes: 300,
+        used_pct: 42,
+        resets_at: "2026-10-15T00:00:00.000Z",
+      },
+      {
+        kind: "weekly",
+        label: "seven_day",
+        window_minutes: 10080,
+        used_pct: null,
+        resets_at: null,
+      },
+    ]);
+    expect(snapshot.updated_at).toBe(NOW);
+  });
+  it.each([
+    ["v", { v: 2 }],
+    [
+      "rate_limits.five_hour.used_percentage",
+      { rate_limits: { five_hour: { used_percentage: 101, resets_at: 1 }, seven_day: null } },
+    ],
+    ["rate_limits.seven_day", { rate_limits: { five_hour: null } }],
+    ["", { transcript_path: "/Users/me/.claude/x.jsonl" }],
+  ])("rejects invalid %s", (path, patch) => {
+    expectInvalid(StatuslineIngestSchema, { ...body(), ...patch }, path);
+  });
+  it("the usage report carries interrupted tasks and the next auto-resume", () => {
+    expectValid(UsageReportSchema, {
+      hosts: [unknownUsage("claude-code"), unknownUsage("codex")],
+      interrupted_tasks: ["T-3"],
+      auto_resume_at: NOW,
+    });
+    expectInvalid(UsageReportSchema, { hosts: [], auto_resume_at: "soon" }, "auto_resume_at");
   });
 });
 
@@ -76,6 +154,7 @@ describe("WorkflowNodeSchema", () => {
     ]) {
       expectValid(WorkflowNodeSchema, node(kind, kind));
     }
+    expectValid(WorkflowNodeSchema, node("eng", "role", { state: "interrupted" }));
     expectValid(WorkflowNodeSchema, node("sf", "subflow", { subflow: "task-t-7" }));
   });
   it.each([

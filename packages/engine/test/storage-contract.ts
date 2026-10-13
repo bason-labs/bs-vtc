@@ -47,6 +47,7 @@ export const runStorageContract = (name: string, open: StorageFactory): void => 
         { name: "a" },
         { name: "b" },
       ]);
+      // "No row" is undefined on every driver (bun:sqlite returns null and must normalise).
       expect(s.prepare("SELECT name FROM t WHERE id = ?").get(99)).toBeUndefined();
       const blob = s.prepare("SELECT b FROM t WHERE id = 2").get()?.b;
       expect(blob).toBeInstanceOf(Uint8Array);
