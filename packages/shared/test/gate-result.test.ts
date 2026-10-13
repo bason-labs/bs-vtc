@@ -4,6 +4,9 @@ import {
   GateReportSchema,
   GateResultSchema,
   GateRunRequestSchema,
+  normalizeSeverity,
+  TestInventorySchema,
+  ToolFindingSchema,
   WriteScopeReportSchema,
 } from "../src/index.js";
 import { COMMIT, SHA, validGateReport, validGateResult } from "./fixtures.js";
@@ -36,15 +39,92 @@ describe("GateResultSchema", () => {
     ["blocking", { blocking: false }],
     ["report.path", { report: { format: "junit", path: "/tmp/junit.xml" } }],
     ["new_violations", { new_violations: -1 }],
-    ["tests.executed", { tests: { executed: 1.5, skipped: 0, failed: 0 } }],
+    ["tests.executed", { tests: { ...validGateResult().tests, executed: 1.5 } }],
+    ["tests.inventory", { tests: { executed: 1, skipped: 0, failed: 0 } }],
+    ["tests.line_coverage_pct", { tests: { ...validGateResult().tests, line_coverage_pct: 101 } }],
+    [
+      "monotonic",
+      { status: "pass", failure_class: undefined, monotonic: [{ kind: "test_missing" }] },
+    ],
+    ["monotonic.0.kind", { monotonic: [{ kind: "vibes_dropped" }] }],
+    ["findings", { new_violations: 0, findings: [toolFinding()] }],
+    ["findings.0.score", { findings: [{ ...toolFinding(), score: 11 }] }],
   ])("rejects invalid %s", (path, patch) => {
     expectInvalid(GateResultSchema, { ...validGateResult(), ...patch }, path);
+  });
+});
+
+/** An Opengrep SARIF result as the Gate Runner extracts it (AD-13 rule 9). */
+function toolFinding() {
+  return {
+    tool: "opengrep",
+    rule_id: "js.express.xss",
+    category: "security",
+    title: "Reflected XSS",
+    location: { path: "src/auth/reset/controller.ts", line: 12 },
+    evidence: { type: "sarif", ref: ".vtc/evidence/T-7/round-2/opengrep.sarif#3" },
+    snippet: "res.send(req.query.next)",
+    cwe: "CWE-79",
+    score: 7.5,
+    sarif_level: "error",
+  } as const;
+}
+
+describe("tool findings: the seam from scanners to triage (§6.3 step 8)", () => {
+  it("a gate carries its new violations with raw severity signals; triage normalises", () => {
+    const sast = {
+      gate_id: "opengrep",
+      layer: "L4",
+      phase: "verify",
+      status: "fail",
+      blocking: true,
+      new_violations: 1,
+      baseline_violations: 4,
+      report: { format: "sarif", path: ".vtc/evidence/T-7/round-2/opengrep.sarif" },
+      findings: [toolFinding()],
+      failure_class: "product",
+      duration_ms: 900,
+    };
+    const finding = expectValid(GateResultSchema, sast).findings[0];
+    expect(finding?.score).toBe(7.5);
+    expect(normalizeSeverity({ source: "tool", score: 7.5, sarifLevel: "error" })).toBe("high");
+    expectInvalid(ToolFindingSchema, { ...toolFinding(), severity: "high" }, "");
+  });
+});
+
+describe("monotonic metrics (§7.3)", () => {
+  it("a failed L2 gate lists how the metrics got worse than compare_to", () => {
+    const worse = {
+      ...validGateResult(),
+      monotonic: [
+        { kind: "test_missing", test: "[REQ-3.AC-1] reset rejects expired tokens" },
+        { kind: "coverage_dropped" },
+      ],
+    };
+    expect(expectValid(GateResultSchema, worse).monotonic).toHaveLength(2);
+  });
+  it("the test inventory is sorted by id, without duplicates", () => {
+    const record = (id: string) => ({ id, status: "pass", assertions: 3 }) as const;
+    expectValid(TestInventorySchema, { v: 1, tests: [record("a"), record("b")] });
+    expectInvalid(TestInventorySchema, { v: 1, tests: [record("b"), record("a")] }, "tests");
+    expectInvalid(TestInventorySchema, { v: 1, tests: [record("a"), record("a")] }, "tests");
   });
 });
 
 describe("GateReportSchema and its verdict", () => {
   it("accepts a report whose verdict matches its results", () => {
     expectValid(GateReportSchema, validGateReport());
+  });
+  it("points at the traceability report the Gate Runner built (AD-18 rule 3)", () => {
+    const path = ".vtc/evidence/T-7/traceability.json";
+    expect(
+      expectValid(GateReportSchema, { ...validGateReport(), traceability: path }).traceability,
+    ).toBe(path);
+    expectInvalid(
+      GateReportSchema,
+      { ...validGateReport(), traceability: "/tmp/t.json" },
+      "traceability",
+    );
   });
   it("rejects a verdict that does not follow from the results", () => {
     expectInvalid(GateReportSchema, { ...validGateReport(), verdict: "pass" }, "verdict");
@@ -82,6 +162,17 @@ describe("GateRunRequestSchema", () => {
   });
   it("accepts a per-round request", () => {
     expectValid(GateRunRequestSchema, request());
+  });
+  it("carries the previous L2 metrics the Gate Runner compares against (§7.3)", () => {
+    const previous = validGateResult().tests;
+    expect(
+      expectValid(GateRunRequestSchema, { ...request(), compare_to: previous }).compare_to,
+    ).toMatchObject({ inventory: previous.inventory });
+    expectInvalid(
+      GateRunRequestSchema,
+      { ...request(), compare_to: { executed: 1, skipped: 0, failed: 0 } },
+      "compare_to.inventory",
+    );
   });
   it.each([
     ["checkout", { checkout: "/Users/me/wt" }],

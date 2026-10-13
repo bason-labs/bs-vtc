@@ -13,6 +13,7 @@ import { VERSION } from "./wiring.js";
 export { COMMANDS } from "./commands/index.js";
 export type { CliIo, CommandContext, CommandSpec } from "./commands/types.js";
 export { detectRuntime, loadStorage, type Runtime } from "./storage.js";
+export { ensureInstallToken, installTokenPath, readInstallToken } from "./token.js";
 export {
   composeEngineDeps,
   createCommandContext,

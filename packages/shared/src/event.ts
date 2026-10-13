@@ -11,6 +11,7 @@ import {
   type CoreEventType,
   type EventData,
 } from "./event-payloads.js";
+import { parsePersisted } from "./persisted.js";
 import {
   FeatureIdSchema,
   HostIdSchema,
@@ -83,13 +84,9 @@ export const EventSchema = z
     }
     const check = validateEventData(event.type, event.data);
     if (!check.ok) {
-      for (const issue of check.issues) {
-        ctx.addIssue({
-          code: "custom",
-          path: ["data", ...issue.path],
-          message: issue.message,
-        });
-      }
+      // Keep each issue's code (e.g. `unrecognized_keys`), so `parsePersisted` can tell a field a
+      // newer writer added from a real error.
+      for (const issue of check.issues) ctx.addIssue({ ...issue, path: ["data", ...issue.path] });
     }
   });
 export type VtcEvent = z.infer<typeof EventSchema>;
@@ -99,6 +96,13 @@ export type VtcEventInput = z.input<typeof EventSchema>;
 export const eventLogPath = (run: string): string =>
   `.vtc/runs/${RunIdSchema.parse(run)}/events.jsonl`;
 
+/**
+ * `.vtc/runs/<run>/request.md`: the engine's projection of `run.started.request` (git-tracked,
+ * regenerated from the log, never read back as input, like plan-file frontmatter, AD-7 rule 8).
+ */
+export const runRequestPath = (run: string): string =>
+  `.vtc/runs/${RunIdSchema.parse(run)}/request.md`;
+
 /** Serialises one event as a JSONL line (validated, trailing newline). */
 export const toEventLine = (event: VtcEventInput): string =>
   `${JSON.stringify(EventSchema.parse(event))}\n`;
@@ -107,17 +111,24 @@ export interface ParsedEventLog {
   readonly events: VtcEvent[];
   /** 1-based line numbers that failed to parse or validate. */
   readonly invalidLines: number[];
+  /**
+   * 1-based line numbers that parsed only after dropping keys this version does not know (a
+   * field a newer MINOR vtc added, AD-3 rule 2). Not corruption: replay uses the event.
+   */
+  readonly strippedLines: number[];
   /** True when the last line had no trailing newline (a torn write after a crash). */
   readonly truncatedTail: boolean;
 }
 
 /**
  * Parses a JSONL event log. Blank lines are skipped; invalid lines are reported, never
- * thrown, so replay can surface an incident instead of crashing (§15 incident reports).
+ * thrown, so replay can surface an incident instead of crashing (§15 incident reports). A reader
+ * of persisted data, so unknown keys are dropped, not errors (`parsePersisted`, AD-3 rule 2).
  */
 export const parseEventLog = (text: string): ParsedEventLog => {
   const events: VtcEvent[] = [];
   const invalidLines: number[] = [];
+  const strippedLines: number[] = [];
   const lines = text.split("\n");
   const truncatedTail = text.length > 0 && !text.endsWith("\n");
   lines.forEach((line, index) => {
@@ -129,11 +140,15 @@ export const parseEventLog = (text: string): ParsedEventLog => {
       invalidLines.push(index + 1);
       return;
     }
-    const parsed = EventSchema.safeParse(raw);
-    if (parsed.success) events.push(parsed.data);
-    else invalidLines.push(index + 1);
+    const parsed = parsePersisted(EventSchema, raw);
+    if (!parsed.success) {
+      invalidLines.push(index + 1);
+      return;
+    }
+    events.push(parsed.data);
+    if (parsed.stripped.length > 0) strippedLines.push(index + 1);
   });
-  return { events, invalidLines, truncatedTail };
+  return { events, invalidLines, strippedLines, truncatedTail };
 };
 
 /** Narrows an event to a core type, so `data` can be read with {@link readEventData}. */

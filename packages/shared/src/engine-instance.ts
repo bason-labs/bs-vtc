@@ -4,7 +4,7 @@
  */
 import { z } from "zod";
 import { sha256Hex } from "./helpers/fingerprint.js";
-import { IsoDateTimeSchema } from "./primitives.js";
+import { HostIdSchema, IsoDateTimeSchema } from "./primitives.js";
 
 export const ENGINE_INSTANCE = {
   /** Exclusive lock, repo-relative; held by the single writer of the event log. */
@@ -17,6 +17,13 @@ export const ENGINE_INSTANCE = {
    * can be arbitrarily deep.
    */
   socketDir: "run",
+  /**
+   * The per-install token (AD-5 rule 2) under the VTC home: 256 random bits, base64url, mode 0600.
+   * Only the cli creates and reads it (`vtc install`, `vtc engine --daemon`, the statusline shim,
+   * `vtc dashboard`): exclusive create of a complete file, and refusal of a token file that group
+   * or others can read. The daemon receives it injected (`EngineDeps.installToken`).
+   */
+  tokenFile: "token",
   /** A daemon with no runs to drive, no bridges and nothing scheduled exits after this long. */
   idleExitMs: 30 * 60 * 1000,
 } as const;
@@ -76,3 +83,63 @@ export const EngineDiscoverySchema = z.strictObject({
   contracts_version: z.string().regex(/^\d+\.\d+\.\d+$/),
 });
 export type EngineDiscovery = z.infer<typeof EngineDiscoverySchema>;
+
+// ------------------------------------------------------- local MCP socket (AD-12)
+
+/**
+ * The daemon's local socket protocol (AD-12 rule 3, AD-19 rule 4). Framing is newline-delimited
+ * JSON, exactly as MCP's stdio transport: one JSON-RPC 2.0 message per line, UTF-8, no embedded
+ * newlines. Every connection starts with one {@link EngineSocketHello} line from the client and one
+ * {@link EngineSocketWelcome} line from the daemon; after that the connection carries plain MCP.
+ * The stdio bridge is a byte relay: it writes its hello, reads the welcome, then copies bytes both
+ * ways without parsing them. The cli control commands (`EngineClient`) speak the same protocol.
+ */
+export const ENGINE_SOCKET = {
+  framing: "ndjson",
+  protocol: "jsonrpc-2.0",
+  /** Longest line either side accepts; a longer line closes the connection. */
+  maxLineBytes: 4 * 1024 * 1024,
+} as const;
+
+/**
+ * First line a client sends. `client: bridge` tags the session with the host the bridge runs in
+ * (`vtc engine --mcp --host <host>`), so the engine knows which adapter and model map apply;
+ * `client: cli` (the control commands) has no host.
+ */
+export const EngineSocketHelloSchema = z
+  .strictObject({
+    v: z.literal(1),
+    client: z.enum(["bridge", "cli"]),
+    host: HostIdSchema.nullable(),
+    contracts_version: z.string().regex(/^\d+\.\d+\.\d+$/),
+  })
+  .refine((hello) => (hello.client === "bridge") === (hello.host !== null), {
+    message: "a bridge names its host; the cli names none",
+    path: ["host"],
+  });
+export type EngineSocketHello = z.infer<typeof EngineSocketHelloSchema>;
+
+/**
+ * The daemon's reply. `ok: false` (a malformed hello, or a different contracts MAJOR version)
+ * carries a human-readable `error`, and the daemon then closes the connection.
+ */
+export const EngineSocketWelcomeSchema = z
+  .strictObject({
+    v: z.literal(1),
+    ok: z.boolean(),
+    engine_version: z.string().min(1).max(64),
+    contracts_version: z.string().regex(/^\d+\.\d+\.\d+$/),
+    error: z.string().min(1).max(500).optional(),
+  })
+  .refine((welcome) => welcome.ok === (welcome.error === undefined), {
+    message: "error is required exactly when ok is false",
+    path: ["error"],
+  });
+export type EngineSocketWelcome = z.infer<typeof EngineSocketWelcomeSchema>;
+
+/** True when two contract versions share a MAJOR, so a client and the daemon can talk. */
+export const contractsCompatible = (a: string, b: string): boolean =>
+  a.split(".")[0] === b.split(".")[0];
+
+/** One protocol line: the message as JSON plus `\n` (hello, welcome, and every MCP message). */
+export const encodeSocketLine = (message: unknown): string => `${JSON.stringify(message)}\n`;

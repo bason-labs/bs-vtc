@@ -12,6 +12,7 @@ import {
   EscalationListSchema,
   FeatureListSchema,
   findUnguardedCycle,
+  integrationBranchFor,
   isEventOfType,
   EventPageSchema,
   parseEventLog,
@@ -142,6 +143,32 @@ describe("golden run: API snapshots", () => {
       expect(feature.spent_usd).toBe(budget ? readEventData(budget).spent_usd : 0);
     }
     expect(StatusResultSchema.parse(api("status")).features).toEqual(features);
+  });
+  it("the run's one feature is named from the recorded request (FeatureSchema)", () => {
+    const started = of("run.started")[0];
+    const request = started && readEventData(started).request;
+    const firstLine = request?.split("\n").find((line) => line.trim() !== "");
+    const features = FeatureListSchema.parse(api("features")).features;
+    expect(features).toHaveLength(1);
+    expect(features[0]?.title).toBe(firstLine?.trim().slice(0, 200));
+    expect(features[0]?.integration_branch).toBe(integrationBranchFor(features[0]?.id ?? ""));
+    const tasks = TaskListSchema.parse(api("tasks")).tasks;
+    expect(new Set(tasks.map((t) => t.feature))).toEqual(new Set([features[0]?.id]));
+  });
+  it("the intent contract replays from task.created: the pack carries exactly it", () => {
+    const pack = TaskPackSchema.parse(JSON.parse(read("packs/a-1.json")));
+    const created = of("task.created").find((e) => e.task === pack.task);
+    expect(created && readEventData(created).intent).toEqual(pack.intent);
+  });
+  it("a built submit names the commit the gates then verified", () => {
+    const built = of("role.submitted").filter((e) => readEventData(e).exit === "built");
+    expect(built.length).toBeGreaterThan(0);
+    for (const submitted of built) {
+      const gate = of("gate.result").find(
+        (e) => e.task === submitted.task && e.seq > submitted.seq,
+      );
+      expect(readEventData(submitted).head).toBe(gate && readEventData(gate).head);
+    }
   });
   it("task detail lists its role runs with prompt versions, and its diff", () => {
     for (const id of ["T-1", "T-2"]) {

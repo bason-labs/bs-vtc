@@ -5,7 +5,12 @@
  */
 import { mkdirSync, readFileSync, renameSync, unlinkSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
-import { engineDiscoveryFile, EngineDiscoverySchema, type EngineDiscovery } from "@vtc/shared";
+import {
+  engineDiscoveryFile,
+  EngineDiscoverySchema,
+  parsePersisted,
+  type EngineDiscovery,
+} from "@vtc/shared";
 
 export const engineDiscoveryPath = (vtcHome: string, repoRoot: string): string =>
   join(vtcHome, engineDiscoveryFile(repoRoot));
@@ -25,7 +30,8 @@ export const writeEngineDiscovery = (vtcHome: string, info: EngineDiscovery): st
 export const readEngineDiscovery = (vtcHome: string, repoRoot: string): EngineDiscovery | null => {
   try {
     const raw: unknown = JSON.parse(readFileSync(engineDiscoveryPath(vtcHome, repoRoot), "utf8"));
-    const parsed = EngineDiscoverySchema.safeParse(raw);
+    // A reader of persisted data (AD-3 rule 2): a newer daemon's extra fields are dropped.
+    const parsed = parsePersisted(EngineDiscoverySchema, raw);
     return parsed.success ? parsed.data : null;
   } catch {
     return null;

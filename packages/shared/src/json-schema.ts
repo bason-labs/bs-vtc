@@ -31,7 +31,11 @@ import {
   TaskDiffSchema,
   TaskListSchema,
 } from "./engine-api.js";
-import { EngineDiscoverySchema } from "./engine-instance.js";
+import {
+  EngineDiscoverySchema,
+  EngineSocketHelloSchema,
+  EngineSocketWelcomeSchema,
+} from "./engine-instance.js";
 import { EscalationSchema } from "./escalation.js";
 import { EVENT_PAYLOAD_SCHEMAS } from "./event-payloads.js";
 import { EventSchema } from "./event.js";
@@ -41,9 +45,10 @@ import {
   GateReportSchema,
   GateResultSchema,
   GateRunRequestSchema,
+  TestInventorySchema,
   WriteScopeReportSchema,
 } from "./gate-result.js";
-import { GatesConfigSchema, ScannerPinsSchema } from "./gates-config.js";
+import { GateAllowlistSchema, GatesConfigSchema, ScannerPinsSchema } from "./gates-config.js";
 import { HostOutcomeSchema, SubagentInstructionSchema } from "./interfaces/host-adapter.js";
 import { ProjectConfigSchema } from "./project-config.js";
 import { QuestionSchema } from "./question.js";
@@ -84,11 +89,13 @@ export const CONTRACT_SCHEMAS = {
   ProjectConfig: ProjectConfigSchema,
   GatesConfig: GatesConfigSchema,
   ScannerPins: ScannerPinsSchema,
+  GateAllowlist: GateAllowlistSchema,
   // gate runner (AD-13)
   GateRunRequest: GateRunRequestSchema,
   GateResult: GateResultSchema,
   GateReport: GateReportSchema,
   WriteScopeReport: WriteScopeReportSchema,
+  TestInventory: TestInventorySchema,
   // usage
   UsageSnapshot: UsageSnapshotSchema,
   UsageReport: UsageReportSchema,
@@ -102,6 +109,8 @@ export const CONTRACT_SCHEMAS = {
   SubagentInstruction: SubagentInstructionSchema,
   // engine instance (AD-12)
   EngineDiscovery: EngineDiscoverySchema,
+  EngineSocketHello: EngineSocketHelloSchema,
+  EngineSocketWelcome: EngineSocketWelcomeSchema,
   // MCP tools (AD-4)
   RunScopedInput: RunScopedInputSchema,
   StartInput: StartInputSchema,

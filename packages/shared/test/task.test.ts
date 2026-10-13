@@ -1,7 +1,9 @@
 import { describe, expect, it } from "vitest";
 import {
   capForRisk,
+  DEPENDENCY_RELEASED_STATUSES,
   FeatureSchema,
+  integrationBranchFor,
   PlanFileFrontmatterSchema,
   ProjectConfigSchema,
   TASK_MAIN_PATH,
@@ -21,6 +23,7 @@ describe("TaskSchema", () => {
     const task = expectValid(TaskSchema, {
       id: "T-1",
       title: "x",
+      feature: "F-1",
       covers: ["REQ-1"],
       files_scope: ["src/**"],
       discipline: "frontend",
@@ -32,6 +35,7 @@ describe("TaskSchema", () => {
       status: "draft",
     });
     expect(task).toMatchObject({
+      origin: "planner",
       after: [],
       stack_packs: [],
       consumes_contracts: [],
@@ -54,8 +58,14 @@ describe("TaskSchema", () => {
     ["budget_usd", { budget_usd: 0 }],
     ["round", { round: 6 }],
     ["after", { after: ["T-7"] }],
+    ["after", { after: ["T-3", "T-3"] }],
+    ["feature", { feature: undefined }],
+    ["source_finding", { source_finding: SHA }],
+    ["origin", { origin: "lookback" }],
     ["park_reason", { status: "parked" }],
     ["park_reason", { park_reason: "cap" }],
+    ["risk_rule", { status: "parked", park_reason: "risk_rule" }],
+    ["risk_rule", { status: "parked", park_reason: "cap", risk_rule: "large_diff" }],
     ["branch", { branch: "vtc/T-8" }],
     ["branch", { branch: "feature/x" }],
     [
@@ -69,6 +79,38 @@ describe("TaskSchema", () => {
 
   it("accepts parked with a reason", () => {
     expectValid(TaskSchema, { ...validTask(), status: "parked", park_reason: "stuck" });
+  });
+
+  it("a risk-rule park names the rule, so nothing joins against escalations", () => {
+    const parked = { ...validTask(), status: "parked", park_reason: "risk_rule" };
+    expect(expectValid(TaskSchema, { ...parked, risk_rule: "db_migration" }).risk_rule).toBe(
+      "db_migration",
+    );
+  });
+
+  it("engine-created tasks name their source finding and may cover no REQ (§6.7a)", () => {
+    const fix = { ...validTask(), origin: "integration_fix", source_finding: SHA, covers: [] };
+    expect(expectValid(TaskSchema, fix).origin).toBe("integration_fix");
+    expectValid(TaskSchema, { ...fix, origin: "out_of_scope" });
+    expectInvalid(TaskSchema, { ...fix, source_finding: undefined }, "source_finding");
+    expectInvalid(TaskSchema, { ...fix, origin: "planner", source_finding: undefined }, "covers");
+  });
+
+  it("a contract provider is released by contract.frozen, never also by after (§6.6)", () => {
+    expect(DEPENDENCY_RELEASED_STATUSES).toEqual(["merged", "done"]);
+    const consumer = {
+      ...validTask(),
+      consumes_contracts: [{ provider: "T-2", kind: "openapi", path: "contracts/api.yaml" }],
+    };
+    expectValid(TaskSchema, consumer);
+    expectInvalid(TaskSchema, { ...consumer, after: ["T-2"] }, "consumes_contracts.0.provider");
+    const draft = {
+      ...validTaskDraft(),
+      after: [],
+      consumes_contracts: consumer.consumes_contracts,
+    };
+    expectValid(TaskDraftSchema, draft);
+    expectInvalid(TaskDraftSchema, { ...draft, after: ["T-2"] }, "consumes_contracts.0.provider");
   });
 
   it("rejects unknown keys (strict contract)", () => {
@@ -109,10 +151,22 @@ describe("FeatureSchema", () => {
     ["park_reason", { status: "parked" }],
     ["park_reason", { park_reason: "cap" }],
     ["final_review_budget_usd", { final_review_budget_usd: 25 }],
-    ["pr.url", { pr: { url: "not a url", draft: true } }],
+    ["pr.url", { pr: { ...validFeature().pr, url: "not a url" } }],
+    ["pr.ci", { pr: { ...validFeature().pr, ci: "passing" } }],
+    ["pr.merge_commit", { pr: { ...validFeature().pr, state: "merged" } }],
+    ["pr.merge_commit", { pr: { ...validFeature().pr, merge_commit: COMMIT } }],
     ["status", { status: "merged" }],
+    ["integration_branch", { integration_branch: "vtc/F-2" }],
+    ["integration_branch", { integration_branch: "feature/reset" }],
+    ["risk_rule", { status: "parked", park_reason: "risk_rule" }],
   ])("rejects invalid %s", (path, patch) => {
     expectInvalid(FeatureSchema, { ...validFeature(), ...patch }, path);
+  });
+  it("records the Level-3 merge into main on the PR (§6.7)", () => {
+    const merged = { ...validFeature().pr, state: "merged", ci: "green", merge_commit: COMMIT };
+    expect(expectValid(FeatureSchema, { ...validFeature(), pr: merged }).pr?.state).toBe("merged");
+    expect(integrationBranchFor("F-3")).toBe("vtc/F-3");
+    expect(() => integrationBranchFor("T-3")).toThrow();
   });
 });
 
@@ -143,6 +197,8 @@ describe("TaskDraftSchema (Planner output)", () => {
     ["branch", { branch: "vtc/T-7" }],
     ["deferred", { deferred: [] }],
     ["baseline_revision", { baseline_revision: COMMIT }],
+    ["feature", { feature: "F-1" }],
+    ["origin", { origin: "planner" }],
   ])("rejects the engine-owned field %s", (_field, patch) => {
     expectInvalid(TaskDraftSchema, { ...validTaskDraft(), ...patch }, "");
   });

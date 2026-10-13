@@ -3,7 +3,8 @@
  * L0–L5, the L5 write-scope and test-integrity check, hidden tests, the pinned scanner store.
  * Implements `GateRunner` from @vtc/shared; the cli builds it with `createGateRunner` and injects
  * it into the daemon (AD-19). Exposes its public API from this file only and never imports
- * engine core, http or mcp. Git access goes through `../git/index.ts`.
+ * engine core, http or mcp. Git access goes only through the injected `GateRunnerDeps.git`
+ * (`GitOps`, AD-13 rule 4): the gate-runner team writes no git code.
  */
 import type { CreateGateRunner } from "@vtc/shared";
 

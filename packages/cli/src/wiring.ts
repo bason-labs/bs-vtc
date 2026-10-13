@@ -27,6 +27,8 @@ export const VERSION = "0.0.0";
 export interface EngineParts {
   readonly repoRoot: string;
   readonly vtcHome: string;
+  /** `ensureInstallToken(vtcHome)` (`token.ts`); the daemon never touches the token file. */
+  readonly installToken: string;
   readonly openStorage: StorageFactory;
   readonly gateRunner: GateRunner;
   readonly adapters: Readonly<Partial<Record<HostId, HostAdapter>>>;

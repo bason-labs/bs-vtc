@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import {
+  ACCEPTANCE_TESTS,
   checkResultAgainstContract,
   estimateTokens,
   resolveRoleMode,
@@ -301,6 +302,7 @@ describe("checkResultAgainstContract (result conformance)", () => {
     ],
     ["undeclared_verdict", { verdicts: [] }],
     ["undeclared_output", { tasks: [] }],
+    ["undeclared_output", { acceptance_tests: ["[REQ-3.AC-2] rejects expired tokens"] }],
     ["undeclared_output", { artifacts: [{ type: "spec", path: ".vtc/spec/spec.md" }] }],
   ] as const)("rejects with %s (%j)", (reason, patch) => {
     const check = checkResultAgainstContract(result(patch), contract(), dispatched);
@@ -332,5 +334,29 @@ describe("checkResultAgainstContract (result conformance)", () => {
     expect(checkResultAgainstContract(drafts, resolved.contract, { role: "planner" })).toEqual({
       ok: true,
     });
+  });
+  it("QA author mode names its new acceptance tests for the base-fail check (§6.3 step 2)", () => {
+    const qa = RoleContractSchema.parse({
+      ...validRoleContract(),
+      id: "qa",
+      reviewer: "engine",
+      output: { artifacts: [ACCEPTANCE_TESTS.artifactType] },
+      exits: ["done", "blocked"],
+      tools: { profile: "write_scoped", write_paths: ["test/acceptance/**"] },
+    });
+    const resolved = resolveRoleMode(qa);
+    if (!resolved.ok) throw new Error(resolved.error);
+    const authored = RoleResultSchema.parse({
+      role: "qa",
+      task: "T-7",
+      exit: "done",
+      summary: "Two acceptance tests.",
+      acceptance_tests: ["[REQ-3.AC-1] issues a token", "[REQ-3.AC-2] rejects expired tokens"],
+      artifacts: [{ type: "acceptance_test", path: "test/acceptance/reset.test.ts" }],
+    });
+    expect(
+      checkResultAgainstContract(authored, resolved.contract, { role: "qa", task: "T-7" }),
+    ).toEqual({ ok: true });
+    expect(RoleResultSchema.safeParse({ ...authored, acceptance_tests: [] }).success).toBe(false);
   });
 });

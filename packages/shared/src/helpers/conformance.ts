@@ -4,6 +4,7 @@
  * action itself. The engine rejects a non-conforming result with the returned `RejectReason`.
  */
 import type { RejectReason } from "../event-payloads.js";
+import { ACCEPTANCE_TESTS } from "../gate-result.js";
 import type { FeatureId, RoleId, TaskId, VerdictSubject } from "../primitives.js";
 import type { EffectiveRoleContract } from "../role-contract.js";
 import type { RoleResult } from "../role-result.js";
@@ -32,8 +33,9 @@ export type ConformanceCheck =
  * 3. `undeclared_exit`: the exit is not in the contract's `exits`;
  * 4. `undeclared_verdict`: a verdict value is not in `output.verdicts`, or a role that declares
  *    verdicts finished (`done`) without one;
- * 5. `undeclared_output`: `tasks` without the `tasks` output artifact, or an artifact type the
- *    contract does not declare.
+ * 5. `undeclared_output`: `tasks` without the `tasks` output artifact, `acceptance_tests`
+ *    without the `acceptance_test` output artifact, or an artifact type the contract does not
+ *    declare.
  */
 export const checkResultAgainstContract = (
   result: RoleResult,
@@ -83,6 +85,9 @@ export const checkResultAgainstContract = (
   const artifacts = contract.output.artifacts;
   if (result.tasks !== undefined && !artifacts.includes(TASKS_ARTIFACT)) {
     add(4, `tasks require the ${TASKS_ARTIFACT} output artifact`);
+  }
+  if (result.acceptance_tests !== undefined && !artifacts.includes(ACCEPTANCE_TESTS.artifactType)) {
+    add(4, `acceptance_tests require the ${ACCEPTANCE_TESTS.artifactType} output artifact`);
   }
   for (const artifact of result.artifacts) {
     if (!artifacts.includes(artifact.type))

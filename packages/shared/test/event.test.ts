@@ -5,6 +5,8 @@ import {
   EventTypeSchema,
   eventLogPath,
   parseEventLog,
+  parsePersisted,
+  runRequestPath,
   toEventLine,
 } from "../src/index.js";
 import { validEvent } from "./fixtures.js";
@@ -52,6 +54,8 @@ describe("event log helpers", () => {
   it("builds the log path and refuses unsafe run ids", () => {
     expect(eventLogPath("run-1")).toBe(".vtc/runs/run-1/events.jsonl");
     expect(() => eventLogPath("../etc")).toThrow();
+    expect(runRequestPath("run-1")).toBe(".vtc/runs/run-1/request.md");
+    expect(() => runRequestPath("../etc")).toThrow();
   });
   it("round-trips lines and reports bad lines without throwing", () => {
     const good = toEventLine(validEvent());
@@ -69,5 +73,44 @@ describe("event log helpers", () => {
   });
   it("toEventLine rejects invalid events", () => {
     expect(() => toEventLine({ ...validEvent(), seq: -1 })).toThrow();
+  });
+});
+
+describe("an older reader of a newer MINOR log (AD-3 rule 2)", () => {
+  /** What a newer vtc writes after adding optional fields: to the envelope and to payloads. */
+  const newer = {
+    ...validEvent(),
+    trace_id: "t-1",
+    data: { ...(validEvent().data as object), retries: 2, nested_ok: true },
+  };
+  it("the writer stays strict: unknown keys never reach the log", () => {
+    expectInvalid(EventSchema, newer, "");
+    expectInvalid(EventSchema, newer, "data");
+    expect(() => toEventLine(newer)).toThrow();
+  });
+  it("replay drops the unknown keys, keeps the event and reports the line, not corruption", () => {
+    const parsed = parseEventLog(`${toEventLine(validEvent())}${JSON.stringify(newer)}\n`);
+    expect(parsed.invalidLines).toEqual([]);
+    expect(parsed.strippedLines).toEqual([2]);
+    expect(parsed.events).toHaveLength(2);
+    expect(parsed.events[1]).toEqual(parsed.events[0]);
+  });
+  it("drops unknown keys nested inside a typed payload too", () => {
+    const task = {
+      v: 1,
+      seq: 3,
+      ts: "2026-10-13T08:00:01Z",
+      run: "r1",
+      task: "T-1",
+      type: "task.status_changed",
+      actor: "engine",
+      data: { from: "ready", to: "tests_authored", round: 0, cap: 3, reason_note: "x" },
+    };
+    const result = parsePersisted(EventSchema, task);
+    expect(result.success && result.stripped).toEqual(["data.reason_note"]);
+  });
+  it("still reports a real error on the same line as invalid", () => {
+    const broken = { ...newer, seq: 0 };
+    expect(parseEventLog(`${JSON.stringify(broken)}\n`).invalidLines).toEqual([1]);
   });
 });

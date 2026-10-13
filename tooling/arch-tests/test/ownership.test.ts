@@ -1,6 +1,13 @@
 /** AD-15: every file in the repo has exactly one owning team; the matcher behaves like a glob. */
 import { describe, expect, it } from "vitest";
-import { globToRegExp, loadOwnership, ownersOf, repoFiles, teamOwns } from "../src/ownership.ts";
+import {
+  globToRegExp,
+  loadOwnership,
+  ownersOf,
+  repoFiles,
+  scopeViolations,
+  teamOwns,
+} from "../src/ownership.ts";
 
 const map = loadOwnership();
 
@@ -40,8 +47,36 @@ describe("tooling/ownership.json (AD-15)", () => {
     ["plugins/claude-code/.mcp.json", "roles-compiler"],
     ["apps/dashboard/src/app/page.tsx", "dashboard"],
     ["fixtures/golden-run/events.jsonl", "engine-core"],
+    ["fixtures/dashboard-export/index.html", "dashboard"],
+    ["pnpm-lock.yaml", "integrator"],
   ])("%s belongs to %s", (path, team) => {
     expect(ownersOf(map, path)).toEqual([team]);
+  });
+});
+
+describe("verify:scope (AD-15 rule 2: dependencies and the lockfile)", () => {
+  it("lets a team that adds a dependency in its own package.json commit the regenerated lockfile", () => {
+    expect(map.regenerated).toEqual(["pnpm-lock.yaml"]);
+    for (const team of Object.keys(map.teams)) {
+      expect(scopeViolations(map, team, ["pnpm-lock.yaml"]), team).toEqual([]);
+    }
+    expect(
+      scopeViolations(map, "dashboard", ["apps/dashboard/package.json", "pnpm-lock.yaml"]),
+    ).toEqual([]);
+  });
+  it("still fails on every other file the team does not own", () => {
+    expect(
+      scopeViolations(map, "dashboard", [
+        "apps/dashboard/package.json",
+        "pnpm-lock.yaml",
+        "package.json",
+        "pnpm-workspace.yaml",
+        "packages/engine/package.json",
+      ]),
+    ).toEqual(["package.json", "pnpm-workspace.yaml", "packages/engine/package.json"]);
+    expect(scopeViolations(map, "gate-runner", ["packages/engine/src/git/index.ts"])).toEqual([
+      "packages/engine/src/git/index.ts",
+    ]);
   });
 });
 

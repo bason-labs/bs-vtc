@@ -8,7 +8,8 @@
  *
  * Transports: the Lead's host reaches the daemon through `vtc engine --mcp --host <host>` (stdio
  * bridge); the cli control commands (`vtc pause`, `resume`, `status`) are MCP clients of the same
- * daemon socket (`EngineDiscovery.mcp_socket`). The HTTP API stays read-only (AD-5).
+ * daemon socket (`EngineDiscovery.mcp_socket`, protocol `ENGINE_SOCKET`). The HTTP API stays
+ * read-only (AD-5).
  */
 import type { z } from "zod";
 import type { EngineMcpToolName, ENGINE_MCP_TOOLS, SessionNonceResult } from "../engine-api.js";
@@ -30,8 +31,13 @@ export interface EngineVersions {
 export interface EngineDeps {
   /** Absolute repo root (the daemon serves exactly one repo, AD-12). */
   readonly repoRoot: string;
-  /** Absolute VTC home (`~/.vtc`): token, discovery, sockets, hidden tests. */
+  /** Absolute VTC home (`~/.vtc`): discovery, sockets, hidden tests. */
   readonly vtcHome: string;
+  /**
+   * The per-install token (AD-5 rule 2), read by the cli from `ENGINE_INSTANCE.tokenFile`. The
+   * daemon checks bearer tokens against it and never reads or writes the token file itself.
+   */
+  readonly installToken: string;
   /** `node:sqlite` in dev/tests, `bun:sqlite` in the binary (AD-2). */
   readonly openStorage: StorageFactory;
   readonly gateRunner: GateRunner;
@@ -76,6 +82,8 @@ export type RunDaemon = (deps: EngineDeps, options: DaemonOptions) => Promise<Ru
 export interface SnapshotDeps {
   readonly repoRoot: string;
   readonly vtcHome: string;
+  /** As in {@link EngineDeps}: the cli's install token, so `vtc` clients can read the snapshot. */
+  readonly installToken: string;
   readonly assets: AssetBundle;
   readonly versions: EngineVersions;
   readonly now?: () => Date;

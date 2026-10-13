@@ -115,6 +115,12 @@ const base = {
    * contract declares the `tasks` output artifact may send it (`checkResultAgainstContract`).
    */
   tasks: z.array(TaskDraftSchema).optional(),
+  /**
+   * QA author mode (§6.3 step 2): the JUnit ids of the new visible acceptance tests, which the
+   * engine runs as `base_fail_check` (they must fail on the base commit). Only roles whose
+   * contract declares the `acceptance_test` output artifact may send it.
+   */
+  acceptance_tests: z.array(z.string().min(1).max(500)).min(1).optional(),
   artifacts: z.array(ArtifactRefSchema).default([]),
   /** Facts the result relies on (files, commits, tests, citations), verified before acceptance
    * (§4.2 step 3). Same vocabulary as all other evidence. */

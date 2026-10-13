@@ -29,6 +29,8 @@ import { IntentContractSchema } from "./task.js";
  * types too (spec, architecture, evidence…); these are the ones every task pipeline uses.
  */
 export const PACK_INPUT_TYPES = {
+  /** The run's idea or change request (`runRequestPath`), for DISCOVER and SPECIFY roles. */
+  request: "request",
   repoMapSlice: "repo_map_slice",
   designMd: "design_md",
   componentManifest: "component_manifest",

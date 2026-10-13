@@ -93,11 +93,16 @@ export interface InstallRequest {
   /** Absolute path of the repo being set up. */
   readonly projectRoot: string;
   /**
-   * Absolute user home that user-scope files go under (e.g. `~/.codex/`, the launchd agent).
-   * Injected so tests install into a temp directory, never into the real home.
+   * Absolute user home that user-scope host files go under (e.g. `~/.codex/`). Injected so tests
+   * install into a temp directory, never into the real home. The auto-resume timer is never an
+   * adapter's file: the cli installs it (AD-6 rule 4).
    */
   readonly home: string;
-  /** Absolute path of the compiled plugin for this host (dist/<host>-plugin). */
+  /**
+   * Absolute directory holding the compiled plugin for this host, already on disk: in
+   * development `ASSET_SOURCES["plugin:<host>"]`; in the binary the cli first extracts the asset namespace
+   * `plugin:<host>` to `~/.vtc/` + `extractedPluginDir(version, host)` (AD-2 rule 7).
+   */
   readonly pluginDir: string;
   readonly scope: "user" | "project";
 }
@@ -151,7 +156,11 @@ export interface SpawnRoleRequest {
   readonly cwd: string;
   /** Rendered task pack / input for the role. On resume: the new input (e.g. the human's answer). */
   readonly prompt: string;
-  /** JSON Schema the final message must satisfy (from @vtc/shared jsonSchemas()). */
+  /**
+   * JSON Schema the final message must satisfy: always the host form,
+   * `jsonSchemaFor("RoleResult", { target: "structured-output" })` (AD-3 rule 8), never the
+   * default `contract` target. Re-validate what comes back with `fromStructuredOutput`.
+   */
   readonly outputSchema: Readonly<Record<string, unknown>>;
   readonly sandbox: SandboxProfile;
   /** Hard timeout; the launcher force-kills on expiry (§15). */

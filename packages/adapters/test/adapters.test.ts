@@ -6,7 +6,8 @@ import {
   StatuslineIngestSchema,
   usageFromStatuslineIngest,
 } from "@vtc/shared";
-import { HOST_CAPABILITIES, statuslineIngestFromClaude } from "../src/index.js";
+import { ADAPTER_FACTORIES, HOST_CAPABILITIES, statuslineIngestFromClaude } from "../src/index.js";
+import { runHostAdapterSafetyContract } from "./host-adapter-contract.js";
 
 const fixture = (path: string): unknown =>
   JSON.parse(readFileSync(new URL(`./fixtures/${path}`, import.meta.url), "utf8"));
@@ -22,10 +23,23 @@ describe("@vtc/adapters smoke", () => {
   });
 });
 
+/**
+ * Trip-wire (AD-6, AD-9): the cli constructs adapters only from ADAPTER_FACTORIES, and every
+ * registered adapter runs the safety contract here, so no adapter is wired without passing it.
+ */
+for (const host of HOST_IDS) {
+  const factory = ADAPTER_FACTORIES[host];
+  if (factory !== undefined) runHostAdapterSafetyContract(factory());
+}
+
 describe("HostAdapter safety contract (AD-9)", () => {
-  // Wired with runHostAdapterSafetyContract (./host-adapter-contract.ts) once each adapter
-  // implements sandboxProfile, headlessCommand and install in sub-project 3.
-  for (const host of HOST_IDS) it.todo(`run the safety contract for ${host}`);
+  it("runs for every registered adapter, and only known hosts can register", () => {
+    for (const host of Object.keys(ADAPTER_FACTORIES)) expect(HOST_IDS).toContain(host);
+    for (const host of HOST_IDS) {
+      const factory = ADAPTER_FACTORIES[host];
+      if (factory !== undefined) expect(factory().host).toBe(host);
+    }
+  });
   it("the bypass detector flags every forbidden form", () => {
     expect(
       findForbiddenHostArgs([

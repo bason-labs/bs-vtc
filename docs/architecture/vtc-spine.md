@@ -1,6 +1,6 @@
 # VTC architecture spine (VTC's own code)
 
-- **Status:** Phase 1 foundation, fix round 2. Frozen for the parallel build of sub-projects
+- **Status:** Phase 1 foundation, fix round 3 (the closing round of the phase-1 review). Frozen for the parallel build of sub-projects
   **1, 2, 3 and 6** (spec §19: 2 and 3 build on 1, 6 needs only 1's events; this spine freezes the
   contracts between them so all four can start together). Sub-projects 4, 5 and 7–9 follow §19's
   order and extend these contracts through the change process (§6 below).
@@ -154,7 +154,10 @@ flowchart TB
      ambient declaration (`bun-sqlite-module.d.ts`, referenced by path). Drivers are loaded
      **lazily** by the engine entry only (`loadNodeSqliteStorage()`, `loadBunSqliteStorage()`); the
      cli picks one with `loadStorage()` (`"Bun" in globalThis`). A runtime never evaluates the
-     other runtime's driver.
+     other runtime's driver. Whether `bun build --compile` keeps the lazy `import()` lazy is a
+     sub-project 0 check (§7). The named fallback if it does not: the binary build (in
+     `packages/cli`, AD-20) replaces `storage/node-sqlite.ts` with a stub module through a Bun
+     build plugin, so the compiled binary contains no `node:sqlite` import at all.
   4. The SQLite index (`.vtc/state/index.sqlite`) is a **cache** rebuildable from the event log
      (AD-7). Losing it loses nothing.
   5. `packages/shared` uses no Node or Bun built-ins **or globals** (`Buffer`, `process`,
@@ -165,7 +168,9 @@ flowchart TB
      string_decoder). Anything else goes behind an interface like `Storage`.
   7. Embedded files (the dashboard's static export, the compiled plugin templates) reach packages
      only through the `AssetBundle` interface (`@vtc/shared`), which the cli builds: from disk in
-     development, from Bun-embedded files in the binary. Packages never import `apps/` or `dist/`.
+     development (`ASSET_SOURCES`: `apps/dashboard/out`, `dist/claude-plugin`,
+     `dist/codex-plugin`), from Bun-embedded files in the binary. Packages never import `apps/` or
+     `dist/`. Serving and the build order are AD-20.
   8. Production npm dependencies are pure JS or WASM: no native addon (`binding.gyp`, `*.node`),
      no install script. `pnpm-workspace.yaml` sets `onlyBuiltDependencies: []`, so no dependency
      script ever runs.
@@ -185,20 +190,29 @@ flowchart TB
   is `CONTRACT_SCHEMAS` (`json-schema.ts`): Run, Task, TaskDraft, PlanFileFrontmatter, Feature,
   Finding, FindingDraft, Question, Escalation, Event, EventPayloads, RoleResult, RoleContract,
   AssertionProvenance, TaskPack, TraceabilityReport, EvidenceBundle, ProjectConfig, GatesConfig,
-  ScannerPins, GateRunRequest, GateResult, GateReport, WriteScopeReport, UsageSnapshot,
-  UsageReport, StatuslineIngest, WorkflowNode/Edge/Graph, HostOutcome, SubagentInstruction,
-  EngineDiscovery, every MCP tool input and output (AD-4) and every HTTP request and response
-  (AD-5). Interfaces: `HostAdapter`, `Storage`, `GateRunner`, `AssetBundle`,
+  ScannerPins, GateAllowlist, GateRunRequest, GateResult (incl. `ToolFinding`), GateReport,
+  WriteScopeReport, TestInventory, UsageSnapshot, UsageReport, StatuslineIngest,
+  WorkflowNode/Edge/Graph, HostOutcome, SubagentInstruction, EngineDiscovery, EngineSocketHello,
+  EngineSocketWelcome, every MCP tool input and output (AD-4) and every HTTP request and response
+  (AD-5). Interfaces: `HostAdapter`, `Storage`, `GateRunner`, `GitOps` (AD-13), `AssetBundle`,
   `AutoResumeScheduler`, and the composition seam (`EngineDeps`, `RunDaemon`, `ServeSnapshot`,
-  `CreateGateRunner`, `EngineClient`; AD-19).
+  `CreateGateRunner`, `CreateGitOps`, `EngineClient`; AD-19).
 - **Prevents:** parallel teams drifting apart; hand-written JSON Schemas diverging from runtime
   validation; AI output accepted without validation (§3 principle 3).
 - **Rule:**
   1. **Zod is the single source.** TypeScript types are `z.infer`; JSON Schemas (draft 2020-12)
      come from `jsonSchemas()` / `jsonSchemaFor(name)`. Never hand-write either.
-  2. Contracts are **strict objects** (`additionalProperties: false`): unknown keys are errors.
-     Persisted and wire data use **snake_case**; TypeScript APIs (interfaces, functions) use
-     camelCase. Example: spec `spawn_role` = `HostAdapter.spawnRole`.
+  2. Contracts are **strict objects** (`additionalProperties: false`): a **writer** never emits,
+     and no input from a trust boundary (MCP tool inputs, HTTP bodies, host structured output,
+     role results, the socket hello) may carry, an unknown key. **Readers of persisted data**
+     (event logs, `project.yaml`, `gates.yml`, evidence bundles, traceability reports, test
+     inventories, discovery and allowlist files) parse with `parsePersisted`, which drops keys
+     the reader does not know and reports where (`stripped`; `parseEventLog` reports
+     `strippedLines`, which is not corruption and raises no incident), and applies every other
+     rule. Teammates' clones run other vtc versions (D8), so this is what keeps "adding an
+     optional field" MINOR (rule 4) for git-shared data. A MAJOR change to a persisted format
+     bumps its `v`/`version`. Persisted and wire data use **snake_case**; TypeScript APIs
+     (interfaces, functions) use camelCase. Example: spec `spawn_role` = `HostAdapter.spawnRole`.
   3. Cross-field rules use `superRefine`. JSON Schema cannot express them, so after a host returns
      structured output the engine **always re-validates with Zod** (`fromStructuredOutput`).
   4. `CONTRACTS_VERSION` is semver. Adding an optional field or an enum value that consumers may
@@ -206,7 +220,7 @@ flowchart TB
      updated in the same change. Every version's schema hash is appended to
      `packages/shared/schemas/contracts-ledger.json` by hand: a schema change without a new
      version entry fails the test even after `vitest -u`. (2.0.0 = fix round 1, 3.0.0 = fix
-     round 2; nothing consumed the earlier versions.)
+     round 2, 4.0.0 = fix round 3; nothing consumed the earlier versions.)
   5. Open vocabularies stay open on purpose: event `type` (pattern `<entity>.<verb>`; the core
      set has typed payloads, AD-7), role ids, artifact types, stack packs. Consumers ignore unknown
      values.
@@ -219,7 +233,10 @@ flowchart TB
      `agentNameFor`, `splitRolePrompt`, `renderTaskPack`, `formatReqTag` / `parseReqTags`,
      `formatProvenance` / `parseProvenance`, `sseEventId` / `parseSseEventId`, `engineRepoKey`,
      `engineSocketFile`, `isServableArtifactPath`, `engineMcpServer`, `findForbiddenHostArgs`,
-     `findForbiddenInText`, `capForRisk` (caps come only from `project.yaml`).
+     `findForbiddenInText`, `capForRisk` (caps come only from `project.yaml`), `parsePersisted`,
+     `checkParkRiskRule`, `integrationBranchFor`, `runRequestPath`, `gateCommandAllowed`,
+     `gateAllowlistFile`, `contractsCompatible`, `encodeSocketLine`, `resolveDashboardAsset`,
+     `dashboardAssetHeaders`, `extractedPluginDir`.
   7. Spine extensions to §16 are named here: the finding route `out_of_scope` (an Engineer
      `out_of_scope_fault` whose guards passed, §6.3 step 3); `RequirementRef` (`REQ-3.AC-2`)
      in `Finding.req_ids`; the Visual QA verdict `unchecked` (§7.5); `FindingDraft.kind` (the
@@ -241,7 +258,10 @@ flowchart TB
   the snapshot is updated **and** a new `CONTRACTS_VERSION` with the new schema hash is appended
   (versions strictly increasing, one hash each); `json-schema.test.ts` also asserts the
   structured-output shape and that structured-output contracts have no nullable field (so `null`
-  always means "absent").
+  always means "absent"). Rule 2: `event.test.ts` ("an older reader of a newer MINOR log": the
+  writer rejects unknown keys; replay drops them from the envelope and from nested payloads and
+  reports the line; a real error on the same line stays invalid) and `config.test.ts` (an older
+  reader of `project.yaml`).
 
 ### AD-4 Engine MCP tool surface
 
@@ -251,8 +271,9 @@ flowchart TB
   engine owns (`done`, caps, budgets); teams negotiating tool output shapes.
 - **Rule:** the Lead reaches the engine through `vtc engine --mcp --host <host>`
   (`engineMcpServer(host)`), a **stdio** MCP server registered by each host plugin (AD-16) that
-  bridges to the repo's engine daemon (AD-12) and tags its session with the host it runs in, so
-  the engine knows which adapter and model map apply. The cli control commands are MCP clients of
+  bridges to the repo's engine daemon (AD-12) and tags its session with the host it runs in (the
+  `host` of its `EngineSocketHello`, AD-12 rule 3), so the engine knows which adapter and model
+  map apply. The cli control commands are MCP clients of
   the same daemon socket (AD-19). The official MCP TypeScript SDK, pinned. Lead-facing tools
   (frozen in `ENGINE_MCP_TOOLS`, each with an `input` and `output` contract):
 
@@ -300,8 +321,12 @@ flowchart TB
 - **Rule:**
   1. Bind **127.0.0.1 only**. Built on `node:http` (implemented by both Node and Bun); no web
      framework.
-  2. **Tokens, never cookies.** A per-install token (256 random bits, `~/.vtc/token`, mode 0600,
-     never in a repo, a discovery file or a URL) authenticates the cli and the statusline shim.
+  2. **Tokens, never cookies.** A per-install token (256 random bits, `~/.vtc/token` =
+     `ENGINE_INSTANCE.tokenFile`, mode 0600, never in a repo, a discovery file or a URL)
+     authenticates the cli and the statusline shim. Only the cli touches the file
+     (`ensureInstallToken`: one race-free exclusive create of a complete file; `readInstallToken`
+     refuses a file group or others can read); the daemon receives the value as
+     `EngineDeps.installToken` / `SnapshotDeps.installToken`.
      Browsers get a **session token** instead: `vtc dashboard` mints a single-use nonce
      (`POST /api/session/nonce` with the install token, or `RunningSnapshot.mintNonce()`; valid
      60 s) and opens `http://127.0.0.1:<port>/#nonce=<nonce>` (a fragment, never sent to a
@@ -335,7 +360,8 @@ flowchart TB
      | `POST /api/ingest/claude-statusline`    | install | `IngestResult`          |
      | `POST /api/design/reviews`              | token   | `DesignReviewResult`    |
 
-     plus the static dashboard at `/`, served from the injected `AssetBundle` (AD-2 rule 7).
+     plus the static dashboard at `/`, served from the injected `AssetBundle` by the AD-20 rules
+     (`resolveDashboardAsset`, `dashboardAssetHeaders`).
 
   5. Exactly **two data writes**, both size-limited (`maxBodyBytes`) and validated (`request`
      contract), and neither can execute anything: the statusline ingest (`StatuslineIngest`,
@@ -378,7 +404,9 @@ flowchart TB
   with a path-escaping screen id is rejected; the artifacts route refuses `.vtc/state/`, `..`, `.`
   segments and a symlink pointing outside `.vtc/`; every prototype response carries
   `PROTOTYPE_CSP` and the prototype port serves no `/api/` route; snapshot mode refuses the
-  ingest.
+  ingest; static serving follows AD-20 against `fixtures/dashboard-export/`. `cli.test.ts`
+  proves the token file: created once at mode 0600, concurrent creators agree, a group- or
+  world-readable or malformed file is refused.
 
 ### AD-6 Host adapter interface
 
@@ -412,10 +440,16 @@ flowchart TB
      `usageFromStatuslineIngest(body)` and merges SDK events from runs it launched. Codex usage
      comes from the adapter's managed `codex app-server` child (`watchUsage`, stopped by
      `dispose`). The auto-resume timer is the `AutoResumeScheduler` interface: the engine decides
-     when; the cli implements it (launchd on macOS, installed by `vtc install`).
+     when; the cli implements it (launchd on macOS, installed by `vtc install`). A `HostAdapter`
+     never installs the timer or any other non-host file.
   5. `install` writes user-scope files only under `InstallRequest.home` (injected, so tests use a
      temp directory) and project files under `projectRoot`. It places or registers what the
-     compiler emitted (AD-16) and authors no plugin content.
+     compiler emitted (AD-16) and authors no plugin content. `pluginDir` is always on disk: in
+     development `ASSET_SOURCES["plugin:<host>"]`; in the binary the cli (cli+binary team) first
+     extracts the `plugin:<host>` asset namespace to `~/.vtc/` + `extractedPluginDir(...)`.
+  6. **Adapter registry.** The cli constructs adapters only from `ADAPTER_FACTORIES`
+     (`@vtc/adapters`); a host is registered once its adapter implements `sandboxProfile`,
+     `headlessCommand` and `install`.
 
 - **Check:** dependency-cruiser AD-1 rules (engine cannot import adapters);
   `packages/adapters/test/adapters.test.ts` (capabilities for every host, Codex gaps recorded,
@@ -423,8 +457,9 @@ flowchart TB
   bypass detector). The reusable safety contract `test/host-adapter-contract.ts`
   (`runHostAdapterSafetyContract`: for every tool profile, `sandboxProfile()` arguments and
   settings, the fresh and resumed `headlessCommand` argv and env, and every file `install` writes
-  into a temp home and project contain no AD-9 marker) is a per-host todo until sub-project 3
-  implements those methods, then it must run for both hosts. Sub-project 3 also adds **contract tests
+  into a temp home and project contain no AD-9 marker) runs for every adapter in
+  `ADAPTER_FACTORIES` (a trip-wire in `adapters.test.ts`, not a todo): registering an adapter, the
+  only way the cli can wire it (rule 6), runs the contract. Sub-project 3 also adds **contract tests
   against recorded host streams** in `packages/adapters/test/fixtures/<host>/*.jsonl`, including
   limit hits and auth errors (§18), validated with `HostOutcomeSchema`.
 
@@ -446,7 +481,8 @@ flowchart TB
      `isEventOfType` + `readEventData`.
   4. Replay uses `parseEventLog`: invalid lines and a torn final line are **reported**, never
      thrown, and become an incident report (§15). The writer fences off a torn tail with a newline
-     and continues the `seq`.
+     and continues the `seq`. Keys a newer MINOR writer added are dropped and reported as
+     `strippedLines`, never as corruption (AD-3 rule 2).
   5. On start the engine rebuilds state from the log; SQLite is only an index (AD-2).
   6. File layout is §4.3: `.vtc/project.yaml`, `gates.yml`, `defaults.toml`, `research/`, `spec/`,
      `architecture/`, `design/` (incl. `reviews/`), `tasks/T-n.md`, `evidence/T-n/` and
@@ -454,20 +490,28 @@ flowchart TB
      (SQLite index, engine lock, worktrees, packs, transcripts, blobs, raw unredacted output) is
      gitignored. `~/.vtc/` holds hidden tests, the research cache (per client), the token, pinned
      scanners and engine discovery files.
-  7. Roles write only inside their declared scope (`RoleContract.tools.write_paths`, per mode, or
-     the task's `files_scope`); the engine verifies every write (§6.3 step 4, AD-13).
-  8. **Plan-file frontmatter is a projection.** `.vtc/tasks/T-n.md` frontmatter
+  7. Roles write only inside their effective write scope: the task's `files_scope` for the
+     Engineer family; `GatesConfig.tests.acceptance_globs` (plus `HIDDEN_TESTS.stagingDir`) for QA
+     author mode; `RoleContract.tools.write_paths` (per mode) for every other role. The engine
+     verifies every write (§6.3 step 4, AD-13).
+  8. **Plan files and the request are projections.** `.vtc/tasks/T-n.md` frontmatter
      (`PlanFileFrontmatter`) is written by the engine from the event log and **never read back as
      input**; an edit to it changes nothing and is overwritten. The `<intent-contract>` block is
-     written once at PLAN from the Planner's `TaskDraft.intent` and is immutable.
+     the Planner's `TaskDraft.intent`, recorded once in `task.created.intent` and immutable; the
+     plan-file block and every task pack are rebuilt from that event. Likewise the run's idea or
+     change request is recorded once in `run.started.request` (redacted) and projected to
+     `runRequestPath(run)` = `.vtc/runs/<run>/request.md`, the pack input type `request` of
+     DISCOVER and SPECIFY. `Run` does not carry the request, so `status` stays compact (§11).
   9. Run ids are path-safe (`RunIdSchema`); every path in a contract is repo-relative with no
      `..` (`RelPathSchema`), including `Task.worktree`; git ids are full SHAs.
   10. **Replay derives every engine-owned field from a core event** (the projection rules are the
       doc comment of `EVENT_PAYLOAD_SCHEMAS`): worktree, branch and baseline from
       `task.workspace_assigned`; `Task.session_ref` from `task.session_updated` (never from
       `role.submitted`, which traces one run); a contract freeze from `contract.frozen`; the PR
-      from `feature.pr_updated`; the effective merge level from `run.merge_level_changed`; CRs
-      from `change_request.opened`/`decided`; wording-only spec edits from `spec.clarified`.
+      (state, head, CI, the Level-3 merge commit) from `feature.pr_updated`; pushes from
+      `branch.pushed`; tasks the engine adds to a feature from `feature.task_added`; the effective
+      merge level from `run.merge_level_changed`; CRs from `change_request.opened`/`decided`;
+      wording-only spec edits from `spec.clarified`.
   11. **Every AI call is traceable** (§1.1 #3, §13): `role.dispatched` and `role.submitted` must
       carry `prompt_sha`, `host` and `model`; `role.submitted` also carries `tokens` and
       `cost_usd`, which may be `null` (unknown or unpriced, flagged in the run summary) but never
@@ -479,7 +523,9 @@ flowchart TB
   unsafe run ids); `engine/test/instance.test.ts` (single writer, `seq` continuity across
   restarts, torn tail, planted token formats and a `.env` value redacted on disk);
   `golden-run.test.ts` (task workspace, session, risk tags, features and role runs follow their
-  events); `.gitignore` contains `.vtc/state/`. Sub-project 1 adds **golden replay
+  events; the feature is named from the recorded request; the pack's intent is the one in
+  `task.created`; a built submit names the commit the gates verified); `.gitignore` contains
+  `.vtc/state/`. Sub-project 1 adds **golden replay
   tests** (§18): `fixtures/golden-run/events.jsonl` replays to exactly the `api/*.json` snapshots,
   and a replay with tampered plan-file frontmatter produces the same state.
 
@@ -519,6 +565,30 @@ flowchart TB
      a role declaring the `tasks` artifact may send task drafts), rejecting with the returned
      `RejectReason`.
   10. `non_converged` is reserved and never set in v1 (§5 reading 9).
+  11. **One feature per run.** At PLAN, with the Planner's tasks, the engine creates one
+      feature (`FeatureSchema` doc: next free `F-n`, title = first line of the request,
+      integration branch `vtc/F-n`, budget = sum of task budgets) and assigns every task to it;
+      `TaskDraft` has no `feature`. A Final Review finding no task owns, and a guarded
+      `out_of_scope_fault` with no owning task, become an engine-created task (`Task.origin`
+      `integration_fix` / `out_of_scope`, `source_finding`, `covers` may be empty) that joins the
+      feature through `feature.task_added`.
+  12. **Dependencies.** `after` is satisfied when each listed task is `merged` or `done`
+      (`DEPENDENCY_RELEASED_STATUSES`); until then a ready task is `waiting_dependency`. A
+      `consumes_contracts` provider is satisfied by its `contract.frozen` and must not also be in
+      `after` (§6.6 contract-first start; enforced by `TaskSchema` and `TaskDraftSchema`).
+  13. **Rounds.** `Task.round` is 0 before the first build; the engine sets 1 on entering
+      `building` and n + 1 on each `fixing`; `cap` is the largest round (cap 4 = rounds 1–4). A
+      merged task reopened by Final Review keeps its round: those fix rounds count on
+      `Feature.round` (cap `FINAL_REVIEW_CAP`). Task findings record task rounds; feature findings
+      (`feature` set, Final Review) record feature rounds.
+  14. **Submit snapshot.** Roles never need to commit. On submit of a role that wrote to the task
+      worktree (Engineer family, QA author), engine core commits the worktree onto the task
+      branch and records the commit as `role.submitted.head` (required for `built`); the
+      write-scope check (`WriteScopeCheckRequest.head`), the gates (`GateRunRequest.head`) and
+      stuck detection ("identical diff" = identical tree) all use that commit.
+  15. **Parks name their rule.** Every record with `park_reason` (Task, Feature, the status-change
+      events, `StatusResult.parked`, WorkflowNode) carries `risk_rule` exactly when the reason is
+      `risk_rule` (`checkParkRiskRule`), so `riskRuleForPark` needs no escalation join.
 - **Check:** engine unit tests per transition/cap/budget/route (sub-project 1); property tests
   for scheduler and DAG invariants; `WorkflowGraphSchema` rejects any back-edge without a
   `loop_guard` (`usage-workflow.test.ts`); `RoleContractSchema` rejects a role reviewing itself
@@ -526,7 +596,10 @@ flowchart TB
   `TaskDraftSchema` rejects every engine-owned field (`task.test.ts`); `role.test.ts` (verdicts
   need evidence, Visual QA question types, one verdict per subject, every conformance rejection);
   `policy.test.ts` (every route, a correctness finding surviving to the cap without tripping rule
-  9, rule 9 after one round, the risk-rule mapping covering every reason and rule).
+  9, rule 9 after one round, the risk-rule mapping covering every reason and rule); `task.test.ts`
+  (engine-created tasks, the contract-provider dependency rule, risk rules on parks, the
+  integration branch and PR state); `event-payloads.test.ts` (`feature.task_added`,
+  `branch.pushed`, `head` on a built submit, intent on Planner tasks only).
 
 ### AD-9 No credentials, no permission bypass
 
@@ -571,7 +644,8 @@ dist/index.js}`. Typecheck (`customConditions`), tests (Vitest aliases) and
      emits `dist/` in dependency order (`^build`).
   3. ESLint flat config with `typescript-eslint` `strictTypeChecked`; Prettier for formatting.
   4. The single-file binary is built later with `bun build --compile` (sub-project 0 spike, then
-     1); the engine serves the dashboard's static export from the cli-provided `AssetBundle`.
+     1); the engine serves the dashboard's static export from the cli-provided `AssetBundle`
+     (AD-20). turbo caches `dist/**` and the dashboard's `out/**`.
   5. `turbo.json` sets `agentGuidance: false`, so turbo does not write an `AGENTS.md` into the
      repo.
   6. **Merge gate.** `pnpm verify` (= `pnpm check && pnpm build`) must be green before any branch
@@ -629,7 +703,13 @@ dist/index.js}`. Typecheck (`customConditions`), tests (Vitest aliases) and
      `sun_path` (104 bytes on macOS, 108 on Linux) and repos can be arbitrarily deep; the daemon
      refuses to start when the path exceeds `UNIX_SOCKET_MAX_BYTES` (100). Any number of host
      sessions share one daemon. A second `vtc engine --daemon` for the same repo fails on the lock
-     and exits.
+     and exits. **Socket protocol** (`ENGINE_SOCKET`): newline-delimited JSON, one JSON-RPC 2.0
+     message per line, exactly MCP's stdio framing. Each connection opens with one
+     `EngineSocketHello` line from the client (`client: bridge` with its `host`, or `client: cli`
+     with none, plus its `contracts_version`) and one `EngineSocketWelcome` line from the daemon
+     (`ok: false` with an `error`, then close, for a malformed hello or a different contracts
+     MAJOR, `contractsCompatible`); after that the connection is plain MCP. The bridge is a byte
+     relay: hello, welcome, then bytes copied both ways unparsed.
   4. **Lifetime:** the daemon is not a child of any host session. It stays up while a run has
      work, a bridge is connected or an auto-resume is scheduled, and exits after
      `ENGINE_INSTANCE.idleExitMs` (30 min) otherwise. The auto-resume timer starts
@@ -641,8 +721,10 @@ dist/index.js}`. Typecheck (`customConditions`), tests (Vitest aliases) and
   writer that lost its lock stops appending; stale-lock takeover is reported; `seq` continues
   after a restart; the discovery file's path, contents and mode); `engine-instance.test.ts` in
   shared (repo key, discovery schema has no token, the socket path stays 25 bytes under the VTC
-  home at any repo depth). Sub-project 1 adds a two-process test of the bridge sharing one
-  daemon.
+  home at any repo depth; the hello and welcome contracts and the line framing). Sub-project 1
+  adds a two-process test of the bridge sharing one daemon and a socket contract test: a client
+  with a valid hello can call `status`; a bad hello or another MAJOR gets `ok: false` and is
+  closed.
 
 ### AD-13 Engine modules and the Gate Runner seam
 
@@ -663,7 +745,11 @@ dist/index.js}`. Typecheck (`customConditions`), tests (Vitest aliases) and
      **invokes** it on every `submit` (§4.2 step 3, §6.3 step 4) and the Gate Runner runs it again
      as layer L5 (§19 sub-project 2). One implementation, two call sites.
   4. `git/` (engine-core team) owns worktrees, branches, clean verification checkouts, diffs and
-     merges. It is a leaf: it imports no other engine module. `gates/` uses it through its index.
+     merges. It is a leaf: it imports no other engine module. The surface the Gate Runner needs is
+     frozen as `GitOps` (`changedFiles`, `diff`, `readFileAtCommit`, `createCleanCheckout`,
+     `removeCheckout`), implemented by `git.createGitOps: CreateGitOps`; the cli builds it and
+     injects it as `GateRunnerDeps.git`. `gates/` writes no git code. Worktrees, the submit
+     snapshot commit (AD-8 rule 14) and merges stay internal to engine core.
   5. `http/` and `mcp/` are transports: they call `core/` through its index; `core/`, `gates/` and
      `git/` never import them.
   6. Engine modules import each other only through the other module's `index.ts`; only the engine
@@ -678,14 +764,35 @@ dist/index.js}`. Typecheck (`customConditions`), tests (Vitest aliases) and
      acceptance tests (`HIDDEN_TESTS`): QA author mode writes artifact type
      `hidden_acceptance_test` to `.vtc/state/hidden-staging/<task>/`; the engine moves them to
      `~/.vtc/hidden/<repo-key>/<task>/`; the Gate Runner copies them in only for a run with
-     `include_hidden` and never writes them to evidence.
+     `include_hidden` and never writes them to evidence. Visible acceptance tests
+     (`ACCEPTANCE_TESTS`) live in `GatesConfig.tests.acceptance_globs`; QA names their JUnit ids
+     in `RoleResult.acceptance_tests`, which become the `base_fail_check` `tests`, and their files
+     are then protected by checksum together with `tests.protected_configs`.
+  9. **Report parsing and results.** The Gate Runner owns every report parser (JUnit, SARIF, tool
+     JSON/text). Per gate it returns the new (non-baseline) violations as `GateResult.findings`
+     (`ToolFinding`: rule, category, location, snippet, redacted evidence and the tool's raw
+     score / label / SARIF level, never a normalised severity); engine-core triage fingerprints,
+     normalises, routes and dedupes them exactly like role findings. L2 returns `TestMetrics`
+     (counts, the redacted `TestInventory` with every test id and assertion count, coverage) and
+     compares them with the request's `compare_to` (which engine core passes: the task's previous
+     L2 metrics at the same scope), failing L2 with `monotonic` violations (§7.3). Every run that
+     executed L2 for a task or feature writes the `TraceabilityReport` and names it in
+     `GateReport.traceability`.
+  10. **Gate allowlist** (§15). The Gate Runner runs a gate only if `gateCommandAllowed` accepts
+      its argv against `~/.vtc/` + `gateAllowlistFile(repo)` (`GateAllowlist`, argv prefixes a
+      human confirmed in `vtc calibrate`) or it names a pinned scanner. Repo content (`gates.yml`,
+      a PR) cannot widen it. A disallowed gate is not run: it reports `error` / `infra`, which
+      parks with `gate_infra` until the human confirms it.
 - **Check:** dependency-cruiser `AD13-engine-modules-use-each-others-entry`,
   `AD13-core-uses-the-gate-runner-interface`, `AD13-gates-never-import-engine-core`,
   `AD13-git-imports-no-engine-module`, `AD13-core-does-not-import-transports`,
   `AD19-only-the-engine-entry-imports-the-daemon`, `AD2-storage-drivers-loaded-by-the-entry-only`
   (each proven by `tooling/arch-tests`, including a planted `daemon/` import of `gates/`);
-  `gate-result.test.ts` (results, the deterministic `gateReportVerdict`, requests, write-scope
-  reports); `policy.test.ts` (guard requests and `gateExpectationMet`).
+  `engine.test.ts` (`git.createGitOps` has exactly the frozen `CreateGitOps` type);
+  `gate-result.test.ts` (results, tool findings, monotonic violations, the test inventory, the
+  deterministic `gateReportVerdict`, requests with `compare_to`, the traceability path,
+  write-scope reports); `config.test.ts` (test layout, allowlist file and `gateCommandAllowed`);
+  `policy.test.ts` (guard requests and `gateExpectationMet`).
 
 ### AD-14 Role sources, compiled agents and prompts
 
@@ -738,8 +845,8 @@ dist/index.js}`. Typecheck (`customConditions`), tests (Vitest aliases) and
   | Gate runner (2)                  | Calibration, baseline, L0–L5, write-scope check, hidden tests, scanner store, traceability, redaction rules           | `packages/engine/src/gates/**`, `packages/engine/test/gates/**`, `gates/**`, `packages/cli/src/commands/calibrate.ts`, `packages/shared/src/helpers/redaction.ts` |
   | Roles + compiler (3)             | Neutral role sources, plugin sources, compiler, Claude/Codex plugin output                                            | `roles/**`, `skills/**`, `plugins/**`, `packages/compiler/**`                                                                                                     |
   | Adapters + usage (3)             | `HostAdapter` for both hosts, stream parsers, sandbox profiles, usage sources (statusline parser, `codex app-server`) | `packages/adapters/**`                                                                                                                                            |
-  | Dashboard (6)                    | Flow Studio                                                                                                           | `apps/dashboard/**`                                                                                                                                               |
-  | Cli + binary (0 binary parts, 1) | `vtc` commands and wiring, stdio bridge, statusline shim, timer, assets, Bun build and storage wiring                 | `packages/cli/**` except `commands/calibrate.ts`; the Bun build config (sub-project 0/1)                                                                          |
+  | Dashboard (6)                    | Flow Studio                                                                                                           | `apps/dashboard/**`, `fixtures/dashboard-export/**`                                                                                                               |
+  | Cli + binary (0 binary parts, 1) | `vtc` commands and wiring, stdio bridge, statusline shim, timer, assets, Bun build and storage wiring                 | `packages/cli/**` except `commands/calibrate.ts`, including the Bun build script and its `build:binary` script (AD-20)                                            |
   1. **Integrator.** One integrator (the architect role of the orchestration) owns
      `packages/shared/**` (incl. `CONTRACTS_VERSION`, `schemas/contracts.json` and the ledger;
      except `helpers/redaction.ts`), `docs/**`, `tooling/**`, the root config files
@@ -753,8 +860,12 @@ dist/index.js}`. Typecheck (`customConditions`), tests (Vitest aliases) and
   2. **Dependencies and lockfile.** A team adds npm dependencies only in a `package.json` it owns
      (adapters, compiler, cli, dashboard). The engine package is shared by two teams, so
      engine-core and gate-runner send dependency additions to the integrator, who adds them to
-     `packages/engine/package.json`. The integrator regenerates `pnpm-lock.yaml` on the
-     integration branch. A team branch never resolves a lockfile conflict by hand.
+     `packages/engine/package.json`. `pnpm-lock.yaml` is owned by the integrator but listed as
+     `regenerated` in `tooling/ownership.json`: a team branch commits the lockfile `pnpm install`
+     produced for its own `package.json` change (so its `pnpm verify` runs against a consistent
+     lockfile), and `verify:scope` allows it for every team. A team branch never resolves a
+     lockfile conflict by hand: on merge the integrator takes either side and re-runs
+     `pnpm install` on the integration branch, then the merge gate runs.
   3. **Shared entry files are pre-split.** `packages/engine/src/index.ts` re-exports each module
      under its own namespace (`core`, `gates`, `git`, `http`, `mcp`) plus the explicit daemon entry
      points, so two teams' export names can never collide (no TS2308 at integration), and
@@ -766,8 +877,9 @@ dist/index.js}`. Typecheck (`customConditions`), tests (Vitest aliases) and
      spike is §5 reading 8.)
 
 - **Check:** `tooling/arch-tests/test/ownership.test.ts`: every file in the repo (tracked or new)
-  matches exactly one team in `tooling/ownership.json`, and the known shared files map to their
-  owners. `pnpm verify:scope <team> --base <integration-branch>` fails when a branch changes a
+  matches exactly one team in `tooling/ownership.json`, the known shared files map to their
+  owners, and `scopeViolations` lets every team change `pnpm-lock.yaml` and nothing else it does
+  not own. `pnpm verify:scope <team> --base <integration-branch>` fails when a branch changes a
   file its team does not own; the orchestrator runs it on every team branch next to the merge
   gate (AD-10 rule 6). The AD-1/AD-13/AD-19 dependency rules keep each team's code behind its
   entry; `engine.test.ts` asserts the namespaced entry.
@@ -785,8 +897,9 @@ dist/index.js}`. Typecheck (`customConditions`), tests (Vitest aliases) and
      hooks, `.mcp.json`) and `plugins/codex/` (plugin manifest, hooks), owned by the roles+compiler
      team.
   2. The compiler merges them with the compiled roles and skills into `dist/claude-plugin` and
-     `dist/codex-plugin` and into the binary's `AssetBundle` (`plugin:claude-code`,
-     `plugin:codex`), and fails on any AD-9 marker in an emitted file (`checkPluginFiles`).
+     `dist/codex-plugin` (`ASSET_SOURCES`), which the binary build embeds as the `AssetBundle`
+     namespaces `plugin:claude-code` and `plugin:codex` (AD-20), and fails on any AD-9 marker in an
+     emitted file (`checkPluginFiles`).
   3. Every plugin registers the engine as `engineMcpServer(host)` = `vtc engine --mcp --host
 <host>`. The Codex installer writes the same entry.
   4. `HostAdapter.install` only places or registers what the compiler emitted (plus the Codex
@@ -815,7 +928,12 @@ mode, capabilities)` is the only decision: in `plugin_only` the engine never sta
      auto-resume after a limit becomes `lead_redispatch`: the step stays `interrupted`, `next`
      returns `wait` until the reset, then a `spawn_role` that resumes the same session (Claude
      Code's own auto-continue keeps an interactive session alive); cross-family review is
-     unavailable and skipped.
+     unavailable and skipped. So in plugin-only mode a run continues after a reset only while a
+     Lead session is alive to take that `spawn_role`: the engine keeps the run, the timer and the
+     interrupted steps, but launches nothing itself. §6.9's "the Lead chat session doesn't need
+     to be alive; only the engine does" (D15) holds only with `headless_allowed`, where the timer
+     wakes the daemon and the engine resumes headless (`claude -p --resume`, `codex exec
+resume`). This is §5 reading 12, pending the human's confirmation.
   3. `headless_allowed` (a user opt-in now; the default may change once confirmation exists)
      adds engine-launched runs for auto-resume, cross-family review and hosts without subagents.
 - **Check:** `config.test.ts` (default `plugin_only`); `policy.test.ts` (`planDispatch` never
@@ -838,7 +956,8 @@ mode, capabilities)` is the only decision: in `plugin_only` the engine never sta
   2. The event log's append path redacts `data` (AD-7 rule 12).
   3. Traceability is built by code (§7.4) as a `TraceabilityReport` (rows of REQ/AC → tests with
      status, hidden flag and provenance; gaps; scope-creep files) at
-     `.vtc/evidence/<T-n|F-n>/traceability.json`, by the Gate Runner.
+     `.vtc/evidence/<T-n|F-n>/traceability.json`, by the Gate Runner, which names it in
+     `GateReport.traceability`; engine core reads it from there into the evidence bundle.
   4. The evidence bundle (§6.7a, §14) is an `EvidenceBundle` (task or feature) at
      `evidenceBundlePath(id)`, written by engine core and placed in the PR description;
      `TaskDetail.evidence_bundle` points at it and the dashboard reads it through the artifacts
@@ -857,11 +976,13 @@ mode, capabilities)` is the only decision: in `plugin_only` the engine never sta
   built, how commands run, and how `vtc pause/resume/status` reach the daemon.
 - **Rule:**
   1. The engine-core team implements `runDaemon(deps: EngineDeps, options)` and
-     `serveSnapshot(deps)` in `daemon/`; the gate-runner team implements
-     `createGateRunner(deps)` in `gates/`. Types are frozen in `@vtc/shared` (`RunDaemon`,
-     `ServeSnapshot`, `CreateGateRunner`, `EngineDeps`, `SnapshotDeps`, `RunningDaemon`).
-  2. The cli builds `EngineDeps` (`composeEngineDeps`: storage driver for the runtime, Gate
-     Runner, adapters, asset bundle, timer, versions) and is the only caller.
+     `serveSnapshot(deps)` in `daemon/` and `createGitOps(deps)` in `git/`; the gate-runner team
+     implements `createGateRunner(deps)` in `gates/`. Types are frozen in `@vtc/shared`
+     (`RunDaemon`, `ServeSnapshot`, `CreateGateRunner`, `CreateGitOps`, `EngineDeps`,
+     `SnapshotDeps`, `GateRunnerDeps`, `RunningDaemon`).
+  2. The cli builds `EngineDeps` (`composeEngineDeps`: install token, storage driver for the
+     runtime, Gate Runner with its `GitOps`, adapters from `ADAPTER_FACTORIES`, asset bundle,
+     timer, versions) and is the only caller.
   3. Commands are `CommandSpec { name, summary, run(args, ctx): Promise<number> }`; `main` is
      async. `CommandContext` carries io, cwd, the VTC home and a lazy `engine()` client.
   4. **Transport.** `vtc pause`, `resume` and `status` are MCP clients of the daemon's local socket
@@ -871,9 +992,49 @@ mode, capabilities)` is the only decision: in `plugin_only` the engine never sta
      logic lives in the engine package, engine-core team), `--mcp --host <host>` runs the bridge.
 - **Check:** `cli.test.ts` (type-level: `composeEngineDeps` returns exactly what `runDaemon`
   takes; `ctx.engine()` resolves to `EngineClient` with per-tool types; the client is opened
-  lazily, once); `engine.test.ts` (the engine's exports have exactly the frozen types);
+  lazily, once); `engine.test.ts` (the engine's exports, incl. `git.createGitOps`, have exactly the
+  frozen types);
   dependency-cruiser `AD19-only-the-engine-entry-imports-the-daemon` and the extended
   `AD13-core-uses-the-gate-runner-interface`.
+
+### AD-20 Dashboard export, static serving and the asset pipeline
+
+- **Binds:** `apps/dashboard` (its Next config and routes), `packages/engine/src/http` (serving
+  `/`), `packages/cli` (the `AssetBundle`, plugin extraction, the binary build), `turbo.json`,
+  `.gitignore`.
+- **Prevents:** three teams (dashboard, engine core, cli+binary) each guessing the export
+  directory, URL-to-file mapping, deep-link fallback, content types and cache headers; a missing
+  script answered with HTML; the cli depending on `apps/`; a root build file nobody owns; plugins
+  in the binary that `install` cannot reach on disk.
+- **Rule:**
+  1. **Export.** The dashboard is a Next.js static export (`output: "export"`,
+     `trailingSlash: true`) into `apps/dashboard/out` (`ASSET_SOURCES.dashboard`). Flow Studio
+     has a fixed set of pages; run and task ids go in the query string (`/task/?run=r1&task=T-2`),
+     never in path segments, because a static export cannot pre-render `/runs/:run`.
+  2. **Serving.** The engine maps a request path to an asset with `resolveDashboardAsset`:
+     `/api` and `/api/...` are never assets; a path with `.`/`..`/empty segments, a backslash or a
+     NUL is refused; then the exact file, `<path>/index.html`, `<path>.html`; then, only for a
+     last segment without an extension, the SPA fallback `index.html`; otherwise 404. Headers come
+     from `dashboardAssetHeaders`: content type by extension (unknown →
+     `application/octet-stream`), `X-Content-Type-Options: nosniff`, `Cache-Control` `immutable`
+     for `_next/static/`, `no-cache` otherwise. The static files carry no run data and need no
+     token (AD-5 rule 2).
+  3. **Bundle sources.** In development the cli's `AssetBundle` reads `ASSET_SOURCES` from the
+     product repo (the dashboard export and `dist/claude-plugin` / `dist/codex-plugin`); the
+     binary embeds the same trees. The cli never imports `apps/` or `dist/` (AD-1 rule 10): it
+     reads files at run time or embeds them at build time.
+  4. **Build order.** `pnpm build` (turbo) builds every package and the dashboard export (turbo
+     caches `dist/**` and `out/**`; `.gitignore` covers `out/` and `.next/`); the compiler emits
+     the plugins; then the binary build, a script in `packages/cli` (`build:binary`, owned by
+     cli+binary), runs `bun build --compile` with those trees embedded. No root build file is
+     needed.
+  5. **Plugins for `install`.** In the binary the cli extracts `plugin:<host>` to `~/.vtc/` +
+     `extractedPluginDir(vtcVersion, host)` before calling `HostAdapter.install`, whose
+     `pluginDir` is always on disk (AD-6 rule 5).
+- **Check:** `asset-paths.test.ts` in shared (the mapping, every refusal and the headers against
+  the seeded export `fixtures/dashboard-export/`, owned by the dashboard team; asset sources;
+  plugin extraction paths). Sub-project 1 adds an HTTP test serving `fixtures/dashboard-export/`
+  through an `AssetBundle`; sub-project 0 checks that the binary serves the embedded export (§7).
 
 ---
 
@@ -932,10 +1093,26 @@ confirmation before it is written back into the spec.
 11. **When triage routes `defer`** (§6.3 step 8 lists the route without a trigger): findings that
     normalise to `info`. Routing otherwise follows the reviewer's `kind` (AD-8 rule 6).
 12. **Plugin-only by default** (§12.5): `hosts.dispatch` defaults to `plugin_only`, with the
-    behaviour in AD-17, until the vendor confirmation exists.
+    behaviour in AD-17, until the vendor confirmation exists. This narrows D15 and §6.9 ("the Lead
+    chat session doesn't need to be alive; only the engine does"): in the default mode a run
+    continues after a usage reset only through a live Lead session (`lead_redispatch`; an
+    interactive Claude session continues on its own through Claude Code's auto-continue).
+    Engine-driven auto-resume without a live Lead (`claude -p --resume`, `codex exec resume`)
+    needs the opt-in `headless_allowed`. Needs the human's explicit confirmation.
 13. **Verdict shape** (§16 lists a scalar `verdict`): `RoleResult.verdicts` is a list, one per
     subject, each with evidence, because the Spec-Verifier judges one AC per call and Visual QA
     judges V1–V8 per call (AD-8 rule 2).
+14. **One feature per run** (§6.7a "the feature (or release batch)" without saying who defines
+    it): the engine creates exactly one feature per run, named from the request, and the Planner
+    does not group tasks (AD-8 rule 11).
+15. **Level-2 `done`** (§6.4 "also pushed and included in the open PR"): a merged task becomes
+    `done` once a `branch.pushed` of the integration branch includes its merge commit while the
+    feature's PR is open; the Level-3 merge into main is the PR's `state: merged` (AD-7 rule 10).
+16. **Where QA writes acceptance tests** (§6.3 step 2 is silent): `gates.yml`
+    `tests.acceptance_globs`, detected by `vtc calibrate` and confirmed with the baseline, plus
+    `tests.protected_configs` for §7.2 L5 / §7.6 rule 5 (AD-13 rule 8).
+17. **Where the gate allowlist lives** (§15 names it without a place): per machine and repo under
+    `~/.vtc/allowlists/`, widened only by a human in `vtc calibrate` (AD-13 rule 10).
 
 ## 6. Change process for this spine
 
@@ -950,13 +1127,14 @@ These contracts rest on host behaviour that sub-project 0 verifies on real Claud
 accounts. Teams build against them as written; if a spike check fails, the integrator changes the
 contract through §6 and every consumer updates in the same change.
 
-| Contract                                                                                                          | Spike check that unfreezes it                                                                                             | Needs a human account |
-| ----------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------- | --------------------- |
-| Structured-output form (`jsonSchemaFor(..., { target: "structured-output" })`, AD-3 rule 8)                       | `claude -p --json-schema` and `codex exec --output-schema` accept it and return a `RoleResult` that re-validates          | yes                   |
-| `HostOutcome` limit/auth signals, `ParsedStream.usage` / `retry` (AD-6)                                           | recorded `claude -p` and `codex exec` streams with a real limit hit, an auth error and SDK `rate_limit_event`/`api_retry` | yes                   |
-| `StatuslineIngest` field names (`rate_limits.five_hour` / `seven_day`, `used_percentage`, `resets_at`)            | the statusline payload of a signed-in Claude Code session                                                                 | yes                   |
-| Codex `UsageWindow` labels from `windowDurationMins` (`codex app-server` `account/rateLimits/read`)               | a real `account/rateLimits/read` and `updated` notification                                                               | yes                   |
-| `HostCapabilities` of both hosts, incl. Codex `sandbox_mode` inheritance for spawned agents (§12.1)               | Codex agent spawning with per-agent `sandbox_mode`; Claude plugin agents and `sandbox.filesystem.denyWrite`               | yes                   |
-| `resume` after a long gap (`SessionRef`, AD-6)                                                                    | `--resume` / `exec resume` work after hours                                                                               | yes                   |
-| Marketplace publishing (AD-16 rule 5)                                                                             | `/plugin marketplace add` from a release branch installs the generated plugin                                             | yes                   |
-| `Storage` contract on `bun:sqlite`, the `AssetBundle` from Bun-embedded files, the MCP stdio bridge (AD-2, AD-12) | the storage contract suite passes under `bun build --compile`; the binary serves the static export and MCP over stdio     | no                    |
+| Contract                                                                                                          | Spike check that unfreezes it                                                                                              | Needs a human account |
+| ----------------------------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------- | --------------------- |
+| Structured-output form (`jsonSchemaFor(..., { target: "structured-output" })`, AD-3 rule 8)                       | `claude -p --json-schema` and `codex exec --output-schema` accept it and return a `RoleResult` that re-validates           | yes                   |
+| `HostOutcome` limit/auth signals, `ParsedStream.usage` / `retry` (AD-6)                                           | recorded `claude -p` and `codex exec` streams with a real limit hit, an auth error and SDK `rate_limit_event`/`api_retry`  | yes                   |
+| `StatuslineIngest` field names (`rate_limits.five_hour` / `seven_day`, `used_percentage`, `resets_at`)            | the statusline payload of a signed-in Claude Code session                                                                  | yes                   |
+| Codex `UsageWindow` labels from `windowDurationMins` (`codex app-server` `account/rateLimits/read`)               | a real `account/rateLimits/read` and `updated` notification                                                                | yes                   |
+| `HostCapabilities` of both hosts, incl. Codex `sandbox_mode` inheritance for spawned agents (§12.1)               | Codex agent spawning with per-agent `sandbox_mode`; Claude plugin agents and `sandbox.filesystem.denyWrite`                | yes                   |
+| `resume` after a long gap (`SessionRef`, AD-6)                                                                    | `--resume` / `exec resume` work after hours                                                                                | yes                   |
+| Marketplace publishing (AD-16 rule 5)                                                                             | `/plugin marketplace add` from a release branch installs the generated plugin                                              | yes                   |
+| `Storage` contract on `bun:sqlite`, the `AssetBundle` from Bun-embedded files, the MCP stdio bridge (AD-2, AD-12) | the storage contract suite passes under `bun build --compile`; the binary serves the static export and MCP over stdio      | no                    |
+| Lazy storage-driver import survives bundling (AD-2 rule 3)                                                        | the compiled binary starts and opens storage without loading `node:sqlite`; otherwise apply the named stub-plugin fallback | no                    |

@@ -1,7 +1,12 @@
 import { describe, expect, it } from "vitest";
 import {
+  engineRepoKey,
+  GateAllowlistSchema,
+  gateAllowlistFile,
+  gateCommandAllowed,
   GatesConfigSchema,
   GateSchema,
+  parsePersisted,
   ProjectConfigSchema,
   ScannerPinSchema,
   ScannerPinsSchema,
@@ -100,8 +105,75 @@ describe("GatesConfigSchema", () => {
       },
     ],
     ["sources.0", { sources: ["vibes"] }],
+    ["tests", { tests: undefined }],
+    ["tests.acceptance_globs", { tests: { acceptance_globs: [] } }],
+    [
+      "tests.protected_configs.0",
+      { tests: { acceptance_globs: ["t/**"], protected_configs: ["/etc/x"] } },
+    ],
   ])("rejects invalid %s", (path, patch) => {
     expectInvalid(GatesConfigSchema, { ...validGatesConfig(), ...patch }, path);
+  });
+  it("records where QA's acceptance tests live and which configs are protected (§7.3)", () => {
+    const { tests } = expectValid(GatesConfigSchema, validGatesConfig());
+    expect(tests.acceptance_globs).toEqual(["test/acceptance/**"]);
+    expect(
+      expectValid(GatesConfigSchema, {
+        ...validGatesConfig(),
+        tests: { acceptance_globs: ["t/**"] },
+      }).tests.protected_configs,
+    ).toEqual([]);
+  });
+});
+
+describe("the gate command allowlist (§15)", () => {
+  const allowlist = () => ({
+    version: 1,
+    commands: [
+      { argv_prefix: ["pnpm", "test"], confirmed_at: "2026-10-13T08:00:00Z" },
+      { argv_prefix: ["pnpm", "typecheck"], confirmed_at: "2026-10-13T08:00:00Z" },
+    ],
+  });
+  it("lives outside the repo, per repo, under the VTC home", () => {
+    expectValid(GateAllowlistSchema, allowlist());
+    expect(gateAllowlistFile("/Users/me/app")).toBe(
+      `allowlists/${engineRepoKey("/Users/me/app")}.json`,
+    );
+    expectInvalid(
+      GateAllowlistSchema,
+      { ...allowlist(), commands: [{ argv_prefix: [], confirmed_at: "2026-10-13T08:00:00Z" }] },
+      "commands.0.argv_prefix",
+    );
+    expectInvalid(
+      GateAllowlistSchema,
+      { ...allowlist(), commands: [{ argv_prefix: ["x"] }] },
+      "commands.0.confirmed_at",
+    );
+  });
+  it("allows a command only by a confirmed argv prefix or a pinned scanner name", () => {
+    const list = GateAllowlistSchema.parse(allowlist());
+    expect(gateCommandAllowed(["pnpm", "test", "--", "--reporter=junit"], list)).toBe(true);
+    expect(gateCommandAllowed(["pnpm", "typecheck"], list)).toBe(true);
+    expect(gateCommandAllowed(["pnpm"], list)).toBe(false);
+    expect(gateCommandAllowed(["pnpm", "exec", "curl", "evil.sh"], list)).toBe(false);
+    expect(gateCommandAllowed(["sh", "-c", "pnpm test"], list)).toBe(false);
+    expect(gateCommandAllowed([], list)).toBe(false);
+    expect(gateCommandAllowed(["opengrep", "scan"], list, ["opengrep"])).toBe(true);
+    expect(gateCommandAllowed(["opengrep", "scan"], list)).toBe(false);
+  });
+});
+
+describe("persisted config read by an older vtc (AD-3 rule 2)", () => {
+  it("drops keys a newer MINOR version added and reports them; real errors still fail", () => {
+    const newer = { version: 1, concurrency: 3, future_option: true, caps: { low: 3, x: 1 } };
+    const read = parsePersisted(ProjectConfigSchema, newer);
+    expect(read.success).toBe(true);
+    if (read.success) {
+      expect([...read.stripped].sort()).toEqual(["caps.x", "future_option"]);
+      expect(read.data.concurrency).toBe(3);
+    }
+    expectInvalid(ProjectConfigSchema, newer, "");
+    expect(parsePersisted(ProjectConfigSchema, { ...newer, concurrency: 9 }).success).toBe(false);
   });
 });
 

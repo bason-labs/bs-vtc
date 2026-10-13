@@ -9,6 +9,11 @@ import { fileURLToPath } from "node:url";
 
 export interface OwnershipMap {
   readonly teams: Readonly<Record<string, readonly string[]>>;
+  /**
+   * Files a tool rewrites on any branch (`pnpm-lock.yaml`): still owned by one team, but any team
+   * may change them, and nobody hand-merges them (AD-15 rule 2).
+   */
+  readonly regenerated?: readonly string[];
 }
 
 export const REPO_ROOT = fileURLToPath(new URL("../../../", import.meta.url));
@@ -48,6 +53,22 @@ const matches = (glob: string, path: string): boolean => {
 export const teamOwns = (globs: readonly string[], path: string): boolean =>
   globs.some((g) => !g.startsWith("!") && matches(g, path)) &&
   !globs.some((g) => g.startsWith("!") && matches(g.slice(1), path));
+
+/**
+ * The files of `changed` that `team` may not change: neither owned by it nor `regenerated`.
+ * What `pnpm verify:scope` fails on.
+ */
+export const scopeViolations = (
+  map: OwnershipMap,
+  team: string,
+  changed: readonly string[],
+): string[] => {
+  const globs = map.teams[team] ?? [];
+  const regenerated = map.regenerated ?? [];
+  return changed.filter(
+    (path) => !teamOwns(globs, path) && !regenerated.some((glob) => matches(glob, path)),
+  );
+};
 
 /** Every team that owns `path` (exactly one, when the map is correct). */
 export const ownersOf = (map: OwnershipMap, path: string): string[] =>

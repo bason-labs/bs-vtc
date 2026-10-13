@@ -8,6 +8,10 @@
     {
       "version": "3.0.0",
       "schemas_sha256": "cf602cb5c8afb9cc58adab16bea96443e677d352bc684be4084482bcadbeff7d"
+    },
+    {
+      "version": "4.0.0",
+      "schemas_sha256": "13cbe007b40c9c180015c7b3e2041422462e4703b2ac6227fc3a1b7c88faf57e"
     }
   ]
 }

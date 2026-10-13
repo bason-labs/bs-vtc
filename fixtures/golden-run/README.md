@@ -4,8 +4,11 @@ A small recorded run (`golden-1`, feature track) for building and testing agains
 frozen surfaces without a running engine (AD-5, AD-7, AD-12).
 
 - `events.jsonl`: the run's event log, exactly as the engine writes `.vtc/runs/<run>/events.jsonl`.
-  It covers the replay-only fields too: `feature.created`, `task.workspace_assigned`,
-  `task.session_updated`, the trace fields of role events, and a feature budget.
+  It covers the replay-only fields too: the request in `run.started` (the feature is named from
+  its first line), the intent contract in `task.created`, `feature.created`,
+  `task.workspace_assigned`, `task.session_updated`, the snapshot commit (`head`) of the built
+  submit, the trace fields of role events, L2 test metrics with their inventory path, the
+  traceability report path, and a feature budget.
 - `api/*.json`: the response of each `ENGINE_HTTP` read route for this log: `health`, `runs`,
   `status`, `events` (`/api/runs/golden-1/events`), `tasks`, `task-T-1` / `task-T-2`,
   `task-T-1-diff`, `features`, `artifact-spec` (`?path=.vtc/spec/spec.md`, the spec G1 froze),
