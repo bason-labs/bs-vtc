@@ -1,7 +1,8 @@
 /**
  * PLAN checks (§6.1): the engine accepts the Planner's task drafts only when every REQ is
- * covered, the DAG has no cycle, tasks that can run in parallel have disjoint write scopes, every
- * reference resolves and every consumed contract matches what its provider publishes. Pure.
+ * covered, the DAG has no cycle, tasks that can run in parallel have disjoint write scopes, no
+ * write scope names a `.vtc/` path, every reference resolves and every consumed contract matches
+ * what its provider publishes. Pure.
  */
 import type { TaskDraft } from "@vtc/shared";
 import { scopesOverlap } from "./globs.js";
@@ -26,6 +27,14 @@ const ancestors = (id: string, byId: ReadonlyMap<string, TaskDraft>): Set<string
   }
   return seen;
 };
+
+/**
+ * True for a `files_scope` entry under `.vtc/`: the engine's state, the frozen artifacts, the
+ * evidence and the gate config are never a task's to write (spine §5 readings 53 and 65; the
+ * hidden-test staging entry is the engine's, added to QA author mode's own pack).
+ */
+export const isVtcScopeEntry = (glob: string): boolean =>
+  glob === ".vtc" || glob.startsWith(".vtc/");
 
 /** A cycle through `after` and consumed contracts, as ids, or `null`. */
 export const findDependencyCycle = (drafts: readonly TaskDraft[]): string[] | null => {
@@ -72,6 +81,10 @@ export const checkPlan = (input: PlanCheckInput): string[] => {
     if (input.takenIds?.includes(d.id) === true) issues.push(`task id ${d.id} is already used`);
   }
   for (const d of drafts) {
+    for (const glob of d.files_scope.filter(isVtcScopeEntry))
+      issues.push(
+        `${d.id} files_scope names ${glob}, which the engine owns (no task writes .vtc/)`,
+      );
     for (const dep of d.after) {
       if (!byId.has(dep)) issues.push(`${d.id} depends on unknown task ${dep}`);
     }

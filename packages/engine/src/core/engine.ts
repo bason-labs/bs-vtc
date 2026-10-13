@@ -44,7 +44,6 @@ import {
 import {
   committedGatesConfig,
   ConfigError,
-  gatesConfigHash,
   GATES_CONFIG_PATH,
   loadGatesConfig,
   loadProjectConfig,
@@ -441,7 +440,7 @@ export class Engine implements Kernel {
     return this.activeFrozen()?.gates ?? null;
   }
 
-  /** The hash of the active run's frozen `gates.yml` bytes (`gates_config_hash`), or `null`. */
+  /** The hash of the active run's frozen `gates.yml` bytes, or `null` (`Kernel.gatesConfigHash`). */
   gatesConfigHash(): string | null {
     return this.activeFrozen()?.gatesSha ?? null;
   }
@@ -470,7 +469,10 @@ export class Engine implements Kernel {
   /**
    * On open: the run's frozen config is the kept copy when it matches the run's hash, else the
    * files when they match it. When neither does, the run continues with the current files and
-   * pauses, saying so (the change is never applied silently).
+   * pauses, saying so (the change is never applied silently). The hash of the run's `gates.yml`
+   * bytes comes only from the kept copy: one an older engine wrote without it, or no copy, leaves
+   * it unknown, and each gate run then checks the base's committed file against the run's
+   * `pipeline_config_hash` (`baselineGates`), never the working tree's bytes.
    */
   private restoreFrozenConfig(handle: RunHandle): void {
     const run = handle.state.run;
@@ -507,7 +509,7 @@ export class Engine implements Kernel {
     } catch {
       return; // the files do not parse: config() reports it until they are fixed
     }
-    this.freezeConfig(handle.state.id, project, gates, this.diskGatesSha());
+    this.freezeConfig(handle.state.id, project, gates, null);
     const hash = pipelineConfigHash(project, gates);
     if (hash !== run.pipeline_config_hash) this.reportConfigDrift(handle, hash, "restart");
   }
@@ -987,7 +989,9 @@ export class Engine implements Kernel {
   /**
    * The `gates.yml` committed at the commit the run starts on (spine §5 reading 46f): `vtc
    * calibrate` tells the user to commit it. `null` when HEAD has none (or no commit yet): the run
-   * starts, and its first gate run parks (`gate_infra`) unless the task's baseline has one.
+   * starts (its front half needs no gates), and each of its tasks parks (`gate_infra`) before a
+   * worktree is made, saying a new run is needed: the run never takes up a `gates.yml` committed
+   * later (reading 20, `startedWithoutGates`).
    */
   private async startGates(): Promise<CommittedGates | null> {
     let head: string;
@@ -1001,15 +1005,6 @@ export class Engine implements Kernel {
     } catch (error) {
       if (error instanceof ConfigError) throw new EngineError("config", error.message);
       throw error;
-    }
-  }
-
-  /** The hash of the working tree's `gates.yml` bytes (a restart without a kept copy), or `null`. */
-  private diskGatesSha(): string | null {
-    try {
-      return gatesConfigHash(readFileSync(join(this.deps.repoRoot, GATES_CONFIG_PATH)));
-    } catch {
-      return null;
     }
   }
 

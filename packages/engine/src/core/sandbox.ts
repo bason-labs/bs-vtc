@@ -13,8 +13,13 @@
  * process-tree rule could not tell a role from the Lead. Denying the role every network route
  * is the barrier that fits AD-5.
  *
- * Plugin-only mode (AD-17) launches no headless runs: these guard the engine-launched headless
- * path and are what any launcher must use.
+ * Plugin-only mode (AD-17) launches no headless run, so no engine code asks an adapter for a
+ * sandbox: a role subagent there runs under the compiled role profile its plugin agent carries
+ * (the roles compiler and the adapters own that). These two helpers guard the engine-launched
+ * headless path and are mandatory for it: any engine or cli source that calls an adapter's
+ * `sandboxProfile`, `spawnRole` or `headlessCommand` must build its request with
+ * {@link roleSandboxRequest} and refuse an unsafe profile with {@link roleSandboxProblem}
+ * (`test/core/sandbox-wiring.test.ts` fails otherwise).
  */
 import type { RoleContract, SandboxProfile, SandboxProfileRequest } from "@vtc/shared";
 

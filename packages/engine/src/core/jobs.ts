@@ -29,7 +29,12 @@ import {
 import { createHash } from "node:crypto";
 import { assertNoSymlinks, runGit } from "../git/index.js";
 import { taskBudgetFor } from "./budget.js";
-import { committedGatesConfig, GATES_CONFIG_PATH, type CommittedGates } from "./config.js";
+import {
+  committedGatesConfig,
+  GATES_CONFIG_PATH,
+  pipelineConfigHash,
+  type CommittedGates,
+} from "./config.js";
 import { globMatch } from "./globs.js";
 import type { Kernel, RunHandle } from "./kernel.js";
 import { assertFeatureTransition } from "./machines.js";
@@ -120,21 +125,44 @@ const gatesAt = (k: Kernel, commit: string): Promise<CommittedGates | null> => {
 };
 
 /**
+ * True when the run started on a commit with no committed `gates.yml` (its `pipeline_config_hash`
+ * was made with none, spine §5 reading 46f). Such a run has no gate config and never adopts one
+ * later (reading 20): its tasks park before any worktree is made ({@link ensureWorkspace}).
+ */
+export const startedWithoutGates = (k: Kernel, h: RunHandle): boolean =>
+  k.gatesConfigHash() === null &&
+  pipelineConfigHash(k.config(), null) === h.state.run.pipeline_config_hash;
+
+/** Why a task of a run with no gate config parks (`gate_infra`): only a new run can fix it. */
+export const NO_RUN_GATES = `this run started on a commit with no committed ${GATES_CONFIG_PATH}, so it has no gate config to verify with, and a run never takes one up later (spine §5 readings 20 and 46f); run vtc calibrate, commit ${GATES_CONFIG_PATH}, then start a new run`;
+
+/**
  * The `gates.yml` committed at a gate run's base (spine §5 reading 46f), checked against the one
  * the run started with (reading 20): the Gate Runner reads the same file at `base`. Throws with
- * the reason the task or feature parks on (`gate_infra`): no committed file at the base, or a
- * different one. A run that started on a commit with no `gates.yml` takes the base's.
+ * the reason the task or feature parks on (`gate_infra`): the run started with none (it never
+ * takes one up later), no committed file at the base, or a different one. When the hash of the
+ * run's file is unknown (a restart whose kept copy an older engine wrote, or with no kept copy),
+ * the base's file must give the run's `pipeline_config_hash`: the working tree never stands in.
  */
-export const baselineGates = async (k: Kernel, base: string): Promise<CommittedGates> => {
+export const baselineGates = async (
+  k: Kernel,
+  h: RunHandle,
+  base: string,
+): Promise<CommittedGates> => {
+  if (startedWithoutGates(k, h)) throw new Error(NO_RUN_GATES);
   const committed = await gatesAt(k, base);
   if (committed === null)
     throw new Error(
-      `the baseline ${base.slice(0, 12)} has no committed ${GATES_CONFIG_PATH}; run vtc calibrate, commit ${GATES_CONFIG_PATH}, then vtc resume`,
+      `the baseline ${base.slice(0, 12)} has no committed ${GATES_CONFIG_PATH}, though this run started with one; a task's baseline is fixed, so drop the task or start a new run`,
     );
   const frozen = k.gatesConfigHash();
-  if (frozen !== null && frozen !== committed.sha256)
+  const same =
+    frozen === null
+      ? pipelineConfigHash(k.config(), committed.config) === h.state.run.pipeline_config_hash
+      : frozen === committed.sha256;
+  if (!same)
     throw new Error(
-      `${GATES_CONFIG_PATH} at the baseline ${base.slice(0, 12)} (${committed.sha256.slice(0, 12)}) is not the one this run started with (${frozen.slice(0, 12)}); a run verifies only with the config it started with`,
+      `${GATES_CONFIG_PATH} at the baseline ${base.slice(0, 12)} (${committed.sha256.slice(0, 12)}) is not the one this run started with${frozen === null ? "" : ` (${frozen.slice(0, 12)})`}; a run verifies only with the config it started with`,
     );
   return committed;
 };
@@ -151,7 +179,7 @@ const runGates = async (
   h: RunHandle,
   input: Omit<GateRunRequestInput, "checkout" | "gates_config_hash">,
 ): Promise<GateReport> => {
-  const gates = await baselineGates(k, input.base);
+  const gates = await baselineGates(k, h, input.base);
   const request = { ...input, gates_config_hash: gates.sha256 };
   const label = `${request.reason} ${request.task ?? request.feature ?? request.run}`;
   const report = await guardGateRun(k, h, label, async () => {
@@ -209,6 +237,16 @@ export const ensureWorkspace = (k: Kernel, h: RunHandle, taskId: string): void =
     const task = h.state.tasks.get(taskId);
     const feature = task === undefined ? undefined : h.state.features.get(task.feature);
     if (task === undefined || feature === undefined || task.worktree !== undefined) return;
+    if (startedWithoutGates(k, h)) {
+      // nothing could verify the task: park it before a worktree or a role run is spent on it
+      await k.serial(h, () => {
+        const current = h.state.tasks.get(taskId);
+        if (current?.status === "ready" && current.worktree === undefined)
+          parkInfra(k, h, taskId, NO_RUN_GATES);
+        return Promise.resolve();
+      });
+      return;
+    }
     try {
       const ws = k.deps.workspace;
       const branch = feature.integration_branch;

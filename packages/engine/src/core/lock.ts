@@ -6,7 +6,8 @@
  * A lock is stale when its holder is gone (AD-12 rule 1, spine §5 reading 67): its pid is dead,
  * or, since a pid can be reused after a `SIGKILL` or a reboot, the holder's MCP socket (recorded
  * in the lock) does not answer the hello. {@link acquireEngineLock} decides on the pid alone (it
- * is synchronous); {@link takeEngineLock}, which the daemon uses, also asks the socket.
+ * is synchronous); {@link takeEngineLock}, which the daemon uses, also asks the socket, several
+ * times with backoff, so a live engine whose event loop is briefly busy is never taken over.
  */
 import { closeSync, mkdirSync, openSync, readFileSync, unlinkSync, writeSync } from "node:fs";
 import { dirname, join } from "node:path";
@@ -69,7 +70,22 @@ export interface TakeLockOptions extends AcquireLockOptions {
    * (the socket is bound after the engine opened). Default {@link LOCK_STARTUP_GRACE_MS}.
    */
   readonly startupGraceMs?: number;
+  /**
+   * The waits between the hello probes: one more probe follows each. Default
+   * {@link LOCK_PROBE_DELAYS_MS} (three probes over about 10 s with the client's 3 s timeout).
+   */
+  readonly probeDelaysMs?: readonly number[];
+  /** Waits between probes (tests pass an immediate one). */
+  readonly sleep?: (ms: number) => Promise<void>;
 }
+
+/** The waits between hello probes before a live pid's silent lock counts as stale. */
+export const LOCK_PROBE_DELAYS_MS: readonly number[] = [1_000, 3_000];
+
+const sleepFor = (ms: number): Promise<void> =>
+  new Promise((resolve) => {
+    setTimeout(resolve, ms);
+  });
 
 /** How long a new holder may take to bind its socket before a silent socket counts as stale. */
 export const LOCK_STARTUP_GRACE_MS = 2 * 60_000;
@@ -180,9 +196,10 @@ export const acquireEngineLock = (
 
 /**
  * {@link acquireEngineLock} plus the socket check (AD-12 rule 1): when the holder's pid is alive
- * but its socket (the one its lock records, else `options.socket`, the repo's own) does not
- * answer the hello and the lock is older than the startup grace, the pid was reused and the lock
- * is taken over (`onStaleLock(pid, "silent")`). A holder that answers keeps the lock.
+ * but its socket (the one its lock records, else `options.socket`, the repo's own) answers none
+ * of the hello probes (`probeDelaysMs` apart) and the lock is older than the startup grace, the
+ * pid was reused and the lock is taken over (`onStaleLock(pid, "silent")`). A holder that
+ * answers any probe keeps the lock, and so does a lock that changed hands between probes.
  */
 export const takeEngineLock = async (
   repoRoot: string,
@@ -200,7 +217,16 @@ export const takeEngineLock = async (
     const grace = options.startupGraceMs ?? LOCK_STARTUP_GRACE_MS;
     // a lock with no readable start time is judged by its socket; a young one is left alone
     if (!Number.isNaN(acquired) && now - acquired < grace) throw error;
-    if (await options.holderAnswers(socket)) throw error;
+    const delays = options.probeDelaysMs ?? LOCK_PROBE_DELAYS_MS;
+    const sleep = options.sleep ?? sleepFor;
+    for (let probe = 0; ; probe += 1) {
+      if (await options.holderAnswers(socket)) throw error;
+      const delay = delays[probe];
+      if (delay === undefined) break;
+      await sleep(delay);
+      // another engine took the lock meanwhile: it is not the one judged silent
+      if (readLockHolder(error.lockPath)?.raw !== holder.raw) throw error;
+    }
     return acquireEngineLock(repoRoot, { ...options, staleHolder: holder.raw });
   }
 };

@@ -13,7 +13,6 @@ import {
   checkResultAgainstContract,
   escalationFromQuestion,
   HIDDEN_TESTS,
-  SESSION_DEFAULT_MODEL,
   resolveRoleMode,
   type ArtifactRef,
   type Finding,
@@ -50,7 +49,7 @@ import {
   reportFindings,
   sweepDispatches,
 } from "./dispatch-guard.js";
-import { checkPlan } from "./plan-check.js";
+import { checkPlan, isVtcScopeEntry } from "./plan-check.js";
 import { collectRoleChanges, mergeRoleChanges, roleScopeIssues } from "./role-worktree.js";
 import {
   consecutiveFailures,
@@ -123,22 +122,11 @@ const bytesSha = (bytes: Uint8Array): string => createHash("sha256").update(byte
 
 // ---------------------------------------------------------------- bookkeeping
 
-/** Records the spend of a run (§11): task, feature and run budgets. Unpriced spend stays unknown. */
 /**
- * The spend of a run as the engine counts it (§11). A run dispatched on the host session's model
- * (`SESSION_DEFAULT_MODEL`, D-ae) is priced only when the host names the model that ran: an
- * unknown model stays unpriced (`null`), never a guess.
+ * Records the spend of a run (§11): task, feature and run budgets. The cost is the one the host
+ * reported, kept also when it names no model (a run on the session's model, D-ae): the host
+ * computed it, so it does not depend on VTC knowing the model id. Unpriced spend stays unknown.
  */
-export const pricedCost = (
-  run: Pick<RoleRunRecord, "model">,
-  reportedModel: string | null | undefined,
-  cost: number | null | undefined,
-): number | null => {
-  if (cost === undefined || cost === null) return null;
-  const unknown = run.model === SESSION_DEFAULT_MODEL && (reportedModel ?? null) === null;
-  return unknown ? null : cost;
-};
-
 const recordSpend = (k: Kernel, h: RunHandle, run: RoleRunRecord, cost: number | null): void => {
   if (cost === null || cost === 0) return;
   const task = run.task === undefined ? undefined : h.state.tasks.get(run.task);
@@ -270,7 +258,7 @@ const emitSubmitted = (
     host: run.host,
     model: usage?.model ?? run.model,
     tokens: usage?.tokens ?? null,
-    cost_usd: pricedCost(run, usage?.model, usage?.cost_usd),
+    cost_usd: usage?.cost_usd ?? null,
     data: {
       action_id: run.action_id,
       exit: result.exit,
@@ -661,6 +649,8 @@ const outOfScopeGuards = async (
 ): Promise<string[]> => {
   if (matchesAny(task.files_scope, fault.path))
     return [`${fault.path} is inside the task's files_scope`];
+  if (isVtcScopeEntry(fault.path))
+    return [`${fault.path} is under .vtc/, which no task writes (out_of_scope claim)`];
   const claimed = [...h.state.findings.values()].some(
     (r) =>
       r.finding.task === task.id &&
@@ -688,7 +678,7 @@ const outOfScopeGuards = async (
   }
   let gatesHash: string;
   try {
-    gatesHash = (await baselineGates(k, base)).sha256;
+    gatesHash = (await baselineGates(k, h, base)).sha256;
   } catch (error) {
     return [
       `the fault cannot be reproduced: ${error instanceof Error ? error.message : String(error)}`,
@@ -1003,7 +993,7 @@ const handleFailure = (
 ): void => {
   if (outcome.kind === "limit") {
     recordLimit(k, h, run, outcome);
-    recordSpend(k, h, run, pricedCost(run, outcome.model, outcome.cost_usd));
+    recordSpend(k, h, run, outcome.cost_usd ?? null);
     return;
   }
   k.emit(h, {
@@ -1027,7 +1017,7 @@ const handleFailure = (
     });
     return;
   }
-  recordSpend(k, h, run, pricedCost(run, null, outcome.cost_usd));
+  recordSpend(k, h, run, outcome.cost_usd ?? null);
   stepFailed(k, h, run);
 };
 
@@ -1116,7 +1106,7 @@ export const handleSubmit = async (
       data: { session_ref: input.session_ref },
     });
   }
-  recordSpend(k, h, run, pricedCost(run, input.usage?.model, input.usage?.cost_usd));
+  recordSpend(k, h, run, input.usage?.cost_usd ?? null);
   await outcome.after();
   checkBudget(k, h, run.task);
   return { accepted: true };

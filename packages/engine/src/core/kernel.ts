@@ -85,7 +85,11 @@ export interface Kernel {
   config(): ProjectConfig;
   /** The active run's frozen `gates.yml` (committed at its start commit, reading 46f). */
   gatesConfig(): GatesConfig | null;
-  /** SHA-256 of that file's bytes: every `GateRunRequest.gates_config_hash` (reading 46b). */
+  /**
+   * SHA-256 of that file's bytes (`GateRunRequest.gates_config_hash`, reading 46b); `null` when the
+   * run started with none or a restart could not recover it (`baselineGates` then checks the
+   * base's committed file against the run's `pipeline_config_hash`).
+   */
   gatesConfigHash(): string | null;
   /** Known secret values (the repo's `.env` values) for redaction (AD-18). */
   secrets(): readonly string[];
