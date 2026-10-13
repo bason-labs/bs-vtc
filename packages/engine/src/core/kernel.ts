@@ -15,6 +15,7 @@ import type {
   VtcEvent,
 } from "@vtc/shared";
 import type { PullRequestService, Workspace } from "../git/index.js";
+import type { EngineWrites } from "./engine-writes.js";
 import type { EventDraft, EventLogWriter } from "./event-log.js";
 import type { EngineLock } from "./lock.js";
 import type { CheckoutRecord } from "./phase-scope.js";
@@ -87,6 +88,10 @@ export interface Kernel {
   allStates(): Iterable<RunState>;
   /** In-memory per-task hint: the round's head has the same tree as the previous round's. */
   readonly identicalTree: Map<string, boolean>;
-  /** The user's checkout as it was when each phase role was dispatched (AD-7 rule 7). */
+  /** The user's checkout as it was when each checkout role was dispatched (AD-7 rule 7). */
   readonly checkouts: Map<string, CheckoutRecord>;
+  /** What the engine wrote in the repo, to tell its own writes from anyone else's (AD-7 rule 7). */
+  readonly writes: EngineWrites;
+  /** The git fingerprint engine git must match after a reported change, until the human resumes. */
+  gitHold: Readonly<Record<string, string>> | null;
 }

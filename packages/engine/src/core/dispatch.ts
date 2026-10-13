@@ -43,7 +43,14 @@ import { resolveModel, roleTier } from "./roles.js";
 import { reviewersFor } from "./router.js";
 import { limitWait } from "./limits.js";
 import { setTaskStatus } from "./parking.js";
-import { recordCheckout, saveCheckoutRecord, type CheckoutRecord } from "./phase-scope.js";
+import { checkGitNow, sweepCheckouts } from "./checkout-guard.js";
+import { CLARIFIER_OF, openGaps } from "./clarify.js";
+import {
+  recordCheckout,
+  runsInCheckout,
+  saveCheckoutRecord,
+  type CheckoutRecord,
+} from "./phase-scope.js";
 
 export interface StepSpec {
   readonly key: string;
@@ -173,6 +180,31 @@ const taskSteps = (k: Kernel, h: RunHandle, taskId: string, host: HostId): StepS
       busyStep(h, { role: "qa", mode: "author", task: taskId })
     )
       return [];
+    // A spec or design gap is answered first, by the BA or the Designer (§6.3 steps 3 and 8).
+    const gaps = openGaps(h.state, taskId);
+    const first = gaps[0];
+    const clarifier = first === undefined ? undefined : CLARIFIER_OF[first.route];
+    if (clarifier !== undefined) {
+      const step = { role: clarifier, task: taskId };
+      if (busyStep(h, step)) return [];
+      const answer = freshAnswer(h, taskId, lastDispatchSeq(h, taskId, clarifier));
+      const note = [
+        rejectionNote(h, step),
+        clarifier === "ba"
+          ? "Answer the spec gap(s) in your pack's findings for this task. A wording-only fix of the frozen spec (no requirement or acceptance criterion added, removed or renamed): edit it and exit done. A change in meaning: write it into the spec and exit spec_conflict; it goes to the human as a change request. If the spec already answers it, exit done and say how in your summary."
+          : "Answer the design gap(s) in your pack's findings for this task. Additions outside the frozen design artifacts: exit done. A change to a frozen design artifact goes to the human as a change request: write it and exit spec_conflict.",
+      ]
+        .filter((n) => n !== undefined)
+        .join("\n");
+      steps.push({
+        key: `clarify:${taskId}`,
+        ...step,
+        findings: gaps.filter((f) => CLARIFIER_OF[f.route] === clarifier),
+        note,
+        ...(answer === undefined ? {} : { answer }),
+      });
+      return steps;
+    }
     const fixingSince = statusEnteredSeq(h.state, taskId, "fixing") ?? 0;
     const badTests = taskFindings(h.state, taskId).filter(
       (f) => f.status === "open" && f.route === "bad_test",
@@ -428,7 +460,10 @@ export const dispatchStep = (k: Kernel, h: RunHandle, step: StepSpec, host: Host
   const agent = agentNameFor(step.role, step.mode);
   const pack = writeTaskPack(k.deps.repoRoot, packFor(k, h, step, actionId));
   const task = step.task === undefined ? undefined : h.state.tasks.get(step.task);
-  const cwd = task?.worktree === undefined ? k.deps.repoRoot : join(k.deps.repoRoot, task.worktree);
+  const cwd =
+    task?.worktree === undefined || runsInCheckout(step.role)
+      ? k.deps.repoRoot
+      : join(k.deps.repoRoot, task.worktree);
   const resume = step.resume !== undefined && step.resume.host === host ? step.resume : undefined;
   step.onDispatch?.();
   k.emit(h, {
@@ -485,6 +520,9 @@ export const dispatchNow = async (
   call: CallContext,
 ): Promise<LeadAction[]> => {
   if (h.state.run.paused || h.state.run.finished_at !== undefined) return [];
+  // Runs that ended without a check (a failure, a limit, a restart) are checked before a new
+  // baseline is recorded; a git change made while a role runs stops everything (AD-7 rule 7).
+  if ((await sweepCheckouts(k, h)).issues.length > 0 || checkGitNow(k, h)) return [];
   if (limitWait(k, h) !== null) return [];
   const host = k.hostFor(call);
   const config = k.config();
@@ -507,15 +545,24 @@ export const dispatchNow = async (
   }
   const actions: LeadAction[] = [];
   let free = config.concurrency - inFlight(h.state).length;
-  // Phase roles write in the user's checkout: record it before the Lead can start one, so
-  // `submit` can verify every write (AD-7 rule 7).
+  // Checkout roles write in the user's checkout: record it before the Lead can start one, so
+  // every write can be verified when the run ends (AD-7 rule 7).
   let checkout: CheckoutRecord | undefined;
   for (const step of pendingSteps(k, h, host)) {
     if (free <= 0) break;
-    if (step.task === undefined) checkout ??= await recordCheckout(k.deps.repoRoot);
+    const inCheckout = runsInCheckout(step.role);
+    if (inCheckout) checkout ??= await recordCheckout(k.deps.repoRoot);
     const action = dispatchStep(k, h, step, host);
-    if (step.task === undefined && checkout !== undefined && action.type === "spawn_role") {
-      saveCheckoutRecord(k.deps.repoRoot, k.checkouts, action.action_id, checkout);
+    if (inCheckout && checkout !== undefined && action.type === "spawn_role") {
+      // A BA answering a task's gap: the spec's ids now, to tell wording from meaning (§6.2).
+      const record =
+        step.role === "ba" && step.task !== undefined
+          ? {
+              ...checkout,
+              spec_ids: frozenSpecItems(k.deps.repoRoot, h.state).map((i) => i.id),
+            }
+          : checkout;
+      saveCheckoutRecord(k.deps.repoRoot, k.checkouts, action.action_id, record);
     }
     actions.push(action);
     free -= 1;

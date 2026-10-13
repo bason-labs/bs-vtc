@@ -59,9 +59,12 @@ export { Engine, type EventListener } from "./engine.js";
 export { EngineError, type CallContext, type EngineCoreDeps, type RunHandle } from "./kernel.js";
 export {
   BUILTIN_ROLES,
+  compiledRoleContracts,
   createRoleRegistry,
   DEFAULT_TIER_MODELS,
   resolveModel,
+  ROLE_CONTRACTS_ASSET,
+  RoleContractsError,
   type RoleRegistry,
 } from "./roles.js";
 export {

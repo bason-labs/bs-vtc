@@ -1,6 +1,8 @@
 /** Config loading (`project.yaml`, `gates.yml`), the YAML reader, claim checks and graph states. */
+import { readFileSync } from "node:fs";
+import { fileURLToPath } from "node:url";
 import { afterEach, describe, expect, it } from "vitest";
-import { ProjectConfigSchema, type Task } from "@vtc/shared";
+import { GatesConfigSchema, ProjectConfigSchema, type Task } from "@vtc/shared";
 import {
   ConfigError,
   loadGatesConfig,
@@ -17,6 +19,65 @@ import { createGitOps } from "../../src/git/index.js";
 import { DEFAULT_GATES_YML } from "../helpers/engine-harness.js";
 
 afterEach(cleanupDirs);
+
+describe("gates.yml as vtc calibrate writes it (block YAML of a YAML library)", () => {
+  it("reads the calibrated fixture into exactly the config it describes", () => {
+    const repo = initRepo({
+      ".vtc/gates.yml": readFileSync(
+        fileURLToPath(new URL("../fixtures/gates-calibrated.yml", import.meta.url)),
+        "utf8",
+      ),
+    });
+    const config = loadGatesConfig(repo);
+    expect(config).toEqual(
+      GatesConfigSchema.parse({
+        version: 1,
+        baseline: {
+          revision: "4f1c2a9e8b7d6c5f4e3d2c1b0a9f8e7d6c5b4a39",
+          calibrated_at: "2026-10-13T08:00:00.000Z",
+          confirmed: true,
+          flaky_tests: ["tests/api.test.ts > reset > retries: twice", "tests/ui.test.ts"],
+        },
+        sources: ["gates_yml", "task_runner", "ci"],
+        tests: {
+          acceptance_globs: ["tests/acceptance/**", "**/*.acceptance.test.ts"],
+          protected_configs: ["vitest.config.ts", "eslint.config.js"],
+        },
+        gates: [
+          {
+            id: "install",
+            layer: "L0",
+            command: ["pnpm", "install", "--frozen-lockfile"],
+            phase: "install",
+            timeout_s: 600,
+          },
+          { id: "typecheck", layer: "L0", command: ["pnpm", "typecheck"] },
+          {
+            id: "tests",
+            layer: "L2",
+            command: [
+              "pnpm",
+              "vitest",
+              "run",
+              "--reporter=junit",
+              "--outputFile=.vtc/state/gates/junit #1.xml",
+            ],
+            cwd: "packages/app",
+            timeout_s: 1800,
+            report: { format: "junit", path: ".vtc/state/gates/junit.xml" },
+          },
+          {
+            id: "checkov",
+            layer: "L4",
+            command: ["checkov", "-d", "infra"],
+            when_changed: ["*.tf", "infra/**"],
+          },
+          { id: "arch", layer: "L6", command: ["pnpm", "depcruise"], blocking: false },
+        ],
+      }),
+    );
+  });
+});
 
 describe("YAML reader", () => {
   it("reads block mappings, sequences, flow collections, quoting and comments", () => {

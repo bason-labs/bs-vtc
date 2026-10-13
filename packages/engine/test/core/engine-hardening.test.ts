@@ -85,16 +85,23 @@ describe("phase roles: every write verified, the run's config frozen (AD-7 rule 
     const issues = (out.rejection?.issues ?? []).join("\n");
     expect(issues).toContain("src/backdoor.ts was written outside");
     expect(issues).toContain(".vtc/project.yaml was written outside");
-    // the edit changes nothing in this run: the run pauses and says so
+    // nothing is re-dispatched over writes no one has looked at: the run pauses with the paths
     expect(h.engine.config()).toMatchObject({ concurrency: 2, merge_level: 2 });
     expect(h.engine.status({}).run.paused).toBe(true);
-    expect(JSON.stringify(events(h).filter((e) => e.type === "run.paused"))).toContain(
-      "keeps the config it started with",
-    );
-    // a restart keeps the frozen config (from the kept copy) and does not pause again
+    const pauses = JSON.stringify(events(h).filter((e) => e.type === "run.paused"));
+    expect(pauses).toContain("src/backdoor.ts was written outside");
+    expect(spawns(await next(h))).toEqual([]);
+    // a restart keeps the frozen config (from the kept copy) and the pause
     await h.engine.settle();
     const engine = h.reopen();
     Object.assign(h, { engine });
+    expect(engine.config()).toMatchObject({ concurrency: 2, merge_level: 2 });
+    expect(engine.status({}).run.paused).toBe(true);
+    // the human resumes: the checkout is taken as it is; the config edit is then said on its own
+    await engine.resume({});
+    expect(JSON.stringify(events(h).filter((e) => e.type === "run.paused"))).toContain(
+      "keeps the config it started with",
+    );
     expect(engine.config()).toMatchObject({ concurrency: 2, merge_level: 2 });
     await engine.resume({});
     const again = only(await next(h), "repo_cartographer");

@@ -8,6 +8,12 @@
  */
 export { createGitOps, parseNameStatus, CHECKOUTS_DIR } from "./git-ops.js";
 export {
+  fingerprintChanges,
+  GitConfigChangedError,
+  gitConfigFingerprint,
+  gitDirOf,
+} from "./git-config.js";
+export {
   createWorkspace,
   WORKTREES_DIR,
   WorktreeError,
@@ -18,8 +24,12 @@ export {
   appendRepoFile,
   assertNoSymlinks,
   ensureRepoDir,
+  observeRepoWrites,
+  removeRepoFile,
   UnsafePathError,
   writeRepoFile,
+  type RepoWrite,
+  type RepoWriteObserver,
 } from "./repo-files.js";
 export {
   ciFromRollup,
@@ -28,4 +38,11 @@ export {
   type PullRequestRequest,
   type PullRequestService,
 } from "./pull-requests.js";
-export { GitError, gitText, runGit, type GitResult, type GitRunOptions } from "./exec.js";
+export {
+  GitError,
+  gitText,
+  runGit,
+  setGitPreflight,
+  type GitResult,
+  type GitRunOptions,
+} from "./exec.js";

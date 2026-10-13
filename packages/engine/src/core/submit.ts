@@ -30,11 +30,20 @@ import { budgetState, sharesExceeded, taskBudgetFor, usd } from "./budget.js";
 import { DEFAULT_ACCEPTANCE_GLOBS } from "./config.js";
 import { resolves, unresolved } from "./evidence.js";
 import { matchesAny } from "./globs.js";
-import { protectedFiles, startBaseCheck, startRoundGates } from "./jobs.js";
+import { adoptGateOutput, protectedFiles, startBaseCheck, startRoundGates } from "./jobs.js";
 import type { Kernel, RunHandle } from "./kernel.js";
 import { recordLimit } from "./limits.js";
 import { openTaskEscalation, parkTask, setTaskStatus } from "./parking.js";
-import { changedPaths, loadCheckoutRecord, outsideScope, recordCheckout } from "./phase-scope.js";
+import { checkRunWrites, reportWrites, sweepCheckouts, writePathsOf } from "./checkout-guard.js";
+import { dropCheckoutRecord, runsInCheckout, type WriteFindings } from "./phase-scope.js";
+import {
+  clarifications,
+  frozenFor,
+  isClarifier,
+  MAX_CLARIFICATIONS,
+  openChangeRequest,
+  resolveGaps,
+} from "./clarify.js";
 import { checkPlan } from "./plan-check.js";
 import {
   consecutiveFailures,
@@ -379,41 +388,6 @@ const createPlan = (
   });
 };
 
-/** A role run's effective write paths (its mode's, else the role's). */
-const writePathsOf = (k: Kernel, run: Pick<RoleRunRecord, "role" | "mode">): readonly string[] => {
-  const contract = k.deps.roles.get(run.role);
-  if (contract === undefined) return [];
-  const effective = resolveRoleMode(contract, run.mode);
-  return effective.ok ? effective.contract.tools.write_paths : [];
-};
-
-/**
- * Every write a phase role made in the user's checkout since its dispatch (AD-7 rule 7): the
- * paths outside its effective write paths, and those of phase roles running alongside it.
- */
-const phaseWriteIssues = async (k: Kernel, h: RunHandle, run: RoleRunRecord): Promise<string[]> => {
-  const before = loadCheckoutRecord(k.deps.repoRoot, k.checkouts, run.action_id);
-  if (before === undefined)
-    return [
-      "the engine has no record of the checkout at dispatch, so the writes cannot be verified",
-    ];
-  const changed = await changedPaths(
-    k.deps.repoRoot,
-    before,
-    await recordCheckout(k.deps.repoRoot),
-  );
-  const concurrent = [...h.state.roleRuns.values()].filter(
-    (r) =>
-      r.task === undefined &&
-      r.action_id !== run.action_id &&
-      (r.status === "in_flight" || (r.closedSeq ?? 0) > run.seq),
-  );
-  const allowed = [...writePathsOf(k, run), ...concurrent.flatMap((r) => writePathsOf(k, r))];
-  return outsideScope(changed, allowed).map(
-    (path) => `${path} was written outside the role's write paths`,
-  );
-};
-
 const acceptPhaseRole = async (
   k: Kernel,
   h: RunHandle,
@@ -422,8 +396,6 @@ const acceptPhaseRole = async (
 ): Promise<StepOutcome> => {
   const contract = k.deps.roles.get(run.role);
   const writePaths = writePathsOf(k, run);
-  const undeclared = await phaseWriteIssues(k, h, run);
-  if (undeclared.length > 0) return reject("write_scope", undeclared);
   const issues: string[] = [];
   const artifacts: ArtifactRef[] = [];
   for (const artifact of result.artifacts) {
@@ -625,6 +597,7 @@ const outOfScopeGuards = async (
       expect: "pass",
       include_hidden: false,
     });
+    adoptGateOutput(k, report);
     k.emit(h, { type: "gate.result", actor: "engine", task: task.id, data: report });
     if (report.verdict === "infra_error")
       return ["the fault could not be reproduced: the gates failed to run (out_of_scope claim)"];
@@ -764,15 +737,38 @@ const acceptEngineer = async (
     };
   }
   if (result.exit === "spec_conflict") {
+    // Goes to the BA (§6.3 step 3) as a spec gap of this task; the human only after it.
     return {
       kind: "accept",
       after: () => {
-        parkTask(k, h, task.id, {
-          reason: "spec_conflict",
-          detail: result.conflict.detail,
-          evidence: result.conflict.req_ids.map((ref) => ({ type: "spec_ref" as const, ref })),
-          raisedBy: run.role,
-        });
+        const evidence = result.conflict.req_ids.map((ref) => ({ type: "spec_ref" as const, ref }));
+        if (clarifications(h.state, task.id) >= MAX_CLARIFICATIONS) {
+          parkTask(k, h, task.id, {
+            reason: "spec_conflict",
+            detail: result.conflict.detail,
+            evidence,
+            raisedBy: run.role,
+          });
+          return;
+        }
+        const spec = frozenFor(h.state, "ba")[0];
+        const finding = findingFromDraft(
+          {
+            rule_id: "spec_conflict",
+            category: "correctness",
+            kind: "spec_ambiguity",
+            title: `Spec conflict: ${result.conflict.req_ids.join(", ")}`.slice(0, 200),
+            message: result.conflict.detail,
+            confidence: 1,
+            location: { path: spec?.path ?? ".vtc/spec/spec.md" },
+            evidence: evidence[0] ?? { type: "file", ref: spec?.path ?? ".vtc/spec/spec.md" },
+            req_ids: result.conflict.req_ids,
+            snippet: result.conflict.detail,
+          },
+          run.role,
+          { task: task.id, round: Math.max(1, task.round) },
+        );
+        k.emit(h, { type: "finding.recorded", actor: "engine", task: task.id, data: { finding } });
       },
     };
   }
@@ -840,6 +836,118 @@ const acceptEngineer = async (
   };
 };
 
+/**
+ * A BA or Designer answering a task's gap (§6.3 steps 3 and 8; `clarify.ts`): a wording-only
+ * spec fix is `spec.clarified`, a change in meaning a change request, `blocked` a question for
+ * the human; then the task's Engineer continues.
+ */
+const acceptClarifier = async (
+  k: Kernel,
+  h: RunHandle,
+  run: RoleRunRecord,
+  role: "ba" | "designer",
+  task: Task,
+  result: RoleResult,
+): Promise<StepOutcome> => {
+  const writePaths = writePathsOf(k, run);
+  const issues: string[] = [];
+  const artifacts: ArtifactRef[] = [];
+  for (const artifact of result.artifacts) {
+    if (!matchesAny(writePaths, artifact.path))
+      issues.push(`${artifact.path} is outside the role's write paths`);
+    const sha = fileSha(k.deps.repoRoot, artifact.path);
+    if (sha === undefined) issues.push(`${artifact.path} does not exist`);
+    else artifacts.push({ ...artifact, sha256: sha });
+  }
+  if (issues.length > 0) return reject("write_scope", issues);
+  const missing = await unresolved(evidenceContext(k, h, null), result.claims);
+  if (missing.length > 0)
+    return reject(
+      "claim_check",
+      missing.map((m) => `does not resolve: ${m}`),
+    );
+  const frozen = frozenFor(h.state, role);
+  const changed = frozen.flatMap((f) => {
+    const sha = fileSha(k.deps.repoRoot, f.path);
+    return sha === f.sha256 ? [] : [{ frozen: f, sha }];
+  });
+  const route = role === "ba" ? "spec_gap" : "design_gap";
+  const gaps = taskFindings(h.state, task.id).filter(
+    (f) => f.status === "open" && f.route === route,
+  );
+  const detail = [result.summary, ...gaps.map((f) => `${f.route}: ${f.title}`)]
+    .join("; ")
+    .slice(0, 2000);
+  const artifact = role === "ba" ? "spec" : "design";
+  let meaning = result.exit === "spec_conflict";
+  if (result.exit === "done" && changed.length > 0) {
+    if (role === "designer") meaning = true;
+    else {
+      // Wording only: the same requirement and acceptance-criterion ids as at dispatch.
+      const before = k.checkouts.get(run.action_id)?.spec_ids;
+      const now = frozenSpecItems(k.deps.repoRoot, h.state).map((i) => i.id);
+      meaning =
+        before === undefined ||
+        before.length !== now.length ||
+        [...before].sort().join("\n") !== [...now].sort().join("\n");
+    }
+  }
+  return {
+    kind: "accept",
+    artifacts,
+    after: () => {
+      if (result.exit === "blocked") {
+        parkTask(k, h, task.id, {
+          reason: "blocked",
+          detail: result.summary.slice(0, 2000),
+          evidence: result.question.evidence,
+          question: result.question,
+          raisedBy: role,
+        });
+        return;
+      }
+      if (meaning) {
+        const target = changed[0]?.frozen ?? frozen[0];
+        if (target !== undefined) {
+          openChangeRequest(k, h, task.id, {
+            artifact,
+            frozen: target,
+            summary: result.summary,
+            detail,
+            raisedBy: role,
+          });
+          return;
+        }
+      }
+      if (meaning || result.exit !== "done") {
+        // nothing frozen to change, or no answer: the human decides
+        parkTask(k, h, task.id, {
+          reason: "spec_conflict",
+          detail,
+          evidence: gaps.slice(0, 5).map((f) => f.evidence),
+          raisedBy: role,
+        });
+        return;
+      }
+      for (const c of changed) {
+        if (c.sha === undefined) continue;
+        k.emit(h, {
+          type: "spec.clarified",
+          actor: "engine",
+          task: task.id,
+          data: {
+            path: c.frozen.path,
+            old_sha256: c.frozen.sha256,
+            new_sha256: c.sha,
+            summary: (result.summary.trim() || "wording clarified").slice(0, 300),
+          },
+        });
+      }
+      resolveGaps(k, h, task.id, [route]);
+    },
+  };
+};
+
 const acceptReviewer = async (
   k: Kernel,
   h: RunHandle,
@@ -894,9 +1002,11 @@ const outOfOrder = (h: RunHandle, run: RoleRunRecord, task: Task | undefined): s
   const expected: readonly string[] =
     run.role === "engineer"
       ? ["building", "fixing"]
-      : run.role === "qa" && run.mode === "author"
-        ? ["ready", "fixing"]
-        : ["verifying"];
+      : isClarifier(run.role)
+        ? ["tests_authored", "building", "fixing"]
+        : run.role === "qa" && run.mode === "author"
+          ? ["ready", "fixing"]
+          : ["verifying"];
   return expected.includes(task.status) ? null : `task ${task.id} is ${task.status}`;
 };
 
@@ -962,16 +1072,34 @@ export const handleSubmit = async (
       rejection: rejection("stale_action", [`action ${input.action_id} is ${run.status}`]),
     };
   }
+  // A role that worked in the user's checkout: every write is checked before anything else, for
+  // a result and a failure alike (AD-7 rule 7); the record goes only once checked.
+  const writes: WriteFindings | null = runsInCheckout(run.role)
+    ? await checkRunWrites(k, h, run)
+    : null;
   if (input.kind === "failure") {
-    k.checkouts.delete(run.action_id);
     handleFailure(k, h, run, input.outcome);
+    if (writes !== null) {
+      reportWrites(k, h, run, writes);
+      dropCheckoutRecord(k.deps.repoRoot, k.checkouts, run.action_id);
+      // a limit interrupts every run in flight: theirs are checked now too
+      await sweepCheckouts(k, h);
+    }
     return { accepted: true };
   }
-  const outcome = await evaluate(k, h, run, input.result);
-  // The action is closed either way: its checkout record is no longer needed in memory.
-  k.checkouts.delete(run.action_id);
+  const outcome: StepOutcome =
+    writes !== null && writes.issues.length > 0
+      ? reject("write_scope", writes.issues)
+      : await evaluate(k, h, run, input.result);
+  if (outcome.kind === "reject") logRejection(k, h, run, outcome.rejection);
+  if (writes !== null) {
+    // nothing is re-dispatched over writes no one has looked at: the human resumes
+    reportWrites(k, h, run, writes);
+    dropCheckoutRecord(k.deps.repoRoot, k.checkouts, run.action_id);
+    if (writes.issues.length > 0)
+      return { accepted: false, rejection: rejection("write_scope", writes.issues) };
+  }
   if (outcome.kind === "reject") {
-    logRejection(k, h, run, outcome.rejection);
     const task = run.task;
     if (outcome.findings !== undefined && task !== undefined) {
       settleRound(
@@ -1020,6 +1148,7 @@ const evaluate = async (
   if (order !== null) return reject("out_of_order", [order]);
   if (task === undefined) return acceptPhaseRole(k, h, run, result);
   if (run.role === "engineer") return acceptEngineer(k, h, run, task, result);
+  if (isClarifier(run.role)) return acceptClarifier(k, h, run, run.role, task, result);
   if (run.role === "qa" && run.mode === "author") return acceptQaAuthor(k, h, run, task, result);
   if (isReviewer(run)) return acceptReviewer(k, h, run, task, result);
   return reject("dispatch_mismatch", [`role ${run.role} has no task step`]);

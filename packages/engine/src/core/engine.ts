@@ -5,11 +5,13 @@
  */
 import { createHash } from "node:crypto";
 import { existsSync, readFileSync, statSync } from "node:fs";
-import { writeRepoFile } from "../git/index.js";
+import { setGitPreflight, writeRepoFile } from "../git/index.js";
 import { join } from "node:path";
 import {
   dotenvValues,
+  eventLogPath,
   HOST_IDS,
+  parseEventLog,
   remainingPct,
   type ApproveInput,
   type AnswerInput,
@@ -46,7 +48,16 @@ import {
 } from "./config.js";
 import { dispatchNow, phaseRoles } from "./dispatch.js";
 import { parkEscalation } from "./escalations.js";
-import type { CheckoutRecord } from "./phase-scope.js";
+import {
+  acceptCheckout,
+  FORENSICS_DIR,
+  gitPreflight,
+  restoreCheckoutRecords,
+  restoreLog,
+  sweepCheckouts,
+} from "./checkout-guard.js";
+import { EngineWrites } from "./engine-writes.js";
+import { loadGitHold, type CheckoutRecord } from "./phase-scope.js";
 import { openEventLog, type EventDraft } from "./event-log.js";
 import {
   ensureWorkspace,
@@ -82,7 +93,7 @@ import { completedReviews, startTriage } from "./review.js";
 import { activeRun } from "./read-model.js";
 import { loadRuns } from "./run-store.js";
 import { schedule } from "./scheduler.js";
-import { applyEvent, emptyRunState, type RunState } from "./state.js";
+import { applyEvent, emptyRunState, projectRun, type RunState } from "./state.js";
 import { checkEngineerShare, handleSubmit } from "./submit.js";
 import { escalationListView, openEscalations, statusView } from "./views.js";
 
@@ -123,6 +134,8 @@ export class Engine implements Kernel {
   readonly usage = new Map<HostId, UsageSnapshot>();
   readonly identicalTree = new Map<string, boolean>();
   readonly checkouts = new Map<string, CheckoutRecord>();
+  readonly writes: EngineWrites;
+  gitHold: Readonly<Record<string, string>> | null = null;
   private readonly handles = new Map<string, RunHandle>();
   private readonly finished = new Map<string, RunState>();
   private readonly jobs = new Map<string, Promise<void>>();
@@ -133,15 +146,55 @@ export class Engine implements Kernel {
   /** Modification stamps of the config files when drift was last checked. */
   private driftStamps = "";
 
-  private constructor(readonly deps: EngineCoreDeps) {}
+  private constructor(readonly deps: EngineCoreDeps) {
+    this.writes = EngineWrites.open(deps.repoRoot);
+  }
 
-  /** Opens the engine on a repo: replays every run's log (AD-7 rule 5) and recovers its work. */
+  /**
+   * Opens the engine on a repo: replays every run's log (AD-7 rule 5) and recovers its work. A
+   * log that is not what the engine wrote (`EngineWrites`) is replayed only as far as it is (the
+   * rest is never applied), and its run pauses with the reason.
+   */
   static open(deps: EngineCoreDeps): Engine {
     const engine = new Engine(deps);
+    restoreCheckoutRecords(engine);
+    engine.gitHold = loadGitHold(deps.repoRoot);
+    setGitPreflight(deps.repoRoot, () => {
+      gitPreflight(engine);
+    });
     for (const loaded of loadRuns(deps.repoRoot)) {
-      const state = loaded.state;
+      let state = loaded.state;
+      const rel = eventLogPath(state.id);
+      const verdict = engine.writes.check(rel, { tolerateTail: true });
+      let tampered: string | undefined;
+      if (verdict.ok) {
+        if (verdict.tolerated === true) engine.writes.accept(rel); // a crash cut its ledger line
+      } else if (verdict.detail === "the engine never wrote it") {
+        engine.writes.accept(rel); // no ledger entry yet: taken as it is
+      } else {
+        tampered = verdict.detail;
+        const bytes = readFileSync(join(deps.repoRoot, rel));
+        const prefix = bytes.subarray(0, verdict.intactPrefix ?? bytes.byteLength);
+        const events = parseEventLog(prefix.toString("utf8")).events.filter(
+          (e) => e.run === state.id,
+        );
+        if (verdict.intactPrefix !== undefined && events.length > 0) {
+          // Only the engine's bytes are replayed; the rest is kept aside, never applied.
+          writeRepoFile(
+            deps.repoRoot,
+            `${FORENSICS_DIR}/${state.id}-open-${String(Date.now())}.jsonl`,
+            bytes,
+            0o600,
+          );
+          writeRepoFile(deps.repoRoot, rel, prefix);
+          state = projectRun(events);
+        } else {
+          engine.writes.accept(rel); // rewritten as a whole: rebuilt from it as it is
+        }
+      }
       for (const [host, snapshot] of state.usage) engine.usage.set(host, snapshot);
       if (state.run.finished_at !== undefined) {
+        // (a finished run's log, if changed, is back to the engine's bytes: nothing to resume)
         engine.finished.set(state.id, state);
         continue;
       }
@@ -151,6 +204,7 @@ export class Engine implements Kernel {
       });
       const handle: RunHandle = { state, log };
       engine.handles.set(state.id, handle);
+      if (tampered !== undefined) engine.reportLogOnOpen(handle, tampered);
       engine.restoreFrozenConfig(handle);
       const damaged = log.recovered.invalidLines.length > 0 || log.recovered.truncatedTail;
       const reported = state.events.some(
@@ -343,8 +397,33 @@ export class Engine implements Kernel {
     });
   }
 
+  /** The run's log was not what the engine wrote when the engine opened (see `open`). */
+  private reportLogOnOpen(handle: RunHandle, detail: string): void {
+    this.emit(handle, {
+      type: "incident.recorded",
+      actor: "engine",
+      data: {
+        kind: "log_corruption",
+        detail:
+          `${eventLogPath(handle.state.id)} was changed outside the engine while it was stopped (${detail}); only what the engine wrote was replayed (the changed file is kept under ${FORENSICS_DIR})`.slice(
+            0,
+            2000,
+          ),
+      },
+    });
+    this.emit(handle, {
+      type: "run.paused",
+      actor: "engine",
+      data: {
+        reason:
+          "the run's event log was changed outside the engine while it was stopped; only what the engine wrote was replayed (see the incident). Check the checkout, then vtc resume",
+      },
+    });
+  }
+
   emit(handle: RunHandle, draft: EventDraft): VtcEvent {
     const event = handle.log.append(draft);
+    const foreign = this.writes.foreign(eventLogPath(handle.state.id));
     applyEvent(handle.state, event);
     if (event.type === "run.started")
       writeRequestFile(this.deps.repoRoot, handle.state, this.secrets());
@@ -362,6 +441,9 @@ export class Engine implements Kernel {
         // a broken listener (an SSE client gone) never breaks the engine
       }
     }
+    // Someone else appended to the log since the engine's last append: rewritten at once.
+    if (foreign !== undefined && this.handles.has(handle.state.id))
+      restoreLog(this, handle, foreign);
     return event;
   }
 
@@ -1089,11 +1171,14 @@ export class Engine implements Kernel {
 
   /**
    * Resumes a paused or interrupted run (AD-4): role runs still marked in flight belong to a
-   * session that is gone, so they are closed and their steps re-dispatched.
+   * session that is gone, so they are closed and their steps re-dispatched. Their writes in the
+   * checkout are checked first; anything found keeps the run paused with the reason. Otherwise
+   * the human's resume takes the checkout as it is (`acceptCheckout`): the run's log is rewritten
+   * from the engine's own events, any other file the engine wrote is taken as it now is.
    */
   async resume(input: RunScopedInput): Promise<RunControlResult> {
     const handle = this.resolve(input.run);
-    return this.serial(handle, () => {
+    return this.serial(handle, async () => {
       const state = handle.state;
       for (const run of inFlight(state)) {
         this.emit(handle, {
@@ -1109,11 +1194,15 @@ export class Engine implements Kernel {
           },
         });
       }
-      if (state.run.paused)
+      // The superseded runs are checked first: what they wrote is said before anything is taken.
+      const found = await sweepCheckouts(this, handle);
+      if (found.issues.length === 0 && state.run.paused) {
+        acceptCheckout(this);
         this.emit(handle, { type: "run.resumed", actor: "human", data: { auto: false } });
+      }
       maybeAutoResume(this, handle);
       this.advance(handle);
-      return Promise.resolve({ run: state.id, paused: state.run.paused, phase: state.run.phase });
+      return { run: state.id, paused: state.run.paused, phase: state.run.phase };
     });
   }
 
