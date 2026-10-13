@@ -201,6 +201,8 @@ export interface Harness {
   readonly home: string;
   readonly base: string;
   readonly run: (request: Partial<GateRunRequestInput> & { head: string }) => Promise<GateReport>;
+  /** Like `run`, but hands the request to the runner unparsed (a malformed caller). */
+  readonly runUnparsed: (request: Record<string, unknown> & { head: string }) => Promise<GateReport>;
 }
 
 export const osvGate: Gate = {
@@ -291,6 +293,26 @@ export const harness = (
             ...partial,
           }),
         );
+      } finally {
+        await gitOps.removeCheckout(checkout);
+      }
+    },
+    runUnparsed: async (partial) => {
+      const checkout = await gitOps.createCleanCheckout(partial.head);
+      try {
+        const request = {
+          ...GateRunRequestSchema.parse({
+            run: "r1",
+            task: "T-1",
+            reason: "round",
+            scope: "affected",
+            base,
+            checkout,
+            head: partial.head,
+          }),
+          ...partial,
+        };
+        return await runner.run(request);
       } finally {
         await gitOps.removeCheckout(checkout);
       }

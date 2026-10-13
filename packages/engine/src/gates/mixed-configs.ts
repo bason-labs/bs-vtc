@@ -40,7 +40,8 @@ const PACKAGE_JSON_KEYS = ["scripts", "jest", "eslintConfig", "mocha", "ava", "c
 type Kind = "pyproject" | "package_json";
 
 const kindOf = (path: string): Kind | null => {
-  const name = posix.basename(path);
+  // Any letter case: a case-insensitive file system finds PyProject.toml as pyproject.toml.
+  const name = posix.basename(path).toLowerCase();
   return name === "pyproject.toml" ? "pyproject" : name === "package.json" ? "package_json" : null;
 };
 

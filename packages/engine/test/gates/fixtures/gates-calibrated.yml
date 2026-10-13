@@ -30,6 +30,8 @@ tests:
     - "**/pytest.ini"
     - "**/conftest.py"
     - "**/tox.ini"
+    - "**/tox.toml"
+    - "**/hatch.toml"
     - "**/setup.cfg"
     - "**/.flake8"
     - "**/ruff.toml"

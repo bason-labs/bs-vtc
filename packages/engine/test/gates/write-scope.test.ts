@@ -125,6 +125,59 @@ describe("config files a diff adds (§7.3, §7.6 rule 5)", () => {
   });
 });
 
+describe("protected configs in any letter case (case-insensitive file systems)", () => {
+  it("flags a config whose name differs from the canonical one only in case", async () => {
+    // On macOS APFS, Vitest's existsSync("vitest.config.ts") finds Vitest.config.ts and loads it.
+    const repo = initRepo({ "src/app.ts": "export const f = () => 1;\n" });
+    const base = git(repo, "rev-parse", "HEAD");
+    writeFile(repo, "packages/x/Vitest.config.ts", "export default { test: { include: [] } };\n");
+    writeFile(repo, "packages/x/TSConfig.json", "{}\n");
+    writeFile(repo, "py/Conftest.py", "collect_ignore = ['test_a.py']\n");
+    writeFile(repo, ".GitleaksIgnore", "src/app.ts\n");
+    writeFile(repo, "PyProject.toml", "[tool.ruff.lint]\nignore = ['ALL']\n");
+    writeFile(repo, "src/app.ts", "export const f = () => 2;\n");
+    const head = commitAll(repo, "case games");
+    const ops = createGitOps({ repoRoot: repo });
+    const scope = { ...request(base, head), protected: [], filesScope: ["**"] };
+    expect((await checkWriteScope(ops, scope)).violations).toEqual([
+      { kind: "new_suppression", path: ".GitleaksIgnore" },
+      { kind: "protected_modified", path: "PyProject.toml" },
+      { kind: "protected_modified", path: "packages/x/TSConfig.json" },
+      { kind: "protected_modified", path: "packages/x/Vitest.config.ts" },
+      { kind: "protected_modified", path: "py/Conftest.py" },
+    ]);
+    // A project's own protected globs match in any case too.
+    const custom = await checkWriteScope(ops, scope, ["**/conftest.py"]);
+    expect(custom.violations.map((v) => v.path)).toContain("py/Conftest.py");
+    // Only the exact path named in files_scope allows the change.
+    const planned = { ...scope, filesScope: ["**", "packages/x/Vitest.config.ts"] };
+    const left = (await checkWriteScope(ops, planned)).violations.map((v) => v.path);
+    expect(left).not.toContain("packages/x/Vitest.config.ts");
+    expect(left).toContain("packages/x/TSConfig.json");
+  });
+});
+
+describe("standalone tox and hatch configs", () => {
+  it("flags a changed tox.toml or hatch.toml under a ** files_scope", async () => {
+    const repo = initRepo({
+      "tox.toml": '[env.test]\ncommands = [["pytest"]]\n',
+      "sub/hatch.toml": '[envs.default.scripts]\ntest = "pytest"\n',
+      "src/app.py": "x = 1\n",
+    });
+    const base = git(repo, "rev-parse", "HEAD");
+    writeFile(repo, "tox.toml", '[env.test]\ncommands = [["true"]]\n');
+    writeFile(repo, "sub/hatch.toml", '[envs.default.scripts]\ntest = "true"\n');
+    writeFile(repo, "src/app.py", "x = 2\n");
+    const head = commitAll(repo, "weaken tox and hatch");
+    const ops = createGitOps({ repoRoot: repo });
+    const scope = { ...request(base, head), protected: [], filesScope: ["**"] };
+    expect((await checkWriteScope(ops, scope)).violations).toEqual([
+      { kind: "protected_modified", path: "sub/hatch.toml" },
+      { kind: "protected_modified", path: "tox.toml" },
+    ]);
+  });
+});
+
 describe("tool sections of pyproject.toml and package.json (§7.2 L1/L5)", () => {
   const PY = [
     "[project]",

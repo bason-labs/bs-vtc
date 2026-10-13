@@ -888,6 +888,54 @@ describe("scanner configs a diff adds (§7.2 L4/L5)", () => {
   });
 });
 
+describe("scanner configs in another letter case (case-insensitive file systems)", () => {
+  it("scans without a .GitleaksIgnore the diff added, and flags it in L5", async () => {
+    // On macOS, the scanner's existsSync(".gitleaksignore") would find .GitleaksIgnore.
+    const h = harness({ "src/old.ts": "export const a = 1;\n" }, config([leaksGate]));
+    writeFile(h.repo, "src/new.ts", "SECRET=newvalue654321\n");
+    writeFile(h.repo, ".GitleaksIgnore", "src/new.ts\n");
+    const head = commitAll(h.repo);
+    const report = await h.run({ head, files_scope: ["src/**", "*"] });
+    expect(gate(report, "secrets")).toMatchObject({ status: "fail", new_violations: 1 });
+    expect(gate(report, "write-scope").findings).toEqual([
+      expect.objectContaining({
+        rule_id: "new_suppression",
+        location: { path: ".GitleaksIgnore" },
+      }),
+    ]);
+  });
+});
+
+describe("a malformed request (the Gate Runner is the trust boundary for test material)", () => {
+  it("validates the request first and never joins a bad task id into a hidden-tests path", async () => {
+    const h = harness({ "tests/unit.json": cases([{ name: "[REQ-1] ok" }]) }, config([testsGate]));
+    // ~/.vtc/hidden/<repo-key>/../T-9 is outside the task directories.
+    const escaped = join(h.home, "hidden", "T-9", "tests/hidden");
+    mkdirSync(escaped, { recursive: true });
+    writeFileSync(join(escaped, "h.json"), cases([{ name: "[REQ-9] not this repo's" }]));
+    const report = await h.runUnparsed({
+      head: h.base,
+      layers: ["L2"],
+      include_hidden: true,
+      hidden_tasks: ["../T-9"],
+    });
+    GateReportSchema.parse(report);
+    expect(report.verdict).toBe("infra_error");
+    expect(report.results.map((r) => r.gate_id)).toEqual(["gate-runner"]);
+    expect(gate(report, "gate-runner")).toMatchObject({ status: "error", failure_class: "infra" });
+    expect(existsSync(join(h.repo, "tests/hidden/h.json"))).toBe(false);
+    const log = gate(report, "gate-runner").evidence[0]?.ref ?? "";
+    expect(read(h.repo, log)).toMatch(/request rejected.*hidden_tasks/s);
+  });
+
+  it("rejects hidden_tasks without include_hidden", async () => {
+    const h = harness({ "tests/unit.json": cases([{ name: "[REQ-1] ok" }]) }, config([testsGate]));
+    const report = await h.runUnparsed({ head: h.base, hidden_tasks: ["T-2"] });
+    expect(report.verdict).toBe("infra_error");
+    expect(report.results.map((r) => r.gate_id)).toEqual(["gate-runner"]);
+  });
+});
+
 describe("tool sections of pyproject.toml and package.json (§7.2 L1/L5)", () => {
   /** A fake ruff: flags "TODO" in changed files unless pyproject.toml ignores ALL. */
   const FAKE_RUFF = `
