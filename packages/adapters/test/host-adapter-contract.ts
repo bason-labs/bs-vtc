@@ -1,10 +1,11 @@
 /**
- * Reusable HostAdapter safety contract (AD-6, AD-9). Every adapter must pass it unchanged. The
- * adapters team runs it for both hosts as soon as each adapter implements these methods
- * (sub-project 3); until then `adapters.test.ts` lists it as a todo per host.
+ * Reusable HostAdapter safety contract (AD-6, AD-9). Every adapter must pass it unchanged; it
+ * runs for every adapter registered in `ADAPTER_FACTORIES` (`adapters.test.ts`).
  *
  * It checks everything an adapter hands to a host: sandbox settings and CLI arguments, the exact
- * headless command (fresh and resumed, every tool profile), and every file `install` writes.
+ * headless command (fresh and resumed, every tool profile), and every file `install` writes when
+ * it installs a compiled plugin (a synthetic one in the compiler's layout) into a temp home and
+ * project.
  */
 import { mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -18,6 +19,7 @@ import {
   type RoleTools,
   type SpawnRoleRequest,
 } from "@vtc/shared";
+import { writeFixturePlugin } from "./support/plugin-fixture.js";
 
 const PROFILES: readonly RoleTools[] = [
   { profile: "read_only", write_paths: [], engine_tools: [] },
@@ -87,8 +89,10 @@ export const runHostAdapterSafetyContract = (adapter: SafetyContractAdapter): vo
       const project = mkdtempSync(join(tmpdir(), "vtc-project-"));
       const pluginDir = mkdtempSync(join(tmpdir(), "vtc-plugin-"));
       dirs.push(home, project, pluginDir);
+      writeFixturePlugin(adapter.host, pluginDir);
       for (const scope of ["project", "user"] as const) {
         const result = await adapter.install({ projectRoot: project, pluginDir, scope, home });
+        expect(result.written.length).toBeGreaterThan(0);
         for (const path of result.written) {
           expect(path.startsWith(home) || path.startsWith(project), path).toBe(true);
           expect(findForbiddenInText(readFileSync(path, "utf8")), path).toEqual([]);

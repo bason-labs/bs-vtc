@@ -1,0 +1,3 @@
+{"type":"system","subtype":"init","session_id":"5f1c2a9e-0d3b-4e7a-9c61-2b8d4f0e7a13","model":"claude-sonnet-5","tools":["Read","Edit","Bash"],"cwd":"/work/app"}
+{"type":"system","subtype":"api_retry","attempt":1,"max_retries":10,"retry_delay_ms":2000,"error_status":429,"error":"rate_limit","session_id":"5f1c2a9e-0d3b-4e7a-9c61-2b8d4f0e7a13","uuid":"7d0e1f2a-0004-4000-8000-000000000004"}
+{"type":"system","subtype":"api_retry","attempt":2,"max_retries":10,"retry_delay_ms":4000,"error_status":429,"error":"rate_limit","session_id":"5f1c2a9e-0d3b-4e7a-9c61-2b8d4f0e7a13","uuid":"7d0e1f2a-0005-4000-8000-000000000005"}
