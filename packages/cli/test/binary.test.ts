@@ -5,7 +5,7 @@
  * with the reason in the suite name, only when Bun is not installed.
  */
 import { spawn, spawnSync, type ChildProcessWithoutNullStreams } from "node:child_process";
-import { existsSync, readFileSync } from "node:fs";
+import { existsSync, readdirSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
@@ -307,6 +307,57 @@ describe.skipIf(!HAS_BUN)(
         await new Promise((r) => setTimeout(r, 100));
       expect(pidAlive(discovery.pid)).toBe(false);
     }, 60_000);
+
+    it("bridges MCP outside a git repository without a daemon or .vtc/ (D-aq, reading 74)", async () => {
+      const dir = tempDir("vtc-nogit-");
+      const home = tempHome();
+      const child = run(["engine", "--mcp", "--host", "claude-code"], dir, home);
+      const out = lines(child);
+      const send = (message: unknown): void => {
+        child.stdin.write(`${JSON.stringify(message)}\n`);
+      };
+      send({
+        jsonrpc: "2.0",
+        id: 1,
+        method: "initialize",
+        params: {
+          protocolVersion: "2025-06-18",
+          capabilities: {},
+          clientInfo: { name: "t", version: "1" },
+        },
+      });
+      expect(JSON.parse(await out.next(/"id":1\b/))).toMatchObject({
+        result: { serverInfo: { name: "vtc" } },
+      });
+      send({ jsonrpc: "2.0", id: 2, method: "ping" });
+      expect(JSON.parse(await out.next(/"id":2\b/))).toMatchObject({ result: {} });
+      send({ jsonrpc: "2.0", id: 3, method: "tools/list" });
+      expect(
+        (JSON.parse(await out.next(/"id":3\b/)) as { result: { tools: unknown[] } }).result.tools,
+      ).toHaveLength(ENGINE_MCP_TOOLS.length);
+      send({
+        jsonrpc: "2.0",
+        id: 4,
+        method: "tools/call",
+        params: { name: "status", arguments: {} },
+      });
+      expect(JSON.parse(await out.next(/"id":4\b/))).toMatchObject({
+        result: {
+          isError: true,
+          content: [
+            {
+              text: expect.stringContaining(
+                "not in a git repository: run git init, then vtc init",
+              ) as string,
+            },
+          ],
+        },
+      });
+      child.stdin.end();
+      expect(await exited(child)).toBe(0);
+      expect(readdirSync(dir)).toEqual([]);
+      expect(readdirSync(home)).toEqual([]);
+    }, 30_000);
 
     it("runs plugin hooks fast and fails open without an engine", () => {
       const repo = initRepo();

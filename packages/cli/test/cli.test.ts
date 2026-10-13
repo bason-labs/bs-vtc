@@ -95,8 +95,10 @@ describe("composition seam (AD-19)", () => {
       return Promise.resolve(client);
     });
     expect(connects).toBe(0);
-    expect(await ctx.engine()).toBe(client);
-    await ctx.engine();
+    const opened = await ctx.engine();
+    // the same client each time, wrapped so it never calls a human-only tool (D-an)
+    await expect(opened.call("status", {})).rejects.toThrow("unused");
+    expect(await ctx.engine()).toBe(opened);
     expect(connects).toBe(1);
   });
   it("resolves the VTC home from $VTC_HOME or ~/.vtc", () => {

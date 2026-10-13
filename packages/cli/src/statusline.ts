@@ -103,7 +103,8 @@ export const MAX_FORWARD_BYTES = 256 * 1024;
 /**
  * Runs the shim: the user's statusline output (and exit code) unchanged, usage forwarded. Usage
  * is forwarded whatever the arguments; arguments that are not the frozen form run nothing and
- * exit 64 with the usage on stderr.
+ * exit `STATUSLINE_TEE.usageExit` (64) with the usage on stderr, and the statusline shows
+ * `STATUSLINE_TEE.misconfiguredLine` so the problem is visible (D-as, spine §5 reading 76).
  */
 export const runStatuslineTee = async (
   args: readonly string[],
@@ -116,7 +117,11 @@ export const runStatuslineTee = async (
       ? forwardStatusline(stdin, deps)
       : Promise.resolve(false),
     "error" in parsed
-      ? Promise.resolve<CommandOutput>({ code: 64, stdout: "", stderr: `${parsed.error}\n` })
+      ? Promise.resolve<CommandOutput>({
+          code: STATUSLINE_TEE.usageExit,
+          stdout: `${STATUSLINE_TEE.misconfiguredLine}\n`,
+          stderr: `${parsed.error}\n`,
+        })
       : parsed.command === null
         ? Promise.resolve<CommandOutput>({ code: 0, stdout: "", stderr: "" })
         : deps.runCommand(parsed.command, stdin),

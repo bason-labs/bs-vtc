@@ -1,30 +1,83 @@
 /**
- * `vtc engine --mcp --host <host>` (AD-12 rule 3; spine §5 reading proposed by the cli+binary
- * team): in a repo set up with `vtc init`, find or start the repo's daemon and relay bytes
- * (`mcp.runStdioBridge`). The plugins are user-scoped, so this bridge also runs in every repo a
- * host session opens; in a repo without `.vtc/project.yaml` it starts no daemon (a daemon creates
+ * `vtc engine --mcp --host <host>` (AD-12 rule 3; spine §5 readings 58 and 74): in a repo set up
+ * with `vtc init`, find or start the repo's daemon and relay bytes. The plugins are user-scoped,
+ * so this bridge also runs in every directory a host session opens; in a repo without
+ * `.vtc/project.yaml`, or outside any git repository, it starts no daemon (a daemon creates
  * `.vtc/state/` in the user's repo) and answers MCP itself instead:
  * - `initialize`, `ping` and `tools/list` (the frozen tool list, so the host knows the tools);
- * - `tools/call` with a tool error that says to run `vtc init`, until the repo is set up. The
- *   first call after `vtc init` starts the daemon, replays the session's `initialize` to it
- *   (its answer is swallowed: the host already has one), and from then on relays bytes.
+ * - `tools/call` with a tool error: outside a git repository always {@link NOT_A_GIT_REPO}; in a
+ *   repo, one that says to run `vtc init`, until the repo is set up. The first call after
+ *   `vtc init` starts the daemon, replays the session's `initialize` to it (its answer is
+ *   swallowed: the host already has one), and from then on relays bytes.
+ * The bridge's hello carries the host session's sandbox state (`session_sandbox`, D-an, reading
+ * 71) when the daemon speaks contracts 4.3.0 or later (an older daemon's strict hello would
+ * refuse the field).
  * Messages are newline-delimited JSON-RPC, MCP's stdio framing (`ENGINE_SOCKET`).
  */
 import type { Socket } from "node:net";
 import type { Readable, Writable } from "node:stream";
 import { StringDecoder } from "node:string_decoder";
 import { mcp } from "@vtc/engine";
-import { CONTRACTS_VERSION, ENGINE_SOCKET, type HostId } from "@vtc/shared";
+import {
+  CONTRACTS_VERSION,
+  ENGINE_SOCKET,
+  type EngineDiscovery,
+  type EngineSocketHello,
+  type HostId,
+  type SessionSandboxState,
+} from "@vtc/shared";
+
+/** The tool error for every `tools/call` outside a git repository (reading 74). */
+export const NOT_A_GIT_REPO = "not in a git repository: run git init, then vtc init";
+
+/** The contracts version that added the hello's `session_sandbox` (and the cli's human-channel field). */
+export const HELLO_FIELDS_SINCE = "4.3.0";
+
+/** True when `version` (MAJOR.MINOR.PATCH) is `min` or later. */
+export const contractsAtLeast = (version: string, min: string): boolean => {
+  const a = version.split(".").map(Number);
+  const b = min.split(".").map(Number);
+  for (let i = 0; i < 3; i += 1) {
+    const x = a[i] ?? 0;
+    const y = b[i] ?? 0;
+    if (x !== y) return x > y;
+  }
+  return true;
+};
+
+/**
+ * The bridge's hello: `session_sandbox` only when there is one to report and the daemon
+ * (`daemonContracts`, its discovery record's `contracts_version`) knows the field.
+ */
+export const bridgeHello = (
+  host: HostId,
+  daemonContracts: string,
+  sessionSandbox: SessionSandboxState | undefined,
+): EngineSocketHello => ({
+  v: 1,
+  client: "bridge",
+  host,
+  contracts_version: CONTRACTS_VERSION,
+  ...(sessionSandbox !== undefined && contractsAtLeast(daemonContracts, HELLO_FIELDS_SINCE)
+    ? { session_sandbox: sessionSandbox }
+    : {}),
+});
 
 export interface BridgeOptions {
-  readonly repoRoot: string;
+  /** The repo root (`findRepoRoot`), or `null` outside a git repository. */
+  readonly repoRoot: string | null;
   readonly host: HostId;
   readonly stdin: Readable;
   readonly stdout: Writable;
   /** True once `vtc init` set the repo up (`isVtcProject`). */
   readonly initialised: () => boolean;
-  /** Finds or starts the repo's daemon; resolves its MCP socket path. */
-  readonly daemonSocket: () => Promise<string>;
+  /** Finds or starts the repo's daemon; resolves its discovery record. */
+  readonly daemon: () => Promise<Pick<EngineDiscovery, "mcp_socket" | "contracts_version">>;
+  /**
+   * The host session's sandbox state for the hello (`claudeSessionSandboxState` on Claude Code);
+   * `undefined` reports nothing (the engine reads that as `unknown`).
+   */
+  readonly sessionSandbox?: () => SessionSandboxState | undefined;
   /** `serverInfo.version` while the bridge answers by itself. */
   readonly serverVersion: string;
 }
@@ -62,15 +115,39 @@ const negotiate = (params: unknown): string => {
     : mcp.MCP_PROTOCOL_VERSION;
 };
 
+/** Finds or starts the daemon and completes the hello; resolves the socket and leftover bytes. */
+const connectDaemon = async (options: BridgeOptions): Promise<{ socket: Socket; rest: Buffer }> => {
+  const daemon = await options.daemon();
+  const { socket, rest } = await mcp.handshake(
+    daemon.mcp_socket,
+    bridgeHello(options.host, daemon.contracts_version, options.sessionSandbox?.()),
+  );
+  socket.on("error", () => socket.destroy());
+  return { socket, rest };
+};
+
+/** Hello, welcome, then bytes copied both ways unparsed; resolves when either side closes. */
+const relay = async (options: BridgeOptions): Promise<void> => {
+  const { stdin, stdout } = options;
+  const { socket, rest } = await connectDaemon(options);
+  if (rest.length > 0) stdout.write(rest);
+  stdin.pipe(socket);
+  socket.pipe(stdout, { end: false });
+  await new Promise<void>((resolve) => {
+    const done = (): void => {
+      stdin.unpipe(socket);
+      socket.destroy();
+      resolve();
+    };
+    socket.once("close", done);
+    stdin.once("end", done);
+  });
+};
+
 /** The bridge for `vtc engine --mcp`; resolves when either side closes. */
 export const runBridge = async (options: BridgeOptions): Promise<void> => {
-  if (options.initialised()) {
-    await mcp.runStdioBridge({
-      path: await options.daemonSocket(),
-      host: options.host,
-      stdin: options.stdin,
-      stdout: options.stdout,
-    });
+  if (options.repoRoot !== null && options.initialised()) {
+    await relay(options);
     return;
   }
   await runDeferredBridge(options);
@@ -143,13 +220,7 @@ const runDeferredBridge = (options: BridgeOptions): Promise<void> =>
 
     /** Starts the daemon and turns into a byte relay; the pending call is the first it gets. */
     const switchOver = async (pending: string): Promise<boolean> => {
-      const { socket, rest } = await mcp.handshake(await options.daemonSocket(), {
-        v: 1,
-        client: "bridge",
-        host: options.host,
-        contracts_version: CONTRACTS_VERSION,
-      });
-      socket.on("error", () => socket.destroy());
+      const { socket, rest } = await connectDaemon(options);
       try {
         const answered = replayedInitialize(socket, (line) => stdout.write(line));
         if (rest.length > 0) socket.emit("data", rest);
@@ -220,6 +291,10 @@ const runDeferredBridge = (options: BridgeOptions): Promise<void> =>
           reply(id, { result: { tools: mcp.toolDefinitions() } });
           return false;
         case "tools/call":
+          if (options.repoRoot === null) {
+            toolError(id, NOT_A_GIT_REPO);
+            return false;
+          }
           if (!options.initialised()) {
             toolError(
               id,
