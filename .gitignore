@@ -3,3 +3,9 @@
 claude-session-*.zip
 # VTC local state (when the product runs here)
 .vtc/state/
+# build + tooling output
+node_modules/
+dist/
+.turbo/
+coverage/
+*.tsbuildinfo

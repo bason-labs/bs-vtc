@@ -1,0 +1,9 @@
+node_modules
+dist
+coverage
+.turbo
+pnpm-lock.yaml
+docs/research
+docs/superpowers
+.vtc
+packages/shared/schemas
