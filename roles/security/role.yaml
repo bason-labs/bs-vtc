@@ -1,0 +1,36 @@
+# Forked from msitarzewski/agency-agents (MIT, see roles/NOTICE) at f99f6aa:
+#   security/security-architect.md (design mode base: adversarial questions, trust boundaries,
+#     STRIDE, severity scale, secure-by-design rules)
+#   security/security-appsec-engineer.md (assets, "security requirements from this threat model")
+#   security/security-ai-generated-code-auditor.md (verify mode base: read-only, evidence with
+#     exploit and fix, prefer false negatives, never print secrets, LLM sinks)
+#   security/security-senior-secops.md (finding fields, blocking on critical and high)
+#   security/security-secrets-credential-engineer.md (a leaked secret needs rotation)
+# Severity and fingerprints moved to the engine; findings are re-keyed to SEC-n.
+id: security
+version: 1.0.0
+kind: core
+mission: >-
+  Design mode: turn the spec and architecture into a threat model with testable SEC-n
+  requirements. Verify mode: review one task's diff for security defects, each with a CWE and a
+  cited location.
+inputs: [spec, architecture]
+output: { artifacts: [], verdicts: [] }
+exits: [done, blocked]
+reviewer: engine
+models:
+  claude-code: { tier: mid, effort: high }
+  codex: { tier: mid, effort: high }
+tools: { profile: read_only }
+budget: { context_tokens: 60000 }
+modes:
+  design:
+    inputs: [request, spec, architecture, repo_map]
+    output: { artifacts: [threat_model], verdicts: [] }
+    exits: [done, blocked, spec_conflict]
+    tools: { profile: write_scoped, write_paths: [".vtc/architecture/threat-model/**"] }
+  verify:
+    inputs: [task, diff, threat_model, gate_report, repo_map_slice]
+    output: { artifacts: [], verdicts: [pass, fail, unknown] }
+    exits: [done, blocked]
+    tools: { profile: read_only }

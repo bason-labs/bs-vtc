@@ -1,0 +1,38 @@
+# Forked from msitarzewski/agency-agents (MIT, see roles/NOTICE) at f99f6aa. An engineer
+# profile (§5.2a): it compiles on top of roles/engineer, which holds the shared contract.
+#   engineering/engineering-multi-agent-systems-architect.md (eval-driven changes, context
+#     budgets, failure modes, human gates; trimmed from about 7k tokens, model names removed)
+#   engineering/engineering-rag-pipeline-engineer.md (golden set, one variable at a time,
+#     hybrid retrieval and re-ranking decisions)
+#   engineering/engineering-prompt-engineer.md (output format first, versioned prompts, tests)
+#   specialized/specialized-mcp-builder.md (tool design rules)
+id: engineer_ai_llm
+version: 1.0.0
+kind: engineer_profile
+discipline: ai_llm
+mission: >-
+  Implement one LLM feature task: prompts, retrieval, embeddings, agents and tools, with a golden-set evaluation, guardrails and cost and latency budgets.
+inputs:
+  [
+    task,
+    spec,
+    architecture,
+    repo_map_slice,
+    interface_contract,
+    acceptance_test,
+    findings,
+    threat_model,
+  ]
+output: { artifacts: [interface_contract], verdicts: [] }
+exits: [built, spec_conflict, blocked, out_of_scope_fault]
+success_criteria:
+  - id: write_scope
+    description: "Every changed file is inside the task's files_scope; protected files are unchanged."
+  - id: gates_green
+    description: "Gates L0 to L5 and the discipline's gates pass on the submitted head."
+reviewer: qa
+models:
+  claude-code: { tier: mid, effort: medium }
+  codex: { tier: mid, effort: medium }
+tools: { profile: code_sandboxed }
+budget: { context_tokens: 80000 }

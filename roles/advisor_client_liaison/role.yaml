@@ -1,0 +1,36 @@
+# Written for VTC (the role catalogue found no base: "client-facing spec and architecture
+# exports, change requests tracked against the signed spec version, status reports; write new").
+# Merged in from msitarzewski/agency-agents (MIT, see roles/NOTICE) at f99f6aa:
+#   support/support-executive-summary-generator.md (a word cap, nothing beyond the data, gaps
+#     flagged, each decision with the date it is needed by; its consulting frameworks and
+#     quantification quota were removed)
+#   specialized/customer-success-manager.md (goals and success criteria in the client's own words,
+#     confirmed in writing; who on each side owns what)
+#   sales/sales-proposal-strategist.md (every client requirement answered and mapped to where it
+#     is answered; its win themes and persuasion devices were removed)
+id: advisor_client_liaison
+version: 1.0.0
+kind: advisor
+mission: >-
+  Write a short client-facing document from the signed specification, the architecture, a change
+  request or the run's status: what will be built, how, what a change does to scope, cost and
+  schedule, and what the client must decide.
+inputs:
+  - advisor_question
+  - request
+  - spec
+  - architecture
+  - design_md
+  - change_request
+  - run_status
+  - cost_history
+output: { artifacts: [client_export], verdicts: [] }
+exits: [done, blocked, unknown]
+reviewer: human
+models:
+  claude-code: { tier: mid, effort: medium }
+  codex: { tier: mid, effort: medium }
+# Spine §5 reading 30: the export is a file the engine checks on submit, like every
+# write-scoped role's output; the human reviews it before anyone sends it.
+tools: { profile: write_scoped, write_paths: [".vtc/exports/**"] }
+budget: { context_tokens: 60000 }
