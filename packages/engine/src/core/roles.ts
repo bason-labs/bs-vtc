@@ -20,10 +20,16 @@ import {
   type RoleContract,
 } from "@vtc/shared";
 
-/** Model id per tier and host, used when `project.yaml` sets none (`hosts.models`). */
-export const DEFAULT_TIER_MODELS: Readonly<Record<HostId, Readonly<Record<ModelTier, string>>>> = {
+/**
+ * Model id per tier and host, used when `project.yaml` sets none (`hosts.models`). Codex has no
+ * built-in ids until a spike names them (spine §5 readings 26 and 51, D-ae): a Codex role with no
+ * explicit or project model runs on the host session's model with only the resolved effort.
+ */
+export const DEFAULT_TIER_MODELS: Readonly<
+  Record<HostId, Readonly<Partial<Record<ModelTier, string>>>>
+> = {
   "claude-code": { top: "opus", mid: "sonnet", low: "haiku" },
-  codex: { top: "gpt-5-codex", mid: "gpt-5-codex", low: "gpt-5-codex-mini" },
+  codex: {},
 };
 
 /** The roles the engine's flow dispatches by id (§6.1, §6.3): a compiled set must cover them. */
@@ -118,7 +124,10 @@ export const roleTier = (contract: RoleContract, host: HostId, mode?: string): M
   return models[host].tier;
 };
 
-/** A concrete model for a role run (AD-6 rule 2): explicit role model, project map, built-in map. */
+/**
+ * The model of a role run (AD-6 rule 2): explicit role model, project map, built-in map. Without
+ * any of them `model` is absent: the host session's default model runs it (spine §5 reading 51).
+ */
 export const resolveModel = (
   contract: RoleContract,
   host: HostId,
@@ -132,9 +141,6 @@ export const resolveModel = (
   const tier = options.tier ?? entry.tier;
   const explicit =
     options.tier === undefined || options.tier === entry.tier ? entry.model : undefined;
-  return {
-    tier,
-    effort: entry.effort,
-    model: explicit ?? config.hosts.models?.[host]?.[tier] ?? DEFAULT_TIER_MODELS[host][tier],
-  };
+  const model = explicit ?? config.hosts.models?.[host]?.[tier] ?? DEFAULT_TIER_MODELS[host][tier];
+  return { tier, effort: entry.effort, ...(model === undefined ? {} : { model }) };
 };

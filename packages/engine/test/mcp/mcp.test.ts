@@ -6,7 +6,7 @@
  */
 import { spawn } from "node:child_process";
 import { mkdtempSync, writeFileSync } from "node:fs";
-import { connect } from "node:net";
+import { connect, createServer, type Socket } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { PassThrough } from "node:stream";
@@ -21,6 +21,7 @@ import {
 import {
   callTool,
   connectEngineClient,
+  engineSocketAnswers,
   MCP_PROTOCOL_VERSION,
   runStdioBridge,
   SUPPORTED_MCP_PROTOCOL_VERSIONS,
@@ -253,6 +254,37 @@ const rawExchange = (path: string, lines: readonly unknown[]): Promise<string[]>
   });
 
 describe("socket protocol (AD-12 rule 3)", () => {
+  it("engineSocketAnswers: true while a daemon answers the hello, false for a silent path", async () => {
+    const h = createHarness();
+    const server = await socketFor(h);
+    expect(await engineSocketAnswers(server.path)).toBe(true);
+    // another contracts MAJOR still gets a welcome (ok: false): the holder is alive
+    expect(await engineSocketAnswers(server.path, { contractsVersion: "99.0.0" })).toBe(true);
+    await server.close();
+    expect(await engineSocketAnswers(server.path)).toBe(false);
+    expect(await engineSocketAnswers(join(tempDir(), "none.sock"))).toBe(false);
+    await h.release();
+  });
+  it("engineSocketAnswers: false for a listener that never sends a welcome", async () => {
+    const path = join(mkdtempSync(join(tmpdir(), "vh-")), "mute.sock");
+    const held: Socket[] = [];
+    const mute = createServer((socket) => {
+      held.push(socket);
+    });
+    await new Promise<void>((resolve) => {
+      mute.listen(path, resolve);
+    });
+    try {
+      expect(await engineSocketAnswers(path, { timeoutMs: 200 })).toBe(false);
+    } finally {
+      for (const socket of held) socket.destroy();
+      await new Promise<void>((resolve) => {
+        mute.close(() => {
+          resolve();
+        });
+      });
+    }
+  });
   it("a client with a valid hello can call status through the typed EngineClient", async () => {
     const h = createHarness();
     await h.engine.start(

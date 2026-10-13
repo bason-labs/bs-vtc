@@ -229,7 +229,8 @@ describe("every task can reach the merge (§6.3, §6.5, §6.7a)", () => {
     expect(status.tasks_by_status).toEqual({ done: 2 });
     expect(status.run.finished_at).toBeDefined();
     await h.release();
-  });
+    // two whole task lifecycles on a real repo: about 3 s alone, near 5 s under `pnpm verify`'s load
+  }, 20_000);
   it("a waived stuck park sends the built head to the merge queue", async () => {
     const h = createHarness({ project: { merge_level: 1 } });
     const engineer = await toEngineer(h);
