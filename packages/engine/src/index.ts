@@ -1,8 +1,9 @@
 /**
  * @vtc/engine: the deterministic core (§4.1). Depends on @vtc/shared only; host adapters, the
- * storage driver, the asset bundle and the auto-resume timer are injected by the cli (AD-1,
- * AD-2, AD-12). Each module exposes its API through its own `index.ts` (AD-13), so teams never
- * need to edit this file.
+ * storage driver, the Gate Runner, the asset bundle and the auto-resume timer are injected by the
+ * cli (AD-1, AD-2, AD-19). Owned by the integrator (AD-15): each module exposes its API through
+ * its own `index.ts` (AD-13) under its own namespace, so two teams' export names can never
+ * collide here and teams never need to edit this file.
  */
 import {
   CONTRACTS_VERSION,
@@ -11,11 +12,12 @@ import {
   type StorageFactory,
 } from "@vtc/shared";
 
-export * from "./core/index.js";
-export * from "./gates/index.js";
-export * from "./git/index.js";
-export * from "./http/index.js";
-export * from "./mcp/index.js";
+export * as core from "./core/index.js";
+export * as gates from "./gates/index.js";
+export * as git from "./git/index.js";
+export * as http from "./http/index.js";
+export * as mcp from "./mcp/index.js";
+export { runDaemon, serveSnapshot } from "./daemon/index.js";
 
 export const ENGINE_NAME = "vtc-engine";
 

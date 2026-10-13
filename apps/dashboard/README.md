@@ -10,8 +10,17 @@ Read-only local dashboard (spec §17). **Not built yet**: it lands in sub-projec
   `ENGINE_HTTP` (`@vtc/shared`). It may import `@vtc/shared` contracts through the package entry,
   and nothing else from `packages/` (AD-1).
 - Writes nothing except design-review pins (`POST /api/design/reviews`, AD-5 rule 5).
-- Served by the `vtc` binary on `127.0.0.1` with a per-install token (AD-5). Without a running
-  engine, `vtc dashboard` serves the same routes read-only from the committed `.vtc/` snapshot.
+- Served by the `vtc` binary on `127.0.0.1` (AD-5). No cookies: `vtc dashboard` opens
+  `/#nonce=<nonce>`; the page exchanges the nonce once (`POST /api/session`) for a session token,
+  keeps it in memory or `sessionStorage`, and sends `Authorization: Bearer <session>` on every
+  request, reading the SSE stream with `fetch` streaming (EventSource cannot send headers).
+- Artifacts (spec, design, evidence bundles) come from `GET /api/runs/:run/artifacts?path=` as
+  JSON; diffs from `/tasks/:task/diff`; features from `/features`.
+- Design review: the prototype comes from the separate prototype origin
+  (`HealthResult.prototype_url`) and is embedded only in `<iframe sandbox="allow-scripts">`
+  (`ENGINE_HTTP.prototype.iframeSandbox`), never with `allow-same-origin`.
+- Without a running engine, `vtc dashboard` serves the same routes read-only from the committed
+  `.vtc/` snapshot.
 
 Development (AD-5 rule 8):
 

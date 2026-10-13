@@ -41,6 +41,7 @@ const EXPECTED: readonly (readonly [file: string, rule: string])[] = [
   ["packages/shared/src/bad-node.ts", "AD2-shared-is-runtime-agnostic"],
   ["packages/adapters/src/claude-code/bad.ts", "AD1-adapter-families-are-isolated"],
   ["packages/adapters/src/bad-engine.ts", "AD1-adapters-depend-only-on-shared"],
+  ["packages/adapters/src/bad-dist.ts", "AD1-no-imports-of-build-output"],
   ["packages/engine/src/bad-adapters.ts", "AD1-engine-uses-adapter-interfaces-only"],
   ["packages/compiler/src/bad.ts", "AD1-compiler-depends-only-on-shared"],
   ["packages/engine/src/bad-cli.ts", "AD1-nothing-imports-the-cli"],
@@ -54,6 +55,8 @@ const EXPECTED: readonly (readonly [file: string, rule: string])[] = [
   ["packages/engine/src/bad-storage.ts", "AD2-storage-drivers-loaded-by-the-entry-only"],
   ["packages/engine/src/http/bad-deep.ts", "AD13-engine-modules-use-each-others-entry"],
   ["packages/engine/src/core/bad-gates.ts", "AD13-core-uses-the-gate-runner-interface"],
+  ["packages/engine/src/daemon/bad-gates.ts", "AD13-core-uses-the-gate-runner-interface"],
+  ["packages/engine/src/core/bad-daemon.ts", "AD19-only-the-engine-entry-imports-the-daemon"],
   ["packages/engine/src/gates/bad.ts", "AD13-gates-never-import-engine-core"],
   ["packages/engine/src/git/bad.ts", "AD13-git-imports-no-engine-module"],
   ["packages/engine/src/core/bad-transport.ts", "AD13-core-does-not-import-transports"],
@@ -77,7 +80,9 @@ describe("dependency-cruiser rules fire on planted violations", () => {
     "apps/dashboard/src/page.tsx",
     "apps/dashboard/src/components/d.tsx",
     "packages/engine/src/core/ok.ts",
+    "packages/engine/src/daemon/index.ts",
     "packages/engine/src/storage/node-sqlite.ts",
+    "packages/engine/dist/index.js",
   ])("allowed shapes stay clean: %s", (file) => {
     expect(rulesFor(file)).toEqual([]);
   });

@@ -6,6 +6,8 @@ claude-session-*.zip
 # build + tooling output
 node_modules/
 dist/
+# planted build output that proves AD1-no-imports-of-build-output fires
+!tooling/arch-tests/fixtures/repo/packages/engine/dist/
 .turbo/
 coverage/
 *.tsbuildinfo

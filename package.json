@@ -17,6 +17,7 @@
     "format:check": "prettier --check .",
     "check": "pnpm typecheck && pnpm lint && pnpm deps:check && pnpm test && pnpm format:check",
     "verify": "pnpm check && pnpm build",
+    "verify:scope": "node --experimental-strip-types --disable-warning=ExperimentalWarning tooling/arch-tests/src/verify-scope.ts",
     "hooks:install": "git config core.hooksPath .githooks"
   },
   "devDependencies": {

@@ -9,7 +9,13 @@ import {
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
-import { ENGINE_INSTANCE, engineRepoKey, parseEventLog } from "@vtc/shared";
+import {
+  dotenvValues,
+  ENGINE_INSTANCE,
+  engineRepoKey,
+  engineSocketFile,
+  parseEventLog,
+} from "@vtc/shared";
 import {
   acquireEngineLock,
   EngineLockedError,
@@ -17,7 +23,7 @@ import {
   readEngineDiscovery,
   removeEngineDiscovery,
   writeEngineDiscovery,
-} from "../src/index.js";
+} from "../src/core/index.js";
 
 const dirs: string[] = [];
 const tempDir = (): string => {
@@ -112,6 +118,29 @@ describe("event log single writer (AD-7 rule 2)", () => {
     expect(log.nextSeq()).toBe(1);
     lock.release();
   });
+  it("redacts secrets before anything reaches the git-tracked log (AD-18)", () => {
+    const repo = tempDir();
+    writeFileSync(join(repo, ".env"), "DB_PASSWORD=correct-horse-battery\n");
+    const lock = acquireEngineLock(repo);
+    const log = openEventLog(repo, "run-1", lock, {
+      secrets: () => dotenvValues(readFileSync(join(repo, ".env"), "utf8")),
+    });
+    const token = `ghp_${"a1B2".repeat(9)}`;
+    const event = log.append({
+      type: "run.paused",
+      actor: "human",
+      data: { reason: `leaked ${token} and correct-horse-battery` },
+    });
+    const line = readFileSync(log.path, "utf8");
+    expect(line).not.toContain(token);
+    expect(line).not.toContain("correct-horse-battery");
+    expect(line).toContain("[REDACTED:github_token]");
+    expect(line).toContain("[REDACTED:known_value]");
+    expect(event.data).toEqual({
+      reason: "leaked [REDACTED:github_token] and [REDACTED:known_value]",
+    });
+    lock.release();
+  });
   it("continues the seq after a restart and fences off a torn final line", () => {
     const repo = tempDir();
     let lock = acquireEngineLock(repo);
@@ -137,11 +166,12 @@ describe("engine discovery file (AD-12)", () => {
     v: 1 as const,
     pid,
     port: 47615,
-    mcp_socket: join(repoRoot, ".vtc/state/engine.sock"),
+    prototype_port: null,
+    mcp_socket: `/home/u/.vtc/${engineSocketFile(repoRoot)}`,
     repo_root: repoRoot,
     started_at: NOW.toISOString(),
     engine_version: "0.0.0",
-    contracts_version: "2.0.0",
+    contracts_version: "3.0.0",
   });
   it("publishes port and socket in ~/.vtc/engines/<repo-key>.json, mode 0600, no token", () => {
     const home = tempDir();

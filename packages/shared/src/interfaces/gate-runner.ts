@@ -26,3 +26,15 @@ export interface GateRunner {
    */
   checkWriteScope(request: WriteScopeCheckRequest): Promise<WriteScopeReport>;
 }
+
+/** What the Gate Runner needs, injected by the cli (AD-19). */
+export interface GateRunnerDeps {
+  /** Absolute repo root. */
+  readonly repoRoot: string;
+  /** Absolute VTC home: pinned scanner store, hidden tests (`HIDDEN_TESTS`). */
+  readonly vtcHome: string;
+  readonly now?: () => Date;
+}
+
+/** Implemented by the gate-runner team in `@vtc/engine` (`gates.createGateRunner`). */
+export type CreateGateRunner = (deps: GateRunnerDeps) => GateRunner;

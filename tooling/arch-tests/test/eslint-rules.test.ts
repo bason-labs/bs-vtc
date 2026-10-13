@@ -10,6 +10,7 @@ import { AD9_FORBIDDEN_MARKERS } from "@vtc/shared";
 import {
   AD9_MARKERS,
   AD9_RESTRICTED_SYNTAX,
+  ENGINE_RESTRICTED_SYNTAX,
   SHARED_RESTRICTED_GLOBALS,
 } from "../../../eslint.config.js";
 
@@ -37,6 +38,12 @@ describe("AD-9 lint rule", () => {
     'export const h = ["security", "find-generic-password", "-s", "x"];',
     'export const i = ["security", "-s", "Claude Code-credentials"];',
     'export const j = "/HOME/.CODEX/AUTH.JSON";',
+    'export const k = { ANTHROPIC_API_KEY: "" };'.replace(
+      "ANTHROPIC_API_KEY:",
+      '"ANTHROPIC_API_KEY":',
+    ),
+    'export const l = ["env", "CLAUDE_CODE_OAUTH_TOKEN"];',
+    "export const m = process.env[`OPENAI_API_KEY`];",
   ];
   it.each(planted.map((code, index) => [index + 1, code] as const))(
     "flags planted line %i",
@@ -66,5 +73,31 @@ describe("AD-2 shared globals rule", () => {
     expect(await lint(code, { "no-restricted-globals": SHARED_RESTRICTED_GLOBALS })).toEqual([
       1, 2, 3, 4,
     ]);
+  });
+});
+
+describe("AD-1 engine host-neutrality lint rule", () => {
+  const rules = { "no-restricted-syntax": ENGINE_RESTRICTED_SYNTAX };
+  it.each([
+    'export const a = spawn("claude", ["-p"]);',
+    'export const b = ["codex", "exec"];',
+    "export const c = `claude -p --resume ${id}`;",
+    'export const d = "CODEX.exe";',
+  ])("flags %s", async (code) => {
+    expect(await lint(code, rules)).toEqual([1]);
+  });
+  it("keeps the AD-9 selectors for engine code", async () => {
+    expect(await lint('export const a = ["--yolo"];', rules)).toEqual([1]);
+  });
+  it("allows hosts by variable and ordinary words", async () => {
+    const code = [
+      'export const a: string = "claude-code";',
+      "export const b = adapters[host];",
+      'export const c = "claude says hi";',
+    ].join("\n");
+    expect(await lint(code, rules)).toEqual([]);
+  });
+  it("flags the codex host id too: engine code never branches on one host", async () => {
+    expect(await lint('export const b = adapters["codex"];', rules)).toEqual([1]);
   });
 });

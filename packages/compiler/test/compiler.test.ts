@@ -1,11 +1,17 @@
+import { readFileSync } from "node:fs";
 import { describe, expect, it } from "vitest";
-import { PROMPT_MARKERS, RoleContractSchema } from "@vtc/shared";
+import { engineMcpServer, PROMPT_MARKERS, RoleContractSchema } from "@vtc/shared";
 import {
+  checkPluginFiles,
   checkRoleContract,
   checkRolePrompt,
   compiledAgentNames,
   COMPILE_TARGETS,
+  PLUGIN_SOURCES,
 } from "../src/index.js";
+
+const repoFile = (path: string): string =>
+  readFileSync(new URL(`../../../${path}`, import.meta.url), "utf8");
 
 describe("@vtc/compiler smoke", () => {
   it("targets both hosts under dist/", () => {
@@ -73,5 +79,34 @@ describe("role prompts and compiled agent names", () => {
     expect(
       compiledAgentNames(RoleContractSchema.parse({ ...base, modes: { author: {}, judge: {} } })),
     ).toEqual(["vtc-qa-author", "vtc-qa-judge"]);
+  });
+});
+
+describe("plugin sources (AD-16) and the AD-9 gate on emitted files", () => {
+  it("the Claude Code plugin registers the engine as `vtc engine --mcp --host claude-code`", () => {
+    const mcp = JSON.parse(repoFile(`${PLUGIN_SOURCES["claude-code"]}/.mcp.json`)) as {
+      mcpServers: Record<string, { command: string; args: string[] }>;
+    };
+    const entry = engineMcpServer("claude-code");
+    expect(mcp.mcpServers).toEqual({ [entry.name]: { command: entry.command, args: entry.args } });
+  });
+  it("flags every forbidden marker in emitted files, with file and line", () => {
+    const files = [
+      {
+        path: "agents/vtc-engineer.md",
+        text: "---\nname: vtc-engineer\npermissionMode: acceptEdits\n---\n",
+      },
+      { path: "agents/vtc-bad.md", text: "---\npermissionMode: bypassPermissions\n---\n" },
+      {
+        path: "agents/vtc-qa.toml",
+        text: 'name = "vtc-qa"\nsandbox_mode = "danger-full-access"\n',
+      },
+      { path: "skills/x/SKILL.md", text: "Never read\n~/.codex/auth.json\n" },
+    ];
+    expect(checkPluginFiles(files)).toEqual([
+      { path: "agents/vtc-bad.md", line: 2, marker: "bypassPermissions" },
+      { path: "agents/vtc-qa.toml", line: 2, marker: "danger-full-access" },
+      { path: "skills/x/SKILL.md", line: 2, marker: "auth.json" },
+    ]);
   });
 });

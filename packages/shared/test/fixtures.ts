@@ -55,6 +55,7 @@ export const validFeature = () => ({
 export const validFindingDraft = () => ({
   rule_id: "authz.missing-check",
   category: "security",
+  kind: "implementation_deviation",
   title: "Reset token not bound to user",
   message: "The token lookup ignores the user id.",
   confidence: 0.8,
@@ -128,7 +129,13 @@ export const validRoleResult = (): RoleResultInput => ({
   mode: "verify",
   task: "T-7",
   exit: "done",
-  verdict: "fail",
+  verdicts: [
+    {
+      subject: "T-7",
+      verdict: "fail",
+      evidence: [{ type: "file_line", ref: "src/auth/reset/service.ts:42" }],
+    },
+  ],
   findings: [validFindingDraft() as never],
   artifacts: [{ type: "findings", path: ".vtc/evidence/T-7/security.json" }],
   claims: [{ type: "file", ref: "src/auth/reset/service.ts" }],

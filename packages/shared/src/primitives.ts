@@ -194,8 +194,49 @@ export const RiskRuleIdSchema = z.enum([
 ]);
 export type RiskRuleId = z.infer<typeof RiskRuleIdSchema>;
 
-/** Kinds of evidence a finding, claim or escalation may cite. */
+/**
+ * Rules 1–9: a park or escalation for one of these uses reason `risk_rule` plus the rule id.
+ * Rules 10–13 always use their dedicated reason instead (`cap`/`stuck`, `spec_conflict`/
+ * `change_request`, `gate_infra`, `budget`), so every situation has exactly one encoding.
+ * `riskRuleForPark` maps any park back to the rule that fired (§6.7 Level-3 checklist item 5).
+ */
+export const RISK_RULE_REASON_RULES = [
+  "committed_secret",
+  "sensitive_area",
+  "db_migration",
+  "new_dependency",
+  "protected_config",
+  "breaking_api",
+  "large_diff",
+  "repeated_test_integrity",
+  "open_high_finding",
+] as const satisfies readonly RiskRuleId[];
+export const RiskRuleReasonRuleSchema = z.enum(RISK_RULE_REASON_RULES);
+export type RiskRuleReasonRule = z.infer<typeof RiskRuleReasonRuleSchema>;
+
+/**
+ * The one evidence vocabulary (principle 3, §7.4). Findings, role claims, verdicts, questions and
+ * escalations all cite {@link EvidenceSchema}; the engine resolves every `ref` before it accepts
+ * a result and discards evidence that does not resolve (§6.3 step 8). `ref` formats:
+ *
+ * | type             | `ref`                                   | Resolves when                          |
+ * | ---------------- | --------------------------------------- | -------------------------------------- |
+ * | `file`           | repo-relative path                      | the file exists at the result's head   |
+ * | `file_line`      | `path:line` or `path:line-end`          | the file has that line                 |
+ * | `log_line`       | `path:line` of a log under `.vtc/`      | the log has that line                  |
+ * | `junit`          | `report-path#test-id`                   | the report has that test case          |
+ * | `sarif`          | `report-path#rule-id` or `#result-index` | the report has that result            |
+ * | `command_output` | path of captured output under `.vtc/`   | the file exists                        |
+ * | `screenshot`     | path of an image under `.vtc/`          | the file exists                        |
+ * | `diff`           | `base..head` (full SHAs)                | both commits exist                     |
+ * | `commit`         | full git SHA                            | the commit exists                      |
+ * | `test`           | test id as it appears in JUnit output   | the test exists in the latest report   |
+ * | `spec_ref`       | `REQ-n`, `SEC-n` or `REQ-n.AC-m`        | the id is in the frozen spec           |
+ * | `fact`           | row id in `.vtc/research/facts.jsonl`   | the row exists (§8.2)                  |
+ * | `url`            | https URL                               | listed in the research brief or facts  |
+ */
 export const EvidenceTypeSchema = z.enum([
+  "file",
   "file_line",
   "log_line",
   "junit",
@@ -204,7 +245,9 @@ export const EvidenceTypeSchema = z.enum([
   "screenshot",
   "diff",
   "commit",
+  "test",
   "spec_ref",
+  "fact",
   "url",
 ]);
 export type EvidenceType = z.infer<typeof EvidenceTypeSchema>;
@@ -215,6 +258,25 @@ export const EvidenceSchema = z.strictObject({
   ref: z.string().min(1).max(2048),
 });
 export type Evidence = z.infer<typeof EvidenceSchema>;
+
+/** Visual QA criterion id, `V1`–`V8` (§5.2, §7.5). */
+export const VisualCriterionIdSchema = z
+  .string()
+  .regex(/^V[1-8]$/, "expected a Visual QA criterion id V1–V8");
+export type VisualCriterionId = z.infer<typeof VisualCriterionIdSchema>;
+
+/**
+ * What one verdict is about (§7.4, §7.5): an acceptance criterion or requirement (Spec-Verifier,
+ * one call per AC), a Visual QA criterion `V1`–`V8`, a task (QA judge, Security verify) or a
+ * feature (Final Review).
+ */
+export const VerdictSubjectSchema = z
+  .string()
+  .regex(
+    /^((REQ|SEC)-[1-9]\d*(\.AC-[1-9]\d*)?|V[1-8]|T-[1-9]\d*|F-[1-9]\d*)$/,
+    "expected an AC/REQ id, a Visual QA criterion V1–V8, a task id or a feature id",
+  );
+export type VerdictSubject = z.infer<typeof VerdictSubjectSchema>;
 
 /** A location in the repo (§16 Finding.location, extended with optional lines). */
 export const LocationSchema = z

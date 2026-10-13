@@ -4,7 +4,11 @@ import {
   engineDiscoveryFile,
   EngineDiscoverySchema,
   engineRepoKey,
+  engineSocketFile,
+  engineWindowsPipe,
+  fitsUnixSocketPath,
   normalizeRepoRoot,
+  UNIX_SOCKET_MAX_BYTES,
 } from "../src/index.js";
 import { NOW } from "./fixtures.js";
 import { expectInvalid, expectValid } from "./helpers.js";
@@ -29,11 +33,12 @@ describe("engine instance (AD-12)", () => {
     v: 1,
     pid: 4242,
     port: 47615,
-    mcp_socket: "/Users/me/work/app/.vtc/state/engine.sock",
+    prototype_port: null,
+    mcp_socket: "/Users/me/.vtc/run/0123456789abcdef.sock",
     repo_root: "/Users/me/work/app",
     started_at: NOW,
     engine_version: "0.0.0",
-    contracts_version: "2.0.0",
+    contracts_version: "3.0.0",
   });
   it("validates the discovery file; it never carries the token", () => {
     expectValid(EngineDiscoverySchema, discovery());
@@ -41,8 +46,26 @@ describe("engine instance (AD-12)", () => {
     expectInvalid(EngineDiscoverySchema, { ...discovery(), port: 0 }, "port");
     expectInvalid(
       EngineDiscoverySchema,
+      { ...discovery(), prototype_port: 70000 },
+      "prototype_port",
+    );
+    expectInvalid(
+      EngineDiscoverySchema,
       { ...discovery(), contracts_version: "2" },
       "contracts_version",
+    );
+  });
+  it("puts the MCP socket under ~/.vtc/run/, short enough for sun_path at any repo depth", () => {
+    const deep = `/Users/me/${"very-long-directory-name/".repeat(12)}app`;
+    const file = engineSocketFile(deep);
+    expect(file).toBe(`run/${engineRepoKey(deep)}.sock`);
+    expect(file.length).toBe(25);
+    // a typical home leaves plenty of room below the 104-byte macOS limit
+    expect(fitsUnixSocketPath(`/Users/some.long.user.name/.vtc/${file}`)).toBe(true);
+    expect(UNIX_SOCKET_MAX_BYTES).toBeLessThan(104);
+    expect(fitsUnixSocketPath(`${deep}/.vtc/state/engine.sock`)).toBe(false);
+    expect(engineWindowsPipe("C:/work/app")).toBe(
+      `\\\\.\\pipe\\vtc-${engineRepoKey("C:/work/app")}`,
     );
   });
 });

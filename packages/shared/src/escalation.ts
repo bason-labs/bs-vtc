@@ -5,19 +5,21 @@ import {
   EvidenceSchema,
   FeatureIdSchema,
   IsoDateTimeSchema,
-  RiskRuleIdSchema,
+  RiskRuleReasonRuleSchema,
   RoleIdSchema,
   RunIdSchema,
   SlugSchema,
   TaskIdSchema,
   type EscalationId,
   type FeatureId,
+  type RiskRuleId,
+  type RiskRuleReasonRule,
   type RunId,
   type TaskId,
 } from "./primitives.js";
 import { checkEscalationOptions, EscalationOptionSchema, type Question } from "./question.js";
 import { PhaseSchema, type Phase } from "./run.js";
-import { ParkReasonSchema } from "./task.js";
+import { ParkReasonSchema, type ParkReason } from "./task.js";
 
 /** Reason categories (§6.5) plus `spec_question` (§6.3) and `blocked` (role exit). */
 export const EscalationReasonSchema = ParkReasonSchema;
@@ -46,8 +48,11 @@ export const EscalationSchema = z
     /** Run-scoped escalations raised before PLAN (no task or feature exists yet). */
     phase: PhaseSchema.optional(),
     reason: EscalationReasonSchema,
-    /** Which §7.6 rule fired; required when (and only when) reason is `risk_rule`. */
-    risk_rule: RiskRuleIdSchema.optional(),
+    /**
+     * Which §7.6 rule 1–9 fired; required when (and only when) reason is `risk_rule`. Rules
+     * 10–13 use their dedicated reason (`RISK_RULE_REASON_RULES`, `riskRuleForPark`).
+     */
+    risk_rule: RiskRuleReasonRuleSchema.optional(),
     /** Free-text detail. */
     detail: z.string().max(2000).optional(),
     /** Exactly one question (§6.5). */
@@ -132,3 +137,28 @@ export const escalationFromQuestion = (
     recommended: question.recommended,
     evidence: question.evidence,
   });
+
+const DEDICATED_REASON_RULE: Readonly<Partial<Record<ParkReason, RiskRuleId>>> = {
+  cap: "stuck_or_cap",
+  stuck: "stuck_or_cap",
+  spec_conflict: "unresolved_spec_conflict",
+  change_request: "unresolved_spec_conflict",
+  gate_infra: "gate_infra_or_sandbox",
+  budget: "budget_exhausted",
+};
+
+/**
+ * The §7.6 risk rule a park or escalation stands for, or `null` when none fired (`spec_question`,
+ * `blocked`). Pure. The Level-3 checklist item "no risk rule fired" (§6.7), Lookback attribution
+ * and dashboard filters all use it, so the two encodings can never diverge.
+ */
+export const riskRuleForPark = (
+  reason: ParkReason,
+  riskRule?: RiskRuleReasonRule,
+): RiskRuleId | null => {
+  if (reason === "risk_rule") {
+    if (riskRule === undefined) throw new TypeError("reason risk_rule needs the rule id");
+    return riskRule;
+  }
+  return DEDICATED_REASON_RULE[reason] ?? null;
+};

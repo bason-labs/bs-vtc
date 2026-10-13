@@ -15,7 +15,14 @@ import {
   type Risk,
 } from "./primitives.js";
 
-/** §6.4 main path plus side states. `fixing(n/cap)` is `fixing` + `round`/`cap`. */
+/**
+ * §6.4 main path plus side states. `fixing(n/cap)` is `fixing` + `round`/`cap`.
+ *
+ * `non_converged` is **reserved**: the v1 engine never sets it. A task whose loop is stuck or
+ * hits its cap parks (`parked`, reason `cap` or `stuck`, §6.3 step 9) and waits for the human.
+ * §6.4 lists the state without saying when it applies; spine §5 reading 9 records this reading,
+ * and giving it a meaning is a contract change (AD-3).
+ */
 export const TaskStatusSchema = z.enum([
   "draft",
   "ready",
@@ -52,6 +59,8 @@ export const TASK_MAIN_PATH = [
 /**
  * Why a task or feature is parked. Same categories as escalation reasons (§6.5), plus the
  * QA `spec_question` (§6.3 step 2) and the Engineer's `blocked(question)` exit (§6.3 step 3).
+ * `risk_rule` is only for §7.6 rules 1–9 (`RISK_RULE_REASON_RULES`); rules 10–13 always use
+ * their own reason (`cap`/`stuck`, `spec_conflict`/`change_request`, `gate_infra`, `budget`).
  */
 export const ParkReasonSchema = z.enum([
   "risk_rule",
@@ -99,9 +108,11 @@ export const ConsumedContractSchema = z.strictObject({
 });
 export type ConsumedContract = z.infer<typeof ConsumedContractSchema>;
 
-/** Round cap by risk (§6.3 step 9). */
-export const CAP_BY_RISK: Readonly<Record<Risk, number>> = { low: 3, med: 4, high: 5 };
-export const capForRisk = (risk: Risk): number => CAP_BY_RISK[risk];
+/**
+ * Round cap of a task by its risk (§6.3 step 9). The only source of the numbers is
+ * `project.yaml` `caps` (`ProjectConfig.caps`, defaults low 3 / med 4 / high 5): pass it in.
+ */
+export const capForRisk = (risk: Risk, caps: Readonly<Record<Risk, number>>): number => caps[risk];
 
 /** Maximum stack packs loaded per task (§5.2a: "at most about 3"). */
 export const MAX_STACK_PACKS = 3;
@@ -119,6 +130,8 @@ export const TaskSchema = z
     provides_contract: ProvidedContractSchema.optional(),
     consumes_contracts: z.array(ConsumedContractSchema).default([]),
     risk: RiskSchema,
+    /** Planner risk tags (§5.2), kept for the Risk Router and lens triggers after replay (§5.3). */
+    risk_tags: z.array(SlugSchema).default([]),
     cap: z.int().min(3).max(5),
     size: TaskSizeSchema,
     arch_triage: ArchTriageSchema,

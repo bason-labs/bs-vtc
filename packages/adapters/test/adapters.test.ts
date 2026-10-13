@@ -24,7 +24,7 @@ describe("@vtc/adapters smoke", () => {
 
 describe("HostAdapter safety contract (AD-9)", () => {
   // Wired with runHostAdapterSafetyContract (./host-adapter-contract.ts) once each adapter
-  // implements sandboxProfile in sub-project 3.
+  // implements sandboxProfile, headlessCommand and install in sub-project 3.
   for (const host of HOST_IDS) it.todo(`run the safety contract for ${host}`);
   it("the bypass detector flags every forbidden form", () => {
     expect(
@@ -36,6 +36,7 @@ describe("HostAdapter safety contract (AD-9)", () => {
         "--yolo",
         "--sandbox=danger-full-access",
         "/Users/me/.claude/.credentials.json",
+        "ANTHROPIC_API_KEY=sk-x",
         "--allowedTools",
         "Read",
       ]),
@@ -46,6 +47,7 @@ describe("HostAdapter safety contract (AD-9)", () => {
       "--yolo",
       "--sandbox=danger-full-access",
       "/Users/me/.claude/.credentials.json",
+      "ANTHROPIC_API_KEY=sk-x",
     ]);
   });
 });

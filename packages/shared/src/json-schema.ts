@@ -3,12 +3,14 @@ import { z } from "zod";
 import {
   AnswerInputSchema,
   ApproveInputSchema,
+  ArtifactContentSchema,
   ChangeRequestInputSchema,
   ChangeRequestResultSchema,
   DesignReviewCommentInputSchema,
   DesignReviewResultSchema,
   EscalationListSchema,
   EventPageSchema,
+  FeatureListSchema,
   HealthResultSchema,
   HttpErrorSchema,
   IngestResultSchema,
@@ -17,12 +19,16 @@ import {
   RunControlResultSchema,
   RunListSchema,
   RunScopedInputSchema,
+  SessionExchangeInputSchema,
+  SessionExchangeResultSchema,
+  SessionNonceResultSchema,
   StartInputSchema,
   StartResultSchema,
   StatusResultSchema,
   SubmitInputSchema,
   SubmitResultSchema,
   TaskDetailSchema,
+  TaskDiffSchema,
   TaskListSchema,
 } from "./engine-api.js";
 import { EngineDiscoverySchema } from "./engine-instance.js";
@@ -45,7 +51,12 @@ import { RoleContractSchema } from "./role-contract.js";
 import { RoleResultSchema } from "./role-result.js";
 import { RunSchema } from "./run.js";
 import { PlanFileFrontmatterSchema, TaskDraftSchema, TaskSchema } from "./task.js";
-import { AssertionProvenanceSchema } from "./traceability.js";
+import { TaskPackSchema } from "./task-pack.js";
+import {
+  AssertionProvenanceSchema,
+  EvidenceBundleSchema,
+  TraceabilityReportSchema,
+} from "./traceability.js";
 import { StatuslineIngestSchema, UsageReportSchema, UsageSnapshotSchema } from "./usage.js";
 import { WorkflowEdgeSchema, WorkflowGraphSchema, WorkflowNodeSchema } from "./workflow.js";
 
@@ -66,6 +77,9 @@ export const CONTRACT_SCHEMAS = {
   RoleResult: RoleResultSchema,
   RoleContract: RoleContractSchema,
   AssertionProvenance: AssertionProvenanceSchema,
+  TaskPack: TaskPackSchema,
+  TraceabilityReport: TraceabilityReportSchema,
+  EvidenceBundle: EvidenceBundleSchema,
   // config files
   ProjectConfig: ProjectConfigSchema,
   GatesConfig: GatesConfigSchema,
@@ -109,6 +123,12 @@ export const CONTRACT_SCHEMAS = {
   EventPage: EventPageSchema,
   TaskList: TaskListSchema,
   TaskDetail: TaskDetailSchema,
+  TaskDiff: TaskDiffSchema,
+  FeatureList: FeatureListSchema,
+  ArtifactContent: ArtifactContentSchema,
+  SessionNonceResult: SessionNonceResultSchema,
+  SessionExchangeInput: SessionExchangeInputSchema,
+  SessionExchangeResult: SessionExchangeResultSchema,
   IngestResult: IngestResultSchema,
   DesignReviewCommentInput: DesignReviewCommentInputSchema,
   DesignReviewResult: DesignReviewResultSchema,

@@ -1,10 +1,23 @@
 /**
- * Reusable HostAdapter contract suite (AD-6, AD-9). Every adapter must pass it unchanged. The
- * adapters team runs it for both hosts as soon as each adapter implements `sandboxProfile`
+ * Reusable HostAdapter safety contract (AD-6, AD-9). Every adapter must pass it unchanged. The
+ * adapters team runs it for both hosts as soon as each adapter implements these methods
  * (sub-project 3); until then `adapters.test.ts` lists it as a todo per host.
+ *
+ * It checks everything an adapter hands to a host: sandbox settings and CLI arguments, the exact
+ * headless command (fresh and resumed, every tool profile), and every file `install` writes.
  */
-import { describe, expect, it } from "vitest";
-import { findForbiddenHostArgs, type HostAdapter, type RoleTools } from "@vtc/shared";
+import { mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { afterAll, describe, expect, it } from "vitest";
+import {
+  findForbiddenHostArgs,
+  findForbiddenInText,
+  jsonSchemaFor,
+  type HostAdapter,
+  type RoleTools,
+  type SpawnRoleRequest,
+} from "@vtc/shared";
 
 const PROFILES: readonly RoleTools[] = [
   { profile: "read_only", write_paths: [], engine_tools: [] },
@@ -12,26 +25,75 @@ const PROFILES: readonly RoleTools[] = [
   { profile: "code_sandboxed", write_paths: [], engine_tools: [] },
 ];
 
-export const runHostAdapterSafetyContract = (
-  adapter: Pick<HostAdapter, "host" | "sandboxProfile">,
-): void => {
+export type SafetyContractAdapter = Pick<
+  HostAdapter,
+  "host" | "sandboxProfile" | "headlessCommand" | "install"
+>;
+
+export const runHostAdapterSafetyContract = (adapter: SafetyContractAdapter): void => {
   describe(`HostAdapter safety contract: ${adapter.host}`, () => {
+    const dirs: string[] = [];
+    afterAll(() => {
+      for (const dir of dirs) rmSync(dir, { recursive: true, force: true });
+    });
+    const profileFor = (tools: RoleTools, network: "none" | "registries") =>
+      adapter.sandboxProfile({
+        tools,
+        cwd: "/work/app/.vtc/state/worktrees/T-1",
+        writablePaths: ["src/**"],
+        protectedPaths: ["test/acceptance/**"],
+        network,
+      });
+
     it.each(PROFILES.map((tools) => [tools.profile, tools] as const))(
-      "sandboxProfile(%s).cliArgs never contain a bypass flag or credential path (AD-9)",
+      "sandboxProfile(%s) never carries a bypass flag or credential marker (AD-9)",
       (_profile, tools) => {
         for (const network of ["none", "registries"] as const) {
-          const profile = adapter.sandboxProfile({
-            tools,
-            cwd: "/work/app/.vtc/state/worktrees/T-1",
-            writablePaths: ["src/**"],
-            protectedPaths: ["test/acceptance/**"],
-            network,
-          });
+          const profile = profileFor(tools, network);
           expect(profile.host).toBe(adapter.host);
           expect(findForbiddenHostArgs(profile.cliArgs)).toEqual([]);
           expect(findForbiddenHostArgs([JSON.stringify(profile.settings)])).toEqual([]);
         }
       },
     );
+
+    it.each(PROFILES.map((tools) => [tools.profile, tools] as const))(
+      "headlessCommand(%s), fresh and resumed, is clean (AD-9)",
+      (_profile, tools) => {
+        const request: SpawnRoleRequest = {
+          role: "engineer",
+          model: { tier: "mid", effort: "medium", model: "model-under-test" },
+          dispatch: "headless",
+          cwd: "/work/app/.vtc/state/worktrees/T-1",
+          prompt: "Read the task pack and follow it.",
+          outputSchema: jsonSchemaFor("RoleResult", { target: "structured-output" }),
+          sandbox: profileFor(tools, "none"),
+          timeoutMs: 600_000,
+        };
+        for (const command of [
+          adapter.headlessCommand(request),
+          adapter.headlessCommand(request, { host: adapter.host, id: "session-1" }),
+        ]) {
+          expect(findForbiddenHostArgs([command.command, ...command.args])).toEqual([]);
+          expect(
+            findForbiddenHostArgs(Object.entries(command.env).flatMap(([k, v]) => [k, v])),
+          ).toEqual([]);
+        }
+      },
+    );
+
+    it("install writes no bypass flag or credential marker into any file (AD-9)", async () => {
+      const home = mkdtempSync(join(tmpdir(), "vtc-home-"));
+      const project = mkdtempSync(join(tmpdir(), "vtc-project-"));
+      const pluginDir = mkdtempSync(join(tmpdir(), "vtc-plugin-"));
+      dirs.push(home, project, pluginDir);
+      for (const scope of ["project", "user"] as const) {
+        const result = await adapter.install({ projectRoot: project, pluginDir, scope, home });
+        for (const path of result.written) {
+          expect(path.startsWith(home) || path.startsWith(project), path).toBe(true);
+          expect(findForbiddenInText(readFileSync(path, "utf8")), path).toEqual([]);
+        }
+      }
+    });
   });
 };

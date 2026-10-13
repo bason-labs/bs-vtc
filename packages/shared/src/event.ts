@@ -62,7 +62,8 @@ export const EventSchema = z
     prompt_sha: Sha256HexSchema.optional(),
     host: HostIdSchema.optional(),
     model: z.string().min(1).max(200).optional(),
-    tokens: TokenUsageSchema.optional(),
+    /** `null` = the host did not report spend (counted as unknown, never 0). */
+    tokens: TokenUsageSchema.nullable().optional(),
     /** List-price-equivalent USD (§11). `null` = model missing from the price table (an error, never $0). */
     cost_usd: z.number().nonnegative().nullable().optional(),
   })

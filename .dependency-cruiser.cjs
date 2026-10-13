@@ -26,7 +26,12 @@ const RUNTIME_SAFE_BUILTINS = [
   "util",
   "zlib",
 ];
-const ENGINE_MODULES = "(core|gates|git|http|mcp)";
+const ENGINE_MODULES = "(core|daemon|gates|git|http|mcp)";
+/**
+ * Build output of any package or app. It is cruised (so imports INTO it are seen and rejected)
+ * but never followed, and nothing it contains is checked as a source of dependencies.
+ */
+const BUILD_OUTPUT = "^(packages|apps)/[^/]+/(dist|out|\\.next)/";
 
 /** @type {import('dependency-cruiser').IConfiguration} */
 module.exports = {
@@ -93,6 +98,14 @@ module.exports = {
       severity: "error",
       from: { path: "^packages/" },
       to: { path: "^apps/" },
+    },
+    {
+      name: "AD1-no-imports-of-build-output",
+      comment:
+        "Code imports other packages through their entry, which resolves to source (AD-10 rule 2). An import of build output (dist/, out/, .next/) bypasses every AD-1 rule and would pass tsc once dist/ exists.",
+      severity: "error",
+      from: { pathNot: BUILD_OUTPUT },
+      to: { path: BUILD_OUTPUT },
     },
     {
       name: "AD1-no-deep-imports-across-packages",
@@ -166,10 +179,18 @@ module.exports = {
     {
       name: "AD13-core-uses-the-gate-runner-interface",
       comment:
-        "Engine core never imports the gates module: it calls the GateRunner interface from @vtc/shared, injected at wiring time.",
+        "Engine core and the daemon composer never import the gates module: they call the GateRunner interface from @vtc/shared, injected through EngineDeps (AD-19).",
       severity: "error",
-      from: { path: "^packages/engine/src/core/" },
+      from: { path: "^packages/engine/src/(core|daemon)/" },
       to: { path: "^packages/engine/src/gates/" },
+    },
+    {
+      name: "AD19-only-the-engine-entry-imports-the-daemon",
+      comment:
+        "daemon/ composes the engine modules; only the engine entry re-exports it. No module imports it back.",
+      severity: "error",
+      from: { path: "^packages/engine/src/(core|gates|git|http|mcp|storage)/" },
+      to: { path: "^packages/engine/src/daemon/" },
     },
     {
       name: "AD13-gates-never-import-engine-core",
@@ -183,7 +204,7 @@ module.exports = {
       comment: "The git/worktree module is a leaf: it imports no other engine module.",
       severity: "error",
       from: { path: "^packages/engine/src/git/" },
-      to: { path: "^packages/engine/src/(core|gates|http|mcp|storage)/" },
+      to: { path: "^packages/engine/src/(core|daemon|gates|http|mcp|storage)/" },
     },
     {
       name: "AD13-core-does-not-import-transports",
@@ -230,8 +251,10 @@ module.exports = {
     },
   ],
   options: {
-    doNotFollow: { path: "node_modules" },
-    exclude: { path: "^(packages|apps)/[^/]+/(dist|coverage|\\.turbo|\\.next|out)/" },
+    // Build output is cruised as a target (AD1-no-imports-of-build-output sees imports into it)
+    // but never followed. Excluding it would hide such imports from every rule.
+    doNotFollow: { path: ["node_modules", BUILD_OUTPUT] },
+    exclude: { path: "^(packages|apps)/[^/]+/(coverage|\\.turbo)/" },
     tsPreCompilationDeps: true,
     combinedDependencies: false,
     tsConfig: { fileName: "tsconfig.depcruise.json" },

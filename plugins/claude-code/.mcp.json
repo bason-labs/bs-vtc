@@ -1,0 +1,8 @@
+{
+  "mcpServers": {
+    "vtc": {
+      "command": "vtc",
+      "args": ["engine", "--mcp", "--host", "claude-code"]
+    }
+  }
+}

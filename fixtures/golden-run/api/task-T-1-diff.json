@@ -1,0 +1,16 @@
+{
+  "run": "golden-1",
+  "task": "T-1",
+  "base": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+  "head": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+  "files": [
+    {
+      "path": "src/t-1/store.ts",
+      "status": "added",
+      "additions": 3,
+      "deletions": 0
+    }
+  ],
+  "patch": "diff --git a/src/t-1/store.ts b/src/t-1/store.ts\nnew file mode 100644\n--- /dev/null\n+++ b/src/t-1/store.ts\n@@ -0,0 +1,3 @@\n+import { createHash } from \"node:crypto\";\n+export const hashToken = (token: string): string =>\n+  createHash(\"sha256\").update(token).digest(\"hex\");\n",
+  "truncated": false
+}

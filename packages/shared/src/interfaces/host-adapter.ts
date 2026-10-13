@@ -80,6 +80,8 @@ export type SubagentInstruction = z.infer<typeof SubagentInstructionSchema>;
 
 /** What a host can enforce itself (§12.1). Anything false is enforced by the engine only. */
 export interface HostCapabilities {
+  /** The Lead can dispatch role subagents in its own session (foreground at least). */
+  readonly subagents: boolean;
   readonly backgroundSubagents: boolean;
   readonly perPathWriteDeny: boolean;
   readonly headless: boolean;
@@ -90,6 +92,11 @@ export interface HostCapabilities {
 export interface InstallRequest {
   /** Absolute path of the repo being set up. */
   readonly projectRoot: string;
+  /**
+   * Absolute user home that user-scope files go under (e.g. `~/.codex/`, the launchd agent).
+   * Injected so tests install into a temp directory, never into the real home.
+   */
+  readonly home: string;
   /** Absolute path of the compiled plugin for this host (dist/<host>-plugin). */
   readonly pluginDir: string;
   readonly scope: "user" | "project";
@@ -153,8 +160,21 @@ export interface SpawnRoleRequest {
   readonly maxBudgetUsd?: number;
 }
 
+/**
+ * The exact process a headless run starts: what `spawnRole` / `resume` execute and what the
+ * safety contract checks with `findForbiddenHostArgs` (AD-9). `env` holds only the variables
+ * the adapter adds; never credentials.
+ */
+export interface HostCommand {
+  readonly command: string;
+  readonly args: readonly string[];
+  readonly env: Readonly<Record<string, string>>;
+}
+
 /** A headless child process started by the adapter. */
 export interface HeadlessRun {
+  /** The command it was started with (`headlessCommand`), recorded in the run transcript. */
+  readonly command: HostCommand;
   readonly pid: number | null;
   /** Raw stdout lines as they arrive (also persisted as the run transcript). */
   lines(): AsyncIterable<string>;
@@ -168,10 +188,26 @@ export type SpawnResult =
   | { readonly dispatch: "subagent"; readonly instruction: SubagentInstruction }
   | { readonly dispatch: "headless"; readonly run: HeadlessRun };
 
+/** The latest host retry notice in a stream (Claude SDK `api_retry`, §6.9). */
+export interface StreamRetry {
+  readonly attempt: number;
+  readonly reason: "rate_limit" | "overloaded" | "other";
+  /** When the host will retry, if it said so. */
+  readonly retryAt: string | null;
+}
+
 export interface ParsedStream {
   /** Terminal outcome, or null if the stream has not ended. */
   readonly outcome: HostOutcome | null;
   readonly sessionRef: SessionRef | null;
+  /**
+   * Latest usage the stream reported (Claude SDK `rate_limit_event`), normalised with
+   * `source: "sdk_event"`; `null` when the stream carried none (§6.9). The engine merges it into
+   * its usage store, so a host-agnostic engine never parses host events itself.
+   */
+  readonly usage: UsageSnapshot | null;
+  /** Latest retry notice (`api_retry`), or null. */
+  readonly retry: StreamRetry | null;
   /** Lines that were not valid host events (counted, never thrown). */
   readonly unrecognizedLines: number;
 }
@@ -183,8 +219,16 @@ export interface HostAdapter {
   install(request: InstallRequest): Promise<InstallResult>;
   /** Start a role as an in-session subagent instruction or a headless process. */
   spawnRole(request: SpawnRoleRequest): Promise<SpawnResult>;
-  /** Pure: parse a recorded or live stream (JSONL lines) into a normalised outcome. */
+  /**
+   * Pure: parse a recorded or live stream (JSONL lines) into a normalised outcome, usage and
+   * retry state. The engine may call it repeatedly on the lines seen so far.
+   */
   parseEvents(lines: readonly string[]): ParsedStream;
+  /**
+   * Pure: the command a headless run of `request` executes (a resume when `session` is given).
+   * `spawnRole` and `resume` must start exactly this command; the safety contract checks it.
+   */
+  headlessCommand(request: SpawnRoleRequest, session?: SessionRef): HostCommand;
   /** Resume a session with new input (same worktree and session, §6.5; after a reset, §6.9). */
   resume(session: SessionRef, request: SpawnRoleRequest): Promise<SpawnResult>;
   /** Pure: host-specific sandbox settings for a role's tool profile. */

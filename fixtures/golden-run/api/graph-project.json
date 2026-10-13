@@ -1,0 +1,181 @@
+{
+  "id": "golden-1-phases",
+  "scope": "project",
+  "nodes": [
+    {
+      "id": "intake",
+      "kind": "subflow",
+      "label": "Intake",
+      "ports_in": [],
+      "ports_out": [],
+      "reason_added": "backbone (§6.1)",
+      "state": "passed",
+      "subflow": "phase-intake"
+    },
+    {
+      "id": "discover",
+      "kind": "subflow",
+      "label": "Discover",
+      "ports_in": [],
+      "ports_out": [],
+      "reason_added": "backbone (§6.1)",
+      "state": "passed",
+      "subflow": "phase-discover"
+    },
+    {
+      "id": "specify",
+      "kind": "subflow",
+      "label": "Specify",
+      "ports_in": [],
+      "ports_out": [],
+      "reason_added": "backbone (§6.1)",
+      "state": "passed",
+      "subflow": "phase-specify"
+    },
+    {
+      "id": "g1",
+      "kind": "human",
+      "label": "G1",
+      "ports_in": [],
+      "ports_out": [],
+      "reason_added": "backbone (§6.1)",
+      "state": "passed"
+    },
+    {
+      "id": "design",
+      "kind": "subflow",
+      "label": "Design",
+      "ports_in": [],
+      "ports_out": [],
+      "reason_added": "backbone (§6.1)",
+      "state": "passed",
+      "subflow": "phase-design"
+    },
+    {
+      "id": "g2",
+      "kind": "human",
+      "label": "G2",
+      "ports_in": [],
+      "ports_out": [],
+      "reason_added": "backbone (§6.1)",
+      "state": "passed"
+    },
+    {
+      "id": "plan",
+      "kind": "subflow",
+      "label": "Plan",
+      "ports_in": [],
+      "ports_out": [],
+      "reason_added": "backbone (§6.1)",
+      "state": "passed",
+      "subflow": "phase-plan"
+    },
+    {
+      "id": "build",
+      "kind": "subflow",
+      "label": "Build",
+      "ports_in": [],
+      "ports_out": [],
+      "reason_added": "backbone (§6.1)",
+      "state": "running",
+      "subflow": "phase-build"
+    },
+    {
+      "id": "integrate",
+      "kind": "subflow",
+      "label": "Integrate",
+      "ports_in": [],
+      "ports_out": [],
+      "reason_added": "backbone (§6.1)",
+      "state": "waiting",
+      "subflow": "phase-integrate"
+    },
+    {
+      "id": "final-review",
+      "kind": "subflow",
+      "label": "Final Review",
+      "ports_in": [],
+      "ports_out": [],
+      "reason_added": "backbone (§6.1)",
+      "state": "waiting",
+      "subflow": "phase-final-review"
+    },
+    {
+      "id": "release",
+      "kind": "subflow",
+      "label": "Release",
+      "ports_in": [],
+      "ports_out": [],
+      "reason_added": "backbone (§6.1)",
+      "state": "waiting",
+      "subflow": "phase-release"
+    },
+    {
+      "id": "retro",
+      "kind": "subflow",
+      "label": "Retro",
+      "ports_in": [],
+      "ports_out": [],
+      "reason_added": "backbone (§6.1)",
+      "state": "waiting",
+      "subflow": "phase-retro"
+    }
+  ],
+  "edges": [
+    {
+      "id": "intake-discover",
+      "from": "intake",
+      "to": "discover"
+    },
+    {
+      "id": "discover-specify",
+      "from": "discover",
+      "to": "specify"
+    },
+    {
+      "id": "specify-g1",
+      "from": "specify",
+      "to": "g1"
+    },
+    {
+      "id": "g1-design",
+      "from": "g1",
+      "to": "design"
+    },
+    {
+      "id": "design-g2",
+      "from": "design",
+      "to": "g2"
+    },
+    {
+      "id": "g2-plan",
+      "from": "g2",
+      "to": "plan"
+    },
+    {
+      "id": "plan-build",
+      "from": "plan",
+      "to": "build"
+    },
+    {
+      "id": "build-integrate",
+      "from": "build",
+      "to": "integrate"
+    },
+    {
+      "id": "integrate-final-review",
+      "from": "integrate",
+      "to": "final-review"
+    },
+    {
+      "id": "final-review-release",
+      "from": "final-review",
+      "to": "release"
+    },
+    {
+      "id": "release-retro",
+      "from": "release",
+      "to": "retro"
+    }
+  ]
+}

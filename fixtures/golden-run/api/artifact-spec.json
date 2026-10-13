@@ -1,0 +1,9 @@
+{
+  "run": "golden-1",
+  "path": ".vtc/spec/spec.md",
+  "sha256": "7bb78c23849c2262a75ef19db9b4b03743dc9195cc48597c1017d18e44fef18e",
+  "size": 409,
+  "media_type": "text/markdown",
+  "encoding": "utf8",
+  "content": "# Password reset\n\n## REQ-1 Reset token store\n\nThe system shall store each reset token hashed, bound to one user.\n\n- REQ-1.AC-1: Given a reset request When a token is issued Then only its hash is stored.\n\n## REQ-2 Reset endpoint\n\nWhen a user submits a valid, unexpired token, the system shall set the new password.\n\n- REQ-2.AC-1: Given an expired token When it is submitted Then the reset is refused with 410.\n"
+}

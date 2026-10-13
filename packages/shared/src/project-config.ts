@@ -16,6 +16,10 @@ export type Track = z.infer<typeof TrackSchema>;
 export const MergeLevelSchema = z.union([z.literal(1), z.literal(2), z.literal(3)]);
 export type MergeLevel = z.infer<typeof MergeLevelSchema>;
 
+/** Whether the engine may launch headless host processes (§12.5). */
+export const DispatchModeSchema = z.enum(["plugin_only", "headless_allowed"]);
+export type DispatchMode = z.infer<typeof DispatchModeSchema>;
+
 const capSchema = (fallback: number) => z.int().min(3).max(5).default(fallback);
 
 export const ProjectConfigSchema = z.strictObject({
@@ -58,6 +62,14 @@ export const ProjectConfigSchema = z.strictObject({
   hosts: z
     .strictObject({
       preferred: HostIdSchema.optional(),
+      /**
+       * `plugin_only` (default): the engine never launches a headless host process; every role
+       * runs as a subagent the Lead dispatches. `headless_allowed`: the engine may launch
+       * `claude -p` / `codex exec` for auto-resume and cross-family review. §12.5 requires
+       * written vendor confirmation before headless spawning ships commercially; plugin-only
+       * mode needs none (`planDispatch`, spine AD-17).
+       */
+      dispatch: DispatchModeSchema.default("plugin_only"),
       /** Opt-in cross-family review for high-risk tasks (D10, §12.4). */
       cross_family_review: z.boolean().default(false),
       /** Model id per tier per host, overriding the built-in mapping. */
