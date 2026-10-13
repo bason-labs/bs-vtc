@@ -249,7 +249,14 @@ export const fakeScanners = (home: string): ScannerStore => {
 export const harness = (
   files: Record<string, string>,
   gatesYml: string,
-  options: { allow?: readonly (readonly string[])[]; now?: () => Date } = {},
+  options: {
+    allow?: readonly (readonly string[])[];
+    now?: () => Date;
+    /** The scanner store (default {@link fakeScanners}). */
+    scanners?: (home: string) => ScannerStore;
+    /** The engine environment the runner scrubs (default `process.env`). */
+    env?: Readonly<Record<string, string | undefined>>;
+  } = {},
 ): Harness => {
   const repo = initRepo({ ...TOOLS, ".lintrc": "strict\n", ...files });
   writeFile(repo, ".vtc/gates.yml", gatesYml);
@@ -264,7 +271,7 @@ export const harness = (
       git: gitOps,
       ...(options.now === undefined ? {} : { now: options.now }),
     },
-    { scanners: fakeScanners(home), env: process.env },
+    { scanners: (options.scanners ?? fakeScanners)(home), env: options.env ?? process.env },
   );
   return {
     repo,

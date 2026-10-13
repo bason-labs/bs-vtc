@@ -53,6 +53,19 @@ tests:
     - "**/.semgrep/**"
     - "**/.checkov.yaml"
     - "**/.checkov.yml"
+    - "**/Makefile"
+    - "**/makefile"
+    - "**/GNUmakefile"
+    - "**/*.mk"
+    - "**/justfile"
+    - "**/Justfile"
+    - "**/.justfile"
+    - "**/*.just"
+    - "**/Taskfile.y*ml"
+    - "**/taskfile.y*ml"
+    - "**/Taskfile.dist.y*ml"
+    - "**/taskfile.dist.y*ml"
+    - "**/noxfile.py"
 gates:
   - id: install
     layer: L0

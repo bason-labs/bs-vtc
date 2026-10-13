@@ -161,6 +161,77 @@ describe("tool sections of pyproject.toml and package.json (§7.2 L1/L5)", () =>
     expect(guardedSections("pyproject.toml", undefined)).toBe("");
   });
 
+  it("decodes quoted and escaped table headers the way TOML does (finding: quoted header bypass)", () => {
+    const sections = guardedSections("pyproject.toml", PY);
+    // Each weakened tool table comes after an unguarded table, where a header the splitter did
+    // not recognise would be swallowed into [project.urls].
+    const after = (header: string, body: string): string =>
+      `${PY}[project.urls]\nhome = "h"\n${header}\n${body}\n`;
+    for (const header of [
+      '[tool."ruff".lint]',
+      "[tool.'ruff'.lint]",
+      '[tool."\\u0072uff".lint]',
+      '[tool."\\U00000072uff".lint]',
+      '[ "tool" . "ruff" . "lint" ]  # comment',
+      '[[tool."mypy".overrides]]',
+      '[tool."pytest".ini_options]',
+    ]) {
+      const text = after(header, 'ignore = ["ALL"]');
+      expect(guardedSections("pyproject.toml", text), header).not.toBe(sections);
+      // L1 runs with the base tool sections: the weakened table is gone.
+      expect(withBaseSections("pyproject.toml", text, PY), header).not.toContain("ALL");
+    }
+    // A quoted key that names an unguarded table is still unguarded.
+    expect(guardedSections("pyproject.toml", after('[tool."poetry".extras]', "x = 1"))).toBe(
+      sections,
+    );
+    // A quoted key holding a dot or a bracket is one key: tool."ruff.lint" is not tool.ruff.lint.
+    expect(guardedSections("pyproject.toml", after('[tool."ruff.lint"]', "x = 1"))).toBe(sections);
+    expect(guardedSections("pyproject.toml", after('[tool."r]uff".lint]', "x = 1"))).toBe(sections);
+  });
+
+  it("fails closed on a table header it cannot decode", () => {
+    const sections = guardedSections("pyproject.toml", PY);
+    for (const header of [
+      '[tool.ruff.lint] ignore = ["ALL"]',
+      '[tool."ruff"x]',
+      '[tool."\\q".lint]',
+      '[tool."ruff]',
+      "[tool..ruff]",
+      "[tool.ruff",
+      "[]",
+    ]) {
+      const text = `${PY}[project.urls]\nhome = "h"\n${header}\nignore = ["ALL"]\n`;
+      expect(guardedSections("pyproject.toml", text), header).not.toBe(sections);
+      // An undecodable head file runs L1 with the base file whole.
+      expect(withBaseSections("pyproject.toml", text, PY), header).toBe(PY);
+    }
+    const weird = `${PY}[tool.ruff] x = 1\n`;
+    // With an undecodable header, any change of the file counts, a dependency change included.
+    expect(guardedSections("pyproject.toml", weird.replace('["requests"]', '["httpx"]'))).not.toBe(
+      guardedSections("pyproject.toml", weird),
+    );
+  });
+
+  it("guards the pyproject task runners a gate command can call (tox, hatch, pdm, poe)", () => {
+    const sections = guardedSections("pyproject.toml", PY);
+    for (const added of [
+      '[tool.tox]\nlegacy_tox_ini = """\n[testenv]\ncommands = true\n"""',
+      '[tool.hatch.envs.default.scripts]\ntest = "true"',
+      '[tool.hatch.envs.default]\nscripts = { test = "true" }',
+      '[tool.hatch]\nenvs.default.scripts.test = "true"',
+      '[tool.pdm.scripts]\ntest = "true"',
+      '[tool.pdm]\nscripts.test = "true"',
+      '[tool.poe.tasks]\ntest = "true"',
+    ]) {
+      expect(guardedSections("pyproject.toml", `${PY}${added}\n`), added).not.toBe(sections);
+    }
+    // Build configuration of the same tools is not a gate command.
+    expect(guardedSections("pyproject.toml", `${PY}[tool.hatch.build]\nexclude = ["x"]\n`)).toBe(
+      sections,
+    );
+  });
+
   it("guards package.json scripts and test-tool keys, never dependencies", () => {
     const pkg = { name: "a", dependencies: { x: "1" }, scripts: { test: "vitest run" } };
     const sections = guardedSections("package.json", JSON.stringify(pkg));
@@ -249,6 +320,49 @@ describe("tool sections of pyproject.toml and package.json (§7.2 L1/L5)", () =>
     expect((await checkWriteScope(ops, { ...scope, base: head, head: gone })).violations).toEqual([
       { kind: "protected_deleted", path: "pyproject.toml" },
     ]);
+  });
+});
+
+describe("task-runner files a gate command calls (D-y, spine §5 reading 45)", () => {
+  const RUNNERS: Record<string, string> = {
+    Makefile: "test:\n\tpytest\n",
+    "sub/GNUmakefile": "test:\n\tpytest\n",
+    "sub/makefile": "test:\n\tpytest\n",
+    "mk/test.mk": "test:\n\tpytest\n",
+    justfile: "test:\n  pytest\n",
+    "a/Justfile": "test:\n  pytest\n",
+    "b/.justfile": "test:\n  pytest\n",
+    "c/JUSTFILE": "test:\n  pytest\n",
+    "d/tasks.just": "test:\n  pytest\n",
+    "Taskfile.yml": "tasks:\n  test:\n    cmds: [pytest]\n",
+    "e/taskfile.dist.yaml": "tasks:\n  test:\n    cmds: [pytest]\n",
+    "noxfile.py": "def tests(session):\n    session.run('pytest')\n",
+  };
+
+  it("flags any change under a ** files_scope unless the scope names the file exactly", async () => {
+    const repo = initRepo({ ...RUNNERS, "src/app.py": "x = 1\n" });
+    const base = git(repo, "rev-parse", "HEAD");
+    const ops = createGitOps({ repoRoot: repo });
+    const scope = { ...request(base, base), protected: [], filesScope: ["**"] };
+    // A `make test` recipe rewritten so the L2 gate passes on exit code alone.
+    for (const path of Object.keys(RUNNERS)) writeFile(repo, path, "test:\n\t@true\n");
+    writeFile(repo, "src/app.py", "x = 2\n");
+    const head = commitAll(repo, "weaken the test recipes");
+    const report = await checkWriteScope(ops, { ...scope, head });
+    expect(report.violations).toEqual(
+      Object.keys(RUNNERS)
+        .sort()
+        .map((path) => ({ kind: "protected_modified", path })),
+    );
+    // A project's own globs replace the defaults, but task-runner files stay guarded.
+    expect(
+      (await checkWriteScope(ops, { ...scope, head }, ["**/conftest.py"])).violations,
+    ).toHaveLength(Object.keys(RUNNERS).length);
+    const planned = { ...scope, head, filesScope: ["**", "Makefile", "mk/test.mk"] };
+    const left = (await checkWriteScope(ops, planned)).violations.map((v) => v.path);
+    expect(left).not.toContain("Makefile");
+    expect(left).not.toContain("mk/test.mk");
+    expect(left).toContain("justfile");
   });
 });
 

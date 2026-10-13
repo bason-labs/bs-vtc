@@ -8,17 +8,27 @@
  */
 import { posix } from "node:path";
 
-/** `[tool.<name>]` tables of pyproject.toml that configure a lint, type-check or test tool. */
-const PYPROJECT_TOOLS = [
-  "ruff",
-  "pytest",
-  "mypy",
-  "coverage",
-  "pyright",
-  "basedpyright",
-  "pylint",
-  "flake8",
-  "bandit",
+/**
+ * pyproject.toml tables that configure a lint, type-check or test tool, or define a command a
+ * calibrated gate can run (`tox`, `hatch run`, `pdm run`, `poe`; D-y, spine §5 reading 45), as key
+ * paths. A table is guarded when its key path starts with one of these, or is an ancestor of one
+ * (the root table, `[tool]`, `[tool.hatch]` and `[tool.pdm]`), because dotted keys in an ancestor
+ * can set the same values (`[tool.hatch]` `envs.default.scripts.test = "true"`).
+ */
+const PYPROJECT_GUARDED: readonly (readonly string[])[] = [
+  ["tool", "ruff"],
+  ["tool", "pytest"],
+  ["tool", "mypy"],
+  ["tool", "coverage"],
+  ["tool", "pyright"],
+  ["tool", "basedpyright"],
+  ["tool", "pylint"],
+  ["tool", "flake8"],
+  ["tool", "bandit"],
+  ["tool", "tox"],
+  ["tool", "hatch", "envs"],
+  ["tool", "pdm", "scripts"],
+  ["tool", "poe"],
 ];
 
 /**
@@ -40,13 +50,109 @@ export const isMixedConfig = (path: string): boolean => kindOf(path) !== null;
 // ------------------------------------------------------------------- pyproject
 
 interface Segment {
-  /** The normalized table name, `null` for the root table before the first header. */
-  readonly name: string | null;
+  /** The table's decoded key path, `null` for the root table before the first header. */
+  readonly key: readonly string[] | null;
   readonly lines: string[];
 }
 
-const HEADER = /^\s*\[\[?([^[\]]+)\]\]?\s*(#.*)?$/;
-const KEY_CHARS = /^[A-Za-z0-9_\-.]+$/;
+interface Split {
+  readonly segments: Segment[];
+  /**
+   * A top-level line starts like a table header but could not be decoded. Tools may still read
+   * it as one, so the file fails closed: its whole text is guarded.
+   */
+  readonly undecodable: boolean;
+}
+
+const BARE_KEY = /^[A-Za-z0-9_-]+/;
+const HEX: Readonly<Record<string, RegExp>> = {
+  u: /^[0-9A-Fa-f]{4}/,
+  U: /^[0-9A-Fa-f]{8}/,
+  x: /^[0-9A-Fa-f]{2}/,
+};
+const SIMPLE_ESCAPES: Readonly<Record<string, string>> = {
+  b: "\b",
+  t: "\t",
+  n: "\n",
+  f: "\f",
+  r: "\r",
+  e: "\u001b",
+  '"': '"',
+  "\\": "\\",
+};
+
+/** Decodes the body of a TOML basic string (`\uXXXX`, `\UXXXXXXXX`, `\xHH`, simple escapes). */
+const decodeBasic = (body: string): string | null => {
+  let out = "";
+  for (let i = 0; i < body.length; i += 1) {
+    const c = body.charAt(i);
+    if (c !== "\\") {
+      out += c;
+      continue;
+    }
+    const e = body.charAt(i + 1);
+    const simple = SIMPLE_ESCAPES[e];
+    if (simple !== undefined) {
+      out += simple;
+      i += 1;
+      continue;
+    }
+    const hex = HEX[e]?.exec(body.slice(i + 2))?.[0];
+    if (hex === undefined) return null;
+    const code = Number.parseInt(hex, 16);
+    if (code > 0x10ffff || (code >= 0xd800 && code <= 0xdfff)) return null;
+    out += String.fromCodePoint(code);
+    i += 1 + hex.length;
+  }
+  return out;
+};
+
+/**
+ * The decoded key path of a table header line (`[a."b".'c']` or `[[…]]`, optional comment), as
+ * TOML reads it; `null` when the line is not a header TOML would accept.
+ */
+const headerKey = (line: string): string[] | null => {
+  let i = 0;
+  const ws = (): void => {
+    while (line.charAt(i) === " " || line.charAt(i) === "\t") i += 1;
+  };
+  ws();
+  if (line.charAt(i) !== "[") return null;
+  const array = line.charAt(i + 1) === "[";
+  i += array ? 2 : 1;
+  const parts: string[] = [];
+  for (;;) {
+    ws();
+    const c = line.charAt(i);
+    if (c === '"' || c === "'") {
+      let j = i + 1;
+      while (j < line.length && line.charAt(j) !== c)
+        j += c === '"' && line.charAt(j) === "\\" ? 2 : 1;
+      if (j >= line.length) return null;
+      const body = line.slice(i + 1, j);
+      const part = c === '"' ? decodeBasic(body) : body;
+      if (part === null) return null;
+      parts.push(part);
+      i = j + 1;
+    } else {
+      const match = BARE_KEY.exec(line.slice(i));
+      if (match === null) return null;
+      parts.push(match[0]);
+      i += match[0].length;
+    }
+    ws();
+    if (line.charAt(i) === ".") {
+      i += 1;
+      continue;
+    }
+    break;
+  }
+  const close = array ? "]]" : "]";
+  if (!line.startsWith(close, i)) return null;
+  i += close.length;
+  ws();
+  return i === line.length || line.charAt(i) === "#" ? parts : null;
+};
 
 interface ScanState {
   /** Open `[` and `{` of a value that spans lines. */
@@ -85,54 +191,65 @@ const scanLine = (line: string, state: ScanState): void => {
 };
 
 /**
- * Splits TOML text at table headers: lines that look like one outside any multi-line array,
- * inline table or string. Header names are normalized (quotes and whitespace removed), so
- * `[ tool . "ruff" ]` is `tool.ruff`.
+ * Splits TOML text at table headers: lines that start with `[` outside any multi-line array,
+ * inline table or string. Header keys are decoded as TOML decodes them (quotes, escapes and
+ * whitespace), so `[ tool . "\u0072uff" ]` is `tool.ruff`. Such a line that does not decode marks
+ * the split `undecodable` (fail closed).
  */
-const segments = (text: string): Segment[] => {
-  const out: Segment[] = [{ name: null, lines: [] }];
+const split = (text: string): Split => {
+  const segments: Segment[] = [{ key: null, lines: [] }];
   const state: ScanState = { depth: 0, open: null };
+  let undecodable = false;
   for (const line of text.split(/\r?\n/)) {
     const atTop = state.depth === 0 && state.open === null;
-    const name = atTop ? HEADER.exec(line)?.[1]?.replace(/["'\s]/g, "") : undefined;
-    if (name !== undefined && KEY_CHARS.test(name)) {
-      out.push({ name, lines: [line] });
-      continue;
+    if (atTop && line.trimStart().startsWith("[")) {
+      const key = headerKey(line);
+      if (key !== null) {
+        segments.push({ key, lines: [line] });
+        continue;
+      }
+      undecodable = true;
     }
-    out.at(-1)?.lines.push(line);
-    scanLine(line, state);
+    segments.at(-1)?.lines.push(line);
+    if (!(atTop && line.trimStart().startsWith("["))) scanLine(line, state);
   }
-  return out;
+  return { segments, undecodable };
 };
 
+const startsWith = (path: readonly string[], prefix: readonly string[]): boolean =>
+  prefix.length <= path.length && prefix.every((part, i) => path[i] === part);
+
 /**
- * Guarded segments: the root table and `[tool]` (dotted keys such as `tool.ruff.lint.ignore` can
- * live there) and every `[tool.<tool>…]` table of {@link PYPROJECT_TOOLS}.
+ * Guarded segments: the root table, and every table on a {@link PYPROJECT_GUARDED} path (at or
+ * below it, or an ancestor whose dotted keys can reach it).
  */
 const guardedSegment = (s: Segment): boolean =>
-  s.name === null ||
-  s.name === "tool" ||
-  PYPROJECT_TOOLS.some((t) => s.name === `tool.${t}` || s.name?.startsWith(`tool.${t}.`) === true);
+  s.key === null ||
+  PYPROJECT_GUARDED.some((g) => startsWith(s.key ?? [], g) || startsWith(g, s.key ?? []));
 
 const canonicalLines = (lines: readonly string[]): string[] =>
   lines.map((l) => l.trim()).filter((l) => l !== "" && !l.startsWith("#"));
 
-const pyprojectSections = (text: string): string =>
-  segments(text)
+const pyprojectSections = (text: string): string => {
+  const { segments, undecodable } = split(text);
+  // Fail closed: a header this splitter cannot decode makes the whole file guarded.
+  if (undecodable) return `undecodable\u0000${text}`;
+  return segments
     .filter(guardedSegment)
     .map((s) => canonicalLines(s.lines).join("\n"))
     .filter((s) => s !== "")
     .join("\n");
+};
 
 const pyprojectWithBase = (head: string, base: string | undefined): string => {
-  const baseSegs = base === undefined ? [] : segments(base);
-  const root = baseSegs.find((s) => s.name === null)?.lines ?? [];
-  const rest = segments(head)
-    .filter((s) => !guardedSegment(s))
-    .flatMap((s) => s.lines);
-  const tools = baseSegs
-    .filter((s) => s.name !== null && guardedSegment(s))
-    .flatMap((s) => s.lines);
+  const headSplit = split(head);
+  const baseSplit = base === undefined ? null : split(base);
+  // Fail closed: when either side does not decode, L1 runs with the base file as it was.
+  if (headSplit.undecodable || baseSplit?.undecodable === true) return base ?? "";
+  const baseSegs = baseSplit?.segments ?? [];
+  const root = baseSegs.find((s) => s.key === null)?.lines ?? [];
+  const rest = headSplit.segments.filter((s) => !guardedSegment(s)).flatMap((s) => s.lines);
+  const tools = baseSegs.filter((s) => s.key !== null && guardedSegment(s)).flatMap((s) => s.lines);
   return `${[...root, ...rest, ...tools].join("\n").trimEnd()}\n`;
 };
 

@@ -262,6 +262,10 @@ describe("calibrate", () => {
       flaky_tests: ["tests/unit.json > wobbly"],
     });
     expect(s.lines.join("\n")).toMatch(/L2 tests: /);
+    // Engine core and the Gate Runner read gates.yml at the run's base commit (D-z f).
+    expect(s.lines.join("\n")).toMatch(
+      /Commit \.vtc\/gates\.yml now: runs read it at their base commit and park until it is committed/,
+    );
   });
 
   it("runs nothing and writes nothing when the human declines the commands", async () => {
