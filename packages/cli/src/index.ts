@@ -7,16 +7,20 @@ import { COMPILE_TARGETS } from "@vtc/compiler";
 import { ENGINE_NAME } from "@vtc/engine";
 import { CONTRACTS_VERSION } from "@vtc/shared";
 import { COMMANDS } from "./commands/index.js";
+import type { CommandContext } from "./commands/types.js";
+import { VERSION } from "./wiring.js";
 
-export const VERSION = "0.0.0";
-
-export { COMMANDS, type CommandSpec } from "./commands/index.js";
+export { COMMANDS } from "./commands/index.js";
+export type { CliIo, CommandContext, CommandSpec } from "./commands/types.js";
 export { detectRuntime, loadStorage, type Runtime } from "./storage.js";
-
-export interface CliIo {
-  readonly out: (line: string) => void;
-  readonly err: (line: string) => void;
-}
+export {
+  composeEngineDeps,
+  createCommandContext,
+  resolveVtcHome,
+  startDaemon,
+  VERSION,
+  type EngineParts,
+} from "./wiring.js";
 
 const helpText = (): string[] => [
   `vtc ${VERSION}`,
@@ -26,25 +30,23 @@ const helpText = (): string[] => [
   ...COMMANDS.map((c) => `  ${c.name.padEnd(15)} ${c.summary}`),
 ];
 
-/** Entry point. Returns the process exit code. */
-export const main = (argv: readonly string[], io: CliIo): number => {
-  const [command] = argv;
+/** Entry point. Resolves to the process exit code. */
+export const main = async (argv: readonly string[], ctx: CommandContext): Promise<number> => {
+  const [command, ...args] = argv;
   if (command === undefined || command === "--help" || command === "-h" || command === "help") {
     helpText().forEach((line) => {
-      io.out(line);
+      ctx.io.out(line);
     });
     return 0;
   }
   if (command === "--version" || command === "-v") {
-    io.out(
+    ctx.io.out(
       `vtc ${VERSION} (${ENGINE_NAME}, contracts ${CONTRACTS_VERSION}, hosts ${Object.keys(HOST_CAPABILITIES).join("/")}, plugins ${Object.values(COMPILE_TARGETS).join(", ")})`,
     );
     return 0;
   }
-  if (COMMANDS.some((c) => c.name === command)) {
-    io.err(`vtc ${command}: not implemented yet`);
-    return 2;
-  }
-  io.err(`vtc: unknown command '${command}'. Run 'vtc --help'.`);
+  const spec = COMMANDS.find((c) => c.name === command);
+  if (spec !== undefined) return spec.run(args, ctx);
+  ctx.io.err(`vtc: unknown command '${command}'. Run 'vtc --help'.`);
   return 64;
 };

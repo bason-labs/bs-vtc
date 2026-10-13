@@ -16,13 +16,20 @@ export const severityRank = (severity: Severity): number =>
 export const isAtLeast = (severity: Severity, threshold: Severity): boolean =>
   severityRank(severity) >= severityRank(threshold);
 
-/** Severity a role finding gets from its category. Reviewer claims are ignored. */
+/**
+ * Severity a role finding gets from its category. Reviewer claims are ignored.
+ *
+ * Only security-class categories are `high` or above, because §7.6 rule 9 parks a task on any
+ * high/critical finding still open after one round (`openHighRuleFires`). An ordinary
+ * correctness bug is `medium`: it goes through the normal fix loop up to the 3–5 round cap
+ * (D6, §6.3 step 9) and still blocks Level-3 auto-merge at the default threshold (§6.7).
+ */
 export const ROLE_CATEGORY_SEVERITY: Readonly<Record<FindingCategory, Severity>> = {
   secret: "critical",
   security: "high",
   supply_chain: "high",
   test_integrity: "high",
-  correctness: "high",
+  correctness: "medium",
   spec_mismatch: "medium",
   test_adequacy: "medium",
   accessibility: "medium",
@@ -128,3 +135,20 @@ export const SEVERITY_WEIGHT: Readonly<Record<Severity, number>> = {
 
 export const weightedSeverity = (severities: readonly Severity[]): number =>
   severities.reduce((sum, severity) => sum + SEVERITY_WEIGHT[severity], 0);
+
+/**
+ * §7.6 rule 9: a high or critical finding still open after one fix round parks the task
+ * (`risk_rule` `open_high_finding`). `currentRound` is the round being verified; a finding first
+ * seen in an earlier round has had its fix round.
+ */
+export const openHighRuleFires = (
+  finding: {
+    readonly severity: Severity;
+    readonly status: string;
+    readonly round_first_seen: number;
+  },
+  currentRound: number,
+): boolean =>
+  finding.status === "open" &&
+  isAtLeast(finding.severity, "high") &&
+  currentRound > finding.round_first_seen;

@@ -1,0 +1,13 @@
+{
+  "$comment": "AD-3 rule 4: append-only. Each CONTRACTS_VERSION with the SHA-256 of JSON.stringify(jsonSchemas()). A schema change must add a new, higher version here by hand; vitest -u cannot.",
+  "versions": [
+    {
+      "version": "2.0.0",
+      "schemas_sha256": "87946578ca2cb41c00b4ef0604f111c1fbefce8895571839a80773c44814b19c"
+    },
+    {
+      "version": "3.0.0",
+      "schemas_sha256": "cf602cb5c8afb9cc58adab16bea96443e677d352bc684be4084482bcadbeff7d"
+    }
+  ]
+}

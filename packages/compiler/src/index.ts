@@ -1,6 +1,7 @@
 /** @vtc/compiler: neutral role sources → host plugin formats (§4.1, §4.4). Depends on @vtc/shared only. */
 import {
   agentNameFor,
+  findForbiddenInText,
   RoleContractSchema,
   splitRolePrompt,
   type HostId,
@@ -11,6 +12,13 @@ import {
 export const COMPILE_TARGETS: Readonly<Record<HostId, string>> = {
   "claude-code": "dist/claude-plugin",
   codex: "dist/codex-plugin",
+};
+
+/** Hand-written plugin sources the compiler merges into each target (AD-16). */
+export const PLUGIN_SOURCES: Readonly<Record<HostId | "common", string>> = {
+  common: "plugins/common",
+  "claude-code": "plugins/claude-code",
+  codex: "plugins/codex",
 };
 
 export type RoleContractCheck =
@@ -44,3 +52,25 @@ export const compiledAgentNames = (role: RoleContract): string[] =>
   role.modes === undefined
     ? [agentNameFor(role.id)]
     : Object.keys(role.modes).map((mode) => agentNameFor(role.id, mode));
+
+/** One AD-9 violation in an emitted or source file. */
+export interface PluginFileViolation {
+  readonly path: string;
+  readonly line: number;
+  readonly marker: string;
+}
+
+/**
+ * AD-9 gate on everything the compiler emits (agent frontmatter such as `permissionMode`, Codex
+ * agent TOML such as `sandbox_mode`, hooks, settings, skills): every file must be free of
+ * permission-bypass flags and credential markers. The compile step fails on any violation.
+ */
+export const checkPluginFiles = (
+  files: Iterable<{ readonly path: string; readonly text: string }>,
+): PluginFileViolation[] => {
+  const violations: PluginFileViolation[] = [];
+  for (const file of files) {
+    for (const hit of findForbiddenInText(file.text)) violations.push({ path: file.path, ...hit });
+  }
+  return violations;
+};

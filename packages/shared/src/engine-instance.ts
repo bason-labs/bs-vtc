@@ -11,6 +11,12 @@ export const ENGINE_INSTANCE = {
   lockFile: ".vtc/state/engine.lock",
   /** Discovery directory under the VTC home (`~/.vtc`). Files are mode 0600. */
   discoveryDir: "engines",
+  /**
+   * Directory under the VTC home for the daemons' MCP sockets (mode 0700). Not `.vtc/state/`:
+   * a Unix socket path must fit `sun_path` (104 bytes on macOS, 108 on Linux), and repo paths
+   * can be arbitrarily deep.
+   */
+  socketDir: "run",
   /** A daemon with no runs to drive, no bridges and nothing scheduled exits after this long. */
   idleExitMs: 30 * 60 * 1000,
 } as const;
@@ -33,6 +39,21 @@ export const engineRepoKey = (absRepoRoot: string): string =>
 export const engineDiscoveryFile = (absRepoRoot: string): string =>
   `${ENGINE_INSTANCE.discoveryDir}/${engineRepoKey(absRepoRoot)}.json`;
 
+/** Longest Unix socket path VTC binds, in bytes (below macOS's 104-byte `sun_path`). */
+export const UNIX_SOCKET_MAX_BYTES = 100;
+
+/** The daemon's MCP socket, relative to `~/.vtc/`: `run/<repo-key>.sock` (25 bytes). */
+export const engineSocketFile = (absRepoRoot: string): string =>
+  `${ENGINE_INSTANCE.socketDir}/${engineRepoKey(absRepoRoot)}.sock`;
+
+/** The daemon's named pipe on Windows: `\\.\pipe\vtc-<repo-key>`. */
+export const engineWindowsPipe = (absRepoRoot: string): string =>
+  `\\\\.\\pipe\\vtc-${engineRepoKey(absRepoRoot)}`;
+
+/** True when a Unix socket path fits {@link UNIX_SOCKET_MAX_BYTES}; the daemon refuses to start otherwise. */
+export const fitsUnixSocketPath = (absPath: string): boolean =>
+  new TextEncoder().encode(absPath).length <= UNIX_SOCKET_MAX_BYTES;
+
 /**
  * `~/.vtc/engines/<repo-key>.json`, written by the running daemon (mode 0600) and removed on a
  * clean exit. It holds no secret: clients read the token from `~/.vtc/token` (AD-5).
@@ -42,7 +63,12 @@ export const EngineDiscoverySchema = z.strictObject({
   pid: z.int().positive(),
   /** HTTP/SSE port on 127.0.0.1 (AD-5). */
   port: z.int().min(1).max(65535),
-  /** Local MCP endpoint the stdio bridges connect to: a Unix socket path or a Windows pipe name. */
+  /** The separate prototype server's port (AD-5 rule 9), or `null` when not started. */
+  prototype_port: z.int().min(1).max(65535).nullable(),
+  /**
+   * Local MCP endpoint the stdio bridges and the cli control commands connect to: the Unix
+   * socket `~/.vtc/run/<repo-key>.sock` or the Windows pipe `\\.\pipe\vtc-<repo-key>`.
+   */
   mcp_socket: z.string().min(1).max(1024),
   repo_root: z.string().min(1).max(4096),
   started_at: IsoDateTimeSchema,

@@ -1,5 +1,5 @@
 {
-  "contracts_version": "2.0.0",
+  "contracts_version": "3.0.0",
   "schemas": {
     "Run": {
       "$id": "https://vtc.local/schemas/Run.json",
@@ -349,6 +349,14 @@
             "med",
             "high"
           ]
+        },
+        "risk_tags": {
+          "default": [],
+          "type": "array",
+          "items": {
+            "type": "string",
+            "pattern": "^[a-z0-9][a-z0-9._-]{0,63}$"
+          }
         },
         "cap": {
           "type": "integer",
@@ -870,6 +878,14 @@
             "high"
           ]
         },
+        "risk_tags": {
+          "default": [],
+          "type": "array",
+          "items": {
+            "type": "string",
+            "pattern": "^[a-z0-9][a-z0-9._-]{0,63}$"
+          }
+        },
         "cap": {
           "type": "integer",
           "minimum": 3,
@@ -1146,6 +1162,16 @@
             "docs"
           ]
         },
+        "kind": {
+          "type": "string",
+          "enum": [
+            "implementation_deviation",
+            "design_ambiguity",
+            "observed_mismatch",
+            "spec_ambiguity",
+            "test_defect"
+          ]
+        },
         "title": {
           "type": "string",
           "minLength": 1,
@@ -1215,6 +1241,7 @@
             "type": {
               "type": "string",
               "enum": [
+                "file",
                 "file_line",
                 "log_line",
                 "junit",
@@ -1223,7 +1250,9 @@
                 "screenshot",
                 "diff",
                 "commit",
+                "test",
                 "spec_ref",
+                "fact",
                 "url"
               ]
             },
@@ -1371,6 +1400,16 @@
             "docs"
           ]
         },
+        "kind": {
+          "type": "string",
+          "enum": [
+            "implementation_deviation",
+            "design_ambiguity",
+            "observed_mismatch",
+            "spec_ambiguity",
+            "test_defect"
+          ]
+        },
         "title": {
           "type": "string",
           "minLength": 1,
@@ -1420,6 +1459,7 @@
             "type": {
               "type": "string",
               "enum": [
+                "file",
                 "file_line",
                 "log_line",
                 "junit",
@@ -1428,7 +1468,9 @@
                 "screenshot",
                 "diff",
                 "commit",
+                "test",
                 "spec_ref",
+                "fact",
                 "url"
               ]
             },
@@ -1474,6 +1516,7 @@
       "required": [
         "rule_id",
         "category",
+        "kind",
         "title",
         "confidence",
         "location",
@@ -1554,6 +1597,7 @@
               "type": {
                 "type": "string",
                 "enum": [
+                  "file",
                   "file_line",
                   "log_line",
                   "junit",
@@ -1562,7 +1606,9 @@
                   "screenshot",
                   "diff",
                   "commit",
+                  "test",
                   "spec_ref",
+                  "fact",
                   "url"
                 ]
               },
@@ -1652,11 +1698,7 @@
             "breaking_api",
             "large_diff",
             "repeated_test_integrity",
-            "open_high_finding",
-            "stuck_or_cap",
-            "unresolved_spec_conflict",
-            "gate_infra_or_sandbox",
-            "budget_exhausted"
+            "open_high_finding"
           ]
         },
         "detail": {
@@ -1730,6 +1772,7 @@
               "type": {
                 "type": "string",
                 "enum": [
+                  "file",
                   "file_line",
                   "log_line",
                   "junit",
@@ -1738,7 +1781,9 @@
                   "screenshot",
                   "diff",
                   "commit",
+                  "test",
                   "spec_ref",
+                  "fact",
                   "url"
                 ]
               },
@@ -1885,36 +1930,43 @@
           "maxLength": 200
         },
         "tokens": {
-          "type": "object",
-          "properties": {
-            "in": {
-              "type": "integer",
-              "minimum": 0,
-              "maximum": 9007199254740991
+          "anyOf": [
+            {
+              "type": "object",
+              "properties": {
+                "in": {
+                  "type": "integer",
+                  "minimum": 0,
+                  "maximum": 9007199254740991
+                },
+                "out": {
+                  "type": "integer",
+                  "minimum": 0,
+                  "maximum": 9007199254740991
+                },
+                "cache_r": {
+                  "type": "integer",
+                  "minimum": 0,
+                  "maximum": 9007199254740991
+                },
+                "cache_w": {
+                  "type": "integer",
+                  "minimum": 0,
+                  "maximum": 9007199254740991
+                }
+              },
+              "required": [
+                "in",
+                "out",
+                "cache_r",
+                "cache_w"
+              ],
+              "additionalProperties": false
             },
-            "out": {
-              "type": "integer",
-              "minimum": 0,
-              "maximum": 9007199254740991
-            },
-            "cache_r": {
-              "type": "integer",
-              "minimum": 0,
-              "maximum": 9007199254740991
-            },
-            "cache_w": {
-              "type": "integer",
-              "minimum": 0,
-              "maximum": 9007199254740991
+            {
+              "type": "null"
             }
-          },
-          "required": [
-            "in",
-            "out",
-            "cache_r",
-            "cache_w"
-          ],
-          "additionalProperties": false
+          ]
         },
         "cost_usd": {
           "anyOf": [
@@ -2099,6 +2151,57 @@
           },
           "required": [
             "outcome"
+          ],
+          "additionalProperties": false
+        },
+        "run.merge_level_changed": {
+          "type": "object",
+          "properties": {
+            "from": {
+              "anyOf": [
+                {
+                  "type": "number",
+                  "const": 1
+                },
+                {
+                  "type": "number",
+                  "const": 2
+                },
+                {
+                  "type": "number",
+                  "const": 3
+                }
+              ]
+            },
+            "to": {
+              "anyOf": [
+                {
+                  "type": "number",
+                  "const": 1
+                },
+                {
+                  "type": "number",
+                  "const": 2
+                },
+                {
+                  "type": "number",
+                  "const": 3
+                }
+              ]
+            },
+            "reason": {
+              "type": "string",
+              "enum": [
+                "revert",
+                "post_merge_ci_failure",
+                "human"
+              ]
+            }
+          },
+          "required": [
+            "from",
+            "to",
+            "reason"
           ],
           "additionalProperties": false
         },
@@ -2335,6 +2438,14 @@
                     "high"
                   ]
                 },
+                "risk_tags": {
+                  "default": [],
+                  "type": "array",
+                  "items": {
+                    "type": "string",
+                    "pattern": "^[a-z0-9][a-z0-9._-]{0,63}$"
+                  }
+                },
                 "cap": {
                   "type": "integer",
                   "minimum": 3,
@@ -2467,6 +2578,80 @@
           },
           "required": [
             "task"
+          ],
+          "additionalProperties": false
+        },
+        "task.workspace_assigned": {
+          "type": "object",
+          "properties": {
+            "worktree": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 1024
+            },
+            "branch": {
+              "type": "string",
+              "pattern": "^vtc\\/T-[1-9]\\d*$"
+            },
+            "baseline_revision": {
+              "type": "string",
+              "pattern": "^([a-f0-9]{40}|[a-f0-9]{64})$"
+            }
+          },
+          "required": [
+            "worktree",
+            "branch",
+            "baseline_revision"
+          ],
+          "additionalProperties": false
+        },
+        "task.session_updated": {
+          "type": "object",
+          "properties": {
+            "session_ref": {
+              "type": "object",
+              "properties": {
+                "host": {
+                  "type": "string",
+                  "enum": [
+                    "claude-code",
+                    "codex"
+                  ]
+                },
+                "id": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 256
+                }
+              },
+              "required": [
+                "host",
+                "id"
+              ],
+              "additionalProperties": false
+            }
+          },
+          "required": [
+            "session_ref"
+          ],
+          "additionalProperties": false
+        },
+        "contract.frozen": {
+          "type": "object",
+          "properties": {
+            "path": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 1024
+            },
+            "sha256": {
+              "type": "string",
+              "pattern": "^[a-f0-9]{64}$"
+            }
+          },
+          "required": [
+            "path",
+            "sha256"
           ],
           "additionalProperties": false
         },
@@ -2708,6 +2893,32 @@
           ],
           "additionalProperties": false
         },
+        "feature.pr_updated": {
+          "type": "object",
+          "properties": {
+            "pr": {
+              "type": "object",
+              "properties": {
+                "url": {
+                  "type": "string",
+                  "format": "uri"
+                },
+                "draft": {
+                  "type": "boolean"
+                }
+              },
+              "required": [
+                "url",
+                "draft"
+              ],
+              "additionalProperties": false
+            }
+          },
+          "required": [
+            "pr"
+          ],
+          "additionalProperties": false
+        },
         "role.dispatched": {
           "type": "object",
           "properties": {
@@ -2718,6 +2929,10 @@
             "mode": {
               "type": "string",
               "pattern": "^[a-z0-9][a-z0-9._-]{0,63}$"
+            },
+            "subject": {
+              "type": "string",
+              "pattern": "^((REQ|SEC)-[1-9]\\d*(\\.AC-[1-9]\\d*)?|V[1-8]|T-[1-9]\\d*|F-[1-9]\\d*)$"
             },
             "dispatch": {
               "type": "string",
@@ -2793,14 +3008,32 @@
                 "unknown"
               ]
             },
-            "verdict": {
-              "type": "string",
-              "enum": [
-                "pass",
-                "fail",
-                "unknown",
-                "unchecked"
-              ]
+            "verdicts": {
+              "default": [],
+              "type": "array",
+              "items": {
+                "type": "object",
+                "properties": {
+                  "subject": {
+                    "type": "string",
+                    "pattern": "^((REQ|SEC)-[1-9]\\d*(\\.AC-[1-9]\\d*)?|V[1-8]|T-[1-9]\\d*|F-[1-9]\\d*)$"
+                  },
+                  "verdict": {
+                    "type": "string",
+                    "enum": [
+                      "pass",
+                      "fail",
+                      "unknown",
+                      "unchecked"
+                    ]
+                  }
+                },
+                "required": [
+                  "subject",
+                  "verdict"
+                ],
+                "additionalProperties": false
+              }
             },
             "findings": {
               "type": "integer",
@@ -2895,7 +3128,11 @@
                 "schema",
                 "claim_check",
                 "write_scope",
-                "undeclared_mode"
+                "undeclared_mode",
+                "dispatch_mismatch",
+                "undeclared_exit",
+                "undeclared_verdict",
+                "undeclared_output"
               ]
             },
             "issues": {
@@ -2966,7 +3203,9 @@
                 "round",
                 "merge_queue",
                 "final_review",
-                "calibration"
+                "calibration",
+                "base_fail_check",
+                "fault_repro"
               ]
             },
             "scope": {
@@ -2983,6 +3222,14 @@
             "head": {
               "type": "string",
               "pattern": "^([a-f0-9]{40}|[a-f0-9]{64})$"
+            },
+            "expect": {
+              "default": "pass",
+              "type": "string",
+              "enum": [
+                "pass",
+                "fail"
+              ]
             },
             "results": {
               "minItems": 1,
@@ -3103,6 +3350,7 @@
                         "type": {
                           "type": "string",
                           "enum": [
+                            "file",
                             "file_line",
                             "log_line",
                             "junit",
@@ -3111,7 +3359,9 @@
                             "screenshot",
                             "diff",
                             "commit",
+                            "test",
                             "spec_ref",
+                            "fact",
                             "url"
                           ]
                         },
@@ -3229,6 +3479,16 @@
                     "docs"
                   ]
                 },
+                "kind": {
+                  "type": "string",
+                  "enum": [
+                    "implementation_deviation",
+                    "design_ambiguity",
+                    "observed_mismatch",
+                    "spec_ambiguity",
+                    "test_defect"
+                  ]
+                },
                 "title": {
                   "type": "string",
                   "minLength": 1,
@@ -3298,6 +3558,7 @@
                     "type": {
                       "type": "string",
                       "enum": [
+                        "file",
                         "file_line",
                         "log_line",
                         "junit",
@@ -3306,7 +3567,9 @@
                         "screenshot",
                         "diff",
                         "commit",
+                        "test",
                         "spec_ref",
+                        "fact",
                         "url"
                       ]
                     },
@@ -3555,11 +3818,7 @@
                     "breaking_api",
                     "large_diff",
                     "repeated_test_integrity",
-                    "open_high_finding",
-                    "stuck_or_cap",
-                    "unresolved_spec_conflict",
-                    "gate_infra_or_sandbox",
-                    "budget_exhausted"
+                    "open_high_finding"
                   ]
                 },
                 "detail": {
@@ -3633,6 +3892,7 @@
                       "type": {
                         "type": "string",
                         "enum": [
+                          "file",
                           "file_line",
                           "log_line",
                           "junit",
@@ -3641,7 +3901,9 @@
                           "screenshot",
                           "diff",
                           "commit",
+                          "test",
                           "spec_ref",
+                          "fact",
                           "url"
                         ]
                       },
@@ -3754,6 +4016,134 @@
           "required": [
             "escalation",
             "answer"
+          ],
+          "additionalProperties": false
+        },
+        "change_request.opened": {
+          "type": "object",
+          "properties": {
+            "escalation": {
+              "type": "string",
+              "pattern": "^E-[1-9]\\d*$"
+            },
+            "artifact": {
+              "type": "string",
+              "enum": [
+                "spec",
+                "architecture",
+                "design",
+                "interface_contract"
+              ]
+            },
+            "frozen": {
+              "type": "object",
+              "properties": {
+                "path": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 1024
+                },
+                "sha256": {
+                  "type": "string",
+                  "pattern": "^[a-f0-9]{64}$"
+                }
+              },
+              "required": [
+                "path",
+                "sha256"
+              ],
+              "additionalProperties": false
+            },
+            "task": {
+              "type": "string",
+              "pattern": "^T-[1-9]\\d*$"
+            },
+            "summary": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 300
+            }
+          },
+          "required": [
+            "escalation",
+            "artifact",
+            "frozen",
+            "summary"
+          ],
+          "additionalProperties": false
+        },
+        "change_request.decided": {
+          "type": "object",
+          "properties": {
+            "escalation": {
+              "type": "string",
+              "pattern": "^E-[1-9]\\d*$"
+            },
+            "decision": {
+              "type": "string",
+              "enum": [
+                "approved",
+                "rejected"
+              ]
+            },
+            "frozen": {
+              "type": "object",
+              "properties": {
+                "path": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 1024
+                },
+                "sha256": {
+                  "type": "string",
+                  "pattern": "^[a-f0-9]{64}$"
+                }
+              },
+              "required": [
+                "path",
+                "sha256"
+              ],
+              "additionalProperties": false
+            },
+            "new_sha256": {
+              "type": "string",
+              "pattern": "^[a-f0-9]{64}$"
+            }
+          },
+          "required": [
+            "escalation",
+            "decision",
+            "frozen"
+          ],
+          "additionalProperties": false
+        },
+        "spec.clarified": {
+          "type": "object",
+          "properties": {
+            "path": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 1024
+            },
+            "old_sha256": {
+              "type": "string",
+              "pattern": "^[a-f0-9]{64}$"
+            },
+            "new_sha256": {
+              "type": "string",
+              "pattern": "^[a-f0-9]{64}$"
+            },
+            "summary": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 300
+            }
+          },
+          "required": [
+            "path",
+            "old_sha256",
+            "new_sha256",
+            "summary"
           ],
           "additionalProperties": false
         },
@@ -4117,6 +4507,7 @@
                   "type": {
                     "type": "string",
                     "enum": [
+                      "file",
                       "file_line",
                       "log_line",
                       "junit",
@@ -4125,7 +4516,9 @@
                       "screenshot",
                       "diff",
                       "commit",
+                      "test",
                       "spec_ref",
+                      "fact",
                       "url"
                     ]
                   },
@@ -4156,12 +4549,17 @@
         "run.paused",
         "run.resumed",
         "run.finished",
+        "run.merge_level_changed",
         "gate.approved",
         "gate.rejected",
         "task.created",
+        "task.workspace_assigned",
+        "task.session_updated",
+        "contract.frozen",
         "task.status_changed",
         "feature.created",
         "feature.status_changed",
+        "feature.pr_updated",
         "role.dispatched",
         "role.submitted",
         "role.rejected",
@@ -4171,6 +4569,9 @@
         "finding.status_changed",
         "escalation.opened",
         "escalation.answered",
+        "change_request.opened",
+        "change_request.decided",
+        "spec.clarified",
         "budget.updated",
         "usage.updated",
         "limit.hit",
@@ -4203,23 +4604,79 @@
               "type": "string",
               "pattern": "^F-[1-9]\\d*$"
             },
-            "verdict": {
-              "type": "string",
-              "enum": [
-                "pass",
-                "fail",
-                "unknown",
-                "unchecked"
-              ]
-            },
-            "question_type": {
-              "type": "string",
-              "enum": [
-                "structure_content",
-                "state",
-                "layout",
-                "brand_design_system"
-              ]
+            "verdicts": {
+              "default": [],
+              "type": "array",
+              "items": {
+                "type": "object",
+                "properties": {
+                  "subject": {
+                    "type": "string",
+                    "pattern": "^((REQ|SEC)-[1-9]\\d*(\\.AC-[1-9]\\d*)?|V[1-8]|T-[1-9]\\d*|F-[1-9]\\d*)$"
+                  },
+                  "verdict": {
+                    "type": "string",
+                    "enum": [
+                      "pass",
+                      "fail",
+                      "unknown",
+                      "unchecked"
+                    ]
+                  },
+                  "question_type": {
+                    "type": "string",
+                    "enum": [
+                      "structure_content",
+                      "state",
+                      "layout",
+                      "brand_design_system"
+                    ]
+                  },
+                  "evidence": {
+                    "minItems": 1,
+                    "type": "array",
+                    "items": {
+                      "type": "object",
+                      "properties": {
+                        "type": {
+                          "type": "string",
+                          "enum": [
+                            "file",
+                            "file_line",
+                            "log_line",
+                            "junit",
+                            "sarif",
+                            "command_output",
+                            "screenshot",
+                            "diff",
+                            "commit",
+                            "test",
+                            "spec_ref",
+                            "fact",
+                            "url"
+                          ]
+                        },
+                        "ref": {
+                          "type": "string",
+                          "minLength": 1,
+                          "maxLength": 2048
+                        }
+                      },
+                      "required": [
+                        "type",
+                        "ref"
+                      ],
+                      "additionalProperties": false
+                    }
+                  }
+                },
+                "required": [
+                  "subject",
+                  "verdict",
+                  "evidence"
+                ],
+                "additionalProperties": false
+              }
             },
             "findings": {
               "default": [],
@@ -4248,6 +4705,16 @@
                       "design",
                       "maintainability",
                       "docs"
+                    ]
+                  },
+                  "kind": {
+                    "type": "string",
+                    "enum": [
+                      "implementation_deviation",
+                      "design_ambiguity",
+                      "observed_mismatch",
+                      "spec_ambiguity",
+                      "test_defect"
                     ]
                   },
                   "title": {
@@ -4299,6 +4766,7 @@
                       "type": {
                         "type": "string",
                         "enum": [
+                          "file",
                           "file_line",
                           "log_line",
                           "junit",
@@ -4307,7 +4775,9 @@
                           "screenshot",
                           "diff",
                           "commit",
+                          "test",
                           "spec_ref",
+                          "fact",
                           "url"
                         ]
                       },
@@ -4353,6 +4823,7 @@
                 "required": [
                   "rule_id",
                   "category",
+                  "kind",
                   "title",
                   "confidence",
                   "location",
@@ -4434,6 +4905,7 @@
                         "type": {
                           "type": "string",
                           "enum": [
+                            "file",
                             "file_line",
                             "log_line",
                             "junit",
@@ -4442,7 +4914,9 @@
                             "screenshot",
                             "diff",
                             "commit",
+                            "test",
                             "spec_ref",
+                            "fact",
                             "url"
                           ]
                         },
@@ -4750,9 +5224,17 @@
                     "type": "string",
                     "enum": [
                       "file",
+                      "file_line",
+                      "log_line",
+                      "junit",
+                      "sarif",
+                      "command_output",
+                      "screenshot",
+                      "diff",
                       "commit",
-                      "citation",
                       "test",
+                      "spec_ref",
+                      "fact",
                       "url"
                     ]
                   },
@@ -4809,23 +5291,79 @@
               "type": "string",
               "pattern": "^F-[1-9]\\d*$"
             },
-            "verdict": {
-              "type": "string",
-              "enum": [
-                "pass",
-                "fail",
-                "unknown",
-                "unchecked"
-              ]
-            },
-            "question_type": {
-              "type": "string",
-              "enum": [
-                "structure_content",
-                "state",
-                "layout",
-                "brand_design_system"
-              ]
+            "verdicts": {
+              "default": [],
+              "type": "array",
+              "items": {
+                "type": "object",
+                "properties": {
+                  "subject": {
+                    "type": "string",
+                    "pattern": "^((REQ|SEC)-[1-9]\\d*(\\.AC-[1-9]\\d*)?|V[1-8]|T-[1-9]\\d*|F-[1-9]\\d*)$"
+                  },
+                  "verdict": {
+                    "type": "string",
+                    "enum": [
+                      "pass",
+                      "fail",
+                      "unknown",
+                      "unchecked"
+                    ]
+                  },
+                  "question_type": {
+                    "type": "string",
+                    "enum": [
+                      "structure_content",
+                      "state",
+                      "layout",
+                      "brand_design_system"
+                    ]
+                  },
+                  "evidence": {
+                    "minItems": 1,
+                    "type": "array",
+                    "items": {
+                      "type": "object",
+                      "properties": {
+                        "type": {
+                          "type": "string",
+                          "enum": [
+                            "file",
+                            "file_line",
+                            "log_line",
+                            "junit",
+                            "sarif",
+                            "command_output",
+                            "screenshot",
+                            "diff",
+                            "commit",
+                            "test",
+                            "spec_ref",
+                            "fact",
+                            "url"
+                          ]
+                        },
+                        "ref": {
+                          "type": "string",
+                          "minLength": 1,
+                          "maxLength": 2048
+                        }
+                      },
+                      "required": [
+                        "type",
+                        "ref"
+                      ],
+                      "additionalProperties": false
+                    }
+                  }
+                },
+                "required": [
+                  "subject",
+                  "verdict",
+                  "evidence"
+                ],
+                "additionalProperties": false
+              }
             },
             "findings": {
               "default": [],
@@ -4854,6 +5392,16 @@
                       "design",
                       "maintainability",
                       "docs"
+                    ]
+                  },
+                  "kind": {
+                    "type": "string",
+                    "enum": [
+                      "implementation_deviation",
+                      "design_ambiguity",
+                      "observed_mismatch",
+                      "spec_ambiguity",
+                      "test_defect"
                     ]
                   },
                   "title": {
@@ -4905,6 +5453,7 @@
                       "type": {
                         "type": "string",
                         "enum": [
+                          "file",
                           "file_line",
                           "log_line",
                           "junit",
@@ -4913,7 +5462,9 @@
                           "screenshot",
                           "diff",
                           "commit",
+                          "test",
                           "spec_ref",
+                          "fact",
                           "url"
                         ]
                       },
@@ -4959,6 +5510,7 @@
                 "required": [
                   "rule_id",
                   "category",
+                  "kind",
                   "title",
                   "confidence",
                   "location",
@@ -5040,6 +5592,7 @@
                         "type": {
                           "type": "string",
                           "enum": [
+                            "file",
                             "file_line",
                             "log_line",
                             "junit",
@@ -5048,7 +5601,9 @@
                             "screenshot",
                             "diff",
                             "commit",
+                            "test",
                             "spec_ref",
+                            "fact",
                             "url"
                           ]
                         },
@@ -5356,9 +5911,17 @@
                     "type": "string",
                     "enum": [
                       "file",
+                      "file_line",
+                      "log_line",
+                      "junit",
+                      "sarif",
+                      "command_output",
+                      "screenshot",
+                      "diff",
                       "commit",
-                      "citation",
                       "test",
+                      "spec_ref",
+                      "fact",
                       "url"
                     ]
                   },
@@ -5454,6 +6017,7 @@
                       "type": {
                         "type": "string",
                         "enum": [
+                          "file",
                           "file_line",
                           "log_line",
                           "junit",
@@ -5462,7 +6026,9 @@
                           "screenshot",
                           "diff",
                           "commit",
+                          "test",
                           "spec_ref",
+                          "fact",
                           "url"
                         ]
                       },
@@ -5516,23 +6082,79 @@
               "type": "string",
               "pattern": "^F-[1-9]\\d*$"
             },
-            "verdict": {
-              "type": "string",
-              "enum": [
-                "pass",
-                "fail",
-                "unknown",
-                "unchecked"
-              ]
-            },
-            "question_type": {
-              "type": "string",
-              "enum": [
-                "structure_content",
-                "state",
-                "layout",
-                "brand_design_system"
-              ]
+            "verdicts": {
+              "default": [],
+              "type": "array",
+              "items": {
+                "type": "object",
+                "properties": {
+                  "subject": {
+                    "type": "string",
+                    "pattern": "^((REQ|SEC)-[1-9]\\d*(\\.AC-[1-9]\\d*)?|V[1-8]|T-[1-9]\\d*|F-[1-9]\\d*)$"
+                  },
+                  "verdict": {
+                    "type": "string",
+                    "enum": [
+                      "pass",
+                      "fail",
+                      "unknown",
+                      "unchecked"
+                    ]
+                  },
+                  "question_type": {
+                    "type": "string",
+                    "enum": [
+                      "structure_content",
+                      "state",
+                      "layout",
+                      "brand_design_system"
+                    ]
+                  },
+                  "evidence": {
+                    "minItems": 1,
+                    "type": "array",
+                    "items": {
+                      "type": "object",
+                      "properties": {
+                        "type": {
+                          "type": "string",
+                          "enum": [
+                            "file",
+                            "file_line",
+                            "log_line",
+                            "junit",
+                            "sarif",
+                            "command_output",
+                            "screenshot",
+                            "diff",
+                            "commit",
+                            "test",
+                            "spec_ref",
+                            "fact",
+                            "url"
+                          ]
+                        },
+                        "ref": {
+                          "type": "string",
+                          "minLength": 1,
+                          "maxLength": 2048
+                        }
+                      },
+                      "required": [
+                        "type",
+                        "ref"
+                      ],
+                      "additionalProperties": false
+                    }
+                  }
+                },
+                "required": [
+                  "subject",
+                  "verdict",
+                  "evidence"
+                ],
+                "additionalProperties": false
+              }
             },
             "findings": {
               "default": [],
@@ -5561,6 +6183,16 @@
                       "design",
                       "maintainability",
                       "docs"
+                    ]
+                  },
+                  "kind": {
+                    "type": "string",
+                    "enum": [
+                      "implementation_deviation",
+                      "design_ambiguity",
+                      "observed_mismatch",
+                      "spec_ambiguity",
+                      "test_defect"
                     ]
                   },
                   "title": {
@@ -5612,6 +6244,7 @@
                       "type": {
                         "type": "string",
                         "enum": [
+                          "file",
                           "file_line",
                           "log_line",
                           "junit",
@@ -5620,7 +6253,9 @@
                           "screenshot",
                           "diff",
                           "commit",
+                          "test",
                           "spec_ref",
+                          "fact",
                           "url"
                         ]
                       },
@@ -5666,6 +6301,7 @@
                 "required": [
                   "rule_id",
                   "category",
+                  "kind",
                   "title",
                   "confidence",
                   "location",
@@ -5747,6 +6383,7 @@
                         "type": {
                           "type": "string",
                           "enum": [
+                            "file",
                             "file_line",
                             "log_line",
                             "junit",
@@ -5755,7 +6392,9 @@
                             "screenshot",
                             "diff",
                             "commit",
+                            "test",
                             "spec_ref",
+                            "fact",
                             "url"
                           ]
                         },
@@ -6063,9 +6702,17 @@
                     "type": "string",
                     "enum": [
                       "file",
+                      "file_line",
+                      "log_line",
+                      "junit",
+                      "sarif",
+                      "command_output",
+                      "screenshot",
+                      "diff",
                       "commit",
-                      "citation",
                       "test",
+                      "spec_ref",
+                      "fact",
                       "url"
                     ]
                   },
@@ -6142,23 +6789,79 @@
               "type": "string",
               "pattern": "^F-[1-9]\\d*$"
             },
-            "verdict": {
-              "type": "string",
-              "enum": [
-                "pass",
-                "fail",
-                "unknown",
-                "unchecked"
-              ]
-            },
-            "question_type": {
-              "type": "string",
-              "enum": [
-                "structure_content",
-                "state",
-                "layout",
-                "brand_design_system"
-              ]
+            "verdicts": {
+              "default": [],
+              "type": "array",
+              "items": {
+                "type": "object",
+                "properties": {
+                  "subject": {
+                    "type": "string",
+                    "pattern": "^((REQ|SEC)-[1-9]\\d*(\\.AC-[1-9]\\d*)?|V[1-8]|T-[1-9]\\d*|F-[1-9]\\d*)$"
+                  },
+                  "verdict": {
+                    "type": "string",
+                    "enum": [
+                      "pass",
+                      "fail",
+                      "unknown",
+                      "unchecked"
+                    ]
+                  },
+                  "question_type": {
+                    "type": "string",
+                    "enum": [
+                      "structure_content",
+                      "state",
+                      "layout",
+                      "brand_design_system"
+                    ]
+                  },
+                  "evidence": {
+                    "minItems": 1,
+                    "type": "array",
+                    "items": {
+                      "type": "object",
+                      "properties": {
+                        "type": {
+                          "type": "string",
+                          "enum": [
+                            "file",
+                            "file_line",
+                            "log_line",
+                            "junit",
+                            "sarif",
+                            "command_output",
+                            "screenshot",
+                            "diff",
+                            "commit",
+                            "test",
+                            "spec_ref",
+                            "fact",
+                            "url"
+                          ]
+                        },
+                        "ref": {
+                          "type": "string",
+                          "minLength": 1,
+                          "maxLength": 2048
+                        }
+                      },
+                      "required": [
+                        "type",
+                        "ref"
+                      ],
+                      "additionalProperties": false
+                    }
+                  }
+                },
+                "required": [
+                  "subject",
+                  "verdict",
+                  "evidence"
+                ],
+                "additionalProperties": false
+              }
             },
             "findings": {
               "default": [],
@@ -6187,6 +6890,16 @@
                       "design",
                       "maintainability",
                       "docs"
+                    ]
+                  },
+                  "kind": {
+                    "type": "string",
+                    "enum": [
+                      "implementation_deviation",
+                      "design_ambiguity",
+                      "observed_mismatch",
+                      "spec_ambiguity",
+                      "test_defect"
                     ]
                   },
                   "title": {
@@ -6238,6 +6951,7 @@
                       "type": {
                         "type": "string",
                         "enum": [
+                          "file",
                           "file_line",
                           "log_line",
                           "junit",
@@ -6246,7 +6960,9 @@
                           "screenshot",
                           "diff",
                           "commit",
+                          "test",
                           "spec_ref",
+                          "fact",
                           "url"
                         ]
                       },
@@ -6292,6 +7008,7 @@
                 "required": [
                   "rule_id",
                   "category",
+                  "kind",
                   "title",
                   "confidence",
                   "location",
@@ -6373,6 +7090,7 @@
                         "type": {
                           "type": "string",
                           "enum": [
+                            "file",
                             "file_line",
                             "log_line",
                             "junit",
@@ -6381,7 +7099,9 @@
                             "screenshot",
                             "diff",
                             "commit",
+                            "test",
                             "spec_ref",
+                            "fact",
                             "url"
                           ]
                         },
@@ -6689,9 +7409,17 @@
                     "type": "string",
                     "enum": [
                       "file",
+                      "file_line",
+                      "log_line",
+                      "junit",
+                      "sarif",
+                      "command_output",
+                      "screenshot",
+                      "diff",
                       "commit",
-                      "citation",
                       "test",
+                      "spec_ref",
+                      "fact",
                       "url"
                     ]
                   },
@@ -6736,6 +7464,7 @@
                     "type": {
                       "type": "string",
                       "enum": [
+                        "file",
                         "file_line",
                         "log_line",
                         "junit",
@@ -6744,7 +7473,9 @@
                         "screenshot",
                         "diff",
                         "commit",
+                        "test",
                         "spec_ref",
+                        "fact",
                         "url"
                       ]
                     },
@@ -7291,6 +8022,1403 @@
         }
       ]
     },
+    "TaskPack": {
+      "$id": "https://vtc.local/schemas/TaskPack.json",
+      "title": "TaskPack",
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "type": "object",
+      "properties": {
+        "v": {
+          "type": "number",
+          "const": 1
+        },
+        "run": {
+          "type": "string",
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$"
+        },
+        "action_id": {
+          "type": "string",
+          "pattern": "^[a-z0-9][a-z0-9._-]{0,63}$"
+        },
+        "role": {
+          "type": "string",
+          "pattern": "^[a-z][a-z0-9_-]{0,47}$"
+        },
+        "mode": {
+          "type": "string",
+          "pattern": "^[a-z0-9][a-z0-9._-]{0,63}$"
+        },
+        "task": {
+          "type": "string",
+          "pattern": "^T-[1-9]\\d*$"
+        },
+        "feature": {
+          "type": "string",
+          "pattern": "^F-[1-9]\\d*$"
+        },
+        "subject": {
+          "type": "string",
+          "pattern": "^((REQ|SEC)-[1-9]\\d*(\\.AC-[1-9]\\d*)?|V[1-8]|T-[1-9]\\d*|F-[1-9]\\d*)$"
+        },
+        "intent": {
+          "type": "object",
+          "properties": {
+            "statement": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 2000
+            },
+            "always": {
+              "default": [],
+              "type": "array",
+              "items": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 500
+              }
+            },
+            "never": {
+              "default": [],
+              "type": "array",
+              "items": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 500
+              }
+            },
+            "io_matrix": {
+              "minItems": 1,
+              "type": "array",
+              "items": {
+                "type": "object",
+                "properties": {
+                  "case": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 200
+                  },
+                  "input": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 1000
+                  },
+                  "expected": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 1000
+                  }
+                },
+                "required": [
+                  "case",
+                  "input",
+                  "expected"
+                ],
+                "additionalProperties": false
+              }
+            }
+          },
+          "required": [
+            "statement",
+            "io_matrix"
+          ],
+          "additionalProperties": false
+        },
+        "requirements": {
+          "default": [],
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "id": {
+                "type": "string",
+                "pattern": "^(REQ|SEC)-[1-9]\\d*(\\.AC-[1-9]\\d*)?$"
+              },
+              "text": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 4000
+              }
+            },
+            "required": [
+              "id",
+              "text"
+            ],
+            "additionalProperties": false
+          }
+        },
+        "decisions": {
+          "default": [],
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "id": {
+                "type": "string",
+                "pattern": "^AD-[1-9]\\d*$"
+              },
+              "text": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 4000
+              }
+            },
+            "required": [
+              "id",
+              "text"
+            ],
+            "additionalProperties": false
+          }
+        },
+        "inputs": {
+          "default": [],
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "type": {
+                "type": "string",
+                "pattern": "^[a-z0-9][a-z0-9._-]{0,63}$"
+              },
+              "path": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 1024
+              },
+              "sha256": {
+                "type": "string",
+                "pattern": "^[a-f0-9]{64}$"
+              }
+            },
+            "required": [
+              "type",
+              "path"
+            ],
+            "additionalProperties": false
+          }
+        },
+        "files_scope": {
+          "default": [],
+          "type": "array",
+          "items": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 1024
+          }
+        },
+        "gates": {
+          "default": [],
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "id": {
+                "type": "string",
+                "pattern": "^[a-z0-9][a-z0-9._-]{0,63}$"
+              },
+              "layer": {
+                "type": "string",
+                "enum": [
+                  "L0",
+                  "L1",
+                  "L2",
+                  "L3",
+                  "L4",
+                  "L5",
+                  "L6"
+                ]
+              },
+              "command": {
+                "minItems": 1,
+                "type": "array",
+                "items": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 4096
+                }
+              }
+            },
+            "required": [
+              "id",
+              "layer",
+              "command"
+            ],
+            "additionalProperties": false
+          }
+        },
+        "findings": {
+          "default": [],
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "fingerprint": {
+                "type": "string",
+                "pattern": "^[a-f0-9]{64}$"
+              },
+              "source": {
+                "type": "string",
+                "enum": [
+                  "tool",
+                  "role"
+                ]
+              },
+              "source_name": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 100
+              },
+              "rule_id": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 200
+              },
+              "category": {
+                "type": "string",
+                "enum": [
+                  "secret",
+                  "security",
+                  "supply_chain",
+                  "test_integrity",
+                  "correctness",
+                  "spec_mismatch",
+                  "test_adequacy",
+                  "accessibility",
+                  "architecture",
+                  "performance",
+                  "design",
+                  "maintainability",
+                  "docs"
+                ]
+              },
+              "kind": {
+                "type": "string",
+                "enum": [
+                  "implementation_deviation",
+                  "design_ambiguity",
+                  "observed_mismatch",
+                  "spec_ambiguity",
+                  "test_defect"
+                ]
+              },
+              "title": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 200
+              },
+              "message": {
+                "type": "string",
+                "maxLength": 4000
+              },
+              "severity": {
+                "type": "string",
+                "enum": [
+                  "critical",
+                  "high",
+                  "medium",
+                  "low",
+                  "info"
+                ]
+              },
+              "claimed_severity": {
+                "type": "string",
+                "enum": [
+                  "critical",
+                  "high",
+                  "medium",
+                  "low",
+                  "info"
+                ]
+              },
+              "confidence": {
+                "type": "number",
+                "minimum": 0,
+                "maximum": 1
+              },
+              "location": {
+                "type": "object",
+                "properties": {
+                  "path": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 1024
+                  },
+                  "symbol": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 512
+                  },
+                  "line": {
+                    "type": "integer",
+                    "exclusiveMinimum": 0,
+                    "maximum": 9007199254740991
+                  },
+                  "end_line": {
+                    "type": "integer",
+                    "exclusiveMinimum": 0,
+                    "maximum": 9007199254740991
+                  }
+                },
+                "required": [
+                  "path"
+                ],
+                "additionalProperties": false
+              },
+              "evidence": {
+                "type": "object",
+                "properties": {
+                  "type": {
+                    "type": "string",
+                    "enum": [
+                      "file",
+                      "file_line",
+                      "log_line",
+                      "junit",
+                      "sarif",
+                      "command_output",
+                      "screenshot",
+                      "diff",
+                      "commit",
+                      "test",
+                      "spec_ref",
+                      "fact",
+                      "url"
+                    ]
+                  },
+                  "ref": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 2048
+                  }
+                },
+                "required": [
+                  "type",
+                  "ref"
+                ],
+                "additionalProperties": false
+              },
+              "req_ids": {
+                "default": [],
+                "type": "array",
+                "items": {
+                  "type": "string",
+                  "pattern": "^(REQ|SEC)-[1-9]\\d*(\\.AC-[1-9]\\d*)?$"
+                }
+              },
+              "snippet": {
+                "type": "string",
+                "maxLength": 4000
+              },
+              "cwe": {
+                "type": "string",
+                "pattern": "^CWE-[1-9]\\d*$"
+              },
+              "route": {
+                "type": "string",
+                "enum": [
+                  "patch",
+                  "spec_gap",
+                  "design_gap",
+                  "bad_test",
+                  "risky",
+                  "defer",
+                  "out_of_scope"
+                ]
+              },
+              "owner_task": {
+                "type": "string",
+                "pattern": "^T-[1-9]\\d*$"
+              },
+              "task": {
+                "type": "string",
+                "pattern": "^T-[1-9]\\d*$"
+              },
+              "feature": {
+                "type": "string",
+                "pattern": "^F-[1-9]\\d*$"
+              },
+              "round_first_seen": {
+                "type": "integer",
+                "exclusiveMinimum": 0,
+                "maximum": 9007199254740991
+              },
+              "round_last_seen": {
+                "type": "integer",
+                "exclusiveMinimum": 0,
+                "maximum": 9007199254740991
+              },
+              "status": {
+                "type": "string",
+                "enum": [
+                  "open",
+                  "resolved",
+                  "deferred",
+                  "waived",
+                  "discarded"
+                ]
+              },
+              "waiver": {
+                "type": "object",
+                "properties": {
+                  "by": {
+                    "type": "string",
+                    "const": "human"
+                  },
+                  "reason": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 2000
+                  },
+                  "expires_at": {
+                    "type": "string",
+                    "format": "date-time",
+                    "pattern": "^(?:(?:\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|(?:02)-(?:0[1-9]|1\\d|2[0-8])))T(?:(?:[01]\\d|2[0-3]):[0-5]\\d:[0-5]\\d(?:\\.\\d+)?(?:Z|([+-](?:[01]\\d|2[0-3]):[0-5]\\d)))$"
+                  }
+                },
+                "required": [
+                  "by",
+                  "reason",
+                  "expires_at"
+                ],
+                "additionalProperties": false
+              }
+            },
+            "required": [
+              "fingerprint",
+              "source",
+              "source_name",
+              "rule_id",
+              "category",
+              "title",
+              "severity",
+              "confidence",
+              "location",
+              "evidence",
+              "route",
+              "round_first_seen",
+              "status"
+            ],
+            "additionalProperties": false
+          }
+        },
+        "answer": {
+          "type": "object",
+          "properties": {
+            "option": {
+              "type": "string",
+              "pattern": "^[a-z0-9][a-z0-9._-]{0,63}$"
+            },
+            "text": {
+              "type": "string",
+              "maxLength": 4000
+            },
+            "who_should_have_caught": {
+              "type": "string",
+              "pattern": "^[a-z][a-z0-9_-]{0,47}$"
+            }
+          },
+          "required": [
+            "option",
+            "who_should_have_caught"
+          ],
+          "additionalProperties": false
+        }
+      },
+      "required": [
+        "v",
+        "run",
+        "action_id",
+        "role"
+      ],
+      "additionalProperties": false
+    },
+    "TraceabilityReport": {
+      "$id": "https://vtc.local/schemas/TraceabilityReport.json",
+      "title": "TraceabilityReport",
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "type": "object",
+      "properties": {
+        "run": {
+          "type": "string",
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$"
+        },
+        "task": {
+          "type": "string",
+          "pattern": "^T-[1-9]\\d*$"
+        },
+        "feature": {
+          "type": "string",
+          "pattern": "^F-[1-9]\\d*$"
+        },
+        "rows": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "req": {
+                "type": "string",
+                "pattern": "^(REQ|SEC)-[1-9]\\d*(\\.AC-[1-9]\\d*)?$"
+              },
+              "tests": {
+                "default": [],
+                "type": "array",
+                "items": {
+                  "type": "object",
+                  "properties": {
+                    "id": {
+                      "type": "string",
+                      "minLength": 1,
+                      "maxLength": 500
+                    },
+                    "status": {
+                      "type": "string",
+                      "enum": [
+                        "pass",
+                        "fail",
+                        "skipped",
+                        "error"
+                      ]
+                    },
+                    "hidden": {
+                      "default": false,
+                      "type": "boolean"
+                    },
+                    "provenance": {
+                      "default": "unknown",
+                      "type": "string",
+                      "enum": [
+                        "spec",
+                        "observed",
+                        "mixed",
+                        "unknown"
+                      ]
+                    }
+                  },
+                  "required": [
+                    "id",
+                    "status"
+                  ],
+                  "additionalProperties": false
+                }
+              },
+              "covered": {
+                "type": "boolean"
+              }
+            },
+            "required": [
+              "req",
+              "covered"
+            ],
+            "additionalProperties": false
+          }
+        },
+        "gaps": {
+          "default": [],
+          "type": "array",
+          "items": {
+            "type": "string",
+            "pattern": "^(REQ|SEC)-[1-9]\\d*(\\.AC-[1-9]\\d*)?$"
+          }
+        },
+        "scope_creep": {
+          "default": [],
+          "type": "array",
+          "items": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 1024
+          }
+        },
+        "built_at": {
+          "type": "string",
+          "format": "date-time",
+          "pattern": "^(?:(?:\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|(?:02)-(?:0[1-9]|1\\d|2[0-8])))T(?:(?:[01]\\d|2[0-3]):[0-5]\\d:[0-5]\\d(?:\\.\\d+)?(?:Z|([+-](?:[01]\\d|2[0-3]):[0-5]\\d)))$"
+        }
+      },
+      "required": [
+        "run",
+        "rows",
+        "built_at"
+      ],
+      "additionalProperties": false
+    },
+    "EvidenceBundle": {
+      "$id": "https://vtc.local/schemas/EvidenceBundle.json",
+      "title": "EvidenceBundle",
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "oneOf": [
+        {
+          "type": "object",
+          "properties": {
+            "kind": {
+              "type": "string",
+              "const": "task"
+            },
+            "run": {
+              "type": "string",
+              "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$"
+            },
+            "task": {
+              "type": "string",
+              "pattern": "^T-[1-9]\\d*$"
+            },
+            "feature": {
+              "type": "string",
+              "pattern": "^F-[1-9]\\d*$"
+            },
+            "discipline": {
+              "type": "string",
+              "enum": [
+                "frontend",
+                "backend",
+                "mobile",
+                "data",
+                "devops",
+                "ai_llm",
+                "desktop",
+                "embedded_iot",
+                "cms",
+                "web3",
+                "search_relevance",
+                "realtime",
+                "video",
+                "game_dev",
+                "cli_tooling",
+                "wasm",
+                "wechat_mini_program",
+                "us_public_sector"
+              ]
+            },
+            "rounds": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 9007199254740991
+            },
+            "cap": {
+              "type": "integer",
+              "minimum": 3,
+              "maximum": 5
+            },
+            "traceability": {
+              "type": "object",
+              "properties": {
+                "run": {
+                  "type": "string",
+                  "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$"
+                },
+                "task": {
+                  "type": "string",
+                  "pattern": "^T-[1-9]\\d*$"
+                },
+                "feature": {
+                  "type": "string",
+                  "pattern": "^F-[1-9]\\d*$"
+                },
+                "rows": {
+                  "type": "array",
+                  "items": {
+                    "type": "object",
+                    "properties": {
+                      "req": {
+                        "type": "string",
+                        "pattern": "^(REQ|SEC)-[1-9]\\d*(\\.AC-[1-9]\\d*)?$"
+                      },
+                      "tests": {
+                        "default": [],
+                        "type": "array",
+                        "items": {
+                          "type": "object",
+                          "properties": {
+                            "id": {
+                              "type": "string",
+                              "minLength": 1,
+                              "maxLength": 500
+                            },
+                            "status": {
+                              "type": "string",
+                              "enum": [
+                                "pass",
+                                "fail",
+                                "skipped",
+                                "error"
+                              ]
+                            },
+                            "hidden": {
+                              "default": false,
+                              "type": "boolean"
+                            },
+                            "provenance": {
+                              "default": "unknown",
+                              "type": "string",
+                              "enum": [
+                                "spec",
+                                "observed",
+                                "mixed",
+                                "unknown"
+                              ]
+                            }
+                          },
+                          "required": [
+                            "id",
+                            "status"
+                          ],
+                          "additionalProperties": false
+                        }
+                      },
+                      "covered": {
+                        "type": "boolean"
+                      }
+                    },
+                    "required": [
+                      "req",
+                      "covered"
+                    ],
+                    "additionalProperties": false
+                  }
+                },
+                "gaps": {
+                  "default": [],
+                  "type": "array",
+                  "items": {
+                    "type": "string",
+                    "pattern": "^(REQ|SEC)-[1-9]\\d*(\\.AC-[1-9]\\d*)?$"
+                  }
+                },
+                "scope_creep": {
+                  "default": [],
+                  "type": "array",
+                  "items": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 1024
+                  }
+                },
+                "built_at": {
+                  "type": "string",
+                  "format": "date-time",
+                  "pattern": "^(?:(?:\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|(?:02)-(?:0[1-9]|1\\d|2[0-8])))T(?:(?:[01]\\d|2[0-3]):[0-5]\\d:[0-5]\\d(?:\\.\\d+)?(?:Z|([+-](?:[01]\\d|2[0-3]):[0-5]\\d)))$"
+                }
+              },
+              "required": [
+                "run",
+                "rows",
+                "built_at"
+              ],
+              "additionalProperties": false
+            },
+            "findings": {
+              "type": "object",
+              "properties": {
+                "open": {
+                  "type": "integer",
+                  "minimum": 0,
+                  "maximum": 9007199254740991
+                },
+                "resolved": {
+                  "type": "integer",
+                  "minimum": 0,
+                  "maximum": 9007199254740991
+                },
+                "deferred": {
+                  "type": "integer",
+                  "minimum": 0,
+                  "maximum": 9007199254740991
+                },
+                "waived": {
+                  "type": "integer",
+                  "minimum": 0,
+                  "maximum": 9007199254740991
+                },
+                "discarded": {
+                  "type": "integer",
+                  "minimum": 0,
+                  "maximum": 9007199254740991
+                }
+              },
+              "required": [
+                "open",
+                "resolved",
+                "deferred",
+                "waived",
+                "discarded"
+              ],
+              "additionalProperties": false
+            },
+            "gate_reports": {
+              "default": [],
+              "type": "array",
+              "items": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 1024
+              }
+            },
+            "verdicts": {
+              "default": [],
+              "type": "array",
+              "items": {
+                "type": "object",
+                "properties": {
+                  "role": {
+                    "type": "string",
+                    "pattern": "^[a-z][a-z0-9_-]{0,47}$"
+                  },
+                  "subject": {
+                    "type": "string",
+                    "pattern": "^((REQ|SEC)-[1-9]\\d*(\\.AC-[1-9]\\d*)?|V[1-8]|T-[1-9]\\d*|F-[1-9]\\d*)$"
+                  },
+                  "verdict": {
+                    "type": "string",
+                    "enum": [
+                      "pass",
+                      "fail",
+                      "unknown",
+                      "unchecked"
+                    ]
+                  },
+                  "prompt_sha": {
+                    "type": "string",
+                    "pattern": "^[a-f0-9]{64}$"
+                  }
+                },
+                "required": [
+                  "role",
+                  "subject",
+                  "verdict",
+                  "prompt_sha"
+                ],
+                "additionalProperties": false
+              }
+            },
+            "spend": {
+              "type": "object",
+              "properties": {
+                "usd": {
+                  "anyOf": [
+                    {
+                      "type": "number",
+                      "minimum": 0
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ]
+                },
+                "tokens": {
+                  "type": "object",
+                  "properties": {
+                    "in": {
+                      "type": "integer",
+                      "minimum": 0,
+                      "maximum": 9007199254740991
+                    },
+                    "out": {
+                      "type": "integer",
+                      "minimum": 0,
+                      "maximum": 9007199254740991
+                    },
+                    "cache_r": {
+                      "type": "integer",
+                      "minimum": 0,
+                      "maximum": 9007199254740991
+                    },
+                    "cache_w": {
+                      "type": "integer",
+                      "minimum": 0,
+                      "maximum": 9007199254740991
+                    }
+                  },
+                  "required": [
+                    "in",
+                    "out",
+                    "cache_r",
+                    "cache_w"
+                  ],
+                  "additionalProperties": false
+                }
+              },
+              "required": [
+                "usd",
+                "tokens"
+              ],
+              "additionalProperties": false
+            },
+            "written_at": {
+              "type": "string",
+              "format": "date-time",
+              "pattern": "^(?:(?:\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|(?:02)-(?:0[1-9]|1\\d|2[0-8])))T(?:(?:[01]\\d|2[0-3]):[0-5]\\d:[0-5]\\d(?:\\.\\d+)?(?:Z|([+-](?:[01]\\d|2[0-3]):[0-5]\\d)))$"
+            }
+          },
+          "required": [
+            "kind",
+            "run",
+            "task",
+            "discipline",
+            "rounds",
+            "cap",
+            "traceability",
+            "findings",
+            "spend",
+            "written_at"
+          ],
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "properties": {
+            "kind": {
+              "type": "string",
+              "const": "feature"
+            },
+            "run": {
+              "type": "string",
+              "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$"
+            },
+            "feature": {
+              "type": "string",
+              "pattern": "^F-[1-9]\\d*$"
+            },
+            "tasks": {
+              "minItems": 1,
+              "type": "array",
+              "items": {
+                "type": "object",
+                "properties": {
+                  "task": {
+                    "type": "string",
+                    "pattern": "^T-[1-9]\\d*$"
+                  },
+                  "discipline": {
+                    "type": "string",
+                    "enum": [
+                      "frontend",
+                      "backend",
+                      "mobile",
+                      "data",
+                      "devops",
+                      "ai_llm",
+                      "desktop",
+                      "embedded_iot",
+                      "cms",
+                      "web3",
+                      "search_relevance",
+                      "realtime",
+                      "video",
+                      "game_dev",
+                      "cli_tooling",
+                      "wasm",
+                      "wechat_mini_program",
+                      "us_public_sector"
+                    ]
+                  },
+                  "rounds": {
+                    "type": "integer",
+                    "minimum": 0,
+                    "maximum": 9007199254740991
+                  },
+                  "spend": {
+                    "type": "object",
+                    "properties": {
+                      "usd": {
+                        "anyOf": [
+                          {
+                            "type": "number",
+                            "minimum": 0
+                          },
+                          {
+                            "type": "null"
+                          }
+                        ]
+                      },
+                      "tokens": {
+                        "type": "object",
+                        "properties": {
+                          "in": {
+                            "type": "integer",
+                            "minimum": 0,
+                            "maximum": 9007199254740991
+                          },
+                          "out": {
+                            "type": "integer",
+                            "minimum": 0,
+                            "maximum": 9007199254740991
+                          },
+                          "cache_r": {
+                            "type": "integer",
+                            "minimum": 0,
+                            "maximum": 9007199254740991
+                          },
+                          "cache_w": {
+                            "type": "integer",
+                            "minimum": 0,
+                            "maximum": 9007199254740991
+                          }
+                        },
+                        "required": [
+                          "in",
+                          "out",
+                          "cache_r",
+                          "cache_w"
+                        ],
+                        "additionalProperties": false
+                      }
+                    },
+                    "required": [
+                      "usd",
+                      "tokens"
+                    ],
+                    "additionalProperties": false
+                  }
+                },
+                "required": [
+                  "task",
+                  "discipline",
+                  "rounds",
+                  "spend"
+                ],
+                "additionalProperties": false
+              }
+            },
+            "by_discipline": {
+              "type": "array",
+              "items": {
+                "type": "object",
+                "properties": {
+                  "discipline": {
+                    "type": "string",
+                    "enum": [
+                      "frontend",
+                      "backend",
+                      "mobile",
+                      "data",
+                      "devops",
+                      "ai_llm",
+                      "desktop",
+                      "embedded_iot",
+                      "cms",
+                      "web3",
+                      "search_relevance",
+                      "realtime",
+                      "video",
+                      "game_dev",
+                      "cli_tooling",
+                      "wasm",
+                      "wechat_mini_program",
+                      "us_public_sector"
+                    ]
+                  },
+                  "spend": {
+                    "type": "object",
+                    "properties": {
+                      "usd": {
+                        "anyOf": [
+                          {
+                            "type": "number",
+                            "minimum": 0
+                          },
+                          {
+                            "type": "null"
+                          }
+                        ]
+                      },
+                      "tokens": {
+                        "type": "object",
+                        "properties": {
+                          "in": {
+                            "type": "integer",
+                            "minimum": 0,
+                            "maximum": 9007199254740991
+                          },
+                          "out": {
+                            "type": "integer",
+                            "minimum": 0,
+                            "maximum": 9007199254740991
+                          },
+                          "cache_r": {
+                            "type": "integer",
+                            "minimum": 0,
+                            "maximum": 9007199254740991
+                          },
+                          "cache_w": {
+                            "type": "integer",
+                            "minimum": 0,
+                            "maximum": 9007199254740991
+                          }
+                        },
+                        "required": [
+                          "in",
+                          "out",
+                          "cache_r",
+                          "cache_w"
+                        ],
+                        "additionalProperties": false
+                      }
+                    },
+                    "required": [
+                      "usd",
+                      "tokens"
+                    ],
+                    "additionalProperties": false
+                  }
+                },
+                "required": [
+                  "discipline",
+                  "spend"
+                ],
+                "additionalProperties": false
+              }
+            },
+            "traceability": {
+              "type": "object",
+              "properties": {
+                "run": {
+                  "type": "string",
+                  "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$"
+                },
+                "task": {
+                  "type": "string",
+                  "pattern": "^T-[1-9]\\d*$"
+                },
+                "feature": {
+                  "type": "string",
+                  "pattern": "^F-[1-9]\\d*$"
+                },
+                "rows": {
+                  "type": "array",
+                  "items": {
+                    "type": "object",
+                    "properties": {
+                      "req": {
+                        "type": "string",
+                        "pattern": "^(REQ|SEC)-[1-9]\\d*(\\.AC-[1-9]\\d*)?$"
+                      },
+                      "tests": {
+                        "default": [],
+                        "type": "array",
+                        "items": {
+                          "type": "object",
+                          "properties": {
+                            "id": {
+                              "type": "string",
+                              "minLength": 1,
+                              "maxLength": 500
+                            },
+                            "status": {
+                              "type": "string",
+                              "enum": [
+                                "pass",
+                                "fail",
+                                "skipped",
+                                "error"
+                              ]
+                            },
+                            "hidden": {
+                              "default": false,
+                              "type": "boolean"
+                            },
+                            "provenance": {
+                              "default": "unknown",
+                              "type": "string",
+                              "enum": [
+                                "spec",
+                                "observed",
+                                "mixed",
+                                "unknown"
+                              ]
+                            }
+                          },
+                          "required": [
+                            "id",
+                            "status"
+                          ],
+                          "additionalProperties": false
+                        }
+                      },
+                      "covered": {
+                        "type": "boolean"
+                      }
+                    },
+                    "required": [
+                      "req",
+                      "covered"
+                    ],
+                    "additionalProperties": false
+                  }
+                },
+                "gaps": {
+                  "default": [],
+                  "type": "array",
+                  "items": {
+                    "type": "string",
+                    "pattern": "^(REQ|SEC)-[1-9]\\d*(\\.AC-[1-9]\\d*)?$"
+                  }
+                },
+                "scope_creep": {
+                  "default": [],
+                  "type": "array",
+                  "items": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 1024
+                  }
+                },
+                "built_at": {
+                  "type": "string",
+                  "format": "date-time",
+                  "pattern": "^(?:(?:\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|(?:02)-(?:0[1-9]|1\\d|2[0-8])))T(?:(?:[01]\\d|2[0-3]):[0-5]\\d:[0-5]\\d(?:\\.\\d+)?(?:Z|([+-](?:[01]\\d|2[0-3]):[0-5]\\d)))$"
+                }
+              },
+              "required": [
+                "run",
+                "rows",
+                "built_at"
+              ],
+              "additionalProperties": false
+            },
+            "findings": {
+              "type": "object",
+              "properties": {
+                "open": {
+                  "type": "integer",
+                  "minimum": 0,
+                  "maximum": 9007199254740991
+                },
+                "resolved": {
+                  "type": "integer",
+                  "minimum": 0,
+                  "maximum": 9007199254740991
+                },
+                "deferred": {
+                  "type": "integer",
+                  "minimum": 0,
+                  "maximum": 9007199254740991
+                },
+                "waived": {
+                  "type": "integer",
+                  "minimum": 0,
+                  "maximum": 9007199254740991
+                },
+                "discarded": {
+                  "type": "integer",
+                  "minimum": 0,
+                  "maximum": 9007199254740991
+                }
+              },
+              "required": [
+                "open",
+                "resolved",
+                "deferred",
+                "waived",
+                "discarded"
+              ],
+              "additionalProperties": false
+            },
+            "deferred": {
+              "default": [],
+              "type": "array",
+              "items": {
+                "type": "string",
+                "pattern": "^[a-f0-9]{64}$"
+              }
+            },
+            "final_review": {
+              "type": "object",
+              "properties": {
+                "verdict": {
+                  "type": "string",
+                  "enum": [
+                    "pending",
+                    "pass",
+                    "fail",
+                    "parked"
+                  ]
+                },
+                "rounds": {
+                  "type": "integer",
+                  "minimum": 0,
+                  "maximum": 3
+                }
+              },
+              "required": [
+                "verdict",
+                "rounds"
+              ],
+              "additionalProperties": false
+            },
+            "spend": {
+              "type": "object",
+              "properties": {
+                "usd": {
+                  "anyOf": [
+                    {
+                      "type": "number",
+                      "minimum": 0
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ]
+                },
+                "tokens": {
+                  "type": "object",
+                  "properties": {
+                    "in": {
+                      "type": "integer",
+                      "minimum": 0,
+                      "maximum": 9007199254740991
+                    },
+                    "out": {
+                      "type": "integer",
+                      "minimum": 0,
+                      "maximum": 9007199254740991
+                    },
+                    "cache_r": {
+                      "type": "integer",
+                      "minimum": 0,
+                      "maximum": 9007199254740991
+                    },
+                    "cache_w": {
+                      "type": "integer",
+                      "minimum": 0,
+                      "maximum": 9007199254740991
+                    }
+                  },
+                  "required": [
+                    "in",
+                    "out",
+                    "cache_r",
+                    "cache_w"
+                  ],
+                  "additionalProperties": false
+                }
+              },
+              "required": [
+                "usd",
+                "tokens"
+              ],
+              "additionalProperties": false
+            },
+            "written_at": {
+              "type": "string",
+              "format": "date-time",
+              "pattern": "^(?:(?:\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|(?:02)-(?:0[1-9]|1\\d|2[0-8])))T(?:(?:[01]\\d|2[0-3]):[0-5]\\d:[0-5]\\d(?:\\.\\d+)?(?:Z|([+-](?:[01]\\d|2[0-3]):[0-5]\\d)))$"
+            }
+          },
+          "required": [
+            "kind",
+            "run",
+            "feature",
+            "tasks",
+            "by_discipline",
+            "traceability",
+            "findings",
+            "final_review",
+            "spend",
+            "written_at"
+          ],
+          "additionalProperties": false
+        }
+      ]
+    },
     "ProjectConfig": {
       "$id": "https://vtc.local/schemas/ProjectConfig.json",
       "title": "ProjectConfig",
@@ -7452,6 +9580,14 @@
               "enum": [
                 "claude-code",
                 "codex"
+              ]
+            },
+            "dispatch": {
+              "default": "plugin_only",
+              "type": "string",
+              "enum": [
+                "plugin_only",
+                "headless_allowed"
               ]
             },
             "cross_family_review": {
@@ -7779,7 +9915,9 @@
             "round",
             "merge_queue",
             "final_review",
-            "calibration"
+            "calibration",
+            "base_fail_check",
+            "fault_repro"
           ]
         },
         "scope": {
@@ -7856,6 +9994,26 @@
             "type": "string",
             "pattern": "^(REQ|SEC)-[1-9]\\d*(\\.AC-[1-9]\\d*)?$"
           }
+        },
+        "tests": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 500
+          }
+        },
+        "expect": {
+          "default": "pass",
+          "type": "string",
+          "enum": [
+            "pass",
+            "fail"
+          ]
+        },
+        "include_hidden": {
+          "default": false,
+          "type": "boolean"
         }
       },
       "required": [
@@ -7987,6 +10145,7 @@
               "type": {
                 "type": "string",
                 "enum": [
+                  "file",
                   "file_line",
                   "log_line",
                   "junit",
@@ -7995,7 +10154,9 @@
                   "screenshot",
                   "diff",
                   "commit",
+                  "test",
                   "spec_ref",
+                  "fact",
                   "url"
                 ]
               },
@@ -8059,7 +10220,9 @@
             "round",
             "merge_queue",
             "final_review",
-            "calibration"
+            "calibration",
+            "base_fail_check",
+            "fault_repro"
           ]
         },
         "scope": {
@@ -8076,6 +10239,14 @@
         "head": {
           "type": "string",
           "pattern": "^([a-f0-9]{40}|[a-f0-9]{64})$"
+        },
+        "expect": {
+          "default": "pass",
+          "type": "string",
+          "enum": [
+            "pass",
+            "fail"
+          ]
         },
         "results": {
           "minItems": 1,
@@ -8196,6 +10367,7 @@
                     "type": {
                       "type": "string",
                       "enum": [
+                        "file",
                         "file_line",
                         "log_line",
                         "junit",
@@ -8204,7 +10376,9 @@
                         "screenshot",
                         "diff",
                         "commit",
+                        "test",
                         "spec_ref",
+                        "fact",
                         "url"
                       ]
                     },
@@ -9513,6 +11687,18 @@
           "minimum": 1,
           "maximum": 65535
         },
+        "prototype_port": {
+          "anyOf": [
+            {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 65535
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
         "mcp_socket": {
           "type": "string",
           "minLength": 1,
@@ -9542,6 +11728,7 @@
         "v",
         "pid",
         "port",
+        "prototype_port",
         "mcp_socket",
         "repo_root",
         "started_at",
@@ -9684,6 +11871,10 @@
             "feature": {
               "type": "string",
               "pattern": "^F-[1-9]\\d*$"
+            },
+            "subject": {
+              "type": "string",
+              "pattern": "^((REQ|SEC)-[1-9]\\d*(\\.AC-[1-9]\\d*)?|V[1-8]|T-[1-9]\\d*|F-[1-9]\\d*)$"
             },
             "pack": {
               "type": "string",
@@ -9918,6 +12109,10 @@
                   "feature": {
                     "type": "string",
                     "pattern": "^F-[1-9]\\d*$"
+                  },
+                  "subject": {
+                    "type": "string",
+                    "pattern": "^((REQ|SEC)-[1-9]\\d*(\\.AC-[1-9]\\d*)?|V[1-8]|T-[1-9]\\d*|F-[1-9]\\d*)$"
                   },
                   "pack": {
                     "type": "string",
@@ -10161,23 +12356,79 @@
                       "type": "string",
                       "pattern": "^F-[1-9]\\d*$"
                     },
-                    "verdict": {
-                      "type": "string",
-                      "enum": [
-                        "pass",
-                        "fail",
-                        "unknown",
-                        "unchecked"
-                      ]
-                    },
-                    "question_type": {
-                      "type": "string",
-                      "enum": [
-                        "structure_content",
-                        "state",
-                        "layout",
-                        "brand_design_system"
-                      ]
+                    "verdicts": {
+                      "default": [],
+                      "type": "array",
+                      "items": {
+                        "type": "object",
+                        "properties": {
+                          "subject": {
+                            "type": "string",
+                            "pattern": "^((REQ|SEC)-[1-9]\\d*(\\.AC-[1-9]\\d*)?|V[1-8]|T-[1-9]\\d*|F-[1-9]\\d*)$"
+                          },
+                          "verdict": {
+                            "type": "string",
+                            "enum": [
+                              "pass",
+                              "fail",
+                              "unknown",
+                              "unchecked"
+                            ]
+                          },
+                          "question_type": {
+                            "type": "string",
+                            "enum": [
+                              "structure_content",
+                              "state",
+                              "layout",
+                              "brand_design_system"
+                            ]
+                          },
+                          "evidence": {
+                            "minItems": 1,
+                            "type": "array",
+                            "items": {
+                              "type": "object",
+                              "properties": {
+                                "type": {
+                                  "type": "string",
+                                  "enum": [
+                                    "file",
+                                    "file_line",
+                                    "log_line",
+                                    "junit",
+                                    "sarif",
+                                    "command_output",
+                                    "screenshot",
+                                    "diff",
+                                    "commit",
+                                    "test",
+                                    "spec_ref",
+                                    "fact",
+                                    "url"
+                                  ]
+                                },
+                                "ref": {
+                                  "type": "string",
+                                  "minLength": 1,
+                                  "maxLength": 2048
+                                }
+                              },
+                              "required": [
+                                "type",
+                                "ref"
+                              ],
+                              "additionalProperties": false
+                            }
+                          }
+                        },
+                        "required": [
+                          "subject",
+                          "verdict",
+                          "evidence"
+                        ],
+                        "additionalProperties": false
+                      }
                     },
                     "findings": {
                       "default": [],
@@ -10206,6 +12457,16 @@
                               "design",
                               "maintainability",
                               "docs"
+                            ]
+                          },
+                          "kind": {
+                            "type": "string",
+                            "enum": [
+                              "implementation_deviation",
+                              "design_ambiguity",
+                              "observed_mismatch",
+                              "spec_ambiguity",
+                              "test_defect"
                             ]
                           },
                           "title": {
@@ -10257,6 +12518,7 @@
                               "type": {
                                 "type": "string",
                                 "enum": [
+                                  "file",
                                   "file_line",
                                   "log_line",
                                   "junit",
@@ -10265,7 +12527,9 @@
                                   "screenshot",
                                   "diff",
                                   "commit",
+                                  "test",
                                   "spec_ref",
+                                  "fact",
                                   "url"
                                 ]
                               },
@@ -10311,6 +12575,7 @@
                         "required": [
                           "rule_id",
                           "category",
+                          "kind",
                           "title",
                           "confidence",
                           "location",
@@ -10392,6 +12657,7 @@
                                 "type": {
                                   "type": "string",
                                   "enum": [
+                                    "file",
                                     "file_line",
                                     "log_line",
                                     "junit",
@@ -10400,7 +12666,9 @@
                                     "screenshot",
                                     "diff",
                                     "commit",
+                                    "test",
                                     "spec_ref",
+                                    "fact",
                                     "url"
                                   ]
                                 },
@@ -10708,9 +12976,17 @@
                             "type": "string",
                             "enum": [
                               "file",
+                              "file_line",
+                              "log_line",
+                              "junit",
+                              "sarif",
+                              "command_output",
+                              "screenshot",
+                              "diff",
                               "commit",
-                              "citation",
                               "test",
+                              "spec_ref",
+                              "fact",
                               "url"
                             ]
                           },
@@ -10767,23 +13043,79 @@
                       "type": "string",
                       "pattern": "^F-[1-9]\\d*$"
                     },
-                    "verdict": {
-                      "type": "string",
-                      "enum": [
-                        "pass",
-                        "fail",
-                        "unknown",
-                        "unchecked"
-                      ]
-                    },
-                    "question_type": {
-                      "type": "string",
-                      "enum": [
-                        "structure_content",
-                        "state",
-                        "layout",
-                        "brand_design_system"
-                      ]
+                    "verdicts": {
+                      "default": [],
+                      "type": "array",
+                      "items": {
+                        "type": "object",
+                        "properties": {
+                          "subject": {
+                            "type": "string",
+                            "pattern": "^((REQ|SEC)-[1-9]\\d*(\\.AC-[1-9]\\d*)?|V[1-8]|T-[1-9]\\d*|F-[1-9]\\d*)$"
+                          },
+                          "verdict": {
+                            "type": "string",
+                            "enum": [
+                              "pass",
+                              "fail",
+                              "unknown",
+                              "unchecked"
+                            ]
+                          },
+                          "question_type": {
+                            "type": "string",
+                            "enum": [
+                              "structure_content",
+                              "state",
+                              "layout",
+                              "brand_design_system"
+                            ]
+                          },
+                          "evidence": {
+                            "minItems": 1,
+                            "type": "array",
+                            "items": {
+                              "type": "object",
+                              "properties": {
+                                "type": {
+                                  "type": "string",
+                                  "enum": [
+                                    "file",
+                                    "file_line",
+                                    "log_line",
+                                    "junit",
+                                    "sarif",
+                                    "command_output",
+                                    "screenshot",
+                                    "diff",
+                                    "commit",
+                                    "test",
+                                    "spec_ref",
+                                    "fact",
+                                    "url"
+                                  ]
+                                },
+                                "ref": {
+                                  "type": "string",
+                                  "minLength": 1,
+                                  "maxLength": 2048
+                                }
+                              },
+                              "required": [
+                                "type",
+                                "ref"
+                              ],
+                              "additionalProperties": false
+                            }
+                          }
+                        },
+                        "required": [
+                          "subject",
+                          "verdict",
+                          "evidence"
+                        ],
+                        "additionalProperties": false
+                      }
                     },
                     "findings": {
                       "default": [],
@@ -10812,6 +13144,16 @@
                               "design",
                               "maintainability",
                               "docs"
+                            ]
+                          },
+                          "kind": {
+                            "type": "string",
+                            "enum": [
+                              "implementation_deviation",
+                              "design_ambiguity",
+                              "observed_mismatch",
+                              "spec_ambiguity",
+                              "test_defect"
                             ]
                           },
                           "title": {
@@ -10863,6 +13205,7 @@
                               "type": {
                                 "type": "string",
                                 "enum": [
+                                  "file",
                                   "file_line",
                                   "log_line",
                                   "junit",
@@ -10871,7 +13214,9 @@
                                   "screenshot",
                                   "diff",
                                   "commit",
+                                  "test",
                                   "spec_ref",
+                                  "fact",
                                   "url"
                                 ]
                               },
@@ -10917,6 +13262,7 @@
                         "required": [
                           "rule_id",
                           "category",
+                          "kind",
                           "title",
                           "confidence",
                           "location",
@@ -10998,6 +13344,7 @@
                                 "type": {
                                   "type": "string",
                                   "enum": [
+                                    "file",
                                     "file_line",
                                     "log_line",
                                     "junit",
@@ -11006,7 +13353,9 @@
                                     "screenshot",
                                     "diff",
                                     "commit",
+                                    "test",
                                     "spec_ref",
+                                    "fact",
                                     "url"
                                   ]
                                 },
@@ -11314,9 +13663,17 @@
                             "type": "string",
                             "enum": [
                               "file",
+                              "file_line",
+                              "log_line",
+                              "junit",
+                              "sarif",
+                              "command_output",
+                              "screenshot",
+                              "diff",
                               "commit",
-                              "citation",
                               "test",
+                              "spec_ref",
+                              "fact",
                               "url"
                             ]
                           },
@@ -11412,6 +13769,7 @@
                               "type": {
                                 "type": "string",
                                 "enum": [
+                                  "file",
                                   "file_line",
                                   "log_line",
                                   "junit",
@@ -11420,7 +13778,9 @@
                                   "screenshot",
                                   "diff",
                                   "commit",
+                                  "test",
                                   "spec_ref",
+                                  "fact",
                                   "url"
                                 ]
                               },
@@ -11474,23 +13834,79 @@
                       "type": "string",
                       "pattern": "^F-[1-9]\\d*$"
                     },
-                    "verdict": {
-                      "type": "string",
-                      "enum": [
-                        "pass",
-                        "fail",
-                        "unknown",
-                        "unchecked"
-                      ]
-                    },
-                    "question_type": {
-                      "type": "string",
-                      "enum": [
-                        "structure_content",
-                        "state",
-                        "layout",
-                        "brand_design_system"
-                      ]
+                    "verdicts": {
+                      "default": [],
+                      "type": "array",
+                      "items": {
+                        "type": "object",
+                        "properties": {
+                          "subject": {
+                            "type": "string",
+                            "pattern": "^((REQ|SEC)-[1-9]\\d*(\\.AC-[1-9]\\d*)?|V[1-8]|T-[1-9]\\d*|F-[1-9]\\d*)$"
+                          },
+                          "verdict": {
+                            "type": "string",
+                            "enum": [
+                              "pass",
+                              "fail",
+                              "unknown",
+                              "unchecked"
+                            ]
+                          },
+                          "question_type": {
+                            "type": "string",
+                            "enum": [
+                              "structure_content",
+                              "state",
+                              "layout",
+                              "brand_design_system"
+                            ]
+                          },
+                          "evidence": {
+                            "minItems": 1,
+                            "type": "array",
+                            "items": {
+                              "type": "object",
+                              "properties": {
+                                "type": {
+                                  "type": "string",
+                                  "enum": [
+                                    "file",
+                                    "file_line",
+                                    "log_line",
+                                    "junit",
+                                    "sarif",
+                                    "command_output",
+                                    "screenshot",
+                                    "diff",
+                                    "commit",
+                                    "test",
+                                    "spec_ref",
+                                    "fact",
+                                    "url"
+                                  ]
+                                },
+                                "ref": {
+                                  "type": "string",
+                                  "minLength": 1,
+                                  "maxLength": 2048
+                                }
+                              },
+                              "required": [
+                                "type",
+                                "ref"
+                              ],
+                              "additionalProperties": false
+                            }
+                          }
+                        },
+                        "required": [
+                          "subject",
+                          "verdict",
+                          "evidence"
+                        ],
+                        "additionalProperties": false
+                      }
                     },
                     "findings": {
                       "default": [],
@@ -11519,6 +13935,16 @@
                               "design",
                               "maintainability",
                               "docs"
+                            ]
+                          },
+                          "kind": {
+                            "type": "string",
+                            "enum": [
+                              "implementation_deviation",
+                              "design_ambiguity",
+                              "observed_mismatch",
+                              "spec_ambiguity",
+                              "test_defect"
                             ]
                           },
                           "title": {
@@ -11570,6 +13996,7 @@
                               "type": {
                                 "type": "string",
                                 "enum": [
+                                  "file",
                                   "file_line",
                                   "log_line",
                                   "junit",
@@ -11578,7 +14005,9 @@
                                   "screenshot",
                                   "diff",
                                   "commit",
+                                  "test",
                                   "spec_ref",
+                                  "fact",
                                   "url"
                                 ]
                               },
@@ -11624,6 +14053,7 @@
                         "required": [
                           "rule_id",
                           "category",
+                          "kind",
                           "title",
                           "confidence",
                           "location",
@@ -11705,6 +14135,7 @@
                                 "type": {
                                   "type": "string",
                                   "enum": [
+                                    "file",
                                     "file_line",
                                     "log_line",
                                     "junit",
@@ -11713,7 +14144,9 @@
                                     "screenshot",
                                     "diff",
                                     "commit",
+                                    "test",
                                     "spec_ref",
+                                    "fact",
                                     "url"
                                   ]
                                 },
@@ -12021,9 +14454,17 @@
                             "type": "string",
                             "enum": [
                               "file",
+                              "file_line",
+                              "log_line",
+                              "junit",
+                              "sarif",
+                              "command_output",
+                              "screenshot",
+                              "diff",
                               "commit",
-                              "citation",
                               "test",
+                              "spec_ref",
+                              "fact",
                               "url"
                             ]
                           },
@@ -12100,23 +14541,79 @@
                       "type": "string",
                       "pattern": "^F-[1-9]\\d*$"
                     },
-                    "verdict": {
-                      "type": "string",
-                      "enum": [
-                        "pass",
-                        "fail",
-                        "unknown",
-                        "unchecked"
-                      ]
-                    },
-                    "question_type": {
-                      "type": "string",
-                      "enum": [
-                        "structure_content",
-                        "state",
-                        "layout",
-                        "brand_design_system"
-                      ]
+                    "verdicts": {
+                      "default": [],
+                      "type": "array",
+                      "items": {
+                        "type": "object",
+                        "properties": {
+                          "subject": {
+                            "type": "string",
+                            "pattern": "^((REQ|SEC)-[1-9]\\d*(\\.AC-[1-9]\\d*)?|V[1-8]|T-[1-9]\\d*|F-[1-9]\\d*)$"
+                          },
+                          "verdict": {
+                            "type": "string",
+                            "enum": [
+                              "pass",
+                              "fail",
+                              "unknown",
+                              "unchecked"
+                            ]
+                          },
+                          "question_type": {
+                            "type": "string",
+                            "enum": [
+                              "structure_content",
+                              "state",
+                              "layout",
+                              "brand_design_system"
+                            ]
+                          },
+                          "evidence": {
+                            "minItems": 1,
+                            "type": "array",
+                            "items": {
+                              "type": "object",
+                              "properties": {
+                                "type": {
+                                  "type": "string",
+                                  "enum": [
+                                    "file",
+                                    "file_line",
+                                    "log_line",
+                                    "junit",
+                                    "sarif",
+                                    "command_output",
+                                    "screenshot",
+                                    "diff",
+                                    "commit",
+                                    "test",
+                                    "spec_ref",
+                                    "fact",
+                                    "url"
+                                  ]
+                                },
+                                "ref": {
+                                  "type": "string",
+                                  "minLength": 1,
+                                  "maxLength": 2048
+                                }
+                              },
+                              "required": [
+                                "type",
+                                "ref"
+                              ],
+                              "additionalProperties": false
+                            }
+                          }
+                        },
+                        "required": [
+                          "subject",
+                          "verdict",
+                          "evidence"
+                        ],
+                        "additionalProperties": false
+                      }
                     },
                     "findings": {
                       "default": [],
@@ -12145,6 +14642,16 @@
                               "design",
                               "maintainability",
                               "docs"
+                            ]
+                          },
+                          "kind": {
+                            "type": "string",
+                            "enum": [
+                              "implementation_deviation",
+                              "design_ambiguity",
+                              "observed_mismatch",
+                              "spec_ambiguity",
+                              "test_defect"
                             ]
                           },
                           "title": {
@@ -12196,6 +14703,7 @@
                               "type": {
                                 "type": "string",
                                 "enum": [
+                                  "file",
                                   "file_line",
                                   "log_line",
                                   "junit",
@@ -12204,7 +14712,9 @@
                                   "screenshot",
                                   "diff",
                                   "commit",
+                                  "test",
                                   "spec_ref",
+                                  "fact",
                                   "url"
                                 ]
                               },
@@ -12250,6 +14760,7 @@
                         "required": [
                           "rule_id",
                           "category",
+                          "kind",
                           "title",
                           "confidence",
                           "location",
@@ -12331,6 +14842,7 @@
                                 "type": {
                                   "type": "string",
                                   "enum": [
+                                    "file",
                                     "file_line",
                                     "log_line",
                                     "junit",
@@ -12339,7 +14851,9 @@
                                     "screenshot",
                                     "diff",
                                     "commit",
+                                    "test",
                                     "spec_ref",
+                                    "fact",
                                     "url"
                                   ]
                                 },
@@ -12647,9 +15161,17 @@
                             "type": "string",
                             "enum": [
                               "file",
+                              "file_line",
+                              "log_line",
+                              "junit",
+                              "sarif",
+                              "command_output",
+                              "screenshot",
+                              "diff",
                               "commit",
-                              "citation",
                               "test",
+                              "spec_ref",
+                              "fact",
                               "url"
                             ]
                           },
@@ -12694,6 +15216,7 @@
                             "type": {
                               "type": "string",
                               "enum": [
+                                "file",
                                 "file_line",
                                 "log_line",
                                 "junit",
@@ -12702,7 +15225,9 @@
                                 "screenshot",
                                 "diff",
                                 "commit",
+                                "test",
                                 "spec_ref",
+                                "fact",
                                 "url"
                               ]
                             },
@@ -13109,7 +15634,11 @@
                 "schema",
                 "claim_check",
                 "write_scope",
-                "undeclared_mode"
+                "undeclared_mode",
+                "dispatch_mismatch",
+                "undeclared_exit",
+                "undeclared_verdict",
+                "undeclared_output"
               ]
             },
             "issues": {
@@ -13158,6 +15687,10 @@
                   "feature": {
                     "type": "string",
                     "pattern": "^F-[1-9]\\d*$"
+                  },
+                  "subject": {
+                    "type": "string",
+                    "pattern": "^((REQ|SEC)-[1-9]\\d*(\\.AC-[1-9]\\d*)?|V[1-8]|T-[1-9]\\d*|F-[1-9]\\d*)$"
                   },
                   "pack": {
                     "type": "string",
@@ -13626,6 +16159,109 @@
             "additionalProperties": false
           }
         },
+        "features": {
+          "default": [],
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "id": {
+                "type": "string",
+                "pattern": "^F-[1-9]\\d*$"
+              },
+              "title": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 200
+              },
+              "status": {
+                "type": "string",
+                "enum": [
+                  "building",
+                  "integrating",
+                  "final_review",
+                  "fixing",
+                  "ready_to_ship",
+                  "shipped",
+                  "parked"
+                ]
+              },
+              "park_reason": {
+                "type": "string",
+                "enum": [
+                  "risk_rule",
+                  "cap",
+                  "stuck",
+                  "spec_conflict",
+                  "budget",
+                  "change_request",
+                  "gate_infra",
+                  "spec_question",
+                  "blocked"
+                ]
+              },
+              "tasks": {
+                "minItems": 1,
+                "type": "array",
+                "items": {
+                  "type": "string",
+                  "pattern": "^T-[1-9]\\d*$"
+                }
+              },
+              "integration_branch": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 255
+              },
+              "round": {
+                "default": 0,
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 3
+              },
+              "budget_usd": {
+                "type": "number",
+                "exclusiveMinimum": 0
+              },
+              "final_review_budget_usd": {
+                "type": "number",
+                "minimum": 0
+              },
+              "spent_usd": {
+                "default": 0,
+                "type": "number",
+                "minimum": 0
+              },
+              "pr": {
+                "type": "object",
+                "properties": {
+                  "url": {
+                    "type": "string",
+                    "format": "uri"
+                  },
+                  "draft": {
+                    "type": "boolean"
+                  }
+                },
+                "required": [
+                  "url",
+                  "draft"
+                ],
+                "additionalProperties": false
+              }
+            },
+            "required": [
+              "id",
+              "title",
+              "status",
+              "tasks",
+              "integration_branch",
+              "budget_usd",
+              "final_review_budget_usd"
+            ],
+            "additionalProperties": false
+          }
+        },
         "open_escalations": {
           "type": "integer",
           "minimum": 0,
@@ -13907,11 +16543,7 @@
                   "breaking_api",
                   "large_diff",
                   "repeated_test_integrity",
-                  "open_high_finding",
-                  "stuck_or_cap",
-                  "unresolved_spec_conflict",
-                  "gate_infra_or_sandbox",
-                  "budget_exhausted"
+                  "open_high_finding"
                 ]
               },
               "detail": {
@@ -13985,6 +16617,7 @@
                     "type": {
                       "type": "string",
                       "enum": [
+                        "file",
                         "file_line",
                         "log_line",
                         "junit",
@@ -13993,7 +16626,9 @@
                         "screenshot",
                         "diff",
                         "commit",
+                        "test",
                         "spec_ref",
+                        "fact",
                         "url"
                       ]
                     },
@@ -14209,8 +16844,13 @@
           "enum": [
             "spec",
             "architecture",
-            "design"
+            "design",
+            "interface_contract"
           ]
+        },
+        "task": {
+          "type": "string",
+          "pattern": "^T-[1-9]\\d*$"
         },
         "summary": {
           "type": "string",
@@ -14314,13 +16954,25 @@
         "contracts_version": {
           "type": "string",
           "pattern": "^\\d+\\.\\d+\\.\\d+$"
+        },
+        "prototype_url": {
+          "anyOf": [
+            {
+              "type": "string",
+              "pattern": "^http:\\/\\/127\\.0\\.0\\.1:[1-9]\\d{0,4}\\/$"
+            },
+            {
+              "type": "null"
+            }
+          ]
         }
       },
       "required": [
         "ok",
         "mode",
         "engine_version",
-        "contracts_version"
+        "contracts_version",
+        "prototype_url"
       ],
       "additionalProperties": false
     },
@@ -14476,36 +17128,43 @@
                 "maxLength": 200
               },
               "tokens": {
-                "type": "object",
-                "properties": {
-                  "in": {
-                    "type": "integer",
-                    "minimum": 0,
-                    "maximum": 9007199254740991
+                "anyOf": [
+                  {
+                    "type": "object",
+                    "properties": {
+                      "in": {
+                        "type": "integer",
+                        "minimum": 0,
+                        "maximum": 9007199254740991
+                      },
+                      "out": {
+                        "type": "integer",
+                        "minimum": 0,
+                        "maximum": 9007199254740991
+                      },
+                      "cache_r": {
+                        "type": "integer",
+                        "minimum": 0,
+                        "maximum": 9007199254740991
+                      },
+                      "cache_w": {
+                        "type": "integer",
+                        "minimum": 0,
+                        "maximum": 9007199254740991
+                      }
+                    },
+                    "required": [
+                      "in",
+                      "out",
+                      "cache_r",
+                      "cache_w"
+                    ],
+                    "additionalProperties": false
                   },
-                  "out": {
-                    "type": "integer",
-                    "minimum": 0,
-                    "maximum": 9007199254740991
-                  },
-                  "cache_r": {
-                    "type": "integer",
-                    "minimum": 0,
-                    "maximum": 9007199254740991
-                  },
-                  "cache_w": {
-                    "type": "integer",
-                    "minimum": 0,
-                    "maximum": 9007199254740991
+                  {
+                    "type": "null"
                   }
-                },
-                "required": [
-                  "in",
-                  "out",
-                  "cache_r",
-                  "cache_w"
-                ],
-                "additionalProperties": false
+                ]
               },
               "cost_usd": {
                 "anyOf": [
@@ -14705,6 +17364,14 @@
                   "med",
                   "high"
                 ]
+              },
+              "risk_tags": {
+                "default": [],
+                "type": "array",
+                "items": {
+                  "type": "string",
+                  "pattern": "^[a-z0-9][a-z0-9._-]{0,63}$"
+                }
               },
               "cap": {
                 "type": "integer",
@@ -14997,6 +17664,14 @@
                 "high"
               ]
             },
+            "risk_tags": {
+              "default": [],
+              "type": "array",
+              "items": {
+                "type": "string",
+                "pattern": "^[a-z0-9][a-z0-9._-]{0,63}$"
+              }
+            },
             "cap": {
               "type": "integer",
               "minimum": 3,
@@ -15176,6 +17851,16 @@
                   "docs"
                 ]
               },
+              "kind": {
+                "type": "string",
+                "enum": [
+                  "implementation_deviation",
+                  "design_ambiguity",
+                  "observed_mismatch",
+                  "spec_ambiguity",
+                  "test_defect"
+                ]
+              },
               "title": {
                 "type": "string",
                 "minLength": 1,
@@ -15245,6 +17930,7 @@
                   "type": {
                     "type": "string",
                     "enum": [
+                      "file",
                       "file_line",
                       "log_line",
                       "junit",
@@ -15253,7 +17939,9 @@
                       "screenshot",
                       "diff",
                       "commit",
+                      "test",
                       "spec_ref",
+                      "fact",
                       "url"
                     ]
                   },
@@ -15397,7 +18085,9 @@
                   "round",
                   "merge_queue",
                   "final_review",
-                  "calibration"
+                  "calibration",
+                  "base_fail_check",
+                  "fault_repro"
                 ]
               },
               "scope": {
@@ -15414,6 +18104,14 @@
               "head": {
                 "type": "string",
                 "pattern": "^([a-f0-9]{40}|[a-f0-9]{64})$"
+              },
+              "expect": {
+                "default": "pass",
+                "type": "string",
+                "enum": [
+                  "pass",
+                  "fail"
+                ]
               },
               "results": {
                 "minItems": 1,
@@ -15534,6 +18232,7 @@
                           "type": {
                             "type": "string",
                             "enum": [
+                              "file",
                               "file_line",
                               "log_line",
                               "junit",
@@ -15542,7 +18241,9 @@
                               "screenshot",
                               "diff",
                               "commit",
+                              "test",
                               "spec_ref",
+                              "fact",
                               "url"
                             ]
                           },
@@ -15680,11 +18381,7 @@
                   "breaking_api",
                   "large_diff",
                   "repeated_test_integrity",
-                  "open_high_finding",
-                  "stuck_or_cap",
-                  "unresolved_spec_conflict",
-                  "gate_infra_or_sandbox",
-                  "budget_exhausted"
+                  "open_high_finding"
                 ]
               },
               "detail": {
@@ -15758,6 +18455,7 @@
                     "type": {
                       "type": "string",
                       "enum": [
+                        "file",
                         "file_line",
                         "log_line",
                         "junit",
@@ -15766,7 +18464,9 @@
                         "screenshot",
                         "diff",
                         "commit",
+                        "test",
                         "spec_ref",
+                        "fact",
                         "url"
                       ]
                     },
@@ -15840,12 +18540,467 @@
             ],
             "additionalProperties": false
           }
+        },
+        "role_runs": {
+          "default": [],
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "action_id": {
+                "type": "string",
+                "pattern": "^[a-z0-9][a-z0-9._-]{0,63}$"
+              },
+              "role": {
+                "type": "string",
+                "pattern": "^[a-z][a-z0-9_-]{0,47}$"
+              },
+              "mode": {
+                "type": "string",
+                "pattern": "^[a-z0-9][a-z0-9._-]{0,63}$"
+              },
+              "subject": {
+                "type": "string",
+                "pattern": "^((REQ|SEC)-[1-9]\\d*(\\.AC-[1-9]\\d*)?|V[1-8]|T-[1-9]\\d*|F-[1-9]\\d*)$"
+              },
+              "prompt_sha": {
+                "type": "string",
+                "pattern": "^[a-f0-9]{64}$"
+              },
+              "host": {
+                "type": "string",
+                "enum": [
+                  "claude-code",
+                  "codex"
+                ]
+              },
+              "model": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 200
+              },
+              "dispatched_at": {
+                "type": "string",
+                "format": "date-time",
+                "pattern": "^(?:(?:\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|(?:02)-(?:0[1-9]|1\\d|2[0-8])))T(?:(?:[01]\\d|2[0-3]):[0-5]\\d:[0-5]\\d(?:\\.\\d+)?(?:Z|([+-](?:[01]\\d|2[0-3]):[0-5]\\d)))$"
+              },
+              "exit": {
+                "anyOf": [
+                  {
+                    "type": "string",
+                    "enum": [
+                      "built",
+                      "done",
+                      "spec_conflict",
+                      "blocked",
+                      "out_of_scope_fault",
+                      "unknown"
+                    ]
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "verdicts": {
+                "default": [],
+                "type": "array",
+                "items": {
+                  "type": "object",
+                  "properties": {
+                    "subject": {
+                      "type": "string",
+                      "pattern": "^((REQ|SEC)-[1-9]\\d*(\\.AC-[1-9]\\d*)?|V[1-8]|T-[1-9]\\d*|F-[1-9]\\d*)$"
+                    },
+                    "verdict": {
+                      "type": "string",
+                      "enum": [
+                        "pass",
+                        "fail",
+                        "unknown",
+                        "unchecked"
+                      ]
+                    }
+                  },
+                  "required": [
+                    "subject",
+                    "verdict"
+                  ],
+                  "additionalProperties": false
+                }
+              }
+            },
+            "required": [
+              "action_id",
+              "role",
+              "prompt_sha",
+              "host",
+              "model",
+              "dispatched_at",
+              "exit"
+            ],
+            "additionalProperties": false
+          }
+        },
+        "diff": {
+          "anyOf": [
+            {
+              "type": "object",
+              "properties": {
+                "base": {
+                  "type": "string",
+                  "pattern": "^([a-f0-9]{40}|[a-f0-9]{64})$"
+                },
+                "head": {
+                  "type": "string",
+                  "pattern": "^([a-f0-9]{40}|[a-f0-9]{64})$"
+                }
+              },
+              "required": [
+                "base",
+                "head"
+              ],
+              "additionalProperties": false
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "evidence_bundle": {
+          "anyOf": [
+            {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 1024
+            },
+            {
+              "type": "null"
+            }
+          ]
         }
       },
       "required": [
         "run",
         "task",
-        "plan_file"
+        "plan_file",
+        "diff",
+        "evidence_bundle"
+      ],
+      "additionalProperties": false
+    },
+    "TaskDiff": {
+      "$id": "https://vtc.local/schemas/TaskDiff.json",
+      "title": "TaskDiff",
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "type": "object",
+      "properties": {
+        "run": {
+          "type": "string",
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$"
+        },
+        "task": {
+          "type": "string",
+          "pattern": "^T-[1-9]\\d*$"
+        },
+        "base": {
+          "type": "string",
+          "pattern": "^([a-f0-9]{40}|[a-f0-9]{64})$"
+        },
+        "head": {
+          "type": "string",
+          "pattern": "^([a-f0-9]{40}|[a-f0-9]{64})$"
+        },
+        "files": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "path": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 1024
+              },
+              "status": {
+                "type": "string",
+                "enum": [
+                  "added",
+                  "modified",
+                  "deleted",
+                  "renamed"
+                ]
+              },
+              "old_path": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 1024
+              },
+              "additions": {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 9007199254740991
+              },
+              "deletions": {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 9007199254740991
+              }
+            },
+            "required": [
+              "path",
+              "status",
+              "additions",
+              "deletions"
+            ],
+            "additionalProperties": false
+          }
+        },
+        "patch": {
+          "type": "string",
+          "maxLength": 1000000
+        },
+        "truncated": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "run",
+        "task",
+        "base",
+        "head",
+        "files",
+        "patch",
+        "truncated"
+      ],
+      "additionalProperties": false
+    },
+    "FeatureList": {
+      "$id": "https://vtc.local/schemas/FeatureList.json",
+      "title": "FeatureList",
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "type": "object",
+      "properties": {
+        "run": {
+          "type": "string",
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$"
+        },
+        "features": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "id": {
+                "type": "string",
+                "pattern": "^F-[1-9]\\d*$"
+              },
+              "title": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 200
+              },
+              "status": {
+                "type": "string",
+                "enum": [
+                  "building",
+                  "integrating",
+                  "final_review",
+                  "fixing",
+                  "ready_to_ship",
+                  "shipped",
+                  "parked"
+                ]
+              },
+              "park_reason": {
+                "type": "string",
+                "enum": [
+                  "risk_rule",
+                  "cap",
+                  "stuck",
+                  "spec_conflict",
+                  "budget",
+                  "change_request",
+                  "gate_infra",
+                  "spec_question",
+                  "blocked"
+                ]
+              },
+              "tasks": {
+                "minItems": 1,
+                "type": "array",
+                "items": {
+                  "type": "string",
+                  "pattern": "^T-[1-9]\\d*$"
+                }
+              },
+              "integration_branch": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 255
+              },
+              "round": {
+                "default": 0,
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 3
+              },
+              "budget_usd": {
+                "type": "number",
+                "exclusiveMinimum": 0
+              },
+              "final_review_budget_usd": {
+                "type": "number",
+                "minimum": 0
+              },
+              "spent_usd": {
+                "default": 0,
+                "type": "number",
+                "minimum": 0
+              },
+              "pr": {
+                "type": "object",
+                "properties": {
+                  "url": {
+                    "type": "string",
+                    "format": "uri"
+                  },
+                  "draft": {
+                    "type": "boolean"
+                  }
+                },
+                "required": [
+                  "url",
+                  "draft"
+                ],
+                "additionalProperties": false
+              }
+            },
+            "required": [
+              "id",
+              "title",
+              "status",
+              "tasks",
+              "integration_branch",
+              "budget_usd",
+              "final_review_budget_usd"
+            ],
+            "additionalProperties": false
+          }
+        }
+      },
+      "required": [
+        "run",
+        "features"
+      ],
+      "additionalProperties": false
+    },
+    "ArtifactContent": {
+      "$id": "https://vtc.local/schemas/ArtifactContent.json",
+      "title": "ArtifactContent",
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "type": "object",
+      "properties": {
+        "run": {
+          "type": "string",
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$"
+        },
+        "path": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 1024
+        },
+        "sha256": {
+          "type": "string",
+          "pattern": "^[a-f0-9]{64}$"
+        },
+        "size": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 2097152
+        },
+        "media_type": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 100
+        },
+        "encoding": {
+          "type": "string",
+          "enum": [
+            "utf8",
+            "base64"
+          ]
+        },
+        "content": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "run",
+        "path",
+        "sha256",
+        "size",
+        "media_type",
+        "encoding",
+        "content"
+      ],
+      "additionalProperties": false
+    },
+    "SessionNonceResult": {
+      "$id": "https://vtc.local/schemas/SessionNonceResult.json",
+      "title": "SessionNonceResult",
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "type": "object",
+      "properties": {
+        "nonce": {
+          "type": "string",
+          "pattern": "^[A-Za-z0-9_-]{43,128}$"
+        },
+        "expires_at": {
+          "type": "string",
+          "format": "date-time",
+          "pattern": "^(?:(?:\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|(?:02)-(?:0[1-9]|1\\d|2[0-8])))T(?:(?:[01]\\d|2[0-3]):[0-5]\\d:[0-5]\\d(?:\\.\\d+)?(?:Z|([+-](?:[01]\\d|2[0-3]):[0-5]\\d)))$"
+        }
+      },
+      "required": [
+        "nonce",
+        "expires_at"
+      ],
+      "additionalProperties": false
+    },
+    "SessionExchangeInput": {
+      "$id": "https://vtc.local/schemas/SessionExchangeInput.json",
+      "title": "SessionExchangeInput",
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "type": "object",
+      "properties": {
+        "nonce": {
+          "type": "string",
+          "pattern": "^[A-Za-z0-9_-]{43,128}$"
+        }
+      },
+      "required": [
+        "nonce"
+      ],
+      "additionalProperties": false
+    },
+    "SessionExchangeResult": {
+      "$id": "https://vtc.local/schemas/SessionExchangeResult.json",
+      "title": "SessionExchangeResult",
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "type": "object",
+      "properties": {
+        "session": {
+          "type": "string",
+          "pattern": "^[A-Za-z0-9_-]{43,128}$"
+        },
+        "expires_at": {
+          "type": "string",
+          "format": "date-time",
+          "pattern": "^(?:(?:\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|(?:02)-(?:0[1-9]|1\\d|2[0-8])))T(?:(?:[01]\\d|2[0-3]):[0-5]\\d:[0-5]\\d(?:\\.\\d+)?(?:Z|([+-](?:[01]\\d|2[0-3]):[0-5]\\d)))$"
+        }
+      },
+      "required": [
+        "session",
+        "expires_at"
       ],
       "additionalProperties": false
     },

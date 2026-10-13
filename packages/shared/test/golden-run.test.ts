@@ -6,17 +6,26 @@
 import { readdirSync, readFileSync } from "node:fs";
 import { describe, expect, it } from "vitest";
 import {
+  ArtifactContentSchema,
   CONTRACT_SCHEMAS,
   ENGINE_HTTP,
   EscalationListSchema,
+  FeatureListSchema,
+  findUnguardedCycle,
   isEventOfType,
   EventPageSchema,
   parseEventLog,
   readEventData,
   RunListSchema,
+  sha256Hex,
   StatusResultSchema,
+  TaskDetailSchema,
+  TaskDiffSchema,
   TaskListSchema,
+  TaskPackSchema,
+  taskPackPath,
   UsageReportSchema,
+  WorkflowGraphSchema,
   type ContractName,
   type CoreEventType,
   type VtcEvent,
@@ -39,8 +48,13 @@ const SNAPSHOTS: Record<string, keyof typeof ENGINE_HTTP.routes> = {
   tasks: "tasks",
   "task-T-1": "task",
   "task-T-2": "task",
+  "task-T-1-diff": "taskDiff",
+  features: "features",
+  "artifact-spec": "artifact",
   escalations: "escalations",
+  "graph-project": "graph",
   "graph-task_dag": "graph",
+  "graph-task-T-2": "graph",
   usage: "usage",
 };
 
@@ -98,6 +112,86 @@ describe("golden run: API snapshots", () => {
     for (const task of tasks) counts[task.status] = (counts[task.status] ?? 0) + 1;
     expect(status.tasks_by_status).toEqual(counts);
     expect(status.budget.spent_usd).toBeCloseTo(tasks.reduce((sum, t) => sum + t.spent_usd, 0));
+  });
+  it("engine-owned task fields replay from their own events (AD-7)", () => {
+    for (const task of TaskListSchema.parse(api("tasks")).tasks) {
+      const created = of("task.created").find((e) => e.task === task.id);
+      expect(task.risk_tags).toEqual(created && readEventData(created).task.risk_tags);
+      const workspace = of("task.workspace_assigned")
+        .filter((e) => e.task === task.id)
+        .at(-1);
+      const ws = workspace && readEventData(workspace);
+      expect([task.worktree, task.branch, task.baseline_revision]).toEqual([
+        ws?.worktree,
+        ws?.branch,
+        ws?.baseline_revision,
+      ]);
+      const session = of("task.session_updated")
+        .filter((e) => e.task === task.id)
+        .at(-1);
+      expect(task.session_ref).toEqual(session && readEventData(session).session_ref);
+    }
+  });
+  it("features follow feature.created and their budget events; status lists them", () => {
+    const features = FeatureListSchema.parse(api("features")).features;
+    expect(features.map((f) => f.id)).toEqual(of("feature.created").map((e) => e.feature));
+    for (const feature of features) {
+      const budget = of("budget.updated")
+        .filter((e) => e.feature === feature.id && readEventData(e).scope === "feature")
+        .at(-1);
+      expect(feature.spent_usd).toBe(budget ? readEventData(budget).spent_usd : 0);
+    }
+    expect(StatusResultSchema.parse(api("status")).features).toEqual(features);
+  });
+  it("task detail lists its role runs with prompt versions, and its diff", () => {
+    for (const id of ["T-1", "T-2"]) {
+      const detail = TaskDetailSchema.parse(api(`task-${id}`));
+      const dispatched = of("role.dispatched").filter((e) => e.task === id);
+      expect(detail.role_runs.map((r) => [r.action_id, r.prompt_sha, r.model])).toEqual(
+        dispatched.map((e) => [readEventData(e).action_id, e.prompt_sha, e.model]),
+      );
+      const gate = of("gate.result")
+        .filter((e) => e.task === id)
+        .at(-1);
+      const report = gate && readEventData(gate);
+      expect(detail.diff).toEqual(report ? { base: report.base, head: report.head } : null);
+    }
+    const diff = TaskDiffSchema.parse(api("task-T-1-diff"));
+    expect({ base: diff.base, head: diff.head }).toEqual(
+      TaskDetailSchema.parse(api("task-T-1")).diff,
+    );
+  });
+  it("the artifact snapshot is the spec G1 froze, byte for byte", () => {
+    const artifact = ArtifactContentSchema.parse(api("artifact-spec"));
+    expect(sha256Hex(artifact.content)).toBe(artifact.sha256);
+    expect(new TextEncoder().encode(artifact.content).length).toBe(artifact.size);
+    const approved = of("gate.approved").flatMap((e) => readEventData(e).frozen);
+    expect(approved).toContainEqual({ path: artifact.path, sha256: artifact.sha256 });
+  });
+  it("has a graph for every zoom level; the task pipeline loops only through a loop_guard", () => {
+    const graphs = ["graph-project", "graph-task_dag", "graph-task-T-2"].map((f) =>
+      WorkflowGraphSchema.parse(api(f)),
+    );
+    expect(graphs.map((g) => g.scope)).toEqual(["project", "task_dag", "task"]);
+    const pipeline = graphs[2]!;
+    const guard = pipeline.nodes.find((n) => n.kind === "loop_guard");
+    expect(pipeline.edges.some((e) => e.from === guard?.id && e.to === "engineer")).toBe(true);
+    expect(findUnguardedCycle(pipeline)).toBeNull();
+    const withoutGuard = {
+      nodes: pipeline.nodes.map((n) =>
+        n.kind === "loop_guard" ? { ...n, kind: "router" as const } : n,
+      ),
+      edges: pipeline.edges,
+    };
+    expect(findUnguardedCycle(withoutGuard)).not.toBeNull();
+  });
+  it("the recorded dispatch's task pack validates and sits at its pack path", () => {
+    const pack = TaskPackSchema.parse(JSON.parse(read("packs/a-1.json")));
+    const dispatched = of("role.dispatched").find(
+      (e) => readEventData(e).action_id === pack.action_id,
+    );
+    expect(dispatched && readEventData(dispatched).pack).toBe(taskPackPath(pack.action_id));
+    expect([dispatched?.task, dispatched?.role]).toEqual([pack.task, pack.role]);
   });
   it("open escalations are opened minus answered", () => {
     const answered = new Set(of("escalation.answered").map((e) => readEventData(e).escalation));

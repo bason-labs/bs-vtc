@@ -1,3 +1,4 @@
+import { readFileSync } from "node:fs";
 import { describe, expect, it } from "vitest";
 import {
   CONTRACT_SCHEMAS,
@@ -5,6 +6,7 @@ import {
   fromStructuredOutput,
   jsonSchemaFor,
   jsonSchemas,
+  sha256Hex,
   STRUCTURED_OUTPUT_CONTRACTS,
   type ContractName,
 } from "../src/index.js";
@@ -84,11 +86,11 @@ describe("structured-output target (hosts' --output-schema / --json-schema)", ()
   it("round-trips a result through the host form and re-validates with Zod", () => {
     const hostOutput = {
       ...validRoleResult(),
+      verdicts: (validRoleResult().verdicts ?? []).map((v) => ({ ...v, question_type: null })),
       question: null,
       conflict: null,
       fault: null,
       tasks: null,
-      question_type: null,
       feature: null,
     };
     const parsed = fromStructuredOutput("RoleResult", hostOutput);
@@ -114,5 +116,39 @@ describe("frozen contracts (AD-3)", () => {
     await expect(`${JSON.stringify(document, null, 2)}\n`).toMatchFileSnapshot(
       "../schemas/contracts.json",
     );
+  });
+
+  /**
+   * `vitest -u` can rewrite the snapshot but not this hand-edited ledger: changing a schema
+   * without adding a new CONTRACTS_VERSION entry (with the new hash) fails here.
+   */
+  describe("version ledger (schemas/contracts-ledger.json)", () => {
+    const ledger = JSON.parse(
+      readFileSync(new URL("../schemas/contracts-ledger.json", import.meta.url), "utf8"),
+    ) as { versions: { version: string; schemas_sha256: string }[] };
+    const semver = (v: string): number[] => v.split(".").map(Number);
+    const newer = (a: string, b: string): boolean => {
+      const [x, y] = [semver(a), semver(b)];
+      for (let i = 0; i < 3; i += 1) if (x[i] !== y[i]) return (x[i] ?? 0) > (y[i] ?? 0);
+      return false;
+    };
+    it("records the current schemas under the current version", () => {
+      const hash = sha256Hex(JSON.stringify(jsonSchemas()));
+      const entry = ledger.versions.find((v) => v.version === CONTRACTS_VERSION);
+      expect(entry, `add ${CONTRACTS_VERSION} to the ledger`).toBeDefined();
+      expect(
+        entry?.schemas_sha256,
+        "schemas changed: bump CONTRACTS_VERSION and append a new ledger entry",
+      ).toBe(hash);
+    });
+    it("is append-only: strictly increasing versions, one hash each, current version last", () => {
+      const versions = ledger.versions.map((v) => v.version);
+      versions.slice(1).forEach((v, i) => {
+        expect(newer(v, versions[i] ?? "0.0.0"), `${v} after ${String(versions[i])}`).toBe(true);
+      });
+      const hashes = ledger.versions.map((v) => v.schemas_sha256);
+      expect(new Set(hashes).size).toBe(hashes.length);
+      expect(versions.at(-1)).toBe(CONTRACTS_VERSION);
+    });
   });
 });

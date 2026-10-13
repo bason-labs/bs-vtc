@@ -1,7 +1,21 @@
 #!/usr/bin/env node
-import { main } from "./index.js";
+import { createCommandContext, main, resolveVtcHome } from "./index.js";
 
-process.exitCode = main(process.argv.slice(2), {
-  out: (line) => process.stdout.write(`${line}\n`),
-  err: (line) => process.stderr.write(`${line}\n`),
-});
+const ctx = createCommandContext(
+  {
+    out: (line) => process.stdout.write(`${line}\n`),
+    err: (line) => process.stderr.write(`${line}\n`),
+  },
+  process.cwd(),
+  resolveVtcHome(process.env),
+);
+
+main(process.argv.slice(2), ctx).then(
+  (code) => {
+    process.exitCode = code;
+  },
+  (error: unknown) => {
+    process.stderr.write(`vtc: ${error instanceof Error ? error.message : String(error)}\n`);
+    process.exitCode = 70;
+  },
+);

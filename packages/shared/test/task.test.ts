@@ -3,6 +3,7 @@ import {
   capForRisk,
   FeatureSchema,
   PlanFileFrontmatterSchema,
+  ProjectConfigSchema,
   TASK_MAIN_PATH,
   TaskDraftSchema,
   TaskSchema,
@@ -74,8 +75,21 @@ describe("TaskSchema", () => {
     expectInvalid(TaskSchema, { ...validTask(), owner: "bob" });
   });
 
-  it("caps follow risk", () => {
-    expect([capForRisk("low"), capForRisk("med"), capForRisk("high")]).toEqual([3, 4, 5]);
+  it("caps come from project.yaml only (one source of defaults)", () => {
+    const { caps } = ProjectConfigSchema.parse({ version: 1 });
+    expect([capForRisk("low", caps), capForRisk("med", caps), capForRisk("high", caps)]).toEqual([
+      3, 4, 5,
+    ]);
+    const custom = ProjectConfigSchema.parse({ version: 1, caps: { high: 4 } }).caps;
+    expect(capForRisk("high", custom)).toBe(4);
+  });
+
+  it("keeps the planner's risk tags on the task, so replay does not lose them", () => {
+    expect(expectValid(TaskSchema, validTask()).risk_tags).toEqual([]);
+    expect(expectValid(TaskSchema, { ...validTask(), risk_tags: ["auth"] }).risk_tags).toEqual([
+      "auth",
+    ]);
+    expectInvalid(TaskSchema, { ...validTask(), risk_tags: ["Auth Flow"] }, "risk_tags.0");
   });
 
   it("main path is ordered and ends in done", () => {

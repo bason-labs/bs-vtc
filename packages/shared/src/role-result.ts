@@ -12,6 +12,7 @@ import {
   Sha256HexSchema,
   SlugSchema,
   TaskIdSchema,
+  VerdictSubjectSchema,
 } from "./primitives.js";
 import { QuestionSchema } from "./question.js";
 import { TaskDraftSchema } from "./task.js";
@@ -46,13 +47,31 @@ export const VerdictQuestionTypeSchema = z.enum([
 ]);
 export type VerdictQuestionType = z.infer<typeof VerdictQuestionTypeSchema>;
 
-/** A claim the engine verifies against reality before accepting a result (§4.2 step 3). */
-export const ClaimTypeSchema = z.enum(["file", "commit", "citation", "test", "url"]);
-export const ClaimSchema = z.strictObject({
-  type: ClaimTypeSchema,
-  ref: z.string().min(1).max(2048),
-});
-export type Claim = z.infer<typeof ClaimSchema>;
+/**
+ * One verdict on one subject (principle 3, §7.4, §7.5). Every verdict cites at least one piece
+ * of evidence the engine resolves; a verdict whose evidence does not resolve is rejected
+ * (`claim_check`). The Spec-Verifier returns one verdict on the AC it was dispatched for; a
+ * Visual QA call returns one verdict per criterion `V1`–`V8` it judged, each naming its
+ * question type, and the engine runs three calls and takes the 2-of-3 vote per criterion.
+ */
+export const RoleVerdictSchema = z
+  .strictObject({
+    subject: VerdictSubjectSchema,
+    verdict: VerdictSchema,
+    /** Required on Visual QA criteria (`V1`–`V8`), not allowed elsewhere (§7.5). */
+    question_type: VerdictQuestionTypeSchema.optional(),
+    evidence: z.array(EvidenceSchema).min(1),
+  })
+  .superRefine((entry, ctx) => {
+    if (/^V[1-8]$/.test(entry.subject) !== (entry.question_type !== undefined)) {
+      ctx.addIssue({
+        code: "custom",
+        path: ["question_type"],
+        message: "question_type is required for, and only allowed on, Visual QA criteria V1–V8",
+      });
+    }
+  });
+export type RoleVerdict = z.infer<typeof RoleVerdictSchema>;
 
 export const ArtifactRefSchema = z.strictObject({
   type: ArtifactTypeSchema,
@@ -82,19 +101,24 @@ const base = {
   mode: SlugSchema.optional(),
   task: TaskIdSchema.optional(),
   feature: FeatureIdSchema.optional(),
-  verdict: VerdictSchema.optional(),
-  /** Visual QA: the question type of this verdict (§7.5). */
-  question_type: VerdictQuestionTypeSchema.optional(),
+  /** Reviewer verdicts, each with cited evidence (§7.4). Which verdicts a role may return is in
+   * its contract (`output.verdicts`, checked by `checkResultAgainstContract`). */
+  verdicts: z.array(RoleVerdictSchema).default([]),
   findings: z.array(FindingDraftSchema).default([]),
   /**
    * Questions raised while still finishing the work, e.g. QA author-mode `spec_question` items
    * (§6.3 step 2). The engine turns each into an escalation (`escalationFromQuestion`).
    */
   questions: z.array(QuestionSchema).default([]),
-  /** Planner output (§5.2): task drafts the engine checks at PLAN (§6.1). Planner only. */
+  /**
+   * Planner output (§5.2): task drafts the engine checks at PLAN (§6.1). Only roles whose
+   * contract declares the `tasks` output artifact may send it (`checkResultAgainstContract`).
+   */
   tasks: z.array(TaskDraftSchema).optional(),
   artifacts: z.array(ArtifactRefSchema).default([]),
-  claims: z.array(ClaimSchema).default([]),
+  /** Facts the result relies on (files, commits, tests, citations), verified before acceptance
+   * (§4.2 step 3). Same vocabulary as all other evidence. */
+  claims: z.array(EvidenceSchema).default([]),
   summary: SummarySchema,
 };
 
@@ -134,11 +158,22 @@ const OutOfScopeFaultResult = z.strictObject({
   }),
 });
 
-export const RoleResultSchema = z.discriminatedUnion("exit", [
-  SimpleExitResult,
-  BlockedResult,
-  SpecConflictResult,
-  OutOfScopeFaultResult,
-]);
+export const RoleResultSchema = z
+  .discriminatedUnion("exit", [
+    SimpleExitResult,
+    BlockedResult,
+    SpecConflictResult,
+    OutOfScopeFaultResult,
+  ])
+  .superRefine((result, ctx) => {
+    const subjects = result.verdicts.map((v) => v.subject);
+    if (new Set(subjects).size !== subjects.length) {
+      ctx.addIssue({
+        code: "custom",
+        path: ["verdicts"],
+        message: "one verdict per subject",
+      });
+    }
+  });
 export type RoleResult = z.infer<typeof RoleResultSchema>;
 export type RoleResultInput = z.input<typeof RoleResultSchema>;

@@ -9,23 +9,30 @@
 import { z } from "zod";
 import { EscalationAnswerSchema, EscalationSchema } from "./escalation.js";
 import { EventSchema } from "./event.js";
+import { FeatureSchema } from "./feature.js";
 import { FindingSchema } from "./finding.js";
 import { GateReportSchema } from "./gate-result.js";
 import { HostFailureOutcomeSchema, SubagentInstructionSchema } from "./interfaces/host-adapter.js";
 import {
   EscalationIdSchema,
   FeatureIdSchema,
+  GitShaSchema,
+  HostIdSchema,
   IsoDateTimeSchema,
   RelPathSchema,
   RoleIdSchema,
   RunIdSchema,
   SessionRefSchema,
+  Sha256HexSchema,
   SlugSchema,
   TaskIdSchema,
   TokenUsageSchema,
+  VerdictSubjectSchema,
+  type HostId,
 } from "./primitives.js";
-import { RoleResultSchema } from "./role-result.js";
+import { RoleExitSchema, RoleResultSchema, VerdictSchema } from "./role-result.js";
 import {
+  ChangeRequestArtifactSchema,
   FrozenArtifactSchema,
   HumanGateIdSchema,
   IntakeClassificationSchema,
@@ -110,6 +117,19 @@ export const ENGINE_MCP_TOOLS = [
 ] as const;
 export type EngineMcpToolName = (typeof ENGINE_MCP_TOOLS)[number]["name"];
 
+/**
+ * The MCP server entry every host plugin registers (§4.4, AD-4, AD-16): a stdio bridge to the
+ * repo's daemon that tags its session with the host it runs in. The Claude Code plugin carries
+ * it in `plugins/claude-code/.mcp.json`; the Codex installer writes the same entry.
+ */
+export const engineMcpServer = (
+  host: HostId,
+): { readonly name: "vtc"; readonly command: "vtc"; readonly args: readonly string[] } => ({
+  name: "vtc",
+  command: "vtc",
+  args: ["engine", "--mcp", "--host", HostIdSchema.parse(host)],
+});
+
 /** Tools act on the active run when `run` is omitted. */
 export const RunScopedInputSchema = z.strictObject({ run: RunIdSchema.optional() });
 export type RunScopedInput = z.infer<typeof RunScopedInputSchema>;
@@ -145,7 +165,9 @@ export const LeadActionSchema = z.discriminatedUnion("type", [
     mode: SlugSchema.optional(),
     task: TaskIdSchema.optional(),
     feature: FeatureIdSchema.optional(),
-    /** The task pack the role reads (§6.3 step 1). */
+    /** The one subject this call judges, e.g. the AC of a Spec-Verifier call (§7.4). */
+    subject: VerdictSubjectSchema.optional(),
+    /** The task pack the role reads (§6.3 step 1; `TaskPack`, rendered by `renderTaskPack`). */
     pack: RelPathSchema,
     ...SubagentInstructionSchema.shape,
     /** Resume this host session (patch rounds, answers: §6.3 step 8, §6.5), when the host can. */
@@ -285,12 +307,19 @@ export const ApproveInputSchema = z
   });
 export type ApproveInput = z.infer<typeof ApproveInputSchema>;
 
-export const ChangeRequestInputSchema = z.strictObject({
-  run: RunIdSchema.optional(),
-  artifact: z.enum(["spec", "architecture", "design"]),
-  summary: z.string().min(1).max(300),
-  detail: z.string().min(1).max(8000),
-});
+export const ChangeRequestInputSchema = z
+  .strictObject({
+    run: RunIdSchema.optional(),
+    artifact: ChangeRequestArtifactSchema,
+    /** The provider task whose published interface contract changes (§6.6). */
+    task: TaskIdSchema.optional(),
+    summary: z.string().min(1).max(300),
+    detail: z.string().min(1).max(8000),
+  })
+  .refine((input) => (input.artifact === "interface_contract") === (input.task !== undefined), {
+    message: "task is required for, and only allowed with, interface_contract",
+    path: ["task"],
+  });
 export type ChangeRequestInput = z.infer<typeof ChangeRequestInputSchema>;
 
 /** A CR becomes an escalation with reason `change_request` the human decides (§6.2). */
@@ -312,6 +341,8 @@ export const StatusResultSchema = z.strictObject({
   run: RunSchema,
   tasks_by_status: z.partialRecord(TaskStatusSchema, z.int().nonnegative()),
   parked: z.array(z.strictObject({ task: TaskIdSchema, reason: ParkReasonSchema })).default([]),
+  /** Every feature with its state; parked features park as a unit (§6.7a). */
+  features: z.array(FeatureSchema).default([]),
   open_escalations: z.int().nonnegative(),
   budget: z.strictObject({
     budget_usd: z.number().nonnegative(),
@@ -335,6 +366,14 @@ export const HealthResultSchema = z.strictObject({
   mode: z.enum(["live", "snapshot"]),
   engine_version: z.string().min(1).max(64),
   contracts_version: z.string().regex(/^\d+\.\d+\.\d+$/),
+  /**
+   * Origin of the separate prototype server (`http://127.0.0.1:<port>/`), or `null` when the
+   * run has no prototype. The dashboard embeds it only in `<iframe sandbox="allow-scripts">`.
+   */
+  prototype_url: z
+    .string()
+    .regex(/^http:\/\/127\.0\.0\.1:[1-9]\d{0,4}\/$/, "expected http://127.0.0.1:<port>/")
+    .nullable(),
 });
 export type HealthResult = z.infer<typeof HealthResultSchema>;
 
@@ -369,7 +408,29 @@ export const TaskListSchema = z.strictObject({
 });
 export type TaskList = z.infer<typeof TaskListSchema>;
 
-/** Drill-down for one task (§17): the task, its findings, gate reports and escalations. */
+/** One role run of a task, for the drill-down's timeline and prompt version (§17). */
+export const RoleRunSummarySchema = z.strictObject({
+  action_id: SlugSchema,
+  role: RoleIdSchema,
+  mode: SlugSchema.optional(),
+  subject: VerdictSubjectSchema.optional(),
+  /** Prompt version: content SHA of the compiled agent prompt (§13). */
+  prompt_sha: Sha256HexSchema,
+  host: HostIdSchema,
+  model: z.string().min(1).max(200),
+  dispatched_at: IsoDateTimeSchema,
+  /** `null` while the run is in flight, failed or was rejected. */
+  exit: RoleExitSchema.nullable(),
+  verdicts: z
+    .array(z.strictObject({ subject: VerdictSubjectSchema, verdict: VerdictSchema }))
+    .default([]),
+});
+export type RoleRunSummary = z.infer<typeof RoleRunSummarySchema>;
+
+/**
+ * Drill-down for one task (§17): the task, its findings, gate reports, escalations, role runs
+ * (with prompt versions), the commits its diff spans and its evidence bundle.
+ */
 export const TaskDetailSchema = z.strictObject({
   run: RunIdSchema,
   task: TaskSchema,
@@ -377,8 +438,112 @@ export const TaskDetailSchema = z.strictObject({
   findings: z.array(FindingSchema).default([]),
   gate_reports: z.array(GateReportSchema).default([]),
   escalations: z.array(EscalationSchema).default([]),
+  role_runs: z.array(RoleRunSummarySchema).default([]),
+  /** Base and head of the task's latest verified diff; `null` before the first build. */
+  diff: z.strictObject({ base: GitShaSchema, head: GitShaSchema }).nullable(),
+  /** `.vtc/evidence/T-n/bundle.json` once written (`EvidenceBundle`, read via the artifacts route). */
+  evidence_bundle: RelPathSchema.nullable(),
 });
 export type TaskDetail = z.infer<typeof TaskDetailSchema>;
+
+export const FeatureListSchema = z.strictObject({
+  run: RunIdSchema,
+  features: z.array(FeatureSchema),
+});
+export type FeatureList = z.infer<typeof FeatureListSchema>;
+
+/** Largest patch text a diff response carries; longer patches are cut and flagged. */
+export const TASK_DIFF_MAX_PATCH_CHARS = 1_000_000;
+
+/** `GET /api/runs/:run/tasks/:task/diff`: the task's diff from git (§17 drill-down). */
+export const TaskDiffSchema = z.strictObject({
+  run: RunIdSchema,
+  task: TaskIdSchema,
+  base: GitShaSchema,
+  head: GitShaSchema,
+  files: z.array(
+    z.strictObject({
+      path: RelPathSchema,
+      status: z.enum(["added", "modified", "deleted", "renamed"]),
+      old_path: RelPathSchema.optional(),
+      additions: z.int().nonnegative(),
+      deletions: z.int().nonnegative(),
+    }),
+  ),
+  patch: z.string().max(TASK_DIFF_MAX_PATCH_CHARS),
+  truncated: z.boolean(),
+});
+export type TaskDiff = z.infer<typeof TaskDiffSchema>;
+
+/** Largest artifact the artifacts route returns, in bytes. */
+export const ARTIFACT_MAX_BYTES = 2 * 1024 * 1024;
+
+/**
+ * True for paths the artifacts route may serve: git-tracked run artifacts under `.vtc/` (spec,
+ * architecture, design, plan files, evidence, events), never `.vtc/state/` (transcripts, raw
+ * unredacted output). Rejects `.` and empty segments so no spelling reaches `.vtc/state/`. The
+ * engine also resolves symlinks and refuses any real path outside `<repo>/.vtc/`.
+ */
+export const isServableArtifactPath = (path: string): boolean => {
+  if (!RelPathSchema.safeParse(path).success) return false;
+  const segments = path.split("/");
+  if (segments.some((segment) => segment === "" || segment === ".")) return false;
+  return segments[0] === ".vtc" && segments.length > 1 && segments[1] !== "state";
+};
+
+/**
+ * `GET /api/runs/:run/artifacts?path=<rel>`: one run artifact, always as JSON (served with
+ * `X-Content-Type-Options: nosniff`), never as a renderable file, so agent-written HTML cannot
+ * run on the API origin. Binary files come base64-encoded.
+ */
+export const ArtifactContentSchema = z.strictObject({
+  run: RunIdSchema,
+  path: RelPathSchema.refine(
+    isServableArtifactPath,
+    "artifacts are served from .vtc/ only, never .vtc/state/",
+  ),
+  sha256: Sha256HexSchema,
+  size: z.int().nonnegative().max(ARTIFACT_MAX_BYTES),
+  media_type: z.string().min(1).max(100),
+  encoding: z.enum(["utf8", "base64"]),
+  content: z.string(),
+});
+export type ArtifactContent = z.infer<typeof ArtifactContentSchema>;
+
+/** Browser sessions (AD-5 rule 2): a single-use nonce from `vtc dashboard`, then a session token. */
+export const ENGINE_SESSION = {
+  /** A nonce is valid this long after it is minted, and only once. */
+  nonceTtlMs: 60_000,
+  /** A session token expires this long after the exchange, and on daemon exit. */
+  sessionTtlMs: 12 * 60 * 60 * 1000,
+  /** Largest exchange body in bytes. */
+  maxBodyBytes: 512,
+} as const;
+
+const TOKEN_PATTERN = /^[A-Za-z0-9_-]{43,128}$/;
+
+/** `POST /api/session/nonce` (install token only): what `vtc dashboard` puts in the URL fragment. */
+export const SessionNonceResultSchema = z.strictObject({
+  nonce: z.string().regex(TOKEN_PATTERN),
+  expires_at: IsoDateTimeSchema,
+});
+export type SessionNonceResult = z.infer<typeof SessionNonceResultSchema>;
+
+/** `POST /api/session` body: the nonce the dashboard read from `#nonce=` in its URL. */
+export const SessionExchangeInputSchema = z.strictObject({
+  nonce: z.string().regex(TOKEN_PATTERN),
+});
+export type SessionExchangeInput = z.infer<typeof SessionExchangeInputSchema>;
+
+/**
+ * A random session token, never the install token. The dashboard keeps it in memory or
+ * `sessionStorage` and sends `Authorization: Bearer <session>`; there are no cookies.
+ */
+export const SessionExchangeResultSchema = z.strictObject({
+  session: z.string().regex(TOKEN_PATTERN),
+  expires_at: IsoDateTimeSchema,
+});
+export type SessionExchangeResult = z.infer<typeof SessionExchangeResultSchema>;
 
 export const IngestResultSchema = z.strictObject({ ok: z.literal(true) });
 export type IngestResult = z.infer<typeof IngestResultSchema>;
@@ -431,32 +596,108 @@ export const HttpErrorSchema = z.strictObject({
 export type HttpError = z.infer<typeof HttpErrorSchema>;
 
 /**
- * Localhost HTTP API (§15, AD-5): bound to 127.0.0.1 only, per-install token required on every
- * route, Host and Origin checked, no CORS headers ever. Read-only except two size-limited,
- * validated writes that cannot execute anything: the statusline ingest and design review pins.
+ * Content-Security-Policy of every prototype response (§17 design review). Agent-written HTML
+ * runs sandboxed with an opaque origin (no `allow-same-origin`), can reach no network, submit
+ * no form, and may be framed only by a loopback page.
+ */
+export const PROTOTYPE_CSP = [
+  "default-src 'none'",
+  "script-src 'self' 'unsafe-inline'",
+  "style-src 'self' 'unsafe-inline'",
+  "img-src 'self' data:",
+  "font-src 'self' data:",
+  "media-src 'self'",
+  "connect-src 'none'",
+  "form-action 'none'",
+  "base-uri 'none'",
+  "frame-ancestors http://127.0.0.1:*",
+  "sandbox allow-scripts",
+].join("; ");
+
+/**
+ * Localhost HTTP API (§15, AD-5): bound to 127.0.0.1 only, Host and Origin checked, no CORS
+ * headers, no cookies. `auth` per route: `token` = `Authorization: Bearer` with the install token
+ * (cli, shim) or a browser session token; `install` = the install token only; `nonce` = no bearer,
+ * the body carries a single-use nonce. Read-only except two size-limited, validated data writes
+ * that cannot execute anything (the statusline ingest, design-review pins) and the two session
+ * routes, which write nothing to disk.
  */
 export const ENGINE_HTTP = {
   bindHost: "127.0.0.1",
   tokenHeader: "authorization",
   tokenScheme: "Bearer",
-  /** Cookie set after the one-time `?token=` exchange so EventSource can authenticate. */
-  sessionCookie: "vtc_session",
   routes: {
-    health: { method: "GET", path: "/api/health", response: "HealthResult" },
-    status: { method: "GET", path: "/api/status", response: "StatusResult" },
-    runs: { method: "GET", path: "/api/runs", response: "RunList" },
-    runEvents: { method: "GET", path: "/api/runs/:run/events", response: "EventPage" },
-    tasks: { method: "GET", path: "/api/runs/:run/tasks", response: "TaskList" },
-    task: { method: "GET", path: "/api/runs/:run/tasks/:task", response: "TaskDetail" },
+    health: { method: "GET", path: "/api/health", auth: "token", response: "HealthResult" },
+    status: { method: "GET", path: "/api/status", auth: "token", response: "StatusResult" },
+    runs: { method: "GET", path: "/api/runs", auth: "token", response: "RunList" },
+    runEvents: {
+      method: "GET",
+      path: "/api/runs/:run/events",
+      auth: "token",
+      response: "EventPage",
+    },
+    tasks: { method: "GET", path: "/api/runs/:run/tasks", auth: "token", response: "TaskList" },
+    task: {
+      method: "GET",
+      path: "/api/runs/:run/tasks/:task",
+      auth: "token",
+      response: "TaskDetail",
+    },
+    taskDiff: {
+      method: "GET",
+      path: "/api/runs/:run/tasks/:task/diff",
+      auth: "token",
+      response: "TaskDiff",
+    },
+    features: {
+      method: "GET",
+      path: "/api/runs/:run/features",
+      auth: "token",
+      response: "FeatureList",
+    },
+    /** `?path=<rel>` (`isServableArtifactPath`): spec, design, plan files, evidence bundles… */
+    artifact: {
+      method: "GET",
+      path: "/api/runs/:run/artifacts",
+      auth: "token",
+      response: "ArtifactContent",
+    },
     /** `?scope=project|task_dag|task&task=T-n` (§17 zoom levels). */
-    graph: { method: "GET", path: "/api/runs/:run/graph", response: "WorkflowGraph" },
-    escalations: { method: "GET", path: "/api/runs/:run/escalations", response: "EscalationList" },
-    usage: { method: "GET", path: "/api/usage", response: "UsageReport" },
-    /** SSE: each message is one Event; `id: <run>:<seq>` (`sseEventId`). */
-    stream: { method: "GET", path: "/api/stream", response: "Event", sse: true },
+    graph: {
+      method: "GET",
+      path: "/api/runs/:run/graph",
+      auth: "token",
+      response: "WorkflowGraph",
+    },
+    escalations: {
+      method: "GET",
+      path: "/api/runs/:run/escalations",
+      auth: "token",
+      response: "EscalationList",
+    },
+    usage: { method: "GET", path: "/api/usage", auth: "token", response: "UsageReport" },
+    /** SSE over `fetch` (the dashboard sends the bearer header): one Event per message,
+     * `id: <run>:<seq>` (`sseEventId`). */
+    stream: { method: "GET", path: "/api/stream", auth: "token", response: "Event", sse: true },
+    sessionNonce: {
+      method: "POST",
+      path: "/api/session/nonce",
+      auth: "install",
+      response: "SessionNonceResult",
+      maxBodyBytes: ENGINE_SESSION.maxBodyBytes,
+    },
+    session: {
+      method: "POST",
+      path: "/api/session",
+      auth: "nonce",
+      request: "SessionExchangeInput",
+      response: "SessionExchangeResult",
+      maxBodyBytes: ENGINE_SESSION.maxBodyBytes,
+    },
     statuslineIngest: {
       method: "POST",
       path: "/api/ingest/claude-statusline",
+      auth: "install",
       request: "StatuslineIngest",
       response: "IngestResult",
       maxBodyBytes: STATUSLINE_INGEST_MAX_BYTES,
@@ -464,10 +705,24 @@ export const ENGINE_HTTP = {
     designReviews: {
       method: "POST",
       path: "/api/design/reviews",
+      auth: "token",
       request: "DesignReviewCommentInput",
       response: "DesignReviewResult",
       maxBodyBytes: DESIGN_REVIEW_MAX_BYTES,
     },
+  },
+  /**
+   * The prototype server (§17 design review): a separate listener on its own 127.0.0.1 port, so
+   * agent-written HTML never shares an origin with the API. It serves only files under `root`,
+   * needs no token (the files are git-tracked, no run data), checks Host, sends
+   * {@link PROTOTYPE_CSP} on every response and exposes no API route.
+   */
+  prototype: {
+    bindHost: "127.0.0.1",
+    root: ".vtc/design/prototype/",
+    csp: PROTOTYPE_CSP,
+    /** The dashboard's iframe attribute. Never add `allow-same-origin`. */
+    iframeSandbox: "allow-scripts",
   },
 } as const;
 export type EngineHttpRouteName = keyof typeof ENGINE_HTTP.routes;

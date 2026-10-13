@@ -12,6 +12,7 @@
       "stack_packs": [],
       "consumes_contracts": [],
       "risk": "med",
+      "risk_tags": ["auth"],
       "cap": 4,
       "size": "M",
       "arch_triage": "fits",
@@ -19,6 +20,13 @@
       "spent_usd": 1.2,
       "status": "merged",
       "round": 1,
+      "baseline_revision": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "worktree": ".vtc/state/worktrees/T-1",
+      "branch": "vtc/T-1",
+      "session_ref": {
+        "host": "claude-code",
+        "id": "sess-t1"
+      },
       "deferred": []
     },
     {
@@ -32,6 +40,7 @@
       "stack_packs": [],
       "consumes_contracts": [],
       "risk": "med",
+      "risk_tags": [],
       "cap": 4,
       "size": "M",
       "arch_triage": "fits",
@@ -40,6 +49,9 @@
       "status": "parked",
       "park_reason": "cap",
       "round": 4,
+      "baseline_revision": "cccccccccccccccccccccccccccccccccccccccc",
+      "worktree": ".vtc/state/worktrees/T-2",
+      "branch": "vtc/T-2",
       "deferred": []
     }
   ]

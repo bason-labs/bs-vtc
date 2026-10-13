@@ -1,7 +1,4 @@
-import type { CommandSpec } from "./types.js";
+import { pendingCommand } from "./types.js";
 
-/** Owner: cli+binary team. */
-export const command: CommandSpec = {
-  name: "status",
-  summary: "Show the current run",
-};
+/** Owner: cli+binary team. Calls the `status` tool through `ctx.engine()` (AD-19). */
+export const command = pendingCommand("status", "Show the current run");

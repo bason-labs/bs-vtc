@@ -2,3 +2,6 @@ packages:
   - "packages/*"
   - "apps/*"
   - "tooling/*"
+# AD-2: no dependency may run install scripts (native addons break `bun build --compile`).
+# tooling/arch-tests/test/supply-chain.test.ts also rejects native or scripted production deps.
+onlyBuiltDependencies: []

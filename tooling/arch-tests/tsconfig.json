@@ -6,6 +6,6 @@
     "allowImportingTsExtensions": true,
     "customConditions": ["@vtc/source"]
   },
-  "include": ["test/**/*.ts", "vitest.config.ts"],
+  "include": ["src/**/*.ts", "test/**/*.ts", "vitest.config.ts"],
   "exclude": ["fixtures/**"]
 }

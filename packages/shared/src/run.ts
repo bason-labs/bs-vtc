@@ -41,6 +41,18 @@ export const FrozenArtifactSchema = z.strictObject({
 });
 export type FrozenArtifact = z.infer<typeof FrozenArtifactSchema>;
 
+/**
+ * What a change request can target (§6.2): an artifact frozen at G1/G2, or a published
+ * interface contract (§6.6: a breaking contract change needs a CR).
+ */
+export const ChangeRequestArtifactSchema = z.enum([
+  "spec",
+  "architecture",
+  "design",
+  "interface_contract",
+]);
+export type ChangeRequestArtifact = z.infer<typeof ChangeRequestArtifactSchema>;
+
 export const HumanGateStateSchema = z
   .strictObject({
     status: z.enum(["pending", "approved", "rejected"]),

@@ -1,5 +1,11 @@
-import { describe, expect, it } from "vitest";
-import { CONTRACTS_VERSION } from "@vtc/shared";
+import { describe, expect, expectTypeOf, it } from "vitest";
+import {
+  CONTRACTS_VERSION,
+  type CreateGateRunner,
+  type RunDaemon,
+  type ServeSnapshot,
+} from "@vtc/shared";
+import * as engine from "../src/index.js";
 import {
   ENGINE_CONTRACTS_VERSION,
   ENGINE_NAME,
@@ -16,6 +22,19 @@ describe("@vtc/engine smoke", () => {
     expect(engineToolNames()).toEqual(
       expect.arrayContaining(["next", "submit", "status", "escalations", "answer"]),
     );
+  });
+  it("implements the frozen composition seam (AD-19)", () => {
+    expectTypeOf(engine.runDaemon).toEqualTypeOf<RunDaemon>();
+    expectTypeOf(engine.serveSnapshot).toEqualTypeOf<ServeSnapshot>();
+    expectTypeOf(engine.gates.createGateRunner).toEqualTypeOf<CreateGateRunner>();
+  });
+  it("re-exports each module under its own namespace, so names cannot collide (AD-15)", () => {
+    expect(
+      Object.keys(engine)
+        .filter((k) => typeof engine[k as keyof typeof engine] === "object")
+        .sort(),
+    ).toEqual(["core", "gates", "git", "http", "mcp"]);
+    expect(typeof engine.core.openEventLog).toBe("function");
   });
   it("loads the node:sqlite driver lazily", async () => {
     const open = await loadNodeSqliteStorage();

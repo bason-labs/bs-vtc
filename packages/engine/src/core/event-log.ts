@@ -1,6 +1,8 @@
 /**
  * The one append path of the event log (AD-7 rule 2). Only the holder of the engine lock
- * (AD-12) can append; every event is validated (`toEventLine`) and gets the next per-run `seq`.
+ * (AD-12) can append; every event's `data` passes the secret-redaction filter (`redactJson`,
+ * AD-18) because the log is committed to git, is validated (`toEventLine`) and gets the next
+ * per-run `seq`.
  */
 import { appendFileSync, existsSync, mkdirSync, readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
@@ -9,6 +11,7 @@ import {
   EventSchema,
   eventLogPath,
   parseEventLog,
+  redactJson,
   toEventLine,
   type VtcEvent,
   type VtcEventInput,
@@ -31,6 +34,11 @@ export interface EventLogWriter {
 
 export interface OpenEventLogOptions {
   readonly now?: () => Date;
+  /**
+   * Known secret values to redact besides the built-in token formats (e.g. the repo's `.env`
+   * values via `dotenvValues`). Read on every append, so new values apply at once.
+   */
+  readonly secrets?: () => readonly string[];
 }
 
 /**
@@ -47,6 +55,7 @@ export const openEventLog = (
   if (!lock.isHeld()) throw new EngineLockedError(lock.path, null);
   const path = join(repoRoot, eventLogPath(run));
   const now = options.now ?? (() => new Date());
+  const secrets = options.secrets ?? (() => []);
   mkdirSync(dirname(path), { recursive: true });
   const parsed = existsSync(path)
     ? parseEventLog(readFileSync(path, "utf8"))
@@ -62,6 +71,7 @@ export const openEventLog = (
       if (!lock.isHeld()) throw new EngineLockedError(lock.path, null);
       const event = EventSchema.parse({
         ...draft,
+        ...(draft.data === undefined ? {} : { data: redactJson(draft.data, secrets()) }),
         v: EVENT_SCHEMA_VERSION,
         seq: next,
         run,

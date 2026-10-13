@@ -65,7 +65,7 @@
         "frozen": [
           {
             "path": ".vtc/spec/spec.md",
-            "sha256": "2222222222222222222222222222222222222222222222222222222222222222"
+            "sha256": "7bb78c23849c2262a75ef19db9b4b03743dc9195cc48597c1017d18e44fef18e"
           }
         ]
       }
@@ -150,7 +150,8 @@
           "spent_usd": 0,
           "status": "draft",
           "round": 0,
-          "deferred": []
+          "deferred": [],
+          "risk_tags": ["auth"]
         }
       }
     },
@@ -181,13 +182,36 @@
           "spent_usd": 0,
           "status": "draft",
           "round": 0,
-          "deferred": []
+          "deferred": [],
+          "risk_tags": []
         }
       }
     },
     {
       "v": 1,
       "seq": 12,
+      "ts": "2026-10-13T09:10:30.000Z",
+      "run": "golden-1",
+      "feature": "F-1",
+      "type": "feature.created",
+      "actor": "engine",
+      "data": {
+        "feature": {
+          "id": "F-1",
+          "title": "Password reset",
+          "status": "building",
+          "tasks": ["T-1", "T-2"],
+          "integration_branch": "vtc/F-1",
+          "round": 0,
+          "budget_usd": 10,
+          "final_review_budget_usd": 1.5,
+          "spent_usd": 0
+        }
+      }
+    },
+    {
+      "v": 1,
+      "seq": 13,
       "ts": "2026-10-13T09:11:00.000Z",
       "run": "golden-1",
       "type": "run.phase_changed",
@@ -199,7 +223,7 @@
     },
     {
       "v": 1,
-      "seq": 13,
+      "seq": 14,
       "ts": "2026-10-13T09:12:00.000Z",
       "run": "golden-1",
       "task": "T-1",
@@ -214,7 +238,21 @@
     },
     {
       "v": 1,
-      "seq": 14,
+      "seq": 15,
+      "ts": "2026-10-13T09:12:30.000Z",
+      "run": "golden-1",
+      "task": "T-1",
+      "type": "task.workspace_assigned",
+      "actor": "engine",
+      "data": {
+        "worktree": ".vtc/state/worktrees/T-1",
+        "branch": "vtc/T-1",
+        "baseline_revision": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+      }
+    },
+    {
+      "v": 1,
+      "seq": 16,
       "ts": "2026-10-13T09:13:00.000Z",
       "run": "golden-1",
       "task": "T-1",
@@ -229,7 +267,7 @@
     },
     {
       "v": 1,
-      "seq": 15,
+      "seq": 17,
       "ts": "2026-10-13T09:14:00.000Z",
       "run": "golden-1",
       "task": "T-1",
@@ -244,7 +282,7 @@
     },
     {
       "v": 1,
-      "seq": 16,
+      "seq": 18,
       "ts": "2026-10-13T09:15:00.000Z",
       "run": "golden-1",
       "task": "T-1",
@@ -255,13 +293,16 @@
         "action_id": "a-1",
         "dispatch": "subagent",
         "agent": "vtc-engineer",
-        "pack": ".vtc/state/packs/T-1.md",
+        "pack": ".vtc/state/packs/a-1.md",
         "resume": null
-      }
+      },
+      "prompt_sha": "4444444444444444444444444444444444444444444444444444444444444444",
+      "host": "claude-code",
+      "model": "claude-sonnet-5"
     },
     {
       "v": 1,
-      "seq": 17,
+      "seq": 19,
       "ts": "2026-10-13T09:16:00.000Z",
       "run": "golden-1",
       "task": "T-1",
@@ -291,7 +332,22 @@
     },
     {
       "v": 1,
-      "seq": 18,
+      "seq": 20,
+      "ts": "2026-10-13T09:16:30.000Z",
+      "run": "golden-1",
+      "task": "T-1",
+      "type": "task.session_updated",
+      "actor": "engine",
+      "data": {
+        "session_ref": {
+          "host": "claude-code",
+          "id": "sess-t1"
+        }
+      }
+    },
+    {
+      "v": 1,
+      "seq": 21,
       "ts": "2026-10-13T09:17:00.000Z",
       "run": "golden-1",
       "task": "T-1",
@@ -306,7 +362,7 @@
     },
     {
       "v": 1,
-      "seq": 19,
+      "seq": 22,
       "ts": "2026-10-13T09:20:00.000Z",
       "run": "golden-1",
       "task": "T-1",
@@ -359,7 +415,7 @@
     },
     {
       "v": 1,
-      "seq": 20,
+      "seq": 23,
       "ts": "2026-10-13T09:21:00.000Z",
       "run": "golden-1",
       "task": "T-1",
@@ -374,7 +430,7 @@
     },
     {
       "v": 1,
-      "seq": 21,
+      "seq": 24,
       "ts": "2026-10-13T09:22:00.000Z",
       "run": "golden-1",
       "task": "T-1",
@@ -389,7 +445,7 @@
     },
     {
       "v": 1,
-      "seq": 22,
+      "seq": 25,
       "ts": "2026-10-13T09:23:00.000Z",
       "run": "golden-1",
       "task": "T-1",
@@ -403,7 +459,7 @@
     },
     {
       "v": 1,
-      "seq": 23,
+      "seq": 26,
       "ts": "2026-10-13T09:24:00.000Z",
       "run": "golden-1",
       "task": "T-1",
@@ -418,7 +474,7 @@
     },
     {
       "v": 1,
-      "seq": 24,
+      "seq": 27,
       "ts": "2026-10-13T09:25:00.000Z",
       "run": "golden-1",
       "task": "T-1",
@@ -432,7 +488,7 @@
     },
     {
       "v": 1,
-      "seq": 25,
+      "seq": 28,
       "ts": "2026-10-13T09:26:00.000Z",
       "run": "golden-1",
       "task": "T-2",
@@ -447,7 +503,21 @@
     },
     {
       "v": 1,
-      "seq": 26,
+      "seq": 29,
+      "ts": "2026-10-13T09:26:30.000Z",
+      "run": "golden-1",
+      "task": "T-2",
+      "type": "task.workspace_assigned",
+      "actor": "engine",
+      "data": {
+        "worktree": ".vtc/state/worktrees/T-2",
+        "branch": "vtc/T-2",
+        "baseline_revision": "cccccccccccccccccccccccccccccccccccccccc"
+      }
+    },
+    {
+      "v": 1,
+      "seq": 30,
       "ts": "2026-10-13T09:27:00.000Z",
       "run": "golden-1",
       "task": "T-2",
@@ -462,7 +532,7 @@
     },
     {
       "v": 1,
-      "seq": 27,
+      "seq": 31,
       "ts": "2026-10-13T09:28:00.000Z",
       "run": "golden-1",
       "task": "T-2",
@@ -477,7 +547,7 @@
     },
     {
       "v": 1,
-      "seq": 28,
+      "seq": 32,
       "ts": "2026-10-13T09:29:00.000Z",
       "run": "golden-1",
       "task": "T-2",
@@ -492,7 +562,7 @@
     },
     {
       "v": 1,
-      "seq": 29,
+      "seq": 33,
       "ts": "2026-10-13T09:30:00.000Z",
       "run": "golden-1",
       "task": "T-2",
@@ -502,11 +572,12 @@
         "finding": {
           "fingerprint": "5555555555555555555555555555555555555555555555555555555555555555",
           "source": "role",
-          "source_name": "security",
-          "rule_id": "authz.token-not-bound",
-          "category": "security",
-          "title": "Reset token not bound to user",
-          "severity": "high",
+          "source_name": "spec_verifier",
+          "rule_id": "reset.expiry-not-checked",
+          "category": "correctness",
+          "kind": "implementation_deviation",
+          "title": "Expired reset tokens are accepted",
+          "severity": "medium",
           "confidence": 0.8,
           "location": {
             "path": "src/t-2/reset.ts",
@@ -517,7 +588,6 @@
             "ref": "src/t-2/reset.ts:31"
           },
           "req_ids": ["REQ-2.AC-1"],
-          "cwe": "CWE-639",
           "route": "patch",
           "task": "T-2",
           "round_first_seen": 1,
@@ -528,7 +598,7 @@
     },
     {
       "v": 1,
-      "seq": 30,
+      "seq": 34,
       "ts": "2026-10-13T09:31:00.000Z",
       "run": "golden-1",
       "task": "T-2",
@@ -543,7 +613,7 @@
     },
     {
       "v": 1,
-      "seq": 31,
+      "seq": 35,
       "ts": "2026-10-13T09:32:00.000Z",
       "run": "golden-1",
       "task": "T-2",
@@ -558,7 +628,7 @@
     },
     {
       "v": 1,
-      "seq": 32,
+      "seq": 36,
       "ts": "2026-10-13T09:33:00.000Z",
       "run": "golden-1",
       "task": "T-2",
@@ -573,7 +643,7 @@
     },
     {
       "v": 1,
-      "seq": 33,
+      "seq": 37,
       "ts": "2026-10-13T09:34:00.000Z",
       "run": "golden-1",
       "task": "T-2",
@@ -588,7 +658,7 @@
     },
     {
       "v": 1,
-      "seq": 34,
+      "seq": 38,
       "ts": "2026-10-13T09:35:00.000Z",
       "run": "golden-1",
       "task": "T-2",
@@ -603,7 +673,7 @@
     },
     {
       "v": 1,
-      "seq": 35,
+      "seq": 39,
       "ts": "2026-10-13T09:36:00.000Z",
       "run": "golden-1",
       "task": "T-2",
@@ -618,7 +688,7 @@
     },
     {
       "v": 1,
-      "seq": 36,
+      "seq": 40,
       "ts": "2026-10-13T09:37:00.000Z",
       "run": "golden-1",
       "task": "T-2",
@@ -634,7 +704,7 @@
     },
     {
       "v": 1,
-      "seq": 37,
+      "seq": 41,
       "ts": "2026-10-13T09:38:00.000Z",
       "run": "golden-1",
       "task": "T-2",
@@ -648,7 +718,21 @@
     },
     {
       "v": 1,
-      "seq": 38,
+      "seq": 42,
+      "ts": "2026-10-13T09:38:30.000Z",
+      "run": "golden-1",
+      "feature": "F-1",
+      "type": "budget.updated",
+      "actor": "engine",
+      "data": {
+        "scope": "feature",
+        "budget_usd": 10,
+        "spent_usd": 5.6
+      }
+    },
+    {
+      "v": 1,
+      "seq": 43,
       "ts": "2026-10-13T09:40:00.000Z",
       "run": "golden-1",
       "task": "T-2",
@@ -660,7 +744,7 @@
           "run": "golden-1",
           "task": "T-2",
           "reason": "cap",
-          "question": "T-2 hit its 4-round cap on the same authz finding. How should we proceed?",
+          "question": "T-2 hit its 4-round cap on the same expiry finding. How should we proceed?",
           "options": [
             {
               "id": "hint",
@@ -688,7 +772,7 @@
     },
     {
       "v": 1,
-      "seq": 39,
+      "seq": 44,
       "ts": "2026-10-13T09:41:00.000Z",
       "run": "golden-1",
       "type": "usage.updated",

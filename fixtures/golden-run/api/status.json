@@ -12,7 +12,7 @@
         "frozen": [
           {
             "path": ".vtc/spec/spec.md",
-            "sha256": "2222222222222222222222222222222222222222222222222222222222222222"
+            "sha256": "7bb78c23849c2262a75ef19db9b4b03743dc9195cc48597c1017d18e44fef18e"
           }
         ],
         "decided_at": "2026-10-13T09:04:00.000Z"
@@ -41,6 +41,19 @@
     {
       "task": "T-2",
       "reason": "cap"
+    }
+  ],
+  "features": [
+    {
+      "id": "F-1",
+      "title": "Password reset",
+      "status": "building",
+      "tasks": ["T-1", "T-2"],
+      "integration_branch": "vtc/F-1",
+      "round": 0,
+      "budget_usd": 10,
+      "final_review_budget_usd": 1.5,
+      "spent_usd": 5.6
     }
   ],
   "open_escalations": 1,

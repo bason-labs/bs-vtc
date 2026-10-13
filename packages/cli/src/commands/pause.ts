@@ -1,7 +1,4 @@
-import type { CommandSpec } from "./types.js";
+import { pendingCommand } from "./types.js";
 
-/** Owner: cli+binary team; calls the engine (spec §6.7 guardrails). */
-export const command: CommandSpec = {
-  name: "pause",
-  summary: "Kill switch: stop dispatching and merging",
-};
+/** Owner: cli+binary team. An MCP client of the daemon: calls the `pause` tool through `ctx.engine()` (spec §6.7 guardrails, AD-19). */
+export const command = pendingCommand("pause", "Kill switch: stop dispatching and merging");

@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import {
   AnswerInputSchema,
   ApproveInputSchema,
+  ArtifactContentSchema,
   ChangeRequestInputSchema,
   ChangeRequestResultSchema,
   CONTRACT_SCHEMAS,
@@ -9,19 +10,31 @@ import {
   DesignReviewResultSchema,
   ENGINE_HTTP,
   ENGINE_MCP_TOOLS,
+  ENGINE_SESSION,
+  FeatureListSchema,
+  HealthResultSchema,
   HostFailureOutcomeSchema,
   HostOutcomeSchema,
+  HttpErrorSchema,
+  IngestResultSchema,
   isContractName,
+  isServableArtifactPath,
   LeadActionSchema,
   NextResultSchema,
   RunControlResultSchema,
   RunScopedInputSchema,
+  SessionExchangeInputSchema,
+  SessionExchangeResultSchema,
+  SessionNonceResultSchema,
   StartInputSchema,
   StartResultSchema,
+  SubagentInstructionSchema,
   SubmitInputSchema,
   SubmitResultSchema,
+  TaskDetailSchema,
+  TaskDiffSchema,
 } from "../src/index.js";
-import { NOW, SHA, validRoleResult } from "./fixtures.js";
+import { COMMIT, NOW, SHA, validFeature, validRoleResult, validTask } from "./fixtures.js";
 import { expectInvalid, expectValid } from "./helpers.js";
 
 const spawn = () => ({
@@ -61,6 +74,13 @@ describe("LeadActionSchema", () => {
       actions: [
         spawn(),
         { ...spawn(), action_id: "a-2", resume: { host: "claude-code", id: "s-1" } },
+        {
+          ...spawn(),
+          action_id: "a-3",
+          role: "spec_verifier",
+          mode: undefined,
+          subject: "REQ-3.AC-2",
+        },
         { type: "ask_human", escalations: ["E-1", "E-2"] },
         {
           type: "approve_gate",
@@ -79,6 +99,7 @@ describe("LeadActionSchema", () => {
   });
   it.each([
     [{ ...spawn(), pack: "/abs.md" }],
+    [{ ...spawn(), subject: "AC-1" }],
     [{ ...spawn(), dispatch: "headless" }],
     [{ ...spawn(), agent: "" }],
     [(({ prompt: _p, ...rest }) => rest)(spawn())],
@@ -255,12 +276,28 @@ describe("answer, approve, change_request and run control", () => {
   ])("rejects invalid approve (%s)", (path, patch) => {
     expectInvalid(ApproveInputSchema, { ...approve(), ...patch }, path);
   });
-  it("validates change requests", () => {
+  it("validates change requests, including published interface contracts (§6.6)", () => {
     expectValid(ChangeRequestInputSchema, {
       artifact: "spec",
       summary: "Tokens expire after 15 minutes",
       detail: "Security asked for a shorter expiry.",
     });
+    expectValid(ChangeRequestInputSchema, {
+      artifact: "interface_contract",
+      task: "T-2",
+      summary: "Add a locale field",
+      detail: "Breaking change to the reset request.",
+    });
+    expectInvalid(
+      ChangeRequestInputSchema,
+      { artifact: "interface_contract", summary: "s", detail: "d" },
+      "task",
+    );
+    expectInvalid(
+      ChangeRequestInputSchema,
+      { artifact: "spec", task: "T-2", summary: "s", detail: "d" },
+      "task",
+    );
     expectValid(ChangeRequestResultSchema, { run: "r1", escalation: "E-3" });
   });
   it.each([
@@ -343,16 +380,95 @@ describe("HTTP API", () => {
     expect(ENGINE_HTTP.bindHost).toBe("127.0.0.1");
     for (const route of routes) expect(route.path.startsWith("/api/")).toBe(true);
   });
-  it("has exactly two writes, both size-limited and validated", () => {
-    const writes = routes.filter((r) => r.method !== "GET");
-    expect(writes.map((r) => r.path).sort()).toEqual([
+  it("has exactly two data writes plus the two session routes, all size-limited", () => {
+    const posts = routes.filter((r) => r.method !== "GET");
+    expect(posts.map((r) => r.path).sort()).toEqual([
       "/api/design/reviews",
       "/api/ingest/claude-statusline",
+      "/api/session",
+      "/api/session/nonce",
     ]);
-    for (const write of writes) {
-      expect("request" in write && isContractName(write.request)).toBe(true);
-      expect("maxBodyBytes" in write && write.maxBodyBytes > 0).toBe(true);
+    for (const post of posts) expect("maxBodyBytes" in post && post.maxBodyBytes > 0).toBe(true);
+    for (const write of [ENGINE_HTTP.routes.designReviews, ENGINE_HTTP.routes.statuslineIngest]) {
+      expect(isContractName(write.request)).toBe(true);
     }
+    expect(isContractName(ENGINE_HTTP.routes.session.request)).toBe(true);
+  });
+  it("authenticates every route by bearer token or nonce, never by cookie (AD-5 rule 2)", () => {
+    expect(JSON.stringify(ENGINE_HTTP).toLowerCase()).not.toContain("cookie");
+    const byAuth = (auth: string) =>
+      Object.entries(ENGINE_HTTP.routes)
+        .filter(([, r]) => r.auth === auth)
+        .map(([name]) => name)
+        .sort();
+    // only the shim and the cli hold the install token; the browser never posts usage
+    expect(byAuth("install")).toEqual(["sessionNonce", "statuslineIngest"]);
+    expect(byAuth("nonce")).toEqual(["session"]);
+    for (const route of routes) expect(["token", "install", "nonce"]).toContain(route.auth);
+  });
+  it("sessions: single-use short nonce, expiring session token, never the install token", () => {
+    expect(ENGINE_SESSION.nonceTtlMs).toBeLessThanOrEqual(60_000);
+    expect(ENGINE_SESSION.sessionTtlMs).toBeLessThanOrEqual(24 * 60 * 60 * 1000);
+    const token = "A".repeat(43);
+    expectValid(SessionNonceResultSchema, { nonce: token, expires_at: NOW });
+    expectValid(SessionExchangeInputSchema, { nonce: token });
+    expectValid(SessionExchangeResultSchema, { session: token, expires_at: NOW });
+    expectInvalid(SessionExchangeInputSchema, { nonce: "short" }, "nonce");
+    expectInvalid(SessionExchangeInputSchema, { nonce: token, token }, "");
+    expectInvalid(SessionExchangeResultSchema, { session: token }, "expires_at");
+  });
+  it("serves artifacts from .vtc/ only, never .vtc/state/, as JSON", () => {
+    for (const ok of [
+      ".vtc/spec/spec.md",
+      ".vtc/evidence/T-1/bundle.json",
+      ".vtc/design/DESIGN.md",
+    ]) {
+      expect(isServableArtifactPath(ok)).toBe(true);
+    }
+    for (const bad of [
+      ".vtc/state/index.sqlite",
+      ".vtc/./state/x",
+      ".vtc//state/x",
+      ".vtc/../src/a.ts",
+      "src/a.ts",
+      ".vtc",
+      "/etc/passwd",
+      ".vtc\\state\\x",
+    ]) {
+      expect(isServableArtifactPath(bad), bad).toBe(false);
+    }
+    const artifact = {
+      run: "r1",
+      path: ".vtc/spec/spec.md",
+      sha256: SHA,
+      size: 12,
+      media_type: "text/markdown",
+      encoding: "utf8",
+      content: "# Spec\n",
+    };
+    expectValid(ArtifactContentSchema, artifact);
+    expectInvalid(ArtifactContentSchema, { ...artifact, path: ".vtc/state/t.jsonl" }, "path");
+    expectInvalid(ArtifactContentSchema, { ...artifact, encoding: "html" }, "encoding");
+    expectInvalid(ArtifactContentSchema, { ...artifact, size: 3 * 1024 * 1024 }, "size");
+  });
+  it("serves prototypes from a separate sandboxed origin (§17 design review)", () => {
+    const { prototype } = ENGINE_HTTP;
+    expect(prototype.bindHost).toBe("127.0.0.1");
+    expect(prototype.iframeSandbox).toBe("allow-scripts");
+    expect(prototype.iframeSandbox).not.toContain("allow-same-origin");
+    expect(prototype.csp).toContain("sandbox allow-scripts");
+    expect(prototype.csp).not.toContain("allow-same-origin");
+    expect(prototype.csp).toContain("connect-src 'none'");
+    expect(prototype.csp).toContain("frame-ancestors http://127.0.0.1:*");
+    expect(prototype.root).toBe(".vtc/design/prototype/");
+    const health = { ok: true, mode: "live", engine_version: "0.0.0", contracts_version: "3.0.0" };
+    expectValid(HealthResultSchema, { ...health, prototype_url: "http://127.0.0.1:41234/" });
+    expectValid(HealthResultSchema, { ...health, prototype_url: null });
+    expectInvalid(
+      HealthResultSchema,
+      { ...health, prototype_url: "http://localhost:41234/" },
+      "prototype_url",
+    );
   });
   it.each(Object.entries(ENGINE_HTTP.routes))(
     "route %s names an existing response contract",
@@ -391,5 +507,98 @@ describe("HTTP API", () => {
     );
     expectValid(DesignReviewResultSchema, { ok: true, path: ".vtc/design/reviews/checkout.jsonl" });
     expectInvalid(DesignReviewResultSchema, { ok: true, path: ".vtc/spec/spec.md" }, "path");
+  });
+});
+
+describe("HTTP response contracts reject invalid bodies", () => {
+  const detail = () => ({
+    run: "r1",
+    task: validTask(),
+    plan_file: ".vtc/tasks/T-7.md",
+    role_runs: [
+      {
+        action_id: "a-1",
+        role: "engineer",
+        prompt_sha: SHA,
+        host: "claude-code",
+        model: "claude-sonnet-5",
+        dispatched_at: NOW,
+        exit: "built",
+      },
+    ],
+    diff: { base: COMMIT, head: COMMIT },
+    evidence_bundle: ".vtc/evidence/T-7/bundle.json",
+  });
+  it("accepts a valid task detail, diff and feature list", () => {
+    expectValid(TaskDetailSchema, detail());
+    expectValid(TaskDetailSchema, { ...detail(), diff: null, evidence_bundle: null });
+    expectValid(TaskDiffSchema, {
+      run: "r1",
+      task: "T-7",
+      base: COMMIT,
+      head: COMMIT,
+      files: [{ path: "src/a.ts", status: "modified", additions: 3, deletions: 1 }],
+      patch: "--- a/src/a.ts\n+++ b/src/a.ts\n",
+      truncated: false,
+    });
+    expectValid(FeatureListSchema, { run: "r1", features: [validFeature()] });
+  });
+  it.each([
+    [
+      HealthResultSchema,
+      {
+        ok: false,
+        mode: "live",
+        engine_version: "0",
+        contracts_version: "3.0.0",
+        prototype_url: null,
+      },
+      "ok",
+    ],
+    [
+      HealthResultSchema,
+      {
+        ok: true,
+        mode: "cloud",
+        engine_version: "0",
+        contracts_version: "3.0.0",
+        prototype_url: null,
+      },
+      "mode",
+    ],
+    [TaskDetailSchema, { ...detail(), plan_file: "/abs/T-7.md" }, "plan_file"],
+    [TaskDetailSchema, { ...detail(), diff: { base: "abc", head: COMMIT } }, "diff.base"],
+    [TaskDetailSchema, (({ evidence_bundle: _e, ...rest }) => rest)(detail()), "evidence_bundle"],
+    [
+      TaskDetailSchema,
+      { ...detail(), role_runs: [{ ...detail().role_runs[0], prompt_sha: "x" }] },
+      "role_runs.0.prompt_sha",
+    ],
+    [
+      TaskDiffSchema,
+      {
+        run: "r1",
+        task: "T-7",
+        base: COMMIT,
+        head: COMMIT,
+        files: [{ path: "a", status: "copied", additions: 0, deletions: 0 }],
+        patch: "",
+        truncated: false,
+      },
+      "files.0.status",
+    ],
+    [
+      FeatureListSchema,
+      { run: "r1", features: [{ ...validFeature(), status: "merged" }] },
+      "features.0.status",
+    ],
+    [HttpErrorSchema, { error: { code: "teapot", message: "x" } }, "error.code"],
+    [HttpErrorSchema, { error: { code: "forbidden", message: "x".repeat(501) } }, "error.message"],
+    [IngestResultSchema, { ok: false }, "ok"],
+    [IngestResultSchema, { ok: true, stored: 1 }, ""],
+    [SubagentInstructionSchema, { agent: "", prompt: "p", background: true }, "agent"],
+    [SubagentInstructionSchema, { agent: "vtc-qa", prompt: "p" }, "background"],
+  ] as const)("case %#: rejects an invalid body", (schema, value, path) => {
+    expectInvalid(schema, value, path);
   });
 });

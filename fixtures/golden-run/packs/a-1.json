@@ -1,0 +1,46 @@
+{
+  "v": 1,
+  "run": "golden-1",
+  "action_id": "a-1",
+  "role": "engineer",
+  "task": "T-1",
+  "intent": {
+    "statement": "Reset tokens are stored hashed and bound to one user.",
+    "always": ["Store only the SHA-256 of a token"],
+    "never": ["Log a raw token"],
+    "io_matrix": [
+      {
+        "case": "issue",
+        "input": "user u1 asks for a reset",
+        "expected": "one hashed token row for u1"
+      }
+    ]
+  },
+  "requirements": [
+    {
+      "id": "REQ-1.AC-1",
+      "text": "Given a reset request When a token is issued Then only its hash is stored."
+    }
+  ],
+  "decisions": [],
+  "inputs": [
+    {
+      "type": "repo_map_slice",
+      "path": ".vtc/state/packs/a-1/repo-map.md"
+    }
+  ],
+  "files_scope": ["src/t-1/**"],
+  "gates": [
+    {
+      "id": "typecheck",
+      "layer": "L0",
+      "command": ["pnpm", "typecheck"]
+    },
+    {
+      "id": "tests",
+      "layer": "L2",
+      "command": ["pnpm", "test"]
+    }
+  ],
+  "findings": []
+}

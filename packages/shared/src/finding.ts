@@ -57,6 +57,25 @@ export const FindingStatusSchema = z.enum(["open", "resolved", "deferred", "waiv
 export type FindingStatus = z.infer<typeof FindingStatusSchema>;
 
 export const FindingSourceSchema = z.enum(["tool", "role"]);
+
+/**
+ * What the reviewer says went wrong; the routing signal triage needs (§6.3 step 8,
+ * `routeForFinding`):
+ * - `implementation_deviation`: the code does not do what the spec, design or tests say → Engineer;
+ * - `design_ambiguity`: the design does not say what to do (§7.5 "ambiguity → Designer");
+ * - `observed_mismatch`: a failure on an `observed` assertion with no spec backing, a possible
+ *   spec gap (§6.3 step 2);
+ * - `spec_ambiguity`: the spec is unclear or contradictory → BA;
+ * - `test_defect`: the test is wrong, or passes while behaviour is wrong → QA (§13).
+ */
+export const FindingKindSchema = z.enum([
+  "implementation_deviation",
+  "design_ambiguity",
+  "observed_mismatch",
+  "spec_ambiguity",
+  "test_defect",
+]);
+export type FindingKind = z.infer<typeof FindingKindSchema>;
 export type FindingSource = z.infer<typeof FindingSourceSchema>;
 
 /**
@@ -66,6 +85,7 @@ export type FindingSource = z.infer<typeof FindingSourceSchema>;
 export const FindingDraftSchema = z.strictObject({
   rule_id: z.string().min(1).max(200),
   category: FindingCategorySchema,
+  kind: FindingKindSchema,
   title: z.string().min(1).max(200),
   message: z.string().max(4000).optional(),
   confidence: z.number().min(0).max(1),
@@ -95,6 +115,8 @@ export const FindingSchema = z
     source_name: z.string().min(1).max(100),
     rule_id: z.string().min(1).max(200),
     category: FindingCategorySchema,
+    /** Role findings carry the reviewer's kind; tool findings have none. */
+    kind: FindingKindSchema.optional(),
     title: z.string().min(1).max(200),
     message: z.string().max(4000).optional(),
     severity: SeveritySchema,
@@ -116,6 +138,9 @@ export const FindingSchema = z
     waiver: WaiverSchema.optional(),
   })
   .superRefine((finding, ctx) => {
+    if (finding.source === "role" && finding.kind === undefined) {
+      ctx.addIssue({ code: "custom", path: ["kind"], message: "role findings carry a kind" });
+    }
     if (finding.status === "waived" && finding.waiver === undefined) {
       ctx.addIssue({ code: "custom", path: ["waiver"], message: "waived requires a waiver" });
     }

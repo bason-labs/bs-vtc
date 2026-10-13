@@ -18,6 +18,9 @@ export const AD9_MARKERS = [
   "auth.json",
   "find-generic-password",
   "Claude Code-credentials",
+  "ANTHROPIC_API_KEY",
+  "CLAUDE_CODE_OAUTH_TOKEN",
+  "OPENAI_API_KEY",
 ];
 
 const ad9Pattern = AD9_MARKERS.map((m) => m.replace(/[.*+?^${}()|[\]\\/-]/g, "\\$&")).join("|");
@@ -31,6 +34,26 @@ export const AD9_RESTRICTED_SYNTAX = [
   "error",
   { selector: `Literal[value=/${ad9Pattern}/i]`, message: AD9_MESSAGE },
   { selector: `TemplateElement[value.raw=/${ad9Pattern}/i]`, message: AD9_MESSAGE },
+];
+
+/**
+ * AD-1: the engine never runs a host CLI itself. Every host process starts through a
+ * `HostAdapter` (injected by the cli), so a literal naming a host binary has no place in engine
+ * code. The `codex` host id is the same word, which is intended: engine code refers to hosts only
+ * through variables (`HOST_IDS`, an adapter's `host`) and never branches on one host. Includes the AD-9 selectors, because a later `no-restricted-syntax` entry replaces an
+ * earlier one for the same files.
+ * @type {import("eslint").Linter.RuleEntry}
+ */
+export const ENGINE_RESTRICTED_SYNTAX = [
+  ...AD9_RESTRICTED_SYNTAX,
+  {
+    selector: "Literal[value=/^(claude|codex)(\\.exe)?$/i]",
+    message: "AD-1: the engine starts host processes only through a HostAdapter, never directly.",
+  },
+  {
+    selector: "TemplateElement[value.raw=/^(claude|codex)(\\.exe)?(\\s|$)/i]",
+    message: "AD-1: the engine starts host processes only through a HostAdapter, never directly.",
+  },
 ];
 
 /**
@@ -91,6 +114,11 @@ export default tseslint.config(
       // AD-9: never bypass host permissions, never touch host credentials (spec §12.5, §15).
       "no-restricted-syntax": AD9_RESTRICTED_SYNTAX,
     },
+  },
+  {
+    files: ["packages/engine/src/**/*.ts"],
+    ignores: ["**/*.test.ts"],
+    rules: { "no-restricted-syntax": ENGINE_RESTRICTED_SYNTAX },
   },
   {
     files: ["packages/shared/src/**/*.ts"],

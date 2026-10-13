@@ -6,7 +6,7 @@
       "run": "golden-1",
       "task": "T-2",
       "reason": "cap",
-      "question": "T-2 hit its 4-round cap on the same authz finding. How should we proceed?",
+      "question": "T-2 hit its 4-round cap on the same expiry finding. How should we proceed?",
       "options": [
         {
           "id": "hint",

@@ -1,0 +1,50 @@
+{
+  "$comment": "AD-15: who owns every path. A file belongs to a team when it matches one of the team's globs and none of its '!' exclusions. tooling/arch-tests checks that every file in the repo has exactly one owner; `pnpm verify:scope <team> --base <ref>` fails when a team branch changes a file outside its globs.",
+  "teams": {
+    "integrator": [
+      "packages/shared/**",
+      "!packages/shared/src/helpers/redaction.ts",
+      "packages/engine/package.json",
+      "packages/engine/tsconfig*.json",
+      "packages/engine/vitest.config.ts",
+      "packages/engine/src/index.ts",
+      "docs/**",
+      "tooling/**",
+      ".dependency-cruiser.cjs",
+      "eslint.config.js",
+      "tsconfig*.json",
+      "turbo.json",
+      "vitest.shared.ts",
+      "vitest.config.ts",
+      "package.json",
+      "pnpm-workspace.yaml",
+      "pnpm-lock.yaml",
+      ".gitignore",
+      ".nvmrc",
+      ".prettierrc.json",
+      ".prettierignore",
+      ".githooks/**"
+    ],
+    "engine-core": [
+      "packages/engine/**",
+      "!packages/engine/package.json",
+      "!packages/engine/tsconfig*.json",
+      "!packages/engine/vitest.config.ts",
+      "!packages/engine/src/index.ts",
+      "!packages/engine/src/gates/**",
+      "!packages/engine/test/gates/**",
+      "fixtures/golden-run/**"
+    ],
+    "gate-runner": [
+      "packages/engine/src/gates/**",
+      "packages/engine/test/gates/**",
+      "gates/**",
+      "packages/cli/src/commands/calibrate.ts",
+      "packages/shared/src/helpers/redaction.ts"
+    ],
+    "roles-compiler": ["roles/**", "skills/**", "plugins/**", "packages/compiler/**"],
+    "adapters": ["packages/adapters/**"],
+    "dashboard": ["apps/dashboard/**"],
+    "cli-binary": ["packages/cli/**", "!packages/cli/src/commands/calibrate.ts"]
+  }
+}

@@ -1,7 +1,7 @@
-import type { CommandSpec } from "./types.js";
+import { pendingCommand } from "./types.js";
 
-/** Owner: gate-runner team (sub-project 2); spec §7.1. */
-export const command: CommandSpec = {
-  name: "calibrate",
-  summary: "Detect the toolchain and freeze the gate baseline",
-};
+/** Owner: gate-runner team (sub-project 2); spec §7.1. Builds the Gate Runner with `gates.createGateRunner` (AD-19). */
+export const command = pendingCommand(
+  "calibrate",
+  "Detect the toolchain and freeze the gate baseline",
+);
