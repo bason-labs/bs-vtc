@@ -49,6 +49,8 @@ describe("formatAge / ageTone", () => {
 describe("formatCountdown", () => {
   it("counts down to a time and says when it is due", () => {
     expect(formatCountdown("2026-10-13T13:00:00.000Z", NOW)).toBe("in 3h 19m");
-    expect(formatCountdown("2026-10-13T09:00:00.000Z", NOW)).toBe("due now");
+    expect(formatCountdown("2026-10-13T09:40:30.000Z", NOW)).toBe("due now");
+    // Clearly past (by more than a minute) is "passed", never "due now".
+    expect(formatCountdown("2026-10-13T09:00:00.000Z", NOW)).toBe("passed");
   });
 });

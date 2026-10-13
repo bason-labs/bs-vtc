@@ -53,10 +53,11 @@ export const formatLocalTime = (
   return `${new Intl.DateTimeFormat(locale, { timeZone, day: "numeric", month: "short" }).format(at)}, ${time}`;
 };
 
-/** `in 3h 19m`, or `due now` once the time has passed. */
+/** `in 3h 19m`; `due now` within a minute after the time; `passed` once it is clearly past. */
 export const formatCountdown = (iso: string, now: number): string => {
   const left = Date.parse(iso) - now;
-  return left <= 0 ? "due now" : `in ${formatDuration(left)}`;
+  if (left > 0) return `in ${formatDuration(left)}`;
+  return left > -MINUTE ? "due now" : "passed";
 };
 
 /** How old a reading is: `just now`, `3m ago`, `never`. */
