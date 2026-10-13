@@ -7,7 +7,8 @@
  * credential file or the keychain (AD-9). Account details the status commands print (email,
  * organisation) are never echoed.
  */
-import { GATE_SANDBOX, type GateSandboxKind } from "@vtc/shared";
+import { gates } from "@vtc/engine";
+import { GATE_SANDBOX } from "@vtc/shared";
 import type { DaemonState } from "./daemon.js";
 import type { Exec } from "./process.js";
 import type { SessionSandboxReport } from "./session-sandbox.js";
@@ -265,51 +266,20 @@ export const checkEnvPassthrough = (read: UserConfigRead): DoctorCheck => {
   };
 };
 
-/** Where macOS ships `sandbox-exec`. */
-export const SANDBOX_EXEC = "/usr/bin/sandbox-exec";
-
-/** The no-op `sandbox-exec` run that shows Seatbelt can start a sandbox here. */
-const SEATBELT_PROBE = ["-p", "(version 1)(allow default)", "--", "/usr/bin/true"] as const;
-/**
- * The no-op `bwrap` run that shows it can create the namespaces a gate run needs: an installed
- * bwrap often cannot (unprivileged user namespaces disabled, Ubuntu's AppArmor userns rule).
- */
-const BWRAP_PROBE = [
-  "--ro-bind",
-  "/",
-  "/",
-  "--dev",
-  "/dev",
-  "--proc",
-  "/proc",
-  "--unshare-pid",
-  "--unshare-net",
-  "--die-with-parent",
-  "--",
-  "true",
-] as const;
+/** What `vtc doctor` reports about the gate sandbox: the Gate Runner's own detection. */
+export type GateSandboxReport = Pick<gates.GateSandboxDetection, "kind" | "detail" | "reason">;
 
 /**
- * The OS sandbox gate commands can run in on this machine (D-al, spine §5 reading 69):
- * `sandbox-exec` on macOS, `bwrap` (bubblewrap) on Linux, `null` when there is none. Each is
- * checked with the same confined no-op run the Gate Runner's own detection uses, so a sandbox
- * that is installed but cannot start reads as none, as it does for the Gate Runner.
+ * The OS sandbox gate commands run in on this machine (D-al, spine §5 reading 69). This is the
+ * Gate Runner's `gates.detectGateSandbox` itself (the same tools, the same confined no-op probes,
+ * bwrap and pasta on Linux), so doctor never reports a sandbox the gate runs would not find.
+ * Tests inject `platform`, `exists`, `env` and `probe`.
  */
-export const detectGateSandbox = async (
-  platform: NodeJS.Platform,
-  exists: (path: string) => boolean,
-  exec: Exec,
-): Promise<Exclude<GateSandboxKind, "none"> | null> => {
-  if (platform === "darwin") {
-    if (!exists(SANDBOX_EXEC)) return null;
-    const probe = await exec(SANDBOX_EXEC, [...SEATBELT_PROBE], { timeoutMs: 10_000 });
-    return probe.code === 0 ? "sandbox-exec" : null;
-  }
-  if (platform === "linux")
-    return (await exec("bwrap", [...BWRAP_PROBE], { timeoutMs: 10_000 })).code === 0
-      ? "bwrap"
-      : null;
-  return null;
+export const detectGateSandbox = (
+  options: gates.DetectGateSandboxOptions = {},
+): GateSandboxReport => {
+  const { kind, detail, reason } = gates.detectGateSandbox(options);
+  return reason === undefined ? { kind, detail } : { kind, detail, reason };
 };
 
 /**
@@ -317,9 +287,10 @@ export const detectGateSandbox = async (
  * `GATE_SANDBOX.noSandboxReason`). The user-level opt-in `gates.allow_unsandboxed` always warns.
  */
 export const checkGateSandbox = (
-  kind: Exclude<GateSandboxKind, "none"> | null,
+  found: GateSandboxReport,
   config: UserConfigRead | null,
 ): DoctorCheck => {
+  const { kind } = found;
   const name = "gate sandbox";
   const optIn = config !== null && allowUnsandboxedOf(config);
   const where = config?.path ?? "~/.vtc/config.yaml";
@@ -330,17 +301,18 @@ export const checkGateSandbox = (
           status: "warn",
           detail: `gate commands run in ${kind}; gates.allow_unsandboxed is on in ${where}, so they would run unconfined if ${kind} went missing: remove it`,
         }
-      : { name, status: "ok", detail: `gate commands run in ${kind}` };
+      : { name, status: "ok", detail: `gate commands run in ${found.detail}` };
+  const why = found.reason === undefined ? "" : ` (${found.reason})`;
   return optIn
     ? {
         name,
         status: "warn",
-        detail: `${GATE_SANDBOX.noSandboxReason}: gates run unconfined (gates.allow_unsandboxed in ${where}), and every gate run records an unsandboxed_gate incident`,
+        detail: `${GATE_SANDBOX.noSandboxReason}${why}: gates run unconfined (gates.allow_unsandboxed in ${where}), and every gate run records an unsandboxed_gate incident`,
       }
     : {
         name,
         status: "fail",
-        detail: `${GATE_SANDBOX.noSandboxReason}: every gate run parks until there is one (macOS: sandbox-exec; Linux: install bubblewrap). To run gates unconfined instead, set gates.allow_unsandboxed: true in ${where}`,
+        detail: `${GATE_SANDBOX.noSandboxReason}${why}: every gate run parks until there is one (macOS: sandbox-exec; Linux: bubblewrap with unprivileged user namespaces, and pasta from passt). To run gates unconfined instead, set gates.allow_unsandboxed: true in ${where}`,
       };
 };
 

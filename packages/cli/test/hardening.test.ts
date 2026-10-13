@@ -482,32 +482,63 @@ describe("the gate sandbox (D-al, reading 69)", () => {
     expect(await build(home, true)).toMatchObject({ allowUnsandboxed: true });
   });
 
-  it("detects sandbox-exec on macOS and bwrap on Linux with a confined no-op, not a gate", async () => {
-    const exists = (p: string): boolean => p === "/usr/bin/sandbox-exec";
-    const seatbelt = {
-      "/usr/bin/sandbox-exec -p (version 1)(allow default) -- /usr/bin/true": {},
-    };
-    expect(await detectGateSandbox("darwin", exists, execOf(seatbelt))).toBe("sandbox-exec");
-    expect(await detectGateSandbox("darwin", () => false, execOf(seatbelt))).toBeNull();
+  it("detects the gate sandbox with the Gate Runner's own detection: bwrap and pasta on Linux", () => {
+    const seen: string[] = [];
+    const probeOf =
+      (ok: readonly string[]) =>
+      (argv: readonly string[]): boolean => {
+        const command = argv[0] ?? "";
+        seen.push(argv.join(" "));
+        return ok.includes(command);
+      };
+    const on =
+      (...paths: string[]) =>
+      (p: string) =>
+        paths.includes(p);
+    const seatbelt = "/usr/bin/sandbox-exec";
     expect(
-      await detectGateSandbox(
-        "linux",
-        () => false,
-        execOf({
-          "bwrap --ro-bind / / --dev /dev --proc /proc --unshare-pid --unshare-net --die-with-parent -- true":
-            {},
-        }),
-      ),
-    ).toBe("bwrap");
+      detectGateSandbox({
+        platform: "darwin",
+        exists: on(seatbelt),
+        probe: probeOf([seatbelt]),
+      }),
+    ).toMatchObject({ kind: "sandbox-exec", detail: expect.stringContaining(seatbelt) as string });
+    expect(seen).toContain(`${seatbelt} -p (version 1)(allow default) -- /usr/bin/true`);
+    expect(
+      detectGateSandbox({ platform: "darwin", exists: () => false, probe: probeOf([seatbelt]) }),
+    ).toMatchObject({ kind: null, reason: expect.stringContaining("missing") as string });
+    const linux = { platform: "linux" as const, env: { PATH: "relative/bin:/opt/bin" } };
+    // bwrap that can create its namespaces and pasta that can start it: bwrap
+    expect(
+      detectGateSandbox({
+        ...linux,
+        exists: on("/opt/bin/bwrap", "/usr/bin/pasta"),
+        probe: probeOf(["/opt/bin/bwrap", "/usr/bin/pasta"]),
+      }),
+    ).toMatchObject({ kind: "bwrap" });
+    // bwrap alone is not enough: the install phase needs pasta, so gate runs would park
+    const noPasta = detectGateSandbox({
+      ...linux,
+      exists: on("/opt/bin/bwrap"),
+      probe: probeOf(["/opt/bin/bwrap"]),
+    });
+    expect(noPasta.kind).toBeNull();
+    expect(noPasta.reason).toMatch(/pasta \(passt\) is not installed/);
     // installed is not enough: a bwrap that cannot create namespaces is none
     expect(
-      await detectGateSandbox(
-        "linux",
-        () => false,
-        execOf({ "bwrap --version": { stdout: "bubblewrap 0.11.0\n" } }),
-      ),
-    ).toBeNull();
-    expect(await detectGateSandbox("win32", exists, execOf(seatbelt))).toBeNull();
+      detectGateSandbox({ ...linux, exists: on("/opt/bin/bwrap"), probe: probeOf([]) }).reason,
+    ).toMatch(/cannot create namespaces/);
+    // only absolute PATH entries (and /usr/bin) are searched
+    expect(
+      detectGateSandbox({
+        ...linux,
+        exists: on("relative/bin/bwrap"),
+        probe: probeOf(["relative/bin/bwrap"]),
+      }).reason,
+    ).toMatch(/bwrap \(bubblewrap\) is not installed/);
+    expect(
+      detectGateSandbox({ platform: "win32", exists: () => true, probe: () => true }).kind,
+    ).toBe(null);
   });
 
   it("vtc doctor reports the sandbox in use, fails without one and warns about the opt-in", async () => {
@@ -520,26 +551,33 @@ describe("the gate sandbox (D-al, reading 69)", () => {
         ...(allow === undefined ? {} : { gates: { allow_unsandboxed: allow } }),
       },
     });
-    expect(checkGateSandbox("sandbox-exec", config(undefined))).toEqual({
+    const seatbelt = {
+      kind: "sandbox-exec",
+      detail: "sandbox-exec (/usr/bin/sandbox-exec)",
+    } as const;
+    const none = { kind: null, detail: "x", reason: "pasta (passt) is not installed" };
+    expect(checkGateSandbox(seatbelt, config(undefined))).toEqual({
       name: "gate sandbox",
       status: "ok",
-      detail: "gate commands run in sandbox-exec",
+      detail: "gate commands run in sandbox-exec (/usr/bin/sandbox-exec)",
     });
-    expect(checkGateSandbox("bwrap", config(true))).toMatchObject({
+    expect(checkGateSandbox({ kind: "bwrap", detail: "bwrap" }, config(true))).toMatchObject({
       status: "warn",
       detail: expect.stringMatching(
         /gate commands run in bwrap; gates\.allow_unsandboxed is on in \/h\/config\.yaml/,
       ) as string,
     });
-    const none = checkGateSandbox(null, config(false));
-    expect(none.status).toBe("fail");
-    expect(none.detail).toContain(GATE_SANDBOX.noSandboxReason);
-    expect(none.detail).toMatch(/every gate run parks/);
-    const optedIn = checkGateSandbox(null, config(true));
+    const failed = checkGateSandbox(none, config(false));
+    expect(failed.status).toBe("fail");
+    expect(failed.detail).toContain(GATE_SANDBOX.noSandboxReason);
+    // the Gate Runner's reason is named
+    expect(failed.detail).toContain("(pasta (passt) is not installed)");
+    expect(failed.detail).toMatch(/every gate run parks/);
+    const optedIn = checkGateSandbox(none, config(true));
     expect(optedIn.status).toBe("warn");
     expect(optedIn.detail).toMatch(/gates run unconfined.*unsandboxed_gate incident/);
     // an unparsable config opts nobody in
-    expect(checkGateSandbox(null, { ok: false, path: "/h/config.yaml", error: "bad" }).status).toBe(
+    expect(checkGateSandbox(none, { ok: false, path: "/h/config.yaml", error: "bad" }).status).toBe(
       "fail",
     );
     // through the command
@@ -548,7 +586,7 @@ describe("the gate sandbox (D-al, reading 69)", () => {
       exec: execOf({ "claude auth status --json": { stdout: '{"loggedIn":true}' } }),
       versions: { node: "22.17.1" },
       userConfig: () => config(undefined),
-      gateSandbox: () => Promise.resolve("sandbox-exec"),
+      gateSandbox: () => Promise.resolve(seatbelt),
     }));
     expect(await cmd.run([], ctx)).toBe(0);
     expect(out.join("\n")).toMatch(/ok +gate sandbox +gate commands run in sandbox-exec/);

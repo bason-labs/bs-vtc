@@ -17,7 +17,6 @@
 import { existsSync, readFileSync } from "node:fs";
 import { gates } from "@vtc/engine";
 import { daemonState } from "../daemon.js";
-import type { GateSandboxKind } from "@vtc/shared";
 import {
   checkChromium,
   checkEngine,
@@ -28,6 +27,7 @@ import {
   runDoctorChecks,
   type DoctorCheck,
   type DoctorEnv,
+  type GateSandboxReport,
 } from "../doctor-checks.js";
 import { exec } from "../process.js";
 import { findRepoRoot } from "../repo.js";
@@ -72,7 +72,7 @@ export interface DoctorCommandEnv extends DoctorEnv {
   /** Playwright's Chromium for Visual QA (§4.4). */
   readonly chromium?: () => DoctorCheck;
   /** The OS sandbox gate commands run in (D-al), `null` when the machine has none. */
-  readonly gateSandbox?: () => Promise<Exclude<GateSandboxKind, "none"> | null>;
+  readonly gateSandbox?: () => Promise<GateSandboxReport>;
   /** The Claude session sandbox of the repo doctor runs in (D-an), `null` outside a repo. */
   readonly sessionSandbox?: () => Promise<SessionSandboxReport | null>;
 }
@@ -115,7 +115,7 @@ export const defaultDoctorEnv = (ctx: CommandContext): DoctorCommandEnv => {
         : checkEngine(repoRoot, await daemonState(ctx.vtcHome, repoRoot));
     },
     chromium: checkChromium,
-    gateSandbox: () => detectGateSandbox(process.platform, existsSync, exec),
+    gateSandbox: () => Promise.resolve(detectGateSandbox()),
     sessionSandbox: async () => {
       const repoRoot = await findRepoRoot(ctx.cwd);
       return repoRoot === null
