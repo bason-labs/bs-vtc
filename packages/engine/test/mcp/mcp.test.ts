@@ -10,7 +10,7 @@ import { connect, createServer, type Socket } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { PassThrough } from "node:stream";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   CONTRACTS_VERSION,
   engineSocketFile,
@@ -33,6 +33,11 @@ import { cleanupDirs, tempDir } from "../helpers/repo.js";
 import { CLAUDE, createHarness, type Harness } from "../helpers/engine-harness.js";
 
 const servers: EngineSocketServer[] = [];
+// Whole engine flows on a real repo spawn a few hundred git processes per test: under turbo's
+// parallel load the 5 s default is too tight, so they get room on a loaded machine. A real hang
+// still fails, and no assertion changes.
+vi.setConfig({ testTimeout: 20_000 });
+
 afterEach(async () => {
   for (const s of servers.splice(0)) await s.close();
   cleanupDirs();
@@ -46,6 +51,7 @@ const socketFor = async (h: Harness): Promise<EngineSocketServer> => {
     path: join(home, engineSocketFile(h.repo)),
     host: h.engine,
     versions: VERSIONS,
+    installToken: "i".repeat(43),
   });
   servers.push(server);
   return server;
@@ -296,12 +302,13 @@ describe("socket protocol (AD-12 rule 3)", () => {
     const status = await client.call("status", {});
     expect(status.run.phase).toBe("discover");
     expect(server.connections()).toEqual({ bridge: 0, cli: 1 });
+    // a bare cli hello is no human channel (D-an): the human-only tools are refused
     await expect(
       client.call("answer", {
         escalation: "E-1",
         answer: { option: "x", who_should_have_caught: "qa" },
       }),
-    ).rejects.toThrow(/no escalation/);
+    ).rejects.toThrow(/forbidden: answer records a human decision/);
     await client.close();
     await h.release();
   });
@@ -350,6 +357,7 @@ describe("socket protocol (AD-12 rule 3)", () => {
         path: `/tmp/${"x".repeat(120)}.sock`,
         host: h.engine,
         versions: VERSIONS,
+        installToken: "i".repeat(43),
       }),
     ).rejects.toThrow(/longer/);
     await h.release();
@@ -412,7 +420,14 @@ s.on("data", (c) => {
     stdin.write(
       `${JSON.stringify({ jsonrpc: "2.0", id: 1, method: "tools/call", params: { name: "next", arguments: {} } })}\n`,
     );
-    await new Promise((r) => setTimeout(r, 300));
+    // the reply arrives once the engine has dispatched (a worktree, the host-config check):
+    // wait for its whole line, not a fixed time, before closing the bridge's input
+    await vi.waitFor(
+      () => {
+        expect(out).toContain("\n");
+      },
+      { timeout: 15_000, interval: 20 },
+    );
     expect(server.connections().bridge).toBe(1);
     stdin.end();
     await bridge;
@@ -421,5 +436,5 @@ s.on("data", (c) => {
     };
     expect(reply.result.structuredContent.actions[0]?.role).toBe("repo_cartographer");
     await h.release();
-  });
+  }, 20_000);
 });

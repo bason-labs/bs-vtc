@@ -8,7 +8,7 @@
 import { chmodSync, existsSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   CONTRACTS_VERSION,
   engineSocketFile,
@@ -36,6 +36,11 @@ import {
   type Harness,
   type SpawnAction,
 } from "../helpers/engine-harness.js";
+
+// Whole engine flows on a real repo spawn a few hundred git processes per test: under turbo's
+// parallel load the 5 s default is too tight, so they get room on a loaded machine. A real hang
+// still fails, and no assertion changes.
+vi.setConfig({ testTimeout: 20_000 });
 
 afterEach(cleanupDirs);
 
@@ -72,6 +77,7 @@ const toEngineer = async (h: Harness): Promise<SpawnAction> => {
   return only(await next(h), "engineer");
 };
 const TOKEN = `ghp_${"a1B2".repeat(9)}`;
+const INSTALL_TOKEN = "i".repeat(43);
 
 describe("consult: advisors through the engine (spine §5 readings 25, 30)", () => {
   it("dispatches an advisor like a role, outside the phase flow, and merges its export", async () => {
@@ -313,6 +319,7 @@ describe("Lead-only tools from role sessions (spine §7, until the Codex isolati
       path: join(home, engineSocketFile(h.repo)),
       host: h.engine,
       versions: { engine: "vtc-engine@0.0.0", contracts: CONTRACTS_VERSION },
+      installToken: INSTALL_TOKEN,
     });
     const lead = await connectEngineClient(server.path, CONTRACTS_VERSION, {
       bridge: "claude-code",
@@ -320,7 +327,9 @@ describe("Lead-only tools from role sessions (spine §7, until the Codex isolati
     const role = await connectEngineClient(server.path, CONTRACTS_VERSION, {
       bridge: "claude-code",
     });
-    const cli = await connectEngineClient(server.path);
+    const cli = await connectEngineClient(server.path, CONTRACTS_VERSION, {
+      installToken: INSTALL_TOKEN,
+    });
     try {
       await lead.call("start", {
         request: "Password reset",
@@ -345,7 +354,7 @@ describe("Lead-only tools from role sessions (spine §7, until the Codex isolati
       await expect(
         role.call("change_request", { artifact: "spec", summary: "x", detail: "y" }),
       ).rejects.toThrow(/forbidden/);
-      // the human's cli and the Lead are not role sessions
+      // the human's cli (its install token matched, D-an) and the Lead are not role sessions
       await expect(cli.call("approve", approve)).rejects.toThrow(/conflict/);
       await expect(lead.call("approve", approve)).rejects.toThrow(/conflict/);
       // a role session may submit one action: its own
