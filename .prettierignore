@@ -7,3 +7,4 @@ docs/research
 docs/superpowers
 .vtc
 packages/shared/schemas
+apps/dashboard/next-env.d.ts

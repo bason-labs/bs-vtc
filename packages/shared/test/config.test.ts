@@ -21,12 +21,13 @@ describe("ProjectConfigSchema", () => {
       version: 1,
       merge_level: 2,
       caps: { low: 3, med: 4, high: 5 },
-      budgets: { task_usd: { S: 1.5, M: 5, L: 15 }, final_review_share: 0.15 },
+      budgets: { task_usd: { S: 1.5, M: 5, L: 15 }, final_review_share: 0.15, advisor_usd: 5 },
       risk_rules: { paths: [], max_diff_lines: 800, max_diff_files: 30 },
       allowlists: { dependencies: [], licenses: [] },
       hosts: { dispatch: "plugin_only", cross_family_review: false },
       concurrency: 2,
       usage: { reserve_pct: 10 },
+      git: { sign_commits: false },
       auto_merge: { block_severity: "medium" },
     });
   });
@@ -37,17 +38,18 @@ describe("ProjectConfigSchema", () => {
       track_default: "feature",
       merge_level: 3,
       caps: { low: 3, med: 3, high: 5 },
-      budgets: { task_usd: { S: 2, M: 6, L: 20 }, final_review_share: 0.2 },
+      budgets: { task_usd: { S: 2, M: 6, L: 20 }, final_review_share: 0.2, advisor_usd: 3 },
       risk_rules: { paths: ["src/billing/**"], max_diff_lines: 500, max_diff_files: 20 },
       allowlists: { dependencies: ["zod"], licenses: ["MIT", "Apache-2.0"] },
       hosts: {
         preferred: "codex",
         dispatch: "headless_allowed",
         cross_family_review: true,
-        models: { "claude-code": { top: "claude-opus-5-5" } },
+        models: { "claude-code": { top: "claude-opus-5-5" }, codex: { top: "gpt-5.5" } },
       },
       concurrency: 3,
       usage: { reserve_pct: 15 },
+      git: { sign_commits: true },
       auto_merge: { block_severity: "low" },
     });
   });
@@ -67,6 +69,9 @@ describe("ProjectConfigSchema", () => {
     ["usage.reserve_pct", { usage: { reserve_pct: 101 } }],
     ["track_default", { track_default: "epic" }],
     ["caps", { caps: { mid: 4 } }],
+    ["git.sign_commits", { git: { sign_commits: "yes" } }],
+    ["budgets.advisor_usd", { budgets: { advisor_usd: 0 } }],
+    ["hosts.models.codex", { hosts: { models: { codex: { best: "gpt" } } } }],
   ])("rejects invalid %s", (path, patch) => {
     expectInvalid(ProjectConfigSchema, { version: 1, ...patch }, path);
   });
