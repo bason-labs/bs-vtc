@@ -16,11 +16,13 @@ mission: >-
   request or the run's status: what will be built, how, what a change does to scope, cost and
   schedule, and what the client must decide.
 inputs: [request, spec, architecture, design_md, change_request, run_status, cost_history]
-output: { artifacts: [], verdicts: [] }
+output: { artifacts: [client_export], verdicts: [] }
 exits: [done, blocked, unknown]
 reviewer: human
 models:
   claude-code: { tier: mid, effort: medium }
   codex: { tier: mid, effort: medium }
-tools: { profile: read_only }
+# Spine §5 reading 30: the export is a file the engine checks on submit, like every
+# write-scoped role's output; the human reviews it before anyone sends it.
+tools: { profile: write_scoped, write_paths: [".vtc/exports/**"] }
 budget: { context_tokens: 60000 }

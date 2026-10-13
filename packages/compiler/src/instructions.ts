@@ -16,13 +16,19 @@
  * compiled skills (`InstructionSources.vars`), so prompts never restate an enum by hand.
  */
 import {
+  ArchitectDepthSchema,
+  ColourStrategySchema,
   ContractKindSchema,
+  DESIGN_SCREENS_PATH,
   DisciplineSchema,
   EscalationEffectSchema,
   EvidenceTypeSchema,
   FindingCategorySchema,
   FindingKindSchema,
   MAX_STACK_PACKS,
+  PrototypeThemeSchema,
+  prototypeStatePath,
+  ResearchDepthSchema,
   resolveRoleMode,
   SUMMARY_MAX_CHARS,
   TASK_PACK_SECTIONS,
@@ -37,6 +43,14 @@ import type { LoadedRole } from "./role-source.js";
 
 /** Values every prompt part may reference as `{{name}}`. */
 export const PROTOCOL_VARS: Readonly<Record<string, string>> = {
+  architect_depths: ArchitectDepthSchema.options.join(", "),
+  colour_strategies: ColourStrategySchema.options.join(", "),
+  research_depths: ResearchDepthSchema.options.join(", "),
+  /** Where the Designer writes the screen list (`DesignScreensFileSchema`, §9). */
+  design_screens_path: DESIGN_SCREENS_PATH,
+  prototype_themes: PrototypeThemeSchema.options.join(", "),
+  /** One state's prototype URL path, as `prototypeStatePath` builds it. */
+  prototype_state_example: prototypeStatePath("/invoices", "empty", "dark"),
   contract_kinds: ContractKindSchema.options.join(", "),
   disciplines: DisciplineSchema.options.join(", "),
   max_stack_packs: String(MAX_STACK_PACKS),
@@ -80,7 +94,10 @@ export const EXIT_MEANINGS: Readonly<Record<RoleExit, string>> = {
   unknown: "your inputs cannot answer the question; say in `summary` what would",
 };
 
-/** Who reads the result, and where the inputs come from: the engine for run roles, the human for advisors. */
+/**
+ * Who reads the result: the engine for every role; for an advisor (dispatched through `consult`,
+ * spine §5 reading 25) also the human who asked, its reviewer.
+ */
 const CONTRACT_INTRO: Readonly<Record<"run" | "advisor", { checked: string; inputs: string }>> = {
   run: {
     checked:
@@ -89,8 +106,8 @@ const CONTRACT_INTRO: Readonly<Record<"run" | "advisor", { checked: string; inpu
   },
   advisor: {
     checked:
-      "Generated from role.yaml. Your result goes to the human through the Lead, not to the engine; keep to this contract all the same.",
-    inputs: "artifact types the Lead's request may list",
+      "Generated from role.yaml. The engine checks your result against it and rejects one that breaks it; then the human who asked reads your advice.",
+    inputs: "artifact types in your task pack",
   },
 };
 

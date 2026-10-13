@@ -5,17 +5,26 @@ import {
   AD9_FORBIDDEN_MARKERS,
   engineMcpServer,
   EvidenceTypeSchema,
+  PLUGIN_MANIFEST_ASSET,
+  PluginManifestSchema,
+  promptShaFor,
+  ROLE_CONTRACTS_ASSET,
+  RoleContractSchema,
   TASK_PACK_SECTIONS,
+  VTC_HOOK,
+  vtcHookCommand,
   type HostId,
+  type PluginManifest,
+  type VtcHookEvent,
 } from "@vtc/shared";
 import {
   checkEmitted,
   compilePlugins,
   EXIT_MEANINGS,
+  HOOKS_FILE,
+  loadRoles,
   type CompileOutput,
   type EmittedFile,
-  type PluginManifest,
-  promptSha256,
 } from "../src/index.js";
 import { fixtureFiles } from "./fixtures.js";
 
@@ -38,7 +47,7 @@ const file = (output: CompileOutput, host: HostId, path: string): string => {
 };
 
 const manifest = (output: CompileOutput, host: HostId): PluginManifest =>
-  JSON.parse(file(output, host, "vtc-manifest.json")) as PluginManifest;
+  PluginManifestSchema.parse(JSON.parse(file(output, host, PLUGIN_MANIFEST_ASSET)));
 
 const body = (md: string): string => md.replace(/^---\n[\s\S]*?\n---\n\n/, "");
 
@@ -56,12 +65,14 @@ describe("compilePlugins: target layout", () => {
       "agents/vtc-qa-author.md",
       "agents/vtc-qa-judge.md",
       "commands/vtc.md",
+      "hooks/hooks.json",
       "skills/domain-desktop/SKILL.md",
       "skills/lead/SKILL.md",
       "skills/lens-db/SKILL.md",
       "skills/stack-react-next/SKILL.md",
       "skills/stack-react-next/references/testing.md",
       "vtc-manifest.json",
+      "vtc/role-contracts.json",
     ]);
   });
 
@@ -74,6 +85,7 @@ describe("compilePlugins: target layout", () => {
       "agents/vtc-lens-db.toml",
       "agents/vtc-qa-author.toml",
       "agents/vtc-qa-judge.toml",
+      "hooks/hooks.json",
       "plugin.json",
       "skills/domain-desktop/SKILL.md",
       "skills/lead/SKILL.md",
@@ -82,6 +94,7 @@ describe("compilePlugins: target layout", () => {
       "skills/stack-react-next/references/testing.md",
       "skills/vtc/SKILL.md",
       "vtc-manifest.json",
+      "vtc/role-contracts.json",
     ]);
     const skill = file(output, "codex", "skills/vtc/SKILL.md");
     expect(skill).toMatch(/^---\nname: vtc\ndescription: Drive VTC\.\n---\n/);
@@ -217,11 +230,11 @@ describe("compilePlugins: manifest", () => {
     });
     const instructions = body(file(output, "claude-code", "agents/vtc-qa-author.md"));
     expect(author?.prompt_sha256).toBe(createHash("sha256").update(instructions).digest("hex"));
-    expect(author?.prompt_sha256).toBe(promptSha256(instructions));
+    expect(author?.prompt_sha256).toBe(promptShaFor(instructions));
     const codexInstructions = parseToml(file(output, "codex", "agents/vtc-qa-author.toml"))
       .developer_instructions as string;
     expect(manifest(output, "codex").agents.find((a) => a.name === "vtc-qa-author")).toMatchObject({
-      prompt_sha256: promptSha256(codexInstructions),
+      prompt_sha256: promptShaFor(codexInstructions),
     });
     expect(m.agents.find((a) => a.name === "vtc-engineer-frontend")?.discipline).toBe("frontend");
   });
@@ -244,6 +257,91 @@ describe("compilePlugins: manifest", () => {
       },
       { name: "vtc", kind: "command", pack: null, file: "skills/vtc/SKILL.md" },
     ]);
+  });
+});
+
+describe("compilePlugins: role contracts asset (ROLE_CONTRACTS_ASSET, AD-14 rule 6)", () => {
+  const output = compileOk();
+  const contracts = (host: HostId): unknown[] =>
+    JSON.parse(file(output, host, ROLE_CONTRACTS_ASSET)) as unknown[];
+
+  it("is written at the shared asset path in both plugins", () => {
+    expect(ROLE_CONTRACTS_ASSET).toBe("vtc/role-contracts.json");
+    for (const host of ["claude-code", "codex"] as const) {
+      expect(Array.isArray(contracts(host))).toBe(true);
+    }
+  });
+
+  it("holds every role's contract, sorted by id, each valid against RoleContractSchema", () => {
+    const loaded = loadRoles(fixtureFiles());
+    if (!loaded.ok) throw new Error("fixture roles do not load");
+    const parsed = contracts("claude-code").map((c) => RoleContractSchema.parse(c));
+    expect(parsed.map((c) => c.id)).toEqual(["engineer", "engineer_frontend", "lens_db", "qa"]);
+    expect(parsed).toEqual(
+      [...loaded.roles.map((r) => r.role)].sort((a, b) => (a.id < b.id ? -1 : 1)),
+    );
+  });
+
+  it("is the same file on both hosts", () => {
+    expect(file(output, "codex", ROLE_CONTRACTS_ASSET)).toBe(
+      file(output, "claude-code", ROLE_CONTRACTS_ASSET),
+    );
+  });
+
+  it("keeps mode overrides and defaults, so the engine needs no second copy", () => {
+    const qa = RoleContractSchema.parse(
+      contracts("codex").find((c) => (c as { id?: string }).id === "qa"),
+    );
+    expect(qa.modes?.author?.tools?.write_paths).toEqual(["tests/acceptance/**"]);
+    expect(qa.budget.return_tokens).toBeGreaterThan(0);
+    expect(qa.tools.engine_tools).toEqual([]);
+  });
+});
+
+describe("compilePlugins: hooks (spine §5 reading 31, the frozen `vtc hook` contract)", () => {
+  const output = compileOk();
+  type HookEntry = {
+    matcher?: string;
+    hooks: { type: string; command: string; timeout: number }[];
+  };
+  const hooks = (host: HostId): Record<string, HookEntry[]> =>
+    (JSON.parse(file(output, host, HOOKS_FILE)) as { hooks: Record<string, HookEntry[]> }).hooks;
+  const commandOf = (event: VtcHookEvent, host: HostId): string => {
+    const c = vtcHookCommand(event, host);
+    return [c.command, ...c.args].join(" ");
+  };
+
+  it.each(["claude-code", "codex"] as const)(
+    "wires the three host events of %s to vtcHookCommand with the contract's timeout",
+    (host) => {
+      const wired = hooks(host);
+      expect(Object.keys(wired).sort()).toEqual(["PreToolUse", "SessionStart", "SubagentStop"]);
+      const events: [string, VtcHookEvent][] = [
+        ["SessionStart", "session-start"],
+        ["PreToolUse", "pre-tool-use"],
+        ["SubagentStop", "subagent-stop"],
+      ];
+      for (const [hostEvent, event] of events) {
+        const entries = wired[hostEvent] ?? [];
+        expect(entries).toHaveLength(1);
+        expect(entries[0]?.hooks).toEqual([
+          { type: "command", command: commandOf(event, host), timeout: VTC_HOOK.timeoutMs / 1000 },
+        ]);
+      }
+    },
+  );
+
+  it("limits the Claude Code pre-tool-use hook to shell and file-writing tools", () => {
+    expect(hooks("claude-code").PreToolUse?.[0]?.matcher).toBe(
+      "Bash|Write|Edit|MultiEdit|NotebookEdit",
+    );
+  });
+
+  it("names the hook command with the host it runs on", () => {
+    expect(file(output, "claude-code", HOOKS_FILE)).toContain(
+      "vtc hook pre-tool-use --host claude-code",
+    );
+    expect(file(output, "codex", HOOKS_FILE)).toContain("vtc hook subagent-stop --host codex");
   });
 });
 
@@ -308,14 +406,17 @@ describe("compilePlugins: errors", () => {
     expect(errorsOf({ "plugins/codex/vtc-manifest.json": "{}" })).toContain(
       "codex:vtc-manifest.json: emitted twice",
     );
+    expect(errorsOf({ "plugins/codex/vtc/role-contracts.json": "[]" })).toContain(
+      "codex:vtc/role-contracts.json: emitted twice",
+    );
   });
 
-  it("rejects hooks until the command they run has a cli contract, and unknown host files", () => {
+  it("rejects hand-written hooks (they are generated from vtcHookCommand) and unknown host files", () => {
     expect(errorsOf({ "plugins/claude-code/hooks/hooks.json": '{ "hooks": {} }' })).toContain(
-      "plugins/claude-code/hooks/hooks.json: hooks need a cli contract",
+      "plugins/claude-code/hooks/hooks.json: hooks are generated from vtcHookCommand; do not hand-write them",
     );
     expect(errorsOf({ "plugins/codex/hooks/hooks.json": '{ "hooks": {} }' })).toContain(
-      "plugins/codex/hooks/hooks.json: hooks need a cli contract",
+      "plugins/codex/hooks/hooks.json: hooks are generated from vtcHookCommand; do not hand-write them",
     );
     expect(errorsOf({ "plugins/codex/settings.json": "{}" })).toContain(
       "plugins/codex/settings.json: unexpected host plugin file",
@@ -351,6 +452,27 @@ describe("compilePlugins: errors", () => {
     expect(errorsOf({ "roles/qa/role.yaml": withTools("approve") })).toContain(
       "roles/qa: engine tool approve drives the run; only the Lead may call it",
     );
+  });
+
+  it("rejects a Codex model id in role.yaml until the spike names Codex models (D-h, reading 26)", () => {
+    const engineer = fixtureFiles().find((f) => f.path === "roles/engineer/role.yaml")?.text ?? "";
+    expect(
+      errorsOf({
+        "roles/engineer/role.yaml": engineer.replace(
+          "codex: { tier: mid, effort: high }",
+          "codex: { tier: mid, effort: high, model: gpt-x }",
+        ),
+      }),
+    ).toContain("roles/engineer: models.codex.model: Codex agents set only reasoning effort");
+    const qa = fixtureFiles().find((f) => f.path === "roles/qa/role.yaml")?.text ?? "";
+    expect(
+      errorsOf({
+        "roles/qa/role.yaml": qa.replace(
+          "  judge:\n",
+          "  judge:\n    models:\n      claude-code: { tier: low, effort: low }\n      codex: { tier: low, effort: low, model: gpt-y }\n",
+        ),
+      }),
+    ).toContain("roles/qa: modes.judge.models.codex.model: Codex agents set only reasoning effort");
   });
 
   it("collects every error instead of stopping at the first", () => {

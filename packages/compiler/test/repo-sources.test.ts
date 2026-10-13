@@ -10,10 +10,18 @@ import { describe, expect, it } from "vitest";
 import {
   CORE_DISCIPLINES,
   CORE_ROLES,
+  DESIGN_SCREENS_PATH,
+  DesignScreenSchema,
+  DesignScreensFileSchema,
   DOMAIN_PACKS,
   ENGINE_MCP_TOOLS,
   engineMcpServer,
   HOST_IDS,
+  isKnownArtifactType,
+  PrototypeThemeSchema,
+  prototypeStatePath,
+  ROLE_CONTRACTS_ASSET,
+  RoleContractSchema,
   VerdictQuestionTypeSchema,
   type RoleContract,
 } from "@vtc/shared";
@@ -22,7 +30,7 @@ import {
   claudeEngineToolName,
   compiledAgentNames,
   compilePlugins,
-  KNOWN_ARTIFACT_TYPES,
+  HOOKS_FILE,
   loadRoles,
   readSources,
   ROLE_FACING_ENGINE_TOOLS,
@@ -89,6 +97,8 @@ const claudeAgent = (text: string): { tools: string[]; body: string } => {
   const front = parseYaml(match?.[1] ?? "") as { tools?: string };
   return { tools: (front.tools ?? "").split(", "), body: match?.[2] ?? "" };
 };
+
+const claudeAgentBody = (text: string): string => claudeAgent(text).body;
 
 /** An instruction to run something, which an agent without a shell cannot follow. */
 const RUN_INSTRUCTION =
@@ -259,11 +269,104 @@ describe("the v1 roster (§5.2, §5.2a, §5.3)", () => {
         ...(m.output?.artifacts ?? []),
       ]),
     ]);
-    expect(used.filter((t) => !KNOWN_ARTIFACT_TYPES.includes(t))).toEqual([]);
+    expect(used.filter((t) => !isKnownArtifactType(t))).toEqual([]);
   });
 });
 
-describe("the advisors (§5.4: Tier 3; compiled, held out of the Lead loop for now)", () => {
+describe("the compiled role contracts the engine loads (ROLE_CONTRACTS_ASSET)", () => {
+  it.each(HOST_IDS)("the %s plugin carries every role's validated contract", (host) => {
+    const asset = output().targets[host].find((f) => f.path === ROLE_CONTRACTS_ASSET);
+    const contracts = (JSON.parse(asset?.text ?? "[]") as unknown[]).map((c) =>
+      RoleContractSchema.parse(c),
+    );
+    expect(contracts.map((c) => c.id)).toEqual(roles.map((r) => r.id).sort());
+    for (const id of CORE_ROLES.filter((r) => r !== "lead")) {
+      expect(contracts.map((c) => c.id)).toContain(id);
+    }
+  });
+
+  it.each(HOST_IDS)("the %s plugin wires its hooks to `vtc hook`", (host) => {
+    const hooks = output().targets[host].find((f) => f.path === HOOKS_FILE)?.text ?? "";
+    for (const event of ["session-start", "pre-tool-use", "subagent-stop"]) {
+      expect(hooks).toContain(`vtc hook ${event} --host ${host}`);
+    }
+  });
+});
+
+describe("spine §5 readings 27, 29 and 37 (write scopes of the research and design roles)", () => {
+  it("keeps the Repo Cartographer and the Research Analyst inside their research directories", () => {
+    expect(role("repo_cartographer")?.tools).toMatchObject({
+      profile: "write_scoped",
+      write_paths: [".vtc/research/repo-map/**"],
+    });
+    expect(role("research_analyst")?.tools).toMatchObject({
+      profile: "write_scoped",
+      write_paths: [".vtc/research/briefs/**"],
+    });
+  });
+
+  it("keeps QA at author and judge, with the SPECIFY testability pass in author mode", () => {
+    expect(Object.keys(role("qa")?.modes ?? {})).toEqual(["author", "judge"]);
+    const author = /<!-- vtc:mode author -->([\s\S]*?)<!-- vtc:mode-end -->/.exec(
+      promptOf("qa"),
+    )?.[1];
+    expect(author).toMatch(/### Testability pass/);
+  });
+
+  it("writes the threat model only from Security design mode", () => {
+    expect(role("security")?.modes?.design?.tools).toMatchObject({
+      profile: "write_scoped",
+      write_paths: [".vtc/architecture/threat-model/**"],
+    });
+    expect(role("security")?.modes?.verify?.tools?.profile).toBe("read_only");
+  });
+
+  it("declares no engine tools: role-facing research tools come with sub-project 4", () => {
+    const named = roles.flatMap((r) => [
+      ...r.tools.engine_tools,
+      ...Object.values(r.modes ?? {}).flatMap((m) => m.tools?.engine_tools ?? []),
+    ]);
+    expect(named).toEqual([]);
+  });
+});
+
+describe("prompts read the engine's dispatch settings from the pack (spine §5 reading 32)", () => {
+  const compiledBody = (name: string): string =>
+    claudeAgentBody(
+      output().targets["claude-code"].find((f) => f.path === `agents/${name}.md`)?.text ?? "",
+    );
+
+  it.each([
+    ["vtc-architect", "architect depth"],
+    ["vtc-research-analyst", "research depth"],
+    ["vtc-designer", "design constraints"],
+  ])("%s reads the `%s` line of the Dispatch section", (name, line) => {
+    const text = compiledBody(name);
+    expect(text).toContain(`\`${line}\``);
+    expect(text).toMatch(/Dispatch section/);
+  });
+
+  it("has the Designer write the screen list in the shared DesignScreensFile shape", () => {
+    const text = compiledBody("vtc-designer");
+    expect(text).toContain(DESIGN_SCREENS_PATH);
+    for (const key of [
+      ...Object.keys(DesignScreensFileSchema.shape),
+      ...Object.keys(DesignScreenSchema.shape),
+    ]) {
+      expect(text).toContain(`\`${key}\``);
+    }
+    expect(text).toContain(prototypeStatePath("/invoices", "empty", "dark"));
+    expect(text).toContain(PrototypeThemeSchema.options.join(", "));
+  });
+
+  it("adds no task-scoped gap clarification to the BA or the Designer (D-b, reading 19)", () => {
+    for (const id of ["ba", "designer"]) {
+      expect(promptOf(id), id).not.toMatch(/spec_gap|design_gap/);
+    }
+  });
+});
+
+describe("the advisors (§5.4: Tier 3; called through the engine's consult, spine §5 reading 25)", () => {
   /** Estimator / Solution Architect, Client-liaison writer, UX Researcher, Incident debugger,
    * Legacy explainer, ML/Data advisor. */
   const ADVISORS = [
@@ -277,24 +380,45 @@ describe("the advisors (§5.4: Tier 3; compiled, held out of the Lead loop for n
   const lead = (): string =>
     sources.find((s) => s.path === "plugins/common/skills/lead/SKILL.md")?.text ?? "";
 
-  it("has a read-only advisor role for every §5.4 advisor and no other", () => {
+  it("has an advisor role for every §5.4 advisor and no other, reviewed by the human", () => {
     expect(
       roles
         .filter((r) => r.kind === "advisor")
         .map((r) => r.id)
         .sort(),
     ).toEqual(ADVISORS);
-    for (const id of ADVISORS) expect(role(id)?.tools.profile).toBe("read_only");
+    for (const id of ADVISORS) expect(role(id)?.reviewer).toBe("human");
   });
 
-  it("keeps advisors out of the Lead loop until the engine has an action for them (AD-4 rule 1)", () => {
+  it("keeps every advisor read-only except the client liaison's export (reading 30)", () => {
+    for (const id of ADVISORS.filter((a) => a !== "advisor_client_liaison")) {
+      expect(role(id)?.tools.profile, id).toBe("read_only");
+    }
+    expect(role("advisor_client_liaison")?.tools).toMatchObject({
+      profile: "write_scoped",
+      write_paths: [".vtc/exports/**"],
+    });
+    expect(role("advisor_client_liaison")?.output.artifacts).toEqual(["client_export"]);
+  });
+
+  it("has the Lead call advisors only through consult, and submit their results (AD-4 rule 1)", () => {
     const command = sources.find((s) => s.path === "plugins/common/commands/vtc.md")?.text ?? "";
-    expect(lead()).not.toMatch(/^## Advisors/m);
-    expect(lead()).not.toMatch(/`vtc-advisor-[a-z-]+`/);
-    expect(command).not.toMatch(/advise/);
+    const advisors = /^## Advisors\n([\s\S]*?)\n## /m.exec(lead())?.[1] ?? "";
+    expect(advisors).toContain("`consult`");
+    expect(advisors).toContain("`submit`");
+    for (const id of ADVISORS) expect(advisors).toContain(`\`${id}\``);
+    expect(advisors).not.toMatch(/`vtc[:-]advisor/);
+    expect(/^## Engine tools\n\n([\s\S]*?)\n\n/m.exec(lead())?.[1]).toContain("`consult`");
+    expect(command).toMatch(/advise "<question>"/);
     const never = /## Never\n([\s\S]*?)\n\n/.exec(lead())?.[1] ?? "";
-    expect(never).toMatch(/Spawn an agent `next` did not return/);
-    expect(never).toMatch(/`vtc-advisor-\*`/);
+    expect(never).toMatch(/Spawn an agent that neither `next` nor `consult` returned/);
+  });
+
+  it("drops the outside-the-engine reading from the READMEs", () => {
+    for (const path of ["roles/README.md", "plugins/README.md"]) {
+      const text = readFileSync(`${ROOT}${path}`, "utf8");
+      expect(text, path).not.toMatch(/held out of the Lead|outside the run|not yet called/i);
+    }
   });
 
   it("tells the Lead to spawn the agent exactly as the engine names it (AD-14 rule 1)", () => {
