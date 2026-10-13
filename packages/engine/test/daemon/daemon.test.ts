@@ -175,6 +175,38 @@ describe("runDaemon (AD-12, AD-19)", () => {
     const log = readFileSync(join(repo, `.vtc/runs/${run}/events.jsonl`), "utf8");
     expect(log).toContain('"kind":"stale_lock"');
   });
+  it("takes over a lock whose pid lives but whose socket is silent (pid reuse, AD-12 rule 1)", async () => {
+    const repo = initRepo();
+    const home = shortHome();
+    const first = await runDaemon(depsFor(repo, home), { wake: false });
+    const lockFile = JSON.parse(readFileSync(join(repo, ENGINE_INSTANCE.lockFile), "utf8")) as {
+      socket?: string;
+    };
+    expect(lockFile.socket).toBe(first.discovery.mcp_socket);
+    const client = await connectEngineClient(first.discovery.mcp_socket);
+    const { run } = await client.call("start", {
+      request: "Idea",
+      track: "feature",
+      repo: "existing",
+      has_ui: false,
+    });
+    await client.close();
+    await first.close();
+    // this test process's pid is alive, but nothing answers on the recorded socket any more
+    writeFileSync(
+      join(repo, ENGINE_INSTANCE.lockFile),
+      JSON.stringify({
+        pid: process.pid,
+        acquired_at: "2026-01-01T00:00:00.000Z",
+        socket: first.discovery.mcp_socket,
+      }),
+    );
+    const second = await runDaemon(depsFor(repo, home), { wake: false });
+    await second.close();
+    const log = readFileSync(join(repo, `.vtc/runs/${run}/events.jsonl`), "utf8");
+    expect(log).toContain('"kind":"stale_lock"');
+    expect(log).toContain("did not answer");
+  });
   it("refuses to start without the compiled role contracts (AD-14 rule 6), and frees the lock", async () => {
     const repo = initRepo();
     const home = shortHome();

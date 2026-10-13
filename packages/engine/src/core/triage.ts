@@ -73,8 +73,10 @@ export const findingFromDraft = (
 };
 
 export const findingFromTool = (tool: ToolFinding, ctx: TriageContext): Finding => {
+  // AD-8 rule 7, spine §5 reading 46a: outside the security class a tool finding caps at medium
   const severity = normalizeSeverity({
     source: "tool",
+    category: tool.category,
     ...(tool.score === undefined ? {} : { score: tool.score }),
     ...(tool.label === undefined ? {} : { label: tool.label }),
     ...(tool.sarif_level === undefined ? {} : { sarifLevel: tool.sarif_level }),

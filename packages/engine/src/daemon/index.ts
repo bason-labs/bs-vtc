@@ -24,7 +24,6 @@ import {
   type ServeSnapshot,
 } from "@vtc/shared";
 import {
-  acquireEngineLock,
   compiledRoleContracts,
   createReadModel,
   createRoleRegistry,
@@ -34,7 +33,9 @@ import {
   openEventIndex,
   pluginCatalogFrom,
   removeEngineDiscovery,
+  takeEngineLock,
   writeEngineDiscovery,
+  type StaleLockReason,
 } from "../core/index.js";
 import { createGhPullRequests, createGitOps, createWorkspace } from "../git/index.js";
 import {
@@ -43,7 +44,7 @@ import {
   createSessionStore,
   type PrototypeServer,
 } from "../http/index.js";
-import { serveEngineSocket } from "../mcp/index.js";
+import { engineSocketAnswers, serveEngineSocket } from "../mcp/index.js";
 
 /**
  * The repo's `.env` values (AD-18 rule 1), re-read when the file changes: snapshot mode still
@@ -94,11 +95,16 @@ const prototypeUrl = (repoRoot: string, server: PrototypeServer) => (): string |
 
 export const runDaemon: RunDaemon = async (deps: EngineDeps, options) => {
   const now = deps.now ?? (() => new Date());
-  let staleHolder: number | null | undefined;
-  const lock = acquireEngineLock(deps.repoRoot, {
+  const ownSocket = socketPath(deps.vtcHome, deps.repoRoot);
+  let stale: { readonly pid: number | null; readonly reason: StaleLockReason } | undefined;
+  // AD-12 rule 1: a holder whose pid is dead, or whose socket no longer answers the hello (pid
+  // reuse after a reboot or SIGKILL), is gone; its lock is taken over and recorded
+  const lock = await takeEngineLock(deps.repoRoot, {
     now,
-    onStaleLock: (pid) => {
-      staleHolder = pid;
+    socket: ownSocket,
+    holderAnswers: (socket) => engineSocketAnswers(socket),
+    onStaleLock: (pid, reason) => {
+      stale = { pid, reason };
     },
   });
   const cleanups: (() => Promise<void> | void)[] = [
@@ -139,10 +145,13 @@ export const runDaemon: RunDaemon = async (deps: EngineDeps, options) => {
     });
     cleanups.push(() => engine.settle());
     for (const notice of engine.notices) process.stderr.write(`vtc engine: ${notice}\n`);
-    if (staleHolder !== undefined) {
+    if (stale !== undefined) {
+      const holder = stale.pid === null ? "an unknown process" : `pid ${String(stale.pid)}`;
       engine.recordIncident(
         "stale_lock",
-        `took over the engine lock left by ${staleHolder === null ? "an unknown process" : `pid ${String(staleHolder)}`}`,
+        stale.reason === "silent"
+          ? `took over the engine lock held by ${holder}: the pid is alive but its socket did not answer the hello (the pid was reused)`
+          : `took over the engine lock left by ${holder}`,
       );
     }
     try {
@@ -199,7 +208,7 @@ export const runDaemon: RunDaemon = async (deps: EngineDeps, options) => {
       lastActive = now().getTime();
     };
     const socket = await serveEngineSocket({
-      path: socketPath(deps.vtcHome, deps.repoRoot),
+      path: ownSocket,
       host: engine,
       versions: deps.versions,
       onActivity: touch,

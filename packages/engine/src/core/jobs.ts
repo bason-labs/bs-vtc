@@ -29,6 +29,12 @@ import {
 import { createHash } from "node:crypto";
 import { assertNoSymlinks, runGit } from "../git/index.js";
 import { taskBudgetFor } from "./budget.js";
+import {
+  committedGatesConfig,
+  GATES_CONFIG_PATH,
+  pipelineConfigHash,
+  type CommittedGates,
+} from "./config.js";
 import { globMatch } from "./globs.js";
 import type { Kernel, RunHandle } from "./kernel.js";
 import { assertFeatureTransition } from "./machines.js";
@@ -47,6 +53,8 @@ import { diffRiskHits, isTrivialDiff } from "./router.js";
 import { parkEscalation } from "./escalations.js";
 import {
   bundleMarkdown,
+  finalReviewScopeNote,
+  finalReviewStepsRun,
   writeFeatureEvidenceBundle,
   writeRunSummary,
   writeTaskEvidenceBundle,
@@ -97,16 +105,82 @@ export const adoptGateOutput = (k: Kernel, report: GateReport): void => {
   if (owner !== undefined) k.writes.adopt(`.vtc/evidence/${owner}`);
 };
 
+/** Commits never change, so a commit's `gates.yml` is read once (per repo, bounded). */
+const gatesAtCommit = new Map<string, Promise<CommittedGates | null>>();
+const GATES_CACHE_MAX = 64;
+
+/** `.vtc/gates.yml` committed at `commit` (`committedGatesConfig`), cached by commit. */
+const gatesAt = (k: Kernel, commit: string): Promise<CommittedGates | null> => {
+  const key = `${k.deps.repoRoot}\0${commit}`;
+  const hit = gatesAtCommit.get(key);
+  if (hit !== undefined) return hit;
+  const read = committedGatesConfig(k.deps.git, commit);
+  read.catch(() => gatesAtCommit.delete(key));
+  if (gatesAtCommit.size >= GATES_CACHE_MAX) {
+    const oldest = gatesAtCommit.keys().next().value;
+    if (oldest !== undefined) gatesAtCommit.delete(oldest);
+  }
+  gatesAtCommit.set(key, read);
+  return read;
+};
+
+/**
+ * True when the run started on a commit with no committed `gates.yml` (its `pipeline_config_hash`
+ * was made with none, spine §5 reading 46f). Such a run has no gate config and never adopts one
+ * later (reading 20): its tasks park before any worktree is made ({@link ensureWorkspace}).
+ */
+export const startedWithoutGates = (k: Kernel, h: RunHandle): boolean =>
+  k.gatesConfigHash() === null &&
+  pipelineConfigHash(k.config(), null) === h.state.run.pipeline_config_hash;
+
+/** Why a task of a run with no gate config parks (`gate_infra`): only a new run can fix it. */
+export const NO_RUN_GATES = `this run started on a commit with no committed ${GATES_CONFIG_PATH}, so it has no gate config to verify with, and a run never takes one up later (spine §5 readings 20 and 46f); run vtc calibrate, commit ${GATES_CONFIG_PATH}, then start a new run`;
+
+/**
+ * The `gates.yml` committed at a gate run's base (spine §5 reading 46f), checked against the one
+ * the run started with (reading 20): the Gate Runner reads the same file at `base`. Throws with
+ * the reason the task or feature parks on (`gate_infra`): the run started with none (it never
+ * takes one up later), no committed file at the base, or a different one. When the hash of the
+ * run's file is unknown (a restart whose kept copy an older engine wrote, or with no kept copy),
+ * the base's file must give the run's `pipeline_config_hash`: the working tree never stands in.
+ */
+export const baselineGates = async (
+  k: Kernel,
+  h: RunHandle,
+  base: string,
+): Promise<CommittedGates> => {
+  if (startedWithoutGates(k, h)) throw new Error(NO_RUN_GATES);
+  const committed = await gatesAt(k, base);
+  if (committed === null)
+    throw new Error(
+      `the baseline ${base.slice(0, 12)} has no committed ${GATES_CONFIG_PATH}, though this run started with one; a task's baseline is fixed, so drop the task or start a new run`,
+    );
+  const frozen = k.gatesConfigHash();
+  const same =
+    frozen === null
+      ? pipelineConfigHash(k.config(), committed.config) === h.state.run.pipeline_config_hash
+      : frozen === committed.sha256;
+  if (!same)
+    throw new Error(
+      `${GATES_CONFIG_PATH} at the baseline ${base.slice(0, 12)} (${committed.sha256.slice(0, 12)}) is not the one this run started with${frozen === null ? "" : ` (${frozen.slice(0, 12)})`}; a run verifies only with the config it started with`,
+    );
+  return committed;
+};
+
 /**
  * Runs the Gate Runner on a clean checkout of `head` (§6.3 step 5); never throws for a failing
- * gate. The gate run is guarded like a role's dispatch (`guardGateRun`): a git config or hook
- * change it made is reported and held, and its results are not used.
+ * gate. Every request carries `gates_config_hash`, the run's `gates.yml` (reading 46b), and
+ * throws, before anything runs, when the base's committed `gates.yml` is missing or another
+ * ({@link baselineGates}). The gate run is guarded like a role's dispatch (`guardGateRun`): a git
+ * config or hook change it made is reported and held, and its results are not used.
  */
 const runGates = async (
   k: Kernel,
   h: RunHandle,
-  request: Omit<GateRunRequestInput, "checkout">,
+  input: Omit<GateRunRequestInput, "checkout" | "gates_config_hash">,
 ): Promise<GateReport> => {
+  const gates = await baselineGates(k, h, input.base);
+  const request = { ...input, gates_config_hash: gates.sha256 };
   const label = `${request.reason} ${request.task ?? request.feature ?? request.run}`;
   const report = await guardGateRun(k, h, label, async () => {
     const checkout = await k.deps.git.createCleanCheckout(request.head);
@@ -139,7 +213,7 @@ export const onlyFlaky = (report: GateReport): boolean => {
 const runGatesRetryingFlaky = async (
   k: Kernel,
   h: RunHandle,
-  request: Omit<GateRunRequestInput, "checkout">,
+  request: Omit<GateRunRequestInput, "checkout" | "gates_config_hash">,
 ): Promise<GateReport[]> => {
   const first = await runGates(k, h, request);
   return onlyFlaky(first) ? [first, await runGates(k, h, request)] : [first];
@@ -163,6 +237,16 @@ export const ensureWorkspace = (k: Kernel, h: RunHandle, taskId: string): void =
     const task = h.state.tasks.get(taskId);
     const feature = task === undefined ? undefined : h.state.features.get(task.feature);
     if (task === undefined || feature === undefined || task.worktree !== undefined) return;
+    if (startedWithoutGates(k, h)) {
+      // nothing could verify the task: park it before a worktree or a role run is spent on it
+      await k.serial(h, () => {
+        const current = h.state.tasks.get(taskId);
+        if (current?.status === "ready" && current.worktree === undefined)
+          parkInfra(k, h, taskId, NO_RUN_GATES);
+        return Promise.resolve();
+      });
+      return;
+    }
     try {
       const ws = k.deps.workspace;
       const branch = feature.integration_branch;
@@ -200,7 +284,11 @@ const message = (error: unknown): string =>
 
 // -------------------------------------------------------------- protected files
 
-/** Files QA wrote (by checksum at QA's commit) plus protected configs at the baseline (§7.3). */
+/**
+ * Files QA wrote (by checksum at QA's commit) plus protected configs at the baseline (§7.3): the
+ * `protected_configs` of the `gates.yml` committed at the baseline (reading 46f), never the
+ * working tree's.
+ */
 export const protectedFiles = async (
   k: Kernel,
   h: RunHandle,
@@ -223,7 +311,10 @@ export const protectedFiles = async (
       if (bytes !== undefined) out.set(a.path, sha256(bytes));
     }
   }
-  const globs = k.gatesConfig()?.tests.protected_configs ?? [];
+  const globs =
+    task.baseline_revision === undefined
+      ? []
+      : ((await gatesAt(k, task.baseline_revision))?.config.tests.protected_configs ?? []);
   if (globs.length > 0 && task.baseline_revision !== undefined) {
     const listed = await runGit(k.deps.repoRoot, [
       "ls-tree",
@@ -344,7 +435,10 @@ export const startBaseCheck = (
 
 // --------------------------------------------------------------- round gates
 
-/** The task's previous L2 metrics at the same scope (§7.3 monotonic metrics). */
+/**
+ * The task's previous L2 metrics at the same scope (§7.3 monotonic metrics): the last L2 result's
+ * `tests`, which with several L2 gates are the run's combined L2 metrics (reading 46d).
+ */
 const previousMetrics = (h: RunHandle, taskId: string): TestMetrics | undefined =>
   h.state.gateReports
     .filter(
@@ -921,14 +1015,36 @@ const createIntegrationFix = (
 };
 
 /**
- * What this engine's Final Review covers, stated wherever its verdict is shown (the PR body):
- * step 1 only. Steps 2–7 of §6.7a and routing findings back to their owning task by blame or
- * fingerprint are not built yet; every finding becomes an integration-fix task.
+ * The Final Review gate request (§6.7a steps 1, 2 and 6): full scope, every layer, and every
+ * hidden acceptance test of the feature's tasks (`hidden_tasks`, reading 46c). The evidence bundle
+ * reads the steps it covered from this shape (`finalReviewStepsCovered`, reading 46e).
  */
-export const FINAL_REVIEW_SCOPE_NOTE =
-  "Final Review ran step 1 of §6.7a only (the full gates on the integrated branch); steps 2–7 are not run by this VTC version, so review the PR with that in mind.";
+export const finalReviewRequest = (
+  h: RunHandle,
+  featureId: string,
+  at: { readonly base: string; readonly head: string; readonly req_tags: readonly string[] },
+): Omit<GateRunRequestInput, "checkout" | "gates_config_hash"> => {
+  const tasks = (h.state.features.get(featureId)?.tasks ?? []).filter(
+    (t) => h.state.tasks.get(t)?.status !== "dropped",
+  );
+  return {
+    run: h.state.id,
+    feature: featureId,
+    reason: "final_review",
+    scope: "full",
+    base: at.base,
+    head: at.head,
+    req_tags: [...at.req_tags],
+    include_hidden: true,
+    hidden_tasks: [...new Set(tasks)],
+  };
+};
 
-/** Final Review step 1 (§6.7a): full gates on the integrated branch; fixes become new tasks. */
+/**
+ * Final Review (§6.7a): the gate steps on the integrated branch (`finalReviewRequest`). Steps 3–5
+ * and 7 and routing findings back to their owning task are not built yet: every finding becomes
+ * an integration-fix task, and the PR note says which steps ran (`finalReviewScopeNote`).
+ */
 export const startFinalReview = (k: Kernel, h: RunHandle, featureId: string): void => {
   k.spawn(h, `final:${featureId}`, async () => {
     const feature = h.state.features.get(featureId);
@@ -946,16 +1062,11 @@ export const startFinalReview = (k: Kernel, h: RunHandle, featureId: string): vo
           .toString("utf8")
           .trim() || head;
       const covers = [...new Set(feature.tasks.flatMap((t) => h.state.tasks.get(t)?.covers ?? []))];
-      reports = await runGatesRetryingFlaky(k, h, {
-        run: h.state.id,
-        feature: featureId,
-        reason: "final_review",
-        scope: "full",
-        base,
-        head,
-        req_tags: covers,
-        include_hidden: true,
-      });
+      reports = await runGatesRetryingFlaky(
+        k,
+        h,
+        finalReviewRequest(h, featureId, { base, head, req_tags: covers }),
+      );
     } catch (error) {
       await k.serial(h, () => {
         parkFeature(
@@ -1037,8 +1148,10 @@ export const startRelease = (k: Kernel, h: RunHandle, featureId: string): void =
       featureId,
       true,
       written === null
-        ? FINAL_REVIEW_SCOPE_NOTE
-        : `${bundleMarkdown(written.bundle).trimEnd()}\n\n${FINAL_REVIEW_SCOPE_NOTE}\n`,
+        ? finalReviewScopeNote(finalReviewStepsRun(k.deps.repoRoot, h.state, featureId))
+        : `${bundleMarkdown(written.bundle).trimEnd()}\n\n${finalReviewScopeNote(
+            written.bundle.kind === "feature" ? written.bundle.final_review.steps_run : [],
+          )}\n`,
     );
     await k.serial(h, () => {
       if (h.state.run.finished_at !== undefined) return Promise.resolve();
