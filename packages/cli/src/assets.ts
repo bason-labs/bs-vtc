@@ -5,6 +5,7 @@
  * the binary embeds the same trees (`binary/main.ts`). The cli never imports `apps/` or `dist/`:
  * it reads files at run time or embeds them at build time.
  */
+import { randomBytes } from "node:crypto";
 import {
   chmodSync,
   lstatSync,
@@ -125,8 +126,11 @@ export const createEmbeddedAssetBundle = (
 
 /**
  * Writes every asset of `namespace` under `dest` (AD-20 rule 5: the binary's plugins must be on
- * disk for `HostAdapter.install`). The tree is built beside `dest` and renamed into place, so a
- * reader never sees half a plugin; an existing `dest` is replaced.
+ * disk for `HostAdapter.install`). The tree is built in a uniquely named staging directory beside
+ * `dest`, the old tree (if any) is renamed aside and the new one renamed into place, so a reader
+ * never sees half a plugin and two concurrent extractions do not collide; the loser of a race
+ * leaves the winner's identical tree in place. Files are written 0644: the `AssetBundle` contract
+ * carries no file modes, and no plugin ships an executable (its hooks run `vtc hook`).
  */
 export const extractNamespace = (
   bundle: AssetBundle,
@@ -136,8 +140,8 @@ export const extractNamespace = (
   const paths = bundle.list(namespace);
   if (paths.length === 0) throw new Error(`the bundle has no ${namespace} assets`);
   mkdirSync(dirname(dest), { recursive: true, mode: 0o700 });
-  const staging = `${dest}.${String(process.pid)}.tmp`;
-  rmSync(staging, { recursive: true, force: true });
+  const unique = `${String(process.pid)}-${randomBytes(4).toString("hex")}`;
+  const staging = `${dest}.${unique}.tmp`;
   for (const path of paths) {
     if (!isSafeAssetPath(path)) throw new Error(`unsafe asset path ${path}`);
     const bytes = bundle.read(namespace, path);
@@ -147,7 +151,25 @@ export const extractNamespace = (
     writeFileSync(abs, bytes);
   }
   chmodSync(staging, 0o755);
-  rmSync(dest, { recursive: true, force: true });
-  renameSync(staging, dest);
+  const old = `${dest}.${unique}.old`;
+  let moved = false;
+  try {
+    renameSync(dest, old);
+    moved = true;
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+  }
+  try {
+    renameSync(staging, dest);
+  } catch (error) {
+    // a concurrent extraction put its tree in place first: keep it
+    rmSync(staging, { recursive: true, force: true });
+    const code = (error as NodeJS.ErrnoException).code;
+    if (code !== "ENOTEMPTY" && code !== "EEXIST") {
+      if (moved) renameSync(old, dest);
+      throw error;
+    }
+  }
+  if (moved) rmSync(old, { recursive: true, force: true });
   return dest;
 };

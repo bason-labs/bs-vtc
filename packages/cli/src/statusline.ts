@@ -1,6 +1,6 @@
 /**
- * `vtc statusline-tee -- <the user's statusline command>` (§6.9, spine §5 reading 6): the Claude
- * statusline shim. It wraps the user's own statusline command instead of replacing it: the
+ * `vtc statusline-tee -- '<the user's statusline command>'` (§6.9, spine §5 reading 6): the
+ * Claude statusline shim. It wraps the user's own statusline command instead of replacing it: the
  * command gets Claude's statusline JSON on stdin unchanged and its output is printed unchanged.
  * Alongside, the shim turns the JSON into a `StatuslineIngest` with the adapter's pure
  * `statuslineIngestFromClaude` and POSTs it to the repo's running engine (found through the
@@ -15,7 +15,7 @@ export interface StatuslineDeps {
   readonly vtcHome: string;
   readonly cwd: string;
   readonly findRepoRoot: (cwd: string) => Promise<string | null>;
-  readonly liveDaemon: (vtcHome: string, repoRoot: string) => EngineDiscovery | null;
+  readonly liveDaemon: (vtcHome: string, repoRoot: string) => Promise<EngineDiscovery | null>;
   readonly readInstallToken: (vtcHome: string) => string;
   readonly post: (
     port: number,
@@ -25,7 +25,7 @@ export interface StatuslineDeps {
   ) => Promise<{
     readonly status: number;
   }>;
-  readonly runCommand: (command: string, stdin: string) => Promise<CommandOutput>;
+  readonly runCommand: (command: UserCommand, stdin: string) => Promise<CommandOutput>;
 }
 
 export interface CommandOutput {
@@ -53,7 +53,7 @@ export const forwardStatusline = async (stdin: string, deps: StatuslineDeps): Pr
     if (body === null) return false;
     const repoRoot = await deps.findRepoRoot(sessionDir(raw) ?? deps.cwd);
     if (repoRoot === null) return false;
-    const daemon = deps.liveDaemon(deps.vtcHome, repoRoot);
+    const daemon = await deps.liveDaemon(deps.vtcHome, repoRoot);
     if (daemon === null) return false;
     const { status } = await deps.post(
       daemon.port,
@@ -67,12 +67,31 @@ export const forwardStatusline = async (stdin: string, deps: StatuslineDeps): Pr
   }
 };
 
-/** The user's command: every argument after `--`, joined as one shell command line. */
-export const userCommandOf = (args: readonly string[]): string | null => {
+/**
+ * The user's statusline command, from the arguments after `--`. The wiring form (the Claude
+ * adapter's `install`, AD-6 rule 4) is exactly one argument: the user's original `statusLine`
+ * command string, quoted as a single shell word, which the shim hands to the shell once, as
+ * Claude Code itself would. More than one argument is an argv run directly, with no shell, so
+ * nothing is ever shell-parsed twice.
+ */
+export type UserCommand =
+  | { readonly kind: "shell"; readonly line: string }
+  | { readonly kind: "argv"; readonly argv: readonly [string, ...string[]] };
+
+export const userCommandOf = (args: readonly string[]): UserCommand | null => {
   const at = args.indexOf("--");
-  const words = at < 0 ? [] : args.slice(at + 1);
-  return words.length === 0 ? null : words.join(" ");
+  const [first, ...rest] = at < 0 ? [] : args.slice(at + 1);
+  if (first === undefined) return null;
+  return rest.length === 0
+    ? { kind: "shell", line: first }
+    : { kind: "argv", argv: [first, ...rest] };
 };
+
+/**
+ * Claude's statusline JSON is small; larger input is not one and is not forwarded. The user's
+ * command still gets all of it.
+ */
+export const MAX_FORWARD_BYTES = 256 * 1024;
 
 /** Runs the shim: the user's statusline output (and exit code) unchanged, usage forwarded. */
 export const runStatuslineTee = async (
@@ -82,7 +101,9 @@ export const runStatuslineTee = async (
 ): Promise<CommandOutput> => {
   const command = userCommandOf(args);
   const [, output] = await Promise.all([
-    forwardStatusline(stdin, deps),
+    Buffer.byteLength(stdin) <= MAX_FORWARD_BYTES
+      ? forwardStatusline(stdin, deps)
+      : Promise.resolve(false),
     command === null
       ? Promise.resolve<CommandOutput>({ code: 0, stdout: "", stderr: "" })
       : deps.runCommand(command, stdin),
@@ -90,17 +111,24 @@ export const runStatuslineTee = async (
   return output;
 };
 
-/** Runs the user's statusline command through the shell, as Claude Code itself would. */
+/**
+ * Runs the user's statusline command: a command line through the shell once, as Claude Code itself
+ * would, or an argv directly.
+ */
 export const runShellCommand = (
-  command: string,
+  command: UserCommand,
   stdin: string,
   timeoutMs = 10_000,
 ): Promise<CommandOutput> =>
   new Promise((resolve) => {
     let stdout = "";
     let stderr = "";
-    const child = spawn(command, {
-      shell: true,
+    const [file, args, shell] =
+      command.kind === "shell"
+        ? [command.line, [], true]
+        : [command.argv[0], command.argv.slice(1), false];
+    const child = spawn(file, args, {
+      shell,
       stdio: ["pipe", "pipe", "pipe"],
       windowsHide: true,
     });

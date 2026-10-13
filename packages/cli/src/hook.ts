@@ -3,7 +3,8 @@
  * hook runs (AD-16 rule 3; the frozen contract is `@vtc/shared` hook.ts). It fails open: no VTC
  * run, no live daemon, unreadable input or any error is exit 0 with no output. It blocks (exit 2,
  * the reason on stderr) only a VTC role agent's git write, or a write outside the write scope of
- * that agent's in-flight dispatch. The engine stays the enforcement point.
+ * that agent's in-flight dispatch: its worktree's scope entries, plus the entries it writes in the
+ * main checkout (QA author mode's hidden-test staging). The engine stays the enforcement point.
  */
 import { readFileSync, realpathSync } from "node:fs";
 import { basename, dirname, isAbsolute, join, relative, sep } from "node:path";
@@ -40,7 +41,7 @@ export interface HookDeps {
   /** Where the hook process runs; the input's `cwd` wins when present. */
   readonly cwd: string;
   readonly findRepoRoot: (cwd: string) => Promise<string | null>;
-  readonly liveDaemon: (vtcHome: string, repoRoot: string) => EngineDiscovery | null;
+  readonly liveDaemon: (vtcHome: string, repoRoot: string) => Promise<EngineDiscovery | null>;
   readonly loadRuns: (repoRoot: string) => readonly RunState[];
 }
 
@@ -57,7 +58,7 @@ const activeRunOf = async (
   deps: HookDeps,
 ): Promise<{ repoRoot: string; run: RunState } | null> => {
   const repoRoot = await deps.findRepoRoot(input.cwd ?? deps.cwd);
-  if (repoRoot === null || deps.liveDaemon(deps.vtcHome, repoRoot) === null) return null;
+  if (repoRoot === null || (await deps.liveDaemon(deps.vtcHome, repoRoot)) === null) return null;
   const run = core.activeRun([...deps.loadRuns(repoRoot)]);
   return run === undefined || run.run.finished_at !== undefined ? null : { repoRoot, run };
 };
@@ -80,6 +81,37 @@ const readText = (abs: string): string | null => {
   }
 };
 
+/** POSIX form of a relative path. */
+const posix = (rel: string): string => rel.split(sep).join("/");
+
+/** `rel` (from `relative`) when it stays below its base, else `null`. */
+const below = (rel: string): string | null =>
+  rel === "" || rel === ".." || rel.startsWith(`..${sep}`) || isAbsolute(rel) ? null : rel;
+
+/**
+ * A scope entry the role writes in the main checkout rather than in its worktree: anything under
+ * the git-ignored `.vtc/state/` but outside the worktrees, which never exists in a worktree. Today
+ * that is QA author mode's `HIDDEN_TESTS.stagingDir/<task>/**`, which the engine reads from the
+ * main checkout (`join(repoRoot, artifact.path)`, §7.3).
+ */
+const isCheckoutEntry = (entry: string): boolean =>
+  entry.startsWith(".vtc/state/") && !entry.startsWith(`${git.WORKTREES_DIR}/`);
+
+/** Each dispatch's write scope from its task pack, or `null` when a pack is unreadable. */
+const scopesOf = (
+  repoRoot: string,
+  dispatches: readonly core.RoleRunRecord[],
+): Map<core.RoleRunRecord, string[]> | null => {
+  const scopes = new Map<core.RoleRunRecord, string[]>();
+  for (const d of dispatches) {
+    const pack = readText(join(repoRoot, d.pack));
+    const own = pack === null ? null : packWriteScope(pack);
+    if (own === null) return null;
+    scopes.set(d, own);
+  }
+  return scopes;
+};
+
 /** Why writing `target` is outside the dispatch's scope, or `null` when it is allowed. */
 const writeViolation = (
   target: string,
@@ -87,23 +119,23 @@ const writeViolation = (
   run: RunState,
   dispatches: readonly core.RoleRunRecord[],
 ): string | null => {
-  const worktrees = realish(join(repoRoot, git.WORKTREES_DIR));
-  const rel = relative(worktrees, realish(target));
-  if (rel === "" || rel.startsWith("..") || isAbsolute(rel))
+  const scopes = scopesOf(repoRoot, dispatches);
+  if (scopes === null) return null; // a pack is unreadable: allow (the engine still checks)
+  const real = realish(target);
+  const inWorktrees = below(relative(realish(join(repoRoot, git.WORKTREES_DIR)), real));
+  if (inWorktrees === null) {
+    const inRepo = below(relative(realish(repoRoot), real));
+    const checkout = [...scopes.values()].flat().filter(isCheckoutEntry);
+    if (inRepo !== null && matchesAnyGlob(checkout, posix(inRepo))) return null;
     return `${target} is outside your worktree under ${git.WORKTREES_DIR}/`;
-  const [id = "", ...rest] = rel.split(sep);
+  }
+  const [id = "", ...rest] = inWorktrees.split(sep);
   const path = rest.join("/");
   const mine = dispatches.filter(
     (d) => d.task === id || core.roleWorktreeId(run.id, d.action_id) === id,
   );
   if (mine.length === 0) return `${target} is in a worktree that is not yours (${id})`;
-  const scope: string[] = [];
-  for (const d of mine) {
-    const pack = readText(join(repoRoot, d.pack));
-    const own = pack === null ? null : packWriteScope(pack);
-    if (own === null) return null; // the pack is unreadable: allow (the engine still checks)
-    scope.push(...own);
-  }
+  const scope = mine.flatMap((d) => scopes.get(d) ?? []);
   if (path !== "" && matchesAnyGlob(scope, path)) return null;
   return `${path || target} is outside your write scope (${scope.length === 0 ? "read-only" : scope.join(", ")})`;
 };

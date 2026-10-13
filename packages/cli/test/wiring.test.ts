@@ -3,20 +3,22 @@
  * builds, the daemon they start (serving the embedded-or-disk dashboard and the compiled role
  * contracts), discovery, the stdio bridge, and the control client.
  */
-import { chmodSync, existsSync, readFileSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { request } from "node:http";
+import { createServer, type Socket } from "node:net";
 import { join } from "node:path";
 import { PassThrough } from "node:stream";
 import { afterEach, describe, expect, it } from "vitest";
 import { mcp } from "@vtc/engine";
 import {
   CONTRACTS_VERSION,
+  engineDiscoveryFile,
   type GateRunner,
   type HostAdapter,
   type RunningDaemon,
 } from "@vtc/shared";
 import { createDiskAssetBundle } from "../src/assets.js";
-import { ensureDaemon, liveDaemon, pidAlive } from "../src/daemon.js";
+import { daemonAnswers, ensureDaemon, liveDaemon, pidAlive } from "../src/daemon.js";
 import {
   buildEngineParts,
   composeEngineDeps,
@@ -121,7 +123,7 @@ describe("buildEngineParts and composeEngineDeps (AD-19)", () => {
     expect(readFileSync(log, "utf8")).toMatch(/^pr view vtc\/F-1 --json /);
   });
 
-  it("builds the Gate Runner on first use and reports a broken one as a failed gate run", async () => {
+  it("builds the Gate Runner on first use, once, and passes a broken one's error to the caller", async () => {
     let created = 0;
     const runner = lazyGateRunner((): GateRunner => {
       created += 1;
@@ -145,7 +147,7 @@ describe("the daemon the cli wires (AD-12, AD-20)", () => {
     const home = tempHome();
     const daemon = await startDaemon(await partsFor(repo, home), { wake: false });
     daemons.push(daemon);
-    expect(liveDaemon(home, repo)).toEqual(daemon.discovery);
+    expect(await liveDaemon(home, repo)).toEqual(daemon.discovery);
     const index = await get(daemon.port, "/");
     expect(index.status).toBe(200);
     expect(index.body).toBe(readFileSync(join(DASHBOARD_FIXTURE, "index.html"), "utf8"));
@@ -234,4 +236,53 @@ describe("the daemon the cli wires (AD-12, AD-20)", () => {
     expect(pidAlive(process.pid)).toBe(true);
     expect(pidAlive(2 ** 22 + 12345)).toBe(false);
   });
+
+  it("treats a record whose pid is alive but whose socket does not answer as stale (AD-12 rule 3)", async () => {
+    const repo = initRepo();
+    const home = tempHome();
+    // a daemon that died without cleanup, its pid since reused (here: by this test process)
+    const stale = {
+      v: 1,
+      pid: process.pid,
+      port: 1,
+      prototype_port: null,
+      mcp_socket: join(home, "run", "dead.sock"),
+      repo_root: repo,
+      started_at: "2026-10-13T00:00:00.000Z",
+      engine_version: "vtc-engine@0.0.0",
+      contracts_version: CONTRACTS_VERSION,
+    };
+    mkdirSync(join(home, "engines"), { recursive: true });
+    writeFileSync(join(home, engineDiscoveryFile(repo)), JSON.stringify(stale));
+    expect(await daemonAnswers(stale.mcp_socket, 500)).toBe(false);
+    expect(await liveDaemon(home, repo)).toBeNull();
+    // ensureDaemon starts a new daemon instead of returning the stale record
+    await expect(
+      ensureDaemon({
+        vtcHome: home,
+        repoRoot: repo,
+        selfCommand: [process.execPath, "-e", "console.error('started'); process.exit(3)"],
+        timeoutMs: 10_000,
+      }),
+    ).rejects.toThrow(/did not start .*started/);
+    // a live daemon's socket answers the hello
+    const daemon = await startDaemon(await partsFor(repo, home), { wake: false });
+    daemons.push(daemon);
+    expect(await daemonAnswers(daemon.discovery.mcp_socket)).toBe(true);
+    // something else listening on the path is not a daemon
+    const accepted: Socket[] = [];
+    const fake = createServer((s) => {
+      accepted.push(s);
+      s.on("error", () => undefined);
+      s.end("HTTP/1.1 400 Bad Request\r\n\r\n");
+    });
+    const fakePath = join(home, "run", "fake.sock");
+    await new Promise<void>((r) => fake.listen(fakePath, r));
+    try {
+      expect(await daemonAnswers(fakePath, 500)).toBe(false);
+    } finally {
+      for (const s of accepted) s.destroy();
+      await new Promise((r) => fake.close(r));
+    }
+  }, 20_000);
 });

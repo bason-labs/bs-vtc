@@ -10,7 +10,7 @@ import { afterEach, describe, expect, it } from "vitest";
 import { ENGINE_HTTP, engineRepoKey, type RunningDaemon } from "@vtc/shared";
 import { createDiskAssetBundle } from "../src/assets.js";
 import { createStatuslineTeeCommand } from "../src/commands/statusline-tee.js";
-import { wakeDue } from "../src/commands/engine.js";
+import { WAKE_GRACE_MS, wakeDue } from "../src/commands/engine.js";
 import { liveDaemon } from "../src/daemon.js";
 import { postToEngine } from "../src/engine-http.js";
 import { renderLaunchAgent } from "../src/launchd.js";
@@ -19,6 +19,7 @@ import { createWakeScheduler, dueWakeups, wakeRecords } from "../src/scheduler.j
 import {
   forwardStatusline,
   runShellCommand,
+  MAX_FORWARD_BYTES,
   runStatuslineTee,
   userCommandOf,
   type StatuslineDeps,
@@ -37,6 +38,9 @@ import {
 } from "./helpers.js";
 
 const daemons: RunningDaemon[] = [];
+const never = (): never => {
+  throw new Error("no command");
+};
 afterEach(async () => {
   for (const d of daemons.splice(0)) await d.close();
   cleanupDirs();
@@ -70,7 +74,7 @@ describe("the persisted wake scheduler (AutoResumeScheduler)", () => {
     expect(readdirSync(join(home, "wake")).some((n) => n.endsWith(".tmp"))).toBe(false);
   });
 
-  it("vtc engine --wake-due starts each due repo's daemon with --wake, once", async () => {
+  it("vtc engine --wake-due starts each due repo's daemon with --wake, leaving the wake-up to it", async () => {
     const home = tempHome();
     const [due, moved, later] = [tempDir(), tempDir(), tempDir()];
     const gone = join(tempDir(), "deleted-repo");
@@ -90,12 +94,25 @@ describe("the persisted wake scheduler (AutoResumeScheduler)", () => {
     });
     expect(count).toBe(2);
     expect(started.sort()).toEqual([`${due} --wake`, `${moved} --wake`].sort());
+    // within the grace the woken engine owns its wake-up: nothing is dropped under it
+    expect(
+      wakeRecords(home)
+        .map((r) => r.repo_root)
+        .sort(),
+    ).toEqual([due, later, moved].sort());
+    expect(out).toHaveLength(2);
+    // past the grace, a wake-up the engine neither cancelled nor moved is dropped after one more try
+    const late = new Date(Date.parse("2026-10-13T10:00:00Z") + WAKE_GRACE_MS);
+    started.length = 0;
+    expect(
+      await wakeDue(ctx, late, (o) => (started.push(o.repoRoot), Promise.resolve({} as never))),
+    ).toBe(1);
+    expect(started).toEqual([due]);
     expect(
       wakeRecords(home)
         .map((r) => r.repo_root)
         .sort(),
     ).toEqual([later, moved].sort());
-    expect(out).toHaveLength(2);
   });
 
   it("renders a launchd agent that runs --wake-due every minute with the user's PATH", () => {
@@ -144,11 +161,56 @@ const getJson = (port: number, path: string, token: string): Promise<unknown> =>
   });
 
 describe("vtc statusline-tee (§6.9)", () => {
-  it("takes the user's command from after --", () => {
-    expect(userCommandOf(["--", "~/bin/status.sh", "--short"])).toBe("~/bin/status.sh --short");
-    expect(userCommandOf(["--", "cat | head -c 5"])).toBe("cat | head -c 5");
+  it("takes the user's command from after --: one command string, or an argv", () => {
+    expect(userCommandOf(["--", "cat | head -c 5"])).toEqual({
+      kind: "shell",
+      line: "cat | head -c 5",
+    });
+    expect(userCommandOf(["--", "~/bin/status.sh", "--short"])).toEqual({
+      kind: "argv",
+      argv: ["~/bin/status.sh", "--short"],
+    });
     expect(userCommandOf([])).toBeNull();
     expect(userCommandOf(["--"])).toBeNull();
+  });
+
+  it("hands the command string to the shell exactly once", async () => {
+    // the wiring form: the user's original statusLine command as one argument
+    const original = `printf '%s|' 'a b' "c  d" | tr -d '\n'`;
+    expect(await runShellCommand(userCommandOf(["--", original]) ?? never(), "")).toEqual({
+      code: 0,
+      stdout: "a b|c  d|",
+      stderr: "",
+    });
+    // several arguments are an argv: no shell parses them, quotes and spaces survive
+    expect(
+      await runShellCommand(
+        userCommandOf(["--", "printf", "%s|", "a 'b'", "$HOME"]) ?? never(),
+        "",
+      ),
+    ).toEqual({ code: 0, stdout: "a 'b'|$HOME|", stderr: "" });
+  });
+
+  it("passes stdin of any size to the user's command, forwarding only a statusline-sized one", async () => {
+    const posts: string[] = [];
+    const deps: StatuslineDeps = {
+      vtcHome: tempHome(),
+      cwd: "/",
+      findRepoRoot: () => Promise.resolve("/r"),
+      liveDaemon: () => Promise.resolve({ port: 1 } as never),
+      readInstallToken: () => "t",
+      post: (_port, path) => {
+        posts.push(path);
+        return Promise.resolve({ status: 204 });
+      },
+      runCommand: runShellCommand,
+    };
+    const big = JSON.stringify({ ...STATUSLINE, pad: "x".repeat(MAX_FORWARD_BYTES) });
+    const output = await runStatuslineTee(["--", "wc -c | tr -d ' '"], big, deps);
+    expect(output.stdout.trim()).toBe(String(Buffer.byteLength(big)));
+    expect(posts).toEqual([]);
+    await runStatuslineTee(["--", "true"], JSON.stringify(STATUSLINE), deps);
+    expect(posts).toEqual([ENGINE_HTTP.routes.statuslineIngest.path]);
   });
 
   it("runs the user's statusline unchanged and forwards usage to the live engine", async () => {
@@ -195,7 +257,7 @@ describe("vtc statusline-tee (§6.9)", () => {
       vtcHome: tempHome(),
       cwd: "/",
       findRepoRoot: () => Promise.resolve("/r"),
-      liveDaemon: () => null,
+      liveDaemon: () => Promise.resolve(null),
       readInstallToken: () => {
         throw new Error("no token");
       },
@@ -207,7 +269,7 @@ describe("vtc statusline-tee (§6.9)", () => {
     expect(
       await forwardStatusline(JSON.stringify(STATUSLINE), {
         ...deps,
-        liveDaemon: () => ({ port: 1 }) as never,
+        liveDaemon: () => Promise.resolve({ port: 1 } as never),
       }),
     ).toBe(false);
     expect(await runStatuslineTee([], "x", deps)).toEqual({ code: 0, stdout: "", stderr: "" });

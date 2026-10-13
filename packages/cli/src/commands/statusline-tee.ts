@@ -1,6 +1,6 @@
 /**
  * Owner: cli+binary team. The Claude statusline tee shim (§6.9, spine §5 reading 6):
- * `vtc statusline-tee [-- <the user's statusline command>]`. It runs the user's own statusline
+ * `vtc statusline-tee [-- '<the user's statusline command>']` (one argument: the command string). It runs the user's own statusline
  * command unchanged and forwards `statuslineIngestFromClaude(stdin)` to the running engine found
  * through the discovery file (AD-12) with the install token (`statusline.ts`). The Claude
  * adapter's `install` wires it in.
@@ -13,8 +13,11 @@ import { readInstallToken } from "../token.js";
 import type { CommandContext, CommandSpec } from "./types.js";
 import { readStdin } from "./util.js";
 
-/** Claude's statusline JSON is small; anything larger is not one and is not forwarded. */
-const MAX_STDIN = 256 * 1024;
+/**
+ * The user's command gets stdin unchanged (§6.9), so it is read whole; the forwarding has its own
+ * cap (`MAX_FORWARD_BYTES`). This bound only stops a runaway producer.
+ */
+const MAX_STDIN = 64 * 1024 * 1024;
 
 export interface StatuslineCommandDeps {
   readonly stdin: () => Promise<string | null>;
@@ -32,7 +35,7 @@ export const defaultStatuslineCommandDeps = (): StatuslineCommandDeps => ({
     vtcHome: ctx.vtcHome,
     cwd: ctx.cwd,
     findRepoRoot: (cwd) => findRepoRoot(cwd),
-    liveDaemon,
+    liveDaemon: (vtcHome, repoRoot) => liveDaemon(vtcHome, repoRoot),
     readInstallToken,
     post: postToEngine,
     runCommand: runShellCommand,

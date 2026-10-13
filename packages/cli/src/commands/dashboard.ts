@@ -46,7 +46,7 @@ export const openInBrowser = (url: string, platform: NodeJS.Platform = process.p
 };
 
 export interface DashboardDeps {
-  readonly liveDaemon: (vtcHome: string, repoRoot: string) => EngineDiscovery | null;
+  readonly liveDaemon: (vtcHome: string, repoRoot: string) => Promise<EngineDiscovery | null>;
   readonly post: (
     port: number,
     path: string,
@@ -72,7 +72,7 @@ const untilInterrupted = (): Promise<void> =>
   });
 
 export const defaultDashboardDeps = (): DashboardDeps => ({
-  liveDaemon,
+  liveDaemon: (vtcHome, repoRoot) => liveDaemon(vtcHome, repoRoot),
   post: postToEngine,
   serveSnapshot,
   assets: () => runtime().assets,
@@ -95,7 +95,7 @@ export const createDashboardCommand = (
         ctx.io.out(`Flow Studio: ${url}`);
         if (values["no-open"] !== true) d.open(url);
       };
-      const live = d.liveDaemon(ctx.vtcHome, repoRoot);
+      const live = await d.liveDaemon(ctx.vtcHome, repoRoot);
       if (live !== null) {
         const route = ENGINE_HTTP.routes.sessionNonce;
         const response = await d.post(live.port, route.path, token, "{}");

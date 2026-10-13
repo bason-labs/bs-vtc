@@ -2,12 +2,12 @@
  * Owner: cli+binary team (wiring, launchd timer); the host part is `HostAdapter.install`
  * (adapters team), which places the compiled plugin (AD-6, AD-16).
  *
- * `vtc install --host <claude-code|codex> [--scope user|project]` creates the install token,
- * puts the compiled plugin on disk (the binary extracts its embedded `plugin:<host>`, AD-20
- * rule 5) and calls the adapter from `ADAPTER_FACTORIES`.
- * `vtc install --auto-resume` installs the macOS launchd agent behind auto-resume (§6.9 step 4);
- * `--no-auto-resume` removes it. The timer is installed only by this explicit flag, never as a
- * side effect of anything else.
+ * `vtc install --host <claude-code|codex> [--scope user|project]` (or `vtc install <host>`, the
+ * spec §4.4 form) creates the install token, puts the compiled plugin on disk (the binary extracts
+ * its embedded `plugin:<host>`, AD-20 rule 5) and calls the adapter from `ADAPTER_FACTORIES`.
+ * On macOS it also installs the launchd agent behind auto-resume (AD-6 rule 4, §6.9 step 4:
+ * "installed by `vtc install`"), and says so; `--no-auto-resume` skips it and removes an installed
+ * one. `vtc install --auto-resume` alone (re)installs just the agent, e.g. after the binary moved.
  */
 import { homedir } from "node:os";
 import { ADAPTER_FACTORIES } from "@vtc/adapters";
@@ -52,31 +52,44 @@ export const createInstallCommand = (
   deps: () => InstallDeps = defaultInstallDeps,
 ): CommandSpec => ({
   name: "install",
-  summary: "Install the plugin for a host (--host claude-code|codex); --auto-resume timer",
+  summary:
+    "Install the plugin for a host (vtc install <claude-code|codex>) and the auto-resume timer",
   run: (args, ctx) =>
     guarded("install", ctx, async () => {
-      const { values } = parseFlags(args, {
-        host: { type: "string" },
-        scope: { type: "string", default: "user" },
-        "auto-resume": { type: "boolean" },
-        "no-auto-resume": { type: "boolean" },
-      });
-      const timer =
-        values["auto-resume"] === true ? "on" : values["no-auto-resume"] === true ? "off" : null;
+      const { values, positionals } = parseFlags(
+        args,
+        {
+          host: { type: "string" },
+          scope: { type: "string", default: "user" },
+          "auto-resume": { type: "boolean" },
+          "no-auto-resume": { type: "boolean" },
+        },
+        true,
+      );
+      const usage =
+        "usage: vtc install <claude-code|codex> [--scope user|project] [--no-auto-resume] | vtc install --auto-resume | --no-auto-resume";
+      if (positionals.length > 1 || (positionals.length === 1 && values.host !== undefined))
+        throw new UsageError(usage);
+      const hostName = values.host ?? positionals[0];
+      const d = deps();
       if (values["auto-resume"] === true && values["no-auto-resume"] === true)
         throw new UsageError("pass either --auto-resume or --no-auto-resume");
-      if (values.host === undefined && timer === null)
-        throw new UsageError(
-          "usage: vtc install --host <claude-code|codex> [--scope user|project] [--auto-resume | --no-auto-resume]",
-        );
+      const timer =
+        values["auto-resume"] === true
+          ? "on"
+          : values["no-auto-resume"] === true
+            ? "off"
+            : hostName !== undefined && d.platform === "darwin"
+              ? "on"
+              : null;
+      if (hostName === undefined && timer === null) throw new UsageError(usage);
       if (values.scope !== "user" && values.scope !== "project")
         throw new UsageError(`--scope must be user or project, got ${values.scope}`);
-      const d = deps();
       ensureInstallToken(ctx.vtcHome);
-      if (values.host !== undefined) {
-        const host = HostIdSchema.safeParse(values.host);
+      if (hostName !== undefined) {
+        const host = HostIdSchema.safeParse(hostName);
         if (!host.success)
-          throw new UsageError(`--host must be claude-code or codex, got ${values.host}`);
+          throw new UsageError(`the host must be claude-code or codex, got ${hostName}`);
         const factory = d.factories[host.data];
         if (factory === undefined)
           throw new Error(`this build of vtc has no ${host.data} adapter yet`);
@@ -95,18 +108,23 @@ export const createInstallCommand = (
           await adapter.dispose();
         }
       }
-      if (timer !== null) {
-        if (d.platform !== "darwin")
+      if (d.platform !== "darwin") {
+        if (timer === "on")
           throw new Error(
             "the auto-resume timer is a launchd agent and needs macOS; on this platform a run resumes when the engine is running",
           );
+        if (hostName !== undefined)
+          ctx.io.out(
+            "Auto-resume has no timer on this platform yet: a run parked on a usage limit resumes when its engine is running.",
+          );
+      } else if (timer !== null) {
         const plist =
           timer === "on"
             ? await installLaunchAgent(d.launchd(), d.agentSpec(ctx.vtcHome))
             : await uninstallLaunchAgent(d.launchd());
         ctx.io.out(
           timer === "on"
-            ? `Installed the auto-resume timer (${plist}): it checks every minute for runs waiting on a usage reset.`
+            ? `Installed the auto-resume timer (${plist}): it checks every minute for runs waiting on a usage reset (--no-auto-resume removes it).`
             : `Removed the auto-resume timer (${plist}).`,
         );
       }

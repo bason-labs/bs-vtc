@@ -1,7 +1,9 @@
 /**
- * The macOS launchd agent behind auto-resume (§6.9 step 4). Installed only by the explicit
- * `vtc install --auto-resume` and removed by `vtc install --no-auto-resume`, never silently: the
- * engine's scheduler only writes wake records (`scheduler.ts`). The agent runs
+ * The macOS launchd agent behind auto-resume (§6.9 step 4, AD-6 rule 4). Installed by
+ * `vtc install <host>` (which says so) or `vtc install --auto-resume`, and removed by
+ * `vtc install --no-auto-resume`; the engine's scheduler only writes wake records
+ * (`scheduler.ts`). The plist pins the running binary's path; `vtc doctor` flags it when an
+ * upgrade moved the binary. The agent runs
  * `vtc engine --wake-due` every minute while the user is logged in; that command does nothing
  * unless a wake record is due.
  */
