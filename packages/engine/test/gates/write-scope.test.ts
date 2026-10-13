@@ -5,7 +5,13 @@ import { join } from "node:path";
 import { WriteScopeReportSchema } from "@vtc/shared";
 import { afterEach, describe, expect, it } from "vitest";
 import { createGitOps } from "../../src/git/index.js";
-import { addedLinesByFile, checkWriteScope, scanAddedLines } from "../../src/gates/index.js";
+import {
+  addedLinesByFile,
+  checkWriteScope,
+  guardedSections,
+  scanAddedLines,
+  withBaseSections,
+} from "../../src/gates/index.js";
 import { cleanupDirs, git, initRepo, writeFile } from "../helpers/repo.js";
 
 afterEach(cleanupDirs);
@@ -115,6 +121,133 @@ describe("config files a diff adds (§7.3, §7.6 rule 5)", () => {
     const custom = await checkWriteScope(git, request(base, head), ["**/conftest.py"]);
     expect(custom.violations).toEqual([
       { kind: "protected_modified", path: "src/new/conftest.py" },
+    ]);
+  });
+});
+
+describe("tool sections of pyproject.toml and package.json (§7.2 L1/L5)", () => {
+  const PY = [
+    "[project]",
+    'name = "app"',
+    'dependencies = ["requests"]',
+    "",
+    "[tool.ruff.lint]",
+    'select = ["E"]',
+    "",
+    "[tool.poetry]",
+    'packages = [{ include = "app" }]',
+    "",
+  ].join("\n");
+
+  it("guards lint and test tool tables, never dependencies", () => {
+    const sections = guardedSections("pyproject.toml", PY);
+    const deps = PY.replace('["requests"]', '["requests", "httpx"]');
+    expect(guardedSections("pyproject.toml", deps)).toBe(sections);
+    expect(
+      guardedSections("pyproject.toml", PY.replace("[tool.poetry]\n", "[tool.poetry]\nx = 1\n")),
+    ).toBe(sections);
+    expect(guardedSections("pyproject.toml", `${PY}# a comment\n\n`)).toBe(sections);
+    const changed = [
+      PY.replace('select = ["E"]', 'select = ["E"]\nignore = ["ALL"]'),
+      `${PY}[tool.pytest.ini_options]\naddopts = "--deselect tests/test_a.py"\n`,
+      `${PY}[ tool . "mypy" ]\nignore_errors = true\n`,
+      `${PY}[[tool.mypy.overrides]]\nmodule = "*"\nignore_errors = true\n`,
+      `tool.coverage.run.omit = ["*"]\n${PY}`,
+      `${PY}[tool]\nruff.lint.ignore = ["ALL"]\n`,
+      // A header-like line inside a multi-line array does not end the guarded table.
+      PY.replace('select = ["E"]', 'select = ["E"]\nx = [\n["a"]\n]\nignore = ["ALL"]'),
+    ];
+    for (const text of changed) expect(guardedSections("pyproject.toml", text)).not.toBe(sections);
+    expect(guardedSections("pyproject.toml", undefined)).toBe("");
+  });
+
+  it("guards package.json scripts and test-tool keys, never dependencies", () => {
+    const pkg = { name: "a", dependencies: { x: "1" }, scripts: { test: "vitest run" } };
+    const sections = guardedSections("package.json", JSON.stringify(pkg));
+    const deps = { ...pkg, dependencies: { x: "2", y: "1" } };
+    expect(guardedSections("package.json", JSON.stringify(deps, null, 2))).toBe(sections);
+    for (const changed of [
+      { ...pkg, scripts: { test: "true" } },
+      { ...pkg, jest: { testPathIgnorePatterns: ["."] } },
+      { ...pkg, eslintConfig: { rules: {} } },
+    ]) {
+      expect(guardedSections("package.json", JSON.stringify(changed))).not.toBe(sections);
+    }
+    expect(guardedSections("package.json", "{ not json")).not.toBe(sections);
+  });
+
+  it("merges the base tool sections into the head file", () => {
+    const head = PY.replace('["requests"]', '["httpx"]').replace(
+      'select = ["E"]',
+      'select = ["E"]\nignore = ["ALL"]',
+    );
+    const merged = withBaseSections("pyproject.toml", head, PY);
+    expect(merged).toContain('dependencies = ["httpx"]');
+    expect(merged).toContain("[tool.poetry]");
+    expect(merged).not.toContain("ALL");
+    expect(guardedSections("pyproject.toml", merged)).toBe(guardedSections("pyproject.toml", PY));
+    expect(withBaseSections("pyproject.toml", head, undefined)).not.toContain("tool.ruff");
+
+    const basePkg = JSON.stringify({ name: "a", scripts: { lint: "eslint ." } });
+    const headPkg = JSON.stringify({
+      name: "a",
+      version: "2",
+      scripts: { lint: "true" },
+      jest: {},
+    });
+    expect(JSON.parse(withBaseSections("package.json", headPkg, basePkg))).toEqual({
+      name: "a",
+      version: "2",
+      scripts: { lint: "eslint ." },
+    });
+  });
+
+  it("flags a changed tool section in L5 unless the scope names the file exactly", async () => {
+    const repo = initRepo({
+      "pyproject.toml": PY,
+      "web/package.json": JSON.stringify({ name: "w", scripts: { test: "vitest run" } }),
+      "src/app.ts": "export const f = () => 1;\n",
+    });
+    const base = git(repo, "rev-parse", "HEAD");
+    const scope = { ...request(base, base), protected: [], filesScope: ["**"] };
+    const ops = createGitOps({ repoRoot: repo });
+
+    writeFile(repo, "pyproject.toml", PY.replace('["requests"]', '["httpx"]'));
+    writeFile(
+      repo,
+      "web/package.json",
+      JSON.stringify({ name: "w", version: "2", scripts: { test: "vitest run" } }),
+    );
+    const deps = commitAll(repo, "deps");
+    expect(await checkWriteScope(ops, { ...scope, head: deps })).toEqual({
+      ok: true,
+      violations: [],
+    });
+
+    writeFile(
+      repo,
+      "pyproject.toml",
+      PY.replace('select = ["E"]', 'select = ["E"]\nignore = ["ALL"]'),
+    );
+    writeFile(repo, "web/package.json", JSON.stringify({ name: "w", scripts: { test: "true" } }));
+    writeFile(repo, "web/vite.config.ts", "export default { test: { exclude: ['**'] } };\n");
+    writeFile(repo, "setup.cfg", "[flake8]\nextend-ignore = E\n");
+    const head = commitAll(repo, "weaken");
+    expect((await checkWriteScope(ops, { ...scope, head })).violations).toEqual([
+      { kind: "protected_modified", path: "pyproject.toml" },
+      { kind: "protected_modified", path: "setup.cfg" },
+      { kind: "protected_modified", path: "web/package.json" },
+      { kind: "protected_modified", path: "web/vite.config.ts" },
+    ]);
+    const planned = { ...scope, head, filesScope: ["**", "pyproject.toml"] };
+    expect((await checkWriteScope(ops, planned)).violations.map((v) => v.path)).not.toContain(
+      "pyproject.toml",
+    );
+
+    rmSync(join(repo, "pyproject.toml"));
+    const gone = commitAll(repo, "delete");
+    expect((await checkWriteScope(ops, { ...scope, base: head, head: gone })).violations).toEqual([
+      { kind: "protected_deleted", path: "pyproject.toml" },
     ]);
   });
 });

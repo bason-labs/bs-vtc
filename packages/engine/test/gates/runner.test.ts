@@ -705,6 +705,68 @@ describe("scanner configs a diff adds (§7.2 L4/L5)", () => {
   });
 });
 
+describe("tool sections of pyproject.toml and package.json (§7.2 L1/L5)", () => {
+  /** A fake ruff: flags "TODO" in changed files unless pyproject.toml ignores ALL. */
+  const FAKE_RUFF = `
+import { readFileSync, writeFileSync, mkdirSync } from "node:fs";
+const [out, ...files] = process.argv.slice(2);
+const off = readFileSync("pyproject.toml", "utf8").includes('ignore = ["ALL"]');
+const results = files.filter((f) => f.endsWith(".py")).map((f) => ({
+  filePath: f,
+  messages: off ? [] : readFileSync(f, "utf8").split("\\n").flatMap((l, i) =>
+    l.includes("TODO") ? [{ ruleId: "FIX002", severity: 2, message: "TODO left", line: i + 1 }] : []),
+}));
+mkdirSync(".vtc/state/gates", { recursive: true });
+writeFileSync(out, JSON.stringify(results));
+process.exit(results.some((r) => r.messages.length > 0) ? 1 : 0);
+`;
+  const ruffGate = {
+    id: "ruff",
+    layer: "L1" as const,
+    command: [NODE, "tools/fake-ruff.mjs", ".vtc/state/gates/ruff.json", "{changed}"],
+    report: { format: "json" as const, path: ".vtc/state/gates/ruff.json" },
+  };
+  const PYPROJECT =
+    '[project]\nname = "app"\ndependencies = []\n\n[tool.ruff.lint]\nselect = ["FIX"]\n';
+
+  it("lints with the base [tool.ruff] when the diff adds an ignore, and flags it in L5", async () => {
+    const h = harness(
+      { "tools/fake-ruff.mjs": FAKE_RUFF, "pyproject.toml": PYPROJECT, "src/a.py": "x = 1\n" },
+      config([ruffGate]),
+    );
+    const weakened = PYPROJECT.replace("dependencies = []", 'dependencies = ["requests"]').replace(
+      'select = ["FIX"]',
+      'select = ["FIX"]\nignore = ["ALL"]',
+    );
+    writeFile(h.repo, "pyproject.toml", weakened);
+    writeFile(h.repo, "src/a.py", "x = 1  # TODO later\n");
+    const head = commitAll(h.repo);
+    const report = await h.run({ head, files_scope: ["src/**", "*.toml"] });
+    expect(gate(report, "ruff")).toMatchObject({ status: "fail", new_violations: 1 });
+    expect(gate(report, "write-scope").findings).toEqual([
+      expect.objectContaining({
+        rule_id: "protected_modified",
+        location: { path: "pyproject.toml" },
+      }),
+    ]);
+    // The checkout is the head commit again afterwards.
+    expect(read(h.repo, "pyproject.toml")).toBe(weakened);
+  });
+
+  it("accepts a dependency change that leaves the tool sections alone", async () => {
+    const h = harness(
+      { "tools/fake-ruff.mjs": FAKE_RUFF, "pyproject.toml": PYPROJECT, "src/a.py": "x = 1\n" },
+      config([ruffGate]),
+    );
+    writeFile(h.repo, "pyproject.toml", PYPROJECT.replace("[]", '["requests"]'));
+    writeFile(h.repo, "src/a.py", "x = 2\n");
+    const head = commitAll(h.repo);
+    const report = await h.run({ head, files_scope: ["src/**", "*.toml"] });
+    expect(gate(report, "ruff")).toMatchObject({ status: "pass" });
+    expect(gate(report, "write-scope")).toMatchObject({ status: "pass" });
+  });
+});
+
 describe("the osv-scanner offline database (§7.2, §15)", () => {
   it("does not start the dependency gate without the database", async () => {
     const h = harness({}, config([osvGate]));

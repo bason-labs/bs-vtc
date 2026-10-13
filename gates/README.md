@@ -46,7 +46,11 @@ directory). Report paths are relative to the gate's working directory and should
 The gates of a run are the base commit's `.vtc/gates.yml`; only `vtc calibrate` reads the working
 tree. Calibration always protects every lint, test and scanner config glob
 (`packages/engine/src/gates/protected-globs.ts`): L5 reports a changed or added file matching one
-unless the task's `files_scope` names that exact path.
+unless the task's `files_scope` names that exact path. `pyproject.toml` and `package.json` also
+hold dependencies, so only their tool sections are guarded (`mixed-configs.ts`: `[tool.ruff]`,
+`[tool.pytest]`, `[tool.mypy]`, `[tool.coverage]`, … and `scripts`, `jest`, `eslintConfig`,
+`mocha`, …): L5 reports a diff that changes one, and L1 runs with the head file whose tool
+sections are put back to the base version.
 
 ## Not built yet (tracked follow-up increments)
 
