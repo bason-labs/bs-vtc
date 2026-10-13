@@ -51,21 +51,32 @@ Both also get:
 - **Role agents cannot reach the Lead's tools.** Claude Code agents get an explicit `tools:`
   allowlist without the engine's run-driving tools. Each Codex agent file carries its own
   `[mcp_servers.vtc]` entry: disabled, or limited to the role's engine tools with
-  `enabled_tools`. Unverified: spine §7 does not yet list a check that spawned Codex agents honour
-  that per-agent entry, and the engine cannot tell a role agent's call from the Lead's (the bridge
-  tags only the host, AD-12 rule 3). Both the spike item and an engine-side guard on `approve`,
-  `answer`, `submit` and `change_request` are proposed to the integrator; until they land, this
-  entry is the only barrier on Codex.
-- **No role touches VTC's own guard rails** (D-w, spine §5 reading 43, `ROLE_DENIED_VTC`). Every
-  Claude Code agent carries `disallowedTools` (`CLAUDE_DENIED_TOOLS`): `Bash(vtc calibrate:*)`,
-  and `Edit`/`Write` on `~/.vtc/allowlists/**`, `~/.vtc/osv-db/**` and `~/.vtc/hidden/**`, on
-  every profile. The rules name the default VTC home; a `$VTC_HOME` elsewhere is unknown at
-  compile time, and the adapter's sandbox profile, which resolves it, is the barrier for shell
-  writes. A Codex agent file cannot deny one command (execpolicy rules are session-level), so on
-  Codex the barrier is the sandbox: every agent is `read-only` or `workspace-write` with no
-  writable roots of its own, so the VTC home is outside its writes, `vtc calibrate`'s included.
-  Whether Claude Code honours rule specifiers in an agent's `disallowedTools` is proposed for the
-  Claude headless role-run spike row (spine §7).
+  `enabled_tools`. The human-only tools (`HUMAN_ONLY_TOOLS`: `approve`, `answer`,
+  `change_request`; D-an, spine §5 reading 71) are refused at three points: `role.yaml` may not
+  name one, the renderers throw if one reaches them, and every Claude Code agent also denies each
+  by its plugin name in `disallowedTools`. The engine accepts them only from a human channel.
+  Whether a spawned Codex agent honours its per-agent entry is the spine §7 spike row "Codex
+  per-agent MCP isolation"; until it passes, the engine's Lead-only and human-channel checks are
+  the other barrier on Codex.
+- **No role touches VTC's own guard rails** (D-w, D-an, D-ap; spine §5 readings 43, 71 and 73;
+  `ROLE_DENIED_VTC`). Every Claude Code agent carries `disallowedTools` (`CLAUDE_DENIED_TOOLS`),
+  on every profile, all built from the shared constant: `Bash(vtc calibrate:*)`; `Edit`/`Write`
+  on each `homeWriteDeny` glob under `~/.vtc/` (allowlists, OSV db, hidden tests, scanners, the
+  Claude marketplace copy, extracted plugins, engine discovery, sockets, `config.yaml`, the
+  token); `Read` on each `homeReadDeny` glob (token, sockets, hidden tests) and on `~/.codex/**`;
+  and shell-level denies `Bash(*<home>/<path>*)` for each of those paths and each spelling of the
+  VTC home (`~/.vtc`, `$HOME/.vtc`, `${HOME}/.vtc`, `$VTC_HOME`, `${VTC_HOME}`). Claude Code
+  applies `Read`/`Edit` denies to the file commands it recognises (`cat`, `sed`, `tee`,
+  redirections); the `Bash` rules refuse any other command that names a guarded path. Both are
+  best effort: a command that reaches a path without naming it (`cd ~/.vtc && cat token`, a
+  script, an absolute home path) is not matched. In plugin-only mode the barrier for a
+  code-running role is the Lead session's own sandbox, which `vtc install` writes and the engine
+  requires before such a dispatch (reading 71); the rest is the spine §7 residual "Plugin-only
+  in-session roles". A Codex agent file cannot deny one command (execpolicy rules are
+  session-level), so on Codex the barrier is the sandbox: every agent is `read-only` or
+  `workspace-write` with no writable roots of its own, so the VTC home is outside its writes,
+  `vtc calibrate`'s included. Whether Claude Code honours rule specifiers in an agent's
+  `disallowedTools` is proposed for the Claude headless role-run spike row (spine §7).
 - **Codex sandbox gap.** A Codex `sandbox_mode` limits what an agent's commands may write, not
   whether it may run a shell, and write-scoped agents need `workspace-write`. So on Codex "run no
   shell command" is an instruction, not a host restriction, and the write paths are not a host
