@@ -3,7 +3,13 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterAll, describe, expect, expectTypeOf, it } from "vitest";
 import { runDaemon } from "@vtc/engine";
-import type { EngineClient, EngineDeps, EngineToolInput, EngineToolOutput } from "@vtc/shared";
+import {
+  CONTRACTS_VERSION,
+  type EngineClient,
+  type EngineDeps,
+  type EngineToolInput,
+  type EngineToolOutput,
+} from "@vtc/shared";
 import {
   COMMANDS,
   composeEngineDeps,
@@ -40,14 +46,16 @@ describe("vtc cli smoke", () => {
   it("prints a version that proves the wiring", async () => {
     const { code, out } = await run("--version");
     expect(code).toBe(0);
-    expect(out[0]).toMatch(
-      /^vtc 0\.0\.0 \(vtc-engine, contracts 4\.1\.0, hosts claude-code\/codex/,
+    expect(out[0]).toContain(
+      `vtc 0.0.0 (vtc-engine, contracts ${CONTRACTS_VERSION}, hosts claude-code/codex`,
     );
+    expect(out[0]).toMatch(/dev on node \d+\.\d+\.\d+\)$/);
+    expect((await run("version")).out).toEqual(out);
   });
-  it("runs a command through its spec; reports unknown commands", async () => {
-    const init = await run("init", "--force");
-    expect(init.code).toBe(2);
-    expect(init.err[0]).toContain("not implemented");
+  it("runs a command through its spec; reports unknown commands and bad flags", async () => {
+    const bad = await run("init", "--frobnicate");
+    expect(bad.code).toBe(64);
+    expect(bad.err[0]).toMatch(/^vtc init: .*frobnicate/);
     const unknown = await run("deploy");
     expect(unknown.code).toBe(64);
     expect(unknown.err[0]).toContain("unknown command");
@@ -59,6 +67,8 @@ describe("command registry", () => {
     const names = COMMANDS.map((c) => c.name);
     expect(new Set(names).size).toBe(names.length);
     expect(names).toContain("statusline-tee");
+    expect(names).toContain("hook");
+    expect(names).toContain("version");
     for (const c of COMMANDS) expect(typeof c.run).toBe("function");
   });
 });

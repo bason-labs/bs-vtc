@@ -18,13 +18,15 @@
     "build": "tsc -p tsconfig.build.json",
     "typecheck": "tsc -p tsconfig.json",
     "lint": "eslint .",
-    "test": "vitest run"
+    "test": "vitest run",
+    "build:binary": "bun scripts/build-binary.ts"
   },
   "dependencies": {
     "@vtc/shared": "workspace:*",
     "@vtc/engine": "workspace:*",
     "@vtc/adapters": "workspace:*",
-    "@vtc/compiler": "workspace:*"
+    "@vtc/compiler": "workspace:*",
+    "zod": "4.6.7"
   },
   "bin": {
     "vtc": "./dist/bin.js"
