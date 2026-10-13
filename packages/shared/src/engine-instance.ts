@@ -19,9 +19,12 @@ export const ENGINE_INSTANCE = {
   socketDir: "run",
   /**
    * The per-install token (AD-5 rule 2) under the VTC home: 256 random bits, base64url, mode 0600.
-   * Only the cli creates and reads it (`vtc install`, `vtc engine --daemon`, the statusline shim,
-   * `vtc dashboard`): exclusive create of a complete file, and refusal of a token file that group
-   * or others can read. The daemon receives it injected (`EngineDeps.installToken`).
+   * Only the cli creates it (`vtc install`, `vtc engine --daemon`): exclusive create of a complete
+   * file. The cli (the daemon launch, the statusline shim, `vtc dashboard`) and VTC's own dev
+   * tooling read it, always refusing a token file that group or others can read: the dashboard's
+   * dev-only `/api` proxy (`pnpm dev:engine`, AD-5 rule 8) reads it at runtime to inject the
+   * bearer. The shipped dashboard bundle never reads it. The daemon receives it injected
+   * (`EngineDeps.installToken`) and never reads the file.
    */
   tokenFile: "token",
   /** A daemon with no runs to drive, no bridges and nothing scheduled exits after this long. */

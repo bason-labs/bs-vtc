@@ -213,6 +213,17 @@ export const EvidenceBundleSchema = z.discriminatedUnion("kind", [
     final_review: z.strictObject({
       verdict: z.enum(["pending", "pass", "fail", "parked"]),
       rounds: z.int().min(0).max(3),
+      /**
+       * The §6.7a steps (1 full gates … 7 release readiness) whose results produced the verdict,
+       * ascending and unique. Empty = not recorded (bundles written before 4.1.0).
+       */
+      steps_run: z
+        .array(z.int().min(1).max(7))
+        .max(7)
+        .default([])
+        .refine((steps) => steps.every((step, i) => i === 0 || step > (steps[i - 1] ?? 0)), {
+          message: "steps_run is ascending and unique",
+        }),
     }),
     spend: SpendSchema,
     written_at: IsoDateTimeSchema,

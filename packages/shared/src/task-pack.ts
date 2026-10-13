@@ -37,6 +37,39 @@ export const PACK_INPUT_TYPES = {
   interfaceContract: "interface_contract",
 } as const;
 
+/**
+ * Architect depth (§8.3), set by the engine from the spec's attributes: `S` decisions only, `M`
+ * two candidates and a scorecard (default), `L` three candidates, ATAM-lite, threat model and
+ * cost model. The track bounds it (§6.2).
+ */
+export const ArchitectDepthSchema = z.enum(["S", "M", "L"]);
+export type ArchitectDepth = z.infer<typeof ArchitectDepthSchema>;
+
+/** Research depth of DISCOVER (§6.2): `light` for the feature track, `full` for a new project. */
+export const ResearchDepthSchema = z.enum(["light", "full"]);
+export type ResearchDepth = z.infer<typeof ResearchDepthSchema>;
+
+/** Colour strategies of the constraints lottery (§9.1 step 2), in OKLCH. */
+export const ColourStrategySchema = z.enum(["restrained", "committed", "full", "drenched"]);
+export type ColourStrategy = z.infer<typeof ColourStrategySchema>;
+
+const lotteryPick = z.string().min(1).max(200);
+
+/**
+ * One direction's constraints, dealt by the engine's local RNG seeded by project and run
+ * (§9.1 step 2: variation comes from code, not the model). The Designer builds the direction
+ * inside them. Picks other than the colour strategy name entries of curated pools.
+ */
+export const DesignConstraintsSchema = z.strictObject({
+  colour_strategy: ColourStrategySchema,
+  type_pairing: lotteryPick,
+  density_grid: lotteryPick,
+  radius_elevation: lotteryPick,
+  motion: lotteryPick,
+  signature_interaction: lotteryPick,
+});
+export type DesignConstraints = z.infer<typeof DesignConstraintsSchema>;
+
 /** An architecture decision id, `AD-n`. */
 export const DecisionIdSchema = z.string().regex(/^AD-[1-9]\d*$/, "expected an AD id like AD-3");
 
@@ -50,6 +83,12 @@ export const TaskPackSchema = z.strictObject({
   feature: FeatureIdSchema.optional(),
   /** The one subject this call judges, e.g. the AC of a Spec-Verifier call (§7.4). */
   subject: VerdictSubjectSchema.optional(),
+  /** Architect dispatches: the depth the engine set (§8.3). */
+  architect_depth: ArchitectDepthSchema.optional(),
+  /** DISCOVER dispatches (Research Analyst, Repo Cartographer): the track's depth (§6.2). */
+  research_depth: ResearchDepthSchema.optional(),
+  /** Designer direction dispatches: the dealt constraints, one set per direction (§9.1). */
+  design_constraints: DesignConstraintsSchema.optional(),
   /** The task's immutable intent contract (§6.3 plan file). */
   intent: IntentContractSchema.optional(),
   /** The REQs and ACs in scope, with their frozen text. */
@@ -116,6 +155,13 @@ export const renderTaskPack = (input: TaskPackInput): string => {
     ...(pack.task === undefined ? [] : [`task: ${pack.task}`]),
     ...(pack.feature === undefined ? [] : [`feature: ${pack.feature}`]),
     ...(pack.subject === undefined ? [] : [`subject: ${pack.subject}`]),
+    ...(pack.architect_depth === undefined ? [] : [`architect depth: ${pack.architect_depth}`]),
+    ...(pack.research_depth === undefined ? [] : [`research depth: ${pack.research_depth}`]),
+    ...(pack.design_constraints === undefined
+      ? []
+      : [
+          `design constraints: colour strategy ${pack.design_constraints.colour_strategy}; type pairing ${pack.design_constraints.type_pairing}; density and grid ${pack.design_constraints.density_grid}; radius and elevation ${pack.design_constraints.radius_elevation}; motion ${pack.design_constraints.motion}; signature interaction ${pack.design_constraints.signature_interaction}`,
+        ]),
   ];
   const intent =
     pack.intent === undefined

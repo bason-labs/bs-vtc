@@ -69,6 +69,14 @@ describe("structured-output target (hosts' --output-schema / --json-schema)", ()
       ["blocked", "built", "done", "out_of_scope_fault", "spec_conflict", "unknown"].sort(),
     );
   });
+  it("is host-neutral: no $schema or $id (Claude's --json-schema rejects them, spike #1)", () => {
+    expect(schema).not.toHaveProperty("$schema");
+    expect(schema).not.toHaveProperty("$id");
+    expect(schema.title).toBe("RoleResult");
+    expect(jsonSchemaFor("RoleResult").$schema).toBe(
+      "https://json-schema.org/draft/2020-12/schema",
+    );
+  });
   it("requires every property of every object and carries no defaults", () => {
     walk(schema, (node) => {
       expect(node).not.toHaveProperty("default");
