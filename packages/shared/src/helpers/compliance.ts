@@ -5,6 +5,7 @@
  * file; compiler and repo tests run `findForbiddenInText` on role, skill and plugin sources and
  * on every emitted plugin file (AD-9).
  */
+import type { SessionSandboxState } from "../engine-instance.js";
 import type { HostId } from "../primitives.js";
 
 export const AD9_FORBIDDEN_MARKERS = [
@@ -161,13 +162,96 @@ const withoutHostCredentialDenies = (arg: string): string => {
  * denies running these `vtc` subcommands and writing these globs under the VTC home (`~/.vtc/`,
  * or `$VTC_HOME`). `vtc calibrate` also confirms only in an interactive terminal and has no
  * `--yes` flag, but a pty is not proof of a human, so the host sandbox is the barrier.
+ *
+ * `homeWriteDeny` (D-ap, spine §5 reading 73) also covers everything under the VTC home that is
+ * later run or trusted with the user's full privileges: the pinned scanner binaries
+ * (`scanners/**`), the Claude plugin the Lead session loads (`claude-marketplace/**`) and the
+ * extracted plugin headless runs load (`plugins/**`), the user config with its
+ * `env_passthrough` and `gates.allow_unsandboxed` (`config.yaml`), the discovery files and
+ * sockets (`engines/**`, `run/**`) and the install token (`token`). An entry without `/**` is a
+ * single file. `homeReadDeny` (D-an, spine §5 reading 71) is what no role, and no shell of a
+ * Lead session that runs roles in-session, may read: the install token, the daemons' sockets
+ * (a client there could declare itself the cli) and the hidden acceptance tests (§7.3).
  */
 export const ROLE_DENIED_VTC = {
   /** `vtc <subcommand>` no role may run. */
   subcommands: ["calibrate"],
-  /** Globs relative to the VTC home that no role may write. */
-  homeWriteDeny: ["allowlists/**", "osv-db/**", "hidden/**"],
+  /** Globs relative to the VTC home that no role may write (a bare name is one file). */
+  homeWriteDeny: [
+    "allowlists/**",
+    "osv-db/**",
+    "hidden/**",
+    "scanners/**",
+    "claude-marketplace/**",
+    "plugins/**",
+    "engines/**",
+    "run/**",
+    "config.yaml",
+    "token",
+  ],
+  /** Globs relative to the VTC home that no role may read (a bare name is one file). */
+  homeReadDeny: ["token", "run/**", "hidden/**"],
 } as const;
+
+const vtcHomePath = (vtcHome: string, glob: string): string => {
+  if (!isAbsolutePath(vtcHome) || vtcHome.includes("\\")) {
+    throw new TypeError(`expected an absolute POSIX VTC home, got ${vtcHome}`);
+  }
+  const base = vtcHome.length > 1 ? vtcHome.replace(/\/+$/, "") : vtcHome;
+  return `${base}/${glob.replace(/\/\*\*$/, "")}`;
+};
+
+/**
+ * The Claude Code session sandbox a Lead session needs before the engine runs a code-running
+ * role in it (D-an, spine §5 reading 71). In plugin-only dispatch (AD-17) an Engineer-family
+ * role is a subagent of the human's Lead session, so its shell is confined only by that
+ * session's own sandbox. `vtc install --host claude-code` (an explicit user command) shows the
+ * user and then writes these keys into the project's gitignored `.claude/settings.local.json`;
+ * {@link claudeSessionSandboxState} reads them back. Absolute POSIX paths, pure string joins.
+ */
+export const claudeSessionSandboxSettings = (
+  vtcHome: string,
+): {
+  readonly sandbox: {
+    readonly enabled: true;
+    readonly allowUnsandboxedCommands: false;
+    readonly filesystem: { readonly denyRead: string[]; readonly denyWrite: string[] };
+  };
+} => ({
+  sandbox: {
+    enabled: true,
+    allowUnsandboxedCommands: false,
+    filesystem: {
+      denyRead: ROLE_DENIED_VTC.homeReadDeny.map((glob) => vtcHomePath(vtcHome, glob)),
+      denyWrite: ROLE_DENIED_VTC.homeWriteDeny.map((glob) => vtcHomePath(vtcHome, glob)),
+    },
+  },
+});
+
+/**
+ * Pure: whether parsed Claude settings (the project's `.claude/settings.local.json`) turn the
+ * session sandbox on with every entry of {@link claudeSessionSandboxSettings}: `sandbox.enabled`
+ * true, `allowUnsandboxedCommands` false, and every read and write deny present. `missing` lists
+ * what is not there (`sandbox.enabled`, `sandbox.allowUnsandboxedCommands`, or a path). Settings
+ * that cannot be read are `unknown`, which the engine treats like `off` (fail closed).
+ */
+export const claudeSessionSandboxState = (
+  settings: unknown,
+  vtcHome: string,
+): { readonly state: SessionSandboxState; readonly missing: readonly string[] } => {
+  if (!isRecord(settings)) return { state: "unknown", missing: ["sandbox"] };
+  const wanted = claudeSessionSandboxSettings(vtcHome).sandbox;
+  const sandbox = isRecord(settings.sandbox) ? settings.sandbox : {};
+  const filesystem = isRecord(sandbox.filesystem) ? sandbox.filesystem : {};
+  const listed = (list: unknown): readonly unknown[] => (Array.isArray(list) ? list : []);
+  const missing = [
+    ...(sandbox.enabled === true ? [] : ["sandbox.enabled"]),
+    ...(sandbox.allowUnsandboxedCommands === false ? [] : ["sandbox.allowUnsandboxedCommands"]),
+    ...wanted.filesystem.denyRead.filter((p) => !listed(filesystem.denyRead).includes(p)),
+    ...wanted.filesystem.denyWrite.filter((p) => !listed(filesystem.denyWrite).includes(p)),
+  ];
+  return { state: missing.length === 0 ? "on" : "off", missing };
+};
 
 /** One marker hit in a text file. */
 export interface ForbiddenMarkerHit {

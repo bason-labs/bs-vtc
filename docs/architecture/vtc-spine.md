@@ -201,7 +201,7 @@ flowchart TB
   WriteScopeReport, TestInventory, UsageSnapshot, UsageReport, StatuslineIngest,
   WorkflowNode/Edge/Graph, HostOutcome, SubagentInstruction, EngineDiscovery, EngineSocketHello,
   EngineSocketWelcome, every MCP tool input and output (AD-4) and every HTTP request and response
-  (AD-5). Interfaces: `HostAdapter`, `Storage`, `GateRunner`, `GitOps` (AD-13),
+  (AD-5). Interfaces: `HostAdapter`, `Storage`, `GateRunner`, `GateSandbox`, `GitOps` (AD-13),
   `PullRequestService`, `AssetBundle`,
   `AutoResumeScheduler`, and the composition seam (`EngineDeps`, `RunDaemon`, `ServeSnapshot`,
   `CreateGateRunner`, `CreateGitOps`, `EngineClient`; AD-19).
@@ -231,7 +231,7 @@ flowchart TB
      round 2, 4.0.0 = fix round 3; nothing consumed the earlier versions; 4.1.0 = the wave-1
      proposals, additive; 4.2.0 = the wave-2 proposals, additive except an optional
      `ResolvedModel.model` and the narrower write-scope globs, which §5 readings 51 and 63
-     justify as MINOR.)
+     justify as MINOR; 4.3.0 = the hardening round, §5 readings 69–78, additive.)
   5. Open vocabularies stay open on purpose: event `type` (pattern `<entity>.<verb>`; the core
      set has typed payloads, AD-7), role ids, artifact types, stack packs. Consumers ignore unknown
      values.
@@ -250,11 +250,15 @@ flowchart TB
      `dashboardAssetHeaders`, `extractedPluginDir`, `promptShaFor` (the prompt version, §13),
      `prototypeStatePath`, `vtcHookCommand`, `isKnownArtifactType`, `finalReviewStepsCovered`,
      `statuslineTeeCommand` / `shellQuoteWord`, `hostCredentialDenyReadPaths` /
-     `isHostCredentialDenyRead`, `isSecurityClass`. Shared paths and constants:
+     `isHostCredentialDenyRead`, `isSecurityClass`, `claudeSessionSandboxSettings` /
+     `claudeSessionSandboxState`, `inSessionDispatchAllowed`, `isHumanOnlyTool` /
+     `humanChannelRequired`, `gatesAllowUnsandboxed`, `gatesConfigNotCommitted`. Shared paths
+     and constants:
      `ROLE_CONTRACTS_ASSET`, `PLUGIN_MANIFEST_ASSET`, `DESIGN_SCREENS_PATH`, `VTC_HOOK`,
      `KNOWN_ARTIFACT_TYPES` (the known names of the open artifact vocabulary, rule 5),
      `STATUSLINE_TEE`, `HOST_CREDENTIAL_DENY_READ`, `ROLE_DENIED_VTC`, `SECURITY_CLASS_CATEGORIES`,
-     `DEFAULT_INSTALL_SCOPE`, `USER_CONFIG_FILE`, `SESSION_DEFAULT_MODEL`.
+     `DEFAULT_INSTALL_SCOPE`, `USER_CONFIG_FILE`, `SESSION_DEFAULT_MODEL`, `HUMAN_ONLY_TOOLS`,
+     `GATE_SANDBOX`, `GATES_CONFIG_FILE`, `SESSION_SANDBOX_OFF_REASON`.
   7. Spine extensions to §16 are named here: the finding route `out_of_scope` (an Engineer
      `out_of_scope_fault` whose guards passed, §6.3 step 3); `RequirementRef` (`REQ-3.AC-2`)
      in `Finding.req_ids`; the Visual QA verdict `unchecked` (§7.5); `FindingDraft.kind` (the
@@ -392,7 +396,10 @@ flowchart TB
      contract), and neither can execute anything: the statusline ingest (`StatuslineIngest`,
      usage data only) and design-review pins (`DesignReviewCommentInput`, spec §17), which the
      engine appends to `.vtc/design/reviews/<screen>.jsonl` and nowhere else. Approval still
-     happens in the Lead chat. The two session routes write nothing to disk.
+     happens in the Lead chat. The two session routes write nothing to disk. No route takes a
+     human-only tool (`HUMAN_ONLY_TOOLS`, §5 reading 71); if one is ever added it takes the
+     browser session token only, never the install token, which the shim and the cli send
+     without a TTY check.
   6. SSE: each message is one `Event` (AD-7) as JSON; `id: <run>:<seq>` (`sseEventId`);
      reconnects resume from `Last-Event-ID` (`parseSseEventId`).
   7. **Snapshot mode.** When no engine runs for the repo, `vtc dashboard` serves the **same
@@ -645,7 +652,12 @@ flowchart TB
   `--dangerously-skip-permissions`, `bypassPermissions`,
   `--dangerously-bypass-approvals-and-sandbox`, `--yolo` or `danger-full-access`; never name the
   credential variables `ANTHROPIC_API_KEY`, `CLAUDE_CODE_OAUTH_TOKEN` or `OPENAI_API_KEY`. Use
-  explicit allow rules plus the sandbox. Git and `gh` use the user's existing auth. The markers
+  explicit allow rules plus the sandbox. Git and `gh` use the user's existing auth. Gate
+  commands run role-authored code, so they get the same treatment as roles: an OS sandbox that
+  denies reading host config and credential locations (built with `hostCredentialDenyReadPaths`),
+  an empty `HOME` and no credential variable (AD-13 rule 11, §5 reading 69). The Lead session's
+  sandbox settings that `vtc install` writes for in-session roles (§5 reading 71) name only VTC
+  paths and carry no marker. The markers
   live in one list, `AD9_FORBIDDEN_MARKERS` (`@vtc/shared`), mirrored by `AD9_MARKERS` in
   `eslint.config.js`. Prompts and skills do not name a marker even as a prohibition ("never use
   …"); they phrase it generically.
@@ -743,8 +755,10 @@ dist/index.js}`. Typecheck (`customConditions`), tests (Vitest aliases) and
      sessions share one daemon. A second `vtc engine --daemon` for the same repo fails on the lock
      and exits. **Socket protocol** (`ENGINE_SOCKET`): newline-delimited JSON, one JSON-RPC 2.0
      message per line, exactly MCP's stdio framing. Each connection opens with one
-     `EngineSocketHello` line from the client (`client: bridge` with its `host`, or `client: cli`
-     with none, plus its `contracts_version`) and one `EngineSocketWelcome` line from the daemon
+     `EngineSocketHello` line from the client (`client: bridge` with its `host` and optionally
+     its session's `session_sandbox`, or `client: cli` with none and, only for a human-only tool
+     after a TTY confirmation, the `install_token` (§5 reading 71); plus its `contracts_version`)
+     and one `EngineSocketWelcome` line from the daemon
      (`ok: false` with an `error`, then close, for a malformed hello or a different contracts
      MAJOR, `contractsCompatible`); after that the connection is plain MCP. The bridge is a byte
      relay: hello, welcome, then bytes copied both ways unparsed.
@@ -822,9 +836,22 @@ dist/index.js}`. Typecheck (`customConditions`), tests (Vitest aliases) and
       its argv against `~/.vtc/` + `gateAllowlistFile(repo)` (`GateAllowlist`, argv prefixes a
       human confirmed in `vtc calibrate`) or it names a pinned scanner. Repo content (`gates.yml`,
       a PR) cannot widen it, and no role can: every role profile denies running `vtc calibrate`
-      and writing the allowlists, the osv database and the hidden tests (`ROLE_DENIED_VTC`, §5
-      reading 43). A disallowed gate is not run: it reports `error` / `infra`, which
+      and writing the allowlists, the osv database, the hidden tests and everything else under
+      the VTC home that is later run or trusted (`ROLE_DENIED_VTC`, §5 readings 43 and 73).
+      Scanner binaries are re-verified against the pinned extracted-binary SHA-256
+      (`ScannerPin.binary_sha256`), never against a manifest stored beside them. A disallowed
+      gate is not run: it reports `error` / `infra`, which
       parks with `gate_infra` until the human confirms it.
+  11. **Gate sandbox** (§7.2, §5 reading 69). Every command the Gate Runner runs goes through a
+      `GateSandbox` (`sandbox-exec` on macOS, `bwrap` on Linux; tests inject a fake through
+      `GateRunnerDeps.sandbox`): no network in the verify phase, registries only (or the full
+      network where the host cannot filter) in the install phase, writes only to the checkout
+      and a private temp dir, reads denied on the VTC home and host config and credential
+      locations, an empty per-run `HOME`, no `VTC_HOME`. Without a sandbox it runs nothing and
+      reports `error` / `infra` with `GATE_SANDBOX.noSandboxReason`, unless the user-level
+      `gates.allow_unsandboxed` (`GateRunnerDeps.allowUnsandboxed`) is set; then the report says
+      `sandbox: "none"` and engine core records an `unsandboxed_gate` incident. Dotenv files the
+      calibrated package managers load are gate-command files (§5 reading 70).
 - **Check:** dependency-cruiser `AD13-engine-modules-use-each-others-entry`,
   `AD13-core-uses-the-gate-runner-interface`, `AD13-gates-never-import-engine-core`,
   `AD13-git-imports-no-engine-module`, `AD13-core-does-not-import-transports`,
@@ -834,7 +861,10 @@ dist/index.js}`. Typecheck (`customConditions`), tests (Vitest aliases) and
   `gate-result.test.ts` (results, tool findings, monotonic violations, the test inventory, the
   deterministic `gateReportVerdict`, requests with `compare_to`, the traceability path,
   write-scope reports); `config.test.ts` (test layout, allowlist file and `gateCommandAllowed`);
-  `policy.test.ts` (guard requests and `gateExpectationMet`).
+  `policy.test.ts` (guard requests and `gateExpectationMet`); `contracts-4-3.test.ts` (the
+  sandbox kind on a report, the user-level opt-in, the widened `ROLE_DENIED_VTC`, scanner binary
+  pins). The gate-runner team adds runner tests with a fake sandbox wrapper (no sandbox and no
+  opt-in runs nothing; the opt-in reports `none`) and one opt-in live `sandbox-exec` test.
 
 ### AD-14 Role sources, compiled agents and prompts
 
@@ -985,7 +1015,12 @@ mode, capabilities)` is the only decision: in `plugin_only` the engine never sta
      to be alive; only the engine does" (D15) holds only with `headless_allowed`, where the timer
      wakes the daemon and the engine resumes headless (`claude -p --resume`, `codex exec
 resume`). This is §5 reading 12, pending the human's confirmation.
-  3. `headless_allowed` (a user opt-in now; the default may change once confirmation exists)
+  3. **In-session shell roles** (§5 reading 71). On Claude Code a `code_sandboxed` role runs
+     in-session only when the Lead session reports its sandbox `on`
+     (`EngineSocketHello.session_sandbox`, `inSessionDispatchAllowed`); otherwise the task parks
+     as `blocked` with `SESSION_SANDBOX_OFF_REASON`. The rest is the §7 accepted residual
+     "Plugin-only in-session roles".
+  4. `headless_allowed` (a user opt-in now; the default may change once confirmation exists)
      adds engine-launched runs for auto-resume, cross-family review and hosts without subagents.
 - **Check:** `config.test.ts` (default `plugin_only`); `policy.test.ts` (`planDispatch` never
   returns `headless` in plugin-only mode, for every purpose and capability). Sub-project 1 adds an
@@ -1348,7 +1383,8 @@ Contracts 4.2.0 carry them.
     engine core fills `final_review.steps_run` from it instead of a constant. (f) Engine core
     reads `.vtc/gates.yml` at the run's baseline commit (`GitOps.readFileAtCommit`), like the Gate
     Runner, never from the working tree; `vtc calibrate` tells the user to commit it, and a run
-    whose baseline has no committed `gates.yml` parks (`gate_infra`) with that reason.
+    whose baseline has no committed `gates.yml` parks (`gate_infra`) with that reason
+    (superseded by reading 78: such a run now refuses to start).
 47. **Claude headless role identity** (§4.2 step 2, AD-6). _Lead decision 2026-10-14, pending
     human review._ An engine-launched Claude run is the compiled plugin agent:
     `claude -p --agent vtc:<agent> --plugin-dir <extracted plugin:claude-code>`, with the prompt
@@ -1487,6 +1523,112 @@ doctor` provisions scanners through the typed `gates.createScannerStore` and ref
     cross-package import of a `test/` file fails dependency-cruiser
     (`AD1-test-support-through-the-sanctioned-entry`).
 
+**Readings 69–78 (2026-10-14, hardening round).** The integrated check of all six team branches
+on `build/foundation` left two high and four medium findings (gate commands run unconfined,
+package-manager dotenv files unguarded, the cli hello trusted as a human, plugin-only shell roles
+unconfined, host config persisting in worktrees, an incomplete VTC-home write deny with a
+self-anchored scanner check). Readings 69–78 are the Lead's decisions D-al to D-au that answer
+them. All are **Lead decision 2026-10-14, pending human review**; G2 did not cover them. Each is
+reversible through §6. Contracts 4.3.0 carry them.
+
+69. **The gate sandbox** (spec §7.2 two-phase sandbox, §15; AD-13 rule 11). _Lead decision
+    2026-10-14, pending human review._ Every gate command (calibration, L0–L5, guards and Final
+    Review runs) runs inside an OS sandbox (`GateSandbox`, `GateSandboxKindSchema`):
+    `sandbox-exec` with a VTC-generated profile on macOS, `bwrap` with its own network namespace
+    on Linux. The verify phase has no network. The install phase may reach package registries
+    only; where the host cannot filter by registry it gets the full network with the same
+    filesystem rules (`WrappedGateCommand.network` says which). Writes are limited to the
+    verification checkout and a private per-command temp directory. Reads are denied on the VTC
+    home and on host config and credential locations (built with `hostCredentialDenyReadPaths`;
+    nothing opens them). `HOME` is an empty per-run temp directory, `VTC_HOME` is unset and no
+    credential variable passes (the gate environment stays an allowlist). With no sandbox tool the
+    Gate Runner runs nothing: each gate reports `error` / `infra` with the visible reason "no OS
+    sandbox for gates" (`GATE_SANDBOX.noSandboxReason`) and the task parks with `gate_infra`. The
+    only way past it is the user-level opt-in `gates.allow_unsandboxed: true` in
+    `~/.vtc/config.yaml` (`UserConfigSchema`; `ProjectConfigSchema` has no such key), passed to the
+    Gate Runner as `GateRunnerDeps.allowUnsandboxed`; a report that ran unconfined says
+    `sandbox: "none"` and engine core records an `unsandboxed_gate` incident for every such gate
+    run. `vtc doctor` reports which sandbox is in use. Tests inject a fake wrapper
+    (`GateRunnerDeps.sandbox`); one opt-in live test may run the real `sandbox-exec` when present,
+    if it is fast and uses no network. This closes the finding that role-authored code ran in
+    gates with the user's full file access and network (reading 49's no-network promise covered
+    only the role process).
+70. **Dotenv files package managers load** (§7.2 L1/L5, §7.6 rule 5; same class as reading 45).
+    _Lead decision 2026-10-14, pending human review._ `.env.yarn`, `.env`, `.env.local`,
+    `.env.test*`, `.env.development*` and `.env.production*` (not `.env.example`) are gate-command
+    files: Yarn 4 injects `.env.yarn` into every `yarn run`, and Bun loads the others for
+    `bun run`, `bunx` and `bun test`, so a `NODE_OPTIONS=--require …` there preloads
+    diff-controlled code into a calibrated gate. L5 flags any change to them, in any letter
+    case, unless `files_scope` names the exact path; L1 pins them to the base version, or
+    removes them when the base has none. The gate sandbox's scrubbed environment (reading 69) narrows the gap but
+    does not replace this rule. Gate Runner only; no contract change.
+71. **Human channel and in-session shell roles** (§15, AD-4, AD-5, AD-12 rule 3, AD-17). _Lead
+    decision 2026-10-14, pending human review._ (a) The human-only tools (`HUMAN_ONLY_TOOLS`:
+    `approve`, `answer`, `change_request`) need a human channel: the run's Lead session (which
+    relays the human's words in the Lead chat, spec §6.2 and D5; never a role session), the
+    dashboard session token, or a cli connection whose `EngineSocketHello.install_token` matched,
+    sent only after an interactive TTY confirmation. A bare `{client: "cli"}` hello is never
+    proof of a human; such a call gets `forbidden` with `humanChannelRequired`. No HTTP route
+    takes these tools today (AD-5 rule 5); one added later would take the session token only.
+    The install token is read-denied to roles (`ROLE_DENIED_VTC.homeReadDeny`: `token`, `run/**`
+    and `hidden/**`, the last because §7.3 already hides the hidden tests from every role).
+    (b) For in-session (`plugin_only`) dispatch of code-running roles on Claude Code,
+    `vtc install --host claude-code` (an explicit user command) shows the user and then writes
+    the Claude sandbox settings (`claudeSessionSandboxSettings`) to the project's gitignored
+    `.claude/settings.local.json`: sandbox on, no unsandboxed escape, reads denied on
+    `homeReadDeny`, writes denied on `homeWriteDeny`. The bridge reports its session's state in
+    `EngineSocketHello.session_sandbox` (`claudeSessionSandboxState`), and the engine refuses an
+    in-session `code_sandboxed` dispatch unless it is `on` (`inSessionDispatchAllowed`; absent or
+    `unknown` refuses), parking the task as `blocked` with `SESSION_SANDBOX_OFF_REASON`, which
+    names the fix. No new park reason: `blocked` with that text is an escalation the human
+    answers to retry. A consequence: shell commands in that Lead session cannot reach
+    `~/.vtc/token` or the sockets, so `vtc status` and friends run from the human's own terminal.
+    (c) What remains is a §7 accepted residual.
+72. **Host config in worktrees** (§15, AD-8, AD-9). _Lead decision 2026-10-14, pending human
+    review._ Before every role dispatch or resume in a worktree, on both hosts, the engine
+    compares `.codex/**`, `.claude/**` and `.mcp.json` with the worktree's base commit. Any change
+    is restored and recorded as a `host_config_restored` incident with the paths as evidence, so a
+    role-authored host config never reaches the next host start. Role runs also pass Codex
+    overrides that disable project MCP servers and `notify` if the CLI supports them (checked with
+    `codex --help` / `codex exec --help` only). A §7 spike item asks whether `codex exec` in a
+    linked worktree loads that worktree's `.codex/config.toml`.
+73. **The VTC home a role may not write; scanner verification anchor** (AD-13 rule 10, §15).
+    _Lead decision 2026-10-14, pending human review._ `ROLE_DENIED_VTC.homeWriteDeny` also
+    covers `scanners/**`, `claude-marketplace/**`, `config.yaml`, `engines/**`, `run/**` and
+    `token`, everything under the VTC home that is later run or trusted with the user's full
+    privileges. The integrator adds `plugins/**`: it is the extracted copy of the same compiled
+    plugin that headless runs load with `--plugin-dir` (AD-2 rule 7), the same class as
+    `claude-marketplace/**`. Compiled agent profiles and adapter sandbox profiles pick the list
+    up from the constant. Scanner re-verification is anchored to the pinned SHA-256 of the
+    extracted binary (`ScannerPin.binary_sha256`, per platform), never to a manifest in the same
+    directory; a platform pinned without it re-verifies the download against `sha256` before
+    use. Widening a deny list narrows what roles may do, not what a contract accepts, so this
+    ships as MINOR.
+74. **`vtc engine --mcp` outside a git repository** (reading 58, AD-12 rule 3). _Lead decision
+    2026-10-14, pending human review._ Reading 58 covers it: the bridge answers `initialize`,
+    `ping` and `tools/list` itself and returns a tool error ("not in a git repository: run git
+    init, then vtc init") for every `tools/call`. It never creates `.vtc/` and never contacts a
+    daemon. cli only; no contract change.
+75. **Pinned scanners with no build for the platform** (reading 41, D-u). _Lead decision
+    2026-10-14, pending human review._ Only Checkov falls back to a user-installed binary; every
+    other pinned scanner with no build for the platform reports `infra`. That is the intended
+    scope of reading 41.
+76. **A misconfigured statusline shim** (reading 61). _Lead decision 2026-10-14, pending human
+    review._ `vtc statusline-tee` with malformed arguments keeps the strict refusal (exit
+    `STATUSLINE_TEE.usageExit`, 64; no user command runs) and prints the one statusline line
+    `STATUSLINE_TEE.misconfiguredLine` ("vtc: statusline misconfigured — run vtc doctor"), so the
+    problem is visible instead of an empty statusline.
+77. **Budgets for runs on an unknown model** (§11, readings 26 and 51). _Lead decision 2026-10-14,
+    pending human review._ A run on the session's default model keeps the host-reported
+    `cost_usd` and counts it toward budgets even when the model id is unknown to the price table
+    (`RunUsageSchema` doc). Being conservative about budget beats being precise about price. A run
+    is unpriced (`cost_usd: null`, counted as 0 and flagged) only when neither the host nor the
+    price table gives a cost; the summary still notes "model unknown".
+78. **A run needs a committed `gates.yml`** (reading 46f). _Lead decision 2026-10-14, pending human
+    review._ `start` refuses (`EngineError` code `config`) when `.vtc/gates.yml` is not committed
+    at the commit the run would start on, with `gatesConfigNotCommitted`: run `vtc calibrate` and
+    commit the file. This replaces reading 46f's "park at the first gate run".
+
 ## 6. Change process for this spine
 
 - Changing an AD, adding one, or changing a frozen contract (AD-3) needs an architecture review
@@ -1547,6 +1689,16 @@ reasoning_output_tokens}`: `thread_id` is the `SessionRef` for `codex exec resum
 | Claude headless role run (§5 readings 47, 62)                                                                                                          | `claude -p --agent vtc:<agent> --plugin-dir <extracted plugin> --setting-sources project --permission-mode dontAsk` with the prompt on stdin runs the compiled plugin agent and returns `structured_output`                                                                                                                            | pending                                                                                                                                                                                                          | yes                   |
 | Codex headless role identity                                                                                                                           | how a headless `codex exec` run (which has no `--agent` flag) loads the compiled role agent's `developer_instructions` and per-agent sandbox; until it passes, a headless Codex role run gets no compiled role instructions                                                                                                            | pending                                                                                                                                                                                                          | yes                   |
 | Claude settings-source isolation (§5 reading 48, D-ab)                                                                                                 | whether `claude --help` offers an empty or explicit settings source, so a role run loads only VTC-authored `--settings` and no committed `.claude/settings.json` allow rules, hooks or MCP enablement; otherwise confirm the explicit `--allowedTools`/`--disallowedTools` override and record what project settings still reach a run | pending                                                                                                                                                                                                          | yes                   |
+| Codex project config in a linked worktree (§5 reading 72, D-ao)                                                                                        | whether `codex exec` started in a linked role worktree loads that worktree's `.codex/config.toml` (and so a role-planted `[mcp_servers]` or `notify`), and which `-c` overrides (`codex exec --help`) disable project MCP servers and `notify` for a role run                                                                          | pending; until it passes the engine restores host config before every dispatch and resume (reading 72)                                                                                                           | yes                   |
+| Claude session sandbox for in-session roles (§5 reading 71, D-an)                                                                                      | with `claudeSessionSandboxSettings` in the project's `.claude/settings.local.json`, a plugin subagent's Bash in that session cannot read `<vtcHome>/token` or `<vtcHome>/run`, cannot write any `homeWriteDeny` path, and has no unsandboxed escape; and whether managed or user settings can turn the sandbox off over the local file | pending                                                                                                                                                                                                          | yes                   |
+
+**Accepted residuals.** Risks VTC knowingly ships with in v1, each bounded by a named control.
+Engine code that relies on one cites this table.
+
+| Residual                                                  | Why it remains                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                            | What bounds it                                                                                                                                                                                                                                                                                                                                                                                                                            | Revisit when                                                                                           |
+| --------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------ |
+| Plugin-only in-session roles (§5 reading 71, D-an; AD-17) | In the default `plugin_only` mode every role runs as a subagent of the human's Lead session, with no adapter sandbox profile. A code-running role's shell is confined only by that session's own Claude sandbox and the agent's tool rules; VTC cannot enforce a per-agent OS sandbox there. Write-scoped roles without a shell rely on their agent's `Edit`/`Write` deny rules and the engine's write-scope check on submit. A process with the user's uid can still declare itself a bridge, and a role shell that escapes the session sandbox can do what the user can | The engine dispatches a `code_sandboxed` role in-session on Claude Code only when the Lead session reports its sandbox `on` (`inSessionDispatchAllowed`); the session sandbox read-denies the token, sockets and hidden tests and write-denies `homeWriteDeny`; human-only tools need a human channel (`HUMAN_ONLY_TOOLS`); every write is still checked on submit (L5) and in gates; Codex subagents keep their per-agent `sandbox_mode` | the Claude session-sandbox spike row above passes or fails, or a host offers a per-subagent OS sandbox |
+| Unsandboxed gates by user opt-in (§5 reading 69, D-al)    | A machine with neither `sandbox-exec` nor `bwrap` can run gates only unconfined                                                                                                                                                                                                                                                                                                                                                                                                                                                                                           | Only the user-level `gates.allow_unsandboxed` enables it (never `project.yaml`); every such gate run records an `unsandboxed_gate` incident; the gate environment stays an allowlist with an empty `HOME`                                                                                                                                                                                                                                 | a portable sandbox exists for that platform                                                            |
 
 **Release-pipeline todo.** This local build has no CI. When the repo gets one, the merge-gate job
 installs Bun 1.4.3, so the single-binary tests (`packages/cli/test/binary.test.ts`) run instead of

@@ -41,11 +41,18 @@ export const ENGINE_INSTANCE = {
  * user command follows `--`, runs that single word through the shell exactly once with the same
  * stdin and prints its output unchanged (so the user's statusline looks the same). The adapter
  * only ever writes zero or one word after `--`.
+ *
+ * Malformed arguments (anything but nothing, or `--` and exactly one word) are refused strictly:
+ * no user command runs and the shim exits `usageExit` (64, EX_USAGE). It still prints
+ * `misconfiguredLine` as the one statusline line, so the problem is visible in the session
+ * instead of an empty statusline (D-as, spine §5 reading 76).
  */
 export const STATUSLINE_TEE = {
   command: "vtc",
   subcommand: "statusline-tee",
   separator: "--",
+  usageExit: 64,
+  misconfiguredLine: "vtc: statusline misconfigured — run vtc doctor",
 } as const;
 
 /** POSIX single-quoting: the whole string as one shell word, taken literally. */
@@ -135,9 +142,37 @@ export const ENGINE_SOCKET = {
 } as const;
 
 /**
+ * What a host session reports about its own OS sandbox (D-an, spine §5 reading 71). In
+ * plugin-only dispatch a code-running role (the Engineer family, profile `code_sandboxed`) runs
+ * as a subagent of the Lead session, so the engine dispatches one in-session only when the Lead
+ * session reports `on`. `off` and `unknown` both refuse (fail closed). On Claude Code the bridge
+ * derives it with `claudeSessionSandboxState` from the repo's `.claude/settings.local.json`.
+ */
+export const SessionSandboxStateSchema = z.enum(["on", "off", "unknown"]);
+export type SessionSandboxState = z.infer<typeof SessionSandboxStateSchema>;
+
+/**
+ * The per-install token's form (AD-5 rule 2): 256 random bits as base64url, at most 128 chars.
+ */
+export const InstallTokenSchema = z.string().regex(/^[A-Za-z0-9_-]{43,128}$/);
+
+/**
  * First line a client sends. `client: bridge` tags the session with the host the bridge runs in
  * (`vtc engine --mcp --host <host>`), so the engine knows which adapter and model map apply;
  * `client: cli` (the control commands) has no host.
+ *
+ * - `session_sandbox` (bridge only, D-an): the host session's sandbox state when the bridge
+ *   started. Absent means `unknown`.
+ * - `install_token` (cli only, D-an, spine §5 reading 71): a bare `{client: "cli"}` hello is never
+ *   proof of a human. The cli sends the install token only for a human-only tool
+ *   (`HUMAN_ONLY_TOOLS`) and only after the human confirmed in an interactive terminal (stdin and
+ *   stdout are TTYs). The daemon compares it in constant time with `EngineDeps.installToken`
+ *   and refuses the connection (`ok: false`) on a mismatch; a cli connection without it may call
+ *   every tool except the human-only ones. Roles cannot read the token (`ROLE_DENIED_VTC
+ *   .homeReadDeny`), and the socket line never leaves the machine.
+ * Both fields are new in contracts 4.3.0 and the hello is a strict object, so a 4.2 daemon would
+ * refuse them: a client sends them only when the discovery file's `contracts_version` is 4.3.0
+ * or later (an older daemon is restarted by the usual version check, or the field is left out).
  */
 export const EngineSocketHelloSchema = z
   .strictObject({
@@ -145,10 +180,20 @@ export const EngineSocketHelloSchema = z
     client: z.enum(["bridge", "cli"]),
     host: HostIdSchema.nullable(),
     contracts_version: z.string().regex(/^\d+\.\d+\.\d+$/),
+    session_sandbox: SessionSandboxStateSchema.optional(),
+    install_token: InstallTokenSchema.optional(),
   })
   .refine((hello) => (hello.client === "bridge") === (hello.host !== null), {
     message: "a bridge names its host; the cli names none",
     path: ["host"],
+  })
+  .refine((hello) => hello.client === "cli" || hello.install_token === undefined, {
+    message: "only the cli sends the install token",
+    path: ["install_token"],
+  })
+  .refine((hello) => hello.client === "bridge" || hello.session_sandbox === undefined, {
+    message: "only a bridge reports its session's sandbox",
+    path: ["session_sandbox"],
   });
 export type EngineSocketHello = z.infer<typeof EngineSocketHelloSchema>;
 

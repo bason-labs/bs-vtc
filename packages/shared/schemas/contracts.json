@@ -1,5 +1,5 @@
 {
-  "contracts_version": "4.2.0",
+  "contracts_version": "4.3.0",
   "schemas": {
     "Run": {
       "$id": "https://vtc.local/schemas/Run.json",
@@ -3967,6 +3967,14 @@
               "minLength": 1,
               "maxLength": 1024
             },
+            "sandbox": {
+              "type": "string",
+              "enum": [
+                "sandbox-exec",
+                "bwrap",
+                "none"
+              ]
+            },
             "verdict": {
               "type": "string",
               "enum": [
@@ -5048,7 +5056,9 @@
                 "log_corruption",
                 "stale_lock",
                 "config_changed",
-                "checkout_write"
+                "checkout_write",
+                "host_config_restored",
+                "unsandboxed_gate"
               ]
             },
             "detail": {
@@ -10615,6 +10625,16 @@
             "type": "string",
             "pattern": "^[A-Za-z_][A-Za-z0-9_]{0,127}$"
           }
+        },
+        "gates": {
+          "type": "object",
+          "properties": {
+            "allow_unsandboxed": {
+              "default": false,
+              "type": "boolean"
+            }
+          },
+          "additionalProperties": false
         }
       },
       "required": [
@@ -10838,6 +10858,23 @@
                 "format": "uri"
               },
               "sha256": {
+                "type": "object",
+                "propertyNames": {
+                  "type": "string",
+                  "enum": [
+                    "darwin-arm64",
+                    "darwin-x64",
+                    "linux-x64",
+                    "linux-arm64",
+                    "windows-x64"
+                  ]
+                },
+                "additionalProperties": {
+                  "type": "string",
+                  "pattern": "^[a-f0-9]{64}$"
+                }
+              },
+              "binary_sha256": {
                 "type": "object",
                 "propertyNames": {
                   "type": "string",
@@ -11928,6 +11965,14 @@
           "type": "string",
           "minLength": 1,
           "maxLength": 1024
+        },
+        "sandbox": {
+          "type": "string",
+          "enum": [
+            "sandbox-exec",
+            "bwrap",
+            "none"
+          ]
         },
         "verdict": {
           "type": "string",
@@ -13370,6 +13415,18 @@
         "contracts_version": {
           "type": "string",
           "pattern": "^\\d+\\.\\d+\\.\\d+$"
+        },
+        "session_sandbox": {
+          "type": "string",
+          "enum": [
+            "on",
+            "off",
+            "unknown"
+          ]
+        },
+        "install_token": {
+          "type": "string",
+          "pattern": "^[A-Za-z0-9_-]{43,128}$"
         }
       },
       "required": [
@@ -20501,6 +20558,14 @@
                 "type": "string",
                 "minLength": 1,
                 "maxLength": 1024
+              },
+              "sandbox": {
+                "type": "string",
+                "enum": [
+                  "sandbox-exec",
+                  "bwrap",
+                  "none"
+                ]
               },
               "verdict": {
                 "type": "string",

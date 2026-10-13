@@ -60,7 +60,19 @@ const UNREADABLE_RULES = [
 const UNREADABLE_VTC_DIRS = [`${VTC_HOME}/hidden`, `${VTC_HOME}/run`];
 const UNREADABLE = [`${VTC_HOME}/token`, CODEX_HOME, CLAUDE_CREDENTIALS, ...UNREADABLE_VTC_DIRS];
 /** D-w: what no role may write under the VTC home, as sandbox directories. */
-const VTC_HOME_DENIED_DIRS = ["allowlists", "osv-db", "hidden"].map((d) => `${VTC_HOME}/${d}`);
+const VTC_HOME_DENIED_DIRS = [
+  "allowlists",
+  "osv-db",
+  "hidden",
+  // D-ap (spine §5 reading 73): everything under the VTC home that is later run or trusted
+  "scanners",
+  "claude-marketplace",
+  "plugins",
+  "engines",
+  "run",
+  "config.yaml",
+  "token",
+].map((d) => `${VTC_HOME}/${d}`);
 
 const settingsOf = (p: SandboxProfile) =>
   p.settings as {

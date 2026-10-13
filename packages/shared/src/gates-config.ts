@@ -75,6 +75,13 @@ export type Gate = z.infer<typeof GateSchema>;
  * A scanner pinned by version and per-platform SHA-256, never auto-updated (§7.2, §15). Each
  * download target has its own checksum (§4.4). `url` is a template with `{version}` and
  * `{platform}` placeholders. `vtc doctor` downloads into `~/.vtc/` and verifies the checksum.
+ *
+ * `binary_sha256` (D-ap, spine §5 reading 73): per platform, the SHA-256 of the executable as
+ * extracted from that download. Re-verification before every use compares the installed binary
+ * with this pin, never with a manifest stored next to it (a role or gate that could write the
+ * store could rewrite both). A platform with a `sha256` but no `binary_sha256` has no anchor for
+ * an installed binary: the store must re-verify the download against `sha256` before using it.
+ * Each key must also have a `sha256`.
  */
 export const ScannerPinSchema = z
   .strictObject({
@@ -85,6 +92,7 @@ export const ScannerPinSchema = z
       .refine((url) => url.startsWith("https://"), "scanner downloads must use https")
       .refine((url) => url.includes("{platform}"), "url must contain {platform}"),
     sha256: z.partialRecord(PlatformSchema, Sha256HexSchema),
+    binary_sha256: z.partialRecord(PlatformSchema, Sha256HexSchema).optional(),
     license: z.string().min(1).max(100),
   })
   .superRefine((pin, ctx) => {
@@ -94,6 +102,15 @@ export const ScannerPinSchema = z
         path: ["sha256"],
         message: "pin at least one platform checksum",
       });
+    }
+    for (const platform of Object.keys(pin.binary_sha256 ?? {})) {
+      if (!Object.hasOwn(pin.sha256, platform)) {
+        ctx.addIssue({
+          code: "custom",
+          path: ["binary_sha256", platform],
+          message: "a binary checksum needs the download checksum of the same platform",
+        });
+      }
     }
   });
 export type ScannerPin = z.infer<typeof ScannerPinSchema>;
@@ -111,6 +128,18 @@ export const ScannerPinsSchema = z
     }
   });
 export type ScannerPins = z.infer<typeof ScannerPinsSchema>;
+
+/** The calibrated gates file, repo-relative (§4.3). */
+export const GATES_CONFIG_FILE = ".vtc/gates.yml";
+
+/**
+ * Why a run refuses to start (D-au, spine §5 reading 78): `.vtc/gates.yml` is not committed at
+ * the commit the run would start on. Engine core reads `gates.yml` only at that commit (reading
+ * 46f), so it refuses `start` with this text (`EngineError` code `config`) instead of starting a
+ * run whose first gate run would park.
+ */
+export const gatesConfigNotCommitted = (commit: string): string =>
+  `${GATES_CONFIG_FILE} is not committed at ${commit.slice(0, 12)}: run vtc calibrate, commit ${GATES_CONFIG_FILE}, then start the run again`;
 
 /**
  * The project's test layout, detected by `vtc calibrate` and confirmed with the baseline (§7.1).
