@@ -27,6 +27,12 @@ covering every requirement and nothing more.
    mean more parallel work.
 6. Give each task a `files_scope`: the globs it may write, as narrow as the change allows. Tasks
    that can run at the same time must not share a file.
+   - When a task scaffolds or changes a lint, test or scanner config, or a task-runner file
+     (`Makefile`, `justfile`, `*.mk`, `package.json` `scripts`), `files_scope` must name that exact
+     path, with no wildcard: `packages/foo/tsconfig.json`, not `packages/foo/**`. A glob does not
+     cover these files: a change the scope does not name exactly is flagged at the gate.
+   - A `files_scope` glob has no `{a,b}` alternatives and no commas, parentheses, quotes,
+     backticks or whitespace: list each alternative as its own entry.
 7. Pick at most {{max_stack_packs}} stack packs per task from: {{stack_packs}}. Only packs for
    technology the task actually touches.
 8. Set `risk` (low, med, high) by probability times impact of getting it wrong, and `risk_tags`

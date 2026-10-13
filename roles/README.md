@@ -72,9 +72,10 @@ human`, exits `done`, `blocked` or `unknown`, no verdicts, no success criteria a
   `advisor_client_liaison`, which is `write_scoped` to `.vtc/exports/**` with output artifact
   `client_export`; the engine checks the write on submit. The compiler allows an advisor no
   other write path and no other output artifact.
-- **Codex model tiers** (reading 26). Compiled Codex agents set only `model_reasoning_effort`;
-  the tier-to-model map lives in the Codex adapter and `project.yaml` `hosts.models.codex`, so
-  `role.yaml` may not name a Codex model until the spike names Codex model ids.
+- **Codex model tiers** (readings 26 and 51). Compiled Codex agents set only
+  `model_reasoning_effort`; the engine resolves models (`project.yaml` `hosts.models.codex`, then
+  its built-in map, which names no Codex ids yet), so `role.yaml` may not name a Codex model until
+  the spike names Codex model ids.
 - **Research roles write their own documents** (reading 27). The Repo Cartographer is
   `write_scoped` to `.vtc/research/repo-map/**` and the Research Analyst to
   `.vtc/research/briefs/**`, nothing else.
@@ -100,6 +101,13 @@ human`, exits `done`, `blocked` or `unknown`, no verdicts, no success criteria a
   entry that is not a role-facing tool in the frozen contract, and always rejects the Lead's
   run-driving tools. The Cartographer, Research Analyst and Architect work from what the engine
   puts in their task pack.
+- **Exact paths for config and task-runner files** (readings 44, 45 and 63, Lead decisions of
+  2026-10-14). The Planner's locked core tells it to name a lint, test or scanner config, or a
+  `Makefile`, `justfile`, `*.mk` or `package.json` `scripts` change, by its exact path in
+  `files_scope`, and to write no `{a,b}` alternatives or rule-breaking characters in a write-scope
+  glob (`WriteScopeGlobSchema`).
+- **No role touches VTC's guard rails** (reading 43). Every compiled agent denies `vtc
+calibrate` and writes to the guarded VTC home globs; see `plugins/README.md`.
 - **Write paths are instructions plus an engine check, not a host deny.** The contract section
   lists `write_paths`; the engine checks every write-scoped role's writes on submit.
 

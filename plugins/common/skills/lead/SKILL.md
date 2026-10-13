@@ -42,8 +42,10 @@ Call `next` and handle each returned action in order:
   - Spell `agent` as given. If this host lists the plugin's agents only under a namespace (Claude
     Code may list `vtc:<agent>`), spawn the listed agent that is `agent` with that prefix, never
     a different agent.
-  - Pass `model` to the spawn wherever the host's subagent spawn takes a model: it overrides the
-    agent's default model (after a tier escalation or a budget drop).
+  - When `spawn_role` carries `model`, pass it to the spawn wherever the host's subagent spawn
+    takes a model: it overrides the agent's default model (after a tier escalation or a budget
+    drop). When it has no `model`, pass none: the agent runs on this session's model. Never pick
+    or invent a model yourself.
   - Run it in the background when `background` is true and the host supports that; resume the
     given session when `resume` is present.
   - When the subagent finishes, take the JSON object in its final message unchanged and call
