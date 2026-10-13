@@ -116,7 +116,10 @@ export const RoleContractSchema = z
     success_criteria: z
       .array(z.strictObject({ id: SlugSchema, description: z.string().min(1).max(400) }))
       .default([]),
-    /** Who checks this role's output (§5.5). A role id, or `engine` for code checks. */
+    /**
+     * Who checks this role's output (§5.5): a role id, `engine` for code checks, or `human` for
+     * advisors (§5.4), whose advice the human who asked for it reads.
+     */
     reviewer: RoleIdSchema,
     /** Model tier and effort per host (§5.1). Both hosts are required: roles compile for both. */
     models: RoleModelsSchema,

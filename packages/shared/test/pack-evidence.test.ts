@@ -86,6 +86,15 @@ describe("EvidenceBundleSchema (§6.7a, §14)", () => {
     expectValid(EvidenceBundleSchema, task());
     expectValid(EvidenceBundleSchema, feature());
   });
+  it("records which Final Review steps produced the verdict (§6.7a)", () => {
+    const parsed = expectValid(EvidenceBundleSchema, {
+      ...feature(),
+      final_review: { verdict: "pass", rounds: 1, steps_run: [1, 2, 6] },
+    });
+    expect(parsed.kind === "feature" && parsed.final_review.steps_run).toEqual([1, 2, 6]);
+    const older = expectValid(EvidenceBundleSchema, feature());
+    expect(older.kind === "feature" && older.final_review.steps_run).toEqual([]);
+  });
   it.each([
     [() => ({ ...task(), cap: 7 }), "cap"],
     [() => ({ ...task(), kind: "pr" }), "kind"],
@@ -98,6 +107,14 @@ describe("EvidenceBundleSchema (§6.7a, §14)", () => {
     ],
     [() => ({ ...feature(), tasks: [] }), "tasks"],
     [() => ({ ...feature(), final_review: { verdict: "pass", rounds: 4 } }), "final_review.rounds"],
+    [
+      () => ({ ...feature(), final_review: { verdict: "pass", rounds: 1, steps_run: [8] } }),
+      "final_review.steps_run.0",
+    ],
+    [
+      () => ({ ...feature(), final_review: { verdict: "pass", rounds: 1, steps_run: [3, 1] } }),
+      "final_review.steps_run",
+    ],
   ] as const)("case %#: rejects an invalid bundle", (make, path) => {
     expectInvalid(EvidenceBundleSchema, make(), path);
   });
@@ -106,6 +123,15 @@ describe("EvidenceBundleSchema (§6.7a, §14)", () => {
     expect(evidenceBundlePath("F-1")).toBe(".vtc/evidence/F-1/bundle.json");
     expect(() => evidenceBundlePath("../x")).toThrow();
   });
+});
+
+const constraints = () => ({
+  colour_strategy: "committed" as const,
+  type_pairing: "grotesk-serif",
+  density_grid: "dense 12-column",
+  radius_elevation: "sharp, flat",
+  motion: "snappy",
+  signature_interaction: "pull-to-reveal ledger",
 });
 
 describe("TaskPackSchema and renderTaskPack (§6.3 step 1)", () => {
@@ -141,9 +167,29 @@ describe("TaskPackSchema and renderTaskPack (§6.3 step 1)", () => {
     ["inputs.0.path", { inputs: [{ type: "spec", path: "/spec.md" }] }],
     ["subject", { subject: "AC-1" }],
     ["gates.0.command", { gates: [{ id: "t", layer: "L2", command: [] }] }],
+    ["architect_depth", { architect_depth: "XL" }],
+    ["research_depth", { research_depth: "deep" }],
+    [
+      "design_constraints.colour_strategy",
+      { design_constraints: { ...constraints(), colour_strategy: "loud" } },
+    ],
     ["", { secrets: ["x"] }],
   ])("rejects invalid %s", (path, patch) => {
     expectInvalid(TaskPackSchema, { ...pack(), ...patch }, path);
+  });
+  it("carries the engine's depths and dealt design constraints in Dispatch (§6.2, §8.3, §9.1)", () => {
+    const text = renderTaskPack({
+      ...(pack() as object as Parameters<typeof renderTaskPack>[0]),
+      role: "designer",
+      architect_depth: "M",
+      research_depth: "light",
+      design_constraints: constraints(),
+    });
+    const dispatch = text.split("## Intent contract")[0] ?? "";
+    expect(dispatch).toContain("architect depth: M");
+    expect(dispatch).toContain("research depth: light");
+    expect(dispatch).toContain("colour strategy committed");
+    expect(dispatch).toContain("signature interaction pull-to-reveal ledger");
   });
   it("one pack per dispatch under .vtc/state/packs/", () => {
     expect(taskPackPath("a-4")).toBe(".vtc/state/packs/a-4.md");
