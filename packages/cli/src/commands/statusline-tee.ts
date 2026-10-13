@@ -5,7 +5,8 @@
  * user's command shell-quoted as one word). It runs that word through the shell once with the same
  * stdin, prints its output unchanged, and forwards `statuslineIngestFromClaude(stdin)` to the
  * running engine found through the discovery file (AD-12) with the install token
- * (`statusline.ts`), whatever the arguments.
+ * (`statusline.ts`), whatever the arguments. Malformed arguments run nothing, exit 64 and show
+ * `STATUSLINE_TEE.misconfiguredLine` as the statusline (D-as).
  */
 import { liveDaemon } from "../daemon.js";
 import { postToEngine } from "../engine-http.js";

@@ -4,7 +4,9 @@
  * CLIs and their logins (through `claude auth status --json` and `codex login status` only,
  * AD-9; an apiKeyHelper-only Claude setup warns, D-ab), gh, the auto-resume timer (launchd on
  * macOS, systemd on Linux, none on Windows in v1: D-aj), the credential variables the detached
- * daemon passes (`~/.vtc/config.yaml` `env_passthrough`, D-ak), the repo's running engine (one
+ * daemon passes (`~/.vtc/config.yaml` `env_passthrough`, D-ak), the OS sandbox gate commands
+ * run in (none fails unless the user opted in with `gates.allow_unsandboxed`, which warns; D-al),
+ * the repo's Claude session sandbox and what it misses (D-an), the repo's running engine (one
  * of an incompatible `vtc` fails), Playwright's Chromium (pin deferred: a warning, D-ai), the
  * pinned scanners (`gates.createScannerStore`; Checkov without a native build warns, D-u) and the
  * osv-scanner offline database.
@@ -15,10 +17,14 @@
 import { existsSync, readFileSync } from "node:fs";
 import { gates } from "@vtc/engine";
 import { daemonState } from "../daemon.js";
+import type { GateSandboxKind } from "@vtc/shared";
 import {
   checkChromium,
   checkEngine,
   checkEnvPassthrough,
+  checkGateSandbox,
+  checkSessionSandbox,
+  detectGateSandbox,
   runDoctorChecks,
   type DoctorCheck,
   type DoctorEnv,
@@ -34,6 +40,7 @@ import {
   type ScannerEnv,
 } from "../scanner-checks.js";
 import { wakeRecords } from "../scheduler.js";
+import { claudeSessionSandboxOf, type SessionSandboxReport } from "../session-sandbox.js";
 import { autoResumeTimer, defaultTimerHost } from "../timer.js";
 import { readUserConfig, type UserConfigRead } from "../user-config.js";
 import type { CommandContext, CommandSpec } from "./types.js";
@@ -60,6 +67,10 @@ export interface DoctorCommandEnv extends DoctorEnv {
   readonly engine?: () => Promise<DoctorCheck | null>;
   /** Playwright's Chromium for Visual QA (§4.4). */
   readonly chromium?: () => DoctorCheck;
+  /** The OS sandbox gate commands run in (D-al), `null` when the machine has none. */
+  readonly gateSandbox?: () => Promise<Exclude<GateSandboxKind, "none"> | null>;
+  /** The Claude session sandbox of the repo doctor runs in (D-an), `null` outside a repo. */
+  readonly sessionSandbox?: () => Promise<SessionSandboxReport | null>;
 }
 
 /** `<name> --version` on PATH: a scanner the user installed where no pinned build exists. */
@@ -100,6 +111,11 @@ export const defaultDoctorEnv = (ctx: CommandContext): DoctorCommandEnv => {
         : checkEngine(repoRoot, await daemonState(ctx.vtcHome, repoRoot));
     },
     chromium: checkChromium,
+    gateSandbox: () => detectGateSandbox(process.platform, existsSync, exec),
+    sessionSandbox: async () => {
+      const repoRoot = await findRepoRoot(ctx.cwd);
+      return repoRoot === null ? null : claudeSessionSandboxOf(repoRoot, ctx.vtcHome);
+    },
   };
 };
 
@@ -108,13 +124,18 @@ export const createDoctorCommand = (
 ): CommandSpec => ({
   name: "doctor",
   summary:
-    "Check prerequisites (runtime, git, host CLIs and logins, gh, auto-resume timer, env passthrough, the repo's engine, pinned scanners, osv database); --download fetches missing scanners and the osv database",
+    "Check prerequisites (runtime, git, host CLIs and logins, gh, auto-resume timer, env passthrough, gate sandbox, session sandbox, the repo's engine, pinned scanners, osv database); --download fetches missing scanners and the osv database",
   run: (args, ctx) =>
     guarded("doctor", ctx, async () => {
       const { values } = parseFlags(args, { download: { type: "boolean" } });
       const e = env(ctx);
       const checks = await runDoctorChecks(e);
-      if (e.userConfig !== undefined) checks.push(checkEnvPassthrough(e.userConfig()));
+      const userConfig = e.userConfig?.() ?? null;
+      if (userConfig !== null) checks.push(checkEnvPassthrough(userConfig));
+      if (e.gateSandbox !== undefined)
+        checks.push(checkGateSandbox(await e.gateSandbox(), userConfig));
+      const session = e.sessionSandbox === undefined ? null : await e.sessionSandbox();
+      if (session !== null) checks.push(checkSessionSandbox(session));
       if (e.chromium !== undefined) checks.push(e.chromium());
       const engine = e.engine === undefined ? null : await e.engine();
       if (engine !== null) checks.push(engine);

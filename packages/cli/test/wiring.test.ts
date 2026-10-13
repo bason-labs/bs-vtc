@@ -10,7 +10,6 @@ import { createServer, type Socket } from "node:net";
 import { join } from "node:path";
 import { PassThrough } from "node:stream";
 import { afterEach, describe, expect, it } from "vitest";
-import { mcp } from "@vtc/engine";
 import {
   CONTRACTS_VERSION,
   ENGINE_INSTANCE,
@@ -59,6 +58,8 @@ import {
   initProject,
   initRepo,
   initVtcRepo,
+  lineSink,
+  rpc,
   tempDir,
   tempHome,
   writePluginTrees,
@@ -275,7 +276,17 @@ describe("the daemon the cli wires (AD-12, AD-20)", () => {
         buffer = parts.pop() ?? "";
         lines.push(...parts.filter((l) => l !== ""));
       });
-      const done = mcp.runStdioBridge({ path: daemon.discovery.mcp_socket, host, stdin, stdout });
+      // the cli's own relay; a 4.3 daemon takes the session's sandbox state in the hello
+      const done = runBridge({
+        repoRoot: repo,
+        host,
+        stdin,
+        stdout,
+        initialised: () => true,
+        daemon: () => Promise.resolve(daemon.discovery),
+        sessionSandbox: () => (host === "claude-code" ? "on" : undefined),
+        serverVersion: "vtc-engine@0.0.0",
+      });
       return { stdin, lines, done };
     };
     const a = bridge("claude-code");
@@ -374,36 +385,6 @@ describe("the daemon the cli wires (AD-12, AD-20)", () => {
   }, 20_000);
 });
 
-/** Lines written to a PassThrough, and a wait for the one that matches. */
-const lineSink = (): {
-  stdout: PassThrough;
-  next: (match: RegExp, ms?: number) => Promise<Record<string, unknown>>;
-} => {
-  const stdout = new PassThrough();
-  const lines: string[] = [];
-  let buffer = "";
-  stdout.on("data", (c: Buffer) => {
-    buffer += c.toString("utf8");
-    const parts = buffer.split("\n");
-    buffer = parts.pop() ?? "";
-    lines.push(...parts.filter((l) => l !== ""));
-  });
-  const next = async (match: RegExp, ms = 10_000): Promise<Record<string, unknown>> => {
-    const deadline = Date.now() + ms;
-    for (;;) {
-      const at = lines.findIndex((l) => match.test(l));
-      if (at >= 0) return JSON.parse(lines.splice(at, 1)[0] ?? "{}") as Record<string, unknown>;
-      if (Date.now() > deadline)
-        throw new Error(`no line matching ${String(match)} in ${JSON.stringify(lines)}`);
-      await new Promise((r) => setTimeout(r, 20));
-    }
-  };
-  return { stdout, next };
-};
-
-const rpc = (id: number, method: string, params?: unknown): string =>
-  `${JSON.stringify({ jsonrpc: "2.0", id, method, ...(params === undefined ? {} : { params }) })}\n`;
-
 describe("repos vtc init never set up (the plugins are user-scoped)", () => {
   it("starts no daemon for the control commands or ensureDaemon", async () => {
     const repo = initRepo();
@@ -429,11 +410,11 @@ describe("repos vtc init never set up (the plugins are user-scoped)", () => {
       stdin,
       stdout,
       initialised: () => isVtcProject(repo),
-      daemonSocket: async () => {
+      daemon: async () => {
         started += 1;
         const daemon = await startDaemon(await partsFor(repo, home), { wake: false });
         daemons.push(daemon);
-        return daemon.discovery.mcp_socket;
+        return daemon.discovery;
       },
       serverVersion: "vtc-engine@0.0.0",
     });

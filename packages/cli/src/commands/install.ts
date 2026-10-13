@@ -9,6 +9,13 @@
  * each host gets its `DEFAULT_INSTALL_SCOPE` (D-ah, reading 54): Claude Code for the user, Codex
  * in the project.
  *
+ * `vtc install claude-code` also sets up the Claude Code session sandbox of the repo it runs in
+ * (D-an, spine §5 reading 71): in plugin-only dispatch a code-running role runs inside the human's
+ * Lead session, which the engine allows only with the sandbox on. It shows the settings
+ * (`claudeSessionSandboxSettings`), and after the human confirms at the terminal merges them into
+ * the project's `.claude/settings.local.json` (the user's other keys kept, never through a link)
+ * and makes sure git ignores that file (the repo's `info/exclude`; a tracked file is refused).
+ *
  * The OS timer behind auto-resume (AD-6 rule 4, §6.9 step 4; `timer.ts`: launchd on macOS, a
  * systemd user timer on Linux) is installed only on an explicit `--auto-resume`, never silently
  * (reading 59): `vtc install --auto-resume` alone (re)installs just the timer (e.g. after the
@@ -18,14 +25,29 @@
  */
 import { homedir } from "node:os";
 import { ADAPTER_FACTORIES } from "@vtc/adapters";
-import { DEFAULT_INSTALL_SCOPE, HostIdSchema, type HostId } from "@vtc/shared";
+import {
+  claudeSessionSandboxSettings,
+  DEFAULT_INSTALL_SCOPE,
+  HostIdSchema,
+  type HostId,
+} from "@vtc/shared";
+import { ttyConfirm } from "../confirm.js";
 import { findRepoRoot, UsageError } from "../repo.js";
 import { runtime } from "../runtime.js";
+import {
+  CLAUDE_LOCAL_SETTINGS,
+  claudeSessionSandboxOf,
+  excludeFromGit,
+  gitIgnoreStatus,
+  mergeSessionSandboxSettings,
+  readClaudeLocalSettings,
+  writeClaudeLocalSettings,
+} from "../session-sandbox.js";
 import { autoResumeTimer, defaultTimerHost, type TimerHost, type TimerSpec } from "../timer.js";
 import { ensureInstallToken } from "../token.js";
 import { VERSION } from "../version.js";
 import type { AdapterFactory } from "../wiring.js";
-import type { CommandSpec } from "./types.js";
+import type { CommandContext, CommandSpec } from "./types.js";
 import { EXIT, guarded, parseFlags } from "./util.js";
 
 export interface InstallDeps {
@@ -37,6 +59,8 @@ export interface InstallDeps {
   /** The user session the auto-resume timer goes into. */
   readonly timerHost: () => TimerHost;
   readonly agentSpec: (vtcHome: string) => TimerSpec;
+  /** Asks the human at the terminal (`ttyConfirm`: no terminal is no). */
+  readonly confirm: (question: string) => Promise<boolean>;
 }
 
 export const defaultInstallDeps = (): InstallDeps => ({
@@ -50,7 +74,75 @@ export const defaultInstallDeps = (): InstallDeps => ({
     vtcHome,
     path: process.env.PATH ?? "/usr/bin:/bin",
   }),
+  confirm: ttyConfirm,
 });
+
+/**
+ * The Claude Code session sandbox of the repo `vtc install claude-code` runs in (D-an). Resolves
+ * false when something is in the way (a link, a file that does not parse, a tracked file); a
+ * human who declines is not a failure.
+ */
+const installSessionSandbox = async (
+  ctx: CommandContext,
+  d: InstallDeps,
+  repoRoot: string | null,
+): Promise<boolean> => {
+  if (d.platform === "win32") {
+    ctx.io.out(
+      "Note: Claude Code has no session sandbox on Windows, so code-running roles run headless or not at all there.",
+    );
+    return true;
+  }
+  if (repoRoot === null) {
+    ctx.io.out(
+      "Note: not in a git repository, so no session sandbox was set up: run vtc install claude-code in each repo whose Claude Code sessions should run code-running roles.",
+    );
+    return true;
+  }
+  const read = readClaudeLocalSettings(repoRoot);
+  if (read.kind === "unreadable") {
+    ctx.io.err(
+      `vtc install: ${read.path} does not parse or is not a plain file (${read.error}); fix it, then run vtc install claude-code again`,
+    );
+    return false;
+  }
+  const ignore = await gitIgnoreStatus(repoRoot, CLAUDE_LOCAL_SETTINGS);
+  if (ignore === "tracked") {
+    ctx.io.err(
+      `vtc install: ${read.path} is tracked by git: run git rm --cached ${CLAUDE_LOCAL_SETTINGS} (it holds this machine's paths), then run vtc install claude-code again`,
+    );
+    return false;
+  }
+  const ensureIgnored = async (): Promise<void> => {
+    if (ignore === "not-ignored") {
+      const exclude = await excludeFromGit(repoRoot, CLAUDE_LOCAL_SETTINGS);
+      ctx.io.out(`  git ignores ${CLAUDE_LOCAL_SETTINGS} now (${exclude})`);
+    }
+  };
+  if (claudeSessionSandboxOf(repoRoot, ctx.vtcHome).state === "on") {
+    ctx.io.out(`The Claude Code session sandbox is already on in ${read.path}.`);
+    await ensureIgnored();
+    return true;
+  }
+  ctx.io.out(
+    `Code-running roles run inside your Claude Code session (plugin-only dispatch) only with its sandbox on. These settings go into ${read.path} (your other settings stay):`,
+  );
+  for (const line of JSON.stringify(claudeSessionSandboxSettings(ctx.vtcHome), null, 2).split("\n"))
+    ctx.io.out(`  ${line}`);
+  if (!(await d.confirm(`Write them to ${read.path}?`))) {
+    ctx.io.out(
+      `Session sandbox not written: code-running roles are refused in your Claude Code session until it is (run vtc install claude-code in a terminal and confirm).`,
+    );
+    return true;
+  }
+  const path = writeClaudeLocalSettings(
+    repoRoot,
+    mergeSessionSandboxSettings(read.kind === "ok" ? read.settings : {}, ctx.vtcHome),
+  );
+  ctx.io.out(`  wrote ${path}`);
+  await ensureIgnored();
+  return true;
+};
 
 export const createInstallCommand = (
   deps: () => InstallDeps = defaultInstallDeps,
@@ -86,6 +178,7 @@ export const createInstallCommand = (
       if (scope !== undefined && scope !== "user" && scope !== "project")
         throw new UsageError(`--scope must be user or project, got ${scope}`);
       ensureInstallToken(ctx.vtcHome);
+      let failed = false;
       if (hostName !== undefined) {
         const host = HostIdSchema.safeParse(hostName);
         if (!host.success)
@@ -95,9 +188,10 @@ export const createInstallCommand = (
           throw new Error(`this build of vtc has no ${host.data} adapter yet`);
         const pluginDir = d.pluginDir(host.data, ctx.vtcHome);
         const adapter = factory({ pluginDir, vtcHome: ctx.vtcHome, vtcVersion: VERSION });
+        const repoRoot = await findRepoRoot(ctx.cwd);
         try {
           const result = await adapter.install({
-            projectRoot: (await findRepoRoot(ctx.cwd)) ?? ctx.cwd,
+            projectRoot: repoRoot ?? ctx.cwd,
             home: d.home(),
             pluginDir,
             scope: scope ?? DEFAULT_INSTALL_SCOPE[host.data],
@@ -108,6 +202,8 @@ export const createInstallCommand = (
         } finally {
           await adapter.dispose();
         }
+        if (host.data === "claude-code" && !(await installSessionSandbox(ctx, d, repoRoot)))
+          failed = true;
       }
       if (osTimer === null) {
         if (timer === "on")
@@ -140,7 +236,7 @@ export const createInstallCommand = (
           `To resume runs parked on a usage limit without you, run vtc install --auto-resume to install the ${osTimer.kind}.`,
         );
       }
-      return EXIT.ok;
+      return failed ? EXIT.failed : EXIT.ok;
     }),
 });
 
