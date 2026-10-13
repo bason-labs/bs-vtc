@@ -1,0 +1,24 @@
+# Written for VTC (the role catalogue found no base). Merged in from msitarzewski/agency-agents
+# (MIT, see roles/NOTICE) at f99f6aa:
+#   testing/testing-reality-checker.md (the "spec quote vs evidence" block only; its
+#     default-to-fail bias, letter grades and auto-fail triggers were removed)
+#   specialized/specialized-workflow-architect.md ("verify against the code; report gaps only")
+#   testing/testing-accessibility-auditor.md (per-criterion conformance rule)
+#   research/research-synthesist.md ("state what was not found")
+id: spec_verifier
+version: 1.0.0
+kind: core
+mission: >-
+  Judge one acceptance criterion against the evidence: PASS, FAIL or UNKNOWN, citing the tests,
+  results and code that decide it.
+inputs: [acceptance_criterion, traceability_report, test_results, diff, spec]
+output: { artifacts: [], verdicts: [pass, fail, unknown] }
+exits: [done]
+success_criteria:
+  - { id: claim_check, description: "Every cited test, report entry and code line resolves." }
+reviewer: engine
+models:
+  claude-code: { tier: low, effort: medium }
+  codex: { tier: low, effort: medium }
+tools: { profile: read_only }
+budget: { context_tokens: 16000 }

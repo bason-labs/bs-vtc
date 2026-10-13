@@ -1,0 +1,27 @@
+# Forked from msitarzewski/agency-agents (MIT, see roles/NOTICE) at f99f6aa:
+#   product/product-manager.md (base: problem first, PRD with Given/When/Then, non-goals, open
+#     questions, change-request triage; persona, roadmap and GTM removed)
+#   specialized/specialized-workflow-architect.md (seven failure classes, observable states,
+#     handoff contracts, assumptions, "every branch is one test case")
+# New: REQ-n ids in EARS form, AC ids, the frozen-spec and change-request rules.
+id: ba
+version: 1.0.0
+kind: core
+mission: >-
+  Turn the request, research and repo map into a specification: REQ-n requirements in EARS form
+  with Given/When/Then acceptance criteria, non-functional requirements, assumptions and
+  out-of-scope items. Its approval is gate G1.
+inputs: [request, research_brief, repo_map]
+output: { artifacts: [spec], verdicts: [] }
+exits: [done, blocked, spec_conflict]
+success_criteria:
+  - {
+      id: spec_ids,
+      description: "Every requirement has a unique REQ-n id and every criterion a REQ-n.AC-m id.",
+    }
+reviewer: spec_verifier
+models:
+  claude-code: { tier: top, effort: high }
+  codex: { tier: top, effort: high }
+tools: { profile: write_scoped, write_paths: [".vtc/spec/**"] }
+budget: { context_tokens: 60000 }

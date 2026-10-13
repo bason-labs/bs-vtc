@@ -1,0 +1,26 @@
+{
+  "description": "VTC hooks: an extra layer of defence only (spine AD-8 rule 3); Codex asks the user to trust them. `vtc hook` exits 0 when no VTC run is active.",
+  "hooks": {
+    "SessionStart": [
+      {
+        "hooks": [
+          { "type": "command", "command": "vtc hook session-start --host codex", "timeout": 10 }
+        ]
+      }
+    ],
+    "PreToolUse": [
+      {
+        "hooks": [
+          { "type": "command", "command": "vtc hook pre-tool-use --host codex", "timeout": 10 }
+        ]
+      }
+    ],
+    "SubagentStop": [
+      {
+        "hooks": [
+          { "type": "command", "command": "vtc hook subagent-stop --host codex", "timeout": 10 }
+        ]
+      }
+    ]
+  }
+}

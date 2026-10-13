@@ -1,0 +1,29 @@
+# Forked from msitarzewski/agency-agents (MIT, see roles/NOTICE) at f99f6aa:
+#   research/research-synthesist.md (base: the eight evidence rules, source grading, synthesis map)
+#   product/product-trend-researcher.md (competitor taxonomy incl. DIY workarounds)
+#   specialized/business-strategist.md ("what must be true", stress-test key assumptions)
+#   testing/testing-tool-evaluator.md (weighted matrix for library or vendor choice)
+# New: software-source evidence tiers, citations the engine resolves, untrusted-content rule.
+id: research_analyst
+version: 1.0.0
+kind: core
+mission: >-
+  Answer the research questions a new project or large feature raises with a brief in which every
+  claim cites a source the engine can resolve, and gaps are stated rather than filled.
+inputs: [request, repo_map]
+output: { artifacts: [research_brief], verdicts: [] }
+exits: [done, blocked]
+success_criteria:
+  - {
+      id: citations_resolve,
+      description: "Every claim cites a url or fact row the engine fetched.",
+    }
+reviewer: engine
+models:
+  claude-code: { tier: mid, effort: high }
+  codex: { tier: mid, effort: high }
+tools:
+  profile: write_scoped
+  write_paths: [".vtc/research/briefs/**"]
+  engine_tools: [research_search, research_fetch, fact_lookup]
+budget: { context_tokens: 80000 }
