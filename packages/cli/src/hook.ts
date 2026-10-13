@@ -19,13 +19,16 @@
  * otherwise a write into either worktree, inside that worktree's own scope, is allowed. The
  * engine still attributes and checks each worktree's diff against its own task (L5).
  *
- * TODO(engine-core, spine §5 reading 67): the write scope is still read from the rendered
- * Markdown pack (`packWriteScopes`) and matched with the cli's copy of the glob dialect
- * (`hook-rules.ts`), because build/foundation's `core` exports neither `matchesAny` /
- * `globToRegExp` nor a structured per-dispatch write scope yet. Switch to those exports and delete
- * both copies as soon as engine-core lands them.
+ * The effective write scope is engine core's structured per-dispatch scope
+ * (`core.dispatchWriteScope`, spine §5 reading 67), matched with engine core's own glob dialect
+ * (`core.matchesAny`), so the hook and the engine agree on which entries are main-checkout entries
+ * (only QA author mode's own staging, `core.isCheckoutScopeEntry`). A VTC role agent with no
+ * in-flight dispatch of its own in the active run has an empty scope: only the OS temp directory
+ * (rule 4). When a dispatch's persisted pack is unreadable, its scope is unknown: a write inside
+ * its own worktree is left to the engine (L5 checks the diff), and a write outside it stays
+ * blocked.
  */
-import { lstatSync, readFileSync, readlinkSync, realpathSync } from "node:fs";
+import { lstatSync, readlinkSync, realpathSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { basename, dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import { core, git } from "@vtc/engine";
@@ -40,9 +43,7 @@ import {
 import {
   agentBaseName,
   gitWriteIn,
-  inAllScopes,
   isVtcRoleAgent,
-  packWriteScopes,
   shellCommandOf,
   writeTargets,
 } from "./hook-rules.js";
@@ -133,14 +134,6 @@ const realish = (abs: string, links = 0): string => {
   }
 };
 
-const readText = (abs: string): string | null => {
-  try {
-    return readFileSync(abs, "utf8");
-  } catch {
-    return null;
-  }
-};
-
 /** POSIX form of a relative path. */
 const posix = (rel: string): string => rel.split(sep).join("/");
 
@@ -148,32 +141,32 @@ const posix = (rel: string): string => rel.split(sep).join("/");
 const below = (rel: string): string | null =>
   rel === "" || rel === ".." || rel.startsWith(`..${sep}`) || isAbsolute(rel) ? null : rel;
 
-/**
- * A scope entry the role writes in the main checkout rather than in its worktree: anything under
- * the git-ignored `.vtc/state/` but outside the worktrees, which never exists in a worktree. Today
- * that is QA author mode's `HIDDEN_TESTS.stagingDir/<task>/**`, which the engine reads from the
- * main checkout (`join(repoRoot, artifact.path)`, §7.3).
- */
-const isCheckoutEntry = (entry: string): boolean =>
-  entry.startsWith(".vtc/state/") && !entry.startsWith(`${git.WORKTREES_DIR}/`);
+/** A dispatch with its effective write scope (`null` when its persisted pack is unreadable). */
+interface Dispatch {
+  readonly scope: core.DispatchWriteScope | null;
+  /** Its worktree's id under `WORKTREES_DIR`, or `null` when it has none. */
+  readonly worktreeId: string | null;
+}
 
-/**
- * Each dispatch's write-scope lists from its task pack (`packWriteScopes`: a path must be in all
- * of them), or `null` when a pack is unreadable.
- */
-const scopesOf = (
+/** The id under `WORKTREES_DIR` of a repo-relative worktree path, or `null`. */
+const worktreeIdFromPath = (worktree: string | null): string | null =>
+  worktree?.startsWith(`${git.WORKTREES_DIR}/`) === true
+    ? (worktree.slice(git.WORKTREES_DIR.length + 1).split("/")[0] ?? null) || null
+    : null;
+
+/** Each dispatch with engine core's structured write scope (spine §5 reading 67). */
+const dispatchesOf = (
   repoRoot: string,
-  dispatches: readonly core.RoleRunRecord[],
-): Map<core.RoleRunRecord, string[][]> | null => {
-  const scopes = new Map<core.RoleRunRecord, string[][]>();
-  for (const d of dispatches) {
-    const pack = readText(join(repoRoot, d.pack));
-    const own = pack === null ? null : packWriteScopes(pack);
-    if (own === null) return null;
-    scopes.set(d, own);
-  }
-  return scopes;
-};
+  run: RunState,
+  records: readonly core.RoleRunRecord[],
+): Dispatch[] =>
+  records.map((record) => {
+    const scope = core.dispatchWriteScope(repoRoot, run, record);
+    return {
+      scope,
+      worktreeId: worktreeIdFromPath(scope?.worktree ?? core.dispatchWorktree(run, record)),
+    };
+  });
 
 /** The worktree id (first segment under `WORKTREES_DIR`) that `abs` lies in, or `null`. */
 const worktreeIdOf = (repoRoot: string, abs: string): string | null => {
@@ -181,45 +174,42 @@ const worktreeIdOf = (repoRoot: string, abs: string): string | null => {
   return rel === null ? null : (rel.split(sep)[0] ?? null);
 };
 
-/** True when the dispatch's worktree is `id`. */
-const ownsWorktree = (run: RunState, d: core.RoleRunRecord, id: string): boolean =>
-  d.task === id || core.roleWorktreeId(run.id, d.action_id) === id;
-
-/** Why writing `target` is outside the dispatch's scope, or `null` when it is allowed. */
+/** Why writing `target` is outside the dispatches' scope, or `null` when it is allowed. */
 const writeViolation = (
   target: string,
   repoRoot: string,
-  run: RunState,
-  dispatches: readonly core.RoleRunRecord[],
+  dispatches: readonly Dispatch[],
   tempDirs: readonly string[],
 ): string | null => {
-  const scopes = scopesOf(repoRoot, dispatches);
-  if (scopes === null) return null; // a pack is unreadable: allow (the engine still checks)
   const real = realish(target);
+  const none = dispatches.length === 0 ? " (you have no in-flight dispatch in this run)" : "";
   const inWorktrees = below(relative(realish(join(repoRoot, git.WORKTREES_DIR)), real));
   if (inWorktrees === null) {
     const inRepo = below(relative(realish(repoRoot), real));
     // outside the repo (where it lands, symlinks resolved), the OS temp directory is allowed
     if (inRepo === null && tempDirs.some((dir) => below(relative(realish(dir), real)) !== null))
       return null;
+    // in the main checkout, only engine core's main-checkout entries (QA author's own staging)
     const allowed =
       inRepo !== null &&
-      dispatches.some((d) =>
-        inAllScopes(
-          (scopes.get(d) ?? []).map((scope) => scope.filter(isCheckoutEntry)),
-          posix(inRepo),
-        ),
+      dispatches.some(
+        (d) => d.scope !== null && core.matchesAny(d.scope.checkout_globs, posix(inRepo)),
       );
     return allowed
       ? null
-      : `${target} is outside your worktree under ${git.WORKTREES_DIR}/ (and outside the OS temp directory)`;
+      : `${target} is outside your worktree under ${git.WORKTREES_DIR}/ (and outside the OS temp directory)${none}`;
   }
   const [id = "", ...rest] = inWorktrees.split(sep);
   const path = rest.join("/");
-  const mine = dispatches.filter((d) => ownsWorktree(run, d, id));
-  if (mine.length === 0) return `${target} is in a worktree that is not yours (${id})`;
-  if (path !== "" && mine.some((d) => inAllScopes(scopes.get(d) ?? [], path))) return null;
-  const scope = [...new Set(mine.flatMap((d) => scopes.get(d)?.[0] ?? []))];
+  const mine = dispatches.filter((d) => d.worktreeId === id);
+  if (mine.length === 0) return `${target} is in a worktree that is not yours (${id})${none}`;
+  // an unreadable pack: its scope is unknown, so a write in its own worktree is left to L5
+  if (
+    path !== "" &&
+    mine.some((d) => d.scope === null || core.matchesAny(d.scope.worktree_globs, path))
+  )
+    return null;
+  const scope = [...new Set(mine.flatMap((d) => d.scope?.worktree_globs ?? []))];
   return `${path || target} is outside your write scope (${scope.length === 0 ? "read-only" : scope.join(", ")})`;
 };
 
@@ -237,23 +227,26 @@ const preToolUse = async (input: VtcHookInput, deps: HookDeps): Promise<HookOutc
     return block(
       `VTC: role agents never run git ${gitWrite}. Leave your changes in the worktree; the engine commits, merges and pushes them after the Lead submits your result.`,
     );
-  const sameAgent = [...active.run.roleRuns.values()].filter(
-    (r) => r.status === "in_flight" && agentBaseName(r.agent) === agent,
+  // No in-flight dispatch of this agent: its effective write scope is empty (rule 4), so only
+  // the OS temp directory is allowed.
+  const sameAgent = dispatchesOf(
+    active.repoRoot,
+    active.run,
+    [...active.run.roleRuns.values()].filter(
+      (r) => r.status === "in_flight" && agentBaseName(r.agent) === agent,
+    ),
   );
-  if (sameAgent.length === 0) return ALLOW;
   // several dispatches of this agent: the one whose worktree the caller runs in, when known
   const cwdWorktree =
     sameAgent.length > 1 && input.cwd !== undefined
       ? worktreeIdOf(active.repoRoot, input.cwd)
       : null;
-  const own =
-    cwdWorktree === null ? [] : sameAgent.filter((d) => ownsWorktree(active.run, d, cwdWorktree));
+  const own = cwdWorktree === null ? [] : sameAgent.filter((d) => d.worktreeId === cwdWorktree);
   const dispatches = own.length > 0 ? own : sameAgent;
   for (const target of targets) {
     const violation = writeViolation(
       target,
       active.repoRoot,
-      active.run,
       dispatches,
       deps.tempDirs ?? osTempDirs(),
     );
