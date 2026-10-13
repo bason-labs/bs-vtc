@@ -135,10 +135,25 @@ export const EnvVarNameSchema = z.string().regex(/^[A-Za-z_][A-Za-z0-9_]{0,127}$
  *   user-level file: `.vtc/project.yaml` is committed, so a repo could otherwise ask for the
  *   user's secrets; `ProjectConfigSchema` has no such key and rejects it. `vtc doctor` shows
  *   which names pass.
+ * - `gates.allow_unsandboxed` (D-al, spine §5 reading 69): every gate command runs inside an OS
+ *   sandbox (`GATE_SANDBOX`). Where none is available the gate run parks (`infra`, "no OS
+ *   sandbox for gates") unless this is `true`; then gates run unconfined and every such gate run
+ *   records an `unsandboxed_gate` incident. Like `env_passthrough` it exists only here, never in
+ *   `project.yaml`, so a repo cannot switch the gate sandbox off.
  */
 export const UserConfigSchema = z.strictObject({
   version: z.literal(1),
   env_passthrough: z.array(EnvVarNameSchema).max(64).default([]),
+  /** Optional, so a `UserConfig` built in code needs no change; absent reads as all defaults. */
+  gates: z
+    .strictObject({
+      allow_unsandboxed: z.boolean().default(false),
+    })
+    .optional(),
 });
+
+/** `gates.allow_unsandboxed` of a parsed user config; false when the section is absent. */
+export const gatesAllowUnsandboxed = (config: Pick<UserConfig, "gates">): boolean =>
+  config.gates?.allow_unsandboxed ?? false;
 export type UserConfig = z.infer<typeof UserConfigSchema>;
 export type UserConfigInput = z.input<typeof UserConfigSchema>;

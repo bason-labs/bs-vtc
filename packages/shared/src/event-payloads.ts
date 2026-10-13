@@ -70,6 +70,12 @@ export type RejectReason = z.infer<typeof RejectReasonSchema>;
  * - `checkout_write`: a write the engine's checkout or log check found that no role and no engine
  *   write explains (AD-7 rule 7), logged in full with its paths as evidence; the pause reason
  *   only summarises it.
+ * - `host_config_restored` (D-ao, spine §5 reading 72): before a role dispatch or resume in a
+ *   worktree, `.codex/**`, `.claude/**` or `.mcp.json` differed from the worktree's base commit;
+ *   the engine restored them before the host started. The changed paths are the evidence.
+ * - `unsandboxed_gate` (D-al, spine §5 reading 69): a gate run executed commands with no OS
+ *   sandbox because the user opted in with `~/.vtc/config.yaml` `gates.allow_unsandboxed`
+ *   (`GateReport.sandbox: "none"`). Recorded for every such gate run.
  */
 export const IncidentKindSchema = z.enum([
   "crash",
@@ -80,6 +86,8 @@ export const IncidentKindSchema = z.enum([
   "stale_lock",
   "config_changed",
   "checkout_write",
+  "host_config_restored",
+  "unsandboxed_gate",
 ]);
 export type IncidentKind = z.infer<typeof IncidentKindSchema>;
 
@@ -378,7 +386,8 @@ export type EnvelopeField =
  * feature, role events the role. Every AI call is traceable to a role, a host/model and a
  * prompt version (§1.1 #3, §13): `role.dispatched` and `role.submitted` require `prompt_sha`,
  * `host` and `model`, and `role.submitted` also carries `tokens` and `cost_usd`, which may be
- * `null` (unknown or unpriced) but never absent.
+ * `null` (unknown or unpriced) but never absent. A host-reported cost is kept even when the model
+ * is unknown and counts toward budgets (D-at, `RunUsageSchema`).
  */
 export const EVENT_ENVELOPE_REQUIREMENTS: Readonly<
   Partial<Record<CoreEventType, readonly EnvelopeField[]>>

@@ -80,5 +80,18 @@ export * from "./json-schema.js";
  * `WriteScopeGlobSchema` for `files_scope` and `write_paths`. Two of these narrow or widen an
  * existing shape, which AD-3 rule 4 would call MAJOR; they ship as MINOR because nothing has
  * persisted or consumed the affected values yet (reading 51 and 63 say why).
+ * 4.3.0 (MINOR): hardening round (spine §5 readings 69–78, Lead decisions D-al..D-au). The gate
+ * sandbox (`GateSandbox` / `GateSandboxSpec` on optional `GateRunnerDeps.sandbox` and
+ * `allowUnsandboxed`, `GateSandboxKindSchema`, `GATE_SANDBOX`, `GateReport.sandbox`, the
+ * user-level optional `gates.allow_unsandboxed` and `gatesAllowUnsandboxed`); the human channel
+ * (`HUMAN_ONLY_TOOLS`, `humanChannelRequired`, `EngineSocketHello.install_token`); the session
+ * sandbox signal (`SessionSandboxStateSchema`, `EngineSocketHello.session_sandbox`,
+ * `claudeSessionSandboxSettings` / `claudeSessionSandboxState`, `inSessionDispatchAllowed`,
+ * `SESSION_SANDBOX_OFF_REASON`); `ROLE_DENIED_VTC.homeWriteDeny` widened and `homeReadDeny`
+ * added; incident kinds `host_config_restored` and `unsandboxed_gate`;
+ * `ScannerPin.binary_sha256`; `STATUSLINE_TEE.usageExit` / `misconfiguredLine`;
+ * `GATES_CONFIG_FILE` / `gatesConfigNotCommitted`; budget semantics for a host-reported cost
+ * (doc only). All additive: optional fields, enum values, new constants and helpers. Widening a
+ * deny list narrows what roles may do, not what a contract accepts (spine §5 reading 73).
  */
-export const CONTRACTS_VERSION = "4.2.0";
+export const CONTRACTS_VERSION = "4.3.0";

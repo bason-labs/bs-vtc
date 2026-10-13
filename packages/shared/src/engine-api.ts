@@ -131,6 +131,34 @@ export const ENGINE_MCP_TOOLS = [
 export type EngineMcpToolName = (typeof ENGINE_MCP_TOOLS)[number]["name"];
 
 /**
+ * Tools that record a human decision (D-an, spine §5 reading 71). The engine accepts them only
+ * from a human channel:
+ * - the run's Lead session (a `client: bridge` connection the engine holds as the run's Lead),
+ *   which relays what the human said in the Lead chat (spec §6.2, D5); never a role session;
+ * - a cli connection whose `EngineSocketHello.install_token` matched, sent only after the human
+ *   confirmed in an interactive terminal;
+ * - a browser holding a dashboard session token, should an HTTP route for one of these tools
+ *   ever exist. None does today (AD-5 rule 5: approval happens in the Lead chat); such a route
+ *   would take the session token only, never the install token the shim and the cli send
+ *   without a TTY check.
+ * A bare `{client: "cli"}` hello is never proof of a human: such a call is refused with
+ * `forbidden` and {@link humanChannelRequired}.
+ */
+export const HUMAN_ONLY_TOOLS = [
+  "approve",
+  "answer",
+  "change_request",
+] as const satisfies readonly EngineMcpToolName[];
+export type HumanOnlyToolName = (typeof HUMAN_ONLY_TOOLS)[number];
+
+export const isHumanOnlyTool = (name: string): name is HumanOnlyToolName =>
+  (HUMAN_ONLY_TOOLS as readonly string[]).includes(name);
+
+/** The refusal text for a human-only tool called from no human channel. */
+export const humanChannelRequired = (tool: HumanOnlyToolName): string =>
+  `${tool} records a human decision and needs a human channel: the Lead chat, or the vtc cli confirmed in an interactive terminal`;
+
+/**
  * The MCP server entry every host plugin registers (§4.4, AD-4, AD-16): a stdio bridge to the
  * repo's daemon that tags its session with the host it runs in (the `host` of its
  * `EngineSocketHello`, `ENGINE_SOCKET`). The Claude Code plugin carries it in
@@ -231,7 +259,17 @@ export const NextResultSchema = z.strictObject({
 });
 export type NextResult = z.infer<typeof NextResultSchema>;
 
-/** Spend of a subagent run as the host reported it to the Lead (§11 cost capture). */
+/**
+ * Spend of a subagent run as the host reported it to the Lead (§11 cost capture).
+ *
+ * Budget semantics (D-at, spine §5 reading 77): a host-reported `cost_usd` is kept and counts
+ * toward the task, Final Review and advisor budgets whatever the model id is, including
+ * `SESSION_DEFAULT_MODEL` and ids missing from the engine's price table; being conservative about
+ * budget beats being precise about price. The engine prices tokens itself only when the host
+ * reported no cost. A run is **unpriced** (`role.submitted.cost_usd: null`, counted as 0 and
+ * flagged) only when neither the host nor the price table gives a cost. The run summary still
+ * notes "model unknown" for a run whose model id the price table does not know.
+ */
 export const RunUsageSchema = z.strictObject({
   model: z.string().min(1).max(200).nullable(),
   tokens: TokenUsageSchema.nullable(),

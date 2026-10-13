@@ -322,6 +322,33 @@ export type GateRunRequest = z.infer<typeof GateRunRequestSchema>;
 export type GateRunRequestInput = z.input<typeof GateRunRequestSchema>;
 
 /**
+ * The OS sandbox gate commands run in (D-al, spine §5 reading 69; spec §7.2 two-phase sandbox):
+ * `sandbox-exec` with a VTC-generated profile on macOS, `bwrap` with its own network namespace on
+ * Linux, or `none` only when the user opted in with `~/.vtc/config.yaml`
+ * `gates.allow_unsandboxed` (an `unsandboxed_gate` incident is then recorded for the gate run).
+ */
+export const GateSandboxKindSchema = z.enum(["sandbox-exec", "bwrap", "none"]);
+export type GateSandboxKind = z.infer<typeof GateSandboxKindSchema>;
+
+/**
+ * The gate sandbox rules (D-al). Every gate command (calibration included) runs wrapped:
+ * - verify phase: no network; install phase: package registries only, or the full network where
+ *   the host cannot filter by registry, with the same filesystem rules;
+ * - writes only to the verification checkout and a private per-command temp directory;
+ * - reads denied on the VTC home and on host config and credential locations (built with
+ *   `hostCredentialDenyReadPaths`; nothing opens them);
+ * - `HOME` is an empty per-run temp directory, `VTC_HOME` is unset, and no credential variable is
+ *   passed (the gate environment is an allowlist).
+ * With no sandbox tool and no opt-in, the Gate Runner runs nothing: each gate it would have run
+ * reports `error` / `infra` with `noSandboxReason` in its evidence note (as a disallowed command
+ * does), so the report's verdict is `infra_error` and the task parks with `gate_infra` (§6.8)
+ * showing that reason. `vtc doctor` reports which sandbox is in use.
+ */
+export const GATE_SANDBOX = {
+  noSandboxReason: "no OS sandbox for gates",
+} as const;
+
+/**
  * Overall verdict, deterministic from the results (`gateReportVerdict`): an infra or
  * environment problem on a blocking gate parks with `gate_infra` (§6.8) and wins over a product
  * failure, because the other results cannot be trusted.
@@ -348,6 +375,12 @@ export const GateReportSchema = z
      * tests for a task or feature. Engine core embeds it in the evidence bundle.
      */
     traceability: RelPathSchema.optional(),
+    /**
+     * The OS sandbox this run's commands ran in (D-al). Absent when the run executed no command
+     * (and on reports written before contracts 4.3.0); `none` only under
+     * `gates.allow_unsandboxed`, which engine core records as an `unsandboxed_gate` incident.
+     */
+    sandbox: GateSandboxKindSchema.optional(),
     verdict: GateVerdictSchema,
     started_at: IsoDateTimeSchema,
     finished_at: IsoDateTimeSchema,
