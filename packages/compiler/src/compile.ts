@@ -4,19 +4,28 @@
  * deterministic; `io.ts` reads the sources and writes `dist/`. Every error is collected, and the
  * step fails on any AD-9 marker in a source or an emitted file.
  */
-import { createHash } from "node:crypto";
 import {
   CONTRACTS_VERSION,
   DOMAIN_PACKS,
   ENGINE_MCP_TOOLS,
   engineMcpServer,
   findForbiddenInText,
+  PLUGIN_MANIFEST_ASSET,
+  PluginManifestSchema,
+  promptShaFor,
+  ROLE_CONTRACTS_ASSET,
+  RoleContractSchema,
   type HostId,
+  type PluginManifestAgent,
+  type PluginManifestInput,
+  type PluginManifestSkill,
+  type PluginSkillKind,
   type RoleContract,
 } from "@vtc/shared";
 import { advisorContractErrors } from "./advisors.js";
 import { checkPluginFiles, compiledAgentNames } from "./checks.js";
 import { parseFrontmatter, renderFrontmatter } from "./frontmatter.js";
+import { HOOKS_FILE, renderHooks } from "./hooks.js";
 import { PLUGIN_NAME, renderClaudeAgent, renderCodexAgent } from "./hosts.js";
 import { buildInstructions, type InstructionSources } from "./instructions.js";
 import { loadRoles, type LoadedRole } from "./role-source.js";
@@ -25,10 +34,6 @@ import type {
   CompileResult,
   CompiledAgent,
   EmittedFile,
-  ManifestAgent,
-  ManifestSkill,
-  PluginManifest,
-  SkillKind,
   SourceFile,
 } from "./types.js";
 
@@ -61,22 +66,14 @@ const KIND_LABEL: Readonly<Record<RoleContract["kind"], string>> = {
 /** How the agent is started, so a host never picks it for unrelated work. */
 const RUNS_WHEN: Readonly<Record<"run" | "advisor", string>> = {
   run: "Runs only when the VTC Lead dispatches it for the engine.",
-  advisor: "Runs only when the VTC Lead calls it because the human asks for this advice.",
+  advisor:
+    "Runs only when the VTC Lead consults it through the engine's consult tool because the human asks for this advice.",
 };
 
 const describeAgent = (role: RoleContract, mode: string | undefined): string =>
   `VTC ${KIND_LABEL[role.kind]} ${role.id}${mode === undefined ? "" : ` (${mode} mode)`}: ${role.mission.trim()} ${RUNS_WHEN[role.kind === "advisor" ? "advisor" : "run"]}`;
 
-/**
- * The prompt content SHA of a compiled agent (§13, `role.dispatched.prompt_sha`): lower-case hex
- * SHA-256 of the UTF-8 bytes of its instructions, exactly as emitted: the body after the
- * frontmatter of a Claude Code agent file, equal to `developer_instructions` of the Codex agent.
- * Host frontmatter and TOML keys are not hashed.
- */
-export const promptSha256 = (instructions: string): string =>
-  createHash("sha256").update(instructions, "utf8").digest("hex");
-
-const skillKind = (skill: Skill): { kind: SkillKind; pack: string | null } => {
+const skillKind = (skill: Skill): { kind: PluginSkillKind; pack: string | null } => {
   if (skill.origin === "plugin") return { kind: "plugin", pack: null };
   const prefixed = /^(stack|domain|lens)-(.+)$/.exec(skill.name);
   if (prefixed?.[1] === "stack") return { kind: "stack_pack", pack: prefixed[2] ?? null };
@@ -87,7 +84,7 @@ const skillKind = (skill: Skill): { kind: SkillKind; pack: string | null } => {
   return { kind: "skill", pack: null };
 };
 
-const packList = (skills: readonly Skill[], kind: SkillKind): string => {
+const packList = (skills: readonly Skill[], kind: PluginSkillKind): string => {
   const packs = skills.flatMap((s) => {
     const k = skillKind(s);
     return k.kind === kind && k.pack !== null ? [k.pack] : [];
@@ -222,8 +219,7 @@ const checkLayout = (files: readonly SourceFile[], errors: CompileError[]): void
       } else if (host[2].startsWith("hooks/")) {
         errors.push({
           path,
-          message:
-            "hooks need a cli contract for the command they run first (AD-8 rule 3: an extra layer only)",
+          message: "hooks are generated from vtcHookCommand; do not hand-write them",
         });
       } else if (!HOST_PLUGIN_FILES[host[1] as HostId].includes(host[2])) {
         errors.push({ path, message: "unexpected host plugin file; see plugins/README.md" });
@@ -291,6 +287,23 @@ export const engineToolErrors = (tools: readonly string[]): string[] =>
     return [];
   });
 
+/**
+ * Spine §5 reading 26 (D-h): until the spike names Codex model ids, compiled Codex agents set only
+ * the reasoning effort, so `role.yaml` may not pin a Codex model; the Codex adapter's defaults and
+ * `project.yaml` `hosts.models.codex` map tiers to models.
+ */
+export const codexModelErrors = (role: RoleContract): string[] => {
+  const message = "Codex agents set only reasoning effort (spine §5 reading 26); remove it";
+  return [
+    ...(role.models.codex.model === undefined ? [] : [`models.codex.model: ${message}`]),
+    ...Object.entries(role.modes ?? {}).flatMap(([name, mode]) =>
+      mode.models?.codex.model === undefined
+        ? []
+        : [`modes.${name}.models.codex.model: ${message}`],
+    ),
+  ];
+};
+
 const compileAgents = (
   roles: readonly LoadedRole[],
   host: HostId,
@@ -307,6 +320,7 @@ const compileAgents = (
       const messages = [
         ...(built.ok ? engineToolErrors(built.contract.tools.engine_tools) : built.errors),
         ...advisorContractErrors(role),
+        ...codexModelErrors(role),
       ];
       if (!built.ok || messages.length > 0) {
         for (const message of messages) {
@@ -333,7 +347,7 @@ const compileAgents = (
   return agents.sort((a, b) => (a.name < b.name ? -1 : 1));
 };
 
-const manifestAgent = (agent: CompiledAgent, file: string): ManifestAgent => ({
+const manifestAgent = (agent: CompiledAgent, file: string): PluginManifestAgent => ({
   name: agent.name,
   role: agent.role,
   mode: agent.mode ?? null,
@@ -341,7 +355,7 @@ const manifestAgent = (agent: CompiledAgent, file: string): ManifestAgent => ({
   discipline: agent.discipline ?? null,
   role_version: agent.roleVersion,
   file,
-  prompt_sha256: promptSha256(agent.instructions),
+  prompt_sha256: promptShaFor(agent.instructions),
   tier: agent.model.tier,
   effort: agent.model.effort,
 });
@@ -360,10 +374,49 @@ const codexCommandSkill = (command: Command): string =>
     `${command.body.replaceAll("$ARGUMENTS", "(the text the user typed after the command)")}\n`,
   );
 
-const manifestFile = (manifest: PluginManifest): EmittedFile => ({
-  path: "vtc-manifest.json",
-  text: `${JSON.stringify(manifest, null, 2)}\n`,
-});
+const issues = (error: { issues: readonly { path: PropertyKey[]; message: string }[] }): string =>
+  error.issues.map((i) => `${i.path.map(String).join(".") || "(root)"}: ${i.message}`).join("; ");
+
+/** `vtc-manifest.json`, validated against the shared `PluginManifestSchema` (AD-3). */
+const manifestFile = (
+  host: HostId,
+  manifest: PluginManifestInput,
+  errors: CompileError[],
+): EmittedFile => {
+  const parsed = PluginManifestSchema.safeParse(manifest);
+  if (!parsed.success) {
+    errors.push({
+      path: `${host}:${PLUGIN_MANIFEST_ASSET}`,
+      message: `does not match PluginManifestSchema: ${issues(parsed.error)}`,
+    });
+  }
+  return { path: PLUGIN_MANIFEST_ASSET, text: `${JSON.stringify(manifest, null, 2)}\n` };
+};
+
+/**
+ * `vtc/role-contracts.json` (`ROLE_CONTRACTS_ASSET`): every role's contract as parsed from
+ * role.yaml (defaults filled in), sorted by id. The engine loads write scopes, exits, verdicts
+ * and models only from this file (AD-14 rule 6), so each entry is checked again after the JSON
+ * round trip the engine will make.
+ */
+const roleContractsFile = (
+  host: HostId,
+  roles: readonly LoadedRole[],
+  errors: CompileError[],
+): EmittedFile => {
+  const contracts = roles.map((r) => r.role).sort((a, b) => (a.id < b.id ? -1 : 1));
+  const text = `${JSON.stringify(contracts, null, 2)}\n`;
+  (JSON.parse(text) as unknown[]).forEach((entry, i) => {
+    const parsed = RoleContractSchema.safeParse(entry);
+    if (!parsed.success) {
+      errors.push({
+        path: `${host}:${ROLE_CONTRACTS_ASSET}`,
+        message: `entry ${String(i)} (${contracts[i]?.id ?? "?"}) does not match RoleContractSchema: ${issues(parsed.error)}`,
+      });
+    }
+  });
+  return { path: ROLE_CONTRACTS_ASSET, text };
+};
 
 const byPath = (a: { path: string }, b: { path: string }): number =>
   a.path < b.path ? -1 : a.path > b.path ? 1 : 0;
@@ -380,7 +433,7 @@ interface TargetInput {
 /**
  * One host's plugin tree: NOTICE, skills, agents, the host's hand-written files, commands (a
  * Claude Code command, a Codex skill), the MCP entry (hand-written and checked for Claude Code,
- * generated for Codex) and `vtc-manifest.json`. A path emitted twice is an error, so a
+ * generated for Codex), the hook wiring, `vtc/role-contracts.json` and `vtc-manifest.json`. A path emitted twice is an error, so a
  * hand-written file can never silently shadow a generated one.
  */
 const emitTarget = (host: HostId, input: TargetInput, errors: CompileError[]): EmittedFile[] => {
@@ -393,7 +446,7 @@ const emitTarget = (host: HostId, input: TargetInput, errors: CompileError[]): E
     ...agents.map((a) => ({ path: `agents/${a.name}.${ext}`, text: render(a) })),
     ...verbatim(input.files, `plugins/${host}/`),
   ];
-  const skills: ManifestSkill[] = input.skills.map((s) => ({
+  const skills: PluginManifestSkill[] = input.skills.map((s) => ({
     name: s.name,
     ...skillKind(s),
     file: `skills/${s.name}/SKILL.md`,
@@ -405,14 +458,20 @@ const emitTarget = (host: HostId, input: TargetInput, errors: CompileError[]): E
   }
   if (host === "codex") emitted.push({ path: ".mcp.json", text: mcpJson(host) });
   emitted.push(
-    manifestFile({
-      v: 1,
+    { path: HOOKS_FILE, text: renderHooks(host) },
+    roleContractsFile(host, input.roles, errors),
+    manifestFile(
       host,
-      plugin: PLUGIN_NAME,
-      contracts_version: CONTRACTS_VERSION,
-      agents: agents.map((a) => manifestAgent(a, `agents/${a.name}.${ext}`)),
-      skills: skills.sort((a, b) => (a.name < b.name ? -1 : 1)),
-    }),
+      {
+        v: 1,
+        host,
+        plugin: PLUGIN_NAME,
+        contracts_version: CONTRACTS_VERSION,
+        agents: agents.map((a) => manifestAgent(a, `agents/${a.name}.${ext}`)),
+        skills: skills.sort((a, b) => (a.name < b.name ? -1 : 1)),
+      },
+      errors,
+    ),
   );
   const sorted = emitted.sort(byPath);
   errors.push(...checkEmitted(host, sorted));

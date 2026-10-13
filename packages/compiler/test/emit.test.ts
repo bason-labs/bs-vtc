@@ -108,7 +108,7 @@ describe("Codex agent (.toml)", () => {
     });
   });
 
-  it("uses a read-only sandbox for read-only roles and pins a model only when role.yaml does", () => {
+  it("uses a read-only sandbox for read-only roles and sets only the reasoning effort (D-h)", () => {
     expect(codexSandboxFor(tools("read_only"))).toBe("read-only");
     expect(codexSandboxFor(tools("code_sandboxed"))).toBe("workspace-write");
     const parsed = parseToml(
@@ -117,7 +117,8 @@ describe("Codex agent (.toml)", () => {
       ),
     );
     expect(parsed.sandbox_mode).toBe("read-only");
-    expect(parsed.model).toBe("m-1");
+    expect(parsed.model).toBeUndefined();
+    expect(parsed.model_reasoning_effort).toBe("low");
   });
 
   it("round-trips awkward instruction text exactly", () => {

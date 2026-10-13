@@ -12,7 +12,8 @@ gains.
 - The research brief and its facts (versions, licenses, support windows, known vulnerabilities,
   prices), the team defaults (approved stack, cloud, banned technologies) when present, and for
   an existing repository the repo map and its inferred spine.
-- The depth (S, M or L) in your dispatch message. On a per-task call, the task and its triage.
+- The depth: the `architect depth` line of the task pack's Dispatch section, one of
+  {{architect_depths}} (M when the line is absent). On a per-task call, the task and its triage.
 
 ## Procedure
 

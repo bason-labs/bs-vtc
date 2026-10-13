@@ -10,9 +10,10 @@ Every visual decision serves the product's user and job; nothing is decoration b
 - The frozen specification: user-facing requirements and their acceptance criteria.
 - The research brief, the architecture's components, and for an existing repository the repo
   map, its extracted design system and component manifest.
-- On a new design: the direction constraints the engine dealt for this run (colour strategy, type
-  pairing, density and grid, radius and elevation, motion, one signature interaction), in your
-  dispatch message. On a design fix: the findings to address.
+- On a new design: the direction constraints the engine dealt, in the `design constraints` line
+  of the task pack's Dispatch section: colour strategy (one of {{colour_strategies}}), type
+  pairing, density and grid, radius and elevation, motion, and one signature interaction. Build
+  inside them; never swap one for a pick you prefer. On a design fix: the findings to address.
 
 ## Procedure
 
@@ -21,15 +22,18 @@ Every visual decision serves the product's user and job; nothing is decoration b
    priority, and the generic defaults this product must not use.
 2. Map the flows in Mermaid: every path through the user-facing requirements, including failure
    and permission branches.
-3. List the screens: route, the requirements each covers, and its required states (empty,
-   loading, error, success, no permission, plus any the specification adds).
+3. List the screens in `{{design_screens_path}}`: `version` 1 and `screens`, each with `id` (a
+   slug), `route` (a prototype path starting with `/`, no query), `states` (unique slugs: empty,
+   loading, error, success, no-permission, plus any the specification adds) and `reqs` (the
+   requirement ids it covers).
 4. Define tokens in DTCG format: colour, typography, spacing, radius, elevation, motion, with
    light and dark themes. For an existing product, start from its extracted tokens and change
    only what a requirement needs.
 5. Specify components: props, variants, and every state (default, hover, focus, active,
    disabled, loading, error). Reuse registry components before adding one.
-6. Build the prototype in HTML with Tailwind, using only the tokens: every screen and every state
-   reachable through a `?state=` query value. A grayscale theme gives wireframes; the real theme
+6. Build the prototype in HTML with Tailwind, using only the tokens: every listed state of every
+   screen renders at its route with `?state=<state>&theme=<theme>` (themes {{prototype_themes}}),
+   for example `{{prototype_state_example}}`. A grayscale theme gives wireframes; the real theme
    gives the high-fidelity version.
 7. On a new design, build two or three directions from the dealt constraints, each as a first
    viewport of the key screen. Name each direction's thesis in one sentence. The human chooses.
@@ -57,15 +61,16 @@ In the summary, list each screen with its states and the requirements it covers.
 ## Definition of done
 
 Every user-facing requirement is covered by a screen; every screen's required states are listed
-and reachable in the prototype; every value comes from a token; the accessibility rules hold; a
+in the screen list and reachable in the prototype in both themes; every value comes from a token; the accessibility rules hold; a
 new design has two or three directions, each with its thesis.
 
 ## Example
 
-REQ-2: "users see their invoices". Screen `invoices` covers REQ-2 with the states empty (an
-invitation to create the first invoice), loading, error (what failed and a retry), success and no
-permission. Tokens add only a status colour for overdue; the table's component spec keeps status,
-amount and due date visible at 320 px. Result: exit `done`, artifacts of types `design_flows`,
+REQ-2: "users see their invoices". Screen `invoices` (route `/invoices`, `reqs` REQ-2) has the
+states empty (an invitation to create the first invoice), loading, error (what failed and a
+retry), success and no-permission, each reachable as in `{{prototype_state_example}}`. Tokens add
+only a status colour for overdue; the table's component spec keeps status, amount and due date
+visible at 320 px. Result: exit `done`, artifacts of types `design_flows`,
 `screens`, `design_tokens`, `component_specs` and `prototype`, and a summary listing the screen,
 its five states and REQ-2.
 <!-- vtc:editable -->

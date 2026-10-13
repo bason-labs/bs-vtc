@@ -1,13 +1,9 @@
-/** Value types of the compiler's API. */
-import type {
-  Discipline,
-  Effort,
-  HostId,
-  ModelTier,
-  RoleHostModel,
-  RoleKind,
-  RoleTools,
-} from "@vtc/shared";
+/**
+ * Value types of the compiler's API. The files other packages read have their shapes in
+ * @vtc/shared (AD-3): `PluginManifestSchema` for `vtc-manifest.json`, `RoleContractSchema` for
+ * `vtc/role-contracts.json`, the `vtc hook` contract for the hook wiring.
+ */
+import type { Discipline, HostId, RoleHostModel, RoleKind, RoleTools } from "@vtc/shared";
 
 /** One source file, by POSIX path relative to the product repo root (`roles/qa/role.yaml`). */
 export interface SourceFile {
@@ -42,48 +38,6 @@ export interface CompiledAgent {
   readonly model: RoleHostModel;
   /** The full instructions: the agent's system prompt on this host. */
   readonly instructions: string;
-}
-
-/** What a skill is, for the engine's pack selection (§5.2a, §5.3). */
-export type SkillKind = "stack_pack" | "domain_pack" | "lens" | "plugin" | "command" | "skill";
-
-export interface ManifestAgent {
-  readonly name: string;
-  readonly role: string;
-  readonly mode: string | null;
-  readonly kind: RoleKind;
-  readonly discipline: Discipline | null;
-  readonly role_version: string;
-  readonly file: string;
-  /** `promptSha256(instructions)`: see there for exactly what is hashed (§13). */
-  readonly prompt_sha256: string;
-  readonly tier: ModelTier;
-  readonly effort: Effort;
-}
-
-export interface ManifestSkill {
-  readonly name: string;
-  readonly kind: SkillKind;
-  /** The pack slug a task names (`stack_packs`, discipline, lens id), or null. */
-  readonly pack: string | null;
-  readonly file: string;
-}
-
-/**
- * `vtc-manifest.json` in each emitted plugin: what the plugin contains.
- *
- * **Provisional, compiler-internal.** A file other packages read must be a Zod schema in
- * @vtc/shared (AD-3), and the engine and adapters cannot import this package (AD-1). Until
- * `PluginManifestSchema` and a shared `promptShaFor` land there (proposed to the integrator), no
- * other package may read this file; the shape may change with that proposal.
- */
-export interface PluginManifest {
-  readonly v: 1;
-  readonly host: HostId;
-  readonly plugin: string;
-  readonly contracts_version: string;
-  readonly agents: readonly ManifestAgent[];
-  readonly skills: readonly ManifestSkill[];
 }
 
 export interface CompileOutput {

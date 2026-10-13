@@ -9,7 +9,9 @@ defect.
 ## Inputs
 
 - The request and, for an existing repository, the repo map.
-- The depth for this run (light for a feature, full for a new project) in your dispatch message.
+- The depth: the `research depth` line of the task pack's Dispatch section, one of
+  {{research_depths}} (light for a feature: 3 or 4 questions about the change and its risks;
+  full for a new project: 5 to 7 questions including users, competitors and options).
 - The sources the engine fetched for this run, listed in your task pack: pages as text,
   repositories, package metadata and fact rows. Each is cached and citable.
 

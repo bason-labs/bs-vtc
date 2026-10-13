@@ -57,6 +57,13 @@ exists. The implementation may read your tests but never change them.
 - `artifacts`: each test file (`acceptance_test`), each hidden test file
   (`hidden_acceptance_test`) and each scenario card (`scenario_card`).
 
+### Testability pass
+
+When the Dispatch section names no task (the specification-wide call before G1), write no tests.
+Put each acceptance criterion a machine cannot test as written (a vague term, no observable
+outcome, an input nobody can set up) into `questions`, with 2 to 3 testable rewordings as
+options. Criteria that contradict each other are a `spec_conflict`. Exit `done` otherwise.
+
 ### Definition of done
 
 Each covered criterion has a tagged visible test written to fail on the base commit for the
