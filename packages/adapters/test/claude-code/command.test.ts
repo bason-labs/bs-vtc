@@ -1,9 +1,14 @@
+import { homedir } from "node:os";
+import { join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   findForbiddenHostArgs,
+  hostCredentialDenyReadPaths,
   HostOutcomeSchema,
   jsonSchemaFor,
+  ROLE_DENIED_VTC,
   type RoleTools,
+  type SandboxProfile,
   type SpawnRoleRequest,
 } from "@vtc/shared";
 import { ADAPTER_FACTORIES, createClaudeCodeAdapter } from "../../src/index.js";
@@ -21,8 +26,16 @@ const ENGINEER: RoleTools = { profile: "code_sandboxed", write_paths: [], engine
 
 const VTC_HOME = "/home/dev/.vtc";
 const CODEX_HOME = "/home/dev/.codex";
+const CLAUDE_CONFIG = "/home/dev/.claude";
 const PLUGIN_DIR = "/opt/vtc/plugin";
-const HOMES = { vtcHome: VTC_HOME, codexHome: CODEX_HOME };
+const HOMES = { vtcHome: VTC_HOME, codexHome: CODEX_HOME, claudeConfigDir: CLAUDE_CONFIG };
+/** Claude's own credential file, built only through the shared deny helper (D-ad). */
+const credentialsIn = (configDir: string): string => {
+  const [path] = hostCredentialDenyReadPaths({ "claude-code": configDir });
+  if (path === undefined) throw new Error("no Claude credential path");
+  return path;
+};
+const CLAUDE_CREDENTIALS = credentialsIn(CLAUDE_CONFIG);
 const profileRequest = (
   tools: RoleTools,
   network: "none" | "registries" = "none",
@@ -33,8 +46,24 @@ const profile = (...args: Parameters<typeof profileRequest>) =>
 
 /** Denied to every role: the web tools (engine tools only). */
 const ALWAYS_DENIED = ["WebFetch", "WebSearch"];
-/** Never readable, as absolute rules in the settings: the install token and the Codex home. */
-const UNREADABLE_RULES = ["Read(//home/dev/.vtc/token)", "Read(//home/dev/.codex/**)"];
+/**
+ * Never readable, as absolute rules in the settings: the install token, the Codex home and
+ * Claude's own credential file (D-ad).
+ */
+const UNREADABLE_RULES = [
+  "Read(//home/dev/.vtc/token)",
+  "Read(//home/dev/.codex/**)",
+  `Read(/${CLAUDE_CREDENTIALS})`,
+];
+const UNREADABLE = [`${VTC_HOME}/token`, CODEX_HOME, CLAUDE_CREDENTIALS];
+/** D-w: what no role may write under the VTC home, as sandbox directories. */
+const VTC_HOME_DENIED_DIRS = ["allowlists", "osv-db", "hidden"].map((d) => `${VTC_HOME}/${d}`);
+
+const settingsOf = (p: SandboxProfile) =>
+  p.settings as {
+    permissions: { deny: string[] };
+    sandbox: { filesystem: { denyRead: string[]; denyWrite: string[] } };
+  };
 const HOST_CONFIG_DENIED = [".claude/**", ".mcp.json", ".codex/**"].flatMap((path) =>
   ["Edit", "Write", "NotebookEdit"].map((tool) => `${tool}(${path})`),
 );
@@ -58,8 +87,15 @@ const request = (overrides: Partial<SpawnRoleRequest> = {}): SpawnRoleRequest =>
 describe("Claude sandboxProfile (§12.1, AD-9)", () => {
   it("reviewers get read tools only: no edits, no shell", () => {
     const p = profile(READ_ONLY);
-    expect(p.enforced).toEqual({ readOnly: true, perPathWriteDeny: true, network: true });
+    expect(p.enforced).toEqual({
+      readOnly: true,
+      perPathWriteDeny: true,
+      network: true,
+      secretsUnreadable: true,
+    });
     expect(argAfter(p.cliArgs, "--allowedTools")).toBe("Read,Grep,Glob");
+    // the built-in tool set itself is minimal, so no settings file can bring another tool in
+    expect(argAfter(p.cliArgs, "--tools")).toBe("Read,Grep,Glob");
     expect(argAfter(p.cliArgs, "--disallowedTools")?.split(",")).toEqual([
       "Edit",
       "Write",
@@ -75,16 +111,47 @@ describe("Claude sandboxProfile (§12.1, AD-9)", () => {
     });
   });
 
-  it("no role may read the VTC install token or the Codex home, from a tool or from the sandboxed shell (AD-5)", () => {
+  it("no role may read the VTC install token, the Codex home or Claude's credential file, from a tool or from the sandboxed shell (AD-5, D-ad)", () => {
     for (const tools of [READ_ONLY, WRITE_SCOPED, ENGINEER]) {
       const p = profile(tools);
+      expect(p.enforced.secretsUnreadable).toBe(true);
       expect(argAfter(p.cliArgs, "--disallowedTools")?.split(",")).toEqual(
         expect.arrayContaining(ALWAYS_DENIED),
       );
-      expect(p.settings).toMatchObject({
-        permissions: { deny: UNREADABLE_RULES },
-        sandbox: { filesystem: { denyRead: [`${VTC_HOME}/token`, CODEX_HOME] } },
-      });
+      const settings = settingsOf(p);
+      expect(settings.permissions.deny.slice(0, 3)).toEqual(UNREADABLE_RULES);
+      expect(settings.sandbox.filesystem.denyRead).toEqual(UNREADABLE);
+      // the credential path appears only in the two sanctioned deny lists (AD-9 exemption)
+      expect(findForbiddenHostArgs(p.cliArgs)).toEqual([]);
+      expect(findForbiddenHostArgs([JSON.stringify(p.settings)])).toEqual([]);
+      for (const arg of p.cliArgs.filter((a) => !a.startsWith("{"))) {
+        expect(arg).not.toContain(CLAUDE_CREDENTIALS);
+      }
+    }
+  });
+
+  it("denies every role running `vtc calibrate` and writing the VTC home's allowlists, scanner DB and hidden tests (D-w)", () => {
+    expect(ROLE_DENIED_VTC.subcommands).toEqual(["calibrate"]);
+    for (const tools of [READ_ONLY, WRITE_SCOPED, ENGINEER]) {
+      const settings = settingsOf(profile(tools));
+      const deny = settings.permissions.deny;
+      for (const rule of [
+        "Bash(vtc calibrate)",
+        "Bash(vtc calibrate:*)",
+        "Bash(npx vtc calibrate:*)",
+        "Bash(pnpm exec vtc calibrate:*)",
+        "Bash(bunx vtc calibrate:*)",
+      ]) {
+        expect(deny).toContain(rule);
+      }
+      for (const glob of ROLE_DENIED_VTC.homeWriteDeny) {
+        for (const tool of ["Edit", "Write", "NotebookEdit"]) {
+          expect(deny).toContain(`${tool}(//home/dev/.vtc/${glob})`);
+        }
+      }
+      expect(settings.sandbox.filesystem.denyWrite).toEqual(
+        expect.arrayContaining(VTC_HOME_DENIED_DIRS),
+      );
     }
   });
 
@@ -92,11 +159,24 @@ describe("Claude sandboxProfile (§12.1, AD-9)", () => {
     const p = createClaudeCodeAdapter({
       vtcHome: "/srv/vtc home",
       codexHome: "/srv/codex",
+      claudeConfigDir: "/srv/claude config",
     }).sandboxProfile(profileRequest(ENGINEER));
-    expect(p.settings).toMatchObject({
-      permissions: { deny: ["Read(//srv/vtc home/token)", "Read(//srv/codex/**)"] },
-      sandbox: { filesystem: { denyRead: ["/srv/vtc home/token", "/srv/codex"] } },
-    });
+    const credentials = credentialsIn("/srv/claude config");
+    const settings = settingsOf(p);
+    expect(settings.permissions.deny).toEqual(
+      expect.arrayContaining([
+        "Read(//srv/vtc home/token)",
+        "Read(//srv/codex/**)",
+        `Read(/${credentials})`,
+        "Write(//srv/vtc home/allowlists/**)",
+      ]),
+    );
+    expect(settings.sandbox.filesystem.denyRead).toEqual([
+      "/srv/vtc home/token",
+      "/srv/codex",
+      credentials,
+    ]);
+    expect(findForbiddenHostArgs([JSON.stringify(p.settings)])).toEqual([]);
     // the rules travel as JSON array entries, never through the comma-separated tool lists
     expect(argAfter(p.cliArgs, "--disallowedTools")).not.toContain("token");
   });
@@ -105,19 +185,42 @@ describe("Claude sandboxProfile (§12.1, AD-9)", () => {
     afterEach(() => {
       vi.unstubAllEnvs();
     });
-    it("follow $VTC_HOME and $CODEX_HOME like the cli, and the factory takes the cli's VTC home", () => {
+    it("follow $VTC_HOME, $CODEX_HOME and $CLAUDE_CONFIG_DIR like the cli and the hosts, and the factory takes the cli's VTC home", () => {
       vi.stubEnv("VTC_HOME", "/env/vtc");
       vi.stubEnv("CODEX_HOME", "/env/codex");
+      vi.stubEnv("CLAUDE_CONFIG_DIR", "/env/claude");
       expect(
-        createClaudeCodeAdapter().sandboxProfile(profileRequest(READ_ONLY)).settings,
-      ).toMatchObject({
-        sandbox: { filesystem: { denyRead: ["/env/vtc/token", "/env/codex"] } },
-      });
+        settingsOf(createClaudeCodeAdapter().sandboxProfile(profileRequest(READ_ONLY))).sandbox
+          .filesystem.denyRead,
+      ).toEqual(["/env/vtc/token", "/env/codex", credentialsIn("/env/claude")]);
       const wired = ADAPTER_FACTORIES["claude-code"]!({ vtcHome: "/cli/vtc" });
-      expect(wired.sandboxProfile(profileRequest(READ_ONLY)).settings).toMatchObject({
-        permissions: { deny: ["Read(//cli/vtc/token)", "Read(//env/codex/**)"] },
-      });
+      expect(
+        settingsOf(wired.sandboxProfile(profileRequest(READ_ONLY))).permissions.deny.slice(0, 3),
+      ).toEqual([
+        "Read(//cli/vtc/token)",
+        "Read(//env/codex/**)",
+        `Read(/${credentialsIn("/env/claude")})`,
+      ]);
     });
+
+    it("without $CLAUDE_CONFIG_DIR, deny Claude's credential file under the home's .claude", () => {
+      vi.stubEnv("CLAUDE_CONFIG_DIR", "");
+      vi.stubEnv("HOME", "/home/someone");
+      const denyRead = settingsOf(
+        createClaudeCodeAdapter({ vtcHome: VTC_HOME, codexHome: CODEX_HOME }).sandboxProfile(
+          profileRequest(READ_ONLY),
+        ),
+      ).sandbox.filesystem.denyRead;
+      expect(denyRead[2]).toBe(credentialsIn(join(homedir(), ".claude")));
+    });
+  });
+
+  it("refuses a Claude config directory whose credential deny could name something else", () => {
+    expect(() =>
+      createClaudeCodeAdapter({ ...HOMES, claudeConfigDir: "/srv/a(b)" }).sandboxProfile(
+        profileRequest(READ_ONLY),
+      ),
+    ).toThrow(/credential/);
   });
 
   it("refuses a write path that would inject permission rules", () => {
@@ -188,12 +291,21 @@ describe("Claude sandboxProfile (§12.1, AD-9)", () => {
             `${CWD}/.claude/**`,
             `${CWD}/.mcp.json`,
             `${CWD}/.codex/**`,
+            ...VTC_HOME_DENIED_DIRS,
           ],
+          denyRead: UNREADABLE,
         },
         network: { allowedDomains: [] },
       },
     });
     expect(JSON.parse(argAfter(p.cliArgs, "--settings") ?? "")).toEqual(p.settings);
+    expect(argAfter(p.cliArgs, "--tools")).toBe("Read,Grep,Glob,Edit,Write,NotebookEdit,Bash");
+  });
+
+  it("write-scoped roles get the edit tools but no shell in the built-in tool set", () => {
+    expect(argAfter(profile(WRITE_SCOPED).cliArgs, "--tools")).toBe(
+      "Read,Grep,Glob,Edit,Write,NotebookEdit",
+    );
   });
 
   it("protected paths and host config are denied to the edit tools as well", () => {
@@ -232,6 +344,8 @@ describe("Claude headlessCommand", () => {
     expect(argAfter(args, "--agent")).toBe("vtc:vtc-qa-judge");
     expect(argAfter(args, "--model")).toBe("sonnet");
     expect(argAfter(args, "--effort")).toBe("medium");
+    // a run can be capped, never widened: no bypass mode and no extra directories
+    expect(args).not.toContain("--add-dir");
     expect(argAfter(args, "--permission-prompts")).toBe("none");
     // pinned, so the user's defaultMode (acceptEdits, auto) never applies to a role run
     expect(argAfter(args, "--permission-mode")).toBe("dontAsk");
@@ -245,11 +359,27 @@ describe("Claude headlessCommand", () => {
     expect(findForbiddenHostArgs(args)).toEqual([]);
   });
 
-  it("loads the compiled plugin from disk and ignores the user's settings, fresh and resumed", () => {
+  it("loads the compiled plugin from disk and no user, project or local settings file, fresh and resumed (D-ab)", () => {
     for (const session of [undefined, { host: "claude-code" as const, id: "sess-9" }]) {
       const args = adapter.headlessCommand(request(), session).args;
       expect(argAfter(args, "--plugin-dir")).toBe(PLUGIN_DIR);
-      expect(argAfter(args, "--setting-sources")).toBe("project");
+      // `--restricted` ignores every settings file (user, project, local); only the VTC-authored
+      // `--settings` applies, so a committed .claude/settings.json cannot pre-approve a tool
+      expect(args).toContain("--restricted");
+      expect(args).not.toContain("--setting-sources");
+      expect(args.filter((a) => a === "--settings")).toHaveLength(1);
+      expect(argAfter(args, "--tools")).toBe("Read,Grep,Glob");
+    }
+  });
+
+  it("runs on the session's default model with only the effort set when the engine resolved no id (D-ae)", () => {
+    for (const session of [undefined, { host: "claude-code" as const, id: "sess-9" }]) {
+      const args = adapter.headlessCommand(
+        request({ model: { tier: "low", effort: "low" } }),
+        session,
+      ).args;
+      expect(args).not.toContain("--model");
+      expect(argAfter(args, "--effort")).toBe("low");
     }
   });
 
