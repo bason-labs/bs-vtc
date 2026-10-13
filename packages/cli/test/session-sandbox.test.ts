@@ -19,6 +19,7 @@
 import { mkdirSync, readFileSync, symlinkSync, writeFileSync } from "node:fs";
 import { join, relative } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
+import { ADAPTER_FACTORIES } from "@vtc/adapters";
 import { claudeSessionSandboxSettings, type HostAdapter } from "@vtc/shared";
 import { createInstallCommand, defaultInstallDeps } from "../src/commands/install.js";
 import { checkSessionSandbox, detectGateSandbox } from "../src/doctor-checks.js";
@@ -34,7 +35,7 @@ import {
   wideningOf,
   type SessionSandboxEnv,
 } from "../src/session-sandbox.js";
-import { capture, cleanupDirs, git, initRepo, tempDir } from "./helpers.js";
+import { capture, cleanupDirs, git, initRepo, tempDir, writePluginTrees } from "./helpers.js";
 
 afterEach(cleanupDirs);
 
@@ -320,6 +321,70 @@ describe("vtc install --host claude-code and widening settings", () => {
     );
     expect(readFileSync(join(repo, CLAUDE_PROJECT_SETTINGS), "utf8")).toContain("npm *");
   });
+});
+
+describe("vtc install --host claude-code with the real Claude adapter: one writer, after consent (D-an)", () => {
+  const installWith = (
+    env: SessionSandboxEnv,
+    answer: boolean,
+  ): { cmd: ReturnType<typeof createInstallCommand>; questions: string[] } => {
+    const questions: string[] = [];
+    const plugins = writePluginTrees(tempDir("vtc-plugins-"));
+    const cmd = createInstallCommand(() => ({
+      ...defaultInstallDeps(),
+      factories: { "claude-code": ADAPTER_FACTORIES["claude-code"] },
+      home: () => env.homeDir,
+      pluginDir: (host) => plugins[`plugin:${host}`],
+      platform: "darwin",
+      timerHost: () => {
+        throw new Error("the real launchd or systemd is never touched in tests");
+      },
+      confirm: (q) => (questions.push(q), Promise.resolve(answer)),
+      sessionSandboxEnv: () => env,
+    }));
+    return { cmd, questions };
+  };
+
+  for (const scope of ["user", "project"] as const) {
+    it(`${scope} scope: a local excludedCommands is shown and dropped, not refused, and the sandbox reads on`, async () => {
+      const { vtcHome, repo, env, write } = setup();
+      git(repo, "config", "core.excludesFile", "/dev/null");
+      write(CLAUDE_LOCAL_SETTINGS, { model: "opus", sandbox: { excludedCommands: ["docker *"] } });
+      const { cmd, questions } = installWith(env, true);
+      const { ctx, out } = capture(repo, vtcHome);
+      expect(await cmd.run(["claude-code", "--scope", scope], ctx)).toBe(0);
+      const text = out.join("\n");
+      expect(text).toMatch(
+        /let commands past the sandbox and are removed:\n {2}- sandbox\.excludedCommands/,
+      );
+      expect(questions).toHaveLength(1);
+      const written = JSON.parse(readFileSync(join(repo, CLAUDE_LOCAL_SETTINGS), "utf8")) as {
+        model: string;
+        sandbox: Record<string, unknown>;
+      };
+      expect(written.model).toBe("opus");
+      expect(written.sandbox).not.toHaveProperty("excludedCommands");
+      expect(claudeSessionSandboxOf(repo, vtcHome, env, repo).state).toBe("on");
+    });
+
+    it(`${scope} scope: declining leaves no sandbox settings on disk`, async () => {
+      const { vtcHome, repo, env, write } = setup();
+      git(repo, "config", "core.excludesFile", "/dev/null");
+      write(CLAUDE_LOCAL_SETTINGS, { model: "opus" });
+      const { cmd, questions } = installWith(env, false);
+      const { ctx, out } = capture(repo, vtcHome);
+      expect(await cmd.run(["claude-code", "--scope", scope], ctx)).toBe(0);
+      expect(questions).toHaveLength(1);
+      expect(out.join("\n")).toMatch(/Session sandbox not written/);
+      const local = JSON.parse(readFileSync(join(repo, CLAUDE_LOCAL_SETTINGS), "utf8")) as Record<
+        string,
+        unknown
+      >;
+      expect(local.model).toBe("opus");
+      expect(local).not.toHaveProperty("sandbox");
+      expect(claudeSessionSandboxOf(repo, vtcHome, env, repo).state).not.toBe("on");
+    });
+  }
 });
 
 describe("the bridge reads the state again for every hello", () => {
