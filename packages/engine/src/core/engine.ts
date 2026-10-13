@@ -10,7 +10,9 @@ import { join } from "node:path";
 import {
   dotenvValues,
   eventLogPath,
+  gatesConfigNotCommitted,
   HOST_IDS,
+  humanChannelRequired,
   PACK_INPUT_TYPES,
   parseEventLog,
   remainingPct,
@@ -32,7 +34,9 @@ import {
   type Phase,
   type ProjectConfig,
   type RunControlResult,
+  type HumanOnlyToolName,
   type RunScopedInput,
+  type SessionSandboxState,
   type StartInput,
   type StartResult,
   type StatusResult,
@@ -51,7 +55,7 @@ import {
   PROJECT_CONFIG_PATH,
   type CommittedGates,
 } from "./config.js";
-import { dispatchGuarded, dispatchNow, phaseRoles } from "./dispatch.js";
+import { dispatchGuarded, dispatchNow, inSessionAllowed, phaseRoles } from "./dispatch.js";
 import { parkEscalation } from "./escalations.js";
 import {
   acceptCheckout,
@@ -211,6 +215,8 @@ export class Engine implements Kernel {
   private readonly leads = new Map<string, string>();
   /** A role session's one action (`run/action`): it may submit nothing else. */
   private readonly bound = new Map<string, string>();
+  /** What each run's Lead session reported about its OS sandbox (D-an; absent = unknown). */
+  private readonly leadSandbox = new Map<string, SessionSandboxState | undefined>();
 
   private constructor(readonly deps: EngineCoreDeps) {
     this.guardDir = guardDirFor(deps.vtcHome, deps.repoRoot);
@@ -683,6 +689,11 @@ export class Engine implements Kernel {
     return installed ?? (HOST_IDS[0] as HostId);
   }
 
+  sessionSandboxFor(run: string, call: CallContext): SessionSandboxState | undefined {
+    if (this.leads.has(run)) return this.leadSandbox.get(run);
+    return call.client === undefined ? call.sessionSandbox : undefined;
+  }
+
   allStates(): Iterable<RunState> {
     return [...this.finished.values(), ...[...this.handles.values()].map((h) => h.state)];
   }
@@ -933,7 +944,7 @@ export class Engine implements Kernel {
 
   async start(input: StartInput, call: CallContext): Promise<StartResult> {
     // read before the checks: nothing awaits between them and registering the run
-    const committed = await this.startGates();
+    const { head, gates: committed } = await this.startGates();
     if ([...this.handles.values()].some((h) => h.state.run.finished_at === undefined)) {
       throw new EngineError(
         "run_active",
@@ -949,8 +960,10 @@ export class Engine implements Kernel {
         ) + "); check the repo, then vtc resume",
       );
     }
+    // spine §5 reading 78 (D-au): a run verifies only with the gates.yml committed where it starts
+    if (committed === null) throw new EngineError("config", gatesConfigNotCommitted(head));
     const config = this.diskProject();
-    const gates = committed?.config ?? null;
+    const gates = committed.config;
     const track = config.track_default ?? input.track;
     const id = this.newRunId();
     const log = openEventLog(this.deps.repoRoot, id, this.deps.lock, {
@@ -959,7 +972,7 @@ export class Engine implements Kernel {
     });
     const handle: RunHandle = { state: emptyRunState(id, this.now().toISOString()), log };
     this.handles.set(id, handle);
-    this.freezeConfig(id, config, gates, committed?.sha256 ?? null);
+    this.freezeConfig(id, config, gates, committed.sha256);
     if (call.client === "bridge" && call.session !== undefined) this.setLead(id, call, "started");
     const noRemote =
       config.merge_level >= 2 &&
@@ -988,20 +1001,19 @@ export class Engine implements Kernel {
 
   /**
    * The `gates.yml` committed at the commit the run starts on (spine §5 reading 46f): `vtc
-   * calibrate` tells the user to commit it. `null` when HEAD has none (or no commit yet): the run
-   * starts (its front half needs no gates), and each of its tasks parks (`gate_infra`) before a
-   * worktree is made, saying a new run is needed: the run never takes up a `gates.yml` committed
-   * later (reading 20, `startedWithoutGates`).
+   * calibrate` tells the user to commit it. `gates: null` when HEAD has none (or there is no
+   * commit yet, `head` is then `HEAD`): `start` refuses (reading 78, D-au), since the run never
+   * takes up a `gates.yml` committed later (reading 20).
    */
-  private async startGates(): Promise<CommittedGates | null> {
+  private async startGates(): Promise<{ head: string; gates: CommittedGates | null }> {
     let head: string;
     try {
       head = await this.deps.workspace.resolve("HEAD");
     } catch {
-      return null;
+      return { head: "HEAD", gates: null };
     }
     try {
-      return await committedGatesConfig(this.deps.git, head);
+      return { head, gates: await committedGatesConfig(this.deps.git, head) };
     } catch (error) {
       if (error instanceof ConfigError) throw new EngineError("config", error.message);
       throw error;
@@ -1202,7 +1214,7 @@ export class Engine implements Kernel {
 
   async answer(input: AnswerInput, call: CallContext): Promise<NextResult> {
     const handle = this.resolve(input.run);
-    this.assertLead(handle.state.id, call, "answer");
+    this.assertHumanChannel(handle.state.id, call, "answer");
     return this.serial(handle, async () => {
       const escalation = handle.state.escalations.get(input.escalation);
       if (escalation === undefined)
@@ -1272,7 +1284,7 @@ export class Engine implements Kernel {
 
   async approve(input: ApproveInput, call: CallContext): Promise<NextResult> {
     const handle = this.resolve(input.run);
-    this.assertLead(handle.state.id, call, "approve");
+    this.assertHumanChannel(handle.state.id, call, "approve");
     return this.serial(handle, async () => {
       const awaiting = this.awaitingGates(handle);
       if (awaiting === null)
@@ -1326,7 +1338,7 @@ export class Engine implements Kernel {
     call: CallContext = { host: null },
   ): Promise<ChangeRequestResult> {
     const handle = this.resolve(input.run);
-    this.assertLead(handle.state.id, call, "change_request");
+    this.assertHumanChannel(handle.state.id, call, "change_request");
     return this.serial(handle, () => {
       const state = handle.state;
       let frozen: FrozenArtifact | undefined;
@@ -1388,11 +1400,14 @@ export class Engine implements Kernel {
   /**
    * The run's Lead session: the bridge session that started the run, or else the first bridge
    * session to drive it (a Lead whose bridge reconnected, or after a restart) that is not bound
-   * to a role action. A `submit` never claims it. The cli (`client: cli`) is the human.
+   * to a role action. A `submit` never claims it, and a cli connection never does.
    *
    * Defence in depth only: `client` is what the connecting process declares, so a same-uid
-   * process that says `cli` is exempt, and a role with a shell can run the cli (spine §7). Each
-   * claim is logged in the engine's private directory (`leads.jsonl`) for the human.
+   * process can declare itself a bridge. What bounds that is the spine §7 Accepted residuals row
+   * "Plugin-only in-session roles" (§5 reading 71): role shells in the Lead session cannot reach
+   * the sockets or the install token, and the human-only tools need a human channel
+   * ({@link assertHumanChannel}). Each claim is logged in the engine's private directory
+   * (`leads.jsonl`) for the human.
    */
   private claimLead(run: string, call: CallContext): void {
     if (call.client !== "bridge" || call.session === undefined) return;
@@ -1403,10 +1418,11 @@ export class Engine implements Kernel {
   private setLead(run: string, call: CallContext, how: "started" | "claimed"): void {
     if (call.session === undefined) return;
     this.leads.set(run, call.session);
+    this.leadSandbox.set(run, call.sessionSandbox);
     try {
       appendPrivateFile(
         join(this.guardDir, "leads.jsonl"),
-        `${JSON.stringify({ ts: this.now().toISOString(), run, session: call.session, host: call.host, how })}\n`,
+        `${JSON.stringify({ ts: this.now().toISOString(), run, session: call.session, host: call.host, how, session_sandbox: call.sessionSandbox ?? "unknown" })}\n`,
       );
     } catch {
       // the log is for the human; the claim stands without it
@@ -1414,16 +1430,25 @@ export class Engine implements Kernel {
   }
 
   /**
-   * Lead-only tools (`approve`, `answer`, `change_request`) are refused from any other bridge
-   * session: a role session until the Codex per-agent MCP isolation spike passes (spine §7).
+   * The human-only tools (`HUMAN_ONLY_TOOLS`: `approve`, `answer`, `change_request`) need a human
+   * channel (D-an, spine §5 reading 71): the run's Lead session, which relays the human's words in
+   * the Lead chat, or a cli connection whose install token matched (sent only after a TTY
+   * confirmation). A bare `{client: "cli"}` hello is never proof of a human, and any other bridge
+   * session is a role session (spine §7: until the Codex per-agent MCP isolation spike passes).
+   * An in-process caller (no `client`: the composition, tests) opened no socket and is trusted.
+   * The rest is the §7 Accepted residuals row "Plugin-only in-session roles".
    */
-  private assertLead(run: string, call: CallContext, tool: string): void {
+  private assertHumanChannel(run: string, call: CallContext, tool: HumanOnlyToolName): void {
+    if (call.client === undefined) return;
+    if (call.client === "cli") {
+      if (call.human === true) return;
+      throw new EngineError("forbidden", humanChannelRequired(tool));
+    }
     this.claimLead(run, call);
-    if (call.client !== "bridge" || call.session === undefined) return;
-    if (this.leads.get(run) !== call.session)
+    if (call.session === undefined || this.leads.get(run) !== call.session)
       throw new EngineError(
         "forbidden",
-        `${tool} is the Lead's tool; a role session may only submit its own result`,
+        `${tool} is the Lead's tool; a role session may only submit its own result (${humanChannelRequired(tool)})`,
       );
   }
 
@@ -1443,7 +1468,11 @@ export class Engine implements Kernel {
 
   /** A connection closed: it is no longer any run's Lead, nor bound to an action. */
   sessionClosed(session: string): void {
-    for (const [run, lead] of [...this.leads]) if (lead === session) this.leads.delete(run);
+    for (const [run, lead] of [...this.leads])
+      if (lead === session) {
+        this.leads.delete(run);
+        this.leadSandbox.delete(run);
+      }
     this.bound.delete(session);
   }
 
@@ -1484,6 +1513,13 @@ export class Engine implements Kernel {
           "conflict",
           `the run's advisor budget is spent ($${spent.toFixed(2)} of $${budget.toFixed(2)}, budgets.advisor_usd)`,
         );
+      const host = this.hostFor(call);
+      // D-an (spine §5 reading 71): an advisor with a shell runs in-session only when sandboxed
+      if (!inSessionAllowed(this, handle, { role: input.advisor }, host, call))
+        throw new EngineError(
+          "conflict",
+          `${input.advisor} runs a shell, and the Lead session's OS sandbox is not on: run \`vtc install --host claude-code\` in this repo, restart the Claude Code session, then ask again`,
+        );
       const question = `${state.id}-${String(state.roleRuns.size + 1)}`;
       const path = `.vtc/state/packs/${state.id}/consult-${question}.md`;
       writeRepoFile(
@@ -1491,7 +1527,6 @@ export class Engine implements Kernel {
         path,
         `# Question for ${input.advisor}\n\n${input.question}\n`,
       );
-      const host = this.hostFor(call);
       const action = await dispatchGuarded(
         this,
         handle,

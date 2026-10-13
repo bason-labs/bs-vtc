@@ -46,6 +46,7 @@ const socketFor = async (h: Harness): Promise<EngineSocketServer> => {
     path: join(home, engineSocketFile(h.repo)),
     host: h.engine,
     versions: VERSIONS,
+    installToken: "i".repeat(43),
   });
   servers.push(server);
   return server;
@@ -296,12 +297,13 @@ describe("socket protocol (AD-12 rule 3)", () => {
     const status = await client.call("status", {});
     expect(status.run.phase).toBe("discover");
     expect(server.connections()).toEqual({ bridge: 0, cli: 1 });
+    // a bare cli hello is no human channel (D-an): the human-only tools are refused
     await expect(
       client.call("answer", {
         escalation: "E-1",
         answer: { option: "x", who_should_have_caught: "qa" },
       }),
-    ).rejects.toThrow(/no escalation/);
+    ).rejects.toThrow(/forbidden: answer records a human decision/);
     await client.close();
     await h.release();
   });
@@ -350,6 +352,7 @@ describe("socket protocol (AD-12 rule 3)", () => {
         path: `/tmp/${"x".repeat(120)}.sock`,
         host: h.engine,
         versions: VERSIONS,
+        installToken: "i".repeat(43),
       }),
     ).rejects.toThrow(/longer/);
     await h.release();

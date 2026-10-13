@@ -51,3 +51,4 @@ export {
   type GitResult,
   type GitRunOptions,
 } from "./exec.js";
+export { HOST_CONFIG_PATHS, restoreHostConfig } from "./host-config.js";
