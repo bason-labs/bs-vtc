@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { DESIGN_REVIEW_MAX_BYTES } from "@vtc/shared";
+import { DESIGN_REVIEW_MAX_BYTES, DESIGN_SCREENS_PATH, prototypeStatePath } from "@vtc/shared";
 import {
   buildReviewInput,
   designReviewsPath,
@@ -15,11 +15,11 @@ import { readDevFixture } from "../fixtures";
 
 const PROTO = "http://127.0.0.1:4311/";
 
-describe("parseScreens (screens.yaml, spec §9)", () => {
+describe("parseScreens (DesignScreensFile at DESIGN_SCREENS_PATH, spec §9)", () => {
   it("reads each screen's id, route, states and REQs", () => {
-    const parsed = parseScreens(readDevFixture(".vtc/design/screens.yaml"));
-    expect(parsed?.skipped).toBe(0);
-    expect(parsed?.screens[0]).toEqual({
+    const parsed = parseScreens(readDevFixture(DESIGN_SCREENS_PATH));
+    expect(parsed).toMatchObject({ ok: true, stripped: [] });
+    expect(parsed.ok && parsed.screens[0]).toEqual({
       id: "reset-request",
       route: "/reset/",
       states: ["empty", "loading", "error", "success"],
@@ -27,38 +27,57 @@ describe("parseScreens (screens.yaml, spec §9)", () => {
     });
   });
 
-  it("skips malformed screens, defaults missing states, and returns null for non-YAML", () => {
+  it("defaults missing states to `default` and drops keys a newer Designer added", () => {
     const parsed = parseScreens(
-      [
-        "screens:",
-        "  - id: home",
-        "    route: /",
-        "  - id: Bad Id",
-        "    route: /x",
-        "  - id: no-route",
-        "  - id: abs",
-        "    route: http://evil.example/",
-      ].join("\n"),
+      ["version: 1", "screens:", "  - id: home", "    route: /", "    owner: designer"].join("\n"),
     );
-    expect(parsed?.screens).toEqual([{ id: "home", route: "/", states: ["default"], reqs: [] }]);
-    expect(parsed?.skipped).toBe(3);
-    expect(parseScreens("screens: [")).toBeNull();
-    expect(parseScreens("just text")).toBeNull();
+    expect(parsed).toEqual({
+      ok: true,
+      screens: [{ id: "home", route: "/", states: ["default"], reqs: [] }],
+      stripped: ["screens.0.owner"],
+    });
+  });
+
+  it("refuses a file that breaks the contract, saying where", () => {
+    const bad = (text: string) => {
+      const parsed = parseScreens(text);
+      return parsed.ok ? null : parsed.error;
+    };
+    expect(bad(["screens:", "  - id: Bad Id", "    route: /x"].join("\n"))).toMatch(
+      /^screens\.0\.id: /,
+    );
+    expect(bad(["screens:", "  - id: abs", "    route: http://evil.example/"].join("\n"))).toMatch(
+      /^screens\.0\.route: /,
+    );
+    expect(bad(["screens:", "  - id: a", "    route: /a?x=1"].join("\n"))).toMatch(/route/);
+    expect(
+      bad(["screens:", "  - id: a", "    route: /a", "  - id: a", "    route: /b"].join("\n")),
+    ).toMatch(/screen ids must be unique/);
+    expect(bad("screens: [")).toBe("not valid YAML");
+    expect(bad("just text")).toMatch(/^\(file\): /);
   });
 });
 
-describe("prototypeFrameUrl (AD-5 rule 9: the separate prototype origin)", () => {
+describe("prototypeFrameUrl (prototypeStatePath on the separate prototype origin, AD-5 rule 9)", () => {
   it("puts the screen route on the prototype origin with ?state= and ?theme=", () => {
+    expect(prototypeFrameUrl(PROTO, "/reset/", "error", "dark")).toBe(
+      `http://127.0.0.1:4311${prototypeStatePath("/reset/", "error", "dark")}`,
+    );
     expect(prototypeFrameUrl(PROTO, "/reset/", "error", "dark")).toBe(
       "http://127.0.0.1:4311/reset/?state=error&theme=dark",
     );
-    expect(prototypeFrameUrl(PROTO, "/a/?x=1", "empty", "light")).toBe(
-      "http://127.0.0.1:4311/a/?x=1&state=empty&theme=light",
-    );
+  });
+
+  it("refuses routes and states the contract refuses", () => {
+    expect(prototypeFrameUrl(PROTO, "/a/?x=1", "empty", "light")).toBeNull();
+    expect(prototypeFrameUrl(PROTO, "/a/", "Not A Slug", "light")).toBeNull();
   });
 
   it("never leaves the prototype origin", () => {
     expect(prototypeFrameUrl(PROTO, "//evil.example/x", "s", "light")).toBe(
+      "http://127.0.0.1:4311/evil.example/x?state=s&theme=light",
+    );
+    expect(prototypeFrameUrl(PROTO, "/\\evil.example/x", "s", "light")).toBe(
       "http://127.0.0.1:4311/evil.example/x?state=s&theme=light",
     );
     expect(prototypeFrameUrl(PROTO, "/../../etc", "s", "light")).toBe(
@@ -70,7 +89,8 @@ describe("prototypeFrameUrl (AD-5 rule 9: the separate prototype origin)", () =>
 });
 
 describe("designSelection (query string → screen, state, viewport, theme)", () => {
-  const screens = parseScreens(readDevFixture(".vtc/design/screens.yaml"))?.screens ?? [];
+  const parsed = parseScreens(readDevFixture(DESIGN_SCREENS_PATH));
+  const screens = parsed.ok ? parsed.screens : [];
 
   it("defaults to the first screen, its first state, desktop and light", () => {
     expect(designSelection(new URLSearchParams(), screens)).toEqual({

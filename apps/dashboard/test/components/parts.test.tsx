@@ -50,7 +50,7 @@ describe("StepNodeCard", () => {
     expect(screen.getByRole("button")).toHaveClass("vtc-node-running");
     expect(screen.getByRole("button")).toHaveTextContent("Role · engineer");
     rerender(<StepNodeCard data={{ node: waiting, meta: nodeStateMeta(waiting) }} />);
-    expect(screen.getByRole("button")).toHaveClass("vtc-node-interrupted");
+    expect(screen.getByRole("button")).toHaveClass("vtc-node-waiting-limit");
     expect(screen.getByRole("button")).toHaveTextContent("Waiting for limit");
     expect(screen.getByRole("button")).toHaveTextContent("1.5k tok");
   });

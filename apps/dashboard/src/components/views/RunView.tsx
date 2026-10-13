@@ -9,6 +9,7 @@ import { Link } from "@/components/app/Link";
 import { FlowCanvas } from "@/components/flows/FlowCanvas";
 import { NodeList } from "@/components/flows/NodeList";
 import { RunNodeDrawer } from "@/components/flows/RunNodeDrawer";
+import { RunNotices } from "@/components/notices/RunNotices";
 import { Breadcrumbs, Loaded, MissingParam, PageHeader } from "./common";
 
 const ZOOMS: readonly { zoom: RunZoom; label: string }[] = [
@@ -76,6 +77,7 @@ export function RunView({
           ))}
         </nav>
       </PageHeader>
+      <RunNotices run={run} />
       <Loaded resource={graph} skeleton="h-[56vh]">
         {(g) => (
           <div className="space-y-4">

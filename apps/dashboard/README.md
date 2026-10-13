@@ -35,20 +35,29 @@ binaries must stay out of the production dependency closure (AD-2, `supply-chain
   request, reading the SSE stream with `fetch` streaming (EventSource cannot send headers).
 - Artifacts (spec, design, evidence bundles) come from `GET /api/runs/:run/artifacts?path=` as
   JSON; diffs from `/tasks/:task/diff`; features from `/features`.
-- Design review: the screens come from `.vtc/design/screens.yaml`
-  (`screens: [{ id, route, states, reqs }]`, read through the artifacts route); the prototype comes
-  from the separate prototype origin (`HealthResult.prototype_url`) at the screen's route with
-  `?state=<state>&theme=<light|dark>`, embedded only in `<iframe sandbox="allow-scripts">`
+- Design review: the screens come from `DESIGN_SCREENS_PATH` (`.vtc/design/screens.yaml`, read
+  through the artifacts route) and are parsed with `parsePersisted(DesignScreensFileSchema)` from
+  `@vtc/shared` (spine §5 reading 32): unknown keys a newer Designer wrote are dropped, and a file
+  that breaks the contract is refused as a whole with the first problem shown. A screen without
+  states is shown with one state, `default`. The prototype comes from the separate prototype
+  origin (`HealthResult.prototype_url`) at `prototypeStatePath(route, state, theme)`
+  (`<route>?state=<state>&theme=<light|dark>`), embedded only in `<iframe sandbox="allow-scripts">`
   (`ENGINE_HTTP.prototype.iframeSandbox`), never with `allow-same-origin`, and scaled to fit at
   the §7.5 widths. Pins are read from `.vtc/design/reviews/<screen>.jsonl` and written with
   `POST /api/design/reviews`; a pin is a percentage of the frame, so it only lines up on the
   state, width and theme it was made on (the others are listed, not drawn). Keyboard users place
   a pin with Enter and the position fields.
-- Open integration risk: the `screens.yaml` shape above is the dashboard's reading of spec §9
-  ("each screen's route, required states and the REQs it covers"); no contract in `@vtc/shared`
-  freezes it yet, and the Designer role (roles-compiler) writes the file. A contract proposal asks
-  the integrator for a frozen `DesignScreensFile` schema shared by both; until then a Designer
-  writing another shape shows "No screens to review yet" (`parseScreens` in `src/lib/design.ts`).
+- Run notices (run and feature views): the run's event log (`GET /api/runs/:run/events`, every
+  page) is read for the typed events the human must see without anything waiting on an answer:
+  `branch.push_failed` and `feature.pr_failed` (marked resolved once a later `branch.pushed` or
+  `feature.pr_updated` of the same feature succeeds), `incident.recorded` (`config_changed`: the
+  run keeps its frozen config; `checkout_write` with its evidence; the unclean-end kinds) and
+  `run.merge_level_changed` (`no_remote`: Level 2+ without a push remote runs at Level 1). It
+  re-reads when one of those events arrives (`notices` topic). Nothing shows when there is none.
+- Node states: a `WorkflowNode` `interrupted` by a usage limit is drawn with the `waiting_limit`
+  style (`vtc-node-waiting-limit`) and labelled "Waiting for limit" (spine §5 reading 34).
+- Transcripts: there is no transcript route (spine §5 reading 33). The node drawer shows the host
+  session id and that transcripts stay in `.vtc/state/`, which the API never serves.
 - Without a running engine, `vtc dashboard` serves the same routes read-only from the committed
   `.vtc/` snapshot.
 
@@ -68,7 +77,9 @@ Development (AD-5 rule 8):
 - Against a live engine: `pnpm dev:engine --repo <abs path of the target repo>` starts
   `scripts/engine-proxy.ts` on `127.0.0.1:4320`, then `VTC_DEV_API=http://127.0.0.1:4320 pnpm dev`.
   The proxy finds the engine in `$VTC_HOME/engines/<repo-key>.json` (`~/.vtc` by default) on
-  every request, injects the install token (refusing a token file others can read), sets `Host`
+  every request, injects the install token (refusing a token file others can read, spine §5
+  reading 35: only this dev proxy reads it; nothing in `src/`, so nothing in the shipped bundle,
+  may, and `test/bundle-guards.test.ts` checks that), sets `Host`
   and drops `Origin`, cookies and the browser's own `Authorization`. It forwards only the routes
   whose `auth` is `token`, never the nonce mint or the statusline ingest. Since it hides the
   browser's `Origin` and `Host` from the engine, it checks them itself first (AD-5 rule 3): `Host`
