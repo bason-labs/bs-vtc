@@ -45,4 +45,10 @@ export const KNOWN_ARTIFACT_TYPES: readonly string[] = [
   "traces",
   "scorecard",
   "prompt_proposal",
+  // advisors (§5.4): what the Lead's request to an advisor may list; the engine routes none of
+  // these, because advisors run outside the run
+  "cost_history",
+  "change_request",
+  "run_status",
+  "attachments",
 ];

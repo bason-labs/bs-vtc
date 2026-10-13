@@ -263,6 +263,49 @@ describe("the v1 roster (§5.2, §5.2a, §5.3)", () => {
   });
 });
 
+describe("the advisors (§5.4: Tier 3, called through the Lead)", () => {
+  /** Estimator / Solution Architect, Client-liaison writer, UX Researcher, Incident debugger,
+   * Legacy explainer, ML/Data advisor. */
+  const ADVISORS = [
+    "advisor_client_liaison",
+    "advisor_estimator",
+    "advisor_incident_debugger",
+    "advisor_legacy_explainer",
+    "advisor_ml_data",
+    "advisor_ux_researcher",
+  ];
+  const lead = (): string =>
+    sources.find((s) => s.path === "plugins/common/skills/lead/SKILL.md")?.text ?? "";
+
+  it("has a read-only advisor role for every §5.4 advisor and no other", () => {
+    expect(
+      roles
+        .filter((r) => r.kind === "advisor")
+        .map((r) => r.id)
+        .sort(),
+    ).toEqual(ADVISORS);
+    for (const id of ADVISORS) expect(role(id)?.tools.profile).toBe("read_only");
+  });
+
+  it("names every advisor agent in the Lead skill, so the Lead can call it", () => {
+    const named = [...lead().matchAll(/`(vtc-advisor-[a-z-]+)`/g)].map((m) => m[1]);
+    expect([...new Set(named)].sort()).toEqual(
+      roles
+        .filter((r) => r.kind === "advisor")
+        .flatMap(compiledAgentNames)
+        .sort(),
+    );
+  });
+
+  it("tells the Lead that advice never reaches the engine and changes nothing by itself", () => {
+    const section = /## Advisors\n([\s\S]*?)\n## /.exec(lead())?.[1] ?? "";
+    expect(section).toMatch(/never call `submit`/);
+    expect(section).toMatch(/`start`/);
+    expect(section).toMatch(/`change_request`/);
+    expect(section).toMatch(/`answer`/);
+  });
+});
+
 describe("role prompts are contracts, not personas (principles 2 and 6)", () => {
   const ids = roles.map((r) => r.id);
 
@@ -291,6 +334,10 @@ describe("attribution (spec §5.1: the MIT notice is kept)", () => {
 
   /** Roles the catalogue (§7.1, §7.2) forks from an upstream base. */
   const FORKED = [
+    "advisor_incident_debugger",
+    "advisor_legacy_explainer",
+    "advisor_ml_data",
+    "advisor_ux_researcher",
     "architect",
     "ba",
     "designer",
@@ -315,7 +362,13 @@ describe("attribution (spec §5.1: the MIT notice is kept)", () => {
     "visual_qa",
   ];
   /** Roles the catalogue says to write new, with upstream material merged in. */
-  const WRITTEN = ["lens_supply_chain", "lookback", "spec_verifier"];
+  const WRITTEN = [
+    "advisor_client_liaison",
+    "advisor_estimator",
+    "lens_supply_chain",
+    "lookback",
+    "spec_verifier",
+  ];
   const roleYaml = (id: string): string => readFileSync(`${ROOT}roles/${id}/role.yaml`, "utf8");
 
   it("classifies every role as forked or written for VTC", () => {

@@ -9,7 +9,8 @@ roles/<role>/
   role.yaml   # the contract, validated by RoleContractSchema in @vtc/shared
   prompt.md   # locked core, then the editable section; 150 lines at most
 roles/_shared/
-  result-protocol.md   # appended to every agent: how to read the task pack and return a RoleResult
+  result-protocol.md   # appended to every run role: how to read the task pack and return a RoleResult
+  advisor-protocol.md  # appended to every advisor instead: the Lead's request and the advice result
   lens-reviewer.md     # the procedure every lens reviewer shares
 roles/NOTICE           # the agency-agents MIT notice; copied into both compiled plugins
 ```
@@ -21,9 +22,10 @@ roles/NOTICE           # the agency-agents MIT notice; copied into both compiled
 | Core (§5.2)       | repo_cartographer, research_analyst, ba, architect, security (modes design, verify), designer, planner, engineer, qa (modes author, judge), spec_verifier, visual_qa, lookback |
 | Engineer profiles | engineer_frontend, engineer_backend, engineer_mobile, engineer_data, engineer_devops, engineer_ai_llm (§5.2a)                                                                  |
 | Lens reviewers    | lens_db, lens_auth, lens_payments, lens_secrets, lens_infra, lens_api, lens_supply_chain (§5.3, one per park-the-task risk rule)                                               |
+| Advisors (§5.4)   | advisor_estimator, advisor_client_liaison, advisor_ux_researcher, advisor_incident_debugger, advisor_legacy_explainer, advisor_ml_data (on demand, outside the run)            |
 
 The Lead is not a compiled agent: it is the main session, driven by the Lead skill in
-`plugins/common/skills/lead`. Advisors (§5.4) are not written yet.
+`plugins/common/skills/lead`, which also tells the Lead when and how to call an advisor.
 
 ## Prompt rules
 
@@ -45,11 +47,26 @@ The Lead is not a compiled agent: it is the main session, driven by the Lead ski
 1. Locked core: an engineer profile gets `roles/engineer`'s locked core first; a lens reviewer
    gets `_shared/lens-reviewer.md` first and its `skills/lens-<x>` checklist after its own core.
 2. `## Contract`, generated from the effective `role.yaml` contract of the mode.
-3. `_shared/result-protocol.md`.
+3. `_shared/result-protocol.md`; for an advisor, `_shared/advisor-protocol.md`.
 4. The editable section(s), in the same order as the locked cores.
 5. `host_overrides.<host>.prompt_append` (§12.3).
 
 ## Readings recorded here
+
+- **Advisors run outside the engine** (proposed to the integrator as a spine §5 reading;
+  provisional until recorded there). §5.4 says advisors are "called through the Lead" and the
+  role catalogue (§7.4) gives them a manual trigger outside the automated flow, but the frozen
+  engine surface has no advisor action. So the Lead calls an advisor directly when the human asks
+  (`plugins/common/skills/lead`, section Advisors) and shows the advice to the human; it never
+  submits it, and acting on advice goes through `start`, `change_request` or `answer`. Because
+  nothing in the engine sees an advisor, the compiler (`advisorContractErrors`) accepts an advisor
+  only when it is `read_only`, returns no output artifacts or verdicts, declares no success
+  criteria and no modes, exits `done`, `blocked` or `unknown`, has `reviewer: human`, and has an
+  `advisor_` id (agent `vtc-advisor-<name>`); only advisors may use that prefix, so the Lead can
+  tell them from run roles. A client export longer than the summary cap is returned section by
+  section rather than written to a file. An engine-mediated call (a `consult` action that records
+  the call, counts its cost and lets an advisor write an export under a checked path) is proposed
+  as a MINOR contract change; the advisor sources need no change for it.
 
 - **Write paths of DISCOVER roles** (proposed to the integrator as a spine §5 reading; provisional
   until recorded there). §5.2 lists the Repo Cartographer and the Research Analyst as read-only,

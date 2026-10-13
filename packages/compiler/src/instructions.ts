@@ -6,7 +6,8 @@
  *    first and its lens skill's checklist after (§5.3);
  * 2. the contract, generated from the effective role.yaml contract of the mode;
  * 3. the shared result protocol (`roles/_shared/result-protocol.md`, filled from the frozen
- *    contracts);
+ *    contracts); for an advisor (§5.4), which has no task pack and whose result goes to the human
+ *    rather than the engine, `roles/_shared/advisor-protocol.md` instead;
  * 4. the editable section(s), the part Lookback may propose changes to (AD-14 rule 4);
  * 5. the host's `prompt_append` (§12.3).
  *
@@ -62,15 +63,30 @@ const TOOL_LINES: Readonly<Record<EffectiveRoleContract["tools"]["profile"], str
     "files and shell in a sandboxed worktree; write only inside the Write scope of your task pack",
 };
 
+/** Who reads the result, and where the inputs come from: the engine for run roles, the human for advisors. */
+const CONTRACT_INTRO: Readonly<Record<"run" | "advisor", { checked: string; inputs: string }>> = {
+  run: {
+    checked:
+      "Generated from role.yaml. The engine checks your result against it and rejects one that breaks it.",
+    inputs: "artifact types in your task pack",
+  },
+  advisor: {
+    checked:
+      "Generated from role.yaml. Your result goes to the human through the Lead, not to the engine; keep to this contract all the same.",
+    inputs: "artifact types the Lead's request may list",
+  },
+};
+
 /** The `## Contract` section for one effective contract. */
 export const renderContract = (role: RoleContract, contract: EffectiveRoleContract): string => {
+  const intro = CONTRACT_INTRO[role.kind === "advisor" ? "advisor" : "run"];
   const lines = [
     "## Contract",
     "",
-    "Generated from role.yaml. The engine checks your result against it and rejects one that breaks it.",
+    intro.checked,
     "",
     `- Role: ${role.id}${contract.mode === undefined ? "" : `, mode ${contract.mode}`} (version ${role.version})`,
-    `- Inputs (artifact types in your task pack): ${list(contract.inputs)}`,
+    `- Inputs (${intro.inputs}): ${list(contract.inputs)}`,
     `- Exits: ${list(contract.exits)}`,
     `- Verdicts: ${list(contract.output.verdicts)}`,
     `- Output artifact types: ${list(contract.output.artifacts)}`,
@@ -93,6 +109,8 @@ export const renderContract = (role: RoleContract, contract: EffectiveRoleContra
 export interface InstructionSources {
   /** `roles/_shared/result-protocol.md`. */
   readonly protocol: string;
+  /** `roles/_shared/advisor-protocol.md`, for advisors. */
+  readonly advisorProtocol: string | undefined;
   /** `roles/_shared/lens-reviewer.md`, for lens roles. */
   readonly lensReviewer: string | undefined;
   /** The Engineer role, for engineer profiles. */
@@ -161,12 +179,16 @@ export const buildInstructions = (
     else locked.push(checklist.trim());
   }
   editable.push(pick(prompt.editable, mode, role, errors));
-  if (errors.length > 0) return { ok: false, errors };
+  const protocol = role.kind === "advisor" ? sources.advisorProtocol : sources.protocol;
+  if (protocol === undefined) {
+    errors.push("advisor roles build on roles/_shared/advisor-protocol.md, which is missing");
+  }
+  if (errors.length > 0 || protocol === undefined) return { ok: false, errors };
   const append = role.host_overrides?.[host]?.prompt_append;
   const parts = [
     ...locked,
     renderContract(role, resolved.contract),
-    sources.protocol.trim(),
+    protocol.trim(),
     ...editable,
     ...(append === undefined ? [] : [append.trim()]),
   ].filter((part) => part !== "");

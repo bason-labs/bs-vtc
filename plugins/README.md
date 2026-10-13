@@ -43,6 +43,9 @@ is in `@vtc/shared` (AD-3; proposed to the integrator).
   whether it may run a shell, and write-scoped agents need `workspace-write`. So on Codex "run no
   shell command" is an instruction, not a host restriction, and the write paths are not a host
   deny; the engine's write-scope check is the enforcement point (spike item proposed for §7).
+- **Advisors.** `vtc-advisor-*` agents (§5.4) run outside the run: the Lead skill calls them
+  only at the human's request and never submits their advice to the engine (reading recorded in
+  `roles/README.md`). Their description says so, so a host does not pick them for other work.
 - **Agent names.** The engine names agents `agentNameFor(role, mode)` (`vtc-qa-judge`). Claude
   Code exposes plugin agents under the plugin's namespace (`vtc:vtc-qa-judge`); the Lead skill
   says so. To be confirmed by the spike.

@@ -14,6 +14,7 @@ import {
   type HostId,
   type RoleContract,
 } from "@vtc/shared";
+import { advisorContractErrors } from "./advisors.js";
 import { checkPluginFiles, compiledAgentNames } from "./checks.js";
 import { parseFrontmatter, renderFrontmatter } from "./frontmatter.js";
 import { PLUGIN_NAME, renderClaudeAgent, renderCodexAgent } from "./hosts.js";
@@ -32,7 +33,7 @@ import type {
 } from "./types.js";
 
 const SKILL_NAME = /^[a-z0-9]+(-[a-z0-9]+)*$/;
-const SHARED_FRAGMENTS = new Set(["result-protocol.md", "lens-reviewer.md"]);
+const SHARED_FRAGMENTS = new Set(["result-protocol.md", "advisor-protocol.md", "lens-reviewer.md"]);
 const IGNORED = new Set(["roles/README.md", "skills/README.md", "plugins/README.md"]);
 
 interface Skill {
@@ -57,8 +58,14 @@ const KIND_LABEL: Readonly<Record<RoleContract["kind"], string>> = {
   advisor: "advisor",
 };
 
+/** How the agent is started, so a host never picks it for unrelated work. */
+const RUNS_WHEN: Readonly<Record<"run" | "advisor", string>> = {
+  run: "Runs only when the VTC Lead dispatches it for the engine.",
+  advisor: "Runs only when the VTC Lead calls it because the human asks for this advice.",
+};
+
 const describeAgent = (role: RoleContract, mode: string | undefined): string =>
-  `VTC ${KIND_LABEL[role.kind]} ${role.id}${mode === undefined ? "" : ` (${mode} mode)`}: ${role.mission.trim()} Runs only when the VTC Lead dispatches it for the engine.`;
+  `VTC ${KIND_LABEL[role.kind]} ${role.id}${mode === undefined ? "" : ` (${mode} mode)`}: ${role.mission.trim()} ${RUNS_WHEN[role.kind === "advisor" ? "advisor" : "run"]}`;
 
 /**
  * The prompt content SHA of a compiled agent (§13, `role.dispatched.prompt_sha`): lower-case hex
@@ -297,9 +304,10 @@ const compileAgents = (
     const names = compiledAgentNames(role);
     modes.forEach((mode, index) => {
       const built = buildInstructions(loaded, mode, host, sources);
-      const messages = built.ok
-        ? engineToolErrors(built.contract.tools.engine_tools)
-        : [...built.errors];
+      const messages = [
+        ...(built.ok ? engineToolErrors(built.contract.tools.engine_tools) : built.errors),
+        ...advisorContractErrors(role),
+      ];
       if (!built.ok || messages.length > 0) {
         for (const message of messages) {
           if (!errors.some((e) => e.path === `roles/${loaded.dir}` && e.message === message)) {
@@ -465,6 +473,7 @@ export const compilePlugins = (files: readonly SourceFile[]): CompileResult => {
   const text = (path: string): string | undefined => files.find((f) => f.path === path)?.text;
   const sources: InstructionSources = {
     protocol: text("roles/_shared/result-protocol.md") ?? "",
+    advisorProtocol: text("roles/_shared/advisor-protocol.md"),
     lensReviewer: text("roles/_shared/lens-reviewer.md"),
     engineer: loaded.roles.find((r) => r.role.id === "engineer"),
     skillBodies: new Map(skills.map((s) => [s.name, s.body])),

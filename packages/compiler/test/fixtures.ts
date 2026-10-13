@@ -115,3 +115,22 @@ export const fixtureFiles = (
     .filter((entry): entry is [string, string] => entry[1] !== null)
     .map(([path, text]) => ({ path, text }));
 };
+
+/** An advisor (§5.4) and the protocol advisors share, as overrides on {@link FIXTURE}. */
+export const ADVISOR_FIXTURE: Readonly<Record<string, string>> = {
+  "roles/_shared/advisor-protocol.md":
+    "## Returning your advice\n\nEvidence types: {{evidence_types}}.\nAt most {{summary_max_chars}} characters.\n",
+  "roles/advisor_estimator/role.yaml": `id: advisor_estimator
+version: 1.0.0
+kind: advisor
+mission: Estimate effort and cost from the cost history.
+inputs: [request, cost_history]
+output: { artifacts: [], verdicts: [] }
+exits: [done, blocked, unknown]
+reviewer: human
+${models}
+tools: { profile: read_only }
+budget: { context_tokens: 40000 }
+`,
+  "roles/advisor_estimator/prompt.md": prompt("ESTIMATOR-LOCKED", "ESTIMATOR-EDITABLE"),
+};
