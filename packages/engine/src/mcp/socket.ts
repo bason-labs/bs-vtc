@@ -67,11 +67,19 @@ export const serveEngineSocket = async (
   const server: Server = createServer((socket) => {
     sockets.add(socket);
     let hello: EngineSocketHello | null = null;
+    // After a refused hello (`ok: false`, then close, AD-12 rule 3) no further line is read.
+    let rejected = false;
     let queue = Promise.resolve();
     const send = (message: unknown): void => {
       if (!socket.destroyed) socket.write(encodeSocketLine(message));
     };
+    const refuse = (reason: string): void => {
+      rejected = true;
+      send(welcome(options.versions, reason));
+      socket.end();
+    };
     const reader = createLineReader(ENGINE_SOCKET.maxLineBytes, (line) => {
+      if (rejected) return;
       if (hello === null) {
         let raw: unknown;
         try {
@@ -81,18 +89,13 @@ export const serveEngineSocket = async (
         }
         const parsed = EngineSocketHelloSchema.safeParse(raw);
         if (!parsed.success) {
-          send(welcome(options.versions, "malformed hello: expected an EngineSocketHello line"));
-          socket.end();
+          refuse("malformed hello: expected an EngineSocketHello line");
           return;
         }
         if (!contractsCompatible(parsed.data.contracts_version, options.versions.contracts)) {
-          send(
-            welcome(
-              options.versions,
-              `contracts ${parsed.data.contracts_version} are incompatible with ${options.versions.contracts}`,
-            ),
+          refuse(
+            `contracts ${parsed.data.contracts_version} are incompatible with ${options.versions.contracts}`,
           );
-          socket.end();
           return;
         }
         hello = parsed.data;

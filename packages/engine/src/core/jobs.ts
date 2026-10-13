@@ -4,7 +4,7 @@
  * release. Each job does its I/O (git, the Gate Runner) outside the run's lock and applies the
  * outcome inside it, re-checking that the task is still where the job left it.
  */
-import { cpSync, existsSync, mkdirSync, readFileSync, rmSync } from "node:fs";
+import { cpSync, existsSync, lstatSync, mkdirSync, readFileSync, rmSync } from "node:fs";
 import { join } from "node:path";
 import {
   capForRisk,
@@ -26,7 +26,7 @@ import {
   type TestMetrics,
 } from "@vtc/shared";
 import { createHash } from "node:crypto";
-import { runGit } from "../git/index.js";
+import { assertNoSymlinks, runGit } from "../git/index.js";
 import { taskBudgetFor } from "./budget.js";
 import { globMatch } from "./globs.js";
 import type { Kernel, RunHandle } from "./kernel.js";
@@ -96,6 +96,30 @@ const runGates = async (
   } finally {
     await k.deps.git.removeCheckout(checkout);
   }
+};
+
+/** A failed report whose every failing blocking gate the Gate Runner classified `flaky`. */
+export const onlyFlaky = (report: GateReport): boolean => {
+  const failing = report.results.filter(
+    (r) => r.blocking && (r.status === "fail" || r.status === "error"),
+  );
+  return (
+    report.verdict === "fail" &&
+    failing.length > 0 &&
+    failing.every((r) => r.failure_class === "flaky")
+  );
+};
+
+/**
+ * §6.3 step 8: a flaky result gets one re-run. Returns every report in order (each is logged);
+ * the last one decides. A second flaky failure routes like any failure.
+ */
+const runGatesRetryingFlaky = async (
+  k: Kernel,
+  request: Omit<GateRunRequestInput, "checkout">,
+): Promise<GateReport[]> => {
+  const first = await runGates(k, request);
+  return onlyFlaky(first) ? [first, await runGates(k, request)] : [first];
 };
 
 const parkInfra = (
@@ -196,13 +220,35 @@ export const protectedFiles = async (
 
 // ------------------------------------------------------------- QA base check
 
-/** Moves QA's hidden tests out of the repo, to `~/.vtc/hidden/<repo-key>/<task>/` (§7.3). */
+/** True for a plain file or directory (symlinks, devices and sockets are not copied). */
+const plainEntry = (path: string): boolean => {
+  try {
+    const stat = lstatSync(path);
+    return stat.isFile() || stat.isDirectory();
+  } catch {
+    return false;
+  }
+};
+
+/**
+ * Moves QA's hidden tests out of the repo, to `~/.vtc/hidden/<repo-key>/<task>/` (§7.3). QA
+ * writes the staging dir, so symlinks there are skipped: a copy never reads a file outside it.
+ */
 const moveHiddenTests = (k: Kernel, taskId: string): void => {
-  const staged = join(k.deps.repoRoot, HIDDEN_TESTS.stagingDir, taskId);
-  if (!existsSync(staged)) return;
+  const rel = `${HIDDEN_TESTS.stagingDir}/${taskId}`;
+  try {
+    assertNoSymlinks(k.deps.repoRoot, HIDDEN_TESTS.stagingDir);
+  } catch {
+    return; // a planted symlink above the staging dir: neither copy nor delete through it
+  }
+  const staged = join(k.deps.repoRoot, rel);
+  if (!existsSync(staged) || !plainEntry(staged)) {
+    rmSync(staged, { recursive: true, force: true });
+    return;
+  }
   const target = join(k.deps.vtcHome, HIDDEN_TESTS.homeDir, engineRepoKey(k.deps.repoRoot), taskId);
   mkdirSync(target, { recursive: true });
-  cpSync(staged, target, { recursive: true });
+  cpSync(staged, target, { recursive: true, filter: (source) => plainEntry(source) });
   rmSync(staged, { recursive: true, force: true });
 };
 
@@ -342,12 +388,12 @@ export const startRoundGates = (k: Kernel, h: RunHandle, taskId: string, head: s
     const task = h.state.tasks.get(taskId);
     if (task?.baseline_revision === undefined) return;
     const base = task.baseline_revision;
-    let report: GateReport;
+    let reports: GateReport[];
     let router: { hits: ReturnType<typeof diffRiskHits>; trivial: boolean } | null = null;
     try {
       const protectedList = await protectedFiles(k, h, task);
       const compare = previousMetrics(h, taskId);
-      report = await runGates(k, {
+      reports = await runGatesRetryingFlaky(k, {
         run: h.state.id,
         task: taskId,
         reason: "round",
@@ -360,7 +406,7 @@ export const startRoundGates = (k: Kernel, h: RunHandle, taskId: string, head: s
         ...(compare === undefined ? {} : { compare_to: compare }),
         include_hidden: true,
       });
-      if (report.verdict === "pass") {
+      if (reports.at(-1)?.verdict === "pass") {
         const files = await k.deps.git.changedFiles(base, head);
         const counts = diffLineCounts(await k.deps.git.diff(base, head));
         let changedLines = 0;
@@ -391,9 +437,14 @@ export const startRoundGates = (k: Kernel, h: RunHandle, taskId: string, head: s
       return;
     }
     await k.serial(h, () => {
-      emitGateResult(k, h, report);
+      for (const r of reports) emitGateResult(k, h, r);
+      const report = reports.at(-1);
       const current = h.state.tasks.get(taskId);
-      if (current?.status !== "verifying" || lastBuilt(h.state, taskId)?.head !== head)
+      if (
+        report === undefined ||
+        current?.status !== "verifying" ||
+        lastBuilt(h.state, taskId)?.head !== head
+      )
         return Promise.resolve();
       applyRoundGates(k, h, current, report, router);
       return Promise.resolve();
@@ -582,10 +633,26 @@ const mergeOne = async (k: Kernel, h: RunHandle, taskId: string): Promise<void> 
       settleRound(k, h, taskId, merge);
       return Promise.resolve();
     });
-  const rebased = await ws.rebase(task.worktree, branch);
-  if (!rebased.ok) return sendBack(rebased.detail);
+  const built = lastBuilt(h.state, taskId)?.head;
+  if (built === undefined) {
+    await k.serial(h, () => {
+      parkInfra(k, h, taskId, "the merge queue found no built head for the task");
+      return Promise.resolve();
+    });
+    return;
+  }
+  // Only the head the gates and reviewers verified is merged: anything committed or left on the
+  // task branch since (or a rebase an interrupted run left behind) is reset first.
+  if (
+    (await ws.resolve(task.branch ?? `vtc/${taskId}`)) !== built ||
+    (await ws.isDirty(task.worktree))
+  ) {
+    await ws.discard(task.worktree, built);
+  }
   const integrationHead = await ws.resolve(branch);
-  const report = await runGates(k, {
+  const rebased = await ws.rebase(task.worktree, integrationHead);
+  if (!rebased.ok) return sendBack(rebased.detail);
+  const reports = await runGatesRetryingFlaky(k, {
     run: h.state.id,
     task: taskId,
     feature: feature.id,
@@ -598,8 +665,10 @@ const mergeOne = async (k: Kernel, h: RunHandle, taskId: string): Promise<void> 
     req_tags: task.covers,
     include_hidden: true,
   });
+  const report = reports.at(-1);
+  if (report === undefined) return;
   const verdict = await k.serial(h, () => {
-    emitGateResult(k, h, report);
+    for (const r of reports) emitGateResult(k, h, r);
     if (h.state.tasks.get(taskId)?.status !== "queued") return Promise.resolve("gone" as const);
     if (report.verdict === "infra_error") {
       parkInfra(k, h, taskId, "the merge-queue gates failed for infrastructure reasons");
@@ -619,12 +688,32 @@ const mergeOne = async (k: Kernel, h: RunHandle, taskId: string): Promise<void> 
   });
   if (verdict !== "merge") return;
   const integration = await ws.ensureIntegration(feature.id, branch, integrationHead);
+  if (integration.head !== integrationHead) {
+    await k.serial(h, () => {
+      parkInfra(k, h, taskId, `${branch} moved while the merge-queue gates ran`);
+      return Promise.resolve();
+    });
+    return;
+  }
+  // The exact commit the gates verified, never whatever the branch points at now.
   const merged = await ws.merge(
     integration.worktree,
-    `vtc/${taskId}`,
+    rebased.commit,
     `vtc: merge ${taskId} ${task.title}`,
   );
   if (!merged.ok) return sendBack(merged.detail);
+  const parents = [
+    await ws.resolve(`${merged.commit}^1`),
+    await ws.resolve(`${merged.commit}^2`).catch(() => ""),
+  ];
+  if (parents[0] !== integrationHead || parents[1] !== rebased.commit) {
+    await ws.discard(integration.worktree, integrationHead);
+    await k.serial(h, () => {
+      parkInfra(k, h, taskId, "the merge commit is not the gated commit on the gated base");
+      return Promise.resolve();
+    });
+    return;
+  }
   await k.serial(h, () => {
     k.emit(h, {
       type: "merge.completed",
@@ -780,13 +869,21 @@ const createIntegrationFix = (
   }
 };
 
+/**
+ * What this engine's Final Review covers, stated wherever its verdict is shown (the PR body):
+ * step 1 only. Steps 2–7 of §6.7a and routing findings back to their owning task by blame or
+ * fingerprint are not built yet; every finding becomes an integration-fix task.
+ */
+export const FINAL_REVIEW_SCOPE_NOTE =
+  "Final Review ran step 1 of §6.7a only (the full gates on the integrated branch); steps 2–7 are not run by this VTC version, so review the PR with that in mind.";
+
 /** Final Review step 1 (§6.7a): full gates on the integrated branch; fixes become new tasks. */
 export const startFinalReview = (k: Kernel, h: RunHandle, featureId: string): void => {
   k.spawn(h, `final:${featureId}`, async () => {
     const feature = h.state.features.get(featureId);
     if (feature === undefined) return;
     const ws = k.deps.workspace;
-    let report: GateReport;
+    let reports: GateReport[];
     try {
       const head = await ws.resolve(feature.integration_branch);
       const base =
@@ -798,7 +895,7 @@ export const startFinalReview = (k: Kernel, h: RunHandle, featureId: string): vo
           .toString("utf8")
           .trim() || head;
       const covers = [...new Set(feature.tasks.flatMap((t) => h.state.tasks.get(t)?.covers ?? []))];
-      report = await runGates(k, {
+      reports = await runGatesRetryingFlaky(k, {
         run: h.state.id,
         feature: featureId,
         reason: "final_review",
@@ -823,9 +920,10 @@ export const startFinalReview = (k: Kernel, h: RunHandle, featureId: string): vo
       return;
     }
     await k.serial(h, () => {
-      emitGateResult(k, h, report);
+      for (const r of reports) emitGateResult(k, h, r);
+      const report = reports.at(-1);
       const current = h.state.features.get(featureId);
-      if (current?.status !== "final_review") return Promise.resolve();
+      if (report === undefined || current?.status !== "final_review") return Promise.resolve();
       if (report.verdict === "infra_error") {
         parkFeature(
           k,
@@ -887,7 +985,9 @@ export const startRelease = (k: Kernel, h: RunHandle, featureId: string): void =
       h,
       featureId,
       true,
-      written === null ? undefined : bundleMarkdown(written.bundle),
+      written === null
+        ? FINAL_REVIEW_SCOPE_NOTE
+        : `${bundleMarkdown(written.bundle).trimEnd()}\n\n${FINAL_REVIEW_SCOPE_NOTE}\n`,
     );
     await k.serial(h, () => {
       if (h.state.run.finished_at !== undefined) return Promise.resolve();

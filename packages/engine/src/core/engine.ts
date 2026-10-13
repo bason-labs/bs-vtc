@@ -5,6 +5,7 @@
  */
 import { createHash } from "node:crypto";
 import { existsSync, readFileSync, statSync } from "node:fs";
+import { writeRepoFile } from "../git/index.js";
 import { join } from "node:path";
 import {
   dotenvValues,
@@ -17,6 +18,8 @@ import {
   type EscalationList,
   type FrozenArtifact,
   type GatesConfig,
+  GatesConfigSchema,
+  ProjectConfigSchema,
   type HostId,
   type HumanGateId,
   type LeadAction,
@@ -43,6 +46,7 @@ import {
 } from "./config.js";
 import { dispatchNow, phaseRoles } from "./dispatch.js";
 import { parkEscalation } from "./escalations.js";
+import type { CheckoutRecord } from "./phase-scope.js";
 import { openEventLog, type EventDraft } from "./event-log.js";
 import {
   ensureWorkspace,
@@ -79,7 +83,7 @@ import { activeRun } from "./read-model.js";
 import { loadRuns } from "./run-store.js";
 import { schedule } from "./scheduler.js";
 import { applyEvent, emptyRunState, type RunState } from "./state.js";
-import { handleSubmit } from "./submit.js";
+import { checkEngineerShare, handleSubmit } from "./submit.js";
 import { escalationListView, openEscalations, statusView } from "./views.js";
 
 const sha256File = (path: string): string | undefined =>
@@ -103,15 +107,31 @@ const significant = (before: UsageSnapshot | undefined, after: UsageSnapshot): b
 
 export type EventListener = (event: VtcEvent) => void;
 
+/** The config a run started with (AD-4 Prevents, AD-8 rule 5: agents never set caps or budgets). */
+interface FrozenConfig {
+  readonly run: string;
+  readonly project: ProjectConfig;
+  readonly gates: GatesConfig | null;
+  /** `pipelineConfigHash(project, gates)`. */
+  readonly hash: string;
+}
+
+/** Where a run's frozen config is kept for a restart (checked against `run.started`'s hash). */
+const frozenConfigPath = (run: string): string => `.vtc/state/runs/${run}/config.json`;
+
 export class Engine implements Kernel {
   readonly usage = new Map<HostId, UsageSnapshot>();
   readonly identicalTree = new Map<string, boolean>();
+  readonly checkouts = new Map<string, CheckoutRecord>();
   private readonly handles = new Map<string, RunHandle>();
   private readonly finished = new Map<string, RunState>();
   private readonly jobs = new Map<string, Promise<void>>();
   private readonly chains = new Map<string, Promise<unknown>>();
   private readonly listeners = new Set<EventListener>();
   private readonly fileCache = new Map<string, { stamp: number; value: unknown }>();
+  private frozen: FrozenConfig | null = null;
+  /** Modification stamps of the config files when drift was last checked. */
+  private driftStamps = "";
 
   private constructor(readonly deps: EngineCoreDeps) {}
 
@@ -131,6 +151,7 @@ export class Engine implements Kernel {
       });
       const handle: RunHandle = { state, log };
       engine.handles.set(state.id, handle);
+      engine.restoreFrozenConfig(handle);
       const damaged = log.recovered.invalidLines.length > 0 || log.recovered.truncatedTail;
       const reported = state.events.some(
         (e) =>
@@ -174,7 +195,15 @@ export class Engine implements Kernel {
     return value;
   }
 
-  config(): ProjectConfig {
+  /** The active run's frozen config, if a run is active. */
+  private activeFrozen(): FrozenConfig | null {
+    const frozen = this.frozen;
+    if (frozen === null) return null;
+    const handle = this.handles.get(frozen.run);
+    return handle !== undefined && handle.state.run.finished_at === undefined ? frozen : null;
+  }
+
+  private diskProject(): ProjectConfig {
     try {
       return this.cached(PROJECT_CONFIG_PATH, () => loadProjectConfig(this.deps.repoRoot));
     } catch (error) {
@@ -183,13 +212,128 @@ export class Engine implements Kernel {
     }
   }
 
-  gatesConfig(): GatesConfig | null {
+  private diskGates(): GatesConfig | null {
     try {
       return this.cached(GATES_CONFIG_PATH, () => loadGatesConfig(this.deps.repoRoot));
     } catch (error) {
       if (error instanceof ConfigError) throw new EngineError("config", error.message);
       throw error;
     }
+  }
+
+  /**
+   * `project.yaml` as the active run started with it: a run's config is frozen at `run.started`
+   * (`pipeline_config_hash`), so an edit mid-run (by anyone, an agent included) never changes
+   * caps, budgets, the merge level or the dispatch mode of a running run. Between runs, the file.
+   */
+  config(): ProjectConfig {
+    return this.activeFrozen()?.project ?? this.diskProject();
+  }
+
+  /** `gates.yml` as the active run started with it (see {@link config}). */
+  gatesConfig(): GatesConfig | null {
+    const frozen = this.activeFrozen();
+    return frozen === null ? this.diskGates() : frozen.gates;
+  }
+
+  /** Freezes `project` and `gates` for `run` and keeps a copy for a restart. */
+  private freezeConfig(run: string, project: ProjectConfig, gates: GatesConfig | null): void {
+    this.frozen = { run, project, gates, hash: pipelineConfigHash(project, gates) };
+    this.driftStamps = this.configStamps();
+    try {
+      writeRepoFile(
+        this.deps.repoRoot,
+        frozenConfigPath(run),
+        `${JSON.stringify({ project, gates })}\n`,
+        0o600,
+      );
+    } catch {
+      // only a restart needs the copy; the run's hash still detects any change
+    }
+  }
+
+  /**
+   * On open: the run's frozen config is the kept copy when it matches the run's hash, else the
+   * files when they match it. When neither does, the run continues with the current files and
+   * pauses, saying so (the change is never applied silently).
+   */
+  private restoreFrozenConfig(handle: RunHandle): void {
+    const run = handle.state.run;
+    if (run.finished_at !== undefined || !handle.state.events.some((e) => e.type === "run.started"))
+      return;
+    try {
+      const kept = JSON.parse(
+        readFileSync(join(this.deps.repoRoot, frozenConfigPath(handle.state.id)), "utf8"),
+      ) as { project?: unknown; gates?: unknown };
+      const project = ProjectConfigSchema.parse(kept.project);
+      const gates = kept.gates === null ? null : GatesConfigSchema.parse(kept.gates);
+      if (pipelineConfigHash(project, gates) === run.pipeline_config_hash) {
+        this.frozen = { run: handle.state.id, project, gates, hash: run.pipeline_config_hash };
+        this.driftStamps = "";
+        return;
+      }
+    } catch {
+      // no usable copy: fall back to the files
+    }
+    let project: ProjectConfig;
+    let gates: GatesConfig | null;
+    try {
+      project = this.diskProject();
+      gates = this.diskGates();
+    } catch {
+      return; // the files do not parse: config() reports it until they are fixed
+    }
+    this.freezeConfig(handle.state.id, project, gates);
+    const hash = pipelineConfigHash(project, gates);
+    if (hash !== run.pipeline_config_hash) this.reportConfigDrift(handle, hash, "restart");
+  }
+
+  /** Stamps of the config files (changes when either is written). */
+  private configStamps(): string {
+    return [PROJECT_CONFIG_PATH, GATES_CONFIG_PATH]
+      .map((p) => {
+        try {
+          return String(statSync(join(this.deps.repoRoot, p)).mtimeMs);
+        } catch {
+          return "-";
+        }
+      })
+      .join("|");
+  }
+
+  /** A config change during the active run pauses it with the reason (once per change). */
+  private checkConfigDrift(handle: RunHandle): void {
+    const frozen = this.activeFrozen();
+    if (frozen?.run !== handle.state.id || handle.state.run.paused) return;
+    const stamps = this.configStamps();
+    if (stamps === this.driftStamps) return;
+    this.driftStamps = stamps;
+    let hash: string;
+    try {
+      hash = pipelineConfigHash(this.diskProject(), this.diskGates());
+    } catch {
+      hash = "unreadable";
+    }
+    if (hash !== frozen.hash) this.reportConfigDrift(handle, hash, "edit");
+  }
+
+  private reportConfigDrift(handle: RunHandle, hash: string, when: "edit" | "restart"): void {
+    const tag = `config ${hash.slice(0, 12)}`;
+    const reported = handle.state.events.some(
+      (e) =>
+        e.type === "run.paused" && ((e.data as { reason?: string }).reason ?? "").includes(tag),
+    );
+    if (reported) return;
+    this.emit(handle, {
+      type: "run.paused",
+      actor: "engine",
+      data: {
+        reason: (when === "edit"
+          ? `project.yaml or gates.yml changed during the run (${tag}${hash === "unreadable" ? ", unreadable" : ""}); the run keeps the config it started with. Restore the file or let it apply to the next run, then vtc resume`
+          : `project.yaml or gates.yml differ from the config this run started with (${tag}) and no copy was kept; the run continues with the current files after vtc resume`
+        ).slice(0, 300),
+      },
+    });
   }
 
   secrets(): readonly string[] {
@@ -342,6 +486,7 @@ export class Engine implements Kernel {
 
   /** Engine-internal transitions (no Lead involved) until nothing changes; starts jobs. */
   advance(handle: RunHandle): void {
+    this.checkConfigDrift(handle);
     for (let i = 0; i < 20; i += 1) {
       if (handle.state.run.finished_at !== undefined || !this.handles.has(handle.state.id)) return;
       if (!this.step(handle)) return;
@@ -377,6 +522,7 @@ export class Engine implements Kernel {
     }
     if (!["build", "integrate", "final_review", "release"].includes(phase)) return false;
     let changed = this.scheduleTasks(handle);
+    if (checkEngineerShare(this, handle)) changed = true;
     for (const task of state.tasks.values()) {
       const gating = this.isRunning(`gates:${task.id}`);
       if (
@@ -531,8 +677,8 @@ export class Engine implements Kernel {
         "a run is already active in this repo; finish or pause it first",
       );
     }
-    const config = this.config();
-    const gates = this.gatesConfig();
+    const config = this.diskProject();
+    const gates = this.diskGates();
     const track = config.track_default ?? input.track;
     const id = this.newRunId();
     const log = openEventLog(this.deps.repoRoot, id, this.deps.lock, {
@@ -541,6 +687,7 @@ export class Engine implements Kernel {
     });
     const handle: RunHandle = { state: emptyRunState(id, this.now().toISOString()), log };
     this.handles.set(id, handle);
+    this.freezeConfig(id, config, gates);
     return this.serial(handle, () => {
       this.emit(handle, {
         type: "run.started",
@@ -613,7 +760,7 @@ export class Engine implements Kernel {
   }
 
   /** What the Lead should do now (§4.2 step 1). */
-  private actionsFor(handle: RunHandle, call: CallContext): LeadAction[] {
+  private async actionsFor(handle: RunHandle, call: CallContext): Promise<LeadAction[]> {
     const state = handle.state;
     if (state.run.finished_at !== undefined) {
       const summary = state.events.findLast((e) => e.type === "run.finished");
@@ -622,7 +769,7 @@ export class Engine implements Kernel {
     }
     maybeAutoResume(this, handle);
     this.advance(handle);
-    const actions: LeadAction[] = dispatchNow(this, handle, call);
+    const actions: LeadAction[] = await dispatchNow(this, handle, call);
     const gate = this.awaitingGates(handle);
     if (gate !== null) {
       actions.push({
@@ -678,9 +825,10 @@ export class Engine implements Kernel {
     const state = this.stateOf(input.run);
     const handle = this.handles.get(state.id);
     if (handle === undefined) return { run: state.id, actions: this.actionsForFinished(state) };
-    return this.serial(handle, () =>
-      Promise.resolve({ run: state.id, actions: this.actionsFor(handle, call) }),
-    );
+    return this.serial(handle, async () => ({
+      run: state.id,
+      actions: await this.actionsFor(handle, call),
+    }));
   }
 
   private actionsForFinished(state: RunState): LeadAction[] {
@@ -694,7 +842,7 @@ export class Engine implements Kernel {
     return this.serial(handle, async () => {
       const outcome = await handleSubmit(this, handle, input);
       this.advance(handle);
-      const actions = this.actionsFor(handle, call);
+      const actions = await this.actionsFor(handle, call);
       return outcome.accepted
         ? { run: handle.state.id, accepted: true, actions }
         : { run: handle.state.id, accepted: false, rejection: outcome.rejection, actions };
@@ -719,7 +867,7 @@ export class Engine implements Kernel {
     }
     const run = handle.state.roleRuns.get(actionId);
     if (run?.status !== "in_flight") return null;
-    return this.serial(handle, () => {
+    return this.serial(handle, async () => {
       const rejection = {
         reason: "schema" as const,
         issues: issues.slice(0, 20).map((i) => i.slice(0, 500)),
@@ -731,12 +879,12 @@ export class Engine implements Kernel {
         ...(run.task === undefined ? {} : { task: run.task }),
         data: { action_id: actionId, ...rejection },
       });
-      return Promise.resolve({
+      return {
         run: handle.state.id,
-        accepted: false,
+        accepted: false as const,
         rejection,
-        actions: this.actionsFor(handle, call),
-      });
+        actions: await this.actionsFor(handle, call),
+      };
     });
   }
 
@@ -750,7 +898,7 @@ export class Engine implements Kernel {
 
   async answer(input: AnswerInput, call: CallContext): Promise<NextResult> {
     const handle = this.resolve(input.run);
-    return this.serial(handle, () => {
+    return this.serial(handle, async () => {
       const escalation = handle.state.escalations.get(input.escalation);
       if (escalation === undefined)
         throw new EngineError("invalid", `no escalation ${input.escalation}`);
@@ -793,7 +941,7 @@ export class Engine implements Kernel {
       }
       applyAnswer(this, handle, escalation, input.answer);
       this.advance(handle);
-      return Promise.resolve({ run: handle.state.id, actions: this.actionsFor(handle, call) });
+      return { run: handle.state.id, actions: await this.actionsFor(handle, call) };
     });
   }
 
@@ -819,7 +967,7 @@ export class Engine implements Kernel {
 
   async approve(input: ApproveInput, call: CallContext): Promise<NextResult> {
     const handle = this.resolve(input.run);
-    return this.serial(handle, () => {
+    return this.serial(handle, async () => {
       const awaiting = this.awaitingGates(handle);
       if (awaiting === null)
         throw new EngineError(
@@ -863,7 +1011,7 @@ export class Engine implements Kernel {
         this.phaseTo(handle, handle.state.run.track === "quick_fix" ? "specify" : back);
       }
       this.advance(handle);
-      return Promise.resolve({ run: handle.state.id, actions: this.actionsFor(handle, call) });
+      return { run: handle.state.id, actions: await this.actionsFor(handle, call) };
     });
   }
 

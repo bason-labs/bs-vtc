@@ -1,0 +1,142 @@
+/**
+ * Engine writes inside the repo that never follow a symlink. Agents write in the repo (phase
+ * roles in the checkout, Designers under `.vtc/design/`), so any path the engine writes to may
+ * have been replaced by a symlink pointing outside the repo. Every component below the repo root
+ * is checked with `lstat`; files are written to a temp file and renamed into place (a rename
+ * replaces a symlink, never its target); appends open with `O_NOFOLLOW`.
+ */
+import { randomBytes } from "node:crypto";
+import {
+  closeSync,
+  constants,
+  lstatSync,
+  mkdirSync,
+  openSync,
+  renameSync,
+  rmSync,
+  writeFileSync,
+  writeSync,
+} from "node:fs";
+import { dirname, join } from "node:path";
+
+export class UnsafePathError extends Error {
+  constructor(
+    readonly path: string,
+    detail: string,
+  ) {
+    super(`refusing to write ${path}: ${detail}`);
+    this.name = "UnsafePathError";
+  }
+}
+
+const segmentsOf = (rel: string): string[] => {
+  const parts = rel.split("/");
+  if (
+    rel === "" ||
+    rel.startsWith("/") ||
+    rel.includes("\\") ||
+    rel.includes("\0") ||
+    parts.some((p) => p === "" || p === "." || p === "..")
+  ) {
+    throw new UnsafePathError(rel, "not a plain repo-relative path");
+  }
+  return parts;
+};
+
+const kindOf = (abs: string): "missing" | "dir" | "file" | "symlink" | "other" => {
+  try {
+    const stat = lstatSync(abs);
+    if (stat.isSymbolicLink()) return "symlink";
+    if (stat.isDirectory()) return "dir";
+    return stat.isFile() ? "file" : "other";
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return "missing";
+    throw error;
+  }
+};
+
+/**
+ * Throws when any existing component of `rel` below `root` is a symlink (or a parent is not a
+ * directory). Missing components are fine.
+ */
+export const assertNoSymlinks = (root: string, rel: string): void => {
+  const parts = segmentsOf(rel);
+  let current = root;
+  for (const [i, part] of parts.entries()) {
+    current = join(current, part);
+    const kind = kindOf(current);
+    if (kind === "missing") return;
+    if (kind === "symlink")
+      throw new UnsafePathError(rel, `${parts.slice(0, i + 1).join("/")} is a symlink`);
+    if (i < parts.length - 1 && kind !== "dir")
+      throw new UnsafePathError(rel, `${parts.slice(0, i + 1).join("/")} is not a directory`);
+  }
+};
+
+/** Creates `relDir` under `root` one component at a time, refusing symlinks on the way. */
+export const ensureRepoDir = (root: string, relDir: string): void => {
+  let current = root;
+  for (const part of segmentsOf(relDir)) {
+    current = join(current, part);
+    const kind = kindOf(current);
+    if (kind === "missing") {
+      try {
+        mkdirSync(current);
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
+      }
+      if (kindOf(current) !== "dir")
+        throw new UnsafePathError(relDir, `${current} is not a directory`);
+    } else if (kind !== "dir") {
+      throw new UnsafePathError(relDir, `${current} is a ${kind}, not a directory`);
+    }
+  }
+};
+
+const parentOf = (rel: string): string | null => {
+  const dir = dirname(rel);
+  return dir === "." ? null : dir;
+};
+
+/** Replaces `rel` under `root` with `content` (temp file + rename; never through a symlink). */
+export const writeRepoFile = (
+  root: string,
+  rel: string,
+  content: string | Uint8Array,
+  mode = 0o644,
+): void => {
+  segmentsOf(rel);
+  const parent = parentOf(rel);
+  if (parent !== null) ensureRepoDir(root, parent);
+  const target = join(root, rel);
+  if (kindOf(target) === "dir") throw new UnsafePathError(rel, "is a directory");
+  const temp = `${target}.vtc-${randomBytes(6).toString("hex")}.tmp`;
+  try {
+    writeFileSync(temp, content, { flag: "wx", mode });
+    renameSync(temp, target);
+  } catch (error) {
+    rmSync(temp, { force: true });
+    throw error;
+  }
+};
+
+/** Appends to `rel` under `root`, creating it; refuses a symlink at any component. */
+export const appendRepoFile = (root: string, rel: string, content: string): void => {
+  segmentsOf(rel);
+  const parent = parentOf(rel);
+  if (parent !== null) ensureRepoDir(root, parent);
+  const target = join(root, rel);
+  const kind = kindOf(target);
+  if (kind !== "missing" && kind !== "file") throw new UnsafePathError(rel, `is a ${kind}`);
+  const noFollow = (constants as { O_NOFOLLOW?: number }).O_NOFOLLOW ?? 0;
+  const fd = openSync(
+    target,
+    constants.O_WRONLY | constants.O_APPEND | constants.O_CREAT | noFollow,
+    0o644,
+  );
+  try {
+    writeSync(fd, content);
+  } finally {
+    closeSync(fd);
+  }
+};

@@ -58,6 +58,14 @@ describe("YAML reader", () => {
     expect(() => parseYaml("a:\n  b: 1\n c: 2")).toThrow(/line 3/);
     expect(() => parseYaml("a: 1\n---\nb: 2")).toThrow(/multiple documents/);
   });
+  it("refuses a __proto__ key instead of replacing the object's prototype", () => {
+    expect(() => parseYaml("__proto__:\n  polluted: true")).toThrow(/__proto__/);
+    expect(() => parseYaml('a: { "__proto__": 1 }')).toThrow(/__proto__/);
+    expect(() => parseYaml("caps:\n  __proto__: 1")).toThrow(YamlError);
+    const parsed = parseYaml("constructor: 1") as Record<string, unknown>;
+    expect(Object.getPrototypeOf(parsed)).toBe(Object.prototype);
+    expect(({} as Record<string, unknown>).polluted).toBeUndefined();
+  });
   it("round-trips its own output", () => {
     const value = {
       id: "T-1",
@@ -132,6 +140,11 @@ describe("claim checks (§4.2 step 3)", () => {
     expect(await resolves(ctx, { type: "spec_ref", ref: "REQ-9" })).toBe(false);
     expect(await resolves(ctx, { type: "commit", ref: head })).toBe(true);
     expect(await resolves(ctx, { type: "diff", ref: `${head}..${"b".repeat(40)}` })).toBe(false);
+    // diff refs are two full shas, never revision expressions handed to git
+    const lenient = { ...ctx, commitExists: () => Promise.resolve(true) };
+    expect(await resolves(lenient, { type: "diff", ref: `${head}..${head}` })).toBe(true);
+    for (const ref of [`HEAD..${head}`, `${head}..--output=/tmp/x`, `${head}..${head}..${head}`])
+      expect(await resolves(lenient, { type: "diff", ref })).toBe(false);
     expect(await resolves(ctx, { type: "url", ref: "http://x" })).toBe(false);
     expect(
       await unresolved(ctx, [

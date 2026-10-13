@@ -1,6 +1,10 @@
 /**
  * Runs `git` with the user's own installation, configuration and auth (AD-9). Arguments are an
- * argv array, never a shell string. Hooks of the user's repo never run on engine commits.
+ * argv array, never a shell string. Engine git calls run unattended, so no hook of the repo runs
+ * on them (`core.hooksPath` points at an empty location; `--no-verify` alone skips only
+ * pre-commit, commit-msg and pre-merge-commit) and no fsmonitor daemon is started. The one
+ * exception is `push` ({@link GitRunOptions.hooks}): a user's pre-push hook guards what leaves
+ * the machine.
  */
 import { spawn } from "node:child_process";
 
@@ -27,7 +31,13 @@ export interface GitRunOptions {
   /** Resolve with the result instead of throwing on a non-zero exit. */
   readonly allowFailure?: boolean;
   readonly timeoutMs?: number;
+  /** Run the repo's hooks (only `push`, see the module doc). Default `false`. */
+  readonly hooks?: boolean;
 }
+
+/** `-c` overrides on every engine git call: no hooks, no fsmonitor. */
+const NO_HOOKS = ["-c", `core.hooksPath=${process.platform === "win32" ? "NUL" : "/dev/null"}`];
+const NO_FSMONITOR = ["-c", "core.fsmonitor=false"];
 
 const DEFAULT_TIMEOUT_MS = 120_000;
 
@@ -37,30 +47,52 @@ export const runGit = (
   options: GitRunOptions = {},
 ): Promise<GitResult> =>
   new Promise((resolve, reject) => {
-    const child = spawn("git", [...args], {
-      cwd,
-      env: {
-        ...process.env,
-        // Never prompt (credentials, editors): the engine runs unattended.
-        GIT_TERMINAL_PROMPT: "0",
-        GIT_EDITOR: "true",
-        ...options.env,
+    const child = spawn(
+      "git",
+      [...(options.hooks === true ? [] : NO_HOOKS), ...NO_FSMONITOR, ...args],
+      {
+        cwd,
+        env: {
+          ...process.env,
+          // Never prompt (credentials, editors): the engine runs unattended.
+          GIT_TERMINAL_PROMPT: "0",
+          GIT_EDITOR: "true",
+          ...options.env,
+        },
+        stdio: ["ignore", "pipe", "pipe"],
       },
-      stdio: ["ignore", "pipe", "pipe"],
-    });
+    );
     const out: Buffer[] = [];
     const err: Buffer[] = [];
+    let settled = false;
+    const timeoutMs = options.timeoutMs ?? DEFAULT_TIMEOUT_MS;
+    // Settles at once on a timeout: a grandchild (ssh, a credential helper) may hold the pipes.
     const timer = setTimeout(() => {
+      if (settled) return;
+      settled = true;
       child.kill("SIGKILL");
-    }, options.timeoutMs ?? DEFAULT_TIMEOUT_MS);
+      child.stdout.destroy();
+      child.stderr.destroy();
+      const timedOut = {
+        code: -1,
+        stdout: Buffer.alloc(0),
+        stderr: `timed out after ${String(timeoutMs)} ms`,
+      };
+      if (options.allowFailure === true) resolve(timedOut);
+      else reject(new GitError(args, -1, timedOut.stderr));
+    }, timeoutMs);
     child.stdout.on("data", (chunk: Buffer) => out.push(chunk));
     child.stderr.on("data", (chunk: Buffer) => err.push(chunk));
     child.on("error", (error) => {
       clearTimeout(timer);
+      if (settled) return;
+      settled = true;
       reject(error);
     });
     child.on("close", (code) => {
       clearTimeout(timer);
+      if (settled) return;
+      settled = true;
       const result = {
         code: code ?? -1,
         stdout: Buffer.concat(out),

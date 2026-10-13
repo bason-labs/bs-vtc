@@ -18,7 +18,7 @@ import {
   type SessionRef,
   type TaskPackInput,
 } from "@vtc/shared";
-import { budgetState } from "./budget.js";
+import { budgetState, sharesExceeded } from "./budget.js";
 import { DEFAULT_ACCEPTANCE_GLOBS } from "./config.js";
 import { EngineError, type CallContext, type Kernel, type RunHandle } from "./kernel.js";
 import { engineerDispatch, tierDown } from "./loop.js";
@@ -29,6 +29,7 @@ import {
   lastQaAuthor,
   lastSubmitted,
   nextActionId,
+  shareSpend,
   pendingBaseCheck,
   phaseEnteredSeq,
   roundVerdict,
@@ -42,6 +43,7 @@ import { resolveModel, roleTier } from "./roles.js";
 import { reviewersFor } from "./router.js";
 import { limitWait } from "./limits.js";
 import { setTaskStatus } from "./parking.js";
+import { recordCheckout, saveCheckoutRecord, type CheckoutRecord } from "./phase-scope.js";
 
 export interface StepSpec {
   readonly key: string;
@@ -205,9 +207,21 @@ const taskSteps = (k: Kernel, h: RunHandle, taskId: string, host: HostId): StepS
       task: taskId,
       tier: plan.tier,
       ...(resume === undefined ? {} : { resume }),
-      findings: taskFindings(h.state, taskId).filter(
-        (f) => f.status === "open" && (f.route === "patch" || f.route === "out_of_scope"),
-      ),
+      findings: [
+        ...taskFindings(h.state, taskId).filter(
+          (f) => f.status === "open" && (f.route === "patch" || f.route === "out_of_scope"),
+        ),
+        // Out-of-scope faults other tasks' Engineers routed to this task (§6.3 step 3).
+        ...[...h.state.findings.values()]
+          .map((r) => r.finding)
+          .filter(
+            (f) =>
+              f.status === "open" &&
+              f.route === "out_of_scope" &&
+              f.owner_task === taskId &&
+              f.task !== taskId,
+          ),
+      ],
       ...(answer === undefined ? {} : { answer }),
       ...(note === undefined ? {} : { note }),
       ...(task.status === "tests_authored"
@@ -224,7 +238,10 @@ const taskSteps = (k: Kernel, h: RunHandle, taskId: string, host: HostId): StepS
     const built = lastBuilt(h.state, taskId);
     if (built?.head === undefined || k.isRunning(`gates:${taskId}`)) return [];
     if (roundVerdict(h.state, taskId)?.verdict !== "pass") return [];
-    const drop = budgetState(task.spent_usd, task.budget_usd) === "reviewers_drop";
+    // At 70% of the budget, or once the reviewers used their 25% share, they drop a tier (§11).
+    const drop =
+      budgetState(task.spent_usd, task.budget_usd) === "reviewers_drop" ||
+      sharesExceeded(shareSpend(h.state, taskId), task.budget_usd).reviewers;
     for (const slot of reviewersFor(
       task,
       h.state.run,
@@ -458,21 +475,49 @@ export const dispatchStep = (k: Kernel, h: RunHandle, step: StepSpec, host: Host
 
 /**
  * New role runs for the Lead, within the concurrency limit (reviewers count, §6.6). In plugin-only
- * mode every role run is a Lead subagent; the engine never starts a headless run (AD-17).
+ * mode every role run is a Lead subagent; the engine never starts a headless run (AD-17). Headless
+ * launches are not part of this engine yet: on a host that cannot run role subagents the run
+ * pauses with the reason instead of waiting silently forever.
  */
-export const dispatchNow = (k: Kernel, h: RunHandle, call: CallContext): LeadAction[] => {
+export const dispatchNow = async (
+  k: Kernel,
+  h: RunHandle,
+  call: CallContext,
+): Promise<LeadAction[]> => {
   if (h.state.run.paused || h.state.run.finished_at !== undefined) return [];
   if (limitWait(k, h) !== null) return [];
   const host = k.hostFor(call);
   const config = k.config();
   const capabilities = k.deps.adapters[host]?.capabilities ?? { subagents: true, headless: false };
   const plan = planDispatch("role", config.hosts.dispatch, capabilities);
-  if (plan !== "subagent") return [];
+  if (plan !== "subagent") {
+    if (pendingSteps(k, h, host).length > 0) {
+      k.emit(h, {
+        type: "run.paused",
+        actor: "engine",
+        data: {
+          reason:
+            plan === "headless"
+              ? `${host} has no role subagents and this engine does not launch headless runs yet; run the Lead on a host with subagents, then vtc resume`
+              : `${host} cannot run roles (no subagents; hosts.dispatch ${config.hosts.dispatch}); run the Lead on a host with subagents, then vtc resume`,
+        },
+      });
+    }
+    return [];
+  }
   const actions: LeadAction[] = [];
   let free = config.concurrency - inFlight(h.state).length;
+  // Phase roles write in the user's checkout: record it before the Lead can start one, so
+  // `submit` can verify every write (AD-7 rule 7).
+  let checkout: CheckoutRecord | undefined;
   for (const step of pendingSteps(k, h, host)) {
     if (free <= 0) break;
-    actions.push(dispatchStep(k, h, step, host));
+    if (step.task === undefined) checkout ??= await recordCheckout(k.deps.repoRoot);
+    const action = dispatchStep(k, h, step, host);
+    if (step.task === undefined && checkout !== undefined && action.type === "spawn_role") {
+      saveCheckoutRecord(k.deps.repoRoot, k.checkouts, action.action_id, checkout);
+    }
+    actions.push(action);
     free -= 1;
   }
   return actions;

@@ -26,7 +26,7 @@ import {
   type Task,
   type TaskDraft,
 } from "@vtc/shared";
-import { budgetState, taskBudgetFor, usd } from "./budget.js";
+import { budgetState, sharesExceeded, taskBudgetFor, usd } from "./budget.js";
 import { DEFAULT_ACCEPTANCE_GLOBS } from "./config.js";
 import { resolves, unresolved } from "./evidence.js";
 import { matchesAny } from "./globs.js";
@@ -34,12 +34,15 @@ import { protectedFiles, startBaseCheck, startRoundGates } from "./jobs.js";
 import type { Kernel, RunHandle } from "./kernel.js";
 import { recordLimit } from "./limits.js";
 import { openTaskEscalation, parkTask, setTaskStatus } from "./parking.js";
+import { changedPaths, loadCheckoutRecord, outsideScope, recordCheckout } from "./phase-scope.js";
 import { checkPlan } from "./plan-check.js";
 import {
   consecutiveFailures,
+  inFlight,
   lastBuilt,
   nextEscalationId,
   nextNumberedId,
+  shareSpend,
   taskFindings,
   usedFeatureIds,
   usedTaskIds,
@@ -160,6 +163,30 @@ const checkBudget = (k: Kernel, h: RunHandle, taskId: string | undefined): void 
     detail: `spent $${task.spent_usd.toFixed(2)} of $${task.budget_usd.toFixed(2)}`,
     evidence: [{ type: "file", ref: `.vtc/tasks/${task.id}.md` }],
   });
+};
+
+/** Statuses in which the Engineer runs next (its share is checked before it runs again). */
+const ENGINEER_NEXT: readonly string[] = ["tests_authored", "building", "fixing"];
+
+/**
+ * §11 Engineer share: once the Engineer has spent more than 45% of the task budget it is not
+ * dispatched again; the task parks with evidence (a human may raise the budget, §6.5).
+ */
+export const checkEngineerShare = (k: Kernel, h: RunHandle): boolean => {
+  let parked = false;
+  for (const task of [...h.state.tasks.values()]) {
+    if (!ENGINEER_NEXT.includes(task.status)) continue;
+    if (inFlight(h.state).some((r) => r.task === task.id && r.role === "engineer")) continue;
+    const spend = shareSpend(h.state, task.id);
+    if (!sharesExceeded(spend, task.budget_usd).engineer) continue;
+    parkTask(k, h, task.id, {
+      reason: "budget",
+      detail: `the Engineer spent $${spend.engineer.toFixed(2)}, over its 45% share of the $${task.budget_usd.toFixed(2)} task budget`,
+      evidence: [{ type: "file", ref: `.vtc/tasks/${task.id}.md` }],
+    });
+    parked = true;
+  }
+  return parked;
 };
 
 /** A step that keeps failing parks its task as stuck (no infinite redispatch, §1.1 #2). */
@@ -352,6 +379,41 @@ const createPlan = (
   });
 };
 
+/** A role run's effective write paths (its mode's, else the role's). */
+const writePathsOf = (k: Kernel, run: Pick<RoleRunRecord, "role" | "mode">): readonly string[] => {
+  const contract = k.deps.roles.get(run.role);
+  if (contract === undefined) return [];
+  const effective = resolveRoleMode(contract, run.mode);
+  return effective.ok ? effective.contract.tools.write_paths : [];
+};
+
+/**
+ * Every write a phase role made in the user's checkout since its dispatch (AD-7 rule 7): the
+ * paths outside its effective write paths, and those of phase roles running alongside it.
+ */
+const phaseWriteIssues = async (k: Kernel, h: RunHandle, run: RoleRunRecord): Promise<string[]> => {
+  const before = loadCheckoutRecord(k.deps.repoRoot, k.checkouts, run.action_id);
+  if (before === undefined)
+    return [
+      "the engine has no record of the checkout at dispatch, so the writes cannot be verified",
+    ];
+  const changed = await changedPaths(
+    k.deps.repoRoot,
+    before,
+    await recordCheckout(k.deps.repoRoot),
+  );
+  const concurrent = [...h.state.roleRuns.values()].filter(
+    (r) =>
+      r.task === undefined &&
+      r.action_id !== run.action_id &&
+      (r.status === "in_flight" || (r.closedSeq ?? 0) > run.seq),
+  );
+  const allowed = [...writePathsOf(k, run), ...concurrent.flatMap((r) => writePathsOf(k, r))];
+  return outsideScope(changed, allowed).map(
+    (path) => `${path} was written outside the role's write paths`,
+  );
+};
+
 const acceptPhaseRole = async (
   k: Kernel,
   h: RunHandle,
@@ -359,7 +421,9 @@ const acceptPhaseRole = async (
   result: RoleResult,
 ): Promise<StepOutcome> => {
   const contract = k.deps.roles.get(run.role);
-  const writePaths = contract?.tools.write_paths ?? [];
+  const writePaths = writePathsOf(k, run);
+  const undeclared = await phaseWriteIssues(k, h, run);
+  if (undeclared.length > 0) return reject("write_scope", undeclared);
   const issues: string[] = [];
   const artifacts: ArtifactRef[] = [];
   for (const artifact of result.artifacts) {
@@ -572,10 +636,26 @@ const outOfScopeGuards = async (
   }
 };
 
-/** A guarded fault goes to its owning task or a new out-of-scope task; the round ends early. */
+/** Statuses in which a task's Engineer still runs, so it can take an out-of-scope fault. */
+const FAULT_OWNER_STATUSES: readonly string[] = [
+  "draft",
+  "waiting_dependency",
+  "ready",
+  "tests_authored",
+  "building",
+  "fixing",
+];
+
+/**
+ * A guarded fault goes to its owning task (one whose Engineer still runs: the finding is in its
+ * next pack) or to a new out-of-scope task; the round ends early.
+ */
 const routeOutOfScope = (k: Kernel, h: RunHandle, task: Task, fault: Fault): void => {
   const owner = [...h.state.tasks.values()].find(
-    (t) => t.id !== task.id && matchesAny(t.files_scope, fault.path),
+    (t) =>
+      t.id !== task.id &&
+      FAULT_OWNER_STATUSES.includes(t.status) &&
+      matchesAny(t.files_scope, fault.path),
   );
   const base = findingFromDraft(
     {
@@ -770,10 +850,16 @@ const acceptReviewer = async (
   const built = lastBuilt(h.state, task.id);
   if (task.worktree === undefined || built?.head === undefined)
     return reject("out_of_order", ["no built head to review"]);
-  if (await k.deps.workspace.isDirty(task.worktree)) {
+  // Read-only: no uncommitted change, and the branch still at the head the gates verified (a
+  // reviewer's own commit would otherwise reach the merge queue unreviewed, AD-8 rules 4 and 14).
+  const dirty = await k.deps.workspace.isDirty(task.worktree);
+  const tip = await k.deps.workspace.resolve(task.branch ?? `vtc/${task.id}`);
+  if (dirty || tip !== built.head) {
     await k.deps.workspace.discard(task.worktree, built.head);
     return reject("write_scope", [
-      "a read-only reviewer changed files in the task worktree (discarded)",
+      dirty
+        ? "a read-only reviewer changed files in the task worktree (discarded)"
+        : `a read-only reviewer moved the task branch to ${tip.slice(0, 12)} (reset to the built head)`,
     ]);
   }
   const missing = await unresolved(evidenceContext(k, h, built.head), [
@@ -877,10 +963,13 @@ export const handleSubmit = async (
     };
   }
   if (input.kind === "failure") {
+    k.checkouts.delete(run.action_id);
     handleFailure(k, h, run, input.outcome);
     return { accepted: true };
   }
   const outcome = await evaluate(k, h, run, input.result);
+  // The action is closed either way: its checkout record is no longer needed in memory.
+  k.checkouts.delete(run.action_id);
   if (outcome.kind === "reject") {
     logRejection(k, h, run, outcome.rejection);
     const task = run.task;

@@ -22,7 +22,9 @@ import {
   callTool,
   connectEngineClient,
   createMcpSession,
+  MCP_PROTOCOL_VERSION,
   runStdioBridge,
+  SUPPORTED_MCP_PROTOCOL_VERSIONS,
   serveEngineSocket,
   toolDefinitions,
   type EngineSocketServer,
@@ -190,6 +192,19 @@ describe("tool surface (AD-4)", () => {
     expect(await session.handle({ hello: 1 })).toMatchObject({ error: { code: -32600 } });
     await h.release();
   });
+  it("negotiates the protocol version against the versions it supports", async () => {
+    const h = createHarness();
+    const session = createMcpSession(h.engine, { host: "claude-code", serverVersion: "0.0.0" });
+    const init = (protocolVersion: unknown) =>
+      session.handle({ jsonrpc: "2.0", id: 1, method: "initialize", params: { protocolVersion } });
+    for (const version of SUPPORTED_MCP_PROTOCOL_VERSIONS)
+      expect(await init(version)).toMatchObject({ result: { protocolVersion: version } });
+    for (const unknown of ["1999-01-01", "2099-12-31", 7, undefined])
+      expect(await init(unknown)).toMatchObject({
+        result: { protocolVersion: MCP_PROTOCOL_VERSION },
+      });
+    await h.release();
+  });
 });
 
 const rawExchange = (path: string, lines: readonly unknown[]): Promise<string[]> =>
@@ -248,6 +263,23 @@ describe("socket protocol (AD-12 rule 3)", () => {
     ]);
     expect(JSON.parse(bridgeWithoutHost[0] ?? "{}")).toMatchObject({ ok: false });
     await expect(connectEngineClient(server.path, "99.1.0")).rejects.toThrow(/refused/);
+    await h.release();
+  });
+  it("reads nothing after a refused hello, even lines that arrived in the same chunk", async () => {
+    const h = createHarness();
+    await h.engine.start(
+      { request: "Idea", track: "feature", repo: "existing", has_ui: false, risk_hints: [] },
+      CLAUDE,
+    );
+    const server = await socketFor(h);
+    const replies = await rawExchange(server.path, [
+      "not json",
+      { v: 1, client: "cli", host: null, contracts_version: CONTRACTS_VERSION },
+      { jsonrpc: "2.0", id: 1, method: "tools/call", params: { name: "pause", arguments: {} } },
+    ]);
+    expect(replies).toHaveLength(1);
+    expect(JSON.parse(replies[0] ?? "{}")).toMatchObject({ ok: false });
+    expect(h.engine.status({}).run.paused).toBe(false);
     await h.release();
   });
   it("refuses a socket path longer than sun_path allows", async () => {

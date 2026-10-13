@@ -4,8 +4,8 @@
  * (`.vtc/state/packs/<action>.md`), evidence bundles and the run summary. The engine writes them
  * and never reads them back as input. Everything git-tracked is redacted first.
  */
-import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
-import { dirname, join } from "node:path";
+import { readFileSync } from "node:fs";
+import { join } from "node:path";
 import {
   EvidenceBundleSchema,
   evidenceBundlePath,
@@ -23,14 +23,14 @@ import {
   type TokenUsage,
   type TraceabilityReport,
 } from "@vtc/shared";
+import { writeRepoFile } from "../git/index.js";
 import type { RunState } from "./state.js";
 import { planFilePath } from "./views.js";
 import { toYaml } from "./yaml.js";
 
+/** Agents write in the repo too: a planted symlink is refused, never followed (AD-18). */
 const write = (repoRoot: string, path: string, content: string): void => {
-  const abs = join(repoRoot, path);
-  mkdirSync(dirname(abs), { recursive: true });
-  writeFileSync(abs, content);
+  writeRepoFile(repoRoot, path, content);
 };
 
 /** `.vtc/runs/<run>/request.md` from `run.started.request`. */

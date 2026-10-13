@@ -5,7 +5,7 @@
  * nothing itself: `next` answers `wait` until then, re-reads usage, and then hands the Lead a
  * `spawn_role` that resumes the same session (`lead_redispatch`).
  */
-import { planDispatch, type HostFailureOutcome, type HostId, type TaskStatus } from "@vtc/shared";
+import type { HostFailureOutcome, HostId, TaskStatus } from "@vtc/shared";
 import type { Kernel, RunHandle } from "./kernel.js";
 import { setTaskStatus } from "./parking.js";
 import type { RoleRunRecord } from "./state.js";
@@ -112,14 +112,8 @@ export const maybeAutoResume = (k: Kernel, h: RunHandle): boolean => {
     schedule(k, at);
     return false;
   }
-  const config = k.config();
-  const capabilities = k.deps.adapters[limit.host]?.capabilities ?? {
-    subagents: true,
-    headless: false,
-  };
-  // Plugin-only: lead_redispatch. Headless resume (headless_allowed) launches through the adapter
-  // in a later increment; until then it also waits for the Lead.
-  planDispatch("auto_resume", config.hosts.dispatch, capabilities);
+  // Resuming is a Lead re-dispatch (plugin-only, `lead_redispatch`): this engine launches no
+  // headless runs, so `headless_allowed` resumes the same way.
   k.emit(h, { type: "run.resumed", actor: "engine", data: { auto: true } });
   for (const task of [...h.state.tasks.values()]) {
     if (task.status !== "interrupted") continue;

@@ -18,6 +18,8 @@ export interface EvidenceContext {
   readonly commitExists: (sha: string) => Promise<boolean>;
 }
 
+const FULL_SHA = /^([a-f0-9]{40}|[a-f0-9]{64})$/;
+
 const splitLine = (ref: string): { path: string; line: number; end: number } | null => {
   const match = /^(.+):(\d+)(?:-(\d+))?$/.exec(ref);
   if (match?.[1] === undefined || match[2] === undefined) return null;
@@ -62,10 +64,12 @@ export const resolves = async (ctx: EvidenceContext, evidence: Evidence): Promis
       return path.startsWith(".vtc/") && safe(path) && existsSync(join(ctx.repoRoot, path));
     }
     case "commit":
-      return /^([a-f0-9]{40}|[a-f0-9]{64})$/.test(evidence.ref) && ctx.commitExists(evidence.ref);
+      return FULL_SHA.test(evidence.ref) && ctx.commitExists(evidence.ref);
     case "diff": {
-      const [base, head] = evidence.ref.split("..");
-      if (base === undefined || head === undefined) return false;
+      const parts = evidence.ref.split("..");
+      const [base, head] = parts;
+      if (parts.length !== 2 || base === undefined || head === undefined) return false;
+      if (!FULL_SHA.test(base) || !FULL_SHA.test(head)) return false;
       return (await ctx.commitExists(base)) && ctx.commitExists(head);
     }
     case "spec_ref":

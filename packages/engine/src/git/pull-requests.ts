@@ -38,10 +38,14 @@ interface GhPr {
   }[];
 }
 
+/** A `gh` call that hangs (network) is killed, so the release job never stalls on it. */
+export const GH_TIMEOUT_MS = 120_000;
+
 const run = (
   cwd: string,
   command: string,
   args: readonly string[],
+  timeoutMs = GH_TIMEOUT_MS,
 ): Promise<{ code: number; stdout: string; stderr: string }> =>
   new Promise((resolve, reject) => {
     const child = spawn(command, [...args], {
@@ -51,10 +55,32 @@ const run = (
     });
     let stdout = "";
     let stderr = "";
+    let settled = false;
+    // Settles at once on a timeout: a grandchild may hold the pipes open after the kill.
+    const timer = setTimeout(() => {
+      if (settled) return;
+      settled = true;
+      child.kill("SIGKILL");
+      child.stdout.destroy();
+      child.stderr.destroy();
+      resolve({
+        code: -1,
+        stdout: "",
+        stderr: `${command} timed out after ${String(timeoutMs)} ms`,
+      });
+    }, timeoutMs);
     child.stdout.on("data", (c: Buffer) => (stdout += c.toString("utf8")));
     child.stderr.on("data", (c: Buffer) => (stderr += c.toString("utf8")));
-    child.on("error", reject);
+    child.on("error", (error) => {
+      clearTimeout(timer);
+      if (settled) return;
+      settled = true;
+      reject(error);
+    });
     child.on("close", (code) => {
+      clearTimeout(timer);
+      if (settled) return;
+      settled = true;
       resolve({ code: code ?? -1, stdout, stderr });
     });
   });
@@ -92,9 +118,18 @@ export const pullRequestFromGh = (pr: GhPr): PullRequestRef | null => {
 const FIELDS = "url,isDraft,state,headRefOid,mergeCommit,statusCheckRollup";
 
 /** `gh`-backed PRs in `repoRoot`. `command` is injectable so tests can use a stand-in. */
-export const createGhPullRequests = (repoRoot: string, command = "gh"): PullRequestService => {
+export const createGhPullRequests = (
+  repoRoot: string,
+  command = "gh",
+  timeoutMs = GH_TIMEOUT_MS,
+): PullRequestService => {
   const view = async (branch: string): Promise<PullRequestRef | null> => {
-    const result = await run(repoRoot, command, ["pr", "view", branch, "--json", FIELDS]);
+    const result = await run(
+      repoRoot,
+      command,
+      ["pr", "view", branch, "--json", FIELDS],
+      timeoutMs,
+    );
     if (result.code !== 0) return null;
     return pullRequestFromGh(JSON.parse(result.stdout) as GhPr);
   };
@@ -104,7 +139,7 @@ export const createGhPullRequests = (repoRoot: string, command = "gh"): PullRequ
     return pr;
   };
   const checked = async (args: readonly string[]): Promise<void> => {
-    const result = await run(repoRoot, command, args);
+    const result = await run(repoRoot, command, args, timeoutMs);
     if (result.code !== 0)
       throw new Error(
         `${command} ${args[0] ?? ""} ${args[1] ?? ""} failed: ${result.stderr.trim().slice(0, 300)}`,

@@ -13,6 +13,28 @@ export const inFlight = (state: RunState): RoleRunRecord[] =>
 export const runsOf = (state: RunState, task: string): RoleRunRecord[] =>
   [...state.roleRuns.values()].filter((r) => r.task === task);
 
+/** A reviewer run (§6.3 step 7): Spec-Verifier, Visual QA, QA judge, Security verify. */
+export const isReviewer = (run: Pick<RoleRunRecord, "role" | "mode">): boolean =>
+  run.role === "spec_verifier" ||
+  run.role === "visual_qa" ||
+  (run.role === "qa" && run.mode === "judge") ||
+  (run.role === "security" && run.mode === "verify");
+
+/** Priced spend of a task's Engineer and reviewer runs (§11 shares within a task). */
+export const shareSpend = (
+  state: RunState,
+  task: string,
+): { readonly engineer: number; readonly reviewers: number } => {
+  let engineer = 0;
+  let reviewers = 0;
+  for (const run of runsOf(state, task)) {
+    const cost = run.costUsd ?? 0;
+    if (run.role === "engineer") engineer += cost;
+    else if (isReviewer(run)) reviewers += cost;
+  }
+  return { engineer, reviewers };
+};
+
 /** Seq of the last time the run entered `phase`, or `null`. */
 export const phaseEnteredSeq = (state: RunState, phase: Phase): number | null => {
   for (let i = state.events.length - 1; i >= 0; i -= 1) {

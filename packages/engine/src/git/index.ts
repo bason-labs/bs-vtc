@@ -3,10 +3,24 @@
  * sub-project 1). Implements the frozen `GitOps` seam from @vtc/shared (`createGitOps`), which the
  * cli builds and injects into the Gate Runner (`GateRunnerDeps.git`); engine core also uses it for
  * worktrees, the submit snapshot commit (`role.submitted.head`) and the merge queue. Imports no
- * other engine module. Uses the user's own git auth (AD-9).
+ * other engine module. Uses the user's own git auth (AD-9). Also home of the engine's repo file
+ * writes that never follow a symlink (`writeRepoFile`, `appendRepoFile`).
  */
 export { createGitOps, parseNameStatus, CHECKOUTS_DIR } from "./git-ops.js";
-export { createWorkspace, WORKTREES_DIR, type MergeOutcome, type Workspace } from "./workspace.js";
+export {
+  createWorkspace,
+  WORKTREES_DIR,
+  WorktreeError,
+  type MergeOutcome,
+  type Workspace,
+} from "./workspace.js";
+export {
+  appendRepoFile,
+  assertNoSymlinks,
+  ensureRepoDir,
+  UnsafePathError,
+  writeRepoFile,
+} from "./repo-files.js";
 export {
   ciFromRollup,
   createGhPullRequests,
