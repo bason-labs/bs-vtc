@@ -1,0 +1,117 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Sample prototype (dev fixture)</title>
+    <!-- Dev fixture for Flow Studio's design review: one page for every screen route, with each
+         state reachable through ?state= and the theme through ?theme= (spec §9). -->
+    <style>
+      :root {
+        --bg: #f6f8fb;
+        --card: #ffffff;
+        --fg: #0f172a;
+        --muted: #475569;
+        --brand: #0d6e8a;
+        --danger: #b42318;
+        --ok: #067647;
+        font-family: system-ui, sans-serif;
+      }
+      [data-theme="dark"] {
+        --bg: #0b1220;
+        --card: #111a2e;
+        --fg: #e2e8f0;
+        --muted: #94a3b8;
+        --brand: #38bdf8;
+        --danger: #f97066;
+        --ok: #47cd89;
+      }
+      body {
+        margin: 0;
+        min-height: 100vh;
+        background: var(--bg);
+        color: var(--fg);
+        display: grid;
+        place-items: center;
+      }
+      main {
+        width: min(26rem, calc(100% - 2rem));
+        background: var(--card);
+        border-radius: 1rem;
+        padding: 1.5rem;
+        box-shadow: 0 10px 30px rgb(0 0 0 / 0.08);
+      }
+      h1 {
+        font-size: 1.4rem;
+        margin: 0 0 0.25rem;
+      }
+      p {
+        color: var(--muted);
+        margin: 0 0 1rem;
+      }
+      label {
+        display: block;
+        font-size: 0.85rem;
+        margin-bottom: 0.25rem;
+      }
+      input {
+        width: 100%;
+        box-sizing: border-box;
+        padding: 0.6rem;
+        border-radius: 0.5rem;
+        border: 1px solid var(--muted);
+        background: transparent;
+        color: var(--fg);
+      }
+      button {
+        margin-top: 1rem;
+        width: 100%;
+        padding: 0.7rem;
+        border: 0;
+        border-radius: 0.5rem;
+        background: var(--brand);
+        color: #fff;
+        font-weight: 600;
+      }
+      .msg {
+        margin-top: 1rem;
+        font-size: 0.9rem;
+      }
+      .error {
+        color: var(--danger);
+      }
+      .success {
+        color: var(--ok);
+      }
+    </style>
+  </head>
+  <body>
+    <main id="screen"></main>
+    <script>
+      const q = new URLSearchParams(location.search);
+      const state = q.get("state") || "default";
+      document.documentElement.dataset.theme = q.get("theme") === "dark" ? "dark" : "light";
+      const confirm = location.pathname.includes("confirm");
+      const title = confirm ? "Choose a new password" : "Reset your password";
+      const field = confirm ? "New password" : "Email";
+      const messages = {
+        loading: ["", "Sending…"],
+        error: ["error", "We could not send the link. Try again in a minute."],
+        expired: ["error", "This link has expired. Ask for a new one."],
+        success: ["success", confirm ? "Password changed." : "Check your inbox for the link."],
+      };
+      const [kind, text] = messages[state] || ["", ""];
+      const main = document.getElementById("screen");
+      main.innerHTML =
+        "<h1></h1><p>State: <b></b></p><label for='f'></label><input id='f' />" +
+        "<button type='button'>Continue</button><div class='msg'></div>";
+      main.querySelector("h1").textContent = title;
+      main.querySelector("b").textContent = state;
+      main.querySelector("label").textContent = field;
+      main.querySelector("button").disabled = state === "loading";
+      const msg = main.querySelector(".msg");
+      msg.textContent = text;
+      if (kind) msg.classList.add(kind);
+    </script>
+  </body>
+</html>
