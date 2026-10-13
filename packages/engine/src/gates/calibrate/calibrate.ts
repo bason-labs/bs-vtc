@@ -1,15 +1,19 @@
 /**
  * `vtc calibrate` (§7.1): detect the toolchain, have a human confirm every command before it runs
  * (§15, the gate allowlist), run every gate twice on the base commit, record flaky tests, and
- * freeze the result as the baseline in `.vtc/gates.yml` once the human confirms it.
+ * freeze the result as the baseline in `.vtc/gates.yml` once the human confirms it. Every command
+ * (both runs and the OSV database download) runs in the gate sandbox (D-al); with none, and no
+ * user-level `gates.allow_unsandboxed`, calibration refuses before it asks or runs anything.
  */
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import {
+  GATE_SANDBOX,
   gateCommandAllowed,
   GateRunRequestSchema,
   GatesConfigSchema,
   type GateReport,
+  type GateSandbox,
   type GatesConfig,
   type GitOps,
   type TestRecord,
@@ -24,6 +28,7 @@ import {
 } from "../config.js";
 import { downloadOsvDatabase, osvDatabaseDir, osvDatabaseReady } from "../osv-db.js";
 import { runWithConfig } from "../runner.js";
+import { detectGateSandbox, resolveGateSandbox } from "../sandbox.js";
 import { createScannerStore, type ScannerStore } from "../scanners.js";
 import { allowlistPrefix, detectToolchain } from "./detect.js";
 
@@ -42,6 +47,12 @@ export interface CalibrateDeps {
   readonly now?: () => Date;
   readonly scanners?: ScannerStore;
   readonly env?: Readonly<Record<string, string | undefined>>;
+  /** The gate sandbox (D-al); absent: the machine's own (`detectGateSandbox`). */
+  readonly sandbox?: GateSandbox;
+  /** `gates.allow_unsandboxed` from `~/.vtc/config.yaml`, read by the cli. Default false. */
+  readonly allowUnsandboxed?: boolean;
+  /** Finds the machine's sandbox when `sandbox` is absent; tests pass `() => null`. */
+  readonly detectSandbox?: () => GateSandbox | null;
 }
 
 export type CalibrateOutcome =
@@ -113,6 +124,30 @@ export const calibrate = async (
   });
   if (options.dryRun === true) return { status: "dry_run", yaml: stringifyGatesConfig(proposed) };
 
+  // Nothing runs outside the gate sandbox unless the user opted in (D-al, spine §5 reading 69).
+  let detail = "";
+  const sandbox = resolveGateSandbox(
+    deps,
+    deps.detectSandbox ??
+      (() => {
+        const found = detectGateSandbox();
+        detail = found.detail;
+        return found.sandbox;
+      }),
+  );
+  if (sandbox === null) {
+    throw new Error(
+      detail === ""
+        ? `${GATE_SANDBOX.noSandboxReason}: install sandbox-exec (macOS) or bwrap (Linux), or set gates.allow_unsandboxed: true in ~/.vtc/config.yaml to run gates unconfined`
+        : detail,
+    );
+  }
+  if (sandbox.kind === "none") {
+    deps.out(
+      `WARNING: ${GATE_SANDBOX.noSandboxReason}: gates.allow_unsandboxed is set, so every gate command runs unconfined, with your files and network`,
+    );
+  }
+
   // Pinned scanners need no allowlist entry, but the human sees exactly how they will run.
   const scannerGates = proposed.gates.filter((g) => scanners.names.includes(g.command[0] ?? ""));
   if (scannerGates.length > 0) {
@@ -160,6 +195,7 @@ export const calibrate = async (
           logDir: join(deps.repoRoot, ".vtc/state/gates", `calibrate-${stamp}-osv-db`),
           env: deps.env ?? process.env,
           now: now(),
+          sandbox,
         });
         deps.out(done.ok ? `OSV database ${done.detail}` : `WARNING: OSV database: ${done.detail}`);
       } finally {
@@ -173,7 +209,7 @@ export const calibrate = async (
     const checkout = await deps.git.createCleanCheckout(deps.revision);
     try {
       return await runWithConfig(
-        { repoRoot: deps.repoRoot, vtcHome: deps.vtcHome, git: deps.git, now },
+        { repoRoot: deps.repoRoot, vtcHome: deps.vtcHome, git: deps.git, now, sandbox },
         { scanners, ...(deps.env === undefined ? {} : { env: deps.env }) },
         GateRunRequestSchema.parse({
           run: `calibrate-${stamp}-${String(n)}`,

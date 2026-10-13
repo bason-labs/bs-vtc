@@ -4,9 +4,13 @@
  * which only a human widens), runs each gate twice on `HEAD`, records flaky tests and freezes the
  * baseline in `.vtc/gates.yml`. Confirmation needs an interactive terminal, so an agent's shell
  * can run detection but never confirm. The logic is `gates.calibrate` in the engine package.
+ * Every gate command runs in the gate sandbox (D-al); `gates.allow_unsandboxed` is read from the
+ * user config in the VTC home only, never from the repo.
  */
 import { createInterface } from "node:readline";
 import { gates, git } from "@vtc/engine";
+import { gatesAllowUnsandboxed } from "@vtc/shared";
+import { readUserConfig } from "../user-config.js";
 import type { CommandSpec } from "./types.js";
 
 /** Exit code when the human did not confirm (or could not: no terminal). */
@@ -53,6 +57,11 @@ export const command: CommandSpec = {
       ctx.io.err("vtc calibrate: run it inside a git repository with at least one commit");
       return 1;
     }
+    const userConfig = readUserConfig(ctx.vtcHome);
+    if (!userConfig.ok) {
+      // Fail closed: an unreadable config never turns the opt-in on.
+      ctx.io.err(`vtc calibrate: ignoring ${userConfig.path}: ${userConfig.error}`);
+    }
     try {
       const outcome = await gates.calibrate(
         {
@@ -62,6 +71,7 @@ export const command: CommandSpec = {
           revision,
           out: ctx.io.out,
           confirm: askTerminal,
+          allowUnsandboxed: userConfig.ok && gatesAllowUnsandboxed(userConfig.config),
         },
         { dryRun: args.includes("--dry-run") },
       );

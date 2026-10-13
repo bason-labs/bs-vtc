@@ -4,8 +4,9 @@
  * from the engine's own environment reach a gate), and stdout/stderr streamed to raw log files
  * under `.vtc/state/` (§7.2: raw output stays gitignored).
  *
- * Not built yet (gates/README.md): the §7.2 two-phase sandbox. A gate runs with the user's
- * network and file access in both phases; there is no OS sandbox profile or network policy.
+ * The Gate Runner never calls {@link runCommand} directly for a gate: every command goes through
+ * the gate sandbox (`sandbox.ts` `GateCommandJail`, D-al), which wraps the argv in `sandbox-exec`
+ * or `bwrap` and points `HOME` and the temp variables at private per-run directories.
  */
 import { spawn } from "node:child_process";
 import { createWriteStream, mkdirSync } from "node:fs";

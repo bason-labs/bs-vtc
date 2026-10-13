@@ -1,8 +1,12 @@
 /**
  * The pinned scanner store (§4.4, §7.2, §15): scanners are downloaded on demand into
  * `~/.vtc/scanners/<name>/<version>/<platform>/`, verified against the pinned SHA-256 before
- * anything is unpacked, and re-verified before every use. Nothing is auto-updated: a different
- * version only arrives with a new pin in a new vtc release.
+ * anything is unpacked, and re-verified before every use against the pinned SHA-256 of the
+ * extracted executable (`ScannerPin.binary_sha256`, D-ap, spine §5 reading 73), never against the
+ * manifest stored beside it: whoever could write the store could rewrite both. A platform pinned
+ * without a binary checksum has no anchor for an installed copy, so it is downloaded and verified
+ * against the download pin again before each use. Nothing is auto-updated: a different version
+ * only arrives with a new pin in a new vtc release.
  */
 import { spawnSync } from "node:child_process";
 import { createHash, randomBytes } from "node:crypto";
@@ -10,7 +14,7 @@ import {
   accessSync,
   chmodSync,
   constants,
-  existsSync,
+  lstatSync,
   mkdirSync,
   readdirSync,
   readFileSync,
@@ -194,6 +198,7 @@ const findBinary = (dir: string, names: readonly string[]): string | null => {
   return null;
 };
 
+/** Written beside an install to locate its executable. Never trusted for verification (D-ap). */
 interface Manifest {
   readonly name: string;
   readonly version: string;
@@ -201,6 +206,7 @@ interface Manifest {
   readonly download_sha256: string;
   /** Path of the executable relative to the install directory. */
   readonly binary: string;
+  /** Informational: verification compares with `ScannerPin.binary_sha256`, not this. */
   readonly binary_sha256: string;
 }
 
@@ -240,18 +246,30 @@ export const createScannerStore: CreateScannerStore = (options) => {
   const extract = options.extract ?? defaultExtract;
   const pending = new Map<string, Promise<string>>();
 
-  const verified = (dir: string, pin: ScannerPin, expected: string): string | null => {
+  /**
+   * The installed executable when it still has the pinned binary checksum, else `null`. The
+   * manifest only says where the executable is; that path must stay inside the install and be a
+   * regular file (not a symlink). Without a binary pin nothing installed is trusted.
+   */
+  const verified = (dir: string, binaryPin: string | undefined): string | null => {
+    if (binaryPin === undefined) return null;
     const manifest = readManifest(dir);
-    if (manifest?.version !== pin.version || manifest.download_sha256 !== expected) return null;
+    if (typeof manifest?.binary !== "string") return null;
     const binary = join(dir, manifest.binary);
-    if (!existsSync(binary) || !statSync(binary).isFile()) return null;
-    return sha256(readFileSync(binary)) === manifest.binary_sha256 ? binary : null;
+    if (binary === dir || !isInsideDir(dir, binary)) return null;
+    try {
+      if (!lstatSync(binary).isFile()) return null;
+      return sha256(readFileSync(binary)) === binaryPin ? binary : null;
+    } catch {
+      return null;
+    }
   };
 
   const install = async (
     pin: ScannerPin,
     asset: string,
     expected: string,
+    binaryPin: string | undefined,
     dir: string,
   ): Promise<string> => {
     const bytes = await download(scannerUrl(pin, asset));
@@ -290,6 +308,13 @@ export const createScannerStore: CreateScannerStore = (options) => {
         binary = found;
       }
       chmodSync(binary, 0o700);
+      const binarySha = sha256(readFileSync(binary));
+      if (binaryPin !== undefined && binarySha !== binaryPin) {
+        throw new ScannerError(
+          pin.name,
+          `binary checksum mismatch for ${asset}: expected ${binaryPin}, got ${binarySha}; nothing was installed`,
+        );
+      }
       const manifest: Manifest = {
         name: pin.name,
         version: pin.version,
@@ -299,7 +324,7 @@ export const createScannerStore: CreateScannerStore = (options) => {
           .slice(staging.length + 1)
           .split("\\")
           .join("/"),
-        binary_sha256: sha256(readFileSync(binary)),
+        binary_sha256: binarySha,
       };
       writeFileSync(join(staging, MANIFEST), `${JSON.stringify(manifest, null, 2)}\n`, {
         mode: 0o600,
@@ -327,11 +352,12 @@ export const createScannerStore: CreateScannerStore = (options) => {
       return Promise.reject(new ScannerUnavailableError(name, platform));
     }
     const dir = join(options.vtcHome, SCANNERS_DIR, name, pin.version, platform);
-    const ok = verified(dir, pin, expected);
+    const binaryPin = pin.binary_sha256?.[platform];
+    const ok = verified(dir, binaryPin);
     if (ok !== null) return Promise.resolve(ok);
     const running = pending.get(name);
     if (running !== undefined) return running;
-    const job = install(pin, asset, expected, dir).finally(() => pending.delete(name));
+    const job = install(pin, asset, expected, binaryPin, dir).finally(() => pending.delete(name));
     pending.set(name, job);
     return job;
   };

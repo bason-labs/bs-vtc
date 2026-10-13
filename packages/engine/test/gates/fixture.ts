@@ -8,6 +8,8 @@ import {
   GateRunRequestSchema,
   type GateReport,
   type GateRunRequestInput,
+  type GateSandbox,
+  type GateSandboxSpec,
   type GatesConfigInput,
 } from "@vtc/shared";
 
@@ -196,10 +198,36 @@ export const commitAll = (repo: string, message = "change"): string => {
   return git(repo, "rev-parse", "HEAD");
 };
 
+/**
+ * A fake gate sandbox: runs the argv as it is and records every spec it was asked to wrap, so
+ * tests see that each command went through the sandbox and with what (D-al).
+ */
+export const recordingSandbox = (
+  kind: GateSandbox["kind"] = "sandbox-exec",
+): { readonly sandbox: GateSandbox; readonly specs: GateSandboxSpec[] } => {
+  const specs: GateSandboxSpec[] = [];
+  return {
+    specs,
+    sandbox: {
+      kind,
+      wrap: (argv, spec) => {
+        specs.push(spec);
+        return {
+          command: argv[0] ?? "",
+          args: argv.slice(1),
+          network: spec.phase === "verify" ? "none" : "full",
+        };
+      },
+    },
+  };
+};
+
 export interface Harness {
   readonly repo: string;
   readonly home: string;
   readonly base: string;
+  /** Every spec the harness's fake sandbox wrapped, in order. */
+  readonly specs: readonly GateSandboxSpec[];
   readonly run: (request: Partial<GateRunRequestInput> & { head: string }) => Promise<GateReport>;
   /** Like `run`, but hands the request to the runner unparsed (a malformed caller). */
   readonly runUnparsed: (
@@ -260,6 +288,13 @@ export const harness = (
     scanners?: (home: string) => ScannerStore;
     /** The engine environment the runner scrubs (default `process.env`). */
     env?: Readonly<Record<string, string | undefined>>;
+    /**
+     * The gate sandbox (default {@link recordingSandbox}). `null`: none injected and none
+     * detected, as on a machine without sandbox-exec or bwrap.
+     */
+    sandbox?: GateSandbox | null;
+    /** `gates.allow_unsandboxed` from the user config. */
+    allowUnsandboxed?: boolean;
   } = {},
 ): Harness => {
   const repo = initRepo({ ...TOOLS, ".lintrc": "strict\n", ...files });
@@ -268,19 +303,30 @@ export const harness = (
   const home = tempDir("vtc-home-");
   addToAllowlist(home, repo, options.allow ?? [[NODE]], new Date("2026-10-13T08:00:00.000Z"));
   const gitOps = createGitOps({ repoRoot: repo });
+  const recording = recordingSandbox();
+  const sandbox = options.sandbox === undefined ? recording.sandbox : options.sandbox;
   const runner = createGateRunnerWith(
     {
       repoRoot: repo,
       vtcHome: home,
       git: gitOps,
       ...(options.now === undefined ? {} : { now: options.now }),
+      ...(sandbox === null ? {} : { sandbox }),
+      ...(options.allowUnsandboxed === undefined
+        ? {}
+        : { allowUnsandboxed: options.allowUnsandboxed }),
     },
-    { scanners: (options.scanners ?? fakeScanners)(home), env: options.env ?? process.env },
+    {
+      scanners: (options.scanners ?? fakeScanners)(home),
+      env: options.env ?? process.env,
+      detectSandbox: () => null,
+    },
   );
   return {
     repo,
     home,
     base,
+    specs: recording.specs,
     run: async (partial) => {
       const checkout = await gitOps.createCleanCheckout(partial.head);
       try {

@@ -21,6 +21,7 @@ import {
   SCANNER_ASSETS,
   SCANNER_PINS,
   scannerUrl,
+  USER_INSTALLED_SCANNERS,
 } from "../../src/gates/index.js";
 import { cleanupDirs, tempDir } from "../helpers/repo.js";
 
@@ -61,6 +62,20 @@ describe("embedded pins and rules match gates/", () => {
       }
     }
   });
+  it("pins the extracted binary of every pinned platform (D-ap); a raw download is its own binary", () => {
+    for (const pin of SCANNER_PINS.scanners) {
+      expect(Object.keys(pin.binary_sha256 ?? {}).sort(), pin.name).toEqual(
+        Object.keys(pin.sha256).sort(),
+      );
+      for (const [platform, asset] of Object.entries(SCANNER_ASSETS[pin.name]?.platforms ?? {})) {
+        const raw = !asset.endsWith(".tar.gz") && !asset.endsWith(".zip");
+        const download = pin.sha256[platform as keyof typeof pin.sha256];
+        const binary = pin.binary_sha256?.[platform as keyof typeof pin.sha256];
+        if (raw) expect(binary, `${pin.name} ${platform}`).toBe(download);
+        else expect(binary, `${pin.name} ${platform}`).not.toBe(download);
+      }
+    }
+  });
   it("builds release URLs from the template", () => {
     const gitleaks = SCANNER_PINS.scanners.find((s) => s.name === "gitleaks");
     expect(gitleaks && scannerUrl(gitleaks, "darwin_arm64.tar.gz")).toBe(
@@ -77,8 +92,13 @@ describe("embedded pins and rules match gates/", () => {
 
 const FAKE = "#!/bin/sh\necho fake-scanner\n";
 
+/**
+ * One fake scanner pinned on darwin-arm64. `binary` is the extracted executable's pin (D-ap):
+ * by default the download itself (a raw binary); `null` pins no binary.
+ */
 const pinsFor = (
   bytes: Uint8Array,
+  binary: Uint8Array | string | null = bytes,
   url = "https://example.test/{version}/fake_{platform}",
 ): ScannerPins =>
   ScannerPinsSchema.parse({
@@ -89,10 +109,13 @@ const pinsFor = (
         version: "1.0.0",
         url,
         sha256: { "darwin-arm64": sha(bytes) },
+        ...(binary === null ? {} : { binary_sha256: { "darwin-arm64": sha(binary) } }),
         license: "MIT",
       },
     ],
   });
+
+const FAKE_ASSETS = { fake: { binary: "fake", platforms: { "darwin-arm64": "darwin_arm64" } } };
 
 describe("scanner store", () => {
   it("downloads once, verifies the SHA-256 and reuses the verified binary", async () => {
@@ -126,7 +149,7 @@ describe("scanner store", () => {
       vtcHome: home,
       platform: "darwin-arm64",
       pins: pinsFor(new TextEncoder().encode(FAKE)),
-      assets: { fake: { binary: "fake", platforms: { "darwin-arm64": "darwin_arm64" } } },
+      assets: FAKE_ASSETS,
       download: () => Promise.resolve(new TextEncoder().encode("evil")),
     });
     await expect(store.ensure("fake")).rejects.toThrow(/checksum mismatch/);
@@ -145,7 +168,7 @@ describe("scanner store", () => {
     const store = createScannerStore({
       vtcHome: home,
       platform: "darwin-arm64",
-      pins: pinsFor(bytes),
+      pins: pinsFor(bytes, FAKE),
       assets: { fake: { binary: "fake", platforms: { "darwin-arm64": "darwin_arm64.tar.gz" } } },
       download: () => Promise.resolve(bytes),
     });
@@ -154,11 +177,84 @@ describe("scanner store", () => {
     expect(execFileSync(binary, { encoding: "utf8" }).trim()).toBe("fake-scanner");
   });
 
+  it("re-verifies an installed binary against the pin, never the manifest beside it (D-ap)", async () => {
+    const home = tempDir();
+    const bytes = new TextEncoder().encode(FAKE);
+    const urls: string[] = [];
+    const store = createScannerStore({
+      vtcHome: home,
+      platform: "darwin-arm64",
+      pins: pinsFor(bytes),
+      assets: FAKE_ASSETS,
+      download: (url) => {
+        urls.push(url);
+        return Promise.resolve(bytes);
+      },
+    });
+    const binary = await store.ensure("fake");
+    const dir = join(home, "scanners/fake/1.0.0/darwin-arm64");
+    const manifestPath = join(dir, "vtc-scanner.json");
+    // Whoever can write the store can rewrite both the binary and the manifest.
+    const evil = "#!/bin/sh\necho evil\n";
+    writeFileSync(binary, evil);
+    const manifest = JSON.parse(readFileSync(manifestPath, "utf8")) as Record<string, unknown>;
+    writeFileSync(manifestPath, JSON.stringify({ ...manifest, binary_sha256: sha(evil) }));
+    expect(await store.ensure("fake")).toBe(binary);
+    expect(readFileSync(binary, "utf8")).toBe(FAKE);
+    expect(urls).toHaveLength(2);
+    // A manifest that points outside the install is not followed either.
+    writeFileSync(join(home, "outside"), FAKE);
+    writeFileSync(manifestPath, JSON.stringify({ ...manifest, binary: "../../../../../outside" }));
+    expect(await store.ensure("fake")).toBe(binary);
+    expect(urls).toHaveLength(3);
+  });
+
+  it("refuses an extracted binary that does not match its pin and installs nothing", async () => {
+    const home = tempDir();
+    const bytes = new TextEncoder().encode(FAKE);
+    const store = createScannerStore({
+      vtcHome: home,
+      platform: "darwin-arm64",
+      pins: pinsFor(bytes, "some other build"),
+      assets: FAKE_ASSETS,
+      download: () => Promise.resolve(bytes),
+    });
+    await expect(store.ensure("fake")).rejects.toThrow(/binary checksum mismatch/);
+    expect(existsSync(join(home, "scanners/fake/1.0.0/darwin-arm64"))).toBe(false);
+  });
+
+  it("re-verifies the download before each use where a platform pins no binary", async () => {
+    const home = tempDir();
+    const bytes = new TextEncoder().encode(FAKE);
+    let downloads = 0;
+    const store = createScannerStore({
+      vtcHome: home,
+      platform: "darwin-arm64",
+      pins: pinsFor(bytes, null),
+      assets: FAKE_ASSETS,
+      download: () => {
+        downloads += 1;
+        return Promise.resolve(downloads === 3 ? new TextEncoder().encode("evil") : bytes);
+      },
+    });
+    const binary = await store.ensure("fake");
+    writeFileSync(binary, "#!/bin/sh\necho tampered\n");
+    expect(await store.ensure("fake")).toBe(binary);
+    expect(readFileSync(binary, "utf8")).toBe(FAKE);
+    expect(downloads).toBe(2);
+    // The check is the download pin itself: a bad download is refused, not used.
+    await expect(store.ensure("fake")).rejects.toThrow(/checksum mismatch/);
+  });
+
   it("explains unpinned scanners and platforms", async () => {
     const store = createScannerStore({ vtcHome: tempDir(), platform: "darwin-arm64" });
     await expect(store.ensure("nope")).rejects.toThrow(/not a pinned scanner/);
     await expect(store.ensure("checkov")).rejects.toThrow(/no pinned build for darwin-arm64/);
     expect(store.names).toEqual(["gitleaks", "osv-scanner", "opengrep", "checkov"]);
+  });
+
+  it("lets only Checkov fall back to a user-installed binary (D-ar, spine §5 reading 75)", () => {
+    expect(USER_INSTALLED_SCANNERS).toEqual(["checkov"]);
   });
 
   it("marks a scanner with no build for this platform as user-installed there (D-u)", async () => {
