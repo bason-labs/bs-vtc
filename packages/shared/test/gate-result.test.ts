@@ -174,6 +174,46 @@ describe("GateRunRequestSchema", () => {
       "compare_to.inventory",
     );
   });
+  it("names the feature's tasks whose hidden tests a Final Review run copies in (§6.7a step 2)", () => {
+    const finalReview = {
+      ...request(),
+      task: undefined,
+      feature: "F-1",
+      reason: "final_review",
+      scope: "full",
+      include_hidden: true,
+    };
+    expect(
+      expectValid(GateRunRequestSchema, { ...finalReview, hidden_tasks: ["T-1", "T-2"] })
+        .hidden_tasks,
+    ).toEqual(["T-1", "T-2"]);
+    expect(expectValid(GateRunRequestSchema, request()).hidden_tasks).toBeUndefined();
+    expectInvalid(
+      GateRunRequestSchema,
+      { ...finalReview, include_hidden: false, hidden_tasks: ["T-1"] },
+      "hidden_tasks",
+    );
+    expectInvalid(
+      GateRunRequestSchema,
+      { ...finalReview, hidden_tasks: ["T-1", "T-1"] },
+      "hidden_tasks",
+    );
+    expectInvalid(
+      GateRunRequestSchema,
+      { ...finalReview, hidden_tasks: ["F-1"] },
+      "hidden_tasks.0",
+    );
+  });
+  it("pins the gates.yml the run started with by hash (spine §5 reading 20)", () => {
+    expect(
+      expectValid(GateRunRequestSchema, { ...request(), gates_config_hash: SHA }).gates_config_hash,
+    ).toBe(SHA);
+    expectInvalid(
+      GateRunRequestSchema,
+      { ...request(), gates_config_hash: "abc" },
+      "gates_config_hash",
+    );
+  });
   it.each([
     ["checkout", { checkout: "/Users/me/wt" }],
     ["reason", { reason: "deploy" }],

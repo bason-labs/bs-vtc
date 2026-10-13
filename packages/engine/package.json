@@ -9,6 +9,9 @@
       "@vtc/source": "./src/index.ts",
       "types": "./dist/index.d.ts",
       "default": "./dist/index.js"
+    },
+    "./test-support": {
+      "@vtc/source": "./test/storage-contract.ts"
     }
   },
   "files": [

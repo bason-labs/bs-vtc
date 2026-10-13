@@ -3,6 +3,7 @@ import { describe, expect, it } from "vitest";
 import {
   fingerprintFinding,
   isAtLeast,
+  isSecurityClass,
   normalizeFindingPath,
   normalizeSeverity,
   normalizeSnippet,
@@ -86,6 +87,38 @@ describe("normalizeSeverity", () => {
     expect(normalizeSeverity({ source: "tool", label: "weird", sarifLevel: "error" })).toBe("high");
     expect(normalizeSeverity({ source: "tool", sarifLevel: "note" })).toBe("low");
     expect(normalizeSeverity({ source: "tool", sarifLevel: "none" })).toBe("info");
+  });
+  it("caps a tool finding outside the security class at medium (AD-8 rule 7)", () => {
+    // an ESLint `error` on a lint finding must not trip §7.6 rule 9
+    expect(normalizeSeverity({ source: "tool", label: "error", category: "correctness" })).toBe(
+      "medium",
+    );
+    expect(normalizeSeverity({ source: "tool", sarifLevel: "error", category: "docs" })).toBe(
+      "medium",
+    );
+    expect(normalizeSeverity({ source: "tool", score: 9.8, category: "performance" })).toBe(
+      "medium",
+    );
+    // below the cap nothing changes
+    expect(normalizeSeverity({ source: "tool", sarifLevel: "note", category: "correctness" })).toBe(
+      "low",
+    );
+    // security-class categories keep the tool's severity
+    expect(normalizeSeverity({ source: "tool", score: 9.8, category: "supply_chain" })).toBe(
+      "critical",
+    );
+    expect(normalizeSeverity({ source: "tool", label: "HIGH", category: "secret" })).toBe("high");
+    expect(normalizeSeverity({ source: "tool", label: "error", category: "test_integrity" })).toBe(
+      "high",
+    );
+    // no category: no cap (callers before 4.2.0)
+    expect(normalizeSeverity({ source: "tool", label: "error" })).toBe("high");
+    expect(FindingCategorySchema.options.filter(isSecurityClass)).toEqual([
+      "secret",
+      "security",
+      "supply_chain",
+      "test_integrity",
+    ]);
   });
   it("treats unknown tool severities as medium (never silently passes)", () => {
     expect(normalizeSeverity({ source: "tool" })).toBe("medium");

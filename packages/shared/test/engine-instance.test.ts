@@ -1,3 +1,4 @@
+import { spawnSync } from "node:child_process";
 import { describe, expect, it } from "vitest";
 import {
   contractsCompatible,
@@ -13,6 +14,9 @@ import {
   engineWindowsPipe,
   fitsUnixSocketPath,
   normalizeRepoRoot,
+  shellQuoteWord,
+  STATUSLINE_TEE,
+  statuslineTeeCommand,
   UNIX_SOCKET_MAX_BYTES,
 } from "../src/index.js";
 import { NOW } from "./fixtures.js";
@@ -104,4 +108,32 @@ describe("local socket protocol (AD-12 rule 3)", () => {
     expect(contractsCompatible("4.0.0", "4.2.1")).toBe(true);
     expect(contractsCompatible("4.0.0", "3.9.0")).toBe(false);
   });
+});
+
+describe("the statusline shim command (spine §5 reading 61)", () => {
+  it("is bare without a user statusline", () => {
+    expect(statuslineTeeCommand()).toBe("vtc statusline-tee");
+    expect(statuslineTeeCommand(null)).toBe("vtc statusline-tee");
+    expect(statuslineTeeCommand("  ")).toBe("vtc statusline-tee");
+    expect(STATUSLINE_TEE.separator).toBe("--");
+  });
+  it("passes the user's command after -- as one shell-quoted word", () => {
+    expect(statuslineTeeCommand("ccstatusline --compact")).toBe(
+      "vtc statusline-tee -- 'ccstatusline --compact'",
+    );
+    expect(statuslineTeeCommand("echo 'hi'")).toBe(
+      String.raw`vtc statusline-tee -- 'echo '\''hi'\'''`,
+    );
+  });
+  it.skipIf(process.platform === "win32")(
+    "quotes any text so the shell reads it back as exactly one literal word",
+    () => {
+      for (const word of ["a b", "it's", "$HOME `id` $(id)", 'x"y\\z', "line\nbreak", "*", ""]) {
+        const out = spawnSync("sh", ["-c", `printf '%s|' ${shellQuoteWord(word)}`], {
+          encoding: "utf8",
+        });
+        expect(out.stdout).toBe(`${word}|`);
+      }
+    },
+  );
 });

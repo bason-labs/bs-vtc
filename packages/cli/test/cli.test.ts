@@ -41,7 +41,7 @@ describe("vtc cli smoke", () => {
     const { code, out } = await run("--version");
     expect(code).toBe(0);
     expect(out[0]).toMatch(
-      /^vtc 0\.0\.0 \(vtc-engine, contracts 4\.1\.0, hosts claude-code\/codex/,
+      /^vtc 0\.0\.0 \(vtc-engine, contracts 4\.2\.0, hosts claude-code\/codex/,
     );
   });
   it("runs a command through its spec; reports unknown commands", async () => {

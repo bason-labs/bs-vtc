@@ -20,6 +20,7 @@ import {
   SlugSchema,
   TaskIdSchema,
   TokenUsageSchema,
+  WriteScopeGlobSchema,
 } from "../src/index.js";
 import { expectInvalid, expectValid } from "./helpers.js";
 
@@ -111,6 +112,28 @@ describe("paths", () => {
   it("globs follow the same rules", () => {
     expectValid(GlobSchema, "src/**/*.ts");
     expectInvalid(GlobSchema, "../**");
+  });
+  it.each([
+    "src/**",
+    "packages/foo/tsconfig.json",
+    ".vtc/state/hidden-staging/T-1/**",
+    "a/[ab].ts",
+  ])("accepts write-scope glob %s", (glob) => {
+    expectValid(WriteScopeGlobSchema, glob);
+  });
+  it.each([
+    "src/{a,b}/**",
+    "src/**),Bash(*",
+    "src/a b.ts",
+    "src/'x'",
+    'src/"x"',
+    "src/`x`",
+    "src/a\tb",
+    "src/a\nb",
+    "src/\u0007",
+    "../**",
+  ])("rejects write-scope glob %j (spine §5 reading 63)", (glob) => {
+    expectInvalid(WriteScopeGlobSchema, glob);
   });
 });
 

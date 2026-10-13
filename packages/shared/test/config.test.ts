@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import {
+  DEFAULT_INSTALL_SCOPE,
   engineRepoKey,
   GateAllowlistSchema,
   gateAllowlistFile,
@@ -10,6 +11,8 @@ import {
   ProjectConfigSchema,
   ScannerPinSchema,
   ScannerPinsSchema,
+  USER_CONFIG_FILE,
+  UserConfigSchema,
 } from "../src/index.js";
 import { COMMIT, SHA, validGatesConfig, validProjectConfig } from "./fixtures.js";
 import { expectInvalid, expectValid } from "./helpers.js";
@@ -74,6 +77,39 @@ describe("ProjectConfigSchema", () => {
     ["hosts.models.codex", { hosts: { models: { codex: { best: "gpt" } } } }],
   ])("rejects invalid %s", (path, patch) => {
     expectInvalid(ProjectConfigSchema, { version: 1, ...patch }, path);
+  });
+});
+
+describe("install scope defaults (D-ah)", () => {
+  it("installs Claude Code for the user and Codex into the project", () => {
+    expect(DEFAULT_INSTALL_SCOPE).toEqual({ "claude-code": "user", codex: "project" });
+  });
+});
+
+describe("UserConfigSchema (~/.vtc/config.yaml, D-ak)", () => {
+  it("lists the environment variable names the daemon passes through", () => {
+    expect(expectValid(UserConfigSchema, { version: 1 }).env_passthrough).toEqual([]);
+    expect(
+      expectValid(UserConfigSchema, { version: 1, env_passthrough: ["GH_HOST", "HTTPS_PROXY"] })
+        .env_passthrough,
+    ).toEqual(["GH_HOST", "HTTPS_PROXY"]);
+    expect(USER_CONFIG_FILE).toBe("config.yaml");
+  });
+  it.each([
+    ["env_passthrough.0", { env_passthrough: ["1BAD"] }],
+    ["env_passthrough.0", { env_passthrough: ["A=B"] }],
+    ["env_passthrough.0", { env_passthrough: ["GH TOKEN"] }],
+    ["env_passthrough", { env_passthrough: Array.from({ length: 65 }, (_, i) => `V${String(i)}`) }],
+  ])("rejects invalid %s", (path, patch) => {
+    expectInvalid(UserConfigSchema, { version: 1, ...patch }, path);
+  });
+  it("is never a project.yaml key: a committed repo cannot ask for the user's secrets", () => {
+    expectInvalid(ProjectConfigSchema, { version: 1, env_passthrough: ["GH_HOST"] }, "");
+    expectInvalid(
+      ProjectConfigSchema,
+      { version: 1, hosts: { env_passthrough: ["GH_HOST"] } },
+      "hosts",
+    );
   });
 });
 

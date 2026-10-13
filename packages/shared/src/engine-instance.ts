@@ -31,6 +31,36 @@ export const ENGINE_INSTANCE = {
   idleExitMs: 30 * 60 * 1000,
 } as const;
 
+/**
+ * The statusline shim (§6.9, spine §5 readings 6 and 61), frozen so the Claude adapter's `install`
+ * (which writes it) and the cli's `vtc statusline-tee` (which runs it) agree on the quoting.
+ * Claude Code runs `statusLine.command` through the shell once. The adapter writes
+ * {@link statuslineTeeCommand}: `vtc statusline-tee -- <the user's original command, shell-quoted
+ * as ONE word>`, or bare `vtc statusline-tee` when the user had no statusline. The shim reads
+ * the statusline JSON on stdin, forwards it to the engine as a `StatuslineIngest`, and, when a
+ * user command follows `--`, runs that single word through the shell exactly once with the same
+ * stdin and prints its output unchanged (so the user's statusline looks the same). The adapter
+ * only ever writes zero or one word after `--`.
+ */
+export const STATUSLINE_TEE = {
+  command: "vtc",
+  subcommand: "statusline-tee",
+  separator: "--",
+} as const;
+
+/** POSIX single-quoting: the whole string as one shell word, taken literally. */
+export const shellQuoteWord = (word: string): string => `'${word.replace(/'/g, `'\\''`)}'`;
+
+/**
+ * The `statusLine.command` the Claude adapter installs: `vtc statusline-tee`, plus `--` and the
+ * user's original command as one shell-quoted word when there was one (blank counts as none).
+ */
+export const statuslineTeeCommand = (userCommand?: string | null): string => {
+  const base = `${STATUSLINE_TEE.command} ${STATUSLINE_TEE.subcommand}`;
+  if (userCommand === undefined || userCommand === null || userCommand.trim() === "") return base;
+  return `${base} ${STATUSLINE_TEE.separator} ${shellQuoteWord(userCommand)}`;
+};
+
 /** Normalises an absolute repo root: POSIX separators, no trailing slash. */
 export const normalizeRepoRoot = (absPath: string): string => {
   const posix = absPath.replace(/\\/g, "/");

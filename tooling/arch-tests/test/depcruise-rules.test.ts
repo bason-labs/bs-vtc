@@ -49,6 +49,7 @@ const EXPECTED: readonly (readonly [file: string, rule: string])[] = [
   ["packages/engine/src/bad-apps.ts", "AD1-no-package-imports-apps"],
   ["packages/cli/src/bad-deep.ts", "AD1-no-deep-imports-across-packages"],
   ["apps/dashboard/src/bad-deep.tsx", "AD1-no-deep-imports-across-packages"],
+  ["packages/cli/test/bad-test-deep.ts", "AD1-test-support-through-the-sanctioned-entry"],
   ["packages/engine/src/bad-sqlite.ts", "AD2-node-sqlite-only-in-its-driver"],
   ["packages/engine/src/bad-bun.ts", "AD2-bun-builtins-only-in-bun-driver"],
   ["packages/engine/src/bad-builtin.ts", "AD2-runtime-builtins-allowlist"],
@@ -83,6 +84,7 @@ describe("dependency-cruiser rules fire on planted violations", () => {
     "packages/engine/src/daemon/index.ts",
     "packages/engine/src/storage/node-sqlite.ts",
     "packages/engine/dist/index.js",
+    "packages/cli/test/ok-test-support.ts",
   ])("allowed shapes stay clean: %s", (file) => {
     expect(rulesFor(file)).toEqual([]);
   });

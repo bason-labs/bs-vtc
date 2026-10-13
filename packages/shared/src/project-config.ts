@@ -78,10 +78,11 @@ export const ProjectConfigSchema = z.strictObject({
       /** Opt-in cross-family review for high-risk tasks (D10, §12.4). */
       cross_family_review: z.boolean().default(false),
       /**
-       * Model id per tier per host, overriding the built-in mapping, e.g.
-       * `models: { codex: { top: "<model id>" } }`. The built-in Codex mapping lives in the Codex
-       * adapter's defaults; until it names model ids, compiled Codex agents set only the reasoning
-       * effort and run on the session's model (spine §5 reading 26).
+       * Model id per tier per host, overriding the engine's built-in mapping, e.g.
+       * `models: { codex: { top: "<model id>" } }`. The engine is the only resolver
+       * (`ResolvedModel`). The built-in Codex mapping names no ids until the spike does, so
+       * without an override Codex runs on the session's model with only the reasoning effort set
+       * (spine §5 reading 26, D-ae).
        */
       models: z
         .partialRecord(HostIdSchema, z.partialRecord(ModelTierSchema, z.string().min(1)))
@@ -116,3 +117,28 @@ export const ProjectConfigSchema = z.strictObject({
 });
 export type ProjectConfig = z.infer<typeof ProjectConfigSchema>;
 export type ProjectConfigInput = z.input<typeof ProjectConfigSchema>;
+
+// --------------------------------------------------------- user-level config
+
+/** The user-level config file, relative to the VTC home (`~/.vtc/`, or `$VTC_HOME`). */
+export const USER_CONFIG_FILE = "config.yaml";
+
+/** An environment variable name (POSIX portable form). */
+export const EnvVarNameSchema = z.string().regex(/^[A-Za-z_][A-Za-z0-9_]{0,127}$/);
+
+/**
+ * `~/.vtc/config.yaml`: settings that belong to the person and the machine, never to a repo.
+ * Read with `parsePersisted`; a missing file is `{ version: 1 }`.
+ * - `env_passthrough` (D-ak, spine §5 reading 57): the detached daemon drops credential
+ *   variables from its environment by default (AD-9). The names listed here pass through to it
+ *   (and so to headless host runs and `gh`). Names only, never values. It lives only in this
+ *   user-level file: `.vtc/project.yaml` is committed, so a repo could otherwise ask for the
+ *   user's secrets; `ProjectConfigSchema` has no such key and rejects it. `vtc doctor` shows
+ *   which names pass.
+ */
+export const UserConfigSchema = z.strictObject({
+  version: z.literal(1),
+  env_passthrough: z.array(EnvVarNameSchema).max(64).default([]),
+});
+export type UserConfig = z.infer<typeof UserConfigSchema>;
+export type UserConfigInput = z.input<typeof UserConfigSchema>;

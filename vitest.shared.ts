@@ -10,7 +10,11 @@ const pkg = (name: string): string =>
  */
 export const sharedConfig = defineConfig({
   resolve: {
+    // More specific keys first: Vite matches `@vtc/engine` as a prefix of `@vtc/engine/...`.
     alias: {
+      "@vtc/engine/test-support": fileURLToPath(
+        new URL("./packages/engine/test/storage-contract.ts", import.meta.url),
+      ),
       "@vtc/shared": pkg("shared"),
       "@vtc/engine": pkg("engine"),
       "@vtc/adapters": pkg("adapters"),

@@ -4,7 +4,7 @@ import { RETURN_CAP_TOKENS } from "./helpers/tokens.js";
 import {
   ArtifactTypeSchema,
   DisciplineSchema,
-  GlobSchema,
+  WriteScopeGlobSchema,
   HostIdSchema,
   RoleIdSchema,
   SlugSchema,
@@ -31,12 +31,26 @@ export type RoleHostModel = z.infer<typeof RoleHostModelSchema>;
 /**
  * The model a spawn actually uses (AD-6 rule 2): the engine resolves the tier to a concrete
  * model id from role.yaml and project.yaml, so adapters never pick models.
+ *
+ * `model` is absent when nothing names an id for the host and tier (D-ae, spine §5 reading 26):
+ * the run uses the host session's default model with the resolved `effort`. The adapter then
+ * passes no model flag, and the Lead passes no `model` to the spawn. Today that is Codex until
+ * the spike names its ids (an explicit role model or `project.yaml` `hosts.models.codex` still
+ * wins). The engine is the only resolver; an adapter never fills the gap with its own id.
  */
 export interface ResolvedModel {
   readonly tier: ModelTier;
   readonly effort: Effort;
-  readonly model: string;
+  readonly model?: string;
 }
+
+/**
+ * The model name recorded for a run whose {@link ResolvedModel} has no `model` id: the
+ * `role.dispatched` envelope `model` and `RoleRunSummary.model` (both required) say the host
+ * session's default ran. No price table has it, so the dispatch prices nothing; spend comes from
+ * what the host reports when the run ends, or stays unknown (`null`), never 0 (§11).
+ */
+export const SESSION_DEFAULT_MODEL = "session-default";
 
 /**
  * Tool profile. `read_only` = no writes; `write_scoped` = writes only to `write_paths`
@@ -49,7 +63,7 @@ export type ToolProfile = z.infer<typeof ToolProfileSchema>;
 export const RoleToolsSchema = z
   .strictObject({
     profile: ToolProfileSchema,
-    write_paths: z.array(GlobSchema).default([]),
+    write_paths: z.array(WriteScopeGlobSchema).default([]),
     /** Engine MCP tools the role may call (e.g. research fetchers, fact lookups). */
     engine_tools: z.array(SlugSchema).default([]),
   })

@@ -5,6 +5,8 @@
  * file; compiler and repo tests run `findForbiddenInText` on role, skill and plugin sources and
  * on every emitted plugin file (AD-9).
  */
+import type { HostId } from "../primitives.js";
+
 export const AD9_FORBIDDEN_MARKERS = [
   // permission / sandbox bypass flags and modes
   "dangerously-skip-permissions",
@@ -23,12 +25,149 @@ export const AD9_FORBIDDEN_MARKERS = [
   "OPENAI_API_KEY",
 ] as const;
 
-/** Every argument that contains a forbidden marker (case-insensitive). */
+const hasMarker = (text: string): boolean => {
+  const lower = text.toLowerCase();
+  return AD9_FORBIDDEN_MARKERS.some((marker) => lower.includes(marker.toLowerCase()));
+};
+
+/**
+ * Every argument that contains a forbidden marker (case-insensitive). One exemption (D-ad,
+ * spine §5 reading 50): an argument that is a JSON object (e.g. Claude's `--settings` value, or
+ * `JSON.stringify(profile.settings)`) is checked **after** removing the read-deny entries for host
+ * credential files ({@link isHostCredentialDenyRead}) from exactly two deny lists,
+ * `permissions.deny` and `sandbox.filesystem.denyRead`. A marker anywhere else, including the
+ * same path in an allow list or in any other argument, is still reported.
+ */
 export const findForbiddenHostArgs = (args: readonly string[]): string[] =>
-  args.filter((arg) => {
-    const lower = arg.toLowerCase();
-    return AD9_FORBIDDEN_MARKERS.some((marker) => lower.includes(marker.toLowerCase()));
+  args.filter((arg) => hasMarker(withoutHostCredentialDenies(arg)));
+
+// --------------------------------------------------- host credential deny-read
+
+/**
+ * Host credential files, named **only** so a role sandbox can deny reading them (D-ad, spine §5
+ * reading 50). The AD-9 rule stands: VTC never reads, stats, opens, copies or stores these files.
+ * They exist here to be written into a host's read-deny settings (Claude
+ * `permissions.deny` `Read(...)` rules and `sandbox.filesystem.denyRead`) and nowhere else; this
+ * file is the one place a credential marker may appear in source (AD-9 Check), so adapters build
+ * the deny entries with {@link hostCredentialDenyReadPaths} and never spell the names out.
+ *
+ * Per host: the environment variable that relocates the host's config directory, the directory's
+ * default name under the user's home, and the credential files inside it. The caller resolves the
+ * directory (`$<configDirEnv>` or `<home>/<defaultConfigDir>`); nothing here touches the disk.
+ * Codex has no per-path read deny, so a Codex role cannot be kept from reading them (the engine
+ * gives no role a network route that could send them anywhere, D-ac).
+ */
+export const HOST_CREDENTIAL_DENY_READ = {
+  "claude-code": {
+    configDirEnv: "CLAUDE_CONFIG_DIR",
+    defaultConfigDir: ".claude",
+    files: [".credentials.json"],
+  },
+  codex: { configDirEnv: "CODEX_HOME", defaultConfigDir: ".codex", files: ["auth.json"] },
+} as const satisfies Readonly<
+  Record<
+    HostId,
+    {
+      readonly configDirEnv: string;
+      readonly defaultConfigDir: string;
+      readonly files: readonly string[];
+    }
+  >
+>;
+
+const isAbsolutePath = (path: string): boolean => path.startsWith("/") || /^[A-Za-z]:\//.test(path);
+
+/**
+ * The absolute credential-file paths to deny reading, for each host config directory given
+ * (already resolved by the caller, absolute, POSIX separators). Pure string joins: the result is
+ * only ever written into deny rules, never opened (D-ad).
+ */
+export const hostCredentialDenyReadPaths = (
+  configDirs: Readonly<Partial<Record<HostId, string>>>,
+): string[] =>
+  (Object.keys(HOST_CREDENTIAL_DENY_READ) as HostId[]).flatMap((host) => {
+    const dir = configDirs[host];
+    if (dir === undefined) return [];
+    if (!isAbsolutePath(dir) || dir.includes("\\")) {
+      throw new TypeError(`expected an absolute POSIX config directory for ${host}, got ${dir}`);
+    }
+    const base = dir.length > 1 ? dir.replace(/\/+$/, "") : dir;
+    return HOST_CREDENTIAL_DENY_READ[host].files.map((file) => `${base}/${file}`);
   });
+
+const CREDENTIAL_FILES: readonly string[] = Object.values(HOST_CREDENTIAL_DENY_READ).flatMap(
+  (entry) => entry.files,
+);
+
+/**
+ * True when `entry` denies reading exactly one host credential file: an absolute path (`/…`,
+ * Claude's rule form `//…`, or `~/…`) whose last segment is a credential file, either bare (a
+ * `denyRead` entry) or wrapped as `Read(<path>)` (a `permissions.deny` rule). No wildcards,
+ * braces, brackets, parentheses, commas, backslashes, `..` segments or control characters, so
+ * the entry can name nothing else.
+ */
+export const isHostCredentialDenyRead = (entry: string): boolean => {
+  const path = /^Read\((.*)\)$/.exec(entry)?.[1] ?? entry;
+  // eslint-disable-next-line no-control-regex -- control characters are what this rejects
+  if (!/^(\/|~\/)/.test(path) || /[\u0000-\u001f\u007f*?(),{}[\]\\]/.test(path)) return false;
+  if (path.split("/").includes("..")) return false;
+  const name = path.slice(path.lastIndexOf("/") + 1);
+  return CREDENTIAL_FILES.includes(name);
+};
+
+const isRecord = (value: unknown): value is Record<string, unknown> =>
+  typeof value === "object" && value !== null && !Array.isArray(value);
+
+const withoutDenies = (list: unknown): unknown =>
+  Array.isArray(list)
+    ? list.filter((entry) => !(typeof entry === "string" && isHostCredentialDenyRead(entry)))
+    : list;
+
+/** The JSON text with credential read-denies removed from the two sanctioned deny lists. */
+const withoutHostCredentialDenies = (arg: string): string => {
+  if (!arg.trimStart().startsWith("{")) return arg;
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(arg);
+  } catch {
+    return arg;
+  }
+  if (!isRecord(parsed)) return arg;
+  const settings = { ...parsed };
+  if (isRecord(settings.permissions)) {
+    settings.permissions = {
+      ...settings.permissions,
+      deny: withoutDenies(settings.permissions.deny),
+    };
+  }
+  if (isRecord(settings.sandbox) && isRecord(settings.sandbox.filesystem)) {
+    settings.sandbox = {
+      ...settings.sandbox,
+      filesystem: {
+        ...settings.sandbox.filesystem,
+        denyRead: withoutDenies(settings.sandbox.filesystem.denyRead),
+      },
+    };
+  }
+  return JSON.stringify(settings);
+};
+
+// ------------------------------------------------------------ role deny list
+
+/**
+ * What no role may do with VTC itself, on either host (D-w, spine §5 reading 43; AD-13 rule 10,
+ * §15: only a human widens the gate allowlist, and a role must not tamper with the scanner
+ * database or the hidden tests). Every compiled role profile and every adapter sandbox profile
+ * denies running these `vtc` subcommands and writing these globs under the VTC home (`~/.vtc/`,
+ * or `$VTC_HOME`). `vtc calibrate` also confirms only in an interactive terminal and has no
+ * `--yes` flag, but a pty is not proof of a human, so the host sandbox is the barrier.
+ */
+export const ROLE_DENIED_VTC = {
+  /** `vtc <subcommand>` no role may run. */
+  subcommands: ["calibrate"],
+  /** Globs relative to the VTC home that no role may write. */
+  homeWriteDeny: ["allowlists/**", "osv-db/**", "hidden/**"],
+} as const;
 
 /** One marker hit in a text file. */
 export interface ForbiddenMarkerHit {

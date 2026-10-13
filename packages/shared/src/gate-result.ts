@@ -11,7 +11,7 @@ import {
   EvidenceSchema,
   FeatureIdSchema,
   GitShaSchema,
-  GlobSchema,
+  WriteScopeGlobSchema,
   IsoDateTimeSchema,
   RelPathSchema,
   RequirementRefSchema,
@@ -85,6 +85,13 @@ export type TestInventory = z.infer<typeof TestInventorySchema>;
  * L2 metrics of one run (§7.2 L2, §7.3 monotonic metrics): counts, the inventory with every
  * executed test id and its assertion count, and coverage (`null` = not measured). Mutation score
  * is v1.1 (spine §4) and has no field yet.
+ *
+ * **Several L2 gates.** When a run has more than one L2 gate, the `tests` of the **last** L2
+ * result in `GateReport.results` are the run's **combined** L2 metrics (every L2 gate's tests in
+ * one inventory, counts summed); the earlier L2 results carry their own gate's metrics. The
+ * combined metrics are what engine core keeps as the run's L2 metrics and passes back as the
+ * next run's `GateRunRequest.compare_to`, and what the monotonic comparison of the last L2 result
+ * reads; per-gate metrics would report every test of the other gates as `test_missing`.
  */
 export const TestMetricsSchema = z.strictObject({
   executed: z.int().nonnegative(),
@@ -122,7 +129,7 @@ export const GateResultSchema = z
     /** Violations not in the baseline: only these block (§7.1). */
     new_violations: z.int().nonnegative(),
     baseline_violations: z.int().nonnegative(),
-    /** L2 only. */
+    /** L2 only. On the last L2 result of a report: the run's combined L2 metrics ({@link TestMetricsSchema}). */
     tests: TestMetricsSchema.optional(),
     /** L2 only: how the metrics got worse than the request's `compare_to` (§7.3). */
     monotonic: z.array(MonotonicViolationSchema).default([]),
@@ -200,7 +207,13 @@ export type GateResultInput = z.input<typeof GateResultSchema>;
  */
 export const HIDDEN_TESTS = {
   artifactType: "hidden_acceptance_test",
-  /** Repo-relative staging directory; one sub-directory per task. */
+  /**
+   * Staging directory, relative to the **main checkout** (the repo root the engine runs in), not
+   * to the role's worktree; one sub-directory per task. QA author mode writes
+   * `<repoRoot>/<stagingDir>/<task>/**` (the task pack lists it as a write scope), the engine
+   * checks the artifacts there on submit, and `vtc hook` counts that main-checkout entry as part
+   * of the dispatch's effective write scope (hook rule 4, spine §5 reading 65).
+   */
   stagingDir: ".vtc/state/hidden-staging",
   /** Directory under the VTC home (`~/.vtc/`); `<repo-key>/<task>/` below it. */
   homeDir: "hidden",
@@ -237,7 +250,7 @@ export const GateRunRequestSchema = z
     /** Layers to run; default all configured layers. */
     layers: z.array(GateLayerSchema).optional(),
     /** L5 write scope (the task's files_scope). */
-    files_scope: z.array(GlobSchema).default([]),
+    files_scope: z.array(WriteScopeGlobSchema).default([]),
     /** L5 protected files with their expected checksums (QA-owned tests, configs; §7.3). */
     protected: z
       .array(z.strictObject({ path: RelPathSchema, sha256: Sha256HexSchema }))
@@ -257,6 +270,22 @@ export const GateRunRequestSchema = z
     expect: GateExpectSchema.default("pass"),
     /** Copy the task's hidden acceptance tests into the checkout for this run (§7.3). */
     include_hidden: z.boolean().default(false),
+    /**
+     * With `include_hidden` on a feature run (Final Review, §6.7a step 2 "all hidden tests"): the
+     * tasks whose hidden acceptance tests (`~/.vtc/hidden/<repo-key>/<task>/`) the Gate Runner
+     * copies in. Engine core passes the feature's tasks. A task run copies its own `task`'s and
+     * needs no entry here. Hidden-test directories are keyed by task, so the Gate Runner never
+     * guesses them. Absent = none.
+     */
+    hidden_tasks: z.array(TaskIdSchema).optional(),
+    /**
+     * SHA-256 (`sha256Hex`) of the raw bytes of the `.vtc/gates.yml` the run started with (spine
+     * §5 reading 20). The Gate Runner reads `gates.yml` at `base`; when this is set and the bytes
+     * there hash differently, it runs nothing and reports `error` / `infra` with that reason, so a
+     * run never verifies with a config other than the one it started with. Absent: the base
+     * commit's `gates.yml` as it is.
+     */
+    gates_config_hash: Sha256HexSchema.optional(),
   })
   .superRefine((request, ctx) => {
     if ((request.reason === "base_fail_check") !== (request.expect === "fail")) {
@@ -264,6 +293,21 @@ export const GateRunRequestSchema = z
         code: "custom",
         path: ["expect"],
         message: "expect fail is used by, and only by, base_fail_check",
+      });
+    }
+    const hiddenTasks = request.hidden_tasks ?? [];
+    if (hiddenTasks.length > 0 && !request.include_hidden) {
+      ctx.addIssue({
+        code: "custom",
+        path: ["hidden_tasks"],
+        message: "hidden_tasks name the hidden tests of an include_hidden run",
+      });
+    }
+    if (new Set(hiddenTasks).size !== hiddenTasks.length) {
+      ctx.addIssue({
+        code: "custom",
+        path: ["hidden_tasks"],
+        message: "hidden_tasks are unique",
       });
     }
     if (request.reason === "base_fail_check" && (request.tests ?? []).length === 0) {

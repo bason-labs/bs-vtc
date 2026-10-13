@@ -118,6 +118,17 @@ module.exports = {
         pathNot: ["^$1/$2/", "^packages/[^/]+/src/index\\.ts$"],
       },
     },
+    {
+      name: "AD1-test-support-through-the-sanctioned-entry",
+      comment:
+        "A package's test/ code is its own. Another package may use only test support that a package exports on purpose: @vtc/engine/test-support, the Storage contract suite (AD-2), which the binary build runs unchanged against bun:sqlite (spine §5 reading 68).",
+      severity: "error",
+      from: { path: "^(packages|apps)/([^/]+)/" },
+      to: {
+        path: "^packages/([^/]+)/test/.+",
+        pathNot: ["^$1/$2/", "^packages/engine/test/storage-contract\\.ts$"],
+      },
+    },
     // ---- AD-2: runtime-agnostic code + storage abstraction ----------------
     {
       name: "AD2-shared-is-runtime-agnostic",
