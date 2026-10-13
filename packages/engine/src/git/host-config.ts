@@ -9,11 +9,14 @@
  * the base. Nothing is followed: a symlink is removed as a link, never through it.
  */
 import {
-  chmodSync,
+  closeSync,
+  constants,
+  fstatSync,
   lstatSync,
+  openSync,
   readdirSync,
-  readFileSync,
   readlinkSync,
+  readSync,
   rmSync,
   symlinkSync,
   type Stats,
@@ -31,13 +34,19 @@ const SHA = /^([a-f0-9]{40}|[a-f0-9]{64})$/;
 interface BaseEntry {
   readonly mode: string;
   readonly object: string;
+  /** The blob's size in bytes (`git ls-tree -l`): a file of another size differs unread. */
+  readonly size: number;
 }
 
-/** The base commit's entries under the host config paths (`git ls-tree -r`), by path. */
-const baseEntries = async (repoRoot: string, base: string): Promise<Map<string, BaseEntry>> => {
+/** `<mode> SP <type> SP <object> SP+ <size>` (`git ls-tree -l`; the size is space-padded). */
+const LONG_ENTRY = /^(\d{6}) (\w+) ([a-f0-9]{40,64}) +(\d+|-)$/;
+
+/** The base commit's entries under the host config paths (`git ls-tree -r -l`), by path. */
+const listBase = async (repoRoot: string, base: string): Promise<Map<string, BaseEntry>> => {
   const out = await runGit(repoRoot, [
     "ls-tree",
     "-r",
+    "-l",
     "-z",
     "--full-tree",
     base,
@@ -48,12 +57,37 @@ const baseEntries = async (repoRoot: string, base: string): Promise<Map<string, 
   for (const record of out.stdout.toString("utf8").split("\0")) {
     const tab = record.indexOf("\t");
     if (tab < 0) continue;
-    const [mode = "", type = "", object = ""] = record.slice(0, tab).split(" ");
+    const match = LONG_ENTRY.exec(record.slice(0, tab));
     // a submodule (a commit entry) has no bytes to restore
-    if (type !== "blob") continue;
-    entries.set(record.slice(tab + 1), { mode, object });
+    if (match === null || match[2] !== "blob") continue;
+    entries.set(record.slice(tab + 1), {
+      mode: match[1] ?? "",
+      object: match[3] ?? "",
+      size: Number(match[4]),
+    });
   }
   return entries;
+};
+
+/**
+ * A commit never changes, so its listing is read once per repo (bounded): a dispatch whose
+ * worktree and base have no host config costs no git call at all.
+ */
+const listings = new Map<string, Promise<Map<string, BaseEntry>>>();
+const LISTINGS_MAX = 64;
+
+const baseEntries = (repoRoot: string, base: string): Promise<Map<string, BaseEntry>> => {
+  const key = `${repoRoot}\0${base}`;
+  const hit = listings.get(key);
+  if (hit !== undefined) return hit;
+  const read = listBase(repoRoot, base);
+  read.catch(() => listings.delete(key));
+  if (listings.size >= LISTINGS_MAX) {
+    const oldest = listings.keys().next().value;
+    if (oldest !== undefined) listings.delete(oldest);
+  }
+  listings.set(key, read);
+  return read;
 };
 
 const blob = async (repoRoot: string, object: string): Promise<Buffer> =>
@@ -80,6 +114,37 @@ const leavesUnder = (root: string, rel: string): string[] => {
 
 const isExecutable = (mode: string): boolean => mode === "100755";
 
+/**
+ * The bytes of the regular file at `path` when it has exactly `size` bytes, else `null`. Opened
+ * without following a symlink and without blocking on a FIFO, checked on the descriptor, and
+ * never read past `size + 1` bytes: a planted multi-GB file is never buffered.
+ */
+const readExactly = (path: string, size: number): Buffer | null => {
+  const noFollow = (constants as { O_NOFOLLOW?: number }).O_NOFOLLOW ?? 0;
+  const nonBlock = (constants as { O_NONBLOCK?: number }).O_NONBLOCK ?? 0;
+  let fd: number;
+  try {
+    fd = openSync(path, constants.O_RDONLY | noFollow | nonBlock);
+  } catch {
+    return null;
+  }
+  try {
+    const stat = fstatSync(fd);
+    if (!stat.isFile() || stat.size !== size) return null;
+    const buffer = Buffer.alloc(size + 1);
+    let read = 0;
+    for (;;) {
+      const n = readSync(fd, buffer, read, buffer.length - read, null);
+      if (n === 0) break;
+      read += n;
+      if (read > size) return null;
+    }
+    return read === size ? buffer.subarray(0, size) : null;
+  } finally {
+    closeSync(fd);
+  }
+};
+
 /** True when the worktree's `rel` is exactly the base entry (bytes, symlink target, exec bit). */
 const matches = async (
   repoRoot: string,
@@ -89,13 +154,15 @@ const matches = async (
 ): Promise<boolean> => {
   const stat = statOf(join(root, rel));
   if (stat === null) return false;
-  const want = await blob(repoRoot, entry.object);
   if (entry.mode === "120000") {
-    return stat.isSymbolicLink() && readlinkSync(join(root, rel)) === want.toString("utf8");
+    if (!stat.isSymbolicLink()) return false;
+    const target = readlinkSync(join(root, rel), { encoding: "buffer" });
+    return target.equals(await blob(repoRoot, entry.object));
   }
-  if (!stat.isFile()) return false;
+  if (!stat.isFile() || stat.size !== entry.size) return false;
   if (isExecutable(entry.mode) !== ((stat.mode & 0o111) !== 0)) return false;
-  return readFileSync(join(root, rel)).equals(want);
+  const bytes = readExactly(join(root, rel), entry.size);
+  return bytes !== null && bytes.equals(await blob(repoRoot, entry.object));
 };
 
 /** Removes `rel` (a file, a symlink as a link, or a directory) under `root`. */
@@ -154,8 +221,9 @@ export const restoreHostConfig = async (
       continue;
     }
     const mode = isExecutable(entry.mode) ? 0o755 : 0o644;
-    writeRepoFile(root, path, bytes, mode);
-    chmodSync(join(root, path), mode);
+    // the mode is set on the temp file's descriptor before the rename: nothing is chmodded by
+    // path once the file is in place, where a role still running could swap in a symlink
+    writeRepoFile(root, path, bytes, mode, { exactMode: true });
   }
   return [...changed].sort();
 };

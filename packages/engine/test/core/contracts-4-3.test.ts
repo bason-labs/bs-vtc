@@ -9,7 +9,7 @@
 import { existsSync, mkdtempSync, readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   CONTRACTS_VERSION,
   engineSocketFile,
@@ -23,7 +23,9 @@ import {
   type SessionSandboxState,
 } from "@vtc/shared";
 import { EngineError, type CallContext } from "../../src/core/index.js";
-import { writeRunSummary } from "../../src/core/projections.js";
+import { NO_LEAD_WAIT_REASON } from "../../src/core/dispatch.js";
+import { spendOf, writeRunSummary } from "../../src/core/projections.js";
+import { shareSpend } from "../../src/core/queries.js";
 import { connectEngineClient, handshake, serveEngineSocket } from "../../src/mcp/index.js";
 import type { ToolHost } from "../../src/mcp/index.js";
 import { cleanupDirs, git, writeFile } from "../helpers/repo.js";
@@ -46,6 +48,11 @@ import {
   type Harness,
   type SpawnAction,
 } from "../helpers/engine-harness.js";
+
+// Whole engine flows on a real repo spawn a few hundred git processes per test: under turbo's
+// parallel load the 5 s default is too tight, so they get room on a loaded machine. A real hang
+// still fails, and no assertion changes.
+vi.setConfig({ testTimeout: 20_000 });
 
 afterEach(cleanupDirs);
 
@@ -352,6 +359,28 @@ describe(
       expect((await ask(CLAUDE)).action.role).toBe("advisor_estimator");
       await h.release();
     });
+    it("with no Lead session, a caller that cannot be the Lead waits: nothing parks", async () => {
+      const h = createHarness();
+      // a cli connection never claims the Lead; nobody holds it for this run
+      const cli: CallContext = { host: "claude-code", client: "cli" };
+      const actions = await toQaSubmit(h, cli);
+      expect(spawns(actions)).toEqual([]);
+      expect(actions).toEqual([{ type: "wait", reason: NO_LEAD_WAIT_REASON, until: null }]);
+      expect(NO_LEAD_WAIT_REASON).toMatch(/no Lead session holds this run/);
+      // a bridge session bound to a role action cannot claim it either
+      const role: CallContext = { host: "claude-code", session: "S-role", client: "bridge" };
+      const { action } = await h.engine.consult(
+        { advisor: "advisor_estimator", question: "x?", inputs: [] },
+        CLAUDE,
+      );
+      expect((await submitResult(h, action, { exit: "done" }, 0.01, role)).accepted).toBe(true);
+      expect(spawns(await next(h, role))).toEqual([]);
+      expect(h.engine.status({}).parked).toEqual([]);
+      expect(events(h).some((e) => e.type === "escalation.opened")).toBe(false);
+      // the Lead (here in-process, its sandbox on) gets the Engineer
+      expect(only(await next(h, CLAUDE), "engineer").task).toBe("T-1");
+      await h.release();
+    });
     it("uses the run's Lead session's report, not the caller's", async () => {
       const h = createHarness();
       const actions = await throughPlan(h, [draft("T-1")], SPEC_ONE);
@@ -466,6 +495,24 @@ describe("an unconfined gate run is an incident (D-al, reading 69)", { timeout: 
     expect(recorded[0]?.data.detail).toMatch(/no OS sandbox/);
     await h.release();
   });
+  it("records it even when the report is dropped because the gate changed git config", async () => {
+    const h = createHarness();
+    h.gates.reshape((request, report) => {
+      // the unconfined gate's code writes the repo's git config
+      if (request.reason === "base_fail_check") git(h.repo, "config", "filter.evil.clean", "cat");
+      return GateReportSchema.parse({ ...report, sandbox: "none" });
+    });
+    const actions = await throughPlan(h, [draft("T-1")], SPEC_ONE);
+    await authorTests(h, only(actions, "qa"));
+    expect(events(h).some((e) => e.type === "gate.result")).toBe(false);
+    expect(incidents(h, "checkout_write")).not.toEqual([]);
+    const recorded = incidents(h, "unsandboxed_gate");
+    expect(recorded).toHaveLength(1);
+    expect(recorded[0]).toMatchObject({ task: "T-1" });
+    expect(recorded[0]?.data.detail).toMatch(/base_fail_check gate run of T-1 .*no OS sandbox/);
+    git(h.repo, "config", "--unset", "filter.evil.clean");
+    await h.release();
+  });
   it("records nothing for a gate run in an OS sandbox", async () => {
     const h = createHarness();
     h.gates.reshape((_request, report) =>
@@ -558,6 +605,79 @@ describe(
         h.engine.consult({ advisor: "advisor_estimator", question: "Again?", inputs: [] }, CLAUDE),
       ).rejects.toThrow(/advisor budget is spent/);
       await h.release();
+    });
+    const LIMIT = {
+      kind: "limit" as const,
+      session_ref: { host: "claude-code" as const, id: "sess-9" },
+      resets_at: "2026-10-13T13:00:00.000Z",
+      window: "five_hour" as const,
+      model: null,
+      message: "limit",
+      tokens: null,
+    };
+    it("puts a limit-hit run's reported cost on limit.hit and on the run, so the shares count it", async () => {
+      const h = createHarness();
+      const engineer = await toEngineer(h);
+      const failed = await h.engine.submit(
+        SubmitInputSchema.parse({
+          kind: "failure",
+          action_id: engineer.action_id,
+          outcome: { ...LIMIT, cost_usd: 0.4 },
+        }),
+        CLAUDE,
+      );
+      expect(failed.accepted).toBe(true);
+      expect(events(h).findLast((e) => e.type === "limit.hit")).toMatchObject({
+        task: "T-1",
+        role: "engineer",
+        cost_usd: 0.4,
+      });
+      const state = h.engine.states().at(-1);
+      if (state === undefined) throw new Error("no run");
+      expect(state.roleRuns.get(engineer.action_id)).toMatchObject({
+        status: "interrupted",
+        costUsd: 0.4,
+      });
+      expect(shareSpend(state, "T-1").engineer).toBeCloseTo(0.4, 4);
+      // the evidence bundle's spend counts it too, as the task budget does
+      const engineerRuns = [...state.roleRuns.values()].filter((r) => r.role === "engineer");
+      expect(spendOf(engineerRuns).usd).toBe(0.4);
+      await h.release();
+    });
+    it("a limit-hit advisor run's reported cost spends the advisor budget", async () => {
+      const h = createHarness({ project: { budgets: { advisor_usd: 0.15 } } });
+      await start(h);
+      const { action } = await h.engine.consult(
+        { advisor: "advisor_estimator", question: "Spend?", inputs: [] },
+        CLAUDE,
+      );
+      await h.engine.submit(
+        SubmitInputSchema.parse({
+          kind: "failure",
+          action_id: action.action_id,
+          outcome: { ...LIMIT, cost_usd: 0.3 },
+        }),
+        CLAUDE,
+      );
+      expect(events(h).findLast((e) => e.type === "limit.hit")).toMatchObject({ cost_usd: 0.3 });
+      await expect(
+        h.engine.consult({ advisor: "advisor_estimator", question: "Again?", inputs: [] }, CLAUDE),
+      ).rejects.toThrow(/advisor budget is spent \(\$0\.30 of \$0\.15/);
+      await h.release();
+    });
+    it("reported spend counts failed and interrupted runs' host-reported cost, like the budgets", () => {
+      const run = (status: string, costUsd: number | null) => ({ status, costUsd, tokens: null });
+      expect(
+        spendOf([
+          run("submitted", 0.5),
+          run("failed", 0.25),
+          run("interrupted", 0.125),
+          // a failed run that reported nothing is unknown, not unpriced: it adds nothing
+          run("failed", null),
+        ]).usd,
+      ).toBe(0.875);
+      // a submitted run with no cost is still unpriced (§11): the total is unknown
+      expect(spendOf([run("submitted", null), run("failed", 0.25)]).usd).toBeNull();
     });
     it("notes 'model unknown' in the run summary for runs on the session's default model", async () => {
       const h = createHarness();

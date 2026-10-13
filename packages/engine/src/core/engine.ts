@@ -55,7 +55,13 @@ import {
   PROJECT_CONFIG_PATH,
   type CommittedGates,
 } from "./config.js";
-import { dispatchGuarded, dispatchNow, inSessionAllowed, phaseRoles } from "./dispatch.js";
+import {
+  dispatchGuarded,
+  dispatchNow,
+  inSessionAllowed,
+  NO_LEAD_WAIT_REASON,
+  phaseRoles,
+} from "./dispatch.js";
 import { parkEscalation } from "./escalations.js";
 import {
   acceptCheckout,
@@ -694,6 +700,10 @@ export class Engine implements Kernel {
     return call.client === undefined ? call.sessionSandbox : undefined;
   }
 
+  leadless(run: string, call: CallContext): boolean {
+    return !this.leads.has(run) && call.client !== undefined;
+  }
+
   allStates(): Iterable<RunState> {
     return [...this.finished.values(), ...[...this.handles.values()].map((h) => h.state)];
   }
@@ -1083,7 +1093,8 @@ export class Engine implements Kernel {
     }
     maybeAutoResume(this, handle);
     this.advance(handle);
-    const actions: LeadAction[] = await dispatchNow(this, handle, call);
+    const held = { noLead: 0 };
+    const actions: LeadAction[] = await dispatchNow(this, handle, call, held);
     const gate = this.awaitingGates(handle);
     if (gate !== null) {
       actions.push({
@@ -1096,7 +1107,12 @@ export class Engine implements Kernel {
     }
     const open = openEscalations(state);
     if (open.length > 0) actions.push({ type: "ask_human", escalations: open.map((e) => e.id) });
-    if (actions.length === 0) actions.push(this.waitAction(handle));
+    if (actions.length === 0)
+      actions.push(
+        held.noLead > 0
+          ? { type: "wait", reason: NO_LEAD_WAIT_REASON, until: null }
+          : this.waitAction(handle),
+      );
     return actions;
   }
 
@@ -1478,12 +1494,12 @@ export class Engine implements Kernel {
 
   // ------------------------------------------------------------- advisors
 
-  /** The run's advisor spend so far (accepted and failed advisor runs, priced). */
+  /** The run's advisor spend so far (accepted, failed and limit-hit advisor runs, priced). */
   private advisorSpend(state: RunState): number {
     return state.events
       .filter(
         (e) =>
-          (e.type === "role.submitted" || e.type === "role.failed") &&
+          (e.type === "role.submitted" || e.type === "role.failed" || e.type === "limit.hit") &&
           e.role !== undefined &&
           this.deps.roles.get(e.role)?.kind === "advisor",
       )
@@ -1518,7 +1534,9 @@ export class Engine implements Kernel {
       if (!inSessionAllowed(this, handle, { role: input.advisor }, host, call))
         throw new EngineError(
           "conflict",
-          `${input.advisor} runs a shell, and the Lead session's OS sandbox is not on: run \`vtc install --host claude-code\` in this repo, restart the Claude Code session, then ask again`,
+          this.leadless(state.id, call)
+            ? `${input.advisor} runs a shell, and ${NO_LEAD_WAIT_REASON}`
+            : `${input.advisor} runs a shell, and the Lead session's OS sandbox is not on: run \`vtc install --host claude-code\` in this repo, restart the Claude Code session, then ask again`,
         );
       const question = `${state.id}-${String(state.roleRuns.size + 1)}`;
       const path = `.vtc/state/packs/${state.id}/consult-${question}.md`;
