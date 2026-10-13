@@ -1,7 +1,13 @@
 import { parse as parseToml } from "smol-toml";
 import { parse as parseYaml } from "yaml";
 import { describe, expect, it } from "vitest";
-import { engineMcpServer, HUMAN_ONLY_TOOLS, ROLE_DENIED_VTC, type RoleTools } from "@vtc/shared";
+import {
+  engineMcpServer,
+  HUMAN_ONLY_TOOLS,
+  REPO_ROLE_DENIED,
+  ROLE_DENIED_VTC,
+  type RoleTools,
+} from "@vtc/shared";
 import {
   CLAUDE_DENIED_TOOLS,
   CLAUDE_HOME_FILE_DENIES_END,
@@ -114,13 +120,27 @@ describe("Claude Code agent (.md)", () => {
       "Read(~/.vtc/run/**)",
       "Read(~/.vtc/hidden/**)",
       "Read(~/.codex/**)",
+      // reading 79: the repo's gate checkouts (hidden tests) and raw gate output, and the run
+      // config, at any depth below the session's directory
+      "Read(**/.vtc/state/checkouts/**)",
+      "Read(**/.vtc/state/gates/**)",
+      "Edit(**/.vtc/state/checkouts/**)",
+      "Write(**/.vtc/state/checkouts/**)",
+      "Edit(**/.vtc/state/gates/**)",
+      "Write(**/.vtc/state/gates/**)",
+      "Edit(**/.vtc/project.yaml)",
+      "Write(**/.vtc/project.yaml)",
+      "Edit(**/.vtc/gates.yml)",
+      "Write(**/.vtc/gates.yml)",
     ]);
     // derived from the shared lists, so a new entry there reaches every agent
     expect(CLAUDE_HOME_FILE_DENIES_END).toBe(
       ROLE_DENIED_VTC.subcommands.length +
         2 * ROLE_DENIED_VTC.homeWriteDeny.length +
         ROLE_DENIED_VTC.homeReadDeny.length +
-        1,
+        1 +
+        REPO_ROLE_DENIED.readDeny.length +
+        2 * REPO_ROLE_DENIED.writeDeny.length,
     );
     expect(CLAUDE_DENIED_TOOLS).toEqual([
       ...CLAUDE_DENIED_TOOLS.slice(0, CLAUDE_HOME_FILE_DENIES_END),
@@ -238,6 +258,7 @@ describe("Codex agent (.toml)", () => {
       model_reasoning_effort: "medium",
       sandbox_mode: "workspace-write",
       developer_instructions: "# Mission\n\nWrite tests.\n",
+      sandbox_workspace_write: { network_access: false },
       mcp_servers: { vtc: { command: "vtc", args: engineMcpServer("codex").args, enabled: false } },
     });
   });

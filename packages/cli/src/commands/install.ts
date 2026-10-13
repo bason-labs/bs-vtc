@@ -40,6 +40,7 @@ import {
   gitIgnoreStatus,
   mergeSessionSandboxSettings,
   readClaudeLocalSettings,
+  sandboxScopeOf,
   sessionSandboxSettings,
   wideningOf,
   writeClaudeLocalSettings,
@@ -133,7 +134,11 @@ const installSessionSandbox = async (
   ctx.io.out(
     `Code-running roles run inside your Claude Code session (plugin-only dispatch) only with its sandbox on. These settings go into ${read.path} (your other settings stay):`,
   );
-  for (const line of JSON.stringify(sessionSandboxSettings(ctx.vtcHome), null, 2).split("\n"))
+  for (const line of JSON.stringify(
+    sessionSandboxSettings(ctx.vtcHome, sandboxScopeOf(repoRoot, env)),
+    null,
+    2,
+  ).split("\n"))
     ctx.io.out(`  ${line}`);
   const dropped =
     read.kind === "ok"
@@ -142,6 +147,7 @@ const installSessionSandbox = async (
           { path: read.path, base: repoRoot, homeDir: env.homeDir },
           ctx.vtcHome,
           env.platform,
+          sandboxScopeOf(repoRoot, env),
         )
       : [];
   if (dropped.length > 0) {
@@ -160,6 +166,7 @@ const installSessionSandbox = async (
       projectRoot: repoRoot,
       homeDir: env.homeDir,
       platform: env.platform,
+      ...(env.hostConfigDirs === undefined ? {} : { hostConfigDirs: env.hostConfigDirs }),
     }),
   );
   ctx.io.out(`  wrote ${path}`);

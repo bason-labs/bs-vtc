@@ -10,6 +10,7 @@ import {
   humanChannelRequired,
   isHumanOnlyTool,
   HUMAN_ONLY_TOOLS,
+  REPO_ROLE_DENIED,
   ROLE_DENIED_VTC,
   type ModelTier,
   type RoleTools,
@@ -111,12 +112,18 @@ export const CLAUDE_SHELL_HOME_DENIES: readonly string[] = [
  * - reads of each `ROLE_DENIED_VTC.homeReadDeny` glob (the install token, the daemons' sockets,
  *   the hidden acceptance tests, §7.3) and of the Codex home: in plugin-only mode (AD-17) no
  *   adapter sandbox profile is built, so the agent carries its own read denies;
+ * - reads of the repo's engine gate files and writes to them and to the run config
+ *   (`REPO_ROLE_DENIED`, spine §5 reading 79: the verification checkouts hold the hidden tests
+ *   during a gate run, the raw gate output what hidden runs printed). The paths are relative to
+ *   the session's directory with a leading `**` so any checkout depth matches; the absolute,
+ *   shell-proof form is in the Lead session's sandbox (`claudeSessionSandboxSettings`);
  * - {@link CLAUDE_SHELL_HOME_DENIES}, the shell-level denies for those paths;
  * - every human-only engine tool (`HUMAN_ONLY_TOOLS`) by its plugin name, on top of the `tools`
  *   allowlist that never names one.
  * Claude's own credential file is not named here: an emitted plugin file may not carry a
- * credential marker (AD-9; the D-ad exemption covers only the adapter's settings), so in this
- * mode it rests on the Lead session's own permissions and sandbox. The file rules name the
+ * credential marker (AD-9; the D-ad exemption covers only the host settings VTC writes), so in
+ * this mode it rests on the Lead session's sandbox, whose settings (`vtc install`) read-deny both
+ * hosts' credential files and the home credential stores (spine §5 reading 79). The file rules name the
  * default homes `~/.vtc/` and `~/.codex/`; a `$VTC_HOME` or `$CODEX_HOME` elsewhere is not known
  * when the plugin is compiled, and the session sandbox (in-session) or the adapter's sandbox
  * profile (headless), which resolve them, stay the barrier. A read-only agent has none of the
@@ -129,6 +136,10 @@ export const CLAUDE_DENIED_TOOLS: readonly string[] = [
   ),
   ...ROLE_DENIED_VTC.homeReadDeny.map((glob) => `Read(~/.vtc/${glob})`),
   `Read(~/${HOST_CREDENTIAL_DENY_READ.codex.defaultConfigDir}/**)`,
+  ...REPO_ROLE_DENIED.readDeny.map((glob) => `Read(**/${glob})`),
+  ...REPO_ROLE_DENIED.writeDeny.flatMap((glob) =>
+    ["Edit", "Write"].map((tool) => `${tool}(**/${glob})`),
+  ),
   ...CLAUDE_SHELL_HOME_DENIES,
   ...HUMAN_ONLY_TOOLS.map(claudeEngineToolName),
 ];
@@ -138,7 +149,9 @@ export const CLAUDE_HOME_FILE_DENIES_END: number =
   ROLE_DENIED_VTC.subcommands.length +
   2 * ROLE_DENIED_VTC.homeWriteDeny.length +
   ROLE_DENIED_VTC.homeReadDeny.length +
-  1;
+  1 +
+  REPO_ROLE_DENIED.readDeny.length +
+  2 * REPO_ROLE_DENIED.writeDeny.length;
 
 export const renderClaudeAgent = (agent: CompiledAgent): string =>
   renderFrontmatter(
@@ -180,6 +193,12 @@ export const codexMcpTable = (tools: RoleTools): string[] => {
   ];
 };
 
+/** The table every Codex agent carries: no network for its sandbox (spine §5 reading 79). */
+export const CODEX_AGENT_NETWORK_OFF: readonly string[] = [
+  "[sandbox_workspace_write]",
+  "network_access = false",
+];
+
 /**
  * A Codex agent file. It sets only `model_reasoning_effort`, never a model (spine §5 readings 26
  * and 51, D-h, D-ae): the engine is the only model resolver, its built-in Codex map names no ids
@@ -190,8 +209,14 @@ export const codexMcpTable = (tools: RoleTools): string[] => {
  * deny is a session-level execpolicy rule, not an agent key. The barrier is the sandbox: a
  * read-only or workspace-write `sandbox_mode` with no writable roots of its own keeps the VTC
  * home outside every role's writes, `vtc calibrate`'s included; the adapter's sandbox profile
- * covers the rest. Every key is a top-level Codex config key, so whichever way the headless role
- * identity spike loads a role (`codex exec` has no `--agent`), this file carries over as is.
+ * covers the rest. Every key is a Codex config key, so whichever way the headless role identity
+ * spike loads a role (`codex exec` has no `--agent`), this file carries over as is.
+ *
+ * Every agent pins `[sandbox_workspace_write] network_access = false` ({@link
+ * CODEX_AGENT_NETWORK_OFF}; spine §5 reading 79), so it never inherits a network the user's own
+ * Codex config opens: a Codex role can read the VTC install token, and only the network-off
+ * sandbox is shown (macOS) to keep it from the engine's socket. A read-only agent has no network
+ * either way; the table is there so no agent depends on its mode alone.
  */
 export const renderCodexAgent = (agent: CompiledAgent): string =>
   [
@@ -201,6 +226,8 @@ export const renderCodexAgent = (agent: CompiledAgent): string =>
     `model_reasoning_effort = ${tomlString(agent.model.effort)}`,
     `sandbox_mode = ${tomlString(codexSandboxFor(agent.tools))}`,
     `developer_instructions = ${tomlMultiline(agent.instructions)}`,
+    "",
+    ...CODEX_AGENT_NETWORK_OFF,
     "",
     ...codexMcpTable(agent.tools),
     "",

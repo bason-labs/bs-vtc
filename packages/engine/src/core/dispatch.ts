@@ -9,12 +9,11 @@ import { join } from "node:path";
 import {
   agentNameFor,
   HIDDEN_TESTS,
-  inSessionDispatchAllowed,
+  inSessionDispatchRefusal,
   PACK_INPUT_TYPES,
   planDispatch,
   resolveRoleMode,
   SESSION_DEFAULT_MODEL,
-  SESSION_SANDBOX_OFF_REASON,
   type ArtifactRef,
   type EscalationAnswer,
   type Finding,
@@ -659,22 +658,33 @@ const guardHostConfig = async (
 };
 
 /**
- * Whether the step may run as a subagent of the Lead session (D-an, spine §5 reading 71): on
- * Claude Code a code-running role (`code_sandboxed`, it has a shell) needs the run's Lead session
- * to report its OS sandbox `on`; absent or `unknown` refuses (`inSessionDispatchAllowed`).
+ * Why the step may not run as a subagent of the Lead session, or `null` when it may
+ * (`inSessionDispatchRefusal`; D-an, spine §5 readings 71 and 79): on Claude Code a code-running
+ * role (`code_sandboxed`, it has a shell) needs the run's Lead session to report its OS sandbox
+ * `on` (absent or `unknown` refuses); on Codex every role needs a platform where Codex's
+ * network-off sandbox is shown to block a Unix-socket connect (`deps.platform`).
  */
-export const inSessionAllowed = (
+export const inSessionRefusal = (
   k: Kernel,
   h: RunHandle,
   step: Pick<StepSpec, "role" | "mode">,
   host: HostId,
   call: CallContext,
-): boolean => {
+): string | null => {
   const contract = k.deps.roles.get(step.role);
-  if (contract === undefined) return true;
-  const effective = resolveRoleMode(contract, step.mode);
-  const profile = effective.ok ? effective.contract.tools.profile : contract.tools.profile;
-  return inSessionDispatchAllowed(host, profile, k.sessionSandboxFor(h.state.id, call));
+  const effective = contract === undefined ? undefined : resolveRoleMode(contract, step.mode);
+  const profile =
+    contract === undefined
+      ? "read_only"
+      : effective?.ok === true
+        ? effective.contract.tools.profile
+        : contract.tools.profile;
+  return inSessionDispatchRefusal(
+    host,
+    profile,
+    k.sessionSandboxFor(h.state.id, call),
+    k.deps.platform ?? process.platform,
+  );
 };
 
 /**
@@ -686,15 +696,16 @@ export const NO_LEAD_WAIT_REASON =
   "no Lead session holds this run, so a role with a shell cannot be dispatched in-session yet: call next from the Lead session (the Claude Code or Codex session running the vtc plugin)";
 
 /**
- * A step refused in-session (D-an): its task parks as `blocked` with `SESSION_SANDBOX_OFF_REASON`
- * (the escalation names the fix; answering it retries the dispatch). A phase step opens the same
- * escalation for its phase, which holds the phase until it is answered.
+ * A step refused in-session (D-an): its task parks as `blocked` with the refusal's text
+ * (`SESSION_SANDBOX_OFF_REASON` or `CODEX_IN_SESSION_REFUSED_REASON`; the escalation names the
+ * fix, answering it retries the dispatch). A phase step opens the same escalation for its phase,
+ * which holds the phase until it is answered.
  */
-const refuseInSession = (k: Kernel, h: RunHandle, step: StepSpec): void => {
+const refuseInSession = (k: Kernel, h: RunHandle, step: StepSpec, reason: string): void => {
   if (step.task !== undefined) {
     parkTask(k, h, step.task, {
       reason: "blocked",
-      detail: SESSION_SANDBOX_OFF_REASON,
+      detail: reason,
       evidence: [],
     });
     return;
@@ -704,7 +715,7 @@ const refuseInSession = (k: Kernel, h: RunHandle, step: StepSpec): void => {
     run: h.state.id,
     phase: h.state.run.phase,
     reason: "blocked",
-    detail: SESSION_SANDBOX_OFF_REASON,
+    detail: reason,
     evidence: [],
     blocks: [],
     now: k.now(),
@@ -801,11 +812,12 @@ export const dispatchNow = async (
   let free = config.concurrency - inFlight(h.state).length;
   for (const step of pendingSteps(k, h, host)) {
     if (free <= 0) break;
-    if (!inSessionAllowed(k, h, step, host, call)) {
+    const refusal = inSessionRefusal(k, h, step, host, call);
+    if (refusal !== null) {
       // only the run's Lead reporting its sandbox off or unknown parks the step; a caller that
       // is not the Lead, with no Lead to ask, leaves it pending ({@link NO_LEAD_WAIT_REASON})
       if (k.leadless(h.state.id, call)) held.noLead += 1;
-      else refuseInSession(k, h, step);
+      else refuseInSession(k, h, step, refusal);
       continue;
     }
     const action = await dispatchGuarded(k, h, step, host);

@@ -28,6 +28,7 @@ import {
   CLAUDE_PROJECT_SETTINGS,
   claudeSessionSandboxOf,
   mergeSessionSandboxSettings,
+  sandboxScopeOf,
   sandboxToolsMissing,
   sessionSandboxProbe,
   sessionSandboxSettings,
@@ -67,23 +68,27 @@ const setup = (over: Partial<SessionSandboxEnv> = {}) => {
 describe("the session sandbox needs sandbox.failIfUnavailable", () => {
   it("is part of what vtc install writes, on top of the shared settings", () => {
     const vtcHome = "/home/u/.vtc";
-    const shared = claudeSessionSandboxSettings(vtcHome).sandbox;
-    expect(sessionSandboxSettings(vtcHome)).toEqual({
+    const scope = sandboxScopeOf("/r", { homeDir: "/home/u" });
+    const shared = claudeSessionSandboxSettings(vtcHome, scope).sandbox;
+    expect(sessionSandboxSettings(vtcHome, scope)).toEqual({
       sandbox: { ...shared, failIfUnavailable: true },
     });
     expect(
       mergeSessionSandboxSettings({}, vtcHome, { projectRoot: "/r", homeDir: "/home/u" }),
-    ).toEqual(sessionSandboxSettings(vtcHome));
+    ).toEqual(sessionSandboxSettings(vtcHome, scope));
   });
 
   it("reads as off with sandbox.failIfUnavailable missing when only the shared keys are there", () => {
     const { vtcHome, repo, env, write, paths } = setup();
-    write(CLAUDE_LOCAL_SETTINGS, claudeSessionSandboxSettings(vtcHome));
+    write(CLAUDE_LOCAL_SETTINGS, claudeSessionSandboxSettings(vtcHome, sandboxScopeOf(repo, env)));
     const report = claudeSessionSandboxOf(repo, vtcHome, env);
     expect(report.state).toBe("off");
     expect(report.missing).toEqual(["sandbox.failIfUnavailable"]);
     write(CLAUDE_LOCAL_SETTINGS, {
-      sandbox: { ...sessionSandboxSettings(vtcHome).sandbox, failIfUnavailable: false },
+      sandbox: {
+        ...sessionSandboxSettings(vtcHome, sandboxScopeOf(repo, env)).sandbox,
+        failIfUnavailable: false,
+      },
     });
     expect(claudeSessionSandboxOf(repo, vtcHome, env).missing).toEqual([
       "sandbox.failIfUnavailable",
@@ -251,7 +256,10 @@ describe("settings that widen the sandbox turn it off", () => {
       vtcHome,
       paths,
     );
-    const wanted = sessionSandboxSettings(vtcHome).sandbox;
+    const wanted = sessionSandboxSettings(
+      vtcHome,
+      sandboxScopeOf(paths.projectRoot, paths),
+    ).sandbox;
     expect(merged).toEqual({
       permissions: { allow: ["Bash(ls)"], additionalDirectories: ["/data"] },
       sandbox: {
@@ -364,6 +372,10 @@ describe("vtc install --host claude-code with the real Claude adapter: one write
       expect(written.model).toBe("opus");
       expect(written.sandbox).not.toHaveProperty("excludedCommands");
       expect(claudeSessionSandboxOf(repo, vtcHome, env, repo).state).toBe("on");
+      // installing again keeps the credential read-denies the adapter's AD-9 check exempts
+      expect(await cmd.run(["claude-code", "--scope", scope], ctx)).toBe(0);
+      expect(out.join("\n")).toMatch(/session sandbox is already on/);
+      expect(questions).toHaveLength(1);
     });
 
     it(`${scope} scope: declining leaves no sandbox settings on disk`, async () => {
@@ -384,6 +396,32 @@ describe("vtc install --host claude-code with the real Claude adapter: one write
       expect(claudeSessionSandboxOf(repo, vtcHome, env, repo).state).not.toBe("on");
     });
   }
+});
+
+describe("allow entries may not reopen the credential and engine-file denies (reading 79)", () => {
+  it("flags entries reaching a credential store or the engine's gate files, not role worktrees", () => {
+    const vtcHome = "/home/u/.vtc";
+    const scope = sandboxScopeOf("/r", { homeDir: "/home/u" });
+    const source = { path: "/r/.claude/settings.local.json", base: "/r", homeDir: "/home/u" };
+    const widen = (filesystem: Record<string, unknown>) =>
+      wideningOf({ sandbox: { filesystem } }, source, vtcHome, "darwin", scope);
+    expect(widen({ allowRead: ["~/.ssh/id_ed25519"] })).toHaveLength(1);
+    expect(widen({ allowRead: ["~/.aws/**"] })).toHaveLength(1);
+    expect(widen({ allowWrite: ["./.vtc/state/**"] })).toHaveLength(1);
+    expect(widen({ allowWrite: ["./.vtc/project.yaml"] })).toHaveLength(1);
+    expect(widen({ allowWrite: ["./.vtc/state/worktrees/**", "~/.cache", "."] })).toEqual([]);
+    // without a scope only the VTC home is guarded
+    expect(
+      wideningOf({ sandbox: { filesystem: { allowRead: ["~/.ssh"] } } }, source, vtcHome, "darwin"),
+    ).toEqual([]);
+    // vtc install drops them
+    const merged = mergeSessionSandboxSettings(
+      { sandbox: { filesystem: { allowRead: ["~/.ssh", "/opt/data"] } } },
+      vtcHome,
+      { projectRoot: "/r", homeDir: "/home/u" },
+    ) as { sandbox: { filesystem: { allowRead: string[] } } };
+    expect(merged.sandbox.filesystem.allowRead).toEqual(["/opt/data"]);
+  });
 });
 
 describe("the bridge reads the state again for every hello", () => {
@@ -619,7 +657,10 @@ describe("fix round 2: sandbox keys VTC does not know to be safe turn it off", (
       vtcHome,
       paths,
     );
-    const wanted = sessionSandboxSettings(vtcHome).sandbox;
+    const wanted = sessionSandboxSettings(
+      vtcHome,
+      sandboxScopeOf(paths.projectRoot, paths),
+    ).sandbox;
     expect(merged).toEqual({
       sandbox: {
         autoAllowBashIfSandboxed: true,
@@ -639,7 +680,7 @@ describe("fix round 2: sandbox keys VTC does not know to be safe turn it off", (
     ).toEqual([]);
     // a sandbox that is not an object is replaced
     expect(mergeSessionSandboxSettings({ sandbox: true }, vtcHome, paths)).toEqual(
-      sessionSandboxSettings(vtcHome),
+      sessionSandboxSettings(vtcHome, sandboxScopeOf(paths.projectRoot, paths)),
     );
   });
 });

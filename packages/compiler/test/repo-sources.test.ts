@@ -222,8 +222,9 @@ describe("no role touches VTC's own guard rails (D-w, spine §5 reading 43)", ()
     for (const f of files) {
       const toml = parseToml(f.text);
       expect(["read-only", "workspace-write"], f.path).toContain(toml.sandbox_mode);
-      expect(toml.sandbox_workspace_write, f.path).toBeUndefined();
-      expect(f.text, f.path).not.toMatch(/writable_roots|network_access/);
+      // the one sandbox table pins the network off (spine §5 reading 79), and widens nothing
+      expect(toml.sandbox_workspace_write, f.path).toEqual({ network_access: false });
+      expect(f.text, f.path).not.toMatch(/writable_roots|network_access\s*=\s*true/);
     }
   });
 });
@@ -264,6 +265,7 @@ describe("host identity of the compiled agents (D-aa, D-ae; spine §5 readings 2
       "model_reasoning_effort",
       "sandbox_mode",
       "developer_instructions",
+      "sandbox_workspace_write",
       "mcp_servers",
     ]);
     for (const f of output().targets.codex.filter((t) => t.path.startsWith("agents/"))) {

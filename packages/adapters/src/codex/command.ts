@@ -66,12 +66,13 @@
 import { createHash } from "node:crypto";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import type {
-  HostCommand,
-  SandboxProfile,
-  SandboxProfileRequest,
-  SessionRef,
-  SpawnRoleRequest,
+import {
+  CODEX_UNIX_CONNECT_BLOCKED_PLATFORMS,
+  type HostCommand,
+  type SandboxProfile,
+  type SandboxProfileRequest,
+  type SessionRef,
+  type SpawnRoleRequest,
 } from "@vtc/shared";
 import { canonicalPath, vtcHomeWriteDeniedPaths, within } from "../common/homes.js";
 
@@ -95,9 +96,10 @@ export interface CodexProfileOptions {
 /**
  * Platforms where Codex's network-off sandbox is shown to block a Unix-socket connect into
  * `<vtcHome>/run/` as well as TCP (see the header). Only there does a profile claim
- * `enforced.network`, the engine's condition for running a role that can read the token.
+ * `enforced.network`, the engine's condition for running a role that can read the token. The
+ * list lives in `@vtc/shared`, where the in-session rule reads it too (spine §5 reading 79).
  */
-export const CODEX_UNIX_CONNECT_BLOCKED_PLATFORMS: readonly NodeJS.Platform[] = ["darwin"];
+export { CODEX_UNIX_CONNECT_BLOCKED_PLATFORMS };
 
 const defaultTempRoots = (): string[] =>
   [process.env.TMPDIR, tmpdir(), "/tmp"].filter(

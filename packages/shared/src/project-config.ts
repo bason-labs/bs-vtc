@@ -116,6 +116,18 @@ export const ProjectConfigSchema = z.strictObject({
     .prefault({}),
 });
 export type ProjectConfig = z.infer<typeof ProjectConfigSchema>;
+
+/** The project config file, repo-relative (§4.3). */
+export const PROJECT_CONFIG_FILE = ".vtc/project.yaml";
+
+/**
+ * Why a run refuses to start (spine §5 reading 79): the working tree's `.vtc/project.yaml` is not
+ * the one committed at the commit the run would start on. A run takes its project config from
+ * that commit, so a change (by the user, or by a role in a Lead session) reaches a run only once
+ * someone commits it.
+ */
+export const projectConfigNotCommitted = (commit: string): string =>
+  `${PROJECT_CONFIG_FILE} differs from the copy committed at ${commit.slice(0, 12)}: commit the change (or undo it), then start the run again`;
 export type ProjectConfigInput = z.input<typeof ProjectConfigSchema>;
 
 // --------------------------------------------------------- user-level config

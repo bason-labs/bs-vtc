@@ -14,7 +14,12 @@ import {
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { claudeSessionSandboxState, STATUSLINE_TEE, statuslineTeeCommand } from "@vtc/shared";
+import {
+  claudeSessionSandboxState,
+  hostCredentialDenyReadPaths,
+  STATUSLINE_TEE,
+  statuslineTeeCommand,
+} from "@vtc/shared";
 import * as adapters from "../../src/index.js";
 import { createClaudeCodeAdapter } from "../../src/index.js";
 import { writeFixturePlugin } from "../support/plugin-fixture.js";
@@ -402,8 +407,28 @@ describe("Claude install: the project's local settings; the session sandbox is t
     expect(settings.enabledPlugins).toEqual({ "vtc@vtc-local": true });
     expect(settings.model).toBe("opus");
     expect(settings.sandbox).toEqual(sandbox);
-    expect(claudeSessionSandboxState(settings, VTC_HOME).state).toBe("off");
+    expect(
+      claudeSessionSandboxState(settings, VTC_HOME, {
+        projectRoot: env.projectRoot,
+        homeDir: env.home,
+        hostConfigDirs: {},
+      }).state,
+    ).toBe("off");
     expect(result.notes.join("\n")).not.toMatch(/Turned on the Claude Code session sandbox/);
+  });
+
+  it("project scope keeps a session sandbox that read-denies the host credential files (D-ad)", async () => {
+    const env = repoSetup();
+    const local = localOf(env.projectRoot);
+    const denyRead = hostCredentialDenyReadPaths({
+      "claude-code": join(env.home, ".claude"),
+      codex: join(env.home, ".codex"),
+    });
+    writeJsonFile(local, { sandbox: { enabled: true, filesystem: { denyRead } } });
+    await createClaudeCodeAdapter({ vtcHome: VTC_HOME }).install({ ...env, scope: "project" });
+    const settings = readJson(local);
+    expect(settings.enabledPlugins).toEqual({ "vtc@vtc-local": true });
+    expect(settings.sandbox).toEqual({ enabled: true, filesystem: { denyRead } });
   });
 
   it("project scope refuses, writing nothing, when the local settings it would write carry an AD-9 marker", async () => {

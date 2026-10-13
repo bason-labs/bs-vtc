@@ -62,10 +62,11 @@ export const initProject = (repo: string): string => {
 };
 
 /**
- * What `vtc calibrate` plus the user's commit leave behind: a confirmed `.vtc/gates.yml` committed
- * at HEAD. A run refuses to start without it (spine §5 reading 78, D-au).
+ * What `vtc calibrate` plus the user's commit leave behind: a confirmed `.vtc/gates.yml`, and the
+ * `.vtc/project.yaml` `vtc init` wrote (when there is one), committed at HEAD. A run refuses to
+ * start without the first (spine §5 reading 78, D-au) or with an uncommitted second (reading 79).
  */
-export const commitGatesConfig = (repo: string): string => {
+export const commitVtcConfig = (repo: string): string => {
   mkdirSync(join(repo, ".vtc"), { recursive: true });
   const gatesYml = {
     version: 1,
@@ -78,8 +79,8 @@ export const commitGatesConfig = (repo: string): string => {
     gates: [{ id: "tests", layer: "L2", command: ["pnpm", "test"] }],
   };
   writeFileSync(join(repo, ".vtc/gates.yml"), `${JSON.stringify(gatesYml, null, 2)}\n`);
-  git(repo, "add", ".vtc/gates.yml");
-  git(repo, "commit", "-q", "-m", "vtc: calibrate gates");
+  git(repo, "add", "--", ".vtc");
+  git(repo, "commit", "-q", "-m", "vtc: init and calibrate");
   return repo;
 };
 

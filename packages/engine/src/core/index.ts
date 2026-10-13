@@ -101,6 +101,8 @@ export { finalReviewScopeNote, finalReviewStepsRun } from "./projections.js";
 export { architectDepth, dealDesignConstraints, LOTTERY_POOLS, researchDepth } from "./lottery.js";
 export {
   committedGatesConfig,
+  parseProjectConfig,
+  startProjectConfig,
   ConfigError,
   DEFAULT_ACCEPTANCE_GLOBS,
   gatesConfigHash,

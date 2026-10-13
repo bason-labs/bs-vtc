@@ -246,6 +246,8 @@ export interface HarnessOptions {
   readonly roles?: readonly RoleContract[];
   /** The compiled plugins' catalog (prompt SHAs, discipline profiles); none by default. */
   readonly plugins?: PluginCatalog;
+  /** The platform roles run on (default `darwin`, where Codex roles may run in-session). */
+  readonly platform?: NodeJS.Platform;
 }
 
 export const DEFAULT_GATES_YML = {
@@ -354,6 +356,7 @@ export const createHarness = (options: HarnessOptions = {}): Harness => {
     now,
     random: () => 0.5,
     remote: "origin",
+    platform: options.platform ?? "darwin",
   });
   Object.assign(h, {
     gates,
