@@ -31,8 +31,22 @@ export const SECRET_PATTERNS: readonly { readonly kind: string; readonly pattern
     kind: "jwt",
     pattern: /\beyJ[A-Za-z0-9_-]{8,}\.eyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}/g,
   },
+  { kind: "npm_token", pattern: /\bnpm_[A-Za-z0-9]{36}\b/g },
+  { kind: "pypi_token", pattern: /\bpypi-AgE[A-Za-z0-9_-]{50,}/g },
+  { kind: "huggingface_token", pattern: /\bhf_[A-Za-z0-9]{34,}\b/g },
+  { kind: "sendgrid_key", pattern: /\bSG\.[A-Za-z0-9_-]{22}\.[A-Za-z0-9_-]{43}\b/g },
   { kind: "bearer_token", pattern: /(?<=\b[Bb]earer\s+)[A-Za-z0-9._~+/-]{20,}=*/g },
   { kind: "url_credentials", pattern: /(?<=\b[a-z][a-z0-9+.-]*:\/\/)[^/\s:@]+:[^/\s@]+(?=@)/gi },
+  /**
+   * A value assigned to a secret-named key (`password=…`, `api_key: "…"`, `client_secret=…`) in
+   * logs and configs. Only values with both a letter and a digit, so code such as
+   * `apiKey: config.apiKey` stays readable.
+   */
+  {
+    kind: "secret_assignment",
+    pattern:
+      /(?<=(?<![A-Za-z0-9])(?:password|passwd|secret|api[_-]?key|access[_-]?token|auth[_-]?token|client[_-]?secret|private[_-]?key)["']?\s*[:=]\s*["']?)(?=[^\s"'`,;(){}<>[\]]*\d)(?=[^\s"'`,;(){}<>[\]]*[A-Za-z])[^\s"'`,;(){}<>[\]]{8,}/gi,
+  },
 ];
 
 /** Known values shorter than this are not redacted by value (too many false positives). */
