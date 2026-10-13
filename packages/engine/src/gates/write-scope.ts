@@ -14,7 +14,11 @@ import type {
 } from "@vtc/shared";
 import { matchesAny } from "./globs.js";
 import { guardedSections, isMixedConfig } from "./mixed-configs.js";
-import { DEFAULT_PROTECTED_GLOBS, SCANNER_CONFIG_GLOBS } from "./protected-globs.js";
+import {
+  DEFAULT_PROTECTED_GLOBS,
+  isTaskRunnerFile,
+  SCANNER_CONFIG_GLOBS,
+} from "./protected-globs.js";
 
 /** Test-skip markers on added lines: JS/TS runners, pytest/unittest, Go, JUnit, Rust (§7.2 L5). */
 export const SKIP_PATTERNS: readonly RegExp[] = [
@@ -140,7 +144,9 @@ const toolSectionsChanged = async (
  * the runner adds the project's `tests.protected_configs`) is a violation, added files included:
  * a new nested `vitest.config.ts` or `.gitleaksignore` can weaken the gates as much as an edit.
  * A changed scanner config is a `new_suppression`. A `pyproject.toml` or `package.json` is a
- * violation only when its tool sections changed (`mixed-configs.ts`). The only exception is a file
+ * violation only when its tool sections changed (`mixed-configs.ts`). A task-runner file (Makefile,
+ * justfile, `*.mk`, Taskfile, noxfile.py, in any letter case) is always guarded, like package.json
+ * `scripts`, whatever `protectedGlobs` holds (D-y). The only exception is a file
  * the task's `files_scope` names exactly (no wildcard), which is how a plan allows a config change.
  */
 export const checkWriteScope = async (
@@ -167,7 +173,7 @@ export const checkWriteScope = async (
       if (protectedPaths.has(path)) continue;
       if (!matchesAny(request.filesScope, path)) add("out_of_scope_write", path);
       if (request.filesScope.includes(path)) continue;
-      if (!matchesAny(protectedGlobs, path)) {
+      if (!matchesAny(protectedGlobs, path) && !isTaskRunnerFile(path)) {
         if (isMixedConfig(path) && (await toolSectionsChanged(git, request, file, path))) {
           add(file.status === "deleted" ? "protected_deleted" : "protected_modified", path);
         }

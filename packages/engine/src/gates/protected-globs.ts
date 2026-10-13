@@ -59,8 +59,39 @@ export const SCANNER_CONFIG_GLOBS: readonly string[] = [
   "**/.checkov.yml",
 ];
 
+/**
+ * Task-runner files that define a command a calibrated gate runs (`make test`, `just lint`,
+ * `task test`, `nox`; D-y, spine §5 reading 45). Guarded like package.json `scripts`: any change
+ * is flagged in L5 unless `files_scope` names the file exactly. These globs cover the usual
+ * spellings; L5 also matches the names case-insensitively ({@link isTaskRunnerFile}), because
+ * `just` and case-insensitive file systems accept any case.
+ */
+export const TASK_RUNNER_GLOBS: readonly string[] = [
+  "**/Makefile",
+  "**/makefile",
+  "**/GNUmakefile",
+  "**/*.mk",
+  "**/justfile",
+  "**/Justfile",
+  "**/.justfile",
+  "**/*.just",
+  "**/Taskfile.y*ml",
+  "**/taskfile.y*ml",
+  "**/Taskfile.dist.y*ml",
+  "**/taskfile.dist.y*ml",
+  "**/noxfile.py",
+];
+
+const TASK_RUNNER_NAME =
+  /^(?:makefile|gnumakefile|justfile|\.justfile|noxfile\.py|taskfile(?:\.dist)?\.ya?ml)$|\.(?:mk|just)$/i;
+
+/** Whether a repo-relative path is a task-runner file (any letter case). */
+export const isTaskRunnerFile = (path: string): boolean =>
+  TASK_RUNNER_NAME.test(path.slice(path.lastIndexOf("/") + 1));
+
 /** Everything L5 protects by default, on top of the project's `tests.protected_configs`. */
 export const DEFAULT_PROTECTED_GLOBS: readonly string[] = [
   ...LINT_TEST_CONFIG_GLOBS,
   ...SCANNER_CONFIG_GLOBS,
+  ...TASK_RUNNER_GLOBS,
 ];

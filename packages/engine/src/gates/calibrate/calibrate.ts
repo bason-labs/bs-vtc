@@ -232,7 +232,7 @@ export const calibrate = async (
   writeRepoFile(deps.repoRoot, GATES_CONFIG_PATH, stringifyGatesConfig(config));
   deps.out(
     confirmed
-      ? `Wrote ${GATES_CONFIG_PATH} (baseline confirmed). Commit it with the repo.`
+      ? `Wrote ${GATES_CONFIG_PATH} (baseline confirmed). Commit ${GATES_CONFIG_PATH} now: runs read it at their base commit and park until it is committed.`
       : `Wrote ${GATES_CONFIG_PATH} unconfirmed: gates will not run until vtc calibrate is confirmed.`,
   );
   return { status: confirmed ? "frozen" : "not_frozen", config, flaky };
