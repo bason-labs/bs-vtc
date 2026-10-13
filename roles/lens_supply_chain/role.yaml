@@ -1,0 +1,21 @@
+# Written for VTC from the role catalogue's supply-chain gap analysis; merged in from
+# msitarzewski/agency-agents (MIT, see roles/NOTICE) at f99f6aa:
+#   security/security-architect.md (supply chain section)
+# A lens reviewer (§5.3): it compiles from roles/_shared/lens-reviewer.md, this prompt and
+# skills/lens-supply-chain.
+id: lens_supply_chain
+version: 1.0.0
+kind: lens
+mission: >-
+  Review a task's new or upgraded dependencies against the supply-chain lens checklist, using the engine's package facts.
+inputs: [task, diff, gate_report, facts]
+output: { artifacts: [], verdicts: [pass, fail, unknown] }
+exits: [done]
+success_criteria:
+  - { id: claim_check, description: "Every finding cites a changed line that exists." }
+reviewer: engine
+models:
+  claude-code: { tier: mid, effort: high }
+  codex: { tier: mid, effort: high }
+tools: { profile: read_only }
+budget: { context_tokens: 30000 }

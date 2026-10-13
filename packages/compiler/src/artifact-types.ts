@@ -1,0 +1,44 @@
+/**
+ * The artifact types role contracts name (principle 2: prompts and ports name artifact types,
+ * never roles or paths). The vocabulary is open in `@vtc/shared` (AD-3 rule 5); this list makes
+ * the compiler's repo test catch a typo that would silently disconnect a port.
+ */
+import { ACCEPTANCE_TESTS, HIDDEN_TESTS, PACK_INPUT_TYPES, TASKS_ARTIFACT } from "@vtc/shared";
+
+export const KNOWN_ARTIFACT_TYPES: readonly string[] = [
+  // what the Context Packer puts in every pipeline's packs
+  ...Object.values(PACK_INPUT_TYPES),
+  // DISCOVER and SPECIFY
+  "repo_map",
+  "research_brief",
+  "facts",
+  "spec",
+  // DESIGN
+  "architecture",
+  "design_note",
+  "threat_model",
+  "design_flows",
+  "screens",
+  "prototype",
+  "design_tokens",
+  "component_specs",
+  // PLAN and BUILD
+  TASKS_ARTIFACT,
+  "task",
+  ACCEPTANCE_TESTS.artifactType,
+  HIDDEN_TESTS.artifactType,
+  "scenario_card",
+  "diff",
+  // verification evidence the engine produces
+  "gate_report",
+  "traceability_report",
+  "acceptance_criterion",
+  "test_results",
+  "findings",
+  "screenshots",
+  "visual_report",
+  // Lookback
+  "traces",
+  "scorecard",
+  "prompt_proposal",
+];

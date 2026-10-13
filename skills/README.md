@@ -1,9 +1,19 @@
 # skills/
 
-`SKILL.md` packs shared by both hosts (spec §4.4): Architect references, reviewer lenses (§5.3),
-Designer method (§9), stack packs and domain packs (§5.2a).
+`SKILL.md` packs shared by both hosts (spec §4.4), copied into both compiled plugins. Each pack is
+one directory with a `SKILL.md` whose frontmatter `name` equals the directory name and whose
+`description` says when to load it. Other files in the directory (references) are copied too.
 
-Each pack is one directory with a `SKILL.md`. Third-party material keeps its license and
-attribution (spec §8.1, §9.1).
+| Prefix    | What                                                                          | Pack id the engine and the Planner use                           |
+| --------- | ----------------------------------------------------------------------------- | ---------------------------------------------------------------- |
+| `stack-`  | Stack packs (§5.2a): conventions, pitfalls, test commands; at most 3 per task | the rest of the name (`stack-react-next` → `react-next`)         |
+| `domain-` | Domain packs (§5.2a), one per `DOMAIN_PACKS` entry in `@vtc/shared`           | the rest with `-` → `_` (`domain-embedded-iot` → `embedded_iot`) |
+| `lens-`   | Reviewer lenses (§5.3): numbered rules a reviewer cites as `rule_id`          | the rest of the name; `lens_<x>` roles embed it                  |
 
-Populated in sub-projects 3–5.
+The compiled plugins list every skill with its kind and pack id in `vtc-manifest.json`.
+
+- Stack packs never carry version-specific API facts from memory: the engine fetches official
+  docs at the pinned version into the task pack (§5.2a, §8.2).
+- Forked material names its sources in a `Sources:` line; the agency-agents MIT notice is in
+  `roles/NOTICE`, copied into both plugins as `NOTICE`.
+- Architect references (§8.1) and the Designer method (§9) are written in sub-projects 4 and 5.

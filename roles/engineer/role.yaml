@@ -1,0 +1,36 @@
+# Forked from msitarzewski/agency-agents (MIT, see roles/NOTICE) at f99f6aa:
+#   engineering/engineering-minimal-change-engineer.md (base: smallest-diff discipline)
+#   engineering/engineering-rust-refactoring-specialist.md (rules: no half-migrations, no test
+#     manipulation, no silent data loss, no unverified pass claims, no destructive git)
+#   engineering/engineering-servicenow-developer-mentor.md (evidence-before-fix debug protocol)
+#   engineering/engineering-git-workflow-master.md (non-interactive git only)
+# Rewritten to the §5.1 contract: "ask first" became typed exits; caps live in the engine.
+# The six engineer profiles (§5.2a) compile on top of this role's prompt.
+id: engineer
+version: 1.0.0
+kind: core
+mission: >-
+  Implement exactly one task in its worktree with the smallest diff that makes its acceptance
+  tests, its intent contract and its gates hold. The only role that writes product code.
+inputs: [task, spec, architecture, repo_map_slice, interface_contract, acceptance_test, findings]
+output: { artifacts: [interface_contract], verdicts: [] }
+exits: [built, spec_conflict, blocked, out_of_scope_fault]
+success_criteria:
+  - {
+      id: write_scope,
+      description: "Every changed file is inside the task's files_scope; protected files are unchanged.",
+    }
+  - {
+      id: gates_green,
+      description: "Gates L0 to L5 pass on a clean verification checkout of the submitted head.",
+    }
+  - {
+      id: acceptance_tests_pass,
+      description: "The task's visible and hidden acceptance tests pass.",
+    }
+reviewer: qa
+models:
+  claude-code: { tier: mid, effort: medium }
+  codex: { tier: mid, effort: medium }
+tools: { profile: code_sandboxed }
+budget: { context_tokens: 80000 }
