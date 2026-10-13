@@ -420,8 +420,23 @@ INTAKE → DISCOVER → SPECIFY → ✋G1 → DESIGN → ✋G2 → PLAN → BUIL
 2. **QA author mode.** QA writes acceptance tests tagged with REQ IDs.
    - The engine checks that they **fail on the base commit**.
    - QA also writes a hidden split of tests, stored in `~/.vtc/`.
+   - **Scenario card** (from QCFactory). Each scenario has a `SCENARIO.md` containing:
+     - the user story;
+     - setup;
+     - a "proves" table;
+     - an explicit **"does NOT cover"** list.
+   - **Every assertion is tagged with its source**, as one of:
+     - `spec:<REQ/AC id> "quote"`;
+     - `observed`, meaning baseline behaviour with no spec backing.
+     
+     Failures on `observed` assertions route as *possible spec gaps*, not as Engineer bugs.
+   - **Questions about the spec** go into **one question list per project**, never inline. Each question offers 2–3 options. The Lead batches them to the human.
 3. **Engineer.** The Engineer works in the task's worktree, in a sandbox with protected paths.
-   - **Exits:** `built`, `spec_conflict` (goes to the BA), or `blocked(question)` (parks the task).
+   - **Exits:**
+     - `built`;
+     - `spec_conflict` (goes to the BA);
+     - `blocked(question)` (parks the task);
+     - `out_of_scope_fault`: the failure is caused outside this task's `files_scope`. The Engineer must cite `file:line` evidence. This ends the round early, does **not** count as stuck, and the engine routes the fault to the owning task or opens an integration-fix task.
 4. **Write-scope check (engine).** The engine compares the diff against `files_scope` and checksums the protected files.
    - Any violation counts as a test-integrity hit.
 5. **Gate Runner.** Runs gates L0–L5 (§7.2) on a clean verification checkout, using affected-only tests.
@@ -437,6 +452,10 @@ INTAKE → DISCOVER → SPECIFY → ✋G1 → DESIGN → ✋G2 → PLAN → BUIL
    
    **Reviewers are skipped on trivial diffs, and their depth scales with risk.**
 8. **Triage (engine).**
+   - **Classify failures first** (from QCFactory):
+     - **Deterministic rules decide first:** infrastructure or timeout signatures, and "passed on the same commit earlier" (flaky). A flaky result gets one re-run; flakiness that repeats is recorded against the baseline.
+     - **A low-tier judge handles only the ambiguous cases.** Its rule is "unsure means product". An `environment` verdict must cite `file:line` or a log line.
+     - **Environment failures go to the gate-infra path (§6.8),** never to the Engineer.
    - **Dedupe and validate:**
      - deduplicate findings by fingerprint;
      - discard any finding whose cited evidence does not exist;
@@ -659,6 +678,20 @@ All of these run in the engine, outside the agent. Every scanner is pinned by ve
 1. Install: network access to package registries only.
 2. Test/scan: **no network**.
 
+**Before evidence is written,** scanner and log output is passed through a **secret-redaction filter**, because `.vtc/evidence/` is committed to git. The filter covers:
+- secret-scanner matches;
+- known token formats;
+- `.env` values.
+
+The raw output stays only in gitignored `.vtc/state/`.
+
+**Which tests run per round (from QCFactory):** affected-only selection uses three inputs:
+- the file → test map;
+- the REQ tags;
+- the changed contracts.
+
+The rule is **"if unsure, run it."** The full suite always runs in the merge queue and in Final Review.
+
 **Licensing:**
 - No CodeQL engine.
 - No bundled Semgrep-maintained rules.
@@ -689,6 +722,9 @@ Checks run in this order:
 4. Computed styles compared with the tokens.
 5. A per-region pixelmatch-v8 diff against the approved prototype, rendered in the same run.
 6. An AI vision judge on V1–V8, with a 2-of-3 vote. It never measures pixels.
+   - Each verdict names its **question type**: structure/content, state, layout, or brand/design-system.
+   - **"Unreached is not clean"** (from QCFactory): a route, state or screen that could not be rendered or reached is reported as `unchecked` and blocks the pass. It is never reported as passing.
+   - **Rendering is replayable:** the approved prototype and design references are re-rendered only when their source hash changes, and the renders are cached and keyed by that hash.
 
 **Routing:**
 - Implementation deviation goes to the Engineer.
@@ -920,7 +956,11 @@ Research: `2026-10-13-impeccable-style.md`. Language models collapse toward the 
 - **Concurrency:** 1–3. Pause on rate-limit events.
 - **Lookback:** about 12% of weekly usage, run off-peak.
 
-**Measurement:** tokens by role, step and host come from stream/JSON events and host telemetry. Quality per token is a first-class scorecard metric.
+**Measurement:**
+- Cost and the token types (input, output, cache read, cache write) are captured from each agent's **final stream event**, then cross-checked against the event log.
+- An **estimated share of the weekly quota** is computed per run.
+- **A model missing from the price table is an error,** never silently priced at $0. The run summary flags it until the price table is updated.
+- Quality per token is a first-class scorecard metric.
 
 ---
 
@@ -1002,6 +1042,11 @@ It is capped at 1–2 rounds and costs both quotas.
   - Every score stores the `grader_bundle_sha`.
   - The judge model is fixed.
 - **Tool promotion:** scripts that recur across 3 or more tasks are proposed as tested engine tools.
+- **Run retro** (from QCFactory). The retro has two layers:
+  - a **deterministic data layer**: KPIs, plus a **snapshot of the config and feature flags** in force, so the retro never misreads a switched-off feature as a bug;
+  - a short write-up with proposals, each carrying a baseline and target KPI.
+  
+  Every retro **reviews whether the previous retro's proposals actually moved their KPIs.**
 
 ---
 
@@ -1026,6 +1071,18 @@ It is capped at 1–2 rounds and costs both quotas.
   - Vulnerability databases update on an explicit schedule.
 - **No `--dangerously-skip-permissions` or `bypassPermissions`.** Use explicit allow rules plus the sandbox.
 - **Kill switch:** `vtc pause`. Every merge is revertable, and auto-merge has the downgrade rule (§6.7).
+- **Local endpoints:** the engine's HTTP/SSE server, the dashboard and the statusline receiver must:
+  - **bind to 127.0.0.1 only**;
+  - require a **per-install token**;
+  - check the **Host and Origin** headers, to block DNS rebinding and other websites.
+  
+  No config change can trigger command execution without passing through the gate allowlist.
+- **Hardened agent launcher** (from QCFactory):
+  - a timeout on every headless role run, with forced kill on expiry;
+  - one transcript per run;
+  - no orphaned processes.
+- **Incident reports:** every run that doesn't finish cleanly (crash, kill, limit, infrastructure failure) leaves a marker. On the next start, the engine turns the marker into a readable incident report in the run summary and on the dashboard.
+- **No agent merges its own work.** Merges happen only through the engine's merge queue.
 
 ---
 
@@ -1150,4 +1207,5 @@ Each sub-project below gets its own spec → plan → implementation.
 - `docs/research/2026-10-13-laya-vs-jev.md`: typed-decision models; v2 option.
 - `docs/research/2026-10-13-impeccable-style.md`: making designs distinct; what to fork; the novelty check.
 - `docs/research/2026-10-13-usage-limits-auto-resume.md`: usage readout per host; auto-resume.
+- `docs/research/2026-10-13-qcfactory-review.md`: Gradion's QCFactory QA factory. The user approved reusing its code. It is plain JavaScript, so we port it to TypeScript. **Never copy its Gradion-internal data:** `log.json`, scan results, specs, transcripts.
 - Theme source: `/Users/bason/Documents/bason-labs/bs-job-agents/apps/web` (`app/globals.css`, `components/ui`, `components/flows`).
