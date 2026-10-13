@@ -41,11 +41,13 @@ export const createRunLauncher = (options: RunLauncherOptions) => {
   const live = new Set<HeadlessRun>();
   let disposed = false;
   return {
+    /** Starts `command` with the request's prompt on stdin (both hosts read it from there). */
     start(command: HostCommand, request: SpawnRoleRequest): SpawnResult {
       if (disposed) throw new Error("this host adapter was disposed");
       const run: HeadlessRun = startHeadlessRun({
         command,
         cwd: request.cwd,
+        input: request.prompt,
         timeoutMs: request.timeoutMs,
         spawner: options.spawner,
         outcome: options.outcome,

@@ -153,3 +153,38 @@ describe("upsertMcpServerTable", () => {
     ).toContain("vtcx");
   });
 });
+
+describe("upsertMcpServerTable: forms a line editor must not touch", () => {
+  it("refuses a root inline mcp_servers table, which an appended [mcp_servers.vtc] would duplicate", () => {
+    expect(() =>
+      upsertMcpServerTable('mcp_servers = { vtc = { command = "x" } }\n', "vtc", TABLE),
+    ).toThrow(/outside a \[mcp_servers.vtc\] table/);
+    expect(() => upsertMcpServerTable("mcp_servers = {}\n", "vtc", TABLE)).toThrow();
+  });
+
+  it("reads a header-like line inside a multi-line string as text, not as a table", () => {
+    const config = [
+      'notes = """',
+      "[mcp_servers.vtc]",
+      'command = "not a key"',
+      '"""',
+      "literal = '''",
+      "[mcp_servers.vtc]",
+      "'''",
+      'model = "o3"',
+      "",
+    ].join("\n");
+    const out = upsertMcpServerTable(config, "vtc", TABLE);
+    expect(out.startsWith(config.trimEnd())).toBe(true);
+    expect(out.endsWith(TABLE)).toBe(true);
+  });
+
+  it("still replaces its own table after a closed multi-line string", () => {
+    const config = ['notes = """one', 'two"""', "", "[mcp_servers.vtc]", 'command = "old"'].join(
+      "\n",
+    );
+    const out = upsertMcpServerTable(config, "vtc", TABLE);
+    expect(out.match(/\[mcp_servers\.vtc\]/g)).toHaveLength(1);
+    expect(out).not.toContain("old");
+  });
+});

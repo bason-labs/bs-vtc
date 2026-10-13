@@ -16,6 +16,7 @@ const exit = (code: number | null, stderrTail = "", signal: string | null = null
   signal,
   error: null,
   stderrTail,
+  endedAt: "2026-10-13T08:00:00.000Z",
 });
 const valid = (outcome: HostOutcome | null): HostOutcome => {
   expect(outcome).not.toBeNull();
@@ -129,6 +130,48 @@ describe("Claude parseEvents: limits (synthetic, documented shapes, §6.9)", () 
     expect(parse(fixtureLines("claude-code/stream-model-limit.synthetic.jsonl")).usage).toBeNull();
   });
 
+  it("a per-model rejection in a session of another family names the limited family", () => {
+    const lines = fixtureLines("claude-code/stream-model-limit.synthetic.jsonl").map((line) =>
+      line.replace("claude-opus-5-5", "claude-sonnet-5"),
+    );
+    expect(valid(parse(lines).outcome)).toMatchObject({ kind: "limit", model: "opus" });
+  });
+
+  it("a rate-limit retry the run recovered from does not make a later error a limit", () => {
+    const outcome = parse([
+      INIT,
+      JSON.stringify({ type: "system", subtype: "api_retry", attempt: 1, error: "rate_limit" }),
+      JSON.stringify({ type: "assistant", message: { content: [] }, session_id: "<session-id>" }),
+      JSON.stringify({
+        type: "result",
+        subtype: "error_during_execution",
+        is_error: true,
+        errors: ["Tool crashed"],
+        session_id: "<session-id>",
+      }),
+    ]).outcome;
+    expect(valid(outcome)).toMatchObject({
+      kind: "error",
+      retryable: true,
+      message: "Tool crashed",
+    });
+  });
+
+  it("an error result right after a rate-limit retry is still a limit", () => {
+    const outcome = parse([
+      INIT,
+      JSON.stringify({ type: "system", subtype: "api_retry", attempt: 10, error: "rate_limit" }),
+      JSON.stringify({
+        type: "result",
+        subtype: "error_during_execution",
+        is_error: true,
+        errors: ["Request failed"],
+        session_id: "<session-id>",
+      }),
+    ]).outcome;
+    expect(valid(outcome)).toMatchObject({ kind: "limit", resets_at: null });
+  });
+
   it("api_retry for rate_limit is the latest retry notice; the run has not ended", () => {
     const parsed = parse(fixtureLines("claude-code/stream-api-retry.synthetic.jsonl"));
     expect(parsed.outcome).toBeNull();
@@ -221,6 +264,7 @@ describe("Claude outcome after the process exits", () => {
       signal: null,
       error: new Error("spawn claude ENOENT"),
       stderrTail: "",
+      endedAt: "2026-10-13T08:00:00.000Z",
     });
     expect(outcome).toMatchObject({ kind: "error", retryable: false });
     expect(outcome.kind === "error" && outcome.message).toContain("ENOENT");

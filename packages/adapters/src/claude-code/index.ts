@@ -3,6 +3,7 @@
  * statusline shim posts `statuslineIngestFromClaude(...)` to the engine, and `parseEvents`
  * returns the SDK rate-limit readings of runs the engine launched. So there is no `readUsage`.
  */
+import { homedir } from "node:os";
 import type { HostAdapter, HostCapabilities, SessionRef, SpawnRoleRequest } from "@vtc/shared";
 import { createRunLauncher, subagentSpawn } from "../common/dispatch.js";
 import { nodeSpawner, type Spawner } from "../common/process.js";
@@ -29,6 +30,10 @@ export interface ClaudeCodeAdapterOptions {
   /** Starts host processes; tests inject a fake (never the real `claude`). */
   readonly spawner?: Spawner;
   readonly killGraceMs?: number;
+  /** The user's home (the VTC install token a role may never read lives under it). Default: `os.homedir()`. */
+  readonly home?: string;
+  /** The compiled Claude plugin on disk; see `ClaudeCommandOptions.pluginDir`. */
+  readonly pluginDir?: string;
 }
 
 export const createClaudeCodeAdapter = (options: ClaudeCodeAdapterOptions = {}): HostAdapter => {
@@ -37,6 +42,10 @@ export const createClaudeCodeAdapter = (options: ClaudeCodeAdapterOptions = {}):
     outcome: claudeOutcomeAfterExit,
     ...(options.killGraceMs === undefined ? {} : { killGraceMs: options.killGraceMs }),
   });
+  const profileOptions = { home: options.home ?? homedir() };
+  const commandOptions = options.pluginDir === undefined ? {} : { pluginDir: options.pluginDir };
+  const headlessCommand = (request: SpawnRoleRequest, session?: SessionRef) =>
+    claudeHeadlessCommand(request, session, commandOptions);
   const spawn = (request: SpawnRoleRequest, session?: SessionRef) =>
     Promise.resolve().then(() =>
       request.dispatch === "subagent"
@@ -44,7 +53,7 @@ export const createClaudeCodeAdapter = (options: ClaudeCodeAdapterOptions = {}):
             background: claudeCodeCapabilities.backgroundSubagents,
             name: claudeSubagentName,
           })
-        : runs.start(claudeHeadlessCommand(request, session), request),
+        : runs.start(headlessCommand(request, session), request),
     );
   return {
     host: HOST,
@@ -53,14 +62,14 @@ export const createClaudeCodeAdapter = (options: ClaudeCodeAdapterOptions = {}):
     spawnRole: (request) => spawn(request),
     subagentName: claudeSubagentName,
     parseEvents: parseClaudeEvents,
-    headlessCommand: claudeHeadlessCommand,
+    headlessCommand,
     resume: (session, request) => {
       if (session.host !== HOST) {
         return Promise.reject(new Error(`cannot resume a ${session.host} session on ${HOST}`));
       }
       return spawn(request, session);
     },
-    sandboxProfile: claudeSandboxProfile,
+    sandboxProfile: (request) => claudeSandboxProfile(request, profileOptions),
     dispose: () => runs.dispose(),
   };
 };

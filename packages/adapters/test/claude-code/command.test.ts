@@ -19,14 +19,25 @@ const WRITE_SCOPED: RoleTools = {
 };
 const ENGINEER: RoleTools = { profile: "code_sandboxed", write_paths: [], engine_tools: [] };
 
-const profile = (tools: RoleTools, network: "none" | "registries" = "none") =>
-  createClaudeCodeAdapter().sandboxProfile({
+const HOME = "/home/dev";
+const profile = (
+  tools: RoleTools,
+  network: "none" | "registries" = "none",
+  writablePaths: readonly string[] = ["src/**"],
+) =>
+  createClaudeCodeAdapter({ home: HOME }).sandboxProfile({
     tools,
     cwd: CWD,
-    writablePaths: ["src/**"],
+    writablePaths,
     protectedPaths: ["test/acceptance/**"],
     network,
   });
+
+/** Denied to every role: the web tools (engine tools only) and the VTC install token. */
+const ALWAYS_DENIED = ["WebFetch", "WebSearch", "Read(~/.vtc/token)"];
+const HOST_CONFIG_DENIED = [".claude/**", ".mcp.json", ".codex/**"].flatMap((path) =>
+  ["Edit", "Write", "NotebookEdit"].map((tool) => `${tool}(${path})`),
+);
 
 const argAfter = (args: readonly string[], flag: string): string | undefined =>
   args[args.indexOf(flag) + 1];
@@ -49,7 +60,44 @@ describe("Claude sandboxProfile (§12.1, AD-9)", () => {
     const p = profile(READ_ONLY);
     expect(p.enforced).toEqual({ readOnly: true, perPathWriteDeny: true, network: true });
     expect(argAfter(p.cliArgs, "--allowedTools")).toBe("Read,Grep,Glob");
-    expect(argAfter(p.cliArgs, "--disallowedTools")).toBe("Edit,Write,NotebookEdit,Bash");
+    expect(argAfter(p.cliArgs, "--disallowedTools")?.split(",")).toEqual([
+      "Edit",
+      "Write",
+      "NotebookEdit",
+      "Bash",
+      ...ALWAYS_DENIED,
+    ]);
+  });
+
+  it("pins the permission mode in the settings too, so the allowlist decides", () => {
+    expect(profile(WRITE_SCOPED).settings).toMatchObject({
+      permissions: { defaultMode: "dontAsk" },
+    });
+  });
+
+  it("no role may read the VTC install token, from a tool or from the sandboxed shell (AD-5)", () => {
+    for (const tools of [READ_ONLY, WRITE_SCOPED, ENGINEER]) {
+      const p = profile(tools);
+      expect(argAfter(p.cliArgs, "--disallowedTools")?.split(",")).toEqual(
+        expect.arrayContaining(ALWAYS_DENIED),
+      );
+      expect(p.settings).toMatchObject({
+        sandbox: { filesystem: { denyRead: [`${HOME}/.vtc/token`] } },
+      });
+    }
+  });
+
+  it("refuses a write path that would inject permission rules", () => {
+    for (const hostile of [
+      "x),mcp__plugin_vtc_vtc__approve,Edit(y",
+      "a b",
+      "src/(x)",
+      'src/"x"',
+      "src/\u0007x",
+    ]) {
+      expect(() => profile(WRITE_SCOPED, "none", [hostile])).toThrow(/permission rule/);
+    }
+    expect(() => profile(WRITE_SCOPED, "none", ["src/**/*.ts", ".vtc/spec/**"])).not.toThrow();
   });
 
   it("write-scoped roles may edit only their paths, plus their engine tools", () => {
@@ -63,7 +111,14 @@ describe("Claude sandboxProfile (§12.1, AD-9)", () => {
       "NotebookEdit(src/**)",
       "mcp__plugin_vtc_vtc__research_fetch",
     ]);
-    expect(argAfter(profile(WRITE_SCOPED).cliArgs, "--disallowedTools")).toContain("Bash");
+    expect(argAfter(profile(WRITE_SCOPED).cliArgs, "--disallowedTools")?.split(",")).toEqual([
+      "Edit(test/acceptance/**)",
+      "Write(test/acceptance/**)",
+      "NotebookEdit(test/acceptance/**)",
+      ...HOST_CONFIG_DENIED,
+      "Bash",
+      ...ALWAYS_DENIED,
+    ]);
   });
 
   it("engineers get Bash inside the OS sandbox, with no unsandboxed escape", () => {
@@ -74,17 +129,28 @@ describe("Claude sandboxProfile (§12.1, AD-9)", () => {
         enabled: true,
         autoAllowBashIfSandboxed: true,
         allowUnsandboxedCommands: false,
-        filesystem: { denyWrite: [`${CWD}/test/acceptance/**`] },
+        filesystem: {
+          denyWrite: [
+            `${CWD}/test/acceptance/**`,
+            `${CWD}/.claude/**`,
+            `${CWD}/.mcp.json`,
+            `${CWD}/.codex/**`,
+          ],
+        },
         network: { allowedDomains: [] },
       },
     });
     expect(JSON.parse(argAfter(p.cliArgs, "--settings") ?? "")).toEqual(p.settings);
   });
 
-  it("protected paths are denied to the edit tools as well", () => {
-    expect(argAfter(profile(ENGINEER).cliArgs, "--disallowedTools")).toBe(
-      "Edit(test/acceptance/**),Write(test/acceptance/**),NotebookEdit(test/acceptance/**)",
-    );
+  it("protected paths and host config are denied to the edit tools as well", () => {
+    expect(argAfter(profile(ENGINEER).cliArgs, "--disallowedTools")?.split(",")).toEqual([
+      "Edit(test/acceptance/**)",
+      "Write(test/acceptance/**)",
+      "NotebookEdit(test/acceptance/**)",
+      ...HOST_CONFIG_DENIED,
+      ...ALWAYS_DENIED,
+    ]);
   });
 
   it("only the install phase reaches package registries", () => {
@@ -102,7 +168,7 @@ describe("Claude sandboxProfile (§12.1, AD-9)", () => {
 describe("Claude headlessCommand", () => {
   const adapter = createClaudeCodeAdapter();
 
-  it("runs claude -p as the role's plugin agent with stream-json and the host schema form", () => {
+  it("runs claude -p as the role's plugin agent with stream-json, the host schema form and the prompt on stdin", () => {
     const command = adapter.headlessCommand(request({ maxTurns: 30, maxBudgetUsd: 2.5 }));
     expect(command.command).toBe("claude");
     expect(command.env).toEqual({});
@@ -114,14 +180,24 @@ describe("Claude headlessCommand", () => {
     expect(argAfter(args, "--model")).toBe("sonnet");
     expect(argAfter(args, "--effort")).toBe("medium");
     expect(argAfter(args, "--permission-prompts")).toBe("none");
-    expect(args).not.toContain("--permission-mode");
+    // pinned, so the user's defaultMode (acceptEdits, auto) never applies to a role run
+    expect(argAfter(args, "--permission-mode")).toBe("dontAsk");
     expect(argAfter(args, "--max-turns")).toBe("30");
     expect(argAfter(args, "--max-budget-usd")).toBe("2.5");
     const schema = JSON.parse(argAfter(args, "--json-schema") ?? "") as Record<string, unknown>;
     expect(schema).not.toHaveProperty("$schema");
     expect(schema).not.toHaveProperty("$id");
-    expect(args.slice(-2)).toEqual(["--", "Read the task pack and follow it."]);
+    expect(args.join(" ")).not.toContain("Read the task pack");
     expect(args).not.toContain("--resume");
+    expect(args).not.toContain("--plugin-dir");
+    expect(findForbiddenHostArgs(args)).toEqual([]);
+  });
+
+  it("with the compiled plugin on disk, loads it directly and ignores the user's settings", () => {
+    const isolated = createClaudeCodeAdapter({ home: HOME, pluginDir: "/opt/vtc/plugin" });
+    const args = isolated.headlessCommand(request()).args;
+    expect(argAfter(args, "--plugin-dir")).toBe("/opt/vtc/plugin");
+    expect(argAfter(args, "--setting-sources")).toBe("project");
     expect(findForbiddenHostArgs(args)).toEqual([]);
   });
 
@@ -161,7 +237,8 @@ describe("Claude spawnRole and resume", () => {
     if (spawned.dispatch !== "headless") throw new Error("expected a headless run");
     const proc = processes[0]!;
     expect(proc.command).toEqual(adapter.headlessCommand(request()));
-    expect(proc.options).toEqual({ cwd: CWD, stdin: "closed" });
+    expect(proc.options).toEqual({ cwd: CWD, stdin: "pipe" });
+    expect(await proc.stdinText()).toBe("Read the task pack and follow it.");
     expect(spawned.run.command).toBe(proc.command);
     const result = JSON.stringify(JSON.parse(fixtureText("claude-code/p-json-schema-result.json")));
     proc.emit('{"type":"system","subtype":"init","session_id":"<session-id>"}', result);

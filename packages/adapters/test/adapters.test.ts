@@ -45,8 +45,8 @@ describe("adapter registry (AD-6 rule 6)", () => {
     expect("readUsage" in codex && "watchUsage" in codex).toBe(true);
     expect("readUsage" in claude || "watchUsage" in claude).toBe(false);
   });
-  it("hands the project's Codex tier models to the Codex adapter", () => {
-    const adapter = ADAPTER_FACTORIES.codex?.({ models: { mid: "model-m" } });
+  it("Codex runs the model the engine resolved (AD-6 rule 2)", () => {
+    const adapter = ADAPTER_FACTORIES.codex?.();
     const sandbox = adapter!.sandboxProfile({
       tools: { profile: "read_only", write_paths: [], engine_tools: [] },
       cwd: "/w",
@@ -56,7 +56,7 @@ describe("adapter registry (AD-6 rule 6)", () => {
     });
     const args = adapter!.headlessCommand({
       role: "qa",
-      model: { tier: "mid", effort: "low", model: "ignored" },
+      model: { tier: "mid", effort: "low", model: "engine-model" },
       dispatch: "headless",
       cwd: "/w",
       prompt: "p",
@@ -64,7 +64,7 @@ describe("adapter registry (AD-6 rule 6)", () => {
       sandbox,
       timeoutMs: 1000,
     }).args;
-    expect(args[args.indexOf("--model") + 1]).toBe("model-m");
+    expect(args[args.indexOf("--model") + 1]).toBe("engine-model");
   });
 });
 

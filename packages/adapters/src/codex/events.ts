@@ -7,7 +7,7 @@
  * `error {message}` events report stream errors.
  */
 import type { HostOutcome, ParsedStream, SessionRef, TokenUsage } from "@vtc/shared";
-import { classifyFailureText } from "../common/failure-text.js";
+import { classifyFailureText, resetFromWaitText } from "../common/failure-text.js";
 import type { RunExit } from "../common/headless-run.js";
 import {
   count,
@@ -113,14 +113,24 @@ const scan = (lines: readonly string[]): CodexScan => {
 const sessionRef = (s: CodexScan): SessionRef | null =>
   s.threadId === null ? null : { host: HOST, id: s.threadId };
 
-const failureOutcome = (s: CodexScan, failure: Failure, retryable: boolean): HostOutcome => {
+/**
+ * `endedAt`: when the run ended, known only to the launcher. The message gives the wait as text
+ * relative to then; without it (the pure `parseEvents`) the reset stays unknown and the engine
+ * re-reads app-server usage.
+ */
+const failureOutcome = (
+  s: CodexScan,
+  failure: Failure,
+  retryable: boolean,
+  endedAt: string | null = null,
+): HostOutcome => {
   const byText = classifyFailureText(failure.message);
   if (failure.info === "usagelimitexceeded" || byText === "limit") {
     return {
       kind: "limit",
       session_ref: sessionRef(s),
-      // the message gives the wait as text relative to now; the engine re-reads app-server usage
-      resets_at: failure.resetsAt,
+      resets_at:
+        failure.resetsAt ?? (endedAt === null ? null : resetFromWaitText(failure.message, endedAt)),
       window: null,
       model: null,
       message: failure.message,
@@ -145,9 +155,9 @@ const doneOutcome = (s: CodexScan): HostOutcome => ({
   cost_usd: null,
 });
 
-const outcomeOf = (s: CodexScan): HostOutcome | null => {
+const outcomeOf = (s: CodexScan, endedAt: string | null = null): HostOutcome | null => {
   if (s.terminal === null) return null;
-  return s.terminal === "completed" ? doneOutcome(s) : failureOutcome(s, s.terminal, true);
+  return s.terminal === "completed" ? doneOutcome(s) : failureOutcome(s, s.terminal, true, endedAt);
 };
 
 export const parseCodexEvents = (lines: readonly string[]): ParsedStream => {
@@ -164,7 +174,7 @@ export const parseCodexEvents = (lines: readonly string[]): ParsedStream => {
 /** The outcome of a finished `codex exec`: its last turn, else its last error, else the exit. */
 export const codexOutcomeAfterExit = (lines: readonly string[], exit: RunExit): HostOutcome => {
   const s = scan(lines);
-  const outcome = outcomeOf(s);
+  const outcome = outcomeOf(s, exit.endedAt);
   if (outcome !== null) return outcome;
   if (exit.error !== null) {
     return {
@@ -175,10 +185,10 @@ export const codexOutcomeAfterExit = (lines: readonly string[], exit: RunExit): 
       cost_usd: null,
     };
   }
-  if (s.lastError !== null) return failureOutcome(s, s.lastError, true);
+  if (s.lastError !== null) return failureOutcome(s, s.lastError, true, exit.endedAt);
   const stderr = exit.stderrTail.trim();
   const how =
     exit.code === null ? `was stopped by ${exit.signal ?? "a signal"}` : `exited ${exit.code}`;
   const message = `codex ${how} before the turn finished${stderr === "" ? "" : `: ${stderr}`}`;
-  return failureOutcome(s, { message, info: null, resetsAt: null }, true);
+  return failureOutcome(s, { message, info: null, resetsAt: null }, true, exit.endedAt);
 };

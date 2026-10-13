@@ -2,20 +2,14 @@
  * Codex host adapter (§4.1, §12.1, AD-6). Usage comes from the adapter's own managed
  * `codex app-server` child (`readUsage` / `watchUsage`, stopped by `dispose`, AD-6 rule 4).
  */
-import { mkdirSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
-import { dirname, join } from "node:path";
+import { tmpdir, userInfo } from "node:os";
+import { join } from "node:path";
 import type { HostAdapter, HostCapabilities, SessionRef, SpawnRoleRequest } from "@vtc/shared";
 import { createRunLauncher, subagentSpawn } from "../common/dispatch.js";
+import { ensurePrivateDir, writeFileAtomic } from "../common/files.js";
 import { nodeSpawner, type Spawner } from "../common/process.js";
 import { createCodexUsageSource } from "./app-server.js";
-import {
-  codexHeadlessCommand,
-  codexSandboxProfile,
-  codexSchemaFile,
-  HOST,
-  type CodexTierModels,
-} from "./command.js";
+import { codexHeadlessCommand, codexSandboxProfile, codexSchemaFile, HOST } from "./command.js";
 import { codexOutcomeAfterExit, parseCodexEvents } from "./events.js";
 import { installCodex } from "./install.js";
 
@@ -35,9 +29,10 @@ export const codexCapabilities: HostCapabilities = {
 export interface CodexAdapterOptions {
   /** Starts host processes; tests inject a fake (never the real `codex`). */
   readonly spawner?: Spawner;
-  /** `project.yaml` `hosts.models.codex`: overrides the built-in tier → model map per tier. */
-  readonly models?: CodexTierModels;
-  /** Where `--output-schema` files are written. Default: `<os tmp>/vtc-codex`. */
+  /**
+   * A private directory (0700, created if missing, refused if anyone else can reach it) for the
+   * `--output-schema` files. Default: `<os tmp>/vtc-codex-<user id>`.
+   */
   readonly scratchDir?: string;
   /** Working directory of the `codex app-server` child. Default: the scratch directory. */
   readonly appServerCwd?: string;
@@ -48,13 +43,14 @@ export interface CodexAdapterOptions {
   readonly clientVersion?: string;
 }
 
+/** Per user, so two users of one machine never share it (and a planted one is refused). */
+const defaultScratchDir = (): string =>
+  join(tmpdir(), `vtc-codex-${String(process.getuid?.() ?? userInfo().username)}`);
+
 export const createCodexAdapter = (options: CodexAdapterOptions = {}): HostAdapter => {
   const spawner = options.spawner ?? nodeSpawner;
-  const scratchDir = options.scratchDir ?? join(tmpdir(), "vtc-codex");
-  const commandOptions = {
-    scratchDir,
-    ...(options.models === undefined ? {} : { models: options.models }),
-  };
+  const scratchDir = options.scratchDir ?? defaultScratchDir();
+  const commandOptions = { scratchDir };
   const runs = createRunLauncher({
     spawner,
     outcome: codexOutcomeAfterExit,
@@ -63,7 +59,7 @@ export const createCodexAdapter = (options: CodexAdapterOptions = {}): HostAdapt
   let usage: ReturnType<typeof createCodexUsageSource> | null = null;
   const usageSource = () => {
     if (usage === null) {
-      mkdirSync(scratchDir, { recursive: true });
+      ensurePrivateDir(scratchDir);
       usage = createCodexUsageSource({
         spawner,
         now: options.now ?? (() => new Date()),
@@ -85,9 +81,12 @@ export const createCodexAdapter = (options: CodexAdapterOptions = {}): HostAdapt
         return subagentSpawn(request, { background: codexCapabilities.backgroundSubagents });
       }
       const command = headlessCommand(request, session);
-      const schemaFile = codexSchemaFile(scratchDir, request.outputSchema);
-      mkdirSync(dirname(schemaFile), { recursive: true });
-      writeFileSync(schemaFile, JSON.stringify(request.outputSchema), "utf8");
+      ensurePrivateDir(scratchDir);
+      // atomic: another run with the same schema may be reading the file right now
+      writeFileAtomic(
+        codexSchemaFile(scratchDir, request.outputSchema),
+        JSON.stringify(request.outputSchema),
+      );
       return runs.start(command, request);
     });
 
@@ -113,5 +112,4 @@ export const createCodexAdapter = (options: CodexAdapterOptions = {}): HostAdapt
   };
 };
 
-export { CODEX_DEFAULT_TIER_MODELS, codexModelFor } from "./command.js";
 export { codexUsageFromRateLimits } from "./rate-limits.js";

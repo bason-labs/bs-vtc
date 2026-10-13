@@ -3,7 +3,10 @@
  * the headless flags, resume, and the Codex app-server read). It spends a little of the user's
  * own quota, so it never runs in `pnpm verify` or in tests; run it by hand:
  *
- *   pnpm --filter @vtc/adapters live:check [claude-code|codex|codex-usage] [--resume]
+ *   pnpm --filter @vtc/adapters live:check [claude-code|codex|codex-usage] [--resume] [--model <id>]
+ *
+ * The model defaults to the engine's built-in low tier for the host (`haiku`, `gpt-5-codex-mini`);
+ * `--model` runs another id, as the engine would after a `project.yaml` override.
  *
  * Each run happens in a fresh temp git repo with a read-only sandbox and a prompt that asks for
  * a bare RoleResult. It prints the exact command, the normalised outcome and whether the output
@@ -26,14 +29,17 @@ import { createClaudeCodeAdapter, createCodexAdapter } from "../src/index.js";
 const PROMPT =
   'Do not read or change any file. Reply only with a RoleResult: role "qa", exit "done", summary "live ok", and every other field null.';
 
-const run = async (adapter: HostAdapter, resume: boolean): Promise<void> => {
+/** The engine's built-in low-tier ids (engine `DEFAULT_TIER_MODELS`), for a cheap check. */
+const LOW_TIER_MODEL = { "claude-code": "haiku", codex: "gpt-5-codex-mini" } as const;
+
+const run = async (adapter: HostAdapter, resume: boolean, model?: string): Promise<void> => {
   const cwd = mkdtempSync(join(tmpdir(), "vtc-live-"));
   try {
     execFileSync("git", ["init", "-q"], { cwd });
     const request: SpawnRoleRequest = {
       role: "qa",
       mode: "judge",
-      model: { tier: "low", effort: "low", model: adapter.host === "claude-code" ? "haiku" : "-" },
+      model: { tier: "low", effort: "low", model: model ?? LOW_TIER_MODEL[adapter.host] },
       dispatch: "headless",
       cwd,
       prompt: PROMPT,
@@ -80,8 +86,10 @@ const run = async (adapter: HostAdapter, resume: boolean): Promise<void> => {
 const main = async (): Promise<void> => {
   const [target = "codex-usage", ...flags] = process.argv.slice(2);
   const resume = flags.includes("--resume");
-  if (target === "claude-code") await run(createClaudeCodeAdapter(), resume);
-  else if (target === "codex") await run(createCodexAdapter(), resume);
+  const at = flags.indexOf("--model");
+  const model = at < 0 ? undefined : flags[at + 1];
+  if (target === "claude-code") await run(createClaudeCodeAdapter(), resume, model);
+  else if (target === "codex") await run(createCodexAdapter(), resume, model);
   else if (target === "codex-usage") {
     const adapter = createCodexAdapter();
     try {
