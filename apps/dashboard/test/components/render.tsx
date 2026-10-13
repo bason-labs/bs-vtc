@@ -1,4 +1,5 @@
 import { act, render, screen, within } from "@testing-library/react";
+import { StrictMode } from "react";
 import { FlowStudio } from "@/components/app/FlowStudio";
 import { fixtureFetch, readEventLog, type FixtureFetch } from "../fixtures";
 
@@ -30,11 +31,14 @@ export interface RenderedApp {
 export const renderApp = (
   url: string,
   overrides: Parameters<typeof fixtureFetch>[0] = {},
+  options: { readonly strict?: boolean } = {},
 ): RenderedApp => {
   window.history.replaceState(null, "", url);
   const f = fixtureFetch({ "/api/stream": () => openStream(), ...overrides });
   const serverPath = new URL(url, "http://127.0.0.1").pathname;
-  render(<FlowStudio serverPath={serverPath} fetchImpl={f.fetch} />);
+  const app = <FlowStudio serverPath={serverPath} fetchImpl={f.fetch} />;
+  // `next dev` runs with reactStrictMode: effects run twice.
+  render(options.strict === true ? <StrictMode>{app}</StrictMode> : app);
   return { requests: f.requests };
 };
 

@@ -61,11 +61,7 @@ const restore = (deps: SessionDeps): SessionResult => {
   return NONE;
 };
 
-export const bootstrapSession = async (deps: SessionDeps): Promise<SessionResult> => {
-  const nonce = readNonce(deps.hash);
-  if (nonce === null) return restore(deps);
-  // Strip first: the nonce must not stay in the address bar or history, even if the exchange fails.
-  deps.replaceUrl();
+const exchange = async (nonce: string, deps: SessionDeps): Promise<SessionResult> => {
   let response: Response;
   try {
     response = await deps.fetch(ENGINE_HTTP.routes.session.path, {
@@ -87,4 +83,40 @@ export const bootstrapSession = async (deps: SessionDeps): Promise<SessionResult
     // Storage blocked: the token lives in memory for this page only.
   }
   return { status: "exchanged", token: parsed.data.session };
+};
+
+/** Forgets the stored session (after the engine refused it), so a reload does not retry it. */
+export const clearStoredSession = (storage: Storage | null): void => {
+  try {
+    storage?.removeItem(SESSION_STORAGE_KEY);
+  } catch {
+    // Storage blocked: nothing stored.
+  }
+};
+
+/**
+ * The nonce exchange in flight, if any. The nonce is single-use and leaves the URL before the
+ * exchange answers, so a second bootstrap meanwhile (React StrictMode runs effects twice in
+ * development; a remount) waits for this one instead of finding neither a nonce nor a session.
+ */
+let inflight: { readonly nonce: string; readonly result: Promise<SessionResult> } | null = null;
+
+/**
+ * The page's session: the `#nonce=` exchanged once, else the stored session, else none. Safe to
+ * call again while an exchange is in flight: later calls share its result.
+ */
+export const bootstrapSession = async (deps: SessionDeps): Promise<SessionResult> => {
+  const nonce = readNonce(deps.hash);
+  if (inflight !== null && (nonce === null || nonce === inflight.nonce)) return inflight.result;
+  if (nonce === null) return restore(deps);
+  // Strip first: the nonce must not stay in the address bar or history, even if the exchange fails.
+  deps.replaceUrl();
+  const result = exchange(nonce, deps);
+  const current = { nonce, result };
+  inflight = current;
+  try {
+    return await result;
+  } finally {
+    if (inflight === current) inflight = null;
+  }
 };

@@ -53,6 +53,8 @@ const ScreenSchema = z.object({
 /**
  * Reads `screens.yaml` (`screens: [{ id, route, states, reqs }]`). Screens that break the shape
  * are skipped and counted; a screen without states gets `default`. `null` = not a screen list.
+ * Provisional: no `@vtc/shared` contract freezes this file yet (open integration risk, see the
+ * README); swap `ScreenSchema` for the frozen schema once there is one.
  */
 export const parseScreens = (text: string): { screens: DesignScreen[]; skipped: number } | null => {
   let doc: unknown;

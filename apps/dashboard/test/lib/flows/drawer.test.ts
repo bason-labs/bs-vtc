@@ -44,6 +44,28 @@ describe("nodeDrawerModel", () => {
     });
     expect(nodeDrawerModel(node("engineer"), detail()).transcript.session).toBeNull();
   });
+  it("builds the node's timeline from its role runs, gate runs and escalations, oldest first", () => {
+    const t1 = TaskDetailSchema.parse(readFixture("task-T-1"));
+    expect(nodeDrawerModel({ ...node("engineer"), task: "T-1" }, t1).timeline).toEqual([
+      {
+        at: "2026-10-13T09:15:00.000Z",
+        label: "engineer dispatched",
+        detail: "a-1 · claude-code · exit built",
+      },
+    ]);
+    expect(nodeDrawerModel({ ...node("gates"), task: "T-1" }, t1).timeline).toEqual([
+      {
+        at: "2026-10-13T09:18:00.000Z",
+        label: "gates started (round)",
+        detail: "affected scope",
+      },
+      { at: "2026-10-13T09:19:00.000Z", label: "gates finished: pass", detail: null },
+    ]);
+    const guard = nodeDrawerModel(node("loop-guard"), detail()).timeline;
+    expect(guard.map((t) => [t.at, t.label])).toEqual([["2026-10-13T09:39:00.000Z", "E-1 raised"]]);
+    expect(nodeDrawerModel(node("loop-guard"), null).timeline).toEqual([]);
+  });
+
   it("works before the task detail has loaded", () => {
     const m = nodeDrawerModel(node("loop-guard"), null);
     expect(m.round).toBe("4/4");

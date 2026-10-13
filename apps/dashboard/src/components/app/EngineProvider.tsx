@@ -13,7 +13,7 @@ import {
 } from "react";
 import { createEngineClient, type EngineClient } from "@/lib/api/client";
 import { connectLiveStream, type LiveStatus } from "@/lib/api/live";
-import { bootstrapSession, type SessionStatus } from "@/lib/api/session";
+import { bootstrapSession, clearStoredSession, type SessionStatus } from "@/lib/api/session";
 import { createInvalidationBus, topicKeysForEvent, type InvalidationBus } from "@/lib/api/topics";
 
 export type ConnectionState =
@@ -66,6 +66,9 @@ export function EngineProvider({ children, fetchImpl }: EngineProviderProps) {
   const [unauthorized, setUnauthorized] = useState(false);
   const bus = useMemo(() => createInvalidationBus(), []);
   const onUnauthorized = useCallback(() => {
+    // The session is dead (expired, or the daemon restarted): forget it, so a reload shows
+    // "run vtc dashboard again" at once instead of retrying it until it would have expired.
+    clearStoredSession(browserStorage());
     setUnauthorized(true);
   }, []);
   const client = useMemo(
@@ -88,6 +91,8 @@ export function EngineProvider({ children, fetchImpl }: EngineProviderProps) {
       fetch: (url, init) => fetcher(url, init),
       now: () => Date.now(),
     }).then((result) => {
+      // A re-run of this effect (StrictMode, remount) gets the same result: the bootstrap shares
+      // an exchange in flight, so dropping this one loses nothing.
       if (cancelled) return;
       token.current = result.token;
       setSession(result.status);
