@@ -107,7 +107,8 @@ export const checkPlan = (input: PlanCheckInput): string[] => {
     const before = new Map(drafts.map((d) => [d.id, ancestors(d.id, byId)]));
     for (const [i, a] of drafts.entries()) {
       for (const b of drafts.slice(i + 1)) {
-        const ordered = before.get(a.id)?.has(b.id) === true || before.get(b.id)?.has(a.id) === true;
+        const ordered =
+          before.get(a.id)?.has(b.id) === true || before.get(b.id)?.has(a.id) === true;
         if (!ordered && scopesOverlap(a.files_scope, b.files_scope)) {
           issues.push(`${a.id} and ${b.id} can run in parallel but their files_scope overlap`);
         }

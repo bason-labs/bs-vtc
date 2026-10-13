@@ -3,12 +3,13 @@
  * round's outcome (park on a risk rule, another fix round, stuck or cap, or all clear → built →
  * merge queue). Synchronous: callers have already done the I/O (gates, git, evidence checks).
  */
-import type { Evidence, Finding, GateReport } from "@vtc/shared";
+import type { Evidence, Finding, GateReport, TestInventory } from "@vtc/shared";
 import type { Kernel, RunHandle } from "./kernel.js";
 import { decideAfterFailedRound, findingRiskRule } from "./loop.js";
 import { parkTask, setTaskStatus } from "./parking.js";
 import { taskFindings } from "./queries.js";
 import {
+  findingFromFailingTest,
   findingFromGateFailure,
   findingFromTool,
   mergeRound,
@@ -108,7 +109,9 @@ export const settleRound = (k: Kernel, h: RunHandle, taskId: string, merge: Roun
     });
     return;
   }
-  if (open.some((f) => f.route === "patch" || f.route === "bad_test" || f.route === "out_of_scope")) {
+  if (
+    open.some((f) => f.route === "patch" || f.route === "bad_test" || f.route === "out_of_scope")
+  ) {
     failRound(k, h, taskId, merge.reappeared);
     return;
   }
@@ -123,14 +126,33 @@ export const markBuilt = (k: Kernel, h: RunHandle, taskId: string): void => {
   setTaskStatus(k, h, taskId, "queued");
 };
 
-/** Findings of a failed gate report: parsed tool findings, or one per failed gate without any. */
-export const gateFindings = (report: GateReport, taskId: string | undefined, round: number): Finding[] => {
+/**
+ * Findings of a failed gate report: the parsed tool findings; for a failed L2 gate one finding per
+ * failing test of its inventory (so fixing some tests lowers the weighted severity); otherwise one
+ * finding per failed gate.
+ */
+export const gateFindings = (
+  report: GateReport,
+  taskId: string | undefined,
+  round: number,
+  readInventory: (path: string) => TestInventory | undefined = () => undefined,
+): Finding[] => {
   const ctx = { ...(taskId === undefined ? {} : { task: taskId }), round };
   const out: Finding[] = [];
   for (const result of report.results) {
     for (const tool of result.findings) out.push(findingFromTool(tool, ctx));
     const failed = result.blocking && (result.status === "fail" || result.status === "error");
-    if (failed && result.findings.length === 0) out.push(findingFromGateFailure(result, ctx));
+    if (!failed || result.findings.length > 0) continue;
+    const inventory =
+      result.tests === undefined ? undefined : readInventory(result.tests.inventory);
+    const failing =
+      inventory?.tests.filter((t) => t.status === "fail" || t.status === "error") ?? [];
+    if (failing.length > 0 && result.tests !== undefined) {
+      for (const test of failing)
+        out.push(findingFromFailingTest(result, test.id, result.tests.inventory, ctx));
+    } else {
+      out.push(findingFromGateFailure(result, ctx));
+    }
   }
   return out;
 };

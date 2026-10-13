@@ -92,7 +92,10 @@ export const resolves = async (ctx: EvidenceContext, evidence: Evidence): Promis
 };
 
 /** The evidence that does not resolve, as `type ref` strings (empty = all resolve). */
-export const unresolved = async (ctx: EvidenceContext, evidence: readonly Evidence[]): Promise<string[]> => {
+export const unresolved = async (
+  ctx: EvidenceContext,
+  evidence: readonly Evidence[],
+): Promise<string[]> => {
   const out: string[] = [];
   for (const e of evidence) if (!(await resolves(ctx, e))) out.push(`${e.type} ${e.ref}`);
   return out;

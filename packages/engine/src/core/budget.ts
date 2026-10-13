@@ -4,11 +4,7 @@
  * reviewers drop one tier; at 100% the task finishes its current turn and parks with evidence;
  * there are no automatic raises, and a human may raise a budget to at most 2× (§6.5).
  */
-import {
-  MAX_BUDGET_RAISE_FACTOR,
-  type ProjectConfig,
-  type TaskSize,
-} from "@vtc/shared";
+import { MAX_BUDGET_RAISE_FACTOR, type ProjectConfig, type TaskSize } from "@vtc/shared";
 
 /** At this share of its budget a task's reviewers drop one model tier (§11). */
 export const REVIEWER_DROP_SHARE = 0.7;

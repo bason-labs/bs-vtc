@@ -112,7 +112,9 @@ const MEDIA_TYPES: Readonly<Record<string, string>> = {
 const mediaTypeOf = (path: string): string => {
   const name = path.split("/").at(-1) ?? "";
   const dot = name.lastIndexOf(".");
-  return MEDIA_TYPES[dot > 0 ? name.slice(dot + 1).toLowerCase() : ""] ?? "application/octet-stream";
+  return (
+    MEDIA_TYPES[dot > 0 ? name.slice(dot + 1).toLowerCase() : ""] ?? "application/octet-stream"
+  );
 };
 
 const utf8 = new TextDecoder("utf-8", { fatal: true, ignoreBOM: true });
@@ -137,12 +139,17 @@ export const readArtifact = (
     return notFound(`no artifact ${path}`);
   }
   const stateRoot = join(vtcRoot, "state");
-  if (!real.startsWith(`${vtcRoot}${sep}`) || real === stateRoot || real.startsWith(`${stateRoot}${sep}`)) {
+  if (
+    !real.startsWith(`${vtcRoot}${sep}`) ||
+    real === stateRoot ||
+    real.startsWith(`${stateRoot}${sep}`)
+  ) {
     return badRequest("artifacts are served from .vtc/ only");
   }
   const info = lstatSync(real);
   if (!info.isFile()) return notFound(`no artifact ${path}`);
-  if (info.size > ARTIFACT_MAX_BYTES) return badRequest(`artifact is larger than ${String(ARTIFACT_MAX_BYTES)} bytes`);
+  if (info.size > ARTIFACT_MAX_BYTES)
+    return badRequest(`artifact is larger than ${String(ARTIFACT_MAX_BYTES)} bytes`);
   const bytes = readFileSync(real);
   let text: string | null;
   try {
@@ -162,7 +169,9 @@ export const readArtifact = (
 };
 
 /** Per-file added and deleted line counts of a unified diff. */
-export const diffLineCounts = (patch: string): Map<string, { additions: number; deletions: number }> => {
+export const diffLineCounts = (
+  patch: string,
+): Map<string, { additions: number; deletions: number }> => {
   const counts = new Map<string, { additions: number; deletions: number }>();
   let current: { additions: number; deletions: number } | undefined;
   let inHunk = false;
@@ -249,7 +258,8 @@ export const createReadModel = (deps: ReadModelDeps): ReadModel => {
       withRun(run, (state) => {
         const bundle = state.tasks.has(task) ? evidenceBundlePath(task) : null;
         const detail = taskDetailView(state, task, {
-          evidenceBundle: bundle !== null && existsSync(join(deps.repoRoot, bundle)) ? bundle : null,
+          evidenceBundle:
+            bundle !== null && existsSync(join(deps.repoRoot, bundle)) ? bundle : null,
         });
         return detail === null ? notFound(`no task ${task}`) : ok(detail);
       }),

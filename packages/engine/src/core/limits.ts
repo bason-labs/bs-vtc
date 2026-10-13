@@ -5,12 +5,7 @@
  * nothing itself: `next` answers `wait` until then, re-reads usage, and then hands the Lead a
  * `spawn_role` that resumes the same session (`lead_redispatch`).
  */
-import {
-  planDispatch,
-  type HostFailureOutcome,
-  type HostId,
-  type TaskStatus,
-} from "@vtc/shared";
+import { planDispatch, type HostFailureOutcome, type HostId, type TaskStatus } from "@vtc/shared";
 import type { Kernel, RunHandle } from "./kernel.js";
 import { setTaskStatus } from "./parking.js";
 import type { RoleRunRecord } from "./state.js";
@@ -22,11 +17,20 @@ export const UNKNOWN_RESET_BACKOFF_MS = 15 * 60_000;
 /** Re-parks after a still-limited re-read before resuming anyway (§6.9 step 5 "up to a cap"). */
 export const MAX_LIMIT_BACKOFFS = 3;
 
-const INTERRUPTIBLE: readonly TaskStatus[] = ["ready", "tests_authored", "building", "verifying", "fixing"];
+const INTERRUPTIBLE: readonly TaskStatus[] = [
+  "ready",
+  "tests_authored",
+  "building",
+  "verifying",
+  "fixing",
+];
 
 const resumeAt = (k: Kernel, resetsAt: string | null): string => {
-  const jitter = RESUME_JITTER_MS.min + Math.floor(k.deps.random() * (RESUME_JITTER_MS.max - RESUME_JITTER_MS.min));
-  const base = resetsAt === null ? k.now().getTime() + UNKNOWN_RESET_BACKOFF_MS : Date.parse(resetsAt);
+  const jitter =
+    RESUME_JITTER_MS.min +
+    Math.floor(k.deps.random() * (RESUME_JITTER_MS.max - RESUME_JITTER_MS.min));
+  const base =
+    resetsAt === null ? k.now().getTime() + UNKNOWN_RESET_BACKOFF_MS : Date.parse(resetsAt);
   return new Date(Math.max(base, k.now().getTime()) + jitter).toISOString();
 };
 
@@ -87,7 +91,8 @@ export const maybeAutoResume = (k: Kernel, h: RunHandle): boolean => {
   if (limit?.autoResumeAt == null || h.state.run.paused) return false;
   if (Date.parse(limit.autoResumeAt) > k.now().getTime()) return false;
   const lastResume = [...h.state.events].reverse().find((e) => e.type === "run.resumed")?.seq ?? 0;
-  const backoffs = h.state.events.filter((e) => e.type === "limit.hit" && e.seq > lastResume).length - 1;
+  const backoffs =
+    h.state.events.filter((e) => e.type === "limit.hit" && e.seq > lastResume).length - 1;
   const reset = stillLimited(k, limit.host);
   if (reset !== null && backoffs < MAX_LIMIT_BACKOFFS) {
     const at = resumeAt(k, reset);
@@ -108,7 +113,10 @@ export const maybeAutoResume = (k: Kernel, h: RunHandle): boolean => {
     return false;
   }
   const config = k.config();
-  const capabilities = k.deps.adapters[limit.host]?.capabilities ?? { subagents: true, headless: false };
+  const capabilities = k.deps.adapters[limit.host]?.capabilities ?? {
+    subagents: true,
+    headless: false,
+  };
   // Plugin-only: lead_redispatch. Headless resume (headless_allowed) launches through the adapter
   // in a later increment; until then it also waits for the Lead.
   planDispatch("auto_resume", config.hosts.dispatch, capabilities);

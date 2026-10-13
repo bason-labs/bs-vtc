@@ -4,7 +4,7 @@
  * release. Each job does its I/O (git, the Gate Runner) outside the run's lock and applies the
  * outcome inside it, re-checking that the task is still where the job left it.
  */
-import { cpSync, existsSync, mkdirSync, rmSync } from "node:fs";
+import { cpSync, existsSync, mkdirSync, readFileSync, rmSync } from "node:fs";
 import { join } from "node:path";
 import {
   capForRisk,
@@ -14,7 +14,10 @@ import {
   gateExpectationMet,
   GateRunRequestSchema,
   HIDDEN_TESTS,
+  parsePersisted,
+  TestInventorySchema,
   type Evidence,
+  type TestInventory,
   type Finding,
   type GateReport,
   type GateRunRequestInput,
@@ -29,7 +32,14 @@ import { globMatch } from "./globs.js";
 import type { Kernel, RunHandle } from "./kernel.js";
 import { assertFeatureTransition } from "./machines.js";
 import { parkTask, setTaskStatus } from "./parking.js";
-import { lastBuilt, lastQaAuthor, nextEscalationId, nextNumberedId, taskFindings, usedTaskIds } from "./queries.js";
+import {
+  lastBuilt,
+  lastQaAuthor,
+  nextEscalationId,
+  nextNumberedId,
+  taskFindings,
+  usedTaskIds,
+} from "./queries.js";
 import { diffLineCounts } from "./read-model.js";
 import { diffRiskHits, isTrivialDiff } from "./router.js";
 import { parkEscalation } from "./escalations.js";
@@ -39,10 +49,31 @@ import {
   writeRunSummary,
   writeTaskEvidenceBundle,
 } from "./projections.js";
-import { gateFindings, gateSources, markBuilt, recordRoundFindings, settleRound } from "./verify.js";
+import {
+  gateFindings,
+  gateSources,
+  markBuilt,
+  recordRoundFindings,
+  settleRound,
+} from "./verify.js";
 import { taskDetailView } from "./views.js";
 
 const sha256 = (bytes: Uint8Array): string => createHash("sha256").update(bytes).digest("hex");
+
+/** Reads an L2 test inventory the Gate Runner wrote under `.vtc/evidence/` (AD-13 rule 9). */
+const inventoryReader =
+  (k: Kernel) =>
+  (path: string): TestInventory | undefined => {
+    try {
+      const parsed = parsePersisted(
+        TestInventorySchema,
+        JSON.parse(readFileSync(join(k.deps.repoRoot, path), "utf8")),
+      );
+      return parsed.success ? parsed.data : undefined;
+    } catch {
+      return undefined;
+    }
+  };
 
 const emitGateResult = (k: Kernel, h: RunHandle, report: GateReport): void => {
   k.emit(h, {
@@ -55,7 +86,10 @@ const emitGateResult = (k: Kernel, h: RunHandle, report: GateReport): void => {
 };
 
 /** Runs the Gate Runner on a clean checkout of `head` (§6.3 step 5); never throws for a failing gate. */
-const runGates = async (k: Kernel, request: Omit<GateRunRequestInput, "checkout">): Promise<GateReport> => {
+const runGates = async (
+  k: Kernel,
+  request: Omit<GateRunRequestInput, "checkout">,
+): Promise<GateReport> => {
   const checkout = await k.deps.git.createCleanCheckout(request.head);
   try {
     return await k.deps.gateRunner.run(GateRunRequestSchema.parse({ ...request, checkout }));
@@ -64,7 +98,13 @@ const runGates = async (k: Kernel, request: Omit<GateRunRequestInput, "checkout"
   }
 };
 
-const parkInfra = (k: Kernel, h: RunHandle, taskId: string, detail: string, evidence: readonly Evidence[] = []): void => {
+const parkInfra = (
+  k: Kernel,
+  h: RunHandle,
+  taskId: string,
+  detail: string,
+  evidence: readonly Evidence[] = [],
+): void => {
   parkTask(k, h, taskId, { reason: "gate_infra", detail, evidence });
 };
 
@@ -79,7 +119,9 @@ export const ensureWorkspace = (k: Kernel, h: RunHandle, taskId: string): void =
     try {
       const ws = k.deps.workspace;
       const branch = feature.integration_branch;
-      const base = (await ws.branchExists(branch)) ? await ws.resolve(branch) : await ws.resolve("HEAD");
+      const base = (await ws.branchExists(branch))
+        ? await ws.resolve(branch)
+        : await ws.resolve("HEAD");
       const integration = await ws.ensureIntegration(feature.id, branch, base);
       const worktree = await ws.ensureTaskWorktree(taskId, `vtc/${taskId}`, integration.head);
       await k.serial(h, () => {
@@ -89,7 +131,11 @@ export const ensureWorkspace = (k: Kernel, h: RunHandle, taskId: string): void =
           type: "task.workspace_assigned",
           actor: "engine",
           task: taskId,
-          data: { worktree: worktree.worktree, branch: `vtc/${taskId}`, baseline_revision: worktree.head },
+          data: {
+            worktree: worktree.worktree,
+            branch: `vtc/${taskId}`,
+            baseline_revision: worktree.head,
+          },
         });
         return Promise.resolve();
       });
@@ -102,7 +148,8 @@ export const ensureWorkspace = (k: Kernel, h: RunHandle, taskId: string): void =
   });
 };
 
-const message = (error: unknown): string => (error instanceof Error ? error.message : String(error)).slice(0, 500);
+const message = (error: unknown): string =>
+  (error instanceof Error ? error.message : String(error)).slice(0, 500);
 
 // -------------------------------------------------------------- protected files
 
@@ -116,9 +163,13 @@ export const protectedFiles = async (
   const qa = lastQaAuthor(h.state, task.id);
   if (qa?.head !== undefined) {
     const submitted = h.state.events.find(
-      (e) => e.type === "role.submitted" && (e.data as { action_id?: string }).action_id === qa.action_id,
+      (e) =>
+        e.type === "role.submitted" &&
+        (e.data as { action_id?: string }).action_id === qa.action_id,
     );
-    const artifacts = (submitted?.data as { artifacts?: { type: string; path: string }[] } | undefined)?.artifacts ?? [];
+    const artifacts =
+      (submitted?.data as { artifacts?: { type: string; path: string }[] } | undefined)
+        ?.artifacts ?? [];
     for (const a of artifacts) {
       if (a.type !== "acceptance_test") continue;
       const bytes = await k.deps.git.readFileAtCommit(qa.head, a.path);
@@ -127,7 +178,13 @@ export const protectedFiles = async (
   }
   const globs = k.gatesConfig()?.tests.protected_configs ?? [];
   if (globs.length > 0 && task.baseline_revision !== undefined) {
-    const listed = await runGit(k.deps.repoRoot, ["ls-tree", "-r", "--name-only", "-z", task.baseline_revision]);
+    const listed = await runGit(k.deps.repoRoot, [
+      "ls-tree",
+      "-r",
+      "--name-only",
+      "-z",
+      task.baseline_revision,
+    ]);
     for (const path of listed.stdout.toString("utf8").split("\0")) {
       if (path === "" || !globs.some((g) => globMatch(g, path))) continue;
       const bytes = await k.deps.git.readFileAtCommit(task.baseline_revision, path);
@@ -150,7 +207,13 @@ const moveHiddenTests = (k: Kernel, taskId: string): void => {
 };
 
 /** QA's new acceptance tests must fail on the base commit before the Engineer starts (§6.3 step 2). */
-export const startBaseCheck = (k: Kernel, h: RunHandle, taskId: string, head: string, tests: readonly string[]): void => {
+export const startBaseCheck = (
+  k: Kernel,
+  h: RunHandle,
+  taskId: string,
+  head: string,
+  tests: readonly string[],
+): void => {
   k.spawn(h, `gates:${taskId}`, async () => {
     const task = h.state.tasks.get(taskId);
     if (task?.baseline_revision === undefined) return;
@@ -180,12 +243,23 @@ export const startBaseCheck = (k: Kernel, h: RunHandle, taskId: string, head: st
       if (h.state.tasks.get(taskId)?.status !== "ready") return Promise.resolve();
       const met = gateExpectationMet(report);
       if (met === null) {
-        parkInfra(k, h, taskId, "the gates could not run the base-fail check", report.results.flatMap((r) => r.evidence).slice(0, 5));
+        parkInfra(
+          k,
+          h,
+          taskId,
+          "the gates could not run the base-fail check",
+          report.results.flatMap((r) => r.evidence).slice(0, 5),
+        );
       } else if (met) {
         moveHiddenTests(k, taskId);
         setTaskStatus(k, h, taskId, "tests_authored");
       } else {
-        const misses = h.state.gateReports.filter((r) => r.report.task === taskId && r.report.reason === "base_fail_check" && gateExpectationMet(r.report) === false).length;
+        const misses = h.state.gateReports.filter(
+          (r) =>
+            r.report.task === taskId &&
+            r.report.reason === "base_fail_check" &&
+            gateExpectationMet(r.report) === false,
+        ).length;
         if (misses >= 3) {
           parkTask(k, h, taskId, {
             reason: "stuck",
@@ -204,22 +278,34 @@ export const startBaseCheck = (k: Kernel, h: RunHandle, taskId: string, head: st
 /** The task's previous L2 metrics at the same scope (§7.3 monotonic metrics). */
 const previousMetrics = (h: RunHandle, taskId: string): TestMetrics | undefined =>
   h.state.gateReports
-    .filter((r) => r.report.task === taskId && r.report.reason === "round" && r.report.scope === "affected")
-    .flatMap((r) => r.report.results.flatMap((g) => (g.layer === "L2" && g.tests !== undefined ? [g.tests] : [])))
+    .filter(
+      (r) =>
+        r.report.task === taskId && r.report.reason === "round" && r.report.scope === "affected",
+    )
+    .flatMap((r) =>
+      r.report.results.flatMap((g) => (g.layer === "L2" && g.tests !== undefined ? [g.tests] : [])),
+    )
     .at(-1);
 
 /** Dependencies a diff adds to any `package.json` that are not on the allowlist (§7.6 rule 4). */
-const newDependencies = async (k: Kernel, base: string, head: string, paths: readonly string[]): Promise<string[]> => {
+const newDependencies = async (
+  k: Kernel,
+  base: string,
+  head: string,
+  paths: readonly string[],
+): Promise<string[]> => {
   const allow = new Set(k.config().allowlists.dependencies);
   const names = (bytes: Uint8Array | undefined): Set<string> => {
     if (bytes === undefined) return new Set();
     try {
       const pkg = JSON.parse(new TextDecoder().decode(bytes)) as Record<string, unknown>;
       return new Set(
-        ["dependencies", "devDependencies", "optionalDependencies", "peerDependencies"].flatMap((field) => {
-          const deps = pkg[field];
-          return deps !== null && typeof deps === "object" ? Object.keys(deps) : [];
-        }),
+        ["dependencies", "devDependencies", "optionalDependencies", "peerDependencies"].flatMap(
+          (field) => {
+            const deps = pkg[field];
+            return deps !== null && typeof deps === "object" ? Object.keys(deps) : [];
+          },
+        ),
       );
     } catch {
       return new Set();
@@ -239,8 +325,15 @@ const newDependencies = async (k: Kernel, base: string, head: string, paths: rea
 const riskWaived = (h: RunHandle, taskId: string, sinceSeq: number): boolean =>
   [...h.state.escalations.values()].some((e) => {
     if (e.task !== taskId || e.reason !== "risk_rule" || e.answer === undefined) return false;
-    const opened = h.state.events.find((ev) => ev.type === "escalation.opened" && (ev.data as { escalation: { id: string } }).escalation.id === e.id);
-    return (opened?.seq ?? 0) > sinceSeq && e.options.find((o) => o.id === e.answer?.option)?.effect === "waive";
+    const opened = h.state.events.find(
+      (ev) =>
+        ev.type === "escalation.opened" &&
+        (ev.data as { escalation: { id: string } }).escalation.id === e.id,
+    );
+    return (
+      (opened?.seq ?? 0) > sinceSeq &&
+      e.options.find((o) => o.id === e.answer?.option)?.effect === "waive"
+    );
   });
 
 /** Gates for a built head (§6.3 step 5), then the risk router (step 6). */
@@ -277,9 +370,17 @@ export const startRoundGates = (k: Kernel, h: RunHandle, taskId: string, head: s
             files,
             changedLines,
             riskRules: k.config().risk_rules,
-            newDependencies: await newDependencies(k, base, head, files.map((f) => f.path)),
+            newDependencies: await newDependencies(
+              k,
+              base,
+              head,
+              files.map((f) => f.path),
+            ),
           }),
-          trivial: isTrivialDiff(files),
+          // Only the Engineer's own diff decides triviality: QA's tests sit between base and head.
+          trivial: isTrivialDiff(
+            await k.deps.git.changedFiles(lastQaAuthor(h.state, taskId)?.head ?? base, head),
+          ),
         };
       }
     } catch (error) {
@@ -292,7 +393,8 @@ export const startRoundGates = (k: Kernel, h: RunHandle, taskId: string, head: s
     await k.serial(h, () => {
       emitGateResult(k, h, report);
       const current = h.state.tasks.get(taskId);
-      if (current?.status !== "verifying" || lastBuilt(h.state, taskId)?.head !== head) return Promise.resolve();
+      if (current?.status !== "verifying" || lastBuilt(h.state, taskId)?.head !== head)
+        return Promise.resolve();
       applyRoundGates(k, h, current, report, router);
       return Promise.resolve();
     });
@@ -307,10 +409,16 @@ const applyRoundGates = (
   router: { hits: ReturnType<typeof diffRiskHits>; trivial: boolean } | null,
 ): void => {
   if (report.verdict === "infra_error") {
-    parkInfra(k, h, task.id, "a blocking gate failed for infrastructure or environment reasons", report.results.flatMap((r) => r.evidence).slice(0, 5));
+    parkInfra(
+      k,
+      h,
+      task.id,
+      "a blocking gate failed for infrastructure or environment reasons",
+      report.results.flatMap((r) => r.evidence).slice(0, 5),
+    );
     return;
   }
-  const fresh = gateFindings(report, task.id, Math.max(1, task.round));
+  const fresh = gateFindings(report, task.id, Math.max(1, task.round), inventoryReader(k));
   const merge = recordRoundFindings(k, h, task.id, fresh, gateSources(h, task.id, fresh));
   if (report.verdict === "fail") {
     settleRound(k, h, task.id, merge);
@@ -323,7 +431,10 @@ const applyRoundGates = (
       reason: "risk_rule",
       riskRule: hit.rule,
       detail: hit.detail,
-      evidence: hit.paths.length > 0 ? hit.paths.slice(0, 5).map((p) => ({ type: "file" as const, ref: p })) : [{ type: "diff", ref: `${report.base}..${report.head}` }],
+      evidence:
+        hit.paths.length > 0
+          ? hit.paths.slice(0, 5).map((p) => ({ type: "file" as const, ref: p }))
+          : [{ type: "diff", ref: `${report.base}..${report.head}` }],
     });
     return;
   }
@@ -357,18 +468,33 @@ const conflictFinding = (task: Task, detail: string, round: number): Finding => 
 
 /** The branch PRs target: the repo's current branch, or `main` when HEAD is detached. */
 const baseBranch = async (repoRoot: string): Promise<string> => {
-  const out = (await runGit(repoRoot, ["rev-parse", "--abbrev-ref", "HEAD"], { allowFailure: true })).stdout.toString("utf8").trim();
+  const out = (
+    await runGit(repoRoot, ["rev-parse", "--abbrev-ref", "HEAD"], { allowFailure: true })
+  ).stdout
+    .toString("utf8")
+    .trim();
   return out === "" || out === "HEAD" || out.startsWith("vtc/") ? "main" : out;
 };
 
 /** Pushes the integration branch and keeps the draft PR current (Level 2, §6.7). */
-const pushFeature = async (k: Kernel, h: RunHandle, featureId: string, ready: boolean, body?: string): Promise<void> => {
+const pushFeature = async (
+  k: Kernel,
+  h: RunHandle,
+  featureId: string,
+  ready: boolean,
+  body?: string,
+): Promise<void> => {
   const feature = h.state.features.get(featureId);
   if (feature === undefined || h.state.run.merge_level_effective < 2) return;
   const ws = k.deps.workspace;
   if ((await ws.remoteUrl(k.deps.remote)) === null) {
     await k.serial(h, () => {
-      k.emit(h, { type: "branch.push_skipped", actor: "engine", feature: featureId, data: { branch: feature.integration_branch, detail: `no remote ${k.deps.remote}` } });
+      k.emit(h, {
+        type: "branch.push_skipped",
+        actor: "engine",
+        feature: featureId,
+        data: { branch: feature.integration_branch, detail: `no remote ${k.deps.remote}` },
+      });
       return Promise.resolve();
     });
     return;
@@ -377,7 +503,12 @@ const pushFeature = async (k: Kernel, h: RunHandle, featureId: string, ready: bo
   const pushed = await ws.push(k.deps.remote, feature.integration_branch);
   if (!pushed.ok) {
     await k.serial(h, () => {
-      k.emit(h, { type: "branch.push_failed", actor: "engine", feature: featureId, data: { branch: feature.integration_branch, detail: pushed.detail } });
+      k.emit(h, {
+        type: "branch.push_failed",
+        actor: "engine",
+        feature: featureId,
+        data: { branch: feature.integration_branch, detail: pushed.detail },
+      });
       return Promise.resolve();
     });
     return;
@@ -388,13 +519,20 @@ const pushFeature = async (k: Kernel, h: RunHandle, featureId: string, ready: bo
       branch: feature.integration_branch,
       base: await baseBranch(k.deps.repoRoot),
       title: feature.title,
-      body: body ?? `Draft: VTC integration of ${feature.id} (${feature.title}). Ready for review after Final Review.`,
+      body:
+        body ??
+        `Draft: VTC integration of ${feature.id} (${feature.title}). Ready for review after Final Review.`,
     };
     pr = await k.deps.pullRequests.upsertDraft(request);
     if (ready) pr = await k.deps.pullRequests.markReady(feature.integration_branch);
   } catch (error) {
     await k.serial(h, () => {
-      k.emit(h, { type: "feature.pr_failed", actor: "engine", feature: featureId, data: { detail: message(error) } });
+      k.emit(h, {
+        type: "feature.pr_failed",
+        actor: "engine",
+        feature: featureId,
+        data: { detail: message(error) },
+      });
       return Promise.resolve();
     });
   }
@@ -402,8 +540,16 @@ const pushFeature = async (k: Kernel, h: RunHandle, featureId: string, ready: bo
   const included = new Set<string>();
   for (const m of merges) if (await ws.isAncestor(m.commit, commit)) included.add(m.task);
   await k.serial(h, () => {
-    k.emit(h, { type: "branch.pushed", actor: "engine", feature: featureId, data: { branch: feature.integration_branch, commit } });
-    if (pr !== undefined && JSON.stringify(pr) !== JSON.stringify(h.state.features.get(featureId)?.pr)) {
+    k.emit(h, {
+      type: "branch.pushed",
+      actor: "engine",
+      feature: featureId,
+      data: { branch: feature.integration_branch, commit },
+    });
+    if (
+      pr !== undefined &&
+      JSON.stringify(pr) !== JSON.stringify(h.state.features.get(featureId)?.pr)
+    ) {
       k.emit(h, { type: "feature.pr_updated", actor: "engine", feature: featureId, data: { pr } });
     }
     const open = h.state.features.get(featureId)?.pr?.state === "open";
@@ -426,7 +572,13 @@ const mergeOne = async (k: Kernel, h: RunHandle, taskId: string): Promise<void> 
   const sendBack = (detail: string): Promise<void> =>
     k.serial(h, () => {
       if (h.state.tasks.get(taskId)?.status !== "queued") return Promise.resolve();
-      const merge = recordRoundFindings(k, h, taskId, [conflictFinding(task, detail, task.round)], new Set(["merge_queue"]));
+      const merge = recordRoundFindings(
+        k,
+        h,
+        taskId,
+        [conflictFinding(task, detail, task.round)],
+        new Set(["merge_queue"]),
+      );
       settleRound(k, h, taskId, merge);
       return Promise.resolve();
     });
@@ -454,15 +606,24 @@ const mergeOne = async (k: Kernel, h: RunHandle, taskId: string): Promise<void> 
       return Promise.resolve("gone" as const);
     }
     if (report.verdict === "fail") {
-      const fresh = gateFindings(report, taskId, Math.max(1, task.round));
-      settleRound(k, h, taskId, recordRoundFindings(k, h, taskId, fresh, gateSources(h, taskId, fresh)));
+      const fresh = gateFindings(report, taskId, Math.max(1, task.round), inventoryReader(k));
+      settleRound(
+        k,
+        h,
+        taskId,
+        recordRoundFindings(k, h, taskId, fresh, gateSources(h, taskId, fresh)),
+      );
       return Promise.resolve("gone" as const);
     }
     return Promise.resolve(h.state.run.paused ? ("paused" as const) : ("merge" as const));
   });
   if (verdict !== "merge") return;
   const integration = await ws.ensureIntegration(feature.id, branch, integrationHead);
-  const merged = await ws.merge(integration.worktree, `vtc/${taskId}`, `vtc: merge ${taskId} ${task.title}`);
+  const merged = await ws.merge(
+    integration.worktree,
+    `vtc/${taskId}`,
+    `vtc: merge ${taskId} ${task.title}`,
+  );
   if (!merged.ok) return sendBack(merged.detail);
   await k.serial(h, () => {
     k.emit(h, {
@@ -505,7 +666,8 @@ const setFeatureStatus = (
   k: Kernel,
   h: RunHandle,
   featureId: string,
-  to: "building" | "integrating" | "final_review" | "fixing" | "ready_to_ship" | "shipped" | "parked",
+  to:
+    "building" | "integrating" | "final_review" | "fixing" | "ready_to_ship" | "shipped" | "parked",
   options: { round?: number; parkReason?: ParkReason } = {},
 ): void => {
   const feature = h.state.features.get(featureId);
@@ -526,7 +688,14 @@ const setFeatureStatus = (
 
 export { setFeatureStatus };
 
-const parkFeature = (k: Kernel, h: RunHandle, featureId: string, reason: ParkReason, detail: string, evidence: readonly Evidence[]): void => {
+const parkFeature = (
+  k: Kernel,
+  h: RunHandle,
+  featureId: string,
+  reason: ParkReason,
+  detail: string,
+  evidence: readonly Evidence[],
+): void => {
   setFeatureStatus(k, h, featureId, "parked", { parkReason: reason });
   const feature = h.state.features.get(featureId);
   const escalation = parkEscalation({
@@ -539,20 +708,38 @@ const parkFeature = (k: Kernel, h: RunHandle, featureId: string, reason: ParkRea
     blocks: feature?.tasks ?? [],
     now: k.now(),
   });
-  k.emit(h, { type: "escalation.opened", actor: "engine", feature: featureId, data: { escalation } });
+  k.emit(h, {
+    type: "escalation.opened",
+    actor: "engine",
+    feature: featureId,
+    data: { escalation },
+  });
 };
 
 /** An engine-created task for Final Review findings no single task owns (§6.7a, AD-8 rule 11). */
-const createIntegrationFix = (k: Kernel, h: RunHandle, featureId: string, findings: readonly Finding[]): void => {
+const createIntegrationFix = (
+  k: Kernel,
+  h: RunHandle,
+  featureId: string,
+  findings: readonly Finding[],
+): void => {
   const feature = h.state.features.get(featureId);
   const first = findings[0];
   if (feature === undefined || first === undefined) return;
   const id = nextNumberedId("T", usedTaskIds([h.state]));
   const config = k.config();
-  const owners = feature.tasks.map((t) => h.state.tasks.get(t)).filter((t): t is Task => t !== undefined);
+  const owners = feature.tasks
+    .map((t) => h.state.tasks.get(t))
+    .filter((t): t is Task => t !== undefined);
   const disciplines = owners.map((t) => t.discipline);
-  const discipline = disciplines.sort((a, b) => disciplines.filter((d) => d === b).length - disciplines.filter((d) => d === a).length)[0] ?? "backend";
-  const paths = [...new Set(findings.map((f) => f.location.path).filter((p) => !p.startsWith(".vtc/")))];
+  const discipline =
+    disciplines.sort(
+      (a, b) =>
+        disciplines.filter((d) => d === b).length - disciplines.filter((d) => d === a).length,
+    )[0] ?? "backend";
+  const paths = [
+    ...new Set(findings.map((f) => f.location.path).filter((p) => !p.startsWith(".vtc/"))),
+  ];
   const task: Task = {
     id,
     title: `Integration fix: ${first.title}`.slice(0, 200),
@@ -577,9 +764,19 @@ const createIntegrationFix = (k: Kernel, h: RunHandle, featureId: string, findin
     deferred: [],
   };
   k.emit(h, { type: "task.created", actor: "engine", task: id, data: { task } });
-  k.emit(h, { type: "feature.task_added", actor: "engine", feature: featureId, data: { task: id } });
+  k.emit(h, {
+    type: "feature.task_added",
+    actor: "engine",
+    feature: featureId,
+    data: { task: id },
+  });
   for (const finding of findings) {
-    k.emit(h, { type: "finding.recorded", actor: "engine", task: id, data: { finding: { ...finding, task: id } } });
+    k.emit(h, {
+      type: "finding.recorded",
+      actor: "engine",
+      task: id,
+      data: { finding: { ...finding, task: id } },
+    });
   }
 };
 
@@ -592,7 +789,14 @@ export const startFinalReview = (k: Kernel, h: RunHandle, featureId: string): vo
     let report: GateReport;
     try {
       const head = await ws.resolve(feature.integration_branch);
-      const base = (await runGit(k.deps.repoRoot, ["merge-base", await baseBranch(k.deps.repoRoot), head], { allowFailure: true })).stdout.toString("utf8").trim() || head;
+      const base =
+        (
+          await runGit(k.deps.repoRoot, ["merge-base", await baseBranch(k.deps.repoRoot), head], {
+            allowFailure: true,
+          })
+        ).stdout
+          .toString("utf8")
+          .trim() || head;
       const covers = [...new Set(feature.tasks.flatMap((t) => h.state.tasks.get(t)?.covers ?? []))];
       report = await runGates(k, {
         run: h.state.id,
@@ -606,7 +810,14 @@ export const startFinalReview = (k: Kernel, h: RunHandle, featureId: string): vo
       });
     } catch (error) {
       await k.serial(h, () => {
-        parkFeature(k, h, featureId, "gate_infra", `Final Review gates could not run: ${message(error)}`, []);
+        parkFeature(
+          k,
+          h,
+          featureId,
+          "gate_infra",
+          `Final Review gates could not run: ${message(error)}`,
+          [],
+        );
         return Promise.resolve();
       });
       return;
@@ -616,17 +827,37 @@ export const startFinalReview = (k: Kernel, h: RunHandle, featureId: string): vo
       const current = h.state.features.get(featureId);
       if (current?.status !== "final_review") return Promise.resolve();
       if (report.verdict === "infra_error") {
-        parkFeature(k, h, featureId, "gate_infra", "Final Review gates failed for infrastructure reasons", report.results.flatMap((r) => r.evidence).slice(0, 5));
+        parkFeature(
+          k,
+          h,
+          featureId,
+          "gate_infra",
+          "Final Review gates failed for infrastructure reasons",
+          report.results.flatMap((r) => r.evidence).slice(0, 5),
+        );
       } else if (report.verdict === "pass") {
         setFeatureStatus(k, h, featureId, "ready_to_ship");
       } else if (current.round + 1 > FINAL_REVIEW_CAP) {
-        parkFeature(k, h, featureId, "cap", `Final Review reached its ${String(FINAL_REVIEW_CAP)}-round cap`, report.results.flatMap((r) => r.evidence).slice(0, 5));
+        parkFeature(
+          k,
+          h,
+          featureId,
+          "cap",
+          `Final Review reached its ${String(FINAL_REVIEW_CAP)}-round cap`,
+          report.results.flatMap((r) => r.evidence).slice(0, 5),
+        );
       } else {
-        const findings = gateFindings(report, undefined, current.round + 1).map((f) => ({ ...f, feature: featureId }));
+        const findings = gateFindings(report, undefined, current.round + 1, inventoryReader(k)).map(
+          (f) => ({ ...f, feature: featureId }),
+        );
         setFeatureStatus(k, h, featureId, "fixing", { round: current.round + 1 });
         createIntegrationFix(k, h, featureId, findings);
         if (h.state.run.phase !== "build") {
-          k.emit(h, { type: "run.phase_changed", actor: "engine", data: { from: h.state.run.phase, to: "build" } });
+          k.emit(h, {
+            type: "run.phase_changed",
+            actor: "engine",
+            data: { from: h.state.run.phase, to: "build" },
+          });
         }
       }
       return Promise.resolve();
@@ -640,13 +871,34 @@ export const startFinalReview = (k: Kernel, h: RunHandle, featureId: string): vo
 export const startRelease = (k: Kernel, h: RunHandle, featureId: string): void => {
   k.spawn(h, `release:${featureId}`, async () => {
     const written = await k.serial(h, () =>
-      Promise.resolve(writeFeatureEvidenceBundle(k.deps.repoRoot, h.state, featureId, "pass", k.now(), k.secrets())),
+      Promise.resolve(
+        writeFeatureEvidenceBundle(
+          k.deps.repoRoot,
+          h.state,
+          featureId,
+          "pass",
+          k.now(),
+          k.secrets(),
+        ),
+      ),
     );
-    await pushFeature(k, h, featureId, true, written === null ? undefined : bundleMarkdown(written.bundle));
+    await pushFeature(
+      k,
+      h,
+      featureId,
+      true,
+      written === null ? undefined : bundleMarkdown(written.bundle),
+    );
     await k.serial(h, () => {
       if (h.state.run.finished_at !== undefined) return Promise.resolve();
-      k.emit(h, { type: "run.phase_changed", actor: "engine", data: { from: h.state.run.phase, to: "retro" } });
-      const roleRuns = [...h.state.tasks.keys()].flatMap((t) => taskDetailView(h.state, t)?.role_runs ?? []);
+      k.emit(h, {
+        type: "run.phase_changed",
+        actor: "engine",
+        data: { from: h.state.run.phase, to: "retro" },
+      });
+      const roleRuns = [...h.state.tasks.keys()].flatMap(
+        (t) => taskDetailView(h.state, t)?.role_runs ?? [],
+      );
       const summary = writeRunSummary(k.deps.repoRoot, h.state, roleRuns, k.secrets());
       k.emit(h, { type: "run.finished", actor: "engine", data: { outcome: "done", summary } });
       return Promise.resolve();

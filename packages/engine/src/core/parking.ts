@@ -64,10 +64,17 @@ export interface ParkInput {
 }
 
 /** Opens an escalation for a task (parking it unless the reason is a non-blocking question). */
-export const openTaskEscalation = (k: Kernel, h: RunHandle, taskId: string, input: ParkInput): Escalation => {
+export const openTaskEscalation = (
+  k: Kernel,
+  h: RunHandle,
+  taskId: string,
+  input: ParkInput,
+): Escalation => {
   const id = nextEscalationId(h.state);
   const blocks =
-    input.reason === "spec_question" ? [] : [taskId, ...transitiveDependents(taskId, h.state.tasks.values())];
+    input.reason === "spec_question"
+      ? []
+      : [taskId, ...transitiveDependents(taskId, h.state.tasks.values())];
   const escalation =
     input.question === undefined
       ? parkEscalation({
@@ -101,7 +108,9 @@ export const parkTask = (k: Kernel, h: RunHandle, taskId: string, input: ParkInp
   if (task === undefined || ["parked", "dropped", "done", "merged"].includes(task.status)) return;
   setTaskStatus(k, h, taskId, "parked", {
     parkReason: input.reason,
-    ...(input.reason === "risk_rule" && input.riskRule !== undefined ? { riskRule: input.riskRule } : {}),
+    ...(input.reason === "risk_rule" && input.riskRule !== undefined
+      ? { riskRule: input.riskRule }
+      : {}),
   });
   openTaskEscalation(k, h, taskId, input);
 };
@@ -136,7 +145,13 @@ const resumeTarget = (
 };
 
 /** Waives every open finding of a task, each with an expiring human waiver (§6.5). */
-const waiveFindings = (k: Kernel, h: RunHandle, taskId: string, reason: string, expiresAt: string): void => {
+const waiveFindings = (
+  k: Kernel,
+  h: RunHandle,
+  taskId: string,
+  reason: string,
+  expiresAt: string,
+): void => {
   for (const finding of taskFindings(h.state, taskId)) {
     if (finding.status !== "open") continue;
     k.emit(h, {
@@ -171,7 +186,8 @@ export const applyAnswer = (
   answer: EscalationAnswer,
 ): void => {
   const option = escalation.options.find((o) => o.id === answer.option);
-  if (option === undefined) throw new EngineError("invalid", `option ${answer.option} is not offered`);
+  if (option === undefined)
+    throw new EngineError("invalid", `option ${answer.option} is not offered`);
   const taskId = escalation.task;
   const task = taskId === undefined ? undefined : h.state.tasks.get(taskId);
   if (option.effect === "approve_change" || option.effect === "reject_change") return;
@@ -181,7 +197,9 @@ export const applyAnswer = (
     return;
   }
   if (option.effect === "raise_budget" && option.budget_factor !== undefined) {
-    const budget = usd(raisedBudget(originalBudget(h, taskId), task.budget_usd, option.budget_factor));
+    const budget = usd(
+      raisedBudget(originalBudget(h, taskId), task.budget_usd, option.budget_factor),
+    );
     k.emit(h, {
       type: "budget.updated",
       actor: "human",

@@ -27,7 +27,11 @@ const VERDICTS = ["pass", "fail", "unknown", "unchecked"] as const;
 const both = (tier: ModelTier, effort: "low" | "medium" | "high" = "medium") =>
   Object.fromEntries(HOST_IDS.map((h) => [h, { tier, effort }])) as RoleContractInput["models"];
 
-const role = (input: Omit<RoleContractInput, "version" | "budget"> & { readonly budget?: RoleContractInput["budget"] }): RoleContract =>
+const role = (
+  input: Omit<RoleContractInput, "version" | "budget"> & {
+    readonly budget?: RoleContractInput["budget"];
+  },
+): RoleContract =>
   RoleContractSchema.parse({ version: "1.0.0", budget: { context_tokens: 60_000 }, ...input });
 
 export const BUILTIN_ROLES: readonly RoleContract[] = [
@@ -109,7 +113,10 @@ export const BUILTIN_ROLES: readonly RoleContract[] = [
     tools: { profile: "read_only" },
     modes: {
       author: {
-        output: { artifacts: ["acceptance_test", "hidden_acceptance_test", "scenario"], verdicts: [] },
+        output: {
+          artifacts: ["acceptance_test", "hidden_acceptance_test", "scenario"],
+          verdicts: [],
+        },
         tools: { profile: "write_scoped", write_paths: ["tests/**"] },
       },
       judge: {
@@ -184,7 +191,8 @@ export const createRoleRegistry = (contracts: readonly RoleContract[] = []): Rol
 
 /** The tier a role runs at on a host (mode overrides first). */
 export const roleTier = (contract: RoleContract, host: HostId, mode?: string): ModelTier => {
-  const models = (mode === undefined ? undefined : contract.modes?.[mode]?.models) ?? contract.models;
+  const models =
+    (mode === undefined ? undefined : contract.modes?.[mode]?.models) ?? contract.models;
   return models[host].tier;
 };
 
@@ -195,10 +203,13 @@ export const resolveModel = (
   config: Pick<ProjectConfig, "hosts">,
   options: { readonly mode?: string; readonly tier?: ModelTier } = {},
 ): ResolvedModel => {
-  const models = (options.mode === undefined ? undefined : contract.modes?.[options.mode]?.models) ?? contract.models;
+  const models =
+    (options.mode === undefined ? undefined : contract.modes?.[options.mode]?.models) ??
+    contract.models;
   const entry = models[host];
   const tier = options.tier ?? entry.tier;
-  const explicit = options.tier === undefined || options.tier === entry.tier ? entry.model : undefined;
+  const explicit =
+    options.tier === undefined || options.tier === entry.tier ? entry.model : undefined;
   return {
     tier,
     effort: entry.effort,

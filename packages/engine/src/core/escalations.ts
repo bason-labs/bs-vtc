@@ -38,7 +38,11 @@ const waiveOption = (now: Date, label: string): EscalationOption => ({
   waiver_expires_at: new Date(now.getTime() + WAIVER_DAYS * 86_400_000).toISOString(),
 });
 
-const DROP: EscalationOption = { id: "drop", label: "Drop the task (and the tasks it blocks)", effect: "drop" };
+const DROP: EscalationOption = {
+  id: "drop",
+  label: "Drop the task (and the tasks it blocks)",
+  effect: "drop",
+};
 
 const optionsFor = (
   reason: ParkReason,
@@ -73,17 +77,32 @@ const optionsFor = (
       return {
         question: "The task spent its budget. Raise it or stop?",
         options: [
-          { id: "raise-1-5x", label: "Raise the budget to 1.5×", effect: "raise_budget", budget_factor: 1.5 },
-          { id: "raise-2x", label: "Raise the budget to 2× (the maximum)", effect: "raise_budget", budget_factor: 2 },
+          {
+            id: "raise-1-5x",
+            label: "Raise the budget to 1.5×",
+            effect: "raise_budget",
+            budget_factor: 1.5,
+          },
+          {
+            id: "raise-2x",
+            label: "Raise the budget to 2× (the maximum)",
+            effect: "raise_budget",
+            budget_factor: 2,
+          },
           DROP,
         ],
         recommended: "raise-1-5x",
       };
     case "gate_infra":
       return {
-        question: "The gates could not run (infrastructure or a disallowed command). Retry once fixed?",
+        question:
+          "The gates could not run (infrastructure or a disallowed command). Retry once fixed?",
         options: [
-          { id: "retry", label: "Retry the gates (after fixing the environment or running vtc calibrate)", effect: "retry" },
+          {
+            id: "retry",
+            label: "Retry the gates (after fixing the environment or running vtc calibrate)",
+            effect: "retry",
+          },
           DROP,
         ],
         recommended: "retry",
@@ -92,7 +111,11 @@ const optionsFor = (
       return {
         question: "Approve this change request?",
         options: [
-          { id: "approve", label: "Approve the change and re-freeze the artifact", effect: "approve_change" },
+          {
+            id: "approve",
+            label: "Approve the change and re-freeze the artifact",
+            effect: "approve_change",
+          },
           { id: "reject", label: "Reject the change", effect: "reject_change" },
         ],
         recommended: "approve",
@@ -134,7 +157,9 @@ export const parkEscalation = (input: ParkEscalationInput): Escalation => {
     recommended,
     // Without other evidence, cite the run's request (always projected, AD-7 rule 8).
     evidence:
-      input.evidence.length > 0 ? input.evidence : [{ type: "file", ref: runRequestPath(input.run) }],
+      input.evidence.length > 0
+        ? input.evidence
+        : [{ type: "file", ref: runRequestPath(input.run) }],
     blocks: [...input.blocks],
     ...(input.raisedBy === undefined ? {} : { raised_by: input.raisedBy }),
     created_at: input.now.toISOString(),

@@ -74,7 +74,10 @@ export const findingRiskRule = (
   );
   const rounds = new Set(
     integrity.flatMap((f) =>
-      Array.from({ length: lastSeen(f) - f.round_first_seen + 1 }, (_v, i) => f.round_first_seen + i),
+      Array.from(
+        { length: lastSeen(f) - f.round_first_seen + 1 },
+        (_v, i) => f.round_first_seen + i,
+      ),
     ),
   );
   const openIntegrity = integrity.find((f) => f.status === "open");
