@@ -12,6 +12,7 @@ import {
   CONTRACTS_VERSION,
   ENGINE_INSTANCE,
   engineDiscoveryFile,
+  ROLE_CONTRACTS_ASSET,
   type AssetBundle,
   type EngineDeps,
   type GateRunner,
@@ -23,11 +24,20 @@ import { connectEngineClient } from "../../src/mcp/index.js";
 import { openNodeSqlite } from "../../src/storage/node-sqlite.js";
 import { cleanupDirs, initRepo, tempDir } from "../helpers/repo.js";
 import { fakeGates } from "../helpers/engine-harness.js";
+import { ALL_FIXTURE_ROLES } from "../fixtures/roles.js";
 
 afterEach(cleanupDirs);
 
 const TOKEN = "t".repeat(43);
 const emptyAssets: AssetBundle = { read: () => undefined, list: () => [] };
+/** A bundle that carries only the compiled role contracts (the daemon refuses to start without). */
+const roleAssets: AssetBundle = {
+  read: (namespace, path) =>
+    namespace === "plugin:claude-code" && path === ROLE_CONTRACTS_ASSET
+      ? new TextEncoder().encode(JSON.stringify(ALL_FIXTURE_ROLES))
+      : undefined,
+  list: (namespace) => (namespace === "plugin:claude-code" ? [ROLE_CONTRACTS_ASSET] : []),
+};
 
 const depsFor = (repoRoot: string, vtcHome: string, gateRunner?: GateRunner): EngineDeps => ({
   repoRoot,
@@ -36,7 +46,7 @@ const depsFor = (repoRoot: string, vtcHome: string, gateRunner?: GateRunner): En
   openStorage: openNodeSqlite,
   gateRunner: gateRunner ?? fakeGates(repoRoot, () => new Date()),
   adapters: {},
-  assets: emptyAssets,
+  assets: roleAssets,
   scheduler: { schedule: () => Promise.resolve(), cancel: () => Promise.resolve() },
   versions: { engine: "vtc-engine@0.0.0", contracts: CONTRACTS_VERSION },
 });
@@ -140,6 +150,14 @@ describe("runDaemon (AD-12, AD-19)", () => {
     await second.close();
     const log = readFileSync(join(repo, `.vtc/runs/${run}/events.jsonl`), "utf8");
     expect(log).toContain('"kind":"stale_lock"');
+  });
+  it("refuses to start without the compiled role contracts (AD-14 rule 6), and frees the lock", async () => {
+    const repo = initRepo();
+    const home = shortHome();
+    await expect(
+      runDaemon({ ...depsFor(repo, home), assets: emptyAssets }, { wake: false }),
+    ).rejects.toThrow(/role contracts .* no plugin in the asset bundle/);
+    expect(existsSync(join(repo, ENGINE_INSTANCE.lockFile))).toBe(false);
   });
   it("loads the storage driver through the engine entry", async () => {
     expect(await loadNodeSqliteStorage()).toBe(openNodeSqlite);

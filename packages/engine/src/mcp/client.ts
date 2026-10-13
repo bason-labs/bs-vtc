@@ -6,6 +6,7 @@
  */
 import { connect, type Socket } from "node:net";
 import type { Readable, Writable } from "node:stream";
+import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import {
   CONTRACT_SCHEMAS,
   CONTRACTS_VERSION,
@@ -21,7 +22,10 @@ import {
   type HostId,
 } from "@vtc/shared";
 import { createLineReader } from "./lines.js";
-import { MCP_PROTOCOL_VERSION } from "./server.js";
+import { LineTransport } from "./transport.js";
+
+/** Engine calls can run long (a resume sweeps the checkout; gates run in jobs, not calls). */
+const CALL_TIMEOUT_MS = 10 * 60_000;
 
 export class EngineConnectError extends Error {
   constructor(message: string) {
@@ -81,66 +85,51 @@ export const handshake = (
     socket.on("data", onData);
   });
 
-interface Pending {
-  resolve(value: unknown): void;
-  reject(error: Error): void;
-}
-
-/** The cli's typed client (`EngineClient`): `call(tool, input)` with per-tool types. */
+/**
+ * The cli's typed client (`EngineClient`): `call(tool, input)` with per-tool types, on the SDK's
+ * client. `bridge` connects as a host's bridge session instead (tests and tooling that act as a
+ * Lead or a role session).
+ */
 export const connectEngineClient = async (
   path: string,
   contractsVersion = CONTRACTS_VERSION,
+  options: { readonly bridge?: HostId } = {},
 ): Promise<EngineClient> => {
-  const { socket, rest } = await handshake(path, {
-    v: 1,
-    client: "cli",
-    host: null,
-    contracts_version: contractsVersion,
-  });
-  let nextId = 1;
-  const pending = new Map<number, Pending>();
-  const request = (method: string, params: unknown): Promise<unknown> =>
-    new Promise((resolve, reject) => {
-      const id = nextId;
-      nextId += 1;
-      pending.set(id, { resolve, reject });
-      socket.write(encodeSocketLine({ jsonrpc: "2.0", id, method, params }));
-    });
+  const { socket, rest } = await handshake(
+    path,
+    options.bridge === undefined
+      ? { v: 1, client: "cli", host: null, contracts_version: contractsVersion }
+      : { v: 1, client: "bridge", host: options.bridge, contracts_version: contractsVersion },
+  );
+  const transport = new LineTransport(
+    (line) => {
+      if (!socket.destroyed) socket.write(line);
+    },
+    () => socket.end(),
+  );
   const reader = createLineReader(ENGINE_SOCKET.maxLineBytes, (line) => {
-    let message: { id?: unknown; result?: unknown; error?: { message?: string } };
-    try {
-      message = JSON.parse(line) as typeof message;
-    } catch {
-      return;
-    }
-    if (typeof message.id !== "number") return;
-    const waiter = pending.get(message.id);
-    if (waiter === undefined) return;
-    pending.delete(message.id);
-    if (message.error !== undefined)
-      waiter.reject(new Error(message.error.message ?? "engine error"));
-    else waiter.resolve(message.result);
+    transport.receive(line);
   });
-  const failAll = (error: Error): void => {
-    for (const waiter of pending.values()) waiter.reject(error);
-    pending.clear();
-  };
   socket.on("data", (chunk: Buffer) => {
     if (!reader.push(chunk)) socket.destroy();
   });
-  socket.on("close", () => {
-    failAll(new EngineConnectError("the engine closed the connection"));
+  const closed = new Promise<void>((resolve) => {
+    socket.once("close", () => {
+      transport.ended();
+      resolve();
+    });
   });
-  socket.on("error", (error) => {
-    failAll(new EngineConnectError(error.message));
-  });
+  socket.on("error", () => socket.destroy());
   if (rest.length > 0) reader.push(rest);
-  await request("initialize", {
-    protocolVersion: MCP_PROTOCOL_VERSION,
-    capabilities: {},
-    clientInfo: { name: "vtc-cli", version: contractsVersion },
-  });
-  socket.write(encodeSocketLine({ jsonrpc: "2.0", method: "notifications/initialized" }));
+  const client = new Client({ name: "vtc-cli", version: contractsVersion }, { capabilities: {} });
+  try {
+    await client.connect(transport, { timeout: CALL_TIMEOUT_MS });
+  } catch (error) {
+    socket.destroy();
+    throw new EngineConnectError(
+      `the engine did not complete the MCP handshake: ${error instanceof Error ? error.message : String(error)}`,
+    );
+  }
   return {
     call: async <N extends EngineMcpToolName>(
       tool: N,
@@ -148,27 +137,21 @@ export const connectEngineClient = async (
     ): Promise<EngineToolOutput<N>> => {
       const spec = ENGINE_MCP_TOOLS.find((t) => t.name === tool);
       if (spec === undefined) throw new Error(`unknown tool ${tool}`);
-      const result = (await request("tools/call", { name: tool, arguments: input })) as {
-        isError?: boolean;
-        structuredContent?: unknown;
-        content?: { text?: string }[];
-      };
+      const result = await client.callTool(
+        { name: tool, arguments: (input ?? {}) as Record<string, unknown> },
+        undefined,
+        { timeout: CALL_TIMEOUT_MS },
+      );
       if (result.isError === true) {
-        throw new Error(result.content?.[0]?.text ?? `${tool} failed`);
+        const content = result.content as { text?: string }[] | undefined;
+        throw new Error(content?.[0]?.text ?? `${tool} failed`);
       }
       return CONTRACT_SCHEMAS[spec.output].parse(result.structuredContent) as EngineToolOutput<N>;
     },
-    close: () =>
-      new Promise<void>((resolve) => {
-        if (socket.destroyed) {
-          resolve();
-          return;
-        }
-        socket.once("close", () => {
-          resolve();
-        });
-        socket.end();
-      }),
+    close: async () => {
+      if (!socket.destroyed) socket.end();
+      await closed;
+    },
   };
 };
 

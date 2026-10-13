@@ -1,29 +1,17 @@
 /**
- * The feature's draft PR (§6.7 Level 2), behind an interface so engine core and its tests never
- * need the network. The default implementation drives the user's own `gh` CLI with the user's
- * existing auth (AD-9, §15); VTC never handles a token.
+ * The default `PullRequestService` (`@vtc/shared`, §6.7 Level 2): the user's own `gh` CLI with
+ * the user's existing auth (AD-9, §15); VTC never handles a token. The cli injects its own
+ * (`EngineDeps.pullRequests`); the daemon falls back to this one.
  */
 import { spawn } from "node:child_process";
-import type { PullRequestCi, PullRequestRef } from "@vtc/shared";
+import type {
+  PullRequestCi,
+  PullRequestRef,
+  PullRequestRequest,
+  PullRequestService,
+} from "@vtc/shared";
 
-export interface PullRequestRequest {
-  /** The integration branch, `vtc/F-n`. */
-  readonly branch: string;
-  /** The branch the PR targets (the repo's default branch). */
-  readonly base: string;
-  readonly title: string;
-  /** The PR description (the evidence bundle summary at release). */
-  readonly body: string;
-}
-
-export interface PullRequestService {
-  /** Opens the draft PR for `branch`, or returns (and re-describes) the open one. */
-  upsertDraft(request: PullRequestRequest): Promise<PullRequestRef>;
-  /** Marks the PR ready for review (after Final Review passes). */
-  markReady(branch: string): Promise<PullRequestRef>;
-  /** The PR as it is now (state, head, CI), or `null` when there is none. */
-  view(branch: string): Promise<PullRequestRef | null>;
-}
+export type { PullRequestRequest, PullRequestService };
 
 interface GhPr {
   readonly url?: string;

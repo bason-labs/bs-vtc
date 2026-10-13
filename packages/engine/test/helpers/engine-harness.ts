@@ -7,7 +7,6 @@ import { createHash } from "node:crypto";
 import { join } from "node:path";
 import {
   GateReportSchema,
-  sha256Hex,
   SubmitInputSchema,
   type GateReport,
   type GateRunner,
@@ -21,13 +20,15 @@ import {
 } from "@vtc/shared";
 import {
   acquireEngineLock,
+  createPluginCatalog,
   Engine,
   createRoleRegistry,
   type EngineCoreDeps,
 } from "../../src/core/index.js";
 import { createGitOps, createWorkspace, type PullRequestService } from "../../src/git/index.js";
 import { globMatch } from "../../src/core/globs.js";
-import { addBareRemote, initRepo, writeFile } from "./repo.js";
+import { ALL_FIXTURE_ROLES } from "../fixtures/roles.js";
+import { addBareRemote, initRepo, tempDir, writeFile } from "./repo.js";
 
 export type SpawnAction = Extract<LeadAction, { type: "spawn_role" }>;
 
@@ -207,6 +208,8 @@ export const fakePullRequests = (): PullRequestService & { readonly calls: strin
 export interface Harness {
   readonly repo: string;
   readonly remote: string;
+  /** The VTC home (outside the repo): the engine's private directory lives under it. */
+  readonly home: string;
   readonly engine: Engine;
   readonly gates: FakeGates;
   readonly prs: ReturnType<typeof fakePullRequests>;
@@ -225,6 +228,8 @@ export interface HarnessOptions {
   readonly capabilities?: Partial<HostAdapter["capabilities"]>;
   readonly gatesYml?: Record<string, unknown> | null;
   readonly files?: Record<string, string>;
+  /** No `origin` remote (Level 2 then drops to Level 1, spine §5 reading 18). */
+  readonly noRemote?: boolean;
 }
 
 export const DEFAULT_GATES_YML = {
@@ -254,7 +259,8 @@ export const createHarness = (options: HarnessOptions = {}): Harness => {
     ...options.files,
   };
   const repo = initRepo(files);
-  const remote = addBareRemote(repo);
+  const remote = options.noRemote === true ? "" : addBareRemote(repo);
+  const home = tempDir("vtc-home-");
   const scheduled = { at: null as Date | null, cancelled: 0 };
   const spawned: string[] = [];
   const adapter: HostAdapter = {
@@ -298,6 +304,7 @@ export const createHarness = (options: HarnessOptions = {}): Harness => {
   const h = {
     repo,
     remote,
+    home,
     clock: new Date("2026-10-13T09:00:00.000Z"),
     scheduled,
     spawned,
@@ -308,7 +315,7 @@ export const createHarness = (options: HarnessOptions = {}): Harness => {
   let lock = acquireEngineLock(repo);
   const deps = (): EngineCoreDeps => ({
     repoRoot: repo,
-    vtcHome: join(repo, ".vtc/state/home"),
+    vtcHome: home,
     lock,
     gateRunner: gates,
     git: createGitOps({ repoRoot: repo }),
@@ -325,10 +332,10 @@ export const createHarness = (options: HarnessOptions = {}): Harness => {
         return Promise.resolve();
       },
     },
-    roles: createRoleRegistry(),
+    roles: createRoleRegistry(ALL_FIXTURE_ROLES),
+    plugins: createPluginCatalog({}),
     now,
     random: () => 0.5,
-    promptSha: (agent) => sha256Hex(agent),
     remote: "origin",
   });
   Object.assign(h, {
@@ -369,6 +376,13 @@ export const only = (actions: readonly LeadAction[], role: string): SpawnAction 
 
 export const worktreeOf = (h: Harness, task: string): string =>
   join(h.repo, ".vtc/state/worktrees", task);
+
+/** Where a dispatched role works (its worktree): the action's `Work in:` line. */
+export const workdir = (action: SpawnAction): string => {
+  const line = action.prompt.split("\n").find((l) => l.startsWith("Work in: "));
+  if (line === undefined) throw new Error(`no Work in: line in ${action.prompt}`);
+  return line.slice("Work in: ".length);
+};
 
 export const result = (
   action: SpawnAction,
@@ -432,7 +446,7 @@ export const toPlanner = async (h: Harness, spec: string = SPEC): Promise<SpawnA
   );
   let actions = (await h.engine.next({}, CLAUDE)).actions;
   const carto = only(actions, "repo_cartographer");
-  writeFile(h.repo, ".vtc/research/repo-map.md", "# map\n");
+  writeFile(workdir(carto), ".vtc/research/repo-map.md", "# map\n");
   actions = (
     await submitResult(h, carto, {
       exit: "done",
@@ -440,7 +454,7 @@ export const toPlanner = async (h: Harness, spec: string = SPEC): Promise<SpawnA
     })
   ).actions;
   const ba = only(actions, "ba");
-  writeFile(h.repo, ".vtc/spec/spec.md", spec);
+  writeFile(workdir(ba), ".vtc/spec/spec.md", spec);
   actions = (
     await submitResult(h, ba, {
       exit: "done",
@@ -456,7 +470,7 @@ export const toPlanner = async (h: Harness, spec: string = SPEC): Promise<SpawnA
     )
   ).actions;
   const architect = only(actions, "architect");
-  writeFile(h.repo, ".vtc/architecture/spine.md", "# spine\n");
+  writeFile(workdir(architect), ".vtc/architecture/spine.md", "# spine\n");
   actions = (
     await submitResult(h, architect, {
       exit: "done",

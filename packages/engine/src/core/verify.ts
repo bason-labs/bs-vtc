@@ -5,7 +5,6 @@
  */
 import type { Evidence, Finding, GateReport, TestInventory } from "@vtc/shared";
 import type { Kernel, RunHandle } from "./kernel.js";
-import { clarifications, MAX_CLARIFICATIONS } from "./clarify.js";
 import { decideAfterFailedRound, findingRiskRule } from "./loop.js";
 import { parkTask, setTaskStatus } from "./parking.js";
 import { taskFindings } from "./queries.js";
@@ -74,9 +73,10 @@ export const failRound = (k: Kernel, h: RunHandle, taskId: string, reappeared: b
 
 /**
  * The outcome of a round once its findings are recorded: a secret or a §7.6 rule 8/9 finding
- * parks; a spec or design gap fails the round, so the BA or the Designer answers it before the
- * Engineer's next round (§6.3 step 8, `clarify.ts`; the human only once a task keeps coming
- * back); open patch or test findings fail the round; otherwise the task is built and queued. A guarded out-of-scope fault went to its owning or a new task (§6.3
+ * parks; a spec or design gap parks for the human (the BA/Designer dispatch of §6.3 step 8 waits
+ * for the front half, sub-project 4: spine §5 reading 19); open patch or test findings fail the
+ * round; otherwise the task is built and queued. A guarded out-of-scope fault went to its owning
+ * or a new task (§6.3
  * step 3), so it never fails the claimer's round: it is resolved on the claimer once the
  * claimer's own gates and reviews pass.
  */
@@ -105,7 +105,7 @@ export const settleRound = (k: Kernel, h: RunHandle, taskId: string, merge: Roun
     return;
   }
   const gaps = open.filter((f) => f.route === "spec_gap" || f.route === "design_gap");
-  if (gaps.length > 0 && clarifications(h.state, taskId) >= MAX_CLARIFICATIONS) {
+  if (gaps.length > 0) {
     parkTask(k, h, taskId, {
       reason: "spec_conflict",
       detail: gaps.map((f) => `${f.route}: ${f.title}`).join("; "),
@@ -113,7 +113,7 @@ export const settleRound = (k: Kernel, h: RunHandle, taskId: string, merge: Roun
     });
     return;
   }
-  if (gaps.length > 0 || open.some((f) => f.route === "patch" || f.route === "bad_test")) {
+  if (open.some((f) => f.route === "patch" || f.route === "bad_test")) {
     failRound(k, h, taskId, merge.reappeared);
     return;
   }

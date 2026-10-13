@@ -2,7 +2,9 @@
  * Worktrees, branches, submit snapshots and merges (§6.6, §6.7; AD-8 rules 4 and 14). Internal to
  * engine core (AD-13 rule 4): only the merge queue merges, and only engine core commits a role's
  * work. Each task works in `.vtc/state/worktrees/T-n` on `vtc/T-n`; each feature integrates in
- * `.vtc/state/worktrees/F-n` on `vtc/F-n`, so the user's own checkout is never touched.
+ * `.vtc/state/worktrees/F-n` on `vtc/F-n`; each front-half role or advisor run works in its own
+ * `.vtc/state/worktrees/R-<run>-<action>` (spine §5 reading 21). So no role works in the user's
+ * own checkout.
  *
  * Agents work inside these worktrees and can delete or rewrite the `.git` file there. Git would
  * then walk up to the user's checkout, or read a repository (config, hooks, fsmonitor) the agent
@@ -94,6 +96,8 @@ export interface Workspace {
   /** The URL of a remote, or `null` when it is not configured. */
   remoteUrl(remote: string): Promise<string | null>;
   removeWorktree(worktree: string): Promise<void>;
+  /** Deletes an engine branch `vtc/<id>` (force; never a branch outside `vtc/`). */
+  deleteBranch(branch: string): Promise<void>;
 }
 
 /** A path with every existing prefix resolved through `realpath` (macOS `/var` → `/private/var`). */
@@ -337,6 +341,11 @@ export const createWorkspace = (repoRoot: string): Workspace => {
       const url = await gitText(repoRoot, ["remote", "get-url", remote], { allowFailure: true });
       return url === "" ? null : url;
     },
+    deleteBranch: locked(async (branch: string) => {
+      if (!/^vtc\/[A-Za-z0-9][A-Za-z0-9_-]*$/.test(branch))
+        throw new WorktreeError(branch, "not an engine branch");
+      await runGit(repoRoot, ["branch", "--quiet", "-D", branch], { allowFailure: true });
+    }),
     removeWorktree: locked(async (worktree: string) => {
       await runGit(repoRoot, ["worktree", "remove", "--force", "--force", worktree], {
         allowFailure: true,

@@ -2,7 +2,9 @@
  * The daemon's local MCP socket (AD-12 rule 3, AD-19 rule 4): `~/.vtc/run/<repo-key>.sock`
  * (directory 0700, socket 0600). Every connection opens with one `EngineSocketHello` line and one
  * `EngineSocketWelcome` line; a malformed hello or another contracts MAJOR gets `ok: false` and the
- * connection is closed. After that the connection is plain MCP. Never exposed over HTTP.
+ * connection is closed. After that the connection is plain MCP, served by the official SDK's
+ * server over {@link LineTransport}; each connection is its own MCP session (`CallContext.session`).
+ * Never exposed over HTTP.
  */
 import { chmodSync, existsSync, mkdirSync, unlinkSync } from "node:fs";
 import { createServer, type Server, type Socket } from "node:net";
@@ -18,7 +20,8 @@ import {
   type EngineVersions,
 } from "@vtc/shared";
 import { createLineReader } from "./lines.js";
-import { createMcpSession, RPC_ERRORS, type ToolHost } from "./server.js";
+import { createMcpServer, type ToolHost } from "./server.js";
+import { LineTransport } from "./transport.js";
 
 export class SocketPathTooLongError extends Error {
   constructor(readonly path: string) {
@@ -64,18 +67,26 @@ export const serveEngineSocket = async (
   }
   const counts = { bridge: 0, cli: 0 };
   const sockets = new Set<Socket>();
+  let sessions = 0;
   const server: Server = createServer((socket) => {
     sockets.add(socket);
+    sessions += 1;
+    const session = `s${String(sessions)}`;
     let hello: EngineSocketHello | null = null;
     // After a refused hello (`ok: false`, then close, AD-12 rule 3) no further line is read.
     let rejected = false;
-    let queue = Promise.resolve();
-    const send = (message: unknown): void => {
+    const sendLine = (message: unknown): void => {
       if (!socket.destroyed) socket.write(encodeSocketLine(message));
     };
+    const transport = new LineTransport(
+      (line) => {
+        if (!socket.destroyed) socket.write(line);
+      },
+      () => socket.end(),
+    );
     const refuse = (reason: string): void => {
       rejected = true;
-      send(welcome(options.versions, reason));
+      sendLine(welcome(options.versions, reason));
       socket.end();
     };
     const reader = createLineReader(ENGINE_SOCKET.maxLineBytes, (line) => {
@@ -101,45 +112,26 @@ export const serveEngineSocket = async (
         hello = parsed.data;
         counts[hello.client] += 1;
         options.onActivity?.();
-        send(welcome(options.versions));
+        sendLine(welcome(options.versions));
+        void createMcpServer(options.host, {
+          call: { host: hello.host, session, client: hello.client },
+          serverVersion: options.versions.engine,
+        }).connect(transport);
         return;
       }
-      const session = sessionFor(hello);
-      queue = queue.then(async () => {
-        let message: unknown;
-        try {
-          message = JSON.parse(line);
-        } catch {
-          send({
-            jsonrpc: "2.0",
-            id: null,
-            error: { code: RPC_ERRORS.parse, message: "parse error" },
-          });
-          return;
-        }
-        const response = await session.handle(message);
-        if (response !== null) send(response);
-      });
+      transport.receive(line);
     });
-    const sessions = new Map<EngineSocketHello, ReturnType<typeof createMcpSession>>();
-    const sessionFor = (h: EngineSocketHello) => {
-      let s = sessions.get(h);
-      if (s === undefined) {
-        s = createMcpSession(options.host, {
-          host: h.host,
-          serverVersion: options.versions.engine,
-        });
-        sessions.set(h, s);
-      }
-      return s;
-    };
     socket.on("data", (chunk: Buffer) => {
       if (!reader.push(chunk)) socket.destroy();
     });
     socket.on("error", () => socket.destroy());
     socket.on("close", () => {
       sockets.delete(socket);
-      if (hello !== null) counts[hello.client] -= 1;
+      transport.ended();
+      if (hello !== null) {
+        counts[hello.client] -= 1;
+        options.host.sessionClosed?.(session);
+      }
       options.onActivity?.();
     });
   });

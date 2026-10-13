@@ -8,11 +8,15 @@
  */
 export { createGitOps, parseNameStatus, CHECKOUTS_DIR } from "./git-ops.js";
 export {
+  ALLOWED_CONFIG_KEYS,
   fingerprintChanges,
   GitConfigChangedError,
   gitConfigFingerprint,
   gitDirOf,
+  globalConfigFiles,
+  isAllowedConfigKey,
 } from "./git-config.js";
+export { gitEnv } from "./env.js";
 export {
   createWorkspace,
   WORKTREES_DIR,
@@ -43,6 +47,7 @@ export {
   gitText,
   runGit,
   setGitPreflight,
+  setGitSigning,
   type GitResult,
   type GitRunOptions,
 } from "./exec.js";

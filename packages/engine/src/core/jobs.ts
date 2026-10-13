@@ -15,6 +15,7 @@ import {
   GateRunRequestSchema,
   HIDDEN_TESTS,
   parsePersisted,
+  redactSecrets,
   TestInventorySchema,
   type Evidence,
   type TestInventory,
@@ -541,6 +542,31 @@ const baseBranch = async (repoRoot: string): Promise<string> => {
   return out === "" || out === "HEAD" || out.startsWith("vtc/") ? "main" : out;
 };
 
+/**
+ * A git or `gh` failure for the log (`branch.push_failed`, `feature.pr_failed`): redacted before
+ * it is cut to the 2000 characters the payload allows (a marker can be longer than a secret).
+ */
+export const failureDetail = (text: string, secrets: readonly string[]): string =>
+  redactSecrets(text.trim(), secrets).slice(0, 2000) || "no detail";
+
+/**
+ * Merge Level 2 or 3 in a repo without the push remote (spine §5 reading 18): the run drops to
+ * Level 1 (`run.merge_level_changed`, reason `no_remote`) and its merged tasks reach `done` under
+ * the Level-1 rule.
+ */
+export const downgradeNoRemote = (k: Kernel, h: RunHandle): void => {
+  const from = h.state.run.merge_level_effective;
+  if (from < 2) return;
+  k.emit(h, {
+    type: "run.merge_level_changed",
+    actor: "engine",
+    data: { from, to: 1, reason: "no_remote" },
+  });
+  for (const task of [...h.state.tasks.values()]) {
+    if (task.status === "merged") setTaskStatus(k, h, task.id, "done");
+  }
+};
+
 /** Pushes the integration branch and keeps the draft PR current (Level 2, §6.7). */
 const pushFeature = async (
   k: Kernel,
@@ -554,12 +580,7 @@ const pushFeature = async (
   const ws = k.deps.workspace;
   if ((await ws.remoteUrl(k.deps.remote)) === null) {
     await k.serial(h, () => {
-      k.emit(h, {
-        type: "branch.push_skipped",
-        actor: "engine",
-        feature: featureId,
-        data: { branch: feature.integration_branch, detail: `no remote ${k.deps.remote}` },
-      });
+      downgradeNoRemote(k, h);
       return Promise.resolve();
     });
     return;
@@ -572,7 +593,10 @@ const pushFeature = async (
         type: "branch.push_failed",
         actor: "engine",
         feature: featureId,
-        data: { branch: feature.integration_branch, detail: pushed.detail },
+        data: {
+          branch: feature.integration_branch,
+          detail: failureDetail(pushed.detail, k.secrets()),
+        },
       });
       return Promise.resolve();
     });
@@ -596,7 +620,12 @@ const pushFeature = async (
         type: "feature.pr_failed",
         actor: "engine",
         feature: featureId,
-        data: { detail: message(error) },
+        data: {
+          detail: failureDetail(
+            error instanceof Error ? error.message : String(error),
+            k.secrets(),
+          ),
+        },
       });
       return Promise.resolve();
     });

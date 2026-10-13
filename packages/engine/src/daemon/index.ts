@@ -7,7 +7,6 @@
  * it never imports gates (the Gate Runner arrives in `EngineDeps`) and never loads a storage
  * driver (the cli injects `openStorage`).
  */
-import { createHash } from "node:crypto";
 import { existsSync, mkdirSync, readFileSync, statSync } from "node:fs";
 import { dirname, join } from "node:path";
 import {
@@ -18,9 +17,7 @@ import {
   engineWindowsPipe,
   HOST_IDS,
   usageFromStatuslineIngest,
-  type AssetBundle,
   type EngineDeps,
-  type HostId,
   type RunDaemon,
   type RunningDaemon,
   type RunningSnapshot,
@@ -31,11 +28,11 @@ import {
   compiledRoleContracts,
   createReadModel,
   createRoleRegistry,
-  ROLE_CONTRACTS_ASSET,
   Engine,
   INDEX_PATH,
   loadRuns,
   openEventIndex,
+  pluginCatalogFrom,
   removeEngineDiscovery,
   writeEngineDiscovery,
 } from "../core/index.js";
@@ -80,23 +77,6 @@ export const dotenvSecrets = (repoRoot: string): (() => readonly string[]) => {
 /** How often the daemon checks whether it is idle (AD-12 rule 4). */
 export const IDLE_CHECK_MS = 60_000;
 
-/**
- * The prompt version of a compiled agent (§13): the SHA-256 of its file in the host's plugin
- * namespace, or of the agent name when the bundle carries no such file (development).
- */
-export const promptShaFrom =
-  (assets: AssetBundle) =>
-  (agent: string, host: HostId): string => {
-    const namespace = `plugin:${host}` as const;
-    const file = assets
-      .list(namespace)
-      .find((p) => p.split("/").at(-1)?.startsWith(`${agent}.`) === true);
-    const bytes = file === undefined ? undefined : assets.read(namespace, file);
-    return createHash("sha256")
-      .update(bytes ?? Buffer.from(agent))
-      .digest("hex");
-  };
-
 const socketPath = (vtcHome: string, repoRoot: string): string =>
   process.platform === "win32"
     ? engineWindowsPipe(repoRoot)
@@ -133,13 +113,10 @@ export const runDaemon: RunDaemon = async (deps: EngineDeps, options) => {
   };
   try {
     const git = createGitOps({ repoRoot: deps.repoRoot });
-    // The role contracts compiled from `roles/` (AD-14); a broken set stops the start.
-    const compiled = compiledRoleContracts(deps.assets);
-    if (compiled === null) {
-      process.stderr.write(
-        `vtc engine: the plugin assets carry no ${ROLE_CONTRACTS_ASSET}; using the engine's built-in role contracts\n`,
-      );
-    }
+    // The role contracts compiled from `roles/` (AD-14 rule 6), only from the asset bundle: a
+    // missing, broken or incomplete set stops the start. So does a broken plugin manifest.
+    const roles = createRoleRegistry(compiledRoleContracts(deps.assets));
+    const plugins = pluginCatalogFrom(deps.assets);
     const engine = Engine.open({
       repoRoot: deps.repoRoot,
       vtcHome: deps.vtcHome,
@@ -147,16 +124,17 @@ export const runDaemon: RunDaemon = async (deps: EngineDeps, options) => {
       gateRunner: deps.gateRunner,
       git,
       workspace: createWorkspace(deps.repoRoot),
-      pullRequests: createGhPullRequests(deps.repoRoot),
+      pullRequests: deps.pullRequests ?? createGhPullRequests(deps.repoRoot),
       adapters: deps.adapters,
       autoResume: deps.scheduler,
-      roles: createRoleRegistry(compiled ?? []),
+      roles,
+      plugins,
       now,
       random: Math.random,
-      promptSha: promptShaFrom(deps.assets),
       remote: "origin",
     });
     cleanups.push(() => engine.settle());
+    for (const notice of engine.notices) process.stderr.write(`vtc engine: ${notice}\n`);
     if (staleHolder !== undefined) {
       engine.recordIncident(
         "stale_lock",

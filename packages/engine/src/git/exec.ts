@@ -1,17 +1,21 @@
 /**
- * Runs `git` with the user's own installation, configuration and auth (AD-9). Arguments are an
- * argv array, never a shell string. Engine git calls run unattended, so no hook of the repo runs
- * on them (`core.hooksPath` points at an empty location; `--no-verify` alone skips only
- * pre-commit, commit-msg and pre-merge-commit), no fsmonitor daemon is started and no commit or
- * tag is signed (`gpg.program` would be a command taken from the repo's config). The one
- * exception is `push` ({@link GitRunOptions.hooks}): a user's pre-push hook guards what leaves
- * the machine. Filter, merge and diff drivers have names chosen by the config itself, so no
- * `-c` can switch them all off; the repo's config files are fingerprinted instead while a role
- * works in the user's checkout, and a change stops engine git: {@link setGitPreflight} runs before
- * every git command in the repo (status runs clean filters too), the Gate Runner's included.
+ * Runs `git` with the user's own installation, configuration and auth (AD-9), in a clean,
+ * controlled environment (`gitEnv`) with explicit config overrides (spine §5 readings 22 and
+ * 23). Arguments are an argv array, never a shell string. Engine git calls run unattended, so no
+ * hook of the repo runs on them (`core.hooksPath` points at an empty location; `--no-verify`
+ * alone skips only pre-commit, commit-msg and pre-merge-commit), no fsmonitor daemon starts, no
+ * `ext::` transport runs, and no commit or tag is signed unless the project asks for it
+ * (`git.sign_commits`, {@link setGitSigning}: then the user's own signing setup signs). The one
+ * exception to the hook rule is `push` ({@link GitRunOptions.hooks}): a user's pre-push hook
+ * guards what leaves the machine. Filter, merge and diff drivers have names chosen by the config
+ * itself, so no `-c` can switch them all off; the held git configuration is fingerprinted
+ * instead while any role is in flight, and a change stops engine git: {@link setGitPreflight}
+ * runs before every git command in the repo (status runs clean filters too), the Gate Runner's
+ * included.
  */
 import { spawn } from "node:child_process";
 import { sep } from "node:path";
+import { gitEnv } from "./env.js";
 
 export interface GitResult {
   readonly code: number;
@@ -31,7 +35,7 @@ export class GitError extends Error {
 }
 
 export interface GitRunOptions {
-  /** Extra environment variables (merged over the process environment). */
+  /** Extra environment variables (over the clean engine environment). */
   readonly env?: Readonly<Record<string, string>>;
   /** Resolve with the result instead of throwing on a non-zero exit. */
   readonly allowFailure?: boolean;
@@ -41,6 +45,10 @@ export interface GitRunOptions {
 }
 
 const preflights = new Map<string, () => void>();
+const signing = new Map<string, () => boolean>();
+
+const under = (root: string, cwd: string): boolean =>
+  cwd === root || cwd.startsWith(`${root}${sep}`);
 
 /**
  * Registers a check that runs before every git command whose working directory is `root` or
@@ -52,21 +60,32 @@ export const setGitPreflight = (root: string, check: (() => void) | null): void 
   else preflights.set(root, check);
 };
 
-const runPreflights = (cwd: string): void => {
-  for (const [root, check] of preflights) {
-    if (cwd === root || cwd.startsWith(`${root}${sep}`)) check();
-  }
+/**
+ * Whether engine commits and merges under `root` are signed with the user's signing setup
+ * (`project.yaml` `git.sign_commits`, spine §5 reading 22); `null` removes it (never sign).
+ */
+export const setGitSigning = (root: string, sign: (() => boolean) | null): void => {
+  if (sign === null) signing.delete(root);
+  else signing.set(root, sign);
 };
 
-/** `-c` overrides on every engine git call: no hooks, no fsmonitor, no signing program. */
+const runPreflights = (cwd: string): void => {
+  for (const [root, check] of preflights) if (under(root, cwd)) check();
+};
+
+const signs = (cwd: string): boolean => {
+  for (const [root, sign] of signing) if (under(root, cwd)) return sign();
+  return false;
+};
+
+/** `-c` overrides on every engine git call (see the module doc). */
 const NO_HOOKS = ["-c", `core.hooksPath=${process.platform === "win32" ? "NUL" : "/dev/null"}`];
-const ALWAYS = [
+const ALWAYS = ["-c", "core.fsmonitor=false", "-c", "protocol.ext.allow=never"];
+const signingArgs = (sign: boolean): string[] => [
   "-c",
-  "core.fsmonitor=false",
+  `commit.gpgsign=${String(sign)}`,
   "-c",
-  "commit.gpgsign=false",
-  "-c",
-  "tag.gpgsign=false",
+  `tag.gpgsign=${String(sign)}`,
 ];
 
 const DEFAULT_TIMEOUT_MS = 120_000;
@@ -78,17 +97,11 @@ export const runGit = (
 ): Promise<GitResult> =>
   new Promise((resolve, reject) => {
     runPreflights(cwd);
-    const child = spawn("git", [...(options.hooks === true ? [] : NO_HOOKS), ...ALWAYS, ...args], {
-      cwd,
-      env: {
-        ...process.env,
-        // Never prompt (credentials, editors): the engine runs unattended.
-        GIT_TERMINAL_PROMPT: "0",
-        GIT_EDITOR: "true",
-        ...options.env,
-      },
-      stdio: ["ignore", "pipe", "pipe"],
-    });
+    const child = spawn(
+      "git",
+      [...(options.hooks === true ? [] : NO_HOOKS), ...ALWAYS, ...signingArgs(signs(cwd)), ...args],
+      { cwd, env: gitEnv(options.env), stdio: ["ignore", "pipe", "pipe"] },
+    );
     const out: Buffer[] = [];
     const err: Buffer[] = [];
     let settled = false;
