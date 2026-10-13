@@ -1,9 +1,10 @@
 /**
  * `pnpm verify:scope <team> [--base <ref>]` (AD-15): fails when the current branch changes any
  * file its team does not own. The orchestrator runs it on every team branch before the merge
- * gate (AD-10 rule 6). Changes outside the team's globs go to the owner as a proposal.
+ * gate (AD-10 rule 6). Changes outside the team's globs go to the owner as a proposal; files the
+ * map marks `regenerated` (the lockfile) may change on any team branch (AD-15 rule 2).
  */
-import { changedFiles, loadOwnership, teamOwns } from "./ownership.ts";
+import { changedFiles, loadOwnership, scopeViolations } from "./ownership.ts";
 
 const args = process.argv.slice(2);
 const team = args.find((a) => !a.startsWith("--") && args[args.indexOf(a) - 1] !== "--base");
@@ -17,8 +18,7 @@ if (team === undefined || base === undefined || map.teams[team] === undefined) {
   );
   process.exit(64);
 }
-const globs = map.teams[team] ?? [];
-const outside = changedFiles(base).filter((path) => !teamOwns(globs, path));
+const outside = scopeViolations(map, team, changedFiles(base));
 if (outside.length > 0) {
   console.error(`verify:scope: ${team} changed ${String(outside.length)} file(s) it does not own:`);
   for (const path of outside) console.error(`  ${path}`);

@@ -15,6 +15,7 @@ import {
   HostIdSchema,
   IsoDateTimeSchema,
   RelPathSchema,
+  RiskRuleReasonRuleSchema,
   SessionRefSchema,
   Sha256HexSchema,
   SlugSchema,
@@ -30,7 +31,13 @@ import {
   IntakeClassificationSchema,
   PhaseSchema,
 } from "./run.js";
-import { ParkReasonSchema, TaskSchema, TaskStatusSchema } from "./task.js";
+import {
+  checkParkRiskRule,
+  IntentContractSchema,
+  ParkReasonSchema,
+  TaskSchema,
+  TaskStatusSchema,
+} from "./task.js";
 import { UsageSnapshotSchema, UsageWindowKindSchema } from "./usage.js";
 
 /** Why the engine rejected a submitted result (§4.2 step 4, §6.3 step 4). */
@@ -66,7 +73,11 @@ export const IncidentKindSchema = z.enum([
 export type IncidentKind = z.infer<typeof IncidentKindSchema>;
 
 const parkedConsistency = (
-  value: { to: string; park_reason?: unknown },
+  value: {
+    to: string;
+    park_reason?: z.infer<typeof ParkReasonSchema> | undefined;
+    risk_rule?: unknown;
+  },
   ctx: z.RefinementCtx,
 ): void => {
   if ((value.to === "parked") !== (value.park_reason !== undefined)) {
@@ -76,27 +87,37 @@ const parkedConsistency = (
       message: "park_reason is required for, and only allowed with, to = parked",
     });
   }
+  checkParkRiskRule(value, ctx);
 };
 
 /**
  * Payload schema per core event type. Keys are the frozen core vocabulary.
  *
  * Replay (AD-7) derives every engine-owned record field from these events and nothing else:
- * - Run: `run.started` (classification, `merge_level_effective` seed, config hash),
+ * - Run: `run.started` (the request, classification, `merge_level_effective` seed, config hash),
  *   `run.phase_changed`, `run.paused`/`run.resumed`, `run.finished`, `gate.approved`/
  *   `gate.rejected` (G1/G2 state), `run.merge_level_changed`;
- * - Task: `task.created` (Planner fields incl. `risk_tags`, cap, budget), `task.status_changed`
- *   (status, round, park reason), `task.workspace_assigned` (worktree, branch, baseline),
+ * - Task: `task.created` (Planner fields incl. `risk_tags`, cap, budget, origin, and the
+ *   immutable intent contract), `task.status_changed` (status, round, park reason and rule),
+ *   `task.workspace_assigned` (worktree, branch, baseline),
  *   `task.session_updated` (`session_ref`), `contract.frozen` (`provides_contract.frozen_sha256`),
  *   `budget.updated` scope task (`spent_usd`), `finding.recorded` route `defer` (`deferred`);
- * - Feature: `feature.created`, `feature.status_changed`, `feature.pr_updated`, `budget.updated`
- *   scope feature;
+ * - Feature: `feature.created`, `feature.task_added` (appends to `tasks`),
+ *   `feature.status_changed`, `feature.pr_updated` (incl. the Level-3 merge into main),
+ *   `branch.pushed` (Level-2 `done`), `budget.updated` scope feature;
  * - Frozen artifacts: `gate.approved`, then `change_request.decided` (re-freeze) and
  *   `spec.clarified` (wording-only, no CR, §6.2).
  * `role.submitted.session_ref` is a trace of that run only; it never sets `Task.session_ref`.
  */
 export const EVENT_PAYLOAD_SCHEMAS = {
   "run.started": IntakeClassificationSchema.extend({
+    /**
+     * The idea or change request as the Lead passed it to `start` (redacted by the append path,
+     * AD-7 rule 12). The only record of the run's input: DISCOVER and SPECIFY read it through the
+     * engine's projection `runRequestPath(run)` (pack input type `request`), and the feature title
+     * is its first line (`FeatureSchema`).
+     */
+    request: z.string().min(1).max(20000),
     merge_level: MergeLevelSchema,
     pipeline_config_hash: Sha256HexSchema,
   }),
@@ -129,7 +150,17 @@ export const EVENT_PAYLOAD_SCHEMAS = {
     gates: z.array(HumanGateIdSchema).min(1).max(2),
     note: z.string().max(4000).optional(),
   }),
-  "task.created": z.strictObject({ task: TaskSchema }),
+  /**
+   * `intent` is the Planner's `TaskDraft.intent`, recorded once (AD-7 rule 8): the immutable
+   * `<intent-contract>` block of the plan file and every task pack are rebuilt from it. Absent for
+   * engine-created tasks (`origin` other than `planner`), whose pack carries the source finding.
+   */
+  "task.created": z
+    .strictObject({ task: TaskSchema, intent: IntentContractSchema.optional() })
+    .refine((v) => (v.task.origin === "planner") === (v.intent !== undefined), {
+      message: "intent is required for, and only allowed on, Planner tasks",
+      path: ["intent"],
+    }),
   /** The task's worktree and branch exist (§6.6); baseline = the base it builds on. */
   "task.workspace_assigned": z.strictObject({
     worktree: RelPathSchema,
@@ -147,19 +178,39 @@ export const EVENT_PAYLOAD_SCHEMAS = {
       round: z.int().nonnegative(),
       cap: z.int().min(3).max(5),
       park_reason: ParkReasonSchema.optional(),
+      risk_rule: RiskRuleReasonRuleSchema.optional(),
     })
     .superRefine(parkedConsistency),
   "feature.created": z.strictObject({ feature: FeatureSchema }),
+  /**
+   * The engine added a task to the feature after PLAN: an integration-fix or out-of-scope task
+   * (`Task.origin`, §6.3 step 3, §6.7a). Its `task.created` comes first; Final Review re-runs
+   * once it merges.
+   */
+  "feature.task_added": z.strictObject({ task: TaskIdSchema }),
   "feature.status_changed": z
     .strictObject({
       from: FeatureStatusSchema,
       to: FeatureStatusSchema,
       round: z.int().nonnegative(),
       park_reason: ParkReasonSchema.optional(),
+      risk_rule: RiskRuleReasonRuleSchema.optional(),
     })
     .superRefine(parkedConsistency),
-  /** The feature's PR was opened or changed state (Level 2 draft → ready, §6.7). */
+  /**
+   * The feature's PR was opened or changed: draft → ready after Final Review (Level 2), CI
+   * status, and `state: merged` for the Level-3 merge into main (§6.7).
+   */
   "feature.pr_updated": z.strictObject({ pr: PullRequestRefSchema }),
+  /**
+   * The engine pushed the feature's integration branch (Level 2+, §6.7). A merged task is `done`
+   * at Level 2 once a push includes its merge commit and the feature's PR is open (§6.4); a
+   * failed push leaves it `merged`.
+   */
+  "branch.pushed": z.strictObject({
+    branch: z.string().regex(/^vtc\/F-[1-9]\d*$/, "expected integration branch vtc/F-n"),
+    commit: GitShaSchema,
+  }),
   "role.dispatched": z.strictObject({
     action_id: SlugSchema,
     mode: SlugSchema.optional(),
@@ -171,18 +222,31 @@ export const EVENT_PAYLOAD_SCHEMAS = {
     pack: RelPathSchema,
     resume: SessionRefSchema.nullable(),
   }),
-  "role.submitted": z.strictObject({
-    action_id: SlugSchema,
-    exit: RoleExitSchema,
-    /** Each verdict's subject and value; the cited evidence stays in the evidence files. */
-    verdicts: z
-      .array(z.strictObject({ subject: VerdictSubjectSchema, verdict: VerdictSchema }))
-      .default([]),
-    findings: z.int().nonnegative(),
-    questions: z.int().nonnegative(),
-    artifacts: z.array(ArtifactRefSchema).default([]),
-    session_ref: SessionRefSchema.nullable(),
-  }),
+  "role.submitted": z
+    .strictObject({
+      action_id: SlugSchema,
+      exit: RoleExitSchema,
+      /** Each verdict's subject and value; the cited evidence stays in the evidence files. */
+      verdicts: z
+        .array(z.strictObject({ subject: VerdictSubjectSchema, verdict: VerdictSchema }))
+        .default([]),
+      findings: z.int().nonnegative(),
+      questions: z.int().nonnegative(),
+      artifacts: z.array(ArtifactRefSchema).default([]),
+      session_ref: SessionRefSchema.nullable(),
+      /**
+       * The commit the result refers to (§6.3 steps 4–5). On submit of a role that wrote to the
+       * task worktree (Engineer family, QA author) the engine commits the worktree onto the task
+       * branch itself (roles never need to commit) and records the commit here; the write-scope
+       * check and the gates run on `base..head`, and stuck detection compares heads' trees.
+       * Required for `built`.
+       */
+      head: GitShaSchema.optional(),
+    })
+    .refine((v) => v.exit !== "built" || v.head !== undefined, {
+      message: "a built result names the commit it built (head)",
+      path: ["head"],
+    }),
   "role.rejected": z.strictObject({
     action_id: SlugSchema,
     reason: RejectReasonSchema,
@@ -258,6 +322,10 @@ export const EVENT_PAYLOAD_SCHEMAS = {
     pending_action_ids: z.array(SlugSchema).default([]),
     auto_resume_at: IsoDateTimeSchema.nullable(),
   }),
+  /**
+   * The merge queue merged a task into the feature's integration branch (§6.7). The Level-3 merge
+   * of the feature PR into main has no task and is a `feature.pr_updated` with `state: merged`.
+   */
   "merge.completed": z.strictObject({
     into: z.string().min(1).max(255),
     commit: GitShaSchema,
@@ -296,8 +364,10 @@ export const EVENT_ENVELOPE_REQUIREMENTS: Readonly<
   "task.session_updated": ["task"],
   "contract.frozen": ["task"],
   "feature.created": ["feature"],
+  "feature.task_added": ["feature"],
   "feature.status_changed": ["feature"],
   "feature.pr_updated": ["feature"],
+  "branch.pushed": ["feature"],
   "role.dispatched": ["role", "prompt_sha", "host", "model"],
   "role.submitted": ["role", "prompt_sha", "host", "model", "tokens", "cost_usd"],
   "role.rejected": ["role"],

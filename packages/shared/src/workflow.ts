@@ -5,12 +5,13 @@
 import { z } from "zod";
 import {
   ArtifactTypeSchema,
+  RiskRuleReasonRuleSchema,
   RoleIdSchema,
   SlugSchema,
   TaskIdSchema,
   TokenUsageSchema,
 } from "./primitives.js";
-import { ParkReasonSchema } from "./task.js";
+import { checkParkRiskRule, ParkReasonSchema } from "./task.js";
 
 export const WorkflowNodeKindSchema = z.enum([
   "role",
@@ -27,7 +28,15 @@ export type WorkflowNodeKind = z.infer<typeof WorkflowNodeKindSchema>;
 
 /**
  * Node display states (§17). `looping` carries round/cap; `interrupted` = stopped by a usage
- * limit, waiting for the auto-resume (§6.8, §6.9).
+ * limit, waiting for the auto-resume (§6.8, §6.9). `skipped` = the node did not run and was not
+ * needed (a reviewer on a trivial diff, §6.3 step 7; a gate whose `GateStatus` is `skipped`);
+ * `dropped` = a task the human dropped (§6.5). Neither is ever shown as `passed` or `done`.
+ *
+ * Task nodes map from `TaskStatus`: draft/ready/waiting_dependency → waiting;
+ * tests_authored/building/verifying → running; fixing → looping; built/queued/merged → passed;
+ * done → done; parked → parked; interrupted → interrupted; dropped → dropped. Gate nodes map from
+ * `GateStatus`: pass → passed, fail/error → looping (or parked when the task parked),
+ * skipped → skipped.
  */
 export const WorkflowNodeStateSchema = z.enum([
   "waiting",
@@ -37,6 +46,8 @@ export const WorkflowNodeStateSchema = z.enum([
   "parked",
   "interrupted",
   "done",
+  "skipped",
+  "dropped",
 ]);
 export type WorkflowNodeState = z.infer<typeof WorkflowNodeStateSchema>;
 
@@ -59,6 +70,8 @@ export const WorkflowNodeSchema = z
     round: z.int().nonnegative().optional(),
     cap: z.int().positive().optional(),
     park_reason: ParkReasonSchema.optional(),
+    /** The §7.6 rule 1–9 that parked the node; only with `park_reason: risk_rule`. */
+    risk_rule: RiskRuleReasonRuleSchema.optional(),
     tokens: TokenUsageSchema.optional(),
     /** For `subflow` nodes: the id of the nested graph. */
     subflow: SlugSchema.optional(),
@@ -88,6 +101,7 @@ export const WorkflowNodeSchema = z
         message: "parked nodes need a reason",
       });
     }
+    checkParkRiskRule(node, ctx);
   });
 export type WorkflowNode = z.infer<typeof WorkflowNodeSchema>;
 

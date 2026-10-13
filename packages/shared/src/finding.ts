@@ -99,6 +99,36 @@ export const FindingDraftSchema = z.strictObject({
 });
 export type FindingDraft = z.infer<typeof FindingDraftSchema>;
 
+/** SARIF 2.1.0 `result.level`, carried raw so triage can normalise it (`normalizeSeverity`). */
+export const SarifLevelSchema = z.enum(["error", "warning", "note", "none"]);
+
+/**
+ * One new (non-baseline) violation a tool reported, as the Gate Runner extracts it from a
+ * scanner or linter report (SARIF, JSON, text; AD-13 rule 9: the Gate Runner owns every report
+ * parser). It carries the tool's raw severity signals, never a normalised severity: engine-core
+ * triage turns each into a {@link Finding} (`fingerprintFinding`, `normalizeSeverity` with
+ * `source: "tool"`, `routeForFinding`, dedupe), exactly as for role findings (§6.3 step 8).
+ */
+export const ToolFindingSchema = z.strictObject({
+  /** Tool name, e.g. `opengrep`, `gitleaks`, `osv-scanner`, `eslint`. Becomes `source_name`. */
+  tool: z.string().min(1).max(100),
+  rule_id: z.string().min(1).max(200),
+  category: FindingCategorySchema,
+  title: z.string().min(1).max(200),
+  message: z.string().max(4000).optional(),
+  location: LocationSchema,
+  /** Points into the redacted report, e.g. `sarif` `report-path#result-index`. */
+  evidence: EvidenceSchema,
+  /** Code the finding is about, redacted; whitespace-normalised into the fingerprint. */
+  snippet: z.string().max(4000).optional(),
+  cwe: CweIdSchema.optional(),
+  /** Raw severity inputs, in `normalizeSeverity` precedence: score, then label, then level. */
+  score: z.number().min(0).max(10).optional(),
+  label: z.string().min(1).max(50).optional(),
+  sarif_level: SarifLevelSchema.optional(),
+});
+export type ToolFinding = z.infer<typeof ToolFindingSchema>;
+
 export const WaiverSchema = z.strictObject({
   by: z.literal("human"),
   reason: z.string().min(1).max(2000),
@@ -128,10 +158,17 @@ export const FindingSchema = z
     snippet: z.string().max(4000).optional(),
     cwe: CweIdSchema.optional(),
     route: FindingRouteSchema,
-    /** For `out_of_scope`: the task that owns the cited location; absent = open an integration-fix task. */
+    /**
+     * For `out_of_scope`: the task that owns the cited location; absent = the engine opens an
+     * integration-fix task (`Task.origin`, `source_finding` = this fingerprint).
+     */
     owner_task: TaskIdSchema.optional(),
     task: TaskIdSchema.optional(),
     feature: FeatureIdSchema.optional(),
+    /**
+     * Round the finding was first seen in: the task's round (`Task.round`) for task findings, the
+     * feature's Final Review round (`Feature.round`) for feature findings without a task (§6.7a).
+     */
     round_first_seen: z.int().positive(),
     round_last_seen: z.int().positive().optional(),
     status: FindingStatusSchema,

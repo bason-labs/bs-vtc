@@ -4,6 +4,7 @@
     "id": "T-1",
     "title": "Reset token store",
     "feature": "F-1",
+    "origin": "planner",
     "covers": ["REQ-1"],
     "after": [],
     "files_scope": ["src/t-1/**"],
@@ -61,7 +62,10 @@
           "tests": {
             "executed": 48,
             "skipped": 0,
-            "failed": 0
+            "failed": 0,
+            "inventory": ".vtc/evidence/T-1/round-1/tests.json",
+            "line_coverage_pct": 84.2,
+            "diff_coverage_pct": 96.5
           },
           "report": {
             "format": "junit",
@@ -73,7 +77,8 @@
       ],
       "verdict": "pass",
       "started_at": "2026-10-13T09:18:00.000Z",
-      "finished_at": "2026-10-13T09:19:00.000Z"
+      "finished_at": "2026-10-13T09:19:00.000Z",
+      "traceability": ".vtc/evidence/T-1/traceability.json"
     }
   ],
   "escalations": [],

@@ -91,6 +91,7 @@ describe("structured-output target (hosts' --output-schema / --json-schema)", ()
       conflict: null,
       fault: null,
       tasks: null,
+      acceptance_tests: null,
       feature: null,
     };
     const parsed = fromStructuredOutput("RoleResult", hostOutput);

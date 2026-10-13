@@ -20,6 +20,7 @@ import {
   validFinding,
   validGateReport,
   validTask,
+  validTaskDraft,
 } from "./fixtures.js";
 import { expectInvalid, expectValid } from "./helpers.js";
 
@@ -30,6 +31,7 @@ const trace = { prompt_sha: SHA, host: "claude-code", model: "claude-sonnet-5" }
 const examples: { [T in CoreEventType]: { data: EventDataInput<T>; envelope?: object } } = {
   "run.started": {
     data: {
+      request: "Password reset\n\nUsers who forget their password reset it by email.",
       track: "feature",
       repo: "existing",
       has_ui: true,
@@ -47,7 +49,10 @@ const examples: { [T in CoreEventType]: { data: EventDataInput<T>; envelope?: ob
     data: { gates: ["G1"], frozen: [{ path: ".vtc/spec/spec.md", sha256: SHA }] },
   },
   "gate.rejected": { data: { gates: ["G2"], note: "Pick a cheaper datastore." } },
-  "task.created": { data: { task: validTask() }, envelope: { task: "T-7" } },
+  "task.created": {
+    data: { task: validTask(), intent: validTaskDraft().intent },
+    envelope: { task: "T-7" },
+  },
   "task.workspace_assigned": {
     data: { worktree: ".vtc/state/worktrees/T-7", branch: "vtc/T-7", baseline_revision: COMMIT },
     envelope: { task: "T-7" },
@@ -65,14 +70,24 @@ const examples: { [T in CoreEventType]: { data: EventDataInput<T>; envelope?: ob
     envelope: { task: "T-7" },
   },
   "feature.created": { data: { feature: validFeature() as never }, envelope: { feature: "F-1" } },
+  "feature.task_added": { data: { task: "T-9" }, envelope: { feature: "F-1" } },
   "feature.status_changed": {
     data: { from: "integrating", to: "final_review", round: 0 },
     envelope: { feature: "F-1" },
   },
   "feature.pr_updated": {
-    data: { pr: { url: "https://github.com/acme/app/pull/12", draft: false } },
+    data: {
+      pr: {
+        url: "https://github.com/acme/app/pull/12",
+        draft: false,
+        state: "open",
+        head_sha: COMMIT,
+        ci: "green",
+      },
+    },
     envelope: { feature: "F-1" },
   },
+  "branch.pushed": { data: { branch: "vtc/F-1", commit: COMMIT }, envelope: { feature: "F-1" } },
   "role.dispatched": {
     data: {
       action_id: "a-1",
@@ -199,6 +214,7 @@ describe("EVENT_PAYLOAD_SCHEMAS", () => {
   /** At least one invalid payload per core event type (AD-3, AD-11). */
   const invalid: readonly (readonly [CoreEventType, object, string])[] = [
     ["run.started", { ...examples["run.started"].data, merge_level: 4 }, "data.merge_level"],
+    ["run.started", { ...examples["run.started"].data, request: "" }, "data.request"],
     ["run.phase_changed", { from: null, to: "deploy" }, "data.to"],
     ["run.paused", { reason: "" }, "data.reason"],
     ["run.resumed", { auto: "yes" }, "data.auto"],
@@ -207,9 +223,23 @@ describe("EVENT_PAYLOAD_SCHEMAS", () => {
     ["gate.approved", { gates: ["G1"], frozen: [] }, "data.frozen"],
     ["gate.rejected", { gates: ["G3"] }, "data.gates.0"],
     ["task.created", { task: { ...validTask(), cap: 9 } }, "data.task.cap"],
+    ["task.created", { task: validTask() }, "data.intent"],
+    [
+      "task.created",
+      {
+        task: { ...validTask(), origin: "integration_fix", source_finding: SHA },
+        intent: validTaskDraft().intent,
+      },
+      "data.intent",
+    ],
     ["task.status_changed", { from: "fixing", to: "parked", round: 5, cap: 5 }, "data.park_reason"],
     ["task.status_changed", { from: "fixing", to: "built", round: 1, cap: 9 }, "data.cap"],
     ["task.status_changed", { from: "fixing", to: "shipped", round: 1, cap: 3 }, "data.to"],
+    [
+      "task.status_changed",
+      { from: "verifying", to: "parked", round: 1, cap: 4, park_reason: "risk_rule" },
+      "data.risk_rule",
+    ],
     [
       "task.workspace_assigned",
       { worktree: "/abs/T-7", branch: "vtc/T-7", baseline_revision: COMMIT },
@@ -218,11 +248,23 @@ describe("EVENT_PAYLOAD_SCHEMAS", () => {
     ["task.session_updated", { session_ref: { host: "cursor", id: "s" } }, "data.session_ref.host"],
     ["contract.frozen", { path: "contracts/auth.yaml", sha256: "abc" }, "data.sha256"],
     ["feature.created", { feature: { ...validFeature(), tasks: [] } }, "data.feature.tasks"],
+    ["feature.task_added", { task: "F-1" }, "data.task"],
     ["feature.status_changed", { from: "building", to: "merged", round: 0 }, "data.to"],
-    ["feature.pr_updated", { pr: { url: "nope", draft: true } }, "data.pr.url"],
+    [
+      "feature.status_changed",
+      { from: "final_review", to: "parked", round: 1, park_reason: "cap", risk_rule: "large_diff" },
+      "data.risk_rule",
+    ],
+    [
+      "feature.pr_updated",
+      { pr: { url: "nope", draft: true, state: "open", head_sha: COMMIT, ci: "unknown" } },
+      "data.pr.url",
+    ],
+    ["branch.pushed", { branch: "main", commit: COMMIT }, "data.branch"],
     ["role.dispatched", { ...examples["role.dispatched"].data, dispatch: "cron" }, "data.dispatch"],
     ["role.dispatched", { ...examples["role.dispatched"].data, subject: "AC-2" }, "data.subject"],
     ["role.submitted", { ...examples["role.submitted"].data, findings: -1 }, "data.findings"],
+    ["role.submitted", { ...examples["role.submitted"].data, exit: "built" }, "data.head"],
     [
       "role.submitted",
       { ...examples["role.submitted"].data, verdicts: [{ subject: "T-7", verdict: "PASS" }] },
@@ -277,6 +319,10 @@ describe("EVENT_PAYLOAD_SCHEMAS", () => {
     expectInvalid(EventSchema, noRole, "role");
     const { feature: _f, ...noFeature } = event("feature.created") as Record<string, unknown>;
     expectInvalid(EventSchema, noFeature, "feature");
+    for (const type of ["feature.task_added", "branch.pushed"] as const) {
+      const { feature: _g, ...rest } = event(type) as Record<string, unknown>;
+      expectInvalid(EventSchema, rest, "feature");
+    }
   });
   it("requires the trace fields of role runs (§1.1 #3): prompt version, host, model, spend", () => {
     for (const field of ["prompt_sha", "host", "model"]) {
@@ -291,6 +337,10 @@ describe("EVENT_PAYLOAD_SCHEMAS", () => {
     }
     // null spend is allowed (unknown or unpriced), absence is not
     expectValid(EventSchema, event("role.submitted"));
+  });
+  it("a built result records the snapshot commit it refers to (§6.3 steps 4–5)", () => {
+    const built = { ...examples["role.submitted"].data, exit: "built", head: COMMIT };
+    expect(validateEventData("role.submitted", built).ok).toBe(true);
   });
   it("leaves unknown event types open", () => {
     expect(validateEventData("research.cached", { anything: [1, 2] })).toEqual({

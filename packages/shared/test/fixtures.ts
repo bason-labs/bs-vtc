@@ -18,7 +18,7 @@ export const validTask = (): TaskInput => ({
   title: "Add password reset endpoint",
   feature: "F-1",
   covers: ["REQ-3", "SEC-1"],
-  after: ["T-2"],
+  after: ["T-3"],
   files_scope: ["src/auth/reset/**", "test/auth/reset.test.ts"],
   discipline: "backend",
   stack_packs: ["node-nest", "postgres"],
@@ -49,7 +49,13 @@ export const validFeature = () => ({
   budget_usd: 20,
   final_review_budget_usd: 3,
   spent_usd: 4,
-  pr: { url: "https://github.com/acme/app/pull/12", draft: true },
+  pr: {
+    url: "https://github.com/acme/app/pull/12",
+    draft: true,
+    state: "open",
+    head_sha: COMMIT,
+    ci: "pending",
+  },
 });
 
 export const validFindingDraft = () => ({
@@ -116,6 +122,7 @@ export const validEvent = (): VtcEventInput => ({
     findings: 0,
     questions: 0,
     session_ref: { host: "codex", id: "sess-9" },
+    head: COMMIT,
   },
   prompt_sha: SHA,
   host: "codex",
@@ -165,6 +172,7 @@ export const validGatesConfig = (): GatesConfigInput => ({
   version: 1,
   baseline: { revision: COMMIT, calibrated_at: NOW, confirmed: true, flaky_tests: ["t1"] },
   sources: ["task_runner", "ci"],
+  tests: { acceptance_globs: ["test/acceptance/**"], protected_configs: ["vitest.config.ts"] },
   gates: [
     {
       id: "install",
@@ -194,7 +202,14 @@ export const validGateResult = () => ({
   blocking: true,
   new_violations: 2,
   baseline_violations: 1,
-  tests: { executed: 120, skipped: 3, failed: 2 },
+  tests: {
+    executed: 120,
+    skipped: 3,
+    failed: 2,
+    inventory: ".vtc/evidence/T-7/round-2/tests.json",
+    line_coverage_pct: 81.5,
+    diff_coverage_pct: 92,
+  },
   report: { format: "junit", path: ".vtc/evidence/T-7/round-2/junit.xml" },
   failure_class: "product",
   evidence: [{ type: "junit", ref: ".vtc/evidence/T-7/round-2/junit.xml#reset-expiry" }],
@@ -229,7 +244,6 @@ export const validGateReport = () => ({
 export const validTaskDraft = () => ({
   id: "T-7",
   title: "Add password reset endpoint",
-  feature: "F-1",
   covers: ["REQ-3", "SEC-1"],
   after: ["T-2"],
   files_scope: ["src/auth/reset/**"],

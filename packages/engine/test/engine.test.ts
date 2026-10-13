@@ -2,6 +2,7 @@ import { describe, expect, expectTypeOf, it } from "vitest";
 import {
   CONTRACTS_VERSION,
   type CreateGateRunner,
+  type CreateGitOps,
   type RunDaemon,
   type ServeSnapshot,
 } from "@vtc/shared";
@@ -23,10 +24,11 @@ describe("@vtc/engine smoke", () => {
       expect.arrayContaining(["next", "submit", "status", "escalations", "answer"]),
     );
   });
-  it("implements the frozen composition seam (AD-19)", () => {
+  it("implements the frozen composition and git seams (AD-19, AD-13 rule 4)", () => {
     expectTypeOf(engine.runDaemon).toEqualTypeOf<RunDaemon>();
     expectTypeOf(engine.serveSnapshot).toEqualTypeOf<ServeSnapshot>();
     expectTypeOf(engine.gates.createGateRunner).toEqualTypeOf<CreateGateRunner>();
+    expectTypeOf(engine.git.createGitOps).toEqualTypeOf<CreateGitOps>();
   });
   it("re-exports each module under its own namespace, so names cannot collide (AD-15)", () => {
     expect(

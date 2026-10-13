@@ -6,6 +6,9 @@ claude-session-*.zip
 # build + tooling output
 node_modules/
 dist/
+# Next.js build cache and static export (apps/dashboard/out, AD-20)
+.next/
+out/
 # planted build output that proves AD1-no-imports-of-build-output fires
 !tooling/arch-tests/fixtures/repo/packages/engine/dist/
 .turbo/

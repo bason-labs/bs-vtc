@@ -4,11 +4,18 @@
  */
 import type { GateReport, GateRunRequest, WriteScopeReport } from "../gate-result.js";
 import type { Glob, GitSha, RelPath, Sha256Hex } from "../primitives.js";
+import type { GitOps } from "./git.js";
 
+/**
+ * The check runs on commits, never on an uncommitted worktree: on submit, engine core commits the
+ * worktree onto the task branch (`role.submitted.head`) and asks for `base..head`.
+ */
 export interface WriteScopeCheckRequest {
   /** Repo-relative worktree of the task (under `.vtc/state/`). */
   readonly worktree: RelPath;
   readonly base: GitSha;
+  /** The submit snapshot commit (`role.submitted.head`). */
+  readonly head: GitSha;
   readonly filesScope: readonly Glob[];
   /** Protected files and the checksums they must still have (§7.3). */
   readonly protected: readonly { readonly path: RelPath; readonly sha256: Sha256Hex }[];
@@ -31,8 +38,13 @@ export interface GateRunner {
 export interface GateRunnerDeps {
   /** Absolute repo root. */
   readonly repoRoot: string;
-  /** Absolute VTC home: pinned scanner store, hidden tests (`HIDDEN_TESTS`). */
+  /**
+   * Absolute VTC home: pinned scanner store, hidden tests (`HIDDEN_TESTS`), the gate allowlist
+   * (`gateAllowlistFile`).
+   */
   readonly vtcHome: string;
+  /** Diffs, base-commit file reads and clean checkouts (AD-13 rule 4), built by `git.createGitOps`. */
+  readonly git: GitOps;
   readonly now?: () => Date;
 }
 

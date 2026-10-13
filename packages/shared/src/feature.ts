@@ -1,7 +1,12 @@
 /** Feature state (§6.7a Final Review on the integrated branch). */
 import { z } from "zod";
-import { FeatureIdSchema, TaskIdSchema } from "./primitives.js";
-import { ParkReasonSchema } from "./task.js";
+import {
+  FeatureIdSchema,
+  GitShaSchema,
+  RiskRuleReasonRuleSchema,
+  TaskIdSchema,
+} from "./primitives.js";
+import { checkParkRiskRule, ParkReasonSchema } from "./task.js";
 
 /** `building → integrating → final_review ⇄ fixing(n/3) → ready_to_ship → shipped`, side state `parked`. */
 export const FeatureStatusSchema = z.enum([
@@ -20,21 +25,59 @@ export const FINAL_REVIEW_CAP = 3;
 /** Default Final Review budget line: 15% of the feature's total budget (§6.7a). */
 export const DEFAULT_FINAL_REVIEW_SHARE = 0.15;
 
-export const PullRequestRefSchema = z.strictObject({
-  url: z.url(),
-  /** Level 2 keeps the PR a draft until Final Review passes (§6.7). */
-  draft: z.boolean(),
-});
+/** Remote CI on the PR head (§6.7 Level-3 checklist item 7). `unknown` = no CI status reported. */
+export const PullRequestCiSchema = z.enum(["pending", "green", "red", "unknown"]);
+export type PullRequestCi = z.infer<typeof PullRequestCiSchema>;
+
+/**
+ * The feature's PR as the engine last observed it (`feature.pr_updated`, through the user's own
+ * `gh` auth). `state: merged` with `merge_commit` is the Level-3 merge into main (§6.7): it has no
+ * task, so it is recorded here and not as `merge.completed`.
+ */
+export const PullRequestRefSchema = z
+  .strictObject({
+    url: z.url(),
+    /** Level 2 keeps the PR a draft until Final Review passes (§6.7). */
+    draft: z.boolean(),
+    state: z.enum(["open", "merged", "closed"]),
+    /** The PR's head commit (the pushed integration branch). */
+    head_sha: GitShaSchema,
+    ci: PullRequestCiSchema,
+    /** The commit on main, once merged. */
+    merge_commit: GitShaSchema.optional(),
+  })
+  .refine((pr) => (pr.state === "merged") === (pr.merge_commit !== undefined), {
+    message: "merge_commit is required for, and only allowed with, state merged",
+    path: ["merge_commit"],
+  });
 export type PullRequestRef = z.infer<typeof PullRequestRefSchema>;
 
+/** The integration branch of a feature: `vtc/F-n` (§6.7). */
+export const integrationBranchFor = (feature: string): string =>
+  `vtc/${FeatureIdSchema.parse(feature)}`;
+
+/**
+ * One feature per run (§6.7a): the engine creates it at PLAN, right after the Planner's tasks
+ * (`feature.created` lists them; each task already names it), with id = the next free `F-n` in
+ * the repo, `title` = the first non-empty line of the run's request (`run.started.request`,
+ * trimmed, cut to 200 characters), `integration_branch` = `vtc/F-n`,
+ * `budget_usd` = the sum of its tasks' budgets and `final_review_budget_usd` =
+ * `budgets.final_review_share` × `budget_usd`. Tasks the engine adds later (integration fixes)
+ * join through `feature.task_added`.
+ */
 export const FeatureSchema = z
   .strictObject({
     id: FeatureIdSchema,
     title: z.string().min(1).max(200),
     status: FeatureStatusSchema,
     park_reason: ParkReasonSchema.optional(),
+    /** The §7.6 rule 1–9 that parked the feature; only with `park_reason: risk_rule`. */
+    risk_rule: RiskRuleReasonRuleSchema.optional(),
     tasks: z.array(TaskIdSchema).min(1),
-    integration_branch: z.string().min(1).max(255),
+    integration_branch: z
+      .string()
+      .regex(/^vtc\/F-[1-9]\d*$/, "expected integration branch vtc/F-n"),
+    /** Final Review fix rounds (§6.7a), capped at {@link FINAL_REVIEW_CAP}. */
     round: z.int().min(0).max(FINAL_REVIEW_CAP).default(0),
     budget_usd: z.number().positive(),
     final_review_budget_usd: z.number().nonnegative(),
@@ -42,6 +85,14 @@ export const FeatureSchema = z
     pr: PullRequestRefSchema.optional(),
   })
   .superRefine((feature, ctx) => {
+    if (feature.integration_branch !== `vtc/${feature.id}`) {
+      ctx.addIssue({
+        code: "custom",
+        path: ["integration_branch"],
+        message: `integration_branch must be vtc/${feature.id}`,
+      });
+    }
+    checkParkRiskRule(feature, ctx);
     if (feature.status === "parked" && feature.park_reason === undefined) {
       ctx.addIssue({
         code: "custom",

@@ -1,5 +1,6 @@
 {
-  "$comment": "AD-15: who owns every path. A file belongs to a team when it matches one of the team's globs and none of its '!' exclusions. tooling/arch-tests checks that every file in the repo has exactly one owner; `pnpm verify:scope <team> --base <ref>` fails when a team branch changes a file outside its globs.",
+  "$comment": "AD-15: who owns every path. A file belongs to a team when it matches one of the team's globs and none of its '!' exclusions. tooling/arch-tests checks that every file in the repo has exactly one owner; `pnpm verify:scope <team> --base <ref>` fails when a team branch changes a file outside its globs. `regenerated` files are owned by the integrator but rewritten by tools on any branch (pnpm-lock.yaml after a team edits its own package.json), so verify:scope lets any team change them; the integrator re-resolves them on the integration branch and nobody hand-merges them (AD-15 rule 2).",
+  "regenerated": ["pnpm-lock.yaml"],
   "teams": {
     "integrator": [
       "packages/shared/**",
@@ -44,7 +45,7 @@
     ],
     "roles-compiler": ["roles/**", "skills/**", "plugins/**", "packages/compiler/**"],
     "adapters": ["packages/adapters/**"],
-    "dashboard": ["apps/dashboard/**"],
+    "dashboard": ["apps/dashboard/**", "fixtures/dashboard-export/**"],
     "cli-binary": ["packages/cli/**", "!packages/cli/src/commands/calibrate.ts"]
   }
 }

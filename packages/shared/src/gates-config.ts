@@ -4,6 +4,7 @@
  * (`gates/scanners.json`, {@link ScannerPinsSchema}) and are embedded in the binary (§4.4).
  */
 import { z } from "zod";
+import { engineRepoKey } from "./engine-instance.js";
 import {
   GitShaSchema,
   GlobSchema,
@@ -43,8 +44,11 @@ export const GateSchema = z
     id: SlugSchema,
     layer: GateLayerSchema,
     /**
-     * argv, executed without a shell. A config change can only run commands that pass the
-     * gate allowlist (§15), so commands are data, never shell strings.
+     * argv, executed without a shell, so commands are data, never shell strings. The Gate Runner
+     * runs it only when `gateCommandAllowed` accepts it against the machine's
+     * {@link GateAllowlistSchema} (§15); otherwise the gate is not run and reports `error` with
+     * failure class `infra`, which parks the task with `gate_infra` until a human confirms the
+     * command (`vtc calibrate`).
      */
     command: z.array(z.string().min(1)).min(1),
     cwd: RelPathSchema.optional(),
@@ -108,6 +112,20 @@ export const ScannerPinsSchema = z
   });
 export type ScannerPins = z.infer<typeof ScannerPinsSchema>;
 
+/**
+ * The project's test layout, detected by `vtc calibrate` and confirmed with the baseline (§7.1).
+ * - `acceptance_globs`: where QA author mode writes visible acceptance tests (artifact type
+ *   `ACCEPTANCE_TESTS.artifactType`). It is QA author mode's effective write scope (AD-7 rule 7),
+ *   and the files QA wrote there are protected from the Engineer by checksum (§7.3).
+ * - `protected_configs`: lint, test and build config the Engineer may not change (§7.2 L5,
+ *   §7.6 rule 5); checksummed like QA's tests.
+ */
+export const TestLayoutSchema = z.strictObject({
+  acceptance_globs: z.array(GlobSchema).min(1),
+  protected_configs: z.array(GlobSchema).default([]),
+});
+export type TestLayout = z.infer<typeof TestLayoutSchema>;
+
 export const GatesConfigSchema = z
   .strictObject({
     version: z.literal(1),
@@ -120,6 +138,7 @@ export const GatesConfigSchema = z
       flaky_tests: z.array(z.string().min(1)).default([]),
     }),
     sources: z.array(CalibrationSourceSchema).default([]),
+    tests: TestLayoutSchema,
     gates: z.array(GateSchema).min(1),
   })
   .superRefine((config, ctx) => {
@@ -135,3 +154,49 @@ export const GatesConfigSchema = z
   });
 export type GatesConfig = z.infer<typeof GatesConfigSchema>;
 export type GatesConfigInput = z.input<typeof GatesConfigSchema>;
+
+/**
+ * The gate command allowlist (§15: no config change can trigger command execution without passing
+ * the gate allowlist). `.vtc/gates.yml` is repo content that a PR or a teammate can change, so the
+ * allowlist lives outside the repo, per machine and repo, at `~/.vtc/` + `gateAllowlistFile(root)`,
+ * and only a human widens it: `vtc calibrate` shows every argv prefix not yet allowed and writes it
+ * after the human confirms. Nothing in a repo, a role or the engine writes it otherwise. Pinned
+ * scanners (`gates/scanners.json`, product data) are allowed by name.
+ */
+export const GateAllowlistSchema = z.strictObject({
+  version: z.literal(1),
+  commands: z
+    .array(
+      z.strictObject({
+        /** argv tokens a gate command must start with, e.g. `["pnpm", "test"]`. */
+        argv_prefix: z.array(z.string().min(1).max(4096)).min(1),
+        confirmed_at: IsoDateTimeSchema,
+      }),
+    )
+    .default([]),
+});
+export type GateAllowlist = z.infer<typeof GateAllowlistSchema>;
+export type GateAllowlistInput = z.input<typeof GateAllowlistSchema>;
+
+/** The allowlist file of a repo, relative to `~/.vtc/`: `allowlists/<repo-key>.json`. */
+export const gateAllowlistFile = (absRepoRoot: string): string =>
+  `allowlists/${engineRepoKey(absRepoRoot)}.json`;
+
+/**
+ * Pure: true when `command` (a gate's argv) starts with a confirmed prefix, token by token, or
+ * names a pinned scanner (`scanners`, the names in `gates/scanners.json`).
+ */
+export const gateCommandAllowed = (
+  command: readonly string[],
+  allowlist: Pick<GateAllowlist, "commands">,
+  scanners: readonly string[] = [],
+): boolean => {
+  const [first] = command;
+  if (first === undefined) return false;
+  if (scanners.includes(first)) return true;
+  return allowlist.commands.some(
+    (entry) =>
+      entry.argv_prefix.length <= command.length &&
+      entry.argv_prefix.every((token, i) => command[i] === token),
+  );
+};

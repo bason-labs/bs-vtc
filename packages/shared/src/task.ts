@@ -7,6 +7,7 @@ import {
   GlobSchema,
   RelPathSchema,
   RequirementIdSchema,
+  RiskRuleReasonRuleSchema,
   RiskSchema,
   SessionRefSchema,
   Sha256HexSchema,
@@ -75,6 +76,25 @@ export const ParkReasonSchema = z.enum([
 ]);
 export type ParkReason = z.infer<typeof ParkReasonSchema>;
 
+/**
+ * Cross-field rule for every record that carries `park_reason` (Task, Feature, the status-change
+ * events, `StatusResult.parked`, WorkflowNode): `risk_rule` names the §7.6 rule 1–9 that fired and
+ * is required for, and only allowed with, reason `risk_rule`, so a parked item says which rule
+ * parked it without a join against escalations (`riskRuleForPark(park_reason, risk_rule)`).
+ */
+export const checkParkRiskRule = (
+  value: { readonly park_reason?: ParkReason | undefined; readonly risk_rule?: unknown },
+  ctx: z.RefinementCtx,
+): void => {
+  if ((value.park_reason === "risk_rule") !== (value.risk_rule !== undefined)) {
+    ctx.addIssue({
+      code: "custom",
+      path: ["risk_rule"],
+      message: "risk_rule is required for, and only allowed with, park_reason risk_rule",
+    });
+  }
+};
+
 export const TaskSizeSchema = z.enum(["S", "M", "L"]);
 export type TaskSize = z.infer<typeof TaskSizeSchema>;
 
@@ -117,12 +137,84 @@ export const capForRisk = (risk: Risk, caps: Readonly<Record<Risk, number>>): nu
 /** Maximum stack packs loaded per task (§5.2a: "at most about 3"). */
 export const MAX_STACK_PACKS = 3;
 
+/**
+ * Statuses of a task listed in `after` that release its dependents: the dependency's code is on
+ * the feature's integration branch, which the dependent's worktree is based on (§6.6, §6.7).
+ * Until then a dependent that is otherwise ready waits as `waiting_dependency`.
+ */
+export const DEPENDENCY_RELEASED_STATUSES = [
+  "merged",
+  "done",
+] as const satisfies readonly TaskStatus[];
+
+/**
+ * Where a task came from. `planner`: a Planner `TaskDraft` at PLAN. The engine creates the other
+ * two from a triaged finding (`source_finding`): `integration_fix` for a Final Review finding no
+ * single task owns (§6.7a), `out_of_scope` for a guarded Engineer `out_of_scope_fault` with no
+ * owning task (§6.3 step 3). Only engine-created tasks may cover no REQ (a tool finding often
+ * has none).
+ */
+export const TaskOriginSchema = z.enum(["planner", "integration_fix", "out_of_scope"]);
+export type TaskOrigin = z.infer<typeof TaskOriginSchema>;
+
+/**
+ * Dependency rules shared by Task and TaskDraft (§5.2a, §6.6):
+ * - `after` is satisfied when every listed task has a status in
+ *   {@link DEPENDENCY_RELEASED_STATUSES} (its code is merged into the integration branch);
+ * - a `consumes_contracts` provider is satisfied by that provider's `contract.frozen` event, not
+ *   by its code, so it must **not** also appear in `after` (that would forbid the early,
+ *   contract-first start §6.6 allows);
+ * - no task depends on itself or consumes its own contract.
+ */
+const checkDependencies = (
+  task: {
+    readonly id: string;
+    readonly after: readonly string[];
+    readonly consumes_contracts: readonly { readonly provider: string }[];
+  },
+  ctx: z.RefinementCtx,
+): void => {
+  if (task.after.includes(task.id)) {
+    ctx.addIssue({ code: "custom", path: ["after"], message: "a task cannot depend on itself" });
+  }
+  if (new Set(task.after).size !== task.after.length) {
+    ctx.addIssue({ code: "custom", path: ["after"], message: "after must be unique" });
+  }
+  for (const [i, consumed] of task.consumes_contracts.entries()) {
+    if (consumed.provider === task.id) {
+      ctx.addIssue({
+        code: "custom",
+        path: ["consumes_contracts", i, "provider"],
+        message: "a task cannot consume its own contract",
+      });
+    }
+    if (task.after.includes(consumed.provider)) {
+      ctx.addIssue({
+        code: "custom",
+        path: ["consumes_contracts", i, "provider"],
+        message:
+          "a contract provider is released by contract.frozen; do not also list it in after (§6.6)",
+      });
+    }
+  }
+};
+
 export const TaskSchema = z
   .strictObject({
     id: TaskIdSchema,
     title: z.string().min(1).max(200),
-    feature: FeatureIdSchema.optional(),
-    covers: z.array(RequirementIdSchema).min(1),
+    /**
+     * The run's feature. The engine creates exactly one feature per run at PLAN and assigns every
+     * task to it, including engine-created tasks (`FeatureSchema`).
+     */
+    feature: FeatureIdSchema,
+    /** `planner` unless the engine created the task from a finding (`source_finding`). */
+    origin: TaskOriginSchema.default("planner"),
+    /** Fingerprint of the finding an `integration_fix` or `out_of_scope` task fixes. */
+    source_finding: Sha256HexSchema.optional(),
+    /** REQs the task covers. At least one for Planner tasks; may be empty for engine-created ones. */
+    covers: z.array(RequirementIdSchema),
+    /** Tasks whose code this one builds on; see {@link DEPENDENCY_RELEASED_STATUSES}. */
     after: z.array(TaskIdSchema).default([]),
     files_scope: z.array(GlobSchema).min(1),
     discipline: DisciplineSchema,
@@ -139,6 +231,15 @@ export const TaskSchema = z
     spent_usd: z.number().nonnegative().default(0),
     status: TaskStatusSchema,
     park_reason: ParkReasonSchema.optional(),
+    /** The §7.6 rule 1–9 that parked the task; only with `park_reason: risk_rule`. */
+    risk_rule: RiskRuleReasonRuleSchema.optional(),
+    /**
+     * Fix-loop round (§6.3 step 9). 0 before the first build; the engine sets round n when the
+     * task enters `building` (n = 1) or `fixing` (n + 1), and `cap` is the largest n, so cap 4
+     * allows rounds 1–4. Findings record the task round they were seen in
+     * (`Finding.round_first_seen`). A merged task reopened by Final Review keeps its round: those
+     * fix rounds count on the feature (`Feature.round`, §6.7a), never here.
+     */
     round: z.int().nonnegative().default(0),
     baseline_revision: GitShaSchema.optional(),
     /**
@@ -158,9 +259,22 @@ export const TaskSchema = z
     if (task.round > task.cap) {
       ctx.addIssue({ code: "custom", path: ["round"], message: "round may not exceed cap" });
     }
-    if (task.after.includes(task.id)) {
-      ctx.addIssue({ code: "custom", path: ["after"], message: "a task cannot depend on itself" });
+    checkDependencies(task, ctx);
+    if (task.origin === "planner" && task.covers.length === 0) {
+      ctx.addIssue({
+        code: "custom",
+        path: ["covers"],
+        message: "a Planner task covers at least one REQ",
+      });
     }
+    if ((task.origin === "planner") !== (task.source_finding === undefined)) {
+      ctx.addIssue({
+        code: "custom",
+        path: ["source_finding"],
+        message: "source_finding is required for, and only allowed on, engine-created tasks",
+      });
+    }
+    checkParkRiskRule(task, ctx);
     if (task.status === "parked" && task.park_reason === undefined) {
       ctx.addIssue({
         code: "custom",
@@ -178,15 +292,6 @@ export const TaskSchema = z
     if (task.branch !== undefined && task.branch !== `vtc/${task.id}`) {
       ctx.addIssue({ code: "custom", path: ["branch"], message: `branch must be vtc/${task.id}` });
     }
-    for (const [i, consumed] of task.consumes_contracts.entries()) {
-      if (consumed.provider === task.id) {
-        ctx.addIssue({
-          code: "custom",
-          path: ["consumes_contracts", i, "provider"],
-          message: "a task cannot consume its own contract",
-        });
-      }
-    }
   });
 export type Task = z.infer<typeof TaskSchema>;
 export type TaskInput = z.input<typeof TaskSchema>;
@@ -203,8 +308,9 @@ export type IoCase = z.infer<typeof IoCaseSchema>;
 
 /**
  * The immutable `<intent-contract>` block of a plan file (§6.3): the intent, Always/Never
- * boundaries and the I/O and edge-case matrix. Written by the Planner, read by the Context
- * Packer, never edited after PLAN (a change is a CR).
+ * boundaries and the I/O and edge-case matrix. Written by the Planner, recorded once in
+ * `task.created.intent` (so replay rebuilds the plan-file block and every pack from the log),
+ * read by the Context Packer, never edited after PLAN (a change is a CR).
  */
 export const IntentContractSchema = z.strictObject({
   statement: z.string().min(1).max(2000),
@@ -216,15 +322,15 @@ export type IntentContract = z.infer<typeof IntentContractSchema>;
 
 /**
  * What the Planner submits per task (§5.2 Planner output). Strict: engine-owned fields
- * (`status`, `cap`, `budget_usd`, `round`, `spent_usd`, `worktree`, `branch`, `session_ref`,
- * `deferred`, `baseline_revision`) are rejected, so a planner can never set them (§6.4).
- * The engine derives `cap` from `risk` and `budget_usd` from `size` and project.yaml.
+ * (`feature`, `origin`, `status`, `cap`, `budget_usd`, `round`, `spent_usd`, `worktree`,
+ * `branch`, `session_ref`, `deferred`, `baseline_revision`) are rejected, so a planner can never
+ * set them (§6.4). The engine derives `cap` from `risk`, `budget_usd` from `size` and
+ * project.yaml, and assigns every task to the run's one feature.
  */
 export const TaskDraftSchema = z
   .strictObject({
     id: TaskIdSchema,
     title: z.string().min(1).max(200),
-    feature: FeatureIdSchema.optional(),
     covers: z.array(RequirementIdSchema).min(1),
     after: z.array(TaskIdSchema).default([]),
     files_scope: z.array(GlobSchema).min(1),
@@ -240,18 +346,7 @@ export const TaskDraftSchema = z
     intent: IntentContractSchema,
   })
   .superRefine((draft, ctx) => {
-    if (draft.after.includes(draft.id)) {
-      ctx.addIssue({ code: "custom", path: ["after"], message: "a task cannot depend on itself" });
-    }
-    for (const [i, consumed] of draft.consumes_contracts.entries()) {
-      if (consumed.provider === draft.id) {
-        ctx.addIssue({
-          code: "custom",
-          path: ["consumes_contracts", i, "provider"],
-          message: "a task cannot consume its own contract",
-        });
-      }
-    }
+    checkDependencies(draft, ctx);
   });
 export type TaskDraft = z.infer<typeof TaskDraftSchema>;
 export type TaskDraftInput = z.input<typeof TaskDraftSchema>;
@@ -259,7 +354,8 @@ export type TaskDraftInput = z.input<typeof TaskDraftSchema>;
 /**
  * Frontmatter of `.vtc/tasks/T-n.md` (§6.3). It is an engine-written **projection** of the task
  * state rebuilt from the event log (AD-7 rule 8): the engine regenerates it and never reads it
- * back as input, so a hand or agent edit cannot become a second source of truth.
+ * back as input, so a hand or agent edit cannot become a second source of truth. The
+ * `<intent-contract>` block below it is a projection too, of `task.created.intent`.
  */
 export const PlanFileFrontmatterSchema = TaskSchema;
 export type PlanFileFrontmatter = Task;

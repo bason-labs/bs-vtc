@@ -5,6 +5,10 @@ Read-only local dashboard (spec §17). **Not built yet**: it lands in sub-projec
 - Next.js 16 **static export**, React 19, Tailwind v4, Radix, lucide, React Flow (`@xyflow/react` 12).
   Source lives in `src/` (incl. `src/app/`); the `@/` alias maps to `src/` (dependency-cruiser
   resolves it, AD-1 rule 9).
+- Static export (AD-20): `output: "export"`, `trailingSlash: true`, into `apps/dashboard/out`. Pages
+  are fixed; run and task ids go in the query string (`/task/?run=r1&task=T-2`), never in path
+  segments. The engine serves it by `resolveDashboardAsset` (deep links fall back to `index.html`);
+  `fixtures/dashboard-export/` is the seeded stand-in the engine tests against.
 - Theme, ui kit and flow canvas are copied from `bs-job-agents/apps/web` (spec D14, §17).
 - Talks to the engine **only over HTTP/SSE**: routes and response contracts are frozen in
   `ENGINE_HTTP` (`@vtc/shared`). It may import `@vtc/shared` contracts through the package entry,

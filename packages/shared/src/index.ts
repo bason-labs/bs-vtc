@@ -23,12 +23,15 @@ export * from "./traceability.js";
 export * from "./task-pack.js";
 export * from "./engine-instance.js";
 export * from "./engine-api.js";
+export * from "./asset-paths.js";
+export * from "./persisted.js";
 export * from "./interfaces/host-adapter.js";
 export type * from "./interfaces/storage.js";
 export type * from "./interfaces/gate-runner.js";
 export type * from "./interfaces/assets.js";
 export type * from "./interfaces/auto-resume.js";
 export type * from "./interfaces/engine.js";
+export type * from "./interfaces/git.js";
 export * from "./helpers/fingerprint.js";
 export * from "./helpers/severity.js";
 export * from "./helpers/tokens.js";
@@ -51,5 +54,10 @@ export * from "./json-schema.js";
  * events, required trace fields, single risk-rule encoding, finding kinds, task packs,
  * traceability and evidence bundles, gate guards and hidden tests, cookie-free sessions,
  * artifacts/diff/features routes, prototype origin, plugin-only dispatch). Nothing consumed 2.x.
+ * 4.0.0: closing round of the phase-1 review (tool findings, test metrics and traceability in gate
+ * reports; replayable request and intent; one feature per run, engine-created tasks and
+ * dependency rules; submit snapshot commits; push, PR state and CI; park risk rules; the test
+ * layout, gate allowlist and socket protocol; tolerant readers of persisted data). Nothing
+ * consumed 3.x.
  */
-export const CONTRACTS_VERSION = "3.0.0";
+export const CONTRACTS_VERSION = "4.0.0";

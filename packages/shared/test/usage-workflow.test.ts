@@ -155,6 +155,16 @@ describe("WorkflowNodeSchema", () => {
       expectValid(WorkflowNodeSchema, node(kind, kind));
     }
     expectValid(WorkflowNodeSchema, node("eng", "role", { state: "interrupted" }));
+    expectValid(WorkflowNodeSchema, node("sec", "role", { state: "skipped" }));
+    expectValid(WorkflowNodeSchema, node("t-9", "subflow", { state: "dropped", subflow: "t-9" }));
+    expectValid(
+      WorkflowNodeSchema,
+      node("park", "park", {
+        state: "parked",
+        park_reason: "risk_rule",
+        risk_rule: "db_migration",
+      }),
+    );
     expectValid(WorkflowNodeSchema, node("sf", "subflow", { subflow: "task-t-7" }));
   });
   it.each([
@@ -162,6 +172,11 @@ describe("WorkflowNodeSchema", () => {
     ["subflow", node("s", "subflow")],
     ["round", node("a", "role", { state: "looping" })],
     ["park_reason", node("a", "role", { state: "parked" })],
+    ["risk_rule", node("a", "role", { state: "parked", park_reason: "risk_rule" })],
+    [
+      "risk_rule",
+      node("a", "role", { state: "parked", park_reason: "cap", risk_rule: "large_diff" }),
+    ],
     ["reason_added", node("a", "role", { reason_added: "" })],
     ["kind", node("a", "agent")],
     ["state", node("a", "role", { state: "failed" })],

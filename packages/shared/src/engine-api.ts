@@ -20,6 +20,7 @@ import {
   HostIdSchema,
   IsoDateTimeSchema,
   RelPathSchema,
+  RiskRuleReasonRuleSchema,
   RoleIdSchema,
   RunIdSchema,
   SessionRefSchema,
@@ -40,7 +41,7 @@ import {
   RunSchema,
 } from "./run.js";
 import { RejectReasonSchema } from "./event-payloads.js";
-import { ParkReasonSchema, TaskSchema, TaskStatusSchema } from "./task.js";
+import { checkParkRiskRule, ParkReasonSchema, TaskSchema, TaskStatusSchema } from "./task.js";
 import { STATUSLINE_INGEST_MAX_BYTES, UsageReportSchema } from "./usage.js";
 
 // ------------------------------------------------------------------ MCP tools
@@ -119,8 +120,9 @@ export type EngineMcpToolName = (typeof ENGINE_MCP_TOOLS)[number]["name"];
 
 /**
  * The MCP server entry every host plugin registers (§4.4, AD-4, AD-16): a stdio bridge to the
- * repo's daemon that tags its session with the host it runs in. The Claude Code plugin carries
- * it in `plugins/claude-code/.mcp.json`; the Codex installer writes the same entry.
+ * repo's daemon that tags its session with the host it runs in (the `host` of its
+ * `EngineSocketHello`, `ENGINE_SOCKET`). The Claude Code plugin carries it in
+ * `plugins/claude-code/.mcp.json`; the Codex installer writes the same entry.
  */
 export const engineMcpServer = (
   host: HostId,
@@ -340,7 +342,20 @@ export type RunControlResult = z.infer<typeof RunControlResultSchema>;
 export const StatusResultSchema = z.strictObject({
   run: RunSchema,
   tasks_by_status: z.partialRecord(TaskStatusSchema, z.int().nonnegative()),
-  parked: z.array(z.strictObject({ task: TaskIdSchema, reason: ParkReasonSchema })).default([]),
+  /** Parked tasks with their reason and, for reason `risk_rule`, the rule that fired. */
+  parked: z
+    .array(
+      z
+        .strictObject({
+          task: TaskIdSchema,
+          reason: ParkReasonSchema,
+          risk_rule: RiskRuleReasonRuleSchema.optional(),
+        })
+        .superRefine((entry, ctx) => {
+          checkParkRiskRule({ park_reason: entry.reason, risk_rule: entry.risk_rule }, ctx);
+        }),
+    )
+    .default([]),
   /** Every feature with its state; parked features park as a unit (§6.7a). */
   features: z.array(FeatureSchema).default([]),
   open_escalations: z.int().nonnegative(),

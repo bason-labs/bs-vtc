@@ -30,6 +30,7 @@ import {
   StartResultSchema,
   SubagentInstructionSchema,
   SubmitInputSchema,
+  StatusResultSchema,
   SubmitResultSchema,
   TaskDetailSchema,
   TaskDiffSchema,
@@ -507,6 +508,18 @@ describe("HTTP API", () => {
     );
     expectValid(DesignReviewResultSchema, { ok: true, path: ".vtc/design/reviews/checkout.jsonl" });
     expectInvalid(DesignReviewResultSchema, { ok: true, path: ".vtc/spec/spec.md" }, "path");
+  });
+});
+
+describe("status", () => {
+  it("a parked task names the risk rule that parked it (§7.6, AD-8 rule 8)", () => {
+    const parked = StatusResultSchema.shape.parked;
+    expectValid(parked, [
+      { task: "T-7", reason: "risk_rule", risk_rule: "db_migration" },
+      { task: "T-8", reason: "cap" },
+    ]);
+    expectInvalid(parked, [{ task: "T-7", reason: "risk_rule" }], "0.risk_rule");
+    expectInvalid(parked, [{ task: "T-7", reason: "cap", risk_rule: "large_diff" }], "0.risk_rule");
   });
 });
 
