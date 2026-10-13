@@ -420,7 +420,7 @@ INTAKE → DISCOVER → SPECIFY → ✋G1 → DESIGN → ✋G2 → PLAN → BUIL
 2. **QA author mode.** QA writes acceptance tests tagged with REQ IDs.
    - The engine checks that they **fail on the base commit**.
    - QA also writes a hidden split of tests, stored in `~/.vtc/`.
-   - **Scenario card** (from QCFactory). Each scenario has a `SCENARIO.md` containing:
+   - **Scenario card** (from QCFactory). Kept **lean** (about 15 lines) and written **only for end-to-end/acceptance scenarios**, not for unit tests. Each such scenario has a `SCENARIO.md` containing:
      - the user story;
      - setup;
      - a "proves" table;
@@ -430,13 +430,19 @@ INTAKE → DISCOVER → SPECIFY → ✋G1 → DESIGN → ✋G2 → PLAN → BUIL
      - `observed`, meaning baseline behaviour with no spec backing.
      
      Failures on `observed` assertions route as *possible spec gaps*, not as Engineer bugs.
-   - **Questions about the spec** go into **one question list per project**, never inline. Each question offers 2–3 options. The Lead batches them to the human.
+   - **Questions about the spec** go into the **escalation queue as `spec_question` items**, never inline. This is the same queue as §6.5, not a separate file. Each question offers 2–3 options, and the Lead batches them to the human.
 3. **Engineer.** The Engineer works in the task's worktree, in a sandbox with protected paths.
    - **Exits:**
      - `built`;
      - `spec_conflict` (goes to the BA);
      - `blocked(question)` (parks the task);
-     - `out_of_scope_fault`: the failure is caused outside this task's `files_scope`. The Engineer must cite `file:line` evidence. This ends the round early, does **not** count as stuck, and the engine routes the fault to the owning task or opens an integration-fix task.
+     - `out_of_scope_fault`: the failure is caused outside this task's `files_scope`. The Engineer must cite `file:line` evidence.
+       - **Guards (engine):**
+         - the cited location must be outside `files_scope`;
+         - the failure must **reproduce on the base plus contracts without this task's diff**;
+         - at most one claim per round.
+       - **If the guards pass:** the round ends early, does **not** count as stuck, and the engine routes the fault to the owning task or opens an integration-fix task.
+       - **If they fail:** the claim is rejected, the round continues, and Lookback records the claim as misuse against the Engineer.
 4. **Write-scope check (engine).** The engine compares the diff against `files_scope` and checksums the protected files.
    - Any violation counts as a test-integrity hit.
 5. **Gate Runner.** Runs gates L0–L5 (§7.2) on a clean verification checkout, using affected-only tests.
@@ -1042,7 +1048,7 @@ It is capped at 1–2 rounds and costs both quotas.
   - Every score stores the `grader_bundle_sha`.
   - The judge model is fixed.
 - **Tool promotion:** scripts that recur across 3 or more tasks are proposed as tested engine tools.
-- **Run retro** (from QCFactory). The retro has two layers:
+- **Run retro** (from QCFactory; built in sub-project 7). The retro has two layers:
   - a **deterministic data layer**: KPIs, plus a **snapshot of the config and feature flags** in force, so the retro never misreads a switched-off feature as a bug;
   - a short write-up with proposals, each carrying a baseline and target KPI.
   
@@ -1170,6 +1176,7 @@ Each sub-project below gets its own spec → plan → implementation.
 | 6 | **Flow Studio** | Read-only dashboard | 1 (events) |
 | 7 | **Lookback + evals** | Scorecards, attribution, replay harness, promotion | 1–3 |
 | 8 | **Agency layer + Level 3 auto-merge + cross-family review** | CRs/exports, cost per client, safe auto-merge, cross-review | 1–7 |
+| 9 | **Watch mode** (post-merge regression, QCFactory-style, opt-in per project) | Scheduled or on-merge re-runs of the accumulated acceptance suite plus scanners on `main` (diff runs, with periodic full runs). Reuses failure classification and fingerprint dedup. New failures become fix tasks or GitHub issues, which auto-close when the check passes again. **Each one is fed to Lookback as an escaped defect, attributed to a role.** Separate small budget; never runs when the usage window is low. | 2, 5, 7 |
 
 **Recommended first build after the spike: #1, then #2 and #3 together.** That sequence produces the headline loop (Engineer ↔ QA, Security and Spec-Verifier) early.
 
