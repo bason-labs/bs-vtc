@@ -6,9 +6,10 @@
  * settings file can bring another built-in tool in. Protected paths are denied twice: edit rules
  * and `sandbox.filesystem.denyWrite`. The permission mode is pinned to `dontAsk`, so the
  * allowlist decides and anything not on it is denied; host config files are never writable.
- * The VTC install token, the Codex home and Claude's own credential file are never readable,
- * from a tool or from the shell (D-ad). No role may run `vtc calibrate` or write the VTC home's
- * allowlists, scanner database or hidden tests (D-w).
+ * The VTC home's install token, daemon sockets and hidden tests (`ROLE_DENIED_VTC.homeReadDeny`,
+ * D-an), the Codex home and Claude's own credential file are never readable, from a tool or from
+ * the shell (D-ad). No role may run `vtc calibrate` or write anything in
+ * `ROLE_DENIED_VTC.homeWriteDeny` (D-w, D-ap): directories and single files alike.
  *
  * Settings isolation (D-ab, spine §5 reading 48): a headless run passes `--restricted`, which
  * (per `claude --help`) ignores the user, project and local settings files and keeps only
@@ -39,7 +40,6 @@
 import nodePath, { type PlatformPath } from "node:path";
 import {
   agentNameFor,
-  ENGINE_INSTANCE,
   hostCredentialDenyReadPaths,
   isHostCredentialDenyRead,
   ROLE_DENIED_VTC,
@@ -50,11 +50,7 @@ import {
   type SessionRef,
   type SpawnRoleRequest,
 } from "@vtc/shared";
-import {
-  VTC_HOME_READ_DENIED_DIRS,
-  vtcHomeReadDeniedDirs,
-  vtcHomeWriteDeniedDirs,
-} from "../common/homes.js";
+import { vtcHomeReadDeniedPaths, vtcHomeWriteDeniedPaths } from "../common/homes.js";
 
 export const CLAUDE_BINARY = "claude";
 export const HOST = "claude-code";
@@ -255,15 +251,14 @@ const claudeCredentialDeny = (
 };
 
 /**
- * What no role may read, as absolute paths: the install token, the whole Codex home and Claude's
- * own credential file.
+ * What no role may read besides the VTC home's `homeReadDeny`, as absolute paths: the whole Codex
+ * home and Claude's own credential file.
  */
 const unreadablePaths = (
   options: ClaudeProfileOptions,
   platform: PlatformPath,
   shell: boolean,
 ) => ({
-  token: platform.resolve(options.vtcHome, ENGINE_INSTANCE.tokenFile),
   codexHome: platform.resolve(options.codexHome),
   claudeCredentials: claudeCredentialDeny(options.claudeConfigDir, platform, shell),
 });
@@ -301,11 +296,10 @@ export const claudeSandboxProfile = (
     permissions: {
       defaultMode: CLAUDE_ROLE_PERMISSION_MODE,
       deny: [
-        `Read(${absoluteRulePath(unreadable.token, platform)})`,
+        // the install token, the daemons' sockets and the hidden acceptance tests (D-an, §7.3)
+        ...ROLE_DENIED_VTC.homeReadDeny.map((glob) => `Read(${vtcHomeRule}/${glob})`),
         `Read(${absoluteRulePath(unreadable.codexHome, platform)}/**)`,
         credentials.rule,
-        // the hidden acceptance tests and the daemons' sockets (§7.3; spine §7 residual)
-        ...VTC_HOME_READ_DENIED_DIRS.map((dir) => `Read(${vtcHomeRule}/${dir}/**)`),
         ...deniedVtcCommands(),
         ...ROLE_DENIED_VTC.homeWriteDeny.flatMap((glob) =>
           WRITE_TOOL_NAMES.map((tool) => `${tool}(${vtcHomeRule}/${glob})`),
@@ -321,13 +315,13 @@ export const claudeSandboxProfile = (
           ...[...request.protectedPaths, ...HOST_CONFIG_PATHS].map((p) =>
             absolute(cwd, p, platform),
           ),
-          ...vtcHomeWriteDeniedDirs(options.vtcHome, platform),
+          // directories and single files (`config.yaml`, `token`) alike (D-ap)
+          ...vtcHomeWriteDeniedPaths(options.vtcHome, platform),
         ],
         denyRead: [
-          unreadable.token,
+          ...vtcHomeReadDeniedPaths(options.vtcHome, platform),
           unreadable.codexHome,
           ...(credentials.sandboxPath === undefined ? [] : [credentials.sandboxPath]),
-          ...vtcHomeReadDeniedDirs(options.vtcHome, platform),
         ],
       },
       network: { allowedDomains: request.network === "registries" ? [...REGISTRY_DOMAINS] : [] },

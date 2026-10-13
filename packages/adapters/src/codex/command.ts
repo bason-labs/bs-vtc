@@ -20,13 +20,44 @@
  *   them anywhere, but it can copy them into its output or worktree.
  * - The role deny list (D-w): Codex has no per-command deny for a headless run, so `vtc
  *   calibrate` cannot be denied here (it confirms only in an interactive terminal, which a role
- *   run never has). Writes to the VTC home's allowlists, scanner database and hidden tests are
- *   blocked because `workspace-write` writes only the worktree and the OS temp roots (`$TMPDIR`,
- *   `/tmp`; D-ag lets roles write there). So a profile whose worktree overlaps one of those
- *   directories is refused, and when one lies under a temp root (a VTC home in the temp
+ *   run never has). Writes to everything in `ROLE_DENIED_VTC.homeWriteDeny` (D-w, D-ap: the
+ *   allowlists, scanner database and binaries, hidden tests, plugin copies, discovery files and
+ *   sockets, `config.yaml` and the token) are blocked because `workspace-write` writes only the
+ *   worktree and the OS temp roots (`$TMPDIR`, `/tmp`; D-ag lets roles write there). So a profile
+ *   whose worktree overlaps one of those paths is refused, and when one lies under a temp root (a VTC home in the temp
  *   directory, as in test setups) the profile takes both temp roots out of the writable set
  *   (`exclude_tmpdir_env_var`, `exclude_slash_tmp`). Paths compare by real location, so a
  *   symlinked worktree or VTC home cannot hide an overlap.
+ * - The VTC home's `homeReadDeny` (D-an: the token, the sockets in `run/`, the hidden tests) is
+ *   readable too, for the same reason. If a role could also connect to a socket in `run/`, it
+ *   could send a cli hello with the token it read, and the token is the cli's proof of a human
+ *   for `approve`/`answer`/`change_request` (D-an). So `enforced.network` claims more than "no
+ *   TCP": it is true only on a platform where the network-off sandbox is shown to block a
+ *   path-based Unix-socket connect too ({@link CODEX_UNIX_CONNECT_BLOCKED_PLATFORMS}). On macOS
+ *   it is: under codex-cli 0.162.1 seatbelt, `sandbox_mode` `read-only` and `workspace-write`
+ *   with `network_access=false` both fail a `connect()` to a listening Unix socket with `EPERM`,
+ *   while `network_access=true` lets it through (checked 2026-10-14 with `codex sandbox` and a
+ *   temp `CODEX_HOME`). Elsewhere it is not shown (Linux: a network namespace alone does not
+ *   hide a socket path visible in the mount namespace, and bwrap/landlock behaviour is
+ *   unchecked), so the profile reports `enforced.network: false` and the engine's
+ *   `roleSandboxProblem` refuses the run (fail closed) until the spine §7 item for Codex roles
+ *   (token readable; Unix-socket connect under the network-off sandbox, per platform) passes
+ *   on that platform.
+ * - Host config in the worktree (D-ao, spine §5 reading 72): every role run passes
+ *   `-c notify=[]`, so no `notify` command (user or role-planted) runs outside the sandbox, and
+ *   `--ignore-rules` (on `codex exec` and `codex exec resume`, 0.162.1), so no execpolicy
+ *   `.rules` file loads: neither the user's `~/.codex/rules/*.rules` (where an interactive
+ *   "always allow" lands) nor one a role planted in `<worktree>/.codex/rules/`. An `allow`
+ *   decision there may run the matched command outside the sandbox, with the network and full
+ *   writes; whether it does is for the §7 spike row on Codex host config to confirm, and the flag
+ *   makes the answer moot for role runs.
+ *   `codex exec --help` (0.162.1) has no override that drops project MCP servers: `-c` sets one
+ *   dotted key, the help does not say whether a table value replaces or merges, no flag skips the
+ *   project `.codex/config.toml` (`--ignore-user-config` covers only `$CODEX_HOME`), and a
+ *   blanket `mcp_servers={}` would also drop the engine bridge roles use. The engine's restore of
+ *   `.codex/**` before every dispatch and resume is the barrier; the §7 spike row ("Codex project
+ *   config in a linked worktree") settles the override. Project hooks need persisted trust, and
+ *   no run ever passes the hook-trust bypass.
  * - `codex exec` has no agent flag: a headless run gets no compiled role instructions
  *   (`developer_instructions` of `.codex/agents/vtc-*.toml`), so the role rests on the prompt
  *   (the task pack). Engine-launched Codex runs (cross-family review, auto-resume) must carry the
@@ -34,7 +65,7 @@
  */
 import { createHash } from "node:crypto";
 import { tmpdir } from "node:os";
-import { join, relative } from "node:path";
+import { join } from "node:path";
 import type {
   HostCommand,
   SandboxProfile,
@@ -42,7 +73,7 @@ import type {
   SessionRef,
   SpawnRoleRequest,
 } from "@vtc/shared";
-import { canonicalPath, vtcHomeWriteDeniedDirs } from "../common/homes.js";
+import { canonicalPath, vtcHomeWriteDeniedPaths, within } from "../common/homes.js";
 
 export const CODEX_BINARY = "codex";
 export const HOST = "codex";
@@ -57,18 +88,21 @@ export interface CodexProfileOptions {
    * `$TMPDIR`, `os.tmpdir()` and `/tmp`; tests pass their own.
    */
   readonly tempRoots?: readonly string[];
+  /** The platform the role runs on. Default: `process.platform`; tests pass their own. */
+  readonly platform?: NodeJS.Platform;
 }
+
+/**
+ * Platforms where Codex's network-off sandbox is shown to block a Unix-socket connect into
+ * `<vtcHome>/run/` as well as TCP (see the header). Only there does a profile claim
+ * `enforced.network`, the engine's condition for running a role that can read the token.
+ */
+export const CODEX_UNIX_CONNECT_BLOCKED_PLATFORMS: readonly NodeJS.Platform[] = ["darwin"];
 
 const defaultTempRoots = (): string[] =>
   [process.env.TMPDIR, tmpdir(), "/tmp"].filter(
     (root): root is string => root !== undefined && root !== "",
   );
-
-/** True when `inner` is `outer` or below it (both already canonical). */
-const within = (outer: string, inner: string): boolean => {
-  const rel = relative(outer, inner);
-  return rel === "" || (!rel.startsWith("..") && !rel.startsWith("/") && !/^[A-Za-z]:/.test(rel));
-};
 
 export const codexSandboxProfile = (
   request: SandboxProfileRequest,
@@ -83,7 +117,7 @@ export const codexSandboxProfile = (
   }
   // compared by real location, each path resolved once
   const denied =
-    mode === "workspace-write" ? vtcHomeWriteDeniedDirs(options.vtcHome).map(canonicalPath) : [];
+    mode === "workspace-write" ? vtcHomeWriteDeniedPaths(options.vtcHome).map(canonicalPath) : [];
   const cwd = denied.length === 0 ? request.cwd : canonicalPath(request.cwd);
   const exposed = denied.find((dir) => within(cwd, dir) || within(dir, cwd));
   if (exposed !== undefined) {
@@ -100,7 +134,8 @@ export const codexSandboxProfile = (
     enforced: {
       readOnly: mode === "read-only",
       perPathWriteDeny: false,
-      network: true,
+      // fail closed where a Unix-socket connect into `<vtcHome>/run/` is not shown blocked (D-an)
+      network: CODEX_UNIX_CONNECT_BLOCKED_PLATFORMS.includes(options.platform ?? process.platform),
       // no per-path read deny on Codex: the token and host credentials stay readable (D-ad)
       secretsUnreadable: false,
     },
@@ -184,6 +219,12 @@ export const codexHeadlessCommand = (
       ...(request.model.model === undefined ? [] : ["--model", request.model.model]),
       "--config",
       `model_reasoning_effort="${request.model.effort}"`,
+      // no notify command, from the user's config or one a role planted in the worktree (D-ao)
+      "--config",
+      "notify=[]",
+      // no execpolicy `.rules` (the user's `~/.codex/rules`, or one planted in the worktree): an
+      // `allow` decision there would run a matching command outside the role sandbox (D-ao)
+      "--ignore-rules",
       "--",
       ...(session === undefined ? [] : [session.id]),
       "-",

@@ -38,8 +38,9 @@ export interface AdapterFactoryOptions {
    */
   readonly pluginDir?: string;
   /**
-   * The absolute VTC home the cli resolved (`$VTC_HOME` or `~/.vtc`): its token stays unreadable,
-   * and no role writes its allowlists, scanner database or hidden tests (D-w).
+   * The absolute VTC home the cli resolved (`$VTC_HOME` or `~/.vtc`): no role reads anything in
+   * `ROLE_DENIED_VTC.homeReadDeny` or writes anything in `homeWriteDeny` (D-w, D-ap, D-an), and
+   * the Claude install writes the session sandbox for it.
    */
   readonly vtcHome?: string;
 }
