@@ -305,6 +305,20 @@ describe("Codex headlessCommand", () => {
     }
   });
 
+  it("skips user and project execpolicy `.rules` for every role run, fresh or resumed, so no `allow` rule runs a command outside the sandbox (D-ao)", () => {
+    const adapter = createCodexAdapter({ vtcHome: VTC_HOME });
+    for (const session of [undefined, { host: "codex" as const, id: "thr-1" }]) {
+      for (const tools of [READ_ONLY, WRITE_SCOPED, ENGINEER]) {
+        const args = adapter.headlessCommand(request({ sandbox: profile(tools) }), session).args;
+        const at = args.indexOf("--ignore-rules");
+        // `codex exec` and `codex exec resume` (0.162.1) both take it, as an option
+        expect(at).toBeGreaterThan(args.indexOf(session === undefined ? "exec" : "resume"));
+        expect(at).toBeLessThan(args.indexOf("--"));
+        expect(findForbiddenHostArgs(args)).toEqual([]);
+      }
+    }
+  });
+
   it("records what `codex exec --help` (0.162.1) offers no override for: project MCP servers (D-ao, spine §7)", () => {
     // Gap: `-c` sets one dotted key and its help does not say whether a table value replaces or
     // merges into the project layer, and no flag skips the project `.codex/config.toml`

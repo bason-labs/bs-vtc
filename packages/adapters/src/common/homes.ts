@@ -1,7 +1,7 @@
 /** Default host and VTC directories, resolved the way the cli and the hosts resolve them. */
 import { realpathSync } from "node:fs";
 import { homedir } from "node:os";
-import nodePath, { basename, dirname, join, resolve, type PlatformPath } from "node:path";
+import nodePath, { basename, dirname, join, relative, resolve, type PlatformPath } from "node:path";
 import { ROLE_DENIED_VTC } from "@vtc/shared";
 
 /** `$<name>` when set and non-empty, else `<home>/<fallback>`. A path only: nothing is read. */
@@ -51,4 +51,10 @@ export const canonicalPath = (path: string): string => {
       current = parent;
     }
   }
+};
+
+/** True when `inner` is `outer` or below it (both already canonical). */
+export const within = (outer: string, inner: string): boolean => {
+  const rel = relative(outer, inner);
+  return rel === "" || (!rel.startsWith("..") && !rel.startsWith("/") && !/^[A-Za-z]:/.test(rel));
 };

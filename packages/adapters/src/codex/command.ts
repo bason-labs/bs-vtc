@@ -29,11 +29,23 @@
  *   (`exclude_tmpdir_env_var`, `exclude_slash_tmp`). Paths compare by real location, so a
  *   symlinked worktree or VTC home cannot hide an overlap.
  * - The VTC home's `homeReadDeny` (D-an: the token, the sockets in `run/`, the hidden tests) is
- *   readable too, for the same reason. The network is off; whether that also stops a Unix-socket
- *   connect into `run/` on every platform is not verified here (handed to the engine as a §7
- *   residual).
+ *   readable too, for the same reason. The network is off, but whether that also stops a
+ *   Unix-socket connect into `run/` is not verified on any platform: macOS seatbelt's network
+ *   deny is said to cover a Unix connect, while a Linux network namespace alone does not hide a
+ *   path-based socket that is visible in the mount namespace. If the connect works, a Codex role
+ *   can send a cli hello with the token it read, and the token is the cli's proof of a human for
+ *   `approve`/`answer`/`change_request` (D-an). The spine has no §7 row for this yet (the
+ *   plugin-only residual row covers Claude Code sessions only): it is escalated to the Lead for a
+ *   spike check or an accepted residual, and the adapter can only report it, through
+ *   `enforced.secretsUnreadable: false`.
  * - Host config in the worktree (D-ao, spine §5 reading 72): every role run passes
- *   `-c notify=[]`, so no `notify` command (user or role-planted) runs outside the sandbox.
+ *   `-c notify=[]`, so no `notify` command (user or role-planted) runs outside the sandbox, and
+ *   `--ignore-rules` (on `codex exec` and `codex exec resume`, 0.162.1), so no execpolicy
+ *   `.rules` file loads: neither the user's `~/.codex/rules/*.rules` (where an interactive
+ *   "always allow" lands) nor one a role planted in `<worktree>/.codex/rules/`. An `allow`
+ *   decision there may run the matched command outside the sandbox, with the network and full
+ *   writes; whether it does is for the §7 spike row on Codex host config to confirm, and the flag
+ *   makes the answer moot for role runs.
  *   `codex exec --help` (0.162.1) has no override that drops project MCP servers: `-c` sets one
  *   dotted key, the help does not say whether a table value replaces or merges, no flag skips the
  *   project `.codex/config.toml` (`--ignore-user-config` covers only `$CODEX_HOME`), and a
@@ -48,7 +60,7 @@
  */
 import { createHash } from "node:crypto";
 import { tmpdir } from "node:os";
-import { join, relative } from "node:path";
+import { join } from "node:path";
 import type {
   HostCommand,
   SandboxProfile,
@@ -56,7 +68,7 @@ import type {
   SessionRef,
   SpawnRoleRequest,
 } from "@vtc/shared";
-import { canonicalPath, vtcHomeWriteDeniedPaths } from "../common/homes.js";
+import { canonicalPath, vtcHomeWriteDeniedPaths, within } from "../common/homes.js";
 
 export const CODEX_BINARY = "codex";
 export const HOST = "codex";
@@ -77,12 +89,6 @@ const defaultTempRoots = (): string[] =>
   [process.env.TMPDIR, tmpdir(), "/tmp"].filter(
     (root): root is string => root !== undefined && root !== "",
   );
-
-/** True when `inner` is `outer` or below it (both already canonical). */
-const within = (outer: string, inner: string): boolean => {
-  const rel = relative(outer, inner);
-  return rel === "" || (!rel.startsWith("..") && !rel.startsWith("/") && !/^[A-Za-z]:/.test(rel));
-};
 
 export const codexSandboxProfile = (
   request: SandboxProfileRequest,
@@ -201,6 +207,9 @@ export const codexHeadlessCommand = (
       // no notify command, from the user's config or one a role planted in the worktree (D-ao)
       "--config",
       "notify=[]",
+      // no execpolicy `.rules` (the user's `~/.codex/rules`, or one planted in the worktree): an
+      // `allow` decision there would run a matching command outside the role sandbox (D-ao)
+      "--ignore-rules",
       "--",
       ...(session === undefined ? [] : [session.id]),
       "-",
