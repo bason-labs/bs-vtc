@@ -13,7 +13,9 @@
  *   ({@link ADVISOR_WRITE_PATHS}) with exactly the {@link ADVISOR_EXPORT_ARTIFACT} output
  *   artifact (reading 30: the client liaison; the engine checks the write on submit);
  * - it returns no verdicts, declares no success criteria and no modes;
- * - it exits `done`, `blocked` (a question for the human) or `unknown`.
+ * - it exits `done`, `blocked` (a question for the human) or `unknown`;
+ * - its first input is {@link ADVISOR_QUESTION_ARTIFACT}, the human's question, and only advisors
+ *   read that type. `request` keeps its shared meaning, the run's idea or change request.
  */
 import type { RoleContract, RoleExit } from "@vtc/shared";
 
@@ -30,14 +32,43 @@ export const ADVISOR_WRITE_PATHS: readonly string[] = [".vtc/exports/**"];
 /** The only output artifact type an advisor may declare, and only when it is write-scoped. */
 export const ADVISOR_EXPORT_ARTIFACT = "client_export";
 
+/**
+ * The artifact type of the human's consult question (`ConsultInput.question`), which the engine
+ * writes to a file and lists first in the advisor's pack inputs. Provisional: proposed to
+ * `@vtc/shared` (MINOR: a `KNOWN_ARTIFACT_TYPES` entry and a path helper next to `taskPackPath`);
+ * until it lands the advisor prompts and role contracts already use this name, so the engine has
+ * one reading to build to. `request` stays the run's request (`PACK_INPUT_TYPES.request`).
+ */
+export const ADVISOR_QUESTION_ARTIFACT = "advisor_question";
+
+/**
+ * Artifact types the roles use that are proposed to `@vtc/shared` but not in
+ * `KNOWN_ARTIFACT_TYPES` yet. Drop an entry once shared adds it.
+ */
+export const PROPOSED_ARTIFACT_TYPES: readonly string[] = [ADVISOR_QUESTION_ARTIFACT];
+
 /** Every advisor rule `role` breaks; empty for a valid advisor and for every other role. */
 export const advisorContractErrors = (role: RoleContract): string[] => {
   const prefixed = role.id.startsWith(ADVISOR_PREFIX);
   if (role.kind !== "advisor") {
-    return prefixed ? [`only advisors (kind advisor) may use the ${ADVISOR_PREFIX} prefix`] : [];
+    const inputs = [
+      ...role.inputs,
+      ...Object.values(role.modes ?? {}).flatMap((mode) => mode.inputs ?? []),
+    ];
+    return [
+      ...(prefixed ? [`only advisors (kind advisor) may use the ${ADVISOR_PREFIX} prefix`] : []),
+      ...(inputs.includes(ADVISOR_QUESTION_ARTIFACT)
+        ? [`only advisors read ${ADVISOR_QUESTION_ARTIFACT} (the consult question)`]
+        : []),
+    ];
   }
   const errors: string[] = [];
   if (!prefixed) errors.push(`advisor role ids start with ${ADVISOR_PREFIX}`);
+  if (role.inputs[0] !== ADVISOR_QUESTION_ARTIFACT) {
+    errors.push(
+      `advisors read the human's question as their first input, ${ADVISOR_QUESTION_ARTIFACT} (the run's request is \`request\`, not the question)`,
+    );
+  }
   const { profile, write_paths: paths } = role.tools;
   const exportsOnly =
     profile === "write_scoped" && paths.every((path) => ADVISOR_WRITE_PATHS.includes(path));

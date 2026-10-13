@@ -10,7 +10,7 @@ roles/<role>/
   prompt.md   # locked core, then the editable section; 150 lines at most
 roles/_shared/
   result-protocol.md   # appended to every run role: how to read the task pack and return a RoleResult
-  advisor-protocol.md  # appended to every advisor instead: the Lead's request and the advice result
+  advisor-protocol.md  # appended to every advisor instead: the human's question and the advice result
   lens-reviewer.md     # the procedure every lens reviewer shares
 roles/NOTICE           # the agency-agents MIT notice; copied into both compiled plugins
 ```
@@ -58,9 +58,14 @@ Spine §5 readings 25 to 37 are Lead or integrator decisions of 2026-10-13, pend
 - **Advisors go through the engine** (reading 25). At the human's request the Lead calls the
   engine's `consult` tool, performs the one `spawn_role` it returns and submits the advisor's
   result with `submit`, so every advisor call is logged with its prompt SHA and model, priced and
-  capped by `budgets.advisor_usd`. An advisor reads a task pack like any role (the human's
-  question is its `request` input) and returns a role result through
-  `_shared/advisor-protocol.md`. The compiler (`advisorContractErrors`) accepts an advisor only
+  capped by `budgets.advisor_usd`. An advisor reads a task pack like any role and returns a role
+  result through `_shared/advisor-protocol.md`. The human's question (`ConsultInput.question`) is
+  its first input, of type `advisor_question`; `request` keeps its shared meaning, the run's idea
+  or change request. The `advisor_question` type is provisional: it is proposed to `@vtc/shared`
+  (a `KNOWN_ARTIFACT_TYPES` entry and a path helper for the file the engine writes, listed first
+  under the pack's Inputs) and, until it lands, the compiler lists it in
+  `PROPOSED_ARTIFACT_TYPES`, requires it as every advisor's first input and refuses it for any
+  other role. The compiler (`advisorContractErrors`) accepts an advisor only
   with an `advisor_` id (agent `vtc-advisor-<name>`; only advisors use the prefix), `reviewer:
 human`, exits `done`, `blocked` or `unknown`, no verdicts, no success criteria and no modes.
 - **Client-liaison exports** (reading 30). Every advisor is `read_only` except

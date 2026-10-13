@@ -11,7 +11,7 @@ kind: advisor
 mission: >-
   Plan user research the team can run, or synthesise the research material the team brings into
   findings tied to requirements and screens; never invent users, quotes or numbers.
-inputs: [request, spec, design_flows, screens, attachments]
+inputs: [advisor_question, request, spec, design_flows, screens, attachments]
 output: { artifacts: [], verdicts: [] }
 exits: [done, blocked, unknown]
 reviewer: human

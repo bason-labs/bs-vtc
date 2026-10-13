@@ -39,7 +39,14 @@ Both also get:
   `VTC_HOOK.timeoutMs` in seconds (spine §5 reading 31). Generated, never hand-written: the
   compiler rejects `plugins/<host>/hooks/**`. Hooks are an extra layer of defence only (AD-8
   rule 3); the command fails open and the engine stays the enforcement point. Host event names
-  and the Codex hook format are provisional until the spike (spine §7).
+  and the Codex hook format are provisional until the spike (spine §7). The hooks run a bare
+  `vtc` from `PATH` in every session where the plugin is enabled, VTC run or not, on session
+  start, subagent stop and every `Bash`, `Write`, `Edit`, `MultiEdit` and `NotebookEdit` call.
+  They need the `vtc` binary on `PATH`: without it (a dev checkout run as `node dist/bin.js`, or
+  a plugin installed without the binary) the host reports a hook error on each of those events.
+  Nothing is blocked, since a missing command is not the block exit, but the noise is constant.
+  Whether the adapter's install checks for `vtc` or the hooks run through a plugin-root shim is
+  proposed as a question for the hook-wiring spike row (spine §7).
 
 - **Role agents cannot reach the Lead's tools.** Claude Code agents get an explicit `tools:`
   allowlist without the engine's run-driving tools. Each Codex agent file carries its own
