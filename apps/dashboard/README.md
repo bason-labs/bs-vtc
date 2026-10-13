@@ -1,6 +1,19 @@
 # Flow Studio (apps/dashboard)
 
-Read-only local dashboard (spec §17). **Not built yet**: it lands in sub-project 6.
+Read-only local dashboard (spec §17), sub-project 6. Increment 1 is built: runs list, the flow
+graph at all three zoom levels (phases, task DAG, one task's pipeline with its fix loop) live over
+SSE, the node drawer, escalations (read-only), the per-host usage panel, the feature view with
+Final Review and PR state, and a plain-text artifact view.
+
+Pages (fixed, AD-20): `/`, `/run/?run=&zoom=phases|tasks&node=`, `/task/?run=&task=&node=`,
+`/feature/?run=&feature=`, `/escalations/?run=`, `/usage/`, `/artifact/?run=&path=`. Every page
+renders the same client app (`src/components/app/FlowStudio.tsx`), which picks the view from the
+address and switches views with `history.pushState` (`src/lib/router.ts`).
+
+`next` is a **devDependency**: it is the build tool, only `out/` ships, and its native SWC
+binaries must stay out of the production dependency closure (AD-2, `supply-chain.test.ts`). So
+`src/` never imports `next/*` (AD-11 rule 9): routing is our own, fonts are self-hosted
+(Fontsource) so the dashboard works offline.
 
 - Next.js 16 **static export**, React 19, Tailwind v4, Radix, lucide, React Flow (`@xyflow/react` 12).
   Source lives in `src/` (incl. `src/app/`); the `@/` alias maps to `src/` (dependency-cruiser
@@ -28,9 +41,15 @@ Read-only local dashboard (spec §17). **Not built yet**: it lands in sub-projec
 
 Development (AD-5 rule 8):
 
+- `pnpm dev:fixtures` serves the golden run (`scripts/fixture-server.ts`: recorded routes, the
+  event log replayed as SSE, any well-formed nonce accepted); `pnpm dev` proxies `/api/*` to it
+  (`VTC_DEV_API` overrides the target). `pnpm build && pnpm dev:fixtures --static out [--live]`
+  serves the real export by the engine's AD-20 rules on `http://127.0.0.1:4310/`.
+- Tests: `pnpm test` (vitest + Testing Library in jsdom) against the same fixture.
+
 - Build against `fixtures/golden-run/`: `events.jsonl` (replay it as the SSE stream) and `api/*.json`
   (the exact response of every read route).
-- Against a live engine, `next dev` proxies `/api/*` to the engine found in
+- Not built yet: against a live engine, `next dev` proxies `/api/*` to the engine found in
   `~/.vtc/engines/<repo-key>.json`, injecting the token, setting `Host` and dropping `Origin`. The
   engine never sends CORS headers.
 
