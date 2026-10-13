@@ -1,4 +1,5 @@
 import type { VtcEvent } from "@vtc/shared";
+import { NOTICE_EVENT_TYPES } from "../notices";
 
 /**
  * Live refresh (§17 "live: the engine's event stream"). The engine owns every derived view
@@ -8,14 +9,13 @@ import type { VtcEvent } from "@vtc/shared";
  * A run-scoped topic is `run:<run>:<name>`; `runs` and `usage` are global.
  */
 export type RunTopicName =
-  "status" | "graph" | "tasks" | "features" | "escalations" | `task:${string}`;
+  "status" | "graph" | "tasks" | "features" | "escalations" | "notices" | `task:${string}`;
 
 export const runTopic = (run: string, name: RunTopicName): string => `run:${run}:${name}`;
 
 const TASK_SCOPED: readonly RunTopicName[] = ["tasks", "graph", "status"];
 
-/** The run-scoped topics an event makes stale (plus `runs`/`usage` markers, made global below). */
-export const topicsForEvent = (event: VtcEvent): string[] => {
+const entityTopics = (event: VtcEvent): string[] => {
   const [entity] = event.type.split(".");
   const task = event.task === undefined ? [] : ([`task:${event.task}`] as const);
   switch (entity) {
@@ -45,6 +45,14 @@ export const topicsForEvent = (event: VtcEvent): string[] => {
     default:
       return [];
   }
+};
+
+/** The run-scoped topics an event makes stale (plus `runs`/`usage` markers, made global below). */
+export const topicsForEvent = (event: VtcEvent): string[] => {
+  const topics = entityTopics(event);
+  return (NOTICE_EVENT_TYPES as ReadonlySet<string>).has(event.type)
+    ? [...topics, "notices"]
+    : topics;
 };
 
 const GLOBAL = new Set(["runs", "usage"]);

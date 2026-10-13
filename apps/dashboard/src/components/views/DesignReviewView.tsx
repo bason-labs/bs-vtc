@@ -1,12 +1,11 @@
 "use client";
 
-import type { DesignReviewCommentInput } from "@vtc/shared";
+import { DESIGN_SCREENS_PATH, type DesignReviewCommentInput } from "@vtc/shared";
 import { MapPin, MessageSquarePlus } from "lucide-react";
 import { useId, useMemo, useState } from "react";
 import { ApiError, describeError } from "@/lib/api/errors";
 import {
   buildReviewInput,
-  DESIGN_SCREENS_PATH,
   designReviewsPath,
   designSelection,
   parsePins,
@@ -353,14 +352,16 @@ export function DesignReviewView({ run, params }: { run: string | null; params: 
       <Loaded resource={screensFile}>
         {(text) => {
           const parsed = text === null ? null : parseScreens(text);
-          if (parsed === null || parsed.screens.length === 0) {
+          if (parsed === null || !parsed.ok || parsed.screens.length === 0) {
             return (
               <EmptyState
                 title="No screens to review yet"
                 description={
-                  text === null
+                  parsed === null
                     ? `The Designer lists screens in ${DESIGN_SCREENS_PATH} during DESIGN.`
-                    : `${DESIGN_SCREENS_PATH} lists no screen this dashboard can read.`
+                    : parsed.ok
+                      ? `${DESIGN_SCREENS_PATH} lists no screen.`
+                      : `${DESIGN_SCREENS_PATH} does not match the screens contract (${parsed.error}).`
                 }
               />
             );
@@ -368,25 +369,17 @@ export function DesignReviewView({ run, params }: { run: string | null; params: 
           const selection = designSelection(params, parsed.screens);
           if (selection.screen === null) return null;
           return (
-            <>
-              {parsed.skipped === 0 ? null : (
-                <p className="mb-3 text-xs text-warn-fg">
-                  {parsed.skipped} screen{parsed.skipped === 1 ? "" : "s"} in {DESIGN_SCREENS_PATH}{" "}
-                  could not be read and {parsed.skipped === 1 ? "is" : "are"} not shown.
-                </p>
-              )}
-              <Review
-                key={selection.screen.id}
-                run={run}
-                selection={{ ...selection, screen: selection.screen }}
-                prototypeUrl={health?.prototype_url ?? null}
-                screens={parsed.screens}
-                added={added}
-                onAdded={(input) => {
-                  setAdded((a) => [...a, input]);
-                }}
-              />
-            </>
+            <Review
+              key={selection.screen.id}
+              run={run}
+              selection={{ ...selection, screen: selection.screen }}
+              prototypeUrl={health?.prototype_url ?? null}
+              screens={parsed.screens}
+              added={added}
+              onAdded={(input) => {
+                setAdded((a) => [...a, input]);
+              }}
+            />
           );
         }}
       </Loaded>

@@ -1,27 +1,28 @@
 import {
   DESIGN_REVIEW_MAX_BYTES,
   DesignReviewCommentInputSchema,
+  DesignScreensFileSchema,
   parsePersisted,
+  prototypeStatePath,
   SlugSchema,
   type DesignReviewCommentInput,
+  type DesignScreen as SharedDesignScreen,
+  type PrototypeTheme,
 } from "@vtc/shared";
 import { parse as parseYaml } from "yaml";
-import { z } from "zod";
 
 /**
  * Design review (spec §17): the Designer's prototype (`.vtc/design/prototype/`, served from its
  * own origin, AD-5 rule 9) with viewport, state and theme switchers, and click-to-pin comments
  * that the engine appends to `.vtc/design/reviews/<screen>.jsonl` (AD-5 rule 5). Approval still
- * happens in the Lead chat.
+ * happens in the Lead chat. The screen list (`DESIGN_SCREENS_PATH`) and the prototype query
+ * convention come from `@vtc/shared` (`DesignScreensFileSchema`, `prototypeStatePath`).
  */
-
-/** The Designer's screen list (spec §4.3, §9): each screen's route, required states and REQs. */
-export const DESIGN_SCREENS_PATH = ".vtc/design/screens.yaml";
 
 export const designReviewsPath = (screen: string): string =>
   `.vtc/design/reviews/${SlugSchema.parse(screen)}.jsonl`;
 
-export type DesignTheme = DesignReviewCommentInput["theme"];
+export type DesignTheme = PrototypeTheme;
 export const DESIGN_THEMES: readonly DesignTheme[] = ["light", "dark"];
 
 /** The Visual QA render widths (§7.5), with the frame height each one is shown at. */
@@ -32,58 +33,55 @@ export const VIEWPORTS = [
 ] as const;
 export type ViewportWidth = (typeof VIEWPORTS)[number]["width"];
 
-export interface DesignScreen {
-  readonly id: string;
-  /** Path on the prototype origin, e.g. `/reset/`. */
-  readonly route: string;
-  readonly states: readonly string[];
-  readonly reqs: readonly string[];
-}
+/** A screen as the review shows it: always at least one state (`default`). */
+export type DesignScreen = Readonly<
+  Omit<SharedDesignScreen, "states" | "reqs"> & {
+    states: readonly string[];
+    reqs: readonly string[];
+  }
+>;
 
-const ScreenSchema = z.object({
-  id: SlugSchema,
-  route: z
-    .string()
-    .max(500)
-    .regex(/^\/[^\s\\]*$/, "a path on the prototype origin"),
-  states: z.array(SlugSchema).max(50).default([]),
-  reqs: z.array(z.string().min(1).max(40)).max(100).default([]),
-});
+export type ScreensRead =
+  | {
+      readonly ok: true;
+      readonly screens: DesignScreen[];
+      /** Keys a newer Designer wrote that this version does not know (dropped, AD-3 rule 2). */
+      readonly stripped: readonly string[];
+    }
+  | { readonly ok: false; readonly error: string };
 
 /**
- * Reads `screens.yaml` (`screens: [{ id, route, states, reqs }]`). Screens that break the shape
- * are skipped and counted; a screen without states gets `default`. `null` = not a screen list.
- * Provisional: no `@vtc/shared` contract freezes this file yet (open integration risk, see the
- * README); swap `ScreenSchema` for the frozen schema once there is one.
+ * Reads `screens.yaml` against `DesignScreensFileSchema` (a reader of persisted data, so unknown
+ * keys are dropped, not errors). A screen without states gets `default`. A file that breaks the
+ * contract is refused as a whole, with the first problem and where it is.
  */
-export const parseScreens = (text: string): { screens: DesignScreen[]; skipped: number } | null => {
+export const parseScreens = (text: string): ScreensRead => {
   let doc: unknown;
   try {
     doc = parseYaml(text, { maxAliasCount: 50 });
   } catch {
-    return null;
+    return { ok: false, error: "not valid YAML" };
   }
-  const list = z.object({ screens: z.array(z.unknown()) }).safeParse(doc);
-  if (!list.success) return null;
-  const screens: DesignScreen[] = [];
-  let skipped = 0;
-  for (const item of list.data.screens) {
-    const parsed = ScreenSchema.safeParse(item);
-    if (!parsed.success || screens.some((s) => s.id === parsed.data.id)) {
-      skipped += 1;
-      continue;
-    }
-    const { id, route, states, reqs } = parsed.data;
-    screens.push({ id, route, states: states.length === 0 ? ["default"] : states, reqs });
+  const parsed = parsePersisted(DesignScreensFileSchema, doc);
+  if (!parsed.success) {
+    const issue = parsed.error.issues[0];
+    const where = issue === undefined || issue.path.length === 0 ? "(file)" : issue.path.join(".");
+    return { ok: false, error: `${where}: ${issue?.message ?? "invalid"}` };
   }
-  return { screens, skipped };
+  const screens = parsed.data.screens.map(({ id, route, states, reqs }) => ({
+    id,
+    route,
+    states: states.length === 0 ? ["default"] : states,
+    reqs,
+  }));
+  return { ok: true, screens, stripped: parsed.stripped };
 };
 
 const PROTOTYPE_ORIGIN = /^http:\/\/127\.0\.0\.1:[1-9]\d{0,4}$/;
 
 /**
- * The frame URL: the screen's route on the prototype origin (`HealthResult.prototype_url`), with
- * every state reachable through `?state=` (spec §9) and the theme through `?theme=`. `null` when
+ * The frame URL: `prototypeStatePath(route, state, theme)` on the prototype origin
+ * (`HealthResult.prototype_url`). `null` when the contract refuses the route or state, or when
  * the result would not be on that loopback origin.
  */
 export const prototypeFrameUrl = (
@@ -92,17 +90,16 @@ export const prototypeFrameUrl = (
   state: string,
   theme: DesignTheme,
 ): string | null => {
-  let base: URL;
   let url: URL;
+  let base: URL;
   try {
     base = new URL(prototypeUrl);
-    url = new URL(route.replace(/^[/\\]+/, ""), base);
+    // Relative to the prototype URL, so a route like `//host/x` can never name another origin.
+    url = new URL(prototypeStatePath(route, state, theme).replace(/^[/\\]+/, ""), base);
   } catch {
     return null;
   }
   if (!PROTOTYPE_ORIGIN.test(base.origin) || url.origin !== base.origin) return null;
-  url.searchParams.set("state", state);
-  url.searchParams.set("theme", theme);
   return url.href;
 };
 

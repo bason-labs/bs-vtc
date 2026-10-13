@@ -82,7 +82,7 @@ export function StepNodeCard({
         "nodrag nopan flex h-[112px] w-[216px] flex-col rounded-2xl border bg-surface/95 p-3 text-left text-sm backdrop-blur transition hover:border-accent",
         node.state === "running" ? "vtc-node-running" : "border-border",
         node.state === "looping" && "vtc-node-looping",
-        node.state === "interrupted" && "vtc-node-interrupted",
+        node.state === "interrupted" && "vtc-node-waiting-limit",
         node.state === "parked" && "vtc-node-parked",
         idle && "border-dashed opacity-75",
         node.state === "dropped" && "line-through",

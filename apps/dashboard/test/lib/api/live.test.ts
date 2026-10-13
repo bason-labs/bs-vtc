@@ -4,6 +4,7 @@ import { connectLiveStream, type LiveStatus } from "@/lib/api/live";
 import { ApiError } from "@/lib/api/errors";
 import { createInvalidationBus, runTopic, topicsForEvent } from "@/lib/api/topics";
 import { readEventLog } from "../../fixtures";
+import { NOTICE_EVENTS } from "../../notice-fixtures";
 
 const events = (): VtcEvent[] =>
   readEventLog()
@@ -41,6 +42,13 @@ describe("topicsForEvent", () => {
     expect(topicsForEvent(byType("run.phase_changed"))).toEqual(
       expect.arrayContaining(["runs", "graph"]),
     );
+  });
+  it("marks run notices stale on push, PR, incident and merge-level events", () => {
+    // branch.pushed and feature.pr_updated resolve earlier failures.
+    for (const e of NOTICE_EVENTS) {
+      expect(topicsForEvent(e)).toEqual(expect.arrayContaining(["notices"]));
+    }
+    expect(topicsForEvent(byType("task.status_changed"))).not.toContain("notices");
   });
   it("ignores event types it does not know", () => {
     expect(topicsForEvent({ ...byType("run.started"), type: "plugin.custom_thing" })).toEqual([]);

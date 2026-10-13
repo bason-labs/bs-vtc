@@ -4,6 +4,7 @@ import { runTopic } from "@/lib/api/topics";
 import { hrefs } from "@/lib/router";
 import { useResource } from "@/lib/useResource";
 import { FeatureSummary } from "@/components/feature/FeatureSummary";
+import { RunNotices } from "@/components/notices/RunNotices";
 import { EmptyState } from "@/components/ui";
 import { Breadcrumbs, Loaded, MissingParam } from "./common";
 
@@ -43,7 +44,12 @@ export function FeatureView({ run, feature }: { run: string | null; feature: str
                 />
               );
             }
-            return <FeatureSummary run={run} feature={chosen} tasks={tasks.data?.tasks ?? []} />;
+            return (
+              <>
+                <RunNotices run={run} feature={chosen.id} />
+                <FeatureSummary run={run} feature={chosen} tasks={tasks.data?.tasks ?? []} />
+              </>
+            );
           }}
         </Loaded>
       </div>
