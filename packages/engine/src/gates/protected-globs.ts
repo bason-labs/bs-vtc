@@ -125,10 +125,27 @@ export const isPackageManagerConfig = (path: string): boolean =>
 export const isGateCommandFile = (path: string): boolean =>
   isTaskRunnerFile(path) || isPackageManagerConfig(path);
 
+/**
+ * Host and VTC configuration (§7.6 rule 5): Claude Code and Codex project config (`.claude/`,
+ * `.mcp.json`, `.codex/`, which can start MCP servers, hooks or notify commands outside the role
+ * sandbox in a later run in the same worktree, or in the human's Lead session once merged), the
+ * repo's git hook directories, and the gates config itself. Codex has no per-path write deny, so
+ * L5 is where a role's change there is caught on both hosts.
+ */
+export const HOST_CONFIG_GLOBS: readonly string[] = [
+  "**/.claude/**",
+  "**/.mcp.json",
+  "**/.codex/**",
+  ".githooks/**",
+  ".husky/**",
+  ".vtc/gates.yml",
+];
+
 /** Everything L5 protects by default, on top of the project's `tests.protected_configs`. */
 export const DEFAULT_PROTECTED_GLOBS: readonly string[] = [
   ...LINT_TEST_CONFIG_GLOBS,
   ...SCANNER_CONFIG_GLOBS,
   ...TASK_RUNNER_GLOBS,
   ...PACKAGE_MANAGER_CONFIG_GLOBS,
+  ...HOST_CONFIG_GLOBS,
 ];

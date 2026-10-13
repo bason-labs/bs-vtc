@@ -58,6 +58,27 @@ describe("checkWriteScope", () => {
     expect(report).toEqual({ ok: true, violations: [] });
   });
 
+  it("flags host and VTC config under a wildcard scope: Codex has no per-path write deny (§7.6 rule 5)", async () => {
+    const { repo, base } = setup();
+    const files = [
+      ".codex/config.toml",
+      ".claude/settings.json",
+      "pkg/.claude/agents/x.md",
+      ".mcp.json",
+      ".githooks/pre-commit",
+      ".vtc/gates.yml",
+    ];
+    for (const file of files) writeFile(repo, file, "x\n");
+    const head = commitAll(repo, "host config");
+    const report = await checkWriteScope(createGitOps({ repoRoot: repo }), {
+      ...request(base, head),
+      filesScope: ["**"],
+    });
+    expect(report.violations).toEqual(
+      [...files].sort().map((path) => ({ kind: "protected_modified", path })),
+    );
+  });
+
   it("reports out-of-scope writes, protected edits and deletions, skips, suppressions and snapshot rewrites", async () => {
     const { repo, base } = setup();
     writeFile(repo, "src/other.ts", "export const g = 3;\n");

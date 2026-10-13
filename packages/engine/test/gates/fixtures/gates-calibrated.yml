@@ -76,6 +76,12 @@ tests:
     - "**/.pnpmfile.*"
     - "**/bunfig.toml"
     - "**/.bunfig.toml"
+    - "**/.claude/**"
+    - "**/.mcp.json"
+    - "**/.codex/**"
+    - .githooks/**
+    - .husky/**
+    - .vtc/gates.yml
 gates:
   - id: install
     layer: L0

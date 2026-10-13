@@ -50,7 +50,11 @@ import {
   type SessionRef,
   type SpawnRoleRequest,
 } from "@vtc/shared";
-import { vtcHomeWriteDeniedDirs } from "../common/homes.js";
+import {
+  VTC_HOME_READ_DENIED_DIRS,
+  vtcHomeReadDeniedDirs,
+  vtcHomeWriteDeniedDirs,
+} from "../common/homes.js";
 
 export const CLAUDE_BINARY = "claude";
 export const HOST = "claude-code";
@@ -300,6 +304,8 @@ export const claudeSandboxProfile = (
         `Read(${absoluteRulePath(unreadable.token, platform)})`,
         `Read(${absoluteRulePath(unreadable.codexHome, platform)}/**)`,
         credentials.rule,
+        // the hidden acceptance tests and the daemons' sockets (§7.3; spine §7 residual)
+        ...VTC_HOME_READ_DENIED_DIRS.map((dir) => `Read(${vtcHomeRule}/${dir}/**)`),
         ...deniedVtcCommands(),
         ...ROLE_DENIED_VTC.homeWriteDeny.flatMap((glob) =>
           WRITE_TOOL_NAMES.map((tool) => `${tool}(${vtcHomeRule}/${glob})`),
@@ -321,6 +327,7 @@ export const claudeSandboxProfile = (
           unreadable.token,
           unreadable.codexHome,
           ...(credentials.sandboxPath === undefined ? [] : [credentials.sandboxPath]),
+          ...vtcHomeReadDeniedDirs(options.vtcHome, platform),
         ],
       },
       network: { allowedDomains: request.network === "registries" ? [...REGISTRY_DOMAINS] : [] },

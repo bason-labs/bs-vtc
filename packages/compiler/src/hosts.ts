@@ -4,7 +4,15 @@
  * No emitted file sets a permission mode or a full-access sandbox (AD-9): read-only enforcement
  * comes from tool allowlists, the Codex sandbox, the OS sandbox and the engine's write-scope check.
  */
-import { engineMcpServer, ROLE_DENIED_VTC, type ModelTier, type RoleTools } from "@vtc/shared";
+import {
+  ENGINE_INSTANCE,
+  engineMcpServer,
+  HIDDEN_TESTS,
+  HOST_CREDENTIAL_DENY_READ,
+  ROLE_DENIED_VTC,
+  type ModelTier,
+  type RoleTools,
+} from "@vtc/shared";
 import { renderFrontmatter } from "./frontmatter.js";
 import { tomlMultiline, tomlString, tomlStringArray } from "./toml.js";
 import type { CompiledAgent } from "./types.js";
@@ -45,16 +53,25 @@ export const claudeToolsFor = (tools: RoleTools): string[] => [
 /**
  * What every Claude Code role agent is denied, whatever its profile (D-w, spine §5 reading 43):
  * running each `ROLE_DENIED_VTC` subcommand of `vtc`, and file writes (`Edit`, `Write`) to each
- * guarded glob under the VTC home. The rules name the default home `~/.vtc/`; a `$VTC_HOME`
- * elsewhere is not known when the plugin is compiled, and the adapter's sandbox profile, which
- * resolves it, stays the barrier for shell writes. A read-only agent has none of these tools,
- * but gets the same list so no agent depends on its allowlist alone.
+ * guarded glob under the VTC home. In plugin-only mode (AD-17) no adapter sandbox profile is
+ * built, so the agent also carries its own read denies: the install token, the hidden acceptance
+ * tests (§7.3), the daemons' socket directory and the Codex home. Claude's own credential file is
+ * not named here: an emitted plugin file may not carry a credential marker (AD-9; the D-ad
+ * exemption covers only the adapter's settings), so in this mode it rests on the Lead session's
+ * own permissions. The rules name the default homes `~/.vtc/` and `~/.codex/`; a `$VTC_HOME` or
+ * `$CODEX_HOME` elsewhere is not known when the plugin is compiled, and the adapter's sandbox
+ * profile, which resolves them, stays the barrier for headless runs. A read-only agent has none of
+ * the write tools, but gets the same list so no agent depends on its allowlist alone.
  */
 export const CLAUDE_DENIED_TOOLS: readonly string[] = [
   ...ROLE_DENIED_VTC.subcommands.map((sub) => `Bash(vtc ${sub}:*)`),
   ...ROLE_DENIED_VTC.homeWriteDeny.flatMap((glob) =>
     ["Edit", "Write"].map((tool) => `${tool}(~/.vtc/${glob})`),
   ),
+  `Read(~/.vtc/${ENGINE_INSTANCE.tokenFile})`,
+  `Read(~/.vtc/${HIDDEN_TESTS.homeDir}/**)`,
+  `Read(~/.vtc/${ENGINE_INSTANCE.socketDir}/**)`,
+  `Read(~/${HOST_CREDENTIAL_DENY_READ.codex.defaultConfigDir}/**)`,
 ];
 
 export const renderClaudeAgent = (agent: CompiledAgent): string =>

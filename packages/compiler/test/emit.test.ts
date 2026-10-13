@@ -90,10 +90,15 @@ describe("Claude Code agent (.md)", () => {
       "Write(~/.vtc/osv-db/**)",
       "Edit(~/.vtc/hidden/**)",
       "Write(~/.vtc/hidden/**)",
+      // plugin-only mode builds no adapter profile: the agent carries its own read denies
+      "Read(~/.vtc/token)",
+      "Read(~/.vtc/hidden/**)",
+      "Read(~/.vtc/run/**)",
+      "Read(~/.codex/**)",
     ]);
     // derived from the shared list, so a new entry there reaches every agent
     expect(CLAUDE_DENIED_TOOLS).toHaveLength(
-      ROLE_DENIED_VTC.subcommands.length + 2 * ROLE_DENIED_VTC.homeWriteDeny.length,
+      ROLE_DENIED_VTC.subcommands.length + 2 * ROLE_DENIED_VTC.homeWriteDeny.length + 4,
     );
     for (const profile of ["read_only", "write_scoped", "code_sandboxed"] as const) {
       const front = frontmatter(renderClaudeAgent(agent({ tools: tools(profile) })));
