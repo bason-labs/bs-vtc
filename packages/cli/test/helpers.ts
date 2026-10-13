@@ -6,6 +6,7 @@ import { execFileSync } from "node:child_process";
 import { mkdirSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
+import { PassThrough } from "node:stream";
 import { fileURLToPath } from "node:url";
 import { compilePlugins, readSources } from "@vtc/compiler";
 import {
@@ -134,3 +135,34 @@ export const fakeGateRunner = (): GateRunner => ({
   run: () => Promise.reject(new Error("no gates in this test")),
   checkWriteScope: () => Promise.reject(new Error("no gates in this test")),
 });
+
+/** Lines written to a PassThrough, and a wait for the one that matches. */
+export const lineSink = (): {
+  stdout: PassThrough;
+  next: (match: RegExp, ms?: number) => Promise<Record<string, unknown>>;
+} => {
+  const stdout = new PassThrough();
+  const lines: string[] = [];
+  let buffer = "";
+  stdout.on("data", (c: Buffer) => {
+    buffer += c.toString("utf8");
+    const parts = buffer.split("\n");
+    buffer = parts.pop() ?? "";
+    lines.push(...parts.filter((l) => l !== ""));
+  });
+  const next = async (match: RegExp, ms = 10_000): Promise<Record<string, unknown>> => {
+    const deadline = Date.now() + ms;
+    for (;;) {
+      const at = lines.findIndex((l) => match.test(l));
+      if (at >= 0) return JSON.parse(lines.splice(at, 1)[0] ?? "{}") as Record<string, unknown>;
+      if (Date.now() > deadline)
+        throw new Error(`no line matching ${String(match)} in ${JSON.stringify(lines)}`);
+      await new Promise((r) => setTimeout(r, 20));
+    }
+  };
+  return { stdout, next };
+};
+
+/** One JSON-RPC request line. */
+export const rpc = (id: number, method: string, params?: unknown): string =>
+  `${JSON.stringify({ jsonrpc: "2.0", id, method, ...(params === undefined ? {} : { params }) })}\n`;

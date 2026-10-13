@@ -4,22 +4,35 @@
  *   @vtc/engine (engine-core team); it runs until the daemon exits (idle, or SIGINT/SIGTERM).
  * - `vtc engine --mcp --host <host>` is the stdio bridge, the MCP entry of every host plugin
  *   (AD-16): it finds the repo's daemon (starting one detached when none is live), sends its
- *   hello and then relays bytes. In a repo `vtc init` never set up it starts no daemon and
- *   answers MCP itself until the repo is set up (`bridge.ts`). Nothing but MCP is ever written to
- *   its stdout.
+ *   hello and then relays bytes. In a repo `vtc init` never set up, or outside any git
+ *   repository (reading 74), it starts no daemon, creates nothing and answers MCP itself
+ *   (`bridge.ts`). On Claude Code every hello reports the session sandbox the repo's and
+ *   the user's Claude settings give, read afresh each time (D-an). Nothing but MCP is ever written to its stdout.
  * - `vtc engine --stop` stops the repo's running daemon (e.g. one of an older `vtc` that refuses
  *   this one after an upgrade).
  * - `vtc engine --wake-due` is what the auto-resume timer (launchd or systemd) runs every minute: it starts
  *   `vtc engine --daemon --wake` for each repo whose persisted wake-up is due (§6.9 step 4).
  */
 import { existsSync } from "node:fs";
+import type { Readable, Writable } from "node:stream";
 import { core } from "@vtc/engine";
 import { HostIdSchema } from "@vtc/shared";
-import { runBridge } from "../bridge.js";
+import { NOT_A_GIT_REPO, runBridge } from "../bridge.js";
 import { ensureDaemon, liveDaemon, stopDaemon } from "../daemon.js";
-import { isVtcProject, requireRepoRoot, requireVtcProject, UsageError } from "../repo.js";
+import {
+  findRepoRoot,
+  isVtcProject,
+  requireRepoRoot,
+  requireVtcProject,
+  UsageError,
+} from "../repo.js";
 import { runtime } from "../runtime.js";
 import { createWakeScheduler, dueWakeups, wakeRecords } from "../scheduler.js";
+import {
+  defaultSessionSandboxEnv,
+  sessionSandboxProbe,
+  type SessionSandboxEnv,
+} from "../session-sandbox.js";
 import { ensureInstallToken } from "../token.js";
 import { buildEngineParts, disposeAdapters, engineVersions, startDaemon } from "../wiring.js";
 import type { CommandContext, CommandSpec } from "./types.js";
@@ -68,19 +81,48 @@ const runDaemonCommand = async (ctx: CommandContext, wake: boolean): Promise<num
   return EXIT.ok;
 };
 
-const runMcpBridge = async (ctx: CommandContext, hostName: string | undefined): Promise<number> => {
+/** The stdio the bridge speaks MCP on: the process's own, injected in tests. */
+export interface EngineCommandDeps {
+  readonly stdin: Readable;
+  readonly stdout: Writable;
+  /** Where the Claude session sandbox state is read from (the real machine by default). */
+  readonly sessionSandboxEnv?: () => SessionSandboxEnv;
+}
+
+export const defaultEngineCommandDeps = (): EngineCommandDeps => ({
+  stdin: process.stdin,
+  stdout: process.stdout,
+});
+
+const runMcpBridge = async (
+  ctx: CommandContext,
+  hostName: string | undefined,
+  stdio: EngineCommandDeps,
+): Promise<number> => {
   const host = HostIdSchema.safeParse(hostName);
   if (!host.success) throw new UsageError("--mcp needs --host claude-code or --host codex");
-  const repoRoot = await requireRepoRoot(ctx.cwd);
+  // outside a git repository: the deferred bridge, never a daemon (reading 74)
+  const repoRoot = await findRepoRoot(ctx.cwd);
+  // read again for every hello: Claude Code applies settings edits to the running session
+  const sessionSandbox = sessionSandboxProbe(
+    repoRoot,
+    host.data,
+    ctx.vtcHome,
+    (stdio.sessionSandboxEnv ?? defaultSessionSandboxEnv)(),
+    // the session's own cwd: Claude Code reads its project settings there (a linked worktree)
+    ctx.cwd,
+  );
   await runBridge({
     repoRoot,
     host: host.data,
-    stdin: process.stdin,
-    stdout: process.stdout,
-    initialised: () => isVtcProject(repoRoot),
-    daemonSocket: async () =>
-      (await ensureDaemon({ vtcHome: ctx.vtcHome, repoRoot, selfCommand: runtime().selfCommand }))
-        .mcp_socket,
+    stdin: stdio.stdin,
+    stdout: stdio.stdout,
+    initialised: () => repoRoot !== null && isVtcProject(repoRoot),
+    daemon: () =>
+      repoRoot === null
+        ? Promise.reject(new Error(NOT_A_GIT_REPO))
+        : ensureDaemon({ vtcHome: ctx.vtcHome, repoRoot, selfCommand: runtime().selfCommand }),
+    ...(sessionSandbox === undefined ? {} : { sessionSandbox }),
     serverVersion: engineVersions().engine,
   });
   return EXIT.ok;
@@ -141,7 +183,9 @@ export const wakeDue = async (
   return started;
 };
 
-export const command: CommandSpec = {
+export const createEngineCommand = (
+  deps: () => EngineCommandDeps = defaultEngineCommandDeps,
+): CommandSpec => ({
   name: "engine",
   summary:
     "Run the engine daemon (--daemon), the stdio MCP bridge (--mcp --host <host>) or stop the repo's daemon (--stop)",
@@ -163,9 +207,11 @@ export const command: CommandSpec = {
           "usage: vtc engine --daemon [--wake] | --mcp --host <claude-code|codex> | --wake-due | --stop",
         );
       if (values.daemon === true) return runDaemonCommand(ctx, values.wake === true);
-      if (values.mcp === true) return runMcpBridge(ctx, values.host);
+      if (values.mcp === true) return runMcpBridge(ctx, values.host, deps());
       if (values.stop === true) return runStop(ctx);
       await wakeDue(ctx);
       return EXIT.ok;
     }),
-};
+});
+
+export const command = createEngineCommand();

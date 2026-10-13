@@ -1,7 +1,8 @@
 /**
  * Composition (AD-1 rule 4, AD-19; owner: cli+binary team). The only place that builds the
- * daemon's dependencies: the storage driver for this runtime, the Gate Runner, the host
- * adapters, the asset bundle, the auto-resume timer and the `gh`-backed PR service.
+ * daemon's dependencies: the storage driver for this runtime, the Gate Runner (with the user's
+ * `gates.allow_unsandboxed`, D-al), the host adapters, the asset bundle, the auto-resume timer
+ * and the `gh`-backed PR service.
  */
 import { homedir } from "node:os";
 import { join, resolve } from "node:path";
@@ -24,10 +25,12 @@ import {
 } from "@vtc/shared";
 import type { CliIo, CommandContext } from "./commands/types.js";
 import { ensureDaemon } from "./daemon.js";
+import { guardHumanOnly } from "./human-channel.js";
 import { requireRepoRoot, requireVtcProject } from "./repo.js";
 import { runtime } from "./runtime.js";
 import { createWakeScheduler } from "./scheduler.js";
 import { loadStorage } from "./storage.js";
+import { allowUnsandboxedOf, readUserConfig } from "./user-config.js";
 import { VERSION } from "./version.js";
 
 export { VERSION } from "./version.js";
@@ -119,20 +122,33 @@ export interface BuildEnginePartsOptions {
   readonly scheduler?: AutoResumeScheduler;
   readonly pullRequests?: PullRequestService;
   readonly ghCommand?: string;
+  /**
+   * Gate runs without an OS sandbox (D-al, spine §5 reading 69). Default: the user-level
+   * `gates.allow_unsandboxed` of `~/.vtc/config.yaml` (`gatesAllowUnsandboxed`); never from
+   * `project.yaml`, and false when the file does not parse.
+   */
+  readonly allowUnsandboxed?: boolean;
 }
 
 /** Builds every part `vtc engine --daemon` injects. Constructing them starts no process. */
 export const buildEngineParts = async (options: BuildEnginePartsOptions): Promise<EngineParts> => {
   const { repoRoot, vtcHome } = options;
   const createGateRunner = options.createGateRunner ?? gates.createGateRunner;
+  const allowUnsandboxed = options.allowUnsandboxed ?? allowUnsandboxedOf(readUserConfig(vtcHome));
   return {
     repoRoot,
     vtcHome,
     installToken: options.installToken,
     openStorage: options.openStorage ?? (await loadStorage()),
-    // the Gate Runner reads and diffs through the engine's GitOps only (AD-13 rule 4)
+    // the Gate Runner reads and diffs through the engine's GitOps only (AD-13 rule 4); it
+    // detects the machine's gate sandbox itself (no `sandbox` passed, D-al)
     gateRunner: lazyGateRunner(() =>
-      createGateRunner({ repoRoot, vtcHome, git: git.createGitOps({ repoRoot }) }),
+      createGateRunner({
+        repoRoot,
+        vtcHome,
+        git: git.createGitOps({ repoRoot }),
+        allowUnsandboxed,
+      }),
     ),
     adapters: createAdapters(options.adapterFactories ?? ADAPTER_FACTORIES, {
       vtcHome,
@@ -180,7 +196,10 @@ export const connectToRepoEngine = async (cwd: string, vtcHome: string): Promise
   return mcp.connectEngineClient(discovery.mcp_socket);
 };
 
-/** The context every command runs with. The engine client connects lazily, once. */
+/**
+ * The context every command runs with. The engine client connects lazily, once, and never calls
+ * a human-only tool (`guardHumanOnly`, D-an): its hello carries no install token.
+ */
 export const createCommandContext = (
   io: CliIo,
   cwd: string,
@@ -188,5 +207,5 @@ export const createCommandContext = (
   connect: () => Promise<EngineClient> = () => connectToRepoEngine(cwd, vtcHome),
 ): CommandContext => {
   let client: Promise<EngineClient> | undefined;
-  return { io, cwd, vtcHome, engine: () => (client ??= connect()) };
+  return { io, cwd, vtcHome, engine: () => (client ??= connect().then(guardHumanOnly)) };
 };
