@@ -120,7 +120,7 @@ export const defaultDoctorEnv = (ctx: CommandContext): DoctorCommandEnv => {
       const repoRoot = await findRepoRoot(ctx.cwd);
       return repoRoot === null
         ? null
-        : claudeSessionSandboxOf(repoRoot, ctx.vtcHome, defaultSessionSandboxEnv());
+        : claudeSessionSandboxOf(repoRoot, ctx.vtcHome, defaultSessionSandboxEnv(), ctx.cwd);
     },
   };
 };

@@ -125,7 +125,7 @@ const installSessionSandbox = async (
     }
   };
   const env = d.sessionSandboxEnv();
-  if (claudeSessionSandboxOf(repoRoot, ctx.vtcHome, env).state === "on") {
+  if (claudeSessionSandboxOf(repoRoot, ctx.vtcHome, env, ctx.cwd).state === "on") {
     ctx.io.out(`The Claude Code session sandbox is already on in ${read.path}.`);
     await ensureIgnored();
     return true;
@@ -141,6 +141,7 @@ const installSessionSandbox = async (
           read.settings,
           { path: read.path, base: repoRoot, homeDir: env.homeDir },
           ctx.vtcHome,
+          env.platform,
         )
       : [];
   if (dropped.length > 0) {
@@ -158,11 +159,12 @@ const installSessionSandbox = async (
     mergeSessionSandboxSettings(read.kind === "ok" ? read.settings : {}, ctx.vtcHome, {
       projectRoot: repoRoot,
       homeDir: env.homeDir,
+      platform: env.platform,
     }),
   );
   ctx.io.out(`  wrote ${path}`);
   await ensureIgnored();
-  const after = claudeSessionSandboxOf(repoRoot, ctx.vtcHome, env);
+  const after = claudeSessionSandboxOf(repoRoot, ctx.vtcHome, env, ctx.cwd);
   if (after.state !== "on") {
     ctx.io.out(
       `The session sandbox is still ${after.state}, so code-running roles stay refused in your Claude Code session:`,
