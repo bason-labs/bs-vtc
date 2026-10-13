@@ -14,13 +14,7 @@ import {
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import {
-  claudeSessionSandboxSettings,
-  claudeSessionSandboxState,
-  ROLE_DENIED_VTC,
-  STATUSLINE_TEE,
-  statuslineTeeCommand,
-} from "@vtc/shared";
+import { claudeSessionSandboxState, STATUSLINE_TEE, statuslineTeeCommand } from "@vtc/shared";
 import * as adapters from "../../src/index.js";
 import { createClaudeCodeAdapter } from "../../src/index.js";
 import { writeFixturePlugin } from "../support/plugin-fixture.js";
@@ -276,7 +270,7 @@ describe("Claude install (AD-6 rule 5, AD-16 rule 4)", () => {
   });
 });
 
-describe("Claude install: the session sandbox for in-session roles (D-an, spine §5 reading 71)", () => {
+describe("Claude install: the project's local settings; the session sandbox is the cli's alone (D-an)", () => {
   const VTC_HOME = "/home/dev/.vtc";
   // git sees only the repository under test: no user or system ignore rules or config
   beforeEach(() => {
@@ -290,7 +284,7 @@ describe("Claude install: the session sandbox for in-session roles (D-an, spine 
   });
   const git = (cwd: string, ...args: string[]): string =>
     execFileSync("git", args, { cwd, encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] });
-  /** A project that is a git checkout, where the session sandbox goes. */
+  /** A project that is a git checkout. */
   const repoSetup = () => {
     const env = setup();
     git(env.projectRoot, "init", "-q");
@@ -317,23 +311,21 @@ describe("Claude install: the session sandbox for in-session roles (D-an, spine 
       existsSync(path) && statSync(path).isFile() ? readFileSync(path, "utf8") : existsSync(path),
     );
 
-  it("keeps the local settings out of git: adds them to .git/info/exclude once, when nothing ignores them yet (D-an)", async () => {
-    for (const scope of ["user", "project"] as const) {
-      const env = repoSetup();
-      expect(ignored(env.projectRoot)).toBe(false);
-      const adapter = createClaudeCodeAdapter({ vtcHome: VTC_HOME });
-      const result = await adapter.install({ ...env, scope });
-      expect(ignored(env.projectRoot)).toBe(true);
-      // ignored, and not committed or staged by `git add -A`
-      git(env.projectRoot, "add", "-A");
-      expect(git(env.projectRoot, "ls-files", "--", ".claude")).toBe("");
-      expect(result.written).toContain(excludeOf(env.projectRoot));
-      expect(result.notes.join("\n")).toContain("out of git");
-      const once = readFileSync(excludeOf(env.projectRoot), "utf8");
-      expect(once.match(/settings\.local\.json/g)).toHaveLength(1);
-      await adapter.install({ ...env, scope });
-      expect(readFileSync(excludeOf(env.projectRoot), "utf8")).toBe(once);
-    }
+  it("project scope keeps the local settings out of git: adds them to .git/info/exclude once, when nothing ignores them yet", async () => {
+    const env = repoSetup();
+    expect(ignored(env.projectRoot)).toBe(false);
+    const adapter = createClaudeCodeAdapter({ vtcHome: VTC_HOME });
+    const result = await adapter.install({ ...env, scope: "project" });
+    expect(ignored(env.projectRoot)).toBe(true);
+    // ignored, and not committed or staged by `git add -A`
+    git(env.projectRoot, "add", "-A");
+    expect(git(env.projectRoot, "ls-files", "--", ".claude")).toBe("");
+    expect(result.written).toContain(excludeOf(env.projectRoot));
+    expect(result.notes.join("\n")).toContain("out of git");
+    const once = readFileSync(excludeOf(env.projectRoot), "utf8");
+    expect(once.match(/settings\.local\.json/g)).toHaveLength(1);
+    await adapter.install({ ...env, scope: "project" });
+    expect(readFileSync(excludeOf(env.projectRoot), "utf8")).toBe(once);
   });
 
   it("leaves .git/info/exclude alone when the repo already ignores the local settings", async () => {
@@ -342,227 +334,87 @@ describe("Claude install: the session sandbox for in-session roles (D-an, spine 
     const before = readFileSync(excludeOf(env.projectRoot), "utf8");
     const result = await createClaudeCodeAdapter({ vtcHome: VTC_HOME }).install({
       ...env,
-      scope: "user",
+      scope: "project",
     });
     expect(readFileSync(excludeOf(env.projectRoot), "utf8")).toBe(before);
     expect(result.written).not.toContain(excludeOf(env.projectRoot));
     expect(ignored(env.projectRoot)).toBe(true);
   });
 
-  it("refuses, writing nothing, when git tracks the local settings: it never writes machine paths into a shared file", async () => {
-    for (const scope of ["user", "project"] as const) {
-      const env = repoSetup();
-      writeJsonFile(localOf(env.projectRoot), { model: "opus" });
-      git(env.projectRoot, "add", "-f", "--", ".claude/settings.local.json");
-      const before = snapshot(env);
-      await expect(
-        createClaudeCodeAdapter({ vtcHome: VTC_HOME }).install({ ...env, scope }),
-      ).rejects.toThrow(/tracked by git.*git rm --cached/);
-      expect(snapshot(env)).toEqual(before);
-    }
+  it("project scope refuses, writing nothing, when git tracks the local settings: it never writes machine paths into a shared file", async () => {
+    const env = repoSetup();
+    writeJsonFile(localOf(env.projectRoot), { model: "opus" });
+    git(env.projectRoot, "add", "-f", "--", ".claude/settings.local.json");
+    const before = snapshot(env);
+    await expect(
+      createClaudeCodeAdapter({ vtcHome: VTC_HOME }).install({ ...env, scope: "project" }),
+    ).rejects.toThrow(/tracked by git.*git rm --cached/);
+    expect(snapshot(env)).toEqual(before);
   });
 
   it.skipIf(process.platform === "win32")(
-    "refuses, writing nothing, when the local settings or their .claude directory is a link: no file outside the project is rewritten",
+    "project scope refuses, writing nothing, when the local settings or their .claude directory is a link",
     async () => {
-      for (const scope of ["user", "project"] as const) {
-        for (const linked of ["file", "dir"] as const) {
-          const env = repoSetup();
-          const outside = temp("vtc-outside-");
-          const target = join(outside, "settings.local.json");
-          writeFileSync(target, JSON.stringify({ model: "haiku" }));
-          if (linked === "file") {
-            mkdirSync(join(env.projectRoot, ".claude"));
-            symlinkSync(target, localOf(env.projectRoot));
-          } else {
-            symlinkSync(outside, join(env.projectRoot, ".claude"));
-          }
-          const before = snapshot(env);
-          await expect(
-            createClaudeCodeAdapter({ vtcHome: VTC_HOME }).install({ ...env, scope }),
-          ).rejects.toThrow(/is a link/);
-          expect(readFileSync(target, "utf8")).toBe(JSON.stringify({ model: "haiku" }));
-          expect(snapshot(env)).toEqual(before);
+      for (const linked of ["file", "dir"] as const) {
+        const env = repoSetup();
+        const outside = temp("vtc-outside-");
+        const target = join(outside, "settings.local.json");
+        writeFileSync(target, JSON.stringify({ model: "haiku" }));
+        if (linked === "file") {
+          mkdirSync(join(env.projectRoot, ".claude"));
+          symlinkSync(target, localOf(env.projectRoot));
+        } else {
+          symlinkSync(outside, join(env.projectRoot, ".claude"));
         }
+        const before = snapshot(env);
+        await expect(
+          createClaudeCodeAdapter({ vtcHome: VTC_HOME }).install({ ...env, scope: "project" }),
+        ).rejects.toThrow(/is a link/);
+        expect(readFileSync(target, "utf8")).toBe(JSON.stringify({ model: "haiku" }));
+        expect(snapshot(env)).toEqual(before);
       }
     },
   );
 
-  it("refuses, writing nothing, when a settings layer reopens an escape from the session sandbox, naming each key", async () => {
-    const escapes: [string, Record<string, unknown>][] = [
-      ["sandbox.excludedCommands", { excludedCommands: ["docker"] }],
-      ["sandbox.network.allowAllUnixSockets", { network: { allowAllUnixSockets: true } }],
-      [
-        `sandbox.network.allowUnixSockets: ${VTC_HOME}/run/engine.sock`,
-        { network: { allowUnixSockets: [`${VTC_HOME}/run/engine.sock`] } },
-      ],
-      [`sandbox.filesystem.allowRead: ${VTC_HOME}`, { filesystem: { allowRead: [VTC_HOME] } }],
-      ["sandbox.filesystem.allowWrite: /home/dev", { filesystem: { allowWrite: ["/home/dev"] } }],
-      [
-        `sandbox.filesystem.allowRead: ${VTC_HOME}/run/**`,
-        { filesystem: { allowRead: [`${VTC_HOME}/run/**`] } },
-      ],
-      ["sandbox.enableWeakerNestedSandbox", { enableWeakerNestedSandbox: true }],
-    ];
-    for (const [key, sandbox] of escapes) {
-      for (const layer of ["local", "shared", "user"] as const) {
-        const env = repoSetup();
-        const file =
-          layer === "local"
-            ? localOf(env.projectRoot)
-            : layer === "shared"
-              ? join(env.projectRoot, ".claude", "settings.json")
-              : join(env.home, ".claude", "settings.json");
-        writeJsonFile(file, { sandbox });
-        const before = snapshot(env);
-        await expect(
-          createClaudeCodeAdapter({ vtcHome: VTC_HOME }).install({ ...env, scope: "user" }),
-        ).rejects.toThrow(key);
-        expect(snapshot(env)).toEqual(before);
-      }
-    }
-  });
-
-  it("keeps sandbox entries that stay clear of the VTC home", async () => {
+  it("user scope in a git checkout writes no local settings: no session sandbox without the user's confirmation", async () => {
     const env = repoSetup();
-    const sandbox = {
-      excludedCommands: [],
-      network: { allowUnixSockets: ["/var/run/docker.sock"], allowAllUnixSockets: false },
-      filesystem: { allowRead: ["/opt/data"], allowWrite: ["/scratch", "~/.cache"] },
-    };
-    writeJsonFile(localOf(env.projectRoot), { sandbox });
-    await createClaudeCodeAdapter({ vtcHome: VTC_HOME }).install({ ...env, scope: "user" });
-    const written = readJson(localOf(env.projectRoot)).sandbox as Record<string, unknown>;
-    expect(written).toMatchObject({ excludedCommands: [], network: sandbox.network });
-    expect(claudeSessionSandboxState(readJson(localOf(env.projectRoot)), VTC_HOME).state).toBe(
-      "on",
-    );
-  });
-
-  it("writes claudeSessionSandboxSettings into the project's settings.local.json in either scope", async () => {
-    for (const scope of ["user", "project"] as const) {
-      const env = repoSetup();
-      const result = await createClaudeCodeAdapter({ vtcHome: VTC_HOME }).install({
-        ...env,
-        scope,
-      });
-      const local = localOf(env.projectRoot);
-      expect(result.written).toContain(local);
-      const settings = readJson(local);
-      expect(settings.sandbox).toEqual(claudeSessionSandboxSettings(VTC_HOME).sandbox);
-      expect(claudeSessionSandboxState(settings, VTC_HOME)).toEqual({ state: "on", missing: [] });
-      // reads denied on the token and sockets, writes on every homeWriteDeny entry
-      const sandbox = settings.sandbox as {
-        filesystem: { denyRead: string[]; denyWrite: string[] };
-      };
-      expect(sandbox.filesystem.denyRead).toEqual(
-        expect.arrayContaining([`${VTC_HOME}/token`, `${VTC_HOME}/run`]),
-      );
-      expect(sandbox.filesystem.denyWrite).toHaveLength(ROLE_DENIED_VTC.homeWriteDeny.length);
-      // the user is told what was written, and that the file stays out of git
-      const notes = result.notes.join("\n");
-      expect(notes).toContain(local);
-      expect(notes).toContain(`${VTC_HOME}/token`);
-      expect(notes).toContain("out of git");
-    }
-  });
-
-  it("user scope leaves the user's own settings without a sandbox block", async () => {
-    const env = repoSetup();
-    await createClaudeCodeAdapter({ vtcHome: VTC_HOME }).install({ ...env, scope: "user" });
-    expect(readJson(join(env.home, ".claude", "settings.json"))).not.toHaveProperty("sandbox");
-    expect(readJson(localOf(env.projectRoot))).toEqual({
-      sandbox: claudeSessionSandboxSettings(VTC_HOME).sandbox,
-    });
-  });
-
-  it("merges into the existing local settings: keeps the user's keys and entries, turns the sandbox on, and is idempotent", async () => {
-    const env = repoSetup();
-    const local = localOf(env.projectRoot);
-    writeJsonFile(local, {
-      model: "opus",
-      sandbox: {
-        enabled: false,
-        allowUnsandboxedCommands: true,
-        network: { allowedDomains: ["example.test"] },
-        filesystem: { denyRead: ["/secrets", `${VTC_HOME}/token`], allowWrite: ["/scratch"] },
-      },
-    });
-    const adapter = createClaudeCodeAdapter({ vtcHome: VTC_HOME });
-    await adapter.install({ ...env, scope: "user" });
-    const wanted = claudeSessionSandboxSettings(VTC_HOME).sandbox;
-    const settings = readJson(local);
-    expect(settings.model).toBe("opus");
-    expect(settings.sandbox).toEqual({
-      enabled: true,
-      allowUnsandboxedCommands: false,
-      network: { allowedDomains: ["example.test"] },
-      filesystem: {
-        denyRead: [
-          "/secrets",
-          `${VTC_HOME}/token`,
-          ...wanted.filesystem.denyRead.filter((p) => p !== `${VTC_HOME}/token`),
-        ],
-        denyWrite: wanted.filesystem.denyWrite,
-        allowWrite: ["/scratch"],
-      },
-    });
-    expect(claudeSessionSandboxState(settings, VTC_HOME).state).toBe("on");
-    const first = readFileSync(local, "utf8");
-    await adapter.install({ ...env, scope: "user" });
-    expect(readFileSync(local, "utf8")).toBe(first);
-  });
-
-  it("project scope keeps the plugin registration and the sandbox in the one local file", async () => {
-    const env = repoSetup();
-    await createClaudeCodeAdapter({ vtcHome: VTC_HOME }).install({ ...env, scope: "project" });
-    const settings = readJson(localOf(env.projectRoot));
-    expect(settings.enabledPlugins).toEqual({ "vtc@vtc-local": true });
-    expect(claudeSessionSandboxState(settings, VTC_HOME).state).toBe("on");
-  });
-
-  it("refuses, writing nothing, when the local settings it would write carry an AD-9 marker", async () => {
-    const env = repoSetup();
-    const local = localOf(env.projectRoot);
-    writeJsonFile(local, { permissions: { defaultMode: "bypassPermissions" } });
-    const before = readFileSync(local, "utf8");
-    await expect(
-      createClaudeCodeAdapter({ vtcHome: VTC_HOME }).install({ ...env, scope: "user" }),
-    ).rejects.toThrow(/bypassPermissions/);
-    expect(readFileSync(local, "utf8")).toBe(before);
-    expect(existsSync(join(env.home, ".vtc", "claude-marketplace"))).toBe(false);
-    expect(existsSync(join(env.home, ".claude", "settings.json"))).toBe(false);
-  });
-
-  it("writes no sandbox outside a git checkout, and says how to turn it on", async () => {
-    const env = setup();
+    const before = readFileSync(excludeOf(env.projectRoot), "utf8");
     const result = await createClaudeCodeAdapter({ vtcHome: VTC_HOME }).install({
       ...env,
       scope: "user",
     });
     expect(existsSync(localOf(env.projectRoot))).toBe(false);
-    expect(result.notes.join("\n")).toMatch(/session sandbox/);
+    expect(result.written).not.toContain(localOf(env.projectRoot));
+    expect(readFileSync(excludeOf(env.projectRoot), "utf8")).toBe(before);
+    expect(readJson(join(env.home, ".claude", "settings.json"))).not.toHaveProperty("sandbox");
   });
 
-  it("writes no sandbox for a Windows VTC home, where Claude Code has no session sandbox, and says so", async () => {
+  it("project scope registers the plugin and leaves the user's sandbox keys as they are, widening ones included (the cli shows and drops those)", async () => {
     const env = repoSetup();
-    const result = await createClaudeCodeAdapter({ vtcHome: "C:\\Users\\u\\.vtc" }).install({
+    const local = localOf(env.projectRoot);
+    const sandbox = { enabled: false, excludedCommands: ["docker"] };
+    writeJsonFile(local, { model: "opus", sandbox });
+    const result = await createClaudeCodeAdapter({ vtcHome: VTC_HOME }).install({
       ...env,
-      scope: "user",
+      scope: "project",
     });
-    expect(existsSync(localOf(env.projectRoot))).toBe(false);
-    expect(result.notes.join("\n")).toMatch(/no session sandbox on this platform/);
+    const settings = readJson(local);
+    expect(settings.enabledPlugins).toEqual({ "vtc@vtc-local": true });
+    expect(settings.model).toBe("opus");
+    expect(settings.sandbox).toEqual(sandbox);
+    expect(claudeSessionSandboxState(settings, VTC_HOME).state).toBe("off");
+    expect(result.notes.join("\n")).not.toMatch(/Turned on the Claude Code session sandbox/);
   });
 
-  it("follows the VTC home the cli resolved", async () => {
+  it("project scope refuses, writing nothing, when the local settings it would write carry an AD-9 marker", async () => {
     const env = repoSetup();
-    await adapters.ADAPTER_FACTORIES["claude-code"]!({ vtcHome: "/cli/vtc home" }).install({
-      ...env,
-      scope: "user",
-    });
-    expect(claudeSessionSandboxState(readJson(localOf(env.projectRoot)), "/cli/vtc home")).toEqual({
-      state: "on",
-      missing: [],
-    });
+    const local = localOf(env.projectRoot);
+    writeJsonFile(local, { permissions: { defaultMode: "bypassPermissions" } });
+    const before = readFileSync(local, "utf8");
+    await expect(
+      createClaudeCodeAdapter({ vtcHome: VTC_HOME }).install({ ...env, scope: "project" }),
+    ).rejects.toThrow(/bypassPermissions/);
+    expect(readFileSync(local, "utf8")).toBe(before);
+    expect(existsSync(join(env.home, ".vtc", "claude-marketplace"))).toBe(false);
   });
 });

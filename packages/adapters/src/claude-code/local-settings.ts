@@ -1,22 +1,19 @@
 /**
- * Guards for the project's personal `.claude/settings.local.json`, which `install` writes in a
- * git checkout in either scope (D-an, spine §5 reading 71). Every check runs before anything is
- * written, so a refusal leaves every file as it was.
+ * Guards for the project's personal `.claude/settings.local.json`, which `install` writes in the
+ * project scope. Every check runs before anything is written, so a refusal leaves every file as it
+ * was.
  * - The file and its `.claude` directory must be real entries in the project, never links: a
  *   cloned repository could otherwise make install rewrite any JSON file the user owns.
  * - The file must stay out of git: a tracked one is refused (install would write machine paths
  *   into a shared, committed file); an untracked one nothing ignores yet is added to the repo's
  *   own `info/exclude`, which is local and never committed.
- * - No settings layer may reopen what the session sandbox closes: commands excluded from it,
- *   Unix-socket allowances into the VTC home, read or write allowances over the VTC home, or the
- *   weaker nested sandbox.
+ * The session sandbox settings in that file, and the check that no settings layer reopens what it
+ * closes, belong to the cli's confirmed `vtc install` flow (D-an), not to the adapter.
  */
 import { spawnSync } from "node:child_process";
 import { lstatSync } from "node:fs";
-import { isAbsolute, join, resolve } from "node:path";
+import { join, resolve } from "node:path";
 import { readTextOrNull } from "../common/files.js";
-import { canonicalPath, within } from "../common/homes.js";
-import { isRecord } from "../common/json.js";
 
 /** The local settings file, relative to the project root, as git names it. */
 export const LOCAL_SETTINGS = ".claude/settings.local.json";
@@ -113,73 +110,4 @@ export const planGitExclusion = (repo: string): GitExclusion => {
   const current = readTextOrNull(path) ?? "";
   const separator = current === "" || current.endsWith("\n") ? "" : "\n";
   return { kind: "exclude", path, text: `${current}${separator}${EXCLUDE_LINE}\n` };
-};
-
-/** Where a settings layer lives, for resolving the relative paths in it. */
-export interface SettingsLayer {
-  /** The file, named in the refusal. */
-  readonly file: string;
-  readonly settings: Record<string, unknown>;
-  /** The directory relative paths in the file resolve against. */
-  readonly base: string;
-}
-
-/** Glob characters: an entry's fixed part ends before the first segment with one. */
-const GLOB = /[*?[\]{}]/u;
-
-/**
- * The absolute paths an entry may name: `~` expands to `home`, `//x` is `/x`, and since hosts
- * differ on whether `/x` is absolute or relative to the settings file, both readings count.
- * Each keeps only the part before its first glob segment.
- */
-const entryPaths = (entry: string, home: string, base: string): string[] => {
-  const fixed = (path: string): string => {
-    const parts = path.split("/");
-    const glob = parts.findIndex((part) => GLOB.test(part));
-    return glob === -1 ? path : parts.slice(0, glob).join("/") || "/";
-  };
-  if (entry === "~" || entry.startsWith("~/")) return [fixed(join(home, entry.slice(1)))];
-  if (entry.startsWith("//")) return [fixed(entry.slice(1))];
-  if (isAbsolute(entry)) return [fixed(entry), fixed(resolve(base, `.${entry}`))];
-  return [fixed(resolve(base, entry))];
-};
-
-/**
- * Every key in `layers` that reopens an escape from the session sandbox (D-an): a non-empty
- * `excludedCommands` (those commands run outside it), `enableWeakerNestedSandbox`,
- * `network.allowAllUnixSockets`, and each `network.allowUnixSockets`, `filesystem.allowRead` or
- * `filesystem.allowWrite` entry that reaches into the VTC home or contains it. Paths compare by
- * real location. Each hit is `<file>: <key>[: <entry>]`.
- */
-export const sessionSandboxEscapes = (
-  layers: readonly SettingsLayer[],
-  vtcHome: string,
-  home: string,
-): string[] => {
-  const vtc = canonicalPath(vtcHome);
-  const reaches = (entry: unknown, base: string): boolean =>
-    typeof entry !== "string" ||
-    entryPaths(entry, home, base)
-      .map(canonicalPath)
-      .some((path) => within(path, vtc) || within(vtc, path));
-  return layers.flatMap(({ file, settings, base }) => {
-    const sandbox = isRecord(settings.sandbox) ? settings.sandbox : {};
-    const network = isRecord(sandbox.network) ? sandbox.network : {};
-    const filesystem = isRecord(sandbox.filesystem) ? sandbox.filesystem : {};
-    const excluded = sandbox.excludedCommands;
-    const entries = (key: string, list: unknown): string[] =>
-      (Array.isArray(list) ? list : list === undefined ? [] : [list])
-        .filter((entry) => reaches(entry, base))
-        .map((entry) => `sandbox.${key}: ${String(entry)}`);
-    return [
-      ...(excluded === undefined || (Array.isArray(excluded) && excluded.length === 0)
-        ? []
-        : ["sandbox.excludedCommands"]),
-      ...(sandbox.enableWeakerNestedSandbox === true ? ["sandbox.enableWeakerNestedSandbox"] : []),
-      ...(network.allowAllUnixSockets === true ? ["sandbox.network.allowAllUnixSockets"] : []),
-      ...entries("network.allowUnixSockets", network.allowUnixSockets),
-      ...entries("filesystem.allowRead", filesystem.allowRead),
-      ...entries("filesystem.allowWrite", filesystem.allowWrite),
-    ].map((key) => `${file}: ${key}`);
-  });
 };

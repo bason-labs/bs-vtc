@@ -85,8 +85,7 @@ export const createClaudeCodeAdapter = (options: ClaudeCodeAdapterOptions = {}):
   return {
     host: HOST,
     capabilities: claudeCodeCapabilities,
-    install: (request) =>
-      Promise.resolve().then(() => installClaudeCode(request, { vtcHome: profileOptions.vtcHome })),
+    install: (request) => Promise.resolve().then(() => installClaudeCode(request)),
     spawnRole: (request) => spawn(request),
     subagentName: claudeSubagentName,
     parseEvents: parseClaudeEvents,

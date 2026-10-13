@@ -1576,7 +1576,9 @@ reversible through §6. Contracts 4.3.0 carry them.
     `vtc install --host claude-code` (an explicit user command) shows the user and then writes
     the Claude sandbox settings (`claudeSessionSandboxSettings`) to the project's gitignored
     `.claude/settings.local.json`: sandbox on, no unsandboxed escape, reads denied on
-    `homeReadDeny`, writes denied on `homeWriteDeny`. The bridge reports its session's state in
+    `homeReadDeny`, writes denied on `homeWriteDeny`. The cli is the one writer of those settings:
+    `HostAdapter.install` for Claude Code registers the plugin and never writes or checks the
+    sandbox block, so a declined confirmation leaves none on disk. The bridge reports its session's state in
     `EngineSocketHello.session_sandbox` (`claudeSessionSandboxState`), and the engine refuses an
     in-session `code_sandboxed` dispatch unless it is `on` (`inSessionDispatchAllowed`; absent or
     `unknown` refuses), parking the task as `blocked` with `SESSION_SANDBOX_OFF_REASON`, which
