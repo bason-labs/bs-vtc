@@ -372,7 +372,7 @@ The engine enforces each pair at dispatch time. In each row, the second role che
 
 ### 6.1 Backbone (fixed)
 ```
-INTAKE → DISCOVER → SPECIFY → ✋G1 → DESIGN → ✋G2 → PLAN → BUILD → INTEGRATE → RETRO
+INTAKE → DISCOVER → SPECIFY → ✋G1 → DESIGN → ✋G2 → PLAN → BUILD ∥ INTEGRATE → FINAL REVIEW → RELEASE → RETRO
 ```
 - **INTAKE:** the Lead classifies the request (track, existing repo or new project, UI, risk hints).
 - **DISCOVER:**
@@ -391,7 +391,9 @@ INTAKE → DISCOVER → SPECIFY → ✋G1 → DESIGN → ✋G2 → PLAN → BUIL
   - each task is within the size cap;
   - each task has an architecture triage (fits / extends / changes).
 - **BUILD:** per-task pipelines (§6.3).
-- **INTEGRATE:** merge queue, release and evidence (§6.6–6.7).
+- **INTEGRATE:** the merge queue merges each `built` task into the feature's integration branch while other tasks are still building (§6.6–6.7).
+- **FINAL REVIEW:** once every task of the feature is merged, a whole-feature review runs on the integrated branch (§6.7a).
+- **RELEASE:** evidence bundle, version and changelog, then the PR is marked ready or auto-merged by level (§6.7).
 - **RETRO:** a run summary and Lookback data.
 
 ### 6.2 Tracks (chosen at intake; the human can override)
@@ -508,6 +510,8 @@ At Levels 1–2, a human merging the PR into main closes the feature, not the ta
 - **Concurrency defaults to 2** and can be configured. The real limit is the subscription's usage window.
 - **The engine refuses to run two tasks with overlapping `files_scope` at the same time.**
 - **A task's reviewers count toward the concurrency limit.**
+- **Interface contracts unblock work early.** A consumer task (e.g. Frontend or Mobile) depends on the provider's *contract*, not on its finished code. It can start as soon as the provider task has published and frozen the contract (OpenAPI, event schema or data contract). Until then it builds against contract-generated mocks.
+- **Contract changes go back through the provider task.** If the provider must change a published contract, every consumer task gets a rebase round. A breaking change also needs a CR.
 
 ### 6.7 Merge queue and auto-merge levels
 The merge queue processes one task at a time:
@@ -520,11 +524,11 @@ A conflict or failure sends the task back to the Engineer as a rebase round. It 
 | Level | What merges automatically | Default |
 |---|---|---|
 | 1. Local | Verified tasks into the local integration branch | |
-| 2. Remote branch | Level 1, plus push and open or update a PR, with the evidence bundle in its description | **Default** |
-| 3. Full auto | The PR auto-merges into main via the host's auto-merge, after remote CI is green | Opt-in per project |
+| 2. Remote branch | Level 1, plus push the integration branch and keep a **draft** PR updated. The PR is marked **ready for review** only after Final Review (§6.7a) passes, with the evidence bundle in its description. | **Default** |
+| 3. Full auto | Level 2, then the PR auto-merges into main via the host's auto-merge, after Final Review passes and remote CI is green | Opt-in per project |
 
 **Safe-to-auto-merge checklist (Level 3).** All of these must hold:
-1. All gates are green on the combined code.
+1. **Final Review (§6.7a) passed** on the integrated branch, and all gates are green on the combined code.
 2. Every reviewer passed with cited evidence, and there are zero open findings at or above the configured severity (default: medium).
 3. Requirement coverage is complete.
 4. The test-integrity check is clean.
@@ -537,6 +541,49 @@ A conflict or failure sends the task back to the Engineer as a rebase round. It 
 - Use the user's existing git/`gh` auth.
 - `vtc pause` acts as a kill switch.
 - Downgrade one level automatically on a revert or a post-merge CI failure. This also records an escaped defect for Lookback.
+
+### 6.7a Final Review (whole feature, integrated branch)
+**When:** all tasks of the feature (or release batch) are merged into the integration branch.
+
+**Why:** per-task checks can't see problems that only appear when the pieces run together. Examples: a new endpoint plus new UI that together expose data; migrations from two tasks that run in the wrong order; a shared component changed by one task and broken for another.
+
+**Steps, deterministic first:**
+1. **Full gates.** The *full* test suite (not affected-only), every scanner, architecture fitness checks (L6), and performance budgets, all on the integrated code.
+2. **Full acceptance run.** Every REQ's acceptance tests plus all hidden tests, end-to-end across disciplines: frontend + backend + mobile against the real integrated services.
+3. **Spec-Verifier across the whole spec.** Every REQ is covered by at least one passing test. Scope creep is flagged. Deferred items are listed.
+4. **Security on the combined diff** (base…integration). Looks for cross-task data flows, authorization gaps between layers, and secrets or configuration across services.
+5. **Visual QA on full user journeys.** Every screen and state of the feature together, design drift, and accessibility across flows.
+6. **Architecture conformance.** The as-built system compared with the approved spine: no unapproved services, datastores, dependencies or boundary crossings.
+7. **Release readiness:**
+   - migration order and reversibility;
+   - configuration and environment changes;
+   - rollback notes;
+   - docs updated;
+   - changelog;
+   - the feature flag plan, if any.
+
+**Routing findings:**
+- The engine's triage (§6.3 step 8) attributes each finding to the task and discipline that introduced it. A file blame and fingerprint match against the task diffs come first; the reviewer's citation is the fallback.
+- **That task reopens** with a fix round: same specialist, its preserved worktree, rebased.
+- A finding no single task owns becomes a new **integration-fix task**, assigned to the discipline that owns the affected files.
+- Fixes go back through the merge queue, and Final Review **re-runs only the steps affected by the fix**, plus the full gates.
+
+**Caps:**
+- Final Review has its own cap of **3 rounds**, with stuck detection.
+- If the cap is hit, a **risky** finding appears, or the review is stuck, the **feature parks** and the Lead asks the human.
+- Unrelated features keep running.
+
+**Cost:**
+- Steps 1, 2, 6 and most of 7 cost no tokens.
+- The AI reviewers (3, 4, 5) run **once per feature** on diffs and evidence, not on whole files.
+- Final Review has its own budget line: by default 15% of the feature's total budget.
+
+**Feature states:**
+`building → integrating → final_review ⇄ fixing(n/3) → ready_to_ship → shipped`. Side state: `parked(reason)`.
+
+**Output:**
+- the **feature evidence bundle**: a REQ → test → result matrix across all tasks, findings, rounds, tokens per task and per discipline, and the Final Review verdict;
+- written to `.vtc/evidence/<feature>/` and placed in the PR description.
 
 ### 6.8 Resilience and usage limits
 - **Every state change is an event.** Events go to `.vtc/runs/<run>/events.jsonl`, are committed at milestones, and SQLite indexes them.
