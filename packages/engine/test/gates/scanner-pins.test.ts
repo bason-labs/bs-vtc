@@ -6,12 +6,16 @@ import { execFileSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import { existsSync, mkdirSync, readFileSync, readdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
-import { ScannerPinsSchema, type ScannerPins } from "@vtc/shared";
+import { HIDDEN_TESTS, ROLE_DENIED_VTC, ScannerPinsSchema, type ScannerPins } from "@vtc/shared";
 import { afterEach, describe, expect, it } from "vitest";
 import { parse } from "yaml";
 import {
   createScannerStore,
   currentPlatform,
+  OSV_DB_DIR,
+  ScannerUnavailableError,
+  type ScannerStore,
+  type ScannerStoreOptions,
   ensureRules,
   PRODUCT_RULES,
   SCANNER_ASSETS,
@@ -155,6 +159,43 @@ describe("scanner store", () => {
     await expect(store.ensure("nope")).rejects.toThrow(/not a pinned scanner/);
     await expect(store.ensure("checkov")).rejects.toThrow(/no pinned build for darwin-arm64/);
     expect(store.names).toEqual(["gitleaks", "osv-scanner", "opengrep", "checkov"]);
+  });
+
+  it("marks a scanner with no build for this platform as user-installed there (D-u)", async () => {
+    const download = (): Promise<Uint8Array> => Promise.reject(new Error("never downloads"));
+    const store = createScannerStore({ vtcHome: tempDir(), platform: "darwin-arm64", download });
+    const error: unknown = await store.ensure("checkov").catch((e: unknown) => e);
+    expect(error).toBeInstanceOf(ScannerUnavailableError);
+    expect(error).toMatchObject({ scanner: "checkov", platform: "darwin-arm64" });
+    // Nothing confirms or records the user's binary, and the message says what will run instead.
+    expect(String(error)).not.toMatch(/confirm/);
+    expect(String(error)).toMatch(/first checkov on an absolute PATH entry outside the repo/);
+    expect(String(error)).toMatch(/does not checksum-verify/);
+    const nowhere = createScannerStore({ vtcHome: tempDir(), platform: null, download });
+    const gitleaks: unknown = await nowhere.ensure("gitleaks").catch((e: unknown) => e);
+    expect(gitleaks).toBeInstanceOf(ScannerUnavailableError);
+    // Only user-installable scanners are told to install themselves.
+    expect(String(gitleaks)).not.toMatch(/install it yourself/);
+    // Platforms with a native build keep their pin.
+    const linux = createScannerStore({ vtcHome: tempDir(), platform: "linux-arm64", download });
+    const pinned: unknown = await linux.ensure("checkov").catch((e: unknown) => e);
+    expect(pinned).not.toBeInstanceOf(ScannerUnavailableError);
+    expect(String(pinned)).toMatch(/never downloads/);
+  });
+
+  it("is typed for doctor: { vtcHome, download? } in, { names, ensure } out", async () => {
+    const options: ScannerStoreOptions = {
+      vtcHome: tempDir(),
+      download: () => Promise.reject(new Error("offline")),
+    };
+    const store: ScannerStore = createScannerStore(options);
+    expect(store.names).toContain("gitleaks");
+    await expect(store.ensure("gitleaks")).rejects.toThrow();
+  });
+
+  it("keeps the osv database where the role deny list protects it (D-w)", () => {
+    expect(ROLE_DENIED_VTC.homeWriteDeny).toContain(`${OSV_DB_DIR}/**`);
+    expect(ROLE_DENIED_VTC.homeWriteDeny).toContain(`${HIDDEN_TESTS.homeDir}/**`);
   });
 
   it("writes the product ruleset under the VTC home", () => {

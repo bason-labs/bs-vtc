@@ -4,6 +4,7 @@
  * redaction of evidence and the evidence layout.
  */
 import {
+  chmodSync,
   existsSync,
   mkdirSync,
   readFileSync,
@@ -12,9 +13,11 @@ import {
   symlinkSync,
   writeFileSync,
 } from "node:fs";
+import { createHash } from "node:crypto";
 import { join } from "node:path";
 import {
   engineRepoKey,
+  finalReviewStepsCovered,
   gateExpectationMet,
   GateReportSchema,
   TestInventorySchema,
@@ -23,7 +26,11 @@ import {
   type GateResult,
 } from "@vtc/shared";
 import { afterEach, describe, expect, it } from "vitest";
-import { finalReviewStepsCovered, HIDDEN_DETAILS_WITHHELD } from "../../src/gates/index.js";
+import {
+  HIDDEN_DETAILS_WITHHELD,
+  ScannerUnavailableError,
+  type ScannerStore,
+} from "../../src/gates/index.js";
 import { cleanupDirs, tempDir, writeFile } from "../helpers/repo.js";
 import {
   cases,
@@ -523,6 +530,182 @@ describe("Final Review coverage (§6.7a)", () => {
     expect(finalReviewStepsCovered({ ...request, layers: ["L2"] }, report, trace)).toEqual([2, 6]);
     expect(finalReviewStepsCovered({ ...request, reason: "round" }, report, trace)).toEqual([]);
   });
+
+  it("copies the hidden tests of every task hidden_tasks names into a feature run (step 2)", async () => {
+    const h = harness({ "tests/unit.json": cases([{ name: "[REQ-1] ok" }]) }, finalGates);
+    plantHidden(h.home, h.repo, "T-1", "[REQ-1] hidden one");
+    plantHidden(h.home, h.repo, "T-2", "[REQ-2] hidden two");
+    plantHidden(h.home, h.repo, "T-3", "[REQ-3] not in this feature");
+    const report = await h.run({
+      head: h.base,
+      task: undefined,
+      feature: "F-1",
+      req_tags: ["REQ-1", "REQ-2"],
+      hidden_tasks: ["T-1", "T-2"],
+      ...request,
+    });
+    expect(gate(report, "tests").tests).toMatchObject({ executed: 3 });
+    const trace = traceOf(h.repo, report);
+    expect(trace.rows.flatMap((r) => r.tests.filter((t) => t.hidden)).length).toBe(2);
+    expect(finalReviewStepsCovered({ ...request, layers: undefined }, report, trace)).toEqual([
+      1, 2, 6,
+    ]);
+    const notes = readdirSync(join(h.repo, ".vtc/evidence/F-1/gates"), { recursive: true }).map(
+      String,
+    );
+    expect(notes.some((f) => f.endsWith("hidden-tests.log"))).toBe(false);
+  });
+
+  it("refuses to let one task's hidden test overwrite another's", async () => {
+    const h = harness({ "tests/unit.json": cases([{ name: "[REQ-1] ok" }]) }, finalGates);
+    for (const task of ["T-1", "T-2"]) {
+      const dir = join(h.home, "hidden", engineRepoKey(h.repo), task, "tests/hidden");
+      mkdirSync(dir, { recursive: true });
+      writeFileSync(join(dir, "same.json"), cases([{ name: `[REQ-1] ${task}` }]));
+    }
+    const report = await h.run({
+      head: h.base,
+      task: undefined,
+      feature: "F-1",
+      hidden_tasks: ["T-1", "T-2"],
+      ...request,
+    });
+    expect(report.verdict).toBe("infra_error");
+    expect(gate(report, "gate-runner")).toMatchObject({ status: "error", failure_class: "infra" });
+    expect(read(h.repo, gate(report, "gate-runner").evidence[0]?.ref ?? "")).toMatch(
+      /T-1 and T-2 both have tests\/hidden\/same\.json/,
+    );
+    // Nothing hidden stays in the checkout or the repo.
+    expect(existsSync(join(h.repo, "tests/hidden"))).toBe(false);
+  });
+});
+
+describe("the gates.yml the run started with (gates_config_hash, spine §5 readings 20 and 46b)", () => {
+  const sha = (text: string): string => createHash("sha256").update(text).digest("hex");
+
+  it("runs when the base commit's gates.yml has the request's hash", async () => {
+    const yml = config([testsGate]);
+    const h = harness({ "tests/unit.json": cases([{ name: "ok" }]) }, yml);
+    const report = await h.run({ head: h.base, layers: ["L2"], gates_config_hash: sha(yml) });
+    expect(report.verdict).toBe("pass");
+    expect(gate(report, "tests").status).toBe("pass");
+  });
+
+  it("runs nothing and reports infra when the base's gates.yml differs from the run's", async () => {
+    const yml = config([testsGate]);
+    const h = harness({ "tests/unit.json": cases([{ name: "ok" }]) }, yml);
+    const report = await h.run({
+      head: h.base,
+      layers: ["L2"],
+      gates_config_hash: sha(`${yml}# edited\n`),
+    });
+    expect(report.results.map((r) => [r.gate_id, r.status, r.failure_class])).toEqual([
+      ["config", "error", "infra"],
+    ]);
+    expect(report.verdict).toBe("infra_error");
+    expect(read(h.repo, gate(report, "config").evidence[0]?.ref ?? "")).toMatch(
+      /does not match the gates\.yml this run started with/,
+    );
+  });
+
+  it("reports infra when the base commit has no gates.yml", async () => {
+    const h = harness({ "tests/unit.json": cases([{ name: "ok" }]) }, config([testsGate]));
+    rmSync(join(h.repo, ".vtc/gates.yml"));
+    const head = commitAll(h.repo, "drop gates");
+    const report = await h.run({ head, layers: ["L2"] });
+    // The base still has it: the run uses the base commit's file, never the head's.
+    expect(gate(report, "tests").status).toBe("pass");
+    const later = await h.run({ head, base: head, layers: ["L2"], gates_config_hash: sha("x") });
+    expect(later.results.map((r) => [r.gate_id, r.status, r.failure_class])).toEqual([
+      ["config", "error", "infra"],
+    ]);
+    expect(read(h.repo, gate(later, "config").evidence[0]?.ref ?? "")).toMatch(/not committed/);
+  });
+});
+
+describe("Checkov where it has no pinned build (D-u, spine §5 reading 41)", () => {
+  const iacGate = {
+    id: "iac",
+    layer: "L4" as const,
+    command: [
+      "checkov",
+      "-d",
+      ".",
+      "--quiet",
+      "-o",
+      "sarif",
+      "--output-file-path",
+      ".vtc/state/gates/checkov",
+    ],
+    report: { format: "sarif" as const, path: ".vtc/state/gates/checkov/results_sarif.sarif" },
+  };
+  const unpinnedCheckov = (): ScannerStore => ({
+    names: ["gitleaks", "osv-scanner", "opengrep", "checkov"],
+    ensure: (name) =>
+      Promise.reject(
+        name === "checkov"
+          ? new ScannerUnavailableError(name, "darwin-arm64")
+          : new Error(`no fake ${name}`),
+      ),
+  });
+  const FAKE_CHECKOV = `#!/usr/bin/env node
+const { mkdirSync, writeFileSync } = require("node:fs");
+const { join } = require("node:path");
+const dir = process.argv[process.argv.indexOf("--output-file-path") + 1];
+mkdirSync(dir, { recursive: true });
+writeFileSync(join(dir, "results_sarif.sarif"), JSON.stringify({ version: "2.1.0", runs: [{ tool: { driver: { name: "checkov" } }, results: [] }] }));
+`;
+
+  it("skips the IaC gate with a visible reason when Checkov is not installed", async () => {
+    const empty = tempDir("vtc-path-");
+    const h = harness({ "infra/main.tf": "resource {}\n" }, config([iacGate]), {
+      scanners: unpinnedCheckov,
+      env: { ...process.env, PATH: empty },
+    });
+    const report = await h.run({ head: h.base, layers: ["L4"] });
+    expect(gate(report, "iac")).toMatchObject({ status: "skipped" });
+    expect(gate(report, "iac").skipped_reason).toMatch(
+      /checkov has no pinned build for darwin-arm64 and is not installed/,
+    );
+    expect(report.verdict).toBe("pass");
+  });
+
+  it("runs a user-installed Checkov found on PATH outside the repo", async () => {
+    const bin = tempDir("vtc-path-");
+    writeFileSync(join(bin, "checkov"), FAKE_CHECKOV, { mode: 0o755 });
+    const h = harness({ "infra/main.tf": "resource {}\n" }, config([iacGate]), {
+      scanners: unpinnedCheckov,
+      env: { ...process.env, PATH: `${bin}:${process.env.PATH ?? ""}` },
+    });
+    const report = await h.run({ head: h.base, layers: ["L4"] });
+    expect(gate(report, "iac")).toMatchObject({ status: "pass" });
+  });
+
+  it("never takes a Checkov from inside the repo or from a relative PATH entry", async () => {
+    const env: Record<string, string | undefined> = { ...process.env, PATH: "bin" };
+    const h = harness(
+      { "infra/main.tf": "resource {}\n", "bin/checkov": FAKE_CHECKOV },
+      config([iacGate]),
+      { scanners: unpinnedCheckov, env },
+    );
+    chmodSync(join(h.repo, "bin/checkov"), 0o755);
+    // The runner reads the environment when a gate starts: both a relative entry (resolved in
+    // the checkout) and the repo's own directory are planted by the diff, not installed.
+    env.PATH = `bin:${join(h.repo, "bin")}`;
+    const inside = await h.run({ head: h.base, layers: ["L4"] });
+    expect(gate(inside, "iac")).toMatchObject({ status: "skipped" });
+  });
+
+  it("keeps refusing a pinned scanner that fails for any other reason", async () => {
+    const h = harness({ "infra/main.tf": "resource {}\n" }, config([iacGate]), {
+      scanners: () => ({
+        names: ["checkov"],
+        ensure: () => Promise.reject(new Error("checksum mismatch")),
+      }),
+    });
+    const report = await h.run({ head: h.base, layers: ["L4"] });
+    expect(gate(report, "iac")).toMatchObject({ status: "error", failure_class: "infra" });
+  });
 });
 
 describe("monotonic metrics on redacted inventories (§7.3, AD-18)", () => {
@@ -705,6 +888,54 @@ describe("scanner configs a diff adds (§7.2 L4/L5)", () => {
   });
 });
 
+describe("scanner configs in another letter case (case-insensitive file systems)", () => {
+  it("scans without a .GitleaksIgnore the diff added, and flags it in L5", async () => {
+    // On macOS, the scanner's existsSync(".gitleaksignore") would find .GitleaksIgnore.
+    const h = harness({ "src/old.ts": "export const a = 1;\n" }, config([leaksGate]));
+    writeFile(h.repo, "src/new.ts", "SECRET=newvalue654321\n");
+    writeFile(h.repo, ".GitleaksIgnore", "src/new.ts\n");
+    const head = commitAll(h.repo);
+    const report = await h.run({ head, files_scope: ["src/**", "*"] });
+    expect(gate(report, "secrets")).toMatchObject({ status: "fail", new_violations: 1 });
+    expect(gate(report, "write-scope").findings).toEqual([
+      expect.objectContaining({
+        rule_id: "new_suppression",
+        location: { path: ".GitleaksIgnore" },
+      }),
+    ]);
+  });
+});
+
+describe("a malformed request (the Gate Runner is the trust boundary for test material)", () => {
+  it("validates the request first and never joins a bad task id into a hidden-tests path", async () => {
+    const h = harness({ "tests/unit.json": cases([{ name: "[REQ-1] ok" }]) }, config([testsGate]));
+    // ~/.vtc/hidden/<repo-key>/../T-9 is outside the task directories.
+    const escaped = join(h.home, "hidden", "T-9", "tests/hidden");
+    mkdirSync(escaped, { recursive: true });
+    writeFileSync(join(escaped, "h.json"), cases([{ name: "[REQ-9] not this repo's" }]));
+    const report = await h.runUnparsed({
+      head: h.base,
+      layers: ["L2"],
+      include_hidden: true,
+      hidden_tasks: ["../T-9"],
+    });
+    GateReportSchema.parse(report);
+    expect(report.verdict).toBe("infra_error");
+    expect(report.results.map((r) => r.gate_id)).toEqual(["gate-runner"]);
+    expect(gate(report, "gate-runner")).toMatchObject({ status: "error", failure_class: "infra" });
+    expect(existsSync(join(h.repo, "tests/hidden/h.json"))).toBe(false);
+    const log = gate(report, "gate-runner").evidence[0]?.ref ?? "";
+    expect(read(h.repo, log)).toMatch(/request rejected.*hidden_tasks/s);
+  });
+
+  it("rejects hidden_tasks without include_hidden", async () => {
+    const h = harness({ "tests/unit.json": cases([{ name: "[REQ-1] ok" }]) }, config([testsGate]));
+    const report = await h.runUnparsed({ head: h.base, hidden_tasks: ["T-2"] });
+    expect(report.verdict).toBe("infra_error");
+    expect(report.results.map((r) => r.gate_id)).toEqual(["gate-runner"]);
+  });
+});
+
 describe("tool sections of pyproject.toml and package.json (§7.2 L1/L5)", () => {
   /** A fake ruff: flags "TODO" in changed files unless pyproject.toml ignores ALL. */
   const FAKE_RUFF = `
@@ -767,6 +998,50 @@ process.exit(results.some((r) => r.messages.length > 0) ? 1 : 0);
   });
 });
 
+describe("package-manager configs a diff adds (§7.2 L1/L5)", () => {
+  /**
+   * A fake lint run through a package manager: like `npm run lint` under a planted
+   * `script-shell=true`, it reports nothing when the checkout's .npmrc says so.
+   */
+  const FAKE_NPM_LINT = `
+import { existsSync, readFileSync, writeFileSync, mkdirSync } from "node:fs";
+const [out, ...files] = process.argv.slice(2);
+const off = existsSync(".npmrc") && readFileSync(".npmrc", "utf8").includes("script-shell=true");
+const results = files.filter((f) => f.endsWith(".ts")).map((f) => ({
+  filePath: f,
+  messages: off ? [] : readFileSync(f, "utf8").split("\\n").flatMap((l, i) =>
+    l.includes("TODO") ? [{ ruleId: "no-todo", severity: 2, message: "TODO left", line: i + 1 }] : []),
+}));
+mkdirSync(".vtc/state/gates", { recursive: true });
+writeFileSync(out, JSON.stringify(results));
+process.exit(results.some((r) => r.messages.length > 0) ? 1 : 0);
+`;
+  const npmLintGate = {
+    id: "lint",
+    layer: "L1" as const,
+    command: [NODE, "tools/npm-lint.mjs", ".vtc/state/gates/lint.json", "{changed}"],
+    report: { format: "json" as const, path: ".vtc/state/gates/lint.json" },
+  };
+
+  it("lints without a .npmrc the diff added, and flags it in L5", async () => {
+    // The project's own protected_configs (.lintrc only) predate the package-manager globs.
+    const h = harness(
+      { "tools/npm-lint.mjs": FAKE_NPM_LINT, "src/a.ts": "ok\n" },
+      config([npmLintGate]),
+    );
+    writeFile(h.repo, ".npmrc", "script-shell=true\n");
+    writeFile(h.repo, "src/a.ts", "// TODO later\n");
+    const head = commitAll(h.repo);
+    const report = await h.run({ head, files_scope: ["**"] });
+    expect(gate(report, "lint")).toMatchObject({ status: "fail", new_violations: 1 });
+    expect(gate(report, "write-scope").findings).toEqual([
+      expect.objectContaining({ rule_id: "protected_modified", location: { path: ".npmrc" } }),
+    ]);
+    // The checkout is the head commit again afterwards.
+    expect(read(h.repo, ".npmrc")).toBe("script-shell=true\n");
+  });
+});
+
 describe("the osv-scanner offline database (§7.2, §15)", () => {
   it("does not start the dependency gate without the database", async () => {
     const h = harness({}, config([osvGate]));
@@ -797,5 +1072,4 @@ describe("not built yet (gates/README.md, follow-up increments)", () => {
   // Today every gate runs with the user's network and file access (exec.ts runCommand).
   it.todo("runs verify-phase gates without network access (§7.2 two-phase sandbox)");
   it.todo("lets install-phase gates reach package registries only (§7.2 two-phase sandbox)");
-  it.todo("copies every task's hidden tests into a feature's Final Review run (§6.7a step 2)");
 });

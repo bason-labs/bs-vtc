@@ -201,6 +201,10 @@ export interface Harness {
   readonly home: string;
   readonly base: string;
   readonly run: (request: Partial<GateRunRequestInput> & { head: string }) => Promise<GateReport>;
+  /** Like `run`, but hands the request to the runner unparsed (a malformed caller). */
+  readonly runUnparsed: (
+    request: Record<string, unknown> & { head: string },
+  ) => Promise<GateReport>;
 }
 
 export const osvGate: Gate = {
@@ -249,7 +253,14 @@ export const fakeScanners = (home: string): ScannerStore => {
 export const harness = (
   files: Record<string, string>,
   gatesYml: string,
-  options: { allow?: readonly (readonly string[])[]; now?: () => Date } = {},
+  options: {
+    allow?: readonly (readonly string[])[];
+    now?: () => Date;
+    /** The scanner store (default {@link fakeScanners}). */
+    scanners?: (home: string) => ScannerStore;
+    /** The engine environment the runner scrubs (default `process.env`). */
+    env?: Readonly<Record<string, string | undefined>>;
+  } = {},
 ): Harness => {
   const repo = initRepo({ ...TOOLS, ".lintrc": "strict\n", ...files });
   writeFile(repo, ".vtc/gates.yml", gatesYml);
@@ -264,7 +275,7 @@ export const harness = (
       git: gitOps,
       ...(options.now === undefined ? {} : { now: options.now }),
     },
-    { scanners: fakeScanners(home), env: process.env },
+    { scanners: (options.scanners ?? fakeScanners)(home), env: options.env ?? process.env },
   );
   return {
     repo,
@@ -284,6 +295,26 @@ export const harness = (
             ...partial,
           }),
         );
+      } finally {
+        await gitOps.removeCheckout(checkout);
+      }
+    },
+    runUnparsed: async (partial) => {
+      const checkout = await gitOps.createCleanCheckout(partial.head);
+      try {
+        const request = {
+          ...GateRunRequestSchema.parse({
+            run: "r1",
+            task: "T-1",
+            reason: "round",
+            scope: "affected",
+            base,
+            checkout,
+            head: partial.head,
+          }),
+          ...partial,
+        };
+        return await runner.run(request);
       } finally {
         await gitOps.removeCheckout(checkout);
       }

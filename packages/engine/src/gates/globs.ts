@@ -7,6 +7,7 @@
 const escape = (c: string): string => c.replace(/[.+^${}()|[\]\\]/g, "\\$&");
 
 const cache = new Map<string, RegExp>();
+const caselessCache = new Map<string, RegExp>();
 
 /** The regular expression of a glob (anchored). */
 export const globToRegExp = (glob: string): RegExp => {
@@ -60,3 +61,19 @@ export const globMatch = (glob: string, path: string): boolean => globToRegExp(g
 
 export const matchesAny = (globs: readonly string[], path: string): boolean =>
   globs.some((g) => globMatch(g, path));
+
+const caselessRegExp = (glob: string): RegExp => {
+  const hit = caselessCache.get(glob);
+  if (hit !== undefined) return hit;
+  const re = new RegExp(globToRegExp(glob).source, "i");
+  caselessCache.set(glob, re);
+  return re;
+};
+
+/**
+ * {@link matchesAny} in any letter case. For protected configs: a tool looks its config up by the
+ * canonical name (`existsSync("vitest.config.ts")`), and on a case-insensitive file system (macOS
+ * APFS, Windows NTFS) that lookup finds `Vitest.config.ts` too.
+ */
+export const matchesAnyCaseless = (globs: readonly string[], path: string): boolean =>
+  globs.some((g) => caselessRegExp(g).test(path));
