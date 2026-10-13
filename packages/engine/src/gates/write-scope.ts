@@ -12,6 +12,7 @@ import type {
   WriteScopeViolationKind,
 } from "@vtc/shared";
 import { matchesAny } from "./globs.js";
+import { DEFAULT_PROTECTED_GLOBS, SCANNER_CONFIG_GLOBS } from "./protected-globs.js";
 
 /** Test-skip markers on added lines: JS/TS runners, pytest/unittest, Go, JUnit, Rust (§7.2 L5). */
 export const SKIP_PATTERNS: readonly RegExp[] = [
@@ -108,10 +109,20 @@ export const scanAddedLines = (diff: string): [WriteScopeViolationKind, string][
 
 type ScopeGit = Pick<GitOps, "changedFiles" | "diff" | "readFileAtCommit">;
 
-/** Runs the check. Violations are unique and sorted by path, then kind. */
+/**
+ * Runs the check. Violations are unique and sorted by path, then kind.
+ *
+ * Besides the checksummed `request.protected` files, every changed file that matches
+ * `protectedGlobs` (lint, test and scanner configuration; default {@link DEFAULT_PROTECTED_GLOBS},
+ * the runner adds the project's `tests.protected_configs`) is a violation, added files included:
+ * a new nested `vitest.config.ts` or `.gitleaksignore` can weaken the gates as much as an edit.
+ * A changed scanner config is a `new_suppression`. The only exception is a file the task's
+ * `files_scope` names exactly (no wildcard), which is how a plan allows a config change.
+ */
 export const checkWriteScope = async (
   git: ScopeGit,
   request: WriteScopeCheckRequest,
+  protectedGlobs: readonly string[] = DEFAULT_PROTECTED_GLOBS,
 ): Promise<WriteScopeReport> => {
   const found = new Map<string, { kind: WriteScopeViolationKind; path: string }>();
   const add = (kind: WriteScopeViolationKind, path: string): void => {
@@ -131,6 +142,16 @@ export const checkWriteScope = async (
     for (const path of touched) {
       if (protectedPaths.has(path)) continue;
       if (!matchesAny(request.filesScope, path)) add("out_of_scope_write", path);
+      if (!matchesAny(protectedGlobs, path) || request.filesScope.includes(path)) continue;
+      const gone = file.status === "deleted" || file.oldPath === path;
+      add(
+        gone
+          ? "protected_deleted"
+          : matchesAny(SCANNER_CONFIG_GLOBS, path)
+            ? "new_suppression"
+            : "protected_modified",
+        path,
+      );
     }
     if (file.status !== "added") {
       const before = file.oldPath ?? file.path;

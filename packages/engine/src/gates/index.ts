@@ -65,7 +65,29 @@ export {
   stringifyGatesConfig,
 } from "./config.js";
 export { gateEnv, runCommand, PASSED_ENV, type ExecRequest, type ExecResult } from "./exec.js";
-export { createGateRunnerWith, scannerArgsProblem, type GateRunnerOptions } from "./runner.js";
+export { createGateRunnerWith, type GateRunnerOptions } from "./runner.js";
+export {
+  checkScannerArgs,
+  scannerArgsProblem,
+  scannerExtraArgs,
+  SCANNER_SPECS,
+  type ScannerArgsCheck,
+  type ScannerArgsContext,
+} from "./scanner-args.js";
+export {
+  downloadOsvDatabase,
+  OSV_DB_DIR,
+  OSV_DB_ENV,
+  OSV_DB_STAMP,
+  osvDatabaseDir,
+  osvDatabaseReady,
+  type OsvDownloadRequest,
+} from "./osv-db.js";
+export {
+  DEFAULT_PROTECTED_GLOBS,
+  LINT_TEST_CONFIG_GLOBS,
+  SCANNER_CONFIG_GLOBS,
+} from "./protected-globs.js";
 export { classifyFailure, environmentSignatureLine, ENVIRONMENT_SIGNATURES } from "./classify.js";
 export {
   attemptId,

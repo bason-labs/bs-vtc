@@ -11,6 +11,7 @@ import {
   clipTitle,
   cweFrom,
   relativeLocation,
+  sourceLine,
   type ParseContext,
   type ParsedFinding,
   type ParsedFindings,
@@ -74,9 +75,17 @@ export const parseSarif = (doc: unknown, ctx: ParseContext): ParsedFindings => {
         ? "security"
         : ctx.defaultCategory;
       const category = categoryForTool(tool, fallback);
-      const snippet = str(obj(region.snippet).text);
       const line =
         typeof region.startLine === "number" && region.startLine > 0 ? region.startLine : undefined;
+      const path = relativeLocation(uri, ctx);
+      const reported = str(obj(region.snippet).text);
+      // A secret's source line is never copied into a finding: only the matched text is redacted.
+      const snippet =
+        reported === undefined || reported.trim() === ""
+          ? category === "secret"
+            ? reported
+            : (sourceLine(ctx, path, line) ?? reported)
+          : reported;
       const end =
         typeof region.endLine === "number" && line !== undefined && region.endLine >= line
           ? region.endLine
@@ -94,7 +103,7 @@ export const parseSarif = (doc: unknown, ctx: ParseContext): ParsedFindings => {
         title: clipTitle(title),
         ...(message === "" ? {} : { message: clipMessage(message) }),
         location: {
-          path: relativeLocation(uri, ctx),
+          path,
           ...(line === undefined ? {} : { line }),
           ...(end === undefined ? {} : { end_line: end }),
         },

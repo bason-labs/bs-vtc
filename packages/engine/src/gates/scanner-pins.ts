@@ -6,8 +6,9 @@
  * weeks old when pinned (2026-10-13).
  *
  * diff-cover (L3) ships no per-platform binary (it is a Python package), so it is not in the
- * store: calibrate proposes it only when the user has it installed, and the human allowlists it
- * like any other command.
+ * store. `vtc calibrate` does not detect or propose an L3 gate yet (gates/README.md, not built
+ * yet): a project that wants L3 writes the gate into `.vtc/gates.yml` by hand and the human
+ * allowlists its command like any other.
  */
 import { ScannerPinsSchema, type Platform, type ScannerPins } from "@vtc/shared";
 

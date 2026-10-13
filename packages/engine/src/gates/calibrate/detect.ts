@@ -16,6 +16,7 @@ import type {
 } from "@vtc/shared";
 import { parse } from "yaml";
 import { globMatch } from "../globs.js";
+import { DEFAULT_PROTECTED_GLOBS } from "../protected-globs.js";
 
 /** A proposed gate (the `GateSchema` input shape). */
 export type ProposedGate = GatesConfigInput["gates"][number];
@@ -577,33 +578,16 @@ const scannerGates = (files: readonly string[], scanners: readonly string[]): Pr
 
 // ----------------------------------------------------------------- test layout
 
-const CONFIG_GLOBS = [
-  "**/eslint.config.*",
-  "**/.eslintrc*",
-  "**/biome.json",
-  "**/biome.jsonc",
-  "**/vitest.config.*",
-  "**/vitest.workspace.*",
-  "**/jest.config.*",
-  "**/playwright.config.*",
-  "**/tsconfig*.json",
-  "**/pytest.ini",
-  "**/conftest.py",
-  "**/tox.ini",
-  "**/ruff.toml",
-  "**/.ruff.toml",
-  "**/.golangci.y*ml",
-  "**/.dependency-cruiser.*",
-];
-
-const matches = (glob: string, file: string): boolean =>
-  globMatch(glob, file) || (glob.startsWith("**/") && globMatch(glob.slice(3), file));
-
-export const detectTestLayout = (root: string, files: readonly string[]): TestLayout => {
+/**
+ * The acceptance-test directory and the protected configs. Every lint, test and scanner config
+ * glob is protected whether or not a matching file exists yet: a config a later diff adds must
+ * be caught too (§7.3, §7.6 rule 5).
+ */
+export const detectTestLayout = (root: string): TestLayout => {
   const dir = ["tests", "test", "spec", "__tests__", "e2e"].find((d) => has(root, d)) ?? "tests";
   return {
     acceptance_globs: [`${dir}/acceptance/**`],
-    protected_configs: CONFIG_GLOBS.filter((g) => files.some((f) => matches(g, f))),
+    protected_configs: [...DEFAULT_PROTECTED_GLOBS],
   };
 };
 
@@ -669,7 +653,7 @@ export const detectToolchain = (root: string, options: DetectOptions): Detection
   }
   gates.push(...scannerGates(files, options.scanners));
   const sources = PRECEDENCE.filter((s) => [...chosen.values()].some((c) => c.source === s));
-  return { gates, sources, tests: detectTestLayout(root, files), notes };
+  return { gates, sources, tests: detectTestLayout(root), notes };
 };
 
 /** The argv prefix a human confirms for a command: the tokens before its first placeholder. */

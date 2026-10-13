@@ -8,6 +8,7 @@ import {
   mkdirSync,
   readFileSync,
   readdirSync,
+  rmSync,
   symlinkSync,
   writeFileSync,
 } from "node:fs";
@@ -30,9 +31,11 @@ import {
   config,
   harness,
   installGate,
+  JUNIT,
   leaksGate,
   lintGate,
   NODE,
+  osvGate,
   testsGate,
 } from "./fixture.js";
 
@@ -323,6 +326,8 @@ describe("symlinks a diff planted (§7.3)", () => {
     const head = commitAll(h.repo);
     const report = await h.run({ head, layers: ["L2"] });
     expect(gate(report, "t")).toMatchObject({ status: "error", failure_class: "infra" });
+    // Nothing is removed through the symlink either.
+    expect(readdirSync(outside)).toEqual(["junit.xml"]);
   });
 });
 
@@ -463,23 +468,272 @@ describe("failures that are not the code's fault", () => {
 });
 
 describe("Final Review coverage (§6.7a)", () => {
-  it("reports which deterministic steps a gate run covers", async () => {
-    const h = harness(
-      { "tests/unit.json": cases([{ name: "ok" }]) },
-      config([
-        testsGate,
-        { id: "arch", layer: "L6", command: [NODE, "tools/install.mjs"], blocking: false },
-      ]),
-    );
-    const request = {
-      reason: "final_review" as const,
-      scope: "full" as const,
-      include_hidden: true,
-    };
-    const report = await h.run({ head: h.base, task: undefined, feature: "F-1", ...request });
+  const finalGates = config([
+    testsGate,
+    { id: "arch", layer: "L6", command: [NODE, "tools/install.mjs"], blocking: false },
+  ]);
+  const request = {
+    reason: "final_review" as const,
+    scope: "full" as const,
+    include_hidden: true,
+  };
+  const plantHidden = (home: string, repo: string, task: string, name: string): void => {
+    const dir = join(home, "hidden", engineRepoKey(repo), task, "tests/hidden");
+    mkdirSync(dir, { recursive: true });
+    writeFileSync(join(dir, `${task}.json`), cases([{ name }]));
+  };
+  const traceOf = (repo: string, report: GateReport) =>
+    TraceabilityReportSchema.parse(JSON.parse(read(repo, report.traceability ?? "")));
+
+  it("never claims the full acceptance run (step 2) when no hidden test was copied in", async () => {
+    const h = harness({ "tests/unit.json": cases([{ name: "[REQ-1] ok" }]) }, finalGates);
+    plantHidden(h.home, h.repo, "T-1", "[REQ-1] hidden one");
+    plantHidden(h.home, h.repo, "T-2", "[REQ-2] hidden two");
+    const report = await h.run({
+      head: h.base,
+      task: undefined,
+      feature: "F-1",
+      req_tags: ["REQ-1", "REQ-2"],
+      ...request,
+    });
     expect(report.traceability).toBe(".vtc/evidence/F-1/traceability.json");
-    expect(finalReviewStepsCovered({ ...request, layers: undefined }, report)).toEqual([1, 2, 6]);
-    expect(finalReviewStepsCovered({ ...request, layers: ["L2"] }, report)).toEqual([2, 6]);
-    expect(finalReviewStepsCovered({ ...request, reason: "round" }, report)).toEqual([]);
+    // The request names no tasks: nothing hidden ran, and evidence says so.
+    expect(gate(report, "tests").tests).toMatchObject({ executed: 1 });
+    const trace = traceOf(h.repo, report);
+    expect(finalReviewStepsCovered({ ...request, layers: undefined }, report, trace)).toEqual([
+      1, 6,
+    ]);
+    const notes = readdirSync(join(h.repo, ".vtc/evidence/F-1/gates"), { recursive: true }).map(
+      String,
+    );
+    const note = notes.find((f) => f.endsWith("hidden-tests.log")) ?? "";
+    expect(read(h.repo, `.vtc/evidence/F-1/gates/${note}`)).toMatch(/not copied/);
   });
+
+  it("reports the steps a run covers, step 2 only when hidden tests ran", async () => {
+    const h = harness({ "tests/unit.json": cases([{ name: "[REQ-1] ok" }]) }, finalGates);
+    plantHidden(h.home, h.repo, "T-1", "[REQ-1] hidden one");
+    const report = await h.run({ head: h.base, req_tags: ["REQ-1"], ...request });
+    expect(gate(report, "tests").tests).toMatchObject({ executed: 2 });
+    const trace = traceOf(h.repo, report);
+    expect(finalReviewStepsCovered({ ...request, layers: undefined }, report, trace)).toEqual([
+      1, 2, 6,
+    ]);
+    expect(finalReviewStepsCovered({ ...request, layers: undefined }, report)).toEqual([1, 6]);
+    expect(finalReviewStepsCovered({ ...request, layers: ["L2"] }, report, trace)).toEqual([2, 6]);
+    expect(finalReviewStepsCovered({ ...request, reason: "round" }, report, trace)).toEqual([]);
+  });
+});
+
+describe("monotonic metrics on redacted inventories (§7.3, AD-18)", () => {
+  it("matches a test whose id holds a .env value across rounds", async () => {
+    const h = harness(
+      {
+        ".env": "DB_HOST=localhost-database\n",
+        "tests/unit.json": cases([
+          { name: "connects to localhost-database", assertions: 2 },
+          { name: "connects to b" },
+        ]),
+      },
+      config([testsGate]),
+    );
+    const first = await h.run({ head: h.base, layers: ["L2"] });
+    const previous = gate(first, "tests").tests;
+    if (previous === undefined) throw new Error("no metrics");
+    expect(read(h.repo, previous.inventory)).not.toContain("localhost-database");
+    // Redaction reorders the ids; the written inventory is sorted again.
+    expect(
+      TestInventorySchema.parse(JSON.parse(read(h.repo, previous.inventory))).tests.map(
+        (t) => t.id,
+      ),
+    ).toEqual([
+      "tests/unit.json > connects to [REDACTED:known_value]",
+      "tests/unit.json > connects to b",
+    ]);
+    writeFile(h.repo, "src/x.ts", "export const x = 1;\n");
+    const head = commitAll(h.repo);
+    const second = await h.run({ head, layers: ["L2"], compare_to: previous });
+    expect(gate(second, "tests")).toMatchObject({ status: "pass", monotonic: [] });
+    expect(second.verdict).toBe("pass");
+    // Selected by its raw id, compared in the redacted space.
+    const selected = await h.run({
+      head,
+      layers: ["L2"],
+      compare_to: previous,
+      tests: ["tests/unit.json > connects to localhost-database"],
+    });
+    expect(gate(selected, "tests")).toMatchObject({ status: "pass", monotonic: [] });
+  });
+
+  it("reports infra, never a silent pass, when the previous inventory cannot be read", async () => {
+    const h = harness({ "tests/unit.json": cases([{ name: "a" }]) }, config([testsGate]));
+    const first = await h.run({ head: h.base, layers: ["L2"] });
+    const previous = gate(first, "tests").tests;
+    if (previous === undefined) throw new Error("no metrics");
+    const missing = await h.run({
+      head: h.base,
+      layers: ["L2"],
+      compare_to: { ...previous, inventory: ".vtc/evidence/T-1/gone.inventory.json" },
+    });
+    expect(gate(missing, "monotonic")).toMatchObject({ status: "error", failure_class: "infra" });
+    expect(missing.verdict).toBe("infra_error");
+    writeFile(h.repo, ".vtc/evidence/T-1/bad.inventory.json", '{"v":1,"tests":[{"id":"x"}]}\n');
+    const invalid = await h.run({
+      head: h.base,
+      layers: ["L2"],
+      compare_to: { ...previous, inventory: ".vtc/evidence/T-1/bad.inventory.json" },
+    });
+    expect(invalid.verdict).toBe("infra_error");
+  });
+
+  it("keeps a flaky classification when tests also went missing", async () => {
+    const yml = config([testsGate]).replace(
+      "flaky_tests: []",
+      'flaky_tests:\n    - "tests/unit.json > wobbly"',
+    );
+    const h = harness({ "tests/unit.json": cases([{ name: "wobbly" }, { name: "gone" }]) }, yml);
+    const first = await h.run({ head: h.base, layers: ["L2"] });
+    const previous = gate(first, "tests").tests;
+    if (previous === undefined) throw new Error("no metrics");
+    writeFile(h.repo, "tests/unit.json", cases([{ name: "wobbly", status: "fail" }]));
+    const head = commitAll(h.repo);
+    const report = await h.run({ head, layers: ["L2"], compare_to: previous });
+    expect(gate(report, "tests")).toMatchObject({
+      status: "fail",
+      failure_class: "flaky",
+      monotonic: [{ kind: "test_missing", test: "tests/unit.json > gone" }],
+    });
+  });
+});
+
+describe("the base-fail rule across L2 gates (§6.3 step 2)", () => {
+  it("decides once over every L2 gate when QA's tests span two of them", async () => {
+    const e2eGate = {
+      id: "e2e",
+      layer: "L2" as const,
+      cwd: "e2e",
+      command: [NODE, "../tools/fake-test.mjs", JUNIT],
+      report: { format: "junit" as const, path: JUNIT },
+    };
+    const h = harness(
+      {
+        "tests/unit.json": cases([{ name: "ok" }]),
+        "e2e/tests/flow.json": cases([{ name: "ok" }]),
+      },
+      config([testsGate, e2eGate]),
+    );
+    writeFile(h.repo, "tests/acceptance/a.json", cases([{ name: "[REQ-1] unit", status: "fail" }]));
+    writeFile(h.repo, "e2e/tests/new.json", cases([{ name: "[REQ-1] flow", status: "fail" }]));
+    const head = commitAll(h.repo);
+    const named = ["tests/acceptance/a.json > [REQ-1] unit", "tests/new.json > [REQ-1] flow"];
+    const report = await h.run({ head, reason: "base_fail_check", expect: "fail", tests: named });
+    expect(report.results.map((r) => [r.gate_id, r.status])).toEqual([
+      ["tests", "fail"],
+      ["e2e", "fail"],
+    ]);
+    expect(gateExpectationMet(report)).toBe(true);
+
+    writeFile(h.repo, "e2e/tests/new.json", cases([{ name: "[REQ-1] flow" }]));
+    const half = commitAll(h.repo);
+    const passing = await h.run({
+      head: half,
+      reason: "base_fail_check",
+      expect: "fail",
+      tests: named,
+    });
+    expect(gateExpectationMet(passing)).toBe(false);
+    expect(gate(passing, "e2e").evidence[0]?.ref).toMatch(/#tests\/new\.json > \[REQ-1\] flow$/);
+  });
+});
+
+describe("baseline findings that move (§7.1)", () => {
+  it("keeps a lint violation the diff only shifted, and counts a second identical one as new", async () => {
+    const h = harness({ "src/a.ts": "// TODO old\n" }, config([lintGate]));
+    writeFile(h.repo, "src/a.ts", "export const x = 1;\n// TODO old\n");
+    const shifted = commitAll(h.repo);
+    const report = await h.run({ head: shifted, layers: ["L1"] });
+    expect(gate(report, "lint")).toMatchObject({
+      status: "pass",
+      new_violations: 0,
+      baseline_violations: 1,
+    });
+    // Evidence of the first run is not part of the next diff (it would be linted too).
+    rmSync(join(h.repo, ".vtc/evidence"), { recursive: true, force: true });
+    writeFile(h.repo, "src/a.ts", "export const x = 1;\n// TODO old\n// TODO old\n");
+    const doubled = commitAll(h.repo);
+    const again = await h.run({ head: doubled, layers: ["L1"] });
+    expect(gate(again, "lint")).toMatchObject({
+      status: "fail",
+      new_violations: 1,
+      baseline_violations: 1,
+    });
+  });
+});
+
+describe("the gates come from the base commit (§7.1)", () => {
+  it("ignores uncommitted edits to gates.yml and parks when the base has none", async () => {
+    const h = harness({ "tests/unit.json": cases([{ name: "ok" }]) }, config([testsGate]));
+    writeFile(h.repo, ".vtc/gates.yml", config([{ id: "other", layer: "L2", command: [NODE] }]));
+    const report = await h.run({ head: h.base, layers: ["L2"] });
+    expect(report.results.map((r) => r.gate_id)).toEqual(["tests"]);
+
+    rmSync(join(h.repo, ".vtc/gates.yml"));
+    const head = commitAll(h.repo);
+    const gone = await h.run({ head, base: head, layers: ["L2"] });
+    expect(gone.results[0]).toMatchObject({ gate_id: "config", failure_class: "infra" });
+    expect(read(h.repo, gone.results[0]?.evidence[0]?.ref ?? "")).toMatch(/not committed/);
+  });
+});
+
+describe("scanner configs a diff adds (§7.2 L4/L5)", () => {
+  it("scans with the base version of scanner configs and flags the new one in L5", async () => {
+    const h = harness({ "src/old.ts": "export const a = 1;\n" }, config([leaksGate]));
+    writeFile(h.repo, "src/new.ts", "SECRET=newvalue654321\n");
+    writeFile(h.repo, ".gitleaksignore", "src/new.ts\n");
+    const head = commitAll(h.repo);
+    const report = await h.run({ head, files_scope: ["src/**", ".gitleaksignore"] });
+    expect(gate(report, "secrets")).toMatchObject({ status: "fail", new_violations: 1 });
+    // Named exactly in files_scope: a plan allowed this config change, so L5 accepts it.
+    expect(gate(report, "write-scope")).toMatchObject({ status: "pass" });
+    const scoped = await h.run({ head, files_scope: ["src/**", "*"] });
+    expect(gate(scoped, "write-scope").findings).toEqual([
+      expect.objectContaining({
+        rule_id: "new_suppression",
+        location: { path: ".gitleaksignore" },
+      }),
+    ]);
+  });
+});
+
+describe("the osv-scanner offline database (§7.2, §15)", () => {
+  it("does not start the dependency gate without the database", async () => {
+    const h = harness({}, config([osvGate]));
+    const report = await h.run({ head: h.base, layers: ["L4"] });
+    expect(gate(report, "dependencies")).toMatchObject({ status: "error", failure_class: "infra" });
+    expect(read(h.repo, gate(report, "dependencies").evidence[0]?.ref ?? "")).toMatch(
+      /offline vulnerability database/,
+    );
+  });
+});
+
+describe("a report that cannot be written (GateRunner.run never throws)", () => {
+  it("returns a minimal infra report when evidence cannot be written", async () => {
+    const h = harness({ "tests/unit.json": cases([{ name: "ok" }]) }, config([testsGate]));
+    const outside = tempDir("vtc-outside-");
+    mkdirSync(join(h.repo, ".vtc"), { recursive: true });
+    symlinkSync(outside, join(h.repo, ".vtc/evidence"));
+    const report = await h.run({ head: h.base, layers: ["L2"] });
+    GateReportSchema.parse(report);
+    expect(report.verdict).toBe("infra_error");
+    expect(report.results.map((r) => r.gate_id)).toEqual(["gate-runner"]);
+    expect(readdirSync(outside)).toEqual([]);
+  });
+});
+
+describe("not built yet (gates/README.md, follow-up increments)", () => {
+  // §7.2 sandbox, two phases: install reaches package registries only; test/scan has no network.
+  // Today every gate runs with the user's network and file access (exec.ts runCommand).
+  it.todo("runs verify-phase gates without network access (§7.2 two-phase sandbox)");
+  it.todo("lets install-phase gates reach package registries only (§7.2 two-phase sandbox)");
+  it.todo("copies every task's hidden tests into a feature's Final Review run (§6.7a step 2)");
 });

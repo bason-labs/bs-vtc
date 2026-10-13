@@ -88,6 +88,37 @@ describe("checkWriteScope", () => {
   });
 });
 
+describe("config files a diff adds (§7.3, §7.6 rule 5)", () => {
+  it("flags new in-scope test, lint and scanner configs unless the scope names them exactly", async () => {
+    const { repo, base } = setup();
+    writeFile(repo, "src/new/vitest.config.ts", "export default { test: { include: [] } };\n");
+    writeFile(repo, "src/new/.eslintrc.json", '{ "rules": {} }\n');
+    writeFile(repo, "src/new/osv-scanner.toml", "[[IgnoredVulns]]\nid = 'GHSA-x'\n");
+    writeFile(repo, "src/new/conftest.py", "collect_ignore = ['test_a.py']\n");
+    const head = commitAll(repo, "configs");
+    const git = createGitOps({ repoRoot: repo });
+    const report = await checkWriteScope(git, request(base, head));
+    expect(report.violations).toEqual([
+      { kind: "protected_modified", path: "src/new/.eslintrc.json" },
+      { kind: "protected_modified", path: "src/new/conftest.py" },
+      { kind: "new_suppression", path: "src/new/osv-scanner.toml" },
+      { kind: "protected_modified", path: "src/new/vitest.config.ts" },
+    ]);
+    const planned = {
+      ...request(base, head),
+      filesScope: [...request(base, head).filesScope, "src/new/conftest.py"],
+    };
+    expect((await checkWriteScope(git, planned)).violations.map((v) => v.path)).not.toContain(
+      "src/new/conftest.py",
+    );
+    // A project's own protected globs apply too.
+    const custom = await checkWriteScope(git, request(base, head), ["**/conftest.py"]);
+    expect(custom.violations).toEqual([
+      { kind: "protected_modified", path: "src/new/conftest.py" },
+    ]);
+  });
+});
+
 describe("added-line scanning", () => {
   it("finds markers of every supported ecosystem on added lines only", () => {
     const diff = [

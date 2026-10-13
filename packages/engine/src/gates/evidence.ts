@@ -20,7 +20,13 @@ export const traceabilityPath = (owner: string): string =>
 
 export type PendingWrite =
   | { readonly rel: string; readonly redact: boolean; readonly text: string }
-  | { readonly rel: string; readonly redact: boolean; readonly json: unknown };
+  | {
+      readonly rel: string;
+      readonly redact: boolean;
+      readonly json: unknown;
+      /** Re-normalises the value after redaction (a test inventory is re-sorted by its new ids). */
+      readonly normalize?: (redacted: unknown) => unknown;
+    };
 
 /**
  * Values to redact by value: every `.env` file at the top of the repo and of the checkout
@@ -57,9 +63,15 @@ export const flushWrites = (
   knownValues: readonly string[],
 ): void => {
   for (const write of writes) {
+    const json =
+      "json" in write
+        ? write.redact
+          ? (write.normalize ?? ((v: unknown) => v))(redactJson(write.json, knownValues))
+          : write.json
+        : undefined;
     const body =
       "json" in write
-        ? `${JSON.stringify(write.redact ? redactJson(write.json, knownValues) : write.json, null, 2)}\n`
+        ? `${JSON.stringify(json, null, 2)}\n`
         : write.redact
           ? redactSecrets(write.text, knownValues)
           : write.text;

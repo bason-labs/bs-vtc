@@ -8,8 +8,10 @@ import { createGitOps } from "../../src/git/index.js";
 import {
   allowlistPrefix,
   calibrate,
+  DEFAULT_PROTECTED_GLOBS,
   detectToolchain,
   flakyBetween,
+  osvDatabaseReady,
   parseGatesConfig,
   readAllowlist,
   slotOf,
@@ -24,6 +26,7 @@ import {
   fakeScanners,
   installGate,
   NODE,
+  osvGate,
   testsGate,
   TOOLS,
 } from "./fixture.js";
@@ -131,10 +134,13 @@ describe("detectToolchain (§7.1 sources in order)", () => {
     expect(byId.iac?.when_changed).toContain("**/*.tf");
     // CI's install line wins over the lockfile's; `pnpm test && pnpm lint` needs a shell and is skipped.
     expect(detection.sources).toEqual(["agents_md", "task_runner", "ci"]);
+    // Every config glob, matched or not: a config a later diff adds is protected too.
     expect(detection.tests).toEqual({
       acceptance_globs: ["tests/acceptance/**"],
-      protected_configs: ["**/eslint.config.*", "**/vitest.config.*", "**/tsconfig*.json"],
+      protected_configs: [...DEFAULT_PROTECTED_GLOBS],
     });
+    expect(detection.tests.protected_configs).toContain("**/conftest.py");
+    expect(detection.tests.protected_configs).toContain("**/.gitleaksignore");
   });
 
   it("detects Python and Go toolchains from their lockfiles", () => {
@@ -207,7 +213,7 @@ describe("gates.yml is plain YAML (integrator follow-up 1)", () => {
 });
 
 describe("calibrate", () => {
-  const setup = () => {
+  const setup = (gates = [installGate, testsGate]) => {
     const repo = initRepo({ ...TOOLS, ".lintrc": "strict\n" });
     const counter = join(tempDir(), "count");
     writeFile(
@@ -215,11 +221,7 @@ describe("calibrate", () => {
       "tests/unit.json",
       cases([{ name: "stable" }, { name: "wobbly", flaky: counter }]),
     );
-    writeFile(
-      repo,
-      ".vtc/gates.yml",
-      config([installGate, testsGate]).replace("confirmed: true", "confirmed: false"),
-    );
+    writeFile(repo, ".vtc/gates.yml", config(gates).replace("confirmed: true", "confirmed: false"));
     const revision = commitAll(repo, "base");
     const home = tempDir("vtc-home-");
     const lines: string[] = [];
@@ -289,6 +291,32 @@ describe("calibrate", () => {
     );
     expect(outcome.status).toBe("dry_run");
     expect(s.answers).toEqual([]);
+  });
+
+  it("shows the scanners' arguments and downloads the OSV database only when the human says yes", async () => {
+    const s = setup([installGate, testsGate, osvGate]);
+    const outcome = await calibrate(s.deps(() => true));
+    expect(s.answers).toEqual([
+      "Allow these commands for this repo on this machine?",
+      "Download the OSV offline vulnerability database now (network)?",
+      "Freeze this as the baseline?",
+    ]);
+    expect(s.lines).toContain(`  dependencies: ${osvGate.command.join(" ")}`);
+    expect(osvDatabaseReady(s.home)).toBe(true);
+    expect(outcome).toMatchObject({ status: "frozen" });
+    if (outcome.status !== "frozen") throw new Error("not frozen");
+    expect(outcome.config.gates.map((g) => g.id)).toContain("dependencies");
+  });
+
+  it("warns loudly when the dependency gate cannot run and is dropped", async () => {
+    const s = setup([installGate, testsGate, osvGate]);
+    const outcome = await calibrate(s.deps((q) => !q.startsWith("Download")));
+    expect(osvDatabaseReady(s.home)).toBe(false);
+    if (outcome.status !== "frozen") throw new Error("not frozen");
+    expect(outcome.config.gates.map((g) => g.id)).not.toContain("dependencies");
+    const text = s.lines.join("\n");
+    expect(text).toMatch(/WARNING: dropped L4 gate dependencies: .* NOT active/);
+    expect(text).toMatch(/needs the OSV offline database/);
   });
 
   it("compares two runs' outcomes per test", () => {

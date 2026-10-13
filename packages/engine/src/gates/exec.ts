@@ -3,6 +3,9 @@
  * timeout that kills the whole process group, a scrubbed environment (no tokens or credentials
  * from the engine's own environment reach a gate), and stdout/stderr streamed to raw log files
  * under `.vtc/state/` (§7.2: raw output stays gitignored).
+ *
+ * Not built yet (gates/README.md): the §7.2 two-phase sandbox. A gate runs with the user's
+ * network and file access in both phases; there is no OS sandbox profile or network policy.
  */
 import { spawn } from "node:child_process";
 import { createWriteStream, mkdirSync } from "node:fs";

@@ -22,6 +22,7 @@ import {
   readAllowlist,
   stringifyGatesConfig,
 } from "../config.js";
+import { downloadOsvDatabase, osvDatabaseDir, osvDatabaseReady } from "../osv-db.js";
 import { runWithConfig } from "../runner.js";
 import { createScannerStore, type ScannerStore } from "../scanners.js";
 import { allowlistPrefix, detectToolchain } from "./detect.js";
@@ -112,6 +113,15 @@ export const calibrate = async (
   });
   if (options.dryRun === true) return { status: "dry_run", yaml: stringifyGatesConfig(proposed) };
 
+  // Pinned scanners need no allowlist entry, but the human sees exactly how they will run.
+  const scannerGates = proposed.gates.filter((g) => scanners.names.includes(g.command[0] ?? ""));
+  if (scannerGates.length > 0) {
+    deps.out(
+      "Pinned scanners run as (vtc refuses unknown flags, network use and paths outside the checkout):",
+    );
+    for (const g of scannerGates) deps.out(`  ${g.id}: ${g.command.join(" ")}`);
+  }
+
   // 1. Every command a human has not confirmed on this machine, before anything runs (§15).
   const allowlist = readAllowlist(deps.vtcHome, deps.repoRoot);
   const pending: string[][] = [];
@@ -129,11 +139,36 @@ export const calibrate = async (
     addToAllowlist(deps.vtcHome, deps.repoRoot, pending, now());
   }
 
-  // 2. Everything twice on the base commit (§7.1).
   const stamp = now()
     .toISOString()
     .replace(/[-:]/g, "")
     .replace(/\.\d+Z$/, "Z");
+
+  // The offline vulnerability database: downloaded only when the human says so (§7.2, §15).
+  const osvGates = proposed.gates.filter((g) => g.command[0] === "osv-scanner");
+  if (osvGates.length > 0 && !osvDatabaseReady(deps.vtcHome)) {
+    deps.out(
+      `WARNING: the osv-scanner offline vulnerability database is not in ${osvDatabaseDir(deps.vtcHome)}; without it the L4 vulnerable-dependency gate cannot run.`,
+    );
+    if (await deps.confirm("Download the OSV offline vulnerability database now (network)?")) {
+      const checkout = await deps.git.createCleanCheckout(deps.revision);
+      try {
+        const done = await downloadOsvDatabase({
+          vtcHome: deps.vtcHome,
+          scanners,
+          checkoutAbs: join(deps.repoRoot, checkout),
+          logDir: join(deps.repoRoot, ".vtc/state/gates", `calibrate-${stamp}-osv-db`),
+          env: deps.env ?? process.env,
+          now: now(),
+        });
+        deps.out(done.ok ? `OSV database ${done.detail}` : `WARNING: OSV database: ${done.detail}`);
+      } finally {
+        await deps.git.removeCheckout(checkout);
+      }
+    }
+  }
+
+  // 2. Everything twice on the base commit (§7.1).
   const runOnce = async (n: number): Promise<GateReport> => {
     const checkout = await deps.git.createCleanCheckout(deps.revision);
     try {
@@ -162,8 +197,16 @@ export const calibrate = async (
   const broken = proposed.gates.filter((g) =>
     [first, second].every((r) => r.results.find((x) => x.gate_id === g.id)?.status === "error"),
   );
-  for (const g of broken)
-    deps.out(`dropped ${g.id}: it could not run on the base commit (see .vtc/state/gates/)`);
+  for (const g of broken) {
+    deps.out(
+      `WARNING: dropped ${g.layer} gate ${g.id}: it could not run on the base commit, so its check is NOT active (see .vtc/state/gates/)`,
+    );
+    if (g.command[0] === "osv-scanner" && !osvDatabaseReady(deps.vtcHome)) {
+      deps.out(
+        "  the vulnerable-dependency check needs the OSV offline database: run vtc calibrate again and accept the download",
+      );
+    }
+  }
   const gates = proposed.gates.filter((g) => !broken.includes(g));
   if (gates.length === 0)
     throw new Error("no gate could run on the base commit; fix the toolchain and calibrate again");
