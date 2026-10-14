@@ -112,6 +112,38 @@ describe("redactRecording: what names the owner's own setup (closing round, spin
     expect(line).not.toContain("private");
   });
 
+  it("keeps built-in and vtc: agents and a built-in output style, and replaces the owner's own agents, style and terminal commands", () => {
+    const [line] = redactRecording(
+      [
+        JSON.stringify({
+          type: "system",
+          subtype: "init",
+          agents: ["claude", "Explore", "private-agent", "vtc:vtc-qa-judge", "other:private"],
+          output_style: "private-style",
+          terminal_slash_commands: ["doctor", "private-command"],
+        }),
+      ],
+      context,
+    );
+    expect(JSON.parse(line ?? "")).toEqual({
+      type: "system",
+      subtype: "init",
+      agents: ["claude", "Explore", "<redacted>", "vtc:vtc-qa-judge", "<redacted>"],
+      output_style: "<redacted>",
+      terminal_slash_commands: "<redacted>",
+    });
+    expect(line).not.toContain("private");
+    const [builtIn] = redactRecording(
+      [JSON.stringify({ type: "system", subtype: "init", output_style: "default" })],
+      context,
+    );
+    expect(JSON.parse(builtIn ?? "")).toEqual({
+      type: "system",
+      subtype: "init",
+      output_style: "default",
+    });
+  });
+
   it("replaces a hook's output text (it can name the owner's plugins and paths), keeping the rest of the event", () => {
     const [line] = redactRecording(
       [

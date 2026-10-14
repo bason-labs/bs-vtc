@@ -195,7 +195,7 @@ export const installCodex = (request: InstallRequest): InstallResult => {
         ? []
         : [`Removed agent files the current plugin no longer has: ${removed.join(", ")}.`]),
       `Placed the vtc skills in ${skillsDir} (the Lead loop is the vtc-lead skill).`,
-      `The vtc plugin is not registered with Codex yet (D-bn: VTC is to register it, which turns on its hooks in the Codex desktop app once you trust them; that waits on a check against a real Codex install). Until then the skills are placed in ${skillsDir} and the hook guard rails do not run in Codex sessions; the engine's own checks still apply.`,
+      `The vtc plugin is not registered with Codex yet (registering it turns on its hooks in the Codex desktop app once you trust them; that waits on a check against a real Codex install). Until then the skills are placed in ${skillsDir} and the hook guard rails do not run in Codex sessions; the engine's own checks still apply.`,
       "A Codex Lead's roles run as headless Codex runs the engine starts itself (codex exec, sandboxed with the network off, budget-checked, no approval prompts, and only their own engine tools on the vtc bridge: never approve, answer or change_request), never inside the Codex session (VTC cannot confirm that session keeps the network off). Where a headless Codex run cannot start (Codex not logged in, or a platform whose network-off sandbox is not yet shown to block the engine's socket), the task parks blocked: run vtc doctor, or run the Lead in Claude Code instead (vtc install --host claude-code).",
     ],
   };

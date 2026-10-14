@@ -111,8 +111,11 @@ type CodexSandboxMode = "read-only" | "workspace-write";
  * `"cached"` or `"disabled"` (codex-cli 0.162.1). `--search` is "live web search: the native
  * Responses `web_search` tool" (`codex --help`), a tool the host provider runs, so the role's
  * sandbox and its network-off setting stay as they are. A `host_web` role gets `"live"`; every
- * other role gets `"disabled"`, set explicitly so the user's `config.toml` (or a default) cannot
- * turn it on; a `code_sandboxed` role with `host_web` is refused.
+ * other role gets `"disabled"`, set explicitly as a top-level `--config` override rather than left
+ * to a default; a `code_sandboxed` role with `host_web` is refused. Codex also reads `web_search`
+ * under a profile in `config.toml`; whether a profile-level `"live"` wins over this top-level
+ * override is not yet checked (open under the §7 H-3 row), so this does not claim the user's
+ * config cannot turn it back on.
  */
 export type CodexWebSearch = "live" | "disabled";
 
