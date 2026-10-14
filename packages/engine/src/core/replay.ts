@@ -22,6 +22,7 @@
  */
 import { join } from "node:path";
 import {
+  agentNameFor,
   GateRunRequestSchema,
   planDispatch,
   type GateRunRequest,
@@ -47,6 +48,7 @@ import type {
   ReplayTrialOutcome,
   RunHandle,
 } from "./kernel.js";
+import { pinBlocker } from "./prompt-target.js";
 import { roleWorktreeId } from "./role-worktree.js";
 import type { RoleRunRecord } from "./state.js";
 
@@ -211,6 +213,10 @@ const replayBlocker = (k: Kernel, h: RunHandle, replay: LookbackReplay): string 
   );
   if (plan !== "subagent" && plan !== "headless")
     return `${replay.host} can run no lookback_replay trial now (hosts.dispatch ${k.config().hosts.dispatch})`;
+  // AD-21 rule 6: only a target that can take a pin is replayed (its trials must run their arm)
+  const agent = agentNameFor(replay.role, replay.mode);
+  const blocker = pinBlocker(k.deps.plugins.promptParts?.(agent, replay.host), replay.host, plan);
+  if (blocker !== null) return `${agent} cannot run a candidate: ${blocker}`;
   return replay.trials.length === 0 ? "it has no trial to run" : null;
 };
 

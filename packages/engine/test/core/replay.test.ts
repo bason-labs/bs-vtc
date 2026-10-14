@@ -279,6 +279,35 @@ describe("RETRO runs Lookback replays (AD-21 rule 6, reading 176)", () => {
     await h.release();
   });
 
+  it("replays only a target that can take a pin: the others wait, and the run finishes (AD-21 rule 6)", async () => {
+    const own: PluginCatalog = {
+      ...switched,
+      promptParts: () => ({
+        lockedSha256: sha256Hex(LOCKED),
+        editableInPack: false,
+        compiled: { locked: LOCKED, editable: BASELINE },
+      }),
+    };
+    const h = createHarness({ project: { merge_level: 1 }, plugins: own });
+    let context: Delivered | undefined;
+    const fake = fakeReplays(["a", "b"], () => {
+      if (context === undefined) throw new Error("not at RETRO yet");
+      return context;
+    });
+    h.engine.setLookbackRetro(fake.retro);
+    await toRetro(h, (d) => {
+      context = d;
+    });
+    await h.engine.settle();
+    expect(h.engine.status({}).run.finished_at).toBeDefined();
+    expect(fake.graded).toEqual([]);
+    expect(fake.finished).toEqual([]);
+    expect(h.engine.notices.join("\n")).toMatch(
+      /proposal p-1 waits for the next RETRO: vtc-spec-verifier cannot run a candidate: it carries its own editable section/,
+    );
+    await h.release();
+  });
+
   it("a replay that cannot start waits: the run finishes and nothing is graded", async () => {
     const h = createHarness({ project: { merge_level: 1 }, plugins: switched });
     const retro: LookbackRetro = {
