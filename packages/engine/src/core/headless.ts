@@ -34,7 +34,7 @@ import type { Kernel, RunHandle } from "./kernel.js";
 import { deferForUsage, limitWait, stillLimited } from "./limits.js";
 import { inFlight } from "./queries.js";
 import { parkTask } from "./parking.js";
-import { deferReplays } from "./replay.js";
+import { deferReplays, trialProtectedFiles } from "./replay.js";
 import { headlessPlatformRefusal, roleSandboxProblem, roleSandboxRequest } from "./sandbox.js";
 import { handleSubmit } from "./submit.js";
 
@@ -521,8 +521,12 @@ export const launchHeadless = async (
       {
         cwd,
         writablePaths: dispatchWriteScope(k.deps.repoRoot, h.state, roleRun)?.worktree_globs ?? [],
-        protectedPaths:
-          task === undefined ? [] : (await protectedFiles(k, h, task)).map((p) => p.path),
+        protectedPaths: (step.replay !== undefined
+          ? await trialProtectedFiles(k, step.replay)
+          : task === undefined
+            ? []
+            : await protectedFiles(k, h, task)
+        ).map((p) => p.path),
       },
     ),
   );

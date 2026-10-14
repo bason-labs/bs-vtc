@@ -119,6 +119,7 @@ import {
 import {
   disableAutoMerges,
   finishAtLevel2,
+  finishAtLevel2Pending,
   pollMergedFeature,
   recordMergePreflight,
   startMergeLevel,
@@ -1277,6 +1278,14 @@ export class Engine implements Kernel {
         !state.run.paused
       ) {
         startFinalReview(this, handle, feature.id);
+      }
+      if (
+        finishAtLevel2Pending(state, feature.id) &&
+        !this.isRunning(`release:${feature.id}`) &&
+        !state.run.paused
+      ) {
+        // recovery: the engine stopped while a `finish_level_2` answer was turning auto-merge off
+        finishAtLevel2(this, handle, feature.id);
       }
       if (
         state.features.get(feature.id)?.status === "ready_to_ship" &&

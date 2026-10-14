@@ -420,6 +420,22 @@ const LEVEL3_PARK_NOTE =
   "The PR stays open for your review; retry the auto-merge once the cause is fixed, or finish at Level 2";
 
 /**
+ * Whether a parked feature's last escalation was answered `finish_level_2` and that answer has not
+ * finished yet: the feature stays parked until {@link finishAtLevel2}'s last step, so an engine
+ * that stopped while it ran (the remote call in flight) leaves the answer to finish again.
+ */
+export const finishAtLevel2Pending = (state: RunState, featureId: string): boolean => {
+  if (state.features.get(featureId)?.status !== "parked") return false;
+  const last = [...state.escalations.values()]
+    .filter((e) => e.feature === featureId && e.task === undefined)
+    .at(-1);
+  const answer = last?.answer?.option;
+  return (
+    answer !== undefined && last?.options.find((o) => o.id === answer)?.effect === "finish_level_2"
+  );
+};
+
+/**
  * The answer `finish_level_2` to a Level-3 release park (AD-23; D-bd, spine §5 reading 158): VTC
  * turns off any auto-merge it enabled on the feature's open PR, leaves the PR open for the human's
  * review and ends the run as at Level 2 (the feature `ready_to_ship`, then RETRO and

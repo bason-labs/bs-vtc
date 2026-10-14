@@ -57,6 +57,7 @@ export {
   assertReplayCheckoutIntact,
   createReplayCheckout,
   exposeReplayHead,
+  isReplayTree,
   newReplayTree,
   removeReplayCheckout,
   replayGitDirFingerprint,

@@ -750,7 +750,7 @@ const acceptReplayTrial = async (
     return reject("out_of_order", [`the run is in ${h.state.run.phase}, not retro`]);
   let head: string;
   try {
-    head = await snapshotTrial(k, h, run, trial.trial);
+    head = await snapshotTrial(k, h, run, trial);
   } catch (error) {
     return reject("out_of_order", [
       `the trial's checkout could not be committed: ${error instanceof Error ? error.message : String(error)}`,
