@@ -14,7 +14,6 @@ import { writeRepoFile } from "../git/index.js";
 import type { LookbackTargetRef, Kernel, RunHandle } from "./kernel.js";
 import { phaseEnteredSeq, countsAsFailure } from "./queries.js";
 import type { RoleRunRecord } from "./state.js";
-import type { StepSpec } from "./dispatch.js";
 import { writeRunSummary } from "./projections.js";
 import { taskDetailView } from "./views.js";
 
@@ -98,8 +97,16 @@ export const retroQueue = (h: RunHandle): RetroTarget[] => {
 export const retroTargetOf = (h: RunHandle, action: string): RetroTarget | undefined =>
   retroQueue(h).find((t) => t.runs.some((r) => r.action_id === action));
 
+/** A lookback role step (a `StepSpec` the dispatcher hands out). */
+export interface RetroStep {
+  readonly key: string;
+  readonly role: string;
+  readonly inputs: readonly { readonly type: "traces"; readonly path: string }[];
+  readonly note: string;
+}
+
 /** The lookback role step RETRO wants now: the first unsettled target, when none is running. */
-export const retroSteps = (h: RunHandle): StepSpec[] => {
+export const retroSteps = (h: RunHandle): RetroStep[] => {
   const queue = retroQueue(h);
   if (queue.some((t) => t.running)) return [];
   const target = queue.find((t) => !t.settled);
