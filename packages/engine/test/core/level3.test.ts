@@ -233,6 +233,8 @@ describe("AD-23 rules 2–3: the checklist and auto-merge bound to the gated SHA
     };
     await toRelease(h);
     const run = runId(h);
+    // GitHub keeps auto-merge on after a push: VTC turns it off before it parks
+    expect(h.remote3.calls).toContain("disable vtc/F-1");
     expect(ofType(h, "feature.auto_merge_disabled", run).at(-1)?.data).toMatchObject({
       reason: "head_moved",
     });
@@ -240,6 +242,75 @@ describe("AD-23 rules 2–3: the checklist and auto-merge bound to the gated SHA
       status: "parked",
       park_reason: "blocked",
     });
+    await h.release();
+  });
+
+  it("a moved head whose auto-merge cannot be turned off parks with what the human must do", async () => {
+    const h = level3();
+    h.remote3.mergeOnEnable = false;
+    const enable = h.remote3.enableAutoMerge.bind(h.remote3);
+    h.remote3.enableAutoMerge = async (request) => {
+      const pr = await enable(request);
+      h.prs.current = { ...(h.prs.current as PullRequestRef), head_sha: "d".repeat(40) };
+      return pr;
+    };
+    h.remote3.disableAutoMerge = () => Promise.reject(new Error("gh: HTTP 502"));
+    await toRelease(h);
+    const run = runId(h);
+    expect(ofType(h, "feature.auto_merge_disabled", run)).toEqual([]);
+    expect(h.engine.status({ run }).features[0]?.status).toBe("parked");
+    const escalation = ofType(h, "escalation.opened", run).at(-1)?.data.escalation as {
+      detail: string;
+    };
+    expect(escalation.detail).toContain("could NOT turn its auto-merge off");
+    expect(escalation.detail).toContain("--disable-auto");
+    await h.release();
+  });
+
+  it("a PR GitHub merged at a head other than the gated SHA is never marked shipped", async () => {
+    const h = level3();
+    const enable = h.remote3.enableAutoMerge.bind(h.remote3);
+    h.remote3.enableAutoMerge = async (request) => {
+      const pr = await enable(request);
+      // the head moved and merged between two polls
+      h.prs.current = { ...(h.prs.current as PullRequestRef), head_sha: "d".repeat(40) };
+      return pr;
+    };
+    await toRelease(h);
+    const run = runId(h);
+    const status = h.engine.status({ run });
+    expect(status.features[0]).toMatchObject({
+      status: "parked",
+      park_reason: "blocked",
+      pr: { state: "merged" },
+    });
+    expect(status.run.finished_at).toBeUndefined();
+    const escalation = ofType(h, "escalation.opened", run).at(-1)?.data.escalation as {
+      detail: string;
+    };
+    expect(escalation.detail).toContain("not at the commit Final Review verified");
+    await h.release();
+  });
+
+  it("a pause that lands while auto-merge is being enabled still turns it off", async () => {
+    const h = level3();
+    h.remote3.mergeOnEnable = false;
+    const enable = h.remote3.enableAutoMerge.bind(h.remote3);
+    h.remote3.enableAutoMerge = async (request) => {
+      // vtc pause runs while gh is enabling auto-merge: the feature's PR is not yet recorded as
+      // enabled, so the pause's own sweep skips it
+      await h.engine.pause({});
+      return enable(request);
+    };
+    await toRelease(h);
+    expect(h.remote3.calls.filter((c) => c === "disable vtc/F-1")).toHaveLength(1);
+    expect(h.remote3.calls.indexOf("disable vtc/F-1")).toBeGreaterThan(
+      h.remote3.calls.findIndex((c) => c.startsWith("enable")),
+    );
+    expect(ofType(h, "feature.auto_merge_disabled").at(-1)?.data).toMatchObject({
+      reason: "paused",
+    });
+    expect(h.prs.current?.auto_merge).toBe("disabled");
     await h.release();
   });
 
@@ -276,6 +347,39 @@ describe("AD-23 rules 2–3: the checklist and auto-merge bound to the gated SHA
     wake();
     await h.engine.settle();
     expect(h.engine.status({}).run.finished_at).toBeUndefined();
+    await h.release();
+  });
+});
+
+describe("the engine's shutdown during a Level-3 wait", () => {
+  it("stops the wait at once, leaves the auto-merge on GitHub and the feature ready to ship", async () => {
+    const h = level3();
+    h.remote3.mergeOnEnable = false;
+    let waiting: () => void = () => undefined;
+    const asleep = new Promise<void>((resolve) => {
+      waiting = resolve;
+    });
+    // a wait that would last the whole merge timeout unless the shutdown cuts it short
+    h.sleeper = () =>
+      new Promise(() => {
+        waiting();
+      });
+    const actions = await throughPlan(h, [draft("T-1")], SPEC_ONE);
+    await authorTests(h, only(actions, "qa"));
+    await build(h, only((await h.engine.next({}, CLAUDE)).actions, "engineer"));
+    await verdictPass(
+      h,
+      only((await h.engine.next({}, CLAUDE)).actions, "spec_verifier"),
+      "src/t-1/impl.ts",
+    );
+    await h.engine.settle().catch(() => undefined);
+    void passFinalReview(h).catch(() => undefined);
+    await asleep;
+    await h.engine.shutdown();
+    expect(h.remote3.calls.some((c) => c.startsWith("disable"))).toBe(false);
+    const status = h.engine.status({});
+    expect(status.features[0]?.status).toBe("ready_to_ship");
+    expect(status.run.finished_at).toBeUndefined();
     await h.release();
   });
 });

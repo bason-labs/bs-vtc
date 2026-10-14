@@ -7,7 +7,9 @@
  *   human should configure (VTC never changes repo settings);
  * - at release the §6.7 checklist (`autoMergeChecklist`, `feature.checklist`) must pass on the
  *   gated SHA, and auto-merge is enabled bound to it (`--match-head-commit`), never with an admin
- *   bypass; a moved head, a host that turns auto-merge off or a timeout parks the feature;
+ *   bypass; a moved head, a host that turns auto-merge off or a timeout parks the feature, and
+ *   VTC turns auto-merge off first (GitHub keeps it on after a push); a PR that merged at any
+ *   head but the gated SHA is never marked shipped;
  * - after the merge a watch reads base CI for the merge commit and looks for reverts; a red
  *   required run or a revert appends a downgrade to the git-tracked ledger
  *   (`MERGE_LEVEL_LEDGER`, `effectiveMergeLevel`) and records an escaped defect for Lookback;
@@ -61,12 +63,28 @@ export const LEVEL3_TIMING = {
   mergeTimeoutMs: 24 * 3_600_000,
 } as const;
 
-const sleep = (k: Kernel, ms: number): Promise<void> =>
-  k.deps.sleep !== undefined
-    ? k.deps.sleep(ms)
-    : new Promise((resolve) => {
-        setTimeout(resolve, ms).unref();
-      });
+/** Waits `ms`, or less when the engine shuts down (`Kernel.stopping`). */
+const sleep = (k: Kernel, ms: number): Promise<void> => {
+  const signal = k.stopping;
+  if (signal.aborted) return Promise.resolve();
+  let onAbort: () => void = () => undefined;
+  const stopped = new Promise<void>((resolve) => {
+    onAbort = resolve;
+    signal.addEventListener("abort", onAbort, { once: true });
+  });
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const slept =
+    k.deps.sleep !== undefined
+      ? k.deps.sleep(ms)
+      : new Promise<void>((resolve) => {
+          timer = setTimeout(resolve, ms);
+          timer.unref();
+        });
+  return Promise.race([slept, stopped]).finally(() => {
+    if (timer !== undefined) clearTimeout(timer);
+    signal.removeEventListener("abort", onAbort);
+  });
+};
 
 const message = (error: unknown): string =>
   (error instanceof Error ? error.message : String(error)).slice(0, 500);
@@ -238,7 +256,9 @@ export const checklistInput = (
       run.verdicts.map((v) => v.verdict),
     );
   }
-  const reviewersPassed = [...latest.values()].every((v) => v.every((x) => x === "pass"));
+  // no recorded verdict at all is not a pass (an empty set would be vacuously true)
+  const reviewersPassed =
+    latest.size > 0 && [...latest.values()].every((v) => v.every((x) => x === "pass"));
   const traceability = readTraceability(
     k.deps.repoRoot,
     state,
@@ -254,12 +274,27 @@ export const checklistInput = (
     if (rule !== null) fired.add(rule);
   }
   const visual = report?.visual?.status ?? (featureHasUi(h.state, featureId) ? "unchecked" : null);
+  // a step of the last Final Review round that could not be checked never counts as a pass
+  // (AD-23 rule 3): the round's steps are those logged after its gate run
+  const reportSeq = h.state.gateReports
+    .filter((r) => r.report.reason === "final_review" && r.report.feature === featureId)
+    .at(-1)?.seq;
+  const uncheckedSteps = h.state.events.filter(
+    (e) =>
+      e.type === "final_review.step_finished" &&
+      e.feature === featureId &&
+      e.seq > (reportSeq ?? Number.MAX_SAFE_INTEGER) &&
+      (e.data as { status?: string }).status === "unchecked",
+  ).length;
   const reportEvidence: Evidence[] =
     report === undefined ? [] : [{ type: "commit", ref: report.head }];
   return {
     finalReview: {
       verdict:
-        feature?.status === "ready_to_ship" || feature?.status === "shipped" ? "pass" : "pending",
+        (feature?.status === "ready_to_ship" || feature?.status === "shipped") &&
+        uncheckedSteps === 0
+          ? "pass"
+          : "pending",
       gatesGreen: report?.verdict === "pass",
       visual,
       evidence: [bundle, ...reportEvidence],
@@ -329,13 +364,14 @@ const park = (
  * Level 3 at release (AD-23 rules 2 and 3): waits for the base's required checks on the gated SHA,
  * evaluates the §6.7 checklist (`feature.checklist`), enables auto-merge bound to that SHA and
  * waits for the merge (`shipped`). Returns `merged` when the feature shipped, `parked` when it
- * parked for the human, `paused` when `vtc pause` stopped it.
+ * parked for the human, `paused` when `vtc pause` stopped it, `stopped` when the engine shut down
+ * (the next start reads the PR again).
  */
 export const autoMergeFeature = async (
   k: Kernel,
   h: RunHandle,
   featureId: string,
-): Promise<"merged" | "parked" | "paused"> => {
+): Promise<"merged" | "parked" | "paused" | "stopped"> => {
   const service = k.deps.remoteMerge;
   const feature = h.state.features.get(featureId);
   const report = lastFinalReview(h, featureId);
@@ -348,6 +384,7 @@ export const autoMergeFeature = async (
   const prs = k.deps.pullRequests;
   const started = k.now().getTime();
   const paused = (): boolean => h.state.run.paused;
+  const stopped = (): boolean => k.stopping.aborted;
   let required: readonly RequiredCheck[] = [];
   let pr: PullRequestRef | null;
   let policy: RemoteMergePolicy;
@@ -358,6 +395,7 @@ export const autoMergeFeature = async (
   }
   try {
     for (;;) {
+      if (stopped()) return "stopped";
       if (paused()) return "paused";
       pr = await prs.view(branch);
       if (pr?.state === "merged") break;
@@ -424,6 +462,8 @@ export const autoMergeFeature = async (
           .slice(0, 10),
       );
     const method = policy.merge_methods[0] ?? "merge";
+    if (stopped()) return "stopped";
+    if (paused()) return "paused";
     try {
       pr = await service.enableAutoMerge({ branch, headSha: gated, method });
     } catch (error) {
@@ -447,9 +487,44 @@ export const autoMergeFeature = async (
       updatePr(k, h, featureId, enabled);
       return Promise.resolve();
     });
+    /**
+     * Turns the PR's auto-merge off (AD-23: GitHub keeps it on when someone pushes, and a pause
+     * must not leave it on) and records it; `null` once it is off, else why it could not be.
+     */
+    const turnOff = async (
+      reason: "paused" | "head_moved" | "timeout",
+      detail: string,
+    ): Promise<string | null> => {
+      let off: PullRequestRef | null;
+      try {
+        off = await service.disableAutoMerge(branch);
+      } catch (error) {
+        return message(error);
+      }
+      await k.serial(h, () => {
+        k.emit(h, {
+          type: "feature.auto_merge_disabled",
+          actor: "engine",
+          feature: featureId,
+          data: { reason, detail },
+        });
+        updatePr(k, h, featureId, off === null ? null : { ...off, auto_merge: "disabled" });
+        return Promise.resolve();
+      });
+      return null;
+    };
+    const stillOn = (failure: string): string =>
+      `; VTC could NOT turn its auto-merge off (${failure}): turn it off now (gh pr merge ${number === undefined ? branch : String(number)} --disable-auto)`;
     const enabledAt = k.now().getTime();
     for (;;) {
-      if (paused()) return "paused";
+      if (stopped()) return "stopped";
+      if (paused()) {
+        // a pause that landed while auto-merge was being enabled: `disableAutoMerges` may not
+        // have seen it enabled yet (AD-23 rule 6)
+        if (h.state.features.get(featureId)?.pr?.auto_merge !== "disabled")
+          await turnOff("paused", "vtc pause turned off the PR's auto-merge");
+        return "paused";
+      }
       if (pr.state === "merged") break;
       const disabled =
         pr.head_sha !== gated
@@ -460,26 +535,37 @@ export const autoMergeFeature = async (
               ? ("timeout" as const)
               : null;
       if (disabled !== null) {
-        if (disabled === "timeout") await service.disableAutoMerge(branch).catch(() => null);
         const detail =
           disabled === "head_moved"
             ? `the PR head moved to ${pr.head_sha.slice(0, 12)} after auto-merge was enabled on ${gated.slice(0, 12)}`
             : disabled === "by_host"
               ? `GitHub turned auto-merge off (PR ${pr.state}${pr.merge_state_status === undefined ? "" : `, ${pr.merge_state_status}`})`
               : `the PR did not merge within ${String(LEVEL3_TIMING.mergeTimeoutMs / 3_600_000)} h${policy.requires_review ? " (the base requires an approving review)" : ""}`;
-        await k.serial(h, () => {
-          k.emit(h, {
-            type: "feature.auto_merge_disabled",
-            actor: "engine",
-            feature: featureId,
-            data: { reason: disabled, detail },
+        if (disabled === "by_host") {
+          await k.serial(h, () => {
+            k.emit(h, {
+              type: "feature.auto_merge_disabled",
+              actor: "engine",
+              feature: featureId,
+              data: { reason: disabled, detail },
+            });
+            return Promise.resolve();
           });
-          return Promise.resolve();
-        });
-        return park(k, h, featureId, detail, [{ type: "commit", ref: gated }]);
+          return park(k, h, featureId, detail, [{ type: "commit", ref: gated }]);
+        }
+        // a moved head or a timeout: GitHub would still merge, so VTC turns auto-merge off first
+        const failure = await turnOff(disabled, detail);
+        return park(k, h, featureId, failure === null ? detail : `${detail}${stillOn(failure)}`, [
+          { type: "commit", ref: gated },
+        ]);
       }
       await sleep(k, LEVEL3_TIMING.pollMs);
-      const seen = await prs.view(branch).catch(() => null);
+      let seen: PullRequestRef | null;
+      try {
+        seen = await prs.view(branch);
+      } catch {
+        continue; // GitHub unreachable: the next poll reads again; the merge timeout still runs
+      }
       if (seen === null) return park(k, h, featureId, "the feature PR is gone");
       pr = seen;
       const current = pr;
@@ -490,6 +576,26 @@ export const autoMergeFeature = async (
     }
   }
   const merged = pr;
+  if (merged.head_sha !== gated) {
+    // GitHub merged a head Final Review never verified (it moved between two polls): never
+    // reported as shipped (AD-23: "merging a commit other than the gated one")
+    await k.serial(h, () => {
+      updatePr(k, h, featureId, merged);
+      return Promise.resolve();
+    });
+    return park(
+      k,
+      h,
+      featureId,
+      `GitHub merged the PR at ${merged.head_sha.slice(0, 12)}, not at the commit Final Review verified (${gated.slice(0, 12)}): VTC does not mark the feature shipped; review the merge${merged.merge_commit === undefined ? "" : ` ${merged.merge_commit.slice(0, 12)}`} on the base and revert it if needed`,
+      [
+        { type: "commit", ref: gated },
+        ...(merged.merge_commit === undefined
+          ? []
+          : [{ type: "commit" as const, ref: merged.merge_commit }]),
+      ],
+    );
+  }
   await k.serial(h, () => {
     updatePr(k, h, featureId, merged);
     if (h.state.features.get(featureId)?.status === "ready_to_ship")

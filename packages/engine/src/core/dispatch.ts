@@ -14,6 +14,7 @@ import {
   resolveRoleMode,
   SESSION_DEFAULT_MODEL,
   type ArtifactRef,
+  type Escalation,
   type EscalationAnswer,
   type Finding,
   type HostId,
@@ -214,16 +215,23 @@ export const architectTriageStep = (
     return "done";
   const filter = { role: "architect", subject: taskId };
   if (busyStep(h, filter)) return null;
-  const accepted = [...h.state.roleRuns.values()].some(
-    (r) => r.role === "architect" && r.subject === taskId && r.status === "submitted",
-  );
-  if (accepted) {
+  const accepted = [...h.state.roleRuns.values()]
+    .filter((r) => r.role === "architect" && r.subject === taskId && r.status === "submitted")
+    .sort((a, b) => (a.closedSeq ?? 0) - (b.closedSeq ?? 0))
+    .at(-1);
+  let rejected: string | undefined;
+  if (accepted !== undefined) {
     const open = [...h.state.escalations.values()].some(
       (e) => e.task === taskId && e.reason === "change_request" && e.answer === undefined,
     );
-    return open ? null : "done";
+    if (open) return null;
+    // a change request the human rejected never lets the task build on it (AD-8 rule 1): the
+    // task parked on the rejection, and once the human answered that park the Architect triages
+    // it again with the answer
+    rejected = rejectedTriageChange(h, taskId, accepted.closedSeq ?? 0);
+    if (rejected === undefined) return "done";
   }
-  const note = rejectionNote(h, filter);
+  const note = [rejected, rejectionNote(h, filter)].filter((n) => n !== undefined).join("\n");
   const ask =
     task.arch_triage === "extends"
       ? `Per-task triage (§8.4): ${taskId} extends the approved spine. Write a one-page design note for it under .vtc/architecture/notes/${taskId}.md (artifact design_note): which components it touches and how it stays inside the spine.`
@@ -231,8 +239,52 @@ export const architectTriageStep = (
   return {
     key: `triage:${taskId}`,
     ...filter,
-    note: [ask, ...(note === undefined ? [] : [note])].join("\n"),
+    note: [ask, ...(note === "" ? [] : [note])].join("\n"),
   };
+};
+
+/** The change-request answer `answer` picked on `escalation`, by its option's effect. */
+const answerEffect = (escalation: Escalation): string | undefined =>
+  escalation.answer === undefined
+    ? undefined
+    : escalation.options.find((o) => o.id === escalation.answer?.option)?.effect;
+
+/**
+ * When the change request the Architect's last accepted triage of `taskId` opened (after
+ * `sinceSeq`) was rejected by the human: the note for the next triage (the rejection and the
+ * human's answers since). `undefined` when there is none or it was not rejected.
+ */
+const rejectedTriageChange = (
+  h: RunHandle,
+  taskId: string,
+  sinceSeq: number,
+): string | undefined => {
+  const opened = h.state.events.findLast((e) => {
+    if (e.type !== "escalation.opened" || e.task !== taskId || e.seq <= sinceSeq) return false;
+    const escalation = (e.data as { escalation?: Partial<Escalation> }).escalation;
+    return escalation?.reason === "change_request" && escalation.raised_by === "architect";
+  });
+  const id = (opened?.data as { escalation?: { id?: string } } | undefined)?.escalation?.id;
+  const cr = id === undefined ? undefined : h.state.escalations.get(id);
+  if (cr === undefined || answerEffect(cr) !== "reject_change") return undefined;
+  const answered = (e: { type: string; data: unknown }): EscalationAnswer | undefined =>
+    e.type === "escalation.answered" ? (e.data as { answer?: EscalationAnswer }).answer : undefined;
+  const rejectedAt =
+    h.state.events.findLast(
+      (e) =>
+        e.type === "escalation.answered" &&
+        (e.data as { escalation?: string }).escalation === cr.id,
+    )?.seq ?? 0;
+  const answers = h.state.events
+    .filter((e) => e.task === taskId && e.seq > rejectedAt)
+    .flatMap((e) => {
+      const text = answered(e)?.text;
+      return text === undefined ? [] : [text];
+    });
+  return [
+    `The human rejected the change request ${cr.id} for your previous ADR of ${taskId}${cr.answer?.text === undefined ? "" : ` ("${cr.answer.text}")`}. Do not build on the rejected change: write a new ADR that fits the human's answer, or say the task is blocked.`,
+    ...answers.map((a) => `The human's answer: ${a}`),
+  ].join("\n");
 };
 
 /** Steps of one task that need a role run now. */

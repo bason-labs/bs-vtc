@@ -27,7 +27,7 @@ import {
   type GitChangedFile,
   type ReleaseReadiness,
 } from "@vtc/shared";
-import { runGit, writeRepoFile } from "../git/index.js";
+import { removeRepoFile, runGit, writeRepoFile } from "../git/index.js";
 import { effectiveVerdict } from "./gate-verdict.js";
 import {
   baseBranch,
@@ -493,6 +493,7 @@ const conclude = (k: Kernel, h: RunHandle, featureId: string, seq: number): void
   const runs = runsSince(h, featureId, seq).filter((r) => r.status === "submitted");
   const blocking: Finding[] = [];
   const evidence: Evidence[] = [];
+  const unchecked: number[] = [];
   for (const s of aiSteps(k)) {
     const run = runs.filter((r) => r.role === s.role && r.mode === s.mode).at(-1);
     const result = run === undefined ? undefined : loadResult(k.deps.repoRoot, run.action_id);
@@ -503,6 +504,7 @@ const conclude = (k: Kernel, h: RunHandle, featureId: string, seq: number): void
         reason: "the reviewer's result is missing",
         evidence: [],
       });
+      unchecked.push(s.step);
       continue;
     }
     const cited = result.verdicts.flatMap((v) => v.evidence).slice(0, 10);
@@ -590,6 +592,18 @@ const conclude = (k: Kernel, h: RunHandle, featureId: string, seq: number): void
   const all = [...blocking, ...readinessFailed];
   if (all.length > 0) {
     failFinalReview(k, h, featureId, all, evidence.slice(0, 5));
+    return;
+  }
+  if (unchecked.length > 0) {
+    // an AI step with no verdict is never a pass (AD-8 rule 2; AD-23 rule 3)
+    parkFeature(
+      k,
+      h,
+      featureId,
+      "blocked",
+      `Final Review step(s) ${unchecked.join(", ")} could not be checked: the reviewer's result is missing or does not parse. Answer to run Final Review again`,
+      [{ type: "file", ref: `.vtc/evidence/${featureId}/bundle.json` }],
+    );
     return;
   }
   setFeatureStatus(k, h, featureId, "ready_to_ship");
@@ -736,12 +750,15 @@ export const startFinalReview = (k: Kernel, h: RunHandle, featureId: string): vo
         );
         return Promise.resolve();
       }
+      // this round's result only: a readiness that could not be computed removes the last
+      // round's file, so step 7 says so instead of reading the old one back
       if (readiness !== null)
         writeRepoFile(
           k.deps.repoRoot,
           releaseReadinessPath(featureId),
           `${JSON.stringify(readiness, null, 2)}\n`,
         );
+      else removeRepoFile(k.deps.repoRoot, releaseReadinessPath(featureId));
       recordGateSteps(k, h, featureId, report);
       if (aiSteps(k).length === 0) {
         const seq = gatesPassedSeq(h, featureId);

@@ -7,12 +7,16 @@
  * - **Directions**: the Designer's 2–3 `design_direction` artifacts, each with its novelty verdict
  *   (`novelty_report`, `unchecked` without one).
  * - **Unverified facts**: every fact in `.vtc/research/facts.jsonl` whose current row is
- *   unverified, stale or conflicting, and every `UNVERIFIED:` tag in the documents G2 shows or the
- *   research briefs. An approval must waive each one with a reason (`fact_waivers`).
+ *   unverified, stale or conflicting, every `UNVERIFIED:` tag in the documents G2 shows or the
+ *   research briefs, and every version, licence, CVE or EOL claim in a research section (a
+ *   research brief, or a section of a shown document whose heading names research) that cites no
+ *   fact id. An approval must waive each one with a reason (`fact_waivers`). The stale facts are
+ *   re-fetched first, through the injected refresher (`Engine.setFactRefresher`).
+ * Role-written files are read without following a symlink (a role could plant one to a host file).
  * - **Design coverage**: every requirement of the frozen spec has a screen, every screen covers a
  *   requirement, and every component the component specs use is registered.
  */
-import { existsSync, readdirSync, readFileSync } from "node:fs";
+import { existsSync, lstatSync, readdirSync, readFileSync } from "node:fs";
 import { basename, dirname, extname, join } from "node:path";
 import {
   DESIGN_SCREENS_PATH,
@@ -32,6 +36,7 @@ import {
   type G2Direction,
   type UnverifiedFactSummary,
 } from "@vtc/shared";
+import { assertNoSymlinks } from "../git/index.js";
 import type { Kernel, RunHandle } from "./kernel.js";
 import { lastSubmitted } from "./queries.js";
 import { frozenSpecItems } from "./read-model.js";
@@ -46,8 +51,14 @@ export interface GateExtras {
   readonly design_coverage?: DesignCoverageReport;
 }
 
+/**
+ * A repo file's text, or `null`: never through a symlink (any component), so a role cannot make
+ * the engine read and echo a file outside the repo.
+ */
 const read = (repoRoot: string, path: string): string | null => {
   try {
+    assertNoSymlinks(repoRoot, path);
+    if (!lstatSync(join(repoRoot, path)).isFile()) return null;
     return readFileSync(join(repoRoot, path), "utf8");
   } catch {
     return null;
@@ -182,13 +193,52 @@ const FACT_REASON: Readonly<Record<"unverified" | "stale" | "conflicting", strin
 /** A line's `UNVERIFIED:` tag (§8.2: an unverified claim blocks G2 unless a human waives it). */
 const UNVERIFIED_TAG = /UNVERIFIED:\s*(.*)$/;
 
+/** A fact id cited on a line (`FactIdSchema`). */
+const FACT_CITE = /\bf-[a-f0-9]{16}\b/;
+
+/**
+ * The kinds of claim a research section must back with a fact (AD-22 rule 4), first match wins.
+ * Deterministic and deliberately broad: a false positive costs one waiver, a miss lets an uncited
+ * claim through G2.
+ */
+const CLAIM_KINDS: readonly { readonly kind: string; readonly pattern: RegExp }[] = [
+  { kind: "cve", pattern: /\b(?:CVE-\d{4}-\d{4,}|GHSA(?:-[a-z0-9]{4}){3})\b|\bvulnerab/i },
+  {
+    kind: "licence",
+    pattern:
+      /\blicen[cs]e[ds]?\b|\b(?:MIT|ISC|BSD-\d-Clause|Apache-2\.0|Apache 2\.0|[AL]?GPL(?:-?v?\d(?:\.\d)?)?|MPL-2\.0|SSPL|BUSL)\b/i,
+  },
+  {
+    kind: "eol",
+    pattern:
+      /\b(?:EOL|end[- ]of[- ](?:life|support)|supported (?:until|through|till)|support ends|LTS|deprecated)\b/i,
+  },
+  {
+    kind: "version",
+    pattern: /\bv?\d+\.\d+(?:\.\d+)?\b|[\w.-]@\^?~?\d|\bversions?\b|\breleased?\b/i,
+  },
+];
+
+/** The kind of uncited claim on `line`, or `null`. */
+const uncitedClaim = (line: string): string | null => {
+  if (FACT_CITE.test(line)) return null;
+  return CLAIM_KINDS.find((c) => c.pattern.test(line))?.kind ?? null;
+};
+
+/** A Markdown heading: its level and text. */
+const HEADING = /^(#{1,6})\s+(.*)$/;
+
 /**
  * Every claim G2 blocks on (AD-22 rule 4): facts whose current row is unverified, stale or
- * conflicting, and `UNVERIFIED:` tags in `documents` (repo-relative), in that order, once each.
+ * conflicting; then, per document of `documents` (repo-relative) in line order, its `UNVERIFIED:`
+ * tags and the version, licence, CVE or EOL claims in its research sections that cite no fact id
+ * (a document in `research` is a research section as a whole; elsewhere a section is research
+ * when its heading says so); once each.
  */
 export const unverifiedFacts = (
   k: Kernel,
   documents: readonly string[],
+  research: ReadonlySet<string> = new Set(),
 ): UnverifiedFactSummary[] => {
   const out = new Map<string, UnverifiedFactSummary>();
   for (const row of currentFacts(k.deps.repoRoot)) {
@@ -206,18 +256,50 @@ export const unverifiedFacts = (
   }
   for (const path of [...new Set(documents)]) {
     const lines = (read(k.deps.repoRoot, path) ?? "").split("\n");
+    // the research section the line is in: the heading level that opened it, or 0 for the whole
+    // document (a research brief); `null` outside one
+    let section: number | null = research.has(path) ? 0 : null;
+    let fenced = false;
     lines.forEach((line, i) => {
+      const subject = `${path}:${String(i + 1)}`.slice(0, 300);
       const tag = UNVERIFIED_TAG.exec(line);
-      if (tag === null) return;
-      const claim = (tag[1] ?? "").trim() || "an unverified claim";
-      const id = factId(path, "unverified_tag", claim, null);
+      if (tag !== null) {
+        const claim = (tag[1] ?? "").trim() || "an unverified claim";
+        const id = factId(path, "unverified_tag", claim, null);
+        if (!out.has(id))
+          out.set(id, {
+            id,
+            subject,
+            predicate: "unverified_tag",
+            status: "unverified",
+            reason: `tagged UNVERIFIED: ${claim}`.slice(0, 500),
+          });
+        return;
+      }
+      if (/^\s*(?:```|~~~)/.test(line)) fenced = !fenced;
+      const heading = fenced ? null : HEADING.exec(line);
+      if (heading !== null) {
+        const level = heading[1]?.length ?? 1;
+        if (section !== null && section !== 0 && level <= section) section = null;
+        if (section === null && /\bresearch\b/i.test(heading[2] ?? "")) section = level;
+        return;
+      }
+      if (section === null) return;
+      const kind = uncitedClaim(line);
+      if (kind === null) return;
+      const claim = line.replace(/^\s*(?:[-*+]|\d+\.)\s+/, "").trim();
+      const id = factId(path, `uncited_${kind}`, claim, null);
       if (out.has(id)) return;
       out.set(id, {
         id,
-        subject: `${path}:${String(i + 1)}`.slice(0, 300),
-        predicate: "unverified_tag",
+        subject,
+        predicate: `uncited_${kind}`,
         status: "unverified",
-        reason: `tagged UNVERIFIED: ${claim}`.slice(0, 500),
+        reason:
+          `a ${kind === "eol" ? "EOL" : kind === "cve" ? "CVE" : kind} claim in a research section cites no fact: ${claim}`.slice(
+            0,
+            500,
+          ),
       });
     });
   }
@@ -310,10 +392,14 @@ export const designCoverage = (k: Kernel, h: RunHandle): DesignCoverageReport | 
 
 // ---------------------------------------------------------------- the gate
 
-/** The documents whose `UNVERIFIED:` tags G2 lists: what it shows, and the research briefs. */
+/** The research briefs: every Research-Analyst artifact is a research section as a whole. */
+const researchBriefs = (h: RunHandle): string[] =>
+  submittedArtifacts(h, "research_analyst").map((a) => a.path);
+
+/** The documents G2 scans for claims: what it shows, and the research briefs. */
 const factDocuments = (h: RunHandle, shown: readonly FrozenArtifact[]): string[] => [
   ...shown.map((a) => a.path),
-  ...submittedArtifacts(h, "research_analyst").map((a) => a.path),
+  ...researchBriefs(h),
 ];
 
 /** What the approval of `gates` shows besides the artifacts (only G2 has any). */
@@ -325,7 +411,7 @@ export const gateExtras = (
 ): GateExtras => {
   if (!gates.includes("G2")) return { design_directions: [], unverified_facts: [] };
   const directions = g2Directions(k, h);
-  const facts = unverifiedFacts(k, factDocuments(h, shown));
+  const facts = unverifiedFacts(k, factDocuments(h, shown), new Set(researchBriefs(h)));
   const coverage = designCoverage(k, h);
   return {
     design_directions: directions.map((d) => d.id),

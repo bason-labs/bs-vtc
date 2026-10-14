@@ -206,6 +206,25 @@ export const applyAnswer = (
     throw new EngineError("invalid", `option ${answer.option} is not offered`);
   const taskId = escalation.task;
   const task = taskId === undefined ? undefined : h.state.tasks.get(taskId);
+  if (
+    option.effect === "reject_change" &&
+    escalation.reason === "change_request" &&
+    escalation.raised_by === "architect" &&
+    taskId !== undefined
+  ) {
+    // the Architect's ADR for a task triaged `changes` was rejected: the task must not build on
+    // it (§8.4; AD-8 rule 1). It parks; answering the park triages it again with the answer.
+    parkTask(k, h, taskId, {
+      reason: "blocked",
+      detail:
+        `you rejected the architecture change ${taskId} needs (${escalation.id}), so it does not start on it. Clarify how ${taskId} should proceed (the Architect triages it again with your answer), or drop it`.slice(
+          0,
+          2000,
+        ),
+      evidence: escalation.evidence,
+    });
+    return;
+  }
   if (option.effect === "approve_change" || option.effect === "reject_change") return;
   if (taskId === undefined || task === undefined) return;
   if (option.effect === "drop" || option.effect === "replan") {

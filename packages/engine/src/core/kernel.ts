@@ -86,6 +86,14 @@ export type RoleToolHandler = (
   call: CallContext,
 ) => Promise<unknown>;
 
+/**
+ * Re-fetches the facts table's stale facts (AD-22 rule 4: "before G2 the engine re-fetches stale
+ * facts"); it appends the new rows to `.vtc/research/facts.jsonl`. The research module implements
+ * it and the daemon hands it to the engine (`Engine.setFactRefresher`), so core never imports
+ * research (AD-13 rule 12).
+ */
+export type FactRefresher = (repoRoot: string) => Promise<void>;
+
 export interface RunHandle {
   readonly state: RunState;
   readonly log: EventLogWriter;
@@ -168,6 +176,11 @@ export interface Kernel {
   readonly unattended: Set<string>;
   /** Engine-launched headless runs in flight, by action id (AD-25). */
   readonly headless: Map<string, HeadlessEntry>;
+  /**
+   * Aborted once the engine shuts down (`Engine.shutdown`): no new job or headless run starts, and
+   * long waits (the Level-3 release) stop at once.
+   */
+  readonly stopping: AbortSignal;
   emit(handle: RunHandle, draft: EventDraft): VtcEvent;
   /** Starts a background job unless one with the same key runs; re-advances the run after it. */
   spawn(handle: RunHandle, key: string, job: () => Promise<void>): void;
