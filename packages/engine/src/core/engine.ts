@@ -62,7 +62,7 @@ import { dispatchGuarded, inSessionRefusal, NO_LEAD_WAIT_REASON, phaseRoles } fr
 import { g2ApprovalProblem, gateExtras, type GateExtras } from "./g2.js";
 import { effectiveVerdict } from "./gate-verdict.js";
 import { headlessRunsOf, killHeadless } from "./headless.js";
-import type { RoleToolHandler } from "./kernel.js";
+import type { FactRefresher, RoleToolHandler } from "./kernel.js";
 import { dispatchNow, drive } from "./route.js";
 import { parkEscalation } from "./escalations.js";
 import {
@@ -304,8 +304,13 @@ export class Engine implements Kernel {
   private readonly leadHosts = new Map<string, HostId>();
   readonly unattended = new Set<string>();
   readonly headless = new Map<string, HeadlessEntry>();
+  private readonly stopper = new AbortController();
   /** The role-facing research tools' handler (AD-22), set by the composition; `null` = none. */
   private roleToolHandler: RoleToolHandler | null = null;
+  /** The stale-fact re-fetch before G2 (AD-22 rule 4), set by the composition; `null` = none. */
+  private factRefresher: FactRefresher | null = null;
+  /** The G2 showings whose stale facts were already re-fetched (`run:phase entry seq`). */
+  private readonly factsRefreshed = new Set<string>();
 
   private constructor(readonly deps: EngineCoreDeps) {
     this.guardDir = guardDirFor(deps.vtcHome, deps.repoRoot);
@@ -816,8 +821,12 @@ export class Engine implements Kernel {
     return event;
   }
 
+  get stopping(): AbortSignal {
+    return this.stopper.signal;
+  }
+
   spawn(handle: RunHandle, key: string, job: () => Promise<void>): void {
-    if (this.jobs.has(key)) return;
+    if (this.jobs.has(key) || this.stopper.signal.aborted) return;
     const promise = (async () => {
       try {
         await job();
@@ -841,7 +850,11 @@ export class Engine implements Kernel {
       } finally {
         this.jobs.delete(key);
       }
-      if (this.handles.has(handle.state.id) && this.deps.lock.isHeld()) {
+      if (
+        this.handles.has(handle.state.id) &&
+        this.deps.lock.isHeld() &&
+        !this.stopper.signal.aborted
+      ) {
         await this.serial(handle, async () => {
           this.advance(handle);
           // a run whose steps the engine runs headless continues without the Lead's next call
@@ -888,6 +901,14 @@ export class Engine implements Kernel {
 
   roleTools(): RoleToolHandler | null {
     return this.roleToolHandler;
+  }
+
+  /**
+   * Re-fetch stale facts with `refresher` once before each G2 shows (AD-22 rule 4): the daemon
+   * wires the research module's (core never imports it, AD-13 rule 12).
+   */
+  setFactRefresher(refresher: FactRefresher | null): void {
+    this.factRefresher = refresher;
   }
 
   leadHostFor(run: string, call: CallContext): HostId | undefined {
@@ -940,6 +961,19 @@ export class Engine implements Kernel {
   async settle(): Promise<void> {
     while (this.jobs.size > 0) await Promise.allSettled([...this.jobs.values()]);
     await Promise.allSettled([...this.chains.values()]);
+  }
+
+  /**
+   * The daemon's shutdown (AD-25: no orphaned processes): nothing new starts, every
+   * engine-launched run is killed (its step stays in flight, as after a crash, and the next
+   * `vtc resume` supersedes it), the Level-3 waits stop
+   * (a pending auto-merge stays on GitHub; the next start reads the PR again), then the jobs
+   * settle.
+   */
+  async shutdown(): Promise<void> {
+    this.stopper.abort();
+    await killHeadless(this);
+    await this.settle();
   }
 
   /** True while a run has work or a job runs (the daemon's idle exit waits for this, AD-12 rule 4). */
@@ -1352,7 +1386,17 @@ export class Engine implements Kernel {
     this.advance(handle);
     const held = { noLead: 0 };
     const actions: LeadAction[] = await dispatchNow(this, handle, call, held);
-    const gate = this.awaitingGates(handle);
+    let gate = this.awaitingGates(handle);
+    if (gate?.gates.includes("G2") === true && this.factRefresher !== null) {
+      // before G2 shows, its stale facts are re-fetched once (AD-22 rule 4); a refresh that
+      // fails leaves them stale, and G2 lists them for a waiver
+      const key = `${state.id}:${String(phaseEnteredSeq(state, state.run.phase) ?? 0)}`;
+      if (!this.factsRefreshed.has(key)) {
+        this.factsRefreshed.add(key);
+        await this.factRefresher(this.deps.repoRoot).catch(() => undefined);
+        gate = this.awaitingGates(handle);
+      }
+    }
     if (gate !== null) {
       this.recordGateRequest(handle, gate);
       const { design_coverage: _coverage, ...shown } = gate.extras;

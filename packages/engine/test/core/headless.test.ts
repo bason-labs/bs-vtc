@@ -17,7 +17,9 @@ import {
   type RoleResultInput,
   type SpawnRoleRequest,
 } from "@vtc/shared";
+import { headlessPreflight } from "../../src/core/headless.js";
 import type { CallContext } from "../../src/core/index.js";
+import type { Kernel, RunHandle } from "../../src/core/kernel.js";
 import { writeFile } from "../helpers/repo.js";
 import {
   CLAUDE,
@@ -255,6 +257,7 @@ describe(
         expect.objectContaining({ host: "codex", purpose: "role", ok: false, failed: "auth" }),
       ]);
       expect(ofType(h, "incident.recorded").at(-1)?.data.detail).toContain("not signed in");
+      expect(String(ofType(h, "incident.recorded").at(-1)?.data.detail)).toMatch(/^auth: /);
       expect(h.engine.status({}).run.paused).toBe(true);
       // the run waits for the human: more next calls check nothing and launch nothing
       await next(h, CODEX);
@@ -339,6 +342,52 @@ describe(
     });
   },
 );
+
+describe("AD-25 rule 3: the budget check comes last", () => {
+  /** The preflight's inputs only: a run whose config matches, a task, the host's sign-in. */
+  const preflightOf = (options: {
+    readonly loggedIn: boolean;
+    readonly spent: number;
+    readonly runSpent?: number;
+  }) => {
+    const k = {
+      diskConfigHash: () => "a".repeat(64),
+      usage: new Map(),
+      now: () => new Date("2026-10-13T09:00:00.000Z"),
+      deps: { adapters: { codex: { authStatus: signedIn("codex", options.loggedIn) } } },
+    } as unknown as Kernel;
+    const h = {
+      state: {
+        run: { paused: false, pipeline_config_hash: "a".repeat(64) },
+        tasks: new Map([["T-1", { id: "T-1", spent_usd: options.spent, budget_usd: 5 }]]),
+        runBudget:
+          options.runSpent === undefined ? null : { budget_usd: 10, spent_usd: options.runSpent },
+      },
+    } as unknown as RunHandle;
+    return headlessPreflight(k, h, { task: "T-1" }, "codex", "auto_resume");
+  };
+
+  it("a task that used up its budget fails on budget, after a passing sign-in check", async () => {
+    expect(await preflightOf({ loggedIn: true, spent: 5 })).toMatchObject({
+      ok: false,
+      failed: "budget",
+    });
+    expect((await preflightOf({ loggedIn: true, spent: 5 })).detail).toContain(
+      "$5.00 of its $5.00",
+    );
+  });
+
+  it("a run that used up its budget fails on budget too", async () => {
+    expect(await preflightOf({ loggedIn: true, spent: 1, runSpent: 10 })).toMatchObject({
+      failed: "budget",
+    });
+  });
+
+  it("the sign-in check comes before the budget", async () => {
+    expect(await preflightOf({ loggedIn: false, spent: 5 })).toMatchObject({ failed: "auth" });
+    expect(await preflightOf({ loggedIn: true, spent: 1 })).toMatchObject({ ok: true });
+  });
+});
 
 describe("§6.9 auto-resume with no live Lead (AD-17 rule 2)", { timeout: 30_000 }, () => {
   const limitOutcome = (h: Harness, action: string) =>
@@ -438,6 +487,33 @@ describe("AD-25 rule 4: supervision, status and the kill switch", { timeout: 30_
       outcome: "error",
       cause: "killed",
     });
+    expect(h.engine.status({}).headless_runs).toBeUndefined();
+    await h.release();
+  });
+
+  it("the engine's shutdown kills it, submits nothing for it and starts nothing new", async () => {
+    let started: () => void = () => undefined;
+    const running = new Promise<void>((resolve) => {
+      started = resolve;
+    });
+    const h = createHarness({
+      codex: {
+        headless: () => {
+          started();
+          return new Promise<HostOutcome>(() => undefined); // never ends by itself
+        },
+      },
+    });
+    await start(h, CODEX);
+    await next(h, CODEX);
+    await running;
+    const before = Date.now();
+    await h.engine.shutdown();
+    expect(Date.now() - before).toBeLessThan(5_000);
+    expect(h.killed).toEqual(["repo_cartographer"]);
+    expect(h.launched).toHaveLength(1);
+    // not the role's failure: the step stays in flight, as after a crash, for vtc resume
+    expect(ofType(h, "role.failed")).toEqual([]);
     expect(h.engine.status({}).headless_runs).toBeUndefined();
     await h.release();
   });

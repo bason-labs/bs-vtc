@@ -10,8 +10,6 @@
  * through the same `handleSubmit` path as a Lead's.
  */
 import {
-  CODEX_IN_SESSION_REFUSED_REASON,
-  CODEX_UNIX_CONNECT_BLOCKED_PLATFORMS,
   fromStructuredOutput,
   headlessPolicyFor,
   jsonSchemaFor,
@@ -35,7 +33,7 @@ import type { Kernel, RunHandle } from "./kernel.js";
 import { deferForUsage, limitWait, stillLimited } from "./limits.js";
 import { inFlight } from "./queries.js";
 import { parkTask } from "./parking.js";
-import { roleSandboxProblem, roleSandboxRequest } from "./sandbox.js";
+import { headlessPlatformRefusal, roleSandboxProblem, roleSandboxRequest } from "./sandbox.js";
 import { handleSubmit } from "./submit.js";
 
 const NO_CAPABILITIES: Pick<HostCapabilities, "subagents" | "headless"> = {
@@ -49,34 +47,6 @@ export const capabilitiesOf = (
   host: HostId,
 ): Pick<HostCapabilities, "subagents" | "headless"> =>
   k.deps.adapters[host]?.capabilities ?? NO_CAPABILITIES;
-
-/**
- * Why a headless run of `step` on `host` may not start on this platform, or `null`. A host whose
- * sandbox cannot keep the VTC install token unreadable (`enforced.secretsUnreadable` not true:
- * Codex has no per-path read deny) runs roles only where its network-off sandbox is shown to block
- * a Unix-socket connect (`CODEX_UNIX_CONNECT_BLOCKED_PLATFORMS`, the §7 Codex-token residual,
- * readings 79 and 99), so the role cannot present the token to the engine's socket.
- */
-export const headlessPlatformRefusal = (
-  k: Kernel,
-  step: Pick<StepSpec, "role" | "mode">,
-  host: HostId,
-): string | null => {
-  const adapter = k.deps.adapters[host];
-  const contract = k.deps.roles.get(step.role);
-  if (adapter === undefined || contract === undefined) return null;
-  const effective = resolveRoleMode(contract, step.mode);
-  const probe = adapter.sandboxProfile(
-    roleSandboxRequest(
-      { tools: effective.ok ? effective.contract.tools : contract.tools },
-      { cwd: k.deps.repoRoot, writablePaths: [], protectedPaths: [] },
-    ),
-  );
-  if (probe.enforced.secretsUnreadable === true) return null;
-  return CODEX_UNIX_CONNECT_BLOCKED_PLATFORMS.includes(k.deps.platform ?? process.platform)
-    ? null
-    : CODEX_IN_SESSION_REFUSED_REASON;
-};
 
 /**
  * The checks before an engine-launched start or resume (AD-25 rule 3), in order: the run is not
@@ -137,6 +107,12 @@ export const headlessPreflight = async (
 };
 
 /**
+ * How an `incident.recorded` for a failed sign-in check starts, so it can be told from a usage
+ * limit until `IncidentKind` has an `auth` kind (contract proposal).
+ */
+export const AUTH_INCIDENT_PREFIX = "auth: ";
+
+/**
  * A failed preflight: nothing launches, and nothing retries in a loop. `usage` waits for the
  * reset (the timer is scheduled); `auth` records an incident and pauses the run until the human
  * signs in again and resumes; `config` parks the step for the human; `budget` parks its task.
@@ -159,14 +135,20 @@ const preflightFailed = (
     }
     case "auth":
       // Never a retry loop: the human signs in again, then resumes (AD-25 rule 3; AD-9: VTC
-      // reads no credential, only the host's own status command).
+      // reads no credential, only the host's own status command). The run pauses rather than
+      // parking the step: every later step on the host would fail the same check. IncidentKind
+      // has no `auth` kind yet (proposed), so the detail starts with `AUTH_INCIDENT_PREFIX`.
       k.emit(h, {
         type: "incident.recorded",
         actor: "engine",
         ...(step.task === undefined ? {} : { task: step.task }),
         data: {
           kind: "limit",
-          detail: `the engine did not start ${step.role} headless: ${detail}`.slice(0, 2000),
+          detail:
+            `${AUTH_INCIDENT_PREFIX}the engine did not start ${step.role} headless: ${detail}`.slice(
+              0,
+              2000,
+            ),
         },
       });
       k.emit(h, {
@@ -275,6 +257,9 @@ const finishHeadless = async (
     },
   });
   if (run.status !== "in_flight") return; // superseded (a resume) while it ran
+  // killed by the engine's shutdown: not the role's failure; the run stays in flight, as after a
+  // crash, and the next `vtc resume` supersedes it
+  if (k.stopping.aborted) return;
   await handleSubmit(k, h, submitInputFor(actionId, outcome));
 };
 
@@ -309,7 +294,7 @@ const watch = async (
 
 /**
  * Launches one step as an engine-launched headless run (a resume of the step's interrupted
- * session when it has one): the preflight, the dispatch record and `role.dispatched` (dispatch
+ * session when it has one): the platform rule (`headlessPlatformRefusal`), the preflight, the dispatch record and `role.dispatched` (dispatch
  * `headless`), the role's sandbox profile (refused when unsafe, D-ac), the `HeadlessPolicy`
  * limits, then `spawnRole` / `resume` and `headless.started`. Callers hold the run's lock.
  * Returns whether a run was launched.
@@ -323,7 +308,15 @@ export const launchHeadless = async (
 ): Promise<boolean> => {
   const adapter = k.deps.adapters[host];
   const contract = k.deps.roles.get(step.role);
-  if (adapter === undefined || contract === undefined) return false;
+  if (adapter === undefined || contract === undefined || k.stopping.aborted) return false;
+  // every engine-launched run (role, auto_resume, cross_family_review) passes the platform rule
+  // (`crossFamilyHost` already leaves out a reviewer whose host would be refused here, so the
+  // cross-family slot is skipped, never parked)
+  const refusal = headlessPlatformRefusal(k, step, host);
+  if (refusal !== null) {
+    if (purpose !== "cross_family_review") refuseInSession(k, h, step, refusal);
+    return false;
+  }
   const check = await headlessPreflight(k, h, step, host, purpose);
   k.emit(h, {
     type: "headless.preflight",
@@ -431,7 +424,7 @@ export const launchHeadless = async (
  * Launches every step the engine wants now as a headless run on `host`, within the concurrency
  * limit (reviewers count, §6.6). Callers hold the run's lock and decided `headless` with
  * `planDispatch`. A step that may not run on this platform parks with the refusal
- * ({@link headlessPlatformRefusal}).
+ * (`headlessPlatformRefusal`, checked in {@link launchHeadless}).
  */
 export const dispatchHeadless = async (
   k: Kernel,
@@ -445,19 +438,17 @@ export const dispatchHeadless = async (
     if (free <= 0 || stop()) return;
     // the cross-family reviewer runs on the other family's host (§12.4)
     const where = step.host ?? host;
-    const refusal = headlessPlatformRefusal(k, step, where);
-    if (refusal !== null) {
-      refuseInSession(k, h, step, refusal);
-      continue;
-    }
     const why = step.host === undefined ? purpose : "cross_family_review";
     if (await launchHeadless(k, h, step, where, why)) free -= 1;
   }
 };
 
-/** Kills every engine-launched run of `run` (`vtc pause`, AD-25 rule 4: no orphans). */
-export const killHeadless = async (k: Kernel, run: string): Promise<void> => {
-  const entries = [...k.headless.values()].filter((e) => e.run === run);
+/**
+ * Kills every engine-launched run of `run` (`vtc pause`), or of every run (the engine's shutdown);
+ * AD-25 rule 4: no orphans.
+ */
+export const killHeadless = async (k: Kernel, run?: string): Promise<void> => {
+  const entries = [...k.headless.values()].filter((e) => run === undefined || e.run === run);
   await Promise.allSettled(entries.map((e) => e.process.kill()));
 };
 

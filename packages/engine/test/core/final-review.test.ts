@@ -5,7 +5,7 @@
  * `release_readiness`; a failed or unchecked visual step fails a round, an errored one is gate
  * infrastructure, a skipped one is a note; a design-slop finding routes to the Designer.
  */
-import { existsSync, readFileSync } from "node:fs";
+import { existsSync, readFileSync, rmSync } from "node:fs";
 import { join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import {
@@ -161,6 +161,25 @@ describe("Final Review steps 3–5 and 7 (§6.7a)", () => {
         (e) => e.type === "task.created" && JSON.stringify(e.data).includes("integration_fix"),
       ),
     ).toBe(true);
+    await h.release();
+  });
+
+  it("a reviewer whose result is lost leaves its step unchecked, which parks the feature: never ready to ship", async () => {
+    const h = createHarness({ project: { merge_level: 1 } });
+    const [verifier, security] = await toFinalReview(h);
+    await review(h, verifier!, "pass");
+    rmSync(join(h.repo, `.vtc/state/results/${verifier!.action_id}.json`));
+    await review(h, security!, "pass");
+    await h.engine.settle();
+    expect(steps(h).find((s) => s.step === 3)).toMatchObject({ status: "unchecked" });
+    expect(h.engine.status({}).features[0]).toMatchObject({
+      status: "parked",
+      park_reason: "blocked",
+    });
+    const escalation = events(h)
+      .filter((e) => e.type === "escalation.opened")
+      .at(-1)?.data.escalation as { detail: string };
+    expect(escalation.detail).toContain("step(s) 3 could not be checked");
     await h.release();
   });
 

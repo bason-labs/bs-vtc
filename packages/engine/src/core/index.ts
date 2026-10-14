@@ -67,6 +67,7 @@ export {
   EngineError,
   type CallContext,
   type EngineCoreDeps,
+  type FactRefresher,
   type RoleToolHandler,
   type RunHandle,
 } from "./kernel.js";

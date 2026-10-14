@@ -4,12 +4,14 @@
  * and the design coverage; an approval that does not waive every unverified fact with a reason is
  * rejected; each waiver is recorded as `fact.waived`; with directions on offer the human picks one.
  */
-import { readFileSync } from "node:fs";
+import { readFileSync, symlinkSync } from "node:fs";
 import { join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { factId, type ApproveInput, type FactRow, type LeadAction } from "@vtc/shared";
 import { ALL_FIXTURE_ROLES } from "../fixtures/roles.js";
-import { cleanupDirs, writeFile } from "../helpers/repo.js";
+import { unverifiedFacts } from "../../src/core/g2.js";
+import type { Kernel } from "../../src/core/kernel.js";
+import { cleanupDirs, tempDir, writeFile } from "../helpers/repo.js";
 import {
   CLAUDE,
   createHarness,
@@ -190,7 +192,14 @@ describe("G2 blocks on unverified facts until a human waives each with a reason 
       "the hosting plan includes point-in-time recovery",
       null,
     );
-    expect(gate.unverified_facts).toEqual([unverified.id, stale.id, tag]);
+    // the spine's research section states an EOL date that cites no fact
+    const uncited = factId(
+      ".vtc/architecture/spine.md",
+      "uncited_eol",
+      "Postgres 17 is supported until 2029.",
+      null,
+    );
+    expect(gate.unverified_facts).toEqual([unverified.id, stale.id, uncited, tag]);
     expect(gate.facts).toEqual([
       expect.objectContaining({
         id: unverified.id,
@@ -198,6 +207,13 @@ describe("G2 blocks on unverified facts until a human waives each with a reason 
         reason: expect.stringContaining("no source") as unknown,
       }),
       expect.objectContaining({ id: stale.id, status: "stale" }),
+      expect.objectContaining({
+        id: uncited,
+        subject: ".vtc/architecture/spine.md:5",
+        predicate: "uncited_eol",
+        status: "unverified",
+        reason: expect.stringContaining("cites no fact") as unknown,
+      }),
       expect.objectContaining({
         id: tag,
         subject: ".vtc/architecture/spine.md:6",
@@ -222,7 +238,7 @@ describe("G2 blocks on unverified facts until a human waives each with a reason 
         waived_facts: [unverified.id],
         fact_waivers: [{ id: unverified.id, reason: "checked by hand" }],
       }),
-    ).rejects.toThrow(new RegExp(`not waived: ${stale.id}, ${tag}`));
+    ).rejects.toThrow(new RegExp(`not waived: ${stale.id}, ${uncited}, ${tag}`));
     expect(h.engine.status({}).run.phase).toBe("g2");
 
     const waivers = gate.unverified_facts.map((id) => ({ id, reason: `accepted risk for ${id}` }));
@@ -236,18 +252,131 @@ describe("G2 blocks on unverified facts until a human waives each with a reason 
     await h.release();
   });
 
+  it("re-fetches the stale facts once before G2 shows: a fact verified again is not listed", async () => {
+    const stale = row({
+      id: factId("react@19", "license", "MIT", null),
+      subject: "react@19",
+      predicate: "license",
+      value: "MIT",
+      status: "stale",
+    });
+    const h = createHarness({
+      files: { ".vtc/research/facts.jsonl": `${JSON.stringify(stale)}\n` },
+    });
+    let refreshed = 0;
+    h.engine.setFactRefresher((repoRoot) => {
+      refreshed += 1;
+      const again = {
+        ...stale,
+        id: factId("react@19", "license", "MIT", "https://deps.dev/react"),
+        status: "verified",
+        supersedes: stale.id,
+        source: {
+          fetcher: "depsdev",
+          url: "https://deps.dev/react",
+          retrieved_at: "2026-10-13T08:00:00.000Z",
+          content_sha256: "b".repeat(64),
+          locator: { kind: "json_pointer", pointer: "/license" },
+        },
+      };
+      writeFile(
+        repoRoot,
+        ".vtc/research/facts.jsonl",
+        `${JSON.stringify(stale)}\n${JSON.stringify(again)}\n`,
+      );
+      return Promise.resolve();
+    });
+    const gate = await toG2(h);
+    expect(refreshed).toBe(1);
+    expect(gate.unverified_facts).not.toContain(stale.id);
+    await h.engine.next({}, CLAUDE);
+    expect(refreshed).toBe(1);
+    await h.release();
+  });
+
   it("with nothing unverified G2 approves as before", async () => {
     const h = createHarness();
     const gate = await toG2(h);
     expect(gate.unverified_facts.filter((id) => !id.startsWith("f-"))).toEqual([]);
-    const tagOnly = gate.unverified_facts;
-    expect(tagOnly).toHaveLength(1); // the spine's UNVERIFIED: line
+    const listed = gate.unverified_facts;
+    expect(listed).toHaveLength(2); // the spine's uncited EOL claim and its UNVERIFIED: line
     const out = await approve(h, gate, {
-      waived_facts: tagOnly,
-      fact_waivers: [{ id: tagOnly[0]!, reason: "the human checked the plan" }],
+      waived_facts: listed,
+      fact_waivers: listed.map((id) => ({ id, reason: "the human checked it" })),
     });
     expect(only(out.actions, "planner").role).toBe("planner");
     await h.release();
+  });
+});
+
+describe("uncited version, licence, CVE and EOL claims in research sections (AD-22 rule 4)", () => {
+  const kernelAt = (repoRoot: string): Kernel => ({ deps: { repoRoot } }) as unknown as Kernel;
+  const DOC = [
+    "# Spine",
+    "",
+    "## Context",
+    "",
+    "- We run Node 22.11.0 today.", // not a research section
+    "",
+    "## Research",
+    "",
+    "- react 19.1.0 is the latest release (f-0123456789abcdef).", // cited
+    "- lodash is MIT licensed.",
+    "- CVE-2025-1234 affects the old parser.",
+    "- Node 20 reaches end of life in April 2026.",
+    "- The team knows TypeScript well.", // no claim
+    "",
+    "```",
+    "# not a heading: inside a fence",
+    "```",
+    "- vite@7 is the build tool.",
+    "",
+    "### Hosting",
+    "",
+    "- Postgres 17.2 is the managed version.", // a subsection of Research
+    "",
+    "## Decision",
+    "",
+    "- Use pnpm 10.0.0.", // research section closed
+    "",
+  ].join("\n");
+
+  it("lists each uncited claim of a research section with its kind, and nothing elsewhere", () => {
+    const repo = tempDir();
+    writeFile(repo, ".vtc/architecture/spine.md", DOC);
+    const facts = unverifiedFacts(kernelAt(repo), [".vtc/architecture/spine.md"]);
+    expect(facts.map((f) => [f.subject, f.predicate])).toEqual([
+      [".vtc/architecture/spine.md:10", "uncited_licence"],
+      [".vtc/architecture/spine.md:11", "uncited_cve"],
+      [".vtc/architecture/spine.md:12", "uncited_eol"],
+      [".vtc/architecture/spine.md:18", "uncited_version"],
+      [".vtc/architecture/spine.md:22", "uncited_version"],
+    ]);
+    expect(facts[0]).toMatchObject({
+      id: factId(".vtc/architecture/spine.md", "uncited_licence", "lodash is MIT licensed.", null),
+      status: "unverified",
+    });
+  });
+
+  it("a research brief is a research section as a whole", () => {
+    const repo = tempDir();
+    writeFile(repo, ".vtc/research/briefs/stack.md", "# Stack\n\n- Use pnpm 10.0.0.\n");
+    const brief = ".vtc/research/briefs/stack.md";
+    expect(unverifiedFacts(kernelAt(repo), [brief])).toEqual([]);
+    expect(
+      unverifiedFacts(kernelAt(repo), [brief], new Set([brief])).map((f) => f.predicate),
+    ).toEqual(["uncited_version"]);
+  });
+
+  it("never reads a role-written document through a symlink", () => {
+    const repo = tempDir();
+    const outside = tempDir();
+    writeFile(outside, "secret.md", "## Research\n\n- UNVERIFIED: host secret 1.2.3\n");
+    writeFile(repo, ".vtc/architecture/.keep", "");
+    symlinkSync(join(outside, "secret.md"), join(repo, ".vtc/architecture/spine.md"));
+    symlinkSync(outside, join(repo, ".vtc/research-link"));
+    expect(unverifiedFacts(kernelAt(repo), [".vtc/architecture/spine.md"])).toEqual([]);
+    expect(unverifiedFacts(kernelAt(repo), [".vtc/research-link/secret.md"])).toEqual([]);
   });
 });
 

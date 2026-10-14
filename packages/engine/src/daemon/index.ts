@@ -147,7 +147,9 @@ export const runDaemon: RunDaemon = async (deps: EngineDeps, options) => {
       random: Math.random,
       remote: "origin",
     });
-    cleanups.push(() => engine.settle());
+    // AD-25: shutting down kills the engine-launched runs and stops the Level-3 waits, so close
+    // returns promptly and leaves no orphaned process
+    cleanups.push(() => engine.shutdown());
     for (const notice of engine.notices) process.stderr.write(`vtc engine: ${notice}\n`);
     if (stale !== undefined) {
       const holder = stale.pid === null ? "an unknown process" : `pid ${String(stale.pid)}`;

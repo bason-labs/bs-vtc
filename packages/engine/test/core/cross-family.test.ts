@@ -118,4 +118,35 @@ describe("cross-family review (§12.4)", () => {
     expect(h.engine.status({}).tasks_by_status).toMatchObject({ done: 1 });
     await h.release();
   });
+
+  it("a Codex reviewer is not launched where Codex may not run headless (linux), and triage completes", async () => {
+    const h = createHarness({
+      platform: "linux",
+      project: {
+        merge_level: 1,
+        concurrency: 3,
+        hosts: { dispatch: "headless_allowed", cross_family_review: true },
+      },
+      codex: { headless: judge },
+    });
+    let pending = await toReviews(h);
+    for (let i = 0; i < 4 && pending.length > 0; i += 1) {
+      const handed: typeof pending = [];
+      for (const r of pending)
+        handed.push(...spawns((await verdictPass(h, r, "src/t-1/impl.ts")).actions));
+      await h.engine.settle();
+      pending = [...handed, ...spawns((await h.engine.next({}, CLAUDE)).actions)].filter(
+        (a, j, all) => all.findIndex((b) => b.action_id === a.action_id) === j,
+      );
+    }
+    expect(h.launched).toEqual([]);
+    const log = readFileSync(
+      join(h.repo, `.vtc/runs/${h.engine.status({}).run.id}/events.jsonl`),
+      "utf8",
+    );
+    expect(log).not.toContain('"purpose":"cross_family_review"');
+    await h.engine.settle();
+    expect(h.engine.status({}).tasks_by_status).toMatchObject({ done: 1 });
+    await h.release();
+  });
 });

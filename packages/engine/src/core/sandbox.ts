@@ -21,7 +21,16 @@
  * {@link roleSandboxRequest} and refuse an unsafe profile with {@link roleSandboxProblem}
  * (`test/core/sandbox-wiring.test.ts` fails otherwise).
  */
-import type { RoleContract, SandboxProfile, SandboxProfileRequest } from "@vtc/shared";
+import {
+  CODEX_IN_SESSION_REFUSED_REASON,
+  CODEX_UNIX_CONNECT_BLOCKED_PLATFORMS,
+  resolveRoleMode,
+  type HostId,
+  type RoleContract,
+  type SandboxProfile,
+  type SandboxProfileRequest,
+} from "@vtc/shared";
+import type { Kernel } from "./kernel.js";
 
 /** A role run's sandbox request: always `network: "none"` (reading 49). */
 export const roleSandboxRequest = (
@@ -44,4 +53,37 @@ export const roleSandboxProblem = (profile: SandboxProfile): string | null => {
   if (profile.enforced.secretsUnreadable === true) return null;
   if (profile.enforced.network) return null;
   return `${profile.host} cannot keep the VTC install token unreadable and does not enforce the role's no-network sandbox; refusing to start the role run (D-ac)`;
+};
+
+/**
+ * Why a headless run of `step` on `host` may not start on this platform, or `null`: a host whose
+ * sandbox profile is unsafe for the role ({@link roleSandboxProblem}), or a host whose
+ * sandbox cannot keep the VTC install token unreadable (`enforced.secretsUnreadable` not true:
+ * Codex has no per-path read deny) runs roles only where its network-off sandbox is shown to block
+ * a Unix-socket connect (`CODEX_UNIX_CONNECT_BLOCKED_PLATFORMS`, the §7 Codex-token residual,
+ * readings 79 and 99), so the role cannot present the token to the engine's socket.
+ */
+export const headlessPlatformRefusal = (
+  k: Kernel,
+  step: { readonly role: string; readonly mode?: string },
+  host: HostId,
+): string | null => {
+  const adapter = k.deps.adapters[host];
+  const contract = k.deps.roles.get(step.role);
+  if (adapter === undefined || contract === undefined) return null;
+  const effective = resolveRoleMode(contract, step.mode);
+  // a probe of what the host can enforce, never a launch (the launcher checks the real profile
+  // again): a host that cannot sandbox the role at all is refused here too
+  const probe = adapter.sandboxProfile(
+    roleSandboxRequest(
+      { tools: effective.ok ? effective.contract.tools : contract.tools },
+      { cwd: k.deps.repoRoot, writablePaths: [], protectedPaths: [] },
+    ),
+  );
+  const problem = roleSandboxProblem(probe);
+  if (problem !== null) return problem;
+  if (probe.enforced.secretsUnreadable === true) return null;
+  return CODEX_UNIX_CONNECT_BLOCKED_PLATFORMS.includes(k.deps.platform ?? process.platform)
+    ? null
+    : CODEX_IN_SESSION_REFUSED_REASON;
 };

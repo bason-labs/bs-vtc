@@ -89,4 +89,50 @@ describe("per-task architecture triage (§8.4)", () => {
     expect(only(answered.actions, "qa").task).toBe("T-1");
     await h.release();
   });
+
+  it("changes, rejected: the task parks and never starts QA on the rejected change; answering triages it again", async () => {
+    const h = createHarness();
+    const actions = await throughPlan(h, [draft("T-1", { arch_triage: "changes" })], SPEC_ONE);
+    const architect = only(actions, "architect");
+    writeFile(workdir(architect), ".vtc/architecture/adr/0001-queue.md", "# ADR 1: a queue\n");
+    await submitResult(h, architect, {
+      exit: "done",
+      artifacts: [{ type: "design_note", path: ".vtc/architecture/adr/0001-queue.md" }],
+    });
+    const rejected = await h.engine.answer(
+      {
+        escalation: "E-1",
+        answer: { option: "reject", text: "no new queue", who_should_have_caught: "none" },
+      },
+      CLAUDE,
+    );
+    expect(events(h).find((e) => e.type === "change_request.decided")?.data).toMatchObject({
+      decision: "rejected",
+    });
+    expect(spawns(rejected.actions)).toEqual([]);
+    expect(h.engine.status({}).tasks_by_status).toMatchObject({ parked: 1 });
+    const park = events(h)
+      .filter((e) => e.type === "escalation.opened")
+      .map((e) => e.data.escalation as { id: string; reason: string; task?: string })
+      .at(-1);
+    expect(park).toMatchObject({ reason: "blocked", task: "T-1" });
+    // the human says how to proceed: the Architect triages T-1 again, QA still waits
+    const again = await h.engine.answer(
+      {
+        escalation: park?.id ?? "",
+        answer: {
+          option: "clarify",
+          text: "use the existing cron",
+          who_should_have_caught: "none",
+        },
+      },
+      CLAUDE,
+    );
+    const retriage = only(again.actions, "architect");
+    expect(retriage).toMatchObject({ subject: "T-1" });
+    expect(retriage.prompt).toContain("rejected the change request E-1");
+    expect(retriage.prompt).toContain("use the existing cron");
+    expect(spawns(again.actions).some((a) => a.role === "qa")).toBe(false);
+    await h.release();
+  });
 });

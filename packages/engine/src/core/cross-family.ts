@@ -2,11 +2,17 @@
  * Cross-family review (spec §12.4, D10; spine AD-17 rules 2, 4 and 5): on a high-risk task, when
  * the project opts in (`hosts.cross_family_review`) and both host families are installed, a
  * read-only reviewer from the other family runs as an engine-launched headless run. It needs
- * `headless_allowed` (`planDispatch("cross_family_review")`); without it the review is
- * unavailable and skipped. Capped at the task's first two rounds; it costs both quotas.
+ * `headless_allowed` (`planDispatch("cross_family_review")`) and a platform where that host may
+ * run roles headless (`headlessPlatformRefusal`: Codex only on
+ * `CODEX_UNIX_CONNECT_BLOCKED_PLATFORMS`); without either the review is unavailable and skipped.
+ * Capped at the task's first two rounds; it costs both quotas.
  */
 import { HOST_IDS, planDispatch, type HostId, type Task } from "@vtc/shared";
 import type { Kernel, RunHandle } from "./kernel.js";
+import { headlessPlatformRefusal } from "./sandbox.js";
+
+/** The cross-family reviewer's step: QA in judge mode (`reviewersFor`, slot `cross-family`). */
+export const CROSS_FAMILY_REVIEWER = { role: "qa", mode: "judge" } as const;
 
 /** The rounds of a task that get a cross-family review (§12.4: "capped at 1–2 rounds"). */
 export const CROSS_FAMILY_MAX_ROUND = 2;
@@ -27,7 +33,7 @@ export const crossFamilyHost = (
     subagents: false,
     headless: false,
   };
-  return planDispatch("cross_family_review", config.hosts.dispatch, capabilities) === "headless"
-    ? other
-    : undefined;
+  if (planDispatch("cross_family_review", config.hosts.dispatch, capabilities) !== "headless")
+    return undefined;
+  return headlessPlatformRefusal(k, CROSS_FAMILY_REVIEWER, other) === null ? other : undefined;
 };
