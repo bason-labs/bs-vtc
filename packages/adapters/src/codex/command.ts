@@ -94,6 +94,7 @@ import {
   type SessionRef,
   type SpawnRoleRequest,
 } from "@vtc/shared";
+import { checkProfileArgs } from "../common/argv.js";
 import { canonicalPath, vtcHomeWriteDeniedPaths, within } from "../common/homes.js";
 
 export const CODEX_BINARY = "codex";
@@ -289,6 +290,8 @@ export const codexHeadlessCommand = (
     throw new Error(`cannot resume a ${session.host} session on ${HOST}`);
   }
   const mode = sandboxModeOf(request.sandbox);
+  // only what `codexSandboxProfile` emits: `--config` overrides, never another sandbox flag
+  checkProfileArgs(HOST, request.sandbox.cliArgs, ["--config"]);
   // fail closed: without the filter every engine tool, the human-only ones too, reaches the role
   if (!request.sandbox.cliArgs.includes(codexHumanOnlyToolsOverride())) {
     throw new Error(
