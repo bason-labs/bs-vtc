@@ -12,8 +12,9 @@
  *   lacks): proposed that role.
  * A new role has no dispatches of its own to replay, so every signal is evidence-only: its PR
  * carries the evidence and the `needs-eval` label (`AUTO_LABELS.needsEval`). Engine core raises
- * the `new_agent` issue from it through the upstream module ({@link newAgentReportFields} is what
- * may leave the machine), and VTC builds the role on the bs-vtc checkout.
+ * the `new_agent` issue from it through the upstream module (`newAgentReportFields` is what may
+ * leave the machine: the proposed role only when it is named after a shipped discipline), and VTC
+ * builds the role on the bs-vtc checkout.
  */
 import {
   AUTO_LABELS,

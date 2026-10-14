@@ -106,6 +106,7 @@ export {
   replayIsolation,
   REPLAY_MAX_TASKS,
   replayPath,
+  replayTaskKey,
   replayTasks,
   tokensDeltaPct,
   writeReplayResult,
@@ -114,10 +115,16 @@ export {
 } from "./replay.js";
 export {
   assembleReplay,
+  readReplayInfra,
   readReplayTrials,
+  recordReplayInfra,
   recordReplayTrial,
+  REPLAY_MAX_INFRA_ATTEMPTS,
   REPLAY_TRIALS_FILE,
   replayTrialKey,
+  type ReplayInfraOutcome,
+  type ReplayInfraRow,
+  type ReplayLedgerScope,
   type ReplayTrialId,
   type ReplayTrialRow,
 } from "./replay-ledger.js";

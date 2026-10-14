@@ -58,9 +58,19 @@ export const costReportFields = (r: CostRegression): LookbackReportFields => ({
   },
 });
 
-/** The `new_agent` report of a signal: the proposed role and the counts behind it. */
+/**
+ * The `new_agent` report of a signal: the counts behind it, and the proposed role only when VTC
+ * named it from its own catalog. A `discipline_failures` role is `engineer_<discipline>`, a
+ * discipline of the shipped `DisciplineSchema`; a `stack_failures` role is named after a stack pack
+ * slug and a `missing_role` one is what a human typed in `who_should_have_caught`, both project-side
+ * text (a stack named after a client, say), so they stay on the machine (D-by).
+ */
 export const newAgentReportFields = (s: NewAgentSignal): LookbackReportFields => ({
   kind: "new_agent",
-  role: s.proposed_role,
+  ...(s.basis === "discipline_failures" &&
+  s.discipline !== undefined &&
+  s.proposed_role === `engineer_${s.discipline}`
+    ? { role: s.proposed_role }
+    : {}),
   metrics: { failures: s.failures, escalations: s.escalations },
 });

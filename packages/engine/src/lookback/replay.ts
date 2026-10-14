@@ -64,12 +64,28 @@ export interface ReplayTask {
   readonly expected?: ExpectedVerdict;
 }
 
+/** Longest `ReplayResult.per_task` key (`ReplayTrialRef.task`). */
+const TASK_KEY_MAX = 100;
+
 /**
- * The held-out tasks a replay of `baseline` runs. For the `gates` grader (the default) the
- * attributions decide which traces failed, checked against the history first
- * ({@link trustedAttributions}): a planted failure row must not move a held-out success out of the
- * regression set. For the `verdict` grader the recorded outcome decides, from the log alone; a
- * dispatch with none is not replayed.
+ * Pure: a replay task's key, the `ReplayResult.per_task` key, the ledger's and the trial's
+ * (`ReplayTrialRef.task`). `<run>:<task>` for a `gates` replay; `<run>:<subject>:<task>` for a
+ * verdict replay, whose dispatches judge one acceptance criterion each, so two criteria of one task
+ * are two replay tasks (the task id stays last, after the last `:`).
+ */
+export const replayTaskKey = (
+  t: Pick<ReplayTask, "run" | "task"> & { readonly expected?: Pick<ExpectedVerdict, "subject"> },
+): string =>
+  t.expected === undefined ? `${t.run}:${t.task}` : `${t.run}:${t.expected.subject}:${t.task}`;
+
+/**
+ * The held-out tasks a replay of `baseline` runs, each once ({@link replayTaskKey}). For the
+ * `gates` grader (the default) the attributions decide which traces failed, checked against the
+ * history first ({@link trustedAttributions}): a planted failure row must not move a held-out
+ * success out of the regression set. For the `verdict` grader the recorded outcome decides, from
+ * the log alone; a dispatch with none is not replayed. A task the baseline failed on is never also
+ * in the regression set (a task with a failed round and a passed one is a failure to fix), so one
+ * key never stands for both.
  */
 export const replayTasks = (
   input: AttributionHistory & {
@@ -105,13 +121,30 @@ export const replayTasks = (
     const failed = new Set(trusted.filter(isRoleFailure).map(traceRef));
     for (const trace of held) judged.push({ trace, failed: failed.has(traceRef(trace)) });
   }
+  const keyOf = (j: (typeof judged)[number]): string | undefined => {
+    if (j.trace.task === undefined) return undefined;
+    const key = replayTaskKey({
+      run: j.trace.run,
+      task: j.trace.task,
+      ...(j.expected === undefined ? {} : { expected: j.expected }),
+    });
+    return key.length > TASK_KEY_MAX ? undefined : key;
+  };
+  // every key the baseline failed on, before the cap: none of them is a regression-set task
+  const failedKeys = new Set(
+    judged.flatMap((j) => {
+      const key = keyOf(j);
+      return j.failed && key !== undefined ? [key] : [];
+    }),
+  );
   const pick = (regressionSet: boolean): ReplayTask[] => {
     const seen = new Set<string>();
     const tasks: ReplayTask[] = [];
-    for (const { trace: t, failed, expected } of judged) {
-      if (failed === regressionSet || t.task === undefined) continue;
-      const key = `${t.run}:${t.task}`;
-      if (seen.has(key)) continue;
+    for (const j of judged) {
+      const key = keyOf(j);
+      const { trace: t, failed, expected } = j;
+      if (failed === regressionSet || t.task === undefined || key === undefined) continue;
+      if (seen.has(key) || (regressionSet && failedKeys.has(key))) continue;
       seen.add(key);
       tasks.push({
         trace: t.trace,

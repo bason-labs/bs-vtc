@@ -375,6 +375,28 @@ describe("new agent (D-cd)", () => {
     expect(UpstreamReportSchema.safeParse({ ...reportBase, ...fields }).success).toBe(true);
   });
 
+  it("keeps a role named from project-side text (a stack slug, a typed role) on the machine", () => {
+    const stack = new RunLog();
+    failing(stack, 1, LOOKBACK_LIMITS.minTrainFailures, "backend", ["acme-billing"]);
+    const asked = new RunLog();
+    asked.escalate("T-1", "acme_auditor", "blocked");
+    asked.escalate("T-2", "acme_auditor", "blocked");
+    const signals = [
+      ...newAgentSignals({ attributions: attributed(stack), history: stack.events, roles: ROLES }),
+      ...newAgentSignals({ attributions: [], history: asked.events, roles: ROLES }),
+    ];
+    expect(signals.map((s) => [s.basis, s.proposed_role])).toEqual([
+      ["stack_failures", "engineer_acme-billing"],
+      ["missing_role", "acme_auditor"],
+    ]);
+    for (const signal of signals) {
+      const fields = newAgentReportFields(signal);
+      expect(fields).not.toHaveProperty("role");
+      expect(JSON.stringify(fields)).not.toContain("acme");
+      expect(UpstreamReportSchema.safeParse({ ...reportBase, ...fields }).success).toBe(true);
+    }
+  });
+
   it("comes out of the run end when the installed roles are given", async () => {
     const log = new RunLog();
     failing(log, 1, LOOKBACK_LIMITS.minTrainFailures, "web3", []);
