@@ -7,16 +7,34 @@
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
+import { fileURLToPath } from "node:url";
 import {
+  agentNameFor,
+  CONTRACTS_VERSION,
   effectivePromptSha,
   engineRepoKey,
+  HOST_IDS,
   LOOKBACK_REPO,
   LookbackPinsSchema,
+  PLUGIN_MANIFEST_ASSET,
+  PluginManifestSchema,
+  promptShaFor,
+  rolePromptAssetPath,
   ScorecardIndexSchema,
   sha256Hex,
+  splitRolePrompt,
+  TASK_PACK_HEURISTICS_SECTION,
+  type AssetBundle,
   type LookbackPinsInput,
+  type PluginManifestAgent,
 } from "@vtc/shared";
-import { createPluginCatalog, toYaml, type PluginCatalog } from "../../src/core/index.js";
+import {
+  createPluginCatalog,
+  pluginCatalogFrom,
+  toYaml,
+  type PluginCatalog,
+} from "../../src/core/index.js";
+import { ALL_FIXTURE_ROLES } from "../fixtures/roles.js";
 import { wireLookback } from "../../src/daemon/index.js";
 import { pinsPath, promptVersionRef, storePromptVersion } from "../../src/lookback/index.js";
 import { cleanupDirs } from "../helpers/repo.js";
@@ -110,7 +128,121 @@ const start = (h: Harness) =>
     CLAUDE,
   );
 
+const ROLES_DIR = fileURLToPath(new URL("../../../../roles/", import.meta.url));
+
+/**
+ * The plugins as the shipped compile emits them (D-bl, spine §5 reading 166): every fixture
+ * role's agents (one per mode) with their manifest SHAs and both prompt texts from
+ * `roles/<role>/prompt.md`, and only `spec_verifier` switched to `editable_in_pack`.
+ */
+const shippedPlugins = (): { readonly catalog: PluginCatalog; readonly locked: string } => {
+  const files: Record<string, string> = {};
+  let specLocked = "";
+  for (const host of HOST_IDS) {
+    const agents: PluginManifestAgent[] = [];
+    for (const contract of ALL_FIXTURE_ROLES) {
+      const path = `${ROLES_DIR}${contract.id}/prompt.md`;
+      if (!existsSync(path)) continue;
+      const split = splitRolePrompt(readFileSync(path, "utf8"));
+      if (!split.ok) throw new Error(`${contract.id}: ${split.errors.join("; ")}`);
+      if (contract.id === "spec_verifier") specLocked = split.locked;
+      const switchedRole = contract.id === "spec_verifier";
+      for (const mode of [undefined, ...Object.keys(contract.modes ?? {})]) {
+        const name = agentNameFor(contract.id, mode);
+        files[`plugin:${host}\n${rolePromptAssetPath(name, "locked")}`] = split.locked;
+        files[`plugin:${host}\n${rolePromptAssetPath(name, "editable")}`] = split.editable;
+        agents.push({
+          name,
+          role: contract.id,
+          mode: mode ?? null,
+          kind: contract.kind,
+          discipline: null,
+          role_version: contract.version,
+          file: `agents/${name}.md`,
+          prompt_sha256: switchedRole
+            ? sha256Hex(split.locked)
+            : promptShaFor(`${split.locked}\n\n${split.editable}`),
+          locked_sha256: sha256Hex(split.locked),
+          editable_sha256: sha256Hex(split.editable),
+          ...(switchedRole ? { editable_in_pack: true } : {}),
+          tier: "mid",
+          effort: "medium",
+        });
+      }
+    }
+    files[`plugin:${host}\n${PLUGIN_MANIFEST_ASSET}`] = JSON.stringify(
+      PluginManifestSchema.parse({
+        v: 1,
+        host,
+        plugin: "vtc",
+        contracts_version: CONTRACTS_VERSION,
+        agents,
+      }),
+    );
+  }
+  const bundle: AssetBundle = {
+    read: (namespace, path) => {
+      const text = files[`${namespace}\n${path}`];
+      return text === undefined ? undefined : new TextEncoder().encode(text);
+    },
+    list: (namespace) =>
+      Object.keys(files)
+        .filter((key) => key.startsWith(`${namespace}\n`))
+        .map((key) => key.slice(namespace.length + 1)),
+  };
+  return { catalog: pluginCatalogFrom(bundle), locked: specLocked };
+};
+
 describe("the daemon wires the Lookback module (AD-21)", () => {
+  it("compiled as shipped (spec_verifier switched, D-bl), a human's pin reaches the Spec Verifier's pack (reading 176)", async () => {
+    const { catalog, locked } = shippedPlugins();
+    expect(catalog.promptParts?.("vtc-spec-verifier", "claude-code")?.editableInPack).toBe(true);
+    const h = createHarness({ plugins: catalog });
+    const heuristics = "Judge only what the cited test output shows; an uncited claim is unknown.";
+    const version = promptVersionRef({
+      role: "spec_verifier",
+      host: "claude-code",
+      locked,
+      editable: heuristics,
+    });
+    const compiled = catalog.promptParts?.("vtc-spec-verifier", "claude-code")?.compiled;
+    await storePromptVersion(
+      h.home,
+      {
+        v: 1,
+        version,
+        parent: effectivePromptSha(locked, compiled?.editable ?? ""),
+        proposal: "p-1",
+        changelog: { hypothesis: "Cite or say unknown.", trace_ids: ["a-1"], evaluation: null },
+        created_at: h.clock.toISOString(),
+      },
+      heuristics,
+    );
+    writePins(h, {
+      pins: [
+        { role: "spec_verifier", host: "claude-code", effective_sha256: version.effective_sha256 },
+      ],
+    });
+    const unwire = wireLookback(h.engine, { repoRoot: h.repo, vtcHome: h.home }, catalog);
+    const actions = await throughPlan(h, [draft("T-1")], SPEC_ONE);
+    await authorTests(h, only(actions, "qa"));
+    await build(h, only((await h.engine.next({}, CLAUDE)).actions, "engineer"));
+    const verifier = only((await h.engine.next({}, CLAUDE)).actions, "spec_verifier");
+    const pack = readFileSync(join(h.repo, verifier.pack), "utf8");
+    expect(pack.startsWith(`## ${TASK_PACK_HEURISTICS_SECTION}\n\n${heuristics}\n`)).toBe(true);
+    const dispatched = events(h).findLast(
+      (e) => e.type === "role.dispatched" && e.role === "spec_verifier",
+    );
+    expect(dispatched?.prompt_sha).toBe(version.effective_sha256);
+    expect(dispatched?.data.editable_sha256).toBe(sha256Hex(heuristics));
+    // the agents that carry their own section ran their compiled prompt, with nothing to record
+    const engineer = events(h).find((e) => e.type === "role.dispatched" && e.role === "engineer");
+    expect(engineer?.data).not.toHaveProperty("editable_sha256");
+    expect(events(h).filter((e) => e.type === "incident.recorded")).toEqual([]);
+    await unwire();
+    await h.release();
+  });
+
   it("hands core a prompt selector that runs the human's pin from the VTC home", async () => {
     const h = createHarness({ plugins: switched });
     const pinned = await store(h, "repo_cartographer");

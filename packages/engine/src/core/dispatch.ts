@@ -753,13 +753,16 @@ const packFor = (k: Kernel, h: RunHandle, step: StepSpec, actionId: string): Tas
 };
 
 /**
- * The pinned editable section of a dispatch (AD-21 rules 1–2, readings 117–118), or `null` for the
- * compiled agent's own. The engine vouches for what it records: the agent must expect the section
- * in its pack (its manifest's `editable_in_pack`) and its manifest's `locked_sha256` must be the
- * version's; the version must be for this role, mode and host; the text, trimmed, must hash to
- * the version's `editable_sha256` (the compiler's and Lookback's section hash) and be a valid
- * `TaskPack.role_heuristics` (no pack heading). Anything else, or a selector that throws, runs the
- * compiled default. The effective SHA is the selector's (core holds no locked text to hash).
+ * The pinned editable section of a dispatch (AD-21 rules 1–2 and 6, readings 117–118 and 176), or
+ * `null` for the compiled agent's own. The engine vouches for what it records: the agent must take
+ * its editable section from the pack ({@link pinBlocker}: its manifest's `editable_in_pack`, or a
+ * headless run on a host that does not load the compiled agent, reading 145) and its manifest's
+ * `locked_sha256` must be the version's; the version must be for this role, mode and host; the
+ * text, trimmed, must hash to the version's `editable_sha256` (the compiler's and Lookback's
+ * section hash) and be a valid `TaskPack.role_heuristics` (no pack heading). Anything else, or a
+ * selector that throws, runs the compiled default. A pin or canary for an agent that cannot take
+ * one applies nothing and says why (reading 176). The effective SHA is the selector's (core holds
+ * no locked text to hash).
  */
 interface PinSelection {
   readonly pinned: PinnedPrompt | null;
@@ -767,12 +770,32 @@ interface PinSelection {
   readonly problem?: string;
 }
 
-const pinnedPrompt = (k: Kernel, target: PromptTarget): PinSelection => {
+/**
+ * Why a dispatch's agent cannot take a pinned editable section, or `null` when it can (AD-21
+ * rule 6, reading 176): an `editable_in_pack` agent on either host, or any agent in a headless run
+ * on a host whose runs do not load the compiled agent ({@link HEADLESS_LOADS_AGENT}); either way
+ * its manifest names the locked core's SHA.
+ */
+const pinBlocker = (
+  parts: PromptParts | undefined,
+  host: HostId,
+  dispatch: "subagent" | "headless",
+): string | null => {
+  if (parts === undefined) return "the plugin has no manifest entry for it";
+  if (parts.lockedSha256 === undefined) return "its manifest names no locked_sha256";
+  if (parts.editableInPack || (dispatch === "headless" && !HEADLESS_LOADS_AGENT[host])) return null;
+  return `it carries its own editable section (not editable_in_pack) and this ${dispatch === "headless" ? `${host} headless run loads the compiled agent` : "run is a subagent of the Lead"}, so a pinned section cannot reach it until its role is switched`;
+};
+
+const pinnedPrompt = (
+  k: Kernel,
+  target: PromptTarget,
+  dispatch: "subagent" | "headless",
+): PinSelection => {
   const pins = k.promptPins();
   if (pins === null) return { pinned: null };
   const parts = k.deps.plugins.promptParts?.(target.agent, target.host);
-  // an agent that carries its own editable section cannot run a pinned one (reading 117)
-  if (parts?.editableInPack !== true || parts.lockedSha256 === undefined) return { pinned: null };
+  const blocker = pinBlocker(parts, target.host, dispatch);
   let pinned: PinnedPrompt | null;
   try {
     pinned = pins(target);
@@ -782,6 +805,11 @@ const pinnedPrompt = (k: Kernel, target: PromptTarget): PinSelection => {
     return { pinned: null, problem: `the prompt selector threw: ${why}` };
   }
   if (pinned === null) return { pinned: null };
+  if (blocker !== null || parts?.lockedSha256 === undefined)
+    return {
+      pinned: null,
+      problem: `a ${pinned.canary === undefined ? "pin" : "canary"} names this role on ${target.host}, but ${blocker ?? "its manifest names no locked_sha256"}; nothing was applied and the compiled agent ran`,
+    };
   const refused = (why: string): PinSelection => ({
     pinned: null,
     problem: `the selected prompt version was not used (${why}); the compiled default ran`,
@@ -942,14 +970,18 @@ export const dispatchStep = (
       ? k.deps.plugins.profileFor(host, task.discipline)
       : undefined;
   const agent = profile ?? agentNameFor(step.role, step.mode);
-  const selection = pinnedPrompt(k, {
-    run: h.state.id,
-    role: step.role,
-    ...(step.mode === undefined ? {} : { mode: step.mode }),
-    host,
-    agent,
-    ...(step.task === undefined ? {} : { task: step.task }),
-  });
+  const selection = pinnedPrompt(
+    k,
+    {
+      run: h.state.id,
+      role: step.role,
+      ...(step.mode === undefined ? {} : { mode: step.mode }),
+      host,
+      agent,
+      ...(step.task === undefined ? {} : { task: step.task }),
+    },
+    dispatch,
+  );
   if (selection.problem !== undefined)
     recordPromptSelection(k, h, step.task, `${agent}: ${selection.problem}`);
   // no pin applies: an agent compiled without its editable section gets the compiled default in
