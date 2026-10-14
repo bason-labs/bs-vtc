@@ -17,6 +17,7 @@ import {
   applyEvidenceBudget,
   AutomationSkip,
   gifArgs,
+  hasVtcTrailer,
   makeGif,
   planEvidenceShots,
   prepareEvidence,
@@ -28,7 +29,7 @@ import {
   type FfmpegCommand,
 } from "../../src/upstream/index.js";
 import { cleanupDirs, tempDir } from "../helpers/repo.js";
-import { fakeAssets, fakePlumbing, fakeRecorder } from "./fakes.js";
+import { fakeAssets, fakePlumbing, fakeRecorder, fakeRemoteRefs } from "./fakes.js";
 
 afterEach(cleanupDirs);
 
@@ -317,6 +318,51 @@ describe("hosting", () => {
     expect(plumbing.remote.get("refs/heads/vtc-evidence")).toBe(plumbing.commits[0]?.sha);
     expect(plumbing.refs.get("refs/heads/vtc-evidence")).toBe(plumbing.commits[0]?.sha);
   });
+  it("fetches the shared branch first: another installation's push is built on, not refused", async () => {
+    const dir = tempDir();
+    writeFileSync(join(dir, "01-replay.webm"), "v");
+    const files = [
+      { name: "01-replay.webm", kind: "replay_video" as const, bytes: 1, alt: "Replay" },
+    ];
+    const publish = (
+      plumbing: ReturnType<typeof fakePlumbing>,
+      refs?: ReturnType<typeof fakeRemoteRefs>,
+    ) =>
+      publishToEvidenceBranch({
+        plumbing,
+        repo: "bason-labs/bs-vtc",
+        dir,
+        files,
+        kind: "defect",
+        fingerprint: FP,
+        at: new Date("2026-10-15T09:05:00Z"),
+        refs,
+      });
+    const mine = fakePlumbing();
+    await publish(mine, fakeRemoteRefs(mine));
+    // Another installation (its own clone, never fetched) pushes the same branch.
+    const theirs = fakePlumbing({}, mine);
+    const refs = fakeRemoteRefs(theirs);
+    await publish(theirs, refs);
+    expect(refs.fetches).toEqual([
+      { remote: "origin", refspecs: ["+refs/heads/vtc-evidence:refs/remotes/origin/vtc-evidence"] },
+    ]);
+    const [first, second] = mine.commits;
+    expect(second?.parents).toEqual([first?.sha]);
+    expect(mine.remote.get("refs/heads/vtc-evidence")).toBe(second?.sha);
+    // Back on the first clone, whose tracking ref is now stale: the fetch makes it a fast-forward.
+    await publish(mine, fakeRemoteRefs(mine));
+    expect(mine.commits[2]?.parents).toEqual([second?.sha]);
+    // Without the fetch seam the stale clone's push is refused, never forced.
+    const stale = fakePlumbing({}, mine);
+    stale.refs.set("refs/remotes/origin/vtc-evidence", first?.sha ?? "");
+    await expect(publish(stale)).rejects.toThrow(/non-fast-forward/);
+  });
+  it("recognises VTC's commit trailer", () => {
+    expect(hasVtcTrailer("vtc(lookback): x\n\nGenerated-by: VTC 0.4.0")).toBe(true);
+    expect(hasVtcTrailer("human fix-up")).toBe(false);
+    expect(hasVtcTrailer("Not Generated-by: VTC 0.4.0")).toBe(false);
+  });
   it("attach hosting references the neutral relative names gh rewrites", () => {
     const section = renderEvidenceSection({
       hosting: "attach",
@@ -431,8 +477,40 @@ describe("prepareEvidence", () => {
     expect(refused).toEqual({
       ok: false,
       detail: expect.stringContaining("could not be pushed") as string,
+      pushRefused: true,
     });
     expect(plumbing.commits).toHaveLength(2);
+  });
+
+  it("fetches and rebuilds once when another installation pushed between the fetch and the push", async () => {
+    const plumbing = fakePlumbing();
+    const other = fakePlumbing({}, plumbing);
+    const base = fakeRemoteRefs(plumbing);
+    let raced = false;
+    const refs = {
+      ...base,
+      fetch: async (remote: string, refspecs: readonly string[]): Promise<void> => {
+        await base.fetch(remote, refspecs).catch(() => undefined);
+        if (raced) return;
+        raced = true;
+        const sha = await other.commit({ base: null, parents: [], changes: [], message: "other" });
+        await other.push("origin", sha, "refs/heads/vtc-evidence");
+      },
+    };
+    const outcome = await prepareEvidence(tempDir(), request(), {
+      recorder: fakeRecorder(),
+      assets: fakeAssets(),
+      hosting: "branch",
+      ffmpeg: false,
+      plumbing,
+      refs,
+      now: () => new Date(),
+    });
+    expect(outcome.ok).toBe(true);
+    const otherSha = plumbing.commits.find((c) => c.message === "other")?.sha;
+    const last = plumbing.commits.at(-1);
+    expect(last?.parents).toEqual([otherSha]);
+    expect(plumbing.remote.get("refs/heads/vtc-evidence")).toBe(last?.sha);
   });
 
   it("checks the opt-outs again right before the evidence branch is pushed", async () => {

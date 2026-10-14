@@ -23,7 +23,11 @@ import {
   type IssueService,
   type PlumbingChange,
 } from "@vtc/shared";
-import { QUIET_CLOSE_MARKER, type RemoteIssueRef } from "../../src/upstream/index.js";
+import {
+  QUIET_CLOSE_MARKER,
+  type RemoteIssueRef,
+  type RemoteRefs,
+} from "../../src/upstream/index.js";
 
 const TEMPLATES = join(import.meta.dirname, "fixtures", "templates");
 
@@ -271,11 +275,16 @@ export interface FakePlumbing extends GitPlumbing {
 /**
  * Plumbing over in-memory refs and a fake `origin`. A push updates the remote and the
  * remote-tracking ref (as git does) and is refused unless it fast-forwards the remote branch.
+ * `sharing` gives another clone of the same remote: its own local refs, the same `origin` and
+ * object store (another VTC installation reporting to the same repo).
  */
-export const fakePlumbing = (refs: Record<string, string> = {}): FakePlumbing => {
+export const fakePlumbing = (
+  refs: Record<string, string> = {},
+  sharing?: FakePlumbing,
+): FakePlumbing => {
   const map = new Map(Object.entries(refs));
-  const remote = new Map<string, string>();
-  const commits: FakePlumbing["commits"] = [];
+  const remote = sharing?.remote ?? new Map<string, string>();
+  const commits: FakePlumbing["commits"] = sharing?.commits ?? [];
   const pushes: FakePlumbing["pushes"] = [];
   const descends = (sha: string, ancestor: string): boolean => {
     if (sha === ancestor) return true;
@@ -310,6 +319,49 @@ export const fakePlumbing = (refs: Record<string, string> = {}): FakePlumbing =>
       map.set(dst.replace(/^refs\/heads\//, `refs/remotes/${name}/`), sha);
       return Promise.resolve();
     },
+  };
+};
+
+export interface FakeRemoteRefs extends RemoteRefs {
+  readonly fetches: { remote: string; refspecs: readonly string[] }[];
+}
+
+/**
+ * `UpstreamDeps.remoteRefs` over a fake plumbing: a fetch copies `origin`'s branches into the
+ * remote-tracking refs its refspecs name (a `*` refspec also prunes tracking refs the remote no
+ * longer has; an exact one whose branch is missing rejects, as git does), and a message is read
+ * from the shared object store.
+ */
+export const fakeRemoteRefs = (plumbing: FakePlumbing): FakeRemoteRefs => {
+  const fetches: FakeRemoteRefs["fetches"] = [];
+  return {
+    fetches,
+    fetch: (name, refspecs) => {
+      fetches.push({ remote: name, refspecs });
+      for (const spec of refspecs) {
+        const [src = "", dst = ""] = spec.replace(/^\+/, "").split(":");
+        if (!src.endsWith("*")) {
+          const sha = plumbing.remote.get(src);
+          if (sha === undefined) {
+            return Promise.reject(new Error(`fatal: couldn't find remote ref ${src}`));
+          }
+          plumbing.refs.set(dst, sha);
+          continue;
+        }
+        const from = src.slice(0, -1);
+        const to = dst.slice(0, -1);
+        for (const ref of [...plumbing.refs.keys()]) {
+          if (ref.startsWith(to) && !plumbing.remote.has(from + ref.slice(to.length))) {
+            plumbing.refs.delete(ref);
+          }
+        }
+        for (const [ref, sha] of plumbing.remote) {
+          if (ref.startsWith(from)) plumbing.refs.set(to + ref.slice(from.length), sha);
+        }
+      }
+      return Promise.resolve();
+    },
+    message: (sha) => Promise.resolve(plumbing.commits.find((c) => c.sha === sha)?.message ?? null),
   };
 };
 

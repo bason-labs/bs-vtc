@@ -1,8 +1,8 @@
 /**
  * Where PR media live and how a body embeds them (D-ce; AD-27 rule 6; spine §5 reading 196):
  * - `branch` (the default): committed through `GitPlumbing` to the orphan `vtc-evidence` branch
- *   (no checkout; the parent is the previous evidence commit as the remote last showed it, never
- *   the default branch), pushed without force, and embedded by commit-pinned
+ *   (no checkout; the parent is the previous evidence commit as the remote shows it right after a
+ *   fetch, never the default branch), pushed without force, and embedded by commit-pinned
  *   `https://github.com/<o>/<r>/blob/<sha>/<path>?raw=true` URLs; a WebM is a link, not a player;
  * - `attach`: `gh … --attach <name>` from the staging directory, with body references that are the
  *   same relative neutral names, so gh rewrites each one to its upload.
@@ -19,6 +19,7 @@ import {
   type GitHubRepo,
   type GitPlumbing,
 } from "@vtc/shared";
+import { refreshRemote, trackingRefspec, type RemoteRefs } from "../remote-refs.js";
 import type { EvidenceFile } from "./manifest.js";
 
 export const EVIDENCE_REF = `refs/heads/${EVIDENCE_BRANCH}`;
@@ -31,10 +32,12 @@ export const evidenceFolder = (kind: AutoKind, fingerprint: AutoFingerprint, at:
 
 /**
  * Commits `files` (in `dir`) to the evidence branch and pushes it; returns each file's
- * commit-pinned URL. The parent is the remote-tracking `refs/remotes/<remote>/vtc-evidence` when
- * the clone has one (another machine or user may have pushed the branch; git updates the tracking
- * ref on every push), else the local branch. Throws when the local branch moved meanwhile
- * (`updateRef` compares) or the push is refused (never forced); the caller retries once.
+ * commit-pinned URL. Every VTC installation reporting to the repo pushes to this one branch, so
+ * it first fetches the remote's `vtc-evidence` (`refs`, when wired) and builds on the
+ * remote-tracking `refs/remotes/<remote>/vtc-evidence` when the clone has one, else on the local
+ * branch. Throws when the local branch moved meanwhile (`updateRef` compares) or the push is
+ * refused (never forced, e.g. another installation pushed between the fetch and the push); the
+ * caller retries once, which fetches and rebuilds.
  */
 export const publishToEvidenceBranch = async (input: {
   readonly plumbing: GitPlumbing;
@@ -45,10 +48,13 @@ export const publishToEvidenceBranch = async (input: {
   readonly fingerprint: AutoFingerprint;
   readonly at: Date;
   readonly remote?: string;
+  /** Fetches the remote's branch first (`UpstreamDeps.remoteRefs`). */
+  readonly refs?: RemoteRefs | undefined;
 }): Promise<Map<string, string>> => {
   if (!autoPushRefAllowed(EVIDENCE_REF)) throw new Error("evidence ref refused");
   const folder = evidenceFolder(input.kind, input.fingerprint, input.at);
   const remote = input.remote ?? "origin";
+  await refreshRemote(input.refs, remote, [trackingRefspec(remote, EVIDENCE_BRANCH)]);
   const local = await input.plumbing.resolve(EVIDENCE_REF);
   const previous =
     (await input.plumbing.resolve(`refs/remotes/${remote}/${EVIDENCE_BRANCH}`)) ?? local;
