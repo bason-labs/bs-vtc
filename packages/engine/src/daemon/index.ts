@@ -56,7 +56,12 @@ import {
   type RunState,
   type StaleLockReason,
 } from "../core/index.js";
-import { createGhPullRequests, createGitOps, createWorkspace } from "../git/index.js";
+import {
+  createGhPullRequests,
+  createGitOps,
+  createGitPlumbing,
+  createWorkspace,
+} from "../git/index.js";
 import {
   createHttpApi,
   createPrototypeServer,
@@ -68,12 +73,19 @@ import {
   createPromptPins,
   evaluateCanaries,
   graderBundleSha,
+  loadPromptVersion,
   lookbackAtRunEnd,
+  readProposalFiles,
   readTiebreakKeys,
   type LockedShaFor,
 } from "../lookback/index.js";
 import { engineSocketAnswers, serveEngineSocket } from "../mcp/index.js";
 import { isGitHubRemote, wireAutomation } from "./automation.js";
+import {
+  bridgeUpstream,
+  readLookbackPrInput,
+  type CreateUpstreamModule,
+} from "./upstream-bridge.js";
 import { createLookbackReplays } from "./replays.js";
 import {
   createFetchQuota,
@@ -251,6 +263,8 @@ export const wireLookback = (
   engine: Engine,
   deps: Pick<EngineDeps, "repoRoot" | "vtcHome" | "now">,
   plugins: PluginCatalog,
+  /** After the scorecards are rewritten at a run's end (the automation's cost regressions). */
+  onScorecards?: (run: string) => void,
 ): (() => Promise<void>) => {
   const now = deps.now ?? (() => new Date());
   const repoKey = engineRepoKey(deps.repoRoot);
@@ -351,7 +365,10 @@ export const wireLookback = (
   };
   const off = engine.onEvent((event) => {
     if (event.type === "run.finished") {
-      enqueue(() => runEnd(event.run));
+      enqueue(async () => {
+        await runEnd(event.run);
+        onScorecards?.(event.run);
+      });
       return;
     }
     if (event.type !== "role.submitted") return;
@@ -401,6 +418,15 @@ export const dotenvSecrets = (repoRoot: string): (() => readonly string[]) => {
     return cached.values;
   };
 };
+
+/**
+ * The upstream module's factory (AD-27 rule 8, AD-13 rule 13). `upstream/` is built on its own
+ * team branch and joins the engine at the round-4 merge, which makes this return `createUpstream`
+ * from `../upstream/index.js` (the daemon is its only importer; the bridge's structural types make
+ * a drift a type error here). Until then facts are gated (`automation.skipped`) but nothing is
+ * raised.
+ */
+const upstreamModule = (): CreateUpstreamModule | undefined => undefined;
 
 /** How often the daemon polls Level-3 merges still in their post-merge watch (AD-23 rule 4). */
 export const POST_MERGE_POLL_MS = 15 * 60_000;
@@ -479,17 +505,60 @@ export const runDaemon: RunDaemon = async (deps: EngineDeps, options) => {
       ...(deps.armPlugins === undefined ? {} : { armPlugins: deps.armPlugins }),
     });
     cleanups.push(wireResearch(engine, deps));
-    cleanups.push(wireLookback(engine, deps, plugins));
-    // AD-27: the upstream module, built from EngineDeps.automation (its factory joins at the
-    // round-4 merge: `createUpstream` from ../upstream/index.js, the only importer, rule 8)
+    // AD-27: the upstream module, built from EngineDeps.automation (rule 8: the daemon is its only
+    // importer); wired before Lookback, whose scorecards feed it cost regressions, so it closes
+    // after Lookback's last job
+    const remoteUrl = await createWorkspace(deps.repoRoot)
+      .remoteUrl("origin")
+      .catch(() => null);
+    const createUpstream = upstreamModule();
     const automation = wireAutomation(engine, deps, {
-      githubRemote: isGitHubRemote(
-        await createWorkspace(deps.repoRoot)
-          .remoteUrl("origin")
-          .catch(() => null),
-      ),
+      githubRemote: isGitHubRemote(remoteUrl),
+      ...(createUpstream === undefined
+        ? {}
+        : {
+            createUpstream: bridgeUpstream(createUpstream, {
+              guardDir: engine.guardDir,
+              vtcVersion: deps.versions.engine,
+              assets: deps.assets,
+              remoteUrl,
+              clientNames: () => {
+                const client = engine.config().client;
+                return client === undefined ? [] : [client];
+              },
+              knownValues: dotenvSecrets(deps.repoRoot),
+              redactSelectors: () => engine.gatesConfig()?.visual?.redact_selectors,
+              lookbackPr: (fact) =>
+                readLookbackPrInput({
+                  projectRoot: deps.repoRoot,
+                  proposal: fact.proposal ?? "",
+                  replayPath: fact.replayPath ?? "",
+                  readProposal: async (role) => (await readProposalFiles(deps.repoRoot, role))?.raw,
+                  candidateEditable: async (replay) => {
+                    const locked = plugins.promptParts?.(
+                      agentNameFor(replay.role, replay.mode),
+                      replay.host,
+                    )?.compiled?.locked;
+                    if (locked === undefined) return undefined;
+                    const stored = await loadPromptVersion(
+                      deps.vtcHome,
+                      { role: replay.role, mode: replay.mode, host: replay.host },
+                      replay.candidate,
+                      locked,
+                    );
+                    return stored?.editable;
+                  },
+                }),
+              plumbing: createGitPlumbing,
+            }),
+          }),
     });
     cleanups.push(() => automation.close());
+    cleanups.push(
+      wireLookback(engine, deps, plugins, (run) => {
+        automation.scorecardsWritten(run);
+      }),
+    );
     // AD-25: shutting down kills the engine-launched runs and stops the Level-3 waits, so close
     // returns promptly and leaves no orphaned process
     cleanups.push(() => engine.shutdown());

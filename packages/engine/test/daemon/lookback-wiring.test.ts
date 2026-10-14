@@ -807,9 +807,18 @@ describe("the daemon wires the Lookback module (AD-21)", () => {
     await h.release();
   });
 
-  it("wires RETRO, and at run.finished attributes the run and writes the scorecards the dashboard lists (rule 8)", async () => {
+  it("wires RETRO, and at run.finished attributes the run and writes the scorecards the dashboard lists (rule 8), then tells automation", async () => {
     const h = createHarness({ plugins: switched, project: { merge_level: 1 } });
-    const unwire = wireLookback(h.engine, { repoRoot: h.repo, vtcHome: h.home }, switched);
+    // the automation's cost regressions read the scorecards once they are written (D-bv)
+    const written: [string, boolean][] = [];
+    const unwire = wireLookback(
+      h.engine,
+      { repoRoot: h.repo, vtcHome: h.home },
+      switched,
+      (run) => {
+        written.push([run, existsSync(join(h.repo, LOOKBACK_REPO.scorecardIndex))]);
+      },
+    );
     const actions = await throughPlan(h, [draft("T-1")], SPEC_ONE);
     await authorTests(h, only(actions, "qa"));
     await build(h, only((await h.engine.next({}, CLAUDE)).actions, "engineer"));
@@ -832,6 +841,7 @@ describe("the daemon wires the Lookback module (AD-21)", () => {
     expect(log).not.toContain("lookback.dispatched");
     await unwire();
     expect(h.engine.lookbackRetro()).toBeNull();
+    expect(written).toEqual([[h.engine.status({}).run.id, true]]);
     const index = ScorecardIndexSchema.parse(
       JSON.parse(readFileSync(join(h.repo, LOOKBACK_REPO.scorecardIndex), "utf8")),
     );

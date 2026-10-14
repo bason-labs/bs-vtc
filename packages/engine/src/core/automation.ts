@@ -10,7 +10,9 @@ import {
   DEFAULT_UPSTREAM_REPO,
   EVENT_PAYLOAD_SCHEMAS,
   EVIDENCE_HOSTING_DEFAULT,
+  LOOKBACK_LIMITS,
   type AutoKind,
+  type AutomationContext,
   type AutomationDeps,
   type AutomationItem,
   type AutomationReport,
@@ -19,6 +21,8 @@ import {
   type AutoTargetKind,
   type HostId,
   type ParkReason,
+  type Scorecard,
+  type ScorecardMetricId,
   type StartInput,
   type VtcEvent,
 } from "@vtc/shared";
@@ -198,6 +202,22 @@ export interface AutomationFact {
   readonly feature?: string;
   /** The engine's own text about it (project details; never sent upstream as is). */
   readonly detail: string;
+  /**
+   * A project problem's stable identity, which the upstream module fingerprints (D-bx dedupe): the
+   * same problem seen again names the same `ruleId`. Project facts only.
+   */
+  readonly ruleId?: string;
+  /** A project issue's title (project details allowed; it stays in the project's repo). */
+  readonly title?: string;
+  /** The project-relative path a project problem cites, when it has one. */
+  readonly path?: string;
+  /** A cost regression (`kind` `cost`): the scorecard metric that worsened. */
+  readonly metric?: ScorecardMetricId;
+  /** A cost regression: the metric under the baseline version and under the current one. */
+  readonly baseline?: number;
+  readonly current?: number;
+  /** A cost regression: the baseline version's effective prompt SHA (`promptSha` is the current). */
+  readonly baselinePromptSha?: string;
   /** A Lookback proposal and its replay result (`lookback.replay_finished`). */
   readonly proposal?: string;
   readonly replayPath?: string;
@@ -212,6 +232,21 @@ const HUMAN_PARKS: ReadonlySet<ParkReason> = new Set([
   "spec_question",
 ]);
 
+/** An issue title, cut to fit. */
+const clip = (text: string): string => (text.length > 200 ? `${text.slice(0, 199)}…` : text);
+
+/** A finding's stable identity (its engine fingerprint), the path it cites and its title. */
+const findingIdentity = (finding: {
+  readonly fingerprint: string;
+  readonly category: string;
+  readonly title: string;
+  readonly location: { readonly path?: string | undefined };
+}): Pick<AutomationFact, "ruleId" | "title" | "path"> => ({
+  ruleId: `finding/${finding.fingerprint}`,
+  title: clip(`${finding.category} finding: ${finding.title}`),
+  ...(finding.location.path === undefined ? {} : { path: finding.location.path }),
+});
+
 /** The marker of a headless result the adapter could not parse (`submitInputFor`). */
 const PARSE_FAILURE = "final output is not a RoleResult";
 
@@ -220,7 +255,7 @@ const PARSE_FAILURE = "final output is not a RoleResult";
  * (`gate_infra`, `crash`), an adapter parse failure, a stuck loop and a replay verdict `improve`;
  * project side: a parked task VTC cannot resolve, a red post-merge CI run, a revert or a Lookback
  * escaped defect, an out-of-scope finding, and the Final Review leftovers a finished run left open.
- * (A cost regression comes from Lookback's scorecards, which hold no event yet.)
+ * A cost regression comes from Lookback's scorecards, not an event ({@link costRegressionFacts}).
  */
 export const automationFacts = (state: RunState, event: VtcEvent): AutomationFact[] => {
   const base = { run: state.id, source: event.type, at: event.ts };
@@ -270,13 +305,19 @@ export const automationFacts = (state: RunState, event: VtcEvent): AutomationFac
       if (v?.to !== "parked" || v.park_reason === undefined || HUMAN_PARKS.has(v.park_reason))
         return [];
       const task = event.task ?? "";
-      const feature = state.tasks.get(task)?.feature;
+      const known = state.tasks.get(task);
+      const feature = known?.feature;
       const project: AutomationFact = {
         ...base,
         target: "project",
         kind: "parked",
         task,
         ...(feature === undefined ? {} : { feature }),
+        // a task id repeats across runs: the run names the problem
+        ruleId: `parked/${v.park_reason}/${state.id}/${task}`,
+        title: clip(
+          `Task ${task} parked (${v.park_reason})${known === undefined ? "" : `: ${known.title}`}`,
+        ),
         detail: `task ${task} parked (${v.park_reason}) after round ${String(v.round)}`,
       };
       if (v.park_reason !== "stuck") return [project];
@@ -321,6 +362,8 @@ export const automationFacts = (state: RunState, event: VtcEvent): AutomationFac
           kind: "ci_failure",
           ...(event.feature === undefined ? {} : { feature: event.feature }),
           mergeCommit: v.merge_commit,
+          ruleId: `post_merge_ci/${v.merge_commit}`,
+          title: `Required checks red after merge ${v.merge_commit.slice(0, 12)}`,
           detail: `the required checks on the base are red after merge ${v.merge_commit.slice(0, 12)}`,
         },
       ];
@@ -335,6 +378,9 @@ export const automationFacts = (state: RunState, event: VtcEvent): AutomationFac
           kind: "escaped_defect",
           ...(event.feature === undefined ? {} : { feature: event.feature }),
           mergeCommit: v.merge_commit,
+          // a revert and Lookback's escaped defect of one merge are one problem
+          ruleId: `escaped_defect/${v.merge_commit}`,
+          title: `Escaped defect in merge ${v.merge_commit.slice(0, 12)}`,
           detail: v.detail,
         },
       ];
@@ -349,6 +395,9 @@ export const automationFacts = (state: RunState, event: VtcEvent): AutomationFac
           kind: "escaped_defect",
           ...(event.feature === undefined ? {} : { feature: event.feature }),
           mergeCommit: v.merge_commit,
+          // a revert and Lookback's escaped defect of one merge are one problem
+          ruleId: `escaped_defect/${v.merge_commit}`,
+          title: `Escaped defect in merge ${v.merge_commit.slice(0, 12)}`,
           detail: `an escaped defect (${v.kind}) of merge ${v.merge_commit.slice(0, 12)}${v.tasks.length === 0 ? "" : ` in ${v.tasks.join(", ")}`}`,
         },
       ];
@@ -363,6 +412,7 @@ export const automationFacts = (state: RunState, event: VtcEvent): AutomationFac
           kind: "finding",
           ...(v.finding.task === undefined ? {} : { task: v.finding.task }),
           ...(v.finding.feature === undefined ? {} : { feature: v.finding.feature }),
+          ...findingIdentity(v.finding),
           detail: `${v.finding.category} finding outside its task's scope: ${v.finding.title}`,
         },
       ];
@@ -382,11 +432,91 @@ export const automationFacts = (state: RunState, event: VtcEvent): AutomationFac
           target: "project" as const,
           kind: "final_review" as const,
           ...(f.feature === undefined ? {} : { feature: f.feature }),
+          ...findingIdentity(f),
           detail: `a Final Review finding left ${f.status}: ${f.title}`,
         }));
     default:
       return [];
   }
+};
+
+// ------------------------------------------------------------ cost regression
+
+/** The scorecard metrics a cost regression is judged on (D-bv: quality per token, cost per task). */
+const COST_METRICS: readonly ScorecardMetricId[] = [
+  "tokens_per_success",
+  "escalations_per_100",
+  "cap_hits_per_100",
+];
+
+/**
+ * Pure: whether `current` is worse than `baseline` beyond `LOOKBACK_LIMITS` (the canary rollback
+ * limits, §13 step 6): tokens per success up more than `maxTokenRisePct`, or the escalation or
+ * cap-hit rate at `rollbackRateRatio` times its baseline or more.
+ */
+export const costWorsened = (
+  metric: ScorecardMetricId,
+  baseline: number,
+  current: number,
+): boolean => {
+  if (metric === "tokens_per_success")
+    return baseline > 0 && current > baseline * (1 + LOOKBACK_LIMITS.maxTokenRisePct / 100);
+  if (metric === "escalations_per_100" || metric === "cap_hits_per_100")
+    return baseline > 0 && current >= baseline * LOOKBACK_LIMITS.rollbackRateRatio;
+  return false;
+};
+
+/**
+ * Pure (D-bv "cost regression"): for each role, mode and host, its newest prompt version (by the
+ * start of its scorecard window) against the version before it; one `cost` fact per metric that
+ * worsened beyond `LOOKBACK_LIMITS`. A metric without enough data (`value` null) on either side is
+ * not compared. The upstream module owns the fingerprint, the dedupe and the report.
+ */
+export const costRegressionFacts = (
+  cards: readonly Scorecard[],
+  meta: { readonly run: string; readonly at: string },
+): AutomationFact[] => {
+  const groups = new Map<string, Scorecard[]>();
+  for (const card of cards) {
+    const p = card.prompt;
+    const key = `${p.role}\u0000${p.mode ?? ""}\u0000${p.host}`;
+    groups.set(key, [...(groups.get(key) ?? []), card]);
+  }
+  const out: AutomationFact[] = [];
+  for (const group of groups.values()) {
+    const versions = [...group].sort((a, b) =>
+      a.window.from === b.window.from ? 0 : a.window.from < b.window.from ? -1 : 1,
+    );
+    const current = versions.at(-1);
+    const baseline = [...versions]
+      .reverse()
+      .find((c) => c.prompt.effective_sha256 !== current?.prompt.effective_sha256);
+    if (current === undefined || baseline === undefined) continue;
+    for (const metric of COST_METRICS) {
+      const before = baseline.metrics[metric]?.value;
+      const now = current.metrics[metric]?.value;
+      if (before === undefined || before === null || now === undefined || now === null) continue;
+      if (!costWorsened(metric, before, now)) continue;
+      const p = current.prompt;
+      out.push({
+        target: "upstream",
+        kind: "cost",
+        run: meta.run,
+        source: "lookback.scorecards",
+        at: meta.at,
+        role: p.role,
+        ...(p.mode === undefined ? {} : { mode: p.mode }),
+        host: p.host,
+        promptSha: p.effective_sha256,
+        baselinePromptSha: baseline.prompt.effective_sha256,
+        metric,
+        baseline: before,
+        current: now,
+        detail: `${p.role} on ${p.host}: ${metric} went from ${String(before)} to ${String(now)} against its previous prompt version`,
+      });
+    }
+  }
+  return out;
 };
 
 // ------------------------------------------------------------- daily summary
@@ -438,6 +568,8 @@ export interface UpstreamWiringDeps {
   readonly automation: AutomationDeps;
   /** The project's resolved settings now (`automationFor`, with `vtc pause`). */
   readonly settings: () => AutomationSettings;
+  /** What the settings were resolved from now: the GitHub remote, the gh login, `vtc pause`. */
+  readonly context: () => AutomationContext;
   /**
    * The only way the module records what it did: an `upstream.*` or `automation.skipped` event,
    * in `run`'s log (absent: the active run, else the next run to start).

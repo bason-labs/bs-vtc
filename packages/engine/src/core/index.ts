@@ -152,14 +152,17 @@ export { HEADLESS_LOADS_AGENT, replayReach, roleChangesFiles } from "./prompt-ta
 export { replayGraderOf, replayWaitSkipReason } from "./replay.js";
 /**
  * Automatic issues and PRs (AD-27, contracts 5.0.0): the Automation read model, the engine facts
- * that trigger the upstream module (D-bv), the daily summary, and the seam the daemon drives the
- * module through (`CreateUpstream`; the module reaches core only through this index, rule 8).
+ * that trigger the upstream module (D-bv: events, and cost regressions from Lookback's scorecards),
+ * the daily summary, and the seam the daemon drives the module through (`CreateUpstream`; the
+ * module reaches core only through this index, rule 8).
  */
 export {
   AUTOMATION_OFF_NOTE,
   automationDailySummary,
   automationFacts,
   automationReportView,
+  costRegressionFacts,
+  costWorsened,
   isAutomationEvent,
   type AutomationFact,
   type CreateUpstream,
