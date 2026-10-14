@@ -2,6 +2,7 @@
  * The `vtc` command registry (§4.1, §4.4). One import line per command file; the cli+binary
  * team owns this list, every other team owns only its own command file (AD-15).
  */
+import { command as automation } from "./automation.js";
 import { command as calibrate } from "./calibrate.js";
 import { command as dashboard } from "./dashboard.js";
 import { command as doctor } from "./doctor.js";
@@ -30,6 +31,7 @@ export const COMMANDS: readonly CommandSpec[] = [
   install,
   doctor,
   lookback,
+  automation,
   mergeLevel,
   engine,
   statuslineTee,

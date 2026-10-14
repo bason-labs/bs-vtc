@@ -1,7 +1,10 @@
 /**
  * Owner: cli+binary team. `vtc lookback approve|pin|rollback` (spec §13 steps 4–6; spine AD-21
- * rule 3, §5 reading 103): the human gestures that move Lookback's prompt pins in
- * `~/.vtc/lookback/pins.yaml`, for the repo the command runs in (`engineRepoKey`). Like
+ * rule 3, §5 readings 103 and 196): the human gestures that move Lookback's prompt pins in
+ * `~/.vtc/lookback/pins.yaml`, for the repo the command runs in (`engineRepoKey`), on this machine
+ * only. Since D-cb (reading 196) a replay verdict `improve` opens a bs-vtc PR on its own, and the
+ * human's review and merge of that PR is the promotion for everyone, in the next VTC release;
+ * `approve` starts a local canary on this machine, and `pin` pins a version here. Like
  * `vtc calibrate` they write the file directly after a yes at an interactive terminal; no MCP tool
  * or HTTP route writes it, and a `pins.yaml` inside a repo is never read. The Lead shows the
  * proposal and its replay result in chat and gives the human the command.
@@ -24,19 +27,19 @@
  * reaches its headless runs only. The gesture still goes ahead after the human's yes.
  *
  * `approve` also warns, while no canary of the target is running, when no replay of it can run
- * in this version (`core.replayReach`, spine §5 readings 180 and 182(8)): a verdict role is not
- * replayed, and on Claude Code only an `editable_in_pack` role runs a candidate. A canary starts
- * only from a replay, so with the shipped plugins none can start from a Claude-led run; the
- * warning says so and points at `vtc lookback pin`.
+ * (`replayGraderFor`, spine §5 readings 201 and 202): a role that changes no file and that no
+ * verdict grader scores. Every file-writing role replays on either host (each Claude arm runs its
+ * own plugin, D-cg) and the Spec Verifier through the verdict grader (D-ch). A canary starts only
+ * from a replay, so the warning says so and points at `vtc lookback pin`.
  */
 import { join } from "node:path";
 import { core, git } from "@vtc/engine";
 import {
   agentNameFor,
   engineRepoKey,
-  type HostId,
   HostIdSchema,
   redactSecrets,
+  replayGraderFor,
   RoleIdSchema,
   rolePromptAssetPath,
   SlugSchema,
@@ -74,8 +77,10 @@ const USAGE = [
   "usage: vtc lookback approve  --role <role> [--mode <mode>] --host <host> --version <sha> [--reason <text>]",
   "       vtc lookback pin      --role <role> [--mode <mode>] --host <host> --version <sha> [--reason <text>]",
   "       vtc lookback rollback --role <role> [--mode <mode>] --host <host> [--reason <text>]",
-  "  approve   start a canary of a version whose replay says improve; again, once the canary",
-  "            is promotable (its window passed with no trigger), to promote it",
+  "  approve   start a local canary, on this machine, of a version whose replay says improve;",
+  "            again, once the canary is promotable (its window passed with no trigger), to pin",
+  "            it here. Promotion for everyone is merging the bs-vtc PR VTC opens for an improve",
+  "            verdict (reading 196)",
   "  pin       pin a version outright (ends a canary; the override before a canary window passes)",
   "  rollback  end the canary, or move the pin back to the version it replaced",
   "  --reason  why, recorded (secrets redacted) in the pins.yaml history",
@@ -153,25 +158,18 @@ export const changesFilesOf =
 
 export const installedChangesFiles: ChangesFilesOf = changesFilesOf(() => runtime().assets);
 
-const LEAD_NAME: Readonly<Record<HostId, string>> = { "claude-code": "Claude", codex: "Codex" };
-
 /**
- * Why `approve` cannot start a canary of the target in this version, or `undefined` (readings 180
- * and 182(8)): no replay of it can run on a run its host leads, and a canary starts only from one.
+ * Why `approve` cannot start a canary of the target, or `undefined` (readings 201 and 202): no
+ * replay can grade it (`replayGraderFor`), and a canary starts only from one. Whether the role
+ * changes files unknown: no warning.
  */
 export const noCanaryWarning = (
   target: PinTarget,
-  editableInPack: boolean,
   changesFiles: boolean | undefined,
-): string | undefined => {
-  const why = core.replayReach(
-    { agent: agentNameFor(target.role, target.mode), host: target.host },
-    { editableInPack, changesFiles: changesFiles ?? true },
-  );
-  return why === null
+): string | undefined =>
+  changesFiles === undefined || replayGraderFor(target.role, changesFiles) !== null
     ? undefined
-    : `no canary of ${describeTarget(target)} can start from a ${LEAD_NAME[target.host]}-led run in this version: ${why}. vtc lookback pin pins a version without a replay (spine §5 reading 182(8))`;
-};
+    : `no canary of ${describeTarget(target)} can start in this version: ${agentNameFor(target.role, target.mode)} changes no file and no verdict grader scores it, so no replay can grade it (spine §5 readings 201 and 202). vtc lookback pin pins a version without a replay`;
 
 export const createLookbackCommand = (
   deps: () => GestureDeps = defaultGestureDeps,
@@ -241,9 +239,9 @@ export const createLookbackCommand = (
         const reach = pinReach(target, inPack);
         if (reach.warning !== undefined) ctx.io.err(`vtc lookback: warning: ${reach.warning}`);
         if (reach.note !== undefined) ctx.io.out(reach.note);
-        // readings 180 and 182(8): say when no replay, so no canary, can start for the target
+        // readings 201 and 202: say when no replay, so no canary, can start for the target
         if (gesture === "approve" && !canaryRunning(ctx.vtcHome, repoKey, target)) {
-          const none = noCanaryWarning(target, inPack, changesFiles(target));
+          const none = noCanaryWarning(target, changesFiles(target));
           if (none !== undefined) ctx.io.err(`vtc lookback: warning: ${none}`);
         }
       }

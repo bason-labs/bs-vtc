@@ -5,7 +5,9 @@
  * the `gh`-backed PR service and, since contracts 4.5.0, the `gh`-backed Level-3 service (AD-23)
  * and the research HTTP client with its network guard (AD-22), the research fetchers' keys and
  * the optional keyed search provider (H-3: none by default, so search runs on the host's own web
- * search).
+ * search). Since contracts 5.0.0 also automatic issues and PRs (`EngineDeps.automation`, AD-27
+ * rule 7) and the Lookback replay arms' plugin compiler (`EngineDeps.armPlugins`, reading 201),
+ * both built in `automation-wiring.ts`.
  */
 import { homedir } from "node:os";
 import { join, resolve } from "node:path";
@@ -13,7 +15,9 @@ import { ADAPTER_FACTORIES, type AdapterFactoryOptions } from "@vtc/adapters";
 import { ENGINE_NAME, gates, git, mcp, runDaemon } from "@vtc/engine";
 import {
   CONTRACTS_VERSION,
+  type ArmPluginCompiler,
   type AssetBundle,
+  type AutomationDeps,
   type AutoResumeScheduler,
   type CreateGateRunner,
   type DaemonOptions,
@@ -31,6 +35,15 @@ import {
   type SearchProvider,
   type StorageFactory,
 } from "@vtc/shared";
+import {
+  armPluginCompiler,
+  buildAutomationDeps,
+  probeAutomation,
+  shippedAutomationFactories,
+  shippedCompileArm,
+  type AutomationFactories,
+  type CompileArm,
+} from "./automation-wiring.js";
 import type { CliIo, CommandContext } from "./commands/types.js";
 import { ensureDaemon } from "./daemon.js";
 import { contractsAtLeast } from "./bridge.js";
@@ -40,6 +53,7 @@ import { bunResolver, createHttpClient, nodeResolver, type Resolve } from "./htt
 import { guardHumanOnly } from "./human-channel.js";
 import { readInstallToken } from "./token.js";
 import { requireRepoRoot, requireVtcProject } from "./repo.js";
+import { exec as runExec, type Exec } from "./process.js";
 import { runtime } from "./runtime.js";
 import { createWakeScheduler } from "./scheduler.js";
 import { loadStorage } from "./storage.js";
@@ -82,6 +96,10 @@ export interface EngineParts {
   readonly researchSearchProvider?: SearchProvider;
   /** The price table (`~/.vtc/config.yaml` `prices`, §11, reading 152). */
   readonly prices?: Readonly<Record<string, ModelPrice>>;
+  /** Automatic issues and PRs (AD-27 rule 7); absent: automation is off with a visible note. */
+  readonly automation?: AutomationDeps;
+  /** Lookback replay arms' plugins (reading 201); absent: Claude-led replays wait for a RETRO. */
+  readonly armPlugins?: ArmPluginCompiler;
 }
 
 /**
@@ -197,7 +215,44 @@ export interface BuildEnginePartsOptions {
    * `project.yaml`, and false when the file does not parse.
    */
   readonly allowUnsandboxed?: boolean;
+  /**
+   * `EngineDeps.automation` (AD-27 rule 7). Default: {@link buildAutomationDeps} over the user
+   * config and a probe of this machine (`gh --version`, `ffmpeg -version`, the origin remote; never
+   * the login). `null` injects none.
+   */
+  readonly automation?: AutomationDeps | null;
+  /** The seams behind the default automation. Default: {@link shippedAutomationFactories}. */
+  readonly automationFactories?: AutomationFactories;
+  /** Runs the default automation probe. Default: the cli's `exec`; tests inject a fake (D-cc). */
+  readonly exec?: Exec;
+  /**
+   * The compiler's `compileArm`, bound to the runtime's plugin dir as `EngineDeps.armPlugins`
+   * (reading 201). Default: {@link shippedCompileArm}. `null` injects none.
+   */
+  readonly compileArm?: CompileArm | null;
 }
+
+/** The default `EngineDeps.automation`: the user's settings and what this machine allows. */
+const defaultAutomation = async (
+  options: BuildEnginePartsOptions,
+  user: ReturnType<typeof readUserConfig>,
+  allowUnsandboxed: boolean,
+): Promise<AutomationDeps> =>
+  buildAutomationDeps({
+    user,
+    probe: await probeAutomation(options.exec ?? runExec, {
+      repoRoot: options.repoRoot,
+      login: false,
+      ...(options.ghCommand === undefined ? {} : { gh: options.ghCommand }),
+    }),
+    factories: options.automationFactories ?? shippedAutomationFactories(),
+    gateDeps: {
+      repoRoot: options.repoRoot,
+      vtcHome: options.vtcHome,
+      git: git.createGitOps({ repoRoot: options.repoRoot }),
+      allowUnsandboxed,
+    },
+  });
 
 /** Builds every part `vtc engine --daemon` injects. Constructing them starts no process. */
 export const buildEngineParts = async (options: BuildEnginePartsOptions): Promise<EngineParts> => {
@@ -209,6 +264,13 @@ export const buildEngineParts = async (options: BuildEnginePartsOptions): Promis
   const researchApiKey = researchApiKeyOf(userConfig);
   const researchSearchProvider = researchSearchProviderOf(userConfig);
   const prices = pricesOf(userConfig);
+  const pluginDir = options.pluginDir ?? ((host, home) => runtime().pluginDir(host, home));
+  const automation =
+    options.automation === null
+      ? undefined
+      : (options.automation ?? (await defaultAutomation(options, userConfig, allowUnsandboxed)));
+  const compileArm =
+    options.compileArm === null ? undefined : (options.compileArm ?? shippedCompileArm());
   return {
     repoRoot,
     vtcHome,
@@ -226,7 +288,7 @@ export const buildEngineParts = async (options: BuildEnginePartsOptions): Promis
     ),
     adapters: createAdapters(options.adapterFactories ?? ADAPTER_FACTORIES, {
       vtcHome,
-      pluginDir: options.pluginDir ?? ((host, home) => runtime().pluginDir(host, home)),
+      pluginDir,
       envPassthrough: passthroughOf(userConfig),
     }),
     assets: options.assets,
@@ -239,6 +301,10 @@ export const buildEngineParts = async (options: BuildEnginePartsOptions): Promis
     ...(researchApiKey === undefined ? {} : { researchApiKey }),
     ...(researchSearchProvider === undefined ? {} : { researchSearchProvider }),
     ...(Object.keys(prices).length === 0 ? {} : { prices }),
+    ...(automation === undefined ? {} : { automation }),
+    ...(compileArm === undefined
+      ? {}
+      : { armPlugins: armPluginCompiler(compileArm, (host) => pluginDir(host, vtcHome)) }),
   };
 };
 

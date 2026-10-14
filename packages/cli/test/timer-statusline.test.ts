@@ -278,6 +278,7 @@ describe("vtc statusline-tee (§6.9)", () => {
     const token = ensureInstallToken(home);
     const daemon = await startDaemon(
       await buildEngineParts({
+        automation: null,
         repoRoot: repo,
         vtcHome: home,
         installToken: token,
