@@ -56,10 +56,24 @@
  *   `codex exec --help` (0.162.1) has no override that drops project MCP servers: `-c` sets one
  *   dotted key, the help does not say whether a table value replaces or merges, no flag skips the
  *   project `.codex/config.toml` (`--ignore-user-config` covers only `$CODEX_HOME`), and a
- *   blanket `mcp_servers={}` would also drop the engine bridge roles use. The engine's restore of
+ *   blanket `mcp_servers={}` would also drop the engine bridge roles use (the `mcp_servers.vtc.*`
+ *   keys a role run sets touch only that one server). The engine's restore of
  *   `.codex/**` before every dispatch and resume is the barrier; the §7 spike row ("Codex project
  *   config in a linked worktree") settles the override. Project hooks need persisted trust, and
  *   no run ever passes the hook-trust bypass.
+ * - Engine tools through the bridge (D-an, spine §5 reading 71): every role run, fresh or resumed,
+ *   pins the engine bridge `[mcp_servers.vtc]` (`engineMcpServer("codex")`, the entry `vtc install`
+ *   writes) and limits it: `enabled_tools` is the role's `engine_tools` and nothing else, and
+ *   `disabled_tools` is `HUMAN_ONLY_TOOLS`, so `approve`, `answer` and `change_request` never reach
+ *   a role run whatever its tools say. The run has `approval_policy="never"`, so nothing asks
+ *   before an MCP call, and the engine cannot tell a role run's bridge from the Lead's by its
+ *   hello (a role bridge could claim a run whose Lead has gone); the filter is what keeps those
+ *   tools out. Checked on codex-cli 0.162.1 (2026-10-14, temp `CODEX_HOME`, a stub stdio server
+ *   listing five tools, read back through app-server `mcpServerStatus/list`): `-c
+ *   mcp_servers.vtc.disabled_tools=[...]` hides the listed tools, `enabled_tools` keeps only the
+ *   listed ones, and `enabled_tools=[]` leaves none. The command and args are pinned too, because a
+ *   filter key alone on a config without `[mcp_servers.vtc]` fails to load ("invalid transport").
+ *   The Lead's own session is never started here and keeps its tools.
  * - `codex exec` has no agent flag: a headless run gets no compiled role instructions
  *   (`developer_instructions` of `.codex/agents/vtc-*.toml`), so the role rests on the prompt
  *   (the task pack). Engine-launched Codex runs (cross-family review, auto-resume) must carry the
@@ -70,7 +84,11 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
   CODEX_UNIX_CONNECT_BLOCKED_PLATFORMS,
+  engineMcpServer,
+  HUMAN_ONLY_TOOLS,
+  isHumanOnlyTool,
   type HostCommand,
+  type RoleTools,
   type SandboxProfile,
   type SandboxProfileRequest,
   type SessionRef,
@@ -103,6 +121,43 @@ export interface CodexProfileOptions {
  */
 export { CODEX_UNIX_CONNECT_BLOCKED_PLATFORMS };
 
+const tomlStrings = (values: readonly string[]): string =>
+  `[${values.map((value) => JSON.stringify(value)).join(", ")}]`;
+
+/**
+ * The engine bridge a role run gets (see the header): the `vtc install` entry, with only the
+ * role's `engine_tools` enabled and the human-only tools disabled. Keyed as Codex config.
+ */
+export const codexRoleBridge = (tools: RoleTools) => {
+  const bridge = engineMcpServer(HOST);
+  return {
+    name: bridge.name,
+    command: bridge.command,
+    args: [...bridge.args],
+    enabled_tools: tools.engine_tools.filter((tool) => !isHumanOnlyTool(tool)),
+    disabled_tools: [...HUMAN_ONLY_TOOLS],
+  };
+};
+
+/** The `--config` override that keeps the human-only tools out of a role run. */
+export const codexHumanOnlyToolsOverride = (): string =>
+  `mcp_servers.${engineMcpServer(HOST).name}.disabled_tools=${tomlStrings(HUMAN_ONLY_TOOLS)}`;
+
+const codexRoleBridgeArgs = (tools: RoleTools): string[] => {
+  const bridge = codexRoleBridge(tools);
+  const key = `mcp_servers.${bridge.name}`;
+  return [
+    "--config",
+    `${key}.command=${JSON.stringify(bridge.command)}`,
+    "--config",
+    `${key}.args=${tomlStrings(bridge.args)}`,
+    "--config",
+    `${key}.enabled_tools=${tomlStrings(bridge.enabled_tools)}`,
+    "--config",
+    codexHumanOnlyToolsOverride(),
+  ];
+};
+
 const defaultTempRoots = (): string[] =>
   [process.env.TMPDIR, tmpdir(), "/tmp"].filter(
     (root): root is string => root !== undefined && root !== "",
@@ -133,6 +188,7 @@ export const codexSandboxProfile = (
   const tempRoots =
     denied.length === 0 ? [] : (options.tempRoots ?? defaultTempRoots()).map(canonicalPath);
   const noTemp = denied.some((dir) => tempRoots.some((root) => within(root, dir)));
+  const { name: bridgeName, ...bridge } = codexRoleBridge(request.tools);
   return {
     host: HOST,
     enforced: {
@@ -154,6 +210,7 @@ export const codexSandboxProfile = (
             },
           }
         : {}),
+      mcp_servers: { [bridgeName]: bridge },
     },
     // config overrides, which `codex exec resume` takes too; the command adds `--sandbox` as an
     // option of `exec` (resume itself has no such flag in 0.162.1)
@@ -176,6 +233,8 @@ export const codexSandboxProfile = (
             "sandbox_workspace_write.exclude_slash_tmp=true",
           ]
         : []),
+      // the engine bridge with the role's engine tools only, never a human-only one (D-an)
+      ...codexRoleBridgeArgs(request.tools),
     ],
   };
 };
@@ -214,7 +273,9 @@ const sandboxModeOf = (sandbox: SandboxProfile): CodexSandboxMode => {
  * Unattended (AD-25 rule 1): an explicit `--sandbox` (an option of `exec`, so it stands before
  * `resume`, which rejects it after itself in 0.162.1; the profile's `sandbox_mode` override says
  * the same) and `-c approval_policy="never"`, so no approval request ever waits for a person.
- * Never an automatic approver or the hook-trust bypass (AD-25 rule 2, AD-9).
+ * Never an automatic approver or the hook-trust bypass (AD-25 rule 2, AD-9). The profile's
+ * overrides carry the engine bridge filter (see the header); a profile without the human-only
+ * `disabled_tools` override is refused.
  */
 export const codexHeadlessCommand = (
   request: SpawnRoleRequest,
@@ -228,6 +289,12 @@ export const codexHeadlessCommand = (
     throw new Error(`cannot resume a ${session.host} session on ${HOST}`);
   }
   const mode = sandboxModeOf(request.sandbox);
+  // fail closed: without the filter every engine tool, the human-only ones too, reaches the role
+  if (!request.sandbox.cliArgs.includes(codexHumanOnlyToolsOverride())) {
+    throw new Error(
+      "refusing a headless Codex run: the profile does not disable the human-only engine tools (approve, answer, change_request) on the engine bridge (D-an)",
+    );
+  }
   return {
     command: CODEX_BINARY,
     args: [

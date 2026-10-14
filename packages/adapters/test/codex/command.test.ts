@@ -34,6 +34,27 @@ const WRITE_SCOPED: RoleTools = {
   engine_tools: [],
 };
 
+// the engine bridge every role run pins, with no engine tool enabled and the human-only ones
+// disabled (D-an); a role with `engine_tools` gets exactly those enabled
+const BRIDGE_ARGS = [
+  "--config",
+  'mcp_servers.vtc.command="vtc"',
+  "--config",
+  'mcp_servers.vtc.args=["engine", "--mcp", "--host", "codex"]',
+  "--config",
+  "mcp_servers.vtc.enabled_tools=[]",
+  "--config",
+  'mcp_servers.vtc.disabled_tools=["approve", "answer", "change_request"]',
+];
+const BRIDGE_SETTINGS = {
+  vtc: {
+    command: "vtc",
+    args: ["engine", "--mcp", "--host", "codex"],
+    enabled_tools: [],
+    disabled_tools: ["approve", "answer", "change_request"],
+  },
+};
+
 const dirs: string[] = [];
 afterEach(() => {
   for (const dir of dirs.splice(0)) rmSync(dir, { recursive: true, force: true });
@@ -74,8 +95,8 @@ const request = (overrides: Partial<SpawnRoleRequest> = {}): SpawnRoleRequest =>
 describe("Codex sandboxProfile (§12.1, AD-9)", () => {
   it("reviewers run read-only", () => {
     const p = profile(READ_ONLY);
-    expect(p.cliArgs).toEqual(["--config", 'sandbox_mode="read-only"']);
-    expect(p.settings).toEqual({ sandbox_mode: "read-only" });
+    expect(p.cliArgs).toEqual(["--config", 'sandbox_mode="read-only"', ...BRIDGE_ARGS]);
+    expect(p.settings).toEqual({ sandbox_mode: "read-only", mcp_servers: BRIDGE_SETTINGS });
     expect(p.enforced).toEqual({
       readOnly: true,
       perPathWriteDeny: false,
@@ -95,10 +116,12 @@ describe("Codex sandboxProfile (§12.1, AD-9)", () => {
         "sandbox_workspace_write.network_access=false",
         "--config",
         "sandbox_workspace_write.writable_roots=[]",
+        ...BRIDGE_ARGS,
       ]);
       expect(p.settings).toEqual({
         sandbox_mode: "workspace-write",
         sandbox_workspace_write: { network_access: false, writable_roots: [] },
+        mcp_servers: BRIDGE_SETTINGS,
       });
       // Codex has no per-path read deny: the token and host credentials stay readable (D-ad)
       expect(p.enforced).toEqual({
@@ -210,7 +233,7 @@ describe("Codex sandboxProfile (§12.1, AD-9)", () => {
         vtcHome: "/scratch-tmp/vtc",
         tempRoots: ["/scratch-tmp"],
       });
-      expect(p.cliArgs.slice(-4)).toEqual(excluded);
+      expect(p.cliArgs.slice(-4 - BRIDGE_ARGS.length, -BRIDGE_ARGS.length)).toEqual(excluded);
       expect(p.settings).toEqual({
         sandbox_mode: "workspace-write",
         sandbox_workspace_write: {
@@ -219,6 +242,7 @@ describe("Codex sandboxProfile (§12.1, AD-9)", () => {
           exclude_tmpdir_env_var: true,
           exclude_slash_tmp: true,
         },
+        mcp_servers: BRIDGE_SETTINGS,
       });
       // a VTC home outside every temp root keeps the temp directory writable (D-ag)
       expect(
@@ -237,7 +261,7 @@ describe("Codex sandboxProfile (§12.1, AD-9)", () => {
         vtcHome: "/scratch-tmp/vtc",
         tempRoots: ["/scratch-tmp"],
       }).cliArgs,
-    ).toEqual(["--config", 'sandbox_mode="read-only"']);
+    ).toEqual(["--config", 'sandbox_mode="read-only"', ...BRIDGE_ARGS]);
   });
 
   it.skipIf(process.platform === "win32")(
@@ -396,16 +420,66 @@ describe("Codex headlessCommand", () => {
     // merges into the project layer, and no flag skips the project `.codex/config.toml`
     // (`--ignore-user-config` covers only `$CODEX_HOME/config.toml`). A blanket
     // `-c mcp_servers={}` would also drop the engine bridge `[mcp_servers.vtc]` that roles use
-    // for engine tools, if it replaced the table. So no MCP override is passed; the engine's
-    // pre-dispatch restore of `.codex/**` (spine §5 reading 72) keeps a planted server from
-    // reaching the next start, and the §7 spike row settles the override.
+    // for engine tools, if it replaced the table. So no override names any server but the
+    // engine bridge; the engine's pre-dispatch restore of `.codex/**` (spine §5 reading 72) keeps
+    // a planted server from reaching the next start, and the §7 spike row settles the override.
     for (const session of [undefined, { host: "codex" as const, id: "thr-1" }]) {
       const args = createCodexAdapter({ vtcHome: VTC_HOME }).headlessCommand(
         request(),
         session,
       ).args;
-      expect(args.some((a) => a.startsWith("mcp_servers"))).toBe(false);
+      const mcp = args.filter((a) => a.startsWith("mcp_servers"));
+      expect(mcp.length).toBeGreaterThan(0);
+      expect(mcp.every((a) => a.startsWith("mcp_servers.vtc."))).toBe(true);
       expect(args).not.toContain("--dangerously-bypass-hook-trust");
+    }
+  });
+
+  it("keeps the human-only engine tools out of every role run, fresh or resumed, and enables only the role's engine tools (D-an)", () => {
+    // `approval_policy="never"` lets every MCP call through unasked, and a role bridge's hello
+    // looks like the Lead's: only the bridge filter keeps approve/answer/change_request out.
+    // The keys were read back on codex-cli 0.162.1 through app-server `mcpServerStatus/list`.
+    const adapter = createCodexAdapter({ vtcHome: VTC_HOME });
+    const researcher: RoleTools = {
+      ...READ_ONLY,
+      engine_tools: ["research_fetch", "fact_lookup", "approve"],
+    };
+    for (const session of [undefined, { host: "codex" as const, id: "thr-1" }]) {
+      for (const tools of [READ_ONLY, WRITE_SCOPED, ENGINEER, researcher]) {
+        const args = adapter.headlessCommand(request({ sandbox: profile(tools) }), session).args;
+        const at = args.indexOf(
+          'mcp_servers.vtc.disabled_tools=["approve", "answer", "change_request"]',
+        );
+        expect(args[at - 1]).toBe("--config");
+        expect(at).toBeGreaterThan(args.indexOf(session === undefined ? "exec" : "resume"));
+        expect(at).toBeLessThan(args.indexOf("--"));
+        // pinned to the entry `vtc install` writes, so the filter never names a server that is
+        // not there (a filter key alone fails the config load with "invalid transport")
+        expect(args).toContain('mcp_servers.vtc.command="vtc"');
+        expect(args).toContain('mcp_servers.vtc.args=["engine", "--mcp", "--host", "codex"]');
+        expect(args).toContain(
+          tools === researcher
+            ? 'mcp_servers.vtc.enabled_tools=["research_fetch", "fact_lookup"]'
+            : "mcp_servers.vtc.enabled_tools=[]",
+        );
+        expect(findForbiddenHostArgs(args)).toEqual([]);
+      }
+    }
+  });
+
+  it("refuses a profile whose overrides do not disable the human-only engine tools (D-an)", () => {
+    const sandbox = profile(READ_ONLY);
+    const unfiltered = {
+      ...sandbox,
+      cliArgs: sandbox.cliArgs.filter(
+        (a, i, all) => !a.includes("disabled_tools") && !all[i + 1]?.includes("disabled_tools"),
+      ),
+    };
+    expect(unfiltered.cliArgs.length).toBe(sandbox.cliArgs.length - 2);
+    for (const session of [undefined, { host: "codex" as const, id: "thr-1" }]) {
+      expect(() =>
+        createCodexAdapter().headlessCommand(request({ sandbox: unfiltered }), session),
+      ).toThrow(/human-only/);
     }
   });
 
