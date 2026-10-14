@@ -123,7 +123,13 @@ describe("evaluateVisual", () => {
           axe: {
             violations: [],
             incomplete: [
-              { rule: "color-contrast", impact: null, help: "Review", nodes: 1, targets: [] },
+              {
+                rule: "color-contrast",
+                impact: null,
+                help: "Review",
+                nodes: 1,
+                targets: ["#hero"],
+              },
             ],
           },
         }),
@@ -131,6 +137,15 @@ describe("evaluateVisual", () => {
     );
     expect(incomplete.summary.status).toBe("unchecked");
     expect(incomplete.summary.counts.axe_incomplete).toBe(1);
+    const review = incomplete.summary.findings.find((x) => x.rule_id === "axe/color-contrast");
+    expect(review).toMatchObject({
+      tool: "axe-core",
+      sarif_level: "note",
+      snippet: "#hero",
+      location: { symbol: "home:default" },
+    });
+    expect(review?.title).toMatch(/Needs review/);
+    expect(review?.message).toMatch(/home:default:390:light/);
 
     const unreached = evaluateVisual(
       input(rendered({ status: "unreached", detail: "HTTP 404", screenshot: undefined })),

@@ -27,6 +27,93 @@ export const ARCHITECTURE_SPINE_PATH = ".vtc/architecture/spine.md";
 const Globs = z.array(z.string().min(1).max(300)).max(50);
 const Mode = z.enum(["blocking", "warn"]).default("blocking");
 
+/** Most unbounded quantifiers (`*`, `+`, `{n,}`) a `forbidden-pattern` may have. */
+export const MAX_UNBOUNDED_QUANTIFIERS = 2;
+
+/**
+ * Why a `forbidden-pattern` is refused, or `null`. It runs in the engine process with no way to
+ * interrupt a match, so only patterns whose matching time stays polynomial and small on a capped
+ * line are accepted: valid, no backreference, no repeated group that itself repeats or holds an
+ * alternation (`(a+)+`, `(a|ab)*`: exponential backtracking), at most
+ * {@link MAX_UNBOUNDED_QUANTIFIERS} unbounded quantifiers.
+ */
+export const patternProblem = (pattern: string): string | null => {
+  try {
+    new RegExp(pattern);
+  } catch {
+    return "not a valid regular expression";
+  }
+  if (/\\[1-9]|\\k</.test(pattern)) return "a backreference is not allowed in a forbidden-pattern";
+  /** Per open group: whether it holds a repeating quantifier or an alternation. */
+  const frames: { repeats: boolean; alternates: boolean }[] = [
+    { repeats: false, alternates: false },
+  ];
+  /** The atom a following quantifier applies to: a closed group's facts, or a plain atom. */
+  let last: { repeats: boolean; alternates: boolean } | null = null;
+  let unbounded = 0;
+  for (let i = 0; i < pattern.length; i += 1) {
+    const c = pattern[i];
+    const top = frames[frames.length - 1] ?? { repeats: false, alternates: false };
+    if (c === "\\") {
+      i += 1;
+      last = { repeats: false, alternates: false };
+      continue;
+    }
+    if (c === "[") {
+      for (i += 1; i < pattern.length && pattern[i] !== "]"; i += 1)
+        if (pattern[i] === "\\") i += 1;
+      last = { repeats: false, alternates: false };
+      continue;
+    }
+    if (c === "(") {
+      frames.push({ repeats: false, alternates: false });
+      last = null;
+      continue;
+    }
+    if (c === ")") {
+      const closed = frames.pop() ?? { repeats: false, alternates: false };
+      const parent = frames[frames.length - 1];
+      if (parent !== undefined) {
+        parent.repeats ||= closed.repeats;
+        parent.alternates ||= closed.alternates;
+      }
+      last = closed;
+      continue;
+    }
+    if (c === "|") {
+      top.alternates = true;
+      last = null;
+      continue;
+    }
+    let max: number | null = null;
+    if (c === "*" || c === "+") max = Infinity;
+    else if (c === "?") max = 1;
+    else if (c === "{") {
+      const m = /^\{(\d+)(,(\d*))?\}/.exec(pattern.slice(i));
+      if (m !== null) {
+        max = m[2] === undefined ? Number(m[1]) : m[3] === "" ? Infinity : Number(m[3]);
+        i += m[0].length - 1;
+      }
+    }
+    if (max === null) {
+      last = { repeats: false, alternates: false };
+      continue;
+    }
+    if (pattern[i + 1] === "?") i += 1; // lazy: the same backtracking
+    if (max > 1) {
+      if (last !== null && (last.repeats || last.alternates)) {
+        return "a repeated group may not repeat inside or hold an alternation (catastrophic backtracking); rewrite the pattern";
+      }
+      top.repeats = true;
+    }
+    if (max === Infinity) unbounded += 1;
+    last = { repeats: false, alternates: false };
+  }
+  return unbounded > MAX_UNBOUNDED_QUANTIFIERS
+    ? `at most ${String(MAX_UNBOUNDED_QUANTIFIERS)} unbounded quantifiers (*, +, {n,}) in a forbidden-pattern`
+    : null;
+};
+
 export const AdCheckSpecSchema = z.discriminatedUnion("kind", [
   z.strictObject({
     kind: z.literal("import-boundary"),
@@ -53,19 +140,15 @@ export const AdCheckSpecSchema = z.discriminatedUnion("kind", [
     mode: Mode,
     /** Files the pattern may not appear in. */
     paths: Globs.min(1),
-    /** A JavaScript regular expression, matched per line. */
+    /** A JavaScript regular expression, matched per line (see {@link patternProblem}). */
     pattern: z
       .string()
       .min(1)
       .max(500)
-      .refine((p) => {
-        try {
-          new RegExp(p);
-          return true;
-        } catch {
-          return false;
-        }
-      }, "not a valid regular expression"),
+      .superRefine((p, ctx) => {
+        const problem = patternProblem(p);
+        if (problem !== null) ctx.addIssue({ code: "custom", message: problem });
+      }),
     except: Globs.default([]),
     message: z.string().min(1).max(500).optional(),
   }),

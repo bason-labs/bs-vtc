@@ -4,11 +4,12 @@
  * sandbox, as `node vtc-visual-runner.mjs <input.json> <result.json>`. It imports Playwright from
  * the project or the doctor-installed store (never bundled), launches the pinned executable, and
  * renders every job twice in the same run with the same browser: the implementation from the app
- * server and the approved prototype, served from `.vtc/design/prototype/` through request
- * interception (no socket). The determinism recipe: headless, DPR 1, `en-US`, `UTC`, a fixed
- * clock, reduced motion, fonts ready, animations and the caret off, every non-loopback request
- * aborted, dynamic regions masked. Then axe (an unmodified `axe.min.js`, reading 106), computed
- * styles, and a per-region pixelmatch diff (pixelmatch from the project or the store).
+ * server and the approved prototype, served from the base commit's `.vtc/design/prototype/` (a
+ * read-only clean checkout the Gate Runner made) through request interception (no socket). The
+ * determinism recipe: headless, DPR 1, `en-US`, `UTC`, a fixed clock, reduced motion, fonts
+ * ready, animations and the caret off, every non-loopback request aborted, dynamic regions
+ * masked. Then axe (an unmodified `axe.min.js`, reading 106), computed styles, and a per-region
+ * pixelmatch diff (pixelmatch from the project or the store).
  *
  * The script writes only into its output directory and the result file; the Gate Runner treats
  * the result as untrusted (`protocol.ts`). It never throws past `main`: a failure of the whole
@@ -298,7 +299,7 @@ const renderJob = async (browser, job, app, pixelmatch, scratch) => {
       }
     }
     if (input.prototype_root === null) {
-      record.reference = { status: "unreached", detail: "no approved prototype under .vtc/design/prototype/" };
+      record.reference = { status: "unreached", detail: "no approved prototype under .vtc/design/prototype/ at the base commit" };
     } else {
       const ref = await openPage(refContext, PROTO_ORIGIN + job.path);
       record.reference = { status: ref.status };

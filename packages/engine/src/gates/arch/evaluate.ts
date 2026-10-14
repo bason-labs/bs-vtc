@@ -2,6 +2,13 @@
  * Evaluates compiled AD Checks (`checks.ts`) on a diff's changed files (§8.5, §7.2 L6). Pure:
  * the caller reads each changed file at the head and the base commit. Only new violations count
  * (§7.1): a violation the same file already had at the base is baseline.
+ *
+ * A `forbidden-pattern` regular expression comes from the spine and runs in the engine process,
+ * where a match cannot be interrupted, so it is bounded: `patternProblem` refuses patterns that
+ * backtrack catastrophically, each line is matched on its first {@link MAX_PATTERN_LINE}
+ * characters, and one Check may spend {@link PATTERN_BUDGET_MS} over all files (checked between
+ * lines). Running out of it throws {@link PatternTimeoutError}: the Check is gate infrastructure
+ * (`error`), never a pass.
  */
 import { posix } from "node:path";
 import { matchesAny } from "../globs.js";
@@ -22,6 +29,35 @@ export interface ArchViolation {
   /** Identity for the baseline comparison (no line number: lines move). */
   readonly key: string;
 }
+
+/** The part of a line a `forbidden-pattern` is matched against. */
+export const MAX_PATTERN_LINE = 500;
+/** Time one `forbidden-pattern` Check may spend over all the changed files (base and head). */
+export const PATTERN_BUDGET_MS = 5000;
+
+/** A `forbidden-pattern` Check ran out of its time budget (a backtracking pattern, §8.5). */
+export class PatternTimeoutError extends Error {
+  constructor(pattern: string) {
+    super(
+      `the pattern /${pattern.slice(0, 200)}/ did not finish within ${String(PATTERN_BUDGET_MS)} ms over the changed files; the Check did not run`,
+    );
+    this.name = "PatternTimeoutError";
+  }
+}
+
+/** Indexes of the lines `pattern` matches; throws once `timeoutMs` has passed (between lines). */
+const matchingLines = (pattern: string, content: string, timeoutMs: number): number[] => {
+  const re = new RegExp(pattern);
+  const deadline = Date.now() + timeoutMs;
+  const hits: number[] = [];
+  content.split("\n").forEach((line, i) => {
+    if (Date.now() > deadline) throw new PatternTimeoutError(pattern);
+    if (re.test(line.length > MAX_PATTERN_LINE ? line.slice(0, MAX_PATTERN_LINE) : line)) {
+      hits.push(i);
+    }
+  });
+  return hits;
+};
 
 const JS = /\.(m|c)?(j|t)sx?$|\.(vue|svelte|astro)$/i;
 const PY = /\.py$/i;
@@ -168,7 +204,13 @@ export const dependenciesOf = (path: string, content: string): { name: string; l
 const norm = (text: string): string => text.trim().replace(/\s+/g, " ");
 
 /** Every violation of one Check in one file's content. */
-export const violationsOf = (spec: AdCheckSpec, path: string, content: string): ArchViolation[] => {
+export const violationsOf = (
+  spec: AdCheckSpec,
+  path: string,
+  content: string,
+  /** Time left for a `forbidden-pattern` (ms). */
+  timeoutMs: number = PATTERN_BUDGET_MS,
+): ArchViolation[] => {
   if (spec.kind === "import-boundary") {
     if (!matchesAny(spec.from, path) || matchesAny(spec.except, path)) return [];
     const python = PY.test(path);
@@ -201,35 +243,41 @@ export const violationsOf = (spec: AdCheckSpec, path: string, content: string): 
       }));
   }
   if (!matchesAny(spec.paths, path) || matchesAny(spec.except, path)) return [];
-  const re = new RegExp(spec.pattern);
-  return content.split("\n").flatMap((text, i) =>
-    re.test(text)
-      ? [
-          {
-            path,
-            line: i + 1,
-            text: text.trim(),
-            detail: `matches /${spec.pattern}/`,
-            key: `pattern\u0000${norm(text)}`,
-          },
-        ]
-      : [],
-  );
+  const lines = content.split("\n");
+  return matchingLines(spec.pattern, content, timeoutMs).map((i) => {
+    const text = lines[i] ?? "";
+    return {
+      path,
+      line: i + 1,
+      text: text.trim(),
+      detail: `matches /${spec.pattern}/`,
+      key: `pattern\u0000${norm(text)}`,
+    };
+  });
 };
 
 /** New and baseline violations of one Check over the changed files. */
 export const evaluateAdCheck = (
   spec: AdCheckSpec,
   files: readonly ArchFile[],
+  budgetMs: number = PATTERN_BUDGET_MS,
 ): { readonly fresh: ArchViolation[]; readonly baseline: number } => {
   const fresh: ArchViolation[] = [];
   let baseline = 0;
+  const deadline = Date.now() + budgetMs;
+  const budget = (): number => {
+    const ms = deadline - Date.now();
+    if (ms <= 0 && spec.kind === "forbidden-pattern") throw new PatternTimeoutError(spec.pattern);
+    return ms;
+  };
   for (const file of files) {
     const before = new Map<string, number>();
-    for (const v of file.base === undefined ? [] : violationsOf(spec, file.path, file.base)) {
+    for (const v of file.base === undefined
+      ? []
+      : violationsOf(spec, file.path, file.base, budget())) {
       before.set(v.key, (before.get(v.key) ?? 0) + 1);
     }
-    for (const v of violationsOf(spec, file.path, file.head)) {
+    for (const v of violationsOf(spec, file.path, file.head, budget())) {
       const left = before.get(v.key) ?? 0;
       if (left > 0) {
         before.set(v.key, left - 1);

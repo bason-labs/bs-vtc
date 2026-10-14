@@ -570,6 +570,8 @@ class Run {
     this.results[last.index] = {
       ...result,
       findings: [...result.findings, ...findings].slice(0, MAX_FINDINGS),
+      // GateResultSchema (frozen 4.x) requires findings <= new_violations, so the info-level
+      // scope-creep findings are counted here too; the status stays pass (contract proposal).
       new_violations: result.new_violations + findings.length,
     };
   }
