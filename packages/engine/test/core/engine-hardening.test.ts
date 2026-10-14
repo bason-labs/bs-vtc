@@ -16,7 +16,7 @@ import {
 } from "node:fs";
 import { join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { engineRepoKey, HIDDEN_TESTS, type LeadAction } from "@vtc/shared";
+import { engineRepoKey, HIDDEN_TESTS, hiddenTestsDir, type LeadAction } from "@vtc/shared";
 import { cleanupDirs, git, tempDir, writeFile } from "../helpers/repo.js";
 import { ALL_FIXTURE_ROLES } from "../fixtures/roles.js";
 import {
@@ -425,8 +425,13 @@ describe("symlinks planted where the engine writes or copies (AD-18)", () => {
     writeFile(staging, "hidden.test.ts", "test('hidden', () => {});\n");
     symlinkSync(join(outside, "secret.txt"), join(staging, "leak.test.ts"));
     await authorTests(h, only(actions, "qa"));
-    const target = join(h.deps.vtcHome, HIDDEN_TESTS.homeDir, engineRepoKey(h.repo), "T-1");
+    // keyed by run (D-ck, reading 205): a later run's T-1 never gets these
+    const run = h.engine.status({}).run.id;
+    const target = join(h.deps.vtcHome, hiddenTestsDir(engineRepoKey(h.repo), run, "T-1"));
     expect(readdirSync(target)).toEqual(["hidden.test.ts"]);
+    expect(existsSync(join(h.deps.vtcHome, HIDDEN_TESTS.homeDir, engineRepoKey(h.repo), "T-1"))).toBe(
+      false,
+    );
     expect(existsSync(staging)).toBe(false);
     expect(readFileSync(join(outside, "secret.txt"), "utf8")).toBe("private\n");
     await h.release();

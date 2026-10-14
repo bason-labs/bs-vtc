@@ -4,7 +4,8 @@
  * cli builds and injects into the Gate Runner (`GateRunnerDeps.git`); engine core also uses it for
  * worktrees, the submit snapshot commit (`role.submitted.head`) and the merge queue. Imports no
  * other engine module. Uses the user's own git auth (AD-9). Also home of the engine's repo file
- * writes that never follow a symlink (`writeRepoFile`, `appendRepoFile`).
+ * writes that never follow a symlink (`writeRepoFile`, `appendRepoFile`), and of the automation's
+ * local git plumbing (`createGitPlumbing`, the frozen `CreateGitPlumbing` seam, AD-27 rule 1).
  */
 export { createGitOps, parseNameStatus, CHECKOUTS_DIR } from "./git-ops.js";
 export {
@@ -53,6 +54,7 @@ export {
   type GitRunOptions,
 } from "./exec.js";
 export { HOST_CONFIG_PATHS, restoreHostConfig } from "./host-config.js";
+export { createGitPlumbing, GitPlumbingRefusedError } from "./plumbing.js";
 export {
   assertReplayCheckoutIntact,
   createReplayCheckout,
