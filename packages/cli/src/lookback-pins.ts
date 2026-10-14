@@ -8,8 +8,15 @@
  * - `approve <version>`: with no canary for the target, starts one (candidate vs. the current
  *   pin, or the version's parent) once the version's replay result says `improve` (AD-21 rule 6):
  *   recomputed here from its trials with the shared `replayVerdict`, never taken from the file;
- *   with that version already the canary's candidate, promotes it to the pin.
- * - `pin <version>`: pins a version outright (ends any canary for the target).
+ *   with that version already the canary's candidate, promotes it to the pin once the shared
+ *   `canaryVerdict` of its arms (counted from the repo's event logs) says `promotable`, never on
+ *   `no_data` (AD-21: no canary promoted on noise).
+ * - `pin <version>`: pins a version outright (ends any canary for the target); the human's explicit
+ *   override, before a canary window has passed included.
+ *
+ * A version is checked as the engine checks it before a dispatch (`lookback.loadPromptVersion`):
+ * its editable section hashes to `editable_sha256`, and against the installed plugin's locked core
+ * when the plugin carries one, so a version that would never run is never pinned.
  * - `rollback`: ends the target's canary (back to its baseline), or else moves the pin back to
  *   the version it replaced (no earlier version: the compiled default).
  *
@@ -31,18 +38,25 @@ import {
 } from "node:fs";
 import { join } from "node:path";
 import { randomBytes } from "node:crypto";
-import { core } from "@vtc/engine";
+import { core, lookback } from "@vtc/engine";
 import {
+  canaryVerdict,
+  eventLogPath,
   LOOKBACK_HOME,
   LookbackPinsSchema,
+  parseEventLog,
   parsePersisted,
   PromptVersionFrontmatterSchema,
   ReplayResultSchema,
   RelPathSchema,
   replayVerdict,
+  RunIdSchema,
+  type CanaryArmStats,
+  type CanaryVerdict,
   type HostId,
   type LookbackPins,
   type PromptVersionFrontmatter,
+  type VtcEvent,
 } from "@vtc/shared";
 import { printable } from "./human-gesture.js";
 
@@ -84,21 +98,28 @@ export const promptVersionsDir = (vtcHome: string, t: PinTarget): string =>
     t.host,
   );
 
-/** The frontmatter of a version file (`---` YAML `---`), or why it cannot be read. */
-export const readVersionFrontmatter = (path: string): PromptVersionFrontmatter => {
-  const text = readFileSync(path, "utf8");
-  const match = /^---\r?\n([\s\S]*?)\r?\n---(\r?\n|$)/.exec(text);
+/** A version file: its frontmatter (`---` YAML `---`) and the editable section after it. */
+export interface PromptVersionFile {
+  readonly frontmatter: PromptVersionFrontmatter;
+  readonly editable: string;
+}
+
+/** The frontmatter and editable section of a version file, or why it cannot be read. */
+export const readVersionFile = (path: string): PromptVersionFile => {
+  const text = readFileSync(path, "utf8").replace(/\r\n/g, "\n");
+  const match = /^---\n([\s\S]*?)\n---(\n|$)/.exec(text);
   if (match?.[1] === undefined) throw new Error(`${path} has no frontmatter`);
   const parsed = parsePersisted(PromptVersionFrontmatterSchema, core.parseYaml(match[1]));
   if (!parsed.success)
     throw new Error(`${path}: ${parsed.error.issues.map((i) => i.message).join("; ")}`);
-  return parsed.data;
+  return { frontmatter: parsed.data, editable: text.slice(match[0].length).trim() };
 };
 
 /**
  * The immutable version `ref` (a full SHA-256 or at least its first 8 hex) of `target`, from
- * `prompts/<role>[-<mode>]/<host>/<sha8>.md`; throws when it does not exist or names another
- * target.
+ * `prompts/<role>[-<mode>]/<host>/<sha8>.md`; throws when it does not exist, names another
+ * target, or its editable section does not hash to its `editable_sha256` (a changed file, which
+ * the engine would refuse at dispatch). {@link checkLockedCore} checks the rest.
  */
 export const findPromptVersion = (
   vtcHome: string,
@@ -121,12 +142,99 @@ export const findPromptVersion = (
       `no version ${ref} of ${describeTarget(target)} in ${dir}${known.length === 0 ? "" : ` (there: ${known.map((n) => n.slice(0, 8)).join(", ")})`}`,
     );
   }
-  const front = readVersionFrontmatter(path);
+  const { frontmatter: front, editable } = readVersionFile(path);
   const v = front.version;
   if (!v.effective_sha256.startsWith(ref) || !sameTarget(v, target))
     throw new Error(`${path} is not version ${ref} of ${describeTarget(target)}`);
+  if (lookback.sectionSha(editable) !== v.editable_sha256)
+    throw new Error(
+      `${path} was changed: its editable section does not hash to the version's editable_sha256, so the engine would never run it`,
+    );
   return front;
 };
+
+/**
+ * Checks a version against the locked core the installed plugin carries for the target, exactly as
+ * the engine does before a dispatch (`lookback.loadPromptVersion`): a version written for another
+ * locked core (a plugin update since) would never run. `locked` is `undefined` when the plugin
+ * carries no locked core for the agent: then only the editable section was checked, and the
+ * returned note says so.
+ */
+export const checkLockedCore = async (
+  vtcHome: string,
+  target: PinTarget,
+  front: PromptVersionFrontmatter,
+  locked: string | undefined,
+): Promise<
+  { readonly ok: true; readonly note?: string } | { readonly ok: false; readonly reason: string }
+> => {
+  const sha = front.version.effective_sha256;
+  if (locked === undefined)
+    return {
+      ok: true,
+      note: `note: the installed plugin carries no locked core for ${describeTarget(target)}, so version ${short(sha)} was not checked against it`,
+    };
+  if ((await lookback.loadPromptVersion(vtcHome, target, sha, locked)) !== undefined)
+    return { ok: true };
+  return {
+    ok: false,
+    reason:
+      lookback.sectionSha(locked) === front.version.locked_sha256
+        ? `version ${short(sha)} does not verify against the installed plugin's locked core: the engine would never run it`
+        : `version ${short(sha)} was written for another locked core (${short(front.version.locked_sha256)}; the installed plugin's is ${short(lookback.sectionSha(locked))}), so the engine would never run it`,
+  };
+};
+
+// -------------------------------------------------------------------- canary
+
+/** A canary's numbers and the shared verdict on them (`canaryVerdict`). */
+export interface CanaryReading {
+  readonly candidate: CanaryArmStats;
+  readonly baseline: CanaryArmStats;
+  readonly verdict: CanaryVerdict;
+  readonly reason: string;
+}
+
+/**
+ * Every valid event of the repo's runs (`.vtc/runs/<run>/events.jsonl`), read only: a run
+ * directory counts only with a `RunIdSchema` name, a log that is not a regular file (a link) is
+ * skipped, and so is a line that is not a valid event of that run.
+ */
+export const readRepoEvents = (repoRoot: string): VtcEvent[] => {
+  const runs = join(repoRoot, ".vtc", "runs");
+  const isDir = (path: string): boolean => {
+    try {
+      return lstatSync(path).isDirectory();
+    } catch {
+      return false;
+    }
+  };
+  if (!isDir(join(repoRoot, ".vtc")) || !isDir(runs)) return [];
+  const events: VtcEvent[] = [];
+  for (const name of readdirSync(runs).sort()) {
+    if (!RunIdSchema.safeParse(name).success || !isDir(join(runs, name))) continue;
+    const path = join(repoRoot, eventLogPath(name));
+    try {
+      if (!lstatSync(path).isFile()) continue;
+    } catch {
+      continue;
+    }
+    events.push(...parseEventLog(readFileSync(path, "utf8")).events.filter((e) => e.run === name));
+  }
+  return events;
+};
+
+/** The canary's arms, counted as the engine counts them, and the shared verdict on them. */
+export const readCanary = (
+  events: readonly VtcEvent[],
+  canary: LookbackPins["projects"][string]["canaries"][number],
+): CanaryReading => {
+  const arms = lookback.canaryArmStats(events, canary);
+  return { ...arms, ...canaryVerdict(arms.candidate, arms.baseline, false) };
+};
+
+const describeArm = (s: CanaryArmStats): string =>
+  `${String(s.dispatches)} dispatches, ${String(s.escalations)} escalations, ${String(s.capHits)} cap hits, ${String(s.tokens)} tokens`;
 
 // ------------------------------------------------------------------ planning
 
@@ -147,6 +255,8 @@ export interface GestureRequest {
   readonly version?: PromptVersionFrontmatter;
   /** Reads the version's replay result for `approve` (relative to the project root). */
   readonly replay?: (relPath: string) => unknown;
+  /** The running canary's numbers, for a promoting `approve`. */
+  readonly canary?: (canary: Project["canaries"][number]) => CanaryReading;
   readonly reason: string;
   readonly now: Date;
 }
@@ -207,9 +317,18 @@ export const planGesture = (pins: LookbackPins, request: GestureRequest): Gestur
             ok: false,
             reason: `a canary of ${short(canary.candidate)} is running for ${name}: approve that version to promote it, or roll it back first`,
           };
+        if (request.canary === undefined)
+          return { ok: false, reason: "promoting a canary needs its numbers" };
+        const reading = request.canary(canary);
+        const numbers = `candidate ${describeArm(reading.candidate)}; baseline ${describeArm(reading.baseline)} (from the event logs in the repo)`;
+        if (reading.verdict !== "promotable")
+          return {
+            ok: false,
+            reason: `the canary of ${short(sha)} for ${name} is not promotable yet: ${reading.verdict} (${reading.reason}); ${numbers}. ${reading.verdict === "rollback" ? "Roll it back" : "Let it run"}, or pin a version outright with vtc lookback pin`,
+          };
         return {
           ok: true,
-          summary: `Promote the canary ${short(sha)} of ${name} to its pin (now ${short(current ?? canary.baseline)}).`,
+          summary: `Promote the canary ${short(sha)} of ${name} to its pin (now ${short(current ?? canary.baseline)}): its window passed with no trigger; ${numbers}.`,
           pins: withProject(
             { pins: pinTo(sha), canaries: otherCanaries },
             history("promote", current ?? canary.baseline, sha),
@@ -344,24 +463,36 @@ const notALink = (path: string): void => {
   }
 };
 
-/** The pins file; `{ v: 1 }` when there is none. Throws when it does not parse (never overwritten). */
-export const readPins = (vtcHome: string): LookbackPins => {
-  const path = pinsPath(vtcHome);
+const readTextOrUndefined = (path: string): string | undefined => {
   notALink(path);
-  let text: string;
   try {
-    text = readFileSync(path, "utf8");
+    return readFileSync(path, "utf8");
   } catch (error) {
-    if ((error as { code?: unknown }).code === "ENOENT") return LookbackPinsSchema.parse({ v: 1 });
+    if ((error as { code?: unknown }).code === "ENOENT") return undefined;
     throw error;
   }
+};
+
+/**
+ * The pins file and the exact text it was read from (`undefined`: no file, `{ v: 1 }`), for
+ * {@link writePins}' compare-before-rename. Throws when it does not parse (never overwritten).
+ */
+export const readPinsFile = (
+  vtcHome: string,
+): { readonly pins: LookbackPins; readonly text: string | undefined } => {
+  const path = pinsPath(vtcHome);
+  const text = readTextOrUndefined(path);
+  if (text === undefined) return { pins: LookbackPinsSchema.parse({ v: 1 }), text };
   const parsed = parsePersisted(LookbackPinsSchema, core.parseYaml(text) ?? {});
   if (!parsed.success)
     throw new Error(
       `${path} does not parse (${parsed.error.issues.map((i) => `${i.path.join(".")}: ${i.message}`).join("; ")}); fix it by hand, nothing was changed`,
     );
-  return parsed.data;
+  return { pins: parsed.data, text };
 };
+
+/** The pins file; `{ v: 1 }` when there is none. Throws when it does not parse (never overwritten). */
+export const readPins = (vtcHome: string): LookbackPins => readPinsFile(vtcHome).pins;
 
 const LOCK_STALE_MS = 60_000;
 const LOCK_WAIT_MS = 5_000;
@@ -403,9 +534,9 @@ const breakStaleLock = (lock: string): void => {
 /**
  * Runs `fn` holding `lookback/pins.lock` (created exclusively with a token only this call knows;
  * one older than a minute is stale and taken over atomically, {@link breakStaleLock}), so two
- * gestures never interleave a read and a write. The engine's `auto_rollback` is serialised with
- * them only once the lock is a shared contract (`LOOKBACK_HOME`; a contract proposal of the cli
- * team): until then it is the cli's own.
+ * gestures never interleave a read and a write. The engine's `auto_rollback` does not take this
+ * lock (it is not a shared contract); it replaces the file only if it still holds the text it
+ * read, and {@link writePins} does the same, so neither silently overwrites the other.
  */
 export const withPinsLock = async <T>(vtcHome: string, fn: () => T): Promise<T> => {
   const dir = join(vtcHome, "lookback");
@@ -446,8 +577,17 @@ export const withPinsLock = async <T>(vtcHome: string, fn: () => T): Promise<T> 
   }
 };
 
-/** Writes the pins atomically (validated, a temporary file, then a rename; never through a link). */
-export const writePins = (vtcHome: string, pins: LookbackPins): string => {
+/**
+ * Writes the pins atomically (validated, a temporary file, then a rename; never through a link),
+ * but only while the file still holds `expected`, the text the pins were planned from
+ * (`undefined`: still absent). Returns the path, or `null` when the file changed meanwhile (an
+ * engine `auto_rollback`), and then nothing is written.
+ */
+export const writePins = (
+  vtcHome: string,
+  pins: LookbackPins,
+  expected: string | undefined,
+): string | null => {
   const path = pinsPath(vtcHome);
   notALink(path);
   const text = core.toYaml(LookbackPinsSchema.parse(pins));
@@ -457,6 +597,10 @@ export const writePins = (vtcHome: string, pins: LookbackPins): string => {
     writeSync(fd, text);
   } finally {
     closeSync(fd);
+  }
+  if (readTextOrUndefined(path) !== expected) {
+    rmSync(temp, { force: true });
+    return null;
   }
   renameSync(temp, path);
   return path;

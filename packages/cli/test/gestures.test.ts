@@ -19,18 +19,22 @@ import { afterEach, describe, expect, it } from "vitest";
 import { core } from "@vtc/engine";
 import {
   effectiveMergeLevel,
+  effectivePromptSha,
   engineRepoKey,
+  eventLogPath,
   LOOKBACK_HOME,
   LookbackPinsSchema,
   MERGE_LEVEL_LEDGER,
   MergeLevelLedgerEntrySchema,
+  sha256Hex,
+  toEventLine,
   type LookbackPins,
   type MergeLevelLedgerEntry,
 } from "@vtc/shared";
-import { createLookbackCommand } from "../src/commands/lookback.js";
+import { createLookbackCommand, type LockedCoreOf } from "../src/commands/lookback.js";
 import { createMergeLevelCommand } from "../src/commands/merge-level.js";
 import { EXIT_NOT_CONFIRMED, type GestureDeps } from "../src/human-gesture.js";
-import { pinsPath, withPinsLock } from "../src/lookback-pins.js";
+import { pinsPath, withPinsLock, writePins } from "../src/lookback-pins.js";
 import { capture, cleanupDirs, initRepo, initVtcRepo, tempHome } from "./helpers.js";
 
 afterEach(cleanupDirs);
@@ -222,7 +226,13 @@ describe("vtc merge-level restore (AD-23 rule 5)", () => {
 const ROLE = "engineer";
 const HOST = "claude-code";
 
-/** An immutable version file under the VTC home, as the engine writes it. */
+const EDITABLE = "Test first.";
+
+/**
+ * An immutable version file under the VTC home, as the engine writes it. Its editable section
+ * hashes to its `editable_sha256`; its effective SHA is a readable stand-in, so these versions are
+ * checked against no locked core (the installed plugin carries none here, `noLockedCore`).
+ */
 const writeVersion = (
   home: string,
   effective: string,
@@ -231,6 +241,8 @@ const writeVersion = (
     evaluation?: string | null;
     role?: string;
     host?: string;
+    locked?: string;
+    editable?: string;
   } = {},
 ): void => {
   const role = options.role ?? ROLE;
@@ -240,8 +252,8 @@ const writeVersion = (
     version: {
       role,
       host,
-      locked_sha256: sha("1"),
-      editable_sha256: sha("2"),
+      locked_sha256: options.locked === undefined ? sha("1") : sha256Hex(options.locked),
+      editable_sha256: sha256Hex(EDITABLE),
       effective_sha256: effective,
     },
     parent: options.parent ?? null,
@@ -255,8 +267,52 @@ const writeVersion = (
   };
   const path = join(home, LOOKBACK_HOME.promptsDir, role, host, `${effective.slice(0, 8)}.md`);
   mkdirSync(dirname(path), { recursive: true });
-  writeFileSync(path, `---\n${JSON.stringify(front, null, 2)}\n---\nTest first.\n`);
+  writeFileSync(
+    path,
+    `---\n${JSON.stringify(front, null, 2)}\n---\n${options.editable ?? EDITABLE}\n`,
+  );
 };
+
+/**
+ * A run log of `role.dispatched` events in each canary arm after the canary started (`NOW`):
+ * `LOOKBACK_LIMITS` makes 10 candidate and 5 baseline dispatches with no trigger promotable.
+ */
+const writeCanaryLog = (repo: string, arms: { candidate: number; baseline: number }): void => {
+  const run = "r-canary";
+  let seq = 0;
+  const lines: string[] = [];
+  for (const arm of ["candidate", "baseline"] as const)
+    for (let i = 0; i < arms[arm]; i += 1) {
+      seq += 1;
+      lines.push(
+        toEventLine({
+          v: 1,
+          seq,
+          ts: new Date(NOW.getTime() + seq * 60_000).toISOString(),
+          run,
+          actor: "engine",
+          type: "role.dispatched",
+          role: ROLE,
+          host: HOST,
+          model: "claude-sonnet-5",
+          prompt_sha: sha("d"),
+          data: {
+            action_id: `a-${String(seq)}`,
+            dispatch: "subagent",
+            agent: "vtc-engineer",
+            pack: `.vtc/state/packs/a-${String(seq)}.md`,
+            resume: null,
+            canary_arm: arm,
+          },
+        }),
+      );
+    }
+  const path = join(repo, eventLogPath(run));
+  mkdirSync(dirname(path), { recursive: true });
+  writeFileSync(path, lines.join(""));
+};
+
+const noLockedCore: LockedCoreOf = () => undefined;
 
 /** `wins` tasks the candidate won outright, 3 runs per arm; the sign test is P(X >= wins) = 0.5^wins. */
 const wonTasks = (wins: number) =>
@@ -312,9 +368,10 @@ const run = async (
   home: string,
   args: string[],
   answer: boolean | "no-terminal" = true,
+  lockedCore: LockedCoreOf = noLockedCore,
 ): Promise<{ code: number; out: string; err: string }> => {
   const { ctx, out, err } = capture(repo, home);
-  const code = await createLookbackCommand(() => human(answer)).run(args, ctx);
+  const code = await createLookbackCommand(() => human(answer), lockedCore).run(args, ctx);
   return { code, out: out.join("\n"), err: err.join("\n") };
 };
 
@@ -425,9 +482,24 @@ describe("vtc lookback approve|pin|rollback (AD-21 rule 3)", () => {
     expect((await run(repo, home, ["approve", ...T, "--version", sha("e")])).err).toMatch(
       /a canary of dddddddd is running/,
     );
-    // approving the candidate again promotes it
+    // approving the candidate again before its window passed promotes nothing: no data yet
+    const early = await run(repo, home, ["approve", ...T, "--version", sha("d")]);
+    expect(early.code).toBe(1);
+    expect(early.err).toMatch(
+      /canary of dddddddd for engineer on claude-code is not promotable yet: no_data \(fewer than 5 dispatches in an arm\); candidate 0 dispatches.*Let it run, or pin a version outright with vtc lookback pin/,
+    );
+    writeCanaryLog(repo, { candidate: 6, baseline: 5 });
+    expect((await run(repo, home, ["approve", ...T, "--version", sha("d")])).err).toMatch(
+      /not promotable yet: continue \(no trigger yet\); candidate 6 dispatches/,
+    );
+    expect(pinsOf(home).projects[key]?.canaries).toHaveLength(1);
+    // once the window passed with no trigger, approving the candidate again promotes it
+    writeCanaryLog(repo, { candidate: 10, baseline: 5 });
     const promote = await run(repo, home, ["approve", ...T, "--version", sha("d")]);
     expect(promote.code, promote.err).toBe(0);
+    expect(promote.out).toMatch(
+      /Promote the canary dddddddd .*its window passed with no trigger; candidate 10 dispatches, 0 escalations, 0 cap hits, 0 tokens; baseline 5 dispatches/,
+    );
     const after = pinsOf(home);
     expect(after.projects[key]).toEqual({
       pins: [{ role: ROLE, host: HOST, effective_sha256: sha("d") }],
@@ -537,6 +609,59 @@ describe("vtc lookback approve|pin|rollback (AD-21 rule 3)", () => {
     expect(r.code, r.err).toBe(0);
     expect(readFileSync(pinsPath(home), "utf8")).not.toContain(key);
     expect(pinsOf(home).history[0]?.reason).toMatch(/^oops /);
+  });
+
+  it("checks a version as the engine does: its editable section and the installed locked core", async () => {
+    const repo = initVtcRepo();
+    const home = tempHome();
+    // a version file whose editable section was changed after it was written
+    writeVersion(home, sha("a"), { editable: "Skip the tests." });
+    const changed = await run(repo, home, ["pin", ...T, "--version", sha("a")]);
+    expect(changed.code).toBe(1);
+    expect(changed.err).toMatch(/was changed: its editable section does not hash/);
+    // a real version of the installed locked core pins; one of an older core does not
+    const locked = "You are the Engineer. Follow the task pack.";
+    const real = effectivePromptSha(locked, EDITABLE);
+    writeVersion(home, real, { locked });
+    const installed: LockedCoreOf = (t) =>
+      t.role === ROLE && t.host === HOST ? locked : undefined;
+    const ok = await run(repo, home, ["pin", ...T, "--version", real], true, installed);
+    expect(ok.code, ok.err).toBe(0);
+    expect(ok.out).not.toMatch(/note:/);
+    const older = "You are the Engineer.";
+    const stale = effectivePromptSha(older, EDITABLE);
+    writeVersion(home, stale, { locked: older });
+    const refused = await run(repo, home, ["pin", ...T, "--version", stale], true, installed);
+    expect(refused.code).toBe(1);
+    expect(refused.err).toMatch(
+      /was written for another locked core .* so the engine would never run it/,
+    );
+    // a version naming the installed core's hash but another effective SHA does not verify
+    writeVersion(home, sha("e"), { locked });
+    expect(
+      (await run(repo, home, ["pin", ...T, "--version", sha("e")], true, installed)).err,
+    ).toMatch(/does not verify against the installed plugin's locked core/);
+    expect(pinsOf(home).projects[engineRepoKey(repo)]?.pins).toEqual([
+      { role: ROLE, host: HOST, effective_sha256: real },
+    ]);
+    // with no locked core installed, the human is told what was not checked
+    writeVersion(home, sha("b"));
+    expect((await run(repo, home, ["pin", ...T, "--version", sha("b")])).out).toMatch(
+      /note: the installed plugin carries no locked core for engineer on claude-code/,
+    );
+  });
+
+  it("writes nothing when the pins file changed under the plan (an engine auto_rollback)", () => {
+    const home = tempHome();
+    const pins = LookbackPinsSchema.parse({ v: 1 });
+    mkdirSync(dirname(pinsPath(home)), { recursive: true });
+    expect(writePins(home, pins, "v: 1\n")).toBeNull();
+    expect(existsSync(pinsPath(home))).toBe(false);
+    const path = writePins(home, pins, undefined);
+    expect(path).toBe(pinsPath(home));
+    const text = readFileSync(pinsPath(home), "utf8");
+    expect(writePins(home, pins, `${text}# edited\n`)).toBeNull();
+    expect(writePins(home, pins, text)).toBe(path);
   });
 
   it("rolls a canary back to its baseline, and a pin back to what it replaced", async () => {
