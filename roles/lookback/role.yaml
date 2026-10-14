@@ -7,7 +7,7 @@
 #   engineering/engineering-autonomous-optimization-architect.md (a rubric declared before the
 #     comparison; its autonomous promotion was removed: a human approves every change)
 id: lookback
-version: 2.0.0
+version: 3.0.0
 kind: core
 mission: >-
   From attributed failures of one role on one host, propose at most three small changes to that

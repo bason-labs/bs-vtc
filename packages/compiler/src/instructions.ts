@@ -21,6 +21,9 @@
  * compiled skills (`InstructionSources.vars`), so prompts never restate an enum by hand.
  */
 import {
+  AD_CHECK_FENCE,
+  AdCheckSpecSchema,
+  ARCHITECTURE_SPINE_PATH,
   ArchitectDepthSchema,
   ColourStrategySchema,
   ContractKindSchema,
@@ -50,7 +53,7 @@ import {
   type RoleExit,
 } from "@vtc/shared";
 import { EDITABLE_IN_PACK_NOTE } from "./prompt-parts.js";
-import { renderTemplate, selectMode } from "./role-source.js";
+import { RESERVED_EDITABLE_HEADINGS, renderTemplate, selectMode } from "./role-source.js";
 import type { LoadedRole } from "./role-source.js";
 
 const ENGINE_DIRECTION_FIELDS: ReadonlySet<string> = new Set(["first_viewport", "novelty"]);
@@ -58,6 +61,14 @@ const ENGINE_DIRECTION_FIELDS: ReadonlySet<string> = new Set(["first_viewport", 
 /** Values every prompt part may reference as `{{name}}`. */
 export const PROTOCOL_VARS: Readonly<Record<string, string>> = {
   architect_depths: ArchitectDepthSchema.options.join(", "),
+  /** The Architect's machine-checkable Checks (`AdCheckSpec`, §8.5; spine §5 reading 126). */
+  architecture_spine_path: ARCHITECTURE_SPINE_PATH,
+  ad_check_fence: AD_CHECK_FENCE,
+  ad_check_kinds: AdCheckSpecSchema.options.map((o) => `\`${o.shape.kind.value}\``).join(", "),
+  ad_check_modes: AdCheckSpecSchema.options[0].shape.mode
+    .unwrap()
+    .options.map((mode) => `\`${mode}\``)
+    .join(", "),
   colour_strategies: ColourStrategySchema.options.join(", "),
   research_depths: ResearchDepthSchema.options.join(", "),
   /** Where the Designer writes the screen list (`DesignScreensFileSchema`, §9). */
@@ -79,6 +90,8 @@ export const PROTOCOL_VARS: Readonly<Record<string, string>> = {
   scorecard_metrics: ScorecardMetricIdSchema.options.join(", "),
   max_proposal_changes: String(LOOKBACK_LIMITS.maxProposalChanges),
   lookback_proposals_dir: LOOKBACK_REPO.proposalsDir,
+  /** What a proposed editable section may not use as a heading (`editableSectionErrors`). */
+  editable_reserved_headings: RESERVED_EDITABLE_HEADINGS.map((name) => `"${name}"`).join(", "),
   /** Where the prototype server serves from (§17); the Designer's G2 directions live under it. */
   prototype_root: ENGINE_HTTP.prototype.root,
   /** Where the Designer writes each direction's fields (`G2DirectionDraft`, contracts 4.6.0). */
