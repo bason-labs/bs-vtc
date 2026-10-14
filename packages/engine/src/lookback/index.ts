@@ -12,7 +12,8 @@
  * {@link planReplayTrials}), launches what {@link planRetroReplays} allows this RETRO (a grader
  * that can score the role, the weekly window, the budget and `maxTrialsPerRetro`, each limit an
  * `automation.skipped` draft), grades each trial with {@link gradeTrial} (the gates) or
- * {@link gradeVerdictTrial} (a verdict role against {@link recordedOutcome}), keeps every grade in
+ * {@link gradeVerdictReplay} (a verdict role against {@link recordedOutcome}; `infra_error` when the
+ * replayed dispatch has none), keeps every grade in
  * the trial ledger ({@link recordReplayTrial}) so a replay continues across RETROs, and once all
  * are graded builds the result with {@link assembleReplay} (its grader and isolation recorded)
  * and writes it with {@link writeReplayResult} (whose `lookback.replay_finished` carries the
@@ -182,6 +183,7 @@ export {
   type TraceEnd,
 } from "./traces.js";
 export {
+  gradeVerdictReplay,
   gradeVerdictTrial,
   recordedOutcome,
   VERDICT_GRADER_VERSION,

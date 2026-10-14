@@ -11,6 +11,7 @@ import {
   assembleReplay,
   attributeRun,
   graderBundleSha,
+  gradeVerdictReplay,
   gradeVerdictTrial,
   LOOKBACK_METRICS_VERSION,
   planReplayTrials,
@@ -241,6 +242,34 @@ describe("grading a verdict trial (D-ch)", () => {
         { subject: AC, verdict: "pass" },
       ]),
     ).toBe(false);
+  });
+});
+
+describe("grading a verdict replay trial from the log (the RETRO seam, D-ch)", () => {
+  const at = { run: "r1", trace: "sv-1" };
+  it("scores the trial's result against the replayed dispatch's recorded outcome", () => {
+    // the gate passed on the head the Spec Verifier judged: `pass` was the right answer
+    const log = judged("fail");
+    expect(gradeVerdictReplay(log.events, at, [{ subject: AC, verdict: "pass" }])).toBe("pass");
+    expect(gradeVerdictReplay(log.events, at, [{ subject: AC, verdict: "fail" }])).toBe("fail");
+    expect(gradeVerdictReplay(log.events, at, [{ subject: AC, verdict: "unknown" }])).toBe("fail");
+    expect(gradeVerdictReplay(log.events, at, [])).toBe("fail");
+  });
+
+  it("follows the strongest evidence: a later escaped defect makes `fail` the right answer", () => {
+    const log = judged("pass");
+    log.escapedDefect(["T-1"]);
+    expect(gradeVerdictReplay(log.events, at, [{ subject: AC, verdict: "fail" }])).toBe("pass");
+    expect(gradeVerdictReplay(log.events, at, [{ subject: AC, verdict: "pass" }])).toBe("fail");
+  });
+
+  it("measures nothing when the replayed dispatch has no recorded outcome", () => {
+    const log = judged("pass");
+    const answer = [{ subject: AC, verdict: "pass" }];
+    expect(gradeVerdictReplay(log.events, { run: "r1", trace: "sv-9" }, answer)).toBe(
+      "infra_error",
+    );
+    expect(gradeVerdictReplay([], at, answer)).toBe("infra_error");
   });
 });
 
