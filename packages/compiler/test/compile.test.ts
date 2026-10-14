@@ -198,7 +198,8 @@ describe("compilePlugins: agent instructions", () => {
 
   it("builds an engineer profile on the shared Engineer contract (§5.2a)", () => {
     const text = claude("vtc-engineer-frontend");
-    const order = ["ENGINEER-LOCKED", "FRONTEND-LOCKED", "ENGINEER-EDITABLE", "FRONTEND-EDITABLE"];
+    // the Engineer's whole prompt first, in the locked part; the profile's own section last
+    const order = ["ENGINEER-LOCKED", "ENGINEER-EDITABLE", "FRONTEND-LOCKED", "FRONTEND-EDITABLE"];
     const positions = order.map((needle) => text.indexOf(needle));
     expect(positions.every((index) => index >= 0)).toBe(true);
     expect([...positions].sort((a, b) => a - b)).toEqual(positions);

@@ -17,6 +17,7 @@ import {
   ROLE_CONTRACTS_ASSET,
   ROLE_MCP_TOOLS,
   RoleContractSchema,
+  sha256Hex,
   type HostId,
   type PluginManifestAgent,
   type PluginManifestInput,
@@ -343,6 +344,10 @@ const compileAgents = (
         ...advisorContractErrors(role),
         ...codexModelErrors(role),
       ];
+      if (built.ok && built.editable !== loaded.prompt.editable.trim()) {
+        // `editableSectionErrors` makes this unreachable; a proposal must map back to prompt.md.
+        messages.push("the compiled editable section differs from prompt.md's editable section");
+      }
       if (!built.ok || messages.length > 0) {
         for (const message of messages) {
           if (!errors.some((e) => e.path === `roles/${loaded.dir}` && e.message === message)) {
@@ -362,8 +367,7 @@ const compileAgents = (
         tools: built.contract.tools,
         model: built.contract.models[host],
         instructions: agentInstructions(built, inPack),
-        locked: built.locked,
-        editable: built.editable,
+        sections: { locked: loaded.prompt.locked.trim(), editable: loaded.prompt.editable.trim() },
         skills: needs.skills,
       });
     });
@@ -380,8 +384,9 @@ const manifestAgent = (agent: CompiledAgent, file: string): PluginManifestAgent 
   role_version: agent.roleVersion,
   file,
   prompt_sha256: promptShaFor(agent.instructions),
-  locked_sha256: promptShaFor(agent.locked),
-  editable_sha256: promptShaFor(agent.editable),
+  // AD-21 / PluginManifestAgent: the SHA-256 of the role's trimmed `splitRolePrompt` sections.
+  locked_sha256: sha256Hex(agent.sections.locked),
+  editable_sha256: sha256Hex(agent.sections.editable),
   tier: agent.model.tier,
   effort: agent.model.effort,
 });
@@ -396,11 +401,11 @@ const skillFiles = (host: HostId, skills: readonly Skill[]): EmittedFile[] =>
     s.files.map((f) => ({ path: `skills/${s.name}/${f.path}`, text: skillTextFor(host, f.text) })),
   );
 
-/** Each agent's prompt parts (`vtc/prompts/<agent>/{locked,editable}.md`, AD-21 rule 2). */
+/** Each agent's role sections (`vtc/prompts/<agent>/{locked,editable}.md`, AD-21 rule 2). */
 const promptPartFiles = (agents: readonly CompiledAgent[]): EmittedFile[] =>
   agents.flatMap((a) => [
-    { path: rolePromptAssetPath(a.name, "locked"), text: a.locked },
-    { path: rolePromptAssetPath(a.name, "editable"), text: a.editable },
+    { path: rolePromptAssetPath(a.name, "locked"), text: a.sections.locked },
+    { path: rolePromptAssetPath(a.name, "editable"), text: a.sections.editable },
   ]);
 
 const codexCommandSkill = (command: Command): string =>
