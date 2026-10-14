@@ -234,6 +234,35 @@ describe("buildEngineParts and composeEngineDeps (AD-19)", () => {
     expect(created).toBe(1);
   });
 
+  it("forwards the optional novelty seam to the real Gate Runner (AD-24 rule 8, reading 127)", async () => {
+    const seen: string[] = [];
+    const report = { direction: "d1" };
+    const runner = lazyGateRunner((): GateRunner => ({
+      run: async () => ({}) as never,
+      checkWriteScope: async () => ({}) as never,
+      checkNovelty: async (r) => (seen.push(`check:${r.direction}`), report as never),
+      recordDesignChoice: async (e) => void seen.push(`record:${e.direction}`),
+    }));
+    expect(typeof runner.checkNovelty).toBe("function");
+    expect(typeof runner.recordDesignChoice).toBe("function");
+    await expect(runner.checkNovelty?.({ direction: "d1" } as never)).resolves.toBe(report);
+    await runner.recordDesignChoice?.({ direction: "d1" } as never, "_shared" as never);
+    expect(seen).toEqual(["check:d1", "record:d1"]);
+  });
+
+  it("fails the novelty seam when the built Gate Runner has none, so the direction stays unchecked", async () => {
+    const runner = lazyGateRunner((): GateRunner => ({
+      run: async () => ({}) as never,
+      checkWriteScope: async () => ({}) as never,
+    }));
+    await expect(runner.checkNovelty?.({ direction: "d1" } as never)).rejects.toThrow(
+      /checkNovelty/,
+    );
+    await expect(
+      runner.recordDesignChoice?.({ direction: "d1" } as never, "_shared" as never),
+    ).rejects.toThrow(/recordDesignChoice/);
+  });
+
   it("constructs one adapter per registered factory, with its plugin, home and version (AD-6 rule 6)", () => {
     const a = { host: "claude-code" } as HostAdapter;
     const c = { host: "codex" } as HostAdapter;
