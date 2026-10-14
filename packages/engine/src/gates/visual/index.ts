@@ -3,7 +3,7 @@
  * detector, the render matrix with axe, computed styles and the per-region pixel diff, the
  * browser pin, and the novelty check against the per-client design library.
  */
-export { visualAppOf, VisualAppSchema, type VisualApp } from "./app.js";
+export { appLoopbackPort, visualAppOf, VisualAppSchema, type VisualApp } from "./app.js";
 export {
   BROWSER_STORE_NODE_MODULES,
   checkProjectBrowser,
@@ -86,7 +86,12 @@ export {
   type RunnerResult,
 } from "./protocol.js";
 export {
+  DISABLE_SIGUSR1,
+  LINUX_PTRACE_REFUSAL,
+  NO_RUNNER_NODE,
+  resolveNodeExecutable,
   sandboxedVisualRunner,
+  type SandboxedVisualRunnerOptions,
   type VisualRunner,
   type VisualRunnerCall,
   type VisualRunnerOutcome,

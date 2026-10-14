@@ -309,6 +309,12 @@ export interface GateJailSpec extends GateSandboxSpec {
    * share.
    */
   readonly resolvConf?: string;
+  /**
+   * Verify phase without `loopback`: the only loopback ports the command may listen on and
+   * connect to (the visual step's app server, AD-24). macOS opens just these ports of the host's
+   * loopback; on Linux the verify phase has a private loopback of its own, so nothing changes.
+   */
+  readonly loopbackPorts?: readonly number[];
 }
 
 /** A wrapped command that runs under {@link REAPER_SCRIPT} (see `exec.ts` `ExecRequest.reaper`). */
@@ -326,11 +332,13 @@ const extrasOf = (
   allowRead: readonly string[];
   reapSentinel?: string;
   resolvConf?: string;
+  loopbackPorts: readonly number[];
 } => {
   const extra = spec as GateJailSpec;
   return {
     hideRead: extra.hideRead ?? [],
     allowRead: extra.allowRead ?? [],
+    loopbackPorts: extra.loopbackPorts ?? [],
     ...(extra.reapSentinel === undefined ? {} : { reapSentinel: extra.reapSentinel }),
     ...(extra.resolvConf === undefined ? {} : { resolvConf: extra.resolvConf }),
   };
@@ -373,6 +381,11 @@ const checkSpec = (argv: readonly string[], spec: GateSandboxSpec): void => {
     ...(extra.resolvConf === undefined ? [] : [extra.resolvConf]),
   ]) {
     if (!isAbsolute(p)) throw new Error(`gate sandbox: expected an absolute path, got ${p}`);
+  }
+  for (const port of extra.loopbackPorts) {
+    if (!Number.isInteger(port) || port < 1 || port > 65_535) {
+      throw new Error(`gate sandbox: not a loopback port: ${String(port)}`);
+    }
   }
 };
 
@@ -516,6 +529,17 @@ export const sandboxExecProfile = (
       "(allow system-socket)",
       '(allow network-outbound (remote ip "localhost:*"))',
       '(allow network-bind network-inbound (local ip "localhost:*"))',
+      ...unixSockets,
+    );
+  } else if (spec.phase === "verify" && extra.loopbackPorts.length > 0) {
+    // The visual step's app server (AD-24): its own port of the host's loopback and no other, so
+    // neither it nor the page reaches the engine API, a local database or another listener.
+    lines.push(
+      "(allow system-socket)",
+      ...[...new Set(extra.loopbackPorts)].flatMap((port) => [
+        `(allow network-outbound (remote ip "localhost:${String(port)}"))`,
+        `(allow network-bind network-inbound (local ip "localhost:${String(port)}"))`,
+      ]),
       ...unixSockets,
     );
   } else if (spec.phase === "verify") {
@@ -944,6 +968,8 @@ export interface JailedRequest extends ExecRequest {
   readonly phase: GatePhase;
   /** Verify phase: the loopback is reachable (gates.yml `sandbox.verify_loopback`, D-av). */
   readonly loopback?: boolean;
+  /** Verify phase: only these loopback ports are reachable ({@link GateJailSpec.loopbackPorts}). */
+  readonly loopbackPorts?: readonly number[];
   /** Absolute checkout the command may write. */
   readonly checkout: string;
   /**
@@ -1026,7 +1052,7 @@ export class GateCommandJail {
   async run(jailed: JailedRequest): Promise<JailedResult> {
     if (this.broken !== null) throw new Error(this.broken);
     const { home, tempDir } = this.dirs();
-    const { allowRead: extraRead, setup, ...rest } = jailed;
+    const { allowRead: extraRead, setup, loopbackPorts, ...rest } = jailed;
     setup?.(tempDir);
     const request = {
       ...rest,
@@ -1043,6 +1069,9 @@ export class GateCommandJail {
       reapSentinel: this.sentinel,
       resolvConf: this.resolvConf,
       ...(request.loopback === true && request.phase === "verify" ? { loopback: true } : {}),
+      ...(loopbackPorts !== undefined && loopbackPorts.length > 0 && request.phase === "verify"
+        ? { loopbackPorts }
+        : {}),
     };
     const wrapped = this.sandbox.wrap(request.argv, spec);
     const reaper = isReaped(wrapped);

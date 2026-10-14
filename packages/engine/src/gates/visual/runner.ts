@@ -8,10 +8,27 @@
  * verifies under the key (which the runner deleted before starting the app), and an image only
  * when it matches the SHA-256 the signed result records for it; anything else fails the step as
  * gate infrastructure. Tests inject a fake {@link VisualRunner} and never start a browser.
+ *
+ * The runner itself must stay out of the app server's reach (reading 124), since code running in
+ * it could sign anything: Node runs with `--disable-sigusr1`, so a signal from the app cannot
+ * open the inspector; the app runs in a session and process group of its own; the interpreter is
+ * an absolute `node` outside the repository ({@link resolveNodeExecutable}), never one the
+ * checkout supplies; and on Linux, where a same-user process may read another's memory through
+ * ptrace unless Yama restricts it to descendants, a render with an app server runs only with
+ * `kernel.yama.ptrace_scope` 1 or higher ({@link LINUX_PTRACE_REFUSAL}).
  */
 import { createHash, createHmac, randomBytes, timingSafeEqual } from "node:crypto";
-import { lstatSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
-import { join } from "node:path";
+import {
+  accessSync,
+  constants,
+  lstatSync,
+  mkdirSync,
+  readFileSync,
+  realpathSync,
+  statSync,
+  writeFileSync,
+} from "node:fs";
+import { delimiter, isAbsolute, join, relative, sep } from "node:path";
 import type { GateCommandJail } from "../sandbox.js";
 import {
   MAX_RUNNER_BODY,
@@ -32,8 +49,11 @@ export interface VisualRunnerCall {
   readonly input: Omit<RunnerInput, "out_dir">;
   /** Absolute directories the script must read (Playwright's browser store or cache). */
   readonly allowRead: readonly string[];
-  /** The app server listens on the loopback. */
-  readonly loopback: boolean;
+  /**
+   * The loopback port the app server listens on (the only one the sandbox opens), or `null`: no
+   * socket at all (the probe).
+   */
+  readonly loopbackPort: number | null;
   /** The scrubbed gate environment, plus `PLAYWRIGHT_BROWSERS_PATH`. */
   readonly env: Readonly<Record<string, string>>;
   /** Absolute verification checkout (the command's working directory). */
@@ -102,22 +122,98 @@ const openEnvelope = (raw: Uint8Array, key: Buffer): { body: string } | { reason
   return { body: envelope.data.body };
 };
 
+/** The Node flag that keeps a signal from opening the runner's inspector (Node 22.14 or later). */
+export const DISABLE_SIGUSR1 = "--disable-sigusr1";
+
+/** Why no render runs on a Linux host whose ptrace policy lets the app server reach the runner. */
+export const LINUX_PTRACE_REFUSAL =
+  "the visual step does not render on this Linux host: kernel.yama.ptrace_scope is 0 or absent, so the app server (project code in the runner's sandbox, as the same user) could attach to the runner and sign any result; set kernel.yama.ptrace_scope to 1 or higher (sysctl) to run it";
+
+/** Why no runner runs without an interpreter VTC can trust. */
+export const NO_RUNNER_NODE =
+  "no node executable for the visual runner: none was found on an absolute PATH entry outside the repository (a relative PATH entry, or one inside the checkout, would let the change under review supply it)";
+
+const inside = (root: string, path: string): boolean => {
+  const rel = relative(root, path);
+  return rel === "" || (!rel.startsWith(`..${sep}`) && rel !== ".." && !isAbsolute(rel));
+};
+
+const realOrNull = (path: string): string | null => {
+  try {
+    return realpathSync(path);
+  } catch {
+    return null;
+  }
+};
+
+/**
+ * The absolute `node` the visual runner runs with: the first executable `node` on an absolute
+ * `PATH` entry that, followed through symbolic links, lies outside every one of `exclude` (the
+ * repository and the verification checkout). `null` when there is none.
+ */
+export const resolveNodeExecutable = (
+  path: string | undefined,
+  exclude: readonly string[],
+): string | null => {
+  const roots = exclude.flatMap((root) => [root, realOrNull(root) ?? root]);
+  const outside = (p: string): boolean => !roots.some((root) => inside(root, p));
+  for (const dir of (path ?? "").split(delimiter)) {
+    if (dir === "" || !isAbsolute(dir) || !outside(dir)) continue;
+    const candidate = join(dir, "node");
+    const real = realOrNull(candidate);
+    if (real === null || !outside(real)) continue;
+    try {
+      if (!statSync(real).isFile()) continue;
+      accessSync(real, constants.X_OK);
+    } catch {
+      continue;
+    }
+    return candidate;
+  }
+  return null;
+};
+
+/** `kernel.yama.ptrace_scope` of this host, or `null` when the kernel has no Yama. */
+const readPtraceScope = (): string | null => {
+  try {
+    return readFileSync("/proc/sys/kernel/yama/ptrace_scope", "utf8").trim();
+  } catch {
+    return null;
+  }
+};
+
+export interface SandboxedVisualRunnerOptions {
+  /** Absolute interpreter ({@link resolveNodeExecutable}); `null`: none found, nothing runs. */
+  readonly node: string | null;
+  readonly noSandbox: string;
+  /** Test seams: the host platform and its ptrace policy. */
+  readonly platform?: NodeJS.Platform;
+  readonly ptraceScope?: () => string | null;
+}
+
 /** The runner in the gate sandbox; `jail` is `null` when there is no sandbox (nothing runs). */
 export const sandboxedVisualRunner = (
   jail: GateCommandJail | null,
-  options: { readonly node: string; readonly noSandbox: string },
+  options: SandboxedVisualRunnerOptions,
 ): VisualRunner => ({
   run: async (call) => {
     if (jail === null) return { ok: false, reason: options.noSandbox };
+    const node = options.node;
+    if (node === null || !isAbsolute(node)) return { ok: false, reason: NO_RUNNER_NODE };
+    if (call.input.app !== null && (options.platform ?? process.platform) === "linux") {
+      const scope = Number((options.ptraceScope ?? readPtraceScope)() ?? "0");
+      if (!(scope >= 1)) return { ok: false, reason: LINUX_PTRACE_REFUSAL };
+    }
     const key = randomBytes(32);
     let exec;
     try {
       exec = await jail.run({
         phase: "verify",
-        ...(call.loopback ? { loopback: true } : {}),
+        ...(call.loopbackPort === null ? {} : { loopbackPorts: [call.loopbackPort] }),
         checkout: call.checkout,
         argv: [
-          options.node,
+          node,
+          DISABLE_SIGUSR1,
           `{tmp}/${RUNNER_SCRIPT_FILE}`,
           `{tmp}/${RUNNER_INPUT_FILE}`,
           `{tmp}/${RUNNER_RESULT_FILE}`,
@@ -155,6 +251,12 @@ export const sandboxedVisualRunner = (
     }
     // Envelope overhead: the body is a JSON string inside JSON (escaped quotes double at most).
     const raw = readPlain(join(exec.tempDir, RUNNER_RESULT_FILE), 2 * MAX_RUNNER_BODY + 4096);
+    if (raw === null && exec.tail.includes(`bad option: ${DISABLE_SIGUSR1}`)) {
+      return {
+        ok: false,
+        reason: `the visual runner needs Node 22.14 or later (for ${DISABLE_SIGUSR1}, which keeps the app server from opening its inspector): ${exec.tail.slice(-300)}`,
+      };
+    }
     if (raw === null) {
       return {
         ok: false,
