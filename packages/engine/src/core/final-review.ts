@@ -41,6 +41,7 @@ import {
   emitGateResult,
   finalReviewRequest,
   gateReportFindings,
+  infraDetail,
   parkFeature,
   reopenOwningTasks,
   riskyFinding,
@@ -1030,7 +1031,7 @@ export const startFinalReview = (k: Kernel, h: RunHandle, featureId: string): vo
           h,
           featureId,
           "gate_infra",
-          `Final Review gates could not run: ${(error instanceof Error ? error.message : String(error)).slice(0, 500)}`,
+          infraDetail("Final Review gates could not run", error),
           [],
         );
         return Promise.resolve();

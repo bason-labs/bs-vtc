@@ -44,6 +44,7 @@ import type { Kernel, RunHandle } from "./kernel.js";
 import { effectiveVerdict } from "./gate-verdict.js";
 import { assertFeatureTransition } from "./machines.js";
 import { parkTask, setTaskStatus } from "./parking.js";
+import { PROJECT_GATES_PARK_PREFIX } from "./state.js";
 import {
   lastBuilt,
   lastQaAuthor,
@@ -149,6 +150,22 @@ export const gatesAt = (k: Kernel, commit: string): Promise<CommittedGates | nul
 };
 
 /**
+ * {@link baselineGates}'s refusal: the project's committed `gates.yml` at the base is missing or
+ * not the run's. The park it causes is a project problem, not VTC's ({@link infraDetail}).
+ */
+export class BaselineGatesError extends Error {}
+
+/**
+ * A `gate_infra` park's detail for an error caught while gates ran: one {@link baselineGates}
+ * refused opens with {@link PROJECT_GATES_PARK_PREFIX} (a project problem, reading 190); any other
+ * is `<what>: <error>` (VTC's own defect).
+ */
+export const infraDetail = (what: string, error: unknown): string =>
+  error instanceof BaselineGatesError
+    ? `${PROJECT_GATES_PARK_PREFIX} ${what}: ${message(error)}`
+    : `${what}: ${message(error)}`;
+
+/**
  * The `gates.yml` committed at a gate run's base (spine §5 reading 46f), checked against the one
  * the run started with (reading 20): the Gate Runner reads the same file at `base`. A run always
  * starts with one (`start` refuses otherwise, reading 78). Throws with the reason the task or
@@ -163,7 +180,7 @@ export const baselineGates = async (
 ): Promise<CommittedGates> => {
   const committed = await gatesAt(k, base);
   if (committed === null)
-    throw new Error(
+    throw new BaselineGatesError(
       `the baseline ${base.slice(0, 12)} has no committed ${GATES_CONFIG_PATH}, though a run starts only with one; a task's baseline is fixed, so drop the task or start a new run`,
     );
   const frozen = k.gatesConfigHash();
@@ -172,7 +189,7 @@ export const baselineGates = async (
       ? pipelineConfigHash(k.config(), committed.config) === h.state.run.pipeline_config_hash
       : frozen === committed.sha256;
   if (!same)
-    throw new Error(
+    throw new BaselineGatesError(
       `${GATES_CONFIG_PATH} at the baseline ${base.slice(0, 12)} (${committed.sha256.slice(0, 12)}) is not the one this run started with${frozen === null ? "" : ` (${frozen.slice(0, 12)})`}; a run verifies only with the config it started with`,
     );
   return committed;
@@ -416,7 +433,7 @@ export const startBaseCheck = (
       });
     } catch (error) {
       await k.serial(h, () => {
-        parkInfra(k, h, taskId, `the base-fail check could not run: ${message(error)}`);
+        parkInfra(k, h, taskId, infraDetail("the base-fail check could not run", error));
         return Promise.resolve();
       });
       return;
@@ -576,7 +593,7 @@ export const startRoundGates = (k: Kernel, h: RunHandle, taskId: string, head: s
       }
     } catch (error) {
       await k.serial(h, () => {
-        parkInfra(k, h, taskId, `the gates could not run: ${message(error)}`);
+        parkInfra(k, h, taskId, infraDetail("the gates could not run", error));
         return Promise.resolve();
       });
       return;
@@ -985,7 +1002,7 @@ export const startMergeQueue = (k: Kernel, h: RunHandle): void => {
         await mergeOne(k, h, next.id);
       } catch (error) {
         await k.serial(h, () => {
-          parkInfra(k, h, next.id, `the merge queue failed: ${message(error)}`);
+          parkInfra(k, h, next.id, infraDetail("the merge queue failed", error));
           return Promise.resolve();
         });
       }

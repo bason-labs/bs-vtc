@@ -22,7 +22,9 @@ import {
   createReadModel,
   type RunState,
 } from "../../src/core/index.js";
-import { emptyRunState } from "../../src/core/state.js";
+import { parkEscalation } from "../../src/core/escalations.js";
+import { BaselineGatesError, infraDetail } from "../../src/core/jobs.js";
+import { emptyRunState, PROJECT_GATES_PARK_PREFIX } from "../../src/core/state.js";
 
 let seq = 0;
 const ev = (
@@ -145,13 +147,85 @@ describe("automation triggers (D-bv)", () => {
       ["project", "parked", undefined],
       ["upstream", "defect", "engine.stuck_loop"],
     ]);
-    expect(facts(park("gate_infra"))).toEqual([["project", "parked", undefined]]);
+    // decided by its escalation, which carries the engine's detail (below)
+    expect(facts(park("gate_infra"))).toEqual([]);
     expect(facts(park("budget"))).toEqual([]);
     expect(facts(park("risk_rule"))).toEqual([]);
     // a role's question for the human, or an in-session dispatch refused on the local setup:
     // routine human escalations, never an issue in the project's repo
     expect(facts(park("blocked"))).toEqual([]);
     expect(facts(park("spec_question"))).toEqual([]);
+  });
+
+  it("a gate_infra park is VTC's own defect unless the project's committed gates.yml is the cause", () => {
+    const opened = (scope: { task?: string; feature?: string }, detail: string) =>
+      ev(
+        "escalation.opened",
+        {
+          escalation: parkEscalation({
+            id: "E-1",
+            run: "r1",
+            ...scope,
+            reason: "gate_infra",
+            detail,
+            evidence: [],
+            blocks: scope.task === undefined ? [] : [scope.task],
+            now: new Date("2026-10-14T10:00:00.000Z"),
+          }),
+        },
+        scope,
+      );
+    const vtc = [["upstream", "defect", "incident.gate_infra"]];
+    // VTC's or the machine's infrastructure: worktree, merge queue, gate sandbox, browser pin
+    expect(facts(opened({ task: "T-1" }, "could not create the task worktree: EACCES"))).toEqual(
+      vtc,
+    );
+    expect(
+      facts(opened({ task: "T-1" }, "the merge commit is not the gated commit on the gated base")),
+    ).toEqual(vtc);
+    expect(
+      facts(opened({ feature: "F-1" }, "Final Review gates failed for infrastructure reasons")),
+    ).toEqual(vtc);
+    // one fingerprint for every run: the upstream defect names no run, task or project path
+    const defect = automationFacts(stateWith(), opened({ task: "T-1" }, "x"))[0];
+    expect(defect).toMatchObject({ task: "T-1", errorClass: "incident.gate_infra" });
+    expect(defect?.ruleId).toBeUndefined();
+    // the project's gates.yml: a project issue in its own repo, one per run
+    const project = automationFacts(
+      stateWith(),
+      opened({ task: "T-1" }, infraDetail("the gates could not run", new BaselineGatesError("no"))),
+    );
+    expect(project.map((f) => [f.target, f.kind, f.ruleId])).toEqual([
+      ["project", "parked", "parked/gates_config/r1"],
+    ]);
+    // the prefix is the engine's, at the start of its detail; mid-text it decides nothing
+    expect(
+      facts(opened({ task: "T-1" }, `the gates could not run: ${PROJECT_GATES_PARK_PREFIX} x`)),
+    ).toEqual(vtc);
+    expect(infraDetail("the gates could not run", new Error("spawn ENOENT"))).toBe(
+      "the gates could not run: spawn ENOENT",
+    );
+    // any other escalation raises nothing here
+    expect(
+      facts(
+        ev(
+          "escalation.opened",
+          {
+            escalation: parkEscalation({
+              id: "E-2",
+              run: "r1",
+              task: "T-1",
+              reason: "budget",
+              detail: "the task's budget is spent",
+              evidence: [],
+              blocks: ["T-1"],
+              now: new Date("2026-10-14T10:00:00.000Z"),
+            }),
+          },
+          { task: "T-1" },
+        ),
+      ),
+    ).toEqual([]);
   });
 
   it("project side: red post-merge CI, reverts, escaped defects, out-of-scope findings", () => {

@@ -44,6 +44,14 @@ export const SUPERSEDED_RUN_PREFIX = "superseded:";
 export const PARSE_FAILURE_PREFIX = "unparsed:";
 
 /**
+ * How the engine's own detail of a `gate_infra` park starts when the cause is the project's
+ * committed `gates.yml` (none at the base, or not the one the run started with: `baselineGates`):
+ * the one `gate_infra` park VTC reports as a project problem rather than its own defect (reading
+ * 190). Only the engine writes a `gate_infra` detail, and it puts this first.
+ */
+export const PROJECT_GATES_PARK_PREFIX = "project gates.yml:";
+
+/**
  * A failure message a Lead or a host supplied, as the engine logs it: one that opens like one of
  * the engine's own ({@link SUPERSEDED_RUN_PREFIX}, {@link PARSE_FAILURE_PREFIX}) is prefixed
  * `reported: `, so a role or host can never mark its own run stopped, nor word its failure into an
