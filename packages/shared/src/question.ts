@@ -9,7 +9,10 @@ import { EvidenceSchema, IsoDateTimeSchema, SlugSchema } from "./primitives.js";
 
 /**
  * What choosing an option does (§6.5 typical answers). `clarify` answers a spec question;
- * `approve_change` / `reject_change` decide a change request (§6.2).
+ * `approve_change` / `reject_change` decide a change request (§6.2). `finish_level_2` answers a
+ * Level-3 park (AD-23): VTC turns off any auto-merge it enabled, leaves the PR open for the
+ * human's review and ends the run, as at Level 2 (spine §5 readings 115 and 158, D-bd; new in
+ * 4.10.0). Only a feature parked at Level-3 release offers it.
  */
 export const EscalationEffectSchema = z.enum([
   "waive",
@@ -21,6 +24,7 @@ export const EscalationEffectSchema = z.enum([
   "clarify",
   "approve_change",
   "reject_change",
+  "finish_level_2",
 ]);
 export type EscalationEffect = z.infer<typeof EscalationEffectSchema>;
 

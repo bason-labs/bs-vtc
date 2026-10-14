@@ -18,7 +18,7 @@ import type { EngineDiscovery } from "../engine-instance.js";
 import type { CONTRACT_SCHEMAS } from "../json-schema.js";
 import type { HostId } from "../primitives.js";
 import type { ModelPrice } from "../project-config.js";
-import type { FetcherId } from "../research.js";
+import type { FetcherId, SearchProvider } from "../research.js";
 import type { AssetBundle } from "./assets.js";
 import type { AutoResumeScheduler } from "./auto-resume.js";
 import type { GateRunner } from "./gate-runner.js";
@@ -74,6 +74,12 @@ export interface EngineDeps {
    * builds it; absent: no fetcher sends a key. New in 4.6.0.
    */
   readonly researchApiKey?: (fetcher: FetcherId) => string | undefined;
+  /**
+   * The keyed provider the `search` fetcher may use, from `~/.vtc/config.yaml`
+   * `research.search_provider` (H-3, spine §5 reading 156). Absent (the default): the `search`
+   * fetcher sends nothing and answers unavailable, naming the host's own web search. New in 4.10.0.
+   */
+  readonly researchSearchProvider?: SearchProvider;
   /**
    * The price table of `~/.vtc/config.yaml` `prices` (§11, H-1; spine §5 reading 152): model id →
    * list price. The cli reads it; absent or empty: no model is priced, so a host that reports no

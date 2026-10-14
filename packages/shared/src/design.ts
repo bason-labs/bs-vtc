@@ -68,9 +68,10 @@ export const prototypeStatePath = (route: string, state: string, theme: Prototyp
  * component specs (artifact type `component_specs`, which name the screens each component is used
  * on) against the component registry. `ok` = every requirement is mapped to a component, every UI
  * requirement has a screen, every screen covers a requirement, every component the specs use is
- * registered, and a UI run's `screens.yaml` is there and valid. A G2 approval is refused while
- * `ok` is false (spine §5 reading 146). New in 4.5.0; `reqs_without_component` and
- * `screens_problem` new in 4.8.0.
+ * registered, a UI run's `screens.yaml` is there and valid, and a new-repo UI design offers
+ * {@link G2_DIRECTIONS} directions. A G2 approval is refused while `ok` is false (spine §5
+ * reading 146). New in 4.5.0; `reqs_without_component` and `screens_problem` new in 4.8.0;
+ * `directions_problem` new in 4.10.0.
  */
 export const DesignCoverageReportSchema = z
   .strictObject({
@@ -81,6 +82,12 @@ export const DesignCoverageReportSchema = z
     components_unregistered: z.array(SlugSchema).default([]),
     /** A UI run's `screens.yaml` is missing or invalid (then no screen list is checked). 4.8.0. */
     screens_problem: z.string().min(1).max(300).optional(),
+    /**
+     * A new-repo UI design (`repo: new`, `has_ui`) with fewer than `G2_DIRECTIONS.min` distinct
+     * `design_direction` artifacts after the Designer's one re-dispatch: G2 shows it as a
+     * blocking notice (spine §5 reading 174, D-bt). New in 4.10.0.
+     */
+    directions_problem: z.string().min(1).max(300).optional(),
     ok: z.boolean(),
   })
   .refine(
@@ -90,13 +97,22 @@ export const DesignCoverageReportSchema = z
         r.reqs_without_screen.length === 0 &&
         r.screens_without_req.length === 0 &&
         r.components_unregistered.length === 0 &&
-        r.screens_problem === undefined),
+        r.screens_problem === undefined &&
+        r.directions_problem === undefined),
     {
       message: "ok is true exactly when every list is empty and screens.yaml is usable",
       path: ["ok"],
     },
   );
 export type DesignCoverageReport = z.infer<typeof DesignCoverageReportSchema>;
+
+/**
+ * How many design directions G2 offers on a new-repo UI design (§9.1 steps 3 and 5; spine §5
+ * reading 174, D-bt). Fewer than `min`: the engine re-dispatches the Designer once, then G2
+ * shows `DesignCoverageReport.directions_problem` and refuses an approval. More than `max` are
+ * cut. New in 4.10.0.
+ */
+export const G2_DIRECTIONS = { min: 2, max: 3 } as const;
 
 /**
  * One of the 2–3 design directions G2 offers (§9.1 steps 3–5): its first-viewport prototype, a

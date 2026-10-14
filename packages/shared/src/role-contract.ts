@@ -66,8 +66,23 @@ export const RoleToolsSchema = z
     write_paths: z.array(WriteScopeGlobSchema).default([]),
     /** Engine MCP tools the role may call (e.g. research fetchers, fact lookups). */
     engine_tools: z.array(SlugSchema).default([]),
+    /**
+     * The role may use its host's own web search and page fetch in its role session (H-3, spine
+     * §5 reading 156; AD-22 rule 6): Claude Code `WebSearch` and `WebFetch`, Codex web search.
+     * Absent or false: the role reaches the web only through engine tools, as before. Never with
+     * `code_sandboxed` (a role that runs code gets no direct web). Only the Research Analyst
+     * ships with it. New in 4.10.0.
+     */
+    host_web: z.boolean().optional(),
   })
   .superRefine((tools, ctx) => {
+    if (tools.host_web === true && tools.profile === "code_sandboxed") {
+      ctx.addIssue({
+        code: "custom",
+        path: ["host_web"],
+        message: "a code_sandboxed role gets no host web tools",
+      });
+    }
     if (tools.profile === "write_scoped" && tools.write_paths.length === 0) {
       ctx.addIssue({
         code: "custom",

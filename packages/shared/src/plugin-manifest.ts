@@ -47,6 +47,19 @@ export const rolePromptAssetPath = (agent: string, part: RolePromptPart): string
  */
 export const promptShaFor = (instructions: string): string => sha256Hex(instructions);
 
+/**
+ * Pure (AD-21 rule 1; spine §5 reading 172, D-br): the locked section of an engineer profile's
+ * prompt identity, as its `locked_sha256` hashes it (trimmed) and its plugin asset
+ * (`rolePromptAssetPath(<agent>, "locked")`) carries it: the Engineer's whole compiled prompt
+ * (locked core, then editable section, both trimmed), then the profile's own locked core,
+ * separated by blank lines. The profile's editable section stays only its own, so a profile's
+ * Lookback proposal never forks the Engineer's heuristics. New in 4.10.0.
+ */
+export const engineerProfileLockedSection = (
+  engineer: { readonly locked: string; readonly editable: string },
+  profileLocked: string,
+): string => [engineer.locked.trim(), engineer.editable.trim(), profileLocked.trim()].join("\n\n");
+
 const SemverSchema = z.string().regex(/^\d+\.\d+\.\d+$/, "expected semver MAJOR.MINOR.PATCH");
 
 /** What a compiled skill is, for the engine's pack selection (§5.2a, §5.3). */
@@ -77,9 +90,11 @@ export const PluginManifestAgentSchema = z
     prompt_sha256: Sha256HexSchema,
     /**
      * Lookback (AD-21, new in 4.5.0): SHA-256 of the trimmed `splitRolePrompt` sections of the
-     * agent's own role prompt (`roles/<role>/prompt.md`; an engineer profile's own sections, not
-     * the Engineer's), `locked` and `editable`; every mode of a role shares them (spine §5
-     * reading 118). The plugin carries both texts at {@link rolePromptAssetPath}. Once an agent
+     * agent's own role prompt (`roles/<role>/prompt.md`), `locked` and `editable`; every mode of a
+     * role shares them (spine §5 reading 118). For an engineer profile the locked section is
+     * {@link engineerProfileLockedSection}: the Engineer base prompt the profile carries, then the
+     * profile's own locked core, so an Engineer prompt change is a new version of every profile
+     * (spine §5 reading 172, D-br, 4.10.0); its editable section is only its own. The plugin carries both texts at {@link rolePromptAssetPath}. Once an agent
      * compiles from the locked part only (`editable_in_pack`), the engine renders the pinned
      * editable section first in the task pack and the prompt version is
      * `effectivePromptSha(locked, editable)`.

@@ -1,5 +1,5 @@
 {
-  "contracts_version": "4.9.0",
+  "contracts_version": "4.10.0",
   "schemas": {
     "Run": {
       "$id": "https://vtc.local/schemas/Run.json",
@@ -1706,7 +1706,8 @@
                   "retry",
                   "clarify",
                   "approve_change",
-                  "reject_change"
+                  "reject_change",
+                  "finish_level_2"
                 ]
               },
               "budget_factor": {
@@ -1881,7 +1882,8 @@
                   "retry",
                   "clarify",
                   "approve_change",
-                  "reject_change"
+                  "reject_change",
+                  "finish_level_2"
                 ]
               },
               "budget_factor": {
@@ -2637,6 +2639,11 @@
                   }
                 },
                 "screens_problem": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 300
+                },
+                "directions_problem": {
                   "type": "string",
                   "minLength": 1,
                   "maxLength": 300
@@ -5093,7 +5100,8 @@
                           "retry",
                           "clarify",
                           "approve_change",
-                          "reject_change"
+                          "reject_change",
+                          "finish_level_2"
                         ]
                       },
                       "budget_factor": {
@@ -5534,6 +5542,20 @@
                     ],
                     "additionalProperties": false
                   }
+                },
+                "billing": {
+                  "anyOf": [
+                    {
+                      "type": "string",
+                      "enum": [
+                        "subscription",
+                        "api_key"
+                      ]
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ]
                 },
                 "updated_at": {
                   "anyOf": [
@@ -6589,6 +6611,33 @@
                     }
                   ]
                 },
+                "reported_source": {
+                  "type": "object",
+                  "properties": {
+                    "url": {
+                      "type": "string",
+                      "maxLength": 2048,
+                      "format": "uri"
+                    },
+                    "via": {
+                      "type": "string",
+                      "enum": [
+                        "host_search",
+                        "host_fetch"
+                      ]
+                    },
+                    "query": {
+                      "type": "string",
+                      "minLength": 1,
+                      "maxLength": 500
+                    }
+                  },
+                  "required": [
+                    "url",
+                    "via"
+                  ],
+                  "additionalProperties": false
+                },
                 "pinned_version": {
                   "type": "string",
                   "minLength": 1,
@@ -7444,7 +7493,8 @@
                             "retry",
                             "clarify",
                             "approve_change",
-                            "reject_change"
+                            "reject_change",
+                            "finish_level_2"
                           ]
                         },
                         "budget_factor": {
@@ -8137,7 +8187,8 @@
                             "retry",
                             "clarify",
                             "approve_change",
-                            "reject_change"
+                            "reject_change",
+                            "finish_level_2"
                           ]
                         },
                         "budget_factor": {
@@ -8568,7 +8619,8 @@
                           "retry",
                           "clarify",
                           "approve_change",
-                          "reject_change"
+                          "reject_change",
+                          "finish_level_2"
                         ]
                       },
                       "budget_factor": {
@@ -8934,7 +8986,8 @@
                             "retry",
                             "clarify",
                             "approve_change",
-                            "reject_change"
+                            "reject_change",
+                            "finish_level_2"
                           ]
                         },
                         "budget_factor": {
@@ -9647,7 +9700,8 @@
                             "retry",
                             "clarify",
                             "approve_change",
-                            "reject_change"
+                            "reject_change",
+                            "finish_level_2"
                           ]
                         },
                         "budget_factor": {
@@ -10342,6 +10396,9 @@
                 "type": "string",
                 "pattern": "^[a-z0-9][a-z0-9._-]{0,63}$"
               }
+            },
+            "host_web": {
+              "type": "boolean"
             }
           },
           "required": [
@@ -10436,6 +10493,9 @@
                       "type": "string",
                       "pattern": "^[a-z0-9][a-z0-9._-]{0,63}$"
                     }
+                  },
+                  "host_web": {
+                    "type": "boolean"
                   }
                 },
                 "required": [
@@ -12845,6 +12905,13 @@
                 "type": "string",
                 "pattern": "^[A-Za-z_][A-Za-z0-9_]{0,127}$"
               }
+            },
+            "search_provider": {
+              "type": "string",
+              "enum": [
+                "tavily",
+                "exa"
+              ]
             }
           },
           "additionalProperties": false
@@ -14858,6 +14925,20 @@
             "additionalProperties": false
           }
         },
+        "billing": {
+          "anyOf": [
+            {
+              "type": "string",
+              "enum": [
+                "subscription",
+                "api_key"
+              ]
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
         "updated_at": {
           "anyOf": [
             {
@@ -15007,6 +15088,20 @@
                   ],
                   "additionalProperties": false
                 }
+              },
+              "billing": {
+                "anyOf": [
+                  {
+                    "type": "string",
+                    "enum": [
+                      "subscription",
+                      "api_key"
+                    ]
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
               },
               "updated_at": {
                 "anyOf": [
@@ -16540,6 +16635,11 @@
                   "minLength": 1,
                   "maxLength": 300
                 },
+                "directions_problem": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 300
+                },
                 "ok": {
                   "type": "boolean"
                 }
@@ -16940,6 +17040,11 @@
                         "minLength": 1,
                         "maxLength": 300
                       },
+                      "directions_problem": {
+                        "type": "string",
+                        "minLength": 1,
+                        "maxLength": 300
+                      },
                       "ok": {
                         "type": "boolean"
                       }
@@ -17335,7 +17440,8 @@
                                     "retry",
                                     "clarify",
                                     "approve_change",
-                                    "reject_change"
+                                    "reject_change",
+                                    "finish_level_2"
                                   ]
                                 },
                                 "budget_factor": {
@@ -18028,7 +18134,8 @@
                                     "retry",
                                     "clarify",
                                     "approve_change",
-                                    "reject_change"
+                                    "reject_change",
+                                    "finish_level_2"
                                   ]
                                 },
                                 "budget_factor": {
@@ -18459,7 +18566,8 @@
                                   "retry",
                                   "clarify",
                                   "approve_change",
-                                  "reject_change"
+                                  "reject_change",
+                                  "finish_level_2"
                                 ]
                               },
                               "budget_factor": {
@@ -18825,7 +18933,8 @@
                                     "retry",
                                     "clarify",
                                     "approve_change",
-                                    "reject_change"
+                                    "reject_change",
+                                    "finish_level_2"
                                   ]
                                 },
                                 "budget_factor": {
@@ -19538,7 +19647,8 @@
                                     "retry",
                                     "clarify",
                                     "approve_change",
-                                    "reject_change"
+                                    "reject_change",
+                                    "finish_level_2"
                                   ]
                                 },
                                 "budget_factor": {
@@ -20738,6 +20848,11 @@
                         "minLength": 1,
                         "maxLength": 300
                       },
+                      "directions_problem": {
+                        "type": "string",
+                        "minLength": 1,
+                        "maxLength": 300
+                      },
                       "ok": {
                         "type": "boolean"
                       }
@@ -21450,6 +21565,20 @@
                       "additionalProperties": false
                     }
                   },
+                  "billing": {
+                    "anyOf": [
+                      {
+                        "type": "string",
+                        "enum": [
+                          "subscription",
+                          "api_key"
+                        ]
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ]
+                  },
                   "updated_at": {
                     "anyOf": [
                       {
@@ -21672,7 +21801,8 @@
                         "retry",
                         "clarify",
                         "approve_change",
-                        "reject_change"
+                        "reject_change",
+                        "finish_level_2"
                       ]
                     },
                     "budget_factor": {
@@ -24216,7 +24346,8 @@
                         "retry",
                         "clarify",
                         "approve_change",
-                        "reject_change"
+                        "reject_change",
+                        "finish_level_2"
                       ]
                     },
                     "budget_factor": {
@@ -25056,6 +25187,20 @@
             }
           ]
         },
+        "billing": {
+          "anyOf": [
+            {
+              "type": "string",
+              "enum": [
+                "subscription",
+                "api_key"
+              ]
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
         "checked_at": {
           "type": "string",
           "format": "date-time",
@@ -25508,6 +25653,11 @@
           }
         },
         "screens_problem": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 300
+        },
+        "directions_problem": {
           "type": "string",
           "minLength": 1,
           "maxLength": 300
@@ -27553,6 +27703,33 @@
             }
           ]
         },
+        "reported_source": {
+          "type": "object",
+          "properties": {
+            "url": {
+              "type": "string",
+              "maxLength": 2048,
+              "format": "uri"
+            },
+            "via": {
+              "type": "string",
+              "enum": [
+                "host_search",
+                "host_fetch"
+              ]
+            },
+            "query": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 500
+            }
+          },
+          "required": [
+            "url",
+            "via"
+          ],
+          "additionalProperties": false
+        },
         "pinned_version": {
           "type": "string",
           "minLength": 1,
@@ -28180,6 +28357,33 @@
                   }
                 ]
               },
+              "reported_source": {
+                "type": "object",
+                "properties": {
+                  "url": {
+                    "type": "string",
+                    "maxLength": 2048,
+                    "format": "uri"
+                  },
+                  "via": {
+                    "type": "string",
+                    "enum": [
+                      "host_search",
+                      "host_fetch"
+                    ]
+                  },
+                  "query": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 500
+                  }
+                },
+                "required": [
+                  "url",
+                  "via"
+                ],
+                "additionalProperties": false
+              },
               "pinned_version": {
                 "type": "string",
                 "minLength": 1,
@@ -28571,6 +28775,33 @@
             }
           ]
         },
+        "reported_source": {
+          "type": "object",
+          "properties": {
+            "url": {
+              "type": "string",
+              "maxLength": 2048,
+              "format": "uri"
+            },
+            "via": {
+              "type": "string",
+              "enum": [
+                "host_search",
+                "host_fetch"
+              ]
+            },
+            "query": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 500
+            }
+          },
+          "required": [
+            "url",
+            "via"
+          ],
+          "additionalProperties": false
+        },
         "pinned_version": {
           "type": "string",
           "minLength": 1,
@@ -28738,6 +28969,33 @@
                   "type": "null"
                 }
               ]
+            },
+            "reported_source": {
+              "type": "object",
+              "properties": {
+                "url": {
+                  "type": "string",
+                  "maxLength": 2048,
+                  "format": "uri"
+                },
+                "via": {
+                  "type": "string",
+                  "enum": [
+                    "host_search",
+                    "host_fetch"
+                  ]
+                },
+                "query": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 500
+                }
+              },
+              "required": [
+                "url",
+                "via"
+              ],
+              "additionalProperties": false
             },
             "pinned_version": {
               "type": "string",

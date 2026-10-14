@@ -51,7 +51,15 @@ export const researchScopeFor = (client: string | undefined): ResearchScope =>
 
 // ------------------------------------------------------------------ fetchers
 
-/** Built-in fetchers (§8.2, §10). Host web search results are model-reported: UNVERIFIED. */
+/**
+ * Built-in fetchers (§8.2, §10). Host web search results are model-reported: UNVERIFIED.
+ *
+ * Search (H-3, spine §5 reading 156): research search runs on the host's own web search in the
+ * Research Analyst's role session (`RoleTools.host_web`), with no VTC API key and no extra bill.
+ * The `search` fetcher is an optional keyed provider with no default: it sends nothing unless
+ * `~/.vtc/config.yaml` names `research.search_provider` and the key's variable
+ * (`research.api_keys.search`); otherwise it answers unavailable and names host search.
+ */
 export const FetcherIdSchema = z.enum([
   "eol",
   "depsdev",
@@ -64,6 +72,13 @@ export const FetcherIdSchema = z.enum([
   "search",
 ]);
 export type FetcherId = z.infer<typeof FetcherIdSchema>;
+
+/**
+ * The keyed web-search providers the `search` fetcher may use when the user opts in
+ * (`UserConfig.research.search_provider`; H-3: none by default). New in 4.10.0.
+ */
+export const SearchProviderSchema = z.enum(["tavily", "exa"]);
+export type SearchProvider = z.infer<typeof SearchProviderSchema>;
 
 /** Default freshness per fetcher, in days (AD-22). Docs at a pinned version may use 30. */
 export const FETCHER_TTL_DAYS: Readonly<Record<FetcherId, number>> = {
@@ -330,6 +345,20 @@ export type FactLocator = z.infer<typeof FactLocatorSchema>;
 export const FactValueSchema = z.union([z.string().max(2000), z.number(), z.boolean(), z.null()]);
 export type FactValue = z.infer<typeof FactValueSchema>;
 
+/**
+ * How a role found a claim on its host's own web tools (H-3, spine §5 reading 156): the page URL,
+ * whether it came from a host search result or a host page fetch, and the search query. It is
+ * provenance only: the engine never fetched or hashed what the host returned, so a row whose only
+ * backing is this stays `unverified` (marked UNVERIFIED at G2) until the engine fetches the page
+ * itself (`FactProposeInput.source`, the `web` fetcher) and the locator resolves. New in 4.10.0.
+ */
+export const FactReportedSourceSchema = z.strictObject({
+  url: z.url().max(2048),
+  via: z.enum(["host_search", "host_fetch"]),
+  query: z.string().min(1).max(500).optional(),
+});
+export type FactReportedSource = z.infer<typeof FactReportedSourceSchema>;
+
 export const FactSourceSchema = z.strictObject({
   fetcher: FetcherIdSchema,
   url: z.url().max(2048),
@@ -352,6 +381,11 @@ export const FactRowSchema = z
     status: FactStatusSchema,
     /** `null` for a claim nobody could source (a model-reported claim): it stays `unverified`. */
     source: FactSourceSchema.nullable(),
+    /**
+     * Where the proposing role says it found the claim on its host's web tools
+     * ({@link FactReportedSourceSchema}); provenance, never verification. New in 4.10.0.
+     */
+    reported_source: FactReportedSourceSchema.optional(),
     pinned_version: z.string().min(1).max(64).optional(),
     expires_at: IsoDateTimeSchema.optional(),
     /** The row this one replaces (rows are superseded, never edited). */
@@ -511,6 +545,13 @@ export const FactProposeInputSchema = z.strictObject({
   predicate: z.string().min(1).max(100),
   value: FactValueSchema,
   source: z.strictObject({ request: FetchRequestSchema, locator: FactLocatorSchema }).nullable(),
+  /**
+   * Where the role found the claim with its host's web tools (H-3). With `source: null` the row
+   * records it and stays `unverified`; to verify a page found this way, the role also names it as
+   * the `source` request (`{ fetcher: "web", url }`) so the engine fetches, caches and checks it.
+   * New in 4.10.0.
+   */
+  reported_source: FactReportedSourceSchema.optional(),
   pinned_version: z.string().min(1).max(64).optional(),
 });
 export type FactProposeInput = z.infer<typeof FactProposeInputSchema>;

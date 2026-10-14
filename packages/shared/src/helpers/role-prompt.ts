@@ -3,6 +3,7 @@
  * MAJOR prompt version); the editable section is what Lookback may propose changes to (MINOR).
  * The compiler rejects a prompt whose markers are missing, repeated or out of order.
  */
+import { TASK_PACK_HEURISTICS_SECTION, TASK_PACK_SECTIONS } from "../task-pack.js";
 
 export const PROMPT_MARKERS = {
   locked: "<!-- vtc:locked -->",
@@ -53,4 +54,59 @@ export const splitRolePrompt = (text: string): RolePromptSplit => {
   if (locked === "") errors.push("the locked core is empty");
   if (editable === "") errors.push("the editable section is empty");
   return errors.length > 0 ? { ok: false, errors } : { ok: true, locked, editable };
+};
+
+/**
+ * Headings an editable section may not use: the task pack's sections and its `Role heuristics`
+ * section (the section may be rendered first in the pack, spine §5 reading 102). Moved from
+ * `@vtc/compiler` in 4.10.0 so the compiler and Lookback's proposal check enforce one rule set
+ * (spine §5 reading 175).
+ */
+export const RESERVED_EDITABLE_HEADINGS: readonly string[] = [
+  ...TASK_PACK_SECTIONS,
+  TASK_PACK_HEURISTICS_SECTION,
+];
+
+const RESERVED_HEADINGS = new Set(RESERVED_EDITABLE_HEADINGS.map((name) => name.toLowerCase()));
+const PLACEHOLDER = /\{\{[a-z_]+\}\}/;
+const HEADING = /^#{1,6}\s+(.+?)\s*#*\s*$/;
+
+/**
+ * Pure (AD-14 rule 4, AD-21): what an editable section may not contain, one message per problem
+ * and line; empty = acceptable. The section is one role-level text that a Lookback proposal
+ * replaces whole and that the engine may render into the task pack, so it compiles verbatim, the
+ * same for every mode and host:
+ * - no mode block (`<!-- vtc:mode … -->`): a proposal written for one mode's agent would drop the
+ *   other modes' blocks when it replaces the role's section (mode rules belong in the locked core);
+ * - no `{{placeholder}}`: the compiled text, its `editable_sha256` and the proposal's text would
+ *   differ from the source a promoted proposal replaces;
+ * - no heading named after a task-pack section or the pack's heuristics section
+ *   ({@link RESERVED_EDITABLE_HEADINGS}): rendered first in the pack, such a heading would blur
+ *   where the section ends and the data begins.
+ * The compiler runs it on `roles/<role>/prompt.md`; Lookback's `checkProposal` runs it on a
+ * proposed section, so a proposal that would fail the compile is refused before replay. New in
+ * 4.10.0 (it was `@vtc/compiler`'s; same messages).
+ */
+export const editableSectionErrors = (section: string): string[] => {
+  const errors: string[] = [];
+  section.split("\n").forEach((line, index) => {
+    const at = `editable section line ${String(index + 1)}`;
+    const trimmed = line.trim();
+    if (trimmed.startsWith("<!-- vtc:mode")) {
+      errors.push(
+        `${at}: no mode block in the editable section; Lookback replaces the section whole, so put mode-specific rules in the locked core`,
+      );
+    }
+    const placeholder = PLACEHOLDER.exec(line);
+    if (placeholder !== null) {
+      errors.push(
+        `${at}: no placeholder (${placeholder[0]}) in the editable section; it must compile verbatim`,
+      );
+    }
+    const heading = HEADING.exec(trimmed)?.[1];
+    if (heading !== undefined && RESERVED_HEADINGS.has(heading.toLowerCase())) {
+      errors.push(`${at}: heading "${heading}" is reserved for the task pack`);
+    }
+  });
+  return errors;
 };
