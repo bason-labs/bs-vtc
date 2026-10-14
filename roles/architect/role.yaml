@@ -7,7 +7,7 @@
 # New: the §8 method (quality-attribute scenarios, boring baseline, scorecard, robustness check),
 # AD-n with Binds/Prevents/Rule/Check, facts only from the engine's fetchers.
 id: architect
-version: 2.0.0
+version: 3.0.0
 kind: core
 mission: >-
   Decide the architecture for the approved spec: candidates, a scored recommendation and the

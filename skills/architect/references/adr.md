@@ -34,7 +34,7 @@ not settle it. Facts cite a fact row or are marked UNVERIFIED.>
 - Binds: <code, modules, artifacts>
 - Prevents: <the failure it rules out>
 - Rule: <what must hold>
-- Check: <the tool and rule that verify it>, blocking | warning
+- Check: <one `vtc-check` block per check a kind expresses, or `Check: <tool> <rule>, blocking|warn`>
 
 ## Consequences
 
@@ -55,4 +55,6 @@ not settle it. Facts cite a fact row or are marked UNVERIFIED.>
 - One decision per ADR. Two decisions are two ADRs.
 - "Keep the current spine" is always an option, so the change has to beat it.
 - An ADR is immutable once accepted; a later change is a new ADR that supersedes it.
-- The Check must be automatable; see the fitness-function reference.
+- The Check must be automatable. Write it exactly as it will sit under the AD's heading in the
+  spine: a `vtc-check` block whenever one of its kinds expresses the rule, with mode `blocking`
+  or `warn`; see the fitness-function reference for the fields and an example of each kind.

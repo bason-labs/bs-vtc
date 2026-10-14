@@ -8,7 +8,13 @@ import { fileURLToPath } from "node:url";
 import { parse as parseYaml } from "yaml";
 import { describe, expect, it } from "vitest";
 import {
+  AD_CHECK_FENCE,
+  AdCheckSpecSchema,
+  ARCHITECTURE_SPINE_PATH,
   effectivePromptSha,
+  FactLookupInputSchema,
+  FactProposeInputSchema,
+  patternProblem,
   FetcherIdSchema,
   findForbiddenInText,
   DESIGN_DIRECTIONS_DIR,
@@ -39,6 +45,7 @@ import {
   loadRoles,
   PROTOCOL_VARS,
   readSources,
+  RESERVED_EDITABLE_HEADINGS,
   rolePromptAssetPath,
   TOOL_SKILLS,
   type CompileOutput,
@@ -192,6 +199,12 @@ describe("the lookback role writes proposals only (AD-14 rule 4, AD-21 rule 4)",
     expect(oneLine(prompt)).toMatch(/not even as a prohibition/);
   });
 
+  it("is told the editable-section rules the compile enforces (editableSectionErrors)", () => {
+    expect(body()).toContain("no mode block, no `{{…}}` placeholder");
+    for (const heading of RESERVED_EDITABLE_HEADINGS)
+      expect(body(), heading).toContain(`"${heading}"`);
+  });
+
   it("reads its previous proposal and the replay result, and writes only proposals", () => {
     const role = loaded.roles.find((r) => r.role.id === "lookback")?.role;
     expect(role?.inputs).toEqual(["traces", "scorecard", "prompt_proposal", "replay_result"]);
@@ -291,6 +304,19 @@ describe("the research skills, written against ROLE_MCP_TOOLS (AD-22)", () => {
     expect(ResearchFetchInputSchema.safeParse(JSON.parse(full) as unknown).success).toBe(true);
   });
 
+  it("shows fact_propose and fact_lookup input that the frozen input schemas accept", () => {
+    const facts = source("skills/research-facts/SKILL.md");
+    const propose = /```json\n(\{\s*"subject"[\s\S]*?\})\n```/.exec(facts)?.[1] ?? "";
+    expect(FactProposeInputSchema.safeParse(JSON.parse(propose) as unknown).success).toBe(true);
+    const lookups = [...facts.matchAll(/^- By [a-z]+: `(\{.*\})`/gm)].map((m) => m[1] ?? "");
+    expect(lookups).toHaveLength(2);
+    for (const lookup of lookups) {
+      expect(FactLookupInputSchema.safeParse(JSON.parse(lookup) as unknown).success, lookup).toBe(
+        true,
+      );
+    }
+  });
+
   it("lists every fact status the engine records", () => {
     const facts = source("skills/research-facts/SKILL.md");
     for (const status of FactStatusSchema.options) expect(facts, status).toContain(`\`${status}\``);
@@ -304,6 +330,68 @@ describe("the research skills, written against ROLE_MCP_TOOLS (AD-22)", () => {
     expect(facts).toContain('{ "type": "fact", "ref": "<fact id>" }');
     expect(facts).toContain("`UNVERIFIED: <claim>`");
     for (const kind of ["json_pointer", "quote"]) expect(facts).toContain(`\`${kind}\``);
+  });
+});
+
+describe("the Architect writes machine-checkable Checks as vtc-check blocks (reading 126)", () => {
+  const KINDS = AdCheckSpecSchema.options.map((o) => o.shape.kind.value);
+  const fitness = (): string => source("skills/architect/references/fitness-functions.md");
+  /** Every `vtc-check` block body in the Architect's prompt and skill. */
+  const blocks = (): { path: string; body: string }[] =>
+    read.files
+      .filter(
+        (f) => f.path.startsWith("skills/architect/") || f.path.startsWith("roles/architect/"),
+      )
+      .flatMap((f) =>
+        [
+          ...f.text.matchAll(new RegExp(`^\`\`\`${AD_CHECK_FENCE}\n([\\s\\S]*?)\n\`\`\`$`, "gm")),
+        ].map((m) => ({ path: f.path, body: m[1] ?? "" })),
+      );
+
+  it("shows only blocks the frozen AdCheckSpec accepts, one of each kind", () => {
+    const found = blocks();
+    expect(found.length).toBeGreaterThanOrEqual(KINDS.length);
+    const kinds = new Set<string>();
+    for (const { path, body } of found) {
+      const parsed = AdCheckSpecSchema.safeParse(parseYaml(body, { uniqueKeys: true }) as unknown);
+      expect(parsed.success, `${path}:\n${body}\n${JSON.stringify(parsed.error?.issues)}`).toBe(
+        true,
+      );
+      if (parsed.success) kinds.add(parsed.data.kind);
+    }
+    expect([...kinds].sort()).toEqual([...KINDS].sort());
+  });
+
+  it("states the pattern limits the contract enforces", () => {
+    const text = oneLine(fitness());
+    for (const refused of ["(a+)+", "(a|ab)*", "(x)\\1"]) {
+      expect(patternProblem(refused), refused).not.toBeNull();
+    }
+    expect(text).toContain("`(a+)+`, `(a|ab)*`");
+    expect(text).toContain("backreference");
+    expect(text).toContain("more than two unbounded quantifiers");
+    expect(patternProblem("a*b*c*d")).not.toBeNull();
+  });
+
+  it("tells the Architect where the spine goes, the fence, the kinds and the modes", () => {
+    const body = oneLine(claudeBody("vtc-architect"));
+    expect(body).toContain(`\`${ARCHITECTURE_SPINE_PATH}\``);
+    expect(body).toContain(`\`${AD_CHECK_FENCE}\``);
+    for (const kind of KINDS) expect(body, kind).toContain(`\`${kind}\``);
+    for (const mode of ["blocking", "warn"]) {
+      expect(
+        AdCheckSpecSchema.safeParse({ kind: "forbidden-dependency", mode, packages: ["x"] })
+          .success,
+      ).toBe(true);
+      expect(body, mode).toContain(`\`${mode}\``);
+    }
+    // the contract's spelling is `warn`; "warning" would fail AdCheckSpec
+    for (const path of [
+      "roles/architect/prompt.md",
+      ...read.files.map((f) => f.path).filter((p) => p.startsWith("skills/architect/")),
+    ]) {
+      expect(source(path), path).not.toMatch(/blocking ?\| ?warning|blocking or warning/);
+    }
   });
 });
 
