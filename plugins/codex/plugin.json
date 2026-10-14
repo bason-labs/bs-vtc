@@ -1,4 +1,5 @@
 {
+  "$schema": "https://agent-plugins.org/schemas/1.0.0/plugin.schema.json",
   "name": "vtc",
   "version": "0.1.0",
   "description": "VTC: a local, gated multi-agent software delivery team driven by the vtc engine. Works with Codex."
