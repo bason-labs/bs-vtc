@@ -3,13 +3,15 @@
  * host's own sanctioned status command (`claude auth status --json`, `codex login status`). Exit 0
  * means logged in. VTC never opens a credential file or the keychain; the command's output is
  * reduced to a fixed method label here and nothing else of it (account names, masked keys) is
- * passed on. A command that cannot start, is killed or hangs leaves the state unknown (`null`),
- * never `false`.
+ * passed on, plus who pays for role runs on that login (`billing`, D-bq, spine §5 reading 171: an
+ * API-key login is allowed and shown with a warning; `null` when the output does not say). A
+ * command that cannot start, is killed or hangs leaves the state unknown (`null`), never `false`.
  */
 import { homedir } from "node:os";
 import {
   HostAuthStatusSchema,
   type HostAuthStatus,
+  type HostBilling,
   type HostCommand,
   type HostId,
 } from "@vtc/shared";
@@ -21,11 +23,13 @@ export interface AuthStatusCommand {
   readonly command: HostCommand;
   /**
    * Pure: from a finished command's output, whether it says logged out despite exit 0 (`false`),
-   * and the login method as a short label, or `null`.
+   * the login method as a short label, or `null`, and who pays for role runs on that login
+   * (`HostBilling`, D-bq), or `null` when the output does not say.
    */
   readonly read: (output: { readonly stdout: string; readonly stderr: string }) => {
     readonly loggedOut: boolean;
     readonly method: string | null;
+    readonly billing: HostBilling | null;
   };
 }
 
@@ -72,11 +76,17 @@ export const createAuthStatusRunner = (options: AuthStatusOptions) => {
   const running = new Set<SpawnedProcess>();
   return {
     async check(status: AuthStatusCommand): Promise<HostAuthStatus> {
-      const result = (logged_in: boolean | null, method: string | null): HostAuthStatus =>
+      // the method and billing are only ever reported for a login the command confirmed
+      const result = (
+        logged_in: boolean | null,
+        method: string | null,
+        billing: HostBilling | null = null,
+      ): HostAuthStatus =>
         HostAuthStatusSchema.parse({
           host: status.host,
           logged_in,
           method: logged_in === true ? method : null,
+          billing: logged_in === true ? billing : null,
           checked_at: options.now().toISOString(),
         });
       let child: SpawnedProcess;
@@ -107,7 +117,7 @@ export const createAuthStatusRunner = (options: AuthStatusOptions) => {
         ]);
         clearTimeout(drain);
         const read = status.read({ stdout: stdout.text(), stderr: stderr.text() });
-        return read.loggedOut ? result(false, null) : result(true, read.method);
+        return read.loggedOut ? result(false, null) : result(true, read.method, read.billing);
       } finally {
         clearTimeout(timer);
         running.delete(child);

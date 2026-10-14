@@ -3,8 +3,12 @@
  * rows on HostOutcome signals and on Codex limit and auth text). Pure. The stream is redacted the
  * way `docs/research/spike-fixtures/` is: session, thread and event ids become placeholders, the
  * temp repo, the home directory and the user name become `<cwd>`, `<home>` and `<user>`, e-mail
- * addresses become `<email>`, and every known token format goes through `redactSecrets`. The
- * owner still reads a recording before it replaces a `*.synthetic.*` fixture.
+ * addresses become `<email>`, and every known token format goes through `redactSecrets`. What
+ * names the owner's own setup is replaced with `<redacted>`: the Claude `init` event's `plugins`,
+ * `skills`, `slash_commands`, `memory_paths` and `messaging_socket_path`, and a hook event's
+ * `output`, `stdout` and `stderr` text (under `--setting-sources user` the user's own plugins and
+ * hooks load into a role run, spine §5 reading 170). Opaque thinking signatures become
+ * `<signature>`. The owner still reads a recording before it replaces a `*.synthetic.*` fixture.
  */
 import { redactSecrets } from "@vtc/shared";
 
@@ -22,6 +26,40 @@ const ID_PLACEHOLDERS: Readonly<Record<string, string>> = {
   session_id: "<session-id>",
   thread_id: "<thread-id>",
   uuid: "<uuid>",
+};
+
+const REDACTED = "<redacted>";
+
+/** The Claude `init` fields that name the owner's own plugins, skills, commands and paths. */
+const INIT_PRIVATE_KEYS = [
+  "plugins",
+  "skills",
+  "slash_commands",
+  "memory_paths",
+  "messaging_socket_path",
+] as const;
+
+/** A hook event's captured output, which can carry anything the user's hook prints. */
+const HOOK_OUTPUT_KEYS = ["output", "stdout", "stderr"] as const;
+
+const isObject = (value: unknown): value is Record<string, unknown> =>
+  typeof value === "object" && value !== null && !Array.isArray(value);
+
+/** The event with the owner-specific fields of its type replaced (top level only). */
+const withoutOwnerSetup = (event: unknown): unknown => {
+  if (!isObject(event) || event.type !== "system") return event;
+  const keys =
+    event.subtype === "init"
+      ? INIT_PRIVATE_KEYS
+      : typeof event.subtype === "string" && event.subtype.startsWith("hook_")
+        ? HOOK_OUTPUT_KEYS
+        : [];
+  const out: Record<string, unknown> = { ...event };
+  for (const key of keys) {
+    const value = out[key];
+    if (value !== undefined && value !== null && value !== "") out[key] = REDACTED;
+  }
+  return out;
 };
 
 const EMAIL = /[A-Za-z0-9._%+-]{1,64}@[A-Za-z0-9-]{1,63}(?:\.[A-Za-z0-9-]{1,63}){1,8}/g;
@@ -50,7 +88,10 @@ const redactText = (text: string, context: RecordingContext): string => {
 
 const redactValue = (value: unknown, context: RecordingContext, key?: string): unknown => {
   if (typeof value === "string") {
-    const placeholder = key === undefined ? undefined : ID_PLACEHOLDERS[key];
+    if (key === "signature") return "<signature>";
+    if (value === REDACTED) return value;
+    const placeholder =
+      key === undefined || !Object.hasOwn(ID_PLACEHOLDERS, key) ? undefined : ID_PLACEHOLDERS[key];
     return placeholder ?? redactText(value, context);
   }
   if (Array.isArray(value)) return value.map((item) => redactValue(item, context));
@@ -76,7 +117,9 @@ export const redactRecording = (lines: readonly string[], context: RecordingCont
     .filter((line) => line.trim() !== "")
     .map((line) => {
       const json = parsed(line);
-      return json.ok ? JSON.stringify(redactValue(json.value, context)) : redactText(line, context);
+      return json.ok
+        ? JSON.stringify(redactValue(withoutOwnerSetup(json.value), context))
+        : redactText(line, context);
     });
 
 /** Where a run's recording goes: the given file, or for the resumed run `<name>.resume<ext>`. */

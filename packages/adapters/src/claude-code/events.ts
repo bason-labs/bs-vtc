@@ -6,7 +6,9 @@
  *   `usage`, `total_cost_usd`, `modelUsage`, `session_id` (recorded, spike 1);
  * - `system/init`: `session_id`, `model`;
  * - `rate_limit_event`: `rate_limit_info {status: allowed|allowed_warning|rejected, resetsAt?,
- *   rateLimitType?, utilization?}` (Agent SDK docs; no recording yet);
+ *   rateLimitType?, overageStatus?, unifiedWindows?: {five_hour, seven_day: {utilization,
+ *   resetsAt}}}` (recorded 2026-10-14; `utilization` read 0.16 then 0.32, apparently a 0–1
+ *   fraction, but its unit is not confirmed against the statusline, so it is not used);
  * - `system/api_retry`: `attempt`, `retry_delay_ms`, `error_status`, `error` (`rate_limit`,
  *   `overloaded`, `authentication_failed`, `oauth_org_not_allowed`, `account_on_hold`,
  *   `billing_error`, …) (Agent SDK and headless docs; no recording yet).
@@ -53,6 +55,8 @@ interface RateLimitInfo {
   readonly status: "allowed" | "allowed_warning" | "rejected";
   readonly type: string | null;
   readonly resetsAt: string | null;
+  /** `unifiedWindows`: each plan window's reset time, by its label (`five_hour`, `seven_day`). */
+  readonly windows: ReadonlyMap<string, string | null>;
 }
 
 interface ClaudeScan {
@@ -60,6 +64,8 @@ interface ClaudeScan {
   readonly model: string | null;
   /** Latest reading per `rateLimitType` (`null` key = untyped). */
   readonly rateLimits: ReadonlyMap<string | null, RateLimitInfo>;
+  /** Latest reset time per plan window from `unifiedWindows` (`null` = given without one). */
+  readonly unifiedResets: ReadonlyMap<string, string | null>;
   readonly rejected: RateLimitInfo | null;
   readonly retry: StreamRetry | null;
   /** The last retry was for a rate limit and nothing ran after it: the host gave up waiting. */
@@ -70,11 +76,27 @@ interface ClaudeScan {
   readonly unrecognized: number;
 }
 
+/** The plan windows `unifiedWindows` reports (per-model limits come only from rejections). */
+const unifiedWindows = (value: unknown): Map<string, string | null> => {
+  const windows = new Map<string, string | null>();
+  if (!isRecord(value)) return windows;
+  for (const label of Object.keys(WINDOW_KINDS)) {
+    const window = ownEntry(value, label);
+    if (isRecord(window)) windows.set(label, epochToIso(window.resetsAt));
+  }
+  return windows;
+};
+
 const rateLimitInfo = (value: unknown): RateLimitInfo | null => {
   if (!isRecord(value)) return null;
   const status = value.status;
   if (status !== "allowed" && status !== "allowed_warning" && status !== "rejected") return null;
-  return { status, type: text(value.rateLimitType), resetsAt: epochToIso(value.resetsAt) };
+  return {
+    status,
+    type: text(value.rateLimitType),
+    resetsAt: epochToIso(value.resetsAt),
+    windows: unifiedWindows(value.unifiedWindows),
+  };
 };
 
 /** `api_retry` errors only the user can fix: their login, org access, account or billing. */
@@ -106,6 +128,7 @@ const scan = (lines: readonly string[]): ClaudeScan => {
   let sessionId: string | null = null;
   let model: string | null = null;
   const rateLimits = new Map<string | null, RateLimitInfo>();
+  const unifiedResets = new Map<string, string | null>();
   let rejected: RateLimitInfo | null = null;
   let retry: StreamRetry | null = null;
   let rateLimitRetryUnrecovered = false;
@@ -137,6 +160,7 @@ const scan = (lines: readonly string[]): ClaudeScan => {
         continue;
       }
       rateLimits.set(info.type, info);
+      for (const [label, resetsAt] of info.windows) unifiedResets.set(label, resetsAt);
       if (info.status === "rejected") rejected = info;
     } else if (type === "result") {
       result = event;
@@ -150,6 +174,7 @@ const scan = (lines: readonly string[]): ClaudeScan => {
     sessionId,
     model,
     rateLimits,
+    unifiedResets,
     rejected,
     retry,
     rateLimitRetryUnrecovered,
@@ -266,19 +291,25 @@ const outcomeFromResult = (s: ClaudeScan, result: Record<string, unknown>): Host
   return { kind: "error", message, retryable: true, tokens, cost_usd: cost };
 };
 
-/** Usage the stream reported (`source: "sdk_event"`), or `null` when it carried none. */
+/**
+ * Usage the stream reported (`source: "sdk_event"`), or `null` when it carried none: one entry per
+ * plan window named by a typed reading (`rateLimitType`) or by `unifiedWindows`, five-hour first.
+ * The reset time is the unified window's when it gives one, else the typed reading's. The use is
+ * known only from a rejection (100%): `utilization` has no confirmed unit (spine §7), so it stays
+ * unknown rather than a guess.
+ */
 const usageOf = (s: ClaudeScan): UsageSnapshot | null => {
   const windows: UsageWindow[] = [];
-  for (const [type, info] of s.rateLimits) {
-    const window = type === null ? undefined : ownEntry(WINDOW_KINDS, type);
-    if (type === null || window === undefined) continue;
+  for (const [label, window] of Object.entries(WINDOW_KINDS)) {
+    const typed = s.rateLimits.get(label);
+    const unified = s.unifiedResets.get(label);
+    if (typed === undefined && unified === undefined) continue;
     windows.push({
       kind: window.kind,
-      label: type,
+      label,
       window_minutes: window.minutes,
-      // `utilization` has no documented unit, so only a rejection gives a known value
-      used_pct: info.status === "rejected" ? 100 : null,
-      resets_at: info.resetsAt,
+      used_pct: typed?.status === "rejected" ? 100 : null,
+      resets_at: unified ?? typed?.resetsAt ?? null,
     });
   }
   if (windows.length === 0) return null;
