@@ -275,13 +275,14 @@ const resolves = (failed: VtcEvent, notice: RunNotice, later: VtcEvent): boolean
     const next = eventData(later, "headless.preflight");
     return next?.ok === true && next.host === preflight.host && next.purpose === preflight.purpose;
   }
-  // A later run of the same role on the same task that ended `done` resolves a failed one.
+  // A later run of the same role that ended `done` resolves a failed one: on the same task, or,
+  // for a run with no task (a phase run, a lookback replay), with no task on the same host.
   if (eventData(failed, "headless.ended") !== null) {
     return (
       eventData(later, "headless.ended")?.outcome === "done" &&
-      failed.task !== undefined &&
+      later.role === failed.role &&
       later.task === failed.task &&
-      later.role === failed.role
+      (failed.task !== undefined || later.host === failed.host)
     );
   }
   return false;

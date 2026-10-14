@@ -1,9 +1,11 @@
 import type {
   AutoResumeCheck,
+  HealthResult,
   HeadlessEnded,
   HeadlessPreflight,
   HeadlessRunSummary,
   HostErrorCause,
+  StatusResult,
   VtcEvent,
 } from "@vtc/shared";
 import { eventsOfType } from "./events";
@@ -75,6 +77,35 @@ const RUNNING: StatusMeta = { label: "Running", tone: "accent", live: true };
 const DID_NOT_FINISH: StatusMeta = { label: "Did not finish", tone: "warn" };
 /** Started, never ended, and the live engine does not report it in flight. */
 const NO_END: StatusMeta = { label: "No end recorded", tone: "warn" };
+
+/** Contracts version from which a live engine sends `StatusResult.headless_runs` (4.5.0). */
+const HEADLESS_RUNS_SINCE: readonly number[] = [4, 5, 0];
+
+const atLeast = (version: string, min: readonly number[]): boolean => {
+  const parts = version.split(".").map(Number);
+  for (const [i, want] of min.entries()) {
+    const have = parts[i] ?? 0;
+    if (have !== want) return have > want;
+  }
+  return true;
+};
+
+/**
+ * What the engine reports in flight for `run`, for {@link headlessRuns}. A live engine on
+ * contracts 4.5.0+ leaves `headless_runs` out when none is in flight, so for its active run an
+ * absent field means `[]`. `null` (not known) for another run, a snapshot or an older engine.
+ */
+export const inFlightHeadless = (
+  status: StatusResult | undefined,
+  run: string,
+  health: HealthResult | null,
+): readonly HeadlessRunSummary[] | null => {
+  if (status?.run.id !== run) return null;
+  if (status.headless_runs !== undefined) return status.headless_runs;
+  return health?.mode === "live" && atLeast(health.contracts_version, HEADLESS_RUNS_SINCE)
+    ? []
+    : null;
+};
 
 /**
  * Engine-launched runs, newest first. `inFlight` is the active run's

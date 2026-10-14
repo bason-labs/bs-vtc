@@ -12,7 +12,7 @@ import {
   w3Event,
 } from "../wave3-fixtures";
 import { artifactContent } from "../../scripts/dev-fixtures.ts";
-import { renderApp, screen, within } from "./render";
+import { act, openStream, renderApp, screen, waitFor, within } from "./render";
 
 const withEvents = {
   "/api/runs/golden-1/events": () => Response.json(eventPageWithWave3()),
@@ -151,6 +151,53 @@ describe("Run view (pending gate, engine-launched runs)", () => {
     const runs = await screen.findByRole("list", { name: "Headless runs" });
     expect(within(runs).getByTestId("headless-a-13")).toHaveTextContent("Did not finish");
     expect(screen.queryByRole("status", { name: "Gate waiting" })).toBeNull();
+  });
+
+  const liveHealth = () =>
+    Response.json({
+      ...(readFixture("health") as object),
+      mode: "live",
+      contracts_version: "4.6.0",
+    });
+
+  it("says no end was recorded when a live engine reports nothing in flight", async () => {
+    // A live 4.5+ engine leaves `headless_runs` out when none is in flight.
+    renderApp("/run/?run=golden-1", { ...withEvents, "/api/health": liveHealth });
+    const runs = await screen.findByRole("list", { name: "Headless runs" });
+    await waitFor(() => {
+      expect(within(runs).getByTestId("headless-a-13")).toHaveTextContent("No end recorded");
+    });
+  });
+
+  it("settles the pending gate and headless runs when the live stream reports the run's end", async () => {
+    const page = eventPageWithWave3() as { events: { type: string; seq: number }[] };
+    const last = page.events.reduce((n, e) => Math.max(n, e.seq), 0);
+    const finished = w3Event(last + 1, "run.finished", { outcome: "aborted" });
+    let events = page.events.filter((e) => e.type !== "gate.approved");
+    let push: ((s: string) => void) | null = null;
+    renderApp("/run/?run=golden-1", {
+      "/api/health": liveHealth,
+      "/api/runs/golden-1/events": () => Response.json({ ...page, events }),
+      "/api/stream": () => {
+        const res = openStream();
+        const stream = new TransformStream<Uint8Array, Uint8Array>();
+        const writer = stream.writable.getWriter();
+        push = (s) => void writer.write(new TextEncoder().encode(s));
+        return new Response(stream.readable, { headers: res.headers });
+      },
+    });
+    expect(await screen.findByRole("status", { name: "Gate waiting" })).toBeInTheDocument();
+    expect(await screen.findByTestId("connection")).toHaveTextContent("Live");
+    events = [...events, finished];
+    await act(async () => {
+      push?.(`id: golden-1:${String(finished.seq)}\ndata: ${JSON.stringify(finished)}\n\n`);
+      await new Promise((r) => setTimeout(r, 400));
+    });
+    await waitFor(() => {
+      expect(screen.queryByRole("status", { name: "Gate waiting" })).toBeNull();
+    });
+    const runs = screen.getByRole("list", { name: "Headless runs" });
+    expect(within(runs).getByTestId("headless-a-13")).toHaveTextContent("Did not finish");
   });
 
   it("says when the event log is longer than the dashboard reads", async () => {

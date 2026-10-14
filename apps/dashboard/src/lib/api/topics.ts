@@ -46,7 +46,14 @@ const entityTopics = (event: VtcEvent): string[] => {
   const task = event.task === undefined ? [] : ([`task:${event.task}`] as const);
   switch (entity) {
     case "run":
-      return ["runs", "status", "graph"];
+      // The run's end settles what the event-log views show live: a gate still open no longer
+      // waits, and a headless start with no end did not finish.
+      return [
+        "runs",
+        "status",
+        "graph",
+        ...(event.type === "run.finished" ? ["gates", "headless"] : []),
+      ];
     case "gate":
       return event.type === "gate.result"
         ? [...task, "graph"]

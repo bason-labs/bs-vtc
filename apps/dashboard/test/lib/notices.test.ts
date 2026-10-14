@@ -281,6 +281,33 @@ describe("wave-3 notices (Level 3, headless runs, lookback; contracts 4.5.0)", (
     expect(ended([...WAVE3_EVENTS, done("T-1", "qa")])).toBe(false);
   });
 
+  it("resolves a failed run with no task by a later done run of that role on that host", () => {
+    const run = (
+      seq: number,
+      outcome: "error" | "done",
+      host: "claude-code" | "codex",
+      task?: string,
+    ) =>
+      w3Event(
+        seq,
+        "headless.ended",
+        {
+          action_id: `a-${String(seq)}`,
+          outcome,
+          ...(outcome === "error" ? { cause: "timeout" } : {}),
+          exit_code: null,
+          duration_ms: 60_000,
+        },
+        { role: "architect", host, ...(task === undefined ? {} : { task }) },
+      );
+    const failed = run(90, "error", "codex");
+    const resolved = (later: VtcEvent) =>
+      runNotices([failed, later]).find((n) => n.seq === 90)?.resolved;
+    expect(resolved(run(91, "done", "codex"))).toBe(true);
+    expect(resolved(run(91, "done", "claude-code"))).toBe(false);
+    expect(resolved(run(91, "done", "codex", "T-1"))).toBe(false);
+  });
+
   it("shows a canary rollback", () => {
     expect(of("lookback.rolled_back")[0]).toMatchObject({
       tone: "warn",

@@ -1,6 +1,12 @@
 import { describe, expect, it } from "vitest";
-import { AutoResumeCheckSchema, HostErrorCauseSchema } from "@vtc/shared";
-import { HEADLESS_CAUSES, headlessRuns, PREFLIGHT_CHECKS } from "@/lib/headless";
+import {
+  AutoResumeCheckSchema,
+  HostErrorCauseSchema,
+  type HealthResult,
+  type StatusResult,
+} from "@vtc/shared";
+import { HEADLESS_CAUSES, headlessRuns, inFlightHeadless, PREFLIGHT_CHECKS } from "@/lib/headless";
+import { readFixture } from "../fixtures";
 import { HEADLESS_EVENTS, w3Event } from "../wave3-fixtures";
 
 describe("headlessRuns (headless.* events and StatusResult.headless_runs, AD-25)", () => {
@@ -63,6 +69,33 @@ describe("headlessRuns (headless.* events and StatusResult.headless_runs, AD-25)
       },
     ]);
     expect(runs.find((r) => r.actionId === "a-13")?.status.live).toBe(true);
+  });
+
+  it("reads a live 4.5+ engine's missing headless_runs as none in flight, so no end shows", () => {
+    const status = readFixture("status") as StatusResult;
+    expect(status).not.toHaveProperty("headless_runs");
+    const health = (mode: "live" | "snapshot", contracts_version: string): HealthResult => ({
+      ok: true,
+      mode,
+      engine_version: "0.0.0",
+      contracts_version,
+      prototype_url: null,
+    });
+    const live = inFlightHeadless(status, "golden-1", health("live", "4.6.0"));
+    expect(live).toEqual([]);
+    expect(headlessRuns(HEADLESS_EVENTS, live).find((r) => r.actionId === "a-13")?.status).toEqual({
+      label: "No end recorded",
+      tone: "warn",
+    });
+    // Not known: an older engine, a snapshot, another run, no health or no status yet.
+    expect(inFlightHeadless(status, "golden-1", health("live", "4.4.9"))).toBeNull();
+    expect(inFlightHeadless(status, "golden-1", health("snapshot", "4.6.0"))).toBeNull();
+    expect(inFlightHeadless(status, "other-run", health("live", "4.6.0"))).toBeNull();
+    expect(inFlightHeadless(status, "golden-1", null)).toBeNull();
+    expect(inFlightHeadless(undefined, "golden-1", health("live", "4.6.0"))).toBeNull();
+    // A reported list is used as is.
+    const reported = { ...status, headless_runs: [] };
+    expect(inFlightHeadless(reported, "golden-1", health("snapshot", "4.1.0"))).toEqual([]);
   });
 
   it("names every cause and preflight check", () => {
