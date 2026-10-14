@@ -12,7 +12,7 @@ import {
   MergePreflightSchema,
   PostMergeCiSchema,
 } from "./auto-merge.js";
-import { DesignCoverageReportSchema, G2DirectionSchema } from "./design.js";
+import { DesignCoverageReportSchema, DesignExitSchema, G2DirectionSchema } from "./design.js";
 import { FeatureSchema, FeatureStatusSchema, PullRequestRefSchema } from "./feature.js";
 import { HeadlessEndedSchema, HeadlessPreflightSchema, HeadlessStartedSchema } from "./headless.js";
 import { CanaryStateSchema, EscapedDefectSchema, ReplayVerdictSchema } from "./lookback.js";
@@ -213,6 +213,8 @@ export const EVENT_PAYLOAD_SCHEMAS = {
     gates: z.array(HumanGateIdSchema).min(1).max(2),
     frozen: z.array(FrozenArtifactSchema).min(1),
     design_direction: SlugSchema.optional(),
+    /** The human took the category standard instead of a direction (§9.1 step 5). New in 4.9.0. */
+    design_exit: DesignExitSchema.extract(["category_standard"]).optional(),
     waived_facts: z.array(SlugSchema).default([]),
     /** The reason given for each waived fact (`ApproveInput.fact_waivers`). New in 4.5.0. */
     fact_waivers: z.array(FactWaiverSchema).optional(),
@@ -231,10 +233,14 @@ export const EVENT_PAYLOAD_SCHEMAS = {
     facts: z.array(UnverifiedFactSummarySchema).optional(),
     /** The DESIGN REQ → component → screen check, when the run has UI. */
     design_coverage: DesignCoverageReportSchema.optional(),
+    /** The exits offered beside the directions (`approve_gate.design_exits`). New in 4.9.0. */
+    design_exits: z.array(DesignExitSchema).max(2).optional(),
   }),
   "gate.rejected": z.strictObject({
     gates: z.array(HumanGateIdSchema).min(1).max(2),
     note: z.string().max(4000).optional(),
+    /** A re-roll: only the Designer runs again (§9.1 step 5). New in 4.9.0. */
+    design_exit: DesignExitSchema.extract(["re_roll"]).optional(),
   }),
   /**
    * `intent` is the Planner's `TaskDraft.intent`, recorded once (AD-7 rule 8): the immutable

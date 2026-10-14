@@ -42,6 +42,7 @@ import {
   type RunHandle,
 } from "./kernel.js";
 import { finalReviewSteps } from "./final-review.js";
+import { designWorkSince, rerollInputs } from "./g2.js";
 import type { PromptParts } from "./plugins.js";
 import { effectiveVerdict } from "./gate-verdict.js";
 import { engineerDispatch, tierDown } from "./loop.js";
@@ -510,10 +511,12 @@ export const pendingSteps = (k: Kernel, h: RunHandle, host: HostId): StepSpec[] 
       (e) => e.phase === phase && e.answer === undefined,
     );
     if (blocked) return [];
+    // a G2 re-roll sends only the Designer back (§9.1 step 5, reading 151)
+    const reroll = phase === "design" ? rerollInputs(h) : undefined;
     return phaseRoleList.flatMap(({ role, mode }) => {
       const filter = { role, ...(mode === undefined ? {} : { mode }) };
       if (busyStep(h, filter)) return [];
-      const done = lastSubmitted(state, filter, entered);
+      const done = lastSubmitted(state, filter, designWorkSince(h, role, entered));
       if (done !== undefined && done.exit === "done") return [];
       const note = rejectionNote(h, filter);
       const decision = [...state.events]
@@ -523,7 +526,8 @@ export const pendingSteps = (k: Kernel, h: RunHandle, host: HostId): StepSpec[] 
         decision?.type === "gate.rejected"
           ? `The human rejected the gate${(decision.data as { note?: string }).note === undefined ? "." : `: ${(decision.data as { note?: string }).note ?? ""}`}`
           : undefined;
-      const combined = [note, gateNote].filter((n) => n !== undefined).join("\n");
+      const rerolled = role === "designer" ? reroll : undefined;
+      const combined = [note, gateNote, rerolled?.note].filter((n) => n !== undefined).join("\n");
       const answer = phaseAnswer(h, phase, role);
       return [
         {
@@ -531,6 +535,9 @@ export const pendingSteps = (k: Kernel, h: RunHandle, host: HostId): StepSpec[] 
           ...filter,
           ...(combined === "" ? {} : { note: combined }),
           ...(answer === undefined ? {} : { answer }),
+          ...(rerolled === undefined || rerolled.inputs.length === 0
+            ? {}
+            : { inputs: rerolled.inputs }),
         },
       ];
     });

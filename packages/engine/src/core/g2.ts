@@ -26,6 +26,7 @@ import { basename, dirname, extname, join } from "node:path";
 import {
   DESIGN_SCREENS_PATH,
   DesignCoverageReportSchema,
+  DesignExitSchema,
   DesignLibraryEntrySchema,
   engineRepoKey,
   DesignScreensFileSchema,
@@ -43,6 +44,7 @@ import {
   type ApproveInput,
   type DesignLibraryEntry,
   type DesignCoverageReport,
+  type DesignExit,
   type FactRow,
   type FrozenArtifact,
   type G2Direction,
@@ -63,6 +65,8 @@ export interface GateExtras {
   readonly unverified_facts: string[];
   readonly facts?: UnverifiedFactSummary[];
   readonly design_coverage?: DesignCoverageReport;
+  /** With directions on offer: re-roll and the category standard (§9.1 step 5, reading 151). */
+  readonly design_exits?: DesignExit[];
 }
 
 /**
@@ -541,7 +545,7 @@ export const gateExtras = (
   const coverage = designCoverage(k, h);
   return {
     design_directions: directions.map((d) => d.id),
-    ...(directions.length === 0 ? {} : { directions }),
+    ...(directions.length === 0 ? {} : { directions, design_exits: [...DesignExitSchema.options] }),
     unverified_facts: facts.map((f) => f.id),
     ...(facts.length === 0 ? {} : { facts }),
     design_coverage: coverage,
@@ -549,12 +553,13 @@ export const gateExtras = (
 };
 
 /**
- * Why a G2 approval may not go ahead, or `null` (AD-22 rule 4, reading 110; §9.1 step 5): every
- * fact G2 lists needs a waiver with a reason, and with directions on offer the human picks one.
+ * Why a G2 approval may not go ahead, or `null` (AD-22 rule 4, reading 110; §9.1 steps 4–5,
+ * reading 151): every fact G2 lists needs a waiver with a reason, and with directions on offer the
+ * human picks one that is not too similar to a past design, or takes the category standard.
  */
 export const g2ApprovalProblem = (
   extras: GateExtras,
-  input: Pick<ApproveInput, "fact_waivers" | "design_direction">,
+  input: Pick<ApproveInput, "fact_waivers" | "design_direction" | "design_exit">,
 ): string | null => {
   const problems: string[] = [];
   // §6.1 DESIGN, reading 146: the human rejects G2 with a note, and the design roles fix it
@@ -569,13 +574,99 @@ export const g2ApprovalProblem = (
     problems.push(
       `every unverified fact needs a waiver with a reason (fact_waivers); not waived: ${missing.join(", ")}`,
     );
+  const exits =
+    "re-roll them (reject G2 with design_exit re_roll) or take the category standard (design_exit category_standard)";
   if (extras.design_directions.length > 0) {
-    if (input.design_direction === undefined)
-      problems.push(`pick one design direction (${extras.design_directions.join(", ")})`);
+    const tooSimilar = new Set(
+      (extras.directions ?? []).filter((d) => d.novelty === "too_similar").map((d) => d.id),
+    );
+    if (input.design_exit === "category_standard") {
+      // the category standard: no direction is taken, none enters the library
+    } else if (input.design_direction === undefined)
+      problems.push(
+        `pick one design direction (${extras.design_directions.join(", ")}), or ${exits}`,
+      );
     else if (!extras.design_directions.includes(input.design_direction))
       problems.push(
         `${input.design_direction} is not one of the directions shown (${extras.design_directions.join(", ")})`,
       );
-  }
+    else if (tooSimilar.has(input.design_direction))
+      problems.push(
+        `${input.design_direction} is too similar to a past design (§9.1 step 4): pick another direction, or ${exits}`,
+      );
+  } else if (input.design_exit !== undefined)
+    problems.push("no design directions are on offer, so there is no design exit to take");
   return problems.length === 0 ? null : problems.join("; ");
+};
+
+// ------------------------------------------------------------------- re-roll
+
+type RunEvents = RunHandle["state"]["events"];
+
+/** The run's latest gate decision (`gate.approved` or `gate.rejected`) before `seq`. */
+const decisionBefore = (events: RunEvents, seq: number) =>
+  events.findLast((e) => e.seq < seq && (e.type === "gate.rejected" || e.type === "gate.approved"));
+
+const isReroll = (e: RunEvents[number] | undefined): boolean =>
+  e?.type === "gate.rejected" && (e.data as { design_exit?: string }).design_exit === "re_roll";
+
+/**
+ * The G2 rejection that re-rolled the directions (§9.1 step 5, spine §5 reading 151), when it is
+ * the run's latest gate decision and the run is back in DESIGN; otherwise `undefined`.
+ */
+export const activeReroll = (h: RunHandle): RunEvents[number] | undefined => {
+  if (h.state.run.phase !== "design") return undefined;
+  const last = decisionBefore(h.state.events, Number.MAX_SAFE_INTEGER);
+  return isReroll(last) ? last : undefined;
+};
+
+/**
+ * The seq from which a DESIGN role's work counts (`entered`, the phase's entry, unless re-rolled):
+ * a re-roll sends only the Designer back, so every other design role's work since the DESIGN phase
+ * that preceded the re-roll (or a chain of them) stands.
+ */
+export const designWorkSince = (h: RunHandle, role: string, entered: number): number => {
+  if (role === "designer") return entered;
+  let decision = activeReroll(h);
+  let since = entered;
+  const events = h.state.events;
+  while (decision !== undefined) {
+    const at = decision.seq;
+    const entry = events.findLast(
+      (e) =>
+        e.seq < at && e.type === "run.phase_changed" && (e.data as { to?: string }).to === "design",
+    );
+    if (entry === undefined) break;
+    since = entry.seq;
+    const before = decisionBefore(events, entry.seq);
+    decision = isReroll(before) ? before : undefined;
+  }
+  return since;
+};
+
+/**
+ * The Designer's re-roll (§9.1 step 5): the engine's novelty report of every direction the last G2
+ * showed as too similar (the role input `novelty_report`), and the note saying what to replace. Its
+ * constraints are dealt afresh like every Designer dispatch's. `undefined` outside a re-roll.
+ */
+export const rerollInputs = (
+  h: RunHandle,
+):
+  | { readonly inputs: { type: "novelty_report"; path: string }[]; readonly note: string }
+  | undefined => {
+  const reroll = activeReroll(h);
+  if (reroll === undefined) return undefined;
+  const shown = h.state.events.findLast((e) => e.seq < reroll.seq && e.type === "gate.requested")
+    ?.data as { directions?: G2Direction[] } | undefined;
+  const similar = (shown?.directions ?? []).filter((d) => d.novelty === "too_similar");
+  return {
+    inputs: similar.map((d) => ({ type: "novelty_report", path: noveltyReportPath(d.id) })),
+    note: [
+      "Re-roll (§9.1 step 5): the human asked for new directions at G2.",
+      similar.length === 0
+        ? "Build new directions from the newly dealt constraints."
+        : `Replace ${similar.map((d) => d.id).join(", ")} (too similar to a past design: see each novelty_report) with directions built from the newly dealt constraints.`,
+      "Return every direction you offer now, the ones you keep included.",
+    ].join(" "),
+  };
 };

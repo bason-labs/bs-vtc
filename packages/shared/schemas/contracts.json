@@ -1,5 +1,5 @@
 {
-  "contracts_version": "4.8.0",
+  "contracts_version": "4.9.0",
   "schemas": {
     "Run": {
       "$id": "https://vtc.local/schemas/Run.json",
@@ -2402,6 +2402,12 @@
               "type": "string",
               "pattern": "^[a-z0-9][a-z0-9._-]{0,63}$"
             },
+            "design_exit": {
+              "type": "string",
+              "enum": [
+                "category_standard"
+              ]
+            },
             "waived_facts": {
               "default": [],
               "type": "array",
@@ -2643,6 +2649,17 @@
                 "ok"
               ],
               "additionalProperties": false
+            },
+            "design_exits": {
+              "maxItems": 2,
+              "type": "array",
+              "items": {
+                "type": "string",
+                "enum": [
+                  "re_roll",
+                  "category_standard"
+                ]
+              }
             }
           },
           "required": [
@@ -2669,6 +2686,12 @@
             "note": {
               "type": "string",
               "maxLength": 4000
+            },
+            "design_exit": {
+              "type": "string",
+              "enum": [
+                "re_roll"
+              ]
             }
           },
           "required": [
@@ -16484,6 +16507,17 @@
                 "ok"
               ],
               "additionalProperties": false
+            },
+            "design_exits": {
+              "maxItems": 2,
+              "type": "array",
+              "items": {
+                "type": "string",
+                "enum": [
+                  "re_roll",
+                  "category_standard"
+                ]
+              }
             }
           },
           "required": [
@@ -16873,6 +16907,17 @@
                       "ok"
                     ],
                     "additionalProperties": false
+                  },
+                  "design_exits": {
+                    "maxItems": 2,
+                    "type": "array",
+                    "items": {
+                      "type": "string",
+                      "enum": [
+                        "re_roll",
+                        "category_standard"
+                      ]
+                    }
                   }
                 },
                 "required": [
@@ -20660,6 +20705,17 @@
                       "ok"
                     ],
                     "additionalProperties": false
+                  },
+                  "design_exits": {
+                    "maxItems": 2,
+                    "type": "array",
+                    "items": {
+                      "type": "string",
+                      "enum": [
+                        "re_roll",
+                        "category_standard"
+                      ]
+                    }
                   }
                 },
                 "required": [
@@ -21801,6 +21857,13 @@
         "design_direction": {
           "type": "string",
           "pattern": "^[a-z0-9][a-z0-9._-]{0,63}$"
+        },
+        "design_exit": {
+          "type": "string",
+          "enum": [
+            "re_roll",
+            "category_standard"
+          ]
         },
         "waived_facts": {
           "default": [],

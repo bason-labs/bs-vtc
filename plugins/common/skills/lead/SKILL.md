@@ -98,15 +98,19 @@ reject.
   reason, and never waive one the human did not name.
 - **Design directions.** For each entry of `directions` show its title, its one-sentence thesis,
   the first-viewport screenshot or the prototype path, and the engine's novelty verdict (a
-  `too_similar` one says so plainly). The human picks one by its `id`.
+  `too_similar` one says so plainly). The human picks one by its `id`; the engine refuses a
+  `too_similar` one. Also offer the `design_exits` the engine listed: `re_roll` (new directions:
+  only the Designer works again, with fresh constraints and the novelty reports) and
+  `category_standard` (no distinct direction: the category's standard look).
 
 Call `approve` with `gates` as the engine listed them, `decision` (`approve` or `reject`),
 `frozen`: every artifact exactly as the engine listed it (`path` and `sha256`), and `note` for
 the human's reasons. Only when approving G2 add `design_direction` (the `id` of the direction the
-human chose), `waived_facts` (the ids of the facts the human waives) and `fact_waivers`: one
+human chose), or `design_exit: "category_standard"` instead when the human takes the category
+standard, `waived_facts` (the ids of the facts the human waives) and `fact_waivers`: one
 `{ "id", "reason" }` per waived fact, with the human's reason; the engine rejects an approval
-that leaves a listed fact without one. A rejection carries none of them. Never approve on the
-human's behalf.
+that leaves a listed fact without one. A rejection carries none of them; a re-roll is a G2
+rejection with `design_exit: "re_roll"`. Never approve on the human's behalf.
 
 ## Lookback proposals
 

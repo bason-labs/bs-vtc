@@ -64,6 +64,7 @@ import {
 import { dispatchGuarded, inSessionRefusal, NO_LEAD_WAIT_REASON, phaseRoles } from "./dispatch.js";
 import {
   checkDirectionsNovelty,
+  designWorkSince,
   g2ApprovalProblem,
   gateExtras,
   recordChosenDirection,
@@ -1115,10 +1116,14 @@ export class Engine implements Kernel {
     const roles = phaseRoles(this, handle, phase);
     if (["discover", "specify", "design"].includes(phase)) {
       const entered = phaseEnteredSeq(state, phase) ?? 0;
+      // after a G2 re-roll only the Designer had to run again (§9.1 step 5, reading 151)
       const done = roles.every(
         ({ role, mode }) =>
-          lastSubmitted(state, { role, ...(mode === undefined ? {} : { mode }) }, entered)?.exit ===
-          "done",
+          lastSubmitted(
+            state,
+            { role, ...(mode === undefined ? {} : { mode }) },
+            phase === "design" ? designWorkSince(handle, role, entered) : entered,
+          )?.exit === "done",
       );
       if (!done) return false;
       if (phase === "discover") this.phaseTo(handle, "specify");
@@ -1754,6 +1759,9 @@ export class Engine implements Kernel {
             ...(input.design_direction === undefined
               ? {}
               : { design_direction: input.design_direction }),
+            ...(input.design_exit === "category_standard"
+              ? { design_exit: "category_standard" as const }
+              : {}),
             waived_facts: input.waived_facts,
             ...(input.fact_waivers === undefined ? {} : { fact_waivers: input.fact_waivers }),
             ...(input.note === undefined ? {} : { note: input.note }),
@@ -1761,12 +1769,26 @@ export class Engine implements Kernel {
         });
         this.phaseTo(handle, handle.state.run.phase === "g1" ? "design" : "plan");
       } else {
+        // §9.1 step 5, reading 151: a re-roll sends only the Designer back (`rerollSince`)
+        const reroll = input.design_exit === "re_roll";
+        if (reroll && awaiting.extras.design_directions.length === 0)
+          throw new EngineError(
+            "invalid",
+            "no design directions are on offer, so there is nothing to re-roll: reject G2 with a note instead",
+          );
         this.emit(handle, {
           type: "gate.rejected",
           actor: "human",
-          data: { gates: input.gates, ...(input.note === undefined ? {} : { note: input.note }) },
+          data: {
+            gates: input.gates,
+            ...(input.note === undefined ? {} : { note: input.note }),
+            ...(reroll ? { design_exit: "re_roll" as const } : {}),
+          },
         });
-        this.phaseTo(handle, handle.state.run.track === "quick_fix" ? "specify" : back);
+        this.phaseTo(
+          handle,
+          reroll ? "design" : handle.state.run.track === "quick_fix" ? "specify" : back,
+        );
       }
       this.advance(handle);
       return { run: handle.state.id, actions: await this.actionsFor(handle, call) };

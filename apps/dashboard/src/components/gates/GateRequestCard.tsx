@@ -160,6 +160,7 @@ export function GateRequestCard({ run, gate }: { run: string; gate: GateRequestV
       </CardHeader>
       <div className="space-y-4">
         {gate.note === null ? null : <p className="text-sm">Note: {gate.note}</p>}
+        {gate.designExit === null ? null : <p className="text-sm">{gate.designExit}</p>}
         {gate.directions.length === 0 ? null : (
           <section aria-labelledby={`${base}-dir`} className="space-y-2">
             <SubHeading id={`${base}-dir`}>Design directions</SubHeading>

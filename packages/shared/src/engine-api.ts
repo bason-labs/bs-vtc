@@ -7,7 +7,7 @@
  * tool or route names a contract that does not exist.
  */
 import { z } from "zod";
-import { DesignCoverageReportSchema, G2DirectionSchema } from "./design.js";
+import { DesignCoverageReportSchema, DesignExitSchema, G2DirectionSchema } from "./design.js";
 import { EscalationAnswerSchema, EscalationSchema } from "./escalation.js";
 import { HeadlessRunSummarySchema } from "./headless.js";
 import { FactWaiverSchema, UnverifiedFactSummarySchema } from "./research.js";
@@ -305,6 +305,12 @@ export const LeadActionSchema = z.discriminatedUnion("type", [
      * (spine §5 reading 146). New in 4.8.0.
      */
     design_coverage: DesignCoverageReportSchema.optional(),
+    /**
+     * G2 with directions: the exits offered beside them, re-roll and the category standard
+     * (§9.1 step 5, `DesignExitSchema`); the human takes one with `ApproveInput.design_exit`.
+     * New in 4.9.0.
+     */
+    design_exits: z.array(DesignExitSchema).max(2).optional(),
   }),
   z.strictObject({
     type: z.literal("wait"),
@@ -410,6 +416,12 @@ export const ApproveInputSchema = z
     frozen: z.array(FrozenArtifactSchema).min(1),
     /** G2: the chosen design direction (§9.1 step 5). */
     design_direction: SlugSchema.optional(),
+    /**
+     * G2: an exit instead of a direction (§9.1 step 5, `DesignExitSchema`): `re_roll` with
+     * `decision: reject`, `category_standard` with `decision: approve` and no
+     * `design_direction`. New in 4.9.0.
+     */
+    design_exit: DesignExitSchema.optional(),
     /** G2: UNVERIFIED research claims the human waives (§8.2). */
     waived_facts: z.array(SlugSchema).default([]),
     /**
@@ -450,6 +462,20 @@ export const ApproveInputSchema = z
         path: ["design_direction"],
         message: "a rejection does not choose a design direction",
       });
+    }
+    if (input.design_exit !== undefined) {
+      const fits =
+        g2 &&
+        (input.design_exit === "re_roll"
+          ? input.decision === "reject"
+          : input.decision === "approve" && input.design_direction === undefined);
+      if (!fits)
+        ctx.addIssue({
+          code: "custom",
+          path: ["design_exit"],
+          message:
+            "design_exit belongs to G2: re_roll with a rejection, category_standard with an approval that picks no direction",
+        });
     }
   });
 export type ApproveInput = z.infer<typeof ApproveInputSchema>;

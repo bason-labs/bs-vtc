@@ -114,6 +114,21 @@ export const G2DirectionSchema = z.strictObject({
 });
 export type G2Direction = z.infer<typeof G2DirectionSchema>;
 
+/**
+ * The two exits G2 offers beside its directions (§9.1 step 5; spine §5 reading 151), in
+ * `approve_gate.design_exits`:
+ * - `re_roll`: a rejection that sends only the Designer back, with a fresh constraints deal and
+ *   the engine's `novelty_report` of every direction G2 showed as too similar
+ *   (`ApproveInput.design_exit` with `decision: reject`);
+ * - `category_standard`: an approval that takes the category's standard look instead of a
+ *   direction; nothing enters the design library (`design_exit` with `decision: approve`, no
+ *   `design_direction`).
+ * A `too_similar` direction cannot be picked (§9.1 step 4: "reject anything too similar"). New in
+ * 4.9.0.
+ */
+export const DesignExitSchema = z.enum(["re_roll", "category_standard"]);
+export type DesignExit = z.infer<typeof DesignExitSchema>;
+
 // ------------------------------------------------- Designer output (4.6.0)
 
 /**
