@@ -90,6 +90,8 @@ export const IncidentKindSchema = z.enum([
   "unsandboxed_gate",
   /** A human adopted a run another clone started (spine §5 reading 88). New in 4.4.0. */
   "run_adopted",
+  /** git refused a milestone commit of the `.vtc/` files (spine §5 reading 90). New in 4.4.0. */
+  "milestone_commit",
 ]);
 export type IncidentKind = z.infer<typeof IncidentKindSchema>;
 

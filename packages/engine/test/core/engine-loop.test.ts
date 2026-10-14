@@ -414,6 +414,37 @@ describe("parking blocks only dependents (§6.5, D5) and concurrency (§6.6)", (
   });
 });
 
+describe("milestone commits of the git-tracked .vtc/ files (spec §6.8, reading 90)", () => {
+  it("commits the run's log and documents at G1/G2, and leaves the user's own changes alone", async () => {
+    const h = createHarness();
+    writeFile(h.repo, "README.md", "# my own edit\n");
+    git(h.repo, "add", "README.md"); // staged by the user, not committed by the engine
+    await throughPlan(h, [draft("T-1")], SPEC_ONE);
+    await h.engine.settle();
+    const run = h.engine.status({}).run.id;
+    const subjects = git(h.repo, "log", "--format=%s").split("\n");
+    expect(subjects).toEqual(
+      expect.arrayContaining([`vtc: ${run} G1 approved`, `vtc: ${run} G2 approved`]),
+    );
+    const filesOf = (grep: string): string[] =>
+      git(
+        h.repo,
+        "show",
+        "--name-only",
+        "--format=",
+        git(h.repo, "log", "--format=%H", "--grep", grep, "-1"),
+      ).split("\n");
+    expect(filesOf("G1 approved").some((f) => f.startsWith(".vtc/spec/"))).toBe(true);
+    const files = filesOf("G2 approved");
+    expect(files).toContain(`.vtc/runs/${run}/events.jsonl`);
+    expect(files.some((f) => f.startsWith(".vtc/state/"))).toBe(false);
+    expect(files).not.toContain("README.md");
+    // the user's staged change is still staged, still theirs
+    expect(git(h.repo, "diff", "--cached", "--name-only")).toBe("README.md");
+    await h.release();
+  });
+});
+
 describe("task and feature ids another clone took (spine §5 reading 89)", () => {
   it("skips T-n / F-n that a fetched remote branch or a committed plan file already uses", async () => {
     const h = createHarness();

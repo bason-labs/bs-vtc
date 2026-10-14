@@ -58,6 +58,7 @@ const INCIDENT_TITLES: Readonly<Record<IncidentKind, string>> = {
   host_config_restored: "Host config in a worktree was restored",
   unsandboxed_gate: "Gates ran without an OS sandbox",
   run_adopted: "Run adopted from another clone",
+  milestone_commit: "Milestone commit of .vtc/ did not go through",
 };
 
 const MERGE_REASONS: Readonly<Record<EventData<"run.merge_level_changed">["reason"], string>> = {
