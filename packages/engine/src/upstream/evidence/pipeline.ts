@@ -3,8 +3,10 @@
  * is not a UI one, serve a redacted snapshot on the loopback, capture the planned shots through the
  * injected `EvidenceRecorder` (retrying failed shots once), add the visual gate's before/after
  * screenshots, make a GIF when ffmpeg is present, apply the budget, publish (`branch` or
- * `attach`), and write the manifest. No file at all fails the step: the caller then opens no PR
- * and raises "evidence capture failed".
+ * `attach`), and write the manifest. No file at all, a gate report that does not render, or an
+ * evidence branch that cannot be pushed (each tried twice) fails the step: the caller then opens
+ * no PR and raises "evidence capture failed". The opt-outs are checked again right before the
+ * evidence branch is pushed (`beforePublish`).
  */
 import { copyFileSync, existsSync, mkdirSync, readFileSync, statSync } from "node:fs";
 import { join } from "node:path";
@@ -24,13 +26,13 @@ import {
   type GitHubRepo,
   type GitPlumbing,
 } from "@vtc/shared";
+import { isAutomationSkip } from "../skip.js";
 import { makeGif, type FfmpegCommand } from "./gif.js";
 import { attachmentsFor, publishToEvidenceBranch, renderEvidenceSection } from "./hosting.js";
 import {
   applyEvidenceBudget,
   buildManifest,
   evidenceComplete,
-  manifestDir,
   writeManifest,
   type EvidenceFile,
 } from "./manifest.js";
@@ -83,6 +85,8 @@ export interface EvidenceRequest {
   readonly knownValues: readonly string[];
   /** Upstream: the project-identifier denylist (refused on screen). */
   readonly denylist?: readonly string[];
+  /** A project's `automation.evidence.max_mb` in bytes (never above `EVIDENCE_LIMITS`). */
+  readonly maxBytes?: number | undefined;
 }
 
 export interface EvidenceDeps {
@@ -94,6 +98,8 @@ export interface EvidenceDeps {
   /** `branch` hosting: plumbing of the repo the PR goes to. */
   readonly plumbing?: GitPlumbing | undefined;
   readonly now: () => Date;
+  /** Runs right before the evidence branch is pushed (the opt-outs, again); may throw a skip. */
+  readonly beforePublish?: () => void;
 }
 
 export type EvidenceOutcome =
@@ -147,6 +153,18 @@ const capture = async (
   return { files, reasons };
 };
 
+/** Runs `step` up to `EVIDENCE_LIMITS.captureAttempts` times; `null` when every try threw. */
+const twice = async <T>(step: () => Promise<T>): Promise<T | null> => {
+  for (let attempt = 0; attempt < EVIDENCE_LIMITS.captureAttempts; attempt += 1) {
+    try {
+      return await step();
+    } catch (error) {
+      if (isAutomationSkip(error)) throw error;
+    }
+  }
+  return null;
+};
+
 const nextName = (files: readonly EvidenceFile[], slug: string, ext: string): string => {
   const used = files.map((f) => Number(f.name.slice(0, 2)));
   const n = Math.max(0, ...used) + 1;
@@ -163,11 +181,16 @@ export const prepareEvidence = async (
   if (request.plan.change === "non_ui" && request.gateReport !== undefined) {
     const reportDir = join(stagingDir, "report");
     mkdirSync(reportDir, { recursive: true, mode: 0o700 });
-    const { html } = await deps.recorder.renderGateReport({
-      report: request.gateReport,
-      outDir: reportDir,
+    const gateReport = request.gateReport;
+    const page = await twice(async () => {
+      const { html } = await deps.recorder.renderGateReport({
+        report: gateReport,
+        outDir: reportDir,
+      });
+      return new Uint8Array(readFileSync(join(reportDir, html)));
     });
-    pages[GATE_REPORT_PAGE] = new Uint8Array(readFileSync(join(reportDir, html)));
+    if (page === null) return { ok: false, detail: "the gate report did not render (2 tries)" };
+    pages[GATE_REPORT_PAGE] = page;
   }
   const shots = planEvidenceShots(request.plan).filter(
     (s) => s.kind !== "gate_report" || pages[GATE_REPORT_PAGE] !== undefined,
@@ -230,7 +253,7 @@ export const prepareEvidence = async (
     if (bytes !== null)
       files.push({ name: output, kind: "replay_gif", bytes, alt: ALT.replay_gif });
   }
-  const { kept } = applyEvidenceBudget(files);
+  const { kept } = applyEvidenceBudget(files, request.maxBytes);
   if (kept.length === 0) {
     return {
       ok: false,
@@ -240,17 +263,24 @@ export const prepareEvidence = async (
   const complete = evidenceComplete(kept, requiredEvidenceKinds(request.plan, deps.hosting));
   let urls: Map<string, string> | undefined;
   if (deps.hosting === "branch") {
-    if (deps.plumbing === undefined)
-      return { ok: false, detail: "branch hosting needs git plumbing" };
-    urls = await publishToEvidenceBranch({
-      plumbing: deps.plumbing,
-      repo: request.repo,
-      dir: stagingDir,
-      files: kept,
-      kind: request.kind,
-      fingerprint: request.fingerprint,
-      at: deps.now(),
+    const plumbing = deps.plumbing;
+    if (plumbing === undefined) return { ok: false, detail: "branch hosting needs git plumbing" };
+    const published = await twice(() => {
+      deps.beforePublish?.();
+      return publishToEvidenceBranch({
+        plumbing,
+        repo: request.repo,
+        dir: stagingDir,
+        files: kept,
+        kind: request.kind,
+        fingerprint: request.fingerprint,
+        at: deps.now(),
+      });
     });
+    if (published === null) {
+      return { ok: false, detail: "the evidence branch could not be pushed (2 tries)" };
+    }
+    urls = published;
   }
   const manifest = buildManifest({
     dir: stagingDir,
@@ -262,7 +292,7 @@ export const prepareEvidence = async (
     complete,
     capturedAt: deps.now().toISOString(),
   });
-  writeManifest(manifest, [manifestDir(request.keep, request.fingerprint)], request.knownValues);
+  writeManifest(manifest, request.keep, request.knownValues);
   return {
     ok: true,
     manifest,

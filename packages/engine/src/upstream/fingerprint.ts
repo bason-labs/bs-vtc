@@ -118,12 +118,25 @@ const functionName = (raw: string | undefined): string => {
   return /^[A-Za-z0-9_$.<>-]{1,120}$/.test(name) ? name : "<anonymous>";
 };
 
+/** The virtual root of a Bun single-file binary (`bun build --compile`), POSIX and Windows. */
+const BUN_ROOT = /^(?:\/\$bunfs\/root\/|[A-Za-z]:\/~BUN\/root\/)/;
+
+/**
+ * A frame of the compiled binary with an embedded sourcemap: Bun prints the build-relative source
+ * path (`packages/engine/src/x.ts`). Node and Bun print every other frame absolute (or `node:`).
+ */
+const isBuildRelative = (path: string): boolean =>
+  !path.startsWith("/") && !/^[A-Za-z]:\//.test(path) && !/^[a-z]+:/.test(path);
+
 /**
  * Pure: the top three VTC frames of a stack, as `package/file:function` (no line or column, no
  * absolute path, `src/` and `dist/` and the extension dropped, so a dev checkout and a release
- * agree). Frames outside VTC's packages (the project, Node, dependencies) are dropped. With
- * `vtcRoots`, only frames under one of those absolute directories count, so a project that is
- * itself a monorepo with `packages/engine/` cannot pass for VTC.
+ * agree). Frames outside VTC's packages (the project, Node, dependencies) are dropped. It fails
+ * closed: an absolute frame counts only under one of `vtcRoots` (the directories VTC's own sources
+ * run from), so a project that is itself a monorepo with `packages/engine/` cannot pass for VTC,
+ * and without `vtcRoots` only the single-file binary's own frames count. Those are the
+ * build-relative paths of a binary built with `--sourcemap`, or, without one, `/$bunfs/root/<bin>`
+ * frames, which carry no source path and become `cli/bundle:<function>` (named functions only).
  */
 export const vtcFramesFromStack = (stack: string, vtcRoots: readonly string[] = []): string[] => {
   const frames: string[] = [];
@@ -131,17 +144,25 @@ export const vtcFramesFromStack = (stack: string, vtcRoots: readonly string[] = 
     const match = FRAME.exec(line);
     if (match === null) continue;
     const path = (match[2] ?? "").replace(/\\/g, "/").replace(/^file:\/\//, "");
-    if (
-      vtcRoots.length > 0 &&
-      !vtcRoots.some((root) => path.startsWith(`${root.replace(/\/+$/, "")}/`))
-    ) {
-      continue;
+    const name = functionName(match[1]);
+    let frame: string;
+    if (BUN_ROOT.test(path)) {
+      const where = VTC_PATH.exec(path.replace(BUN_ROOT, ""));
+      if (where === null) {
+        if (name === "<anonymous>") continue;
+        frame = `cli/bundle:${name}`;
+      } else {
+        frame = `${where[1] ?? where[2] ?? where[3] ?? ""}/${(where[4] ?? "").toLowerCase()}:${name}`;
+      }
+    } else {
+      const ours =
+        isBuildRelative(path) ||
+        vtcRoots.some((root) => path.startsWith(`${root.replace(/\/+$/, "")}/`));
+      if (!ours) continue;
+      const where = VTC_PATH.exec(path);
+      if (where === null) continue;
+      frame = `${where[1] ?? where[2] ?? where[3] ?? ""}/${(where[4] ?? "").toLowerCase()}:${name}`;
     }
-    const where = VTC_PATH.exec(path);
-    if (where === null) continue;
-    const pkg = where[1] ?? where[2] ?? where[3] ?? "";
-    const file = (where[4] ?? "").toLowerCase();
-    const frame = `${pkg}/${file}:${functionName(match[1])}`;
     if (!VtcFrameSchema.safeParse(frame).success) continue;
     frames.push(frame);
     if (frames.length === 3) break;

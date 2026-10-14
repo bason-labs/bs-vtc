@@ -198,12 +198,60 @@ export interface UpstreamPrivacyCheck {
   readonly upstreamRepo: string;
 }
 
+/**
+ * `text` with the upstream repo's own name masked, at token boundaries only: a project repo such as
+ * `owner/name-client` keeps its full name, so the denylist still sees it.
+ */
 const maskUpstream = (text: string, upstreamRepo: string): string =>
-  text
-    .split(`https://github.com/${upstreamRepo}/`)
-    .join("https://github.com/UPSTREAM/")
-    .split(upstreamRepo)
-    .join("UPSTREAM");
+  text.replace(
+    new RegExp(`(?<![A-Za-z0-9_.-])${escape(upstreamRepo)}(?![A-Za-z0-9_.-])`, "gi"),
+    "UPSTREAM",
+  );
+
+/**
+ * Where a path in an upstream text may point: VTC's own tree and the generic tool folders. Any
+ * other `dir/file.ext` is taken for a project path (model-written text cannot be trusted not to
+ * carry one, and the denylist cannot know project-relative paths).
+ */
+const VTC_TREE = new Set([
+  "roles",
+  "packages",
+  "apps",
+  "skills",
+  "plugins",
+  "gates",
+  "docs",
+  "tooling",
+  "fixtures",
+  "packaging",
+  ".vtc",
+  ".github",
+  ".claude",
+  ".codex",
+]);
+
+/** `dir/…/file.ext` not inside a URL or a longer path (a URL's host and path are not matched). */
+const PATH_SHAPE =
+  /(?<![A-Za-z0-9_.~/:@-])((?:[A-Za-z0-9_.-]+\/)+[A-Za-z0-9_.-]*\.[A-Za-z][A-Za-z0-9]{0,7})(?![A-Za-z0-9_/-])/g;
+
+/** Pure: whether `text` names a file path outside VTC's own tree (spine §5 reading 208; D-by). */
+export const containsProjectPath = (text: string): boolean => {
+  for (const match of text.matchAll(PATH_SHAPE)) {
+    const first = (match[1] ?? "").replace(/^\.\//, "").split("/")[0] ?? "";
+    if (!VTC_TREE.has(first)) return true;
+  }
+  return false;
+};
+
+/**
+ * Throws `AutomationSkip("privacy")` when a model-written upstream text (a proposal's summary,
+ * hypothesis or new prompt lines, a PR's slots) names a file path outside VTC's tree.
+ */
+export const assertNoProjectPaths = (texts: readonly string[]): void => {
+  if (texts.some(containsProjectPath)) {
+    throw new AutomationSkip("privacy", "an upstream text named a file path outside VTC's tree");
+  }
+};
 
 /**
  * Throws `AutomationSkip("privacy")` unless the report and every outgoing text are unchanged by

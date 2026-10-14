@@ -113,6 +113,11 @@ export interface LookbackPrParts {
   readonly summary: string;
   readonly slots: TemplateSlots;
   readonly changes: readonly { readonly path: string; readonly text: string }[];
+  /**
+   * The model-written text this PR adds (the proposal's summaries, hypotheses, target metrics and
+   * trace ids, and the prompt lines it adds), which the path-shape check reads (D-by).
+   */
+  readonly freeTexts: readonly string[];
   /** The upstream-safe snapshot the evidence browser sees. */
   readonly snapshot: {
     readonly routes: Readonly<Record<string, unknown>>;
@@ -162,6 +167,12 @@ export const buildLookbackPr = (input: {
   const nextPrompt = spliceEditable(input.prompt, proposal.editable);
   const diff = `\`\`\`diff\n${lineDiff(before.editable, proposal.editable.trim())}\n\`\`\``;
   const traceIds = proposal.changes.flatMap((c) => c.trace_ids);
+  const oldLines = new Set(before.editable.split("\n").map((l) => l.trim()));
+  const freeTexts = [
+    ...proposal.changes.flatMap((c) => [c.summary, c.hypothesis, c.target_metric]),
+    ...traceIds,
+    ...proposal.editable.split("\n").filter((l) => !oldLines.has(l.trim())),
+  ];
   const evaluation = table([
     ["verdict", "improve"],
     ["trials per task (k)", String(replay.k)],
@@ -226,6 +237,7 @@ export const buildLookbackPr = (input: {
     report,
     summary,
     slots,
+    freeTexts,
     changes: [
       { path: rolePromptPath(replay.role), text: nextPrompt },
       { path: ROLES_CHANGELOG, text: insertChangelogEntry(input.changelog, entry) },

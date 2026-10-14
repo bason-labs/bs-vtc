@@ -1,5 +1,13 @@
 /** The dedupe table, caps and the auto-close sweep (AD-27 rule 4; spine §5 reading 208 (3)). */
-import { lstatSync, readFileSync, statSync, symlinkSync, writeFileSync } from "node:fs";
+import {
+  lstatSync,
+  mkdirSync,
+  readdirSync,
+  readFileSync,
+  statSync,
+  symlinkSync,
+  writeFileSync,
+} from "node:fs";
 import { join } from "node:path";
 import type { AutoIssueRef, AutoPrRef } from "@vtc/shared";
 import { afterEach, describe, expect, it } from "vitest";
@@ -168,6 +176,26 @@ describe("the dedupe table", () => {
     ).toEqual({ action: "reopen", number: 7 });
   });
 
+  it("reopens VTC's quiet close the remote shows, with no ledger (another machine)", () => {
+    const closed = issue({ number: 7, state: "closed", stateReason: "not_planned" });
+    expect(
+      decideIssue({
+        fingerprint: FP,
+        issues: [{ ...closed, closedQuietByVtc: true }],
+        now: NOW,
+        material: true,
+      }),
+    ).toEqual({ action: "reopen", number: 7 });
+    expect(
+      decideIssue({
+        fingerprint: FP,
+        issues: [{ ...closed, closedQuietByVtc: false }],
+        now: NOW,
+        material: true,
+      }),
+    ).toEqual({ action: "skip", reason: "muted", number: 7 });
+  });
+
   it("counts a change as material on a new VTC version or when the count crosses 10 or 100", () => {
     const l = ledger();
     for (let i = 0; i < 9; i += 1) {
@@ -219,6 +247,20 @@ describe("caps", () => {
     expect(issueCapReached(l, REPO, NOW)).toBe(true);
     expect(issueCapReached(l, "o/other", NOW)).toBe(false);
     expect(issueCapReached(l, REPO, new Date("2026-10-16T00:00:00Z"))).toBe(false);
+  });
+
+  it("counts today's automatic issues from the remote listing too (every installation)", () => {
+    const l = openLedger(join(tempDir(), "ledger.jsonl"));
+    const listed = [1, 2, 3, 4, 5].map((n) => ({
+      ...issue({ number: n }),
+      createdAt: `2026-10-15T0${String(n)}:00:00Z`,
+    }));
+    expect(issueCapReached(l, REPO, NOW, listed)).toBe(true);
+    expect(issueCapReached(l, REPO, NOW, listed.slice(1))).toBe(false);
+    const yesterday = listed.map((i) => ({ ...i, createdAt: "2026-10-14T23:00:00Z" }));
+    expect(issueCapReached(l, REPO, NOW, yesterday)).toBe(false);
+    const unmarked = listed.map((i) => ({ ...i, marker: null }));
+    expect(issueCapReached(l, REPO, NOW, unmarked)).toBe(false);
   });
 
   it("allows three open automatic PRs per kind", () => {
@@ -354,5 +396,22 @@ describe("the ledger", () => {
         at: NOW.toISOString(),
       });
     }).toThrow(/symlink/);
+  });
+  it("never writes through a symlinked directory below its root (a role-planted link)", () => {
+    const root = tempDir("vtc-project-");
+    const elsewhere = tempDir("vtc-elsewhere-");
+    mkdirSync(join(root, ".vtc", "state"), { recursive: true });
+    symlinkSync(elsewhere, join(root, ".vtc", "state", "automation"));
+    const path = ledgerPath({ kind: "project", repoRoot: root });
+    expect(() => {
+      openLedger(path, [], root).append({
+        repo: REPO,
+        fp: FP,
+        kind: "defect",
+        event: "seen",
+        at: NOW.toISOString(),
+      });
+    }).toThrow(/symlink/);
+    expect(readdirSync(elsewhere)).toEqual([]);
   });
 });

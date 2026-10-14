@@ -3,9 +3,11 @@ import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 import {
+  assertNoProjectPaths,
   assertUpstreamSafe,
   autoFingerprint,
   containsDenied,
+  containsProjectPath,
   loadAutoTemplate,
   projectDenylist,
   projectUpstreamReport,
@@ -30,7 +32,7 @@ const STACK = `Error: unexpected token
     at async runTurn (/Users/alice/vtc/packages/engine/src/core/loop.ts:88:5)`;
 
 const facts = (over: Partial<UpstreamFacts> = {}): UpstreamFacts => {
-  const frames = vtcFramesFromStack(STACK);
+  const frames = vtcFramesFromStack(STACK, ["/Users/alice/vtc"]);
   return {
     kind: "defect",
     fingerprint: autoFingerprint({ kind: "defect", errorClass: "adapter.parse_failure", frames }),
@@ -147,6 +149,42 @@ describe("redaction fails closed", () => {
         denylist: projectDenylist({ ...IDENTITY, homeDir: "/Users/bason" }),
       });
     }).not.toThrow();
+  });
+});
+
+describe("upstream free text", () => {
+  it("masks the upstream repo only as a whole name, so a project repo that extends it is caught", () => {
+    const report = projectUpstreamReport(facts());
+    const check = {
+      ...CHECK,
+      denylist: projectDenylist({ ...IDENTITY, repo: "bason-labs/bs-vtc-client" }),
+    };
+    expect(() => {
+      assertUpstreamSafe(report, ["fails in bason-labs/bs-vtc-client too"], check);
+    }).toThrow(expect.objectContaining({ reason: "privacy" }) as Error);
+    expect(() => {
+      assertUpstreamSafe(report, ["see bason-labs/bs-vtc#12"], {
+        ...check,
+        denylist: projectDenylist({
+          ...IDENTITY,
+          repo: "someone/bs-vtc-client",
+          remoteUrl: "git@github.com:someone/bs-vtc-client.git",
+        }),
+      });
+    }).not.toThrow();
+  });
+  it("refuses file paths outside VTC's tree, and lets VTC's own paths and URLs through", () => {
+    expect(containsProjectPath("edit src/payroll/export.ts first")).toBe(true);
+    expect(containsProjectPath("the app/models/user.rb model")).toBe(true);
+    expect(containsProjectPath("see roles/implementer/prompt.md")).toBe(false);
+    expect(containsProjectPath("packages/engine/src/core/loop.ts:runTurn")).toBe(false);
+    expect(containsProjectPath("https://github.com/bason-labs/bs-vtc/blob/a/x.png?raw=true")).toBe(
+      false,
+    );
+    expect(containsProjectPath("tokens per task fell 8% (p = 0.06)")).toBe(false);
+    expect(() => {
+      assertNoProjectPaths(["Plan the steps.", "check lib/billing/invoice.py before editing"]);
+    }).toThrow(expect.objectContaining({ reason: "privacy" }) as Error);
   });
 });
 

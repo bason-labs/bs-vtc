@@ -4,10 +4,15 @@
  * `AUTOMATION_LIMITS.minWriteIntervalMs` after the last one, at most
  * `AUTOMATION_LIMITS.mutatingCallsPerHour` run per rolling hour (beyond that the action is skipped
  * with `rate_limit`), and GitHub's secondary rate limit is backed off 60 s × 2^n for three tries in
- * all, then skipped with `github_rate_limit`.
+ * all, then skipped with `github_rate_limit`. With `pacing`, the write times of each repo are kept
+ * in VTC's home under a lock file, so the interval and the hourly cap hold across every daemon on
+ * the machine (AD-12 runs one per project, and they all report to the same upstream repo).
  */
+import { join } from "node:path";
 import { AUTOMATION_LIMITS } from "@vtc/shared";
+import { withFileLock } from "./file-lock.js";
 import { isSecondaryRateLimit, type GhResult } from "./gh.js";
+import { ensureDirNoFollow, readNoFollow, repoFileName, writeFileNoFollow } from "./safe-fs.js";
 import { AutomationSkip } from "./skip.js";
 
 /** First backoff after a secondary rate limit; doubles each time. */
@@ -21,6 +26,8 @@ export interface RepoQueueOptions {
   readonly sleep?: (ms: number) => Promise<void>;
   readonly minWriteIntervalMs?: number;
   readonly mutatingCallsPerHour?: number;
+  /** Where the shared write log lives: `dir` below the trusted `root` (VTC's home). */
+  readonly pacing?: { readonly root: string; readonly dir: string };
 }
 
 export interface RepoQueue {
@@ -47,29 +54,80 @@ export const createKeyedSerial = (): (<T>(key: string, task: () => Promise<T>) =
 export const realSleep = (ms: number): Promise<void> =>
   new Promise((resolve) => setTimeout(resolve, ms));
 
+/** The write times of each repo: reserves a slot (cap checked, interval waited, time recorded). */
+interface WriteLog {
+  reserve(repo: string): Promise<void>;
+}
+
+const reserveIn = async (
+  times: number[],
+  repo: string,
+  limits: {
+    now: () => number;
+    sleep: (ms: number) => Promise<void>;
+    minInterval: number;
+    perHour: number;
+  },
+): Promise<number[]> => {
+  const recent = times.filter((t) => limits.now() - t < HOUR_MS);
+  if (recent.length >= limits.perHour) {
+    throw new AutomationSkip(
+      "rate_limit",
+      `${String(limits.perHour)} mutating gh calls to ${repo} in the last hour`,
+    );
+  }
+  const last = recent.at(-1);
+  if (last !== undefined) {
+    const wait = last + limits.minInterval - limits.now();
+    if (wait > 0) await limits.sleep(wait);
+  }
+  return [...recent, limits.now()];
+};
+
+const parseTimes = (text: string | null): number[] => {
+  if (text === null) return [];
+  try {
+    const value: unknown = JSON.parse(text);
+    return Array.isArray(value) ? value.filter((t): t is number => typeof t === "number") : [];
+  } catch {
+    return [];
+  }
+};
+
 export const createRepoQueue = (options: RepoQueueOptions = {}): RepoQueue => {
-  const now = options.now ?? Date.now;
-  const sleep = options.sleep ?? realSleep;
-  const minInterval = options.minWriteIntervalMs ?? AUTOMATION_LIMITS.minWriteIntervalMs;
-  const perHour = options.mutatingCallsPerHour ?? AUTOMATION_LIMITS.mutatingCallsPerHour;
+  const limits = {
+    now: options.now ?? Date.now,
+    sleep: options.sleep ?? realSleep,
+    minInterval: options.minWriteIntervalMs ?? AUTOMATION_LIMITS.minWriteIntervalMs,
+    perHour: options.mutatingCallsPerHour ?? AUTOMATION_LIMITS.mutatingCallsPerHour,
+  };
   const serial = createKeyedSerial();
-  const writes = new Map<string, number[]>();
+  const memory = new Map<string, number[]>();
+  const pacing = options.pacing;
+  const log: WriteLog =
+    pacing === undefined
+      ? {
+          reserve: async (repo) => {
+            memory.set(repo, await reserveIn(memory.get(repo) ?? [], repo, limits));
+          },
+        }
+      : {
+          reserve: async (repo) => {
+            const dir = ensureDirNoFollow(pacing.root, pacing.dir, "the gh pacing log");
+            const name = `${repoFileName(repo)}.json`;
+            await withFileLock(
+              join(dir, `${name}.lock`),
+              async () => {
+                const times = parseTimes(readNoFollow(join(dir, name), "the gh pacing log"));
+                writeFileNoFollow(dir, name, JSON.stringify(await reserveIn(times, repo, limits)));
+              },
+              { now: limits.now },
+            );
+          },
+        };
 
   const oneWrite = async (repo: string, call: () => Promise<GhResult>): Promise<GhResult> => {
-    const times = (writes.get(repo) ?? []).filter((t) => now() - t < HOUR_MS);
-    writes.set(repo, times);
-    if (times.length >= perHour) {
-      throw new AutomationSkip(
-        "rate_limit",
-        `${String(perHour)} mutating gh calls to ${repo} in the last hour`,
-      );
-    }
-    const last = times.at(-1);
-    if (last !== undefined) {
-      const wait = last + minInterval - now();
-      if (wait > 0) await sleep(wait);
-    }
-    times.push(now());
+    await log.reserve(repo);
     return call();
   };
 
@@ -86,7 +144,7 @@ export const createRepoQueue = (options: RepoQueueOptions = {}): RepoQueue => {
               `GitHub's secondary rate limit on ${repo} after ${String(SECONDARY_LIMIT_TRIES)} tries`,
             );
           }
-          await sleep(SECONDARY_LIMIT_BACKOFF_MS * 2 ** attempt);
+          await limits.sleep(SECONDARY_LIMIT_BACKOFF_MS * 2 ** attempt);
         }
       }),
   };

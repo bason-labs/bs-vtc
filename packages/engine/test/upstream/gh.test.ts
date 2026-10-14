@@ -1,18 +1,22 @@
 /** The gh seam of AD-27 rule 1: argv guard, stub-binary services, the per-repo queue (D-cc). */
-import { writeFileSync } from "node:fs";
+import { existsSync, symlinkSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
-import { AUTO_COMMENT_MARKER, renderAutoMarker } from "@vtc/shared";
+import { AUTO_COMMENT_MARKER, AUTOMATION_LIMITS, renderAutoMarker } from "@vtc/shared";
 import { afterEach, describe, expect, it } from "vitest";
 import {
   assertGhArgsAllowed,
   createGhServices,
   createRepoQueue,
   GhArgvRefusedError,
+  issueFromGh,
+  lockIsStale,
+  QUIET_CLOSE_MARKER,
   stripUnresolvedReferences,
+  withFileLock,
   type GhResult,
 } from "../../src/upstream/index.js";
 import { cleanupDirs, tempDir } from "../helpers/repo.js";
-import { ghIssue, ghPr, stubGh } from "./stub-gh.js";
+import { ghIssue, ghPr, stubGh, type GhRule, type StubGh } from "./stub-gh.js";
 
 afterEach(cleanupDirs);
 
@@ -160,6 +164,67 @@ describe("gh-backed services with a stub gh", () => {
     expect(call?.args.join(" ")).not.toMatch(/search/);
   });
 
+  it("reads the remote facts: when an issue opened, and whether VTC's quiet sweep closed it", () => {
+    const quiet = issueFromGh({
+      number: 3,
+      url: "https://github.com/o/r/issues/3",
+      state: "CLOSED",
+      stateReason: "NOT_PLANNED",
+      body: MARKER,
+      createdAt: "2026-10-01T08:00:00Z",
+      closedAt: "2026-10-15T09:00:01Z",
+      comments: [
+        { body: "a human", createdAt: "2026-10-02T00:00:00Z" },
+        {
+          body: `${AUTO_COMMENT_MARKER}\n${QUIET_CLOSE_MARKER}\nNot seen for 14 days`,
+          createdAt: "2026-10-15T09:00:00Z",
+        },
+      ],
+    });
+    expect(quiet).toMatchObject({ createdAt: "2026-10-01T08:00:00Z", closedQuietByVtc: true });
+    // A human closed it later as not planned (or commented after VTC's close): not VTC's close.
+    expect(
+      issueFromGh({
+        number: 3,
+        url: "u",
+        state: "CLOSED",
+        stateReason: "NOT_PLANNED",
+        closedAt: "2026-10-20T00:00:00Z",
+        comments: [{ body: QUIET_CLOSE_MARKER, createdAt: "2026-10-15T09:00:00Z" }],
+      })?.closedQuietByVtc,
+    ).toBe(false);
+    expect(
+      issueFromGh({
+        number: 3,
+        url: "u",
+        state: "CLOSED",
+        stateReason: "NOT_PLANNED",
+        closedAt: "2026-10-15T09:00:01Z",
+        comments: [{ body: "not planned, thanks", createdAt: "2026-10-15T09:00:00Z" }],
+      })?.closedQuietByVtc,
+    ).toBe(false);
+  });
+
+  it("reads the PR head after its comment, right before closing", async () => {
+    const gh = stubGh([
+      {
+        match: ["pr", "view", "9"],
+        stdout: JSON.stringify(ghPr({ number: 9, sha: "b".repeat(40), body: MARKER })),
+      },
+    ]);
+    const services = createGhServices({
+      command: gh.command,
+      queue: fastQueue(),
+      stagingRoot: tempDir(),
+    });
+    await services.pullRequests.close(REPO, 9, "superseded", "b".repeat(40));
+    expect(gh.calls().map((c) => c.args.slice(0, 2).join(" "))).toEqual([
+      "pr comment",
+      "pr view",
+      "pr close",
+    ]);
+  });
+
   it("comments, closes and reopens through body files that carry the comment marker", async () => {
     const gh = stubGh([]);
     const services = createGhServices({
@@ -236,12 +301,83 @@ describe("gh-backed services with a stub gh", () => {
     expect(gh.calls().some((c) => c.args.includes("merge"))).toBe(false);
   });
 
+  const partialUpload = (extra: GhRule[] = []): GhRule[] => [
+    ...extra,
+    { match: ["label", "list"], stdout: JSON.stringify([{ name: "vtc:auto" }]) },
+    {
+      match: ["pr", "create"],
+      code: 1,
+      stdout: "https://github.com/o/r/pull/5\n",
+      stderr: "upload failed for 02-flow.png",
+    },
+    {
+      match: ["pr", "view", "5", "-R", REPO, "--json", "body"],
+      stdout: JSON.stringify({
+        body: `${MARKER}\n![replay](https://github.com/user-attachments/assets/x)\n![shot](02-flow.png)\n`,
+      }),
+    },
+    { match: ["pr", "view", "5"], stdout: JSON.stringify(ghPr({ number: 5, body: MARKER })) },
+  ];
+  const openWithAttachments = async (gh: StubGh): Promise<void> => {
+    const staging = stagingWith(`${MARKER}\n![replay](01-replay.webm)\n![shot](02-flow.png)\n`, [
+      "01-replay.webm",
+      "02-flow.png",
+    ]);
+    const services = createGhServices({
+      command: gh.command,
+      queue: fastQueue(),
+      stagingRoot: tempDir(),
+    });
+    await services.pullRequests.openDraft(REPO, {
+      title: "t",
+      stagingDir: staging,
+      bodyFile: "body.md",
+      labels: [],
+      kind: "defect",
+      fingerprint: FP,
+      branch: "vtc/auto/defect/01234567",
+      base: "main",
+      attach: [
+        { name: "01-replay.webm", alt: "replay" },
+        { name: "02-flow.png", alt: "shot" },
+      ],
+    });
+  };
+
+  it("creates the evidence: partial label a repair needs when the repo lacks it", async () => {
+    const gh = stubGh(partialUpload());
+    await openWithAttachments(gh);
+    const calls = gh.calls().map((c) => c.args.slice(0, 3).join(" "));
+    expect(calls.indexOf("label create evidence: partial")).toBeGreaterThan(-1);
+    expect(calls.indexOf("label create evidence: partial")).toBeLessThan(
+      calls.indexOf("pr edit 5"),
+    );
+  });
+
+  it("strips the unresolved references even when labelling the item fails", async () => {
+    const gh = stubGh(
+      partialUpload([
+        {
+          match: ["pr", "edit", "5", "-R", REPO, "--body-file", "body-resolved.md", "--add-label"],
+          code: 1,
+          stderr: "could not add label: 'evidence: partial' not found",
+        },
+      ]),
+    );
+    await openWithAttachments(gh);
+    const edits = gh.calls().filter((c) => c.args[1] === "edit");
+    expect(edits.map((e) => e.args.includes("--add-label"))).toEqual([true, false]);
+    expect(edits[1]?.body).toContain("user-attachments");
+    expect(edits[1]?.body).not.toContain("02-flow.png");
+  });
+
   it("repairs a partial --attach upload: strips unresolved references, labels partial", async () => {
     const staging = stagingWith(`${MARKER}\n![replay](01-replay.webm)\n![shot](02-flow.png)\n`, [
       "01-replay.webm",
       "02-flow.png",
     ]);
     const gh = stubGh([
+      { match: ["label", "list"], stdout: JSON.stringify([{ name: "evidence: partial" }]) },
       {
         match: ["pr", "create"],
         code: 1,
@@ -344,6 +480,23 @@ describe("the per-repo queue", () => {
     await expect(queue.write("o/other", () => Promise.resolve(ok))).resolves.toEqual(ok);
   });
 
+  it("shares the interval and the hourly cap across processes through VTC's home", async () => {
+    const home = tempDir("vtc-home-");
+    const pacing = { root: home, dir: join(home, "upstream", "pacing") };
+    const c = clock();
+    // Two daemons (two queues, nothing shared in memory) writing to the same repo.
+    const a = createRepoQueue({ now: c.now, sleep: c.sleep, mutatingCallsPerHour: 3, pacing });
+    const b = createRepoQueue({ now: c.now, sleep: c.sleep, mutatingCallsPerHour: 3, pacing });
+    await a.write("o/r", () => Promise.resolve(ok));
+    await b.write("o/r", () => Promise.resolve(ok));
+    expect(c.slept).toEqual([AUTOMATION_LIMITS.minWriteIntervalMs]);
+    await a.write("o/r", () => Promise.resolve(ok));
+    await expect(b.write("o/r", () => Promise.resolve(ok))).rejects.toMatchObject({
+      reason: "rate_limit",
+    });
+    expect(existsSync(join(home, "upstream", "pacing", "o__r.json"))).toBe(true);
+  });
+
   it("backs off 60 s x 2^n on the secondary limit, then skips with github_rate_limit", async () => {
     const c = clock();
     const queue = createRepoQueue({ now: c.now, sleep: c.sleep, minWriteIntervalMs: 0 });
@@ -362,5 +515,57 @@ describe("the per-repo queue", () => {
       return Promise.resolve(second === 1 ? limited : ok);
     });
     expect(result).toEqual(ok);
+  });
+});
+
+describe("the automation lock", () => {
+  it("runs one holder at a time across lock instances, and releases on failure", async () => {
+    const dir = tempDir("vtc-lock-");
+    const path = join(dir, "o__r.lock");
+    const order: string[] = [];
+    let release: () => void = () => undefined;
+    const held = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const first = withFileLock(path, async () => {
+      order.push("first in");
+      await held;
+      order.push("first out");
+    });
+    const second = withFileLock(
+      path,
+      () => {
+        order.push("second");
+        return Promise.resolve();
+      },
+      { pollMs: 5 },
+    );
+    await new Promise((resolve) => setTimeout(resolve, 30));
+    expect(order).toEqual(["first in"]);
+    release();
+    await Promise.all([first, second]);
+    expect(order).toEqual(["first in", "first out", "second"]);
+    await expect(withFileLock(path, () => Promise.reject(new Error("boom")))).rejects.toThrow(
+      "boom",
+    );
+    expect(existsSync(path)).toBe(false);
+  });
+
+  it("breaks a lock whose holder is gone, and never follows a symlink", async () => {
+    const dir = tempDir("vtc-lock-");
+    const path = join(dir, "o__r.lock");
+    expect(lockIsStale(`999999999\n${String(Date.now())}\nx\n`, Date.now(), 60_000)).toBe(true);
+    expect(
+      lockIsStale(`${String(process.pid)}\n${String(Date.now())}\nx\n`, Date.now(), 60_000),
+    ).toBe(false);
+    writeFileSync(path, `999999999\n${String(Date.now())}\nstale\n`);
+    await expect(withFileLock(path, () => Promise.resolve("ran"))).resolves.toBe("ran");
+    const target = join(dir, "target");
+    writeFileSync(target, "keep");
+    const link = join(dir, "link.lock");
+    symlinkSync(target, link);
+    await expect(
+      withFileLock(link, () => Promise.resolve("ran"), { timeoutMs: 50, pollMs: 5 }),
+    ).rejects.toThrow();
   });
 });

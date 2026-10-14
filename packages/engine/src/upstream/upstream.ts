@@ -4,8 +4,9 @@
  * only through the `@vtc/shared` seams in `AutomationDeps`, checks the opt-outs when an item is
  * queued and again when it is sent, dedupes against the remote label listing, keeps the caps, fails
  * closed on privacy, opens no PR without evidence, and reports every action (or skip) as an event.
+ * The list → decide → write sequence of a target repo runs under a lock file in VTC's home, so the
+ * daemons of several projects reporting to the same repo never race each other.
  */
-import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import {
   AUTO_LABELS,
@@ -18,6 +19,7 @@ import {
   type AssetBundle,
   type AutoFingerprint,
   type AutoKind,
+  type AutoPrRef,
   type AutomationContext,
   type AutomationDeps,
   type AutomationSettings,
@@ -49,14 +51,17 @@ import {
   planPrCap,
   planQuietSweep,
   planStalePrs,
+  QUIET_CLOSE_MARKER,
 } from "./decisions.js";
-import type { FfmpegCommand } from "./evidence/gif.js";
+import { createFfmpegCommand, type FfmpegCommand } from "./evidence/gif.js";
 import type { EvidencePlanInput } from "./evidence/plan.js";
 import { prepareEvidence } from "./evidence/pipeline.js";
+import { withFileLock } from "./file-lock.js";
 import { autoFingerprint } from "./fingerprint.js";
 import { createGhServices } from "./gh-services.js";
 import { ledgerPath, openLedger, type Ledger, type LedgerRecord } from "./ledger.js";
 import {
+  assertNoProjectPaths,
   assertUpstreamSafe,
   projectDenylist,
   projectUpstreamReport,
@@ -64,6 +69,7 @@ import {
 } from "./privacy.js";
 import { buildLookbackPr, UPSTREAM_EVIDENCE_ROUTE } from "./lookback-pr.js";
 import { upstreamIssueSlots } from "./report-render.js";
+import { ensureDirNoFollow, repoFileName } from "./safe-fs.js";
 import { AutomationSkip, isAutomationSkip } from "./skip.js";
 import { createKeyedSerial } from "./queue.js";
 import { createStaging, stagingRootFor, type Staging } from "./staging.js";
@@ -94,6 +100,12 @@ export interface ProjectContext {
   readonly knownValues: readonly string[];
   /** `visual.redact_selectors`. */
   readonly redactSelectors?: readonly string[];
+  /**
+   * `project.yaml` `automation.evidence`, resolved by the daemon, for the project repo's PRs:
+   * `maxBytes` is `max_mb` in bytes (it lowers the per-PR budget, never above `EVIDENCE_LIMITS`);
+   * `video: false` drops the recordings (screenshots only, `evidence: partial`).
+   */
+  readonly evidence?: { readonly maxBytes?: number; readonly video?: boolean };
 }
 
 export interface UpstreamDeps {
@@ -104,16 +116,29 @@ export interface UpstreamDeps {
   readonly vtcVersion: string;
   /** The compiled plugins' templates and the dashboard export. */
   readonly assets: AssetBundle;
+  /**
+   * Every action and skip as an event (D-ca). An `{ status: "error" }` outcome (a gh, git or
+   * template failure) has no event of its own (contracts 5.0.0 has no such skip reason; a contract
+   * proposal adds one): the daemon records it, e.g. as an incident note, so it stays visible.
+   */
   readonly emit: (event: UpstreamEvent) => void;
   readonly now?: () => Date;
   /** The `gh` binary for the default services. */
   readonly ghCommand?: string;
   /** A repo's default branch; default `gh repo view`. */
   readonly defaultBranch?: (repo: GitHubRepo) => Promise<string>;
+  /** Default with `automation.ffmpeg`: `createFfmpegCommand()` (the `ffmpeg` on PATH). */
   readonly ffmpegCommand?: FfmpegCommand;
-  /** Reads a file at a commit (engine git's `GitOps`); default: the checkout's work tree. */
+  /**
+   * Reads a file at a commit (engine git's `GitOps`). The Lookback PR reads the role prompt and
+   * the CHANGELOG at the default branch's commit it builds on; without it no Lookback PR opens
+   * (never from the checkout's work tree, which may be dirty, behind or on another branch).
+   */
   readonly gitOps?: (repoRoot: string) => Pick<GitOps, "readFileAtCommit">;
-  /** Absolute directories VTC's own sources run from (stack frames outside them are dropped). */
+  /**
+   * Absolute directories VTC's own sources run from. Absolute stack frames outside them are
+   * dropped; absent, only the single-file binary's own frames count (fail closed).
+   */
   readonly vtcRoots?: readonly string[];
 }
 
@@ -156,8 +181,14 @@ export interface AutoPrInput {
   readonly source: PrSource;
   /** Upstream PRs: the report the body is checked against (D-by). */
   readonly report?: UpstreamReport | undefined;
-  /** Extra texts the privacy check reads (for upstream), e.g. committed file contents. */
+  /** Extra texts the privacy check reads (for upstream); committed files are always read. */
   readonly checkTexts?: readonly string[];
+  /**
+   * Upstream: model-written free text this PR carries beyond its slots (proposal summaries,
+   * hypotheses, new prompt lines). With the title and slots it is refused when it names a file
+   * path outside VTC's tree (D-by).
+   */
+  readonly freeTexts?: readonly string[];
   readonly issue?: number | undefined;
   readonly evidence: {
     readonly plan: EvidencePlanInput;
@@ -172,8 +203,12 @@ export interface AutoPrInput {
       readonly label: string;
     }[];
   };
-  /** Automatic runs: the Spec-Verifier verdict so far; the PR is marked ready only on `pass`. */
-  readonly specVerifier?: "pending" | "pass" | "fail" | undefined;
+  /**
+   * The Spec-Verifier verdict so far (AD-27 rule 2): the PR is marked ready only on `pass`, or on
+   * `none` for a kind with no Spec Verifier (a Lookback prompt edit, a dependency bump). A branch
+   * an automatic run pushed (`pushedHead`) always has one, so `none` keeps it draft.
+   */
+  readonly specVerifier: "pending" | "pass" | "fail" | "none";
   readonly extraLabels?: readonly string[];
 }
 
@@ -210,7 +245,7 @@ export interface Upstream {
 }
 
 const QUIET_COMMENT = (version: string): string =>
-  `Not seen for 14 days as of VTC ${version}. VTC reopens this issue if it recurs; label it \`${AUTO_LABELS.keep}\` to keep it open or \`${AUTO_LABELS.muted}\` to stop it for good.`;
+  `${QUIET_CLOSE_MARKER}\nNot seen for 14 days as of VTC ${version}. VTC reopens this issue if it recurs; label it \`${AUTO_LABELS.keep}\` to keep it open or \`${AUTO_LABELS.muted}\` to stop it for good.`;
 
 export const createUpstream = (deps: UpstreamDeps): Upstream => {
   const now = deps.now ?? ((): Date => new Date());
@@ -218,7 +253,23 @@ export const createUpstream = (deps: UpstreamDeps): Upstream => {
   const gh = createGhServices({
     ...(deps.ghCommand === undefined ? {} : { command: deps.ghCommand }),
     stagingRoot,
+    pacing: { root: deps.vtcHome, dir: join(deps.vtcHome, "upstream", "pacing") },
   });
+  const ffmpegCommand =
+    deps.ffmpegCommand ?? (deps.automation.ffmpeg ? createFfmpegCommand() : undefined);
+
+  /**
+   * One target repo's list → decide → write sequence at a time across every VTC process on the
+   * machine (AD-27 rule 1; AD-12 runs one daemon per project, all reporting to one upstream repo).
+   */
+  const withRepoLock = <T>(repo: GitHubRepo, task: () => Promise<T>): Promise<T> => {
+    const dir = ensureDirNoFollow(
+      deps.vtcHome,
+      join(deps.vtcHome, "upstream", "locks"),
+      "the automation lock",
+    );
+    return withFileLock(join(dir, `${repoFileName(repo)}.lock`), task);
+  };
   const issues = deps.automation.issues ?? gh.issues;
   const pullRequests = deps.automation.pullRequests ?? gh.pullRequests;
   const defaultBranch = deps.defaultBranch ?? gh.defaultBranch;
@@ -232,12 +283,17 @@ export const createUpstream = (deps: UpstreamDeps): Upstream => {
     target === "upstream" ? deps.automation.upstream.repo : ctx.repo;
 
   const ledgerFor = (target: "upstream" | "project", ctx: ProjectContext): Ledger =>
-    openLedger(
-      target === "upstream"
-        ? ledgerPath({ kind: "upstream", vtcHome: deps.vtcHome })
-        : ledgerPath({ kind: "project", repoRoot: ctx.repoRoot }),
-      ctx.knownValues,
-    );
+    target === "upstream"
+      ? openLedger(
+          ledgerPath({ kind: "upstream", vtcHome: deps.vtcHome }),
+          ctx.knownValues,
+          deps.vtcHome,
+        )
+      : openLedger(
+          ledgerPath({ kind: "project", repoRoot: ctx.repoRoot }),
+          ctx.knownValues,
+          ctx.repoRoot,
+        );
 
   /** The opt-outs and controls; checked when an item is queued and again when it is sent. */
   const gate = (
@@ -375,147 +431,155 @@ export const createUpstream = (deps: UpstreamDeps): Upstream => {
       gate(item.target, "issues", ctx);
       const repo = repoOf(item.target, ctx);
       if (repo === null) throw new AutomationSkip("no_github_remote", "no target repo");
-      const ledger = ledgerFor(item.target, ctx);
-      ledger.append({
-        repo,
-        fp: item.fingerprint,
-        kind: item.kind,
-        event: "seen",
-        at: item.at,
-        version: deps.vtcVersion,
-      });
-      const record = ledger.record(repo, item.fingerprint);
-      if ((record?.count ?? 0) < item.minOccurrences) {
-        return { status: "recorded", fingerprint: item.fingerprint };
-      }
-      const listed = await issues.listAutomatic(repo);
-      const decision = decideIssue({
-        fingerprint: item.fingerprint,
-        issues: listed,
-        record,
-        now: now(),
-        material: isMaterialChange(record, deps.vtcVersion),
-      });
-      if (decision.action === "skip") {
-        throw new AutomationSkip(
-          decision.reason,
-          decision.reason === "muted"
-            ? `issue #${String(decision.number)} is muted`
-            : `issue #${String(decision.number)} was updated in the last 24 h`,
-        );
-      }
-      const regressionOf = decision.action === "regression" ? decision.of : undefined;
-      const rendered = renderIssue(item, record, ctx, regressionOf);
-      return withStaging(async (staging) => {
-        const request = {
-          title: rendered.title,
-          stagingDir: staging.dir,
-          bodyFile: staging.write("body.md", rendered.body),
-          labels: [
-            AUTO_LABELS.auto,
-            autoKindLabel(item.kind),
-            ...(item.kind === "security" ? [AUTO_LABELS.security] : []),
-            ...(regressionOf === undefined ? [] : [AUTO_LABELS.regression]),
-          ],
-        };
-        const target = { kind: item.target, repo };
-        const at = now().toISOString();
-        gate(item.target, "issues", ctx);
-        switch (decision.action) {
-          case "create":
-          case "regression": {
-            if (issueCapReached(ledger, repo, now())) {
-              throw new AutomationSkip("rate_limit", "5 new automatic issues today");
-            }
-            await issues.ensureLabels(repo, request.labels);
-            const issue = await issues.create(repo, request);
-            ledger.append({
-              repo,
-              fp: item.fingerprint,
-              kind: item.kind,
-              event: "issue_opened",
-              number: issue.number,
-              at,
-            });
-            emit("upstream.issue_opened", {
-              target,
-              kind: item.kind,
-              fingerprint: item.fingerprint,
-              number: issue.number,
-              url: issue.url,
-              ...(regressionOf === undefined ? {} : { regression_of: regressionOf }),
-            });
-            return { status: "issue", action: "opened", number: issue.number, url: issue.url };
+      return withRepoLock(repo, () => raiseLocked(item, ctx, repo));
+    });
+  };
+
+  const raiseLocked = async (
+    item: AutoWorkItem,
+    ctx: ProjectContext,
+    repo: GitHubRepo,
+  ): Promise<AutomationOutcome> => {
+    const ledger = ledgerFor(item.target, ctx);
+    ledger.append({
+      repo,
+      fp: item.fingerprint,
+      kind: item.kind,
+      event: "seen",
+      at: item.at,
+      version: deps.vtcVersion,
+    });
+    const record = ledger.record(repo, item.fingerprint);
+    if ((record?.count ?? 0) < item.minOccurrences) {
+      return { status: "recorded", fingerprint: item.fingerprint };
+    }
+    const listed = await issues.listAutomatic(repo);
+    const decision = decideIssue({
+      fingerprint: item.fingerprint,
+      issues: listed,
+      record,
+      now: now(),
+      material: isMaterialChange(record, deps.vtcVersion),
+    });
+    if (decision.action === "skip") {
+      throw new AutomationSkip(
+        decision.reason,
+        decision.reason === "muted"
+          ? `issue #${String(decision.number)} is muted`
+          : `issue #${String(decision.number)} was updated in the last 24 h`,
+      );
+    }
+    const regressionOf = decision.action === "regression" ? decision.of : undefined;
+    const rendered = renderIssue(item, record, ctx, regressionOf);
+    return withStaging(async (staging) => {
+      const request = {
+        title: rendered.title,
+        stagingDir: staging.dir,
+        bodyFile: staging.write("body.md", rendered.body),
+        labels: [
+          AUTO_LABELS.auto,
+          autoKindLabel(item.kind),
+          ...(item.kind === "security" ? [AUTO_LABELS.security] : []),
+          ...(regressionOf === undefined ? [] : [AUTO_LABELS.regression]),
+        ],
+      };
+      const target = { kind: item.target, repo };
+      const at = now().toISOString();
+      gate(item.target, "issues", ctx);
+      switch (decision.action) {
+        case "create":
+        case "regression": {
+          if (issueCapReached(ledger, repo, now(), listed)) {
+            throw new AutomationSkip("rate_limit", "5 new automatic issues today");
           }
-          case "update": {
-            const url = listed.find((i) => i.number === decision.number)?.url ?? "";
-            await issues.editBody(repo, decision.number, request);
-            ledger.append({
-              repo,
-              fp: item.fingerprint,
-              kind: item.kind,
-              event: "issue_updated",
-              number: decision.number,
-              at,
-            });
-            let action: "edited" | "commented" = "edited";
-            if (decision.comment) {
-              const comment = {
-                ...request,
-                bodyFile: staging.write(
-                  "comment.md",
-                  `Seen again: ${String(record?.count ?? 1)} occurrences, last at ${record?.lastSeen ?? item.at}, VTC ${deps.vtcVersion}.`,
-                ),
-              };
-              await issues.comment(repo, decision.number, comment);
-              ledger.append({
-                repo,
-                fp: item.fingerprint,
-                kind: item.kind,
-                event: "commented",
-                number: decision.number,
-                at,
-              });
-              action = "commented";
-            }
-            emit("upstream.issue_updated", {
-              target,
-              kind: item.kind,
-              fingerprint: item.fingerprint,
-              number: decision.number,
-              url,
-              action,
-            });
-            return { status: "issue", action, number: decision.number, url };
-          }
-          case "reopen": {
-            const url = listed.find((i) => i.number === decision.number)?.url ?? "";
-            await issues.reopen(
-              repo,
-              decision.number,
-              `Seen again (VTC ${deps.vtcVersion}); reopening the quiet issue.`,
-            );
-            await issues.editBody(repo, decision.number, request);
-            ledger.append({
-              repo,
-              fp: item.fingerprint,
-              kind: item.kind,
-              event: "reopened",
-              number: decision.number,
-              at,
-            });
-            emit("upstream.issue_updated", {
-              target,
-              kind: item.kind,
-              fingerprint: item.fingerprint,
-              number: decision.number,
-              url,
-              action: "reopened",
-            });
-            return { status: "issue", action: "reopened", number: decision.number, url };
-          }
+          await issues.ensureLabels(repo, request.labels);
+          const issue = await issues.create(repo, request);
+          ledger.append({
+            repo,
+            fp: item.fingerprint,
+            kind: item.kind,
+            event: "issue_opened",
+            number: issue.number,
+            at,
+          });
+          emit("upstream.issue_opened", {
+            target,
+            kind: item.kind,
+            fingerprint: item.fingerprint,
+            number: issue.number,
+            url: issue.url,
+            ...(regressionOf === undefined ? {} : { regression_of: regressionOf }),
+          });
+          return { status: "issue", action: "opened", number: issue.number, url: issue.url };
         }
-      });
+        case "update": {
+          const url = listed.find((i) => i.number === decision.number)?.url ?? "";
+          await issues.editBody(repo, decision.number, request);
+          ledger.append({
+            repo,
+            fp: item.fingerprint,
+            kind: item.kind,
+            event: "issue_updated",
+            number: decision.number,
+            at,
+          });
+          let action: "edited" | "commented" = "edited";
+          if (decision.comment) {
+            const comment = {
+              ...request,
+              bodyFile: staging.write(
+                "comment.md",
+                `Seen again: ${String(record?.count ?? 1)} occurrences, last at ${record?.lastSeen ?? item.at}, VTC ${deps.vtcVersion}.`,
+              ),
+            };
+            await issues.comment(repo, decision.number, comment);
+            ledger.append({
+              repo,
+              fp: item.fingerprint,
+              kind: item.kind,
+              event: "commented",
+              number: decision.number,
+              at,
+            });
+            action = "commented";
+          }
+          emit("upstream.issue_updated", {
+            target,
+            kind: item.kind,
+            fingerprint: item.fingerprint,
+            number: decision.number,
+            url,
+            action,
+          });
+          return { status: "issue", action, number: decision.number, url };
+        }
+        case "reopen": {
+          const url = listed.find((i) => i.number === decision.number)?.url ?? "";
+          await issues.reopen(
+            repo,
+            decision.number,
+            `Seen again (VTC ${deps.vtcVersion}); reopening the quiet issue.`,
+          );
+          await issues.editBody(repo, decision.number, request);
+          ledger.append({
+            repo,
+            fp: item.fingerprint,
+            kind: item.kind,
+            event: "reopened",
+            number: decision.number,
+            at,
+          });
+          emit("upstream.issue_updated", {
+            target,
+            kind: item.kind,
+            fingerprint: item.fingerprint,
+            number: decision.number,
+            url,
+            action: "reopened",
+          });
+          return { status: "issue", action: "reopened", number: decision.number, url };
+        }
+      }
     });
   };
 
@@ -548,10 +612,18 @@ export const createUpstream = (deps: UpstreamDeps): Upstream => {
     );
   };
 
+  /**
+   * Commits `input.source.changes` on the default branch and pushes `vtc/auto/<kind>/<fp8>`
+   * without force. When the branch already exists (the open PR this one supersedes, or a branch
+   * the remote-tracking ref still shows), the new commit descends from its head so the push is a
+   * fast-forward, and only when that head is one VTC pushed itself: a branch with anyone else's
+   * commits is left alone and the PR skipped.
+   */
   const commitAndPush = async (
     input: AutoPrInput,
     repoRoot: string,
     base: string,
+    at: { readonly repo: GitHubRepo; readonly ledger: Ledger; readonly open?: AutoPrRef },
   ): Promise<GitSha> => {
     const branch = autoBranchName(input.kind, input.fingerprint);
     if ("pushedHead" in input.source) return input.source.pushedHead;
@@ -562,16 +634,31 @@ export const createUpstream = (deps: UpstreamDeps): Upstream => {
       (await plumbing.resolve(`refs/remotes/origin/${base}`)) ??
       (await plumbing.resolve(`refs/heads/${base}`));
     if (baseSha === null) throw new Error(`the default branch ${base} is not available locally`);
-    const sha = await plumbing.commit({
-      base: baseSha,
-      parents: [baseSha],
-      changes: input.source.changes,
-      message: `${renderTitle(input.kind, input.summary)}\n\nGenerated-by: VTC ${deps.vtcVersion}`,
-    });
     const dst = `refs/heads/${branch}`;
     if (!autoPushRefAllowed(dst) || dst === `refs/heads/${base}`) {
       throw new Error("an automatic branch never names the default branch");
     }
+    const current =
+      at.open?.headSha !== undefined && at.open.headSha !== ""
+        ? at.open.headSha
+        : await plumbing.resolve(`refs/remotes/origin/${branch}`);
+    let parents: GitSha[] = [baseSha];
+    if (current !== null && current !== baseSha) {
+      const ours = at.ledger.record(at.repo, input.fingerprint)?.pushedHeads ?? [];
+      if (!ours.includes(current)) {
+        throw new AutomationSkip(
+          "duplicate",
+          `${branch} holds commits VTC did not push; VTC leaves the branch alone`,
+        );
+      }
+      parents = [current, baseSha];
+    }
+    const sha = await plumbing.commit({
+      base: baseSha,
+      parents,
+      changes: input.source.changes,
+      message: `${renderTitle(input.kind, input.summary)}\n\nGenerated-by: VTC ${deps.vtcVersion}`,
+    });
     await plumbing.push("origin", sha, dst);
     return sha;
   };
@@ -598,44 +685,86 @@ export const createUpstream = (deps: UpstreamDeps): Upstream => {
         throw new AutomationSkip("evidence_failed", "no evidence recorder is available");
       }
       const upstream = input.target === "upstream";
-      if (upstream && input.report === undefined) {
+      const report = input.report;
+      if (upstream && report === undefined) {
         throw new AutomationSkip("privacy", "an upstream PR needs its upstream report");
       }
       // Reading 208: a bs-vtc PR not built on the bs-vtc checkout itself was caused by a project
       // run, so its evidence is the upstream-safe projection only, whatever the caller passed.
       const upstreamSafe = upstream && ctx.repoRoot !== deps.automation.upstream.checkout;
-      const plan = upstreamSafe
-        ? { ...input.evidence.plan, upstreamSafe: true }
-        : input.evidence.plan;
+      // A project's `automation.evidence` settings apply to its own repo's PRs.
+      const projectEvidence = upstream ? undefined : ctx.evidence;
+      const plan = {
+        ...input.evidence.plan,
+        ...(upstreamSafe ? { upstreamSafe: true } : {}),
+        ...(projectEvidence?.video === false ? { video: false } : {}),
+      };
       const snapshot = upstreamSafe
         ? {
             routes: {
               [UPSTREAM_EVIDENCE_ROUTE]: input.evidence.snapshot.routes[
                 UPSTREAM_EVIDENCE_ROUTE
               ] ?? {
-                report: input.report,
+                report,
               },
             },
             events: [],
           }
         : input.evidence.snapshot;
-      const cap = planPrCap({
+      const early = planPrCap({
         open: await pullRequests.listOpenAutomatic(repo),
         kind: input.kind,
         fingerprint: input.fingerprint,
         ...(input.role === undefined ? {} : { role: input.role }),
       });
-      if (cap.action === "skip") throw new AutomationSkip(cap.reason, cap.detail);
+      if (early.action === "skip") throw new AutomationSkip(early.reason, early.detail);
       const template = loadAutoTemplate(deps.assets, "auto-pr");
       const title = renderTitle(input.kind, input.summary);
       const check = privacyCheck(ctx);
-      const texts = [
-        title,
-        ...Object.values(input.slots),
-        ...(input.checkTexts ?? []),
-        ...(upstreamSafe ? [JSON.stringify(snapshot.routes)] : []),
-      ];
-      if (upstream && input.report !== undefined) assertUpstreamSafe(input.report, texts, check);
+      const branch = autoBranchName(input.kind, input.fingerprint);
+      const bodyWith = (evidence: string, status: "complete" | "partial"): string =>
+        renderBody(template, {
+          ...input.slots,
+          marker: renderAutoMarker({
+            v: 1,
+            kind: input.kind,
+            fp: input.fingerprint,
+            ...(input.role === undefined ? {} : { role: input.role }),
+          }),
+          note: renderNote({
+            kind: input.kind,
+            pr: true,
+            disclosure: disclosure(report?.host, report?.model),
+            closes: input.issue,
+            evidence: status,
+          }),
+          title,
+          evidence,
+        });
+      if (upstream && report !== undefined) {
+        // D-by: everything that will leave for the upstream repo is checked before anything
+        // does: the texts, every committed file, and the body as it will read.
+        const decoder = new TextDecoder();
+        const committed =
+          "changes" in input.source
+            ? input.source.changes.flatMap((c) =>
+                c.bytes === null ? [] : [decoder.decode(c.bytes)],
+              )
+            : [];
+        const modelText = [title, ...Object.values(input.slots), ...(input.freeTexts ?? [])];
+        assertUpstreamSafe(
+          report,
+          [
+            ...modelText,
+            ...(input.checkTexts ?? []),
+            ...committed,
+            ...(upstreamSafe ? [JSON.stringify(snapshot.routes)] : []),
+            bodyWith(UNAVAILABLE, "complete"),
+          ],
+          check,
+        );
+        assertNoProjectPaths(modelText);
+      }
       const ledger = ledgerFor(input.target, ctx);
       const hosting = deps.automation.hosting;
       return withStaging(async (staging) => {
@@ -656,18 +785,24 @@ export const createUpstream = (deps: UpstreamDeps): Upstream => {
             ...(ctx.redactSelectors === undefined ? {} : { redactSelectors: ctx.redactSelectors }),
             knownValues: ctx.knownValues,
             ...(upstream ? { denylist: check.denylist } : {}),
+            ...(projectEvidence?.maxBytes === undefined
+              ? {}
+              : { maxBytes: projectEvidence.maxBytes }),
           },
           {
             recorder,
             assets: deps.assets,
             hosting,
             ffmpeg: deps.automation.ffmpeg,
-            ffmpegCommand: deps.ffmpegCommand,
+            ffmpegCommand,
             plumbing:
               hosting === "branch" && deps.automation.plumbing !== undefined
                 ? deps.automation.plumbing({ repoRoot })
                 : undefined,
             now,
+            beforePublish: () => {
+              gate(input.target, "prs", ctx);
+            },
           },
         );
         if (!evidence.ok) {
@@ -675,97 +810,109 @@ export const createUpstream = (deps: UpstreamDeps): Upstream => {
           throw new AutomationSkip("evidence_failed", evidence.detail);
         }
         const status = evidence.partial ? "partial" : "complete";
-        for (const old of cap.supersede) {
-          const fp = old.marker?.fp ?? input.fingerprint;
-          await pullRequests.close(
-            repo,
-            old.number,
-            `Superseded by a newer ${input.kind} proposal (VTC ${deps.vtcVersion}).`,
-            ledger.record(repo, fp)?.prHead ?? undefined,
-          );
-          ledger.append({
-            repo,
-            fp,
-            kind: input.kind,
-            event: "pr_closed",
-            number: old.number,
-            at: now().toISOString(),
-          });
-          emit("upstream.pr_closed", {
-            target: { kind: input.target, repo },
-            kind: input.kind,
-            fingerprint: fp,
-            number: old.number,
-            url: old.url,
-            reason: "superseded",
-          });
-        }
-        const base = await defaultBranch(repo);
-        const head = await commitAndPush(input, repoRoot, base);
-        const slots: TemplateSlots = {
-          ...input.slots,
-          marker: renderAutoMarker({
-            v: 1,
-            kind: input.kind,
-            fp: input.fingerprint,
-            ...(input.role === undefined ? {} : { role: input.role }),
-          }),
-          note: renderNote({
-            kind: input.kind,
-            pr: true,
-            disclosure: disclosure(input.report?.host, input.report?.model),
-            closes: input.issue,
-            evidence: status,
-          }),
-          title,
-          evidence: evidence.section,
-        };
-        const body = renderBody(template, slots);
-        if (upstream && input.report !== undefined) assertUpstreamSafe(input.report, [body], check);
+        const body = bodyWith(evidence.section, status);
+        if (upstream && report !== undefined) assertUpstreamSafe(report, [body], check);
         const labels = [
           AUTO_LABELS.auto,
           autoKindLabel(input.kind),
           ...(evidence.partial ? [AUTO_LABELS.evidencePartial] : []),
           ...(input.extraLabels ?? []),
         ];
-        gate(input.target, "prs", ctx);
-        await issues.ensureLabels(repo, labels);
-        const branch = autoBranchName(input.kind, input.fingerprint);
-        const pr = await pullRequests.openDraft(repo, {
-          title,
-          stagingDir: staging.dir,
-          bodyFile: staging.write("body.md", body),
-          labels,
-          ...(evidence.attach.length === 0 ? {} : { attach: evidence.attach }),
-          kind: input.kind,
-          fingerprint: input.fingerprint,
-          branch,
-          base,
+        return withRepoLock(repo, async () => {
+          // Under the repo lock, against a fresh listing: another daemon may have opened or
+          // superseded meanwhile.
+          const cap = planPrCap({
+            open: await pullRequests.listOpenAutomatic(repo),
+            kind: input.kind,
+            fingerprint: input.fingerprint,
+            ...(input.role === undefined ? {} : { role: input.role }),
+          });
+          if (cap.action === "skip") throw new AutomationSkip(cap.reason, cap.detail);
+          const base = await defaultBranch(repo);
+          // The new head is pushed before the superseded PR is closed, so a refused push leaves
+          // the older PR as it was.
+          gate(input.target, "prs", ctx);
+          const open = cap.supersede.find((p) => p.headRefName === branch);
+          const head = await commitAndPush(input, repoRoot, base, {
+            repo,
+            ledger,
+            ...(open === undefined ? {} : { open }),
+          });
+          for (const old of cap.supersede) {
+            const fp = old.marker?.fp ?? input.fingerprint;
+            await pullRequests.close(
+              repo,
+              old.number,
+              `Superseded by a newer ${input.kind} proposal (VTC ${deps.vtcVersion}).`,
+              // The new head now sits on a shared branch: never delete it.
+              old.headRefName === branch
+                ? undefined
+                : (ledger.record(repo, fp)?.prHead ?? undefined),
+            );
+            ledger.append({
+              repo,
+              fp,
+              kind: input.kind,
+              event: "pr_closed",
+              number: old.number,
+              at: now().toISOString(),
+            });
+            emit("upstream.pr_closed", {
+              target: { kind: input.target, repo },
+              kind: input.kind,
+              fingerprint: fp,
+              number: old.number,
+              url: old.url,
+              reason: "superseded",
+            });
+          }
+          gate(input.target, "prs", ctx);
+          // An --attach upload that fails part-way is repaired with the `evidence: partial`
+          // label, so the repo must have it whenever files are attached.
+          await issues.ensureLabels(repo, [
+            ...labels,
+            ...(evidence.attach.length === 0 ? [] : [AUTO_LABELS.evidencePartial]),
+          ]);
+          const pr = await pullRequests.openDraft(repo, {
+            title,
+            stagingDir: staging.dir,
+            bodyFile: staging.write("body.md", body),
+            labels,
+            ...(evidence.attach.length === 0 ? {} : { attach: evidence.attach }),
+            kind: input.kind,
+            fingerprint: input.fingerprint,
+            branch,
+            base,
+          });
+          const at = now().toISOString();
+          ledger.append({
+            repo,
+            fp: input.fingerprint,
+            kind: input.kind,
+            event: "pr_opened",
+            number: pr.number,
+            head,
+            at,
+          });
+          const finalStatus = pr.labels.includes(AUTO_LABELS.evidencePartial) ? "partial" : status;
+          emit("upstream.pr_opened", {
+            target: { kind: input.target, repo },
+            kind: input.kind,
+            fingerprint: input.fingerprint,
+            number: pr.number,
+            url: pr.url,
+            branch,
+            ...(input.issue === undefined ? {} : { issue: input.issue }),
+            evidence: finalStatus,
+          });
+          // AD-27 rule 2: ready only on the Spec Verifier's pass, or for a kind that has none
+          // (never for a branch an automatic run pushed, which always has one).
+          const ready =
+            input.specVerifier === "pass" ||
+            (input.specVerifier === "none" && !("pushedHead" in input.source));
+          if (ready) await pullRequests.markReady(repo, pr.number);
+          return { status: "pr", number: pr.number, url: pr.url, ready, evidence: finalStatus };
         });
-        const at = now().toISOString();
-        ledger.append({
-          repo,
-          fp: input.fingerprint,
-          kind: input.kind,
-          event: "pr_opened",
-          number: pr.number,
-          head,
-          at,
-        });
-        const finalStatus = pr.labels.includes(AUTO_LABELS.evidencePartial) ? "partial" : status;
-        emit("upstream.pr_opened", {
-          target: { kind: input.target, repo },
-          kind: input.kind,
-          fingerprint: input.fingerprint,
-          number: pr.number,
-          url: pr.url,
-          branch,
-          ...(input.issue === undefined ? {} : { issue: input.issue }),
-          evidence: finalStatus,
-        });
-        const ready = input.specVerifier === undefined || input.specVerifier === "pass";
-        if (ready) await pullRequests.markReady(repo, pr.number);
-        return { status: "pr", number: pr.number, url: pr.url, ready, evidence: finalStatus };
       });
     });
   };
@@ -790,13 +937,17 @@ export const createUpstream = (deps: UpstreamDeps): Upstream => {
         (await plumbing.resolve(`refs/remotes/origin/${base}`)) ??
         (await plumbing.resolve(`refs/heads/${base}`));
       if (baseSha === null) throw new Error(`the default branch ${base} is not available locally`);
+      // The prompt and CHANGELOG are read at the commit the PR builds on, never from the work tree.
+      const gitOps = deps.gitOps;
+      if (gitOps === undefined) {
+        throw new AutomationSkip(
+          "no_upstream_checkout",
+          "the bs-vtc checkout cannot be read at its default branch (no git reader is wired)",
+        );
+      }
       const read = async (path: string): Promise<string | null> => {
-        if (deps.gitOps !== undefined) {
-          const bytes = await deps.gitOps(checkout).readFileAtCommit(baseSha, path);
-          return bytes === undefined ? null : new TextDecoder().decode(bytes);
-        }
-        const file = join(checkout, path);
-        return existsSync(file) ? readFileSync(file, "utf8") : null;
+        const bytes = await gitOps(checkout).readFileAtCommit(baseSha, path);
+        return bytes === undefined ? null : new TextDecoder().decode(bytes);
       };
       const promptPath = `roles/${input.replay.role}/prompt.md`;
       const prompt = await read(promptPath);
@@ -824,6 +975,8 @@ export const createUpstream = (deps: UpstreamDeps): Upstream => {
           },
           report: parts.report,
           checkTexts: [input.proposal.editable, input.proposal.id],
+          freeTexts: parts.freeTexts,
+          specVerifier: "none",
           evidence: {
             plan: { upstreamSafe: true, change: "prompt" },
             snapshot: parts.snapshot,
@@ -857,7 +1010,6 @@ export const createUpstream = (deps: UpstreamDeps): Upstream => {
     target: "upstream" | "project",
     ctx: ProjectContext,
   ): Promise<AutomationOutcome[]> => {
-    const out: AutomationOutcome[] = [];
     try {
       gate(target, "issues", ctx);
     } catch (error) {
@@ -866,6 +1018,15 @@ export const createUpstream = (deps: UpstreamDeps): Upstream => {
     }
     const repo = repoOf(target, ctx);
     if (repo === null) return [];
+    return withRepoLock(repo, () => sweepLocked(target, repo, ctx));
+  };
+
+  const sweepLocked = async (
+    target: "upstream" | "project",
+    repo: GitHubRepo,
+    ctx: ProjectContext,
+  ): Promise<AutomationOutcome[]> => {
+    const out: AutomationOutcome[] = [];
     const ledger = ledgerFor(target, ctx);
     const listed = await issues.listAutomatic(repo);
     const openPrs = await pullRequests.listOpenAutomatic(repo);
