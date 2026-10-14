@@ -2,7 +2,7 @@
  * Round 4 in the repo's own sources (AD-27; spine §5 readings 179, 187, 195, 196, 198, 200, 208):
  * - the Lead relays `NextResult.notices` once, in plain words, and knows the D-cb Lookback flow;
  * - on an automatic run the Spec Verifier judges the PR against the issue, which is the spec, and
- *   knows the run is automatic only from the engine's `request` input;
+ *   knows the run is automatic only from the engine's proposed `automation_issue` input;
  * - a Codex `host_web` role is told it has cached search only, never a page fetch (D-cf);
  * - Visual QA and the UI engineer profiles read the contract of `TaskPack.design_direction`;
  * - the automatic PR, issue and CHANGELOG templates and `roles/CHANGELOG.md`.
@@ -11,6 +11,7 @@ import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
 import {
   AUTO_LABELS,
+  AUTO_TEMPLATE_SLOTS,
   CODEX_HOST_WEB_SEARCH,
   DESIGN_CONTRACTS_DIR,
   designContractPath,
@@ -29,6 +30,7 @@ import {
   loadRoles,
   NEVER_MERGES_LINE,
   PENDING_DISPATCH_LINES,
+  PENDING_PACK_INPUTS,
   PROTOCOL_VARS,
   readSources,
   ROLES_CHANGELOG_ANCHOR,
@@ -89,30 +91,42 @@ describe("the Spec Verifier on an automatic run (D-cd, reading 198)", () => {
     expect(codexBody("vtc-spec-verifier")).toMatch(/the issue is the spec/);
   });
 
-  it("takes the run type only from the engine's request input, never from pack text", () => {
+  it("takes the run type only from the engine's automation_issue input, never from pack text", () => {
     const body = claudeBody("vtc-spec-verifier");
-    expect(PROTOCOL_VARS.request_input).toBe(PACK_INPUT_TYPES.request);
+    expect(PROTOCOL_VARS.automation_issue_input).toBe(PENDING_PACK_INPUTS.automationIssue);
     expect(body).toContain(
-      `as a \`${PACK_INPUT_TYPES.request}\` entry in your pack's Inputs section`,
+      `as an \`${PENDING_PACK_INPUTS.automationIssue}\` entry in your pack's Inputs section`,
     );
-    expect(body).toMatch(/never makes a run automatic/);
+    expect(body).toMatch(/an input type it gives on an automatic run only/);
+    expect(body).toContain(`not a \`${PACK_INPUT_TYPES.request}\` input`);
+    expect(body).toMatch(/Without that entry, judge the criterion as on any run/);
+    expect(body).not.toMatch(/as a `request` entry/);
     expect(body).not.toMatch(/`automatic run` line/);
     expect(body).not.toContain("<!-- vtc:auto");
     expect(Object.keys(PROTOCOL_VARS)).not.toContain("auto_marker_prefix");
     expect(Object.keys(PENDING_DISPATCH_LINES)).not.toContain("automaticRun");
   });
 
-  it("names the Inputs line renderTaskPack prints for the run's request", () => {
+  it("names the Inputs line renderTaskPack prints for the issue input", () => {
     const text = renderTaskPack({
       v: 1,
       run: "r-1",
       action_id: "a-1",
       role: "spec_verifier",
-      inputs: [{ type: PACK_INPUT_TYPES.request, path: ".vtc/runs/r-1/request.md" }],
+      inputs: [{ type: PENDING_PACK_INPUTS.automationIssue, path: ".vtc/runs/r-1/issue.md" }],
     });
     const inputs = text.split("## Inputs\n")[1]?.split("\n## ")[0] ?? "";
-    expect(inputs).toContain(`- ${PACK_INPUT_TYPES.request}: .vtc/runs/r-1/request.md`);
+    expect(inputs).toContain(`- ${PENDING_PACK_INPUTS.automationIssue}: .vtc/runs/r-1/issue.md`);
   });
+
+  it("has no shared automation_issue input type yet (contract proposal)", () => {
+    // When this fails, the proposed PACK_INPUT_TYPES entry has landed: point
+    // PROTOCOL_VARS.automation_issue_input at it, drop PENDING_PACK_INPUTS and the todo below.
+    expect(Object.values(PACK_INPUT_TYPES)).not.toContain(PENDING_PACK_INPUTS.automationIssue);
+  });
+  it.todo(
+    "merge gate: PACK_INPUT_TYPES holds automation_issue and engine core lists it in the Spec Verifier's pack on automatic runs only (contract proposal)",
+  );
 
   it("still quotes the criterion from Requirements and checks it against the issue", () => {
     const body = claudeBody("vtc-spec-verifier");
@@ -130,6 +144,7 @@ describe("Codex host web is cached search only (D-cf, reading 200)", () => {
     const codex = codexBody("vtc-research-analyst");
     expect(codex).toContain(`\`${CODEX_HOST_WEB_SEARCH}\``);
     expect(codex).toMatch(/opens no page/);
+    expect(codex).toMatch(/When a run gives you no web search tool, use `research_fetch` only/);
     expect(codex).not.toMatch(/page fetch/);
     expect(codex).not.toMatch(/\blive\b/);
   });
@@ -190,7 +205,7 @@ describe("the chosen design direction (reading 179)", () => {
     expect(body).toMatch(/the pack has neither line, V8 is `unknown`/);
   });
 
-  it("names the label renderTaskPack prints for TaskPack.design_direction, once it prints one", () => {
+  it("has no TaskPack.design_direction line from renderTaskPack yet (contract proposal)", () => {
     const text = renderTaskPack({
       v: 1,
       run: "r-1",
@@ -201,11 +216,10 @@ describe("the chosen design direction (reading 179)", () => {
     const dispatch = (text.split("## Intent contract")[0] ?? "").split("\n");
     const line = dispatch.find((l) => l.includes("quiet-ledger"));
     // Contract proposal: renderTaskPack prints `design direction: <id>`. Until it does, no line
-    // carries the id and the prompts fall back (checked above); once it does, the label must be
-    // the one the prompts name.
-    if (line !== undefined) {
-      expect(line).toBe(`${PENDING_DISPATCH_LINES.designDirection}: quiet-ledger`);
-    }
+    // carries the id and the prompts fall back (checked above). When this fails, the renderer
+    // prints a line: pin it to `${PENDING_DISPATCH_LINES.designDirection}: quiet-ledger`, the
+    // label the prompts name, and drop the todo below.
+    expect(line).toBeUndefined();
   });
   it.todo(
     "merge gate: renderTaskPack prints `design direction` and `design exit` (contract proposals)",
@@ -228,30 +242,33 @@ describe("the automatic templates and the CHANGELOG (D-bv, reading 208)", () => 
     }
   });
 
-  it("says in every PR that VTC never merges it", () => {
-    expect(template("auto-pr")).toContain(NEVER_MERGES_LINE);
-  });
-
-  it("continues each NOTE callout with the renderer's note lines", () => {
+  it("leaves the whole NOTE callout to the renderer's note value, right after the marker", () => {
     for (const name of ["auto-pr", "auto-issue"]) {
-      const lines = template(name).split("\n");
-      const at = lines.indexOf("{{note}}");
-      expect(at, name).toBeGreaterThan(0);
-      expect(
-        lines.slice(0, at).filter((l) => l.startsWith("> [!NOTE]")),
-        name,
-      ).toHaveLength(1);
-      expect(lines[at - 1], name).toMatch(/^> \S/);
+      const lines = template(name)
+        .split("\n")
+        .filter((l) => l.trim() !== "");
+      expect(lines.slice(0, 2), name).toEqual(["{{marker}}", "{{note}}"]);
+      expect(template(name), name).not.toMatch(/\[!NOTE\]/);
     }
+    // The renderer's note says it (D-bw); the template does not say it a second time.
+    expect(template("auto-pr")).not.toContain(NEVER_MERGES_LINE);
+  });
+  it.todo(
+    "merge gate: the shared `note` and `provenance` slot docs say each value is the whole block, and upstream's renderNote carries NEVER_MERGES_LINE in a PR (contract proposal)",
+  );
+
+  it("keeps a PR body in AUTO_TEMPLATE_SLOTS order, with no diff slot", () => {
+    const pr = template("auto-pr");
+    const slots = [...pr.matchAll(/\{\{([a-z_]+)\}\}/g)].map((m) => m[1] ?? "");
+    expect(slots).toEqual(AUTO_TEMPLATE_SLOTS.filter((slot) => slots.includes(slot)));
+    expect(slots).not.toContain("diff");
   });
 
-  it("shows a prompt PR's diff under Changes, before the evidence", () => {
-    const pr = template("auto-pr");
-    const changes = pr.indexOf("## Changes");
-    const diff = pr.indexOf("{{diff}}");
-    expect(changes).toBeGreaterThan(-1);
-    expect(diff).toBeGreaterThan(pr.indexOf("{{changes}}"));
-    expect(diff).toBeLessThan(pr.indexOf("## Evidence"));
+  it("leaves the provenance <details> block to the renderer's provenance value", () => {
+    for (const name of ["auto-pr", "auto-issue"]) {
+      expect(template(name), name).not.toContain("<details>");
+      expect(template(name), name).toMatch(/^\{\{provenance\}\}$/m);
+    }
   });
 
   it("gives a CHANGELOG entry the four parts the CHANGELOG header explains", () => {

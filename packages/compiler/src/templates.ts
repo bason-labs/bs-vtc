@@ -19,19 +19,20 @@ import type { CompileError, EmittedFile, SourceFile } from "./types.js";
 export const AUTO_TEMPLATE_SOURCE_DIR = "plugins/common/templates";
 
 /**
- * What every automatic PR says before its summary (D-bw, AD-27 rule 2), in the template's own
- * words rather than a slot, so no renderer input can drop it. The template opens the NOTE callout
- * (`> [!NOTE]` and this line); the `note` slot stands on the next line and continues it, so its
- * value is the renderer's own `> ` lines (VTC version, AI disclosure, kind, evidence status,
- * `Closes #n`) without a second `[!NOTE]` header.
+ * What every automatic PR's note says (D-bw, AD-27 rule 2). The `note` slot's value is the whole
+ * NOTE callout, its `> [!NOTE]` header included, and the upstream module's renderer writes it
+ * (VTC version, AI disclosure, this sentence in a PR, kind, evidence status, `Closes #n`); a
+ * template opens no callout of its own, so a body never carries a second header or the sentence
+ * twice. The shared doc line on the `note` slot that pins this is a contract proposal of this
+ * branch; the Lead's skill quotes the sentence.
  */
 export const NEVER_MERGES_LINE = "For human review only: VTC never merges automatic PRs.";
 
 /**
- * The slots of each template, each exactly once and in this order. A PR body follows spine §5
- * reading 208: marker, note, summary, why, changes, evidence, verification, risk, provenance,
- * checklist. A prompt PR's editable-section diff (`diff`) closes its Changes section, as its own
- * slot because the renderer drops it first when a body is too long. An issue has no changes,
+ * The slots of each template, each exactly once and in this order, which is also their order in
+ * `AUTO_TEMPLATE_SLOTS` (spine §5 reading 208 (5)). A PR body: marker, note, summary, why,
+ * changes, evidence, verification, risk, provenance, checklist; a prompt PR's diff is in the pull
+ * request's own diff and its CHANGELOG entry, not in the body. An issue has no changes,
  * verification, risk or checklist. A CHANGELOG entry (`ROLES_CHANGELOG`, D-bv) records the
  * hypothesis, the trace ids, the diff and the evaluation.
  */
@@ -43,7 +44,6 @@ export const AUTO_TEMPLATE_LAYOUT: Readonly<Record<AutoTemplateName, readonly Au
       "summary",
       "why",
       "changes",
-      "diff",
       "evidence",
       "verification",
       "risk",
@@ -59,8 +59,9 @@ const KNOWN: ReadonlySet<string> = new Set(AUTO_TEMPLATE_SLOTS);
 
 /**
  * The slots whose value is one line, so a template may put them inside a line (a heading, a
- * bullet). Every other slot can hold several lines (a table, a fenced diff, the NOTE's own `> `
- * lines), so it must stand on a line of its own or its value would not render.
+ * bullet). Every other slot can hold several lines (a table, a fenced diff, the NOTE callout, the
+ * provenance `<details>` block), so it must stand on a line of its own or its value would not
+ * render.
  */
 export const INLINE_TEMPLATE_SLOTS: ReadonlySet<AutoTemplateSlot> = new Set([
   "title",
@@ -98,20 +99,22 @@ export const autoTemplateErrors = (name: AutoTemplateName, text: string): string
       "the first line must be {{marker}} (AD-27 rule 3: every body starts with the marker)",
     );
   }
-  if (name === "auto-pr") {
-    const summary = text.indexOf("{{summary}}");
-    const before = summary === -1 ? text : text.slice(0, summary);
-    if (!before.includes(NEVER_MERGES_LINE)) {
-      errors.push(`the note must say "${NEVER_MERGES_LINE}" before {{summary}} (D-bw)`);
+  if (layout[1] === "note") {
+    const lines = text.split("\n").filter((l) => l.trim() !== "");
+    if (lines[1] !== "{{note}}") {
+      errors.push("{{note}} must follow {{marker}} directly: the note comes before anything else");
+    }
+    if (/\[!NOTE\]/i.test(text)) {
+      errors.push("the template opens no NOTE callout: the {{note}} value is the whole callout");
     }
   }
   const provenance = text.indexOf("{{provenance}}");
-  if (layout.includes("provenance") && provenance !== -1) {
+  if (provenance !== -1) {
     const open = text.lastIndexOf("<details>", provenance);
-    const closedBefore = text.lastIndexOf("</details>", provenance);
-    const close = text.indexOf("</details>", provenance);
-    if (open === -1 || closedBefore > open || close === -1) {
-      errors.push("{{provenance}} must sit inside a <details> block");
+    if (open !== -1 && text.lastIndexOf("</details>", provenance) < open) {
+      errors.push(
+        "{{provenance}} stands outside any <details> block: its value is the whole block",
+      );
     }
   }
   return errors;
@@ -155,7 +158,9 @@ export const autoTemplateFiles = (
 
 /**
  * The line in `roles/CHANGELOG.md` (`ROLES_CHANGELOG`) directly below which the upstream module
- * inserts each new entry, newest first (D-bv). Local until the proposed shared constant lands.
+ * inserts each new entry, newest first (D-bv). Local until the proposed shared constant lands next
+ * to `ROLES_CHANGELOG` (a contract proposal of this branch, with the upstream module as its
+ * consumer); a todo merge gate in the template tests tracks it.
  */
 export const ROLES_CHANGELOG_ANCHOR = "<!-- vtc:changelog-entries -->";
 

@@ -104,13 +104,13 @@ budget: { context_tokens: 20000 }
     "---\ndescription: Drive VTC.\nargument-hint: start|status\n---\n\nUse the lead skill. $ARGUMENTS\n",
   "plugins/common/templates/auto-pr.md": [
     "{{marker}}",
-    "> For human review only: VTC never merges automatic PRs.\n{{note}}",
-    "{{summary}}\n{{why}}\n{{changes}}\n{{diff}}\n{{evidence}}\n{{verification}}\n{{risk}}",
-    "<details>\n{{provenance}}\n</details>",
+    "{{note}}",
+    "{{summary}}\n{{why}}\n{{changes}}\n{{evidence}}\n{{verification}}\n{{risk}}",
+    "{{provenance}}",
     "{{checklist}}\n",
   ].join("\n\n"),
   "plugins/common/templates/auto-issue.md":
-    "{{marker}}\n\n{{note}}\n{{summary}}\n{{why}}\n{{evidence}}\n<details>\n{{provenance}}\n</details>\n",
+    "{{marker}}\n\n{{note}}\n{{summary}}\n{{why}}\n{{evidence}}\n{{provenance}}\n",
   "plugins/common/templates/changelog-entry.md":
     "### {{title}}\n\n{{hypothesis}}\n{{trace_ids}}\n{{diff}}\n{{evaluation}}\n",
   "plugins/claude-code/.claude-plugin/plugin.json": '{ "name": "vtc", "version": "0.1.0" }\n',

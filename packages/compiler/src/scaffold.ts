@@ -32,8 +32,10 @@ import { stringify as stringifyYaml } from "yaml";
 import {
   AUTO_LABELS,
   editableSectionErrors,
+  findForbiddenInText,
   PROMPT_MARKERS,
   RoleContractSchema,
+  RoleIdSchema,
   type RoleContractInput,
   type RoleKind,
 } from "@vtc/shared";
@@ -235,18 +237,43 @@ export const scaffoldRole = (
     return { ok: false, errors: compiled.errors.map((e) => `${e.path}: ${e.message}`) };
   const agents = compiledAgentNames(role);
   const needsEval = request.evaluation === "evidence_only";
+  const files: SourceFile[] = [
+    ...roleFiles,
+    { path: roleTestStubPath(role.id), text: testStub(role.id, agents, reason, needsEval) },
+  ];
+  // AD-9 on every file the scaffold writes, the test stub included: the compile above scans only
+  // the role's sources, and the repo's supply-chain test would refuse a marker only on the PR.
+  const markers = files.flatMap((file) =>
+    findForbiddenInText(file.text).map(
+      (hit) => `${file.path}: line ${String(hit.line)}: AD-9 marker ${hit.marker}`,
+    ),
+  );
+  if (markers.length > 0) return { ok: false, errors: markers };
   return {
     ok: true,
-    scaffold: {
-      role: role.id,
-      files: [
-        ...roleFiles,
-        { path: roleTestStubPath(role.id), text: testStub(role.id, agents, reason, needsEval) },
-      ],
-      agents,
-      labels: needsEval ? [AUTO_LABELS.needsEval] : [],
-    },
+    scaffold: { role: role.id, files, agents, labels: needsEval ? [AUTO_LABELS.needsEval] : [] },
   };
+};
+
+/**
+ * The only paths a scaffold of `role` may write: its `role.yaml` and `prompt.md`, and its test
+ * stub. Throws on any other, before anything is written.
+ */
+const assertScaffoldPaths = (scaffold: RoleScaffold): void => {
+  const id = RoleIdSchema.safeParse(scaffold.role);
+  if (!id.success) throw new Error(`refusing to scaffold role ${scaffold.role}: not a role id`);
+  const allowed = new Set([
+    `roles/${id.data}/role.yaml`,
+    `roles/${id.data}/prompt.md`,
+    roleTestStubPath(id.data),
+  ]);
+  for (const file of scaffold.files) {
+    if (!allowed.has(file.path)) {
+      throw new Error(
+        `refusing to write ${file.path}: a scaffold writes only ${[...allowed].join(", ")}`,
+      );
+    }
+  }
 };
 
 const NEW_FILE = constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL | constants.O_NOFOLLOW;
@@ -293,13 +320,16 @@ const rollback = (root: string, files: readonly string[], dirs: readonly string[
 };
 
 /**
- * Writes a scaffold under `root`. Nothing is overwritten and nothing is written through a
- * symbolic link: every file is checked before the first write, each directory path is checked
- * again after it is created and before each file is opened, and each file is created exclusively.
+ * Writes a scaffold under `root`. Only the role's own three paths are written (a `RoleScaffold`
+ * that names any other path, a `..` or an absolute path is refused), nothing is overwritten and
+ * nothing is written through a symbolic link: every file is checked before the first write, each
+ * directory path is checked again after it is created and before each file is opened, and each
+ * file is created exclusively.
  * A failure part-way removes what this call wrote, so no half scaffold (a role.yaml without its
  * prompt.md) is left behind. Returns the written paths, relative to `root`.
  */
 export const writeScaffold = (root: string, scaffold: RoleScaffold): string[] => {
+  assertScaffoldPaths(scaffold);
   for (const file of scaffold.files) {
     assertRealDirectoryPath(root, dirname(file.path));
     let exists = true;
