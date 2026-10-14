@@ -12,6 +12,8 @@ import {
   type HostAuthStatus,
   type UserConfig,
 } from "@vtc/shared";
+import { mkdirSync, writeFileSync } from "node:fs";
+import { join } from "node:path";
 import {
   checkAutomation,
   checkEvidence,
@@ -19,13 +21,17 @@ import {
   checkGhLogin,
   checkHostWeb,
   checkProviderBilling,
+  checkUpstreamCheckout,
+  githubSlugOf,
+  inspectCheckout,
+  type CheckoutFacts,
 } from "../src/automation-checks.js";
 import type { AutomationProbe } from "../src/automation-wiring.js";
 import { createDoctorCommand, type DoctorCommandEnv } from "../src/commands/doctor.js";
 import type { DoctorCheck } from "../src/doctor-checks.js";
 import type { Exec } from "../src/process.js";
 import type { UserConfigRead } from "../src/user-config.js";
-import { capture, cleanupDirs } from "./helpers.js";
+import { capture, cleanupDirs, tempDir } from "./helpers.js";
 
 afterEach(cleanupDirs);
 
@@ -99,6 +105,91 @@ describe("evidence hosting and capture (reading 196, D-ce)", () => {
     expect(check.detail).toMatch(
       /no browser installed by vtc: capture uses the project's own Playwright, and without one no automatic PR opens \(issues still do\); run vtc doctor --install-browser$/,
     );
+  });
+});
+
+describe("a build without the evidence recorder (merge note, readings 207 and 209)", () => {
+  it("warns that no automatic PR opens, in place of the capture note", () => {
+    const check = checkEvidence(PROBE, "branch", BROWSER_OK, false);
+    expect(check.status).toBe("warn");
+    expect(check.detail).toMatch(
+      /; this vtc build has no evidence recorder, so no automatic PR opens \(issues still do\)$/,
+    );
+    expect(check.detail).not.toMatch(/pinned browser/);
+  });
+});
+
+describe("upstream.checkout (D-by): a clone of upstream.repo set up for VTC", () => {
+  const GOOD: CheckoutFacts = {
+    exists: true,
+    origin: "git@github.com:bason-labs/bs-vtc.git",
+    vtcProject: true,
+  };
+  const check = (facts: Partial<CheckoutFacts>) =>
+    checkUpstreamCheckout("bason-labs/bs-vtc", "/src/bs-vtc", { ...GOOD, ...facts });
+
+  it("is ok when it exists, its origin is upstream.repo on github.com and vtc init ran in it", () => {
+    expect(check({})).toEqual({
+      name: "upstream",
+      status: "ok",
+      detail: "upstream PRs from /src/bs-vtc (origin github.com/bason-labs/bs-vtc, set up for VTC)",
+    });
+    expect(check({ origin: "https://github.com/Bason-Labs/bs-vtc/" }).status).toBe("ok");
+  });
+
+  it("warns, naming what is wrong and never the origin URL, otherwise", () => {
+    const tail = ": upstream PRs cannot open from it, so upstream gets issues only";
+    expect(check({ exists: false }).detail).toBe(
+      `upstream.checkout /src/bs-vtc is not a directory${tail}`,
+    );
+    expect(check({ origin: null }).detail).toBe(
+      `upstream.checkout /src/bs-vtc is not a git repository with an origin remote${tail}`,
+    );
+    const fork = check({ origin: "https://user:secret@github.com/me/fork.git" });
+    expect(fork).toEqual({
+      name: "upstream",
+      status: "warn",
+      detail: `upstream.checkout /src/bs-vtc has an origin that is not github.com/bason-labs/bs-vtc (upstream.repo)${tail}`,
+    });
+    expect(fork.detail).not.toMatch(/secret|fork/);
+    expect(check({ origin: "https://ghe.example.com/bason-labs/bs-vtc.git" }).status).toBe("warn");
+    expect(check({ vtcProject: false }).detail).toBe(
+      `upstream.checkout /src/bs-vtc is not set up for VTC (run vtc init in it)${tail}`,
+    );
+  });
+
+  it("reads owner/name from github.com remote URLs only", () => {
+    expect(githubSlugOf("git@github.com:o/r.git")).toBe("o/r");
+    expect(githubSlugOf("ssh://git@github.com/o/r")).toBe("o/r");
+    expect(githubSlugOf("https://github.com/O/R.git\n")).toBe("o/r");
+    expect(githubSlugOf("https://gitlab.com/o/r.git")).toBeNull();
+  });
+
+  it("looks at the directory, its origin (run inside it) and .vtc/project.yaml", async () => {
+    const calls: { line: string; cwd?: string }[] = [];
+    const exec: Exec = (command, args, options) => {
+      calls.push({
+        line: [command, ...args].join(" "),
+        ...(options?.cwd === undefined ? {} : { cwd: options.cwd }),
+      });
+      return Promise.resolve({ code: 0, stdout: "git@github.com:o/r.git\n", stderr: "" });
+    };
+    const dir = tempDir();
+    expect(await inspectCheckout(exec, dir)).toEqual({
+      exists: true,
+      origin: "git@github.com:o/r.git",
+      vtcProject: false,
+    });
+    expect(calls).toEqual([{ line: "git remote get-url origin", cwd: dir }]);
+    mkdirSync(join(dir, ".vtc"));
+    writeFileSync(join(dir, ".vtc", "project.yaml"), "version: 1\n");
+    expect((await inspectCheckout(exec, dir)).vtcProject).toBe(true);
+    expect(await inspectCheckout(exec, join(dir, "missing"))).toEqual({
+      exists: false,
+      origin: null,
+      vtcProject: false,
+    });
+    expect(calls).toHaveLength(2);
   });
 });
 
@@ -216,6 +307,21 @@ describe("host web search for research roles (D-cf, reading 200)", () => {
     );
   });
 
+  it("follows hostWebRoute per lead: a Codex-led run keeps Codex when Claude Code cannot search", () => {
+    // Claude Code is logged in but its host web is not safe: a Claude-led run gets none, while a
+    // Codex-led run (Codex cached mode confirmed) searches on Codex
+    expect(
+      checkHostWeb([status("claude-code", {}), status("codex", {})], {
+        "claude-code": false,
+        codex: true,
+      }),
+    ).toEqual({
+      name: "host web",
+      status: "info",
+      detail: `on a Claude-led run, ${HOST_WEB_OFF_NOTICE}; on a Codex-led run, research roles search the web on Codex with web_search = "cached" (it opens no page the model picks)`,
+    });
+  });
+
   it("says research runs without host web search, as info, when no host can search safely", () => {
     expect(checkHostWeb([status("codex", {})], { codex: false })).toEqual({
       name: "host web",
@@ -257,6 +363,36 @@ describe("vtc doctor prints the automation checks", () => {
     expect(text).toMatch(/^info {2}automation {3}issues off, PRs off/m);
     expect(text).toMatch(/^info {2}billing {6}claude-code: billed through your cloud provider/m);
     expect(text).toMatch(/^ok {4}host web {5}research roles search the web on Claude Code/m);
+  });
+
+  it("checks upstream.checkout when the user set one, and says when the build has no recorder", async () => {
+    const seen: string[] = [];
+    const { text } = await doctor({
+      userConfig: () => userRead({ upstream: { checkout: "/src/bs-vtc" } }),
+      automation: {
+        probe: () => Promise.resolve(PROBE),
+        project: () => Promise.resolve(null),
+        recorder: false,
+        checkout: (path) => {
+          seen.push(path);
+          return Promise.resolve({ exists: false, origin: null, vtcProject: false });
+        },
+      },
+    });
+    expect(seen).toEqual(["/src/bs-vtc"]);
+    expect(text).toMatch(
+      /^warn {2}upstream {5}upstream\.checkout \/src\/bs-vtc is not a directory/m,
+    );
+    expect(text).toMatch(/^warn {2}evidence .*this vtc build has no evidence recorder/m);
+    const none = await doctor({
+      userConfig: () => userRead(),
+      automation: {
+        probe: () => Promise.resolve(PROBE),
+        project: () => Promise.resolve(null),
+        checkout: () => Promise.reject(new Error("not asked")),
+      },
+    });
+    expect(none.text).not.toMatch(/^\w+ +upstream /m);
   });
 
   it("leaves the project line out outside a VTC repo, and reports a project.yaml that does not load", async () => {

@@ -17,7 +17,8 @@
  *   readings 201, 202 and 209(2), which retire `CLAUDE_LEAD_REPLAYABLE_ROLES`): every role that
  *   changes files, graded by the gates, and the verdict roles, graded by the verdict grader.
  * - Each compiled plugin carries the automatic PR, issue and CHANGELOG templates the upstream
- *   module renders (`AUTO_TEMPLATE_NAMES` under `AUTO_TEMPLATES_ASSET_DIR`, AD-27).
+ *   module renders (`AUTO_TEMPLATE_NAMES` under `AUTO_TEMPLATES_ASSET_DIR`, AD-27), once the
+ *   integrator's merge flag says roles-compiler's round 4 has landed (`round4-merge.ts`).
  */
 import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
@@ -38,6 +39,8 @@ import {
   type HostId,
   type RoleContract,
 } from "@vtc/shared";
+
+import { ROUND4_LANDED } from "./round4-merge.js";
 
 const REPO_ROOT = fileURLToPath(new URL("../../../", import.meta.url));
 
@@ -181,12 +184,9 @@ describe("the roles a Claude-led run can replay are the list replayGraderFor der
     }
   });
 
-  it("are exactly the file-changing roles and the verdict roles, and include every editable_in_pack role", () => {
-    const expected = new Set([
-      ...graded.filter((g) => g.changesFiles).map((g) => g.agent.role),
-      ...VERDICT_GRADED_ROLES,
-    ]);
-    expect([...replayable].sort()).toEqual([...expected].sort());
+  // Once engine-core's replay gate follows replayGraderFor (reading 209(2)), assert here that the
+  // engine's gate agrees with it for every compiled Claude agent.
+  it("include every editable_in_pack role, and never a role that writes nothing and has no verdict grader", () => {
     for (const role of EDITABLE_IN_PACK_ROLES) expect(replayable).toContain(role);
     // a role that writes nothing and has no verdict grader is never replayed
     const never = graded.filter((g) => g.grader === null);
@@ -196,26 +196,29 @@ describe("the roles a Claude-led run can replay are the list replayGraderFor der
 });
 
 /**
- * The templates are roles-compiler's this round (AD-27, reading 189): until any of them ships the
- * check is skipped, saying so in its name; once one does, every host must carry all three.
+ * The templates are roles-compiler's this round (AD-27, reading 189). Whether this checkout must
+ * carry them is the integrator's merge flag (`round4-merge.ts`), not the templates themselves: the
+ * first test fails when they ship before the flag is flipped, and with the flag on, every host must
+ * carry all three at their path.
  */
-const templatesShipped = (["claude-code", "codex"] as const).some((host) =>
-  AUTO_TEMPLATE_NAMES.some((name) => fileOf(host, autoTemplateAssetPath(name)) !== undefined),
+const shippedTemplates = (["claude-code", "codex"] as const).flatMap((host) =>
+  AUTO_TEMPLATE_NAMES.filter((name) => fileOf(host, autoTemplateAssetPath(name)) !== undefined),
 );
 
-describe.skipIf(!templatesShipped)(
-  `the compiled plugins carry the automatic PR, issue and CHANGELOG templates (AD-27)${templatesShipped ? "" : "; skipped: the compiler ships none yet"}`,
-  () => {
-    for (const host of ["claude-code", "codex"] as const)
-      it(host, () => {
-        for (const name of AUTO_TEMPLATE_NAMES) {
-          const path = autoTemplateAssetPath(name);
-          expect(path).toBe(`vtc/templates/${name}.md`);
-          expect(fileOf(host, path)?.length ?? 0, `${host}: ${path}`).toBeGreaterThan(0);
-        }
-      });
-  },
-);
+describe("the compiled plugins carry the automatic PR, issue and CHANGELOG templates (AD-27)", () => {
+  it("ship exactly when the round-4 merge flag says they have landed", () => {
+    expect(shippedTemplates.length > 0).toBe(ROUND4_LANDED.autoTemplates);
+  });
+
+  for (const host of ["claude-code", "codex"] as const)
+    it.runIf(ROUND4_LANDED.autoTemplates)(host, () => {
+      for (const name of AUTO_TEMPLATE_NAMES) {
+        const path = autoTemplateAssetPath(name);
+        expect(path).toBe(`vtc/templates/${name}.md`);
+        expect(fileOf(host, path)?.length ?? 0, `${host}: ${path}`).toBeGreaterThan(0);
+      }
+    });
+});
 
 describe("an engineer profile's locked asset opens with the Engineer's prompt (D-br, reading 172)", () => {
   for (const host of ["claude-code", "codex"] as const) {

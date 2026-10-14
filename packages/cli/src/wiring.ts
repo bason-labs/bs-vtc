@@ -39,10 +39,10 @@ import {
   armPluginCompiler,
   buildAutomationDeps,
   probeAutomation,
+  shippedArmPluginCompilerFactory,
   shippedAutomationFactories,
-  shippedCompileArm,
   type AutomationFactories,
-  type CompileArm,
+  type CreateArmPluginCompiler,
 } from "./automation-wiring.js";
 import type { CliIo, CommandContext } from "./commands/types.js";
 import { ensureDaemon } from "./daemon.js";
@@ -59,6 +59,7 @@ import { createWakeScheduler } from "./scheduler.js";
 import { loadStorage } from "./storage.js";
 import {
   allowUnsandboxedOf,
+  liveUserConfig,
   passthroughOf,
   pricesOf,
   readUserConfig,
@@ -217,8 +218,9 @@ export interface BuildEnginePartsOptions {
   readonly allowUnsandboxed?: boolean;
   /**
    * `EngineDeps.automation` (AD-27 rule 7). Default: {@link buildAutomationDeps} over the user
-   * config and a probe of this machine (`gh --version`, `ffmpeg -version`, the origin remote; never
-   * the login). `null` injects none.
+   * config, read live (`liveUserConfig`: an opt-out flipped while the daemon runs is seen), and a
+   * probe of this machine when the daemon starts (`gh --version`, `ffmpeg -version`, the origin
+   * remote; never the login). `null` injects none.
    */
   readonly automation?: AutomationDeps | null;
   /** The seams behind the default automation. Default: {@link shippedAutomationFactories}. */
@@ -226,23 +228,25 @@ export interface BuildEnginePartsOptions {
   /** Runs the default automation probe. Default: the cli's `exec`; tests inject a fake (D-cc). */
   readonly exec?: Exec;
   /**
-   * The compiler's `compileArm`, bound to the runtime's plugin dir as `EngineDeps.armPlugins`
-   * (reading 201). Default: {@link shippedCompileArm}. `null` injects none.
+   * The compiler's `createArmPluginCompiler`, bound to the runtime's plugin dir as
+   * `EngineDeps.armPlugins` (reading 201). Default: {@link shippedArmPluginCompilerFactory}.
+   * `null` injects none.
    */
-  readonly compileArm?: CompileArm | null;
+  readonly createArmPluginCompiler?: CreateArmPluginCompiler | null;
 }
 
 /** The default `EngineDeps.automation`: the user's settings and what this machine allows. */
 const defaultAutomation = async (
   options: BuildEnginePartsOptions,
-  user: ReturnType<typeof readUserConfig>,
   allowUnsandboxed: boolean,
 ): Promise<AutomationDeps> =>
   buildAutomationDeps({
-    user,
+    user: liveUserConfig(options.vtcHome),
     probe: await probeAutomation(options.exec ?? runExec, {
       repoRoot: options.repoRoot,
       login: false,
+      // gh and ffmpeg run by name outside the repo (a repo could ship an ffmpeg.exe)
+      cwd: options.vtcHome,
       ...(options.ghCommand === undefined ? {} : { gh: options.ghCommand }),
     }),
     factories: options.automationFactories ?? shippedAutomationFactories(),
@@ -268,9 +272,11 @@ export const buildEngineParts = async (options: BuildEnginePartsOptions): Promis
   const automation =
     options.automation === null
       ? undefined
-      : (options.automation ?? (await defaultAutomation(options, userConfig, allowUnsandboxed)));
-  const compileArm =
-    options.compileArm === null ? undefined : (options.compileArm ?? shippedCompileArm());
+      : (options.automation ?? (await defaultAutomation(options, allowUnsandboxed)));
+  const createArm =
+    options.createArmPluginCompiler === null
+      ? undefined
+      : (options.createArmPluginCompiler ?? shippedArmPluginCompilerFactory());
   return {
     repoRoot,
     vtcHome,
@@ -302,9 +308,9 @@ export const buildEngineParts = async (options: BuildEnginePartsOptions): Promis
     ...(researchSearchProvider === undefined ? {} : { researchSearchProvider }),
     ...(Object.keys(prices).length === 0 ? {} : { prices }),
     ...(automation === undefined ? {} : { automation }),
-    ...(compileArm === undefined
+    ...(createArm === undefined
       ? {}
-      : { armPlugins: armPluginCompiler(compileArm, (host) => pluginDir(host, vtcHome)) }),
+      : { armPlugins: armPluginCompiler(createArm, (host) => pluginDir(host, vtcHome)) }),
   };
 };
 
