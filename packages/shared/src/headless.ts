@@ -112,8 +112,22 @@ export type HostErrorCause = z.infer<typeof HostErrorCauseSchema>;
  * runs are not refused, but `vtc doctor` and Flow Studio show {@link API_KEY_BILLING_WARNING}
  * (`HostAuthStatus.billing`, `UsageSnapshot.billing`). New in 4.10.0.
  */
-export const HostBillingSchema = z.enum(["subscription", "api_key"]);
+export const HostBillingSchema = z.enum([
+  "subscription",
+  "api_key",
+  /**
+   * Billed through a cloud provider or gateway (Amazon Bedrock, Google Vertex AI, Microsoft
+   * Foundry, an LLM gateway): the adapter reads it from the status command's provider. Flow Studio
+   * and `vtc doctor` show {@link PROVIDER_BILLING_NOTICE}, a neutral notice, not a warning. New in
+   * 5.0.0 (D-ci, spine §5 reading 203). A login the status command reports only as an OAuth
+   * token (`oauth_token`) is `null` (unknown), never `subscription`.
+   */
+  "provider",
+]);
 export type HostBilling = z.infer<typeof HostBillingSchema>;
+
+/** The neutral notice for {@link HostBilling} `provider` (D-ci), in doctor and Flow Studio. */
+export const PROVIDER_BILLING_NOTICE = "billed through your cloud provider or gateway";
 
 /** The visible warning for an API-key login (D-bq), the same text in doctor and Flow Studio. */
 export const API_KEY_BILLING_WARNING =

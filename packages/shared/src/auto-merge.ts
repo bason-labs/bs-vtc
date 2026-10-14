@@ -322,18 +322,25 @@ export const MergeLevelLedgerEntrySchema = z
   });
 export type MergeLevelLedgerEntry = z.infer<typeof MergeLevelLedgerEntrySchema>;
 
+/** The highest merge level an automatic run may use (D-bw): a draft PR for human review. */
+export const AUTOMATIC_RUN_MAX_MERGE_LEVEL: MergeLevel = 2;
+
 /**
  * Pure: the effective merge level = `min(project.yaml merge_level, ledger cap)`. Entries apply in
  * order: a downgrade lowers the cap to its `cap` (never raises it), a restore sets the cap to its
- * `cap`. No entries = no cap.
+ * `cap`. No entries = no cap. An automatic run (`run.started.automation`, AD-27) is capped at 2:
+ * VTC never merges what it opened on its own (D-bw; `automatic`, new in 5.0.0).
  */
 export const effectiveMergeLevel = (
   configured: MergeLevel,
   entries: readonly Pick<MergeLevelLedgerEntry, "kind" | "cap">[],
+  options: { readonly automatic?: boolean } = {},
 ): MergeLevel => {
-  let cap: MergeLevel = 3;
+  let cap: MergeLevel = options.automatic === true ? AUTOMATIC_RUN_MAX_MERGE_LEVEL : 3;
   for (const entry of entries) {
     cap = entry.kind === "restore" ? entry.cap : (Math.min(cap, entry.cap) as MergeLevel);
+    if (options.automatic === true)
+      cap = Math.min(cap, AUTOMATIC_RUN_MAX_MERGE_LEVEL) as MergeLevel;
   }
   return Math.min(configured, cap) as MergeLevel;
 };

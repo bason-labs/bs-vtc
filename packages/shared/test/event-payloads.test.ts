@@ -27,6 +27,14 @@ import { expectInvalid, expectValid } from "./helpers.js";
 /** Trace envelope of role events (§1.1 #3): prompt version, host and model. */
 const trace = { prompt_sha: SHA, host: "claude-code", model: "claude-sonnet-5" } as const;
 
+/** An automatic issue or PR in VTC's own repo (AD-27). */
+const autoRepoUrl = "https://github.com/bason-labs/bs-vtc";
+const autoItem = {
+  target: { kind: "upstream", repo: "bason-labs/bs-vtc" },
+  kind: "defect",
+  fingerprint: "0123abcd4567ef89",
+} as const;
+
 /** One valid payload per core event type, plus the envelope fields that type requires. */
 const examples: { [T in CoreEventType]: { data: EventDataInput<T>; envelope?: object } } = {
   "run.started": {
@@ -367,6 +375,30 @@ const examples: { [T in CoreEventType]: { data: EventDataInput<T>; envelope?: ob
     envelope: { feature: "F-1" },
   },
   "lookback.unattributed": { data: { failures: 2, tasks: ["T-1", "T-2"] } },
+  // automatic issues and PRs (AD-27, 5.0.0)
+  "upstream.issue_opened": { data: { ...autoItem, number: 4, url: `${autoRepoUrl}/issues/4` } },
+  "upstream.issue_updated": {
+    data: { ...autoItem, number: 4, url: `${autoRepoUrl}/issues/4`, action: "commented" },
+  },
+  "upstream.issue_closed": {
+    data: { ...autoItem, number: 4, url: `${autoRepoUrl}/issues/4`, reason: "quiet" },
+  },
+  "upstream.pr_opened": {
+    data: {
+      ...autoItem,
+      number: 5,
+      url: `${autoRepoUrl}/pull/5`,
+      branch: "vtc/auto/defect/0123abcd",
+      issue: 4,
+      evidence: "partial",
+    },
+  },
+  "upstream.pr_closed": {
+    data: { ...autoItem, number: 5, url: `${autoRepoUrl}/pull/5`, reason: "superseded" },
+  },
+  "automation.skipped": {
+    data: { reason: "rate_limit", kind: "defect", detail: "5 issues today" },
+  },
 };
 
 const event = (type: CoreEventType) => ({
@@ -540,6 +572,32 @@ describe("EVENT_PAYLOAD_SCHEMAS", () => {
     ],
     ["lookback.escaped_defect", { merge_commit: COMMIT, kind: "flaky" }, "data.kind"],
     ["lookback.unattributed", { failures: 0, tasks: [] }, "data.failures"],
+    [
+      "upstream.issue_opened",
+      { ...examples["upstream.issue_opened"].data, kind: "nope" },
+      "data.kind",
+    ],
+    [
+      "upstream.issue_updated",
+      { ...examples["upstream.issue_updated"].data, action: "deleted" },
+      "data.action",
+    ],
+    [
+      "upstream.issue_closed",
+      { ...examples["upstream.issue_closed"].data, reason: "spam" },
+      "data.reason",
+    ],
+    [
+      "upstream.pr_opened",
+      { ...examples["upstream.pr_opened"].data, branch: "main" },
+      "data.branch",
+    ],
+    [
+      "upstream.pr_closed",
+      { ...examples["upstream.pr_closed"].data, fingerprint: "short" },
+      "data.fingerprint",
+    ],
+    ["automation.skipped", { reason: "because", detail: "x" }, "data.reason"],
   ];
   it("has an invalid case for every core type", () => {
     expect(new Set(invalid.map(([type]) => type))).toEqual(new Set(CORE_EVENT_TYPES));

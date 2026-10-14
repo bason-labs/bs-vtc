@@ -15,6 +15,7 @@ import {
 import type { ResolvedModel, RoleTools } from "../role-contract.js";
 import { UsageWindowKindSchema, type UsageSnapshot } from "../usage.js";
 import { HostErrorCauseSchema, type HostAuthStatus } from "../headless.js";
+import type { PluginLoadProof } from "./lookback.js";
 
 /**
  * Terminal outcome of a role run, normalised across hosts to `done | limit | auth | error`
@@ -96,6 +97,14 @@ export interface HostCapabilities {
   readonly headless: boolean;
   readonly turnCap: boolean;
   readonly budgetCap: boolean;
+  /**
+   * The host's built-in web search, as the adapter configures it for a `host_web` role, opens no
+   * page the model chooses (D-cf, spine §5 reading 200; `hostWebRoute`): Claude Code, whose role
+   * profiles deny reading the credential stores; Codex only with `web_search = "cached"` confirmed
+   * (`CODEX_HOST_WEB_SEARCH`). Absent = false: the engine routes `host_web` roles elsewhere or
+   * runs them without host web. New in 5.0.0.
+   */
+  readonly safeHostWeb?: boolean;
 }
 
 export interface InstallRequest {
@@ -231,6 +240,13 @@ export interface SpawnRoleRequest {
   readonly idleTimeoutMs?: number;
   readonly maxTurns?: number;
   readonly maxBudgetUsd?: number;
+  /**
+   * A Lookback replay arm's own compiled plugin directory (D-cg, `ArmPluginCompiler`), absolute,
+   * for a `lookback_replay` headless run on a host whose runs load the compiled agent. It replaces
+   * the adapter's plugin directory for this run only; the run is valid only if
+   * {@link HeadlessRun.pluginLoad} proves this copy loaded. New in 5.0.0.
+   */
+  readonly pluginDir?: string;
 }
 
 /**
@@ -261,6 +277,12 @@ export interface HeadlessRun {
   wait(): Promise<HostOutcome>;
   /** Kills the process tree; no orphans (§15). */
   kill(): Promise<void>;
+  /**
+   * After `wait()`, for a run started with `SpawnRoleRequest.pluginDir`: which plugin copy the
+   * host loaded (the stream's init record and the run's debug log). Absent on runs without one.
+   * New in 5.0.0 (D-cg).
+   */
+  pluginLoad?(): Promise<PluginLoadProof>;
 }
 
 export type SpawnResult =

@@ -205,9 +205,15 @@ export type GateResultInput = z.input<typeof GateResultSchema>;
 /**
  * Hidden acceptance tests (§6.3 step 2, §7.3). QA author mode writes them as artifact type
  * `hidden_acceptance_test` into the staging directory (gitignored); after accepting the result
- * the engine moves them to `~/.vtc/hidden/<repo-key>/<task>/`, outside the repo. The Gate Runner
- * copies them into the clean checkout only for a run with `include_hidden` (§7.3: "copied in
- * only at gate time") and never writes them to evidence.
+ * the engine moves them to `~/.vtc/hidden/<repo-key>/<run>/<task>/` ({@link hiddenTestsDir}),
+ * outside the repo. The Gate Runner copies them into the clean checkout only for a run with
+ * `include_hidden` (§7.3: "copied in only at gate time") and never writes them to evidence.
+ *
+ * Keyed by run since 5.0.0 (D-ck, spine §5 reading 205; MAJOR: a persisted layout): task ids
+ * repeat across runs, so a later run's task, or a Lookback replay trial, could otherwise be given
+ * another run's hidden tests. The engine (writer) and the Gate Runner (reader) both build the
+ * path with {@link hiddenTestsDir} only. Nothing released wrote the old `<repo-key>/<task>/`
+ * layout, so there is no migration; a directory at the old depth is never read.
  */
 export const HIDDEN_TESTS = {
   artifactType: "hidden_acceptance_test",
@@ -219,9 +225,43 @@ export const HIDDEN_TESTS = {
    * of the dispatch's effective write scope (hook rule 4, spine §5 reading 65).
    */
   stagingDir: ".vtc/state/hidden-staging",
-  /** Directory under the VTC home (`~/.vtc/`); `<repo-key>/<task>/` below it. */
+  /** Directory under the VTC home (`~/.vtc/`); `<repo-key>/<run>/<task>/` below it. */
   homeDir: "hidden",
 } as const;
+
+/** One run's task whose hidden tests a gate run copies in: `T-n` (the request's run) or `<run>:T-n`. */
+export const HiddenTestsEntrySchema = z
+  .string()
+  .regex(
+    /^(?:[A-Za-z0-9][A-Za-z0-9._-]{0,63}:)?T-[1-9]\d*$/,
+    "expected a task id (T-7) or a run-qualified one (<run>:T-7)",
+  );
+
+/**
+ * Pure (D-ck): the run and task a `GateRunRequest.hidden_tasks` entry names. A bare task id is the
+ * request's own run's; `<run>:<task>` (the `ReplayResult.per_task` key) is another run's, which a
+ * Lookback replay trial uses for the recorded dispatch's run. New in 5.0.0.
+ */
+export const hiddenTestsRef = (
+  requestRun: string,
+  entry: string,
+): { readonly run: string; readonly task: string } => {
+  HiddenTestsEntrySchema.parse(entry);
+  const at = entry.lastIndexOf(":");
+  return at === -1
+    ? { run: RunIdSchema.parse(requestRun), task: entry }
+    : { run: entry.slice(0, at), task: entry.slice(at + 1) };
+};
+
+/**
+ * Pure (D-ck): a task's hidden-test directory relative to the VTC home,
+ * `hidden/<repo-key>/<run>/<task>`. The only way to build it: the engine moves QA's staged tests
+ * there and the Gate Runner copies from there. New in 5.0.0.
+ */
+export const hiddenTestsDir = (repoKey: string, run: string, task: string): string => {
+  if (!/^[a-f0-9]{16}$/.test(repoKey)) throw new TypeError(`not an engineRepoKey: ${repoKey}`);
+  return `${HIDDEN_TESTS.homeDir}/${repoKey}/${RunIdSchema.parse(run)}/${TaskIdSchema.parse(task)}`;
+};
 
 /**
  * Visible acceptance tests (§6.3 step 2). QA author mode writes them inside the project's
@@ -276,12 +316,13 @@ export const GateRunRequestSchema = z
     include_hidden: z.boolean().default(false),
     /**
      * With `include_hidden` on a feature run (Final Review, §6.7a step 2 "all hidden tests"): the
-     * tasks whose hidden acceptance tests (`~/.vtc/hidden/<repo-key>/<task>/`) the Gate Runner
-     * copies in. Engine core passes the feature's tasks. A task run copies its own `task`'s and
-     * needs no entry here. Hidden-test directories are keyed by task, so the Gate Runner never
-     * guesses them. Absent = none.
+     * tasks whose hidden acceptance tests ({@link hiddenTestsDir}) the Gate Runner copies in.
+     * Engine core passes the feature's tasks. A task run copies its own `task`'s and needs no
+     * entry here. Each entry is a task of this request's `run` (`T-n`) or, since 5.0.0, of another
+     * run (`<run>:T-n`, {@link hiddenTestsRef}): a Lookback replay trial names the recorded
+     * dispatch's run (D-ck). The Gate Runner never guesses a directory. Absent = none.
      */
-    hidden_tasks: z.array(TaskIdSchema).optional(),
+    hidden_tasks: z.array(HiddenTestsEntrySchema).optional(),
     /**
      * SHA-256 (`sha256Hex`) of the raw bytes of the `.vtc/gates.yml` the run started with (spine
      * §5 reading 20). The Gate Runner reads `gates.yml` at `base`; when this is set and the bytes
@@ -313,7 +354,11 @@ export const GateRunRequestSchema = z
         message: "hidden_tasks name the hidden tests of an include_hidden run",
       });
     }
-    if (new Set(hiddenTasks).size !== hiddenTasks.length) {
+    // Resolve bare ids against the request's run, so `T-1` and `<run>:T-1` count as one.
+    const refs = hiddenTasks.map((entry) =>
+      entry.includes(":") ? entry : `${request.run}:${entry}`,
+    );
+    if (new Set(refs).size !== refs.length) {
       ctx.addIssue({
         code: "custom",
         path: ["hidden_tasks"],

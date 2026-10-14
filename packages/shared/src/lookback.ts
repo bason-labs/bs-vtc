@@ -107,6 +107,11 @@ export const LOOKBACK_LIMITS = {
   minScorecardN: 10,
   /** Lookback starts only with this much of the weekly window left (§6.9). */
   minWeeklyRemainingPct: 30,
+  /**
+   * Replay trials one RETRO may launch, across its proposals (D-cg, spine §5 reading 201); the
+   * rest wait for the next RETRO with `automation.skipped` reason `trial_cap`. New in 5.0.0.
+   */
+  maxTrialsPerRetro: 24,
 } as const;
 
 // ----------------------------------------------------------------- identity
@@ -353,6 +358,31 @@ export type ReplayTrialRef = z.infer<typeof ReplayTrialRefSchema>;
 export const ReplayIsolationSchema = z.enum(["paths_only", "read_denied"]);
 export type ReplayIsolation = z.infer<typeof ReplayIsolationSchema>;
 
+/**
+ * How a replay grades each trial (spine §5 readings 201 and 202): `gates`, through the Gate Runner
+ * on the trial's head (a role that changes files); `verdict`, by scoring the trial's verdict
+ * against the recorded outcome of the replayed dispatch (D-ch: the human's G-gate or PR verdict,
+ * the gate result, a later escaped defect), for the roles in {@link VERDICT_GRADED_ROLES}. New in
+ * 5.0.0.
+ */
+export const ReplayGraderSchema = z.enum(["gates", "verdict"]);
+export type ReplayGrader = z.infer<typeof ReplayGraderSchema>;
+
+/** Verdict roles the verdict grader scores (D-ch: the Spec Verifier first). New in 5.0.0. */
+export const VERDICT_GRADED_ROLES: readonly string[] = ["spec_verifier"];
+
+/**
+ * Pure (D-cg, D-ch; replaces the v1 list `CLAUDE_LEAD_REPLAYABLE_ROLES`): how a replay of `role`
+ * is graded, or `null` when it cannot be. A role that changes files is graded by the gates on
+ * either host (on Claude Code each arm runs its own plugin); a verdict role by the verdict grader
+ * when it is in {@link VERDICT_GRADED_ROLES}. `changesFiles` is the engine's `roleChangesFiles`
+ * (a profile other than `read_only` with a declared artifact). New in 5.0.0.
+ */
+export const replayGraderFor = (role: string, changesFiles: boolean): ReplayGrader | null => {
+  if (changesFiles) return "gates";
+  return VERDICT_GRADED_ROLES.includes(role) ? "verdict" : null;
+};
+
 /** `.vtc/lookback/replays/<proposal>.json` (§13 step 3). */
 export const ReplayResultSchema = z.strictObject({
   v: z.literal(1),
@@ -388,6 +418,8 @@ export const ReplayResultSchema = z.strictObject({
    * 4.11.0, read as `paths_only`. New in 4.11.0.
    */
   isolation: ReplayIsolationSchema.optional(),
+  /** How its trials were graded (`replayGraderFor`). Absent: `gates`. New in 5.0.0 (D-ch). */
+  grader: ReplayGraderSchema.optional(),
 });
 export type ReplayResult = z.infer<typeof ReplayResultSchema>;
 

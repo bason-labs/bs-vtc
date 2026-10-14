@@ -33,7 +33,7 @@ const RUNTIME_SAFE_BUILTINS = [
   "vm",
   "zlib",
 ];
-const ENGINE_MODULES = "(core|daemon|gates|git|http|lookback|mcp|research)";
+const ENGINE_MODULES = "(core|daemon|gates|git|http|lookback|mcp|research|upstream)";
 /**
  * Build output of any package or app. It is cruised (so imports INTO it are seen and rejected)
  * but never followed, and nothing it contains is checked as a source of dependencies.
@@ -186,7 +186,7 @@ module.exports = {
     {
       name: "AD13-engine-modules-use-each-others-entry",
       comment:
-        "Engine modules (core, daemon, gates, git, http, lookback, mcp, research) import each other only through the other module's index.ts.",
+        "Engine modules (core, daemon, gates, git, http, lookback, mcp, research, upstream) import each other only through the other module's index.ts.",
       severity: "error",
       from: { path: `^packages/engine/src/([^/]+)/` },
       to: {
@@ -207,7 +207,9 @@ module.exports = {
       comment:
         "daemon/ composes the engine modules; only the engine entry re-exports it. No module imports it back.",
       severity: "error",
-      from: { path: "^packages/engine/src/(core|gates|git|http|lookback|mcp|research|storage)/" },
+      from: {
+        path: "^packages/engine/src/(core|gates|git|http|lookback|mcp|research|storage|upstream)/",
+      },
       to: { path: "^packages/engine/src/daemon/" },
     },
     {
@@ -239,6 +241,24 @@ module.exports = {
       severity: "error",
       from: { path: "^packages/engine/src/(core|gates|git)/" },
       to: { path: "^packages/engine/src/(lookback|research)/" },
+    },
+    {
+      name: "AD27-only-the-daemon-wires-upstream",
+      comment:
+        "Engine core, the Gate Runner, git, lookback, research and the transports never import upstream/: the daemon wires it and core hands it engine facts through interfaces (AD-27 rule 1).",
+      severity: "error",
+      from: { path: "^packages/engine/src/(core|gates|git|http|lookback|mcp|research)/" },
+      to: { path: "^packages/engine/src/upstream/" },
+    },
+    {
+      name: "AD27-upstream-uses-core-only",
+      comment:
+        "upstream/ (automatic issues and PRs, evidence) reaches engine core through its index only; GitHub, git plumbing, evidence capture and the arm compiler come in through @vtc/shared interfaces. It never imports gates, git, lookback, research, the transports, storage drivers or the daemon.",
+      severity: "error",
+      from: { path: "^packages/engine/src/upstream/" },
+      to: {
+        path: "^packages/engine/src/(daemon|gates|git|http|lookback|mcp|research|storage)/",
+      },
     },
     {
       name: "AD21-lookback-uses-core-and-the-gate-interface",

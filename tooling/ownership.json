@@ -10,6 +10,7 @@
       "packages/engine/vitest.config.ts",
       "packages/engine/src/index.ts",
       "docs/**",
+      "README.md",
       "tooling/**",
       ".dependency-cruiser.cjs",
       "eslint.config.js",
@@ -40,6 +41,8 @@
       "!packages/engine/src/research/**",
       "!packages/engine/test/lookback/**",
       "!packages/engine/test/research/**",
+      "!packages/engine/src/upstream/**",
+      "!packages/engine/test/upstream/**",
       "fixtures/golden-run/**"
     ],
     "gate-runner": [
@@ -65,6 +68,7 @@
       "packages/engine/src/research/**",
       "packages/engine/test/lookback/**",
       "packages/engine/test/research/**"
-    ]
+    ],
+    "upstream": ["packages/engine/src/upstream/**", "packages/engine/test/upstream/**"]
   }
 }

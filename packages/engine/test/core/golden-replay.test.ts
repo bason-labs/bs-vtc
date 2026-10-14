@@ -66,7 +66,7 @@ const modelFor = (dir: string): ReadModel => {
   return createReadModel({
     repoRoot: dir,
     mode: "snapshot",
-    versions: { engine: "0.0.0", contracts: "4.1.0" },
+    versions: { engine: "0.0.0", contracts: "5.0.0" },
     prototypeUrl: () => null,
     runs: () => runs,
     usage: () => runs.at(-1)?.usage ?? new Map(),

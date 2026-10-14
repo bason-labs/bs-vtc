@@ -31,9 +31,8 @@ const SHA = "a".repeat(64);
 const NOW = "2026-10-14T08:00:00.000Z";
 
 describe("contracts 4.10.0", () => {
-  it("is MINOR over 4.9.0 (and still in force: 4.11.0 is MINOR too)", () => {
-    expect(CONTRACTS_VERSION.split(".")[0]).toBe("4");
-    expect(Number(CONTRACTS_VERSION.split(".")[1])).toBeGreaterThanOrEqual(10);
+  it("was MINOR over 4.9.0; its contracts stay in force in 5.0.0 (MAJOR for D-ck only)", () => {
+    expect(CONTRACTS_VERSION.split(".")[0]).toBe("5");
   });
 });
 

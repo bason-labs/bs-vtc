@@ -102,6 +102,13 @@ export const VisualConfigSchema = z.strictObject({
   include_best_practice: z.boolean().optional(),
   dynamic_regions: z.array(z.string().min(1).max(300)).max(50).optional(),
   app: VisualAppSchema.optional(),
+  /**
+   * CSS selectors of the app's own screens that hold secrets or personal data: automatic-PR
+   * evidence (AD-27 rule 6) paints them as solid blocks in every video frame and masks them in
+   * screenshots, together with `dynamic_regions`. Absent: none beyond VTC's own redaction. New in
+   * 5.0.0 (H-8, D-ce).
+   */
+  redact_selectors: z.array(z.string().min(1).max(300)).max(50).optional(),
 });
 export type VisualConfig = z.infer<typeof VisualConfigSchema>;
 
