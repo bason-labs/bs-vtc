@@ -15,7 +15,13 @@ import {
 import { DesignCoverageReportSchema, DesignExitSchema, G2DirectionSchema } from "./design.js";
 import { FeatureSchema, FeatureStatusSchema, PullRequestRefSchema } from "./feature.js";
 import { HeadlessEndedSchema, HeadlessPreflightSchema, HeadlessStartedSchema } from "./headless.js";
-import { CanaryStateSchema, EscapedDefectSchema, ReplayVerdictSchema } from "./lookback.js";
+import {
+  CanaryStateSchema,
+  RoleDispatchPurposeSchema,
+  EscapedDefectSchema,
+  ReplayTrialRefSchema,
+  ReplayVerdictSchema,
+} from "./lookback.js";
 import {
   FactIdSchema,
   FactRowSchema,
@@ -313,25 +319,39 @@ export const EVENT_PAYLOAD_SCHEMAS = {
   }),
   /** Opening, updating or readying the feature's PR failed (§6.7); `detail` is redacted. */
   "feature.pr_failed": z.strictObject({ detail: z.string().min(1).max(2000) }),
-  "role.dispatched": z.strictObject({
-    action_id: SlugSchema,
-    mode: SlugSchema.optional(),
-    /** The one subject this call judges (e.g. the AC of a Spec-Verifier call, §7.4). */
-    subject: VerdictSubjectSchema.optional(),
-    /** `subagent` = a Lead action; `headless` = launched by the engine (AD-4 rule 4). */
-    dispatch: z.enum(["subagent", "headless"]),
-    agent: z.string().min(1).max(128),
-    pack: RelPathSchema,
-    resume: SessionRefSchema.nullable(),
-    /**
-     * SHA-256 of the editable section the pack carried (AD-21): with the compiled locked core it
-     * gives the prompt version (`effectivePromptSha`), which the envelope's `prompt_sha` records.
-     * New in 4.5.0.
-     */
-    editable_sha256: Sha256HexSchema.optional(),
-    /** The Lookback canary arm this dispatch ran in, when a canary covers the role. New in 4.5.0. */
-    canary_arm: z.enum(["candidate", "baseline"]).optional(),
-  }),
+  "role.dispatched": z
+    .strictObject({
+      action_id: SlugSchema,
+      mode: SlugSchema.optional(),
+      /** The one subject this call judges (e.g. the AC of a Spec-Verifier call, §7.4). */
+      subject: VerdictSubjectSchema.optional(),
+      /** `subagent` = a Lead action; `headless` = launched by the engine (AD-4 rule 4). */
+      dispatch: z.enum(["subagent", "headless"]),
+      agent: z.string().min(1).max(128),
+      pack: RelPathSchema,
+      resume: SessionRefSchema.nullable(),
+      /**
+       * SHA-256 of the editable section the pack carried (AD-21): with the compiled locked core it
+       * gives the prompt version (`effectivePromptSha`), which the envelope's `prompt_sha` records.
+       * New in 4.5.0.
+       */
+      editable_sha256: Sha256HexSchema.optional(),
+      /** The Lookback canary arm this dispatch ran in, when a canary covers the role. New in 4.5.0. */
+      canary_arm: z.enum(["candidate", "baseline"]).optional(),
+      /**
+       * Why the role ran (spine §5 reading 177). Absent or `role`: the run's own work.
+       * `lookback_replay`: a Lookback replay trial (AD-21 rule 6), which changes no task; every
+       * reader that counts the run's work (traces, attributions, scorecards, canary data, Flow
+       * Studio, status) leaves it and its `role.submitted` out, from the log alone. New in 4.11.0.
+       */
+      purpose: RoleDispatchPurposeSchema.optional(),
+      /** The trial a `lookback_replay` dispatch is; present exactly then. New in 4.11.0. */
+      replay: ReplayTrialRefSchema.optional(),
+    })
+    .refine((v) => (v.purpose === "lookback_replay") === (v.replay !== undefined), {
+      message: "replay names the trial exactly when purpose is lookback_replay",
+      path: ["replay"],
+    }),
   "role.submitted": z
     .strictObject({
       action_id: SlugSchema,

@@ -94,6 +94,14 @@ export const TaskPackSchema = z.strictObject({
   research_depth: ResearchDepthSchema.optional(),
   /** Designer direction dispatches: the dealt constraints, one set per direction (§9.1). */
   design_constraints: DesignConstraintsSchema.optional(),
+  /**
+   * Post-G2 UI dispatches (Engineer, Visual QA, Designer refinement): the design direction the
+   * human approved at G2 (`ApproveInput.design_direction`), so the role judges against that
+   * direction's contract in each key screen's design contract (`designContractPath`, §9.1;
+   * spine §5 reading 179). Absent before G2, on a run with one direction, and after the
+   * `category_standard` exit. New in 4.11.0.
+   */
+  design_direction: SlugSchema.optional(),
   /** The task's immutable intent contract (§6.3 plan file). */
   intent: IntentContractSchema.optional(),
   /** The REQs and ACs in scope, with their frozen text. */

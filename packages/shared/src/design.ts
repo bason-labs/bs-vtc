@@ -9,6 +9,20 @@ import { RelPathSchema, RequirementRefSchema, SlugSchema } from "./primitives.js
 /** Where the Designer writes the screen list (git-tracked, AD-7 rule 6). */
 export const DESIGN_SCREENS_PATH = ".vtc/design/screens.yaml";
 
+/**
+ * Where the Designer writes each key screen's design contract (§9, §9.1; spine §5 reading 179):
+ * one Markdown file per screen id, returned as a `screens` artifact beside the screen list, with
+ * the screen's mode and one `## Direction <id>` contract per offered direction. Visual QA and the
+ * Engineer read the contract of `TaskPack.design_direction`. New in 4.11.0.
+ */
+export const DESIGN_CONTRACTS_DIR = ".vtc/design/screens";
+
+/** Pure: the design contract of one key screen (`DESIGN_CONTRACTS_DIR/<screen id>.md`). */
+export const designContractPath = (screenId: string): string => {
+  const id = SlugSchema.parse(screenId);
+  return `${DESIGN_CONTRACTS_DIR}/${id}.md`;
+};
+
 /** Prototype themes: the design review's theme switcher and Visual QA's render matrix. */
 export const PrototypeThemeSchema = z.enum(["light", "dark"]);
 export type PrototypeTheme = z.infer<typeof PrototypeThemeSchema>;

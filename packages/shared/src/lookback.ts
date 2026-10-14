@@ -322,6 +322,37 @@ export const replayVerdict = (
   return { verdict: "inconclusive", signTest };
 };
 
+/**
+ * Why a role ran (`role.dispatched.purpose`, spine §5 reading 177). Absent means `role`, the
+ * run's own work. New in 4.11.0.
+ */
+export const RoleDispatchPurposeSchema = z.enum(["role", "lookback_replay"]);
+export type RoleDispatchPurpose = z.infer<typeof RoleDispatchPurposeSchema>;
+
+/**
+ * The Lookback replay trial a `lookback_replay` dispatch is (`role.dispatched.replay`, AD-21
+ * rule 6): the proposal it measures, the replayed task (the `ReplayResult.per_task` key,
+ * `<run>:<task>`), the arm (`a` the baseline, `b` the candidate, `aa` the baseline's second arm)
+ * and the 1-based trial number. New in 4.11.0.
+ */
+export const ReplayTrialRefSchema = z.strictObject({
+  proposal: SlugSchema,
+  task: z.string().min(1).max(100),
+  arm: z.enum(["a", "b", "aa"]),
+  trial: z.int().min(1).max(10),
+});
+export type ReplayTrialRef = z.infer<typeof ReplayTrialRefSchema>;
+
+/**
+ * How well a replay's trials were kept from the user's current tree (spine §5 reading 178):
+ * `paths_only` = a clean checkout at the base outside the repo, no refs past it, but the host
+ * sandbox denied no reads, so a trial that knew the repo's absolute path could read the current
+ * files; `read_denied` = the host also enforced `SandboxProfileRequest.readDeny` on the repo.
+ * New in 4.11.0.
+ */
+export const ReplayIsolationSchema = z.enum(["paths_only", "read_denied"]);
+export type ReplayIsolation = z.infer<typeof ReplayIsolationSchema>;
+
 /** `.vtc/lookback/replays/<proposal>.json` (§13 step 3). */
 export const ReplayResultSchema = z.strictObject({
   v: z.literal(1),
@@ -352,6 +383,11 @@ export const ReplayResultSchema = z.strictObject({
   tokens_delta_pct: z.number(),
   verdict: ReplayVerdictSchema,
   finished_at: IsoDateTimeSchema,
+  /**
+   * The weakest isolation any of its trials ran under (reading 178). Absent: written before
+   * 4.11.0, read as `paths_only`. New in 4.11.0.
+   */
+  isolation: ReplayIsolationSchema.optional(),
 });
 export type ReplayResult = z.infer<typeof ReplayResultSchema>;
 
