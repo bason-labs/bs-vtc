@@ -13,6 +13,7 @@ import {
   checkResultAgainstContract,
   escalationFromQuestion,
   HIDDEN_TESTS,
+  priceTokens,
   redactSecrets,
   resolveRoleMode,
   type ArtifactRef,
@@ -27,6 +28,7 @@ import {
   type SubmitInput,
   type Task,
   type TaskDraft,
+  type TokenUsage,
 } from "@vtc/shared";
 import { budgetState, sharesExceeded, taskBudgetFor, usd } from "./budget.js";
 import { DEFAULT_ACCEPTANCE_GLOBS } from "./config.js";
@@ -183,6 +185,39 @@ const recordSpend = (k: Kernel, h: RunHandle, run: RoleRunRecord, cost: number |
       },
     });
   }
+};
+
+/**
+ * §11 (spine §5 reading 152): the engine prices a run's tokens itself only when the host reported
+ * no cost (Codex reports none): with the model the host named, else the one the dispatch resolved,
+ * at the user's price table (`prices`). A model the table does not have stays unpriced (`null`,
+ * flagged in the run summary), never $0.
+ */
+export const pricedCost = (
+  k: Pick<Kernel, "deps">,
+  run: Pick<RoleRunRecord, "model">,
+  usage: { readonly model?: string | null; readonly tokens: TokenUsage | null },
+): number | null => {
+  if (usage.tokens === null) return null;
+  const price = k.deps.prices?.[usage.model ?? run.model];
+  return price === undefined ? null : priceTokens(usage.tokens, price);
+};
+
+/** The submission with an engine-priced cost where the host reported none ({@link pricedCost}). */
+const pricedSubmit = (k: Kernel, run: RoleRunRecord, input: SubmitInput): SubmitInput => {
+  if (input.kind === "result") {
+    const usage = input.usage;
+    if (usage === undefined || usage.cost_usd !== null) return input;
+    const cost = pricedCost(k, run, usage);
+    return cost === null ? input : { ...input, usage: { ...usage, cost_usd: cost } };
+  }
+  const outcome = input.outcome;
+  if (outcome.kind === "auth" || outcome.cost_usd !== null) return input;
+  const cost = pricedCost(k, run, {
+    model: outcome.kind === "limit" ? outcome.model : null,
+    tokens: outcome.tokens,
+  });
+  return cost === null ? input : { ...input, outcome: { ...outcome, cost_usd: cost } };
 };
 
 /** At 100% of its budget a task finishes the current turn, then parks (§11, §7.6 rule 13). */
@@ -1285,9 +1320,10 @@ const handleFailure = (
 export const handleSubmit = async (
   k: Kernel,
   h: RunHandle,
-  input: SubmitInput,
+  submitted: SubmitInput,
 ): Promise<SubmitOutcome> => {
-  const run = h.state.roleRuns.get(input.action_id);
+  const run = h.state.roleRuns.get(submitted.action_id);
+  const input = run === undefined ? submitted : pricedSubmit(k, run, submitted);
   if (run === undefined) {
     return {
       accepted: false,

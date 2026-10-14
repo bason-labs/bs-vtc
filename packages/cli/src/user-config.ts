@@ -17,6 +17,7 @@ import {
   USER_CONFIG_FILE,
   UserConfigSchema,
   type FetcherId,
+  type ModelPrice,
   type UserConfig,
 } from "@vtc/shared";
 
@@ -81,3 +82,11 @@ export const researchApiKeyOf = (
 /** `gates.allow_unsandboxed`: false when the file does not parse (the gate sandbox stays required). */
 export const allowUnsandboxedOf = (read: UserConfigRead): boolean =>
   read.ok && gatesAllowUnsandboxed(read.config);
+
+/**
+ * `prices` (§11, H-1; spine §5 reading 152): the engine's price table, model id → list price.
+ * Empty when the file does not parse: then no model is priced, and a host that reports no cost
+ * (Codex) runs no engine-launched role, which fails closed.
+ */
+export const pricesOf = (read: UserConfigRead): Readonly<Record<string, ModelPrice>> =>
+  read.ok ? (read.config.prices ?? {}) : {};

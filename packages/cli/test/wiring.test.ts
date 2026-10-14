@@ -41,6 +41,7 @@ import { isVtcProject } from "../src/repo.js";
 import {
   passthroughOf,
   readUserConfig,
+  pricesOf,
   researchApiKeyOf,
   researchKeyNamesOf,
 } from "../src/user-config.js";
@@ -310,6 +311,26 @@ describe("buildEngineParts and composeEngineDeps (AD-19)", () => {
     expect(
       daemonEnv({ SEARCH_KEY: "k-1", OTHER: "x" }, home, Object.values(researchKeyNamesOf(read))),
     ).toEqual({ SEARCH_KEY: "k-1", VTC_HOME: home });
+  });
+
+  it("reads the price table the engine budget-checks unpriced hosts with (§11, reading 152)", () => {
+    const home = tempHome();
+    expect(pricesOf(readUserConfig(home))).toEqual({});
+    writeFileSync(
+      join(home, USER_CONFIG_FILE),
+      "version: 1\nprices:\n  gpt-test:\n    input_per_mtok: 1.25\n    cached_input_per_mtok: 0.125\n    output_per_mtok: 10\n",
+    );
+    expect(pricesOf(readUserConfig(home))).toEqual({
+      "gpt-test": {
+        input_per_mtok: 1.25,
+        cached_input_per_mtok: 0.125,
+        output_per_mtok: 10,
+        cache_write_per_mtok: 0,
+      },
+    });
+    // a file that does not parse prices nothing: unpriced hosts then run no engine-launched role
+    writeFileSync(join(home, USER_CONFIG_FILE), "version: 1\nprices:\n  gpt-test: free\n");
+    expect(pricesOf(readUserConfig(home))).toEqual({});
   });
 
   it("threads the plugin dir into the daemon's adapters and builds the Gate Runner on its git", async () => {

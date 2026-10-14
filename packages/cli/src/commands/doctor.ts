@@ -35,6 +35,7 @@ import {
   checkHostAuth,
   checkMergeLevel,
   checkEnvPassthrough,
+  checkPrices,
   checkGateSandbox,
   checkSessionSandbox,
   detectGateSandbox,
@@ -246,6 +247,8 @@ export const createDoctorCommand = (
       }
       const userConfig = e.userConfig?.() ?? null;
       if (userConfig !== null) checks.push(checkEnvPassthrough(userConfig));
+      const prices = userConfig === null ? null : checkPrices(userConfig);
+      if (prices !== null) checks.push(prices);
       if (e.gateSandbox !== undefined)
         checks.push(checkGateSandbox(await e.gateSandbox(), userConfig));
       const session = e.sessionSandbox === undefined ? null : await e.sessionSandbox();

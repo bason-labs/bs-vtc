@@ -12848,6 +12848,47 @@
             }
           },
           "additionalProperties": false
+        },
+        "prices": {
+          "type": "object",
+          "propertyNames": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 200,
+            "pattern": "^[A-Za-z0-9][A-Za-z0-9._:/@-]*$"
+          },
+          "additionalProperties": {
+            "type": "object",
+            "properties": {
+              "input_per_mtok": {
+                "type": "number",
+                "minimum": 0,
+                "maximum": 10000
+              },
+              "cached_input_per_mtok": {
+                "type": "number",
+                "minimum": 0,
+                "maximum": 10000
+              },
+              "output_per_mtok": {
+                "type": "number",
+                "minimum": 0,
+                "maximum": 10000
+              },
+              "cache_write_per_mtok": {
+                "default": 0,
+                "type": "number",
+                "minimum": 0,
+                "maximum": 10000
+              }
+            },
+            "required": [
+              "input_per_mtok",
+              "cached_input_per_mtok",
+              "output_per_mtok"
+            ],
+            "additionalProperties": false
+          }
         }
       },
       "required": [

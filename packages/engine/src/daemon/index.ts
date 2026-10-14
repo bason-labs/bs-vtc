@@ -353,6 +353,8 @@ export const runDaemon: RunDaemon = async (deps: EngineDeps, options) => {
       now,
       random: Math.random,
       remote: "origin",
+      // §11, reading 152: the user's price table budget-checks hosts that report no cost
+      ...(deps.prices === undefined ? {} : { prices: deps.prices }),
     });
     cleanups.push(wireResearch(engine, deps));
     cleanups.push(wireLookback(engine, deps, plugins));
