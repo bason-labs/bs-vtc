@@ -84,6 +84,9 @@ describe("compilePlugins: target layout", () => {
       "vtc/prompts/vtc-qa-judge/editable.md",
       "vtc/prompts/vtc-qa-judge/locked.md",
       "vtc/role-contracts.json",
+      "vtc/templates/auto-issue.md",
+      "vtc/templates/auto-pr.md",
+      "vtc/templates/changelog-entry.md",
     ]);
   });
 
@@ -116,6 +119,9 @@ describe("compilePlugins: target layout", () => {
       "vtc/prompts/vtc-qa-judge/editable.md",
       "vtc/prompts/vtc-qa-judge/locked.md",
       "vtc/role-contracts.json",
+      "vtc/templates/auto-issue.md",
+      "vtc/templates/auto-pr.md",
+      "vtc/templates/changelog-entry.md",
     ]);
     const skill = file(output, "codex", "skills/vtc/SKILL.md");
     expect(skill).toMatch(/^---\nname: vtc\ndescription: Drive VTC\.\n---\n/);

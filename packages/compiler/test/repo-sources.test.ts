@@ -42,6 +42,7 @@ import {
   PROPOSED_ARTIFACT_TYPES,
   readSources,
   ROLE_FACING_ENGINE_TOOLS,
+  SCAFFOLD_HEADER,
   type CompileOutput,
 } from "../src/index.js";
 
@@ -266,9 +267,11 @@ describe("the v1 roster (§5.2, §5.2a, §5.3)", () => {
     expect(sources.map((s) => s.path)).toContain("plugins/common/skills/lead/SKILL.md");
   });
 
-  it("has one engineer profile per core discipline", () => {
+  it("has one engineer profile per core discipline, and one discipline per profile", () => {
     const profiles = roles.filter((r) => r.kind === "engineer_profile");
-    expect(profiles.map((r) => r.discipline).sort()).toEqual([...CORE_DISCIPLINES].sort());
+    const disciplines = profiles.map((r) => r.discipline);
+    for (const d of CORE_DISCIPLINES) expect(disciplines, d).toContain(d);
+    expect(new Set(disciplines).size).toBe(disciplines.length);
     for (const p of profiles) expect(p.id).toBe(`engineer_${String(p.discipline)}`);
   });
 
@@ -700,8 +703,12 @@ describe("attribution (spec §5.1: the MIT notice is kept)", () => {
   ];
   const roleYaml = (id: string): string => readFileSync(`${ROOT}roles/${id}/role.yaml`, "utf8");
 
-  it("classifies every role as forked or written for VTC", () => {
-    expect(roles.map((r) => r.id).sort()).toEqual([...FORKED, ...WRITTEN].sort());
+  /** Roles the new-role scaffold wrote (D-cd): their role.yaml opens with its header. */
+  const scaffolded = (): string[] =>
+    roles.map((r) => r.id).filter((id) => roleYaml(id).split("\n")[0] === SCAFFOLD_HEADER);
+
+  it("classifies every role as forked, written for VTC, or written by the new-role scaffold", () => {
+    expect(roles.map((r) => r.id).sort()).toEqual([...FORKED, ...WRITTEN, ...scaffolded()].sort());
   });
 
   it.each(FORKED)("%s names its upstream base in a '# Forked from' line", (id) => {

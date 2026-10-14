@@ -164,8 +164,10 @@ export const renderClaudeAgent = (agent: CompiledAgent): string =>
  * session's own sandbox is shown network-off.
  *
  * Host web search (`RoleTools.host_web`, H-3) has no per-agent switch in that list either, so a
- * Codex agent file names none: a headless `codex exec` role run turns web search on for a
- * `host_web` role through the adapter's own flags (spine §7, "Host web search in role runs").
+ * Codex agent file names none: a headless `codex exec` role run sets web search for a `host_web`
+ * role through the adapter's own flags, and only ever `CODEX_HOST_WEB_SEARCH` (`cached`, D-cf,
+ * spine §5 reading 200), never a live page fetch; the agent's contract line says so
+ * (`HOST_WEB_LINES`).
  */
 export const codexFeaturesFor = (tools: RoleTools): Readonly<Record<string, false>> => ({
   ...(tools.profile === "code_sandboxed" ? {} : { shell_tool: false }),
