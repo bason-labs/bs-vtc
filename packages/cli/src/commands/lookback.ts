@@ -10,12 +10,24 @@
  *   vtc lookback pin      --role <role> [--mode <mode>] --host <host> --version <sha> [--reason <text>]
  *   vtc lookback rollback --role <role> [--mode <mode>] --host <host> [--reason <text>]
  *
- * The planning is `lookback-pins.ts`.
+ * The planning is `lookback-pins.ts`. A version is checked as the engine checks it against the
+ * locked core of this vtc's bundled plugin (`plugin:<host>`, `rolePromptAssetPath(<agent>,
+ * "locked")`; not read from the host's own plugin directory, which can lag a vtc upgrade until the
+ * plugin is reinstalled). A canary starts only from a replay result whose bytes match the hash its
+ * `lookback.replay_finished` event recorded, when it recorded one (spine §5 reading 128), and is
+ * promoted only when its arms, counted from the repo's event logs, say `promotable`.
  */
-import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { git } from "@vtc/engine";
-import { engineRepoKey, HostIdSchema, redactSecrets, RoleIdSchema, SlugSchema } from "@vtc/shared";
+import {
+  agentNameFor,
+  engineRepoKey,
+  HostIdSchema,
+  redactSecrets,
+  RoleIdSchema,
+  rolePromptAssetPath,
+  SlugSchema,
+} from "@vtc/shared";
 import {
   defaultGestureDeps,
   EXIT_NOT_CONFIRMED,
@@ -23,15 +35,22 @@ import {
   type GestureDeps,
 } from "../human-gesture.js";
 import {
+  bytesSha256,
+  checkLockedCore,
   findPromptVersion,
   planGesture,
-  readPins,
+  readCanary,
+  readPinsFile,
+  readRegularFile,
+  readRepoEvents,
+  replayRecorded,
   withPinsLock,
   writePins,
   type Gesture,
   type PinTarget,
 } from "../lookback-pins.js";
 import { requireRepoRoot, requireVtcProject, UsageError } from "../repo.js";
+import { runtime } from "../runtime.js";
 import type { CommandSpec } from "./types.js";
 import { EXIT, guarded, parseFlags } from "./util.js";
 
@@ -39,16 +58,29 @@ const USAGE = [
   "usage: vtc lookback approve  --role <role> [--mode <mode>] --host <host> --version <sha> [--reason <text>]",
   "       vtc lookback pin      --role <role> [--mode <mode>] --host <host> --version <sha> [--reason <text>]",
   "       vtc lookback rollback --role <role> [--mode <mode>] --host <host> [--reason <text>]",
-  "  approve   start a canary of a version whose replay says improve; again to promote it",
-  "  pin       pin a version outright (ends a canary)",
+  "  approve   start a canary of a version whose replay says improve; again, once the canary",
+  "            is promotable (its window passed with no trigger), to promote it",
+  "  pin       pin a version outright (ends a canary; the override before a canary window passes)",
   "  rollback  end the canary, or move the pin back to the version it replaced",
   "  --reason  why, recorded (secrets redacted) in the pins.yaml history",
 ].join("\n");
 
 const GESTURES: readonly Gesture[] = ["approve", "pin", "rollback"];
 
+/** The locked core this vtc's bundled plugin carries for the target's agent, or `undefined`. */
+export type LockedCoreOf = (target: PinTarget) => string | undefined;
+
+export const installedLockedCore: LockedCoreOf = (target) => {
+  const bytes = runtime().assets.read(
+    `plugin:${target.host}`,
+    rolePromptAssetPath(agentNameFor(target.role, target.mode), "locked"),
+  );
+  return bytes === undefined ? undefined : new TextDecoder().decode(bytes);
+};
+
 export const createLookbackCommand = (
   deps: () => GestureDeps = defaultGestureDeps,
+  lockedCore: LockedCoreOf = installedLockedCore,
 ): CommandSpec => ({
   name: "lookback",
   summary:
@@ -100,22 +132,42 @@ export const createLookbackCommand = (
         values.version === undefined
           ? undefined
           : findPromptVersion(ctx.vtcHome, target, values.version);
+      if (version !== undefined) {
+        const checked = await checkLockedCore(ctx.vtcHome, target, version, lockedCore(target));
+        if (!checked.ok) {
+          ctx.io.err(`vtc lookback: ${checked.reason}`);
+          return EXIT.failed;
+        }
+        if (checked.note !== undefined) ctx.io.out(checked.note);
+      }
       const reason = (values.reason ?? "").trim() || `vtc lookback ${gesture} at the terminal`;
-      const plan = (now: Date) =>
-        planGesture(readPins(ctx.vtcHome), {
-          gesture,
-          repoKey,
-          target,
-          ...(version === undefined ? {} : { version }),
-          // a repo file roles can write: never through a link, and the summary shows its numbers
-          replay: (rel) => {
-            git.assertNoSymlinks(repoRoot, rel);
-            return JSON.parse(readFileSync(join(repoRoot, rel), "utf8")) as unknown;
-          },
-          reason: redactSecrets(reason).slice(0, 500),
-          now,
-        });
-      const first = plan(d.now());
+      const plan = (now: Date) => {
+        const file = readPinsFile(ctx.vtcHome);
+        return {
+          text: file.text,
+          plan: planGesture(file.pins, {
+            gesture,
+            repoKey,
+            target,
+            ...(version === undefined ? {} : { version }),
+            // a repo file roles can write: never through a link, and the summary shows its numbers
+            replay: (rel) => {
+              git.assertNoSymlinks(repoRoot, rel);
+              const bytes = readRegularFile(join(repoRoot, rel));
+              if (bytes === undefined) throw new Error(`${rel} is not a regular file`);
+              return {
+                json: JSON.parse(bytes.toString("utf8")) as unknown,
+                sha256: bytesSha256(bytes),
+              };
+            },
+            replayRecord: (rel) => replayRecorded(readRepoEvents(repoRoot), rel),
+            canary: (c) => readCanary(readRepoEvents(repoRoot), c),
+            reason: redactSecrets(reason).slice(0, 500),
+            now,
+          }),
+        };
+      };
+      const first = plan(d.now()).plan;
       if (!first.ok) {
         ctx.io.err(`vtc lookback: ${first.reason}`);
         return EXIT.failed;
@@ -129,13 +181,20 @@ export const createLookbackCommand = (
         ctx.io.out("Not confirmed: the pins are unchanged.");
         return EXIT_NOT_CONFIRMED;
       }
-      // re-plan under the lock: the engine may have rolled a canary back meanwhile
+      // re-plan under the lock: the engine may have rolled a canary back meanwhile. The plan must
+      // decide the same (a canary's counts may grow meanwhile; its verdict may not change), and
+      // the write replaces the file only if it still holds what this plan read (the engine's
+      // auto_rollback does not take the lock yet)
+      const changed = {
+        ok: false as const,
+        reason: "the pins or the canary changed while you decided; run it again",
+      };
       const written = await withPinsLock(ctx.vtcHome, () => {
         const again = plan(d.now());
-        if (!again.ok) return again;
-        if (again.summary !== first.summary)
-          return { ok: false as const, reason: "the pins changed while you decided; run it again" };
-        return { ok: true as const, path: writePins(ctx.vtcHome, again.pins) };
+        if (!again.plan.ok) return again.plan;
+        if (again.plan.decision !== first.decision) return changed;
+        const path = writePins(ctx.vtcHome, again.plan.pins, again.text);
+        return path === null ? changed : { ok: true as const, path };
       });
       if (!written.ok) {
         ctx.io.err(`vtc lookback: ${written.reason}`);
