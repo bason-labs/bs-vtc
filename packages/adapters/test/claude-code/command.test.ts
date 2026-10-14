@@ -50,8 +50,20 @@ const profileRequest = (
 const profile = (...args: Parameters<typeof profileRequest>) =>
   createClaudeCodeAdapter(HOMES).sandboxProfile(profileRequest(...args));
 
-/** Denied to every role: the web tools (engine tools only). */
-const ALWAYS_DENIED = ["WebFetch", "WebSearch"];
+/**
+ * Every human-only engine tool (approve, answer, change_request; D-an, spine §5 reading 71) under
+ * both names a role run could reach it by: the plugin's server and the `--mcp-config` bridge.
+ */
+const HUMAN_ONLY_DENIED = [
+  "mcp__plugin_vtc_vtc__approve",
+  "mcp__vtc__approve",
+  "mcp__plugin_vtc_vtc__answer",
+  "mcp__vtc__answer",
+  "mcp__plugin_vtc_vtc__change_request",
+  "mcp__vtc__change_request",
+];
+/** Denied to every role: the web tools (engine tools only) and the human-only engine tools. */
+const ALWAYS_DENIED = ["WebFetch", "WebSearch", ...HUMAN_ONLY_DENIED];
 /**
  * Never readable, as absolute rules in the settings: the VTC home's install token, daemon
  * sockets and hidden acceptance tests (`ROLE_DENIED_VTC.homeReadDeny`, D-an), the Codex home and
@@ -139,6 +151,19 @@ describe("Claude sandboxProfile (§12.1, AD-9)", () => {
       "Bash",
       ...ALWAYS_DENIED,
     ]);
+  });
+
+  it("no role may call a human-only engine tool under either name, and no allow rule can bring one back (D-an)", () => {
+    for (const tools of [READ_ONLY, WRITE_SCOPED, ENGINEER]) {
+      const p = profile(tools);
+      // --disallowedTools and the settings' deny rules both beat any allow rule, the user's too
+      expect(argAfter(p.cliArgs, "--disallowedTools")?.split(",")).toEqual(
+        expect.arrayContaining(HUMAN_ONLY_DENIED),
+      );
+      expect(settingsOf(p).permissions.deny).toEqual(expect.arrayContaining(HUMAN_ONLY_DENIED));
+      const allowed = argAfter(p.cliArgs, "--allowedTools")?.split(",") ?? [];
+      expect(allowed.filter((tool) => HUMAN_ONLY_DENIED.includes(tool))).toEqual([]);
+    }
   });
 
   it("pins the permission mode in the settings too, so the allowlist decides", () => {

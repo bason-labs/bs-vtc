@@ -41,6 +41,7 @@ import {
   epochToIso,
   isRecord,
   nonNegative,
+  ownEntry,
   parseJsonLines,
   parseJsonObject,
   text,
@@ -205,7 +206,7 @@ const limitOutcome = (
     kind: "limit",
     session_ref: sessionRef(s),
     resets_at: hit?.resetsAt ?? resetFromLimitText(message),
-    window: type === null ? null : (WINDOW_KINDS[type]?.kind ?? null),
+    window: type === null ? null : (ownEntry(WINDOW_KINDS, type)?.kind ?? null),
     // the limited family, or the session's model when it is of that family
     model: family === null ? null : s.model?.includes(family) === true ? s.model : family,
     message,
@@ -251,7 +252,7 @@ const outcomeFromResult = (s: ClaudeScan, result: Record<string, unknown>): Host
     };
   }
   const message = resultMessage(result);
-  const cap = subtype === null ? undefined : CAP_CAUSES[subtype];
+  const cap = subtype === null ? undefined : ownEntry(CAP_CAUSES, subtype);
   if (cap !== undefined && s.rejected === null) {
     // the run hit its own cap, even if it waited out a rate-limit retry on the way
     return { kind: "error", message, retryable: false, cause: cap, tokens, cost_usd: cost };
@@ -269,7 +270,7 @@ const outcomeFromResult = (s: ClaudeScan, result: Record<string, unknown>): Host
 const usageOf = (s: ClaudeScan): UsageSnapshot | null => {
   const windows: UsageWindow[] = [];
   for (const [type, info] of s.rateLimits) {
-    const window = type === null ? undefined : WINDOW_KINDS[type];
+    const window = type === null ? undefined : ownEntry(WINDOW_KINDS, type);
     if (type === null || window === undefined) continue;
     windows.push({
       kind: window.kind,

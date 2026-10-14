@@ -3,6 +3,13 @@
 export const isRecord = (value: unknown): value is Record<string, unknown> =>
   typeof value === "object" && value !== null && !Array.isArray(value);
 
+/**
+ * `map[key]` only when `map` has `key` as its own property: a key read from a host stream
+ * (`constructor`, `toString`) never reaches an `Object.prototype` member.
+ */
+export const ownEntry = <T>(map: Readonly<Record<string, T>>, key: string): T | undefined =>
+  Object.hasOwn(map, key) ? map[key] : undefined;
+
 /** One JSON object per line (JSONL), or `null` for a blank, non-JSON or non-object line. */
 export const parseJsonObject = (line: string): Record<string, unknown> | null => {
   const trimmed = line.trim();

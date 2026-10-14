@@ -10,7 +10,8 @@
  * D-an), the Codex home and Claude's own credential file are never readable, from a tool or from
  * the shell (D-ad). No role may run `vtc calibrate` or write anything in
  * `ROLE_DENIED_VTC.homeWriteDeny` or `WAVE3_HOME_WRITE_DENY` (D-w, D-ap, spine §5 reading 103):
- * directories and single files alike.
+ * directories and single files alike. No role may call a human-only engine tool (`approve`,
+ * `answer`, `change_request`; D-an) under either of its names, whatever allow rule applies.
  *
  * Settings isolation (AD-25 rule 1, spine §5 reading 108, which replaces reading 48's `project`
  * source and the earlier `--restricted`): a headless run loads `--setting-sources user` only, so
@@ -41,6 +42,7 @@ import {
   agentNameFor,
   engineMcpServer,
   HEADLESS_DEFAULTS,
+  HUMAN_ONLY_TOOLS,
   hostCredentialDenyReadPaths,
   isHostCredentialDenyRead,
   ROLE_DENIED_VTC,
@@ -84,6 +86,16 @@ export const claudeHeadlessMcpConfig = (): string => {
 /** An engine tool as the `--mcp-config` bridge names it: `mcp__<server>__<tool>`. */
 const claudeBridgeToolName = (tool: string): string =>
   `mcp__${engineMcpServer(HOST).name}__${tool}`;
+
+/**
+ * Tools that record a human decision (`HUMAN_ONLY_TOOLS`: approve, answer, change_request, D-an,
+ * spine §5 reading 71), under both names a role run could reach them by: the plugin's server and
+ * the `--mcp-config` bridge. Every profile denies them, in `--disallowedTools` and in the
+ * `--settings` deny rules, so no allow rule (the profile's, the agent's or the user's own) can
+ * bring one in: the engine cannot tell a role run's bridge from the Lead's by its hello.
+ */
+export const claudeHumanOnlyToolDenies = (): string[] =>
+  HUMAN_ONLY_TOOLS.flatMap((tool) => [claudeEngineToolName(tool), claudeBridgeToolName(tool)]);
 
 /** Package registries the install phase may reach (§7.2); everything else has no network. */
 export const REGISTRY_DOMAINS = [
@@ -197,6 +209,7 @@ const disallowedTools = (tools: RoleTools, protectedPaths: readonly string[]): s
     : toolRules([...protectedPaths, ...HOST_CONFIG_PATHS], rulePath)),
   ...(tools.profile === "code_sandboxed" ? [] : ["Bash"]),
   ...WEB_TOOLS,
+  ...claudeHumanOnlyToolDenies(),
 ];
 
 const absolute = (cwd: string, path: string, platform: PlatformPath): string =>
@@ -321,6 +334,8 @@ export const claudeSandboxProfile = (
         `Read(${absoluteRulePath(unreadable.codexHome, platform)}/**)`,
         credentials.rule,
         ...deniedVtcCommands(),
+        // a human decision is never a role's, whatever a user allow rule says (D-an)
+        ...claudeHumanOnlyToolDenies(),
         ...ROLE_HOME_WRITE_DENY.flatMap((glob) =>
           WRITE_TOOL_NAMES.map((tool) => `${tool}(${vtcHomeRule}/${glob})`),
         ),

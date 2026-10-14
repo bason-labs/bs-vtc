@@ -97,7 +97,12 @@ export const startHeadlessRun = (options: HeadlessRunOptions): HeadlessRun => {
   let ended = false;
   let stderrTail = "";
   // an object, so the callbacks' writes are visible to the type checker
-  const state: { stop: RunStop | null; stdoutDone: boolean } = { stop: null, stdoutDone: false };
+  // `exited`: the process is gone, so a timer firing while its stdout drains is no reason to stop
+  const state: { stop: RunStop | null; stdoutDone: boolean; exited: boolean } = {
+    stop: null,
+    stdoutDone: false,
+    exited: false,
+  };
 
   const later = (ms: number, run: () => void): NodeJS.Timeout => {
     const timer = setTimeout(() => {
@@ -116,7 +121,7 @@ export const startHeadlessRun = (options: HeadlessRunOptions): HeadlessRun => {
 
   /** SIGINT, then SIGTERM, then SIGKILL on the group; the first reason to stop is kept. */
   const stop = (cause: StopCause): void => {
-    if (ended || state.stop !== null) return;
+    if (ended || state.exited || state.stop !== null) return;
     state.stop = { cause, message: stopMessage(options.command.command, cause, options) };
     child.kill("SIGINT");
     later(interruptGraceMs, () => {
@@ -164,6 +169,7 @@ export const startHeadlessRun = (options: HeadlessRunOptions): HeadlessRun => {
 
   const settled: Promise<HostOutcome> = (async () => {
     const exit = await child.exited;
+    state.exited = true;
     // a process that never started has no stdout to drain; one that did gets a bounded drain,
     // since something it started may still hold the pipe
     if (exit.error === null) {

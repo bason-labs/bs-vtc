@@ -6,7 +6,7 @@
  * passed on. A command that cannot start, is killed or hangs leaves the state unknown (`null`),
  * never `false`.
  */
-import { tmpdir } from "node:os";
+import { homedir } from "node:os";
 import {
   HostAuthStatusSchema,
   type HostAuthStatus,
@@ -34,6 +34,12 @@ export interface AuthStatusOptions {
   readonly now: () => Date;
   /** How long the status command may run before it is killed. Default 20 s. */
   readonly timeoutMs?: number;
+  /**
+   * The status command's working directory. Default: the user's home, which only the user can
+   * write. Never the OS temp directory: other local users and roles (D-ag) can write there, and a
+   * file planted in the working directory must never be what runs (§15).
+   */
+  readonly cwd?: string;
 }
 
 const DEFAULT_TIMEOUT_MS = 20_000;
@@ -75,8 +81,9 @@ export const createAuthStatusRunner = (options: AuthStatusOptions) => {
         });
       let child: SpawnedProcess;
       try {
-        // a neutral directory: no repo's settings are anywhere near the status command
-        child = options.spawner(status.command, { cwd: tmpdir(), stdin: "closed" });
+        // a directory only the user can write, and no repo's: no planted file or repo settings
+        // are anywhere near the status command
+        child = options.spawner(status.command, { cwd: options.cwd ?? homedir(), stdin: "closed" });
       } catch {
         return result(null, null);
       }
