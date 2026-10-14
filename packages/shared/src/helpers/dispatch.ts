@@ -64,9 +64,13 @@ export const CODEX_UNIX_CONNECT_BLOCKED_PLATFORMS: readonly string[] = ["darwin"
  * nothing VTC can read shows that the Lead's own Codex session has it off (`--sandbox`,
  * `--yolo` and `/permissions` change it at runtime). A Codex role can read the install token, so
  * with the network on it could reach the engine's socket as a cli (a human channel).
+ *
+ * A step dispatches on the Lead session's own host (`dispatchNow`) and the engine launches no
+ * headless runs (reading 93), so a Codex Lead can run no roles at all in v1: the one remedy is a
+ * Claude Code Lead. There is no per-family host setting in `.vtc/project.yaml` (F7).
  */
 export const CODEX_IN_SESSION_REFUSED_REASON =
-  "a Codex role runs with the Lead session's own Codex sandbox and network (a Codex agent file cannot narrow them), VTC cannot confirm that sandbox keeps the network off, and a Codex role can read the VTC install token, so Codex roles do not run in-session: set hosts.dispatch for this role's family to claude-code in .vtc/project.yaml (or run the Lead in Claude Code), commit it, then answer this escalation to retry";
+  "a Codex role runs with the Lead session's own Codex sandbox and network (a Codex agent file cannot narrow them), VTC cannot confirm that sandbox keeps the network off, and a Codex role can read the VTC install token, so Codex roles do not run in-session; roles run on the Lead's own host, so a Codex Lead can run no roles in v1: close this Codex session, run the Lead in Claude Code (vtc install --host claude-code in this repo, then open it in Claude Code with the vtc plugin and continue the run), then answer this escalation from that session to retry";
 
 /**
  * Pure (D-an, spine §5 readings 71, 79, 81 and 82): why a `subagent` dispatch may not go ahead,

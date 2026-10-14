@@ -11,6 +11,9 @@
  *    project scope, `$HOME/.agents/skills` for the user scope), each as `vtc-<name>/` with a
  *    `.vtc-generated` marker, and removes marked `vtc-*` skills a newer plugin no longer has.
  *    The plugin's hooks are not registered (spine §5 reading 94, §7 Codex hook row).
+ * The notes also say that a Codex Lead can run no roles in v1 (spine §5 readings 82 and 93, §7
+ * residual "A Codex Lead runs no roles"): the engine refuses every in-session Codex role and
+ * launches no headless runs.
  */
 import { existsSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { basename, dirname, join } from "node:path";
@@ -184,6 +187,7 @@ export const installCodex = (request: InstallRequest): InstallResult => {
         : [`Removed agent files the current plugin no longer has: ${removed.join(", ")}.`]),
       `Placed the vtc skills in ${skillsDir} (the Lead loop is the vtc-lead skill).`,
       "The Codex plugin's hooks are not registered yet (the Codex hook wiring is a pending spike): the engine's own checks still apply, but the hook guard rails do not run in Codex sessions.",
+      "A Codex Lead can run no roles in v1: the engine refuses every Codex role in-session (VTC cannot confirm the Codex session keeps the network off) and launches no headless runs, so each task of a run led from Codex parks blocked. Run the Lead in Claude Code instead (vtc install --host claude-code); the Codex install gives you the vtc skills and the engine's MCP tools for reading and steering runs.",
     ],
   };
 };
