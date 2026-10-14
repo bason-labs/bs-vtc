@@ -112,6 +112,7 @@ import {
 import { computeScopeCreep, scopeCreepFindings, type ScopeCreep } from "./scope-creep.js";
 import { buildTraceability } from "./traceability.js";
 import { visualWithoutRenders } from "./visual/evaluate.js";
+import { noveltySeam } from "./visual/novelty.js";
 import {
   resolveNodeExecutable,
   sandboxedVisualRunner,
@@ -1959,5 +1960,6 @@ export const createGateRunnerWith = (
       }
       return checkWriteScope(deps.git, request, [...DEFAULT_PROTECTED_GLOBS, ...globs]);
     },
+    ...noveltySeam(deps),
   };
 };
