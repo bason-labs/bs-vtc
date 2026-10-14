@@ -66,3 +66,23 @@ export const devArtifact = (run: string, path: string): ArtifactContent | null =
     };
   }
 };
+
+/**
+ * TEMPORARY stand-ins for golden-run API responses engine core has not recorded yet, by fixture
+ * name (`dev-fixtures/api/README.md`): `automation` (`GET /api/automation`, contracts 5.0.0) until
+ * `fixtures/golden-run/api/automation.json` lands. Remove an entry once its golden file exists.
+ */
+const TEMPORARY_API_FIXTURES: Readonly<Record<string, string>> = {
+  automation: join(DEV_FIXTURES_DIR, "api", "automation.json"),
+};
+
+/**
+ * The file holding the response named `name`: the golden run's (`<goldenApiDir>/<name>.json`), or
+ * a temporary dev stand-in while the golden run lacks it, or `null`.
+ */
+export const apiFixtureFile = (goldenApiDir: string, name: string): string | null => {
+  const golden = join(goldenApiDir, `${name}.json`);
+  if (existsSync(golden)) return golden;
+  const temporary = TEMPORARY_API_FIXTURES[name];
+  return temporary !== undefined && existsSync(temporary) ? temporary : null;
+};

@@ -19,6 +19,7 @@ export const fixtureNameFor = (method: string, url: string): string | null => {
   if (pathname === "/api/runs") return "runs";
   if (pathname === "/api/usage") return "usage";
   if (pathname === "/api/spend") return "client-spend";
+  if (pathname === "/api/automation") return "automation";
   const parts = pathname.split("/").slice(1);
   if (parts[0] !== "api" || parts[1] !== "runs" || parts[2] !== GOLDEN_RUN) return null;
   const rest = parts.slice(3);

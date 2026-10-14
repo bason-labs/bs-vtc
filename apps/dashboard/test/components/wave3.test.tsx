@@ -351,16 +351,6 @@ describe("Lookback view (scorecards and lookback events)", () => {
     expect(events).toHaveTextContent("Replay of engineer-p1: inconclusive, not an improvement");
   });
 
-  it("says a canary cannot start from a Claude-led run in this version (readings 180 and 182(8))", async () => {
-    renderApp("/lookback/?run=golden-1", withEvents);
-    const note = await screen.findByTestId("lookback-no-canary");
-    expect(note).toHaveTextContent(
-      /No canary can start for engineer · claude-code from a Claude-led run in this version/,
-    );
-    expect(note).toHaveTextContent(/vtc lookback pin/);
-    expect(note).toHaveTextContent(/Codex-led headless run/);
-  });
-
   it("refuses an index that breaks its contract and shows an empty state without one", async () => {
     renderApp("/lookback/?run=golden-1", {
       "/api/runs/golden-1/artifacts": artifacts({

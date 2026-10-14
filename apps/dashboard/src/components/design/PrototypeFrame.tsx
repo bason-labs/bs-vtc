@@ -4,6 +4,7 @@ import { ENGINE_HTTP } from "@vtc/shared";
 import { useEffect, useRef, useState, type MouseEvent } from "react";
 import { pinPosition, type DesignPin } from "@/lib/design";
 import { cn } from "@/lib/cn";
+import { useEvidenceMode } from "@/lib/useEvidenceMode";
 
 export interface DraftPin {
   readonly x_pct: number;
@@ -49,7 +50,8 @@ const marker =
  * `<iframe sandbox="allow-scripts">` (`ENGINE_HTTP.prototype.iframeSandbox`, never
  * `allow-same-origin`): agent-written HTML runs with an opaque origin and cannot reach this page.
  * The frame renders at the chosen viewport width and is scaled to fit; pins sit on top of it at
- * percentages of the frame, so they line up at any scale.
+ * percentages of the frame, so they line up at any scale. Evidence mode loads no prototype (no
+ * request outside the page's origin, AD-27 rule 6).
  */
 export function PrototypeFrame({
   src,
@@ -62,6 +64,8 @@ export function PrototypeFrame({
   onPlace,
 }: PrototypeFrameProps) {
   const { ref, width: available } = useAvailableWidth();
+  // Evidence mode: no request leaves the page's own origin, so the prototype is not loaded.
+  const evidence = useEvidenceMode() !== "off";
   const scale = available > 0 ? Math.min(1, available / width) : 1;
   const place = (event: MouseEvent<HTMLButtonElement>) => {
     // A keyboard press (detail 0) has no point: start in the middle; the form can move it.
@@ -77,16 +81,25 @@ export function PrototypeFrame({
         className="relative mx-auto overflow-hidden rounded-2xl border border-border bg-surface-2"
         style={{ width: width * scale, height: height * scale }}
       >
-        <iframe
-          src={src}
-          title={title}
-          sandbox={ENGINE_HTTP.prototype.iframeSandbox}
-          referrerPolicy="no-referrer"
-          width={width}
-          height={height}
-          className="origin-top-left border-0 bg-white"
-          style={{ transform: `scale(${String(scale)})` }}
-        />
+        {evidence ? (
+          <p
+            className="grid h-full place-items-center p-4 text-center text-xs text-muted-fg"
+            data-testid="prototype-not-loaded"
+          >
+            The prototype runs on its own origin, so evidence mode does not load it.
+          </p>
+        ) : (
+          <iframe
+            src={src}
+            title={title}
+            sandbox={ENGINE_HTTP.prototype.iframeSandbox}
+            referrerPolicy="no-referrer"
+            width={width}
+            height={height}
+            className="origin-top-left border-0 bg-white"
+            style={{ transform: `scale(${String(scale)})` }}
+          />
+        )}
         <div aria-hidden className="pointer-events-none absolute inset-0" data-testid="pins">
           {pins.map((p) => (
             <span

@@ -35,7 +35,11 @@ export function NodeList({
           >
             <span className="min-w-0">
               <span className="block truncate font-medium">{node.label}</span>
-              <span className="block truncate text-[11px] text-muted-fg">{node.reason_added}</span>
+              {node.reason_added === "" ? null : (
+                <span className="block truncate text-[11px] text-muted-fg">
+                  {node.reason_added}
+                </span>
+              )}
             </span>
             <StatusPill meta={nodeStateMeta(node)} className="mt-0.5 shrink-0" />
           </button>

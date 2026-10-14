@@ -3,7 +3,9 @@
 import { useCallback } from "react";
 import { runTopic } from "@/lib/api/topics";
 import { cn } from "@/lib/cn";
+import { upstreamGraph } from "@/lib/evidence-mode";
 import { hrefs, navigate, type RunZoom } from "@/lib/router";
+import { useEvidenceMode } from "@/lib/useEvidenceMode";
 import { useResource } from "@/lib/useResource";
 import { Link } from "@/components/app/Link";
 import { FlowCanvas } from "@/components/flows/FlowCanvas";
@@ -18,7 +20,12 @@ const ZOOMS: readonly { zoom: RunZoom; label: string }[] = [
   { zoom: "tasks", label: "Task DAG" },
 ];
 
-/** Zoom levels 1 and 2 (§17): the run's phases, and its task DAG. */
+const noSelect = (): void => undefined;
+
+/**
+ * Zoom levels 1 and 2 (§17): the run's phases, and its task DAG. In upstream evidence mode, only
+ * the upstream-safe projection of the graph (`upstreamGraph`).
+ */
 export function RunView({
   run,
   zoom,
@@ -29,6 +36,7 @@ export function RunView({
   node: string | null;
 }) {
   const key = run ?? "";
+  const upstream = useEvidenceMode() === "upstream";
   const scope = zoom === "tasks" ? "task_dag" : "project";
   const graph = useResource(
     run === null ? null : `graph:${key}:${scope}`,
@@ -36,7 +44,7 @@ export function RunView({
     run === null ? [] : [runTopic(key, "graph")],
   );
   const tasks = useResource(
-    run === null || zoom !== "tasks" ? null : `tasks:${key}`,
+    run === null || zoom !== "tasks" || upstream ? null : `tasks:${key}`,
     (c, s) => c.tasks(key, s),
     run === null ? [] : [runTopic(key, "tasks")],
   );
@@ -50,6 +58,53 @@ export function RunView({
     navigate(hrefs.run(key, zoom));
   }, [key, zoom]);
   if (run === null) return <MissingParam what="run" />;
+  const zoomNav = (
+    <nav
+      aria-label="Zoom level"
+      className="flex gap-1 rounded-2xl border border-border bg-surface/70 p-1"
+    >
+      {ZOOMS.map((z) => (
+        <Link
+          key={z.zoom}
+          href={hrefs.run(run, z.zoom)}
+          aria-current={z.zoom === zoom ? "page" : undefined}
+          className={cn(
+            "rounded-xl px-3 py-1.5 text-sm transition",
+            z.zoom === zoom ? "bg-brand text-white" : "text-muted-fg hover:text-fg",
+          )}
+        >
+          {z.label}
+        </Link>
+      ))}
+    </nav>
+  );
+  if (upstream) {
+    // The upstream-safe projection (D-by, reading 208): role ids, task ordinals, states and
+    // metrics; no run id, title, path, notice or drawer.
+    return (
+      <>
+        <PageHeader title="Run" eyebrow="Upstream-safe view: role ids and task ordinals only">
+          {zoomNav}
+        </PageHeader>
+        <Loaded resource={graph} skeleton="h-[56vh]">
+          {(g) => {
+            const projected = upstreamGraph(g);
+            return (
+              <div className="space-y-4">
+                <FlowCanvas
+                  graph={projected}
+                  selected={null}
+                  onSelect={noSelect}
+                  label={zoom === "tasks" ? "Task DAG" : "Project phases"}
+                />
+                <NodeList graph={projected} selected={null} onSelect={noSelect} />
+              </div>
+            );
+          }}
+        </Loaded>
+      </>
+    );
+  }
   const selected = graph.data?.nodes.find((n) => n.id === node) ?? null;
   const task =
     selected?.task === undefined
@@ -58,26 +113,7 @@ export function RunView({
   return (
     <>
       <Breadcrumbs items={[{ label: "Runs", href: hrefs.runs() }, { label: run }]} />
-      <PageHeader title={`Run ${run}`}>
-        <nav
-          aria-label="Zoom level"
-          className="flex gap-1 rounded-2xl border border-border bg-surface/70 p-1"
-        >
-          {ZOOMS.map((z) => (
-            <Link
-              key={z.zoom}
-              href={hrefs.run(run, z.zoom)}
-              aria-current={z.zoom === zoom ? "page" : undefined}
-              className={cn(
-                "rounded-xl px-3 py-1.5 text-sm transition",
-                z.zoom === zoom ? "bg-brand text-white" : "text-muted-fg hover:text-fg",
-              )}
-            >
-              {z.label}
-            </Link>
-          ))}
-        </nav>
-      </PageHeader>
+      <PageHeader title={`Run ${run}`}>{zoomNav}</PageHeader>
       <RunActivity run={run} />
       <RunNotices run={run} />
       <Loaded resource={graph} skeleton="h-[56vh]">

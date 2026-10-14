@@ -9,6 +9,7 @@ import { hrefs } from "@/lib/router";
 import type { TraceabilityReport } from "@vtc/shared";
 import { Link } from "@/components/app/Link";
 import { Badge, Card, CardDescription, CardHeader, CardTitle, StatusPill } from "@/components/ui";
+import { REDACT } from "@/lib/redact";
 
 /** The REQ → test → result matrix (§7.4 traceability, §6.7a evidence). */
 export function TraceMatrixTable({ report }: { report: TraceabilityReport }) {
@@ -168,7 +169,9 @@ export function EvidenceDocView({ run, doc }: { run: string; doc: EvidenceDoc })
                 <Link className="text-accent-fg underline" href={hrefs.task(run, t.task)}>
                   {t.task}
                 </Link>{" "}
-                <span className="text-muted-fg">{t.detail}</span>
+                <span className="text-muted-fg" {...REDACT}>
+                  {t.detail}
+                </span>
               </li>
             ))}
           </ul>

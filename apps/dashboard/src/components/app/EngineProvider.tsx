@@ -15,6 +15,7 @@ import { createEngineClient, type EngineClient } from "@/lib/api/client";
 import { connectLiveStream, type LiveStatus } from "@/lib/api/live";
 import { bootstrapSession, clearStoredSession, type SessionStatus } from "@/lib/api/session";
 import { createInvalidationBus, topicKeysForEvent, type InvalidationBus } from "@/lib/api/topics";
+import { createReplayTrialFilter } from "@/lib/replay-trials";
 
 export type ConnectionState =
   | { readonly kind: "starting" }
@@ -107,9 +108,12 @@ export function EngineProvider({ children, fetchImpl }: EngineProviderProps) {
     if (!ready) return;
     const controller = new AbortController();
     client.health(controller.signal).then(setHealth, () => undefined);
+    // A Lookback replay trial is not the run's work (reading 177): it marks no view stale.
+    const replayTrial = createReplayTrialFilter();
     const close = connectLiveStream({
       openStream: (lastId, signal) => client.openStream(lastId, signal),
       onEvent: (event) => {
+        if (replayTrial(event)) return;
         bus.invalidate(topicKeysForEvent(event));
         // The Designer writes the prototype mid-run; health names its origin once it exists.
         if (event.type === "role.submitted" && event.role === "designer")

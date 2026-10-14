@@ -5,6 +5,7 @@ import type { ReactNode } from "react";
 import { runTopic } from "@/lib/api/topics";
 import { cn } from "@/lib/cn";
 import { hrefs, type View } from "@/lib/router";
+import { useEvidenceMode } from "@/lib/useEvidenceMode";
 import { useResource } from "@/lib/useResource";
 import type { Route } from "@/lib/useRoute";
 import {
@@ -82,6 +83,20 @@ const RUN_VIEWS: readonly View[] = [
   "lookback",
 ];
 
+/** Upstream evidence mode: only the flow and Lookback, and no run id (D-by). */
+function UpstreamRunNav({ run, view }: { run: string; view: View }) {
+  return (
+    <nav aria-label="Run" className="flex items-center gap-1 overflow-x-auto">
+      <NavLink href={hrefs.run(run)} current={view === "run"}>
+        Flow
+      </NavLink>
+      <NavLink href={hrefs.lookback(run)} current={view === "lookback"}>
+        Lookback
+      </NavLink>
+    </nav>
+  );
+}
+
 function RunNav({ run, view }: { run: string; view: View }) {
   const escalations = useResource(`shell-esc:${run}`, (c, s) => c.escalations(run, s), [
     runTopic(run, "escalations"),
@@ -126,8 +141,20 @@ function RunNav({ run, view }: { run: string; view: View }) {
 /** Header with navigation, the live/snapshot badge and the theme switch; banners; the page. */
 export function AppShell({ route, children }: { route: Route; children: ReactNode }) {
   const { connection, health } = useEngine();
+  const upstream = useEvidenceMode() === "upstream";
   const run = route.params.get("run");
   const conn = CONNECTION[connection.kind];
+  const brand = (
+    <>
+      <span
+        aria-hidden
+        className="grid size-8 place-items-center rounded-xl bg-gradient-brand text-white shadow-glow"
+      >
+        <Workflow className="size-4" />
+      </span>
+      <span className="font-display text-base font-semibold">Flow Studio</span>
+    </>
+  );
   return (
     <div className="flex min-h-dvh flex-col">
       <a href="#main" className="skip-link rounded-xl bg-brand px-3 py-2 text-sm text-white">
@@ -135,26 +162,29 @@ export function AppShell({ route, children }: { route: Route; children: ReactNod
       </a>
       <header className="sticky top-0 z-30 border-b border-border/60 bg-bg/85 backdrop-blur-md">
         <div className="mx-auto flex max-w-7xl flex-wrap items-center gap-x-3 gap-y-1 px-4 py-2">
-          <Link
-            href={hrefs.runs()}
-            className="flex shrink-0 items-center gap-2 rounded-xl py-1 pr-2"
-          >
-            <span
-              aria-hidden
-              className="grid size-8 place-items-center rounded-xl bg-gradient-brand text-white shadow-glow"
+          {upstream ? (
+            <span className="flex shrink-0 items-center gap-2 py-1 pr-2">{brand}</span>
+          ) : (
+            <Link
+              href={hrefs.runs()}
+              className="flex shrink-0 items-center gap-2 rounded-xl py-1 pr-2"
             >
-              <Workflow className="size-4" />
-            </span>
-            <span className="font-display text-base font-semibold">Flow Studio</span>
-          </Link>
-          <nav aria-label="Main" className="flex items-center gap-1">
-            <NavLink href={hrefs.runs()} current={route.view === "runs"}>
-              Runs
-            </NavLink>
-            <NavLink href={hrefs.usage()} current={route.view === "usage"}>
-              Usage
-            </NavLink>
-          </nav>
+              {brand}
+            </Link>
+          )}
+          {upstream ? null : (
+            <nav aria-label="Main" className="flex items-center gap-1">
+              <NavLink href={hrefs.runs()} current={route.view === "runs"}>
+                Runs
+              </NavLink>
+              <NavLink href={hrefs.usage()} current={route.view === "usage"}>
+                Usage
+              </NavLink>
+              <NavLink href={hrefs.automation()} current={route.view === "automation"}>
+                Automation
+              </NavLink>
+            </nav>
+          )}
           <div className="ml-auto flex items-center gap-2">
             <Badge tone={conn.tone} title={conn.title} data-testid="connection">
               <span
@@ -170,7 +200,11 @@ export function AppShell({ route, children }: { route: Route; children: ReactNod
           </div>
           {run !== null && RUN_VIEWS.includes(route.view) ? (
             <div className="w-full border-t border-border/60 pt-1">
-              <RunNav run={run} view={route.view} />
+              {upstream ? (
+                <UpstreamRunNav run={run} view={route.view} />
+              ) : (
+                <RunNav run={run} view={route.view} />
+              )}
             </div>
           ) : null}
         </div>
