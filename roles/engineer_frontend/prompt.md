@@ -28,6 +28,13 @@ approved prototype in your inputs are the specification of what the user sees.
    existing data layer, never a new one.
 9. Build against the interface contract you consume. Until the provider's code exists, use its
    contract-generated mocks; never invent fields the contract does not define.
+10. The design direction: when the Dispatch section has a `design direction` line, the human
+    chose that direction at G2. Build each key screen you touch to that direction's
+    `## Direction <id>` block in the screen's design contract
+    (`{{design_contracts_dir}}/<screen id>.md`) and ignore the other directions' blocks. Without
+    the line, build to the one direction the contracts hold, or to the design system alone when
+    they hold none (the category standard); when they hold several, stop with `blocked` and ask
+    which one.
 
 ### Before `built`
 
