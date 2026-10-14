@@ -19,6 +19,7 @@ import {
   sha256Hex,
   TaskPackSchema,
   type ArtifactRef,
+  type DispatchPurpose,
   type Escalation,
   type EscalationAnswer,
   type Finding,
@@ -38,11 +39,12 @@ import {
   type CallContext,
   type Kernel,
   type PinnedPrompt,
+  type PromptPins,
   type PromptTarget,
   type RunHandle,
 } from "./kernel.js";
 import { finalReviewSteps } from "./final-review.js";
-import { designWorkSince, rerollInputs } from "./g2.js";
+import { designerRedispatchNote, designWorkSince, rerollInputs } from "./g2.js";
 import { retroSteps } from "./retro.js";
 import type { PromptParts } from "./plugins.js";
 import { effectiveVerdict } from "./gate-verdict.js";
@@ -76,6 +78,10 @@ import { parkEscalation } from "./escalations.js";
 import { recordDispatch, type DispatchRecord } from "./dispatch-guard.js";
 import { architectDepth, dealDesignConstraints, researchDepth } from "./lottery.js";
 import { prepareRoleWorktree } from "./role-worktree.js";
+import { prepareTrial, refuseTrial, type ReplayStepRef } from "./replay.js";
+import { HEADLESS_LOADS_AGENT, pinBlocker } from "./prompt-target.js";
+
+export { HEADLESS_LOADS_AGENT } from "./prompt-target.js";
 
 /** A handed-out step: the Lead's action, and what an engine-launched run of it needs. */
 export interface DispatchedStep {
@@ -91,17 +97,6 @@ export interface DispatchedStep {
    */
   readonly roleCore?: string | null;
 }
-
-/**
- * Whether a host's headless run loads the compiled plugin agent itself (`claude -p --agent`,
- * spine §7 "Claude headless plugin agent"). `codex exec` has no agent flag (spine §7 "Codex
- * headless role identity"): the engine carries the role's locked core in the prompt and its
- * editable section in the pack.
- */
-export const HEADLESS_LOADS_AGENT: Readonly<Record<HostId, boolean>> = {
-  "claude-code": true,
-  codex: false,
-};
 
 export interface StepSpec {
   readonly key: string;
@@ -125,6 +120,13 @@ export interface StepSpec {
   readonly inputs?: readonly ArtifactRef[];
   /** Engine transition that happens as the step is handed out (e.g. → building). */
   readonly onDispatch?: () => void;
+  /** Why the step runs (`planDispatch`'s purpose); default `role`. */
+  readonly purpose?: DispatchPurpose;
+  /**
+   * A Lookback replay trial (AD-21 rule 6, reading 176): it runs in a clean checkout at `base`,
+   * reads the recorded pack (without its task) and runs the arm's prompt version, never a pin.
+   */
+  readonly replay?: ReplayStepRef;
 }
 
 /**
@@ -506,7 +508,7 @@ export const pendingSteps = (k: Kernel, h: RunHandle, host: HostId): StepSpec[] 
   if (state.run.finished_at !== undefined) return [];
   const phase = state.run.phase;
   // RETRO (§13 steps 1–2): the lookback role, one target at a time (retro.ts)
-  if (phase === "retro") return retroSteps(h);
+  if (phase === "retro") return retroSteps(k, h);
   const phaseRoleList = phaseRoles(k, h, phase);
   if (phaseRoleList.length > 0) {
     const entered = phaseEnteredSeq(state, phase) ?? 0;
@@ -519,9 +521,13 @@ export const pendingSteps = (k: Kernel, h: RunHandle, host: HostId): StepSpec[] 
     return phaseRoleList.flatMap(({ role, mode }) => {
       const filter = { role, ...(mode === undefined ? {} : { mode }) };
       if (busyStep(h, filter)) return [];
-      const done = lastSubmitted(state, filter, designWorkSince(h, role, entered));
-      if (done !== undefined && done.exit === "done") return [];
-      const note = rejectionNote(h, filter);
+      const since = designWorkSince(h, role, entered);
+      const done = lastSubmitted(state, filter, since);
+      // D-bt (reading 174): too few directions on a new UI design send the Designer back once
+      const again =
+        phase === "design" && role === "designer" ? designerRedispatchNote(k, h, since) : undefined;
+      if (done !== undefined && done.exit === "done" && again === undefined) return [];
+      const note = [rejectionNote(h, filter), again].filter((n) => n !== undefined).join("\n");
       const decision = [...state.events]
         .reverse()
         .find((e) => e.type === "gate.rejected" || e.type === "gate.approved");
@@ -530,7 +536,9 @@ export const pendingSteps = (k: Kernel, h: RunHandle, host: HostId): StepSpec[] 
           ? `The human rejected the gate${(decision.data as { note?: string }).note === undefined ? "." : `: ${(decision.data as { note?: string }).note ?? ""}`}`
           : undefined;
       const rerolled = role === "designer" ? reroll : undefined;
-      const combined = [note, gateNote, rerolled?.note].filter((n) => n !== undefined).join("\n");
+      const combined = [note === "" ? undefined : note, gateNote, rerolled?.note]
+        .filter((n) => n !== undefined)
+        .join("\n");
       const answer = phaseAnswer(h, phase, role);
       return [
         {
@@ -747,13 +755,16 @@ const packFor = (k: Kernel, h: RunHandle, step: StepSpec, actionId: string): Tas
 };
 
 /**
- * The pinned editable section of a dispatch (AD-21 rules 1–2, readings 117–118), or `null` for the
- * compiled agent's own. The engine vouches for what it records: the agent must expect the section
- * in its pack (its manifest's `editable_in_pack`) and its manifest's `locked_sha256` must be the
- * version's; the version must be for this role, mode and host; the text, trimmed, must hash to
- * the version's `editable_sha256` (the compiler's and Lookback's section hash) and be a valid
- * `TaskPack.role_heuristics` (no pack heading). Anything else, or a selector that throws, runs the
- * compiled default. The effective SHA is the selector's (core holds no locked text to hash).
+ * The pinned editable section of a dispatch (AD-21 rules 1–2 and 6, readings 117–118 and 176), or
+ * `null` for the compiled agent's own. The engine vouches for what it records: the agent must take
+ * its editable section from the pack ({@link pinBlocker}: its manifest's `editable_in_pack`, or a
+ * headless run on a host that does not load the compiled agent, reading 145) and its manifest's
+ * `locked_sha256` must be the version's; the version must be for this role, mode and host; the
+ * text, trimmed, must hash to the version's `editable_sha256` (the compiler's and Lookback's
+ * section hash) and be a valid `TaskPack.role_heuristics` (no pack heading). Anything else, or a
+ * selector that throws, runs the compiled default. A pin or canary for an agent that cannot take
+ * one applies nothing and says why (reading 176). The effective SHA is the selector's (core holds
+ * no locked text to hash).
  */
 interface PinSelection {
   readonly pinned: PinnedPrompt | null;
@@ -761,12 +772,17 @@ interface PinSelection {
   readonly problem?: string;
 }
 
-const pinnedPrompt = (k: Kernel, target: PromptTarget): PinSelection => {
-  const pins = k.promptPins();
+const pinnedPrompt = (
+  k: Kernel,
+  target: PromptTarget,
+  dispatch: "subagent" | "headless",
+  /** A replay trial's arm (reading 176): selected by the trial, never by the pins. */
+  arm?: PinnedPrompt,
+): PinSelection => {
+  const pins: PromptPins | null = arm === undefined ? k.promptPins() : () => arm;
   if (pins === null) return { pinned: null };
   const parts = k.deps.plugins.promptParts?.(target.agent, target.host);
-  // an agent that carries its own editable section cannot run a pinned one (reading 117)
-  if (parts?.editableInPack !== true || parts.lockedSha256 === undefined) return { pinned: null };
+  const blocker = pinBlocker(parts, target.host, dispatch);
   let pinned: PinnedPrompt | null;
   try {
     pinned = pins(target);
@@ -776,6 +792,11 @@ const pinnedPrompt = (k: Kernel, target: PromptTarget): PinSelection => {
     return { pinned: null, problem: `the prompt selector threw: ${why}` };
   }
   if (pinned === null) return { pinned: null };
+  if (blocker !== null || parts?.lockedSha256 === undefined)
+    return {
+      pinned: null,
+      problem: `a ${pinned.canary === undefined ? "pin" : "canary"} names this role on ${target.host}, but ${blocker ?? "its manifest names no locked_sha256"}; nothing was applied and the compiled agent ran`,
+    };
   const refused = (why: string): PinSelection => ({
     pinned: null,
     problem: `the selected prompt version was not used (${why}); the compiled default ran`,
@@ -907,6 +928,43 @@ const assignCanary = (
 };
 
 /**
+ * Why a replay trial cannot run its arm now (reading 176), or `null`: the arm goes through the
+ * same checks as a pin ({@link pinnedPrompt}) for the dispatch kind decided now, and anything but
+ * that exact version applied (no pin can apply to the agent here, a locked core recompiled since,
+ * a text that does not hash) refuses the trial, so no arm is ever measured with another's prompt.
+ */
+const replayArmRefusal = (
+  k: Kernel,
+  h: RunHandle,
+  step: StepSpec,
+  host: HostId,
+  dispatch: "subagent" | "headless",
+): string | null => {
+  if (step.replay === undefined) return null;
+  const want = step.replay.prompt.version.effective_sha256;
+  const selection = pinnedPrompt(
+    k,
+    {
+      run: h.state.id,
+      role: step.role,
+      ...(step.mode === undefined ? {} : { mode: step.mode }),
+      host,
+      agent: agentNameFor(step.role, step.mode),
+    },
+    dispatch,
+    step.replay.prompt,
+  );
+  if (selection.pinned?.version.effective_sha256 === want) return null;
+  return `its arm's prompt version ${want.slice(0, 12)} cannot run as planned (${selection.problem ?? "no pin applies"}), and a trial never runs another arm's prompt`;
+};
+
+/** A replay trial's pack: the recorded one in this run, without its task or feature. */
+const trialPack = (h: RunHandle, ref: ReplayStepRef, actionId: string): TaskPackInput => {
+  const { task: _task, feature: _feature, role_heuristics: _heuristics, ...rest } = ref.pack;
+  return { ...rest, run: h.state.id, action_id: actionId };
+};
+
+/**
  * Hands out one step: writes its pack (the pinned editable section first, AD-21), logs
  * `role.dispatched` (prompt version and the resolved model), returns the Lead action. `cwd` is
  * where the role works (its worktree).
@@ -936,14 +994,19 @@ export const dispatchStep = (
       ? k.deps.plugins.profileFor(host, task.discipline)
       : undefined;
   const agent = profile ?? agentNameFor(step.role, step.mode);
-  const selection = pinnedPrompt(k, {
-    run: h.state.id,
-    role: step.role,
-    ...(step.mode === undefined ? {} : { mode: step.mode }),
-    host,
-    agent,
-    ...(step.task === undefined ? {} : { task: step.task }),
-  });
+  const selection = pinnedPrompt(
+    k,
+    {
+      run: h.state.id,
+      role: step.role,
+      ...(step.mode === undefined ? {} : { mode: step.mode }),
+      host,
+      agent,
+      ...(step.task === undefined ? {} : { task: step.task }),
+    },
+    dispatch,
+    step.replay?.prompt,
+  );
   if (selection.problem !== undefined)
     recordPromptSelection(k, h, step.task, `${agent}: ${selection.problem}`);
   // no pin applies: an agent compiled without its editable section gets the compiled default in
@@ -965,9 +1028,12 @@ export const dispatchStep = (
       : undefined;
   const core = parts === undefined ? undefined : compiledPrompt(target, parts);
   const pinned = selection.pinned ?? compiledDefaultPrompt(k, target) ?? core?.pinned ?? null;
-  // AD-21 rule 2, reading 117: the pinned section is the pack's opening `Role heuristics` block
+  // AD-21 rule 2, reading 117: the pinned section is the pack's opening `Role heuristics` block;
+  // a replay trial reads the recorded pack, run as a task-less role (reading 176)
   const pack = writeTaskPack(k.deps.repoRoot, {
-    ...packFor(k, h, step, actionId),
+    ...(step.replay === undefined
+      ? packFor(k, h, step, actionId)
+      : trialPack(h, step.replay, actionId)),
     ...(pinned === null ? {} : { role_heuristics: pinned.text }),
   });
   const resume = step.resume !== undefined && step.resume.host === host ? step.resume : undefined;
@@ -1142,6 +1208,11 @@ export const NO_LEAD_WAIT_REASON =
  * which holds the phase until it is answered.
  */
 export const refuseInSession = (k: Kernel, h: RunHandle, step: StepSpec, reason: string): void => {
+  // a replay trial that cannot run did not pass (reading 176): nothing to ask the human
+  if (step.replay !== undefined) {
+    refuseTrial(k, h, step.replay, reason);
+    return;
+  }
   if (step.task !== undefined) {
     parkTask(k, h, step.task, {
       reason: "blocked",
@@ -1186,6 +1257,18 @@ export const dispatchPrepared = async (
   dispatch: "subagent" | "headless",
 ): Promise<DispatchedStep | null> => {
   const actionId = nextActionId(h.state);
+  if (step.replay !== undefined) {
+    const refused = replayArmRefusal(k, h, step, host, dispatch);
+    if (refused !== null) {
+      refuseTrial(k, h, step.replay, refused);
+      return null;
+    }
+    // a replay trial works in its own clean checkout at the recorded base (reading 176)
+    const cwd = await prepareTrial(k, h, step.replay, actionId);
+    if (cwd === null) return null;
+    recordDispatch(k, h.state.id, actionId);
+    return dispatchStep(k, h, step, host, cwd, dispatch);
+  }
   const task = step.task === undefined ? undefined : h.state.tasks.get(step.task);
   let worktree: DispatchRecord["worktree"];
   if (task === undefined) {

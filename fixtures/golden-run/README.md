@@ -18,6 +18,26 @@ frozen surfaces without a running engine (AD-5, AD-7, AD-12).
 - `packs/a-1.json`: the `TaskPack` behind the one recorded dispatch (`a-1`), rendered by
   `renderTaskPack` to `.vtc/state/packs/a-1.md`.
 
+- `samples/`: wave-3 shapes beside the run (contracts 4.10.0), not part of `golden-1`, so the `api/`
+  snapshots do not change:
+  - `wave3-events.jsonl`: a short log (`golden-wave3`) with a G2 `gate.requested` carrying
+    `directions`, `facts`, `design_coverage` and `design_exits`; `headless.preflight` / `started` /
+    `ended` (a replay preflight among them); `merge.preflight`; `feature.checklist`,
+    `feature.auto_merge_enabled` and `feature.auto_merge_disabled`; `final_review.step_finished`;
+    `fact.recorded` (one row with a host-reported `reported_source`, H-3), `fact.verified` and
+    `fact.waived`; `lookback.dispatched`, `proposal_recorded`, `replay_finished` (its `sha256` is
+    that of `replay-p-engineer-1.json`'s bytes), `canary_assigned`, `canary_evaluated`,
+    `rolled_back` and `escaped_defect`; and a `prompt_selection` incident (reading 176);
+  - `replay-p-engineer-1.json`: the `ReplayResult` that event names. The replay is an Engineer's on
+    a Codex-led headless run, a replay this engine can produce today: it refuses replays of verdict
+    roles such as `spec_verifier` (they change no file, so the gates would grade the same base for
+    both arms), an open deviation from spine readings 166 and 176 that waits for the Lead;
+  - `gate-report-visual.json`: a `GateReport` whose `visual` summary names its `toolchain`;
+  - `usage-billing.json`: a `UsageReport` with each host's `billing` (D-bq).
+
+  `packages/engine/test/core/golden-samples.test.ts` validates each against its contract and
+  replays the log through the engine's loader.
+
 Who uses it:
 
 - **Dashboard (sub-project 6):** serve `api/` from a dev fixture server, or point `next dev` at it,

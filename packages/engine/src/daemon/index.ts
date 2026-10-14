@@ -3,8 +3,8 @@
  * seam from @vtc/shared: `runDaemon` takes the engine lock, wires core to the injected Gate
  * Runner, host adapters, storage, assets and timer, serves MCP on the local socket and HTTP/SSE
  * on 127.0.0.1, and publishes discovery (AD-12); `serveSnapshot` serves the committed `.vtc/`
- * read-only for `vtc dashboard` (AD-5 rule 7). It may import the core, git, http, mcp and research
- * entries (it is where the research module meets core, AD-13 rule 12); it never imports gates
+ * read-only for `vtc dashboard` (AD-5 rule 7). It may import the core, git, http, mcp, research and
+ * lookback entries (it is where those modules meet core, AD-13 rule 12); it never imports gates
  * (the Gate Runner arrives in `EngineDeps`) and never loads a storage driver (the cli injects
  * `openStorage`).
  */
@@ -27,6 +27,8 @@ import {
   type HostId,
   type ResearchScope,
   type RunDaemon,
+  type SearchProvider,
+  type VtcEvent,
   type RunningDaemon,
   type RunningSnapshot,
   type ServeSnapshot,
@@ -46,6 +48,7 @@ import {
   removeEngineDiscovery,
   takeEngineLock,
   writeEngineDiscovery,
+  type LookbackRetro,
   type PluginCatalog,
   type RunState,
   type StaleLockReason,
@@ -66,17 +69,22 @@ import {
   type LockedShaFor,
 } from "../lookback/index.js";
 import { engineSocketAnswers, serveEngineSocket } from "../mcp/index.js";
+import { createLookbackReplays } from "./replays.js";
 import {
   createFetchQuota,
   createFileResearchCache,
   createResearchService,
+  type FetchQuota,
   type ResearchEventDraft,
   type ResearchService,
+  type ResearchServiceDeps,
 } from "../research/index.js";
 
 export interface ResearchWiringOptions {
   /** Network requests per run for the role tools (`createFetchQuota`'s default when absent). */
   readonly quotaPerRun?: number;
+  /** The per-run research quota itself (default `createFetchQuota(quotaPerRun)`). */
+  readonly quota?: FetchQuota;
   /** How often the cache is pruned (the first prune runs one interval after the start). */
   readonly pruneEveryMs?: number;
 }
@@ -90,11 +98,17 @@ export const RESEARCH_PRUNE_MS = 24 * 60 * 60_000;
  * hands core the re-checked table. A call is served only while a role run that declares the tool
  * is in flight; the fact row records that role. The events it emits go to that run's log. Each
  * run's role calls share one research quota, dropped at `run.finished`, and the cache is pruned on
- * a schedule (spine §5 reading 138). Returns the cleanup the daemon runs at shutdown.
+ * a schedule (spine §5 reading 138). Search runs on the host's own web search in the role session
+ * (H-3, reading 156): the keyed `search` fetcher is the user's opt-in (`researchSearchProvider`,
+ * no default), handed to the service, and without it that fetcher gets no key, so it sends
+ * nothing. Returns the cleanup the daemon runs at shutdown.
  */
 export const wireResearch = (
   engine: Engine,
-  deps: Pick<EngineDeps, "repoRoot" | "vtcHome" | "http" | "researchApiKey" | "now">,
+  deps: Pick<
+    EngineDeps,
+    "repoRoot" | "vtcHome" | "http" | "researchApiKey" | "researchSearchProvider" | "now"
+  >,
   options: ResearchWiringOptions = {},
 ): (() => void) => {
   const scope = ((): ResearchScope => {
@@ -107,14 +121,19 @@ export const wireResearch = (
   const cache = createFileResearchCache(deps.vtcHome);
   // one quota for the daemon's life: the service is built per call, the per-run counts outlive it
   // (the G2 re-check, run undefined, takes none)
-  const quota = createFetchQuota(options.quotaPerRun);
+  const quota = options.quota ?? createFetchQuota(options.quotaPerRun);
   const keyOf = deps.researchApiKey;
-  const serviceFor = (run: string | undefined): ResearchService =>
-    createResearchService({
+  // H-3 (reading 156): search runs on the host's own web search in the role session; the keyed
+  // `search` fetcher is an opt-in with no default, so without a provider it gets no key and sends
+  // nothing
+  const provider = deps.researchSearchProvider;
+  const serviceFor = (run: string | undefined): ResearchService => {
+    const service: ResearchServiceDeps & { readonly searchProvider?: SearchProvider } = {
       projectRoot: deps.repoRoot,
       cache,
       scope,
       http: deps.http,
+      ...(provider === undefined ? {} : { searchProvider: provider }),
       ...(run === undefined ? {} : { quota: quota.forRun(run) }),
       ...(deps.now === undefined ? {} : { now: deps.now }),
       ...(keyOf === undefined
@@ -122,14 +141,18 @@ export const wireResearch = (
         : {
             apiKey: (fetcher: string) => {
               const id = FetcherIdSchema.safeParse(fetcher);
-              return id.success ? keyOf(id.data) : undefined;
+              if (!id.success) return undefined;
+              if (id.data === "search" && provider === undefined) return undefined;
+              return keyOf(id.data);
             },
           }),
       knownValues: () => engine.secrets(),
       onEvent: (event: ResearchEventDraft) => {
         engine.recordModuleEvent(run, event);
       },
-    });
+    };
+    return createResearchService(service);
+  };
   engine.setRoleTools(async (name, input) => {
     const caller = engine.roleCalling(name);
     if (caller === undefined)
@@ -163,6 +186,20 @@ export const wireResearch = (
 };
 
 /**
+ * The host the lookback role of `state` runs on, and the percent of its weekly window left (AD-21
+ * rule 8, spine §5 reading 176): the run's live Lead host, else the host its limit names, else the
+ * engine's default host; `null` when that host's weekly window is unknown (then Lookback waits).
+ */
+export const lookbackWindow = (
+  engine: Pick<Engine, "liveLeadHost" | "hostFor" | "usage">,
+  state: Pick<RunState, "id" | "limit">,
+): { readonly host: HostId; readonly pct: number | null } => {
+  const host = engine.liveLeadHost(state.id) ?? state.limit?.host ?? engine.hostFor({ host: null });
+  const weekly = engine.usage.get(host)?.windows.find((w) => w.kind === "weekly");
+  return { host, pct: weekly === undefined ? null : remainingPct(weekly) };
+};
+
+/**
  * The Lookback module wired into the engine (AD-21; spine §5 reading 144):
  * - core's prompt selector (`Engine.setPromptPins`, reading 135(d)): each dispatch of an agent the
  *   plugin compiled without its editable section runs the human's pin or the task's canary arm
@@ -175,12 +212,18 @@ export const wireResearch = (
  *   the lookback role queued for each target (`lookback.dispatched`), reading the input the module
  *   renders; its proposal is checked on submit, and an accepted one stored as a candidate version
  *   (`lookback.proposal_recorded`);
+ * - then, at RETRO, the replays (rule 6, reading 176, `createLookbackReplays`): every proposal not
+ *   yet replayed, its `lookback_replay` trials run in clean checkouts and graded through the Gate
+ *   Runner, its `ReplayResult` and `lookback.replay_finished` written; the weekly window checked is
+ *   the run's Lead host's ({@link lookbackWindow});
  * - at `run.finished` (an aborted run too) the run's failures are attributed to
  *   `.vtc/lookback/attributions.jsonl` and the scorecards of every version in the history are
- *   rewritten under `.vtc/lookback/scorecards/`.
- * Not wired yet (spine §7 "Lookback replays", AD-21 rule 6): the `lookback_replay` trials. Lookback
- * work at `run.finished` runs one job at a time and never fails the engine; the returned cleanup
- * waits for the job in flight.
+ *   rewritten under `.vtc/lookback/scorecards/`. Only the AI tiebreak answers the engine recorded
+ *   would let an `ai_tiebreak` row count; nothing produces one yet, so none counts (the lookback
+ *   module's tiebreak store, `readTiebreakKeys` / `appendTiebreakRecord`, is wired here once the
+ *   lookback-research branch that ships it is integrated).
+ * Lookback work at `run.finished` runs one job at a time and never fails the engine; the returned
+ * cleanup waits for the job in flight.
  */
 export const wireLookback = (
   engine: Engine,
@@ -199,7 +242,21 @@ export const wireLookback = (
   // every mode of a role shares its prompt sections (reading 118)
   const lockedShaFor: LockedShaFor = (role, mode, host) =>
     plugins.promptParts?.(agentNameFor(role, mode), host)?.lockedSha256;
-  const history = () => engine.states().flatMap((s) => s.events);
+  // a run's events as Lookback reads them: without its replay trials, which measure a version and
+  // are no trace of the run's work (no attribution, no scorecard dispatch; reading 176)
+  const lookbackEvents = (state: RunState): readonly VtcEvent[] => {
+    const trials = engine.replayTrialActions(state.id);
+    if (trials.size === 0) return state.events;
+    return state.events.filter((e) => {
+      const action = (e.data as { action_id?: unknown }).action_id;
+      return !(
+        typeof action === "string" &&
+        trials.has(action) &&
+        (e.type.startsWith("role.") || e.type.startsWith("headless."))
+      );
+    });
+  };
+  const history = () => engine.states().flatMap(lookbackEvents);
   let chain: Promise<void> = Promise.resolve();
   const enqueue = (job: () => Promise<void>): void => {
     chain = chain.then(job).catch((error: unknown) => {
@@ -218,17 +275,19 @@ export const wireLookback = (
         }
       },
     );
-  const weeklyRemaining = (): number | null => {
-    const host: HostId = engine.hostFor({ host: null });
-    const weekly = engine.usage.get(host)?.windows.find((w) => w.kind === "weekly");
-    return weekly === undefined ? null : remainingPct(weekly);
-  };
+  // rule 8 (reading 176): the window of the run's Lead host, where the lookback role runs
+  const weeklyRemaining = (state: RunState): number | null => lookbackWindow(engine, state).pct;
+  // the AI tiebreak answers the engine recorded (reading 137): only these ai_tiebreak rows count.
+  // No AI tiebreak is produced yet, so none is recorded and none counts (fail closed); the
+  // lookback module's store reader replaces this at integration
+  const tiebreaks = (): Promise<ReadonlySet<string>> => Promise.resolve(new Set<string>());
   const bundleSha = (): string =>
     graderBundleSha({ judgeModel: null, gatesConfigHash: engine.gatesConfigHash() });
   const budgetAvailable = (state: RunState): boolean =>
     state.runBudget === null || state.runBudget.spent_usd < state.runBudget.budget_usd;
-  // AD-21 rules 4 and 8: the lookback role at RETRO, before the run finishes (reading 154)
-  engine.setLookbackRetro(
+  // AD-21 rules 4 and 8: the lookback role at RETRO, before the run finishes (reading 154); the
+  // weekly window is the finishing run's Lead host's (reading 176)
+  const retroFor = (state: RunState | null): LookbackRetro =>
     createLookbackRetro({
       projectRoot: deps.repoRoot,
       vtcHome: deps.vtcHome,
@@ -237,23 +296,44 @@ export const wireLookback = (
       compiled: (role, mode, host) =>
         plugins.promptParts?.(agentNameFor(role, mode), host)?.compiled,
       graderBundleSha: bundleSha,
-      weeklyRemainingPct: weeklyRemaining,
+      weeklyRemainingPct: () => (state === null ? null : weeklyRemaining(state)),
       budgetAvailable,
       now,
-    }),
-  );
+    });
+  const checker = retroFor(null);
+  // AD-21 rule 6 (reading 176): after the targets, RETRO replays every proposal not yet replayed
+  const replays = createLookbackReplays({
+    projectRoot: deps.repoRoot,
+    vtcHome: deps.vtcHome,
+    repoKey,
+    history,
+    lockedShaFor,
+    compiled: (role, mode, host) => plugins.promptParts?.(agentNameFor(role, mode), host)?.compiled,
+    tiebreaks,
+    graderBundleSha: bundleSha,
+    weeklyWindow: (state) => lookbackWindow(engine, state),
+    budgetAvailable,
+    gateRunner: engine.deps.gateRunner,
+    now,
+  });
+  engine.setLookbackRetro({
+    plan: (state) => retroFor(state).plan({ ...state, events: [...lookbackEvents(state)] }),
+    check: (target, root, state) => checker.check(target, root, state),
+    ...replays,
+  });
   const runEnd = async (run: string): Promise<void> => {
     const state = engine.states().find((s) => s.id === run);
     if (state === undefined) return;
     await lookbackAtRunEnd({
       projectRoot: deps.repoRoot,
-      events: state.events,
+      events: lookbackEvents(state),
       history: history(),
       lockedShaFor,
       graderBundleSha: bundleSha(),
-      weeklyRemainingPct: weeklyRemaining(),
+      weeklyRemainingPct: weeklyRemaining(state),
       budgetAvailable: budgetAvailable(state),
       now: now(),
+      tiebreaks: await tiebreaks(),
     });
   };
   const off = engine.onEvent((event) => {
@@ -421,6 +501,19 @@ export const runDaemon: RunDaemon = async (deps: EngineDeps, options) => {
         adapter.watchUsage((snapshot) => {
           engine.ingestUsage(snapshot);
         }),
+      );
+    }
+    // D-bq (reading 171): who pays for each host's role runs, from its own sign-in check, so
+    // `GET /api/usage` carries an API-key login before any role runs (every engine-launched start
+    // checks again)
+    for (const host of HOST_IDS) {
+      const adapter = deps.adapters[host];
+      if (adapter?.authStatus === undefined) continue;
+      adapter.authStatus().then(
+        (status) => {
+          engine.recordBilling(host, status.billing ?? null);
+        },
+        () => undefined,
       );
     }
     const prototype = await createPrototypeServer(deps.repoRoot);

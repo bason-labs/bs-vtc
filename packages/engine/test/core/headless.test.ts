@@ -15,6 +15,7 @@ import {
   sha256Hex,
   SubmitInputSchema,
   TASK_PACK_HEURISTICS_SECTION,
+  unknownUsage,
   type HostOutcome,
   type LeadAction,
   type RoleResultInput,
@@ -26,6 +27,7 @@ import {
   headlessPreflight,
 } from "../../src/core/headless.js";
 import { consecutiveFailures } from "../../src/core/queries.js";
+import { usageReportView } from "../../src/core/views.js";
 import { MAX_STEP_FAILURES, stopTaskHeadless } from "../../src/core/submit.js";
 import { createPluginCatalog, type CallContext, type PluginCatalog } from "../../src/core/index.js";
 import type { HeadlessEntry, Kernel, RunHandle } from "../../src/core/kernel.js";
@@ -272,6 +274,39 @@ describe(
       await h.release();
     });
 
+    it("a headless Codex run of an agent that carries its own section takes a pin (reading 176)", async () => {
+      const PINNED = "Name the entry points first.";
+      const h = createHarness({
+        plugins: compiledPlugins(),
+        codex: { headless: frontHalf, authStatus: signedIn("codex", true) },
+      });
+      h.engine.setPromptPins((target) =>
+        target.role === "repo_cartographer"
+          ? {
+              version: {
+                role: target.role,
+                host: target.host,
+                locked_sha256: sha256Hex(LOCKED),
+                editable_sha256: sha256Hex(PINNED),
+                effective_sha256: effectivePromptSha(LOCKED, PINNED),
+              },
+              text: PINNED,
+            }
+          : null,
+      );
+      await start(h, CODEX);
+      await next(h, CODEX);
+      const dispatched = ofType(h, "role.dispatched")[0];
+      expect(dispatched?.prompt_sha).toBe(effectivePromptSha(LOCKED, PINNED));
+      expect(dispatched?.data.editable_sha256).toBe(sha256Hex(PINNED));
+      const pack = readFileSync(join(h.repo, String(dispatched?.data.pack)), "utf8");
+      expect(pack.startsWith(`## ${TASK_PACK_HEURISTICS_SECTION}\n\n${PINNED}\n`)).toBe(true);
+      expect(h.launched[0]?.request.prompt.startsWith(`${LOCKED}\n`)).toBe(true);
+      expect(ofType(h, "incident.recorded")).toEqual([]);
+      await h.engine.settle();
+      await h.release();
+    });
+
     it("never runs a role without its instructions: texts missing or not the manifest's fail the step", async () => {
       for (const plugins of [
         compiledPlugins({ texts: false }),
@@ -442,19 +477,30 @@ describe(
 
 describe("AD-25 rule 3: the budget check comes last", () => {
   /** The preflight's inputs only: a run whose config matches, a task, the host's sign-in. */
+  const billed: [string, string | null][] = [];
   const preflightOf = (options: {
     readonly loggedIn: boolean;
     readonly spent: number;
     readonly runSpent?: number;
     readonly method?: string;
+    readonly billing?: "subscription" | "api_key" | null;
   }) => {
+    const status = signedIn("codex", options.loggedIn, options.method ?? null);
     const k = {
       diskConfigHash: () => "a".repeat(64),
       usage: new Map(),
       now: () => new Date("2026-10-13T09:00:00.000Z"),
+      recordBilling: (host: string, billing: string | null) => {
+        billed.push([host, billing]);
+      },
       deps: {
         adapters: {
-          codex: { authStatus: signedIn("codex", options.loggedIn, options.method ?? null) },
+          codex: {
+            authStatus: () =>
+              status().then((s) =>
+                options.billing === undefined ? s : { ...s, billing: options.billing },
+              ),
+          },
         },
       },
     } as unknown as Kernel;
@@ -490,13 +536,53 @@ describe("AD-25 rule 3: the budget check comes last", () => {
     expect(await preflightOf({ loggedIn: true, spent: 1 })).toMatchObject({ ok: true });
   });
 
-  it("a login with an API key fails on auth: roles run on the subscription only (reading 141)", async () => {
-    const refused = await preflightOf({ loggedIn: true, spent: 1, method: "API key" });
-    expect(refused).toMatchObject({ ok: false, failed: "auth" });
-    expect(refused.detail).toContain("API key");
+  it("a login with an API key is allowed, and who pays reaches the usage snapshot (D-bq, reading 171)", async () => {
+    billed.length = 0;
+    expect(
+      await preflightOf({ loggedIn: true, spent: 1, method: "API key", billing: "api_key" }),
+    ).toMatchObject({ ok: true });
     expect(await preflightOf({ loggedIn: true, spent: 1, method: "ChatGPT" })).toMatchObject({
       ok: true,
     });
+    // a status command that does not say who pays leaves the billing unknown
+    expect(billed).toEqual([
+      ["codex", "api_key"],
+      ["codex", null],
+    ]);
+  });
+});
+
+describe("D-bq: who pays for a host's role runs reaches GET /api/usage (reading 171)", () => {
+  it("keeps the sign-in check's billing on the host's usage snapshot across later readings", async () => {
+    const h = createHarness();
+    h.engine.recordBilling("codex", "api_key");
+    expect(usageReportView(h.engine.usage, null).hosts.find((s) => s.host === "codex")).toEqual({
+      ...unknownUsage("codex"),
+      billing: "api_key",
+    });
+    h.engine.ingestUsage({
+      host: "codex",
+      source: "app_server",
+      windows: [
+        {
+          kind: "weekly",
+          label: "weekly",
+          window_minutes: 10080,
+          used_pct: 18,
+          resets_at: null,
+        },
+      ],
+      model_limits: [],
+      updated_at: "2026-10-14T09:00:00.000Z",
+    });
+    const codex = h.engine.usage.get("codex");
+    expect(codex?.billing).toBe("api_key");
+    expect(codex?.windows.map((w) => w.used_pct)).toEqual([18]);
+    // a later check that signs in on the subscription replaces it
+    h.engine.recordBilling("codex", "subscription");
+    expect(h.engine.usage.get("codex")?.billing).toBe("subscription");
+    expect(h.engine.usage.get("claude-code")).toBeUndefined();
+    await h.release();
   });
 });
 

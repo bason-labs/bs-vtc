@@ -34,6 +34,7 @@ import type { Kernel, RunHandle } from "./kernel.js";
 import { deferForUsage, limitWait, stillLimited } from "./limits.js";
 import { inFlight } from "./queries.js";
 import { parkTask } from "./parking.js";
+import { deferReplays, trialProtectedFiles } from "./replay.js";
 import { headlessPlatformRefusal, roleSandboxProblem, roleSandboxRequest } from "./sandbox.js";
 import { handleSubmit } from "./submit.js";
 
@@ -48,9 +49,6 @@ export const capabilitiesOf = (
   host: HostId,
 ): Pick<HostCapabilities, "subagents" | "headless"> =>
   k.deps.adapters[host]?.capabilities ?? NO_CAPABILITIES;
-
-/** The login method label of an API-key login (the Codex adapter's `authStatus`). */
-export const API_KEY_LOGIN = "API key";
 
 /**
  * The model id a step runs on `host` (`resolveModel`), or `undefined`: the host session's model,
@@ -99,7 +97,8 @@ const unpricedDetail = (detail: string): boolean =>
  * The checks before an engine-launched start or resume (AD-25 rule 3), in order: the run is not
  * paused; the config files still give the run's `pipeline_config_hash`; the host's five-hour
  * window is not used up; the host's own sign-in check (`HostAdapter.authStatus`, when the adapter
- * has one) says logged in, and not with an API key (spec D2); the budget: the run can be priced
+ * has one) says logged in (an API-key login is allowed, and who pays is kept on the host's usage
+ * snapshot for the API-key billing warning: D-bq, spine §5 reading 171); the budget: the run can be priced
  * ({@link unpricedRun}, when the step names its role) and the task (or the run) has budget left.
  */
 export const headlessPreflight = async (
@@ -138,13 +137,9 @@ export const headlessPreflight = async (
           ? `${host}'s sign-in status command could not be run`
           : `${host}'s sign-in status command says it is not signed in`,
       );
-    // spec D2, AD-25 rule 2: roles run on the user's subscription only, never an API key
-    // (spine §5 reading 141); the adapter reports Codex's API-key login as this label
-    if (status.method === API_KEY_LOGIN)
-      return fail(
-        "auth",
-        `${host} is signed in with an API key: VTC runs roles only on your subscription (sign in with your ChatGPT account)`,
-      );
+    // D-bq (reading 171, supersedes reading 141): an API-key login runs roles; who pays reaches
+    // `UsageSnapshot.billing`, so Flow Studio shows `API_KEY_BILLING_WARNING`
+    k.recordBilling(host, status.billing ?? null);
   }
   const unpriced =
     step.role === undefined ? null : unpricedRun(k, { ...step, role: step.role }, host);
@@ -168,6 +163,8 @@ export const headlessPreflight = async (
  * A failed preflight: nothing launches, and nothing retries in a loop. `usage` waits for the
  * reset (the timer is scheduled); `auth` records an incident and pauses the run until the human
  * signs in again and resumes; `config` parks the step for the human; `budget` parks its task.
+ * A Lookback replay trial pauses nothing (reading 176): the replays stop and wait for the next
+ * RETRO, and the delivered run finishes (`deferReplays`; a sign-in failure is still an incident).
  */
 const preflightFailed = (
   k: Kernel,
@@ -176,6 +173,27 @@ const preflightFailed = (
   check: HeadlessPreflight,
 ): void => {
   const detail = check.detail ?? "the headless preflight failed";
+  if (step.replay !== undefined && check.failed !== undefined && check.failed !== "paused") {
+    if (check.failed === "auth")
+      k.emit(h, {
+        type: "incident.recorded",
+        actor: "engine",
+        data: {
+          kind: "auth",
+          detail:
+            `the engine did not start a replay trial of ${step.role} headless: ${detail}`.slice(
+              0,
+              2000,
+            ),
+        },
+      });
+    deferReplays(
+      k,
+      h,
+      `a headless trial of ${step.role} could not start (${check.failed}): ${detail}`,
+    );
+    return;
+  }
   switch (check.failed) {
     case "paused":
     case undefined:
@@ -503,8 +521,12 @@ export const launchHeadless = async (
       {
         cwd,
         writablePaths: dispatchWriteScope(k.deps.repoRoot, h.state, roleRun)?.worktree_globs ?? [],
-        protectedPaths:
-          task === undefined ? [] : (await protectedFiles(k, h, task)).map((p) => p.path),
+        protectedPaths: (step.replay !== undefined
+          ? await trialProtectedFiles(k, step.replay)
+          : task === undefined
+            ? []
+            : await protectedFiles(k, h, task)
+        ).map((p) => p.path),
       },
     ),
   );
@@ -611,7 +633,7 @@ export const dispatchHeadless = async (
     if (free <= 0 || stop()) return;
     // the cross-family reviewer runs on the other family's host (§12.4)
     const where = step.host ?? host;
-    const why = step.host === undefined ? purpose : "cross_family_review";
+    const why = step.host === undefined ? (step.purpose ?? purpose) : "cross_family_review";
     const share = left.get(pool(step)) ?? 1;
     left.set(pool(step), Math.max(1, share - 1));
     if (await launchHeadless(k, h, step, where, why, share)) free -= 1;

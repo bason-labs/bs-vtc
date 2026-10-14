@@ -41,6 +41,7 @@ afterEach(cleanupDirs);
 
 interface Line {
   type: string;
+  role?: string;
   data: Record<string, unknown>;
 }
 const events = (h: Harness): Line[] =>
@@ -91,6 +92,10 @@ const toG2 = async (
   options: {
     readonly hasUi?: boolean;
     readonly designer?: (action: SpawnAction) => { type: string; path: string }[];
+    /** Later Designer rounds, while the engine dispatches the Designer again (D-bt). */
+    readonly designerAgain?: readonly ((action: SpawnAction) => { type: string; path: string }[])[];
+    /** `new`: DISCOVER runs the Research Analyst (default `existing`). */
+    readonly repo?: "new" | "existing";
     /** The Architect's architecture artifact (default {@link SPINE}). */
     readonly spine?: string;
     /** Security's threat model (default: no SEC-n requirement). */
@@ -101,23 +106,41 @@ const toG2 = async (
     {
       request: "Password reset",
       track: "feature",
-      repo: "existing",
+      repo: options.repo ?? "existing",
       has_ui: options.hasUi ?? false,
       risk_hints: [],
     },
     CLAUDE,
   );
-  const carto = only((await h.engine.next({}, CLAUDE)).actions, "repo_cartographer");
-  writeFile(workdir(carto), ".vtc/research/repo-map/map.md", "# map\n");
-  const ba = only(
-    (
-      await submitResult(h, carto, {
-        exit: "done",
-        artifacts: [{ type: "repo_map", path: ".vtc/research/repo-map/map.md" }],
-      })
-    ).actions,
-    "ba",
-  );
+  const discover = (await h.engine.next({}, CLAUDE)).actions;
+  const ba =
+    options.repo === "new"
+      ? await (async () => {
+          const analyst = only(discover, "research_analyst");
+          writeFile(workdir(analyst), ".vtc/research/briefs/brief.md", "# brief\n");
+          return only(
+            (
+              await submitResult(h, analyst, {
+                exit: "done",
+                artifacts: [{ type: "research_brief", path: ".vtc/research/briefs/brief.md" }],
+              })
+            ).actions,
+            "ba",
+          );
+        })()
+      : await (async () => {
+          const carto = only(discover, "repo_cartographer");
+          writeFile(workdir(carto), ".vtc/research/repo-map/map.md", "# map\n");
+          return only(
+            (
+              await submitResult(h, carto, {
+                exit: "done",
+                artifacts: [{ type: "repo_map", path: ".vtc/research/repo-map/map.md" }],
+              })
+            ).actions,
+            "ba",
+          );
+        })();
   writeFile(workdir(ba), ".vtc/spec/spec.md", SPEC);
   const g1 = gateOf(
     (
@@ -152,6 +175,10 @@ const toG2 = async (
         artifacts: options.designer(designerAction),
       })
     ).actions;
+  for (const again of options.designerAgain ?? []) {
+    const next = only(actions, "designer");
+    actions = (await submitResult(h, next, { exit: "done", artifacts: again(next) })).actions;
+  }
   return gateOf(actions);
 };
 
@@ -860,6 +887,60 @@ describe("too-similar directions, re-roll and the category standard (§9.1 steps
       ["ember", "novel"],
       ["quiet", "novel"],
     ]);
+    await h.release();
+  });
+
+  it("a new-repo UI design with one direction gets the Designer once more, then G2 refuses (D-bt)", async () => {
+    const h = createHarness({ roles: ROLES });
+    similarSeam(h);
+    let again: SpawnAction | undefined;
+    const gate = await toG2(h, {
+      hasUi: true,
+      repo: "new",
+      designer: designer(["signal"]),
+      designerAgain: [
+        (action) => {
+          again = action;
+          return designer(["quiet"])(action);
+        },
+      ],
+    });
+    // the second dispatch says why it runs again
+    expect(again?.prompt).toMatch(/G2 offers 2–3 design directions.*you offered 1/s);
+    expect(gate.design_directions).toEqual(["quiet"]);
+    expect(gate.design_coverage?.ok).toBe(false);
+    expect(gate.design_coverage?.directions_problem).toMatch(
+      /1 distinct design direction.*at least 2/,
+    );
+    expect(ofType(h, "gate.requested").at(-1)?.data.design_coverage).toEqual(gate.design_coverage);
+    await expect(
+      approve(h, gate, { ...waiveAll(gate), design_direction: "quiet" }),
+    ).rejects.toThrow(/DESIGN check failed: .*1 distinct design direction/);
+    // the Designer ran twice, no more
+    expect(ofType(h, "role.dispatched").filter((e) => e.role === "designer")).toHaveLength(2);
+    await h.release();
+  });
+
+  it("a new-repo UI design with two directions goes to G2 at once (D-bt)", async () => {
+    const h = createHarness({ roles: ROLES });
+    similarSeam(h);
+    const gate = await toG2(h, {
+      hasUi: true,
+      repo: "new",
+      designer: designer(["quiet", "bold", "calm", "loud"]),
+    });
+    // more than three are cut (G2_DIRECTIONS.max)
+    expect(gate.design_directions).toEqual(["quiet", "bold", "calm"]);
+    expect(gate.design_coverage).toMatchObject({ ok: true });
+    expect(gate.design_coverage?.directions_problem).toBeUndefined();
+    await h.release();
+  });
+
+  it("an existing repo's UI design is not held to two directions", async () => {
+    const h = createHarness({ roles: ROLES });
+    similarSeam(h);
+    const gate = await toG2(h, { hasUi: true, designer: designer(["quiet"]) });
+    expect(gate.design_coverage).toMatchObject({ ok: true });
     await h.release();
   });
 

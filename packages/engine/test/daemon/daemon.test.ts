@@ -16,6 +16,8 @@ import {
   type AssetBundle,
   type EngineDeps,
   type GateRunner,
+  type HostAdapter,
+  type UsageReport,
 } from "@vtc/shared";
 import { EngineLockedError, readEngineDiscovery } from "../../src/core/index.js";
 import { runDaemon, serveSnapshot } from "../../src/daemon/index.js";
@@ -140,6 +142,36 @@ describe("runDaemon (AD-12, AD-19)", () => {
     await client.close();
     await again.close();
   });
+  it("carries an API-key login's billing in GET /api/usage from the start (D-bq, reading 171)", async () => {
+    const repo = calibratedRepo();
+    const home = shortHome();
+    const codex = {
+      capabilities: { subagents: false, headless: true, budgetCap: false },
+      authStatus: () =>
+        Promise.resolve({
+          host: "codex" as const,
+          logged_in: true,
+          method: "API key",
+          billing: "api_key" as const,
+          checked_at: new Date().toISOString(),
+        }),
+    } as unknown as HostAdapter;
+    const daemon = await runDaemon(
+      { ...depsFor(repo, home), adapters: { codex } },
+      { wake: false },
+    );
+    try {
+      const usage = async (): Promise<UsageReport> =>
+        JSON.parse((await get(daemon.port, "/api/usage")).body) as UsageReport;
+      await vi.waitFor(async () => {
+        expect((await usage()).hosts.find((s) => s.host === "codex")?.billing).toBe("api_key");
+      });
+      expect((await usage()).hosts.find((s) => s.host === "claude-code")?.billing).toBeUndefined();
+    } finally {
+      await daemon.close();
+    }
+  });
+
   it("serves the prototype origin once the Designer writes it mid-run (AD-5 rule 9)", async () => {
     const repo = calibratedRepo();
     const home = shortHome();

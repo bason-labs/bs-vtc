@@ -48,6 +48,7 @@ import type { Kernel, RunHandle } from "./kernel.js";
 import { parkEscalation } from "./escalations.js";
 import { featureReviewDone } from "./final-review.js";
 import { LOOKBACK_ROLE, retroTargetOf } from "./retro.js";
+import { replayTrialOf, snapshotTrial, startTrialGrade } from "./replay.js";
 import { recordLimit } from "./limits.js";
 import { openTaskEscalation, parkTask, setTaskStatus } from "./parking.js";
 import {
@@ -729,6 +730,37 @@ const acceptLookback = async (
     artifacts: work.artifacts,
     after: () => {
       for (const event of events) k.emit(h, event);
+    },
+  };
+};
+
+/**
+ * A Lookback replay trial's result (AD-21 rule 6, spine §5 reading 176), checked against the
+ * role's contract like any result: its work is committed in its clean checkout, then graded
+ * through the Gate Runner (`startTrialGrade`). Nothing reaches a task, the user's checkout or the
+ * integration branch, and its questions and findings open nothing.
+ */
+const acceptReplayTrial = async (
+  k: Kernel,
+  h: RunHandle,
+  run: RoleRunRecord,
+  trial: NonNullable<ReturnType<typeof replayTrialOf>>,
+): Promise<StepOutcome> => {
+  if (h.state.run.phase !== "retro")
+    return reject("out_of_order", [`the run is in ${h.state.run.phase}, not retro`]);
+  let head: string;
+  try {
+    head = await snapshotTrial(k, h, run, trial);
+  } catch (error) {
+    return reject("out_of_order", [
+      `the trial's checkout could not be committed: ${error instanceof Error ? error.message : String(error)}`,
+    ]);
+  }
+  return {
+    kind: "accept",
+    head,
+    after: () => {
+      startTrialGrade(k, h, trial, run.action_id, head);
     },
   };
 };
@@ -1483,6 +1515,9 @@ const evaluate = async (
     subject: run.subject,
   });
   if (!conformance.ok) return reject(conformance.reason, conformance.issues);
+  // a Lookback replay trial changes nothing: its work is graded where it ran (reading 176)
+  const trial = run.task === undefined ? replayTrialOf(k, h, run.action_id) : undefined;
+  if (trial !== undefined) return acceptReplayTrial(k, h, run, trial);
   const task = run.task === undefined ? undefined : h.state.tasks.get(run.task);
   const order = outOfOrder(k, h, run, task);
   if (order !== null) return reject("out_of_order", [order]);
