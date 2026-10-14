@@ -3,9 +3,10 @@
  * (with the recording fake sandbox), against a fake Playwright module and a fake pixelmatch:
  * the script's protocol, recipe and request policy are exercised without any browser.
  */
-import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { createServer } from "node:net";
 import { join } from "node:path";
+import type { GateSandbox } from "@vtc/shared";
 import { describe, expect, it } from "vitest";
 import { GateCommandJail } from "../../../src/gates/index.js";
 import {
@@ -95,9 +96,57 @@ const FAKE_PIXELMATCH = String.raw`export default function pixelmatch(a, b, out,
   return n;
 }`;
 
-/** A minimal app server on a fixed port that answers 200. */
+/**
+ * A minimal app server on a fixed port that answers 200. It records what it could see of the
+ * runner's temp directory (the app server shares it): the input, and whether the key was there.
+ */
 const SERVER = String.raw`import { createServer } from "node:http";
+import { existsSync, writeFileSync } from "node:fs";
+import { join } from "node:path";
+const tmp = process.env.TMPDIR;
+writeFileSync("seen.json", JSON.stringify({ input: existsSync(join(tmp, "input.json")), key: existsSync(join(tmp, "key")) }));
 createServer((req, res) => { res.writeHead(200); res.end("ok"); }).listen(Number(process.argv[2]), "127.0.0.1");`;
+
+/**
+ * Stand-ins for a process the app server left behind that rewrites the runner's temp directory
+ * after the runner's last write: run by {@link tamperingSandbox} once the runner has exited.
+ */
+const TAMPER = {
+  /** A clean result of its own, with a made-up MAC. */
+  forge: String.raw`import { writeFileSync } from "node:fs";
+const body = JSON.stringify({ v: 1, browser: { name: "chromium", version: "1" }, renders: [], files: {} });
+writeFileSync(process.argv[2] + "/result.json", JSON.stringify({ v: 1, body, mac: "0".repeat(64) }));`,
+  /** The runner's own envelope, its body edited (every render made "rendered"). */
+  edit: String.raw`import { readFileSync, writeFileSync } from "node:fs";
+const file = process.argv[2] + "/result.json";
+const env = JSON.parse(readFileSync(file, "utf8"));
+env.body = env.body.replaceAll('"unreached"', '"rendered"');
+writeFileSync(file, JSON.stringify(env));`,
+  /** The runner's result left alone, one screenshot replaced. */
+  image: String.raw`import { writeFileSync } from "node:fs";
+writeFileSync(process.argv[2] + "/out/home_default_390_light.png", "not the runner's screenshot");`,
+  /** The result replaced by a bare, unsigned result (the format before envelopes). */
+  bare: String.raw`import { writeFileSync } from "node:fs";
+writeFileSync(process.argv[2] + "/result.json", JSON.stringify({ v: 1, browser: null, renders: [] }));`,
+} as const;
+
+/** The recording sandbox, plus a tamper script run on the temp directory after the command. */
+const tamperingSandbox = (script: string): GateSandbox => ({
+  kind: "sandbox-exec",
+  wrap: (argv, spec) => ({
+    command: "/bin/sh",
+    args: [
+      "-c",
+      'n=$1; t=$2; d=$3; shift 3; "$@"; s=$?; "$n" "$t" "$d"; exit $s',
+      "vtc-tamper",
+      NODE,
+      script,
+      spec.tempDir,
+      ...argv,
+    ],
+    network: "none",
+  }),
+});
 
 const freePort = (): Promise<number> =>
   new Promise((resolve) => {
@@ -111,70 +160,77 @@ const freePort = (): Promise<number> =>
     });
   });
 
+/** A render run's directories and input: a checkout with a prototype, fake tools, an app server. */
+const renderSetup = async () => {
+  const dir = tempDir("vtc-visual-script-");
+  const checkout = join(dir, "checkout");
+  mkdirSync(join(checkout, ".vtc/design/prototype"), { recursive: true });
+  writeFileSync(join(checkout, ".vtc/design/prototype/index.html"), "<main>proto</main>");
+  const tools = join(dir, "tools");
+  mkdirSync(tools);
+  writeFileSync(join(tools, "playwright.mjs"), FAKE_PLAYWRIGHT);
+  writeFileSync(join(tools, "pixelmatch.mjs"), FAKE_PIXELMATCH);
+  writeFileSync(join(tools, "axe.min.js"), "/* axe */");
+  writeFileSync(join(checkout, "server.mjs"), SERVER);
+  const port = await freePort();
+  const input: Omit<RunnerInput, "out_dir"> = {
+    v: 1,
+    mode: "render",
+    playwright: join(tools, "playwright.mjs"),
+    executable: "/fake/chrome-headless-shell",
+    axe: join(tools, "axe.min.js"),
+    pixelmatch: join(tools, "pixelmatch.mjs"),
+    prototype_root: join(checkout, ".vtc/design/prototype"),
+    app: {
+      command: [NODE, "server.mjs", String(port)],
+      cwd: checkout,
+      url: `http://127.0.0.1:${String(port)}`,
+      ready_timeout_ms: 10_000,
+    },
+    fixed_time: "2026-01-15T12:00:00.000Z",
+    axe_tags: ["wcag2a", "wcag2aa"],
+    include_best_practice: false,
+    pixel_threshold: 0.1,
+    dynamic_regions: [".clock"],
+    style_properties: [...STYLE_PROPERTIES],
+    style_limit: 100,
+    nav_timeout_ms: 5000,
+    jobs: [
+      {
+        key: "home:default:390:light",
+        path: "/?state=default&theme=light",
+        width: 390,
+        theme: "light",
+      },
+      {
+        key: "home:default:390:dark",
+        path: "/missing?state=default&theme=dark",
+        width: 390,
+        theme: "dark",
+      },
+    ],
+  };
+  const call = () => ({
+    input,
+    allowRead: [tools],
+    loopback: true,
+    env: { PATH: process.env.PATH ?? "" },
+    checkout,
+    timeoutMs: 60_000,
+    stdoutPath: join(dir, "out.log"),
+    stderrPath: join(dir, "err.log"),
+  });
+  return { dir, checkout, tools, port, call };
+};
+
 describe("visual runner script", () => {
   it("renders app and prototype per job with the recipe, axe, styles and region diffs", async () => {
-    const dir = tempDir("vtc-visual-script-");
-    const checkout = join(dir, "checkout");
-    mkdirSync(join(checkout, ".vtc/design/prototype"), { recursive: true });
-    writeFileSync(join(checkout, ".vtc/design/prototype/index.html"), "<main>proto</main>");
-    const tools = join(dir, "tools");
-    mkdirSync(tools);
-    writeFileSync(join(tools, "playwright.mjs"), FAKE_PLAYWRIGHT);
-    writeFileSync(join(tools, "pixelmatch.mjs"), FAKE_PIXELMATCH);
-    writeFileSync(join(tools, "axe.min.js"), "/* axe */");
-    writeFileSync(join(checkout, "server.mjs"), SERVER);
-    const port = await freePort();
+    const { checkout, tools, port, call } = await renderSetup();
     const { sandbox, specs } = recordingSandbox();
     const jail = new GateCommandJail(sandbox, []);
     const runner = sandboxedVisualRunner(jail, { node: NODE, noSandbox: "none" });
-    const input: Omit<RunnerInput, "out_dir"> = {
-      v: 1,
-      mode: "render",
-      playwright: join(tools, "playwright.mjs"),
-      executable: "/fake/chrome-headless-shell",
-      axe: join(tools, "axe.min.js"),
-      pixelmatch: join(tools, "pixelmatch.mjs"),
-      prototype_root: join(checkout, ".vtc/design/prototype"),
-      app: {
-        command: [NODE, "server.mjs", String(port)],
-        cwd: checkout,
-        url: `http://127.0.0.1:${String(port)}`,
-        ready_timeout_ms: 10_000,
-      },
-      fixed_time: "2026-01-15T12:00:00.000Z",
-      axe_tags: ["wcag2a", "wcag2aa"],
-      include_best_practice: false,
-      pixel_threshold: 0.1,
-      dynamic_regions: [".clock"],
-      style_properties: [...STYLE_PROPERTIES],
-      style_limit: 100,
-      nav_timeout_ms: 5000,
-      jobs: [
-        {
-          key: "home:default:390:light",
-          path: "/?state=default&theme=light",
-          width: 390,
-          theme: "light",
-        },
-        {
-          key: "home:default:390:dark",
-          path: "/missing?state=default&theme=dark",
-          width: 390,
-          theme: "dark",
-        },
-      ],
-    };
     try {
-      const outcome = await runner.run({
-        input,
-        allowRead: [tools],
-        loopback: true,
-        env: { PATH: process.env.PATH ?? "" },
-        checkout,
-        timeoutMs: 60_000,
-        stdoutPath: join(dir, "out.log"),
-        stderrPath: join(dir, "err.log"),
-      });
+      const outcome = await runner.run(call());
       if (!outcome.ok) throw new Error(outcome.reason);
       const { result } = outcome;
       expect(result.error).toBeUndefined();
@@ -191,6 +247,14 @@ describe("visual runner script", () => {
       });
       expect(outcome.file("home_default_390_light.png")).not.toBeNull();
       expect(outcome.file("../result.json")).toBeNull();
+      // Every image the runner wrote is listed with its hash; a name it did not write is absent.
+      expect(Object.keys(result.files)).toContain("home_default_390_light.png");
+      expect(outcome.file("unlisted.png")).toBeNull();
+      // The app server shares the temp directory, but the key was gone before it started.
+      expect(JSON.parse(readFileSync(join(checkout, "seen.json"), "utf8"))).toEqual({
+        input: true,
+        key: false,
+      });
       // The app answered 404 for the dark job's route: unreached, never clean.
       expect(dark).toMatchObject({ key: "home:default:390:dark", status: "unreached" });
       expect(dark?.detail).toMatch(/HTTP 404/);
@@ -243,6 +307,56 @@ describe("visual runner script", () => {
       expect((specs.at(-1) as { allowRead?: string[] }).allowRead).toEqual(
         expect.arrayContaining([expect.stringContaining("tools")]),
       );
+    } finally {
+      jail.dispose();
+    }
+  }, 60_000);
+
+  it.each([
+    ["forge", /valid MAC under this run's key/],
+    ["edit", /valid MAC under this run's key/],
+    ["bare", /valid MAC under this run's key/],
+    ["image", /home_default_390_light\.png is not the file the runner wrote/],
+  ] as const)(
+    "never uses a result or image something other than the runner wrote (%s)",
+    async (kind, reason) => {
+      const { dir, call } = await renderSetup();
+      const script = join(dir, `tamper-${kind}.mjs`);
+      writeFileSync(script, TAMPER[kind]);
+      const jail = new GateCommandJail(tamperingSandbox(script), []);
+      const runner = sandboxedVisualRunner(jail, { node: NODE, noSandbox: "none" });
+      try {
+        const outcome = await runner.run(call());
+        expect(outcome.ok).toBe(false);
+        expect(outcome.ok ? "" : outcome.reason).toMatch(reason);
+      } finally {
+        jail.dispose();
+      }
+    },
+    60_000,
+  );
+
+  it("starts nothing when it cannot take the key", async () => {
+    const { dir, checkout, call } = await renderSetup();
+    // The key is removed before the runner starts: it fails before any project code runs.
+    const jail = new GateCommandJail(
+      {
+        kind: "sandbox-exec",
+        wrap: (argv, spec) => ({
+          command: "/bin/sh",
+          args: ["-c", 'rm -f "$1/key"; shift; "$@"', "vtc-nokey", spec.tempDir, ...argv],
+          network: "none",
+        }),
+      },
+      [],
+    );
+    const runner = sandboxedVisualRunner(jail, { node: NODE, noSandbox: "none" });
+    try {
+      const outcome = await runner.run(call());
+      expect(outcome.ok).toBe(false);
+      expect(outcome.ok ? "" : outcome.reason).toMatch(/wrote no result/);
+      expect(existsSync(join(checkout, "seen.json"))).toBe(false);
+      expect(existsSync(join(dir, "tools", "log.json"))).toBe(false);
     } finally {
       jail.dispose();
     }

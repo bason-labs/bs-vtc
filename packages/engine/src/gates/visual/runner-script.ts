@@ -1,30 +1,50 @@
 /**
  * The visual runner (AD-24 rules 1 and 3): a VTC-written ES module the Gate Runner writes into
  * the gate command's private temp directory and runs with the project's Node, inside the gate
- * sandbox, as `node vtc-visual-runner.mjs <input.json> <result.json>`. It imports Playwright from
- * the project or the doctor-installed store (never bundled), launches the pinned executable, and
- * renders every job twice in the same run with the same browser: the implementation from the app
- * server and the approved prototype, served from the base commit's `.vtc/design/prototype/` (a
- * read-only clean checkout the Gate Runner made) through request interception (no socket). The
+ * sandbox, as `node vtc-visual-runner.mjs <input.json> <result.json> <key>`. It imports Playwright
+ * from the project or the doctor-installed store (never bundled), launches the pinned executable,
+ * and renders every job twice in the same run with the same browser: the implementation from the
+ * app server and the approved prototype, served from the base commit's `.vtc/design/prototype/`
+ * (a read-only clean checkout the Gate Runner made) through request interception (no socket). The
  * determinism recipe: headless, DPR 1, `en-US`, `UTC`, a fixed clock, reduced motion, fonts
  * ready, animations and the caret off, every non-loopback request aborted, dynamic regions
  * masked. Then axe (an unmodified `axe.min.js`, reading 106), computed styles, and a per-region
- * pixelmatch diff (pixelmatch from the project or the store).
+ * pixelmatch diff.
+ *
+ * The app server is project code in the same sandbox, with the same write access to this temp
+ * directory, and a process it detaches can outlive it. So the runner reads and deletes the run's
+ * key file first, before it imports anything or starts the app, and writes its result once, at
+ * the end, as an envelope with an HMAC under that key, listing the SHA-256 of every image it
+ * wrote (`protocol.ts`). Whatever the app writes into the temp directory carries no valid MAC
+ * and is not used. Playwright and pixelmatch are imported before the app starts.
  *
  * The script writes only into its output directory and the result file; the Gate Runner treats
  * the result as untrusted (`protocol.ts`). It never throws past `main`: a failure of the whole
  * run is the result's `error`.
  */
 export const VISUAL_RUNNER_SCRIPT = String.raw`// VTC visual runner (generated; see packages/engine/src/gates/visual/runner-script.ts).
-import { readFileSync, realpathSync, statSync, writeFileSync } from "node:fs";
+import { createHash, createHmac } from "node:crypto";
+import { readFileSync, realpathSync, statSync, unlinkSync, writeFileSync } from "node:fs";
 import { extname, join, resolve, sep } from "node:path";
 import { pathToFileURL } from "node:url";
 import { spawn } from "node:child_process";
 
+// The run's key: read and deleted before any project code (Playwright, the app server) runs, so
+// nothing else in the sandbox can sign a result. If it cannot be deleted, nothing runs.
+const key = readFileSync(process.argv[4]);
+unlinkSync(process.argv[4]);
 const input = JSON.parse(readFileSync(process.argv[2], "utf8"));
 const resultFile = process.argv[3];
-const out = { v: 1, browser: null, renders: [] };
-const save = () => writeFileSync(resultFile, JSON.stringify(out));
+const out = { v: 1, browser: null, renders: [], files: {} };
+const save = () => {
+  const body = JSON.stringify(out);
+  const mac = createHmac("sha256", key).update(body).digest("hex");
+  writeFileSync(resultFile, JSON.stringify({ v: 1, body, mac }));
+};
+const writeOut = (name, bytes) => {
+  writeFileSync(join(input.out_dir, name), bytes);
+  out.files[name] = createHash("sha256").update(bytes).digest("hex");
+};
 const clip = (s, n) => String(s === undefined || s === null ? "" : s).slice(0, n);
 const PROTO_ORIGIN = "http://prototype.vtc.invalid";
 const MASK_COLOR = "#ff00ff";
@@ -111,9 +131,8 @@ const openPage = async (context, url) => {
 
 const masks = (page) => input.dynamic_regions.map((selector) => page.locator(selector));
 
-const shoot = (page, file, clipRect) =>
-  page.screenshot({
-    ...(file === null ? {} : { path: join(input.out_dir, file) }),
+const shoot = async (page, file, clipRect) => {
+  const png = await page.screenshot({
     fullPage: true,
     animations: "disabled",
     caret: "hide",
@@ -121,6 +140,9 @@ const shoot = (page, file, clipRect) =>
     maskColor: MASK_COLOR,
     ...(clipRect ? { clip: clipRect } : {}),
   });
+  if (file !== null) writeOut(file, png);
+  return png;
+};
 
 const runAxe = async (page) => {
   if (!input.axe) return null;
@@ -270,7 +292,7 @@ const diffRegions = async (job, impl, ref, pixelmatch, scratch) => {
     const entry = { region: r.name, mismatch_px: mismatch, total_px: r.width * r.height, dimension_mismatch: false };
     if (mismatch > 0) {
       entry.diff_image = fileName(job.key, "." + r.name.replace(/[^A-Za-z0-9._-]/g, "_") + ".diff.png");
-      writeFileSync(join(input.out_dir, entry.diff_image), await toPng(scratch, output, r.width, r.height));
+      writeOut(entry.diff_image, await toPng(scratch, output, r.width, r.height));
     }
     diffs.push(entry);
   }
@@ -361,6 +383,8 @@ const main = async () => {
     out.executable = chromium.executablePath();
     return;
   }
+  // Imported before the app server starts, so it cannot swap the module under the runner.
+  const pixelmatch = input.pixelmatch ? (await import(pathToFileURL(input.pixelmatch).href)).default : null;
   const app = input.app ? await startApp(input.app) : null;
   let browser = null;
   try {
@@ -371,12 +395,10 @@ const main = async () => {
       args: ["--force-device-scale-factor=1", "--hide-scrollbars", "--font-render-hinting=none"],
     });
     out.browser = { name: "chromium", version: clip(browser.version(), 64) || "unknown" };
-    const pixelmatch = input.pixelmatch ? (await import(pathToFileURL(input.pixelmatch).href)).default : null;
     const scratchContext = await browser.newContext();
     const scratch = await scratchContext.newPage();
     for (const job of input.jobs) {
       out.renders.push(await renderJob(browser, job, app, pixelmatch, scratch));
-      save();
     }
   } finally {
     if (browser !== null) await browser.close().catch(() => undefined);

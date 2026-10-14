@@ -1,16 +1,23 @@
 /**
  * How the visual step runs its runner script (AD-24 rule 1): as one gate command in the gate
  * sandbox (`GateCommandJail`), verify phase, with the project's Node, allowed by name like a
- * pinned scanner (it is VTC's own script, never repo content). The script and its input go into
- * the command's private temp directory; its result and images come back from there and are
- * read as untrusted data (regular files only, bounded, schema-checked). Tests inject a fake
- * {@link VisualRunner} and never start a browser.
+ * pinned scanner (it is VTC's own script, never repo content). The script, its input and a fresh
+ * random key go into the command's private temp directory; its result and images come back from
+ * there and are read as untrusted data (regular files only, bounded, schema-checked). The app
+ * server can write that directory too, so the result is used only when its envelope's HMAC
+ * verifies under the key (which the runner deleted before starting the app), and an image only
+ * when it matches the SHA-256 the signed result records for it; anything else fails the step as
+ * gate infrastructure. Tests inject a fake {@link VisualRunner} and never start a browser.
  */
+import { createHash, createHmac, randomBytes, timingSafeEqual } from "node:crypto";
 import { lstatSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import type { GateCommandJail } from "../sandbox.js";
 import {
+  MAX_RUNNER_BODY,
+  RunnerEnvelopeSchema,
   RUNNER_INPUT_FILE,
+  RUNNER_KEY_FILE,
   RUNNER_OUT_DIR,
   RUNNER_RESULT_FILE,
   RUNNER_SCRIPT_FILE,
@@ -64,6 +71,37 @@ const readPlain = (path: string, max: number): Uint8Array | null => {
   }
 };
 
+const sha256 = (bytes: Uint8Array): string => createHash("sha256").update(bytes).digest("hex");
+
+/** Why a result without a valid MAC under the run's key is not used. */
+const forged =
+  "the visual runner's result does not carry a valid MAC under this run's key: something other than the runner wrote it (the app server, or a process it left behind, can write the runner's temp directory), so it is not used";
+
+/** The runner's signed result body, or why there is none. */
+const openEnvelope = (raw: Uint8Array, key: Buffer): { body: string } | { reason: string } => {
+  let value: unknown;
+  try {
+    value = JSON.parse(new TextDecoder().decode(raw));
+  } catch {
+    return { reason: "the visual runner's result is not JSON" };
+  }
+  const envelope = RunnerEnvelopeSchema.safeParse(value);
+  if (!envelope.success) {
+    const body = (value as { body?: unknown } | null)?.body;
+    return typeof body === "string" && body.length > MAX_RUNNER_BODY
+      ? {
+          reason: `the visual runner's result is larger than ${String(MAX_RUNNER_BODY / (1024 * 1024))} MiB`,
+        }
+      : { reason: forged };
+  }
+  const expected = createHmac("sha256", key).update(envelope.data.body).digest();
+  const actual = Buffer.from(envelope.data.mac, "hex");
+  if (actual.length !== expected.length || !timingSafeEqual(actual, expected)) {
+    return { reason: forged };
+  }
+  return { body: envelope.data.body };
+};
+
 /** The runner in the gate sandbox; `jail` is `null` when there is no sandbox (nothing runs). */
 export const sandboxedVisualRunner = (
   jail: GateCommandJail | null,
@@ -71,6 +109,7 @@ export const sandboxedVisualRunner = (
 ): VisualRunner => ({
   run: async (call) => {
     if (jail === null) return { ok: false, reason: options.noSandbox };
+    const key = randomBytes(32);
     let exec;
     try {
       exec = await jail.run({
@@ -82,6 +121,7 @@ export const sandboxedVisualRunner = (
           `{tmp}/${RUNNER_SCRIPT_FILE}`,
           `{tmp}/${RUNNER_INPUT_FILE}`,
           `{tmp}/${RUNNER_RESULT_FILE}`,
+          `{tmp}/${RUNNER_KEY_FILE}`,
         ],
         cwd: call.checkout,
         env: call.env,
@@ -94,6 +134,7 @@ export const sandboxedVisualRunner = (
           mkdirSync(join(tmp, RUNNER_OUT_DIR), { mode: 0o700 });
           const input: RunnerInput = { ...call.input, out_dir: join(tmp, RUNNER_OUT_DIR) };
           writeFileSync(join(tmp, RUNNER_INPUT_FILE), JSON.stringify(input), { mode: 0o600 });
+          writeFileSync(join(tmp, RUNNER_KEY_FILE), key, { mode: 0o600 });
         },
       });
     } catch (error) {
@@ -112,16 +153,19 @@ export const sandboxedVisualRunner = (
         reason: `the visual runner timed out after ${String(Math.round(call.timeoutMs / 1000))} s`,
       };
     }
-    const raw = readPlain(join(exec.tempDir, RUNNER_RESULT_FILE), 16 * 1024 * 1024);
+    // Envelope overhead: the body is a JSON string inside JSON (escaped quotes double at most).
+    const raw = readPlain(join(exec.tempDir, RUNNER_RESULT_FILE), 2 * MAX_RUNNER_BODY + 4096);
     if (raw === null) {
       return {
         ok: false,
         reason: `the visual runner wrote no result (exit ${String(exec.code)}): ${exec.tail.slice(-400)}`,
       };
     }
+    const opened = openEnvelope(raw, key);
+    if ("reason" in opened) return { ok: false, reason: opened.reason };
     let parsed;
     try {
-      parsed = RunnerResultSchema.safeParse(JSON.parse(new TextDecoder().decode(raw)));
+      parsed = RunnerResultSchema.safeParse(JSON.parse(opened.body));
     } catch {
       return { ok: false, reason: "the visual runner's result is not JSON" };
     }
@@ -135,11 +179,35 @@ export const sandboxedVisualRunner = (
       };
     }
     const outDir = join(exec.tempDir, RUNNER_OUT_DIR);
+    const hashes = parsed.data.files;
+    // Every image the runner recorded must still be the one it wrote. Too large for evidence is
+    // left out (`file` answers null); missing, replaced or changed is tampering.
+    for (const [name, digest] of Object.entries(hashes)) {
+      let size: number | null = null;
+      try {
+        const stat = lstatSync(join(outDir, name));
+        if (stat.isFile()) size = stat.size;
+      } catch {
+        // missing
+      }
+      if (size !== null && size > MAX_OUTPUT_BYTES) continue;
+      const bytes = size === null ? null : readPlain(join(outDir, name), MAX_OUTPUT_BYTES);
+      if (bytes === null || sha256(bytes) !== digest) {
+        return {
+          ok: false,
+          reason: `the visual runner's output ${name} is not the file the runner wrote (missing or changed after it was written), so the run is not used`,
+        };
+      }
+    }
     return {
       ok: true,
       result: parsed.data,
-      file: (name) =>
-        PLAIN_NAME.test(name) ? readPlain(join(outDir, name), MAX_OUTPUT_BYTES) : null,
+      file: (name) => {
+        const digest = Object.hasOwn(hashes, name) ? hashes[name] : undefined;
+        if (!PLAIN_NAME.test(name) || digest === undefined) return null;
+        const bytes = readPlain(join(outDir, name), MAX_OUTPUT_BYTES);
+        return bytes !== null && sha256(bytes) === digest ? bytes : null;
+      },
     };
   },
 });
