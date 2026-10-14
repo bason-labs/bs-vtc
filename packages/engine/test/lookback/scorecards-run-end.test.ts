@@ -12,11 +12,15 @@ import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 import {
+  appendAttributions,
+  buildTraces,
   computeScorecards,
   graderBundleSha,
   lookbackAtRunEnd,
   lookbackTargets,
   readAttributions,
+  tiebreakAttribution,
+  tiebreakKey,
   traceRef,
   traceSplit,
   writeScorecards,
@@ -371,5 +375,48 @@ describe("lookback at run end (AD-21 rule 8)", () => {
     );
     expect(result.scorecards[0]?.metrics.first_round_gate_pass?.n).toBe(12);
     expect(card.metrics.first_round_gate_pass?.n).toBe(12);
+  });
+  it("counts a recorded AI tiebreak only when the engine's tiebreak record is passed in", async () => {
+    const log = engineerRun(6, () => true);
+    const parked = log.dispatch("engineer", { task: "T-99", tokens: 2000 });
+    log.status("T-99", "fixing", "parked", 4, "cap");
+    const trace = buildTraces(log.events, lockedShaFor).find((t) => t.trace === parked);
+    if (trace === undefined) throw new Error("no trace");
+    const tiebreak = tiebreakAttribution({
+      trace,
+      blamed: "engineer",
+      confidence: 0.6,
+      evidence: [],
+      now,
+    });
+    if (tiebreak === undefined) throw new Error("unversioned");
+    const runEnd = async (tiebreaks?: ReadonlySet<string>) => {
+      const root = await tempDir("tiebreak");
+      await appendAttributions(root, [tiebreak]);
+      return lookbackAtRunEnd({
+        projectRoot: root,
+        events: log.events,
+        history: log.events,
+        lockedShaFor,
+        graderBundleSha: BUNDLE,
+        weeklyRemainingPct: 80,
+        budgetAvailable: true,
+        now,
+        ...(tiebreaks === undefined ? {} : { tiebreaks }),
+      });
+    };
+    const cards = (attributions: Attribution[]) =>
+      computeScorecards({
+        events: log.events,
+        attributions,
+        lockedShaFor,
+        graderBundleSha: BUNDLE,
+        now,
+      });
+    const without = await runEnd();
+    const withRecord = await runEnd(new Set([tiebreakKey(tiebreak)]));
+    expect(without.scorecards).toEqual(cards(without.attributions));
+    expect(withRecord.scorecards).toEqual(cards([tiebreak, ...withRecord.attributions]));
+    expect(withRecord.scorecards).not.toEqual(without.scorecards);
   });
 });

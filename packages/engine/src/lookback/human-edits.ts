@@ -2,12 +2,18 @@
  * Human edits (spec §13 improvement loop step 1: "attributed failures from the training split,
  * plus human edit diffs"). Pure, over run events in log order.
  *
- * A human edit is an artifact a role submitted (`role.submitted.artifacts`, with the SHA-256 the
- * engine computed from its bytes) that a human gate then froze (`gate.approved.frozen`, actor
- * `human`) at another SHA-256, with no role submitting that path in between: the human (or the
- * Lead on their behalf) changed the role's work before approving it. The edit is credited to the
- * dispatch that last wrote the path in that run, and carries that dispatch's prompt version and
- * split, so the lookback role sees only train-split edits of the version under review.
+ * A human edit is an artifact a role submitted (`role.submitted.artifacts`, with its SHA-256)
+ * that a human gate then froze (`gate.approved.frozen`, actor `human`) at another SHA-256, with
+ * no role submitting that path in between: the human (or the Lead on their behalf) changed the
+ * role's work before approving it. The edit is credited to the dispatch that last wrote the path
+ * in that run, and carries that dispatch's prompt version and split, so the lookback role sees
+ * only train-split edits of the version under review.
+ *
+ * The submitted SHA-256 is the engine's own only where its submit path hashes the artifact's bytes
+ * (isolated and advisor roles today); elsewhere it is what the role reported. A role reporting a
+ * wrong one can make up an edit of its own work: the lookback role then reads a made-up "human
+ * edit", which may mislead its proposal but blames nothing (edits are shown to the lookback role,
+ * never counted in scorecards or attributions, and a proposal still faces replay and the canary).
  *
  * The events name the two versions by SHA only; the diff text comes from the injected reader of
  * `lookbackAtRunEnd` (git is outside this module, AD-21).

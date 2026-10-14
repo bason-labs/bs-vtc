@@ -185,9 +185,15 @@ export const createFileResearchCache = (vtcHome: string): FileResearchCache => {
         // Missing, or tampered with: (re)write it.
         await writeAtomic(path, body);
       } else {
-        // Touched, so a prune running now sees it as new and keeps it.
+        // Touched, so a prune running now sees it as new and keeps it; a prune that removed it
+        // between the read and the touch leaves it to be written again.
         const at = new Date();
-        await utimes(path, at, at);
+        try {
+          await utimes(path, at, at);
+        } catch (error) {
+          if ((error as { code?: unknown }).code !== "ENOENT") throw error;
+          await writeAtomic(path, body);
+        }
       }
       await appendLines(join(scopeDir(scope), RESEARCH_CACHE.indexFile), [JSON.stringify(valid)]);
     },

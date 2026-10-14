@@ -239,4 +239,15 @@ describe("research claims for G2 (AD-22 rule 4)", () => {
     const deep = `${"x ".repeat(50_000)}uses lodash@4.17.20 ${"y ".repeat(50_000)}`;
     expect(scanResearchClaims([{ path: "a.md", text: deep }], new Set())).toHaveLength(1);
   });
+
+  it("sees no claim a window edge makes up by cutting a word", () => {
+    // A window starts at 1800: there `xv1.2` would read as `v1.2`.
+    const cutStart = `${"w".repeat(1799)}xv1.2 ${"z ".repeat(300)}`;
+    // The first window ends at 2000: there `MITx` would read as `MIT`.
+    const cutEnd = `${"a ".repeat(998)} MITx${" z".repeat(10)}`;
+    expect(cutEnd.indexOf("MITx")).toBe(1997);
+    expect(
+      scanResearchClaims([{ path: "a.md", text: `${cutStart}\n${cutEnd}` }], new Set()),
+    ).toEqual([]);
+  });
 });

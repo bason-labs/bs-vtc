@@ -89,6 +89,14 @@ describe("research quota per run", () => {
     expect(http.count(`GET ${npmUrl("3.0.0")}`)).toBe(1);
   });
 
+  it("forgets a finished run's count", () => {
+    const quota = createFetchQuota(1);
+    expect(quota.forRun("r-1").take()).toBe(true);
+    expect(quota.used("r-1")).toBe(1);
+    quota.forget("r-1");
+    expect(quota.used("r-1")).toBe(0);
+  });
+
   it("refuses a quota that is not a positive integer", () => {
     expect(() => createFetchQuota(0)).toThrow();
     expect(() => createFetchQuota(1.5)).toThrow();

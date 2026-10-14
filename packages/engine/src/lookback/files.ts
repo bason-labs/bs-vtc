@@ -32,6 +32,8 @@ export const readTextIfExists = async (path: string): Promise<string | undefined
 
 /** `O_NOFOLLOW` where the platform has it (not on Windows, where the `lstat` check stands alone). */
 const NO_FOLLOW = "O_NOFOLLOW" in constants ? constants.O_NOFOLLOW : 0;
+/** `O_NONBLOCK` where the platform has it: a FIFO swapped in after the `lstat` never blocks the open. */
+const NON_BLOCK = "O_NONBLOCK" in constants ? constants.O_NONBLOCK : 0;
 
 export type GuardedRead =
   | { readonly kind: "missing" }
@@ -41,19 +43,31 @@ export type GuardedRead =
 /**
  * Reads a file a role can write, as UTF-8, only when it is a regular file (never through a
  * symbolic link, so a planted link cannot make the engine read another file of the user's) of at
- * most `maxBytes`.
+ * most `maxBytes`. The open never blocks (a FIFO swapped in after the check is refused), and at most
+ * `maxBytes + 1` bytes are read, so a file that grows after the size check is refused too.
  */
 export const readRoleWrittenText = async (path: string, maxBytes: number): Promise<GuardedRead> => {
+  const tooLarge = (): GuardedRead => ({
+    kind: "refused",
+    problem: `${path} is larger than ${String(maxBytes)} bytes`,
+  });
   try {
     const info = await lstat(path);
     if (!info.isFile()) return { kind: "refused", problem: `${path} is not a regular file` };
-    const handle = await open(path, constants.O_RDONLY | NO_FOLLOW);
+    const handle = await open(path, constants.O_RDONLY | NO_FOLLOW | NON_BLOCK);
     try {
       const opened = await handle.stat();
       if (!opened.isFile()) return { kind: "refused", problem: `${path} is not a regular file` };
-      if (opened.size > maxBytes)
-        return { kind: "refused", problem: `${path} is larger than ${String(maxBytes)} bytes` };
-      return { kind: "text", text: await handle.readFile("utf8") };
+      if (opened.size > maxBytes) return tooLarge();
+      const buffer = new Uint8Array(maxBytes + 1);
+      let length = 0;
+      while (length < buffer.length) {
+        const { bytesRead } = await handle.read(buffer, length, buffer.length - length, length);
+        if (bytesRead === 0) break;
+        length += bytesRead;
+      }
+      if (length > maxBytes) return tooLarge();
+      return { kind: "text", text: Buffer.from(buffer.buffer, 0, length).toString("utf8") };
     } finally {
       await handle.close();
     }
@@ -174,6 +188,12 @@ const breakStaleLock = async (lock: string, staleMs: number): Promise<void> => {
  * Runs `fn` holding `lock`: created exclusively (`wx`) holding a token only this call knows, a lock
  * older than `staleMs` taken over ({@link breakStaleLock}), released only while it still holds the
  * token. Returns `undefined` without running `fn` when the lock stays held for `waitMs`.
+ *
+ * Mutual exclusion holds only while every holder finishes well within `staleMs`: a holder still
+ * running past it can be taken over, and a takeover that races its release or another takeover
+ * can leave two holders. So a holder keeps the lock around its read-modify-write only, never
+ * across a wait on a person (the cli's gestures confirm first and lock after); writers also
+ * replace the file only if it is unchanged ({@link writeAtomicIfUnchanged}).
  */
 export const withFileLock = async <T>(
   lock: string,
