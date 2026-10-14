@@ -8,7 +8,8 @@
  * skip the target) and stores an accepted one as a candidate version. The run finishes once every
  * target is settled. Lookback never holds a delivered feature: with no Lookback wired, or when its
  * planning fails, the run finishes at once.
- * Replays (AD-21 rule 6) are not wired: spine §7 "Lookback replays".
+ * Once every target is settled, RETRO runs the replays Lookback may start now (`replay.ts`, AD-21
+ * rule 6, spine §5 reading 176), one trial at a time; the run finishes after them.
  */
 import { writeRepoFile } from "../git/index.js";
 import type { LookbackTargetRef, Kernel, RunHandle } from "./kernel.js";
@@ -16,6 +17,13 @@ import { phaseEnteredSeq, countsAsFailure } from "./queries.js";
 import type { RoleRunRecord } from "./state.js";
 import { writeRunSummary } from "./projections.js";
 import { taskDetailView } from "./views.js";
+import {
+  planReplays,
+  readReplayPlan,
+  replaySteps,
+  stepReplays,
+  type ReplayStep,
+} from "./replay.js";
 
 /** The role the RETRO step dispatches. */
 export const LOOKBACK_ROLE = "lookback";
@@ -105,12 +113,15 @@ export interface RetroStep {
   readonly note: string;
 }
 
-/** The lookback role step RETRO wants now: the first unsettled target, when none is running. */
-export const retroSteps = (h: RunHandle): RetroStep[] => {
+/**
+ * The step RETRO wants now: the lookback role for the first unsettled target, when none is
+ * running; once every target is settled, the next replay trial (reading 176).
+ */
+export const retroSteps = (k: Kernel, h: RunHandle): (RetroStep | ReplayStep)[] => {
   const queue = retroQueue(h);
   if (queue.some((t) => t.running)) return [];
   const target = queue.find((t) => !t.settled);
-  if (target === undefined) return [];
+  if (target === undefined) return retroEntered(h) === undefined ? [] : replaySteps(k, h);
   const rejected = target.runs.findLast((r) => r.status === "rejected")?.rejection;
   const name = `${target.role}${target.mode === undefined ? "" : ` (${target.mode})`} on ${target.host}`;
   return [
@@ -166,7 +177,8 @@ export const startRetro = (k: Kernel, h: RunHandle): void => {
     finishRun(k, h);
     return;
   }
-  if (planned(h) || k.isRunning(`retro:${h.state.id}`)) return;
+  if (planned(h) || readReplayPlan(k, h.state.id) !== null || k.isRunning(`retro:${h.state.id}`))
+    return;
   k.spawn(h, `retro:${h.state.id}`, async () => {
     let targets: Awaited<ReturnType<typeof lookback.plan>>["targets"] = [];
     let problem: string | undefined;
@@ -175,6 +187,8 @@ export const startRetro = (k: Kernel, h: RunHandle): void => {
     } catch (error) {
       problem = error instanceof Error ? error.message : String(error);
     }
+    // no target: the replays still pending from earlier runs are planned at once (reading 176)
+    const replays = targets.length === 0 ? await planReplays(k, h) : null;
     await k.serial(h, () => {
       if (h.state.run.finished_at !== undefined || planned(h)) return Promise.resolve();
       if (problem !== undefined) k.notice(`lookback at the end of run ${h.state.id}: ${problem}`);
@@ -182,7 +196,7 @@ export const startRetro = (k: Kernel, h: RunHandle): void => {
         writeRepoFile(k.deps.repoRoot, lookbackInputPath(h.state.id, i + 1), target.input);
         k.emit(h, target.dispatched);
       });
-      if (targets.length === 0) finishRun(k, h);
+      if (targets.length === 0 && replays?.replays.length === 0) finishRun(k, h);
       return Promise.resolve();
     });
   });
@@ -196,15 +210,15 @@ const finished = (h: RunHandle): boolean => h.state.run.finished_at !== undefine
  */
 export const stepRetro = (k: Kernel, h: RunHandle): boolean => {
   if (h.state.run.phase !== "retro" || h.state.run.finished_at !== undefined) return false;
-  if (!planned(h)) {
+  if (!planned(h) && readReplayPlan(k, h.state.id) === null) {
     startRetro(k, h);
     // the plan may have finished the run at once (no Lookback wired)
     return finished(h);
   }
   const queue = retroQueue(h);
-  if (queue.every((t) => t.settled) && !queue.some((t) => t.running)) {
-    finishRun(k, h);
-    return true;
-  }
-  return false;
+  if (!queue.every((t) => t.settled) || queue.some((t) => t.running)) return false;
+  // the replays Lookback may start now, then run.finished (reading 176)
+  if (stepReplays(k, h) !== "done") return false;
+  finishRun(k, h);
+  return true;
 };

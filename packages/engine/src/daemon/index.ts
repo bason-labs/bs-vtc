@@ -68,6 +68,7 @@ import {
   type LockedShaFor,
 } from "../lookback/index.js";
 import { engineSocketAnswers, serveEngineSocket } from "../mcp/index.js";
+import { createLookbackReplays } from "./replays.js";
 import { readTiebreakKeys, recordTiebreak } from "./tiebreaks.js";
 import {
   createFetchQuota,
@@ -211,12 +212,16 @@ export const lookbackWindow = (
  *   the lookback role queued for each target (`lookback.dispatched`), reading the input the module
  *   renders; its proposal is checked on submit, and an accepted one stored as a candidate version
  *   (`lookback.proposal_recorded`);
+ * - then, at RETRO, the replays (rule 6, reading 176, `createLookbackReplays`): every proposal not
+ *   yet replayed, its `lookback_replay` trials run in clean checkouts and graded through the Gate
+ *   Runner, its `ReplayResult` and `lookback.replay_finished` written; the weekly window checked is
+ *   the run's Lead host's ({@link lookbackWindow});
  * - at `run.finished` (an aborted run too) the run's failures are attributed to
  *   `.vtc/lookback/attributions.jsonl` and the scorecards of every version in the history are
- *   rewritten under `.vtc/lookback/scorecards/`.
- * Not wired yet (spine §7 "Lookback replays", AD-21 rule 6): the `lookback_replay` trials. Lookback
- * work at `run.finished` runs one job at a time and never fails the engine; the returned cleanup
- * waits for the job in flight.
+ *   rewritten under `.vtc/lookback/scorecards/`; the AI tiebreak answers the engine recorded are
+ *   the only `ai_tiebreak` rows that count, and every one it produces is recorded (`tiebreaks.ts`).
+ * Lookback work at `run.finished` runs one job at a time and never fails the engine; the returned
+ * cleanup waits for the job in flight.
  */
 export const wireLookback = (
   engine: Engine,
@@ -278,9 +283,25 @@ export const wireLookback = (
       now,
     });
   const checker = retroFor(null);
+  // AD-21 rule 6 (reading 176): after the targets, RETRO replays every proposal not yet replayed
+  const replays = createLookbackReplays({
+    projectRoot: deps.repoRoot,
+    vtcHome: deps.vtcHome,
+    repoKey,
+    history,
+    lockedShaFor,
+    compiled: (role, mode, host) => plugins.promptParts?.(agentNameFor(role, mode), host)?.compiled,
+    tiebreaks,
+    graderBundleSha: bundleSha,
+    weeklyRemainingPct: weeklyRemaining,
+    budgetAvailable,
+    gateRunner: engine.deps.gateRunner,
+    now,
+  });
   engine.setLookbackRetro({
     plan: (state) => retroFor(state).plan(state),
     check: (target, root, state) => checker.check(target, root, state),
+    ...replays,
   });
   const runEnd = async (run: string): Promise<void> => {
     const state = engine.states().find((s) => s.id === run);

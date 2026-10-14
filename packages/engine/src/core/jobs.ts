@@ -131,7 +131,7 @@ const gatesAtCommit = new Map<string, Promise<CommittedGates | null>>();
 const GATES_CACHE_MAX = 64;
 
 /** `.vtc/gates.yml` committed at `commit` (`committedGatesConfig`), cached by commit. */
-const gatesAt = (k: Kernel, commit: string): Promise<CommittedGates | null> => {
+export const gatesAt = (k: Kernel, commit: string): Promise<CommittedGates | null> => {
   const key = `${k.deps.repoRoot}\0${commit}`;
   const hit = gatesAtCommit.get(key);
   if (hit !== undefined) return hit;

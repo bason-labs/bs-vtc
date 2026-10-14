@@ -19,6 +19,7 @@ import {
   sha256Hex,
   TaskPackSchema,
   type ArtifactRef,
+  type DispatchPurpose,
   type Escalation,
   type EscalationAnswer,
   type Finding,
@@ -38,6 +39,7 @@ import {
   type CallContext,
   type Kernel,
   type PinnedPrompt,
+  type PromptPins,
   type PromptTarget,
   type RunHandle,
 } from "./kernel.js";
@@ -76,6 +78,7 @@ import { parkEscalation } from "./escalations.js";
 import { recordDispatch, type DispatchRecord } from "./dispatch-guard.js";
 import { architectDepth, dealDesignConstraints, researchDepth } from "./lottery.js";
 import { prepareRoleWorktree } from "./role-worktree.js";
+import { prepareTrial, type ReplayStepRef } from "./replay.js";
 
 /** A handed-out step: the Lead's action, and what an engine-launched run of it needs. */
 export interface DispatchedStep {
@@ -125,6 +128,13 @@ export interface StepSpec {
   readonly inputs?: readonly ArtifactRef[];
   /** Engine transition that happens as the step is handed out (e.g. → building). */
   readonly onDispatch?: () => void;
+  /** Why the step runs (`planDispatch`'s purpose); default `role`. */
+  readonly purpose?: DispatchPurpose;
+  /**
+   * A Lookback replay trial (AD-21 rule 6, reading 176): it runs in a clean checkout at `base`,
+   * reads the recorded pack (without its task) and runs the arm's prompt version, never a pin.
+   */
+  readonly replay?: ReplayStepRef;
 }
 
 /**
@@ -506,7 +516,7 @@ export const pendingSteps = (k: Kernel, h: RunHandle, host: HostId): StepSpec[] 
   if (state.run.finished_at !== undefined) return [];
   const phase = state.run.phase;
   // RETRO (§13 steps 1–2): the lookback role, one target at a time (retro.ts)
-  if (phase === "retro") return retroSteps(h);
+  if (phase === "retro") return retroSteps(k, h);
   const phaseRoleList = phaseRoles(k, h, phase);
   if (phaseRoleList.length > 0) {
     const entered = phaseEnteredSeq(state, phase) ?? 0;
@@ -791,8 +801,10 @@ const pinnedPrompt = (
   k: Kernel,
   target: PromptTarget,
   dispatch: "subagent" | "headless",
+  /** A replay trial's arm (reading 176): selected by the trial, never by the pins. */
+  arm?: PinnedPrompt,
 ): PinSelection => {
-  const pins = k.promptPins();
+  const pins: PromptPins | null = arm === undefined ? k.promptPins() : () => arm;
   if (pins === null) return { pinned: null };
   const parts = k.deps.plugins.promptParts?.(target.agent, target.host);
   const blocker = pinBlocker(parts, target.host, dispatch);
@@ -940,6 +952,12 @@ const assignCanary = (
   return canary;
 };
 
+/** A replay trial's pack: the recorded one in this run, without its task or feature. */
+const trialPack = (h: RunHandle, ref: ReplayStepRef, actionId: string): TaskPackInput => {
+  const { task: _task, feature: _feature, role_heuristics: _heuristics, ...rest } = ref.pack;
+  return { ...rest, run: h.state.id, action_id: actionId };
+};
+
 /**
  * Hands out one step: writes its pack (the pinned editable section first, AD-21), logs
  * `role.dispatched` (prompt version and the resolved model), returns the Lead action. `cwd` is
@@ -981,6 +999,7 @@ export const dispatchStep = (
       ...(step.task === undefined ? {} : { task: step.task }),
     },
     dispatch,
+    step.replay?.prompt,
   );
   if (selection.problem !== undefined)
     recordPromptSelection(k, h, step.task, `${agent}: ${selection.problem}`);
@@ -1003,9 +1022,12 @@ export const dispatchStep = (
       : undefined;
   const core = parts === undefined ? undefined : compiledPrompt(target, parts);
   const pinned = selection.pinned ?? compiledDefaultPrompt(k, target) ?? core?.pinned ?? null;
-  // AD-21 rule 2, reading 117: the pinned section is the pack's opening `Role heuristics` block
+  // AD-21 rule 2, reading 117: the pinned section is the pack's opening `Role heuristics` block;
+  // a replay trial reads the recorded pack, run as a task-less role (reading 176)
   const pack = writeTaskPack(k.deps.repoRoot, {
-    ...packFor(k, h, step, actionId),
+    ...(step.replay === undefined
+      ? packFor(k, h, step, actionId)
+      : trialPack(h, step.replay, actionId)),
     ...(pinned === null ? {} : { role_heuristics: pinned.text }),
   });
   const resume = step.resume !== undefined && step.resume.host === host ? step.resume : undefined;
@@ -1224,6 +1246,13 @@ export const dispatchPrepared = async (
   dispatch: "subagent" | "headless",
 ): Promise<DispatchedStep | null> => {
   const actionId = nextActionId(h.state);
+  if (step.replay !== undefined) {
+    // a replay trial works in its own clean checkout at the recorded base (reading 176)
+    const cwd = await prepareTrial(k, h, step.replay, actionId);
+    if (cwd === null) return null;
+    recordDispatch(k, h.state.id, actionId);
+    return dispatchStep(k, h, step, host, cwd, dispatch);
+  }
   const task = step.task === undefined ? undefined : h.state.tasks.get(step.task);
   let worktree: DispatchRecord["worktree"];
   if (task === undefined) {

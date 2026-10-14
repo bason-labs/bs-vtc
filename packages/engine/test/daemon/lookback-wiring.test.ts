@@ -15,12 +15,14 @@ import {
   effectivePromptSha,
   engineRepoKey,
   HOST_IDS,
+  LOOKBACK_HOME,
   LOOKBACK_LIMITS,
   LOOKBACK_REPO,
   LookbackPinsSchema,
   PLUGIN_MANIFEST_ASSET,
   PluginManifestSchema,
   promptShaFor,
+  ReplayResultSchema,
   rolePromptAssetPath,
   ScorecardIndexSchema,
   sha256Hex,
@@ -43,6 +45,7 @@ import {
 import { ALL_FIXTURE_ROLES } from "../fixtures/roles.js";
 import { lookbackWindow, wireLookback } from "../../src/daemon/index.js";
 import {
+  lookbackEvent,
   lookbackTargets,
   pinsPath,
   promptVersionRef,
@@ -60,6 +63,8 @@ import {
   only,
   passFinalReview,
   SPEC_ONE,
+  spawns,
+  submitResult,
   throughPlan,
   verdictPass,
   type Harness,
@@ -298,6 +303,95 @@ describe("RETRO reads the weekly window of the run's Lead host (AD-21 rule 8, re
       lookbackWindow({ ...engine, usage: new Map() }, { id: "r-1", limit: null }).pct,
     ).toBeNull();
   });
+});
+
+describe("RETRO replays a recorded proposal end to end (AD-21 rule 6, reading 176)", () => {
+  it("runs its trials, grades them through the Gate Runner and writes the result with its SHA-256", async () => {
+    const h = createHarness({ plugins: switched, project: { merge_level: 1 } });
+    h.engine.ingestUsage({
+      host: "claude-code",
+      source: "statusline",
+      windows: [
+        { kind: "weekly", label: "weekly", window_minutes: 10080, used_pct: 10, resets_at: null },
+      ],
+      model_limits: [],
+      updated_at: "2026-10-13T09:00:00.000Z",
+    });
+    const unwire = wireLookback(h.engine, { repoRoot: h.repo, vtcHome: h.home }, switched);
+    const actions = await throughPlan(h, [draft("T-1")], SPEC_ONE);
+    await authorTests(h, only(actions, "qa"));
+    await build(h, only((await h.engine.next({}, CLAUDE)).actions, "engineer"));
+    await verdictPass(
+      h,
+      only((await h.engine.next({}, CLAUDE)).actions, "spec_verifier"),
+      "src/t-1/impl.ts",
+    );
+    await h.engine.settle();
+    const run = h.engine.status({}).run.id;
+    // a held-out dispatch of a task role in this run: its version gets a recorded proposal
+    const held = events(h).find(
+      (e) =>
+        e.type === "role.dispatched" &&
+        e.task !== undefined &&
+        ["engineer", "spec_verifier"].includes(e.role ?? "") &&
+        traceSplit({ run, trace: String(e.data.action_id) }) === "holdout",
+    );
+    if (held?.role === undefined) throw new Error("no held-out task dispatch to replay");
+    const role = held.role;
+    const candidate = await store(h, role);
+    h.engine.recordModuleEvent(
+      run,
+      lookbackEvent("lookback.proposal_recorded", {
+        proposal: "p-1",
+        path: `.vtc/lookback/proposals/${role}/proposal.json`,
+        changes: 1,
+      }),
+    );
+    let carried = spawns(await passFinalReview(h));
+    await h.engine.settle();
+    let trials = 0;
+    for (;;) {
+      const trial =
+        carried.find((a) => a.role === role) ??
+        spawns((await h.engine.next({}, CLAUDE)).actions).find((a) => a.role === role);
+      if (trial === undefined) break;
+      trials += 1;
+      expect(trial.task).toBeUndefined();
+      expect(readFileSync(join(h.repo, trial.pack), "utf8")).toMatch(
+        new RegExp(`^## ${TASK_PACK_HEURISTICS_SECTION}\n\n(${CANDIDATE}|${DEFAULT})\n`),
+      );
+      const out =
+        role === "engineer"
+          ? await submitResult(h, trial, { exit: "built" })
+          : await verdictPass(h, trial, "src/t-1/impl.ts");
+      carried = "actions" in out ? spawns(out.actions) : [];
+      await h.engine.settle();
+    }
+    await unwire();
+    // k = 3 trials per arm, with an A/A arm (no noise floor was cached)
+    expect(trials % 9).toBe(0);
+    expect(trials).toBeGreaterThan(0);
+    const finished = events(h).filter((e) => e.type === "lookback.replay_finished");
+    expect(finished).toHaveLength(1);
+    const path = String(finished[0]?.data.path);
+    expect(path).toBe(".vtc/lookback/replays/p-1.json");
+    const bytes = readFileSync(join(h.repo, path), "utf8");
+    expect(finished[0]?.data.sha256).toBe(sha256Hex(bytes));
+    const result = ReplayResultSchema.parse(JSON.parse(bytes));
+    expect(result).toMatchObject({
+      proposal: "p-1",
+      role,
+      host: "claude-code",
+      baseline: effectivePromptSha(LOCKED, DEFAULT),
+      candidate,
+      k: 3,
+      aa_flip_rate: 0,
+    });
+    // the noise floor the replay measured is kept for the next one
+    expect(existsSync(join(h.home, LOOKBACK_HOME.aaNoiseFile))).toBe(true);
+    expect(h.engine.status({}).run.finished_at).toBeDefined();
+    await h.release();
+  }, 120_000);
 });
 
 describe("the daemon wires the Lookback module (AD-21)", () => {
