@@ -4,8 +4,11 @@
  * facts table, the Designer's artifacts, `screens.yaml`, the frozen spec); the research module
  * (lookback-research team, wired by the daemon) writes the facts and is never imported (AD-13
  * rule 12).
- * - **Directions**: the Designer's 2–3 `design_direction` artifacts, each with its novelty verdict
- *   (`novelty_report`, `unchecked` without one).
+ * - **Directions**: the Designer's 2–3 `design_direction` artifacts, each with the engine's
+ *   novelty verdict: before G2 shows, `GateRunner.checkNovelty` checks each direction's first
+ *   viewport against the client's design library and the engine writes the report to
+ *   `noveltyReportPath(id)` (`checkDirectionsNovelty`, readings 116 and 127); `unchecked` without
+ *   one. A verdict a role wrote is never read.
  * - **Unverified facts**: every fact in `.vtc/research/facts.jsonl` whose current row is
  *   unverified, stale or conflicting, every `UNVERIFIED:` tag in the documents G2 shows or the
  *   research briefs, and every version, licence, CVE or EOL claim in a research section (a
@@ -13,6 +16,8 @@
  *   fact id. An approval must waive each one with a reason (`fact_waivers`). The stale facts are
  *   re-fetched first, through the injected refresher (`Engine.setFactRefresher`).
  * Role-written files are read without following a symlink (a role could plant one to a host file).
+ * - **The chosen direction** enters the per-client design library once G2 is approved, through
+ *   `GateRunner.recordDesignChoice` (`recordChosenDirection`, §9.1 step 6, reading 127).
  * - **Design coverage**: every requirement of the frozen spec has a screen, every screen covers a
  *   requirement, and every component the component specs use is registered.
  */
@@ -21,24 +26,31 @@ import { basename, dirname, extname, join } from "node:path";
 import {
   DESIGN_SCREENS_PATH,
   DesignCoverageReportSchema,
+  DesignLibraryEntrySchema,
+  engineRepoKey,
   DesignScreensFileSchema,
   factId,
   FactRowSchema,
   G2DirectionDraftSchema,
   G2DirectionSchema,
+  noveltyReportPath,
   NoveltyReportSchema,
   parsePersisted,
   RESEARCH_FACTS_FILE,
+  researchScopeFor,
+  sha256Hex,
   SlugSchema,
   type ApproveInput,
+  type DesignLibraryEntry,
   type DesignCoverageReport,
   type FactRow,
   type FrozenArtifact,
   type G2Direction,
   type G2DirectionDraft,
+  type NoveltyReport,
   type UnverifiedFactSummary,
 } from "@vtc/shared";
-import { assertNoSymlinks } from "../git/index.js";
+import { assertNoSymlinks, writeRepoFile } from "../git/index.js";
 import type { Kernel, RunHandle } from "./kernel.js";
 import { lastSubmitted } from "./queries.js";
 import { frozenSpecItems } from "./read-model.js";
@@ -130,30 +142,98 @@ const readDirection = (k: Kernel, path: string): G2DirectionDraft => {
   };
 };
 
-/** The Designer's directions for G2 with their novelty verdicts (§9.1 steps 3–5), at most 3. */
-export const g2Directions = (k: Kernel, h: RunHandle): G2Direction[] => {
-  const artifacts = submittedArtifacts(h, "designer");
-  const novelty = new Map<string, G2Direction["novelty"]>();
-  for (const a of artifacts.filter((x) => x.type === "novelty_report")) {
-    try {
-      const parsed = parsePersisted(
-        NoveltyReportSchema,
-        JSON.parse(read(k.deps.repoRoot, a.path) ?? "") as unknown,
-      );
-      if (parsed.success) novelty.set(parsed.data.direction, parsed.data.verdict);
-    } catch {
-      // an unreadable report leaves the direction unchecked
-    }
+/**
+ * The engine's novelty report of a direction (§9.1 step 4, `noveltyReportPath(id)`; only the
+ * engine writes there, reading 116), or `undefined` when there is none or it does not parse.
+ */
+const noveltyReport = (k: Kernel, direction: string): NoveltyReport | undefined => {
+  try {
+    const parsed = parsePersisted(
+      NoveltyReportSchema,
+      JSON.parse(read(k.deps.repoRoot, noveltyReportPath(direction)) ?? "") as unknown,
+    );
+    return parsed.success && parsed.data.direction === direction ? parsed.data : undefined;
+  } catch {
+    return undefined; // an unreadable report leaves the direction unchecked
   }
+};
+
+/** The Designer's directions (§9.1 step 3) as files describe them, at most 3, once each. */
+const directionDrafts = (k: Kernel, h: RunHandle): G2DirectionDraft[] => {
   const seen = new Set<string>();
-  const directions: G2Direction[] = [];
-  for (const a of artifacts.filter((x) => x.type === "design_direction")) {
+  const drafts: G2DirectionDraft[] = [];
+  for (const a of submittedArtifacts(h, "designer").filter((x) => x.type === "design_direction")) {
     const d = readDirection(k, a.path);
     if (seen.has(d.id)) continue;
     seen.add(d.id);
-    directions.push(G2DirectionSchema.parse({ ...d, novelty: novelty.get(d.id) ?? "unchecked" }));
+    drafts.push(d);
   }
-  return directions.slice(0, 3);
+  return drafts.slice(0, 3);
+};
+
+/** The Designer's directions for G2 with the engine's novelty verdicts (§9.1 steps 3–5), at most 3. */
+export const g2Directions = (k: Kernel, h: RunHandle): G2Direction[] =>
+  directionDrafts(k, h).map((d) =>
+    G2DirectionSchema.parse({ ...d, novelty: noveltyReport(k, d.id)?.verdict ?? "unchecked" }),
+  );
+
+/**
+ * §9.1 step 4, reading 127: before G2 shows, each direction with a first viewport is checked
+ * against the design library of the project's client scope (`GateRunner.checkNovelty`) and the
+ * report written to `noveltyReportPath(id)`. A check that fails leaves its direction `unchecked`;
+ * without the method every direction stays `unchecked`.
+ */
+export const checkDirectionsNovelty = async (k: Kernel, h: RunHandle): Promise<void> => {
+  const check = k.deps.gateRunner.checkNovelty?.bind(k.deps.gateRunner);
+  if (check === undefined) return;
+  const scope = researchScopeFor(k.config().client);
+  for (const d of directionDrafts(k, h)) {
+    if (d.first_viewport === undefined) continue;
+    try {
+      const report = NoveltyReportSchema.parse(
+        await check({ direction: d.id, firstViewport: d.first_viewport, scope }),
+      );
+      if (report.direction !== d.id) continue;
+      writeRepoFile(
+        k.deps.repoRoot,
+        noveltyReportPath(d.id),
+        `${JSON.stringify(report, null, 2)}\n`,
+      );
+    } catch {
+      // the direction stays unchecked; G2 says so
+    }
+  }
+};
+
+/**
+ * §9.1 step 6, reading 127: the direction the human chose at G2 enters the design library of the
+ * project's client scope (`_shared` or `client-<slug>`, as for research, §14) through
+ * `GateRunner.recordDesignChoice`, so the novelty check of later projects steers away from it. The
+ * entry carries the perceptual hash and token vector of the engine's novelty report; a direction
+ * with none, or a gate runner without the method, records nothing. The id is fixed per repo, run
+ * and direction, so recording twice writes one entry. Returns the entry, or `null`; throws when
+ * the gate runner could not record it.
+ */
+export const recordChosenDirection = async (
+  k: Kernel,
+  h: RunHandle,
+  direction: string,
+): Promise<DesignLibraryEntry | null> => {
+  const record = k.deps.gateRunner.recordDesignChoice?.bind(k.deps.gateRunner);
+  const report = noveltyReport(k, direction);
+  if (record === undefined || report === undefined) return null;
+  const key = engineRepoKey(k.deps.repoRoot);
+  const entry = DesignLibraryEntrySchema.parse({
+    v: 1,
+    id: `${key}-${sha256Hex(`${h.state.id}\n${direction}`).slice(0, 12)}`,
+    project_key: key,
+    direction,
+    phash: report.phash,
+    token_vector: report.token_vector,
+    chosen_at: k.now().toISOString(),
+  });
+  await record(entry, researchScopeFor(k.config().client));
+  return entry;
 };
 
 // --------------------------------------------------------------------- facts

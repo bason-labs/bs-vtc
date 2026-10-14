@@ -93,7 +93,17 @@ export const lastQaAuthor = (state: RunState, task: string): RoleRunRecord | und
 export const taskFindings = (state: RunState, task: string): Finding[] =>
   [...state.findings.values()].filter((r) => r.finding.task === task).map((r) => r.finding);
 
-/** Runs of one step that ended without an accepted result since its last accepted one. */
+/**
+ * A rejected or failed run, unless the engine or the human stopped it (`vtc pause`, a resume):
+ * what the stuck limits count.
+ */
+export const countsAsFailure = (run: RoleRunRecord): boolean =>
+  run.status === "rejected" || (run.status === "failed" && run.stopped !== true);
+
+/**
+ * Runs of one step that ended without an accepted result since its last accepted one (a stopped
+ * run neither counts nor breaks the streak).
+ */
 export const consecutiveFailures = (
   state: RunState,
   step: { role: string; mode?: string; task?: string; subject?: string },
@@ -109,7 +119,7 @@ export const consecutiveFailures = (
   for (let i = runs.length - 1; i >= 0; i -= 1) {
     const r = runs[i];
     if (r === undefined || r.status === "submitted") break;
-    if (r.status === "rejected" || r.status === "failed") count += 1;
+    if (countsAsFailure(r)) count += 1;
   }
   return count;
 };

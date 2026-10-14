@@ -7,7 +7,18 @@
 import { readFileSync, symlinkSync } from "node:fs";
 import { join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { factId, type ApproveInput, type FactRow, type LeadAction } from "@vtc/shared";
+import {
+  engineRepoKey,
+  factId,
+  noveltyReportPath,
+  type ApproveInput,
+  type DesignLibraryEntry,
+  type FactRow,
+  type LeadAction,
+  type NoveltyCheckRequest,
+  type NoveltyReport,
+  type ResearchScope,
+} from "@vtc/shared";
 import { ALL_FIXTURE_ROLES } from "../fixtures/roles.js";
 import { unverifiedFacts } from "../../src/core/g2.js";
 import type { Kernel } from "../../src/core/kernel.js";
@@ -382,8 +393,8 @@ describe("uncited version, licence, CVE and EOL claims in research sections (AD-
 });
 
 /**
- * The Designer declares `design_direction` (roles/designer); a `novelty_report` output stands in
- * for the engine's novelty check, which has no seam in these tests.
+ * The Designer declares `design_direction` (roles/designer). The `novelty_report` output here lets
+ * a test show that a verdict the Designer submits itself is never read (spine §5 reading 116).
  */
 const ROLES = ALL_FIXTURE_ROLES.map((r) =>
   r.id === "designer"
@@ -396,6 +407,37 @@ const ROLES = ALL_FIXTURE_ROLES.map((r) =>
       }
     : r,
 );
+
+const SIGNAL_REPORT: NoveltyReport = {
+  v: 1,
+  direction: "signal",
+  phash: "0123456789abcdef",
+  token_vector: [0.1, 0.2],
+  nearest: [],
+  thresholds: { phash_distance: 10, token_distance: 0.2 },
+  verdict: "novel",
+};
+
+/**
+ * The gate runner's novelty seam (reading 127) on the harness's fake: `checkNovelty` reports
+ * `signal` novel and fails for anything else; `recordDesignChoice` keeps what it was given.
+ */
+const noveltySeam = (h: Harness, failRecord = false) => {
+  const checked: NoveltyCheckRequest[] = [];
+  const recorded: { entry: DesignLibraryEntry; scope: ResearchScope }[] = [];
+  h.gates.checkNovelty = (request) => {
+    checked.push(request);
+    return request.direction === "signal"
+      ? Promise.resolve(SIGNAL_REPORT)
+      : Promise.reject(new Error("no first viewport rendered"));
+  };
+  h.gates.recordDesignChoice = (entry, scope) => {
+    if (failRecord) return Promise.reject(new Error("the design library is read-only"));
+    recorded.push({ entry, scope });
+    return Promise.resolve();
+  };
+  return { checked, recorded };
+};
 
 describe("G2 directions and the DESIGN coverage check (§9.1, §6.1)", () => {
   const SCREENS = [
@@ -421,7 +463,7 @@ describe("G2 directions and the DESIGN coverage check (§9.1, §6.1)", () => {
     writeFile(
       cwd,
       ".vtc/design/directions/signal.yaml",
-      "id: signal\ntitle: Signal\nthesis: high-contrast and fast\nprototype: .vtc/design/prototype/signal\n",
+      "id: signal\ntitle: Signal\nthesis: high-contrast and fast\nprototype: .vtc/design/prototype/signal\nfirst_viewport: .vtc/design/prototype/signal/first.png\n",
     );
     // a verdict the Designer wrote itself is dropped (spine §5 reading 116)
     writeFile(
@@ -435,18 +477,11 @@ describe("G2 directions and the DESIGN coverage check (§9.1, §6.1)", () => {
         novelty: "novel",
       }),
     );
+    // a verdict the Designer submits as a report is never read either (reading 116)
     writeFile(
       cwd,
-      ".vtc/design/directions/signal-novelty.json",
-      JSON.stringify({
-        v: 1,
-        direction: "signal",
-        phash: "0123456789abcdef",
-        token_vector: [0.1, 0.2],
-        nearest: [],
-        thresholds: { phash_distance: 10, token_distance: 0.2 },
-        verdict: "novel",
-      }),
+      ".vtc/design/directions/bold-novelty.json",
+      JSON.stringify({ ...SIGNAL_REPORT, direction: "bold" }),
     );
     writeFile(
       cwd,
@@ -458,14 +493,26 @@ describe("G2 directions and the DESIGN coverage check (§9.1, §6.1)", () => {
       { type: "design_direction", path: ".vtc/design/directions/quiet-ledger.md" },
       { type: "design_direction", path: ".vtc/design/directions/signal.yaml" },
       { type: "design_direction", path: ".vtc/design/directions/bold.json" },
-      { type: "novelty_report", path: ".vtc/design/directions/signal-novelty.json" },
+      { type: "novelty_report", path: ".vtc/design/directions/bold-novelty.json" },
       { type: "component_specs", path: ".vtc/design/components/button.yaml" },
     ];
   };
 
-  it("shows each direction with its novelty, and the coverage report in gate.requested", async () => {
+  it("shows each direction with the engine's novelty verdict, and the coverage report in gate.requested", async () => {
     const h = createHarness({ roles: ROLES });
+    const seam = noveltySeam(h);
     const gate = await toG2(h, { hasUi: true, designer: designerWork });
+    // only a direction with a first viewport is checked, in the project's client scope
+    expect(seam.checked).toEqual([
+      {
+        direction: "signal",
+        firstViewport: ".vtc/design/prototype/signal/first.png",
+        scope: "_shared",
+      },
+    ]);
+    expect(JSON.parse(readFileSync(join(h.repo, noveltyReportPath("signal")), "utf8"))).toEqual(
+      SIGNAL_REPORT,
+    );
     expect(gate.design_directions).toEqual(["quiet-ledger", "signal", "bold"]);
     expect(gate.directions).toEqual([
       {
@@ -480,6 +527,7 @@ describe("G2 directions and the DESIGN coverage check (§9.1, §6.1)", () => {
         title: "Signal",
         thesis: "high-contrast and fast",
         prototype: ".vtc/design/prototype/signal",
+        first_viewport: ".vtc/design/prototype/signal/first.png",
         novelty: "novel",
       },
       {
@@ -514,6 +562,79 @@ describe("G2 directions and the DESIGN coverage check (§9.1, §6.1)", () => {
     );
     const out = await approve(h, gate, { ...waive, design_direction: "signal" });
     expect(only(out.actions, "planner").role).toBe("planner");
+    expect(ofType(h, "gate.approved").at(-1)?.data.design_direction).toBe("signal");
+    await h.release();
+  });
+
+  const waiveAll = (gate: ApproveGate) => ({
+    waived_facts: gate.unverified_facts,
+    fact_waivers: gate.unverified_facts.map((id) => ({ id, reason: "ok" })),
+  });
+
+  it("records the chosen direction through the gate runner's design library (§9.1 step 6)", async () => {
+    const h = createHarness({ roles: ROLES });
+    const seam = noveltySeam(h);
+    const gate = await toG2(h, { hasUi: true, designer: designerWork });
+    await approve(h, gate, { ...waiveAll(gate), design_direction: "signal" });
+    expect(seam.recorded).toEqual([
+      {
+        scope: "_shared",
+        entry: {
+          v: 1,
+          id: expect.stringMatching(/^[a-f0-9]{16}-[a-f0-9]{12}$/) as string,
+          project_key: engineRepoKey(h.repo),
+          direction: "signal",
+          phash: "0123456789abcdef",
+          token_vector: [0.1, 0.2],
+          chosen_at: "2026-10-13T09:00:00.000Z",
+        },
+      },
+    ]);
+    await h.release();
+  });
+
+  it("keeps a client's directions in the client's own library", async () => {
+    const h = createHarness({ roles: ROLES, project: { client: "acme" } });
+    const seam = noveltySeam(h);
+    const gate = await toG2(h, { hasUi: true, designer: designerWork });
+    expect(seam.checked.map((c) => c.scope)).toEqual(["client-acme"]);
+    await approve(h, gate, { ...waiveAll(gate), design_direction: "signal" });
+    expect(seam.recorded.map((r) => [r.scope, r.entry.direction])).toEqual([
+      ["client-acme", "signal"],
+    ]);
+    await h.release();
+  });
+
+  it("a chosen direction with no engine novelty report has nothing to record", async () => {
+    const h = createHarness({ roles: ROLES });
+    const seam = noveltySeam(h);
+    const gate = await toG2(h, { hasUi: true, designer: designerWork });
+    // bold's only report is the one the Designer submitted
+    await approve(h, gate, { ...waiveAll(gate), design_direction: "bold" });
+    expect(seam.recorded).toEqual([]);
+    await h.release();
+  });
+
+  it("an approval whose direction the library could not record is refused and records nothing", async () => {
+    const h = createHarness({ roles: ROLES });
+    noveltySeam(h, true);
+    const gate = await toG2(h, { hasUi: true, designer: designerWork });
+    await expect(
+      approve(h, gate, { ...waiveAll(gate), design_direction: "signal" }),
+    ).rejects.toThrow(
+      /could not be recorded in the design library: the design library is read-only/,
+    );
+    // G1 was approved on the way; G2 is not
+    expect(ofType(h, "gate.approved").map((e) => e.data.gates)).toEqual([["G1"]]);
+    expect(ofType(h, "fact.waived")).toEqual([]);
+    await h.release();
+  });
+
+  it("without the gate runner's novelty seam every direction stays unchecked", async () => {
+    const h = createHarness({ roles: ROLES });
+    const gate = await toG2(h, { hasUi: true, designer: designerWork });
+    expect(gate.directions?.map((d) => d.novelty)).toEqual(["unchecked", "unchecked", "unchecked"]);
+    await approve(h, gate, { ...waiveAll(gate), design_direction: "signal" });
     expect(ofType(h, "gate.approved").at(-1)?.data.design_direction).toBe("signal");
     await h.release();
   });

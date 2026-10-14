@@ -68,6 +68,9 @@ export {
   type CallContext,
   type EngineCoreDeps,
   type FactRefresher,
+  type PinnedPrompt,
+  type PromptPins,
+  type PromptTarget,
   type RoleToolHandler,
   type RunHandle,
 } from "./kernel.js";
@@ -87,6 +90,7 @@ export {
   pluginManifest,
   PluginManifestError,
   type PluginCatalog,
+  type PromptParts,
 } from "./plugins.js";
 export { guardDirFor, GUARD_DIR } from "./guard.js";
 export { EngineWrites, type WriteCheck } from "./engine-writes.js";

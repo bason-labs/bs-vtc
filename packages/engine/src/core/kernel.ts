@@ -13,6 +13,7 @@ import type {
   HostAdapter,
   HostId,
   ProjectConfig,
+  PromptVersionRef,
   PullRequestService,
   RemoteMergeService,
   RoleMcpToolName,
@@ -74,6 +75,8 @@ export interface HeadlessEntry {
   readonly run: string;
   readonly summary: HeadlessRunSummary;
   readonly process: HeadlessRun;
+  /** Set when `vtc pause` killed it: its end is then not the role's failure. */
+  stoppedByPause?: boolean;
 }
 
 /**
@@ -96,6 +99,39 @@ export type RoleToolHandler = (
  * §5 reading 120). `null`: core reads the statuses the rows record.
  */
 export type FactRefresher = (repoRoot: string) => Promise<readonly UnverifiedFactSummary[] | null>;
+
+/** The dispatch a prompt version is selected for (AD-21). */
+export interface PromptTarget {
+  readonly run: string;
+  readonly role: string;
+  readonly mode?: string;
+  readonly host: HostId;
+  /** The compiled agent that runs it (a discipline profile for an Engineer task, §5.2a). */
+  readonly agent: string;
+  readonly task?: string;
+}
+
+/** The editable section a dispatch carries, and the prompt version it makes (AD-21 rule 1). */
+export interface PinnedPrompt {
+  /** `effective_sha256` becomes the envelope's `prompt_sha`, `editable_sha256` the event's. */
+  readonly version: PromptVersionRef;
+  /** The editable section, rendered first in the task pack (AD-21 rule 2, reading 102). */
+  readonly text: string;
+  /** The canary arm the dispatch runs in, when a canary covers the role (AD-21 rule 7). */
+  readonly canary?: {
+    readonly arm: "candidate" | "baseline";
+    readonly candidate: string;
+    readonly baseline: string;
+  };
+}
+
+/**
+ * Selects the pinned editable section for a dispatch, or `null` for the compiled agent's own
+ * (AD-21 rules 1–3 and 7: user-level pins and canaries, never repo content). The lookback module
+ * implements it and the daemon hands it to the engine (`Engine.setPromptPins`), so core never
+ * imports lookback (AD-13 rule 12). Synchronous: it reads its pins once and caches them.
+ */
+export type PromptPins = (target: PromptTarget) => PinnedPrompt | null;
 
 export interface RunHandle {
   readonly state: RunState;
@@ -183,6 +219,8 @@ export interface Kernel {
    * a Lead session calls `next` again.
    */
   readonly unattended: Set<string>;
+  /** The prompt-version selector the daemon wired (`Engine.setPromptPins`), or `null`. */
+  promptPins(): PromptPins | null;
   /** Engine-launched headless runs in flight, by action id (AD-25). */
   readonly headless: Map<string, HeadlessEntry>;
   /**

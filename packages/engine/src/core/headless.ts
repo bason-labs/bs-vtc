@@ -221,14 +221,33 @@ const spawnError = (message: string): HostOutcome => ({
   cost_usd: null,
 });
 
+/**
+ * What a run `vtc pause` killed ended with: unless it finished first, a failure with cause
+ * `killed`. Its `headless.ended` after the logged pause marks the run `stopped` (state.ts), so it
+ * never counts toward the stuck limit; what the host reported it cost still counts (D-at).
+ */
+export const pausedOutcome = (outcome: HostOutcome): HostOutcome => {
+  if (outcome.kind === "done") return outcome;
+  const detail = outcome.kind === "error" || outcome.kind === "auth" ? outcome.message : "a limit";
+  return {
+    kind: "error",
+    message: `stopped by vtc pause (the kill switch): ${detail}`.slice(0, 2000),
+    retryable: true,
+    cause: "killed",
+    tokens: outcome.kind === "auth" ? null : outcome.tokens,
+    cost_usd: outcome.kind === "auth" ? null : outcome.cost_usd,
+  };
+};
+
 /** The run ended (or never started): logged, then submitted like a Lead's `submit`. */
 const finishHeadless = async (
   k: Kernel,
   h: RunHandle,
   actionId: string,
-  outcome: HostOutcome,
+  ended: HostOutcome,
   startedAt: number,
 ): Promise<void> => {
+  const outcome = k.headless.get(actionId)?.stoppedByPause === true ? pausedOutcome(ended) : ended;
   k.headless.delete(actionId);
   const run = h.state.roleRuns.get(actionId);
   if (run === undefined) return;
@@ -446,11 +465,14 @@ export const dispatchHeadless = async (
 };
 
 /**
- * Kills every engine-launched run of `run` (`vtc pause`), or of every run (the engine's shutdown);
- * AD-25 rule 4: no orphans.
+ * Kills every engine-launched run of `run` (`vtc pause`: each is then submitted as stopped, not
+ * failed, {@link pausedOutcome}), or of every run (the engine's shutdown); AD-25 rule 4: no
+ * orphans.
  */
 export const killHeadless = async (k: Kernel, run?: string): Promise<void> => {
   const entries = [...k.headless.values()].filter((e) => run === undefined || e.run === run);
+  // the pause, not the role, ended these (the shutdown's are left in flight instead)
+  if (run !== undefined) for (const entry of entries) entry.stoppedByPause = true;
   await Promise.allSettled(entries.map((e) => e.process.kill()));
 };
 

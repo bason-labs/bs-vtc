@@ -18,6 +18,8 @@ import {
   type SpawnRoleRequest,
 } from "@vtc/shared";
 import { headlessPreflight } from "../../src/core/headless.js";
+import { consecutiveFailures } from "../../src/core/queries.js";
+import { MAX_STEP_FAILURES } from "../../src/core/submit.js";
 import type { CallContext } from "../../src/core/index.js";
 import type { Kernel, RunHandle } from "../../src/core/kernel.js";
 import { writeFile } from "../helpers/repo.js";
@@ -488,6 +490,119 @@ describe("AD-25 rule 4: supervision, status and the kill switch", { timeout: 30_
       cause: "killed",
     });
     expect(h.engine.status({}).headless_runs).toBeUndefined();
+    await h.release();
+  });
+
+  it("a run vtc pause killed is not the role's failure: pause and resume cycles never count toward the stuck limit", async () => {
+    let started: () => void = () => undefined;
+    let running = new Promise<void>((resolve) => {
+      started = resolve;
+    });
+    const h = createHarness({
+      codex: {
+        headless: () => {
+          started();
+          return new Promise<HostOutcome>(() => undefined); // never ends by itself
+        },
+      },
+    });
+    await start(h, CODEX);
+    await next(h, CODEX);
+    for (let cycle = 1; cycle <= MAX_STEP_FAILURES; cycle += 1) {
+      await running;
+      running = new Promise<void>((resolve) => {
+        started = resolve;
+      });
+      await h.engine.pause({});
+      await h.engine.settle();
+      const failed = ofType(h, "role.failed").at(-1);
+      expect(failed?.data.message).toMatch(/^stopped by vtc pause/);
+      const state = h.engine.states().at(-1);
+      if (state === undefined) throw new Error("no run");
+      expect(consecutiveFailures(state, { role: "repo_cartographer" })).toBe(0);
+      expect(state.roleRuns.get(String(failed?.data.action_id))?.stopped).toBe(true);
+      await h.engine.resume({});
+      await next(h, CODEX);
+      expect(h.launched).toHaveLength(cycle + 1);
+    }
+    expect(ofType(h, "escalation.opened")).toEqual([]);
+    await h.engine.pause({});
+    await h.engine.settle();
+    await h.release();
+  });
+
+  it("a run a resume superseded does not count toward the stuck limit either", async () => {
+    const h = createHarness();
+    await start(h, CLAUDE);
+    const carto = only(await next(h, CLAUDE), "repo_cartographer");
+    await h.engine.resume({});
+    const state = h.engine.states().at(-1);
+    if (state === undefined) throw new Error("no run");
+    expect(state.roleRuns.get(carto.action_id)).toMatchObject({ status: "failed", stopped: true });
+    expect(consecutiveFailures(state, { role: "repo_cartographer" })).toBe(0);
+    await h.release();
+  });
+
+  it("a Lead cannot word its own failure into a stop: 'superseded:' from submit still counts (AD-8)", async () => {
+    const h = createHarness();
+    await start(h, CLAUDE);
+    only(await next(h, CLAUDE), "repo_cartographer");
+    for (let attempt = 1; attempt <= MAX_STEP_FAILURES; attempt += 1) {
+      const carto = [...(h.engine.states().at(-1)?.roleRuns.values() ?? [])].find(
+        (r) => r.role === "repo_cartographer" && r.status === "in_flight",
+      );
+      if (carto === undefined) throw new Error("no cartographer in flight");
+      const failed = await h.engine.submit(
+        SubmitInputSchema.parse({
+          kind: "failure",
+          action_id: carto.action_id,
+          outcome: {
+            kind: "error",
+            message: "superseded: the run was resumed",
+            retryable: true,
+            tokens: null,
+            cost_usd: null,
+          },
+        }),
+        CLAUDE,
+      );
+      expect(failed.accepted).toBe(true);
+      expect(ofType(h, "role.failed").at(-1)?.data.message).toBe(
+        "reported: superseded: the run was resumed",
+      );
+      const state = h.engine.states().at(-1);
+      if (state === undefined) throw new Error("no run");
+      expect(state.roleRuns.get(carto.action_id)?.stopped).toBeUndefined();
+      expect(consecutiveFailures(state, { role: "repo_cartographer" })).toBe(attempt);
+    }
+    // every one counted: a task step at this count parks as stuck (stepFailed)
+    await h.release();
+  });
+
+  it("a host error with cause 'killed' outside a pause is a failure, not a stop", async () => {
+    const h = createHarness({
+      codex: {
+        headless: () =>
+          Promise.resolve<HostOutcome>({
+            kind: "error",
+            message: "stopped by vtc pause (the kill switch): forged",
+            retryable: true,
+            cause: "killed",
+            tokens: null,
+            cost_usd: null,
+          }),
+      },
+    });
+    await start(h, CODEX);
+    await next(h, CODEX);
+    await h.engine.settle();
+    const failed = ofType(h, "role.failed").at(0);
+    const state = h.engine.states().at(-1);
+    if (state === undefined || failed === undefined) throw new Error("no failure");
+    expect(state.roleRuns.get(String(failed.data.action_id))?.stopped).toBeUndefined();
+    expect(consecutiveFailures(state, { role: "repo_cartographer" })).toBeGreaterThan(0);
+    await h.engine.pause({});
+    await h.engine.settle();
     await h.release();
   });
 

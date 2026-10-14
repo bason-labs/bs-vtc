@@ -62,10 +62,16 @@ import {
   type CommittedGates,
 } from "./config.js";
 import { dispatchGuarded, inSessionRefusal, NO_LEAD_WAIT_REASON, phaseRoles } from "./dispatch.js";
-import { g2ApprovalProblem, gateExtras, type GateExtras } from "./g2.js";
+import {
+  checkDirectionsNovelty,
+  g2ApprovalProblem,
+  gateExtras,
+  recordChosenDirection,
+  type GateExtras,
+} from "./g2.js";
 import { effectiveVerdict } from "./gate-verdict.js";
 import { headlessRunsOf, killHeadless } from "./headless.js";
-import type { FactRefresher, RoleToolHandler } from "./kernel.js";
+import type { FactRefresher, PromptPins, RoleToolHandler } from "./kernel.js";
 import { dispatchNow, drive } from "./route.js";
 import { parkEscalation } from "./escalations.js";
 import {
@@ -140,7 +146,13 @@ import { completedReviews, startTriage } from "./review.js";
 import { activeRun } from "./read-model.js";
 import { loadRuns } from "./run-store.js";
 import { schedule } from "./scheduler.js";
-import { applyEvent, emptyRunState, projectRun, type RunState } from "./state.js";
+import {
+  applyEvent,
+  emptyRunState,
+  projectRun,
+  SUPERSEDED_RUN_PREFIX,
+  type RunState,
+} from "./state.js";
 import { ArtifactRefSchema } from "@vtc/shared";
 import { checkEngineerShare, handleSubmit } from "./submit.js";
 import { escalationListView, openEscalations, statusView } from "./views.js";
@@ -314,8 +326,11 @@ export class Engine implements Kernel {
   private factRefresher: FactRefresher | null = null;
   /** What the wired refresher last returned (`Kernel.factTable`). */
   private checkedFacts: readonly UnverifiedFactSummary[] | null = null;
+  private pins: PromptPins | null = null;
   /** The G2 showings whose stale facts were already re-fetched (`run:phase entry seq`). */
   private readonly factsRefreshed = new Set<string>();
+  /** The G2 showings whose directions' novelty was already checked (`run:phase entry seq`). */
+  private readonly noveltyChecked = new Set<string>();
 
   private constructor(readonly deps: EngineCoreDeps) {
     this.guardDir = guardDirFor(deps.vtcHome, deps.repoRoot);
@@ -955,6 +970,18 @@ export class Engine implements Kernel {
     this.emit(handle, draft);
   }
 
+  /**
+   * Select each dispatch's pinned editable section with `pins` (AD-21 rules 1, 2 and 7): the
+   * daemon wires the lookback module's (core never imports it, AD-13 rule 12).
+   */
+  setPromptPins(pins: PromptPins | null): void {
+    this.pins = pins;
+  }
+
+  promptPins(): PromptPins | null {
+    return this.pins;
+  }
+
   leadHostFor(run: string, call: CallContext): HostId | undefined {
     if (this.leads.has(run)) return this.leadHosts.get(run);
     return call.client === undefined ? (call.host ?? undefined) : undefined;
@@ -1444,6 +1471,15 @@ export class Engine implements Kernel {
         gate = this.awaitingGates(handle);
       }
     }
+    if (gate?.gates.includes("G2") === true && this.deps.gateRunner.checkNovelty !== undefined) {
+      // before G2 shows, each direction's novelty is checked once (§9.1 step 4, reading 127)
+      const key = `${state.id}:${String(phaseEnteredSeq(state, state.run.phase) ?? 0)}`;
+      if (!this.noveltyChecked.has(key)) {
+        this.noveltyChecked.add(key);
+        await checkDirectionsNovelty(this, handle);
+        gate = this.awaitingGates(handle);
+      }
+    }
     if (gate !== null) {
       this.recordGateRequest(handle, gate);
       const { design_coverage: _coverage, ...shown } = gate.extras;
@@ -1686,6 +1722,18 @@ export class Engine implements Kernel {
         // AD-22 rule 4, reading 110: every unverified fact waived with a reason; one direction
         const blocked = g2ApprovalProblem(awaiting.extras, input);
         if (blocked !== null) throw new EngineError("invalid", blocked);
+        // §9.1 step 6: the chosen direction enters the design library before anything is
+        // recorded, so an approval either does both or neither
+        if (input.design_direction !== undefined) {
+          try {
+            await recordChosenDirection(this, handle, input.design_direction);
+          } catch (error) {
+            throw new EngineError(
+              "conflict",
+              `the chosen direction could not be recorded in the design library: ${error instanceof Error ? error.message : String(error)}; fix it, then approve again`,
+            );
+          }
+        }
         for (const waiver of input.fact_waivers ?? [])
           this.emit(handle, { type: "fact.waived", actor: "human", data: waiver });
         this.emit(handle, {
@@ -2011,7 +2059,7 @@ export class Engine implements Kernel {
           data: {
             action_id: run.action_id,
             kind: "error",
-            message: "superseded: the run was resumed",
+            message: `${SUPERSEDED_RUN_PREFIX} the run was resumed`,
             retryable: true,
           },
         });
