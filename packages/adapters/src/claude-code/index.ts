@@ -2,6 +2,8 @@
  * Claude Code host adapter (§4.1, §12.1, AD-6). Usage is pushed, not pulled (AD-6 rule 4): the
  * statusline shim posts `statuslineIngestFromClaude(...)` to the engine, and `parseEvents`
  * returns the SDK rate-limit readings of runs the engine launched. So there is no `readUsage`.
+ * Engine-launched runs are unattended (AD-25): an isolated argv, process-group supervision, and
+ * `authStatus()` through `claude auth status --json` before every start or resume.
  */
 import {
   HOST_CREDENTIAL_DENY_READ,
@@ -10,6 +12,7 @@ import {
   type SessionRef,
   type SpawnRoleRequest,
 } from "@vtc/shared";
+import { createAuthStatusRunner } from "../common/auth-status.js";
 import { createRunLauncher, subagentSpawn } from "../common/dispatch.js";
 import { envHome } from "../common/homes.js";
 import { nodeSpawner, type Spawner } from "../common/process.js";
@@ -19,6 +22,7 @@ import {
   claudeSubagentName,
   HOST,
 } from "./command.js";
+import { CLAUDE_AUTH_STATUS } from "./auth.js";
 import { claudeOutcomeAfterExit, parseClaudeEvents } from "./events.js";
 import { installClaudeCode } from "./install.js";
 
@@ -35,7 +39,16 @@ export const claudeCodeCapabilities: HostCapabilities = {
 export interface ClaudeCodeAdapterOptions {
   /** Starts host processes; tests inject a fake (never the real `claude`). */
   readonly spawner?: Spawner;
+  /**
+   * SIGTERM → SIGKILL grace when a headless run is stopped. Default
+   * `HEADLESS_DEFAULTS.termGraceMs` (AD-25 rule 4).
+   */
   readonly killGraceMs?: number;
+  /**
+   * SIGINT → SIGTERM grace when a headless run is stopped. Default
+   * `HEADLESS_DEFAULTS.interruptGraceMs` (AD-25 rule 4).
+   */
+  readonly interruptGraceMs?: number;
   /**
    * The absolute VTC home, whose `ROLE_DENIED_VTC` paths the profiles and the session sandbox
    * written by `install` deny. Default: `$VTC_HOME`, else `~/.vtc` (the cli's own rule); the cli
@@ -54,13 +67,25 @@ export interface ClaudeCodeAdapterOptions {
    * headless runs: without it `headlessCommand`, `spawnRole` (headless) and `resume` refuse.
    */
   readonly pluginDir?: string;
+  /** Clock for `authStatus().checked_at`. */
+  readonly now?: () => Date;
+  /** How long `claude auth status` may run before it is killed. Default 20 s. */
+  readonly authTimeoutMs?: number;
 }
 
 export const createClaudeCodeAdapter = (options: ClaudeCodeAdapterOptions = {}): HostAdapter => {
   const runs = createRunLauncher({
     spawner: options.spawner ?? nodeSpawner,
     outcome: claudeOutcomeAfterExit,
-    ...(options.killGraceMs === undefined ? {} : { killGraceMs: options.killGraceMs }),
+    ...(options.killGraceMs === undefined ? {} : { termGraceMs: options.killGraceMs }),
+    ...(options.interruptGraceMs === undefined
+      ? {}
+      : { interruptGraceMs: options.interruptGraceMs }),
+  });
+  const auth = createAuthStatusRunner({
+    spawner: options.spawner ?? nodeSpawner,
+    now: options.now ?? (() => new Date()),
+    ...(options.authTimeoutMs === undefined ? {} : { timeoutMs: options.authTimeoutMs }),
   });
   const codex = HOST_CREDENTIAL_DENY_READ.codex;
   const claude = HOST_CREDENTIAL_DENY_READ["claude-code"];
@@ -97,7 +122,11 @@ export const createClaudeCodeAdapter = (options: ClaudeCodeAdapterOptions = {}):
       return spawn(request, session);
     },
     sandboxProfile: (request) => claudeSandboxProfile(request, profileOptions),
-    dispose: () => runs.dispose(),
+    authStatus: () => auth.check(CLAUDE_AUTH_STATUS),
+    async dispose() {
+      auth.dispose();
+      await runs.dispose();
+    },
   };
 };
 

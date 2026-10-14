@@ -14,6 +14,9 @@ import { spawn } from "node:child_process";
 import type { Readable, Writable } from "node:stream";
 import type { HostCommand } from "@vtc/shared";
 
+/** The signals the launcher sends, in this order when it stops a run (AD-25 rule 4). */
+export type ProcessSignal = "SIGINT" | "SIGTERM" | "SIGKILL";
+
 export interface ProcessExit {
   readonly code: number | null;
   readonly signal: string | null;
@@ -29,8 +32,8 @@ export interface SpawnedProcess {
   readonly stdin: Writable | null;
   /** Resolves once, when the process has exited or failed to start. Never rejects. */
   readonly exited: Promise<ProcessExit>;
-  /** Signals the process and everything it started. Safe after exit. */
-  kill(signal: "SIGTERM" | "SIGKILL"): void;
+  /** Signals the process and everything it started (its process group). Safe after exit. */
+  kill(signal: ProcessSignal): void;
 }
 
 export interface SpawnOptions {
@@ -44,6 +47,78 @@ export type Spawner = (command: HostCommand, options: SpawnOptions) => SpawnedPr
 
 const POSIX = process.platform !== "win32";
 
+/**
+ * The variables a host child inherits from VTC's own environment (AD-25 rule 4): an allowlist, so
+ * no credential variable (AD-9), no `NODE_OPTIONS`, no `GIT_*` location and no agent socket
+ * reaches a role run. The real `HOME` (and the hosts' own config locations) stay, so the host
+ * finds the user's login itself; VTC never reads it. Matched case-insensitively (Windows names
+ * are), so `https_proxy` passes with `HTTPS_PROXY`.
+ */
+const INHERITED_ENV: ReadonlySet<string> = new Set([
+  // the user and the shell basics
+  "HOME",
+  "PATH",
+  "USER",
+  "LOGNAME",
+  "SHELL",
+  "LANG",
+  "LANGUAGE",
+  "TZ",
+  "TERM",
+  "TMPDIR",
+  // where the hosts keep their config and login (paths only), and the VTC home the role's engine
+  // bridge needs to find the daemon
+  "CLAUDE_CONFIG_DIR",
+  "CODEX_HOME",
+  "VTC_HOME",
+  "XDG_CONFIG_HOME",
+  "XDG_DATA_HOME",
+  "XDG_STATE_HOME",
+  "XDG_CACHE_HOME",
+  "XDG_RUNTIME_DIR",
+  // reaching the host's API through the user's network
+  "HTTPS_PROXY",
+  "HTTP_PROXY",
+  "ALL_PROXY",
+  "NO_PROXY",
+  "NODE_EXTRA_CA_CERTS",
+  "SSL_CERT_FILE",
+  "SSL_CERT_DIR",
+  // Windows essentials
+  "SYSTEMROOT",
+  "WINDIR",
+  "COMSPEC",
+  "PATHEXT",
+  "USERPROFILE",
+  "HOMEDRIVE",
+  "HOMEPATH",
+  "APPDATA",
+  "LOCALAPPDATA",
+  "PROGRAMDATA",
+  "TEMP",
+  "TMP",
+]);
+
+const inherited = (name: string): boolean => {
+  const upper = name.toUpperCase();
+  return INHERITED_ENV.has(upper) || upper.startsWith("LC_");
+};
+
+/**
+ * Pure: a host child's environment, the allowlisted part of `parent` plus the command's own
+ * variables (`HostCommand.env`, which the safety contract checks).
+ */
+export const childEnvironment = (
+  parent: Readonly<Record<string, string | undefined>>,
+  added: Readonly<Record<string, string>>,
+): Record<string, string> => {
+  const env: Record<string, string> = {};
+  for (const [name, value] of Object.entries(parent)) {
+    if (value !== undefined && inherited(name)) env[name] = value;
+  }
+  return { ...env, ...added };
+};
+
 /** How long stdout and stderr may stay open after the leader exited before they are cut. */
 const DEFAULT_DRAIN_MS = 2000;
 
@@ -56,13 +131,16 @@ export interface NodeSpawnerOptions {
   readonly drainMs?: number;
 }
 
-/** Starts real host processes. The child inherits the user's environment plus `command.env`. */
+/**
+ * Starts real host processes, each the leader of its own process group. The child gets
+ * {@link childEnvironment}: the allowlisted part of the user's environment plus `command.env`.
+ */
 export const createNodeSpawner =
   (spawnerOptions: NodeSpawnerOptions = {}): Spawner =>
   (command, options) => {
     const child = spawn(command.command, [...command.args], {
       cwd: options.cwd,
-      env: { ...process.env, ...command.env },
+      env: childEnvironment(process.env, command.env),
       stdio: [options.stdin === "pipe" ? "pipe" : "ignore", "pipe", "pipe"],
       detached: POSIX,
       windowsHide: true,
@@ -70,7 +148,7 @@ export const createNodeSpawner =
     const { stdout, stderr } = child;
     if (stdout === null || stderr === null) throw new Error("stdout and stderr are always piped");
     const pid = child.pid;
-    const signalGroup = (signal: "SIGTERM" | "SIGKILL"): void => {
+    const signalGroup = (signal: ProcessSignal): void => {
       if (pid === undefined) return;
       try {
         if (POSIX) process.kill(-pid, signal);

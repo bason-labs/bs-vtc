@@ -84,10 +84,17 @@ describe("Codex install (AD-6 rule 5, AD-16 rules 3–4)", () => {
     expect(existsSync(join(skills, "mine", "SKILL.md"))).toBe(true);
     expect(existsSync(join(skills, "vtc-gone"))).toBe(false);
     expect(result.notes.join(" ")).toMatch(/hooks .*not registered/);
-    // F7: the engine refuses every in-session Codex role (reading 82) and launches no headless
-    // runs (reading 93), so the install says a Codex Lead drives no roles in v1
-    expect(result.notes.join(" ")).toMatch(/a Codex Lead can run no roles in v1/i);
-    expect(result.notes.join(" ")).toContain("vtc install --host claude-code");
+    // H-1 (spine §5 reading 99, replacing F7's "no roles in v1"): the engine runs a Codex Lead's
+    // roles as headless Codex runs; in-session Codex roles stay refused (reading 82)
+    const notes = result.notes.join(" ");
+    expect(notes).not.toMatch(/can run no roles/i);
+    expect(notes).toMatch(
+      /a Codex Lead's roles run as headless Codex runs the engine starts itself/i,
+    );
+    expect(notes).toMatch(/never inside the Codex session/i);
+    // the remedy when a headless launch is impossible: vtc doctor, or a Claude Lead
+    expect(notes).toContain("vtc doctor");
+    expect(notes).toContain("vtc install --host claude-code");
   });
 
   it("keeps the user's config and replaces only its own table, idempotently", async () => {
