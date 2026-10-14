@@ -8,7 +8,8 @@ reports as a REQ → test → result matrix, everything else as plain text), and
 
 Pages (fixed, AD-20): `/`, `/run/?run=&zoom=phases|tasks&node=`, `/task/?run=&task=&node=`,
 `/feature/?run=&feature=`, `/escalations/?run=`, `/usage/`, `/artifact/?run=&path=`,
-`/design/?run=&screen=&state=&viewport=390|768|1440&theme=light|dark`. Every page
+`/design/?run=&screen=&state=&viewport=390|768|1440&theme=light|dark`, `/gates/?run=`,
+`/research/?run=`, `/lookback/?run=`. Every page
 renders the same client app (`src/components/app/FlowStudio.tsx`), which picks the view from the
 address and switches views with `history.pushState` (`src/lib/router.ts`).
 
@@ -54,6 +55,37 @@ binaries must stay out of the production dependency closure (AD-2, `supply-chain
   run keeps its frozen config; `checkout_write` with its evidence; the unclean-end kinds) and
   `run.merge_level_changed` (`no_remote`: Level 2+ without a push remote runs at Level 1). It
   re-reads when one of those events arrives (`notices` topic). Nothing shows when there is none.
+- Wave 3 (contracts 4.5.0, spine §5 reading 109: no new route or MCP tool, everything from data
+  the dashboard already receives):
+  - **Gates** (`/gates/`): every `gate.requested` with the G2 design directions (novelty, the
+    first-viewport screenshot through the artifacts route, the prototype opened on the prototype
+    origin), the facts still unverified with why and the waiver reason given (`gate.approved`
+    `fact_waivers`, `fact.waived`), the DESIGN coverage check, and the decision. The run view
+    shows a banner while a gate waits in the Lead chat.
+  - **Engine-launched runs** (run view): `headless.started` / `headless.ended` plus
+    `StatusResult.headless_runs` (active run only) with how each ended; a failed
+    `headless.preflight` and an unfinished run are run notices.
+  - **Level 3** (feature view): the `merge.preflight` (and what to configure when the run fell to
+    Level 2), the latest `feature.checklist` with each item's evidence, the auto-merge timeline
+    (`feature.auto_merge_*`, `feature.post_merge_ci`, `feature.reverted`), the PR's number,
+    auto-merge state, required checks and `merge_state_status`, and the §6.7a steps from
+    `final_review.step_finished`. Red base CI, a revert, auto-merge turned off and a failed
+    preflight are also run notices.
+  - **Research** (`/research/`): the current row of every fact in `.vtc/research/facts.jsonl`
+    (superseded rows hidden, lines that break `FactRow` reported by number), what needs attention
+    first, with source, locator and any G2 waiver.
+  - **Lookback** (`/lookback/`): `.vtc/lookback/scorecards/index.json`, then each role and host's
+    latest `Scorecard`: every proportion with n and its 95% Wilson interval, "insufficient data"
+    when `value` is null or n is below `LOOKBACK_LIMITS.minScorecardN`, the Engineer breakdown;
+    and the run's `lookback.*` events (canaries, replays, proposals, rollbacks, escaped defects).
+    A scorecard opened in the artifact view renders the same way.
+  - **Visual QA**: `GateReport.visual` in the gate reports, and a `VisualReport` under
+    `.vtc/evidence/` in the artifact view as the render matrix (screen × state × width × theme),
+    axe violations and items needing review, per-region diffs and style mismatches. Only `pass`
+    counts as passed: `skipped` and `unchecked` show as "Not passed" (reading 105). Raster
+    screenshots and diff images (base64 from the artifacts route) show as images; SVG never does.
+  - Unknown event types and payloads that break their contract are skipped (`src/lib/events.ts`
+    reads payloads with `parsePersisted`, so keys a newer engine adds are dropped).
 - Node states: a `WorkflowNode` `interrupted` by a usage limit is drawn with the `waiting_limit`
   style (`vtc-node-waiting-limit`) and labelled "Waiting for limit" (spine §5 reading 34).
 - Transcripts: there is no transcript route (spine §5 reading 33). The node drawer shows the host
@@ -65,7 +97,8 @@ Development (AD-5 rule 8):
 
 - `pnpm dev:fixtures` serves the golden run (`scripts/fixture-server.ts`: recorded routes, the
   event log replayed as SSE, any well-formed nonce accepted), plus the dashboard's own
-  `dev-fixtures/` (an evidence bundle and traceability report for T-1, `screens.yaml`, pins, and a
+  `dev-fixtures/` (an evidence bundle, traceability report and visual QA report with a screenshot
+  for T-1, Lookback scorecards, research facts, `screens.yaml`, pins, and a
   sample prototype on port 4311 with `PROTOTYPE_CSP`); it keeps posted pins in memory. `pnpm dev`
   proxies `/api/*` to it (`VTC_DEV_API` overrides the target). Open the dashboard on
   `http://127.0.0.1:…`, not `localhost`: the prototype's CSP allows framing by `127.0.0.1` only. `pnpm build && pnpm dev:fixtures --static out [--live]`

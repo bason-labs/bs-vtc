@@ -1,10 +1,14 @@
 "use client";
 
-import { isServableArtifactPath } from "@vtc/shared";
+import { isServableArtifactPath, LOOKBACK_REPO } from "@vtc/shared";
 import { readEvidence } from "@/lib/evidence";
+import { readScorecard } from "@/lib/scorecards";
+import { imageDataUrl, readVisualReport } from "@/lib/visual";
 import { hrefs } from "@/lib/router";
 import { useResource } from "@/lib/useResource";
 import { EvidenceDocView } from "@/components/evidence/EvidenceView";
+import { ScorecardDetail } from "@/components/lookback/ScorecardDetail";
+import { VisualReportView } from "@/components/visual/VisualReportView";
 import { Card, EmptyState } from "@/components/ui";
 import { Breadcrumbs, Loaded, MissingParam, PageHeader } from "./common";
 
@@ -22,7 +26,9 @@ function ArtifactText({ content }: { content: string }) {
 /**
  * One run artifact (spec, plan file, evidence bundle…), shown as text: the engine serves artifacts
  * as JSON so agent-written HTML never runs on this origin (AD-5 rule 10). Evidence bundles and
- * traceability reports (AD-18) are rendered as the REQ → test → result matrix, raw JSON on demand.
+ * traceability reports (AD-18) are rendered as the REQ → test → result matrix, visual QA reports
+ * (AD-24) as the render matrix with axe results and diffs, raw JSON on demand. Screenshots and
+ * diff images (raster only) are shown as images.
  */
 export function ArtifactView({ run, path }: { run: string | null; path: string | null }) {
   const valid = run !== null && path !== null && isServableArtifactPath(path);
@@ -58,16 +64,47 @@ export function ArtifactView({ run, path }: { run: string | null; path: string |
               </p>
             );
             if (a.encoding !== "utf8") {
+              const image = imageDataUrl(a);
               return (
                 <Card>
                   {meta}
-                  <p className="text-sm text-muted-fg">Binary file; not shown.</p>
+                  {image === null ? (
+                    <p className="text-sm text-muted-fg">Binary file; not shown.</p>
+                  ) : (
+                    <img
+                      src={image}
+                      alt={path}
+                      className="max-w-full rounded-xl border border-border bg-surface-2"
+                    />
+                  )}
                 </Card>
               );
             }
             const text = <ArtifactText content={a.content} />;
             const evidence = readEvidence(a);
-            if (evidence === null) {
+            const visual = evidence === null ? readVisualReport(a) : null;
+            const scorecard = a.path.startsWith(`${LOOKBACK_REPO.scorecardsDir}/`)
+              ? readScorecard(a)
+              : null;
+            if (scorecard?.ok === true) {
+              return (
+                <div className="space-y-4">
+                  <Card>
+                    <ScorecardDetail scorecard={scorecard.value} />
+                  </Card>
+                  <Card>
+                    <details>
+                      <summary className="cursor-pointer text-sm font-medium">Raw JSON</summary>
+                      <div className="mt-2">
+                        {meta}
+                        {text}
+                      </div>
+                    </details>
+                  </Card>
+                </div>
+              );
+            }
+            if (evidence === null && visual === null) {
               return (
                 <Card>
                   {meta}
@@ -77,7 +114,8 @@ export function ArtifactView({ run, path }: { run: string | null; path: string |
             }
             return (
               <div className="space-y-4">
-                <EvidenceDocView run={run} doc={evidence} />
+                {evidence === null ? null : <EvidenceDocView run={run} doc={evidence} />}
+                {visual === null ? null : <VisualReportView run={run} report={visual} />}
                 <Card>
                   <details>
                     <summary className="cursor-pointer text-sm font-medium">Raw JSON</summary>

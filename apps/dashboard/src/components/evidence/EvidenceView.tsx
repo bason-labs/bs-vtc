@@ -3,6 +3,8 @@
 import { FileText } from "lucide-react";
 import { Fragment, useId, useMemo } from "react";
 import { bundleFacts, traceMatrix, type EvidenceDoc } from "@/lib/evidence";
+import { releaseReadinessRows, stepRows } from "@/lib/level3";
+import { FinalReviewStepsCard } from "@/components/feature/Level3";
 import { hrefs } from "@/lib/router";
 import type { TraceabilityReport } from "@vtc/shared";
 import { Link } from "@/components/app/Link";
@@ -204,6 +206,39 @@ export function EvidenceDocView({ run, doc }: { run: string; doc: EvidenceDoc })
           </p>
         )}
       </Card>
+      {doc.bundle.kind !== "feature" || doc.bundle.final_review_steps === undefined ? null : (
+        <FinalReviewStepsCard rows={stepRows(doc.bundle.final_review_steps)} />
+      )}
+      {doc.bundle.kind !== "feature" || doc.bundle.release_readiness === undefined ? null : (
+        <Card aria-labelledby="readiness-title">
+          <CardHeader>
+            <CardTitle id="readiness-title">Release readiness</CardTitle>
+            <StatusPill
+              meta={
+                doc.bundle.release_readiness.ok
+                  ? { label: "Ready", tone: "ok" }
+                  : { label: "Not ready", tone: "danger" }
+              }
+            />
+          </CardHeader>
+          <ul aria-label="Release readiness" className="space-y-1.5 text-sm">
+            {releaseReadinessRows(doc.bundle.release_readiness).map((r) => (
+              <li key={r.id} className="rounded-xl bg-surface-2 px-3 py-2">
+                <p className="flex flex-wrap items-center gap-2">
+                  <span className="font-medium">{r.label}</span>
+                  <StatusPill meta={r.status} className="ml-auto" />
+                </p>
+                {r.note === null ? null : <p className="text-xs text-muted-fg">{r.note}</p>}
+                {r.evidence.length === 0 ? null : (
+                  <p className="font-mono text-[11px] break-all text-muted-fg">
+                    {r.evidence.join(" · ")}
+                  </p>
+                )}
+              </li>
+            ))}
+          </ul>
+        </Card>
+      )}
       <TraceMatrixTable report={doc.bundle.traceability} />
     </div>
   );

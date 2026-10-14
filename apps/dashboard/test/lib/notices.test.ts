@@ -3,6 +3,7 @@ import { EventPageSchema, type EventPage } from "@vtc/shared";
 import { loadRunEvents, noticeForEvent, runNotices, type RunNotice } from "@/lib/notices";
 import { readFixture } from "../fixtures";
 import { NOTICE_EVENTS, noticeEvent } from "../notice-fixtures";
+import { w3Event, WAVE3_EVENTS } from "../wave3-fixtures";
 
 const byType = (type: string, kind?: string) =>
   NOTICE_EVENTS.find(
@@ -151,5 +152,95 @@ describe("loadRunEvents", () => {
       "golden-1",
     );
     expect(calls).toBe(1);
+  });
+});
+
+describe("wave-3 notices (Level 3, headless runs, lookback; contracts 4.5.0)", () => {
+  const notices = runNotices(WAVE3_EVENTS);
+  const of = (type: string) => notices.filter((n) => n.type === type);
+
+  it("explains a failed Level-3 preflight and what to configure", () => {
+    expect(of("merge.preflight")).toHaveLength(1);
+    expect(of("merge.preflight")[0]).toMatchObject({
+      tone: "warn",
+      title: "Level 3 is not available: this run merges at Level 2",
+    });
+    expect(of("merge.preflight")[0]?.detail).toContain("required status check");
+    expect(of("merge.preflight")[0]?.note).toMatch(/never changes repository settings/);
+  });
+
+  it("shows a passed preflight as nothing", () => {
+    const ok = w3Event(95, "merge.preflight", {
+      configured_level: 3,
+      effective_level: 3,
+      ok: true,
+      policy: null,
+    });
+    expect(noticeForEvent(ok)).toBeNull();
+  });
+
+  it("shows auto-merge turned off, a red base CI and a revert for the feature", () => {
+    expect(runNotices(WAVE3_EVENTS, "F-1").map((n) => n.type)).toEqual([
+      "feature.reverted",
+      "feature.post_merge_ci",
+      "feature.auto_merge_disabled",
+    ]);
+    expect(of("feature.post_merge_ci")[0]).toMatchObject({
+      tone: "danger",
+      title: "Base CI failed after the merge",
+      detail: "Failed required runs: ci / test",
+    });
+    expect(of("feature.reverted")[0]?.note).toMatch(/vtc merge-level restore/);
+  });
+
+  it("marks a red base CI resolved once a later poll of the same commit is green", () => {
+    const green = w3Event(
+      96,
+      "feature.post_merge_ci",
+      { merge_commit: "c".repeat(40), status: "green", runs: [] },
+      { feature: "F-1" },
+    );
+    expect(noticeForEvent(green)).toBeNull();
+    const ci = runNotices([...WAVE3_EVENTS, green]).find((n) => n.type === "feature.post_merge_ci");
+    expect(ci?.resolved).toBe(true);
+  });
+
+  it("shows a headless run that did not finish and a preflight that stopped one", () => {
+    expect(of("headless.ended")[0]).toMatchObject({
+      tone: "danger",
+      title: "Headless engineer run a-12 ended: Error: no output (idle timeout)",
+    });
+    expect(of("headless.preflight")[0]).toMatchObject({
+      tone: "danger",
+      title: "Auto-resume on codex did not start",
+      detail: "Failed check: the host is not logged in. codex login status: not logged in",
+    });
+    expect(of("headless.preflight")[0]?.note).toMatch(/never retries/);
+  });
+
+  it("marks a failed preflight resolved by a later passing one on the same host", () => {
+    const ok = w3Event(97, "headless.preflight", {
+      host: "codex",
+      purpose: "auto_resume",
+      ok: true,
+    });
+    expect(
+      runNotices([...WAVE3_EVENTS, ok]).find((n) => n.type === "headless.preflight")?.resolved,
+    ).toBe(true);
+  });
+
+  it("shows a canary rollback", () => {
+    expect(of("lookback.rolled_back")[0]).toMatchObject({
+      tone: "warn",
+      title: "Prompt canary rolled back for engineer on claude-code",
+    });
+  });
+
+  it("ignores the wave-3 events that need no attention", () => {
+    for (const e of WAVE3_EVENTS) {
+      if (["gate.requested", "fact.waived", "lookback.dispatched"].includes(e.type)) {
+        expect(noticeForEvent(e)).toBeNull();
+      }
+    }
   });
 });

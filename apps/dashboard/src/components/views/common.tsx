@@ -2,7 +2,7 @@
 
 import { ChevronRight } from "lucide-react";
 import type { ReactNode } from "react";
-import { describeError } from "@/lib/api/errors";
+import { describeError, isNotFound } from "@/lib/api/errors";
 import type { Resource } from "@/lib/useResource";
 import { Link } from "@/components/app/Link";
 import { Button, EmptyState, Skeleton } from "@/components/ui";
@@ -48,17 +48,23 @@ export function Breadcrumbs({ items }: { items: readonly { label: string; href?:
   );
 }
 
-/** Loading skeleton, error with retry, or the content once `resource` has data. */
+/**
+ * Loading skeleton, error with retry, or the content once `resource` has data. `missing` is shown
+ * instead of the error when the engine has no such item (a file nobody has written yet).
+ */
 export function Loaded<T>({
   resource,
   children,
   skeleton = "h-40",
+  missing,
 }: {
   resource: Resource<T>;
   children: (data: T) => ReactNode;
   skeleton?: string;
+  missing?: ReactNode;
 }) {
   if (resource.data !== undefined) return <>{children(resource.data)}</>;
+  if (missing !== undefined && isNotFound(resource.error)) return <>{missing}</>;
   if (resource.error !== null) {
     return (
       <EmptyState

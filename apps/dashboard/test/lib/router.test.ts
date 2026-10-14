@@ -14,6 +14,9 @@ describe("matchView (AD-20 fixed pages)", () => {
     ["/usage/", "usage"],
     ["/artifact/", "artifact"],
     ["/design/", "design"],
+    ["/gates/", "gates"],
+    ["/research/", "research"],
+    ["/lookback/", "lookback"],
     ["/runs/golden-1", "not_found"],
   ])("%s → %s", (path, view) => {
     expect(matchView(path)).toBe(view);
@@ -37,6 +40,9 @@ describe("hrefs", () => {
     expect(
       hrefs.design("golden-1", { screen: "reset", state: "error", viewport: 390, theme: "dark" }),
     ).toBe("/design/?run=golden-1&screen=reset&state=error&viewport=390&theme=dark");
+    expect(hrefs.gates("golden-1")).toBe("/gates/?run=golden-1");
+    expect(hrefs.research("golden-1")).toBe("/research/?run=golden-1");
+    expect(hrefs.lookback("golden-1")).toBe("/lookback/?run=golden-1");
     expect(hrefs.usage()).toBe("/usage/");
     expect(hrefs.runs()).toBe("/");
   });

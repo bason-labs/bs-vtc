@@ -4,7 +4,9 @@ import {
   type FeatureStatus,
   type PullRequestRef,
 } from "@vtc/shared";
-import { featureStatusMeta, type Tone } from "./states";
+import { webUrl } from "./events";
+import { AUTO_MERGE_STATES, REQUIRED_CHECK_STATES } from "./level3";
+import { featureStatusMeta, type StatusMeta, type Tone } from "./states";
 
 /**
  * Feature view (§6.7a): `building → integrating → final_review ⇄ fixing(n/3) → ready_to_ship →
@@ -64,6 +66,14 @@ export interface PullRequestModel {
   readonly ciTone: Tone;
   readonly head: string;
   readonly mergeCommit: string | null;
+  /** `#7`, when the engine recorded it (Level 3). */
+  readonly number: string | null;
+  /** Where the PR's auto-merge stands (Level 3, AD-23). */
+  readonly autoMerge: StatusMeta | null;
+  /** The base's required checks on the PR head. */
+  readonly requiredChecks: readonly { readonly name: string; readonly status: StatusMeta }[];
+  /** GitHub's `mergeStateStatus`, e.g. `BLOCKED`. */
+  readonly mergeState: string | null;
 }
 
 const CI_TONES: Readonly<Record<PullRequestRef["ci"], Tone>> = {
@@ -74,15 +84,6 @@ const CI_TONES: Readonly<Record<PullRequestRef["ci"], Tone>> = {
 };
 
 const short = (sha: string): string => sha.slice(0, 7);
-
-const webUrl = (url: string): string | null => {
-  try {
-    const { protocol } = new URL(url);
-    return protocol === "https:" || protocol === "http:" ? url : null;
-  } catch {
-    return null;
-  }
-};
 
 export const pullRequestModel = (pr: PullRequestRef): PullRequestModel => {
   const [stateLabel, stateTone]: [string, Tone] =
@@ -101,5 +102,12 @@ export const pullRequestModel = (pr: PullRequestRef): PullRequestModel => {
     ciTone: CI_TONES[pr.ci],
     head: short(pr.head_sha),
     mergeCommit: pr.merge_commit === undefined ? null : short(pr.merge_commit),
+    number: pr.number === undefined ? null : `#${String(pr.number)}`,
+    autoMerge: pr.auto_merge === undefined ? null : AUTO_MERGE_STATES[pr.auto_merge],
+    requiredChecks: (pr.required_checks ?? []).map((c) => ({
+      name: c.name,
+      status: REQUIRED_CHECK_STATES[c.state],
+    })),
+    mergeState: pr.merge_state_status ?? null,
   };
 };
