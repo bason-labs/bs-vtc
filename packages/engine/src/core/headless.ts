@@ -9,6 +9,7 @@
  * events feed the usage store, and its outcome comes from the stream (`HostOutcome`), submitted
  * through the same `handleSubmit` path as a Lead's.
  */
+import { rmSync } from "node:fs";
 import {
   fromStructuredOutput,
   headlessPolicyFor,
@@ -21,6 +22,7 @@ import {
   type HostCapabilities,
   type HostId,
   type HostOutcome,
+  type PluginLoadProof,
   type SpawnResult,
   type SpawnRoleRequest,
   type SubmitInput,
@@ -34,8 +36,16 @@ import type { Kernel, RunHandle } from "./kernel.js";
 import { deferForUsage, limitWait, stillLimited } from "./limits.js";
 import { inFlight } from "./queries.js";
 import { parkTask } from "./parking.js";
-import { deferReplays, trialProtectedFiles } from "./replay.js";
+import {
+  armPluginNotLoaded,
+  deferReplays,
+  recordTrialIsolation,
+  replayTrialOf,
+  trialProtectedFiles,
+  trialReadDeny,
+} from "./replay.js";
 import { headlessPlatformRefusal, roleSandboxProblem, roleSandboxRequest } from "./sandbox.js";
+import { hostWebRouteFor } from "./host-web.js";
 import { handleSubmit } from "./submit.js";
 
 const NO_CAPABILITIES: Pick<HostCapabilities, "subagents" | "headless"> = {
@@ -191,6 +201,8 @@ const preflightFailed = (
       k,
       h,
       `a headless trial of ${step.role} could not start (${check.failed}): ${detail}`,
+      // a limit (D-cg): the budget, or the host's usage window; anything else is no limit
+      check.failed === "budget" ? "budget" : check.failed === "usage" ? "weekly_window" : null,
     );
     return;
   }
@@ -386,6 +398,20 @@ export const headlessBudgetCap = (
   return { pool: pool.key, capUsd };
 };
 
+/**
+ * Why a replay trial run with its own arm plugin did not prove that copy loaded (D-cg, spine §5
+ * reading 201), or `null` when it did: the adapter's `HeadlessRun.pluginLoad` must report the
+ * directory the engine passed.
+ */
+export const pluginLoadProblem = (
+  pluginDir: string,
+  proof: PluginLoadProof | undefined,
+): string | null => {
+  if (proof === undefined) return "the host adapter cannot prove which plugin copy the run loaded";
+  if (!proof.loaded) return `the arm plugin did not load: ${proof.reason}`;
+  return proof.dir === pluginDir ? null : "the run loaded another plugin copy than the arm's";
+};
+
 /** The run ended (or never started): logged, then submitted like a Lead's `submit`. */
 const finishHeadless = async (
   k: Kernel,
@@ -393,6 +419,7 @@ const finishHeadless = async (
   actionId: string,
   ended: HostOutcome,
   startedAt: number,
+  proof?: PluginLoadProof,
 ): Promise<void> => {
   const entry = k.headless.get(actionId);
   const outcome =
@@ -422,6 +449,33 @@ const finishHeadless = async (
   // killed by the engine's shutdown: not the role's failure; the run stays in flight, as after a
   // crash, and the next `vtc resume` supersedes it
   if (k.stopping.aborted) return;
+  const pluginDir = entry?.pluginDir;
+  if (pluginDir !== undefined) {
+    // the host has exited: the arm's plugin copy is no longer loaded from
+    rmSync(pluginDir, { recursive: true, force: true });
+    const problem =
+      entry?.stoppedByPause === true || entry?.stoppedByBudget === true
+        ? null
+        : pluginLoadProblem(pluginDir, proof);
+    const trial = problem === null ? undefined : replayTrialOf(k, h, actionId);
+    if (problem !== null && trial !== undefined) {
+      // gate_infra, never a verdict: the trial measured nothing, and its run ends as a failure
+      armPluginNotLoaded(k, h, trial, actionId, problem);
+      await handleSubmit(k, h, {
+        kind: "failure",
+        action_id: actionId,
+        outcome: {
+          kind: "error",
+          message: `the replay trial did not run its arm's plugin: ${problem}`.slice(0, 2000),
+          retryable: false,
+          cause: "spawn",
+          tokens: outcome.kind === "auth" || outcome.kind === "limit" ? null : outcome.tokens,
+          cost_usd: outcome.kind === "auth" || outcome.kind === "limit" ? null : outcome.cost_usd,
+        },
+      });
+      return;
+    }
+  }
   await handleSubmit(k, h, submitInputFor(actionId, outcome));
 };
 
@@ -451,7 +505,17 @@ const watch = async (
     tokens: null,
     cost_usd: null,
   }));
-  await k.serial(h, () => finishHeadless(k, h, actionId, outcome, startedAt));
+  // D-cg: a run with an arm plugin proves which copy it loaded, after wait()
+  const proof =
+    k.headless.get(actionId)?.pluginDir === undefined
+      ? undefined
+      : await (process.pluginLoad?.() ?? Promise.resolve(undefined)).catch(
+          (error: unknown): PluginLoadProof => ({
+            loaded: false,
+            reason: `the load proof could not be read: ${error instanceof Error ? error.message : String(error)}`,
+          }),
+        );
+  await k.serial(h, () => finishHeadless(k, h, actionId, outcome, startedAt, proof));
 };
 
 /**
@@ -468,6 +532,8 @@ export const launchHeadless = async (
   host: HostId,
   purpose: DispatchPurpose,
   share = 1,
+  /** `false`: a `host_web` role runs without its host's web search (D-cf, `hostWebRoute`). */
+  hostWeb = true,
 ): Promise<boolean> => {
   const adapter = k.deps.adapters[host];
   const contract = k.deps.roles.get(step.role);
@@ -503,6 +569,8 @@ export const launchHeadless = async (
   const startedAt = k.now().getTime();
   const roleRun = h.state.roleRuns.get(action.action_id);
   const fail = async (message: string): Promise<false> => {
+    if (prepared.pluginDir !== undefined)
+      rmSync(prepared.pluginDir, { recursive: true, force: true });
     await finishHeadless(k, h, action.action_id, spawnError(message), startedAt);
     return false;
   };
@@ -513,7 +581,9 @@ export const launchHeadless = async (
       `the compiled role instructions of ${step.role} are missing from the ${host} plugin or do not match its manifest`,
     );
   const effective = resolveRoleMode(contract, step.mode);
-  const tools = effective.ok ? effective.contract.tools : contract.tools;
+  const declared = effective.ok ? effective.contract.tools : contract.tools;
+  // D-cf: no safe host web search on the route, so none at all (the engine's fetchers remain)
+  const tools = hostWeb ? declared : { ...declared, host_web: false };
   const task = step.task === undefined ? undefined : h.state.tasks.get(step.task);
   const sandbox = adapter.sandboxProfile(
     roleSandboxRequest(
@@ -527,6 +597,8 @@ export const launchHeadless = async (
             ? []
             : await protectedFiles(k, h, task)
         ).map((p) => p.path),
+        // reading 178: a trial may read neither the user's repo nor its git directory
+        ...(step.replay === undefined ? {} : { readDeny: trialReadDeny(k) }),
       },
     ),
   );
@@ -536,6 +608,9 @@ export const launchHeadless = async (
     refuseInSession(k, h, step, problem);
     return false;
   }
+  // what the host enforced goes to Lookback with the trial (`ReplayResult.isolation`)
+  if (step.replay !== undefined)
+    recordTrialIsolation(k, h, step.replay, sandbox.enforced.readDeny === true);
   const policy = headlessPolicyFor(k.config().hosts.headless);
   const request: SpawnRoleRequest = {
     role: step.role,
@@ -550,6 +625,8 @@ export const launchHeadless = async (
     idleTimeoutMs: policy.idleTimeoutMs,
     // §11: a task-less step is capped from the run's budget; steps launched together share it
     ...(budget === null ? {} : { maxBudgetUsd: Math.max(0.01, budget.capUsd) }),
+    // D-cg: a replay arm's own compiled plugin
+    ...(prepared.pluginDir === undefined ? {} : { pluginDir: prepared.pluginDir }),
   };
   // the engine's shutdown may have landed during the awaits above, after `killHeadless` took its
   // snapshot: nothing starts now (the dispatch stays in flight, as after a crash, for vtc resume)
@@ -588,6 +665,7 @@ export const launchHeadless = async (
     summary,
     process,
     ...(budget === null ? {} : { budget: { pool: budget.pool, capUsd: budget.capUsd } }),
+    ...(prepared.pluginDir === undefined ? {} : { pluginDir: prepared.pluginDir }),
   });
   k.emit(h, {
     type: "headless.started",
@@ -631,12 +709,18 @@ export const dispatchHeadless = async (
     left.set(pool(step), (left.get(pool(step)) ?? 0) + 1);
   for (const step of steps) {
     if (free <= 0 || stop()) return;
+    // a host_web role goes where its host's web search is safe, or runs without it (D-cf)
+    const web =
+      step.host === undefined && step.purpose === undefined
+        ? hostWebRouteFor(k, step, k.leadHostFor(h.state.id, { host: null }), host)
+        : null;
+    if (web !== null && !web.hostWeb) k.relay(h.state.id, web.notice);
     // the cross-family reviewer runs on the other family's host (§12.4)
-    const where = step.host ?? host;
+    const where = step.host ?? web?.host ?? host;
     const why = step.host === undefined ? (step.purpose ?? purpose) : "cross_family_review";
     const share = left.get(pool(step)) ?? 1;
     left.set(pool(step), Math.max(1, share - 1));
-    if (await launchHeadless(k, h, step, where, why, share)) free -= 1;
+    if (await launchHeadless(k, h, step, where, why, share, web?.hostWeb ?? true)) free -= 1;
   }
 };
 

@@ -4,7 +4,7 @@
  * dispatch is a `role.dispatched` event with its pack, model and prompt version, so `submit` can
  * reject anything the engine did not ask for.
  */
-import { readFileSync } from "node:fs";
+import { mkdirSync, readFileSync, rmSync } from "node:fs";
 import { join } from "node:path";
 import {
   agentNameFor,
@@ -23,6 +23,7 @@ import {
   type Escalation,
   type EscalationAnswer,
   type Finding,
+  type ArmPlugin,
   type HostId,
   type ModelTier,
   type Phase,
@@ -78,7 +79,14 @@ import { parkEscalation } from "./escalations.js";
 import { recordDispatch, type DispatchRecord } from "./dispatch-guard.js";
 import { architectDepth, dealDesignConstraints, researchDepth } from "./lottery.js";
 import { prepareRoleWorktree } from "./role-worktree.js";
-import { prepareTrial, refuseTrial, replayTrialRef, type ReplayStepRef } from "./replay.js";
+import {
+  armPluginDir,
+  prepareTrial,
+  refuseTrial,
+  replayTrialRef,
+  trialAtRef,
+  type ReplayStepRef,
+} from "./replay.js";
 import { HEADLESS_LOADS_AGENT, pinBlocker } from "./prompt-target.js";
 
 export { HEADLESS_LOADS_AGENT } from "./prompt-target.js";
@@ -96,6 +104,12 @@ export interface DispatchedStep {
    * start). Absent when the host loads the agent, or the plugin has no manifest entry for it.
    */
   readonly roleCore?: string | null;
+  /**
+   * A replay trial's own compiled arm plugin (D-cg, spine §5 reading 201), for
+   * `SpawnRoleRequest.pluginDir`: on a host whose runs load the compiled agent, the arm's prompt is
+   * in this copy of the plugin.
+   */
+  readonly pluginDir?: string;
 }
 
 export interface StepSpec {
@@ -691,6 +705,10 @@ const packFor = (k: Kernel, h: RunHandle, step: StepSpec, actionId: string): Tas
   const inputs: TaskPackInput["inputs"] = [...(step.inputs ?? [])];
   if (task === undefined && ["discover", "specify"].includes(state.run.phase)) {
     inputs.push({ type: "request", path: `.vtc/runs/${state.id}/request.md` });
+  } else if (state.automation !== null && step.role === "spec_verifier") {
+    // an automatic run's issue is its spec: the Spec Verifier checks the work against it too
+    // (AD-27 rule 2, D-cd)
+    inputs.push({ type: "request", path: `.vtc/runs/${state.id}/request.md` });
   }
   if (task !== undefined && step.role === "engineer") {
     const qa = lastQaAuthor(state, task.id);
@@ -778,11 +796,18 @@ const pinnedPrompt = (
   dispatch: "subagent" | "headless",
   /** A replay trial's arm (reading 176): selected by the trial, never by the pins. */
   arm?: PinnedPrompt,
+  /**
+   * The arm's own compiled plugin (D-cg, reading 201): the agent then runs this copy, so the arm
+   * applies when the copy's prompt is exactly the arm's version (in place of {@link pinBlocker}
+   * and the shipped manifest's locked core).
+   */
+  armPlugin?: ArmPlugin,
 ): PinSelection => {
   const pins: PromptPins | null = arm === undefined ? k.promptPins() : () => arm;
   if (pins === null) return { pinned: null };
   const parts = k.deps.plugins.promptParts?.(target.agent, target.host);
-  const blocker = pinBlocker(parts, target.host, dispatch);
+  // an arm plugin carries the arm's own section: no pack pin needs to reach the agent
+  const blocker = armPlugin === undefined ? pinBlocker(parts, target.host, dispatch) : null;
   let pinned: PinnedPrompt | null;
   try {
     pinned = pins(target);
@@ -792,7 +817,7 @@ const pinnedPrompt = (
     return { pinned: null, problem: `the prompt selector threw: ${why}` };
   }
   if (pinned === null) return { pinned: null };
-  if (blocker !== null || parts?.lockedSha256 === undefined)
+  if (armPlugin === undefined && (blocker !== null || parts?.lockedSha256 === undefined))
     return {
       pinned: null,
       problem: `a ${pinned.canary === undefined ? "pin" : "canary"} names this role on ${target.host}, but ${blocker ?? "its manifest names no locked_sha256"}; nothing was applied and the compiled agent ran`,
@@ -809,8 +834,14 @@ const pinnedPrompt = (
     version.data.host !== target.host
   )
     return refused("a version of another role, mode or host");
-  if (version.data.locked_sha256 !== parts.lockedSha256)
+  // an arm plugin is compiled from the shipped plugin: its locked core is the manifest's too
+  if (
+    (armPlugin === undefined || parts?.lockedSha256 !== undefined) &&
+    version.data.locked_sha256 !== parts?.lockedSha256
+  )
     return refused("a version of another locked core than the compiled agent's");
+  if (armPlugin !== undefined && armPlugin.promptSha256 !== version.data.effective_sha256)
+    return refused("an arm plugin whose agent prompt is not the version's");
   if (typeof pinned.text !== "string") return refused("no editable text");
   const text = pinned.text.trim();
   if (text === "" || sha256Hex(text) !== version.data.editable_sha256)
@@ -939,8 +970,11 @@ const replayArmRefusal = (
   step: StepSpec,
   host: HostId,
   dispatch: "subagent" | "headless",
+  armPlugin?: ArmPlugin,
 ): string | null => {
   if (step.replay === undefined) return null;
+  // D-cg (reading 201): a trial is an engine-launched headless run, never a Lead's subagent
+  if (dispatch !== "headless") return "a lookback_replay trial runs only headless";
   const want = step.replay.prompt.version.effective_sha256;
   const selection = pinnedPrompt(
     k,
@@ -953,9 +987,48 @@ const replayArmRefusal = (
     },
     dispatch,
     step.replay.prompt,
+    armPlugin,
   );
   if (selection.pinned?.version.effective_sha256 === want) return null;
   return `its arm's prompt version ${want.slice(0, 12)} cannot run as planned (${selection.problem ?? "no pin applies"}), and a trial never runs another arm's prompt`;
+};
+
+/**
+ * A replay trial's own compiled plugin (D-cg, spine §5 reading 201), when its host's runs load the
+ * compiled agent (Claude Code): `compileArm` writes a full copy of the plugin whose agent carries
+ * the arm's editable section into a fresh directory under the engine's private area
+ * (`armPluginDir`), which the trial runs with `--plugin-dir`. `undefined`: the host takes the arm
+ * in the pack; a string: why no arm plugin could be made (the trial then measures nothing).
+ */
+const trialArmPlugin = async (
+  k: Kernel,
+  h: RunHandle,
+  step: StepSpec,
+  host: HostId,
+  dispatch: "subagent" | "headless",
+): Promise<ArmPlugin | string | undefined> => {
+  if (step.replay === undefined || dispatch !== "headless" || !HEADLESS_LOADS_AGENT[host])
+    return undefined;
+  const compiler = k.deps.armPlugins;
+  if (compiler === undefined)
+    return `no arm plugin compiler is wired (EngineDeps.armPlugins), so a ${host} trial cannot run its arm`;
+  const trial = trialAtRef(k, h.state.id, step.replay);
+  if (trial === undefined) return "the plan no longer has the trial";
+  const outDir = armPluginDir(k, h.state.id, step.replay, trial.arm);
+  try {
+    // a directory a stopped engine left behind is not reused: the host loads it in place
+    rmSync(outDir, { recursive: true, force: true });
+    mkdirSync(outDir, { recursive: true, mode: 0o700 });
+    return await compiler.compileArm({
+      host,
+      agent: agentNameFor(step.role, step.mode),
+      editable: step.replay.prompt.text,
+      outDir,
+    });
+  } catch (error) {
+    rmSync(outDir, { recursive: true, force: true });
+    return `its arm plugin could not be compiled: ${error instanceof Error ? error.message : String(error)}`;
+  }
 };
 
 /** A replay trial's pack: the recorded one in this run, without its task or feature. */
@@ -976,6 +1049,7 @@ export const dispatchStep = (
   host: HostId,
   cwd: string,
   dispatch: "subagent" | "headless" = "subagent",
+  armPlugin?: ArmPlugin,
 ): DispatchedStep => {
   const contract = k.deps.roles.get(step.role);
   if (contract === undefined) throw new EngineError("invalid", `no contract for role ${step.role}`);
@@ -1006,6 +1080,7 @@ export const dispatchStep = (
     },
     dispatch,
     step.replay?.prompt,
+    armPlugin,
   );
   if (selection.problem !== undefined)
     recordPromptSelection(k, h, step.task, `${agent}: ${selection.problem}`);
@@ -1112,6 +1187,7 @@ export const dispatchStep = (
     model,
     cwd,
     ...(core === undefined ? {} : { roleCore: core === null ? null : core.locked }),
+    ...(armPlugin === undefined ? {} : { pluginDir: armPlugin.dir }),
   };
 };
 
@@ -1262,16 +1338,24 @@ export const dispatchPrepared = async (
 ): Promise<DispatchedStep | null> => {
   const actionId = nextActionId(h.state);
   if (step.replay !== undefined) {
-    const refused = replayArmRefusal(k, h, step, host, dispatch);
+    const arm = await trialArmPlugin(k, h, step, host, dispatch);
+    const refused =
+      typeof arm === "string" ? arm : replayArmRefusal(k, h, step, host, dispatch, arm);
     if (refused !== null) {
+      if (arm !== undefined && typeof arm !== "string")
+        rmSync(arm.dir, { recursive: true, force: true });
       refuseTrial(k, h, step.replay, refused);
       return null;
     }
+    const plugin = typeof arm === "string" ? undefined : arm;
     // a replay trial works in its own clean checkout at the recorded base (reading 176)
     const cwd = await prepareTrial(k, h, step.replay, actionId);
-    if (cwd === null) return null;
+    if (cwd === null) {
+      if (plugin !== undefined) rmSync(plugin.dir, { recursive: true, force: true });
+      return null;
+    }
     recordDispatch(k, h.state.id, actionId);
-    return dispatchStep(k, h, step, host, cwd, dispatch);
+    return dispatchStep(k, h, step, host, cwd, dispatch, plugin);
   }
   const task = step.task === undefined ? undefined : h.state.tasks.get(step.task);
   let worktree: DispatchRecord["worktree"];

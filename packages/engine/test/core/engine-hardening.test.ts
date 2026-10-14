@@ -429,9 +429,9 @@ describe("symlinks planted where the engine writes or copies (AD-18)", () => {
     const run = h.engine.status({}).run.id;
     const target = join(h.deps.vtcHome, hiddenTestsDir(engineRepoKey(h.repo), run, "T-1"));
     expect(readdirSync(target)).toEqual(["hidden.test.ts"]);
-    expect(existsSync(join(h.deps.vtcHome, HIDDEN_TESTS.homeDir, engineRepoKey(h.repo), "T-1"))).toBe(
-      false,
-    );
+    expect(
+      existsSync(join(h.deps.vtcHome, HIDDEN_TESTS.homeDir, engineRepoKey(h.repo), "T-1")),
+    ).toBe(false);
     expect(existsSync(staging)).toBe(false);
     expect(readFileSync(join(outside, "secret.txt"), "utf8")).toBe("private\n");
     await h.release();

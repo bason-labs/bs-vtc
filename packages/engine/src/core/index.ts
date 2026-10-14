@@ -142,3 +142,4 @@ export { INDEX_PATH, openEventIndex, type EventIndex } from "./event-index.js";
  * copies.
  */
 export { HEADLESS_LOADS_AGENT, replayReach, roleChangesFiles } from "./prompt-target.js";
+export { replayGraderOf, replayWaitSkipReason } from "./replay.js";

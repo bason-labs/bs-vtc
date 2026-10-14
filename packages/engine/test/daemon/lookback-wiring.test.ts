@@ -74,10 +74,8 @@ import {
   passFinalReview,
   SPEC_ONE,
   spawns,
-  submitResult,
   throughPlan,
   verdictPass,
-  workdir,
   type Harness,
 } from "../helpers/engine-harness.js";
 
@@ -421,9 +419,36 @@ describe("RETRO reads the weekly window of the run's Lead host (AD-21 rule 8, re
   });
 });
 
-describe("RETRO replays a recorded proposal end to end (AD-21 rule 6, reading 176)", () => {
-  it("runs its trials, grades them through the Gate Runner and writes the result with its SHA-256", async () => {
-    const h = createHarness({ plugins: switched, project: { merge_level: 1 } });
+describe("RETRO replays a recorded proposal end to end (AD-21 rule 6, readings 176 and 201)", () => {
+  it("runs its trials headless with each arm's own plugin, grades them through the Gate Runner and writes the result with its SHA-256", async () => {
+    const trialPacks: string[] = [];
+    const h = createHarness({
+      plugins: switched,
+      project: { merge_level: 1 },
+      // D-cg: every trial is an engine-launched headless run with its arm's compiled plugin
+      armPlugins: {
+        compileArm: (request) =>
+          Promise.resolve({
+            dir: request.outDir,
+            version: "arm-000000000000",
+            promptSha256: effectivePromptSha(LOCKED, request.editable),
+          }),
+      },
+      headless: (request) => {
+        const pack = /^Read your task pack: (.*)$/m.exec(request.prompt)?.[1] ?? "";
+        trialPacks.push(readFileSync(pack, "utf8"));
+        mkdirSync(join(request.cwd, "src/t-1"), { recursive: true });
+        writeFileSync(join(request.cwd, "src/t-1/impl.ts"), "export const x = 2;\n");
+        return {
+          kind: "done",
+          session_ref: null,
+          output: { role: request.role, summary: "done", exit: "built" },
+          model: "sonnet",
+          tokens: { in: 100, out: 50, cache_r: 0, cache_w: 0 },
+          cost_usd: 0.1,
+        };
+      },
+    });
     h.engine.ingestUsage({
       host: "claude-code",
       source: "statusline",
@@ -464,26 +489,20 @@ describe("RETRO replays a recorded proposal end to end (AD-21 rule 6, reading 17
         changes: 1,
       }),
     );
-    let carried = spawns(await passFinalReview(h));
+    const carried = spawns(await passFinalReview(h));
     await h.engine.settle();
-    let trials = 0;
-    for (;;) {
-      const trial =
-        carried.find((a) => a.role === role) ??
-        spawns((await h.engine.next({}, CLAUDE)).actions).find((a) => a.role === role);
-      if (trial === undefined) break;
-      trials += 1;
-      expect(trial.task).toBeUndefined();
-      expect(readFileSync(join(h.repo, trial.pack), "utf8")).toMatch(
-        new RegExp(`^## ${TASK_PACK_HEURISTICS_SECTION}\n\n(${CANDIDATE}|${DEFAULT})\n`),
-      );
-      mkdirSync(join(workdir(trial), "src/t-1"), { recursive: true });
-      writeFileSync(join(workdir(trial), "src/t-1/impl.ts"), "export const x = 2;\n");
-      const out = await submitResult(h, trial, { exit: "built" });
-      carried = "actions" in out ? spawns(out.actions) : [];
+    for (let i = 0; i < 2 && h.engine.status({}).run.finished_at === undefined; i += 1) {
+      carried.push(...spawns((await h.engine.next({}, CLAUDE)).actions));
       await h.engine.settle();
     }
     await unwire();
+    // no trial is a Lead's subagent
+    expect(carried.filter((a) => a.role === role)).toEqual([]);
+    const trials = trialPacks.length;
+    for (const pack of trialPacks)
+      expect(pack).toMatch(
+        new RegExp(`^## ${TASK_PACK_HEURISTICS_SECTION}\n\n(${CANDIDATE}|${DEFAULT})\n`),
+      );
     // k = 3 trials per arm, with an A/A arm (no noise floor was cached)
     expect(trials % 9).toBe(0);
     expect(trials).toBeGreaterThan(0);
@@ -502,6 +521,9 @@ describe("RETRO replays a recorded proposal end to end (AD-21 rule 6, reading 17
       candidate,
       k: 3,
       aa_flip_rate: 0,
+      // the fake host enforces no read deny (reading 178); the gates graded (D-ch)
+      isolation: "paths_only",
+      grader: "gates",
     });
     // the noise floor the replay measured is kept for the next one
     expect(existsSync(join(h.home, LOOKBACK_HOME.aaNoiseFile))).toBe(true);
@@ -516,12 +538,10 @@ describe("RETRO replays a recorded proposal end to end (AD-21 rule 6, reading 17
   }, 120_000);
 });
 
-// Spine §5 reading 180 (Lead decision 2026-10-14, pending human review): a verdict role takes pins
-// but is not replayed in v1, so with the shipped plugins on a Claude Lead no role is both pinnable
-// and replayable, and `vtc lookback approve` cannot start a canary there. Reading 182(8) sends that
-// to the human as a question; these tests keep the gap visible until it is answered (an Engineer
-// switched to editable_in_pack after its A/A on a Codex-led run, or a verdict grader).
-describe("which replays the shipped plugins can reach on a Claude Lead (spine §5 readings 180 and 182(8))", () => {
+// Spine §5 readings 201 and 202 (D-cg, D-ch): on a Claude Lead every file-writing role replays
+// through its arms' own plugins (`EngineDeps.armPlugins`), and a verdict role through the verdict
+// grader; without either wired, the replay waits for the next RETRO and says why.
+describe("which replays the shipped plugins can reach on a Claude Lead (spine §5 readings 201 and 202)", () => {
   it("compiled as shipped on a Claude Lead, no proposal's replay runs: the Engineer carries its own section, and the Spec Verifier, the one switched role, changes no file", async () => {
     const { catalog } = shippedPlugins();
     const h = createHarness({ plugins: catalog, project: { merge_level: 1 } });
@@ -597,7 +617,7 @@ describe("which replays the shipped plugins can reach on a Claude Lead (spine §
     await h.release();
   }, 60_000);
 
-  it("compiled as shipped on a Claude Lead, core refuses both roles' replays: the Engineer cannot take a pin, the Spec Verifier changes no file", async () => {
+  it("compiled as shipped on a Claude Lead with no arm compiler and no verdict grader wired, both roles' replays wait and say why", async () => {
     const { catalog } = shippedPlugins();
     const h = createHarness({ plugins: catalog, project: { merge_level: 1 } });
     const replayOf = (role: string): LookbackReplay => {
@@ -654,10 +674,10 @@ describe("which replays the shipped plugins can reach on a Claude Lead (spine §
     expect(log.slice(retroAt).filter((e) => e.type === "role.dispatched")).toEqual([]);
     const notices = h.engine.notices.join("\n");
     expect(notices).toMatch(
-      /proposal p-engineer waits for the next RETRO: vtc-engineer cannot run a candidate: it carries its own editable section/,
+      /proposal p-engineer waits for the next RETRO: a claude-code trial runs its arm's own compiled plugin, and no arm plugin compiler is wired/,
     );
     expect(notices).toMatch(
-      /proposal p-spec_verifier waits for the next RETRO: vtc-spec-verifier changes no file.*\(spine §5 reading 180\)/,
+      /proposal p-spec_verifier waits for the next RETRO: vtc-spec-verifier is graded by its verdict, and no verdict grader is wired \(spine §5 reading 202\)/,
     );
     await h.release();
   }, 60_000);

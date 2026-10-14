@@ -25,6 +25,7 @@ import {
   type UsageSnapshot,
   type Verdict,
   type VtcEvent,
+  type AutomationRunRef,
 } from "@vtc/shared";
 
 /**
@@ -136,6 +137,12 @@ export interface RunState {
   request: string;
   /** The configured merge level at start (`run.started.merge_level`). */
   mergeLevel: MergeLevel;
+  /**
+   * An automatic run's issue (`run.started.automation`, D-cd, AD-27 rule 2): it skips G1 and G2,
+   * the Spec Verifier reads the issue, and it never runs at merge Level 3. `null`: a run the human
+   * asked for.
+   */
+  automation: AutomationRunRef | null;
   readonly tasks: Map<string, Task>;
   readonly intents: Map<string, IntentContract>;
   /** The status a task had right before it was parked or interrupted (its checkpoint). */
@@ -186,6 +193,7 @@ export const emptyRunState = (id: string, startedAt: string): RunState => ({
   },
   request: "",
   mergeLevel: 2,
+  automation: null,
   tasks: new Map(),
   intents: new Map(),
   checkpoints: new Map(),
@@ -246,6 +254,7 @@ export const applyEvent = (state: RunState, event: VtcEvent): void => {
     };
     state.request = data.request;
     state.mergeLevel = data.merge_level;
+    state.automation = data.automation ?? null;
   } else if (isEventOfType(event, "run.phase_changed")) {
     state.run.phase = readEventData(event).to;
   } else if (isEventOfType(event, "run.paused")) {

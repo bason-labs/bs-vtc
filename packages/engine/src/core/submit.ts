@@ -48,7 +48,13 @@ import type { Kernel, RunHandle } from "./kernel.js";
 import { parkEscalation } from "./escalations.js";
 import { featureReviewDone } from "./final-review.js";
 import { LOOKBACK_ROLE, retroTargetOf } from "./retro.js";
-import { replayTrialOf, snapshotTrial, startTrialGrade } from "./replay.js";
+import {
+  replayGraderOf,
+  replayTrialOf,
+  snapshotTrial,
+  startTrialGrade,
+  startVerdictGrade,
+} from "./replay.js";
 import { recordLimit } from "./limits.js";
 import { openTaskEscalation, parkTask, setTaskStatus } from "./parking.js";
 import {
@@ -745,9 +751,19 @@ const acceptReplayTrial = async (
   h: RunHandle,
   run: RoleRunRecord,
   trial: NonNullable<ReturnType<typeof replayTrialOf>>,
+  result: RoleResult,
 ): Promise<StepOutcome> => {
   if (h.state.run.phase !== "retro")
     return reject("out_of_order", [`the run is in ${h.state.run.phase}, not retro`]);
+  // a verdict role's trial changed nothing: its verdict is scored against the recorded outcome
+  // (D-ch, spine §5 reading 202)
+  if (replayGraderOf(k, trial.trial) === "verdict")
+    return {
+      kind: "accept",
+      after: () => {
+        startVerdictGrade(k, h, trial, run.action_id, result);
+      },
+    };
   let head: string;
   try {
     head = await snapshotTrial(k, h, run, trial);
@@ -1517,7 +1533,7 @@ const evaluate = async (
   if (!conformance.ok) return reject(conformance.reason, conformance.issues);
   // a Lookback replay trial changes nothing: its work is graded where it ran (reading 176)
   const trial = run.task === undefined ? replayTrialOf(k, h, run.action_id) : undefined;
-  if (trial !== undefined) return acceptReplayTrial(k, h, run, trial);
+  if (trial !== undefined) return acceptReplayTrial(k, h, run, trial, result);
   const task = run.task === undefined ? undefined : h.state.tasks.get(run.task);
   const order = outOfOrder(k, h, run, task);
   if (order !== null) return reject("out_of_order", [order]);
