@@ -78,7 +78,7 @@ import { parkEscalation } from "./escalations.js";
 import { recordDispatch, type DispatchRecord } from "./dispatch-guard.js";
 import { architectDepth, dealDesignConstraints, researchDepth } from "./lottery.js";
 import { prepareRoleWorktree } from "./role-worktree.js";
-import { prepareTrial, type ReplayStepRef } from "./replay.js";
+import { prepareTrial, refuseTrial, type ReplayStepRef } from "./replay.js";
 import { HEADLESS_LOADS_AGENT, pinBlocker } from "./prompt-target.js";
 
 export { HEADLESS_LOADS_AGENT } from "./prompt-target.js";
@@ -1177,6 +1177,11 @@ export const NO_LEAD_WAIT_REASON =
  * which holds the phase until it is answered.
  */
 export const refuseInSession = (k: Kernel, h: RunHandle, step: StepSpec, reason: string): void => {
+  // a replay trial that cannot run did not pass (reading 176): nothing to ask the human
+  if (step.replay !== undefined) {
+    refuseTrial(k, h, step.replay, reason);
+    return;
+  }
   if (step.task !== undefined) {
     parkTask(k, h, step.task, {
       reason: "blocked",

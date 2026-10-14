@@ -268,6 +268,15 @@ const failTrial = (k: Kernel, h: RunHandle, t: TrialRef, action: string | undefi
 };
 
 /**
+ * A trial the dispatcher refused to hand out (the Lead session's sandbox, the platform): it did not
+ * pass, with a notice, so RETRO moves on instead of asking the human (a replay changes nothing).
+ */
+export const refuseTrial = (k: Kernel, h: RunHandle, ref: TrialRef, reason: string): void => {
+  k.notice(`replay trial ${key(ref)} of run ${h.state.id} was not run: ${reason}`);
+  failTrial(k, h, ref, undefined);
+};
+
+/**
  * Creates a trial's clean checkout and records its dispatch (callers then hand the step out with
  * the checkout as its working directory). Returns the checkout's absolute path, or `null` when it
  * could not be made: the trial then did not pass, with a notice.
