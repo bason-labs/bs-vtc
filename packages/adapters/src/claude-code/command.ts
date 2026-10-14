@@ -9,37 +9,40 @@
  * The VTC home's install token, daemon sockets and hidden tests (`ROLE_DENIED_VTC.homeReadDeny`,
  * D-an), the Codex home and Claude's own credential file are never readable, from a tool or from
  * the shell (D-ad). No role may run `vtc calibrate` or write anything in
- * `ROLE_DENIED_VTC.homeWriteDeny` (D-w, D-ap): directories and single files alike.
+ * `ROLE_DENIED_VTC.homeWriteDeny` or `WAVE3_HOME_WRITE_DENY` (D-w, D-ap, spine §5 reading 103):
+ * directories and single files alike. No role may call a human-only engine tool (`approve`,
+ * `answer`, `change_request`; D-an) under either of its names, whatever allow rule applies.
  *
- * Settings isolation (D-ab, spine §5 reading 48): a headless run passes `--restricted`, which
- * (per `claude --help`) ignores the user, project and local settings files and keeps only
- * managed settings and the VTC-authored `--settings`. So neither the user's settings nor a
- * committed `.claude/settings.json` (allow rules, hooks, MCP enablement) reach a role run. It
- * also confines the file tools to the working directory. The compiled plugin loads from disk
- * (`--plugin-dir`). What the spike still has to confirm (spine §7, "Claude settings-source
- * isolation"): that `--plugin-dir`, `--agent vtc:<agent>`, the plugin's hooks and its MCP server
- * load under `--restricted`, and that the engine MCP tools are callable in a `--restricted
- * --tools <set>` run (`ToolSearch` is in every set in case Claude defers them).
+ * Settings isolation (AD-25 rule 1, spine §5 reading 108, which replaces reading 48's `project`
+ * source and the earlier `--restricted`): a headless run loads `--setting-sources user` only, so
+ * the user's own settings (the user's trust domain) apply and the repo's committed or local
+ * settings (allow rules, hooks, `env`, MCP enablement: untrusted repo content that `-p` would run
+ * without a trust prompt) never do. `--strict-mcp-config` with a VTC-only `--mcp-config` (the
+ * engine bridge, `engineMcpServer`) keeps the repo's `.mcp.json` and the user's own MCP servers
+ * out. The VTC-authored `--settings` carry the role's sandbox and deny rules; the permission mode
+ * is `dontAsk` and `--permission-prompts none`, so nothing ever waits for an answer. The compiled
+ * plugin loads from disk (`--plugin-dir`) and the run is its agent (`--agent vtc:<agent>`). Never
+ * `--bare` (API-key mode, which never reads the subscription login).
  *
- * Accepted residuals until that spike (recorded for spine §7, reading 48):
- * - MCP servers from the user's `~/.claude.json` (not a settings file) still start, as host
- *   processes outside the role sandbox, and their server instructions reach the role's context;
- *   their tools are denied (not on the allowlist under `dontAsk`). `--strict-mcp-config` would
- *   stop them but is not passed: it may also drop the plugin's own MCP server, which carries
- *   every engine tool. The spike checks whether the plugin server survives it.
- * - `--restricted` confines the file tools to the working directory and no `--add-dir` is
- *   passed, so a headless QA-author run could not write its hidden-test staging scope in the
- *   main checkout (spine §5 reading 65). QA author must stay on subagent dispatch until a
- *   profile request can name a main-checkout scope.
- * - `--restricted` lets only a person or a permission handler approve writes to settings, git
- *   and tool-configuration files, and `--permission-prompts none` answers nobody, so an
- *   Engineer's in-scope write to such a file (a package's `tsconfig.json`) may be denied.
+ * Accepted residuals (recorded for spine §7):
+ * - The user's own settings apply to role runs: their hooks run, their `permissions.allow` rules
+ *   join the profile's allowlist (the profile's `--tools` set and every deny rule still bound
+ *   them, and the engine's write-scope check always runs), and their sandbox lists merge with the
+ *   profile's. Whether `--restricted` keeps the subscription login and isolates further is the
+ *   §7 row "Claude `--restricted`".
+ * - Whether the plugin's own MCP server survives `--strict-mcp-config` is the §7 row "Claude
+ *   headless plugin agent". The engine tools are allowed under both names (the plugin's
+ *   `mcp__plugin_vtc_vtc__*` and the `--mcp-config` server's `mcp__vtc__*`), both the same
+ *   engine bridge; `ToolSearch` is in every set in case Claude defers them.
  *
  * Nothing here ever sets a bypass; the engine's write-scope check always runs.
  */
 import nodePath, { type PlatformPath } from "node:path";
 import {
   agentNameFor,
+  engineMcpServer,
+  HEADLESS_DEFAULTS,
+  HUMAN_ONLY_TOOLS,
   hostCredentialDenyReadPaths,
   isHostCredentialDenyRead,
   ROLE_DENIED_VTC,
@@ -50,7 +53,11 @@ import {
   type SessionRef,
   type SpawnRoleRequest,
 } from "@vtc/shared";
-import { vtcHomeReadDeniedPaths, vtcHomeWriteDeniedPaths } from "../common/homes.js";
+import {
+  ROLE_HOME_WRITE_DENY,
+  vtcHomeReadDeniedPaths,
+  vtcHomeWriteDeniedPaths,
+} from "../common/homes.js";
 
 export const CLAUDE_BINARY = "claude";
 export const HOST = "claude-code";
@@ -64,6 +71,31 @@ export const claudeSubagentName = (agent: string): string => `${CLAUDE_PLUGIN_NA
 /** Claude Code names plugin MCP tools `mcp__plugin_<plugin>_<server>__<tool>`. */
 export const claudeEngineToolName = (tool: string): string =>
   `mcp__plugin_${CLAUDE_PLUGIN_NAMESPACE}_vtc__${tool}`;
+
+/**
+ * The only MCP config a headless role run loads (`--mcp-config` under `--strict-mcp-config`,
+ * AD-25 rule 1): the engine bridge, exactly as the plugin declares it (`engineMcpServer`).
+ */
+export const claudeHeadlessMcpConfig = (): string => {
+  const bridge = engineMcpServer(HOST);
+  return JSON.stringify({
+    mcpServers: { [bridge.name]: { command: bridge.command, args: [...bridge.args] } },
+  });
+};
+
+/** An engine tool as the `--mcp-config` bridge names it: `mcp__<server>__<tool>`. */
+const claudeBridgeToolName = (tool: string): string =>
+  `mcp__${engineMcpServer(HOST).name}__${tool}`;
+
+/**
+ * Tools that record a human decision (`HUMAN_ONLY_TOOLS`: approve, answer, change_request, D-an,
+ * spine §5 reading 71), under both names a role run could reach them by: the plugin's server and
+ * the `--mcp-config` bridge. Every profile denies them, in `--disallowedTools` and in the
+ * `--settings` deny rules, so no allow rule (the profile's, the agent's or the user's own) can
+ * bring one in: the engine cannot tell a role run's bridge from the Lead's by its hello.
+ */
+export const claudeHumanOnlyToolDenies = (): string[] =>
+  HUMAN_ONLY_TOOLS.flatMap((tool) => [claudeEngineToolName(tool), claudeBridgeToolName(tool)]);
 
 /** Package registries the install phase may reach (§7.2); everything else has no network. */
 export const REGISTRY_DOMAINS = [
@@ -168,7 +200,7 @@ const allowedTools = (tools: RoleTools, writable: readonly string[]): string[] =
   TOOL_SEARCH,
   ...(tools.profile === "read_only" ? [] : toolRules(writable, anchoredRulePath)),
   ...(tools.profile === "code_sandboxed" ? ["Bash"] : []),
-  ...tools.engine_tools.map(claudeEngineToolName),
+  ...tools.engine_tools.flatMap((tool) => [claudeEngineToolName(tool), claudeBridgeToolName(tool)]),
 ];
 
 const disallowedTools = (tools: RoleTools, protectedPaths: readonly string[]): string[] => [
@@ -177,6 +209,7 @@ const disallowedTools = (tools: RoleTools, protectedPaths: readonly string[]): s
     : toolRules([...protectedPaths, ...HOST_CONFIG_PATHS], rulePath)),
   ...(tools.profile === "code_sandboxed" ? [] : ["Bash"]),
   ...WEB_TOOLS,
+  ...claudeHumanOnlyToolDenies(),
 ];
 
 const absolute = (cwd: string, path: string, platform: PlatformPath): string =>
@@ -301,7 +334,9 @@ export const claudeSandboxProfile = (
         `Read(${absoluteRulePath(unreadable.codexHome, platform)}/**)`,
         credentials.rule,
         ...deniedVtcCommands(),
-        ...ROLE_DENIED_VTC.homeWriteDeny.flatMap((glob) =>
+        // a human decision is never a role's, whatever a user allow rule says (D-an)
+        ...claudeHumanOnlyToolDenies(),
+        ...ROLE_HOME_WRITE_DENY.flatMap((glob) =>
           WRITE_TOOL_NAMES.map((tool) => `${tool}(${vtcHomeRule}/${glob})`),
         ),
       ],
@@ -357,10 +392,10 @@ export const claudeSandboxProfile = (
 export interface ClaudeCommandOptions {
   /**
    * The compiled Claude plugin on disk (the cli's extracted `plugin:claude-code`). Every headless
-   * run loads the plugin from it (`--plugin-dir`) and no settings file (`--restricted`): the
-   * user's and the repo's settings, plugins and hooks cannot widen a role run, and the plugin
-   * resolves in any worktree whatever the install scope. Without it there is no isolated run, so
-   * `claudeHeadlessCommand` refuses to build one (fail closed).
+   * run loads the plugin from it (`--plugin-dir`), so the role is the compiled agent with its
+   * prompt SHA in any worktree whatever the install scope, and the repo's settings and MCP servers
+   * stay out (AD-25 rule 1). Without it there is no isolated run, so `claudeHeadlessCommand`
+   * refuses to build one (fail closed).
    */
   readonly pluginDir?: string;
 }
@@ -370,7 +405,9 @@ export interface ClaudeCommandOptions {
  * sees SDK rate-limit and retry events as they happen (§6.9); the final `result` event carries
  * `structured_output` for `--json-schema` (spike 1). The run is the role's compiled plugin agent
  * (`--agent vtc:<agent>`), so it gets the role's instructions and tool list. The prompt is read
- * from stdin (the launcher writes it and closes stdin), so it never sits in argv.
+ * from stdin (the launcher writes it and closes stdin), so it never sits in argv. The
+ * environment sets `CLAUDE_CODE_PRINT_BG_WAIT_CEILING_MS` explicitly, so a run never waits the
+ * host's default 10 minutes for background work after its result (AD-25 rule 4).
  */
 export const claudeHeadlessCommand = (
   request: SpawnRoleRequest,
@@ -413,13 +450,20 @@ export const claudeHeadlessCommand = (
         ? []
         : ["--max-budget-usd", String(request.maxBudgetUsd)]),
       ...(session === undefined ? [] : ["--resume", session.id]),
-      // no settings file (user, project or local: allow rules, hooks, MCP enablement) reaches a
-      // role run; only managed settings and the VTC-authored --settings apply (D-ab)
-      "--restricted",
+      // the user's settings only: the repo's committed and local settings (allow rules, hooks,
+      // env, MCP enablement) are untrusted repo content (AD-25 rule 1, reading 108)
+      "--setting-sources",
+      "user",
+      // no MCP server but the engine bridge: not the repo's .mcp.json, not the user's servers
+      "--strict-mcp-config",
+      "--mcp-config",
+      claudeHeadlessMcpConfig(),
       "--plugin-dir",
       options.pluginDir,
       ...request.sandbox.cliArgs,
     ],
-    env: {},
+    env: {
+      CLAUDE_CODE_PRINT_BG_WAIT_CEILING_MS: String(HEADLESS_DEFAULTS.claudeBackgroundWaitMs),
+    },
   };
 };

@@ -1,13 +1,27 @@
-import { describe, expect, it } from "vitest";
-import type { HostOutcome } from "@vtc/shared";
+import { chmodSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { afterEach, describe, expect, it, vi } from "vitest";
+import { AD9_FORBIDDEN_MARKERS, type HostOutcome } from "@vtc/shared";
 import { startHeadlessRun, type RunExit } from "../src/common/headless-run.js";
-import { createNodeSpawner, nodeSpawner } from "../src/common/process.js";
+import {
+  absoluteSearchPath,
+  childEnvironment,
+  createNodeSpawner,
+  nodeSpawner,
+} from "../src/common/process.js";
 import { fakeSpawner } from "./support/fake-spawner.js";
 
 const COMMAND = { command: "host", args: ["run"], env: {} };
 const echoOutcome = (lines: readonly string[], exit: RunExit): HostOutcome => ({
   kind: "error",
-  message: JSON.stringify({ lines, code: exit.code, signal: exit.signal, stderr: exit.stderrTail }),
+  message: JSON.stringify({
+    lines,
+    code: exit.code,
+    signal: exit.signal,
+    stderr: exit.stderrTail,
+    stop: exit.stop,
+  }),
   retryable: true,
   tokens: null,
   cost_usd: null,
@@ -18,6 +32,7 @@ const details = (outcome: HostOutcome) =>
     code: number | null;
     signal: string | null;
     stderr: string;
+    stop: RunExit["stop"];
   };
 
 describe("headless launcher (§15 hardened launcher)", () => {
@@ -40,7 +55,13 @@ describe("headless launcher (§15 hardened launcher)", () => {
     proc.exit(3);
     const outcome = details(await run.wait());
     await reading;
-    expect(outcome).toEqual({ lines: ["a", "b"], code: 3, signal: null, stderr: "warning: x" });
+    expect(outcome).toEqual({
+      lines: ["a", "b"],
+      code: 3,
+      signal: null,
+      stderr: "warning: x",
+      stop: null,
+    });
     expect(early).toEqual(["a", "b"]);
     const late: string[] = [];
     for await (const line of run.lines()) late.push(line);
@@ -49,30 +70,107 @@ describe("headless launcher (§15 hardened launcher)", () => {
     expect(run.command).toBe(COMMAND);
   });
 
-  it("kills a run that outlives its timeout, escalating to SIGKILL", async () => {
+  it("stops a run that outlives its wall timeout: SIGINT, then SIGTERM, then SIGKILL, and says why (AD-25 rule 4)", async () => {
     const { spawner, processes } = fakeSpawner((p) => {
+      p.obeysInt = false;
       p.obeysTerm = false;
     });
     const run = startHeadlessRun({
       command: COMMAND,
       cwd: "/w",
       timeoutMs: 10,
-      killGraceMs: 10,
+      interruptGraceMs: 10,
+      termGraceMs: 10,
       spawner,
       outcome: echoOutcome,
     });
-    const outcome = await run.wait();
-    expect(processes[0]?.signals).toEqual(["SIGTERM", "SIGKILL"]);
-    expect(outcome).toEqual({
-      kind: "error",
-      message: "host timed out after 10 ms and was killed",
-      retryable: true,
-      tokens: null,
-      cost_usd: null,
+    const outcome = details(await run.wait());
+    expect(processes[0]?.signals).toEqual(["SIGINT", "SIGTERM", "SIGKILL"]);
+    expect(outcome.stop).toEqual({
+      cause: "timeout",
+      message: "host ran longer than its wall timeout of 10 ms and was stopped",
     });
   });
 
-  it("kill() stops the run and resolves once it has exited; calling it again is harmless", async () => {
+  it("a host that ends its turn on SIGINT gets no harsher signal", async () => {
+    const { spawner, processes } = fakeSpawner();
+    const run = startHeadlessRun({
+      command: COMMAND,
+      cwd: "/w",
+      timeoutMs: 10,
+      interruptGraceMs: 10,
+      termGraceMs: 10,
+      spawner,
+      outcome: echoOutcome,
+    });
+    expect(details(await run.wait()).stop?.cause).toBe("timeout");
+    expect(processes[0]?.signals).toEqual(["SIGINT"]);
+  });
+
+  it("escalates to SIGTERM when SIGINT is ignored, and stops there when the host obeys it", async () => {
+    const { spawner, processes } = fakeSpawner((p) => {
+      p.obeysInt = false;
+    });
+    const run = startHeadlessRun({
+      command: COMMAND,
+      cwd: "/w",
+      timeoutMs: 10,
+      interruptGraceMs: 10,
+      termGraceMs: 10_000,
+      spawner,
+      outcome: echoOutcome,
+    });
+    expect(details(await run.wait()).signal).toBe("SIGTERM");
+    expect(processes[0]?.signals).toEqual(["SIGINT", "SIGTERM"]);
+  });
+
+  it("stops a run that prints no line for its idle timeout; every line restarts the clock", async () => {
+    const { spawner, processes } = fakeSpawner();
+    const run = startHeadlessRun({
+      command: COMMAND,
+      cwd: "/w",
+      timeoutMs: 60_000,
+      idleTimeoutMs: 80,
+      interruptGraceMs: 10,
+      termGraceMs: 10,
+      spawner,
+      outcome: echoOutcome,
+    });
+    const proc = processes[0]!;
+    const started = Date.now();
+    // a line every 30 ms keeps the run alive past several idle periods
+    for (let i = 0; i < 6; i += 1) {
+      await new Promise((resolve) => setTimeout(resolve, 30));
+      proc.emit(`tick ${String(i)}`);
+    }
+    expect(proc.finished).toBe(false);
+    const outcome = details(await run.wait());
+    expect(Date.now() - started).toBeGreaterThanOrEqual(180);
+    expect(outcome.lines).toHaveLength(6);
+    expect(outcome.stop).toEqual({
+      cause: "idle",
+      message: "host printed nothing for 80 ms (its idle timeout) and was stopped",
+    });
+    expect(proc.signals).toEqual(["SIGINT"]);
+  });
+
+  it("without an idle timeout a quiet run is left alone until its wall timeout", async () => {
+    const { spawner, processes } = fakeSpawner();
+    const run = startHeadlessRun({
+      command: COMMAND,
+      cwd: "/w",
+      timeoutMs: 120,
+      interruptGraceMs: 10,
+      termGraceMs: 10,
+      spawner,
+      outcome: echoOutcome,
+    });
+    await new Promise((resolve) => setTimeout(resolve, 60));
+    expect(processes[0]?.finished).toBe(false);
+    expect(details(await run.wait()).stop?.cause).toBe("timeout");
+  });
+
+  it("kill() stops the run with cause killed and resolves once it has exited; calling it again is harmless", async () => {
     const { spawner, processes } = fakeSpawner();
     const settled: string[] = [];
     const run = startHeadlessRun({
@@ -85,9 +183,31 @@ describe("headless launcher (§15 hardened launcher)", () => {
     });
     await run.kill();
     await run.kill();
-    expect(processes[0]?.signals).toEqual(["SIGTERM"]);
-    expect(details(await run.wait()).signal).toBe("SIGTERM");
+    expect(processes[0]?.signals).toEqual(["SIGINT"]);
+    const outcome = details(await run.wait());
+    expect(outcome.signal).toBe("SIGINT");
+    expect(outcome.stop).toEqual({ cause: "killed", message: "host was stopped by VTC" });
     expect(settled).toEqual(["done"]);
+  });
+
+  it("the first reason to stop is the one reported", async () => {
+    const { spawner, processes } = fakeSpawner((p) => {
+      p.obeysInt = false;
+    });
+    const run = startHeadlessRun({
+      command: COMMAND,
+      cwd: "/w",
+      timeoutMs: 30,
+      idleTimeoutMs: 5_000,
+      interruptGraceMs: 50,
+      termGraceMs: 10,
+      spawner,
+      outcome: echoOutcome,
+    });
+    await new Promise((resolve) => setTimeout(resolve, 40));
+    await run.kill();
+    expect(details(await run.wait()).stop?.cause).toBe("timeout");
+    expect(processes[0]?.signals).toEqual(["SIGINT", "SIGTERM"]);
   });
 
   it("writes the input to stdin and closes it, and stamps when the run ended", async () => {
@@ -119,7 +239,7 @@ describe("headless launcher (§15 hardened launcher)", () => {
       command: COMMAND,
       cwd: "/w",
       timeoutMs: 5_000,
-      killGraceMs: 20,
+      termGraceMs: 20,
       spawner,
       outcome: echoOutcome,
     });
@@ -128,6 +248,26 @@ describe("headless launcher (§15 hardened launcher)", () => {
     // the leader is gone, but its stdout never closes
     proc.settleOnly(0);
     expect(details(await run.wait()).lines).toEqual(["a"]);
+  });
+
+  it("a timer that fires after the process exited, while its stdout drains, is no reason to stop it", async () => {
+    const { spawner, processes } = fakeSpawner();
+    const run = startHeadlessRun({
+      command: COMMAND,
+      cwd: "/w",
+      timeoutMs: 20,
+      idleTimeoutMs: 20,
+      termGraceMs: 200,
+      spawner,
+      outcome: echoOutcome,
+    });
+    const proc = processes[0]!;
+    // the leader exits by itself; something it started holds stdout past both timeouts
+    proc.settleOnly(1);
+    const outcome = details(await run.wait());
+    expect(outcome.stop).toBeNull();
+    expect(outcome.code).toBe(1);
+    expect(proc.signals).toEqual([]);
   });
 
   it("a process that cannot start settles with its start error", async () => {
@@ -150,6 +290,163 @@ describe("headless launcher (§15 hardened launcher)", () => {
   });
 });
 
+describe("child environment (AD-25 rule 4)", () => {
+  const BASE = {
+    HOME: "/Users/dev",
+    PATH: "/usr/bin:/bin",
+    LANG: "en_US.UTF-8",
+    LC_ALL: "en_US.UTF-8",
+    TMPDIR: "/var/folders/x/T/",
+    CLAUDE_CONFIG_DIR: "/Users/dev/.claude-work",
+    CODEX_HOME: "/Users/dev/.codex-work",
+    VTC_HOME: "/Users/dev/.vtc",
+    https_proxy: "http://proxy.local:3128",
+    NODE_OPTIONS: "--require /tmp/x.js",
+    GIT_DIR: "/elsewhere/.git",
+    SSH_AUTH_SOCK: "/tmp/agent.sock",
+    AWS_SECRET_ACCESS_KEY: "secret",
+    GITHUB_TOKEN: "ghp_x",
+    UNRELATED: "1",
+  };
+
+  it("passes an allowlist: the real HOME, PATH, locale, temp, the hosts' and VTC's homes and proxies", () => {
+    expect(childEnvironment(BASE, {})).toEqual({
+      HOME: "/Users/dev",
+      PATH: "/usr/bin:/bin",
+      LANG: "en_US.UTF-8",
+      LC_ALL: "en_US.UTF-8",
+      TMPDIR: "/var/folders/x/T/",
+      CLAUDE_CONFIG_DIR: "/Users/dev/.claude-work",
+      CODEX_HOME: "/Users/dev/.codex-work",
+      VTC_HOME: "/Users/dev/.vtc",
+      https_proxy: "http://proxy.local:3128",
+    });
+  });
+
+  it("never passes a credential variable, whatever the parent has", () => {
+    const parent: Record<string, string> = { ...BASE };
+    for (const marker of AD9_FORBIDDEN_MARKERS) {
+      if (/^[A-Z_]+$/.test(marker)) parent[marker] = "x";
+    }
+    const env = childEnvironment(parent, {});
+    for (const name of Object.keys(parent)) {
+      if (/^[A-Z_]+$/.test(name) && AD9_FORBIDDEN_MARKERS.some((m) => m === name)) {
+        expect(env).not.toHaveProperty(name);
+      }
+    }
+  });
+
+  it("keeps only the absolute PATH entries: a relative, `.` or empty one would search the worktree (§15)", () => {
+    expect(absoluteSearchPath("rel:/usr/bin::.:./node_modules/.bin:/bin:~/bin:")).toBe(
+      "/usr/bin:/bin",
+    );
+    expect(childEnvironment({ PATH: "./node_modules/.bin:/usr/bin:" }, {})).toEqual({
+      PATH: "/usr/bin",
+    });
+    // whatever spells it, and also a PATH the command itself would add
+    expect(childEnvironment({ Path: ":/bin" }, { PATH: "x:/usr/bin" })).toEqual({
+      Path: "/bin",
+      PATH: "/usr/bin",
+    });
+  });
+
+  it("passes the user's env_passthrough names, but never a host credential variable (D-ak, AD-9)", () => {
+    const parent = {
+      ...BASE,
+      CORP_PROXY_PAC: "http://pac.local",
+      ANTHROPIC_API_KEY: "sk-x",
+      OPENAI_API_KEY: "sk-y",
+      CLAUDE_CODE_OAUTH_TOKEN: "t",
+    };
+    const env = childEnvironment(parent, {}, [
+      "CORP_PROXY_PAC",
+      "SSH_AUTH_SOCK",
+      "ANTHROPIC_API_KEY",
+      "OPENAI_API_KEY",
+      "CLAUDE_CODE_OAUTH_TOKEN",
+      "NOT_SET",
+    ]);
+    expect(env).toMatchObject({
+      CORP_PROXY_PAC: "http://pac.local",
+      SSH_AUTH_SOCK: "/tmp/agent.sock",
+    });
+    for (const name of [
+      "ANTHROPIC_API_KEY",
+      "OPENAI_API_KEY",
+      "CLAUDE_CODE_OAUTH_TOKEN",
+      "NOT_SET",
+    ]) {
+      expect(env).not.toHaveProperty(name);
+    }
+    expect(childEnvironment(BASE, {})).not.toHaveProperty("SSH_AUTH_SOCK");
+  });
+
+  it("adds the command's own variables, and skips unset ones", () => {
+    expect(
+      childEnvironment(
+        { PATH: "/bin", HOME: undefined },
+        { CLAUDE_CODE_PRINT_BG_WAIT_CEILING_MS: "1" },
+      ),
+    ).toEqual({ PATH: "/bin", CLAUDE_CODE_PRINT_BG_WAIT_CEILING_MS: "1" });
+  });
+});
+
+describe.skipIf(process.platform === "win32")("Node spawner environment", () => {
+  afterEach(() => {
+    vi.unstubAllEnvs();
+  });
+
+  it("starts the host with the allowlisted environment only", async () => {
+    vi.stubEnv("VTC_TEST_UNLISTED", "leak");
+    const run = startHeadlessRun({
+      command: { command: "/bin/sh", args: ["-c", "env"], env: { VTC_TEST_ADDED: "yes" } },
+      cwd: process.cwd(),
+      timeoutMs: 10_000,
+      spawner: nodeSpawner,
+      outcome: echoOutcome,
+    });
+    const lines = details(await run.wait()).lines;
+    expect(lines).toContain(`HOME=${process.env.HOME ?? ""}`);
+    expect(lines).toContain("VTC_TEST_ADDED=yes");
+    expect(lines.some((l) => l.startsWith("VTC_TEST_UNLISTED="))).toBe(false);
+  });
+});
+
+describe.skipIf(process.platform === "win32")("Node spawner PATH (§15)", () => {
+  const dirs: string[] = [];
+  afterEach(() => {
+    vi.unstubAllEnvs();
+    for (const dir of dirs.splice(0)) rmSync(dir, { recursive: true, force: true });
+  });
+
+  it("never runs a host binary planted in the working directory through a relative or empty PATH entry", async () => {
+    const cwd = mkdtempSync(join(tmpdir(), "vtc-planted-"));
+    dirs.push(cwd);
+    mkdirSync(join(cwd, "rel"));
+    for (const path of [join(cwd, "rel", "vtc-fake-host"), join(cwd, "vtc-fake-host")]) {
+      writeFileSync(path, "#!/bin/sh\necho PLANTED\n");
+      chmodSync(path, 0o755);
+    }
+    for (const PATH of ["rel:/usr/bin:/bin", "/usr/bin:/bin:", ".:/usr/bin:/bin"]) {
+      vi.stubEnv("PATH", PATH);
+      let seen: RunExit | null = null;
+      const run = startHeadlessRun({
+        command: { command: "vtc-fake-host", args: [], env: {} },
+        cwd,
+        timeoutMs: 10_000,
+        spawner: nodeSpawner,
+        outcome: (lines, exit) => {
+          seen = exit;
+          return echoOutcome(lines, exit);
+        },
+      });
+      const outcome = details(await run.wait());
+      expect(outcome.lines, PATH).not.toContain("PLANTED");
+      expect(seen, PATH).toMatchObject({ error: { code: "ENOENT" } });
+    }
+  });
+});
+
 describe.skipIf(process.platform === "win32")("Node spawner (no orphans, §15)", () => {
   it("closes stdin and kills the whole process tree", async () => {
     const run = startHeadlessRun({
@@ -164,7 +461,8 @@ describe.skipIf(process.platform === "win32")("Node spawner (no orphans, §15)",
       },
       cwd: process.cwd(),
       timeoutMs: 10_000,
-      killGraceMs: 500,
+      interruptGraceMs: 200,
+      termGraceMs: 500,
       spawner: nodeSpawner,
       outcome: echoOutcome,
     });
@@ -228,7 +526,7 @@ describe.skipIf(process.platform === "win32")("Node spawner (no orphans, §15)",
       },
       cwd: process.cwd(),
       timeoutMs: 10_000,
-      killGraceMs: 200,
+      termGraceMs: 200,
       spawner: createNodeSpawner({ drainMs: 200 }),
       outcome: echoOutcome,
     });
@@ -236,6 +534,38 @@ describe.skipIf(process.platform === "win32")("Node spawner (no orphans, §15)",
     expect(outcome.lines).toEqual(["started"]);
     expect(outcome.code).toBe(0);
     expect(Date.now() - started).toBeLessThan(2_500);
+  });
+
+  it("an idle timeout stops the whole process group and leaves no orphans (AD-25 rule 4)", async () => {
+    const run = startHeadlessRun({
+      // a stand-in host that prints its grandchild's pid, then hangs without another line; a
+      // background job of a non-interactive shell ignores SIGINT, so the escalation is needed
+      command: {
+        command: "/bin/sh",
+        args: ["-c", 'sleep 30 & echo "$!"; wait'],
+        env: {},
+      },
+      cwd: process.cwd(),
+      timeoutMs: 20_000,
+      idleTimeoutMs: 300,
+      interruptGraceMs: 200,
+      termGraceMs: 200,
+      spawner: nodeSpawner,
+      outcome: echoOutcome,
+    });
+    const outcome = details(await run.wait());
+    expect(outcome.stop?.cause).toBe("idle");
+    const grandchild = Number(outcome.lines[0]);
+    expect(grandchild).toBeGreaterThan(0);
+    const alive = (): boolean => {
+      try {
+        process.kill(grandchild, 0);
+        return true;
+      } catch {
+        return false;
+      }
+    };
+    await expect.poll(alive, { timeout: 3_000 }).toBe(false);
   });
 
   it("reports a missing binary as a start error, not a crash", async () => {

@@ -32,7 +32,10 @@ export const subagentSpawn = (
 
 export interface RunLauncherOptions {
   readonly spawner: Spawner;
-  readonly killGraceMs?: number;
+  /** SIGINT → SIGTERM grace. Default `HEADLESS_DEFAULTS.interruptGraceMs` (AD-25 rule 4). */
+  readonly interruptGraceMs?: number;
+  /** SIGTERM → SIGKILL grace. Default `HEADLESS_DEFAULTS.termGraceMs`. */
+  readonly termGraceMs?: number;
   readonly outcome: (lines: readonly string[], exit: RunExit) => HostOutcome;
 }
 
@@ -41,7 +44,10 @@ export const createRunLauncher = (options: RunLauncherOptions) => {
   const live = new Set<HeadlessRun>();
   let disposed = false;
   return {
-    /** Starts `command` with the request's prompt on stdin (both hosts read it from there). */
+    /**
+     * Starts `command` with the request's prompt on stdin (both hosts read it from there), under
+     * the request's wall and idle timeouts (AD-25 rule 4).
+     */
     start(command: HostCommand, request: SpawnRoleRequest): SpawnResult {
       if (disposed) throw new Error("this host adapter was disposed");
       const run: HeadlessRun = startHeadlessRun({
@@ -49,9 +55,13 @@ export const createRunLauncher = (options: RunLauncherOptions) => {
         cwd: request.cwd,
         input: request.prompt,
         timeoutMs: request.timeoutMs,
+        ...(request.idleTimeoutMs === undefined ? {} : { idleTimeoutMs: request.idleTimeoutMs }),
+        ...(options.interruptGraceMs === undefined
+          ? {}
+          : { interruptGraceMs: options.interruptGraceMs }),
+        ...(options.termGraceMs === undefined ? {} : { termGraceMs: options.termGraceMs }),
         spawner: options.spawner,
         outcome: options.outcome,
-        ...(options.killGraceMs === undefined ? {} : { killGraceMs: options.killGraceMs }),
         onSettled: () => live.delete(run),
       });
       live.add(run);
