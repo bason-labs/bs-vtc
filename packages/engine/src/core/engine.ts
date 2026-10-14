@@ -107,6 +107,7 @@ import {
   ensurePrivateDir,
   guardDirFor,
   readPrivateFile,
+  setAutomationPaused,
   writePrivateFile,
 } from "./guard.js";
 import { openEventLog, type EventDraft } from "./event-log.js";
@@ -2220,7 +2221,20 @@ export class Engine implements Kernel {
   }
 
   async pause(input: RunScopedInput): Promise<RunControlResult> {
-    const handle = this.resolve(input.run);
+    // the kill switch stops automation for the whole repo, run or no run, until vtc resume
+    // (spec §15; AD-27 rule 7): the daemon's automation reads it (`automationPausedByHuman`)
+    setAutomationPaused(this.guardDir, this.now().toISOString());
+    let handle: RunHandle;
+    try {
+      handle = this.resolve(input.run);
+    } catch (error) {
+      if (error instanceof EngineError && error.code === "no_run" && input.run === undefined)
+        throw new EngineError(
+          "no_run",
+          "no active run to pause; automatic issues and PRs are paused until vtc resume",
+        );
+      throw error;
+    }
     const result = await this.serial(handle, () => {
       if (!handle.state.run.paused) {
         this.emit(handle, {
@@ -2272,6 +2286,9 @@ export class Engine implements Kernel {
    */
   async resume(input: ResumeInput, call: CallContext = { host: null }): Promise<RunControlResult> {
     if (input.adopt === true) this.adopt(input.run, call);
+    // the human's resume lifts the repo-level automation kill switch `pause` set (an open run
+    // that stays paused still holds automation)
+    const automationWasPaused = setAutomationPaused(this.guardDir, null);
     if (this.held.size > 0) {
       const active = activeRun([...this.handles.values()].map((h) => h.state));
       const run = input.run ?? (active === undefined ? [...this.held.keys()][0] : undefined);
@@ -2282,7 +2299,22 @@ export class Engine implements Kernel {
         return { run, paused: false, phase };
       }
     }
-    const handle = this.resolve(input.run);
+    let handle: RunHandle;
+    try {
+      handle = this.resolve(input.run);
+    } catch (error) {
+      if (
+        automationWasPaused &&
+        error instanceof EngineError &&
+        error.code === "no_run" &&
+        input.run === undefined
+      )
+        throw new EngineError(
+          "no_run",
+          "no active run to resume; automatic issues and PRs are back on",
+        );
+      throw error;
+    }
     return this.serial(handle, async () => {
       const state = handle.state;
       for (const run of inFlight(state)) {

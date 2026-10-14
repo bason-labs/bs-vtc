@@ -120,6 +120,25 @@ describe("automatic runs (AD-27 rule 2)", () => {
     await h.release();
   });
 
+  it("leaves a G2 that lists unverified facts for the human: a fact waiver needs a human's reason (AD-22 rule 4)", async () => {
+    const h = createHarness({ project: { merge_level: 2 } });
+    await h.engine.startAutomatic(REQUEST, ISSUE, CLAUDE);
+    const unverified = `${spineFor(SPEC_ONE)}\n## Research\n\n- UNVERIFIED: the hosting plan includes point-in-time recovery\n`;
+    const { planner, seen } = await drive(h, () => unverified);
+    expect(planner).toBeUndefined();
+    const log = events(h);
+    // G1 is the engine's; G2 is neither approved nor rejected by it
+    expect(
+      log.filter((e) => e.type === "gate.approved").map((e) => [e.actor, e.data.gates]),
+    ).toEqual([["engine", ["G1"]]]);
+    expect(log.filter((e) => e.type === "gate.rejected")).toEqual([]);
+    const gate = seen.findLast((a) => a.type === "approve_gate");
+    expect(gate).toMatchObject({ type: "approve_gate", gates: ["G2"] });
+    expect((gate as { unverified_facts: string[] }).unverified_facts).toHaveLength(1);
+    expect(h.engine.status({}).run.phase).toBe("g2");
+    await h.release();
+  });
+
   it("never runs at merge Level 3: a Level-3 project starts the automatic run at Level 2 with no Level-3 preflight", async () => {
     const h = createHarness({ project: { merge_level: 3 }, level3: true });
     await h.engine.startAutomatic(REQUEST, ISSUE, CLAUDE);

@@ -5,7 +5,7 @@
  * events (into the next run's log when none is open); the Lead relays a daily summary once per UTC
  * day; without `EngineDeps.automation` nothing is evaluated.
  */
-import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import {
@@ -24,6 +24,7 @@ import type {
   UpstreamWiringDeps,
 } from "../../src/core/index.js";
 import { isGitHubRemote, wireAutomation } from "../../src/daemon/automation.js";
+import { automationPausedByHuman, setAutomationPaused } from "../../src/core/guard.js";
 import { cleanupDirs, tempDir } from "../helpers/repo.js";
 import { CLAUDE, createHarness, type Harness } from "../helpers/engine-harness.js";
 import { driveToRelease, ISSUE, REQUEST as AUTO_REQUEST } from "../helpers/automatic-run.js";
@@ -85,6 +86,9 @@ const started = async (h: Harness): Promise<string> => (await h.engine.start(REQ
 const fakeEngine = () => {
   const runs = new Map<string, { finished: boolean; paused: boolean }>();
   const recorded: { run: string; type: string; data: unknown }[] = [];
+  const notices: string[] = [];
+  /** While set, recording an event throws (a full disk, a log the engine refuses). */
+  const failRecord = { on: false };
   let listener: ((event: VtcEvent) => void) | undefined;
   const engine = {
     guardDir: tempDir("vtc-guard-"),
@@ -99,6 +103,7 @@ const fakeEngine = () => {
       })),
     config: () => ({}),
     recordModuleEvent: (run: string, draft: EventDraft): boolean => {
+      if (failRecord.on) throw new Error("the event log refused the append");
       const r = runs.get(run);
       if (r === undefined || r.finished) return false;
       recorded.push({ run, type: draft.type, data: draft.data });
@@ -111,12 +116,20 @@ const fakeEngine = () => {
       };
     },
     relay: () => undefined,
-    notice: () => undefined,
+    notice: (text: string) => {
+      notices.push(text);
+    },
   } as unknown as Engine;
   return {
     engine,
     runs,
     recorded,
+    notices,
+    failRecord,
+    /** An event of `run` reaches the wiring's listener. */
+    event: (event: Pick<VtcEvent, "type" | "run" | "data"> & Partial<VtcEvent>) => {
+      listener?.({ ts: "2026-10-13T09:00:00.000Z", seq: 1, actor: "engine", ...event } as VtcEvent);
+    },
     started: (run: string) => {
       listener?.({ type: "run.started", run } as VtcEvent);
     },
@@ -559,5 +572,134 @@ describe("automation wiring (AD-27 rules 7 and 8)", () => {
     );
     await wiring.close();
     await h.release();
+  });
+  it("a job that throws is an engine notice: the queue keeps going and idle never rejects", async () => {
+    const fake = fakeEngine();
+    const up = fakeUpstream();
+    const wiring = wireAutomation(
+      fake.engine,
+      { repoRoot: tempDir(), vtcHome: tempDir(), automation: AUTOMATION },
+      { githubRemote: true, createUpstream: up.create },
+    );
+    fake.runs.set("R-1", { finished: false, paused: true });
+    const crash = { type: "incident.recorded", run: "R-1", data: { kind: "crash", detail: "x" } };
+    // paused: the skip's event cannot be recorded
+    fake.failRecord.on = true;
+    fake.event(crash);
+    await expect(wiring.idle()).resolves.toBeUndefined();
+    expect(fake.notices.join("\n")).toMatch(/the event log refused the append/);
+    // the next fact is still handled
+    fake.failRecord.on = false;
+    fake.runs.set("R-1", { finished: false, paused: false });
+    fake.event(crash);
+    await wiring.idle();
+    expect(up.facts.map((f) => f.kind)).toEqual(["defect"]);
+    await expect(wiring.close()).resolves.toBeUndefined();
+  });
+
+  it("a guard-dir write that throws is an engine notice, and a later fact is still handled", async () => {
+    const h = createHarness();
+    const up = fakeUpstream();
+    const wiring = wireAutomation(
+      h.engine,
+      { repoRoot: h.repo, vtcHome: h.home, automation: AUTOMATION, now: () => h.clock },
+      { githubRemote: true, createUpstream: up.create },
+    );
+    const run = await started(h);
+    await wiring.idle();
+    // the summary's file is now a directory: the next day's summary write throws
+    const summary = join(h.engine.guardDir, "automation-summary.json");
+    rmSync(summary, { force: true });
+    mkdirSync(join(summary, "x"), { recursive: true });
+    h.advance(24 * 60 * 60_000);
+    h.engine.recordModuleEvent(run, {
+      type: "incident.recorded",
+      actor: "engine",
+      data: { kind: "gate_infra", detail: "the scanner could not start" },
+    });
+    await expect(wiring.idle()).resolves.toBeUndefined();
+    expect(h.engine.notices.join("\n")).toMatch(/automation \(the daily summary\) failed/);
+    h.engine.recordModuleEvent(run, {
+      type: "incident.recorded",
+      actor: "engine",
+      data: { kind: "crash", detail: "a job failed" },
+    });
+    await wiring.idle();
+    expect(up.facts.map((f) => f.errorClass)).toEqual(["incident.gate_infra", "incident.crash"]);
+    await wiring.close();
+    await h.release();
+  });
+
+  it("vtc pause stops automation with no run open, until the human's vtc resume (the kill switch)", async () => {
+    const h = createHarness();
+    let sweeps = 0;
+    const create: CreateUpstream = () => ({
+      onFact: () => Promise.resolve(),
+      sweep: () => {
+        sweeps += 1;
+        return Promise.resolve();
+      },
+    });
+    vi.useFakeTimers({ toFake: ["setInterval", "clearInterval"] });
+    try {
+      const wiring = wireAutomation(
+        h.engine,
+        { repoRoot: h.repo, vtcHome: h.home, automation: AUTOMATION, now: () => h.clock },
+        { githubRemote: true, createUpstream: create, sweepEveryMs: 1000 },
+      );
+      await wiring.idle();
+      expect(sweeps).toBe(1);
+      // idle: no run to pause, but automation stops all the same
+      await expect(h.engine.pause({})).rejects.toThrow(
+        /no active run to pause; automatic issues and PRs are paused until vtc resume/,
+      );
+      expect(automationPausedByHuman(h.engine.guardDir)).toBe(true);
+      expect(wiring.settings()).toMatchObject({ issues: false, prs: false, upstream: false });
+      expect(wiring.settings()?.notes).toContain("automation is paused (vtc pause)");
+      vi.advanceTimersByTime(3000);
+      await wiring.idle();
+      expect(sweeps).toBe(1);
+      // a run that starts meanwhile does not switch it back on
+      await started(h);
+      expect(automationPausedByHuman(h.engine.guardDir)).toBe(true);
+      expect(wiring.settings()?.notes).toContain("automation is paused (vtc pause)");
+      // the human's resume does
+      await h.engine.resume({});
+      expect(automationPausedByHuman(h.engine.guardDir)).toBe(false);
+      vi.advanceTimersByTime(1000);
+      await wiring.idle();
+      expect(sweeps).toBe(2);
+      await wiring.close();
+    } finally {
+      vi.useRealTimers();
+    }
+    await h.release();
+  });
+
+  it("while the kill switch is set, a fact of a finished run is an automation.skipped (paused)", async () => {
+    const fake = fakeEngine();
+    const up = fakeUpstream();
+    const wiring = wireAutomation(
+      fake.engine,
+      { repoRoot: tempDir(), vtcHome: tempDir(), automation: AUTOMATION },
+      { githubRemote: true, createUpstream: up.create },
+    );
+    // between runs: the last one finished, none is open
+    fake.runs.set("R-1", { finished: true, paused: false });
+    setAutomationPaused(fake.engine.guardDir, "2026-10-13T09:00:00.000Z");
+    fake.event({
+      type: "feature.post_merge_ci",
+      run: "R-1",
+      feature: "F-1",
+      data: { merge_commit: "a".repeat(40), status: "red", runs: [] },
+    });
+    await wiring.idle();
+    expect(up.facts).toEqual([]);
+    const pending = readFileSync(join(fake.engine.guardDir, "automation-pending.jsonl"), "utf8");
+    expect(JSON.parse(pending.trim()) as Line).toMatchObject({
+      type: "automation.skipped",
+      data: { reason: "paused", kind: "ci_failure" },
+    });
+    await wiring.close();
   });
 });

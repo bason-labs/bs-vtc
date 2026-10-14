@@ -9,6 +9,7 @@ import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import {
   automationFor,
+  sha256Hex,
   type AssetBundle,
   type AutomationContext,
   type AutomationDeps,
@@ -239,10 +240,12 @@ describe("engine facts in the module's vocabulary", () => {
 });
 
 describe("the Lookback PR input (D-cb)", () => {
+  /** The replay result as the engine wrote it, and the SHA-256 its event recorded. */
+  const REPLAY_TEXT = JSON.stringify(REPLAY);
   const setup = () => {
     const root = tempDir("vtc-bridge-");
     mkdirSync(join(root, ".vtc/lookback/replays"), { recursive: true });
-    writeFileSync(join(root, ".vtc/lookback/replays/p-engineer-1.json"), JSON.stringify(REPLAY));
+    writeFileSync(join(root, ".vtc/lookback/replays/p-engineer-1.json"), REPLAY_TEXT);
     return root;
   };
   const read = (root: string, over: Partial<Parameters<typeof readLookbackPrInput>[0]> = {}) =>
@@ -250,6 +253,7 @@ describe("the Lookback PR input (D-cb)", () => {
       projectRoot: root,
       proposal: "p-engineer-1",
       replayPath: ".vtc/lookback/replays/p-engineer-1.json",
+      replaySha256: sha256Hex(REPLAY_TEXT),
       readProposal: () => Promise.resolve(PROPOSAL),
       candidateEditable: (replay) =>
         Promise.resolve(
@@ -280,14 +284,12 @@ describe("the Lookback PR input (D-cb)", () => {
     expect(await read(root, { candidateEditable: () => Promise.resolve(undefined) })).toMatch(
       /is not stored/,
     );
-    writeFileSync(
-      join(root, ".vtc/lookback/replays/p-engineer-1.json"),
-      JSON.stringify({ ...REPLAY, verdict: "no_change" }),
-    );
-    expect(await read(root)).toMatch(/says no_change/);
+    const noChange = JSON.stringify({ ...REPLAY, verdict: "no_change" });
+    writeFileSync(join(root, ".vtc/lookback/replays/p-engineer-1.json"), noChange);
+    expect(await read(root, { replaySha256: sha256Hex(noChange) })).toMatch(/says no_change/);
     // a link is never followed
     const outside = join(tempDir("vtc-outside-"), "r.json");
-    writeFileSync(outside, JSON.stringify(REPLAY));
+    writeFileSync(outside, REPLAY_TEXT);
     symlinkSync(outside, join(root, ".vtc/lookback/replays/p-link.json"));
     expect(await read(root, { replayPath: ".vtc/lookback/replays/p-link.json" })).toMatch(
       /not a regular file/,
@@ -299,6 +301,40 @@ describe("the Lookback PR input (D-cb)", () => {
     expect(await read(linked, { replayPath: ".vtc/lookback/replays/p-engineer-1.json" })).toMatch(
       /not a regular file/,
     );
+  });
+});
+
+describe("the Lookback PR input against an edited replay result (reading 128)", () => {
+  const root = (): string => {
+    const dir = tempDir("vtc-bridge-");
+    mkdirSync(join(dir, ".vtc/lookback/replays"), { recursive: true });
+    return dir;
+  };
+  const read = (dir: string, replaySha256: string | undefined) =>
+    readLookbackPrInput({
+      projectRoot: dir,
+      proposal: "p-engineer-1",
+      replayPath: ".vtc/lookback/replays/p-engineer-1.json",
+      replaySha256,
+      readProposal: () => Promise.resolve(PROPOSAL),
+      candidateEditable: () => Promise.resolve("the replayed candidate text"),
+    });
+
+  it("refuses a replay result a role rewrote after the engine wrote it", async () => {
+    const dir = root();
+    const written = JSON.stringify(REPLAY);
+    // a role swaps the role and the candidate the PR would carry
+    writeFileSync(
+      join(dir, ".vtc/lookback/replays/p-engineer-1.json"),
+      JSON.stringify({ ...REPLAY, role: "architect", candidate: "f".repeat(64) }),
+    );
+    expect(await read(dir, sha256Hex(written))).toMatch(/edited after the engine wrote it/);
+  });
+
+  it("refuses one whose event recorded no SHA-256", async () => {
+    const dir = root();
+    writeFileSync(join(dir, ".vtc/lookback/replays/p-engineer-1.json"), JSON.stringify(REPLAY));
+    expect(await read(dir, undefined)).toMatch(/no recorded SHA-256/);
   });
 });
 

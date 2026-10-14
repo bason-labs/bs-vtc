@@ -566,6 +566,7 @@ export const runDaemon: RunDaemon = async (deps: EngineDeps, options) => {
                   projectRoot: deps.repoRoot,
                   proposal: fact.proposal ?? "",
                   replayPath: fact.replayPath ?? "",
+                  replaySha256: fact.replaySha256,
                   readProposal: async (role) => (await readProposalFiles(deps.repoRoot, role))?.raw,
                   candidateEditable: async (replay) => {
                     const locked = plugins.promptParts?.(

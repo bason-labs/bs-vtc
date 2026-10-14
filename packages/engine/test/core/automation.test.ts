@@ -110,6 +110,18 @@ describe("automation triggers (D-bv)", () => {
         }),
       ),
     ).toEqual([["upstream", "lookback", undefined]]);
+    // the fact carries the replay result's hash, so the PR is built only from the engine's bytes
+    expect(
+      automationFacts(
+        stateWith(),
+        ev("lookback.replay_finished", {
+          proposal: "p-1",
+          verdict: "improve",
+          path: ".vtc/lookback/replays/p-1.json",
+          sha256: "e".repeat(64),
+        }),
+      )[0],
+    ).toMatchObject({ proposal: "p-1", replaySha256: "e".repeat(64) });
     expect(
       facts(
         ev("lookback.replay_finished", {
@@ -122,7 +134,7 @@ describe("automation triggers (D-bv)", () => {
     ).toEqual([]);
   });
 
-  it("a stuck park is a project issue and VTC's own defect; a budget park is the human's", () => {
+  it("a stuck park is a project issue and VTC's own defect; a budget or blocked park is the human's", () => {
     const park = (reason: string) =>
       ev(
         "task.status_changed",
@@ -136,6 +148,10 @@ describe("automation triggers (D-bv)", () => {
     expect(facts(park("gate_infra"))).toEqual([["project", "parked", undefined]]);
     expect(facts(park("budget"))).toEqual([]);
     expect(facts(park("risk_rule"))).toEqual([]);
+    // a role's question for the human, or an in-session dispatch refused on the local setup:
+    // routine human escalations, never an issue in the project's repo
+    expect(facts(park("blocked"))).toEqual([]);
+    expect(facts(park("spec_question"))).toEqual([]);
   });
 
   it("project side: red post-merge CI, reverts, escaped defects, out-of-scope findings", () => {

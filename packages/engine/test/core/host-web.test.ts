@@ -9,7 +9,12 @@ import { describe, expect, it } from "vitest";
 import { HOST_WEB_OFF_NOTICE, type HostOutcome } from "@vtc/shared";
 import type { CallContext } from "../../src/core/index.js";
 import { writeFile } from "../helpers/repo.js";
-import { createHarness, type Harness, type HeadlessScript } from "../helpers/engine-harness.js";
+import {
+  CLAUDE,
+  createHarness,
+  type Harness,
+  type HeadlessScript,
+} from "../helpers/engine-harness.js";
 
 const CODEX: CallContext = { host: "codex" };
 
@@ -100,6 +105,35 @@ describe("host_web roles are routed where host web search is safe (D-cf, reading
       h.sandboxRequests.find((r) => r.cwd === h.launched[0]?.request.cwd)?.tools.host_web,
     ).toBe(true);
     expect(result.notices).toBeUndefined();
+    await h.release();
+  });
+
+  it("on its Lead's own host without safe web search, it never runs in session: headless without host web, with the notice", async () => {
+    // only Claude Code, its web search not safe here: the route is the Lead's host, hostWeb off
+    const h = createHarness({ capabilities: { safeHostWeb: false }, headless: researcher });
+    await startNew(h, CLAUDE);
+    const first = await h.engine.next({}, CLAUDE);
+    await h.engine.settle();
+    expect(first.actions.some((a) => a.type === "spawn_role")).toBe(false);
+    expect(h.launched.map((l) => [l.host, l.request.role])).toEqual([
+      ["claude-code", "research_analyst"],
+    ]);
+    expect(
+      h.sandboxRequests.find((r) => r.cwd === h.launched[0]?.request.cwd)?.tools.host_web,
+    ).toBe(false);
+    const second = await h.engine.next({}, CLAUDE);
+    expect([...(first.notices ?? []), ...(second.notices ?? [])]).toEqual([HOST_WEB_OFF_NOTICE]);
+    await h.release();
+  });
+
+  it("and when that host cannot run it headless either, the step is refused, never run in session", async () => {
+    const h = createHarness({ capabilities: { safeHostWeb: false, headless: false } });
+    await startNew(h, CLAUDE);
+    const result = await h.engine.next({}, CLAUDE);
+    expect(result.actions.some((a) => a.type === "spawn_role")).toBe(false);
+    expect(h.launched).toEqual([]);
+    // a phase step: the human gets an escalation saying why
+    expect(h.engine.status({}).open_escalations).toBe(1);
     await h.release();
   });
 
