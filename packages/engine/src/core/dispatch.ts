@@ -79,6 +79,9 @@ import { recordDispatch, type DispatchRecord } from "./dispatch-guard.js";
 import { architectDepth, dealDesignConstraints, researchDepth } from "./lottery.js";
 import { prepareRoleWorktree } from "./role-worktree.js";
 import { prepareTrial, type ReplayStepRef } from "./replay.js";
+import { HEADLESS_LOADS_AGENT, pinBlocker } from "./prompt-target.js";
+
+export { HEADLESS_LOADS_AGENT } from "./prompt-target.js";
 
 /** A handed-out step: the Lead's action, and what an engine-launched run of it needs. */
 export interface DispatchedStep {
@@ -94,17 +97,6 @@ export interface DispatchedStep {
    */
   readonly roleCore?: string | null;
 }
-
-/**
- * Whether a host's headless run loads the compiled plugin agent itself (`claude -p --agent`,
- * spine §7 "Claude headless plugin agent"). `codex exec` has no agent flag (spine §7 "Codex
- * headless role identity"): the engine carries the role's locked core in the prompt and its
- * editable section in the pack.
- */
-export const HEADLESS_LOADS_AGENT: Readonly<Record<HostId, boolean>> = {
-  "claude-code": true,
-  codex: false,
-};
 
 export interface StepSpec {
   readonly key: string;
@@ -779,23 +771,6 @@ interface PinSelection {
   /** Why a selection was thrown away (an `incident.recorded` `prompt_selection`, reading 137). */
   readonly problem?: string;
 }
-
-/**
- * Why a dispatch's agent cannot take a pinned editable section, or `null` when it can (AD-21
- * rule 6, reading 176): an `editable_in_pack` agent on either host, or any agent in a headless run
- * on a host whose runs do not load the compiled agent ({@link HEADLESS_LOADS_AGENT}); either way
- * its manifest names the locked core's SHA.
- */
-const pinBlocker = (
-  parts: PromptParts | undefined,
-  host: HostId,
-  dispatch: "subagent" | "headless",
-): string | null => {
-  if (parts === undefined) return "the plugin has no manifest entry for it";
-  if (parts.lockedSha256 === undefined) return "its manifest names no locked_sha256";
-  if (parts.editableInPack || (dispatch === "headless" && !HEADLESS_LOADS_AGENT[host])) return null;
-  return `it carries its own editable section (not editable_in_pack) and this ${dispatch === "headless" ? `${host} headless run loads the compiled agent` : "run is a subagent of the Lead"}, so a pinned section cannot reach it until its role is switched`;
-};
 
 const pinnedPrompt = (
   k: Kernel,

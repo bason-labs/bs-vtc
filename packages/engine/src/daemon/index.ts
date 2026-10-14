@@ -3,8 +3,8 @@
  * seam from @vtc/shared: `runDaemon` takes the engine lock, wires core to the injected Gate
  * Runner, host adapters, storage, assets and timer, serves MCP on the local socket and HTTP/SSE
  * on 127.0.0.1, and publishes discovery (AD-12); `serveSnapshot` serves the committed `.vtc/`
- * read-only for `vtc dashboard` (AD-5 rule 7). It may import the core, git, http, mcp and research
- * entries (it is where the research module meets core, AD-13 rule 12); it never imports gates
+ * read-only for `vtc dashboard` (AD-5 rule 7). It may import the core, git, http, mcp, research and
+ * lookback entries (it is where those modules meet core, AD-13 rule 12); it never imports gates
  * (the Gate Runner arrives in `EngineDeps`) and never loads a storage driver (the cli injects
  * `openStorage`).
  */
