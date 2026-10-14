@@ -704,9 +704,13 @@ export const draft = (id: string, over: Record<string, unknown> = {}) => ({
 });
 
 /** Security's design mode (§6.1 DESIGN): writes the threat model and submits it. */
-export const threatModel = async (h: Harness, action: SpawnAction): Promise<LeadAction[]> => {
+export const threatModel = async (
+  h: Harness,
+  action: SpawnAction,
+  text = "# Threat model\n\nNo threat needs a new SEC-n requirement.\n",
+): Promise<LeadAction[]> => {
   const path = ".vtc/architecture/threat-model/model.md";
-  writeFile(workdir(action), path, "# Threat model\n\n- SEC-1: tokens are stored hashed\n");
+  writeFile(workdir(action), path, text);
   return (
     await submitResult(h, action, { exit: "done", artifacts: [{ type: "threat_model", path }] })
   ).actions;
@@ -716,7 +720,23 @@ export const threatModel = async (h: Harness, action: SpawnAction): Promise<Lead
 export interface FrontHalfOptions {
   /** A run with UI: the Designer runs in DESIGN and writes this `screens.yaml`. */
   readonly screens?: string;
+  /** Security's threat model (default: no SEC-n requirement). */
+  readonly threats?: string;
 }
+
+/**
+ * An architecture artifact whose requirement-to-component map names every requirement of `spec`
+ * (the DESIGN check, §6.1, spine §5 reading 146).
+ */
+export const spineFor = (spec: string): string =>
+  [
+    "# spine",
+    "",
+    "## Requirement map",
+    "",
+    ...[...new Set(spec.match(/\b(?:REQ|SEC)-[1-9]\d*\b/g) ?? [])].map((id) => `- ${id}: app`),
+    "",
+  ].join("\n");
 
 export const toPlanner = async (
   h: Harness,
@@ -771,7 +791,7 @@ export const toPlanner = async (
   };
   collect(actions);
   for (let step = pending.shift(); step !== undefined; step = pending.shift()) {
-    if (step.role === "security") actions = await threatModel(h, step);
+    if (step.role === "security") actions = await threatModel(h, step, options.threats);
     else if (step.role === "designer") {
       writeFile(workdir(step), ".vtc/design/screens.yaml", options.screens ?? "screens: []\n");
       actions = (
@@ -781,7 +801,7 @@ export const toPlanner = async (
         })
       ).actions;
     } else {
-      writeFile(workdir(step), ".vtc/architecture/spine.md", "# spine\n");
+      writeFile(workdir(step), ".vtc/architecture/spine.md", spineFor(spec));
       actions = (
         await submitResult(h, step, {
           exit: "done",

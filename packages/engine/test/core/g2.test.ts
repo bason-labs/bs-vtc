@@ -65,6 +65,11 @@ const SPINE = [
   "- Postgres 17 is supported until 2029.",
   "- UNVERIFIED: the hosting plan includes point-in-time recovery",
   "",
+  "## Requirement map",
+  "",
+  "- REQ-1: the token store",
+  "- REQ-2: the reset endpoint",
+  "",
 ].join("\n");
 
 const row = (over: Partial<FactRow>): FactRow => ({
@@ -86,6 +91,10 @@ const toG2 = async (
   options: {
     readonly hasUi?: boolean;
     readonly designer?: (action: SpawnAction) => { type: string; path: string }[];
+    /** The Architect's architecture artifact (default {@link SPINE}). */
+    readonly spine?: string;
+    /** Security's threat model (default: no SEC-n requirement). */
+    readonly threats?: string;
   } = {},
 ): Promise<ApproveGate> => {
   await h.engine.start(
@@ -126,7 +135,7 @@ const toG2 = async (
   ).actions;
   const architect = only(design, "architect");
   const security = only(design, "security");
-  writeFile(workdir(architect), ".vtc/architecture/spine.md", SPINE);
+  writeFile(workdir(architect), ".vtc/architecture/spine.md", options.spine ?? SPINE);
   let actions = (
     await submitResult(h, architect, {
       exit: "done",
@@ -134,7 +143,7 @@ const toG2 = async (
     })
   ).actions;
   const designer = spawns(actions).find((a) => a.role === "designer");
-  actions = await threatModel(h, security);
+  actions = await threatModel(h, security, options.threats);
   const designerAction = designer ?? spawns(actions).find((a) => a.role === "designer");
   if (designerAction !== undefined && options.designer !== undefined)
     actions = (
@@ -145,6 +154,11 @@ const toG2 = async (
     ).actions;
   return gateOf(actions);
 };
+
+const waiveAll = (gate: ApproveGate) => ({
+  waived_facts: gate.unverified_facts,
+  fact_waivers: gate.unverified_facts.map((id) => ({ id, reason: "ok" })),
+});
 
 const approve = (h: Harness, gate: ApproveGate, over: Partial<ApproveInput> = {}) =>
   h.engine.approve(
@@ -452,9 +466,28 @@ describe("G2 directions and the DESIGN coverage check (§9.1, §6.1)", () => {
     "    states: [success]",
     "",
   ].join("\n");
-  const designerWork = (action: SpawnAction): { type: string; path: string }[] => {
+  /** Screens and a component registry the DESIGN check passes on. */
+  const COVERED = [
+    "version: 1",
+    "screens:",
+    "  - id: reset-request",
+    "    route: /reset",
+    "    states: [empty, success]",
+    "    reqs: [REQ-1, REQ-2]",
+    "",
+  ].join("\n");
+  const designerWork = (action: SpawnAction): { type: string; path: string }[] =>
+    designerWith(action, COVERED, "id: button\nscreens: [reset-request]\n");
+  /** The same work with gaps: REQ-2 has no screen, `about` covers nothing, `icon` is unregistered. */
+  const gappyDesigner = (action: SpawnAction): { type: string; path: string }[] =>
+    designerWith(action, SCREENS, "id: button\nuses: [icon]\nscreens: [reset-request]\n");
+  const designerWith = (
+    action: SpawnAction,
+    screens: string,
+    button: string,
+  ): { type: string; path: string }[] => {
     const cwd = workdir(action);
-    writeFile(cwd, ".vtc/design/screens.yaml", SCREENS);
+    writeFile(cwd, ".vtc/design/screens.yaml", screens);
     writeFile(
       cwd,
       ".vtc/design/directions/quiet-ledger.md",
@@ -483,11 +516,7 @@ describe("G2 directions and the DESIGN coverage check (§9.1, §6.1)", () => {
       ".vtc/design/directions/bold-novelty.json",
       JSON.stringify({ ...SIGNAL_REPORT, direction: "bold" }),
     );
-    writeFile(
-      cwd,
-      ".vtc/design/components/button.yaml",
-      "id: button\nuses: [icon]\nscreens: [reset-request]\n",
-    );
+    writeFile(cwd, ".vtc/design/components/button.yaml", button);
     return [
       { type: "screens", path: ".vtc/design/screens.yaml" },
       { type: "design_direction", path: ".vtc/design/directions/quiet-ledger.md" },
@@ -501,7 +530,7 @@ describe("G2 directions and the DESIGN coverage check (§9.1, §6.1)", () => {
   it("shows each direction with the engine's novelty verdict, and the coverage report in gate.requested", async () => {
     const h = createHarness({ roles: ROLES });
     const seam = noveltySeam(h);
-    const gate = await toG2(h, { hasUi: true, designer: designerWork });
+    const gate = await toG2(h, { hasUi: true, designer: gappyDesigner });
     // only a direction with a first viewport is checked, in the project's client scope
     expect(seam.checked).toEqual([
       {
@@ -538,14 +567,67 @@ describe("G2 directions and the DESIGN coverage check (§9.1, §6.1)", () => {
         novelty: "unchecked",
       },
     ]);
-    expect(ofType(h, "gate.requested").at(-1)?.data.design_coverage).toEqual({
+    const coverage = {
+      reqs_without_component: [],
       reqs_without_screen: ["REQ-2"],
       screens_without_req: ["about"],
       components_unregistered: ["icon"],
       ok: false,
+    };
+    expect(ofType(h, "gate.requested").at(-1)?.data.design_coverage).toEqual(coverage);
+    // the Lead shows it too: the approval is refused while it fails (reading 146)
+    expect(gate.design_coverage).toEqual(coverage);
+    await expect(
+      approve(h, gate, { ...waiveAll(gate), design_direction: "signal" }),
+    ).rejects.toThrow(
+      /DESIGN check failed: REQ-2 has no screen; screen about covers no requirement; component icon is not registered/,
+    );
+    await h.release();
+  });
+
+  it("checks every requirement is mapped to a component, on a run without UI too (§6.1)", async () => {
+    const h = createHarness({ roles: ROLES });
+    const gate = await toG2(h, {
+      spine: "# Spine\n\n## Requirement map\n\n- REQ-1: the token store\n",
     });
-    // the coverage report is Flow Studio's (gate.requested); the Lead's action stays as frozen
-    expect(gate).not.toHaveProperty("design_coverage");
+    expect(gate.design_coverage).toEqual({
+      reqs_without_component: ["REQ-2"],
+      reqs_without_screen: [],
+      screens_without_req: [],
+      components_unregistered: [],
+      ok: false,
+    });
+    await expect(approve(h, gate, waiveAll(gate))).rejects.toThrow(
+      /DESIGN check failed: REQ-2 is mapped to no component/,
+    );
+    // rejecting G2 with a note sends DESIGN back to the Architect
+    const back = await h.engine.approve(
+      {
+        gates: gate.gates,
+        decision: "reject",
+        frozen: gate.artifacts,
+        waived_facts: [],
+        note: "map REQ-2",
+      },
+      CLAUDE,
+    );
+    expect(only(back.actions, "architect").role).toBe("architect");
+    await h.release();
+  });
+
+  it("a UI run whose Designer wrote no screens.yaml fails the check instead of skipping it", async () => {
+    const h = createHarness({ roles: ROLES });
+    const gate = await toG2(h, {
+      hasUi: true,
+      designer: (action) => {
+        writeFile(workdir(action), ".vtc/design/directions/one.md", "# One\n\nTHESIS: one\n");
+        return [{ type: "design_direction", path: ".vtc/design/directions/one.md" }];
+      },
+    });
+    expect(gate.design_coverage).toMatchObject({
+      screens_problem: expect.stringContaining("screens.yaml") as unknown,
+      ok: false,
+    });
     await h.release();
   });
 
@@ -564,11 +646,6 @@ describe("G2 directions and the DESIGN coverage check (§9.1, §6.1)", () => {
     expect(only(out.actions, "planner").role).toBe("planner");
     expect(ofType(h, "gate.approved").at(-1)?.data.design_direction).toBe("signal");
     await h.release();
-  });
-
-  const waiveAll = (gate: ApproveGate) => ({
-    waived_facts: gate.unverified_facts,
-    fact_waivers: gate.unverified_facts.map((id) => ({ id, reason: "ok" })),
   });
 
   it("records the chosen direction through the gate runner's design library (§9.1 step 6)", async () => {

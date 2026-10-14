@@ -159,5 +159,10 @@ export * from "./json-schema.js";
  * `RepoKeySchema`; `RESEARCH_CACHE.requestsFile` and `ResearchCacheRequestRow`; the design
  * library layout (doc only). A GitHub `FetchRequest.repo` may no longer start a name with a dot,
  * and `REPO_ROLE_DENIED.writeDeny` adds `.vtc/runs/**` (reading 143 says why both ship as MINOR).
+ *
+ * 4.8.0 (MINOR): the wave-3 fix round (spine §5 reading 146). `DesignCoverageReport` adds
+ * `reqs_without_component` (the REQ → component check of §6.1 DESIGN) and `screens_problem` (a UI
+ * run's missing or invalid `screens.yaml`), both counted in `ok`; `approve_gate` carries the
+ * report as `design_coverage`, since an approval is refused while it fails.
  */
-export const CONTRACTS_VERSION = "4.7.0";
+export const CONTRACTS_VERSION = "4.8.0";

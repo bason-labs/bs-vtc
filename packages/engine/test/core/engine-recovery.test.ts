@@ -242,6 +242,38 @@ describe("questions, plans and the design phase", () => {
     expect(h.engine.status({}).run.phase).toBe("plan");
     await h.release();
   });
+  it("adds the SEC-n requirements of the threat model G2 froze: the plan must cover them (§6.1)", async () => {
+    const h = createHarness();
+    const threats = [
+      "# Threat model",
+      "",
+      "| Threat | Mitigation |",
+      "| --- | --- |",
+      "| token replay | SEC-1 |",
+      "",
+      "## SEC-n",
+      "",
+      "- SEC-1: A reset token expires 15 minutes after it is issued.",
+      "- SEC-1.AC-1: Given a token issued 16 minutes ago When it is submitted Then the reset is refused.",
+      "",
+    ].join("\n");
+    const planner = await toPlanner(h, SPEC_ONE, { threats });
+    const rejected = await submitResult(h, planner, {
+      exit: "done",
+      tasks: [draft("T-1")] as never,
+    });
+    expect(rejected).toMatchObject({
+      accepted: false,
+      rejection: { reason: "claim_check", issues: ["SEC-1 is not covered by any task"] },
+    });
+    const again = only(rejected.actions, "planner");
+    const accepted = await submitResult(h, again, {
+      exit: "done",
+      tasks: [draft("T-1", { covers: ["REQ-1", "SEC-1"] })] as never,
+    });
+    expect(accepted.accepted).toBe(true);
+    await h.release();
+  });
   it("a run with UI dispatches the Architect and the Designer and shows both at G2", async () => {
     const h = createHarness();
     await h.engine.start(

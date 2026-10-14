@@ -422,26 +422,22 @@ const componentSpecs = (k: Kernel, h: RunHandle): Record<string, unknown>[] => {
 const strings = (value: unknown): string[] =>
   Array.isArray(value) ? value.filter((v): v is string => typeof v === "string") : [];
 
+/** Whether `text` names requirement `id` (`REQ-2`, or one of its ACs, never `REQ-21`). */
+const names = (text: string, id: string): boolean =>
+  new RegExp(`(?<![A-Za-z0-9-])${id}(?![0-9])`).test(text);
+
 /**
- * The DESIGN check (§6.1, §9; `DesignCoverageReport`) for a run with UI: every requirement of the
- * frozen spec is covered by a screen's `reqs` (a screen covering `REQ-1` covers its ACs); every
- * screen covers at least one requirement; every component a component spec uses (`uses`) is one a
- * component spec defines (`id`), the registry the Engineer may build from (§9 Consistency).
- * `undefined` when the run has no UI or the Designer wrote no `screens.yaml`.
+ * The DESIGN check (§6.1, §9; `DesignCoverageReport`, spine §5 reading 146), before every G2:
+ * - every requirement of the frozen spec is mapped to a component: the Architect's architecture
+ *   artifacts (its requirement-to-component map) name it;
+ * - with UI, every requirement is covered by a screen's `reqs` (a screen covering `REQ-1` covers
+ *   its ACs); every screen covers at least one requirement; every component a component spec uses
+ *   (`uses`) is one a component spec defines (`id`), the registry the Engineer may build from (§9
+ *   Consistency); and a `screens.yaml` that is missing or invalid fails the check
+ *   (`screens_problem`) instead of skipping it.
+ * An approval is refused while `ok` is false (`g2ApprovalProblem`).
  */
-export const designCoverage = (k: Kernel, h: RunHandle): DesignCoverageReport | undefined => {
-  if (!h.state.run.has_ui) return undefined;
-  const text = read(k.deps.repoRoot, DESIGN_SCREENS_PATH);
-  if (text === null) return undefined;
-  let screens;
-  try {
-    const parsed = parsePersisted(DesignScreensFileSchema, parseYaml(text));
-    if (!parsed.success) return undefined;
-    screens = parsed.data.screens;
-  } catch {
-    return undefined;
-  }
-  const covered = screens.flatMap((s) => s.reqs);
+export const designCoverage = (k: Kernel, h: RunHandle): DesignCoverageReport => {
   const reqs = [
     ...new Set(
       frozenSpecItems(k.deps.repoRoot, h.state)
@@ -449,26 +445,76 @@ export const designCoverage = (k: Kernel, h: RunHandle): DesignCoverageReport | 
         .filter((id) => /^(REQ|SEC)-[1-9]\d*$/.test(id)),
     ),
   ];
-  const specs = componentSpecs(k, h);
-  const registered = new Set(specs.flatMap((c) => (typeof c.id === "string" ? [c.id] : [])));
-  const used = [...new Set(specs.flatMap((c) => strings(c.uses)))];
+  const architecture = submittedArtifacts(h, "architect")
+    .filter((a) => a.type === "architecture")
+    .map((a) => read(k.deps.repoRoot, a.path) ?? "")
+    .join("\n");
+  const unmapped = reqs.filter((req) => !names(architecture, req));
+  const ui = ((): Partial<Omit<DesignCoverageReport, "reqs_without_component" | "ok">> => {
+    if (!h.state.run.has_ui) return {};
+    const text = read(k.deps.repoRoot, DESIGN_SCREENS_PATH);
+    if (text === null) return { screens_problem: `the Designer wrote no ${DESIGN_SCREENS_PATH}` };
+    let screens;
+    try {
+      const parsed = parsePersisted(DesignScreensFileSchema, parseYaml(text));
+      if (!parsed.success)
+        return {
+          screens_problem:
+            `${DESIGN_SCREENS_PATH} is invalid: ${parsed.error.issues.map((i) => `${i.path.join(".")} ${i.message}`).join("; ")}`.slice(
+              0,
+              300,
+            ),
+        };
+      screens = parsed.data.screens;
+    } catch (error) {
+      return {
+        screens_problem:
+          `${DESIGN_SCREENS_PATH} does not parse: ${error instanceof Error ? error.message : String(error)}`.slice(
+            0,
+            300,
+          ),
+      };
+    }
+    const covered = screens.flatMap((s) => s.reqs);
+    const specs = componentSpecs(k, h);
+    const registered = new Set(specs.flatMap((c) => (typeof c.id === "string" ? [c.id] : [])));
+    const used = [...new Set(specs.flatMap((c) => strings(c.uses)))];
+    return {
+      reqs_without_screen: reqs.filter(
+        (req) => !covered.some((c) => c === req || c.startsWith(`${req}.`)),
+      ),
+      screens_without_req: screens.filter((s) => s.reqs.length === 0).map((s) => s.id),
+      components_unregistered: used
+        .filter((c) => !registered.has(c))
+        .filter((c) => SlugSchema.safeParse(c).success),
+    };
+  })();
   const report = {
-    reqs_without_screen: reqs.filter(
-      (req) => !covered.some((c) => c === req || c.startsWith(`${req}.`)),
-    ),
-    screens_without_req: screens.filter((s) => s.reqs.length === 0).map((s) => s.id),
-    components_unregistered: used
-      .filter((c) => !registered.has(c))
-      .filter((c) => SlugSchema.safeParse(c).success),
+    reqs_without_component: unmapped,
+    reqs_without_screen: ui.reqs_without_screen ?? [],
+    screens_without_req: ui.screens_without_req ?? [],
+    components_unregistered: ui.components_unregistered ?? [],
+    ...(ui.screens_problem === undefined ? {} : { screens_problem: ui.screens_problem }),
   };
   return DesignCoverageReportSchema.parse({
     ...report,
     ok:
+      report.reqs_without_component.length === 0 &&
       report.reqs_without_screen.length === 0 &&
       report.screens_without_req.length === 0 &&
-      report.components_unregistered.length === 0,
+      report.components_unregistered.length === 0 &&
+      report.screens_problem === undefined,
   });
 };
+
+/** What a failed DESIGN check says, one clause per gap. */
+const coverageProblems = (r: DesignCoverageReport): string[] => [
+  ...r.reqs_without_component.map((id) => `${id} is mapped to no component`),
+  ...(r.screens_problem === undefined ? [] : [r.screens_problem]),
+  ...r.reqs_without_screen.map((id) => `${id} has no screen`),
+  ...r.screens_without_req.map((id) => `screen ${id} covers no requirement`),
+  ...r.components_unregistered.map((id) => `component ${id} is not registered`),
+];
 
 // ---------------------------------------------------------------- the gate
 
@@ -498,7 +544,7 @@ export const gateExtras = (
     ...(directions.length === 0 ? {} : { directions }),
     unverified_facts: facts.map((f) => f.id),
     ...(facts.length === 0 ? {} : { facts }),
-    ...(coverage === undefined ? {} : { design_coverage: coverage }),
+    design_coverage: coverage,
   };
 };
 
@@ -511,6 +557,12 @@ export const g2ApprovalProblem = (
   input: Pick<ApproveInput, "fact_waivers" | "design_direction">,
 ): string | null => {
   const problems: string[] = [];
+  // §6.1 DESIGN, reading 146: the human rejects G2 with a note, and the design roles fix it
+  const coverage = extras.design_coverage;
+  if (coverage !== undefined && !coverage.ok)
+    problems.push(
+      `the DESIGN check failed: ${coverageProblems(coverage).join("; ")} (reject G2 with a note so the Architect and Designer fix it)`,
+    );
   const waived = new Set((input.fact_waivers ?? []).map((w) => w.id));
   const missing = extras.unverified_facts.filter((id) => !waived.has(id));
   if (missing.length > 0)
