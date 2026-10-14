@@ -58,6 +58,8 @@ export interface ParkInput {
   readonly riskRule?: RiskRuleReasonRule;
   readonly detail: string;
   readonly evidence: readonly Evidence[];
+  /** `cap` / `stuck`: the role that stopped making progress (the hint goes to it). */
+  readonly stuckRole?: string;
   /** A role's own question (Engineer `blocked`, QA `spec_question`) becomes the escalation. */
   readonly question?: Question;
   readonly raisedBy?: string;
@@ -88,6 +90,7 @@ export const openTaskEscalation = (
           blocks,
           now: k.now(),
           ...(input.raisedBy === undefined ? {} : { raisedBy: input.raisedBy }),
+          ...(input.stuckRole === undefined ? {} : { stuckRole: input.stuckRole }),
         })
       : escalationFromQuestion(input.question, {
           id,
@@ -141,7 +144,10 @@ const resumeTarget = (
       // (e.g. stuck in QA's base check) retries from its checkpoint.
       return lastBuilt(h.state, taskId)?.head === undefined ? checkpoint : "built";
     }
-    return "fixing";
+    // A hint goes to the role that got stuck: a task parked before QA's tests were accepted
+    // (QA author failed, or its tests never failed on the base) resumes at `ready`, so QA author
+    // runs again with the hint; the Engineer gets it only once tests exist.
+    return checkpoint === "ready" ? "ready" : "fixing";
   }
   if (reason === "risk_rule" && effect === "hint") return "fixing";
   // A question or conflict found while verifying: the Engineer continues with the answer.

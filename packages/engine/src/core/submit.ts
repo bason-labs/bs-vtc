@@ -13,6 +13,7 @@ import {
   checkResultAgainstContract,
   escalationFromQuestion,
   HIDDEN_TESTS,
+  redactSecrets,
   resolveRoleMode,
   type ArtifactRef,
   type Finding,
@@ -52,7 +53,13 @@ import {
   sweepDispatches,
 } from "./dispatch-guard.js";
 import { checkPlan, isVtcScopeEntry } from "./plan-check.js";
-import { collectRoleChanges, mergeRoleChanges, roleScopeIssues } from "./role-worktree.js";
+import {
+  collectRoleChanges,
+  mergeRoleChanges,
+  roleScopeIssues,
+  touched,
+  type RoleChanges,
+} from "./role-worktree.js";
 import {
   consecutiveFailures,
   inFlight,
@@ -155,6 +162,8 @@ const recordSpend = (k: Kernel, h: RunHandle, run: RoleRunRecord, cost: number |
       });
     }
   }
+  // The run's spend as shown counts every role run, the front half's included (views.ts
+  // `runBudget` sums the role runs); this event carries the features' budget once there is one.
   const features = [...h.state.features.values()];
   if (features.length > 0) {
     const previous =
@@ -212,6 +221,26 @@ export const checkEngineerShare = (k: Kernel, h: RunHandle): boolean => {
   return parked;
 };
 
+/**
+ * The task worktree a run writes in (the Engineer, QA author) and its branch head before the
+ * result is looked at, or `null` for a run that does not work there.
+ */
+const taskWorktreeHead = async (
+  k: Kernel,
+  h: RunHandle,
+  run: RoleRunRecord,
+): Promise<{ readonly worktree: string; readonly head: string } | null> => {
+  if (run.task === undefined) return null;
+  if (run.role !== "engineer" && !(run.role === "qa" && run.mode === "author")) return null;
+  const task = h.state.tasks.get(run.task);
+  if (task?.worktree === undefined) return null;
+  try {
+    return { worktree: task.worktree, head: await k.deps.workspace.resolve(`vtc/${task.id}`) };
+  } catch {
+    return null;
+  }
+};
+
 /** A step that keeps failing parks its task as stuck (no infinite redispatch, §1.1 #2). */
 const stepFailed = (k: Kernel, h: RunHandle, run: RoleRunRecord): void => {
   if (run.task === undefined) return;
@@ -226,18 +255,38 @@ const stepFailed = (k: Kernel, h: RunHandle, run: RoleRunRecord): void => {
       reason: "stuck",
       detail: `${run.role}${run.mode === undefined ? "" : ` (${run.mode})`} failed or was rejected ${String(failures)} times in a row`,
       evidence: [{ type: "file", ref: `.vtc/tasks/${run.task}.md` }],
+      stuckRole: run.role,
     });
   }
 };
 
-const logRejection = (k: Kernel, h: RunHandle, run: RoleRunRecord, value: Rejection): void => {
+/**
+ * Records a rejection with what the run cost (§11, AD-7 rule 11: every AI call is traceable): a
+ * rejected result was still paid for, so its host-reported usage is on the event and its cost
+ * is charged to the task, feature and run budgets like any other run.
+ */
+const logRejection = (
+  k: Kernel,
+  h: RunHandle,
+  run: RoleRunRecord,
+  value: Rejection,
+  usage: RunUsage | undefined,
+): void => {
   k.emit(h, {
     type: "role.rejected",
     actor: "engine",
     role: run.role,
     ...(run.task === undefined ? {} : { task: run.task }),
+    ...(usage === undefined
+      ? {}
+      : {
+          model: usage.model ?? run.model,
+          tokens: usage.tokens ?? null,
+          cost_usd: usage.cost_usd ?? null,
+        }),
     data: { action_id: run.action_id, reason: value.reason, issues: value.issues },
   });
+  recordSpend(k, h, run, usage?.cost_usd ?? null);
 };
 
 const emitSubmitted = (
@@ -412,6 +461,30 @@ const createPlan = (
  * must resolve there, and only then are its changes copied into the user's checkout (never over
  * a file the user changed meanwhile).
  */
+/**
+ * AD-18 rule 1 for what roles write into git-tracked `.vtc/` (repo map, briefs, spec,
+ * architecture, threat model, design, exports): every text file the role changed is checked with
+ * `redactSecrets` before it is copied into the user's checkout (spine §5 reading 87). Anything it
+ * would redact rejects the result: rewriting the file silently would change the artifact's
+ * sha256 and the hashes gates freeze. The issue names the path and the kind, never the value.
+ */
+const secretIssues = async (k: Kernel, work: RoleChanges): Promise<string[]> => {
+  const issues: string[] = [];
+  const known = k.secrets();
+  for (const path of [...new Set(work.changes.flatMap(touched))]) {
+    const bytes = await k.deps.git.readFileAtCommit(work.head, path);
+    if (bytes === undefined || bytes.includes(0)) continue;
+    const text = Buffer.from(bytes).toString("utf8");
+    const redacted = redactSecrets(text, known);
+    if (redacted === text) continue;
+    const kinds = [...new Set([...redacted.matchAll(/\[REDACTED:([a-z_]+)\]/g)].map((m) => m[1]))];
+    issues.push(
+      `${path} holds what looks like a secret (${kinds.join(", ")}); remove it, refer to it by name instead`,
+    );
+  }
+  return issues;
+};
+
 const acceptIsolatedRole = async (
   k: Kernel,
   h: RunHandle,
@@ -437,6 +510,8 @@ const acceptIsolatedRole = async (
     else artifacts.push({ ...artifact, sha256: bytesSha(bytes) });
   }
   if (issues.length > 0) return { outcome: reject("write_scope", issues) };
+  const secrets = await secretIssues(k, work);
+  if (secrets.length > 0) return { outcome: reject("write_scope", secrets) };
   const missing = await unresolved(
     { ...evidenceContext(k, h, null), repoRoot: join(k.deps.repoRoot, worktree.path) },
     [...result.claims, ...result.verdicts.flatMap((v) => v.evidence)],
@@ -1073,11 +1148,17 @@ export const handleSubmit = async (
     await sweepDispatches(k, h);
     return { accepted: true };
   }
+  const rollback = await taskWorktreeHead(k, h, run);
   const outcome: StepOutcome =
     writes.issues.length > 0
       ? reject("write_scope", writes.issues)
       : await evaluate(k, h, run, input.result);
-  if (outcome.kind === "reject") logRejection(k, h, run, outcome.rejection);
+  if (outcome.kind === "reject") {
+    logRejection(k, h, run, outcome.rejection, input.usage);
+    // A rejected result leaves nothing in the task worktree (committed or not), so the next role
+    // there is never charged with it (spine §5 reading 86).
+    if (rollback !== null) await k.deps.workspace.discard(rollback.worktree, rollback.head);
+  }
   await close(outcome.kind === "reject" && outcome.keepWorktree === true);
   if (writes.issues.length > 0)
     return { accepted: false, rejection: rejection("write_scope", writes.issues) };

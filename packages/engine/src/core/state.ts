@@ -350,6 +350,8 @@ export const applyEvent = (state: RunState, event: VtcEvent): void => {
       run.status = "rejected";
       run.closedSeq = event.seq;
       run.rejection = { reason: data.reason, issues: data.issues };
+      run.tokens = event.tokens ?? null;
+      run.costUsd = event.cost_usd ?? null;
     }
   } else if (isEventOfType(event, "role.failed")) {
     const data = readEventData(event);

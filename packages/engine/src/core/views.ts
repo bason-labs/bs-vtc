@@ -48,13 +48,21 @@ export const usageReportView = (
   };
 };
 
+/**
+ * The run's budget and spend (§11). The spend is every role run's host-reported cost: the front
+ * half's (Cartographer, BA, Architect, Planner, before any feature exists), advisors', and
+ * rejected and failed runs' too, so the run never shows less than it spent. Unpriced runs count
+ * as 0 here (the summary flags them).
+ */
 const runBudget = (state: RunState): StatusResult["budget"] => {
   const features = [...state.features.values()];
   const sum = (pick: (f: (typeof features)[number]) => number): number =>
     features.reduce((total, f) => total + pick(f), 0);
+  const roleRuns = [...state.roleRuns.values()].reduce((total, r) => total + (r.costUsd ?? 0), 0);
+  const recorded = state.runBudget?.spent_usd ?? sum((f) => f.spent_usd);
   return {
     budget_usd: state.runBudget?.budget_usd ?? sum((f) => f.budget_usd),
-    spent_usd: state.runBudget?.spent_usd ?? sum((f) => f.spent_usd),
+    spent_usd: Math.round(Math.max(roleRuns, recorded) * 1e6) / 1e6,
   };
 };
 

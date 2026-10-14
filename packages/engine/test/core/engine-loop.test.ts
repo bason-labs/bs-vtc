@@ -2,11 +2,11 @@
  * The loop controller, parking and escalation, budgets, write scope, usage limits and the kill
  * switch, each driven through next()/submit() on a real repo (§6.3–6.9, §11, AD-8, AD-17).
  */
-import { readFileSync } from "node:fs";
+import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { EscalationListSchema, type LeadAction } from "@vtc/shared";
-import { cleanupDirs, writeFile } from "../helpers/repo.js";
+import { cleanupDirs, git, writeFile } from "../helpers/repo.js";
 import {
   authorTests,
   build,
@@ -18,6 +18,7 @@ import {
   submitResult,
   throughPlan,
   verdictPass,
+  workdir,
   worktreeOf,
   SPEC_ONE,
   toolFinding,
@@ -109,6 +110,71 @@ describe("loop controller through the engine (§6.3 step 9)", () => {
     await h.release();
   });
 
+  it("a hint after QA got stuck re-runs QA author with the hint, never the Engineer", async () => {
+    const h = createHarness();
+    const actions = await throughPlan(h, [draft("T-1")], SPEC_ONE);
+    let qa = only(actions, "qa");
+    // three QA author results rejected in a row (no acceptance tests named): stuck
+    for (let i = 0; i < 3; i += 1) {
+      const out = await submitResult(h, qa, { exit: "done" });
+      expect(out.accepted).toBe(false);
+      await h.engine.settle();
+      if (i < 2) qa = only(out.actions, "qa");
+    }
+    expect(taskOf(h, "T-1").parked?.reason).toBe("stuck");
+    const escalation = EscalationListSchema.parse(h.engine.escalations({})).escalations.find(
+      (e) => e.id === "E-1",
+    );
+    // the option names the role that got stuck
+    expect(escalation?.options.find((o) => o.id === "hint")?.label).toMatch(/^Give QA a hint/);
+    const answered = await h.engine.answer(
+      {
+        escalation: "E-1",
+        answer: {
+          option: "hint",
+          text: "tests go under tests/acceptance/",
+          who_should_have_caught: "qa",
+        },
+      },
+      CLAUDE,
+    );
+    expect(spawns(answered.actions).map((a) => a.role)).toEqual(["qa"]);
+    const resumed = only(answered.actions, "qa");
+    expect(resumed.mode).toBe("author");
+    expect(readFileSync(join(h.repo, resumed.pack), "utf8")).toContain(
+      "hint: tests go under tests/acceptance/",
+    );
+    expect(statusChanges(h).at(-1)).toBe("ready@0");
+    await h.release();
+  });
+
+  it("a rejected QA result leaves nothing on the task branch, so the Engineer is never charged for it", async () => {
+    const h = createHarness();
+    const actions = await throughPlan(h, [draft("T-1")], SPEC_ONE);
+    const qa = only(actions, "qa");
+    const tree = worktreeOf(h, "T-1");
+    const before = git(tree, "rev-parse", "HEAD");
+    // QA writes its test outside the acceptance globs: rejected for write scope
+    writeFile(tree, "test/acceptance/t-1.test.ts", 'test("[REQ-1.AC-1] works", () => {});\n');
+    const out = await submitResult(h, qa, {
+      exit: "done",
+      acceptance_tests: ["[REQ-1.AC-1] works"],
+      artifacts: [{ type: "acceptance_test", path: "test/acceptance/t-1.test.ts" }],
+    });
+    expect(out.accepted).toBe(false);
+    expect(out.rejection?.reason).toBe("write_scope");
+    await h.engine.settle();
+    // the branch is where it was, and the rejected file is gone from the worktree
+    expect(git(tree, "rev-parse", "HEAD")).toBe(before);
+    expect(existsSync(join(tree, "test/acceptance/t-1.test.ts"))).toBe(false);
+    // QA retries within scope; the Engineer's write scope sees only its own writes
+    await authorTests(h, only(out.actions, "qa"));
+    const engineer = only(await next(h), "engineer");
+    const built = await build(h, engineer);
+    expect(built.accepted).toBe(true);
+    await h.release();
+  });
+
   it("parks at the round cap (risk low = 3) and escalates the Engineer's tier from round 3", async () => {
     const h = createHarness();
     let engineer = await toEngineer(h, [draft("T-1", { risk: "low" })]);
@@ -163,11 +229,9 @@ describe("write scope (§6.3 step 4) and protected files (§7.3)", () => {
     const again = only(out.actions, "engineer");
     writeFile(worktreeOf(h, "T-1"), "tests/acceptance/t-1.test.ts", "tampered\n");
     const second = await build(h, again);
-    // the first round's stray file is still on the branch until the Engineer removes it
-    expect(second.rejection?.issues).toEqual([
-      "out_of_scope_write: lib/elsewhere.ts",
-      "protected_modified: tests/acceptance/t-1.test.ts",
-    ]);
+    // the first round's stray file was discarded with its rejected result (reading 86)
+    expect(existsSync(join(worktreeOf(h, "T-1"), "lib/elsewhere.ts"))).toBe(false);
+    expect(second.rejection?.issues).toEqual(["protected_modified: tests/acceptance/t-1.test.ts"]);
     expect(taskOf(h, "T-1").parked).toEqual({
       task: "T-1",
       reason: "risk_rule",
@@ -350,6 +414,30 @@ describe("parking blocks only dependents (§6.5, D5) and concurrency (§6.6)", (
   });
 });
 
+describe("role-written .vtc/ documents are checked for secrets (AD-18 rule 1)", () => {
+  it("rejects a front-half result that quotes a secret, and nothing reaches the checkout", async () => {
+    const h = createHarness();
+    await h.engine.start(
+      { request: "Idea", track: "feature", repo: "existing", has_ui: false, risk_hints: [] },
+      CLAUDE,
+    );
+    const carto = only(await next(h), "repo_cartographer");
+    const map = ".vtc/research/repo-map/map.md";
+    writeFile(workdir(carto), map, "# map\n\nThe .env sets AWS_KEY=AKIAABCDEFGHIJKLMNOP\n");
+    const out = await submitResult(h, carto, {
+      exit: "done",
+      artifacts: [{ type: "repo_map", path: map }],
+    });
+    expect(out.accepted).toBe(false);
+    expect(out.rejection?.reason).toBe("write_scope");
+    expect(out.rejection?.issues.join("\n")).toMatch(/map\.md .*secret/);
+    // the secret is not in the user's checkout, and the issue does not repeat it
+    expect(existsSync(join(h.repo, map))).toBe(false);
+    expect(JSON.stringify(out)).not.toContain("AKIAABCDEFGHIJKLMNOP");
+    await h.release();
+  });
+});
+
 describe("budget controller (§11, §7.6 rule 13)", () => {
   it("parks a task at 100% of its budget after the current turn; a human raise resumes it", async () => {
     const h = createHarness({ project: { budgets: { task_usd: { S: 1.5, M: 1, L: 15 } } } });
@@ -362,7 +450,8 @@ describe("budget controller (§11, §7.6 rule 13)", () => {
     await h.engine.settle();
     expect(taskOf(h, "T-1").parked?.reason).toBe("budget");
     const tasks = h.engine.status({});
-    expect(tasks.budget.spent_usd).toBeCloseTo(1.35);
+    // the run's spend counts the front half's four runs too (0.4), not only the task's 1.35
+    expect(tasks.budget.spent_usd).toBeCloseTo(1.75);
     await h.engine.answer(
       { escalation: "E-1", answer: { option: "raise-2x", who_should_have_caught: "planner" } },
       CLAUDE,
@@ -373,6 +462,44 @@ describe("budget controller (§11, §7.6 rule 13)", () => {
         .at(-1)?.data,
     ).toMatchObject({ budget_usd: 2 });
     expect(statusChanges(h).at(-1)).toBe("verifying@1");
+    await h.release();
+  });
+  it("charges what a rejected result cost to its task and the run (§11)", async () => {
+    const h = createHarness();
+    const actions = await throughPlan(h, [draft("T-1")], SPEC_ONE);
+    const before = h.engine.status({}).budget.spent_usd;
+    const out = await submitResult(h, only(actions, "qa"), { exit: "done" }, 0.25);
+    expect(out.accepted).toBe(false);
+    const rejected = eventsOf(h).findLast((e) => e.type === "role.rejected") as unknown as {
+      cost_usd?: number;
+      tokens?: unknown;
+    };
+    expect(rejected.cost_usd).toBe(0.25);
+    expect(rejected.tokens).toMatchObject({ in: 100, out: 50 });
+    expect(h.engine.status({}).budget.spent_usd).toBeCloseTo(before + 0.25);
+    expect(
+      eventsOf(h)
+        .filter((e) => e.type === "budget.updated" && e.task === "T-1")
+        .at(-1)?.data,
+    ).toMatchObject({ spent_usd: 0.25 });
+    await h.release();
+  });
+  it("counts front-half role runs in the run's spend, before any feature exists", async () => {
+    const h = createHarness();
+    await h.engine.start(
+      { request: "Idea", track: "feature", repo: "existing", has_ui: false, risk_hints: [] },
+      CLAUDE,
+    );
+    const carto = only(await next(h), "repo_cartographer");
+    writeFile(workdir(carto), ".vtc/research/repo-map/map.md", "# map\n");
+    const out = await submitResult(
+      h,
+      carto,
+      { exit: "done", artifacts: [{ type: "repo_map", path: ".vtc/research/repo-map/map.md" }] },
+      0.4,
+    );
+    expect(out.accepted).toBe(true);
+    expect(h.engine.status({}).budget.spent_usd).toBeCloseTo(0.4);
     await h.release();
   });
   it("leaves an unpriced run unknown, never $0", async () => {

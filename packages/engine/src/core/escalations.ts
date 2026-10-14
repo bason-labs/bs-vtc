@@ -28,6 +28,8 @@ export interface ParkEscalationInput {
   readonly evidence: readonly Evidence[];
   readonly blocks: readonly string[];
   readonly now: Date;
+  /** `cap` / `stuck`: who stopped making progress, for the hint option (default the Engineer). */
+  readonly stuckRole?: string;
   readonly raisedBy?: string;
 }
 
@@ -44,25 +46,38 @@ const DROP: EscalationOption = {
   effect: "drop",
 };
 
+/** How an escalation names a role that stopped making progress. */
+const roleName = (role: string | undefined): string =>
+  role === undefined || role === "engineer"
+    ? "the Engineer"
+    : role === "qa"
+      ? "QA"
+      : role.replaceAll("_", " ");
+
 const optionsFor = (
   reason: ParkReason,
   now: Date,
+  stuckRole?: string,
 ): { question: string; options: EscalationOption[]; recommended: string } => {
   switch (reason) {
     case "cap":
-    case "stuck":
+    case "stuck": {
+      const who = roleName(stuckRole);
       return {
         question:
           reason === "cap"
             ? "The task reached its round cap. How should it proceed?"
-            : "The fix loop stopped making progress. How should it proceed?",
+            : stuckRole === undefined || stuckRole === "engineer"
+              ? "The fix loop stopped making progress. How should it proceed?"
+              : `${who.charAt(0).toUpperCase()}${who.slice(1)} stopped making progress on this task. How should it proceed?`,
         options: [
-          { id: "hint", label: "Give the Engineer a hint and run one more round", effect: "hint" },
+          { id: "hint", label: `Give ${who} a hint and run it again`, effect: "hint" },
           waiveOption(now, `Accept the open findings with a ${String(WAIVER_DAYS)}-day waiver`),
           DROP,
         ],
         recommended: "hint",
       };
+    }
     case "risk_rule":
       return {
         question: "A risk rule fired on this task. Accept the change or send it back?",
@@ -140,7 +155,7 @@ const optionsFor = (
 
 /** An escalation for a park (§6.5) with the standard options of its reason. */
 export const parkEscalation = (input: ParkEscalationInput): Escalation => {
-  const { question, options, recommended } = optionsFor(input.reason, input.now);
+  const { question, options, recommended } = optionsFor(input.reason, input.now, input.stuckRole);
   return EscalationSchema.parse({
     id: input.id,
     run: input.run,
