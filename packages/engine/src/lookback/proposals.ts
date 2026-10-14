@@ -1,0 +1,155 @@
+/**
+ * Proposals (spec §13 steps 1–2; AD-21 rule 4; AD-14 rule 4). The lookback role writes
+ * `.vtc/lookback/proposals/<role>/editable.md` and `proposal.json` (`PromptProposal`); the engine
+ * accepts one only when:
+ * - it validates (at most `LOOKBACK_LIMITS.maxProposalChanges` changes, each with a hypothesis, a
+ *   target metric and trace ids) and `editable.md` is exactly the proposed section;
+ * - it is based on the role's current locked core and leaves it untouched: the locked core plus the
+ *   proposed section must split back (`splitRolePrompt`) into the same locked core and section, so
+ *   a section that smuggles in a prompt marker is refused;
+ * - nothing in it names an AD-9 marker (`findForbiddenInText`);
+ * - every trace it cites (by its run-qualified slug, `traceSlug`) is an attributed train-split
+ *   failure of that role that the history bears out (`trustedAttributions`; the role never sees
+ *   held-out traces);
+ * - it actually changes the section.
+ * An accepted proposal becomes a candidate version file under the VTC home (immutable) and a
+ * `lookback.proposal_recorded` event; promotion stays a human gesture.
+ */
+import {
+  findForbiddenInText,
+  LOOKBACK_REPO,
+  PROMPT_MARKERS,
+  PromptProposalSchema,
+  RoleIdSchema,
+  splitRolePrompt,
+  type Attribution,
+  type PromptProposal,
+  type PromptVersionFrontmatter,
+  type PromptVersionRef,
+} from "@vtc/shared";
+import { join } from "node:path";
+import { isTrainFailure, trustedAttributions, type AttributionHistory } from "./attribution.js";
+import { lookbackEvent, type LookbackEventDraft } from "./events.js";
+import { readTextIfExists } from "./files.js";
+import { traceSlug, traceSplit } from "./traces.js";
+import { promptVersionRef, sectionSha } from "./versions.js";
+
+export type ProposalCheck =
+  | { readonly ok: true; readonly proposal: PromptProposal; readonly candidate: PromptVersionRef }
+  | { readonly ok: false; readonly problems: readonly string[] };
+
+/** Repo-relative paths of a role's proposal files. */
+export const proposalPaths = (
+  role: string,
+): { readonly proposal: string; readonly editable: string } => {
+  const dir = `${LOOKBACK_REPO.proposalsDir}/${RoleIdSchema.parse(role)}`;
+  return { proposal: `${dir}/proposal.json`, editable: `${dir}/editable.md` };
+};
+
+/** Reads a role's proposal files; `undefined` when either is missing. */
+export const readProposalFiles = async (
+  projectRoot: string,
+  role: string,
+): Promise<{ readonly raw: unknown; readonly editable: string } | undefined> => {
+  const paths = proposalPaths(role);
+  const json = await readTextIfExists(join(projectRoot, paths.proposal));
+  const editable = await readTextIfExists(join(projectRoot, paths.editable));
+  if (json === undefined || editable === undefined) return undefined;
+  try {
+    return { raw: JSON.parse(json) as unknown, editable };
+  } catch {
+    return { raw: undefined, editable };
+  }
+};
+
+/** Checks a proposal against the role's current locked core and the recorded attributions. */
+export const checkProposal = (
+  input: AttributionHistory & {
+    readonly role: string;
+    readonly raw: unknown;
+    /** The content of `editable.md`. */
+    readonly editableFile: string;
+    /** The role's current locked core (`splitRolePrompt(...).locked`). */
+    readonly locked: string;
+    readonly attributions: readonly Attribution[];
+  },
+): ProposalCheck => {
+  const parsed = PromptProposalSchema.safeParse(input.raw);
+  if (!parsed.success) {
+    return {
+      ok: false,
+      problems: parsed.error.issues.map((i) => `${i.path.join(".") || "proposal"}: ${i.message}`),
+    };
+  }
+  const proposal = parsed.data;
+  const problems: string[] = [];
+  const editable = proposal.editable.trim();
+  if (proposal.base.role !== input.role)
+    problems.push(`the proposal is for ${proposal.base.role}, not ${input.role}`);
+  if (input.editableFile.trim() !== editable)
+    problems.push("editable.md is not the proposed editable section");
+  if (proposal.base.locked_sha256 !== sectionSha(input.locked)) {
+    problems.push("the proposal is not based on the current locked core");
+  }
+  const composed = `${PROMPT_MARKERS.locked}\n${input.locked.trim()}\n${PROMPT_MARKERS.editable}\n${editable}\n`;
+  const split = splitRolePrompt(composed);
+  if (!split.ok || split.locked !== input.locked.trim() || split.editable !== editable) {
+    problems.push(
+      "the proposal touches the locked core or the prompt markers (a MAJOR change is a human edit)",
+    );
+  }
+  const texts = [editable, ...proposal.changes.flatMap((c) => [c.hypothesis, c.summary])];
+  for (const hit of texts.flatMap((t) => findForbiddenInText(t))) {
+    problems.push(`names a forbidden marker (${hit.marker})`);
+  }
+  const ofRole = trustedAttributions(input.attributions, input).filter(
+    (a) => a.prompt.role === input.role,
+  );
+  const trainFailures = new Set(ofRole.filter(isTrainFailure).map(traceSlug));
+  const heldOut = new Set(ofRole.filter((a) => traceSplit(a) === "holdout").map(traceSlug));
+  for (const trace of new Set(proposal.changes.flatMap((c) => c.trace_ids))) {
+    if (heldOut.has(trace)) problems.push(`cites held-out trace ${trace}`);
+    else if (!trainFailures.has(trace))
+      problems.push(`cites ${trace}, which is not an attributed train failure of ${input.role}`);
+  }
+  if (sectionSha(editable) === proposal.base.editable_sha256)
+    problems.push("the proposal does not change the section");
+  if (problems.length > 0) return { ok: false, problems: [...new Set(problems)] };
+  const candidate = promptVersionRef({
+    role: proposal.base.role,
+    mode: proposal.base.mode,
+    host: proposal.base.host,
+    locked: input.locked,
+    editable,
+  });
+  return { ok: true, proposal, candidate };
+};
+
+/** The candidate's version file frontmatter (its CHANGELOG entry, §13). */
+export const candidateFrontmatter = (
+  proposal: PromptProposal,
+  candidate: PromptVersionRef,
+  now: Date,
+): PromptVersionFrontmatter => {
+  const hypothesis = proposal.changes.map((c, i) => `${String(i + 1)}. ${c.hypothesis}`).join("\n");
+  return {
+    v: 1,
+    version: candidate,
+    parent: proposal.base.effective_sha256,
+    proposal: proposal.id,
+    changelog: {
+      hypothesis: hypothesis.length > 2000 ? `${hypothesis.slice(0, 1999)}…` : hypothesis,
+      trace_ids: [...new Set(proposal.changes.flatMap((c) => c.trace_ids))].slice(0, 50),
+      evaluation: null,
+    },
+    created_at: now.toISOString(),
+  };
+};
+
+/** `lookback.proposal_recorded` for an accepted proposal. */
+export const proposalRecordedEvent = (role: string, proposal: PromptProposal): LookbackEventDraft =>
+  lookbackEvent("lookback.proposal_recorded", {
+    proposal: proposal.id,
+    path: proposalPaths(role).proposal,
+    changes: proposal.changes.length,
+  });
