@@ -239,13 +239,33 @@ runner's sandbox and can write the runner's temp directory (and a process it det
 outlive it until the reaper), so the runner reads and deletes a per-run random key before it
 imports anything or starts the app, writes its result once, at the end, as an envelope with an
 HMAC-SHA256 under that key, and lists the SHA-256 of every image it wrote. A result without a
-valid MAC, or an image that is missing or changed, is `error` and never read as a verdict. On
-the doctor-installed store's Playwright the comparison code is VTC's. On the project's own
-Playwright (preferred when installed, reading 96) the runner process loads `playwright-core`
-from the verification checkout, which the change under review can modify (install scripts run
-there), so every such run carries a `vtc-visual/note` saying the comparison ran on
-project-controlled code. Limit: on Linux with `kernel.yama.ptrace_scope` 0 a process in the
-sandbox may read the memory of another process of the same user, the runner's key included.
+valid MAC, or an image that is missing or changed, is `error` and never read as a verdict.
+The runner itself is out of the app server's reach (reading 124): Node runs with
+`--disable-sigusr1` (Node 22.14 or later; the script refuses to start without it), so a signal
+cannot open its inspector; the app runs detached, in a session and process group of its own;
+the interpreter is the engine's own Node when it has the flag, else an absolute `node` from a
+`PATH` entry outside the repository and the checkout (none: `error`; known limit: a
+version-manager shim there, such as Volta, asdf or mise, picks its interpreter and, with mise,
+an environment from config files in the checkout under review); and on Linux, where a same-user process can attach to another through
+ptrace unless Yama limits it to descendants, a render runs only with `kernel.yama.ptrace_scope`
+1 or higher (else `error`, naming the sysctl). axe, the computed styles, the region lookup and
+the font wait run in an isolated world of the runner's own (CDP `Page.createIsolatedWorld`), so
+the page under review cannot replace `window.axe`, `getComputedStyle` or
+`getBoundingClientRect`; the prototype origin is served only to the reference context (the
+implementation's requests to it are aborted, so it cannot load the prototype through that
+origin; known limit: the app server shares the sandbox, which may read the prototype, so it
+could serve the same bytes from its own origin). On the
+doctor-installed store's Playwright, preferred whenever it is installed (reading 124), the
+comparison code is VTC's. Without a store the project's own Playwright runs, and the runner
+process loads `playwright-core` from the verification checkout, which the change under review
+can modify (install scripts run there), so every such run carries a note under its own rule,
+`vtc-visual/project-toolchain`, saying the comparison ran on project-controlled code. Notes come
+first in the findings, so the summary's 200-finding cap never drops one. That such a run, even
+a `pass`, does not satisfy Level 3 is not built yet: engine core may not import `gates/`
+(AD-13), and neither the rule id nor a toolchain field is in `@vtc/shared`, so the cap waits on
+a contract change (proposed: `VisualSummary.toolchain: "store" | "project"`, written by the gate
+runner and read by engine core). Until then the note is the only signal, and
+`ranOnProjectToolchain` in `gates/visual/` serves the gate runner's own tests.
 
 1. Token lint (`vtc-token/<kind>`) on the lines the diff added to UI files: literal colours (OKLab
    ΔE over `color_delta` from every colour token), spacing and radii off the token scale, font
@@ -253,14 +273,16 @@ sandbox may read the memory of another process of the same user, the runner's ke
 2. The design detector (`vtc-design/<id>`, Designer): twelve source-level slop rules ported from
    Apache-2.0 impeccable (`THIRD_PARTY/impeccable/`, `NOTICE`), each with a flag and a pass
    fixture. Advisory rules report SARIF `note` and do not fail the step.
-3. The browser: the project's own Playwright (resolved inside the checkout, its browser in the
-   user's Playwright cache, pinned per executable path on first use under
-   `~/.vtc/browsers/projects/<repo-key>/<path-hash>.json`, which the report shows as a
-   `vtc-visual/note`) or the store `vtc doctor --install-browser` fills
-   (`~/.vtc/browsers/node_modules/` and `BROWSER_PIN_FILE`). The executable is re-hashed against
-   its pin before every run; a mismatch, an unreadable pin or a pin for another path is `error`.
-   A path seen before is never re-pinned. axe-core and pixelmatch come from the store when it
-   has them, else from the project. None: `skipped` with `VISUAL_SKIPPED_NO_BROWSER`. Nothing is downloaded here.
+3. The browser: the store `vtc doctor --install-browser` fills (`~/.vtc/browsers/node_modules/`
+   and `BROWSER_PIN_FILE`) when it is installed, else the project's own Playwright (resolved
+   inside the checkout, its browser in the user's Playwright cache, pinned per executable path
+   on first use under `~/.vtc/browsers/projects/<repo-key>/<path-hash>.json`, which the report
+   shows as a `vtc-visual/note`). The executable is re-hashed against its pin before every run; a
+   mismatch, an unreadable pin or a pin for another path is `error`. A path seen before is never
+   re-pinned. axe-core and pixelmatch come from the store when it has them, else from the
+   project. No Playwright, or the project's Playwright with no browser installed: `skipped` with
+   `VISUAL_SKIPPED_NO_BROWSER`. The project's Playwright installed but its probe failing (a
+   crash, no sandbox): `error`. Nothing is downloaded here.
 4. The app server: `visual.app` in `gates.yml` (`command`, a loopback `url`, `cwd`,
    `ready_timeout_s`), allowlisted like a gate. `vtc calibrate` proposes one from the package.json
    `dev`, `start` or `preview` script (its `--port`/`-p`/`PORT=` or the server's default port, on
@@ -268,9 +290,14 @@ sandbox may read the memory of another process of the same user, the runner's ke
    valid one is kept on re-calibration. Provisional: `@vtc/shared` has no field for it yet, so it
    is read from and written to the raw YAML. Without one, or with one not allowlisted, the step
    is `error` (gate infrastructure: a human sets it up).
-5. The render matrix runs as one gate command in the sandbox (verify phase, loopback for the app
-   server): VTC's runner script (`runner-script.ts`) in the command's private temp directory, run
-   with the project's Node. Per job it renders the app at `<url><route>?state=&theme=` and the
+5. The render matrix runs as one gate command in the sandbox (verify phase; on macOS the host
+   loopback is opened at the app server's own port only, `GateJailSpec.loopbackPorts`, never
+   the engine API or a service on another port, and `vtc calibrate`'s question names that port;
+   a service already listening on that very port would be reachable, so the runner first checks
+   that nothing answers there and otherwise ends the run as `error` ("port N is already in
+   use"), takes readiness only from a live child, and ends as `error` when the app exits
+   mid-run; on Linux the loopback is the sandbox's own): VTC's runner script (`runner-script.ts`) in the
+   command's private temp directory. Per job it renders the app at `<url><route>?state=&theme=` and the
    base prototype (served through request interception) in the same run with the same
    browser: headless, DPR 1, `en-US`, `UTC`, a fixed clock, reduced motion, fonts ready,
    animations and the caret off, non-loopback requests aborted, `dynamic_regions` masked. Then
@@ -281,7 +308,10 @@ sandbox may read the memory of another process of the same user, the runner's ke
 6. Status: `error` (runner failed, or its result or images fail the MAC and hash checks) > `fail` (a blocking finding) > `unchecked` (an unreached
    render or screen, an axe `incomplete` item, a check that could not run: never clean) > `pass`.
    Each axe `incomplete` rule per screen state is a note-level `axe/<rule>` finding that names
-   what needs review.
+   what needs review. Every finding's location is `.vtc/design/screens.yaml` with the screen
+   state, render key and region, selector or note as its symbol, so it keeps its fingerprint
+   from run to run (waivers, deferrals and "reappeared" match); the run's screenshot or diff
+   image is its `evidence.ref`.
 7. Evidence: the screenshots, references and diff images go into the git-tracked evidence
    unredacted (redaction works on text; an image cannot be redacted). This is an exemption from
    AD-18 rule 1 recorded here and proposed to the integrator as a spine reading: a page the app
@@ -293,11 +323,13 @@ The novelty check (`visual/novelty.ts`, §9.1 step 4, reading 107) compares a di
 viewport (64-bit dHash) and token vector (OKLCH palette, type pair, radius, density) with the
 per-client design library `~/.vtc/design-library/<scope>/`; `too_similar` only when both are
 under their thresholds, judged over the whole library (the report lists the ten nearest,
-too-similar ones first). `recordDesignChoice` adds the chosen direction. Nothing calls it yet:
-engine core may not import `gates/` (AD-13 rules 1 and 7) and the frozen `GateRunner` and
-`VisualRequest` have no novelty entry, so wiring it needs a contract seam (proposed to the
-integrator: a novelty mode of `GateRunRequest.visual`, or an injected `EngineDeps` function the
-cli builds from `gates.visual.checkNovelty`).
+too-similar ones first). `recordDesignChoice` adds the chosen direction. The Gate Runner
+exposes both as the optional `GateRunner.checkNovelty` / `recordDesignChoice` (contracts 4.6.0,
+reading 127): the first viewport is read from the repo's working tree (a missing, oversized,
+symlinked or escaping path gives `unchecked`), the token vector from `.vtc/design/tokens.json`
+(none yet: empty tokens), and the library is the request's `ResearchScope` only (`_shared` or
+`client-<slug>`; a malformed scope, direction or entry rejects). Engine core writes the report
+to `noveltyReportPath` and calls `recordDesignChoice` when the human picks at G2.
 
 ## Not built yet (tracked follow-up increments)
 
@@ -318,8 +350,8 @@ cli builds from `gates.visual.checkNovelty`).
   an opt-in live test needs a local `playwright-core`, which this repo does not install. The
   render cache keyed by `source_hash` is not used yet (every run renders, and every attempt
   copies its images, up to the per-run cap). The detector ports the source-level slop rules
-  only (no live-DOM, quality or design-system drift rules). The novelty check has no caller
-  until the contract seam exists (see above).
+  only (no live-DOM, quality or design-system drift rules). Engine core does not call the
+  novelty seam yet, so every direction stays `unchecked` until it does (reading 127).
 - **Visual app server detection** knows the default ports of common dev and preview servers
   (Vite, Next, Nuxt, Astro, Angular, webpack, Create React App) and the explicit `--port`,
   `-p` and `PORT=` forms; any other server needs `visual.app` written by hand and confirmed with

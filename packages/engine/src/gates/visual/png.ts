@@ -61,7 +61,9 @@ export const decodePng = (bytes: Uint8Array): RgbaImage => {
     const data = bytes.subarray(offset + 8, offset + 8 + length);
     if (data.length !== length) throw new Error("PNG chunk runs past the end of the file");
     offset += 12 + length;
+    if (colorType < 0 && type !== "IHDR") throw new Error("PNG does not start with an IHDR chunk");
     if (type === "IHDR") {
+      if (colorType >= 0) throw new Error("PNG has more than one IHDR chunk");
       if (length < 13) throw new Error("PNG IHDR chunk is too short");
       const header = new DataView(data.buffer, data.byteOffset, data.byteLength);
       width = header.getUint32(0);
@@ -85,8 +87,19 @@ export const decodePng = (bytes: Uint8Array): RgbaImage => {
   if (colorType < 0) throw new Error("PNG has no IHDR chunk");
   const channels = CHANNELS[colorType] ?? 4;
   const stride = width * channels;
-  const raw = inflateSync(Buffer.concat(idat));
-  if (raw.length < (stride + 1) * height) throw new Error("PNG image data is truncated");
+  // Bounded by the size IHDR declares: a small, highly compressed IDAT cannot inflate past it.
+  const expected = (stride + 1) * height;
+  let raw: Buffer;
+  try {
+    raw = inflateSync(Buffer.concat(idat), { maxOutputLength: expected });
+  } catch (error) {
+    const code = (error as { code?: unknown }).code;
+    if (code === "ERR_BUFFER_TOO_LARGE" || error instanceof RangeError) {
+      throw new Error("PNG image data is larger than its IHDR size", { cause: error });
+    }
+    throw error;
+  }
+  if (raw.length < expected) throw new Error("PNG image data is truncated");
   const pixels = new Uint8Array(stride * height);
   for (let y = 0; y < height; y += 1) {
     const filter = raw[y * (stride + 1)];

@@ -5,10 +5,11 @@
  * styles and the per-region pixel diff runs in the gate sandbox. Returns the `VisualSummary`
  * for `GateReport.visual` and the evidence to write (the redacted `VisualReport` and the images).
  *
- * - No browser (neither the project's Playwright nor the doctor-installed store): `skipped` with
- *   `VISUAL_SKIPPED_NO_BROWSER`.
- * - The pin does not match, the runner failed, no app server is configured or allowed: `error`
- *   (gate infrastructure, §6.8: a human sets the app server up with `vtc calibrate`).
+ * - No browser (neither the doctor-installed store nor the project's Playwright, or the project's
+ *   Playwright has no browser installed): `skipped` with `VISUAL_SKIPPED_NO_BROWSER`.
+ * - The pin does not match, the project's Playwright is installed but its probe failed, the
+ *   runner failed, no app server is configured or allowed: `error` (gate infrastructure, §6.8: a
+ *   human sets the app server up with `vtc calibrate`).
  * - Settings come from `gates.yml` `visual` (`visualConfigFor`); `screens.yaml`, `tokens.json`
  *   and the approved prototype are read at the base commit, so a diff cannot change the reference
  *   it is compared with. The prototype comes from a clean checkout of the base made for this step
@@ -16,11 +17,14 @@
  * - The verdict comes only from a result the runner signed with a key the app server never sees,
  *   and from images that match the hashes in it (`runner.ts`): the app server shares the runner's
  *   sandbox and temp directory, but cannot forge either. That holds for the comparison code only
- *   when it is VTC's: on the doctor-installed store's Playwright. On the project's own Playwright
- *   (preferred when installed, reading 96) the runner process runs `playwright-core` from the
- *   verification checkout, which the change under review can modify (its install scripts run
- *   there), so the report carries a visible note saying the comparison ran on project-controlled
- *   code. axe-core and pixelmatch come from the store whenever it has them.
+ *   when it is VTC's: on the doctor-installed store's Playwright, which is preferred whenever it
+ *   is installed (reading 124). Without a store the project's own Playwright runs, and the runner
+ *   process then loads `playwright-core` from the verification checkout, which the change under
+ *   review can modify (its install scripts run there), so the report carries a visible note
+ *   saying the comparison ran on project-controlled code. axe-core and pixelmatch come from the
+ *   store whenever it has them.
+ * - The sandbox opens the host's loopback to the run only at the app server's own port (macOS;
+ *   Linux has a private loopback), never the engine API or other local services.
  * - The images copied into evidence are capped per run ({@link MAX_VISUAL_EVIDENCE_BYTES}): diff
  *   images first, then screenshots; whatever is left out is a visible note.
  */
@@ -39,7 +43,7 @@ import {
   type VisualSummary,
 } from "@vtc/shared";
 import type { PendingWrite } from "../evidence.js";
-import { visualAppOf } from "./app.js";
+import { appLoopbackPort, visualAppOf } from "./app.js";
 import {
   checkProjectBrowser,
   checkStoreBrowser,
@@ -53,8 +57,10 @@ import { detectorFindings, type DetectorFile } from "./detector/index.js";
 import { addedLinesWithNumbers } from "./diff-lines.js";
 import {
   evaluateVisual,
+  VISUAL_PROJECT_TOOLCHAIN_RULE,
   visualWithoutRenders,
   type BrowserIdentity,
+  type VisualNote,
   type VisualOutcome,
 } from "./evaluate.js";
 import { expandMatrix, parseScreens, type RenderMatrix } from "./matrix.js";
@@ -76,7 +82,7 @@ const STYLE_LIMIT = 400;
  * ran in a process that loaded code the change under review can modify.
  */
 export const PROJECT_TOOLCHAIN_NOTE = (toolchain: VisualToolchain): string =>
-  `the renders, axe and the pixel diff ran on the project's own Playwright (playwright-core ${toolchain.playwrightVersion} from the verification checkout), code the change under review can modify through its dependencies and install scripts, so this result is only as trustworthy as those packages; the store from vtc doctor --install-browser runs VTC's own comparison code but is used only when the project has no usable Playwright`;
+  `the renders, axe and the pixel diff ran on the project's own Playwright (playwright-core ${toolchain.playwrightVersion} from the verification checkout), code the change under review can modify through its dependencies and install scripts, so this result is only as trustworthy as those packages; vtc doctor --install-browser installs a store with VTC's own comparison code, which the visual step then uses instead`;
 const NAV_TIMEOUT_MS = 30_000;
 const MAX_DETECTOR_BYTES = 2 * 1024 * 1024;
 
@@ -217,7 +223,7 @@ export const runVisualStep = async (ctx: VisualStepContext): Promise<VisualStepR
     writes: [{ rel: reportPath, redact: true, json: outcome.report }, ...images],
   });
   /** Visible, non-blocking notes for the report (a browser pinned on first use…). */
-  const visibleNotes: string[] = [];
+  const visibleNotes: VisualNote[] = [];
   const without = (
     status: "skipped" | "error",
     reason: string,
@@ -272,7 +278,14 @@ export const runVisualStep = async (ctx: VisualStepContext): Promise<VisualStepR
   let toolchain: VisualToolchain | null = null;
   let check: BrowserCheck | null = null;
   const notes: string[] = [];
-  const project = toolchains.project(ctx.checkoutAbs, ctx.env, ctx.vtcHome);
+  // Reading 124: VTC's own comparison code whenever the doctor store is installed.
+  const store = toolchains.store(ctx.vtcHome);
+  if (store !== null) {
+    check = await checkStoreBrowser(ctx.vtcHome);
+    if (check !== null) toolchain = store;
+  }
+  const project =
+    toolchain === null ? toolchains.project(ctx.checkoutAbs, ctx.env, ctx.vtcHome) : null;
   if (project !== null) {
     const probe = await ctx.runner.run({
       input: {
@@ -287,39 +300,36 @@ export const runVisualStep = async (ctx: VisualStepContext): Promise<VisualStepR
         jobs: [],
       },
       allowRead: project.readable,
-      loopback: false,
+      loopbackPort: null,
       env: browsersEnv(project),
       checkout: ctx.checkoutAbs,
       timeoutMs: 60_000,
       stdoutPath: `${ctx.logPrefix}.probe.stdout.log`,
       stderrPath: `${ctx.logPrefix}.probe.stderr.log`,
     });
-    if (probe.ok && probe.result.executable !== undefined) {
-      const chromium = chromiumOf(project.playwright);
-      check = await checkProjectBrowser({
-        vtcHome: ctx.vtcHome,
-        repoRoot: ctx.repoRoot,
-        executable: probe.result.executable,
-        browsersPath: project.browsersPath,
-        name: chromium.name,
-        version: chromium.version,
-        playwrightVersion: project.playwrightVersion,
-        now: ctx.now(),
-      });
-      if (check !== null) toolchain = project;
-      else notes.push(`the project's Playwright has no browser at ${probe.result.executable}`);
-    } else {
-      notes.push(
-        `the project's Playwright could not be probed: ${probe.ok ? (probe.result.error ?? "no executable") : probe.reason}`,
+    // An installed Playwright that could not run is gate infrastructure, not a missing browser.
+    if (!probe.ok) {
+      return without("error", `the project's Playwright could not be probed: ${probe.reason}`);
+    }
+    if (probe.result.error !== undefined || probe.result.executable === undefined) {
+      return without(
+        "error",
+        `the project's Playwright could not be probed: ${probe.result.error ?? "it named no browser executable"}`,
       );
     }
-  }
-  if (toolchain === null) {
-    const store = toolchains.store(ctx.vtcHome);
-    if (store !== null) {
-      check = await checkStoreBrowser(ctx.vtcHome);
-      if (check !== null) toolchain = store;
-    }
+    const chromium = chromiumOf(project.playwright);
+    check = await checkProjectBrowser({
+      vtcHome: ctx.vtcHome,
+      repoRoot: ctx.repoRoot,
+      executable: probe.result.executable,
+      browsersPath: project.browsersPath,
+      name: chromium.name,
+      version: chromium.version,
+      playwrightVersion: project.playwrightVersion,
+      now: ctx.now(),
+    });
+    if (check !== null) toolchain = project;
+    else notes.push(`the project's Playwright has no browser at ${probe.result.executable}`);
   }
   if (toolchain === null || check === null) {
     const why = notes.length > 0 ? ` (${notes.join("; ")})` : "";
@@ -327,7 +337,12 @@ export const runVisualStep = async (ctx: VisualStepContext): Promise<VisualStepR
   }
   if (!check.ok) return without("error", check.reason);
   if (check.note !== undefined) visibleNotes.push(check.note);
-  if (toolchain.source === "project") visibleNotes.push(PROJECT_TOOLCHAIN_NOTE(toolchain));
+  if (toolchain.source === "project") {
+    visibleNotes.push({
+      rule_id: VISUAL_PROJECT_TOOLCHAIN_RULE,
+      text: PROJECT_TOOLCHAIN_NOTE(toolchain),
+    });
+  }
   const pin = check.pin;
   const browser: BrowserIdentity = {
     name: pin.name,
@@ -404,7 +419,7 @@ export const runVisualStep = async (ctx: VisualStepContext): Promise<VisualStepR
         input,
         // Read-only to the sandbox: only the verification checkout and the temp directory are writable.
         allowRead: hasPrototype ? [...toolchain.readable, prototypeAbs] : toolchain.readable,
-        loopback: true,
+        loopbackPort: appLoopbackPort(app.url),
         env: browsersEnv(toolchain),
         checkout: ctx.checkoutAbs,
         timeoutMs: Math.min(

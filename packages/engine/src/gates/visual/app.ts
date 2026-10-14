@@ -32,6 +32,16 @@ export const VisualAppSchema = z.strictObject({
 export type VisualApp = z.infer<typeof VisualAppSchema>;
 
 /**
+ * The loopback port the app server answers on: the URL's port, else the scheme's default. The
+ * gate sandbox opens this port of the loopback to the visual run, and no other.
+ */
+export const appLoopbackPort = (url: string): number => {
+  const parsed = new URL(url);
+  if (parsed.port !== "") return Number(parsed.port);
+  return parsed.protocol === "https:" ? 443 : 80;
+};
+
+/**
  * `visual.app` of raw `gates.yml` text: the app, `null` when there is none, or why it is invalid
  * (a run then reports the visual step as gate infrastructure, never a silent pass).
  */

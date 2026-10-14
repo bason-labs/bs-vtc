@@ -207,14 +207,21 @@ export const commitAll = (repo: string, message = "change"): string => {
  */
 export const recordingSandbox = (
   kind: GateSandbox["kind"] = "sandbox-exec",
-): { readonly sandbox: GateSandbox; readonly specs: GateSandboxSpec[] } => {
+): {
+  readonly sandbox: GateSandbox;
+  readonly specs: GateSandboxSpec[];
+  readonly argvs: (readonly string[])[];
+} => {
   const specs: GateSandboxSpec[] = [];
+  const argvs: (readonly string[])[] = [];
   return {
     specs,
+    argvs,
     sandbox: {
       kind,
       wrap: (argv, spec) => {
         specs.push(spec);
+        argvs.push(argv);
         return {
           command: argv[0] ?? "",
           args: argv.slice(1),

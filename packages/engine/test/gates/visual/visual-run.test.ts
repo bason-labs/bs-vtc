@@ -8,7 +8,9 @@ import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 import {
   BROWSER_PIN_FILE,
+  DESIGN_SCREENS_PATH,
   engineRepoKey,
+  fingerprintFinding,
   GateReportSchema,
   HIDDEN_TESTS,
   VISUAL_SKIPPED_NO_BROWSER,
@@ -16,7 +18,9 @@ import {
 } from "@vtc/shared";
 import {
   projectToolchain,
+  ranOnProjectToolchain,
   RunnerResultSchema,
+  VISUAL_PROJECT_TOOLCHAIN_RULE,
   type RunnerInput,
   type VisualRunner,
   type VisualRunnerCall,
@@ -213,7 +217,7 @@ describe("visual step in a gate run", () => {
     });
     expect(render?.input.prototype_root).toMatch(/\.vtc\/design\/prototype$/);
     expect(render?.allowRead).toContain(render?.input.prototype_root);
-    expect(render?.loopback).toBe(true);
+    expect(render?.loopbackPort).toBe(4173);
     expect(render?.env.PLAYWRIGHT_BROWSERS_PATH).toBeDefined();
     expect(report.visual?.counts.renders).toBe(3);
     const written = VisualReportSchema.parse(
@@ -231,17 +235,20 @@ describe("visual step in a gate run", () => {
     const projectCode = (fs: readonly { rule_id: string; message?: string | undefined }[]) =>
       fs.some(
         (f) =>
-          f.rule_id === "vtc-visual/note" &&
+          f.rule_id === VISUAL_PROJECT_TOOLCHAIN_RULE &&
           /ran on the project's own Playwright .* the change under review can modify/.test(
             f.message ?? "",
           ),
       );
     expect(projectCode(written.findings)).toBe(true);
+    expect(ranOnProjectToolchain(report.visual)).toBe(true);
     const later = await h.run({ head: h.base, visual: { screens: [] } });
     expect(later.visual?.status).toBe("pass");
     const laterNotes = later.visual?.findings.filter((f) => f.rule_id === "vtc-visual/note") ?? [];
     expect(laterNotes.some((f) => /pinned the project's browser/.test(f.title))).toBe(false);
-    expect(projectCode(laterNotes)).toBe(true);
+    expect(projectCode(later.visual?.findings ?? [])).toBe(true);
+    // Engine core reads this to keep such a run from satisfying Level 3 (reading 124).
+    expect(ranOnProjectToolchain(later.visual)).toBe(true);
   });
 
   it("compares with the base commit's prototype, which neither the diff nor project code can change", async () => {
@@ -321,6 +328,75 @@ describe("visual step in a gate run", () => {
     expect(report.visual?.status).toBe("pass");
   });
 
+  it("gives a finding the same fingerprint in every run, whatever its attempt's evidence path", async () => {
+    const { h } = setup({
+      project: true,
+      runner: (exe) =>
+        fakeRunner(exe, (job) => ({
+          axe: {
+            violations: [
+              {
+                rule: "image-alt",
+                impact: "critical",
+                help: "Images need alt text",
+                nodes: 1,
+                targets: ["img"],
+              },
+            ],
+            incomplete: [],
+          },
+          styles: [{ selector: "p.lead", property: "color", value: "rgb(255, 0, 0)" }],
+          diffs: [
+            {
+              region: "main",
+              mismatch_px: 900,
+              total_px: 1000,
+              diff_image: `${job.key.replace(/[^A-Za-z0-9._-]/g, "_")}.main.diff.png`,
+            },
+          ],
+        })),
+    });
+    const fingerprints = async () => {
+      const report = await h.run({ head: h.base, visual: { screens: ["home"] } });
+      expect(report.visual?.status).toBe("fail");
+      const findings = report.visual?.findings ?? [];
+      expect(findings.map((f) => f.rule_id)).toEqual(
+        expect.arrayContaining([
+          "axe/image-alt",
+          "vtc-style/color",
+          "vtc-layout/pixels",
+          VISUAL_PROJECT_TOOLCHAIN_RULE,
+        ]),
+      );
+      // The location is the screens file, never this attempt's screenshot, diff image or report.
+      expect(findings.every((f) => f.location.path === DESIGN_SCREENS_PATH)).toBe(true);
+      expect(findings.find((f) => f.rule_id === "vtc-layout/pixels")?.evidence.ref).toMatch(
+        /\/visual\/.+\.diff\.png$/,
+      );
+      return {
+        evidence: report.visual?.report,
+        prints: findings.map((f) =>
+          fingerprintFinding({
+            rule_id: f.rule_id,
+            path: f.location.path,
+            symbol: f.location.symbol,
+            snippet: f.snippet,
+            line: f.location.line,
+          }),
+        ),
+      };
+    };
+    const first = await fingerprints();
+    await new Promise((r) => setTimeout(r, 1100));
+    const second = await fingerprints();
+    expect(second.evidence).not.toBe(first.evidence);
+    // Every finding of the second run is the first run's (the first also had the one-off note
+    // that pinned the browser), and no two findings of a run share a fingerprint.
+    expect(second.prints.length).toBeGreaterThanOrEqual(4);
+    expect(first.prints).toEqual(expect.arrayContaining(second.prints));
+    expect(new Set(first.prints).size).toBe(first.prints.length);
+  });
+
   it("renders only the requested screens", async () => {
     const { h, fake } = setup({ project: true });
     await h.run({ head: h.base, visual: { screens: ["home"] } });
@@ -342,6 +418,7 @@ describe("visual step in a gate run", () => {
     const ok = setup({ store: "match" });
     const passed = await ok.h.run({ head: ok.h.base, visual: { screens: [] } });
     expect(passed.visual?.status).toBe("pass");
+    expect(ranOnProjectToolchain(passed.visual)).toBe(false);
     // VTC's own comparison code: no note about project-controlled code.
     expect(
       passed.visual?.findings.some((f) => /the project's own Playwright/.test(f.message ?? "")),
@@ -350,6 +427,57 @@ describe("visual step in a gate run", () => {
     const report = await bad.h.run({ head: bad.h.base, visual: { screens: [] } });
     expect(report.visual?.status).toBe("error");
     expect(bad.fake.calls.some((c) => c.input.mode === "render")).toBe(false);
+  });
+
+  it("prefers the doctor store over the project's Playwright when both are there (reading 124)", async () => {
+    const { h, fake } = setup({ project: true, store: "match" });
+    const report = await h.run({ head: h.base, visual: { screens: ["home"] } });
+    expect(report.visual?.status).toBe("pass");
+    // The project's Playwright was never even probed: no project code ran for the comparison.
+    expect(fake.calls.some((c) => c.input.mode === "probe")).toBe(false);
+    const render = fake.calls.find((c) => c.input.mode === "render");
+    expect(render?.input.playwright).toBe(join(h.home, "browsers", "playwright-core", "index.js"));
+    expect(
+      report.visual?.findings.some((f) => /the project's own Playwright/.test(f.message ?? "")),
+    ).toBe(false);
+  });
+
+  it("is error, not skipped, when the project's Playwright is installed but its probe fails", async () => {
+    const probeFails = (outcome: "crash" | "refused") => (exe: string) => {
+      const inner = fakeRunner(exe);
+      return {
+        calls: inner.calls,
+        runner: {
+          run: (call: VisualRunnerCall) =>
+            call.input.mode !== "probe"
+              ? inner.runner.run(call)
+              : Promise.resolve(
+                  outcome === "refused"
+                    ? { ok: false as const, reason: "no OS sandbox to run it in" }
+                    : {
+                        ok: true as const,
+                        result: RunnerResultSchema.parse({ v: 1, error: "Cannot find module" }),
+                        file: () => null,
+                      },
+                ),
+        },
+      };
+    };
+    for (const [outcome, reason] of [
+      ["crash", /could not be probed: Cannot find module/],
+      ["refused", /could not be probed: no OS sandbox/],
+    ] as const) {
+      const { h } = setup({ project: true, runner: probeFails(outcome) });
+      const report = await h.run({ head: h.base, visual: { screens: [] } });
+      expect(report.visual?.status).toBe("error");
+      expect(report.visual?.skipped_reason).toBeUndefined();
+      expect(report.visual?.findings.at(-1)?.title).toMatch(reason);
+    }
+    // No browser behind a Playwright that does run: still the lenient skip (D-ay).
+    const { h } = setup({ project: true, runner: () => fakeRunner("/nowhere/chrome") });
+    const report = await h.run({ head: h.base, visual: { screens: [] } });
+    expect(report.visual?.status).toBe("skipped");
+    expect(report.visual?.skipped_reason).toMatch(/has no browser at \/nowhere\/chrome/);
   });
 
   it("is unchecked when a render is not reached", async () => {
