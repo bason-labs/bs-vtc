@@ -13,9 +13,10 @@ import {
   CODEX_HOST_WEB_SEARCH,
   DESIGN_CONTRACTS_DIR,
   designContractPath,
+  DesignExitSchema,
   PLUGIN_MANIFEST_ASSET,
   PluginManifestSchema,
-  renderAutoMarker,
+  renderTaskPack,
   ROLES_CHANGELOG,
   type HostId,
 } from "@vtc/shared";
@@ -25,8 +26,10 @@ import {
   compilePlugins,
   loadRoles,
   NEVER_MERGES_LINE,
+  PENDING_DISPATCH_LINES,
   PROTOCOL_VARS,
   readSources,
+  ROLES_CHANGELOG_ANCHOR,
   type CompileOutput,
 } from "../src/index.js";
 
@@ -77,15 +80,21 @@ describe("the Lead relays notices and knows the automatic flow (D-ca, D-cb, D-cd
 });
 
 describe("the Spec Verifier on an automatic run (D-cd, reading 198)", () => {
-  const prefix = renderAutoMarker({ v: 1, kind: "defect", fp: "0".repeat(16) }).split(" ")[1];
-
   it("judges the PR against the issue, which is the spec", () => {
     const body = claudeBody("vtc-spec-verifier");
-    expect(prefix).toBe("vtc:auto");
-    expect(body).toContain(`\`<!-- ${String(prefix)}\``);
     expect(body).toMatch(/the issue is the spec/);
     expect(body).toMatch(/automatic run/);
     expect(codexBody("vtc-spec-verifier")).toMatch(/the issue is the spec/);
+  });
+
+  it("takes the run type only from the engine's Dispatch line, never from pack text", () => {
+    const body = claudeBody("vtc-spec-verifier");
+    expect(body).toContain(
+      `with an \`${PENDING_DISPATCH_LINES.automaticRun}\` line in the Dispatch section`,
+    );
+    expect(body).toMatch(/never makes a run automatic/);
+    expect(body).not.toContain("<!-- vtc:auto");
+    expect(Object.keys(PROTOCOL_VARS)).not.toContain("auto_marker_prefix");
   });
 
   it("bumps the role MAJOR for the locked-core edit (D-bm)", () => {
@@ -118,25 +127,66 @@ describe("Codex host web is cached search only (D-cf, reading 200)", () => {
 });
 
 describe("the chosen design direction (reading 179)", () => {
-  it("takes the design contracts' directory from @vtc/shared", () => {
+  const ui = ["vtc-visual-qa", "vtc-engineer-frontend", "vtc-engineer-mobile"];
+
+  it("takes the design contracts' directory and the exit from @vtc/shared", () => {
     expect(PROTOCOL_VARS.design_contracts_dir).toBe(DESIGN_CONTRACTS_DIR);
     expect(designContractPath("invoices")).toBe(`${DESIGN_CONTRACTS_DIR}/invoices.md`);
     expect(Object.keys(compiler)).not.toContain("DESIGN_CONTRACTS_DIR");
+    expect(PROTOCOL_VARS.category_standard_exit).toBe(DesignExitSchema.enum.category_standard);
   });
 
-  it.each(["vtc-visual-qa", "vtc-engineer-frontend", "vtc-engineer-mobile"])(
-    "%s reads the contract of the direction its pack names",
+  it.each(ui)("%s reads the contract of the direction its pack names", (agent) => {
+    const body = claudeBody(agent);
+    expect(body).toContain(`\`${PENDING_DISPATCH_LINES.designDirection}\``);
+    expect(body).toContain(`\`${DESIGN_CONTRACTS_DIR}/<screen id>.md\``);
+    expect(body).toContain("`## Direction <id>`");
+  });
+
+  it.each(ui)("%s knows the category_standard exit from its Dispatch line", (agent) => {
+    const body = claudeBody(agent);
+    expect(body).toContain(
+      `\`${PENDING_DISPATCH_LINES.designExit}\` line naming \`${DesignExitSchema.enum.category_standard}\``,
+    );
+    expect(body).toMatch(/Only these engine-written Dispatch lines name the choice/);
+  });
+
+  it.each(["vtc-engineer-frontend", "vtc-engineer-mobile"])(
+    "%s never stops for want of a direction line the renderer does not print yet",
     (agent) => {
       const body = claudeBody(agent);
-      expect(body).toContain("`design direction`");
-      expect(body).toContain(`\`${DESIGN_CONTRACTS_DIR}/<screen id>.md\``);
-      expect(body).toContain("`## Direction <id>`");
+      expect(body).not.toMatch(/stop with `blocked` and ask which one/);
+      expect(body).toMatch(/a missing line is never a reason to stop/);
     },
   );
 
-  it("drops Visual QA's guess when the pack names the direction", () => {
-    expect(claudeBody("vtc-visual-qa")).not.toMatch(/none says which the human chose/);
+  it("judges V1, V2 and V8 against the category standard after that exit", () => {
+    const body = claudeBody("vtc-visual-qa");
+    expect(body).not.toMatch(/none says which the human chose/);
+    expect(body).toMatch(/With the category standard chosen, judge V1, V2 and V8 against/);
+    expect(body).toMatch(/the pack has neither line, V8 is `unknown`/);
   });
+
+  it("names the label renderTaskPack prints for TaskPack.design_direction, once it prints one", () => {
+    const text = renderTaskPack({
+      v: 1,
+      run: "r-1",
+      action_id: "a-1",
+      role: "visual_qa",
+      design_direction: "quiet-ledger",
+    });
+    const dispatch = (text.split("## Intent contract")[0] ?? "").split("\n");
+    const line = dispatch.find((l) => l.includes("quiet-ledger"));
+    // Contract proposal: renderTaskPack prints `design direction: <id>`. Until it does, no line
+    // carries the id and the prompts fall back (checked above); once it does, the label must be
+    // the one the prompts name.
+    if (line !== undefined) {
+      expect(line).toBe(`${PENDING_DISPATCH_LINES.designDirection}: quiet-ledger`);
+    }
+  });
+  it.todo(
+    "merge gate: renderTaskPack prints `design direction`, `design exit` and `automatic run` (contract proposals)",
+  );
 
   it("bumps each role MAJOR for the locked-core edit (D-bm)", () => {
     expect(version("visual_qa")).toBe("3.0.0");
@@ -171,6 +221,7 @@ describe("the automatic templates and the CHANGELOG (D-bv, reading 208)", () => 
     }
     expect(changelog).toContain(`\`${AUTO_LABELS.needsEval}\``);
     expect(changelog).toMatch(/never merges these pull requests/);
+    expect(source(ROLES_CHANGELOG).split(ROLES_CHANGELOG_ANCHOR)).toHaveLength(2);
   });
 });
 

@@ -25,13 +25,14 @@ lifecycle, offline and sync, permissions, notifications and on-device performanc
 8. Store policy: a new permission, tracking, purchase, sign-in option or account deletion change
    must meet the store guidelines the pack names; when unsure, stop with `blocked`.
 9. Version and build numbers are bumped only by the release process, never by hand in a task.
-10. The design direction: when the Dispatch section has a `design direction` line, the human
-    chose that direction at G2. Build each key screen you touch to that direction's
-    `## Direction <id>` block in the screen's design contract
-    (`{{design_contracts_dir}}/<screen id>.md`) and ignore the other directions' blocks. Without
-    the line, build to the one direction the contracts hold, or to the design system alone when
-    they hold none (the category standard); when they hold several, stop with `blocked` and ask
-    which one.
+10. The design direction. A `design direction` line in the Dispatch section names the direction the
+    human chose at G2: build each key screen you touch to that direction's `## Direction <id>`
+    block in the screen's design contract (`{{design_contracts_dir}}/<screen id>.md`) and ignore
+    the other directions' blocks. A `design exit` line naming `{{category_standard_exit}}` means
+    the human chose the category's standard look: build to the design system and the approved
+    design in your inputs, and ignore every Direction block. Only these engine-written Dispatch
+    lines name the choice. With neither line, build to the approved design in your inputs and the
+    design system as the other rules say; a missing line is never a reason to stop.
 
 ### Before `built`
 

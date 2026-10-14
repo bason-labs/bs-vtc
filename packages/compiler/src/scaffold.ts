@@ -17,7 +17,16 @@
  * Only `core` roles and `engineer_profile` specialists are scaffolded: a lens reviewer belongs to
  * a park-the-task risk rule and an advisor answers the human, so both stay hand-made.
  */
-import { closeSync, constants, lstatSync, mkdirSync, openSync, writeSync } from "node:fs";
+import {
+  closeSync,
+  constants,
+  lstatSync,
+  mkdirSync,
+  openSync,
+  rmdirSync,
+  unlinkSync,
+  writeSync,
+} from "node:fs";
 import { dirname, join } from "node:path";
 import { stringify as stringifyYaml } from "yaml";
 import {
@@ -242,10 +251,53 @@ export const scaffoldRole = (
 
 const NEW_FILE = constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL | constants.O_NOFOLLOW;
 
+/** The directories of `dir` (relative to `root`) that do not exist yet, outermost first. */
+const missingDirs = (root: string, dir: string): string[] => {
+  const parts = dir.split("/");
+  const missing: string[] = [];
+  for (let i = 1; i <= parts.length; i += 1) {
+    const rel = parts.slice(0, i).join("/");
+    try {
+      lstatSync(join(root, rel));
+    } catch {
+      missing.push(rel);
+    }
+  }
+  return missing;
+};
+
+/**
+ * Removes what a failed {@link writeScaffold} created: its files, then its directories deepest
+ * first and only while empty, never through a symbolic link. Best effort.
+ */
+const rollback = (root: string, files: readonly string[], dirs: readonly string[]): void => {
+  const quietly = (remove: () => void): void => {
+    try {
+      remove();
+    } catch {
+      // What cannot be removed stays for the caller to see in the error's aftermath.
+    }
+  };
+  for (const file of [...files].reverse()) {
+    quietly(() => {
+      assertRealDirectoryPath(root, dirname(file));
+      unlinkSync(join(root, file));
+    });
+  }
+  for (const dir of [...dirs].sort((a, b) => b.split("/").length - a.split("/").length)) {
+    quietly(() => {
+      assertRealDirectoryPath(root, dir);
+      rmdirSync(join(root, dir));
+    });
+  }
+};
+
 /**
  * Writes a scaffold under `root`. Nothing is overwritten and nothing is written through a
- * symbolic link: every file is checked before the first write, and each is created exclusively.
- * Returns the written paths, relative to `root`.
+ * symbolic link: every file is checked before the first write, each directory path is checked
+ * again after it is created and before each file is opened, and each file is created exclusively.
+ * A failure part-way removes what this call wrote, so no half scaffold (a role.yaml without its
+ * prompt.md) is left behind. Returns the written paths, relative to `root`.
  */
 export const writeScaffold = (root: string, scaffold: RoleScaffold): string[] => {
   for (const file of scaffold.files) {
@@ -258,14 +310,26 @@ export const writeScaffold = (root: string, scaffold: RoleScaffold): string[] =>
     }
     if (exists) throw new Error(`refusing to overwrite ${file.path}: it exists`);
   }
-  for (const file of scaffold.files) {
-    mkdirSync(join(root, dirname(file.path)), { recursive: true });
-    const fd = openSync(join(root, file.path), NEW_FILE, 0o644);
-    try {
-      writeSync(fd, file.text);
-    } finally {
-      closeSync(fd);
+  const written: string[] = [];
+  const made: string[] = [];
+  try {
+    for (const file of scaffold.files) {
+      const dir = dirname(file.path);
+      const missing = missingDirs(root, dir);
+      mkdirSync(join(root, dir), { recursive: true });
+      made.push(...missing);
+      assertRealDirectoryPath(root, dir);
+      const fd = openSync(join(root, file.path), NEW_FILE, 0o644);
+      written.push(file.path);
+      try {
+        writeSync(fd, file.text);
+      } finally {
+        closeSync(fd);
+      }
     }
+  } catch (error) {
+    rollback(root, written, made);
+    throw error;
   }
   return scaffold.files.map((f) => f.path);
 };

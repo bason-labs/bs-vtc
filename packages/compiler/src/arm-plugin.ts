@@ -16,10 +16,19 @@
  *   the task pack's `Role heuristics`, so its agent file is copied unchanged.
  * - The candidate section must pass the shared `editableSectionErrors` and the AD-9 marker check,
  *   exactly as a compiled section would.
+ * - The arm is self-consistent: its `vtc-manifest.json` gives the arm agent's own
+ *   `prompt_sha256` and `editable_sha256`, and its editable asset holds the arm's section, so an
+ *   integrity check over the arm's directory finds every agent matching its manifest.
  * - Every write lands inside `outDir`: the base tree is read without following links (a link in
  *   it is refused), `outDir` must be a real, empty directory, every file is created exclusively
- *   with `O_NOFOLLOW`, and the written tree is walked again to prove it holds no link and nothing
- *   resolves outside. Nothing runs the real `claude`.
+ *   with `O_NOFOLLOW` in a directory that is still the one this call created (same device and
+ *   inode), and the written tree is walked again to prove it holds no link and nothing resolves
+ *   outside. On a failure only what this call created is removed, file by file and deepest
+ *   directory first, and nothing is removed once `outDir` is no longer the directory it checked.
+ *   Nothing runs the real `claude`.
+ * - The copy uses synchronous file calls (about 180 small files per arm). That blocks the engine's
+ *   event loop for the copy, which v1 accepts: a replay compiles three arms per trial, before any
+ *   arm runs.
  */
 import { createHash } from "node:crypto";
 import {
@@ -30,8 +39,10 @@ import {
   openSync,
   readdirSync,
   realpathSync,
-  rmSync,
+  rmdirSync,
+  unlinkSync,
   writeSync,
+  type Stats,
 } from "node:fs";
 import { isAbsolute, join, relative } from "node:path";
 import {
@@ -146,8 +157,56 @@ export const armAgentFile = (
   return `${front}${instructions.slice(0, instructions.length - section.length)}${editable.trim()}`;
 };
 
-/** Throws unless `outDir` is absolute and is (or now is) a real, empty directory. */
-const prepareOutDir = (outDir: string): void => {
+/**
+ * Pure: the arm's `vtc-manifest.json`, the base manifest's JSON with the arm agent's entry
+ * describing the arm: `prompt_sha256` of its agent file's instructions and `editable_sha256` of
+ * its section (the arm's editable asset). Everything else is the base's.
+ */
+export const armManifest = (
+  baseManifestJson: string,
+  agent: PluginManifestAgent,
+  agentText: string,
+  editable: string,
+): string => {
+  const manifest = JSON.parse(baseManifestJson) as { agents: Record<string, unknown>[] };
+  const entry = manifest.agents.find((a) => a.name === agent.name);
+  if (entry === undefined) throw new Error(`the base manifest has no agent ${agent.name}`);
+  const front = FRONTMATTER.exec(agentText)?.[0] ?? "";
+  entry.prompt_sha256 = promptShaFor(agentText.slice(front.length));
+  entry.editable_sha256 = sha256Hex(editable);
+  return `${JSON.stringify(manifest, null, 2)}\n`;
+};
+
+/** A directory's identity: it is the same directory while its device and inode are. */
+interface DirId {
+  readonly dev: number;
+  readonly ino: number;
+}
+
+const idOf = (stat: Stats): DirId => ({ dev: stat.dev, ino: stat.ino });
+
+/** Whether `path` is still the real directory `id` (not a link, not replaced). */
+const isSameDir = (path: string, id: DirId): boolean => {
+  let stat;
+  try {
+    stat = lstatSync(path);
+  } catch {
+    return false;
+  }
+  return !stat.isSymbolicLink() && stat.isDirectory() && stat.dev === id.dev && stat.ino === id.ino;
+};
+
+const assertSameDir = (path: string, id: DirId, what: string): void => {
+  if (!isSameDir(path, id)) {
+    throw new Error(`${what} changed while the arm was written (replaced or linked): ${path}`);
+  }
+};
+
+/**
+ * Throws unless `outDir` is absolute and is (or now is) a real, empty directory; returns its
+ * identity, which every later step checks again.
+ */
+const prepareOutDir = (outDir: string): DirId => {
   if (!isAbsolute(outDir)) throw new Error(`outDir must be an absolute path: ${outDir}`);
   let stat;
   try {
@@ -160,22 +219,56 @@ const prepareOutDir = (outDir: string): void => {
     throw new Error(`outDir must be a real directory, not a symbolic link: ${outDir}`);
   }
   if (readdirSync(outDir).length > 0) throw new Error(`outDir must be empty: ${outDir}`);
+  return idOf(stat);
 };
 
 const NEW_FILE = constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL | constants.O_NOFOLLOW;
 
-/** Writes `files` into the empty `outDir`, creating each directory and file exclusively. */
-const writeTree = (outDir: string, files: readonly PluginTreeFile[]): void => {
-  const made = new Set<string>();
+/** What one call created inside `outDir`, in creation order, so a failure removes only that. */
+interface Written {
+  /** Each created directory's path relative to `outDir`, with its identity. */
+  readonly dirs: Map<string, DirId>;
+  /** Each created file's path relative to `outDir`. */
+  readonly files: string[];
+}
+
+const parentOf = (path: string): string => path.split("/").slice(0, -1).join("/");
+
+/** The identity `rel` (a directory relative to `outDir`, "" for `outDir`) must still have. */
+const dirIdOf = (root: DirId, written: Written, rel: string): DirId => {
+  const id = rel === "" ? root : written.dirs.get(rel);
+  if (id === undefined) throw new Error(`arm plugin directory ${rel} was not created here`);
+  return id;
+};
+
+/**
+ * Writes `files` into the empty `outDir`, creating each directory and file exclusively, each in a
+ * parent that is still the directory created (or checked) here.
+ */
+const writeTree = (
+  outDir: string,
+  root: DirId,
+  files: readonly PluginTreeFile[],
+  written: Written,
+): void => {
   for (const file of files) {
     const parts = file.path.split("/");
     for (let i = 1; i < parts.length; i += 1) {
       const dir = parts.slice(0, i).join("/");
-      if (made.has(dir)) continue;
+      if (written.dirs.has(dir)) continue;
+      const parent = parentOf(dir);
+      assertSameDir(join(outDir, parent), dirIdOf(root, written, parent), "an arm directory");
       mkdirSync(join(outDir, dir));
-      made.add(dir);
+      const stat = lstatSync(join(outDir, dir));
+      if (stat.isSymbolicLink() || !stat.isDirectory()) {
+        throw new Error(`arm plugin directory ${dir} is not a real directory`);
+      }
+      written.dirs.set(dir, idOf(stat));
     }
+    const parent = parentOf(file.path);
+    assertSameDir(join(outDir, parent), dirIdOf(root, written, parent), "an arm directory");
     const fd = openSync(join(outDir, file.path), NEW_FILE, 0o644);
+    written.files.push(file.path);
     try {
       writeSync(fd, file.bytes);
     } finally {
@@ -184,8 +277,12 @@ const writeTree = (outDir: string, files: readonly PluginTreeFile[]): void => {
   }
 };
 
-/** Walks the written tree: no symbolic link, nothing outside `outDir`, exactly `count` files. */
-const assertContained = (outDir: string, count: number): void => {
+/**
+ * Walks the written tree: `outDir` is still the directory checked, no symbolic link, nothing
+ * outside `outDir`, exactly `count` files.
+ */
+const assertContained = (outDir: string, rootId: DirId, count: number): void => {
+  assertSameDir(outDir, rootId, "outDir");
   const root = realpathSync(outDir);
   let files = 0;
   const walk = (dir: string): void => {
@@ -204,6 +301,43 @@ const assertContained = (outDir: string, count: number): void => {
   walk(root);
   if (files !== count) {
     throw new Error(`arm plugin holds ${String(files)} files, expected ${String(count)}`);
+  }
+};
+
+/**
+ * After a failure, removes what this call created and nothing else: each file whose directory is
+ * still the one created here, then each such directory, deepest first, and only while empty. When
+ * `outDir` is no longer the directory checked, nothing is removed.
+ */
+const removeWritten = (outDir: string, root: DirId, written: Written): void => {
+  if (!isSameDir(outDir, root)) return;
+  const quietly = (remove: () => void): void => {
+    try {
+      remove();
+    } catch {
+      // Best effort: a file or directory that cannot be removed stays for the caller to see.
+    }
+  };
+  for (const file of [...written.files].reverse()) {
+    const parent = parentOf(file);
+    const id = parent === "" ? root : written.dirs.get(parent);
+    if (id !== undefined && isSameDir(join(outDir, parent), id)) {
+      quietly(() => {
+        unlinkSync(join(outDir, file));
+      });
+    }
+  }
+  const dirs = [...written.dirs].sort(([a], [b]) => b.split("/").length - a.split("/").length);
+  for (const [dir, id] of dirs) {
+    const parent = parentOf(dir);
+    const parentId = parent === "" ? root : written.dirs.get(parent);
+    if (parentId !== undefined && isSameDir(join(outDir, parent), parentId)) {
+      if (isSameDir(join(outDir, dir), id)) {
+        quietly(() => {
+          rmdirSync(join(outDir, dir));
+        });
+      }
+    }
   }
 };
 
@@ -254,9 +388,21 @@ const armFiles = (
       `the editable section carries an AD-9 marker: ${violations.map((v) => v.marker).join(", ")}`,
     );
   }
+  const editablePath = rolePromptAssetPath(agent.name, "editable");
+  const replaced = new Map<string, string>([
+    [agent.file, agentText],
+    [editablePath, request.editable],
+    [
+      PLUGIN_MANIFEST_ASSET,
+      armManifest(textOf(base, PLUGIN_MANIFEST_ASSET), agent, agentText, request.editable),
+    ],
+  ]);
   const copied = base
     .filter((f) => f.path !== CLAUDE_PLUGIN_JSON)
-    .map((f) => (f.path === agent.file ? { path: f.path, bytes: Buffer.from(agentText) } : f));
+    .map((f) => {
+      const text = replaced.get(f.path);
+      return text === undefined ? f : { path: f.path, bytes: Buffer.from(text) };
+    });
   const version = armPluginVersion(copied);
   const manifestJson = `${JSON.stringify({ ...pluginJson, version }, null, 2)}\n`;
   return {
@@ -282,14 +428,13 @@ const compileArmSync = (
     throw new Error(`refusing the arm's editable section: ${problems.join("; ")}`);
   }
   const built = armFiles(readPluginTree(options.pluginDir), { ...request, editable });
-  prepareOutDir(request.outDir);
+  const root = prepareOutDir(request.outDir);
+  const written: Written = { dirs: new Map(), files: [] };
   try {
-    writeTree(request.outDir, built.files);
-    assertContained(request.outDir, built.files.length);
+    writeTree(request.outDir, root, built.files, written);
+    assertContained(request.outDir, root, built.files.length);
   } catch (error) {
-    for (const entry of readdirSync(request.outDir)) {
-      rmSync(join(request.outDir, entry), { recursive: true, force: true });
-    }
+    removeWritten(request.outDir, root, written);
     throw error;
   }
   return {

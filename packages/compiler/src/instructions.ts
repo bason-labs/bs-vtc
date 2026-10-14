@@ -31,6 +31,7 @@ import {
   DESIGN_CONTRACTS_DIR,
   DESIGN_DIRECTIONS_DIR,
   DESIGN_SCREENS_PATH,
+  DesignExitSchema,
   DisciplineSchema,
   EscalationEffectSchema,
   ENGINE_HTTP,
@@ -44,7 +45,6 @@ import {
   MAX_STACK_PACKS,
   PrototypeThemeSchema,
   prototypeStatePath,
-  renderAutoMarker,
   RESERVED_EDITABLE_HEADINGS,
   ResearchDepthSchema,
   resolveRoleMode,
@@ -64,18 +64,27 @@ import type { LoadedRole } from "./role-source.js";
 const ENGINE_DIRECTION_FIELDS: ReadonlySet<string> = new Set(["first_viewport", "novelty"]);
 
 /**
- * How the hidden marker of an automatic issue or PR starts (`renderAutoMarker`, AD-27 rule 3):
- * `<!-- vtc:auto`, taken from the shared renderer so the prompt never restates it.
+ * The Dispatch lines the UI and Spec Verifier prompts key off that `renderTaskPack` does not print
+ * yet (this branch's contract proposals; spine §5 readings 179 and 198). Each is `<label>: <value>`
+ * like every Dispatch line:
+ *
+ * - `design direction: <id>`, from `TaskPack.design_direction` (the G2 choice);
+ * - `design exit: category_standard`, the G2 `category_standard` exit (proposed field);
+ * - `automatic run: <kind>, issue #<n>`, from `run.started.automation` (proposed field).
+ *
+ * Until a line is printed the prompts fall back to their pre-round-4 behaviour: no role blocks or
+ * switches mode for want of one, and no other pack text stands in for it.
  */
-const AUTO_MARKER_PREFIX = renderAutoMarker({ v: 1, kind: "defect", fp: "0".repeat(16) })
-  .split(" ")
-  .slice(0, 2)
-  .join(" ");
+export const PENDING_DISPATCH_LINES = {
+  designDirection: "design direction",
+  designExit: "design exit",
+  automaticRun: "automatic run",
+} as const;
 
 /** Values every prompt part may reference as `{{name}}`. */
 export const PROTOCOL_VARS: Readonly<Record<string, string>> = {
-  /** An automatic run's spec is its issue, whose body starts with this (D-cd, reading 198). */
-  auto_marker_prefix: AUTO_MARKER_PREFIX,
+  /** The G2 exit that takes the category's standard look (`DesignExit`, spine §5 reading 179). */
+  category_standard_exit: DesignExitSchema.enum.category_standard,
   architect_depths: ArchitectDepthSchema.options.join(", "),
   /** The Architect's machine-checkable Checks (`AdCheckSpec`, §8.5; spine §5 reading 126). */
   architecture_spine_path: ARCHITECTURE_SPINE_PATH,

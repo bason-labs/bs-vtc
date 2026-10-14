@@ -4,6 +4,7 @@
  * proposal is labelled `needs-eval`.
  */
 import {
+  chmodSync,
   existsSync,
   mkdirSync,
   mkdtempSync,
@@ -248,5 +249,24 @@ describe("writeScaffold", () => {
     symlinkSync(outside, join(root, "roles", "release_notes"));
     expect(() => writeScaffold(root, scaffold)).toThrow(/symbolic link|real directory/);
     expect(existsSync(join(outside, "role.yaml"))).toBe(false);
+  });
+
+  it("removes what it wrote when a later file fails, leaving no half scaffold", () => {
+    const root = plantedRoot();
+    const scaffold = ok(scaffoldRole(request(), readSources(root).files));
+    // The test stub's parent cannot take a new directory, so the stub (written last) fails
+    // after role.yaml and prompt.md are on disk.
+    const stubParent = dirname(dirname(join(root, roleTestStubPath("release_notes"))));
+    mkdirSync(stubParent, { recursive: true });
+    chmodSync(stubParent, 0o555);
+    try {
+      expect(() => writeScaffold(root, scaffold)).toThrow();
+    } finally {
+      chmodSync(stubParent, 0o755);
+    }
+    expect(existsSync(join(root, "roles/release_notes/role.yaml"))).toBe(false);
+    expect(existsSync(join(root, "roles/release_notes/prompt.md"))).toBe(false);
+    expect(existsSync(join(root, "roles/release_notes"))).toBe(false);
+    expect(existsSync(join(root, "roles/NOTICE"))).toBe(true);
   });
 });
