@@ -2853,15 +2853,17 @@ pin|approve` warn that the target cannot take a pin until its role is switched. 
       the preferred host. `autoRollback` takes `LOOKBACK_HOME.pinsLock`. _Amended by readings 177,
       178 and 180: trials are marked in the log, run under the isolation reading 178 records, and
       only roles that change files are replayed._
-177.  **Replay trials are marked in the log; contracts 4.11.0 is MINOR** (AD-3 rule 4; AD-7 rules
-      1, 5 and 10; AD-21 rule 6; closes `replay-trial-identity-not-in-event-log` once engine core
-      writes it). _Lead decision 2026-10-14, pending human review._ A `lookback_replay` trial's
-      `role.dispatched` carries `purpose: lookback_replay` and `replay` (`ReplayTrialRef`:
-      proposal, `<run>:<task>`, arm `a`/`b`/`aa`, trial); absent `purpose` means `role`. Every
-      reader that counts the run's work (Lookback's traces, attributions, scorecards and canary
-      data, Flow Studio, status) leaves a marked dispatch and its `role.submitted` out, from
-      `events.jsonl` alone, so a clone or a fresh machine sees the same run; the engine's private
-      `<guard>/replays/` file stays a resume cache, not the record. 4.11.0 also adds
+177.  **Replay trials are marked in the log; contracts 4.11.0 is MINOR** (AD-3 rule 4; AD-7 rules 1,
+      5 and 10; AD-21 rule 6; closes `replay-trial-identity-not-in-event-log` for Lookback; the read
+      models follow). _Lead decision 2026-10-14, pending human review._ A `lookback_replay` trial's
+      `role.dispatched` carries `purpose: lookback_replay` and `replay` (`ReplayTrialRef`: proposal,
+      `<run>:<task>`, arm `a`/`b`/`aa`, trial); absent `purpose` means `role`. Every reader that
+      counts the run's work (Lookback's traces, attributions, scorecards and canary data, Flow
+      Studio, status) leaves a marked dispatch and its `role.submitted` out, from `events.jsonl`
+      alone, so a clone or a fresh machine sees the same run; the engine's private
+      `<guard>/replays/` file stays a resume cache, not the record. The engine writes the marker and
+      Lookback's event feed (`lookbackEvents`) filters on it since the integration round; the read
+      models behind status and Flow Studio follow. 4.11.0 also adds
       `SandboxProfileRequest.readDeny`, `SandboxProfile.enforced.readDeny` and
       `ReplayResult.isolation` (reading 178), `TaskPack.design_direction`, `DESIGN_CONTRACTS_DIR`
       and `designContractPath` (reading 179). Every change is an optional field, a new schema or a
@@ -2879,9 +2881,10 @@ pin|approve` warn that the target cannot take a pin until its role is switched. 
       arms meet the conditions the recorded dispatch met. The host sandboxes deny no reads today,
       so a trial that knows the repo's absolute path can read the user's current tree and `.git`:
       that is an accepted residual (§7), not a reason to keep replays off, because nothing
-      promotes without a human and the canary still measures live work. The engine passes the
-      repo root and its git directory as `SandboxProfileRequest.readDeny` on every trial;
-      adapters enforce it where the host can (Claude: `permissions.deny` `Read` rules and
+      promotes without a human and the canary still measures live work. The closing of the
+      leak, which engine core, the adapters and Lookback build next: the engine passes the repo
+      root and its git directory as `SandboxProfileRequest.readDeny` on every trial; adapters
+      enforce it where the host can (Claude: `permissions.deny` `Read` rules and
       `sandbox.filesystem.denyRead`; Codex cannot, reading 82) and report it in
       `enforced.readDeny`; Lookback writes `ReplayResult.isolation` (`read_denied` only when every
       trial ran with it enforced). Hidden acceptance tests are keyed by task only
