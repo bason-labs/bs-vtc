@@ -14,6 +14,9 @@ export type View =
   | "usage"
   | "artifact"
   | "design"
+  | "gates"
+  | "research"
+  | "lookback"
   | "not_found";
 
 export const VIEW_PATHS = {
@@ -25,6 +28,9 @@ export const VIEW_PATHS = {
   usage: "/usage/",
   artifact: "/artifact/",
   design: "/design/",
+  gates: "/gates/",
+  research: "/research/",
+  lookback: "/lookback/",
 } as const satisfies Record<Exclude<View, "not_found">, string>;
 
 const BY_PATH = new Map<string, View>(
@@ -73,6 +79,12 @@ export const hrefs = {
       viewport: q.viewport === undefined ? undefined : String(q.viewport),
       theme: q.theme,
     }),
+  /** G1/G2 as the Lead showed them: directions, unverified facts, design coverage. */
+  gates: (run: string): string => withQuery(VIEW_PATHS.gates, { run }),
+  /** Research facts (`.vtc/research/facts.jsonl`). */
+  research: (run: string): string => withQuery(VIEW_PATHS.research, { run }),
+  /** Lookback scorecards and the run's canaries, replays and proposals. */
+  lookback: (run: string): string => withQuery(VIEW_PATHS.lookback, { run }),
 };
 
 const listeners = new Set<() => void>();

@@ -9,11 +9,37 @@ import { NOTICE_EVENT_TYPES } from "../notices";
  * A run-scoped topic is `run:<run>:<name>`; `runs` and `usage` are global.
  */
 export type RunTopicName =
-  "status" | "graph" | "tasks" | "features" | "escalations" | "notices" | `task:${string}`;
+  | "status"
+  | "graph"
+  | "tasks"
+  | "features"
+  | "escalations"
+  | "notices"
+  | "gates"
+  | "headless"
+  | "level3"
+  | "research"
+  | "lookback"
+  | `task:${string}`;
 
 export const runTopic = (run: string, name: RunTopicName): string => `run:${run}:${name}`;
 
 const TASK_SCOPED: readonly RunTopicName[] = ["tasks", "graph", "status"];
+
+/**
+ * The views that read the run's event log for wave-3 data (spine §5 reading 109) re-read it on
+ * these topics: `gates` (G1/G2 requests, directions, unverified facts), `headless`
+ * (engine-launched runs), `level3` (preflight, checklist, auto-merge, Final Review steps),
+ * `research` (facts) and `lookback`.
+ */
+const LEVEL3_TYPES = new Set([
+  "merge.preflight",
+  "feature.checklist",
+  "feature.auto_merge_enabled",
+  "feature.auto_merge_disabled",
+  "feature.post_merge_ci",
+  "feature.reverted",
+]);
 
 const entityTopics = (event: VtcEvent): string[] => {
   const [entity] = event.type.split(".");
@@ -22,14 +48,31 @@ const entityTopics = (event: VtcEvent): string[] => {
     case "run":
       return ["runs", "status", "graph"];
     case "gate":
-      return event.type === "gate.result" ? [...task, "graph"] : ["runs", "status", "graph"];
+      return event.type === "gate.result"
+        ? [...task, "graph"]
+        : ["runs", "status", "graph", "gates"];
     case "task":
     case "contract":
     case "merge":
-      return [...TASK_SCOPED, ...task, ...(entity === "merge" ? ["features"] : [])];
+      return [
+        ...TASK_SCOPED,
+        ...task,
+        ...(entity === "merge" ? ["features"] : []),
+        ...(LEVEL3_TYPES.has(event.type) ? ["level3"] : []),
+      ];
     case "feature":
     case "branch":
-      return ["features", "graph", "status"];
+      return ["features", "graph", "status", ...(LEVEL3_TYPES.has(event.type) ? ["level3"] : [])];
+    case "final_review":
+      return ["features", "level3"];
+    case "headless":
+      return ["headless", "status", "graph", ...task];
+    case "fact":
+      return event.type === "fact.waived" ? ["research", "gates"] : ["research"];
+    case "research":
+      return ["research"];
+    case "lookback":
+      return ["lookback"];
     case "role":
     case "finding":
       return [...task, "graph"];

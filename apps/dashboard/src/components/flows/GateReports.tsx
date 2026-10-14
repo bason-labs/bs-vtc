@@ -7,6 +7,7 @@ import { gateReportModel, type GateLayerGroup } from "@/lib/gates";
 import { hrefs } from "@/lib/router";
 import { Link } from "@/components/app/Link";
 import { Badge, StatusPill } from "@/components/ui";
+import { VisualSummaryBlock } from "@/components/visual/VisualSummaryBlock";
 
 const linkClass = "inline-flex items-center gap-1 text-accent-fg underline";
 
@@ -66,19 +67,24 @@ function Layer({ run, group }: { run: string; group: GateLayerGroup }) {
 /**
  * Gate reports of a task (§17 drill-down), newest first: verdict, commit range and duration, then
  * each layer (§7.2 L0–L6) with its gates' violations, failure class, test counts, coverage,
- * regressions (§7.3), tool findings and the redacted report. Older runs start collapsed.
+ * regressions (§7.3), tool findings and the redacted report, then the visual step when it ran
+ * (AD-24). Older runs start collapsed.
  */
 export function GateReports({ run, reports }: { run: string; reports: readonly GateReport[] }) {
   const models = useMemo(
     () =>
       [...reports]
         .sort((a, b) => b.started_at.localeCompare(a.started_at))
-        .map((r) => ({ key: `${r.reason}-${r.started_at}`, model: gateReportModel(r) })),
+        .map((r) => ({
+          key: `${r.reason}-${r.started_at}`,
+          model: gateReportModel(r),
+          visual: r.visual ?? null,
+        })),
     [reports],
   );
   return (
     <ol className="space-y-2 text-xs">
-      {models.map(({ key, model }, i) => (
+      {models.map(({ key, model, visual }, i) => (
         <li key={key}>
           <details
             open={i === 0}
@@ -100,6 +106,7 @@ export function GateReports({ run, reports }: { run: string; reports: readonly G
               {model.layers.map((g) => (
                 <Layer key={g.layer} run={run} group={g} />
               ))}
+              {visual === null ? null : <VisualSummaryBlock run={run} summary={visual} />}
               {model.traceability === null ? null : (
                 <Link className={linkClass} href={hrefs.artifact(run, model.traceability)}>
                   <Table2 aria-hidden className="size-3.5" /> Traceability matrix

@@ -7,14 +7,21 @@ import {
   type IncidentKind,
   type VtcEvent,
 } from "@vtc/shared";
+import { eventData } from "./events";
+import { formatGateDuration } from "./gates";
+import { headlessOutcomeMeta, PREFLIGHT_CHECKS, PREFLIGHT_PURPOSES } from "./headless";
+import { AUTO_MERGE_DISABLED, PREFLIGHT_FIXES } from "./level3";
 import type { Tone } from "./states";
 
 /**
  * Run notices (§6.7, §15 incident reports): events the human must see although nothing is
  * waiting on an answer. A failed push or PR update (`branch.push_failed`, `feature.pr_failed`),
  * an incident (`config_changed`, `checkout_write` and the unclean-end kinds) and a merge-level
- * change (`no_remote`: Level 2+ in a repo without a push remote, spine §5 reading 18). The engine
- * still owns all state: these are read from the run's event log and only explained here.
+ * change (`no_remote`: Level 2+ in a repo without a push remote, spine §5 reading 18). Since
+ * contracts 4.5.0 also a failed Level-3 preflight, auto-merge turned off, a red base CI or a
+ * revert after a Level-3 merge (AD-23), an engine-launched run that did not finish or could not
+ * start (AD-25) and a prompt canary rolled back (AD-21). The engine still owns all state: these
+ * are read from the run's event log and only explained here.
  */
 
 /** Event types that make a notice, or resolve one (a later push or PR update). */
@@ -25,10 +32,27 @@ export const NOTICE_EVENT_TYPES: ReadonlySet<CoreEventType> = new Set<CoreEventT
   "feature.pr_updated",
   "incident.recorded",
   "run.merge_level_changed",
+  "merge.preflight",
+  "feature.auto_merge_disabled",
+  "feature.post_merge_ci",
+  "feature.reverted",
+  "headless.preflight",
+  "headless.ended",
+  "lookback.rolled_back",
 ]);
 
 export type NoticeType =
-  "branch.push_failed" | "feature.pr_failed" | "incident.recorded" | "run.merge_level_changed";
+  | "branch.push_failed"
+  | "feature.pr_failed"
+  | "incident.recorded"
+  | "run.merge_level_changed"
+  | "merge.preflight"
+  | "feature.auto_merge_disabled"
+  | "feature.post_merge_ci"
+  | "feature.reverted"
+  | "headless.preflight"
+  | "headless.ended"
+  | "lookback.rolled_back";
 
 export interface RunNotice {
   readonly seq: number;
@@ -71,6 +95,100 @@ const MERGE_REASONS: Readonly<Record<EventData<"run.merge_level_changed">["reaso
 type NoticeBody = Omit<RunNotice, "seq" | "at" | "type" | "feature" | "resolved" | "evidence"> &
   Partial<Pick<RunNotice, "evidence">>;
 
+const DOWNGRADE_NOTE =
+  "The merge level drops one step and an escaped defect goes to Lookback; only a human restores the level (vtc merge-level restore).";
+
+/** Notices of the wave-3 events (contracts 4.5.0); `null` for one that needs no attention. */
+const wave3Body = (event: VtcEvent): NoticeBody | null => {
+  const preflight = eventData(event, "merge.preflight");
+  if (preflight !== null) {
+    if (preflight.ok) return null;
+    return {
+      tone: "warn",
+      title: `Level ${String(preflight.configured_level)} is not available: this run merges at Level ${String(preflight.effective_level)}`,
+      detail: [
+        ...preflight.failed.map((f) => PREFLIGHT_FIXES[f]),
+        ...(preflight.detail === undefined ? [] : [preflight.detail]),
+      ].join(" "),
+      note: "VTC never changes repository settings; configure these, and the next run checks again.",
+    };
+  }
+  const disabled = eventData(event, "feature.auto_merge_disabled");
+  if (disabled !== null) {
+    return {
+      tone: "warn",
+      title: "Auto-merge turned off",
+      detail: disabled.detail,
+      note: `Why: ${AUTO_MERGE_DISABLED[disabled.reason]}.`,
+    };
+  }
+  const ci = eventData(event, "feature.post_merge_ci");
+  if (ci !== null) {
+    if (ci.status !== "red") return null;
+    const failed = ci.runs.filter((r) => r.required && r.conclusion === "failure");
+    return {
+      tone: "danger",
+      title: "Base CI failed after the merge",
+      detail:
+        failed.length === 0
+          ? `Merge commit ${ci.merge_commit.slice(0, 8)}`
+          : `Failed required runs: ${failed.map((r) => r.name).join(", ")}`,
+      note: DOWNGRADE_NOTE,
+    };
+  }
+  const reverted = eventData(event, "feature.reverted");
+  if (reverted !== null) {
+    return {
+      tone: "danger",
+      title: "The feature's merge was reverted",
+      detail: reverted.detail,
+      note: DOWNGRADE_NOTE,
+    };
+  }
+  const headless = eventData(event, "headless.preflight");
+  if (headless !== null) {
+    if (headless.ok || headless.failed === undefined) return null;
+    const purpose = PREFLIGHT_PURPOSES[headless.purpose];
+    return {
+      tone: headless.failed === "auth" ? "danger" : "warn",
+      title: `${purpose.charAt(0).toUpperCase()}${purpose.slice(1)} on ${headless.host} did not start`,
+      detail: `Failed check: ${PREFLIGHT_CHECKS[headless.failed]}.${headless.detail === undefined ? "" : ` ${headless.detail}`}`,
+      note:
+        headless.failed === "auth"
+          ? "The steps park with an incident; the engine never retries a login failure. Log in with the host's own command."
+          : "The steps wait; the engine checks again before the next start.",
+    };
+  }
+  const ended = eventData(event, "headless.ended");
+  if (ended !== null) {
+    if (ended.outcome === "done") return null;
+    const meta = headlessOutcomeMeta(ended);
+    return {
+      tone: meta.tone,
+      title: `Headless ${event.role ?? "role"} run ${ended.action_id} ended: ${meta.label}`,
+      detail: `Ran ${formatGateDuration(ended.duration_ms)}${
+        ended.exit_code === null ? "" : `, exit ${String(ended.exit_code)}`
+      }.`,
+      note:
+        ended.outcome === "limit"
+          ? "The step waits for the limit to reset (§6.9)."
+          : ended.outcome === "auth"
+            ? "The steps park; the engine never retries a login failure."
+            : null,
+    };
+  }
+  const rolled = eventData(event, "lookback.rolled_back");
+  if (rolled !== null) {
+    return {
+      tone: "warn",
+      title: `Prompt canary rolled back for ${rolled.target_role} on ${rolled.target_host}`,
+      detail: rolled.reason,
+      note: "The baseline prompt runs again; only a human promotes a version (vtc lookback approve).",
+    };
+  }
+  return null;
+};
+
 const body = (event: VtcEvent): NoticeBody | null => {
   if (isEventOfType(event, "branch.push_failed")) {
     const data = readEventData(event);
@@ -112,7 +230,7 @@ const body = (event: VtcEvent): NoticeBody | null => {
       note: data.reason === "no_remote" ? "Tasks reach done once merged locally (Level 1)." : null,
     };
   }
-  return null;
+  return wave3Body(event);
 };
 
 /** The notice an event makes, or `null` (other types, or a payload this version cannot read). */
@@ -135,10 +253,37 @@ export const noticeForEvent = (event: VtcEvent): RunNotice | null => {
   };
 };
 
-/** The success that resolves each failure type. */
+/** The success that resolves each failure type (of the same feature). */
 const RESOLVED_BY: Readonly<Partial<Record<NoticeType, CoreEventType>>> = {
   "branch.push_failed": "branch.pushed",
   "feature.pr_failed": "feature.pr_updated",
+};
+
+/** Whether `later` resolves the failure `failed` made. */
+const resolves = (failed: VtcEvent, notice: RunNotice, later: VtcEvent): boolean => {
+  if (later.seq <= failed.seq) return false;
+  const success = RESOLVED_BY[notice.type];
+  if (success !== undefined) return later.type === success && later.feature === notice.feature;
+  const ci = eventData(failed, "feature.post_merge_ci");
+  if (ci !== null) {
+    const next = eventData(later, "feature.post_merge_ci");
+    return next?.status === "green" && next.merge_commit === ci.merge_commit;
+  }
+  const preflight = eventData(failed, "headless.preflight");
+  if (preflight !== null) {
+    const next = eventData(later, "headless.preflight");
+    return next?.ok === true && next.host === preflight.host && next.purpose === preflight.purpose;
+  }
+  // A later run of the same role on the same task that ended `done` resolves a failed one.
+  if (eventData(failed, "headless.ended") !== null) {
+    return (
+      eventData(later, "headless.ended")?.outcome === "done" &&
+      failed.task !== undefined &&
+      later.task === failed.task &&
+      later.role === failed.role
+    );
+  }
+  return false;
 };
 
 /**
@@ -151,31 +296,38 @@ export const runNotices = (events: readonly VtcEvent[], feature?: string): RunNo
     if (feature !== undefined && event.feature !== feature) continue;
     const notice = noticeForEvent(event);
     if (notice === null) continue;
-    const success = RESOLVED_BY[notice.type];
-    const resolved =
-      success !== undefined &&
-      events.some((e) => e.type === success && e.feature === notice.feature && e.seq > notice.seq);
+    const resolved = events.some((later) => resolves(event, notice, later));
     notices.push({ ...notice, resolved });
   }
   return notices.sort((a, b) => b.seq - a.seq);
 };
 
-/** Upper bound on pages read for one view (2000 events a page at most). */
-const MAX_PAGES = 50;
+/** Upper bound on pages read for one view (`EVENT_PAGE_LIMIT.max` events a page). */
+export const MAX_EVENT_PAGES = 50;
+
+export interface RunEventLog {
+  /** Oldest first. */
+  readonly events: VtcEvent[];
+  /**
+   * The log is longer than {@link MAX_EVENT_PAGES} pages: the newest events were not read, so
+   * the views built from it say so instead of showing a live state as current.
+   */
+  readonly truncated: boolean;
+}
 
 /** Reads the run's whole event log, page by page (`GET /api/runs/:run/events?after=`). */
 export const loadRunEvents = async (
   client: { events(run: string, after: number, signal?: AbortSignal): Promise<EventPage> },
   run: string,
   signal?: AbortSignal,
-): Promise<VtcEvent[]> => {
+): Promise<RunEventLog> => {
   const events: VtcEvent[] = [];
   let after = 0;
-  for (let page = 0; page < MAX_PAGES; page += 1) {
+  for (let page = 0; page < MAX_EVENT_PAGES; page += 1) {
     const read = await client.events(run, after, signal);
     events.push(...read.events);
-    if (read.next_after === null || read.next_after <= after) break;
+    if (read.next_after === null || read.next_after <= after) return { events, truncated: false };
     after = read.next_after;
   }
-  return events;
+  return { events, truncated: true };
 };
