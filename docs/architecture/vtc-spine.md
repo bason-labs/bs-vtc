@@ -1660,8 +1660,9 @@ reversible through §6. Contracts 4.3.0 carry them.
     entry in any settings layer that reaches one of these paths widens the sandbox, like one
     reaching the VTC home. Compiled Claude agents add `Read`, `Edit` and `Write` denies for the
     same repo paths (`**/`-prefixed, relative to the session; best effort, the session sandbox is
-    the barrier; superseded by reading 81: those rules are the session's `permissions.deny` now). The settings name credential files only in `sandbox.filesystem.denyRead`, which
-    the D-ad exemption covers; the adapter's AD-9 check on the project's local file honours it.
+    the barrier; superseded by reading 81: those rules are the session's `permissions.deny` now).
+    The settings name credential files only in `sandbox.filesystem.denyRead`, which the D-ad
+    exemption covers; the adapter's AD-9 check on the project's local file honours it.
     (c) A run takes `.vtc/project.yaml` from the commit it starts on (as reading 78 does for
     `gates.yml`), and `start` refuses (`EngineError` code `config`, `projectConfigNotCommitted`)
     when the working tree's copy differs from it (edited, added or deleted), so a change to the
