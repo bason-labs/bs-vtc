@@ -20,9 +20,10 @@
  * 3. A task that parked on its round cap or as stuck with no signal is **inconclusive**: it is
  *    returned for an AI tiebreak (method `ai_tiebreak`, with an "unknown" answer allowed).
  *
- * The blamed dispatch is the blamed role's latest dispatch on the task before the failure (or in
- * the run, for roles that work before tasks exist, like the BA). Only failures are recorded; the
- * scorecards count successes from the events.
+ * The blamed dispatch is the blamed role's latest dispatch on the task before the failure (or, for
+ * roles that work before tasks exist, like the BA, its latest dispatch with no task). A failure
+ * whose blamed role has no such dispatch is inconclusive: a dispatch on another task never takes
+ * the blame. Only failures are recorded; the scorecards count successes from the events.
  */
 import {
   ATTRIBUTION_TREE,
@@ -32,6 +33,7 @@ import {
   LOOKBACK_REPO,
   parsePersisted,
   readEventData,
+  sha256Hex,
   type Attribution,
   type AttributionRule,
   type Evidence,
@@ -204,15 +206,34 @@ export const humanLabels = (events: readonly VtcEvent[]): HumanLabel[] => {
 const groupKey = (s: { readonly task?: string; readonly feature?: string }): string =>
   s.task ?? (s.feature === undefined ? "run" : `feature:${s.feature}`);
 
-/** The blamed role's latest dispatch on the task before `seq`, else its latest in the run. */
+/**
+ * The blamed role's dispatch for a failure at `scope` before `seq`: its latest on the failure's
+ * task (or, for a feature-scoped failure, in the feature; for a run-scoped one, in the run), else
+ * its latest dispatch with no task (roles that work before tasks exist, like the BA) of the same
+ * feature or none. A dispatch on another task never takes the blame: `undefined` then.
+ */
 const blamedTrace = (
   traces: readonly Trace[],
   role: string,
-  task: string | undefined,
+  scope: { readonly task?: string; readonly feature?: string },
   seq: number,
 ): Trace | undefined => {
   const before = traces.filter((t) => t.role === role && t.seq < seq);
-  return before.filter((t) => task !== undefined && t.task === task).at(-1) ?? before.at(-1);
+  if (scope.task === undefined && scope.feature === undefined) return before.at(-1);
+  const inScope =
+    scope.task !== undefined
+      ? before.filter((t) => t.task === scope.task).at(-1)
+      : before.filter((t) => t.feature === scope.feature).at(-1);
+  return (
+    inScope ??
+    before
+      .filter(
+        (t) =>
+          t.task === undefined &&
+          (t.feature === undefined || scope.feature === undefined || t.feature === scope.feature),
+      )
+      .at(-1)
+  );
 };
 
 export interface AttributionResult {
@@ -275,7 +296,9 @@ export const attributeRun = (input: {
   const groups = new Map<string, FailureSignal[]>();
   for (const signal of signals) {
     const key = groupKey(signal);
-    groups.set(key, [...(groups.get(key) ?? []), signal]);
+    const list = groups.get(key);
+    if (list === undefined) groups.set(key, [signal]);
+    else list.push(signal);
   }
   // A labelled escalation is a failure signal of its own, at task, feature or run scope.
   for (const label of labels) if (!groups.has(groupKey(label))) groups.set(groupKey(label), []);
@@ -285,7 +308,7 @@ export const attributeRun = (input: {
     if (scoped.length > 0) {
       for (const label of scoped) {
         if (label.role === "none") continue;
-        record(blamedTrace(traces, label.role, label.task, label.seq), {
+        record(blamedTrace(traces, label.role, label, label.seq), {
           blamed_role: label.role,
           method: "human",
           confidence: 1,
@@ -305,7 +328,13 @@ export const attributeRun = (input: {
     const first = group.find((s) => s.rule === rule);
     if (first === undefined) continue;
     const blame = ATTRIBUTION_TREE[rule];
-    record(blamedTrace(traces, blame.primary, first.task, first.seq), {
+    const blamed = blamedTrace(traces, blame.primary, first, first.seq);
+    if (blamed === undefined) {
+      // The blamed role never worked on this failure's scope: left to the AI tiebreak.
+      inconclusive.push(...group);
+      continue;
+    }
+    record(blamed, {
       blamed_role: blame.primary,
       ...(blame.secondary === null ? {} : { secondary_role: blame.secondary }),
       method: "tree",
@@ -368,9 +397,35 @@ export interface AttributionHistory {
   /** Events of every run whose attributions count (the runs the scorecards cover). */
   readonly history: readonly VtcEvent[];
   readonly lockedShaFor: LockedShaFor;
+  /**
+   * {@link tiebreakKey}s of the AI tiebreak answers the engine itself recorded, somewhere no role
+   * can write. A tiebreak cannot be derived again from the events, so an `ai_tiebreak` row of the
+   * git-tracked file counts only when it matches one; none are trusted without this.
+   */
+  readonly tiebreaks?: ReadonlySet<string>;
 }
 
-const samePrompt = (a: Attribution["prompt"], b: Attribution["prompt"]): boolean =>
+/**
+ * The digest that ties an `ai_tiebreak` row to the engine's own record of that answer: its trace,
+ * prompt version, blame, confidence and evidence (`attributed_at` and `split` are left out).
+ */
+export const tiebreakKey = (a: Attribution): string =>
+  sha256Hex(
+    JSON.stringify([
+      a.run,
+      a.trace,
+      a.prompt.role,
+      a.prompt.mode ?? null,
+      a.prompt.host,
+      a.prompt.effective_sha256,
+      a.blamed_role,
+      a.confidence,
+      a.evidence.map((e) => [e.type, e.ref]),
+    ]),
+  );
+
+/** The same prompt version: role, mode, host and all three hashes. */
+export const samePrompt = (a: Attribution["prompt"], b: Attribution["prompt"]): boolean =>
   a.role === b.role &&
   a.mode === b.mode &&
   a.host === b.host &&
@@ -385,13 +440,15 @@ const samePrompt = (a: Attribution["prompt"], b: Attribution["prompt"]): boolean
  * - a `tree` or `human` row is one the engine derives again from that run's events (same method
  *   and blamed role); the derived row is returned, with the row's `attributed_at`;
  * - an `ai_tiebreak` row names a dispatch whose run has an inconclusive failure in the dispatch's
- *   task, its feature or the run as a whole (the tiebreak's answer itself cannot be re-derived).
+ *   task, its feature or the run as a whole, and matches a tiebreak the engine recorded
+ *   (`tiebreaks`; the answer itself cannot be re-derived, and a hand-edited or planted row must
+ *   not mark a dispatch as failed).
  * Rows of a run outside `history`, of an invented dispatch, of a success the events do not show
  * failing, or whose split is not the trace's split are dropped. One row per trace.
  */
 export const trustedAttributions = (
   rows: readonly Attribution[],
-  { history, lockedShaFor }: AttributionHistory,
+  { history, lockedShaFor, tiebreaks }: AttributionHistory,
 ): Attribution[] => {
   const byRun = new Map<string, VtcEvent[]>();
   for (const event of history) {
@@ -430,7 +487,11 @@ export const trustedAttributions = (
         ...(trace.feature === undefined ? [] : [`feature:${trace.feature}`]),
         "run",
       ];
-      if (row.method !== "ai_tiebreak" || !groups.some((g) => inconclusive.has(`${row.run}\n${g}`)))
+      if (
+        row.method !== "ai_tiebreak" ||
+        tiebreaks?.has(tiebreakKey(row)) !== true ||
+        !groups.some((g) => inconclusive.has(`${row.run}\n${g}`))
+      )
         continue;
       trusted.push(row);
     }

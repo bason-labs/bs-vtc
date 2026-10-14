@@ -1,12 +1,14 @@
 import {
   canaryArmFor,
   effectivePromptSha,
+  LOOKBACK_HOME,
+  LOOKBACK_PINS_LOCK_STALE_MS,
   LookbackPinsSchema,
   type LookbackPinsInput,
   type PromptVersionFrontmatter,
 } from "@vtc/shared";
-import { mkdir, readdir, readFile, writeFile } from "node:fs/promises";
-import { join } from "node:path";
+import { mkdir, readdir, readFile, utimes, writeFile } from "node:fs/promises";
+import { basename, dirname, join } from "node:path";
 import { describe, expect, it } from "vitest";
 import { parseYaml, toYaml } from "../../src/core/index.js";
 import {
@@ -82,6 +84,24 @@ describe("prompt versions (AD-21 rules 1 and 3)", () => {
       PromptVersionError,
     );
     expect(candidate.effective_sha256).toBe(effectivePromptSha(LOCKED, CANDIDATE_TEXT));
+  });
+
+  it("never replaces a file that is already at the version's path, even in a race", async () => {
+    const home = await tempDir("home");
+    const path = await storePromptVersion(home, frontmatter(), CANDIDATE_TEXT);
+    const squatter = "---\nnot a version\n---\n";
+    await writeFile(path, squatter);
+    await expect(storePromptVersion(home, frontmatter(), CANDIDATE_TEXT)).rejects.toThrow(
+      PromptVersionError,
+    );
+    expect(await readFile(path, "utf8")).toBe(squatter);
+    // Concurrent stores of one version: one writes it, the others find it in place.
+    const fresh = await tempDir("home");
+    const paths = await Promise.all(
+      Array.from({ length: 5 }, () => storePromptVersion(fresh, frontmatter(), CANDIDATE_TEXT)),
+    );
+    expect(new Set(paths).size).toBe(1);
+    expect(await readdir(dirname(paths[0] ?? ""))).toEqual([basename(paths[0] ?? "")]);
   });
 });
 
@@ -241,6 +261,26 @@ describe("the engine's only pins write: auto_rollback", () => {
     expect(after.projects[REPO]?.pins).toHaveLength(1);
     expect(after.history.at(-1)).toMatchObject({ gesture: "auto_rollback", by: "engine" });
     expect((await readPins(home)).problem).toBeUndefined();
+    // The pins lock is released.
+    expect(await readdir(join(home, "lookback"))).not.toContain("pins.lock");
+  });
+
+  it("takes the pins lock, and takes over a stale one", async () => {
+    const home = await tempDir("home");
+    await writePins(home, canaryPins());
+    const lock = join(home, LOOKBACK_HOME.pinsLock);
+    await writeFile(lock, "a crashed writer's token");
+    const old = new Date(Date.now() - LOOKBACK_PINS_LOCK_STALE_MS - 5_000);
+    await utimes(lock, old, old);
+    const event = await autoRollback({
+      vtcHome: home,
+      repoKey: REPO,
+      target: { role: "engineer", host: HOST },
+      reason: "tokens up",
+      now,
+    });
+    expect(event).toMatchObject({ type: "lookback.rolled_back" });
+    expect(await readdir(join(home, "lookback"))).not.toContain("pins.lock");
   });
 
   it("does nothing without a canary or with a pins file it cannot read", async () => {

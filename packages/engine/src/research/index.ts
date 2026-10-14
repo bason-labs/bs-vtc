@@ -7,7 +7,11 @@
 export {
   CacheIntegrityError,
   createFileResearchCache,
+  RESEARCH_CACHE_PRUNE_GRACE_MS,
+  RESEARCH_CACHE_RETENTION_DAYS,
+  type CachePruning,
   type CacheProvenance,
+  type PruneOptions,
   type FileResearchCache,
   type RequestMemory,
 } from "./cache.js";
@@ -34,12 +38,18 @@ export {
 export { htmlToMarkdown } from "./html.js";
 export {
   cachedFetch,
-  HTTP_GUARD_ERROR_NAME,
   RESEARCH_HTTP_LIMITS,
   type CachedFetchContext,
   type CachedFetchSpec,
   type StoredBody,
 } from "./http-fetch.js";
+export {
+  createFetchQuota,
+  RESEARCH_FETCH_MAX_PER_RUN,
+  withQuota,
+  type FetchQuota,
+  type FetchQuotaSlot,
+} from "./quota.js";
 export { robotsAllows, robotsPatternMatches } from "./robots.js";
 export {
   createResearchService,
