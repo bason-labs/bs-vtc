@@ -1,6 +1,6 @@
 /**
- * Skills an agent needs in context (spec §8.1, §10; spine AD-22): a role's own reference skill
- * (the Architect's method references) and the skill that teaches each role-facing engine tool
+ * Skills an agent needs in context (spec §8.1, §9.1, §10; spine AD-22): a role's own reference
+ * skill (the Architect's method references, the Designer's and Visual QA's design craft) and the skill that teaches each role-facing engine tool
  * the role declares (`ROLE_MCP_TOOLS`). On Claude Code the agent preloads them through its
  * `skills` frontmatter (code.claude.com/docs/en/sub-agents, "Preload skills into subagents"),
  * because an agent without the `Skill` tool cannot load one itself; plugin skills are namespaced
@@ -9,9 +9,14 @@
  */
 import type { RoleMcpToolName } from "@vtc/shared";
 
-/** A role's own skill(s), by role id. */
+/**
+ * A role's own skill(s), by role id: the Architect's method references (§8.1), and the design
+ * craft the Designer builds to and Visual QA judges against (§9.1, forked from impeccable).
+ */
 export const ROLE_SKILLS: Readonly<Record<string, readonly string[]>> = {
   architect: ["architect"],
+  designer: ["design-craft"],
+  visual_qa: ["design-craft"],
 };
 
 /** The skill that teaches each role-facing engine tool. */

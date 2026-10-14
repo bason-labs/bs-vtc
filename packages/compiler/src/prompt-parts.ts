@@ -1,31 +1,37 @@
 /**
- * Lookback prompt parts (spec §13; spine AD-14 rules 3–4, AD-21 rules 1–2, §5 reading 102).
+ * Lookback prompt parts (spec §13; spine AD-14 rules 3–4, AD-21 rules 1–2, §5 readings 102, 166,
+ * 172).
  *
  * Every compiled agent has two parts, each rendered for its host:
  * - **locked**: the locked core(s), the generated contract, the result protocol and the host's
- *   `prompt_append`; human-only (a MAJOR role version). An engineer profile's locked part opens
- *   with the Engineer's whole prompt, its editable section included, so a profile's proposal
- *   never carries (or forks) the Engineer's heuristics; those change through the Engineer's own
- *   proposals and reach every profile when they are upstreamed into `roles/engineer/prompt.md`.
+ *   `prompt_append`; human-only (a MAJOR role version, reading 167). An engineer profile's locked
+ *   part opens with the Engineer's whole prompt, its editable section included, so a profile's
+ *   proposal never carries (or forks) the Engineer's heuristics; those change through the
+ *   Engineer's own proposals and reach every profile when they are upstreamed into
+ *   `roles/engineer/prompt.md`.
  * - **editable**: the role's own editable section, the only part a Lookback proposal may replace
- *   (MINOR). It compiles verbatim (`editableSectionErrors`: no mode block, no placeholder), so for
- *   every role, engineer profiles included, it is exactly the trimmed
- *   `splitRolePrompt(...).editable` of `roles/<role>/prompt.md`, and a promoted section maps back
- *   to that file unchanged.
+ *   (MINOR). It compiles verbatim (`editableSectionErrors` from `@vtc/shared`: no mode block, no
+ *   placeholder, no pack heading), so for every role, engineer profiles included, it is exactly
+ *   the trimmed `splitRolePrompt(...).editable` of `roles/<role>/prompt.md`, and a promoted
+ *   section maps back to that file unchanged.
  *
  * **Prompt identity** (AD-21 rule 1) follows the frozen `PluginManifestAgent` contract and the
  * lookback-research engine (`sectionSha`): `locked_sha256` and `editable_sha256` are the SHA-256
- * of the role's own trimmed `splitRolePrompt` sections of `roles/<role>/prompt.md` (an engineer
- * profile's own sections, not the Engineer's). Every mode of a role shares them. Each plugin
- * carries those two sections at `vtc/prompts/<agent>/{locked,editable}.md`, so the engine can take
- * a proposal's locked core and default section from its plugin assets. The rest of the compiled
- * locked part (the contract, the protocol, `prompt_append`, the Engineer's prompt in a profile)
- * is not in the Lookback identity: it changes only with the role version or the compiler, and
- * the manifest's `prompt_sha256` (the SHA of the instructions as emitted) records it.
+ * of the role's own trimmed `splitRolePrompt` sections of `roles/<role>/prompt.md`, except that an
+ * engineer profile's locked section is `engineerProfileLockedSection`: the Engineer's locked core
+ * and editable section, then the profile's own locked core (reading 172, D-br), so an Engineer
+ * prompt change is a new version of every profile. A profile's editable section stays its own.
+ * Every mode of a role shares them. Each plugin carries those two sections at
+ * `vtc/prompts/<agent>/{locked,editable}.md`, so the engine can take a proposal's locked core and
+ * default section from its plugin assets. The rest of the compiled locked part (the contract, the
+ * protocol, `prompt_append`) is not in the Lookback identity: it changes only with the role
+ * version or the compiler, and the manifest's `prompt_sha256` (the SHA of the instructions as
+ * emitted) records it.
  *
  * An agent whose role is switched to "editable in the pack" carries the compiled locked part only:
- * the engine renders the pinned editable section first in the task pack. No role is switched by
- * default (see `EDITABLE_IN_PACK_ROLES`).
+ * the engine renders the pinned editable section, or the compiled default from the plugin's
+ * editable asset when no pin applies, first in the task pack as its `Role heuristics` section
+ * (reading 142). The switched roles are `EDITABLE_IN_PACK_ROLES`.
  */
 import {
   ROLE_PROMPTS_ASSET_DIR,
@@ -37,19 +43,18 @@ import {
 export { ROLE_PROMPTS_ASSET_DIR, rolePromptAssetPath };
 
 /**
- * Roles whose agents carry the locked core only (reading 102). Empty until the switch can work
- * end to end: `@vtc/shared` defines the pack section and the prompt-part asset path since 4.6.0
- * (`TaskPack.role_heuristics`, `rolePromptAssetPath`), but the engine does not yet render the
- * pinned editable section into the pack; until it does a switched agent would run without its
- * heuristics (spine §5 reading 117). The mechanism is exercised through
- * `CompileOptions.editableInPack` in tests.
+ * Roles whose agents carry the locked core only (readings 102, 166). The engine renders the
+ * `Role heuristics` pack section (`TaskPack.role_heuristics`, reading 142), so a switched agent
+ * gets its heuristics from the pack: the pinned version when Lookback pins one, else the compiled
+ * default.
  *
- * The first role to switch, in the same integration step that lands those changes, is the Spec
- * Verifier: it is dispatched once per acceptance criterion (the most dispatches per run, so the
- * A/A comparison reaches its sample size soonest), read-only and on the low tier. Switching a
- * role changes its compiled locked part, so it ships with a MAJOR role version.
+ * The Spec Verifier is switched first (D-bl): it is dispatched once per acceptance criterion (the
+ * most dispatches per run, so an A/A comparison reaches its sample size soonest), read-only and on
+ * the low tier, and it is the first role a pin and a replay can reach on both hosts (reading
+ * 176). Switching a role changes its compiled locked part, so it ships with a MAJOR role version
+ * (D-bm, reading 167).
  */
-export const EDITABLE_IN_PACK_ROLES: readonly string[] = [];
+export const EDITABLE_IN_PACK_ROLES: readonly string[] = ["spec_verifier"];
 
 /**
  * The task-pack section that carries a switched role's editable section, rendered before the

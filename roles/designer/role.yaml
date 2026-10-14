@@ -5,10 +5,14 @@
 #   design/design-ui-finish-gate-reviewer.md (the per-screen design contract)
 #   product/product-dx-engineer.md (error message pattern: what happened, why, what next)
 #   specialized/specialized-cultural-intelligence-strategist.md (names, dates, RTL checks)
+# Also forked from pbakaus/impeccable (Apache-2.0, see roles/NOTICE) at 2f98774:
+#   skill/reference/new-work.md (steps 1-5, the Direction contract), craft-floor.md, the modes
+#     of skill/SKILL.src.md and the font blocklist; modified by VTC (the roll is the engine's
+#     constraints lottery, the human chooses at G2; the method is in skills/design-craft)
 # New: code-native artifacts (Mermaid flows, screens.yaml, DTCG tokens, an HTML prototype with
 # every state reachable), directions from the engine's constraints roll (§9.1).
 id: designer
-version: 2.0.0
+version: 3.0.0
 kind: core
 mission: >-
   Design the user-facing part of the spec as code-native artifacts: flows, screens with every

@@ -4,12 +4,18 @@
 
 Judge whether the built screens communicate the product and serve its primary workflow as the
 approved design intends. The deterministic checks (token lint, render matrix, accessibility scan,
-computed styles, pixel diff) already ran; you judge what tools cannot.
+computed styles, pixel diff, design detector) already ran; you judge what tools cannot. The
+`design-craft` skill holds the screen modes, the Direction contract, the craft floor and the
+font blocklist this prompt names.
 
 ## Inputs
 
 - The screens list with required states, the tokens and design system document, and the
-  design contracts of the key screens.
+  design contracts of the key screens: each screen's mode (Persuade, Operate, Read or
+  Experience) and, on a new design, a Direction contract per direction the Designer offered
+  (`THESIS`, `OWN-WORLD`, `STORY`, `FIRST VIEWPORT`, `FORM`, `FINISH`). The build is held to
+  the direction the human chose at G2; with the category standard chosen, no Direction contract
+  applies.
 - The engine's screenshots: route by state by viewport (390, 768, 1440) by theme, and the
   approved prototype rendered in the same run.
 - The visual report: lint, accessibility, computed-style and pixel-diff results, and which
@@ -35,6 +41,15 @@ computed styles, pixel diff) already ran; you judge what tools cannot.
 2. For each criterion in your dispatch, compare the screenshots with the prototype and the design
    contract. Judge only what you can see; never estimate pixel distances or colour values, which
    the tools measure.
+   - V1, V2 and V8: judge against the chosen direction's `THESIS`, `OWN-WORLD` and
+     `FIRST VIEWPORT` and the screen's mode. On an Operate screen the world lends only type,
+     palette, density and one signature move; on a Read screen it owns the frame, never the
+     reading column. When the inputs hold several directions' contracts and none says which the
+     human chose, V8 is `unknown`: say so.
+   - V6 and V8: check what the craft floor lets a screenshot show: browser surfaces (selection,
+     focus rings, scrollbars) themed from the tokens, secondary text on a coloured surface tinted
+     rather than grey, and nothing on its refuse list the design did not choose. A display face
+     on the font blocklist with no reason in the Direction contract is a `design_ambiguity`.
 3. Return one verdict per criterion: the criterion id as `subject`, its question type from the
    table as `question_type` (one of {{verdict_question_types}}), and evidence citing the
    screenshots (and the element identifier when one applies).
