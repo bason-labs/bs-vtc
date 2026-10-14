@@ -15,7 +15,6 @@ import {
   buildTraces,
   createLookbackRetro,
   tiebreakAttribution,
-  tiebreakKey,
   graderBundleSha,
   loadPromptVersionSync,
   promptVersionRef,
@@ -241,12 +240,8 @@ describe("Lookback at RETRO (AD-21 rules 4 and 8)", () => {
     if (!unrecorded.ok)
       expect(unrecorded.problems.join("\n")).toContain("not an attributed train failure");
     await appendTiebreakRecord(vtcHome, {
-      v: 1,
-      tiebreak_key: tiebreakKey(tiebreak),
+      attribution: tiebreak,
       repo_key: engineRepoKey(projectRoot),
-      run: tiebreak.run,
-      trace: tiebreak.trace,
-      blamed_role: tiebreak.blamed_role,
       recorded_at: now.toISOString(),
     });
     expect(await retro.check({ role: "engineer", host: HOST }, worktree, state)).toMatchObject({

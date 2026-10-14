@@ -4,13 +4,8 @@
  * links; the reader returns a project's keys, skipping lines that do not parse; Lookback trusts an
  * `ai_tiebreak` row only when its key is there.
  */
-import {
-  engineRepoKey,
-  LOOKBACK_HOME,
-  lookbackTiebreakKey,
-  type LookbackTiebreakRecord,
-} from "@vtc/shared";
-import { appendFile, mkdir, readFile, stat, symlink, writeFile } from "node:fs/promises";
+import { engineRepoKey, LOOKBACK_HOME, lookbackTiebreakKey, type Attribution } from "@vtc/shared";
+import { appendFile, chmod, mkdir, readFile, stat, symlink, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 import {
@@ -20,51 +15,99 @@ import {
   graderBundleSha,
   lookbackAtRunEnd,
   readTiebreakKeys,
+  TIEBREAK_STORE_MAX_BYTES,
   tiebreakAttribution,
   tiebreakKey,
+  tiebreakRecordFor,
   tiebreaksPath,
+  type TiebreakAnswer,
 } from "../../src/lookback/index.js";
 import { lockedShaFor, RunLog, tempDir } from "./log.js";
 
 const REPO = "0123456789abcdef";
 const now = new Date("2026-10-14T18:00:00.000Z");
 
-const record = (over: Partial<LookbackTiebreakRecord> = {}): LookbackTiebreakRecord => ({
+/** An `ai_tiebreak` attribution row. */
+const row = (over: Partial<Attribution> = {}): Attribution => ({
   v: 1,
-  tiebreak_key: "a".repeat(64),
-  repo_key: REPO,
-  run: "r1",
   trace: "a-1",
+  run: "r1",
+  prompt: {
+    role: "engineer",
+    host: "claude-code",
+    locked_sha256: "1".repeat(64),
+    editable_sha256: "2".repeat(64),
+    effective_sha256: "3".repeat(64),
+  },
+  outcome: "failure",
   blamed_role: "engineer",
-  recorded_at: now.toISOString(),
+  method: "ai_tiebreak",
+  confidence: 0.6,
+  split: "train",
+  evidence: [],
+  attributed_at: now.toISOString(),
   ...over,
 });
 
+const answer = (over: Partial<Attribution> = {}, repoKey = REPO): TiebreakAnswer => ({
+  attribution: row(over),
+  repo_key: repoKey,
+  recorded_at: now.toISOString(),
+});
+
 describe("appendTiebreakRecord", () => {
-  it("creates the store with mode 0600 and appends one line per record", async () => {
+  it("keys each record with lookbackTiebreakKey of its row, creates the store 0600 and appends one line per answer", async () => {
     const home = await tempDir("tb-home");
-    await appendTiebreakRecord(home, record());
-    await appendTiebreakRecord(home, record({ tiebreak_key: "b".repeat(64), blamed_role: null }));
+    const first = await appendTiebreakRecord(home, answer());
+    const second = await appendTiebreakRecord(home, answer({ trace: "a-2", blamed_role: null }));
+    expect(first).toEqual({
+      v: 1,
+      tiebreak_key: lookbackTiebreakKey(row()),
+      repo_key: REPO,
+      run: "r1",
+      trace: "a-1",
+      blamed_role: "engineer",
+      recorded_at: now.toISOString(),
+    });
+    expect(second).toMatchObject({
+      tiebreak_key: lookbackTiebreakKey(row({ trace: "a-2", blamed_role: null })),
+      trace: "a-2",
+      blamed_role: null,
+    });
     const path = join(home, LOOKBACK_HOME.tiebreaksFile);
     expect(tiebreaksPath(home)).toBe(path);
     if (process.platform !== "win32") expect((await stat(path)).mode & 0o777).toBe(0o600);
     const lines = (await readFile(path, "utf8")).trimEnd().split("\n");
-    expect(lines.map((l) => JSON.parse(l) as unknown)).toEqual([
-      record(),
-      record({ tiebreak_key: "b".repeat(64), blamed_role: null }),
-    ]);
+    expect(lines.map((l) => JSON.parse(l) as unknown)).toEqual([first, second]);
   });
 
-  it("refuses an invalid record and writes nothing", async () => {
+  it("refuses an invalid answer or a row that is not an ai_tiebreak, and writes nothing", async () => {
     const home = await tempDir("tb-home");
+    await expect(appendTiebreakRecord(home, answer({}, "not-a-key"))).rejects.toThrow();
     await expect(
-      appendTiebreakRecord(home, record({ tiebreak_key: "not-a-sha" })),
+      appendTiebreakRecord(home, { ...answer(), recorded_at: "yesterday" }),
     ).rejects.toThrow();
+    await expect(appendTiebreakRecord(home, answer({ method: "human" }))).rejects.toThrow(
+      /ai_tiebreak/,
+    );
     await expect(
-      appendTiebreakRecord(home, { ...record(), extra: 1 } as LookbackTiebreakRecord),
+      appendTiebreakRecord(home, answer({ extra: 1 } as Partial<Attribution>)),
     ).rejects.toThrow();
     await expect(stat(tiebreaksPath(home))).rejects.toMatchObject({ code: "ENOENT" });
+    expect(() => tiebreakRecordFor(answer({ method: "human" }))).toThrow(/ai_tiebreak/);
   });
+
+  it.skipIf(process.platform === "win32")(
+    "tightens a store with looser permissions to 0600",
+    async () => {
+      const home = await tempDir("tb-home");
+      await mkdir(join(home, "lookback"), { recursive: true });
+      await writeFile(tiebreaksPath(home), "");
+      await chmod(tiebreaksPath(home), 0o644);
+      await appendTiebreakRecord(home, answer());
+      expect((await stat(tiebreaksPath(home))).mode & 0o777).toBe(0o600);
+    },
+  );
 
   it.skipIf(process.platform === "win32")(
     "refuses a symbolic link at the file or its directory",
@@ -75,12 +118,12 @@ describe("appendTiebreakRecord", () => {
       const target = join(elsewhere, "target.jsonl");
       await writeFile(target, "");
       await symlink(target, tiebreaksPath(home));
-      await expect(appendTiebreakRecord(home, record())).rejects.toThrow(/symbolic link/);
+      await expect(appendTiebreakRecord(home, answer())).rejects.toThrow(/symbolic link/);
       expect(await readFile(target, "utf8")).toBe("");
 
       const home2 = await tempDir("tb-home");
       await symlink(elsewhere, join(home2, "lookback"));
-      await expect(appendTiebreakRecord(home2, record())).rejects.toThrow(/plain directory/);
+      await expect(appendTiebreakRecord(home2, answer())).rejects.toThrow(/plain directory/);
       await expect(stat(join(elsewhere, "tiebreaks.jsonl"))).rejects.toMatchObject({
         code: "ENOENT",
       });
@@ -91,16 +134,13 @@ describe("appendTiebreakRecord", () => {
 describe("readTiebreakKeys", () => {
   it("returns the project's keys and skips lines that do not parse", async () => {
     const home = await tempDir("tb-home");
-    await appendTiebreakRecord(home, record());
-    await appendTiebreakRecord(
-      home,
-      record({ tiebreak_key: "c".repeat(64), repo_key: "f".repeat(16) }),
-    );
+    const a = await appendTiebreakRecord(home, answer());
+    const c = await appendTiebreakRecord(home, answer({ trace: "c-1" }, "f".repeat(16)));
     await appendFile(tiebreaksPath(home), "{torn line\n");
-    await appendFile(tiebreaksPath(home), `${JSON.stringify({ ...record(), v: 9 })}\n`);
-    await appendTiebreakRecord(home, record({ tiebreak_key: "d".repeat(64) }));
-    expect(await readTiebreakKeys(home, REPO)).toEqual(new Set(["a".repeat(64), "d".repeat(64)]));
-    expect(await readTiebreakKeys(home, "f".repeat(16))).toEqual(new Set(["c".repeat(64)]));
+    await appendFile(tiebreaksPath(home), `${JSON.stringify({ ...a, v: 9 })}\n`);
+    const d = await appendTiebreakRecord(home, answer({ trace: "d-1" }));
+    expect(await readTiebreakKeys(home, REPO)).toEqual(new Set([a.tiebreak_key, d.tiebreak_key]));
+    expect(await readTiebreakKeys(home, "f".repeat(16))).toEqual(new Set([c.tiebreak_key]));
     expect(await readTiebreakKeys(home, "not-a-key")).toEqual(new Set());
   });
 
@@ -110,9 +150,17 @@ describe("readTiebreakKeys", () => {
     if (process.platform === "win32") return;
     const elsewhere = await tempDir("tb-elsewhere");
     const planted = join(elsewhere, "planted.jsonl");
-    await writeFile(planted, `${JSON.stringify(record())}\n`);
+    await writeFile(planted, `${JSON.stringify(tiebreakRecordFor(answer()))}\n`);
     await mkdir(join(home, "lookback"), { recursive: true });
     await symlink(planted, tiebreaksPath(home));
+    expect(await readTiebreakKeys(home, REPO)).toEqual(new Set());
+  });
+
+  it("is empty (fail closed) for a store over the byte cap", async () => {
+    const home = await tempDir("tb-home");
+    await appendTiebreakRecord(home, answer());
+    expect((await readTiebreakKeys(home, REPO)).size).toBe(1);
+    await appendFile(tiebreaksPath(home), " ".repeat(TIEBREAK_STORE_MAX_BYTES));
     expect(await readTiebreakKeys(home, REPO)).toEqual(new Set());
   });
 });
@@ -157,12 +205,8 @@ describe("tiebreak keys", () => {
       await appendAttributions(root, [tiebreak]);
       if (recorded)
         await appendTiebreakRecord(home, {
-          v: 1,
-          tiebreak_key: lookbackTiebreakKey(tiebreak),
+          attribution: tiebreak,
           repo_key: engineRepoKey(root),
-          run: tiebreak.run,
-          trace: tiebreak.trace,
-          blamed_role: tiebreak.blamed_role,
           recorded_at: now.toISOString(),
         });
       return lookbackAtRunEnd({

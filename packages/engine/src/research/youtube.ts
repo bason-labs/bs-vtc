@@ -3,7 +3,9 @@
  * transcript through the user's own `yt-dlp`. VTC never installs it.
  *
  * - The binary is found on an absolute `PATH` entry outside the repo (a relative entry, or one
- *   inside the project, could be a planted file), resolved through links and checked again.
+ *   inside the project, could be a planted file), resolved through links and checked again. The
+ *   child's `PATH` keeps only such entries too, so a `#!/usr/bin/env python3` yt-dlp cannot pick
+ *   up an interpreter planted in the repo.
  * - It runs with an argv array and no shell, a timeout, a fresh temporary directory as its working
  *   directory, home and output, no configuration files, no cookies and no login; the directory is
  *   removed afterwards.
@@ -41,7 +43,15 @@ export const YT_DLP_TIMEOUT_MS = 60_000;
 
 /** Where yt-dlp is, or why it cannot be used. */
 export type YtDlpLocation =
-  | { readonly available: true; readonly path: string }
+  | {
+      readonly available: true;
+      readonly path: string;
+      /**
+       * The `PATH` the yt-dlp child gets: the absolute entries of the searched `PATH` outside
+       * every excluded directory, as given and by real path (never one inside the repo).
+       */
+      readonly childPathEnv: string;
+    }
   | { readonly available: false; readonly reason: string };
 
 /** What one yt-dlp run did. */
@@ -91,7 +101,8 @@ const executable = (path: string): boolean => {
 /**
  * Finds the user's yt-dlp (for `vtc doctor` and the fetcher): the first executable `yt-dlp` on an
  * absolute `PATH` entry outside every excluded directory (the repo; the working directory by
- * default), whose real path is outside them too. Never installs anything.
+ * default), whose real path is outside them too, with the `PATH` its child may use (the entries
+ * that pass the same check). Never installs anything.
  */
 export const ytDlpAvailable = (
   options: {
@@ -111,8 +122,18 @@ export const ytDlpAvailable = (
     }
   });
   const outside = (path: string): boolean => !excluded.some((dir) => within(dir, path));
-  for (const entry of (pathEnv ?? "").split(delimiter)) {
-    if (entry === "" || !isAbsolute(entry) || !outside(entry)) continue;
+  /** An absolute entry outside the excluded directories, as given and by its real path. */
+  const safeEntry = (entry: string): boolean => {
+    if (entry === "" || !isAbsolute(entry) || !outside(entry)) return false;
+    try {
+      return outside(realpathSync(entry));
+    } catch {
+      return false;
+    }
+  };
+  const entries = (pathEnv ?? "").split(delimiter).filter(safeEntry);
+  const childPathEnv = [...new Set(entries)].join(delimiter);
+  for (const entry of entries) {
     for (const name of BINARY_NAMES) {
       const candidate = join(entry, name);
       if (!executable(candidate)) continue;
@@ -122,7 +143,7 @@ export const ytDlpAvailable = (
       } catch {
         continue;
       }
-      if (outside(real)) return { available: true, path: candidate };
+      if (outside(real)) return { available: true, path: candidate, childPathEnv };
     }
   }
   return {
@@ -213,6 +234,8 @@ export const ytDlpArgs = (watchUrl: string, dir: string): string[] => [
   watchUrl,
 ];
 
+const ENTITIES: Readonly<Record<string, string>> = { amp: "&", lt: "<", gt: ">", nbsp: " " };
+
 /**
  * Plain text of a WebVTT file: cue text only (no header, timings, cue ids, notes or inline tags),
  * with the repeated lines of rolling automatic captions dropped.
@@ -237,10 +260,8 @@ export const vttToText = (vtt: string): string => {
     if ((lines[i + 1] ?? "").includes("-->")) continue;
     const text = line
       .replace(/<[^>]*>/g, "")
-      .replace(/&amp;/g, "&")
-      .replace(/&lt;/g, "<")
-      .replace(/&gt;/g, ">")
-      .replace(/&nbsp;/g, " ")
+      // one pass, so `&amp;lt;` stays `&lt;`
+      .replace(/&(amp|lt|gt|nbsp);/g, (_, name: string) => ENTITIES[name] ?? "")
       .replace(/\s+/g, " ")
       .trim();
     if (text === "" || text === out.at(-1)) continue;
@@ -355,11 +376,9 @@ export const createYoutubeFetcher = (options: YoutubeFetcherOptions): Fetcher =>
           cwd: dir,
           // no user config, cookies, plugins or cache: home and XDG dirs are the fresh directory
           env: {
-            // absolute entries only (a `#!/usr/bin/env python3` yt-dlp still finds its python)
-            PATH: (process.env.PATH ?? "")
-              .split(delimiter)
-              .filter((entry) => entry !== "" && isAbsolute(entry))
-              .join(delimiter),
+            // absolute entries outside the repo only (a `#!/usr/bin/env python3` yt-dlp still
+            // finds the user's python, never one planted in the project)
+            PATH: located.childPathEnv,
             HOME: dir,
             XDG_CONFIG_HOME: dir,
             XDG_CACHE_HOME: dir,
