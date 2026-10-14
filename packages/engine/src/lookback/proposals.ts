@@ -7,6 +7,8 @@
  * - it is based on the role's current locked core and leaves it untouched: the locked core plus the
  *   proposed section must split back (`splitRolePrompt`) into the same locked core and section, so
  *   a section that smuggles in a prompt marker is refused;
+ * - the section keeps the compiler's editable-section rules (`editableSectionErrors` from
+ *   `@vtc/shared`: no mode block, no `{{placeholder}}`, no heading reserved for the task pack);
  * - nothing in it names an AD-9 marker (`findForbiddenInText`);
  * - every trace it cites (by its run-qualified slug, `traceSlug`) is an attributed train-split
  *   failure of that role that the history bears out (`trustedAttributions`; the role never sees
@@ -17,6 +19,7 @@
  * `lookback.proposal_recorded` event; promotion stays a human gesture.
  */
 import {
+  editableSectionErrors,
   findForbiddenInText,
   LOOKBACK_REPO,
   PROMPT_MARKERS,
@@ -123,6 +126,9 @@ export const checkProposal = (
       "the proposal touches the locked core or the prompt markers (a MAJOR change is a human edit)",
     );
   }
+  // the compiler's rules for an editable section (no mode block, no placeholder, no reserved
+  // heading; spine §5 reading 175): a section that would fail the compile is refused before replay
+  problems.push(...editableSectionErrors(editable));
   const texts = [editable, ...proposal.changes.flatMap((c) => [c.hypothesis, c.summary])];
   for (const hit of texts.flatMap((t) => findForbiddenInText(t))) {
     problems.push(`names a forbidden marker (${hit.marker})`);

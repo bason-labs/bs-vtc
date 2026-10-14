@@ -12,13 +12,20 @@ import {
   cachedFetch,
   createFileResearchCache,
   RESEARCH_HTTP_LIMITS,
+  SEARCH_UNAVAILABLE_DETAIL,
   type CachedFetchContext,
 } from "../../src/research/index.js";
 import { clock, FixtureHttp, jsonResponse, respond, tempDir } from "./fixture-http.js";
 import { guardNoNetwork } from "./no-network.js";
 
 const EOL_URL = "https://endoflife.date/api/v1/products/nodejs/releases/22";
-const fetchers = builtInFetchers();
+// no test runs yt-dlp: the youtube fetcher gets one that is never there
+const fetchers = builtInFetchers({
+  ytDlp: {
+    locate: () => ({ available: false, reason: "yt-dlp is not installed (test)" }),
+    run: () => Promise.reject(new Error("a test ran yt-dlp")),
+  },
+});
 
 const setup = async (routes: ConstructorParameters<typeof FixtureHttp>[0] = {}) => {
   const http = new FixtureHttp(routes);
@@ -236,31 +243,20 @@ describe("built-in fetchers", () => {
     expect(http.requests[0]?.headers?.cookie).toBeUndefined();
   });
 
-  it("answers search without a key, and youtube, with an error result and no request", async () => {
-    const { http, run } = await setup();
+  it("answers search without a provider, and youtube without yt-dlp, unavailable with no request", async () => {
+    const { http, keys, run } = await setup();
+    keys.search = "tvly-fixture-key-123";
     expect(await run({ fetcher: "search", query: "vitest 5 release" })).toMatchObject({
       status: "error",
-      detail: "no search API key is configured",
+      detail: SEARCH_UNAVAILABLE_DETAIL,
     });
     expect(
-      (await run({ fetcher: "youtube", url: "https://www.youtube.com/watch?v=x" })).status,
-    ).toBe("error");
+      await run({ fetcher: "youtube", url: "https://www.youtube.com/watch?v=dQw4w9WgXcQ" }),
+    ).toMatchObject({
+      status: "error",
+      detail: expect.stringContaining("yt-dlp is not installed") as string,
+    });
     expect(http.requests).toHaveLength(0);
-  });
-
-  it("uses the keyed search API when the user supplied a key", async () => {
-    const url = "https://api.tavily.com/search";
-    const { http, keys, run } = await setup({
-      [`POST ${url}`]: jsonResponse(url, { results: [] }),
-    });
-    keys.search = "tvly-fixture-key-123";
-    expect((await run({ fetcher: "search", query: "node 22 eol", max_results: 3 })).status).toBe(
-      "ok",
-    );
-    expect(JSON.parse(http.requests[0]?.body ?? "")).toEqual({
-      query: "node 22 eol",
-      max_results: 3,
-    });
   });
 });
 

@@ -7,9 +7,13 @@
  * {@link createLookbackRetro} for RETRO (spine §5 reading 154): before the run finishes, the
  * lookback role is queued for the targets `lookbackAtRunEnd` returns, reading the input
  * {@link renderLookbackInput} writes, and {@link checkProposal} runs when it submits.
- * Not wired yet (spine §7 "Lookback replays", AD-21 rule 6): the `lookback_replay` trials planned
- * with {@link planReplayTrials} (reading the A/A noise floor with {@link cachedAaFlipRate},
- * keeping a measured one with {@link recordAaFlipRate}).
+ * Replays (AD-21 rule 6, spine §5 reading 176): engine-core's runner dispatches the
+ * `lookback_replay` trials {@link planReplayTrials} plans, grades each with {@link gradeTrial},
+ * decides with {@link finishReplay} and writes the result with {@link writeReplayResult} (whose
+ * `lookback.replay_finished` carries the SHA-256 of the bytes written), reading the A/A noise
+ * floor with {@link cachedAaFlipRate} and keeping a measured one with {@link recordAaFlipRate}.
+ * AI tiebreak answers are recorded with {@link appendTiebreakRecord} under the VTC home; only
+ * those {@link readTiebreakKeys} returns let an `ai_tiebreak` attribution count.
  * Human promotion is the cli's `vtc lookback approve|pin|rollback`, never an MCP tool.
  */
 export {
@@ -98,6 +102,7 @@ export {
   type LookbackRetroDeps,
 } from "./retro.js";
 export { computeScorecards, writeScorecards } from "./scorecards.js";
+export { appendTiebreakRecord, readTiebreakKeys, tiebreaksPath } from "./tiebreaks.js";
 export {
   buildTraces,
   sameTarget,

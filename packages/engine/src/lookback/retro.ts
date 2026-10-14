@@ -9,12 +9,14 @@
  *   current locked core of the plugin this vtc carries and the attributions the history bears out;
  *   an accepted proposal is stored as an immutable candidate version under the VTC home
  *   ({@link storePromptVersion}) and logged as `lookback.proposal_recorded`.
- * Replays (AD-21 rule 6) are not run yet (spine §7 "Lookback replays"): a candidate reaches a
- * project only through a human's `vtc lookback pin`.
+ * Both read the AI tiebreaks the engine recorded for the project (`readTiebreakKeys`), so an
+ * `ai_tiebreak` attribution counts only when the engine recorded its answer. Replays (AD-21 rule
+ * 6) run after a proposal is recorded, through engine-core's runner (spine §5 reading 176).
  */
 import {
   agentNameFor,
   effectivePromptSha,
+  engineRepoKey,
   LOOKBACK_REPO,
   type Attribution,
   type HostId,
@@ -31,6 +33,7 @@ import {
   readProposalFiles,
 } from "./proposals.js";
 import { lookbackAtRunEnd, type HumanEditDiff, type LookbackTarget } from "./run-end.js";
+import { readTiebreakKeys } from "./tiebreaks.js";
 import { traceRef, type LockedShaFor } from "./traces.js";
 import { loadPromptVersionSync, storePromptVersion } from "./versions.js";
 
@@ -208,87 +211,98 @@ export const renderLookbackInput = (input: {
 };
 
 /** The `LookbackRetro` the daemon wires into engine core. */
-export const createLookbackRetro = (deps: LookbackRetroDeps): LookbackRetro => ({
-  plan: async (state) => {
-    const history = deps.history();
-    const end = await lookbackAtRunEnd({
-      projectRoot: deps.projectRoot,
-      events: state.events,
-      history,
-      lockedShaFor: deps.lockedShaFor,
-      graderBundleSha: deps.graderBundleSha(),
-      weeklyRemainingPct: deps.weeklyRemainingPct(),
-      budgetAvailable: deps.budgetAvailable(state),
-      now: deps.now(),
-      ...(deps.humanEditDiff === undefined ? {} : { humanEditDiff: deps.humanEditDiff }),
-    });
-    if (end.targets.length === 0) return { targets: [] };
-    const rows = await readAttributions(deps.projectRoot, {
-      history,
-      lockedShaFor: deps.lockedShaFor,
-    });
-    const attributions = new Map(rows.map((a) => [traceRef(a), a]));
-    const targets: LookbackRetroTarget[] = end.targets.flatMap((target, i) => {
-      const dispatched = end.events[i];
-      if (dispatched === undefined) return [];
-      return [
-        {
-          role: target.role,
-          ...(target.mode === undefined ? {} : { mode: target.mode }),
-          host: target.host,
-          dispatched,
-          input: renderLookbackInput({
-            target,
-            texts: versionTexts(deps, target.base),
-            attributions,
-            history,
-          }),
-        },
-      ];
-    });
-    return { targets };
-  },
-  check: async (target, root) => {
-    const files = await readProposalFiles(root, target.role);
-    // no proposal: the role found no cause the prompt can fix (lookback step 6)
-    if (files === undefined) return { ok: true, events: [] };
-    if (files.problem !== undefined) return { ok: false, problems: [files.problem] };
-    const compiled = deps.compiled(target.role, target.mode, target.host);
-    if (compiled === undefined)
-      return {
-        ok: false,
-        problems: [
-          `the compiled prompt of ${agentNameFor(target.role, target.mode)} on ${target.host} is not in this vtc's plugin, so the proposal cannot be checked against its locked core`,
-        ],
-      };
-    const history = deps.history();
-    const attributions = await readAttributions(deps.projectRoot, {
-      history,
-      lockedShaFor: deps.lockedShaFor,
-    });
-    const checked = checkProposal({
-      history,
-      lockedShaFor: deps.lockedShaFor,
-      role: target.role,
-      raw: files.raw,
-      editableFile: files.editable,
-      locked: compiled.locked,
-      attributions,
-    });
-    if (!checked.ok) return { ok: false, problems: [...checked.problems] };
-    const base = checked.proposal.base;
-    if (base.mode !== target.mode || base.host !== target.host)
-      return {
-        ok: false,
-        problems: [
-          `the proposal is for ${base.role}${base.mode === undefined ? "" : ` (${base.mode})`} on ${base.host}, not the version under review on ${target.host}`,
-        ],
-      };
-    await storePromptVersion(
-      deps.vtcHome,
-      candidateFrontmatter(checked.proposal, checked.candidate, deps.now()),
-      checked.proposal.editable.trim(),
-    );
-    return { ok: true, events: [proposalRecordedEvent(target.role, checked.proposal)] };
-  },
-});
+export const createLookbackRetro = (deps: LookbackRetroDeps): LookbackRetro => {
+  // the AI tiebreaks the engine recorded for this project (`LOOKBACK_HOME.tiebreaksFile`)
+  const tiebreaks = (): Promise<Set<string>> =>
+    readTiebreakKeys(deps.vtcHome, engineRepoKey(deps.projectRoot));
+  return {
+    plan: async (state) => {
+      const history = deps.history();
+      const recordedTiebreaks = await tiebreaks();
+      const end = await lookbackAtRunEnd({
+        projectRoot: deps.projectRoot,
+        events: state.events,
+        history,
+        tiebreaks: recordedTiebreaks,
+        lockedShaFor: deps.lockedShaFor,
+        graderBundleSha: deps.graderBundleSha(),
+        weeklyRemainingPct: deps.weeklyRemainingPct(),
+        budgetAvailable: deps.budgetAvailable(state),
+        now: deps.now(),
+        ...(deps.humanEditDiff === undefined ? {} : { humanEditDiff: deps.humanEditDiff }),
+      });
+      if (end.targets.length === 0) return { targets: [] };
+      const rows = await readAttributions(deps.projectRoot, {
+        history,
+        lockedShaFor: deps.lockedShaFor,
+        tiebreaks: recordedTiebreaks,
+      });
+      const attributions = new Map(rows.map((a) => [traceRef(a), a]));
+      const targets: LookbackRetroTarget[] = end.targets.flatMap((target, i) => {
+        const dispatched = end.events[i];
+        if (dispatched === undefined) return [];
+        return [
+          {
+            role: target.role,
+            ...(target.mode === undefined ? {} : { mode: target.mode }),
+            host: target.host,
+            dispatched,
+            input: renderLookbackInput({
+              target,
+              texts: versionTexts(deps, target.base),
+              attributions,
+              history,
+            }),
+          },
+        ];
+      });
+      return { targets };
+    },
+    check: async (target, root) => {
+      const files = await readProposalFiles(root, target.role);
+      // no proposal: the role found no cause the prompt can fix (lookback step 6)
+      if (files === undefined) return { ok: true, events: [] };
+      if (files.problem !== undefined) return { ok: false, problems: [files.problem] };
+      const compiled = deps.compiled(target.role, target.mode, target.host);
+      if (compiled === undefined)
+        return {
+          ok: false,
+          problems: [
+            `the compiled prompt of ${agentNameFor(target.role, target.mode)} on ${target.host} is not in this vtc's plugin, so the proposal cannot be checked against its locked core`,
+          ],
+        };
+      const history = deps.history();
+      const recordedTiebreaks = await tiebreaks();
+      const attributions = await readAttributions(deps.projectRoot, {
+        history,
+        lockedShaFor: deps.lockedShaFor,
+        tiebreaks: recordedTiebreaks,
+      });
+      const checked = checkProposal({
+        history,
+        lockedShaFor: deps.lockedShaFor,
+        tiebreaks: recordedTiebreaks,
+        role: target.role,
+        raw: files.raw,
+        editableFile: files.editable,
+        locked: compiled.locked,
+        attributions,
+      });
+      if (!checked.ok) return { ok: false, problems: [...checked.problems] };
+      const base = checked.proposal.base;
+      if (base.mode !== target.mode || base.host !== target.host)
+        return {
+          ok: false,
+          problems: [
+            `the proposal is for ${base.role}${base.mode === undefined ? "" : ` (${base.mode})`} on ${base.host}, not the version under review on ${target.host}`,
+          ],
+        };
+      await storePromptVersion(
+        deps.vtcHome,
+        candidateFrontmatter(checked.proposal, checked.candidate, deps.now()),
+        checked.proposal.editable.trim(),
+      );
+      return { ok: true, events: [proposalRecordedEvent(target.role, checked.proposal)] };
+    },
+  };
+};

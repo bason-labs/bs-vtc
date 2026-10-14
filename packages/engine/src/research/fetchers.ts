@@ -7,14 +7,24 @@
  * - `registry`: npm, PyPI and crates.io JSON; `github`: the GitHub REST API (unauthenticated, or
  *   with the user's own key for this fetcher);
  * - `web`: an HTTPS page after robots.txt allows it, stored as markdown; `rss`: a feed as is;
- * - `search`: a keyed search API the user supplies (none configured: an error result);
- * - `youtube`: transcripts need the optional external yt-dlp tool, which this version does not
- *   run, so it answers with an error result.
+ * - `search` (`search.ts`): an optional keyed provider (H-3); with none configured it sends
+ *   nothing and names the host's own web search;
+ * - `youtube` (`youtube.ts`): a transcript through the user's own yt-dlp (reading 173).
  */
-import type { FetchContext, Fetcher, FetcherId, FetchRequest, FetchResult } from "@vtc/shared";
+import type {
+  FetchContext,
+  Fetcher,
+  FetcherId,
+  FetchRequest,
+  FetchResult,
+  SearchProvider,
+} from "@vtc/shared";
 import { cachedFetch, RESEARCH_HTTP_LIMITS, type CachedFetchSpec } from "./http-fetch.js";
 import { htmlToMarkdown } from "./html.js";
+import type { FetchQuotaSlot } from "./quota.js";
 import { robotsAllows, robotsProductToken } from "./robots.js";
+import { createSearchFetcher } from "./search.js";
+import { createYoutubeFetcher, userYtDlp, type YtDlp } from "./youtube.js";
 
 type RequestOf<F extends FetcherId> = Extract<FetchRequest, { fetcher: F }>;
 
@@ -212,62 +222,33 @@ export const webFetcher: Fetcher = {
 };
 
 /**
- * The `search` fetcher over a keyed search API the user supplies (spec §10: Exa or Tavily). It
- * uses Tavily's `POST /search` with the user's key for this fetcher; without a key it answers
- * with an error result. Results are search snippets: a fact still needs the page itself, so
- * `fact_propose` keeps a fact sourced from `search` unverified (`SEARCH_NOT_A_SOURCE`).
+ * The `search` fetcher with no provider: it sends nothing and names the host's own web search
+ * (H-3). The service builds the keyed one from `EngineDeps.researchSearchProvider`.
  */
-export const searchFetcher: Fetcher = {
-  id: "search",
-  version: "1",
-  async fetch(request, context) {
-    if (request.fetcher !== "search")
-      throw new TypeError(`the search fetcher got a ${request.fetcher} request`);
-    const url = "https://api.tavily.com/search";
-    const key = context.apiKey?.("search");
-    if (key === undefined || key === "") {
-      return unavailable("search", this.version, url, context, "no search API key is configured");
-    }
-    return cachedFetch(
-      {
-        fetcher: "search",
-        version: this.version,
-        request,
-        url,
-        method: "POST",
-        headers: {
-          ...JSON_ACCEPT,
-          "content-type": "application/json",
-          authorization: `Bearer ${key}`,
-        },
-        body: JSON.stringify({ query: request.query, max_results: request.max_results }),
-      },
-      context,
-    );
-  },
-};
+export const searchFetcher: Fetcher = createSearchFetcher();
 
-/** The `youtube` fetcher: not available in this version (it needs the external yt-dlp tool). */
-export const youtubeFetcher: Fetcher = {
-  id: "youtube",
-  version: "1",
-  fetch(request, context) {
-    if (request.fetcher !== "youtube")
-      throw new TypeError(`the youtube fetcher got a ${request.fetcher} request`);
-    return Promise.resolve(
-      unavailable(
-        "youtube",
-        this.version,
-        request.url,
-        context,
-        "video transcripts need the optional yt-dlp tool, which this version does not run",
-      ),
-    );
-  },
-};
+/** What the built-in fetchers take from the engine's wiring. */
+export interface BuiltInFetcherOptions {
+  /**
+   * The keyed provider of the `search` fetcher (`EngineDeps.researchSearchProvider`; H-3: absent
+   * by default, and then the fetcher sends nothing).
+   */
+  readonly searchProvider?: SearchProvider | undefined;
+  /**
+   * The yt-dlp the `youtube` fetcher runs (default: the user's own on `PATH`, never inside
+   * `projectRoot`). Tests inject a fake.
+   */
+  readonly ytDlp?: YtDlp | undefined;
+  /** The project root, where yt-dlp is never taken from. */
+  readonly projectRoot?: string | undefined;
+  /** The run's research quota: a yt-dlp run takes one request from it. */
+  readonly quota?: FetchQuotaSlot | undefined;
+}
 
 /** Every built-in fetcher, by id. */
-export const builtInFetchers = (): ReadonlyMap<FetcherId, Fetcher> =>
+export const builtInFetchers = (
+  options: BuiltInFetcherOptions = {},
+): ReadonlyMap<FetcherId, Fetcher> =>
   new Map<FetcherId, Fetcher>(
     [
       eolFetcher,
@@ -277,7 +258,14 @@ export const builtInFetchers = (): ReadonlyMap<FetcherId, Fetcher> =>
       githubFetcher,
       webFetcher,
       rssFetcher,
-      youtubeFetcher,
-      searchFetcher,
+      createYoutubeFetcher({
+        ytDlp:
+          options.ytDlp ??
+          userYtDlp(
+            options.projectRoot === undefined ? undefined : [options.projectRoot, process.cwd()],
+          ),
+        quota: options.quota,
+      }),
+      createSearchFetcher(options.searchProvider),
     ].map((f) => [f.id, f]),
   );

@@ -323,7 +323,8 @@ export const checkEngineWrite = (before: LookbackPins, after: LookbackPins): voi
 
 /**
  * Rolls a canary back (§13 step 6): removes it from the project and records an `auto_rollback`
- * by the engine, holding the pins lock. Returns the `lookback.rolled_back` draft, or `undefined`
+ * by the engine, holding `LOOKBACK_HOME.pinsLock` (reading-128 protocol, spine §5 reading 176)
+ * around its read and its {@link writeAtomicIfUnchanged}. Returns the `lookback.rolled_back` draft, or `undefined`
  * when there is no such canary, the pins file cannot be read safely or the lock stays held (the
  * file is then left untouched).
  */
@@ -333,13 +334,15 @@ export const autoRollback = async (input: {
   readonly target: PinTarget;
   readonly reason: string;
   readonly now: Date;
+  /** How long to wait for a held pins lock (default {@link PINS_LOCK_WAIT_MS}). */
+  readonly lockWaitMs?: number;
 }): Promise<LookbackEventDraft | undefined> => {
   // Every writer of pins.yaml takes `LOOKBACK_HOME.pinsLock` (spine §5 reading 128), the cli's
   // gestures included. The file is still replaced only if it holds the bytes this rollback read,
   // so a writer that skipped the lock is never overwritten either.
   const held = await withFileLock(
     join(input.vtcHome, LOOKBACK_HOME.pinsLock),
-    { staleMs: LOOKBACK_PINS_LOCK_STALE_MS, waitMs: PINS_LOCK_WAIT_MS },
+    { staleMs: LOOKBACK_PINS_LOCK_STALE_MS, waitMs: input.lockWaitMs ?? PINS_LOCK_WAIT_MS },
     async () => {
       for (let attempt = 0; attempt < PINS_WRITE_ATTEMPTS; attempt += 1) {
         const text = await readTextIfExists(pinsPath(input.vtcHome));
