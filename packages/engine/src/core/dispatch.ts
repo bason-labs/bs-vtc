@@ -49,7 +49,7 @@ import {
 } from "./queries.js";
 import { frozenSpecItems, taskAcceptanceCriteria } from "./read-model.js";
 import { resolveModel, roleTier } from "./roles.js";
-import { reviewersFor } from "./router.js";
+import { installedLensRoles, reviewersFor } from "./router.js";
 import { limitWait } from "./limits.js";
 import { parkTask, setTaskStatus } from "./parking.js";
 import { parkEscalation } from "./escalations.js";
@@ -278,6 +278,7 @@ const taskSteps = (k: Kernel, h: RunHandle, taskId: string, host: HostId): StepS
       task,
       h.state.run,
       taskAcceptanceCriteria(k.deps.repoRoot, h.state, taskId),
+      { lensRoles: installedLensRoles(k.deps.roles) },
     )) {
       const filter = {
         role: slot.role,

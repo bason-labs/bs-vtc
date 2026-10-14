@@ -15,7 +15,7 @@ import {
   type WorkflowNode,
   type WorkflowNodeState,
 } from "@vtc/shared";
-import { reviewersFor, type ReviewerSlot } from "./router.js";
+import { LENS_ROLES, reviewersFor, type ReviewerSlot } from "./router.js";
 import type { RunState } from "./state.js";
 
 const nodeId = (text: string): string => text.toLowerCase().replace(/[^a-z0-9]+/g, "-");
@@ -300,7 +300,8 @@ export const taskPipelineGraph = (
 ): WorkflowGraph | null => {
   const task = state.tasks.get(taskId);
   if (task === undefined) return null;
-  const reviewers = reviewersFor(task, state.run, acceptanceCriteria);
+  // the compiled role set has every lens role, so the graph shows the lens nodes it dispatches
+  const reviewers = reviewersFor(task, state.run, acceptanceCriteria, { lensRoles: LENS_ROLES });
   const view = stageStates(state, task);
   const parked = task.status === "parked" ? task.park_reason : undefined;
   const parkAt = parked === undefined ? undefined : PARK_STAGE[parked];

@@ -6,6 +6,7 @@ import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { EscalationListSchema, type LeadAction } from "@vtc/shared";
+import { ALL_FIXTURE_ROLES, FIXTURE_LENS_DB } from "../fixtures/roles.js";
 import { cleanupDirs, git, writeFile } from "../helpers/repo.js";
 import {
   authorTests,
@@ -724,6 +725,26 @@ describe("change requests (§6.2)", () => {
     expect(eventsOf(h).map((e) => e.type)).toEqual(
       expect.arrayContaining(["change_request.opened", "change_request.decided"]),
     );
+    await h.release();
+  });
+});
+
+describe("Tier-2 lens reviewers (§5.3, reading 92)", () => {
+  it("attaches the lens a planner risk tag names as its own reviewer node, and waits for it", async () => {
+    const h = createHarness({ roles: [...ALL_FIXTURE_ROLES, FIXTURE_LENS_DB] });
+    const engineer = await toEngineer(h, [draft("T-1", { risk_tags: ["migration"] })]);
+    await build(h, engineer);
+    const reviewers = spawns(await next(h));
+    expect(reviewers.map((a) => a.role).sort()).toEqual(["lens_db", "spec_verifier"]);
+    const lens = only(reviewers, "lens_db");
+    expect(lens.subject).toBe("T-1");
+    await verdictPass(h, only(reviewers, "spec_verifier"), "src/t-1/impl.ts");
+    await h.engine.settle();
+    // the round waits for the lens too
+    expect(h.engine.status({}).tasks_by_status).toMatchObject({ verifying: 1 });
+    await verdictPass(h, lens, "src/t-1/impl.ts");
+    await h.engine.settle();
+    expect(h.engine.status({}).tasks_by_status.verifying ?? 0).toBe(0);
     await h.release();
   });
 });

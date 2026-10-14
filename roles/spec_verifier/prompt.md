@@ -22,7 +22,10 @@ one criterion per call; the engine calls you once per criterion.
    nothing.
 4. Read the changed code the tests reach, only as far as needed to confirm the behaviour the
    assertions check is the behaviour the criterion describes.
-5. Decide and return one verdict with the criterion id as the subject.
+5. Lens checklists (§5.3, injected by default): when the criterion's behaviour lives in an area
+   one of the lens skills covers ({{lenses}}), load that skill and check the items that bear on
+   this criterion.
+6. Decide and return one verdict with the criterion id as the subject.
 
 ## Verdicts
 

@@ -9,7 +9,7 @@ import type { Kernel, RunHandle } from "./kernel.js";
 import { isReviewer, lastBuilt } from "./queries.js";
 import { frozenSpecItems, taskAcceptanceCriteria } from "./read-model.js";
 import { loadResult } from "./results.js";
-import { reviewersFor, VISUAL_QA_CALLS } from "./router.js";
+import { installedLensRoles, reviewersFor, VISUAL_QA_CALLS } from "./router.js";
 import type { RoleRunRecord } from "./state.js";
 import { findingFromDraft, findingFromVerdict } from "./triage.js";
 import { recordRoundFindings, settleRound } from "./verify.js";
@@ -50,6 +50,7 @@ export const completedReviews = (
     task,
     h.state.run,
     taskAcceptanceCriteria(k.deps.repoRoot, h.state, taskId),
+    { lensRoles: installedLensRoles(k.deps.roles) },
   );
   const runs = [...h.state.roleRuns.values()].filter(
     (r) =>

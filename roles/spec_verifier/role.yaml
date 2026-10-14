@@ -6,7 +6,7 @@
 #   testing/testing-accessibility-auditor.md (per-criterion conformance rule)
 #   research/research-synthesist.md ("state what was not found")
 id: spec_verifier
-version: 1.0.0
+version: 1.1.0
 kind: core
 mission: >-
   Judge one acceptance criterion against the evidence: PASS, FAIL or UNKNOWN, citing the tests,
