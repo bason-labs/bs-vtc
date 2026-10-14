@@ -28,7 +28,9 @@
  * text): `--record <file>` writes the run's stream, redacted (`scripts/recording.ts`), to `<file>`
  * and a resumed run's to `<name>.resume<ext>`, for the owner to read and copy over a
  * `test/fixtures/<host>/*.synthetic.*` file. Each stream has its own recipe:
- * - max-turns (Claude): `claude-code --max-turns 1 --record …`;
+ * - max-turns (Claude): `claude-code --max-turns 1 --record …` with a prompt that needs a tool
+ *   turn; this script's own prompt does not reach the cap (2026-10-14: the closing
+ *   `StructuredOutput` call made 2 turns and the run still ended `success`);
  * - kill: `--kill-after 3000 --record …` stops the run through `HeadlessRun.kill()` (SIGINT,
  *   SIGTERM, SIGKILL on the process group, as the engine does);
  * - auth: sign the host out with its own command, then `--signed-out --record …`, which runs only

@@ -1,26 +1,71 @@
 # Adapter test fixtures
 
-Recorded host output is copied from `docs/research/spike-fixtures/` (spike rounds 1 and 2,
-2026-10-13, redacted there); the JSON content is unchanged, only re-indented by prettier. Files named `*.synthetic.*` are **not** recordings: no limit hit,
-auth error, turn-cap hit, killed run, SDK `rate_limit_event`/`api_retry` or
-`account/rateLimits/updated` notification has been captured yet (spine §7, including the AD-25
-row "Codex limit and auth text"). They are built from the documented shapes in
-`docs/research/2026-10-13-usage-limits-auto-resume.md`, `docs/research/2026-10-14-wave3-best-practice.md`
-§5 and the Claude Agent SDK / headless / Codex non-interactive docs, and must be replaced by
-recordings once the spike captures them (`pnpm --filter @vtc/adapters live:check`). AD-25 asks for
-limit, auth, max-turns and kill streams: Claude has all four (synthetic), Codex has limit, auth
-and kill (synthetic); Codex has no turn cap of its own (§12.1), so it has no max-turns stream.
+Three kinds of file live here:
 
-To record one, run on the signed-in machine (the header of `scripts/live-check.ts` has the full
-recipe; `--record` redacts ids, paths, the user name, e-mail addresses and token formats, and the
-recording is still read before it replaces a synthetic file):
+- **Spike recordings** are copied from `docs/research/spike-fixtures/` (spike rounds 1 and 2,
+  2026-10-13, redacted there). The JSON content is unchanged; prettier only re-indented it.
+- **Live-check recordings** come from 2026-10-14 (Claude Code 2.1.299, codex-cli 0.162.1).
+  - They were recorded with `pnpm --filter @vtc/adapters live:check … --record` on the owner's
+    signed-in machine. That redacts ids, paths, the user name, e-mail addresses and token
+    formats.
+  - They were then passed through `redactRecording` again (`scripts/recording.ts`). This replaces
+    what names the owner's own setup with `<redacted>`: the `init` event's `plugins`, `skills`,
+    `slash_commands`, `memory_paths` and `messaging_socket_path`, and the hook events'
+    `output`/`stdout`/`stderr`. Thinking signatures become `<signature>`.
+  - Under `--setting-sources user` the user's own plugins and `SessionStart` hooks load into a
+    role run (spine §5 reading 170). Their events stay in the streams, with that text redacted.
+- **Synthetic files** (`*.synthetic.*`) are not recordings. They are built from documented shapes:
+  - `docs/research/2026-10-13-usage-limits-auto-resume.md`;
+  - `docs/research/2026-10-14-wave3-best-practice.md` §5;
+  - the Claude Agent SDK, headless and Codex non-interactive docs.
+
+  Replace each one once a real stream is captured. Still missing: a limit hit, an auth error, a
+  Claude turn-cap hit, a killed Claude run, `api_retry`, and the `account/rateLimits/updated`
+  notification.
+
+AD-25 asks for limit, auth, max-turns and kill streams. What exists today:
+
+| Stream    | Claude                                    | Codex                                            |
+| --------- | ----------------------------------------- | ------------------------------------------------ |
+| limit     | synthetic                                 | synthetic                                        |
+| auth      | synthetic                                 | synthetic                                        |
+| max-turns | synthetic; both recordings missed the cap | none: Codex has no turn cap of its own (§12.1)   |
+| kill      | synthetic                                 | recorded (`thread.started`, `turn.started`, end) |
+
+To record a stream, run the command below on the signed-in machine. The header of
+`scripts/live-check.ts` has the full recipe. Read every recording before it replaces a
+synthetic file.
 
 | Stream    | Command (`pnpm --filter @vtc/adapters live:check …`)                                    |
 | --------- | --------------------------------------------------------------------------------------- |
-| max-turns | `claude-code --max-turns 1 --record <file>`                                             |
+| max-turns | `claude-code --max-turns 1 --record <file>` with a prompt that needs a tool turn        |
 | kill      | `<host> --kill-after 3000 --record <file>`                                              |
 | auth      | sign the host out with its own command, then `<host> --signed-out --record <file>`      |
 | limit     | `<host> --record <file>` while the host reports its limit reached (it cannot be forced) |
+
+`--max-turns 1` with the live check's trivial prompt does not hit the cap. Without the
+`StructuredOutput` tool the reply takes one turn. With it, the closing `StructuredOutput` call
+makes `num_turns` 2, and the run still ends `success`.
+
+Claude recordings (2026-10-14):
+
+| File                                                   | What it shows                                                                                                                                                                                       |
+| ------------------------------------------------------ | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `claude-code/stream-success.jsonl`                     | A headless role run whose agent's `tools` include `StructuredOutput`. The proposed compiler change was applied to a scratch copy of the plugin. `structured_output` re-validates; `unifiedWindows`. |
+| `claude-code/stream-resume.jsonl`                      | The `--resume` of that run, again with `structured_output`.                                                                                                                                         |
+| `claude-code/stream-no-structured-output.jsonl`        | The same run with the agent as compiled today (`tools: Read, Grep, Glob`). No `StructuredOutput` tool, a fenced JSON reply, no `structured_output`.                                                 |
+| `claude-code/stream-max-turns-not-hit.jsonl`           | `--max-turns 1` without the tool. The cap was not hit (`success`, 1 turn).                                                                                                                          |
+| `claude-code/stream-max-turns-structured-output.jsonl` | `--max-turns 1` with the tool. The cap was not hit (`success`, 2 turns, `structured_output`).                                                                                                       |
+
+Codex recordings (2026-10-14):
+
+| File                       | What it shows                                                                                                                   |
+| -------------------------- | ------------------------------------------------------------------------------------------------------------------------------- |
+| `codex/exec-success.jsonl` | A headless role run. `turn.completed.usage` adds `cache_write_input_tokens`.                                                    |
+| `codex/exec-resume.jsonl`  | `codex exec resume` with the `code_sandboxed` profile. The prior context is reloaded: 23,552 of 47,455 input tokens are cached. |
+| `codex/exec-killed.jsonl`  | A run stopped by `HeadlessRun.kill()`: `thread.started`, `turn.started`, then nothing.                                          |
+
+Spike recordings and synthetic files:
 
 | File                                                 | Source                                                                     |
 | ---------------------------------------------------- | -------------------------------------------------------------------------- |
@@ -36,7 +81,6 @@ recording is still read before it replaces a synthetic file):
 | `codex/exec-output-schema-events.jsonl`              | recorded: `codex exec --json --output-schema` (spike 1)                    |
 | `codex/exec-usage-limit.synthetic.jsonl`             | synthetic: `turn.failed` with `usageLimitExceeded`                         |
 | `codex/exec-auth.synthetic.jsonl`                    | synthetic: `turn.failed` with `unauthorized`                               |
-| `codex/exec-killed.synthetic.jsonl`                  | synthetic: a run cut off mid-command: no `turn.completed` / `turn.failed`  |
 | `codex/app-server-rateLimits-read.json`              | recorded: `account/rateLimits/read` response (spike 1)                     |
 | `codex/app-server-account-updated.json`              | recorded: unprompted `account/updated` notification (spike 1)              |
 | `codex/app-server-rateLimits-updated.synthetic.json` | synthetic: `account/rateLimits/updated` notification                       |

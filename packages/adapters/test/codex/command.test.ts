@@ -49,6 +49,11 @@ const BRIDGE_ARGS = [
   "--config",
   'mcp_servers.vtc.disabled_tools=["approve", "answer", "change_request"]',
 ];
+/**
+ * Codex's own web search (`web_search`, codex-cli 0.162.1: "live", "indexed", "cached" or
+ * "disabled"), set explicitly on every role run: off unless the role has `host_web` (H-3).
+ */
+const WEB_OFF = ["--config", 'web_search="disabled"'];
 const BRIDGE_SETTINGS = {
   vtc: {
     command: "vtc",
@@ -98,8 +103,12 @@ const request = (overrides: Partial<SpawnRoleRequest> = {}): SpawnRoleRequest =>
 describe("Codex sandboxProfile (§12.1, AD-9)", () => {
   it("reviewers run read-only", () => {
     const p = profile(READ_ONLY);
-    expect(p.cliArgs).toEqual(["--config", 'sandbox_mode="read-only"', ...BRIDGE_ARGS]);
-    expect(p.settings).toEqual({ sandbox_mode: "read-only", mcp_servers: BRIDGE_SETTINGS });
+    expect(p.cliArgs).toEqual(["--config", 'sandbox_mode="read-only"', ...WEB_OFF, ...BRIDGE_ARGS]);
+    expect(p.settings).toEqual({
+      sandbox_mode: "read-only",
+      web_search: "disabled",
+      mcp_servers: BRIDGE_SETTINGS,
+    });
     expect(p.enforced).toEqual({
       readOnly: true,
       perPathWriteDeny: false,
@@ -115,6 +124,7 @@ describe("Codex sandboxProfile (§12.1, AD-9)", () => {
       expect(p.cliArgs).toEqual([
         "--config",
         'sandbox_mode="workspace-write"',
+        ...WEB_OFF,
         "--config",
         "sandbox_workspace_write.network_access=false",
         "--config",
@@ -123,6 +133,7 @@ describe("Codex sandboxProfile (§12.1, AD-9)", () => {
       ]);
       expect(p.settings).toEqual({
         sandbox_mode: "workspace-write",
+        web_search: "disabled",
         sandbox_workspace_write: { network_access: false, writable_roots: [] },
         mcp_servers: BRIDGE_SETTINGS,
       });
@@ -167,6 +178,51 @@ describe("Codex sandboxProfile (§12.1, AD-9)", () => {
       });
       expect(p.enforced.network).toBe(process.platform === "darwin");
     }
+  });
+
+  describe("host web search (H-3, spine §5 reading 156)", () => {
+    it("a host_web role gets Codex's live web search, set explicitly, and nothing else changes", () => {
+      for (const tools of [
+        { ...READ_ONLY, host_web: true },
+        { ...WRITE_SCOPED, host_web: true },
+      ]) {
+        const p = profile(tools);
+        expect(argAfter(p.cliArgs, "--config")).toMatch(/^sandbox_mode=/u);
+        expect(p.cliArgs).toContain('web_search="live"');
+        expect(p.cliArgs).not.toContain('web_search="disabled"');
+        expect(p.settings.web_search).toBe("live");
+        // the role's sandbox stays as it was: search runs on the host provider, not in the sandbox
+        expect(p.cliArgs).not.toContain("sandbox_workspace_write.network_access=true");
+        expect(p.cliArgs.filter((arg) => arg.startsWith("web_search="))).toHaveLength(1);
+      }
+    });
+
+    it("every other role sets web search to disabled explicitly (a top-level override; profile precedence is open, §7 H-3)", () => {
+      for (const tools of [READ_ONLY, WRITE_SCOPED, ENGINEER, { ...READ_ONLY, host_web: false }]) {
+        const p = profile(tools);
+        expect(p.cliArgs).toContain('web_search="disabled"');
+        expect(p.cliArgs.filter((arg) => arg.startsWith("web_search="))).toHaveLength(1);
+      }
+    });
+
+    it("refuses host web search for a code_sandboxed role", () => {
+      expect(() => profile({ ...ENGINEER, host_web: true })).toThrow(/code_sandboxed.*web/);
+    });
+
+    it("the headless command carries the profile's web search setting, fresh and resumed", () => {
+      const adapter = createCodexAdapter({
+        vtcHome: VTC_HOME,
+        platform: "darwin",
+        scratchDir: scratch(),
+      });
+      const sandbox = profile({ ...READ_ONLY, host_web: true });
+      for (const session of [undefined, { host: "codex" as const, id: "thread-1" }]) {
+        const args = adapter.headlessCommand(request({ sandbox }), session).args;
+        expect(args).toContain('web_search="live"');
+        expect(findDisallowedHostArgs(args)).toEqual([]);
+        expect(headlessIsolationGaps("codex", args)).toEqual([]);
+      }
+    });
   });
 
   it("refuses the registry network for every role: Codex could only open all of it, engine API included (D-ac)", () => {
@@ -243,6 +299,7 @@ describe("Codex sandboxProfile (§12.1, AD-9)", () => {
       expect(p.cliArgs.slice(-4 - BRIDGE_ARGS.length, -BRIDGE_ARGS.length)).toEqual(excluded);
       expect(p.settings).toEqual({
         sandbox_mode: "workspace-write",
+        web_search: "disabled",
         sandbox_workspace_write: {
           network_access: false,
           writable_roots: [],
@@ -268,7 +325,7 @@ describe("Codex sandboxProfile (§12.1, AD-9)", () => {
         vtcHome: "/scratch-tmp/vtc",
         tempRoots: ["/scratch-tmp"],
       }).cliArgs,
-    ).toEqual(["--config", 'sandbox_mode="read-only"', ...BRIDGE_ARGS]);
+    ).toEqual(["--config", 'sandbox_mode="read-only"', ...WEB_OFF, ...BRIDGE_ARGS]);
   });
 
   it.skipIf(process.platform === "win32")(
@@ -560,9 +617,7 @@ describe("Codex spawnRole", () => {
     const session = { host: "codex" as const, id: "thr-1" };
     const resumed = await adapter.resume(session, request({ idleTimeoutMs: 30 }));
     if (resumed.dispatch !== "headless") throw new Error("expected a headless run");
-    processes[0]!.emit(
-      ...fixtureLines("codex/exec-killed.synthetic.jsonl").filter((l) => l !== ""),
-    );
+    processes[0]!.emit(...fixtureLines("codex/exec-killed.jsonl").filter((l) => l !== ""));
     const outcome = HostOutcomeSchema.parse(await resumed.run.wait());
     expect(outcome).toMatchObject({ kind: "error", retryable: true, cause: "idle" });
     expect(processes[0]?.signals).toEqual(["SIGINT", "SIGTERM"]);

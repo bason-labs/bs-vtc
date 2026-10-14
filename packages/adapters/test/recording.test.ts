@@ -76,6 +76,124 @@ describe("redactRecording (live-check --record)", () => {
   });
 });
 
+describe("redactRecording: what names the owner's own setup (closing round, spine §7)", () => {
+  it("replaces the init event's plugins, skills, commands, memory paths and messaging socket with a placeholder", () => {
+    const [line] = redactRecording(
+      [
+        JSON.stringify({
+          type: "system",
+          subtype: "init",
+          session_id: "s",
+          tools: ["Read", "StructuredOutput"],
+          agents: ["Explore", "vtc:vtc-qa-judge"],
+          plugins: [{ name: "private-plugin", path: "/opt/private/plugin", source: "x@y" }],
+          skills: ["private-skill", "vtc:architect"],
+          slash_commands: ["private-command"],
+          memory_paths: { auto: "/somewhere/memory/" },
+          messaging_socket_path: "/tmp/cc-socks/1.sock",
+          apiKeySource: "none",
+        }),
+      ],
+      context,
+    );
+    expect(JSON.parse(line ?? "")).toEqual({
+      type: "system",
+      subtype: "init",
+      session_id: "<session-id>",
+      tools: ["Read", "StructuredOutput"],
+      agents: ["Explore", "vtc:vtc-qa-judge"],
+      plugins: "<redacted>",
+      skills: "<redacted>",
+      slash_commands: "<redacted>",
+      memory_paths: "<redacted>",
+      messaging_socket_path: "<redacted>",
+      apiKeySource: "none",
+    });
+    expect(line).not.toContain("private");
+  });
+
+  it("keeps built-in and vtc: agents and a built-in output style, and replaces the owner's own agents, style and terminal commands", () => {
+    const [line] = redactRecording(
+      [
+        JSON.stringify({
+          type: "system",
+          subtype: "init",
+          agents: ["claude", "Explore", "private-agent", "vtc:vtc-qa-judge", "other:private"],
+          output_style: "private-style",
+          terminal_slash_commands: ["doctor", "private-command"],
+        }),
+      ],
+      context,
+    );
+    expect(JSON.parse(line ?? "")).toEqual({
+      type: "system",
+      subtype: "init",
+      agents: ["claude", "Explore", "<redacted>", "vtc:vtc-qa-judge", "<redacted>"],
+      output_style: "<redacted>",
+      terminal_slash_commands: "<redacted>",
+    });
+    expect(line).not.toContain("private");
+    const [builtIn] = redactRecording(
+      [JSON.stringify({ type: "system", subtype: "init", output_style: "default" })],
+      context,
+    );
+    expect(JSON.parse(builtIn ?? "")).toEqual({
+      type: "system",
+      subtype: "init",
+      output_style: "default",
+    });
+  });
+
+  it("replaces a hook's output text (it can name the owner's plugins and paths), keeping the rest of the event", () => {
+    const [line] = redactRecording(
+      [
+        JSON.stringify({
+          type: "system",
+          subtype: "hook_response",
+          hook_name: "SessionStart:startup",
+          output: "private context",
+          stdout: "private context",
+          stderr: "",
+          exit_code: 0,
+          outcome: "success",
+        }),
+      ],
+      context,
+    );
+    expect(JSON.parse(line ?? "")).toEqual({
+      type: "system",
+      subtype: "hook_response",
+      hook_name: "SessionStart:startup",
+      output: "<redacted>",
+      stdout: "<redacted>",
+      stderr: "",
+      exit_code: 0,
+      outcome: "success",
+    });
+  });
+
+  it("replaces opaque thinking signatures, wherever they sit", () => {
+    const [line] = redactRecording(
+      [
+        JSON.stringify({
+          type: "assistant",
+          message: { content: [{ type: "thinking", thinking: "", signature: "CAQSabc" }] },
+        }),
+      ],
+      context,
+    );
+    expect(JSON.parse(line ?? "")).toEqual({
+      type: "assistant",
+      message: { content: [{ type: "thinking", thinking: "", signature: "<signature>" }] },
+    });
+  });
+
+  it("leaves the same keys alone in events of other types", () => {
+    const line = '{"type":"result","subtype":"success","skills":["x"],"output":"y"}';
+    expect(redactRecording([line], context)).toEqual([line]);
+  });
+});
+
 describe("recordPath", () => {
   it("writes the first run to the given file and a resumed run beside it", () => {
     expect(recordPath("out/stream-max-turns.jsonl", false)).toBe("out/stream-max-turns.jsonl");
