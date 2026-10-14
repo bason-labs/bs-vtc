@@ -7,14 +7,32 @@
  * {@link createLookbackRetro} for RETRO (spine §5 reading 154): before the run finishes, the
  * lookback role is queued for the targets `lookbackAtRunEnd` returns, reading the input
  * {@link renderLookbackInput} writes, and {@link checkProposal} runs when it submits.
- * Replays (AD-21 rule 6, spine §5 reading 176): engine-core's runner dispatches the
- * `lookback_replay` trials {@link planReplayTrials} plans, grades each with {@link gradeTrial},
- * decides with {@link finishReplay} and writes the result with {@link writeReplayResult} (whose
- * `lookback.replay_finished` carries the SHA-256 of the bytes written), reading the A/A noise
- * floor with {@link cachedAaFlipRate} and keeping a measured one with {@link recordAaFlipRate}.
+ * Replays (AD-21 rule 6, spine §5 readings 176, 201 and 202): engine-core's runner plans the
+ * `lookback_replay` trials of each proposal ({@link replayTasks} with the role's grader,
+ * {@link planReplayTrials}), launches what {@link planRetroReplays} allows this RETRO (a grader
+ * that can score the role, the weekly window, the budget and `maxTrialsPerRetro`, each limit an
+ * `automation.skipped` draft), grades each trial with {@link gradeTrial} (the gates) or
+ * {@link gradeVerdictReplay} (a verdict role against the expectation its task key carries,
+ * {@link expectedOfTaskKey}; `infra_error` when the replayed dispatch has no recorded outcome), keeps
+ * every grade in the trial ledger ({@link recordReplayTrial}) so a replay continues across RETROs,
+ * and once all are graded builds the result with {@link assembleReplay} (its grader and isolation
+ * recorded)
+ * and writes it with {@link writeReplayResult} (whose `lookback.replay_finished` carries the
+ * SHA-256 of the bytes written), reading the A/A noise floor with {@link cachedAaFlipRate} and
+ * keeping a measured one with {@link recordAaFlipRate}. Engine core's `LookbackRetro` seam does not
+ * drive {@link planRetroReplays} and the ledger yet (core caps whole replays itself and has no
+ * per-trial outcome hook): a contract proposal to engine core and the daemon owner, see the
+ * `replay-ledger` module comment.
+ * At the run's end Lookback also returns what engine core hands the upstream module: cost
+ * regressions ({@link costRegressions}, D-bv; their lookback target is aimed at tokens) and
+ * missing specialists ({@link newAgentSignals}, D-cd, evidence-only), with the VTC-side report
+ * fields of each ({@link costReportFields}, {@link newAgentReportFields}); an `improve` verdict's
+ * fields ({@link improvementReportFields}) open the bs-vtc PR.
  * AI tiebreak answers are recorded with {@link appendTiebreakRecord} under the VTC home; only
  * those {@link readTiebreakKeys} returns let an `ai_tiebreak` attribution count.
- * Human promotion is the cli's `vtc lookback approve|pin|rollback`, never an MCP tool.
+ * Promotion (D-cb, spine §5 reading 196): for everyone, the human's merge of the bs-vtc PR an
+ * `improve` opens; on one machine, the cli's `vtc lookback approve|pin|rollback` (a local canary),
+ * never an MCP tool. The engine may only roll a canary back.
  */
 export {
   appendAttributions,
@@ -35,6 +53,13 @@ export {
   type FailureSignal,
 } from "./attribution.js";
 export { canaryArmStats, evaluateCanaries } from "./canary.js";
+export {
+  COST_TRACES_MAX,
+  costRegressions,
+  type CostMetric,
+  type CostRegression,
+  type CostTrace,
+} from "./cost-regression.js";
 export { lookbackEvent, type LookbackEventDraft, type LookbackEventType } from "./events.js";
 export {
   capDiff,
@@ -61,6 +86,12 @@ export {
   type PromptSelection,
 } from "./pins.js";
 export {
+  NEW_AGENT_MIN_ESCALATIONS,
+  newAgentSignals,
+  type InstalledRole,
+  type NewAgentSignal,
+} from "./new-agent.js";
+export {
   candidateFrontmatter,
   checkProposal,
   PROPOSAL_FILE_MAX_BYTES,
@@ -77,8 +108,11 @@ export {
   planReplayTrials,
   recordAaFlipRate,
   replayDispatchPlan,
+  replayIsolation,
   REPLAY_MAX_TASKS,
   replayPath,
+  expectedOfTaskKey,
+  replayTaskKey,
   replayTasks,
   tokensDeltaPct,
   writeReplayResult,
@@ -86,10 +120,46 @@ export {
   type ReplayTrial,
 } from "./replay.js";
 export {
+  assembleReplay,
+  readReplayInfra,
+  readReplayLedger,
+  readReplayTrials,
+  recordReplayInfra,
+  recordReplayTrial,
+  REPLAY_INFRA_OUTCOMES,
+  REPLAY_MAX_INFRA_ATTEMPTS,
+  REPLAY_TRIALS_FILE,
+  replayTrialKey,
+  type ReplayInfraAttempts,
+  type ReplayInfraOutcome,
+  type ReplayInfraRow,
+  type ReplayLedger,
+  type ReplayLedgerScope,
+  type ReplayTrialId,
+  type ReplayTrialRow,
+} from "./replay-ledger.js";
+export {
+  planRetroReplays,
+  REPLAY_LIMIT_REASONS,
+  replayLimitReason,
+  replaySkippedEvent,
+  type AutomationSkippedDraft,
+  type LaunchedReplay,
+  type PendingReplay,
+  type ReplayLimitReason,
+} from "./replay-plan.js";
+export {
+  costReportFields,
+  improvementReportFields,
+  newAgentReportFields,
+  type LookbackReportFields,
+} from "./reports.js";
+export {
   LOOKBACK_MAX_TRACES,
   lookbackAtRunEnd,
   lookbackTargets,
   type HumanEditDiff,
+  type LookbackDispatched,
   type LookbackHumanEdit,
   type LookbackSkipReason,
   type LookbackTarget,
@@ -121,6 +191,15 @@ export {
   type Trace,
   type TraceEnd,
 } from "./traces.js";
+export {
+  gradeVerdictReplay,
+  gradeVerdictTrial,
+  recordedOutcome,
+  VERDICT_GRADER_VERSION,
+  type ExpectedVerdict,
+  type RecordedOutcome,
+  type RecordedOutcomeSource,
+} from "./verdict-grader.js";
 export {
   loadPromptVersion,
   loadPromptVersionSync,

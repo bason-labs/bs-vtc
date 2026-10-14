@@ -4,9 +4,12 @@
  * - Pins are read only from `~/.vtc/lookback/pins.yaml` (`LookbackPins`, read with
  *   `parsePersisted`). Nothing here takes a repo path, so a `pins.yaml` inside a repo can never
  *   select a prompt.
- * - Only a human promotes or pins (`vtc lookback approve|pin|rollback`, the cli). The engine's one
- *   write is {@link autoRollback}: it removes a canary and appends an `auto_rollback` history
- *   entry, and {@link checkEngineWrite} proves that is all it changed before the file is written.
+ * - Only a human promotes or pins (`vtc lookback approve|pin|rollback`, the cli). Since D-cb
+ *   (spine §5 reading 196) these gestures are a local canary on one machine: the promotion for
+ *   everyone is the human's merge of the bs-vtc PR a replay verdict `improve` opens, delivered in
+ *   the next VTC release. The engine's one write is {@link autoRollback} (unchanged): it removes a
+ *   canary and appends an `auto_rollback` history entry, and {@link checkEngineWrite} proves that
+ *   is all it changed before the file is written.
  * - A pins file that does not parse selects nothing (every role runs its compiled default) and is
  *   never overwritten by the engine.
  */
