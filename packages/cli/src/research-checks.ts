@@ -2,14 +2,12 @@
  * `vtc doctor`'s research lines (AD-22): whether the user's own yt-dlp is there for YouTube
  * transcripts (D-bs, spine §5 reading 173) and where research search runs (H-3, reading 156).
  *
- * yt-dlp is found the way the `youtube` fetcher looks for it: on an absolute PATH entry outside
- * the repo (a repo could otherwise plant one), resolved through links. Doctor only looks for the
- * file; it never runs, installs or updates it. When lookback-research exports its own probe from
- * `@vtc/engine`'s `research` module, doctor's `ytDlp` seam should call that one instead (contract
- * proposal), so both always agree.
+ * yt-dlp is found by the `youtube` fetcher's own probe (`research.ytDlpAvailable` from
+ * `@vtc/engine`, reading 181), so doctor and the fetcher always agree: an absolute PATH entry
+ * outside the repo, as given and by real path. Doctor only looks for the file; it never runs,
+ * installs or updates it.
  */
-import { accessSync, constants, realpathSync, statSync } from "node:fs";
-import { delimiter, isAbsolute, join, relative } from "node:path";
+import { research } from "@vtc/engine";
 import type { DoctorCheck } from "./doctor-checks.js";
 import {
   researchKeyNamesOf,
@@ -20,48 +18,17 @@ import {
 export interface YtDlpProbeEnv {
   /** `PATH`; relative and empty entries are skipped. */
   readonly pathEnv: string;
-  readonly platform: NodeJS.Platform;
   /** The repo doctor runs in, whose files never count; `null` outside one. */
   readonly repoRoot: string | null;
 }
 
-const realOrNull = (path: string): string | null => {
-  try {
-    return realpathSync(path);
-  } catch {
-    return null;
-  }
-};
-
-const executableFile = (path: string): boolean => {
-  try {
-    if (!statSync(path).isFile()) return false;
-    accessSync(path, constants.X_OK);
-    return true;
-  } catch {
-    return false;
-  }
-};
-
-const inside = (root: string, path: string): boolean => {
-  const rel = relative(root, path);
-  return rel === "" || (!rel.startsWith("..") && !isAbsolute(rel));
-};
-
-/** The user's yt-dlp, or `null`: the first executable one on PATH that is not in the repo. */
+/** The user's yt-dlp as the `youtube` fetcher finds it, or `null`. */
 export const findYtDlp = (env: YtDlpProbeEnv): string | null => {
-  const name = env.platform === "win32" ? "yt-dlp.exe" : "yt-dlp";
-  const repo = env.repoRoot === null ? null : (realOrNull(env.repoRoot) ?? env.repoRoot);
-  for (const dir of env.pathEnv.split(delimiter)) {
-    if (dir === "" || !isAbsolute(dir)) continue;
-    const candidate = join(dir, name);
-    if (!executableFile(candidate)) continue;
-    const real = realOrNull(candidate);
-    if (real === null) continue;
-    if (repo !== null && (inside(repo, candidate) || inside(repo, real))) continue;
-    return candidate;
-  }
-  return null;
+  const found = research.ytDlpAvailable({
+    pathEnv: env.pathEnv,
+    excludeDirs: env.repoRoot === null ? [] : [env.repoRoot],
+  });
+  return found.available ? found.path : null;
 };
 
 /** Found: `ok`. Absent: an `info` line (transcripts are optional), never an install. */

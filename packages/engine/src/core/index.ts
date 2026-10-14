@@ -137,3 +137,5 @@ export { LOOKBACK_ROLE, lookbackInputPath } from "./retro.js";
 export { MAX_STEP_FAILURES } from "./submit.js";
 export { RESUME_JITTER_MS, MAX_LIMIT_BACKOFFS } from "./limits.js";
 export { INDEX_PATH, openEventIndex, type EventIndex } from "./event-index.js";
+/** Spine §5 reading 181: the cli pin gestures use the engine table, not a copy. */
+export { HEADLESS_LOADS_AGENT } from "./prompt-target.js";

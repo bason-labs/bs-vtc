@@ -235,11 +235,7 @@ export const defaultDoctorEnv = (ctx: CommandContext): DoctorCommandEnv => {
         : readClaudeUserSettings(userSettings);
     },
     ytDlp: async () =>
-      findYtDlp({
-        pathEnv: process.env.PATH ?? "",
-        platform: process.platform,
-        repoRoot: await findRepoRoot(ctx.cwd),
-      }),
+      findYtDlp({ pathEnv: process.env.PATH ?? "", repoRoot: await findRepoRoot(ctx.cwd) }),
     researchEnv: process.env,
   };
 };
