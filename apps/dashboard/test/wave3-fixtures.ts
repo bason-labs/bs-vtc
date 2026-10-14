@@ -83,6 +83,7 @@ export const GATE_EVENTS: readonly VtcEvent[] = [
       },
     ],
     design_coverage: {
+      reqs_without_component: ["REQ-5"],
       reqs_without_screen: ["REQ-4"],
       screens_without_req: [],
       components_unregistered: ["date-picker"],

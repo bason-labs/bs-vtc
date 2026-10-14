@@ -7,7 +7,7 @@
  * tool or route names a contract that does not exist.
  */
 import { z } from "zod";
-import { G2DirectionSchema } from "./design.js";
+import { DesignCoverageReportSchema, G2DirectionSchema } from "./design.js";
 import { EscalationAnswerSchema, EscalationSchema } from "./escalation.js";
 import { HeadlessRunSummarySchema } from "./headless.js";
 import { FactWaiverSchema, UnverifiedFactSummarySchema } from "./research.js";
@@ -299,6 +299,12 @@ export const LeadActionSchema = z.discriminatedUnion("type", [
      * New in 4.5.0.
      */
     facts: z.array(UnverifiedFactSummarySchema).optional(),
+    /**
+     * G2: the DESIGN check (§6.1, `DesignCoverageReport`); while its `ok` is false the engine
+     * refuses an approval, and the human rejects G2 with a note so the design roles fix it
+     * (spine §5 reading 146). New in 4.8.0.
+     */
+    design_coverage: DesignCoverageReportSchema.optional(),
   }),
   z.strictObject({
     type: z.literal("wait"),

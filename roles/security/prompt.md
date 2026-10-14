@@ -29,8 +29,11 @@ check. Every user input is hostile, every component fails, and no single control
 ### Output
 
 One threat model artifact: assets, trust boundaries, the STRIDE table (threat, component,
-likelihood, impact, mitigation), and the SEC-n list. SEC-n requirements are added to the
-specification by the engine; never edit the specification yourself.
+likelihood, impact, mitigation), and the SEC-n list, one line per requirement and per acceptance
+criterion (`- SEC-1: <requirement>`, `- SEC-1.AC-1: Given … When … Then …`). When G2 freezes the
+threat model, the engine adds its SEC-n to the frozen requirements: the plan must cover each,
+and traceability and Final Review check them like the spec's REQ-n. Never edit the specification
+yourself.
 
 ### Rules
 

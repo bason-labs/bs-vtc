@@ -149,6 +149,8 @@ export const gateRequests = (events: readonly VtcEvent[]): GateRequestView[] => 
             : {
                 ok: coverage.ok,
                 problems: [
+                  ...coverage.reqs_without_component.map((r) => `${r} is mapped to no component`),
+                  ...(coverage.screens_problem === undefined ? [] : [coverage.screens_problem]),
                   ...coverage.reqs_without_screen.map((r) => `${r} has no screen`),
                   ...coverage.screens_without_req.map((s) => `Screen ${s} covers no requirement`),
                   ...coverage.components_unregistered.map(

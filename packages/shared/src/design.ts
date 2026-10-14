@@ -63,25 +63,38 @@ export const prototypeStatePath = (route: string, state: string, theme: Prototyp
 
 /**
  * The DESIGN check of REQ → component → screen coverage (spec §9, §6.1 DESIGN), computed by engine
- * core before G2 from the frozen spec, `screens.yaml` (each screen's `reqs`) and the Designer's
+ * core before G2 from the frozen spec, the Architect's architecture artifact (its
+ * requirement-to-component map), `screens.yaml` (each screen's `reqs`) and the Designer's
  * component specs (artifact type `component_specs`, which name the screens each component is used
- * on) against the component registry. `ok` = every UI requirement has a screen, every screen
- * covers a requirement, and every component the specs use is registered. New in 4.5.0.
+ * on) against the component registry. `ok` = every requirement is mapped to a component, every UI
+ * requirement has a screen, every screen covers a requirement, every component the specs use is
+ * registered, and a UI run's `screens.yaml` is there and valid. A G2 approval is refused while
+ * `ok` is false (spine §5 reading 146). New in 4.5.0; `reqs_without_component` and
+ * `screens_problem` new in 4.8.0.
  */
 export const DesignCoverageReportSchema = z
   .strictObject({
+    /** Requirements the Architect's requirement-to-component map does not name. New in 4.8.0. */
+    reqs_without_component: z.array(RequirementRefSchema).default([]),
     reqs_without_screen: z.array(RequirementRefSchema).default([]),
     screens_without_req: z.array(SlugSchema).default([]),
     components_unregistered: z.array(SlugSchema).default([]),
+    /** A UI run's `screens.yaml` is missing or invalid (then no screen list is checked). 4.8.0. */
+    screens_problem: z.string().min(1).max(300).optional(),
     ok: z.boolean(),
   })
   .refine(
     (r) =>
       r.ok ===
-      (r.reqs_without_screen.length === 0 &&
+      (r.reqs_without_component.length === 0 &&
+        r.reqs_without_screen.length === 0 &&
         r.screens_without_req.length === 0 &&
-        r.components_unregistered.length === 0),
-    { message: "ok is true exactly when every list is empty", path: ["ok"] },
+        r.components_unregistered.length === 0 &&
+        r.screens_problem === undefined),
+    {
+      message: "ok is true exactly when every list is empty and screens.yaml is usable",
+      path: ["ok"],
+    },
   );
 export type DesignCoverageReport = z.infer<typeof DesignCoverageReportSchema>;
 

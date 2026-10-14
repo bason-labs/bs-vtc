@@ -43,7 +43,11 @@ describe("gateRequests (gate.requested, spine §5 reading 109)", () => {
     const [g2] = gateRequests(GATE_EVENTS);
     expect(g2?.coverage).toEqual({
       ok: false,
-      problems: ["REQ-4 has no screen", "Component date-picker is not registered"],
+      problems: [
+        "REQ-5 is mapped to no component",
+        "REQ-4 has no screen",
+        "Component date-picker is not registered",
+      ],
     });
   });
 

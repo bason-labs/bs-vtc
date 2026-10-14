@@ -194,15 +194,34 @@ export const diffLineCounts = (
   return counts;
 };
 
-/** The frozen spec's items (from the artifact G1 froze under `.vtc/spec/`), or none. */
+/** Where Security's design mode writes the threat model (its write scope, spine §5 reading 37). */
+const THREAT_MODEL_DIR = ".vtc/architecture/threat-model/";
+
+/**
+ * The frozen requirements: the items of the spec G1 froze under `.vtc/spec/`, then the `SEC-n`
+ * requirements (and their ACs) of the threat model G2 froze (§6.1, §5.2 Security design mode;
+ * spine §5 reading 147). The spec is never edited after G1, so the engine adds Security's SEC-n
+ * here: the Planner's coverage check, task packs, traceability and Final Review read them like
+ * the spec's. An id the spec already defines keeps the spec's text.
+ */
 export const frozenSpecItems = (repoRoot: string, state: RunState): SpecItem[] => {
+  const read = (path: string): SpecItem[] => {
+    try {
+      return parseSpecItems(readFileSync(join(repoRoot, path), "utf8"));
+    } catch {
+      return [];
+    }
+  };
   const spec = state.run.gates.G1.frozen.find((f) => f.path.startsWith(".vtc/spec/"));
-  if (spec === undefined) return [];
-  try {
-    return parseSpecItems(readFileSync(join(repoRoot, spec.path), "utf8"));
-  } catch {
-    return [];
-  }
+  const items = spec === undefined ? [] : read(spec.path);
+  const known = new Set(items.map((i) => i.id));
+  for (const model of state.run.gates.G2.frozen.filter((f) => f.path.startsWith(THREAT_MODEL_DIR)))
+    for (const item of read(model.path))
+      if (item.id.startsWith("SEC-") && !known.has(item.id)) {
+        known.add(item.id);
+        items.push(item);
+      }
+  return items;
 };
 
 /** The ACs a task covers: from the frozen spec, else what its findings and verdicts name. */

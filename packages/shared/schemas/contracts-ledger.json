@@ -40,6 +40,10 @@
     {
       "version": "4.7.0",
       "schemas_sha256": "b4048e388a0d39f9e5643c0c20423df54e1129229b831e6a4edc55d566fd09f8"
+    },
+    {
+      "version": "4.8.0",
+      "schemas_sha256": "afb8dbd0449a7505938464face0d6e3abff76f19e65ffd3818e6ac768924b3d0"
     }
   ]
 }

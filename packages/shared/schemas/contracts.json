@@ -1,5 +1,5 @@
 {
-  "contracts_version": "4.7.0",
+  "contracts_version": "4.8.0",
   "schemas": {
     "Run": {
       "$id": "https://vtc.local/schemas/Run.json",
@@ -2598,6 +2598,14 @@
             "design_coverage": {
               "type": "object",
               "properties": {
+                "reqs_without_component": {
+                  "default": [],
+                  "type": "array",
+                  "items": {
+                    "type": "string",
+                    "pattern": "^(REQ|SEC)-[1-9]\\d*(\\.AC-[1-9]\\d*)?$"
+                  }
+                },
                 "reqs_without_screen": {
                   "default": [],
                   "type": "array",
@@ -2621,6 +2629,11 @@
                     "type": "string",
                     "pattern": "^[a-z0-9][a-z0-9._-]{0,63}$"
                   }
+                },
+                "screens_problem": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 300
                 },
                 "ok": {
                   "type": "boolean"
@@ -16422,6 +16435,55 @@
                 ],
                 "additionalProperties": false
               }
+            },
+            "design_coverage": {
+              "type": "object",
+              "properties": {
+                "reqs_without_component": {
+                  "default": [],
+                  "type": "array",
+                  "items": {
+                    "type": "string",
+                    "pattern": "^(REQ|SEC)-[1-9]\\d*(\\.AC-[1-9]\\d*)?$"
+                  }
+                },
+                "reqs_without_screen": {
+                  "default": [],
+                  "type": "array",
+                  "items": {
+                    "type": "string",
+                    "pattern": "^(REQ|SEC)-[1-9]\\d*(\\.AC-[1-9]\\d*)?$"
+                  }
+                },
+                "screens_without_req": {
+                  "default": [],
+                  "type": "array",
+                  "items": {
+                    "type": "string",
+                    "pattern": "^[a-z0-9][a-z0-9._-]{0,63}$"
+                  }
+                },
+                "components_unregistered": {
+                  "default": [],
+                  "type": "array",
+                  "items": {
+                    "type": "string",
+                    "pattern": "^[a-z0-9][a-z0-9._-]{0,63}$"
+                  }
+                },
+                "screens_problem": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 300
+                },
+                "ok": {
+                  "type": "boolean"
+                }
+              },
+              "required": [
+                "ok"
+              ],
+              "additionalProperties": false
             }
           },
           "required": [
@@ -16762,6 +16824,55 @@
                       ],
                       "additionalProperties": false
                     }
+                  },
+                  "design_coverage": {
+                    "type": "object",
+                    "properties": {
+                      "reqs_without_component": {
+                        "default": [],
+                        "type": "array",
+                        "items": {
+                          "type": "string",
+                          "pattern": "^(REQ|SEC)-[1-9]\\d*(\\.AC-[1-9]\\d*)?$"
+                        }
+                      },
+                      "reqs_without_screen": {
+                        "default": [],
+                        "type": "array",
+                        "items": {
+                          "type": "string",
+                          "pattern": "^(REQ|SEC)-[1-9]\\d*(\\.AC-[1-9]\\d*)?$"
+                        }
+                      },
+                      "screens_without_req": {
+                        "default": [],
+                        "type": "array",
+                        "items": {
+                          "type": "string",
+                          "pattern": "^[a-z0-9][a-z0-9._-]{0,63}$"
+                        }
+                      },
+                      "components_unregistered": {
+                        "default": [],
+                        "type": "array",
+                        "items": {
+                          "type": "string",
+                          "pattern": "^[a-z0-9][a-z0-9._-]{0,63}$"
+                        }
+                      },
+                      "screens_problem": {
+                        "type": "string",
+                        "minLength": 1,
+                        "maxLength": 300
+                      },
+                      "ok": {
+                        "type": "boolean"
+                      }
+                    },
+                    "required": [
+                      "ok"
+                    ],
+                    "additionalProperties": false
                   }
                 },
                 "required": [
@@ -20500,6 +20611,55 @@
                       ],
                       "additionalProperties": false
                     }
+                  },
+                  "design_coverage": {
+                    "type": "object",
+                    "properties": {
+                      "reqs_without_component": {
+                        "default": [],
+                        "type": "array",
+                        "items": {
+                          "type": "string",
+                          "pattern": "^(REQ|SEC)-[1-9]\\d*(\\.AC-[1-9]\\d*)?$"
+                        }
+                      },
+                      "reqs_without_screen": {
+                        "default": [],
+                        "type": "array",
+                        "items": {
+                          "type": "string",
+                          "pattern": "^(REQ|SEC)-[1-9]\\d*(\\.AC-[1-9]\\d*)?$"
+                        }
+                      },
+                      "screens_without_req": {
+                        "default": [],
+                        "type": "array",
+                        "items": {
+                          "type": "string",
+                          "pattern": "^[a-z0-9][a-z0-9._-]{0,63}$"
+                        }
+                      },
+                      "components_unregistered": {
+                        "default": [],
+                        "type": "array",
+                        "items": {
+                          "type": "string",
+                          "pattern": "^[a-z0-9][a-z0-9._-]{0,63}$"
+                        }
+                      },
+                      "screens_problem": {
+                        "type": "string",
+                        "minLength": 1,
+                        "maxLength": 300
+                      },
+                      "ok": {
+                        "type": "boolean"
+                      }
+                    },
+                    "required": [
+                      "ok"
+                    ],
+                    "additionalProperties": false
                   }
                 },
                 "required": [
@@ -25211,6 +25371,14 @@
       "$schema": "https://json-schema.org/draft/2020-12/schema",
       "type": "object",
       "properties": {
+        "reqs_without_component": {
+          "default": [],
+          "type": "array",
+          "items": {
+            "type": "string",
+            "pattern": "^(REQ|SEC)-[1-9]\\d*(\\.AC-[1-9]\\d*)?$"
+          }
+        },
         "reqs_without_screen": {
           "default": [],
           "type": "array",
@@ -25234,6 +25402,11 @@
             "type": "string",
             "pattern": "^[a-z0-9][a-z0-9._-]{0,63}$"
           }
+        },
+        "screens_problem": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 300
         },
         "ok": {
           "type": "boolean"

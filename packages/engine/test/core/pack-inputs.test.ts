@@ -13,6 +13,7 @@ import {
   createHarness,
   only,
   SPEC_ONE,
+  spineFor,
   spawns,
   submitResult,
   threatModel,
@@ -84,9 +85,13 @@ describe("pack inputs by declared artifact type (AD-14 rule 5)", () => {
       expect(inputsOf(h, role)).toContain("repo_map: .vtc/research/repo-map/map.md");
       expect(inputsOf(h, role)).toContain("spec: .vtc/spec/spec.md");
     }
-    writeFile(workdir(architect!), ".vtc/architecture/spine.md", "# spine\n");
+    writeFile(workdir(architect!), ".vtc/architecture/spine.md", spineFor(SPEC_ONE));
     writeFile(workdir(designer), ".vtc/design/flows.mmd", "flowchart LR\n");
-    writeFile(workdir(designer), ".vtc/design/screens.yaml", "screens: []\n");
+    writeFile(
+      workdir(designer),
+      ".vtc/design/screens.yaml",
+      "screens:\n  - id: signup\n    route: /signup\n    states: [empty]\n    reqs: [REQ-1]\n",
+    );
     await submitResult(h, architect!, {
       exit: "done",
       artifacts: [{ type: "architecture", path: ".vtc/architecture/spine.md" }],

@@ -1482,12 +1482,11 @@ export class Engine implements Kernel {
     }
     if (gate !== null) {
       this.recordGateRequest(handle, gate);
-      const { design_coverage: _coverage, ...shown } = gate.extras;
       actions.push({
         type: "approve_gate",
         gates: gate.gates,
         artifacts: gate.artifacts,
-        ...shown,
+        ...gate.extras,
       });
     }
     const open = openEscalations(state);
