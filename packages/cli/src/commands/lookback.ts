@@ -10,11 +10,13 @@
  *   vtc lookback pin      --role <role> [--mode <mode>] --host <host> --version <sha> [--reason <text>]
  *   vtc lookback rollback --role <role> [--mode <mode>] --host <host> [--reason <text>]
  *
- * The planning is `lookback-pins.ts`. A version is checked against the locked core of the installed
- * plugin (`plugin:<host>`, `rolePromptAssetPath(<agent>, "locked")`) as the engine checks it, and
- * a canary is promoted only when its arms, counted from the repo's event logs, say `promotable`.
+ * The planning is `lookback-pins.ts`. A version is checked as the engine checks it against the
+ * locked core of this vtc's bundled plugin (`plugin:<host>`, `rolePromptAssetPath(<agent>,
+ * "locked")`; not read from the host's own plugin directory, which can lag a vtc upgrade until the
+ * plugin is reinstalled). A canary starts only from a replay result whose bytes match the hash its
+ * `lookback.replay_finished` event recorded, when it recorded one (spine §5 reading 128), and is
+ * promoted only when its arms, counted from the repo's event logs, say `promotable`.
  */
-import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { git } from "@vtc/engine";
 import {
@@ -33,12 +35,15 @@ import {
   type GestureDeps,
 } from "../human-gesture.js";
 import {
+  bytesSha256,
   checkLockedCore,
   findPromptVersion,
   planGesture,
   readCanary,
   readPinsFile,
+  readRegularFile,
   readRepoEvents,
+  replayRecorded,
   withPinsLock,
   writePins,
   type Gesture,
@@ -62,7 +67,7 @@ const USAGE = [
 
 const GESTURES: readonly Gesture[] = ["approve", "pin", "rollback"];
 
-/** The locked core the installed plugin carries for the target's agent, or `undefined`. */
+/** The locked core this vtc's bundled plugin carries for the target's agent, or `undefined`. */
 export type LockedCoreOf = (target: PinTarget) => string | undefined;
 
 export const installedLockedCore: LockedCoreOf = (target) => {
@@ -148,8 +153,14 @@ export const createLookbackCommand = (
             // a repo file roles can write: never through a link, and the summary shows its numbers
             replay: (rel) => {
               git.assertNoSymlinks(repoRoot, rel);
-              return JSON.parse(readFileSync(join(repoRoot, rel), "utf8")) as unknown;
+              const bytes = readRegularFile(join(repoRoot, rel));
+              if (bytes === undefined) throw new Error(`${rel} is not a regular file`);
+              return {
+                json: JSON.parse(bytes.toString("utf8")) as unknown,
+                sha256: bytesSha256(bytes),
+              };
             },
+            replayRecord: (rel) => replayRecorded(readRepoEvents(repoRoot), rel),
             canary: (c) => readCanary(readRepoEvents(repoRoot), c),
             reason: redactSecrets(reason).slice(0, 500),
             now,
@@ -170,8 +181,10 @@ export const createLookbackCommand = (
         ctx.io.out("Not confirmed: the pins are unchanged.");
         return EXIT_NOT_CONFIRMED;
       }
-      // re-plan under the lock: the engine may have rolled a canary back meanwhile, and the write
-      // replaces the file only if it still holds what this plan read (the engine does not lock)
+      // re-plan under the lock: the engine may have rolled a canary back meanwhile. The plan must
+      // decide the same (a canary's counts may grow meanwhile; its verdict may not change), and
+      // the write replaces the file only if it still holds what this plan read (the engine's
+      // auto_rollback does not take the lock yet)
       const changed = {
         ok: false as const,
         reason: "the pins or the canary changed while you decided; run it again",
@@ -179,7 +192,7 @@ export const createLookbackCommand = (
       const written = await withPinsLock(ctx.vtcHome, () => {
         const again = plan(d.now());
         if (!again.plan.ok) return again.plan;
-        if (again.plan.summary !== first.summary) return changed;
+        if (again.plan.decision !== first.decision) return changed;
         const path = writePins(ctx.vtcHome, again.plan.pins, again.text);
         return path === null ? changed : { ok: true as const, path };
       });
