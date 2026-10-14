@@ -2,6 +2,7 @@ import {
   canaryArmFor,
   LookbackPinsSchema,
   ReplayResultSchema,
+  sha256Hex,
   validateEventData,
   type Attribution,
   type GateReport,
@@ -209,31 +210,43 @@ describe("replay harness (AD-21 rule 6)", () => {
 
     const root = await tempDir("replay");
     const home = await tempDir("home");
-    expect(await cachedAaFlipRate(home, baseline, BUNDLE)).toBeUndefined();
+    const noise = (over: { repoKey?: string; baseline?: typeof baseline; bundle?: string } = {}) =>
+      cachedAaFlipRate({
+        vtcHome: home,
+        repoKey: over.repoKey ?? REPO,
+        baseline: over.baseline ?? baseline,
+        graderBundleSha: over.bundle ?? BUNDLE,
+      });
+    expect(await noise()).toBeUndefined();
     const event = await writeReplayResult(root, result);
+    const written = await readFile(join(root, ".vtc/lookback/replays/p-1.json"), "utf8");
     expect(event).toMatchObject({
       type: "lookback.replay_finished",
-      data: { proposal: "p-1", verdict: "improve", path: ".vtc/lookback/replays/p-1.json" },
+      data: {
+        proposal: "p-1",
+        verdict: "improve",
+        path: ".vtc/lookback/replays/p-1.json",
+        sha256: sha256Hex(written),
+      },
     });
     expect(validateEventData(event.type, event.data).ok).toBe(true);
-    expect(
-      ReplayResultSchema.parse(
-        JSON.parse(await readFile(join(root, ".vtc/lookback/replays/p-1.json"), "utf8")),
-      ),
-    ).toEqual(result);
+    expect(ReplayResultSchema.parse(JSON.parse(written))).toEqual(result);
     // A replay file in the repo is git-tracked and role-writable: never a source of the floor.
     await writeReplayResult(root, { ...result, proposal: "p-planted", aa_flip_rate: 0.9 });
-    expect(await cachedAaFlipRate(home, baseline, BUNDLE)).toBeUndefined();
+    expect(await noise()).toBeUndefined();
     await recordAaFlipRate({
       vtcHome: home,
+      repoKey: REPO,
       baseline,
       graderBundleSha: BUNDLE,
       aaFlipRate: 0.1,
       now,
     });
-    expect(await cachedAaFlipRate(home, baseline, BUNDLE)).toBe(0.1);
-    expect(await cachedAaFlipRate(home, baseline, "8".repeat(64))).toBeUndefined();
-    expect(await cachedAaFlipRate(home, candidate, BUNDLE)).toBeUndefined();
+    expect(await noise()).toBe(0.1);
+    expect(await noise({ bundle: "8".repeat(64) })).toBeUndefined();
+    expect(await noise({ baseline: candidate })).toBeUndefined();
+    // Measured on another project's tasks: no noise floor here.
+    expect(await noise({ repoKey: "fedcba9876543210" })).toBeUndefined();
   });
 });
 

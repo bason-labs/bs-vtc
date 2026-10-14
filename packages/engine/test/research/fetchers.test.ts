@@ -4,13 +4,13 @@ import {
   type FetchContext,
   type FetchRequestInput,
   FetchRequestSchema,
+  HttpGuardError,
 } from "@vtc/shared";
 import { describe, expect, it } from "vitest";
 import {
   builtInFetchers,
   cachedFetch,
   createFileResearchCache,
-  HTTP_GUARD_ERROR_NAME,
   RESEARCH_HTTP_LIMITS,
   type CachedFetchContext,
 } from "../../src/research/index.js";
@@ -309,6 +309,23 @@ describe("web fetcher", () => {
     expect(http2.count(`GET ${other}`)).toBe(0);
   });
 
+  it("re-checks robots.txt when the page redirects within its origin", async () => {
+    const moved = new URL("/private/install", page).href;
+    const { cache, run } = await setup({
+      [`GET ${robots}`]: respond(robots, 200, "User-agent: *\nDisallow: /private\n", {
+        "content-type": "text/plain",
+      }),
+      [`GET ${page}`]: respond(moved, 200, html, { "content-type": "text/html" }),
+    });
+    expect(await run({ fetcher: "web", url: page })).toMatchObject({
+      status: "blocked",
+      content_sha256: null,
+      detail: "robots.txt disallows this page (after a redirect to /private/install)",
+    });
+    const key = canonicalCacheKey("1", FetchRequestSchema.parse({ fetcher: "web", url: page }));
+    expect(await cache.get("_shared", key)).toBeUndefined();
+  });
+
   it("re-checks robots.txt when the page redirects to another origin", async () => {
     const moved = "https://mirror.example.org/guide/install";
     const mirrorRobots = "https://mirror.example.org/robots.txt";
@@ -332,12 +349,6 @@ describe("web fetcher", () => {
 });
 
 describe("network guard refusals (AD-22 rule 1)", () => {
-  const guardError = (message: string): Error => {
-    const error = new Error(message);
-    error.name = HTTP_GUARD_ERROR_NAME;
-    return error;
-  };
-
   it("reports a refusal by the client's guard (a private address) as blocked, never stale", async () => {
     const { http, time, run } = await setup({
       [`GET ${EOL_URL}`]: jsonResponse(EOL_URL, { isEol: false }),
@@ -346,7 +357,7 @@ describe("network guard refusals (AD-22 rule 1)", () => {
     time.advanceDays(8);
     http.set(
       `GET ${EOL_URL}`,
-      guardError("endoflife.date resolves to a private address (10.0.0.5)"),
+      new HttpGuardError("endoflife.date resolves to a private address (10.0.0.5)", "guard"),
     );
     expect(await run({ fetcher: "eol", product: "nodejs", release: "22" })).toMatchObject({
       status: "blocked",
@@ -361,7 +372,8 @@ describe("network guard refusals (AD-22 rule 1)", () => {
     });
     await run({ fetcher: "eol", product: "nodejs", release: "22" });
     time.advanceDays(8);
-    http.set(`GET ${EOL_URL}`, guardError("timed out after 20000 ms"));
+    // Matched by its code, whatever the message says.
+    http.set(`GET ${EOL_URL}`, new HttpGuardError("gave up waiting", "timeout"));
     expect((await run({ fetcher: "eol", product: "nodejs", release: "22" })).cache).toBe("stale");
   });
 });

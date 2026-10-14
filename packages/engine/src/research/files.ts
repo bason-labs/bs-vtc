@@ -4,7 +4,7 @@
  * blob; JSONL files are appended one whole line at a time.
  */
 import { createHash, randomBytes } from "node:crypto";
-import { appendFile, mkdir, readFile, rename, writeFile } from "node:fs/promises";
+import { appendFile, mkdir, open, readFile, rename, writeFile } from "node:fs/promises";
 import { dirname } from "node:path";
 
 /** Lower-case hex SHA-256 of raw bytes. */
@@ -64,3 +64,50 @@ export const parseJsonLines = (
   });
   return { values, invalid };
 };
+
+/**
+ * An append-only JSONL file read incrementally: each {@link JsonlTail.read} parses only the whole
+ * lines appended since the last one (a torn last line waits for its newline), and starts over when
+ * the file shrank or was replaced. Other processes may append to the same file meanwhile.
+ */
+export class JsonlTail {
+  private offset = 0;
+  private identity: string | undefined;
+
+  constructor(private readonly path: string) {}
+
+  /** The JSON values of the lines appended since the last read; `reset` when it starts over. */
+  async read(): Promise<{ readonly reset: boolean; readonly values: readonly unknown[] }> {
+    let handle;
+    try {
+      handle = await open(this.path, "r");
+    } catch (error) {
+      if (!isMissing(error)) throw error;
+      const reset = this.offset !== 0;
+      this.offset = 0;
+      this.identity = undefined;
+      return { reset, values: [] };
+    }
+    try {
+      const info = await handle.stat();
+      const identity = `${String(info.dev)}:${String(info.ino)}`;
+      let reset = false;
+      if (identity !== this.identity || info.size < this.offset) {
+        reset = this.identity !== undefined || this.offset !== 0;
+        this.offset = 0;
+        this.identity = identity;
+      }
+      if (info.size === this.offset) return { reset, values: [] };
+      const buffer = new Uint8Array(info.size - this.offset);
+      const { bytesRead } = await handle.read(buffer, 0, buffer.length, this.offset);
+      const chunk = buffer.subarray(0, bytesRead);
+      const end = chunk.lastIndexOf(0x0a);
+      if (end === -1) return { reset, values: [] };
+      this.offset += end + 1;
+      const text = new TextDecoder().decode(chunk.subarray(0, end + 1));
+      return { reset, values: parseJsonLines(text).values.map((v) => v.value) };
+    } finally {
+      await handle.close();
+    }
+  }
+}

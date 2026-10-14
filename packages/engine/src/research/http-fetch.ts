@@ -15,6 +15,7 @@
 import {
   canonicalCacheKey,
   FETCHER_TTL_DAYS,
+  HTTP_GUARD_ERROR,
   type CacheEntry,
   type FetchContext,
   type FetcherId,
@@ -71,16 +72,14 @@ const errorText = (error: unknown): string =>
   clip(error instanceof Error && error.message !== "" ? error.message : String(error));
 
 /**
- * The cli's client rejects a guard refusal with an `Error` named `HttpGuardError` (it also uses it
- * for its deadline, which is a timeout, not a refusal). Until `HttpClient` names the refusal in
- * `@vtc/shared` (a contract proposal), the name is the signal.
+ * A refusal by the client's network guard (`HttpGuardError`, code `guard`), matched by name and
+ * code as spine §5 reading 129 says. Its `timeout` code is a timeout, not a refusal: that is
+ * served stale like any other network failure.
  */
-export const HTTP_GUARD_ERROR_NAME = "HttpGuardError";
-
 const isGuardRefusal = (error: unknown): boolean =>
   error instanceof Error &&
-  error.name === HTTP_GUARD_ERROR_NAME &&
-  !error.message.startsWith("timed out");
+  error.name === HTTP_GUARD_ERROR &&
+  (error as { readonly code?: unknown }).code === "guard";
 
 const isFresh = (entry: CacheEntry, now: Date): boolean =>
   now.getTime() - Date.parse(entry.retrieved_at) < entry.ttl_s * 1000;

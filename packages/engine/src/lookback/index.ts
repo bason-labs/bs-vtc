@@ -19,6 +19,7 @@ export {
   readAttributions,
   RULES_UPSTREAM_FIRST,
   tiebreakAttribution,
+  tiebreakKey,
   TREE_CONFIDENCE,
   trustedAttributions,
   type AttributionHistory,
@@ -43,6 +44,7 @@ export {
 export {
   candidateFrontmatter,
   checkProposal,
+  PROPOSAL_FILE_MAX_BYTES,
   proposalPaths,
   proposalRecordedEvent,
   readProposalFiles,

@@ -159,8 +159,8 @@ const ROBOTS_DISALLOW = "robots.txt disallows this page";
 
 /**
  * The `web` fetcher: robots.txt first (RFC 9309), then the page, stored as markdown. When the page
- * redirects to another origin, that origin's robots.txt must allow the final URL too, or nothing
- * is stored.
+ * redirects, the final URL's origin's robots.txt must allow its path too (within the origin as
+ * across origins), or nothing is stored.
  */
 export const webFetcher: Fetcher = {
   id: "web",
@@ -189,10 +189,14 @@ export const webFetcher: Fetcher = {
         headers: { accept: "text/html, text/plain;q=0.9, */*;q=0.1" },
         checkFinalUrl: async (finalUrl) => {
           const final = new URL(finalUrl);
-          if (final.origin === target.origin) return undefined;
+          if (final.href === target.href) return undefined;
+          // robots.txt rules are per path: a redirect within the origin is checked too (its
+          // robots.txt is already cached).
           return (await robotsAllowUrl(final, context))
             ? undefined
-            : `${ROBOTS_DISALLOW} (after a redirect to ${final.origin})`;
+            : `${ROBOTS_DISALLOW} (after a redirect to ${
+                final.origin === target.origin ? final.pathname : final.origin
+              })`;
         },
         transform: (body, contentType) =>
           isHtml(contentType)

@@ -34,7 +34,6 @@ export {
 export { htmlToMarkdown } from "./html.js";
 export {
   cachedFetch,
-  HTTP_GUARD_ERROR_NAME,
   RESEARCH_HTTP_LIMITS,
   type CachedFetchContext,
   type CachedFetchSpec,
