@@ -3,6 +3,7 @@
  * projected run state plus the files and git history it points at. The HTTP transport maps
  * routes to these; live mode and snapshot mode share them (AD-5 rule 7).
  */
+import { automationReportView } from "./automation.js";
 import { createHash } from "node:crypto";
 import { existsSync, lstatSync, readFileSync, realpathSync } from "node:fs";
 import { join, sep } from "node:path";
@@ -29,6 +30,8 @@ import {
   type UsageReport,
   type UsageSnapshot,
   type WorkflowGraph,
+  type AutomationReport,
+  type AutomationSettings,
 } from "@vtc/shared";
 import { projectGraph, taskDagGraph, taskPipelineGraph } from "./graph.js";
 import { acceptanceCriteriaOf, parseSpecItems, type SpecItem } from "./spec.js";
@@ -71,6 +74,11 @@ export interface ReadModelDeps {
    * there is none to read.
    */
   readonly clientSpend?: () => ClientSpendReport;
+  /**
+   * The project's resolved automation settings (`automationFor`, D-bz), or `null` when the engine
+   * has no automation wiring (`EngineDeps.automation` absent). Absent: `null`.
+   */
+  readonly automation?: () => AutomationSettings | null;
 }
 
 export interface ReadModel {
@@ -87,6 +95,8 @@ export interface ReadModel {
   escalations(run: string): ReadResult<EscalationList>;
   usage(): UsageReport;
   clientSpend(): ReadResult<ClientSpendReport>;
+  /** `GET /api/automation` (D-ca): from the `upstream.*` events of every run of the repo. */
+  automation(): AutomationReport;
 }
 
 /** The run tools act on when none is named: the newest unfinished run, else the newest. */
@@ -344,5 +354,10 @@ export const createReadModel = (deps: ReadModelDeps): ReadModel => {
       deps.clientSpend === undefined
         ? notFound("this dashboard has no client spend record to read")
         : ok(deps.clientSpend()),
+    automation: () =>
+      automationReportView(
+        deps.runs().flatMap((state) => state.events),
+        deps.automation?.() ?? null,
+      ),
   };
 };
