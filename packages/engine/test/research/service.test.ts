@@ -554,6 +554,7 @@ describe("search results are not fact sources (spec §10)", () => {
       http,
       now: clock().now,
       apiKey: (name) => (name === "search" ? "tvly-test-key-0000" : undefined),
+      searchProvider: "tavily",
     });
     const { fact } = await service.factPropose(
       {

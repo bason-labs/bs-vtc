@@ -1,4 +1,5 @@
 import {
+  editableSectionErrors,
   LOOKBACK_LIMITS,
   PROMPT_MARKERS,
   type Attribution,
@@ -146,6 +147,32 @@ describe("proposal checks (AD-21 rule 4)", () => {
       problems: [expect.stringMatching(/did not run with the proposal's base version/)],
     });
     expect(check(proposal({ base: { ...base, mode: "repair" } }))).toMatchObject({ ok: false });
+  });
+
+  it("refuses a section the compiler's editable-section rules refuse (reading 175)", () => {
+    const cases: readonly { readonly text: string; readonly message: RegExp }[] = [
+      {
+        text: `${NEW_SECTION}\n<!-- vtc:mode repair -->\nRepair mode only.\n<!-- /vtc:mode -->`,
+        message: /^editable section line 2: no mode block/,
+      },
+      {
+        text: `${NEW_SECTION}\nUse {{stack_pack}} conventions.`,
+        message: /^editable section line 2: no placeholder \(\{\{stack_pack\}\}\)/,
+      },
+      {
+        text: `${NEW_SECTION}\n## Role heuristics\nMore rules.`,
+        message:
+          /^editable section line 2: heading "Role heuristics" is reserved for the task pack$/,
+      },
+    ];
+    for (const { text, message } of cases) {
+      const result = check(proposal({ editable: text }), text);
+      expect(result.ok).toBe(false);
+      if (result.ok) continue;
+      // exactly the shared rule's messages (`editableSectionErrors`), nothing else
+      expect(result.problems).toEqual(editableSectionErrors(text));
+      expect(result.problems).toEqual([expect.stringMatching(message)]);
+    }
   });
 
   it("refuses a section that names an AD-9 marker", () => {

@@ -372,6 +372,26 @@ describe("the engine's only pins write: auto_rollback", () => {
     expect(await readdir(join(home, "lookback"))).not.toContain("pins.lock");
   });
 
+  it("leaves pins.yaml untouched while another writer holds a fresh pins lock", async () => {
+    const home = await tempDir("home");
+    await writePins(home, canaryPins());
+    const before = await readFile(pinsPath(home), "utf8");
+    const lock = join(home, LOOKBACK_HOME.pinsLock);
+    await writeFile(lock, "a cli gesture's token");
+    const event = await autoRollback({
+      vtcHome: home,
+      repoKey: REPO,
+      target: { role: "engineer", host: HOST },
+      reason: "tokens up",
+      now,
+      lockWaitMs: 150,
+    });
+    expect(event).toBeUndefined();
+    expect(await readFile(pinsPath(home), "utf8")).toBe(before);
+    // the other writer's lock is still in place, untouched
+    expect(await readFile(lock, "utf8")).toBe("a cli gesture's token");
+  });
+
   it("does nothing without a canary or with a pins file it cannot read", async () => {
     const home = await tempDir("home");
     expect(

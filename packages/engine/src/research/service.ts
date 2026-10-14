@@ -6,6 +6,10 @@
  *
  * A role proposes a fact; the engine decides its status. A fact is `verified` only when
  * `verifyFactLocator` resolves its locator against the cached blob whose SHA the row records.
+ * Research search runs on the host (H-3, spine §5 reading 156): a claim the role found with its
+ * host's web tools carries `reported_source` and stays `unverified` until the role names the page
+ * as a `web` source, which the engine fetches, caches and checks; the row keeps the report either
+ * way.
  *
  * `facts.jsonl` is git-tracked and a role can write it, so G2 takes no judgement from it: a row
  * verifies only against a blob the cache index (under the VTC home) records as that fetcher's
@@ -44,6 +48,7 @@ import {
   type ResearchFetchResult,
   type ResearchScope,
   type RoleId,
+  type SearchProvider,
   type UnverifiedFactSummary,
 } from "@vtc/shared";
 import type { CachePruning, CacheProvenance, RequestMemory } from "./cache.js";
@@ -53,6 +58,7 @@ import { builtInFetchers } from "./fetchers.js";
 import type { CachedFetchContext } from "./http-fetch.js";
 import { withQuota, type FetchQuotaSlot } from "./quota.js";
 import { roleFacingText } from "./text.js";
+import type { YtDlp } from "./youtube.js";
 
 /** An event the service asks its caller to append (actor `engine`). */
 export type ResearchEventDraft =
@@ -90,6 +96,16 @@ export interface ResearchServiceDeps {
   /** Known secret values to redact from fetched text and fact rows. */
   readonly knownValues?: () => readonly string[];
   readonly fetchers?: ReadonlyMap<FetcherId, Fetcher>;
+  /**
+   * The keyed provider of the `search` fetcher (`EngineDeps.researchSearchProvider`, H-3). Absent
+   * (the default): the fetcher sends nothing and names the host's own web search.
+   */
+  readonly searchProvider?: SearchProvider | undefined;
+  /**
+   * The yt-dlp the `youtube` fetcher runs (default: the user's own, never from the repo, and none
+   * without `http`).
+   */
+  readonly ytDlp?: YtDlp | undefined;
   /**
    * The role run's share of the research quota (`FetchQuota.forRun`): each network request takes
    * one. Absent for the engine's own fetches (the G2 re-check).
@@ -143,10 +159,18 @@ const DAY_MS = 86_400_000;
 export const NO_HTTP_DETAIL = "no HTTP client: research fetchers are unavailable";
 const NO_HTTP: HttpClient = { request: () => Promise.reject(new Error(NO_HTTP_DETAIL)) };
 const LOOKUP_MAX = 50;
+const NO_YT_DLP: YtDlp = {
+  locate: () => ({ available: false, reason: NO_HTTP_DETAIL }),
+  run: () => Promise.reject(new Error(NO_HTTP_DETAIL)),
+};
 
 /** Why a fact from the `search` fetcher stays unverified (spec §10: a snippet is not the source). */
 export const SEARCH_NOT_A_SOURCE =
   "a search result is a snippet, not the source: cite the page itself";
+
+/** Why G2 lists a claim backed only by the role's host web tools (H-3). */
+const reportedReason = (reported: NonNullable<FactRow["reported_source"]>): string =>
+  `UNVERIFIED: reported from the host's ${reported.via === "host_search" ? "web search" : "page fetch"} (${reported.url}); the engine never fetched it, so propose it with that page as a web source to verify`;
 
 const clip = (text: string, max: number): string =>
   text.length > max ? `${text.slice(0, max - 1)}…` : text;
@@ -154,7 +178,15 @@ const clip = (text: string, max: number): string =>
 export const createResearchService = (deps: ResearchServiceDeps): ResearchService => {
   const scope = ResearchScopeSchema.parse(deps.scope);
   const now = deps.now ?? (() => new Date());
-  const fetchers = deps.fetchers ?? builtInFetchers();
+  const fetchers =
+    deps.fetchers ??
+    builtInFetchers({
+      searchProvider: deps.searchProvider,
+      // without `EngineDeps.http` research fetchers are unavailable, yt-dlp's own network too
+      ytDlp: deps.ytDlp ?? (deps.http === undefined ? NO_YT_DLP : undefined),
+      projectRoot: deps.projectRoot,
+      quota: deps.quota,
+    });
   const keysRead = new Set<string>();
   const knownValues = (): string[] => [...(deps.knownValues?.() ?? []), ...keysRead];
   const apiKey = (name: string): string | undefined => {
@@ -232,6 +264,12 @@ export const createResearchService = (deps: ResearchServiceDeps): ResearchServic
     const recordedAt = now().toISOString();
     const pinned =
       input.pinned_version === undefined ? {} : { pinned_version: input.pinned_version };
+    // Where the role says its host's web tools found the claim (H-3): provenance kept on the row,
+    // never verification. Only an engine fetch of the page (`source`) can verify it.
+    const reported =
+      input.reported_source === undefined ? {} : { reported_source: input.reported_source };
+    const sameReport = (row: FactRow): boolean =>
+      JSON.stringify(row.reported_source ?? null) === JSON.stringify(input.reported_source ?? null);
     const current = currentFacts((await readFactRows(deps.projectRoot)).rows);
 
     // A claim with no source, or whose source stored nothing a row could name, stays unsourced.
@@ -244,11 +282,14 @@ export const createResearchService = (deps: ResearchServiceDeps): ResearchServic
         value: input.value,
         status: "unverified",
         source: null,
+        ...reported,
         ...pinned,
         recorded_by: recordedBy,
         recorded_at: recordedAt,
       };
-      const same = current.find((r) => r.id === row.id && r.status === row.status);
+      const same = current.find(
+        (r) => r.id === row.id && r.status === row.status && r.source === null && sameReport(r),
+      );
       const fact = same ?? (await record([row]))[0];
       return FactProposeResultSchema.parse({ fact });
     };
@@ -292,6 +333,7 @@ export const createResearchService = (deps: ResearchServiceDeps): ResearchServic
         content_sha256: result.content_sha256,
         locator: input.source.locator,
       },
+      ...reported,
       ...pinned,
       expires_at: expiresAt(result),
       ...(replaced === undefined ? {} : { supersedes: replaced.id }),
@@ -302,7 +344,8 @@ export const createResearchService = (deps: ResearchServiceDeps): ResearchServic
       (r) =>
         r.id === row.id &&
         r.status === row.status &&
-        r.source?.content_sha256 === row.source?.content_sha256,
+        r.source?.content_sha256 === row.source?.content_sha256 &&
+        sameReport(r),
     );
     if (same !== undefined && disagreeing.length === 0) {
       return FactProposeResultSchema.parse({ fact: same });
@@ -430,8 +473,11 @@ export const createResearchService = (deps: ResearchServiceDeps): ResearchServic
   ): { status: UnverifiedFactSummary["status"]; reason: string } | undefined => {
     if (row.status === "stale") return { status: "stale", reason: STALE_REASON };
     const check = checks.get(row) ?? { ok: false, reason: "not checked" };
-    if (row.status === "unverified")
+    if (row.status === "unverified") {
+      if (row.source === null && row.reported_source !== undefined)
+        return { status: row.status, reason: reportedReason(row.reported_source) };
       return { status: row.status, reason: check.ok ? "recorded as unverified" : check.reason };
+    }
     if (!check.ok) {
       // The file is git-tracked, so a recorded status counts only when the engine can reproduce
       // it; a waiver covers one G2 only.
@@ -541,7 +587,11 @@ export const createResearchService = (deps: ResearchServiceDeps): ResearchServic
           predicate: row.predicate,
           status: listed.status,
           reason: clip(listed.reason, 500),
-          ...(row.source === null ? {} : { source_url: row.source.url }),
+          ...(row.source !== null
+            ? { source_url: row.source.url }
+            : row.reported_source === undefined
+              ? {}
+              : { source_url: row.reported_source.url }),
         });
       }
       const listed = new Set(facts.map((f) => f.id));
