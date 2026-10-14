@@ -1,11 +1,21 @@
 /** The evidence pipeline of AD-27 rule 6 (D-ce, H-8) with a fake recorder, plumbing and ffmpeg. */
-import { existsSync, readFileSync, statSync, writeFileSync } from "node:fs";
+import {
+  existsSync,
+  lstatSync,
+  mkdirSync,
+  readdirSync,
+  readFileSync,
+  statSync,
+  symlinkSync,
+  writeFileSync,
+} from "node:fs";
 import { request as httpRequest } from "node:http";
 import { join } from "node:path";
 import { EvidenceManifestSchema, EVIDENCE_LIMITS } from "@vtc/shared";
 import { afterEach, describe, expect, it } from "vitest";
 import {
   applyEvidenceBudget,
+  AutomationSkip,
   gifArgs,
   makeGif,
   planEvidenceShots,
@@ -126,6 +136,17 @@ describe("what to record", () => {
     expect(upstream.every((s) => s.path.startsWith("/lookback/?evidence=upstream"))).toBe(true);
     expect(upstream.map((s) => s.name)).toEqual(["01-replay.webm", "02-final-state.png"]);
   });
+  it("drops every recording when a project turns video off (screenshots only)", () => {
+    const shots = planEvidenceShots({
+      run: "R1",
+      upstreamSafe: false,
+      change: "ui",
+      flowPath: "/x",
+      video: false,
+    });
+    expect(shots.map((s) => s.name)).toEqual(["01-final-state.png"]);
+    expect(shots.every((s) => s.videoSeconds === undefined)).toBe(true);
+  });
 });
 
 describe("the GIF", () => {
@@ -207,6 +228,24 @@ describe("the budget", () => {
     }));
     expect(applyEvidenceBudget(many).kept).toHaveLength(EVIDENCE_LIMITS.maxFilesPerPr);
   });
+  it("lowers the per-PR budget to a project's max_mb, never raises it", () => {
+    const MB = 1024 * 1024;
+    const files = [
+      { name: "01-replay.webm", kind: "replay_video" as const, bytes: 3 * MB, alt: "a" },
+      { name: "02-final-state.png", kind: "screenshot" as const, bytes: 1 * MB, alt: "a" },
+    ];
+    expect(applyEvidenceBudget(files, 2 * MB).kept.map((f) => f.name)).toEqual([
+      "02-final-state.png",
+    ]);
+    const big = [
+      { name: "01-replay.webm", kind: "replay_video" as const, bytes: 7 * MB, alt: "a" },
+      { name: "02-final-state.png", kind: "screenshot" as const, bytes: 2 * MB, alt: "a" },
+      { name: "03-chart-2.png", kind: "chart" as const, bytes: 2 * MB, alt: "a" },
+    ];
+    expect(applyEvidenceBudget(big, 100 * MB).kept.map((f) => f.name)).toEqual(
+      applyEvidenceBudget(big).kept.map((f) => f.name),
+    );
+  });
 });
 
 describe("hosting", () => {
@@ -255,6 +294,28 @@ describe("hosting", () => {
     expect(section).toContain("[Replay (WebM video)](https://github.com/bason-labs/bs-vtc/blob/");
     expect(section).toContain("![Final](https://github.com/");
     expect(section).toContain("partial");
+  });
+  it("builds on the branch as the remote last showed it, not a stale local branch", async () => {
+    const dir = tempDir();
+    writeFileSync(join(dir, "01-replay.webm"), "v");
+    const remoteHead = "e".repeat(40);
+    const plumbing = fakePlumbing({
+      "refs/heads/vtc-evidence": "d".repeat(40),
+      "refs/remotes/origin/vtc-evidence": remoteHead,
+    });
+    plumbing.remote.set("refs/heads/vtc-evidence", remoteHead);
+    await publishToEvidenceBranch({
+      plumbing,
+      repo: "bason-labs/bs-vtc",
+      dir,
+      files: [{ name: "01-replay.webm", kind: "replay_video", bytes: 1, alt: "Replay" }],
+      kind: "defect",
+      fingerprint: FP,
+      at: new Date("2026-10-15T09:05:00Z"),
+    });
+    expect(plumbing.commits[0]?.parents).toEqual([remoteHead]);
+    expect(plumbing.remote.get("refs/heads/vtc-evidence")).toBe(plumbing.commits[0]?.sha);
+    expect(plumbing.refs.get("refs/heads/vtc-evidence")).toBe(plumbing.commits[0]?.sha);
   });
   it("attach hosting references the neutral relative names gh rewrites", () => {
     const section = renderEvidenceSection({
@@ -344,6 +405,91 @@ describe("prepareEvidence", () => {
     expect(withGif.ok ? withGif.manifest.files.map((f) => f.name) : []).toContain(
       "04-replay-preview.gif",
     );
+  });
+
+  it("fails the step (for the evidence-failed issue) when the gate report or the push fails", async () => {
+    const throwing = { ...fakeRecorder(), renderGateReport: () => Promise.reject(new Error("x")) };
+    expect(
+      await prepareEvidence(tempDir(), request(), {
+        recorder: throwing,
+        assets: fakeAssets(),
+        hosting: "attach",
+        ffmpeg: false,
+        now: () => new Date(),
+      }),
+    ).toEqual({ ok: false, detail: expect.stringContaining("gate report") as string });
+    const plumbing = fakePlumbing();
+    plumbing.remote.set("refs/heads/vtc-evidence", "9".repeat(40));
+    const refused = await prepareEvidence(tempDir(), request(), {
+      recorder: fakeRecorder(),
+      assets: fakeAssets(),
+      hosting: "branch",
+      ffmpeg: false,
+      plumbing,
+      now: () => new Date(),
+    });
+    expect(refused).toEqual({
+      ok: false,
+      detail: expect.stringContaining("could not be pushed") as string,
+    });
+    expect(plumbing.commits).toHaveLength(2);
+  });
+
+  it("checks the opt-outs again right before the evidence branch is pushed", async () => {
+    const plumbing = fakePlumbing();
+    await expect(
+      prepareEvidence(tempDir(), request(), {
+        recorder: fakeRecorder(),
+        assets: fakeAssets(),
+        hosting: "branch",
+        ffmpeg: false,
+        plumbing,
+        now: () => new Date(),
+        beforePublish: () => {
+          throw new AutomationSkip("share_off", "upstream reports are off");
+        },
+      }),
+    ).rejects.toMatchObject({ reason: "share_off" });
+    expect(plumbing.pushes).toHaveLength(0);
+  });
+
+  it("never writes the manifest through a symlink a role planted in the project", async () => {
+    const repoRoot = tempDir("vtc-project-");
+    const victim = join(tempDir("vtc-victim-"), "gitconfig");
+    writeFileSync(victim, "[user]\n");
+    const dir = join(repoRoot, ".vtc", "evidence", "auto", FP.slice(0, 8));
+    mkdirSync(dir, { recursive: true });
+    symlinkSync(victim, join(dir, "manifest.json"));
+    const outcome = await prepareEvidence(
+      tempDir(),
+      request({ keep: { kind: "project", repoRoot } }),
+      {
+        recorder: fakeRecorder(),
+        assets: fakeAssets(),
+        hosting: "attach",
+        ffmpeg: false,
+        now: () => new Date(),
+      },
+    );
+    expect(outcome.ok).toBe(true);
+    expect(readFileSync(victim, "utf8")).toBe("[user]\n");
+    expect(lstatSync(join(dir, "manifest.json")).isSymbolicLink()).toBe(false);
+
+    // A symlinked fingerprint directory is refused outright.
+    const other = tempDir("vtc-project-");
+    const outside = tempDir("vtc-outside-");
+    mkdirSync(join(other, ".vtc", "evidence", "auto"), { recursive: true });
+    symlinkSync(outside, join(other, ".vtc", "evidence", "auto", FP.slice(0, 8)));
+    await expect(
+      prepareEvidence(tempDir(), request({ keep: { kind: "project", repoRoot: other } }), {
+        recorder: fakeRecorder(),
+        assets: fakeAssets(),
+        hosting: "attach",
+        ffmpeg: false,
+        now: () => new Date(),
+      }),
+    ).rejects.toThrow(/symlink/);
+    expect(readdirSync(outside)).toEqual([]);
   });
 
   it("retries failed shots once, then fails with no file", async () => {

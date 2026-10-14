@@ -1,6 +1,4 @@
 /** The upstream module end to end with in-memory fakes (AD-27; D-cc: no real gh, git or GitHub). */
-import { mkdirSync, writeFileSync } from "node:fs";
-import { join } from "node:path";
 import {
   automationFor,
   splitRolePrompt,
@@ -10,13 +8,17 @@ import {
   type PromptProposal,
   type ReplayResult,
 } from "@vtc/shared";
-import { afterEach, describe, expect, it } from "vitest";
+import { chmodSync, writeFileSync } from "node:fs";
+import { delimiter, join } from "node:path";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   autoFingerprint,
   createUpstream,
   projectUpstreamReport,
   UPSTREAM_EVIDENCE_ROUTE,
   type AutomationFact,
+  type AutoPrInput,
+  type FfmpegCommand,
   type ProjectContext,
   type UpstreamEvent,
 } from "../../src/upstream/index.js";
@@ -43,6 +45,9 @@ interface Harness {
   readonly plumbing: FakePlumbing;
   readonly clock: { now: Date };
   readonly checkout: string;
+  readonly vtcHome: string;
+  /** The bs-vtc checkout's files at `BASE_SHA` (what `gitOps.readFileAtCommit` serves). */
+  readonly files: Map<string, string>;
   setContext(change: Partial<AutomationContext>): void;
   setShare(share: boolean): void;
 }
@@ -52,14 +57,28 @@ const harness = (
     automation?: Partial<AutomationDeps>;
     noRecorder?: boolean;
     contexts?: () => Partial<AutomationContext>;
+    /** Share GitHub, the remote and the clock with another installation's harness. */
+    shared?: Harness;
+    /** Share VTC's home too (another daemon on the same machine). */
+    sameHome?: boolean;
+    noGitOps?: boolean;
+    ffmpegCommand?: FfmpegCommand;
+    evidence?: ProjectContext["evidence"];
   } = {},
 ): Harness => {
-  const github = memoryGitHub();
+  const clock = options.shared?.clock ?? { now: new Date("2026-10-15T12:00:00Z") };
+  const plumbing =
+    options.shared?.plumbing ?? fakePlumbing({ "refs/remotes/origin/main": BASE_SHA });
+  const github =
+    options.shared?.github ?? memoryGitHub({ remote: plumbing.remote, now: () => clock.now });
   const events: UpstreamEvent[] = [];
-  const clock = { now: new Date("2026-10-15T12:00:00Z") };
-  const repoRoot = tempDir("vtc-project-");
-  const checkout = tempDir("vtc-checkout-");
-  const plumbing = fakePlumbing({ "refs/remotes/origin/main": BASE_SHA });
+  const repoRoot = options.shared?.ctx.repoRoot ?? tempDir("vtc-project-");
+  const checkout = options.shared?.checkout ?? tempDir("vtc-checkout-");
+  const files = options.shared?.files ?? new Map<string, string>();
+  const vtcHome =
+    options.shared !== undefined && options.sameHome === true
+      ? options.shared.vtcHome
+      : tempDir("vtc-home-");
   let context: AutomationContext = { githubRemote: true, ghLoggedIn: true, paused: false };
   let share = true;
   const automation: AutomationDeps = {
@@ -90,16 +109,31 @@ const harness = (
       homeDir: "/Users/alice",
     },
     knownValues: ["sk-live-payroll-SECRET-1234"],
+    ...(options.evidence === undefined ? {} : { evidence: options.evidence }),
   };
   const upstream = createUpstream({
     automation,
-    vtcHome: tempDir("vtc-home-"),
+    vtcHome,
     guardDir: tempDir("vtc-guard-"),
     vtcVersion: "0.4.0",
     assets: fakeAssets(),
     emit: (e) => events.push(e),
     now: () => clock.now,
     defaultBranch: () => Promise.resolve("main"),
+    vtcRoots: ["/Users/alice/vtc"],
+    ...(options.noGitOps === true
+      ? {}
+      : {
+          gitOps: () => ({
+            readFileAtCommit: (sha, path) => {
+              const text = sha === BASE_SHA ? files.get(path) : undefined;
+              return Promise.resolve(
+                text === undefined ? undefined : new TextEncoder().encode(text),
+              );
+            },
+          }),
+        }),
+    ...(options.ffmpegCommand === undefined ? {} : { ffmpegCommand: options.ffmpegCommand }),
   });
   return {
     github,
@@ -109,6 +143,8 @@ const harness = (
     plumbing,
     clock,
     checkout,
+    vtcHome,
+    files,
     setContext: (change) => {
       context = { ...context, ...change };
     },
@@ -415,12 +451,8 @@ const proposal: PromptProposal = {
 
 describe("the Lookback PR", () => {
   const withCheckout = (h: Harness): void => {
-    mkdirSync(join(h.checkout, "roles", "implementer"), { recursive: true });
-    writeFileSync(join(h.checkout, "roles", "implementer", "prompt.md"), PROMPT);
-    writeFileSync(
-      join(h.checkout, "roles", "CHANGELOG.md"),
-      "# Role prompt changes\n\n## older entry\n",
-    );
+    h.files.set("roles/implementer/prompt.md", PROMPT);
+    h.files.set("roles/CHANGELOG.md", "# Role prompt changes\n\n## older entry\n");
   };
 
   it("commits the editable section and a CHANGELOG entry, opens a draft with evidence, then marks it ready", async () => {
@@ -487,21 +519,137 @@ describe("the Lookback PR", () => {
     });
   });
 
-  it("supersedes the older Lookback PR of the role, deleting its branch only at VTC's head", async () => {
+  const lookbackBranch = `refs/heads/vtc/auto/lookback/${autoFingerprint({
+    kind: "lookback",
+    subject: "implementer",
+    proposalKind: "prompt",
+  }).slice(0, 8)}`;
+
+  it("supersedes the older Lookback PR of the role: pushes on VTC's head first, then closes", async () => {
     const h = harness();
     withCheckout(h);
     await h.upstream.openLookbackPr({ replay: replay(), proposal }, h.ctx);
-    await h.upstream.openLookbackPr(
+    const oldHead = h.plumbing.remote.get(lookbackBranch);
+    const outcome = await h.upstream.openLookbackPr(
       { replay: replay({ finished_at: "2026-10-16T10:00:00Z" }), proposal },
       h.ctx,
     );
+    expect(outcome).toMatchObject({ status: "pr", number: 2 });
+    // The new head descends from VTC's old head (a fast-forward), on the same branch, which the
+    // close therefore never deletes.
+    const newHead = h.plumbing.remote.get(lookbackBranch);
+    expect(newHead).not.toBe(oldHead);
+    expect(h.plumbing.commits.find((c) => c.sha === newHead)?.parents).toEqual([oldHead, BASE_SHA]);
     expect(h.github.state.prs.map((p) => p.state)).toEqual(["closed", "open"]);
     expect(h.github.state.prs[0]?.branchDeleted).toBe(false);
+    expect(h.github.state.prs[1]?.headSha).toBe(newHead);
+    expect(h.github.state.log.filter((l) => l.startsWith("pr"))).toEqual([
+      "pr create 1",
+      "pr ready 1",
+      "pr close 1",
+      "pr create 2",
+      "pr ready 2",
+    ]);
     expect(types(h.events)).toEqual([
       "upstream.pr_opened",
       "upstream.pr_closed",
       "upstream.pr_opened",
     ]);
+  });
+
+  it("deletes a superseded PR's own branch only at VTC's head", async () => {
+    const h = harness();
+    withCheckout(h);
+    const older = "aaaaaaaaaaaaaaaa";
+    const report = projectUpstreamReport({
+      kind: "lookback",
+      fingerprint: older,
+      vtcVersion: "0.4.0",
+      role: "implementer",
+      occurrences: 1,
+      firstSeen: "2026-10-15T00:00:00Z",
+      lastSeen: "2026-10-15T00:00:00Z",
+    });
+    expect(
+      await h.upstream.openPullRequest(
+        {
+          target: "upstream",
+          kind: "lookback",
+          fingerprint: older,
+          role: "implementer",
+          summary: "improve the implementer prompt",
+          slots: { summary: "An older proposal." },
+          source: {
+            changes: [{ path: "roles/CHANGELOG.md", bytes: new TextEncoder().encode("x") }],
+            message: "older",
+          },
+          report,
+          specVerifier: "none",
+          evidence: {
+            plan: { upstreamSafe: true, change: "prompt" },
+            snapshot: { routes: {}, events: [] },
+          },
+        },
+        h.ctx,
+      ),
+    ).toMatchObject({ status: "pr", number: 1 });
+    expect(h.plumbing.remote.has("refs/heads/vtc/auto/lookback/aaaaaaaa")).toBe(true);
+    await h.upstream.openLookbackPr({ replay: replay(), proposal }, h.ctx);
+    expect(h.github.state.prs[0]).toMatchObject({ state: "closed", branchDeleted: true });
+    expect(h.plumbing.remote.has("refs/heads/vtc/auto/lookback/aaaaaaaa")).toBe(false);
+  });
+
+  it("leaves a branch with a human's commit alone: no push, the older PR stays open", async () => {
+    const h = harness();
+    withCheckout(h);
+    await h.upstream.openLookbackPr({ replay: replay(), proposal }, h.ctx);
+    // A human pushes a fix-up commit onto the automatic branch.
+    const human = await h.plumbing.commit({
+      base: h.plumbing.remote.get(lookbackBranch) ?? null,
+      parents: [h.plumbing.remote.get(lookbackBranch) ?? ""],
+      changes: [],
+      message: "human fix-up",
+    });
+    h.plumbing.remote.set(lookbackBranch, human);
+    const pushes = h.plumbing.pushes.length;
+    expect(
+      await h.upstream.openLookbackPr(
+        { replay: replay({ finished_at: "2026-10-16T10:00:00Z" }), proposal },
+        h.ctx,
+      ),
+    ).toMatchObject({ status: "skipped", reason: "duplicate" });
+    expect(h.plumbing.remote.get(lookbackBranch)).toBe(human);
+    expect(h.plumbing.pushes.slice(pushes).map((p) => p.dst)).toEqual(["refs/heads/vtc-evidence"]);
+    expect(h.github.state.prs.map((p) => p.state)).toEqual(["open"]);
+    expect(types(h.events)).not.toContain("upstream.pr_closed");
+  });
+
+  it("reads the prompt at the default branch's commit, never the work tree; no reader, no PR", async () => {
+    const h = harness({ noGitOps: true });
+    withCheckout(h);
+    expect(await h.upstream.openLookbackPr({ replay: replay(), proposal }, h.ctx)).toMatchObject({
+      status: "skipped",
+      reason: "no_upstream_checkout",
+    });
+    expect(h.plumbing.pushes).toHaveLength(0);
+  });
+
+  it("refuses model-written text that names a project path", async () => {
+    const h = harness();
+    withCheckout(h);
+    const leaky: PromptProposal = {
+      ...proposal,
+      changes: [
+        {
+          ...(proposal.changes[0] as PromptProposal["changes"][number]),
+          hypothesis: "Edits to src/payroll/export.ts kept failing.",
+        },
+      ],
+    };
+    expect(
+      await h.upstream.openLookbackPr({ replay: replay(), proposal: leaky }, h.ctx),
+    ).toMatchObject({ status: "skipped", reason: "privacy" });
+    expect(h.plumbing.pushes).toHaveLength(0);
   });
 
   it("skips without a bs-vtc checkout, and ignores any verdict but improve", async () => {
@@ -573,6 +721,7 @@ describe("bs-vtc PRs caused by a project run", () => {
           firstSeen: "2026-10-15T00:00:00Z",
           lastSeen: "2026-10-15T00:00:00Z",
         }),
+        specVerifier: "none",
         evidence: {
           plan: { run: "R7", upstreamSafe: false, change: "non_ui" },
           snapshot: {
@@ -599,6 +748,7 @@ describe("no PR without evidence", () => {
       changes: [{ path: "src/a.ts", bytes: new TextEncoder().encode("x") }],
       message: "fix",
     },
+    specVerifier: "none" as const,
     evidence: {
       plan: { run: "R7", upstreamSafe: false, change: "non_ui" as const },
       snapshot: { routes: {}, events: [] },
@@ -667,5 +817,243 @@ describe("no PR without evidence", () => {
       status: "skipped",
       reason: "rate_limit",
     });
+  });
+});
+
+describe("the remote is the source of truth, across installations", () => {
+  it("another machine reopens an issue VTC's quiet sweep closed (no ledger there)", async () => {
+    const first = harness();
+    await first.upstream.report(defect(), first.ctx);
+    await first.upstream.report(defect(), first.ctx);
+    first.clock.now = new Date("2026-11-02T12:00:00Z");
+    expect(await first.upstream.sweep(first.ctx)).toEqual([
+      expect.objectContaining({ action: "closed", number: 1 }),
+    ]);
+    const other = harness({ shared: first });
+    other.clock.now = new Date("2026-11-03T12:00:00Z");
+    await other.upstream.report(defect({ at: "2026-11-03T11:00:00Z" }), other.ctx);
+    expect(
+      await other.upstream.report(defect({ at: "2026-11-03T11:00:00Z" }), other.ctx),
+    ).toMatchObject({ status: "issue", action: "reopened", number: 1 });
+    // A human's not-planned close stays muted for every installation.
+    first.github.human(1, { close: "not_planned" });
+    expect(
+      await harness({ shared: first }).upstream.raise(
+        {
+          target: "upstream",
+          kind: "defect",
+          fingerprint: first.github.state.issues[0]?.marker?.fp ?? "",
+          minOccurrences: 1,
+          facts: {
+            kind: "defect",
+            fingerprint: first.github.state.issues[0]?.marker?.fp ?? "",
+            vtcVersion: "0.4.0",
+            errorClass: "adapter.parse_failure",
+          },
+          at: "2026-11-03T11:00:00Z",
+        },
+        first.ctx,
+      ),
+    ).toMatchObject({ status: "skipped", reason: "muted" });
+  });
+
+  it("counts the five-a-day cap from the remote, so installations share it", async () => {
+    const first = harness();
+    const second = harness({ shared: first });
+    const advisory = (n: number): AutomationFact => ({
+      type: "security_advisory",
+      advisoryId: `GHSA-000${String(n)}`,
+      package: "yaml",
+      at: "2026-10-15T11:00:00Z",
+    });
+    for (const n of [1, 2, 3]) await first.upstream.report(advisory(n), first.ctx);
+    expect(await second.upstream.report(advisory(4), second.ctx)).toMatchObject({
+      status: "issue",
+    });
+    expect(await second.upstream.report(advisory(5), second.ctx)).toMatchObject({
+      status: "issue",
+    });
+    expect(await second.upstream.report(advisory(6), second.ctx)).toMatchObject({
+      status: "skipped",
+      reason: "rate_limit",
+    });
+    expect(first.github.state.issues).toHaveLength(5);
+  });
+
+  it("serialises two daemons on one machine: one issue for one fingerprint", async () => {
+    const first = harness();
+    const second = harness({ shared: first, sameHome: true });
+    const fact: AutomationFact = {
+      type: "security_advisory",
+      advisoryId: "GHSA-9",
+      package: "yaml",
+      at: "2026-10-15T11:00:00Z",
+    };
+    const outcomes = await Promise.all([
+      first.upstream.report(fact, first.ctx),
+      second.upstream.report(fact, second.ctx),
+    ]);
+    expect(outcomes.map((o) => o.status).sort()).toEqual(["issue", "skipped"]);
+    expect(first.github.state.issues).toHaveLength(1);
+  });
+});
+
+describe("what leaves for the upstream repo", () => {
+  const fp = autoFingerprint({ kind: "config", subject: "max_rounds" });
+  const input = (over: Partial<AutoPrInput> = {}): AutoPrInput => ({
+    target: "upstream",
+    kind: "config",
+    fingerprint: fp,
+    summary: "raise the review round cap",
+    slots: { summary: "Raises the cap." },
+    source: {
+      changes: [{ path: "roles/x.yaml", bytes: new TextEncoder().encode("max_rounds: 4\n") }],
+      message: "cap",
+    },
+    report: projectUpstreamReport({
+      kind: "config",
+      fingerprint: fp,
+      vtcVersion: "0.4.0",
+      occurrences: 1,
+      firstSeen: "2026-10-15T00:00:00Z",
+      lastSeen: "2026-10-15T00:00:00Z",
+    }),
+    specVerifier: "none",
+    evidence: {
+      plan: { upstreamSafe: true, change: "non_ui" },
+      snapshot: { routes: {}, events: [] },
+      gateReport: {} as never,
+    },
+    ...over,
+  });
+
+  it("checks every committed file and the model's text before anything is pushed", async () => {
+    const h = harness({ automation: { hosting: "attach" } });
+    expect(await h.upstream.openPullRequest(input(), h.ctx)).toMatchObject({ status: "pr" });
+    const leakyFile = input({
+      fingerprint: "1111111111111111",
+      source: {
+        changes: [
+          { path: "roles/x.yaml", bytes: new TextEncoder().encode("# for Globex Industries\n") },
+        ],
+        message: "cap",
+      },
+    });
+    expect(await h.upstream.openPullRequest(leakyFile, h.ctx)).toMatchObject({
+      status: "skipped",
+      reason: "privacy",
+    });
+    const leakyText = input({
+      fingerprint: "2222222222222222",
+      slots: { summary: "Needed for app/services/payslip.rb." },
+    });
+    expect(await h.upstream.openPullRequest(leakyText, h.ctx)).toMatchObject({
+      status: "skipped",
+      reason: "privacy",
+    });
+    expect(h.plumbing.pushes).toHaveLength(1);
+  });
+
+  it("re-checks the opt-outs right before each push: nothing leaves once sharing is off", async () => {
+    const inner = fakeRecorder();
+    const during = { capture: (): void => undefined };
+    const recorder: EvidenceRecorder = {
+      renderGateReport: (request) => inner.renderGateReport(request),
+      capture: (request) => {
+        during.capture();
+        return inner.capture(request);
+      },
+    };
+    const h = harness({ automation: { evidence: recorder } });
+    during.capture = () => {
+      h.setShare(false);
+    };
+    expect(await h.upstream.openPullRequest(input(), h.ctx)).toMatchObject({
+      status: "skipped",
+      reason: "share_off",
+    });
+    expect(h.plumbing.pushes).toHaveLength(0);
+    expect(h.github.state.prs).toHaveLength(0);
+  });
+});
+
+describe("evidence settings and the GIF", () => {
+  const prInput = (over: Partial<AutoPrInput> = {}): AutoPrInput => ({
+    target: "project",
+    kind: "parked",
+    fingerprint: "0123456789abcdef",
+    summary: "fix the parked export task",
+    slots: { summary: "Fixes the export." },
+    source: {
+      changes: [{ path: "src/a.ts", bytes: new TextEncoder().encode("x") }],
+      message: "fix",
+    },
+    specVerifier: "pending",
+    evidence: {
+      plan: { run: "R7", upstreamSafe: false, change: "non_ui" },
+      snapshot: { routes: {}, events: [] },
+      gateReport: {} as never,
+    },
+    ...over,
+  });
+
+  it("drops recordings when the project turns video off, and keeps to its max_mb", async () => {
+    const h = harness({ automation: { hosting: "attach" }, evidence: { video: false } });
+    expect(await h.upstream.openPullRequest(prInput(), h.ctx)).toMatchObject({
+      status: "pr",
+      evidence: "partial",
+    });
+    expect(h.github.state.prs[0]?.attached).toEqual(["01-final-state.png", "02-gate-report.png"]);
+    expect(h.github.state.prs[0]?.labels).toContain("evidence: partial");
+    const small = harness({ automation: { hosting: "attach" }, evidence: { maxBytes: 2500 } });
+    expect(await small.upstream.openPullRequest(prInput(), small.ctx)).toMatchObject({
+      status: "pr",
+      evidence: "partial",
+    });
+    expect(small.github.state.prs[0]?.attached).toHaveLength(2);
+  });
+
+  it("keeps a branch an automatic run pushed draft unless the Spec Verifier passed", async () => {
+    const h = harness({ automation: { hosting: "attach" } });
+    expect(
+      await h.upstream.openPullRequest(
+        prInput({ source: { pushedHead: "7".repeat(40) }, specVerifier: "none" }),
+        h.ctx,
+      ),
+    ).toMatchObject({ status: "pr", ready: false });
+    expect(h.github.state.prs[0]?.isDraft).toBe(true);
+  });
+
+  it("makes the GIF with the ffmpeg on PATH when automation.ffmpeg is on (branch hosting)", async () => {
+    const bin = tempDir("vtc-ffmpeg-");
+    writeFileSync(
+      join(bin, "ffmpeg"),
+      '#!/bin/sh\nfor last in "$@"; do :; done\nprintf gif > "$last"\n',
+    );
+    chmodSync(join(bin, "ffmpeg"), 0o755);
+    vi.stubEnv("PATH", `${bin}${delimiter}${process.env.PATH ?? ""}`);
+    try {
+      const h = harness({ automation: { ffmpeg: true } });
+      expect(await h.upstream.openPullRequest(prInput(), h.ctx)).toMatchObject({
+        status: "pr",
+        evidence: "complete",
+      });
+      expect(h.github.state.prs[0]?.body).toContain("replay-preview.gif");
+    } finally {
+      vi.unstubAllEnvs();
+    }
+  });
+
+  it("opens no PR and raises 'evidence capture failed' when the evidence branch cannot be pushed", async () => {
+    const h = harness();
+    h.plumbing.remote.set("refs/heads/vtc-evidence", "9".repeat(40));
+    expect(await h.upstream.openPullRequest(prInput(), h.ctx)).toMatchObject({
+      status: "skipped",
+      reason: "evidence_failed",
+    });
+    expect(h.github.state.prs).toHaveLength(0);
+    expect(h.github.state.issues[0]?.title).toBe(
+      "vtc(defect): evidence.capture_failed in the engine",
+    );
   });
 });

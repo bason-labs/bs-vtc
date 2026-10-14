@@ -11,6 +11,9 @@ const STACK_A = `TypeError: Cannot read properties of undefined (reading 'x')
     at Object.<anonymous> (/Users/alice/work/bs-vtc/packages/engine/dist/core/kernel.js:5:1)
     at next (/Users/alice/work/bs-vtc/packages/engine/src/core/scheduler.ts:1:1)`;
 
+const ROOTS_A = ["/Users/alice/work/bs-vtc"];
+const ROOTS_B = ["/opt/vtc", "/home/bob/vtc"];
+
 const STACK_B = `TypeError: Cannot read properties of undefined (reading 'y')
     at parseLine (/opt/vtc/node_modules/@vtc/adapters/dist/codex/parse.js:999:3)
     at async runTurn (/home/bob/vtc/packages/engine/src/core/loop.ts:12:9)
@@ -18,7 +21,7 @@ const STACK_B = `TypeError: Cannot read properties of undefined (reading 'y')
 
 describe("VTC stack frames", () => {
   it("keep package/file:function and drop lines, absolute paths and project frames", () => {
-    const frames = vtcFramesFromStack(STACK_A);
+    const frames = vtcFramesFromStack(STACK_A, ROOTS_A);
     expect(frames).toEqual([
       "adapters/codex/parse:parseLine",
       "engine/core/loop:runTurn",
@@ -28,7 +31,29 @@ describe("VTC stack frames", () => {
     expect(frames.join(" ")).not.toMatch(/alice|acme|\d+:\d+/);
   });
   it("are the same across machines, checkouts, builds and versions", () => {
-    expect(vtcFramesFromStack(STACK_B)).toEqual(vtcFramesFromStack(STACK_A));
+    expect(vtcFramesFromStack(STACK_B, ROOTS_B)).toEqual(vtcFramesFromStack(STACK_A, ROOTS_A));
+  });
+  it("fail closed: without VTC's roots no absolute frame counts, nor a project monorepo's", () => {
+    expect(vtcFramesFromStack(STACK_A)).toEqual([]);
+    const project = `Error: x
+    at handler (/Users/alice/clients/acme/packages/engine/src/server.ts:10:2)`;
+    expect(vtcFramesFromStack(project, ROOTS_A)).toEqual([]);
+  });
+  it("read the single-file binary's frames: sourcemapped paths, else named bundle frames", () => {
+    // What \`bun build --compile --sourcemap\` prints, and the same binary without a sourcemap.
+    const mapped = `Error: boom
+    at parseLine (packages/adapters/src/codex/parse.ts:1:58)
+    at packages/cli/src/main.ts:3:7
+    at handler (/Users/alice/clients/acme/app/src/server.ts:10:2)`;
+    expect(vtcFramesFromStack(mapped)).toEqual([
+      "adapters/codex/parse:parseLine",
+      "cli/main:<anonymous>",
+    ]);
+    expect(vtcFramesFromStack(mapped)[0]).toBe(vtcFramesFromStack(STACK_A, ROOTS_A)[0]);
+    const bundled = `Error: boom
+    at parseLine (/$bunfs/root/vtc:4:18)
+    at /$bunfs/root/vtc:12:10`;
+    expect(vtcFramesFromStack(bundled)).toEqual(["cli/bundle:parseLine"]);
   });
 });
 
@@ -39,14 +64,14 @@ describe("autoFingerprint", () => {
       errorClass: "adapter.parse_failure",
       host: "codex",
       role: "implementer",
-      frames: vtcFramesFromStack(STACK_A),
+      frames: vtcFramesFromStack(STACK_A, ROOTS_A),
     });
     const b = autoFingerprint({
       kind: "defect",
       errorClass: "adapter.parse_failure",
       host: "codex",
       role: "implementer",
-      frames: vtcFramesFromStack(STACK_B),
+      frames: vtcFramesFromStack(STACK_B, ROOTS_B),
     });
     expect(AutoFingerprintSchema.safeParse(a).success).toBe(true);
     expect(a).toBe(b);

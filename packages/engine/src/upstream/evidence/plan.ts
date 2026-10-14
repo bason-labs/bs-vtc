@@ -6,6 +6,8 @@
  *   `EVIDENCE_LIMITS.maxFlowSeconds`;
  * - prompt, agent or cost changes: the scorecard and replay charts;
  * - non-UI fixes: the gate report (`EvidenceRecorder.renderGateReport`), screenshotted.
+ * A project's `automation.evidence.video: false` drops the recordings (screenshots only, which
+ * leaves the set incomplete: `evidence: partial`).
  */
 import {
   EVIDENCE_LIMITS,
@@ -37,6 +39,8 @@ export interface EvidencePlanInput {
   readonly change: ChangeClass;
   /** UI changes: the snapshot path of the changed flow to record. */
   readonly flowPath?: string | undefined;
+  /** `false`: no recordings, screenshots only (a project's `automation.evidence.video`). */
+  readonly video?: boolean | undefined;
 }
 
 /** The page a replay or a chart is recorded from on the snapshot origin. */
@@ -49,6 +53,7 @@ const pagePath = (input: EvidencePlanInput, hash = ""): string =>
 export const planEvidenceShots = (input: EvidencePlanInput): EvidenceShot[] => {
   const shots: Omit<EvidenceShot, "name">[] = [];
   const add = (shot: Omit<EvidenceShot, "name">): void => {
+    if (input.video === false && shot.videoSeconds !== undefined) return;
     shots.push(shot);
   };
   add({

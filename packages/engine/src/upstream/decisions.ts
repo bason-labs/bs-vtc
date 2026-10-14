@@ -2,7 +2,8 @@
  * Pure decisions of the upstream module (AD-27 rule 4; D-bx; spine §5 reading 208 (3)): the dedupe
  * table over the remote label listing, the caps, and the plans of the quiet sweep and the stale-PR
  * close. Everything is read from `listAutomatic` / `listOpenAutomatic` plus `parseAutoMarker`,
- * never GitHub search; the ledger adds only what the remote cannot tell.
+ * never GitHub search; the ledger adds only what the remote cannot tell, and is a fallback where
+ * an injected service does not report the remote facts below.
  */
 import {
   AUTO_LABELS,
@@ -15,6 +16,47 @@ import type { Ledger, LedgerRecord } from "./ledger.js";
 
 const HOUR_MS = 3_600_000;
 const DAY_MS = 24 * HOUR_MS;
+
+/**
+ * The hidden marker of the comment VTC's quiet sweep closes an issue with (beside
+ * `AUTO_COMMENT_MARKER`), so any installation can tell VTC's quiet close from a human's
+ * not-planned close by reading the issue, without this machine's ledger.
+ */
+export const QUIET_CLOSE_MARKER = "<!-- vtc:quiet-close -->";
+
+/** VTC closes right after its quiet-close comment; a later close is a human's. */
+export const QUIET_CLOSE_WINDOW_MS = 15 * 60_000;
+
+/**
+ * Facts the gh-backed `listAutomatic` reads beyond the frozen `AutoIssueRef` (contracts 5.0.0 has
+ * neither; a contract proposal adds them). Absent from an injected service: the ledger decides.
+ */
+export interface RemoteIssueFacts {
+  /** When the issue was opened (`gh --json createdAt`). */
+  readonly createdAt?: string;
+  /**
+   * VTC's quiet sweep closed it: closed as not planned, its last comment carries
+   * {@link QUIET_CLOSE_MARKER}, and the close came within {@link QUIET_CLOSE_WINDOW_MS} of it.
+   */
+  readonly closedQuietByVtc?: boolean;
+}
+export type RemoteIssueRef = AutoIssueRef & RemoteIssueFacts;
+
+/** Pure: whether a not-planned close was VTC's quiet sweep (see {@link RemoteIssueFacts}). */
+export const isQuietCloseByVtc = (input: {
+  readonly stateReason: AutoIssueRef["stateReason"];
+  readonly closedAt: string | null | undefined;
+  readonly comments: readonly { readonly body: string; readonly createdAt?: string | undefined }[];
+}): boolean => {
+  if (input.stateReason !== "not_planned") return false;
+  if (input.closedAt === null || input.closedAt === undefined) return false;
+  const last = [...input.comments].sort(
+    (a, b) => Date.parse(a.createdAt ?? "") - Date.parse(b.createdAt ?? ""),
+  )[input.comments.length - 1];
+  if (last?.createdAt === undefined || !last.body.includes(QUIET_CLOSE_MARKER)) return false;
+  const gap = Date.parse(input.closedAt) - Date.parse(last.createdAt);
+  return gap >= 0 && gap <= QUIET_CLOSE_WINDOW_MS;
+};
 
 export type IssueDecision =
   | { readonly action: "create" }
@@ -36,11 +78,13 @@ const byNumberDesc = (a: AutoIssueRef, b: AutoIssueRef): number => b.number - a.
  * - an open issue → update it (comment only on a material change), at most once per
  *   `commentIntervalHours`, otherwise a duplicate;
  * - the latest closed as completed (or with no reason) → a new regression issue;
- * - the latest closed by VTC's own quiet sweep (the ledger says so) → reopen.
+ * - the latest closed by VTC's own quiet sweep → reopen. The remote says so (its quiet-close
+ *   comment, {@link RemoteIssueFacts}), so another machine or a wiped ledger agrees; the ledger is
+ *   the fallback for a service that does not report it.
  */
 export const decideIssue = (input: {
   readonly fingerprint: string;
-  readonly issues: readonly AutoIssueRef[];
+  readonly issues: readonly RemoteIssueRef[];
   readonly record?: LedgerRecord | undefined;
   readonly now: Date;
   readonly material: boolean;
@@ -60,7 +104,9 @@ export const decideIssue = (input: {
   const latest = matches[0];
   if (latest === undefined) return { action: "create" };
   if (latest.stateReason === "not_planned") {
-    return (input.record?.quietClosed ?? []).includes(latest.number)
+    const quiet =
+      latest.closedQuietByVtc === true || (input.record?.quietClosed ?? []).includes(latest.number);
+    return quiet
       ? { action: "reopen", number: latest.number }
       : { action: "skip", reason: "muted", number: latest.number };
   }
@@ -81,9 +127,26 @@ export const isMaterialChange = (record: LedgerRecord | undefined, version: stri
 const utcDay = (now: Date): Date =>
   new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate()));
 
-/** `AUTOMATION_LIMITS.newIssuesPerDay` reached for `repo` today (UTC). */
-export const issueCapReached = (ledger: Ledger, repo: string, now: Date): boolean =>
-  ledger.issuesOpenedSince(repo, utcDay(now)) >= AUTOMATION_LIMITS.newIssuesPerDay;
+/**
+ * `AUTOMATION_LIMITS.newIssuesPerDay` reached for `repo` today (UTC): counted from the remote
+ * listing (automatic issues opened today, by any installation) and from the ledger, whichever is
+ * higher; the ledger alone where the listing carries no `createdAt`.
+ */
+export const issueCapReached = (
+  ledger: Ledger,
+  repo: string,
+  now: Date,
+  listed: readonly RemoteIssueRef[] = [],
+): boolean => {
+  const since = utcDay(now).getTime();
+  const remote = listed.filter(
+    (i) => i.marker !== null && i.createdAt !== undefined && Date.parse(i.createdAt) >= since,
+  ).length;
+  return (
+    Math.max(remote, ledger.issuesOpenedSince(repo, utcDay(now))) >=
+    AUTOMATION_LIMITS.newIssuesPerDay
+  );
+};
 
 export type PrCapDecision =
   | { readonly action: "open"; readonly supersede: readonly AutoPrRef[] }

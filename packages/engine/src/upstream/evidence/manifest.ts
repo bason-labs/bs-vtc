@@ -3,10 +3,11 @@
  * `EVIDENCE_LIMITS.maxBytesPerPr` and `maxFilesPerPr` in priority order (motion first), and the
  * `EvidenceManifest` that lists every file with its hash, size, redaction verdict and URL. The
  * manifest is kept, redacted, at `<vtcHome>/upstream/evidence/<fp8>/` (VTC's repo) or
- * `.vtc/evidence/auto/<fp8>/` (a project).
+ * `.vtc/evidence/auto/<fp8>/` (a project), never through a symlink: a project's `.vtc/evidence/` is
+ * tracked by git, so a role could plant one there.
  */
 import { createHash } from "node:crypto";
-import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import {
   EVIDENCE_LIMITS,
@@ -18,6 +19,7 @@ import {
   type EvidenceHosting,
   type EvidenceManifest,
 } from "@vtc/shared";
+import { ensureDirNoFollow, writeFileNoFollow } from "../safe-fs.js";
 
 export interface EvidenceFile {
   readonly name: string;
@@ -50,10 +52,16 @@ const capFor = (kind: EvidenceFileKind): number => {
   }
 };
 
-/** Pure: the files that fit the per-file caps and the per-PR budget, and those dropped. */
+/**
+ * Pure: the files that fit the per-file caps and the per-PR budget, and those dropped. `maxBytes`
+ * (a project's `automation.evidence.max_mb`) lowers the per-PR budget, never above
+ * `EVIDENCE_LIMITS.maxBytesPerPr`.
+ */
 export const applyEvidenceBudget = (
   files: readonly EvidenceFile[],
+  maxBytes?: number,
 ): { readonly kept: EvidenceFile[]; readonly dropped: EvidenceFile[] } => {
+  const budget = Math.min(maxBytes ?? EVIDENCE_LIMITS.maxBytesPerPr, EVIDENCE_LIMITS.maxBytesPerPr);
   const ordered = [...files].sort(
     (a, b) => PRIORITY.indexOf(a.kind) - PRIORITY.indexOf(b.kind) || a.name.localeCompare(b.name),
   );
@@ -64,7 +72,7 @@ export const applyEvidenceBudget = (
     const fits =
       file.bytes > 0 &&
       file.bytes <= capFor(file.kind) &&
-      total + file.bytes <= EVIDENCE_LIMITS.maxBytesPerPr &&
+      total + file.bytes <= budget &&
       kept.length < EVIDENCE_LIMITS.maxFilesPerPr;
     if (fits) {
       kept.push(file);
@@ -116,26 +124,32 @@ export const buildManifest = (input: {
     captured_at: input.capturedAt,
   });
 
+type ManifestTarget =
+  | { readonly kind: "upstream"; readonly vtcHome: string }
+  | { readonly kind: "project"; readonly repoRoot: string };
+
 /** Where a target keeps its manifests. */
-export const manifestDir = (
-  target:
-    | { readonly kind: "upstream"; readonly vtcHome: string }
-    | { readonly kind: "project"; readonly repoRoot: string },
-  fingerprint: AutoFingerprint,
-): string =>
+export const manifestDir = (target: ManifestTarget, fingerprint: AutoFingerprint): string =>
   target.kind === "upstream"
     ? join(target.vtcHome, "upstream", "evidence", fingerprint.slice(0, 8))
     : join(target.repoRoot, ".vtc", "evidence", "auto", fingerprint.slice(0, 8));
 
-/** Writes `manifest.json` (redacted) into each of `dirs`. */
+/**
+ * Writes `manifest.json` (redacted) into the target's manifest directory: every directory below
+ * VTC's home or the project root is checked for symlinks, and the file goes through a fresh
+ * `O_EXCL|O_NOFOLLOW` temporary file renamed into place.
+ */
 export const writeManifest = (
   manifest: EvidenceManifest,
-  dirs: readonly string[],
+  target: ManifestTarget,
   knownValues: readonly string[] = [],
 ): void => {
   const text = `${JSON.stringify(redactJson(manifest, knownValues), null, 2)}\n`;
-  for (const dir of dirs) {
-    mkdirSync(dir, { recursive: true, mode: 0o700 });
-    writeFileSync(join(dir, "manifest.json"), text, { mode: 0o600 });
-  }
+  const root = target.kind === "upstream" ? target.vtcHome : target.repoRoot;
+  const dir = ensureDirNoFollow(
+    root,
+    manifestDir(target, manifest.fingerprint),
+    "the evidence manifest",
+  );
+  writeFileNoFollow(dir, "manifest.json", text);
 };

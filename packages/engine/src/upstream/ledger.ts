@@ -2,13 +2,15 @@
  * The local automation ledger (AD-27 rule 4; spine §5 reading 208): one JSON line per thing VTC saw
  * or did for a fingerprint, at `<vtcHome>/upstream/ledger.jsonl` for VTC's own repo and
  * `.vtc/state/automation/ledger.jsonl` (gitignored) for a project. Append-only, mode 0600, never
- * through a symlink, every line redacted. It is a cache: the remote label listing is the source of
+ * through a symlink (every directory below the trusted root is checked and the file is opened
+ * `O_NOFOLLOW`), every line redacted. It is a cache: the remote label listing is the source of
  * truth for issue and PR state; the ledger holds what the remote cannot tell (occurrences, when VTC
- * last wrote to an issue, which issues VTC's quiet sweep closed, the head VTC last pushed).
+ * last wrote to an issue, which issues VTC's quiet sweep closed, the heads VTC pushed).
  */
-import { appendFileSync, existsSync, lstatSync, mkdirSync, readFileSync } from "node:fs";
+import { mkdirSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { redactJson, type AutoKind } from "@vtc/shared";
+import { appendNoFollow, ensureDirNoFollow, readNoFollow } from "./safe-fs.js";
 
 export type LedgerEvent =
   /** One occurrence of the fingerprint (`version`: the VTC release that saw it). */
@@ -46,6 +48,8 @@ export interface LedgerRecord {
   readonly issue: number | null;
   readonly pr: number | null;
   readonly prHead: string | null;
+  /** Every head VTC pushed for the fingerprint (a branch at one of them holds no human commit). */
+  readonly pushedHeads: readonly string[];
   /** The last time VTC wrote to the issue (edit, comment or reopen). */
   readonly lastWriteAt: string | null;
   /** `count` when VTC last commented on (or opened) the issue. */
@@ -99,6 +103,7 @@ const fold = (entries: readonly LedgerEntry[]): LedgerRecord | undefined => {
     issue: null,
     pr: null,
     prHead: null,
+    pushedHeads: [],
     lastWriteAt: null,
     countAtComment: 0,
     versionsAtComment: [],
@@ -154,7 +159,15 @@ const fold = (entries: readonly LedgerEntry[]): LedgerRecord | undefined => {
         };
         break;
       case "pr_opened":
-        record = { ...record, pr: e.number ?? record.pr, prHead: e.head ?? record.prHead };
+        record = {
+          ...record,
+          pr: e.number ?? record.pr,
+          prHead: e.head ?? record.prHead,
+          pushedHeads:
+            e.head === undefined || record.pushedHeads.includes(e.head)
+              ? record.pushedHeads
+              : [...record.pushedHeads, e.head],
+        };
         break;
       case "pr_closed":
         record = { ...record, pr: null, prHead: null };
@@ -164,40 +177,45 @@ const fold = (entries: readonly LedgerEntry[]): LedgerRecord | undefined => {
   return record;
 };
 
-const refuseSymlink = (path: string): void => {
-  if (existsSync(path) && lstatSync(path).isSymbolicLink()) {
-    throw new Error("the automation ledger is a symlink");
-  }
-};
+const WHAT = "the automation ledger";
 
-/** Opens (lazily creates) the ledger at `path`; `knownValues` are redacted from every line. */
-export const openLedger = (path: string, knownValues: readonly string[] = []): Ledger => {
+/**
+ * Opens (lazily creates) the ledger at `path`; `knownValues` are redacted from every line. With
+ * `root` (VTC's home or the project root), every directory from it down to the ledger is checked
+ * for symlinks; without it only the ledger's own directory is.
+ */
+export const openLedger = (
+  path: string,
+  knownValues: readonly string[] = [],
+  root?: string,
+): Ledger => {
   const entries = (): LedgerEntry[] => {
-    refuseSymlink(path);
-    if (!existsSync(path)) return [];
-    return readFileSync(path, "utf8")
-      .split("\n")
-      .flatMap((line) => {
-        if (line.trim() === "") return [];
-        try {
-          const value: unknown = JSON.parse(line);
-          return isEntry(value) ? [value] : [];
-        } catch {
-          return [];
-        }
-      });
+    const text = readNoFollow(path, WHAT);
+    if (text === null) return [];
+    return text.split("\n").flatMap((line) => {
+      if (line.trim() === "") return [];
+      try {
+        const value: unknown = JSON.parse(line);
+        return isEntry(value) ? [value] : [];
+      } catch {
+        return [];
+      }
+    });
+  };
+  const ensureDir = (): void => {
+    const dir = dirname(path);
+    if (root !== undefined) {
+      ensureDirNoFollow(root, dir, WHAT);
+      return;
+    }
+    mkdirSync(dirname(dir), { recursive: true, mode: 0o700 });
+    ensureDirNoFollow(dirname(dir), dir, WHAT);
   };
   return {
     path,
     append: (entry) => {
-      refuseSymlink(path);
-      const dir = dirname(path);
-      mkdirSync(dir, { recursive: true, mode: 0o700 });
-      refuseSymlink(dir);
-      appendFileSync(path, `${JSON.stringify(redactJson(entry, knownValues))}\n`, {
-        mode: 0o600,
-        flag: "a",
-      });
+      ensureDir();
+      appendNoFollow(path, `${JSON.stringify(redactJson(entry, knownValues))}\n`, WHAT);
     },
     record: (repo, fingerprint) =>
       fold(entries().filter((e) => e.repo === repo && e.fp === fingerprint)),

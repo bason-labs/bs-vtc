@@ -5,7 +5,10 @@
  * paced; bodies and comments go through `--body-file` from a staging directory; `-R owner/name` is
  * always explicit. In `attach` hosting a partial upload failure (non-zero exit, URL still printed)
  * is repaired: the body is re-read, unresolved relative references are stripped, and the item is
- * labelled `evidence: partial`.
+ * labelled `evidence: partial` (the label is created first if the repo lacks it, and the references
+ * are stripped even if labelling fails). Issue listings also read `createdAt`, `closedAt` and the
+ * comment times, so the daily cap and VTC's quiet close are known from the remote
+ * (`RemoteIssueFacts`).
  */
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
@@ -23,8 +26,10 @@ import {
   type GitHubRepo,
   type IssueService,
 } from "@vtc/shared";
+import { isQuietCloseByVtc, type RemoteIssueRef } from "./decisions.js";
 import { createGhCommand, type GhCommand, type GhResult } from "./gh.js";
 import { createRepoQueue, type RepoQueue } from "./queue.js";
+import { isAutomationSkip } from "./skip.js";
 import { createStaging } from "./staging.js";
 
 export interface GhServicesDeps {
@@ -34,6 +39,8 @@ export interface GhServicesDeps {
   readonly queue?: RepoQueue;
   /** Root of the per-action staging directories (`<guard dir>/upstream/staging`). */
   readonly stagingRoot: string;
+  /** The default queue's shared write log (VTC's home), so pacing holds across daemons. */
+  readonly pacing?: { readonly root: string; readonly dir: string };
 }
 
 export interface GhServices {
@@ -54,7 +61,9 @@ interface GhIssue {
   readonly labels?: readonly GhLabel[];
   readonly body?: string;
   readonly updatedAt?: string;
-  readonly comments?: readonly { readonly body?: string }[];
+  readonly createdAt?: string;
+  readonly closedAt?: string | null;
+  readonly comments?: readonly { readonly body?: string; readonly createdAt?: string }[];
 }
 interface GhPr {
   readonly number?: number;
@@ -67,7 +76,8 @@ interface GhPr {
   readonly body?: string;
 }
 
-const ISSUE_FIELDS = "number,url,state,stateReason,labels,body,updatedAt,comments";
+const ISSUE_FIELDS =
+  "number,url,state,stateReason,labels,body,updatedAt,createdAt,closedAt,comments";
 const PR_FIELDS = "number,url,headRefName,headRefOid,isDraft,state,labels,body";
 const LIST_LIMIT = "1000";
 
@@ -100,19 +110,26 @@ const stateReasonOf = (value: string | null | undefined): AutoIssueRef["stateRea
 };
 
 /** Pure: an issue from `gh issue list|view --json`, or `null` when it lacks its identity. */
-export const issueFromGh = (issue: GhIssue): AutoIssueRef | null => {
+export const issueFromGh = (issue: GhIssue): RemoteIssueRef | null => {
   if (issue.number === undefined || issue.url === undefined) return null;
+  const state = (issue.state ?? "").toUpperCase() === "CLOSED" ? "closed" : "open";
+  const stateReason = stateReasonOf(issue.stateReason);
+  const comments = (issue.comments ?? []).map((c) => ({
+    body: c.body ?? "",
+    createdAt: c.createdAt,
+  }));
   return {
     number: issue.number,
     url: issue.url,
-    state: (issue.state ?? "").toUpperCase() === "CLOSED" ? "closed" : "open",
-    stateReason: stateReasonOf(issue.stateReason),
+    state,
+    stateReason,
     labels: labelNames(issue.labels),
     marker: parseAutoMarker(issue.body ?? ""),
     updatedAt: issue.updatedAt ?? new Date(0).toISOString(),
-    humanActivity: (issue.comments ?? []).some(
-      (c) => !(c.body ?? "").includes(AUTO_COMMENT_MARKER),
-    ),
+    humanActivity: comments.some((c) => !c.body.includes(AUTO_COMMENT_MARKER)),
+    ...(issue.createdAt === undefined ? {} : { createdAt: issue.createdAt }),
+    closedQuietByVtc:
+      state === "closed" && isQuietCloseByVtc({ stateReason, closedAt: issue.closedAt, comments }),
   };
 };
 
@@ -157,7 +174,8 @@ const labelArgs = (labels: readonly string[]): string[] => labels.flatMap((l) =>
 export const createGhServices = (deps: GhServicesDeps): GhServices => {
   const run =
     deps.run ?? createGhCommand(deps.command === undefined ? {} : { command: deps.command });
-  const queue = deps.queue ?? createRepoQueue();
+  const queue =
+    deps.queue ?? createRepoQueue(deps.pacing === undefined ? {} : { pacing: deps.pacing });
 
   const read = async (repo: GitHubRepo, args: readonly string[], cwd: string): Promise<string> => {
     const result = await queue.read(repo, () => run(args, cwd));
@@ -215,7 +233,9 @@ export const createGhServices = (deps: GhServicesDeps): GhServices => {
 
   /**
    * After an `--attach` write exited non-zero but still printed the URL: re-read the body, strip
-   * unresolved references and label the item `evidence: partial` (spine §5 reading 208).
+   * unresolved references and label the item `evidence: partial` (spine §5 reading 208). The label
+   * is created first when the repo lacks it; if labelling still fails, the references are
+   * stripped anyway.
    */
   const repairPartial = async (
     command: "issue" | "pr",
@@ -232,21 +252,20 @@ export const createGhServices = (deps: GhServicesDeps): GhServices => {
     const staging = createStaging(deps.stagingRoot);
     try {
       const file = staging.write("body-resolved.md", stripUnresolvedReferences(body));
-      await mustWrite(
-        repo,
-        [
-          command,
-          "edit",
-          String(number),
-          "-R",
+      const edit = [command, "edit", String(number), "-R", repo, "--body-file", file];
+      let labelled = false;
+      try {
+        await ensureLabels(repo, [AUTO_LABELS.evidencePartial]);
+        const result = await write(
           repo,
-          "--body-file",
-          file,
-          "--add-label",
-          AUTO_LABELS.evidencePartial,
-        ],
-        staging.dir,
-      );
+          [...edit, "--add-label", AUTO_LABELS.evidencePartial],
+          staging.dir,
+        );
+        labelled = result.code === 0;
+      } catch (error) {
+        if (isAutomationSkip(error)) throw error;
+      }
+      if (!labelled) await mustWrite(repo, edit, staging.dir);
     } finally {
       staging.dispose();
     }
@@ -271,38 +290,40 @@ export const createGhServices = (deps: GhServicesDeps): GhServices => {
     throw fail(args, result);
   };
 
+  const ensureLabels = async (repo: GitHubRepo, labels: readonly string[]): Promise<void> => {
+    await tmpCwd(async (cwd) => {
+      const stdout = await read(
+        repo,
+        ["label", "list", "-R", repo, "--json", "name", "--limit", LIST_LIMIT],
+        cwd,
+      );
+      const existing = new Set(labelNames(JSON.parse(stdout) as GhLabel[]));
+      for (const label of new Set(labels)) {
+        if (existing.has(label)) continue;
+        await mustWrite(
+          repo,
+          [
+            "label",
+            "create",
+            label,
+            "-R",
+            repo,
+            "--color",
+            LABEL_COLORS[label] ?? "c5def5",
+            "--description",
+            "Raised automatically by VTC",
+          ],
+          cwd,
+        );
+      }
+    });
+  };
+
   const bodyOf = (request: AutoIssueRequest): string =>
     readFileSync(join(request.stagingDir, request.bodyFile), "utf8");
 
   const issues: IssueService = {
-    ensureLabels: async (repo, labels) => {
-      await tmpCwd(async (cwd) => {
-        const stdout = await read(
-          repo,
-          ["label", "list", "-R", repo, "--json", "name", "--limit", LIST_LIMIT],
-          cwd,
-        );
-        const existing = new Set(labelNames(JSON.parse(stdout) as GhLabel[]));
-        for (const label of new Set(labels)) {
-          if (existing.has(label)) continue;
-          await mustWrite(
-            repo,
-            [
-              "label",
-              "create",
-              label,
-              "-R",
-              repo,
-              "--color",
-              LABEL_COLORS[label] ?? "c5def5",
-              "--description",
-              "Raised automatically by VTC",
-            ],
-            cwd,
-          );
-        }
-      });
-    },
+    ensureLabels,
     listAutomatic: (repo) =>
       tmpCwd(async (cwd) => {
         const stdout = await read(
@@ -471,13 +492,16 @@ export const createGhServices = (deps: GhServicesDeps): GhServices => {
       }),
     close: async (repo, number, comment, deleteIfHead) => {
       await withComment(comment, async (cwd, file) => {
-        const pr = await viewPr(repo, number, cwd);
         await mustWrite(
           repo,
           ["pr", "comment", String(number), "-R", repo, "--body-file", file],
           cwd,
         );
-        const deleteBranch = deleteIfHead !== undefined && pr.headSha === deleteIfHead;
+        // The head is read last, right before the close, so a push during the paced comment
+        // write is seen; the remaining window is one read (a ref compare-and-delete is a contract
+        // proposal).
+        const deleteBranch =
+          deleteIfHead !== undefined && (await viewPr(repo, number, cwd)).headSha === deleteIfHead;
         await mustWrite(
           repo,
           ["pr", "close", String(number), "-R", repo, ...(deleteBranch ? ["--delete-branch"] : [])],
