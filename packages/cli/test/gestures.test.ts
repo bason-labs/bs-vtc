@@ -32,11 +32,25 @@ import {
   type LookbackPins,
   type MergeLevelLedgerEntry,
 } from "@vtc/shared";
-import { createLookbackCommand, type LockedCoreOf } from "../src/commands/lookback.js";
+import {
+  createLookbackCommand,
+  editableInPackOf,
+  type EditableInPackOf,
+  type LockedCoreOf,
+} from "../src/commands/lookback.js";
 import { createMergeLevelCommand } from "../src/commands/merge-level.js";
 import { EXIT_NOT_CONFIRMED, type GestureDeps } from "../src/human-gesture.js";
 import { pinsPath, readVersionFile, withPinsLock, writePins } from "../src/lookback-pins.js";
-import { capture, cleanupDirs, initRepo, initVtcRepo, tempHome } from "./helpers.js";
+import { createDiskAssetBundle } from "../src/assets.js";
+import {
+  capture,
+  cleanupDirs,
+  initRepo,
+  initVtcRepo,
+  tempDir,
+  tempHome,
+  writePluginTrees,
+} from "./helpers.js";
 
 afterEach(cleanupDirs);
 
@@ -417,6 +431,7 @@ const run = async (
   answer: boolean | "no-terminal" = true,
   lockedCore: LockedCoreOf = noLockedCore,
   whileDeciding?: () => void,
+  editableInPack: EditableInPackOf = () => true,
 ): Promise<{ code: number; out: string; err: string }> => {
   const { ctx, out, err } = capture(repo, home);
   const deps = (): GestureDeps => {
@@ -431,7 +446,7 @@ const run = async (
           },
         };
   };
-  const code = await createLookbackCommand(deps, lockedCore).run(args, ctx);
+  const code = await createLookbackCommand(deps, lockedCore, editableInPack).run(args, ctx);
   return { code, out: out.join("\n"), err: err.join("\n") };
 };
 
@@ -921,6 +936,98 @@ describe("vtc lookback approve|pin|rollback (AD-21 rule 3)", () => {
     const plain = await run(initRepo(), home, ["rollback", ...T]);
     expect(plain.code).toBe(1);
     expect(plain.err).toMatch(/vtc init/);
+  });
+});
+
+describe("vtc lookback pin|approve warn when the target cannot take a pin (reading 176)", () => {
+  it("warns for an agent that is not editable_in_pack on a host whose runs load the compiled agent", async () => {
+    const repo = initVtcRepo();
+    const home = tempHome();
+    writeVersion(home, sha("a"));
+    const asked: string[] = [];
+    const notInPack: EditableInPackOf = (t) => {
+      asked.push(`${t.role}@${t.host}`);
+      return false;
+    };
+    const r = await run(
+      repo,
+      home,
+      ["pin", ...T, "--version", sha("a")],
+      true,
+      noLockedCore,
+      undefined,
+      notInPack,
+    );
+    // a warning, not a refusal: the human may still pin it
+    expect(r.code, r.err).toBe(0);
+    expect(r.err).toMatch(
+      /vtc lookback: warning: vtc-engineer on claude-code is not editable_in_pack: it takes its editable section from its compiled agent, so this version reaches no run; each dispatch records a prompt_selection incident until the role is switched to editable_in_pack \(spine §5 reading 176\)/,
+    );
+    expect(asked).toEqual(["engineer@claude-code"]);
+    expect(pinsOf(home).projects[engineRepoKey(repo)]?.pins).toHaveLength(1);
+    // the warning comes before the human decides
+    const no = await run(
+      repo,
+      home,
+      ["pin", ...T, "--version", sha("a")],
+      "no-terminal",
+      noLockedCore,
+      undefined,
+      notInPack,
+    );
+    expect(no.err).toMatch(/warning: vtc-engineer on claude-code is not editable_in_pack/);
+  });
+
+  it("reads editable_in_pack from the bundled plugin's manifest (spec_verifier first, reading 166)", () => {
+    const assets = createDiskAssetBundle(
+      writePluginTrees(tempDir(), { editableInPack: ["spec_verifier"] }),
+    );
+    const inPack = editableInPackOf(() => assets);
+    for (const host of ["claude-code", "codex"] as const) {
+      expect(inPack({ role: "spec_verifier", host })).toBe(true);
+      expect(inPack({ role: "engineer", host })).toBe(false);
+    }
+    // no manifest, or one that cannot be read: not in the pack, so the gesture warns
+    expect(
+      editableInPackOf(() => createDiskAssetBundle({}))({ role: "spec_verifier", host: HOST }),
+    ).toBe(false);
+    expect(
+      editableInPackOf(() => {
+        throw new Error("no bundle");
+      })({ role: "spec_verifier", host: HOST }),
+    ).toBe(false);
+  });
+
+  it("does not warn for an editable_in_pack agent, nor for a headless-Codex target, and never on rollback", async () => {
+    const repo = initVtcRepo();
+    const home = tempHome();
+    writeVersion(home, sha("a"));
+    const inPack = await run(repo, home, ["pin", ...T, "--version", sha("a")]);
+    expect(inPack.code, inPack.err).toBe(0);
+    expect(inPack.err).not.toMatch(/warning/);
+    // Codex: a headless run carries the role's prompt itself, so the pin reaches it there
+    writeVersion(home, sha("c"), { host: "codex" });
+    const codex = await run(
+      repo,
+      home,
+      ["pin", "--role", ROLE, "--host", "codex", "--version", sha("c")],
+      true,
+      noLockedCore,
+      undefined,
+      () => false,
+    );
+    expect(codex.code, codex.err).toBe(0);
+    expect(codex.err).not.toMatch(/warning/);
+    expect(codex.out).toMatch(
+      /vtc-engineer is not editable_in_pack, so on codex this version reaches headless Codex runs only/,
+    );
+    let checked = false;
+    const back = await run(repo, home, ["rollback", ...T], true, noLockedCore, undefined, () => {
+      checked = true;
+      return false;
+    });
+    expect(back.err).not.toMatch(/warning/);
+    expect(checked).toBe(false);
   });
 });
 

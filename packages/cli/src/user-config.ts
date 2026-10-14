@@ -2,9 +2,10 @@
  * The user-level config `~/.vtc/config.yaml` (`USER_CONFIG_FILE`, `UserConfigSchema`; D-ak, spine
  * §5 reading 57): settings that belong to the person and the machine, never to a repo:
  * `env_passthrough`, the credential variable names the detached daemon keeps (AD-9: it drops
- * them by default), and `gates.allow_unsandboxed` (D-al, reading 69), the opt-in to run gates
- * without an OS sandbox on a machine that has none. They are read only from the VTC home:
- * `.vtc/project.yaml` is committed, so a repo could otherwise ask for the user's secrets or
+ * them by default), `gates.allow_unsandboxed` (D-al, reading 69), the opt-in to run gates
+ * without an OS sandbox on a machine that has none, the research fetchers' key variables and
+ * the optional search provider (readings 120, 156) and the price table (reading 152). They are
+ * read only from the VTC home: `.vtc/project.yaml` is committed, so a repo could otherwise ask for the user's secrets or
  * switch the gate sandbox off, and `ProjectConfigSchema` rejects both keys.
  * Read with `parsePersisted`; a missing file is `{ version: 1 }`. Names only, never values.
  */
@@ -18,6 +19,7 @@ import {
   UserConfigSchema,
   type FetcherId,
   type ModelPrice,
+  type SearchProvider,
   type UserConfig,
 } from "@vtc/shared";
 
@@ -55,12 +57,28 @@ export const passthroughOf = (read: UserConfigRead): readonly string[] =>
   read.ok ? read.config.env_passthrough : [];
 
 /**
- * The environment variable names `research.api_keys` gives each research fetcher (AD-22 rule 1,
- * spine §5 reading 120); none when the file does not parse. Names only: the daemon keeps them
- * in its environment, and the values are read at call time ({@link researchApiKeyOf}).
+ * `research.search_provider` (H-3, spine §5 reading 156): the optional keyed provider behind the
+ * `search` fetcher (`EngineDeps.researchSearchProvider`). `undefined` by default, and when the
+ * file does not parse: research search then runs on the host's own web search in the Research
+ * Analyst's role session, and the `search` fetcher sends nothing.
  */
-export const researchKeyNamesOf = (read: UserConfigRead): Partial<Record<FetcherId, string>> =>
-  read.ok ? (read.config.research?.api_keys ?? {}) : {};
+export const researchSearchProviderOf = (read: UserConfigRead): SearchProvider | undefined =>
+  read.ok ? read.config.research?.search_provider : undefined;
+
+/**
+ * The environment variable names `research.api_keys` gives each research fetcher (AD-22 rule 1,
+ * spine §5 reading 120); none when the file does not parse. The `search` entry counts only when
+ * a provider is named ({@link researchSearchProviderOf}, H-3): without one no search key is kept
+ * or sent. Names only: the daemon keeps them in its environment, and the values are read at call
+ * time ({@link researchApiKeyOf}).
+ */
+export const researchKeyNamesOf = (read: UserConfigRead): Partial<Record<FetcherId, string>> => {
+  if (!read.ok) return {};
+  const { search, ...others } = read.config.research?.api_keys ?? {};
+  return search === undefined || researchSearchProviderOf(read) === undefined
+    ? others
+    : { ...others, search };
+};
 
 /**
  * `EngineDeps.researchApiKey`: a fetcher's key read from `env` at call time, or `undefined`
