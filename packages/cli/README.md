@@ -39,11 +39,13 @@ records an `unsandboxed_gate` incident. A repo's `.vtc/project.yaml` can set nei
 - **Gates** (D-al, spine §5 reading 69): every gate command runs in `sandbox-exec` (macOS) or
   `bwrap` (Linux), which the Gate Runner detects itself. `vtc doctor` reports which one is in
   use. It fails when there is none and the user has not opted in, and warns when the opt-in is on.
-- **The Claude Code session** (D-an, reading 71): in plugin-only dispatch, code-running roles run
-  inside your Lead session, so the engine runs them there only when that session's sandbox is on.
-  `vtc install claude-code` shows the settings (the sandbox on, no unsandboxed retry,
-  `failIfUnavailable` so Claude Code refuses to start rather than run commands unsandboxed, and the
-  VTC home denies), writes them into the repo's `.claude/settings.local.json` once you confirm at
+- **The Claude Code session** (D-an, readings 71 and 81): in plugin-only dispatch, every role runs
+  inside your Lead session, so the engine runs them there only when that session's settings are
+  on. `vtc install claude-code` shows the settings (the sandbox on, no unsandboxed retry,
+  `failIfUnavailable` so Claude Code refuses to start rather than run commands unsandboxed, the
+  VTC home and credential denies, and the same paths as `permissions.deny` `Read(//…)` /
+  `Edit(//…)` rules, because the sandbox confines shell commands only and Claude's file tools
+  follow permission rules), writes them into the repo's `.claude/settings.local.json` once you confirm at
   the terminal, dropping the local entries that let commands past the sandbox, and makes git ignore
   that file through the repo's `info/exclude`. The sandbox counts as on only when nothing widens
   it in the local file, the repo's committed `.claude/settings.json` or your own Claude
@@ -55,7 +57,8 @@ records an `unsandboxed_gate` incident. A repo's `.vtc/project.yaml` can set nei
   `--setting-sources` are beyond what VTC reads (spine §7).
 - **Human-only tools** (`approve`, `answer`, `change_request`): the cli's engine client refuses
   them. The install token goes into a hello only after you confirm at an interactive terminal
-  (`human-channel.ts`). No cli command calls these tools today.
+  (`human-channel.ts`). No cli command calls these tools today. `vtc resume --run <id> --adopt`
+  (continue a run another clone started, reading 88) goes over the same confirmed connection.
 
 ## Outside a git repository
 
