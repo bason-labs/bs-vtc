@@ -1,22 +1,20 @@
 import {
-  CLAUDE_LEAD_REPLAYABLE_ROLES,
   isServableArtifactPath,
   LOOKBACK_LIMITS,
   LOOKBACK_REPO,
-  parsePersisted,
   ScorecardIndexSchema,
   ScorecardSchema,
   wilsonInterval,
   type ArtifactContent,
   type CanaryVerdict,
-  type ReplayVerdict,
   type Scorecard,
   type ScorecardIndex,
   type ScorecardMetricId,
   type VtcEvent,
 } from "@vtc/shared";
-import type { z } from "zod";
 import { eventData } from "./events";
+import { readJsonArtifact, type Read } from "./read-json";
+import { IMPROVE_NEXT, REPLAY_VERDICTS } from "./replays";
 import type { StatusMeta } from "./states";
 
 /**
@@ -25,26 +23,9 @@ import type { StatusMeta } from "./states";
  * events. Every proportion is shown with n and its 95% Wilson interval, never as a bare
  * percentage; below `LOOKBACK_LIMITS.minScorecardN` a metric is "insufficient data".
  */
-export type Read<T> =
-  { readonly ok: true; readonly value: T } | { readonly ok: false; readonly problem: string };
+export type { Read };
 
-const readJson = <S extends z.ZodType>(schema: S, artifact: ArtifactContent): Read<z.infer<S>> => {
-  if (artifact.encoding !== "utf8") return { ok: false, problem: "not a text file" };
-  let raw: unknown;
-  try {
-    raw = JSON.parse(artifact.content);
-  } catch {
-    return { ok: false, problem: "not JSON" };
-  }
-  const parsed = parsePersisted(schema, raw);
-  if (parsed.success) return { ok: true, value: parsed.data };
-  const issue = parsed.error.issues[0];
-  const path = issue?.path.map(String).join(".") ?? "";
-  return {
-    ok: false,
-    problem: `${path === "" ? "" : `${path}: `}${issue?.message ?? "does not match its contract"}`,
-  };
-};
+const readJson = readJsonArtifact;
 
 export const readScorecardIndex = (artifact: ArtifactContent): Read<ScorecardIndex> =>
   readJson(ScorecardIndexSchema, artifact);
@@ -203,18 +184,11 @@ export const groupScorecards = (index: ScorecardIndex): ScorecardGroup[] => {
 
 // ------------------------------------------------------------------ events
 
-const REPLAY: Readonly<Record<ReplayVerdict, StatusMeta>> = {
-  improve: { label: "improves; a human approves before any canary", tone: "ok" },
-  regress: { label: "regresses", tone: "danger" },
-  no_change: { label: "no change", tone: "neutral" },
-  inconclusive: { label: "inconclusive, not an improvement", tone: "warn" },
-};
-
 const CANARY: Readonly<Record<CanaryVerdict, StatusMeta>> = {
   no_data: { label: "Not enough dispatches yet", tone: "neutral" },
   continue: { label: "Running, no trigger", tone: "accent" },
   rollback: { label: "Rollback", tone: "danger" },
-  promotable: { label: "Promotable; a human approves", tone: "ok" },
+  promotable: { label: "Promotable on this machine; a human approves", tone: "ok" },
 };
 
 export interface CanaryView {
@@ -258,9 +232,7 @@ const item = (event: VtcEvent): Omit<LookbackItem, "seq" | "at" | "type"> | null
     return {
       tone: "neutral",
       title: `Lookback queued for ${target(dispatched.target_role, dispatched.target_mode, dispatched.target_host)}`,
-      detail: noClaudeCanary(dispatched)
-        ? `${failures}. No canary can start for it from a Claude-led run in this version (spine §5 readings 180 and 182); vtc lookback pin still pins a version.`
-        : failures,
+      detail: failures,
       path: null,
     };
   }
@@ -275,11 +247,11 @@ const item = (event: VtcEvent): Omit<LookbackItem, "seq" | "at" | "type"> | null
   }
   const replay = eventData(event, "lookback.replay_finished");
   if (replay !== null) {
-    const v = REPLAY[replay.verdict];
+    const v = REPLAY_VERDICTS[replay.verdict];
     return {
       tone: v.tone,
       title: `Replay of ${replay.proposal}: ${v.label}`,
-      detail: null,
+      detail: replay.verdict === "improve" ? IMPROVE_NEXT : null,
       path: replay.path,
     };
   }
@@ -318,32 +290,16 @@ const item = (event: VtcEvent): Omit<LookbackItem, "seq" | "at" | "type"> | null
   return null;
 };
 
-/**
- * Whether a Lookback target's proposals can never reach a canary in this version (spine §5
- * readings 180 and 182(8)): a Claude Code target's replay runs on a Claude-led run, which replays
- * only `CLAUDE_LEAD_REPLAYABLE_ROLES` (none ship in v1), and a canary starts only from a replay.
- */
-const noClaudeCanary = (t: { target_role: string; target_host: string }): boolean =>
-  t.target_host === "claude-code" && !CLAUDE_LEAD_REPLAYABLE_ROLES.includes(t.target_role);
-
-/**
- * The run's canaries (latest state per target), its other lookback events, newest first, and the
- * targets it queued Lookback for whose proposals no canary can start from in this version.
- */
+/** The run's canaries (latest state per target) and its other lookback events, newest first. */
 export const lookbackActivity = (
   events: readonly VtcEvent[],
 ): {
   readonly canaries: readonly CanaryView[];
   readonly items: readonly LookbackItem[];
-  readonly noCanary: readonly string[];
 } => {
   const canaries = new Map<string, CanaryView>();
   const items: LookbackItem[] = [];
-  const noCanary = new Set<string>();
   for (const event of events) {
-    const queued = eventData(event, "lookback.dispatched");
-    if (queued !== null && noClaudeCanary(queued))
-      noCanary.add(target(queued.target_role, queued.target_mode, queued.target_host));
     const canary = eventData(event, "lookback.canary_evaluated");
     if (canary !== null) {
       const t = target(canary.role, canary.mode, canary.host);
@@ -362,9 +318,5 @@ export const lookbackActivity = (
     const made = item(event);
     if (made !== null) items.push({ seq: event.seq, at: event.ts, type: event.type, ...made });
   }
-  return {
-    canaries: [...canaries.values()],
-    items: items.sort((a, b) => b.seq - a.seq),
-    noCanary: [...noCanary],
-  };
+  return { canaries: [...canaries.values()], items: items.sort((a, b) => b.seq - a.seq) };
 };

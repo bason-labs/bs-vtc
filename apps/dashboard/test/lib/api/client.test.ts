@@ -24,6 +24,7 @@ describe("createEngineClient against the golden run", () => {
     expect((await api.graph("golden-1", "project")).nodes).toHaveLength(12);
     expect((await api.graph("golden-1", "task", "T-2")).scope).toBe("task");
     expect((await api.events("golden-1", 0)).events.length).toBeGreaterThan(0);
+    expect((await api.automation()).upstream_repo).toBe("bason-labs/bs-vtc");
   });
 
   it("reads the client spend report (§14) and validates it", async () => {

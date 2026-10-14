@@ -236,6 +236,29 @@ body {
   }
 }
 
+/*
+ * Evidence mode (?evidence=1|upstream, AD-27 rule 6): a recording that does not depend on frame
+ * timing (no animation, transition or caret), and free text (data-vtc-redact) painted out as solid
+ * blocks, the same paint the evidence recorder injects.
+ */
+:root[data-vtc-evidence] *,
+:root[data-vtc-evidence] *::before,
+:root[data-vtc-evidence] *::after {
+  animation: none !important;
+  transition: none !important;
+  caret-color: transparent !important;
+}
+
+:root[data-vtc-evidence] [data-vtc-redact],
+:root[data-vtc-evidence] [data-vtc-redact] * {
+  color: transparent !important;
+  text-shadow: none !important;
+}
+
+:root[data-vtc-evidence] [data-vtc-redact] {
+  background: #1f1f1f !important;
+}
+
 /* Live status dot. */
 @keyframes pulseDot {
   0%,

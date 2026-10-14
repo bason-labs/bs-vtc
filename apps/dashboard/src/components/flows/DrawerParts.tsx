@@ -2,6 +2,7 @@ import type { ReactNode } from "react";
 import type { Finding, Severity } from "@vtc/shared";
 import { Badge } from "@/components/ui";
 import type { Tone } from "@/lib/states";
+import { REDACT } from "@/lib/redact";
 
 export function Stat({ label, children }: { label: string; children: ReactNode }) {
   return (
@@ -59,7 +60,11 @@ export function FindingItem({ finding }: { finding: Finding }) {
         <Badge tone="brand">route: {finding.route.replace(/_/g, " ")}</Badge>
       </div>
       <p className="text-sm font-medium">{finding.title}</p>
-      {finding.message === undefined ? null : <p className="text-muted-fg">{finding.message}</p>}
+      {finding.message === undefined ? null : (
+        <p className="text-muted-fg" {...REDACT}>
+          {finding.message}
+        </p>
+      )}
       <p className="text-muted-fg">
         {finding.source_name} · {finding.category} · {finding.rule_id} · {rounds}
       </p>

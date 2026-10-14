@@ -16,6 +16,7 @@ import { Maximize, Minus, Plus } from "lucide-react";
 import { useCallback, useEffect, useMemo, useRef, useState, type RefObject } from "react";
 import { focusBox, followView } from "@/lib/flows/follow";
 import { buildFlow, type FlowNodeData } from "@/lib/flows/graph";
+import { useEvidenceMode } from "@/lib/useEvidenceMode";
 import { IconButton } from "@/components/ui";
 import { FlowEdge, LoopEdge, type FlowEdgeData } from "./Edges";
 import { StepNode, type StepFlowNode } from "./StepNode";
@@ -66,6 +67,8 @@ function FollowRun({
   const height = useStore((st) => st.height);
   const nodeCount = useStore((st) => st.nodes.length);
   const first = useRef(true);
+  // Evidence mode: no easing, so a recording does not depend on frame timing.
+  const still = useEvidenceMode() !== "off";
   useEffect(() => {
     if (!following.current) return;
     const boxes = rf.getNodes().map((n) => ({
@@ -80,10 +83,10 @@ function FollowRun({
     if (!view) return;
     void rf.setCenter(view.center.x, view.center.y, {
       zoom: view.zoom,
-      duration: first.current ? 0 : 400,
+      duration: first.current || still ? 0 : 400,
     });
     first.current = false;
-  }, [rf, following, nodeCount, focusId, fitTick, width, height]);
+  }, [rf, following, nodeCount, focusId, fitTick, width, height, still]);
   return null;
 }
 

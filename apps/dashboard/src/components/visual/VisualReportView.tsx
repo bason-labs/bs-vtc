@@ -15,6 +15,7 @@ import {
 import { Link } from "@/components/app/Link";
 import { Badge, Card, CardDescription, CardHeader, CardTitle, StatusPill } from "@/components/ui";
 import { VisualNotes } from "./VisualNotes";
+import { REDACT } from "@/lib/redact";
 
 const th = "px-3 py-2 font-medium";
 const td = "border-t border-border px-3 py-2 align-top";
@@ -80,7 +81,9 @@ function Matrix({ run, report }: { run: string; report: VisualReport }) {
                         </ul>
                       )}
                       {cell.detail === null ? null : (
-                        <p className="mt-1 text-muted-fg">{cell.detail}</p>
+                        <p className="mt-1 text-muted-fg" {...REDACT}>
+                          {cell.detail}
+                        </p>
                       )}
                       <p className="mt-1 flex flex-wrap gap-x-2">
                         <ImageLink run={run} path={cell.screenshot} label="screenshot" />

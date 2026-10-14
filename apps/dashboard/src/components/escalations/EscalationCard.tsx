@@ -5,6 +5,7 @@ import { hrefs } from "@/lib/router";
 import { formatLocalTime } from "@/lib/time";
 import { Link } from "@/components/app/Link";
 import { Badge, Card } from "@/components/ui";
+import { REDACT } from "@/lib/redact";
 
 /** One escalation (§6.5), read-only: the human answers in the Lead chat. */
 export function EscalationCard({ escalation, now }: { escalation: Escalation; now: number }) {
@@ -31,7 +32,11 @@ export function EscalationCard({ escalation, now }: { escalation: Escalation; no
       <h2 id={`esc-${m.id}`} className="mt-2 font-display text-base font-semibold">
         {m.question}
       </h2>
-      {m.detail === null ? null : <p className="mt-1 text-sm text-muted-fg">{m.detail}</p>}
+      {m.detail === null ? null : (
+        <p className="mt-1 text-sm text-muted-fg" {...REDACT}>
+          {m.detail}
+        </p>
+      )}
 
       <h3 className="mt-3 text-xs font-semibold tracking-wide text-muted-fg uppercase">Options</h3>
       <ul className="mt-1 space-y-1.5">

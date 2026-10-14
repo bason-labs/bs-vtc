@@ -13,6 +13,7 @@ import { useRunEvents } from "@/lib/useRunEvents";
 import { useEngine } from "@/components/app/EngineProvider";
 import { Link } from "@/components/app/Link";
 import { Card, CardDescription, CardHeader, CardTitle, StatusPill } from "@/components/ui";
+import { REDACT } from "@/lib/redact";
 
 const plural = (n: number, one: string, many = `${one}s`): string =>
   `${String(n)} ${n === 1 ? one : many}`;
@@ -97,7 +98,7 @@ export function RunActivity({ run }: { run: string }) {
                     {formatLocalTime(r.startedAt, now)}
                   </time>
                 </div>
-                <p className="mt-0.5 text-xs text-muted-fg">
+                <p className="mt-0.5 text-xs text-muted-fg" {...REDACT}>
                   <span className="font-mono">{r.actionId}</span> · {r.detail}
                 </p>
               </li>

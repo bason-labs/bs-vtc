@@ -6,7 +6,8 @@ import { NOTICE_EVENT_TYPES } from "../notices";
  * (graph states, task detail, usage), so the dashboard never replays events itself: an event
  * only marks the read routes it can change as stale, and the views re-read them.
  *
- * A run-scoped topic is `run:<run>:<name>`; `runs` and `usage` are global.
+ * A run-scoped topic is `run:<run>:<name>`; `runs`, `usage` and `automation` (the repo's
+ * automatic issues and PRs, `GET /api/automation`) are global.
  */
 export type RunTopicName =
   | "status"
@@ -80,6 +81,9 @@ const entityTopics = (event: VtcEvent): string[] => {
       return ["research"];
     case "lookback":
       return ["lookback"];
+    case "upstream":
+    case "automation":
+      return ["automation"];
     case "role":
     case "finding":
       return [...task, "graph"];
@@ -105,7 +109,7 @@ export const topicsForEvent = (event: VtcEvent): string[] => {
     : topics;
 };
 
-const GLOBAL = new Set(["runs", "usage"]);
+const GLOBAL = new Set(["runs", "usage", "automation"]);
 
 /** Full topic keys for an event: run-scoped names are prefixed with the run. */
 export const topicKeysForEvent = (event: VtcEvent): string[] =>

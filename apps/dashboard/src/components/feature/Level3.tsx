@@ -6,6 +6,7 @@ import { formatLocalTime } from "@/lib/time";
 import { useNow } from "@/lib/useNow";
 import { cn } from "@/lib/cn";
 import { Badge, Card, CardDescription, CardHeader, CardTitle, StatusPill } from "@/components/ui";
+import { REDACT } from "@/lib/redact";
 
 function Evidence({ items }: { items: readonly string[] }) {
   if (items.length === 0) return null;
@@ -144,7 +145,9 @@ export function Level3Card({
               ))}
             </ul>
             {preflight.detail === null ? null : (
-              <p className="text-xs text-muted-fg">{preflight.detail}</p>
+              <p className="text-xs text-muted-fg" {...REDACT}>
+                {preflight.detail}
+              </p>
             )}
             {preflight.policy.length === 0 ? null : (
               <p className="text-xs text-muted-fg">Base branch: {preflight.policy.join(" · ")}</p>
@@ -166,7 +169,9 @@ export function Level3Card({
                   </time>
                 </p>
                 {t.detail === null ? null : (
-                  <p className="mt-0.5 text-xs break-words text-muted-fg">{t.detail}</p>
+                  <p className="mt-0.5 text-xs break-words text-muted-fg" {...REDACT}>
+                    {t.detail}
+                  </p>
                 )}
               </li>
             ))}
