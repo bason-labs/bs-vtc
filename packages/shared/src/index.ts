@@ -182,5 +182,12 @@ export * from "./json-schema.js";
  * `engineerProfileLockedSection`. Moved here: `editableSectionErrors` and
  * `RESERVED_EDITABLE_HEADINGS` (from `@vtc/compiler`) and `lookbackTiebreakKey` (the lookback
  * module's `tiebreakKey`), with the tiebreak store's writer rules on `LOOKBACK_HOME.tiebreaksFile`.
+ *
+ * 4.11.0 (MINOR): the closing-round integration (spine §5 readings 177–181). Replay trials in the
+ * log: `role.dispatched.purpose` (`RoleDispatchPurpose`) and `role.dispatched.replay`
+ * (`ReplayTrialRef`). Replay isolation: `SandboxProfileRequest.readDeny`,
+ * `SandboxProfile.enforced.readDeny` and `ReplayResult.isolation` (`ReplayIsolation`). The chosen
+ * G2 direction in post-G2 packs: `TaskPack.design_direction`; the key-screen design contracts'
+ * path (`DESIGN_CONTRACTS_DIR`, `designContractPath`).
  */
-export const CONTRACTS_VERSION = "4.10.0";
+export const CONTRACTS_VERSION = "4.11.0";

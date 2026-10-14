@@ -158,6 +158,15 @@ export interface SandboxProfileRequest {
    * cannot keep `registries` away from the engine's localhost API refuses it (Codex does).
    */
   readonly network: "none" | "registries";
+  /**
+   * Absolute paths the role may not read at all (spine §5 reading 178): for a `lookback_replay`
+   * trial the engine names the user's repo root and its git directory, so a trial in a checkout
+   * outside the repo cannot read the current tree or later refs (AD-21 rule 6). Claude maps each
+   * to a `permissions.deny` `Read(//<path>/**)` rule and `sandbox.filesystem.denyRead`; an
+   * adapter that cannot enforce it says so in `SandboxProfile.enforced.readDeny`. It never
+   * narrows `cwd`. Absent or empty: none. New in 4.11.0.
+   */
+  readonly readDeny?: readonly string[];
 }
 
 export interface SandboxProfile {
@@ -175,6 +184,11 @@ export interface SandboxProfile {
      * anything the token unlocks: no network at all (D-ac, spine §5 reading 49).
      */
     readonly secretsUnreadable?: boolean;
+    /**
+     * The host itself enforces every `SandboxProfileRequest.readDeny` path (reading 178). Absent
+     * = false: a replay trial then runs `paths_only` (`ReplayResult.isolation`). New in 4.11.0.
+     */
+    readonly readDeny?: boolean;
   };
   /** Host-specific settings (e.g. Claude `sandbox.filesystem.denyWrite`, Codex `sandbox_mode`). */
   readonly settings: Readonly<Record<string, unknown>>;
