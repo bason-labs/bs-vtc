@@ -259,6 +259,8 @@ jobs:
             echo "Verify its provenance: gh attestation verify <file> -R $GH_REPO"
             echo
             echo "The macOS binaries are not signed or notarized yet (pending the owner's Apple Developer ID)."
+            echo
+            echo 'Upgrading from an earlier vtc: in each repo where you use VTC with Claude Code, re-run `vtc install --host claude-code`, so its settings carry the session sandbox rules of this release.'
           } > "$RUNNER_TEMP/notes.md"
           gh release create "$TAG" --draft --verify-tag --title "vtc $TAG" --notes-file "$RUNNER_TEMP/notes.md" release/*
           gh release edit "$TAG" --draft=false

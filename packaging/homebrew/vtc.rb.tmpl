@@ -32,6 +32,15 @@ class Vtc < Formula
     bin.install "vtc"
   end
 
+  # D-bo: the Claude Code settings vtc install writes change between releases
+  def caveats
+    <<~EOS
+      Upgrading from an earlier vtc? In each repo where you use VTC with Claude Code, re-run
+        vtc install --host claude-code
+      so its settings carry this release's session sandbox rules.
+    EOS
+  end
+
   test do
     ENV["VTC_HOME"] = (testpath/".vtc").to_s
     assert_match "vtc #{version} ", shell_output("#{bin}/vtc --version")

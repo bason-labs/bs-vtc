@@ -43,6 +43,7 @@ import { dirname, join } from "node:path";
 import { createHash, randomBytes } from "node:crypto";
 import { core, lookback } from "@vtc/engine";
 import {
+  agentNameFor,
   canaryVerdict,
   eventLogPath,
   isEventOfType,
@@ -74,6 +75,38 @@ export interface PinTarget {
   readonly mode?: string | undefined;
   readonly host: HostId;
 }
+
+/**
+ * Whether a host's headless run loads the compiled plugin agent itself: the engine's
+ * `HEADLESS_LOADS_AGENT` (`core/dispatch.ts`, spine §5 reading 145), which `@vtc/engine` does not
+ * export yet (contract proposal). `codex exec` has no agent flag, so the engine carries the role's
+ * prompt, and a pin reaches every agent there.
+ */
+export const HEADLESS_LOADS_AGENT: Readonly<Record<HostId, boolean>> = {
+  "claude-code": true,
+  codex: false,
+};
+
+/**
+ * What a pin or a canary of the target can reach (spine §5 reading 176): an `editable_in_pack`
+ * agent on either host, else only headless runs on a host whose runs do not load the compiled
+ * agent (Codex). A target that can take it nowhere gets a `warning` (the gesture still goes
+ * ahead: the human may pin ahead of the role's switch); a Codex-only reach gets a `note`.
+ */
+export const pinReach = (
+  target: PinTarget,
+  editableInPack: boolean,
+): { readonly warning?: string; readonly note?: string } => {
+  if (editableInPack) return {};
+  const agent = agentNameFor(target.role, target.mode);
+  return HEADLESS_LOADS_AGENT[target.host]
+    ? {
+        warning: `${agent} on ${target.host} is not editable_in_pack: it takes its editable section from its compiled agent, so this version reaches no run; each dispatch records a prompt_selection incident until the role is switched to editable_in_pack (spine §5 reading 176)`,
+      }
+    : {
+        note: `${agent} is not editable_in_pack, so on ${target.host} this version reaches headless Codex runs only (the engine carries the role's prompt there); a dispatch that loads the compiled agent records a prompt_selection incident instead`,
+      };
+};
 
 type Project = LookbackPins["projects"][string];
 type HistoryEntry = LookbackPins["history"][number];

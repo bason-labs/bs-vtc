@@ -16,9 +16,15 @@
  * plugin is reinstalled). A canary starts only from a replay result whose bytes match the hash its
  * `lookback.replay_finished` event recorded, when it recorded one (spine §5 reading 128), and is
  * promoted only when its arms, counted from the repo's event logs, say `promotable`.
+ *
+ * `pin` and `approve` warn when the target cannot take a pin (spine §5 reading 176): its agent is
+ * not `editable_in_pack` in the bundled plugin's manifest and its host's runs load the compiled
+ * agent (Claude Code), so the version would reach no run and each dispatch records a
+ * `prompt_selection` incident. A Codex target that is not `editable_in_pack` gets a note: the pin
+ * reaches its headless runs only. The gesture still goes ahead after the human's yes.
  */
 import { join } from "node:path";
-import { git } from "@vtc/engine";
+import { core, git } from "@vtc/engine";
 import {
   agentNameFor,
   engineRepoKey,
@@ -27,6 +33,7 @@ import {
   RoleIdSchema,
   rolePromptAssetPath,
   SlugSchema,
+  type AssetBundle,
 } from "@vtc/shared";
 import {
   defaultGestureDeps,
@@ -38,6 +45,7 @@ import {
   bytesSha256,
   checkLockedCore,
   findPromptVersion,
+  pinReach,
   planGesture,
   readCanary,
   readPinsFile,
@@ -78,9 +86,34 @@ export const installedLockedCore: LockedCoreOf = (target) => {
   return bytes === undefined ? undefined : new TextDecoder().decode(bytes);
 };
 
+/**
+ * Whether this vtc's bundled plugin marks the target's agent `editable_in_pack` (its manifest,
+ * `core.pluginManifest`), so the engine renders a pinned editable section in the task pack. No
+ * manifest, no entry or a broken manifest reads as `false`: the gesture then warns.
+ */
+export type EditableInPackOf = (target: PinTarget) => boolean;
+
+/** {@link EditableInPackOf} over an asset bundle's plugin manifests. */
+export const editableInPackOf =
+  (assets: () => AssetBundle): EditableInPackOf =>
+  (target) => {
+    try {
+      const agent = agentNameFor(target.role, target.mode);
+      return (
+        core.pluginManifest(assets(), target.host)?.agents.find((a) => a.name === agent)
+          ?.editable_in_pack === true
+      );
+    } catch {
+      return false;
+    }
+  };
+
+export const installedEditableInPack: EditableInPackOf = editableInPackOf(() => runtime().assets);
+
 export const createLookbackCommand = (
   deps: () => GestureDeps = defaultGestureDeps,
   lockedCore: LockedCoreOf = installedLockedCore,
+  editableInPack: EditableInPackOf = installedEditableInPack,
 ): CommandSpec => ({
   name: "lookback",
   summary:
@@ -139,6 +172,10 @@ export const createLookbackCommand = (
           return EXIT.failed;
         }
         if (checked.note !== undefined) ctx.io.out(checked.note);
+        // reading 176: say before the human decides when the pin cannot reach a run
+        const reach = pinReach(target, editableInPack(target));
+        if (reach.warning !== undefined) ctx.io.err(`vtc lookback: warning: ${reach.warning}`);
+        if (reach.note !== undefined) ctx.io.out(reach.note);
       }
       const reason = (values.reason ?? "").trim() || `vtc lookback ${gesture} at the terminal`;
       const plan = (now: Date) => {

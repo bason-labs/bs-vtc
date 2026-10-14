@@ -71,12 +71,18 @@ main() {
   chmod 0755 "${tmp}/x/vtc"
 
   mkdir -p "$install_dir"
+  upgrade=0
+  if [ -e "${install_dir}/vtc" ]; then upgrade=1; fi
   # an unpredictable staging file, created by mktemp (never an existing path or a link)
   staged="$(mktemp "${install_dir}/.vtc.install.XXXXXX")" || fail "cannot write to ${install_dir}"
   cp "${tmp}/x/vtc" "$staged" || { rm -f "$staged"; fail "cannot write to ${install_dir}"; }
   chmod 0755 "$staged" || { rm -f "$staged"; fail "cannot write to ${install_dir}"; }
   mv -f "$staged" "${install_dir}/vtc" || { rm -f "$staged"; fail "cannot install into ${install_dir}"; }
   say "Installed ${install_dir}/vtc"
+  # D-bo: the Claude Code settings vtc install writes change between releases
+  if [ "$upgrade" = 1 ]; then
+    say "Upgraded: in each repo where you use VTC with Claude Code, re-run vtc install --host claude-code, so its settings carry this release's session sandbox rules"
+  fi
 
   case ":${PATH}:" in
     *":${install_dir}:"*) ;;

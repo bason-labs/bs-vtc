@@ -44,6 +44,7 @@ import {
   pricesOf,
   researchApiKeyOf,
   researchKeyNamesOf,
+  researchSearchProviderOf,
 } from "../src/user-config.js";
 import {
   buildEngineParts,
@@ -299,7 +300,7 @@ describe("buildEngineParts and composeEngineDeps (AD-19)", () => {
     expect(researchApiKeyOf(readUserConfig(home))).toBeUndefined();
     writeFileSync(
       join(home, USER_CONFIG_FILE),
-      "version: 1\nresearch:\n  api_keys:\n    search: SEARCH_KEY\n    github: GH_READ\n",
+      "version: 1\nresearch:\n  search_provider: tavily\n  api_keys:\n    search: SEARCH_KEY\n    github: GH_READ\n",
     );
     const read = readUserConfig(home);
     expect(researchKeyNamesOf(read)).toEqual({ search: "SEARCH_KEY", github: "GH_READ" });
@@ -311,6 +312,51 @@ describe("buildEngineParts and composeEngineDeps (AD-19)", () => {
     expect(
       daemonEnv({ SEARCH_KEY: "k-1", OTHER: "x" }, home, Object.values(researchKeyNamesOf(read))),
     ).toEqual({ SEARCH_KEY: "k-1", VTC_HOME: home });
+  });
+
+  it("uses the search key only when a search provider is named (H-3, reading 156)", async () => {
+    const home = tempHome();
+    const parts = (h: string) =>
+      buildEngineParts({
+        repoRoot: "/r",
+        vtcHome: h,
+        installToken: TOKEN,
+        assets: createDiskAssetBundle({}),
+        pullRequests: fakePullRequests(),
+        adapterFactories: {},
+        http: null,
+      });
+    // no provider (the default): research search runs on the host's own web search
+    expect(researchSearchProviderOf(readUserConfig(home))).toBeUndefined();
+    expect(composeEngineDeps(await parts(home))).not.toHaveProperty("researchSearchProvider");
+    writeFileSync(
+      join(home, USER_CONFIG_FILE),
+      "version: 1\nresearch:\n  api_keys:\n    search: SEARCH_KEY\n    github: GH_READ\n",
+    );
+    const keyed = readUserConfig(home);
+    // a search key with no provider is never kept or sent
+    expect(researchKeyNamesOf(keyed)).toEqual({ github: "GH_READ" });
+    const key = researchApiKeyOf(keyed, { SEARCH_KEY: "k-1", GH_READ: "g-1" });
+    expect(key?.("search")).toBeUndefined();
+    expect(key?.("github")).toBe("g-1");
+    expect(
+      daemonEnv({ SEARCH_KEY: "k-1" }, home, Object.values(researchKeyNamesOf(keyed))),
+    ).toEqual({ VTC_HOME: home });
+    // a named provider: EngineDeps.researchSearchProvider, and the search key with it
+    const named = tempHome();
+    writeFileSync(
+      join(named, USER_CONFIG_FILE),
+      "version: 1\nresearch:\n  search_provider: exa\n  api_keys:\n    search: SEARCH_KEY\n",
+    );
+    expect(researchSearchProviderOf(readUserConfig(named))).toBe("exa");
+    expect(researchKeyNamesOf(readUserConfig(named))).toEqual({ search: "SEARCH_KEY" });
+    expect(composeEngineDeps(await parts(named)).researchSearchProvider).toBe("exa");
+    // a file that does not parse names no provider
+    writeFileSync(
+      join(named, USER_CONFIG_FILE),
+      "version: 1\nresearch:\n  search_provider: bing\n",
+    );
+    expect(researchSearchProviderOf(readUserConfig(named))).toBeUndefined();
   });
 
   it("reads the price table the engine budget-checks unpriced hosts with (§11, reading 152)", () => {

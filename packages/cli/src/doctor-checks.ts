@@ -9,6 +9,7 @@
  */
 import { gates } from "@vtc/engine";
 import {
+  API_KEY_BILLING_WARNING,
   effectiveMergeLevel,
   GATE_SANDBOX,
   level3Preflight,
@@ -24,7 +25,11 @@ import type { Exec } from "./process.js";
 import type { SessionSandboxReport } from "./session-sandbox.js";
 import { allowUnsandboxedOf, type UserConfigRead } from "./user-config.js";
 
-export type CheckStatus = "ok" | "warn" | "fail";
+/**
+ * `info` reports something the user should know that needs no action and fails nothing (an
+ * accepted residual, an optional tool that is absent).
+ */
+export type CheckStatus = "ok" | "info" | "warn" | "fail";
 
 export interface DoctorCheck {
   readonly name: string;
@@ -32,8 +37,11 @@ export interface DoctorCheck {
   readonly detail: string;
 }
 
-/** Oldest Node that runs VTC in development (`.nvmrc`, AD-2 rule 1). */
-export const MIN_NODE = [22, 13] as const;
+/**
+ * Oldest Node that runs VTC in development (`.nvmrc`, AD-2 rule 1): 22.14, for the visual
+ * runner's `--disable-sigusr1` (D-bk, spine §5 reading 165).
+ */
+export const MIN_NODE = [22, 14] as const;
 
 export interface DoctorEnv {
   readonly exec: Exec;
@@ -141,9 +149,10 @@ export const checkGh = async (exec: Exec): Promise<DoctorCheck> => {
 
 /**
  * Claude Code: on PATH, and logged in per `claude auth status --json` (`loggedIn`). An
- * `apiKeyHelper` setup (named by its `authMethod` or `apiKeySource`) is a warning (D-ab; spine §5
- * readings 108 and 130): headless role runs load the user's settings, so the helper would bill
- * them to the API key rather than the subscription login VTC is built for. Nothing but that
+ * `apiKeyHelper` setup (named by its `authMethod` or `apiKeySource`) warns with
+ * `API_KEY_BILLING_WARNING` (D-ab, D-bq; spine §5 readings 108, 130 and 171): headless role runs
+ * load the user's settings, so the helper bills them to the API key rather than the subscription
+ * login VTC is built for. Role runs are allowed; doctor does not fail on it. Nothing but that
  * status command is consulted (AD-9).
  */
 export const checkClaude = async (exec: Exec): Promise<DoctorCheck> => {
@@ -172,7 +181,7 @@ export const checkClaude = async (exec: Exec): Promise<DoctorCheck> => {
     return {
       name: "claude-code",
       status: "warn",
-      detail: `${version}: an apiKeyHelper setup is out of scope for v1 (headless role runs load your user settings, so the helper would bill them to the API key): log in with your Claude subscription (run claude, then /login)`,
+      detail: `${version}: ${API_KEY_BILLING_WARNING} (an apiKeyHelper in your user settings, which headless role runs load). Role runs still run; to bill your subscription instead, remove apiKeyHelper and log in (run claude, then /login)`,
     };
   return loggedIn
     ? withClaudeMinimum(
@@ -450,6 +459,21 @@ export const checkHostAuth = (statuses: readonly HostAuthStatus[]): DoctorCheck 
     name: "host auth",
     status: anyIn ? "ok" : "warn",
     detail: `${parts.join("; ")}${anyIn ? "" : ": an unattended run parks with auth until you log in"}`,
+  };
+};
+
+/**
+ * API-key billing (D-bq, spine §5 reading 171): each host whose `authStatus()` reports
+ * `billing: "api_key"` warns with `API_KEY_BILLING_WARNING`, the same text Flow Studio shows. Role
+ * runs on it are not refused, so this never fails doctor. `null` when no host bills a key.
+ */
+export const checkHostBilling = (statuses: readonly HostAuthStatus[]): DoctorCheck | null => {
+  const keyed = statuses.filter((s) => s.billing === "api_key").map((s) => s.host);
+  if (keyed.length === 0) return null;
+  return {
+    name: "billing",
+    status: "warn",
+    detail: `${keyed.join(", ")}: ${API_KEY_BILLING_WARNING}. Role runs still run; to bill your subscription instead, log ${keyed.join(" and ")} in with it`,
   };
 };
 
