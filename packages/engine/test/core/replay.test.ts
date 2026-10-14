@@ -671,7 +671,8 @@ describe("RETRO runs Lookback replays (AD-21 rule 6, reading 176)", () => {
     for (const request of fake.graded) {
       expect(request.protected).toContainEqual({ path: tests, sha256: sha256Hex(atBase) });
       expect(request.include_hidden).toBe(true);
-      expect(request.hidden_tasks).toEqual(["T-1"]);
+      // the recorded dispatch's run, not the RETRO run's task (D-ck, reading 205)
+      expect(request.hidden_tasks).toEqual(["r-old:T-1"]);
     }
     expect(fake.finished[0]?.outcomes.map((o) => o.passed)).toEqual([true, false]);
     await h.release();

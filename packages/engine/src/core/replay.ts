@@ -66,7 +66,7 @@ import {
   RoleIdSchema,
   SlugSchema,
   planDispatch,
-  TaskIdSchema,
+  HiddenTestsEntrySchema,
   type GateRunRequestInput,
   type HostId,
   type ReplayTrialRef,
@@ -745,10 +745,15 @@ export const trialProtectedFiles = async (
   return [...out.entries()].map(([path, sum]) => ({ path, sha256: sum }));
 };
 
-/** The recorded task whose hidden acceptance tests a trial's grade copies in (`<run>:<task>`). */
-const hiddenTaskOf = (trial: LookbackReplayTrial): string | undefined => {
-  const task = trial.task.split(":").at(-1);
-  return TaskIdSchema.safeParse(task).success ? task : undefined;
+/**
+ * The recorded task whose hidden acceptance tests a trial's grade copies in: the trial's
+ * `<run>:<task>` (the `ReplayTrialRef.task` / `per_task` key), naming the recorded dispatch's run,
+ * never the RETRO run's task of the same id (D-ck, spine §5 reading 205; `hiddenTestsRef`). A key
+ * without a run names no hidden tests.
+ */
+export const hiddenTaskOf = (trial: Pick<LookbackReplayTrial, "task">): string | undefined => {
+  if (!trial.task.includes(":")) return undefined;
+  return HiddenTestsEntrySchema.safeParse(trial.task).success ? trial.task : undefined;
 };
 
 /** What a grade came to: a measurement, or nothing measured with the reason. */

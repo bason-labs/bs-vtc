@@ -14,6 +14,7 @@ import {
   gateExpectationMet,
   GateRunRequestSchema,
   HIDDEN_TESTS,
+  hiddenTestsDir,
   parsePersisted,
   redactSecrets,
   TestInventorySchema,
@@ -359,10 +360,13 @@ const plainEntry = (path: string): boolean => {
 };
 
 /**
- * Moves QA's hidden tests out of the repo, to `~/.vtc/hidden/<repo-key>/<task>/` (§7.3). QA
- * writes the staging dir, so symlinks there are skipped: a copy never reads a file outside it.
+ * Moves QA's hidden tests out of the repo, to `~/.vtc/hidden/<repo-key>/<run>/<task>/` (§7.3;
+ * keyed by run since contracts 5.0.0, D-ck, spine §5 reading 205: task ids repeat across runs, so
+ * a later run's task or a replay trial never gets another run's tests). The path is built only
+ * with `hiddenTestsDir`, as the Gate Runner reads it. QA writes the staging dir, so symlinks there
+ * are skipped: a copy never reads a file outside it.
  */
-const moveHiddenTests = (k: Kernel, taskId: string): void => {
+const moveHiddenTests = (k: Kernel, runId: string, taskId: string): void => {
   const rel = `${HIDDEN_TESTS.stagingDir}/${taskId}`;
   try {
     assertNoSymlinks(k.deps.repoRoot, HIDDEN_TESTS.stagingDir);
@@ -374,7 +378,7 @@ const moveHiddenTests = (k: Kernel, taskId: string): void => {
     rmSync(staged, { recursive: true, force: true });
     return;
   }
-  const target = join(k.deps.vtcHome, HIDDEN_TESTS.homeDir, engineRepoKey(k.deps.repoRoot), taskId);
+  const target = join(k.deps.vtcHome, hiddenTestsDir(engineRepoKey(k.deps.repoRoot), runId, taskId));
   mkdirSync(target, { recursive: true });
   cpSync(staged, target, { recursive: true, filter: (source) => plainEntry(source) });
   rmSync(staged, { recursive: true, force: true });
@@ -425,7 +429,7 @@ export const startBaseCheck = (
           report.results.flatMap((r) => r.evidence).slice(0, 5),
         );
       } else if (met) {
-        moveHiddenTests(k, taskId);
+        moveHiddenTests(k, h.state.id, taskId);
         setTaskStatus(k, h, taskId, "tests_authored");
       } else {
         const misses = h.state.gateReports.filter(
