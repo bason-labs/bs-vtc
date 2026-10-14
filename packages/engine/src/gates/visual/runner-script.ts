@@ -16,7 +16,17 @@
  * key file first, before it imports anything or starts the app, and writes its result once, at
  * the end, as an envelope with an HMAC under that key, listing the SHA-256 of every image it
  * wrote (`protocol.ts`). Whatever the app writes into the temp directory carries no valid MAC
- * and is not used. Playwright and pixelmatch are imported before the app starts.
+ * and is not used. Playwright and pixelmatch are imported before the app starts. The runner
+ * itself is out of the app's reach: Node runs with `--disable-sigusr1` (the script refuses to
+ * start without it), so a signal cannot open its inspector, and the app runs detached, in a
+ * session and process group of its own (`runner.ts` has the rest).
+ *
+ * The page under review owns its main world: it could replace `window.axe`, `getComputedStyle`
+ * or `getBoundingClientRect` and make every check report what it likes. So axe, the computed
+ * styles, the region lookup and the font wait run in an isolated world of the runner's own (CDP
+ * `Page.createIsolatedWorld`): the same DOM, none of the page's globals or prototypes. The
+ * prototype origin is served only to the reference context; the implementation's context gets
+ * it aborted, so the implementation cannot embed the approved prototype and pass as it.
  *
  * The script writes only into its output directory and the result file; the Gate Runner treats
  * the result as untrusted (`protocol.ts`). It never throws past `main`: a failure of the whole
@@ -29,6 +39,11 @@ import { extname, join, resolve, sep } from "node:path";
 import { pathToFileURL } from "node:url";
 import { spawn } from "node:child_process";
 
+// Without --disable-sigusr1 a signal from the app server would open this process's inspector.
+if (!process.execArgv.includes("--disable-sigusr1")) {
+  process.stderr.write("the visual runner must run with node --disable-sigusr1\n");
+  process.exit(2);
+}
 // The run's key: read and deleted before any project code (Playwright, the app server) runs, so
 // nothing else in the sandbox can sign a result. If it cannot be deleted, nothing runs.
 const key = readFileSync(process.argv[4]);
@@ -88,7 +103,8 @@ const fulfillPrototype = async (route, url) => {
   return route.fulfill({ status: 404, body: "not found" });
 };
 
-const newContext = async (browser, job) => {
+// role "impl": the implementation from the app server; "ref": the approved prototype.
+const newContext = async (browser, job, role) => {
   const context = await browser.newContext({
     viewport: { width: job.width, height: 900 },
     deviceScaleFactor: 1,
@@ -101,13 +117,43 @@ const newContext = async (browser, job) => {
   await context.route("**/*", async (route) => {
     let url;
     try { url = new URL(route.request().url()); } catch { return route.abort("blockedbyclient"); }
-    if (url.origin === PROTO_ORIGIN) return fulfillPrototype(route, url);
+    if (url.origin === PROTO_ORIGIN) {
+      return role === "ref" ? fulfillPrototype(route, url) : route.abort("blockedbyclient");
+    }
     if ((url.protocol === "http:" || url.protocol === "https:" || url.protocol === "ws:") && LOOPBACK.has(url.hostname)) {
       return route.continue();
     }
     return route.abort("blockedbyclient");
   });
   return context;
+};
+
+// An isolated world of the runner's own in the page's main frame: the page's DOM, none of its
+// globals or prototypes. Functions are sent as source with a JSON argument.
+const isolatedWorld = async (context, page) => {
+  const session = await context.newCDPSession(page);
+  const { frameTree } = await session.send("Page.getFrameTree");
+  const { executionContextId } = await session.send("Page.createIsolatedWorld", {
+    frameId: frameTree.frame.id,
+    worldName: "vtc-visual-checks",
+  });
+  const run = async (expression) => {
+    const r = await session.send("Runtime.evaluate", {
+      expression,
+      contextId: executionContextId,
+      awaitPromise: true,
+      returnByValue: true,
+    });
+    if (r.exceptionDetails) {
+      const ex = r.exceptionDetails;
+      throw new Error("isolated evaluation failed: " + clip((ex.exception && ex.exception.description) || ex.text, 300));
+    }
+    return r.result ? r.result.value : undefined;
+  };
+  return {
+    evaluate: (fn, arg) => run("(" + String(fn) + ")(" + JSON.stringify(arg === undefined ? null : arg) + ")"),
+    inject: (source) => run(source + "\n;true"),
+  };
 };
 
 const openPage = async (context, url) => {
@@ -124,9 +170,10 @@ const openPage = async (context, url) => {
   if (response && response.status() >= 400) {
     return { status: "unreached", detail: "HTTP " + response.status() + " for " + clip(url, 300), page };
   }
-  await page.evaluate(() => (document.fonts ? document.fonts.ready.then(() => true) : true));
+  const world = await isolatedWorld(context, page);
+  await world.evaluate(() => (document.fonts ? document.fonts.ready.then(() => true) : true));
   await page.waitForLoadState("networkidle", { timeout: 5000 }).catch(() => undefined);
-  return { status: "rendered", page };
+  return { status: "rendered", page, world };
 };
 
 const masks = (page) => input.dynamic_regions.map((selector) => page.locator(selector));
@@ -144,11 +191,11 @@ const shoot = async (page, file, clipRect) => {
   return png;
 };
 
-const runAxe = async (page) => {
+const runAxe = async (world) => {
   if (!input.axe) return null;
-  await page.addScriptTag({ path: input.axe });
+  await world.inject(readFileSync(input.axe, "utf8"));
   const tags = input.include_best_practice ? input.axe_tags.concat(["best-practice"]) : input.axe_tags;
-  return page.evaluate(async (values) => {
+  return world.evaluate(async (values) => {
     const result = await window.axe.run(document, {
       runOnly: { type: "tag", values },
       resultTypes: ["violations", "incomplete"],
@@ -164,8 +211,8 @@ const runAxe = async (page) => {
   }, tags);
 };
 
-const collectStyles = (page) =>
-  page.evaluate(({ props, limit }) => {
+const collectStyles = (world) =>
+  world.evaluate(({ props, limit }) => {
     const out = [];
     const seen = new Set();
     const selectorOf = (el) => {
@@ -209,8 +256,8 @@ const collectStyles = (page) =>
     return out;
   }, { props: input.style_properties, limit: input.style_limit });
 
-const regionsOf = (page) =>
-  page.evaluate(() => {
+const regionsOf = (world) =>
+  world.evaluate(() => {
     const found = [];
     const names = new Set();
     const add = (name, el) => {
@@ -277,16 +324,16 @@ const toPng = (scratch, rgba, width, height) =>
 
 const diffRegions = async (job, impl, ref, pixelmatch, scratch) => {
   const diffs = [];
-  const implRegions = await regionsOf(impl);
-  const refRegions = await regionsOf(ref);
+  const implRegions = await regionsOf(impl.world);
+  const refRegions = await regionsOf(ref.world);
   for (const r of refRegions.slice(0, 50)) {
     const i = implRegions.find((x) => x.name === r.name);
     if (!i || i.width !== r.width || i.height !== r.height) {
       diffs.push({ region: r.name, mismatch_px: 0, total_px: 0, dimension_mismatch: true });
       continue;
     }
-    const a = await toRgba(scratch, await shoot(impl, null, { x: i.x, y: i.y, width: i.width, height: i.height }));
-    const b = await toRgba(scratch, await shoot(ref, null, { x: r.x, y: r.y, width: r.width, height: r.height }));
+    const a = await toRgba(scratch, await shoot(impl.page, null, { x: i.x, y: i.y, width: i.width, height: i.height }));
+    const b = await toRgba(scratch, await shoot(ref.page, null, { x: r.x, y: r.y, width: r.width, height: r.height }));
     const output = new Uint8Array(r.width * r.height * 4);
     const mismatch = pixelmatch(a, b, output, r.width, r.height, { threshold: input.pixel_threshold, includeAA: false });
     const entry = { region: r.name, mismatch_px: mismatch, total_px: r.width * r.height, dimension_mismatch: false };
@@ -301,8 +348,8 @@ const diffRegions = async (job, impl, ref, pixelmatch, scratch) => {
 
 const renderJob = async (browser, job, app, pixelmatch, scratch) => {
   const record = { key: job.key, status: "error", axe: null, styles: [], diffs: [] };
-  const implContext = await newContext(browser, job);
-  const refContext = await newContext(browser, job);
+  const implContext = await newContext(browser, job, "impl");
+  const refContext = await newContext(browser, job, "ref");
   try {
     let impl = null;
     if (app === null) {
@@ -313,11 +360,11 @@ const renderJob = async (browser, job, app, pixelmatch, scratch) => {
       record.status = opened.status;
       if (opened.detail) record.detail = opened.detail;
       if (opened.status === "rendered") {
-        impl = opened.page;
+        impl = opened;
         record.screenshot = fileName(job.key, ".png");
-        await shoot(impl, record.screenshot);
-        record.axe = await runAxe(impl);
-        record.styles = await collectStyles(impl);
+        await shoot(impl.page, record.screenshot);
+        record.axe = await runAxe(impl.world);
+        record.styles = await collectStyles(impl.world);
       }
     }
     if (input.prototype_root === null) {
@@ -330,7 +377,7 @@ const renderJob = async (browser, job, app, pixelmatch, scratch) => {
         record.reference.screenshot = fileName(job.key, ".ref.png");
         await shoot(ref.page, record.reference.screenshot);
         if (impl !== null && pixelmatch !== null) {
-          record.diffs = await diffRegions(job, impl, ref.page, pixelmatch, scratch);
+          record.diffs = await diffRegions(job, impl, ref, pixelmatch, scratch);
         }
       }
     }

@@ -400,6 +400,8 @@ describe("calibrate", () => {
       command: ["npm", "run", "dev"],
       url: "http://localhost:4000",
     });
+    // The human is told which port of the host's loopback the sandbox then opens.
+    expect(question).toMatch(/port 4000 of this machine's loopback/);
     await calibrate(s.deps(() => true));
     expect(s.answers[0]).toBe(question);
     const text = readFileSync(join(s.repo, ".vtc/gates.yml"), "utf8");

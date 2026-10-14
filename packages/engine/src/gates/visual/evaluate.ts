@@ -8,6 +8,12 @@
  * with other dimensions, token lint, a non-advisory detector rule), `unchecked` (a render, a
  * requested screen or a check that was not reached, or an axe `incomplete` item: "unreached is
  * not clean"), `pass`.
+ *
+ * Every finding's `location` is stable across gate runs: `DESIGN_SCREENS_PATH` with the screen
+ * state, render key, region, selector or note as the symbol, never a per-attempt evidence file
+ * (the attempt id changes every run, and triage fingerprints a finding by its location, so a
+ * waiver, a deferral or the "reappeared" signal would never match the next round). The
+ * screenshot or diff image of this run stays in `evidence.ref`.
  */
 import {
   DESIGN_SCREENS_PATH,
@@ -91,7 +97,7 @@ export const noteFindings = (notes: readonly string[], reportPath: string): Tool
     category: "design",
     title: note.slice(0, 200),
     message: note.slice(0, 4000),
-    location: { path: reportPath },
+    location: { path: DESIGN_SCREENS_PATH, symbol: `note: ${note}`.slice(0, 512) },
     evidence: { type: "command_output", ref: reportPath },
     sarif_level: "note",
   }));
@@ -310,7 +316,7 @@ export const evaluateVisual = (input: EvaluateInput): VisualOutcome => {
           0,
           4000,
         ),
-      location: { path: shot ?? input.reportPath, symbol: screenState(keys[0] ?? "") },
+      location: { path: DESIGN_SCREENS_PATH, symbol: screenState(keys[0] ?? "") },
       evidence:
         shot === null
           ? { type: "command_output", ref: input.reportPath }
@@ -331,7 +337,10 @@ export const evaluateVisual = (input: EvaluateInput): VisualOutcome => {
           0,
           4000,
         ),
-      location: { path: shot ?? input.reportPath, symbol: screenState(keys[0] ?? "") },
+      location: {
+        path: DESIGN_SCREENS_PATH,
+        symbol: `${screenState(keys[0] ?? "")} (needs review)`,
+      },
       evidence:
         shot === null
           ? { type: "command_output", ref: input.reportPath }
@@ -359,7 +368,7 @@ export const evaluateVisual = (input: EvaluateInput): VisualOutcome => {
           0,
           4000,
         ),
-      location: { path: shot ?? input.reportPath, symbol: first.selector.slice(0, 512) },
+      location: { path: DESIGN_SCREENS_PATH, symbol: first.selector.slice(0, 512) },
       evidence:
         shot === undefined
           ? { type: "command_output", ref: input.reportPath }
@@ -379,10 +388,7 @@ export const evaluateVisual = (input: EvaluateInput): VisualOutcome => {
         : `Region ${d.region} differs from the approved prototype by ${String(d.ratio_pct)}% on ${d.key}`
       ).slice(0, 200),
       message: `budget ${String(d.budget_pct)}%, ${String(d.mismatch_px)} px differ`,
-      location: {
-        path: d.diff_image ?? input.reportPath,
-        symbol: `${d.key} ${d.region}`.slice(0, 512),
-      },
+      location: { path: DESIGN_SCREENS_PATH, symbol: `${d.key} ${d.region}`.slice(0, 512) },
       evidence:
         d.diff_image === undefined
           ? { type: "command_output", ref: input.reportPath }
@@ -418,7 +424,7 @@ export const evaluateVisual = (input: EvaluateInput): VisualOutcome => {
       category: "design",
       title: `Visual checks not run: ${notRun[0] ?? ""}`.slice(0, 200),
       message: [...new Set(notRun)].join("; ").slice(0, 4000),
-      location: { path: input.reportPath },
+      location: { path: DESIGN_SCREENS_PATH, symbol: "checks not run" },
       evidence: { type: "command_output", ref: input.reportPath },
       sarif_level: "warning",
     });
@@ -501,7 +507,10 @@ export const visualWithoutRenders = (input: {
         0,
         200,
       ),
-      location: { path: input.reportPath },
+      location: {
+        path: DESIGN_SCREENS_PATH,
+        symbol: input.status === "error" ? "visual step failed" : "not rendered",
+      },
       evidence: { type: "command_output", ref: input.reportPath },
       sarif_level: "warning",
     });

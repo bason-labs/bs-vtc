@@ -142,7 +142,7 @@ describe("evaluateVisual", () => {
       tool: "axe-core",
       sarif_level: "note",
       snippet: "#hero",
-      location: { symbol: "home:default" },
+      location: { symbol: "home:default (needs review)" },
     });
     expect(review?.title).toMatch(/Needs review/);
     expect(review?.message).toMatch(/home:default:390:light/);
