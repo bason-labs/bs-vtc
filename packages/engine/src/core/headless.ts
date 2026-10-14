@@ -308,7 +308,9 @@ export const launchHeadless = async (
 ): Promise<boolean> => {
   const adapter = k.deps.adapters[host];
   const contract = k.deps.roles.get(step.role);
-  if (adapter === undefined || contract === undefined || k.stopping.aborted) return false;
+  // a call, not the property: the shutdown may land during any await below
+  const stopped = (): boolean => k.stopping.aborted;
+  if (adapter === undefined || contract === undefined || stopped()) return false;
   // every engine-launched run (role, auto_resume, cross_family_review) passes the platform rule
   // (`crossFamilyHost` already leaves out a reviewer whose host would be refused here, so the
   // cross-family slot is skipped, never parked)
@@ -377,6 +379,9 @@ export const launchHeadless = async (
           maxBudgetUsd: Math.max(0.01, Math.round((task.budget_usd - task.spent_usd) * 100) / 100),
         }),
   };
+  // the engine's shutdown may have landed during the awaits above, after `killHeadless` took its
+  // snapshot: nothing starts now (the dispatch stays in flight, as after a crash, for vtc resume)
+  if (stopped()) return false;
   let spawned: SpawnResult;
   try {
     spawned =
@@ -391,6 +396,13 @@ export const launchHeadless = async (
   if (spawned.dispatch !== "headless")
     return fail(`${host} returned a subagent instruction for a headless run`);
   const process = spawned.run;
+  if (stopped()) {
+    // the shutdown landed while the host was starting it: no watch would run (`Kernel.spawn` is
+    // a no-op once stopping) and `killHeadless` already ran, so it is killed here (AD-25: no
+    // orphaned processes)
+    await process.kill().catch(() => undefined);
+    return false;
+  }
   const summary: HeadlessRunSummary = {
     action_id: action.action_id,
     role: step.role,

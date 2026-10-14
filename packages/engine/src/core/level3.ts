@@ -339,6 +339,40 @@ const updatePr = (k: Kernel, h: RunHandle, featureId: string, pr: PullRequestRef
   k.emit(h, { type: "feature.pr_updated", actor: "engine", feature: featureId, data: { pr } });
 };
 
+/** GitHub would merge the PR on its own: auto-merge is on, or the PR is in the merge queue. */
+const isOn = (pr: PullRequestRef | null | undefined): boolean =>
+  pr?.auto_merge === "enabled" || pr?.auto_merge === "queued";
+
+/**
+ * VTC enabled the feature's auto-merge and has not seen it turned off since. Read from the run's
+ * events, not from `feature.pr`: on the next start after a shutdown that left it on (the shutdown
+ * does not turn it off), the release's push records the PR again, and a `gh pr view` that does not
+ * report `auto_merge` would otherwise hide it.
+ */
+const leftOnByVtc = (state: RunState, featureId: string): boolean => {
+  let on = false;
+  for (const e of state.events) {
+    if (e.feature !== featureId) continue;
+    if (e.type === "feature.auto_merge_enabled") on = true;
+    else if (e.type === "feature.auto_merge_disabled") on = false;
+    else if (e.type === "feature.pr_updated") {
+      const pr = (e.data as { pr?: PullRequestRef }).pr;
+      if (
+        pr?.state !== "open" ||
+        pr.auto_merge === "disabled" ||
+        pr.auto_merge === "not_requested" ||
+        pr.auto_merge === "merged"
+      )
+        on = false;
+    }
+  }
+  return on;
+};
+
+/** Auto-merge may be on for the feature's PR: GitHub or the run's own events say so. */
+const mayBeOn = (h: RunHandle, featureId: string, pr: PullRequestRef | null | undefined): boolean =>
+  isOn(pr) || leftOnByVtc(h.state, featureId);
+
 const park = (
   k: Kernel,
   h: RunHandle,
@@ -388,6 +422,59 @@ export const autoMergeFeature = async (
   let required: readonly RequiredCheck[] = [];
   let pr: PullRequestRef | null;
   let policy: RemoteMergePolicy;
+  let number = feature.pr?.number;
+  /**
+   * Turns the PR's auto-merge off (AD-23: GitHub keeps it on when someone pushes, and a pause
+   * must not leave it on) and records it; `null` once it is off, else why it could not be.
+   * Without a `reason` (no `feature.auto_merge_disabled` reason fits) only the PR is recorded.
+   */
+  const turnOff = async (
+    reason: "paused" | "head_moved" | "timeout" | null,
+    detail: string,
+  ): Promise<string | null> => {
+    let off: PullRequestRef | null;
+    try {
+      off = await service.disableAutoMerge(branch);
+    } catch (error) {
+      return message(error);
+    }
+    await k.serial(h, () => {
+      if (reason !== null)
+        k.emit(h, {
+          type: "feature.auto_merge_disabled",
+          actor: "engine",
+          feature: featureId,
+          data: { reason, detail },
+        });
+      updatePr(k, h, featureId, off === null ? null : { ...off, auto_merge: "disabled" });
+      return Promise.resolve();
+    });
+    return null;
+  };
+  const stillOn = (failure: string): string =>
+    `; VTC could NOT turn its auto-merge off (${failure}): turn it off now (gh pr merge ${number === undefined ? branch : String(number)} --disable-auto)`;
+  /**
+   * Parks before VTC enabled auto-merge in this start. An auto-merge still on from an earlier
+   * start (or that GitHub reports on) is turned off first: GitHub would otherwise merge a head
+   * Final Review never verified once its checks pass (AD-23).
+   */
+  const parkOff = async (
+    reason: "head_moved" | "timeout" | null,
+    detail: string,
+    current: PullRequestRef | null,
+    evidence: readonly Evidence[],
+  ): Promise<"parked"> => {
+    if (current?.state !== "open" || !mayBeOn(h, featureId, current))
+      return park(k, h, featureId, detail, evidence);
+    const failure = await turnOff(reason, detail);
+    return park(
+      k,
+      h,
+      featureId,
+      failure === null ? detail : `${detail}${stillOn(failure)}`,
+      evidence,
+    );
+  };
   try {
     policy = await service.policy(await baseBranch(k.deps.repoRoot));
   } catch (error) {
@@ -400,24 +487,22 @@ export const autoMergeFeature = async (
       pr = await prs.view(branch);
       if (pr?.state === "merged") break;
       if (pr === null || pr.head_sha !== gated)
-        return await park(
-          k,
-          h,
-          featureId,
+        return await parkOff(
+          "head_moved",
           pr === null
             ? "the feature PR is gone"
             : `the PR head ${pr.head_sha.slice(0, 12)} is not the commit Final Review verified (${gated.slice(0, 12)})`,
+          pr,
           [{ type: "commit", ref: gated }],
         );
       required = await service.requiredChecks(branch, gated);
       const pending = required.some((c) => c.state === "pending");
       if (!pending) break;
       if (k.now().getTime() - started >= LEVEL3_TIMING.checksTimeoutMs)
-        return await park(
-          k,
-          h,
-          featureId,
+        return await parkOff(
+          "timeout",
           `the required checks on ${gated.slice(0, 12)} are still pending after ${String(LEVEL3_TIMING.checksTimeoutMs / 3_600_000)} h`,
+          pr,
           [{ type: "commit", ref: gated }],
         );
       const waiting = {
@@ -448,14 +533,13 @@ export const autoMergeFeature = async (
       return Promise.resolve(checklist.ok);
     });
     if (!go)
-      return park(
-        k,
-        h,
-        featureId,
+      return parkOff(
+        null,
         `the safe-to-auto-merge checklist failed: ${checklist.items
           .filter((i) => !i.ok)
           .map((i) => `${i.id} (${i.detail})`)
           .join("; ")}`,
+        pr,
         checklist.items
           .filter((i) => !i.ok)
           .flatMap((i) => i.evidence)
@@ -469,16 +553,17 @@ export const autoMergeFeature = async (
     } catch (error) {
       return park(k, h, featureId, `gh refused to enable auto-merge: ${message(error)}`);
     }
-    const number = pr.number ?? feature.pr?.number;
+    number = pr.number ?? number;
     const enabled = pr;
+    const prNumber = number;
     await k.serial(h, () => {
-      if (number !== undefined)
+      if (prNumber !== undefined)
         k.emit(h, {
           type: "feature.auto_merge_enabled",
           actor: "engine",
           feature: featureId,
           data: {
-            pr_number: number,
+            pr_number: prNumber,
             head_sha: gated,
             method,
             merge_queue: policy.merge_queue,
@@ -487,34 +572,6 @@ export const autoMergeFeature = async (
       updatePr(k, h, featureId, enabled);
       return Promise.resolve();
     });
-    /**
-     * Turns the PR's auto-merge off (AD-23: GitHub keeps it on when someone pushes, and a pause
-     * must not leave it on) and records it; `null` once it is off, else why it could not be.
-     */
-    const turnOff = async (
-      reason: "paused" | "head_moved" | "timeout",
-      detail: string,
-    ): Promise<string | null> => {
-      let off: PullRequestRef | null;
-      try {
-        off = await service.disableAutoMerge(branch);
-      } catch (error) {
-        return message(error);
-      }
-      await k.serial(h, () => {
-        k.emit(h, {
-          type: "feature.auto_merge_disabled",
-          actor: "engine",
-          feature: featureId,
-          data: { reason, detail },
-        });
-        updatePr(k, h, featureId, off === null ? null : { ...off, auto_merge: "disabled" });
-        return Promise.resolve();
-      });
-      return null;
-    };
-    const stillOn = (failure: string): string =>
-      `; VTC could NOT turn its auto-merge off (${failure}): turn it off now (gh pr merge ${number === undefined ? branch : String(number)} --disable-auto)`;
     const enabledAt = k.now().getTime();
     for (;;) {
       if (stopped()) return "stopped";
@@ -611,7 +668,7 @@ export const disableAutoMerges = async (k: Kernel, h: RunHandle): Promise<void> 
   if (service === undefined) return;
   for (const feature of [...h.state.features.values()]) {
     const state = feature.pr?.auto_merge;
-    if (state !== "enabled" && state !== "queued" && state !== "awaiting_checks") continue;
+    if (state !== "awaiting_checks" && !mayBeOn(h, feature.id, feature.pr)) continue;
     if (feature.pr?.state !== "open") continue;
     let pr: PullRequestRef | null;
     try {

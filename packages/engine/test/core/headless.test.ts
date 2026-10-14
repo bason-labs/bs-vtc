@@ -518,6 +518,72 @@ describe("AD-25 rule 4: supervision, status and the kill switch", { timeout: 30_
     await h.release();
   });
 
+  it("a shutdown that lands while the preflight runs starts nothing and orphans nothing", async () => {
+    let asked: () => void = () => undefined;
+    const preflighting = new Promise<void>((resolve) => {
+      asked = resolve;
+    });
+    let answer: () => void = () => undefined;
+    const answered = new Promise<void>((resolve) => {
+      answer = resolve;
+    });
+    const h = createHarness({
+      codex: {
+        headless: () => new Promise<HostOutcome>(() => undefined), // never ends by itself
+        authStatus: async () => {
+          asked();
+          await answered; // the host's status command is still running
+          return signedIn("codex", true)();
+        },
+      },
+    });
+    await start(h, CODEX);
+    const pending = next(h, CODEX).catch(() => []);
+    await preflighting;
+    const down = h.engine.shutdown();
+    answer();
+    await down;
+    await pending;
+    expect(h.launched).toEqual([]);
+    expect(h.engine.status({}).headless_runs).toBeUndefined();
+    expect(ofType(h, "headless.started")).toEqual([]);
+    await h.release();
+  });
+
+  it("a shutdown that lands while the host starts the run kills it", async () => {
+    let starting: () => void = () => undefined;
+    const spawning = new Promise<void>((resolve) => {
+      starting = resolve;
+    });
+    let go: () => void = () => undefined;
+    const proceed = new Promise<void>((resolve) => {
+      go = resolve;
+    });
+    const h = createHarness({
+      codex: { headless: () => new Promise<HostOutcome>(() => undefined) },
+    });
+    const codex = h.deps.adapters.codex;
+    if (codex === undefined) throw new Error("no codex adapter");
+    const spawnRole = codex.spawnRole.bind(codex);
+    codex.spawnRole = async (request) => {
+      starting();
+      await proceed; // the host is still starting the process
+      return spawnRole(request);
+    };
+    await start(h, CODEX);
+    const pending = next(h, CODEX).catch(() => []);
+    await spawning;
+    const down = h.engine.shutdown();
+    go();
+    await down;
+    await pending;
+    expect(h.launched).toHaveLength(1);
+    expect(h.killed).toEqual(["repo_cartographer"]);
+    expect(h.engine.status({}).headless_runs).toBeUndefined();
+    expect(ofType(h, "headless.started")).toEqual([]);
+    await h.release();
+  });
+
   it("feeds the stream's usage events to the usage store", async () => {
     const usage = {
       host: "codex",

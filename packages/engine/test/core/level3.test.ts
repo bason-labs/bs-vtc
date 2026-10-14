@@ -384,6 +384,108 @@ describe("the engine's shutdown during a Level-3 wait", () => {
   });
 });
 
+/** Auto-merge enabled, then the engine shut down while it waited for the merge (left on GitHub). */
+const shutDownAfterEnable = async (h: Harness): Promise<void> => {
+  h.remote3.mergeOnEnable = false;
+  let waiting: () => void = () => undefined;
+  const asleep = new Promise<void>((resolve) => {
+    waiting = resolve;
+  });
+  h.sleeper = () =>
+    new Promise(() => {
+      waiting();
+    });
+  const actions = await throughPlan(h, [draft("T-1")], SPEC_ONE);
+  await authorTests(h, only(actions, "qa"));
+  await build(h, only((await h.engine.next({}, CLAUDE)).actions, "engineer"));
+  await verdictPass(
+    h,
+    only((await h.engine.next({}, CLAUDE)).actions, "spec_verifier"),
+    "src/t-1/impl.ts",
+  );
+  await h.engine.settle().catch(() => undefined);
+  void passFinalReview(h).catch(() => undefined);
+  await asleep;
+  await h.engine.shutdown();
+  expect(h.prs.current?.auto_merge).toBe("enabled");
+  h.sleeper = null;
+};
+
+/**
+ * Someone pushed to the feature branch while the engine was down: the PR's head is no longer the
+ * gated SHA, and the release's push and PR update on the next start report it without
+ * `auto_merge` (as `gh pr view` without `autoMergeRequest` does).
+ */
+const pushWhileDown = (h: Harness): void => {
+  const moved = { ...(h.prs.current as PullRequestRef), head_sha: "d".repeat(40) };
+  h.prs.current = moved;
+  const { auto_merge: _ignored, ...unreported } = moved;
+  const upsert = (): Promise<PullRequestRef> => {
+    h.prs.current = {
+      ...unreported,
+      ...(h.prs.current?.auto_merge === "disabled" ? { auto_merge: "disabled" as const } : {}),
+    };
+    return Promise.resolve(h.prs.current);
+  };
+  h.prs.upsertDraft = upsert;
+  h.prs.markReady = upsert;
+};
+
+describe("the next start after a shutdown that left auto-merge on", () => {
+  it("a head that moved while the engine was down: auto-merge is turned off before the park", async () => {
+    const h = level3();
+    await shutDownAfterEnable(h);
+    pushWhileDown(h);
+    const engine = h.reopen();
+    await engine.settle();
+    const run = engine.status({}).run.id;
+    expect(h.remote3.calls).toContain("disable vtc/F-1");
+    expect(h.prs.current?.auto_merge).toBe("disabled");
+    expect(ofType(h, "feature.auto_merge_disabled", run).at(-1)?.data).toMatchObject({
+      reason: "head_moved",
+    });
+    expect(engine.status({ run }).features[0]).toMatchObject({
+      status: "parked",
+      park_reason: "blocked",
+    });
+    await engine.shutdown();
+    await h.release();
+  });
+
+  it("required checks that stay pending after the restart: auto-merge is turned off before the park", async () => {
+    const h = level3();
+    await shutDownAfterEnable(h);
+    h.remote3.checks = [[{ name: "ci", state: "pending" }]];
+    const engine = h.reopen();
+    await engine.settle();
+    const run = engine.status({}).run.id;
+    expect(h.remote3.calls).toContain("disable vtc/F-1");
+    expect(ofType(h, "feature.auto_merge_disabled", run).at(-1)?.data).toMatchObject({
+      reason: "timeout",
+    });
+    expect(engine.status({ run }).features[0]?.status).toBe("parked");
+    await engine.shutdown();
+    await h.release();
+  });
+
+  it("a disable that fails on the restart parks with what the human must do", async () => {
+    const h = level3();
+    await shutDownAfterEnable(h);
+    pushWhileDown(h);
+    h.remote3.disableAutoMerge = () => Promise.reject(new Error("gh: HTTP 502"));
+    const engine = h.reopen();
+    await engine.settle();
+    const run = engine.status({}).run.id;
+    const escalation = ofType(h, "escalation.opened", run).at(-1)?.data.escalation as {
+      detail: string;
+    };
+    expect(escalation.detail).toContain("could NOT turn its auto-merge off");
+    expect(escalation.detail).toContain("--disable-auto");
+    await engine.shutdown();
+    await h.release();
+  });
+});
+
 describe("AD-23 rules 4–5: the post-merge watch and the ledger", () => {
   it("a red required base run downgrades through the ledger and records the escaped defect", async () => {
     const h = level3();
