@@ -167,7 +167,6 @@ export {
   flakyBetween,
   LOOPBACK_QUESTION,
   visualAppQuestion,
-  withVisualApp,
   type CalibrateDeps,
   type CalibrateOutcome,
 } from "./calibrate/calibrate.js";

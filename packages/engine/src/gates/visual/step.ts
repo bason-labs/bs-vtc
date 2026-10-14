@@ -9,7 +9,9 @@
  *   Playwright has no browser installed): `skipped` with `VISUAL_SKIPPED_NO_BROWSER`.
  * - The pin does not match, the project's Playwright is installed but its probe failed, the
  *   runner failed, no app server is configured or allowed: `error` (gate infrastructure, §6.8: a
- *   human sets the app server up with `vtc calibrate`).
+ *   human sets the app server up with `vtc calibrate`; reading 162).
+ * - A Linux host whose `kernel.yama.ptrace_scope` is 0 or absent renders nothing with an app
+ *   server: `skipped`, naming the sysctl (reading 164), so it is never a Level-3 pass.
  * - Settings come from `gates.yml` `visual` (`visualConfigFor`); `screens.yaml`, `tokens.json`
  *   and the approved prototype are read at the base commit, so a diff cannot change the reference
  *   it is compared with. The prototype comes from a clean checkout of the base made for this step
@@ -43,7 +45,7 @@ import {
   type VisualSummary,
 } from "@vtc/shared";
 import type { PendingWrite } from "../evidence.js";
-import { appLoopbackPort, visualAppOf } from "./app.js";
+import { appLoopbackPort } from "./app.js";
 import {
   checkProjectBrowser,
   checkStoreBrowser,
@@ -110,9 +112,8 @@ export interface VisualStepContext {
     "diff" | "readFileAtCommit" | "createCleanCheckout" | "removeCheckout"
   >;
   readonly changed: readonly GitChangedFile[];
+  /** The run's calibrated gates; `config.visual.app` is the app server (contracts 4.6.0). */
   readonly config: GatesConfig;
-  /** The raw `gates.yml` the run started with (for the provisional `visual.app`). */
-  readonly gatesYml: string | null;
   /** The engine's environment (to find the project's Playwright cache). */
   readonly env: Readonly<Record<string, string | undefined>>;
   /** The scrubbed gate environment the runner gets (`gateEnv`). */
@@ -354,16 +355,15 @@ export const runVisualStep = async (ctx: VisualStepContext): Promise<VisualStepR
     executable_sha256: pin.executable_sha256,
   };
 
-  // 4. the app server (provisional `visual.app`, allowlisted like a gate).
-  const app = visualAppOf(ctx.gatesYml);
-  if (app === null) {
+  // 4. the app server (`GatesConfig.visual.app`, validated with gates.yml; allowlisted like a gate).
+  const app = ctx.config.visual?.app;
+  if (app === undefined) {
     return without(
       "error",
       "no app server for the visual step: run vtc calibrate, which proposes one from the package.json dev/start/preview script for a human to confirm, or add visual.app (command, loopback url) to .vtc/gates.yml and confirm it with vtc calibrate",
       browser,
     );
   }
-  if ("invalid" in app) return without("error", `gates.yml ${app.invalid}`, browser);
   if (!ctx.allowCommand(app.command)) {
     return without(
       "error",
@@ -433,7 +433,9 @@ export const runVisualStep = async (ctx: VisualStepContext): Promise<VisualStepR
         stdoutPath: `${ctx.logPrefix}.stdout.log`,
         stderrPath: `${ctx.logPrefix}.stderr.log`,
       });
-      if (!outcome.ok) return without("error", outcome.reason, browser);
+      if (!outcome.ok) {
+        return without(outcome.skipped === true ? "skipped" : "error", outcome.reason, browser);
+      }
       result = outcome.result;
       file = outcome.file;
     } finally {

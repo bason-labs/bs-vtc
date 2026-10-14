@@ -561,7 +561,7 @@ describe("visual runner script", () => {
     }
   }, 60_000);
 
-  it("renders nothing on Linux when ptrace would let the app server reach the runner", async () => {
+  it("renders nothing on Linux when ptrace would let the app server reach the runner, and says skipped (D-bj)", async () => {
     const { checkout, call } = await renderSetup();
     const { sandbox, specs } = recordingSandbox();
     const jail = new GateCommandJail(sandbox, []);
@@ -573,10 +573,32 @@ describe("visual runner script", () => {
           platform: "linux",
           ptraceScope: () => scope,
         });
-        expect(await runner.run(call())).toEqual({ ok: false, reason: LINUX_PTRACE_REFUSAL });
+        // A visible `skipped` naming the sysctl (reading 164), never a pass and never an error.
+        expect(await runner.run(call())).toEqual({
+          ok: false,
+          skipped: true,
+          reason: LINUX_PTRACE_REFUSAL,
+        });
       }
       expect(specs).toEqual([]);
       expect(existsSync(join(checkout, "seen.json"))).toBe(false);
+      expect(LINUX_PTRACE_REFUSAL).toMatch(/kernel\.yama\.ptrace_scope is 0 or absent/);
+      expect(LINUX_PTRACE_REFUSAL).toMatch(/set kernel\.yama\.ptrace_scope to 1 or higher/);
+      expect(LINUX_PTRACE_REFUSAL.length).toBeLessThanOrEqual(500);
+      // The probe starts no app server, so ptrace does not matter to it.
+      const probing = sandboxedVisualRunner(jail, {
+        node: NODE,
+        noSandbox: "none",
+        platform: "linux",
+        ptraceScope: () => "0",
+      });
+      const probe = await probing.run({
+        ...call(),
+        loopbackPort: null,
+        input: { ...call().input, mode: "probe", app: null, prototype_root: null, jobs: [] },
+      });
+      expect(probe.ok ? null : probe.reason).not.toBe(LINUX_PTRACE_REFUSAL);
+      expect(!probe.ok && probe.skipped === true).toBe(false);
       // Yama scope 1 (descendants only): the app server, a descendant, cannot attach to the runner.
       const restricted = sandboxedVisualRunner(jail, {
         node: NODE,
