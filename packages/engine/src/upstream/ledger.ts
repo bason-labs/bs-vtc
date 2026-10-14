@@ -1,7 +1,10 @@
 /**
  * The local automation ledger (AD-27 rule 4; spine §5 reading 208): one JSON line per thing VTC saw
  * or did for a fingerprint, at `<vtcHome>/upstream/ledger.jsonl` for VTC's own repo and
- * `.vtc/state/automation/ledger.jsonl` (gitignored) for a project. Append-only, mode 0600, never
+ * `<guard dir>/upstream/ledger.jsonl` for a project's repo. The ledger is read back as trusted (the
+ * heads VTC pushed, the head a close may delete, the issues VTC's quiet sweep closed), so a
+ * project's ledger lives in the engine's private guard dir (`ROLE_DENIED_VTC.homeWriteDeny`
+ * `guard/**`), never in the checkout, where roles and gate commands write. Append-only, mode 0600, never
  * through a symlink (every directory below the trusted root is checked and the file is opened
  * `O_NOFOLLOW`), every line redacted. It is a cache: the remote label listing is the source of
  * truth for issue and PR state; the ledger holds what the remote cannot tell (occurrences, when VTC
@@ -71,11 +74,11 @@ export interface Ledger {
 export const ledgerPath = (
   target:
     | { readonly kind: "upstream"; readonly vtcHome: string }
-    | { readonly kind: "project"; readonly repoRoot: string },
+    | { readonly kind: "project"; readonly guardDir: string },
 ): string =>
   target.kind === "upstream"
     ? join(target.vtcHome, "upstream", "ledger.jsonl")
-    : join(target.repoRoot, ".vtc", "state", "automation", "ledger.jsonl");
+    : join(target.guardDir, "upstream", "ledger.jsonl");
 
 const isEntry = (value: unknown): value is LedgerEntry => {
   if (typeof value !== "object" || value === null) return false;
@@ -181,7 +184,7 @@ const WHAT = "the automation ledger";
 
 /**
  * Opens (lazily creates) the ledger at `path`; `knownValues` are redacted from every line. With
- * `root` (VTC's home or the project root), every directory from it down to the ledger is checked
+ * `root` (VTC's home or the engine's guard dir), every directory from it down to the ledger is checked
  * for symlinks; without it only the ledger's own directory is.
  */
 export const openLedger = (

@@ -15,6 +15,7 @@ import {
   type AutoFingerprint,
   type AutoKind,
   type EvidenceAttachment,
+  type EvidenceFileKind,
   type EvidenceHosting,
   type GitHubRepo,
   type GitPlumbing,
@@ -90,6 +91,8 @@ export const renderEvidenceSection = (input: {
   readonly files: readonly EvidenceFile[];
   readonly urls?: ReadonlyMap<string, string>;
   readonly partial: boolean;
+  /** What a partial set lacks, and why; the note names each (absent: a plain "partial" note). */
+  readonly missing?: readonly MissingEvidence[];
 }): string => {
   const order = (f: EvidenceFile): number =>
     f.kind === "replay_gif" ? 0 : isVideo(f.name) ? 1 : 2;
@@ -103,12 +106,41 @@ export const renderEvidenceSection = (input: {
       return `![${alt}](${target})`;
     });
   if (input.partial) {
+    const missing = input.missing ?? [];
     lines.push(
       "",
-      "_Evidence is partial: no inline motion preview could be made (install ffmpeg for GIF previews)._",
+      missing.length === 0
+        ? "_Evidence is partial._"
+        : `_Evidence is partial: ${missing.map((m) => `no ${MISSING_LABEL[m.kind]} (${MISSING_REASON[m.reason]})`).join("; ")}._`,
     );
   }
   return lines.join("\n\n");
+};
+
+/** Why a required evidence file is missing from the published set. */
+export type MissingEvidenceReason = "no_ffmpeg" | "video_off" | "budget" | "not_captured";
+
+export interface MissingEvidence {
+  readonly kind: EvidenceFileKind;
+  readonly reason: MissingEvidenceReason;
+}
+
+const MISSING_LABEL: Readonly<Record<EvidenceFileKind, string>> = {
+  replay_video: "replay recording",
+  replay_gif: "inline motion preview",
+  screenshot: "final-state screenshot",
+  ui_before: "UI before screenshot",
+  ui_after: "UI after screenshot",
+  flow_video: "changed-flow recording",
+  chart: "chart",
+  gate_report: "gate report",
+};
+
+const MISSING_REASON: Readonly<Record<MissingEvidenceReason, string>> = {
+  no_ffmpeg: "install ffmpeg for GIF previews",
+  video_off: "recordings are off in `automation.evidence.video`",
+  budget: "left out to stay within the evidence size budget",
+  not_captured: "it could not be captured",
 };
 
 /** Pure: the `--attach` list of `attach` hosting (empty for `branch`). */

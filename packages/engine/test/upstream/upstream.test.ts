@@ -8,7 +8,7 @@ import {
   type PromptProposal,
   type ReplayResult,
 } from "@vtc/shared";
-import { chmodSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, writeFileSync } from "node:fs";
 import { delimiter, join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import {
@@ -647,7 +647,7 @@ describe("the Lookback PR", () => {
     expect(second.plumbing.commits.find((c) => c.sha === head)?.parents).toEqual([left, BASE_SHA]);
   });
 
-  it("leaves a branch with a human's commit alone: no push, the older PR stays open", async () => {
+  it("leaves a branch with a human's commit alone: no push, no evidence, the older PR stays open", async () => {
     const h = harness({ remoteRefs: true });
     withCheckout(h);
     await h.upstream.openLookbackPr({ replay: replay(), proposal }, h.ctx);
@@ -667,7 +667,8 @@ describe("the Lookback PR", () => {
       ),
     ).toMatchObject({ status: "skipped", reason: "duplicate" });
     expect(h.plumbing.remote.get(lookbackBranch)).toBe(human);
-    expect(h.plumbing.pushes.slice(pushes).map((p) => p.dst)).toEqual(["refs/heads/vtc-evidence"]);
+    // Checked before capture: no media reaches the evidence branch for a PR that cannot open.
+    expect(h.plumbing.pushes.slice(pushes)).toEqual([]);
     expect(h.github.state.prs.map((p) => p.state)).toEqual(["open"]);
     expect(types(h.events)).not.toContain("upstream.pr_closed");
   });
@@ -928,6 +929,24 @@ describe("the remote is the source of truth, across installations", () => {
     expect(first.github.state.issues).toHaveLength(5);
   });
 
+  it("never closes as quiet an issue another installation keeps seeing", async () => {
+    const first = harness();
+    await first.upstream.report(defect(), first.ctx);
+    await first.upstream.report(defect(), first.ctx);
+    const second = harness({ shared: first });
+    second.clock.now = new Date("2026-10-29T12:00:00Z");
+    await second.upstream.report(defect({ at: "2026-10-29T11:00:00Z" }), second.ctx);
+    expect(
+      await second.upstream.report(defect({ at: "2026-10-29T11:00:00Z" }), second.ctx),
+    ).toMatchObject({ status: "issue", number: 1 });
+    expect(first.github.state.issues[0]?.humanActivity).toBe(false);
+    // 18 days after the first installation last saw it, 4 after the second did.
+    first.clock.now = new Date("2026-11-02T12:00:00Z");
+    expect(await first.upstream.sweep(first.ctx)).toEqual([]);
+    expect(await second.upstream.sweep(second.ctx)).toEqual([]);
+    expect(first.github.state.issues[0]?.state).toBe("open");
+  });
+
   it("serialises two daemons on one machine: one issue for one fingerprint", async () => {
     const first = harness();
     const second = harness({ shared: first, sameHome: true });
@@ -1116,5 +1135,175 @@ describe("evidence settings and the GIF", () => {
       ),
     ).toMatchObject({ status: "pr" });
     expect(first.github.state.issues).toHaveLength(0);
+  });
+});
+
+describe("project-repo PRs", () => {
+  const TOKEN = `ghp_${"a".repeat(36)}`;
+  const input = (over: Partial<AutoPrInput> = {}): AutoPrInput => ({
+    target: "project",
+    kind: "parked",
+    fingerprint: "0123456789abcdef",
+    summary: "fix key sk-live-payroll-SECRET-1234",
+    slots: {
+      summary: `The key sk-live-payroll-SECRET-1234 and ${TOKEN} were rejected.`,
+      diff: `+API_KEY=${TOKEN}`,
+      provenance: "run R7, key sk-live-payroll-SECRET-1234",
+    },
+    source: {
+      changes: [{ path: "src/a.ts", bytes: new TextEncoder().encode("x") }],
+      message: "fix",
+    },
+    specVerifier: "pending",
+    evidence: {
+      plan: { run: "R7", upstreamSafe: false, change: "non_ui" },
+      snapshot: { routes: {}, events: [] },
+      gateReport: {} as never,
+    },
+    ...over,
+  });
+
+  it("pass the shared redaction: no known value or token in the title, body or commit", async () => {
+    const h = harness({ automation: { hosting: "attach" } });
+    expect(await h.upstream.openPullRequest(input(), h.ctx)).toMatchObject({ status: "pr" });
+    const [pr] = h.github.state.prs;
+    const commit = h.plumbing.commits.at(-1);
+    for (const text of [pr?.title, pr?.body, commit?.message]) {
+      expect(text).toBeDefined();
+      expect(text).not.toContain("SECRET-1234");
+      expect(text).not.toContain("ghp_aaaa");
+    }
+    expect(pr?.title).toBe("vtc(parked): fix key [REDACTED:known_value]");
+    expect(pr?.body).toContain("[REDACTED:github_token]");
+    // Project details stay: the PR is for the project's own repo.
+    expect(pr?.body).toContain("were rejected");
+  });
+
+  it("opens no PR for a fingerprint a human muted", async () => {
+    const h = harness({ automation: { hosting: "attach" } });
+    await h.upstream.report(
+      {
+        type: "project_problem",
+        kind: "parked",
+        ruleId: "task.parked",
+        path: "src/payroll/export.ts",
+        title: "Payroll export task is parked",
+        detail: "T-4 parked",
+        run: "R7",
+        at: "2026-10-15T11:00:00Z",
+      },
+      h.ctx,
+    );
+    const [issue] = h.github.state.issues;
+    const fp = issue?.marker?.fp ?? "";
+    expect(fp).not.toBe("");
+    h.github.human(issue?.number ?? 0, { label: "vtc:muted" });
+    expect(await h.upstream.openPullRequest(input({ fingerprint: fp }), h.ctx)).toMatchObject({
+      status: "skipped",
+      reason: "muted",
+    });
+    expect(h.github.state.prs).toHaveLength(0);
+    expect(h.plumbing.pushes).toHaveLength(0);
+  });
+
+  it("keeps the project's ledger in the engine's guard dir, never in the checkout", async () => {
+    const h = harness({ automation: { hosting: "attach" } });
+    expect(await h.upstream.openPullRequest(input(), h.ctx)).toMatchObject({ status: "pr" });
+    expect(existsSync(join(h.ctx.repoRoot, ".vtc", "state"))).toBe(false);
+  });
+});
+
+describe("VTC builds VTC (the project is bs-vtc itself)", () => {
+  it("records its own run, and bs-vtc's own name is no project secret; the home path still is", async () => {
+    let request: Parameters<EvidenceRecorder["capture"]>[0] | undefined;
+    const inner = fakeRecorder();
+    const recorder: EvidenceRecorder = {
+      renderGateReport: (r) => inner.renderGateReport(r),
+      capture: (r) => {
+        request = r;
+        return inner.capture(r);
+      },
+    };
+    const h = harness({ automation: { evidence: recorder, hosting: "attach" } });
+    const ctx: ProjectContext = {
+      ...h.ctx,
+      repoRoot: h.checkout,
+      repo: UPSTREAM,
+      identity: {
+        repo: UPSTREAM,
+        remoteUrl: `git@github.com:${UPSTREAM}.git`,
+        repoRoot: "/Users/bason/Documents/bason-labs/bs-vtc",
+        homeDir: "/Users/bason",
+      },
+    };
+    const fp = autoFingerprint({ kind: "config", subject: "max_rounds" });
+    const outcome = await h.upstream.openPullRequest(
+      {
+        target: "upstream",
+        kind: "config",
+        fingerprint: fp,
+        summary: "raise the bs-vtc review round cap",
+        slots: { summary: "The bs-vtc run on bason-labs hit the cap." },
+        source: {
+          changes: [{ path: "roles/x.yaml", bytes: new TextEncoder().encode("max_rounds: 4\n") }],
+          message: "cap",
+        },
+        report: projectUpstreamReport({
+          kind: "config",
+          fingerprint: fp,
+          vtcVersion: "0.4.0",
+          occurrences: 1,
+          firstSeen: "2026-10-15T00:00:00Z",
+          lastSeen: "2026-10-15T00:00:00Z",
+        }),
+        specVerifier: "none",
+        evidence: {
+          plan: { run: "R7", upstreamSafe: false, change: "non_ui" },
+          snapshot: {
+            routes: { "/api/runs/R7/status": { title: "bs-vtc engine" } },
+            events: [{ run: "R7", seq: 1 }],
+          },
+          gateReport: {} as never,
+        },
+      },
+      ctx,
+    );
+    expect(outcome).toMatchObject({ status: "pr" });
+    expect(request?.shots.some((s) => s.path.startsWith("/lookback/?evidence=upstream"))).toBe(
+      false,
+    );
+    expect(request?.denyText).not.toContain("bs-vtc");
+    expect(request?.denyText).not.toContain("bason-labs");
+    expect(request?.denyText).toContain("/Users/bason");
+    expect(request?.denyText).toContain("sk-live-payroll-SECRET-1234");
+    expect(h.github.state.prs[0]?.title).toBe("vtc(config): raise the bs-vtc review round cap");
+    // The home path still fails closed.
+    expect(
+      await h.upstream.openPullRequest(
+        {
+          target: "upstream",
+          kind: "config",
+          fingerprint: "1111111111111111",
+          summary: "see /Users/bason/notes",
+          slots: {},
+          source: { changes: [], message: "x" },
+          report: projectUpstreamReport({
+            kind: "config",
+            fingerprint: "1111111111111111",
+            vtcVersion: "0.4.0",
+            occurrences: 1,
+            firstSeen: "2026-10-15T00:00:00Z",
+            lastSeen: "2026-10-15T00:00:00Z",
+          }),
+          specVerifier: "none",
+          evidence: {
+            plan: { run: "R7", upstreamSafe: false, change: "non_ui" },
+            snapshot: { routes: {}, events: [] },
+            gateReport: {} as never,
+          },
+        },
+        ctx,
+      ),
+    ).toMatchObject({ status: "skipped", reason: "privacy" });
   });
 });

@@ -1,5 +1,5 @@
 /** The gh seam of AD-27 rule 1: argv guard, stub-binary services, the per-repo queue (D-cc). */
-import { existsSync, symlinkSync, writeFileSync } from "node:fs";
+import { existsSync, readFileSync, symlinkSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { AUTO_COMMENT_MARKER, AUTOMATION_LIMITS, renderAutoMarker } from "@vtc/shared";
 import { afterEach, describe, expect, it } from "vitest";
@@ -567,5 +567,47 @@ describe("the automation lock", () => {
     await expect(
       withFileLock(link, () => Promise.resolve("ran"), { timeoutMs: 50, pollMs: 5 }),
     ).rejects.toThrow();
+  });
+
+  it("keeps a slow live holder's lock fresh with its heartbeat", async () => {
+    const path = join(tempDir("vtc-lock-"), "o__r.lock");
+    const order: string[] = [];
+    const first = withFileLock(
+      path,
+      async () => {
+        order.push("first in");
+        await new Promise((resolve) => setTimeout(resolve, 900));
+        order.push("first out");
+      },
+      { staleMs: 300 },
+    );
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    const second = withFileLock(
+      path,
+      () => {
+        order.push("second");
+        return Promise.resolve();
+      },
+      { staleMs: 300, pollMs: 10 },
+    );
+    await Promise.all([first, second]);
+    expect(order).toEqual(["first in", "first out", "second"]);
+  });
+
+  it("breaks a stale lock only under the break file, and clears a break file a dead process left", async () => {
+    const path = join(tempDir("vtc-lock-"), "o__r.lock");
+    writeFileSync(path, `999999999\n${String(Date.now())}\nstale\n`);
+    // Another live process is breaking it right now: this waiter leaves the lock alone.
+    writeFileSync(`${path}.break`, `${String(process.pid)}\n${String(Date.now())}\n`);
+    await expect(
+      withFileLock(path, () => Promise.resolve("ran"), { timeoutMs: 50, pollMs: 5 }),
+    ).rejects.toThrow("holds the automation lock");
+    expect(readFileSync(path, "utf8")).toContain("stale");
+    writeFileSync(`${path}.break`, `999999999\n${String(Date.now())}\n`);
+    await expect(withFileLock(path, () => Promise.resolve("ran"), { pollMs: 5 })).resolves.toBe(
+      "ran",
+    );
+    expect(existsSync(`${path}.break`)).toBe(false);
+    expect(existsSync(path)).toBe(false);
   });
 });

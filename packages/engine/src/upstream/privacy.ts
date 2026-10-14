@@ -182,6 +182,21 @@ export const projectDenylist = (identity: ProjectIdentity): string[] => {
   return [...out];
 };
 
+/**
+ * Pure: the denylist of a project that is VTC's own repo ("VTC builds VTC", spine §5 reading 208
+ * (1)): the upstream repo's public identifiers (its `owner/name`, each part, any remote URL of it,
+ * and every token that is part of that public name) are not project secrets there, so they are
+ * left out; the local paths (the home directory and the checkout path) and client names stay.
+ */
+export const selfDenylist = (denylist: readonly string[], upstreamRepo: string): string[] => {
+  const name = upstreamRepo.toLowerCase();
+  return denylist.filter((token) => {
+    const t = token.toLowerCase();
+    if (name.includes(t)) return false;
+    return remotePath(token)?.toLowerCase() !== name;
+  });
+};
+
 const escape = (s: string): string => s.replace(/[.*+?^${}()|[\]\\/-]/g, "\\$&");
 
 /** Pure: whether `text` contains a denylisted identifier (case-insensitive, whole token). */
@@ -277,6 +292,9 @@ export const assertUpstreamSafe = (
   }
 };
 
-/** Project-repo content may hold project details; it still passes the shared redaction. */
+/**
+ * Project-repo content may hold project details; it still passes the shared redaction (AD-27
+ * rule 5): known values and token formats are replaced by redaction markers.
+ */
 export const redactProjectText = (text: string, knownValues: readonly string[]): string =>
   redactSecrets(text, knownValues);

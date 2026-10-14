@@ -1,7 +1,6 @@
 /** The dedupe table, caps and the auto-close sweep (AD-27 rule 4; spine §5 reading 208 (3)). */
 import {
   lstatSync,
-  mkdirSync,
   readdirSync,
   readFileSync,
   statSync,
@@ -105,6 +104,18 @@ describe("the dedupe table", () => {
         material: true,
       }),
     ).toEqual({ action: "update", number: 3, comment: true });
+  });
+
+  it("holds to one write a day from the remote's update time too (another installation, a wiped ledger)", () => {
+    expect(
+      decideIssue({
+        fingerprint: FP,
+        issues: [issue({ number: 3, updatedAt: "2026-10-15T11:00:00Z" })],
+        record: undefined,
+        now: NOW,
+        material: true,
+      }),
+    ).toEqual({ action: "skip", reason: "duplicate", number: 3 });
   });
 
   it("never raises a muted fingerprint again: closed not planned by a human, or vtc:muted", () => {
@@ -341,6 +352,32 @@ describe("the auto-close sweep", () => {
     expect(close.map((i) => i.number)).toEqual([1]);
   });
 
+  it("never closes an issue another installation keeps seeing, whatever this ledger says", () => {
+    const l = openLedger(join(tempDir(), "ledger.jsonl"));
+    l.append({ repo: REPO, fp: FP, kind: "defect", event: "seen", at: "2026-10-01T00:00:00Z" });
+    const fresh = issue({ number: 1, updatedAt: "2026-11-01T00:00:00Z" });
+    expect(
+      planQuietSweep({
+        repo: REPO,
+        issues: [fresh],
+        openPrs: [],
+        ledger: l,
+        now: new Date("2026-11-02T00:00:00Z"),
+      }),
+    ).toEqual([]);
+    // The ledger's later occurrence keeps it open too (the remote update is older).
+    l.append({ repo: REPO, fp: FP, kind: "defect", event: "seen", at: "2026-11-01T00:00:00Z" });
+    expect(
+      planQuietSweep({
+        repo: REPO,
+        issues: [issue({ number: 1, updatedAt: "2026-10-01T00:00:00Z" })],
+        openPrs: [],
+        ledger: l,
+        now: new Date("2026-11-02T00:00:00Z"),
+      }),
+    ).toEqual([]);
+  });
+
   it("closes automatic PRs whose issue is closed", () => {
     const stale = planStalePrs({
       issues: [
@@ -357,12 +394,12 @@ describe("the auto-close sweep", () => {
 });
 
 describe("the ledger", () => {
-  it("lives at <vtcHome>/upstream or .vtc/state/automation, private and redacted", () => {
+  it("lives at <vtcHome>/upstream or in the engine's guard dir (never the checkout), private and redacted", () => {
     expect(ledgerPath({ kind: "upstream", vtcHome: "/h/.vtc" })).toBe(
       "/h/.vtc/upstream/ledger.jsonl",
     );
-    expect(ledgerPath({ kind: "project", repoRoot: "/p" })).toBe(
-      "/p/.vtc/state/automation/ledger.jsonl",
+    expect(ledgerPath({ kind: "project", guardDir: "/h/.vtc/guard/k" })).toBe(
+      "/h/.vtc/guard/k/upstream/ledger.jsonl",
     );
     const path = join(tempDir(), "upstream", "ledger.jsonl");
     const l = openLedger(path, ["supersecretvalue1"]);
@@ -398,11 +435,10 @@ describe("the ledger", () => {
     }).toThrow(/symlink/);
   });
   it("never writes through a symlinked directory below its root (a role-planted link)", () => {
-    const root = tempDir("vtc-project-");
+    const root = tempDir("vtc-guard-");
     const elsewhere = tempDir("vtc-elsewhere-");
-    mkdirSync(join(root, ".vtc", "state"), { recursive: true });
-    symlinkSync(elsewhere, join(root, ".vtc", "state", "automation"));
-    const path = ledgerPath({ kind: "project", repoRoot: root });
+    symlinkSync(elsewhere, join(root, "upstream"));
+    const path = ledgerPath({ kind: "project", guardDir: root });
     expect(() => {
       openLedger(path, [], root).append({
         repo: REPO,
