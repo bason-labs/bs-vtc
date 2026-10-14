@@ -22,6 +22,7 @@ import {
   GATE_SANDBOX,
   gateExpectationMet,
   GateReportSchema,
+  hiddenTestsDir,
   TestInventorySchema,
   TraceabilityReportSchema,
   type GateReport,
@@ -270,7 +271,11 @@ describe("monotonic metrics (§7.3)", () => {
 describe("hidden acceptance tests (§7.3)", () => {
   it("copies them in only for include_hidden runs and withholds their details from evidence", async () => {
     const h = harness({ "tests/unit.json": cases([{ name: "ok" }]) }, config([testsGate]));
-    const hiddenDir = join(h.home, "hidden", engineRepoKey(h.repo), "T-1", "tests/hidden");
+    const hiddenDir = join(
+      h.home,
+      hiddenTestsDir(engineRepoKey(h.repo), "r1", "T-1"),
+      "tests/hidden",
+    );
     mkdirSync(hiddenDir, { recursive: true });
     writeFileSync(
       join(hiddenDir, "h.json"),
@@ -310,7 +315,11 @@ describe("symlinks a diff planted (§7.3)", () => {
     const outside = tempDir("vtc-outside-");
     symlinkSync(outside, join(h.repo, "tests/hidden"));
     const head = commitAll(h.repo);
-    const hiddenDir = join(h.home, "hidden", engineRepoKey(h.repo), "T-1", "tests/hidden");
+    const hiddenDir = join(
+      h.home,
+      hiddenTestsDir(engineRepoKey(h.repo), "r1", "T-1"),
+      "tests/hidden",
+    );
     mkdirSync(hiddenDir, { recursive: true });
     writeFileSync(join(hiddenDir, "h.json"), cases([{ name: "secret edge" }]));
     const report = await h.run({ head, layers: ["L2"], include_hidden: true });
@@ -489,7 +498,7 @@ describe("Final Review coverage (§6.7a)", () => {
     include_hidden: true,
   };
   const plantHidden = (home: string, repo: string, task: string, name: string): void => {
-    const dir = join(home, "hidden", engineRepoKey(repo), task, "tests/hidden");
+    const dir = join(home, hiddenTestsDir(engineRepoKey(repo), "r1", task), "tests/hidden");
     mkdirSync(dir, { recursive: true });
     writeFileSync(join(dir, `${task}.json`), cases([{ name }]));
   };
@@ -563,7 +572,7 @@ describe("Final Review coverage (§6.7a)", () => {
   it("refuses to let one task's hidden test overwrite another's", async () => {
     const h = harness({ "tests/unit.json": cases([{ name: "[REQ-1] ok" }]) }, finalGates);
     for (const task of ["T-1", "T-2"]) {
-      const dir = join(h.home, "hidden", engineRepoKey(h.repo), task, "tests/hidden");
+      const dir = join(h.home, hiddenTestsDir(engineRepoKey(h.repo), "r1", task), "tests/hidden");
       mkdirSync(dir, { recursive: true });
       writeFileSync(join(dir, "same.json"), cases([{ name: `[REQ-1] ${task}` }]));
     }
@@ -581,6 +590,100 @@ describe("Final Review coverage (§6.7a)", () => {
     );
     // Nothing hidden stays in the checkout or the repo.
     expect(existsSync(join(h.repo, "tests/hidden"))).toBe(false);
+  });
+});
+
+describe("hidden acceptance tests keyed by run (D-ck, spine §5 reading 205)", () => {
+  /** Plants `count` hidden tests at `<home>/<rel>/tests/hidden/<file>`; counts tell runs apart. */
+  const plant = (home: string, rel: string, file: string, count: number): void => {
+    const dir = join(home, rel, "tests/hidden");
+    mkdirSync(dir, { recursive: true });
+    writeFileSync(
+      join(dir, file),
+      cases(Array.from({ length: count }, (_, i) => ({ name: `[REQ-1] ${file} ${i}` }))),
+    );
+  };
+
+  it("copies a run-qualified entry from that run's directory only", async () => {
+    const h = harness({ "tests/unit.json": cases([{ name: "[REQ-1] ok" }]) }, config([testsGate]));
+    const key = engineRepoKey(h.repo);
+    plant(h.home, hiddenTestsDir(key, "rec-7", "T-4"), "recorded.json", 3);
+    plant(h.home, hiddenTestsDir(key, "r1", "T-4"), "own.json", 1);
+    const report = await h.run({
+      head: h.base,
+      task: undefined,
+      feature: "F-1",
+      reason: "final_review",
+      scope: "full",
+      layers: ["L2"],
+      req_tags: ["REQ-1"],
+      include_hidden: true,
+      hidden_tasks: ["rec-7:T-4"],
+    });
+    // The visible test plus the recorded run's three; never this run's own T-4.
+    expect(gate(report, "tests").tests).toMatchObject({ executed: 4 });
+  });
+
+  it("keeps two runs' tests apart when they share a task id", async () => {
+    const h = harness({ "tests/unit.json": cases([{ name: "[REQ-1] ok" }]) }, config([testsGate]));
+    const key = engineRepoKey(h.repo);
+    plant(h.home, hiddenTestsDir(key, "r0", "T-1"), "earlier.json", 2);
+    plant(h.home, hiddenTestsDir(key, "r1", "T-1"), "own.json", 1);
+    const own = await h.run({ head: h.base, layers: ["L2"], include_hidden: true });
+    expect(gate(own, "tests").tests).toMatchObject({ executed: 2 });
+
+    // Both named: the bare T-1 is r1's, `r0:T-1` is r0's; different files, so both run.
+    const both = await h.run({
+      head: h.base,
+      layers: ["L2"],
+      include_hidden: true,
+      hidden_tasks: ["r0:T-1"],
+    });
+    expect(gate(both, "tests").tests).toMatchObject({ executed: 4 });
+  });
+
+  it("copies the request's task once when hidden_tasks also names it qualified", async () => {
+    const h = harness({ "tests/unit.json": cases([{ name: "[REQ-1] ok" }]) }, config([testsGate]));
+    plant(h.home, hiddenTestsDir(engineRepoKey(h.repo), "r1", "T-1"), "h.json", 1);
+    const report = await h.run({
+      head: h.base,
+      layers: ["L2"],
+      include_hidden: true,
+      hidden_tasks: ["r1:T-1"],
+    });
+    expect(report.verdict).toBe("pass");
+    expect(gate(report, "tests").tests).toMatchObject({ executed: 2 });
+  });
+
+  it("refuses two runs' tests at the same path, naming the other run's task qualified", async () => {
+    const h = harness({ "tests/unit.json": cases([{ name: "[REQ-1] ok" }]) }, config([testsGate]));
+    const key = engineRepoKey(h.repo);
+    plant(h.home, hiddenTestsDir(key, "r0", "T-1"), "same.json", 1);
+    plant(h.home, hiddenTestsDir(key, "r1", "T-1"), "same.json", 1);
+    const report = await h.run({
+      head: h.base,
+      layers: ["L2"],
+      include_hidden: true,
+      hidden_tasks: ["r0:T-1"],
+    });
+    expect(report.verdict).toBe("infra_error");
+    expect(read(h.repo, gate(report, "gate-runner").evidence[0]?.ref ?? "")).toMatch(
+      /T-1 and r0:T-1 both have tests\/hidden\/same\.json/,
+    );
+    expect(existsSync(join(h.repo, "tests/hidden"))).toBe(false);
+  });
+
+  it("never reads the old <repo-key>/<task> layout", async () => {
+    const h = harness({ "tests/unit.json": cases([{ name: "[REQ-1] ok" }]) }, config([testsGate]));
+    plant(h.home, join("hidden", engineRepoKey(h.repo), "T-1"), "old.json", 1);
+    const report = await h.run({
+      head: h.base,
+      layers: ["L2"],
+      include_hidden: true,
+      hidden_tasks: ["T-1"],
+    });
+    expect(report.verdict).toBe("pass");
+    expect(gate(report, "tests").tests).toMatchObject({ executed: 1 });
   });
 });
 
@@ -1027,8 +1130,8 @@ writeFileSync("src/.npmrc", "script-shell=/bin/true\\n");
 describe("a malformed request (the Gate Runner is the trust boundary for test material)", () => {
   it("validates the request first and never joins a bad task id into a hidden-tests path", async () => {
     const h = harness({ "tests/unit.json": cases([{ name: "[REQ-1] ok" }]) }, config([testsGate]));
-    // ~/.vtc/hidden/<repo-key>/../T-9 is outside the task directories.
-    const escaped = join(h.home, "hidden", "T-9", "tests/hidden");
+    // ~/.vtc/hidden/<repo-key>/r1/../T-9 is outside the run's task directories.
+    const escaped = join(h.home, "hidden", engineRepoKey(h.repo), "T-9", "tests/hidden");
     mkdirSync(escaped, { recursive: true });
     writeFileSync(join(escaped, "h.json"), cases([{ name: "[REQ-9] not this repo's" }]));
     const report = await h.runUnparsed({
@@ -1337,7 +1440,11 @@ process.exit(existsSync("tests/hidden/h.json") ? 3 : 0);
       { "tests/unit.json": cases([{ name: "ok" }]), "tools/probe.mjs": probe },
       config([testsGate, { ...installGate, command: [NODE, "tools/probe.mjs"] }]),
     );
-    const hiddenDir = join(h.home, "hidden", engineRepoKey(h.repo), "T-1", "tests/hidden");
+    const hiddenDir = join(
+      h.home,
+      hiddenTestsDir(engineRepoKey(h.repo), "r1", "T-1"),
+      "tests/hidden",
+    );
     mkdirSync(hiddenDir, { recursive: true });
     writeFileSync(join(hiddenDir, "h.json"), cases([{ name: "[REQ-1] hidden edge" }]));
     writeFile(h.repo, "src/x.ts", "export const x = 1;\n");

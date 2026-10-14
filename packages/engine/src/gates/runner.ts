@@ -39,7 +39,8 @@ import {
   gateReportVerdict,
   GateReportSchema,
   GateRunRequestSchema,
-  HIDDEN_TESTS,
+  hiddenTestsDir,
+  hiddenTestsRef,
   TestInventorySchema,
   isAtLeast,
   normalizeSeverity,
@@ -1562,14 +1563,18 @@ class Run {
    * only. A task run copies its own task's. A feature run (Final Review, §6.7a step 2) copies the
    * tasks `hidden_tasks` names (engine core passes the feature's tasks); with none named it copies
    * nothing and says so in evidence, and `finalReviewStepsCovered` then does not report step 2.
+   * Each entry is resolved with `hiddenTestsRef` (a bare `T-n` is the request's run's, `<run>:T-n`
+   * another run's, D-ck) and read only from `hiddenTestsDir`, never the old `<repo-key>/<task>`.
    */
   private copyHidden(): void {
     const r = this.request;
     if (!r.include_hidden) return;
-    const tasks = [
-      ...new Set([...(r.task === undefined ? [] : [r.task]), ...(r.hidden_tasks ?? [])]),
-    ];
-    if (tasks.length === 0) {
+    const refs = new Map<string, { readonly run: string; readonly task: string }>();
+    for (const entry of [...(r.task === undefined ? [] : [r.task]), ...(r.hidden_tasks ?? [])]) {
+      const ref = hiddenTestsRef(r.run, entry);
+      refs.set(`${ref.run}:${ref.task}`, ref);
+    }
+    if (refs.size === 0) {
       this.note(
         "hidden-tests",
         "hidden acceptance tests were not copied: the request names no tasks (hidden_tasks), so this run is not a full acceptance run (§6.7a step 2)",
@@ -1577,20 +1582,23 @@ class Run {
       return;
     }
     const owners = new Map<string, string>();
-    for (const task of tasks) this.copyHiddenOf(task, owners);
+    for (const ref of refs.values()) this.copyHiddenOf(ref, owners);
   }
 
   /**
-   * Copies one task's hidden tests. `owners` maps each copied path to its task: two tasks' tests
-   * at the same path would silently replace one another, so that is an error (the run reports
-   * infra) rather than a smaller acceptance run.
+   * Copies one run's task's hidden tests. `owners` maps each copied path to its task (bare for the
+   * request's run, `<run>:T-n` for another): two tasks' tests at the same path would silently
+   * replace one another, so that is an error (the run reports infra) rather than a smaller
+   * acceptance run.
    */
-  private copyHiddenOf(task: string, owners: Map<string, string>): void {
+  private copyHiddenOf(
+    ref: { readonly run: string; readonly task: string },
+    owners: Map<string, string>,
+  ): void {
+    const label = ref.run === this.request.run ? ref.task : `${ref.run}:${ref.task}`;
     const dir = join(
       this.deps.vtcHome,
-      HIDDEN_TESTS.homeDir,
-      engineRepoKey(this.deps.repoRoot),
-      task,
+      hiddenTestsDir(engineRepoKey(this.deps.repoRoot), ref.run, ref.task),
     );
     if (!existsSync(dir)) return;
     const walk = (abs: string, rel: string): void => {
@@ -1601,10 +1609,10 @@ class Run {
           const owner = owners.get(childRel);
           if (owner !== undefined) {
             throw new Error(
-              `hidden acceptance tests of ${owner} and ${task} both have ${childRel}; neither may replace the other, so the acceptance run did not start`,
+              `hidden acceptance tests of ${owner} and ${label} both have ${childRel}; neither may replace the other, so the acceptance run did not start`,
             );
           }
-          owners.set(childRel, task);
+          owners.set(childRel, label);
           // Never through a symlink the diff planted: hidden tests must not land outside the checkout.
           assertNoSymlinks(this.checkoutAbs, childRel);
           const parent = childRel.includes("/") ? childRel.slice(0, childRel.lastIndexOf("/")) : "";

@@ -27,6 +27,8 @@
  *   store whenever it has them.
  * - The sandbox opens the host's loopback to the run only at the app server's own port (macOS;
  *   Linux has a private loopback), never the engine API or other local services.
+ * - `visual.redact_selectors` are masked in every screenshot with `dynamic_regions` (contracts
+ *   5.0.0), so what they cover never reaches an image in evidence.
  * - The images copied into evidence are capped per run ({@link MAX_VISUAL_EVIDENCE_BYTES}): diff
  *   images first, then screenshots; whatever is left out is a visible note.
  */
@@ -273,7 +275,11 @@ export const runVisualStep = async (ctx: VisualStepContext): Promise<VisualStepR
     axe_tags: settings.axe_tags,
     include_best_practice: settings.include_best_practice,
     pixel_threshold: settings.pixel_threshold,
-    dynamic_regions: settings.dynamic_regions,
+    // `redact_selectors` (secrets, personal data) are masked like dynamic regions, so they never
+    // reach a screenshot in evidence (AD-27 rule 6); a masked region never differs.
+    dynamic_regions: [
+      ...new Set([...settings.dynamic_regions, ...(ctx.config.visual?.redact_selectors ?? [])]),
+    ],
     style_properties: [...STYLE_PROPERTIES],
     style_limit: STYLE_LIMIT,
     nav_timeout_ms: NAV_TIMEOUT_MS,

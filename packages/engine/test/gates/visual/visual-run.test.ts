@@ -12,7 +12,7 @@ import {
   engineRepoKey,
   fingerprintFinding,
   GateReportSchema,
-  HIDDEN_TESTS,
+  hiddenTestsDir,
   VISUAL_SKIPPED_NO_BROWSER,
   VisualReportSchema,
 } from "@vtc/shared";
@@ -549,7 +549,7 @@ describe("visual step in a gate run", () => {
         };
       },
     });
-    const hiddenDir = join(h.home, HIDDEN_TESTS.homeDir, engineRepoKey(h.repo), "T-1", "tests");
+    const hiddenDir = join(h.home, hiddenTestsDir(engineRepoKey(h.repo), "r1", "T-1"), "tests");
     mkdirSync(hiddenDir, { recursive: true });
     writeFileSync(join(hiddenDir, "hidden.json"), cases([{ name: "[REQ-1] hidden" }]));
     const report = await h.run({ head: h.base, include_hidden: true, visual: { screens: [] } });
@@ -635,5 +635,27 @@ describe("visual step in a gate run", () => {
     // gates.yml does not parse, so the run is gate infrastructure and nothing renders.
     expect(report.results.find((r) => r.gate_id === "config")?.status).toBe("error");
     expect(fake.calls).toEqual([]);
+  });
+});
+
+describe("visual.redact_selectors (AD-27 rule 6, contracts 5.0.0)", () => {
+  it("masks them in the visual step's own screenshots, with dynamic_regions", async () => {
+    const { h, fake } = setup({
+      store: "match",
+      gatesExtra: `${APP}  dynamic_regions: [".clock"]\n  redact_selectors: ["[data-customer]", ".api-key"]\n`,
+    });
+    await h.run({ head: h.base, visual: { screens: [] } });
+    const render = fake.calls.find((c) => c.input.mode === "render");
+    expect(render?.input.dynamic_regions).toEqual([".clock", "[data-customer]", ".api-key"]);
+  });
+
+  it("masks only dynamic_regions when none are configured", async () => {
+    const { h, fake } = setup({
+      store: "match",
+      gatesExtra: `${APP}  dynamic_regions: [".clock"]\n`,
+    });
+    await h.run({ head: h.base, visual: { screens: [] } });
+    const render = fake.calls.find((c) => c.input.mode === "render");
+    expect(render?.input.dynamic_regions).toEqual([".clock"]);
   });
 });
