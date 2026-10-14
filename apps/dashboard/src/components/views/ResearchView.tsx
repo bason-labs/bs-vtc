@@ -29,6 +29,26 @@ function FactItem({ fact, now }: { fact: FactView; now: number }) {
         <span className="font-mono break-all">= {fact.value}</span>
         {fact.pinnedVersion === null ? null : <Badge>at {fact.pinnedVersion}</Badge>}
       </div>
+      {fact.reportedSource === null ? null : (
+        <p className="text-xs text-muted-fg" data-testid="reported-source">
+          {fact.reportedSource.via}:{" "}
+          {fact.reportedSource.href === null ? (
+            <span className="break-all">{fact.reportedSource.url}</span>
+          ) : (
+            <a
+              className="inline-flex items-center gap-1 break-all text-accent-fg underline"
+              href={fact.reportedSource.href}
+              target="_blank"
+              rel="noopener noreferrer"
+            >
+              {fact.reportedSource.url}
+              <ExternalLink aria-hidden className="size-3 shrink-0" />
+              <span className="sr-only">(opens in a new tab)</span>
+            </a>
+          )}{" "}
+          · where the role says it found this; provenance only, not verified.
+        </p>
+      )}
       {fact.source === null ? (
         <p className="text-xs text-danger">No source: a claim nobody could check.</p>
       ) : (

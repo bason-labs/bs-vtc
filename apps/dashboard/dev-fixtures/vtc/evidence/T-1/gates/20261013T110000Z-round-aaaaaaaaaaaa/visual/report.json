@@ -3,6 +3,7 @@
   "run": "golden-1",
   "task": "T-1",
   "status": "unchecked",
+  "toolchain": "vtc",
   "browser": {
     "name": "chromium-headless-shell",
     "version": "141.0",
@@ -12,14 +13,14 @@
     {
       "key": "login:default:390:light",
       "status": "rendered",
-      "screenshot": ".vtc/evidence/T-1/visual/login-default-390-light.png",
-      "reference": ".vtc/evidence/T-1/visual/ref-login-default-390-light.png",
+      "screenshot": ".vtc/evidence/T-1/gates/20261013T110000Z-round-aaaaaaaaaaaa/visual/login-default-390-light.png",
+      "reference": ".vtc/evidence/T-1/gates/20261013T110000Z-round-aaaaaaaaaaaa/visual/ref-login-default-390-light.png",
       "source_hash": "7777777777777777777777777777777777777777777777777777777777777777"
     },
     {
       "key": "login:default:1440:dark",
       "status": "rendered",
-      "screenshot": ".vtc/evidence/T-1/visual/login-default-1440-dark.png",
+      "screenshot": ".vtc/evidence/T-1/gates/20261013T110000Z-round-aaaaaaaaaaaa/visual/login-default-1440-dark.png",
       "source_hash": "7777777777777777777777777777777777777777777777777777777777777777"
     },
     {
@@ -68,7 +69,7 @@
       "ratio_pct": 1.4,
       "budget_pct": 0.5,
       "dimension_mismatch": false,
-      "diff_image": ".vtc/evidence/T-1/visual/diff-login-default-390-light-header.png"
+      "diff_image": ".vtc/evidence/T-1/gates/20261013T110000Z-round-aaaaaaaaaaaa/visual/diff-login-default-390-light-header.png"
     },
     {
       "key": "login:default:390:light",
@@ -90,7 +91,7 @@
       },
       "evidence": {
         "type": "file",
-        "ref": ".vtc/evidence/T-1/visual/report.json"
+        "ref": ".vtc/evidence/T-1/gates/20261013T110000Z-round-aaaaaaaaaaaa/visual/report.json"
       }
     }
   ],

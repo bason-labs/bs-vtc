@@ -6,6 +6,7 @@ import {
   FACT_ROWS,
   PNG_BASE64,
   SCORECARD_INDEX,
+  VISUAL_DIR,
   VISUAL_REPORT,
   VISUAL_REPORT_PATH,
 } from "./wave3-fixtures";
@@ -29,7 +30,7 @@ describe("wave-3 dev fixtures", () => {
   });
 
   it("serve a screenshot base64-encoded, like the engine", () => {
-    const png = devArtifact(GOLDEN_RUN, ".vtc/evidence/T-1/visual/login-default-390-light.png");
+    const png = devArtifact(GOLDEN_RUN, `${VISUAL_DIR}/login-default-390-light.png`);
     expect(png).toMatchObject({ encoding: "base64", media_type: "image/png", content: PNG_BASE64 });
   });
 });

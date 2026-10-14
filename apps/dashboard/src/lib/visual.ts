@@ -1,20 +1,24 @@
 import {
   isServableArtifactPath,
   parsePersisted,
+  VISUAL_REPORT_FILE,
   VisualReportSchema,
   type ArtifactContent,
   type ToolFinding,
   type VisualReport,
   type VisualStatus,
   type VisualSummary,
+  type VisualToolchain,
 } from "@vtc/shared";
 import type { StatusMeta } from "./states";
 
 /**
  * Deterministic visual QA (spec §7.5, spine AD-24): the step's outcome on a gate report
- * (`GateReport.visual`) and its full evidence (`VisualReport` under `.vtc/evidence/`). "Unreached
- * is not clean": only `pass` counts as passed; `skipped` (no browser) and `unchecked` (a render or
- * axe item nobody could decide) are shown as not passed (spine §5 reading 105).
+ * (`GateReport.visual`) and its full evidence (the `VisualReport` that `VisualSummary.report`
+ * names). "Unreached is not clean": only `pass` counts as passed; `skipped` (no browser, or a
+ * Linux host whose `ptrace_scope` lets the app reach the runner, D-bj) and `unchecked` (a render
+ * or axe item nobody could decide) are shown as not passed (spine §5 readings 105, 164). A step
+ * that ran on the project's own Playwright is not a Level-3 pass (readings 124, 136).
  */
 export interface VisualStatusMeta extends StatusMeta {
   readonly passed: boolean;
@@ -50,28 +54,58 @@ const COUNT_LABELS: Readonly<Record<keyof VisualSummary["counts"], string>> = {
   detector: "Design detector",
 };
 
+/** Whose Playwright ran the step (`VisualSummary.toolchain`), and what that means for Level 3. */
+export interface VisualToolchainModel {
+  readonly label: string;
+  /** Set for a `pass` on the project's Playwright: engine core reads it as `skipped` at Level 3. */
+  readonly note: string | null;
+}
+
+const TOOLCHAINS: Readonly<Record<VisualToolchain, string>> = {
+  vtc: "VTC's browser store",
+  project: "the project's own Playwright",
+};
+
+const PROJECT_PASS_NOTE =
+  "Not a Level-3 pass: the change under review can modify the project's Playwright and its install scripts, so Level 3 reads this pass as skipped. vtc doctor --install-browser installs VTC's own store, which the visual step then uses.";
+
+/** `null` when the gate runner did not say (an older engine, or a step that never rendered). */
+export const visualToolchain = (
+  toolchain: VisualToolchain | undefined,
+  status: VisualStatus,
+): VisualToolchainModel | null =>
+  toolchain === undefined
+    ? null
+    : {
+        label: TOOLCHAINS[toolchain],
+        note: toolchain === "project" && status === "pass" ? PROJECT_PASS_NOTE : null,
+      };
+
 export interface VisualSummaryModel {
   readonly status: VisualStatusMeta;
+  /** Why the step was skipped, as the gate runner wrote it (shown as a visible note). */
+  readonly reason: string | null;
+  /** What the status means for the run. */
   readonly notes: readonly string[];
+  readonly toolchain: VisualToolchainModel | null;
   readonly counts: readonly { label: string; value: number; bad: boolean }[];
   /** The full report, when the artifacts route can serve it. */
   readonly report: string | null;
   readonly findings: readonly ToolFinding[];
 }
 
-/** Why a step that did not pass did not, and what it means for the run. */
-export const visualNotes = (status: VisualStatus, skippedReason?: string): string[] => {
+/** What a status that is not a pass means for the run. */
+export const visualNotes = (status: VisualStatus): string[] => {
   const note = NOTES[status];
-  return [
-    ...(skippedReason === undefined ? [] : [skippedReason]),
-    ...(note === undefined ? [] : [note]),
-  ];
+  return note === undefined ? [] : [note];
 };
 
 export const visualSummaryModel = (summary: VisualSummary): VisualSummaryModel => {
   return {
     status: STATUS[summary.status],
-    notes: visualNotes(summary.status, summary.skipped_reason),
+    reason: summary.skipped_reason ?? null,
+    notes: visualNotes(summary.status),
+    toolchain: visualToolchain(summary.toolchain, summary.status),
     counts: (Object.keys(COUNT_LABELS) as (keyof VisualSummary["counts"])[]).map((key) => ({
       label: COUNT_LABELS[key],
       value: summary.counts[key],
@@ -85,15 +119,31 @@ export const visualSummaryModel = (summary: VisualSummary): VisualSummaryModel =
 
 // ------------------------------------------------------------------ report
 
-/** A `VisualReport` read through the artifacts route, or `null` for anything else. */
+const ATTEMPT_DIR = /^[A-Za-z0-9][A-Za-z0-9._-]*$/;
+
+/**
+ * Whether `path` is where the gate runner writes a visual report, the path `VisualSummary.report`
+ * names: `.vtc/evidence/<T-n|F-n>/gates/<attempt>/visual/report.json` (contracts 4.7.0, spine §5
+ * reading 137). A report kept under `.vtc/state/` is never served. Readers follow that path; no
+ * other file is taken for a report because it parses as one.
+ */
+export const isVisualReportPath = (path: string): boolean => {
+  const [vtc, evidence, owner, gates, attempt, ...rest] = path.split("/");
+  return (
+    vtc === ".vtc" &&
+    evidence === "evidence" &&
+    owner !== undefined &&
+    /^[TF]-[1-9]\d*$/.test(owner) &&
+    gates === "gates" &&
+    attempt !== undefined &&
+    ATTEMPT_DIR.test(attempt) &&
+    rest.join("/") === VISUAL_REPORT_FILE
+  );
+};
+
+/** The `VisualReport` at a visual report path ({@link isVisualReportPath}), or `null`. */
 export const readVisualReport = (artifact: ArtifactContent): VisualReport | null => {
-  if (
-    artifact.encoding !== "utf8" ||
-    !artifact.path.startsWith(".vtc/evidence/") ||
-    !artifact.path.endsWith(".json")
-  ) {
-    return null;
-  }
+  if (artifact.encoding !== "utf8" || !isVisualReportPath(artifact.path)) return null;
   let raw: unknown;
   try {
     raw = JSON.parse(artifact.content);

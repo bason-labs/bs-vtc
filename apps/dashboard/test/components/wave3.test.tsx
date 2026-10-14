@@ -8,6 +8,8 @@ import {
   pngArtifact,
   SCORECARD_INDEX,
   SHA,
+  VISUAL_DIR,
+  VISUAL_REPORT,
   VISUAL_REPORT_PATH,
   w3Event,
 } from "../wave3-fixtures";
@@ -385,7 +387,7 @@ describe("Artifact view (visual QA evidence, screenshots, scorecards)", () => {
       }),
     ).toHaveAttribute(
       "href",
-      "/artifact/?run=golden-1&path=.vtc%2Fevidence%2FT-1%2Fvisual%2Flogin-default-390-light.png",
+      `/artifact/?run=golden-1&path=${encodeURIComponent(`${VISUAL_DIR}/login-default-390-light.png`)}`,
     );
     expect(within(report).getByRole("list", { name: "Axe results" })).toHaveTextContent(
       "needs review",
@@ -394,9 +396,26 @@ describe("Artifact view (visual QA evidence, screenshots, scorecards)", () => {
     expect(screen.getByText("Raw JSON")).toBeInTheDocument();
   });
 
+  it("names the report's toolchain", async () => {
+    renderApp(`/artifact/?run=golden-1&path=${encodeURIComponent(VISUAL_REPORT_PATH)}`);
+    const report = await screen.findByTestId("visual-report");
+    expect(within(report).getByText("Toolchain: VTC's browser store")).toBeInTheDocument();
+  });
+
+  it("reads a visual report only at the path VisualSummary.report names, never by scanning", async () => {
+    const elsewhere = ".vtc/evidence/T-1/notes.json";
+    renderApp(`/artifact/?run=golden-1&path=${encodeURIComponent(elsewhere)}`, {
+      "/api/runs/golden-1/artifacts": artifacts({
+        [elsewhere]: jsonArtifact(elsewhere, VISUAL_REPORT),
+      }),
+    });
+    expect(await screen.findByTestId("artifact-text")).toBeInTheDocument();
+    expect(screen.queryByTestId("visual-report")).toBeNull();
+  });
+
   it("shows a screenshot as an image", async () => {
     renderApp(
-      "/artifact/?run=golden-1&path=.vtc%2Fevidence%2FT-1%2Fvisual%2Flogin-default-390-light.png",
+      `/artifact/?run=golden-1&path=${encodeURIComponent(`${VISUAL_DIR}/login-default-390-light.png`)}`,
     );
     const img = await screen.findByRole("img");
     expect(img.getAttribute("src")).toMatch(/^data:image\/png;base64,/);

@@ -1,7 +1,7 @@
 "use client";
 
 import type { UsageReport } from "@vtc/shared";
-import { Clock, PauseCircle } from "lucide-react";
+import { AlertTriangle, Clock, PauseCircle } from "lucide-react";
 import { cn } from "@/lib/cn";
 import type { AgeTone } from "@/lib/time";
 import { usagePanelModel, type UsageCardModel, type UsageTone } from "@/lib/usage";
@@ -36,6 +36,16 @@ export function UsageCard({ card }: { card: UsageCardModel }) {
           {card.updated.text}
         </Badge>
       </CardHeader>
+      {card.billingWarning === null ? null : (
+        <p
+          role="note"
+          aria-label="Billing"
+          className="mb-4 flex gap-1.5 rounded-xl border border-warn/40 bg-warn/10 px-3 py-2 text-xs text-warn-fg"
+        >
+          <AlertTriangle aria-hidden className="mt-0.5 size-3.5 shrink-0" />
+          <span>{card.billingWarning}</span>
+        </p>
+      )}
       <ul className="space-y-4">
         {card.windows.map((w) => (
           <li key={w.key} className="space-y-1.5">

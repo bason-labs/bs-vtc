@@ -71,3 +71,20 @@ describe("sortEscalations", () => {
     expect(sorted.map((x) => x.id)).toEqual(["E-1", "E-2", "E-4", "E-3"]);
   });
 });
+
+describe("escalation option effects", () => {
+  it("labels finish_level_2 (D-bd) by what it does, not the generic effect text", () => {
+    const parked: Escalation = {
+      ...golden(),
+      options: [
+        { id: "retry", label: "Retry the merge", effect: "retry" },
+        { id: "l2", label: "Finish at Level 2", effect: "finish_level_2" },
+      ],
+      recommended: "l2",
+    };
+    expect(escalationModel(parked).options.map((o) => o.effect)).toEqual([
+      "retry",
+      "Finish at Level 2 (leave the PR for review)",
+    ]);
+  });
+});
