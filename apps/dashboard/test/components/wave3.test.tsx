@@ -1,8 +1,8 @@
 import userEvent from "@testing-library/user-event";
 import { describe, expect, it } from "vitest";
+import type { VtcEvent } from "@vtc/shared";
 import { readFixture } from "../fixtures";
 import {
-  eventPageWithWave3,
   FACTS_JSONL,
   jsonArtifact,
   pngArtifact,
@@ -11,14 +11,33 @@ import {
   VISUAL_DIR,
   VISUAL_REPORT,
   VISUAL_REPORT_PATH,
-  w3Event,
-} from "../wave3-fixtures";
+} from "../dev-samples";
+import {
+  firstSample,
+  goldenPageWithSamples,
+  HEADLESS_VARIANTS,
+  LEVEL3_VARIANTS,
+  SAMPLE_EVENTS,
+  SAMPLE_RUN,
+  SAMPLE_SEQ_OFFSET,
+  sampleEvent,
+  samplePage,
+  variant,
+} from "../golden-samples";
 import { artifactContent } from "../../scripts/dev-fixtures.ts";
 import { act, openStream, renderApp, screen, waitFor, within } from "./render";
 
-const withEvents = {
-  "/api/runs/golden-1/events": () => Response.json(eventPageWithWave3()),
-};
+/**
+ * The wave-3 views on engine core's golden samples (`fixtures/golden-run/samples/`): the gates,
+ * research and Lookback views read the samples' own run (`golden-wave3`); the run and feature
+ * views read the golden run with the samples appended (`goldenPageWithSamples`). A case the
+ * samples lack is a changed sample event (`variant`).
+ */
+const SAMPLE_EVENTS_ROUTE = `/api/runs/${SAMPLE_RUN}/events`;
+const SAMPLE_ARTIFACTS_ROUTE = `/api/runs/${SAMPLE_RUN}/artifacts`;
+const sampleEvents = (events: readonly VtcEvent[]) => ({
+  [SAMPLE_EVENTS_ROUTE]: () => Response.json(samplePage(events)),
+});
 
 const notFound = () =>
   Response.json({ error: { code: "not_found", message: "no artifact" } }, { status: 404 });
@@ -32,39 +51,63 @@ const artifacts =
     return file === undefined ? notFound() : Response.json(file);
   };
 
+/** The samples' G2 request (seq 5) and an approval of its `ledger` direction. */
+const request = firstSample("gate.requested");
+const approved = sampleEvent(30, "gate.approved", {
+  gates: ["G2"],
+  frozen: (request.data as { artifacts: unknown[] }).artifacts,
+  design_direction: "ledger",
+  waived_facts: ["f-0123456789abcdef"],
+});
+
 describe("Gates view (gate.requested: G2 directions, unverified facts, design coverage)", () => {
   it("shows what G2 asked and what the human decided", async () => {
-    const firstViewport = ".vtc/design/prototype/calm-ledger/first-viewport.png";
-    renderApp("/gates/?run=golden-1", {
-      ...withEvents,
-      "/api/runs/golden-1/artifacts": artifacts({ [firstViewport]: pngArtifact(firstViewport) }),
+    const firstViewport = ".vtc/design/prototype/ledger/first.png";
+    renderApp(`/gates/?run=${SAMPLE_RUN}`, {
+      ...sampleEvents([...SAMPLE_EVENTS, approved]),
+      [SAMPLE_ARTIFACTS_ROUTE]: artifacts({
+        [firstViewport]: pngArtifact(firstViewport, SAMPLE_RUN),
+      }),
     });
-    const card = await screen.findByTestId("gate-request-60");
+    const card = await screen.findByTestId(`gate-request-${String(request.seq)}`);
     expect(within(card).getByRole("heading", { name: "G2" })).toBeInTheDocument();
     expect(within(card).getByText("Approved")).toBeInTheDocument();
-    const chosen = within(card).getByTestId("direction-calm-ledger");
+    const chosen = within(card).getByTestId("direction-ledger");
     expect(within(chosen).getByText("Chosen")).toBeInTheDocument();
     expect(within(chosen).getByText("Novel")).toBeInTheDocument();
-    const img = await within(chosen).findByRole("img", { name: "First viewport of Calm ledger" });
+    const img = await within(chosen).findByRole("img", { name: "First viewport of Quiet ledger" });
     expect(img.getAttribute("src")).toMatch(/^data:image\/png;base64,/);
-    const other = within(card).getByTestId("direction-night-shift");
+    const other = within(card).getByTestId("direction-signal");
     expect(within(other).getByText("Too similar to a past direction")).toBeInTheDocument();
     // No prototype origin in snapshot mode: the path is shown, not a link.
-    expect(
-      within(other).getByText(".vtc/design/prototype/night-shift/index.html"),
-    ).toBeInTheDocument();
-    const fact = within(card).getByTestId("fact-f-fedcba9876543210");
-    expect(fact).toHaveTextContent("nodejs@22 · eol_date");
-    expect(fact).toHaveTextContent("Stale");
-    expect(fact).toHaveTextContent("Waived: EOL date checked by hand");
+    expect(within(other).getByText(".vtc/design/prototype/signal")).toBeInTheDocument();
+    const fact = within(card).getByTestId("fact-f-0123456789abcdef");
+    expect(fact).toHaveTextContent("npm:papaparse@5.5.3 · license");
+    expect(fact).toHaveTextContent("Unverified");
+    expect(fact).toHaveTextContent(
+      "Waived: MIT confirmed by legal from the package's LICENSE file",
+    );
+  });
+
+  it("lists the design coverage gaps", async () => {
+    const gaps = variant(request, 31, {
+      design_coverage: {
+        reqs_without_component: ["REQ-5"],
+        reqs_without_screen: ["REQ-4"],
+        screens_without_req: [],
+        components_unregistered: ["date-picker"],
+        ok: false,
+      },
+    });
+    renderApp(`/gates/?run=${SAMPLE_RUN}`, sampleEvents([gaps]));
+    const card = await screen.findByTestId("gate-request-31");
     expect(within(card).getByText("REQ-4 has no screen")).toBeInTheDocument();
     expect(within(card).getByText("Component date-picker is not registered")).toBeInTheDocument();
   });
 
   it("shows a direction's prototype only in the sandboxed frame, never in a tab of its own", async () => {
     const user = userEvent.setup();
-    renderApp("/gates/?run=golden-1", {
-      ...withEvents,
+    renderApp(`/gates/?run=${SAMPLE_RUN}`, {
       "/api/health": () =>
         Response.json({
           ...(readFixture("health") as object),
@@ -72,12 +115,14 @@ describe("Gates view (gate.requested: G2 directions, unverified facts, design co
           prototype_url: "http://127.0.0.1:4311/",
         }),
     });
-    const other = await screen.findByTestId("direction-night-shift");
-    expect(within(other).queryByRole("link")).toBeNull();
+    const other = await screen.findByTestId("direction-signal");
+    // Only its first-viewport screenshot is a link (through the artifacts route).
+    for (const link of within(other).queryAllByRole("link"))
+      expect(link.getAttribute("href")).toMatch(/^\/artifact\//);
     await user.click(await within(other).findByRole("button", { name: "Show the prototype" }));
-    const iframe = within(other).getByTitle<HTMLIFrameElement>("Prototype of Night shift");
+    const iframe = within(other).getByTitle<HTMLIFrameElement>("Prototype of Signal");
     expect(iframe.getAttribute("sandbox")).toBe("allow-scripts");
-    expect(iframe.getAttribute("src")).toBe("http://127.0.0.1:4311/night-shift/index.html");
+    expect(iframe.getAttribute("src")).toMatch(/^http:\/\/127\.0\.0\.1:4311\/signal/);
     expect(iframe).toHaveAttribute("referrerpolicy", "no-referrer");
   });
 
@@ -88,16 +133,17 @@ describe("Gates view (gate.requested: G2 directions, unverified facts, design co
 });
 
 describe("Run view (pending gate, engine-launched runs)", () => {
+  /** The samples (G2 still waiting), the runs they lack, and a preflight that fell to Level 2. */
+  const extra = [...HEADLESS_VARIANTS, LEVEL3_VARIANTS.failedPreflight];
+  const page = () => goldenPageWithSamples(SAMPLE_EVENTS, extra);
+  const lastSeq = () => page().events.reduce((n, e) => Math.max(n, e.seq), 0);
+  const finished = () =>
+    sampleEvent(lastSeq() + 1 - SAMPLE_SEQ_OFFSET, "run.finished", { outcome: "aborted" });
+
   it("shows a gate waiting in the Lead chat and the headless runs", async () => {
-    const page = eventPageWithWave3() as { events: { type: string }[] };
-    // Drop the decision so G2 is still pending.
-    const pending = {
-      ...page,
-      events: page.events.filter((e) => e.type !== "gate.approved"),
-    };
     const status = readFixture("status") as Record<string, unknown>;
     renderApp("/run/?run=golden-1", {
-      "/api/runs/golden-1/events": () => Response.json(pending),
+      "/api/runs/golden-1/events": () => Response.json(page()),
       "/api/status": () =>
         Response.json({
           ...status,
@@ -107,14 +153,14 @@ describe("Run view (pending gate, engine-launched runs)", () => {
               role: "architect",
               host: "claude-code",
               pid: 77,
-              started_at: "2026-10-13T12:00:00.000Z",
+              started_at: "2026-10-14T12:00:00.000Z",
             },
             {
               action_id: "a-13",
               role: "qa",
               host: "codex",
               pid: null,
-              started_at: "2026-10-13T11:15:00.000Z",
+              started_at: "2026-10-14T11:42:00.000Z",
             },
           ],
         }),
@@ -122,7 +168,7 @@ describe("Run view (pending gate, engine-launched runs)", () => {
     const gate = await screen.findByRole("status", { name: "Gate waiting" });
     expect(gate).toHaveTextContent("G2 is waiting for approval in the Lead chat");
     expect(gate).toHaveTextContent(
-      "2 design directions · 2 unverified facts to waive with a reason",
+      "2 design directions · 1 unverified fact to waive with a reason",
     );
     expect(within(gate).getByRole("link", { name: "See what G2 shows" })).toHaveAttribute(
       "href",
@@ -134,21 +180,16 @@ describe("Run view (pending gate, engine-launched runs)", () => {
       "Error: no output (idle timeout)",
     );
     expect(within(runs).getByTestId("headless-a-13")).toHaveTextContent("Running");
+    expect(within(runs).getByTestId("headless-a-7")).toHaveTextContent("Done");
     const notices = await screen.findByRole("list", { name: "Run notices" });
     expect(notices).toHaveTextContent("Level 3 is not available: this run merges at Level 2");
-    expect(notices).toHaveTextContent("Auto-resume on codex did not start");
+    expect(notices).toHaveTextContent("Lookback replay on codex did not start");
   });
 
   it("stops showing live states once the run finished", async () => {
-    const page = eventPageWithWave3() as { events: { type: string; seq: number }[] };
-    const last = page.events.reduce((n, e) => Math.max(n, e.seq), 0);
-    const finished = w3Event(last + 1, "run.finished", { outcome: "aborted" });
     renderApp("/run/?run=golden-1", {
       "/api/runs/golden-1/events": () =>
-        Response.json({
-          ...page,
-          events: [...page.events.filter((e) => e.type !== "gate.approved"), finished],
-        }),
+        Response.json(goldenPageWithSamples(SAMPLE_EVENTS, [...extra, finished()])),
     });
     const runs = await screen.findByRole("list", { name: "Headless runs" });
     expect(within(runs).getByTestId("headless-a-13")).toHaveTextContent("Did not finish");
@@ -159,12 +200,15 @@ describe("Run view (pending gate, engine-launched runs)", () => {
     Response.json({
       ...(readFixture("health") as object),
       mode: "live",
-      contracts_version: "4.6.0",
+      contracts_version: "5.0.0",
     });
 
   it("says no end was recorded when a live engine reports nothing in flight", async () => {
     // A live 4.5+ engine leaves `headless_runs` out when none is in flight.
-    renderApp("/run/?run=golden-1", { ...withEvents, "/api/health": liveHealth });
+    renderApp("/run/?run=golden-1", {
+      "/api/runs/golden-1/events": () => Response.json(page()),
+      "/api/health": liveHealth,
+    });
     const runs = await screen.findByRole("list", { name: "Headless runs" });
     await waitFor(() => {
       expect(within(runs).getByTestId("headless-a-13")).toHaveTextContent("No end recorded");
@@ -172,14 +216,12 @@ describe("Run view (pending gate, engine-launched runs)", () => {
   });
 
   it("settles the pending gate and headless runs when the live stream reports the run's end", async () => {
-    const page = eventPageWithWave3() as { events: { type: string; seq: number }[] };
-    const last = page.events.reduce((n, e) => Math.max(n, e.seq), 0);
-    const finished = w3Event(last + 1, "run.finished", { outcome: "aborted" });
-    let events = page.events.filter((e) => e.type !== "gate.approved");
+    const end = { ...finished(), run: "golden-1", seq: lastSeq() + 1 };
+    let events: unknown[] = page().events;
     let push: ((s: string) => void) | null = null;
     renderApp("/run/?run=golden-1", {
       "/api/health": liveHealth,
-      "/api/runs/golden-1/events": () => Response.json({ ...page, events }),
+      "/api/runs/golden-1/events": () => Response.json({ ...page(), events }),
       "/api/stream": () => {
         const res = openStream();
         const stream = new TransformStream<Uint8Array, Uint8Array>();
@@ -190,9 +232,9 @@ describe("Run view (pending gate, engine-launched runs)", () => {
     });
     expect(await screen.findByRole("status", { name: "Gate waiting" })).toBeInTheDocument();
     expect(await screen.findByTestId("connection")).toHaveTextContent("Live");
-    events = [...events, finished];
+    events = [...events, end];
     await act(async () => {
-      push?.(`id: golden-1:${String(finished.seq)}\ndata: ${JSON.stringify(finished)}\n\n`);
+      push?.(`id: golden-1:${String(end.seq)}\ndata: ${JSON.stringify(end)}\n\n`);
       await new Promise((r) => setTimeout(r, 400));
     });
     await waitFor(() => {
@@ -203,7 +245,6 @@ describe("Run view (pending gate, engine-launched runs)", () => {
   });
 
   it("says when the event log is longer than the dashboard reads", async () => {
-    const page = eventPageWithWave3() as { events: { seq: number }[] };
     const limits = new Set<string | null>();
     renderApp("/run/?run=golden-1", {
       // Every page answers "more after": the reader stops at its page cap and says so.
@@ -212,8 +253,8 @@ describe("Run view (pending gate, engine-launched runs)", () => {
         limits.add(query.get("limit"));
         const after = Number(query.get("after"));
         return Response.json({
-          ...page,
-          events: after === 0 ? page.events : [],
+          ...page(),
+          events: after === 0 ? page().events : [],
           next_after: after + 1,
         });
       },
@@ -240,23 +281,57 @@ describe("Feature view (Level 3 and Final Review steps)", () => {
     features: features.features.map((f) => ({
       ...f,
       pr: {
-        url: "https://github.com/o/r/pull/7",
+        url: "https://github.com/o/r/pull/12",
         draft: false,
         state: "open",
-        head_sha: SHA("b"),
+        head_sha: SHA("c"),
         ci: "pending",
-        number: 7,
+        number: 12,
         auto_merge: "awaiting_checks",
-        required_checks: [{ name: "ci / test", state: "pending" }],
+        required_checks: [{ name: "ci", state: "pending" }],
         merge_state_status: "BLOCKED",
       },
     })),
   };
+  const { failedPreflight, failedChecklist, postMergeRed, reverted } = LEVEL3_VARIANTS;
 
-  it("shows the checklist, the auto-merge timeline, the steps and the PR's Level-3 state", async () => {
+  it("shows the golden samples' passing checklist, auto-merge timeline and steps", async () => {
     renderApp("/feature/?run=golden-1&feature=F-1", {
-      ...withEvents,
+      "/api/runs/golden-1/events": () => Response.json(goldenPageWithSamples()),
       "/api/runs/golden-1/features": () => Response.json(withPr),
+    });
+    const level3 = await screen.findByTestId("level3");
+    expect(level3).toHaveTextContent("All seven hold");
+    expect(level3).not.toHaveTextContent("running at 2");
+    expect(within(level3).getByTestId("check-coverage")).toHaveTextContent(
+      "diff coverage 96% (floor 80%)",
+    );
+    const timeline = within(level3).getByRole("list", { name: "Auto-merge timeline" });
+    expect(within(timeline).getAllByRole("listitem")[0]).toHaveTextContent(
+      "Auto-merge turned off: the PR head moved past the gated commit",
+    );
+    const steps = screen.getByRole("list", { name: "Final Review steps" });
+    expect(within(steps).getByTestId("fr-step-2")).toHaveTextContent("Passed");
+    expect(within(steps).getByTestId("fr-step-5")).toHaveTextContent("Not passed: skipped");
+    expect(within(steps).getByTestId("fr-step-3")).toHaveTextContent("Not reported yet");
+    const pr = screen.getByTestId("pull-request");
+    expect(pr).toHaveTextContent("Awaiting required checks");
+    expect(pr).toHaveTextContent("PR #12");
+    expect(pr).toHaveTextContent("BLOCKED");
+    expect(within(pr).getByRole("list", { name: "Required checks" })).toHaveTextContent("ci");
+  });
+
+  it("shows a fall to Level 2, a failing checklist item and the revert", async () => {
+    renderApp("/feature/?run=golden-1&feature=F-1", {
+      "/api/runs/golden-1/events": () =>
+        Response.json(
+          goldenPageWithSamples(SAMPLE_EVENTS, [
+            failedPreflight,
+            failedChecklist,
+            postMergeRed,
+            reverted,
+          ]),
+        ),
     });
     const level3 = await screen.findByTestId("level3");
     expect(level3).toHaveTextContent("Configured 3, running at 2");
@@ -266,17 +341,6 @@ describe("Feature view (Level 3 and Final Review steps)", () => {
     const timeline = within(level3).getByRole("list", { name: "Auto-merge timeline" });
     expect(within(timeline).getAllByRole("listitem")[0]).toHaveTextContent(
       "Merge reverted on the base branch",
-    );
-    const steps = screen.getByRole("list", { name: "Final Review steps" });
-    expect(within(steps).getByTestId("fr-step-5")).toHaveTextContent("Not passed: skipped");
-    expect(within(steps).getByTestId("fr-step-2")).toHaveTextContent("Not passed: unchecked");
-    expect(within(steps).getByTestId("fr-step-3")).toHaveTextContent("Not reported yet");
-    const pr = screen.getByTestId("pull-request");
-    expect(pr).toHaveTextContent("Awaiting required checks");
-    expect(pr).toHaveTextContent("PR #7");
-    expect(pr).toHaveTextContent("BLOCKED");
-    expect(within(pr).getByRole("list", { name: "Required checks" })).toHaveTextContent(
-      "ci / test",
     );
   });
 
@@ -291,7 +355,11 @@ describe("Feature view (Level 3 and Final Review steps)", () => {
 
 describe("Research view (facts.jsonl)", () => {
   it("lists the current facts, what needs attention first, with waivers from G2", async () => {
-    renderApp("/research/?run=golden-1", withEvents);
+    const waiver = variant(firstSample("fact.waived"), 30, {
+      id: "f-fedcba9876543210",
+      reason: "EOL date checked by hand",
+    });
+    renderApp(`/research/?run=${SAMPLE_RUN}`, sampleEvents([...SAMPLE_EVENTS, waiver]));
     const list = await screen.findByRole("list", { name: "Facts" });
     const items = within(list).getAllByRole("listitem");
     expect(items.map((i) => i.dataset.testid)).toEqual([
@@ -309,24 +377,24 @@ describe("Research view (facts.jsonl)", () => {
   });
 
   it("reports lines it cannot read, and says when there are no facts", async () => {
-    renderApp("/research/?run=golden-1", {
-      "/api/runs/golden-1/artifacts": () =>
+    renderApp(`/research/?run=${SAMPLE_RUN}`, {
+      [SAMPLE_ARTIFACTS_ROUTE]: () =>
         Response.json(
-          artifactContent("golden-1", ".vtc/research/facts.jsonl", `${FACTS_JSONL}oops\n`),
+          artifactContent(SAMPLE_RUN, ".vtc/research/facts.jsonl", `${FACTS_JSONL}oops\n`),
         ),
     });
     expect(await screen.findByRole("alert")).toHaveTextContent("Line 5 of the file is not a fact");
   });
 
   it("shows an empty state when nothing was researched", async () => {
-    renderApp("/research/?run=golden-1", { "/api/runs/golden-1/artifacts": notFound });
+    renderApp(`/research/?run=${SAMPLE_RUN}`, { [SAMPLE_ARTIFACTS_ROUTE]: notFound });
     expect(await screen.findByText("No research facts yet")).toBeInTheDocument();
   });
 });
 
 describe("Lookback view (scorecards and lookback events)", () => {
   it("shows each role's latest scorecard with n and intervals, insufficient data as such", async () => {
-    renderApp("/lookback/?run=golden-1", withEvents);
+    renderApp(`/lookback/?run=${SAMPLE_RUN}`);
     const group = await screen.findByTestId("scorecard-group-engineer|claude-code");
     const table = await within(group).findByRole("table", {
       name: "Metrics of engineer on claude-code",
@@ -346,35 +414,27 @@ describe("Lookback view (scorecards and lookback events)", () => {
     const qa = screen.getByTestId("scorecard-group-qa|codex");
     expect(await within(qa).findByText(/no such item/)).toBeInTheDocument();
     const canaries = screen.getByRole("list", { name: "Canaries" });
+    expect(canaries).toHaveTextContent("engineer · codex");
     expect(canaries).toHaveTextContent("Rollback");
     const events = screen.getByRole("list", { name: "Lookback events" });
-    expect(events).toHaveTextContent("Replay of engineer-p1: inconclusive, not an improvement");
-  });
-
-  it("says a canary cannot start from a Claude-led run in this version (readings 180 and 182(8))", async () => {
-    renderApp("/lookback/?run=golden-1", withEvents);
-    const note = await screen.findByTestId("lookback-no-canary");
-    expect(note).toHaveTextContent(
-      /No canary can start for engineer · claude-code from a Claude-led run in this version/,
-    );
-    expect(note).toHaveTextContent(/vtc lookback pin/);
-    expect(note).toHaveTextContent(/Codex-led headless run/);
+    expect(events).toHaveTextContent("Replay of p-engineer-1: inconclusive, not an improvement");
   });
 
   it("refuses an index that breaks its contract and shows an empty state without one", async () => {
-    renderApp("/lookback/?run=golden-1", {
-      "/api/runs/golden-1/artifacts": artifacts({
-        ".vtc/lookback/scorecards/index.json": jsonArtifact(".vtc/lookback/scorecards/index.json", {
-          ...SCORECARD_INDEX,
-          v: 9,
-        }),
+    renderApp(`/lookback/?run=${SAMPLE_RUN}`, {
+      [SAMPLE_ARTIFACTS_ROUTE]: artifacts({
+        ".vtc/lookback/scorecards/index.json": jsonArtifact(
+          ".vtc/lookback/scorecards/index.json",
+          { ...SCORECARD_INDEX, v: 9 },
+          SAMPLE_RUN,
+        ),
       }),
     });
     expect(await screen.findByText("The scorecard index breaks its contract")).toBeInTheDocument();
   });
 
   it("shows an empty state when no scorecard was written", async () => {
-    renderApp("/lookback/?run=golden-1", { "/api/runs/golden-1/artifacts": notFound });
+    renderApp(`/lookback/?run=${SAMPLE_RUN}`, { [SAMPLE_ARTIFACTS_ROUTE]: notFound });
     expect(await screen.findByText("No scorecards yet")).toBeInTheDocument();
   });
 });

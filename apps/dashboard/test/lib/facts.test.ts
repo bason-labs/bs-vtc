@@ -1,7 +1,8 @@
 import { describe, expect, it } from "vitest";
 import { FactRowSchema, FactStatusSchema } from "@vtc/shared";
 import { currentFacts, factCounts, factStatusMeta, parseFactsJsonl } from "@/lib/facts";
-import { FACT_EVENTS, FACTS_JSONL, GATE_EVENTS, w3Event } from "../wave3-fixtures";
+import { FACTS_JSONL } from "../dev-samples";
+import { firstSample, sampleEvent, variant } from "../golden-samples";
 
 describe("parseFactsJsonl (.vtc/research/facts.jsonl)", () => {
   it("reads every FactRow line", () => {
@@ -84,7 +85,11 @@ describe("currentFacts", () => {
   });
 
   it("applies a later fact.waived event with its reason", () => {
-    const facts = currentFacts(rows, GATE_EVENTS);
+    const waiver = variant(firstSample("fact.waived"), 30, {
+      id: "f-fedcba9876543210",
+      reason: "EOL date checked by hand",
+    });
+    const facts = currentFacts(rows, [waiver]);
     const waived = facts.find((f) => f.id === "f-fedcba9876543210")!;
     expect(waived.status.label).toBe("Waived");
     expect(waived.waiver).toBe("EOL date checked by hand");
@@ -92,15 +97,16 @@ describe("currentFacts", () => {
 
   it("applies a later fact.verified event, but not one older than the row", () => {
     const later = currentFacts(rows, [
-      w3Event(90, "fact.verified", { id: "f-2222222222222222", status: "conflicting" }),
+      sampleEvent(90, "fact.verified", { id: "f-2222222222222222", status: "conflicting" }),
     ]);
     expect(later.find((f) => f.id === "f-2222222222222222")?.status.label).toBe("Conflicting");
     const older = currentFacts(rows, [
-      {
-        ...FACT_EVENTS[0]!,
-        ts: "2026-01-01T00:00:00.000Z",
-        data: { id: "f-2222222222222222", status: "verified" },
-      },
+      variant(
+        firstSample("fact.verified"),
+        31,
+        { id: "f-2222222222222222", status: "verified", detail: undefined },
+        { ts: "2026-01-01T00:00:00.000Z" },
+      ),
     ]);
     expect(older.find((f) => f.id === "f-2222222222222222")?.status.label).toBe("Unverified");
   });
@@ -146,7 +152,7 @@ describe("currentFacts", () => {
   it("counts and waives a re-recorded fact once", () => {
     const facts = currentFacts(
       [...rows, reverified],
-      [w3Event(95, "fact.waived", { id: stale.id, reason: "Checked by hand" })],
+      [sampleEvent(95, "fact.waived", { id: stale.id, reason: "Checked by hand" })],
     );
     expect(factCounts(facts).reduce((n, c) => n + c.n, 0)).toBe(3);
     expect(facts.filter((f) => f.waiver === "Checked by hand")).toHaveLength(1);

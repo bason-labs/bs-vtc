@@ -9,7 +9,14 @@ import {
 } from "@/lib/notices";
 import { readFixture } from "../fixtures";
 import { NOTICE_EVENTS, noticeEvent } from "../notice-fixtures";
-import { w3Event, WAVE3_EVENTS } from "../wave3-fixtures";
+import {
+  AUTH_PREFLIGHT,
+  firstSample,
+  HEADLESS_VARIANTS,
+  LEVEL3_VARIANTS,
+  SAMPLE_EVENTS,
+  variant,
+} from "../golden-samples";
 
 const byType = (type: string, kind?: string) =>
   NOTICE_EVENTS.find(
@@ -180,8 +187,18 @@ describe("loadRunEvents", () => {
   });
 });
 
-describe("wave-3 notices (Level 3, headless runs, lookback; contracts 4.5.0)", () => {
-  const notices = runNotices(WAVE3_EVENTS);
+describe("wave-3 notices (Level 3, headless runs, lookback; golden samples)", () => {
+  const { failedPreflight, postMergeRed, reverted } = LEVEL3_VARIANTS;
+  /** The samples, plus the failures they lack (each a changed sample event). */
+  const EVENTS = [
+    ...SAMPLE_EVENTS,
+    failedPreflight,
+    postMergeRed,
+    reverted,
+    ...HEADLESS_VARIANTS,
+    AUTH_PREFLIGHT,
+  ];
+  const notices = runNotices(EVENTS);
   const of = (type: string) => notices.filter((n) => n.type === type);
 
   it("explains a failed Level-3 preflight and what to configure", () => {
@@ -194,22 +211,17 @@ describe("wave-3 notices (Level 3, headless runs, lookback; contracts 4.5.0)", (
     expect(of("merge.preflight")[0]?.note).toMatch(/never changes repository settings/);
   });
 
-  it("shows a passed preflight as nothing", () => {
-    const ok = w3Event(95, "merge.preflight", {
-      configured_level: 3,
-      effective_level: 3,
-      ok: true,
-      policy: null,
-    });
-    expect(noticeForEvent(ok)).toBeNull();
+  it("shows the samples' passed preflight as nothing", () => {
+    expect(noticeForEvent(firstSample("merge.preflight"))).toBeNull();
   });
 
   it("shows auto-merge turned off, a red base CI and a revert for the feature", () => {
-    expect(runNotices(WAVE3_EVENTS, "F-1").map((n) => n.type)).toEqual([
+    expect(runNotices(EVENTS, "F-1").map((n) => n.type)).toEqual([
       "feature.reverted",
       "feature.post_merge_ci",
       "feature.auto_merge_disabled",
     ]);
+    expect(of("feature.auto_merge_disabled")[0]?.detail).toMatch(/dddddddddddd/);
     expect(of("feature.post_merge_ci")[0]).toMatchObject({
       tone: "danger",
       title: "Base CI failed after the merge",
@@ -219,66 +231,59 @@ describe("wave-3 notices (Level 3, headless runs, lookback; contracts 4.5.0)", (
   });
 
   it("marks a red base CI resolved once a later poll of the same commit is green", () => {
-    const green = w3Event(
-      96,
-      "feature.post_merge_ci",
-      { merge_commit: "c".repeat(40), status: "green", runs: [] },
-      { feature: "F-1" },
-    );
+    const green = variant(postMergeRed, 96, { status: "green", runs: [] });
     expect(noticeForEvent(green)).toBeNull();
-    const ci = runNotices([...WAVE3_EVENTS, green]).find((n) => n.type === "feature.post_merge_ci");
+    const ci = runNotices([...EVENTS, green]).find((n) => n.type === "feature.post_merge_ci");
     expect(ci?.resolved).toBe(true);
   });
 
-  it("shows a headless run that did not finish and a preflight that stopped one", () => {
+  it("shows a headless run that did not finish and the preflights that stopped one", () => {
     expect(of("headless.ended")[0]).toMatchObject({
       tone: "danger",
       title: "Headless engineer run a-12 ended: Error: no output (idle timeout)",
     });
-    expect(of("headless.preflight")[0]).toMatchObject({
+    const [auth, replay] = of("headless.preflight");
+    expect(auth).toMatchObject({
       tone: "danger",
       title: "Auto-resume on codex did not start",
       detail: "Failed check: the host is not logged in. codex login status: not logged in",
     });
-    expect(of("headless.preflight")[0]?.note).toMatch(/never retries/);
+    expect(auth?.note).toMatch(/never retries/);
+    expect(replay).toMatchObject({
+      tone: "warn",
+      title: "Lookback replay on codex did not start",
+    });
+    expect(replay?.detail).toMatch(/too little of the usage window is left/);
   });
 
   it("marks a failed preflight resolved by a later passing one on the same host", () => {
-    const ok = w3Event(97, "headless.preflight", {
-      host: "codex",
-      purpose: "auto_resume",
-      ok: true,
-    });
-    expect(
-      runNotices([...WAVE3_EVENTS, ok]).find((n) => n.type === "headless.preflight")?.resolved,
-    ).toBe(true);
+    const ok = variant(AUTH_PREFLIGHT, 97, { ok: true, failed: undefined, detail: undefined });
+    const auth = (events: readonly VtcEvent[]) =>
+      runNotices(events).find((n) => n.seq === AUTH_PREFLIGHT.seq)?.resolved;
+    expect(auth([...EVENTS, ok])).toBe(true);
   });
 
   it("keeps a failed preflight open when the later passing one had another purpose", () => {
-    const other = w3Event(97, "headless.preflight", {
-      host: "codex",
+    const other = variant(AUTH_PREFLIGHT, 97, {
       purpose: "lookback_replay",
       ok: true,
+      failed: undefined,
+      detail: undefined,
     });
-    expect(
-      runNotices([...WAVE3_EVENTS, other]).find((n) => n.type === "headless.preflight")?.resolved,
-    ).toBe(false);
+    expect(runNotices([...EVENTS, other]).find((n) => n.seq === AUTH_PREFLIGHT.seq)?.resolved).toBe(
+      false,
+    );
   });
 
   it("marks a failed headless run resolved once a later run of the same step ends done", () => {
     const done = (task: string, role: string) =>
-      w3Event(
-        98,
-        "headless.ended",
-        { action_id: "a-30", outcome: "done", exit_code: 0, duration_ms: 60_000 },
-        { role, host: "codex", task },
-      );
+      variant(firstSample("headless.ended"), 98, { action_id: "a-30" }, { role, task });
     const ended = (events: readonly VtcEvent[]) =>
       runNotices(events).find((n) => n.type === "headless.ended")?.resolved;
-    expect(ended(WAVE3_EVENTS)).toBe(false);
-    expect(ended([...WAVE3_EVENTS, done("T-1", "engineer")])).toBe(true);
-    expect(ended([...WAVE3_EVENTS, done("T-2", "engineer")])).toBe(false);
-    expect(ended([...WAVE3_EVENTS, done("T-1", "qa")])).toBe(false);
+    expect(ended(EVENTS)).toBe(false);
+    expect(ended([...EVENTS, done("T-1", "engineer")])).toBe(true);
+    expect(ended([...EVENTS, done("T-2", "engineer")])).toBe(false);
+    expect(ended([...EVENTS, done("T-1", "qa")])).toBe(false);
   });
 
   it("resolves a failed run with no task by a later done run of that role on that host", () => {
@@ -288,17 +293,17 @@ describe("wave-3 notices (Level 3, headless runs, lookback; contracts 4.5.0)", (
       host: "claude-code" | "codex",
       task?: string,
     ) =>
-      w3Event(
+      variant(
+        firstSample("headless.ended"),
         seq,
-        "headless.ended",
         {
           action_id: `a-${String(seq)}`,
           outcome,
-          ...(outcome === "error" ? { cause: "timeout" } : {}),
+          cause: outcome === "error" ? "timeout" : undefined,
           exit_code: null,
           duration_ms: 60_000,
         },
-        { role: "architect", host, ...(task === undefined ? {} : { task }) },
+        { role: "architect", host, task },
       );
     const failed = run(90, "error", "codex");
     const resolved = (later: VtcEvent) =>
@@ -311,13 +316,28 @@ describe("wave-3 notices (Level 3, headless runs, lookback; contracts 4.5.0)", (
   it("shows a canary rollback", () => {
     expect(of("lookback.rolled_back")[0]).toMatchObject({
       tone: "warn",
-      title: "Prompt canary rolled back for engineer on claude-code",
+      title: "Prompt canary rolled back for engineer on codex",
+    });
+  });
+
+  it("shows the samples' prompt_selection incident as a notice", () => {
+    expect(of("incident.recorded")[0]).toMatchObject({
+      tone: "warn",
+      title: "A pinned or canary prompt was not used",
     });
   });
 
   it("ignores the wave-3 events that need no attention", () => {
-    for (const e of WAVE3_EVENTS) {
-      if (["gate.requested", "fact.waived", "lookback.dispatched"].includes(e.type)) {
+    for (const e of SAMPLE_EVENTS) {
+      if (
+        [
+          "gate.requested",
+          "fact.waived",
+          "lookback.dispatched",
+          "feature.checklist",
+          "headless.started",
+        ].includes(e.type)
+      ) {
         expect(noticeForEvent(e)).toBeNull();
       }
     }

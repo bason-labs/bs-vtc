@@ -8,6 +8,7 @@ import { hrefs } from "@/lib/router";
 import { Link } from "@/components/app/Link";
 import { Badge, StatusPill } from "@/components/ui";
 import { VisualSummaryBlock } from "@/components/visual/VisualSummaryBlock";
+import { REDACT } from "@/lib/redact";
 
 const linkClass = "inline-flex items-center gap-1 text-accent-fg underline";
 
@@ -29,7 +30,7 @@ function Layer({ run, group }: { run: string; group: GateLayerGroup }) {
               <StatusPill meta={r.status} />
               {r.blocking ? null : <Badge>warn only</Badge>}
             </div>
-            <ul className="text-muted-fg">
+            <ul className="text-muted-fg" {...REDACT}>
               {r.details.map((d) => (
                 <li key={d}>{d}</li>
               ))}

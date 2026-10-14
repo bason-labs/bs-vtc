@@ -12,6 +12,7 @@ describe("fixtureNameFor", () => {
     ["/api/runs", "runs"],
     ["/api/usage", "usage"],
     ["/api/spend", "client-spend"],
+    ["/api/automation", "automation"],
     ["/api/runs/golden-1/events?after=0&limit=500", "events"],
     ["/api/runs/golden-1/tasks", "tasks"],
     ["/api/runs/golden-1/tasks/T-1", "task-T-1"],

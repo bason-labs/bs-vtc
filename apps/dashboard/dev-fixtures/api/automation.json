@@ -1,0 +1,98 @@
+{
+  "issues": true,
+  "prs": true,
+  "upstream": true,
+  "upstream_repo": "bason-labs/bs-vtc",
+  "evidence_hosting": "branch",
+  "notes": [
+    "ffmpeg is not installed: automatic PRs carry the WebM link and screenshots, labelled evidence: partial"
+  ],
+  "items": [
+    {
+      "target": { "kind": "project", "repo": "example-org/golden-app" },
+      "kind": "ci_failure",
+      "fingerprint": "1a2b3c4d5e6f7081",
+      "issue": {
+        "number": 41,
+        "url": "https://github.com/example-org/golden-app/issues/41",
+        "state": "open"
+      },
+      "pr": {
+        "number": 42,
+        "url": "https://github.com/example-org/golden-app/pull/42",
+        "state": "draft",
+        "evidence": "complete"
+      },
+      "first_at": "2026-10-14T10:30:00.000Z",
+      "last_at": "2026-10-14T11:10:00.000Z"
+    },
+    {
+      "target": { "kind": "upstream", "repo": "bason-labs/bs-vtc" },
+      "kind": "lookback",
+      "fingerprint": "9f8e7d6c5b4a3921",
+      "issue": {
+        "number": 301,
+        "url": "https://github.com/bason-labs/bs-vtc/issues/301",
+        "state": "open"
+      },
+      "pr": {
+        "number": 302,
+        "url": "https://github.com/bason-labs/bs-vtc/pull/302",
+        "state": "open",
+        "evidence": "partial"
+      },
+      "first_at": "2026-10-14T09:00:00.000Z",
+      "last_at": "2026-10-14T11:20:00.000Z"
+    },
+    {
+      "target": { "kind": "upstream", "repo": "bason-labs/bs-vtc" },
+      "kind": "defect",
+      "fingerprint": "0011223344556677",
+      "issue": {
+        "number": 290,
+        "url": "https://github.com/bason-labs/bs-vtc/issues/290",
+        "state": "closed"
+      },
+      "pr": {
+        "number": 295,
+        "url": "https://github.com/bason-labs/bs-vtc/pull/295",
+        "state": "merged",
+        "evidence": "complete"
+      },
+      "first_at": "2026-10-10T08:00:00.000Z",
+      "last_at": "2026-10-13T16:00:00.000Z"
+    },
+    {
+      "target": { "kind": "project", "repo": "example-org/golden-app" },
+      "kind": "parked",
+      "fingerprint": "aabbccddeeff0011",
+      "issue": {
+        "number": 38,
+        "url": "https://github.com/example-org/golden-app/issues/38",
+        "state": "closed"
+      },
+      "pr": null,
+      "first_at": "2026-10-12T12:00:00.000Z",
+      "last_at": "2026-10-12T12:00:00.000Z"
+    }
+  ],
+  "skipped": [
+    {
+      "at": "2026-10-14T11:30:00.000Z",
+      "reason": "rate_limit",
+      "kind": "finding",
+      "detail": "5 new issues already opened in example-org/golden-app today; queued on the automation dashboard issue"
+    },
+    {
+      "at": "2026-10-14T10:45:00.000Z",
+      "reason": "privacy",
+      "kind": "cost",
+      "detail": "the upstream report named a project path; nothing was sent"
+    },
+    {
+      "at": "2026-10-13T18:00:00.000Z",
+      "reason": "paused",
+      "detail": "vtc pause: no automatic action until vtc resume"
+    }
+  ]
+}

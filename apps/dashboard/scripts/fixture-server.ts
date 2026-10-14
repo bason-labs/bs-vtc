@@ -29,6 +29,7 @@ import {
   resolveDashboardAsset,
 } from "@vtc/shared";
 import {
+  apiFixtureFile,
   artifactContent,
   DEV_PROTOTYPE_DIR,
   devArtifact,
@@ -225,8 +226,8 @@ const server = createServer((req, res) => {
   }
   if (url.pathname === "/api" || url.pathname.startsWith("/api/")) {
     const name = fixtureNameFor(method, `${url.pathname}${url.search}`);
-    const file = name === null ? null : join(fixtures, "api", `${name}.json`);
-    if (file === null || !existsSync(file)) {
+    const file = name === null ? null : apiFixtureFile(join(fixtures, "api"), name);
+    if (file === null) {
       notFound(res);
       return;
     }

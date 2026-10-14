@@ -18,6 +18,7 @@ import {
   type DesignTheme,
 } from "@/lib/design";
 import { hrefs, navigate } from "@/lib/router";
+import { useEvidenceMode } from "@/lib/useEvidenceMode";
 import { useResource } from "@/lib/useResource";
 import { useEngine } from "@/components/app/EngineProvider";
 import { CommentForm, fieldClass, type CommentDraft } from "@/components/design/CommentForm";
@@ -117,6 +118,8 @@ function Review({
     readOptional(() => c.artifact(run, reviewsPath, s)),
   );
   const [placing, setPlacing] = useState(false);
+  // Evidence mode is read-only: no pin can be placed or posted (AD-27 rule 6).
+  const readOnly = useEvidenceMode() !== "off";
   const [draft, setDraft] = useState<DraftPin | null>(null);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -149,7 +152,7 @@ function Review({
   };
 
   const submit = async (fields: CommentDraft) => {
-    if (draft === null) return;
+    if (draft === null || readOnly) return;
     const built = buildReviewInput({
       screen: screen.id,
       state,
@@ -262,25 +265,27 @@ function Review({
             />
           ) : (
             <>
-              <div className="flex flex-wrap items-center gap-2">
-                <Button
-                  size="sm"
-                  variant={placing ? "primary" : "secondary"}
-                  aria-pressed={placing}
-                  leftIcon={<MessageSquarePlus aria-hidden className="size-4" />}
-                  onClick={() => {
-                    setPlacing((p) => !p);
-                    setSaved(null);
-                  }}
-                >
-                  Add comment
-                </Button>
-                <span className="text-xs text-muted-fg">
-                  {placing
-                    ? "Click the point the comment is about."
-                    : "Turn this on, then click the frame to pin a comment."}
-                </span>
-              </div>
+              {readOnly ? null : (
+                <div className="flex flex-wrap items-center gap-2">
+                  <Button
+                    size="sm"
+                    variant={placing ? "primary" : "secondary"}
+                    aria-pressed={placing}
+                    leftIcon={<MessageSquarePlus aria-hidden className="size-4" />}
+                    onClick={() => {
+                      setPlacing((p) => !p);
+                      setSaved(null);
+                    }}
+                  >
+                    Add comment
+                  </Button>
+                  <span className="text-xs text-muted-fg">
+                    {placing
+                      ? "Click the point the comment is about."
+                      : "Turn this on, then click the frame to pin a comment."}
+                  </span>
+                </div>
+              )}
               <PrototypeFrame
                 src={src}
                 title={`Prototype: ${screen.id}, state ${state}, ${String(viewport)} px, ${theme}`}
@@ -288,7 +293,7 @@ function Review({
                 height={vp.height}
                 pins={pinsInView(pins, selection)}
                 draft={draft}
-                placing={placing && draft === null}
+                placing={placing && draft === null && !readOnly}
                 onPlace={(pin) => {
                   setDraft(pin);
                   setError(null);
@@ -298,7 +303,7 @@ function Review({
           )}
         </div>
         <div className="min-w-0 space-y-4">
-          {draft === null ? null : (
+          {draft === null || readOnly ? null : (
             <CommentForm
               pin={draft}
               saving={saving}

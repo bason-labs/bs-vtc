@@ -13,6 +13,7 @@ import { DiffSection } from "./DiffSection";
 import { FindingItem, Section, Stat } from "./DrawerParts";
 import { GateReports } from "./GateReports";
 import { nodeEyebrow } from "./StepNode";
+import { REDACT } from "@/lib/redact";
 
 export interface NodeDrawerProps {
   readonly run: string;
@@ -154,7 +155,9 @@ export function NodeDrawer({ run, node, detail, onClose }: NodeDrawerProps) {
                       <span className="font-medium">{t.label}</span>
                     </p>
                     {t.detail === null ? null : (
-                      <p className="break-words text-muted-fg">{t.detail}</p>
+                      <p className="break-words text-muted-fg" {...REDACT}>
+                        {t.detail}
+                      </p>
                     )}
                   </li>
                 ))}
@@ -164,9 +167,11 @@ export function NodeDrawer({ run, node, detail, onClose }: NodeDrawerProps) {
 
           <Section title="Transcript">
             <p className="text-xs">
-              {model.transcript.session === null
-                ? "No host session recorded yet."
-                : `Host ${model.transcript.session}.`}{" "}
+              {model.transcript.session === null ? (
+                "No host session recorded yet."
+              ) : (
+                <span {...REDACT}>Host {model.transcript.session}.</span>
+              )}{" "}
               <span className="text-muted-fg">
                 Full transcripts stay on this machine in{" "}
                 <code className="font-mono">{model.transcript.location}</code>; the engine does not

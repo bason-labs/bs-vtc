@@ -5,6 +5,8 @@
  * links switch views with `history.pushState` and no page load; a hard load of any page (or the
  * engine's SPA fallback to `index.html`) lands on the same view.
  */
+import { withEvidenceParam } from "./evidence-mode";
+
 export type View =
   | "runs"
   | "run"
@@ -17,6 +19,7 @@ export type View =
   | "gates"
   | "research"
   | "lookback"
+  | "automation"
   | "not_found";
 
 export const VIEW_PATHS = {
@@ -31,6 +34,7 @@ export const VIEW_PATHS = {
   gates: "/gates/",
   research: "/research/",
   lookback: "/lookback/",
+  automation: "/automation/",
 } as const satisfies Record<Exclude<View, "not_found">, string>;
 
 const BY_PATH = new Map<string, View>(
@@ -85,6 +89,8 @@ export const hrefs = {
   research: (run: string): string => withQuery(VIEW_PATHS.research, { run }),
   /** Lookback scorecards and the run's canaries, replays and proposals. */
   lookback: (run: string): string => withQuery(VIEW_PATHS.lookback, { run }),
+  /** Automatic issues and PRs of this repo (D-ca). */
+  automation: (): string => VIEW_PATHS.automation,
 };
 
 const listeners = new Set<() => void>();
@@ -105,8 +111,10 @@ function notify(): void {
 /**
  * Switches view without a page load. `replace` swaps the current history entry. A new page
  * scrolls to the top; a query change on the same page (selecting a node) keeps the position.
+ * Evidence mode (`?evidence=`) stays on across views (`withEvidenceParam`).
  */
-export const navigate = (href: string, options: { replace?: boolean } = {}): void => {
+export const navigate = (target: string, options: { replace?: boolean } = {}): void => {
+  const href = withEvidenceParam(target, window.location.search);
   const before = window.location.pathname;
   if (options.replace === true) window.history.replaceState(null, "", href);
   else window.history.pushState(null, "", href);

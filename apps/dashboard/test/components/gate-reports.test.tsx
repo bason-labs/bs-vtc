@@ -4,13 +4,14 @@ import { describe, expect, it } from "vitest";
 import { GateReportSchema, TaskDetailSchema, type GateReport } from "@vtc/shared";
 import { GateReports } from "@/components/flows/GateReports";
 import { readFixture } from "../fixtures";
+import { SAMPLE_GATE_REPORT } from "../golden-samples";
 import {
   VISUAL_REPORT_PATH,
   VISUAL_SUMMARY_PROJECT_PASS,
   VISUAL_SUMMARY_PTRACE,
   VISUAL_SUMMARY_SKIPPED,
   VISUAL_SUMMARY_UNCHECKED,
-} from "../wave3-fixtures";
+} from "../dev-samples";
 
 const golden = (): GateReport => {
   const [report] = TaskDetailSchema.parse(readFixture("task-T-1")).gate_reports;
@@ -144,5 +145,17 @@ describe("GateReports (drawer: gate-report detail per layer)", () => {
     const visual = screen.getByRole("region", { name: "Visual QA" });
     expect(within(visual).getByText("Toolchain: VTC's browser store")).toBeInTheDocument();
     expect(within(visual).queryByRole("note", { name: "Toolchain" })).toBeNull();
+  });
+
+  it("renders engine core's recorded gate report with its visual summary", () => {
+    render(<GateReports run="golden-wave3" reports={[SAMPLE_GATE_REPORT]} />);
+    const report = screen.getByTestId("gate-report-0");
+    const l2 = within(report).getByRole("region", { name: "L2 Tests" });
+    expect(l2).toHaveTextContent("48");
+    const visual = within(report).getByRole("region", { name: "Visual QA" });
+    expect(within(visual).getByText("Toolchain: the project's own Playwright")).toBeInTheDocument();
+    expect(within(visual).getByRole("note", { name: "Toolchain" })).toHaveTextContent(
+      "Not a Level-3 pass",
+    );
   });
 });
