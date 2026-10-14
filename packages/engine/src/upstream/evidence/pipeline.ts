@@ -4,9 +4,11 @@
  * injected `EvidenceRecorder` (retrying failed shots once), add the visual gate's before/after
  * screenshots, make a GIF when ffmpeg is present, apply the budget, publish (`branch` or
  * `attach`), and write the manifest. No file at all, a gate report that does not render, or an
- * evidence branch that cannot be pushed (each tried twice) fails the step: the caller then opens
- * no PR and raises "evidence capture failed". The opt-outs are checked again right before the
- * evidence branch is pushed (`beforePublish`).
+ * evidence branch that cannot be pushed (each tried twice; each push attempt fetches the shared
+ * branch and rebuilds first) fails the step and no PR opens. A capture failure makes the caller
+ * raise "evidence capture failed"; a refused push (`pushRefused`) does not, since another
+ * installation pushing the shared branch is not a VTC defect. The opt-outs are checked again
+ * right before the evidence branch is pushed (`beforePublish`).
  */
 import { copyFileSync, existsSync, mkdirSync, readFileSync, statSync } from "node:fs";
 import { join } from "node:path";
@@ -26,6 +28,7 @@ import {
   type GitHubRepo,
   type GitPlumbing,
 } from "@vtc/shared";
+import type { RemoteRefs } from "../remote-refs.js";
 import { isAutomationSkip } from "../skip.js";
 import { makeGif, type FfmpegCommand } from "./gif.js";
 import { attachmentsFor, publishToEvidenceBranch, renderEvidenceSection } from "./hosting.js";
@@ -97,6 +100,8 @@ export interface EvidenceDeps {
   readonly ffmpegCommand?: FfmpegCommand | undefined;
   /** `branch` hosting: plumbing of the repo the PR goes to. */
   readonly plumbing?: GitPlumbing | undefined;
+  /** `branch` hosting: fetches the shared evidence branch before each push attempt. */
+  readonly refs?: RemoteRefs | undefined;
   readonly now: () => Date;
   /** Runs right before the evidence branch is pushed (the opt-outs, again); may throw a skip. */
   readonly beforePublish?: () => void;
@@ -112,7 +117,12 @@ export type EvidenceOutcome =
       readonly attach: readonly EvidenceAttachment[];
       readonly partial: boolean;
     }
-  | { readonly ok: false; readonly detail: string };
+  | {
+      readonly ok: false;
+      readonly detail: string;
+      /** The evidence was captured but the shared branch refused both pushes. */
+      readonly pushRefused?: true;
+    };
 
 const capturedFiles = (
   dir: string,
@@ -275,10 +285,15 @@ export const prepareEvidence = async (
         kind: request.kind,
         fingerprint: request.fingerprint,
         at: deps.now(),
+        refs: deps.refs,
       });
     });
     if (published === null) {
-      return { ok: false, detail: "the evidence branch could not be pushed (2 tries)" };
+      return {
+        ok: false,
+        detail: "the evidence branch could not be pushed (2 tries, each after a fetch)",
+        pushRefused: true,
+      };
     }
     urls = published;
   }

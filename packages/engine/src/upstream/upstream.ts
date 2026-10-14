@@ -72,6 +72,12 @@ import { upstreamIssueSlots } from "./report-render.js";
 import { ensureDirNoFollow, repoFileName } from "./safe-fs.js";
 import { AutomationSkip, isAutomationSkip } from "./skip.js";
 import { createKeyedSerial } from "./queue.js";
+import {
+  AUTO_BRANCHES_REFSPEC,
+  refreshRemote,
+  vtcAuthored,
+  type RemoteRefs,
+} from "./remote-refs.js";
 import { createStaging, stagingRootFor, type Staging } from "./staging.js";
 import { evaluateTrigger, type AutomationFact, type AutoWorkItem } from "./triggers.js";
 
@@ -140,6 +146,16 @@ export interface UpstreamDeps {
    * dropped; absent, only the single-file binary's own frames count (fail closed).
    */
   readonly vtcRoots?: readonly string[];
+  /**
+   * Fetch and commit-message reading for a repo (engine git; `GitPlumbing` has neither, see
+   * `remote-refs.ts`). Right before VTC builds a commit on a shared branch (`vtc-evidence`,
+   * `vtc/auto/*`) it fetches that branch, and it recognises a head another VTC installation
+   * pushed by its `Generated-by: VTC` trailer. Absent, VTC builds on the remote-tracking refs as
+   * last fetched by the user's own git: a stale ref then makes the (never forced) push fail, the
+   * PR is skipped and no "evidence capture failed" is raised; and a branch head missing from
+   * this installation's ledger counts as someone else's.
+   */
+  readonly remoteRefs?: (repoRoot: string) => RemoteRefs;
 }
 
 export type AutomationOutcome =
@@ -614,10 +630,13 @@ export const createUpstream = (deps: UpstreamDeps): Upstream => {
 
   /**
    * Commits `input.source.changes` on the default branch and pushes `vtc/auto/<kind>/<fp8>`
-   * without force. When the branch already exists (the open PR this one supersedes, or a branch
-   * the remote-tracking ref still shows), the new commit descends from its head so the push is a
-   * fast-forward, and only when that head is one VTC pushed itself: a branch with anyone else's
-   * commits is left alone and the PR skipped.
+   * without force. It first fetches every automatic branch (another
+   * installation may have pushed this one, or a human closed its PR and left it). When the branch
+   * exists (the open PR this one supersedes, or the fresh remote-tracking ref), the new commit
+   * descends from its head so the push is a fast-forward, and only when that head is VTC's: one
+   * this installation pushed (its ledger) or one carrying VTC's `Generated-by: VTC` trailer
+   * (another installation's). A branch whose head is anyone else's is left alone and the PR
+   * skipped.
    */
   const commitAndPush = async (
     input: AutoPrInput,
@@ -630,6 +649,9 @@ export const createUpstream = (deps: UpstreamDeps): Upstream => {
     const factory = deps.automation.plumbing;
     if (factory === undefined) throw new Error("no git plumbing was injected");
     const plumbing = factory({ repoRoot });
+    const refs = deps.remoteRefs?.(repoRoot);
+    // Only the automatic branches: the base stays the commit a Lookback PR read its files at.
+    await refreshRemote(refs, "origin", [AUTO_BRANCHES_REFSPEC]);
     const baseSha =
       (await plumbing.resolve(`refs/remotes/origin/${base}`)) ??
       (await plumbing.resolve(`refs/heads/${base}`));
@@ -645,7 +667,7 @@ export const createUpstream = (deps: UpstreamDeps): Upstream => {
     let parents: GitSha[] = [baseSha];
     if (current !== null && current !== baseSha) {
       const ours = at.ledger.record(at.repo, input.fingerprint)?.pushedHeads ?? [];
-      if (!ours.includes(current)) {
+      if (!ours.includes(current) && !(await vtcAuthored(refs, current))) {
         throw new AutomationSkip(
           "duplicate",
           `${branch} holds commits VTC did not push; VTC leaves the branch alone`,
@@ -799,6 +821,7 @@ export const createUpstream = (deps: UpstreamDeps): Upstream => {
               hosting === "branch" && deps.automation.plumbing !== undefined
                 ? deps.automation.plumbing({ repoRoot })
                 : undefined,
+            refs: deps.remoteRefs?.(repoRoot),
             now,
             beforePublish: () => {
               gate(input.target, "prs", ctx);
@@ -806,7 +829,9 @@ export const createUpstream = (deps: UpstreamDeps): Upstream => {
           },
         );
         if (!evidence.ok) {
-          await raiseEvidenceFailure(input.kind, ctx);
+          // A refused push of the shared evidence branch is a race with another installation,
+          // not "evidence capture failed".
+          if (evidence.pushRefused !== true) await raiseEvidenceFailure(input.kind, ctx);
           throw new AutomationSkip("evidence_failed", evidence.detail);
         }
         const status = evidence.partial ? "partial" : "complete";

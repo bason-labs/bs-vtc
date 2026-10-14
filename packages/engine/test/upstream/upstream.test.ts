@@ -27,6 +27,7 @@ import {
   fakeAssets,
   fakePlumbing,
   fakeRecorder,
+  fakeRemoteRefs,
   memoryGitHub,
   type FakePlumbing,
 } from "./fakes.js";
@@ -61,6 +62,10 @@ const harness = (
     shared?: Harness;
     /** Share VTC's home too (another daemon on the same machine). */
     sameHome?: boolean;
+    /** With `shared`: its own clone of the shared remote (another installation's checkout). */
+    clone?: boolean;
+    /** Wire `UpstreamDeps.remoteRefs` (fetch and commit messages) over the fake plumbing. */
+    remoteRefs?: boolean;
     noGitOps?: boolean;
     ffmpegCommand?: FfmpegCommand;
     evidence?: ProjectContext["evidence"];
@@ -68,7 +73,9 @@ const harness = (
 ): Harness => {
   const clock = options.shared?.clock ?? { now: new Date("2026-10-15T12:00:00Z") };
   const plumbing =
-    options.shared?.plumbing ?? fakePlumbing({ "refs/remotes/origin/main": BASE_SHA });
+    options.shared !== undefined && options.clone !== true
+      ? options.shared.plumbing
+      : fakePlumbing({ "refs/remotes/origin/main": BASE_SHA }, options.shared?.plumbing);
   const github =
     options.shared?.github ?? memoryGitHub({ remote: plumbing.remote, now: () => clock.now });
   const events: UpstreamEvent[] = [];
@@ -134,6 +141,7 @@ const harness = (
           }),
         }),
     ...(options.ffmpegCommand === undefined ? {} : { ffmpegCommand: options.ffmpegCommand }),
+    ...(options.remoteRefs === true ? { remoteRefs: () => fakeRemoteRefs(plumbing) } : {}),
   });
   return {
     github,
@@ -599,8 +607,48 @@ describe("the Lookback PR", () => {
     expect(h.plumbing.remote.has("refs/heads/vtc/auto/lookback/aaaaaaaa")).toBe(false);
   });
 
+  it("builds on another installation's VTC head of the shared branch (fetched, by its trailer)", async () => {
+    const first = harness({ remoteRefs: true });
+    withCheckout(first);
+    await first.upstream.openLookbackPr({ replay: replay(), proposal }, first.ctx);
+    const theirs = first.plumbing.remote.get(lookbackBranch);
+    const second = harness({ shared: first, clone: true, remoteRefs: true });
+    expect(
+      await second.upstream.openLookbackPr(
+        { replay: replay({ finished_at: "2026-10-16T10:00:00Z" }), proposal },
+        second.ctx,
+      ),
+    ).toMatchObject({ status: "pr", number: 2 });
+    const head = second.plumbing.remote.get(lookbackBranch);
+    expect(second.plumbing.commits.find((c) => c.sha === head)?.parents).toEqual([
+      theirs,
+      BASE_SHA,
+    ]);
+    expect(first.github.state.prs.map((p) => p.state)).toEqual(["closed", "open"]);
+  });
+
+  it("fetches a branch left on the remote after its PR closed, and fast-forwards it", async () => {
+    const first = harness({ remoteRefs: true });
+    withCheckout(first);
+    await first.upstream.openLookbackPr({ replay: replay(), proposal }, first.ctx);
+    // A human closes the PR and leaves the branch.
+    await first.github.pullRequests.close(UPSTREAM, 1, "not now");
+    const left = first.plumbing.remote.get(lookbackBranch);
+    expect(left).toBeDefined();
+    const second = harness({ shared: first, clone: true, remoteRefs: true });
+    expect(second.plumbing.refs.has(lookbackBranch.replace("heads", "remotes/origin"))).toBe(false);
+    expect(
+      await second.upstream.openLookbackPr(
+        { replay: replay({ finished_at: "2026-10-16T10:00:00Z" }), proposal },
+        second.ctx,
+      ),
+    ).toMatchObject({ status: "pr" });
+    const head = second.plumbing.remote.get(lookbackBranch);
+    expect(second.plumbing.commits.find((c) => c.sha === head)?.parents).toEqual([left, BASE_SHA]);
+  });
+
   it("leaves a branch with a human's commit alone: no push, the older PR stays open", async () => {
-    const h = harness();
+    const h = harness({ remoteRefs: true });
     withCheckout(h);
     await h.upstream.openLookbackPr({ replay: replay(), proposal }, h.ctx);
     // A human pushes a fix-up commit onto the automatic branch.
@@ -1044,7 +1092,7 @@ describe("evidence settings and the GIF", () => {
     }
   });
 
-  it("opens no PR and raises 'evidence capture failed' when the evidence branch cannot be pushed", async () => {
+  it("opens no PR, and raises no 'evidence capture failed', when the shared evidence branch refuses the push", async () => {
     const h = harness();
     h.plumbing.remote.set("refs/heads/vtc-evidence", "9".repeat(40));
     expect(await h.upstream.openPullRequest(prInput(), h.ctx)).toMatchObject({
@@ -1052,8 +1100,21 @@ describe("evidence settings and the GIF", () => {
       reason: "evidence_failed",
     });
     expect(h.github.state.prs).toHaveLength(0);
-    expect(h.github.state.issues[0]?.title).toBe(
-      "vtc(defect): evidence.capture_failed in the engine",
-    );
+    expect(h.github.state.issues).toHaveLength(0);
+  });
+
+  it("fetches the evidence branch another installation pushed, so its PR opens", async () => {
+    const first = harness({ remoteRefs: true });
+    expect(await first.upstream.openPullRequest(prInput(), first.ctx)).toMatchObject({
+      status: "pr",
+    });
+    const second = harness({ shared: first, clone: true, remoteRefs: true });
+    expect(
+      await second.upstream.openPullRequest(
+        prInput({ fingerprint: "fedcba9876543210" }),
+        second.ctx,
+      ),
+    ).toMatchObject({ status: "pr" });
+    expect(first.github.state.issues).toHaveLength(0);
   });
 });
