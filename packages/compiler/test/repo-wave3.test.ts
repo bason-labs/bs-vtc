@@ -12,6 +12,7 @@ import {
   AdCheckSpecSchema,
   ARCHITECTURE_SPINE_PATH,
   effectivePromptSha,
+  engineerProfileLockedSection,
   FactLookupInputSchema,
   FactProposeInputSchema,
   patternProblem,
@@ -32,6 +33,7 @@ import {
   ResearchFetchInputSchema,
   FactStatusSchema,
   splitRolePrompt,
+  TASK_PACK_HEURISTICS_SECTION,
   TASK_PACK_SECTIONS,
   type HostId,
   type PluginManifest,
@@ -94,7 +96,12 @@ describe("prompt identity in the compiled plugins (AD-21 rules 1–2)", () => {
         loaded.roles.flatMap((r) => compiledAgentNames(r.role)).sort(),
       );
       for (const { dir, role } of loaded.roles) {
-        const sections = sectionsOf(dir);
+        const own = sectionsOf(dir);
+        // D-br (reading 172): a profile's locked identity covers the Engineer prompt it carries
+        const sections =
+          role.kind === "engineer_profile"
+            ? { ...own, locked: engineerProfileLockedSection(sectionsOf("engineer"), own.locked) }
+            : own;
         for (const name of compiledAgentNames(role)) {
           const agent = agents.find((a) => a.name === name);
           // PluginManifestAgent (4.5.0) and checkProposal's base check, for profiles too
@@ -117,14 +124,13 @@ describe("prompt identity in the compiled plugins (AD-21 rules 1–2)", () => {
     },
   );
 
-  it("switches a role only once the task pack has the section that carries its heuristics", () => {
-    // The default stays empty until @vtc/shared defines the section and the engine renders it;
-    // flipping it earlier would ship agents that run without their heuristics. A switched agent
-    // trusts only the block the pack opens with (EDITABLE_IN_PACK_NOTE), so the section must be
-    // the first one rendered, ahead of every free-text field.
-    if (EDITABLE_IN_PACK_ROLES.length > 0) {
-      expect(TASK_PACK_SECTIONS[0] as string).toBe(EDITABLE_PACK_SECTION);
-    }
+  it("switches roles into the pack's own heuristics section, rendered before Dispatch", () => {
+    // A switched agent trusts only the block the pack opens with (EDITABLE_IN_PACK_NOTE): the
+    // optional `Role heuristics` section the engine renders before `## Dispatch` (reading 117),
+    // ahead of every free-text field, so it is not one of the ordinary pack sections.
+    expect(EDITABLE_PACK_SECTION).toBe(TASK_PACK_HEURISTICS_SECTION);
+    expect(TASK_PACK_SECTIONS as readonly string[]).not.toContain(EDITABLE_PACK_SECTION);
+    expect(TASK_PACK_SECTIONS[0]).toBe("Dispatch");
     const ids = loaded.roles.map((r) => r.role.id);
     for (const role of EDITABLE_IN_PACK_ROLES) expect(ids).toContain(role);
   });
@@ -149,11 +155,12 @@ describe("prompt identity in the compiled plugins (AD-21 rules 1–2)", () => {
     expect(flag("vtc-architect")).toBeUndefined();
   });
 
-  it("ends every agent with its own role's editable section, verbatim", () => {
+  it("ends every unswitched agent with its own role's editable section, verbatim", () => {
     // A proposal for any role, engineer profiles included, maps back to that role's prompt.md;
     // a profile carries the Engineer's section in its locked part, before its own core.
     const engineer = sectionsOf("engineer").editable;
     for (const { dir, role } of loaded.roles) {
+      if (EDITABLE_IN_PACK_ROLES.includes(role.id)) continue; // its section is in the pack
       const { editable } = sectionsOf(dir);
       for (const name of compiledAgentNames(role)) {
         const body = claudeBody(name);

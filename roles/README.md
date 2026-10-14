@@ -12,7 +12,7 @@ roles/_shared/
   result-protocol.md   # appended to every run role: how to read the task pack and return a RoleResult
   advisor-protocol.md  # appended to every advisor instead: the human's question and the advice result
   lens-reviewer.md     # the procedure every lens reviewer shares
-roles/NOTICE           # the agency-agents MIT notice; copied into both compiled plugins
+roles/NOTICE           # the agency-agents (MIT) and impeccable (Apache-2.0) notices; copied into both plugins
 ```
 
 ## The roster (v1)
@@ -66,34 +66,30 @@ Parts 1 to 4 are the agent's **locked part** and part 5 its **editable part**.
   sections as `splitRolePrompt` returns them: `locked_sha256` and `editable_sha256` in the
   manifest are the SHA-256 of those trimmed sections (the frozen `PluginManifestAgent` contract,
   and what lookback-research's `sectionSha` checks a proposal's base against). Every mode of a
-  role shares them; an engineer profile's are its own sections, not the Engineer's. Each plugin
-  carries the two sections as `vtc/prompts/<agent>/locked.md` and `editable.md`, so the engine
-  can read them from the plugin. The rest of the compiled locked part (the contract, the
-  protocol, `prompt_append`, the Engineer's prompt in a profile) is outside the Lookback identity;
-  it changes with the role version or the compiler, and the manifest's `prompt_sha256` (the SHA
-  of the instructions as emitted) records it.
+  role shares them. An engineer profile's locked section is `engineerProfileLockedSection`
+  (`@vtc/shared`, reading 172, D-br): the Engineer's locked core and editable section, then the
+  profile's own locked core, so an Engineer prompt change is a new version of every profile and
+  a profile's scorecard never mixes two Engineer prompts. Each plugin carries the two sections
+  as `vtc/prompts/<agent>/locked.md` and `editable.md`, so the engine can read them from the
+  plugin. The rest of the compiled locked part (the contract, the protocol, `prompt_append`) is
+  outside the Lookback identity; it changes with the role version or the compiler, and the
+  manifest's `prompt_sha256` (the SHA of the instructions as emitted) records it.
 - The editable part is the role's own section verbatim, engineer profiles included, so a
   promoted proposal maps back to `roles/<role>/prompt.md` unchanged. A profile's proposal never
   carries the Engineer's heuristics: those sit in the profile's locked part and change only
   through a proposal for the engineer role, which reaches every profile once it is upstreamed
-  into `roles/engineer/prompt.md` and the plugins are recompiled.
-- A consequence to keep in mind when reading a profile's scorecard: an Engineer prompt change
-  alters what every profile runs but not the profile's `effective_sha256`, so the profile's
-  scorecard keeps counting across it. Compare a profile's numbers before and after an Engineer
-  role-version change only with that caveat (a contract proposal to name the Engineer base in a
-  profile's `PromptVersionRef` is open).
-- Reading 102 moves the editable section out of the compiled agent: the engine renders the
-  pinned editable section first in the task pack, so a canary needs no plugin reinstall. The
-  compiler has the switch (`EDITABLE_IN_PACK_ROLES`), but **no role is switched yet**: the frozen
-  task pack has no section for it and the engine does not render one, so a switched agent would
-  run without its heuristics. The pack section (`Role heuristics`, opening the pack before
-  `## Dispatch`), a `TaskPack` field for it and the asset path are proposed to `@vtc/shared`; the
-  Spec Verifier (the role with the most dispatches per run) switches first, with a MAJOR role
-  version, in the integration step that lands them, and is compared with an A/A run before every
-  role switches. A switched agent carries the locked part only, ending in a note that only the
-  block its pack opens with, up to the first `## Dispatch` heading, is instructions (a heading of
-  that name further down is pack data). Switching changes its `prompt_sha256` but not its
-  `locked_sha256` or `editable_sha256`.
+  into `roles/engineer/prompt.md` and the plugins are recompiled. The editable-section rules
+  (`editableSectionErrors`, `RESERVED_EDITABLE_HEADINGS`) are `@vtc/shared`'s, so the compile
+  and Lookback's proposal check enforce one rule set (reading 175).
+- Reading 102 moves the editable section out of the compiled agent: the engine renders it first
+  in the task pack as `## Role heuristics`, before `## Dispatch` (the pinned version, else the
+  compiled default from the plugin's editable asset), so a canary needs no plugin reinstall.
+  `EDITABLE_IN_PACK_ROLES` lists the switched roles: the Spec Verifier, the role with the most
+  dispatches per run (D-bl, reading 166; version 2.0.0, since switching changes the compiled
+  locked part, D-bm). A switched agent carries the locked part only, ending in a note that only
+  the block its pack opens with, up to the first `## Dispatch` heading, is instructions (a
+  heading of that name further down is pack data). Switching changes its `prompt_sha256` but not
+  its `locked_sha256` or `editable_sha256`. Any other role switches after an A/A comparison.
 - The lookback role writes `proposal.json` (`PromptProposal`: at most three changes, each with a
   hypothesis, a target metric and trace ids) and `editable.md` (the full proposed section) under
   `.vtc/lookback/proposals/<role>/`. It never writes `roles/`, the stored versions or the pins; a
@@ -167,6 +163,32 @@ human`, exits `done`, `blocked` or `unknown`, no verdicts, no success criteria a
   compiled into agents; see `plugins/README.md`.
 - **Write paths are instructions plus an engine check, not a host deny.** The contract section
   lists `write_paths`; the engine checks every write-scoped role's writes on submit.
+- **Locked-core edits are MAJOR** (reading 167, D-bm): any edit to a role's locked core bumps
+  its `role_version` MAJOR, even when only the prompt changes.
+- **Host web search** (H-3, reading 156). The Research Analyst (`tools.host_web: true`, the only
+  role with it) discovers pages with its host's own web search and page fetch: its Claude Code
+  agent's `tools` name `WebSearch` and `WebFetch`, and its contract section says so on both
+  hosts. A Codex agent file has no per-agent web switch, so the Codex adapter turns web search
+  on for a headless `host_web` run. Page content is untrusted data; a page the role relies on
+  is proposed with `fact_propose` as a `web` source request plus `reported_source`, so the
+  engine fetches and checks it, and a claim it cannot verify stays `unverified`. The engine's
+  `research_analyst` fixture (`packages/engine/test/fixtures/roles.ts`, engine-core) gains
+  `tools.host_web: true` and `version: "3.0.0"` at the merge of this branch; until then the
+  AD-14 drift test (`packages/engine/test/core/roles.test.ts`) fails on `host_web`.
+- **The Designer method** (spec §9.1; readings 116, 174). The Designer and Visual QA preload the
+  `design-craft` skill, forked from pbakaus/impeccable (Apache-2.0, see `NOTICE`): screen modes,
+  new-work steps 1–5 inside the engine's dealt constraints, the per-screen Direction contract,
+  the craft floor and the font blocklist. Each key screen's design contract, with its mode and
+  one Direction contract per direction, is `.vtc/design/screens/<screen id>.md`, returned as a
+  `screens` artifact. A new-repo UI design offers 2 to 3 directions (`G2_DIRECTIONS`); with
+  fewer, the engine re-dispatches the Designer once and then G2 blocks (D-bt).
+- **Visual QA needs the chosen direction (pending engine plumbing).** Visual QA judges V1, V2 and
+  V8 against the Direction contract of the direction the human chose at G2, but its task pack
+  does not yet say which one that is: the engine records the choice (`ApproveInput.direction`)
+  without passing it to Visual QA, and `design_contracts_dir` is not a frozen path yet. Until a
+  contract proposal lands (a chosen-direction field in Visual QA's pack, or G2 freezing only the
+  chosen direction's artifacts), Visual QA returns V8 `unknown` whenever the screens' design
+  contracts hold several directions, as its prompt says.
 
 ## What the compiler emits for the engine
 
