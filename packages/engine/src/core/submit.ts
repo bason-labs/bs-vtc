@@ -364,25 +364,30 @@ const openQuestions = (k: Kernel, h: RunHandle, run: RoleRunRecord, result: Role
 // ------------------------------------------------------------- front half
 
 /** Engine fields for the Planner's drafts (AD-8 rules 5 and 11); ids renumbered past used ones. */
-const planTasks = (
+const planTasks = async (
   k: Kernel,
   h: RunHandle,
   drafts: readonly TaskDraft[],
-): { tasks: { task: Task; draft: TaskDraft }[] } | { issues: string[] } => {
+): Promise<{ tasks: { task: Task; draft: TaskDraft }[] } | { issues: string[] }> => {
   const issues = checkPlan({
     drafts,
     requirements: specRequirementIds(frozenSpecItems(k.deps.repoRoot, h.state)),
   });
   if (issues.length > 0) return { issues };
   const states = [...k.allStates()];
-  const taken = usedTaskIds(states);
+  // ids a teammate's clone already used, as far as this clone's git shows (reading 89)
+  const shared = await k.deps.workspace
+    .sharedIds()
+    .catch(() => ({ tasks: [] as readonly string[], features: [] as readonly string[] }));
+  for (const id of shared.tasks) k.sharedTaskIds.add(id);
+  const taken = new Set([...usedTaskIds(states), ...k.sharedTaskIds]);
   const remap = new Map<string, string>();
   for (const d of drafts) {
     const id = taken.has(d.id) ? nextNumberedId("T", taken) : d.id;
     remap.set(d.id, id);
     taken.add(id);
   }
-  const featureId = nextNumberedId("F", usedFeatureIds(states));
+  const featureId = nextNumberedId("F", new Set([...usedFeatureIds(states), ...shared.features]));
   const config = k.config();
   return {
     tasks: drafts.map((draft) => {
@@ -569,7 +574,7 @@ const acceptPhaseRole = async (
   let planned: { tasks: { task: Task; draft: TaskDraft }[] } | undefined;
   if (run.role === "planner" && result.exit === "done") {
     if (result.tasks === undefined) return reject("claim_check", ["the Planner returns its tasks"]);
-    const plan = planTasks(k, h, result.tasks);
+    const plan = await planTasks(k, h, result.tasks);
     if ("issues" in plan) return reject("claim_check", plan.issues);
     planned = plan;
   }
@@ -837,7 +842,7 @@ const routeOutOfScope = (k: Kernel, h: RunHandle, task: Task, fault: Fault): voi
   k.emit(h, { type: "finding.recorded", actor: "engine", task: task.id, data: { finding } });
   if (owner === undefined) {
     const config = k.config();
-    const id = nextNumberedId("T", usedTaskIds(k.allStates()));
+    const id = nextNumberedId("T", new Set([...usedTaskIds(k.allStates()), ...k.sharedTaskIds]));
     const scope = fault.path.includes("/")
       ? `${fault.path.slice(0, fault.path.lastIndexOf("/"))}/**`
       : fault.path;

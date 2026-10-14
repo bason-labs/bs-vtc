@@ -123,8 +123,9 @@ export const ENGINE_MCP_TOOLS = [
   },
   {
     name: "resume",
-    purpose: "Resume a paused or interrupted run, rebuilding state from the event log.",
-    input: "RunScopedInput",
+    purpose:
+      "Resume a paused or interrupted run, rebuilding state from the event log. adopt: continue here a run another clone started (human only).",
+    input: "ResumeInput",
     output: "RunControlResult",
   },
 ] as const;
@@ -175,6 +176,15 @@ export const engineMcpServer = (
 /** Tools act on the active run when `run` is omitted. */
 export const RunScopedInputSchema = z.strictObject({ run: RunIdSchema.optional() });
 export type RunScopedInput = z.infer<typeof RunScopedInputSchema>;
+
+/**
+ * `resume`. `adopt` (spine §5 reading 88): the run was started by another clone's engine (its
+ * `run.started.origin` is not this install's), so this engine opened it read-only; adopting
+ * makes this install its one writer from here on. Only a human channel adopts (the Lead session
+ * relaying the human, or `vtc resume --adopt` after a terminal confirmation). New in 4.4.0.
+ */
+export const ResumeInputSchema = RunScopedInputSchema.extend({ adopt: z.boolean().optional() });
+export type ResumeInput = z.infer<typeof ResumeInputSchema>;
 
 /**
  * `start` carries the Lead's INTAKE classification (§6.1): the Lead classifies, the engine

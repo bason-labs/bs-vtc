@@ -99,5 +99,12 @@ export * from "./json-schema.js";
  * `hostConfigDirsOf`, `HOME_CREDENTIAL_LOCATIONS`, `REPO_ROLE_DENIED`, `inSessionDispatchRefusal`
  * and a `platform` parameter of `inSessionDispatchAllowed`, `CODEX_UNIX_CONNECT_BLOCKED_PLATFORMS`,
  * `CODEX_IN_SESSION_REFUSED_REASON`, `PROJECT_CONFIG_FILE` / `projectConfigNotCommitted`.
+ * 4.4.0 (MINOR): Final Review fix round (spine §5 readings 81–90, Lead decisions D-av..D-ax).
+ * `GatesConfig.sandbox.verify_loopback` and `GateSandboxSpec.loopback` (D-av); the run's
+ * `run.started.origin`, `ResumeInput.adopt` and incident kind `run_adopted` (reading 88);
+ * `InstallRequest.vtcHome` (reading 83); the Lead session settings' `permissions.deny`
+ * (`claudeSessionPermissionDeny`, `VTC_HOME_SHELL_SPELLINGS`, reading 81); every Claude role
+ * needing the session settings and no in-session Codex role (`inSessionDispatchRefusal`,
+ * readings 81 and 82). All additive: optional fields, an enum value, new helpers.
  */
-export const CONTRACTS_VERSION = "4.3.0";
+export const CONTRACTS_VERSION = "4.4.0";

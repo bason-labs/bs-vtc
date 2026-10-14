@@ -414,6 +414,27 @@ describe("parking blocks only dependents (§6.5, D5) and concurrency (§6.6)", (
   });
 });
 
+describe("task and feature ids another clone took (spine §5 reading 89)", () => {
+  it("skips T-n / F-n that a fetched remote branch or a committed plan file already uses", async () => {
+    const h = createHarness();
+    // a teammate's pushed work, as this clone's fetch saw it: their integration branch and a
+    // committed plan file on the default branch
+    const head = git(h.repo, "rev-parse", "HEAD");
+    git(h.repo, "update-ref", "refs/remotes/origin/vtc/F-1", head);
+    git(h.repo, "update-ref", "refs/remotes/origin/vtc/T-1", head);
+    writeFile(h.repo, ".vtc/tasks/T-3.md", "---\nid: T-3\n---\n");
+    git(h.repo, "add", ".vtc/tasks/T-3.md");
+    git(h.repo, "commit", "-q", "-m", "teammate plan");
+    await throughPlan(h, [draft("T-1")], SPEC_ONE);
+    const status = h.engine.status({});
+    expect(status.features.map((f) => f.id)).toEqual(["F-2"]);
+    expect(Object.keys(h.engine.status({}).tasks_by_status).length).toBeGreaterThan(0);
+    const created = eventsOf(h).filter((e) => e.type === "task.created");
+    expect(created.map((e) => e.task)).toEqual(["T-4"]);
+    await h.release();
+  });
+});
+
 describe("role-written .vtc/ documents are checked for secrets (AD-18 rule 1)", () => {
   it("rejects a front-half result that quotes a secret, and nothing reaches the checkout", async () => {
     const h = createHarness();

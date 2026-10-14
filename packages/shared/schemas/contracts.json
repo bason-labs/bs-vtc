@@ -1,5 +1,5 @@
 {
-  "contracts_version": "4.3.0",
+  "contracts_version": "4.4.0",
   "schemas": {
     "Run": {
       "$id": "https://vtc.local/schemas/Run.json",
@@ -2144,6 +2144,10 @@
             "pipeline_config_hash": {
               "type": "string",
               "pattern": "^[a-f0-9]{64}$"
+            },
+            "origin": {
+              "type": "string",
+              "pattern": "^[0-9a-f-]{8,64}$"
             }
           },
           "required": [
@@ -5058,7 +5062,8 @@
                 "config_changed",
                 "checkout_write",
                 "host_config_restored",
-                "unsandboxed_gate"
+                "unsandboxed_gate",
+                "run_adopted"
               ]
             },
             "detail": {
@@ -10818,6 +10823,18 @@
             ],
             "additionalProperties": false
           }
+        },
+        "sandbox": {
+          "type": "object",
+          "properties": {
+            "verify_loopback": {
+              "type": "boolean"
+            }
+          },
+          "required": [
+            "verify_loopback"
+          ],
+          "additionalProperties": false
         }
       },
       "required": [
@@ -13482,6 +13499,22 @@
         "run": {
           "type": "string",
           "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$"
+        }
+      },
+      "additionalProperties": false
+    },
+    "ResumeInput": {
+      "$id": "https://vtc.local/schemas/ResumeInput.json",
+      "title": "ResumeInput",
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "type": "object",
+      "properties": {
+        "run": {
+          "type": "string",
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$"
+        },
+        "adopt": {
+          "type": "boolean"
         }
       },
       "additionalProperties": false

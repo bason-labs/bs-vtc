@@ -98,6 +98,13 @@ export interface Workspace {
   removeWorktree(worktree: string): Promise<void>;
   /** Deletes an engine branch `vtc/<id>` (force; never a branch outside `vtc/`). */
   deleteBranch(branch: string): Promise<void>;
+  /**
+   * Task and feature ids git already shows (spine §5 reading 89): every local or remote-tracking
+   * `vtc/T-n` / `vtc/F-n` branch (a teammate's pushed work this clone fetched), and the
+   * `.vtc/tasks/T-n.md` and `.vtc/evidence/<id>/` entries committed at `HEAD` and at each remote's
+   * default branch. Reads refs only; never fetches.
+   */
+  sharedIds(): Promise<{ readonly tasks: readonly string[]; readonly features: readonly string[] }>;
 }
 
 /** A path with every existing prefix resolved through `realpath` (macOS `/var` → `/private/var`). */
@@ -340,6 +347,35 @@ export const createWorkspace = (repoRoot: string): Workspace => {
     remoteUrl: async (remote) => {
       const url = await gitText(repoRoot, ["remote", "get-url", remote], { allowFailure: true });
       return url === "" ? null : url;
+    },
+    sharedIds: async () => {
+      const tasks = new Set<string>();
+      const features = new Set<string>();
+      const add = (name: string): void => {
+        const id = /(?:^|\/)((?:T|F)-[1-9]\d*)(?:\.md)?$/.exec(name)?.[1];
+        if (id === undefined) return;
+        (id.startsWith("T-") ? tasks : features).add(id);
+      };
+      const refs = await gitText(
+        repoRoot,
+        ["for-each-ref", "--format=%(refname)", "refs/heads/vtc/", "refs/remotes/"],
+        { allowFailure: true },
+      );
+      for (const ref of refs.split("\n")) if (/\/vtc\/[TF]-[1-9]\d*$/.test(ref)) add(ref);
+      const heads = await gitText(
+        repoRoot,
+        ["for-each-ref", "--format=%(refname)", "refs/remotes/*/HEAD"],
+        { allowFailure: true },
+      );
+      for (const tree of ["HEAD", ...heads.split("\n").filter((r) => r !== "")]) {
+        for (const dir of [".vtc/tasks", ".vtc/evidence"]) {
+          const listed = await gitText(repoRoot, ["ls-tree", "--name-only", `${tree}:${dir}`], {
+            allowFailure: true,
+          });
+          for (const name of listed.split("\n")) add(name);
+        }
+      }
+      return { tasks: [...tasks], features: [...features] };
     },
     deleteBranch: locked(async (branch: string) => {
       if (!/^vtc\/[A-Za-z0-9][A-Za-z0-9_-]*$/.test(branch))

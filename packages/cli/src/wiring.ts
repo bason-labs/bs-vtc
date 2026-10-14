@@ -25,7 +25,10 @@ import {
 } from "@vtc/shared";
 import type { CliIo, CommandContext } from "./commands/types.js";
 import { ensureDaemon } from "./daemon.js";
+import { contractsAtLeast } from "./bridge.js";
+import { interactiveTerminal, ttyConfirm } from "./confirm.js";
 import { guardHumanOnly } from "./human-channel.js";
+import { readInstallToken } from "./token.js";
 import { requireRepoRoot, requireVtcProject } from "./repo.js";
 import { runtime } from "./runtime.js";
 import { createWakeScheduler } from "./scheduler.js";
@@ -196,6 +199,35 @@ export const connectToRepoEngine = async (cwd: string, vtcHome: string): Promise
   return mcp.connectEngineClient(discovery.mcp_socket);
 };
 
+/** The contracts version whose engine takes `resume` with `adopt` (spine §5 reading 88). */
+const ADOPT_SINCE = "4.4.0";
+
+/**
+ * A connection to the repo's daemon that proves a human (spine §5 readings 71 and 88): only in
+ * an interactive terminal, only after the human says yes to `what`, and only then is the install
+ * token read and sent in the hello.
+ */
+export const connectHumanToRepoEngine = async (
+  cwd: string,
+  vtcHome: string,
+  what: string,
+): Promise<EngineClient> => {
+  if (!interactiveTerminal())
+    throw new Error(`to ${what} you confirm it yourself: run it in an interactive terminal`);
+  const repoRoot = await requireRepoRoot(cwd);
+  requireVtcProject(repoRoot);
+  const discovery = await ensureDaemon({ vtcHome, repoRoot, selfCommand: runtime().selfCommand });
+  if (!contractsAtLeast(discovery.contracts_version, ADOPT_SINCE))
+    throw new Error(
+      `the running engine speaks contracts ${discovery.contracts_version}: run vtc engine --stop in the repo, then try again`,
+    );
+  if (!(await ttyConfirm(`You are about to ${what}. Is this your decision?`)))
+    throw new Error("not confirmed: nothing was sent");
+  return mcp.connectEngineClient(discovery.mcp_socket, CONTRACTS_VERSION, {
+    installToken: readInstallToken(vtcHome),
+  });
+};
+
 /**
  * The context every command runs with. The engine client connects lazily, once, and never calls
  * a human-only tool (`guardHumanOnly`, D-an): its hello carries no install token.
@@ -207,5 +239,11 @@ export const createCommandContext = (
   connect: () => Promise<EngineClient> = () => connectToRepoEngine(cwd, vtcHome),
 ): CommandContext => {
   let client: Promise<EngineClient> | undefined;
-  return { io, cwd, vtcHome, engine: () => (client ??= connect().then(guardHumanOnly)) };
+  return {
+    io,
+    cwd,
+    vtcHome,
+    engine: () => (client ??= connect().then(guardHumanOnly)),
+    humanEngine: (what) => connectHumanToRepoEngine(cwd, vtcHome, what),
+  };
 };

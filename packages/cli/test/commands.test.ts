@@ -404,6 +404,29 @@ describe("vtc status / pause / resume (AD-19 rule 4)", () => {
     expect(JSON.parse(out.at(-1) ?? "")).toEqual({ run: "r1", paused: false, phase: "build" });
   });
 
+  it("vtc resume --adopt goes over the human connection only, naming the run (reading 88)", async () => {
+    const plain: string[] = [];
+    const human: string[] = [];
+    const asked: string[] = [];
+    const { ctx, err } = capture("/w", "/h", () => Promise.resolve(fakeClient(plain)));
+    // without a human connection (no terminal), nothing is sent
+    expect(await resume.run(["--run", "r9", "--adopt"], ctx)).toBe(1);
+    expect(plain).toEqual([]);
+    const withHuman = {
+      ...ctx,
+      humanEngine: (what: string) => {
+        asked.push(what);
+        return Promise.resolve(fakeClient(human));
+      },
+    };
+    expect(await resume.run(["--adopt"], withHuman)).toBe(64);
+    expect(await resume.run(["--run", "r9", "--adopt"], withHuman)).toBe(0);
+    expect(asked).toEqual(["adopt run r9 from another clone onto this machine"]);
+    expect(human).toEqual(['resume {"run":"r9","adopt":true}', "close"]);
+    expect(plain).toEqual([]);
+    expect(err.join("\n")).toMatch(/--adopt needs --run/);
+  });
+
   it("shows unknown usage as unknown, never 0% (§6.9)", () => {
     const lines = formatStatus({
       ...statusResult,
