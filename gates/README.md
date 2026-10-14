@@ -125,13 +125,18 @@ submit`). Every command runs under an in-sandbox reaper (`REAPER_SCRIPT`): when 
   so no host loopback listener such as the engine is mirrored in), no gateway mapped to the host's
   loopback (`--no-map-gw`), and DNS through pasta's forwarder (`--dns-forward 169.254.1.1`, named
   by a jail-written `resolv.conf` mounted where `/etc/resolv.conf` points). Without `pasta`
-  (package `passt`), or when it cannot start bwrap, there is no gate sandbox on Linux (see "No
-  sandbox" below).
-- Verify phase: no network (Unix sockets only inside the writable directories). Install phase:
-  IP networking (neither tool can filter by registry host; `WrappedGateCommand.network` says
-  `full`) with the same filesystem rules; on macOS no Unix socket outside the writable
-  directories except DNS (`mDNSResponder`), so not the engine socket under `~/.vtc/run`, an ssh
-  or gpg agent, or Docker; on Linux no host Unix socket at all, pathname or abstract.
+  (package `passt`), or when it cannot start bwrap, verify-phase gates still run in bwrap and
+  only install-phase gates refuse (they park as `infra`; `vtc doctor` warns; D-aw, spine §5
+  reading 85).
+- Verify phase: no network (Unix sockets only inside the writable directories). With
+  `sandbox.verify_loopback: true` in `.vtc/gates.yml`, which only the human's yes at `vtc
+calibrate`'s confirmation writes, the macOS verify phase may open sockets to `localhost`
+  (127.0.0.1 and ::1) and nothing else (D-av, spine §5 reading 84). Install phase: IP networking
+  (neither tool can filter by registry host; `WrappedGateCommand.network` says `full`) with the
+  same filesystem rules, never the host's loopback (macOS denies `localhost`; pasta maps none);
+  on macOS no Unix socket outside the writable directories except DNS (`mDNSResponder`), so not
+  the engine socket under `~/.vtc/run`, an ssh or gpg agent, or Docker; on Linux no host Unix
+  socket at all, pathname or abstract.
 - Install-phase gates run first, as one batch, and the hidden acceptance tests are copied into
   the checkout only after all of them: no command with network access runs while they are there.
 - Writes only to the verification checkout, the command's private temp directory and the run's
@@ -162,14 +167,14 @@ submit`). Every command runs under an in-sandbox reaper (`REAPER_SCRIPT`): when 
   (never `project.yaml`): commands then run unconfined (same environment rules), the report says
   `sandbox: "none"`, evidence notes it, and engine core records an `unsandboxed_gate` incident.
   Every report that ran a command names its sandbox (`GateReport.sandbox`).
-- Known limits: on macOS the verify phase also refuses loopback sockets (the host's loopback is
-  shared with the engine and other local services), so a test suite that starts a localhost
-  server fails there, while on Linux it gets a private loopback. Unix sockets inside the
+- Known limits: on macOS the verify phase refuses loopback sockets by default (the host's
+  loopback is shared with the engine and other local services), so a test suite that starts a
+  localhost server fails there unless the human said yes to the loopback question at `vtc
+calibrate`, while on Linux it gets a private loopback. Unix sockets inside the
   writable directories work. A gate cannot write the repo's shared git directory, and private
   registries that need credentials from the user's `.npmrc` or environment do not install. On
   macOS, file watching through FSEvents and anything else that needs an unlisted system service
-  fails in a gate. On Linux the install phase cannot reach the host's loopback services (pasta
-  maps none), while on macOS it can. The pasta path has unit tests of its argv only; no live
+  fails in a gate. Neither platform's install phase reaches the host's loopback services. The pasta path has unit tests of its argv only; no live
   test runs it. The reaper confirms before its `kill`, so a gate that kills it in the microseconds between the
   two is not detected. Under `gates.allow_unsandboxed` nothing of this applies.
 
