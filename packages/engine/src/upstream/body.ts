@@ -1,0 +1,138 @@
+/**
+ * Issue, PR and CHANGELOG bodies (AD-27 rule 3; spine §5 reading 208 (5)), rendered from the
+ * roles-compiler's templates (`autoTemplateAssetPath`, Markdown with `{{slot}}` placeholders from
+ * `AUTO_TEMPLATE_SLOTS`). A template that names any other slot is refused; an issue or PR template
+ * must start with the marker and then the note (VTC never merges; AI disclosure). Slots VTC has
+ * no value for read "unavailable". Bodies are cut below `AUTOMATION_LIMITS.maxBodyChars` by
+ * dropping the diff, then the provenance, then the verification detail; the marker and the note
+ * always survive.
+ */
+import {
+  AUTO_TEMPLATE_SLOTS,
+  AUTOMATION_LIMITS,
+  autoTemplateAssetPath,
+  AutoKindSchema,
+  type AssetBundle,
+  type AssetNamespace,
+  type AutoKind,
+  type AutoTemplateName,
+  type AutoTemplateSlot,
+} from "@vtc/shared";
+
+export type TemplateSlots = Partial<Record<AutoTemplateSlot, string>>;
+
+export const UNAVAILABLE = "unavailable";
+export const TRUNCATED = "_(truncated; the full report is in the evidence bundle)_";
+/** The order in which slots give way when a body is too long (spine §5 reading 208). */
+export const TRUNCATION_ORDER: readonly AutoTemplateSlot[] = ["diff", "provenance", "verification"];
+export const MAX_TITLE_CHARS = 72;
+
+const SLOT = /\{\{\s*([A-Za-z0-9_-]+)\s*\}\}/g;
+
+export class TemplateError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "TemplateError";
+  }
+}
+
+/** Pure: the slots a template names, in order. Throws on a slot outside `AUTO_TEMPLATE_SLOTS`. */
+export const templateSlots = (template: string): AutoTemplateSlot[] => {
+  const names = [...template.matchAll(SLOT)].map((m) => m[1] ?? "");
+  const unknown = names.filter((n) => !(AUTO_TEMPLATE_SLOTS as readonly string[]).includes(n));
+  if (unknown.length > 0) {
+    throw new TemplateError(`unknown template slot(s): ${[...new Set(unknown)].join(", ")}`);
+  }
+  return names as AutoTemplateSlot[];
+};
+
+/** Pure: an issue or PR template must open with `{{marker}}` and then `{{note}}`. */
+const assertMarkerFirst = (template: string, slots: readonly AutoTemplateSlot[]): void => {
+  if (!/^\s*\{\{\s*marker\s*\}\}/.test(template) || slots[1] !== "note") {
+    throw new TemplateError("an issue or PR template starts with {{marker}} and then {{note}}");
+  }
+};
+
+/** Pure: `template` with every slot filled (`unavailable` when VTC has no value). */
+export const fillTemplate = (template: string, slots: TemplateSlots): string => {
+  templateSlots(template);
+  return template.replace(SLOT, (_m, name: string) => {
+    const value = slots[name as AutoTemplateSlot];
+    return value === undefined || value.trim() === "" ? UNAVAILABLE : value;
+  });
+};
+
+/**
+ * Pure: an issue or PR body within `maxChars`: the template filled, then the diff, provenance and
+ * verification replaced by {@link TRUNCATED} in that order while it is too long, then a hard cut
+ * that keeps the head (the marker and the note come first).
+ */
+export const renderBody = (
+  template: string,
+  slots: TemplateSlots,
+  maxChars: number = AUTOMATION_LIMITS.maxBodyChars,
+): string => {
+  assertMarkerFirst(template, templateSlots(template));
+  let current: TemplateSlots = { ...slots };
+  let body = fillTemplate(template, current);
+  for (const slot of TRUNCATION_ORDER) {
+    if (body.length <= maxChars) return body;
+    current = { ...current, [slot]: TRUNCATED };
+    body = fillTemplate(template, current);
+  }
+  if (body.length <= maxChars) return body;
+  const tail = `\n\n${TRUNCATED}\n`;
+  return `${body.slice(0, Math.max(0, maxChars - tail.length))}${tail}`;
+};
+
+/** Pure: `vtc(<kind>): <summary>`, one line, at most {@link MAX_TITLE_CHARS} characters. */
+export const renderTitle = (kind: AutoKind, summary: string): string => {
+  const title = `vtc(${AutoKindSchema.parse(kind)}): ${summary.replace(/\s+/g, " ").trim()}`;
+  return title.length <= MAX_TITLE_CHARS ? title : `${title.slice(0, MAX_TITLE_CHARS - 1)}…`;
+};
+
+/** AI-disclosure facts; unknown values are written "unavailable". */
+export interface Disclosure {
+  readonly vtcVersion: string;
+  readonly host?: string | undefined;
+  readonly model?: string | undefined;
+}
+
+/** Pure: the NOTE every automatic issue and PR carries right after its marker. */
+export const renderNote = (input: {
+  readonly kind: AutoKind;
+  readonly pr: boolean;
+  readonly disclosure: Disclosure;
+  readonly closes?: number | undefined;
+  readonly evidence?: "complete" | "partial" | undefined;
+}): string => {
+  const d = input.disclosure;
+  const facts = [
+    `kind: ${input.kind}`,
+    ...(input.evidence === undefined ? [] : [`evidence: ${input.evidence}`]),
+    ...(input.closes === undefined ? [] : [`Closes #${String(input.closes)}`]),
+  ];
+  return [
+    "> [!NOTE]",
+    `> ${input.pr ? "Opened" : "Raised"} automatically by VTC ${d.vtcVersion}. **For human review only: VTC never merges automatic PRs.**`,
+    `> AI disclosure: generated by VTC (AI) with host ${d.host ?? UNAVAILABLE}, model ${d.model ?? UNAVAILABLE}; a human reviews and merges every change.`,
+    `> ${facts.join(" · ")}`,
+  ].join("\n");
+};
+
+/** Plugin namespaces that carry the templates, in the order they are read. */
+const TEMPLATE_NAMESPACES: readonly AssetNamespace[] = ["plugin:claude-code", "plugin:codex"];
+
+/** The roles-compiler's template `name` from the bundle; throws when no plugin carries it. */
+export const loadAutoTemplate = (assets: AssetBundle, name: AutoTemplateName): string => {
+  const path = autoTemplateAssetPath(name);
+  for (const namespace of TEMPLATE_NAMESPACES) {
+    const bytes = assets.read(namespace, path);
+    if (bytes !== undefined) {
+      const text = new TextDecoder().decode(bytes);
+      templateSlots(text);
+      return text;
+    }
+  }
+  throw new TemplateError(`no compiled plugin carries ${path}`);
+};

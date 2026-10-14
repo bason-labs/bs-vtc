@@ -1,0 +1,671 @@
+/** The upstream module end to end with in-memory fakes (AD-27; D-cc: no real gh, git or GitHub). */
+import { mkdirSync, writeFileSync } from "node:fs";
+import { join } from "node:path";
+import {
+  automationFor,
+  splitRolePrompt,
+  type AutomationContext,
+  type AutomationDeps,
+  type EvidenceRecorder,
+  type PromptProposal,
+  type ReplayResult,
+} from "@vtc/shared";
+import { afterEach, describe, expect, it } from "vitest";
+import {
+  autoFingerprint,
+  createUpstream,
+  projectUpstreamReport,
+  UPSTREAM_EVIDENCE_ROUTE,
+  type AutomationFact,
+  type ProjectContext,
+  type UpstreamEvent,
+} from "../../src/upstream/index.js";
+import { cleanupDirs, tempDir } from "../helpers/repo.js";
+import {
+  fakeAssets,
+  fakePlumbing,
+  fakeRecorder,
+  memoryGitHub,
+  type FakePlumbing,
+} from "./fakes.js";
+
+afterEach(cleanupDirs);
+
+const UPSTREAM = "bason-labs/bs-vtc";
+const PROJECT = "acme-corp/payroll-portal";
+const BASE_SHA = "1".repeat(40);
+
+interface Harness {
+  readonly github: ReturnType<typeof memoryGitHub>;
+  readonly events: UpstreamEvent[];
+  readonly upstream: ReturnType<typeof createUpstream>;
+  readonly ctx: ProjectContext;
+  readonly plumbing: FakePlumbing;
+  readonly clock: { now: Date };
+  readonly checkout: string;
+  setContext(change: Partial<AutomationContext>): void;
+  setShare(share: boolean): void;
+}
+
+const harness = (
+  options: {
+    automation?: Partial<AutomationDeps>;
+    noRecorder?: boolean;
+    contexts?: () => Partial<AutomationContext>;
+  } = {},
+): Harness => {
+  const github = memoryGitHub();
+  const events: UpstreamEvent[] = [];
+  const clock = { now: new Date("2026-10-15T12:00:00Z") };
+  const repoRoot = tempDir("vtc-project-");
+  const checkout = tempDir("vtc-checkout-");
+  const plumbing = fakePlumbing({ "refs/remotes/origin/main": BASE_SHA });
+  let context: AutomationContext = { githubRemote: true, ghLoggedIn: true, paused: false };
+  let share = true;
+  const automation: AutomationDeps = {
+    issues: github.issues,
+    pullRequests: github.pullRequests,
+    ...(options.noRecorder === true ? {} : { evidence: fakeRecorder() }),
+    plumbing: () => plumbing,
+    upstream: { repo: UPSTREAM, share: true, checkout },
+    hosting: "branch",
+    ffmpeg: false,
+    ...options.automation,
+  };
+  const ctx: ProjectContext = {
+    repoRoot,
+    repo: PROJECT,
+    state: () => {
+      const c = { ...context, ...options.contexts?.() };
+      return {
+        settings: automationFor({ upstream: { share } }, {}, c),
+        context: c,
+      };
+    },
+    identity: {
+      repo: PROJECT,
+      remoteUrl: `git@github.com:${PROJECT}.git`,
+      repoRoot: "/Users/alice/clients/globex/payroll-portal",
+      clientNames: ["Globex Industries"],
+      homeDir: "/Users/alice",
+    },
+    knownValues: ["sk-live-payroll-SECRET-1234"],
+  };
+  const upstream = createUpstream({
+    automation,
+    vtcHome: tempDir("vtc-home-"),
+    guardDir: tempDir("vtc-guard-"),
+    vtcVersion: "0.4.0",
+    assets: fakeAssets(),
+    emit: (e) => events.push(e),
+    now: () => clock.now,
+    defaultBranch: () => Promise.resolve("main"),
+  });
+  return {
+    github,
+    events,
+    upstream,
+    ctx,
+    plumbing,
+    clock,
+    checkout,
+    setContext: (change) => {
+      context = { ...context, ...change };
+    },
+    setShare: (value) => {
+      share = value;
+    },
+  };
+};
+
+const defect = (
+  over: Partial<Extract<AutomationFact, { type: "vtc_defect" }>> = {},
+): AutomationFact => ({
+  type: "vtc_defect",
+  errorClass: "adapter.parse_failure",
+  role: "implementer",
+  host: "codex",
+  model: "gpt-5.5-codex",
+  stack: `Error: x\n    at parseLine (/Users/alice/vtc/packages/adapters/src/codex/parse.ts:1:1)\n    at handler (/Users/alice/clients/globex/payroll-portal/src/a.ts:1:1)`,
+  at: "2026-10-15T11:00:00Z",
+  ...over,
+});
+
+const types = (events: readonly UpstreamEvent[]): string[] => events.map((e) => e.type);
+
+describe("raising upstream issues", () => {
+  it("records a first defect occurrence and raises the issue when it recurs", async () => {
+    const h = harness();
+    expect(await h.upstream.report(defect(), h.ctx)).toMatchObject({ status: "recorded" });
+    const opened = await h.upstream.report(defect(), h.ctx);
+    expect(opened).toMatchObject({ status: "issue", action: "opened" });
+    const [issue] = h.github.state.issues;
+    expect(issue?.repo).toBe(UPSTREAM);
+    expect(issue?.labels).toEqual(["vtc:auto", "vtc:kind/defect"]);
+    expect(issue?.title).toBe("vtc(defect): adapter.parse_failure in implementer");
+    expect(issue?.body).toContain("| 2 |");
+    for (const word of ["alice", "globex", "payroll", "acme"]) {
+      expect(issue?.body.toLowerCase()).not.toContain(word);
+    }
+    expect(types(h.events)).toEqual(["upstream.issue_opened"]);
+  });
+
+  it("follows the dedupe table: duplicate within 24 h, muted, regression, quiet sweep and reopen", async () => {
+    const h = harness();
+    await h.upstream.report(defect(), h.ctx);
+    await h.upstream.report(defect(), h.ctx);
+    expect(await h.upstream.report(defect(), h.ctx)).toMatchObject({
+      status: "skipped",
+      reason: "duplicate",
+    });
+    h.clock.now = new Date("2026-10-16T12:30:00Z");
+    expect(await h.upstream.report(defect(), h.ctx)).toMatchObject({
+      status: "issue",
+      action: "edited",
+    });
+    expect(h.github.state.issues).toHaveLength(1);
+
+    // Closed as completed by a human, then it recurs: a linked regression.
+    h.github.human(1, { close: "completed" });
+    h.clock.now = new Date("2026-10-18T12:00:00Z");
+    expect(await h.upstream.report(defect(), h.ctx)).toMatchObject({
+      status: "issue",
+      action: "opened",
+    });
+    const regression = h.github.state.issues[1];
+    expect(regression?.labels).toContain("vtc:regression");
+    expect(regression?.body).toContain("Regression of #1.");
+    expect(
+      h.events.find((e) => e.type === "upstream.issue_opened" && "regression_of" in e.payload)
+        ?.payload,
+    ).toMatchObject({ regression_of: 1 });
+
+    // Quiet for 14 days: the sweep closes it; when it recurs it is reopened.
+    h.clock.now = new Date("2026-11-02T12:00:00Z");
+    const swept = await h.upstream.sweep(h.ctx);
+    expect(swept).toEqual([
+      expect.objectContaining({ status: "issue", action: "closed", number: 2 }),
+    ]);
+    expect(h.github.state.issues[1]).toMatchObject({ state: "closed", stateReason: "not_planned" });
+    expect(await h.upstream.report(defect(), h.ctx)).toMatchObject({
+      status: "issue",
+      action: "reopened",
+      number: 2,
+    });
+
+    // A human closes it as not planned: muted forever.
+    h.github.human(2, { close: "not_planned" });
+    h.clock.now = new Date("2026-11-20T12:00:00Z");
+    expect(await h.upstream.report(defect(), h.ctx)).toMatchObject({
+      status: "skipped",
+      reason: "muted",
+    });
+    expect(h.github.state.issues).toHaveLength(2);
+    expect(
+      h.events.filter((e) => e.type === "automation.skipped").map((e) => e.payload),
+    ).toContainEqual(expect.objectContaining({ reason: "muted", kind: "defect" }));
+  });
+
+  it("never creates two issues for concurrent occurrences of one fingerprint", async () => {
+    const h = harness();
+    const fact: AutomationFact = {
+      type: "security_advisory",
+      advisoryId: "GHSA-9",
+      package: "yaml",
+      at: "2026-10-15T11:00:00Z",
+    };
+    const outcomes = await Promise.all([
+      h.upstream.report(fact, h.ctx),
+      h.upstream.report(fact, h.ctx),
+    ]);
+    expect(outcomes.map((o) => o.status).sort()).toEqual(["issue", "skipped"]);
+    expect(h.github.state.issues).toHaveLength(1);
+  });
+
+  it("keeps the sweep off issues labelled vtc:keep or with human activity", async () => {
+    const h = harness();
+    for (const id of ["GHSA-0001", "GHSA-0002", "GHSA-0003"]) {
+      await h.upstream.report(
+        { type: "security_advisory", advisoryId: id, package: "yaml", at: "2026-10-15T11:00:00Z" },
+        h.ctx,
+      );
+    }
+    h.github.human(1, { label: "vtc:keep" });
+    h.github.human(2, { comment: "I am looking at this" });
+    h.clock.now = new Date("2026-11-15T12:00:00Z");
+    const swept = await h.upstream.sweep(h.ctx);
+    expect(swept.map((o) => ("number" in o ? o.number : 0))).toEqual([3]);
+  });
+
+  it("caps new issues at five per repo per day", async () => {
+    const h = harness();
+    const outcomes = [];
+    for (let i = 1; i <= 6; i += 1) {
+      outcomes.push(
+        await h.upstream.report(
+          {
+            type: "security_advisory",
+            advisoryId: `GHSA-000${String(i)}`,
+            package: "yaml",
+            at: "2026-10-15T11:00:00Z",
+          },
+          h.ctx,
+        ),
+      );
+    }
+    expect(outcomes.filter((o) => o.status === "issue")).toHaveLength(5);
+    expect(outcomes[5]).toMatchObject({ status: "skipped", reason: "rate_limit" });
+    expect(h.github.state.issues[0]?.labels).toEqual([
+      "vtc:auto",
+      "vtc:kind/security",
+      "vtc:security",
+    ]);
+  });
+
+  it("checks the opt-outs when queued and again when sent", async () => {
+    const off = harness();
+    off.setShare(false);
+    expect(
+      await off.upstream.report(
+        {
+          type: "security_advisory",
+          advisoryId: "GHSA-1",
+          package: "yaml",
+          at: "2026-10-15T11:00:00Z",
+        },
+        off.ctx,
+      ),
+    ).toMatchObject({
+      status: "skipped",
+      reason: "share_off",
+    });
+    let calls = 0;
+    const late = harness({ contexts: () => ((calls += 1) > 1 ? { paused: true } : {}) });
+    expect(
+      await late.upstream.report(
+        {
+          type: "security_advisory",
+          advisoryId: "GHSA-1",
+          package: "yaml",
+          at: "2026-10-15T11:00:00Z",
+        },
+        late.ctx,
+      ),
+    ).toMatchObject({
+      status: "skipped",
+      reason: "paused",
+    });
+    expect(late.github.state.issues).toHaveLength(0);
+    const logout = harness();
+    logout.setContext({ ghLoggedIn: false });
+    expect(
+      await logout.upstream.report(
+        {
+          type: "security_advisory",
+          advisoryId: "GHSA-1",
+          package: "yaml",
+          at: "2026-10-15T11:00:00Z",
+        },
+        logout.ctx,
+      ),
+    ).toMatchObject({
+      reason: "gh_unavailable",
+    });
+  });
+
+  it("fails closed on privacy: nothing is sent when a project identifier or secret shows", async () => {
+    const h = harness();
+    const fact = defect({ model: "globex-tuned" });
+    await h.upstream.report(fact, h.ctx);
+    expect(await h.upstream.report(fact, h.ctx)).toMatchObject({
+      status: "skipped",
+      reason: "privacy",
+    });
+    const secret = defect({ errorClass: "engine.crash", model: "sk-live-payroll-SECRET-1234" });
+    await h.upstream.report(secret, h.ctx);
+    expect(await h.upstream.report(secret, h.ctx)).toMatchObject({
+      status: "skipped",
+      reason: "privacy",
+    });
+    expect(h.github.state.issues).toHaveLength(0);
+    const skip = h.events.find((e) => e.type === "automation.skipped");
+    expect(JSON.stringify(skip)).not.toMatch(/globex|SECRET/i);
+  });
+
+  it("raises project issues in the project's repo, redacted, and only with a GitHub remote", async () => {
+    const h = harness();
+    const fact: AutomationFact = {
+      type: "project_problem",
+      kind: "parked",
+      ruleId: "task.parked",
+      path: "src/payroll/export.ts",
+      title: "Payroll export task is parked",
+      detail: "T-4 parked: the API key sk-live-payroll-SECRET-1234 is rejected",
+      run: "R7",
+      at: "2026-10-15T11:00:00Z",
+    };
+    expect(await h.upstream.report(fact, h.ctx)).toMatchObject({
+      status: "issue",
+      action: "opened",
+    });
+    const [issue] = h.github.state.issues;
+    expect(issue?.repo).toBe(PROJECT);
+    expect(issue?.title).toBe("vtc(parked): Payroll export task is parked");
+    expect(issue?.body).toContain("T-4 parked");
+    expect(issue?.body).not.toContain("SECRET-1234");
+    expect(issue?.labels).toEqual(["vtc:auto", "vtc:kind/parked"]);
+    h.setContext({ githubRemote: false });
+    expect(await h.upstream.report({ ...fact, ruleId: "other" }, h.ctx)).toMatchObject({
+      reason: "no_github_remote",
+    });
+  });
+});
+
+const PROMPT = `<!-- vtc:locked -->
+# Implementer
+
+Locked core: never touch files outside the task's scope.
+
+<!-- vtc:editable -->
+Prefer small commits.
+Run the tests before you finish.
+`;
+
+const replay = (over: Partial<ReplayResult> = {}): ReplayResult => ({
+  v: 1,
+  proposal: "implementer-steps",
+  role: "implementer",
+  host: "codex",
+  baseline: "a".repeat(64),
+  candidate: "b".repeat(64),
+  grader_bundle_sha: "c".repeat(64),
+  k: 3,
+  per_task: [
+    { task: "T-12", a: [false, false, true], b: [true, true, true], regression_set: false },
+    { task: "T-15", a: [false, true, false], b: [true, true, false], regression_set: true },
+  ],
+  aa_flip_rate: 0.05,
+  sign_test: { n_discordant: 4, wins_b: 4, p: 0.0625 },
+  tokens_delta_pct: -8,
+  verdict: "improve",
+  finished_at: "2026-10-15T10:00:00Z",
+  ...over,
+});
+
+const proposal: PromptProposal = {
+  v: 1,
+  id: "implementer-steps",
+  base: {
+    role: "implementer",
+    host: "codex",
+    effective_sha256: "a".repeat(64),
+  } as PromptProposal["base"],
+  changes: [
+    {
+      hypothesis: "Listing the steps first cuts rework rounds.",
+      target_metric: "rounds_to_done",
+      trace_ids: ["r1-a1", "r2-a4"],
+      summary: "plan the steps before editing",
+    },
+  ],
+  editable:
+    "Plan the steps before editing.\nPrefer small commits.\nRun the tests before you finish.",
+  created_at: "2026-10-15T09:00:00Z",
+};
+
+describe("the Lookback PR", () => {
+  const withCheckout = (h: Harness): void => {
+    mkdirSync(join(h.checkout, "roles", "implementer"), { recursive: true });
+    writeFileSync(join(h.checkout, "roles", "implementer", "prompt.md"), PROMPT);
+    writeFileSync(
+      join(h.checkout, "roles", "CHANGELOG.md"),
+      "# Role prompt changes\n\n## older entry\n",
+    );
+  };
+
+  it("commits the editable section and a CHANGELOG entry, opens a draft with evidence, then marks it ready", async () => {
+    const h = harness();
+    withCheckout(h);
+    const outcome = await h.upstream.openLookbackPr({ replay: replay(), proposal }, h.ctx);
+    expect(outcome).toMatchObject({ status: "pr", ready: true, evidence: "partial" });
+    const fp = autoFingerprint({
+      kind: "lookback",
+      subject: "implementer",
+      proposalKind: "prompt",
+    });
+
+    const [evidenceCommit, change] = h.plumbing.commits;
+    expect(
+      evidenceCommit?.changes.every((c) => c.path.startsWith(`lookback/${fp.slice(0, 8)}/`)),
+    ).toBe(true);
+    expect(change?.base).toBe(BASE_SHA);
+    expect(change?.parents).toEqual([BASE_SHA]);
+    const decoder = new TextDecoder();
+    const prompt = decoder.decode(
+      change?.changes.find((c) => c.path === "roles/implementer/prompt.md")?.bytes ??
+        new Uint8Array(),
+    );
+    const split = splitRolePrompt(prompt);
+    expect(split.ok && split.locked).toBe(
+      "# Implementer\n\nLocked core: never touch files outside the task's scope.",
+    );
+    expect(split.ok && split.editable).toBe(proposal.editable);
+    const changelog = decoder.decode(
+      change?.changes.find((c) => c.path === "roles/CHANGELOG.md")?.bytes ?? new Uint8Array(),
+    );
+    expect(changelog.indexOf("implementer: plan the steps")).toBeLessThan(
+      changelog.indexOf("older entry"),
+    );
+    expect(changelog).toContain("Listing the steps first");
+    expect(changelog).toContain("`r1-a1`");
+    expect(changelog).toContain("+Plan the steps before editing.");
+    expect(changelog).toContain("A/A flip rate");
+    expect(h.plumbing.pushes.map((p) => p.dst)).toEqual([
+      "refs/heads/vtc-evidence",
+      `refs/heads/vtc/auto/lookback/${fp.slice(0, 8)}`,
+    ]);
+
+    const [pr] = h.github.state.prs;
+    expect(pr?.repo).toBe(UPSTREAM);
+    expect(pr?.isDraft).toBe(false);
+    expect(h.github.state.log.filter((l) => l.startsWith("pr"))).toEqual([
+      "pr create 1",
+      "pr ready 1",
+    ]);
+    expect(pr?.title).toBe("vtc(lookback): improve the implementer prompt");
+    expect(pr?.labels).toEqual(["vtc:auto", "vtc:kind/lookback", "evidence: partial"]);
+    expect(
+      pr?.body.startsWith(`<!-- vtc:auto v=1 kind=lookback fp=${fp} role=implementer -->`),
+    ).toBe(true);
+    expect(pr?.body).toContain("VTC never merges automatic PRs");
+    expect(pr?.body).toContain(`https://github.com/${UPSTREAM}/blob/`);
+    expect(pr?.body).not.toMatch(/T-12|T-15|alice|globex|payroll/);
+    expect(types(h.events)).toEqual(["upstream.pr_opened"]);
+    expect(h.events[0]?.payload).toMatchObject({
+      evidence: "partial",
+      branch: `vtc/auto/lookback/${fp.slice(0, 8)}`,
+    });
+  });
+
+  it("supersedes the older Lookback PR of the role, deleting its branch only at VTC's head", async () => {
+    const h = harness();
+    withCheckout(h);
+    await h.upstream.openLookbackPr({ replay: replay(), proposal }, h.ctx);
+    await h.upstream.openLookbackPr(
+      { replay: replay({ finished_at: "2026-10-16T10:00:00Z" }), proposal },
+      h.ctx,
+    );
+    expect(h.github.state.prs.map((p) => p.state)).toEqual(["closed", "open"]);
+    expect(h.github.state.prs[0]?.branchDeleted).toBe(false);
+    expect(types(h.events)).toEqual([
+      "upstream.pr_opened",
+      "upstream.pr_closed",
+      "upstream.pr_opened",
+    ]);
+  });
+
+  it("skips without a bs-vtc checkout, and ignores any verdict but improve", async () => {
+    const h = harness({ automation: { upstream: { repo: UPSTREAM, share: true } } });
+    expect(await h.upstream.openLookbackPr({ replay: replay(), proposal }, h.ctx)).toMatchObject({
+      status: "skipped",
+      reason: "no_upstream_checkout",
+    });
+    expect(
+      await h.upstream.openLookbackPr(
+        { replay: replay({ verdict: "no_change" }), proposal },
+        h.ctx,
+      ),
+    ).toEqual({
+      status: "ignored",
+    });
+  });
+
+  it("refuses a proposal that names the project", async () => {
+    const h = harness();
+    withCheckout(h);
+    const leaky = { ...proposal, editable: "For Globex Industries payroll, plan the steps first." };
+    expect(
+      await h.upstream.openLookbackPr({ replay: replay(), proposal: leaky }, h.ctx),
+    ).toMatchObject({
+      status: "skipped",
+      reason: "privacy",
+    });
+    expect(h.plumbing.pushes).toHaveLength(0);
+    expect(h.github.state.prs).toHaveLength(0);
+  });
+});
+
+describe("bs-vtc PRs caused by a project run", () => {
+  it("record only the upstream-safe projection, whatever snapshot the caller passed", async () => {
+    const probes: Record<string, number> = {};
+    const inner = fakeRecorder();
+    const recorder: EvidenceRecorder = {
+      renderGateReport: (request) => inner.renderGateReport(request),
+      capture: async (request) => {
+        for (const path of ["/api/runs/R7/status", UPSTREAM_EVIDENCE_ROUTE]) {
+          probes[path] = (await fetch(new URL(path, request.origin))).status;
+        }
+        expect(request.shots.every((s) => s.path.startsWith("/lookback/?evidence=upstream"))).toBe(
+          true,
+        );
+        expect(request.denyText).toContain("payroll-portal");
+        return inner.capture(request);
+      },
+    };
+    const h = harness({ automation: { evidence: recorder, hosting: "attach" } });
+    const fp = autoFingerprint({ kind: "config", subject: "max_rounds" });
+    const outcome = await h.upstream.openPullRequest(
+      {
+        target: "upstream",
+        kind: "config",
+        fingerprint: fp,
+        summary: "raise the review round cap",
+        slots: { summary: "Raises the cap." },
+        source: {
+          changes: [{ path: "roles/x.yaml", bytes: new TextEncoder().encode("x") }],
+          message: "cap",
+        },
+        report: projectUpstreamReport({
+          kind: "config",
+          fingerprint: fp,
+          vtcVersion: "0.4.0",
+          occurrences: 1,
+          firstSeen: "2026-10-15T00:00:00Z",
+          lastSeen: "2026-10-15T00:00:00Z",
+        }),
+        evidence: {
+          plan: { run: "R7", upstreamSafe: false, change: "non_ui" },
+          snapshot: {
+            routes: { "/api/runs/R7/status": { title: "Payroll export" } },
+            events: [{ run: "R7", seq: 1 }],
+          },
+        },
+      },
+      h.ctx,
+    );
+    expect(outcome).toMatchObject({ status: "pr" });
+    expect(probes).toEqual({ "/api/runs/R7/status": 404, [UPSTREAM_EVIDENCE_ROUTE]: 200 });
+  });
+});
+
+describe("no PR without evidence", () => {
+  const prInput = {
+    target: "project" as const,
+    kind: "parked" as const,
+    fingerprint: "0123456789abcdef",
+    summary: "fix the parked export task",
+    slots: { summary: "Fixes the export." },
+    source: {
+      changes: [{ path: "src/a.ts", bytes: new TextEncoder().encode("x") }],
+      message: "fix",
+    },
+    evidence: {
+      plan: { run: "R7", upstreamSafe: false, change: "non_ui" as const },
+      snapshot: { routes: {}, events: [] },
+      gateReport: {} as never,
+    },
+  };
+
+  it("retries once, then opens no PR and raises 'evidence capture failed' upstream", async () => {
+    const recorder = fakeRecorder({ failing: () => true });
+    const h = harness({ automation: { evidence: recorder } });
+    expect(await h.upstream.openPullRequest(prInput, h.ctx)).toMatchObject({
+      status: "skipped",
+      reason: "evidence_failed",
+    });
+    expect(recorder.requests).toHaveLength(2);
+    expect(h.github.state.prs).toHaveLength(0);
+    expect(h.plumbing.pushes).toHaveLength(0);
+    const [issue] = h.github.state.issues;
+    expect(issue?.repo).toBe(UPSTREAM);
+    expect(issue?.title).toBe("vtc(defect): evidence.capture_failed in the engine");
+    expect(types(h.events)).toEqual(["upstream.issue_opened", "automation.skipped"]);
+  });
+
+  it("opens no PR when no recorder is available", async () => {
+    const h = harness({ noRecorder: true });
+    expect(await h.upstream.openPullRequest(prInput, h.ctx)).toMatchObject({
+      reason: "evidence_failed",
+    });
+    expect(h.github.state.prs).toHaveLength(0);
+  });
+
+  it("keeps an automatic run's PR draft until the Spec-Verifier passes", async () => {
+    const h = harness({ automation: { hosting: "attach" } });
+    const outcome = await h.upstream.openPullRequest(
+      { ...prInput, specVerifier: "pending", issue: 3 },
+      h.ctx,
+    );
+    expect(outcome).toMatchObject({ status: "pr", ready: false, evidence: "complete" });
+    const [pr] = h.github.state.prs;
+    expect(pr?.repo).toBe(PROJECT);
+    expect(pr?.isDraft).toBe(true);
+    expect(pr?.attached).toEqual(["01-replay.webm", "02-final-state.png", "03-gate-report.png"]);
+    expect(pr?.body).toContain(
+      "![Flow Studio replay of the run that produced this PR](01-replay.webm)",
+    );
+    expect(pr?.body).toContain("Closes #3");
+    expect(
+      await h.upstream.completePullRequest("project", pr?.number ?? 0, "fail", h.ctx),
+    ).toMatchObject({ ready: false });
+    expect(
+      await h.upstream.completePullRequest("project", pr?.number ?? 0, "pass", h.ctx),
+    ).toMatchObject({ ready: true });
+    expect(h.github.state.prs[0]?.isDraft).toBe(false);
+  });
+
+  it("caps open automatic PRs per kind", async () => {
+    const h = harness({ automation: { hosting: "attach" } });
+    for (const fp of ["1111111111111111", "2222222222222222", "3333333333333333"]) {
+      expect(
+        await h.upstream.openPullRequest({ ...prInput, fingerprint: fp }, h.ctx),
+      ).toMatchObject({ status: "pr" });
+    }
+    expect(
+      await h.upstream.openPullRequest({ ...prInput, fingerprint: "4444444444444444" }, h.ctx),
+    ).toMatchObject({
+      status: "skipped",
+      reason: "rate_limit",
+    });
+  });
+});
