@@ -10,24 +10,33 @@
  *   records `automation.skipped` with the reason the settings give;
  * - it gives the module its only event sink (`upstream.*` and `automation.skipped`, nothing else),
  *   into the run's log, or the next run's when none is open (kept in the engine's private area);
- * - it relays the daily summary to the Lead once per UTC day (`NextResult.notices`).
+ * - it relays the daily summary to the Lead once per UTC day (`NextResult.notices`);
+ * - after Lookback rewrites the scorecards at a run's end, it hands over each role's cost
+ *   regression against its previous prompt version (`costRegressionFacts`), once per pair of
+ *   versions and metric.
  * Without `EngineDeps.automation` nothing is evaluated (the Automation view says why).
  */
+import { lstatSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import {
   automationFor,
   isCoreEventType,
+  LOOKBACK_REPO,
+  ScorecardIndexSchema,
+  ScorecardSchema,
   validateEventData,
   type AutomationContext,
   type AutomationSettings,
   type AutomationSkipReason,
   type EngineDeps,
+  type Scorecard,
   type VtcEvent,
 } from "@vtc/shared";
 import {
   appendPrivateFile,
   automationDailySummary,
   automationFacts,
+  costRegressionFacts,
   ensurePrivateDir,
   isAutomationEvent,
   readPrivateFile,
@@ -53,6 +62,11 @@ export interface AutomationWiring {
   readonly settings: () => AutomationSettings | null;
   /** Resolves once every fact handed over so far has been handled. */
   readonly idle: () => Promise<void>;
+  /**
+   * Lookback rewrote the scorecards at `run`'s end: each new cost regression (a role's newest
+   * prompt version against the one before it) becomes a fact of that run.
+   */
+  readonly scorecardsWritten: (run: string) => void;
   readonly close: () => Promise<void>;
 }
 
@@ -62,6 +76,40 @@ export const isGitHubRemote = (url: string | null): boolean =>
 
 const SUMMARY_FILE = "automation-summary.json";
 const PENDING_FILE = "automation-pending.jsonl";
+const COST_SEEN_FILE = "automation-cost-seen.json";
+/** How many reported cost regressions the guard dir remembers. */
+const COST_SEEN_MAX = 500;
+/** The largest scorecard or scorecard index file read. */
+const SCORECARD_MAX_BYTES = 256 * 1024;
+
+/** A repo file the engine wrote, as JSON, or `undefined` (missing, a link, too large, not JSON). */
+const readRepoJson = (root: string, path: string): unknown => {
+  try {
+    const file = join(root, path);
+    const stat = lstatSync(file);
+    if (!stat.isFile() || stat.size > SCORECARD_MAX_BYTES) return undefined;
+    return JSON.parse(readFileSync(file, "utf8")) as unknown;
+  } catch {
+    return undefined;
+  }
+};
+
+/** The project's scorecards, from Lookback's index (`.vtc/lookback/scorecards/index.json`). */
+export const readScorecards = (projectRoot: string): Scorecard[] => {
+  const index = ScorecardIndexSchema.safeParse(
+    readRepoJson(projectRoot, LOOKBACK_REPO.scorecardIndex),
+  );
+  if (!index.success) return [];
+  return index.data.scorecards.flatMap((entry) => {
+    if (
+      !entry.path.startsWith(`${LOOKBACK_REPO.scorecardsDir}/`) ||
+      entry.path.split("/").includes("..")
+    )
+      return [];
+    const card = ScorecardSchema.safeParse(readRepoJson(projectRoot, entry.path));
+    return card.success ? [card.data] : [];
+  });
+};
 
 /** Why a fact is not acted on under `context` (D-bz, D-by), or `null` when it may be. */
 export const automationSkipReason = (
@@ -194,6 +242,7 @@ export const wireAutomation = (
             if (settings === null) throw new Error("automation is not wired");
             return settings;
           },
+          context,
           emit,
           startRun: async (input, issue) => {
             await engine.startAutomatic(input, issue);
@@ -251,26 +300,58 @@ export const wireAutomation = (
   };
   const unsubscribe = engine.onEvent(listener);
   maybeSummarise();
+
+  // ---- cost regressions, after Lookback rewrote the scorecards (D-bv)
+  const costSeenFile = join(guard, COST_SEEN_FILE);
+  const costSeen = (): string[] => {
+    try {
+      const value = JSON.parse(readPrivateFile(costSeenFile) ?? "[]") as unknown;
+      return Array.isArray(value) ? value.filter((v): v is string => typeof v === "string") : [];
+    } catch {
+      return [];
+    }
+  };
+  const scorecardsWritten = (run: string): void => {
+    if (automation === undefined) return;
+    queue = queue.then(async () => {
+      const facts = costRegressionFacts(readScorecards(deps.repoRoot), {
+        run,
+        at: now().toISOString(),
+      });
+      if (facts.length === 0) return;
+      const seen = costSeen();
+      const key = (f: AutomationFact): string =>
+        [f.role, f.mode ?? "", f.host, f.baselinePromptSha, f.promptSha, f.metric].join(" ");
+      const fresh = facts.filter((f) => !seen.includes(key(f)));
+      if (fresh.length === 0) return;
+      ensurePrivateDir(guard);
+      writePrivateFile(
+        costSeenFile,
+        `${JSON.stringify([...seen, ...fresh.map(key)].slice(-COST_SEEN_MAX))}\n`,
+      );
+      for (const fact of fresh) await handle(fact);
+    });
+  };
+
+  // ---- the module's sweep: tried at start and then on a timer (the module paces it)
   const sweep = upstream?.sweep?.bind(upstream);
-  const timer =
-    sweep === undefined
-      ? null
-      : setInterval(
-          () => {
-            if (paused()) return;
-            queue = queue.then(() =>
-              sweep().catch((error: unknown) => {
-                engine.notice(
-                  `the automation sweep failed: ${error instanceof Error ? error.message : String(error)}`,
-                );
-              }),
-            );
-          },
-          options.sweepEveryMs ?? 60 * 60_000,
+  const runSweep = (): void => {
+    if (sweep === undefined || paused()) return;
+    queue = queue.then(() =>
+      sweep().catch((error: unknown) => {
+        engine.notice(
+          `the automation sweep failed: ${error instanceof Error ? error.message : String(error)}`,
         );
+      }),
+    );
+  };
+  if (automation !== undefined) runSweep();
+  const timer =
+    sweep === undefined ? null : setInterval(runSweep, options.sweepEveryMs ?? 60 * 60_000);
   timer?.unref();
   return {
     settings: settingsNow,
+    scorecardsWritten,
     idle: () => queue,
     close: async () => {
       unsubscribe();

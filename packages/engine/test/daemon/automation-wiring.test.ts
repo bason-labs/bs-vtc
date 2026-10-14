@@ -5,10 +5,10 @@
  * events (into the next run's log when none is open); the Lead relays a daily summary once per UTC
  * day; without `EngineDeps.automation` nothing is evaluated.
  */
-import { readFileSync } from "node:fs";
+import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { type AutomationDeps, type StartInput } from "@vtc/shared";
+import { scorecardPath, type AutomationDeps, type Scorecard, type StartInput } from "@vtc/shared";
 import type { AutomationFact, CreateUpstream, UpstreamWiringDeps } from "../../src/core/index.js";
 import { isGitHubRemote, wireAutomation } from "../../src/daemon/automation.js";
 import { cleanupDirs } from "../helpers/repo.js";
@@ -295,6 +295,92 @@ describe("automation wiring (AD-27 rules 7 and 8)", () => {
     );
     expect(notices[0]).toContain("https://github.com/acme/app/pull/12");
     expect((await h.engine.next({}, CLAUDE)).notices).toBeUndefined();
+    await wiring.close();
+    await h.release();
+  });
+
+  it("after Lookback rewrites the scorecards, hands over each new cost regression once", async () => {
+    const h = createHarness();
+    const up = fakeUpstream();
+    const wiring = wireAutomation(
+      h.engine,
+      { repoRoot: h.repo, vtcHome: h.home, automation: AUTOMATION, now: () => h.clock },
+      { githubRemote: true, createUpstream: up.create },
+    );
+    const run = await started(h);
+    const card = (effective: string, from: string, tokens: number): Scorecard => ({
+      v: 1,
+      prompt: {
+        role: "engineer",
+        host: "claude-code",
+        locked_sha256: "1".repeat(64),
+        editable_sha256: effective,
+        effective_sha256: effective,
+      },
+      grader_bundle_sha: "9".repeat(64),
+      window: { from, to: "2026-10-12T00:00:00.000Z" },
+      metrics: { tokens_per_success: { value: tokens, ci_low: null, ci_high: null, n: 20 } },
+      breakdown: [],
+      written_at: "2026-10-12T00:00:00.000Z",
+    });
+    const cards = [
+      card("a".repeat(64), "2026-10-01T00:00:00.000Z", 10000),
+      card("b".repeat(64), "2026-10-05T00:00:00.000Z", 15000),
+    ];
+    const index = {
+      v: 1,
+      scorecards: cards.map((c) => ({
+        prompt: c.prompt,
+        path: scorecardPath(c.prompt.role, c.prompt.host, c.prompt.effective_sha256),
+        written_at: c.written_at,
+      })),
+    };
+    for (const [c, entry] of cards.map((c, i) => [c, index.scorecards[i]] as const)) {
+      const file = join(h.repo, entry?.path ?? "");
+      mkdirSync(join(file, ".."), { recursive: true });
+      writeFileSync(file, JSON.stringify(c));
+    }
+    writeFileSync(join(h.repo, ".vtc/lookback/scorecards/index.json"), JSON.stringify(index));
+    wiring.scorecardsWritten(run);
+    await wiring.idle();
+    expect(up.facts).toEqual([
+      expect.objectContaining({
+        target: "upstream",
+        kind: "cost",
+        run,
+        role: "engineer",
+        metric: "tokens_per_success",
+        baseline: 10000,
+        current: 15000,
+        baselinePromptSha: "a".repeat(64),
+        promptSha: "b".repeat(64),
+      }),
+    ]);
+    // the same pair of versions is not handed over again at the next run's end
+    wiring.scorecardsWritten(run);
+    await wiring.idle();
+    expect(up.facts).toHaveLength(1);
+    await wiring.close();
+    await h.release();
+  });
+
+  it("tries the module's sweep when it starts (the module paces it), never while paused", async () => {
+    const h = createHarness();
+    let sweeps = 0;
+    const create: CreateUpstream = () => ({
+      onFact: () => Promise.resolve(),
+      sweep: () => {
+        sweeps += 1;
+        return Promise.resolve();
+      },
+    });
+    const wiring = wireAutomation(
+      h.engine,
+      { repoRoot: h.repo, vtcHome: h.home, automation: AUTOMATION, now: () => h.clock },
+      { githubRemote: true, createUpstream: create },
+    );
+    await wiring.idle();
+    expect(sweeps).toBe(1);
     await wiring.close();
     await h.release();
   });
