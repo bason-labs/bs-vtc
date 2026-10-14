@@ -22,7 +22,13 @@ export interface ExecResult {
 export type Exec = (
   command: string,
   args: readonly string[],
-  options?: { readonly cwd?: string; readonly timeoutMs?: number; readonly input?: string },
+  options?: {
+    readonly cwd?: string;
+    readonly timeoutMs?: number;
+    readonly input?: string;
+    /** Variables set over the inherited environment. */
+    readonly env?: Readonly<Record<string, string>>;
+  },
 ) => Promise<ExecResult>;
 
 const MAX_OUTPUT = 1024 * 1024;
@@ -90,6 +96,7 @@ export const exec: Exec = (command, args, options = {}) => {
     };
     const child = spawn(invocation.file, [...invocation.args], {
       cwd: options.cwd,
+      ...(options.env === undefined ? {} : { env: { ...process.env, ...options.env } }),
       stdio: [options.input === undefined ? "ignore" : "pipe", "pipe", "pipe"],
       windowsHide: true,
       windowsVerbatimArguments: invocation.verbatim,

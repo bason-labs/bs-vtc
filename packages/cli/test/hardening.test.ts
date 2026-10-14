@@ -19,9 +19,7 @@ import { PassThrough } from "node:stream";
 import { fileURLToPath } from "node:url";
 import { afterEach, describe, expect, it } from "vitest";
 import {
-  claudeSessionSandboxSettings,
   CONTRACTS_VERSION,
-  ENGINE_MCP_TOOLS,
   EngineSocketHelloSchema,
   GATE_SANDBOX,
   HUMAN_ONLY_TOOLS,
@@ -64,6 +62,7 @@ import {
   rpc,
   tempDir,
   tempHome,
+  expectServedTools,
 } from "./helpers.js";
 
 afterEach(cleanupDirs);
@@ -117,9 +116,7 @@ describe("vtc engine --mcp outside a git repository (D-aq, reading 74)", () => {
     expect(await next(/"id":2\b/)).toMatchObject({ result: {} });
     stdin.write(rpc(3, "tools/list"));
     const tools = (await next(/"id":3\b/)) as { result: { tools: { name: string }[] } };
-    expect(tools.result.tools.map((t) => t.name).sort()).toEqual(
-      ENGINE_MCP_TOOLS.map((t) => t.name).sort(),
-    );
+    expectServedTools(tools.result.tools.map((t) => t.name));
     for (const id of [4, 5]) {
       stdin.write(rpc(id, "tools/call", { name: "status", arguments: {} }));
       const refused = (await next(new RegExp(`"id":${String(id)}\\b`))) as {
@@ -275,7 +272,8 @@ describe("the session sandbox the bridge reports (D-an, reading 71)", () => {
 
   it("merges the settings, keeping the user's other keys and deny entries", () => {
     const home = "/home/u/.vtc";
-    const shared = claudeSessionSandboxSettings(home, sandboxScopeOf("/r", SANDBOX_ENV));
+    // what vtc install writes: the shared settings plus the wave-3 write denies
+    const shared = sessionSandboxSettings(home, sandboxScopeOf("/r", SANDBOX_ENV));
     const wanted = shared.sandbox;
     const merged = mergeSessionSandboxSettings(
       {
@@ -339,6 +337,7 @@ describe("vtc install --host claude-code writes the session sandbox (D-an)", () 
       },
       confirm,
       sessionSandboxEnv: () => SANDBOX_ENV,
+      registerCodex: () => ({ written: [], notes: [] }),
     });
 
   it("shows the settings, writes them after the user confirms, merged and gitignored", async () => {

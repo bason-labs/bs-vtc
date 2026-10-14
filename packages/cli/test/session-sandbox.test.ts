@@ -20,7 +20,7 @@ import { mkdirSync, readFileSync, symlinkSync, writeFileSync } from "node:fs";
 import { join, relative } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import { ADAPTER_FACTORIES } from "@vtc/adapters";
-import { claudeSessionSandboxSettings, type HostAdapter } from "@vtc/shared";
+import { claudeSessionSandboxSettings, WAVE3_HOME_WRITE_DENY, type HostAdapter } from "@vtc/shared";
 import { createInstallCommand, defaultInstallDeps } from "../src/commands/install.js";
 import { checkSessionSandbox, detectGateSandbox } from "../src/doctor-checks.js";
 import {
@@ -32,6 +32,7 @@ import {
   sandboxToolsMissing,
   sessionSandboxProbe,
   sessionSandboxSettings,
+  wave3SessionDenies,
   wideningOf,
   type SessionSandboxEnv,
 } from "../src/session-sandbox.js";
@@ -70,11 +71,39 @@ describe("the session sandbox needs sandbox.failIfUnavailable", () => {
     const vtcHome = "/home/u/.vtc";
     const scope = sandboxScopeOf("/r", { homeDir: "/home/u" });
     const shared = claudeSessionSandboxSettings(vtcHome, scope);
-    expect(sessionSandboxSettings(vtcHome, scope)).toEqual({
-      sandbox: { ...shared.sandbox, failIfUnavailable: true },
+    // WAVE3_HOME_WRITE_DENY (Lookback pins and versions, research cache, browser store, design
+    // library) until the integrator folds it into ROLE_DENIED_VTC.homeWriteDeny (reading 103)
+    const wave3 = WAVE3_HOME_WRITE_DENY.map((g) => `${vtcHome}/${g.replace(/\/\*\*$/, "")}`);
+    expect(wave3).toEqual([
+      "/home/u/.vtc/lookback",
+      "/home/u/.vtc/research-cache",
+      "/home/u/.vtc/browsers",
+      "/home/u/.vtc/design-library",
+    ]);
+    const settings = sessionSandboxSettings(vtcHome, scope);
+    expect(settings).toEqual({
+      sandbox: {
+        ...shared.sandbox,
+        filesystem: {
+          ...shared.sandbox.filesystem,
+          denyWrite: [...new Set([...shared.sandbox.filesystem.denyWrite, ...wave3])],
+        },
+        failIfUnavailable: true,
+      },
       // the file tools follow permission rules, not the sandbox (reading 81)
-      permissions: shared.permissions,
+      permissions: {
+        deny: [
+          ...new Set([
+            ...shared.permissions.deny,
+            ...wave3.flatMap((p) => [`Edit(/${p})`, `Edit(/${p}/**)`]),
+            ...wave3SessionDenies(vtcHome).permissionDeny.filter((r) => r.startsWith("Bash(")),
+          ]),
+        ],
+      },
     });
+    for (const path of wave3) expect(settings.sandbox.filesystem.denyWrite).toContain(path);
+    expect(settings.permissions.deny).toContain("Edit(//home/u/.vtc/lookback/**)");
+    expect(settings.permissions.deny).toContain("Bash(*~/.vtc/lookback*)");
     expect(
       mergeSessionSandboxSettings({}, vtcHome, { projectRoot: "/r", homeDir: "/home/u" }),
     ).toEqual(sessionSandboxSettings(vtcHome, scope));
@@ -85,7 +114,13 @@ describe("the session sandbox needs sandbox.failIfUnavailable", () => {
     write(CLAUDE_LOCAL_SETTINGS, claudeSessionSandboxSettings(vtcHome, sandboxScopeOf(repo, env)));
     const report = claudeSessionSandboxOf(repo, vtcHome, env);
     expect(report.state).toBe("off");
-    expect(report.missing).toEqual(["sandbox.failIfUnavailable"]);
+    // the wave-3 write denies count as missing too, until the shared lists carry them
+    const wave3 = wave3SessionDenies(vtcHome);
+    expect(report.missing).toEqual([
+      "sandbox.failIfUnavailable",
+      ...wave3.denyWrite,
+      ...wave3.permissionDeny,
+    ]);
     write(CLAUDE_LOCAL_SETTINGS, {
       ...sessionSandboxSettings(vtcHome, sandboxScopeOf(repo, env)),
       sandbox: {

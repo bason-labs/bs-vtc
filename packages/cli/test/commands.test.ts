@@ -30,7 +30,6 @@ import {
   defaultInstallDeps,
   type InstallDeps,
 } from "../src/commands/install.js";
-import { checkChromium } from "../src/doctor-checks.js";
 import { plistProgram, renderLaunchAgent } from "../src/launchd.js";
 import type { Exec, ExecResult } from "../src/process.js";
 import { renderSystemdService, systemdProgram } from "../src/systemd.js";
@@ -53,9 +52,10 @@ describe("vtc init", () => {
     const text = readFileSync(join(repo, ".vtc/project.yaml"), "utf8");
     expect(text).toMatch(/^# VTC project settings/);
     expect(text).toContain("dispatch: plugin_only");
-    // the engine starts no host CLI in v1, so the header promises no engine-launched runs
+    // the header says when the engine launches roles itself (readings 98 and 99)
     expect(text).not.toMatch(/lets the engine start host CLIs/);
-    expect(text).toMatch(/headless_allowed behaves as plugin_only/);
+    expect(text).toMatch(/a Codex Lead's roles run as headless Codex runs/);
+    expect(text).toMatch(/headless_allowed also\n# +lets the engine launch roles itself/);
     expect(readFileSync(join(repo, ".vtc/.gitignore"), "utf8")).toContain("/state/");
     expect(out[0]).toContain(".vtc/project.yaml");
   });
@@ -137,6 +137,7 @@ describe("vtc install", () => {
       timerHost: () => {
         throw new Error("the real launchd or systemd is never touched in tests");
       },
+      registerCodex: () => ({ written: [], notes: [] }),
       ...over,
     });
 
@@ -162,10 +163,23 @@ describe("vtc install", () => {
     const { ctx, out } = capture(repo, vtcHome);
     const options: (AdapterFactoryOptions | undefined)[] = [];
     const factory = (o?: AdapterFactoryOptions): HostAdapter => (options.push(o), adapter);
+    const registered: Parameters<InstallDeps["registerCodex"]>[0][] = [];
     const cmd = createInstallCommand(
-      installDeps({ factories: { codex: factory, "claude-code": factory } }, "/h"),
+      installDeps(
+        {
+          factories: { codex: factory, "claude-code": factory },
+          registerCodex: (o) => {
+            registered.push(o);
+            return { written: [`${o.root}/.agents/plugins/vtc`], notes: ["registered"] };
+          },
+        },
+        "/h",
+      ),
     );
     expect(await cmd.run(["--host", "codex", "--scope", "user"], ctx)).toBe(0);
+    // Codex: the plugin is registered per Codex's layout, in the home for the user scope
+    expect(registered).toEqual([{ root: "/h", pluginDir: "/plugins/codex", scope: "user" }]);
+    expect(out.join("\n")).toContain("note: registered");
     expect(requests).toEqual([
       // the VTC home goes with the request, so VTC-owned host files sit where the deny lists point
       { projectRoot: repo, home: "/h", pluginDir: "/plugins/codex", scope: "user", vtcHome },
@@ -179,8 +193,14 @@ describe("vtc install", () => {
     // (D-ah): Codex in the project, Claude Code for the user
     expect(await cmd.run(["codex"], ctx)).toBe(0);
     expect(requests.at(-1)).toMatchObject({ pluginDir: "/plugins/codex", scope: "project" });
+    expect(registered.at(-1)).toEqual({
+      root: repo,
+      pluginDir: "/plugins/codex",
+      scope: "project",
+    });
     expect(await cmd.run(["claude-code"], ctx)).toBe(0);
     expect(requests.at(-1)).toMatchObject({ pluginDir: "/plugins/claude-code", scope: "user" });
+    expect(registered).toHaveLength(2);
     expect(DEFAULT_INSTALL_SCOPE).toEqual({ "claude-code": "user", codex: "project" });
     expect(await cmd.run(["codex", "claude-code"], ctx)).toBe(64);
     expect(await cmd.run(["codex", "--host", "codex"], ctx)).toBe(64);
@@ -621,10 +641,5 @@ describe("vtc doctor", () => {
       ok: true,
       config: { env_passthrough: ["GH_TOKEN"] },
     });
-  });
-
-  it("only warns about Playwright's Chromium until Visual QA has a pin (D-ai)", () => {
-    expect(checkChromium()).toMatchObject({ name: "chromium", status: "warn" });
-    expect(checkChromium().detail).toMatch(/deferred until Visual QA/);
   });
 });

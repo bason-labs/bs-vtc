@@ -1,8 +1,9 @@
 /**
  * Composition (AD-1 rule 4, AD-19; owner: cli+binary team). The only place that builds the
  * daemon's dependencies: the storage driver for this runtime, the Gate Runner (with the user's
- * `gates.allow_unsandboxed`, D-al), the host adapters, the asset bundle, the auto-resume timer
- * and the `gh`-backed PR service.
+ * `gates.allow_unsandboxed`, D-al), the host adapters, the asset bundle, the auto-resume timer,
+ * the `gh`-backed PR service and, since contracts 4.5.0, the `gh`-backed Level-3 service (AD-23)
+ * and the research HTTP client with its network guard (AD-22).
  */
 import { homedir } from "node:os";
 import { join, resolve } from "node:path";
@@ -19,7 +20,9 @@ import {
   type GateRunner,
   type HostAdapter,
   type HostId,
+  type HttpClient,
   type PullRequestService,
+  type RemoteMergeService,
   type RunningDaemon,
   type StorageFactory,
 } from "@vtc/shared";
@@ -27,6 +30,8 @@ import type { CliIo, CommandContext } from "./commands/types.js";
 import { ensureDaemon } from "./daemon.js";
 import { contractsAtLeast } from "./bridge.js";
 import { interactiveTerminal, ttyConfirm } from "./confirm.js";
+import { createGhRemoteMerge, createGhRunner } from "./gh-remote-merge.js";
+import { bunResolver, createHttpClient, type Resolve } from "./http-client.js";
 import { guardHumanOnly } from "./human-channel.js";
 import { readInstallToken } from "./token.js";
 import { requireRepoRoot, requireVtcProject } from "./repo.js";
@@ -52,7 +57,22 @@ export interface EngineParts {
   readonly scheduler: AutoResumeScheduler;
   /** The feature PR service (§6.7 Level 2): `gh`-backed in production, a fake in tests. */
   readonly pullRequests: PullRequestService;
+  /** Level-3 auto-merge and the post-merge watch (AD-23): `gh`-backed, a fake in tests. */
+  readonly remoteMerge?: RemoteMergeService;
+  /** The research fetchers' HTTP client (AD-22); absent where no resolver is available. */
+  readonly http?: HttpClient;
 }
+
+/**
+ * The research HTTP client over the runtime's `fetch` (AD-22 rule 1), or `undefined` when there
+ * is no resolver to run the private-address guard with: the fetchers are then unavailable and
+ * new facts stay UNVERIFIED, which fails closed. The binary resolves with Bun's DNS; Node in
+ * development has no resolver among the runtime-safe built-ins (AD-2 rule 6).
+ */
+export const defaultHttpClient = (
+  resolve: Resolve | null = bunResolver(),
+  fetch: typeof globalThis.fetch = globalThis.fetch,
+): HttpClient | undefined => (resolve === null ? undefined : createHttpClient({ fetch, resolve }));
 
 export const engineVersions = (): EngineDeps["versions"] => ({
   engine: `${ENGINE_NAME}@${VERSION}`,
@@ -124,6 +144,10 @@ export interface BuildEnginePartsOptions {
   readonly pluginDir?: (host: HostId, vtcHome: string) => string;
   readonly scheduler?: AutoResumeScheduler;
   readonly pullRequests?: PullRequestService;
+  /** Default: the `gh`-backed service on `ghCommand` (AD-23). */
+  readonly remoteMerge?: RemoteMergeService;
+  /** Default: {@link defaultHttpClient}. `null` injects none. */
+  readonly http?: HttpClient | null;
   readonly ghCommand?: string;
   /**
    * Gate runs without an OS sandbox (D-al, spine §5 reading 69). Default: the user-level
@@ -138,6 +162,7 @@ export const buildEngineParts = async (options: BuildEnginePartsOptions): Promis
   const { repoRoot, vtcHome } = options;
   const createGateRunner = options.createGateRunner ?? gates.createGateRunner;
   const allowUnsandboxed = options.allowUnsandboxed ?? allowUnsandboxedOf(readUserConfig(vtcHome));
+  const http = options.http === null ? undefined : (options.http ?? defaultHttpClient());
   return {
     repoRoot,
     vtcHome,
@@ -160,6 +185,10 @@ export const buildEngineParts = async (options: BuildEnginePartsOptions): Promis
     assets: options.assets,
     scheduler: options.scheduler ?? createWakeScheduler(vtcHome),
     pullRequests: options.pullRequests ?? git.createGhPullRequests(repoRoot, options.ghCommand),
+    remoteMerge:
+      options.remoteMerge ??
+      createGhRemoteMerge({ repoRoot, gh: createGhRunner(repoRoot, options.ghCommand) }),
+    ...(http === undefined ? {} : { http }),
   };
 };
 
