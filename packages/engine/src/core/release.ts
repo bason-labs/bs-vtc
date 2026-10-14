@@ -1,7 +1,7 @@
 /**
  * RELEASE and RETRO (§6.1, §6.7): the feature evidence bundle, the PR marked ready with the bundle
- * in its description (Level 2), at Level 3 the auto-merge into main (`level3.ts`), then the run
- * summary. A Level-3 feature that parks, or a pause, leaves the run open: it finishes once the
+ * in its description (Level 2), at Level 3 the auto-merge into main (`level3.ts`), then RETRO
+ * (`retro.ts`: the lookback role where Lookback asks for it) and the run summary. A Level-3 feature that parks, or a pause, leaves the run open: it finishes once the
  * feature ships, or the human takes it from there.
  */
 import type { Kernel, RunHandle } from "./kernel.js";
@@ -12,9 +12,8 @@ import {
   finalReviewScopeNote,
   finalReviewStepsRun,
   writeFeatureEvidenceBundle,
-  writeRunSummary,
 } from "./projections.js";
-import { taskDetailView } from "./views.js";
+import { startRetro } from "./retro.js";
 
 export const startRelease = (k: Kernel, h: RunHandle, featureId: string): void => {
   k.spawn(h, `release:${featureId}`, async () => {
@@ -52,11 +51,8 @@ export const startRelease = (k: Kernel, h: RunHandle, featureId: string): void =
         actor: "engine",
         data: { from: h.state.run.phase, to: "retro" },
       });
-      const roleRuns = [...h.state.tasks.keys()].flatMap(
-        (t) => taskDetailView(h.state, t)?.role_runs ?? [],
-      );
-      const summary = writeRunSummary(k.deps.repoRoot, h.state, roleRuns, k.secrets());
-      k.emit(h, { type: "run.finished", actor: "engine", data: { outcome: "done", summary } });
+      // RETRO: the lookback role where Lookback asks for it, then run.finished (retro.ts)
+      startRetro(k, h);
       return Promise.resolve();
     });
   });

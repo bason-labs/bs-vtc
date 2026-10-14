@@ -368,3 +368,16 @@ export const FIXTURE_LENS_DB: RoleContract = role({
   tools: { profile: "read_only" },
   budget: { context_tokens: 30_000 },
 });
+
+/** The lookback role (§13; roles/lookback/role.yaml): proposals only, at RETRO. */
+export const FIXTURE_LOOKBACK: RoleContract = role({
+  id: "lookback",
+  kind: "core",
+  mission: "Propose at most three changes to one role's editable prompt section.",
+  inputs: ["traces", "scorecard", "prompt_proposal", "replay_result"],
+  output: { artifacts: ["prompt_proposal"], verdicts: [] },
+  exits: ["done", "blocked"],
+  reviewer: "engine",
+  models: both("top"),
+  tools: { profile: "write_scoped", write_paths: [".vtc/lookback/proposals/**"] },
+});

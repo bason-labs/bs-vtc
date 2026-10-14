@@ -185,7 +185,7 @@ describe("the daemon wires the Lookback module (AD-21)", () => {
     await h.release();
   });
 
-  it("at run.finished attributes the run and writes the scorecards the dashboard lists (rule 8)", async () => {
+  it("wires RETRO, and at run.finished attributes the run and writes the scorecards the dashboard lists (rule 8)", async () => {
     const h = createHarness({ plugins: switched, project: { merge_level: 1 } });
     const unwire = wireLookback(h.engine, { repoRoot: h.repo, vtcHome: h.home }, switched);
     const actions = await throughPlan(h, [draft("T-1")], SPEC_ONE);
@@ -198,9 +198,18 @@ describe("the daemon wires the Lookback module (AD-21)", () => {
     );
     await h.engine.settle();
     expect(existsSync(join(h.repo, LOOKBACK_REPO.scorecardIndex))).toBe(false);
+    // RETRO asked Lookback first (reading 154): one passing task leaves no target, so the run ends
+    expect(h.engine.lookbackRetro()).not.toBeNull();
     await passFinalReview(h);
     expect(h.engine.status({}).run.finished_at).toBeDefined();
+    const log = readFileSync(
+      join(h.repo, `.vtc/runs/${h.engine.status({}).run.id}/events.jsonl`),
+      "utf8",
+    );
+    expect(log).toContain('"to":"retro"');
+    expect(log).not.toContain("lookback.dispatched");
     await unwire();
+    expect(h.engine.lookbackRetro()).toBeNull();
     const index = ScorecardIndexSchema.parse(
       JSON.parse(readFileSync(join(h.repo, LOOKBACK_REPO.scorecardIndex), "utf8")),
     );

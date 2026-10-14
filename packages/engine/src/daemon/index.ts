@@ -47,6 +47,7 @@ import {
   takeEngineLock,
   writeEngineDiscovery,
   type PluginCatalog,
+  type RunState,
   type StaleLockReason,
 } from "../core/index.js";
 import { createGhPullRequests, createGitOps, createWorkspace } from "../git/index.js";
@@ -57,6 +58,7 @@ import {
   type PrototypeServer,
 } from "../http/index.js";
 import {
+  createLookbackRetro,
   createPromptPins,
   evaluateCanaries,
   graderBundleSha,
@@ -168,13 +170,17 @@ export const wireResearch = (
  * - as a canary dispatch ends (`role.submitted` of a dispatch with a `canary_arm`, rule 7), the
  *   project's canaries are evaluated over every run's events, `lookback.canary_evaluated` (and, on
  *   a rollback verdict, the engine's `auto_rollback` and `lookback.rolled_back`) going to that run;
- * - at `run.finished` (rule 8) the run's failures are attributed to
+ * - at RETRO, before the run finishes (rules 4 and 8, spine §5 reading 154), core's
+ *   `LookbackRetro` (`createLookbackRetro`): the run is attributed, the scorecards rewritten, and
+ *   the lookback role queued for each target (`lookback.dispatched`), reading the input the module
+ *   renders; its proposal is checked on submit, and an accepted one stored as a candidate version
+ *   (`lookback.proposal_recorded`);
+ * - at `run.finished` (an aborted run too) the run's failures are attributed to
  *   `.vtc/lookback/attributions.jsonl` and the scorecards of every version in the history are
  *   rewritten under `.vtc/lookback/scorecards/`.
- * Not wired yet (spine §7 "Lookback role dispatch and replays"): queueing the lookback role for the
- * targets `lookbackAtRunEnd` returns, the proposal check, and the `lookback_replay` trials. The
- * targets are therefore not logged as `lookback.dispatched`. Lookback work runs one job at a time
- * and never fails the engine; the returned cleanup waits for the job in flight.
+ * Not wired yet (spine §7 "Lookback replays", AD-21 rule 6): the `lookback_replay` trials. Lookback
+ * work at `run.finished` runs one job at a time and never fails the engine; the returned cleanup
+ * waits for the job in flight.
  */
 export const wireLookback = (
   engine: Engine,
@@ -212,23 +218,41 @@ export const wireLookback = (
         }
       },
     );
+  const weeklyRemaining = (): number | null => {
+    const host: HostId = engine.hostFor({ host: null });
+    const weekly = engine.usage.get(host)?.windows.find((w) => w.kind === "weekly");
+    return weekly === undefined ? null : remainingPct(weekly);
+  };
+  const bundleSha = (): string =>
+    graderBundleSha({ judgeModel: null, gatesConfigHash: engine.gatesConfigHash() });
+  const budgetAvailable = (state: RunState): boolean =>
+    state.runBudget === null || state.runBudget.spent_usd < state.runBudget.budget_usd;
+  // AD-21 rules 4 and 8: the lookback role at RETRO, before the run finishes (reading 154)
+  engine.setLookbackRetro(
+    createLookbackRetro({
+      projectRoot: deps.repoRoot,
+      vtcHome: deps.vtcHome,
+      history,
+      lockedShaFor,
+      compiled: (role, mode, host) =>
+        plugins.promptParts?.(agentNameFor(role, mode), host)?.compiled,
+      graderBundleSha: bundleSha,
+      weeklyRemainingPct: weeklyRemaining,
+      budgetAvailable,
+      now,
+    }),
+  );
   const runEnd = async (run: string): Promise<void> => {
     const state = engine.states().find((s) => s.id === run);
     if (state === undefined) return;
-    const host: HostId = engine.hostFor({ host: null });
-    const weekly = engine.usage.get(host)?.windows.find((w) => w.kind === "weekly");
     await lookbackAtRunEnd({
       projectRoot: deps.repoRoot,
       events: state.events,
       history: history(),
       lockedShaFor,
-      graderBundleSha: graderBundleSha({
-        judgeModel: null,
-        gatesConfigHash: engine.gatesConfigHash(),
-      }),
-      weeklyRemainingPct: weekly === undefined ? null : remainingPct(weekly),
-      budgetAvailable:
-        state.runBudget === null || state.runBudget.spent_usd < state.runBudget.budget_usd,
+      graderBundleSha: bundleSha(),
+      weeklyRemainingPct: weeklyRemaining(),
+      budgetAvailable: budgetAvailable(state),
       now: now(),
     });
   };
@@ -251,6 +275,7 @@ export const wireLookback = (
   return async () => {
     off();
     engine.setPromptPins(null);
+    engine.setLookbackRetro(null);
     await chain;
   };
 };

@@ -3,11 +3,13 @@
  * `core/index.ts` and the gates only through the `GateRunner` interface. The daemon
  * (`wireLookback`, spine §5 reading 144) hands core {@link createPromptPins} as its synchronous
  * prompt selector, calls {@link evaluateCanaries} as canary dispatches end, and calls
- * {@link lookbackAtRunEnd} at `run.finished` (attributions and scorecards).
- * Not wired yet (spine §7 "Lookback role dispatch and replays"): queueing the lookback role for the
- * targets `lookbackAtRunEnd` returns, {@link checkProposal} when that role submits, and the
- * `lookback_replay` trials planned with {@link planReplayTrials} (reading the A/A noise floor with
- * {@link cachedAaFlipRate}, keeping a measured one with {@link recordAaFlipRate}).
+ * {@link lookbackAtRunEnd} at `run.finished` (attributions and scorecards), and hands core
+ * {@link createLookbackRetro} for RETRO (spine §5 reading 154): before the run finishes, the
+ * lookback role is queued for the targets `lookbackAtRunEnd` returns, reading the input
+ * {@link renderLookbackInput} writes, and {@link checkProposal} runs when it submits.
+ * Not wired yet (spine §7 "Lookback replays", AD-21 rule 6): the `lookback_replay` trials planned
+ * with {@link planReplayTrials} (reading the A/A noise floor with {@link cachedAaFlipRate},
+ * keeping a measured one with {@link recordAaFlipRate}).
  * Human promotion is the cli's `vtc lookback approve|pin|rollback`, never an MCP tool.
  */
 export {
@@ -89,6 +91,12 @@ export {
   type LookbackTarget,
   type RunEndResult,
 } from "./run-end.js";
+export {
+  createLookbackRetro,
+  renderLookbackInput,
+  type CompiledTexts,
+  type LookbackRetroDeps,
+} from "./retro.js";
 export { computeScorecards, writeScorecards } from "./scorecards.js";
 export {
   buildTraces,

@@ -43,9 +43,11 @@ import {
   startBaseCheck,
   startRoundGates,
 } from "./jobs.js";
+import type { EventDraft } from "./event-log.js";
 import type { Kernel, RunHandle } from "./kernel.js";
 import { parkEscalation } from "./escalations.js";
 import { featureReviewDone } from "./final-review.js";
+import { LOOKBACK_ROLE, retroTargetOf } from "./retro.js";
 import { recordLimit } from "./limits.js";
 import { openTaskEscalation, parkTask, setTaskStatus } from "./parking.js";
 import {
@@ -121,6 +123,8 @@ const PHASE_OF_ROLE: Readonly<Record<string, Phase>> = {
   // Security's design mode (its verify mode always has a task, §6.1)
   security: "design",
   planner: "plan",
+  // the lookback role at the run's end (§13 steps 1–2, retro.ts)
+  lookback: "retro",
 };
 
 const rejection = (reason: RejectReason, issues: readonly string[]): Rejection => ({
@@ -550,6 +554,8 @@ const acceptIsolatedRole = async (
   h: RunHandle,
   run: RoleRunRecord,
   result: RoleResult,
+  /** A last check of the role's committed work in its worktree (`root`), before it is copied. */
+  check?: (root: string) => Promise<readonly string[]>,
 ): Promise<{ outcome: StepOutcome } | { artifacts: ArtifactRef[] }> => {
   const worktree = k.dispatches.get(recordKey(h.state.id, run.action_id))?.worktree;
   if (worktree === undefined)
@@ -583,6 +589,8 @@ const acceptIsolatedRole = async (
         missing.map((m) => `does not resolve: ${m}`),
       ),
     };
+  const problems = check === undefined ? [] : await check(join(k.deps.repoRoot, worktree.path));
+  if (problems.length > 0) return { outcome: reject("claim_check", problems) };
   const merged = await mergeRoleChanges(k, worktree, work);
   if (merged.conflicts.length > 0) {
     k.emit(h, {
@@ -679,6 +687,48 @@ const acceptPhaseRole = async (
           run.role,
         );
       }
+    },
+  };
+};
+
+/**
+ * The lookback role's result at RETRO (§13 steps 1–2; AD-21 rule 4; spine §5 reading 154): its
+ * writes are checked like any role's, then the wired Lookback checks the proposal it wrote in its
+ * worktree for its target. A refused proposal is a rejection naming the problems (the role may
+ * answer it); an accepted one is stored as a candidate version, copied into the checkout, and its
+ * events logged. The run finishes once every target is settled (`stepRetro`).
+ */
+const acceptLookback = async (
+  k: Kernel,
+  h: RunHandle,
+  run: RoleRunRecord,
+  result: RoleResult,
+): Promise<StepOutcome> => {
+  const target = retroTargetOf(h, run.action_id);
+  const lookback = k.lookbackRetro();
+  if (target === undefined || lookback === null)
+    return reject("out_of_order", ["no Lookback target is waiting for this run"]);
+  let events: readonly EventDraft[] = [];
+  const work = await acceptIsolatedRole(k, h, run, result, async (root) => {
+    const checked = await lookback.check(target, root, h.state).catch(
+      (error: unknown) =>
+        ({
+          ok: false,
+          problems: [
+            `the proposal could not be checked: ${error instanceof Error ? error.message : String(error)}`,
+          ],
+        }) as const,
+    );
+    if (!checked.ok) return checked.problems;
+    events = checked.events;
+    return [];
+  });
+  if ("outcome" in work) return work.outcome;
+  return {
+    kind: "accept",
+    artifacts: work.artifacts,
+    after: () => {
+      for (const event of events) k.emit(h, event);
     },
   };
 };
@@ -1443,7 +1493,9 @@ const evaluate = async (
         ? acceptFeatureReviewer(k, h, run, result)
         : triageTask(h, run) !== undefined
           ? acceptArchitectTriage(k, h, run, triageTask(h, run) as Task, result)
-          : acceptPhaseRole(k, h, run, result);
+          : run.role === LOOKBACK_ROLE && h.state.run.phase === "retro"
+            ? acceptLookback(k, h, run, result)
+            : acceptPhaseRole(k, h, run, result);
   if (run.role === "engineer") return acceptEngineer(k, h, run, task, result);
   if (run.role === "qa" && run.mode === "author") return acceptQaAuthor(k, h, run, task, result);
   if (isReviewer(run)) return acceptReviewer(k, h, run, task, result);
