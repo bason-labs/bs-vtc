@@ -9,7 +9,8 @@
  *   a section that smuggles in a prompt marker is refused;
  * - nothing in it names an AD-9 marker (`findForbiddenInText`);
  * - every trace it cites (by its run-qualified slug, `traceSlug`) is an attributed train-split
- *   failure of that role (the role never sees held-out traces);
+ *   failure of that role that the history bears out (`trustedAttributions`; the role never sees
+ *   held-out traces);
  * - it actually changes the section.
  * An accepted proposal becomes a candidate version file under the VTC home (immutable) and a
  * `lookback.proposal_recorded` event; promotion stays a human gesture.
@@ -27,7 +28,7 @@ import {
   type PromptVersionRef,
 } from "@vtc/shared";
 import { join } from "node:path";
-import { isTrainFailure } from "./attribution.js";
+import { isTrainFailure, trustedAttributions, type AttributionHistory } from "./attribution.js";
 import { lookbackEvent, type LookbackEventDraft } from "./events.js";
 import { readTextIfExists } from "./files.js";
 import { traceSlug, traceSplit } from "./traces.js";
@@ -62,15 +63,17 @@ export const readProposalFiles = async (
 };
 
 /** Checks a proposal against the role's current locked core and the recorded attributions. */
-export const checkProposal = (input: {
-  readonly role: string;
-  readonly raw: unknown;
-  /** The content of `editable.md`. */
-  readonly editableFile: string;
-  /** The role's current locked core (`splitRolePrompt(...).locked`). */
-  readonly locked: string;
-  readonly attributions: readonly Attribution[];
-}): ProposalCheck => {
+export const checkProposal = (
+  input: AttributionHistory & {
+    readonly role: string;
+    readonly raw: unknown;
+    /** The content of `editable.md`. */
+    readonly editableFile: string;
+    /** The role's current locked core (`splitRolePrompt(...).locked`). */
+    readonly locked: string;
+    readonly attributions: readonly Attribution[];
+  },
+): ProposalCheck => {
   const parsed = PromptProposalSchema.safeParse(input.raw);
   if (!parsed.success) {
     return {
@@ -99,7 +102,9 @@ export const checkProposal = (input: {
   for (const hit of texts.flatMap((t) => findForbiddenInText(t))) {
     problems.push(`names a forbidden marker (${hit.marker})`);
   }
-  const ofRole = input.attributions.filter((a) => a.prompt.role === input.role);
+  const ofRole = trustedAttributions(input.attributions, input).filter(
+    (a) => a.prompt.role === input.role,
+  );
   const trainFailures = new Set(ofRole.filter(isTrainFailure).map(traceSlug));
   const heldOut = new Set(ofRole.filter((a) => traceSplit(a) === "holdout").map(traceSlug));
   for (const trace of new Set(proposal.changes.flatMap((c) => c.trace_ids))) {

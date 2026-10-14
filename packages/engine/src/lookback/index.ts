@@ -20,6 +20,8 @@ export {
   RULES_UPSTREAM_FIRST,
   tiebreakAttribution,
   TREE_CONFIDENCE,
+  trustedAttributions,
+  type AttributionHistory,
   type AttributionResult,
   type FailureSignal,
 } from "./attribution.js";

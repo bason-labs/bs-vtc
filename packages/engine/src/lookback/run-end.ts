@@ -11,9 +11,9 @@
  * It returns the `lookback.dispatched` drafts and what each lookback dispatch reads (train traces
  * only); engine core queues the dispatches like any role step.
  *
- * `attributions.jsonl` is git-tracked, so its rows are checked before they count: the split is
- * recomputed ({@link isTrainFailure}), and a row of a run in the history must name a dispatch of
- * that run with the same prompt version, or it is ignored.
+ * `attributions.jsonl` is git-tracked, so only the rows {@link readAttributions} trusts count: a row
+ * of a run outside the history, of a dispatch the history does not show, or of a failure its
+ * events do not show is ignored (`trustedAttributions`).
  */
 import { LOOKBACK_LIMITS, type Attribution, type Scorecard, type VtcEvent } from "@vtc/shared";
 import {
@@ -25,7 +25,7 @@ import {
 } from "./attribution.js";
 import { lookbackEvent, type LookbackEventDraft } from "./events.js";
 import { computeScorecards, writeScorecards } from "./scorecards.js";
-import { buildTraces, targetKey, traceRef, traceSlug, type LockedShaFor } from "./traces.js";
+import { targetKey, traceRef, traceSlug, type LockedShaFor } from "./traces.js";
 
 /** Most failures one lookback dispatch reads (§13 step 1: 5–10). */
 export const LOOKBACK_MAX_TRACES = 10;
@@ -112,17 +112,10 @@ export const lookbackAtRunEnd = async (input: {
   readonly budgetAvailable: boolean;
   readonly now: Date;
 }): Promise<RunEndResult> => {
-  // Rows of a run in the history must name one of its dispatches, with the version it ran.
-  const dispatched = new Map(
-    buildTraces(input.history, input.lockedShaFor).map((t) => [
-      traceRef(t),
-      t.prompt?.effective_sha256,
-    ]),
-  );
-  const historyRuns = new Set(input.history.map((e) => e.run));
-  const recorded = (await readAttributions(input.projectRoot)).filter(
-    (a) => !historyRuns.has(a.run) || dispatched.get(traceRef(a)) === a.prompt.effective_sha256,
-  );
+  const recorded = await readAttributions(input.projectRoot, {
+    history: input.history,
+    lockedShaFor: input.lockedShaFor,
+  });
   const result = attributeRun({
     events: input.events,
     lockedShaFor: input.lockedShaFor,

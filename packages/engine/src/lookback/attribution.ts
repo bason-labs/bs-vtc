@@ -363,17 +363,97 @@ export const isRoleFailure = (a: Attribution): boolean =>
 export const isTrainFailure = (a: Attribution): boolean =>
   isRoleFailure(a) && a.split === "train" && traceSplit(a) === "train";
 
+/** The events attributions are checked against: every run they may name. */
+export interface AttributionHistory {
+  /** Events of every run whose attributions count (the runs the scorecards cover). */
+  readonly history: readonly VtcEvent[];
+  readonly lockedShaFor: LockedShaFor;
+}
+
+const samePrompt = (a: Attribution["prompt"], b: Attribution["prompt"]): boolean =>
+  a.role === b.role &&
+  a.mode === b.mode &&
+  a.host === b.host &&
+  a.locked_sha256 === b.locked_sha256 &&
+  a.editable_sha256 === b.editable_sha256 &&
+  a.effective_sha256 === b.effective_sha256;
+
 /**
- * Every recorded attribution. Lines that do not validate are skipped, and so are rows whose
- * recorded split is not the trace's split (a hand-edited or planted row).
+ * The attributions the engine can stand behind (pure). `attributions.jsonl` is git-tracked and a
+ * role can write it, so a row counts only when it names a dispatch of a run in `history`, with the
+ * prompt version that dispatch ran, and:
+ * - a `tree` or `human` row is one the engine derives again from that run's events (same method
+ *   and blamed role); the derived row is returned, with the row's `attributed_at`;
+ * - an `ai_tiebreak` row names a dispatch whose run has an inconclusive failure in the dispatch's
+ *   task, its feature or the run as a whole (the tiebreak's answer itself cannot be re-derived).
+ * Rows of a run outside `history`, of an invented dispatch, of a success the events do not show
+ * failing, or whose split is not the trace's split are dropped. One row per trace.
  */
-export const readAttributions = async (projectRoot: string): Promise<Attribution[]> => {
+export const trustedAttributions = (
+  rows: readonly Attribution[],
+  { history, lockedShaFor }: AttributionHistory,
+): Attribution[] => {
+  const byRun = new Map<string, VtcEvent[]>();
+  for (const event of history) {
+    const list = byRun.get(event.run);
+    if (list === undefined) byRun.set(event.run, [event]);
+    else list.push(event);
+  }
+  const traces = new Map(buildTraces(history, lockedShaFor).map((t) => [traceRef(t), t]));
+  const derived = new Map<string, Attribution>();
+  const inconclusive = new Set<string>();
+  for (const [run, events] of byRun) {
+    const result = attributeRun({ events, lockedShaFor, now: new Date(0) });
+    for (const a of result.attributions) derived.set(traceRef(a), a);
+    for (const s of result.inconclusive) inconclusive.add(`${run}\n${groupKey(s)}`);
+  }
+  const trusted: Attribution[] = [];
+  const seen = new Set<string>();
+  for (const row of rows) {
+    const ref = traceRef(row);
+    const trace = traces.get(ref);
+    if (
+      seen.has(ref) ||
+      row.outcome !== "failure" ||
+      row.split !== traceSplit(row) ||
+      trace?.prompt === undefined ||
+      !samePrompt(trace.prompt, row.prompt)
+    )
+      continue;
+    const own = derived.get(ref);
+    if (own !== undefined) {
+      if (row.method !== own.method || row.blamed_role !== own.blamed_role) continue;
+      trusted.push({ ...own, attributed_at: row.attributed_at });
+    } else {
+      const groups = [
+        ...(trace.task === undefined ? [] : [trace.task]),
+        ...(trace.feature === undefined ? [] : [`feature:${trace.feature}`]),
+        "run",
+      ];
+      if (row.method !== "ai_tiebreak" || !groups.some((g) => inconclusive.has(`${row.run}\n${g}`)))
+        continue;
+      trusted.push(row);
+    }
+    seen.add(ref);
+  }
+  return trusted;
+};
+
+/**
+ * The recorded attributions the engine can stand behind ({@link trustedAttributions}): the only
+ * way to read the file, so every consumer (run end, replay tasks, proposal checks) gets checked
+ * rows. Lines that do not validate are skipped.
+ */
+export const readAttributions = async (
+  projectRoot: string,
+  against: AttributionHistory,
+): Promise<Attribution[]> => {
   const rows: Attribution[] = [];
   for (const value of await readJsonLines(attributionsPath(projectRoot))) {
     const parsed = parsePersisted(AttributionSchema, value);
-    if (parsed.success && parsed.data.split === traceSplit(parsed.data)) rows.push(parsed.data);
+    if (parsed.success) rows.push(parsed.data);
   }
-  return rows;
+  return trustedAttributions(rows, against);
 };
 
 /** Appends attributions (validated). */
