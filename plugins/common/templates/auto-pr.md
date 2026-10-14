@@ -2,7 +2,7 @@
 
 > [!NOTE]
 > **For human review only: VTC never merges automatic PRs.**
-> {{note}}
+{{note}}
 
 ## Summary
 
@@ -15,6 +15,8 @@
 ## Changes
 
 {{changes}}
+
+{{diff}}
 
 ## Evidence
 

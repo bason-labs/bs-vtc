@@ -3,6 +3,10 @@
 - **Hypothesis:** {{hypothesis}}
 - **Trace ids:** {{trace_ids}}
 
+**Diff:**
+
 {{diff}}
 
-**Evaluation:** {{evaluation}}
+**Evaluation:**
+
+{{evaluation}}

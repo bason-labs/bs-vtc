@@ -28,6 +28,7 @@ const PR_ORDER = [
   "summary",
   "why",
   "changes",
+  "diff",
   "evidence",
   "verification",
   "risk",
@@ -48,7 +49,7 @@ describe("autoTemplateErrors", () => {
     slots
       .map((slot) =>
         slot === "note"
-          ? `> [!NOTE]\n> ${NEVER_MERGES_LINE}\n> {{note}}`
+          ? `> [!NOTE]\n> ${NEVER_MERGES_LINE}\n{{note}}`
           : slot === "provenance"
             ? "<details>\n<summary>Provenance</summary>\n\n{{provenance}}\n</details>"
             : `{{${slot}}}`,
@@ -58,6 +59,32 @@ describe("autoTemplateErrors", () => {
   it("accepts the PR layout in the order of spine §5 reading 208", () => {
     expect(AUTO_TEMPLATE_LAYOUT["auto-pr"]).toEqual(PR_ORDER);
     expect(autoTemplateErrors("auto-pr", pr(PR_ORDER))).toEqual([]);
+  });
+
+  it("puts a prompt PR's diff right after its changes, where the renderer cuts it first", () => {
+    const layout = AUTO_TEMPLATE_LAYOUT["auto-pr"];
+    expect(layout.indexOf("diff")).toBe(layout.indexOf("changes") + 1);
+  });
+
+  it("refuses a block slot that shares its line with other text", () => {
+    expect(
+      autoTemplateErrors("auto-pr", pr(PR_ORDER).replace("\n{{note}}", "\n> {{note}}")),
+    ).toEqual(["{{note}} must stand on a line of its own: its value can span several lines"]);
+    expect(
+      autoTemplateErrors(
+        "changelog-entry",
+        "### {{title}}\n\n{{hypothesis}}\n{{trace_ids}}\n{{diff}}\n**Evaluation:** {{evaluation}}\n",
+      ),
+    ).toEqual(["{{evaluation}} must stand on a line of its own: its value can span several lines"]);
+  });
+
+  it("lets the one-line slots sit inside a line", () => {
+    expect(
+      autoTemplateErrors(
+        "changelog-entry",
+        "### {{title}}\n\n- **Hypothesis:** {{hypothesis}}\n- **Trace ids:** {{trace_ids}}\n\n{{diff}}\n\n{{evaluation}}\n",
+      ),
+    ).toEqual([]);
   });
 
   it("refuses a slot outside AUTO_TEMPLATE_SLOTS, and a malformed one", () => {

@@ -57,8 +57,13 @@ Both also get:
   all three and checks each against `AUTO_TEMPLATE_LAYOUT`: every slot once and in order, the
   marker on the first line of a PR or issue, `{{provenance}}` inside a `<details>` block, and in
   a PR the sentence "For human review only: VTC never merges automatic PRs." before the summary.
-  A PR body follows reading 208: marker, note, summary, why, changes, evidence, verification,
-  risk and rollback, provenance, reviewer checklist;
+  A slot that can hold several lines stands on a line of its own; only `title`, `hypothesis` and
+  `trace_ids` may sit inside a line. A PR body follows reading 208: marker, note, summary, why,
+  changes (with a prompt PR's `{{diff}}` closing the section, so the renderer can cut it first),
+  evidence, verification, risk and rollback, provenance, reviewer checklist. What a slot's value
+  holds: `{{note}}` continues the template's NOTE callout, so it is `> ` lines without a second
+  `[!NOTE]` header; `{{provenance}}` is the content of the template's `<details>` block, without
+  its own;
 - `hooks/hooks.json`: `SessionStart`, `PreToolUse` and `SubagentStop` wired to
   `vtcHookCommand(event, host)` (`vtc hook <event> --host <host>`), each with the timeout
   `VTC_HOOK.timeoutMs` in seconds (spine §5 reading 31). Generated, never hand-written: the

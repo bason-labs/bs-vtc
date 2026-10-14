@@ -20,15 +20,20 @@ export const AUTO_TEMPLATE_SOURCE_DIR = "plugins/common/templates";
 
 /**
  * What every automatic PR says before its summary (D-bw, AD-27 rule 2), in the template's own
- * words rather than a slot, so no renderer input can drop it.
+ * words rather than a slot, so no renderer input can drop it. The template opens the NOTE callout
+ * (`> [!NOTE]` and this line); the `note` slot stands on the next line and continues it, so its
+ * value is the renderer's own `> ` lines (VTC version, AI disclosure, kind, evidence status,
+ * `Closes #n`) without a second `[!NOTE]` header.
  */
 export const NEVER_MERGES_LINE = "For human review only: VTC never merges automatic PRs.";
 
 /**
  * The slots of each template, each exactly once and in this order. A PR body follows spine §5
  * reading 208: marker, note, summary, why, changes, evidence, verification, risk, provenance,
- * checklist. An issue has no changes, verification, risk or checklist. A CHANGELOG entry
- * (`ROLES_CHANGELOG`, D-bv) records the hypothesis, the trace ids, the diff and the evaluation.
+ * checklist. A prompt PR's editable-section diff (`diff`) closes its Changes section, as its own
+ * slot because the renderer drops it first when a body is too long. An issue has no changes,
+ * verification, risk or checklist. A CHANGELOG entry (`ROLES_CHANGELOG`, D-bv) records the
+ * hypothesis, the trace ids, the diff and the evaluation.
  */
 export const AUTO_TEMPLATE_LAYOUT: Readonly<Record<AutoTemplateName, readonly AutoTemplateSlot[]>> =
   {
@@ -38,6 +43,7 @@ export const AUTO_TEMPLATE_LAYOUT: Readonly<Record<AutoTemplateName, readonly Au
       "summary",
       "why",
       "changes",
+      "diff",
       "evidence",
       "verification",
       "risk",
@@ -51,6 +57,17 @@ export const AUTO_TEMPLATE_LAYOUT: Readonly<Record<AutoTemplateName, readonly Au
 const SLOT = /\{\{([^{}]*)\}\}/g;
 const KNOWN: ReadonlySet<string> = new Set(AUTO_TEMPLATE_SLOTS);
 
+/**
+ * The slots whose value is one line, so a template may put them inside a line (a heading, a
+ * bullet). Every other slot can hold several lines (a table, a fenced diff, the NOTE's own `> `
+ * lines), so it must stand on a line of its own or its value would not render.
+ */
+export const INLINE_TEMPLATE_SLOTS: ReadonlySet<AutoTemplateSlot> = new Set([
+  "title",
+  "hypothesis",
+  "trace_ids",
+]);
+
 /** Pure: what is wrong with one template's text; empty = acceptable. */
 export const autoTemplateErrors = (name: AutoTemplateName, text: string): string[] => {
   const errors: string[] = [];
@@ -60,6 +77,18 @@ export const autoTemplateErrors = (name: AutoTemplateName, text: string): string
     const slot = match[1] ?? "";
     if (KNOWN.has(slot)) used.push({ slot, at: match.index });
     else errors.push(`unknown slot ${match[0]}; templates use only AUTO_TEMPLATE_SLOTS`);
+  }
+  for (const line of text.split("\n")) {
+    for (const match of line.matchAll(SLOT)) {
+      const slot = match[1] ?? "";
+      if (KNOWN.has(slot) && !INLINE_TEMPLATE_SLOTS.has(slot as AutoTemplateSlot)) {
+        if (line.trim() !== match[0]) {
+          errors.push(
+            `${match[0]} must stand on a line of its own: its value can span several lines`,
+          );
+        }
+      }
+    }
   }
   if (used.map((u) => u.slot).join(",") !== layout.join(",")) {
     errors.push(`slots must be, in order: ${layout.map((s) => `{{${s}}}`).join(", ")}`);

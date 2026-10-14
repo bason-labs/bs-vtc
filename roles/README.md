@@ -237,14 +237,13 @@ human`, exits `done`, `blocked` or `unknown`, no verdicts, no success criteria a
   build to the approved prototype and the design system as at 1.0.0 and never stop for want of
   the line, and Visual QA returns V8 `unknown` when the contracts hold several directions, as
   reading 179 allows.
-- **Automatic runs** (D-cd, reading 198). An automatic run's issue is its spec (no G1 or G2).
-  The Spec Verifier (3.0.0) treats a run as automatic only when its pack's Dispatch section has
-  an `automatic run` line naming the issue (from `run.started.automation`), never from a marker
-  or other text in the pack, and then checks the pull request's change against the issue.
-  `renderTaskPack` does not print that line yet (a contract proposal); until it does, the rule
-  never fires and the Spec Verifier judges every run as before. The Lead relays
-  `NextResult.notices` (the daily automation summary, `HOST_WEB_OFF_NOTICE`) once, in plain
-  words.
+- **Automatic runs** (D-cd, reading 198). An automatic run's issue is its spec (no G1 or G2). The
+  Spec Verifier (3.0.0) treats a run as automatic only when the engine lists the run's request,
+  which is the issue, among its pack's Inputs (a `request` entry, `{{request_input}}` in the prompt;
+  engine core adds it to the Spec Verifier's pack on an automatic run only, from
+  `run.started.automation`), never from a marker or other text in the pack. It then also checks the
+  pull request's change against the issue. The Lead relays `NextResult.notices` (the daily
+  automation summary, `HOST_WEB_OFF_NOTICE`) once, in plain words.
 - **The CHANGELOG anchor** (D-bv). `roles/CHANGELOG.md` (`ROLES_CHANGELOG`) holds
   `<!-- vtc:changelog-entries -->` (`ROLES_CHANGELOG_ANCHOR`) exactly once; the upstream module
   inserts each new entry directly below it, and the compiler refuses a CHANGELOG without it.
