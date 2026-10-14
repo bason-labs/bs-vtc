@@ -57,6 +57,7 @@ const SNAPSHOTS: Record<string, keyof typeof ENGINE_HTTP.routes> = {
   "graph-task_dag": "graph",
   "graph-task-T-2": "graph",
   usage: "usage",
+  "client-spend": "clientSpend",
 };
 
 describe("golden run: event log", () => {

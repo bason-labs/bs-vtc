@@ -38,9 +38,11 @@ import {
   Engine,
   EngineError,
   INDEX_PATH,
+  loadProjectConfig,
   loadRuns,
   openEventIndex,
   pluginCatalogFrom,
+  readClientSpend,
   removeEngineDiscovery,
   takeEngineLock,
   writeEngineDiscovery,
@@ -407,6 +409,8 @@ export const runDaemon: RunDaemon = async (deps: EngineDeps, options) => {
         runs: () => engine.states(),
         usage: () => engine.usage,
         git,
+        // §14, reading 153: the project's client scope (the config the engine runs with)
+        clientSpend: () => readClientSpend(deps.vtcHome, engine.config().client),
       }),
       installToken: deps.installToken,
       sessions: createSessionStore(now),
@@ -491,6 +495,15 @@ export const runDaemon: RunDaemon = async (deps: EngineDeps, options) => {
   }
 };
 
+/** The committed `project.yaml`'s client, or none when it does not parse (the shared scope). */
+const snapshotClient = (repoRoot: string): string | undefined => {
+  try {
+    return loadProjectConfig(repoRoot).client;
+  } catch {
+    return undefined;
+  }
+};
+
 /** How long snapshot mode reuses a replay before re-reading the committed logs. */
 const SNAPSHOT_TTL_MS = 2_000;
 
@@ -518,6 +531,7 @@ export const serveSnapshot: ServeSnapshot = async (deps) => {
       runs,
       usage: () => runs().at(-1)?.usage ?? new Map(),
       git,
+      clientSpend: () => readClientSpend(deps.vtcHome, snapshotClient(deps.repoRoot)),
     }),
     installToken: deps.installToken,
     sessions,

@@ -30382,6 +30382,299 @@
         "request"
       ],
       "additionalProperties": false
+    },
+    "ClientSpendRow": {
+      "$id": "https://vtc.local/schemas/ClientSpendRow.json",
+      "title": "ClientSpendRow",
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "type": "object",
+      "properties": {
+        "v": {
+          "type": "number",
+          "const": 1
+        },
+        "scope": {
+          "type": "string",
+          "pattern": "^(_shared|client-[a-z0-9][a-z0-9._-]{0,63})$"
+        },
+        "client": {
+          "anyOf": [
+            {
+              "type": "string",
+              "pattern": "^[a-z0-9][a-z0-9._-]{0,63}$"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "repo_key": {
+          "type": "string",
+          "pattern": "^[a-f0-9]{16}$"
+        },
+        "project": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 200
+        },
+        "run": {
+          "type": "string",
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$"
+        },
+        "outcome": {
+          "type": "string",
+          "enum": [
+            "done",
+            "aborted"
+          ]
+        },
+        "finished_at": {
+          "type": "string",
+          "format": "date-time",
+          "pattern": "^(?:(?:\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|(?:02)-(?:0[1-9]|1\\d|2[0-8])))T(?:(?:[01]\\d|2[0-3]):[0-5]\\d:[0-5]\\d(?:\\.\\d+)?(?:Z|([+-](?:[01]\\d|2[0-3]):[0-5]\\d)))$"
+        },
+        "spent_usd": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 1000000
+        },
+        "unpriced_runs": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9007199254740991
+        },
+        "features": {
+          "default": [],
+          "maxItems": 50,
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "feature": {
+                "type": "string",
+                "pattern": "^F-[1-9]\\d*$"
+              },
+              "title": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 200
+              },
+              "spent_usd": {
+                "type": "number",
+                "minimum": 0,
+                "maximum": 1000000
+              }
+            },
+            "required": [
+              "feature",
+              "title",
+              "spent_usd"
+            ],
+            "additionalProperties": false
+          }
+        }
+      },
+      "required": [
+        "v",
+        "scope",
+        "client",
+        "repo_key",
+        "project",
+        "run",
+        "outcome",
+        "finished_at",
+        "spent_usd",
+        "unpriced_runs"
+      ],
+      "additionalProperties": false
+    },
+    "ClientSpendReport": {
+      "$id": "https://vtc.local/schemas/ClientSpendReport.json",
+      "title": "ClientSpendReport",
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "type": "object",
+      "properties": {
+        "scope": {
+          "type": "string",
+          "pattern": "^(_shared|client-[a-z0-9][a-z0-9._-]{0,63})$"
+        },
+        "client": {
+          "anyOf": [
+            {
+              "type": "string",
+              "pattern": "^[a-z0-9][a-z0-9._-]{0,63}$"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "total_usd": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 1000000
+        },
+        "unpriced_runs": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9007199254740991
+        },
+        "projects": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "repo_key": {
+                "type": "string",
+                "pattern": "^[a-f0-9]{16}$"
+              },
+              "project": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 200
+              },
+              "runs": {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 9007199254740991
+              },
+              "spent_usd": {
+                "type": "number",
+                "minimum": 0,
+                "maximum": 1000000
+              },
+              "last_finished_at": {
+                "type": "string",
+                "format": "date-time",
+                "pattern": "^(?:(?:\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|(?:02)-(?:0[1-9]|1\\d|2[0-8])))T(?:(?:[01]\\d|2[0-3]):[0-5]\\d:[0-5]\\d(?:\\.\\d+)?(?:Z|([+-](?:[01]\\d|2[0-3]):[0-5]\\d)))$"
+              }
+            },
+            "required": [
+              "repo_key",
+              "project",
+              "runs",
+              "spent_usd",
+              "last_finished_at"
+            ],
+            "additionalProperties": false
+          }
+        },
+        "runs": {
+          "maxItems": 100,
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "v": {
+                "type": "number",
+                "const": 1
+              },
+              "scope": {
+                "type": "string",
+                "pattern": "^(_shared|client-[a-z0-9][a-z0-9._-]{0,63})$"
+              },
+              "client": {
+                "anyOf": [
+                  {
+                    "type": "string",
+                    "pattern": "^[a-z0-9][a-z0-9._-]{0,63}$"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "repo_key": {
+                "type": "string",
+                "pattern": "^[a-f0-9]{16}$"
+              },
+              "project": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 200
+              },
+              "run": {
+                "type": "string",
+                "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$"
+              },
+              "outcome": {
+                "type": "string",
+                "enum": [
+                  "done",
+                  "aborted"
+                ]
+              },
+              "finished_at": {
+                "type": "string",
+                "format": "date-time",
+                "pattern": "^(?:(?:\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|(?:02)-(?:0[1-9]|1\\d|2[0-8])))T(?:(?:[01]\\d|2[0-3]):[0-5]\\d:[0-5]\\d(?:\\.\\d+)?(?:Z|([+-](?:[01]\\d|2[0-3]):[0-5]\\d)))$"
+              },
+              "spent_usd": {
+                "type": "number",
+                "minimum": 0,
+                "maximum": 1000000
+              },
+              "unpriced_runs": {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 9007199254740991
+              },
+              "features": {
+                "default": [],
+                "maxItems": 50,
+                "type": "array",
+                "items": {
+                  "type": "object",
+                  "properties": {
+                    "feature": {
+                      "type": "string",
+                      "pattern": "^F-[1-9]\\d*$"
+                    },
+                    "title": {
+                      "type": "string",
+                      "minLength": 1,
+                      "maxLength": 200
+                    },
+                    "spent_usd": {
+                      "type": "number",
+                      "minimum": 0,
+                      "maximum": 1000000
+                    }
+                  },
+                  "required": [
+                    "feature",
+                    "title",
+                    "spent_usd"
+                  ],
+                  "additionalProperties": false
+                }
+              }
+            },
+            "required": [
+              "v",
+              "scope",
+              "client",
+              "repo_key",
+              "project",
+              "run",
+              "outcome",
+              "finished_at",
+              "spent_usd",
+              "unpriced_runs"
+            ],
+            "additionalProperties": false
+          }
+        }
+      },
+      "required": [
+        "scope",
+        "client",
+        "total_usd",
+        "unpriced_runs",
+        "projects",
+        "runs"
+      ],
+      "additionalProperties": false
     }
   }
 }

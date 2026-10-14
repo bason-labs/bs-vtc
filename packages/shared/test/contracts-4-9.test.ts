@@ -1,11 +1,15 @@
 /**
  * Contracts 4.9.0 (the wave-3 Final Review fix round; spine §5 readings 149–155): G2's design
- * exits (§9.1 step 5) and the user's price table (§11, H-1).
+ * exits (§9.1 step 5), the user's price table (§11, H-1) and cost per client (§14).
  */
 import { describe, expect, it } from "vitest";
 import {
   ApproveInputSchema,
+  clientSpendPath,
+  clientSpendReport,
+  ClientSpendRowSchema,
   CONTRACTS_VERSION,
+  ENGINE_HTTP,
   EVENT_PAYLOAD_SCHEMAS,
   LeadActionSchema,
   ModelPriceSchema,
@@ -116,5 +120,52 @@ describe("the price table (§11, H-1; reading 152)", () => {
     expect(
       ProjectConfigSchema.safeParse({ version: 1, prices: { "gpt-test": price } }).success,
     ).toBe(false);
+  });
+});
+
+describe("cost per client (§14, reading 153)", () => {
+  const row = (over: Record<string, unknown>) =>
+    ClientSpendRowSchema.parse({
+      v: 1,
+      scope: "client-acme",
+      client: "acme",
+      repo_key: "a".repeat(16),
+      project: "shop",
+      run: "r20261013-090000",
+      outcome: "done",
+      finished_at: "2026-10-13T10:00:00.000Z",
+      spent_usd: 1.5,
+      unpriced_runs: 0,
+      ...over,
+    });
+
+  it("keeps one record per client scope under engines/, which no role may write", () => {
+    expect(clientSpendPath("client-acme")).toBe("engines/spend/client-acme.jsonl");
+    expect(clientSpendPath("_shared")).toBe("engines/spend/_shared.jsonl");
+    expect(() => clientSpendPath("../x")).toThrow();
+    expect(ENGINE_HTTP.routes.clientSpend).toMatchObject({
+      method: "GET",
+      path: "/api/spend",
+      response: "ClientSpendReport",
+    });
+  });
+
+  it("reports only its own scope, each run once", () => {
+    const report = clientSpendReport("client-acme", "acme", [
+      row({}),
+      row({ spent_usd: 2, finished_at: "2026-10-13T11:00:00.000Z" }),
+      row({ scope: "client-globex", client: "globex", run: "r20261013-100000" }),
+    ]);
+    expect(report.total_usd).toBe(2);
+    expect(report.runs).toHaveLength(1);
+    expect(report.projects).toEqual([
+      {
+        repo_key: "a".repeat(16),
+        project: "shop",
+        runs: 1,
+        spent_usd: 2,
+        last_finished_at: "2026-10-13T11:00:00.000Z",
+      },
+    ]);
   });
 });

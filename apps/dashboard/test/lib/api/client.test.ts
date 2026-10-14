@@ -26,6 +26,21 @@ describe("createEngineClient against the golden run", () => {
     expect((await api.events("golden-1", 0)).events.length).toBeGreaterThan(0);
   });
 
+  it("reads the client spend report (§14) and validates it", async () => {
+    const report = {
+      scope: "client-acme",
+      client: "acme",
+      total_usd: 1.5,
+      unpriced_runs: 0,
+      projects: [],
+      runs: [],
+    };
+    const { api } = client({ "/api/spend": () => Response.json(report) });
+    expect(await api.clientSpend()).toEqual(report);
+    const bad = client({ "/api/spend": () => Response.json({ ...report, scope: "acme" }) });
+    await expect(bad.api.clientSpend()).rejects.toMatchObject({ code: "bad_response" });
+  });
+
   it("sends the session token as a bearer header and never a cookie", async () => {
     const { api, f } = client(undefined, "s".repeat(43));
     await api.health();

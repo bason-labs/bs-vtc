@@ -1,5 +1,6 @@
 import {
   ArtifactContentSchema,
+  ClientSpendReportSchema,
   DesignReviewCommentInputSchema,
   DesignReviewResultSchema,
   EscalationListSchema,
@@ -17,6 +18,7 @@ import {
   UsageReportSchema,
   WorkflowGraphSchema,
   type ArtifactContent,
+  type ClientSpendReport,
   type DesignReviewCommentInput,
   type DesignReviewResult,
   type EngineHttpRouteName,
@@ -64,6 +66,8 @@ export interface EngineClient {
   ): Promise<WorkflowGraph>;
   escalations(run: string, signal?: AbortSignal): Promise<EscalationList>;
   usage(signal?: AbortSignal): Promise<UsageReport>;
+  /** Cost per client (§14): the project's client scope, totalled per project. */
+  clientSpend(signal?: AbortSignal): Promise<ClientSpendReport>;
   /**
    * The dashboard's only write (AD-5 rule 5): a click-to-pin design review comment, which the
    * engine appends to `.vtc/design/reviews/<screen>.jsonl`. Validated before it is sent.
@@ -156,6 +160,7 @@ export const createEngineClient = (options: EngineClientOptions): EngineClient =
       read(WorkflowGraphSchema, "graph", { run }, { scope, task }, signal),
     escalations: (run, signal) => read(EscalationListSchema, "escalations", { run }, {}, signal),
     usage: (signal) => read(UsageReportSchema, "usage", {}, {}, signal),
+    clientSpend: (signal) => read(ClientSpendReportSchema, "clientSpend", {}, {}, signal),
     postDesignReview: async (input, signal) => {
       const valid = DesignReviewCommentInputSchema.safeParse(input);
       if (!valid.success)
