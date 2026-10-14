@@ -8,14 +8,14 @@ import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import {
+  autoBranchName,
   MERGE_LEVEL_LEDGER,
-  parseAutoMarker,
   TaskPackSchema,
   type AutomationRunRef,
   type LeadAction,
   type StartInput,
 } from "@vtc/shared";
-import { cleanupDirs, writeFile } from "../helpers/repo.js";
+import { cleanupDirs, git, writeFile } from "../helpers/repo.js";
 import {
   authorTests,
   build,
@@ -249,14 +249,8 @@ describe("automatic runs (AD-27 rule 2)", () => {
     await h.release();
   });
 
-  it("its PR opens with the vtc:auto marker and stays a draft after Final Review (AD-27 rules 3 and 6, H-8)", async () => {
+  it("pushes only to its vtc/auto branch and opens no unlabelled, evidence-less PR (AD-27 rules 1, 2, 3 and 6, H-8)", async () => {
     const h = createHarness({ project: { merge_level: 2 } });
-    const bodies: string[] = [];
-    const upsert = h.prs.upsertDraft.bind(h.prs);
-    h.prs.upsertDraft = (request) => {
-      bodies.push(request.body);
-      return upsert(request);
-    };
     await h.engine.startAutomatic(REQUEST, ISSUE, CLAUDE);
     const { planner } = await frontHalf(h);
     const planned = await submitResult(h, planner, {
@@ -273,17 +267,59 @@ describe("automatic runs (AD-27 rule 2)", () => {
     await passFinalReview(h);
     await h.engine.next({}, CLAUDE);
     expect(h.engine.status({}).run.finished_at).toBeDefined();
-    // every description it gave the PR starts with the issue's marker
-    expect(bodies.length).toBeGreaterThan(1);
-    for (const body of bodies) {
-      expect(body.startsWith("<!-- vtc:auto v=1 kind=ci_failure fp=0123456789abcdef -->")).toBe(
-        true,
-      );
-      expect(parseAutoMarker(body)).toEqual({ v: 1, kind: "ci_failure", fp: ISSUE.fingerprint });
-    }
-    // no evidence manifest is recorded, so the PR is never marked ready
-    expect(h.prs.calls.filter((c) => c.startsWith("ready"))).toEqual([]);
-    expect(h.engine.status({}).features[0]?.pr).toMatchObject({ draft: true, state: "open" });
+    const branch = autoBranchName(ISSUE.kind, ISSUE.fingerprint);
+    expect(branch).toBe("vtc/auto/ci_failure/01234567");
+    // the work is on the remote under the automatic branch only, never vtc/F-n
+    const heads = git(h.remote, "for-each-ref", "--format=%(refname)", "refs/heads/")
+      .trim()
+      .split("\n");
+    expect(heads.sort()).toEqual(["refs/heads/main", `refs/heads/${branch}`]);
+    const integration = h.engine.status({}).features[0]?.integration_branch ?? "";
+    expect(git(h.remote, "rev-parse", `refs/heads/${branch}`).trim()).toBe(
+      git(h.repo, "rev-parse", integration).trim(),
+    );
+    const pushes = events(h).filter((e) => e.type === "branch.pushed");
+    expect(pushes.length).toBeGreaterThan(0);
+    // the events name the integration branch whose head went to the automatic one
+    for (const e of pushes) expect(e.data.branch).toBe(integration);
+    // no PR through the Level-2 seam: its draft PR is the upstream module's, labelled and with
+    // evidence; until then the merged task is in no open PR
+    expect(h.prs.calls).toEqual([]);
+    expect(h.engine.status({}).features[0]?.pr).toBeUndefined();
+    const statuses = events(h)
+      .filter((e) => e.type === "task.status_changed")
+      .map((e) => e.data.to);
+    expect(statuses.at(-1)).toBe("merged");
+    expect(statuses).not.toContain("done");
+    await h.release();
+  });
+
+  it("records a refused push when its vtc/auto branch moved on the remote (never forced)", async () => {
+    const h = createHarness({ project: { merge_level: 2 } });
+    const branch = autoBranchName(ISSUE.kind, ISSUE.fingerprint);
+    // a human's commit on the automatic branch, which VTC's work does not contain
+    git(h.repo, "commit", "--quiet", "--allow-empty", "-m", "human");
+    git(h.repo, "push", "--quiet", "origin", `HEAD:refs/heads/${branch}`);
+    const human = git(h.repo, "rev-parse", "HEAD").trim();
+    git(h.repo, "reset", "--quiet", "--hard", "HEAD~1");
+    await h.engine.startAutomatic(REQUEST, ISSUE, CLAUDE);
+    const { planner } = await frontHalf(h);
+    const planned = await submitResult(h, planner, {
+      exit: "done",
+      tasks: [draft("T-1")] as never,
+    });
+    if (!planned.accepted) throw new Error("plan rejected");
+    await h.engine.settle();
+    await authorTests(h, only((await h.engine.next({}, CLAUDE)).actions, "qa"));
+    await build(h, only((await h.engine.next({}, CLAUDE)).actions, "engineer"));
+    const verifier = only((await h.engine.next({}, CLAUDE)).actions, "spec_verifier");
+    await verdictPass(h, verifier, "src/t-1/impl.ts");
+    await h.engine.settle();
+    const failed = events(h).filter((e) => e.type === "branch.push_failed");
+    expect(failed.length).toBeGreaterThan(0);
+    expect(failed[0]?.data.detail).toContain(`push to ${branch}`);
+    expect(git(h.remote, "rev-parse", `refs/heads/${branch}`).trim()).toBe(human);
+    expect(h.prs.calls).toEqual([]);
     await h.release();
   });
 
