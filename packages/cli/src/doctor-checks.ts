@@ -301,6 +301,28 @@ export const checkEnvPassthrough = (read: UserConfigRead): DoctorCheck => {
   };
 };
 
+/**
+ * The price table (§11, H-1; spine §5 reading 152): Codex reports no cost, so the engine prices
+ * an engine-launched Codex run from `prices` in `~/.vtc/config.yaml` and starts none whose model
+ * (`hosts.models.codex`) is not priced there. An empty table warns; a file that does not parse is
+ * reported by the `env` check.
+ */
+export const checkPrices = (read: UserConfigRead): DoctorCheck | null => {
+  if (!read.ok) return null;
+  const models = Object.keys(read.config.prices ?? {}).sort();
+  return models.length === 0
+    ? {
+        name: "prices",
+        status: "warn",
+        detail: `no model is priced (prices in ${read.path}): Codex reports no cost, so the engine starts no Codex role run (a Codex-led run's roles, a Codex cross-family review) until the model hosts.models.codex names is priced there (§11)`,
+      }
+    : {
+        name: "prices",
+        status: "ok",
+        detail: `prices ${models.join(", ")} (prices in ${read.path}); a run on any other model of a host that reports no cost does not start`,
+      };
+};
+
 /** What `vtc doctor` reports about the gate sandbox: the Gate Runner's own detection. */
 export type GateSandboxReport = Pick<
   gates.GateSandboxDetection,

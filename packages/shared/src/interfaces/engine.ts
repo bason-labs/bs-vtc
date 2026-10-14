@@ -17,6 +17,7 @@ import type { EngineMcpToolName, ENGINE_MCP_TOOLS, SessionNonceResult } from "..
 import type { EngineDiscovery } from "../engine-instance.js";
 import type { CONTRACT_SCHEMAS } from "../json-schema.js";
 import type { HostId } from "../primitives.js";
+import type { ModelPrice } from "../project-config.js";
 import type { FetcherId } from "../research.js";
 import type { AssetBundle } from "./assets.js";
 import type { AutoResumeScheduler } from "./auto-resume.js";
@@ -73,6 +74,12 @@ export interface EngineDeps {
    * builds it; absent: no fetcher sends a key. New in 4.6.0.
    */
   readonly researchApiKey?: (fetcher: FetcherId) => string | undefined;
+  /**
+   * The price table of `~/.vtc/config.yaml` `prices` (§11, H-1; spine §5 reading 152): model id →
+   * list price. The cli reads it; absent or empty: no model is priced, so a host that reports no
+   * cost (Codex) runs no engine-launched role. New in 4.9.0.
+   */
+  readonly prices?: Readonly<Record<string, ModelPrice>>;
   readonly versions: EngineVersions;
   /** Clock override for tests. */
   readonly now?: () => Date;

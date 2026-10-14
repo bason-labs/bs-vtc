@@ -29,6 +29,7 @@ import { budgetState } from "./budget.js";
 import { dispatchWriteScope } from "./dispatch-scope.js";
 import { dispatchPrepared, pendingSteps, refuseInSession, type StepSpec } from "./dispatch.js";
 import { protectedFiles } from "./jobs.js";
+import { resolveModel } from "./roles.js";
 import type { Kernel, RunHandle } from "./kernel.js";
 import { deferForUsage, limitWait, stillLimited } from "./limits.js";
 import { inFlight } from "./queries.js";
@@ -52,16 +53,59 @@ export const capabilitiesOf = (
 export const API_KEY_LOGIN = "API key";
 
 /**
+ * The model id a step runs on `host` (`resolveModel`), or `undefined`: the host session's model,
+ * which no price table can price.
+ */
+const stepModel = (
+  k: Kernel,
+  step: Pick<StepSpec, "role" | "mode" | "tier">,
+  host: HostId,
+): string | undefined => {
+  const contract = k.deps.roles.get(step.role);
+  return contract === undefined
+    ? undefined
+    : resolveModel(contract, host, k.config(), {
+        ...(step.mode === undefined ? {} : { mode: step.mode }),
+        ...(step.tier === undefined ? {} : { tier: step.tier }),
+      }).model;
+};
+
+/**
+ * Why a run on `host` cannot be budget-checked, or `null` (§11, H-1; spine §5 reading 152): a
+ * host that cannot cap its own spend (`HostCapabilities.budgetCap` false: Codex, which reports no
+ * cost either) is priced from the user's price table, so its model needs an id and a price there.
+ * A model missing from the price table is an error, never $0.
+ */
+export const unpricedRun = (
+  k: Kernel,
+  step: Pick<StepSpec, "role" | "mode" | "tier">,
+  host: HostId,
+): string | null => {
+  const adapter = k.deps.adapters[host];
+  if (adapter === undefined || adapter.capabilities.budgetCap) return null;
+  const model = stepModel(k, step, host);
+  if (model === undefined)
+    return `${step.role} has no ${host} model id (set hosts.models.${host} in .vtc/project.yaml), so its run cannot be priced and budget-checked (§11)`;
+  if (k.deps.prices?.[model] === undefined)
+    return `no list price for ${host} model ${model} in ~/.vtc/config.yaml prices: ${host} reports no cost, so the engine prices its tokens to budget-check the run (§11: a model missing from the price table is an error)`;
+  return null;
+};
+
+/** Whether a failed budget check was {@link unpricedRun}'s (the fix is a price, not a raise). */
+const unpricedDetail = (detail: string): boolean =>
+  detail.includes("cannot be priced") || detail.includes("no list price");
+
+/**
  * The checks before an engine-launched start or resume (AD-25 rule 3), in order: the run is not
  * paused; the config files still give the run's `pipeline_config_hash`; the host's five-hour
  * window is not used up; the host's own sign-in check (`HostAdapter.authStatus`, when the adapter
- * has one) says logged in, and not with an API key (spec D2); the task (or the run) has budget
- * left.
+ * has one) says logged in, and not with an API key (spec D2); the budget: the run can be priced
+ * ({@link unpricedRun}, when the step names its role) and the task (or the run) has budget left.
  */
 export const headlessPreflight = async (
   k: Kernel,
   h: RunHandle,
-  step: Pick<StepSpec, "task">,
+  step: Pick<StepSpec, "task"> & Partial<Pick<StepSpec, "role" | "mode" | "tier">>,
   host: HostId,
   purpose: DispatchPurpose,
 ): Promise<HeadlessPreflight> => {
@@ -102,6 +146,9 @@ export const headlessPreflight = async (
         `${host} is signed in with an API key: VTC runs roles only on your subscription (sign in with your ChatGPT account)`,
       );
   }
+  const unpriced =
+    step.role === undefined ? null : unpricedRun(k, { ...step, role: step.role }, host);
+  if (unpriced !== null) return fail("budget", unpriced);
   const task = step.task === undefined ? undefined : state.tasks.get(step.task);
   if (task !== undefined && budgetState(task.spent_usd, task.budget_usd) === "exhausted")
     return fail(
@@ -177,7 +224,12 @@ const preflightFailed = (
       k.emit(h, {
         type: "run.paused",
         actor: "engine",
-        data: { reason: `${detail}: raise the budget, then vtc resume`.slice(0, 300) },
+        data: {
+          reason: (unpricedDetail(detail)
+            ? `${detail}; then vtc resume`
+            : `${detail}: raise the budget, then vtc resume`
+          ).slice(0, 300),
+        },
       });
       return;
     case "config":

@@ -6,7 +6,13 @@
 import { z } from "zod";
 import { DEFAULT_FINAL_REVIEW_SHARE } from "./feature.js";
 import { HeadlessConfigSchema } from "./headless.js";
-import { GlobSchema, HostIdSchema, SeveritySchema, SlugSchema } from "./primitives.js";
+import {
+  GlobSchema,
+  HostIdSchema,
+  SeveritySchema,
+  SlugSchema,
+  type TokenUsage,
+} from "./primitives.js";
 import { FetcherIdSchema } from "./research.js";
 import { ModelTierSchema } from "./role-contract.js";
 
@@ -148,6 +154,42 @@ export const USER_CONFIG_FILE = "config.yaml";
 export const EnvVarNameSchema = z.string().regex(/^[A-Za-z_][A-Za-z0-9_]{0,127}$/);
 
 /**
+ * One model's list price (§11 "Unit: list-price-equivalent USD, computed from the four token
+ * types"), in USD per million tokens of each type: fresh input, cache read (cached input), output,
+ * and cache write. New in 4.9.0.
+ */
+export const ModelPriceSchema = z.strictObject({
+  input_per_mtok: z.number().nonnegative().max(10_000),
+  cached_input_per_mtok: z.number().nonnegative().max(10_000),
+  output_per_mtok: z.number().nonnegative().max(10_000),
+  cache_write_per_mtok: z.number().nonnegative().max(10_000).default(0),
+});
+export type ModelPrice = z.infer<typeof ModelPriceSchema>;
+export type ModelPriceInput = z.input<typeof ModelPriceSchema>;
+
+/** A model id as the price table keys it (the id `hosts.models` names, e.g. `gpt-6.1-sol`). */
+export const PricedModelIdSchema = z
+  .string()
+  .min(1)
+  .max(200)
+  .regex(/^[A-Za-z0-9][A-Za-z0-9._:/@-]*$/, "a model id");
+
+/**
+ * Pure (§11): the list-price-equivalent USD of `tokens` at `price`, rounded to a hundredth of a
+ * cent. `TokenUsage.in` is fresh input only (a host that counts cached input inside its input
+ * reports it apart, as the Codex adapter does), so each token is priced once. New in 4.9.0.
+ */
+export const priceTokens = (tokens: TokenUsage, price: ModelPrice): number => {
+  const usd =
+    (tokens.in * price.input_per_mtok +
+      tokens.cache_r * price.cached_input_per_mtok +
+      tokens.out * price.output_per_mtok +
+      tokens.cache_w * price.cache_write_per_mtok) /
+    1_000_000;
+  return Math.round(usd * 10_000) / 10_000;
+};
+
+/**
  * `~/.vtc/config.yaml`: settings that belong to the person and the machine, never to a repo.
  * Read with `parsePersisted`; a missing file is `{ version: 1 }`.
  * - `env_passthrough` (D-ak, spine §5 reading 57): the detached daemon drops credential
@@ -161,6 +203,12 @@ export const EnvVarNameSchema = z.string().regex(/^[A-Za-z_][A-Za-z0-9_]{0,127}$
  *   sandbox for gates") unless this is `true`; then gates run unconfined and every such gate run
  *   records an `unsandboxed_gate` incident. Like `env_passthrough` it exists only here, never in
  *   `project.yaml`, so a repo cannot switch the gate sandbox off.
+ * - `prices` (§11, H-1; spine §5 reading 152): the engine's price table, model id → list price
+ *   ({@link ModelPriceSchema}). The engine prices a run's tokens from it only when the host reported
+ *   no cost (Codex reports none). An engine-launched run on a host that cannot cap its own spend
+ *   (Codex) must be priceable here, or it does not start: a model missing from the price table is
+ *   an error, never $0 (§11). Only here, never in `project.yaml`: a repo could otherwise price its
+ *   own runs at zero. New in 4.9.0.
  */
 export const UserConfigSchema = z.strictObject({
   version: z.literal(1),
@@ -181,6 +229,10 @@ export const UserConfigSchema = z.strictObject({
     .strictObject({
       api_keys: z.partialRecord(FetcherIdSchema, EnvVarNameSchema).default({}),
     })
+    .optional(),
+  prices: z
+    .record(PricedModelIdSchema, ModelPriceSchema)
+    .refine((table) => Object.keys(table).length <= 200, "at most 200 priced models")
     .optional(),
 });
 

@@ -20,6 +20,7 @@ import {
   type FetcherId,
   type GateRunner,
   type HostAdapter,
+  type ModelPrice,
   type HostId,
   type HttpClient,
   type PullRequestService,
@@ -42,6 +43,7 @@ import { loadStorage } from "./storage.js";
 import {
   allowUnsandboxedOf,
   passthroughOf,
+  pricesOf,
   readUserConfig,
   researchApiKeyOf,
 } from "./user-config.js";
@@ -69,6 +71,8 @@ export interface EngineParts {
   readonly http?: HttpClient;
   /** A research fetcher's own key (`~/.vtc/config.yaml` `research.api_keys`, reading 120). */
   readonly researchApiKey?: (fetcher: FetcherId) => string | undefined;
+  /** The price table (`~/.vtc/config.yaml` `prices`, §11, reading 152). */
+  readonly prices?: Readonly<Record<string, ModelPrice>>;
 }
 
 /**
@@ -194,6 +198,7 @@ export const buildEngineParts = async (options: BuildEnginePartsOptions): Promis
   const allowUnsandboxed = options.allowUnsandboxed ?? allowUnsandboxedOf(userConfig);
   const http = options.http === null ? undefined : (options.http ?? defaultHttpClient());
   const researchApiKey = researchApiKeyOf(userConfig);
+  const prices = pricesOf(userConfig);
   return {
     repoRoot,
     vtcHome,
@@ -222,6 +227,7 @@ export const buildEngineParts = async (options: BuildEnginePartsOptions): Promis
       createGhRemoteMerge({ repoRoot, gh: createGhRunner(repoRoot, options.ghCommand) }),
     ...(http === undefined ? {} : { http }),
     ...(researchApiKey === undefined ? {} : { researchApiKey }),
+    ...(Object.keys(prices).length === 0 ? {} : { prices }),
   };
 };
 

@@ -7,6 +7,7 @@ import { createHash } from "node:crypto";
 import { join } from "node:path";
 import {
   GateReportSchema,
+  ModelPriceSchema,
   SubmitInputSchema,
   type GateReport,
   type GateRunner,
@@ -16,6 +17,7 @@ import {
   type HostAuthStatus,
   type HostId,
   type HostOutcome,
+  type ModelPriceInput,
   type BaseRun,
   type RemoteInfo,
   type RemoteMergePolicy,
@@ -505,6 +507,8 @@ export interface HarnessOptions {
   readonly codex?: FakeAdapterOptions;
   /** Wire a Level-3 `RemoteMergeService` fake (AD-23); `h.remote3` scripts it. */
   readonly level3?: boolean;
+  /** The user's price table (`~/.vtc/config.yaml` `prices`, §11). */
+  readonly prices?: Readonly<Record<string, ModelPriceInput>>;
 }
 
 export const DEFAULT_GATES_YML = {
@@ -601,6 +605,13 @@ export const createHarness = (options: HarnessOptions = {}): Harness => {
     random: () => 0.5,
     remote: "origin",
     platform: options.platform ?? "darwin",
+    ...(options.prices === undefined
+      ? {}
+      : {
+          prices: Object.fromEntries(
+            Object.entries(options.prices).map(([id, p]) => [id, ModelPriceSchema.parse(p)]),
+          ),
+        }),
   });
   Object.assign(h, {
     gates,

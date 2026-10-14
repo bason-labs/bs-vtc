@@ -12,6 +12,7 @@ import type {
   HeadlessRunSummary,
   HostAdapter,
   HostId,
+  ModelPrice,
   ProjectConfig,
   PromptVersionRef,
   PullRequestService,
@@ -68,6 +69,12 @@ export interface EngineCoreDeps {
    * Codex's network-off sandbox is shown to block a Unix-socket connect (spine §5 reading 79).
    */
   readonly platform?: NodeJS.Platform;
+  /**
+   * The user's price table (`~/.vtc/config.yaml` `prices`, §11; spine §5 reading 152): the engine
+   * prices a run's tokens from it when the host reported no cost, and an engine-launched run on a
+   * host that cannot cap its own spend (Codex) starts only when its model is priced here.
+   */
+  readonly prices?: Readonly<Record<string, ModelPrice>>;
 }
 
 /** One engine-launched headless role run in flight (AD-25; `StatusResult.headless_runs`). */

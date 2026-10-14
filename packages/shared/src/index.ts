@@ -167,6 +167,7 @@ export * from "./json-schema.js";
  *
  * 4.9.0 (MINOR): the wave-3 Final Review fix round (spine §5 readings 149–155). G2's design exits
  * (`DesignExitSchema`: `approve_gate.design_exits` / `gate.requested.design_exits`,
- * `ApproveInput.design_exit`, `gate.approved.design_exit` and `gate.rejected.design_exit`).
+ * `ApproveInput.design_exit`, `gate.approved.design_exit` and `gate.rejected.design_exit`); the
+ * user's price table (`UserConfig.prices`, `ModelPriceSchema`, `priceTokens`, `EngineDeps.prices`).
  */
 export const CONTRACTS_VERSION = "4.9.0";
