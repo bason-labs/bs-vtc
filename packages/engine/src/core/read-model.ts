@@ -29,7 +29,11 @@ import {
   type UsageReport,
   type UsageSnapshot,
   type WorkflowGraph,
+  type AutomationReport,
+  type AutomationSettings,
 } from "@vtc/shared";
+import { AUTOMATION_SNAPSHOT_NOTE, automationReportView } from "./automation.js";
+import { readModelState } from "./replay-view.js";
 import { projectGraph, taskDagGraph, taskPipelineGraph } from "./graph.js";
 import { acceptanceCriteriaOf, parseSpecItems, type SpecItem } from "./spec.js";
 import type { RunState } from "./state.js";
@@ -71,6 +75,11 @@ export interface ReadModelDeps {
    * there is none to read.
    */
   readonly clientSpend?: () => ClientSpendReport;
+  /**
+   * The project's resolved automation settings (`automationFor`, D-bz), or `null` when the engine
+   * has no automation wiring (`EngineDeps.automation` absent). Absent: `null`.
+   */
+  readonly automation?: () => AutomationSettings | null;
 }
 
 export interface ReadModel {
@@ -87,6 +96,8 @@ export interface ReadModel {
   escalations(run: string): ReadResult<EscalationList>;
   usage(): UsageReport;
   clientSpend(): ReadResult<ClientSpendReport>;
+  /** `GET /api/automation` (D-ca): from the `upstream.*` events of every run of the repo. */
+  automation(): AutomationReport;
 }
 
 /** The run tools act on when none is named: the newest unfinished run, else the newest. */
@@ -253,7 +264,11 @@ export const taskAcceptanceCriteria = (
 };
 
 export const createReadModel = (deps: ReadModelDeps): ReadModel => {
-  const find = (run: string): RunState | undefined => deps.runs().find((r) => r.id === run);
+  // reading 177: the views leave out the run's Lookback replay trials
+  const find = (run: string): RunState | undefined => {
+    const state = deps.runs().find((r) => r.id === run);
+    return state === undefined ? undefined : readModelState(state);
+  };
   const withRun = <T>(run: string, fn: (state: RunState) => ReadResult<T>): ReadResult<T> => {
     const state = find(run);
     return state === undefined ? notFound(`no run ${run}`) : fn(state);
@@ -268,7 +283,9 @@ export const createReadModel = (deps: ReadModelDeps): ReadModel => {
     }),
     status: () => {
       const state = activeRun(deps.runs());
-      return state === undefined ? notFound("no run yet") : ok(statusView(state, deps.usage()));
+      return state === undefined
+        ? notFound("no run yet")
+        : ok(statusView(readModelState(state), deps.usage()));
     },
     runs: () => runListView(deps.runs()),
     events: (run, after, limit) =>
@@ -344,5 +361,11 @@ export const createReadModel = (deps: ReadModelDeps): ReadModel => {
       deps.clientSpend === undefined
         ? notFound("this dashboard has no client spend record to read")
         : ok(deps.clientSpend()),
+    automation: () =>
+      automationReportView(
+        deps.runs().flatMap((state) => state.events),
+        deps.automation?.() ?? null,
+        ...(deps.mode === "snapshot" ? [AUTOMATION_SNAPSHOT_NOTE] : []),
+      ),
   };
 };

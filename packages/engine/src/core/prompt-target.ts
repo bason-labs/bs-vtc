@@ -1,7 +1,8 @@
 /**
  * Which dispatches can take a pinned editable section (AD-21 rules 2 and 6; spine §5 readings 117,
- * 145 and 176): shared by the dispatcher (pins and canaries) and RETRO's replays. And which
- * targets a replay can grade at all (reading 180), shared by RETRO and `vtc lookback approve`.
+ * 145 and 176): the dispatcher's pins and canaries (still only `editable_in_pack` dispatches,
+ * D-cg) and a Codex replay arm in the pack. Which roles a trial can change files as (the gates'
+ * grader, `replayGraderFor`).
  */
 import { resolveRoleMode, type HostId, type RoleContract } from "@vtc/shared";
 import type { PromptParts } from "./plugins.js";
@@ -46,6 +47,10 @@ export const roleChangesFiles = (contract: RoleContract, mode?: string): boolean
 };
 
 /**
+ * Superseded by `replayGraderFor` (D-cg, D-ch; spine §5 readings 201, 202 and 209(2)): engine core
+ * no longer uses it. It stays exported only for the cli's `vtc lookback approve` warning until the
+ * cli moves to `replayGraderFor` in its branch; the round-4 merge removes it.
+ *
  * Why no replay of a target can run in v1, or `null` (AD-21 rule 6; spine §5 readings 176 and
  * 180). A target's replay runs on a run its host leads, so: a role that changes no file is never
  * replayed (reading 180: both arms would leave the same base for the gates; a verdict grader would

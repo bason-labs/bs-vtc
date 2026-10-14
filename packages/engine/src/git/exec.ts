@@ -42,6 +42,11 @@ export interface GitRunOptions {
   readonly timeoutMs?: number;
   /** Run the repo's hooks (only `push`, see the module doc). Default `false`. */
   readonly hooks?: boolean;
+  /**
+   * Leave commit and tag signing to the user's own git configuration: no `commit.gpgsign` /
+   * `tag.gpgsign` override (the automation plumbing, AD-27 rule 1). Default `false`.
+   */
+  readonly userSigning?: boolean;
 }
 
 const preflights = new Map<string, () => void>();
@@ -99,7 +104,12 @@ export const runGit = (
     runPreflights(cwd);
     const child = spawn(
       "git",
-      [...(options.hooks === true ? [] : NO_HOOKS), ...ALWAYS, ...signingArgs(signs(cwd)), ...args],
+      [
+        ...(options.hooks === true ? [] : NO_HOOKS),
+        ...ALWAYS,
+        ...(options.userSigning === true ? [] : signingArgs(signs(cwd))),
+        ...args,
+      ],
       { cwd, env: gitEnv(options.env), stdio: ["ignore", "pipe", "pipe"] },
     );
     const out: Buffer[] = [];

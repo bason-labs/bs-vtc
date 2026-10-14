@@ -296,6 +296,59 @@ describe("pull requests via gh (parsing only; no network in tests)", () => {
     expect(await prs.view("vtc/F-1")).toBeNull();
     expect(Date.now() - started).toBeLessThan(10_000);
   });
+  it.skipIf(process.platform === "win32")(
+    "passes PR bodies through --body-file, never --body on argv, and removes the file after (AD-27 rule 1)",
+    async () => {
+      const dir = tempDir("vtc-gh-");
+      const log = join(dir, "argv.log");
+      const state = join(dir, "created");
+      const fake = join(dir, "gh");
+      const pr = `{"url":"https://github.com/o/r/pull/1","isDraft":true,"state":"OPEN","headRefOid":"${"a".repeat(40)}","statusCheckRollup":[]}`;
+      // records argv and the body file (content and path), and serves a PR once one was created
+      writeFileSync(
+        fake,
+        [
+          "#!/bin/sh",
+          `LOG='${log}'`,
+          'echo "ARGV $*" >> "$LOG"',
+          'prev=""',
+          'for a in "$@"; do',
+          '  if [ "$prev" = "--body-file" ]; then',
+          '    echo "PATH $a" >> "$LOG"; echo "BODY<<" >> "$LOG"; cat "$a" >> "$LOG"; echo ">>BODY" >> "$LOG"',
+          "  fi",
+          '  prev="$a"',
+          "done",
+          'if [ "$1 $2" = "pr view" ]; then',
+          `  if [ -f '${state}' ]; then echo '${pr}'; exit 0; fi`,
+          "  exit 1",
+          "fi",
+          `if [ "$1 $2" = "pr create" ]; then touch '${state}'; fi`,
+          "exit 0",
+          "",
+        ].join("\n"),
+      );
+      chmodSync(fake, 0o755);
+      const prs = createGhPullRequests(dir, fake, 10_000);
+      const body = '## Summary\n--title injected `$(touch pwned)` "quoted"';
+      await prs.upsertDraft({ branch: "vtc/F-1", base: "main", title: "F-1", body });
+      await prs.upsertDraft({ branch: "vtc/F-1", base: "main", title: "F-1", body: "second" });
+      const text = readFileSync(log, "utf8");
+      const argv = text.split("\n").filter((l) => l.startsWith("ARGV "));
+      expect(argv.some((l) => l.includes("pr create") && l.includes("--body-file"))).toBe(true);
+      expect(argv.some((l) => l.includes("pr edit") && l.includes("--body-file"))).toBe(true);
+      expect(argv.every((l) => !`${l} `.includes(" --body "))).toBe(true);
+      expect(argv.join("\n")).not.toContain("injected");
+      expect(text).toContain(`BODY<<\n${body}>>BODY`);
+      expect(text).toContain("BODY<<\nsecond>>BODY");
+      expect(existsSync(join(dir, "pwned"))).toBe(false);
+      const paths = text
+        .split("\n")
+        .filter((l) => l.startsWith("PATH "))
+        .map((l) => l.slice(5));
+      expect(paths).toHaveLength(2);
+      for (const path of paths) expect(existsSync(path)).toBe(false);
+    },
+  );
   it("maps gh JSON to a PullRequestRef", () => {
     const sha = "a".repeat(40);
     expect(

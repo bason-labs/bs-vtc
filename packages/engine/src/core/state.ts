@@ -25,6 +25,7 @@ import {
   type UsageSnapshot,
   type Verdict,
   type VtcEvent,
+  type AutomationRunRef,
 } from "@vtc/shared";
 
 /**
@@ -36,15 +37,34 @@ import {
 export const SUPERSEDED_RUN_PREFIX = "superseded:";
 
 /**
- * A failure message a Lead or a host supplied, as the engine logs it: one that opens like the
- * engine's own stop ({@link SUPERSEDED_RUN_PREFIX}) is prefixed `reported: `, so a role or host
- * can never mark its own run stopped (AD-8: the engine decides).
+ * How the engine's own `role.failed` starts for a headless run whose final output is not a
+ * `RoleResult` (`submitInputFor`): the automation trigger of an upstream `adapter.parse_failure`
+ * defect (D-bv) matches it. Only the engine writes it, as {@link SUPERSEDED_RUN_PREFIX}.
  */
-export const reportedFailureMessage = (message: string): string =>
-  (message.trimStart().startsWith(SUPERSEDED_RUN_PREFIX) ? `reported: ${message}` : message).slice(
-    0,
-    2000,
-  );
+export const PARSE_FAILURE_PREFIX = "unparsed:";
+
+/**
+ * How the engine's own detail of a `gate_infra` park starts when the cause is the project's
+ * committed `gates.yml` (none at the base, or not the one the run started with: `baselineGates`):
+ * the one `gate_infra` park VTC reports as a project problem rather than its own defect (reading
+ * 190). Only the engine writes a `gate_infra` detail, and it puts this first.
+ */
+export const PROJECT_GATES_PARK_PREFIX = "project gates.yml:";
+
+/**
+ * A failure message a Lead or a host supplied, as the engine logs it: one that opens like one of
+ * the engine's own ({@link SUPERSEDED_RUN_PREFIX}, {@link PARSE_FAILURE_PREFIX}) is prefixed
+ * `reported: `, so a role or host can never mark its own run stopped, nor word its failure into an
+ * upstream defect (AD-8: the engine decides).
+ */
+export const reportedFailureMessage = (message: string): string => {
+  const opening = message.trimStart();
+  return (
+    [SUPERSEDED_RUN_PREFIX, PARSE_FAILURE_PREFIX].some((p) => opening.startsWith(p))
+      ? `reported: ${message}`
+      : message
+  ).slice(0, 2000);
+};
 
 /** One role run (a `role.dispatched` and what became of it). */
 export interface RoleRunRecord {
@@ -136,6 +156,12 @@ export interface RunState {
   request: string;
   /** The configured merge level at start (`run.started.merge_level`). */
   mergeLevel: MergeLevel;
+  /**
+   * An automatic run's issue (`run.started.automation`, D-cd, AD-27 rule 2): it skips G1 and G2,
+   * the Spec Verifier reads the issue, and it never runs at merge Level 3. `null`: a run the human
+   * asked for.
+   */
+  automation: AutomationRunRef | null;
   readonly tasks: Map<string, Task>;
   readonly intents: Map<string, IntentContract>;
   /** The status a task had right before it was parked or interrupted (its checkpoint). */
@@ -186,6 +212,7 @@ export const emptyRunState = (id: string, startedAt: string): RunState => ({
   },
   request: "",
   mergeLevel: 2,
+  automation: null,
   tasks: new Map(),
   intents: new Map(),
   checkpoints: new Map(),
@@ -246,6 +273,7 @@ export const applyEvent = (state: RunState, event: VtcEvent): void => {
     };
     state.request = data.request;
     state.mergeLevel = data.merge_level;
+    state.automation = data.automation ?? null;
   } else if (isEventOfType(event, "run.phase_changed")) {
     state.run.phase = readEventData(event).to;
   } else if (isEventOfType(event, "run.paused")) {

@@ -48,7 +48,13 @@ import type { Kernel, RunHandle } from "./kernel.js";
 import { parkEscalation } from "./escalations.js";
 import { featureReviewDone } from "./final-review.js";
 import { LOOKBACK_ROLE, retroTargetOf } from "./retro.js";
-import { replayTrialOf, snapshotTrial, startTrialGrade } from "./replay.js";
+import {
+  replayGraderOf,
+  replayTrialOf,
+  snapshotTrial,
+  startTrialGrade,
+  startVerdictGrade,
+} from "./replay.js";
 import { recordLimit } from "./limits.js";
 import { openTaskEscalation, parkTask, setTaskStatus } from "./parking.js";
 import {
@@ -745,9 +751,19 @@ const acceptReplayTrial = async (
   h: RunHandle,
   run: RoleRunRecord,
   trial: NonNullable<ReturnType<typeof replayTrialOf>>,
+  result: RoleResult,
 ): Promise<StepOutcome> => {
   if (h.state.run.phase !== "retro")
     return reject("out_of_order", [`the run is in ${h.state.run.phase}, not retro`]);
+  // a verdict role's trial changed nothing: its verdict is scored against the recorded outcome
+  // (D-ch, spine §5 reading 202)
+  if (replayGraderOf(k, trial.trial) === "verdict")
+    return {
+      kind: "accept",
+      after: () => {
+        startVerdictGrade(k, h, trial, run.action_id, result);
+      },
+    };
   let head: string;
   try {
     head = await snapshotTrial(k, h, run, trial);
@@ -1362,6 +1378,7 @@ const handleFailure = (
   h: RunHandle,
   run: RoleRunRecord,
   outcome: HostFailureOutcome,
+  worded: FailureWording,
 ): void => {
   if (outcome.kind === "limit") {
     recordLimit(k, h, run, outcome);
@@ -1381,7 +1398,10 @@ const handleFailure = (
       action_id: run.action_id,
       kind: outcome.kind,
       // a Lead or a host cannot word its failure into the engine's stop (AD-8)
-      message: reportedFailureMessage(outcome.message),
+      message:
+        worded === "engine"
+          ? outcome.message.slice(0, 2000)
+          : reportedFailureMessage(outcome.message),
       retryable: outcome.kind === "error" ? outcome.retryable : false,
     },
   });
@@ -1398,11 +1418,18 @@ const handleFailure = (
   stepFailed(k, h, run);
 };
 
+/**
+ * Who worded a failure's message: the engine itself (`submitInputFor`'s parse failure, which may
+ * open with an engine prefix), or a Lead or host (`reportedFailureMessage`).
+ */
+export type FailureWording = "engine" | "reported";
+
 /** Handles a `submit`. Callers run it inside the run's lock. */
 export const handleSubmit = async (
   k: Kernel,
   h: RunHandle,
   submitted: SubmitInput,
+  worded: FailureWording = "reported",
 ): Promise<SubmitOutcome> => {
   const run = h.state.roleRuns.get(submitted.action_id);
   const input = run === undefined ? submitted : pricedSubmit(k, run, submitted);
@@ -1436,7 +1463,7 @@ export const handleSubmit = async (
     dropDispatch(k, h.state.id, run.action_id);
   };
   if (input.kind === "failure") {
-    handleFailure(k, h, run, input.outcome);
+    handleFailure(k, h, run, input.outcome, worded);
     await close(false);
     // a limit interrupts every run in flight: theirs are checked now too
     await sweepDispatches(k, h);
@@ -1517,7 +1544,7 @@ const evaluate = async (
   if (!conformance.ok) return reject(conformance.reason, conformance.issues);
   // a Lookback replay trial changes nothing: its work is graded where it ran (reading 176)
   const trial = run.task === undefined ? replayTrialOf(k, h, run.action_id) : undefined;
-  if (trial !== undefined) return acceptReplayTrial(k, h, run, trial);
+  if (trial !== undefined) return acceptReplayTrial(k, h, run, trial, result);
   const task = run.task === undefined ? undefined : h.state.tasks.get(run.task);
   const order = outOfOrder(k, h, run, task);
   if (order !== null) return reject("out_of_order", [order]);
