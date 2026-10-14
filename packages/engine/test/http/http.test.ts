@@ -16,6 +16,7 @@ import { request } from "node:http";
 import { join, relative } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import {
+  AutomationReportSchema,
   ENGINE_SESSION,
   HttpErrorSchema,
   PROTOTYPE_CSP,
@@ -671,4 +672,59 @@ describe("AD-5 rule 9: the prototype origin", () => {
       expect((await call(proto.port, "/")).body).toBe("<h1>proto</h1>");
     },
   );
+});
+
+describe("GET /api/automation (AD-27 rule 7, D-ca)", () => {
+  it("serves the AutomationReport folded from the upstream.* events of every run", async () => {
+    const repo = tempDir("vtc-http-");
+    for (const [run, file] of [
+      ["golden-1", "golden-run/events.jsonl"],
+      ["golden-auto", "golden-run/samples/automation-events.jsonl"],
+    ] as const) {
+      mkdirSync(join(repo, `.vtc/runs/${run}`), { recursive: true });
+      writeFileSync(
+        join(repo, `.vtc/runs/${run}/events.jsonl`),
+        readFileSync(new URL(file, fixtures)),
+      );
+    }
+    const runs = loadRuns(repo).map((r) => r.state);
+    const api = await createHttpApi({
+      readModel: createReadModel({
+        repoRoot: repo,
+        mode: "snapshot",
+        versions: { engine: "0.0.0", contracts: "5.0.0" },
+        prototypeUrl: () => null,
+        runs: () => runs,
+        usage: () => new Map(),
+        git: null,
+      }),
+      installToken: INSTALL,
+      sessions: createSessionStore(() => new Date("2026-10-14T10:00:00.000Z")),
+      assets: diskBundle(new URL("dashboard-export/", fixtures).pathname),
+      repoRoot: repo,
+      ingest: null,
+      subscribe: null,
+      secrets: () => [],
+    });
+    servers.push(api);
+    expect((await call(api.port, "/api/automation")).status).toBe(403);
+    const reply = await call(api.port, "/api/automation", { headers: auth(INSTALL) });
+    expect(reply.status).toBe(200);
+    const report = AutomationReportSchema.parse(JSON.parse(reply.body));
+    expect(report.items.map((i) => [i.kind, i.issue?.number ?? null, i.pr?.state ?? null])).toEqual(
+      [
+        ["lookback", null, "closed"],
+        ["defect", 41, null],
+        ["ci_failure", 12, "draft"],
+      ],
+    );
+    expect(report.skipped.map((s) => s.reason)).toEqual([
+      "trial_cap",
+      "plugin_locked",
+      "rate_limit",
+    ]);
+    // no automation wiring behind this read model: off, with the note
+    expect(report).toMatchObject({ issues: false, prs: false, upstream: false });
+    expect(report.notes).toHaveLength(1);
+  });
 });

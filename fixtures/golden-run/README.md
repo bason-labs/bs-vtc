@@ -28,12 +28,27 @@ frozen surfaces without a running engine (AD-5, AD-7, AD-12).
     `fact.waived`; `lookback.dispatched`, `proposal_recorded`, `replay_finished` (its `sha256` is
     that of `replay-p-engineer-1.json`'s bytes), `canary_assigned`, `canary_evaluated`,
     `rolled_back` and `escaped_defect`; and a `prompt_selection` incident (reading 176);
-  - `replay-p-engineer-1.json`: the `ReplayResult` that event names. The replay is an Engineer's on
-    a Codex-led headless run, a replay this engine can produce today: it refuses replays of verdict
-    roles such as `spec_verifier` (they change no file, so the gates would grade the same base for
-    both arms), an open deviation from spine readings 166 and 176 that waits for the Lead;
+  - `replay-p-engineer-1.json`: the `ReplayResult` that event names: an Engineer's replay on a
+    Codex-led headless run, graded by the gates (since contracts 5.0.0 every replay trial is an
+    engine-launched headless run, a Claude arm with its own compiled plugin, and a verdict role
+    such as `spec_verifier` is graded by the verdict grader, spine §5 readings 201 and 202);
   - `gate-report-visual.json`: a `GateReport` whose `visual` summary names its `toolchain`;
   - `usage-billing.json`: a `UsageReport` with each host's `billing` (D-bq).
+
+- `samples/` closing-round and round-4 shapes (contracts 5.0.0):
+  - `closing-events.jsonl` (`golden-closing`): a `gate.result` whose visual step names its
+    `toolchain`, one whose visual step was `skipped` with its `skipped_reason`, a G2
+    `gate.requested` whose `design_coverage` names `directions_problem` (D-bt), and a Level-3
+    release park whose escalation offers `finish_level_2` (D-bd);
+  - `usage-billing-provider.json`: a `UsageReport` billed through a cloud `provider` (D-ci) beside
+    an `api_key` host;
+  - `facts.jsonl`: a `.vtc/research/facts.jsonl` row with a host-reported `reported_source` (H-3);
+  - `automation-events.jsonl` (`golden-auto`): an automatic run (`run.started.automation`) and
+    every `upstream.*` and `automation.skipped` event (AD-27, D-ca);
+  - `automation.json`: the `GET /api/automation` answer (`AutomationReport`) engine core's read
+    model gives for that log with the project opted out of upstream reports. It moves to
+    `api/automation.json` when the integrator drops the route's `PENDING_GOLDEN` exemption at the
+    round-4 merge (spine §5 reading 209(3)).
 
   `packages/engine/test/core/golden-samples.test.ts` validates each against its contract and
   replays the log through the engine's loader.
