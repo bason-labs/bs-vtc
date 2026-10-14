@@ -54,8 +54,12 @@ export {
 } from "./exec.js";
 export { HOST_CONFIG_PATHS, restoreHostConfig } from "./host-config.js";
 export {
+  assertReplayCheckoutIntact,
   createReplayCheckout,
+  exposeReplayHead,
   removeReplayCheckout,
+  replayGitDirFingerprint,
+  ReplayCheckoutTamperedError,
   snapshotReplayCheckout,
   type ReplayCheckout,
 } from "./replay-checkout.js";

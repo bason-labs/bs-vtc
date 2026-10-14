@@ -70,7 +70,6 @@ import {
 } from "../lookback/index.js";
 import { engineSocketAnswers, serveEngineSocket } from "../mcp/index.js";
 import { createLookbackReplays } from "./replays.js";
-import { readTiebreakKeys, recordTiebreak } from "./tiebreaks.js";
 import {
   createFetchQuota,
   createFileResearchCache,
@@ -219,8 +218,10 @@ export const lookbackWindow = (
  *   the run's Lead host's ({@link lookbackWindow});
  * - at `run.finished` (an aborted run too) the run's failures are attributed to
  *   `.vtc/lookback/attributions.jsonl` and the scorecards of every version in the history are
- *   rewritten under `.vtc/lookback/scorecards/`; the AI tiebreak answers the engine recorded are
- *   the only `ai_tiebreak` rows that count, and every one it produces is recorded (`tiebreaks.ts`).
+ *   rewritten under `.vtc/lookback/scorecards/`. Only the AI tiebreak answers the engine recorded
+ *   would let an `ai_tiebreak` row count; nothing produces one yet, so none counts (the lookback
+ *   module's tiebreak store, `readTiebreakKeys` / `appendTiebreakRecord`, is wired here once the
+ *   lookback-research branch that ships it is integrated).
  * Lookback work at `run.finished` runs one job at a time and never fails the engine; the returned
  * cleanup waits for the job in flight.
  */
@@ -276,8 +277,10 @@ export const wireLookback = (
     );
   // rule 8 (reading 176): the window of the run's Lead host, where the lookback role runs
   const weeklyRemaining = (state: RunState): number | null => lookbackWindow(engine, state).pct;
-  // the AI tiebreak answers the engine recorded (reading 137): only these ai_tiebreak rows count
-  const tiebreaks = (): ReadonlySet<string> => readTiebreakKeys(deps.vtcHome, repoKey);
+  // the AI tiebreak answers the engine recorded (reading 137): only these ai_tiebreak rows count.
+  // No AI tiebreak is produced yet, so none is recorded and none counts (fail closed); the
+  // lookback module's store reader replaces this at integration
+  const tiebreaks = (): Promise<ReadonlySet<string>> => Promise.resolve(new Set<string>());
   const bundleSha = (): string =>
     graderBundleSha({ judgeModel: null, gatesConfigHash: engine.gatesConfigHash() });
   const budgetAvailable = (state: RunState): boolean =>
@@ -308,7 +311,7 @@ export const wireLookback = (
     compiled: (role, mode, host) => plugins.promptParts?.(agentNameFor(role, mode), host)?.compiled,
     tiebreaks,
     graderBundleSha: bundleSha,
-    weeklyRemainingPct: weeklyRemaining,
+    weeklyWindow: (state) => lookbackWindow(engine, state),
     budgetAvailable,
     gateRunner: engine.deps.gateRunner,
     now,
@@ -321,7 +324,7 @@ export const wireLookback = (
   const runEnd = async (run: string): Promise<void> => {
     const state = engine.states().find((s) => s.id === run);
     if (state === undefined) return;
-    const end = await lookbackAtRunEnd({
+    await lookbackAtRunEnd({
       projectRoot: deps.repoRoot,
       events: lookbackEvents(state),
       history: history(),
@@ -330,12 +333,8 @@ export const wireLookback = (
       weeklyRemainingPct: weeklyRemaining(state),
       budgetAvailable: budgetAvailable(state),
       now: now(),
-      tiebreaks: tiebreaks(),
+      tiebreaks: await tiebreaks(),
     });
-    // every ai_tiebreak row the engine itself produced is recorded where no role can write, so it
-    // counts at the next read (readings 137, 175)
-    for (const row of end.attributions)
-      if (row.method === "ai_tiebreak") recordTiebreak(deps.vtcHome, repoKey, row, now());
   };
   const off = engine.onEvent((event) => {
     if (event.type === "run.finished") {

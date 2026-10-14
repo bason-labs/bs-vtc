@@ -1,15 +1,38 @@
 /**
  * Clean checkouts for Lookback replay trials (AD-21 rule 6, spine §5 reading 176): a standalone
  * repository at the recorded dispatch's base commit, with no refs past it. It is not a worktree of
- * the user's repo (a worktree shares every ref and object, so a trial could read the work that came
- * after its base): the objects reachable from the base are fetched into a fresh repository whose
- * git directory lives outside the checkout, in the engine's private directory, where no role can
- * plant a hook or a config key; every git call names that directory and the checkout explicitly
- * (and, like every engine git call, runs no hook). The trial's work is committed there (its head)
- * so the Gate Runner can grade `base..head` in the checkout; then both directories are removed.
+ * the user's repo (a worktree shares every ref and object, so git in the checkout would list the
+ * work that came after its base): the objects reachable from the base are fetched by SHA into a
+ * fresh repository whose git directory lives in the engine's private directory, and no ref is
+ * ever made in the user's repo. Every engine git call names that directory and the checkout
+ * explicitly and, like every engine git call, runs no hook.
+ *
+ * Limits, kept honest: the checkout sits under the user's repo (the Gate Runner grades a checkout
+ * named relative to the repo root), and the host sandboxes a role runs in deny no reads there, so
+ * a trial that goes looking can read the user's current files and their `.git`; the private git
+ * directory keeps only git itself (and so the role's own git commands) from handing it the later
+ * work. The checkout's `.git` file names that directory, so a role that can write there could
+ * plant a config key, an attributes file or a hook that the engine's own `git add` would run: its
+ * control files are fingerprinted when the checkout is made ({@link replayGitDirFingerprint}) and
+ * checked before every later engine git call on it; a change throws
+ * {@link ReplayCheckoutTamperedError} and nothing runs.
+ *
+ * The trial's work is committed in the checkout (its head); before the Gate Runner grades
+ * `base..head` with the user's repo, the head's objects are fetched there by SHA
+ * ({@link exposeReplayHead}: objects only, no ref, so git's own gc prunes them once they are old).
+ * Then both directories are removed.
  */
-import { randomBytes } from "node:crypto";
-import { existsSync, mkdirSync, rmSync } from "node:fs";
+import { createHash } from "node:crypto";
+import {
+  existsSync,
+  lstatSync,
+  mkdirSync,
+  readdirSync,
+  readFileSync,
+  readlinkSync,
+  rmSync,
+  writeFileSync,
+} from "node:fs";
 import { dirname, join } from "node:path";
 import { assertNoSymlinks } from "./repo-files.js";
 import { gitText, runGit, withRepoLock } from "./exec.js";
@@ -24,6 +47,21 @@ const TRIAL_IDENTITY = {
   GIT_COMMITTER_EMAIL: "vtc@localhost",
 } as const;
 
+/**
+ * A fetch by SHA and nothing else: protocol v2 (whose server hands out any object it holds by
+ * SHA, so no ref is needed), no tags, no submodules, no FETCH_HEAD, no maintenance after it.
+ */
+const FETCH_BY_SHA = [
+  "-c",
+  "protocol.version=2",
+  "fetch",
+  "--quiet",
+  "--no-tags",
+  "--no-recurse-submodules",
+  "--no-write-fetch-head",
+  "--no-auto-maintenance",
+] as const;
+
 export interface ReplayCheckout {
   /** The checkout, relative to the repo root. */
   readonly path: string;
@@ -33,15 +71,127 @@ export interface ReplayCheckout {
   readonly base: string;
 }
 
+/** A replay checkout's git directory changed after the engine made it (see the module doc). */
+export class ReplayCheckoutTamperedError extends Error {
+  constructor(readonly paths: readonly string[]) {
+    super(
+      `refusing to run git in the replay checkout: ${paths.length === 0 ? "the fingerprint of its git directory is missing" : `${paths.join(", ")} changed in its git directory`}`.slice(
+        0,
+        500,
+      ),
+    );
+    this.name = "ReplayCheckoutTamperedError";
+  }
+}
+
 const args = (repoRoot: string, checkout: ReplayCheckout): string[] => [
   `--git-dir=${checkout.gitDir}`,
   `--work-tree=${join(repoRoot, checkout.path)}`,
+  // no gc after a commit: it would write under `objects/info` mid-trial
+  "-c",
+  "gc.auto=0",
+  "-c",
+  "maintenance.auto=false",
 ];
+
+/** Where the fingerprint taken at creation is kept: beside the git directory, private too. */
+const fingerprintFile = (checkout: ReplayCheckout): string => `${checkout.gitDir}.fingerprint`;
+
+/**
+ * Entries of a git directory that the engine's own git calls write (objects, refs, the index,
+ * logs) and that make git run nothing. Every other entry is fingerprinted: `config`, `hooks/`,
+ * `info/`, `commondir`, anything a role adds, and the {@link ALTERNATES} inside `objects/`.
+ */
+const DATA_ENTRIES = new Set([
+  "HEAD",
+  "ORIG_HEAD",
+  "FETCH_HEAD",
+  "COMMIT_EDITMSG",
+  "index",
+  "packed-refs",
+  "logs",
+  "refs",
+  "gc.pid",
+  "gc.log",
+]);
+
+/** The files under `objects/` that point git at other object stores. */
+const ALTERNATES = ["objects/info/alternates", "objects/info/http-alternates"] as const;
+
+const lstatExists = (path: string): boolean => {
+  try {
+    lstatSync(path);
+    return true;
+  } catch {
+    return false;
+  }
+};
+
+const isData = (rel: string): boolean =>
+  rel.endsWith(".lock") || DATA_ENTRIES.has(rel) || rel === "objects";
+
+const digestOf = (path: string): string => {
+  const stat = lstatSync(path);
+  const hash = createHash("sha256");
+  if (stat.isSymbolicLink()) hash.update(`link\0${readlinkSync(path)}`);
+  else if (stat.isFile()) hash.update("file\0").update(readFileSync(path));
+  else hash.update(`other\0${String(stat.mode)}`);
+  return hash.digest("hex");
+};
+
+/**
+ * The control files of a replay checkout's git directory, path → digest of their type and bytes
+ * (a symlink by its target, a directory by its presence): what can make git run code or read
+ * elsewhere.
+ */
+export const replayGitDirFingerprint = (gitDir: string): Record<string, string> => {
+  const out: Record<string, string> = {};
+  const walk = (rel: string): void => {
+    let names: string[];
+    try {
+      names = readdirSync(rel === "" ? gitDir : join(gitDir, rel));
+    } catch {
+      return;
+    }
+    for (const name of names.sort()) {
+      const child = rel === "" ? name : `${rel}/${name}`;
+      if (isData(child)) continue;
+      const path = join(gitDir, child);
+      if (lstatSync(path).isDirectory()) {
+        out[`${child}/`] = "dir";
+        walk(child);
+      } else out[child] = digestOf(path);
+    }
+  };
+  walk("");
+  for (const rel of ALTERNATES) {
+    const path = join(gitDir, rel);
+    if (lstatExists(path)) out[rel] = digestOf(path);
+  }
+  return out;
+};
+
+/**
+ * Checks the checkout's git directory against the fingerprint taken when it was made; throws
+ * {@link ReplayCheckoutTamperedError} naming what changed (or saying the fingerprint is missing).
+ */
+export const assertReplayCheckoutIntact = (checkout: ReplayCheckout): void => {
+  let kept: Record<string, string>;
+  try {
+    kept = JSON.parse(readFileSync(fingerprintFile(checkout), "utf8")) as Record<string, string>;
+  } catch {
+    throw new ReplayCheckoutTamperedError([]);
+  }
+  const now = replayGitDirFingerprint(checkout.gitDir);
+  const changed = [...new Set([...Object.keys(kept), ...Object.keys(now)])]
+    .filter((path) => kept[path] !== now[path])
+    .sort();
+  if (changed.length > 0) throw new ReplayCheckoutTamperedError(changed.slice(0, 20));
+};
 
 /**
  * Creates the checkout at `base` (replacing a leftover one at the same paths). The base must be a
- * commit of the user's repo; a temporary ref there is the only way to fetch it, and it is deleted
- * again before this returns.
+ * commit of the user's repo; it is fetched by SHA, so the user's repo gets no ref.
  */
 export const createReplayCheckout = async (
   repoRoot: string,
@@ -55,22 +205,9 @@ export const createReplayCheckout = async (
   mkdirSync(tree, { recursive: true });
   mkdirSync(dirname(checkout.gitDir), { recursive: true, mode: 0o700 });
   await runGit(tree, ["init", "--quiet", `--separate-git-dir=${checkout.gitDir}`, tree]);
-  const ref = `refs/vtc/replay-${randomBytes(6).toString("hex")}`;
-  await withRepoLock(repoRoot, () => runGit(repoRoot, ["update-ref", ref, checkout.base]));
-  try {
-    await runGit(tree, [
-      ...args(repoRoot, checkout),
-      "fetch",
-      "--quiet",
-      "--no-tags",
-      repoRoot,
-      ref,
-    ]);
-  } finally {
-    await withRepoLock(repoRoot, () =>
-      runGit(repoRoot, ["update-ref", "-d", ref], { allowFailure: true }),
-    );
-  }
+  await runGit(tree, [...args(repoRoot, checkout), ...FETCH_BY_SHA, repoRoot, checkout.base], {
+    timeoutMs: 600_000,
+  });
   await runGit(tree, [
     ...args(repoRoot, checkout),
     "checkout",
@@ -78,6 +215,11 @@ export const createReplayCheckout = async (
     "--detach",
     checkout.base,
   ]);
+  writeFileSync(
+    fingerprintFile(checkout),
+    `${JSON.stringify(replayGitDirFingerprint(checkout.gitDir))}\n`,
+    { mode: 0o600 },
+  );
 };
 
 /** Commits what the trial left in the checkout; its head (the base when it changed nothing). */
@@ -88,6 +230,8 @@ export const snapshotReplayCheckout = async (
 ): Promise<string> => {
   const tree = join(repoRoot, checkout.path);
   const git = args(repoRoot, checkout);
+  // `add` runs the clean filters the git directory names: never one a role planted there
+  assertReplayCheckoutIntact(checkout);
   await runGit(tree, [...git, "add", "--all"]);
   const staged = await runGit(tree, [...git, "diff", "--cached", "--quiet"], {
     allowFailure: true,
@@ -103,9 +247,31 @@ export const snapshotReplayCheckout = async (
   return gitText(tree, [...git, "rev-parse", "HEAD"]);
 };
 
+/**
+ * Makes a trial's head readable to git in the user's repo, so the Gate Runner (whose `GitOps`
+ * reads the user's repo) can diff `base..head` and check the head out: its objects are fetched by
+ * SHA from the checkout's git directory, with no ref. A head that is the base needs nothing.
+ */
+export const exposeReplayHead = async (
+  repoRoot: string,
+  checkout: ReplayCheckout,
+  head: string,
+): Promise<void> => {
+  if (!SHA.test(head)) throw new TypeError(`expected a full git sha, got ${head}`);
+  if (head === checkout.base) return;
+  // the fetch runs git's upload-pack in the checkout's git directory
+  assertReplayCheckoutIntact(checkout);
+  await withRepoLock(repoRoot, () =>
+    runGit(repoRoot, [...FETCH_BY_SHA, checkout.gitDir, head], { timeoutMs: 600_000 }),
+  );
+  const type = await gitText(repoRoot, ["cat-file", "-t", head]);
+  if (type !== "commit") throw new Error(`the trial head ${head.slice(0, 12)} is not a commit`);
+};
+
 /** Removes the checkout and its git directory (best effort; a missing one is fine). */
 export const removeReplayCheckout = (repoRoot: string, checkout: ReplayCheckout): void => {
   const tree = join(repoRoot, checkout.path);
   if (existsSync(tree)) rmSync(tree, { recursive: true, force: true });
   if (existsSync(checkout.gitDir)) rmSync(checkout.gitDir, { recursive: true, force: true });
+  rmSync(fingerprintFile(checkout), { force: true });
 };

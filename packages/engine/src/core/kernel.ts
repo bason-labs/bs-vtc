@@ -236,6 +236,11 @@ export interface LookbackRetro {
   replays?(
     state: RunState,
   ): Promise<{ readonly replays: readonly LookbackReplay[]; readonly wait?: string }>;
+  /**
+   * The same weekly-window and budget checks, again before each trial (AD-21 rule 8): why the
+   * replays must stop now, or `null`. Replays that stop wait for the next RETRO.
+   */
+  replayWait?(state: RunState): string | null;
   /** Grades one trial through the Gate Runner (`gradeTrial`): it passed when the gates pass. */
   gradeTrial?(request: GateRunRequest): Promise<boolean>;
   /**
