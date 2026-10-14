@@ -3,13 +3,14 @@
 import { ShieldQuestion } from "lucide-react";
 import { useMemo } from "react";
 import { runTopic } from "@/lib/api/topics";
-import { headlessRuns } from "@/lib/headless";
+import { headlessRuns, inFlightHeadless } from "@/lib/headless";
 import { pendingGate } from "@/lib/human-gates";
 import { hrefs } from "@/lib/router";
 import { formatLocalTime } from "@/lib/time";
 import { useNow } from "@/lib/useNow";
 import { useResource } from "@/lib/useResource";
 import { useRunEvents } from "@/lib/useRunEvents";
+import { useEngine } from "@/components/app/EngineProvider";
 import { Link } from "@/components/app/Link";
 import { Card, CardDescription, CardHeader, CardTitle, StatusPill } from "@/components/ui";
 
@@ -23,6 +24,7 @@ const plural = (n: number, one: string, many = `${one}s`): string =>
  */
 export function RunActivity({ run }: { run: string }) {
   const now = useNow();
+  const { health } = useEngine();
   const events = useRunEvents(run, ["gates", "headless"]);
   const status = useResource("status", (c, s) => c.status(s), [runTopic(run, "status")]);
   const gate = useMemo(
@@ -31,10 +33,8 @@ export function RunActivity({ run }: { run: string }) {
   );
   const runs = useMemo(() => {
     if (events.data === undefined) return [];
-    // `StatusResult` describes the active run only; without it, what is in flight is unknown.
-    const inFlight = status.data?.run.id === run ? (status.data.headless_runs ?? null) : null;
-    return headlessRuns(events.data.events, inFlight);
-  }, [events.data, status.data, run]);
+    return headlessRuns(events.data.events, inFlightHeadless(status.data, run, health));
+  }, [events.data, status.data, run, health]);
   return (
     <>
       {gate === null ? null : (

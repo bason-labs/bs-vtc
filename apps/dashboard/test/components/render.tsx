@@ -1,4 +1,4 @@
-import { act, render, screen, within } from "@testing-library/react";
+import { act, render, screen, waitFor, within } from "@testing-library/react";
 import { StrictMode } from "react";
 import { FlowStudio } from "@/components/app/FlowStudio";
 import { fixtureFetch, readEventLog, type FixtureFetch } from "../fixtures";
@@ -42,4 +42,4 @@ export const renderApp = (
   return { requests: f.requests };
 };
 
-export { act, screen, within };
+export { act, screen, waitFor, within };
