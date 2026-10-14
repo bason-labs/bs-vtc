@@ -17,6 +17,7 @@ import {
   autoTemplateErrors,
   compilePlugins,
   NEVER_MERGES_LINE,
+  ROLES_CHANGELOG_ANCHOR,
   type CompileOutput,
 } from "../src/index.js";
 import { fixtureFiles } from "./fixtures.js";
@@ -147,7 +148,40 @@ describe("the templates compile into both plugins", () => {
 
   it("lets the CHANGELOG through the layout check", () => {
     expect(ROLES_CHANGELOG).toBe("roles/CHANGELOG.md");
-    const result = compilePlugins(fixtureFiles({ [ROLES_CHANGELOG]: "# Role prompt changes\n" }));
+    const result = compilePlugins(
+      fixtureFiles({ [ROLES_CHANGELOG]: `# Role prompt changes\n\n${ROLES_CHANGELOG_ANCHOR}\n` }),
+    );
     expect(result.ok ? [] : result.errors).toEqual([]);
+  });
+});
+
+describe("the CHANGELOG entry anchor (D-bv)", () => {
+  const errorsFor = (text: string | null): { path: string; message: string }[] => {
+    const result = compilePlugins(fixtureFiles({ [ROLES_CHANGELOG]: text }));
+    return result.ok ? [] : result.errors.filter((e) => e.path === ROLES_CHANGELOG);
+  };
+
+  it("is the hidden line the upstream module inserts below", () => {
+    expect(ROLES_CHANGELOG_ANCHOR).toBe("<!-- vtc:changelog-entries -->");
+    expect(errorsFor(`# Changes\n\n${ROLES_CHANGELOG_ANCHOR}\n\n### entry\n`)).toEqual([]);
+  });
+
+  it("requires roles/CHANGELOG.md", () => {
+    expect(errorsFor(null)).toEqual([
+      { path: ROLES_CHANGELOG, message: "required file is missing" },
+    ]);
+  });
+
+  it.each([
+    ["no anchor", "# Changes\n", 0],
+    ["two anchors", `${ROLES_CHANGELOG_ANCHOR}\n${ROLES_CHANGELOG_ANCHOR}\n`, 2],
+    ["an anchor inside other text", `see ${ROLES_CHANGELOG_ANCHOR} here\n`, 1],
+  ])("refuses a CHANGELOG with %s", (_name, text, found) => {
+    expect(errorsFor(text)).toEqual([
+      {
+        path: ROLES_CHANGELOG,
+        message: `must hold the entry anchor ${ROLES_CHANGELOG_ANCHOR} exactly once, on its own line (found ${String(found)})`,
+      },
+    ]);
   });
 });

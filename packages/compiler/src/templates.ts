@@ -9,6 +9,7 @@ import {
   AUTO_TEMPLATE_NAMES,
   AUTO_TEMPLATE_SLOTS,
   autoTemplateAssetPath,
+  ROLES_CHANGELOG,
   type AutoTemplateName,
   type AutoTemplateSlot,
 } from "@vtc/shared";
@@ -121,4 +122,29 @@ export const autoTemplateFiles = (
     emitted.push({ path: autoTemplateAssetPath(name), text: source.text });
   }
   return emitted;
+};
+
+/**
+ * The line in `roles/CHANGELOG.md` (`ROLES_CHANGELOG`) directly below which the upstream module
+ * inserts each new entry, newest first (D-bv). Local until the proposed shared constant lands.
+ */
+export const ROLES_CHANGELOG_ANCHOR = "<!-- vtc:changelog-entries -->";
+
+/**
+ * Checks `roles/CHANGELOG.md`: it is required and holds {@link ROLES_CHANGELOG_ANCHOR} exactly
+ * once, on a line of its own, so the upstream module always finds one insertion point.
+ */
+export const checkRolesChangelog = (files: readonly SourceFile[], errors: CompileError[]): void => {
+  const source = files.find((f) => f.path === ROLES_CHANGELOG);
+  if (source === undefined) {
+    errors.push({ path: ROLES_CHANGELOG, message: "required file is missing" });
+    return;
+  }
+  const lines = source.text.split("\n").filter((line) => line.includes(ROLES_CHANGELOG_ANCHOR));
+  if (lines.length !== 1 || lines[0]?.trim() !== ROLES_CHANGELOG_ANCHOR) {
+    errors.push({
+      path: ROLES_CHANGELOG,
+      message: `must hold the entry anchor ${ROLES_CHANGELOG_ANCHOR} exactly once, on its own line (found ${String(lines.length)})`,
+    });
+  }
 };

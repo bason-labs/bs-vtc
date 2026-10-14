@@ -111,9 +111,13 @@ version is `arm-<sha12>` of the copy (`armPluginVersion`); `promptSha256` is
 `effectivePromptSha(locked, editable)`. The candidate section passes the shared
 `editableSectionErrors` and the AD-9 check, the base agent must still hash to its manifest SHA,
 and an `editable_in_pack` agent's file stays unchanged (its section reaches it through the pack).
-Every path stays inside `outDir`, with no symbolic link: the base tree is read without following
-links, each file is created exclusively with `O_NOFOLLOW`, and the written tree is walked again.
-This is checked structurally in the tests; nothing runs the real `claude`.
+The arm is self-consistent: its `vtc-manifest.json` gives the arm agent's own `prompt_sha256`
+and `editable_sha256`, and its editable asset holds the arm's section (`armManifest`). Every
+path stays inside `outDir`, with no symbolic link: the base tree is read without following
+links, each file is created exclusively with `O_NOFOLLOW` in a directory whose device and inode
+are still the ones this call created, and the written tree is walked again. A failure removes
+only what the call created, never recursively, and nothing once `outDir` was replaced. This is
+checked structurally in the tests; nothing runs the real `claude`.
 
 ## New roles (D-cd, reading 198)
 
@@ -129,7 +133,8 @@ engineer profile an `engineer_<discipline>` id for a discipline no profile cover
 `core` roles and `engineer_profile` specialists only: a lens reviewer belongs to a park-the-task
 risk rule and an advisor answers the human, so both stay hand-made. When no replay can compare
 the role, the proposal is evidence-only: the scaffold returns the `needs-eval` label and writes
-it into the test stub as a todo. Nothing is overwritten and nothing is written through a link.
+it into the test stub as a todo. Nothing is overwritten, nothing is written through a link,
+and a failure part-way removes what was written.
 
 ## Readings this tree follows
 
@@ -224,14 +229,25 @@ human`, exits `done`, `blocked` or `unknown`, no verdicts, no success criteria a
   frozen (`DESIGN_CONTRACTS_DIR`, `designContractPath`), which `{{design_contracts_dir}}` now
   renders. Visual QA (3.0.0) judges V1, V2 and V8, and the frontend and mobile profiles (2.0.0)
   build, against that direction's `## Direction <id>` block, read from the `design direction`
-  line of the pack's Dispatch section. `renderTaskPack` does not print that line yet (a
-  contract proposal); until it does, Visual QA returns V8 `unknown` when the contracts hold
-  several directions, and the profiles stop with `blocked` and ask.
+  line of the pack's Dispatch section; a `design exit` line naming `category_standard` (the G2
+  exit, `{{category_standard_exit}}`) means no Direction contract applies and Visual QA judges
+  against the category standard. Only those engine-written lines name the choice
+  (`PENDING_DISPATCH_LINES` in `instructions.ts`). `renderTaskPack` prints neither yet, and
+  TaskPack has no exit field (contract proposals of this branch); until they land the profiles
+  build to the approved prototype and the design system as at 1.0.0 and never stop for want of
+  the line, and Visual QA returns V8 `unknown` when the contracts hold several directions, as
+  reading 179 allows.
 - **Automatic runs** (D-cd, reading 198). An automatic run's issue is its spec (no G1 or G2).
-  The Spec Verifier (3.0.0) recognises it by the hidden marker its spec starts with
-  (`{{auto_marker_prefix}}`, from `renderAutoMarker`) and checks the pull request's change
-  against the issue. The Lead relays `NextResult.notices` (the daily automation summary,
-  `HOST_WEB_OFF_NOTICE`) once, in plain words.
+  The Spec Verifier (3.0.0) treats a run as automatic only when its pack's Dispatch section has
+  an `automatic run` line naming the issue (from `run.started.automation`), never from a marker
+  or other text in the pack, and then checks the pull request's change against the issue.
+  `renderTaskPack` does not print that line yet (a contract proposal); until it does, the rule
+  never fires and the Spec Verifier judges every run as before. The Lead relays
+  `NextResult.notices` (the daily automation summary, `HOST_WEB_OFF_NOTICE`) once, in plain
+  words.
+- **The CHANGELOG anchor** (D-bv). `roles/CHANGELOG.md` (`ROLES_CHANGELOG`) holds
+  `<!-- vtc:changelog-entries -->` (`ROLES_CHANGELOG_ANCHOR`) exactly once; the upstream module
+  inserts each new entry directly below it, and the compiler refuses a CHANGELOG without it.
 
 ## What the compiler emits for the engine
 

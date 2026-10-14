@@ -42,7 +42,7 @@ import { agentInstructions, buildInstructions, type InstructionSources } from ".
 import { EDITABLE_IN_PACK_ROLES, rolePromptAssetPath } from "./prompt-parts.js";
 import { skillsForAgent, skillTextFor } from "./role-skills.js";
 import { loadRoles, type LoadedRole } from "./role-source.js";
-import { autoTemplateFiles } from "./templates.js";
+import { autoTemplateFiles, checkRolesChangelog } from "./templates.js";
 import type {
   CompileError,
   CompileOptions,
@@ -638,6 +638,7 @@ export const compilePlugins = (
   }
   requireFile(files, "roles/NOTICE", errors);
   requireFile(files, "roles/_shared/result-protocol.md", errors);
+  checkRolesChangelog(files, errors);
 
   const loaded = loadRoles(files);
   if (!loaded.ok) errors.push(...loaded.errors);

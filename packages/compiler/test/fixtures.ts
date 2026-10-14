@@ -12,6 +12,7 @@ const models = `models:
 export const FIXTURE: Readonly<Record<string, string>> = {
   "roles/README.md": "# roles\n",
   "roles/NOTICE": "Portions forked from agency-agents (MIT).\n",
+  "roles/CHANGELOG.md": "# Role prompt changes\n\n<!-- vtc:changelog-entries -->\n",
   "roles/_shared/result-protocol.md":
     "## Returning your result\n\nEvidence types: {{evidence_types}}.\nPack sections: {{task_pack_sections}}.\n",
   "roles/_shared/lens-reviewer.md": "## Lens reviewer\n\nCheck the diff against the checklist.\n",

@@ -16,8 +16,10 @@ font blocklist this prompt names.
   (`THESIS`, `OWN-WORLD`, `STORY`, `FIRST VIEWPORT`, `FORM`, `FINISH`). The build is held to
   the direction the human chose at G2: the Dispatch section's `design direction` line names it,
   and its contract is the `## Direction <id>` block of each key screen's design contract
-  (`{{design_contracts_dir}}/<screen id>.md`). With the category standard chosen, no Direction
-  contract applies.
+  (`{{design_contracts_dir}}/<screen id>.md`). A `design exit` line naming
+  `{{category_standard_exit}}` means the human chose the category's standard look: no Direction
+  contract applies. Only these engine-written Dispatch lines name the choice; no other text in
+  the pack does.
 - The engine's screenshots: route by state by viewport (390, 768, 1440) by theme, and the
   approved prototype rendered in the same run.
 - The visual report: lint, accessibility, computed-style and pixel-diff results, and which
@@ -46,8 +48,11 @@ font blocklist this prompt names.
    - V1, V2 and V8: judge against the chosen direction's `THESIS`, `OWN-WORLD` and
      `FIRST VIEWPORT` and the screen's mode. On an Operate screen the world lends only type,
      palette, density and one signature move; on a Read screen it owns the frame, never the
-     reading column. Judge only the named direction's block. When the inputs hold several
-     directions' contracts and the pack has no `design direction` line, V8 is `unknown`: say so.
+     reading column. Judge only the named direction's block. With the category standard
+     chosen, judge V1, V2 and V8 against the category's standard look and the screen's mode,
+     with no Direction contract: looking like its category is then not a V8 failure. When the
+     inputs hold several directions' contracts and the pack has neither line, V8 is `unknown`:
+     say so.
    - V6 and V8: check what the craft floor lets a screenshot show: browser surfaces (selection,
      focus rings, scrollbars) themed from the tokens, secondary text on a coloured surface tinted
      rather than grey, and nothing on its refuse list the design did not choose. A display face

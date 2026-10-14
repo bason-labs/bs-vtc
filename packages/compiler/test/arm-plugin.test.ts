@@ -18,12 +18,14 @@ import {
 import { tmpdir } from "node:os";
 import { join, relative } from "node:path";
 import { fileURLToPath } from "node:url";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterAll, afterEach, beforeAll, describe, expect, it } from "vitest";
 import {
   effectivePromptSha,
   PLUGIN_MANIFEST_ASSET,
   PluginManifestSchema,
+  promptShaFor,
   rolePromptAssetPath,
+  sha256Hex,
   type ArmPluginCompiler,
 } from "@vtc/shared";
 import {
@@ -91,7 +93,7 @@ const compileArm = (
   });
 
 describe("createArmPluginCompiler: the arm is a full copy with one editable section changed", () => {
-  it("copies every file byte for byte except the agent and the plugin manifest", async () => {
+  it("copies every file byte for byte except the agent, its section and the manifests", async () => {
     const base = basePlugin();
     const out = join(temp(), "trial-1", "b");
     const arm = await compileArm(createArmPluginCompiler({ pluginDir: base }), out);
@@ -102,7 +104,39 @@ describe("createArmPluginCompiler: the arm is a full copy with one editable sect
     const changed = [...after.keys()].filter(
       (p) => !after.get(p)?.equals(before.get(p) ?? Buffer.alloc(0)),
     );
-    expect(changed.sort()).toEqual([CLAUDE_PLUGIN_JSON, `agents/${AGENT}.md`].sort());
+    expect(changed.sort()).toEqual(
+      [
+        CLAUDE_PLUGIN_JSON,
+        PLUGIN_MANIFEST_ASSET,
+        `agents/${AGENT}.md`,
+        rolePromptAssetPath(AGENT, "editable"),
+      ].sort(),
+    );
+  });
+
+  it("is self-consistent: the arm's manifest describes the arm's agent and section", async () => {
+    const base = basePlugin();
+    const out = join(temp(), "consistent");
+    await compileArm(createArmPluginCompiler({ pluginDir: base }), out);
+    const read = (dir: string) =>
+      PluginManifestSchema.parse(
+        JSON.parse(readFileSync(join(dir, PLUGIN_MANIFEST_ASSET), "utf8")),
+      );
+    const armed = read(out);
+    for (const agent of armed.agents) {
+      const body = bodyOf(readFileSync(join(out, agent.file), "utf8"));
+      expect(promptShaFor(body), agent.name).toBe(agent.prompt_sha256);
+      const editable = readFileSync(join(out, rolePromptAssetPath(agent.name, "editable")), "utf8");
+      expect(sha256Hex(editable), agent.name).toBe(agent.editable_sha256);
+    }
+    expect(readFileSync(join(out, rolePromptAssetPath(AGENT, "editable")), "utf8")).toBe(NEW);
+    const baseAgents = read(base).agents;
+    expect(armed.agents.map(({ prompt_sha256: _p, editable_sha256: _e, ...rest }) => rest)).toEqual(
+      baseAgents.map(({ prompt_sha256: _p, editable_sha256: _e, ...rest }) => rest),
+    );
+    expect(armed.agents.filter((a, i) => a.prompt_sha256 !== baseAgents[i]?.prompt_sha256)).toEqual(
+      [armed.agents.find((a) => a.name === AGENT)],
+    );
   });
 
   it("replaces only the editable section of the agent's instructions", async () => {
@@ -274,23 +308,39 @@ describe("createArmPluginCompiler: refusals (fail closed)", () => {
 });
 
 describe("createArmPluginCompiler on the repo's own plugin", () => {
-  it("builds an arm for every compiled Claude agent", async () => {
+  // The repo compile and one full arm per agent (about 180 files each) take seconds, more under
+  // load: they get their own timeouts rather than vitest's 5 s default.
+  const HEAVY_MS = 120_000;
+  let repo = "";
+  beforeAll(() => {
     const root = fileURLToPath(new URL("../../../", import.meta.url));
     const result = compilePlugins(readSources(root).files);
     if (!result.ok) throw new Error(result.errors.map((e) => e.message).join("\n"));
-    const repo = temp();
+    repo = realpathSync(mkdtempSync(join(tmpdir(), "vtc-arm-repo-")));
     writeTargets(result.output, repo);
-    const base = join(repo, COMPILE_TARGETS["claude-code"]);
-    const manifest = PluginManifestSchema.parse(
-      JSON.parse(readFileSync(join(base, PLUGIN_MANIFEST_ASSET), "utf8")),
-    );
-    const compiler = createArmPluginCompiler({ pluginDir: base });
-    for (const agent of manifest.agents) {
-      const arm = await compileArm(compiler, join(temp(), agent.name), { agent: agent.name });
-      const body = bodyOf(readFileSync(join(arm.dir, agent.file), "utf8"));
-      expect(body.endsWith(agent.editable_in_pack === true ? "" : `\n${NEW}`), agent.name).toBe(
-        true,
-      );
-    }
+  }, HEAVY_MS);
+  afterAll(() => {
+    if (repo !== "") rmSync(repo, { recursive: true, force: true });
   });
+
+  it(
+    "builds an arm for every compiled Claude agent",
+    async () => {
+      const base = join(repo, COMPILE_TARGETS["claude-code"]);
+      const manifest = PluginManifestSchema.parse(
+        JSON.parse(readFileSync(join(base, PLUGIN_MANIFEST_ASSET), "utf8")),
+      );
+      const compiler = createArmPluginCompiler({ pluginDir: base });
+      for (const agent of manifest.agents) {
+        const out = join(temp(), agent.name);
+        const arm = await compileArm(compiler, out, { agent: agent.name });
+        const body = bodyOf(readFileSync(join(arm.dir, agent.file), "utf8"));
+        expect(body.endsWith(agent.editable_in_pack === true ? "" : `\n${NEW}`), agent.name).toBe(
+          true,
+        );
+        rmSync(out, { recursive: true, force: true });
+      }
+    },
+    HEAVY_MS,
+  );
 });
