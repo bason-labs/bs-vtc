@@ -5,9 +5,16 @@ import { ImageIcon } from "lucide-react";
 import { useId, useMemo } from "react";
 import { cn } from "@/lib/cn";
 import { hrefs } from "@/lib/router";
-import { renderMatrix, visualDiffs, visualNotes, visualStatusMeta } from "@/lib/visual";
+import {
+  renderMatrix,
+  visualDiffs,
+  visualNotes,
+  visualStatusMeta,
+  visualToolchain,
+} from "@/lib/visual";
 import { Link } from "@/components/app/Link";
 import { Badge, Card, CardDescription, CardHeader, CardTitle, StatusPill } from "@/components/ui";
+import { VisualNotes } from "./VisualNotes";
 
 const th = "px-3 py-2 font-medium";
 const td = "border-t border-border px-3 py-2 align-top";
@@ -235,7 +242,7 @@ function Styles({ report }: { report: VisualReport }) {
 /** A visual QA report (AD-24) instead of raw JSON: matrix, axe, diffs, styles, findings. */
 export function VisualReportView({ run, report }: { run: string; report: VisualReport }) {
   const status = visualStatusMeta(report.status);
-  const notes = visualNotes(report.status, report.skipped_reason);
+  const notes = visualNotes(report.status);
   const subject = report.task ?? report.feature ?? report.run;
   return (
     <div className="space-y-4" data-testid="visual-report">
@@ -252,11 +259,12 @@ export function VisualReportView({ run, report }: { run: string; report: VisualR
           </div>
           <StatusPill meta={status} />
         </CardHeader>
-        {notes.map((n) => (
-          <p key={n} className="text-sm text-muted-fg">
-            {n}
-          </p>
-        ))}
+        <VisualNotes
+          className="text-sm"
+          reason={report.skipped_reason ?? null}
+          notes={notes}
+          toolchain={visualToolchain(report.toolchain, report.status)}
+        />
         {report.findings.length === 0 ? null : (
           <ul aria-label="Visual findings" className="mt-2 space-y-1 text-xs">
             {report.findings.map((f) => (

@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
-import { UsageReportSchema, type UsageReport } from "@vtc/shared";
-import { usagePanelModel } from "@/lib/usage";
+import { API_KEY_BILLING_WARNING, UsageReportSchema, type UsageReport } from "@vtc/shared";
+import { billingNotices, usagePanelModel } from "@/lib/usage";
 import { readFixture } from "../fixtures";
 
 const NOW = Date.parse("2026-10-13T09:41:00.000Z");
@@ -121,5 +121,33 @@ describe("usagePanelModel", () => {
 
   it("says when nothing is scheduled", () => {
     expect(usagePanelModel(golden(), NOW, opts).autoResume).toBeNull();
+  });
+});
+
+describe("API-key billing (D-bq, spine §5 reading 171)", () => {
+  const withBilling = (billing: Record<string, unknown>): UsageReport =>
+    UsageReportSchema.parse({
+      ...golden(),
+      hosts: golden().hosts.map((h) =>
+        Object.hasOwn(billing, h.host) ? { ...h, billing: billing[h.host] } : h,
+      ),
+    });
+
+  it("warns, verbatim, on the card of a host signed in with an API key", () => {
+    const model = usagePanelModel(withBilling({ codex: "api_key" }), NOW, opts);
+    expect(model.cards.map((c) => c.billingWarning)).toEqual([null, API_KEY_BILLING_WARNING]);
+    expect(billingNotices(withBilling({ codex: "api_key" }))).toEqual([
+      { host: "codex", name: "Codex", warning: API_KEY_BILLING_WARNING },
+    ]);
+  });
+
+  it("says nothing for a subscription, unknown or unreported billing", () => {
+    for (const report of [golden(), withBilling({ codex: "subscription", "claude-code": null })]) {
+      expect(usagePanelModel(report, NOW, opts).cards.map((c) => c.billingWarning)).toEqual([
+        null,
+        null,
+      ]);
+      expect(billingNotices(report)).toEqual([]);
+    }
   });
 });

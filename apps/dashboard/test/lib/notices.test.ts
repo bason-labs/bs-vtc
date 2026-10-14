@@ -323,3 +323,46 @@ describe("wave-3 notices (Level 3, headless runs, lookback; contracts 4.5.0)", (
     }
   });
 });
+
+describe("prompt_selection incidents (AD-21; spine §5 readings 137 and 176)", () => {
+  const cannotPin = (seq: number, task?: string) =>
+    noticeEvent(
+      seq,
+      "incident.recorded",
+      {
+        kind: "prompt_selection",
+        detail:
+          "qa on claude-code: this target cannot take a pin until its role is switched (its agent carries its own editable section); the compiled default ran",
+      },
+      task === undefined ? {} : { task },
+    );
+
+  it("explains that the compiled default ran and when a target cannot take a pin", () => {
+    expect(noticeForEvent(cannotPin(54))).toMatchObject({
+      type: "incident.recorded",
+      tone: "warn",
+      title: "A pinned or canary prompt was not used",
+      detail: expect.stringContaining("this target cannot take a pin") as unknown,
+      note: expect.stringMatching(/compiled default prompt ran/) as unknown,
+    });
+    expect(noticeForEvent(cannotPin(54))?.note).toMatch(/until its role is switched/);
+  });
+
+  it("shows the same incident recorded again once, newest, with how often", () => {
+    const thrown = noticeEvent(57, "incident.recorded", {
+      kind: "prompt_selection",
+      detail: "the prompt selector threw: pins.yaml is not valid YAML",
+    });
+    const notices = runNotices([cannotPin(54, "T-1"), cannotPin(55, "T-2"), cannotPin(56), thrown]);
+    expect(notices.map((n) => [n.seq, n.repeats])).toEqual([
+      [57, 1],
+      [56, 3],
+    ]);
+  });
+
+  it("never folds other incidents together", () => {
+    const write = (seq: number) =>
+      noticeEvent(seq, "incident.recorded", { kind: "checkout_write", detail: "x changed" });
+    expect(runNotices([write(54), write(55)]).map((n) => n.repeats)).toEqual([1, 1]);
+  });
+});

@@ -51,6 +51,28 @@ describe("gateRequests (gate.requested, spine §5 reading 109)", () => {
     });
   });
 
+  it("shows too few design directions (D-bt) as a blocking notice, not a coverage gap", () => {
+    const few = w3Event(73, "gate.requested", {
+      gates: ["G2"],
+      artifacts: frozen,
+      design_coverage: {
+        reqs_without_component: [],
+        reqs_without_screen: [],
+        screens_without_req: [],
+        components_unregistered: [],
+        directions_problem: "1 design direction after the Designer's re-dispatch; G2 needs 2–3",
+        ok: false,
+      },
+    });
+    const [view] = gateRequests([few]);
+    expect(view?.blocking).toBe(
+      "1 design direction after the Designer's re-dispatch; G2 needs 2–3",
+    );
+    expect(view?.coverage).toEqual({ ok: false, problems: [] });
+    const [plain] = gateRequests(GATE_EVENTS);
+    expect(plain?.blocking).toBeNull();
+  });
+
   it("is pending until a decision on the same gate, and a newer request supersedes it", () => {
     expect(pendingGate([request])?.outcome.id).toBe("pending");
     expect(pendingGate(GATE_EVENTS)).toBeNull();

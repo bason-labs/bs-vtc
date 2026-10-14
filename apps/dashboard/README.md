@@ -86,13 +86,26 @@ binaries must stay out of the production dependency closure (AD-2, `supply-chain
     when `value` is null or n is below `LOOKBACK_LIMITS.minScorecardN`, the Engineer breakdown;
     and the run's `lookback.*` events (canaries, replays, proposals, rollbacks, escaped defects).
     A scorecard opened in the artifact view renders the same way.
+  - Closing round (contracts 4.10.0): a host whose `UsageSnapshot.billing` is `api_key` shows
+    `API_KEY_BILLING_WARNING` verbatim on its usage card and in the run's notices (D-bq; unknown
+    or absent billing shows nothing); `prompt_selection` incidents (a pin or canary the engine
+    did not use, including a target that cannot take a pin, reading 176) are notices, the same
+    detail folded into one; the escalation effect `finish_level_2` reads "Finish at Level 2 (leave
+    the PR for review)" (D-bd); G2's `design_coverage.directions_problem` is a blocking notice on
+    the gate card and in the run's gate banner (D-bt); a fact that is not verified shows its
+    `reported_source` (host search with its query, or host fetch) as provenance (H-3).
   - These views read the run's event log in pages of `EVENT_PAGE_LIMIT.max`, at most 50 pages; a
     longer log is read oldest first and each view says that its newest events are not shown.
-  - **Visual QA**: `GateReport.visual` in the gate reports, and a `VisualReport` under
-    `.vtc/evidence/` in the artifact view as the render matrix (screen × state × width × theme),
-    axe violations and items needing review, per-region diffs and style mismatches. Only `pass`
-    counts as passed: `skipped` and `unchecked` show as "Not passed" (reading 105). Raster
-    screenshots and diff images (base64 from the artifacts route) show as images; SVG never does.
+  - **Visual QA**: `GateReport.visual` in the gate reports, with a link to the report at the path
+    `VisualSummary.report` names (`.vtc/evidence/<T-n|F-n>/gates/<attempt>/visual/report.json`,
+    contracts 4.7.0); the artifact view renders a `VisualReport` only at that path, never a file
+    found by scanning, as the render matrix (screen × state × width × theme), axe violations and
+    items needing review, per-region diffs and style mismatches. Only `pass` counts as passed:
+    `skipped` and `unchecked` show as "Not passed" (reading 105), and a skip's reason (no
+    browser, or Linux `ptrace_scope` 0, D-bj) is a visible note. `VisualSummary.toolchain` is
+    named; a pass on the project's own Playwright says it is not a Level-3 pass (readings 124,
+    136). Raster screenshots and diff images (base64 from the artifacts route) show as images;
+    SVG never does.
   - Unknown event types and payloads that break their contract are skipped (`src/lib/events.ts`
     reads payloads with `parsePersisted`, so keys a newer engine adds are dropped).
 - Node states: a `WorkflowNode` `interrupted` by a usage limit is drawn with the `waiting_limit`

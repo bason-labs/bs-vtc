@@ -27,7 +27,8 @@ function ArtifactText({ content }: { content: string }) {
  * One run artifact (spec, plan file, evidence bundle…), shown as text: the engine serves artifacts
  * as JSON so agent-written HTML never runs on this origin (AD-5 rule 10). Evidence bundles and
  * traceability reports (AD-18) are rendered as the REQ → test → result matrix, visual QA reports
- * (AD-24) as the render matrix with axe results and diffs, raw JSON on demand. Screenshots and
+ * (AD-24, at the path `VisualSummary.report` names) as the render matrix with axe results and
+ * diffs, raw JSON on demand. Screenshots and
  * diff images (raster only) are shown as images.
  */
 export function ArtifactView({ run, path }: { run: string | null; path: string | null }) {
