@@ -11,6 +11,17 @@ recordings once the spike captures them (`pnpm --filter @vtc/adapters live:check
 limit, auth, max-turns and kill streams: Claude has all four (synthetic), Codex has limit, auth
 and kill (synthetic); Codex has no turn cap of its own (§12.1), so it has no max-turns stream.
 
+To record one, run on the signed-in machine (the header of `scripts/live-check.ts` has the full
+recipe; `--record` redacts ids, paths, the user name, e-mail addresses and token formats, and the
+recording is still read before it replaces a synthetic file):
+
+| Stream    | Command (`pnpm --filter @vtc/adapters live:check …`)                                    |
+| --------- | --------------------------------------------------------------------------------------- |
+| max-turns | `claude-code --max-turns 1 --record <file>`                                             |
+| kill      | `<host> --kill-after 3000 --record <file>`                                              |
+| auth      | sign the host out with its own command, then `<host> --signed-out --record <file>`      |
+| limit     | `<host> --record <file>` while the host reports its limit reached (it cannot be forced) |
+
 | File                                                 | Source                                                                     |
 | ---------------------------------------------------- | -------------------------------------------------------------------------- |
 | `claude-code/statusline.json`                        | documented statusline payload (statusline capture still pending)           |
