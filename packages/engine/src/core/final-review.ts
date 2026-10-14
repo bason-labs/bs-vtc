@@ -3,22 +3,26 @@
  * integrated branch, deterministic steps first.
  * - Steps 1, 2 and 6 are the full gate run (`finalReviewRequest`); step 5's deterministic part is
  *   its visual step on every screen (`GateRunRequest.visual` with `screens: []`, AD-24): `pass`,
- *   `fail`, `unchecked`, or `skipped` with the reason (no browser, D-ay).
+ *   `fail`, `unchecked`, or `skipped` with the reason (no browser, D-ay). When that step rendered,
+ *   its AI part follows: the Visual QA judge, three calls fed the visual report and renders, a
+ *   2-of-3 vote per criterion (`FINAL_REVIEW_VISUAL_STEP`, spine §5 reading 149).
  * - Steps 3 and 4 are the AI reviewers, once per feature on the combined diff: the
  *   Spec-Verifier across the whole spec (plus the traceability gaps, the scope-creep flags and the
  *   deferred items) and Security verify. They run read-only in a worktree at the integrated head
- *   and cite evidence there.
+ *   and cite evidence there (the gate runs' evidence, such as step 5's screenshots, in the checkout).
  * - Step 7, release readiness, is computed from the diff (migration order, config changes,
  *   rollback notes, docs, changelog, feature flags) and costs no tokens.
  * Each step is logged as `final_review.step_finished`; the evidence bundle carries the results
  * and the release readiness. After a fix round the full gates and step 7 run again, but an AI step
  * that passed the round before is carried over when the fix's diff cannot change what it reviews
- * (`fixAffectedSteps`): a failed step always runs again. Findings route as before: a risky one parks the feature, the cap and
- * a stuck loop park it, anything else becomes an integration-fix task.
+ * (`fixAffectedSteps`): a failed step always runs again. Findings route as before: a risky one
+ * parks the feature, the cap and a stuck loop park it, a finding one merged task owns reopens that
+ * task (reading 150), anything else becomes an integration-fix task.
  */
 import {
   FINAL_REVIEW_CAP,
   finalReviewStepsCovered,
+  type ArtifactRef,
   ReleaseReadinessSchema,
   resolveRoleMode,
   VISUAL_SKIPPED_NO_BROWSER,
@@ -43,11 +47,12 @@ import {
   setFeatureStatus,
 } from "./jobs.js";
 import type { Kernel, RunHandle } from "./kernel.js";
-import { countsAsFailure, inFlight } from "./queries.js";
+import { countsAsFailure, inFlight, renderedVisualReport, visualJudgeStep } from "./queries.js";
 import { readReleaseReadiness, readTraceabilityFile, releaseReadinessPath } from "./projections.js";
 import { loadResult } from "./results.js";
 import { findingFromDraft, findingFromVerdict } from "./triage.js";
 import { featureHasUi } from "./ui.js";
+import { VISUAL_QA_CALLS } from "./router.js";
 
 /** The AI steps of Final Review (§6.7a steps 3–4) and the role mode each runs. */
 export const FINAL_REVIEW_AI_STEPS = [
@@ -55,14 +60,24 @@ export const FINAL_REVIEW_AI_STEPS = [
   { step: 4, role: "security", mode: "verify" },
 ] as const;
 
+/**
+ * Step 5's AI part (§6.7a step 5, §7.5 step 6): the Visual QA judge on every screen and state of
+ * the feature together, three calls and a 2-of-3 vote per criterion, fed the round's visual
+ * report. It runs every round whose visual step rendered (a fix can change any screen), never
+ * carried over; without renders (skipped: no browser) step 5 stays the deterministic note.
+ */
+export const FINAL_REVIEW_VISUAL_STEP = { step: 5, role: "visual_qa" } as const;
+
 /** A Final Review step the engine wants dispatched (a feature-level reviewer, no task). */
 export interface FeatureStep {
   readonly key: string;
   readonly role: string;
   readonly mode?: string;
   readonly feature: string;
-  readonly subject: string;
+  /** The verdict subject (the feature); none for the Visual QA judge, which judges V1–V8. */
+  readonly subject?: string;
   readonly note: string;
+  readonly inputs?: readonly ArtifactRef[];
 }
 
 /** The AI steps whose role (and mode) the installed contracts have. */
@@ -93,6 +108,18 @@ const roundReports = (h: RunHandle, featureId: string) => {
   );
 };
 
+/**
+ * The visual report step 5's judge reads this round (`renderedVisualReport` of the round's passing
+ * gate run), or `undefined`: no judge this round (no renders, or no Visual QA role installed).
+ */
+const roundVisualReport = (k: Kernel, h: RunHandle, featureId: string): string | undefined => {
+  if (k.deps.roles.get(FINAL_REVIEW_VISUAL_STEP.role) === undefined) return undefined;
+  const last = roundReports(h, featureId).at(-1);
+  return last !== undefined && effectiveVerdict(last.report) === "pass"
+    ? renderedVisualReport(last.report)
+    : undefined;
+};
+
 /** True once this round's gates concluded (pass or not): they do not run again this round. */
 export const finalReviewGatesDone = (h: RunHandle, featureId: string): boolean =>
   roundReports(h, featureId).some((r) => r.report.verdict !== "infra_error");
@@ -107,6 +134,15 @@ const runsSince = (h: RunHandle, featureId: string, seq: number) =>
   [...h.state.roleRuns.values()].filter(
     (r) => r.feature === featureId && r.task === undefined && r.seq > seq,
   );
+
+/** This round's Visual QA judge runs of the feature. */
+const judgeRuns = (h: RunHandle, featureId: string, seq: number) =>
+  runsSince(h, featureId, seq).filter((r) => r.role === FINAL_REVIEW_VISUAL_STEP.role);
+
+/** Whether step 5's judge reported: three accepted calls this round (or no judge this round). */
+const judgeDone = (k: Kernel, h: RunHandle, featureId: string, seq: number): boolean =>
+  roundVisualReport(k, h, featureId) === undefined ||
+  judgeRuns(h, featureId, seq).filter((r) => r.status === "submitted").length >= VISUAL_QA_CALLS;
 
 /** The AI steps this round already settled at its gate run: carried over from the round before. */
 const carriedSteps = (h: RunHandle, featureId: string, seq: number): Set<number> =>
@@ -234,6 +270,31 @@ export const finalReviewSteps = (k: Kernel, h: RunHandle): FeatureStep[] => {
           s.step === 3
             ? `Final Review step 3 (§6.7a): verify feature ${feature.id} across the whole spec on its integrated branch: every requirement covered by a passing test, scope creep flagged, deferred items listed. Give one verdict on subject ${feature.id}.`
             : `Final Review step 4 (§6.7a): review feature ${feature.id}'s combined diff for cross-task data flows, authorization gaps between layers, and secrets or configuration across services. Give one verdict on subject ${feature.id}.`,
+          ...(rejected === undefined
+            ? []
+            : [
+                `Your previous result was rejected (${rejected.reason}): ${rejected.issues.join("; ")}`,
+              ]),
+        ].join("\n"),
+      });
+    }
+    // step 5's judge: three independent calls, counted like a UI round's (§7.5 step 6)
+    const report = roundVisualReport(k, h, feature.id);
+    if (report === undefined) continue;
+    const judges = judgeRuns(h, feature.id, seq);
+    if (judges.filter(countsAsFailure).length >= 3) continue;
+    const taken = judges.filter((r) => r.status === "submitted" || r.status === "in_flight").length;
+    const judge = visualJudgeStep(report, `feature ${feature.id}'s user journeys`);
+    const rejected = judges.findLast((r) => r.status === "rejected")?.rejection;
+    for (let call = taken + 1; call <= VISUAL_QA_CALLS; call += 1) {
+      steps.push({
+        key: `final:${feature.id}:visual_qa:${String(call)}`,
+        role: FINAL_REVIEW_VISUAL_STEP.role,
+        feature: feature.id,
+        inputs: judge.inputs,
+        note: [
+          `Final Review step 5 (§6.7a): Visual QA on feature ${feature.id}'s full user journeys: every screen and state together, design drift and accessibility across flows. One verdict per criterion V1–V8 (no feature subject).`,
+          judge.note,
           ...(rejected === undefined
             ? []
             : [
@@ -635,6 +696,84 @@ export const failFinalReview = (
     });
 };
 
+/**
+ * Step 5's judge (§7.5 step 6): the 2-of-3 vote per criterion over this round's three accepted
+ * calls; a criterion that is not `pass` (`fail`, `unknown`, `unchecked`) in two calls is a
+ * finding, and every finding a call reported counts (once per fingerprint). `null` when no judge
+ * ran this round; `unchecked` when a call's result is missing.
+ */
+const judgeVote = (
+  k: Kernel,
+  h: RunHandle,
+  featureId: string,
+  seq: number,
+  round: number,
+): { readonly result: FinalReviewStepResult; readonly findings: Finding[] } | null => {
+  const report = roundVisualReport(k, h, featureId);
+  if (report === undefined) return null;
+  const runs = judgeRuns(h, featureId, seq)
+    .filter((r) => r.status === "submitted")
+    .slice(-VISUAL_QA_CALLS);
+  const results = runs.map((r) => loadResult(k.deps.repoRoot, r.action_id));
+  if (runs.length < VISUAL_QA_CALLS || results.some((r) => r === undefined))
+    return {
+      result: {
+        step: 5,
+        status: "unchecked",
+        reason: "a Visual QA judge's result is missing",
+        evidence: [{ type: "file", ref: report }],
+      },
+      findings: [],
+    };
+  const role = FINAL_REVIEW_VISUAL_STEP.role;
+  const fallbackPath = `.vtc/evidence/${featureId}/bundle.json`;
+  const byFingerprint = new Map<string, Finding>();
+  for (const result of results)
+    for (const d of result?.findings ?? []) {
+      const f = findingFromDraft(d, role, { feature: featureId, round });
+      if (f.route !== "defer" && !byFingerprint.has(f.fingerprint))
+        byFingerprint.set(f.fingerprint, f);
+    }
+  const verdicts = results.flatMap((r) => r?.verdicts ?? []);
+  const failingSubjects: string[] = [];
+  for (const subject of [...new Set(verdicts.map((v) => v.subject))]) {
+    const failing = verdicts.filter((v) => v.subject === subject && v.verdict !== "pass");
+    const first = failing[0];
+    if (failing.length < 2 || first === undefined) continue;
+    failingSubjects.push(subject);
+    const f = findingFromVerdict(first, role, { feature: featureId, round, fallbackPath });
+    if (f.route !== "defer" && !byFingerprint.has(f.fingerprint))
+      byFingerprint.set(f.fingerprint, f);
+  }
+  const findings = [...byFingerprint.values()];
+  const reportEvidence: Evidence = { type: "file", ref: report };
+  const cited: Evidence[] = [
+    reportEvidence,
+    ...verdicts.filter((v) => v.verdict !== "pass").flatMap((v) => v.evidence),
+  ].slice(0, 10);
+  const ok = findings.length === 0;
+  return {
+    result: {
+      step: 5,
+      status: ok ? "pass" : "fail",
+      ...(ok
+        ? {}
+        : {
+            reason: [
+              ...(failingSubjects.length > 0
+                ? [`2 of 3 judges did not pass ${failingSubjects.slice(0, 8).join(", ")}`]
+                : []),
+              `${String(findings.length)} finding(s)`,
+            ]
+              .join("; ")
+              .slice(0, 500),
+          }),
+      evidence: cited,
+    },
+    findings,
+  };
+};
+
 /** Steps 3, 4 and 7, then the feature's verdict, once every AI step of the round reported. */
 const conclude = (k: Kernel, h: RunHandle, featureId: string, seq: number): void => {
   const feature = h.state.features.get(featureId);
@@ -713,6 +852,13 @@ const conclude = (k: Kernel, h: RunHandle, featureId: string, seq: number): void
     blocking.push(...fresh);
     evidence.push(...cited);
   }
+  const judged = judgeVote(k, h, featureId, seq, round);
+  if (judged !== null) {
+    stepFinished(k, h, featureId, judged.result);
+    if (judged.result.status === "unchecked") unchecked.push(5);
+    blocking.push(...judged.findings);
+    evidence.push(...judged.result.evidence);
+  }
   const readiness = readReleaseReadiness(k.deps.repoRoot, featureId);
   const readinessFailed = readiness === null ? [] : readinessFindings(featureId, readiness, round);
   stepFinished(
@@ -770,11 +916,12 @@ export const featureReviewDone = (k: Kernel, h: RunHandle, featureId: string): v
   if (seq === undefined) return;
   const runs = runsSince(h, featureId, seq);
   const carried = carriedSteps(h, featureId, seq);
-  const done = aiSteps(k).every(
-    (s) =>
-      carried.has(s.step) ||
-      runs.some((r) => r.role === s.role && r.mode === s.mode && r.status === "submitted"),
-  );
+  const done =
+    aiSteps(k).every(
+      (s) =>
+        carried.has(s.step) ||
+        runs.some((r) => r.role === s.role && r.mode === s.mode && r.status === "submitted"),
+    ) && judgeDone(k, h, featureId, seq);
   if (done) conclude(k, h, featureId, seq);
 };
 
@@ -793,13 +940,23 @@ export const checkFinalReviewStuck = (k: Kernel, h: RunHandle): void => {
         runs.filter((r) => r.role === s.role && r.mode === s.mode && countsAsFailure(r)).length >=
           3,
     );
-    if (stuck !== undefined)
+    const judgeStuck =
+      roundVisualReport(k, h, feature.id) !== undefined &&
+      !judgeDone(k, h, feature.id, seq) &&
+      judgeRuns(h, feature.id, seq).filter(countsAsFailure).length >= 3;
+    const which =
+      stuck !== undefined
+        ? stuck
+        : judgeStuck
+          ? { step: FINAL_REVIEW_VISUAL_STEP.step, role: FINAL_REVIEW_VISUAL_STEP.role }
+          : undefined;
+    if (which !== undefined)
       parkFeature(
         k,
         h,
         feature.id,
         "stuck",
-        `Final Review step ${String(stuck.step)} (${stuck.role}) failed or was rejected 3 times`,
+        `Final Review step ${String(which.step)} (${which.role}) failed or was rejected 3 times`,
         [{ type: "file", ref: `.vtc/evidence/${feature.id}/bundle.json` }],
       );
   }
@@ -938,7 +1095,11 @@ export const startFinalReview = (k: Kernel, h: RunHandle, featureId: string): vo
       if (seq !== undefined) {
         const carried = carriedSteps(h, featureId, seq);
         // nothing left to dispatch: no reviewer role installed, or every step carried over
-        if (aiSteps(k).every((s) => carried.has(s.step))) conclude(k, h, featureId, seq);
+        if (
+          aiSteps(k).every((s) => carried.has(s.step)) &&
+          roundVisualReport(k, h, featureId) === undefined
+        )
+          conclude(k, h, featureId, seq);
       }
       return Promise.resolve();
     });

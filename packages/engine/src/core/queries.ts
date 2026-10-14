@@ -1,5 +1,5 @@
 /** Pure queries over a run's projected state, shared by the engine's modules. */
-import type { Finding, GateReport, Phase, Task } from "@vtc/shared";
+import type { ArtifactRef, Finding, GateReport, Phase, Task } from "@vtc/shared";
 import type { RoleRunRecord, RunState } from "./state.js";
 
 export const nextActionId = (state: RunState): string => `a-${String(state.roleRuns.size + 1)}`;
@@ -168,6 +168,40 @@ export const roundVerdict = (state: RunState, task: string): GateReport | undefi
         r.report.verdict !== "infra_error",
     )
     .at(-1)?.report;
+};
+
+/**
+ * The visual report a Visual QA judge reads (§7.5 step 6, spine §5 reading 92): the path the
+ * gate run's visual step wrote, when that step rendered screens and passed its deterministic
+ * checks. `undefined` when it did not run, was skipped (no browser, D-ay) or rendered nothing:
+ * a judge with no renders could only answer `unchecked`.
+ */
+export const renderedVisualReport = (
+  report: Pick<GateReport, "visual"> | undefined,
+): string | undefined => {
+  const visual = report?.visual;
+  return visual?.status === "pass" && visual.report !== null && visual.counts.renders > 0
+    ? visual.report
+    : undefined;
+};
+
+/**
+ * What a Visual QA judge dispatch carries (§7.5 step 6): the visual report and the directory of
+ * its render evidence (screenshots, the prototype renders, diff images) as pack inputs, and a note
+ * naming them. `what` says what is judged ("task T-1's screens", "feature F-1's user journeys").
+ */
+export const visualJudgeStep = (
+  report: string,
+  what: string,
+): { readonly inputs: ArtifactRef[]; readonly note: string } => {
+  const dir = report.includes("/") ? report.slice(0, report.lastIndexOf("/")) : report;
+  return {
+    inputs: [
+      { type: "visual_report", path: report },
+      { type: "screenshots", path: dir },
+    ],
+    note: `Judge ${what} on V1–V8 from the deterministic visual step's report ${report} and its renders under ${dir}: read the report first; a route or state it lists as not rendered is unchecked for the criteria it affects.`,
+  };
 };
 
 /**

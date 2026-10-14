@@ -32,17 +32,16 @@ const VISUAL_DISCIPLINES: readonly Discipline[] = ["frontend"];
 export const VISUAL_QA_CALLS = 3;
 
 /**
- * Whether the engine attaches Visual QA (spine §5 reading 92). Its judge assumes the §7.5
+ * Whether the engine attaches Visual QA (spine §5 readings 92 and 149). Its judge assumes the §7.5
  * deterministic stack already ran (token lint, the Playwright route × state × viewport × theme
- * renders, axe, computed styles, pixelmatch) and judges those renders. That stack has landed as
- * the visual gate step (AD-24): UI rounds and Final Review step 5 run it and record
- * `GateReport.visual`. What is still open is the judge's input: no Visual QA dispatch is fed the
- * step's report (`VisualSummary.report`) and render evidence yet, so an attached judge could only
- * report its criteria as unchecked, which blocks every UI round. Off until that wiring lands (spine
- * §7 accepted residual "Visual QA not attached", whose exit is setting this to true); the
- * deterministic visual step and the other reviewers still run.
+ * renders, axe, computed styles, pixelmatch) and judges those renders: a UI round's three calls,
+ * and Final Review step 5's, are fed the visual step's report (`VisualSummary.report`) and the
+ * directory of its render evidence. The judge is attached to a round only once its visual step
+ * rendered (`reviewersFor` option `visual`, `renderedVisualReport`): with no renders (no visual
+ * step, or `skipped` because no browser is installed, D-ay) every criterion could only be
+ * `unchecked`, which would block every UI round, so the visible skip note stands instead.
  */
-export const VISUAL_QA: { readonly attached: boolean } = { attached: false };
+export const VISUAL_QA: { readonly attached: boolean } = { attached: true };
 
 /**
  * The Tier-2 lens reviewer a planner risk tag attaches as its own read-only node (§5.3, spine §5
@@ -132,8 +131,8 @@ const slug = (text: string): string => text.toLowerCase().replace(/[^a-z0-9]+/g,
  * - Security verify on high-risk tasks and on security-tagged tasks;
  * - a Tier-2 lens node per planner risk tag that names an installed lens role
  *   ({@link LENS_FOR_TAG}, §5.3);
- * - Visual QA (three calls) on UI tasks of a run with UI, once its stack exists
- *   ({@link VISUAL_QA}).
+ * - Visual QA (three calls) on UI tasks of a run with UI, once the round's visual step rendered
+ *   their screens (option `visual`, {@link VISUAL_QA}).
  * QA judge stays on high-risk tasks only: §6.3 step 7 scales reviewer depth with risk (spine §5
  * reading 92 records it against §5.2's "QA per task, in two modes").
  */
@@ -145,6 +144,11 @@ export const reviewersFor = (
     readonly lensRoles?: readonly string[];
     /** The task gets a cross-family reviewer (`crossFamilyHost`, §12.4). */
     readonly crossFamily?: boolean;
+    /**
+     * The round's visual step rendered the task's screens (`renderedVisualReport`), so the Visual
+     * QA judge has renders to judge (§7.5 step 6).
+     */
+    readonly visual?: boolean;
   } = {},
 ): ReviewerSlot[] => {
   const slots: ReviewerSlot[] = [];
@@ -206,7 +210,12 @@ export const reviewersFor = (
       reason: `risk tag ${tag} (§5.3)`,
     });
   }
-  if (VISUAL_QA.attached && run.has_ui && VISUAL_DISCIPLINES.includes(task.discipline)) {
+  if (
+    VISUAL_QA.attached &&
+    options.visual === true &&
+    run.has_ui &&
+    VISUAL_DISCIPLINES.includes(task.discipline)
+  ) {
     for (let call = 1; call <= VISUAL_QA_CALLS; call += 1) {
       slots.push({
         id: `visual-qa-${String(call)}`,

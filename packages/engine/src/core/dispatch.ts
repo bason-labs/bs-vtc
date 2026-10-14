@@ -56,11 +56,13 @@ import {
   shareSpend,
   pendingBaseCheck,
   phaseEnteredSeq,
+  renderedVisualReport,
   roundVerdict,
   planOrder,
   runsOf,
   statusEnteredSeq,
   taskFindings,
+  visualJudgeStep,
 } from "./queries.js";
 import { frozenSpecItems, taskAcceptanceCriteria } from "./read-model.js";
 import { resolveModel, roleTier } from "./roles.js";
@@ -431,11 +433,17 @@ const taskSteps = (k: Kernel, h: RunHandle, taskId: string, host: HostId): StepS
       budgetState(task.spent_usd, task.budget_usd) === "reviewers_drop" ||
       sharesExceeded(shareSpend(h.state, taskId), task.budget_usd).reviewers;
     const cross = crossFamilyHost(k, h, task);
+    // §7.5 step 6: the judge reads the round's visual report and renders
+    const visual = renderedVisualReport(round);
     for (const slot of reviewersFor(
       task,
       h.state.run,
       taskAcceptanceCriteria(k.deps.repoRoot, h.state, taskId),
-      { lensRoles: installedLensRoles(k.deps.roles), crossFamily: cross !== undefined },
+      {
+        lensRoles: installedLensRoles(k.deps.roles),
+        crossFamily: cross !== undefined,
+        visual: visual !== undefined,
+      },
     )) {
       const filter = {
         role: slot.role,
@@ -467,12 +475,19 @@ const taskSteps = (k: Kernel, h: RunHandle, taskId: string, host: HostId): StepS
       const contract = k.deps.roles.get(slot.role);
       const tier =
         contract !== undefined && drop ? tierDown(roleTier(contract, host, slot.mode)) : undefined;
-      const note = rejectionNote(h, filter);
+      const judge =
+        slot.role === "visual_qa" && visual !== undefined
+          ? visualJudgeStep(visual, `task ${taskId}'s screens`)
+          : undefined;
+      const note = [judge?.note, rejectionNote(h, filter)]
+        .filter((n) => n !== undefined)
+        .join("\n");
       steps.push({
         key: `review:${taskId}:${slot.id}`,
         ...filter,
         ...(tier === undefined ? {} : { tier }),
-        ...(note === undefined ? {} : { note }),
+        ...(note === "" ? {} : { note }),
+        ...(judge === undefined ? {} : { inputs: judge.inputs }),
         ...(slot.crossFamily === true && cross !== undefined ? { host: cross } : {}),
       });
     }

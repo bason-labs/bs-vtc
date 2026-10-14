@@ -706,7 +706,7 @@ describe("risk router (§6.3 steps 6–7, §7.6)", () => {
       "spec_verifier",
       "security",
     ]);
-    // Visual QA waits for its deterministic render stack (sub-project 5; spine §5 reading 92)
+    // Visual QA attaches only once the round's visual step rendered (option `visual`, reading 149)
     expect(
       reviewersFor(
         task("T-1", { discipline: "frontend" }),
