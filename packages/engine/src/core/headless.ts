@@ -605,7 +605,7 @@ export const dispatchHeadless = async (
     if (free <= 0 || stop()) return;
     // the cross-family reviewer runs on the other family's host (§12.4)
     const where = step.host ?? host;
-    const why = step.host === undefined ? purpose : "cross_family_review";
+    const why = step.host === undefined ? (step.purpose ?? purpose) : "cross_family_review";
     const share = left.get(pool(step)) ?? 1;
     left.set(pool(step), Math.max(1, share - 1));
     if (await launchHeadless(k, h, step, where, why, share)) free -= 1;

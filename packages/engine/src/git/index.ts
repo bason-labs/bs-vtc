@@ -53,3 +53,9 @@ export {
   type GitRunOptions,
 } from "./exec.js";
 export { HOST_CONFIG_PATHS, restoreHostConfig } from "./host-config.js";
+export {
+  createReplayCheckout,
+  removeReplayCheckout,
+  snapshotReplayCheckout,
+  type ReplayCheckout,
+} from "./replay-checkout.js";

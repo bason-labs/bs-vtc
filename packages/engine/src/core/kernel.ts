@@ -6,6 +6,7 @@
 import type {
   AutoResumeScheduler,
   GateRunner,
+  GateRunRequest,
   GatesConfig,
   GitOps,
   HeadlessRun,
@@ -20,6 +21,7 @@ import type {
   RemoteMergeService,
   RoleMcpToolName,
   SessionSandboxState,
+  TaskPack,
   UnverifiedFactSummary,
   UsageSnapshot,
   VtcEvent,
@@ -170,6 +172,46 @@ export interface LookbackRetroTarget extends LookbackTargetRef {
 }
 
 /**
+ * One `lookback_replay` trial (AD-21 rule 6, spine §5 reading 176): a recorded dispatch run again,
+ * in a clean checkout at the commit it started from, with one arm's prompt version.
+ */
+export interface LookbackReplayTrial {
+  /** `a` the baseline, `b` the candidate, `aa` the baseline's second arm (the A/A noise floor). */
+  readonly arm: "a" | "b" | "aa";
+  /** 1-based. */
+  readonly trial: number;
+  /** The replayed task, the replay result's `per_task` key (`<run>:<task>`). */
+  readonly task: string;
+  /** The task passed with the baseline (a regression-set task). */
+  readonly regressionSet: boolean;
+  readonly role: string;
+  readonly mode?: string;
+  readonly host: HostId;
+  /** The arm's prompt version and its editable section (rendered first in the pack). */
+  readonly prompt: PinnedPrompt;
+  /** The recorded dispatch's task pack: what the trial reads (its inputs, scope and subject). */
+  readonly pack: TaskPack;
+  /** The commit the recorded dispatch started from (the trial's checkout is at it). */
+  readonly base: string;
+}
+
+/** The replay of one proposal: its trials, run one at a time in order. */
+export interface LookbackReplay {
+  readonly proposal: string;
+  readonly role: string;
+  readonly mode?: string;
+  readonly host: HostId;
+  readonly trials: readonly LookbackReplayTrial[];
+}
+
+/** A graded trial: its index in `LookbackReplay.trials`, whether it passed, the tokens it used. */
+export interface ReplayTrialOutcome {
+  readonly n: number;
+  readonly passed: boolean;
+  readonly tokens: number;
+}
+
+/**
  * Lookback at RETRO (spec §13 steps 1–2; AD-21 rules 4 and 8; spine §5 reading 154): the lookback
  * module implements it and the daemon hands it to the engine (`Engine.setLookbackRetro`), so core
  * never imports lookback (AD-13 rule 12).
@@ -184,6 +226,27 @@ export interface LookbackRetroTarget extends LookbackTargetRef {
  */
 export interface LookbackRetro {
   plan(state: RunState): Promise<{ readonly targets: readonly LookbackRetroTarget[] }>;
+  /**
+   * The replays RETRO runs once every lookback target is settled (AD-21 rule 6, spine §5 reading
+   * 176): one per proposal recorded and not yet replayed, each with its `lookback_replay` trials
+   * in order (`planReplayTrials`). `wait` says why none can start now (the weekly window or the
+   * budget, as for the lookback role); a replay that cannot start waits for the next RETRO.
+   * Absent: no replays.
+   */
+  replays?(
+    state: RunState,
+  ): Promise<{ readonly replays: readonly LookbackReplay[]; readonly wait?: string }>;
+  /** Grades one trial through the Gate Runner (`gradeTrial`): it passed when the gates pass. */
+  gradeTrial?(request: GateRunRequest): Promise<boolean>;
+  /**
+   * The replay's result once every trial is graded (`finishReplay`, `writeReplayResult`): its
+   * events (`lookback.replay_finished` with the SHA-256 of the bytes written).
+   */
+  finishReplay?(
+    replay: LookbackReplay,
+    outcomes: readonly ReplayTrialOutcome[],
+    state: RunState,
+  ): Promise<readonly EventDraft[]>;
   check(
     target: LookbackTargetRef,
     root: string,
