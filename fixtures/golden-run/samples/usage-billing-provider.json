@@ -1,0 +1,45 @@
+{
+  "hosts": [
+    {
+      "host": "claude-code",
+      "source": "sdk_event",
+      "windows": [
+        {
+          "kind": "five_hour",
+          "label": "five_hour",
+          "window_minutes": 300,
+          "used_pct": null,
+          "resets_at": "2026-10-14T13:00:00.000Z"
+        }
+      ],
+      "model_limits": [],
+      "billing": "provider",
+      "updated_at": "2026-10-14T10:20:00.000Z"
+    },
+    {
+      "host": "codex",
+      "source": "app_server",
+      "windows": [
+        {
+          "kind": "five_hour",
+          "label": "five_hour",
+          "window_minutes": 300,
+          "used_pct": 0,
+          "resets_at": null
+        },
+        {
+          "kind": "weekly",
+          "label": "weekly",
+          "window_minutes": 10080,
+          "used_pct": 18,
+          "resets_at": null
+        }
+      ],
+      "model_limits": [],
+      "billing": "api_key",
+      "updated_at": "2026-10-14T10:20:00.000Z"
+    }
+  ],
+  "interrupted_tasks": [],
+  "auto_resume_at": null
+}

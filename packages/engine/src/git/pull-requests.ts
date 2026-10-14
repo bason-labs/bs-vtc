@@ -1,9 +1,14 @@
 /**
  * The default `PullRequestService` (`@vtc/shared`, §6.7 Level 2): the user's own `gh` CLI with
  * the user's existing auth (AD-9, §15); VTC never handles a token. The cli injects its own
- * (`EngineDeps.pullRequests`); the daemon falls back to this one.
+ * (`EngineDeps.pullRequests`); the daemon falls back to this one. Bodies always go through
+ * `--body-file` (AD-27 rule 1): a private temp file removed after the call, never `--body` on
+ * argv, where a body is visible in the process list and limited by the argv size.
  */
 import { spawn } from "node:child_process";
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import type {
   PullRequestCi,
   PullRequestRef,
@@ -126,6 +131,17 @@ export const createGhPullRequests = (
     if (pr === null) throw new Error(`no pull request for ${branch}`);
     return pr;
   };
+  /** Runs `gh` with `--body-file <private temp file holding body>` appended to `args`. */
+  const withBody = async (args: readonly string[], body: string): Promise<void> => {
+    const dir = mkdtempSync(join(tmpdir(), "vtc-gh-body-"));
+    try {
+      const file = join(dir, "body.md");
+      writeFileSync(file, body, { mode: 0o600 });
+      await checked([...args, "--body-file", file]);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  };
   const checked = async (args: readonly string[]): Promise<void> => {
     const result = await run(repoRoot, command, args, timeoutMs);
     if (result.code !== 0)
@@ -138,21 +154,22 @@ export const createGhPullRequests = (
     upsertDraft: async (request) => {
       const existing = await view(request.branch);
       if (existing === null) {
-        await checked([
-          "pr",
-          "create",
-          "--draft",
-          "--base",
-          request.base,
-          "--head",
-          request.branch,
-          "--title",
-          request.title,
-          "--body",
+        await withBody(
+          [
+            "pr",
+            "create",
+            "--draft",
+            "--base",
+            request.base,
+            "--head",
+            request.branch,
+            "--title",
+            request.title,
+          ],
           request.body,
-        ]);
+        );
       } else if (existing.state === "open") {
-        await checked(["pr", "edit", request.branch, "--body", request.body]);
+        await withBody(["pr", "edit", request.branch], request.body);
       }
       return must(request.branch);
     },

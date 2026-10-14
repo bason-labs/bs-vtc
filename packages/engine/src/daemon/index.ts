@@ -3,8 +3,9 @@
  * seam from @vtc/shared: `runDaemon` takes the engine lock, wires core to the injected Gate
  * Runner, host adapters, storage, assets and timer, serves MCP on the local socket and HTTP/SSE
  * on 127.0.0.1, and publishes discovery (AD-12); `serveSnapshot` serves the committed `.vtc/`
- * read-only for `vtc dashboard` (AD-5 rule 7). It may import the core, git, http, mcp, research and
- * lookback entries (it is where those modules meet core, AD-13 rule 12); it never imports gates
+ * read-only for `vtc dashboard` (AD-5 rule 7). It may import the core, git, http, mcp, research,
+ * lookback and upstream entries (it is where those modules meet core, AD-13 rules 12 and 13); it
+ * never imports gates
  * (the Gate Runner arrives in `EngineDeps`) and never loads a storage driver (the cli injects
  * `openStorage`).
  */
@@ -23,6 +24,7 @@ import {
   remainingPct,
   researchScopeFor,
   usageFromStatuslineIngest,
+  type AutomationSettings,
   type EngineDeps,
   type HostId,
   type ResearchScope,
@@ -39,12 +41,16 @@ import {
   Engine,
   EngineError,
   INDEX_PATH,
+  isReplayTrialEvent,
   loadProjectConfig,
   loadRuns,
   openEventIndex,
   pluginCatalogFrom,
   readClientSpend,
   removeEngineDiscovery,
+  replayGraderOf,
+  replayTrialActionIds,
+  withoutReplayTrialEvents,
   takeEngineLock,
   writeEngineDiscovery,
   type LookbackRetro,
@@ -52,7 +58,13 @@ import {
   type RunState,
   type StaleLockReason,
 } from "../core/index.js";
-import { createGhPullRequests, createGitOps, createWorkspace } from "../git/index.js";
+import {
+  createGhPullRequests,
+  createGitOps,
+  createGitPlumbing,
+  createRemoteRefs,
+  createWorkspace,
+} from "../git/index.js";
 import {
   createHttpApi,
   createPrototypeServer,
@@ -64,11 +76,20 @@ import {
   createPromptPins,
   evaluateCanaries,
   graderBundleSha,
+  loadPromptVersion,
   lookbackAtRunEnd,
+  readProposalFiles,
   readTiebreakKeys,
   type LockedShaFor,
 } from "../lookback/index.js";
 import { engineSocketAnswers, serveEngineSocket } from "../mcp/index.js";
+import { isGitHubRemote, wireAutomation } from "./automation.js";
+import { evidenceSnapshot } from "./evidence-snapshot.js";
+import {
+  bridgeUpstream,
+  readLookbackPrInput,
+  type CreateUpstreamModule,
+} from "./upstream-bridge.js";
 import { createLookbackReplays } from "./replays.js";
 import {
   createFetchQuota,
@@ -79,6 +100,37 @@ import {
   type ResearchService,
   type ResearchServiceDeps,
 } from "../research/index.js";
+
+/**
+ * A run's events as Lookback reads them (reading 176): without its replay trials, which measure a
+ * version and are no trace of the run's work (no attribution, no scorecard dispatch). A trial is
+ * marked in the log (`role.dispatched.purpose`, reading 177), so a clone or a machine without the
+ * engine's private `<guard>/replays/` file still leaves it out; `privateTrials` (that file's
+ * actions) covers logs written before contracts 4.11.0.
+ */
+export const lookbackEventsOf = (
+  state: Pick<RunState, "events">,
+  privateTrials: ReadonlySet<string> = new Set(),
+): readonly VtcEvent[] =>
+  withoutReplayTrialEvents(
+    state.events,
+    new Set([...privateTrials, ...replayTrialActionIds(state.events)]),
+  );
+
+/**
+ * The engine's events as the live SSE stream sends them (reading 177): without a replay trial's
+ * `role.*` and `headless.*` events, as the paged event view and the replay on connect leave them
+ * out, so the live view and a reload show the same events.
+ */
+export const liveEvents = (
+  engine: Pick<Engine, "onEvent" | "states">,
+  listener: (event: VtcEvent) => void,
+): (() => void) =>
+  engine.onEvent((event) => {
+    const state = engine.states().find((s) => s.id === event.run);
+    if (state !== undefined && isReplayTrialEvent(state, event)) return;
+    listener(event);
+  });
 
 export interface ResearchWiringOptions {
   /** Network requests per run for the role tools (`createFetchQuota`'s default when absent). */
@@ -230,6 +282,8 @@ export const wireLookback = (
   engine: Engine,
   deps: Pick<EngineDeps, "repoRoot" | "vtcHome" | "now">,
   plugins: PluginCatalog,
+  /** After the scorecards are rewritten at a run's end (the automation's cost regressions). */
+  onScorecards?: (run: string) => void,
 ): (() => Promise<void>) => {
   const now = deps.now ?? (() => new Date());
   const repoKey = engineRepoKey(deps.repoRoot);
@@ -245,29 +299,8 @@ export const wireLookback = (
     plugins.promptParts?.(agentNameFor(role, mode), host)?.lockedSha256;
   // a run's events as Lookback reads them: without its replay trials, which measure a version and
   // are no trace of the run's work (no attribution, no scorecard dispatch; reading 176)
-  const lookbackEvents = (state: RunState): readonly VtcEvent[] => {
-    // reading 177: a trial is marked in the log; the private file covers logs before 4.11.0
-    const trials = new Set(engine.replayTrialActions(state.id));
-    for (const e of state.events) {
-      const data = e.data as { purpose?: unknown; action_id?: unknown };
-      if (
-        e.type === "role.dispatched" &&
-        data.purpose === "lookback_replay" &&
-        typeof data.action_id === "string"
-      ) {
-        trials.add(data.action_id);
-      }
-    }
-    if (trials.size === 0) return state.events;
-    return state.events.filter((e) => {
-      const action = (e.data as { action_id?: unknown }).action_id;
-      return !(
-        typeof action === "string" &&
-        trials.has(action) &&
-        (e.type.startsWith("role.") || e.type.startsWith("headless."))
-      );
-    });
-  };
+  const lookbackEvents = (state: RunState): readonly VtcEvent[] =>
+    lookbackEventsOf(state, engine.replayTrialActions(state.id));
   const history = () => engine.states().flatMap(lookbackEvents);
   let chain: Promise<void> = Promise.resolve();
   const enqueue = (job: () => Promise<void>): void => {
@@ -327,6 +360,7 @@ export const wireLookback = (
     budgetAvailable,
     gateRunner: engine.deps.gateRunner,
     now,
+    graderOf: (replay) => replayGraderOf(engine, replay),
   });
   engine.setLookbackRetro({
     plan: (state) => retroFor(state).plan({ ...state, events: [...lookbackEvents(state)] }),
@@ -350,7 +384,10 @@ export const wireLookback = (
   };
   const off = engine.onEvent((event) => {
     if (event.type === "run.finished") {
-      enqueue(() => runEnd(event.run));
+      enqueue(async () => {
+        await runEnd(event.run);
+        onScorecards?.(event.run);
+      });
       return;
     }
     if (event.type !== "role.submitted") return;
@@ -400,6 +437,15 @@ export const dotenvSecrets = (repoRoot: string): (() => readonly string[]) => {
     return cached.values;
   };
 };
+
+/**
+ * The upstream module's factory (AD-27 rule 8, AD-13 rule 13). `upstream/` is built on its own
+ * team branch and joins the engine at the round-4 merge, which makes this return `createUpstream`
+ * from `../upstream/index.js` (the daemon is its only importer; the bridge's structural types make
+ * a drift a type error here). Until then facts are gated (`automation.skipped`) but nothing is
+ * raised.
+ */
+const upstreamModule = (): CreateUpstreamModule | undefined => undefined;
 
 /** How often the daemon polls Level-3 merges still in their post-merge watch (AD-23 rule 4). */
 export const POST_MERGE_POLL_MS = 15 * 60_000;
@@ -474,9 +520,83 @@ export const runDaemon: RunDaemon = async (deps: EngineDeps, options) => {
       remote: "origin",
       // §11, reading 152: the user's price table budget-checks hosts that report no cost
       ...(deps.prices === undefined ? {} : { prices: deps.prices }),
+      // D-cg (reading 201): each Claude replay arm runs its own compiled plugin
+      ...(deps.armPlugins === undefined ? {} : { armPlugins: deps.armPlugins }),
     });
     cleanups.push(wireResearch(engine, deps));
-    cleanups.push(wireLookback(engine, deps, plugins));
+    // AD-27: the upstream module, built from EngineDeps.automation (rule 8: the daemon is its only
+    // importer); wired before Lookback, whose scorecards feed it cost regressions, so it closes
+    // after Lookback's last job
+    const remoteUrl = await createWorkspace(deps.repoRoot)
+      .remoteUrl("origin")
+      .catch(() => null);
+    const createUpstream = upstreamModule();
+    // the evidence browser's frozen read routes of an automatic run (AD-27 rule 6): the engine's
+    // read model with no prototype origin, whose Automation view reads the wiring's settings
+    let automationSettings: () => AutomationSettings | null = () => null;
+    const evidenceModel = createReadModel({
+      repoRoot: deps.repoRoot,
+      mode: "live",
+      versions: deps.versions,
+      prototypeUrl: () => null,
+      runs: () => engine.states(),
+      usage: () => engine.usage,
+      git,
+      automation: () => automationSettings(),
+    });
+    const automation = wireAutomation(engine, deps, {
+      githubRemote: isGitHubRemote(remoteUrl),
+      ...(createUpstream === undefined
+        ? {}
+        : {
+            createUpstream: bridgeUpstream(createUpstream, {
+              guardDir: engine.guardDir,
+              vtcVersion: deps.versions.engine,
+              assets: deps.assets,
+              remoteUrl,
+              clientNames: () => {
+                const client = engine.config().client;
+                return client === undefined ? [] : [client];
+              },
+              knownValues: dotenvSecrets(deps.repoRoot),
+              redactSelectors: () => engine.gatesConfig()?.visual?.redact_selectors,
+              projectEvidence: () => engine.config().automation?.evidence,
+              lookbackPr: (fact) =>
+                readLookbackPrInput({
+                  projectRoot: deps.repoRoot,
+                  proposal: fact.proposal ?? "",
+                  replayPath: fact.replayPath ?? "",
+                  replaySha256: fact.replaySha256,
+                  readProposal: async (role) => (await readProposalFiles(deps.repoRoot, role))?.raw,
+                  candidateEditable: async (replay) => {
+                    const locked = plugins.promptParts?.(
+                      agentNameFor(replay.role, replay.mode),
+                      replay.host,
+                    )?.compiled?.locked;
+                    if (locked === undefined) return undefined;
+                    const stored = await loadPromptVersion(
+                      deps.vtcHome,
+                      { role: replay.role, mode: replay.mode, host: replay.host },
+                      replay.candidate,
+                      locked,
+                    );
+                    return stored?.editable;
+                  },
+                }),
+              evidenceSnapshot: (run) => evidenceSnapshot(evidenceModel, run),
+              gitOps: (root) => createGitOps({ repoRoot: root }),
+              remoteRefs: (root) => createRemoteRefs({ repoRoot: root }),
+              plumbing: createGitPlumbing,
+            }),
+          }),
+    });
+    automationSettings = automation.settings;
+    cleanups.push(() => automation.close());
+    cleanups.push(
+      wireLookback(engine, deps, plugins, (run) => {
+        automation.scorecardsWritten(run);
+      }),
+    );
     // AD-25: shutting down kills the engine-launched runs and stops the Level-3 waits, so close
     // returns promptly and leaves no orphaned process
     cleanups.push(() => engine.shutdown());
@@ -541,6 +661,8 @@ export const runDaemon: RunDaemon = async (deps: EngineDeps, options) => {
         git,
         // §14, reading 153: the project's client scope (the config the engine runs with)
         clientSpend: () => readClientSpend(deps.vtcHome, engine.config().client),
+        // D-ca: the Automation view's settings and notes (automationFor)
+        automation: automation.settings,
       }),
       installToken: deps.installToken,
       sessions: createSessionStore(now),
@@ -549,7 +671,7 @@ export const runDaemon: RunDaemon = async (deps: EngineDeps, options) => {
       ingest: (body) => {
         engine.ingestUsage(usageFromStatuslineIngest(body, now().toISOString()));
       },
-      subscribe: (listener) => engine.onEvent(listener),
+      subscribe: (listener) => liveEvents(engine, listener),
       secrets: () => engine.secrets(),
       now,
     });

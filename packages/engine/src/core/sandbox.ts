@@ -32,16 +32,22 @@ import {
 } from "@vtc/shared";
 import type { Kernel } from "./kernel.js";
 
-/** A role run's sandbox request: always `network: "none"` (reading 49). */
+/**
+ * A role run's sandbox request: always `network: "none"` (reading 49); a `lookback_replay` trial
+ * also names what it may not read (`readDeny`: the user's repo and its git directory, reading 178).
+ */
 export const roleSandboxRequest = (
   contract: Pick<RoleContract, "tools">,
-  where: Pick<SandboxProfileRequest, "cwd" | "writablePaths" | "protectedPaths">,
+  where: Pick<SandboxProfileRequest, "cwd" | "writablePaths" | "protectedPaths" | "readDeny">,
 ): SandboxProfileRequest => ({
   tools: contract.tools,
   cwd: where.cwd,
   writablePaths: where.writablePaths,
   protectedPaths: where.protectedPaths,
   network: "none",
+  ...(where.readDeny === undefined || where.readDeny.length === 0
+    ? {}
+    : { readDeny: where.readDeny }),
 });
 
 /**

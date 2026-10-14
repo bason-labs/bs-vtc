@@ -7,13 +7,16 @@
 import { cpSync, existsSync, lstatSync, mkdirSync, readFileSync, rmSync } from "node:fs";
 import { join } from "node:path";
 import {
+  autoBranchName,
   capForRisk,
   engineRepoKey,
   fingerprintFinding,
   GATE_SANDBOX,
   gateExpectationMet,
   GateRunRequestSchema,
+  GitShaSchema,
   HIDDEN_TESTS,
+  hiddenTestsDir,
   parsePersisted,
   redactSecrets,
   TestInventorySchema,
@@ -28,7 +31,7 @@ import {
   type TestMetrics,
 } from "@vtc/shared";
 import { createHash } from "node:crypto";
-import { assertNoSymlinks, runGit } from "../git/index.js";
+import { assertNoSymlinks, createGitPlumbing, runGit } from "../git/index.js";
 import { taskBudgetFor } from "./budget.js";
 import {
   committedGatesConfig,
@@ -41,6 +44,7 @@ import type { Kernel, RunHandle } from "./kernel.js";
 import { effectiveVerdict } from "./gate-verdict.js";
 import { assertFeatureTransition } from "./machines.js";
 import { parkTask, setTaskStatus } from "./parking.js";
+import { PROJECT_GATES_PARK_PREFIX } from "./state.js";
 import {
   lastBuilt,
   lastQaAuthor,
@@ -146,6 +150,22 @@ export const gatesAt = (k: Kernel, commit: string): Promise<CommittedGates | nul
 };
 
 /**
+ * {@link baselineGates}'s refusal: the project's committed `gates.yml` at the base is missing or
+ * not the run's. The park it causes is a project problem, not VTC's ({@link infraDetail}).
+ */
+export class BaselineGatesError extends Error {}
+
+/**
+ * A `gate_infra` park's detail for an error caught while gates ran: one {@link baselineGates}
+ * refused opens with {@link PROJECT_GATES_PARK_PREFIX} (a project problem, reading 190); any other
+ * is `<what>: <error>` (VTC's own defect).
+ */
+export const infraDetail = (what: string, error: unknown): string =>
+  error instanceof BaselineGatesError
+    ? `${PROJECT_GATES_PARK_PREFIX} ${what}: ${message(error)}`
+    : `${what}: ${message(error)}`;
+
+/**
  * The `gates.yml` committed at a gate run's base (spine §5 reading 46f), checked against the one
  * the run started with (reading 20): the Gate Runner reads the same file at `base`. A run always
  * starts with one (`start` refuses otherwise, reading 78). Throws with the reason the task or
@@ -160,7 +180,7 @@ export const baselineGates = async (
 ): Promise<CommittedGates> => {
   const committed = await gatesAt(k, base);
   if (committed === null)
-    throw new Error(
+    throw new BaselineGatesError(
       `the baseline ${base.slice(0, 12)} has no committed ${GATES_CONFIG_PATH}, though a run starts only with one; a task's baseline is fixed, so drop the task or start a new run`,
     );
   const frozen = k.gatesConfigHash();
@@ -169,7 +189,7 @@ export const baselineGates = async (
       ? pipelineConfigHash(k.config(), committed.config) === h.state.run.pipeline_config_hash
       : frozen === committed.sha256;
   if (!same)
-    throw new Error(
+    throw new BaselineGatesError(
       `${GATES_CONFIG_PATH} at the baseline ${base.slice(0, 12)} (${committed.sha256.slice(0, 12)}) is not the one this run started with${frozen === null ? "" : ` (${frozen.slice(0, 12)})`}; a run verifies only with the config it started with`,
     );
   return committed;
@@ -359,10 +379,13 @@ const plainEntry = (path: string): boolean => {
 };
 
 /**
- * Moves QA's hidden tests out of the repo, to `~/.vtc/hidden/<repo-key>/<task>/` (§7.3). QA
- * writes the staging dir, so symlinks there are skipped: a copy never reads a file outside it.
+ * Moves QA's hidden tests out of the repo, to `~/.vtc/hidden/<repo-key>/<run>/<task>/` (§7.3;
+ * keyed by run since contracts 5.0.0, D-ck, spine §5 reading 205: task ids repeat across runs, so
+ * a later run's task or a replay trial never gets another run's tests). The path is built only
+ * with `hiddenTestsDir`, as the Gate Runner reads it. QA writes the staging dir, so symlinks there
+ * are skipped: a copy never reads a file outside it.
  */
-const moveHiddenTests = (k: Kernel, taskId: string): void => {
+const moveHiddenTests = (k: Kernel, runId: string, taskId: string): void => {
   const rel = `${HIDDEN_TESTS.stagingDir}/${taskId}`;
   try {
     assertNoSymlinks(k.deps.repoRoot, HIDDEN_TESTS.stagingDir);
@@ -374,7 +397,10 @@ const moveHiddenTests = (k: Kernel, taskId: string): void => {
     rmSync(staged, { recursive: true, force: true });
     return;
   }
-  const target = join(k.deps.vtcHome, HIDDEN_TESTS.homeDir, engineRepoKey(k.deps.repoRoot), taskId);
+  const target = join(
+    k.deps.vtcHome,
+    hiddenTestsDir(engineRepoKey(k.deps.repoRoot), runId, taskId),
+  );
   mkdirSync(target, { recursive: true });
   cpSync(staged, target, { recursive: true, filter: (source) => plainEntry(source) });
   rmSync(staged, { recursive: true, force: true });
@@ -407,7 +433,7 @@ export const startBaseCheck = (
       });
     } catch (error) {
       await k.serial(h, () => {
-        parkInfra(k, h, taskId, `the base-fail check could not run: ${message(error)}`);
+        parkInfra(k, h, taskId, infraDetail("the base-fail check could not run", error));
         return Promise.resolve();
       });
       return;
@@ -425,7 +451,7 @@ export const startBaseCheck = (
           report.results.flatMap((r) => r.evidence).slice(0, 5),
         );
       } else if (met) {
-        moveHiddenTests(k, taskId);
+        moveHiddenTests(k, h.state.id, taskId);
         setTaskStatus(k, h, taskId, "tests_authored");
       } else {
         const misses = h.state.gateReports.filter(
@@ -567,7 +593,7 @@ export const startRoundGates = (k: Kernel, h: RunHandle, taskId: string, head: s
       }
     } catch (error) {
       await k.serial(h, () => {
-        parkInfra(k, h, taskId, `the gates could not run: ${message(error)}`);
+        parkInfra(k, h, taskId, infraDetail("the gates could not run", error));
         return Promise.resolve();
       });
       return;
@@ -691,7 +717,64 @@ export const downgradeNoRemote = (k: Kernel, h: RunHandle): void => {
   }
 };
 
-/** Pushes the integration branch and keeps the draft PR current (Level 2, §6.7). */
+/**
+ * An automatic run's push (AD-27 rules 1 and 2): the integration head to `refs/heads/<dst>`
+ * (`autoBranchName`) through `GitPlumbing`, which refuses any destination `autoPushRefAllowed`
+ * rejects, the remote's default branch, and a force. Its events name the integration branch
+ * (`branch.pushed` takes `vtc/F-n` only); the remote name follows from `run.started.automation`.
+ * No PR and no task status change: see {@link pushFeature}.
+ */
+const pushAutomatic = async (
+  k: Kernel,
+  h: RunHandle,
+  featureId: string,
+  branch: string,
+  commit: string,
+  dst: string,
+): Promise<void> => {
+  let failure: string | null = null;
+  try {
+    await createGitPlumbing({ repoRoot: k.deps.repoRoot }).push(
+      k.deps.remote,
+      GitShaSchema.parse(commit),
+      `refs/heads/${dst}`,
+    );
+  } catch (error) {
+    failure = `push to ${dst}: ${error instanceof Error ? error.message : String(error)}`;
+  }
+  await k.serial(h, () => {
+    k.emit(
+      h,
+      failure === null
+        ? {
+            type: "branch.pushed",
+            actor: "engine",
+            feature: featureId,
+            data: { branch, commit },
+          }
+        : {
+            type: "branch.push_failed",
+            actor: "engine",
+            feature: featureId,
+            data: { branch, detail: failureDetail(failure, k.secrets()) },
+          },
+    );
+    return Promise.resolve();
+  });
+};
+
+/**
+ * Pushes the integration branch and keeps the draft PR current (Level 2, §6.7).
+ *
+ * An automatic run (`run.started.automation`; AD-27 rules 1, 2, 3 and 6, H-8) never goes through
+ * the Level-2 seam: its work is pushed through engine git's `GitPlumbing` (never forced, never to
+ * the default branch) to `autoBranchName(kind, fingerprint)`, its only remote branch, and the
+ * engine opens no PR for it. Its draft PR is the upstream module's: the daemon hands the release
+ * push (`automaticReleaseOf`) to the module, whose `AutoPullRequestService` applies `vtc:auto` and
+ * the kind's label (so dedupe and the per-kind cap see it), opens nothing without an
+ * `EvidenceManifest`, and marks the PR ready on the Spec Verifier's pass. The engine does not see
+ * that PR as `Feature.pr`, so the run's merged tasks stay `merged`.
+ */
 export const pushFeature = async (
   k: Kernel,
   h: RunHandle,
@@ -710,6 +793,18 @@ export const pushFeature = async (
     return;
   }
   const commit = await ws.resolve(feature.integration_branch);
+  const automation = h.state.automation;
+  if (automation !== null) {
+    await pushAutomatic(
+      k,
+      h,
+      featureId,
+      feature.integration_branch,
+      commit,
+      autoBranchName(automation.kind, automation.fingerprint),
+    );
+    return;
+  }
   const pushed = await ws.push(k.deps.remote, feature.integration_branch);
   if (!pushed.ok) {
     await k.serial(h, () => {
@@ -728,15 +823,14 @@ export const pushFeature = async (
   }
   let pr = feature.pr;
   try {
-    const request = {
+    pr = await k.deps.pullRequests.upsertDraft({
       branch: feature.integration_branch,
       base: await baseBranch(k.deps.repoRoot),
       title: feature.title,
       body:
         body ??
         `Draft: VTC integration of ${feature.id} (${feature.title}). Ready for review after Final Review.`,
-    };
-    pr = await k.deps.pullRequests.upsertDraft(request);
+    });
     if (ready) pr = await k.deps.pullRequests.markReady(feature.integration_branch);
   } catch (error) {
     await k.serial(h, () => {
@@ -908,7 +1002,7 @@ export const startMergeQueue = (k: Kernel, h: RunHandle): void => {
         await mergeOne(k, h, next.id);
       } catch (error) {
         await k.serial(h, () => {
-          parkInfra(k, h, next.id, `the merge queue failed: ${message(error)}`);
+          parkInfra(k, h, next.id, infraDetail("the merge queue failed", error));
           return Promise.resolve();
         });
       }

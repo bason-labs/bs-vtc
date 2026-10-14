@@ -28,11 +28,14 @@ import {
   type GateRunner,
   type HostId,
   type PromptVersionRef,
+  type ReplayGrader,
+  type ReplayIsolation,
   type TaskPack,
   type VtcEvent,
 } from "@vtc/shared";
 import {
   parseYaml,
+  replayWaitSkipReason,
   taskPackJsonPath,
   type LookbackReplay,
   type LookbackReplayTrial,
@@ -81,6 +84,8 @@ export interface ReplayWiringDeps {
   readonly budgetAvailable: (state: RunState) => boolean;
   readonly gateRunner: GateRunner;
   readonly now: () => Date;
+  /** How a replay's trials were graded (`replayGraderFor`); absent: `gates`. */
+  readonly graderOf?: (replay: LookbackReplay) => ReplayGrader | null;
 }
 
 /** A version with the editable section it carries (trimmed). */
@@ -283,7 +288,7 @@ export const createLookbackReplays = (
     if (pending.length === 0) return { replays: [] };
     // AD-21 rule 8: the same checks as the lookback role (reading 176)
     const wait = replayWaitReason(deps, state);
-    if (wait !== null) return { replays: [], wait };
+    if (wait !== null) return { replays: [], wait, waitKind: replayWaitSkipReason(wait) };
     const tiebreaks = await deps.tiebreaks();
     const attributions = await readAttributions(deps.projectRoot, {
       history,
@@ -426,6 +431,12 @@ export const createLookbackReplays = (
       tokensDeltaPct: tokensDeltaPct(tokens.a, tokens.b),
       now: deps.now(),
     });
-    return [await writeReplayResult(deps.projectRoot, result)];
+    // reading 178: read_denied only when the host enforced every trial's read deny; the grader
+    // that scored the trials (D-ch; replayGraderFor)
+    const isolation: ReplayIsolation = outcomes.every((o) => o.readDenied === true)
+      ? "read_denied"
+      : "paths_only";
+    const grader: ReplayGrader = deps.graderOf?.(replay) ?? "gates";
+    return [await writeReplayResult(deps.projectRoot, { ...result, isolation, grader })];
   },
 });

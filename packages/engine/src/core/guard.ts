@@ -5,7 +5,8 @@
  * of its own repo writes (`engine-writes.jsonl`, with a digest per event-log append), the record
  * of every dispatch (`dispatches/`, the git baseline and the engine files at dispatch), the git
  * baseline of every gate run still running (`gates/`), a held git change awaiting the human (`git-hold.json`), the runs the engine could not verify when
- * it opened (`held-runs.json`), and who claimed each run's Lead role (`leads.jsonl`).
+ * it opened (`held-runs.json`), who claimed each run's Lead role (`leads.jsonl`), and the human's
+ * repo-level automation kill switch (`automation-paused.json`, {@link AUTOMATION_PAUSED_FILE}).
  *
  * No role may write here: `ROLE_DENIED_VTC.homeWriteDeny` names `guard/**` (contracts 4.12.0), so
  * every Claude role profile and the Lead session deny it to the file tools and the sandbox, and a
@@ -81,4 +82,30 @@ export const appendPrivateFile = (abs: string, line: string): void => {
   } finally {
     closeSync(fd);
   }
+};
+
+/**
+ * `vtc pause` as the kill switch of automation for the whole repo (spec §15; AD-27 rule 7 "`vtc
+ * pause` stops everything"): set by every `pause`, run or no run, cleared only by the human's
+ * `vtc resume`. Automatic issues, PRs and the sweep stop while it is set, so an idle daemon
+ * (between runs, after a cancel or a finished run) can still be stopped. It lives here, where no
+ * role can write.
+ */
+export const AUTOMATION_PAUSED_FILE = "automation-paused.json";
+
+/** Whether the human's automation kill switch is set for this repo. */
+export const automationPausedByHuman = (guardDir: string): boolean =>
+  readPrivateFile(join(guardDir, AUTOMATION_PAUSED_FILE)) !== null;
+
+/** Sets (`at`) or clears (`null`) the automation kill switch; returns whether it was set before. */
+export const setAutomationPaused = (guardDir: string, at: string | null): boolean => {
+  const was = automationPausedByHuman(guardDir);
+  const file = join(guardDir, AUTOMATION_PAUSED_FILE);
+  if (at === null) {
+    removePrivateFile(file);
+    return was;
+  }
+  ensurePrivateDir(guardDir);
+  writePrivateFile(file, `${JSON.stringify({ at })}\n`);
+  return was;
 };

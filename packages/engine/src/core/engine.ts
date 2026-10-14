@@ -51,6 +51,9 @@ import {
   type UnverifiedFactSummary,
   type UsageSnapshot,
   type VtcEvent,
+  AutomationRunRefSchema,
+  effectiveMergeLevel,
+  type AutomationRunRef,
 } from "@vtc/shared";
 import {
   committedGatesConfig,
@@ -104,6 +107,7 @@ import {
   ensurePrivateDir,
   guardDirFor,
   readPrivateFile,
+  setAutomationPaused,
   writePrivateFile,
 } from "./guard.js";
 import { openEventLog, type EventDraft } from "./event-log.js";
@@ -167,6 +171,13 @@ import {
 import { ArtifactRefSchema } from "@vtc/shared";
 import { checkEngineerShare, handleSubmit } from "./submit.js";
 import { escalationListView, openEscalations, statusView } from "./views.js";
+
+/**
+ * How many times the engine itself rejects an automatic run's failed DESIGN check (AD-27 rule 2,
+ * reading 198) before it leaves G2 for the human: bounded, so a design that keeps failing never
+ * loops unattended.
+ */
+const AUTO_GATE_REJECTS = 2;
 
 const sha256File = (path: string): string | undefined =>
   existsSync(path) ? createHash("sha256").update(readFileSync(path)).digest("hex") : undefined;
@@ -991,14 +1002,16 @@ export class Engine implements Kernel {
 
   /**
    * Appends an event a wired module emitted (research: `research.fetched`, `fact.recorded`) to
-   * `run`'s log, or to the active run's when `run` is absent; dropped when that run is not open
-   * (the module's own files are the record).
+   * `run`'s log, or to the active run's when `run` is absent; not recorded when that run is not
+   * open (the research module's own files are the record; automation keeps it for the next run).
+   * Returns whether it was recorded.
    */
-  recordModuleEvent(run: string | undefined, draft: EventDraft): void {
+  recordModuleEvent(run: string | undefined, draft: EventDraft): boolean {
     const id = run ?? this.activeFrozen()?.run;
     const handle = id === undefined ? undefined : this.handles.get(id);
-    if (handle === undefined || handle.state.run.finished_at !== undefined) return;
+    if (handle === undefined || handle.state.run.finished_at !== undefined) return false;
     this.emit(handle, draft);
+    return true;
   }
 
   /**
@@ -1033,6 +1046,32 @@ export class Engine implements Kernel {
 
   notice(text: string): void {
     this.notices.push(text);
+  }
+
+  /** Notices for the Lead to relay, per run (`""`: whichever run's Lead asks next). */
+  private readonly relayed = new Map<string, { queue: string[]; seen: Set<string> }>();
+
+  relay(run: string | undefined, text: string): void {
+    const key = run ?? "";
+    const entry = this.relayed.get(key) ?? { queue: [], seen: new Set<string>() };
+    this.relayed.set(key, entry);
+    const value = text.slice(0, 2000);
+    if (value === "" || entry.seen.has(value)) return;
+    entry.seen.add(value);
+    entry.queue.push(value);
+  }
+
+  /** The notices the Lead of `run` relays now (at most 20 a call; the rest wait for the next). */
+  private takeRelayed(run: string): string[] {
+    const out: string[] = [];
+    for (const key of [run, ""]) {
+      const queue = this.relayed.get(key)?.queue;
+      while (queue !== undefined && queue.length > 0 && out.length < 20) {
+        const text = queue.shift();
+        if (text !== undefined) out.push(text);
+      }
+    }
+    return out;
   }
 
   leadHostFor(run: string, call: CallContext): HostId | undefined {
@@ -1361,6 +1400,30 @@ export class Engine implements Kernel {
   }
 
   async start(input: StartInput, call: CallContext): Promise<StartResult> {
+    return this.startRun(input, call, null);
+  }
+
+  /**
+   * Starts an automatic run from an automatic issue (D-cd, H-7; AD-27 rule 2): a normal run whose
+   * `run.started.automation` names the issue. The issue is its spec, so it skips the human gates
+   * G1 and G2 (the engine records them approved, unless a G2 needs a human's fact waiver); the Spec
+   * Verifier reads the issue; it never runs at merge Level 3 (`effectiveMergeLevel`'s `automatic`,
+   * D-bw); every gate, review and risk rule still applies. The upstream module starts it, through
+   * the daemon.
+   */
+  async startAutomatic(
+    input: StartInput,
+    automation: AutomationRunRef,
+    call: CallContext = { host: null },
+  ): Promise<StartResult> {
+    return this.startRun(input, call, AutomationRunRefSchema.parse(automation));
+  }
+
+  private async startRun(
+    input: StartInput,
+    call: CallContext,
+    automation: AutomationRunRef | null,
+  ): Promise<StartResult> {
     // read before the checks: nothing awaits between them and registering the run
     const { head, gates: committed, project } = await this.startGates();
     if ([...this.handles.values()].some((h) => h.state.run.finished_at === undefined)) {
@@ -1396,12 +1459,18 @@ export class Engine implements Kernel {
     this.freezeConfig(id, config, gates, committed.sha256);
     if (call.client === "bridge" && call.session !== undefined) this.setLead(id, call, "started");
     const noRemote =
-      config.merge_level >= 2 &&
+      (automation === null ? config.merge_level : Math.min(config.merge_level, 2)) >= 2 &&
       (await this.deps.workspace.remoteUrl(this.deps.remote).catch(() => null)) === null;
     // AD-23: the ledger caps the level; Level 3 needs its preflight (a failure starts at Level 2)
     const level = noRemote
-      ? { level: config.merge_level, preflight: null }
-      : await startMergeLevel(this, config);
+      ? {
+          level:
+            automation === null
+              ? config.merge_level
+              : effectiveMergeLevel(config.merge_level, [], { automatic: true }),
+          preflight: null,
+        }
+      : await startMergeLevel(this, config, automation !== null);
     return this.serial(handle, () => {
       this.emit(handle, {
         type: "run.started",
@@ -1415,6 +1484,7 @@ export class Engine implements Kernel {
           merge_level: level.level,
           pipeline_config_hash: pipelineConfigHash(config, gates),
           origin: this.origin,
+          ...(automation === null ? {} : { automation }),
         },
       });
       if (level.preflight !== null) recordMergePreflight(this, handle, level.preflight);
@@ -1561,6 +1631,11 @@ export class Engine implements Kernel {
         gate = this.awaitingGates(handle);
       }
     }
+    if (gate !== null && state.automation !== null && this.autoApproveGates(handle, gate)) {
+      // the next phase's roles start now, as after a human's approval
+      actions.push(...(await dispatchNow(this, handle, call, held)));
+      gate = this.awaitingGates(handle);
+    }
     if (gate !== null) {
       this.recordGateRequest(handle, gate);
       actions.push({
@@ -1579,6 +1654,64 @@ export class Engine implements Kernel {
           : this.waitAction(handle),
       );
     return actions;
+  }
+
+  /**
+   * An automatic run's G1 and G2 (AD-27 rule 2; D-cd, H-7): its issue is the spec, so the engine
+   * records the gate approved with what it froze, the run moves on, and the human's one step is the
+   * final PR review. A G2 that lists unverified facts needs a human's waiver with a reason (AD-22
+   * rule 4), so it stays for the human; with UI the category standard is taken (no human picks a
+   * direction). Every other G2 rule still holds (reading 198): a failed DESIGN check is never
+   * approved; the engine rejects G2 with the check's problems as its note, so the Architect and
+   * Designer fix it, at most `AUTO_GATE_REJECTS` times, then leaves it for the human. Returns
+   * whether it decided the gate. Callers hold the run's lock.
+   */
+  private autoApproveGates(
+    handle: RunHandle,
+    gate: { gates: HumanGateId[]; artifacts: FrozenArtifact[]; extras: GateExtras },
+  ): boolean {
+    if (gate.extras.unverified_facts.length > 0) return false;
+    const state = handle.state;
+    const issue = state.automation;
+    const exit = gate.extras.design_directions.length > 0 ? "category_standard" : undefined;
+    const blocked = g2ApprovalProblem(gate.extras, {
+      fact_waivers: [],
+      ...(exit === undefined ? {} : { design_exit: exit }),
+    });
+    if (blocked !== null) {
+      const rejected = state.events.filter(
+        (e) => e.type === "gate.rejected" && e.actor === "engine",
+      ).length;
+      if (rejected >= AUTO_GATE_REJECTS) return false;
+      this.recordGateRequest(handle, gate);
+      this.emit(handle, {
+        type: "gate.rejected",
+        actor: "engine",
+        data: { gates: gate.gates, note: `automatic run: ${blocked}`.slice(0, 4000) },
+      });
+      // as a human's rejection (`approve`): back to the phase whose roles fix it
+      this.phaseTo(
+        handle,
+        state.run.track === "quick_fix" || state.run.phase === "g1" ? "specify" : "design",
+      );
+      this.advance(handle);
+      return true;
+    }
+    this.recordGateRequest(handle, gate);
+    this.emit(handle, {
+      type: "gate.approved",
+      actor: "engine",
+      data: {
+        gates: gate.gates,
+        frozen: gate.artifacts,
+        ...(exit === undefined ? {} : { design_exit: exit }),
+        waived_facts: [],
+        note: `automatic run: the issue${issue === null ? "" : ` #${String(issue.issue)}`} is its spec, so no human gate before the final PR review (AD-27 rule 2)`,
+      },
+    });
+    this.phaseTo(handle, handle.state.run.phase === "g1" ? "design" : "plan");
+    this.advance(handle);
+    return true;
   }
 
   private waitAction(handle: RunHandle): LeadAction {
@@ -1624,10 +1757,11 @@ export class Engine implements Kernel {
     // a Lead session (or an in-process caller) drives the run again: the engine stops driving it
     if (call.client === undefined || this.leads.get(state.id) === call.session)
       this.unattended.delete(state.id);
-    return this.serial(handle, async () => ({
-      run: state.id,
-      actions: await this.actionsFor(handle, call),
-    }));
+    return this.serial(handle, async () => {
+      const actions = await this.actionsFor(handle, call);
+      const notices = this.takeRelayed(state.id);
+      return { run: state.id, actions, ...(notices.length === 0 ? {} : { notices }) };
+    });
   }
 
   private actionsForFinished(state: RunState): LeadAction[] {
@@ -2087,7 +2221,20 @@ export class Engine implements Kernel {
   }
 
   async pause(input: RunScopedInput): Promise<RunControlResult> {
-    const handle = this.resolve(input.run);
+    // the kill switch stops automation for the whole repo, run or no run, until vtc resume
+    // (spec §15; AD-27 rule 7): the daemon's automation reads it (`automationPausedByHuman`)
+    setAutomationPaused(this.guardDir, this.now().toISOString());
+    let handle: RunHandle;
+    try {
+      handle = this.resolve(input.run);
+    } catch (error) {
+      if (error instanceof EngineError && error.code === "no_run" && input.run === undefined)
+        throw new EngineError(
+          "no_run",
+          "no active run to pause; automatic issues and PRs are paused until vtc resume",
+        );
+      throw error;
+    }
     const result = await this.serial(handle, () => {
       if (!handle.state.run.paused) {
         this.emit(handle, {
@@ -2139,6 +2286,9 @@ export class Engine implements Kernel {
    */
   async resume(input: ResumeInput, call: CallContext = { host: null }): Promise<RunControlResult> {
     if (input.adopt === true) this.adopt(input.run, call);
+    // the human's resume lifts the repo-level automation kill switch `pause` set (an open run
+    // that stays paused still holds automation)
+    const automationWasPaused = setAutomationPaused(this.guardDir, null);
     if (this.held.size > 0) {
       const active = activeRun([...this.handles.values()].map((h) => h.state));
       const run = input.run ?? (active === undefined ? [...this.held.keys()][0] : undefined);
@@ -2149,7 +2299,22 @@ export class Engine implements Kernel {
         return { run, paused: false, phase };
       }
     }
-    const handle = this.resolve(input.run);
+    let handle: RunHandle;
+    try {
+      handle = this.resolve(input.run);
+    } catch (error) {
+      if (
+        automationWasPaused &&
+        error instanceof EngineError &&
+        error.code === "no_run" &&
+        input.run === undefined
+      )
+        throw new EngineError(
+          "no_run",
+          "no active run to resume; automatic issues and PRs are back on",
+        );
+      throw error;
+    }
     return this.serial(handle, async () => {
       const state = handle.state;
       for (const run of inFlight(state)) {

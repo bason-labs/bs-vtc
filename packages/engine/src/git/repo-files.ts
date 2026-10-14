@@ -18,6 +18,7 @@ import {
   lstatSync,
   mkdirSync,
   openSync,
+  readFileSync,
   renameSync,
   rmSync,
   writeFileSync,
@@ -103,6 +104,48 @@ export const assertNoSymlinks = (root: string, rel: string): void => {
       throw new UnsafePathError(rel, `${parts.slice(0, i + 1).join("/")} is a symlink`);
     if (i < parts.length - 1 && kind !== "dir")
       throw new UnsafePathError(rel, `${parts.slice(0, i + 1).join("/")} is not a directory`);
+  }
+};
+
+/** What {@link readRepoFileCapped} read, or why it read nothing. */
+export type CappedRead =
+  | { readonly ok: true; readonly text: string }
+  | { readonly ok: false; readonly reason: "missing" | "not_a_file" | "too_large" };
+
+/**
+ * Reads `rel` under `root` as UTF-8, never through a symlink: no component may be one
+ * ({@link assertNoSymlinks}), the file is opened `O_NOFOLLOW` (and non-blocking, so a FIFO never
+ * hangs), and its type and size come from that descriptor, so a swap after the check is never read.
+ */
+export const readRepoFileCapped = (root: string, rel: string, maxBytes: number): CappedRead => {
+  try {
+    assertNoSymlinks(root, rel);
+  } catch (error) {
+    if (error instanceof UnsafePathError) return { ok: false, reason: "not_a_file" };
+    throw error;
+  }
+  const flags = constants as { O_NOFOLLOW?: number; O_NONBLOCK?: number };
+  let fd: number;
+  try {
+    fd = openSync(
+      join(root, rel),
+      constants.O_RDONLY | (flags.O_NOFOLLOW ?? 0) | (flags.O_NONBLOCK ?? 0),
+    );
+  } catch (error) {
+    const code = (error as NodeJS.ErrnoException).code;
+    if (code === "ENOENT" || code === "ENOTDIR") return { ok: false, reason: "missing" };
+    if (code === "ELOOP" || code === "EISDIR") return { ok: false, reason: "not_a_file" };
+    throw error;
+  }
+  try {
+    const stat = fstatSync(fd);
+    if (!stat.isFile()) return { ok: false, reason: "not_a_file" };
+    if (stat.size > maxBytes) return { ok: false, reason: "too_large" };
+    const bytes = readFileSync(fd);
+    if (bytes.length > maxBytes) return { ok: false, reason: "too_large" };
+    return { ok: true, text: bytes.toString("utf8") };
+  } finally {
+    closeSync(fd);
   }
 };
 

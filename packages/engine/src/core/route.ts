@@ -15,10 +15,18 @@ import {
   type LeadAction,
 } from "@vtc/shared";
 import { checkGitNow, sweepDispatches } from "./dispatch-guard.js";
-import { dispatchGuarded, inSessionRefusal, pendingSteps, refuseInSession } from "./dispatch.js";
+import {
+  dispatchGuarded,
+  inSessionRefusal,
+  pendingSteps,
+  refuseInSession,
+  type StepSpec,
+} from "./dispatch.js";
 import { capabilitiesOf, dispatchHeadless, launchHeadless } from "./headless.js";
+import { hostWebRouteFor } from "./host-web.js";
 import type { CallContext, Kernel, RunHandle } from "./kernel.js";
 import { limitWait } from "./limits.js";
+import { replayHostOf } from "./replay.js";
 import { inFlight } from "./queries.js";
 
 /**
@@ -68,9 +76,34 @@ export const dispatchNow = async (
   let free = config.concurrency - inFlight(h.state).length;
   for (const step of pendingSteps(k, h, host)) {
     if (free <= 0) break;
+    if (step.purpose === "lookback_replay") {
+      // D-cg (reading 201): a replay trial is an engine-launched headless run, never a subagent
+      if (await launchReplayTrial(k, h, step, host, leadHost)) free -= 1;
+      continue;
+    }
     if (step.host !== undefined) {
       // the cross-family reviewer runs headless on the other family's host (§12.4)
       if (await launchHeadless(k, h, step, step.host, "cross_family_review")) free -= 1;
+      continue;
+    }
+    // D-cf: a host_web role whose route is another host runs headless there; as this host's
+    // subagent the compiled agent's own profile governs its web search (Claude Code's denies the
+    // credential stores), so only a route with safe host web search runs in session. On this
+    // host without it (its web search not safe, `HOST_WEB_OFF_NOTICE`), the role runs headless
+    // with no host web search, as `dispatchHeadless` runs it, or not at all.
+    const web = hostWebRouteFor(k, step, leadHost, host);
+    if (web !== null && (web.host !== host || !web.hostWeb)) {
+      if (!web.hostWeb) k.relay(h.state.id, web.notice);
+      if (web.host === host && !capabilitiesOf(k, host).headless) {
+        refuseInSession(
+          k,
+          h,
+          step,
+          `${step.role} needs web search, which is not safe on ${host}, and ${host} cannot run it headless without it (D-cf); run the Lead on Claude Code`,
+        );
+        continue;
+      }
+      if (await launchHeadless(k, h, step, web.host, "role", 1, web.hostWeb)) free -= 1;
       continue;
     }
     const refusal = inSessionRefusal(k, h, step, host, call);
@@ -87,6 +120,49 @@ export const dispatchNow = async (
     free -= 1;
   }
   return actions;
+};
+
+/**
+ * Launches a `lookback_replay` trial as the engine's own headless run on `host` (D-cg, spine §5
+ * reading 201: `planDispatch` sends every trial headless whenever the host can, without
+ * `headless_allowed`); a host that cannot measures nothing, and the replay waits for the next
+ * RETRO. Returns whether a run was launched.
+ */
+const launchReplayTrial = async (
+  k: Kernel,
+  h: RunHandle,
+  step: StepSpec,
+  host: HostId,
+  leadHost: HostId | undefined,
+): Promise<boolean> => {
+  if (
+    planDispatch(
+      "lookback_replay",
+      k.config().hosts.dispatch,
+      capabilitiesOf(k, host),
+      leadHost,
+    ) !== "headless"
+  ) {
+    refuseInSession(k, h, step, `${host} cannot launch a headless run now`);
+    return false;
+  }
+  return launchHeadless(k, h, step, host, "lookback_replay");
+};
+
+/**
+ * Launches the replay trials RETRO wants now on the run's Lead host (D-cg): the engine drives them
+ * itself, so a trial starts when the one before it is graded, not only on the Lead's next call.
+ * Callers hold the run's lock.
+ */
+const driveReplayTrials = async (k: Kernel, h: RunHandle, lead: HostId): Promise<void> => {
+  if (h.state.run.phase !== "retro") return;
+  let free = k.config().concurrency - inFlight(h.state).length;
+  for (const step of pendingSteps(k, h, lead)) {
+    if (free <= 0) return;
+    if (step.purpose !== "lookback_replay") continue;
+    if ((await sweepDispatches(k, h)).issues.length > 0 || checkGitNow(k, h)) return;
+    if (await launchReplayTrial(k, h, step, lead, k.liveLeadHost(h.state.id))) free -= 1;
+  }
 };
 
 /**
@@ -108,9 +184,16 @@ export const drive = async (k: Kernel, h: RunHandle): Promise<void> => {
   } else if (k.unattended.has(state.id)) {
     purpose = "auto_resume";
     host = state.limit?.host ?? k.hostFor({ host: null });
-  } else return;
+  } else {
+    // RETRO's replay trials are the engine's own runs, on the run's Lead host (D-cg)
+    await driveReplayTrials(k, h, replayHostOf(k, h));
+    return;
+  }
   const plan = planDispatch(purpose, k.config().hosts.dispatch, capabilitiesOf(k, host), lead);
-  if (plan !== "headless") return;
+  if (plan !== "headless") {
+    await driveReplayTrials(k, h, lead ?? host);
+    return;
+  }
   if ((await sweepDispatches(k, h)).issues.length > 0 || checkGitNow(k, h)) return;
   await dispatchHeadless(k, h, host, purpose);
 };

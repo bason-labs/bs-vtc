@@ -12,7 +12,10 @@ import {
   type GateReport,
   type GateRunner,
   type GateRunRequest,
+  type ArmPluginCompiler,
   type HeadlessRun,
+  type PluginLoadProof,
+  type SandboxProfileRequest,
   type HostAdapter,
   type HostAuthStatus,
   type HostId,
@@ -350,6 +353,13 @@ export interface FakeAdapterOptions {
   readonly headless?: HeadlessScript;
   /** `HostAdapter.authStatus`; absent: the adapter has none. */
   readonly authStatus?: () => Promise<HostAuthStatus>;
+  /**
+   * `HeadlessRun.pluginLoad` of a run started with `pluginDir` (D-cg). Default: the copy loaded;
+   * `null`: the run has no `pluginLoad`.
+   */
+  readonly pluginLoad?: ((request: SpawnRoleRequest) => PluginLoadProof) | null;
+  /** The sandbox enforces `SandboxProfileRequest.readDeny` (reading 178). */
+  readonly readDeny?: boolean;
 }
 
 const outcomeOf = async (
@@ -364,7 +374,12 @@ const outcomeOf = async (
 const fakeAdapter = (
   host: HostId,
   options: FakeAdapterOptions & { readonly subagentName?: (agent: string) => string },
-  record: { spawned: string[]; launched: Launched[]; killed: string[] },
+  record: {
+    spawned: string[];
+    launched: Launched[];
+    killed: string[];
+    sandboxRequests: SandboxProfileRequest[];
+  },
 ): HostAdapter => {
   const launch = (request: SpawnRoleRequest, session: SessionRef | undefined): HeadlessRun => {
     const script = options.headless;
@@ -394,6 +409,17 @@ const fakeAdapter = (
         for (const line of (await done).lines) yield line;
       },
       wait: async () => (await done).outcome,
+      ...(request.pluginDir === undefined || options.pluginLoad === null
+        ? {}
+        : {
+            pluginLoad: () =>
+              Promise.resolve(
+                options.pluginLoad?.(request) ?? {
+                  loaded: true as const,
+                  dir: request.pluginDir ?? "",
+                },
+              ),
+          }),
       kill: () => {
         record.killed.push(request.role);
         kill();
@@ -410,6 +436,9 @@ const fakeAdapter = (
       headless: true,
       turnCap: true,
       budgetCap: true,
+      // as the real adapters report it: Claude Code's role profiles deny the credential stores,
+      // Codex's web search is not confirmed safe (D-cf)
+      safeHostWeb: host === "claude-code",
       ...options.capabilities,
     },
     install: () => Promise.reject(new Error("not in tests")),
@@ -442,17 +471,21 @@ const fakeAdapter = (
       return Promise.resolve({ dispatch: "headless", run: launch(request, session) });
     },
     // Claude Code keeps the token unreadable; Codex cannot, but enforces "no network" (D-ac)
-    sandboxProfile: () => ({
-      host,
-      enforced: {
-        readOnly: false,
-        perPathWriteDeny: host === "claude-code",
-        network: true,
-        secretsUnreadable: host === "claude-code",
-      },
-      settings: {},
-      cliArgs: [],
-    }),
+    sandboxProfile: (request) => {
+      record.sandboxRequests.push(request);
+      return {
+        host,
+        enforced: {
+          readOnly: false,
+          perPathWriteDeny: host === "claude-code",
+          network: true,
+          secretsUnreadable: host === "claude-code",
+          ...(options.readDeny === true ? { readDeny: true } : {}),
+        },
+        settings: {},
+        cliArgs: [],
+      };
+    },
     ...(options.authStatus === undefined ? {} : { authStatus: options.authStatus }),
     dispose: () => Promise.resolve(),
   };
@@ -474,6 +507,8 @@ export interface Harness {
   readonly launched: Launched[];
   /** Roles of engine-launched runs the engine killed. */
   readonly killed: string[];
+  /** Every sandbox profile request the fake adapters answered. */
+  readonly sandboxRequests: SandboxProfileRequest[];
   clock: Date;
   /** Replaces the engine's waits between remote polls (default: the clock moves `ms`). */
   sleeper: ((ms: number) => Promise<void>) | null;
@@ -503,6 +538,12 @@ export interface HarnessOptions {
   readonly headless?: HeadlessScript;
   /** The fake Claude Code adapter's `authStatus`. */
   readonly authStatus?: () => Promise<HostAuthStatus>;
+  /** The fake Claude Code adapter's `HeadlessRun.pluginLoad` (see {@link FakeAdapterOptions}). */
+  readonly pluginLoad?: FakeAdapterOptions["pluginLoad"];
+  /** The replay arm plugin compiler (`EngineDeps.armPlugins`, D-cg); none by default. */
+  readonly armPlugins?: ArmPluginCompiler;
+  /** The fake Claude Code adapter's sandbox enforces `readDeny` (reading 178). */
+  readonly readDeny?: boolean;
   /** A Codex adapter too (absent: none is installed). */
   readonly codex?: FakeAdapterOptions;
   /** Wire a Level-3 `RemoteMergeService` fake (AD-23); `h.remote3` scripts it. */
@@ -544,7 +585,8 @@ export const createHarness = (options: HarnessOptions = {}): Harness => {
   const spawned: string[] = [];
   const launched: Launched[] = [];
   const killed: string[] = [];
-  const record = { spawned, launched, killed };
+  const sandboxRequests: SandboxProfileRequest[] = [];
+  const record = { spawned, launched, killed, sandboxRequests };
   const adapter = fakeAdapter(
     "claude-code",
     {
@@ -552,6 +594,8 @@ export const createHarness = (options: HarnessOptions = {}): Harness => {
       ...(options.headless === undefined ? {} : { headless: options.headless }),
       ...(options.authStatus === undefined ? {} : { authStatus: options.authStatus }),
       ...(options.subagentName === undefined ? {} : { subagentName: options.subagentName }),
+      ...(options.pluginLoad === undefined ? {} : { pluginLoad: options.pluginLoad }),
+      ...(options.readDeny === undefined ? {} : { readDeny: options.readDeny }),
     },
     record,
   );
@@ -566,6 +610,7 @@ export const createHarness = (options: HarnessOptions = {}): Harness => {
     spawned,
     launched,
     killed,
+    sandboxRequests,
     sleeper: null,
   } as Harness;
   const now = (): Date => h.clock;
@@ -605,6 +650,7 @@ export const createHarness = (options: HarnessOptions = {}): Harness => {
     random: () => 0.5,
     remote: "origin",
     platform: options.platform ?? "darwin",
+    ...(options.armPlugins === undefined ? {} : { armPlugins: options.armPlugins }),
     ...(options.prices === undefined
       ? {}
       : {

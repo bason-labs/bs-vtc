@@ -4,7 +4,7 @@
  * checkout, the trial's work committed there and made readable to the Gate Runner's git in the
  * user's repo; a git directory a role changed runs no engine git.
  */
-import { existsSync, mkdirSync, readFileSync, rmSync, statSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, realpathSync, rmSync, statSync } from "node:fs";
 import { join, relative } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import {
@@ -14,6 +14,7 @@ import {
   isReplayTree,
   newReplayTree,
   removeReplayCheckout,
+  repoGitDirs,
   ReplayCheckoutTamperedError,
   runGit,
   snapshotReplayCheckout,
@@ -22,6 +23,34 @@ import {
 import { cleanupDirs, git, initRepo, tempDir, writeFile } from "../helpers/repo.js";
 
 afterEach(cleanupDirs);
+
+describe("the repo's git directories (reading 178)", () => {
+  const real = (dirs: string[]) =>
+    dirs
+      .filter((d) => existsSync(d))
+      .map((d) => realpathSync(d))
+      .sort();
+
+  it("a plain repo: its .git", async () => {
+    const repo = initRepo();
+    expect(real(await repoGitDirs(repo))).toEqual([realpathSync(join(repo, ".git"))]);
+  });
+
+  it("a linked worktree: its own git directory and the common one, both outside its root", async () => {
+    const main = initRepo();
+    const linked = join(tempDir(), "linked");
+    git(main, "worktree", "add", "-q", "-b", "side", linked);
+    const dirs = await repoGitDirs(linked);
+    expect(real(dirs)).toEqual(
+      [
+        realpathSync(join(main, ".git")),
+        realpathSync(join(main, ".git", "worktrees", "linked")),
+        // `<linked>/.git` is a file naming the worktree's git directory
+        realpathSync(join(linked, ".git")),
+      ].sort(),
+    );
+  });
+});
 
 describe("replay checkouts (reading 176)", () => {
   it("holds the base and nothing after it, and commits the trial's work there", async () => {

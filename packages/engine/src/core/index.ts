@@ -98,7 +98,15 @@ export {
   type PluginCatalog,
   type PromptParts,
 } from "./plugins.js";
-export { guardDirFor, GUARD_DIR } from "./guard.js";
+export {
+  appendPrivateFile,
+  automationPausedByHuman,
+  ensurePrivateDir,
+  guardDirFor,
+  GUARD_DIR,
+  readPrivateFile,
+  writePrivateFile,
+} from "./guard.js";
 export { EngineWrites, type WriteCheck } from "./engine-writes.js";
 export { ENGINE_FILE_DIRS, FORENSICS_DIR, type DispatchRecord } from "./dispatch-guard.js";
 export { roleWorktreeId, ROLE_INPUT_DIRS } from "./role-worktree.js";
@@ -142,3 +150,32 @@ export { INDEX_PATH, openEventIndex, type EventIndex } from "./event-index.js";
  * copies.
  */
 export { HEADLESS_LOADS_AGENT, replayReach, roleChangesFiles } from "./prompt-target.js";
+export { replayGraderOf, replayWaitSkipReason } from "./replay.js";
+/**
+ * Automatic issues and PRs (AD-27, contracts 5.0.0): the Automation read model, the engine facts
+ * that trigger the upstream module (D-bv: events, and cost regressions from Lookback's scorecards),
+ * the daily summary, and the seam the daemon drives the module through (`CreateUpstream`; the
+ * module reaches core only through this index, rule 8).
+ */
+export {
+  AUTOMATION_OFF_NOTE,
+  AUTOMATION_SNAPSHOT_NOTE,
+  automationDailySummary,
+  automationFacts,
+  automationReportView,
+  automaticReleaseOf,
+  costRegressionFacts,
+  costWorsened,
+  isAutomationEvent,
+  type AutomaticRelease,
+  type AutomationFact,
+  type CreateUpstream,
+  type UpstreamWiring,
+  type UpstreamWiringDeps,
+} from "./automation.js";
+export {
+  isReplayTrialEvent,
+  readModelState,
+  replayTrialActionIds,
+  withoutReplayTrialEvents,
+} from "./replay-view.js";

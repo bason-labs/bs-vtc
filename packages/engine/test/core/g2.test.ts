@@ -18,14 +18,18 @@ import {
   type NoveltyCheckRequest,
   type NoveltyReport,
   type ResearchScope,
+  type TaskPack,
+  TaskPackSchema,
 } from "@vtc/shared";
 import { ALL_FIXTURE_ROLES } from "../fixtures/roles.js";
 import { unverifiedFacts } from "../../src/core/g2.js";
 import type { Kernel } from "../../src/core/kernel.js";
 import { cleanupDirs, tempDir, writeFile } from "../helpers/repo.js";
 import {
+  authorTests,
   CLAUDE,
   createHarness,
+  draft,
   only,
   SPEC,
   spawns,
@@ -836,6 +840,44 @@ describe("too-similar directions, re-roll and the category standard (§9.1 steps
     expect(approved?.design_exit).toBe("category_standard");
     expect(approved?.design_direction).toBeUndefined();
     expect(recorded).toEqual([]);
+    await h.release();
+  });
+
+  const packJson = (h: Harness, action: SpawnAction): TaskPack =>
+    TaskPackSchema.parse(
+      JSON.parse(readFileSync(join(h.repo, action.pack.replace(/\.md$/, ".json")), "utf8")),
+    );
+
+  /** From the Planner's dispatch to the first Engineer's pack (one task covering the spec). */
+  const engineerPack = async (h: Harness, planner: SpawnAction): Promise<TaskPack> => {
+    const planned = await submitResult(h, planner, {
+      exit: "done",
+      tasks: [draft("T-1", { covers: ["REQ-1", "REQ-2"] })] as never,
+    });
+    if (!planned.accepted) throw new Error(`plan rejected: ${JSON.stringify(planned.rejection)}`);
+    await h.engine.settle();
+    await authorTests(h, only((await h.engine.next({}, CLAUDE)).actions, "qa"));
+    return packJson(h, only((await h.engine.next({}, CLAUDE)).actions, "engineer"));
+  };
+
+  it("hands the approved direction to the post-G2 UI roles' packs (spine §5 reading 179)", async () => {
+    const h = createHarness({ roles: ROLES });
+    similarSeam(h);
+    const gate = await toG2(h, { hasUi: true, designer: designer(["signal", "quiet"]) });
+    const out = await approve(h, gate, { ...waiveAll(gate), design_direction: "quiet" });
+    const planner = only(out.actions, "planner");
+    // the Planner is no UI role that judges a direction
+    expect(packJson(h, planner).design_direction).toBeUndefined();
+    expect((await engineerPack(h, planner)).design_direction).toBe("quiet");
+    await h.release();
+  });
+
+  it("after the category standard no pack names a direction", async () => {
+    const h = createHarness({ roles: ROLES });
+    similarSeam(h);
+    const gate = await toG2(h, { hasUi: true, designer: designer(["signal", "quiet"]) });
+    const out = await approve(h, gate, { ...waiveAll(gate), design_exit: "category_standard" });
+    expect((await engineerPack(h, only(out.actions, "planner"))).design_direction).toBeUndefined();
     await h.release();
   });
 
