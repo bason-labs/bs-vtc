@@ -65,6 +65,21 @@ Codex recordings (2026-10-14):
 | `codex/exec-resume.jsonl`  | `codex exec resume` with the `code_sandboxed` profile. The prior context is reloaded: 23,552 of 47,455 input tokens are cached. |
 | `codex/exec-killed.jsonl`  | A run stopped by `HeadlessRun.kill()`: `thread.started`, `turn.started`, then nothing.                                          |
 
+D-cl live-check recordings (2026-10-15, spine §5 reading 206). They were made with
+`pnpm --filter @vtc/adapters live:dcl <check> --out <dir>` (`scripts/dcl-check.ts`), redacted the
+same way, and read before they were copied here.
+
+| File                                                  | What it shows                                                                                                                                                                                                                                                                           |
+| ----------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `claude-code/stream-arm-success.jsonl`                | The success fixture: a replay arm's run (D-cg) on an unchanged copy of the real compiled plugin (no scratch patch), `--plugin-dir <arm-dir>`, a replay `readDeny`. `structured_output` re-validates. The `init` record keeps the `vtc` plugin's entry (`path`, `source: "vtc@inline"`). |
+| `claude-code/arm-debug-plugin-lines.log`              | The lines of that run's `--debug-file` that name the `vtc` plugin or `--plugin-dir`: what the load proof reads (no lock line).                                                                                                                                                          |
+| `claude-code/arm-debug-locked.synthetic.log`          | Synthetic: the documented line for a plugin locked by managed settings (`--plugin-dir copy of "vtc" ignored: plugin is locked by managed settings`).                                                                                                                                    |
+| `codex/exec-web-search-cached.jsonl`                  | `web_search="cached"` under `workspace-write`: one search answered from the index, no page opened.                                                                                                                                                                                      |
+| `codex/exec-web-search-cached-open-refused.jsonl`     | `cached`, the role handed a fresh `https://example.com/vtc-dcl-probe-…` URL: `open_page` answered "Internal Error", the role reports it could not open the page.                                                                                                                        |
+| `codex/exec-web-search-indexed.jsonl`                 | `indexed`, for the record: it opened a result page (`open_page`).                                                                                                                                                                                                                       |
+| `codex/exec-web-search-disabled-apps-connector.jsonl` | `disabled`, before the adapter turned the apps connectors off: the role called `codex_apps` `search_service.web_run` (it failed with "Unsupported Search commands").                                                                                                                    |
+| `codex/exec-web-search-disabled.jsonl`                | `disabled` with `CODEX_ROLE_FEATURES_OFF`: no web tool at all.                                                                                                                                                                                                                          |
+
 Spike recordings and synthetic files:
 
 | File                                                 | Source                                                                     |

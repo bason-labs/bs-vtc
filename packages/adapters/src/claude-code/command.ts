@@ -9,7 +9,9 @@
  * The VTC home's install token, daemon sockets and hidden tests (`ROLE_DENIED_VTC.homeReadDeny`,
  * D-an), the Codex home, Claude's own credential file and the user's credential stores
  * (`HOME_CREDENTIAL_LOCATIONS`, as the Lead session and the gate sandbox deny them) are never
- * readable, from a tool or from the shell (D-ad). No role may run `vtc calibrate` or write anything in
+ * readable, from a tool or from the shell (D-ad), and neither are a replay trial's
+ * `SandboxProfileRequest.readDeny` paths (the user's repo root and git directory, spine §5
+ * reading 178; `enforced.readDeny`). No role may run `vtc calibrate` or write anything in
  * `ROLE_DENIED_VTC.homeWriteDeny` or `WAVE3_HOME_WRITE_DENY` (D-w, D-ap, spine §5 reading 103):
  * directories and single files alike. No role may call a human-only engine tool (`approve`,
  * `answer`, `change_request`; D-an) under either of its names, whatever allow rule applies.
@@ -367,6 +369,36 @@ const deniedVtcCommands = (): string[] =>
     ]),
   );
 
+/** Whether `inner` is `outer` or lies under it, by the platform's path rules (no file is read). */
+const covers = (outer: string, inner: string, platform: PlatformPath): boolean => {
+  const rel = platform.relative(outer, inner);
+  return rel === "" || (!rel.startsWith("..") && !platform.isAbsolute(rel));
+};
+
+/**
+ * `SandboxProfileRequest.readDeny` (spine §5 reading 178), as absolute paths of the platform:
+ * each must be absolute, and none may cover the role's worktree or lie inside it (the request
+ * never narrows `cwd`), so a wrong request fails here instead of starting a run that cannot read
+ * its own files or that reads what it should not.
+ */
+const readDenyPaths = (request: SandboxProfileRequest, platform: PlatformPath): string[] =>
+  (request.readDeny ?? []).map((path) => {
+    if (hasControl(path)) refuseRulePath(path, "paths may not contain control characters");
+    if (path === "" || !platform.isAbsolute(path)) {
+      throw new Error(
+        `refusing a Claude role profile: readDeny path ${JSON.stringify(path)} is not absolute`,
+      );
+    }
+    const denied = platform.resolve(path);
+    const cwd = platform.resolve(request.cwd);
+    if (covers(denied, cwd, platform) || covers(cwd, denied, platform)) {
+      throw new Error(
+        `refusing a Claude role profile: readDeny path ${JSON.stringify(path)} overlaps the role's worktree ${JSON.stringify(request.cwd)}, which readDeny never narrows (spine §5 reading 178)`,
+      );
+    }
+    return denied;
+  });
+
 export const claudeSandboxProfile = (
   request: SandboxProfileRequest,
   options: ClaudeProfileOptions,
@@ -379,6 +411,7 @@ export const claudeSandboxProfile = (
   const deny = disallowedTools(tools, request.protectedPaths, web);
   const unreadable = unreadablePaths(options, platform, tools.profile === "code_sandboxed");
   const credentials = unreadable.claudeCredentials;
+  const readDeny = readDenyPaths(request, platform);
   const vtcHomeRule = absoluteRulePath(options.vtcHome, platform);
   // every rule here is one JSON array entry, so no character in a home path can end a rule
   const settings = {
@@ -393,6 +426,11 @@ export const claudeSandboxProfile = (
         // gate sandbox deny too. A host_web role could otherwise be steered by a fetched page
         // into reading one and carrying it out in a WebFetch URL (spine §7 H-3 row)
         ...unreadable.homeCredentials.flatMap((path) => {
+          const rule = absoluteRulePath(path, platform);
+          return [`Read(${rule})`, `Read(${rule}/**)`];
+        }),
+        // a replay trial's repo root and git directory (reading 178), a directory or a file each
+        ...readDeny.flatMap((path) => {
           const rule = absoluteRulePath(path, platform);
           return [`Read(${rule})`, `Read(${rule}/**)`];
         }),
@@ -424,6 +462,7 @@ export const claudeSandboxProfile = (
           unreadable.codexHome,
           ...(credentials.sandboxPath === undefined ? [] : [credentials.sandboxPath]),
           ...unreadable.homeCredentials,
+          ...readDeny,
         ],
       },
       network: { allowedDomains: request.network === "registries" ? [...REGISTRY_DOMAINS] : [] },
@@ -438,6 +477,8 @@ export const claudeSandboxProfile = (
       // read-deny rules plus `sandbox.filesystem.denyRead` (D-ad, spine §5 reading 49); a role
       // whose sandbox list cannot name the credential file has no shell (Windows, above)
       secretsUnreadable: true,
+      // every `readDeny` path, from the tools and from the shell, as above (reading 178)
+      readDeny: true,
     },
     settings,
     cliArgs: [
@@ -468,6 +509,26 @@ export interface ClaudeCommandOptions {
 }
 
 /**
+ * Where a replay arm's run writes its debug log (D-cg): beside the arm directory, never inside it,
+ * because the host loads the arm in place and it must stay unchanged until the run exits
+ * (`<arms>/<trial>/<arm>` → `<arms>/<trial>/<arm>.debug.log`).
+ */
+export const claudeArmDebugFile = (armDir: string): string =>
+  nodePath.join(nodePath.dirname(armDir), `${nodePath.basename(armDir)}.debug.log`);
+
+/** The arm directory of a replay run, checked: absolute, and not a filesystem root. */
+const armDirOf = (request: SpawnRoleRequest): string | undefined => {
+  const dir = request.pluginDir;
+  if (dir === undefined) return undefined;
+  if (!nodePath.isAbsolute(dir) || nodePath.basename(dir) === "" || hasControl(dir)) {
+    throw new Error(
+      `refusing a headless Claude replay run: its plugin directory ${JSON.stringify(dir)} must be an absolute directory path (D-cg)`,
+    );
+  }
+  return dir;
+};
+
+/**
  * `claude -p` for a role (fresh, or `--resume <id>`). The stream is `stream-json` so the engine
  * sees SDK rate-limit and retry events as they happen (§6.9); the final `result` event carries
  * `structured_output` for `--json-schema` once the run has called `StructuredOutput` (spike 1;
@@ -477,6 +538,13 @@ export interface ClaudeCommandOptions {
  * writes it and closes stdin), so it never sits in argv. The
  * environment sets `CLAUDE_CODE_PRINT_BG_WAIT_CEILING_MS` explicitly, so a run never waits the
  * host's default 10 minutes for background work after its result (AD-25 rule 4).
+ *
+ * A Lookback replay arm (D-cg, spine §5 reading 201): `request.pluginDir` replaces the adapter's
+ * plugin directory for this run only, and the run writes its debug log beside the arm
+ * (`--debug-file`, {@link claudeArmDebugFile}), so `HeadlessRun.pluginLoad` can prove the arm's
+ * copy loaded: a plugin locked by managed settings keeps the installed copy and says so only in
+ * that log. Everything else, the isolation flags and the profile, is as for any role run, and no
+ * bypass flag is ever added (AD-25).
  */
 export const claudeHeadlessCommand = (
   request: SpawnRoleRequest,
@@ -492,7 +560,9 @@ export const claudeHeadlessCommand = (
   // only what `claudeSandboxProfile` emits: never a second isolation flag that would win (AD-25)
   checkProfileArgs(HOST, request.sandbox.cliArgs, CLAUDE_PROFILE_FLAGS);
   if (session !== undefined) checkSessionId(HOST, session.id);
-  if (options.pluginDir === undefined) {
+  const armDir = armDirOf(request);
+  const pluginDir = armDir ?? options.pluginDir;
+  if (pluginDir === undefined) {
     throw new Error(
       "refusing a headless Claude role run without the compiled plugin on disk: pass `pluginDir` to the adapter so the run loads it isolated from the user's settings",
     );
@@ -531,7 +601,9 @@ export const claudeHeadlessCommand = (
       "--mcp-config",
       claudeHeadlessMcpConfig(),
       "--plugin-dir",
-      options.pluginDir,
+      pluginDir,
+      // a replay arm's proof of which copy loaded (D-cg)
+      ...(armDir === undefined ? [] : ["--debug-file", claudeArmDebugFile(armDir)]),
       ...request.sandbox.cliArgs,
     ],
     env: {

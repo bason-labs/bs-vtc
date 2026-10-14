@@ -74,8 +74,10 @@
  *   listed ones, and `enabled_tools=[]` leaves none. The command and args are pinned too, because a
  *   filter key alone on a config without `[mcp_servers.vtc]` fails to load ("invalid transport").
  *   The Lead's own session is never started here and keeps its tools.
- * - Web search (H-3): on only for a `host_web` role (`web_search="live"`), explicitly off for
- *   every other role; see {@link CodexWebSearch}.
+ * - Web search (H-3, D-cf): `cached` for a `host_web` role, explicitly `disabled` for every other
+ *   role, never `live`; see {@link CodexWebSearch}. Every role run also turns off the features
+ *   that reach pages by another route ({@link CODEX_ROLE_FEATURES_OFF}: the apps connectors,
+ *   browser and computer use).
  * - `codex exec` has no agent flag: a headless run gets no compiled role instructions
  *   (`developer_instructions` of `.codex/agents/vtc-*.toml`), so the role rests on the prompt
  *   (the task pack). Engine core carries the role itself (spine §5 reading 145): the compiled
@@ -86,6 +88,7 @@ import { createHash } from "node:crypto";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
+  CODEX_HOST_WEB_SEARCH,
   CODEX_UNIX_CONNECT_BLOCKED_PLATFORMS,
   engineMcpServer,
   HUMAN_ONLY_TOOLS,
@@ -106,18 +109,28 @@ export const HOST = "codex";
 type CodexSandboxMode = "read-only" | "workspace-write";
 
 /**
- * Codex's own web search (H-3, spine §5 reading 156). `codex exec` has no `--search` flag (only
- * the interactive CLI does, 0.162.1); the `web_search` config key takes `"live"`, `"indexed"`,
- * `"cached"` or `"disabled"` (codex-cli 0.162.1). `--search` is "live web search: the native
- * Responses `web_search` tool" (`codex --help`), a tool the host provider runs, so the role's
- * sandbox and its network-off setting stay as they are. A `host_web` role gets `"live"`; every
- * other role gets `"disabled"`, set explicitly as a top-level `--config` override rather than left
- * to a default; a `code_sandboxed` role with `host_web` is refused. Codex also reads `web_search`
- * under a profile in `config.toml`; whether a profile-level `"live"` wins over this top-level
- * override is not yet checked (open under the §7 H-3 row), so this does not claim the user's
- * config cannot turn it back on.
+ * Codex's own web search (H-3 and D-cf, spine §5 readings 156 and 200). `codex exec` has no
+ * `--search` flag (only the interactive CLI does, 0.162.1); the top-level `web_search` config key
+ * takes `"live"`, `"indexed"`, `"cached"` or `"disabled"` (codex-cli 0.162.1). It is a tool the host
+ * provider runs, so the role's sandbox and its network-off setting stay as they are.
+ *
+ * Codex has no per-path read deny, so a Codex role reads everything the user can (D-ad): a role
+ * that could open a page the model picks could carry a credential out in its URL. So the adapter
+ * never emits `"live"` (the type has no such value), and a `host_web` role gets
+ * `CODEX_HOST_WEB_SEARCH` (`"cached"`: an OpenAI-maintained index, no live page fetch); every other
+ * role gets `"disabled"`. Both are set explicitly as a top-level `--config` (`-c`) override,
+ * never left to a default (a full-access sandbox defaults to `"live"`). A `code_sandboxed` role
+ * with `host_web` is refused. The D-cl precedence check (codex-cli 0.162.1, a temporary
+ * `CODEX_HOME`, `scripts/dcl-check.ts codex-precedence`): a `--config` override wins over the
+ * user's `config.toml` and over a `--profile <name>` layer (`<name>.config.toml`), which VTC never
+ * passes; the legacy `profile = "<name>"` key in `config.toml` is refused by 0.162.1 ("no longer
+ * supported"), and an untrusted project `.codex/config.toml` is not loaded. The D-cl run check
+ * (`codex-web`, 2026-10-15): under both role sandboxes `cached` searched the index and opened only
+ * pages its results named (`open_page`), and refused a URL the model was handed that no index holds
+ * ("not accessible via this tool"); `indexed` opened a result page too; `disabled` had no search
+ * tool, but the apps connectors still offered one, hence {@link CODEX_ROLE_FEATURES_OFF}.
  */
-export type CodexWebSearch = "live" | "disabled";
+export type CodexWebSearch = typeof CODEX_HOST_WEB_SEARCH | "disabled";
 
 const codexWebSearch = (tools: RoleTools): CodexWebSearch => {
   if (tools.host_web !== true) return "disabled";
@@ -126,7 +139,62 @@ const codexWebSearch = (tools: RoleTools): CodexWebSearch => {
       "refusing host web search for a code_sandboxed Codex role: a role that runs code gets no direct web (H-3, spine §5 reading 156)",
     );
   }
-  return "live";
+  return CODEX_HOST_WEB_SEARCH;
+};
+
+/**
+ * Codex features that give a run other routes to pages the model picks, turned off for every
+ * role run, whatever its tools (D-cf, D-cl): `apps`, the ChatGPT apps connectors (the
+ * `codex_apps` MCP server, whose `search_service.web_run` a role with `web_search="disabled"`
+ * still called in the 2026-10-15 live check, codex-cli 0.162.1), and browser and computer use.
+ * No role needs them; the engine bridge is a separate MCP server and stays.
+ */
+export const CODEX_ROLE_FEATURES_OFF = [
+  "apps",
+  "browser_use",
+  "browser_use_external",
+  "in_app_browser",
+  "computer_use",
+] as const;
+
+const featureOffOverride = (feature: string): string => `features.${feature}=false`;
+
+/** Throws unless the profile turns every {@link CODEX_ROLE_FEATURES_OFF} feature off. */
+const checkFeaturesOff = (cliArgs: readonly string[]): void => {
+  const values = cliArgs.filter((_, i) => i % 2 === 1);
+  const left = CODEX_ROLE_FEATURES_OFF.filter(
+    (feature) =>
+      !values.includes(featureOffOverride(feature)) ||
+      values.some(
+        (arg) => arg.startsWith(`features.${feature}=`) && arg !== featureOffOverride(feature),
+      ),
+  );
+  if (left.length > 0) {
+    throw new Error(
+      `refusing a headless Codex run: its profile leaves on ${left.join(", ")}, other routes to web pages the model picks (D-cf)`,
+    );
+  }
+};
+
+/** The `--config` value that sets web search to `mode`. */
+const webSearchOverride = (mode: CodexWebSearch): string => `web_search="${mode}"`;
+
+/** Any `--config` value that sets the top-level `web_search` key, however it is spelled. */
+const WEB_SEARCH_KEY = /^\s*"?web_search"?\s*=/u;
+
+/**
+ * Throws unless the profile's overrides set web search exactly once, to `cached` or `disabled`
+ * (D-cf): a profile built anywhere else can never bring live search (or any other mode) in.
+ */
+const checkWebSearchArgs = (cliArgs: readonly string[]): void => {
+  const set = cliArgs.filter((arg, i) => i % 2 === 1 && WEB_SEARCH_KEY.test(arg));
+  const allowed = [webSearchOverride(CODEX_HOST_WEB_SEARCH), webSearchOverride("disabled")];
+  const [only] = set;
+  if (set.length !== 1 || only === undefined || !allowed.includes(only)) {
+    throw new Error(
+      `refusing a headless Codex run: its profile must set web search exactly once, to ${allowed.join(" or ")} (never live; D-cf, spine §5 reading 200), got ${set.length === 0 ? "none" : set.map((arg) => JSON.stringify(arg)).join(", ")}`,
+    );
+  }
 };
 
 export interface CodexProfileOptions {
@@ -227,10 +295,13 @@ export const codexSandboxProfile = (
       network: CODEX_UNIX_CONNECT_BLOCKED_PLATFORMS.includes(options.platform ?? process.platform),
       // no per-path read deny on Codex: the token and host credentials stay readable (D-ad)
       secretsUnreadable: false,
+      // nor a replay trial's `readDeny` paths: the trial records `paths_only` (readings 178, 204)
+      readDeny: false,
     },
     settings: {
       sandbox_mode: mode,
       web_search: webSearch,
+      features: Object.fromEntries(CODEX_ROLE_FEATURES_OFF.map((feature) => [feature, false])),
       ...(mode === "workspace-write"
         ? {
             sandbox_workspace_write: {
@@ -248,7 +319,8 @@ export const codexSandboxProfile = (
       "--config",
       `sandbox_mode="${mode}"`,
       "--config",
-      `web_search="${webSearch}"`,
+      webSearchOverride(webSearch),
+      ...CODEX_ROLE_FEATURES_OFF.flatMap((feature) => ["--config", featureOffOverride(feature)]),
       ...(mode === "workspace-write"
         ? [
             "--config",
@@ -320,9 +392,16 @@ export const codexHeadlessCommand = (
   if (session !== undefined && session.host !== HOST) {
     throw new Error(`cannot resume a ${session.host} session on ${HOST}`);
   }
+  if (request.pluginDir !== undefined) {
+    throw new Error(
+      "refusing a headless Codex run with a replay arm's plugin directory: `codex exec` loads no compiled agent (the engine carries the role in the prompt), so no plugin copy could load or be proven (D-cg)",
+    );
+  }
   const mode = sandboxModeOf(request.sandbox);
   // only what `codexSandboxProfile` emits: `--config` overrides, never another sandbox flag
   checkProfileArgs(HOST, request.sandbox.cliArgs, ["--config"]);
+  checkWebSearchArgs(request.sandbox.cliArgs);
+  checkFeaturesOff(request.sandbox.cliArgs);
   // fail closed: without the filter every engine tool, the human-only ones too, reaches the role
   if (!request.sandbox.cliArgs.includes(codexHumanOnlyToolsOverride())) {
     throw new Error(

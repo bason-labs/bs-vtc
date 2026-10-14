@@ -1,0 +1,4 @@
+{"type":"thread.started","thread_id":"<thread-id>"}
+{"type":"turn.started"}
+{"type":"item.completed","item":{"id":"item_0","type":"agent_message","text":"{\"role\":\"research_analyst\",\"mode\":null,\"task\":null,\"feature\":null,\"verdicts\":null,\"findings\":null,\"questions\":null,\"tasks\":null,\"acceptance_tests\":null,\"artifacts\":null,\"claims\":null,\"summary\":\"no web search available\",\"exit\":\"done\",\"question\":null,\"conflict\":null,\"fault\":null}"}}
+{"type":"turn.completed","usage":{"input_tokens":46855,"cached_input_tokens":23168,"cache_write_input_tokens":0,"output_tokens":150,"reasoning_output_tokens":0}}
