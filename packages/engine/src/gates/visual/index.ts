@@ -45,10 +45,14 @@ export { addedLinesWithNumbers, type AddedLine } from "./diff-lines.js";
 export {
   evaluateVisual,
   MAX_SUMMARY_FINDINGS,
+  ranOnProjectToolchain,
   styleMismatch,
+  VISUAL_NOTE_RULE,
+  VISUAL_PROJECT_TOOLCHAIN_RULE,
   visualWithoutRenders,
   type BrowserIdentity,
   type EvaluateInput,
+  type VisualNote,
   type VisualOutcome,
   type VisualSettings,
 } from "./evaluate.js";
