@@ -305,8 +305,6 @@ class Run {
   private readonly hiddenFiles: string[] = [];
   private diffCoverage: number | null = null;
   private config: GatesConfig | null = null;
-  /** The raw `gates.yml` text the run started with (the visual step's provisional `visual.app`). */
-  private gatesYml: string | null = null;
   private visual: VisualSummary | null = null;
   /** §7.4 scope creep of this run's diff, when its L2 ran for a task or feature. */
   private scopeCreep: ScopeCreep | null = null;
@@ -372,14 +370,7 @@ class Run {
    * readings 20 and 46b): otherwise nothing runs.
    */
   private async loadConfig(): Promise<GatesConfig | null> {
-    if (this.request.reason === "calibration") {
-      try {
-        this.gatesYml = readFileSync(join(this.deps.repoRoot, GATES_CONFIG_PATH), "utf8");
-      } catch {
-        this.gatesYml = null;
-      }
-      return loadGatesConfig(this.deps.repoRoot);
-    }
+    if (this.request.reason === "calibration") return loadGatesConfig(this.deps.repoRoot);
     const base = this.request.base.slice(0, 12);
     const bytes = await this.deps.git.readFileAtCommit(this.request.base, GATES_CONFIG_PATH);
     if (bytes === undefined) {
@@ -396,8 +387,7 @@ class Run {
         );
       }
     }
-    this.gatesYml = new TextDecoder().decode(bytes);
-    return parseGatesConfig(this.gatesYml);
+    return parseGatesConfig(new TextDecoder().decode(bytes));
   }
 
   async execute(): Promise<GateReport> {
@@ -1692,7 +1682,6 @@ class Run {
         git: this.deps.git,
         changed: this.changed,
         config,
-        gatesYml: this.gatesYml,
         env: this.env,
         gateEnv: gateEnv(this.env),
         runner:

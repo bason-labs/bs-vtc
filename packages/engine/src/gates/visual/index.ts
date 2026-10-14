@@ -3,7 +3,7 @@
  * detector, the render matrix with axe, computed styles and the per-region pixel diff, the
  * browser pin, and the novelty check against the per-client design library.
  */
-export { appLoopbackPort, visualAppOf, VisualAppSchema, type VisualApp } from "./app.js";
+export { appLoopbackPort } from "./app.js";
 export {
   BROWSER_STORE_NODE_MODULES,
   checkProjectBrowser,

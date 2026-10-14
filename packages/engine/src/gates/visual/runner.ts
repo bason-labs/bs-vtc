@@ -15,7 +15,8 @@
  * an absolute `node` outside the repository ({@link resolveNodeExecutable}), never one the
  * checkout supplies; and on Linux, where a same-user process may read another's memory through
  * ptrace unless Yama restricts it to descendants, a render with an app server runs only with
- * `kernel.yama.ptrace_scope` 1 or higher ({@link LINUX_PTRACE_REFUSAL}).
+ * `kernel.yama.ptrace_scope` 1 or higher; otherwise nothing runs and the step is `skipped`
+ * with {@link LINUX_PTRACE_REFUSAL} (reading 164, D-bj).
  */
 import { createHash, createHmac, randomBytes, timingSafeEqual } from "node:crypto";
 import {
@@ -71,7 +72,15 @@ export type VisualRunnerOutcome =
       /** One output file by the name the result gives it; `null` when absent or not a plain file. */
       readonly file: (name: string) => Uint8Array | null;
     }
-  | { readonly ok: false; readonly reason: string };
+  | {
+      readonly ok: false;
+      readonly reason: string;
+      /**
+       * Nothing ran, on purpose, for a reason a human fixes on the host: the step is `skipped`
+       * with `reason`, not `error` (Linux `ptrace_scope` 0, reading 164). Absent: `error`.
+       */
+      readonly skipped?: true;
+    };
 
 export interface VisualRunner {
   run(call: VisualRunnerCall): Promise<VisualRunnerOutcome>;
@@ -125,7 +134,11 @@ const openEnvelope = (raw: Uint8Array, key: Buffer): { body: string } | { reason
 /** The Node flag that keeps a signal from opening the runner's inspector (Node 22.14 or later). */
 export const DISABLE_SIGUSR1 = "--disable-sigusr1";
 
-/** Why no render runs on a Linux host whose ptrace policy lets the app server reach the runner. */
+/**
+ * Why no render runs on a Linux host whose ptrace policy lets the app server reach the runner:
+ * the step's `skipped_reason` (reading 164, D-bj). A visible note at Levels 1–2; never a Level-3
+ * pass, since that item counts only `pass` (reading 105).
+ */
 export const LINUX_PTRACE_REFUSAL =
   "the visual step does not render on this Linux host: kernel.yama.ptrace_scope is 0 or absent, so the app server (project code in the runner's sandbox, as the same user) could attach to the runner and sign any result; set kernel.yama.ptrace_scope to 1 or higher (sysctl) to run it";
 
@@ -231,7 +244,7 @@ export const sandboxedVisualRunner = (
     if (node === null || !isAbsolute(node)) return { ok: false, reason: NO_RUNNER_NODE };
     if (call.input.app !== null && (options.platform ?? process.platform) === "linux") {
       const scope = Number((options.ptraceScope ?? readPtraceScope)() ?? "0");
-      if (!(scope >= 1)) return { ok: false, reason: LINUX_PTRACE_REFUSAL };
+      if (!(scope >= 1)) return { ok: false, skipped: true, reason: LINUX_PTRACE_REFUSAL };
     }
     const key = randomBytes(32);
     let exec;
