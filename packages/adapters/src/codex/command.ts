@@ -76,8 +76,9 @@
  *   The Lead's own session is never started here and keeps its tools.
  * - `codex exec` has no agent flag: a headless run gets no compiled role instructions
  *   (`developer_instructions` of `.codex/agents/vtc-*.toml`), so the role rests on the prompt
- *   (the task pack). Engine-launched Codex runs (cross-family review, auto-resume) must carry the
- *   role's instructions in the prompt until the spike settles how to load them.
+ *   (the task pack). Engine core carries the role itself (spine §5 reading 145): the compiled
+ *   agent's locked core before the prompt and its editable section in the pack, until the spike
+ *   settles how to load the agent.
  */
 import { createHash } from "node:crypto";
 import { tmpdir } from "node:os";

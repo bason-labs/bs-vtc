@@ -10,8 +10,11 @@ import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 import {
   CODEX_IN_SESSION_REFUSED_REASON,
+  effectivePromptSha,
   HEADLESS_DEFAULTS,
+  sha256Hex,
   SubmitInputSchema,
+  TASK_PACK_HEURISTICS_SECTION,
   type HostOutcome,
   type LeadAction,
   type RoleResultInput,
@@ -20,7 +23,7 @@ import {
 import { headlessPreflight } from "../../src/core/headless.js";
 import { consecutiveFailures } from "../../src/core/queries.js";
 import { MAX_STEP_FAILURES } from "../../src/core/submit.js";
-import type { CallContext } from "../../src/core/index.js";
+import { createPluginCatalog, type CallContext, type PluginCatalog } from "../../src/core/index.js";
 import type { Kernel, RunHandle } from "../../src/core/kernel.js";
 import { writeFile } from "../helpers/repo.js";
 import {
@@ -39,6 +42,7 @@ interface Line {
   task?: string;
   role?: string;
   host?: string;
+  prompt_sha?: string;
   data: Record<string, unknown>;
 }
 
@@ -209,6 +213,91 @@ describe(
       await h.engine.settle();
       expect(ofType(h, "headless.ended").at(-1)?.data).toMatchObject({ outcome: "error" });
       expect(ofType(h, "role.failed")).toHaveLength(1);
+      await h.release();
+    });
+  },
+);
+
+/** Compiled plugins whose agents carry their role prompt sections (AD-21; a manifest entry). */
+const LOCKED = "You are the VTC role. Follow the task pack.";
+const DEFAULT = "Prefer the smallest change that meets the contract.";
+const compiledPlugins = (
+  over: { lockedSha256?: string; editableInPack?: boolean; texts?: boolean } = {},
+): PluginCatalog => ({
+  ...createPluginCatalog({}),
+  promptParts: () => ({
+    lockedSha256: over.lockedSha256 ?? sha256Hex(LOCKED),
+    editableInPack: over.editableInPack ?? false,
+    ...(over.texts === false ? {} : { compiled: { locked: LOCKED, editable: DEFAULT } }),
+  }),
+});
+
+describe(
+  "Codex headless role identity: codex exec has no agent flag, so the engine carries the role",
+  { timeout: 30_000 },
+  () => {
+    it("prepends the compiled locked core to the prompt and renders the default section in the pack", async () => {
+      const h = createHarness({
+        plugins: compiledPlugins(),
+        codex: { headless: frontHalf, authStatus: signedIn("codex", true) },
+      });
+      await start(h, CODEX);
+      await next(h, CODEX);
+      const { request } = h.launched[0]!;
+      expect(request.prompt.startsWith(`${LOCKED}\n`)).toBe(true);
+      expect(request.prompt).toContain("Read your task pack");
+      const dispatched = ofType(h, "role.dispatched")[0];
+      expect(dispatched?.prompt_sha).toBe(effectivePromptSha(LOCKED, DEFAULT));
+      expect(dispatched?.data.editable_sha256).toBe(sha256Hex(DEFAULT));
+      const pack = readFileSync(join(h.repo, String(dispatched?.data.pack)), "utf8");
+      expect(pack.startsWith(`## ${TASK_PACK_HEURISTICS_SECTION}\n\n${DEFAULT}\n`)).toBe(true);
+      await h.engine.settle();
+      await h.release();
+    });
+
+    it("a switched agent keeps its section in the pack and still gets the locked core", async () => {
+      const h = createHarness({
+        plugins: compiledPlugins({ editableInPack: true }),
+        codex: { headless: frontHalf, authStatus: signedIn("codex", true) },
+      });
+      await start(h, CODEX);
+      await next(h, CODEX);
+      expect(h.launched[0]?.request.prompt.startsWith(`${LOCKED}\n`)).toBe(true);
+      expect(ofType(h, "role.dispatched")[0]?.prompt_sha).toBe(effectivePromptSha(LOCKED, DEFAULT));
+      await h.engine.settle();
+      await h.release();
+    });
+
+    it("never runs a role without its instructions: texts missing or not the manifest's fail the step", async () => {
+      for (const plugins of [
+        compiledPlugins({ texts: false }),
+        compiledPlugins({ lockedSha256: sha256Hex("another locked core") }),
+      ]) {
+        const h = createHarness({
+          plugins,
+          codex: { headless: frontHalf, authStatus: signedIn("codex", true) },
+        });
+        await start(h, CODEX);
+        await next(h, CODEX);
+        await h.engine.settle();
+        expect(h.launched).toEqual([]);
+        expect(ofType(h, "role.failed")).toHaveLength(1);
+        expect(JSON.stringify(ofType(h, "role.failed")[0]?.data)).toMatch(/role instructions/);
+        await h.release();
+      }
+    });
+
+    it("a Claude Code headless run loads the compiled agent itself: nothing is prepended", async () => {
+      const h = createHarness({
+        plugins: compiledPlugins(),
+        project: { hosts: { dispatch: "headless_allowed" } },
+        capabilities: { subagents: false, backgroundSubagents: false },
+        headless: frontHalf,
+      });
+      await start(h, CLAUDE);
+      await next(h, CLAUDE);
+      expect(h.launched[0]?.request.prompt.startsWith("VTC dispatch")).toBe(true);
+      await h.engine.settle();
       await h.release();
     });
   },

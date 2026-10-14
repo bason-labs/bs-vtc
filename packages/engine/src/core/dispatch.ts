@@ -42,6 +42,7 @@ import {
   type RunHandle,
 } from "./kernel.js";
 import { finalReviewSteps } from "./final-review.js";
+import type { PromptParts } from "./plugins.js";
 import { effectiveVerdict } from "./gate-verdict.js";
 import { engineerDispatch, tierDown } from "./loop.js";
 import { writeTaskPack } from "./projections.js";
@@ -77,7 +78,25 @@ export interface DispatchedStep {
   readonly model: ResolvedModel;
   /** Absolute directory the role works in. */
   readonly cwd: string;
+  /**
+   * A headless run on a host that cannot load the compiled agent ({@link HEADLESS_LOADS_AGENT}):
+   * the agent's locked core, which the engine puts before the prompt (spine §5 reading 145);
+   * `null` when the plugin's texts are missing or do not match its manifest (the run must not
+   * start). Absent when the host loads the agent, or the plugin has no manifest entry for it.
+   */
+  readonly roleCore?: string | null;
 }
+
+/**
+ * Whether a host's headless run loads the compiled plugin agent itself (`claude -p --agent`,
+ * spine §7 "Claude headless plugin agent"). `codex exec` has no agent flag (spine §7 "Codex
+ * headless role identity"): the engine carries the role's locked core in the prompt and its
+ * editable section in the pack.
+ */
+export const HEADLESS_LOADS_AGENT: Readonly<Record<HostId, boolean>> = {
+  "claude-code": true,
+  codex: false,
+};
 
 export interface StepSpec {
   readonly key: string;
@@ -763,29 +782,44 @@ const pinnedPrompt = (k: Kernel, target: PromptTarget): PinSelection => {
 };
 
 /**
- * The compiled default editable section of an agent compiled without it (`editable_in_pack`,
- * reading 142), as the version Lookback's selector falls back to: the locked core must hash to the
- * manifest's `locked_sha256`, and the section must be a valid `Role heuristics` block. `null` when
- * the plugin does not carry both texts, or they do not check out.
+ * The compiled locked core and default editable section of an agent, checked: the locked core must
+ * hash to the manifest's `locked_sha256`, and the section must be a valid `Role heuristics` block.
+ * `null` when the plugin does not carry both texts, or they do not check out.
  */
-const compiledDefaultPrompt = (k: Kernel, target: PromptTarget): PinnedPrompt | null => {
-  const parts = k.deps.plugins.promptParts?.(target.agent, target.host);
-  if (parts?.editableInPack !== true || parts.compiled === undefined) return null;
+const compiledPrompt = (
+  target: PromptTarget,
+  parts: PromptParts | undefined,
+): { readonly locked: string; readonly pinned: PinnedPrompt } | null => {
+  if (parts?.compiled === undefined) return null;
   const locked = parts.compiled.locked.trim();
   const text = parts.compiled.editable.trim();
   if (parts.lockedSha256 === undefined || sha256Hex(locked) !== parts.lockedSha256) return null;
   if (text === "" || !TaskPackSchema.shape.role_heuristics.safeParse(text).success) return null;
   return {
-    version: {
-      role: target.role,
-      ...(target.mode === undefined ? {} : { mode: target.mode }),
-      host: target.host,
-      locked_sha256: parts.lockedSha256,
-      editable_sha256: sha256Hex(text),
-      effective_sha256: effectivePromptSha(locked, text),
+    locked,
+    pinned: {
+      version: {
+        role: target.role,
+        ...(target.mode === undefined ? {} : { mode: target.mode }),
+        host: target.host,
+        locked_sha256: parts.lockedSha256,
+        editable_sha256: sha256Hex(text),
+        effective_sha256: effectivePromptSha(locked, text),
+      },
+      text,
     },
-    text,
   };
+};
+
+/**
+ * The compiled default editable section of an agent compiled without it (`editable_in_pack`,
+ * reading 142), as the version Lookback's selector falls back to. `null` when the agent is not
+ * switched, or its texts do not check out ({@link compiledPrompt}).
+ */
+const compiledDefaultPrompt = (k: Kernel, target: PromptTarget): PinnedPrompt | null => {
+  const parts = k.deps.plugins.promptParts?.(target.agent, target.host);
+  if (parts?.editableInPack !== true) return null;
+  return compiledPrompt(target, parts)?.pinned ?? null;
 };
 
 /** An `incident.recorded` `prompt_selection` (reading 137): a selection the engine did not use. */
@@ -886,15 +920,23 @@ export const dispatchStep = (
     recordPromptSelection(k, h, step.task, `${agent}: ${selection.problem}`);
   // no pin applies: an agent compiled without its editable section gets the compiled default in
   // the pack (reading 142), so it never runs without its heuristics
-  const pinned =
-    selection.pinned ??
-    compiledDefaultPrompt(k, {
-      run: h.state.id,
-      role: step.role,
-      ...(step.mode === undefined ? {} : { mode: step.mode }),
-      host,
-      agent,
-    });
+  const target: PromptTarget = {
+    run: h.state.id,
+    role: step.role,
+    ...(step.mode === undefined ? {} : { mode: step.mode }),
+    host,
+    agent,
+  };
+  // reading 145: a headless run on a host that cannot load the compiled agent carries the role
+  // itself, its locked core before the prompt and its editable section in the pack (the default
+  // when no pin applies), so it never runs without its role. A plugin without a manifest entry
+  // for the agent (development) carries nothing; one whose texts do not check out fails the run.
+  const parts =
+    dispatch === "headless" && !HEADLESS_LOADS_AGENT[host]
+      ? k.deps.plugins.promptParts?.(agent, host)
+      : undefined;
+  const core = parts === undefined ? undefined : compiledPrompt(target, parts);
+  const pinned = selection.pinned ?? compiledDefaultPrompt(k, target) ?? core?.pinned ?? null;
   // AD-21 rule 2, reading 117: the pinned section is the pack's opening `Role heuristics` block
   const pack = writeTaskPack(k.deps.repoRoot, {
     ...packFor(k, h, step, actionId),
@@ -967,7 +1009,12 @@ export const dispatchStep = (
     ...(model.model === undefined ? {} : { model: model.model }),
     ...(resume === undefined ? {} : { resume }),
   };
-  return { action, model, cwd };
+  return {
+    action,
+    model,
+    cwd,
+    ...(core === undefined ? {} : { roleCore: core === null ? null : core.locked }),
+  };
 };
 
 /**
