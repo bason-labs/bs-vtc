@@ -26,7 +26,7 @@ const RUNTIME_SAFE_BUILTINS = [
   "util",
   "zlib",
 ];
-const ENGINE_MODULES = "(core|daemon|gates|git|http|mcp)";
+const ENGINE_MODULES = "(core|daemon|gates|git|http|lookback|mcp|research)";
 /**
  * Build output of any package or app. It is cruised (so imports INTO it are seen and rejected)
  * but never followed, and nothing it contains is checked as a source of dependencies.
@@ -200,7 +200,7 @@ module.exports = {
       comment:
         "daemon/ composes the engine modules; only the engine entry re-exports it. No module imports it back.",
       severity: "error",
-      from: { path: "^packages/engine/src/(core|gates|git|http|mcp|storage)/" },
+      from: { path: "^packages/engine/src/(core|gates|git|http|lookback|mcp|research|storage)/" },
       to: { path: "^packages/engine/src/daemon/" },
     },
     {
@@ -224,6 +224,30 @@ module.exports = {
       severity: "error",
       from: { path: "^packages/engine/src/(core|gates|git)/" },
       to: { path: "^packages/engine/src/(http|mcp)/" },
+    },
+    {
+      name: "AD13-core-does-not-import-lookback-or-research",
+      comment:
+        "Engine core, the Gate Runner and git never import lookback/ or research/: the daemon wires them (D-bb, AD-21, AD-22).",
+      severity: "error",
+      from: { path: "^packages/engine/src/(core|gates|git)/" },
+      to: { path: "^packages/engine/src/(lookback|research)/" },
+    },
+    {
+      name: "AD21-lookback-uses-core-and-the-gate-interface",
+      comment:
+        "lookback/ reaches engine core through its index only and the gates only through the GateRunner interface; it never imports gates, the transports, storage drivers or the daemon.",
+      severity: "error",
+      from: { path: "^packages/engine/src/lookback/" },
+      to: { path: "^packages/engine/src/(daemon|gates|http|mcp|storage)/" },
+    },
+    {
+      name: "AD22-research-is-a-leaf",
+      comment:
+        "research/ (fetchers, cache, facts) imports no other engine module; HTTP comes from the injected HttpClient.",
+      severity: "error",
+      from: { path: "^packages/engine/src/research/" },
+      to: { path: "^packages/engine/src/(core|daemon|gates|git|http|lookback|mcp|storage)/" },
     },
     // ---- AD-11: tests stay out of production code --------------------------
     {

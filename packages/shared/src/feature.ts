@@ -29,6 +29,41 @@ export const DEFAULT_FINAL_REVIEW_SHARE = 0.15;
 export const PullRequestCiSchema = z.enum(["pending", "green", "red", "unknown"]);
 export type PullRequestCi = z.infer<typeof PullRequestCiSchema>;
 
+/** A required status check on a commit, as `gh pr checks --required` reports its bucket. */
+export const RequiredCheckStateSchema = z.enum([
+  "success",
+  "pending",
+  "failure",
+  "skipped",
+  "cancelled",
+  "unknown",
+]);
+export type RequiredCheckState = z.infer<typeof RequiredCheckStateSchema>;
+
+export const RequiredCheckSchema = z.strictObject({
+  name: z.string().min(1).max(200),
+  state: RequiredCheckStateSchema,
+});
+export type RequiredCheck = z.infer<typeof RequiredCheckSchema>;
+
+/**
+ * Where the feature PR's auto-merge stands (`PullRequestRef.auto_merge`):
+ * `awaiting_checks` (required checks on the gated SHA still pending), `awaiting_review` (the base
+ * requires an approving review VTC never gives itself), `enabled` (`gh pr merge --auto` accepted),
+ * `queued` (in the base's merge queue), `merged`, `disabled` (GitHub or `vtc pause` turned it
+ * off: the head moved, the base changed, a conflict).
+ */
+export const AutoMergeStateSchema = z.enum([
+  "not_requested",
+  "awaiting_checks",
+  "awaiting_review",
+  "enabled",
+  "queued",
+  "merged",
+  "disabled",
+]);
+export type AutoMergeState = z.infer<typeof AutoMergeStateSchema>;
+
 /**
  * The feature's PR as the engine last observed it (`feature.pr_updated`, through the user's own
  * `gh` auth). `state: merged` with `merge_commit` is the Level-3 merge into main (§6.7): it has no
@@ -45,6 +80,17 @@ export const PullRequestRefSchema = z
     ci: PullRequestCiSchema,
     /** The commit on main, once merged. */
     merge_commit: GitShaSchema.optional(),
+    /** The PR number (`gh pr view --json number`), for `gh pr merge <n>`. New in 4.5.0. */
+    number: z.int().positive().optional(),
+    /** Level 3: where the PR's auto-merge stands (AD-23). New in 4.5.0. */
+    auto_merge: AutoMergeStateSchema.optional(),
+    /** The base's required checks on `head_sha`; `ci` stays the rollup. New in 4.5.0. */
+    required_checks: z.array(RequiredCheckSchema).optional(),
+    /** GitHub's `mergeStateStatus` as `gh` reports it (e.g. `BLOCKED`, `CLEAN`). New in 4.5.0. */
+    merge_state_status: z
+      .string()
+      .regex(/^[A-Z_]{1,32}$/)
+      .optional(),
   })
   .refine((pr) => (pr.state === "merged") === (pr.merge_commit !== undefined), {
     message: "merge_commit is required for, and only allowed with, state merged",

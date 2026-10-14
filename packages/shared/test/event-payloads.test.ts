@@ -198,6 +198,174 @@ const examples: { [T in CoreEventType]: { data: EventDataInput<T>; envelope?: ob
   "incident.recorded": {
     data: { kind: "log_corruption", detail: "torn final line", invalid_lines: [12] },
   },
+  // ---- contracts 4.5.0
+  "gate.requested": {
+    data: {
+      gates: ["G2"],
+      artifacts: [{ path: ".vtc/architecture/spine.md", sha256: SHA }],
+      design_directions: ["calm-ledger", "night-market"],
+      unverified_facts: ["f-0123456789abcdef"],
+    },
+  },
+  "headless.preflight": {
+    data: { host: "codex", purpose: "role", ok: false, failed: "auth", detail: "logged out" },
+  },
+  "headless.started": {
+    data: {
+      action_id: "a-7",
+      pid: 4242,
+      resume: null,
+      wall_timeout_ms: 3_600_000,
+      idle_timeout_ms: 600_000,
+    },
+    envelope: { role: "engineer", host: "codex" },
+  },
+  "headless.ended": {
+    data: { action_id: "a-7", outcome: "error", cause: "idle", exit_code: 143, duration_ms: 1000 },
+    envelope: { role: "engineer", host: "codex" },
+  },
+  "merge.preflight": {
+    data: {
+      configured_level: 3,
+      effective_level: 2,
+      ok: false,
+      failed: ["no_required_checks"],
+      policy: {
+        base: "main",
+        auto_merge_allowed: true,
+        required_checks: [],
+        merge_methods: ["squash"],
+        merge_queue: false,
+        requires_review: false,
+        signatures_required: false,
+      },
+    },
+  },
+  "feature.checklist": {
+    data: {
+      ok: false,
+      items: [
+        "final_review",
+        "reviewers",
+        "coverage",
+        "test_integrity",
+        "risk_rules",
+        "waivers",
+        "remote_ci",
+      ].map((id) => ({ id: id as "final_review", ok: id !== "remote_ci", detail: "x" })),
+    },
+    envelope: { feature: "F-1" },
+  },
+  "feature.auto_merge_enabled": {
+    data: { pr_number: 12, head_sha: COMMIT, method: "squash", merge_queue: false },
+    envelope: { feature: "F-1" },
+  },
+  "feature.auto_merge_disabled": {
+    data: { reason: "head_moved", detail: "the PR head is no longer the gated commit" },
+    envelope: { feature: "F-1" },
+  },
+  "feature.post_merge_ci": {
+    data: {
+      merge_commit: COMMIT,
+      status: "red",
+      runs: [{ name: "ci", conclusion: "failure", required: true }],
+    },
+    envelope: { feature: "F-1" },
+  },
+  "feature.reverted": {
+    data: {
+      merge_commit: COMMIT,
+      revert: { commit: COMMIT, detected_by: "git_log" },
+      detail: "This reverts commit",
+    },
+    envelope: { feature: "F-1" },
+  },
+  "final_review.step_finished": {
+    data: { step: 5, status: "skipped", reason: "no browser" },
+    envelope: { feature: "F-1" },
+  },
+  "research.fetched": {
+    data: {
+      scope: "_shared",
+      result: {
+        fetcher: "eol",
+        fetcher_version: "1",
+        url: "https://endoflife.date/api/v1/products/nodejs/releases/22",
+        status: "ok",
+        cache: "miss",
+        http_status: 200,
+        content_type: "application/json",
+        content_sha256: SHA,
+        bytes: 512,
+        retrieved_at: NOW,
+      },
+    },
+  },
+  "fact.recorded": {
+    data: {
+      fact: {
+        v: 1,
+        id: "f-0123456789abcdef",
+        subject: "nodejs@22",
+        predicate: "eol_date",
+        value: "2027-04-30",
+        status: "verified",
+        source: {
+          fetcher: "eol",
+          url: "https://endoflife.date/api/v1/products/nodejs/releases/22",
+          retrieved_at: NOW,
+          content_sha256: SHA,
+          locator: { kind: "json_pointer", pointer: "/result/eolFrom" },
+        },
+        recorded_by: "engine",
+        recorded_at: NOW,
+      },
+    },
+  },
+  "fact.verified": { data: { id: "f-0123456789abcdef", status: "stale" } },
+  "fact.waived": { data: { id: "f-0123456789abcdef", reason: "pricing page needs a login" } },
+  "lookback.dispatched": {
+    data: { target_role: "engineer", target_host: "claude-code", train_failures: 6 },
+  },
+  "lookback.proposal_recorded": {
+    data: { proposal: "p-1", path: ".vtc/lookback/proposals/engineer/proposal.json", changes: 2 },
+  },
+  "lookback.replay_finished": {
+    data: { proposal: "p-1", verdict: "inconclusive", path: ".vtc/lookback/replays/p-1.json" },
+  },
+  "lookback.canary_assigned": {
+    data: { arm: "candidate", candidate: SHA, baseline: "b".repeat(64) },
+    envelope: { task: "T-7", role: "engineer" },
+  },
+  "lookback.canary_evaluated": {
+    data: {
+      role: "engineer",
+      host: "claude-code",
+      repo_key: "0123456789abcdef",
+      candidate: SHA,
+      baseline: "b".repeat(64),
+      started_at: NOW,
+      arms: {
+        candidate: { dispatches: 3, escalations: 0, cap_hits: 0, tokens: 1000 },
+        baseline: { dispatches: 4, escalations: 1, cap_hits: 0, tokens: 1200 },
+      },
+      verdict: "no_data",
+      reason: "fewer than 5 dispatches in an arm",
+    },
+  },
+  "lookback.rolled_back": {
+    data: {
+      target_role: "engineer",
+      target_host: "claude-code",
+      from: SHA,
+      to: "b".repeat(64),
+      reason: "tokens per dispatch up more than 20%",
+    },
+  },
+  "lookback.escaped_defect": {
+    data: { merge_commit: COMMIT, kind: "revert", tasks: ["T-7"] },
+    envelope: { feature: "F-1" },
+  },
 };
 
 const event = (type: CoreEventType) => ({
@@ -315,6 +483,61 @@ describe("EVENT_PAYLOAD_SCHEMAS", () => {
     ["limit.hit", { host: "claude-code" }, "data.window"],
     ["merge.completed", { into: "main", commit: "abc1234", level: 2 }, "data.commit"],
     ["incident.recorded", { kind: "crash", detail: "x", extra: 1 }, "data"],
+    // ---- contracts 4.5.0
+    ["gate.requested", { gates: ["G2"], artifacts: [] }, "data.artifacts"],
+    ["headless.preflight", { host: "codex", purpose: "role", ok: false }, "data.failed"],
+    [
+      "headless.started",
+      { ...examples["headless.started"].data, wall_timeout_ms: 0 },
+      "data.wall_timeout_ms",
+    ],
+    ["headless.ended", { ...examples["headless.ended"].data, cause: "bored" }, "data.cause"],
+    ["merge.preflight", { ...examples["merge.preflight"].data, ok: true }, "data.failed"],
+    ["feature.checklist", { ok: true, items: [] }, "data.items"],
+    [
+      "feature.auto_merge_enabled",
+      { ...examples["feature.auto_merge_enabled"].data, method: "admin" },
+      "data.method",
+    ],
+    ["feature.auto_merge_disabled", { reason: "bored", detail: "x" }, "data.reason"],
+    ["feature.post_merge_ci", { merge_commit: COMMIT, status: "amber" }, "data.status"],
+    ["feature.reverted", { merge_commit: "abc", detail: "x" }, "data.merge_commit"],
+    ["final_review.step_finished", { step: 5, status: "skipped" }, "data.reason"],
+    ["research.fetched", { scope: "client-Bad Name", result: {} }, "data.scope"],
+    [
+      "fact.recorded",
+      { fact: { ...examples["fact.recorded"].data.fact, source: null } },
+      "data.fact.source",
+    ],
+    ["fact.verified", { id: "fact-1", status: "verified" }, "data.id"],
+    ["fact.waived", { id: "f-0123456789abcdef", reason: "" }, "data.reason"],
+    [
+      "lookback.dispatched",
+      { target_role: "engineer", target_host: "vim", train_failures: 6 },
+      "data.target_host",
+    ],
+    [
+      "lookback.proposal_recorded",
+      { ...examples["lookback.proposal_recorded"].data, changes: 4 },
+      "data.changes",
+    ],
+    [
+      "lookback.replay_finished",
+      { ...examples["lookback.replay_finished"].data, verdict: "improved" },
+      "data.verdict",
+    ],
+    ["lookback.canary_assigned", { arm: "both", candidate: SHA, baseline: SHA }, "data.arm"],
+    [
+      "lookback.canary_evaluated",
+      { ...examples["lookback.canary_evaluated"].data, verdict: "maybe" },
+      "data.verdict",
+    ],
+    [
+      "lookback.rolled_back",
+      { ...examples["lookback.rolled_back"].data, from: "abc" },
+      "data.from",
+    ],
+    ["lookback.escaped_defect", { merge_commit: COMMIT, kind: "flaky" }, "data.kind"],
   ];
   it("has an invalid case for every core type", () => {
     expect(new Set(invalid.map(([type]) => type))).toEqual(new Set(CORE_EVENT_TYPES));

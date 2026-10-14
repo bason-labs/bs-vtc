@@ -24,7 +24,9 @@
       ".nvmrc",
       ".prettierrc.json",
       ".prettierignore",
-      ".githooks/**"
+      ".githooks/**",
+      ".github/**",
+      "!.github/workflows/release.yml"
     ],
     "engine-core": [
       "packages/engine/**",
@@ -34,6 +36,10 @@
       "!packages/engine/src/index.ts",
       "!packages/engine/src/gates/**",
       "!packages/engine/test/gates/**",
+      "!packages/engine/src/lookback/**",
+      "!packages/engine/src/research/**",
+      "!packages/engine/test/lookback/**",
+      "!packages/engine/test/research/**",
       "fixtures/golden-run/**"
     ],
     "gate-runner": [
@@ -41,11 +47,24 @@
       "packages/engine/test/gates/**",
       "gates/**",
       "packages/cli/src/commands/calibrate.ts",
-      "packages/shared/src/helpers/redaction.ts"
+      "packages/shared/src/helpers/redaction.ts",
+      "THIRD_PARTY/**",
+      "NOTICE"
     ],
     "roles-compiler": ["roles/**", "skills/**", "plugins/**", "packages/compiler/**"],
     "adapters": ["packages/adapters/**"],
     "dashboard": ["apps/dashboard/**", "fixtures/dashboard-export/**"],
-    "cli-binary": ["packages/cli/**", "!packages/cli/src/commands/calibrate.ts"]
+    "cli-binary": [
+      "packages/cli/**",
+      "!packages/cli/src/commands/calibrate.ts",
+      ".github/workflows/release.yml",
+      "packaging/**"
+    ],
+    "lookback-research": [
+      "packages/engine/src/lookback/**",
+      "packages/engine/src/research/**",
+      "packages/engine/test/lookback/**",
+      "packages/engine/test/research/**"
+    ]
   }
 }

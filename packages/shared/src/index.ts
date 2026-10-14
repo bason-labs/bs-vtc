@@ -29,6 +29,11 @@ export * from "./engine-instance.js";
 export * from "./engine-api.js";
 export * from "./asset-paths.js";
 export * from "./persisted.js";
+export * from "./headless.js";
+export * from "./auto-merge.js";
+export * from "./research.js";
+export * from "./lookback.js";
+export * from "./visual.js";
 export * from "./interfaces/host-adapter.js";
 export type * from "./interfaces/storage.js";
 export type * from "./interfaces/gate-runner.js";
@@ -36,6 +41,7 @@ export type * from "./interfaces/assets.js";
 export type * from "./interfaces/auto-resume.js";
 export type * from "./interfaces/engine.js";
 export type * from "./interfaces/git.js";
+export type * from "./interfaces/research.js";
 export * from "./helpers/fingerprint.js";
 export * from "./helpers/severity.js";
 export * from "./helpers/tokens.js";
@@ -106,5 +112,26 @@ export * from "./json-schema.js";
  * (`claudeSessionPermissionDeny`, `VTC_HOME_SHELL_SPELLINGS`, reading 81); every Claude role
  * needing the session settings and no in-session Codex role (`inSessionDispatchRefusal`,
  * readings 81 and 82). All additive: optional fields, an enum value, new helpers.
+ * 4.5.0 (MINOR): wave 3, v1 completion (spine AD-21..AD-26, §5 readings 96–110, Lead decisions
+ * D-ay..D-bb, human decisions H-1 and H-2). Headless runs: `ROLE_DISPATCH_BY_LEAD_HOST` and an
+ * optional `leadHost` of `planDispatch` (a Codex Lead's roles run headless), purpose
+ * `lookback_replay`, `HeadlessPolicy` and `hosts.headless`, `HostOutcome` `error.cause`,
+ * `HostAuthStatus` and `HostAdapter.authStatus?`, `SpawnRoleRequest.idleTimeoutMs`,
+ * `HOST_DISALLOWED_ARGS`, `headlessIsolationGaps`, the AD-9 marker
+ * `dangerously-bypass-hook-trust`, `StatusResult.headless_runs`. Level 3: `RemoteMergeService`
+ * (optional `EngineDeps.remoteMerge`), `RemoteMergePolicy`, `level3Preflight`,
+ * `autoMergeChecklist`, the merge-level ledger and `effectiveMergeLevel`, `GH_FORBIDDEN_ARGS`,
+ * `PullRequestRef.number` / `auto_merge` / `required_checks` / `merge_state_status`. G2 and Final
+ * Review: `approve_gate.directions` / `facts`, `ApproveInput.fact_waivers`, `G2Direction`,
+ * `DesignCoverageReport`, `FinalReviewStepResult`,
+ * `ReleaseReadiness`, `SCOPE_CREEP_RULE_ID`. Lookback: prompt versions, pins, attribution,
+ * scorecards, proposals, replays, canaries and their pure statistics. Research: fetch requests
+ * and results, the cache, facts and locators, the network guard, `ROLE_MCP_TOOLS`, optional
+ * `EngineDeps.http`. Visual: `VisualReport` / `VisualSummary` (`GateReport.visual`),
+ * `GateRunRequest.visual`, `GatesConfig.visual`, `BrowserPin`, the novelty check and design
+ * library. New core events for each, and `role.dispatched.editable_sha256` / `canary_arm`.
+ * `WAVE3_HOME_WRITE_DENY` (folded into `ROLE_DENIED_VTC.homeWriteDeny` at the wave-3 merge). All
+ * additive: optional fields, new contracts, new
+ * constants and helpers; no existing enum gained a value a consumer maps exhaustively.
  */
-export const CONTRACTS_VERSION = "4.4.0";
+export const CONTRACTS_VERSION = "4.5.0";

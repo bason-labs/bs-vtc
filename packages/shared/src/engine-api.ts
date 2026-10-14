@@ -7,7 +7,10 @@
  * tool or route names a contract that does not exist.
  */
 import { z } from "zod";
+import { G2DirectionSchema } from "./design.js";
 import { EscalationAnswerSchema, EscalationSchema } from "./escalation.js";
+import { HeadlessRunSummarySchema } from "./headless.js";
+import { FactWaiverSchema, UnverifiedFactSummarySchema } from "./research.js";
 import { EventSchema } from "./event.js";
 import { FeatureSchema } from "./feature.js";
 import { FindingSchema } from "./finding.js";
@@ -132,6 +135,37 @@ export const ENGINE_MCP_TOOLS = [
 export type EngineMcpToolName = (typeof ENGINE_MCP_TOOLS)[number]["name"];
 
 /**
+ * Role-facing MCP tools (AD-4 rule 3; spine AD-22, new in 4.5.0): the research fetchers and the
+ * facts table, for the Research Analyst and the Architect. The engine serves them next to
+ * {@link ENGINE_MCP_TOOLS} on the same server, to role sessions and the Lead alike; every result is
+ * compact and fetched text arrives datamarked (`datamarkFetchedText`). A role proposes a fact and
+ * the engine verifies it; no role writes `facts.jsonl` or the cache itself.
+ */
+export const ROLE_MCP_TOOLS = [
+  {
+    name: "research_fetch",
+    purpose:
+      "Fetch from a pinned research source (endoflife.date, deps.dev, OSV, a registry, GitHub, a web page, RSS, a video transcript, search) through the engine's cache; returns the result and the datamarked text.",
+    input: "ResearchFetchInput",
+    output: "ResearchFetchResult",
+  },
+  {
+    name: "fact_lookup",
+    purpose: "Look up recorded facts by id or by subject, with their status and source.",
+    input: "FactLookupInput",
+    output: "FactLookupResult",
+  },
+  {
+    name: "fact_propose",
+    purpose:
+      "Propose a fact with its source and locator; the engine verifies the locator against the cached source and records the row as verified or unverified.",
+    input: "FactProposeInput",
+    output: "FactProposeResult",
+  },
+] as const;
+export type RoleMcpToolName = (typeof ROLE_MCP_TOOLS)[number]["name"];
+
+/**
  * Tools that record a human decision (D-an, spine §5 reading 71). The engine accepts them only
  * from a human channel:
  * - the run's Lead session (a `client: bridge` connection the engine holds as the run's Lead),
@@ -253,6 +287,18 @@ export const LeadActionSchema = z.discriminatedUnion("type", [
     design_directions: z.array(SlugSchema).max(3).default([]),
     /** G2: research claims still UNVERIFIED; each needs a human waiver (§8.2). */
     unverified_facts: z.array(SlugSchema).default([]),
+    /**
+     * G2: what to show for each of `design_directions` (prototype, screenshot, novelty), in the
+     * same order. New in 4.5.0.
+     */
+    directions: z.array(G2DirectionSchema).max(3).optional(),
+    /**
+     * G2: what to show for each of `unverified_facts` (subject, status, why), in the same order:
+     * every fact that is unverified, stale or conflicting, plus `UNVERIFIED:` tags and version,
+     * licence, CVE or EOL claims in the research sections that cite no fact (AD-22 rule 5).
+     * New in 4.5.0.
+     */
+    facts: z.array(UnverifiedFactSummarySchema).optional(),
   }),
   z.strictObject({
     type: z.literal("wait"),
@@ -360,6 +406,12 @@ export const ApproveInputSchema = z
     design_direction: SlugSchema.optional(),
     /** G2: UNVERIFIED research claims the human waives (§8.2). */
     waived_facts: z.array(SlugSchema).default([]),
+    /**
+     * G2: the human's reason for each waived fact (AD-22 rule 5); each id must also be in
+     * `waived_facts`. The engine requires a waiver with a reason for every fact
+     * `approve_gate.unverified_facts` listed and records each as `fact.waived`. New in 4.5.0.
+     */
+    fact_waivers: z.array(FactWaiverSchema).max(200).optional(),
     note: z.string().max(4000).optional(),
   })
   .superRefine((input, ctx) => {
@@ -376,6 +428,14 @@ export const ApproveInputSchema = z
         code: "custom",
         path: ["design_direction"],
         message: "design_direction and waived_facts belong to G2",
+      });
+    }
+    const waived = new Set(input.waived_facts);
+    if ((input.fact_waivers ?? []).some((w) => !waived.has(w.id))) {
+      ctx.addIssue({
+        code: "custom",
+        path: ["fact_waivers"],
+        message: "every fact waiver names a fact in waived_facts",
       });
     }
     if (input.decision === "reject" && input.design_direction !== undefined) {
@@ -467,6 +527,8 @@ export const StatusResultSchema = z.strictObject({
     spent_usd: z.number().nonnegative(),
   }),
   usage: UsageReportSchema,
+  /** Role runs the engine launched itself and that are still running (AD-25). New in 4.5.0. */
+  headless_runs: z.array(HeadlessRunSummarySchema).optional(),
 });
 export type StatusResult = z.infer<typeof StatusResultSchema>;
 

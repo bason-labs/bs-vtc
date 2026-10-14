@@ -15,6 +15,7 @@ export const AD9_MARKERS = [
   "bypassPermissions",
   "--yolo",
   "danger-full-access",
+  "dangerously-bypass-hook-trust",
   ".credentials.json",
   "auth.json",
   "find-generic-password",

@@ -5,7 +5,8 @@
  * implementation. Worktrees, branches, the submit snapshot commit and merges stay internal to
  * engine core. Every call uses the user's own git and auth (AD-9).
  */
-import type { PullRequestRef } from "../feature.js";
+import type { BaseRun, MergeMethod, RemoteMergePolicy, RevertRef } from "../auto-merge.js";
+import type { PullRequestRef, RequiredCheck } from "../feature.js";
 import type { GitSha, RelPath } from "../primitives.js";
 
 /** One changed file between two commits (renames detected). */
@@ -70,4 +71,51 @@ export interface PullRequestService {
   markReady(branch: string): Promise<PullRequestRef>;
   /** The PR as it is now (state, head, CI), or `null` when there is none. */
   view(branch: string): Promise<PullRequestRef | null>;
+}
+
+/** The remote and the user's `gh` login, for the Level-3 preflight (AD-23 rule 1). */
+export interface RemoteInfo {
+  /** The push remote is on GitHub. */
+  readonly github: boolean;
+  /** `gh auth status` exits 0 (no token is read). */
+  readonly ghAuthenticated: boolean;
+}
+
+/**
+ * Level-3 auto-merge and the post-merge watch (spec §6.7, AD-23), behind an interface so engine
+ * core and its tests never need the network. A separate, optional seam (`EngineDeps.remoteMerge`)
+ * keeps {@link PullRequestService} unchanged. The cli injects the `gh`-backed implementation; it
+ * uses the user's own `gh` auth, never passes `GH_FORBIDDEN_ARGS` (`--admin`), never changes repo
+ * settings and never pushes to the base branch. Without it, Level 3 is unavailable and the
+ * effective level is 2. New in contracts 4.5.0.
+ */
+export interface RemoteMergeService {
+  /** Whether the remote is GitHub and `gh` is logged in. */
+  remote(): Promise<RemoteInfo>;
+  /** What the remote enforces on `base` (rules API, then classic branch protection). */
+  policy(base: string): Promise<RemoteMergePolicy>;
+  /** The base's required checks on the PR head `sha` of `branch` (`gh pr checks --required`). */
+  requiredChecks(branch: string, sha: string): Promise<readonly RequiredCheck[]>;
+  /**
+   * `gh pr merge <n> --auto --match-head-commit <headSha> --<method>`: GitHub merges only while
+   * the PR head is still `headSha` (the commit the gates verified) and the requirements pass.
+   */
+  enableAutoMerge(request: {
+    readonly branch: string;
+    readonly headSha: string;
+    readonly method: MergeMethod;
+  }): Promise<PullRequestRef>;
+  /** `gh pr merge <n> --disable-auto` (`vtc pause`, a moved head); `null` when no PR exists. */
+  disableAutoMerge(branch: string): Promise<PullRequestRef | null>;
+  /** CI runs on `base` for the merge commit `sha` (`gh run list --branch --commit`). */
+  baseRuns(base: string, sha: string): Promise<readonly BaseRun[]>;
+  /**
+   * Reverts of `mergeCommit` on `base`: `git log <merge>..origin/<base>` for "This reverts commit
+   * <sha>", a PR that names `prNumber`, or an inverse patch-id match.
+   */
+  findReverts(
+    base: string,
+    mergeCommit: string,
+    prNumber: number | null,
+  ): Promise<readonly RevertRef[]>;
 }

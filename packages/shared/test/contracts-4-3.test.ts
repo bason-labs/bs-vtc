@@ -305,11 +305,11 @@ describe("the Lead session's Claude sandbox (D-an)", () => {
     expect(CODEX_UNIX_CONNECT_BLOCKED_PLATFORMS).toEqual(["darwin"]);
     expect(SESSION_SANDBOX_OFF_REASON).toContain("vtc install --host claude-code");
     expect(CODEX_IN_SESSION_REFUSED_REASON).toMatch(/cannot narrow them/);
-    // F7: the only remedy in v1 is a Claude Code Lead; no per-family host setting exists
-    // (project.yaml `hosts` has none) and the engine launches no headless runs (reading 93)
+    // F7, H-1: no per-family host setting exists (project.yaml `hosts` has none); since 4.5.0 a
+    // Codex Lead's roles run headless, so the refusal names the doctor check or a Claude Lead
     expect(CODEX_IN_SESSION_REFUSED_REASON).not.toMatch(/hosts\.dispatch/);
     expect(CODEX_IN_SESSION_REFUSED_REASON).not.toMatch(/project\.yaml/);
-    expect(CODEX_IN_SESSION_REFUSED_REASON).toMatch(/a Codex Lead can run no roles in v1/);
+    expect(CODEX_IN_SESSION_REFUSED_REASON).toMatch(/headless Codex runs the engine launches/);
     expect(CODEX_IN_SESSION_REFUSED_REASON).toContain("vtc install --host claude-code");
     expect(CODEX_IN_SESSION_REFUSED_REASON).toMatch(/run the Lead in Claude Code/);
   });

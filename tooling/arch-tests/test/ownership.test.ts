@@ -12,7 +12,7 @@ import {
 const map = loadOwnership();
 
 describe("tooling/ownership.json (AD-15)", () => {
-  it("names the six build teams and the integrator", () => {
+  it("names the seven build teams and the integrator (D-bb adds lookback-research)", () => {
     expect(Object.keys(map.teams).sort()).toEqual(
       [
         "adapters",
@@ -21,6 +21,7 @@ describe("tooling/ownership.json (AD-15)", () => {
         "engine-core",
         "gate-runner",
         "integrator",
+        "lookback-research",
         "roles-compiler",
       ].sort(),
     );
@@ -49,6 +50,19 @@ describe("tooling/ownership.json (AD-15)", () => {
     ["fixtures/golden-run/events.jsonl", "engine-core"],
     ["fixtures/dashboard-export/index.html", "dashboard"],
     ["pnpm-lock.yaml", "integrator"],
+    // wave 3 (D-bb, D-az, D-ay)
+    ["packages/engine/src/lookback/index.ts", "lookback-research"],
+    ["packages/engine/src/research/fetchers/eol.ts", "lookback-research"],
+    ["packages/engine/test/lookback/replay.test.ts", "lookback-research"],
+    ["packages/engine/test/research/cache.test.ts", "lookback-research"],
+    ["packages/engine/src/core/scheduler.ts", "engine-core"],
+    ["packages/engine/src/gates/visual/runner.ts", "gate-runner"],
+    ["THIRD_PARTY/impeccable/LICENSE", "gate-runner"],
+    ["NOTICE", "gate-runner"],
+    [".github/workflows/release.yml", "cli-binary"],
+    [".github/workflows/ci.yml", "integrator"],
+    ["packaging/install.sh", "cli-binary"],
+    ["packaging/homebrew/vtc.rb.tmpl", "cli-binary"],
   ])("%s belongs to %s", (path, team) => {
     expect(ownersOf(map, path)).toEqual([team]);
   });
@@ -77,6 +91,23 @@ describe("verify:scope (AD-15 rule 2: dependencies and the lockfile)", () => {
     expect(scopeViolations(map, "gate-runner", ["packages/engine/src/git/index.ts"])).toEqual([
       "packages/engine/src/git/index.ts",
     ]);
+    // D-bb: lookback/ and research/ moved from engine-core to lookback-research
+    expect(
+      scopeViolations(map, "engine-core", [
+        "packages/engine/src/lookback/index.ts",
+        "packages/engine/test/research/cache.test.ts",
+      ]),
+    ).toEqual([
+      "packages/engine/src/lookback/index.ts",
+      "packages/engine/test/research/cache.test.ts",
+    ]);
+    expect(
+      scopeViolations(map, "lookback-research", [
+        "packages/engine/src/research/index.ts",
+        "packages/engine/src/core/index.ts",
+        "packages/engine/src/index.ts",
+      ]),
+    ).toEqual(["packages/engine/src/core/index.ts", "packages/engine/src/index.ts"]);
   });
 });
 

@@ -39,7 +39,49 @@ import {
   EngineSocketHelloSchema,
   EngineSocketWelcomeSchema,
 } from "./engine-instance.js";
-import { DesignScreensFileSchema } from "./design.js";
+import {
+  AutoMergeChecklistSchema,
+  MergeLevelLedgerEntrySchema,
+  MergePreflightSchema,
+  RemoteMergePolicySchema,
+} from "./auto-merge.js";
+import {
+  DesignCoverageReportSchema,
+  DesignScreensFileSchema,
+  G2DirectionSchema,
+} from "./design.js";
+import { HostAuthStatusSchema } from "./headless.js";
+import {
+  AttributionSchema,
+  CanaryStateSchema,
+  LookbackPinsSchema,
+  PromptProposalSchema,
+  PromptVersionFrontmatterSchema,
+  PromptVersionRefSchema,
+  ReplayResultSchema,
+  ScorecardIndexSchema,
+  ScorecardSchema,
+} from "./lookback.js";
+import {
+  CacheEntrySchema,
+  FactLookupInputSchema,
+  FactLookupResultSchema,
+  FactProposeInputSchema,
+  FactProposeResultSchema,
+  FactRowSchema,
+  FactWaiverSchema,
+  FetchRequestSchema,
+  FetchResultSchema,
+  ResearchFetchInputSchema,
+  ResearchFetchResultSchema,
+} from "./research.js";
+import {
+  BrowserPinSchema,
+  DesignLibraryEntrySchema,
+  NoveltyReportSchema,
+  VisualReportSchema,
+  VisualSummarySchema,
+} from "./visual.js";
 import { EscalationSchema } from "./escalation.js";
 import { EVENT_PAYLOAD_SCHEMAS } from "./event-payloads.js";
 import { EventSchema } from "./event.js";
@@ -65,6 +107,8 @@ import { TaskPackSchema } from "./task-pack.js";
 import {
   AssertionProvenanceSchema,
   EvidenceBundleSchema,
+  FinalReviewStepResultSchema,
+  ReleaseReadinessSchema,
   TraceabilityReportSchema,
 } from "./traceability.js";
 import { StatuslineIngestSchema, UsageReportSchema, UsageSnapshotSchema } from "./usage.js";
@@ -153,6 +197,47 @@ export const CONTRACT_SCHEMAS = {
   DesignReviewCommentInput: DesignReviewCommentInputSchema,
   DesignReviewResult: DesignReviewResultSchema,
   HttpError: HttpErrorSchema,
+  // ---- contracts 4.5.0 (wave 3)
+  // headless runs (AD-25)
+  HostAuthStatus: HostAuthStatusSchema,
+  // Level 3 (AD-23)
+  RemoteMergePolicy: RemoteMergePolicySchema,
+  MergePreflight: MergePreflightSchema,
+  AutoMergeChecklist: AutoMergeChecklistSchema,
+  MergeLevelLedgerEntry: MergeLevelLedgerEntrySchema,
+  // G2 and Final Review
+  G2Direction: G2DirectionSchema,
+  DesignCoverageReport: DesignCoverageReportSchema,
+  FinalReviewStepResult: FinalReviewStepResultSchema,
+  ReleaseReadiness: ReleaseReadinessSchema,
+  // Lookback (AD-21)
+  PromptVersionRef: PromptVersionRefSchema,
+  PromptVersionFrontmatter: PromptVersionFrontmatterSchema,
+  LookbackPins: LookbackPinsSchema,
+  Attribution: AttributionSchema,
+  Scorecard: ScorecardSchema,
+  ScorecardIndex: ScorecardIndexSchema,
+  PromptProposal: PromptProposalSchema,
+  ReplayResult: ReplayResultSchema,
+  CanaryState: CanaryStateSchema,
+  // research (AD-22) and the role-facing tools (`ROLE_MCP_TOOLS`)
+  FetchRequest: FetchRequestSchema,
+  FetchResult: FetchResultSchema,
+  CacheEntry: CacheEntrySchema,
+  FactRow: FactRowSchema,
+  FactWaiver: FactWaiverSchema,
+  ResearchFetchInput: ResearchFetchInputSchema,
+  ResearchFetchResult: ResearchFetchResultSchema,
+  FactLookupInput: FactLookupInputSchema,
+  FactLookupResult: FactLookupResultSchema,
+  FactProposeInput: FactProposeInputSchema,
+  FactProposeResult: FactProposeResultSchema,
+  // visual QA (AD-24)
+  VisualReport: VisualReportSchema,
+  VisualSummary: VisualSummarySchema,
+  BrowserPin: BrowserPinSchema,
+  NoveltyReport: NoveltyReportSchema,
+  DesignLibraryEntry: DesignLibraryEntrySchema,
 } as const;
 export type ContractName = keyof typeof CONTRACT_SCHEMAS;
 

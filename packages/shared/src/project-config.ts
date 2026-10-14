@@ -5,6 +5,7 @@
  */
 import { z } from "zod";
 import { DEFAULT_FINAL_REVIEW_SHARE } from "./feature.js";
+import { HeadlessConfigSchema } from "./headless.js";
 import { GlobSchema, HostIdSchema, SeveritySchema, SlugSchema } from "./primitives.js";
 import { ModelTierSchema } from "./role-contract.js";
 
@@ -68,13 +69,20 @@ export const ProjectConfigSchema = z.strictObject({
     .strictObject({
       preferred: HostIdSchema.optional(),
       /**
-       * `plugin_only` (default): the engine never launches a headless host process; every role
-       * runs as a subagent the Lead dispatches. `headless_allowed`: the engine may launch
-       * `claude -p` / `codex exec` for auto-resume and cross-family review. §12.5 requires
-       * written vendor confirmation before headless spawning ships commercially; plugin-only
-       * mode needs none (`planDispatch`, spine AD-17).
+       * `plugin_only` (default): the engine launches no headless Claude run and no run without
+       * a live Lead; roles run as subagents the Lead dispatches, except that a Codex Lead's roles
+       * always run as engine-launched headless Codex runs (H-1, `ROLE_DISPATCH_BY_LEAD_HOST`).
+       * `headless_allowed`: the engine may also launch `claude -p` / `codex exec` for
+       * auto-resume with no Lead, cross-family review and hosts without subagents. §12.5
+       * requires written vendor confirmation before headless spawning ships commercially
+       * (`planDispatch`, spine AD-17, AD-25).
        */
       dispatch: DispatchModeSchema.default("plugin_only"),
+      /**
+       * Supervision of engine-launched headless runs (AD-25 rule 4): wall and idle timeouts in
+       * minutes. Absent: `HEADLESS_DEFAULTS` (`headlessPolicyFor`). New in 4.5.0.
+       */
+      headless: HeadlessConfigSchema.optional(),
       /** Opt-in cross-family review for high-risk tasks (D10, §12.4). */
       cross_family_review: z.boolean().default(false),
       /**
