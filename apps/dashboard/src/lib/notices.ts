@@ -20,7 +20,9 @@ import type { Tone } from "./states";
  * change (`no_remote`: Level 2+ in a repo without a push remote, spine §5 reading 18). Since
  * contracts 4.5.0 also a failed Level-3 preflight, auto-merge turned off, a red base CI or a
  * revert after a Level-3 merge (AD-23), an engine-launched run that did not finish or could not
- * start (AD-25) and a prompt canary rolled back (AD-21). The engine still owns all state: these
+ * start (AD-25) and a prompt canary rolled back (AD-21). Since 4.7.0 a pinned or canary prompt
+ * the engine did not use (`prompt_selection`, spine §5 readings 137 and 176), folded into one
+ * notice per detail since core records one per dispatch. The engine still owns all state: these
  * are read from the run's event log and only explained here.
  */
 
@@ -68,6 +70,8 @@ export interface RunNotice {
   readonly evidence: readonly string[];
   /** A later push or PR update succeeded for the same feature. */
   readonly resolved: boolean;
+  /** How many times the engine recorded this same notice (1 unless folded). */
+  readonly repeats: number;
 }
 
 const INCIDENT_TITLES: Readonly<Record<IncidentKind, string>> = {
@@ -84,7 +88,7 @@ const INCIDENT_TITLES: Readonly<Record<IncidentKind, string>> = {
   run_adopted: "Run adopted from another clone",
   milestone_commit: "Milestone commit of .vtc/ did not go through",
   auth: "A host is not signed in",
-  prompt_selection: "A pinned prompt was not used",
+  prompt_selection: "A pinned or canary prompt was not used",
 };
 
 const MERGE_REASONS: Readonly<Record<EventData<"run.merge_level_changed">["reason"], string>> = {
@@ -94,8 +98,24 @@ const MERGE_REASONS: Readonly<Record<EventData<"run.merge_level_changed">["reaso
   no_remote: "This repository has no push remote.",
 };
 
-type NoticeBody = Omit<RunNotice, "seq" | "at" | "type" | "feature" | "resolved" | "evidence"> &
+type NoticeBody = Omit<
+  RunNotice,
+  "seq" | "at" | "type" | "feature" | "resolved" | "evidence" | "repeats"
+> &
   Partial<Pick<RunNotice, "evidence">>;
+
+/** Incident kinds that are a heads-up, not a failure: the run carries on as configured. */
+const WARN_INCIDENTS: ReadonlySet<IncidentKind> = new Set<IncidentKind>([
+  "config_changed",
+  "prompt_selection",
+]);
+
+const INCIDENT_NOTES: Readonly<Partial<Record<IncidentKind, string>>> = {
+  config_changed:
+    "The run keeps the config it started with; the new config applies to the next run.",
+  prompt_selection:
+    "The compiled default prompt ran instead. A target whose agent carries its own editable section cannot take a pin until its role is switched to the task pack; vtc lookback pin and approve warn about this.",
+};
 
 const DOWNGRADE_NOTE =
   "The merge level drops one step and an escaped defect goes to Lookback; only a human restores the level (vtc merge-level restore).";
@@ -212,13 +232,10 @@ const body = (event: VtcEvent): NoticeBody | null => {
   if (isEventOfType(event, "incident.recorded")) {
     const data = readEventData(event);
     return {
-      tone: data.kind === "config_changed" ? "warn" : "danger",
+      tone: WARN_INCIDENTS.has(data.kind) ? "warn" : "danger",
       title: INCIDENT_TITLES[data.kind],
       detail: data.detail,
-      note:
-        data.kind === "config_changed"
-          ? "The run keeps the config it started with; the new config applies to the next run."
-          : null,
+      note: INCIDENT_NOTES[data.kind] ?? null,
       evidence: data.evidence.map((e) => `${e.type}: ${e.ref}`),
     };
   }
@@ -251,6 +268,7 @@ export const noticeForEvent = (event: VtcEvent): RunNotice | null => {
     ...(event.feature === undefined ? {} : { feature: event.feature }),
     evidence: [],
     resolved: false,
+    repeats: 1,
     ...made,
   };
 };
@@ -290,16 +308,37 @@ const resolves = (failed: VtcEvent, notice: RunNotice, later: VtcEvent): boolean
 };
 
 /**
+ * The key of a notice that folds with every other notice of the same key, or `null`: a
+ * `prompt_selection` incident is recorded at each dispatch the pin could not reach, so the same
+ * detail is one notice (the newest) with how often it was recorded.
+ */
+const foldKey = (event: VtcEvent): string | null => {
+  const incident = eventData(event, "incident.recorded");
+  return incident?.kind === "prompt_selection" ? `prompt_selection:${incident.detail}` : null;
+};
+
+/**
  * The run's notices, newest first; with `feature`, only that feature's. A failed push or PR
  * update is `resolved` once a later push or PR update of the same feature succeeded.
  */
 export const runNotices = (events: readonly VtcEvent[], feature?: string): RunNotice[] => {
   const notices: RunNotice[] = [];
+  const folded = new Map<string, number>();
   for (const event of events) {
     if (feature !== undefined && event.feature !== feature) continue;
     const notice = noticeForEvent(event);
     if (notice === null) continue;
     const resolved = events.some((later) => resolves(event, notice, later));
+    const key = foldKey(event);
+    const at = key === null ? undefined : folded.get(key);
+    if (key !== null && at !== undefined) {
+      const earlier = notices[at];
+      if (earlier !== undefined) {
+        notices[at] = { ...notice, resolved, repeats: earlier.repeats + 1 };
+        continue;
+      }
+    }
+    if (key !== null) folded.set(key, notices.length);
     notices.push({ ...notice, resolved });
   }
   return notices.sort((a, b) => b.seq - a.seq);

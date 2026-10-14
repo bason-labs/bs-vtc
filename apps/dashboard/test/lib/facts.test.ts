@@ -53,6 +53,36 @@ describe("currentFacts", () => {
     expect(model.recordedBy).toBe("architect");
   });
 
+  it("shows where the role reported an unverified claim from (H-3): host search and its query", () => {
+    const model = currentFacts(rows).find((f) => f.id === "f-2222222222222222")!;
+    expect(model.reportedSource).toEqual({
+      via: "Reported via host search for “vendor-sdk latest version”",
+      url: "https://vendor.example.com/sdk/releases",
+      href: "https://vendor.example.com/sdk/releases",
+    });
+    const fetched = FactRowSchema.parse({
+      ...rows.find((r) => r.id === "f-2222222222222222")!,
+      reported_source: { url: "ftp://vendor.example.com/notes", via: "host_fetch" },
+    });
+    expect(currentFacts([fetched])[0]?.reportedSource).toEqual({
+      via: "Reported via host fetch",
+      url: "ftp://vendor.example.com/notes",
+      href: null,
+    });
+  });
+
+  it("shows a reported source only next to a fact that is not verified", () => {
+    const row = rows.find((r) => r.id === "f-1111111111111111")!;
+    const verified = FactRowSchema.parse({
+      ...row,
+      reported_source: { url: "https://registry.npmjs.org/react", via: "host_fetch" },
+    });
+    expect(currentFacts([verified])[0]?.reportedSource).toBeNull();
+    expect(
+      currentFacts(rows).find((f) => f.id === "f-fedcba9876543210")?.reportedSource,
+    ).toBeNull();
+  });
+
   it("applies a later fact.waived event with its reason", () => {
     const facts = currentFacts(rows, GATE_EVENTS);
     const waived = facts.find((f) => f.id === "f-fedcba9876543210")!;

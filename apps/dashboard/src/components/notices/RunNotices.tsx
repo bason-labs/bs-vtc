@@ -3,6 +3,7 @@
 import { AlertTriangle, CheckCircle2 } from "lucide-react";
 import { runTopic } from "@/lib/api/topics";
 import { loadRunEvents, runNotices } from "@/lib/notices";
+import { billingNotices } from "@/lib/usage";
 import { hrefs } from "@/lib/router";
 import { formatLocalTime } from "@/lib/time";
 import { useNow } from "@/lib/useNow";
@@ -14,17 +15,23 @@ import { Badge, Card, CardDescription, CardHeader, CardTitle } from "@/component
 /**
  * The run's notices (§6.7, §15): failed pushes and PR updates, incidents (a config change that
  * does not pause the run, an unexplained checkout write…) and merge-level changes, read from
- * the run's event log. Shows nothing while loading, on error or when there is nothing to see:
- * the graph and the feature view stay the page's subject. With `feature`, only that feature's.
+ * the run's event log; on the run itself, also each host whose role runs bill an API key
+ * (`UsageSnapshot.billing`, D-bq). Shows nothing while loading, on error or when there is nothing
+ * to see: the graph and the feature view stay the page's subject. With `feature`, only that
+ * feature's.
  */
 export function RunNotices({ run, feature }: { run: string; feature?: string }) {
   const now = useNow();
   const events = useResource(`events:${run}`, (c, s) => loadRunEvents(c, run, s), [
     runTopic(run, "notices"),
   ]);
+  const usage = useResource(feature === undefined ? "usage" : null, (c, s) => c.usage(s), [
+    "usage",
+  ]);
   const notices = events.data === undefined ? [] : runNotices(events.data.events, feature);
+  const billing = usage.data === undefined ? [] : billingNotices(usage.data);
   const truncated = events.data?.truncated === true;
-  if (notices.length === 0 && !truncated) return null;
+  if (notices.length === 0 && billing.length === 0 && !truncated) return null;
   return (
     <Card aria-labelledby={`notices-${run}`} className="mb-4">
       <CardHeader>
@@ -32,8 +39,24 @@ export function RunNotices({ run, feature }: { run: string; feature?: string }) 
         <CardDescription>Recorded by the engine; nothing here waits for an answer.</CardDescription>
       </CardHeader>
       {truncated ? <EventLogTruncated className="mb-2" /> : null}
-      {notices.length === 0 ? null : (
+      {notices.length === 0 && billing.length === 0 ? null : (
         <ul aria-label="Run notices" className="space-y-2">
+          {billing.map((b) => (
+            <li
+              key={`billing-${b.host}`}
+              data-testid={`billing-${b.host}`}
+              className="rounded-2xl border border-border bg-surface/60 px-3 py-2 text-sm"
+            >
+              <div className="flex flex-wrap items-center gap-1.5 text-xs">
+                <Badge tone="warn">
+                  <AlertTriangle aria-hidden className="size-3" />
+                  Notice
+                </Badge>
+              </div>
+              <p className="mt-1 font-medium">{b.name}</p>
+              <p className="mt-0.5 break-words text-muted-fg">{b.warning}</p>
+            </li>
+          ))}
           {notices.map((n) => (
             <li
               key={n.seq}
@@ -58,7 +81,12 @@ export function RunNotices({ run, feature }: { run: string; feature?: string }) 
                   {formatLocalTime(n.at, now)}
                 </time>
               </div>
-              <p className="mt-1 font-medium">{n.title}</p>
+              <p className="mt-1 font-medium">
+                {n.title}
+                {n.repeats > 1 ? (
+                  <span className="font-normal text-muted-fg"> · recorded {n.repeats} times</span>
+                ) : null}
+              </p>
               <p className="mt-0.5 break-words text-muted-fg">{n.detail}</p>
               {n.note === null ? null : <p className="mt-0.5 text-xs text-muted-fg">{n.note}</p>}
               {n.evidence.length === 0 ? null : (

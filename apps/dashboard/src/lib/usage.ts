@@ -1,4 +1,5 @@
 import {
+  API_KEY_BILLING_WARNING,
   HOST_IDS,
   remainingPct,
   unknownUsage,
@@ -22,7 +23,8 @@ import {
  * The usage panel (§17, D15; §6.9): one card per host with the 5-hour and weekly windows (used %,
  * remaining %, the local reset time), when the data was last updated, per-model "limit reached"
  * rows, the tasks interrupted by limits and the auto-resume countdown. Missing data is "unknown",
- * never 0%.
+ * never 0%. A host signed in with an API key shows `API_KEY_BILLING_WARNING` verbatim (D-bq,
+ * spine §5 reading 171); unknown or absent billing shows nothing.
  */
 export const HOST_NAMES: Readonly<Record<HostId, string>> = {
   "claude-code": "Claude Code",
@@ -61,6 +63,8 @@ export interface UsageCardModel {
   readonly updated: { readonly text: string; readonly tone: AgeTone };
   readonly windows: readonly UsageWindowModel[];
   readonly modelLimits: readonly string[];
+  /** `API_KEY_BILLING_WARNING` for an API-key login, else `null`. */
+  readonly billingWarning: string | null;
 }
 
 export interface UsagePanelModel {
@@ -116,6 +120,23 @@ const windowModel = (
   };
 };
 
+const billingWarning = (snapshot: Pick<UsageSnapshot, "billing">): string | null =>
+  snapshot.billing === "api_key" ? API_KEY_BILLING_WARNING : null;
+
+export interface BillingNotice {
+  readonly host: HostId;
+  readonly name: string;
+  readonly warning: string;
+}
+
+/** The hosts whose role runs bill an API key (D-bq), in host order, for the run notices. */
+export const billingNotices = (report: UsageReport): BillingNotice[] =>
+  HOST_IDS.flatMap((host) => {
+    const snapshot = report.hosts.find((h) => h.host === host);
+    const warning = snapshot === undefined ? null : billingWarning(snapshot);
+    return warning === null ? [] : [{ host, name: HOST_NAMES[host], warning }];
+  });
+
 const cardModel = (
   snapshot: UsageSnapshot,
   now: number,
@@ -151,6 +172,7 @@ const cardModel = (
             : `resets ${formatLocalTime(limit.resets_at, now, options)}`
         }`,
     ),
+    billingWarning: billingWarning(snapshot),
   };
 };
 

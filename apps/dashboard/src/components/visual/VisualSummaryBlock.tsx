@@ -8,11 +8,13 @@ import { hrefs } from "@/lib/router";
 import { visualSummaryModel } from "@/lib/visual";
 import { Link } from "@/components/app/Link";
 import { StatusPill } from "@/components/ui";
+import { VisualNotes } from "./VisualNotes";
 
 /**
  * The visual step of a gate run (`GateReport.visual`, AD-24): its status (only `pass` passes;
- * `skipped` and `unchecked` are shown as not passed), why, the counts and its findings, with a
- * link to the full report (render matrix, axe, diffs).
+ * `skipped` and `unchecked` are shown as not passed), why, whose toolchain ran it, the counts and
+ * its findings, with a link to the full report at the path `VisualSummary.report` names (render
+ * matrix, axe, diffs).
  */
 export function VisualSummaryBlock({ run, summary }: { run: string; summary: VisualSummary }) {
   const m = visualSummaryModel(summary);
@@ -25,11 +27,7 @@ export function VisualSummaryBlock({ run, summary }: { run: string; summary: Vis
         </h4>
         <StatusPill meta={m.status} className="ml-auto" />
       </div>
-      {m.notes.map((n) => (
-        <p key={n} className="text-muted-fg">
-          {n}
-        </p>
-      ))}
+      <VisualNotes reason={m.reason} notes={m.notes} toolchain={m.toolchain} />
       <dl className="grid grid-cols-2 gap-1 sm:grid-cols-4">
         {m.counts.map((c) => (
           <div key={c.label} className="rounded-lg bg-surface-2 px-2 py-1">
