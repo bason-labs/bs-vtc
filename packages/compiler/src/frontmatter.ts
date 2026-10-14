@@ -30,7 +30,10 @@ export const parseFrontmatter = (text: string): FrontmatterCheck => {
 };
 
 /** Renders frontmatter plus body. Keys keep their insertion order; strings are quoted only when YAML needs it. */
-export const renderFrontmatter = (data: Readonly<Record<string, string>>, body: string): string => {
+export const renderFrontmatter = (
+  data: Readonly<Record<string, string | readonly string[]>>,
+  body: string,
+): string => {
   const yaml = stringifyYaml(data, { lineWidth: 0 }).trimEnd();
   return `---\n${yaml}\n---\n\n${body}`;
 };

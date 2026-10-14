@@ -89,6 +89,13 @@ const assertBareToolNames = (field: string, entries: readonly string[]): readonl
   return entries;
 };
 
+/** Claude Code names plugin skills `<plugin>:<skill>` (code.claude.com/docs/en/skills). */
+export const claudeSkillName = (skill: string): string => `${PLUGIN_NAME}:${skill}`;
+
+/**
+ * A Claude Code agent file. `skills` preloads the agent's skills (`role-skills.ts`): the agent's
+ * `tools` never include `Skill`, so preloading is the only way a skill reaches it.
+ */
 export const renderClaudeAgent = (agent: CompiledAgent): string =>
   renderFrontmatter(
     {
@@ -98,6 +105,7 @@ export const renderClaudeAgent = (agent: CompiledAgent): string =>
       disallowedTools: assertBareToolNames("disallowedTools", CLAUDE_DENIED_TOOLS).join(", "),
       model: agent.model.model ?? CLAUDE_MODEL_ALIASES[agent.model.tier],
       effort: agent.model.effort,
+      ...(agent.skills.length === 0 ? {} : { skills: agent.skills.map(claudeSkillName) }),
     },
     agent.instructions,
   );

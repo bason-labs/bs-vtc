@@ -29,6 +29,8 @@ import {
 } from "@vtc/shared";
 import {
   ADVISOR_QUESTION_ARTIFACT,
+  AGENT_PLUGINS_SCHEMAS,
+  CODEX_MCP_FILE,
   checkPluginFiles,
   CLAUDE_DENIED_TOOLS,
   claudeEngineToolName,
@@ -67,12 +69,25 @@ describe("the repo's sources compile (AD-16 Check)", () => {
     expect(loaded.ok ? [] : loaded.errors).toEqual([]);
   });
 
-  it.each(HOST_IDS)("the %s plugin registers the engine bridge", (host) => {
-    const mcp = output().targets[host].find((f) => f.path === ".mcp.json");
-    const entry = engineMcpServer(host);
+  it("the claude-code plugin registers the engine bridge in .mcp.json", () => {
+    const mcp = output().targets["claude-code"].find((f) => f.path === ".mcp.json");
+    const entry = engineMcpServer("claude-code");
     expect(JSON.parse(mcp?.text ?? "{}")).toEqual({
       mcpServers: { [entry.name]: { command: entry.command, args: entry.args } },
     });
+  });
+
+  it("the codex plugin registers the engine bridge in the portable mcp.json, with its transport", () => {
+    const mcp = output().targets.codex.find((f) => f.path === CODEX_MCP_FILE);
+    const entry = engineMcpServer("codex");
+    expect(JSON.parse(mcp?.text ?? "{}")).toEqual({
+      $schema: AGENT_PLUGINS_SCHEMAS.mcp,
+      mcpServers: { [entry.name]: { type: "stdio", command: entry.command, args: entry.args } },
+    });
+    const manifest = JSON.parse(
+      sources.find((f) => f.path === "plugins/codex/plugin.json")?.text ?? "{}",
+    ) as Record<string, unknown>;
+    expect(manifest.$schema).toBe(AGENT_PLUGINS_SCHEMAS.plugin);
   });
 
   it.each(HOST_IDS)("the %s plugin has exactly one agent per compiled agent name", (host) => {
@@ -427,12 +442,13 @@ describe("spine §5 readings 27, 29 and 37 (write scopes of the research and des
     expect(role("security")?.modes?.verify?.tools?.profile).toBe("read_only");
   });
 
-  it("declares no engine tools: role-facing research tools come with sub-project 4", () => {
-    const named = roles.flatMap((r) => [
-      ...r.tools.engine_tools,
-      ...Object.values(r.modes ?? {}).flatMap((m) => m.tools?.engine_tools ?? []),
-    ]);
-    expect(named).toEqual([]);
+  it("lets only the Architect and the Research Analyst declare the research tools (AD-22)", () => {
+    const declaring = roles.filter(
+      (r) =>
+        r.tools.engine_tools.length > 0 ||
+        Object.values(r.modes ?? {}).some((m) => (m.tools?.engine_tools ?? []).length > 0),
+    );
+    for (const r of declaring) expect(["architect", "research_analyst"]).toContain(r.id);
   });
 });
 

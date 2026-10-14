@@ -15,6 +15,7 @@ import {
   PluginManifestSchema,
   promptShaFor,
   ROLE_CONTRACTS_ASSET,
+  ROLE_MCP_TOOLS,
   RoleContractSchema,
   type HostId,
   type PluginManifestAgent,
@@ -25,13 +26,22 @@ import {
 } from "@vtc/shared";
 import { advisorContractErrors } from "./advisors.js";
 import { checkPluginFiles, compiledAgentNames } from "./checks.js";
+import {
+  CODEX_MCP_FILE,
+  CODEX_PLUGIN_MANIFEST,
+  codexManifestErrors,
+  codexMcpJson,
+} from "./codex-plugin.js";
 import { parseFrontmatter, renderFrontmatter } from "./frontmatter.js";
 import { HOOKS_FILE, renderHooks } from "./hooks.js";
 import { PLUGIN_NAME, renderClaudeAgent, renderCodexAgent } from "./hosts.js";
-import { buildInstructions, type InstructionSources } from "./instructions.js";
+import { agentInstructions, buildInstructions, type InstructionSources } from "./instructions.js";
+import { EDITABLE_IN_PACK_ROLES, rolePromptAssetPath } from "./prompt-parts.js";
+import { skillsForAgent, skillTextFor } from "./role-skills.js";
 import { loadRoles, type LoadedRole } from "./role-source.js";
 import type {
   CompileError,
+  CompileOptions,
   CompileResult,
   CompiledAgent,
   EmittedFile,
@@ -212,7 +222,7 @@ const checkLayout = (files: readonly SourceFile[], errors: CompileError[]): void
     }
     const host = /^plugins\/(claude-code|codex)\/(.+)$/.exec(path);
     if (host?.[1] !== undefined && host[2] !== undefined) {
-      if (path === "plugins/codex/.mcp.json") {
+      if (path === "plugins/codex/.mcp.json" || path === `plugins/codex/${CODEX_MCP_FILE}`) {
         errors.push({
           path,
           message: "the Codex MCP entry is generated from engineMcpServer; do not hand-write it",
@@ -235,15 +245,16 @@ const checkLayout = (files: readonly SourceFile[], errors: CompileError[]): void
   }
 };
 
-const mcpJson = (host: HostId): string => {
-  const entry = engineMcpServer(host);
+/** The Claude Code plugin's `.mcp.json`: Claude Code's own format, no transport type. */
+const claudeMcpJson = (): string => {
+  const entry = engineMcpServer("claude-code");
   return `${JSON.stringify({ mcpServers: { [entry.name]: { command: entry.command, args: entry.args } } }, null, 2)}\n`;
 };
 
 const checkClaudeMcp = (files: readonly SourceFile[], errors: CompileError[]): void => {
   const path = "plugins/claude-code/.mcp.json";
   const file = files.find((f) => f.path === path);
-  const expected = JSON.parse(mcpJson("claude-code")) as unknown;
+  const expected = JSON.parse(claudeMcpJson()) as unknown;
   let actual: unknown;
   try {
     actual = file === undefined ? undefined : (JSON.parse(file.text) as unknown);
@@ -265,12 +276,12 @@ const requireFile = (files: readonly SourceFile[], path: string, errors: Compile
 };
 
 /**
- * Role-facing engine MCP tools in the frozen contract. None yet: the frozen surface
- * (`ENGINE_MCP_TOOLS`) holds the Lead's tools only, and AD-4 rule 3 adds role-facing ones (repo
- * map, research fetchers, fact lookups) as a MINOR change to @vtc/shared. Until then a role that
- * names an engine tool does not compile, so no agent is built against a tool nobody serves.
+ * Role-facing engine MCP tools in the frozen contract (`ROLE_MCP_TOOLS`, AD-4 rule 3, contracts
+ * 4.5.0): the research fetchers and the facts table, served on the same `vtc` server as the
+ * Lead's tools. A role that names any other engine tool does not compile, so no agent is built
+ * against a tool nobody serves.
  */
-export const ROLE_FACING_ENGINE_TOOLS: readonly string[] = [];
+export const ROLE_FACING_ENGINE_TOOLS: readonly string[] = ROLE_MCP_TOOLS.map((tool) => tool.name);
 
 const LEAD_TOOLS: readonly string[] = ENGINE_MCP_TOOLS.map((tool) => tool.name);
 
@@ -312,18 +323,23 @@ export const codexModelErrors = (role: RoleContract): string[] => {
 const compileAgents = (
   roles: readonly LoadedRole[],
   host: HostId,
-  sources: InstructionSources,
+  input: TargetInput,
   errors: CompileError[],
 ): CompiledAgent[] => {
   const agents: CompiledAgent[] = [];
+  const available = new Set(input.skills.map((s) => s.name));
   for (const loaded of roles) {
     const { role } = loaded;
     const modes = role.modes === undefined ? [undefined] : Object.keys(role.modes);
     const names = compiledAgentNames(role);
+    const inPack = input.editableInPack.includes(role.id);
     modes.forEach((mode, index) => {
-      const built = buildInstructions(loaded, mode, host, sources);
+      const built = buildInstructions(loaded, mode, host, input.sources, inPack);
+      const tools = built.ok ? built.contract.tools.engine_tools : [];
+      const needs = skillsForAgent(role.id, tools, available);
       const messages = [
-        ...(built.ok ? engineToolErrors(built.contract.tools.engine_tools) : built.errors),
+        ...(built.ok ? engineToolErrors(tools) : built.errors),
+        ...needs.errors,
         ...advisorContractErrors(role),
         ...codexModelErrors(role),
       ];
@@ -345,7 +361,10 @@ const compileAgents = (
         description: describeAgent(role, mode),
         tools: built.contract.tools,
         model: built.contract.models[host],
-        instructions: built.text,
+        instructions: agentInstructions(built, inPack),
+        locked: built.locked,
+        editable: built.editable,
+        skills: needs.skills,
       });
     });
   }
@@ -361,6 +380,8 @@ const manifestAgent = (agent: CompiledAgent, file: string): PluginManifestAgent 
   role_version: agent.roleVersion,
   file,
   prompt_sha256: promptShaFor(agent.instructions),
+  locked_sha256: promptShaFor(agent.locked),
+  editable_sha256: promptShaFor(agent.editable),
   tier: agent.model.tier,
   effort: agent.model.effort,
 });
@@ -370,8 +391,17 @@ const verbatim = (files: readonly SourceFile[], prefix: string): EmittedFile[] =
     .filter((f) => f.path.startsWith(prefix))
     .map((f) => ({ path: f.path.slice(prefix.length), text: f.text }));
 
-const skillFiles = (skills: readonly Skill[]): EmittedFile[] =>
-  skills.flatMap((s) => s.files.map((f) => ({ path: `skills/${s.name}/${f.path}`, text: f.text })));
+const skillFiles = (host: HostId, skills: readonly Skill[]): EmittedFile[] =>
+  skills.flatMap((s) =>
+    s.files.map((f) => ({ path: `skills/${s.name}/${f.path}`, text: skillTextFor(host, f.text) })),
+  );
+
+/** Each agent's prompt parts (`vtc/prompts/<agent>/{locked,editable}.md`, AD-21 rule 2). */
+const promptPartFiles = (agents: readonly CompiledAgent[]): EmittedFile[] =>
+  agents.flatMap((a) => [
+    { path: rolePromptAssetPath(a.name, "locked"), text: a.locked },
+    { path: rolePromptAssetPath(a.name, "editable"), text: a.editable },
+  ]);
 
 const codexCommandSkill = (command: Command): string =>
   renderFrontmatter(
@@ -433,22 +463,25 @@ interface TargetInput {
   readonly commands: readonly Command[];
   readonly sources: InstructionSources;
   readonly notice: string;
+  readonly editableInPack: readonly string[];
 }
 
 /**
- * One host's plugin tree: NOTICE, skills, agents, the host's hand-written files, commands (a
- * Claude Code command, a Codex skill), the MCP entry (hand-written and checked for Claude Code,
- * generated for Codex), the hook wiring, `vtc/role-contracts.json` and `vtc-manifest.json`. A path emitted twice is an error, so a
+ * One host's plugin tree: NOTICE, skills, agents and their prompt parts, the host's hand-written
+ * files, commands (a Claude Code command, a Codex skill), the MCP entry (hand-written and checked
+ * for Claude Code, generated as the portable `mcp.json` for Codex), the hook wiring,
+ * `vtc/role-contracts.json` and `vtc-manifest.json`. A path emitted twice is an error, so a
  * hand-written file can never silently shadow a generated one.
  */
 const emitTarget = (host: HostId, input: TargetInput, errors: CompileError[]): EmittedFile[] => {
-  const agents = compileAgents(input.roles, host, input.sources, errors);
+  const agents = compileAgents(input.roles, host, input, errors);
   const ext = host === "codex" ? "toml" : "md";
   const render = host === "codex" ? renderCodexAgent : renderClaudeAgent;
   const emitted: EmittedFile[] = [
     { path: "NOTICE", text: input.notice },
-    ...skillFiles(input.skills),
+    ...skillFiles(host, input.skills),
     ...agents.map((a) => ({ path: `agents/${a.name}.${ext}`, text: render(a) })),
+    ...promptPartFiles(agents),
     ...verbatim(input.files, `plugins/${host}/`),
   ];
   const skills: PluginManifestSkill[] = input.skills.map((s) => ({
@@ -461,7 +494,7 @@ const emitTarget = (host: HostId, input: TargetInput, errors: CompileError[]): E
     emitted.push({ path: file, text: host === "codex" ? codexCommandSkill(c) : c.source.text });
     skills.push({ name: c.name, kind: "command", pack: null, file });
   }
-  if (host === "codex") emitted.push({ path: ".mcp.json", text: mcpJson(host) });
+  if (host === "codex") emitted.push({ path: CODEX_MCP_FILE, text: codexMcpJson() });
   emitted.push(
     { path: HOOKS_FILE, text: renderHooks(host) },
     roleContractsFile(host, input.roles, errors),
@@ -514,8 +547,12 @@ export const checkEmitted = (host: HostId, files: readonly EmittedFile[]): Compi
 };
 
 /** Compiles the sources (every file under `roles/`, `skills/` and `plugins/`). */
-export const compilePlugins = (files: readonly SourceFile[]): CompileResult => {
+export const compilePlugins = (
+  files: readonly SourceFile[],
+  options: CompileOptions = {},
+): CompileResult => {
   const errors: CompileError[] = [];
+  const editableInPack = options.editableInPack ?? EDITABLE_IN_PACK_ROLES;
   for (const file of files) {
     for (const hit of findForbiddenInText(file.text)) {
       errors.push({
@@ -527,7 +564,13 @@ export const compilePlugins = (files: readonly SourceFile[]): CompileResult => {
   checkLayout(files, errors);
   checkClaudeMcp(files, errors);
   requireFile(files, "plugins/claude-code/.claude-plugin/plugin.json", errors);
-  requireFile(files, "plugins/codex/plugin.json", errors);
+  requireFile(files, CODEX_PLUGIN_MANIFEST, errors);
+  const codexManifest = files.find((f) => f.path === CODEX_PLUGIN_MANIFEST);
+  if (codexManifest !== undefined) {
+    for (const message of codexManifestErrors(codexManifest.text)) {
+      errors.push({ path: CODEX_PLUGIN_MANIFEST, message });
+    }
+  }
   requireFile(files, "roles/NOTICE", errors);
   requireFile(files, "roles/_shared/result-protocol.md", errors);
 
@@ -564,6 +607,7 @@ export const compilePlugins = (files: readonly SourceFile[]): CompileResult => {
     commands,
     sources,
     notice: text("roles/NOTICE") ?? "",
+    editableInPack,
   };
   const targets = {
     "claude-code": emitTarget("claude-code", input, errors),

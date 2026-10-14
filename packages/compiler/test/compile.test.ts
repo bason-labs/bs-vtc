@@ -73,13 +73,22 @@ describe("compilePlugins: target layout", () => {
       "skills/stack-react-next/SKILL.md",
       "skills/stack-react-next/references/testing.md",
       "vtc-manifest.json",
+      "vtc/prompts/vtc-engineer-frontend/editable.md",
+      "vtc/prompts/vtc-engineer-frontend/locked.md",
+      "vtc/prompts/vtc-engineer/editable.md",
+      "vtc/prompts/vtc-engineer/locked.md",
+      "vtc/prompts/vtc-lens-db/editable.md",
+      "vtc/prompts/vtc-lens-db/locked.md",
+      "vtc/prompts/vtc-qa-author/editable.md",
+      "vtc/prompts/vtc-qa-author/locked.md",
+      "vtc/prompts/vtc-qa-judge/editable.md",
+      "vtc/prompts/vtc-qa-judge/locked.md",
       "vtc/role-contracts.json",
     ]);
   });
 
   it("emits the Codex plugin tree, with the /vtc command as a skill", () => {
     expect(output.targets.codex.map((f) => f.path)).toEqual([
-      ".mcp.json",
       "NOTICE",
       "agents/vtc-engineer-frontend.toml",
       "agents/vtc-engineer.toml",
@@ -87,6 +96,7 @@ describe("compilePlugins: target layout", () => {
       "agents/vtc-qa-author.toml",
       "agents/vtc-qa-judge.toml",
       "hooks/hooks.json",
+      "mcp.json",
       "plugin.json",
       "skills/domain-desktop/SKILL.md",
       "skills/lead/SKILL.md",
@@ -95,6 +105,16 @@ describe("compilePlugins: target layout", () => {
       "skills/stack-react-next/references/testing.md",
       "skills/vtc/SKILL.md",
       "vtc-manifest.json",
+      "vtc/prompts/vtc-engineer-frontend/editable.md",
+      "vtc/prompts/vtc-engineer-frontend/locked.md",
+      "vtc/prompts/vtc-engineer/editable.md",
+      "vtc/prompts/vtc-engineer/locked.md",
+      "vtc/prompts/vtc-lens-db/editable.md",
+      "vtc/prompts/vtc-lens-db/locked.md",
+      "vtc/prompts/vtc-qa-author/editable.md",
+      "vtc/prompts/vtc-qa-author/locked.md",
+      "vtc/prompts/vtc-qa-judge/editable.md",
+      "vtc/prompts/vtc-qa-judge/locked.md",
       "vtc/role-contracts.json",
     ]);
     const skill = file(output, "codex", "skills/vtc/SKILL.md");
@@ -104,12 +124,15 @@ describe("compilePlugins: target layout", () => {
   });
 
   it("registers the engine on both hosts as engineMcpServer(host) (AD-16 rule 3)", () => {
-    for (const host of ["claude-code", "codex"] as const) {
-      const entry = engineMcpServer(host);
-      expect(JSON.parse(file(output, host, ".mcp.json"))).toEqual({
-        mcpServers: { [entry.name]: { command: entry.command, args: entry.args } },
-      });
-    }
+    const claude = engineMcpServer("claude-code");
+    expect(JSON.parse(file(output, "claude-code", ".mcp.json"))).toEqual({
+      mcpServers: { [claude.name]: { command: claude.command, args: claude.args } },
+    });
+    // the portable Agent Plugins format: a root mcp.json with a transport type per server
+    const codex = engineMcpServer("codex");
+    expect(JSON.parse(file(output, "codex", "mcp.json"))).toMatchObject({
+      mcpServers: { [codex.name]: { type: "stdio", command: codex.command, args: codex.args } },
+    });
   });
 
   it("carries the third-party NOTICE into both plugins", () => {

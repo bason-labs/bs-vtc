@@ -16,4 +16,12 @@ The compiled plugins list every skill with its kind and pack id in `vtc-manifest
   docs at the pinned version into the task pack (§5.2a, §8.2).
 - Forked material names its sources in a `Sources:` line; the agency-agents MIT notice is in
   `roles/NOTICE`, copied into both plugins as `NOTICE`.
-- Architect references (§8.1) and the Designer method (§9) are written in sub-projects 4 and 5.
+- Role skills (no prefix) are preloaded by the agents that need them (`ROLE_SKILLS`,
+  `TOOL_SKILLS` in the compiler): `architect` (the §8.1 core file and ten reference checklists
+  under `references/`), `research-fetch` (the `research_fetch` tool and its fetchers) and
+  `research-facts` (`fact_lookup`, `fact_propose`, citing facts and `UNVERIFIED:` tags). A skill
+  links its own files as `${CLAUDE_SKILL_DIR}/references/<file>.md`; the Codex copy drops the
+  prefix.
+- The Designer method references forked from impeccable (§9.1: the Direction contract, the
+  playbooks, the font blocklist) are not written yet; the detector rules are the gate-runner
+  team's port (AD-24 rule 7).
