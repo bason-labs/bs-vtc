@@ -1009,6 +1009,94 @@ export const riskyFinding = (
   return high === undefined ? undefined : { finding: high, rule: "open_high_finding" };
 };
 
+/**
+ * §6.7a routing, spine §5 readings 139 and 150: every finding one merged planner task owns (its
+ * `files_scope` holds the finding's path) while that task is not yet `done` reopens that task
+ * (`merged` → `fixing`, keeping its round: these fix rounds count on the feature) with the
+ * finding recorded on it. Its own specialist runs the fix round (the task's session, resumed as
+ * in any fix round) in its preserved worktree, which `rebaseReopened` first moves onto the
+ * integrated head. Returns the findings left for an integration-fix task: those no single task
+ * owns, and those on a `done` task (`done` stays terminal, §6.4).
+ */
+export const reopenOwningTasks = (
+  k: Kernel,
+  h: RunHandle,
+  featureId: string,
+  findings: readonly Finding[],
+): Finding[] => {
+  const feature = h.state.features.get(featureId);
+  if (feature === undefined) return [...findings];
+  const tasks = feature.tasks
+    .map((t) => h.state.tasks.get(t))
+    .filter((t): t is Task => t !== undefined);
+  const byOwner = new Map<string, Finding[]>();
+  const rest: Finding[] = [];
+  for (const finding of findings) {
+    const path = finding.location.path;
+    const owner = path.startsWith(".vtc/") ? undefined : owningTask(tasks, [path]);
+    if (owner?.status !== "merged" || owner.worktree === undefined) {
+      rest.push(finding);
+      continue;
+    }
+    byOwner.set(owner.id, [...(byOwner.get(owner.id) ?? []), finding]);
+  }
+  for (const [taskId, owned] of byOwner) {
+    setTaskStatus(k, h, taskId, "fixing");
+    for (const finding of owned) {
+      k.emit(h, {
+        type: "finding.recorded",
+        actor: "engine",
+        task: taskId,
+        data: { finding: { ...finding, task: taskId } },
+      });
+    }
+    rebaseReopened(k, h, taskId);
+  }
+  return rest;
+};
+
+/**
+ * A reopened task's preserved worktree onto the feature's integrated head (§6.7a "rebased"): its
+ * own work is already merged there, so the branch moves to that head, which becomes the task's
+ * baseline (`task.workspace_assigned`), so its next round's diff is the fix alone. Runs again after
+ * a restart while the task still awaits it (`awaitingReopenRebase`); a failure parks the task as
+ * gate infrastructure.
+ */
+export const rebaseReopened = (k: Kernel, h: RunHandle, taskId: string): void => {
+  k.spawn(h, `reopen:${taskId}`, async () => {
+    const task = h.state.tasks.get(taskId);
+    const feature = task === undefined ? undefined : h.state.features.get(task.feature);
+    if (task === undefined || feature === undefined) return;
+    const branch = task.branch ?? `vtc/${taskId}`;
+    try {
+      const ws = k.deps.workspace;
+      const head = await ws.resolve(feature.integration_branch);
+      const { worktree } = await ws.ensureTaskWorktree(taskId, branch, head);
+      await ws.discard(worktree, head);
+      await k.serial(h, () => {
+        if (h.state.tasks.get(taskId)?.status !== "fixing") return Promise.resolve();
+        k.emit(h, {
+          type: "task.workspace_assigned",
+          actor: "engine",
+          task: taskId,
+          data: { worktree, branch, baseline_revision: head },
+        });
+        return Promise.resolve();
+      });
+    } catch (error) {
+      await k.serial(h, () => {
+        parkInfra(
+          k,
+          h,
+          taskId,
+          `could not move the reopened task's worktree onto ${feature.integration_branch}: ${message(error)}`,
+        );
+        return Promise.resolve();
+      });
+    }
+  });
+};
+
 /** An engine-created task for Final Review findings (§6.7a, AD-8 rule 11). */
 export const createIntegrationFix = (
   k: Kernel,
@@ -1028,9 +1116,10 @@ export const createIntegrationFix = (
   const paths = [
     ...new Set(findings.map((f) => f.location.path).filter((p) => !p.startsWith(".vtc/"))),
   ];
-  // The owning task (§6.7a routing; spine §5 reading 91): the one merged planner task whose
-  // files_scope holds every finding's path. The fix then gets its discipline and scope; reopening
-  // the merged task itself is not built yet, so the fix is a new task that names it.
+  // The owning task (§6.7a routing; spine §5 readings 91, 139): the one planner task whose
+  // files_scope holds every finding's path. A merged owner that is not yet done was reopened
+  // instead (`reopenOwningTasks`); a done one stays done, so the fix is a new task that names it
+  // and gets its discipline and scope.
   const owner = owningTask(owners, paths);
   const discipline =
     owner?.discipline ??

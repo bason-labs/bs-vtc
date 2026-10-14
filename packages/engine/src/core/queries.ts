@@ -171,6 +171,27 @@ export const roundVerdict = (state: RunState, task: string): GateReport | undefi
 };
 
 /**
+ * A task Final Review reopened (`merged` → `fixing`, spine §5 reading 150) whose preserved
+ * worktree has not yet been moved onto the integrated head: its last reopen is newer than its last
+ * `task.workspace_assigned`. No role runs in it until the engine rebased it (`rebaseReopened`).
+ */
+export const awaitingReopenRebase = (state: RunState, task: string): boolean => {
+  let reopened = 0;
+  let assigned = 0;
+  for (const e of state.events) {
+    if (e.task !== task) continue;
+    if (e.type === "task.workspace_assigned") assigned = e.seq;
+    else if (
+      e.type === "task.status_changed" &&
+      (e.data as { from?: string; to?: string }).from === "merged" &&
+      (e.data as { to?: string }).to === "fixing"
+    )
+      reopened = e.seq;
+  }
+  return reopened > assigned;
+};
+
+/**
  * The visual report a Visual QA judge reads (§7.5 step 6, spine §5 reading 92): the path the
  * gate run's visual step wrote, when that step rendered screens and passed its deterministic
  * checks. `undefined` when it did not run, was skipped (no browser, D-ay) or rendered nothing:

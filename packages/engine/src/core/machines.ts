@@ -27,7 +27,9 @@ export const TASK_TRANSITIONS: Readonly<Record<TaskStatus, readonly TaskStatus[]
   built: ["queued", "parked", "dropped"],
   // A merge-queue conflict or failure is a rebase round (§6.7).
   queued: ["merged", "fixing", "parked", "dropped"],
-  merged: ["done"],
+  // Final Review reopens a merged task that owns a finding while it is not yet done (§6.7a; spine
+  // §5 readings 139 and 150); `done` stays terminal (§6.4).
+  merged: ["done", "fixing"],
   done: [],
   parked: [...CHECKPOINTS, "dropped"],
   interrupted: ["ready", "tests_authored", "building", "verifying", "fixing", "parked", "dropped"],

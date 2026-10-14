@@ -47,6 +47,7 @@ import { effectiveVerdict } from "./gate-verdict.js";
 import { engineerDispatch, tierDown } from "./loop.js";
 import { writeTaskPack } from "./projections.js";
 import {
+  awaitingReopenRebase,
   inFlight,
   lastBuilt,
   lastQaAuthor,
@@ -359,7 +360,9 @@ const taskSteps = (k: Kernel, h: RunHandle, taskId: string, host: HostId): StepS
   if (task.status === "tests_authored" || task.status === "building" || task.status === "fixing") {
     if (
       busyStep(h, { role: "engineer", task: taskId }) ||
-      busyStep(h, { role: "qa", mode: "author", task: taskId })
+      busyStep(h, { role: "qa", mode: "author", task: taskId }) ||
+      // a task Final Review reopened works only once its worktree is on the integrated head
+      awaitingReopenRebase(h.state, taskId)
     )
       return [];
     const fixingSince = statusEnteredSeq(h.state, taskId, "fixing") ?? 0;

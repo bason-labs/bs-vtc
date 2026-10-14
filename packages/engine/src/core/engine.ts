@@ -106,6 +106,7 @@ import { openEventLog, type EventDraft } from "./event-log.js";
 import {
   downgradeNoRemote,
   ensureWorkspace,
+  rebaseReopened,
   setFeatureStatus,
   startBaseCheck,
   startMergeQueue,
@@ -133,6 +134,7 @@ import { ACTIVE_TASK_STATUSES } from "./machines.js";
 import { applyAnswer, setTaskStatus } from "./parking.js";
 import { writePlanFile, writeRequestFile } from "./projections.js";
 import {
+  awaitingReopenRebase,
   inFlight,
   lastBuilt,
   lastSubmitted,
@@ -1136,6 +1138,14 @@ export class Engine implements Kernel {
         !this.isRunning(`ws:${task.id}`)
       ) {
         ensureWorkspace(this, handle, task.id);
+      }
+      if (
+        task.status === "fixing" &&
+        awaitingReopenRebase(state, task.id) &&
+        !this.isRunning(`reopen:${task.id}`)
+      ) {
+        // recovery: a task Final Review reopened whose worktree was not moved yet (restart)
+        rebaseReopened(this, handle, task.id);
       }
       if (task.status === "ready" && !gating) {
         // recovery: QA's tests are in but their base-fail check never concluded (restart, retry)
