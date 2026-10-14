@@ -71,8 +71,10 @@ main() {
   chmod 0755 "${tmp}/x/vtc"
 
   mkdir -p "$install_dir"
-  staged="${install_dir}/.vtc.install.$$"
+  # an unpredictable staging file, created by mktemp (never an existing path or a link)
+  staged="$(mktemp "${install_dir}/.vtc.install.XXXXXX")" || fail "cannot write to ${install_dir}"
   cp "${tmp}/x/vtc" "$staged" || { rm -f "$staged"; fail "cannot write to ${install_dir}"; }
+  chmod 0755 "$staged" || { rm -f "$staged"; fail "cannot write to ${install_dir}"; }
   mv -f "$staged" "${install_dir}/vtc" || { rm -f "$staged"; fail "cannot install into ${install_dir}"; }
   say "Installed ${install_dir}/vtc"
 

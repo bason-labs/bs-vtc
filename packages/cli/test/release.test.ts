@@ -11,6 +11,7 @@ import {
   mkdirSync,
   readdirSync,
   readFileSync,
+  statSync,
   symlinkSync,
   writeFileSync,
 } from "node:fs";
@@ -420,6 +421,12 @@ describe("packaging/install.sh (AD-26 rule 4)", () => {
     expect(readdirSync(run.installDir)).toEqual(["vtc"]);
     const installed = spawnSync(join(run.installDir, "vtc"), { encoding: "utf8" });
     expect(installed.stdout.trim()).toBe(`vtc ${VERSION} linux-x64`);
+    expect(statSync(join(run.installDir, "vtc")).mode & 0o777).toBe(0o755);
+    // the staging file is created by mktemp in the install dir, never a predictable name that an
+    // existing link could take over
+    const script = readFileSync(INSTALLER, "utf8");
+    expect(script).toMatch(/staged="\$\(mktemp "\$\{install_dir\}\/\.vtc\.install\.XXXXXX"\)"/);
+    expect(script).not.toMatch(/\$\$/);
     const base = `https://github.com/${REPO}/releases/download/v${VERSION}`;
     expect(run.requested.map((line) => line.replace(/ -o \S+ /, " -o <out> "))).toEqual([
       `--proto =https --tlsv1.2 -fsSL -o <out> ${base}/vtc-${VERSION}-linux-x64.tar.gz`,

@@ -101,7 +101,6 @@ describe("vtc install on Linux", () => {
       timerHost: () => host,
       agentSpec: (vtcHome) => ({ selfCommand: ["/opt/vtc"], vtcHome, path: "/usr/bin:/bin" }),
       factories: { codex: () => adapter },
-      registerCodex: () => ({ written: [], notes: [] }),
     });
 
   it("installs and enables the systemd timer only on --auto-resume, and removes it", async () => {

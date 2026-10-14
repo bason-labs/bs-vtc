@@ -142,7 +142,7 @@ jobs:
     name: sign + notarize macOS (pending H-2)
     needs: smoke
     # TODO(H-2): sign + notarize once the owner has an Apple Developer ID. Switch this on then
-    # (and prune packaging/macos/entitlements.plist under test). Until then it never runs and the
+    # (and check packaging/macos/entitlements.plist, JIT keys only, under test). Until then it never runs and the
     # release ships unsigned binaries. A bare Mach-O binary cannot be stapled; Gatekeeper checks
     # the notarization online on first run.
     if: ${{ false }}

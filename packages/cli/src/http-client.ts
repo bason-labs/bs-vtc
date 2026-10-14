@@ -12,7 +12,12 @@
  *   (`maxBytes`); both reject.
  * The resolver is injected: the binary uses Bun's own DNS (`bunResolver`). Fetch resolves the host
  * again when it connects, so a DNS answer that changes between the two lookups (rebinding) is a
- * residual this guard narrows but cannot close without its own socket layer.
+ * residual: the address check alone cannot close it without its own socket layer (connecting to
+ * the vetted address with the host name as TLS server name needs `node:https`/`node:tls`, which
+ * the runtime-safe built-ins do not list). What closes it in practice is HTTPS with the runtime's
+ * default certificate validation, which this client never turns off: a rebound private service
+ * would have to present a valid certificate for the attacker's host name, so the TLS handshake
+ * fails before any request is sent. The cli team proposed a spine §7 residual row for this.
  */
 import { isIP } from "node:net";
 import {
@@ -80,11 +85,20 @@ const checkHost = async (url: URL, resolve: Resolve): Promise<void> => {
     throw new HttpGuardError(`${host} resolves to a private address (${blocked})`);
 };
 
-const readCapped = async (response: Response, maxBytes: number): Promise<Uint8Array> => {
+/**
+ * Reads a response body, at most `maxBytes`: a declared length beyond it is refused before
+ * reading, and the stream is cancelled as soon as the running count passes it, so the cap bounds
+ * memory. `tooLarge` makes the error thrown.
+ */
+export const readCappedBody = async (
+  response: Response,
+  maxBytes: number,
+  tooLarge: () => Error,
+): Promise<Uint8Array> => {
   const declared = Number(response.headers.get("content-length") ?? "");
   if (Number.isFinite(declared) && declared > maxBytes) {
     await response.body?.cancel();
-    throw new HttpGuardError(`response larger than ${String(maxBytes)} bytes`);
+    throw tooLarge();
   }
   if (response.body === null) return new Uint8Array(0);
   const reader = (response.body as ReadableStream<Uint8Array>).getReader();
@@ -96,7 +110,7 @@ const readCapped = async (response: Response, maxBytes: number): Promise<Uint8Ar
     size += value.byteLength;
     if (size > maxBytes) {
       await reader.cancel();
-      throw new HttpGuardError(`response larger than ${String(maxBytes)} bytes`);
+      throw tooLarge();
     }
     chunks.push(value);
   }
@@ -183,7 +197,13 @@ export const createHttpClient = (deps: HttpClientDeps): HttpClient => ({
         return {
           status: response.status,
           headers: responseHeaders(response.headers),
-          body: await bounded(readCapped(response, request.maxBytes)),
+          body: await bounded(
+            readCappedBody(
+              response,
+              request.maxBytes,
+              () => new HttpGuardError(`response larger than ${String(request.maxBytes)} bytes`),
+            ),
+          ),
           url: url.toString(),
         };
       }

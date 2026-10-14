@@ -14,7 +14,8 @@
  */
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
-import { engineRepoKey, HostIdSchema, RoleIdSchema, SlugSchema } from "@vtc/shared";
+import { git } from "@vtc/engine";
+import { engineRepoKey, HostIdSchema, redactSecrets, RoleIdSchema, SlugSchema } from "@vtc/shared";
 import {
   defaultGestureDeps,
   EXIT_NOT_CONFIRMED,
@@ -105,8 +106,12 @@ export const createLookbackCommand = (
           repoKey,
           target,
           ...(version === undefined ? {} : { version }),
-          replay: (rel) => JSON.parse(readFileSync(join(repoRoot, rel), "utf8")) as unknown,
-          reason: reason.slice(0, 500),
+          // a repo file roles can write: never through a link, and the summary shows its numbers
+          replay: (rel) => {
+            git.assertNoSymlinks(repoRoot, rel);
+            return JSON.parse(readFileSync(join(repoRoot, rel), "utf8")) as unknown;
+          },
+          reason: redactSecrets(reason).slice(0, 500),
           now,
         });
       const first = plan(d.now());

@@ -27,6 +27,7 @@ import {
   checkBrowser,
   findExecutable,
   installBrowser,
+  installerEnv,
   matchesIntegrity,
   sha256OfFile,
   tarballUrl,
@@ -34,7 +35,7 @@ import {
   type BrowserInstallDeps,
   type PinnedPackage,
 } from "../src/browser-install.js";
-import { createDoctorCommand, defaultDoctorEnv } from "../src/commands/doctor.js";
+import { createDoctorCommand, defaultDoctorEnv, engineBaseBranch } from "../src/commands/doctor.js";
 import {
   CLAUDE_MIN_VERSION,
   checkHostAuth,
@@ -43,6 +44,7 @@ import {
   withClaudeMinimum,
   type MergeLevelEnv,
 } from "../src/doctor-checks.js";
+import { readCappedBody } from "../src/http-client.js";
 import type { Exec, ExecResult } from "../src/process.js";
 import { capture, cleanupDirs, initRepo, initVtcRepo, tempDir, tempHome } from "./helpers.js";
 
@@ -178,6 +180,71 @@ describe("vtc doctor --install-browser (AD-24, D-ay)", () => {
     await installBrowser(home, again, packages);
     expect(again.downloads).toEqual([]);
     expect(again.lines.join("\n")).toMatch(/already installed and verified/);
+    // a package changed in the store after its install is noticed and installed again
+    const cli = join(store, "node_modules/playwright-core/cli.js");
+    const original = readFileSync(cli, "utf8");
+    writeFileSync(cli, "tampered()");
+    const third = fakeDeps(bodies);
+    await installBrowser(home, third, packages);
+    expect(third.downloads).toEqual([tarballUrl({ name: "playwright-core", version: "1.63.0" })]);
+    expect(third.lines.join("\n")).toMatch(/changed since it was installed/);
+    expect(readFileSync(cli, "utf8")).toBe(original);
+  });
+
+  it("says Node.js is needed when no node runs the installer", async () => {
+    const home = tempHome();
+    const { bodies, packages } = fakeRegistry();
+    const deps = fakeDeps(bodies, {
+      runInstaller: () => Promise.resolve({ code: null, stdout: "", stderr: "", error: "ENOENT" }),
+    });
+    await expect(installBrowser(home, deps, packages)).rejects.toThrow(
+      /runs on Node\.js, and no node is on PATH/,
+    );
+  });
+
+  it("runs the installer with an allowlisted environment: no credentials, no download host", () => {
+    expect(
+      installerEnv(
+        {
+          PATH: "/usr/bin",
+          HOME: "/home/u",
+          HTTPS_PROXY: "http://proxy:3128",
+          GH_TOKEN: "x",
+          AWS_SECRET_ACCESS_KEY: "y",
+          ANTHROPIC_API_KEY: "z",
+          PLAYWRIGHT_DOWNLOAD_HOST: "https://evil.example",
+          PLAYWRIGHT_BROWSERS_PATH: "/elsewhere",
+        },
+        "/home/u/.vtc/browsers",
+      ),
+    ).toEqual({
+      PATH: "/usr/bin",
+      HOME: "/home/u",
+      HTTPS_PROXY: "http://proxy:3128",
+      PLAYWRIGHT_BROWSERS_PATH: "/home/u/.vtc/browsers",
+    });
+  });
+
+  it("caps a download while it streams, not after buffering it", async () => {
+    const big = (): Error => new Error("larger than 1000 bytes");
+    const chunk = new Uint8Array(400);
+    let pulled = 0;
+    const endless = new ReadableStream<Uint8Array>({
+      pull: (controller) => {
+        pulled += 1;
+        controller.enqueue(chunk);
+      },
+    });
+    await expect(readCappedBody(new Response(endless), 1_000, big)).rejects.toThrow(
+      /larger than 1000 bytes/,
+    );
+    expect(pulled).toBeLessThan(10);
+    await expect(
+      readCappedBody(new Response("abc", { headers: { "content-length": "5000" } }), 1_000, big),
+    ).rejects.toThrow(/larger than 1000 bytes/);
+    expect(new TextDecoder().decode(await readCappedBody(new Response("abc"), 1_000, big))).toBe(
+      "abc",
+    );
   });
 
   it("installs nothing from a download that does not match its integrity", async () => {
@@ -391,6 +458,14 @@ const levelEnv = (over: Partial<MergeLevelEnv> = {}): MergeLevelEnv => ({
 });
 
 describe("vtc doctor: the merge level and the Level-3 preflight (AD-23 rule 1)", () => {
+  it("checks the branch the engine targets: the current one, else main", () => {
+    expect(engineBaseBranch("develop\n")).toBe("develop");
+    expect(engineBaseBranch("release/2.0")).toBe("release/2.0");
+    expect(engineBaseBranch("HEAD\n")).toBe("main");
+    expect(engineBaseBranch("vtc/F-1")).toBe("main");
+    expect(engineBaseBranch("")).toBe("main");
+  });
+
   it("passes Level 3 only when GitHub enforces what the checklist promises", async () => {
     expect(await checkMergeLevel(levelEnv())).toEqual({
       name: "merge level",

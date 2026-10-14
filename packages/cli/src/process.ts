@@ -28,6 +28,8 @@ export type Exec = (
     readonly input?: string;
     /** Variables set over the inherited environment. */
     readonly env?: Readonly<Record<string, string>>;
+    /** `false`: `env` is the child's whole environment (nothing inherited). Default `true`. */
+    readonly inheritEnv?: boolean;
   },
 ) => Promise<ExecResult>;
 
@@ -96,7 +98,11 @@ export const exec: Exec = (command, args, options = {}) => {
     };
     const child = spawn(invocation.file, [...invocation.args], {
       cwd: options.cwd,
-      ...(options.env === undefined ? {} : { env: { ...process.env, ...options.env } }),
+      ...(options.inheritEnv === false
+        ? { env: { ...options.env } }
+        : options.env === undefined
+          ? {}
+          : { env: { ...process.env, ...options.env } }),
       stdio: [options.input === undefined ? "ignore" : "pipe", "pipe", "pipe"],
       windowsHide: true,
       windowsVerbatimArguments: invocation.verbatim,

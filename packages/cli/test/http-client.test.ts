@@ -19,6 +19,8 @@ interface Seen {
   readonly headers: Record<string, string>;
   readonly body: string | undefined;
   readonly redirect: string | undefined;
+  /** Every option key the client passed to fetch. */
+  readonly keys: readonly string[];
 }
 
 type Route = (seen: Seen) => Response | Promise<Response>;
@@ -33,6 +35,7 @@ const fakeFetch = (routes: Readonly<Record<string, Route>>) => {
       headers: { ...(init?.headers as Record<string, string> | undefined) },
       body: typeof init?.body === "string" ? init.body : undefined,
       redirect: init?.redirect,
+      keys: Object.keys(init ?? {}).sort(),
     };
     seen.push(entry);
     const route = routes[url];
@@ -83,6 +86,9 @@ describe("the research HttpClient (AD-22 rule 1)", () => {
     expect(res.url).toBe("https://example.com/data.json");
     expect(seen[0]?.redirect).toBe("manual");
     expect(seen[0]?.headers).toEqual({ accept: "application/json" });
+    // certificate validation stays the runtime's default (what closes DNS rebinding, see the
+    // module comment): no `tls`, `dispatcher` or `agent` option ever reaches fetch
+    expect(seen[0]?.keys).toEqual(["credentials", "headers", "method", "redirect", "signal"]);
   });
 
   it.each([

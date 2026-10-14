@@ -337,7 +337,6 @@ describe("vtc install --host claude-code writes the session sandbox (D-an)", () 
       },
       confirm,
       sessionSandboxEnv: () => SANDBOX_ENV,
-      registerCodex: () => ({ written: [], notes: [] }),
     });
 
   it("shows the settings, writes them after the user confirms, merged and gitignored", async () => {

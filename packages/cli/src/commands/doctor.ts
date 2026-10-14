@@ -107,6 +107,16 @@ const versionOnPath = async (name: string): Promise<string | null> => {
   return result.code === 0 ? result.stdout.trim().split(/\r?\n/)[0] || name : null;
 };
 
+/**
+ * The base branch the engine opens PRs against, from `git rev-parse --abbrev-ref HEAD`, as the
+ * engine's `baseBranch` picks it: the current branch, or `main` when HEAD is detached or on a
+ * `vtc/` branch. Doctor's Level-3 preflight checks that branch.
+ */
+export const engineBaseBranch = (abbrevHead: string): string => {
+  const out = abbrevHead.trim();
+  return out === "" || out === "HEAD" || out.startsWith("vtc/") ? "main" : out;
+};
+
 export const defaultDoctorEnv = (ctx: CommandContext): DoctorCommandEnv => {
   const timer = autoResumeTimer(process.platform);
   return {
@@ -159,24 +169,15 @@ export const defaultDoctorEnv = (ctx: CommandContext): DoctorCommandEnv => {
       const repoRoot = await findRepoRoot(ctx.cwd);
       if (repoRoot === null || !isVtcProject(repoRoot)) return null;
       const remote = createGhRemoteMerge({ repoRoot });
-      const head = await git.runGit(
-        repoRoot,
-        ["symbolic-ref", "--short", "refs/remotes/origin/HEAD"],
-        {
-          allowFailure: true,
-        },
-      );
-      const base =
-        head.code === 0
-          ? head.stdout
-              .toString("utf8")
-              .trim()
-              .replace(/^origin\//, "")
-          : "main";
+      // the branch the engine's PRs target (engine `baseBranch`): the current branch, or `main`
+      // when HEAD is detached or on a VTC branch
+      const head = await git.runGit(repoRoot, ["rev-parse", "--abbrev-ref", "HEAD"], {
+        allowFailure: true,
+      });
       return {
         configured: core.loadProjectConfig(repoRoot).merge_level,
         ledger: readMergeLevelLedger(repoRoot).entries,
-        base: base === "" ? "main" : base,
+        base: engineBaseBranch(head.code === 0 ? head.stdout.toString("utf8") : ""),
         remote: () => remote.remote(),
         policy: (b) => remote.policy(b),
       };

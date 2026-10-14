@@ -28,6 +28,7 @@ import {
   openSync,
   readdirSync,
   readFileSync,
+  readlinkSync,
   renameSync,
   rmSync,
   writeFileSync,
@@ -42,6 +43,7 @@ import {
   type BrowserPin,
 } from "@vtc/shared";
 import type { DoctorCheck } from "./doctor-checks.js";
+import { readCappedBody } from "./http-client.js";
 import { exec, type ExecResult } from "./process.js";
 
 export interface PinnedPackage {
@@ -119,10 +121,11 @@ export const httpsDownload = async (url: string, maxBytes: number): Promise<Uint
   if (!url.startsWith("https://")) throw new Error(`only https downloads: ${url}`);
   const response = await fetch(url, { redirect: "error", signal: AbortSignal.timeout(300_000) });
   if (!response.ok) throw new Error(`GET ${url}: HTTP ${String(response.status)}`);
-  const body = new Uint8Array(await response.arrayBuffer());
-  if (body.byteLength > maxBytes)
-    throw new Error(`${url} is larger than ${String(maxBytes)} bytes`);
-  return body;
+  return readCappedBody(
+    response,
+    maxBytes,
+    () => new Error(`${url} is larger than ${String(maxBytes)} bytes`),
+  );
 };
 
 /** The system `tar` (macOS, Linux and Windows 10+ ship one). */
@@ -134,14 +137,64 @@ export const tarExtract = async (tarball: string, dir: string): Promise<void> =>
     throw new Error(`tar could not unpack ${tarball}: ${(result.error ?? result.stderr).trim()}`);
 };
 
-/** The Node that runs Playwright's installer: this one in development, `node` on PATH in the binary. */
+/**
+ * The Node that runs Playwright's installer: this one in development, `node` on PATH in the
+ * binary (Playwright's installer supports Node only, so the binary needs Node.js on PATH for
+ * `--install-browser`; {@link installBrowser} says so when it is missing).
+ */
 export const nodeCommand = (): string =>
   process.versions.bun === undefined ? process.execPath : "node";
+
+/**
+ * The variables the installer inherits: what finding programs, a home, a temp dir, the locale
+ * and the user's proxy and CA settings need, nothing else. No credential variable reaches it,
+ * and no `PLAYWRIGHT_*` override (`PLAYWRIGHT_DOWNLOAD_HOST` would change where the browser
+ * comes from): the only one set is `PLAYWRIGHT_BROWSERS_PATH`.
+ */
+export const INSTALLER_ENV_ALLOW: readonly string[] = [
+  "PATH",
+  "HOME",
+  "USERPROFILE",
+  "TMPDIR",
+  "TMP",
+  "TEMP",
+  "LANG",
+  "LC_ALL",
+  "LC_CTYPE",
+  "SYSTEMROOT",
+  "SystemRoot",
+  "WINDIR",
+  "APPDATA",
+  "LOCALAPPDATA",
+  "PATHEXT",
+  "COMSPEC",
+  "HTTPS_PROXY",
+  "https_proxy",
+  "HTTP_PROXY",
+  "http_proxy",
+  "NO_PROXY",
+  "no_proxy",
+  "NODE_EXTRA_CA_CERTS",
+];
+
+/** Pure: the installer's whole environment from `env` ({@link INSTALLER_ENV_ALLOW}). */
+export const installerEnv = (
+  env: Readonly<Record<string, string | undefined>>,
+  browsersPath: string,
+): Record<string, string> => {
+  const out: Record<string, string> = {};
+  for (const name of INSTALLER_ENV_ALLOW) {
+    const value = env[name];
+    if (value !== undefined) out[name] = value;
+  }
+  return { ...out, PLAYWRIGHT_BROWSERS_PATH: browsersPath };
+};
 
 export const playwrightInstaller = (cliJs: string, browsersPath: string): Promise<ExecResult> =>
   exec(nodeCommand(), [cliJs, "install", "--only-shell", "chromium"], {
     timeoutMs: 15 * 60_000,
-    env: { PLAYWRIGHT_BROWSERS_PATH: browsersPath },
+    env: installerEnv(process.env, browsersPath),
+    inheritEnv: false,
   });
 
 export const defaultBrowserInstallDeps = (log: (line: string) => void): BrowserInstallDeps => ({
@@ -153,6 +206,35 @@ export const defaultBrowserInstallDeps = (log: (line: string) => void): BrowserI
 });
 
 const MARKER = ".vtc-integrity";
+
+/**
+ * SHA-256 over an unpacked package: every entry's relative path, kind and content (a link's
+ * target), in sorted order, leaving out the marker. Recorded in the marker at install, so a
+ * re-run notices any later change to the package's files (`cli.js`, `axe.min.js`…) and installs
+ * it again from the verified tarball.
+ */
+export const treeHash = (dir: string): string => {
+  const hash = createHash("sha256");
+  const walk = (rel: string): void => {
+    const names = readdirSync(join(dir, rel)).sort();
+    for (const name of names) {
+      const path = rel === "" ? name : `${rel}/${name}`;
+      if (path === MARKER) continue;
+      const full = join(dir, path);
+      const stat = lstatSync(full);
+      if (stat.isSymbolicLink()) hash.update(`l\0${path}\0${readlinkSync(full)}\0`);
+      else if (stat.isDirectory()) {
+        hash.update(`d\0${path}\0`);
+        walk(path);
+      } else {
+        hash.update(`f\0${path}\0${String(stat.size)}\0`);
+        hash.update(readFileSync(full));
+      }
+    }
+  };
+  walk("");
+  return hash.digest("hex");
+};
 
 const refuseLink = (path: string): void => {
   if (existsSync(path) && lstatSync(path).isSymbolicLink())
@@ -171,9 +253,13 @@ const installPackage = async (
   const target = join(modules, pkg.name);
   refuseLink(target);
   const marker = join(target, MARKER);
-  if (existsSync(marker) && readFileSync(marker, "utf8").trim() === pkg.integrity) {
-    deps.log(`  ${pkg.name}@${pkg.version}: already installed and verified`);
-    return;
+  if (existsSync(marker)) {
+    const [integrity, tree] = readFileSync(marker, "utf8").split("\n");
+    if (integrity === pkg.integrity && tree !== undefined && tree === treeHash(target)) {
+      deps.log(`  ${pkg.name}@${pkg.version}: already installed and verified`);
+      return;
+    }
+    deps.log(`  ${pkg.name}@${pkg.version}: changed since it was installed; installing it again`);
   }
   const url = tarballUrl(pkg);
   deps.log(`  ${pkg.name}@${pkg.version}: downloading ${url}`);
@@ -194,7 +280,7 @@ const installPackage = async (
     };
     if (manifest.name !== pkg.name || manifest.version !== pkg.version)
       throw new Error(`${url} unpacked to something other than ${pkg.name}@${pkg.version}`);
-    writeFileSync(join(staging, MARKER), `${pkg.integrity}\n`);
+    writeFileSync(join(staging, MARKER), `${pkg.integrity}\n${treeHash(staging)}\n`);
     rmSync(target, { recursive: true, force: true });
     renameSync(staging, target);
   } finally {
@@ -280,6 +366,10 @@ export const installBrowser = async (
   const core = join(store, "node_modules", "playwright-core");
   deps.log(`  ${HEADLESS_SHELL}: running playwright-core's installer`);
   const result = await deps.runInstaller(join(core, "cli.js"), store);
+  if (result.code === null && result.error === "ENOENT")
+    throw new Error(
+      "playwright-core's installer runs on Node.js, and no node is on PATH: install Node.js 18 or later (or add Playwright to the project, which the visual step then uses) and run vtc doctor --install-browser again",
+    );
   if (result.code !== 0)
     throw new Error(
       `playwright-core's installer failed${result.error === undefined ? "" : ` (${result.error})`}: ${result.stderr.trim().slice(-500)}`,

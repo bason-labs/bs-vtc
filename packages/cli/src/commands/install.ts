@@ -19,10 +19,10 @@
  * (the repo's `info/exclude`; a tracked file is refused). What still keeps the sandbox off from
  * other settings files (the repo's committed ones, the user's own) is named, never edited.
  *
- * `vtc install codex` also registers the compiled plugin per Codex's plugin layout
- * (`codex-registration.ts`: a marked copy under `.agents/plugins/vtc/`, the local marketplace
- * `.agents/plugins/marketplace.json`, and `[plugins."vtc@<marketplace>"] enabled = true` in
- * `.codex/config.toml`), in the repo for the project scope and in the home for the user scope.
+ * Registering the Codex plugin (marketplace and `[plugins."vtc@…"]`) is `HostAdapter.install`'s
+ * job (AD-6, AD-16 rule 4, reading 60), so its files pass the adapter safety contract; until the
+ * spine's §7 "Codex plugin manifest fields" row closes, the Codex install places the skills only
+ * and registers no hooks (reading 94). The cli writes none of it.
  *
  * The OS timer behind auto-resume (AD-6 rule 4, §6.9 step 4; `timer.ts`: launchd on macOS, a
  * systemd user timer on Linux) is installed only on an explicit `--auto-resume`, never silently
@@ -34,7 +34,6 @@
 import { homedir } from "node:os";
 import { ADAPTER_FACTORIES } from "@vtc/adapters";
 import { DEFAULT_INSTALL_SCOPE, HostIdSchema, type HostId } from "@vtc/shared";
-import { registerCodexPlugin } from "../codex-registration.js";
 import { ttyConfirm } from "../confirm.js";
 import { findRepoRoot, UsageError } from "../repo.js";
 import { runtime } from "../runtime.js";
@@ -72,8 +71,6 @@ export interface InstallDeps {
   readonly confirm: (question: string) => Promise<boolean>;
   /** Where the Claude session sandbox state is read from (the real machine by default). */
   readonly sessionSandboxEnv: () => SessionSandboxEnv;
-  /** Registers the Codex plugin per Codex's plugin layout (`registerCodexPlugin`). */
-  readonly registerCodex: typeof registerCodexPlugin;
 }
 
 export const defaultInstallDeps = (): InstallDeps => ({
@@ -89,7 +86,6 @@ export const defaultInstallDeps = (): InstallDeps => ({
   }),
   confirm: ttyConfirm,
   sessionSandboxEnv: defaultSessionSandboxEnv,
-  registerCodex: registerCodexPlugin,
 });
 
 /**
@@ -251,15 +247,6 @@ export const createInstallCommand = (
           for (const note of result.notes) ctx.io.out(`  note: ${note}`);
         } finally {
           await adapter.dispose();
-        }
-        if (host.data === "codex") {
-          const registered = d.registerCodex({
-            root: installScope === "user" ? d.home() : (repoRoot ?? ctx.cwd),
-            pluginDir,
-            scope: installScope,
-          });
-          for (const path of registered.written) ctx.io.out(`  wrote ${path}`);
-          for (const note of registered.notes) ctx.io.out(`  note: ${note}`);
         }
         if (host.data === "claude-code" && !(await installSessionSandbox(ctx, d, repoRoot)))
           failed = true;
