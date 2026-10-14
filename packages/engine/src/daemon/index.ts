@@ -47,6 +47,8 @@ import {
   readClientSpend,
   removeEngineDiscovery,
   replayGraderOf,
+  replayTrialActionIds,
+  withoutReplayTrialEvents,
   takeEngineLock,
   writeEngineDiscovery,
   type LookbackRetro,
@@ -82,6 +84,22 @@ import {
   type ResearchService,
   type ResearchServiceDeps,
 } from "../research/index.js";
+
+/**
+ * A run's events as Lookback reads them (reading 176): without its replay trials, which measure a
+ * version and are no trace of the run's work (no attribution, no scorecard dispatch). A trial is
+ * marked in the log (`role.dispatched.purpose`, reading 177), so a clone or a machine without the
+ * engine's private `<guard>/replays/` file still leaves it out; `privateTrials` (that file's
+ * actions) covers logs written before contracts 4.11.0.
+ */
+export const lookbackEventsOf = (
+  state: Pick<RunState, "events">,
+  privateTrials: ReadonlySet<string> = new Set(),
+): readonly VtcEvent[] =>
+  withoutReplayTrialEvents(
+    state.events,
+    new Set([...privateTrials, ...replayTrialActionIds(state.events)]),
+  );
 
 export interface ResearchWiringOptions {
   /** Network requests per run for the role tools (`createFetchQuota`'s default when absent). */
@@ -248,29 +266,8 @@ export const wireLookback = (
     plugins.promptParts?.(agentNameFor(role, mode), host)?.lockedSha256;
   // a run's events as Lookback reads them: without its replay trials, which measure a version and
   // are no trace of the run's work (no attribution, no scorecard dispatch; reading 176)
-  const lookbackEvents = (state: RunState): readonly VtcEvent[] => {
-    // reading 177: a trial is marked in the log; the private file covers logs before 4.11.0
-    const trials = new Set(engine.replayTrialActions(state.id));
-    for (const e of state.events) {
-      const data = e.data as { purpose?: unknown; action_id?: unknown };
-      if (
-        e.type === "role.dispatched" &&
-        data.purpose === "lookback_replay" &&
-        typeof data.action_id === "string"
-      ) {
-        trials.add(data.action_id);
-      }
-    }
-    if (trials.size === 0) return state.events;
-    return state.events.filter((e) => {
-      const action = (e.data as { action_id?: unknown }).action_id;
-      return !(
-        typeof action === "string" &&
-        trials.has(action) &&
-        (e.type.startsWith("role.") || e.type.startsWith("headless."))
-      );
-    });
-  };
+  const lookbackEvents = (state: RunState): readonly VtcEvent[] =>
+    lookbackEventsOf(state, engine.replayTrialActions(state.id));
   const history = () => engine.states().flatMap(lookbackEvents);
   let chain: Promise<void> = Promise.resolve();
   const enqueue = (job: () => Promise<void>): void => {
