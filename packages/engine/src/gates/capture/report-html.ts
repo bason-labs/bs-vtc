@@ -3,9 +3,12 @@
  * of an automatic PR; AD-27 rule 6). The recorder screenshots it from the evidence snapshot
  * server like any other page. The page has inline CSS only: no script, no link, no image and a
  * `default-src 'none'` policy, so it loads nothing. Every string is passed through
- * `redactSecrets` and HTML-escaped; findings show rule, place and title only, at most
- * {@link MAX_REPORT_FINDINGS}.
+ * `redactSecrets`, has local account paths replaced (the home directory by `~`, any other
+ * `/Users/<name>`, `/home/<name>` or `C:\Users\<name>` by `~<user>`; free-text reasons such as
+ * a runner's stderr tail can hold them) and is HTML-escaped; findings show rule, place and title
+ * only, at most {@link MAX_REPORT_FINDINGS}.
  */
+import { homedir } from "node:os";
 import {
   GateReportSchema,
   redactSecrets,
@@ -29,10 +32,22 @@ const escapeHtml = (text: string): string =>
     .replaceAll('"', "&quot;")
     .replaceAll("'", "&#39;");
 
-/** Redacted, clipped and escaped: the only way a value reaches the page. */
+const escapeRe = (text: string): string => text.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+const ACCOUNT_PATH = /(?:\/Users|\/home|[A-Za-z]:\\Users)[/\\][^/\\\s"'<>:]+/g;
+
+/** `text` without the account's home directory or any other account's home path in it. */
+export const scrubLocalPaths = (text: string, home: string = homedir()): string => {
+  const own =
+    home.length > 1 && home !== "/"
+      ? text.replace(new RegExp(escapeRe(home.replace(/[/\\]+$/, "")) + "(?=$|[/\\\\])", "g"), "~")
+      : text;
+  return own.replace(ACCOUNT_PATH, "~<user>");
+};
+
+/** Redacted, without local account paths, clipped and escaped: the only way a value reaches the page. */
 const t = (value: string | number | null | undefined, max = 300): string => {
   if (value === null || value === undefined) return "";
-  const s = redactSecrets(String(value));
+  const s = scrubLocalPaths(redactSecrets(String(value)));
   return escapeHtml(s.length > max ? `${s.slice(0, max - 1)}…` : s);
 };
 

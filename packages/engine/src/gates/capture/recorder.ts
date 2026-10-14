@@ -19,13 +19,19 @@
  *   file; a project `gates.yml` that cannot be read fails every shot, since its selectors are
  *   unknown. Every reason passes `redactSecrets` and has each `denyText` value removed, so no
  *   matched text is ever reported.
+ * - Kinds: `replay_video` and `flow_video` are recordings, `screenshot`, `ui_before`, `ui_after`,
+ *   `chart` and `gate_report` are screenshots; `replay_gif` is made from a recording later (with
+ *   ffmpeg), never here. A shot whose kind, `videoSeconds` and extension disagree fails.
  * - Budget: a PNG over `EVIDENCE_LIMITS.maxPngBytes` or a recording over `maxVideoBytes` fails;
- *   recordings are WebM (no ffmpeg here), at most `maxReplaySeconds` long.
+ *   recordings are WebM (no ffmpeg here), a replay at most `maxReplaySeconds` and a changed flow at
+ *   most `maxFlowSeconds` long. One capture never returns more than `maxBytesPerPr` in all: a file
+ *   that would go over it fails. The PR's total across captures and the project's lower
+ *   `automation.evidence.max_mb` are applied by the caller, which knows both.
  *
  * Tests inject a fake {@link EvidenceRunner} or a fake Playwright module and never start a browser.
  */
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
-import { createServer, connect, type Server } from "node:net";
+import { createServer, connect, type Server, type Socket } from "node:net";
 import { tmpdir } from "node:os";
 import { isAbsolute, join } from "node:path";
 import {
@@ -127,6 +133,17 @@ export const EVIDENCE_NO_SANDBOX =
 const NAV_TIMEOUT_MS = 30_000;
 const LOOPBACK_ORIGIN = /^http:\/\/127\.0\.0\.1:([1-9]\d{0,4})$/;
 const MAX_REASON = 300;
+/** Longest Unix socket path (Linux `sun_path` is 108 bytes with its NUL). */
+const MAX_SOCKET_PATH = 107;
+
+const VIDEO_KINDS: ReadonlySet<EvidenceShot["kind"]> = new Set(["replay_video", "flow_video"]);
+const SCREENSHOT_KINDS: ReadonlySet<EvidenceShot["kind"]> = new Set([
+  "screenshot",
+  "ui_before",
+  "ui_after",
+  "chart",
+  "gate_report",
+]);
 
 /** A reason with no secret and no `denyText` value in it. */
 export const cleanReason = (text: string, denyText: readonly string[]): string => {
@@ -144,15 +161,28 @@ const shotProblem = (shot: EvidenceShot): string | null => {
   if (!EvidenceFileNameSchema.safeParse(shot.name).success) {
     return "the file name is not NN-<slug>.<png|gif|webm|mp4>";
   }
-  const video = shot.videoSeconds !== undefined;
+  if (shot.kind === "replay_gif") {
+    return "a replay_gif is made from a replay_video later (with ffmpeg), never captured";
+  }
+  const video = VIDEO_KINDS.has(shot.kind);
+  if (!video && !SCREENSHOT_KINDS.has(shot.kind)) return "the kind is not an evidence file kind";
+  if (video !== (shot.videoSeconds !== undefined)) {
+    return video
+      ? `a ${shot.kind} is a recording: give it videoSeconds`
+      : `a ${shot.kind} is a screenshot: it takes no videoSeconds`;
+  }
   if (video && !shot.name.endsWith(".webm")) {
     return "a recording is WebM: name it .webm (GIFs and MP4 are made from it later, with ffmpeg)";
   }
   if (!video && !shot.name.endsWith(".png")) return "a screenshot is PNG: name it .png";
   if (video) {
     const s = shot.videoSeconds ?? 0;
-    if (!Number.isFinite(s) || s <= 0 || s > EVIDENCE_LIMITS.maxReplaySeconds) {
-      return `a recording lasts more than 0 and at most ${String(EVIDENCE_LIMITS.maxReplaySeconds)} seconds`;
+    const max =
+      shot.kind === "flow_video"
+        ? EVIDENCE_LIMITS.maxFlowSeconds
+        : EVIDENCE_LIMITS.maxReplaySeconds;
+    if (!Number.isFinite(s) || s <= 0 || s > max) {
+      return `a ${shot.kind} lasts more than 0 and at most ${String(max)} seconds`;
     }
   }
   const { width, height } = shot.viewport;
@@ -178,8 +208,10 @@ export const sandboxedEvidenceRunner = (
     if (node === null || !isAbsolute(node)) return { ok: false, reason: NO_RUNNER_NODE };
     const logs = mkdtempSync(join(tmpdir(), "vtc-evidence-logs-"));
     let relay: Server | null = null;
+    const sockets = new Set<Socket>();
+    let relayError: string | null = null;
     try {
-      return await runSignedScript(
+      const outcome = await runSignedScript(
         jail,
         node,
         {
@@ -196,24 +228,41 @@ export const sandboxedEvidenceRunner = (
           stderrPath: join(logs, "stderr.log"),
           setup: (tmp) => {
             if (!call.input.relay) return;
+            const path = join(tmp, "relay.sock");
+            if (Buffer.byteLength(path) > MAX_SOCKET_PATH) {
+              throw new Error(
+                `the relay socket path is longer than ${String(MAX_SOCKET_PATH)} bytes; set TMPDIR to a shorter directory`,
+              );
+            }
             // Bound before the command starts (a pipe binds synchronously); forwards only to the origin.
-            relay = createServer((client) => {
+            const server = createServer((client) => {
               const upstream = connect({ host: "127.0.0.1", port: call.port });
+              sockets.add(client).add(upstream);
               const end = (): void => {
                 client.destroy();
                 upstream.destroy();
               };
               client.on("error", end);
               upstream.on("error", end);
+              client.on("close", () => sockets.delete(client));
+              upstream.on("close", () => sockets.delete(upstream));
               client.pipe(upstream).pipe(client);
             });
-            relay.listen(join(tmp, "relay.sock"));
+            // A relay that cannot listen fails the capture instead of the engine.
+            server.on("error", (error) => {
+              relayError ??= `the evidence relay failed: ${error.message}`;
+            });
+            server.listen(path);
+            relay = server;
           },
         },
         EvidenceRunnerResultSchema,
       );
+      const failed = relayError as string | null;
+      return failed === null ? outcome : { ok: false, reason: failed };
     } finally {
       (relay as Server | null)?.close();
+      for (const socket of sockets) socket.destroy();
       rmSync(logs, { recursive: true, force: true });
     }
   },
@@ -299,7 +348,11 @@ export const createEvidenceRecorder = (
         options.detectSandbox ?? (() => detectGateSandbox().sandbox),
       );
       if (sandbox !== null) {
-        const policy = gateReadPolicy({ vtcHome: deps.vtcHome, env });
+        const policy = gateReadPolicy({
+          vtcHome: deps.vtcHome,
+          env,
+          ...(deps.repoRoot === undefined ? {} : { repoRoot: deps.repoRoot }),
+        });
         jail = new GateCommandJail(sandbox, policy.denyRead, policy);
       }
       const exclude = deps.repoRoot === undefined ? [] : [deps.repoRoot];
@@ -388,6 +441,7 @@ const keep = (
 ): EvidenceCaptureResult => {
   mkdirSync(outDir, { recursive: true });
   const files: { name: string; kind: EvidenceShot["kind"]; bytes: number }[] = [];
+  let total = 0;
   for (const shot of shots) {
     const fail = (reason: string) =>
       failed.push({ name: shot.name, reason: cleanReason(reason, deny) });
@@ -418,6 +472,13 @@ const keep = (
       );
       continue;
     }
+    if (total + bytes.length > EVIDENCE_LIMITS.maxBytesPerPr) {
+      fail(
+        `the file would take this capture over the ${(EVIDENCE_LIMITS.maxBytesPerPr / (1024 * 1024)).toFixed(0)} MB evidence budget of a PR`,
+      );
+      continue;
+    }
+    total += bytes.length;
     const target = join(outDir, shot.name);
     // Never through a file or link already there.
     rmSync(target, { force: true });

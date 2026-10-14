@@ -3,6 +3,7 @@
  * and redacted, with the gate table, the layers and the test results.
  */
 import { readFileSync, statSync } from "node:fs";
+import { homedir } from "node:os";
 import { join } from "node:path";
 import { GateReportSchema, type GateReport, type GateResultInput } from "@vtc/shared";
 import { describe, expect, it } from "vitest";
@@ -11,6 +12,7 @@ import {
   GATE_REPORT_HTML,
   gateReportHtml,
   MAX_REPORT_FINDINGS,
+  scrubLocalPaths,
 } from "../../../src/gates/capture/index.js";
 import { tempDir } from "../../helpers/repo.js";
 
@@ -114,6 +116,32 @@ describe("the gate report page (D-ce)", () => {
     expect(html).toContain("&lt;script&gt;alert(1)&lt;/script&gt;");
     expect(html).not.toContain(TOKEN);
     expect(html).toContain("[REDACTED:github_token]");
+  });
+
+  it("replaces local account paths in free-text reasons", () => {
+    const home = homedir();
+    const html = gateReportHtml(
+      report([
+        {
+          gate_id: "visual",
+          layer: "L4",
+          phase: "verify",
+          status: "skipped",
+          skipped_reason: `the visual runner wrote no result (exit 1): Error at ${join(home, ".vtc/browsers/x.mjs")} and /home/alice/repo/a.ts`,
+          blocking: true,
+          new_violations: 0,
+          baseline_violations: 0,
+          duration_ms: 10,
+        },
+      ]),
+    );
+    expect(html).toContain("Error at ~/.vtc/browsers/x.mjs and ~&lt;user&gt;/repo/a.ts");
+    expect(html).not.toContain(home);
+    expect(html).not.toContain("alice");
+    expect(
+      scrubLocalPaths("at /Users/bob/x, C:\\Users\\carol\\y and /Users/me2/z", "/Users/me"),
+    ).toBe("at ~<user>/x, ~<user>\\y and ~<user>/z");
+    expect(scrubLocalPaths("at /Users/me/x and /Users/me", "/Users/me")).toBe("at ~/x and ~");
   });
 
   it("says so when no tests ran", () => {

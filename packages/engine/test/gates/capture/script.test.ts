@@ -5,18 +5,28 @@
  * and the signed result, without a browser or a network.
  */
 import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { createServer as createHttpServer } from "node:http";
+import { createServer, type AddressInfo } from "node:net";
 import { join } from "node:path";
-import { BrowserPinSchema, type EvidenceCaptureRequest } from "@vtc/shared";
-import { describe, expect, it } from "vitest";
-import { createEvidenceRecorder } from "../../../src/gates/capture/index.js";
+import { BrowserPinSchema, SECRET_PATTERNS, type EvidenceCaptureRequest } from "@vtc/shared";
+import { afterEach, describe, expect, it } from "vitest";
+import {
+  createEvidenceRecorder,
+  EVIDENCE_PAINT_DEFAULTS,
+  sandboxedEvidenceRunner,
+  type EvidenceRunnerCall,
+} from "../../../src/gates/capture/index.js";
+import { GateCommandJail, type GateJailSpec } from "../../../src/gates/sandbox.js";
 import type { VisualToolchain } from "../../../src/gates/visual/index.js";
 import { tempDir } from "../../helpers/repo.js";
 import { NODE, recordingSandbox } from "../fixture.js";
 
 /**
  * A Playwright stand-in. `scenario.json` next to it says, per path, what the page check answers
- * (`texts`, `state`) and what the page hands the binding during a recording (`live`). Everything
- * the runner asked for is logged to `log.json`.
+ * (`texts`, `state`), its child frames (`frames`: the same, or `script: false` for a frame the
+ * init script did not run in), a frame that comes and goes during a recording (`transientFrame`)
+ * and what the page hands the binding during a recording (`live`). With `fetch`, `goto` really
+ * requests the URL and logs the body. Everything the runner asked for is logged to `log.json`.
  */
 const FAKE_PLAYWRIGHT = String.raw`
 import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
@@ -24,7 +34,7 @@ import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 const here = dirname(fileURLToPath(import.meta.url));
 const scenario = JSON.parse(readFileSync(join(here, "scenario.json"), "utf8"));
-const log = { launch: null, contexts: [], routes: [], ws: 0, continued: [], aborted: [], init: [], bindings: [], order: [], screenshots: [], waited: [], videoPathBeforeClose: 0 };
+const log = { launch: null, contexts: [], routes: [], ws: 0, continued: [], aborted: [], init: [], bindings: [], order: [], screenshots: [], waited: [], videoPathBeforeClose: 0, fetched: [] };
 const flush = () => writeFileSync(join(here, "log.json"), JSON.stringify(log));
 const PNG = Buffer.from("89504e470d0a1a0a", "hex");
 const request = async (ctx, url) => {
@@ -63,27 +73,39 @@ export const chromium = {
           },
           newPage: async () => {
             let path = "/";
+            const handlers = {};
+            const locator = (selector) => {
+              const loc = { selector, first: () => loc, waitFor: async () => { if (selector === ".never") throw new Error("Timeout 30000ms exceeded waiting for .never"); } };
+              return loc;
+            };
+            const frame = (spec) => ({
+              evaluate: async () => (spec().script === false ? null : { state: spec().state || { painted: true, broken: null }, texts: spec().texts || [], error: null }),
+              locator,
+              isDetached: () => spec().detached === true,
+            });
+            const main = frame(() => scenario.pages[path] || {});
+            let children = [];
             ctx.page = {
+              on: (event, fn) => { handlers[event] = fn; },
+              mainFrame: () => main,
+              frames: () => [main, ...children.filter((f) => !f.isDetached())],
               goto: async (url) => {
                 path = new URL(url).pathname;
-                const main = await request(ctx, url);
+                const first = await request(ctx, url);
                 for (const extra of scenario.extraRequests || []) await request(ctx, extra);
+                if (scenario.fetch) log.fetched.push(await (await fetch(url)).text());
                 flush();
-                if (main.aborted) throw new Error("net::ERR_BLOCKED_BY_CLIENT");
+                if (first.aborted) throw new Error("net::ERR_BLOCKED_BY_CLIENT");
+                children = ((scenario.pages[path] || {}).frames || []).map((f) => frame(() => f));
+                for (const child of children) handlers.frameattached?.(child);
                 return { status: () => (path === "/missing" ? 404 : 200) };
               },
-              locator: (selector) => {
-                const loc = { selector, first: () => loc, waitFor: async () => { if (selector === ".never") throw new Error("Timeout 30000ms exceeded waiting for .never"); } };
-                return loc;
-              },
+              locator,
               waitForTimeout: async (ms) => {
                 log.waited.push(ms);
-                const live = (scenario.pages[path] || {}).live;
-                if (live) await ctx.bindings.__vtcEvidenceText({}, live);
-              },
-              evaluate: async () => {
                 const page = scenario.pages[path] || {};
-                return { state: page.state || { painted: true, broken: null }, texts: page.texts || [], error: null };
+                if (page.live) await ctx.bindings.__vtcEvidenceText({}, page.live);
+                if (page.transientFrame) handlers.frameattached?.(frame(() => ({ detached: true })));
               },
               screenshot: async (o) => {
                 log.screenshots.push({ type: o.type, animations: o.animations, caret: o.caret, scale: o.scale, mask: o.mask.map((m) => m.selector), maskColor: o.maskColor });
@@ -128,12 +150,20 @@ const pin = BrowserPinSchema.parse({
 
 const GITHUB_TOKEN = `ghp_${"x".repeat(36)}`;
 
-const setup = (scenario: object) => {
-  const dir = tempDir("vtc-evidence-script-");
-  const tools = join(dir, "tools");
+const fakeTools = (scenario: object): string => {
+  const tools = join(tempDir("vtc-evidence-tools-"), "tools");
   mkdirSync(tools);
   writeFileSync(join(tools, "playwright.mjs"), FAKE_PLAYWRIGHT);
   writeFileSync(join(tools, "scenario.json"), JSON.stringify(scenario));
+  return tools;
+};
+
+const setup = (
+  scenario: object,
+  options: { kind?: "bwrap"; repoRoot?: string; origin?: string } = {},
+) => {
+  const dir = tempDir("vtc-evidence-script-");
+  const tools = fakeTools(scenario);
   const toolchain: VisualToolchain = {
     source: "vtc",
     playwright: join(tools, "playwright.mjs"),
@@ -143,9 +173,13 @@ const setup = (scenario: object) => {
     browsersPath: tools,
     readable: [tools],
   };
-  const recording = recordingSandbox();
+  const recording = recordingSandbox(options.kind);
   const recorder = createEvidenceRecorder(
-    { vtcHome: join(dir, "home"), sandbox: recording.sandbox },
+    {
+      vtcHome: join(dir, "home"),
+      sandbox: recording.sandbox,
+      ...(options.repoRoot === undefined ? {} : { repoRoot: options.repoRoot }),
+    },
     {
       node: NODE,
       env: { PATH: process.env.PATH ?? "" },
@@ -174,9 +208,10 @@ const setup = (scenario: object) => {
       }[];
       waited: number[];
       videoPathBeforeClose: number;
+      fetched: string[];
     };
   const request = (extra: Partial<EvidenceCaptureRequest> = {}): EvidenceCaptureRequest => ({
-    origin: "http://127.0.0.1:45678",
+    origin: options.origin ?? "http://127.0.0.1:45678",
     outDir,
     shots: [
       {
@@ -275,19 +310,98 @@ describe("evidence runner script (AD-27 rule 6)", () => {
     expect(() => readFileSync(join(outDir, "01-page.png"))).toThrow();
   });
 
-  it("matches a denied value shorter than four characters only as a whole word", async () => {
+  it("matches a denied value as a substring, however short (any hit discards)", async () => {
     const { recorder, request } = setup({
-      pages: { "/word": { texts: ["Open the Acme UI"] }, "/inside": { texts: ["build passed"] } },
+      pages: {
+        "/word": { texts: ["Open the Acme UI"] },
+        "/inside": { texts: ["build passed"] },
+        "/clean": { texts: ["all gates pass"] },
+      },
     });
-    const shots = ["/word", "/inside"].map((path, i) => ({
+    const shots = ["/word", "/inside", "/clean"].map((path, i) => ({
       name: `0${String(i + 1)}-page.png`,
       kind: "screenshot" as const,
       path,
       viewport: { width: 1280, height: 800 },
     }));
     const result = await recorder.capture(request({ shots, denyText: ["ui"] }));
-    expect(result.files.map((f) => f.name)).toEqual(["02-page.png"]);
-    expect(result.failed.map((f) => f.name)).toEqual(["01-page.png"]);
+    expect(result.files.map((f) => f.name)).toEqual(["03-page.png"]);
+    expect(result.failed.map((f) => f.name)).toEqual(["01-page.png", "02-page.png"]);
+  });
+
+  it("scans every frame of the page, and fails a frame it cannot vouch for", async () => {
+    const { recorder, request, outDir, log } = setup({
+      pages: {
+        "/token": {
+          texts: ["Run R1"],
+          frames: [{ texts: ["calm"] }, { texts: [`srcdoc frame ${GITHUB_TOKEN}`] }],
+        },
+        "/denied": { texts: ["Run R1"], frames: [{ texts: ["the acme-client prototype"] }] },
+        "/noscript": { texts: ["Run R1"], frames: [{ script: false }] },
+        "/unpainted": {
+          texts: ["Run R1"],
+          frames: [
+            {
+              state: {
+                painted: false,
+                broken: "the redaction stylesheet was removed from the page",
+              },
+            },
+          ],
+        },
+        "/framed": { texts: ["Run R1"], frames: [{ texts: ["chart"] }] },
+      },
+    });
+    const shots = ["/token", "/denied", "/noscript", "/unpainted", "/framed"].map((path, i) => ({
+      name: `0${String(i + 1)}-page.png`,
+      kind: "screenshot" as const,
+      path,
+      viewport: { width: 1280, height: 800 },
+    }));
+    const result = await recorder.capture(request({ shots }));
+    expect(result.files.map((f) => f.name)).toEqual(["05-page.png"]);
+    expect(Object.fromEntries(result.failed.map((f) => [f.name, f.reason]))).toEqual({
+      "01-page.png": "the redaction scan found github_token on the page, so the file was discarded",
+      "02-page.png": "the redaction scan found denied_text on the page, so the file was discarded",
+      "03-page.png": "the redaction script did not run in a frame of the page",
+      "04-page.png":
+        "redaction is not in force in a frame of the page: the redaction stylesheet was removed from the page",
+    });
+    expect(() => readFileSync(join(outDir, "01-page.png"))).toThrow();
+    // Screenshots mask in every frame.
+    expect(log().screenshots.at(-1)?.mask).toEqual([
+      "[data-vtc-redact]",
+      "[data-vtc-secret]",
+      "input[type=password]",
+      ".prompt-text",
+      "[data-vtc-redact]",
+      "[data-vtc-secret]",
+      "input[type=password]",
+      ".prompt-text",
+    ]);
+  });
+
+  it("fails a recording in which a frame came and went before it could be scanned", async () => {
+    const { recorder, request } = setup({
+      pages: { "/blink": { texts: ["calm"], transientFrame: true } },
+    });
+    const result = await recorder.capture(
+      request({
+        shots: [
+          {
+            name: "01-replay.webm",
+            kind: "replay_video",
+            path: "/blink",
+            viewport: { width: 1280, height: 800 },
+            videoSeconds: 1,
+          },
+        ],
+      }),
+    );
+    expect(result.files).toEqual([]);
+    expect(result.failed).toEqual([
+      { name: "01-replay.webm", reason: "a frame was removed before its text could be scanned" },
+    ]);
   });
 
   it("discards a recording when text that appeared during it matched", async () => {
@@ -344,5 +458,121 @@ describe("evidence runner script (AD-27 rule 6)", () => {
       "02-missing.png": "HTTP 404 for /missing",
       "03-wait.png": "Timeout 30000ms exceeded waiting for .never",
     });
+  });
+});
+
+/** A loopback port nothing listens on (just now). */
+const freePort = async (): Promise<number> => {
+  const server = createServer();
+  await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+  const { port } = server.address() as AddressInfo;
+  await new Promise<void>((resolve) =>
+    server.close(() => {
+      resolve();
+    }),
+  );
+  return port;
+};
+
+describe("evidence runner script on Linux: the socket relay (bwrap)", () => {
+  const savedTmp = process.env.TMPDIR;
+  afterEach(() => {
+    if (savedTmp === undefined) delete process.env.TMPDIR;
+    else process.env.TMPDIR = savedTmp;
+  });
+
+  it("asks for the relay instead of a host port, and hides the repo's state from the browser", async () => {
+    const repo = tempDir("vtc-evidence-repo-");
+    const port = await freePort();
+    const { recorder, request, specs } = setup(
+      { pages: { "/clean": { texts: ["all gates pass"] } } },
+      { kind: "bwrap", repoRoot: repo, origin: `http://127.0.0.1:${String(port)}` },
+    );
+    const result = await recorder.capture(request());
+    expect(result.failed).toEqual([]);
+    expect(specs[0]?.phase).toBe("verify");
+    expect(specs[0]).not.toHaveProperty("loopbackPorts");
+    const spec = specs[0] as GateJailSpec | undefined;
+    expect(spec?.hideRead).toContain(join(repo, ".vtc", "state"));
+    expect(spec?.denyRead).toContain(join(repo, ".vtc", "evidence"));
+  });
+
+  const relayCall = (tools: string, origin: number, port: number): EvidenceRunnerCall => ({
+    input: {
+      v: 1,
+      playwright: join(tools, "playwright.mjs"),
+      executable: "/fake/chrome-headless-shell",
+      origin: `http://127.0.0.1:${String(origin)}`,
+      relay: true,
+      video_size: { width: 1280, height: 800 },
+      nav_timeout_ms: 30_000,
+      paint: [...EVIDENCE_PAINT_DEFAULTS],
+      mask: [...EVIDENCE_PAINT_DEFAULTS],
+      mask_color: "#1f1f1f",
+      patterns: SECRET_PATTERNS.map((p) => ({
+        kind: p.kind,
+        source: p.pattern.source,
+        flags: p.pattern.flags,
+      })),
+      deny_text: [],
+      max_scan_chars: 100_000,
+      shots: [{ name: "01-page.png", path: "/hello", width: 1280, height: 800 }],
+    },
+    allowRead: [tools],
+    port,
+    env: { PATH: process.env.PATH ?? "" },
+    timeoutMs: 60_000,
+  });
+
+  it("reaches the host's origin port only through <tmp>/relay.sock", async () => {
+    // The sandbox's loopback is its own on Linux; here the script's relay listens on one port and
+    // the recorder forwards relay.sock to another, so the two ends are told apart.
+    const server = createHttpServer((req, res) => {
+      res.end(`hello from the origin at ${req.url ?? ""}`);
+    });
+    await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+    try {
+      const hostPort = (server.address() as AddressInfo).port;
+      const tools = fakeTools({ pages: { "/hello": { texts: ["hello"] } }, fetch: true });
+      const recording = recordingSandbox("bwrap");
+      const jail = new GateCommandJail(recording.sandbox, []);
+      try {
+        const call = relayCall(tools, await freePort(), hostPort);
+        const outcome = await sandboxedEvidenceRunner(jail, NODE).run(call);
+        expect(outcome.ok).toBe(true);
+        if (outcome.ok) expect(outcome.result.shots[0]?.status).toBe("captured");
+        const log = JSON.parse(readFileSync(join(tools, "log.json"), "utf8")) as {
+          fetched: string[];
+        };
+        expect(log.fetched).toEqual(["hello from the origin at /hello"]);
+        expect(recording.specs[0]).not.toHaveProperty("loopbackPorts");
+      } finally {
+        jail.dispose();
+      }
+    } finally {
+      await new Promise<void>((resolve) =>
+        server.close(() => {
+          resolve();
+        }),
+      );
+    }
+  });
+
+  it("fails the capture, not the engine, when the relay socket cannot be bound", async () => {
+    const long = join(tempDir("vtc-evidence-long-"), "d".repeat(60), "e".repeat(60));
+    mkdirSync(long, { recursive: true });
+    process.env.TMPDIR = long;
+    const tools = fakeTools({ pages: { "/hello": { texts: ["hello"] } } });
+    const jail = new GateCommandJail(recordingSandbox("bwrap").sandbox, []);
+    try {
+      const call = relayCall(tools, await freePort(), await freePort());
+      const outcome = await sandboxedEvidenceRunner(jail, NODE).run(call);
+      expect(outcome).toEqual({
+        ok: false,
+        reason: expect.stringMatching(/relay socket path is longer than 107 bytes/) as unknown,
+      });
+    } finally {
+      jail.dispose();
+    }
   });
 });
