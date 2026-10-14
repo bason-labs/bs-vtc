@@ -172,5 +172,15 @@ export * from "./json-schema.js";
  * user's price table (`UserConfig.prices`, `ModelPriceSchema`, `priceTokens`, `EngineDeps.prices`);
  * cost per client (`ClientSpendRow` under `CLIENT_SPEND_DIR`, `ClientSpendReport`,
  * `clientSpendReport`, the `clientSpend` route `GET /api/spend`).
+ *
+ * 4.10.0 (MINOR): the wave-3 closing round (spine §5 readings 156–176). H-3 host web search:
+ * `RoleTools.host_web`, `FactReportedSource` (`FactRow.reported_source`,
+ * `FactProposeInput.reported_source`), `SearchProvider` and `UserConfig.research.search_provider`
+ * (no default), `EngineDeps.researchSearchProvider`. D-bq: `HostBilling` (`HostAuthStatus.billing`, `UsageSnapshot.billing`) and
+ * `API_KEY_BILLING_WARNING`. D-bd: `EscalationEffect` `finish_level_2`. D-bt:
+ * `DesignCoverageReport.directions_problem` (counted in `ok`) and `G2_DIRECTIONS`. D-br:
+ * `engineerProfileLockedSection`. Moved here: `editableSectionErrors` and
+ * `RESERVED_EDITABLE_HEADINGS` (from `@vtc/compiler`) and `lookbackTiebreakKey` (the lookback
+ * module's `tiebreakKey`), with the tiebreak store's writer rules on `LOOKBACK_HOME.tiebreaksFile`.
  */
-export const CONTRACTS_VERSION = "4.9.0";
+export const CONTRACTS_VERSION = "4.10.0";

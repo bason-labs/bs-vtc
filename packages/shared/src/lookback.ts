@@ -56,6 +56,14 @@ export const LOOKBACK_HOME = {
    * The AI tiebreak answers the engine recorded, one {@link LookbackTiebreakRecord} per line.
    * Under the VTC home (never in a repo), so no role can plant one: an `ai_tiebreak` attribution
    * counts only when its `tiebreak_key` is here (spine §5 reading 137). New in 4.7.0.
+   *
+   * Writer path (4.10.0, spine §5 reading 175): only the engine writes it, and only through the
+   * lookback module's writer, which the daemon hands to core (core never imports lookback, AD-13
+   * rule 12). The writer appends one line per answer (`O_APPEND`, never a rewrite), creates the
+   * file with mode `0600`, refuses a symlink at the path or its directory, and keys each record
+   * with {@link lookbackTiebreakKey} of the `ai_tiebreak` attribution row it backs. Roles may not
+   * write it (`ROLE_DENIED_VTC`: the VTC home's `lookback/**`). Readers parse each line with
+   * `parsePersisted` and skip a line that does not parse.
    */
   tiebreaksFile: "lookback/tiebreaks.jsonl",
 } as const;
@@ -478,6 +486,28 @@ export const LookbackTiebreakRecordSchema = z.strictObject({
   recorded_at: IsoDateTimeSchema,
 });
 export type LookbackTiebreakRecord = z.infer<typeof LookbackTiebreakRecordSchema>;
+
+/**
+ * Pure: the digest that ties an `ai_tiebreak` {@link Attribution} row to the engine's record of
+ * that answer ({@link LookbackTiebreakRecord}`.tiebreak_key`): its run, trace, prompt version,
+ * blame, confidence and evidence; `attributed_at` and `split` are left out, so neither can be
+ * changed to re-key a row. Frozen in 4.10.0 (it was the lookback module's `tiebreakKey`, same
+ * digest) so engine core can key a record it writes without importing lookback.
+ */
+export const lookbackTiebreakKey = (a: Attribution): string =>
+  sha256Hex(
+    JSON.stringify([
+      a.run,
+      a.trace,
+      a.prompt.role,
+      a.prompt.mode ?? null,
+      a.prompt.host,
+      a.prompt.effective_sha256,
+      a.blamed_role,
+      a.confidence,
+      a.evidence.map((e) => [e.type, e.ref]),
+    ]),
+  );
 
 /**
  * One measured A/A flip rate ({@link LOOKBACK_HOME}`.aaNoiseFile`, one JSON line per replay that

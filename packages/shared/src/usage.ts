@@ -8,6 +8,7 @@
  * (`HostAdapter.watchUsage`).
  */
 import { z } from "zod";
+import { HostBillingSchema } from "./headless.js";
 import { HostIdSchema, IsoDateTimeSchema, TaskIdSchema } from "./primitives.js";
 
 /** Where the reading came from (§6.9: sanctioned sources only). */
@@ -54,6 +55,12 @@ export const UsageSnapshotSchema = z.strictObject({
   source: UsageSourceSchema,
   windows: z.array(UsageWindowSchema).default([]),
   model_limits: z.array(ModelLimitSchema).default([]),
+  /**
+   * Who pays for role runs on this host's login, from its last sign-in check
+   * (`HostAuthStatus.billing`); `api_key` makes Flow Studio show `API_KEY_BILLING_WARNING`
+   * (D-bq, spine §5 reading 171). Absent or `null` = unknown. New in 4.10.0.
+   */
+  billing: HostBillingSchema.nullable().optional(),
   /** When the data was last updated; `null` = never. */
   updated_at: IsoDateTimeSchema.nullable(),
 });

@@ -107,6 +107,17 @@ export const HostErrorCauseSchema = z.enum([
 export type HostErrorCause = z.infer<typeof HostErrorCauseSchema>;
 
 // --------------------------------------------------------------------- auth
+/**
+ * Who pays for a host's role runs (spine §5 reading 171, D-bq). An API-key login is allowed: role
+ * runs are not refused, but `vtc doctor` and Flow Studio show {@link API_KEY_BILLING_WARNING}
+ * (`HostAuthStatus.billing`, `UsageSnapshot.billing`). New in 4.10.0.
+ */
+export const HostBillingSchema = z.enum(["subscription", "api_key"]);
+export type HostBilling = z.infer<typeof HostBillingSchema>;
+
+/** The visible warning for an API-key login (D-bq), the same text in doctor and Flow Studio. */
+export const API_KEY_BILLING_WARNING =
+  "API-key billing: this host is signed in with an API key, so VTC role runs on it are billed to that key at API prices, not to your subscription";
 
 /**
  * The host's own login state, read only through the host's sanctioned status command
@@ -118,6 +129,12 @@ export const HostAuthStatusSchema = z.strictObject({
   host: HostIdSchema,
   logged_in: z.boolean().nullable(),
   method: z.string().min(1).max(100).nullable(),
+  /**
+   * Who pays for role runs on this login, as the adapter reads it from the status command
+   * (`HostBilling`): `api_key` for an API-key login (Codex "Logged in using an API key"), else
+   * `subscription`; absent or `null` when the command does not say. New in 4.10.0 (D-bq).
+   */
+  billing: HostBillingSchema.nullable().optional(),
   checked_at: IsoDateTimeSchema,
 });
 export type HostAuthStatus = z.infer<typeof HostAuthStatusSchema>;

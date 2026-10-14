@@ -13,7 +13,7 @@ import {
   SlugSchema,
   type TokenUsage,
 } from "./primitives.js";
-import { FetcherIdSchema } from "./research.js";
+import { FetcherIdSchema, SearchProviderSchema } from "./research.js";
 import { ModelTierSchema } from "./role-contract.js";
 
 /** Tracks (§6.2). */
@@ -228,6 +228,13 @@ export const UserConfigSchema = z.strictObject({
   research: z
     .strictObject({
       api_keys: z.partialRecord(FetcherIdSchema, EnvVarNameSchema).default({}),
+      /**
+       * The optional keyed provider behind the `search` fetcher (H-3, spine §5 reading 156).
+       * Absent (the default): the fetcher sends nothing and research search runs on the host's
+       * own web search in the role session. With a provider, its key is `api_keys.search`'s
+       * variable. New in 4.10.0.
+       */
+      search_provider: SearchProviderSchema.optional(),
     })
     .optional(),
   prices: z

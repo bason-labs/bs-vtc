@@ -21,8 +21,9 @@ import {
 const frozen = [{ path: ".vtc/architecture/spine.md", sha256: "a".repeat(64) }];
 
 describe("contracts 4.9.0", () => {
-  it("is MINOR over 4.8.0", () => {
-    expect(CONTRACTS_VERSION).toBe("4.9.0");
+  it("is MINOR over 4.8.0 (and still in force: 4.10.0 is MINOR too)", () => {
+    expect(CONTRACTS_VERSION.split(".").slice(0, 1)).toEqual(["4"]);
+    expect(Number(CONTRACTS_VERSION.split(".")[1])).toBeGreaterThanOrEqual(9);
   });
 });
 
