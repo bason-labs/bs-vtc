@@ -40,6 +40,7 @@ import {
   Engine,
   EngineError,
   INDEX_PATH,
+  isReplayTrialEvent,
   loadProjectConfig,
   loadRuns,
   openEventIndex,
@@ -112,6 +113,21 @@ export const lookbackEventsOf = (
     state.events,
     new Set([...privateTrials, ...replayTrialActionIds(state.events)]),
   );
+
+/**
+ * The engine's events as the live SSE stream sends them (reading 177): without a replay trial's
+ * `role.*` and `headless.*` events, as the paged event view and the replay on connect leave them
+ * out, so the live view and a reload show the same events.
+ */
+export const liveEvents = (
+  engine: Pick<Engine, "onEvent" | "states">,
+  listener: (event: VtcEvent) => void,
+): (() => void) =>
+  engine.onEvent((event) => {
+    const state = engine.states().find((s) => s.id === event.run);
+    if (state !== undefined && isReplayTrialEvent(state, event)) return;
+    listener(event);
+  });
 
 export interface ResearchWiringOptions {
   /** Network requests per run for the role tools (`createFetchQuota`'s default when absent). */
@@ -633,7 +649,7 @@ export const runDaemon: RunDaemon = async (deps: EngineDeps, options) => {
       ingest: (body) => {
         engine.ingestUsage(usageFromStatuslineIngest(body, now().toISOString()));
       },
-      subscribe: (listener) => engine.onEvent(listener),
+      subscribe: (listener) => liveEvents(engine, listener),
       secrets: () => engine.secrets(),
       now,
     });

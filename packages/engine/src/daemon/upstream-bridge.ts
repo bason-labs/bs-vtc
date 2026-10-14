@@ -10,14 +10,15 @@
  *   role-writable proposal file as it is now (D-cb);
  * - the module's `{ type, payload }` events → the engine's `upstream.*` / `automation.skipped`
  *   events, through the wiring's only sink;
- * - its sweep (auto-close, stale PRs) at most once a day, remembered across daemon restarts.
+ * - its sweep (auto-close, stale PRs) at most once a day after one that worked, remembered across
+ *   daemon restarts;
+ * - `startRun` (`Engine.startAutomatic`), passed on for the module to start an automatic run.
  *
  * The module is not imported here: {@link UpstreamModule} and {@link UpstreamModuleDeps} are the
  * structural shape of `createUpstream` (`upstream/upstream.ts`), and the daemon passes that factory
  * in (`../upstream/index.js` joins the engine at the round-4 merge, AD-13 rule 13), so a drift
  * between the two is a type error at that one call.
  */
-import { lstatSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import {
   LOOKBACK_REPO,
@@ -27,11 +28,13 @@ import {
   type AssetBundle,
   type AutomationContext,
   type AutomationDeps,
+  type AutomationRunRef,
   type AutomationSettings,
   type GitHubRepo,
   type PromptProposal,
   type ReplayResult,
   type ScorecardMetricId,
+  type StartInput,
 } from "@vtc/shared";
 import {
   ensurePrivateDir,
@@ -41,6 +44,7 @@ import {
   type CreateUpstream,
   type UpstreamWiring,
 } from "../core/index.js";
+import { readRepoFileCapped } from "../git/index.js";
 
 // --------------------------------------------------------------- the module's shape
 
@@ -130,6 +134,12 @@ export interface UpstreamModuleDeps {
   readonly vtcVersion: string;
   readonly assets: AssetBundle;
   readonly emit: (event: { readonly type: string; readonly payload: unknown }) => void;
+  /**
+   * Starts an automatic run from one of its issues (D-bv "a fixable one becomes a normal VTC run";
+   * AD-27 rule 2): `Engine.startAutomatic`. The module's `UpstreamDeps` has no such hook yet (a
+   * contract proposal to the upstream team); until it takes one, nothing calls it.
+   */
+  readonly startRun?: (input: StartInput, issue: AutomationRunRef) => Promise<void>;
   readonly now?: () => Date;
 }
 
@@ -232,14 +242,15 @@ export const readLookbackPrInput = async (input: {
   const path = input.replayPath;
   if (!path.startsWith(`${LOOKBACK_REPO.replaysDir}/`) || path.split("/").includes(".."))
     return `the replay result ${path} is not under ${LOOKBACK_REPO.replaysDir}`;
-  const file = join(input.projectRoot, path);
   let raw: unknown;
   try {
-    // the engine writes it; a link or an oversized file is never read
-    const stat = lstatSync(file);
-    if (!stat.isFile()) return `the replay result ${path} is not a regular file`;
-    if (stat.size > REPLAY_FILE_MAX_BYTES) return `the replay result ${path} is too large`;
-    raw = JSON.parse(readFileSync(file, "utf8"));
+    // the engine writes it; a link (at any component) or an oversized file is never read
+    const read = readRepoFileCapped(input.projectRoot, path, REPLAY_FILE_MAX_BYTES);
+    if (!read.ok && read.reason === "not_a_file")
+      return `the replay result ${path} is not a regular file`;
+    if (!read.ok && read.reason === "too_large") return `the replay result ${path} is too large`;
+    if (!read.ok) return `the replay result ${path} is missing or not JSON`;
+    raw = JSON.parse(read.text);
   } catch {
     return `the replay result ${path} is missing or not JSON`;
   }
@@ -309,6 +320,7 @@ export const bridgeUpstream =
       emit: (event) => {
         deps.emit(asDraft(event));
       },
+      startRun: deps.startRun,
       now,
     });
     const repo = githubRepoOf(options.remoteUrl);
@@ -357,8 +369,6 @@ export const bridgeUpstream =
         const at = now();
         const last = lastSweep();
         if (!Number.isNaN(last) && at.getTime() - last < UPSTREAM_SWEEP_EVERY_MS) return;
-        ensurePrivateDir(options.guardDir);
-        writePrivateFile(sweepFile, `${JSON.stringify({ at: at.toISOString() })}\n`);
         const outcomes = await module.sweep(ctx());
         const errors = outcomes.filter((o) => o.status === "error");
         if (errors.length > 0)
@@ -368,6 +378,10 @@ export const bridgeUpstream =
               .join("; ")
               .slice(0, 500),
           );
+        // the clock moves only after a sweep that worked: a failed one is tried again at the
+        // wiring's next tick, not a day later
+        ensurePrivateDir(options.guardDir);
+        writePrivateFile(sweepFile, `${JSON.stringify({ at: at.toISOString() })}\n`);
       },
     };
   };

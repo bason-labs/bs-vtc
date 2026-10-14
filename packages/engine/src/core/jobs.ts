@@ -17,6 +17,7 @@ import {
   hiddenTestsDir,
   parsePersisted,
   redactSecrets,
+  renderAutoMarker,
   TestInventorySchema,
   type Evidence,
   type TestInventory,
@@ -698,7 +699,12 @@ export const downgradeNoRemote = (k: Kernel, h: RunHandle): void => {
   }
 };
 
-/** Pushes the integration branch and keeps the draft PR current (Level 2, §6.7). */
+/**
+ * Pushes the integration branch and keeps the draft PR current (Level 2, §6.7). An automatic run's
+ * PR (AD-27 rules 3 and 6, H-8) opens with the hidden `vtc:auto` marker of its issue's kind and
+ * fingerprint, and stays a draft after Final Review: marking it ready waits for its evidence
+ * manifest, which the engine does not record.
+ */
 export const pushFeature = async (
   k: Kernel,
   h: RunHandle,
@@ -734,17 +740,23 @@ export const pushFeature = async (
     return;
   }
   let pr = feature.pr;
+  const automation = h.state.automation;
   try {
+    const described =
+      body ??
+      `Draft: VTC integration of ${feature.id} (${feature.title}). Ready for review after Final Review.`;
     const request = {
       branch: feature.integration_branch,
       base: await baseBranch(k.deps.repoRoot),
       title: feature.title,
       body:
-        body ??
-        `Draft: VTC integration of ${feature.id} (${feature.title}). Ready for review after Final Review.`,
+        automation === null
+          ? described
+          : `${renderAutoMarker({ v: 1, kind: automation.kind, fp: automation.fingerprint })}\n\n${described}`,
     };
     pr = await k.deps.pullRequests.upsertDraft(request);
-    if (ready) pr = await k.deps.pullRequests.markReady(feature.integration_branch);
+    if (ready && automation === null)
+      pr = await k.deps.pullRequests.markReady(feature.integration_branch);
   } catch (error) {
     await k.serial(h, () => {
       k.emit(h, {

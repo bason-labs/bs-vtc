@@ -171,6 +171,13 @@ import { ArtifactRefSchema } from "@vtc/shared";
 import { checkEngineerShare, handleSubmit } from "./submit.js";
 import { escalationListView, openEscalations, statusView } from "./views.js";
 
+/**
+ * How many times the engine itself rejects an automatic run's failed DESIGN check (AD-27 rule 2,
+ * reading 198) before it leaves G2 for the human: bounded, so a design that keeps failing never
+ * loops unattended.
+ */
+const AUTO_GATE_REJECTS = 2;
+
 const sha256File = (path: string): string | undefined =>
   existsSync(path) ? createHash("sha256").update(readFileSync(path)).digest("hex") : undefined;
 
@@ -994,14 +1001,16 @@ export class Engine implements Kernel {
 
   /**
    * Appends an event a wired module emitted (research: `research.fetched`, `fact.recorded`) to
-   * `run`'s log, or to the active run's when `run` is absent; dropped when that run is not open
-   * (the module's own files are the record).
+   * `run`'s log, or to the active run's when `run` is absent; not recorded when that run is not
+   * open (the research module's own files are the record; automation keeps it for the next run).
+   * Returns whether it was recorded.
    */
-  recordModuleEvent(run: string | undefined, draft: EventDraft): void {
+  recordModuleEvent(run: string | undefined, draft: EventDraft): boolean {
     const id = run ?? this.activeFrozen()?.run;
     const handle = id === undefined ? undefined : this.handles.get(id);
-    if (handle === undefined || handle.state.run.finished_at !== undefined) return;
+    if (handle === undefined || handle.state.run.finished_at !== undefined) return false;
     this.emit(handle, draft);
+    return true;
   }
 
   /**
@@ -1651,14 +1660,42 @@ export class Engine implements Kernel {
    * records the gate approved with what it froze, the run moves on, and the human's one step is the
    * final PR review. A G2 that lists unverified facts needs a human's waiver with a reason (AD-22
    * rule 4), so it stays for the human; with UI the category standard is taken (no human picks a
-   * direction). Returns whether it approved. Callers hold the run's lock.
+   * direction). Every other G2 rule still holds (reading 198): a failed DESIGN check is never
+   * approved; the engine rejects G2 with the check's problems as its note, so the Architect and
+   * Designer fix it, at most `AUTO_GATE_REJECTS` times, then leaves it for the human. Returns
+   * whether it decided the gate. Callers hold the run's lock.
    */
   private autoApproveGates(
     handle: RunHandle,
     gate: { gates: HumanGateId[]; artifacts: FrozenArtifact[]; extras: GateExtras },
   ): boolean {
     if (gate.extras.unverified_facts.length > 0) return false;
-    const issue = handle.state.automation;
+    const state = handle.state;
+    const issue = state.automation;
+    const exit = gate.extras.design_directions.length > 0 ? "category_standard" : undefined;
+    const blocked = g2ApprovalProblem(gate.extras, {
+      fact_waivers: [],
+      ...(exit === undefined ? {} : { design_exit: exit }),
+    });
+    if (blocked !== null) {
+      const rejected = state.events.filter(
+        (e) => e.type === "gate.rejected" && e.actor === "engine",
+      ).length;
+      if (rejected >= AUTO_GATE_REJECTS) return false;
+      this.recordGateRequest(handle, gate);
+      this.emit(handle, {
+        type: "gate.rejected",
+        actor: "engine",
+        data: { gates: gate.gates, note: `automatic run: ${blocked}`.slice(0, 4000) },
+      });
+      // as a human's rejection (`approve`): back to the phase whose roles fix it
+      this.phaseTo(
+        handle,
+        state.run.track === "quick_fix" || state.run.phase === "g1" ? "specify" : "design",
+      );
+      this.advance(handle);
+      return true;
+    }
     this.recordGateRequest(handle, gate);
     this.emit(handle, {
       type: "gate.approved",
@@ -1666,9 +1703,7 @@ export class Engine implements Kernel {
       data: {
         gates: gate.gates,
         frozen: gate.artifacts,
-        ...(gate.extras.design_directions.length > 0
-          ? { design_exit: "category_standard" as const }
-          : {}),
+        ...(exit === undefined ? {} : { design_exit: exit }),
         waived_facts: [],
         note: `automatic run: the issue${issue === null ? "" : ` #${String(issue.issue)}`} is its spec, so no human gate before the final PR review (AD-27 rule 2)`,
       },

@@ -8,10 +8,22 @@
 import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { scorecardPath, type AutomationDeps, type Scorecard, type StartInput } from "@vtc/shared";
-import type { AutomationFact, CreateUpstream, UpstreamWiringDeps } from "../../src/core/index.js";
+import {
+  scorecardPath,
+  type AutomationDeps,
+  type Scorecard,
+  type StartInput,
+  type VtcEvent,
+} from "@vtc/shared";
+import type {
+  AutomationFact,
+  CreateUpstream,
+  Engine,
+  EventDraft,
+  UpstreamWiringDeps,
+} from "../../src/core/index.js";
 import { isGitHubRemote, wireAutomation } from "../../src/daemon/automation.js";
-import { cleanupDirs } from "../helpers/repo.js";
+import { cleanupDirs, tempDir } from "../helpers/repo.js";
 import { CLAUDE, createHarness, type Harness } from "../helpers/engine-harness.js";
 
 vi.setConfig({ testTimeout: 30_000 });
@@ -66,6 +78,60 @@ const fakeUpstream = () => {
 };
 
 const started = async (h: Harness): Promise<string> => (await h.engine.start(REQUEST, CLAUDE)).run;
+
+/** An engine stand-in whose runs a test opens, finishes and pauses at will. */
+const fakeEngine = () => {
+  const runs = new Map<string, { finished: boolean; paused: boolean }>();
+  const recorded: { run: string; type: string; data: unknown }[] = [];
+  let listener: ((event: VtcEvent) => void) | undefined;
+  const engine = {
+    guardDir: tempDir("vtc-guard-"),
+    states: () =>
+      [...runs.entries()].map(([id, r]) => ({
+        id,
+        run: {
+          ...(r.finished ? { finished_at: "2026-10-13T09:00:00.000Z" } : {}),
+          paused: r.paused,
+        },
+        events: [],
+      })),
+    config: () => ({}),
+    recordModuleEvent: (run: string, draft: EventDraft): boolean => {
+      const r = runs.get(run);
+      if (r === undefined || r.finished) return false;
+      recorded.push({ run, type: draft.type, data: draft.data });
+      return true;
+    },
+    onEvent: (fn: (event: VtcEvent) => void) => {
+      listener = fn;
+      return () => {
+        listener = undefined;
+      };
+    },
+    relay: () => undefined,
+    notice: () => undefined,
+  } as unknown as Engine;
+  return {
+    engine,
+    runs,
+    recorded,
+    started: (run: string) => {
+      listener?.({ type: "run.started", run } as VtcEvent);
+    },
+  };
+};
+
+const OPENED = {
+  type: "upstream.issue_opened",
+  actor: "engine" as const,
+  data: {
+    target: { kind: "upstream", repo: "bason-labs/bs-vtc" },
+    kind: "defect",
+    fingerprint: "0123456789abcdef",
+    number: 7,
+    url: "https://github.com/bason-labs/bs-vtc/issues/7",
+  },
+};
 
 describe("automation wiring (AD-27 rules 7 and 8)", () => {
   it("tells a GitHub push remote", () => {
@@ -230,6 +296,36 @@ describe("automation wiring (AD-27 rules 7 and 8)", () => {
     await h.release();
   });
 
+  it("an event for a finished run is never written into another run's log: the next run records it, and a flush keeps what it could not record", async () => {
+    const fake = fakeEngine();
+    const up = fakeUpstream();
+    const wiring = wireAutomation(
+      fake.engine,
+      { repoRoot: tempDir(), vtcHome: tempDir(), automation: AUTOMATION },
+      { githubRemote: true, createUpstream: up.create },
+    );
+    fake.runs.set("R-1", { finished: true, paused: false });
+    fake.runs.set("R-2", { finished: false, paused: false });
+    // R-1 finished: not into R-2, the open run
+    up.deps().emit(OPENED, "R-1");
+    expect(fake.recorded).toEqual([]);
+    // the next run to start finished before the flush: the line stays
+    fake.runs.set("R-3", { finished: true, paused: false });
+    fake.started("R-3");
+    await wiring.idle();
+    expect(fake.recorded).toEqual([]);
+    fake.runs.set("R-4", { finished: false, paused: false });
+    fake.started("R-4");
+    await wiring.idle();
+    expect(fake.recorded).toEqual([{ run: "R-4", type: OPENED.type, data: OPENED.data }]);
+    // flushed once: a later run records nothing more
+    fake.runs.set("R-5", { finished: false, paused: false });
+    fake.started("R-5");
+    await wiring.idle();
+    expect(fake.recorded).toHaveLength(1);
+    await wiring.close();
+  });
+
   it("the module starts an automatic run from an issue", async () => {
     const h = createHarness();
     const up = fakeUpstream();
@@ -364,7 +460,40 @@ describe("automation wiring (AD-27 rules 7 and 8)", () => {
     await h.release();
   });
 
-  it("tries the module's sweep when it starts (the module paces it), never while paused", async () => {
+  it("never sweeps while a run is paused", async () => {
+    const fake = fakeEngine();
+    fake.runs.set("R-1", { finished: false, paused: true });
+    let sweeps = 0;
+    const create: CreateUpstream = () => ({
+      onFact: () => Promise.resolve(),
+      sweep: () => {
+        sweeps += 1;
+        return Promise.resolve();
+      },
+    });
+    vi.useFakeTimers({ toFake: ["setInterval", "clearInterval"] });
+    try {
+      const wiring = wireAutomation(
+        fake.engine,
+        { repoRoot: tempDir(), vtcHome: tempDir(), automation: AUTOMATION },
+        { githubRemote: true, createUpstream: create, sweepEveryMs: 1000 },
+      );
+      await wiring.idle();
+      vi.advanceTimersByTime(3000);
+      await wiring.idle();
+      expect(sweeps).toBe(0);
+      // resumed: the next tick sweeps
+      fake.runs.set("R-1", { finished: false, paused: false });
+      vi.advanceTimersByTime(1000);
+      await wiring.idle();
+      expect(sweeps).toBe(1);
+      await wiring.close();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("tries the module's sweep when it starts (the module paces it)", async () => {
     const h = createHarness();
     let sweeps = 0;
     const create: CreateUpstream = () => ({

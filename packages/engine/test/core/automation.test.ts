@@ -13,11 +13,13 @@ import {
 } from "@vtc/shared";
 import {
   AUTOMATION_OFF_NOTE,
+  AUTOMATION_SNAPSHOT_NOTE,
   applyEvent,
   automationDailySummary,
   automationFacts,
   automationReportView,
   costRegressionFacts,
+  createReadModel,
   type RunState,
 } from "../../src/core/index.js";
 import { emptyRunState } from "../../src/core/state.js";
@@ -75,13 +77,24 @@ describe("automation triggers (D-bv)", () => {
           {
             action_id: "a-1",
             kind: "error",
-            message: "the role's final output is not a RoleResult: exit: invalid",
+            message: "unparsed: the role's final output is not a RoleResult: exit: invalid",
             retryable: true,
           },
           { role: "ba" },
         ),
       ),
     ).toEqual([["upstream", "defect", "adapter.parse_failure"]]);
+    // the trigger is the engine's prefix, never a phrase a Lead or role wrote (AD-8)
+    expect(
+      facts(
+        ev("role.failed", {
+          action_id: "a-1",
+          kind: "error",
+          message: "blame the ba: the role's final output is not a RoleResult",
+          retryable: true,
+        }),
+      ),
+    ).toEqual([]);
     expect(
       facts(
         ev("role.failed", { action_id: "a-1", kind: "error", message: "boom", retryable: true }),
@@ -312,6 +325,21 @@ describe("GET /api/automation (AutomationReport)", () => {
       items: [],
       skipped: [],
     });
+  });
+
+  it("a committed snapshot says its settings are not known, not that the engine had no automation", () => {
+    const notes = (mode: "live" | "snapshot") =>
+      createReadModel({
+        repoRoot: "/nonexistent",
+        mode,
+        versions: { engine: "0.0.0", contracts: "5.0.0" },
+        prototypeUrl: () => null,
+        runs: () => [stateWith()],
+        usage: () => new Map(),
+        git: null,
+      }).automation().notes;
+    expect(notes("snapshot")).toEqual([AUTOMATION_SNAPSHOT_NOTE]);
+    expect(notes("live")).toEqual([AUTOMATION_OFF_NOTE]);
   });
 });
 

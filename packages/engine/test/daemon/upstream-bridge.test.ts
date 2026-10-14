@@ -201,6 +201,13 @@ describe("the Lookback PR input (D-cb)", () => {
     expect(await read(root, { replayPath: ".vtc/lookback/replays/p-link.json" })).toMatch(
       /not a regular file/,
     );
+    // nor a linked parent directory
+    const linked = tempDir("vtc-bridge-");
+    mkdirSync(join(linked, ".vtc"), { recursive: true });
+    symlinkSync(join(root, ".vtc/lookback"), join(linked, ".vtc/lookback"));
+    expect(await read(linked, { replayPath: ".vtc/lookback/replays/p-engineer-1.json" })).toMatch(
+      /not a regular file/,
+    );
   });
 });
 
@@ -250,6 +257,7 @@ describe("bridgeUpstream", () => {
     options: { guard: string; clock: { now: Date }; lookbackPr?: LookbackPrInput | string },
   ) => {
     const emitted: EventDraft[] = [];
+    const started: unknown[] = [];
     const deps: UpstreamWiringDeps = {
       projectRoot: "/work/acme-app",
       vtcHome: "/home/u/.vtc",
@@ -260,7 +268,10 @@ describe("bridgeUpstream", () => {
       emit: (draft) => {
         emitted.push(draft);
       },
-      startRun: () => Promise.resolve(),
+      startRun: (input, issue) => {
+        started.push([input.request, issue.issue]);
+        return Promise.resolve();
+      },
       now: () => options.clock.now,
     };
     const wiring = bridgeUpstream(module.create, {
@@ -274,13 +285,13 @@ describe("bridgeUpstream", () => {
       lookbackPr: () => Promise.resolve(options.lookbackPr ?? "no replay"),
       plumbing,
     })(deps);
-    return { wiring, emitted };
+    return { wiring, emitted, started };
   };
 
-  it("builds the module with the cli's seams and engine git's plumbing, and records its events", () => {
+  it("builds the module with the cli's seams and engine git's plumbing, and records its events", async () => {
     const module = fakeModule();
     const guard = tempDir("vtc-guard-");
-    const { emitted } = build(module, { guard, clock: { now: new Date() } });
+    const { emitted, started } = build(module, { guard, clock: { now: new Date() } });
     const deps = module.built();
     expect(deps).toMatchObject({ vtcHome: "/home/u/.vtc", guardDir: guard, vtcVersion: "0.4.0" });
     expect(deps.automation.plumbing).toBe(plumbing);
@@ -288,6 +299,17 @@ describe("bridgeUpstream", () => {
     const payload = { reason: "rate_limit", detail: "5 issues today" };
     deps.emit({ type: "automation.skipped", payload });
     expect(emitted).toEqual([{ type: "automation.skipped", actor: "engine", data: payload }]);
+    // the module gets the engine's way to start an automatic run from an issue (D-bv)
+    await deps.startRun?.(
+      { request: "Fix #42", track: "feature", repo: "existing", has_ui: false, risk_hints: [] },
+      {
+        kind: "ci_failure",
+        fingerprint: "0123456789abcdef",
+        target: { kind: "project", repo: "acme/app" },
+        issue: 42,
+      },
+    );
+    expect(started).toEqual([["Fix #42", 42]]);
   });
 
   it("reports a fact with the project's context; an error outcome fails the fact", async () => {
@@ -356,5 +378,21 @@ describe("bridgeUpstream", () => {
     clock.now = new Date(clock.now.getTime() + 1);
     await restarted.wiring.sweep?.();
     expect(module.calls.filter((c) => c.what === "sweep")).toHaveLength(2);
+  });
+
+  it("a sweep that failed is tried again at the next tick, not a day later", async () => {
+    const guard = tempDir("vtc-guard-");
+    const clock = { now: new Date("2026-10-14T10:00:00.000Z") };
+    const failing = fakeModule({ status: "error", detail: "gh exploded" });
+    const first = build(failing, { guard, clock });
+    await expect(first.wiring.sweep?.()).rejects.toThrow(/gh exploded/);
+    clock.now = new Date(clock.now.getTime() + 60_000);
+    const working = fakeModule();
+    const second = build(working, { guard, clock });
+    await second.wiring.sweep?.();
+    expect(working.calls.filter((c) => c.what === "sweep")).toHaveLength(1);
+    // now the clock is set: the next try waits a day
+    await second.wiring.sweep?.();
+    expect(working.calls.filter((c) => c.what === "sweep")).toHaveLength(1);
   });
 });

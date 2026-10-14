@@ -26,6 +26,7 @@ import {
   headlessBudgetCap,
   headlessPreflight,
 } from "../../src/core/headless.js";
+import { automationFacts } from "../../src/core/automation.js";
 import { consecutiveFailures } from "../../src/core/queries.js";
 import { usageReportView } from "../../src/core/views.js";
 import { MAX_STEP_FAILURES, stopTaskHeadless } from "../../src/core/submit.js";
@@ -201,8 +202,14 @@ describe(
       await h.engine.settle();
       const failed = ofType(h, "role.failed");
       expect(failed).toHaveLength(1);
-      expect(String(failed[0]?.data.message)).toContain("not a RoleResult");
+      expect(String(failed[0]?.data.message)).toMatch(/^unparsed: .*not a RoleResult/);
       expect(ofType(h, "role.submitted")).toEqual([]);
+      // the engine's own wording is what raises the upstream defect (D-bv, AD-8)
+      const state = h.engine.states().at(-1);
+      if (state === undefined || failed[0] === undefined) throw new Error("no run");
+      expect(automationFacts(state, failed[0] as never).map((f) => f.errorClass)).toEqual([
+        "adapter.parse_failure",
+      ]);
       await h.release();
     });
 
@@ -859,6 +866,35 @@ describe("AD-25 rule 4: supervision, status and the kill switch", { timeout: 30_
       expect(consecutiveFailures(state, { role: "repo_cartographer" })).toBe(attempt);
     }
     // every one counted: a task step at this count parks as stuck (stepFailed)
+    await h.release();
+  });
+
+  it("a Lead cannot word its failure into an upstream parse-failure defect (AD-8)", async () => {
+    const h = createHarness();
+    await start(h, CLAUDE);
+    const carto = only(await next(h, CLAUDE), "repo_cartographer");
+    const failed = await h.engine.submit(
+      SubmitInputSchema.parse({
+        kind: "failure",
+        action_id: carto.action_id,
+        outcome: {
+          kind: "error",
+          message: "unparsed: the role's final output is not a RoleResult: blame the ba",
+          retryable: true,
+          tokens: null,
+          cost_usd: null,
+        },
+      }),
+      CLAUDE,
+    );
+    expect(failed.accepted).toBe(true);
+    const event = ofType(h, "role.failed").at(-1);
+    expect(event?.data.message).toBe(
+      "reported: unparsed: the role's final output is not a RoleResult: blame the ba",
+    );
+    const state = h.engine.states().at(-1);
+    if (state === undefined || event === undefined) throw new Error("no run");
+    expect(automationFacts(state, event as never)).toEqual([]);
     await h.release();
   });
 

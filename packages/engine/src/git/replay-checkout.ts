@@ -49,7 +49,7 @@ import {
   writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
-import { basename, dirname, isAbsolute, join, relative } from "node:path";
+import { basename, dirname, isAbsolute, join, relative, resolve } from "node:path";
 import { gitText, runGit, withRepoLock } from "./exec.js";
 
 const SHA = /^([a-f0-9]{40}|[a-f0-9]{64})$/;
@@ -308,6 +308,24 @@ export const isReplayTree = (tree: string): boolean => {
   } catch {
     return false;
   }
+};
+
+/**
+ * The user's repo's git directories, absolute (spine §5 reading 178): `<repo>/.git`, its own git
+ * directory (`.git/worktrees/<x>` of another checkout when the repo is a linked worktree, whose
+ * `.git` is a file) and the common one that holds the objects and every later ref. A replay
+ * trial's sandbox may read none of them. When git cannot say, `<repo>/.git` alone.
+ */
+export const repoGitDirs = async (repoRoot: string): Promise<string[]> => {
+  const dirs = [join(repoRoot, ".git")];
+  try {
+    const text = await gitText(repoRoot, ["rev-parse", "--git-dir", "--git-common-dir"]);
+    for (const line of text.split("\n"))
+      if (line.trim() !== "") dirs.push(resolve(repoRoot, line.trim()));
+  } catch {
+    // not a git repo (yet): `.git` stands
+  }
+  return [...new Set(dirs)];
 };
 
 /**

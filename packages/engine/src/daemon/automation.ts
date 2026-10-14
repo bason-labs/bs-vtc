@@ -16,7 +16,6 @@
  *   versions and metric.
  * Without `EngineDeps.automation` nothing is evaluated (the Automation view says why).
  */
-import { lstatSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import {
   automationFor,
@@ -47,6 +46,7 @@ import {
   type EventDraft,
   type UpstreamWiring,
 } from "../core/index.js";
+import { readRepoFileCapped } from "../git/index.js";
 
 export interface AutomationWiringOptions {
   /** The upstream module's factory (`upstream.createUpstream`); absent: facts are only gated. */
@@ -82,13 +82,14 @@ const COST_SEEN_MAX = 500;
 /** The largest scorecard or scorecard index file read. */
 const SCORECARD_MAX_BYTES = 256 * 1024;
 
-/** A repo file the engine wrote, as JSON, or `undefined` (missing, a link, too large, not JSON). */
+/**
+ * A repo file the engine wrote, as JSON, or `undefined` (missing, a link at any component, too
+ * large, not JSON), read from one no-follow descriptor (`readRepoFileCapped`).
+ */
 const readRepoJson = (root: string, path: string): unknown => {
   try {
-    const file = join(root, path);
-    const stat = lstatSync(file);
-    if (!stat.isFile() || stat.size > SCORECARD_MAX_BYTES) return undefined;
-    return JSON.parse(readFileSync(file, "utf8")) as unknown;
+    const read = readRepoFileCapped(root, path, SCORECARD_MAX_BYTES);
+    return read.ok ? (JSON.parse(read.text) as unknown) : undefined;
   } catch {
     return undefined;
   }
@@ -140,6 +141,10 @@ export const wireAutomation = (
   const automation = deps.automation;
   const paused = (): boolean =>
     engine.states().some((s) => s.run.finished_at === undefined && s.run.paused);
+  // Precondition (the cli's): `EngineDeps.automation` is injected only after `gh auth status`
+  // passed, so its presence stands for the gh login here. `AutomationDeps` carries no login of
+  // its own (a contract proposal adds one); until then `gh_unavailable` cannot show while
+  // automation is wired.
   const context = (): AutomationContext => ({
     githubRemote: options.githubRemote,
     ghLoggedIn: automation !== undefined,
@@ -161,11 +166,11 @@ export const wireAutomation = (
   const pendingFile = join(guard, PENDING_FILE);
 
   // ---- the event sink: upstream.* and automation.skipped only, into a run's log
+  /** `run` while it is open (never another run's log), or the open run when `run` is absent. */
   const openRun = (run: string | undefined): string | undefined => {
     const states = engine.states().filter((s) => s.run.finished_at === undefined);
-    return (
-      (run !== undefined && states.some((s) => s.id === run) ? run : undefined) ?? states.at(-1)?.id
-    );
+    if (run !== undefined) return states.some((s) => s.id === run) ? run : undefined;
+    return states.at(-1)?.id;
   };
   const emit = (draft: EventDraft, run?: string): void => {
     if (!isAutomationEvent(draft.type) || !isCoreEventType(draft.type))
@@ -177,26 +182,26 @@ export const wireAutomation = (
       throw new Error(`invalid ${draft.type}: ${JSON.stringify(checked.issues).slice(0, 300)}`);
     const event: EventDraft = { ...draft, actor: "engine", data: checked.data };
     const target = openRun(run);
-    if (target !== undefined) {
-      engine.recordModuleEvent(target, event);
-      return;
-    }
-    // no open run: the next run's log records it (every automatic action is an event, D-ca)
+    if (target !== undefined && engine.recordModuleEvent(target, event)) return;
+    // its run is finished, or none is open: the next run's log records it (every automatic
+    // action is an event, D-ca)
     ensurePrivateDir(guard);
     appendPrivateFile(pendingFile, `${JSON.stringify(event)}\n`);
   };
   const flushPending = (run: string): void => {
     const text = readPrivateFile(pendingFile);
     if (text === null || text.trim() === "") return;
-    writePrivateFile(pendingFile, "");
+    // only what was recorded leaves the file (a run that finished meanwhile records nothing)
+    const kept: string[] = [];
     for (const line of text.split("\n")) {
       if (line.trim() === "") continue;
       try {
-        engine.recordModuleEvent(run, JSON.parse(line) as EventDraft);
+        if (!engine.recordModuleEvent(run, JSON.parse(line) as EventDraft)) kept.push(line);
       } catch {
         // a line the engine did not write is dropped
       }
     }
+    writePrivateFile(pendingFile, kept.map((line) => `${line}\n`).join(""));
   };
 
   // ---- the daily summary, once per UTC day (D-ca)

@@ -77,10 +77,12 @@ import { installedLensRoles, reviewersFor, slotMatches } from "./router.js";
 import { parkTask, setTaskStatus } from "./parking.js";
 import { parkEscalation } from "./escalations.js";
 import { recordDispatch, type DispatchRecord } from "./dispatch-guard.js";
+import { ensurePrivateDir } from "./guard.js";
 import { architectDepth, dealDesignConstraints, researchDepth } from "./lottery.js";
 import { prepareRoleWorktree } from "./role-worktree.js";
 import {
   armPluginDir,
+  armPluginsRoot,
   prepareTrial,
   refuseTrial,
   replayTrialRef,
@@ -547,7 +549,7 @@ export const pendingSteps = (k: Kernel, h: RunHandle, host: HostId): StepSpec[] 
         .find((e) => e.type === "gate.rejected" || e.type === "gate.approved");
       const gateNote =
         decision?.type === "gate.rejected"
-          ? `The human rejected the gate${(decision.data as { note?: string }).note === undefined ? "." : `: ${(decision.data as { note?: string }).note ?? ""}`}`
+          ? `The ${decision.actor === "engine" ? "engine" : "human"} rejected the gate${(decision.data as { note?: string }).note === undefined ? "." : `: ${(decision.data as { note?: string }).note ?? ""}`}`
           : undefined;
       const rerolled = role === "designer" ? reroll : undefined;
       const combined = [note === "" ? undefined : note, gateNote, rerolled?.note]
@@ -1044,6 +1046,7 @@ const trialArmPlugin = async (
   try {
     // a directory a stopped engine left behind is not reused: the host loads it in place
     rmSync(outDir, { recursive: true, force: true });
+    ensurePrivateDir(armPluginsRoot(k));
     mkdirSync(outDir, { recursive: true, mode: 0o700 });
     return await compiler.compileArm({
       host,

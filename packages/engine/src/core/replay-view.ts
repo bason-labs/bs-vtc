@@ -35,6 +35,23 @@ export const withoutReplayTrialEvents = (
         );
       });
 
+/**
+ * Whether `event` of `state`'s run is one a read model leaves out (a replay trial's `role.*` or
+ * `headless.*` event), for a live stream that sees one event at a time: `state` already holds the
+ * event (the engine applies it before its listeners run), so its dispatch is there to read.
+ */
+export const isReplayTrialEvent = (state: RunState, event: VtcEvent): boolean => {
+  if (!event.type.startsWith("role.") && !event.type.startsWith("headless.")) return false;
+  const action = (event.data as { action_id?: unknown } | undefined)?.action_id;
+  if (typeof action !== "string") return false;
+  const run = state.roleRuns.get(action);
+  if (run === undefined) return false;
+  const dispatched = state.events.findLast(
+    (e) => e.seq === run.seq && e.type === "role.dispatched",
+  );
+  return (dispatched?.data as { purpose?: unknown } | undefined)?.purpose === "lookback_replay";
+};
+
 const views = new WeakMap<RunState, { readonly lastSeq: number; readonly view: RunState }>();
 
 /**
