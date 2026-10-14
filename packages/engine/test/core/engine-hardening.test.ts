@@ -26,6 +26,7 @@ import {
   createHarness,
   draft,
   only,
+  passFinalReview,
   spawns,
   SPEC_ONE,
   submitResult,
@@ -230,6 +231,7 @@ describe("every task can reach the merge (§6.3, §6.5, §6.7a)", () => {
     await build(h, fix);
     await h.engine.settle();
     expect(statusOf(h, "T-2")).toBe("done");
+    await passFinalReview(h);
     const status = h.engine.status({});
     expect(status.tasks_by_status).toEqual({ done: 2 });
     expect(status.run.finished_at).toBeDefined();
@@ -383,9 +385,9 @@ describe("gates and hosts", () => {
     expect(statusOf(h, "T-1")).toBe("fixing");
     await h.release();
   });
-  it("pauses with the reason when the host cannot run role subagents", async () => {
+  it("pauses with the reason when the host cannot run role subagents and headless runs are not allowed", async () => {
+    // with headless_allowed the engine runs them headless instead (headless.test.ts, AD-25)
     const h = createHarness({
-      project: { hosts: { dispatch: "headless_allowed" } },
       capabilities: { subagents: false, backgroundSubagents: false },
     });
     await start(h);

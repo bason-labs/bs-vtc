@@ -15,6 +15,7 @@ import {
   createHarness,
   draft,
   only,
+  passFinalReview,
   spawns,
   throughPlan,
   verdictPass,
@@ -89,10 +90,11 @@ describe("engine: the happy path, Level 2", () => {
     await verdictPass(h, verifier2, "src/t-2/impl.ts");
     await h.engine.settle();
 
-    // Final Review gates on the integrated branch, release, retro
+    // Final Review gates on the integrated branch, its AI steps (§6.7a 3–4), release, retro
     expect(h.gates.requests.some((r) => r.reason === "final_review" && r.scope === "full")).toBe(
       true,
     );
+    await passFinalReview(h);
     const done = await h.engine.next({}, CLAUDE);
     expect(NextResultSchema.parse(done).actions).toEqual([
       { type: "done", summary: expect.stringContaining("summary.md") as unknown },
@@ -238,22 +240,21 @@ describe("engine: tool contract (AD-4 rule 1)", () => {
     const { writeFile } = await import("../helpers/repo.js");
     const { submitResult, workdir } = await import("../helpers/engine-harness.js");
     writeFile(workdir(ba), ".vtc/spec/spec.md", "# spec\n\n## REQ-1 x\n");
-    const architect = only(
-      (
-        await submitResult(h, ba, {
-          exit: "done",
-          artifacts: [{ type: "spec", path: ".vtc/spec/spec.md" }],
-        })
-      ).actions,
-      "architect",
-    );
-    writeFile(workdir(architect), ".vtc/architecture/spine.md", "# spine\n");
-    const actions = (
-      await submitResult(h, architect, {
+    const design = (
+      await submitResult(h, ba, {
         exit: "done",
-        artifacts: [{ type: "architecture", path: ".vtc/architecture/spine.md" }],
+        artifacts: [{ type: "spec", path: ".vtc/spec/spec.md" }],
       })
     ).actions;
+    const architect = only(design, "architect");
+    const security = only(design, "security");
+    writeFile(workdir(architect), ".vtc/architecture/spine.md", "# spine\n");
+    await submitResult(h, architect, {
+      exit: "done",
+      artifacts: [{ type: "architecture", path: ".vtc/architecture/spine.md" }],
+    });
+    const { threatModel } = await import("../helpers/engine-harness.js");
+    const actions = await threatModel(h, security);
     const gate = actions.find((a) => a.type === "approve_gate");
     expect(gate).toMatchObject({ gates: ["G1", "G2"] });
     if (gate?.type !== "approve_gate") throw new Error("no gate");

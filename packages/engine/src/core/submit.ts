@@ -42,6 +42,8 @@ import {
   startRoundGates,
 } from "./jobs.js";
 import type { Kernel, RunHandle } from "./kernel.js";
+import { parkEscalation } from "./escalations.js";
+import { featureReviewDone } from "./final-review.js";
 import { recordLimit } from "./limits.js";
 import { openTaskEscalation, parkTask, setTaskStatus } from "./parking.js";
 import {
@@ -114,6 +116,8 @@ const PHASE_OF_ROLE: Readonly<Record<string, Phase>> = {
   ba: "specify",
   architect: "design",
   designer: "design",
+  // Security's design mode (its verify mode always has a task, §6.1)
+  security: "design",
   planner: "plan",
 };
 
@@ -1044,6 +1048,141 @@ const acceptReviewer = async (
   };
 };
 
+/** The task an Architect triage run is about (§8.4), when the run is one. */
+const triageTask = (h: RunHandle, run: RoleRunRecord): Task | undefined =>
+  run.role === "architect" && run.task === undefined && run.subject?.startsWith("T-") === true
+    ? h.state.tasks.get(run.subject)
+    : undefined;
+
+/**
+ * The Architect's per-task triage (§8.4): its design note or ADR is checked like any front-half
+ * role's work (its worktree, its write paths, citations) and copied into the checkout. An ADR for a
+ * task triaged `changes` is put to the human as a change request on the frozen architecture; the
+ * task waits for the answer. A blocked or conflicting result parks the task.
+ */
+const acceptArchitectTriage = async (
+  k: Kernel,
+  h: RunHandle,
+  run: RoleRunRecord,
+  task: Task,
+  result: RoleResult,
+): Promise<StepOutcome> => {
+  if (result.exit === "done" && result.artifacts.length === 0)
+    return reject("claim_check", [
+      `a done triage of ${task.id} returns its ${task.arch_triage === "changes" ? "ADR" : "design note"}`,
+    ]);
+  const work = await acceptIsolatedRole(k, h, run, result);
+  if ("outcome" in work) return work.outcome;
+  const artifacts = work.artifacts;
+  return {
+    kind: "accept",
+    artifacts,
+    after: () => {
+      openQuestions(k, h, run, result);
+      if (result.exit === "blocked" || result.exit === "spec_conflict") {
+        parkTask(k, h, task.id, {
+          reason: result.exit,
+          detail:
+            result.exit === "blocked"
+              ? `the Architect's triage of ${task.id} is blocked: ${result.question.question}`
+              : `the Architect found a conflict in the spec: ${result.conflict.detail}`,
+          evidence: artifacts.slice(0, 5).map((a) => ({ type: "file" as const, ref: a.path })),
+        });
+        return;
+      }
+      if (task.arch_triage !== "changes") return;
+      const frozen = h.state.run.gates.G2.frozen.find((f) =>
+        f.path.startsWith(".vtc/architecture/"),
+      );
+      const id = nextEscalationId(h.state);
+      const escalation = parkEscalation({
+        id,
+        run: h.state.id,
+        task: task.id,
+        reason: "change_request",
+        detail:
+          `${task.id} (${task.title}) changes the approved architecture; the Architect's ADR: ${artifacts
+            .map((a) => a.path)
+            .join(", ")}`.slice(0, 2000),
+        evidence: artifacts.slice(0, 5).map((a) => ({ type: "file" as const, ref: a.path })),
+        blocks: [task.id],
+        now: k.now(),
+        raisedBy: "architect",
+      });
+      k.emit(h, {
+        type: "escalation.opened",
+        actor: "engine",
+        task: task.id,
+        data: {
+          escalation: {
+            ...escalation,
+            question: `Approve the architecture change ${task.id} needs (§8.4)?`,
+          },
+        },
+      });
+      if (frozen !== undefined)
+        k.emit(h, {
+          type: "change_request.opened",
+          actor: "engine",
+          data: {
+            escalation: id,
+            artifact: "architecture",
+            frozen,
+            summary: `ADR for ${task.id}: ${task.title}`.slice(0, 300),
+          },
+        });
+    },
+  };
+};
+
+/**
+ * A Final Review reviewer (§6.7a steps 3–4): read-only in its worktree at the feature's integrated
+ * head (any change is refused), every citation resolving there. Once every AI step of the round
+ * reported, the round concludes (`featureReviewDone`).
+ */
+const acceptFeatureReviewer = async (
+  k: Kernel,
+  h: RunHandle,
+  run: RoleRunRecord,
+  result: RoleResult,
+): Promise<StepOutcome> => {
+  const worktree = k.dispatches.get(recordKey(h.state.id, run.action_id))?.worktree;
+  if (worktree === undefined || run.feature === undefined)
+    return reject("write_scope", [
+      "the engine has no record of the reviewer's worktree, so its review cannot be verified",
+    ]);
+  const work = await collectRoleChanges(k, worktree, `vtc: ${run.role} (${run.action_id})`);
+  if (work.changes.length > 0)
+    return reject("write_scope", [
+      `a read-only Final Review reviewer changed ${work.changes
+        .slice(0, 3)
+        .map((c) => c.path)
+        .join(", ")}`,
+    ]);
+  const missing = await unresolved(
+    { ...evidenceContext(k, h, null), repoRoot: join(k.deps.repoRoot, worktree.path) },
+    // its findings too: at Final Review a finding becomes a fix task, so it must cite what is there
+    [
+      ...result.claims,
+      ...result.verdicts.flatMap((v) => v.evidence),
+      ...result.findings.map((f) => f.evidence),
+    ],
+  );
+  if (missing.length > 0)
+    return reject(
+      "claim_check",
+      missing.map((m) => `does not resolve: ${m}`),
+    );
+  const feature = run.feature;
+  return {
+    kind: "accept",
+    after: () => {
+      openQuestions(k, h, run, result);
+      featureReviewDone(k, h, feature);
+    },
+  };
+};
+
 /** Is the result arriving where the flow expects it (§4.2 step 4)? `null` when it is. */
 const outOfOrder = (
   k: Kernel,
@@ -1054,6 +1193,13 @@ const outOfOrder = (
   if (h.state.run.finished_at !== undefined) return "the run has finished";
   if (run.task === undefined) {
     if (k.deps.roles.get(run.role)?.kind === "advisor") return null;
+    if (run.feature !== undefined) {
+      const status = h.state.features.get(run.feature)?.status;
+      return status === "final_review" ? null : `feature ${run.feature} is ${status ?? "unknown"}`;
+    }
+    const about = triageTask(h, run);
+    if (about !== undefined)
+      return about.status === "ready" ? null : `task ${about.id} is ${about.status}`;
     const phase = PHASE_OF_ROLE[run.role];
     return phase !== undefined && h.state.run.phase !== phase
       ? `the run is in ${h.state.run.phase}, not ${phase}`
@@ -1232,7 +1378,11 @@ const evaluate = async (
   if (task === undefined)
     return contract.kind === "advisor"
       ? acceptAdvisor(k, h, run, result)
-      : acceptPhaseRole(k, h, run, result);
+      : run.feature !== undefined
+        ? acceptFeatureReviewer(k, h, run, result)
+        : triageTask(h, run) !== undefined
+          ? acceptArchitectTriage(k, h, run, triageTask(h, run) as Task, result)
+          : acceptPhaseRole(k, h, run, result);
   if (run.role === "engineer") return acceptEngineer(k, h, run, task, result);
   if (run.role === "qa" && run.mode === "author") return acceptQaAuthor(k, h, run, task, result);
   if (isReviewer(run)) return acceptReviewer(k, h, run, task, result);

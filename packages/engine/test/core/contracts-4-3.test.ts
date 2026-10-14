@@ -740,7 +740,13 @@ describe("a run starts on the committed project.yaml (reading 79)", () => {
     git(h.repo, "add", ".vtc/project.yaml");
     git(h.repo, "commit", "--quiet", "-m", "merge level 3");
     expect((await start(h)).phase).toBe("discover");
-    expect(startedWith(h).merge_level).toBe(3);
+    // the committed level 3 is the run's configured level; with no merge service (AD-23) the
+    // Level-3 preflight starts it at Level 2
+    expect(events(h).find((e) => e.type === "merge.preflight")?.data).toMatchObject({
+      configured_level: 3,
+      effective_level: 2,
+    });
+    expect(startedWith(h).merge_level).toBe(2);
     await h.release();
   });
   it("refuses a working tree that deleted or added the file, and starts on defaults with neither", async () => {
