@@ -269,7 +269,7 @@ export const createInstallCommand = (
           return EXIT.failed;
         }
         ctx.io.out(
-          `Installed the auto-resume timer (${path}): it checks every minute for runs waiting on a usage reset (--no-auto-resume removes it).`,
+          `Installed the auto-resume timer (${path}): every minute it wakes the engine of a repo whose run waits on a usage reset; the run then continues when the Lead session asks for its next step (the engine starts no host CLI itself in v1). --no-auto-resume removes it.`,
         );
       } else {
         ctx.io.out(

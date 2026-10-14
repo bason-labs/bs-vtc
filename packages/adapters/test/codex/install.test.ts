@@ -50,8 +50,9 @@ describe("Codex install (AD-6 rule 5, AD-16 rules 3–4)", () => {
       readFileSync(join(env.pluginDir, "agents", "vtc-qa-judge.toml"), "utf8"),
     );
     expect(readFileSync(config, "utf8")).toBe(TABLE);
+    const skill = join(env.projectRoot, ".agents", "skills", "vtc-vtc", "SKILL.md");
     expect([...result.written].sort()).toEqual(
-      [join(agents, "vtc-engineer.toml"), join(agents, "vtc-qa-judge.toml"), config].sort(),
+      [join(agents, "vtc-engineer.toml"), join(agents, "vtc-qa-judge.toml"), config, skill].sort(),
     );
     expect(existsSync(join(env.home, ".codex"))).toBe(false);
     expect(result.notes.join(" ")).toContain("trust this project");
@@ -60,8 +61,29 @@ describe("Codex install (AD-6 rule 5, AD-16 rules 3–4)", () => {
   it("user scope writes under the injected home only", async () => {
     const env = setup();
     const result = await createCodexAdapter().install({ ...env, scope: "user" });
-    for (const path of result.written) expect(path.startsWith(join(env.home, ".codex"))).toBe(true);
+    for (const path of result.written)
+      expect(
+        path.startsWith(join(env.home, ".codex")) || path.startsWith(join(env.home, ".agents")),
+      ).toBe(true);
     expect(existsSync(join(env.projectRoot, ".codex"))).toBe(false);
+  });
+
+  it("places the plugin's skills where Codex loads skills, and keeps the user's own (F7)", async () => {
+    const env = setup();
+    const skills = join(env.projectRoot, ".agents", "skills");
+    mkdirSync(join(skills, "mine"), { recursive: true });
+    writeFileSync(join(skills, "mine", "SKILL.md"), "---\nname: mine\ndescription: x\n---\n");
+    mkdirSync(join(skills, "vtc-gone"), { recursive: true });
+    writeFileSync(join(skills, "vtc-gone", ".vtc-generated"), "");
+    const result = await createCodexAdapter().install({ ...env, scope: "project" });
+    // learn.chatgpt.com/docs/build-skills: $REPO_ROOT/.agents/skills/<skill>/SKILL.md
+    expect(readFileSync(join(skills, "vtc-vtc", "SKILL.md"), "utf8")).toBe(
+      readFileSync(join(env.pluginDir, "skills", "vtc", "SKILL.md"), "utf8"),
+    );
+    expect(existsSync(join(skills, "vtc-vtc", ".vtc-generated"))).toBe(true);
+    expect(existsSync(join(skills, "mine", "SKILL.md"))).toBe(true);
+    expect(existsSync(join(skills, "vtc-gone"))).toBe(false);
+    expect(result.notes.join(" ")).toMatch(/hooks .*not registered/);
   });
 
   it("keeps the user's config and replaces only its own table, idempotently", async () => {

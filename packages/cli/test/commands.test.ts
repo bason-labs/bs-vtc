@@ -53,6 +53,9 @@ describe("vtc init", () => {
     const text = readFileSync(join(repo, ".vtc/project.yaml"), "utf8");
     expect(text).toMatch(/^# VTC project settings/);
     expect(text).toContain("dispatch: plugin_only");
+    // the engine starts no host CLI in v1, so the header promises no engine-launched runs
+    expect(text).not.toMatch(/lets the engine start host CLIs/);
+    expect(text).toMatch(/headless_allowed behaves as plugin_only/);
     expect(readFileSync(join(repo, ".vtc/.gitignore"), "utf8")).toContain("/state/");
     expect(out[0]).toContain(".vtc/project.yaml");
   });
@@ -246,6 +249,8 @@ describe("vtc install", () => {
     expect(await withHost.run(["codex", "--auto-resume"], hostCtx)).toBe(0);
     expect(existsSync(plist)).toBe(true);
     expect(out.join("\n")).toMatch(/Installed the auto-resume timer/);
+    // what the timer does in v1: it wakes the daemon; the Lead session continues the run
+    expect(out.join("\n")).toMatch(/wakes the engine.*the Lead session/);
     expect(await withHost.run(["--host", "codex", "--no-auto-resume"], hostCtx)).toBe(0);
     expect(existsSync(plist)).toBe(false);
     // a launchctl failure leaves no plist behind
