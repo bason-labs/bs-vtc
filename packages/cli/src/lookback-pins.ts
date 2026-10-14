@@ -3,9 +3,11 @@
  * `~/.vtc/lookback/pins.yaml` (`LOOKBACK_HOME.pinsFile`, `LookbackPins`) is user-level, outside
  * every repo, keyed by `engineRepoKey`. Only these gestures move a pointer forward; the engine may
  * only roll a canary back (`auto_rollback`). Every gesture is appended to `history` with
- * `by: human`.
+ * `by: human`. The file is this machine's: since D-cb (spine §5 reading 196) the promotion for
+ * everyone is the human's merge of the bs-vtc PR VTC opens for an `improve` verdict, and these
+ * gestures are a local canary and pin on one machine.
  *
- * - `approve <version>`: with no canary for the target, starts one (candidate vs. the current
+ * - `approve <version>`: with no canary for the target, starts a local one (candidate vs. the current
  *   pin, or the version's parent) once the version's replay result says `improve` (AD-21 rule 6):
  *   recomputed here from its trials with the shared `replayVerdict`, never taken from the file;
  *   with that version already the canary's candidate, promotes it to the pin once the shared
@@ -434,7 +436,7 @@ export const planGesture = (pins: LookbackPins, request: GestureRequest): Gestur
             ok: false,
             reason: `the canary of ${short(sha)} for ${name} is not promotable yet: ${reading.verdict} (${reading.reason}); ${numbers}. ${reading.verdict === "rollback" ? "Roll it back" : "Let it run"}, or pin a version outright with vtc lookback pin`,
           };
-        const decision = `Promote the canary ${short(sha)} of ${name} to its pin (now ${short(current ?? canary.baseline)}): its window passed with no trigger`;
+        const decision = `Promote the canary ${short(sha)} of ${name} to its pin on this machine (now ${short(current ?? canary.baseline)}): its window passed with no trigger`;
         return planned(
           `${decision}; ${numbers}.`,
           withProject(
@@ -514,7 +516,7 @@ export const planGesture = (pins: LookbackPins, request: GestureRequest): Gestur
           reason: `${evaluation} compared ${short(sha)} with ${short(r.baseline)}, but the canary's baseline would be ${short(baseline)}: replay against it first`,
         };
       return planned(
-        `Start a canary of ${short(sha)} for ${name} on this project: half its tasks (by hash) run it, half run ${short(baseline)}; the engine rolls it back on a trigger, and you promote it with vtc lookback approve again.\n  evidence (${evaluation}, a file in the repo: check it): its trials, recomputed here, say improve with ${evidence}; ${provenance}.`,
+        `Start a local canary of ${short(sha)} for ${name} on this machine, for this project: half its tasks (by hash) run it, half run ${short(baseline)}; the engine rolls it back on a trigger, and you pin it here with vtc lookback approve again. Promotion for everyone is the human's review and merge of the bs-vtc PR VTC opens for an improve verdict (spine §5 reading 196); this canary runs on this machine only.\n  evidence (${evaluation}, a file in the repo: check it): its trials, recomputed here, say improve with ${evidence}; ${provenance}.`,
         withProject(
           {
             pins: project.pins,

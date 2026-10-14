@@ -213,6 +213,13 @@ const older = (a: readonly number[], b: readonly number[]): boolean => {
   return false;
 };
 
+/** Whether the first `x.y.z` in a `--version` line is at least `min`; `false` when none is found. */
+export const versionAtLeast = (versionLine: string, min: string): boolean => {
+  const found = parseVersion(versionLine);
+  const floor = parseVersion(min);
+  return found !== null && floor !== null && !older(found, floor);
+};
+
 /** The Claude Code check, warning (when it is otherwise ok) below {@link CLAUDE_MIN_VERSION}. */
 export const withClaudeMinimum = (check: DoctorCheck, versionLine: string | null): DoctorCheck => {
   const found = versionLine === null ? null : parseVersion(versionLine);

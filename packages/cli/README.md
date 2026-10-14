@@ -38,6 +38,23 @@ records an `unsandboxed_gate` incident. A repo's `.vtc/project.yaml` can set nei
 none by default, and then research search runs on the host's own web search in the Research
 Analyst's session and no search key is kept or sent. `vtc doctor` says which.
 
+Automatic issues and PRs (AD-27, contracts 5.0.0) read three user-level keys:
+
+```yaml
+upstream:
+  repo: bason-labs/bs-vtc # VTC's own repo (the default)
+  share: true # false: no upstream reports from any project (default true)
+  checkout: /abs/path/bs-vtc # a local clone set up for VTC; absent: upstream issues only
+automation:
+  evidence_hosting: branch # or attach (gh >= 2.99.0 and a github.com remote)
+```
+
+A file that does not parse keeps upstream reports off. The project's own `upstream.share` and
+`automation.{issues,prs,evidence}` live in `.vtc/project.yaml`, which the engine reads at the run's
+commit. `vtc automation status [--json]` prints the repo's Automation report: whether issues, PRs
+and upstream reports are on and why not, the open automatic issues and PRs with their links, and
+the latest skips. `vtc pause` stops automation too.
+
 ## What `vtc doctor` reports since the wave-3 closing round
 
 - Node 22.14 or later in development (D-bk, reading 165).
@@ -54,6 +71,21 @@ Analyst's session and no search key is kept or sent. `vtc doctor` says which.
   line saying YouTube transcripts are unavailable. VTC never installs it.
 - **Research search** (H-3): an `info` line saying it uses the host's web search, or the keyed
   provider configured, which warns when its key variable is missing.
+
+## What `vtc doctor` reports since round 4 (AD-27)
+
+- **gh login**: `gh auth status`, its exit code only (no token is read, nothing it prints is kept).
+- **evidence**: where PR media go: the orphan `vtc-evidence` branch (the default), or `gh
+--attach` when `automation.evidence_hosting: attach`, gh is 2.99.0 or later and the origin
+  remote is on github.com (it warns and falls back to the branch otherwise); and whether capture
+  has vtc's pinned browser.
+- **ffmpeg**: optional; without it GIF previews are off (`info`).
+- **automation**: `automationFor` over `project.yaml`, `~/.vtc/config.yaml`, the origin remote and
+  the gh login, with its notes.
+- **billing**: a host billed through a cloud provider or gateway gets the neutral
+  `PROVIDER_BILLING_NOTICE` (D-ci).
+- **host web**: where research roles get web search (D-cf): Claude Code, else Codex with
+  `web_search = "cached"`, else none (the engine's own fetchers, `HOST_WEB_OFF_NOTICE`).
 
 `info` lines report and never fail. `vtc lookback pin|approve` warn when the target's agent is not
 `editable_in_pack` on a host whose runs load the compiled agent (Claude Code): the version would
@@ -100,7 +132,9 @@ an interactive terminal (an agent's shell or a pipe cannot confirm), like `vtc c
 
 - `vtc lookback approve|pin|rollback --role <role> [--mode <mode>] --host <host> [--reason <text>]`
   moves Lookback's prompt pins in `~/.vtc/lookback/pins.yaml` for the repo it runs in (AD-21).
-  `approve --version <sha>` starts a canary once the version's replay result says `improve`
+  The pins are this machine's: since D-cb (reading 196) an `improve` verdict opens a bs-vtc PR on
+  its own, and the human's merge of that PR is the promotion for everyone.
+  `approve --version <sha>` starts a local canary once the version's replay result says `improve`
   (recomputed from its trials with the shared `replayVerdict`; the file's own verdict and sign
   test must agree with it, since roles can write the repo), and promotes it when run again; `pin --version <sha>` pins a version outright; `rollback` ends the canary or moves the
   pin back to what it replaced. Every gesture is recorded in the file's history as a human's,

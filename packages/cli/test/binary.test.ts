@@ -5,8 +5,15 @@
  * with the reason in the suite name, only when Bun is not installed.
  */
 import { spawn, spawnSync, type ChildProcessWithoutNullStreams } from "node:child_process";
-import { existsSync, readdirSync, readFileSync } from "node:fs";
-import { join } from "node:path";
+import {
+  chmodSync,
+  existsSync,
+  mkdirSync,
+  readdirSync,
+  readFileSync,
+  writeFileSync,
+} from "node:fs";
+import { delimiter, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { ASSET_SOURCES, CONTRACTS_VERSION, engineDiscoveryFile } from "@vtc/shared";
@@ -97,8 +104,18 @@ describe.skipIf(!HAS_BUN)(
     const children: ChildProcessWithoutNullStreams[] = [];
     const daemonPids: number[] = [];
 
+    let stubBin: string;
+    /**
+     * The binary's environment: a stub `gh` first on PATH (AD-27 rule 9: no test runs the real
+     * gh), which the detached daemon's automation probe asks for its version.
+     */
+    const envFor = (home: string): NodeJS.ProcessEnv => ({
+      ...process.env,
+      PATH: `${stubBin}${delimiter}${process.env.PATH ?? ""}`,
+      VTC_HOME: home,
+    });
     const run = (args: string[], cwd: string, home: string): ChildProcessWithoutNullStreams => {
-      const child = spawn(vtc, args, { cwd, env: { ...process.env, VTC_HOME: home } });
+      const child = spawn(vtc, args, { cwd, env: envFor(home) });
       children.push(child);
       return child;
     };
@@ -106,6 +123,13 @@ describe.skipIf(!HAS_BUN)(
     beforeAll(() => {
       dir = tempDir("vtc-bin-");
       vtc = join(dir, "vtc");
+      stubBin = join(dir, "stub-bin");
+      mkdirSync(stubBin);
+      writeFileSync(
+        join(stubBin, "gh"),
+        '#!/bin/sh\nif [ "$1" = "--version" ]; then echo "gh version 2.101.0 (stub)"; exit 0; fi\nexit 1\n',
+      );
+      chmodSync(join(stubBin, "gh"), 0o755);
       const roots = writePluginTrees(join(dir, "plugins"));
       bun(
         "scripts/build-binary.ts",
@@ -221,14 +245,12 @@ describe.skipIf(!HAS_BUN)(
       expect(existsSync(join(home, engineDiscoveryFile(repo)))).toBe(false);
       const status0 = spawnSync(vtc, ["status"], {
         cwd: repo,
-        env: { ...process.env, VTC_HOME: home },
+        env: envFor(home),
         encoding: "utf8",
       });
       expect(status0.status).toBe(1);
       expect(status0.stderr).toMatch(/run `vtc init` there first/);
-      expect(
-        spawnSync(vtc, ["init"], { cwd: repo, env: { ...process.env, VTC_HOME: home } }).status,
-      ).toBe(0);
+      expect(spawnSync(vtc, ["init"], { cwd: repo, env: envFor(home) }).status).toBe(0);
       // a run starts only on a committed gates.yml (D-au)
       commitVtcConfig(repo);
       // set up now: the next call starts the daemon detached
@@ -286,7 +308,7 @@ describe.skipIf(!HAS_BUN)(
       // the control commands reach the same daemon over its socket
       const statusCmd = spawnSync(vtc, ["status"], {
         cwd: repo,
-        env: { ...process.env, VTC_HOME: home },
+        env: envFor(home),
         encoding: "utf8",
       });
       expect(statusCmd.stdout).toContain(`Run ${started.result.structuredContent.run}: quick_fix`);
@@ -363,7 +385,7 @@ describe.skipIf(!HAS_BUN)(
       const started = Date.now();
       const result = spawnSync(vtc, ["hook", "pre-tool-use", "--host", "claude-code"], {
         cwd: repo,
-        env: { ...process.env, VTC_HOME: tempHome() },
+        env: envFor(tempHome()),
         input: JSON.stringify({
           cwd: repo,
           agent_type: "vtc:vtc-engineer",

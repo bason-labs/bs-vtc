@@ -13,9 +13,14 @@
  *   the engine's own Lookback tests build their plugins from (D-bl, reading 166), and a pin
  *   reaches each such role through the engine's catalog of the real compiled plugin.
  * - An engineer profile's locked asset opens with the Engineer's prompt (D-br, reading 172).
- * - The roles a Claude-led run can replay (switched to `editable_in_pack` and changing files) are
- *   the shared `CLAUDE_LEAD_REPLAYABLE_ROLES` the dashboard's Lookback view reads, and the
- *   engine's `replayReach` refuses every other compiled Claude agent (readings 180, 182(8)).
+ * - The roles a Claude-led run can replay are the list `replayGraderFor` derives (D-cg, D-ch;
+ *   readings 201, 202 and 209(2), which retire `CLAUDE_LEAD_REPLAYABLE_ROLES`): every role that
+ *   changes files, graded by the gates, and the verdict roles, graded by the verdict grader. Once
+ *   engine core's switch has landed (merge flag), the engine's replay gate grades each compiled
+ *   Claude agent the same way (`core.replayGraderOf`).
+ * - Each compiled plugin carries the automatic PR, issue and CHANGELOG templates the upstream
+ *   module renders (`AUTO_TEMPLATE_NAMES` under `AUTO_TEMPLATES_ASSET_DIR`, AD-27), once the
+ *   integrator's merge flag says roles-compiler's round 4 has landed (`round4-merge.ts`).
  */
 import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
@@ -24,15 +29,21 @@ import { compilePlugins, readSources } from "@vtc/compiler";
 import { core } from "@vtc/engine";
 import {
   agentNameFor,
-  CLAUDE_LEAD_REPLAYABLE_ROLES,
+  AUTO_TEMPLATE_NAMES,
+  autoTemplateAssetPath,
   EDITABLE_IN_PACK_ROLES,
   HUMAN_ONLY_TOOLS,
+  replayGraderFor,
   rolePromptAssetPath,
+  VERDICT_GRADED_ROLES,
   type AssetBundle,
   type AssetNamespace,
   type HostId,
+  type ReplayGrader,
   type RoleContract,
 } from "@vtc/shared";
+
+import { ROUND4_LANDED } from "./round4-merge.js";
 
 const REPO_ROOT = fileURLToPath(new URL("../../../", import.meta.url));
 
@@ -47,6 +58,15 @@ const compiled = (() => {
     );
   return result.output;
 })();
+
+/**
+ * Engine core's `core.replayGraderOf` (reading 209(2)) as the replay test calls it: of the kernel
+ * it reads only the role registry. Looked up by name, since it lands in engine core's branch.
+ */
+type ReplayGraderOf = (
+  kernel: { readonly deps: { readonly roles: core.RoleRegistry } },
+  target: { readonly role: string; readonly mode?: string },
+) => ReplayGrader | null;
 
 const fileOf = (host: HostId, path: string): string | undefined =>
   compiled.targets[host].find((f) => f.path === path)?.text;
@@ -149,23 +169,86 @@ describe("the compiled plugins switch exactly the shared EDITABLE_IN_PACK_ROLES 
   }
 });
 
-describe("the roles a Claude-led run can replay are the shared CLAUDE_LEAD_REPLAYABLE_ROLES (readings 180, 182(8))", () => {
-  it("are the switched roles that change files, and replayReach refuses every other Claude agent", () => {
-    const replayable = new Set<string>();
-    for (const agent of claudeAgents) {
-      const contract = contracts.get(agent.role);
-      if (contract === undefined) throw new Error(`no contract for ${agent.role}`);
-      const why = core.replayReach(
-        { agent: agent.name, host: "claude-code" },
-        {
-          editableInPack: agent.editable_in_pack === true,
-          changesFiles: core.roleChangesFiles(contract, agent.mode ?? undefined),
-        },
-      );
-      if (why === null) replayable.add(agent.role);
-    }
-    expect([...replayable].sort()).toEqual([...CLAUDE_LEAD_REPLAYABLE_ROLES].sort());
+describe("the roles a Claude-led run can replay are the list replayGraderFor derives (readings 201, 202, 209(2))", () => {
+  const graded = claudeAgents.map((agent) => {
+    const contract = contracts.get(agent.role);
+    if (contract === undefined) throw new Error(`no contract for ${agent.role}`);
+    const changesFiles = core.roleChangesFiles(contract, agent.mode ?? undefined);
+    return { agent, changesFiles, grader: replayGraderFor(agent.role, changesFiles) };
   });
+  const replayable = [...new Set(graded.filter((g) => g.grader !== null).map((g) => g.agent.role))];
+
+  it("grades every agent that changes files by the gates, whether or not it is editable_in_pack (D-cg)", () => {
+    const writers = graded.filter((g) => g.changesFiles);
+    expect(writers.some((g) => g.agent.editable_in_pack !== true)).toBe(true);
+    for (const g of writers) expect(g.grader, g.agent.name).toBe("gates");
+    expect(replayable).toContain("engineer");
+  });
+
+  it("grades each verdict role by the verdict grader; it ships and changes no file (D-ch)", () => {
+    for (const role of VERDICT_GRADED_ROLES) {
+      const agents = graded.filter((g) => g.agent.role === role);
+      expect(agents.length, role).toBeGreaterThan(0);
+      for (const g of agents) {
+        expect(g.changesFiles, g.agent.name).toBe(false);
+        expect(g.grader, g.agent.name).toBe("verdict");
+      }
+    }
+  });
+
+  // reading 209(2): engine core's replay gate, trial submission and daemon take a replay's grader
+  // from `core.replayGraderOf`, held here to the merge flag and then to `replayGraderFor`
+  const engineGraderOf = (core as Readonly<Record<string, unknown>>)["replayGraderOf"];
+
+  it("are graded by the engine as replayGraderFor says, once engine core's switch has landed (merge flag)", () => {
+    expect(typeof engineGraderOf === "function").toBe(ROUND4_LANDED.replayGrader);
+  });
+
+  it.runIf(ROUND4_LANDED.replayGrader)(
+    "the engine's replay gate gives every compiled Claude agent the grader replayGraderFor derives",
+    () => {
+      // only the kernel's role registry is read; anything more fails here, not in a live RETRO
+      const kernel = { deps: { roles: core.createRoleRegistry([...contracts.values()]) } };
+      const graderOf = engineGraderOf as ReplayGraderOf;
+      for (const g of graded) {
+        const target = { role: g.agent.role, ...(g.agent.mode ? { mode: g.agent.mode } : {}) };
+        expect(graderOf(kernel, target), g.agent.name).toBe(g.grader);
+      }
+    },
+  );
+
+  it("include every editable_in_pack role, and never a role that writes nothing and has no verdict grader", () => {
+    for (const role of EDITABLE_IN_PACK_ROLES) expect(replayable).toContain(role);
+    // a role that writes nothing and has no verdict grader is never replayed
+    const never = graded.filter((g) => g.grader === null);
+    expect(never.length).toBeGreaterThan(0);
+    for (const g of never) expect(VERDICT_GRADED_ROLES, g.agent.name).not.toContain(g.agent.role);
+  });
+});
+
+/**
+ * The templates are roles-compiler's this round (AD-27, reading 189). Whether this checkout must
+ * carry them is the integrator's merge flag (`round4-merge.ts`), not the templates themselves: the
+ * first test fails when they ship before the flag is flipped, and with the flag on, every host must
+ * carry all three at their path.
+ */
+const shippedTemplates = (["claude-code", "codex"] as const).flatMap((host) =>
+  AUTO_TEMPLATE_NAMES.filter((name) => fileOf(host, autoTemplateAssetPath(name)) !== undefined),
+);
+
+describe("the compiled plugins carry the automatic PR, issue and CHANGELOG templates (AD-27)", () => {
+  it("ship exactly when the round-4 merge flag says they have landed", () => {
+    expect(shippedTemplates.length > 0).toBe(ROUND4_LANDED.autoTemplates);
+  });
+
+  for (const host of ["claude-code", "codex"] as const)
+    it.runIf(ROUND4_LANDED.autoTemplates)(host, () => {
+      for (const name of AUTO_TEMPLATE_NAMES) {
+        const path = autoTemplateAssetPath(name);
+        expect(path).toBe(`vtc/templates/${name}.md`);
+        expect(fileOf(host, path)?.length ?? 0, `${host}: ${path}`).toBeGreaterThan(0);
+      }
+    });
 });
 
 describe("an engineer profile's locked asset opens with the Engineer's prompt (D-br, reading 172)", () => {

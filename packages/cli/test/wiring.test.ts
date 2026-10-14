@@ -87,6 +87,7 @@ afterEach(async () => {
 
 const partsFor = async (repoRoot: string, vtcHome: string): Promise<EngineParts> =>
   buildEngineParts({
+    automation: null,
     repoRoot,
     vtcHome,
     installToken: TOKEN,
@@ -122,6 +123,7 @@ describe("buildEngineParts and composeEngineDeps (AD-19)", () => {
     const prs = fakePullRequests();
     const adapter = { host: "codex", dispose: () => Promise.resolve() } as unknown as HostAdapter;
     const parts = await buildEngineParts({
+      automation: null,
       repoRoot: "/r",
       vtcHome: "/h",
       installToken: TOKEN,
@@ -148,6 +150,7 @@ describe("buildEngineParts and composeEngineDeps (AD-19)", () => {
     chmodSync(gh, 0o755);
     const repo = initRepo();
     const parts = await buildEngineParts({
+      automation: null,
       repoRoot: repo,
       vtcHome: tempHome(),
       installToken: TOKEN,
@@ -170,6 +173,7 @@ describe("buildEngineParts and composeEngineDeps (AD-19)", () => {
     const repo = initRepo();
     git(repo, "remote", "add", "origin", "https://github.com/o/r.git");
     const parts = await buildEngineParts({
+      automation: null,
       repoRoot: repo,
       vtcHome: tempHome(),
       installToken: TOKEN,
@@ -183,6 +187,7 @@ describe("buildEngineParts and composeEngineDeps (AD-19)", () => {
     expect(readFileSync(log, "utf8")).toBe("auth status\n");
     const injected = { remote: () => Promise.resolve({ github: false, ghAuthenticated: false }) };
     const withFake = await buildEngineParts({
+      automation: null,
       repoRoot: repo,
       vtcHome: tempHome(),
       installToken: TOKEN,
@@ -196,6 +201,7 @@ describe("buildEngineParts and composeEngineDeps (AD-19)", () => {
   it("injects the research HTTP client only with a resolver for its network guard (AD-22)", async () => {
     const http: HttpClient = { request: () => Promise.reject(new Error("unused")) };
     const base = {
+      automation: null,
       repoRoot: "/r",
       vtcHome: "/h",
       installToken: TOKEN,
@@ -318,6 +324,7 @@ describe("buildEngineParts and composeEngineDeps (AD-19)", () => {
     const home = tempHome();
     const parts = (h: string) =>
       buildEngineParts({
+        automation: null,
         repoRoot: "/r",
         vtcHome: h,
         installToken: TOKEN,
@@ -384,6 +391,7 @@ describe("buildEngineParts and composeEngineDeps (AD-19)", () => {
     const gateDeps: Parameters<CreateGateRunner>[0][] = [];
     const repo = initRepo();
     const parts = await buildEngineParts({
+      automation: null,
       repoRoot: repo,
       vtcHome: "/vh",
       installToken: TOKEN,
