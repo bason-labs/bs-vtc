@@ -8,7 +8,9 @@
  * project. Since 4.5.0 (AD-25 rules 1–2) every fresh and resumed headless argv also isolates the
  * repo's host settings and MCP servers and denies every prompt nobody can answer
  * (`headlessIsolationGaps` is empty), and carries no flag that drops the user's login or approves
- * on the user's behalf (`findDisallowedHostArgs` finds nothing).
+ * on the user's behalf (`findDisallowedHostArgs` finds nothing). Since 4.10.0 (H-3, spine §5
+ * reading 156) the same holds for a role with the host's own web tools (`RoleTools.host_web`),
+ * and every adapter refuses them to a `code_sandboxed` role.
  */
 import { mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -30,7 +32,18 @@ const PROFILES: readonly RoleTools[] = [
   { profile: "read_only", write_paths: [], engine_tools: [] },
   { profile: "write_scoped", write_paths: [".vtc/spec/**"], engine_tools: [] },
   { profile: "code_sandboxed", write_paths: [], engine_tools: [] },
+  // H-3: the Research Analyst's shape, and a reviewer with host web tools
+  {
+    profile: "write_scoped",
+    write_paths: [".vtc/research/briefs/**"],
+    engine_tools: ["research_fetch"],
+    host_web: true,
+  },
+  { profile: "read_only", write_paths: [], engine_tools: [], host_web: true },
 ];
+
+const label = (tools: RoleTools): string =>
+  tools.host_web === true ? `${tools.profile}+host_web` : tools.profile;
 
 export type SafetyContractAdapter = Pick<
   HostAdapter,
@@ -52,7 +65,7 @@ export const runHostAdapterSafetyContract = (adapter: SafetyContractAdapter): vo
         network,
       });
 
-    it.each(PROFILES.map((tools) => [tools.profile, tools] as const))(
+    it.each(PROFILES.map((tools) => [label(tools), tools] as const))(
       "sandboxProfile(%s) never carries a bypass flag or credential marker (AD-9)",
       (_profile, tools) => {
         for (const network of ["none", "registries"] as const) {
@@ -72,7 +85,7 @@ export const runHostAdapterSafetyContract = (adapter: SafetyContractAdapter): vo
       },
     );
 
-    it.each(PROFILES.map((tools) => [tools.profile, tools] as const))(
+    it.each(PROFILES.map((tools) => [label(tools), tools] as const))(
       "headlessCommand(%s), fresh and resumed, is clean and isolated (AD-9, AD-25)",
       (_profile, tools) => {
         const request: SpawnRoleRequest = {
@@ -100,6 +113,15 @@ export const runHostAdapterSafetyContract = (adapter: SafetyContractAdapter): vo
         }
       },
     );
+
+    it("refuses the host's web tools to a code_sandboxed role (H-3: a role that runs code gets no direct web)", () => {
+      expect(() =>
+        profileFor(
+          { profile: "code_sandboxed", write_paths: [], engine_tools: [], host_web: true },
+          "none",
+        ),
+      ).toThrow(/refusing/);
+    });
 
     it("install writes no bypass flag or credential marker into any file (AD-9)", async () => {
       const home = mkdtempSync(join(tmpdir(), "vtc-home-"));

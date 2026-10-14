@@ -77,6 +77,56 @@ describe("Codex parseEvents: recorded success (spike 1)", () => {
   });
 });
 
+describe("Codex parseEvents: recorded headless role runs (live check 2026-10-14, codex-cli 0.162.1)", () => {
+  it("a fresh run is done with the RoleResult, which re-validates; cache_write_input_tokens is read", () => {
+    const parsed = parse(lines("codex/exec-success.jsonl"));
+    const outcome = valid(parsed.outcome);
+    expect(outcome).toMatchObject({
+      kind: "done",
+      session_ref: { host: "codex", id: "<thread-id>" },
+      tokens: { in: 23669, out: 83, cache_r: 0, cache_w: 0 },
+      cost_usd: null,
+    });
+    expect(parsed.unrecognizedLines).toBe(0);
+    if (outcome.kind !== "done") throw new Error("expected done");
+    const result = fromStructuredOutput("RoleResult", outcome.output);
+    expect(result.success).toBe(true);
+    expect(result.data).toMatchObject({ role: "qa", exit: "done", summary: "live ok" });
+  });
+
+  it("a resumed run reloads the prior context: cached input is kept apart (§11; about 2x a fresh call)", () => {
+    const outcome = valid(parse(lines("codex/exec-resume.jsonl")).outcome);
+    expect(outcome).toMatchObject({
+      kind: "done",
+      session_ref: { host: "codex", id: "<thread-id>" },
+      tokens: { in: 47455 - 23552, out: 166, cache_r: 23552, cache_w: 0 },
+    });
+    if (outcome.kind !== "done") throw new Error("expected done");
+    expect(fromStructuredOutput("RoleResult", outcome.output).success).toBe(true);
+  });
+
+  it("counts cache_write_input_tokens (new in the 2026-10-14 stream) as cache writes", () => {
+    const outcome = parse([
+      JSON.stringify({
+        type: "turn.completed",
+        usage: {
+          input_tokens: 1000,
+          cached_input_tokens: 400,
+          cache_write_input_tokens: 250,
+          output_tokens: 10,
+          reasoning_output_tokens: 0,
+        },
+      }),
+    ]).outcome;
+    expect(outcome?.kind === "done" && outcome.tokens).toEqual({
+      in: 600,
+      out: 10,
+      cache_r: 400,
+      cache_w: 250,
+    });
+  });
+});
+
 describe("Codex parseEvents: limits and auth (synthetic, documented shapes, §6.9)", () => {
   it("turn.failed with usageLimitExceeded is a limit; the reset is re-read from app-server", () => {
     const outcome = valid(parse(fixtureLines("codex/exec-usage-limit.synthetic.jsonl")).outcome);
@@ -167,10 +217,14 @@ describe("Codex outcome after the process exits", () => {
     expect(valid(outcome)).toMatchObject({ kind: "error", retryable: false, cause: "spawn" });
   });
 
-  it("a run killed from outside is a killed error (synthetic fixture)", () => {
-    const killed = lines("codex/exec-killed.synthetic.jsonl");
+  it("a run killed from outside is a killed error (recorded 2026-10-14: thread.started, turn.started, then nothing)", () => {
+    const killed = lines("codex/exec-killed.jsonl");
+    expect(killed.map((line) => (JSON.parse(line) as { type: string }).type)).toEqual([
+      "thread.started",
+      "turn.started",
+    ]);
     expect(parse(killed).outcome).toBeNull();
-    expect(parse(killed).sessionRef).toEqual({ host: "codex", id: THREAD });
+    expect(parse(killed).sessionRef).toEqual({ host: "codex", id: "<thread-id>" });
     for (const how of [exit(null, "", "SIGTERM"), exit(143), exit(null, "", "SIGKILL")]) {
       expect(valid(codexOutcomeAfterExit(killed, how))).toMatchObject({
         kind: "error",
@@ -181,7 +235,7 @@ describe("Codex outcome after the process exits", () => {
   });
 
   it("a run the launcher stopped says why, unless the stream says more (AD-25 rules 4–5)", () => {
-    const killed = lines("codex/exec-killed.synthetic.jsonl");
+    const killed = lines("codex/exec-killed.jsonl");
     expect(valid(codexOutcomeAfterExit(killed, exit(null, "", "SIGINT", IDLE)))).toEqual({
       kind: "error",
       message: `${IDLE.message} before the turn finished`,

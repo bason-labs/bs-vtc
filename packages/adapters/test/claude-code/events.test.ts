@@ -93,6 +93,111 @@ describe("Claude parseEvents: recorded success (spike 1)", () => {
   });
 });
 
+/**
+ * Recorded headless role runs (live check 2026-10-14, Claude Code 2.1.299): `claude -p
+ * --output-format stream-json --verbose --json-schema … --agent vtc:vtc-qa-judge --plugin-dir …`.
+ */
+describe("Claude parseEvents: recorded headless role runs (2026-10-14)", () => {
+  const roleResultOf = (outcome: HostOutcome) => {
+    if (outcome.kind !== "done") throw new Error(`expected done, got ${outcome.kind}`);
+    return fromStructuredOutput("RoleResult", outcome.output);
+  };
+
+  it("a run whose agent has the StructuredOutput tool returns structured_output, which re-validates", () => {
+    for (const fixture of ["claude-code/stream-success.jsonl", "claude-code/stream-resume.jsonl"]) {
+      const parsed = parse(lines(fixture));
+      const outcome = valid(parsed.outcome);
+      expect(outcome, fixture).toMatchObject({
+        kind: "done",
+        session_ref: { host: "claude-code", id: "<session-id>" },
+        model: "claude-haiku-5-5",
+      });
+      const result = roleResultOf(outcome);
+      expect(result.success, fixture).toBe(true);
+      expect(result.data).toMatchObject({ role: "qa", exit: "done", summary: "live ok" });
+      // every line is a host event, the hook and thinking-token system events included
+      expect(parsed.unrecognizedLines, fixture).toBe(0);
+      expect(claudeOutcomeAfterExit(lines(fixture), exit(0)).kind).toBe("done");
+    }
+    expect(valid(parse(lines("claude-code/stream-success.jsonl")).outcome)).toMatchObject({
+      tokens: { in: 2, out: 625, cache_r: 0, cache_w: 13245 },
+      cost_usd: 0.0029617000000000003,
+    });
+  });
+
+  it("a run whose agent lacks the tool answers in a fenced text, which is never taken as the RoleResult", () => {
+    // the bug the live check found: no structured_output; the text is passed on as it is, so the
+    // engine's re-validation fails it visibly instead of a guessed parse
+    const outcome = valid(parse(lines("claude-code/stream-no-structured-output.jsonl")).outcome);
+    expect(outcome.kind).toBe("done");
+    if (outcome.kind !== "done") return;
+    expect(typeof outcome.output).toBe("string");
+    expect(String(outcome.output)).toMatch(/^```json\n/u);
+    expect(roleResultOf(outcome).success).toBe(false);
+  });
+
+  it("--max-turns 1 was not hit in either recording: both runs end done, not max_turns", () => {
+    // without StructuredOutput the reply took 1 turn; with it, the closing StructuredOutput call
+    // made 2 turns and still ended `success` under --max-turns 1 (no real max-turns stream yet)
+    const noTool = valid(parse(lines("claude-code/stream-max-turns-not-hit.jsonl")).outcome);
+    expect(noTool.kind).toBe("done");
+    const withTool = valid(
+      parse(lines("claude-code/stream-max-turns-structured-output.jsonl")).outcome,
+    );
+    expect(roleResultOf(withTool).success).toBe(true);
+    const result = lines("claude-code/stream-max-turns-structured-output.jsonl")
+      .map((line) => JSON.parse(line) as { type: string; num_turns?: number })
+      .find((event) => event.type === "result");
+    expect(result?.num_turns).toBe(2);
+  });
+
+  it("reads both plan windows' reset times from rate_limit_info.unifiedWindows; the use stays unknown", () => {
+    const usage = UsageSnapshotSchema.parse(parse(lines("claude-code/stream-success.jsonl")).usage);
+    expect(usage).toEqual({
+      host: "claude-code",
+      source: "sdk_event",
+      windows: [
+        {
+          kind: "five_hour",
+          label: "five_hour",
+          window_minutes: 300,
+          // `utilization` (0.32 here) has no confirmed unit yet (spine §7): unknown, never a guess
+          used_pct: null,
+          resets_at: "2026-10-14T15:40:00.000Z",
+        },
+        {
+          kind: "weekly",
+          label: "seven_day",
+          window_minutes: 10080,
+          used_pct: null,
+          resets_at: "2026-10-19T14:00:00.000Z",
+        },
+      ],
+      model_limits: [],
+      updated_at: null,
+    });
+  });
+
+  it("a unified window without a reset time, or with a malformed one, is skipped or left unknown", () => {
+    const event = (unifiedWindows: unknown) =>
+      JSON.stringify({
+        type: "rate_limit_event",
+        rate_limit_info: { status: "allowed", unifiedWindows },
+      });
+    expect(parse([event({ seven_day: { utilization: 0.1 } })]).usage?.windows).toEqual([
+      {
+        kind: "weekly",
+        label: "seven_day",
+        window_minutes: 10080,
+        used_pct: null,
+        resets_at: null,
+      },
+    ]);
+    expect(parse([event("nonsense")]).usage).toBeNull();
+    expect(parse([event({ seven_day_opus: { resetsAt: 1792418400 } })]).usage).toBeNull();
+  });
+});
+
 describe("Claude parseEvents: limits (synthetic, documented shapes, §6.9)", () => {
   it("a rejected rate_limit_event ends the run as a five-hour limit with its reset time", () => {
     const parsed = parse(fixtureLines("claude-code/stream-limit-rejected.synthetic.jsonl"));

@@ -66,6 +66,7 @@ describe("authStatus through the host's own status command (AD-25 rule 3, AD-9)"
       host: "claude-code",
       logged_in: true,
       method: "claude.ai",
+      billing: "subscription",
       checked_at: "2026-10-14T09:00:00.000Z",
     });
     // only the method label leaves the command, never the account details
@@ -87,13 +88,18 @@ describe("authStatus through the host's own status command (AD-25 rule 3, AD-9)"
       [1, "Not logged in"],
     ] as const) {
       const { adapter } = adapterFor("claude-code", replying(code, stdout));
-      expect(await status(adapter)).toMatchObject({ logged_in: false, method: null });
+      expect(await status(adapter)).toMatchObject({
+        logged_in: false,
+        method: null,
+        billing: null,
+      });
     }
   });
 
   it("Claude: exit 0 with output it cannot read is logged in with an unknown method", async () => {
     const { adapter } = adapterFor("claude-code", replying(0, "Logged in."));
-    expect(await status(adapter)).toMatchObject({ logged_in: true, method: null });
+    // nothing the adapter can read says who pays: unknown, never a guess (D-bq)
+    expect(await status(adapter)).toMatchObject({ logged_in: true, method: null, billing: null });
   });
 
   it("Claude: a method that is not a plain label is dropped, never passed on", async () => {
@@ -112,6 +118,7 @@ describe("authStatus through the host's own status command (AD-25 rule 3, AD-9)"
       host: "codex",
       logged_in: true,
       method: "ChatGPT",
+      billing: "subscription",
       checked_at: "2026-10-14T09:00:00.000Z",
     });
     expect(processes[0]?.command).toEqual({ command: "codex", args: ["login", "status"], env: {} });
@@ -124,13 +131,42 @@ describe("authStatus through the host's own status command (AD-25 rule 3, AD-9)"
       replying(0, "", "Logged in using an API key - sk-proj-***ABCD\n"),
     );
     const result = await status(adapter);
-    expect(result).toMatchObject({ logged_in: true, method: "API key" });
+    expect(result).toMatchObject({ logged_in: true, method: "API key", billing: "api_key" });
     expect(JSON.stringify(result)).not.toContain("sk-");
+  });
+
+  it("Codex: a login of a kind it does not name has unknown billing (D-bq)", async () => {
+    const { adapter } = adapterFor("codex", replying(0, "Logged in using an access token\n"));
+    expect(await status(adapter)).toMatchObject({ logged_in: true, method: null, billing: null });
+  });
+
+  it("Claude: billing is the subscription unless the status reports an API key (D-bq, spine §5 reading 171)", async () => {
+    const cases: readonly (readonly [
+      Record<string, unknown>,
+      "subscription" | "api_key" | null,
+    ])[] = [
+      [{ loggedIn: true, authMethod: "claude.ai" }, "subscription"],
+      [{ loggedIn: true, authMethod: "claude.ai", apiKeySource: "none" }, "subscription"],
+      [{ loggedIn: true, authMethod: "oauth_token" }, "subscription"],
+      [{ loggedIn: true, authMethod: "api_key" }, "api_key"],
+      [{ loggedIn: true, authMethod: "apiKeyHelper" }, "api_key"],
+      [{ loggedIn: true, authMethod: "claude.ai", apiKeySource: "ANTHROPIC_API_KEY" }, "api_key"],
+      [{ loggedIn: true, authMethod: "api_key", apiKeySource: "apiKeyHelper" }, "api_key"],
+      // the status names no login method at all: unknown, never a guess
+      [{ loggedIn: true }, null],
+    ];
+    for (const [json, billing] of cases) {
+      const { adapter } = adapterFor("claude-code", replying(0, JSON.stringify(json)));
+      expect(await status(adapter), JSON.stringify(json)).toMatchObject({
+        logged_in: true,
+        billing,
+      });
+    }
   });
 
   it("Codex: a non-zero exit is logged out", async () => {
     const { adapter } = adapterFor("codex", replying(1, "Not logged in\n"));
-    expect(await status(adapter)).toMatchObject({ logged_in: false, method: null });
+    expect(await status(adapter)).toMatchObject({ logged_in: false, method: null, billing: null });
   });
 
   it("a status command that cannot start, or is killed, leaves the login unknown (null), never false", async () => {
@@ -138,7 +174,12 @@ describe("authStatus through the host's own status command (AD-25 rule 3, AD-9)"
       const { adapter } = adapterFor(host, (p) => {
         p.failToStart(new Error(`spawn ${host} ENOENT`));
       });
-      expect(await status(adapter)).toMatchObject({ host, logged_in: null, method: null });
+      expect(await status(adapter)).toMatchObject({
+        host,
+        logged_in: null,
+        method: null,
+        billing: null,
+      });
       const killed = adapterFor(host, replying(null, ""));
       expect(await status(killed.adapter)).toMatchObject({ logged_in: null });
     }

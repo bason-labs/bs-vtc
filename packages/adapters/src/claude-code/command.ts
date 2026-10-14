@@ -35,6 +35,16 @@
  *   `mcp__plugin_vtc_vtc__*` and the `--mcp-config` server's `mcp__vtc__*`), both the same
  *   engine bridge; `ToolSearch` is in every set in case Claude defers them.
  *
+ * Structured output (spine §7, live check 2026-10-14): `--json-schema` answers through the
+ * `StructuredOutput` tool, and with `--agent` the session's tools are cut to the agent's own
+ * `tools` frontmatter, so the compiled agent must list it too (a contract proposal to the
+ * compiler); the profile names it in `--tools` and `--allowedTools`.
+ *
+ * Host web tools (H-3, spine §5 reading 156): `WebSearch` and `WebFetch` are in a role's tool set
+ * and allowed only when its contract says `host_web`, and denied otherwise; never for a
+ * `code_sandboxed` role (refused). They run in Claude Code itself, not in the Bash sandbox, whose
+ * network stays as the profile sets it.
+ *
  * Nothing here ever sets a bypass; the engine's write-scope check always runs.
  */
 import nodePath, { type PlatformPath } from "node:path";
@@ -120,9 +130,31 @@ const READ_TOOLS = ["Read", "Grep", "Glob"] as const;
  * all. It reaches no file and no network.
  */
 const TOOL_SEARCH = "ToolSearch";
+/**
+ * The tool `--json-schema` answers through: the run ends by calling it with the RoleResult, and
+ * the `result` event then carries `structured_output`. A session that lacks it never sees the
+ * schema, and the model answers in prose (the 2026-10-14 live check: a fenced JSON reply, no
+ * `structured_output`). Every role has it; it reaches no file and no network.
+ */
+export const CLAUDE_STRUCTURED_OUTPUT_TOOL = "StructuredOutput";
 const WRITE_TOOL_NAMES = ["Edit", "Write", "NotebookEdit"] as const;
-/** Roles reach the web only through engine tools (research fetchers), never directly. */
-const WEB_TOOLS = ["WebFetch", "WebSearch"] as const;
+/**
+ * The host's own web search and page fetch. A role reaches the web only through engine tools
+ * (research fetchers), unless its contract opts in with `host_web` (H-3, spine §5 reading 156:
+ * the Research Analyst); never a `code_sandboxed` role.
+ */
+export const CLAUDE_WEB_TOOLS = ["WebFetch", "WebSearch"] as const;
+
+/** Whether the role has the host's web tools; refused for a role that runs code (H-3). */
+const hostWeb = (tools: RoleTools): boolean => {
+  if (tools.host_web !== true) return false;
+  if (tools.profile === "code_sandboxed") {
+    throw new Error(
+      "refusing host web tools for a code_sandboxed role: a role that runs code gets no direct web (H-3, spine §5 reading 156)",
+    );
+  }
+  return true;
+};
 
 /** Host config a role must never change: it would load into later runs in the same worktree. */
 export const HOST_CONFIG_PATHS = [".claude/**", ".mcp.json", ".codex/**"] as const;
@@ -189,27 +221,35 @@ const absoluteRulePath = (path: string, platform: PlatformPath): string => {
 };
 
 /** The built-in tools a profile has at all (`--tools`); anything else does not exist in the run. */
-const builtInTools = (tools: RoleTools): string[] => [
+const builtInTools = (tools: RoleTools, web: boolean): string[] => [
   ...READ_TOOLS,
   TOOL_SEARCH,
+  CLAUDE_STRUCTURED_OUTPUT_TOOL,
   ...(tools.profile === "read_only" ? [] : WRITE_TOOL_NAMES),
   ...(tools.profile === "code_sandboxed" ? ["Bash"] : []),
+  ...(web ? CLAUDE_WEB_TOOLS : []),
 ];
 
-const allowedTools = (tools: RoleTools, writable: readonly string[]): string[] => [
+const allowedTools = (tools: RoleTools, writable: readonly string[], web: boolean): string[] => [
   ...READ_TOOLS,
   TOOL_SEARCH,
+  CLAUDE_STRUCTURED_OUTPUT_TOOL,
   ...(tools.profile === "read_only" ? [] : toolRules(writable, anchoredRulePath)),
   ...(tools.profile === "code_sandboxed" ? ["Bash"] : []),
+  ...(web ? CLAUDE_WEB_TOOLS : []),
   ...tools.engine_tools.flatMap((tool) => [claudeEngineToolName(tool), claudeBridgeToolName(tool)]),
 ];
 
-const disallowedTools = (tools: RoleTools, protectedPaths: readonly string[]): string[] => [
+const disallowedTools = (
+  tools: RoleTools,
+  protectedPaths: readonly string[],
+  web: boolean,
+): string[] => [
   ...(tools.profile === "read_only"
     ? [...WRITE_TOOL_NAMES]
     : toolRules([...protectedPaths, ...HOST_CONFIG_PATHS], rulePath)),
   ...(tools.profile === "code_sandboxed" ? [] : ["Bash"]),
-  ...WEB_TOOLS,
+  ...(web ? [] : CLAUDE_WEB_TOOLS),
   ...claudeHumanOnlyToolDenies(),
 ];
 
@@ -320,8 +360,9 @@ export const claudeSandboxProfile = (
   const { tools, cwd } = request;
   const platform = options.platformPath ?? nodePath;
   const writable = tools.profile === "read_only" ? [] : request.writablePaths;
-  const allow = allowedTools(tools, writable);
-  const deny = disallowedTools(tools, request.protectedPaths);
+  const web = hostWeb(tools);
+  const allow = allowedTools(tools, writable, web);
+  const deny = disallowedTools(tools, request.protectedPaths, web);
   const unreadable = unreadablePaths(options, platform, tools.profile === "code_sandboxed");
   const credentials = unreadable.claudeCredentials;
   const vtcHomeRule = absoluteRulePath(options.vtcHome, platform);
@@ -381,7 +422,7 @@ export const claudeSandboxProfile = (
       "--settings",
       JSON.stringify(settings),
       "--tools",
-      builtInTools(tools).join(","),
+      builtInTools(tools, web).join(","),
       "--allowedTools",
       allow.join(","),
       "--disallowedTools",
@@ -407,7 +448,8 @@ export interface ClaudeCommandOptions {
 /**
  * `claude -p` for a role (fresh, or `--resume <id>`). The stream is `stream-json` so the engine
  * sees SDK rate-limit and retry events as they happen (§6.9); the final `result` event carries
- * `structured_output` for `--json-schema` (spike 1). The run is the role's compiled plugin agent
+ * `structured_output` for `--json-schema` once the run has called `StructuredOutput` (spike 1;
+ * live check 2026-10-14, which also needs the tool in the agent's own `tools`). The run is the role's compiled plugin agent
  * (`--agent vtc:<agent>`), so it gets the role's instructions and tool list. The prompt is read
  * from stdin (the launcher writes it and closes stdin), so it never sits in argv. The
  * environment sets `CLAUDE_CODE_PRINT_BG_WAIT_CEILING_MS` explicitly, so a run never waits the

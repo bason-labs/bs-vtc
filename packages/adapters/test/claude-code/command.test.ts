@@ -2,6 +2,7 @@ import { homedir } from "node:os";
 import { join, win32 } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import {
+  claudeSessionSandboxSettings,
   engineMcpServer,
   findDisallowedHostArgs,
   findForbiddenHostArgs,
@@ -16,7 +17,10 @@ import {
   type SandboxProfile,
   type SpawnRoleRequest,
 } from "@vtc/shared";
-import { claudeSandboxProfile } from "../../src/claude-code/command.js";
+import {
+  CLAUDE_STRUCTURED_OUTPUT_TOOL,
+  claudeSandboxProfile,
+} from "../../src/claude-code/command.js";
 import { ADAPTER_FACTORIES, createClaudeCodeAdapter } from "../../src/index.js";
 import { fakeSpawner } from "../support/fake-spawner.js";
 import { fixtureText } from "../support/fixtures.js";
@@ -62,7 +66,10 @@ const HUMAN_ONLY_DENIED = [
   "mcp__plugin_vtc_vtc__change_request",
   "mcp__vtc__change_request",
 ];
-/** Denied to every role: the web tools (engine tools only) and the human-only engine tools. */
+/**
+ * Denied to every role without `host_web` (H-3): the host web tools; and to every role: the
+ * human-only engine tools.
+ */
 const ALWAYS_DENIED = ["WebFetch", "WebSearch", ...HUMAN_ONLY_DENIED];
 /**
  * Never readable, as absolute rules in the settings: the VTC home's install token, daemon
@@ -140,10 +147,13 @@ describe("Claude sandboxProfile (§12.1, AD-9)", () => {
       network: true,
       secretsUnreadable: true,
     });
-    expect(argAfter(p.cliArgs, "--allowedTools")).toBe("Read,Grep,Glob,ToolSearch");
+    expect(argAfter(p.cliArgs, "--allowedTools")).toBe(
+      "Read,Grep,Glob,ToolSearch,StructuredOutput",
+    );
     // the built-in tool set itself is minimal, so no settings file can bring another tool in;
-    // ToolSearch only loads deferred tool definitions (the engine MCP tools may be deferred)
-    expect(argAfter(p.cliArgs, "--tools")).toBe("Read,Grep,Glob,ToolSearch");
+    // ToolSearch only loads deferred tool definitions (the engine MCP tools may be deferred), and
+    // StructuredOutput is how `--json-schema` returns the RoleResult (live check 2026-10-14)
+    expect(argAfter(p.cliArgs, "--tools")).toBe("Read,Grep,Glob,ToolSearch,StructuredOutput");
     expect(argAfter(p.cliArgs, "--disallowedTools")?.split(",")).toEqual([
       "Edit",
       "Write",
@@ -445,6 +455,7 @@ describe("Claude sandboxProfile (§12.1, AD-9)", () => {
       "Grep",
       "Glob",
       "ToolSearch",
+      "StructuredOutput",
       "Edit(./src/**)",
       "Write(./src/**)",
       "NotebookEdit(./src/**)",
@@ -493,13 +504,13 @@ describe("Claude sandboxProfile (§12.1, AD-9)", () => {
     });
     expect(JSON.parse(argAfter(p.cliArgs, "--settings") ?? "")).toEqual(p.settings);
     expect(argAfter(p.cliArgs, "--tools")).toBe(
-      "Read,Grep,Glob,ToolSearch,Edit,Write,NotebookEdit,Bash",
+      "Read,Grep,Glob,ToolSearch,StructuredOutput,Edit,Write,NotebookEdit,Bash",
     );
   });
 
   it("write-scoped roles get the edit tools but no shell in the built-in tool set", () => {
     expect(argAfter(profile(WRITE_SCOPED).cliArgs, "--tools")).toBe(
-      "Read,Grep,Glob,ToolSearch,Edit,Write,NotebookEdit",
+      "Read,Grep,Glob,ToolSearch,StructuredOutput,Edit,Write,NotebookEdit",
     );
   });
 
@@ -511,6 +522,81 @@ describe("Claude sandboxProfile (§12.1, AD-9)", () => {
       ...HOST_CONFIG_DENIED,
       ...ALWAYS_DENIED,
     ]);
+  });
+
+  it("every role has the structured-output tool `--json-schema` answers through, in its tool set and allowed (live check 2026-10-14)", () => {
+    for (const tools of [READ_ONLY, WRITE_SCOPED, ENGINEER, { ...READ_ONLY, host_web: true }]) {
+      const p = profile(tools);
+      expect(argAfter(p.cliArgs, "--tools")?.split(",")).toContain(CLAUDE_STRUCTURED_OUTPUT_TOOL);
+      expect(argAfter(p.cliArgs, "--allowedTools")?.split(",")).toContain(
+        CLAUDE_STRUCTURED_OUTPUT_TOOL,
+      );
+      expect(argAfter(p.cliArgs, "--disallowedTools")?.split(",")).not.toContain(
+        CLAUDE_STRUCTURED_OUTPUT_TOOL,
+      );
+    }
+    expect(CLAUDE_STRUCTURED_OUTPUT_TOOL).toBe("StructuredOutput");
+  });
+
+  describe("host web search (H-3, spine §5 reading 156)", () => {
+    const RESEARCH: RoleTools = {
+      profile: "write_scoped",
+      write_paths: [".vtc/research/briefs/**"],
+      engine_tools: ["research_fetch"],
+      host_web: true,
+    };
+
+    it("a host_web role gets WebSearch and WebFetch in its tool set and allowed, never denied", () => {
+      for (const tools of [RESEARCH, { ...READ_ONLY, host_web: true }]) {
+        const p = profile(tools);
+        expect(argAfter(p.cliArgs, "--tools")?.split(",")).toEqual(
+          expect.arrayContaining(["WebSearch", "WebFetch"]),
+        );
+        expect(argAfter(p.cliArgs, "--allowedTools")?.split(",")).toEqual(
+          expect.arrayContaining(["WebSearch", "WebFetch"]),
+        );
+        const denied = argAfter(p.cliArgs, "--disallowedTools")?.split(",") ?? [];
+        expect(denied.filter((t) => t === "WebSearch" || t === "WebFetch")).toEqual([]);
+        expect(
+          settingsOf(p).permissions.deny.filter((rule) => /^Web(Search|Fetch)\b/u.test(rule)),
+        ).toEqual([]);
+        // the human-only engine tools stay denied whatever else the role gets (D-an)
+        expect(denied).toEqual(expect.arrayContaining(HUMAN_ONLY_DENIED));
+      }
+    });
+
+    it("a role without host_web (absent or false) has no web tool at all and denies both", () => {
+      for (const tools of [READ_ONLY, WRITE_SCOPED, ENGINEER, { ...READ_ONLY, host_web: false }]) {
+        const p = profile(tools);
+        for (const flag of ["--tools", "--allowedTools"]) {
+          expect(argAfter(p.cliArgs, flag)?.split(","), flag).not.toEqual(
+            expect.arrayContaining(["WebSearch"]),
+          );
+          expect(argAfter(p.cliArgs, flag)?.split(","), flag).not.toEqual(
+            expect.arrayContaining(["WebFetch"]),
+          );
+        }
+        expect(argAfter(p.cliArgs, "--disallowedTools")?.split(",")).toEqual(
+          expect.arrayContaining(["WebFetch", "WebSearch"]),
+        );
+      }
+    });
+
+    it("refuses host web tools for a code_sandboxed role: a role that runs code gets no direct web", () => {
+      expect(() => profile({ ...ENGINEER, host_web: true })).toThrow(/code_sandboxed.*web/);
+    });
+
+    it("the Lead session's permissions.deny that vtc install writes blocks no web tool, so a host_web plugin subagent keeps them", () => {
+      const settings = claudeSessionSandboxSettings(VTC_HOME, {
+        homeDir: "/home/dev",
+        projectRoot: "/work/app",
+        hostConfigDirs: { "claude-code": CLAUDE_CONFIG, codex: CODEX_HOME },
+      });
+      expect(settings.permissions.deny.length).toBeGreaterThan(0);
+      expect(settings.permissions.deny.filter((rule) => /Web(Search|Fetch)/u.test(rule))).toEqual(
+        [],
+      );
+    });
   });
 
   it("only the install phase reaches package registries", () => {
@@ -575,7 +661,7 @@ describe("Claude headlessCommand", () => {
       // reading 108 replaces `--restricted` (it would drop the user's settings; a §7 spike row)
       expect(args).not.toContain("--restricted");
       expect(args.filter((a) => a === "--settings")).toHaveLength(1);
-      expect(argAfter(args, "--tools")).toBe("Read,Grep,Glob,ToolSearch");
+      expect(argAfter(args, "--tools")).toBe("Read,Grep,Glob,ToolSearch,StructuredOutput");
       expect(headlessIsolationGaps("claude-code", args)).toEqual([]);
       // API-key mode never: it would not read the user's subscription login (AD-9)
       expect(findDisallowedHostArgs(args)).toEqual([]);
