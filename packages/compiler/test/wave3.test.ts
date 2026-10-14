@@ -429,7 +429,7 @@ describe("placeholders for the wave-3 prompts", () => {
   });
 
   it("fills the G2 direction fields the Designer gives and where its prototype lives", () => {
-    expect(PROTOCOL_VARS.g2_direction_fields).toBe("`id`, `title`, `thesis`, `prototype`");
+    expect(PROTOCOL_VARS.direction_fields).toBe("`id`, `title`, `thesis`, `prototype`");
     expect(PROTOCOL_VARS.prototype_root).toBe(ENGINE_HTTP.prototype.root);
   });
 });

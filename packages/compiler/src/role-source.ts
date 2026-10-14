@@ -66,12 +66,13 @@ export const selectMode = (
 };
 
 /**
- * Replaces `{{name}}` placeholders (lower-case letters, digits and `_`, starting with a letter,
- * e.g. `{{g2_directions_min}}`); unknown placeholders are errors.
+ * Replaces `{{name}}` placeholders (lower-case letters and `_`: the grammar `editableSectionErrors`
+ * in `@vtc/shared` detects, so a placeholder the compiler renders is one an editable section and a
+ * Lookback proposal are refused for); unknown placeholders are errors.
  */
 export const renderTemplate = (text: string, vars: Readonly<Record<string, string>>): TextCheck => {
   const errors: string[] = [];
-  const rendered = text.replace(/\{\{([a-z][a-z0-9_]*)\}\}/g, (whole, name: string) => {
+  const rendered = text.replace(/\{\{([a-z_]+)\}\}/g, (whole, name: string) => {
     const value = vars[name];
     if (value === undefined) {
       errors.push(`unknown placeholder ${whole}`);

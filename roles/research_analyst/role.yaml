@@ -4,9 +4,10 @@
 #   specialized/business-strategist.md ("what must be true", stress-test key assumptions)
 #   testing/testing-tool-evaluator.md (weighted matrix for library or vendor choice)
 # New: software-source evidence tiers, citations the engine resolves, untrusted-content rule;
-# discovery with the host's own web search and page fetch (H-3, spine §5 reading 156).
+# discovery with the host's own web search and page fetch (H-3, spine §5 reading 156); a
+# locked-core edit, so MAJOR (D-bm, reading 167).
 id: research_analyst
-version: 2.1.0
+version: 3.0.0
 kind: core
 mission: >-
   Answer the research questions a new project or large feature raises with a brief in which every

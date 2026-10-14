@@ -179,6 +179,13 @@ human`, exits `done`, `blocked` or `unknown`, no verdicts, no success criteria a
   one Direction contract per direction, is `.vtc/design/screens/<screen id>.md`, returned as a
   `screens` artifact. A new-repo UI design offers 2 to 3 directions (`G2_DIRECTIONS`); with
   fewer, the engine re-dispatches the Designer once and then G2 blocks (D-bt).
+- **Visual QA needs the chosen direction (pending engine plumbing).** Visual QA judges V1, V2 and
+  V8 against the Direction contract of the direction the human chose at G2, but its task pack
+  does not yet say which one that is: the engine records the choice (`ApproveInput.direction`)
+  without passing it to Visual QA, and `design_contracts_dir` is not a frozen path yet. Until a
+  contract proposal lands (a chosen-direction field in Visual QA's pack, or G2 freezing only the
+  chosen direction's artifacts), Visual QA returns V8 `unknown` whenever the screens' design
+  contracts hold several directions, as its prompt says.
 
 ## What the compiler emits for the engine
 

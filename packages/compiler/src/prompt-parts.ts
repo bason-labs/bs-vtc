@@ -20,7 +20,10 @@
  * of the role's own trimmed `splitRolePrompt` sections of `roles/<role>/prompt.md`, except that an
  * engineer profile's locked section is `engineerProfileLockedSection`: the Engineer's locked core
  * and editable section, then the profile's own locked core (reading 172, D-br), so an Engineer
- * prompt change is a new version of every profile. A profile's editable section stays its own.
+ * prompt change is a new version of every profile. Those are the Engineer's unrendered sections,
+ * so the compiler refuses a placeholder or mode block in the Engineer's locked core
+ * (`engineerLockedCoreErrors`; its editable section is already verbatim), which keeps them equal
+ * to the text the profiles run. A profile's editable section stays its own.
  * Every mode of a role shares them. Each plugin carries those two sections at
  * `vtc/prompts/<agent>/{locked,editable}.md`, so the engine can take a proposal's locked core and
  * default section from its plugin assets. The rest of the compiled locked part (the contract, the

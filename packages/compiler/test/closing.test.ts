@@ -24,6 +24,8 @@ import {
   compilePlugins,
   EDITABLE_IN_PACK_ROLES,
   editableSectionErrors,
+  engineerLockedCoreErrors,
+  PROTOCOL_VARS,
   renderTemplate,
   RESERVED_EDITABLE_HEADINGS,
   rolePromptAssetPath,
@@ -119,6 +121,29 @@ describe("an engineer profile's identity covers the Engineer prompt (D-br, readi
     expect(fileOf(output, "claude-code", rolePromptAssetPath("vtc-engineer", "locked"))).toBe(
       engineer.locked,
     );
+  });
+
+  it("refuses a placeholder in the Engineer's locked core, which profiles hash unrendered", () => {
+    const core = "ENGINEER-LOCKED {{design_screens_path}}";
+    const result = compilePlugins(
+      fixtureFiles({ "roles/engineer/prompt.md": prompt(core, "ENGINEER-EDITABLE") }),
+    );
+    expect(result.ok).toBe(false);
+    const messages = result.ok ? [] : result.errors.map((e) => e.message);
+    expect(messages).toContain(
+      "locked core line 1: no placeholder in the Engineer's locked core; profiles hash it unrendered",
+    );
+  });
+
+  it("refuses a mode block in the Engineer's locked core", () => {
+    const core = "A\n<!-- vtc:mode build -->\nB\n<!-- vtc:mode-end -->";
+    expect(engineerLockedCoreErrors(core)).toEqual(
+      [2, 4].map(
+        (line) =>
+          `locked core line ${String(line)}: no mode block in the Engineer's locked core; profiles hash it unrendered`,
+      ),
+    );
+    expect(engineerLockedCoreErrors("ENGINEER-LOCKED")).toEqual([]);
   });
 
   it.each([
@@ -230,20 +255,23 @@ budget: { context_tokens: 80000 }
   });
 });
 
-describe("placeholders with digits render (the G2 direction placeholders)", () => {
-  it("fills a placeholder whose name has a digit", () => {
-    expect(
-      renderTemplate("{{g2_directions_min}} or {{a1}}", { g2_directions_min: "2", a1: "x" }),
-    ).toEqual({
-      ok: true,
-      text: "2 or x",
-    });
+describe("the compiler renders exactly the placeholders the shared rule detects (reading 175)", () => {
+  it("names every protocol placeholder in the shared grammar", () => {
+    for (const name of Object.keys(PROTOCOL_VARS)) expect(name).toMatch(/^[a-z_]+$/);
   });
 
-  it("refuses an unknown placeholder whose name has a digit", () => {
-    expect(renderTemplate("{{g2_nope}}", {})).toEqual({
+  it("renders a placeholder only when editableSectionErrors would refuse it", () => {
+    for (const text of ["{{directions_min}}", "{{a1}}", "{{g2_directions_min}}", "{{Name}}"]) {
+      const rendered = renderTemplate(text, { directions_min: "2" });
+      const touched = !rendered.ok || rendered.text !== text;
+      expect(touched, text).toBe(editableSectionErrors(text).length > 0);
+    }
+  });
+
+  it("refuses an unknown placeholder", () => {
+    expect(renderTemplate("{{directions_nope}}", {})).toEqual({
       ok: false,
-      errors: ["unknown placeholder {{g2_nope}}"],
+      errors: ["unknown placeholder {{directions_nope}}"],
     });
   });
 });
