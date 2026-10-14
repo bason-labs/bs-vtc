@@ -8,8 +8,10 @@
  * 3. decides which (role, host) targets get the lookback role ({@link lookbackTargets}): at least
  *    `minTrainFailures` attributed train failures of the version that ran, at least one of them new
  *    in this run, `minWeeklyRemainingPct` of the weekly window left and budget available.
- * It returns the `lookback.dispatched` drafts and what each lookback dispatch reads (train traces
- * only); engine core queues the dispatches like any role step.
+ * It returns the `lookback.dispatched` drafts and what each lookback dispatch reads: train traces
+ * only, plus the human edits of the version under review (§13 step 1, {@link humanEdits}) with
+ * their diffs when the caller injects a reader. Engine core queues the dispatches like any role
+ * step (and redacts the pack as it does every pack).
  *
  * `attributions.jsonl` is git-tracked, so only the rows {@link readAttributions} trusts count: a row
  * of a run outside the history, of a dispatch the history does not show, or of a failure its
@@ -24,8 +26,9 @@ import {
   type FailureSignal,
 } from "./attribution.js";
 import { lookbackEvent, type LookbackEventDraft } from "./events.js";
+import { capDiff, humanEdits, LOOKBACK_MAX_HUMAN_EDITS, type HumanEdit } from "./human-edits.js";
 import { computeScorecards, writeScorecards } from "./scorecards.js";
-import { targetKey, traceRef, traceSlug, type LockedShaFor } from "./traces.js";
+import { sameTarget, targetKey, traceRef, traceSlug, type LockedShaFor } from "./traces.js";
 
 /** Most failures one lookback dispatch reads (§13 step 1: 5–10). */
 export const LOOKBACK_MAX_TRACES = 10;
@@ -45,7 +48,27 @@ export interface LookbackTarget {
    * run-qualified slug it cites in `trace_ids` ({@link traceSlug}).
    */
   readonly traces: readonly { readonly id: string; readonly run: string; readonly trace: string }[];
+  /**
+   * Train-split human edits of this version's work (the newest {@link LOOKBACK_MAX_HUMAN_EDITS}):
+   * the file, what the role submitted and what the human froze, and the diff when one was read.
+   */
+  readonly human_edits: readonly LookbackHumanEdit[];
 }
+
+export interface LookbackHumanEdit {
+  readonly id: string;
+  readonly run: string;
+  readonly trace: string;
+  readonly path: string;
+  readonly role_sha256: string;
+  readonly human_sha256: string;
+  readonly gates: readonly string[];
+  /** Capped at `HUMAN_EDIT_DIFF_MAX_CHARS`. */
+  readonly diff?: string;
+}
+
+/** Reads the diff of one human edit (role version → frozen version), e.g. from git. */
+export type HumanEditDiff = (edit: HumanEdit) => Promise<string | undefined>;
 
 export type LookbackSkipReason = "weekly_window" | "budget";
 
@@ -57,6 +80,8 @@ export const lookbackTargets = (input: {
   /** Percent of the weekly window left; `null` when unknown (then Lookback waits). */
   readonly weeklyRemainingPct: number | null;
   readonly budgetAvailable: boolean;
+  /** Human edits of the history ({@link humanEdits}); only train-split ones are shown. */
+  readonly humanEdits?: readonly HumanEdit[];
 }): { readonly targets: LookbackTarget[]; readonly skipped?: LookbackSkipReason } => {
   const candidates = new Map<string, Attribution[]>();
   for (const a of input.attributions) {
@@ -80,6 +105,23 @@ export const lookbackTargets = (input: {
       traces: rows
         .slice(-LOOKBACK_MAX_TRACES)
         .map((a) => ({ id: traceSlug(a), run: a.run, trace: a.trace })),
+      human_edits: (input.humanEdits ?? [])
+        .filter(
+          (e) =>
+            e.split === "train" &&
+            sameTarget(e.prompt, base) &&
+            e.prompt.effective_sha256 === base.effective_sha256,
+        )
+        .slice(-LOOKBACK_MAX_HUMAN_EDITS)
+        .map((e) => ({
+          id: e.id,
+          run: e.run,
+          trace: e.trace,
+          path: e.path,
+          role_sha256: e.role_sha256,
+          human_sha256: e.human_sha256,
+          gates: [...e.gates],
+        })),
     });
   }
   if (targets.length === 0) return { targets };
@@ -91,6 +133,35 @@ export const lookbackTargets = (input: {
   }
   if (!input.budgetAvailable) return { targets: [], skipped: "budget" };
   return { targets };
+};
+
+/** The targets with each human edit's diff read through `read`, capped. */
+const withDiffs = async (
+  targets: readonly LookbackTarget[],
+  edits: readonly HumanEdit[],
+  read: HumanEditDiff,
+): Promise<LookbackTarget[]> => {
+  const editKey = (e: Pick<HumanEdit, "run" | "trace" | "path" | "human_sha256">): string =>
+    `${traceRef(e)}\n${e.path}\n${e.human_sha256}`;
+  const byKey = new Map(edits.map((e) => [editKey(e), e]));
+  const out: LookbackTarget[] = [];
+  for (const target of targets) {
+    const human_edits: LookbackHumanEdit[] = [];
+    for (const shown of target.human_edits) {
+      const edit = byKey.get(editKey(shown));
+      let diff: string | undefined;
+      try {
+        diff = edit === undefined ? undefined : await read(edit);
+      } catch {
+        diff = undefined;
+      }
+      human_edits.push(
+        diff === undefined || diff === "" ? shown : { ...shown, diff: capDiff(diff) },
+      );
+    }
+    out.push({ ...target, human_edits });
+  }
+  return out;
 };
 
 export interface RunEndResult {
@@ -113,6 +184,11 @@ export const lookbackAtRunEnd = async (input: {
   readonly weeklyRemainingPct: number | null;
   readonly budgetAvailable: boolean;
   readonly now: Date;
+  /**
+   * Reads a human edit's diff (git lives outside this module). A failure or `undefined` leaves the
+   * edit without a diff: the lookback role still sees which file the human changed.
+   */
+  readonly humanEditDiff?: HumanEditDiff;
 }): Promise<RunEndResult> => {
   const recorded = await readAttributions(input.projectRoot, {
     history: input.history,
@@ -143,12 +219,19 @@ export const lookbackAtRunEnd = async (input: {
     const newest = latest.get(targetKey(a.prompt));
     return newest === undefined || newest === a.prompt.effective_sha256;
   });
-  const { targets, skipped } = lookbackTargets({
+  const edits = humanEdits(input.history, input.lockedShaFor);
+  const chosen = lookbackTargets({
     attributions: current,
     fresh: new Set(result.attributions.map(traceRef)),
     weeklyRemainingPct: input.weeklyRemainingPct,
     budgetAvailable: input.budgetAvailable,
+    humanEdits: edits,
   });
+  const { skipped } = chosen;
+  const targets =
+    input.humanEditDiff === undefined
+      ? chosen.targets
+      : await withDiffs(chosen.targets, edits, input.humanEditDiff);
   const events = targets.map((t) =>
     lookbackEvent("lookback.dispatched", {
       target_role: t.role,

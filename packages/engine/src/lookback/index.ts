@@ -28,6 +28,13 @@ export {
 } from "./attribution.js";
 export { canaryArmStats, evaluateCanaries } from "./canary.js";
 export { lookbackEvent, type LookbackEventDraft, type LookbackEventType } from "./events.js";
+export {
+  capDiff,
+  HUMAN_EDIT_DIFF_MAX_CHARS,
+  humanEdits,
+  LOOKBACK_MAX_HUMAN_EDITS,
+  type HumanEdit,
+} from "./human-edits.js";
 export { graderBundleSha, LOOKBACK_METRICS_VERSION, type GraderBundle } from "./grader-bundle.js";
 export {
   autoRollback,
@@ -70,6 +77,8 @@ export {
   LOOKBACK_MAX_TRACES,
   lookbackAtRunEnd,
   lookbackTargets,
+  type HumanEditDiff,
+  type LookbackHumanEdit,
   type LookbackSkipReason,
   type LookbackTarget,
   type RunEndResult,
