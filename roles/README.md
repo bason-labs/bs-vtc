@@ -48,8 +48,30 @@ The Lead is not a compiled agent: it is the main session, driven by the Lead ski
    gets `_shared/lens-reviewer.md` first and its `skills/lens-<x>` checklist after its own core.
 2. `## Contract`, generated from the effective `role.yaml` contract of the mode.
 3. `_shared/result-protocol.md`; for an advisor, `_shared/advisor-protocol.md`.
-4. The editable section(s), in the same order as the locked cores.
-5. `host_overrides.<host>.prompt_append` (§12.3).
+4. `host_overrides.<host>.prompt_append` (§12.3).
+5. The editable section(s), in the same order as the locked cores.
+
+Parts 1 to 4 are the agent's **locked part** and part 5 its **editable part**.
+
+## Prompt parts and Lookback (spine AD-21, §5 reading 102)
+
+- A prompt version is `effectivePromptSha(locked, editable)`. An agent that carries its editable
+  section has the instructions `<locked>` + newline + `<editable>`, so its manifest
+  `prompt_sha256` is exactly that effective SHA. The manifest also records `locked_sha256` and
+  `editable_sha256` for every agent, and each plugin carries both parts as
+  `vtc/prompts/<agent>/locked.md` and `editable.md`.
+- Reading 102 moves the editable section out of the compiled agent: the engine renders the
+  pinned editable section first in the task pack, so a canary needs no plugin reinstall. One
+  role goes first (`EDITABLE_IN_PACK_ROLES`: `spec_verifier`, the role with the most dispatches
+  per run) and is compared with an A/A run before every role switches. A switched agent carries
+  the locked part only, ending in a note that its heuristics come first in the task pack's
+  `Role heuristics` section, the one part of the pack that is instructions; its `prompt_sha256`
+  equals its `locked_sha256`, which is how the engine tells a switched agent apart.
+- The lookback role writes `proposal.json` (`PromptProposal`: at most three changes, each with a
+  hypothesis, a target metric and trace ids) and `editable.md` (the full proposed section) under
+  `.vtc/lookback/proposals/<role>/`. It never writes `roles/`, the stored versions or the pins; a
+  human promotes with `vtc lookback approve` and a promoted section is upstreamed into
+  `roles/<role>/prompt.md` as a normal MINOR change.
 
 ## Readings this tree follows
 
@@ -95,19 +117,22 @@ human`, exits `done`, `blocked` or `unknown`, no verdicts, no success criteria a
 - **Gap findings stay with the human** (reading 19). Until sub-project 4, `spec_gap` and
   `design_gap` findings park the task for the human; the BA and Designer prompts have no
   task-scoped clarification mode.
-- **No engine tools yet.** Role-facing engine MCP tools (repo map, research fetchers, fact
-  lookups) are deferred to sub-project 4 and added to `@vtc/shared` as a MINOR contract change
-  (spine AD-4 rule 3). Until then `tools.engine_tools` stays empty: the compiler rejects any
-  entry that is not a role-facing tool in the frozen contract, and always rejects the Lead's
-  run-driving tools. The Cartographer, Research Analyst and Architect work from what the engine
-  puts in their task pack.
+- **Role-facing engine tools** (AD-4 rule 3, AD-22; contracts 4.5.0). `ROLE_MCP_TOOLS`
+  (`research_fetch`, `fact_lookup`, `fact_propose`) is the only engine surface a role may name
+  in `tools.engine_tools`; the compiler rejects any other entry and always rejects the Lead's
+  run-driving tools. An agent that declares one preloads the skill that teaches it
+  (`research-fetch`, `research-facts`). Declaring them for the Architect and the Research Analyst
+  changes their `role.yaml` contracts, which the engine's role fixtures mirror, so it lands with
+  the matching fixture change at integration; until then both work from the facts and sources in
+  their task pack.
 - **Exact paths for config and task-runner files** (readings 44, 45 and 63, Lead decisions of
   2026-10-14). The Planner's locked core tells it to name a lint, test or scanner config, or a
   `Makefile`, `justfile`, `*.mk` or `package.json` `scripts` change, by its exact path in
   `files_scope`, and to write no `{a,b}` alternatives or rule-breaking characters in a write-scope
   glob (`WriteScopeGlobSchema`).
-- **No role touches VTC's guard rails** (reading 43). Every compiled agent denies `vtc
-calibrate` and writes to the guarded VTC home globs; see `plugins/README.md`.
+- **No role touches VTC's guard rails** (readings 43 and 81). The guarded VTC-home globs and
+  `vtc calibrate` are `permissions.deny` rules and sandbox deny lists built in `@vtc/shared`, not
+  compiled into agents; see `plugins/README.md`.
 - **Write paths are instructions plus an engine check, not a host deny.** The contract section
   lists `write_paths`; the engine checks every write-scoped role's writes on submit.
 

@@ -38,6 +38,18 @@ export interface CompiledAgent {
   readonly model: RoleHostModel;
   /** The full instructions: the agent's system prompt on this host. */
   readonly instructions: string;
+  /** The locked part of the prompt, rendered for this host (`prompt-parts.ts`). */
+  readonly locked: string;
+  /** The default editable part, rendered for this host; Lookback proposals replace it. */
+  readonly editable: string;
+  /** Skills the agent preloads (`role-skills.ts`), by skill name. */
+  readonly skills: readonly string[];
+}
+
+/** Options of the compile step; the defaults are the repo's policy. */
+export interface CompileOptions {
+  /** Roles whose agents carry the locked core only; default `EDITABLE_IN_PACK_ROLES`. */
+  readonly editableInPack?: readonly string[];
 }
 
 export interface CompileOutput {

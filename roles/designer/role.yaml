@@ -8,7 +8,7 @@
 # New: code-native artifacts (Mermaid flows, screens.yaml, DTCG tokens, an HTML prototype with
 # every state reachable), directions from the engine's constraints roll (§9.1).
 id: designer
-version: 1.0.0
+version: 2.0.0
 kind: core
 mission: >-
   Design the user-facing part of the spec as code-native artifacts: flows, screens with every
