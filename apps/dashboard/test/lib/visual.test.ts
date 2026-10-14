@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import { VisualStatusSchema } from "@vtc/shared";
 import {
   imageDataUrl,
+  isVisualReportPath,
   readVisualReport,
   renderMatrix,
   visualDiffs,
@@ -11,8 +12,11 @@ import {
 import {
   jsonArtifact,
   pngArtifact,
+  VISUAL_DIR,
   VISUAL_REPORT,
   VISUAL_REPORT_PATH,
+  VISUAL_SUMMARY_PROJECT_PASS,
+  VISUAL_SUMMARY_PTRACE,
   VISUAL_SUMMARY_SKIPPED,
   VISUAL_SUMMARY_UNCHECKED,
 } from "../wave3-fixtures";
@@ -39,9 +43,37 @@ describe("visualSummaryModel (GateReport.visual)", () => {
   it("shows a skipped step's reason and that Level 3 never counts it", () => {
     const m = visualSummaryModel(VISUAL_SUMMARY_SKIPPED);
     expect(m.status.label).toBe("Not passed: skipped");
-    expect(m.notes.join(" ")).toContain("vtc doctor --install-browser");
+    expect(m.reason).toContain("vtc doctor --install-browser");
     expect(m.notes.join(" ")).toMatch(/Level 3/);
     expect(m.report).toBeNull();
+  });
+
+  it("shows the Linux ptrace_scope skip (D-bj) as a note, with the report it names", () => {
+    const m = visualSummaryModel(VISUAL_SUMMARY_PTRACE);
+    expect(m.status).toMatchObject({ label: "Not passed: skipped", tone: "warn" });
+    expect(m.reason).toMatch(/kernel\.yama\.ptrace_scope/);
+    expect(m.notes.join(" ")).toMatch(/Level 3 never counts/);
+    expect(m.report).toBe(VISUAL_REPORT_PATH);
+  });
+
+  it("has no reason for a step that was not skipped", () => {
+    expect(visualSummaryModel(VISUAL_SUMMARY_UNCHECKED).reason).toBeNull();
+  });
+
+  it("names the toolchain; a pass on the project's Playwright is not a Level-3 pass", () => {
+    expect(visualSummaryModel(VISUAL_SUMMARY_UNCHECKED).toolchain).toEqual({
+      label: "VTC's browser store",
+      note: null,
+    });
+    const project = visualSummaryModel(VISUAL_SUMMARY_PROJECT_PASS);
+    expect(project.status.label).toBe("Passed");
+    expect(project.toolchain?.label).toBe("the project's own Playwright");
+    expect(project.toolchain?.note).toMatch(/^Not a Level-3 pass/);
+    expect(project.toolchain?.note).toMatch(/vtc doctor --install-browser/);
+    const failed = visualSummaryModel({ ...VISUAL_SUMMARY_PROJECT_PASS, status: "fail" });
+    expect(failed.toolchain).toEqual({ label: "the project's own Playwright", note: null });
+    const { toolchain: _omit, ...older } = VISUAL_SUMMARY_UNCHECKED;
+    expect(visualSummaryModel(older).toolchain).toBeNull();
   });
 
   it("lists the counts that are not clean and links the full report", () => {
@@ -60,6 +92,31 @@ describe("visualSummaryModel (GateReport.visual)", () => {
   });
 });
 
+describe("isVisualReportPath (VisualSummary.report, contracts 4.7.0)", () => {
+  it("accepts the gate runner's report path under a task's or feature's gate attempt", () => {
+    expect(isVisualReportPath(VISUAL_REPORT_PATH)).toBe(true);
+    expect(
+      isVisualReportPath(
+        ".vtc/evidence/F-2/gates/20261013T110000Z-final_review-bbbbbbbbbbbb/visual/report.json",
+      ),
+    ).toBe(true);
+  });
+
+  it("refuses every other path", () => {
+    for (const path of [
+      ".vtc/evidence/T-1/visual/report.json",
+      ".vtc/evidence/T-1/bundle.json",
+      ".vtc/evidence/T-1/gates/a/visual/other.json",
+      ".vtc/evidence/T-1/gates/a/b/visual/report.json",
+      ".vtc/evidence/X-1/gates/a/visual/report.json",
+      ".vtc/evidence/T-1/gates/../visual/report.json",
+      ".vtc/state/gates/r1/a/evidence/visual/report.json",
+    ]) {
+      expect(isVisualReportPath(path), path).toBe(false);
+    }
+  });
+});
+
 describe("readVisualReport", () => {
   it("reads a visual report under .vtc/evidence/", () => {
     const report = readVisualReport(jsonArtifact(VISUAL_REPORT_PATH, VISUAL_REPORT));
@@ -68,8 +125,10 @@ describe("readVisualReport", () => {
 
   it("ignores other paths, other JSON and binary files", () => {
     expect(readVisualReport(jsonArtifact(".vtc/design/report.json", VISUAL_REPORT))).toBeNull();
+    // A report-shaped file elsewhere under evidence is not one: readers follow the named path.
+    expect(readVisualReport(jsonArtifact(".vtc/evidence/T-1/x.json", VISUAL_REPORT))).toBeNull();
     expect(readVisualReport(jsonArtifact(VISUAL_REPORT_PATH, { v: 1 }))).toBeNull();
-    expect(readVisualReport(pngArtifact(".vtc/evidence/T-1/visual/a.png"))).toBeNull();
+    expect(readVisualReport(pngArtifact(`${VISUAL_DIR}/a.png`))).toBeNull();
   });
 
   it("drops keys a newer engine added", () => {
@@ -93,7 +152,7 @@ describe("renderMatrix (screen × state × width × theme)", () => {
     // 390 light rendered, but a style mismatch and a diff over budget: not passed.
     expect(def?.cells[0]?.passed).toBe(false);
     expect(def?.cells[0]?.issues).toEqual(["1 style mismatch", "1 diff over budget"]);
-    expect(def?.cells[0]?.screenshot).toBe(".vtc/evidence/T-1/visual/login-default-390-light.png");
+    expect(def?.cells[0]?.screenshot).toBe(`${VISUAL_DIR}/login-default-390-light.png`);
     // 1440 dark: an axe violation and an incomplete item.
     expect(def?.cells[1]?.issues).toEqual(["1 axe violation", "1 axe item needs review"]);
     expect(err?.cells[0]).toMatchObject({ passed: false, label: "Unreached" });
@@ -114,7 +173,7 @@ describe("renderMatrix (screen × state × width × theme)", () => {
 
 describe("imageDataUrl", () => {
   it("shows raster images the artifacts route returned as base64", () => {
-    expect(imageDataUrl(pngArtifact(".vtc/evidence/T-1/visual/a.png"))).toMatch(
+    expect(imageDataUrl(pngArtifact(`${VISUAL_DIR}/a.png`))).toMatch(
       /^data:image\/png;base64,iVBOR/,
     );
   });

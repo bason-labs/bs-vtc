@@ -18,11 +18,20 @@ export interface EscalationModel {
   readonly answer: { option: string; text: string | null; caughtBy: string; at: string } | null;
 }
 
+/**
+ * What choosing an option does. Most effects read well as their name; `finish_level_2` answers a
+ * Level-3 park (D-bd, spine §5 reading 158): VTC turns off its auto-merge, leaves the PR open for
+ * the human's review and ends the run.
+ */
+const EFFECT_TEXT: Readonly<Partial<Record<EscalationOption["effect"], string>>> = {
+  finish_level_2: "Finish at Level 2 (leave the PR for review)",
+};
+
 const effectText = (option: EscalationOption): string => {
   if (option.effect === "raise_budget" && option.budget_factor !== undefined) {
     return `raise budget ×${String(option.budget_factor)}`;
   }
-  return option.effect.replace(/_/g, " ");
+  return EFFECT_TEXT[option.effect] ?? option.effect.replace(/_/g, " ");
 };
 
 const scopeText = (e: Escalation): string => {

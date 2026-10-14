@@ -4,7 +4,13 @@ import { describe, expect, it } from "vitest";
 import { GateReportSchema, TaskDetailSchema, type GateReport } from "@vtc/shared";
 import { GateReports } from "@/components/flows/GateReports";
 import { readFixture } from "../fixtures";
-import { VISUAL_SUMMARY_SKIPPED, VISUAL_SUMMARY_UNCHECKED } from "../wave3-fixtures";
+import {
+  VISUAL_REPORT_PATH,
+  VISUAL_SUMMARY_PROJECT_PASS,
+  VISUAL_SUMMARY_PTRACE,
+  VISUAL_SUMMARY_SKIPPED,
+  VISUAL_SUMMARY_UNCHECKED,
+} from "../wave3-fixtures";
 
 const golden = (): GateReport => {
   const [report] = TaskDetailSchema.parse(readFixture("task-T-1")).gate_reports;
@@ -99,7 +105,44 @@ describe("GateReports (drawer: gate-report detail per layer)", () => {
     expect(within(visual).getByText("Elements must meet contrast")).toBeInTheDocument();
     expect(within(visual).getByRole("link", { name: /Visual report/ })).toHaveAttribute(
       "href",
-      "/artifact/?run=golden-1&path=.vtc%2Fevidence%2FT-1%2Fvisual%2Freport.json",
+      `/artifact/?run=golden-1&path=${encodeURIComponent(VISUAL_REPORT_PATH)}`,
     );
+  });
+
+  it("shows a skipped step's reason as a visible note, and follows its report", () => {
+    render(
+      <GateReports run="golden-1" reports={[{ ...golden(), visual: VISUAL_SUMMARY_PTRACE }]} />,
+    );
+    const visual = screen.getByRole("region", { name: "Visual QA" });
+    const note = within(visual).getByRole("note", { name: "Why the visual step was skipped" });
+    expect(note).toHaveTextContent("kernel.yama.ptrace_scope is 0 or absent");
+    expect(within(visual).getByRole("link", { name: /Visual report/ })).toHaveAttribute(
+      "href",
+      `/artifact/?run=golden-1&path=${encodeURIComponent(VISUAL_REPORT_PATH)}`,
+    );
+  });
+
+  it("names the toolchain, and says a pass on the project's Playwright is not a Level-3 pass", () => {
+    render(
+      <GateReports
+        run="golden-1"
+        reports={[{ ...golden(), visual: VISUAL_SUMMARY_PROJECT_PASS }]}
+      />,
+    );
+    const visual = screen.getByRole("region", { name: "Visual QA" });
+    expect(within(visual).getByText("Passed")).toBeInTheDocument();
+    expect(within(visual).getByText("Toolchain: the project's own Playwright")).toBeInTheDocument();
+    expect(within(visual).getByRole("note", { name: "Toolchain" })).toHaveTextContent(
+      "Not a Level-3 pass",
+    );
+  });
+
+  it("names VTC's browser store as the toolchain without a note", () => {
+    render(
+      <GateReports run="golden-1" reports={[{ ...golden(), visual: VISUAL_SUMMARY_UNCHECKED }]} />,
+    );
+    const visual = screen.getByRole("region", { name: "Visual QA" });
+    expect(within(visual).getByText("Toolchain: VTC's browser store")).toBeInTheDocument();
+    expect(within(visual).queryByRole("note", { name: "Toolchain" })).toBeNull();
   });
 });

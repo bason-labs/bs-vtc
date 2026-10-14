@@ -52,9 +52,10 @@ export function RunActivity({ run }: { run: string }) {
                 gate.facts.length === 0
                   ? null
                   : `${plural(gate.facts.length, "unverified fact")} to waive with a reason`,
-                gate.coverage === null || gate.coverage.ok
+                gate.coverage === null || gate.coverage.problems.length === 0
                   ? null
                   : plural(gate.coverage.problems.length, "coverage gap"),
+                gate.blocking === null ? null : "approval blocked: too few design directions",
               ]
                 .filter((x) => x !== null)
                 .join(" · ")}

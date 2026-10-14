@@ -1,6 +1,6 @@
 "use client";
 
-import { CheckCircle2, ExternalLink, FileText, MonitorPlay } from "lucide-react";
+import { CheckCircle2, ExternalLink, FileText, MonitorPlay, OctagonAlert } from "lucide-react";
 import { useId, useState } from "react";
 import { cn } from "@/lib/cn";
 import {
@@ -159,6 +159,24 @@ export function GateRequestCard({ run, gate }: { run: string; gate: GateRequestV
         <StatusPill meta={gate.outcome} />
       </CardHeader>
       <div className="space-y-4">
+        {gate.blocking === null ? null : (
+          <div
+            role="alert"
+            className="flex gap-2 rounded-2xl border border-danger/40 bg-danger/10 px-3 py-2 text-sm"
+          >
+            <OctagonAlert aria-hidden className="mt-0.5 size-4 shrink-0 text-danger" />
+            <div>
+              <p className="font-medium">
+                {gate.gates} cannot be approved: too few design directions
+              </p>
+              <p className="text-muted-fg">{gate.blocking}</p>
+              <p className="text-xs text-muted-fg">
+                The Designer was dispatched again once already. The human may reject with a re-roll
+                in the Lead chat.
+              </p>
+            </div>
+          </div>
+        )}
         {gate.note === null ? null : <p className="text-sm">Note: {gate.note}</p>}
         {gate.designExit === null ? null : <p className="text-sm">{gate.designExit}</p>}
         {gate.directions.length === 0 ? null : (
@@ -184,7 +202,8 @@ export function GateRequestCard({ run, gate }: { run: string; gate: GateRequestV
             </Link>
           </section>
         )}
-        {gate.coverage === null ? null : (
+        {gate.coverage === null ||
+        (!gate.coverage.ok && gate.coverage.problems.length === 0) ? null : (
           <section aria-labelledby={`${base}-cov`} className="space-y-1">
             <SubHeading id={`${base}-cov`}>Design coverage</SubHeading>
             {gate.coverage.ok ? (
@@ -193,7 +212,10 @@ export function GateRequestCard({ run, gate }: { run: string; gate: GateRequestV
                 component is registered.
               </p>
             ) : (
-              <ul className="list-disc pl-5 text-sm text-danger">
+              <ul
+                aria-label="Design coverage problems"
+                className="list-disc pl-5 text-sm text-danger"
+              >
                 {gate.coverage.problems.map((p) => (
                   <li key={p}>{p}</li>
                 ))}

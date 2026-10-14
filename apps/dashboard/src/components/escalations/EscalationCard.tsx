@@ -41,7 +41,7 @@ export function EscalationCard({ escalation, now }: { escalation: Escalation; no
             className="flex flex-wrap items-center gap-2 rounded-xl border border-border px-3 py-2 text-sm"
           >
             <span className="font-medium">{o.label}</span>
-            <span className="text-xs text-muted-fg">({o.effect})</span>
+            <span className="text-xs text-muted-fg">Effect: {o.effect}</span>
             {o.recommended ? (
               <Badge tone="brand">
                 <Star aria-hidden className="size-3" /> Recommended

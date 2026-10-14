@@ -2,6 +2,7 @@ import {
   FactRowSchema,
   parsePersisted,
   type FactLocator,
+  type FactReportedSource,
   type FactRow,
   type FactStatus,
   type FactValue,
@@ -14,7 +15,9 @@ import type { StatusMeta } from "./states";
  * Research facts (spec §8.2, §10; spine AD-22): the rows of `.vtc/research/facts.jsonl`, read
  * through the artifacts route. Rows are appended and superseded, never edited, so the view shows
  * the current row of each fact; the engine decides every status (only code resolving the
- * locator against the cached source makes a fact `verified`).
+ * locator against the cached source makes a fact `verified`). A claim the role found with its
+ * host's own web search or fetch carries `reported_source` (H-3, spine §5 reading 156): shown
+ * next to a fact that is not verified, as provenance, never as verification.
  */
 export const FACTS_ORDER: readonly FactStatus[] = [
   "unverified",
@@ -75,6 +78,14 @@ export interface FactView {
     readonly retrievedAt: string;
     readonly locator: string;
   } | null;
+  /** Where the role says it found a claim that is not verified (H-3), or `null`. */
+  readonly reportedSource: {
+    /** e.g. `Reported via host search for “react license”`. */
+    readonly via: string;
+    readonly url: string;
+    /** `null` unless the URL is http(s). */
+    readonly href: string | null;
+  } | null;
   readonly pinnedVersion: string | null;
   readonly expiresAt: string | null;
   readonly recordedBy: string;
@@ -91,6 +102,19 @@ const locatorText = (locator: FactLocator): string =>
   locator.kind === "json_pointer"
     ? `JSON pointer ${locator.pointer === "" ? "(whole document)" : locator.pointer}`
     : `quote “${locator.text.length > 80 ? `${locator.text.slice(0, 80)}…` : locator.text}”`;
+
+const VIA: Readonly<Record<FactReportedSource["via"], string>> = {
+  host_search: "host search",
+  host_fetch: "host fetch",
+};
+
+const reportedSourceView = (
+  reported: FactReportedSource,
+): NonNullable<FactView["reportedSource"]> => ({
+  via: `Reported via ${VIA[reported.via]}${reported.query === undefined ? "" : ` for “${reported.query}”`}`,
+  url: reported.url,
+  href: webUrl(reported.url),
+});
 
 const chainLength = (row: FactRow, byId: ReadonlyMap<string, FactRow>): number => {
   let n = 0;
@@ -168,6 +192,10 @@ export const currentFacts = (
                 retrievedAt: row.source.retrieved_at,
                 locator: locatorText(row.source.locator),
               },
+        reportedSource:
+          status === "verified" || row.reported_source === undefined
+            ? null
+            : reportedSourceView(row.reported_source),
         pinnedVersion: row.pinned_version ?? null,
         expiresAt: row.expires_at ?? null,
         recordedBy: row.recorded_by,

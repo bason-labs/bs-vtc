@@ -402,12 +402,23 @@ export const FACT_ROWS = [
     value: "4.2.0",
     status: "unverified",
     source: null,
+    reported_source: {
+      url: "https://vendor.example.com/sdk/releases",
+      via: "host_search",
+      query: "vendor-sdk latest version",
+    },
     recorded_by: "architect",
     recorded_at: "2026-10-12T10:00:00.000Z",
   },
 ].map((row) => FactRowSchema.parse(row));
 
 export const FACTS_JSONL = `${FACT_ROWS.map((r) => JSON.stringify(r)).join("\n")}\n`;
+
+/**
+ * A gate run's visual evidence directory, where the gate runner writes the report and images
+ * (`.vtc/evidence/<T-n|F-n>/gates/<attempt>/visual/`, contracts 4.7.0).
+ */
+export const VISUAL_DIR = ".vtc/evidence/T-1/gates/20261013T110000Z-round-aaaaaaaaaaaa/visual";
 
 const K = (state: string, width: number, theme: string) =>
   `login:${state}:${String(width)}:${theme}`;
@@ -417,19 +428,20 @@ export const VISUAL_REPORT = VisualReportSchema.parse({
   run: GOLDEN_RUN,
   task: "T-1",
   status: "unchecked",
+  toolchain: "vtc",
   browser: { name: "chromium-headless-shell", version: "141.0", executable_sha256: SHA256("6") },
   renders: [
     {
       key: K("default", 390, "light"),
       status: "rendered",
-      screenshot: ".vtc/evidence/T-1/visual/login-default-390-light.png",
-      reference: ".vtc/evidence/T-1/visual/ref-login-default-390-light.png",
+      screenshot: `${VISUAL_DIR}/login-default-390-light.png`,
+      reference: `${VISUAL_DIR}/ref-login-default-390-light.png`,
       source_hash: SHA256("7"),
     },
     {
       key: K("default", 1440, "dark"),
       status: "rendered",
-      screenshot: ".vtc/evidence/T-1/visual/login-default-1440-dark.png",
+      screenshot: `${VISUAL_DIR}/login-default-1440-dark.png`,
       source_hash: SHA256("7"),
     },
     {
@@ -472,7 +484,7 @@ export const VISUAL_REPORT = VisualReportSchema.parse({
       mismatch_px: 1200,
       ratio_pct: 1.4,
       budget_pct: 0.5,
-      diff_image: ".vtc/evidence/T-1/visual/diff-login-default-390-light-header.png",
+      diff_image: `${VISUAL_DIR}/diff-login-default-390-light-header.png`,
     },
     {
       key: K("default", 390, "light"),
@@ -489,13 +501,13 @@ export const VISUAL_REPORT = VisualReportSchema.parse({
       category: "accessibility",
       title: "Elements must meet contrast",
       location: { path: "src/app/login/page.tsx" },
-      evidence: { type: "file", ref: ".vtc/evidence/T-1/visual/report.json" },
+      evidence: { type: "file", ref: `${VISUAL_DIR}/report.json` },
     },
   ],
   written_at: "2026-10-13T11:00:00.000Z",
 });
 
-export const VISUAL_REPORT_PATH = ".vtc/evidence/T-1/visual/report.json";
+export const VISUAL_REPORT_PATH = `${VISUAL_DIR}/report.json`;
 
 export const VISUAL_SUMMARY_SKIPPED = VisualSummarySchema.parse({
   status: "skipped",
@@ -517,6 +529,7 @@ export const VISUAL_SUMMARY_SKIPPED = VisualSummarySchema.parse({
 export const VISUAL_SUMMARY_UNCHECKED = VisualSummarySchema.parse({
   status: "unchecked",
   report: VISUAL_REPORT_PATH,
+  toolchain: "vtc",
   counts: {
     renders: 3,
     unreached: 1,
@@ -528,6 +541,34 @@ export const VISUAL_SUMMARY_UNCHECKED = VisualSummarySchema.parse({
     detector: 0,
   },
   findings: VISUAL_REPORT.findings,
+});
+
+const NO_COUNTS = {
+  renders: 0,
+  unreached: 0,
+  axe_violations: 0,
+  axe_incomplete: 0,
+  style_mismatches: 0,
+  diffs_over_budget: 0,
+  token_lint: 0,
+  detector: 0,
+};
+
+/** A pass on the project's own Playwright (spine §5 readings 124, 136): not a Level-3 pass. */
+export const VISUAL_SUMMARY_PROJECT_PASS = VisualSummarySchema.parse({
+  status: "pass",
+  report: VISUAL_REPORT_PATH,
+  toolchain: "project",
+  counts: { ...NO_COUNTS, renders: 4 },
+});
+
+/** D-bj (spine §5 reading 164): Linux with `kernel.yama.ptrace_scope` 0 skips with a note. */
+export const VISUAL_SUMMARY_PTRACE = VisualSummarySchema.parse({
+  status: "skipped",
+  report: VISUAL_REPORT_PATH,
+  skipped_reason:
+    "the visual step does not render on this Linux host: kernel.yama.ptrace_scope is 0 or absent, so the app server (project code in the runner's sandbox, as the same user) could attach to the runner and sign any result; set kernel.yama.ptrace_scope to 1 or higher (sysctl) to run it",
+  counts: NO_COUNTS,
 });
 
 /** A JSON artifact as the artifacts route returns it. */

@@ -6,7 +6,9 @@ import type { StatusMeta } from "./states";
 /**
  * The human gates as the Lead showed them (spec §6.2, §8.2, §9.1; spine §5 reading 109): every
  * `gate.requested` event with its G2 design directions, the facts still unverified (each needs
- * a waiver with a reason, reading 110) and the DESIGN coverage check, then the decision
+ * a waiver with a reason, reading 110), the DESIGN coverage check and, for a new-repo UI design
+ * with fewer than two directions, the blocking `directions_problem` (D-bt, reading 174), then the
+ * decision
  * (`gate.approved` / `gate.rejected`). Approval happens in the Lead chat; this only shows it.
  * A request still open when the run finished (`run.finished`) no longer waits for anyone.
  */
@@ -61,6 +63,12 @@ export interface GateRequestView {
   readonly directions: readonly DirectionView[];
   readonly facts: readonly GateFactView[];
   readonly coverage: { readonly ok: boolean; readonly problems: readonly string[] } | null;
+  /**
+   * Why G2 cannot be approved as asked (`design_coverage.directions_problem`: too few design
+   * directions after the Designer's re-dispatch), or `null`. The human may still reject with a
+   * re-roll.
+   */
+  readonly blocking: string | null;
   /** The G2 exit the human took instead of a direction (§9.1 step 5), or `null`. */
   readonly designExit: string | null;
 }
@@ -126,6 +134,7 @@ export const gateRequests = (events: readonly VtcEvent[]): GateRequestView[] => 
         decidedAt: decided?.event.ts ?? null,
         note: decided?.data.note ?? null,
         designExit: exit === undefined ? null : DESIGN_EXIT[exit],
+        blocking: coverage?.directions_problem ?? null,
         artifacts: data.artifacts.map((a) => a.path),
         directions: directionIds.map((id) => {
           const d = details.get(id);
