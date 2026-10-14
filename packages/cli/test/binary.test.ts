@@ -9,12 +9,7 @@ import { existsSync, readdirSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
-import {
-  ASSET_SOURCES,
-  CONTRACTS_VERSION,
-  ENGINE_MCP_TOOLS,
-  engineDiscoveryFile,
-} from "@vtc/shared";
+import { ASSET_SOURCES, CONTRACTS_VERSION, engineDiscoveryFile } from "@vtc/shared";
 import { DEFAULT_SOURCES, renderEntry } from "../scripts/build-binary.js";
 import { pidAlive } from "../src/daemon.js";
 import {
@@ -25,6 +20,7 @@ import {
   tempDir,
   tempHome,
   writePluginTrees,
+  expectServedTools,
 } from "./helpers.js";
 
 const CLI_ROOT = fileURLToPath(new URL("../", import.meta.url));
@@ -210,9 +206,7 @@ describe.skipIf(!HAS_BUN)(
       const tools = JSON.parse(await aOut.next(/"id":2\b/)) as {
         result: { tools: { name: string }[] };
       };
-      expect(tools.result.tools.map((t) => t.name).sort()).toEqual(
-        ENGINE_MCP_TOOLS.map((t) => t.name).sort(),
-      );
+      expectServedTools(tools.result.tools.map((t) => t.name));
       // a repo vtc init never set up: the bridge answers, starts no daemon, writes nothing there
       send(a, {
         jsonrpc: "2.0",
@@ -335,9 +329,11 @@ describe.skipIf(!HAS_BUN)(
       send({ jsonrpc: "2.0", id: 2, method: "ping" });
       expect(JSON.parse(await out.next(/"id":2\b/))).toMatchObject({ result: {} });
       send({ jsonrpc: "2.0", id: 3, method: "tools/list" });
-      expect(
-        (JSON.parse(await out.next(/"id":3\b/)) as { result: { tools: unknown[] } }).result.tools,
-      ).toHaveLength(ENGINE_MCP_TOOLS.length);
+      expectServedTools(
+        (
+          JSON.parse(await out.next(/"id":3\b/)) as { result: { tools: { name: string }[] } }
+        ).result.tools.map((t) => t.name),
+      );
       send({
         jsonrpc: "2.0",
         id: 4,

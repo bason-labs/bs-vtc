@@ -30,7 +30,6 @@ import {
   defaultInstallDeps,
   type InstallDeps,
 } from "../src/commands/install.js";
-import { checkChromium } from "../src/doctor-checks.js";
 import { plistProgram, renderLaunchAgent } from "../src/launchd.js";
 import type { Exec, ExecResult } from "../src/process.js";
 import { renderSystemdService, systemdProgram } from "../src/systemd.js";
@@ -53,9 +52,10 @@ describe("vtc init", () => {
     const text = readFileSync(join(repo, ".vtc/project.yaml"), "utf8");
     expect(text).toMatch(/^# VTC project settings/);
     expect(text).toContain("dispatch: plugin_only");
-    // the engine starts no host CLI in v1, so the header promises no engine-launched runs
+    // the header says when the engine launches roles itself (readings 98 and 99)
     expect(text).not.toMatch(/lets the engine start host CLIs/);
-    expect(text).toMatch(/headless_allowed behaves as plugin_only/);
+    expect(text).toMatch(/a Codex Lead's roles run as headless Codex runs/);
+    expect(text).toMatch(/headless_allowed also\n# +lets the engine launch roles itself/);
     expect(readFileSync(join(repo, ".vtc/.gitignore"), "utf8")).toContain("/state/");
     expect(out[0]).toContain(".vtc/project.yaml");
   });
@@ -179,6 +179,10 @@ describe("vtc install", () => {
     // (D-ah): Codex in the project, Claude Code for the user
     expect(await cmd.run(["codex"], ctx)).toBe(0);
     expect(requests.at(-1)).toMatchObject({ pluginDir: "/plugins/codex", scope: "project" });
+    // Codex plugin registration is the adapter's (AD-16 rule 4, reading 94): the cli itself
+    // writes no marketplace, plugin copy or config.toml into the repo
+    expect(existsSync(join(repo, ".agents"))).toBe(false);
+    expect(existsSync(join(repo, ".codex"))).toBe(false);
     expect(await cmd.run(["claude-code"], ctx)).toBe(0);
     expect(requests.at(-1)).toMatchObject({ pluginDir: "/plugins/claude-code", scope: "user" });
     expect(DEFAULT_INSTALL_SCOPE).toEqual({ "claude-code": "user", codex: "project" });
@@ -621,10 +625,5 @@ describe("vtc doctor", () => {
       ok: true,
       config: { env_passthrough: ["GH_TOKEN"] },
     });
-  });
-
-  it("only warns about Playwright's Chromium until Visual QA has a pin (D-ai)", () => {
-    expect(checkChromium()).toMatchObject({ name: "chromium", status: "warn" });
-    expect(checkChromium().detail).toMatch(/deferred until Visual QA/);
   });
 });

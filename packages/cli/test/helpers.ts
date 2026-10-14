@@ -9,8 +9,11 @@ import { dirname, join } from "node:path";
 import { PassThrough } from "node:stream";
 import { fileURLToPath } from "node:url";
 import { compilePlugins, readSources } from "@vtc/compiler";
+import { expect } from "vitest";
 import {
+  ENGINE_MCP_TOOLS,
   HOST_IDS,
+  ROLE_MCP_TOOLS,
   type AssetNamespace,
   type EngineClient,
   type GateRunner,
@@ -189,3 +192,14 @@ export const lineSink = (): {
 /** One JSON-RPC request line. */
 export const rpc = (id: number, method: string, params?: unknown): string =>
   `${JSON.stringify({ jsonrpc: "2.0", id, method, ...(params === undefined ? {} : { params }) })}\n`;
+
+/**
+ * A `vtc` server's `tools/list` names: the Lead-facing tools (`ENGINE_MCP_TOOLS`), plus the
+ * role-facing research tools (`ROLE_MCP_TOOLS`, AD-22, §5 reading 109) once the engine serves
+ * them on the same server.
+ */
+export const expectServedTools = (names: readonly string[]): void => {
+  const lead = ENGINE_MCP_TOOLS.map((t) => t.name).sort();
+  const withRoles = [...lead, ...ROLE_MCP_TOOLS.map((t) => t.name)].sort();
+  expect([lead, withRoles]).toContainEqual([...names].sort());
+};
