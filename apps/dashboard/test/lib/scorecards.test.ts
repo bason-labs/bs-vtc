@@ -10,7 +10,7 @@ import {
   refusedScorecardPaths,
 } from "@/lib/scorecards";
 import { firstSample, SAMPLE_EVENTS, sampleEvent, variant } from "../golden-samples";
-import { ENGINEER_SCORECARD, jsonArtifact, SCORECARD_INDEX } from "../wave3-fixtures";
+import { ENGINEER_SCORECARD, jsonArtifact, SCORECARD_INDEX } from "../dev-samples";
 
 const INDEX_PATH = ".vtc/lookback/scorecards/index.json";
 

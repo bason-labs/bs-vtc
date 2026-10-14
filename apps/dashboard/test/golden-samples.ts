@@ -52,9 +52,13 @@ export const firstSample = (type: CoreEventType): VtcEvent => {
   return event;
 };
 
+/** The time of a made event: after every sample, one minute per seq. */
+const madeAt = (seq: number): string =>
+  `2026-10-14T11:${String(seq % 60).padStart(2, "0")}:00.000Z`;
+
 /**
- * A copy of `base` at `seq` with `data` merged into its payload (and `envelope` into the event),
- * validated against the contract.
+ * A copy of `base` at `seq` (and a later time) with `data` merged into its payload (an
+ * `undefined` value drops the key) and `envelope` into the event, validated against the contract.
  */
 export const variant = (
   base: VtcEvent,
@@ -62,10 +66,11 @@ export const variant = (
   data: Record<string, unknown> = {},
   envelope: Partial<VtcEventInput> = {},
 ): VtcEvent => {
-  const merged = { ...(base.data as Record<string, unknown>), ...data };
-  for (const [k, v] of Object.entries(merged)) if (v === undefined) delete merged[k];
+  const merged = Object.fromEntries(
+    Object.entries({ ...base.data, ...data }).filter(([, v]) => v !== undefined),
+  );
   EVENT_PAYLOAD_SCHEMAS[base.type as CoreEventType].parse(merged);
-  return EventSchema.parse({ ...base, seq, ...envelope, data: merged });
+  return EventSchema.parse({ ...base, seq, ts: madeAt(seq), ...envelope, data: merged });
 };
 
 /** A new event of `type` in the sample run, validated against its contract. */
@@ -79,7 +84,7 @@ export const sampleEvent = (
   return EventSchema.parse({
     v: 1,
     seq,
-    ts: `2026-10-14T11:${String(seq % 60).padStart(2, "0")}:00.000Z`,
+    ts: madeAt(seq),
     run: SAMPLE_RUN,
     type,
     actor: "engine",
@@ -107,4 +112,122 @@ export const SAMPLE_GATE_REPORT: GateReport = GateReportSchema.parse(
 /** `usage-billing.json`: a usage report with each host's billing (D-bq). */
 export const SAMPLE_USAGE: UsageReport = UsageReportSchema.parse(
   JSON.parse(read("usage-billing.json")),
+);
+
+/** Seq offset of the samples when they are appended to the golden run's own log. */
+export const SAMPLE_SEQ_OFFSET = 100;
+
+const goldenPage = JSON.parse(readFileSync(`${dir}../api/events.json`, "utf8")) as {
+  run: string;
+  events: VtcEvent[];
+  next_after: number | null;
+};
+if (goldenPage.events.some((e) => e.seq >= SAMPLE_SEQ_OFFSET))
+  throw new Error("the golden run's log reaches the sample offset");
+
+/** A sample event as it reads in the golden run's log (`golden-1`, seq + {@link SAMPLE_SEQ_OFFSET}). */
+export const inGoldenRun = (event: VtcEvent): VtcEvent =>
+  EventSchema.parse({ ...event, run: goldenPage.run, seq: event.seq + SAMPLE_SEQ_OFFSET });
+
+/**
+ * The golden run's event page (`golden-1`) with the samples (all but their `run.started`)
+ * and `extra` appended, re-keyed to the golden run with seq + {@link SAMPLE_SEQ_OFFSET}, for the
+ * views that also need the golden run's graph, status and features.
+ */
+export const goldenPageWithSamples = (
+  samples: readonly VtcEvent[] = SAMPLE_EVENTS,
+  extra: readonly VtcEvent[] = [],
+) => ({
+  ...goldenPage,
+  events: [
+    ...goldenPage.events,
+    ...[...samples, ...extra].filter((e) => e.type !== "run.started").map(inGoldenRun),
+  ],
+});
+
+// ------------------------------------------- cases the samples lack, from a sample
+
+/**
+ * Engine-launched runs beside the sample's `a-7` (done): `a-12`, an Engineer run that ended on
+ * the idle timeout, and `a-13`, a QA run resuming a session with no end recorded yet.
+ */
+export const HEADLESS_VARIANTS: readonly VtcEvent[] = [
+  variant(firstSample("headless.started"), 40, { action_id: "a-12" }),
+  variant(firstSample("headless.ended"), 41, {
+    action_id: "a-12",
+    outcome: "error",
+    cause: "idle",
+    exit_code: null,
+    duration_ms: 615_000,
+  }),
+  variant(
+    firstSample("headless.started"),
+    42,
+    { action_id: "a-13", pid: null, resume: { host: "codex", id: "sess-9" } },
+    { role: "qa", task: "T-2" },
+  ),
+];
+
+const preflight = firstSample("merge.preflight");
+const checklist = firstSample("feature.checklist");
+const SHA40 = (c: string): string => c.repeat(40);
+
+/**
+ * Level-3 outcomes beside the samples' passing preflight and checklist: a preflight that fell to
+ * Level 2, a checklist whose Final Review item fails, a red base CI after the merge and a revert.
+ */
+export const LEVEL3_VARIANTS = {
+  failedPreflight: variant(preflight, 30, {
+    effective_level: 2,
+    ok: false,
+    failed: ["no_required_checks", "auto_merge_disallowed"],
+    policy: {
+      ...(preflight.data as { policy: object }).policy,
+      auto_merge_allowed: false,
+      required_checks: [],
+    },
+  }),
+  failedChecklist: variant(checklist, 31, {
+    ok: false,
+    items: (
+      checklist.data as {
+        items: { id: string; ok: boolean; detail: string; evidence: unknown[] }[];
+      }
+    ).items.map((i) =>
+      i.id === "final_review"
+        ? { ...i, ok: false, detail: "Final Review pass; gates green; visual skipped" }
+        : i.id === "remote_ci"
+          ? { ...i, evidence: [{ type: "url", ref: "https://github.com/o/r/pull/12" }] }
+          : i,
+    ),
+  }),
+  postMergeRed: sampleEvent(
+    32,
+    "feature.post_merge_ci",
+    {
+      merge_commit: SHA40("e"),
+      status: "red",
+      runs: [{ name: "ci / test", conclusion: "failure", required: true }],
+    },
+    { feature: "F-1" },
+  ),
+  reverted: sampleEvent(
+    33,
+    "feature.reverted",
+    {
+      merge_commit: SHA40("e"),
+      revert: { commit: SHA40("f"), detected_by: "git_log" },
+      detail: "Revert of the F-1 merge found on main",
+    },
+    { feature: "F-1" },
+  ),
+} as const;
+
+/** An auto-resume that did not start because the host is logged out. */
+export const AUTH_PREFLIGHT = variant(
+  samplesOfType("headless.preflight").find((e) => !(e.data as { ok: boolean }).ok) ??
+    firstSample("headless.preflight"),
+  43,
+  { purpose: "auto_resume", failed: "auth", detail: "codex login status: not logged in" },
+  { role: undefined },
 );

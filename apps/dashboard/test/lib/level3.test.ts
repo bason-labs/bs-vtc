@@ -14,11 +14,30 @@ import {
   PREFLIGHT_FIXES,
   REQUIRED_CHECK_STATES,
 } from "@/lib/level3";
-import { LEVEL3_EVENTS, SHA, w3Event } from "../wave3-fixtures";
+import { SHA } from "../dev-samples";
+import { firstSample, LEVEL3_VARIANTS, SAMPLE_EVENTS, variant } from "../golden-samples";
+
+const { failedPreflight, failedChecklist, postMergeRed, reverted } = LEVEL3_VARIANTS;
+const unchecked = variant(firstSample("final_review.step_finished"), 34, {
+  status: "unchecked",
+  reason: "hidden tests did not start",
+  evidence: [],
+});
 
 describe("mergePreflight (merge.preflight, AD-23 rule 1)", () => {
+  it("shows the golden run's passing preflight with its policy", () => {
+    const p = mergePreflight(SAMPLE_EVENTS)!;
+    expect(p).toMatchObject({ configured: 3, effective: 3, ok: true, fixes: [] });
+    expect(p.policy).toEqual([
+      "Base main",
+      "Auto-merge allowed",
+      "Required checks: ci",
+      "Merge methods: squash",
+    ]);
+  });
+
   it("says the run merges at Level 2 and what to configure", () => {
-    const p = mergePreflight(LEVEL3_EVENTS)!;
+    const p = mergePreflight([...SAMPLE_EVENTS, failedPreflight])!;
     expect(p).toMatchObject({ configured: 3, effective: 2, ok: false });
     expect(p.fixes).toEqual([
       PREFLIGHT_FIXES.no_required_checks,
@@ -39,12 +58,13 @@ describe("mergePreflight (merge.preflight, AD-23 rule 1)", () => {
 });
 
 describe("featureLevel3", () => {
-  const model = featureLevel3(LEVEL3_EVENTS, "F-1");
+  const golden = featureLevel3(SAMPLE_EVENTS, "F-1");
+  const model = featureLevel3([...SAMPLE_EVENTS, failedChecklist, postMergeRed, reverted], "F-1");
 
-  it("shows the latest safe-to-auto-merge checklist with each item's evidence", () => {
-    expect(model.checklist?.ok).toBe(false);
-    expect(model.checklist?.items.map((i) => [i.id, i.ok])).toEqual([
-      ["final_review", false],
+  it("shows the golden run's checklist, every item holding", () => {
+    expect(golden.checklist?.ok).toBe(true);
+    expect(golden.checklist?.items.map((i) => [i.id, i.ok])).toEqual([
+      ["final_review", true],
       ["reviewers", true],
       ["coverage", true],
       ["test_integrity", true],
@@ -52,57 +72,66 @@ describe("featureLevel3", () => {
       ["waivers", true],
       ["remote_ci", true],
     ]);
+    expect(golden.checklist?.items[2]?.detail).toBe("diff coverage 96% (floor 80%)");
+  });
+
+  it("shows the latest checklist with each item's evidence", () => {
+    expect(model.checklist?.ok).toBe(false);
+    expect(model.checklist?.items[0]).toMatchObject({ id: "final_review", ok: false });
     expect(model.checklist?.items[0]?.detail).toMatch(/visual skipped/);
-    expect(model.checklist?.items[6]?.evidence).toEqual(["url: https://github.com/o/r/pull/7"]);
+    expect(model.checklist?.items[6]?.evidence).toEqual(["url: https://github.com/o/r/pull/12"]);
   });
 
   it("lists the auto-merge, post-merge CI and revert events newest first", () => {
-    expect(model.timeline.map((t) => [t.title, t.tone])).toEqual([
+    expect(golden.timeline.map((t) => [t.title, t.tone])).toEqual([
+      ["Auto-merge turned off: the PR head moved past the gated commit", "warn"],
+      ["Auto-merge enabled on PR #12", "accent"],
+    ]);
+    expect(golden.timeline[0]?.detail).toMatch(/dddddddddddd/);
+    expect(golden.timeline[1]?.detail).toBe("squash, bound to the gated commit cccccccc");
+    expect(model.timeline.map((t) => [t.title, t.tone]).slice(0, 2)).toEqual([
       ["Merge reverted on the base branch", "danger"],
       ["Base CI after the merge: red", "danger"],
-      ["Auto-merge turned off: the PR head moved past the gated commit", "warn"],
-      ["Auto-merge enabled on PR #7", "accent"],
     ]);
-    expect(model.timeline[0]?.detail).toMatch(/dddddddd.*git log/);
+    expect(model.timeline[0]?.detail).toMatch(/ffffffff.*git log/);
     expect(model.timeline[1]?.detail).toBe("Failed required runs: ci / test");
-    expect(model.timeline[3]?.detail).toBe("squash, bound to the gated commit bbbbbbbb");
   });
 
   it("ignores other features", () => {
-    expect(featureLevel3(LEVEL3_EVENTS, "F-2")).toEqual({ checklist: null, timeline: [] });
+    expect(featureLevel3(SAMPLE_EVENTS, "F-2")).toEqual({ checklist: null, timeline: [] });
   });
 });
 
 describe("finalReviewStepRows (final_review.step_finished, §6.7a)", () => {
-  const rows = finalReviewStepRows(LEVEL3_EVENTS, "F-1");
+  const rows = finalReviewStepRows(SAMPLE_EVENTS, "F-1");
 
   it("shows all seven steps, the latest result of each", () => {
     expect(rows.map((r) => r.step)).toEqual([1, 2, 3, 4, 5, 6, 7]);
-    expect(rows[0]).toMatchObject({ name: "Full gates", passed: true });
-    expect(rows[0]?.evidence).toEqual(["file: .vtc/evidence/F-1/gates.json"]);
-    expect(rows[2]).toMatchObject({ status: null, passed: false });
+    expect(rows[1]).toMatchObject({ name: "Full acceptance run", passed: true });
+    expect(rows[1]?.evidence).toEqual(["file: .vtc/evidence/F-1/final-review/gates.json"]);
+    expect(rows[0]).toMatchObject({ status: null, passed: false });
   });
 
   it("shows skipped and unchecked steps as not passed, with the reason", () => {
     expect(rows[4]).toMatchObject({
       name: "Visual QA on full user journeys",
       passed: false,
-      reason: "no browser for the visual gates",
+      reason:
+        "the visual step ran on the project's own Playwright (toolchain project), which Level 3 does not count",
     });
     expect(rows[4]?.status?.label).toBe("Not passed: skipped");
-    expect(rows[1]?.status).toMatchObject({ label: "Not passed: unchecked", tone: "danger" });
+    const later = finalReviewStepRows([...SAMPLE_EVENTS, unchecked], "F-1");
+    expect(later[1]?.status).toMatchObject({ label: "Not passed: unchecked", tone: "danger" });
+    expect(later[1]?.reason).toBe("hidden tests did not start");
   });
 
   it("takes a re-run's result over the earlier one", () => {
-    const rerun = w3Event(
-      90,
-      "final_review.step_finished",
-      { step: 5, status: "pass" },
-      {
-        feature: "F-1",
-      },
-    );
-    expect(finalReviewStepRows([...LEVEL3_EVENTS, rerun], "F-1")[4]?.passed).toBe(true);
+    const rerun = variant(firstSample("final_review.step_finished"), 35, {
+      step: 5,
+      status: "pass",
+      reason: undefined,
+    });
+    expect(finalReviewStepRows([...SAMPLE_EVENTS, rerun], "F-1")[4]?.passed).toBe(true);
   });
 });
 

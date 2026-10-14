@@ -94,6 +94,35 @@ binaries must stay out of the production dependency closure (AD-2, `supply-chain
     the PR for review)" (D-bd); G2's `design_coverage.directions_problem` is a blocking notice on
     the gate card and in the run's gate banner (D-bt); a fact that is not verified shows its
     `reported_source` (host search with its query, or host fetch) as provenance (H-3).
+  - Round 4 (contracts 5.0.0, AD-27):
+    - **Automation** (`/automation/`, D-ca): `GET /api/automation` (`AutomationReport`) shows
+      whether VTC raises issues and opens PRs for this project, upstream reporting and how PR
+      evidence is hosted, with the visible notes that say why something is off; every issue and
+      PR VTC opened, with http(s) links, state (draft, open, closed, merged) and evidence
+      (complete or partial); and the latest skipped actions with their reason. VTC never merges
+      them. `upstream.*` and `automation.skipped` events are also run notices (repeated skips
+      folded), and mark the view stale (global `automation` topic).
+    - **Evidence mode** (`?evidence=1|upstream`, readings 199 and 208): what the evidence
+      recorder captures. Read-only (no design-review pin), nothing loaded from another origin
+      (no prototype frame; the client only calls `/api/` routes), free text (diffs, file
+      contents, logs, notice details, session and action ids) tagged `data-vtc-redact` in every
+      mode and painted out in evidence mode, no animation, transition or ticking clock and no
+      canvas easing, so the only pace is the one the snapshot server replays events at. The mode
+      stays on across navigation. `upstream` shows only the upstream-safe projection (D-by): the
+      flow with role ids (or backbone phases, `task n` or the node kind) and no run id, title,
+      reason, notice or drawer, and Lookback's scorecards, canary numbers and replay arms with
+      tasks as ordinals; every other view says it is not part of the upstream evidence.
+    - **Billing**: `HostBilling` `provider` shows `PROVIDER_BILLING_NOTICE` verbatim as a neutral
+      note on the usage card and in the run notices (D-ci); `api_key` stays a warning.
+    - **Lookback**: a replay result (on its own in the artifact view, and under its
+      `lookback.replay_finished` event) shows which grader scored it (`ReplayResult.grader`;
+      absent means the gates, D-ch), both arms per task, the sign test, the A/A rate, tokens and
+      isolation. A verdict `improve` says VTC opens a pull request to its own repo and the next
+      VTC release ships the change once a human merges it (D-cb); the old "no canary from a
+      Claude-led run" note is gone (D-cg).
+    - **Replay trials** (`role.dispatched` with `purpose: lookback_replay`, its `role.*` results
+      and the headless run that carried it) are left out of every view built from the event log
+      and do not mark the flow or task views stale (reading 177).
   - These views read the run's event log in pages of `EVENT_PAGE_LIMIT.max`, at most 50 pages; a
     longer log is read oldest first and each view says that its newest events are not shown.
   - **Visual QA**: `GateReport.visual` in the gate reports, with a link to the report at the path
@@ -125,7 +154,12 @@ Development (AD-5 rule 8):
   proxies `/api/*` to it (`VTC_DEV_API` overrides the target). Open the dashboard on
   `http://127.0.0.1:…`, not `localhost`: the prototype's CSP allows framing by `127.0.0.1` only. `pnpm build && pnpm dev:fixtures --static out [--live]`
   serves the real export by the engine's AD-20 rules on `http://127.0.0.1:4310/`.
-- Tests: `pnpm test` (vitest + Testing Library in jsdom) against the same fixture.
+- Tests: `pnpm test` (vitest + Testing Library in jsdom) against the same fixture. Wave-3 cases
+  build on engine core's recorded samples (`fixtures/golden-run/samples/`, `test/golden-samples.ts`;
+  a case the samples lack is one changed sample event, checked against its contract) and on the
+  dashboard's own dev fixtures (`test/dev-samples.ts`). `GET /api/automation` is served from
+  `fixtures/golden-run/api/automation.json` once engine core records it, and until then from the
+  TEMPORARY stand-in `dev-fixtures/api/automation.json`.
 
 - Build against `fixtures/golden-run/`: `events.jsonl` (replay it as the SSE stream) and `api/*.json`
   (the exact response of every read route).

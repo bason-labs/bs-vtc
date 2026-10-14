@@ -8,25 +8,18 @@ import {
   SCORECARD_INDEX,
   VISUAL_DIR,
   VISUAL_REPORT,
-  VISUAL_REPORT_PATH,
-} from "./wave3-fixtures";
+} from "./dev-samples";
 
-const json = (path: string): unknown =>
-  JSON.parse(devArtifact(GOLDEN_RUN, path)?.content ?? "null");
-
-/** The dev fixture server's wave-3 files are the same samples the tests check against contracts. */
+/**
+ * The dashboard's own dev fixtures (what the golden run does not record) hold to their contracts:
+ * `dev-samples.ts` parses each, so a file that broke its contract would fail here first.
+ */
 describe("wave-3 dev fixtures", () => {
-  it("match the contract-checked samples", () => {
-    expect(json(VISUAL_REPORT_PATH)).toEqual(VISUAL_REPORT);
-    expect(json(".vtc/lookback/scorecards/index.json")).toEqual(SCORECARD_INDEX);
-    expect(json(SCORECARD_INDEX.scorecards[0]!.path)).toEqual(ENGINEER_SCORECARD);
-    const facts = devArtifact(GOLDEN_RUN, ".vtc/research/facts.jsonl")?.content ?? "";
-    expect(
-      facts
-        .trim()
-        .split("\n")
-        .map((l) => JSON.parse(l) as unknown),
-    ).toEqual(FACT_ROWS);
+  it("parse against their contracts", () => {
+    expect(VISUAL_REPORT.task).toBe("T-1");
+    expect(SCORECARD_INDEX.scorecards.length).toBeGreaterThan(0);
+    expect(ENGINEER_SCORECARD.prompt.role).toBe("engineer");
+    expect(FACT_ROWS.length).toBeGreaterThan(0);
   });
 
   it("serve a screenshot base64-encoded, like the engine", () => {

@@ -84,7 +84,7 @@ describe("?evidence=upstream (the upstream-safe projection, D-by)", () => {
     expect(within(nodes).getByText("task 1")).toBeInTheDocument();
     expect(within(nodes).getByText("task 2")).toBeInTheDocument();
     const main = document.getElementById("main")!;
-    const page = document.body.textContent ?? "";
+    const page = document.body.textContent;
     for (const leak of ["golden-1", "Reset token store", "Reset endpoint", "T-1", "T-2"])
       expect(page, leak).not.toContain(leak);
     expect(main.querySelector("[aria-label*='golden-1']")).toBeNull();
@@ -111,7 +111,7 @@ describe("?evidence=upstream (the upstream-safe projection, D-by)", () => {
     expect(arms).toHaveTextContent("task 1");
     expect(arms).not.toHaveTextContent("golden-1");
     await screen.findByTestId("scorecard-group-engineer|claude-code");
-    const page = document.body.textContent ?? "";
+    const page = document.body.textContent;
     for (const leak of [".vtc/", SAMPLE_RUN, "bbbbbbbb", "scorecard.json"])
       expect(page, leak).not.toContain(leak);
   });
