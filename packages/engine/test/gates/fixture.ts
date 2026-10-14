@@ -20,6 +20,7 @@ import {
   createGateRunnerWith,
   stringifyGatesConfig,
   type GateJailSpec,
+  type GateRunnerOptions,
   type ReapedGateCommand,
   type ScannerStore,
 } from "../../src/gates/index.js";
@@ -322,6 +323,8 @@ export const harness = (
     sandbox?: GateSandbox | null;
     /** `gates.allow_unsandboxed` from the user config. */
     allowUnsandboxed?: boolean;
+    /** The visual step's runner and toolchains (AD-24); tests never start a browser. */
+    visual?: Pick<GateRunnerOptions, "visualRunner" | "visualToolchains" | "node">;
   } = {},
 ): Harness => {
   const repo = initRepo({ ...TOOLS, ".lintrc": "strict\n", ...files });
@@ -347,6 +350,7 @@ export const harness = (
       scanners: (options.scanners ?? fakeScanners)(home),
       env: options.env ?? process.env,
       detectSandbox: () => null,
+      ...options.visual,
     },
   );
   return {

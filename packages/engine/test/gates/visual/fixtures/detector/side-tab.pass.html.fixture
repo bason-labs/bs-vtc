@@ -1,0 +1,3 @@
+<blockquote style="border-left: 4px solid #3355ff">Quote</blockquote>
+<div class="card border-l-1 p-4">Plan</div>
+<style>.rule { border-left: 4px solid #dddddd; }</style>

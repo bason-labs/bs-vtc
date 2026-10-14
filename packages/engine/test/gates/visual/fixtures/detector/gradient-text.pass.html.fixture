@@ -1,0 +1,2 @@
+<h1 class="bg-clip-text text-ink">Hello</h1>
+<style>.mask { background-clip: text; background: #222; }</style>

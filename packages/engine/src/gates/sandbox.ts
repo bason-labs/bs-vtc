@@ -80,11 +80,17 @@ export const SANDBOX_EXEC = "/usr/bin/sandbox-exec";
 
 /**
  * Entries of the VTC home a gate reads: the pinned scanner store (`scanners.ts` `SCANNERS_DIR`),
- * VTC's Opengrep rules (`rules.ts` `RULES_DIR`) and the OSV offline database (`osv-db.ts`
- * `OSV_DB_DIR`). Everything else there is read-denied. Spelled out here (a test keeps them equal)
- * so this module imports none of the three.
+ * VTC's Opengrep rules (`rules.ts` `RULES_DIR`), the OSV offline database (`osv-db.ts`
+ * `OSV_DB_DIR`) and the browser store the visual runner launches from (`BROWSERS_DIR`, AD-24;
+ * binaries and pins, no secrets). Everything else there is read-denied. Spelled out here (a test
+ * keeps them equal) so this module imports none of them.
  */
-export const GATE_READABLE_VTC_HOME: readonly string[] = ["scanners", "rules", "osv-db"];
+export const GATE_READABLE_VTC_HOME: readonly string[] = [
+  "scanners",
+  "rules",
+  "osv-db",
+  "browsers",
+];
 
 /**
  * Credential stores under the user's home that no gate needs (the shared list, which the Lead
@@ -940,9 +946,22 @@ export interface JailedRequest extends ExecRequest {
   readonly loopback?: boolean;
   /** Absolute checkout the command may write. */
   readonly checkout: string;
+  /**
+   * Absolute directories this command may read besides the run's readable roots (the visual
+   * runner's browser store or Playwright cache, AD-24). The deny list still wins.
+   */
+  readonly allowRead?: readonly string[];
+  /**
+   * Called with the command's fresh private temp directory before it starts (the visual runner
+   * writes its script and input there, AD-24 rule 1). Every `{tmp}` in `argv` becomes that
+   * directory.
+   */
+  readonly setup?: (tempDir: string) => void;
 }
 
 export interface JailedResult extends ExecResult {
+  /** The command's private temp directory; removed with the jail ({@link GateCommandJail.dispose}). */
+  readonly tempDir: string;
   readonly network: WrappedGateCommand["network"];
   /**
    * Set when processes the command left may still be running: the in-sandbox reaper did not
@@ -1004,9 +1023,15 @@ export class GateCommandJail {
     return { home, tempDir };
   }
 
-  async run(request: JailedRequest): Promise<JailedResult> {
+  async run(jailed: JailedRequest): Promise<JailedResult> {
     if (this.broken !== null) throw new Error(this.broken);
     const { home, tempDir } = this.dirs();
+    const { allowRead: extraRead, setup, ...rest } = jailed;
+    setup?.(tempDir);
+    const request = {
+      ...rest,
+      argv: setup === undefined ? rest.argv : rest.argv.map((t) => t.replaceAll("{tmp}", tempDir)),
+    };
     const spec: GateJailSpec = {
       phase: request.phase,
       checkout: realOrSelf(request.checkout),
@@ -1014,7 +1039,7 @@ export class GateCommandJail {
       home,
       denyRead: this.denyRead,
       hideRead: this.read.hideRead ?? [],
-      allowRead: this.read.allowRead ?? [],
+      allowRead: [...(this.read.allowRead ?? []), ...(extraRead ?? []).map(realOrSelf)],
       reapSentinel: this.sentinel,
       resolvConf: this.resolvConf,
       ...(request.loopback === true && request.phase === "verify" ? { loopback: true } : {}),
@@ -1030,9 +1055,9 @@ export class GateCommandJail {
     });
     if (reaper && result.spawnError === undefined && result.reaped !== true) {
       this.broken = REAPER_UNCONFIRMED;
-      return { ...result, network: wrapped.network, leftover: REAPER_UNCONFIRMED };
+      return { ...result, tempDir, network: wrapped.network, leftover: REAPER_UNCONFIRMED };
     }
-    return { ...result, network: wrapped.network };
+    return { ...result, tempDir, network: wrapped.network };
   }
 
   /** Removes the run's home and temp directories (never throws). */

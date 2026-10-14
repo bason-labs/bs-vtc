@@ -1,0 +1,22 @@
+Upstream:  https://github.com/pbakaus/impeccable
+Commit:    2f98774f86bc05563876643db37e6c37c322850f (2026-10-14)
+License:   Apache-2.0 (LICENSE in this directory, copied unmodified; Copyright 2025 Paul Bakaus).
+           The upstream NOTICE.md credits only ehmo's MIT platform-design-skills for
+           skill/reference/ios.md and android.md; VTC uses neither file.
+
+What VTC derived (all modified by VTC; each derived file says so in its header):
+  packages/engine/src/gates/visual/detector/catalog.ts
+      from crates/live/assets/antipatterns.json (rule ids and intent; descriptions rewritten)
+  packages/engine/src/gates/visual/detector/line-rules.ts
+      from crates/detect/src/regex_matchers.rs (REGEX_MATCHERS) and
+      crates/foundation/src/{constants,fonts}.rs (OVERUSED_FONTS, Google Fonts families)
+  packages/engine/src/gates/visual/detector/page-rules.ts
+      from crates/detect/src/regex_matchers.rs (REGEX_ANALYZERS),
+      crates/core/src/checks/{html_patterns,css_scan}.rs (theater framing, marquee) and
+      crates/foundation/src/constants.rs (em-dash thresholds)
+
+How: the rule logic was ported by hand from Rust to TypeScript. No upstream code is executed or
+shipped: not the Rust engine (a native binary that also carries telemetry code), not the browser
+scripts, not the skill. Rule ids are renamed vtc-design/<id>; the upstream name is not used as a
+brand (spec section 9.1). Twelve source-level slop rules are ported; the rules that need a live
+DOM, the design-system drift rules and the quality rules are not.
