@@ -93,7 +93,9 @@ describe("headless dispatch (AD-25, D-ba, H-1)", () => {
     expect(planDispatch("auto_resume", "headless_allowed", CAPS[0], "codex")).toBe("headless");
   });
   it("never yields headless in plugin-only mode for a Claude Lead or an unnamed Lead", () => {
-    for (const purpose of PURPOSES) {
+    // Since 5.0.0 a lookback_replay trial is always an engine-launched headless run (D-cg, spine
+    // §5 reading 201); contracts-5-0.test.ts covers it. Every other purpose keeps this rule.
+    for (const purpose of PURPOSES.filter((p) => p !== "lookback_replay")) {
       for (const caps of CAPS) {
         expect(planDispatch(purpose, "plugin_only", caps)).not.toBe("headless");
         expect(planDispatch(purpose, "plugin_only", caps, "claude-code")).not.toBe("headless");

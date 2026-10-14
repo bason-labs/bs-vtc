@@ -15,6 +15,15 @@ import {
 } from "./primitives.js";
 import { FetcherIdSchema, SearchProviderSchema } from "./research.js";
 import { ModelTierSchema } from "./role-contract.js";
+import {
+  DEFAULT_UPSTREAM_REPO,
+  EVIDENCE_HOSTING_DEFAULT,
+  EVIDENCE_LIMITS,
+  EvidenceHostingSchema,
+  GitHubRepoSchema,
+  type EvidenceHosting,
+  type GitHubRepo,
+} from "./upstream.js";
 
 /** Tracks (§6.2). */
 export const TrackSchema = z.enum(["quick_fix", "feature", "new_project"]);
@@ -129,6 +138,35 @@ export const ProjectConfigSchema = z.strictObject({
       block_severity: SeveritySchema.default("medium"),
     })
     .prefault({}),
+  /**
+   * Upstream reports to VTC's own repo from this project (D-by, AD-27 rule 5). `share: false`
+   * opts the project out; absent = on (the user asked for more automation). The user-level
+   * `upstream.share` in `~/.vtc/config.yaml` turns it off for every project. New in 5.0.0.
+   */
+  upstream: z.strictObject({ share: z.boolean().optional() }).optional(),
+  /**
+   * Automatic issues and PRs in this project's repo (D-bz). `issues` / `prs` absent = on whenever
+   * the project has a GitHub remote and `gh` is logged in, otherwise off with a visible note
+   * (`automationFor`). `evidence.max_mb` lowers the per-PR media budget (never above
+   * `EVIDENCE_LIMITS`); `evidence.video: false` drops recordings (screenshots only, `evidence:
+   * partial`). New in 5.0.0.
+   */
+  automation: z
+    .strictObject({
+      issues: z.boolean().optional(),
+      prs: z.boolean().optional(),
+      evidence: z
+        .strictObject({
+          max_mb: z
+            .number()
+            .positive()
+            .max(EVIDENCE_LIMITS.maxBytesPerPr / (1024 * 1024))
+            .optional(),
+          video: z.boolean().optional(),
+        })
+        .optional(),
+    })
+    .optional(),
 });
 export type ProjectConfig = z.infer<typeof ProjectConfigSchema>;
 
@@ -241,6 +279,31 @@ export const UserConfigSchema = z.strictObject({
     .record(PricedModelIdSchema, ModelPriceSchema)
     .refine((table) => Object.keys(table).length <= 200, "at most 200 priced models")
     .optional(),
+  /**
+   * Upstream reporting (D-bz, D-by; AD-27). `repo`: VTC's own repo, default
+   * {@link DEFAULT_UPSTREAM_REPO}. `share: false` turns upstream issues and PRs off for every
+   * project (default on). `checkout`: absolute path of a local clone of that repo set up for VTC
+   * (`vtc init`), where Lookback PRs and "VTC builds VTC" fix runs are made; absent: upstream
+   * issues only, PRs skip with `no_upstream_checkout`. New in 5.0.0.
+   */
+  upstream: z
+    .strictObject({
+      repo: GitHubRepoSchema.optional(),
+      share: z.boolean().optional(),
+      checkout: z
+        .string()
+        .min(2)
+        .max(1024)
+        .refine((p) => p.startsWith("/") && !p.split("/").includes(".."), "an absolute path")
+        .optional(),
+    })
+    .optional(),
+  /**
+   * Where automatic-PR media live (D-ce, spine §5 reading 196): `branch` (the orphan
+   * `vtc-evidence` branch, the default) or `attach` (`gh --attach`, gh ≥ 2.99, github.com only).
+   * New in 5.0.0.
+   */
+  automation: z.strictObject({ evidence_hosting: EvidenceHostingSchema.optional() }).optional(),
 });
 
 /** `gates.allow_unsandboxed` of a parsed user config; false when the section is absent. */
@@ -248,3 +311,58 @@ export const gatesAllowUnsandboxed = (config: Pick<UserConfig, "gates">): boolea
   config.gates?.allow_unsandboxed ?? false;
 export type UserConfig = z.infer<typeof UserConfigSchema>;
 export type UserConfigInput = z.input<typeof UserConfigSchema>;
+
+// ------------------------------------------------------------- automation
+
+/** What decides whether automation runs for a project now (D-bz). */
+export interface AutomationContext {
+  /** The project's push remote is on GitHub. */
+  readonly githubRemote: boolean;
+  /** `gh auth status` exits 0 (no token is read). */
+  readonly ghLoggedIn: boolean;
+  /** `vtc pause` is in effect. */
+  readonly paused: boolean;
+}
+
+/** The resolved automation settings of one project, with the notes Flow Studio and doctor show. */
+export interface AutomationSettings {
+  readonly issues: boolean;
+  readonly prs: boolean;
+  readonly upstream: boolean;
+  readonly upstreamRepo: GitHubRepo;
+  readonly evidenceHosting: EvidenceHosting;
+  readonly notes: readonly string[];
+}
+
+/**
+ * Pure (D-bz, D-by; AD-27 rule 7): project issues and PRs are on by default when the project has a
+ * GitHub remote and `gh` is logged in, and off with a visible note otherwise; `false` in
+ * `project.yaml` turns either off. Upstream reporting needs `gh` and both opt-outs unset. `vtc
+ * pause` stops everything. New in 5.0.0.
+ */
+export const automationFor = (
+  project: Pick<ProjectConfig, "upstream" | "automation">,
+  user: Pick<UserConfig, "upstream" | "automation">,
+  context: AutomationContext,
+): AutomationSettings => {
+  const notes: string[] = [];
+  if (context.paused) notes.push("automation is paused (vtc pause)");
+  if (!context.githubRemote)
+    notes.push("automatic issues and PRs are off: this project has no GitHub remote");
+  if (!context.ghLoggedIn)
+    notes.push("automatic issues and PRs are off: gh is not logged in (run gh auth login)");
+  const live = !context.paused && context.ghLoggedIn;
+  const projectOn = live && context.githubRemote;
+  const shareUser = user.upstream?.share ?? true;
+  const shareProject = project.upstream?.share ?? true;
+  if (!shareUser) notes.push("upstream reports are off for every project (~/.vtc/config.yaml)");
+  else if (!shareProject) notes.push("upstream reports are off for this project (project.yaml)");
+  return {
+    issues: projectOn && (project.automation?.issues ?? true),
+    prs: projectOn && (project.automation?.prs ?? true),
+    upstream: live && shareUser && shareProject,
+    upstreamRepo: user.upstream?.repo ?? DEFAULT_UPSTREAM_REPO,
+    evidenceHosting: user.automation?.evidence_hosting ?? EVIDENCE_HOSTING_DEFAULT,
+    notes,
+  };
+};

@@ -14,8 +14,8 @@ import {
 } from "../src/index.js";
 
 describe("contracts 4.12.0", () => {
-  it("is MINOR over 4.11.0", () => {
-    expect(CONTRACTS_VERSION).toBe("4.12.0");
+  it("was MINOR over 4.11.0; 5.0.0 follows it (contracts-5-0.test.ts)", () => {
+    expect(CONTRACTS_VERSION.split(".")[0]).toBe("5");
   });
 });
 

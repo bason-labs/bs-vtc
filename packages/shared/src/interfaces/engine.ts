@@ -21,6 +21,8 @@ import type { ModelPrice } from "../project-config.js";
 import type { FetcherId, SearchProvider } from "../research.js";
 import type { AssetBundle } from "./assets.js";
 import type { AutoResumeScheduler } from "./auto-resume.js";
+import type { AutomationDeps } from "./automation.js";
+import type { ArmPluginCompiler } from "./lookback.js";
 import type { GateRunner } from "./gate-runner.js";
 import type { PullRequestService, RemoteMergeService } from "./git.js";
 import type { HttpClient } from "./research.js";
@@ -86,6 +88,18 @@ export interface EngineDeps {
    * cost (Codex) runs no engine-launched role. New in 4.9.0.
    */
   readonly prices?: Readonly<Record<string, ModelPrice>>;
+  /**
+   * Automatic issues and PRs (AD-27): the `gh`, git-plumbing and evidence seams and the user's
+   * upstream settings, built by the cli. Absent: automation is off, with a visible note in the
+   * Automation view. New in 5.0.0.
+   */
+  readonly automation?: AutomationDeps;
+  /**
+   * Replay arm plugins (D-cg, spine §5 reading 201): the compiler's `compileArm` bound to the
+   * shipped plugin. Absent: replays on a host whose runs load the compiled agent (Claude Code)
+   * cannot run a candidate and wait for the next RETRO. New in 5.0.0.
+   */
+  readonly armPlugins?: ArmPluginCompiler;
   readonly versions: EngineVersions;
   /** Clock override for tests. */
   readonly now?: () => Date;

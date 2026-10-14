@@ -147,12 +147,17 @@ describe("replay harness (AD-21 rule 6)", () => {
   });
 
   it("dispatches replays through planDispatch with purpose lookback_replay", () => {
-    expect(replayDispatchPlan("plugin_only", { subagents: true, headless: true })).toBe("subagent");
+    // Contracts 5.0.0 (D-cg, spine §5 reading 201): every replay trial is an engine-launched
+    // headless run wherever the host can run one, without headless_allowed.
+    expect(replayDispatchPlan("plugin_only", { subagents: true, headless: true })).toBe("headless");
     expect(replayDispatchPlan("plugin_only", { subagents: false, headless: true })).toBe(
-      "unavailable",
+      "headless",
     );
     expect(replayDispatchPlan("headless_allowed", { subagents: false, headless: true })).toBe(
       "headless",
+    );
+    expect(replayDispatchPlan("headless_allowed", { subagents: true, headless: false })).toBe(
+      "unavailable",
     );
   });
 

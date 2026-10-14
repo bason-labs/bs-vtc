@@ -17,7 +17,8 @@ import type { ToolProfile } from "../role-contract.js";
  *   session is connected);
  * - `auto_resume`: the timer woke the daemon and no Lead session is connected (§6.9 step 6);
  * - `cross_family_review`: the opt-in reviewer on the other host family (D10, §12.4);
- * - `lookback_replay`: a Lookback replay trial (§13, AD-21). New in 4.5.0.
+ * - `lookback_replay`: a Lookback replay trial (§13, AD-21). New in 4.5.0; always headless since
+ *   5.0.0 (D-cg).
  */
 export type DispatchPurpose = "role" | "auto_resume" | "cross_family_review" | "lookback_replay";
 
@@ -38,11 +39,17 @@ export type DispatchPlan = "subagent" | "headless" | "lead_redispatch" | "unavai
  * engine holds as the run's Lead), and `capabilities` are those of the host the role runs on.
  * Roles run on the Lead's own host; {@link ROLE_DISPATCH_BY_LEAD_HOST} says how by default
  * (H-1, 2026-10-14):
- * - `role` and `lookback_replay` with a Lead whose default is `headless` (Codex) → `headless`
- *   whenever the host can, whatever `mode` says; that host has no in-session roles (reading 82),
- *   so without headless support the step is `unavailable`;
- * - otherwise `role` and `lookback_replay` → `subagent` when the host has subagents, else
- *   `headless` only with `headless_allowed`;
+ * - `role` with a Lead whose default is `headless` (Codex) → `headless` whenever the host can,
+ *   whatever `mode` says; that host has no in-session roles (reading 82), so without headless
+ *   support the step is `unavailable`;
+ * - otherwise `role` → `subagent` when the host has subagents, else `headless` only with
+ *   `headless_allowed`;
+ * - `lookback_replay` → `headless` whenever the host can, else `unavailable`, whatever `mode`
+ *   says (D-cg, spine §5 reading 201, contracts 5.0.0): a replay trial is an engine-launched
+ *   headless run in a clean checkout outside the repo, bounded by the Lead host's weekly window,
+ *   the Lookback budget and `LOOKBACK_LIMITS.maxTrialsPerRetro`, so it needs no
+ *   `headless_allowed`; on a host whose runs load the compiled agent each arm runs its own plugin
+ *   (`SpawnRoleRequest.pluginDir`);
  * - `auto_resume` (no live Lead) → `headless` only with `headless_allowed`, else
  *   `lead_redispatch`: `headless_allowed` still governs every engine-driven run without a Lead;
  * - `cross_family_review` → `headless` only with `headless_allowed`.
@@ -60,10 +67,11 @@ export const planDispatch = (
     leadHost !== undefined && ROLE_DISPATCH_BY_LEAD_HOST[leadHost] === "headless";
   switch (purpose) {
     case "role":
-    case "lookback_replay":
       if (leadRunsHeadless) return capabilities.headless ? "headless" : "unavailable";
       if (capabilities.subagents) return "subagent";
       return headless ? "headless" : "unavailable";
+    case "lookback_replay":
+      return capabilities.headless ? "headless" : "unavailable";
     case "auto_resume":
       return headless ? "headless" : "lead_redispatch";
     case "cross_family_review":
@@ -134,3 +142,44 @@ export const inSessionDispatchAllowed = (
   sessionSandbox: SessionSandboxState | undefined,
   platform: string | undefined,
 ): boolean => inSessionDispatchRefusal(host, profile, sessionSandbox, platform) === null;
+
+/**
+ * The only Codex `web_search` mode a `host_web` role gets (D-cf, spine §5 reading 200): `cached`
+ * answers from an OpenAI-maintained index and opens no page the model chooses, so a crafted page
+ * cannot receive what a Codex role (which reads everywhere, reading 82) carries out in a URL.
+ * `live` is never emitted; any other role gets `disabled`. The adapter always sets it explicitly,
+ * because a full-access sandbox defaults to `live`. New in 5.0.0.
+ */
+export const CODEX_HOST_WEB_SEARCH = "cached";
+
+/** The visible run notice when a `host_web` role runs without host web search (D-cf). */
+export const HOST_WEB_OFF_NOTICE =
+  "the research role runs without its host's web search on this run: no available host could search without opening pages the model picks, so research uses the engine's own fetchers only (install Claude Code, or see vtc doctor for the Codex web search check)";
+
+/** Where a `host_web` role runs, and whether it keeps host web search (D-cf). */
+export type HostWebRoute =
+  | { readonly host: HostId; readonly hostWeb: true }
+  | { readonly host: HostId; readonly hostWeb: false; readonly notice: string };
+
+/**
+ * Pure (D-cf, spine §5 reading 200): the host a `host_web` role runs on. `hosts` says, for each
+ * host the role could be dispatched to now (`planDispatch` gives a plan other than
+ * `unavailable`), whether its host web is safe (`HostCapabilities.safeHostWeb`).
+ * 1. Claude Code when it is dispatchable and safe: its role profiles deny the credential stores;
+ * 2. else the Lead's host when it is safe (Codex with `cached` confirmed);
+ * 3. else the Lead's host without host web, with {@link HOST_WEB_OFF_NOTICE}; the engine's `web`
+ *    fetcher still serves the role's source requests.
+ */
+export const hostWebRoute = (
+  leadHost: HostId,
+  hosts: Readonly<
+    Partial<Record<HostId, { readonly dispatchable: boolean; readonly safeHostWeb: boolean }>>
+  >,
+): HostWebRoute => {
+  const claude = hosts["claude-code"];
+  if (claude?.dispatchable === true && claude.safeHostWeb)
+    return { host: "claude-code", hostWeb: true };
+  const lead = hosts[leadHost];
+  if (lead?.dispatchable === true && lead.safeHostWeb) return { host: leadHost, hostWeb: true };
+  return { host: leadHost, hostWeb: false, notice: HOST_WEB_OFF_NOTICE };
+};

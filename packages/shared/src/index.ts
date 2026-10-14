@@ -36,6 +36,7 @@ export * from "./lookback.js";
 export * from "./visual.js";
 export * from "./architecture-checks.js";
 export * from "./spend.js";
+export * from "./upstream.js";
 export * from "./interfaces/host-adapter.js";
 export type * from "./interfaces/storage.js";
 export type * from "./interfaces/gate-runner.js";
@@ -43,6 +44,8 @@ export type * from "./interfaces/assets.js";
 export type * from "./interfaces/auto-resume.js";
 export type * from "./interfaces/engine.js";
 export type * from "./interfaces/git.js";
+export type * from "./interfaces/automation.js";
+export type * from "./interfaces/lookback.js";
 export * from "./interfaces/research.js";
 export * from "./helpers/fingerprint.js";
 export * from "./helpers/severity.js";
@@ -199,5 +202,27 @@ export * from "./json-schema.js";
  * replay (none in v1, readings 180 and 182(8)), for the dashboard's Lookback view. All additive:
  * new constants, a new event type and one more deny glob (a deny list only narrows what a role
  * may do).
+ *
+ * 5.0.0 (MAJOR): round 4, automatic issues and PRs (spine AD-27, §5 readings 184–209; H-4..H-8,
+ * D-bu..D-cl). MAJOR because hidden acceptance tests move to a run-keyed layout,
+ * `~/.vtc/hidden/<repo-key>/<run>/<task>/` (`hiddenTestsDir`, D-ck): a persisted layout, written
+ * by engine core and read by the Gate Runner, which switch to it together at the round's merge.
+ * `GateRunRequest.hidden_tasks` entries may name another run's task (`<run>:T-n`,
+ * `hiddenTestsRef`). Also: `HostBilling` `provider` and `PROVIDER_BILLING_NOTICE` (D-ci); the
+ * automation contracts in `upstream.ts` (kinds, targets, the identity marker, labels, branch names
+ * and `autoPushRefAllowed`, `AUTOMATION_LIMITS`, the `UpstreamReport` privacy allowlist,
+ * `EvidenceHosting` / `EvidenceManifest` / `EVIDENCE_LIMITS`, templates and their slots,
+ * `ROLES_CHANGELOG`, the `upstream.*` and `automation.skipped` events, `AutomationReport` on
+ * `GET /api/automation`, `run.started.automation`); the seams `IssueService`,
+ * `AutoPullRequestService`, `GitPlumbing`, `EvidenceRecorder`, `AutomationDeps`
+ * (`EngineDeps.automation`) and `ArmPluginCompiler` (`EngineDeps.armPlugins`,
+ * `SpawnRoleRequest.pluginDir`, `HeadlessRun.pluginLoad`, D-cg); config `project.yaml`
+ * `upstream` / `automation`, `~/.vtc/config.yaml` `upstream` / `automation` and `automationFor`;
+ * `gates.yml` `visual.redact_selectors`; `effectiveMergeLevel`'s `automatic` cap
+ * (`AUTOMATIC_RUN_MAX_MERGE_LEVEL`, D-bw); `NextResult.notices` (the daily summary, D-ca); D-cf's
+ * `CODEX_HOST_WEB_SEARCH`, `HostCapabilities.safeHostWeb` and `hostWebRoute`; `planDispatch`
+ * sends every `lookback_replay` trial headless (D-cg); `LOOKBACK_LIMITS.maxTrialsPerRetro`,
+ * `ReplayGrader`, `ReplayResult.grader`, `VERDICT_GRADED_ROLES` and `replayGraderFor` (D-ch),
+ * which supersede `CLAUDE_LEAD_REPLAYABLE_ROLES` (removed at the round's merge).
  */
-export const CONTRACTS_VERSION = "4.12.0";
+export const CONTRACTS_VERSION = "5.0.0";

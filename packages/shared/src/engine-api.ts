@@ -324,6 +324,12 @@ export type LeadAction = z.infer<typeof LeadActionSchema>;
 export const NextResultSchema = z.strictObject({
   run: RunIdSchema,
   actions: z.array(LeadActionSchema),
+  /**
+   * Short notices the Lead relays to the human once, in its own words: the automation daily
+   * summary (D-ca: issues and PRs VTC opened, and what it skipped, with links) and run notices
+   * such as `HOST_WEB_OFF_NOTICE`. Absent: none. New in 5.0.0.
+   */
+  notices: z.array(z.string().min(1).max(2000)).max(20).optional(),
 });
 export type NextResult = z.infer<typeof NextResultSchema>;
 
@@ -898,6 +904,16 @@ export const ENGINE_HTTP = {
       path: "/api/spend",
       auth: "token",
       response: "ClientSpendReport",
+    },
+    /**
+     * Automatic issues and PRs of this repo (D-ca, AD-27): whether automation is on and why not,
+     * what VTC opened, and the latest skips. New in 5.0.0.
+     */
+    automation: {
+      method: "GET",
+      path: "/api/automation",
+      auth: "token",
+      response: "AutomationReport",
     },
     /** SSE over `fetch` (the dashboard sends the bearer header): one Event per message,
      * `id: <run>:<seq>` (`sseEventId`). */

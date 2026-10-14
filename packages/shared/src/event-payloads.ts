@@ -33,6 +33,7 @@ import {
 import { FinalReviewStepResultSchema } from "./traceability.js";
 import { FindingSchema, FindingStatusSchema, WaiverSchema } from "./finding.js";
 import { GateReportSchema } from "./gate-result.js";
+import { AutomationRunRefSchema, UPSTREAM_EVENT_PAYLOAD_SCHEMAS } from "./upstream.js";
 import { EscalationAnswerSchema, EscalationSchema } from "./escalation.js";
 import {
   EscalationIdSchema,
@@ -192,6 +193,13 @@ export const EVENT_PAYLOAD_SCHEMAS = {
       .string()
       .regex(/^[0-9a-f-]{8,64}$/)
       .optional(),
+    /**
+     * An automatic run (D-cd, AD-27): the engine started it from an automatic issue, which serves
+     * as its spec. It skips G1 and G2, keeps every gate, review and risk rule, the Spec Verifier
+     * checks its PR against the issue, and it never runs at merge Level 3 (D-bw). Absent: a run
+     * the human asked for. New in 5.0.0.
+     */
+    automation: AutomationRunRefSchema.optional(),
   }),
   "run.phase_changed": z.strictObject({ from: PhaseSchema.nullable(), to: PhaseSchema }),
   "run.paused": z.strictObject({ reason: z.string().min(1).max(300) }),
@@ -540,6 +548,8 @@ export const EVENT_PAYLOAD_SCHEMAS = {
     /** The tasks they belong to (a run-level failure names none), each once. */
     tasks: z.array(TaskIdSchema).max(500),
   }),
+  // ---- automatic issues and PRs (AD-27, D-ca), new in 5.0.0
+  ...UPSTREAM_EVENT_PAYLOAD_SCHEMAS,
   "incident.recorded": z.strictObject({
     kind: IncidentKindSchema,
     detail: z.string().min(1).max(2000),

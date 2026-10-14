@@ -12,7 +12,7 @@ import {
 const map = loadOwnership();
 
 describe("tooling/ownership.json (AD-15)", () => {
-  it("names the seven build teams and the integrator (D-bb adds lookback-research)", () => {
+  it("names the eight build teams and the integrator (D-bb adds lookback-research, AD-27 upstream)", () => {
     expect(Object.keys(map.teams).sort()).toEqual(
       [
         "adapters",
@@ -23,6 +23,7 @@ describe("tooling/ownership.json (AD-15)", () => {
         "integrator",
         "lookback-research",
         "roles-compiler",
+        "upstream",
       ].sort(),
     );
   });
@@ -63,6 +64,12 @@ describe("tooling/ownership.json (AD-15)", () => {
     [".github/workflows/ci.yml", "integrator"],
     ["packaging/install.sh", "cli-binary"],
     ["packaging/homebrew/vtc.rb.tmpl", "cli-binary"],
+    // round 4 (AD-27): the upstream module moved out of engine-core
+    ["packages/engine/src/upstream/index.ts", "upstream"],
+    ["packages/engine/src/upstream/evidence/snapshot-server.ts", "upstream"],
+    ["packages/engine/test/upstream/dedupe.test.ts", "upstream"],
+    ["packages/engine/src/git/plumbing.ts", "engine-core"],
+    ["README.md", "integrator"],
   ])("%s belongs to %s", (path, team) => {
     expect(ownersOf(map, path)).toEqual([team]);
   });
@@ -108,6 +115,28 @@ describe("verify:scope (AD-15 rule 2: dependencies and the lockfile)", () => {
         "packages/engine/src/index.ts",
       ]),
     ).toEqual(["packages/engine/src/core/index.ts", "packages/engine/src/index.ts"]);
+    // AD-27: upstream/ belongs to the upstream team, not engine-core
+    expect(
+      scopeViolations(map, "engine-core", [
+        "packages/engine/src/upstream/index.ts",
+        "packages/engine/test/upstream/dedupe.test.ts",
+      ]),
+    ).toEqual([
+      "packages/engine/src/upstream/index.ts",
+      "packages/engine/test/upstream/dedupe.test.ts",
+    ]);
+    expect(
+      scopeViolations(map, "upstream", [
+        "packages/engine/src/upstream/index.ts",
+        "packages/engine/src/core/index.ts",
+        "packages/engine/src/index.ts",
+        "packages/shared/src/upstream.ts",
+      ]),
+    ).toEqual([
+      "packages/engine/src/core/index.ts",
+      "packages/engine/src/index.ts",
+      "packages/shared/src/upstream.ts",
+    ]);
   });
 });
 

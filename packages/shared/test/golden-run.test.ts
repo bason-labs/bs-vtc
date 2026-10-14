@@ -60,6 +60,13 @@ const SNAPSHOTS: Record<string, keyof typeof ENGINE_HTTP.routes> = {
   "client-spend": "clientSpend",
 };
 
+/**
+ * Read routes frozen before their implementation (spine §5 reading 209): engine core adds the
+ * golden snapshot from its read model and the dashboard maps it in its fixture server in their
+ * round-4 branches; the integrator removes the route from this set at the round's merge.
+ */
+const PENDING_GOLDEN: ReadonlySet<string> = new Set(["automation"]);
+
 describe("golden run: event log", () => {
   it("is a clean log with seq 1..n and typed payloads", () => {
     expect(log.invalidLines).toEqual([]);
@@ -74,7 +81,7 @@ describe("golden run: API snapshots", () => {
     const files = readdirSync(new URL("api/", root)).map((f) => f.replace(/\.json$/, ""));
     expect(files.sort()).toEqual(Object.keys(SNAPSHOTS).sort());
     const reads = Object.entries(ENGINE_HTTP.routes)
-      .filter(([, r]) => r.method === "GET" && !("sse" in r))
+      .filter(([name, r]) => r.method === "GET" && !("sse" in r) && !PENDING_GOLDEN.has(name))
       .map(([name]) => name);
     expect([...new Set(Object.values(SNAPSHOTS))].sort()).toEqual(reads.sort());
   });

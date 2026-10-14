@@ -41,6 +41,12 @@ export const ROLE_PROMPTS_ASSET_DIR = "vtc/prompts";
 export const EDITABLE_IN_PACK_ROLES: readonly string[] = ["spec_verifier"];
 
 /**
+ * Superseded in contracts 5.0.0 (D-cg, D-ch; spine §5 readings 201, 202 and 209): every role
+ * that changes files is replayable on a Claude-led run (each arm runs its own plugin), and so is
+ * the Spec Verifier, through the verdict grader. Derive the list with `replayGraderFor`. This constant
+ * keeps its v1 value only until the round-4 merge, which removes it; the engine, the cli test and
+ * the dashboard stop reading it in their round-4 branches.
+ *
  * Roles a Lookback replay can grade on a Claude-led run (spine §5 readings 176, 180 and 182(8)):
  * the {@link EDITABLE_IN_PACK_ROLES} that change files. A Claude trial loads the compiled agent, so
  * only a switched role runs a candidate; a verdict role leaves the same base for both arms, so the

@@ -120,6 +120,11 @@ import {
 } from "./traceability.js";
 import { StatuslineIngestSchema, UsageReportSchema, UsageSnapshotSchema } from "./usage.js";
 import { ClientSpendReportSchema, ClientSpendRowSchema } from "./spend.js";
+import {
+  AutomationReportSchema,
+  EvidenceManifestSchema,
+  UpstreamReportSchema,
+} from "./upstream.js";
 import { WorkflowEdgeSchema, WorkflowGraphSchema, WorkflowNodeSchema } from "./workflow.js";
 
 /** Every frozen contract by name. */
@@ -258,6 +263,10 @@ export const CONTRACT_SCHEMAS = {
   // ---- contracts 4.9.0 (the wave-3 Final Review fix round, spine §5 readings 149-155)
   ClientSpendRow: ClientSpendRowSchema,
   ClientSpendReport: ClientSpendReportSchema,
+  // ---- contracts 5.0.0 (round 4: automatic issues and PRs, AD-27; spine §5 readings 184-209)
+  UpstreamReport: UpstreamReportSchema,
+  EvidenceManifest: EvidenceManifestSchema,
+  AutomationReport: AutomationReportSchema,
 } as const;
 export type ContractName = keyof typeof CONTRACT_SCHEMAS;
 
