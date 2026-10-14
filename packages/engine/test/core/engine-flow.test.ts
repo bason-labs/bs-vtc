@@ -15,6 +15,7 @@ import {
   createHarness,
   draft,
   only,
+  passFinalReview,
   spawns,
   throughPlan,
   verdictPass,
@@ -89,10 +90,11 @@ describe("engine: the happy path, Level 2", () => {
     await verdictPass(h, verifier2, "src/t-2/impl.ts");
     await h.engine.settle();
 
-    // Final Review gates on the integrated branch, release, retro
+    // Final Review gates on the integrated branch, its AI steps (§6.7a 3–4), release, retro
     expect(h.gates.requests.some((r) => r.reason === "final_review" && r.scope === "full")).toBe(
       true,
     );
+    await passFinalReview(h);
     const done = await h.engine.next({}, CLAUDE);
     expect(NextResultSchema.parse(done).actions).toEqual([
       { type: "done", summary: expect.stringContaining("summary.md") as unknown },

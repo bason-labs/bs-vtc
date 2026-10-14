@@ -47,6 +47,7 @@ import { parkEscalation } from "./escalations.js";
 import { baseBranch, parkFeature, setFeatureStatus } from "./jobs.js";
 import type { Kernel, RunHandle } from "./kernel.js";
 import { readTraceability } from "./projections.js";
+import { featureHasUi } from "./ui.js";
 import { nextEscalationId } from "./queries.js";
 import type { RunState } from "./state.js";
 
@@ -209,10 +210,6 @@ export const lastFinalReview = (h: RunHandle, featureId: string): GateReport | u
     .filter((r) => r.reason === "final_review" && r.feature === featureId)
     .at(-1);
 
-/** True when the feature has screens the visual stack judges (a UI run, a frontend task). */
-export const featureHasUi = (h: RunHandle, featureId: string): boolean =>
-  h.state.run.has_ui && featureTasks(h, featureId).some((t) => t.discipline === "frontend");
-
 /** The engine-side inputs of the §6.7 checklist, each with its evidence (AD-23 rule 2). */
 export const checklistInput = (
   k: Kernel,
@@ -256,7 +253,7 @@ export const checklistInput = (
     const rule = riskRuleForPark(e.reason, e.risk_rule);
     if (rule !== null) fired.add(rule);
   }
-  const visual = report?.visual?.status ?? (featureHasUi(h, featureId) ? "unchecked" : null);
+  const visual = report?.visual?.status ?? (featureHasUi(h.state, featureId) ? "unchecked" : null);
   const reportEvidence: Evidence[] =
     report === undefined ? [] : [{ type: "commit", ref: report.head }];
   return {

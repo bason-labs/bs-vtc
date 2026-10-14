@@ -60,6 +60,7 @@ import {
 } from "./config.js";
 import { dispatchGuarded, inSessionRefusal, NO_LEAD_WAIT_REASON, phaseRoles } from "./dispatch.js";
 import { g2ApprovalProblem, gateExtras, type GateExtras } from "./g2.js";
+import { effectiveVerdict } from "./gate-verdict.js";
 import { headlessRunsOf, killHeadless } from "./headless.js";
 import { dispatchNow, drive } from "./route.js";
 import { parkEscalation } from "./escalations.js";
@@ -97,7 +98,6 @@ import {
   ensureWorkspace,
   setFeatureStatus,
   startBaseCheck,
-  startFinalReview,
   startMergeQueue,
   startRoundGates,
 } from "./jobs.js";
@@ -109,6 +109,7 @@ import {
   watchedFeatures,
 } from "./level3.js";
 import { startRelease } from "./release.js";
+import { checkFinalReviewStuck, startFinalReview } from "./final-review.js";
 import {
   EngineError,
   type CallContext,
@@ -1031,7 +1032,8 @@ export class Engine implements Kernel {
         if (built?.head !== undefined && verdict === undefined) {
           startRoundGates(this, handle, task.id, built.head);
         } else if (
-          verdict?.verdict === "pass" &&
+          verdict !== undefined &&
+          effectiveVerdict(verdict) === "pass" &&
           completedReviews(this, handle, task.id) !== null
         ) {
           startTriage(this, handle, task.id);
@@ -1040,6 +1042,7 @@ export class Engine implements Kernel {
     }
     if ([...state.tasks.values()].some((t) => t.status === "queued") && !state.run.paused)
       startMergeQueue(this, handle);
+    checkFinalReviewStuck(this, handle);
     for (const feature of state.features.values()) {
       const tasks = feature.tasks
         .map((id) => state.tasks.get(id))

@@ -17,6 +17,7 @@ import {
   createHarness,
   draft,
   only,
+  passFinalReview,
   reportCoverage,
   SPEC_ONE,
   throughPlan,
@@ -61,6 +62,7 @@ const toRelease = async (h: Harness): Promise<void> => {
     "src/t-1/impl.ts",
   );
   await h.engine.settle();
+  await passFinalReview(h);
 };
 
 const gatedSha = (h: Harness): string => {
@@ -262,6 +264,8 @@ describe("AD-23 rules 2–3: the checklist and auto-merge bound to the gated SHA
       only((await h.engine.next({}, CLAUDE)).actions, "spec_verifier"),
       "src/t-1/impl.ts",
     );
+    await h.engine.settle().catch(() => undefined);
+    void passFinalReview(h);
     await asleep; // auto-merge is enabled and the engine waits for the merge
     await h.engine.pause({});
     expect(h.remote3.calls).toContain("disable vtc/F-1");

@@ -42,6 +42,7 @@ import {
   startRoundGates,
 } from "./jobs.js";
 import type { Kernel, RunHandle } from "./kernel.js";
+import { featureReviewDone } from "./final-review.js";
 import { recordLimit } from "./limits.js";
 import { openTaskEscalation, parkTask, setTaskStatus } from "./parking.js";
 import {
@@ -1046,6 +1047,49 @@ const acceptReviewer = async (
   };
 };
 
+/**
+ * A Final Review reviewer (§6.7a steps 3–4): read-only in its worktree at the feature's integrated
+ * head (any change is refused), every citation resolving there. Once every AI step of the round
+ * reported, the round concludes (`featureReviewDone`).
+ */
+const acceptFeatureReviewer = async (
+  k: Kernel,
+  h: RunHandle,
+  run: RoleRunRecord,
+  result: RoleResult,
+): Promise<StepOutcome> => {
+  const worktree = k.dispatches.get(recordKey(h.state.id, run.action_id))?.worktree;
+  if (worktree === undefined || run.feature === undefined)
+    return reject("write_scope", [
+      "the engine has no record of the reviewer's worktree, so its review cannot be verified",
+    ]);
+  const work = await collectRoleChanges(k, worktree, `vtc: ${run.role} (${run.action_id})`);
+  if (work.changes.length > 0)
+    return reject("write_scope", [
+      `a read-only Final Review reviewer changed ${work.changes
+        .slice(0, 3)
+        .map((c) => c.path)
+        .join(", ")}`,
+    ]);
+  const missing = await unresolved(
+    { ...evidenceContext(k, h, null), repoRoot: join(k.deps.repoRoot, worktree.path) },
+    [...result.claims, ...result.verdicts.flatMap((v) => v.evidence)],
+  );
+  if (missing.length > 0)
+    return reject(
+      "claim_check",
+      missing.map((m) => `does not resolve: ${m}`),
+    );
+  const feature = run.feature;
+  return {
+    kind: "accept",
+    after: () => {
+      openQuestions(k, h, run, result);
+      featureReviewDone(k, h, feature);
+    },
+  };
+};
+
 /** Is the result arriving where the flow expects it (§4.2 step 4)? `null` when it is. */
 const outOfOrder = (
   k: Kernel,
@@ -1056,6 +1100,10 @@ const outOfOrder = (
   if (h.state.run.finished_at !== undefined) return "the run has finished";
   if (run.task === undefined) {
     if (k.deps.roles.get(run.role)?.kind === "advisor") return null;
+    if (run.feature !== undefined) {
+      const status = h.state.features.get(run.feature)?.status;
+      return status === "final_review" ? null : `feature ${run.feature} is ${status ?? "unknown"}`;
+    }
     const phase = PHASE_OF_ROLE[run.role];
     return phase !== undefined && h.state.run.phase !== phase
       ? `the run is in ${h.state.run.phase}, not ${phase}`
@@ -1234,7 +1282,9 @@ const evaluate = async (
   if (task === undefined)
     return contract.kind === "advisor"
       ? acceptAdvisor(k, h, run, result)
-      : acceptPhaseRole(k, h, run, result);
+      : run.feature !== undefined
+        ? acceptFeatureReviewer(k, h, run, result)
+        : acceptPhaseRole(k, h, run, result);
   if (run.role === "engineer") return acceptEngineer(k, h, run, task, result);
   if (run.role === "qa" && run.mode === "author") return acceptQaAuthor(k, h, run, task, result);
   if (isReviewer(run)) return acceptReviewer(k, h, run, task, result);

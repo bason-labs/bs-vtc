@@ -28,6 +28,8 @@ import { restoreHostConfig } from "../git/index.js";
 import { budgetState, sharesExceeded } from "./budget.js";
 import { DEFAULT_ACCEPTANCE_GLOBS } from "./config.js";
 import { EngineError, type CallContext, type Kernel, type RunHandle } from "./kernel.js";
+import { finalReviewSteps } from "./final-review.js";
+import { effectiveVerdict } from "./gate-verdict.js";
 import { engineerDispatch, tierDown } from "./loop.js";
 import { writeTaskPack } from "./projections.js";
 import {
@@ -68,6 +70,8 @@ export interface StepSpec {
   readonly role: string;
   readonly mode?: string;
   readonly task?: string;
+  /** A feature-level step with no task: a Final Review reviewer (§6.7a steps 3–4). */
+  readonly feature?: string;
   readonly subject?: string;
   readonly tier?: ModelTier;
   readonly resume?: SessionRef;
@@ -286,7 +290,8 @@ const taskSteps = (k: Kernel, h: RunHandle, taskId: string, host: HostId): StepS
   if (task.status === "verifying") {
     const built = lastBuilt(h.state, taskId);
     if (built?.head === undefined || k.isRunning(`gates:${taskId}`)) return [];
-    if (roundVerdict(h.state, taskId)?.verdict !== "pass") return [];
+    const round = roundVerdict(h.state, taskId);
+    if (round === undefined || effectiveVerdict(round) !== "pass") return [];
     // At 70% of the budget, or once the reviewers used their 25% share, they drop a tier (§11).
     const drop =
       budgetState(task.spent_usd, task.budget_usd) === "reviewers_drop" ||
@@ -372,7 +377,11 @@ export const pendingSteps = (k: Kernel, h: RunHandle, host: HostId): StepSpec[] 
       ];
     });
   }
-  return planOrder(state).flatMap((task) => taskSteps(k, h, task.id, host));
+  return [
+    ...planOrder(state).flatMap((task) => taskSteps(k, h, task.id, host)),
+    // Final Review's AI steps, once per feature on its integrated branch (§6.7a steps 3–4)
+    ...finalReviewSteps(k, h),
+  ];
 };
 
 /** The answer to the latest run-scoped escalation of `phase` given after the role's last dispatch. */
@@ -481,11 +490,14 @@ const packFor = (k: Kernel, h: RunHandle, step: StepSpec, actionId: string): Tas
   const task = step.task === undefined ? undefined : state.tasks.get(step.task);
   const items = frozenSpecItems(k.deps.repoRoot, state);
   const covers = task?.covers ?? [];
-  const requirements = items.filter((i) =>
-    step.subject !== undefined && /^(REQ|SEC)-/.test(step.subject)
-      ? i.id === step.subject || step.subject.startsWith(`${i.id}.`)
-      : covers.some((c) => i.id === c || i.id.startsWith(`${c}.`)),
-  );
+  const requirements =
+    step.feature !== undefined && task === undefined
+      ? items // Final Review checks the whole spec (§6.7a step 3)
+      : items.filter((i) =>
+          step.subject !== undefined && /^(REQ|SEC)-/.test(step.subject)
+            ? i.id === step.subject || step.subject.startsWith(`${i.id}.`)
+            : covers.some((c) => i.id === c || i.id.startsWith(`${c}.`)),
+        );
   const gates = k.gatesConfig();
   const contract = k.deps.roles.get(step.role);
   const writeScope =
@@ -528,7 +540,12 @@ const packFor = (k: Kernel, h: RunHandle, step: StepSpec, actionId: string): Tas
   }
   for (const gate of state.run.gates.G1.frozen.concat(state.run.gates.G2.frozen)) {
     const type = submitted.get(gate.path) ?? frozenTypeByPath(gate.path);
-    if (task !== undefined || state.run.phase === "plan" || state.run.phase === "design")
+    if (
+      task !== undefined ||
+      step.feature !== undefined ||
+      state.run.phase === "plan" ||
+      state.run.phase === "design"
+    )
       inputs.push({ type, path: gate.path });
   }
   return {
@@ -538,7 +555,11 @@ const packFor = (k: Kernel, h: RunHandle, step: StepSpec, actionId: string): Tas
     role: step.role,
     ...(step.mode === undefined ? {} : { mode: step.mode }),
     ...(step.task === undefined ? {} : { task: step.task }),
-    ...(task === undefined ? {} : { feature: task.feature }),
+    ...(task === undefined
+      ? step.feature === undefined
+        ? {}
+        : { feature: step.feature }
+      : { feature: task.feature }),
     ...(step.subject === undefined ? {} : { subject: step.subject }),
     ...depthsFor(k, h, step),
     ...(step.task === undefined || state.intents.get(step.task) === undefined
@@ -590,7 +611,11 @@ export const dispatchStep = (
     type: "role.dispatched",
     actor: "engine",
     role: step.role,
-    ...(step.task === undefined ? {} : { task: step.task, feature: task?.feature }),
+    ...(step.task === undefined
+      ? step.feature === undefined
+        ? {}
+        : { feature: step.feature }
+      : { task: step.task, feature: task?.feature }),
     prompt_sha: k.deps.plugins.promptSha(agent, host),
     host,
     // D-ae: no resolved id means the host session's model, recorded as such
@@ -617,7 +642,7 @@ export const dispatchStep = (
     `Read your task pack: ${join(k.deps.repoRoot, pack)}`,
     ...(skills.length === 0 ? [] : [`Use these skills: ${skills.join(", ")}`]),
     ...(step.note === undefined ? [] : [step.note]),
-    `Finish with exactly one RoleResult JSON object as your final message (role "${step.role}"${step.mode === undefined ? "" : `, mode "${step.mode}"`}${step.task === undefined ? "" : `, task "${step.task}"`}${step.subject === undefined ? "" : `, verdict subject "${step.subject}"`}). ${dispatch === "subagent" ? `The Lead submits it with action_id ${actionId}.` : `The engine records it as action ${actionId}.`}`,
+    `Finish with exactly one RoleResult JSON object as your final message (role "${step.role}"${step.mode === undefined ? "" : `, mode "${step.mode}"`}${step.task === undefined ? "" : `, task "${step.task}"`}${step.task === undefined && step.feature !== undefined ? `, feature "${step.feature}"` : ""}${step.subject === undefined ? "" : `, verdict subject "${step.subject}"`}). ${dispatch === "subagent" ? `The Lead submits it with action_id ${actionId}.` : `The engine records it as action ${actionId}.`}`,
   ].join("\n");
   const action: SpawnRoleAction = {
     type: "spawn_role",
@@ -625,7 +650,11 @@ export const dispatchStep = (
     role: step.role,
     ...(step.mode === undefined ? {} : { mode: step.mode }),
     ...(step.task === undefined ? {} : { task: step.task }),
-    ...(task === undefined ? {} : { feature: task.feature }),
+    ...(task === undefined
+      ? step.feature === undefined
+        ? {}
+        : { feature: step.feature }
+      : { feature: task.feature }),
     ...(step.subject === undefined ? {} : { subject: step.subject }),
     pack,
     // AD-14 rule 1: the host's adapter adds its plugin namespace; the log keeps the base name
@@ -783,7 +812,13 @@ export const dispatchPrepared = async (
   let worktree: DispatchRecord["worktree"];
   if (task === undefined) {
     try {
-      worktree = await prepareRoleWorktree(k, h.state.id, actionId);
+      // a Final Review reviewer reads the feature's integrated branch (§6.7a)
+      const feature = step.feature === undefined ? undefined : h.state.features.get(step.feature);
+      const at =
+        feature === undefined
+          ? undefined
+          : await k.deps.workspace.resolve(feature.integration_branch);
+      worktree = await prepareRoleWorktree(k, h.state.id, actionId, at);
     } catch (error) {
       k.emit(h, {
         type: "run.paused",
