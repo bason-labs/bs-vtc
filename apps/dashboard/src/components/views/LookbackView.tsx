@@ -11,6 +11,7 @@ import {
   lookbackActivity,
   readScorecard,
   readScorecardIndex,
+  refusedScorecardPaths,
   type ScorecardGroup,
 } from "@/lib/scorecards";
 import { formatLocalTime } from "@/lib/time";
@@ -19,6 +20,7 @@ import { useResource } from "@/lib/useResource";
 import { useRunEvents } from "@/lib/useRunEvents";
 import { Link } from "@/components/app/Link";
 import { ScorecardDetail } from "@/components/lookback/ScorecardDetail";
+import { EventLogTruncated } from "@/components/notices/EventLogTruncated";
 import {
   Badge,
   Card,
@@ -100,10 +102,14 @@ function Activity({ run }: { run: string }) {
   const now = useNow();
   const events = useRunEvents(run, ["lookback"]);
   const activity = useMemo(
-    () => (events.data === undefined ? null : lookbackActivity(events.data)),
+    () => (events.data === undefined ? null : lookbackActivity(events.data.events)),
     [events.data],
   );
-  if (activity === null || (activity.canaries.length === 0 && activity.items.length === 0)) {
+  const truncated = events.data?.truncated === true;
+  if (
+    activity === null ||
+    (activity.canaries.length === 0 && activity.items.length === 0 && !truncated)
+  ) {
     return null;
   }
   return (
@@ -116,6 +122,7 @@ function Activity({ run }: { run: string }) {
           </CardDescription>
         </div>
       </CardHeader>
+      {truncated ? <EventLogTruncated className="mb-3" /> : null}
       {activity.canaries.length === 0 ? null : (
         <ul aria-label="Canaries" className="mb-3 space-y-2">
           {activity.canaries.map((c) => (
@@ -210,13 +217,22 @@ export function LookbackView({ run }: { run: string | null }) {
               );
             }
             const groups = groupScorecards(read.value);
-            return groups.length === 0 ? (
-              <EmptyState title="No scorecards yet" />
-            ) : (
+            const refused = refusedScorecardPaths(read.value);
+            return (
               <div className="space-y-4">
-                {groups.map((g) => (
-                  <ScorecardCard key={g.key} run={run} group={g} />
-                ))}
+                {refused.length === 0 ? null : (
+                  <p role="alert" className="text-xs text-warn-fg" data-testid="scorecards-refused">
+                    The scorecard index breaks its contract: not shown, because{" "}
+                    {refused.length === 1 ? "this path is" : "these paths are"} outside{" "}
+                    <code className="font-mono">{LOOKBACK_REPO.scorecardsDir}/</code>:{" "}
+                    <span className="font-mono break-all">{refused.join(", ")}</span>
+                  </p>
+                )}
+                {groups.length === 0 ? (
+                  <EmptyState title="No scorecards yet" />
+                ) : (
+                  groups.map((g) => <ScorecardCard key={g.key} run={run} group={g} />)
+                )}
               </div>
             );
           }}

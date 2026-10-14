@@ -5,6 +5,7 @@ import { gateRequests } from "@/lib/human-gates";
 import { hrefs } from "@/lib/router";
 import { useRunEvents } from "@/lib/useRunEvents";
 import { GateRequestCard } from "@/components/gates/GateRequestCard";
+import { EventLogTruncated } from "@/components/notices/EventLogTruncated";
 import { EmptyState } from "@/components/ui";
 import { Breadcrumbs, Loaded, MissingParam, PageHeader } from "./common";
 
@@ -16,7 +17,7 @@ import { Breadcrumbs, Loaded, MissingParam, PageHeader } from "./common";
 export function GatesView({ run }: { run: string | null }) {
   const events = useRunEvents(run, ["gates"]);
   const gates = useMemo(
-    () => (events.data === undefined ? [] : gateRequests(events.data)),
+    () => (events.data === undefined ? [] : gateRequests(events.data.events)),
     [events.data],
   );
   if (run === null) return <MissingParam what="run" />;
@@ -39,6 +40,7 @@ export function GatesView({ run }: { run: string | null }) {
             />
           ) : (
             <div className="space-y-4">
+              {events.data?.truncated === true ? <EventLogTruncated /> : null}
               {gates.map((g) => (
                 <GateRequestCard key={g.seq} run={run} gate={g} />
               ))}

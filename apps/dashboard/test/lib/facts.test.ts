@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
-import { FactStatusSchema } from "@vtc/shared";
-import { currentFacts, factStatusMeta, parseFactsJsonl } from "@/lib/facts";
+import { FactRowSchema, FactStatusSchema } from "@vtc/shared";
+import { currentFacts, factCounts, factStatusMeta, parseFactsJsonl } from "@/lib/facts";
 import { FACT_EVENTS, FACTS_JSONL, GATE_EVENTS, w3Event } from "../wave3-fixtures";
 
 describe("parseFactsJsonl (.vtc/research/facts.jsonl)", () => {
@@ -73,6 +73,53 @@ describe("currentFacts", () => {
       },
     ]);
     expect(older.find((f) => f.id === "f-2222222222222222")?.status.label).toBe("Unverified");
+  });
+
+  const stale = rows.find((r) => r.id === "f-fedcba9876543210")!;
+  const reverified = FactRowSchema.parse({
+    ...stale,
+    status: "verified",
+    expires_at: "2026-10-20T09:00:00.000Z",
+    recorded_at: "2026-10-12T11:00:00.000Z",
+  });
+
+  it("shows only the newest row of an id (a new status is a new row with the same id)", () => {
+    const facts = currentFacts([...rows, reverified]);
+    const same = facts.filter((f) => f.id === stale.id);
+    expect(same.map((f) => f.status.label)).toEqual(["Verified"]);
+    expect(new Set(facts.map((f) => f.id)).size).toBe(facts.length);
+  });
+
+  it("shows a claim recorded again after a later row superseded it", () => {
+    const original = rows.find((r) => r.id === "f-0123456789abcdef")!;
+    const again = FactRowSchema.parse({ ...original, recorded_at: "2026-10-12T12:00:00.000Z" });
+    const facts = currentFacts([...rows, again]);
+    expect(facts.filter((f) => f.id === original.id).map((f) => f.status.label)).toEqual([
+      "Unverified",
+    ]);
+    // Superseded again after it was recorded again: hidden.
+    const replacement = rows.find((r) => r.id === "f-1111111111111111")!;
+    const later = FactRowSchema.parse({
+      ...replacement,
+      recorded_at: "2026-10-12T13:00:00.000Z",
+    });
+    expect(currentFacts([...rows, again, later]).map((f) => f.id)).not.toContain(original.id);
+  });
+
+  it("ignores a row that names its own id in supersedes", () => {
+    const self = FactRowSchema.parse({ ...reverified, supersedes: reverified.id });
+    const fact = currentFacts([...rows, self]).find((f) => f.id === self.id);
+    expect(fact?.status.label).toBe("Verified");
+    expect(fact?.replaced).toBe(0);
+  });
+
+  it("counts and waives a re-recorded fact once", () => {
+    const facts = currentFacts(
+      [...rows, reverified],
+      [w3Event(95, "fact.waived", { id: stale.id, reason: "Checked by hand" })],
+    );
+    expect(factCounts(facts).reduce((n, c) => n + c.n, 0)).toBe(3);
+    expect(facts.filter((f) => f.waiver === "Checked by hand")).toHaveLength(1);
   });
 
   it("names every status", () => {

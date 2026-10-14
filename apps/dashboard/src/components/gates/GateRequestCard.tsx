@@ -1,7 +1,7 @@
 "use client";
 
-import { CheckCircle2, ExternalLink, FileText } from "lucide-react";
-import { useId } from "react";
+import { CheckCircle2, ExternalLink, FileText, MonitorPlay } from "lucide-react";
+import { useId, useState } from "react";
 import { cn } from "@/lib/cn";
 import {
   directionPrototypeUrl,
@@ -14,8 +14,17 @@ import { formatLocalTime } from "@/lib/time";
 import { useNow } from "@/lib/useNow";
 import { useEngine } from "@/components/app/EngineProvider";
 import { Link } from "@/components/app/Link";
+import { PrototypeFrame } from "@/components/design/PrototypeFrame";
 import { ArtifactImage } from "@/components/evidence/ArtifactImage";
-import { Badge, Card, CardDescription, CardHeader, CardTitle, StatusPill } from "@/components/ui";
+import {
+  Badge,
+  Button,
+  Card,
+  CardDescription,
+  CardHeader,
+  CardTitle,
+  StatusPill,
+} from "@/components/ui";
 
 function SubHeading({ id, children }: { id: string; children: string }) {
   return (
@@ -25,8 +34,14 @@ function SubHeading({ id, children }: { id: string; children: string }) {
   );
 }
 
+/** The frame size of a direction preview (the design review's desktop viewport). */
+const PREVIEW = { width: 1440, height: 900 } as const;
+
+const noPlace = (): void => undefined;
+
 function Direction({ run, direction }: { run: string; direction: DirectionView }) {
   const { health } = useEngine();
+  const [open, setOpen] = useState(false);
   const url =
     direction.prototype === null
       ? null
@@ -57,15 +72,32 @@ function Direction({ run, direction }: { run: string; direction: DirectionView }
         />
       )}
       {url !== null ? (
-        <a
-          className="inline-flex items-center gap-1 text-accent-fg underline"
-          href={url}
-          target="_blank"
-          rel="noopener noreferrer"
-        >
-          Open the prototype <ExternalLink aria-hidden className="size-3.5" />
-          <span className="sr-only">(opens in a new tab)</span>
-        </a>
+        // Only ever in the sandboxed frame (AD-5 rule 9), never as a page of its own.
+        <div className="space-y-2">
+          <Button
+            type="button"
+            size="sm"
+            aria-expanded={open}
+            onClick={() => {
+              setOpen((o) => !o);
+            }}
+          >
+            <MonitorPlay aria-hidden className="size-3.5" />
+            {open ? "Hide the prototype" : "Show the prototype"}
+          </Button>
+          {open ? (
+            <PrototypeFrame
+              src={url}
+              title={`Prototype of ${direction.title}`}
+              width={PREVIEW.width}
+              height={PREVIEW.height}
+              pins={[]}
+              draft={null}
+              placing={false}
+              onPlace={noPlace}
+            />
+          ) : null}
+        </div>
       ) : direction.prototype === null ? null : (
         <p className="font-mono text-xs break-all text-muted-fg">{direction.prototype}</p>
       )}

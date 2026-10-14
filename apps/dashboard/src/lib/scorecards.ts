@@ -1,5 +1,7 @@
 import {
+  isServableArtifactPath,
   LOOKBACK_LIMITS,
+  LOOKBACK_REPO,
   parsePersisted,
   ScorecardIndexSchema,
   ScorecardSchema,
@@ -155,10 +157,25 @@ export interface ScorecardGroup {
   readonly versions: readonly ScorecardVersion[];
 }
 
-/** The index grouped by role (and mode) and host, newest scorecard first in each group. */
+/**
+ * Whether an index entry names a file the dashboard may read as a scorecard: servable through
+ * the artifacts route and under `LOOKBACK_REPO.scorecardsDir` (the engine refuses others too).
+ */
+const isScorecardPath = (path: string): boolean =>
+  isServableArtifactPath(path) && path.startsWith(`${LOOKBACK_REPO.scorecardsDir}/`);
+
+/** Index entries whose path is not a scorecard path: contract problems, never fetched. */
+export const refusedScorecardPaths = (index: ScorecardIndex): string[] =>
+  index.scorecards.filter((e) => !isScorecardPath(e.path)).map((e) => e.path);
+
+/**
+ * The index grouped by role (and mode) and host, newest scorecard first in each group. Entries
+ * whose path is not under the scorecards directory are left out ({@link refusedScorecardPaths}).
+ */
 export const groupScorecards = (index: ScorecardIndex): ScorecardGroup[] => {
   const groups = new Map<string, { title: string; entries: ScorecardIndex["scorecards"] }>();
   for (const entry of index.scorecards) {
+    if (!isScorecardPath(entry.path)) continue;
     const p = entry.prompt;
     const role = p.mode === undefined ? p.role : `${p.role} (${p.mode})`;
     const key = `${role}|${p.host}`;

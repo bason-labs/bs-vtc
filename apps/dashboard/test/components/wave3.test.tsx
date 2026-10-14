@@ -1,3 +1,4 @@
+import userEvent from "@testing-library/user-event";
 import { describe, expect, it } from "vitest";
 import { readFixture } from "../fixtures";
 import {
@@ -8,6 +9,7 @@ import {
   SCORECARD_INDEX,
   SHA,
   VISUAL_REPORT_PATH,
+  w3Event,
 } from "../wave3-fixtures";
 import { artifactContent } from "../../scripts/dev-fixtures.ts";
 import { renderApp, screen, within } from "./render";
@@ -57,6 +59,26 @@ describe("Gates view (gate.requested: G2 directions, unverified facts, design co
     expect(within(card).getByText("Component date-picker is not registered")).toBeInTheDocument();
   });
 
+  it("shows a direction's prototype only in the sandboxed frame, never in a tab of its own", async () => {
+    const user = userEvent.setup();
+    renderApp("/gates/?run=golden-1", {
+      ...withEvents,
+      "/api/health": () =>
+        Response.json({
+          ...(readFixture("health") as object),
+          mode: "live",
+          prototype_url: "http://127.0.0.1:4311/",
+        }),
+    });
+    const other = await screen.findByTestId("direction-night-shift");
+    expect(within(other).queryByRole("link")).toBeNull();
+    await user.click(await within(other).findByRole("button", { name: "Show the prototype" }));
+    const iframe = within(other).getByTitle<HTMLIFrameElement>("Prototype of Night shift");
+    expect(iframe.getAttribute("sandbox")).toBe("allow-scripts");
+    expect(iframe.getAttribute("src")).toBe("http://127.0.0.1:4311/night-shift/index.html");
+    expect(iframe).toHaveAttribute("referrerpolicy", "no-referrer");
+  });
+
   it("says so when no gate was requested", async () => {
     renderApp("/gates/?run=golden-1");
     expect(await screen.findByText("No gate requested yet")).toBeInTheDocument();
@@ -85,6 +107,13 @@ describe("Run view (pending gate, engine-launched runs)", () => {
               pid: 77,
               started_at: "2026-10-13T12:00:00.000Z",
             },
+            {
+              action_id: "a-13",
+              role: "qa",
+              host: "codex",
+              pid: null,
+              started_at: "2026-10-13T11:15:00.000Z",
+            },
           ],
         }),
     });
@@ -106,6 +135,44 @@ describe("Run view (pending gate, engine-launched runs)", () => {
     const notices = await screen.findByRole("list", { name: "Run notices" });
     expect(notices).toHaveTextContent("Level 3 is not available: this run merges at Level 2");
     expect(notices).toHaveTextContent("Auto-resume on codex did not start");
+  });
+
+  it("stops showing live states once the run finished", async () => {
+    const page = eventPageWithWave3() as { events: { type: string; seq: number }[] };
+    const last = page.events.reduce((n, e) => Math.max(n, e.seq), 0);
+    const finished = w3Event(last + 1, "run.finished", { outcome: "aborted" });
+    renderApp("/run/?run=golden-1", {
+      "/api/runs/golden-1/events": () =>
+        Response.json({
+          ...page,
+          events: [...page.events.filter((e) => e.type !== "gate.approved"), finished],
+        }),
+    });
+    const runs = await screen.findByRole("list", { name: "Headless runs" });
+    expect(within(runs).getByTestId("headless-a-13")).toHaveTextContent("Did not finish");
+    expect(screen.queryByRole("status", { name: "Gate waiting" })).toBeNull();
+  });
+
+  it("says when the event log is longer than the dashboard reads", async () => {
+    const page = eventPageWithWave3() as { events: { seq: number }[] };
+    const limits = new Set<string | null>();
+    renderApp("/run/?run=golden-1", {
+      // Every page answers "more after": the reader stops at its page cap and says so.
+      "/api/runs/golden-1/events": (_init: RequestInit | undefined, url: string) => {
+        const query = new URL(url, "http://127.0.0.1").searchParams;
+        limits.add(query.get("limit"));
+        const after = Number(query.get("after"));
+        return Response.json({
+          ...page,
+          events: after === 0 ? page.events : [],
+          next_after: after + 1,
+        });
+      },
+    });
+    expect(await screen.findByTestId("event-log-truncated")).toHaveTextContent(
+      "The newest events are not shown",
+    );
+    expect([...limits]).toEqual(["2000"]);
   });
 
   it("shows neither when the run has none", async () => {

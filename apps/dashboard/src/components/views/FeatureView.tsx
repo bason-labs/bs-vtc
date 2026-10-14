@@ -30,7 +30,7 @@ export function FeatureView({ run, feature }: { run: string | null; feature: str
   );
   const events = useRunEvents(run, ["level3"]);
   const preflight = useMemo(
-    () => (events.data === undefined ? null : mergePreflight(events.data)),
+    () => (events.data === undefined ? null : mergePreflight(events.data.events)),
     [events.data],
   );
   if (run === null) return <MissingParam what="run" />;
@@ -62,10 +62,12 @@ export function FeatureView({ run, feature }: { run: string | null; feature: str
                 <FeatureSummary run={run} feature={chosen} tasks={tasks.data?.tasks ?? []}>
                   {events.data === undefined ? null : (
                     <>
-                      <FinalReviewStepsCard rows={finalReviewStepRows(events.data, chosen.id)} />
+                      <FinalReviewStepsCard
+                        rows={finalReviewStepRows(events.data.events, chosen.id)}
+                      />
                       <Level3Card
                         preflight={preflight}
-                        {...featureLevel3(events.data, chosen.id)}
+                        {...featureLevel3(events.data.events, chosen.id)}
                       />
                     </>
                   )}

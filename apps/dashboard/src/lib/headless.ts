@@ -70,12 +70,29 @@ export interface HeadlessRunView {
 
 const minutes = (ms: number): string => `${String(Math.round(ms / 60_000))} min`;
 
-/** Engine-launched runs, newest first. */
+const RUNNING: StatusMeta = { label: "Running", tone: "accent", live: true };
+/** Started, never ended, and the run has finished (e.g. the engine stopped mid-run). */
+const DID_NOT_FINISH: StatusMeta = { label: "Did not finish", tone: "warn" };
+/** Started, never ended, and the live engine does not report it in flight. */
+const NO_END: StatusMeta = { label: "No end recorded", tone: "warn" };
+
+/**
+ * Engine-launched runs, newest first. `inFlight` is the active run's
+ * `StatusResult.headless_runs`, or `null` when that is not known (another run, an older engine,
+ * a snapshot): only then is a start with no end taken to be still running.
+ */
 export const headlessRuns = (
   events: readonly VtcEvent[],
-  inFlight: readonly HeadlessRunSummary[] = [],
+  inFlight: readonly HeadlessRunSummary[] | null = null,
 ): HeadlessRunView[] => {
   const ended = new Map(eventsOfType(events, "headless.ended").map((e) => [e.data.action_id, e]));
+  const live = new Set((inFlight ?? []).map((r) => r.action_id));
+  const runEnded = eventsOfType(events, "run.finished").length > 0;
+  const unended = (actionId: string): StatusMeta => {
+    if (live.has(actionId)) return RUNNING;
+    if (runEnded) return DID_NOT_FINISH;
+    return inFlight === null ? RUNNING : NO_END;
+  };
   const runs: HeadlessRunView[] = eventsOfType(events, "headless.started").map(
     ({ event, data }) => {
       const end = ended.get(data.action_id)?.data;
@@ -97,14 +114,13 @@ export const headlessRuns = (
         host: event.host ?? "unknown host",
         task: event.task ?? null,
         startedAt: event.ts,
-        status:
-          end === undefined ? { label: "Running", tone: "accent", live: true } : outcomeMeta(end),
+        status: end === undefined ? unended(data.action_id) : outcomeMeta(end),
         detail: parts.filter((p) => p !== null).join(" · "),
       };
     },
   );
   const known = new Set(runs.map((r) => r.actionId));
-  for (const r of inFlight) {
+  for (const r of inFlight ?? []) {
     if (known.has(r.action_id)) continue;
     runs.push({
       actionId: r.action_id,
@@ -112,7 +128,7 @@ export const headlessRuns = (
       host: r.host,
       task: r.task ?? null,
       startedAt: r.started_at,
-      status: { label: "Running", tone: "accent", live: true },
+      status: RUNNING,
       detail: r.pid === null ? "In flight" : `pid ${String(r.pid)}`,
     });
   }

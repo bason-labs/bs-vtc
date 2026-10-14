@@ -8,14 +8,16 @@ import type { StatusMeta } from "./states";
  * `gate.requested` event with its G2 design directions, the facts still unverified (each needs
  * a waiver with a reason, reading 110) and the DESIGN coverage check, then the decision
  * (`gate.approved` / `gate.rejected`). Approval happens in the Lead chat; this only shows it.
+ * A request still open when the run finished (`run.finished`) no longer waits for anyone.
  */
-export type GateOutcomeId = "pending" | "approved" | "rejected" | "superseded";
+export type GateOutcomeId = "pending" | "approved" | "rejected" | "superseded" | "unanswered";
 
 const OUTCOME: Readonly<Record<GateOutcomeId, StatusMeta>> = {
   pending: { label: "Waiting for approval in the Lead chat", tone: "accent", live: true },
   approved: { label: "Approved", tone: "ok" },
   rejected: { label: "Rejected", tone: "danger" },
   superseded: { label: "Asked again later", tone: "neutral" },
+  unanswered: { label: "Not decided before the run ended", tone: "neutral" },
 };
 
 const NOVELTY: Readonly<Record<G2Direction["novelty"] | "unknown", StatusMeta>> = {
@@ -70,6 +72,7 @@ export const gateRequests = (events: readonly VtcEvent[]): GateRequestView[] => 
   const approvals = eventsOfType(events, "gate.approved");
   const rejections = eventsOfType(events, "gate.rejected");
   const waivedEvents = eventsOfType(events, "fact.waived");
+  const finished = eventsOfType(events, "run.finished")[0];
   return requests
     .map(({ event, data }): GateRequestView => {
       const approved = approvals.find(
@@ -89,6 +92,8 @@ export const gateRequests = (events: readonly VtcEvent[]): GateRequestView[] => 
         outcome = decision === approved ? "approved" : "rejected";
       } else if (newer !== undefined) {
         outcome = "superseded";
+      } else if (finished !== undefined && finished.event.seq > event.seq) {
+        outcome = "unanswered";
       }
       const decided = outcome === "approved" || outcome === "rejected" ? decision : undefined;
       const approval = outcome === "approved" ? approved?.data : undefined;
@@ -163,8 +168,8 @@ export const pendingGate = (events: readonly VtcEvent[]): GateRequestView | null
 const PROTOTYPE_ORIGIN = /^http:\/\/127\.0\.0\.1:[1-9]\d{0,4}$/;
 
 /**
- * A direction's prototype on the prototype origin (`HealthResult.prototype_url`), opened in its
- * own tab; `null` when the path is outside `.vtc/design/prototype/` or the result would leave
+ * A direction's prototype on the prototype origin (`HealthResult.prototype_url`), for the
+ * sandboxed frame only (AD-5 rule 9: never a top-level page); `null` when the path is outside `.vtc/design/prototype/` or the result would leave
  * that loopback origin.
  */
 export const directionPrototypeUrl = (prototypeUrl: string | null, path: string): string | null => {
