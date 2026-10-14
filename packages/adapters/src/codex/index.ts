@@ -1,15 +1,20 @@
 /**
  * Codex host adapter (§4.1, §12.1, AD-6). Usage comes from the adapter's own managed
  * `codex app-server` child (`readUsage` / `watchUsage`, stopped by `dispose`, AD-6 rule 4).
+ * Engine-launched runs are unattended (AD-25; a Codex Lead's roles run this way, H-1): an
+ * explicit sandbox and no approval prompts, process-group supervision, and `authStatus()` through
+ * `codex login status` before every start or resume.
  */
 import { tmpdir, userInfo } from "node:os";
 import { join } from "node:path";
 import type { HostAdapter, HostCapabilities, SessionRef, SpawnRoleRequest } from "@vtc/shared";
+import { createAuthStatusRunner } from "../common/auth-status.js";
 import { createRunLauncher, subagentSpawn } from "../common/dispatch.js";
 import { envHome } from "../common/homes.js";
 import { ensurePrivateDir, writeFileAtomic } from "../common/files.js";
-import { nodeSpawner, type Spawner } from "../common/process.js";
+import { createNodeSpawner, type Spawner } from "../common/process.js";
 import { createCodexUsageSource } from "./app-server.js";
+import { CODEX_AUTH_STATUS } from "./auth.js";
 import { codexHeadlessCommand, codexSandboxProfile, codexSchemaFile, HOST } from "./command.js";
 import { codexOutcomeAfterExit, parseCodexEvents } from "./events.js";
 import { installCodex } from "./install.js";
@@ -39,7 +44,16 @@ export interface CodexAdapterOptions {
   readonly appServerCwd?: string;
   readonly now?: () => Date;
   readonly usagePollMs?: number;
+  /**
+   * SIGTERM → SIGKILL grace when a headless run is stopped. Default
+   * `HEADLESS_DEFAULTS.termGraceMs` (AD-25 rule 4).
+   */
   readonly killGraceMs?: number;
+  /**
+   * SIGINT → SIGTERM grace when a headless run is stopped. Default
+   * `HEADLESS_DEFAULTS.interruptGraceMs` (AD-25 rule 4).
+   */
+  readonly interruptGraceMs?: number;
   /** Reported to the app-server as the client version. */
   readonly clientVersion?: string;
   /**
@@ -52,6 +66,14 @@ export interface CodexAdapterOptions {
    * is enforced (see `CODEX_UNIX_CONNECT_BLOCKED_PLATFORMS`). Default: `process.platform`.
    */
   readonly platform?: NodeJS.Platform;
+  /**
+   * Variable names from the user's `~/.vtc/config.yaml` `env_passthrough` (D-ak, spine §5 reading
+   * 57) that pass to host children besides the fixed allowlist; host credential variables never
+   * do. Used by the default spawner only. Default: none.
+   */
+  readonly envPassthrough?: readonly string[];
+  /** How long `codex login status` may run before it is killed. Default 20 s. */
+  readonly authTimeoutMs?: number;
 }
 
 /** Per user, so two users of one machine never share it (and a planted one is refused). */
@@ -59,7 +81,8 @@ const defaultScratchDir = (): string =>
   join(tmpdir(), `vtc-codex-${String(process.getuid?.() ?? userInfo().username)}`);
 
 export const createCodexAdapter = (options: CodexAdapterOptions = {}): HostAdapter => {
-  const spawner = options.spawner ?? nodeSpawner;
+  const spawner =
+    options.spawner ?? createNodeSpawner({ envPassthrough: options.envPassthrough ?? [] });
   const scratchDir = options.scratchDir ?? defaultScratchDir();
   const commandOptions = { scratchDir };
   const profileOptions = {
@@ -69,7 +92,15 @@ export const createCodexAdapter = (options: CodexAdapterOptions = {}): HostAdapt
   const runs = createRunLauncher({
     spawner,
     outcome: codexOutcomeAfterExit,
-    ...(options.killGraceMs === undefined ? {} : { killGraceMs: options.killGraceMs }),
+    ...(options.killGraceMs === undefined ? {} : { termGraceMs: options.killGraceMs }),
+    ...(options.interruptGraceMs === undefined
+      ? {}
+      : { interruptGraceMs: options.interruptGraceMs }),
+  });
+  const auth = createAuthStatusRunner({
+    spawner,
+    now: options.now ?? (() => new Date()),
+    ...(options.authTimeoutMs === undefined ? {} : { timeoutMs: options.authTimeoutMs }),
   });
   let usage: ReturnType<typeof createCodexUsageSource> | null = null;
   const usageSource = () => {
@@ -121,7 +152,9 @@ export const createCodexAdapter = (options: CodexAdapterOptions = {}): HostAdapt
     sandboxProfile: (request) => codexSandboxProfile(request, profileOptions),
     readUsage: () => usageSource().read(),
     watchUsage: (onUpdate) => usageSource().watch(onUpdate),
+    authStatus: () => auth.check(CODEX_AUTH_STATUS),
     async dispose() {
+      auth.dispose();
       await Promise.all([runs.dispose(), usage?.dispose()]);
     },
   };

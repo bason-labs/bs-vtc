@@ -9,6 +9,13 @@
 import type { HostOutcome, ParsedStream, SessionRef, TokenUsage } from "@vtc/shared";
 import { classifyFailureText, resetFromWaitText } from "../common/failure-text.js";
 import type { RunExit } from "../common/headless-run.js";
+import { CODEX_BINARY } from "./command.js";
+import {
+  describeExit,
+  endedWithoutResult,
+  spawnFailure,
+  withStopCause,
+} from "../common/outcome.js";
 import {
   count,
   epochToIso,
@@ -171,24 +178,27 @@ export const parseCodexEvents = (lines: readonly string[]): ParsedStream => {
   };
 };
 
-/** The outcome of a finished `codex exec`: its last turn, else its last error, else the exit. */
+/**
+ * The outcome of a finished `codex exec` (AD-25 rules 4–5; Codex exit codes are undocumented, so
+ * they never decide): its last turn (a failed turn without a limit or sign-in signal takes the
+ * launcher's stop cause); else a limit or sign-in signal in its last `error` event or on stderr;
+ * else an `error` saying why the process ended: the launcher's stop (`timeout`, `idle`,
+ * `killed`), a kill from outside (`killed`) or a bare exit (`exit_code`).
+ */
 export const codexOutcomeAfterExit = (lines: readonly string[], exit: RunExit): HostOutcome => {
   const s = scan(lines);
   const outcome = outcomeOf(s, exit.endedAt);
-  if (outcome !== null) return outcome;
-  if (exit.error !== null) {
-    return {
-      kind: "error",
-      message: `could not start codex: ${exit.error.message}`,
-      retryable: false,
-      tokens: null,
-      cost_usd: null,
-    };
-  }
-  if (s.lastError !== null) return failureOutcome(s, s.lastError, true, exit.endedAt);
-  const stderr = exit.stderrTail.trim();
-  const how =
-    exit.code === null ? `was stopped by ${exit.signal ?? "a signal"}` : `exited ${exit.code}`;
-  const message = `codex ${how} before the turn finished${stderr === "" ? "" : `: ${stderr}`}`;
-  return failureOutcome(s, { message, info: null, resetsAt: null }, true, exit.endedAt);
+  if (outcome !== null) return withStopCause(outcome, exit);
+  if (exit.error !== null) return spawnFailure(CODEX_BINARY, exit.error);
+  const lastError =
+    s.lastError === null ? null : failureOutcome(s, s.lastError, true, exit.endedAt);
+  if (lastError !== null && lastError.kind !== "error") return lastError;
+  const message = describeExit(CODEX_BINARY, exit, "before the turn finished");
+  const byStderr = failureOutcome(s, { message, info: null, resetsAt: null }, true, exit.endedAt);
+  if (byStderr.kind !== "error") return byStderr;
+  return endedWithoutResult(
+    s.lastError === null ? message : `${message}; last error: ${s.lastError.message}`,
+    exit,
+    { tokens: s.tokens, cost_usd: null },
+  );
 };

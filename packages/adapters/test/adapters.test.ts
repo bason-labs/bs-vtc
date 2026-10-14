@@ -1,6 +1,9 @@
-import { readFileSync } from "node:fs";
+import { readdirSync, readFileSync } from "node:fs";
+import { join } from "node:path";
+import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
 import {
+  findDisallowedHostArgs,
   findForbiddenHostArgs,
   HOST_IDS,
   StatuslineIngestSchema,
@@ -53,6 +56,11 @@ describe("adapter registry (AD-6 rule 6)", () => {
       expect(ADAPTER_FACTORIES[host]?.().capabilities).toEqual(HOST_CAPABILITIES[host]);
     }
   });
+  it("every host reports its login through its own status command before unattended runs (AD-25 rule 3)", () => {
+    for (const host of HOST_IDS) {
+      expect(typeof ADAPTER_FACTORIES[host]?.().authStatus).toBe("function");
+    }
+  });
   it("only Codex pulls usage itself; Claude usage is pushed (AD-6 rule 4)", () => {
     const codex = ADAPTER_FACTORIES.codex!();
     const claude = ADAPTER_FACTORIES["claude-code"]!();
@@ -98,6 +106,21 @@ describe("adapter registry (AD-6 rule 6)", () => {
   });
 });
 
+describe("model ids (AD-6 rule 2)", () => {
+  const filesUnder = (dir: string): string[] =>
+    readdirSync(dir, { withFileTypes: true }).flatMap((entry) =>
+      entry.isDirectory() ? filesUnder(join(dir, entry.name)) : [join(dir, entry.name)],
+    );
+  it("no adapter source, script or fixture names a Codex model id: the engine resolves them, and the recommended ids are a §7 spike row", () => {
+    const root = fileURLToPath(new URL("..", import.meta.url));
+    const files = ["src", "scripts", "test"].flatMap((dir) => filesUnder(join(root, dir)));
+    expect(files.length).toBeGreaterThan(20);
+    for (const file of files) {
+      expect(readFileSync(file, "utf8"), file).not.toMatch(/\bgpt-\d/iu);
+    }
+  });
+});
+
 describe("HostAdapter safety contract (AD-9)", () => {
   it("runs for every registered adapter, and only known hosts can register", () => {
     for (const host of Object.keys(ADAPTER_FACTORIES)) expect(HOST_IDS).toContain(host);
@@ -115,6 +138,7 @@ describe("HostAdapter safety contract (AD-9)", () => {
         "--dangerously-bypass-approvals-and-sandbox",
         "--yolo",
         "--sandbox=danger-full-access",
+        "--dangerously-bypass-hook-trust",
         "/Users/me/.claude/.credentials.json",
         "ANTHROPIC_API_KEY=sk-x",
         "--allowedTools",
@@ -126,9 +150,24 @@ describe("HostAdapter safety contract (AD-9)", () => {
       "--dangerously-bypass-approvals-and-sandbox",
       "--yolo",
       "--sandbox=danger-full-access",
+      // Codex's hook-trust bypass is an AD-9 marker since 4.5.0 (AD-25)
+      "--dangerously-bypass-hook-trust",
       "/Users/me/.claude/.credentials.json",
       "ANTHROPIC_API_KEY=sk-x",
     ]);
+  });
+  it("the disallowed-flag detector flags API-key mode and automatic approvers (AD-25 rule 2)", () => {
+    expect(
+      findDisallowedHostArgs([
+        "-p",
+        "--bare",
+        "--approve-for-me",
+        "--not-so-yolo=1",
+        "--barely",
+        "--permission-mode",
+        "dontAsk",
+      ]),
+    ).toEqual(["--bare", "--approve-for-me", "--not-so-yolo=1"]);
   });
 });
 

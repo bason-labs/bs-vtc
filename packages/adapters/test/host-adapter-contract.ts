@@ -5,15 +5,20 @@
  * It checks everything an adapter hands to a host: sandbox settings and CLI arguments, the exact
  * headless command (fresh and resumed, every tool profile), and every file `install` writes when
  * it installs a compiled plugin (a synthetic one in the compiler's layout) into a temp home and
- * project.
+ * project. Since 4.5.0 (AD-25 rules 1–2) every fresh and resumed headless argv also isolates the
+ * repo's host settings and MCP servers and denies every prompt nobody can answer
+ * (`headlessIsolationGaps` is empty), and carries no flag that drops the user's login or approves
+ * on the user's behalf (`findDisallowedHostArgs` finds nothing).
  */
 import { mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterAll, describe, expect, it } from "vitest";
 import {
+  findDisallowedHostArgs,
   findForbiddenHostArgs,
   findForbiddenInText,
+  headlessIsolationGaps,
   jsonSchemaFor,
   type HostAdapter,
   type RoleTools,
@@ -68,7 +73,7 @@ export const runHostAdapterSafetyContract = (adapter: SafetyContractAdapter): vo
     );
 
     it.each(PROFILES.map((tools) => [tools.profile, tools] as const))(
-      "headlessCommand(%s), fresh and resumed, is clean (AD-9)",
+      "headlessCommand(%s), fresh and resumed, is clean and isolated (AD-9, AD-25)",
       (_profile, tools) => {
         const request: SpawnRoleRequest = {
           role: "engineer",
@@ -88,6 +93,10 @@ export const runHostAdapterSafetyContract = (adapter: SafetyContractAdapter): vo
           expect(
             findForbiddenHostArgs(Object.entries(command.env).flatMap(([k, v]) => [k, v])),
           ).toEqual([]);
+          // AD-25 rule 2: no API-key mode and no automatic approver
+          expect(findDisallowedHostArgs(command.args)).toEqual([]);
+          // AD-25 rule 1: the repo's host settings and MCP stay out, and nobody is ever asked
+          expect(headlessIsolationGaps(adapter.host, command.args)).toEqual([]);
         }
       },
     );
