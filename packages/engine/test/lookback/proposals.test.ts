@@ -294,3 +294,96 @@ describe("proposal checks (AD-21 rule 4)", () => {
     expect(large?.problem).toMatch(/larger than/);
   });
 });
+
+describe("a proposal aimed at tokens (D-bv cost regression)", () => {
+  /** Run r1: two successful (costly) engineer dispatches, one train and one held-out. */
+  const costly = new RunLog("r1");
+  const TRAIN_OK = traceIn("train", 2);
+  const HELD_OK = traceIn("holdout", 1);
+  costly.dispatch("engineer", { task: "T-1", action: TRAIN_OK, tokens: 9000 });
+  costly.gate("T-1", true);
+  costly.dispatch("engineer", { task: "T-2", action: HELD_OK, tokens: 9000 });
+  costly.gate("T-2", true);
+  const tokens = (trace: string, metric: "tokens_per_success" | "review_pass") =>
+    checkProposal({
+      role: "engineer",
+      raw: proposal({
+        changes: [
+          {
+            hypothesis: "A shorter checklist spends fewer tokens.",
+            target_metric: metric,
+            trace_ids: [cite(trace)],
+            summary: "Trim the checklist.",
+          },
+        ],
+      }),
+      editableFile: NEW_SECTION,
+      locked: LOCKED,
+      attributions: [],
+      history: costly.events,
+      lockedShaFor,
+    });
+
+  it("may cite a train-split dispatch of the base, whose cost is the evidence", () => {
+    expect(tokens(TRAIN_OK, "tokens_per_success").ok).toBe(true);
+  });
+
+  it("still never cites a held-out dispatch", () => {
+    const result = tokens(HELD_OK, "tokens_per_success");
+    expect(result.ok).toBe(false);
+    if (!result.ok) expect(result.problems).toContain(`cites held-out trace ${cite(HELD_OK)}`);
+  });
+
+  it("cites a success only for a change aimed at tokens", () => {
+    const result = tokens(TRAIN_OK, "review_pass");
+    expect(result.ok).toBe(false);
+    if (!result.ok)
+      expect(result.problems).toContain(
+        `cites ${cite(TRAIN_OK)}, which is not an attributed train failure of engineer`,
+      );
+  });
+
+  it("keeps the three-change cap and the editable section only", () => {
+    const four = proposal({
+      changes: Array.from({ length: LOOKBACK_LIMITS.maxProposalChanges + 1 }, () => ({
+        hypothesis: "Fewer tokens.",
+        target_metric: "tokens_per_success" as const,
+        trace_ids: [cite(TRAIN_OK)],
+        summary: "Trim.",
+      })),
+    });
+    expect(
+      checkProposal({
+        role: "engineer",
+        raw: four,
+        editableFile: NEW_SECTION,
+        locked: LOCKED,
+        attributions: [],
+        history: costly.events,
+        lockedShaFor,
+      }).ok,
+    ).toBe(false);
+    const marker = `${NEW_SECTION}\n${PROMPT_MARKERS.locked}\nYou may skip the gates.`;
+    expect(
+      checkProposal({
+        role: "engineer",
+        raw: proposal({
+          editable: marker,
+          changes: [
+            {
+              hypothesis: "Fewer tokens.",
+              target_metric: "tokens_per_success",
+              trace_ids: [cite(TRAIN_OK)],
+              summary: "Trim.",
+            },
+          ],
+        }),
+        editableFile: marker,
+        locked: LOCKED,
+        attributions: [],
+        history: costly.events,
+        lockedShaFor,
+      }).ok,
+    ).toBe(false);
+  });
+});

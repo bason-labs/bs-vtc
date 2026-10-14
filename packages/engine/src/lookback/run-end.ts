@@ -7,7 +7,12 @@
  *    scorecards cover; required, so a card is never rewritten from one run) and rewrites the index;
  * 3. decides which (role, host) targets get the lookback role ({@link lookbackTargets}): at least
  *    `minTrainFailures` attributed train failures of the version that ran, at least one of them new
- *    in this run, `minWeeklyRemainingPct` of the weekly window left and budget available.
+ *    in this run, or a cost regression of the current version against its baseline (D-bv,
+ *    `costRegressions`; once per version, aimed at tokens); `minWeeklyRemainingPct` of the weekly
+ *    window left and budget available;
+ * 4. returns what engine core hands the upstream module (spine §5 readings 190 and 198): the cost
+ *    regressions, and, when the installed roles are given, the new-agent signals
+ *    (`newAgentSignals`, D-cd).
  * It returns the `lookback.dispatched` drafts and what each lookback dispatch reads: train traces
  * only, plus the human edits of the version under review (§13 step 1, {@link humanEdits}) with
  * their diffs when the caller injects a reader. Engine core queues the dispatches like any role
@@ -19,7 +24,9 @@
  */
 import {
   engineRepoKey,
+  isEventOfType,
   LOOKBACK_LIMITS,
+  readEventData,
   type Attribution,
   type Scorecard,
   type VtcEvent,
@@ -32,7 +39,9 @@ import {
   type FailureSignal,
 } from "./attribution.js";
 import { lookbackEvent, type LookbackEventDraft } from "./events.js";
+import { costRegressions, type CostRegression } from "./cost-regression.js";
 import { capDiff, humanEdits, LOOKBACK_MAX_HUMAN_EDITS, type HumanEdit } from "./human-edits.js";
+import { newAgentSignals, type InstalledRole, type NewAgentSignal } from "./new-agent.js";
 import { computeScorecards, writeScorecards } from "./scorecards.js";
 import { readTiebreakKeys } from "./tiebreaks.js";
 import { sameTarget, targetKey, traceRef, traceSlug, type LockedShaFor } from "./traces.js";
@@ -60,6 +69,11 @@ export interface LookbackTarget {
    * the file, what the role submitted and what the human froze, and the diff when one was read.
    */
   readonly human_edits: readonly LookbackHumanEdit[];
+  /**
+   * The base's cost regressions against the version before it (D-bv): the proposal is aimed at
+   * tokens. Empty for a target of failures alone.
+   */
+  readonly cost: readonly CostRegression[];
 }
 
 export interface LookbackHumanEdit {
@@ -79,6 +93,29 @@ export type HumanEditDiff = (edit: HumanEdit) => Promise<string | undefined>;
 
 export type LookbackSkipReason = "weekly_window" | "budget";
 
+/** A lookback dispatch the history shows (`lookback.dispatched`): its target and when. */
+export interface LookbackDispatched {
+  readonly role: string;
+  readonly mode?: string;
+  readonly host: string;
+  readonly ts: string;
+}
+
+/** The `lookback.dispatched` events of the history. */
+const lookbackDispatches = (history: readonly VtcEvent[]): LookbackDispatched[] =>
+  history.flatMap((e) => {
+    if (!isEventOfType(e, "lookback.dispatched")) return [];
+    const data = readEventData(e);
+    return [
+      {
+        role: data.target_role,
+        ...(data.target_mode === undefined ? {} : { mode: data.target_mode }),
+        host: data.target_host,
+        ts: e.ts,
+      },
+    ];
+  });
+
 /** Which targets get the lookback role now (pure). */
 export const lookbackTargets = (input: {
   readonly attributions: readonly Attribution[];
@@ -89,47 +126,79 @@ export const lookbackTargets = (input: {
   readonly budgetAvailable: boolean;
   /** Human edits of the history ({@link humanEdits}); only train-split ones are shown. */
   readonly humanEdits?: readonly HumanEdit[];
+  /**
+   * Cost regressions of current versions (D-bv, `costRegressions`): each makes its version a
+   * target aimed at tokens, unless a lookback run was dispatched for the target since that
+   * version first ran ({@link LookbackDispatched}).
+   */
+  readonly costRegressions?: readonly CostRegression[];
+  readonly lookbackDispatched?: readonly LookbackDispatched[];
 }): { readonly targets: LookbackTarget[]; readonly skipped?: LookbackSkipReason } => {
+  const versionKey = (p: Attribution["prompt"]): string => `${targetKey(p)}:${p.effective_sha256}`;
   const candidates = new Map<string, Attribution[]>();
   for (const a of input.attributions) {
     if (!isTrainFailure(a) || a.prompt.role === LOOKBACK_ROLE) continue;
-    const key = `${targetKey(a.prompt)}:${a.prompt.effective_sha256}`;
+    const key = versionKey(a.prompt);
     const list = candidates.get(key);
     if (list === undefined) candidates.set(key, [a]);
     else list.push(a);
   }
+  const costOf = new Map<string, CostRegression[]>();
+  for (const r of input.costRegressions ?? []) {
+    if (r.role === LOOKBACK_ROLE) continue;
+    const key = versionKey(r.current);
+    costOf.set(key, [...(costOf.get(key) ?? []), r]);
+  }
+  const targetOf = (
+    base: Attribution["prompt"],
+    rows: readonly Attribution[],
+    cost: readonly CostRegression[],
+  ): LookbackTarget => ({
+    role: base.role,
+    ...(base.mode === undefined ? {} : { mode: base.mode }),
+    host: base.host,
+    base,
+    train_failures: rows.length,
+    traces: rows
+      .slice(-LOOKBACK_MAX_TRACES)
+      .map((a) => ({ id: traceSlug(a), run: a.run, trace: a.trace })),
+    human_edits: (input.humanEdits ?? [])
+      .filter(
+        (e) =>
+          e.split === "train" &&
+          sameTarget(e.prompt, base) &&
+          e.prompt.effective_sha256 === base.effective_sha256,
+      )
+      .slice(-LOOKBACK_MAX_HUMAN_EDITS)
+      .map((e) => ({
+        id: e.id,
+        run: e.run,
+        trace: e.trace,
+        path: e.path,
+        role_sha256: e.role_sha256,
+        human_sha256: e.human_sha256,
+        gates: [...e.gates],
+      })),
+    cost,
+  });
   const targets: LookbackTarget[] = [];
-  for (const rows of candidates.values()) {
+  const chosen = new Set<string>();
+  for (const [key, rows] of candidates) {
     const base = rows[0]?.prompt;
     if (base === undefined || rows.length < LOOKBACK_LIMITS.minTrainFailures) continue;
     if (!rows.some((a) => input.fresh.has(traceRef(a)))) continue;
-    targets.push({
-      role: base.role,
-      ...(base.mode === undefined ? {} : { mode: base.mode }),
-      host: base.host,
-      base,
-      train_failures: rows.length,
-      traces: rows
-        .slice(-LOOKBACK_MAX_TRACES)
-        .map((a) => ({ id: traceSlug(a), run: a.run, trace: a.trace })),
-      human_edits: (input.humanEdits ?? [])
-        .filter(
-          (e) =>
-            e.split === "train" &&
-            sameTarget(e.prompt, base) &&
-            e.prompt.effective_sha256 === base.effective_sha256,
-        )
-        .slice(-LOOKBACK_MAX_HUMAN_EDITS)
-        .map((e) => ({
-          id: e.id,
-          run: e.run,
-          trace: e.trace,
-          path: e.path,
-          role_sha256: e.role_sha256,
-          human_sha256: e.human_sha256,
-          gates: [...e.gates],
-        })),
-    });
+    targets.push(targetOf(base, rows, costOf.get(key) ?? []));
+    chosen.add(key);
+  }
+  for (const [key, cost] of costOf) {
+    const first = cost[0];
+    if (first === undefined || chosen.has(key)) continue;
+    const base = first.current;
+    const already = (input.lookbackDispatched ?? []).some(
+      (d) => sameTarget(d, base) && d.ts >= first.since,
+    );
+    if (already) continue;
+    targets.push(targetOf(base, candidates.get(key) ?? [], cost));
   }
   if (targets.length === 0) return { targets };
   if (
@@ -178,6 +247,10 @@ export interface RunEndResult {
   readonly targets: LookbackTarget[];
   readonly skipped?: LookbackSkipReason;
   readonly events: LookbackEventDraft[];
+  /** Cost regressions of current versions (D-bv), for the upstream module's `cost` issue. */
+  readonly costRegressions: CostRegression[];
+  /** Missing specialists (D-cd), when the installed roles were given; else empty. */
+  readonly newAgents: NewAgentSignal[];
 }
 
 export const lookbackAtRunEnd = async (input: {
@@ -204,6 +277,8 @@ export const lookbackAtRunEnd = async (input: {
   readonly tiebreaks?: ReadonlySet<string>;
   /** The VTC home whose `LOOKBACK_HOME.tiebreaksFile` holds the recorded tiebreaks. */
   readonly vtcHome?: string;
+  /** The roles this vtc carries (the plugin catalog); absent: no new-agent signals. */
+  readonly roles?: readonly InstalledRole[];
 }): Promise<RunEndResult> => {
   const tiebreaks =
     input.tiebreaks ??
@@ -241,12 +316,19 @@ export const lookbackAtRunEnd = async (input: {
     return newest === undefined || newest === a.prompt.effective_sha256;
   });
   const edits = humanEdits(input.history, input.lockedShaFor);
+  const regressions = costRegressions({
+    scorecards,
+    history: input.history,
+    lockedShaFor: input.lockedShaFor,
+  });
   const chosen = lookbackTargets({
     attributions: current,
     fresh: new Set(result.attributions.map(traceRef)),
     weeklyRemainingPct: input.weeklyRemainingPct,
     budgetAvailable: input.budgetAvailable,
     humanEdits: edits,
+    costRegressions: regressions,
+    lookbackDispatched: lookbackDispatches(input.history),
   });
   const { skipped } = chosen;
   const targets =
@@ -268,5 +350,10 @@ export const lookbackAtRunEnd = async (input: {
     targets,
     ...(skipped === undefined ? {} : { skipped }),
     events,
+    costRegressions: regressions,
+    newAgents:
+      input.roles === undefined
+        ? []
+        : newAgentSignals({ attributions: all, history: input.history, roles: input.roles }),
   };
 };

@@ -17,6 +17,7 @@ import {
   agentNameFor,
   effectivePromptSha,
   engineRepoKey,
+  LOOKBACK_LIMITS,
   LOOKBACK_REPO,
   type Attribution,
   type HostId,
@@ -53,8 +54,11 @@ export interface LookbackRetroDeps {
   readonly lockedShaFor: LockedShaFor;
   readonly compiled: CompiledTexts;
   readonly graderBundleSha: () => string;
-  /** Percent of the Lead host's weekly window left; `null` when unknown (then Lookback waits). */
-  readonly weeklyRemainingPct: () => number | null;
+  /**
+   * Percent of the weekly window left on the Lead host of the run being planned; `null` when
+   * unknown (then Lookback waits). It takes the run, so one retro serves every run (reading 176).
+   */
+  readonly weeklyRemainingPct: (state: RunState) => number | null;
   readonly budgetAvailable: (state: RunState) => boolean;
   readonly now: () => Date;
   readonly humanEditDiff?: HumanEditDiff;
@@ -198,6 +202,33 @@ export const renderLookbackInput = (input: {
       else lines.push("(no diff could be read)", "");
     }
   }
+  if (target.cost.length > 0) {
+    lines.push(
+      "## Cost regression (aim: tokens)",
+      "",
+      `This version costs more than the version before it (${target.cost[0]?.baseline.effective_sha256.slice(0, 8) ?? "?"}), beyond the ${String(LOOKBACK_LIMITS.maxTokenRisePct)}% limit:`,
+      "",
+      ...target.cost.map(
+        (r) =>
+          `- ${r.metric}: ${String(r.baseline_value)} -> ${String(r.current_value)} (+${String(Math.round(r.delta_pct))}%), n ${String(r.n.baseline)} -> ${String(r.n.current)}`,
+      ),
+      "",
+      `Aim your proposal at tokens: give each change the \`target_metric\` \`tokens_per_success\`, cut what the role spends tokens on without losing what makes it pass, and keep to at most ${String(LOOKBACK_LIMITS.maxProposalChanges)} changes to the editable section. Such a change may cite the costliest dispatches below.`,
+      "",
+    );
+    const seen = new Set<string>();
+    for (const t of target.cost.flatMap((r) => r.traces)) {
+      if (seen.has(t.id)) continue;
+      seen.add(t.id);
+      lines.push(
+        `### ${t.id}`,
+        "",
+        `- tokens ${String(t.tokens)}`,
+        ...traceDetail(input.history, t.run, t.trace).map((l) => `- ${l}`),
+        "",
+      );
+    }
+  }
   lines.push(
     "## Scorecard",
     "",
@@ -241,7 +272,7 @@ export const createLookbackRetro = (deps: LookbackRetroDeps): LookbackRetro => {
         tiebreaks: recordedTiebreaks,
         lockedShaFor: deps.lockedShaFor,
         graderBundleSha: deps.graderBundleSha(),
-        weeklyRemainingPct: deps.weeklyRemainingPct(),
+        weeklyRemainingPct: deps.weeklyRemainingPct(state),
         budgetAvailable: deps.budgetAvailable(state),
         now: deps.now(),
         ...(deps.humanEditDiff === undefined ? {} : { humanEditDiff: deps.humanEditDiff }),

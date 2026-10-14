@@ -1,11 +1,14 @@
 /**
  * The grader bundle (spec §13 "Protection"; AD-21 rule 5): what scores a prompt version. Graders
- * are the gates (named by the committed gates config hash), the metric code is this module's
- * version together with the attribution tree and the Lookback limits, and the judge model is fixed
- * in the bundle. Every scorecard and replay stores the bundle's SHA, so a score computed by other
- * graders is never compared with it. All of it is engine code the lookback role cannot write.
+ * are the gates (named by the committed gates config hash) and the verdict grader of verdict roles
+ * (its version and `VERDICT_GRADED_ROLES`, D-ch, spine §5 reading 202), the metric code is this
+ * module's version together with the attribution tree and the Lookback limits, and the judge model
+ * is fixed in the bundle. Every scorecard and replay stores the bundle's SHA, so a score computed
+ * by other graders is never compared with it. All of it is engine code the lookback role cannot
+ * write.
  */
-import { ATTRIBUTION_TREE, LOOKBACK_LIMITS, sha256Hex } from "@vtc/shared";
+import { ATTRIBUTION_TREE, LOOKBACK_LIMITS, sha256Hex, VERDICT_GRADED_ROLES } from "@vtc/shared";
+import { VERDICT_GRADER_VERSION } from "./verdict-grader.js";
 
 /** Bump when a metric's definition changes (scorecards.ts, attribution.ts). */
 export const LOOKBACK_METRICS_VERSION = 1;
@@ -26,5 +29,6 @@ export const graderBundleSha = (bundle: GraderBundle): string =>
       limits: Object.entries(LOOKBACK_LIMITS).sort(([a], [b]) => a.localeCompare(b)),
       judge_model: bundle.judgeModel,
       gates_config_hash: bundle.gatesConfigHash,
+      verdict_grader: { version: VERDICT_GRADER_VERSION, roles: [...VERDICT_GRADED_ROLES].sort() },
     }),
   );
