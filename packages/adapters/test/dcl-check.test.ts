@@ -101,7 +101,20 @@ describe("what the Codex web search recordings show (D-cf, D-cl)", () => {
     expect(resultOf(recorded("cached")).summary).toMatch(/\| https:\/\//u);
   });
 
-  it("cached: a page the model was handed that no index holds is not opened", () => {
+  it("cached under read-only: a search, then an open_page of a URL its own results named", () => {
+    const lines = recorded("cached-read-only");
+    const summary = summarizeCodexWebSearch(lines);
+    const search = summary.webSearchItems[0] as { results: { url?: string }[] };
+    const named = search.results.map((result) => result.url);
+    const opened = summary.pageActions.filter(
+      (action): action is { type: "open_page"; url: string } =>
+        (action as { type?: unknown }).type === "open_page",
+    );
+    expect(opened.length).toBeGreaterThan(0);
+    for (const action of opened) expect(named).toContain(action.url);
+  });
+
+  it("cached handed a model-picked URL: open_page returns only 'Internal Error', which cannot tell no fetch from a failed fetch", () => {
     const lines = recorded("cached-open-refused");
     const summary = summarizeCodexWebSearch(lines);
     expect(summary.pageActions).toHaveLength(1);
@@ -110,6 +123,8 @@ describe("what the Codex web search recordings show (D-cf, D-cl)", () => {
     );
     expect(JSON.stringify(summary.webSearchItems)).toContain('"title":"Internal Error"');
     expect(JSON.stringify(summary.webSearchItems)).not.toContain("Example Domain");
+    // the "not accessible via this tool" wording is the role's own summary, not the tool's result
+    expect(JSON.stringify(summary.webSearchItems)).not.toContain("not accessible");
     expect(resultOf(lines).summary).toMatch(/could not open/u);
   });
 
@@ -134,6 +149,7 @@ describe("what the Codex web search recordings show (D-cf, D-cl)", () => {
     for (const name of [
       "cached",
       "cached-open-refused",
+      "cached-read-only",
       "indexed",
       "disabled",
       "disabled-apps-connector",
@@ -163,5 +179,52 @@ describe("the Claude arm recording's helpers", () => {
       ]),
     );
     expect(pluginDebugLines("a\nb plugin c\n")).toEqual(["b plugin c"]);
+  });
+});
+
+describe("what the offline Codex checks recorded (D-cl, codex-cli 0.162.1, temporary CODEX_HOME)", () => {
+  const json = (name: string): unknown => JSON.parse(fixtureText(`codex/${name}`));
+  type Read = { web_search: unknown; web_search_request?: unknown; layers?: unknown[] };
+
+  it("precedence: the top-level override wins over the user's and a project's live; the profile layer is compared by marker only; the legacy profile key is refused", () => {
+    const p = json("precedence.json") as {
+      userLive: Read;
+      userLiveWithFlag: Read;
+      profileLayerOrder: { profileOnly: string[]; profileAndFlag: string[] };
+      legacyProfileKey: { ok: boolean; stderr: string[] };
+      untrustedProject: { configReadWithFlag: Read };
+      legacySearchKeys: { withFlag: Read };
+    };
+    expect(p.userLive.web_search).toBe("live");
+    expect(p.userLiveWithFlag.web_search).toBe("cached");
+    expect(p.untrustedProject.configReadWithFlag.web_search).toBe("cached");
+    expect(p.profileLayerOrder).toEqual({
+      profileOnly: ["MARK_PROFILE"],
+      profileAndFlag: ["MARK_FLAG"],
+    });
+    expect(p.legacyProfileKey.ok).toBe(false);
+    expect(p.legacyProfileKey.stderr.join("\n")).toMatch(/no longer supported/u);
+    // the legacy search key stays set beside the override: the adapter refuses it in an override
+    expect(p.legacySearchKeys.withFlag).toMatchObject({
+      web_search: "disabled",
+      web_search_request: true,
+    });
+  });
+
+  it("plugin add: a local marketplace, then the plugin cached under CODEX_HOME and enabled in config.toml", () => {
+    const p = json("plugin-add.json") as {
+      results: { argv: string; ok: boolean; stdout: string }[];
+      configToml: string;
+      codexHomeFiles: string[];
+    };
+    expect(p.results.every((step) => step.ok)).toBe(true);
+    const add = p.results.find((step) => step.argv === "plugin add vtc@vtc-local --json");
+    expect(JSON.parse(add?.stdout ?? "{}")).toMatchObject({
+      pluginId: "vtc@vtc-local",
+      installedPath: "<codex-home>/plugins/cache/vtc-local/vtc/0.1.0",
+    });
+    expect(p.configToml).toContain("[marketplaces.vtc-local]");
+    expect(p.configToml).toContain('[plugins."vtc@vtc-local"]\nenabled = true');
+    expect(p.codexHomeFiles).toContain("plugins/cache/vtc-local/vtc/0.1.0/plugin.json");
   });
 });

@@ -75,9 +75,15 @@
  *   filter key alone on a config without `[mcp_servers.vtc]` fails to load ("invalid transport").
  *   The Lead's own session is never started here and keeps its tools.
  * - Web search (H-3, D-cf): `cached` for a `host_web` role, explicitly `disabled` for every other
- *   role, never `live`; see {@link CodexWebSearch}. Every role run also turns off the features
- *   that reach pages by another route ({@link CODEX_ROLE_FEATURES_OFF}: the apps connectors,
- *   browser and computer use).
+ *   role, never `live`; see {@link CodexWebSearch}. Every role run also turns off the Codex
+ *   features that reach pages by another route ({@link CODEX_ROLE_FEATURES_OFF}: the apps
+ *   connectors, browser and computer use). Not closed: the MCP servers in the user's own
+ *   `config.toml` (a fetch or browser server, say) still load into every role run and run outside
+ *   the role sandbox with the network. Claude runs drop them (`--strict-mcp-config`); `codex exec`
+ *   has no such flag (above), `--ignore-user-config` would drop the rest of the user's config with
+ *   them, and disabling each by name (`-c mcp_servers.<name>.enabled=false`) needs their names,
+ *   which this pure builder does not have. So Codex reports `safeHostWeb` false (see `index.ts`)
+ *   until the §7 H-3 row settles it.
  * - `codex exec` has no agent flag: a headless run gets no compiled role instructions
  *   (`developer_instructions` of `.codex/agents/vtc-*.toml`), so the role rests on the prompt
  *   (the task pack). Engine core carries the role itself (spine §5 reading 145): the compiled
@@ -120,15 +126,26 @@ type CodexSandboxMode = "read-only" | "workspace-write";
  * `CODEX_HOST_WEB_SEARCH` (`"cached"`: an OpenAI-maintained index, no live page fetch); every other
  * role gets `"disabled"`. Both are set explicitly as a top-level `--config` (`-c`) override,
  * never left to a default (a full-access sandbox defaults to `"live"`). A `code_sandboxed` role
- * with `host_web` is refused. The D-cl precedence check (codex-cli 0.162.1, a temporary
- * `CODEX_HOME`, `scripts/dcl-check.ts codex-precedence`): a `--config` override wins over the
- * user's `config.toml` and over a `--profile <name>` layer (`<name>.config.toml`), which VTC never
- * passes; the legacy `profile = "<name>"` key in `config.toml` is refused by 0.162.1 ("no longer
- * supported"), and an untrusted project `.codex/config.toml` is not loaded. The D-cl run check
- * (`codex-web`, 2026-10-15): under both role sandboxes `cached` searched the index and opened only
- * pages its results named (`open_page`), and refused a URL the model was handed that no index holds
- * ("not accessible via this tool"); `indexed` opened a result page too; `disabled` had no search
- * tool, but the apps connectors still offered one, hence {@link CODEX_ROLE_FEATURES_OFF}.
+ * with `host_web` is refused, and so is any other override that names web search or a profile
+ * (see `checkWebSearchArgs`).
+ *
+ * The D-cl precedence check (codex-cli 0.162.1, a temporary `CODEX_HOME`, `scripts/dcl-check.ts
+ * codex-precedence`, recorded as `test/fixtures/codex/precedence.json`): through `config/read`, a
+ * top-level `--config web_search=...` wins over `web_search = "live"` in the user's `config.toml`
+ * and in an untrusted project `.codex/config.toml`. A `--profile <name>` layer
+ * (`<name>.config.toml`) was compared only through `developer_instructions` markers, where the
+ * override won; `codex app-server` refuses `--profile`, so its effective `web_search` is unmeasured.
+ * VTC never passes `--profile`, and 0.162.1 refuses the legacy `profile = "<name>"` key ("no longer
+ * supported"). With the legacy `[features] web_search_request = true` in the user's config, the
+ * override still sets `web_search` and the legacy key stays as it is.
+ *
+ * The D-cl run check (`codex-web`, 2026-10-15): `cached` searched the index under both role
+ * sandboxes, and under `read-only` also opened a page its own results named (`open_page`). Handed a
+ * fresh `https://example.com/<random>` URL, its `open_page` returned one result titled "Internal
+ * Error" with no page text (the "not accessible" wording is the role's own summary, not the
+ * tool's), which does not show that no live fetch happened. `indexed` opened a result page;
+ * `disabled` had no search tool, but the apps connectors still offered one, hence
+ * {@link CODEX_ROLE_FEATURES_OFF}.
  */
 export type CodexWebSearch = typeof CODEX_HOST_WEB_SEARCH | "disabled";
 
@@ -179,20 +196,40 @@ const checkFeaturesOff = (cliArgs: readonly string[]): void => {
 /** The `--config` value that sets web search to `mode`. */
 const webSearchOverride = (mode: CodexWebSearch): string => `web_search="${mode}"`;
 
-/** Any `--config` value that sets the top-level `web_search` key, however it is spelled. */
-const WEB_SEARCH_KEY = /^\s*"?web_search"?\s*=/u;
+/** The dotted key a `--config` value sets, without quotes or spaces (`a."b".c=1` → `a.b.c`). */
+const configKey = (value: string): string => {
+  const at = value.indexOf("=");
+  return (at < 0 ? value : value.slice(0, at)).replace(/["'\s]/gu, "").toLowerCase();
+};
 
 /**
- * Throws unless the profile's overrides set web search exactly once, to `cached` or `disabled`
- * (D-cf): a profile built anywhere else can never bring live search (or any other mode) in.
+ * Whether a `--config` value could touch web search: any key that names it on any path (the
+ * top-level `web_search`, the legacy `tools.web_search` and `features.web_search_request`,
+ * `features.web_search_cached`, `profiles.<x>.web_search`), or that picks or defines a profile
+ * (`profile`, `profiles.*`), whose layer could carry its own.
+ */
+const touchesWebSearch = (value: string): boolean => {
+  const key = configKey(value);
+  return (
+    key.includes("web_search") ||
+    key === "profile" ||
+    key === "profiles" ||
+    key.startsWith("profiles.")
+  );
+};
+
+/**
+ * Throws unless the profile's overrides set web search exactly once, to `cached` or `disabled`,
+ * as the top-level key, and nothing else names web search or a profile (D-cf): a profile built
+ * anywhere else can never bring live search (or any other mode) in.
  */
 const checkWebSearchArgs = (cliArgs: readonly string[]): void => {
-  const set = cliArgs.filter((arg, i) => i % 2 === 1 && WEB_SEARCH_KEY.test(arg));
+  const set = cliArgs.filter((arg, i) => i % 2 === 1 && touchesWebSearch(arg));
   const allowed = [webSearchOverride(CODEX_HOST_WEB_SEARCH), webSearchOverride("disabled")];
   const [only] = set;
   if (set.length !== 1 || only === undefined || !allowed.includes(only)) {
     throw new Error(
-      `refusing a headless Codex run: its profile must set web search exactly once, to ${allowed.join(" or ")} (never live; D-cf, spine §5 reading 200), got ${set.length === 0 ? "none" : set.map((arg) => JSON.stringify(arg)).join(", ")}`,
+      `refusing a headless Codex run: its profile must set web search exactly once, to ${allowed.join(" or ")}, and name no other web search key or profile (never live; D-cf, spine §5 reading 200), got ${set.length === 0 ? "none" : set.map((arg) => JSON.stringify(arg)).join(", ")}`,
     );
   }
 };

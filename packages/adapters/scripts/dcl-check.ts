@@ -14,9 +14,10 @@
  *   web-search items (`web-search-summary.json`): whether any opened a page.
  * - `codex-precedence`: offline, in a temporary `CODEX_HOME` (never `~/.codex`), no login and no
  *   model call. Shows which config layer wins: the user's `config.toml`, a `--profile` layer, an
- *   untrusted project `.codex/config.toml`, and the top-level `-c` override VTC passes. Reads the
- *   effective `web_search` through the app server's `config/read` and the layer order through
- *   `codex debug prompt-input` (a `developer_instructions` marker per layer).
+ *   untrusted project `.codex/config.toml`, the legacy search keys, and the top-level `-c`
+ *   override VTC passes. Reads the effective `web_search` through the app server's `config/read`
+ *   and the layer order through `codex debug prompt-input` (a `developer_instructions` marker per
+ *   layer). The `--profile` layer is measured by marker only: the app server refuses `--profile`.
  * - `codex-plugin [--plugin-dir <dist/codex-plugin>]`: `codex plugin marketplace add` and
  *   `codex plugin add` ONLY in a temporary `CODEX_HOME`, never `~/.codex`; records what each wrote.
  * - `claude-arm [--plugin-dir <dist/claude-plugin>] [--model <id>]`: one real `claude -p` role
@@ -270,7 +271,11 @@ const configRead = (codexHome: string, cwd: string, extra: readonly string[]) =>
           child.kill();
           const result = message.result as
             | {
-                config?: { web_search?: unknown };
+                config?: {
+                  web_search?: unknown;
+                  tools?: { web_search?: unknown } | null;
+                  features?: Record<string, unknown> | null;
+                };
                 layers?: { name: unknown; config?: { web_search?: unknown } }[];
               }
             | undefined;
@@ -279,6 +284,15 @@ const configRead = (codexHome: string, cwd: string, extra: readonly string[]) =>
               ? { error: message.error }
               : {
                   web_search: result.config?.web_search ?? null,
+                  // the legacy keys, when set
+                  ...(result.config?.tools?.web_search === undefined
+                    ? {}
+                    : { tools_web_search: result.config.tools.web_search }),
+                  ...Object.fromEntries(
+                    Object.entries(result.config?.features ?? {}).filter(([key]) =>
+                      key.startsWith("web_search"),
+                    ),
+                  ),
                   layers: (result.layers ?? []).map((layer) => ({
                     layer: (layer.name as { type?: unknown }).type,
                     web_search: layer.config?.web_search ?? null,
@@ -327,6 +341,9 @@ const codexPrecedence = async (args: DclArgs): Promise<void> => {
           .stdout,
       ),
     };
+    // only the developer_instructions layer order is measured here: `codex app-server` refuses
+    // `--profile` (0.162.1: "--profile only applies to runtime commands"), so `config/read` cannot
+    // show the effective `web_search` under a profile layer, and `debug prompt-input` lists no tools
     // 3. the legacy active-profile key in config.toml
     setUser('profile = "legacy"\n\n[profiles.legacy]\nweb_search = "live"\n');
     const legacy = codexIn(codexHome, cwd, ["debug", "prompt-input", "hi"]);
@@ -347,6 +364,14 @@ const codexPrecedence = async (args: DclArgs): Promise<void> => {
     results.untrustedProject = {
       layerOrder: markers(codexIn(codexHome, cwd, ["debug", "prompt-input", "hi"]).stdout),
       configReadWithFlag: await configRead(codexHome, cwd, ["-c", 'web_search="cached"']),
+    };
+    // 5. the legacy keys that turn search on (`[features] web_search_request`, `[tools]
+    // web_search`) in the user's config.toml, against VTC's top-level override
+    rmSync(join(cwd, ".codex"), { recursive: true, force: true });
+    setUser("[features]\nweb_search_request = true\n\n[tools]\nweb_search = true\n");
+    results.legacySearchKeys = {
+      withoutFlag: await configRead(codexHome, cwd, []),
+      withFlag: await configRead(codexHome, cwd, ["-c", 'web_search="disabled"']),
     };
     const text = JSON.stringify(results, null, 2)
       .split(codexHome)
@@ -449,7 +474,8 @@ const claudeArm = async (args: DclArgs): Promise<void> => {
     cpSync(plugin, armDir, { recursive: true });
     execFileSync("git", ["init", "-q"], { cwd });
     // the adapter has no plugin of its own here: the arm is the only one the run can load
-    const adapter = createClaudeCodeAdapter();
+    // keeps the arm's debug log after the run, so the check can record it
+    const adapter = createClaudeCodeAdapter({ keepArmDebugLogs: true });
     const login = await adapter.authStatus?.();
     console.warn(`auth: ${JSON.stringify(login)}`);
     if (login?.logged_in !== true) throw new Error("claude is not logged in: not starting");

@@ -18,12 +18,12 @@ import {
 import { runHostAdapterSafetyContract } from "./host-adapter-contract.js";
 
 /**
- * What the D-cl live check (2026-10-15, codex-cli 0.162.1) showed (spine §7 H-3 row): `cached`
- * under both role sandboxes searched the index and opened only indexed result pages, refused a
- * model-picked URL no index holds ("not accessible via this tool"), and a top-level `-c` beat the
- * user's `config.toml` and a `--profile` layer.
+ * Codex host web stays off (spine §7 H-3 row): the D-cl `cached` open probe returned "Internal
+ * Error" for a model-picked example.com URL, which cannot tell "no live fetch" from "fetched and
+ * failed", and the user's own MCP servers still load into a Codex role run. Flip this only when
+ * the §7 row records both as passed.
  */
-const CODEX_SAFE_HOST_WEB = true;
+const CODEX_SAFE_HOST_WEB = false;
 
 const fixture = (path: string): unknown =>
   JSON.parse(readFileSync(new URL(`./fixtures/${path}`, import.meta.url), "utf8"));
@@ -40,7 +40,7 @@ describe("@vtc/adapters smoke", () => {
   it("says whose host web search opens no page the model picks (D-cf, spine §5 reading 200)", () => {
     // Claude: the role profiles deny reading the credential stores, so its web tools are safe
     expect(HOST_CAPABILITIES["claude-code"].safeHostWeb).toBe(true);
-    // Codex: `cached`, which the D-cl live check (scripts/dcl-check.ts) confirmed or not
+    // Codex: not until the §7 H-3 row passes (see CODEX_SAFE_HOST_WEB)
     expect(HOST_CAPABILITIES.codex.safeHostWeb).toBe(CODEX_SAFE_HOST_WEB);
   });
 });

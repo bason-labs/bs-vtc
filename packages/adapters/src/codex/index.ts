@@ -20,13 +20,23 @@ import { installCodex } from "./install.js";
 
 /**
  * §12.1 / §20.4: subagents are spawned explicitly (foreground), no background agents in the CLI,
- * no per-path write-deny, caps enforced by the engine only. Host web is safe (D-cf, spine §5
- * reading 200): a `host_web` role gets `web_search="cached"`, never `live`, and every role run
- * turns off the apps connectors, browser and computer use (`CODEX_ROLE_FEATURES_OFF`). The D-cl
- * live check (2026-10-15, codex-cli 0.162.1, `scripts/dcl-check.ts`): under both role sandboxes
- * `cached` searched the index and opened only indexed result pages; it refused a model-picked URL
- * no index holds ("not accessible via this tool"); a top-level `-c` beat the user's `config.toml`
- * and a `--profile` layer; and with the apps connectors off no `codex_apps` web tool was called.
+ * no per-path write-deny, caps enforced by the engine only. Host web is not yet safe (D-cf, spine
+ * §5 reading 200, §7 H-3 row: "until both pass, Codex reports `safeHostWeb` false"), so the engine
+ * routes `host_web` roles to Claude Code or runs them without host web. What the D-cl checks
+ * showed (codex-cli 0.162.1, 2026-10-15, `scripts/dcl-check.ts`, `test/fixtures/codex/`):
+ * - `cached` searched the index under both role sandboxes; under `read-only` it also opened a
+ *   page its own results named (`open_page`, `exec-web-search-cached-read-only.jsonl`).
+ * - Handed a fresh `https://example.com/<random>` URL, `cached` tried `open_page` and the tool
+ *   returned one result titled "Internal Error" with no page text; the role then reported it could
+ *   not open the page. That cannot tell "no live fetch" from "fetched and failed", so it does not
+ *   show the property reading 200 needs: that no page the model picks is fetched. Settling it
+ *   needs a probe URL on a server whose requests can be watched.
+ * - A top-level `-c web_search=...` beat the user's `config.toml` and an untrusted project
+ *   `.codex/config.toml` (`config/read`); VTC never passes `--profile`, whose layer was compared
+ *   only through `developer_instructions` markers (`precedence.json`).
+ * - With the apps connectors off no `codex_apps` web tool was called. The user's own MCP servers
+ *   from `config.toml` still load into a role run (no override drops them, see `command.ts`), and
+ *   one of them may fetch pages: a second open item before this flag can turn on.
  */
 export const codexCapabilities: HostCapabilities = {
   subagents: true,
@@ -35,7 +45,7 @@ export const codexCapabilities: HostCapabilities = {
   headless: true,
   turnCap: false,
   budgetCap: false,
-  safeHostWeb: true,
+  safeHostWeb: false,
 };
 
 export interface CodexAdapterOptions {
