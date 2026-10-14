@@ -42,6 +42,7 @@ import {
   finalReviewRequest,
   gateReportFindings,
   parkFeature,
+  reopenOwningTasks,
   riskyFinding,
   runGatesRetryingFlaky,
   setFeatureStatus,
@@ -613,7 +614,8 @@ const readinessFindings = (
 /**
  * A failing Final Review round (§6.7a routing and caps): a risky finding parks the feature for
  * the human; the cap parks it; a finding the last fix round left in place parks it as stuck;
- * otherwise an integration-fix task goes to the owning task's discipline.
+ * otherwise a finding a merged task owns reopens that task, and the rest become an integration-fix
+ * task for the owning discipline.
  */
 export const failFinalReview = (
   k: Kernel,
@@ -687,7 +689,9 @@ export const failFinalReview = (
     return;
   }
   setFeatureStatus(k, h, featureId, "fixing", { round: current.round + 1 });
-  createIntegrationFix(k, h, featureId, findings);
+  // a finding a merged task owns reopens it; the rest becomes one integration-fix task
+  const rest = reopenOwningTasks(k, h, featureId, findings);
+  if (rest.length > 0) createIntegrationFix(k, h, featureId, rest);
   if (h.state.run.phase !== "build")
     k.emit(h, {
       type: "run.phase_changed",
