@@ -1,0 +1,96 @@
+{
+  "codexVersion": "codex-cli 0.162.1",
+  "withoutOverrides": {
+    "ok": true,
+    "servers": [
+      {
+        "name": "fetchy",
+        "enabled": true
+      },
+      {
+        "name": "off",
+        "enabled": false
+      },
+      {
+        "name": "planted",
+        "enabled": true
+      },
+      {
+        "name": "plugfetch",
+        "enabled": true
+      },
+      {
+        "name": "we.ird name",
+        "enabled": true
+      }
+    ]
+  },
+  "discovered": ["fetchy", "off", "planted", "we.ird name"],
+  "afterOverrides": {
+    "ok": true,
+    "servers": [
+      {
+        "name": "fetchy",
+        "enabled": false
+      },
+      {
+        "name": "off",
+        "enabled": false
+      },
+      {
+        "name": "planted",
+        "enabled": false
+      },
+      {
+        "name": "vtc",
+        "enabled": true
+      },
+      {
+        "name": "we.ird name",
+        "enabled": false
+      }
+    ]
+  },
+  "confirmOff": "ok",
+  "dottedKeyForDottedName": {
+    "ok": false,
+    "error": [
+      "Error: failed to load bootstrap configuration",
+      "Caused by:",
+      "    invalid transport"
+    ]
+  },
+  "dottedThenTable": {
+    "ok": true,
+    "servers": [
+      {
+        "name": "fetchy",
+        "enabled": false
+      },
+      {
+        "name": "off",
+        "enabled": false
+      },
+      {
+        "name": "planted",
+        "enabled": true
+      },
+      {
+        "name": "plugfetch",
+        "enabled": true
+      },
+      {
+        "name": "we.ird name",
+        "enabled": true
+      }
+    ]
+  },
+  "pluginServerByName": {
+    "ok": false,
+    "error": [
+      "Error: failed to load bootstrap configuration",
+      "Caused by:",
+      "    invalid transport"
+    ]
+  }
+}

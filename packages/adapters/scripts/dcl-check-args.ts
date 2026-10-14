@@ -1,6 +1,12 @@
 /** The command line of `live:dcl` (scripts/dcl-check.ts, spine §5 reading 206). Pure. */
 
-export const DCL_TARGETS = ["codex-web", "codex-precedence", "codex-plugin", "claude-arm"] as const;
+export const DCL_TARGETS = [
+  "codex-web",
+  "codex-precedence",
+  "codex-mcp",
+  "codex-plugin",
+  "claude-arm",
+] as const;
 export type DclTarget = (typeof DCL_TARGETS)[number];
 
 /**
@@ -49,6 +55,7 @@ type ValueFlag = (typeof VALUE_FLAGS)[number];
 const TARGET_FLAGS: Readonly<Record<DclTarget, readonly ValueFlag[]>> = {
   "codex-web": ["--mode", "--profile", "--open"],
   "codex-precedence": [],
+  "codex-mcp": [],
   "codex-plugin": ["--plugin-dir"],
   "claude-arm": ["--plugin-dir", "--model"],
 };

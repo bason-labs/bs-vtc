@@ -3,10 +3,18 @@
  * `codex app-server` child (`readUsage` / `watchUsage`, stopped by `dispose`, AD-6 rule 4).
  * Engine-launched runs are unattended (AD-25; a Codex Lead's roles run this way, H-1): an
  * explicit sandbox and no approval prompts, process-group supervision, and `authStatus()` through
- * `codex login status` before every start or resume.
+ * `codex login status` before every start or resume. Before every headless start or resume the
+ * adapter also lists the MCP servers the run would load (`codex mcp list --json`) and starts it
+ * only with every one but the engine bridge turned off (`mcp-servers.ts`).
  */
 import { join } from "node:path";
-import type { HostAdapter, HostCapabilities, SessionRef, SpawnRoleRequest } from "@vtc/shared";
+import {
+  engineMcpServer,
+  type HostAdapter,
+  type HostCapabilities,
+  type SessionRef,
+  type SpawnRoleRequest,
+} from "@vtc/shared";
 import { createAuthStatusRunner } from "../common/auth-status.js";
 import { createRunLauncher, subagentSpawn } from "../common/dispatch.js";
 import { envHome } from "../common/homes.js";
@@ -16,6 +24,7 @@ import { createCodexUsageSource } from "./app-server.js";
 import { CODEX_AUTH_STATUS } from "./auth.js";
 import { codexHeadlessCommand, codexSandboxProfile, codexSchemaFile, HOST } from "./command.js";
 import { codexOutcomeAfterExit, parseCodexEvents } from "./events.js";
+import { codexConfigArgs, createCodexMcpGuard } from "./mcp-servers.js";
 import { installCodex } from "./install.js";
 
 /**
@@ -34,9 +43,12 @@ import { installCodex } from "./install.js";
  * - A top-level `-c web_search=...` beat the user's `config.toml` and an untrusted project
  *   `.codex/config.toml` (`config/read`); VTC never passes `--profile`, whose layer was compared
  *   only through `developer_instructions` markers (`precedence.json`).
- * - With the apps connectors off no `codex_apps` web tool was called. The user's own MCP servers
- *   from `config.toml` still load into a role run (no override drops them, see `command.ts`), and
- *   one of them may fetch pages: a second open item before this flag can turn on.
+ * - With the apps connectors off no `codex_apps` web tool was called. MCP servers other than the
+ *   engine bridge (the user's, a trusted project's, a plugin's), one of which may fetch pages,
+ *   are kept out of every role run: plugins are off, and before every start or resume the adapter
+ *   lists the rest with `codex mcp list` and turns each off by name, then checks that none is left
+ *   on, or refuses the run (`mcp-servers.ts`; offline check `mcp-isolation.json`). That closes the
+ *   second §7 H-3 item; the open probe above is the one left before this flag can turn on.
  */
 export const codexCapabilities: HostCapabilities = {
   subagents: true,
@@ -96,7 +108,15 @@ export interface CodexAdapterOptions {
   readonly envPassthrough?: readonly string[];
   /** How long `codex login status` may run before it is killed. Default 20 s. */
   readonly authTimeoutMs?: number;
+  /**
+   * How long one `codex mcp list` (the MCP check before every headless start or resume) may run
+   * before it is killed and the run refused. Default 20 s.
+   */
+  readonly mcpListTimeoutMs?: number;
 }
+
+/** How many role cwds' MCP server names the adapter remembers for `headlessCommand`. */
+const MCP_NAMES_KEPT = 256;
 
 export const createCodexAdapter = (options: CodexAdapterOptions = {}): HostAdapter => {
   const spawner =
@@ -139,15 +159,45 @@ export const createCodexAdapter = (options: CodexAdapterOptions = {}): HostAdapt
     return usage;
   };
 
+  const mcp = createCodexMcpGuard({
+    spawner,
+    bridge: engineMcpServer(HOST).name,
+    ...(options.mcpListTimeoutMs === undefined ? {} : { timeoutMs: options.mcpListTimeoutMs }),
+  });
+  // The servers to turn off per role cwd, as the last listing before a start or resume found
+  // them (see `mcp-servers.ts`). `headlessCommand` reads them, so the command a run starts with
+  // is exactly `headlessCommand(request, session)` at that moment; for a cwd never listed it turns
+  // nothing off (only plugins), and no run starts before its cwd is listed.
+  const mcpServersOff = new Map<string, readonly string[]>();
+  const rememberMcpServersOff = (cwd: string, names: readonly string[]): void => {
+    mcpServersOff.delete(cwd);
+    mcpServersOff.set(cwd, names);
+    const oldest = mcpServersOff.keys().next();
+    if (mcpServersOff.size > MCP_NAMES_KEPT && oldest.done !== true) {
+      mcpServersOff.delete(oldest.value);
+    }
+  };
+
   const headlessCommand = (request: SpawnRoleRequest, session?: SessionRef) =>
-    codexHeadlessCommand(request, commandOptions, session);
+    codexHeadlessCommand(
+      request,
+      { ...commandOptions, mcpServersOff: mcpServersOff.get(request.cwd) ?? [] },
+      session,
+    );
 
   const spawn = (request: SpawnRoleRequest, session?: SessionRef) =>
-    Promise.resolve().then(() => {
+    Promise.resolve().then(async () => {
       if (request.dispatch === "subagent") {
         return subagentSpawn(request, { background: codexCapabilities.backgroundSubagents });
       }
+      // validates the request (it throws before anything runs), and gives the run's overrides
+      const probe = codexHeadlessCommand(request, commandOptions, session);
+      rememberMcpServersOff(
+        request.cwd,
+        await mcp.serversToTurnOff(request.cwd, codexConfigArgs(probe.args)),
+      );
       const command = headlessCommand(request, session);
+      await mcp.confirmOff(request.cwd, codexConfigArgs(command.args));
       ensurePrivateDir(scratchDir);
       // atomic: another run with the same schema may be reading the file right now; never
       // through a link, whoever put one there
@@ -177,6 +227,7 @@ export const createCodexAdapter = (options: CodexAdapterOptions = {}): HostAdapt
     authStatus: () => auth.check(CODEX_AUTH_STATUS),
     async dispose() {
       auth.dispose();
+      mcp.dispose();
       await Promise.all([runs.dispose(), usage?.dispose()]);
     },
   };
