@@ -4,6 +4,7 @@ import { describe, expect, it } from "vitest";
 import { GateReportSchema, TaskDetailSchema, type GateReport } from "@vtc/shared";
 import { GateReports } from "@/components/flows/GateReports";
 import { readFixture } from "../fixtures";
+import { VISUAL_SUMMARY_SKIPPED, VISUAL_SUMMARY_UNCHECKED } from "../wave3-fixtures";
 
 const golden = (): GateReport => {
   const [report] = TaskDetailSchema.parse(readFixture("task-T-1")).gate_reports;
@@ -76,5 +77,29 @@ describe("GateReports (drawer: gate-report detail per layer)", () => {
     expect(older).not.toHaveAttribute("open");
     await user.click(within(older).getByText("Round · affected"));
     expect(older).toHaveAttribute("open");
+  });
+
+  it("shows a skipped visual step as not passed, with why and that Level 3 never counts it", () => {
+    render(
+      <GateReports run="golden-1" reports={[{ ...golden(), visual: VISUAL_SUMMARY_SKIPPED }]} />,
+    );
+    const visual = screen.getByRole("region", { name: "Visual QA" });
+    expect(within(visual).getByText("Not passed: skipped")).toBeInTheDocument();
+    expect(within(visual).getByText(/vtc doctor --install-browser/)).toBeInTheDocument();
+    expect(within(visual).getByText(/Level 3 never counts/)).toBeInTheDocument();
+    expect(within(visual).queryByRole("link", { name: /Visual report/ })).toBeNull();
+  });
+
+  it("shows an unchecked visual step with its counts, findings and report link", () => {
+    render(
+      <GateReports run="golden-1" reports={[{ ...golden(), visual: VISUAL_SUMMARY_UNCHECKED }]} />,
+    );
+    const visual = screen.getByRole("region", { name: "Visual QA" });
+    expect(within(visual).getByText("Not passed: unchecked")).toBeInTheDocument();
+    expect(within(visual).getByText("Elements must meet contrast")).toBeInTheDocument();
+    expect(within(visual).getByRole("link", { name: /Visual report/ })).toHaveAttribute(
+      "href",
+      "/artifact/?run=golden-1&path=.vtc%2Fevidence%2FT-1%2Fvisual%2Freport.json",
+    );
   });
 });

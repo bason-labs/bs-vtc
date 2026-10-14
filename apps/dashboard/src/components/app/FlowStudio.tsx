@@ -9,6 +9,9 @@ import { ArtifactView } from "@/components/views/ArtifactView";
 import { DesignReviewView } from "@/components/views/DesignReviewView";
 import { EscalationsView } from "@/components/views/EscalationsView";
 import { FeatureView } from "@/components/views/FeatureView";
+import { GatesView } from "@/components/views/GatesView";
+import { LookbackView } from "@/components/views/LookbackView";
+import { ResearchView } from "@/components/views/ResearchView";
 import { RunsView } from "@/components/views/RunsView";
 import { RunView } from "@/components/views/RunView";
 import { TaskView } from "@/components/views/TaskView";
@@ -57,6 +60,15 @@ function Views({ serverPath }: { serverPath: string }) {
       break;
     case "design":
       view = <DesignReviewView run={p("run")} params={route.params} />;
+      break;
+    case "gates":
+      view = <GatesView run={p("run")} />;
+      break;
+    case "research":
+      view = <ResearchView run={p("run")} />;
+      break;
+    case "lookback":
+      view = <LookbackView run={p("run")} />;
       break;
     case "not_found":
       view = (

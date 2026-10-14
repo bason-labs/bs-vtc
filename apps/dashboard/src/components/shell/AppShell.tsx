@@ -70,7 +70,17 @@ function NavLink({
   );
 }
 
-const RUN_VIEWS: readonly View[] = ["run", "task", "feature", "escalations", "artifact", "design"];
+const RUN_VIEWS: readonly View[] = [
+  "run",
+  "task",
+  "feature",
+  "escalations",
+  "artifact",
+  "design",
+  "gates",
+  "research",
+  "lookback",
+];
 
 function RunNav({ run, view }: { run: string; view: View }) {
   const escalations = useResource(`shell-esc:${run}`, (c, s) => c.escalations(run, s), [
@@ -86,6 +96,9 @@ function RunNav({ run, view }: { run: string; view: View }) {
       <NavLink href={hrefs.feature(run)} current={view === "feature"}>
         Feature
       </NavLink>
+      <NavLink href={hrefs.gates(run)} current={view === "gates"}>
+        Gates
+      </NavLink>
       <NavLink href={hrefs.escalations(run)} current={view === "escalations"}>
         Escalations
         {open > 0 ? (
@@ -99,6 +112,12 @@ function RunNav({ run, view }: { run: string; view: View }) {
       </NavLink>
       <NavLink href={hrefs.design(run)} current={view === "design"}>
         Design
+      </NavLink>
+      <NavLink href={hrefs.research(run)} current={view === "research"}>
+        Research
+      </NavLink>
+      <NavLink href={hrefs.lookback(run)} current={view === "lookback"}>
+        Lookback
       </NavLink>
     </nav>
   );

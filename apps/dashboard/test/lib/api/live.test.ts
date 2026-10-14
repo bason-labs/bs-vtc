@@ -5,6 +5,7 @@ import { ApiError } from "@/lib/api/errors";
 import { createInvalidationBus, runTopic, topicsForEvent } from "@/lib/api/topics";
 import { readEventLog } from "../../fixtures";
 import { NOTICE_EVENTS } from "../../notice-fixtures";
+import { WAVE3_EVENTS } from "../../wave3-fixtures";
 
 const events = (): VtcEvent[] =>
   readEventLog()
@@ -49,6 +50,25 @@ describe("topicsForEvent", () => {
       expect(topicsForEvent(e)).toEqual(expect.arrayContaining(["notices"]));
     }
     expect(topicsForEvent(byType("task.status_changed"))).not.toContain("notices");
+  });
+  it("marks the wave-3 views stale on their events (gates, headless, Level 3, research, lookback)", () => {
+    const topics = (type: string) => topicsForEvent(WAVE3_EVENTS.find((e) => e.type === type)!);
+    expect(topics("gate.requested")).toEqual(expect.arrayContaining(["gates", "status"]));
+    expect(topics("gate.approved")).toEqual(expect.arrayContaining(["gates"]));
+    expect(topics("fact.waived")).toEqual(expect.arrayContaining(["gates", "research"]));
+    expect(topics("fact.verified")).toEqual(["research"]);
+    expect(topics("headless.started")).toEqual(
+      expect.arrayContaining(["headless", "status", "graph", "task:T-1"]),
+    );
+    expect(topics("headless.ended")).toEqual(expect.arrayContaining(["headless", "notices"]));
+    expect(topics("merge.preflight")).toEqual(expect.arrayContaining(["level3", "notices"]));
+    expect(topics("feature.checklist")).toEqual(expect.arrayContaining(["level3", "features"]));
+    expect(topics("feature.reverted")).toEqual(expect.arrayContaining(["level3", "notices"]));
+    expect(topics("final_review.step_finished")).toEqual(
+      expect.arrayContaining(["level3", "features"]),
+    );
+    expect(topics("lookback.canary_evaluated")).toEqual(["lookback"]);
+    expect(topics("lookback.rolled_back")).toEqual(expect.arrayContaining(["lookback", "notices"]));
   });
   it("ignores event types it does not know", () => {
     expect(topicsForEvent({ ...byType("run.started"), type: "plugin.custom_thing" })).toEqual([]);

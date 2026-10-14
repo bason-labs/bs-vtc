@@ -145,13 +145,7 @@ export const createEngineClient = (options: EngineClientOptions): EngineClient =
     status: (signal) => read(StatusResultSchema, "status", {}, {}, signal),
     runs: (signal) => read(RunListSchema, "runs", {}, {}, signal),
     events: (run, after, signal) =>
-      read(
-        EventPageSchema,
-        "runEvents",
-        { run },
-        { after, limit: EVENT_PAGE_LIMIT.default },
-        signal,
-      ),
+      read(EventPageSchema, "runEvents", { run }, { after, limit: EVENT_PAGE_LIMIT.max }, signal),
     tasks: (run, signal) => read(TaskListSchema, "tasks", { run }, {}, signal),
     task: (run, task, signal) => read(TaskDetailSchema, "task", { run, task }, {}, signal),
     taskDiff: (run, task, signal) => read(TaskDiffSchema, "taskDiff", { run, task }, {}, signal),

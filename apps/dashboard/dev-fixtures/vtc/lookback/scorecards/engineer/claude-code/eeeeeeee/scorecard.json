@@ -1,0 +1,57 @@
+{
+  "v": 1,
+  "prompt": {
+    "role": "engineer",
+    "host": "claude-code",
+    "locked_sha256": "1111111111111111111111111111111111111111111111111111111111111111",
+    "editable_sha256": "2222222222222222222222222222222222222222222222222222222222222222",
+    "effective_sha256": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"
+  },
+  "grader_bundle_sha": "9999999999999999999999999999999999999999999999999999999999999999",
+  "window": {
+    "from": "2026-10-01T00:00:00.000Z",
+    "to": "2026-10-13T00:00:00.000Z"
+  },
+  "metrics": {
+    "first_round_gate_pass": {
+      "value": 0.625,
+      "ci_low": 0.4,
+      "ci_high": 0.81,
+      "n": 24
+    },
+    "review_pass": {
+      "value": null,
+      "ci_low": null,
+      "ci_high": null,
+      "n": 4
+    },
+    "rounds_to_done": {
+      "value": 1.8,
+      "ci_low": null,
+      "ci_high": null,
+      "n": 24
+    },
+    "tokens_per_success": {
+      "value": 41250,
+      "ci_low": null,
+      "ci_high": null,
+      "n": 15
+    }
+  },
+  "breakdown": [
+    {
+      "discipline": "frontend",
+      "stack_pack": "nextjs",
+      "host": "claude-code",
+      "metrics": {
+        "first_round_gate_pass": {
+          "value": null,
+          "ci_low": null,
+          "ci_high": null,
+          "n": 3
+        }
+      }
+    }
+  ],
+  "written_at": "2026-10-13T08:00:00.000Z"
+}

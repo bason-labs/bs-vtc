@@ -1,4 +1,5 @@
 import type { Feature, Task } from "@vtc/shared";
+import type { ReactNode } from "react";
 import { Check, ExternalLink, GitPullRequest } from "lucide-react";
 import { cn } from "@/lib/cn";
 import { finalReviewSteps, pullRequestModel } from "@/lib/feature";
@@ -109,7 +110,28 @@ export function PullRequestCard({ feature }: { feature: Feature }) {
           <span className="sr-only">(opens in a new tab)</span>
         </a>
       )}
+      {pr.autoMerge === null && pr.mergeState === null ? null : (
+        <p className="mt-2 flex flex-wrap items-center gap-1.5 text-xs">
+          {pr.autoMerge === null ? null : <StatusPill meta={pr.autoMerge} />}
+          {pr.mergeState === null ? null : (
+            <span className="text-muted-fg">
+              GitHub merge state <span className="font-mono">{pr.mergeState}</span>
+            </span>
+          )}
+        </p>
+      )}
+      {pr.requiredChecks.length === 0 ? null : (
+        <ul aria-label="Required checks" className="mt-2 space-y-1 text-xs">
+          {pr.requiredChecks.map((c) => (
+            <li key={c.name} className="flex items-center justify-between gap-2">
+              <span className="font-mono break-all">{c.name}</span>
+              <StatusPill meta={c.status} />
+            </li>
+          ))}
+        </ul>
+      )}
       <p className="mt-2 text-xs text-muted-fg">
+        {pr.number === null ? null : <>PR {pr.number} · </>}
         Head <span className="font-mono">{pr.head}</span>
         {pr.mergeCommit === null ? null : (
           <>
@@ -122,15 +144,17 @@ export function PullRequestCard({ feature }: { feature: Feature }) {
   );
 }
 
-/** Feature header, budget and its tasks. */
+/** Feature header, budget and PR, then `children` (Final Review steps, Level 3), then its tasks. */
 export function FeatureSummary({
   run,
   feature,
   tasks,
+  children,
 }: {
   run: string;
   feature: Feature;
   tasks: readonly Task[];
+  children?: ReactNode;
 }) {
   const spentPct = feature.budget_usd === 0 ? 0 : (feature.spent_usd / feature.budget_usd) * 100;
   const own = tasks.filter((t) => feature.tasks.includes(t.id));
@@ -170,6 +194,8 @@ export function FeatureSummary({
         </Card>
         <PullRequestCard feature={feature} />
       </div>
+
+      {children}
 
       <Card aria-labelledby="tasks-title">
         <CardHeader>

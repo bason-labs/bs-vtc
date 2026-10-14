@@ -1,0 +1,27 @@
+{
+  "v": 1,
+  "scorecards": [
+    {
+      "prompt": {
+        "role": "engineer",
+        "host": "claude-code",
+        "locked_sha256": "1111111111111111111111111111111111111111111111111111111111111111",
+        "editable_sha256": "2222222222222222222222222222222222222222222222222222222222222222",
+        "effective_sha256": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"
+      },
+      "path": ".vtc/lookback/scorecards/engineer/claude-code/eeeeeeee/scorecard.json",
+      "written_at": "2026-10-13T08:00:00.000Z"
+    },
+    {
+      "prompt": {
+        "role": "qa",
+        "host": "codex",
+        "locked_sha256": "1111111111111111111111111111111111111111111111111111111111111111",
+        "editable_sha256": "3333333333333333333333333333333333333333333333333333333333333333",
+        "effective_sha256": "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"
+      },
+      "path": ".vtc/lookback/scorecards/qa/codex/ffffffff/scorecard.json",
+      "written_at": "2026-10-12T08:00:00.000Z"
+    }
+  ]
+}
