@@ -322,7 +322,9 @@ const emitSubmitted = (
       verdicts: result.verdicts.map((v) => ({ subject: v.subject, verdict: v.verdict })),
       findings: result.findings.length,
       questions: result.questions.length,
-      artifacts: [...(extras.artifacts ?? result.artifacts)],
+      // an artifact's sha256 is the engine's own hash of its bytes (the isolated paths), never one
+      // the role reported: Lookback's human-edit detection compares it with the frozen file's
+      artifacts: extras.artifacts ?? result.artifacts.map(({ type, path }) => ({ type, path })),
       session_ref: extras.session ?? null,
       ...(extras.head === undefined ? {} : { head: extras.head }),
     },

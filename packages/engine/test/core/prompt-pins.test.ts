@@ -178,6 +178,41 @@ describe("AD-21 rules 1 and 2: the pinned editable section goes in the task pack
       await h.release();
     }
   });
+  it("renders the compiled default section when no pin applies (reading 142)", async () => {
+    const plugins: PluginCatalog = {
+      ...createPluginCatalog({}),
+      promptParts: () => ({
+        lockedSha256: sha256Hex(LOCKED),
+        editableInPack: true,
+        compiled: { locked: `${LOCKED}\n`, editable: `\n${EDITABLE}\n` },
+      }),
+    };
+    const h = createHarness({ plugins });
+    await start(h);
+    const carto = only((await h.engine.next({}, CLAUDE)).actions, "repo_cartographer");
+    const dispatched = ofType(h, "role.dispatched")[0];
+    expect(dispatched?.data.editable_sha256).toBe(sha256Hex(EDITABLE));
+    expect(dispatched?.prompt_sha).toBe(effectivePromptSha(LOCKED, EDITABLE));
+    expect(readFileSync(join(h.repo, carto.pack), "utf8")).toContain(EDITABLE);
+    await h.release();
+
+    // a bundle whose locked text is not the manifest's runs without it, as before
+    const off = createHarness({
+      plugins: {
+        ...plugins,
+        promptParts: () => ({
+          lockedSha256: sha256Hex("another core"),
+          editableInPack: true,
+          compiled: { locked: LOCKED, editable: EDITABLE },
+        }),
+      },
+    });
+    await start(off);
+    only((await off.engine.next({}, CLAUDE)).actions, "repo_cartographer");
+    expect(ofType(off, "role.dispatched")[0]?.data).not.toHaveProperty("editable_sha256");
+    await off.release();
+  });
+
   it("runs the compiled prompt for an agent that carries its own editable section", async () => {
     for (const plugins of [createPluginCatalog({}), switched(LOCKED, false)]) {
       const h = createHarness({ plugins });

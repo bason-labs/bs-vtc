@@ -8,6 +8,7 @@ import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import {
   agentNameFor,
+  effectivePromptSha,
   HIDDEN_TESTS,
   inSessionDispatchRefusal,
   PACK_INPUT_TYPES,
@@ -761,6 +762,32 @@ const pinnedPrompt = (k: Kernel, target: PromptTarget): PinSelection => {
   };
 };
 
+/**
+ * The compiled default editable section of an agent compiled without it (`editable_in_pack`,
+ * reading 142), as the version Lookback's selector falls back to: the locked core must hash to the
+ * manifest's `locked_sha256`, and the section must be a valid `Role heuristics` block. `null` when
+ * the plugin does not carry both texts, or they do not check out.
+ */
+const compiledDefaultPrompt = (k: Kernel, target: PromptTarget): PinnedPrompt | null => {
+  const parts = k.deps.plugins.promptParts?.(target.agent, target.host);
+  if (parts?.editableInPack !== true || parts.compiled === undefined) return null;
+  const locked = parts.compiled.locked.trim();
+  const text = parts.compiled.editable.trim();
+  if (parts.lockedSha256 === undefined || sha256Hex(locked) !== parts.lockedSha256) return null;
+  if (text === "" || !TaskPackSchema.shape.role_heuristics.safeParse(text).success) return null;
+  return {
+    version: {
+      role: target.role,
+      ...(target.mode === undefined ? {} : { mode: target.mode }),
+      host: target.host,
+      locked_sha256: parts.lockedSha256,
+      editable_sha256: sha256Hex(text),
+      effective_sha256: effectivePromptSha(locked, text),
+    },
+    text,
+  };
+};
+
 /** An `incident.recorded` `prompt_selection` (reading 137): a selection the engine did not use. */
 const recordPromptSelection = (
   k: Kernel,
@@ -857,7 +884,17 @@ export const dispatchStep = (
   });
   if (selection.problem !== undefined)
     recordPromptSelection(k, h, step.task, `${agent}: ${selection.problem}`);
-  const pinned = selection.pinned;
+  // no pin applies: an agent compiled without its editable section gets the compiled default in
+  // the pack (reading 142), so it never runs without its heuristics
+  const pinned =
+    selection.pinned ??
+    compiledDefaultPrompt(k, {
+      run: h.state.id,
+      role: step.role,
+      ...(step.mode === undefined ? {} : { mode: step.mode }),
+      host,
+      agent,
+    });
   // AD-21 rule 2, reading 117: the pinned section is the pack's opening `Role heuristics` block
   const pack = writeTaskPack(k.deps.repoRoot, {
     ...packFor(k, h, step, actionId),

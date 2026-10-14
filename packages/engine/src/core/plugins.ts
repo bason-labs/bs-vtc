@@ -11,6 +11,7 @@ import {
   PLUGIN_MANIFEST_ASSET,
   PluginManifestSchema,
   promptShaFor,
+  rolePromptAssetPath,
   type AssetBundle,
   type HostId,
   type PluginManifest,
@@ -36,6 +37,12 @@ export interface PluginCatalog {
 export interface PromptParts {
   readonly lockedSha256?: string;
   readonly editableInPack: boolean;
+  /**
+   * For an agent with `editableInPack`: its locked core and compiled default editable section as
+   * the plugin carries them (`rolePromptAssetPath`), when the bundle has both. The engine renders
+   * the default section in the pack when no pin applies (spine §5 reading 142).
+   */
+  readonly compiled?: { readonly locked: string; readonly editable: string };
 }
 
 export class PluginManifestError extends Error {
@@ -78,6 +85,28 @@ const fileSha =
     return promptShaFor(bytes === undefined ? agent : Buffer.from(bytes).toString("utf8"));
   };
 
+/** The locked and default editable texts the plugin carries for an agent, when it has both. */
+const compiledParts = (
+  assets: AssetBundle | null,
+  host: HostId,
+  agent: string,
+): { locked: string; editable: string } | undefined => {
+  if (assets === null) return undefined;
+  const text = (part: "locked" | "editable"): string | undefined => {
+    let path: string;
+    try {
+      path = rolePromptAssetPath(agent, part);
+    } catch {
+      return undefined;
+    }
+    const bytes = assets.read(`plugin:${host}`, path);
+    return bytes === undefined ? undefined : Buffer.from(bytes).toString("utf8");
+  };
+  const locked = text("locked");
+  const editable = text("editable");
+  return locked === undefined || editable === undefined ? undefined : { locked, editable };
+};
+
 /** A catalog over the given manifests (per host; missing ones fall back, see the module doc). */
 export const createPluginCatalog = (
   manifests: Readonly<Partial<Record<HostId, PluginManifest | null>>>,
@@ -98,9 +127,12 @@ export const createPluginCatalog = (
     promptParts: (agent, host) => {
       const entry = manifests[host]?.agents.find((a) => a.name === agent);
       if (entry === undefined) return undefined;
+      const editableInPack = entry.editable_in_pack === true;
+      const compiled = editableInPack ? compiledParts(assets, host, agent) : undefined;
       return {
         ...(entry.locked_sha256 === undefined ? {} : { lockedSha256: entry.locked_sha256 }),
-        editableInPack: entry.editable_in_pack === true,
+        editableInPack,
+        ...(compiled === undefined ? {} : { compiled }),
       };
     },
   };
