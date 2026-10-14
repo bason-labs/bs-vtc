@@ -1,0 +1,12 @@
+2026-10-14T17:19:26.957Z [DEBUG] clearPluginCache: invalidating loadAllPlugins cache (preAction: --plugin-dir inline plugins)
+2026-10-14T17:19:27.193Z [DEBUG] --plugin-dir <arm-dir> is one plugin: .mcp.json at its top marks it
+2026-10-14T17:19:27.356Z [DEBUG] Read hooks.json for plugin vtc (enabled=true): <arm-dir>/hooks/hooks.json
+2026-10-14T17:19:27.359Z [DEBUG] Loaded inline plugin from path: vtc
+2026-10-14T17:19:27.359Z [DEBUG] Loaded 1 directory-loaded plugins
+2026-10-14T17:19:27.371Z [DEBUG] Checking plugin vtc: skillsPath=exists, skillsPaths=0 paths
+2026-10-14T17:19:27.371Z [DEBUG] Attempting to load skills from plugin vtc default skillsPath: <arm-dir>/skills
+2026-10-14T17:19:27.403Z [DEBUG] Loading hooks from plugin: vtc
+2026-10-14T17:19:27.561Z [DEBUG] Loaded 1 commands from plugin vtc default directory
+2026-10-14T17:19:27.582Z [DEBUG] Loaded 33 agents from plugin vtc default directory
+2026-10-14T17:19:27.621Z [DEBUG] Loaded 54 skills from plugin vtc default directory
+2026-10-14T17:19:28.131Z [DEBUG] Hooks: SessionStart:startup [vtc hook session-start --host claude-code] (plugin vtc@inline) finished with status 127 (257ms)

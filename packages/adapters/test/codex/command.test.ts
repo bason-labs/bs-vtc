@@ -13,6 +13,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import {
+  CODEX_HOST_WEB_SEARCH,
   findDisallowedHostArgs,
   findForbiddenHostArgs,
   headlessIsolationGaps,
@@ -25,7 +26,7 @@ import {
 } from "@vtc/shared";
 import { codexSandboxProfile } from "../../src/codex/command.js";
 import { ADAPTER_FACTORIES, createCodexAdapter } from "../../src/index.js";
-import { fakeSpawner } from "../support/fake-spawner.js";
+import { codexFakeSpawner } from "../support/fake-spawner.js";
 import { fixtureLines } from "../support/fixtures.js";
 
 const CWD = "/work/app/.vtc/state/worktrees/T-1";
@@ -50,10 +51,38 @@ const BRIDGE_ARGS = [
   'mcp_servers.vtc.disabled_tools=["approve", "answer", "change_request"]',
 ];
 /**
- * Codex's own web search (`web_search`, codex-cli 0.162.1: "live", "indexed", "cached" or
- * "disabled"), set explicitly on every role run: off unless the role has `host_web` (H-3).
+ * Codex's own web search (`web_search`, codex-cli 0.162.1), set explicitly on every role run:
+ * `disabled` unless the role has `host_web`, then `cached` and never `live` (H-3, D-cf).
  */
-const WEB_OFF = ["--config", 'web_search="disabled"'];
+/**
+ * Codex's other routes to pages the model picks, off for every role run (D-cf, the D-cl live
+ * check 2026-10-15: with `web_search="disabled"` a role still called the ChatGPT apps connector
+ * `codex_apps` `search_service.web_run`): the apps connectors, browser use and computer use.
+ */
+const OTHER_WEB_OFF = [
+  "--config",
+  "features.apps=false",
+  "--config",
+  "features.browser_use=false",
+  "--config",
+  "features.browser_use_external=false",
+  "--config",
+  "features.in_app_browser=false",
+  "--config",
+  "features.computer_use=false",
+  // a plugin's own MCP servers cannot be turned off by name (D-cf, `mcp-servers.ts`)
+  "--config",
+  "features.plugins=false",
+];
+const FEATURES_OFF = {
+  apps: false,
+  browser_use: false,
+  browser_use_external: false,
+  in_app_browser: false,
+  computer_use: false,
+  plugins: false,
+};
+const WEB_OFF = ["--config", 'web_search="disabled"', ...OTHER_WEB_OFF];
 const BRIDGE_SETTINGS = {
   vtc: {
     command: "vtc",
@@ -107,6 +136,7 @@ describe("Codex sandboxProfile (§12.1, AD-9)", () => {
     expect(p.settings).toEqual({
       sandbox_mode: "read-only",
       web_search: "disabled",
+      features: FEATURES_OFF,
       mcp_servers: BRIDGE_SETTINGS,
     });
     expect(p.enforced).toEqual({
@@ -114,6 +144,7 @@ describe("Codex sandboxProfile (§12.1, AD-9)", () => {
       perPathWriteDeny: false,
       network: true,
       secretsUnreadable: false,
+      readDeny: false,
     });
   });
 
@@ -134,6 +165,7 @@ describe("Codex sandboxProfile (§12.1, AD-9)", () => {
       expect(p.settings).toEqual({
         sandbox_mode: "workspace-write",
         web_search: "disabled",
+        features: FEATURES_OFF,
         sandbox_workspace_write: { network_access: false, writable_roots: [] },
         mcp_servers: BRIDGE_SETTINGS,
       });
@@ -143,7 +175,25 @@ describe("Codex sandboxProfile (§12.1, AD-9)", () => {
         perPathWriteDeny: false,
         network: true,
         secretsUnreadable: false,
+        readDeny: false,
       });
+    }
+  });
+
+  it("cannot enforce a replay trial's readDeny (no per-path read deny, reading 82): it says so and the profile is otherwise unchanged, so the trial records paths_only (D-cj)", () => {
+    for (const tools of [READ_ONLY, WRITE_SCOPED, ENGINEER]) {
+      const plain = profile(tools);
+      const denied = createCodexAdapter({ vtcHome: VTC_HOME, platform: "darwin" }).sandboxProfile({
+        tools,
+        cwd: CWD,
+        writablePaths: ["src/**"],
+        protectedPaths: ["test/acceptance/**"],
+        network: "none",
+        readDeny: ["/work/repo", "/work/repo/.git"],
+      });
+      expect(denied.enforced.readDeny).toBe(false);
+      expect(denied.cliArgs).toEqual(plain.cliArgs);
+      expect(denied.settings).toEqual(plain.settings);
     }
   });
 
@@ -180,28 +230,151 @@ describe("Codex sandboxProfile (§12.1, AD-9)", () => {
     }
   });
 
-  describe("host web search (H-3, spine §5 reading 156)", () => {
-    it("a host_web role gets Codex's live web search, set explicitly, and nothing else changes", () => {
+  describe("host web search (H-3, D-cf, spine §5 readings 156 and 200)", () => {
+    const ALL_TOOLS: readonly RoleTools[] = [
+      READ_ONLY,
+      WRITE_SCOPED,
+      ENGINEER,
+      { ...READ_ONLY, host_web: true },
+      { ...WRITE_SCOPED, host_web: true },
+      { ...READ_ONLY, host_web: false },
+      { ...WRITE_SCOPED, engine_tools: ["research_fetch"], host_web: true },
+    ];
+
+    it("a host_web role gets the cached web search (CODEX_HOST_WEB_SEARCH), set explicitly, and nothing else changes", () => {
+      expect(CODEX_HOST_WEB_SEARCH).toBe("cached");
       for (const tools of [
         { ...READ_ONLY, host_web: true },
         { ...WRITE_SCOPED, host_web: true },
       ]) {
         const p = profile(tools);
         expect(argAfter(p.cliArgs, "--config")).toMatch(/^sandbox_mode=/u);
-        expect(p.cliArgs).toContain('web_search="live"');
+        expect(p.cliArgs).toContain(`web_search="${CODEX_HOST_WEB_SEARCH}"`);
         expect(p.cliArgs).not.toContain('web_search="disabled"');
-        expect(p.settings.web_search).toBe("live");
+        expect(p.settings.web_search).toBe(CODEX_HOST_WEB_SEARCH);
         // the role's sandbox stays as it was: search runs on the host provider, not in the sandbox
         expect(p.cliArgs).not.toContain("sandbox_workspace_write.network_access=true");
         expect(p.cliArgs.filter((arg) => arg.startsWith("web_search="))).toHaveLength(1);
       }
     });
 
-    it("every other role sets web search to disabled explicitly (a top-level override; profile precedence is open, §7 H-3)", () => {
+    it("every other role sets web search to disabled explicitly, as a top-level override", () => {
       for (const tools of [READ_ONLY, WRITE_SCOPED, ENGINEER, { ...READ_ONLY, host_web: false }]) {
         const p = profile(tools);
         expect(p.cliArgs).toContain('web_search="disabled"');
+        expect(p.settings.web_search).toBe("disabled");
         expect(p.cliArgs.filter((arg) => arg.startsWith("web_search="))).toHaveLength(1);
+      }
+    });
+
+    it("no profile, settings or argv, fresh or resumed, ever names live web search (D-cf)", () => {
+      const adapter = createCodexAdapter({
+        vtcHome: VTC_HOME,
+        platform: "darwin",
+        scratchDir: scratch(),
+      });
+      for (const tools of ALL_TOOLS) {
+        const p = profile(tools);
+        const settings = JSON.stringify(p.settings);
+        expect(settings).not.toMatch(/live/u);
+        expect(p.cliArgs.join("\n")).not.toMatch(/live/u);
+        // always explicit: a full-access sandbox would otherwise default to live
+        expect(p.cliArgs.filter((arg) => /^web_search\s*=/u.test(arg))).toHaveLength(1);
+        for (const session of [undefined, { host: "codex" as const, id: "thread-1" }]) {
+          const args = adapter.headlessCommand(request({ sandbox: p }), session).args;
+          expect(args.join("\n")).not.toMatch(/web_search\s*=\s*"?live/u);
+          expect(args.filter((arg) => /^web_search\s*=/u.test(arg))).toHaveLength(1);
+        }
+      }
+    });
+
+    it("refuses a profile from anywhere else that asks for live or another mode, or sets web search twice or not at all (fail closed)", () => {
+      const adapter = createCodexAdapter({
+        vtcHome: VTC_HOME,
+        platform: "darwin",
+        scratchDir: scratch(),
+      });
+      const base = profile({ ...READ_ONLY, host_web: true });
+      const swap = (to: readonly string[]) => {
+        const index = base.cliArgs.indexOf(`web_search="${CODEX_HOST_WEB_SEARCH}"`);
+        return {
+          ...base,
+          cliArgs: [...base.cliArgs.slice(0, index - 1), ...to, ...base.cliArgs.slice(index + 1)],
+        };
+      };
+      for (const cliArgs of [
+        ["--config", 'web_search="live"'],
+        ["--config", "web_search=live"],
+        ["--config", 'web_search = "live"'],
+        ["--config", 'web_search="indexed"'],
+        ["--config", 'web_search="cached"', "--config", 'web_search="live"'],
+        // a legacy key or a profile, with no top-level mode at all
+        ["--config", "tools.web_search=true"],
+        ["--config", 'profile="x"'],
+        [],
+      ]) {
+        expect(
+          () => adapter.headlessCommand(request({ sandbox: swap(cliArgs) })),
+          JSON.stringify(cliArgs),
+        ).toThrow(/web search/u);
+      }
+      // beside the one allowed override: any other key that names web search, on any path, or
+      // that picks or defines a profile whose layer could carry its own
+      for (const extra of [
+        "tools.web_search=true",
+        "features.web_search_request=true",
+        "features.web_search_cached=true",
+        "features.Web_Search_Request = true",
+        'profiles.x.web_search="live"',
+        '"profiles"."x"."web_search"="live"',
+        'profile="x"',
+        "profiles={}",
+        'profiles.x.model="o"',
+      ]) {
+        const cliArgs = ["--config", `web_search="${CODEX_HOST_WEB_SEARCH}"`, "--config", extra];
+        expect(() => adapter.headlessCommand(request({ sandbox: swap(cliArgs) })), extra).toThrow(
+          /web search/u,
+        );
+      }
+    });
+
+    it("every role run, host_web or not, fresh or resumed, turns off Codex's other routes to pages the model picks (apps connectors, browser and computer use)", () => {
+      const adapter = createCodexAdapter({
+        vtcHome: VTC_HOME,
+        platform: "darwin",
+        scratchDir: scratch(),
+      });
+      for (const tools of ALL_TOOLS) {
+        const p = profile(tools);
+        expect(p.settings.features).toEqual(FEATURES_OFF);
+        for (const session of [undefined, { host: "codex" as const, id: "thread-1" }]) {
+          const args = adapter.headlessCommand(request({ sandbox: p }), session).args;
+          for (let i = 1; i < OTHER_WEB_OFF.length; i += 2) {
+            expect(args).toContain(OTHER_WEB_OFF[i]);
+          }
+        }
+      }
+    });
+
+    it("refuses a profile from anywhere else that leaves one of those routes on (fail closed)", () => {
+      const adapter = createCodexAdapter({
+        vtcHome: VTC_HOME,
+        platform: "darwin",
+        scratchDir: scratch(),
+      });
+      const base = profile({ ...READ_ONLY, host_web: true });
+      for (const off of OTHER_WEB_OFF.filter((_, i) => i % 2 === 1)) {
+        const at = base.cliArgs.indexOf(off);
+        const sandbox = {
+          ...base,
+          cliArgs: [...base.cliArgs.slice(0, at - 1), ...base.cliArgs.slice(at + 1)],
+        };
+        expect(() => adapter.headlessCommand(request({ sandbox })), off).toThrow(/web/u);
+        const flipped = {
+          ...base,
+          cliArgs: base.cliArgs.map((arg) => (arg === off ? off.replace("false", "true") : arg)),
+        };
+        expect(() => adapter.headlessCommand(request({ sandbox: flipped })), off).toThrow(/web/u);
       }
     });
 
@@ -218,7 +391,7 @@ describe("Codex sandboxProfile (§12.1, AD-9)", () => {
       const sandbox = profile({ ...READ_ONLY, host_web: true });
       for (const session of [undefined, { host: "codex" as const, id: "thread-1" }]) {
         const args = adapter.headlessCommand(request({ sandbox }), session).args;
-        expect(args).toContain('web_search="live"');
+        expect(args).toContain('web_search="cached"');
         expect(findDisallowedHostArgs(args)).toEqual([]);
         expect(headlessIsolationGaps("codex", args)).toEqual([]);
       }
@@ -302,6 +475,7 @@ describe("Codex sandboxProfile (§12.1, AD-9)", () => {
       expect(p.settings).toEqual({
         sandbox_mode: "workspace-write",
         web_search: "disabled",
+        features: FEATURES_OFF,
         sandbox_workspace_write: {
           network_access: false,
           writable_roots: [],
@@ -560,6 +734,17 @@ describe("Codex headlessCommand", () => {
     }
   });
 
+  it("refuses a replay arm's plugin directory: codex exec loads no compiled agent, so no copy could be proven (D-cg)", () => {
+    const adapter = createCodexAdapter({
+      vtcHome: VTC_HOME,
+      platform: "darwin",
+      scratchDir: scratch(),
+    });
+    expect(() =>
+      adapter.headlessCommand(request({ pluginDir: "/users-dev/.vtc/guard/lookback/arms/t/b" })),
+    ).toThrow(/plugin/u);
+  });
+
   it("refuses another host's session", () => {
     expect(() =>
       createCodexAdapter().headlessCommand(request(), { host: "claude-code", id: "s" }),
@@ -585,7 +770,7 @@ describe("Codex spawnRole", () => {
 
   it("a headless run writes the schema file, sends the prompt on stdin and ends with the recorded outcome", async () => {
     const dir = scratch();
-    const { spawner, processes } = fakeSpawner();
+    const { spawner, processes } = codexFakeSpawner();
     const adapter = createCodexAdapter({ spawner, scratchDir: dir });
     const spawned = await adapter.spawnRole(request());
     if (spawned.dispatch !== "headless") throw new Error("expected a headless run");
@@ -607,8 +792,10 @@ describe("Codex spawnRole", () => {
   });
 
   it("a resumed run is supervised by the request's idle timeout and ends with cause idle (AD-25 rule 4)", async () => {
-    const { spawner, processes } = fakeSpawner((p) => {
-      p.obeysInt = false;
+    const { spawner, processes } = codexFakeSpawner({
+      onSpawn: (p) => {
+        p.obeysInt = false;
+      },
     });
     const adapter = createCodexAdapter({
       spawner,
@@ -629,8 +816,10 @@ describe("Codex spawnRole", () => {
 
 describe.skipIf(process.platform === "win32")("Codex scratch directory", () => {
   const spawnWith = async (scratchDir: string) => {
-    const { spawner } = fakeSpawner((p) => {
-      p.exit(0);
+    const { spawner } = codexFakeSpawner({
+      onSpawn: (p) => {
+        p.exit(0);
+      },
     });
     const adapter = createCodexAdapter({ spawner, scratchDir });
     try {
@@ -648,8 +837,10 @@ describe.skipIf(process.platform === "win32")("Codex scratch directory", () => {
 
   it("defaults to <vtcHome>/run/codex, which no role can write, never the OS temp directory (D-w)", async () => {
     const vtcHome = scratch();
-    const { spawner, processes } = fakeSpawner((p) => {
-      p.exit(0);
+    const { spawner, processes } = codexFakeSpawner({
+      onSpawn: (p) => {
+        p.exit(0);
+      },
     });
     const adapter = createCodexAdapter({ spawner, vtcHome });
     try {

@@ -118,3 +118,73 @@ export const onStdinMessage = (
     }
   });
 };
+
+/** One entry of a fake `codex mcp list --json`. */
+export interface FakeMcpServer {
+  readonly name: string;
+  readonly enabled: boolean;
+}
+
+const isCodexMcpList = (process: FakeProcess): boolean =>
+  process.command.command === "codex" &&
+  process.command.args[0] === "mcp" &&
+  process.command.args[1] === "list";
+
+/**
+ * The servers a fake `codex mcp list --json` prints for `args`, as codex-cli 0.162.1 resolves
+ * them (`test/fixtures/codex/mcp-isolation.json`): the configured ones, the engine bridge when
+ * the overrides pin it, and each server an inline `mcp_servers={"<name>"={enabled=false}, …}`
+ * override names, turned off.
+ */
+export const fakeMcpList = (
+  servers: readonly FakeMcpServer[],
+  args: readonly string[],
+): FakeMcpServer[] => {
+  const off = new Set<string>();
+  for (const arg of args) {
+    if (!arg.startsWith("mcp_servers={")) continue;
+    for (const match of arg.matchAll(/("(?:[^"\\]|\\.)*")=\{enabled=false\}/gu)) {
+      off.add(JSON.parse(match[1]!) as string);
+    }
+  }
+  const bridge = args.some((arg) => arg.startsWith("mcp_servers.vtc.command="))
+    ? [{ name: "vtc", enabled: true }]
+    : [];
+  return [...servers, ...bridge].map((server) =>
+    off.has(server.name) ? { ...server, enabled: false } : server,
+  );
+};
+
+/**
+ * A fake spawner for the Codex adapter: each `codex mcp list --json` it is asked for (the MCP
+ * isolation check before every headless run) is answered at once from `servers` (default: none)
+ * and recorded in `mcpLists`, never in `processes`; `onMcpList` replaces that answer. Every other
+ * command behaves as in {@link fakeSpawner}.
+ */
+export const codexFakeSpawner = (
+  options: {
+    readonly onSpawn?: (process: FakeProcess) => void;
+    readonly servers?: readonly FakeMcpServer[];
+    readonly onMcpList?: (process: FakeProcess) => void;
+  } = {},
+) => {
+  const processes: FakeProcess[] = [];
+  const mcpLists: FakeProcess[] = [];
+  const spawner: Spawner = (command, spawnOptions) => {
+    const process = new FakeProcess(command, spawnOptions);
+    if (isCodexMcpList(process)) {
+      mcpLists.push(process);
+      if (options.onMcpList !== undefined) {
+        options.onMcpList(process);
+      } else {
+        process.emit(JSON.stringify(fakeMcpList(options.servers ?? [], command.args)));
+        process.exit(0);
+      }
+      return process;
+    }
+    processes.push(process);
+    options.onSpawn?.(process);
+    return process;
+  };
+  return { spawner, processes, mcpLists };
+};
