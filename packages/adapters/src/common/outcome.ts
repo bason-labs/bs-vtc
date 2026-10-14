@@ -6,7 +6,7 @@
  * without a terminal event (`error` with `cause`: the launcher's stop, a kill from outside, or a
  * bare exit).
  */
-import type { HostOutcome, TokenUsage } from "@vtc/shared";
+import { redactSecrets, type HostOutcome, type TokenUsage } from "@vtc/shared";
 import type { RunExit } from "./headless-run.js";
 
 /** 128 + SIGINT, SIGKILL, SIGTERM: a process killed by a signal it did not survive. */
@@ -28,10 +28,11 @@ export const spawnFailure = (binary: string, error: Error): HostOutcome => ({
 
 /**
  * How the process ended, as the start of a message: the launcher's reason when it stopped the run,
- * else the exit status or signal, followed by `what` was missing and the stderr tail.
+ * else the exit status or signal, followed by `what` was missing and the stderr tail with every
+ * secret-shaped value redacted (the message goes into the event log, AD-18).
  */
 export const describeExit = (binary: string, exit: RunExit, what: string): string => {
-  const stderr = exit.stderrTail.trim();
+  const stderr = redactSecrets(exit.stderrTail.trim());
   const how =
     exit.stop?.message ??
     `${binary} ${exit.code === null ? `was stopped by ${exit.signal ?? "a signal"}` : `exited ${String(exit.code)}`}`;

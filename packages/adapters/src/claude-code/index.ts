@@ -83,6 +83,7 @@ export const createClaudeCodeAdapter = (options: ClaudeCodeAdapterOptions = {}):
   const spawner =
     options.spawner ?? createNodeSpawner({ envPassthrough: options.envPassthrough ?? [] });
   const runs = createRunLauncher({
+    host: HOST,
     spawner,
     outcome: claudeOutcomeAfterExit,
     ...(options.killGraceMs === undefined ? {} : { termGraceMs: options.killGraceMs }),

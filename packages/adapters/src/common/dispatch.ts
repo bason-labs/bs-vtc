@@ -7,10 +7,12 @@ import {
   SubagentInstructionSchema,
   type HeadlessRun,
   type HostCommand,
+  type HostId,
   type HostOutcome,
   type SpawnResult,
   type SpawnRoleRequest,
 } from "@vtc/shared";
+import { headlessArgvProblems } from "./argv.js";
 import { startHeadlessRun, type RunExit } from "./headless-run.js";
 import type { Spawner } from "./process.js";
 
@@ -31,6 +33,8 @@ export const subagentSpawn = (
 };
 
 export interface RunLauncherOptions {
+  /** The host whose isolation flags every started argv must carry (AD-25 rule 1). */
+  readonly host: HostId;
   readonly spawner: Spawner;
   /** SIGINT → SIGTERM grace. Default `HEADLESS_DEFAULTS.interruptGraceMs` (AD-25 rule 4). */
   readonly interruptGraceMs?: number;
@@ -46,10 +50,15 @@ export const createRunLauncher = (options: RunLauncherOptions) => {
   return {
     /**
      * Starts `command` with the request's prompt on stdin (both hosts read it from there), under
-     * the request's wall and idle timeouts (AD-25 rule 4).
+     * the request's wall and idle timeouts (AD-25 rule 4). Refuses an argv with an AD-9 marker,
+     * a disallowed flag or a missing isolation flag, whoever built it (AD-25 rules 1–2).
      */
     start(command: HostCommand, request: SpawnRoleRequest): SpawnResult {
       if (disposed) throw new Error("this host adapter was disposed");
+      const problems = headlessArgvProblems(options.host, command);
+      if (problems.length > 0) {
+        throw new Error(`refusing to start ${command.command}: ${problems.join("; ")}`);
+      }
       const run: HeadlessRun = startHeadlessRun({
         command,
         cwd: request.cwd,
