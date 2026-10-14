@@ -185,7 +185,7 @@ jobs:
     needs: [verify, smoke, sign-macos]
     # The signing job is skipped until H-2; packaging runs after it either way. Signing comes
     # before the checksums (AD-26 rule 3).
-    if: ${{ !cancelled() && needs.smoke.result == 'success' && (needs.sign-macos.result == 'success' || needs.sign-macos.result == 'skipped') }}
+    if: ${{ !cancelled() && needs.verify.result == 'success' && needs.smoke.result == 'success' && (needs.sign-macos.result == 'success' || needs.sign-macos.result == 'skipped') }}
     runs-on: ubuntu-24.04
     permissions:
       contents: read
@@ -231,7 +231,9 @@ jobs:
     name: attest and publish
     needs: [verify, package]
     # Tags only: a workflow_dispatch run is a dry run and ends with the release artifact.
-    if: ${{ github.event_name == 'push' && github.ref_type == 'tag' }}
+    # The explicit status check matters: sign-macos is skipped until H-2, and without one GitHub
+    # adds an implicit success() that carries that skip down the needs chain and skips this job.
+    if: ${{ !cancelled() && needs.verify.result == 'success' && needs.package.result == 'success' && github.event_name == 'push' && github.ref_type == 'tag' }}
     runs-on: ubuntu-24.04
     environment: release
     permissions:
