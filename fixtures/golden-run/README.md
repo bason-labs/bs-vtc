@@ -14,7 +14,8 @@ frozen surfaces without a running engine (AD-5, AD-7, AD-12).
   `task-T-1-diff`, `features`, `artifact-spec` (`?path=.vtc/spec/spec.md`, the spec G1 froze),
   `escalations`, the three graph zoom levels `graph-project` (`?scope=project`), `graph-task_dag`
   (`?scope=task_dag`) and `graph-task-T-2` (`?scope=task&task=T-2`, with a `loop_guard`
-  back-edge), and `usage`.
+  back-edge), and `usage`; `client-spend`; and `automation`, which comes from the
+  `samples/automation-events.jsonl` log below, because this run takes no automatic action.
 - `packs/a-1.json`: the `TaskPack` behind the one recorded dispatch (`a-1`), rendered by
   `renderTaskPack` to `.vtc/state/packs/a-1.md`.
 
@@ -45,10 +46,9 @@ frozen surfaces without a running engine (AD-5, AD-7, AD-12).
   - `facts.jsonl`: a `.vtc/research/facts.jsonl` row with a host-reported `reported_source` (H-3);
   - `automation-events.jsonl` (`golden-auto`): an automatic run (`run.started.automation`) and
     every `upstream.*` and `automation.skipped` event (AD-27, D-ca);
-  - `automation.json`: the `GET /api/automation` answer (`AutomationReport`) engine core's read
-    model gives for that log with the project opted out of upstream reports. It moves to
-    `api/automation.json` when the integrator drops the route's `PENDING_GOLDEN` exemption at the
-    round-4 merge (spine §5 reading 209(3)).
+  - the `GET /api/automation` answer for that log (`AutomationReport`, with the project opted out
+    of upstream reports) is `api/automation.json`: the golden run's own log has no automatic
+    action, so the route's snapshot comes from this sample log (spine §5 reading 209(3)).
 
   `packages/engine/test/core/golden-samples.test.ts` validates each against its contract and
   replays the log through the engine's loader.

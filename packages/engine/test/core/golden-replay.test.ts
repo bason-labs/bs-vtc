@@ -141,6 +141,7 @@ describe("golden replay: events.jsonl rebuilds every read route's snapshot (AD-7
       ["graph", body(model.graph("golden-1", "task", "T-1"))],
       ["escalations", body(model.escalations("golden-1"))],
       ["usage", model.usage()],
+      ["automation", model.automation()],
     ];
     for (const [route, value] of checks) {
       const parsed = CONTRACT_SCHEMAS[ENGINE_HTTP.routes[route].response].safeParse(value);

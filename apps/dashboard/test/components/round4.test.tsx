@@ -1,6 +1,6 @@
 import { API_KEY_BILLING_WARNING, EventSchema, PROVIDER_BILLING_NOTICE } from "@vtc/shared";
 import { describe, expect, it } from "vitest";
-import { readFixture } from "../fixtures";
+import { readAutomationFixture, readFixture } from "../fixtures";
 import { firstSample, SAMPLE_RUN, SAMPLE_USAGE, sampleEvent, variant } from "../golden-samples";
 import { renderApp, screen, within } from "./render";
 
@@ -116,7 +116,9 @@ describe("Replay trials are not the run's work (reading 177)", () => {
 
 describe("Automation view (D-ca, AD-27 rule 7)", () => {
   it("reads GET /api/automation and shows the switches, notes, items and skips", async () => {
-    const app = renderApp("/automation/");
+    const app = renderApp("/automation/", {
+      "/api/automation": () => Response.json(readAutomationFixture()),
+    });
     const items = await screen.findByRole("list", { name: "Automatic issues and PRs" });
     expect(
       app.requests.some((r) => new URL(r.url, "http://x").pathname === "/api/automation"),

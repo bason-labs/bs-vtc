@@ -158,8 +158,8 @@ Development (AD-5 rule 8):
   build on engine core's recorded samples (`fixtures/golden-run/samples/`, `test/golden-samples.ts`;
   a case the samples lack is one changed sample event, checked against its contract) and on the
   dashboard's own dev fixtures (`test/dev-samples.ts`). `GET /api/automation` is served from
-  `fixtures/golden-run/api/automation.json` once engine core records it, and until then from the
-  TEMPORARY stand-in `dev-fixtures/api/automation.json`.
+  `fixtures/golden-run/api/automation.json`; the Automation view's tests also use the richer
+  dashboard sample `dev-fixtures/automation.json` (a merged PR, `privacy` and `paused` skips).
 
 - Build against `fixtures/golden-run/`: `events.jsonl` (replay it as the SSE stream) and `api/*.json`
   (the exact response of every read route).

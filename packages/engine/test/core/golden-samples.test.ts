@@ -207,8 +207,8 @@ describe("golden-run closing-round samples", () => {
 /**
  * The automation samples (AD-27, D-ca; spine §5 reading 209(3)): a log with an automatic run's
  * marker and every `upstream.*` and `automation.skipped` event, and `automation.json`, the
- * `GET /api/automation` answer engine core's read model gives for it (the snapshot moves to
- * `api/automation.json` when the integrator drops `PENDING_GOLDEN` at the round's merge).
+ * `GET /api/automation` answer engine core's read model gives for it, the golden run's
+ * `api/automation.json` snapshot (spine §5 reading 209(3)).
  */
 describe("golden-run automation samples", () => {
   const auto = parseEventLog(read("automation-events.jsonl"));
@@ -232,7 +232,9 @@ describe("golden-run automation samples", () => {
   });
 
   it("automation.json is the read model's answer for the log", () => {
-    const snapshot = AutomationReportSchema.parse(JSON.parse(read("automation.json")));
+    const snapshot = AutomationReportSchema.parse(
+      JSON.parse(readFileSync(new URL("../api/automation.json", samples), "utf8")),
+    );
     const settings = automationFor(
       { upstream: { share: false } },
       {
