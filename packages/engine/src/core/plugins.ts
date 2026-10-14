@@ -23,6 +23,19 @@ export interface PluginCatalog {
   profileFor(host: HostId, discipline: string): string | undefined;
   /** The skills that serve the packs a task names (§5.3), by name. */
   skillsFor(host: HostId, packs: readonly string[]): string[];
+  /**
+   * The agent's prompt parts from its manifest entry (AD-21, spine §5 readings 117–118): the SHA
+   * of its locked core and whether it expects the editable section as the pack's `Role
+   * heuristics` block; `undefined` when the plugin has no manifest entry for it. Optional: a
+   * catalog without it runs every agent's compiled prompt.
+   */
+  promptParts?(agent: string, host: HostId): PromptParts | undefined;
+}
+
+/** What {@link PluginCatalog.promptParts} returns. */
+export interface PromptParts {
+  readonly lockedSha256?: string;
+  readonly editableInPack: boolean;
 }
 
 export class PluginManifestError extends Error {
@@ -82,6 +95,14 @@ export const createPluginCatalog = (
       (manifests[host]?.skills ?? [])
         .filter((s) => s.pack !== null && packs.includes(s.pack))
         .map((s) => s.name),
+    promptParts: (agent, host) => {
+      const entry = manifests[host]?.agents.find((a) => a.name === agent);
+      if (entry === undefined) return undefined;
+      return {
+        ...(entry.locked_sha256 === undefined ? {} : { lockedSha256: entry.locked_sha256 }),
+        editableInPack: entry.editable_in_pack === true,
+      };
+    },
   };
 };
 

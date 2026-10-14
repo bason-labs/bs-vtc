@@ -11,7 +11,9 @@
  * - Step 7, release readiness, is computed from the diff (migration order, config changes,
  *   rollback notes, docs, changelog, feature flags) and costs no tokens.
  * Each step is logged as `final_review.step_finished`; the evidence bundle carries the results
- * and the release readiness. Findings route as before: a risky one parks the feature, the cap and
+ * and the release readiness. After a fix round the full gates and step 7 run again, but an AI step
+ * that passed the round before is carried over when the fix's diff cannot change what it reviews
+ * (`fixAffectedSteps`): a failed step always runs again. Findings route as before: a risky one parks the feature, the cap and
  * a stuck loop park it, anything else becomes an integration-fix task.
  */
 import {
@@ -41,7 +43,7 @@ import {
   setFeatureStatus,
 } from "./jobs.js";
 import type { Kernel, RunHandle } from "./kernel.js";
-import { inFlight } from "./queries.js";
+import { countsAsFailure, inFlight } from "./queries.js";
 import { readReleaseReadiness, readTraceabilityFile, releaseReadinessPath } from "./projections.js";
 import { loadResult } from "./results.js";
 import { findingFromDraft, findingFromVerdict } from "./triage.js";
@@ -106,6 +108,106 @@ const runsSince = (h: RunHandle, featureId: string, seq: number) =>
     (r) => r.feature === featureId && r.task === undefined && r.seq > seq,
   );
 
+/** The AI steps this round already settled at its gate run: carried over from the round before. */
+const carriedSteps = (h: RunHandle, featureId: string, seq: number): Set<number> =>
+  new Set(
+    h.state.events
+      .filter(
+        (e) => e.seq > seq && e.feature === featureId && e.type === "final_review.step_finished",
+      )
+      .map((e) => (e.data as { step?: number }).step ?? 0)
+      .filter((step) => FINAL_REVIEW_AI_STEPS.some((s) => s.step === step)),
+  );
+
+/** The source-code extensions a test file can have: data and config (yaml, json, toml, rego, env, sh) never count. */
+const TEST_SOURCE_EXT =
+  "(?:ts|tsx|mts|cts|js|jsx|mjs|cjs|py|go|rb|java|kt|kts|scala|rs|cs|php|swift|ex|exs)";
+
+/**
+ * A test file by its name alone (`*.test.*`, `*.spec.*`, `*_test.*`, `*_spec.*`, `test_*.py`), never
+ * by a directory it sits in: `api/specs/` or `src/spec/` can hold production code and configuration.
+ * The extension must be source code (`openapi.spec.yaml`, `appsettings.test.json` and
+ * `docker-compose.test.yml` are configuration), a hyphen does not make a test (`policy-spec.ts`),
+ * and a `test_*.py` settings or config module (`test_settings.py`) is configuration.
+ */
+const TEST_NAME = new RegExp(
+  `(^|/)[^/]+[._](test|spec)\\.${TEST_SOURCE_EXT}$|(^|/)test_(?![^/]*(settings|conf))[^/]+\\.py$`,
+  "i",
+);
+
+/** Directories whose files configure CI, deployment or infrastructure, whatever their names. */
+const NON_TEST_DIR =
+  /(^|\/)(\.github|\.gitlab|\.circleci|\.buildkite|ci|deploy|deployments?|infra|infrastructure)\//i;
+
+/** A test by name and extension, outside the CI, deploy and infrastructure directories. If unsure, it is code. */
+const isTestFile = (path: string): boolean => TEST_NAME.test(path) && !NON_TEST_DIR.test(path);
+
+/**
+ * The `.vtc/` files no AI step judges: the engine's own records (the event log, evidence and
+ * release readiness, the plan-file projections, the merge-level ledger, Lookback, the gitignored
+ * state). Everything else under `.vtc/` (the frozen spec, architecture, design, research) is what
+ * step 3 verifies against.
+ */
+const ENGINE_RECORD =
+  /^\.vtc\/(?:state|runs|evidence|tasks|lookback)\/|^\.vtc\/merge-level\.jsonl$/;
+
+/**
+ * Pure (§6.7a "re-runs only the steps affected by the fix"): the AI steps a fix's diff (the
+ * previous round's gated head … this round's) can change the outcome of. The engine's own records,
+ * docs and the changelog affect none (step 7 and the gates run every round). An added test only
+ * adds coverage, which the gates' traceability checks again each round (and a gap there runs step
+ * 3 again). A changed or deleted test can weaken the coverage step 3 judged, and so can a change
+ * to the spec, architecture or design under `.vtc/`. Anything else (code, configuration,
+ * dependencies, migrations) can change both the coverage and scope step 3 judged and the combined
+ * diff step 4 reviewed, and so does a fixture or helper next to the tests: only a file
+ * {@link isTestFile} names as a test counts as one. If unsure, run it.
+ */
+export const fixAffectedSteps = (changes: readonly GitChangedFile[]): number[] => {
+  const affected = new Set<number>();
+  for (const change of changes) {
+    const paths = [change.path, ...(change.oldPath === undefined ? [] : [change.oldPath])];
+    if (paths.every((p) => ENGINE_RECORD.test(p) || DOCS.test(p) || CHANGELOG.test(p))) continue;
+    if (paths.every((p) => p.startsWith(".vtc/") && !ENGINE_RECORD.test(p))) {
+      affected.add(3);
+      continue;
+    }
+    if (paths.every(isTestFile)) {
+      if (change.status !== "added") affected.add(3);
+      continue;
+    }
+    affected.add(3);
+    affected.add(4);
+  }
+  return [...affected].sort((a, b) => a - b);
+};
+
+/** The head the round before last reviewed: its passing Final Review gate run's, if any. */
+const previousRoundHead = (h: RunHandle, featureId: string): string | undefined => {
+  const since = enteredSeq(h, featureId);
+  return h.state.gateReports
+    .filter(
+      (r) =>
+        r.seq < since &&
+        r.report.reason === "final_review" &&
+        r.report.feature === featureId &&
+        effectiveVerdict(r.report) === "pass",
+    )
+    .at(-1)?.report.head;
+};
+
+/** Each AI step's last result before this round, by step. */
+const lastStepResults = (h: RunHandle, featureId: string): Map<number, FinalReviewStepResult> => {
+  const since = enteredSeq(h, featureId);
+  const out = new Map<number, FinalReviewStepResult>();
+  for (const e of h.state.events) {
+    if (e.seq >= since || e.feature !== featureId || e.type !== "final_review.step_finished")
+      continue;
+    const result = e.data as unknown as FinalReviewStepResult;
+    out.set(result.step, result);
+  }
+  return out;
+};
+
 /** The AI reviewer steps Final Review wants now (feature-level, read-only, at the integrated head). */
 export const finalReviewSteps = (k: Kernel, h: RunHandle): FeatureStep[] => {
   const steps: FeatureStep[] = [];
@@ -114,12 +216,13 @@ export const finalReviewSteps = (k: Kernel, h: RunHandle): FeatureStep[] => {
     const seq = gatesPassedSeq(h, feature.id);
     if (seq === undefined) continue;
     const runs = runsSince(h, feature.id, seq);
+    const carried = carriedSteps(h, feature.id, seq);
     for (const s of aiSteps(k)) {
+      if (carried.has(s.step)) continue;
       const mine = runs.filter((r) => r.role === s.role && r.mode === s.mode);
       if (mine.some((r) => r.status === "submitted" || r.status === "in_flight")) continue;
       if (inFlight(h.state).some((r) => r.role === s.role && r.feature === feature.id)) continue;
-      if (mine.filter((r) => r.status === "rejected" || r.status === "failed").length >= 3)
-        continue;
+      if (mine.filter(countsAsFailure).length >= 3) continue;
       const rejected = mine.findLast((r) => r.status === "rejected")?.rejection;
       steps.push({
         key: `final:${feature.id}:${s.role}`,
@@ -236,6 +339,36 @@ const recordGateSteps = (k: Kernel, h: RunHandle, featureId: string, report: Gat
         ? { step, status: "pass", evidence }
         : { step, status: "not_run", reason: notRun[step], evidence },
     );
+  }
+};
+
+/** The requirements this gate run's traceability report has no passing test for. */
+const traceabilityGaps = (k: Kernel, report: GateReport): string[] => {
+  const path = report.traceability;
+  return path === undefined ? [] : (readTraceabilityFile(k.deps.repoRoot, path)?.gaps ?? []);
+};
+
+/**
+ * Carries over the AI steps of `steps` that passed the round before (§6.7a: the fix did not touch
+ * what they review), each as this round's `final_review.step_finished` with the earlier evidence.
+ */
+const carryOver = (k: Kernel, h: RunHandle, featureId: string, steps: readonly number[]): void => {
+  const current = h.state.features.get(featureId);
+  if (current === undefined) return;
+  const last = lastStepResults(h, featureId);
+  for (const s of aiSteps(k)) {
+    const before = last.get(s.step);
+    if (!steps.includes(s.step) || before?.status !== "pass") continue;
+    stepFinished(k, h, featureId, {
+      step: s.step,
+      status: "pass",
+      reason:
+        `carried over from round ${String(current.round)}: the fix changed nothing this step reviews`.slice(
+          0,
+          500,
+        ),
+      evidence: before.evidence,
+    });
   }
 };
 
@@ -461,6 +594,23 @@ export const failFinalReview = (
     );
     return;
   }
+  // a spec or design gap is a question for the human or the BA (§6.3 step 8), never an engineer
+  // fix round: the feature parks with it
+  const gaps = findings.filter((f) => f.route === "spec_gap" || f.route === "design_gap");
+  if (gaps.length > 0) {
+    parkFeature(
+      k,
+      h,
+      featureId,
+      "spec_conflict",
+      `Final Review found ${String(gaps.length)} spec or design gap(s): ${gaps
+        .slice(0, 3)
+        .map((f) => `${f.route}: ${f.title}`)
+        .join("; ")}`.slice(0, 2000),
+      [...gaps.map((f) => f.evidence), ...evidence].slice(0, 5),
+    );
+    return;
+  }
   if (current.round > 0 && repeated.length > 0) {
     parkFeature(
       k,
@@ -494,7 +644,9 @@ const conclude = (k: Kernel, h: RunHandle, featureId: string, seq: number): void
   const blocking: Finding[] = [];
   const evidence: Evidence[] = [];
   const unchecked: number[] = [];
+  const carried = carriedSteps(h, featureId, seq);
   for (const s of aiSteps(k)) {
+    if (carried.has(s.step)) continue;
     const run = runs.filter((r) => r.role === s.role && r.mode === s.mode).at(-1);
     const result = run === undefined ? undefined : loadResult(k.deps.repoRoot, run.action_id);
     if (run === undefined || result === undefined) {
@@ -617,8 +769,11 @@ export const featureReviewDone = (k: Kernel, h: RunHandle, featureId: string): v
   const seq = gatesPassedSeq(h, featureId);
   if (seq === undefined) return;
   const runs = runsSince(h, featureId, seq);
-  const done = aiSteps(k).every((s) =>
-    runs.some((r) => r.role === s.role && r.mode === s.mode && r.status === "submitted"),
+  const carried = carriedSteps(h, featureId, seq);
+  const done = aiSteps(k).every(
+    (s) =>
+      carried.has(s.step) ||
+      runs.some((r) => r.role === s.role && r.mode === s.mode && r.status === "submitted"),
   );
   if (done) conclude(k, h, featureId, seq);
 };
@@ -630,15 +785,13 @@ export const checkFinalReviewStuck = (k: Kernel, h: RunHandle): void => {
     const seq = gatesPassedSeq(h, feature.id);
     if (seq === undefined) continue;
     const runs = runsSince(h, feature.id, seq);
+    const carried = carriedSteps(h, feature.id, seq);
     const stuck = aiSteps(k).find(
       (s) =>
+        !carried.has(s.step) &&
         !runs.some((r) => r.role === s.role && r.mode === s.mode && r.status === "submitted") &&
-        runs.filter(
-          (r) =>
-            r.role === s.role &&
-            r.mode === s.mode &&
-            (r.status === "rejected" || r.status === "failed"),
-        ).length >= 3,
+        runs.filter((r) => r.role === s.role && r.mode === s.mode && countsAsFailure(r)).length >=
+          3,
     );
     if (stuck !== undefined)
       parkFeature(
@@ -668,6 +821,8 @@ export const startFinalReview = (k: Kernel, h: RunHandle, featureId: string): vo
     const ws = k.deps.workspace;
     let reports: GateReport[];
     let readiness: ReleaseReadiness | null = null;
+    // the AI steps the fix since the round before cannot have changed (null: all of them run)
+    let unaffected: number[] | null = null;
     try {
       const head = await ws.resolve(feature.integration_branch);
       const base =
@@ -695,6 +850,17 @@ export const startFinalReview = (k: Kernel, h: RunHandle, featureId: string): vo
         readiness = releaseReadiness(await k.deps.git.changedFiles(base, head), listedFiles);
       } catch {
         readiness = null; // step 7 then says it could not be computed
+      }
+      const previous = feature.round > 0 ? previousRoundHead(h, featureId) : undefined;
+      if (previous !== undefined) {
+        try {
+          const affected = fixAffectedSteps(await k.deps.git.changedFiles(previous, head));
+          unaffected = FINAL_REVIEW_AI_STEPS.map((s) => s.step).filter(
+            (step) => !affected.includes(step),
+          );
+        } catch {
+          unaffected = null; // if unsure, run it
+        }
       }
     } catch (error) {
       await k.serial(h, () => {
@@ -760,9 +926,19 @@ export const startFinalReview = (k: Kernel, h: RunHandle, featureId: string): vo
         );
       else removeRepoFile(k.deps.repoRoot, releaseReadinessPath(featureId));
       recordGateSteps(k, h, featureId, report);
-      if (aiSteps(k).length === 0) {
-        const seq = gatesPassedSeq(h, featureId);
-        if (seq !== undefined) conclude(k, h, featureId, seq);
+      // step 3 is never carried over a traceability gap of this round: it runs and fails on it
+      if (unaffected !== null)
+        carryOver(
+          k,
+          h,
+          featureId,
+          unaffected.filter((step) => step !== 3 || traceabilityGaps(k, report).length === 0),
+        );
+      const seq = gatesPassedSeq(h, featureId);
+      if (seq !== undefined) {
+        const carried = carriedSteps(h, featureId, seq);
+        // nothing left to dispatch: no reviewer role installed, or every step carried over
+        if (aiSteps(k).every((s) => carried.has(s.step))) conclude(k, h, featureId, seq);
       }
       return Promise.resolve();
     });

@@ -27,6 +27,25 @@ import {
   type VtcEvent,
 } from "@vtc/shared";
 
+/**
+ * How the engine's own `role.failed` starts for a run a resume superseded (`Engine.resume`): such
+ * a run is `stopped`, not the role's failure, and never counts toward the stuck limits
+ * (`consecutiveFailures`, Final Review's). Only the engine writes it: a failure message a Lead or
+ * a host supplied goes through {@link reportedFailureMessage} first.
+ */
+export const SUPERSEDED_RUN_PREFIX = "superseded:";
+
+/**
+ * A failure message a Lead or a host supplied, as the engine logs it: one that opens like the
+ * engine's own stop ({@link SUPERSEDED_RUN_PREFIX}) is prefixed `reported: `, so a role or host
+ * can never mark its own run stopped (AD-8: the engine decides).
+ */
+export const reportedFailureMessage = (message: string): string =>
+  (message.trimStart().startsWith(SUPERSEDED_RUN_PREFIX) ? `reported: ${message}` : message).slice(
+    0,
+    2000,
+  );
+
 /** One role run (a `role.dispatched` and what became of it). */
 export interface RoleRunRecord {
   readonly action_id: string;
@@ -55,6 +74,16 @@ export interface RoleRunRecord {
   tokens: TokenUsage | null;
   costUsd: number | null;
   rejection?: { reason: string; issues: string[] };
+  /**
+   * A failed run the engine or the human stopped, not the role's failure: a resume superseded it
+   * ({@link SUPERSEDED_RUN_PREFIX}), or `vtc pause` killed it (`killedByPause`).
+   */
+  stopped?: boolean;
+  /**
+   * The engine-launched run ended killed while the run was paused (`headless.ended` with cause
+   * `killed` after a `run.paused`): engine facts only, so replay sees the same.
+   */
+  killedByPause?: boolean;
 }
 
 export interface GateReportRecord {
@@ -353,6 +382,12 @@ export const applyEvent = (state: RunState, event: VtcEvent): void => {
       run.tokens = event.tokens ?? null;
       run.costUsd = event.cost_usd ?? null;
     }
+  } else if (isEventOfType(event, "headless.ended")) {
+    const data = readEventData(event);
+    const run = state.roleRuns.get(data.action_id);
+    // `vtc pause` killed it: the pause is logged first, the kill is the engine's (headless.ts)
+    if (run?.status === "in_flight" && data.cause === "killed" && state.run.paused)
+      run.killedByPause = true;
   } else if (isEventOfType(event, "role.failed")) {
     const data = readEventData(event);
     const run = state.roleRuns.get(data.action_id);
@@ -360,6 +395,8 @@ export const applyEvent = (state: RunState, event: VtcEvent): void => {
       run.status = "failed";
       run.closedSeq = event.seq;
       run.costUsd = event.cost_usd ?? null;
+      if (data.message.startsWith(SUPERSEDED_RUN_PREFIX) || run.killedByPause === true)
+        run.stopped = true;
     }
   } else if (isEventOfType(event, "gate.result")) {
     state.gateReports.push({
