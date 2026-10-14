@@ -90,8 +90,10 @@ const AXE_TOOL = "axe-core";
 export const VISUAL_NOTE_RULE = "vtc-visual/note";
 /**
  * Rule id of the note on a run whose renders, axe and pixel diff loaded the project's own
- * Playwright from the checkout under review (§5 reading 124). Such a run does not satisfy the
- * Level-3 checklist's Final Review item; engine core reads it with {@link ranOnProjectToolchain}.
+ * Playwright from the checkout under review (§5 reading 124). Such a run is not to satisfy the
+ * Level-3 checklist's Final Review item, but engine core cannot read this marker (AD-13: core
+ * never imports `gates/`, and the id is not a contract): the cap waits on a proposed
+ * `VisualSummary.toolchain` field in `@vtc/shared`.
  */
 export const VISUAL_PROJECT_TOOLCHAIN_RULE = "vtc-visual/project-toolchain";
 
@@ -126,10 +128,10 @@ export const noteFindings = (notes: readonly VisualNote[], reportPath: string): 
 };
 
 /**
- * Whether a visual step ran on the project's own Playwright (reading 124): such a result, even a
- * `pass`, does not satisfy Level 3. Only the gate runner writes `GateReport.visual`, and the
- * marker is its first findings, so the summary's cap never drops it. Stands in for a toolchain
- * field on `VisualSummary` until the contract has one.
+ * Whether a visual step ran on the project's own Playwright (reading 124). Only the gate runner
+ * writes `GateReport.visual`, and the marker is among its first findings, so the summary's cap
+ * never drops it. For the gate runner's own use and tests: engine core may not import it (AD-13)
+ * and reads a `VisualSummary.toolchain` field once the contract has one.
  */
 export const ranOnProjectToolchain = (
   summary: Pick<VisualSummary, "findings"> | null | undefined,
@@ -230,6 +232,8 @@ export const evaluateVisual = (input: EvaluateInput): VisualOutcome => {
   const diffs: VisualReport["diffs"] = [];
   // Notes first: the summary keeps only the first findings, and a note must never be cut.
   const findings: ToolFinding[] = noteFindings(input.notes ?? [], input.reportPath);
+  // Where the "checks not run" finding goes once it is known: right after the notes.
+  const reasonAt = findings.length;
   const unreachedBy = new Map<string, string[]>();
   const axeBy = new Map<string, { item: RunnerAxeItem; keys: string[]; shot: string | null }>();
   const incompleteBy = new Map<
@@ -453,8 +457,23 @@ export const evaluateVisual = (input: EvaluateInput): VisualOutcome => {
     status = "unchecked";
   } else status = "pass";
 
+  // Why the step is `error` or `unchecked`: ahead of every check's findings (after the notes), so
+  // the summary's cap never drops it.
+  const reasons: ToolFinding[] = [];
+  if (result.error !== undefined) {
+    reasons.push({
+      tool: VISUAL_TOOL,
+      rule_id: VISUAL_RULE_PREFIX.unreached,
+      category: "design",
+      title: `Visual step failed: ${result.error}`.slice(0, 200),
+      message: result.error.slice(0, 4000),
+      location: { path: DESIGN_SCREENS_PATH, symbol: "visual step failed" },
+      evidence: { type: "command_output", ref: input.reportPath },
+      sarif_level: "warning",
+    });
+  }
   if (notRun.length > 0) {
-    findings.push({
+    reasons.push({
       tool: VISUAL_TOOL,
       rule_id: VISUAL_RULE_PREFIX.unreached,
       category: "design",
@@ -465,6 +484,7 @@ export const evaluateVisual = (input: EvaluateInput): VisualOutcome => {
       sarif_level: "warning",
     });
   }
+  findings.splice(reasonAt, 0, ...reasons);
 
   const report = VisualReportSchema.parse({
     v: 1,
@@ -531,9 +551,11 @@ export const visualWithoutRenders = (input: {
   readonly notes?: readonly VisualNote[];
 }): VisualOutcome => {
   const reason = input.reason.slice(0, 500);
-  const findings = [...noteFindings(input.notes ?? [], input.reportPath), ...input.findings];
+  // Notes, then the finding that says why nothing rendered, then the rest: the summary keeps only
+  // the first findings, and neither a note nor the reason may be cut.
+  const findings = noteFindings(input.notes ?? [], input.reportPath);
   const status: VisualStatus =
-    input.status === "skipped" && findings.some(isBlocking) ? "fail" : input.status;
+    input.status === "skipped" && input.findings.some(isBlocking) ? "fail" : input.status;
   if (status !== "skipped") {
     findings.push({
       tool: VISUAL_TOOL,
@@ -551,6 +573,7 @@ export const visualWithoutRenders = (input: {
       sarif_level: "warning",
     });
   }
+  findings.push(...input.findings);
   const skipped = status === "skipped" ? { skipped_reason: reason } : {};
   const report = VisualReportSchema.parse({
     v: 1,

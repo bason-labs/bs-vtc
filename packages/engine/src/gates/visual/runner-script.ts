@@ -26,7 +26,15 @@
  * styles, the region lookup and the font wait run in an isolated world of the runner's own (CDP
  * `Page.createIsolatedWorld`): the same DOM, none of the page's globals or prototypes. The
  * prototype origin is served only to the reference context; the implementation's context gets
- * it aborted, so the implementation cannot embed the approved prototype and pass as it.
+ * it aborted, so the implementation cannot load the prototype through that origin. (It is not a
+ * wall: the app server shares the sandbox, which may read the prototype, so it could serve those
+ * bytes from its own origin; the pixel diff alone does not prove the page is the app's own work.)
+ *
+ * On macOS the sandbox shares the host's loopback at the app's port. Before the app starts, the
+ * runner checks that nothing answers on that port (else the run is an `error`: a server it did
+ * not start, such as the developer's own dev server, would be rendered in its place); it accepts
+ * readiness only while its child is alive, and a child that exits during the run makes the run
+ * an `error`.
  *
  * The script writes only into its output directory and the result file; the Gate Runner treats
  * the result as untrusted (`protocol.ts`). It never throws past `main`: a failure of the whole
@@ -38,6 +46,7 @@ import { readFileSync, realpathSync, statSync, unlinkSync, writeFileSync } from 
 import { extname, join, resolve, sep } from "node:path";
 import { pathToFileURL } from "node:url";
 import { spawn } from "node:child_process";
+import { connect } from "node:net";
 
 // Without --disable-sigusr1 a signal from the app server would open this process's inspector.
 if (!process.execArgv.includes("--disable-sigusr1")) {
@@ -391,7 +400,25 @@ const renderJob = async (browser, job, app, pixelmatch, scratch) => {
   return record;
 };
 
+// Whether something accepts connections at host:port. On macOS the sandbox shares the host's
+// loopback at the app's port, so a server already there (the developer's own dev server of this
+// project, say) would answer the readiness check and be rendered in place of the code under review.
+const portTaken = (host, port) => new Promise((done) => {
+  const socket = connect({ host, port });
+  const finish = (taken) => { socket.destroy(); done(taken); };
+  socket.setTimeout(2000, () => finish(false));
+  socket.once("connect", () => finish(true));
+  socket.once("error", () => finish(false));
+});
+
 const startApp = async (app) => {
+  const url = new URL(app.url);
+  const port = Number(url.port || (url.protocol === "https:" ? 443 : 80));
+  for (const host of new Set([url.hostname.replace(/^\[|\]$/g, ""), "127.0.0.1", "::1"])) {
+    if (await portTaken(host, port)) {
+      throw new Error("port " + port + " is already in use on the loopback (" + host + "): a server this run did not start answers there, so nothing is rendered from it; stop that server or give visual.app another port");
+    }
+  }
   const child = spawn(app.command[0], app.command.slice(1), {
     cwd: app.cwd,
     stdio: ["ignore", "pipe", "pipe"],
@@ -405,18 +432,20 @@ const startApp = async (app) => {
   let exited = null;
   child.on("exit", (code, signal) => { exited = code === null ? String(signal) : String(code); });
   child.on("error", (error) => { exited = "spawn error: " + error.message; });
+  const started = { child, url: app.url, exited: () => exited, log: () => log };
   const deadline = Date.now() + app.ready_timeout_ms;
   while (Date.now() < deadline) {
     if (exited !== null) throw new Error("the app server exited (" + exited + ") before it answered: " + clip(log, 1000));
     try {
       const response = await fetch(app.url, { redirect: "manual" });
-      if (response.status < 500) return { child, url: app.url };
+      // Answered, and by a live child (one that failed to bind would have exited).
+      if (response.status < 500 && exited === null) return started;
     } catch {
       // not listening yet
     }
     await new Promise((r) => setTimeout(r, 250));
   }
-  stopApp({ child });
+  stopApp(started);
   throw new Error("the app server did not answer at " + app.url + " within " + app.ready_timeout_ms + " ms: " + clip(log, 1000));
 };
 
@@ -446,6 +475,10 @@ const main = async () => {
     const scratch = await scratchContext.newPage();
     for (const job of input.jobs) {
       out.renders.push(await renderJob(browser, job, app, pixelmatch, scratch));
+    }
+    // The app server died during the run: whatever answered on its port was not its code.
+    if (app !== null && app.exited() !== null) {
+      throw new Error("the app server exited (" + app.exited() + ") during the run, so what was rendered from its port is not the code under review: " + clip(app.log(), 1000));
     }
   } finally {
     if (browser !== null) await browser.close().catch(() => undefined);

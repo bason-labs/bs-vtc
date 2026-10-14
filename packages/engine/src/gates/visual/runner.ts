@@ -147,28 +147,57 @@ const realOrNull = (path: string): string | null => {
 };
 
 /**
- * The absolute `node` the visual runner runs with: the first executable `node` on an absolute
- * `PATH` entry that, followed through symbolic links, lies outside every one of `exclude` (the
- * repository and the verification checkout). `null` when there is none.
+ * The interpreter running the engine, when it is Node with `--disable-sigusr1` (22.14 or later,
+ * 23.7 or later): an absolute binary the engine already trusts, picked before anything on `PATH`.
+ * `null` under Bun (the release binary) or an older Node.
+ */
+export const engineNodeExecutable = (
+  versions: NodeJS.ProcessVersions = process.versions,
+  execPath: string = process.execPath,
+): string | null => {
+  if (versions.bun !== undefined || !isAbsolute(execPath)) return null;
+  const [major = 0, minor = 0] = versions.node.split(".").map(Number);
+  const supported = major >= 24 || (major === 23 && minor >= 7) || (major === 22 && minor >= 14);
+  return supported ? execPath : null;
+};
+
+/**
+ * The absolute `node` the visual runner runs with: `preferred` (the engine's own Node,
+ * {@link engineNodeExecutable}) when it lies outside every one of `exclude` (the repository and
+ * the verification checkout), else the first executable `node` on an absolute `PATH` entry that,
+ * followed through symbolic links, lies outside them. `null` when there is none.
+ *
+ * Known limit: a version-manager shim on `PATH` (Volta, asdf, mise) is accepted like any `node`
+ * outside the repository, and such a shim picks its interpreter, and with mise an environment,
+ * from config files in its working directory, the checkout under review. An interpreter without
+ * `--disable-sigusr1` fails closed (`error`), but a trusted mise config could still set
+ * `NODE_OPTIONS` for the runner. Preferring the engine's own Node avoids the shim in development.
  */
 export const resolveNodeExecutable = (
   path: string | undefined,
   exclude: readonly string[],
+  preferred: string | null = null,
 ): string | null => {
   const roots = exclude.flatMap((root) => [root, realOrNull(root) ?? root]);
   const outside = (p: string): boolean => !roots.some((root) => inside(root, p));
+  const usable = (candidate: string): boolean => {
+    const real = realOrNull(candidate);
+    if (real === null || !outside(real)) return false;
+    try {
+      if (!statSync(real).isFile()) return false;
+      accessSync(real, constants.X_OK);
+    } catch {
+      return false;
+    }
+    return true;
+  };
+  if (preferred !== null && isAbsolute(preferred) && outside(preferred) && usable(preferred)) {
+    return preferred;
+  }
   for (const dir of (path ?? "").split(delimiter)) {
     if (dir === "" || !isAbsolute(dir) || !outside(dir)) continue;
     const candidate = join(dir, "node");
-    const real = realOrNull(candidate);
-    if (real === null || !outside(real)) continue;
-    try {
-      if (!statSync(real).isFile()) continue;
-      accessSync(real, constants.X_OK);
-    } catch {
-      continue;
-    }
-    return candidate;
+    if (usable(candidate)) return candidate;
   }
   return null;
 };

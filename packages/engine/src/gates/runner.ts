@@ -114,6 +114,7 @@ import { buildTraceability } from "./traceability.js";
 import { visualWithoutRenders } from "./visual/evaluate.js";
 import { noveltySeam } from "./visual/novelty.js";
 import {
+  engineNodeExecutable,
   resolveNodeExecutable,
   sandboxedVisualRunner,
   type VisualRunner,
@@ -139,8 +140,9 @@ export interface GateRunnerOptions {
   /** Where the visual step finds Playwright (default: the browser store, then the project's). */
   readonly visualToolchains?: VisualToolchains;
   /**
-   * The absolute Node the visual runner script runs with (default: `node` on an absolute `PATH`
-   * entry outside the repository and the checkout, `resolveNodeExecutable`).
+   * The absolute Node the visual runner script runs with (default: the engine's own Node when it
+   * supports `--disable-sigusr1`, else `node` on an absolute `PATH` entry outside the repository
+   * and the checkout, `resolveNodeExecutable`).
    */
   readonly node?: string;
 }
@@ -1698,7 +1700,11 @@ class Run {
           sandboxedVisualRunner(this.jail, {
             node:
               this.options.node ??
-              resolveNodeExecutable(this.env.PATH, [this.deps.repoRoot, this.checkoutAbs]),
+              resolveNodeExecutable(
+                this.env.PATH,
+                [this.deps.repoRoot, this.checkoutAbs],
+                engineNodeExecutable(),
+              ),
             noSandbox: NO_SANDBOX_REFUSAL,
           }),
         allowCommand: (argv) => gateCommandAllowed(argv, allowlist),

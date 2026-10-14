@@ -106,7 +106,7 @@ export const LOOPBACK_QUESTION =
 
 /** The question that puts a proposed app server into `visual.app`. */
 export const visualAppQuestion = (app: Pick<VisualApp, "command" | "url">): string =>
-  `Use \`${app.command.join(" ")}\` at ${app.url} as the app server the visual step renders screens from? It runs in the gate sandbox, which then may listen on and connect to port ${String(appLoopbackPort(app.url))} of this machine's loopback (on macOS the host's own loopback: any local service already on that port is reachable too; no other port)`;
+  `Use \`${app.command.join(" ")}\` at ${app.url} as the app server the visual step renders screens from? It runs in the gate sandbox, which then may listen on and connect to port ${String(appLoopbackPort(app.url))} of this machine's loopback (on macOS the host's own loopback: any local service already on that port is reachable too, so the visual step stops with an error while one is listening there; no other port)`;
 
 /** `gates.yml` text with `visual.app` set (the typed config has no field for it yet). */
 export const withVisualApp = (yaml: string, app: VisualApp | null): string => {

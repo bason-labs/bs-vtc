@@ -17,6 +17,7 @@ import type { GateSandbox } from "@vtc/shared";
 import { describe, expect, it } from "vitest";
 import { GateCommandJail } from "../../../src/gates/index.js";
 import {
+  engineNodeExecutable,
   LINUX_PTRACE_REFUSAL,
   NO_RUNNER_NODE,
   resolveNodeExecutable,
@@ -493,6 +494,47 @@ describe("visual runner script", () => {
     }
   }, 60_000);
 
+  it("renders nothing from a port a server it did not start already answers on", async () => {
+    const { checkout, port, call } = await renderSetup();
+    // Someone else's server (the developer's own dev server, say) holds the app's port.
+    const foreign = createServer((socket) => {
+      // The runner's probe connects and drops the connection at once.
+      socket.on("error", () => undefined);
+      socket.end("HTTP/1.1 200 OK\r\ncontent-length: 0\r\n\r\n");
+    });
+    await new Promise<void>((resolve) => foreign.listen(port, "127.0.0.1", resolve));
+    const jail = new GateCommandJail(recordingSandbox().sandbox, []);
+    const runner = sandboxedVisualRunner(jail, { node: NODE, noSandbox: "none" });
+    try {
+      const outcome = await runner.run(call());
+      if (!outcome.ok) throw new Error(outcome.reason);
+      expect(outcome.result.error).toMatch(new RegExp(`port ${String(port)} is already in use`));
+      expect(outcome.result.renders).toEqual([]);
+      // The app server was never started.
+      expect(existsSync(join(checkout, "seen.json"))).toBe(false);
+    } finally {
+      jail.dispose();
+      await new Promise((resolve) => foreign.close(resolve));
+    }
+  }, 60_000);
+
+  it("names Node 22.14 when the interpreter does not know --disable-sigusr1", async () => {
+    const { dir, call } = await renderSetup();
+    // An older Node: it rejects the flag before running anything.
+    const old = join(dir, "old-node");
+    writeFileSync(old, '#!/bin/sh\necho "node: bad option: --disable-sigusr1" >&2\nexit 9\n');
+    chmodSync(old, 0o755);
+    const jail = new GateCommandJail(recordingSandbox().sandbox, []);
+    const runner = sandboxedVisualRunner(jail, { node: old, noSandbox: "none" });
+    try {
+      const outcome = await runner.run(call());
+      expect(outcome.ok).toBe(false);
+      expect(outcome.ok ? "" : outcome.reason).toMatch(/needs Node 22\.14 or later/);
+    } finally {
+      jail.dispose();
+    }
+  }, 60_000);
+
   it("never runs the script without --disable-sigusr1", async () => {
     const { dir, checkout, call } = await renderSetup();
     // A sandbox that drops the flag: the script refuses before it takes the key or starts the app.
@@ -592,5 +634,19 @@ describe("visual runner script", () => {
       null,
     );
     expect(resolveNodeExecutable(undefined, [repo])).toBe(null);
+    // The engine's own Node comes before PATH (no version-manager shim), unless it is the checkout's.
+    expect(resolveNodeExecutable(path, [repo, checkout], NODE)).toBe(NODE);
+    expect(resolveNodeExecutable(path, [repo, checkout], join(checkout, "node"))).toBe(
+      join(trusted, "node"),
+    );
+    expect(resolveNodeExecutable(path, [repo, checkout], "node")).toBe(join(trusted, "node"));
+    const versions = (node: string, bun?: string) =>
+      ({ node, ...(bun === undefined ? {} : { bun }) }) as NodeJS.ProcessVersions;
+    expect(engineNodeExecutable(versions("22.14.0"), "/usr/bin/node")).toBe("/usr/bin/node");
+    expect(engineNodeExecutable(versions("23.7.0"), "/usr/bin/node")).toBe("/usr/bin/node");
+    expect(engineNodeExecutable(versions("24.0.0"), "/usr/bin/node")).toBe("/usr/bin/node");
+    expect(engineNodeExecutable(versions("22.13.1"), "/usr/bin/node")).toBe(null);
+    expect(engineNodeExecutable(versions("23.6.0"), "/usr/bin/node")).toBe(null);
+    expect(engineNodeExecutable(versions("22.17.0", "1.4.3"), "/usr/local/bin/vtc")).toBe(null);
   });
 });

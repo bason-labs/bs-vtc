@@ -243,22 +243,29 @@ valid MAC, or an image that is missing or changed, is `error` and never read as 
 The runner itself is out of the app server's reach (reading 124): Node runs with
 `--disable-sigusr1` (Node 22.14 or later; the script refuses to start without it), so a signal
 cannot open its inspector; the app runs detached, in a session and process group of its own;
-the interpreter is an absolute `node` from a `PATH` entry outside the repository and the
-checkout (none: `error`); and on Linux, where a same-user process can attach to another through
+the interpreter is the engine's own Node when it has the flag, else an absolute `node` from a
+`PATH` entry outside the repository and the checkout (none: `error`; known limit: a
+version-manager shim there, such as Volta, asdf or mise, picks its interpreter and, with mise,
+an environment from config files in the checkout under review); and on Linux, where a same-user process can attach to another through
 ptrace unless Yama limits it to descendants, a render runs only with `kernel.yama.ptrace_scope`
 1 or higher (else `error`, naming the sysctl). axe, the computed styles, the region lookup and
 the font wait run in an isolated world of the runner's own (CDP `Page.createIsolatedWorld`), so
 the page under review cannot replace `window.axe`, `getComputedStyle` or
 `getBoundingClientRect`; the prototype origin is served only to the reference context (the
-implementation's requests to it are aborted, so it cannot embed the prototype). On the
+implementation's requests to it are aborted, so it cannot load the prototype through that
+origin; known limit: the app server shares the sandbox, which may read the prototype, so it
+could serve the same bytes from its own origin). On the
 doctor-installed store's Playwright, preferred whenever it is installed (reading 124), the
 comparison code is VTC's. Without a store the project's own Playwright runs, and the runner
 process loads `playwright-core` from the verification checkout, which the change under review
 can modify (install scripts run there), so every such run carries a note under its own rule,
-`vtc-visual/project-toolchain`, saying the comparison ran on project-controlled code. Such a run,
-even a `pass`, does not satisfy Level 3; engine core checks it with
-`visual.ranOnProjectToolchain(report.visual)` until `VisualSummary` has a toolchain field. Notes
-come first in the findings, so the summary's 200-finding cap never drops one.
+`vtc-visual/project-toolchain`, saying the comparison ran on project-controlled code. Notes come
+first in the findings, so the summary's 200-finding cap never drops one. That such a run, even
+a `pass`, does not satisfy Level 3 is not built yet: engine core may not import `gates/`
+(AD-13), and neither the rule id nor a toolchain field is in `@vtc/shared`, so the cap waits on
+a contract change (proposed: `VisualSummary.toolchain: "store" | "project"`, written by the gate
+runner and read by engine core). Until then the note is the only signal, and
+`ranOnProjectToolchain` in `gates/visual/` serves the gate runner's own tests.
 
 1. Token lint (`vtc-token/<kind>`) on the lines the diff added to UI files: literal colours (OKLab
    ΔE over `color_delta` from every colour token), spacing and radii off the token scale, font
@@ -285,8 +292,11 @@ come first in the findings, so the summary's 200-finding cap never drops one.
    is `error` (gate infrastructure: a human sets it up).
 5. The render matrix runs as one gate command in the sandbox (verify phase; on macOS the host
    loopback is opened at the app server's own port only, `GateJailSpec.loopbackPorts`, never
-   the engine API or another local service, and `vtc calibrate`'s question names that port; on
-   Linux the loopback is the sandbox's own): VTC's runner script (`runner-script.ts`) in the
+   the engine API or a service on another port, and `vtc calibrate`'s question names that port;
+   a service already listening on that very port would be reachable, so the runner first checks
+   that nothing answers there and otherwise ends the run as `error` ("port N is already in
+   use"), takes readiness only from a live child, and ends as `error` when the app exits
+   mid-run; on Linux the loopback is the sandbox's own): VTC's runner script (`runner-script.ts`) in the
    command's private temp directory. Per job it renders the app at `<url><route>?state=&theme=` and the
    base prototype (served through request interception) in the same run with the same
    browser: headless, DPR 1, `en-US`, `UTC`, a fixed clock, reduced motion, fonts ready,
