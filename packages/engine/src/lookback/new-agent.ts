@@ -9,7 +9,9 @@
  *   have a profile, when no installed role declares that stack: proposed `engineer_<stack>`.
  * - `missing_role`: at least {@link NEW_AGENT_MIN_ESCALATIONS} answered escalations whose
  *   `who_should_have_caught` names a role that is not installed (the human asking for a skill VTC
- *   lacks): proposed that role.
+ *   lacks): proposed that role. A core role (`CORE_ROLES`) always exists, whether or not the
+ *   catalog compiles an agent for it (the Lead is the host session, not a compiled role), so an
+ *   escalation blaming one is never a missing role.
  * A new role has no dispatches of its own to replay, so every signal is evidence-only: its PR
  * carries the evidence and the `needs-eval` label (`AUTO_LABELS.needsEval`). Engine core raises
  * the `new_agent` issue from it through the upstream module (`newAgentReportFields` is what may
@@ -18,6 +20,7 @@
  */
 import {
   AUTO_LABELS,
+  CORE_ROLES,
   DisciplineSchema,
   isEventOfType,
   LOOKBACK_LIMITS,
@@ -150,10 +153,11 @@ export const newAgentSignals = (input: {
     });
   }
   const asked = new Map<string, number>();
+  const core: ReadonlySet<string> = new Set(CORE_ROLES);
   for (const event of input.history) {
     if (!isEventOfType(event, "escalation.answered")) continue;
     const role = readEventData(event).answer.who_should_have_caught;
-    if (role === "none" || installed.has(role)) continue;
+    if (role === "none" || installed.has(role) || core.has(role)) continue;
     asked.set(role, (asked.get(role) ?? 0) + 1);
   }
   for (const [role, escalations] of asked) {

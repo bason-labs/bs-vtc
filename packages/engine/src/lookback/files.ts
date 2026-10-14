@@ -137,11 +137,19 @@ export const writeAtomicIfUnchanged = async (
   return true;
 };
 
-/** Appends whole JSON lines. */
-export const appendJsonLines = async (path: string, values: readonly unknown[]): Promise<void> => {
+/** Appends whole JSON lines. `mode` applies when the append creates the file. */
+export const appendJsonLines = async (
+  path: string,
+  values: readonly unknown[],
+  options: { readonly mode?: number } = {},
+): Promise<void> => {
   if (values.length === 0) return;
   await mkdir(dirname(path), { recursive: true });
-  await appendFile(path, values.map((v) => `${JSON.stringify(v)}\n`).join(""));
+  await appendFile(
+    path,
+    values.map((v) => `${JSON.stringify(v)}\n`).join(""),
+    options.mode === undefined ? {} : { mode: options.mode },
+  );
 };
 
 /** The JSON values of a JSONL file (lines that do not parse are skipped). */

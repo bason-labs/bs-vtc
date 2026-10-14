@@ -12,13 +12,17 @@
  * {@link planReplayTrials}), launches what {@link planRetroReplays} allows this RETRO (a grader
  * that can score the role, the weekly window, the budget and `maxTrialsPerRetro`, each limit an
  * `automation.skipped` draft), grades each trial with {@link gradeTrial} (the gates) or
- * {@link gradeVerdictReplay} (a verdict role against {@link recordedOutcome}; `infra_error` when the
- * replayed dispatch has none), keeps every grade in
- * the trial ledger ({@link recordReplayTrial}) so a replay continues across RETROs, and once all
- * are graded builds the result with {@link assembleReplay} (its grader and isolation recorded)
+ * {@link gradeVerdictReplay} (a verdict role against the expectation its task key carries,
+ * {@link expectedOfTaskKey}; `infra_error` when the replayed dispatch has no recorded outcome), keeps
+ * every grade in the trial ledger ({@link recordReplayTrial}) so a replay continues across RETROs,
+ * and once all are graded builds the result with {@link assembleReplay} (its grader and isolation
+ * recorded)
  * and writes it with {@link writeReplayResult} (whose `lookback.replay_finished` carries the
  * SHA-256 of the bytes written), reading the A/A noise floor with {@link cachedAaFlipRate} and
- * keeping a measured one with {@link recordAaFlipRate}.
+ * keeping a measured one with {@link recordAaFlipRate}. Engine core's `LookbackRetro` seam does not
+ * drive {@link planRetroReplays} and the ledger yet (core caps whole replays itself and has no
+ * per-trial outcome hook): a contract proposal to engine core and the daemon owner, see the
+ * `replay-ledger` module comment.
  * At the run's end Lookback also returns what engine core hands the upstream module: cost
  * regressions ({@link costRegressions}, D-bv; their lookback target is aimed at tokens) and
  * missing specialists ({@link newAgentSignals}, D-cd, evidence-only), with the VTC-side report
@@ -107,6 +111,7 @@ export {
   replayIsolation,
   REPLAY_MAX_TASKS,
   replayPath,
+  expectedOfTaskKey,
   replayTaskKey,
   replayTasks,
   tokensDeltaPct,
@@ -117,14 +122,18 @@ export {
 export {
   assembleReplay,
   readReplayInfra,
+  readReplayLedger,
   readReplayTrials,
   recordReplayInfra,
   recordReplayTrial,
+  REPLAY_INFRA_OUTCOMES,
   REPLAY_MAX_INFRA_ATTEMPTS,
   REPLAY_TRIALS_FILE,
   replayTrialKey,
+  type ReplayInfraAttempts,
   type ReplayInfraOutcome,
   type ReplayInfraRow,
+  type ReplayLedger,
   type ReplayLedgerScope,
   type ReplayTrialId,
   type ReplayTrialRow,

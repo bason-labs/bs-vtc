@@ -6,7 +6,7 @@
  * its grader (reading 202) and its isolation (reading 178).
  */
 import { LOOKBACK_LIMITS, ReplayResultSchema, validateEventData, type HostId } from "@vtc/shared";
-import { writeFile, mkdir } from "node:fs/promises";
+import { appendFile, mkdir, stat, writeFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import { describe, expect, it } from "vitest";
 import {
@@ -15,6 +15,7 @@ import {
   planRetroReplays,
   promptVersionRef,
   readReplayInfra,
+  readReplayLedger,
   readReplayTrials,
   recordReplayInfra,
   recordReplayTrial,
@@ -72,7 +73,8 @@ const pending = (
   role = "engineer",
   changesFiles = true,
   host: HostId = HOST,
-) => ({ proposal, role, host, changesFiles, trials });
+  recordedAt = "2026-10-01T09:00:00.000Z",
+) => ({ proposal, role, host, changesFiles, trials, recordedAt });
 
 const open = { weeklyRemainingPct: 80, budgetAvailable: true };
 
@@ -167,6 +169,23 @@ describe("planning a RETRO's replays (D-cg, D-ch)", () => {
     expect(validateEventData("automation.skipped", planned.skipped[0]?.data ?? {}).ok).toBe(true);
   });
 
+  it("fills the cap oldest replay first, whatever order the caller passes", () => {
+    const older = plan(["r1:T-1", "r1:T-2"], true);
+    const newer = plan(["r1:T-3", "r1:T-4"], true);
+    const planned = planRetroReplays({
+      ...open,
+      pending: [
+        pending("p-new", newer, "engineer", true, HOST, "2026-10-09T09:00:00.000Z"),
+        pending("p-old", older, "engineer", true, HOST, "2026-10-02T09:00:00.000Z"),
+      ],
+      graded: () => new Set(),
+    });
+    expect(planned.launch.map((r) => [r.proposal, r.trials.length, r.remaining])).toEqual([
+      ["p-old", 18, 0],
+      ["p-new", 6, 12],
+    ]);
+  });
+
   it("never splits a task's paired trial across RETROs", () => {
     // pairs of 2 (no A/A arm): a cap of 5 launches two whole pairs
     const planned = planRetroReplays({
@@ -244,7 +263,7 @@ describe("planning a RETRO's replays (D-cg, D-ch)", () => {
     const trials = plan(["r1:T-1"], false, 1);
     const [first] = trials;
     if (first === undefined) throw new Error("no trial");
-    const attempts = (n: number, outcome: "plugin_locked" | "gate_infra") =>
+    const attempts = (n: number, outcome: "plugin_locked" | "gate_infra" | "no_outcome") =>
       new Map([[replayTrialKey(first), { attempts: n, outcome }]]);
     const below = planRetroReplays({
       ...open,
@@ -271,6 +290,16 @@ describe("planning a RETRO's replays (D-cg, D-ch)", () => {
     });
     expect(infra.unreplayable[0]?.reason).toContain("gate_infra");
     expect(infra.skipped).toEqual([]);
+    // a verdict trial whose replayed dispatch lost its recorded outcome is not a gate failure
+    const noOutcome = planRetroReplays({
+      ...open,
+      pending: [pending("p-1", trials, "spec_verifier", false)],
+      graded: () => new Set(),
+      infra: () => attempts(REPLAY_MAX_INFRA_ATTEMPTS, "no_outcome"),
+    });
+    expect(noOutcome.unreplayable[0]?.reason).toContain("no longer has a recorded outcome");
+    expect(noOutcome.unreplayable[0]?.reason).not.toContain("gate");
+    expect(noOutcome.skipped).toEqual([]);
   });
 
   it("hands back a fully graded replay with no trial to run, so it can be finished", () => {
@@ -359,6 +388,47 @@ describe("the replay trial ledger (D-cg)", () => {
     expect((await readReplayTrials(vtcHome, SCOPE)).size).toBe(0);
     expect([...(await readReplayInfra(vtcHome, SCOPE))]).toEqual([
       [replayTrialKey(infra), { attempts: 2, outcome: "plugin_locked" }],
+    ]);
+  });
+
+  it("creates the ledger owner-only", async () => {
+    const vtcHome = await tempDir("ledger-mode");
+    await recordReplayTrial(vtcHome, row());
+    expect((await stat(join(vtcHome, REPLAY_TRIALS_FILE))).mode & 0o777).toBe(0o600);
+  });
+
+  it("reads a newer vtc's row without the fields it does not know, instead of dropping it", async () => {
+    const vtcHome = await tempDir("ledger-newer");
+    const path = join(vtcHome, REPLAY_TRIALS_FILE);
+    await mkdir(dirname(path), { recursive: true });
+    await appendFile(path, `${JSON.stringify({ v: 1, ...row(), host_build: "9.9.9" })}\n`);
+    const rows = await readReplayTrials(vtcHome, SCOPE);
+    expect([...rows.values()]).toEqual([row()]);
+  });
+
+  it("reads the ledger once for every replay a RETRO plans", async () => {
+    const vtcHome = await tempDir("ledger-once");
+    await recordReplayTrial(vtcHome, row());
+    await recordReplayTrial(vtcHome, row({ proposal: "p-2", arm: "b" }));
+    await recordReplayInfra(vtcHome, {
+      repo_key: REPO,
+      proposal: "p-2",
+      ...SHAS,
+      task: "r1:T-1",
+      arm: "a",
+      trial: 1,
+      grader_bundle_sha: BUNDLE,
+      outcome: "no_outcome",
+      at: now.toISOString(),
+    });
+    const ledger = await readReplayLedger(vtcHome);
+    expect([...ledger.trials(SCOPE).values()].map((r) => r.arm)).toEqual(["a"]);
+    expect([...ledger.trials({ ...SCOPE, proposal: "p-2" }).values()].map((r) => r.arm)).toEqual([
+      "b",
+    ]);
+    expect(ledger.infra(SCOPE).size).toBe(0);
+    expect([...ledger.infra({ ...SCOPE, proposal: "p-2" }).values()]).toEqual([
+      { attempts: 1, outcome: "no_outcome" },
     ]);
   });
 

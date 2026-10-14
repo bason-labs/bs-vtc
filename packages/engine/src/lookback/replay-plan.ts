@@ -10,16 +10,22 @@
  *   window, the Lookback budget and the per-RETRO trial cap (`LOOKBACK_LIMITS.maxTrialsPerRetro`).
  *   When a limit is hit, what is left waits for the next RETRO and the run logs
  *   `automation.skipped` with the limit's reason (`weekly_window`, `budget`, `trial_cap`).
- * - **Order.** Oldest replay first, each one's trials in plan order (interleaved arms), in whole
+ * - **Order.** Oldest replay first (by `PendingReplay.recordedAt`, the proposal's
+ *   `lookback.proposal_recorded` time; ties keep the caller's order), each one's trials in plan
+ *   order (interleaved arms), in whole
  *   groups (one task's trial number across its arms), so a pair is never split across RETROs. A
  *   replay whose trials are all graded comes back with none to run, whatever the limits: it is
  *   ready to finish (`assembleReplay`).
  * - **Unreplayable.** A replay is never launched, and comes back in `unreplayable` with its reason,
  *   when no grader can score its role, when its plan has no trial (the baseline has no held-out
  *   task to replay: for a verdict role, none with a recorded outcome), or when one of its trials
- *   measured nothing (`gate_infra`, `plugin_locked`) `REPLAY_MAX_INFRA_ATTEMPTS` times; the last
+ *   measured nothing (`gate_infra`, `plugin_locked`, `no_outcome`) `REPLAY_MAX_INFRA_ATTEMPTS`
+ *   times; the last
  *   also logs `automation.skipped` `plugin_locked` when the lock was the cause. The caller ends
  *   such a replay (it is no longer pending), so each is reported once.
+ *
+ * Not wired yet: engine core's RETRO applies its own whole-replay trial cap and does not call this
+ * (see the `replay-ledger` module comment for the contract proposal that makes this the one cap).
  */
 import {
   LOOKBACK_LIMITS,
@@ -93,6 +99,8 @@ export interface PendingReplay<T extends ReplayTrialId> {
   readonly role: string;
   readonly mode?: string;
   readonly host: HostId;
+  /** When the proposal was recorded (`lookback.proposal_recorded`, ISO): older replays go first. */
+  readonly recordedAt: string;
   /** The engine's `roleChangesFiles` for the role (and mode). */
   readonly changesFiles: boolean;
   readonly trials: readonly T[];
@@ -149,7 +157,15 @@ export const planRetroReplays = <T extends ReplayTrialId>(input: {
   const unreplayable: { proposal: string; reason: string }[] = [];
   const skipped: AutomationSkippedDraft[] = [];
   const replayable: (PendingReplay<T> & { grader: ReplayGrader; groups: T[][] })[] = [];
-  for (const replay of input.pending) {
+  const oldestFirst = input.pending
+    .map((replay, i) => {
+      const at = Date.parse(replay.recordedAt);
+      return { replay, i, at: Number.isNaN(at) ? Number.POSITIVE_INFINITY : at };
+    })
+    // an unreadable time sorts last; equal times (and two unreadable ones: NaN) keep caller order
+    .sort((x, y) => x.at - y.at || x.i - y.i)
+    .map((x) => x.replay);
+  for (const replay of oldestFirst) {
     const grader = replayGraderFor(replay.role, replay.changesFiles);
     if (grader === null) {
       unreplayable.push({
@@ -175,10 +191,12 @@ export const planRetroReplays = <T extends ReplayTrialId>(input: {
       .map((t) => infra?.get(replayTrialKey(t)))
       .find((a) => a !== undefined && a.attempts >= REPLAY_MAX_INFRA_ATTEMPTS);
     if (stuck !== undefined) {
-      const why =
-        stuck.outcome === "plugin_locked"
-          ? "the host did not load the arm's plugin (a managed-settings lock)"
-          : "the gates could not run (gate_infra)";
+      const why = {
+        plugin_locked: "the host did not load the arm's plugin (a managed-settings lock)",
+        gate_infra: "the gates could not run (gate_infra)",
+        no_outcome:
+          "the replayed dispatch no longer has a recorded outcome to grade its verdict against",
+      }[stuck.outcome];
       unreplayable.push({
         proposal: replay.proposal,
         reason: `a trial measured nothing ${String(REPLAY_MAX_INFRA_ATTEMPTS)} times: ${why}`,

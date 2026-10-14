@@ -215,6 +215,15 @@ describe("cost regression (D-bv)", () => {
     expect(input).toContain("at most 3 changes");
   });
 
+  it("never proposes a core role, compiled or not: escalations blaming the Lead raise nothing", () => {
+    const log = new RunLog();
+    for (const task of ["T-1", "T-2", "T-3"]) log.escalate(task, "lead", "blocked");
+    log.escalate("T-4", "planner", "blocked");
+    log.escalate("T-5", "planner", "blocked");
+    // ROLES carries neither `lead` (no compiled agent) nor `planner`
+    expect(newAgentSignals({ attributions: [], history: log.events, roles: ROLES })).toEqual([]);
+  });
+
   it("reports VTC-side fields only", () => {
     const log = twoVersions(12, { tokens: 1000, cost: 0.1 }, { tokens: 1500, cost: 0.2 });
     const [regression] = costRegressions({

@@ -69,14 +69,35 @@ const TASK_KEY_MAX = 100;
 
 /**
  * Pure: a replay task's key, the `ReplayResult.per_task` key, the ledger's and the trial's
- * (`ReplayTrialRef.task`). `<run>:<task>` for a `gates` replay; `<run>:<subject>:<task>` for a
- * verdict replay, whose dispatches judge one acceptance criterion each, so two criteria of one task
- * are two replay tasks (the task id stays last, after the last `:`).
+ * (`ReplayTrialRef.task`). `<run>:<task>` for a `gates` replay; `<run>:<subject>:<verdict>:<task>`
+ * for a verdict replay, whose dispatches judge one acceptance criterion each, so two criteria of one
+ * task are two replay tasks. The expected verdict is part of the key: the recorded outcome can
+ * gain stronger evidence between two RETROs (the feature's PR merges or is reverted, a defect
+ * escapes, a human labels the miss), and a trial graded against one expectation must never be
+ * counted with one graded against another, nor a task's regression-set membership change under
+ * its grades. A changed expectation is a new replay task, whose trials start over; the ledger's
+ * rows under the old key are no longer planned, so they no longer count. The task id stays last,
+ * after the last `:` (a run id and a task id hold no `:`).
  */
 export const replayTaskKey = (
-  t: Pick<ReplayTask, "run" | "task"> & { readonly expected?: Pick<ExpectedVerdict, "subject"> },
+  t: Pick<ReplayTask, "run" | "task"> & { readonly expected?: ExpectedVerdict },
 ): string =>
-  t.expected === undefined ? `${t.run}:${t.task}` : `${t.run}:${t.expected.subject}:${t.task}`;
+  t.expected === undefined
+    ? `${t.run}:${t.task}`
+    : `${t.run}:${t.expected.subject}:${t.expected.verdict}:${t.task}`;
+
+/**
+ * Pure: the expected verdict a verdict replay task's key carries ({@link replayTaskKey}), or
+ * `undefined` for a `gates` key. The verdict grader scores a trial against it, so a trial is graded
+ * against the expectation it was planned with, whatever the history says by the time it ends.
+ */
+export const expectedOfTaskKey = (key: string): ExpectedVerdict | undefined => {
+  const parts = key.split(":");
+  if (parts.length < 4) return undefined;
+  const verdict = parts.at(-2);
+  if (verdict !== "pass" && verdict !== "fail") return undefined;
+  return { subject: parts.slice(1, -2).join(":"), verdict };
+};
 
 /**
  * The held-out tasks a replay of `baseline` runs, each once ({@link replayTaskKey}). For the
