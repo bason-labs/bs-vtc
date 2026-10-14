@@ -8,6 +8,7 @@ import {
   appendFileSync,
   existsSync,
   mkdirSync,
+  readdirSync,
   readFileSync,
   rmSync,
   symlinkSync,
@@ -34,7 +35,7 @@ import {
 import { createLookbackCommand, type LockedCoreOf } from "../src/commands/lookback.js";
 import { createMergeLevelCommand } from "../src/commands/merge-level.js";
 import { EXIT_NOT_CONFIRMED, type GestureDeps } from "../src/human-gesture.js";
-import { pinsPath, withPinsLock, writePins } from "../src/lookback-pins.js";
+import { pinsPath, readVersionFile, withPinsLock, writePins } from "../src/lookback-pins.js";
 import { capture, cleanupDirs, initRepo, initVtcRepo, tempHome } from "./helpers.js";
 
 afterEach(cleanupDirs);
@@ -231,7 +232,7 @@ const EDITABLE = "Test first.";
 /**
  * An immutable version file under the VTC home, as the engine writes it. Its editable section
  * hashes to its `editable_sha256`; its effective SHA is a readable stand-in, so these versions are
- * checked against no locked core (the installed plugin carries none here, `noLockedCore`).
+ * checked against no locked core (the bundled plugin carries none here, `noLockedCore`).
  */
 const writeVersion = (
   home: string,
@@ -276,40 +277,86 @@ const writeVersion = (
 /**
  * A run log of `role.dispatched` events in each canary arm after the canary started (`NOW`):
  * `LOOKBACK_LIMITS` makes 10 candidate and 5 baseline dispatches with no trigger promotable.
+ * With `tokens`, each dispatch is followed by a `role.submitted` that spent that many per arm.
  */
-const writeCanaryLog = (repo: string, arms: { candidate: number; baseline: number }): void => {
+const writeCanaryLog = (
+  repo: string,
+  arms: { candidate: number; baseline: number },
+  tokens?: { candidate: number; baseline: number },
+): void => {
   const run = "r-canary";
   let seq = 0;
   const lines: string[] = [];
+  const envelope = () => {
+    seq += 1;
+    return {
+      v: 1 as const,
+      seq,
+      ts: new Date(NOW.getTime() + seq * 60_000).toISOString(),
+      run,
+      actor: "engine" as const,
+      role: ROLE,
+      host: HOST as "claude-code",
+      model: "claude-sonnet-5",
+      prompt_sha: sha("d"),
+    };
+  };
   for (const arm of ["candidate", "baseline"] as const)
     for (let i = 0; i < arms[arm]; i += 1) {
-      seq += 1;
+      const dispatched = envelope();
+      const action = `a-${String(dispatched.seq)}`;
       lines.push(
         toEventLine({
-          v: 1,
-          seq,
-          ts: new Date(NOW.getTime() + seq * 60_000).toISOString(),
-          run,
-          actor: "engine",
+          ...dispatched,
           type: "role.dispatched",
-          role: ROLE,
-          host: HOST,
-          model: "claude-sonnet-5",
-          prompt_sha: sha("d"),
           data: {
-            action_id: `a-${String(seq)}`,
+            action_id: action,
             dispatch: "subagent",
             agent: "vtc-engineer",
-            pack: `.vtc/state/packs/a-${String(seq)}.md`,
+            pack: `.vtc/state/packs/${action}.md`,
             resume: null,
             canary_arm: arm,
           },
         }),
       );
+      if (tokens !== undefined)
+        lines.push(
+          toEventLine({
+            ...envelope(),
+            type: "role.submitted",
+            tokens: { in: tokens[arm], out: 0, cache_r: 0, cache_w: 0 },
+            cost_usd: 0,
+            data: { action_id: action, exit: "done", findings: 0, questions: 0, session_ref: null },
+          }),
+        );
     }
   const path = join(repo, eventLogPath(run));
   mkdirSync(dirname(path), { recursive: true });
   writeFileSync(path, lines.join(""));
+};
+
+/** A run log holding the engine's `lookback.replay_finished` for a replay file. */
+const writeReplayFinished = (repo: string, rel: string, sha256?: string): void => {
+  const run = "r-replay";
+  const path = join(repo, eventLogPath(run));
+  mkdirSync(dirname(path), { recursive: true });
+  writeFileSync(
+    path,
+    toEventLine({
+      v: 1,
+      seq: 1,
+      ts: "2026-10-13T09:00:00.000Z",
+      run,
+      actor: "engine",
+      type: "lookback.replay_finished",
+      data: {
+        proposal: "p-1",
+        verdict: "improve",
+        path: rel,
+        ...(sha256 === undefined ? {} : { sha256 }),
+      },
+    }),
+  );
 };
 
 const noLockedCore: LockedCoreOf = () => undefined;
@@ -369,9 +416,22 @@ const run = async (
   args: string[],
   answer: boolean | "no-terminal" = true,
   lockedCore: LockedCoreOf = noLockedCore,
+  whileDeciding?: () => void,
 ): Promise<{ code: number; out: string; err: string }> => {
   const { ctx, out, err } = capture(repo, home);
-  const code = await createLookbackCommand(() => human(answer), lockedCore).run(args, ctx);
+  const deps = (): GestureDeps => {
+    const h = human(answer);
+    return whileDeciding === undefined
+      ? h
+      : {
+          ...h,
+          confirm: (q) => {
+            whileDeciding();
+            return h.confirm(q);
+          },
+        };
+  };
+  const code = await createLookbackCommand(deps, lockedCore).run(args, ctx);
   return { code, out: out.join("\n"), err: err.join("\n") };
 };
 
@@ -461,7 +521,7 @@ describe("vtc lookback approve|pin|rollback (AD-21 rule 3)", () => {
     expect(start.out).toMatch(/Start a canary of dddddddd .* half run aaaaaaaa/);
     // the human sees the evidence, and where it comes from (a repo file roles can write)
     expect(start.out).toMatch(
-      /evidence \(\.vtc\/lookback\/replays\/p-1\.json, a file in the repo: check it\): its trials, recomputed here, say improve with p = 0\.016 over 6 discordant tasks \(6 won by the candidate\), 6 tasks x 3 runs per arm, tokens \+4%, A\/A flip rate 0\.05/,
+      /evidence \(\.vtc\/lookback\/replays\/p-1\.json, a file in the repo: check it\): its trials, recomputed here, say improve with p = 0\.016 over 6 discordant tasks \(6 won by the candidate\), 6 tasks x 3 runs per arm, tokens \+4%, A\/A flip rate 0\.05; no lookback\.replay_finished event in the repo's logs records its hash, so it was not checked against the engine's file\./,
     );
     const key = engineRepoKey(repo);
     expect(pinsOf(home).projects[key]?.canaries).toEqual([
@@ -493,12 +553,22 @@ describe("vtc lookback approve|pin|rollback (AD-21 rule 3)", () => {
       /not promotable yet: continue \(no trigger yet\); candidate 6 dispatches/,
     );
     expect(pinsOf(home).projects[key]?.canaries).toHaveLength(1);
-    // once the window passed with no trigger, approving the candidate again promotes it
+    // once the window passed with no trigger, approving the candidate again promotes it, even
+    // while dispatches keep arriving as the human decides (the counts grow, the verdict holds)
     writeCanaryLog(repo, { candidate: 10, baseline: 5 });
-    const promote = await run(repo, home, ["approve", ...T, "--version", sha("d")]);
+    const promote = await run(
+      repo,
+      home,
+      ["approve", ...T, "--version", sha("d")],
+      true,
+      noLockedCore,
+      () => {
+        writeCanaryLog(repo, { candidate: 12, baseline: 6 });
+      },
+    );
     expect(promote.code, promote.err).toBe(0);
     expect(promote.out).toMatch(
-      /Promote the canary dddddddd .*its window passed with no trigger; candidate 10 dispatches, 0 escalations, 0 cap hits, 0 tokens; baseline 5 dispatches/,
+      /Promote the canary dddddddd .*its window passed with no trigger; candidate 10 dispatches, 0 escalations, 0 cap hits, 0 tokens; baseline 5 dispatches.*\(counted from the event logs in the repo, which roles can write: check them\)/,
     );
     const after = pinsOf(home);
     expect(after.projects[key]).toEqual({
@@ -510,6 +580,82 @@ describe("vtc lookback approve|pin|rollback (AD-21 rule 3)", () => {
       ["approve", sha("a"), sha("d"), "human"],
       ["promote", sha("a"), sha("d"), "human"],
     ]);
+  });
+
+  it("refuses to promote a canary whose arms say rollback, and when the verdict changes meanwhile", async () => {
+    const repo = initVtcRepo();
+    const home = tempHome();
+    writeVersion(home, sha("a"));
+    expect((await run(repo, home, ["pin", ...T, "--version", sha("a")])).code).toBe(0);
+    writeVersion(home, sha("d"), {
+      parent: sha("a"),
+      evaluation: writeReplay(repo, sha("d"), "improve"),
+    });
+    expect((await run(repo, home, ["approve", ...T, "--version", sha("d")])).code).toBe(0);
+    const before = readFileSync(pinsPath(home), "utf8");
+    // the candidate spends 1000 tokens a dispatch, the baseline 500: up more than 20%
+    writeCanaryLog(repo, { candidate: 10, baseline: 5 }, { candidate: 1000, baseline: 500 });
+    const tokens = await run(repo, home, ["approve", ...T, "--version", sha("d")]);
+    expect(tokens.code).toBe(1);
+    expect(tokens.err).toMatch(
+      /not promotable yet: rollback \(tokens per dispatch up more than 20%\); candidate 10 dispatches, 0 escalations, 0 cap hits, 10000 tokens; baseline 5 dispatches, 0 escalations, 0 cap hits, 2500 tokens.*Roll it back, or pin a version outright/,
+    );
+    expect(readFileSync(pinsPath(home), "utf8")).toBe(before);
+    // promotable when the human is asked, rollback by the time the lock is held: nothing written
+    writeCanaryLog(repo, { candidate: 10, baseline: 5 });
+    const turned = await run(
+      repo,
+      home,
+      ["approve", ...T, "--version", sha("d")],
+      true,
+      noLockedCore,
+      () => {
+        writeCanaryLog(repo, { candidate: 10, baseline: 5 }, { candidate: 1000, baseline: 500 });
+      },
+    );
+    expect(turned.code).toBe(1);
+    expect(turned.err).toMatch(/not promotable yet: rollback/);
+    expect(readFileSync(pinsPath(home), "utf8")).toBe(before);
+  });
+
+  it("checks the replay file against the hash the engine recorded for it", async () => {
+    const repo = initVtcRepo();
+    const approve = async (record: (rel: string) => void) => {
+      const h = tempHome();
+      writeVersion(h, sha("a"));
+      expect((await run(repo, h, ["pin", ...T, "--version", sha("a")])).code).toBe(0);
+      const rel = writeReplay(repo, sha("d"), "improve");
+      writeVersion(h, sha("d"), { parent: sha("a"), evaluation: rel });
+      record(rel);
+      const r = await run(repo, h, ["approve", ...T, "--version", sha("d")]);
+      return { ...r, canaries: pinsOf(h).projects[engineRepoKey(repo)]?.canaries ?? [] };
+    };
+    const bytesOf = (rel: string) => sha256Hex(readFileSync(join(repo, rel), "utf8"));
+    // the engine's file, as it recorded it
+    const same = await approve((rel) => {
+      writeReplayFinished(repo, rel, bytesOf(rel));
+    });
+    expect(same.code, same.err).toBe(0);
+    expect(same.out).toMatch(/its bytes match the hash lookback\.replay_finished recorded\./);
+    expect(same.canaries).toHaveLength(1);
+    // an edited file, even one whose trials and verdict still agree
+    const edited = await approve((rel) => {
+      writeReplayFinished(repo, rel, bytesOf(rel));
+      appendFileSync(join(repo, rel), "\n");
+    });
+    expect(edited.code).toBe(1);
+    expect(edited.err).toMatch(
+      /p-1\.json is not the file the engine wrote: its bytes hash to [0-9a-f]{8}, but lookback\.replay_finished recorded [0-9a-f]{8}: no canary/,
+    );
+    expect(edited.canaries).toEqual([]);
+    // an event with no hash: the human is told the file was not checked
+    const unhashed = await approve((rel) => {
+      writeReplayFinished(repo, rel);
+    });
+    expect(unhashed.code, unhashed.err).toBe(0);
+    expect(unhashed.out).toMatch(
+      /its lookback\.replay_finished event carries no hash, so it was not checked against the engine's file/,
+    );
   });
 
   it("recomputes the replay's verdict from its trials and never trusts the file's own", async () => {
@@ -611,7 +757,7 @@ describe("vtc lookback approve|pin|rollback (AD-21 rule 3)", () => {
     expect(pinsOf(home).history[0]?.reason).toMatch(/^oops /);
   });
 
-  it("checks a version as the engine does: its editable section and the installed locked core", async () => {
+  it("checks a version as the engine does: its fences, its editable section and the bundled locked core", async () => {
     const repo = initVtcRepo();
     const home = tempHome();
     // a version file whose editable section was changed after it was written
@@ -619,7 +765,12 @@ describe("vtc lookback approve|pin|rollback (AD-21 rule 3)", () => {
     const changed = await run(repo, home, ["pin", ...T, "--version", sha("a")]);
     expect(changed.code).toBe(1);
     expect(changed.err).toMatch(/was changed: its editable section does not hash/);
-    // a real version of the installed locked core pins; one of an older core does not
+    // the engine ends the frontmatter only at "\n---\n": a closing fence at the end of the file is
+    // no frontmatter to it, nor here
+    const fenced = join(home, "fenced.md");
+    writeFileSync(fenced, `---\nv: 1\n---`);
+    expect(() => readVersionFile(fenced)).toThrow(/has no frontmatter/);
+    // a real version of the bundled locked core pins; one of an older core does not
     const locked = "You are the Engineer. Follow the task pack.";
     const real = effectivePromptSha(locked, EDITABLE);
     writeVersion(home, real, { locked });
@@ -636,32 +787,37 @@ describe("vtc lookback approve|pin|rollback (AD-21 rule 3)", () => {
     expect(refused.err).toMatch(
       /was written for another locked core .* so the engine would never run it/,
     );
-    // a version naming the installed core's hash but another effective SHA does not verify
+    // a version naming the bundled core's hash but another effective SHA does not verify
     writeVersion(home, sha("e"), { locked });
     expect(
       (await run(repo, home, ["pin", ...T, "--version", sha("e")], true, installed)).err,
-    ).toMatch(/does not verify against the installed plugin's locked core/);
+    ).toMatch(/does not verify against the locked core of this vtc's bundled plugin/);
     expect(pinsOf(home).projects[engineRepoKey(repo)]?.pins).toEqual([
       { role: ROLE, host: HOST, effective_sha256: real },
     ]);
-    // with no locked core installed, the human is told what was not checked
+    // with no locked core bundled, the human is told what was not checked
     writeVersion(home, sha("b"));
     expect((await run(repo, home, ["pin", ...T, "--version", sha("b")])).out).toMatch(
-      /note: the installed plugin carries no locked core for engineer on claude-code/,
+      /note: this vtc's bundled plugin carries no locked core for engineer on claude-code/,
     );
   });
 
   it("writes nothing when the pins file changed under the plan (an engine auto_rollback)", () => {
     const home = tempHome();
     const pins = LookbackPinsSchema.parse({ v: 1 });
-    mkdirSync(dirname(pinsPath(home)), { recursive: true });
+    const dir = dirname(pinsPath(home));
+    mkdirSync(dir, { recursive: true });
+    const leftovers = () => readdirSync(dir).filter((n) => n.endsWith(".tmp"));
     expect(writePins(home, pins, "v: 1\n")).toBeNull();
     expect(existsSync(pinsPath(home))).toBe(false);
+    expect(leftovers()).toEqual([]);
     const path = writePins(home, pins, undefined);
     expect(path).toBe(pinsPath(home));
     const text = readFileSync(pinsPath(home), "utf8");
     expect(writePins(home, pins, `${text}# edited\n`)).toBeNull();
+    expect(leftovers()).toEqual([]);
     expect(writePins(home, pins, text)).toBe(path);
+    expect(leftovers()).toEqual([]);
   });
 
   it("rolls a canary back to its baseline, and a pin back to what it replaced", async () => {
@@ -771,7 +927,7 @@ describe("vtc lookback approve|pin|rollback (AD-21 rule 3)", () => {
 describe("the pins lock", () => {
   it("takes a stale lock over and removes only its own lock", async () => {
     const home = tempHome();
-    const lock = join(home, "lookback", "pins.lock");
+    const lock = join(home, LOOKBACK_HOME.pinsLock);
     mkdirSync(dirname(lock), { recursive: true });
     writeFileSync(lock, "someone.old");
     const old = new Date(Date.now() - 120_000);
