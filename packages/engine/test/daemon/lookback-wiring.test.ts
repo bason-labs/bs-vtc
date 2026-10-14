@@ -10,10 +10,12 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { fileURLToPath } from "node:url";
 import {
   agentNameFor,
+  AttributionSchema,
   CONTRACTS_VERSION,
   effectivePromptSha,
   engineRepoKey,
   HOST_IDS,
+  LOOKBACK_LIMITS,
   LOOKBACK_REPO,
   LookbackPinsSchema,
   PLUGIN_MANIFEST_ASSET,
@@ -25,18 +27,29 @@ import {
   splitRolePrompt,
   TASK_PACK_HEURISTICS_SECTION,
   type AssetBundle,
+  type Attribution,
+  type HostId,
   type LookbackPinsInput,
   type PluginManifestAgent,
+  type UsageSnapshot,
 } from "@vtc/shared";
 import {
   createPluginCatalog,
   pluginCatalogFrom,
   toYaml,
   type PluginCatalog,
+  type RunState,
 } from "../../src/core/index.js";
 import { ALL_FIXTURE_ROLES } from "../fixtures/roles.js";
-import { wireLookback } from "../../src/daemon/index.js";
-import { pinsPath, promptVersionRef, storePromptVersion } from "../../src/lookback/index.js";
+import { lookbackWindow, wireLookback } from "../../src/daemon/index.js";
+import {
+  lookbackTargets,
+  pinsPath,
+  promptVersionRef,
+  storePromptVersion,
+  traceRef,
+  traceSplit,
+} from "../../src/lookback/index.js";
 import { cleanupDirs } from "../helpers/repo.js";
 import {
   authorTests,
@@ -192,6 +205,100 @@ const shippedPlugins = (): { readonly catalog: PluginCatalog; readonly locked: s
   };
   return { catalog: pluginCatalogFrom(bundle), locked: specLocked };
 };
+
+describe("RETRO reads the weekly window of the run's Lead host (AD-21 rule 8, reading 176)", () => {
+  const weekly = (host: HostId, used: number): UsageSnapshot => ({
+    host,
+    source: host === "codex" ? "app_server" : "statusline",
+    windows: [
+      { kind: "weekly", label: "weekly", window_minutes: 10080, used_pct: used, resets_at: null },
+    ],
+    model_limits: [],
+    updated_at: "2026-10-14T09:00:00.000Z",
+  });
+  /** Enough attributed train failures of one version for a lookback target. */
+  const trainFailures = (host: HostId): Attribution[] => {
+    const rows: Attribution[] = [];
+    for (let i = 1; rows.length < LOOKBACK_LIMITS.minTrainFailures; i += 1) {
+      const trace = { run: "r-old", trace: `a-${String(i)}` };
+      if (traceSplit(trace) !== "train") continue;
+      rows.push(
+        AttributionSchema.parse({
+          v: 1,
+          ...trace,
+          task: "T-1",
+          prompt: promptVersionRef({ role: "engineer", host, locked: LOCKED, editable: DEFAULT }),
+          outcome: "failure",
+          blamed_role: "engineer",
+          method: "tree",
+          rule: "test_fails",
+          confidence: 0.9,
+          split: "train",
+          evidence: [],
+          attributed_at: "2026-10-14T09:00:00.000Z",
+        }),
+      );
+    }
+    return rows;
+  };
+
+  it("a Codex-led run whose Codex window is low skips with weekly_window, though Claude's is high", async () => {
+    const h = createHarness();
+    await h.engine.start(
+      {
+        request: "Password reset\n\nUsers reset forgotten passwords.",
+        track: "feature",
+        repo: "existing",
+        has_ui: false,
+        risk_hints: [],
+      },
+      { host: "codex", client: "bridge", session: "lead-codex" },
+    );
+    h.engine.ingestUsage(weekly("codex", 90));
+    h.engine.ingestUsage(weekly("claude-code", 10));
+    const state = h.engine.states()[0];
+    if (state === undefined) throw new Error("no run");
+    const window = lookbackWindow(h.engine, state);
+    expect(window).toEqual({ host: "codex", pct: 10 });
+    const rows = trainFailures("codex");
+    const fresh = new Set(rows.map(traceRef));
+    expect(
+      lookbackTargets({
+        attributions: rows,
+        fresh,
+        weeklyRemainingPct: window.pct,
+        budgetAvailable: true,
+      }),
+    ).toEqual({ targets: [], skipped: "weekly_window" });
+    // the preferred host's window (Claude's, 90% left) would have let it run
+    expect(
+      lookbackTargets({ attributions: rows, fresh, weeklyRemainingPct: 90, budgetAvailable: true })
+        .targets,
+    ).toHaveLength(1);
+    await h.release();
+  });
+
+  it("without a live Lead it reads the run's limit host, then the engine's default host", () => {
+    const engine = {
+      liveLeadHost: () => undefined,
+      hostFor: () => "claude-code" as const,
+      usage: new Map<HostId, UsageSnapshot>([
+        ["codex", weekly("codex", 40)],
+        ["claude-code", weekly("claude-code", 75)],
+      ]),
+    };
+    expect(
+      lookbackWindow(engine, { id: "r-1", limit: { host: "codex" } as RunState["limit"] }),
+    ).toEqual({ host: "codex", pct: 60 });
+    expect(lookbackWindow(engine, { id: "r-1", limit: null })).toEqual({
+      host: "claude-code",
+      pct: 25,
+    });
+    expect(
+      lookbackWindow({ ...engine, usage: new Map() }, { id: "r-1", limit: null }).pct,
+    ).toBeNull();
+  });
+});
 
 describe("the daemon wires the Lookback module (AD-21)", () => {
   it("compiled as shipped (spec_verifier switched, D-bl), a human's pin reaches the Spec Verifier's pack (reading 176)", async () => {
