@@ -35,7 +35,8 @@ describe("@vtc/engine smoke", () => {
       Object.keys(engine)
         .filter((k) => typeof engine[k as keyof typeof engine] === "object")
         .sort(),
-    ).toEqual(["core", "gates", "git", "http", "lookback", "mcp", "research"]);
+    ).toEqual(["core", "gates", "git", "http", "lookback", "mcp", "research", "upstream"]);
+    expect(typeof engine.upstream.createUpstream).toBe("function");
     expect(typeof engine.core.openEventLog).toBe("function");
   });
   it("loads the node:sqlite driver lazily", async () => {

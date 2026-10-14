@@ -47,7 +47,7 @@
   "traceability": ".vtc/evidence/T-1/traceability.json",
   "visual": {
     "status": "pass",
-    "report": ".vtc/evidence/T-1/round-1/visual/report.json",
+    "report": ".vtc/evidence/T-1/gates/20261013T091900Z-round-bbbbbbbbbbbb/visual/report.json",
     "toolchain": "project",
     "counts": {
       "renders": 6,

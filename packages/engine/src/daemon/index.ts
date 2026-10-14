@@ -91,6 +91,7 @@ import {
   type CreateUpstreamModule,
 } from "./upstream-bridge.js";
 import { createLookbackReplays } from "./replays.js";
+import { createUpstream } from "../upstream/index.js";
 import {
   createFetchQuota,
   createFileResearchCache,
@@ -439,13 +440,11 @@ export const dotenvSecrets = (repoRoot: string): (() => readonly string[]) => {
 };
 
 /**
- * The upstream module's factory (AD-27 rule 8, AD-13 rule 13). `upstream/` is built on its own
- * team branch and joins the engine at the round-4 merge, which makes this return `createUpstream`
- * from `../upstream/index.js` (the daemon is its only importer; the bridge's structural types make
- * a drift a type error here). Until then facts are gated (`automation.skipped`) but nothing is
- * raised.
+ * The upstream module's factory (AD-27 rule 8, AD-13 rule 13): the daemon is the only importer of
+ * `../upstream/index.js`, and this annotation makes a drift from the bridge's structural types a
+ * type error here.
  */
-const upstreamModule = (): CreateUpstreamModule | undefined => undefined;
+const upstreamModule: CreateUpstreamModule = createUpstream;
 
 /** How often the daemon polls Level-3 merges still in their post-merge watch (AD-23 rule 4). */
 export const POST_MERGE_POLL_MS = 15 * 60_000;
@@ -530,7 +529,6 @@ export const runDaemon: RunDaemon = async (deps: EngineDeps, options) => {
     const remoteUrl = await createWorkspace(deps.repoRoot)
       .remoteUrl("origin")
       .catch(() => null);
-    const createUpstream = upstreamModule();
     // the evidence browser's frozen read routes of an automatic run (AD-27 rule 6): the engine's
     // read model with no prototype origin, whose Automation view reads the wiring's settings
     let automationSettings: () => AutomationSettings | null = () => null;
@@ -546,49 +544,45 @@ export const runDaemon: RunDaemon = async (deps: EngineDeps, options) => {
     });
     const automation = wireAutomation(engine, deps, {
       githubRemote: isGitHubRemote(remoteUrl),
-      ...(createUpstream === undefined
-        ? {}
-        : {
-            createUpstream: bridgeUpstream(createUpstream, {
-              guardDir: engine.guardDir,
-              vtcVersion: deps.versions.engine,
-              assets: deps.assets,
-              remoteUrl,
-              clientNames: () => {
-                const client = engine.config().client;
-                return client === undefined ? [] : [client];
-              },
-              knownValues: dotenvSecrets(deps.repoRoot),
-              redactSelectors: () => engine.gatesConfig()?.visual?.redact_selectors,
-              projectEvidence: () => engine.config().automation?.evidence,
-              lookbackPr: (fact) =>
-                readLookbackPrInput({
-                  projectRoot: deps.repoRoot,
-                  proposal: fact.proposal ?? "",
-                  replayPath: fact.replayPath ?? "",
-                  replaySha256: fact.replaySha256,
-                  readProposal: async (role) => (await readProposalFiles(deps.repoRoot, role))?.raw,
-                  candidateEditable: async (replay) => {
-                    const locked = plugins.promptParts?.(
-                      agentNameFor(replay.role, replay.mode),
-                      replay.host,
-                    )?.compiled?.locked;
-                    if (locked === undefined) return undefined;
-                    const stored = await loadPromptVersion(
-                      deps.vtcHome,
-                      { role: replay.role, mode: replay.mode, host: replay.host },
-                      replay.candidate,
-                      locked,
-                    );
-                    return stored?.editable;
-                  },
-                }),
-              evidenceSnapshot: (run) => evidenceSnapshot(evidenceModel, run),
-              gitOps: (root) => createGitOps({ repoRoot: root }),
-              remoteRefs: (root) => createRemoteRefs({ repoRoot: root }),
-              plumbing: createGitPlumbing,
-            }),
+      createUpstream: bridgeUpstream(upstreamModule, {
+        guardDir: engine.guardDir,
+        vtcVersion: deps.versions.engine,
+        assets: deps.assets,
+        remoteUrl,
+        clientNames: () => {
+          const client = engine.config().client;
+          return client === undefined ? [] : [client];
+        },
+        knownValues: dotenvSecrets(deps.repoRoot),
+        redactSelectors: () => engine.gatesConfig()?.visual?.redact_selectors,
+        projectEvidence: () => engine.config().automation?.evidence,
+        lookbackPr: (fact) =>
+          readLookbackPrInput({
+            projectRoot: deps.repoRoot,
+            proposal: fact.proposal ?? "",
+            replayPath: fact.replayPath ?? "",
+            replaySha256: fact.replaySha256,
+            readProposal: async (role) => (await readProposalFiles(deps.repoRoot, role))?.raw,
+            candidateEditable: async (replay) => {
+              const locked = plugins.promptParts?.(
+                agentNameFor(replay.role, replay.mode),
+                replay.host,
+              )?.compiled?.locked;
+              if (locked === undefined) return undefined;
+              const stored = await loadPromptVersion(
+                deps.vtcHome,
+                { role: replay.role, mode: replay.mode, host: replay.host },
+                replay.candidate,
+                locked,
+              );
+              return stored?.editable;
+            },
           }),
+        evidenceSnapshot: (run) => evidenceSnapshot(evidenceModel, run),
+        gitOps: (root) => createGitOps({ repoRoot: root }),
+        remoteRefs: (root) => createRemoteRefs({ repoRoot: root }),
+        plumbing: createGitPlumbing,
+      }),
     });
     automationSettings = automation.settings;
     cleanups.push(() => automation.close());
