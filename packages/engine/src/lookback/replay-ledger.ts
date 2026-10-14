@@ -209,7 +209,8 @@ export const readReplayLedger = async (vtcHome: string): Promise<ReplayLedger> =
     const attempt = parsePersisted(ReplayInfraRowSchema, value);
     if (!attempt.success) continue;
     const scope = scopeKey(attempt.data);
-    const rows = infra.get(scope) ?? new Map<string, { attempts: number; outcome: ReplayInfraOutcome }>();
+    const rows =
+      infra.get(scope) ?? new Map<string, { attempts: number; outcome: ReplayInfraOutcome }>();
     const key = replayTrialKey(attempt.data);
     rows.set(key, { attempts: (rows.get(key)?.attempts ?? 0) + 1, outcome: attempt.data.outcome });
     infra.set(scope, rows);
