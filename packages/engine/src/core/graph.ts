@@ -15,6 +15,7 @@ import {
   type WorkflowNode,
   type WorkflowNodeState,
 } from "@vtc/shared";
+import { renderedVisualReport, roundVerdict } from "./queries.js";
 import { LENS_ROLES, reviewersFor, type ReviewerSlot } from "./router.js";
 import type { RunState } from "./state.js";
 
@@ -301,7 +302,11 @@ export const taskPipelineGraph = (
   const task = state.tasks.get(taskId);
   if (task === undefined) return null;
   // the compiled role set has every lens role, so the graph shows the lens nodes it dispatches
-  const reviewers = reviewersFor(task, state.run, acceptanceCriteria, { lensRoles: LENS_ROLES });
+  const reviewers = reviewersFor(task, state.run, acceptanceCriteria, {
+    lensRoles: LENS_ROLES,
+    // the Visual QA nodes once the round's visual step rendered, as the engine dispatches them
+    visual: renderedVisualReport(roundVerdict(state, taskId)) !== undefined,
+  });
   const view = stageStates(state, task);
   const parked = task.status === "parked" ? task.park_reason : undefined;
   const parkAt = parked === undefined ? undefined : PARK_STAGE[parked];

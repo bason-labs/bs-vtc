@@ -6,7 +6,7 @@
 import type { Finding } from "@vtc/shared";
 import { resolves, type EvidenceContext } from "./evidence.js";
 import type { Kernel, RunHandle } from "./kernel.js";
-import { isReviewer, lastBuilt } from "./queries.js";
+import { isReviewer, lastBuilt, renderedVisualReport, roundVerdict } from "./queries.js";
 import { frozenSpecItems, taskAcceptanceCriteria } from "./read-model.js";
 import { loadResult } from "./results.js";
 import { crossFamilyHost } from "./cross-family.js";
@@ -52,7 +52,11 @@ export const completedReviews = (
     task,
     h.state.run,
     taskAcceptanceCriteria(k.deps.repoRoot, h.state, taskId),
-    { lensRoles: installedLensRoles(k.deps.roles), crossFamily: cross !== undefined },
+    {
+      lensRoles: installedLensRoles(k.deps.roles),
+      crossFamily: cross !== undefined,
+      visual: renderedVisualReport(roundVerdict(h.state, taskId)) !== undefined,
+    },
   );
   const runs = [...h.state.roleRuns.values()].filter(
     (r) =>

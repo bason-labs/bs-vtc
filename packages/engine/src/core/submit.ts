@@ -1175,15 +1175,23 @@ const acceptFeatureReviewer = async (
         .map((c) => c.path)
         .join(", ")}`,
     ]);
-  const missing = await unresolved(
-    { ...evidenceContext(k, h, null), repoRoot: join(k.deps.repoRoot, worktree.path) },
-    // its findings too: at Final Review a finding becomes a fix task, so it must cite what is there
-    [
-      ...result.claims,
-      ...result.verdicts.flatMap((v) => v.evidence),
-      ...result.findings.map((f) => f.evidence),
-    ],
-  );
+  // its findings too: at Final Review a finding becomes a fix task, so it must cite what is there
+  const cited = [
+    ...result.claims,
+    ...result.verdicts.flatMap((v) => v.evidence),
+    ...result.findings.map((f) => f.evidence),
+  ];
+  // the gate runs' evidence (step 5's screenshots and visual report) is the engine's, in the
+  // checkout, never in the reviewer's worktree; everything else resolves at the integrated head
+  const engineEvidence = (e: (typeof cited)[number]): boolean =>
+    e.type === "screenshot" || e.ref.startsWith(".vtc/evidence/");
+  const missing = [
+    ...(await unresolved(
+      { ...evidenceContext(k, h, null), repoRoot: join(k.deps.repoRoot, worktree.path) },
+      cited.filter((e) => !engineEvidence(e)),
+    )),
+    ...(await unresolved(evidenceContext(k, h, null), cited.filter(engineEvidence))),
+  ];
   if (missing.length > 0)
     return reject(
       "claim_check",
