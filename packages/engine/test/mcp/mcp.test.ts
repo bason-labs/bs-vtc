@@ -16,6 +16,7 @@ import {
   engineSocketFile,
   ENGINE_MCP_TOOLS,
   EngineSocketWelcomeSchema,
+  ROLE_MCP_TOOLS,
   type EngineMcpToolName,
 } from "@vtc/shared";
 import {
@@ -58,6 +59,38 @@ const socketFor = async (h: Harness): Promise<EngineSocketServer> => {
 };
 
 const parsed = (result: Record<string, unknown>): unknown => result.structuredContent;
+
+describe("role-facing research tools (AD-4 rule 3, AD-22)", () => {
+  it("are listed and served next to the Lead's only once the composition wires a handler", async () => {
+    const h = createHarness();
+    expect(toolDefinitions().map((t) => t.name)).not.toContain("fact_lookup");
+    expect(await callTool(h.engine, "fact_lookup", { subject: "nodejs@22" }, CLAUDE)).toMatchObject(
+      { isError: true },
+    );
+    const seen: unknown[] = [];
+    h.engine.setRoleTools((name, input) => {
+      seen.push([name, input]);
+      return Promise.resolve({ facts: [] });
+    });
+    expect(toolDefinitions(true).map((t) => t.name)).toEqual([
+      ...ENGINE_MCP_TOOLS.map((t) => t.name),
+      ...ROLE_MCP_TOOLS.map((t) => t.name),
+    ]);
+    const ok = await callTool(h.engine, "fact_lookup", { subject: "nodejs@22" }, CLAUDE);
+    expect(ok.structuredContent).toEqual({ facts: [] });
+    expect(seen).toEqual([["fact_lookup", { subject: "nodejs@22" }]]);
+    // the input contract is checked before the handler sees it
+    const bad = await callTool(h.engine, "fact_lookup", {}, CLAUDE);
+    expect(bad).toMatchObject({ isError: true });
+    expect(seen).toHaveLength(1);
+    // and the output contract before it leaves
+    h.engine.setRoleTools(() => Promise.resolve({ facts: "nope" }));
+    expect(await callTool(h.engine, "fact_lookup", { subject: "x" }, CLAUDE)).toMatchObject({
+      isError: true,
+    });
+    await h.release();
+  });
+});
 
 describe("tool surface (AD-4)", () => {
   it("lists exactly the frozen tools, each with object input and output schemas", () => {
