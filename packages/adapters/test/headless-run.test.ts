@@ -2,8 +2,15 @@ import { chmodSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:f
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { AD9_FORBIDDEN_MARKERS, type HostOutcome } from "@vtc/shared";
+import {
+  AD9_FORBIDDEN_MARKERS,
+  HEADLESS_DEFAULTS,
+  type HostOutcome,
+  type SpawnRoleRequest,
+} from "@vtc/shared";
+import { createRunLauncher } from "../src/common/dispatch.js";
 import { startHeadlessRun, type RunExit } from "../src/common/headless-run.js";
+import { describeExit } from "../src/common/outcome.js";
 import {
   absoluteSearchPath,
   childEnvironment,
@@ -287,6 +294,125 @@ describe("headless launcher (§15 hardened launcher)", () => {
     });
     await run.wait();
     expect(seen).toMatchObject({ code: null, error: { message: "spawn host ENOENT" } });
+  });
+});
+
+describe("headless launcher defaults and bounds", () => {
+  it("without grace options waits HEADLESS_DEFAULTS: SIGINT, then SIGTERM, then SIGKILL (AD-25 rule 4)", async () => {
+    vi.useFakeTimers();
+    try {
+      const { spawner, processes } = fakeSpawner((p) => {
+        p.obeysInt = false;
+        p.obeysTerm = false;
+      });
+      const run = startHeadlessRun({
+        command: COMMAND,
+        cwd: "/w",
+        timeoutMs: 1_000,
+        spawner,
+        outcome: echoOutcome,
+      });
+      const signals = () => processes[0]?.signals;
+      await vi.advanceTimersByTimeAsync(1_000);
+      expect(signals()).toEqual(["SIGINT"]);
+      await vi.advanceTimersByTimeAsync(HEADLESS_DEFAULTS.interruptGraceMs - 1);
+      expect(signals()).toEqual(["SIGINT"]);
+      await vi.advanceTimersByTimeAsync(1);
+      expect(signals()).toEqual(["SIGINT", "SIGTERM"]);
+      await vi.advanceTimersByTimeAsync(HEADLESS_DEFAULTS.termGraceMs - 1);
+      expect(signals()).toEqual(["SIGINT", "SIGTERM"]);
+      await vi.advanceTimersByTimeAsync(1);
+      expect(signals()).toEqual(["SIGINT", "SIGTERM", "SIGKILL"]);
+      expect(details(await run.wait()).stop?.cause).toBe("timeout");
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("keeps the first lines and a bounded tail, and a late reader resumes at the oldest kept line", async () => {
+    const { spawner, processes } = fakeSpawner();
+    const run = startHeadlessRun({
+      command: COMMAND,
+      cwd: "/w",
+      timeoutMs: 5_000,
+      spawner,
+      outcome: echoOutcome,
+      transcriptLimits: { headLines: 2, tailChars: 8, lineChars: 5 },
+    });
+    const proc = processes[0]!;
+    proc.emit("init", "h2", "m1", "m2", "m3", "toolong-line", "t1", "t2");
+    proc.stdout.write("crlf\r\nlast");
+    proc.exit(0);
+    const outcome = details(await run.wait());
+    // the head always stays; of the rest only the newest lines within 8 characters
+    expect(outcome.lines).toEqual(["init", "h2", "crlf", "last"]);
+    const late: string[] = [];
+    for await (const line of run.lines()) late.push(line);
+    expect(late).toEqual(["init", "h2", "crlf", "last"]);
+  });
+
+  it("cuts a line longer than the limit even before its newline arrives", async () => {
+    const { spawner, processes } = fakeSpawner();
+    const run = startHeadlessRun({
+      command: COMMAND,
+      cwd: "/w",
+      timeoutMs: 5_000,
+      spawner,
+      outcome: echoOutcome,
+      transcriptLimits: { headLines: 10, tailChars: 100, lineChars: 4 },
+    });
+    const proc = processes[0]!;
+    for (let i = 0; i < 50; i += 1) proc.stdout.write("xxxxxxxxxx");
+    proc.stdout.write("\nok\n");
+    proc.exit(0);
+    expect(details(await run.wait()).lines).toEqual(["xxxx", "ok"]);
+  });
+
+  it("redacts secrets in the stderr tail an exit message carries (AD-18)", () => {
+    const secret = `sk-ant-${"a".repeat(30)}`;
+    const message = describeExit(
+      "host",
+      {
+        code: 1,
+        signal: null,
+        error: null,
+        stderrTail: `auth failed for ${secret}\n`,
+        endedAt: "2026-10-14T09:00:00.000Z",
+        stop: null,
+      },
+      "without a result",
+    );
+    expect(message).toContain("host exited 1 without a result: auth failed for [REDACTED:");
+    expect(message).not.toContain(secret);
+  });
+});
+
+describe("run launcher argv guard (AD-9, AD-25 rules 1-2)", () => {
+  const ROLE_REQUEST = { cwd: "/w", prompt: "p", timeoutMs: 5_000 } as SpawnRoleRequest;
+  const ISOLATED = ["exec", "--sandbox", "read-only", "-c", 'approval_policy="never"'];
+
+  it("refuses to start an argv that misses an isolation flag or carries a forbidden one", async () => {
+    const { spawner, processes } = fakeSpawner((p) => {
+      p.exit(0);
+    });
+    const runs = createRunLauncher({ host: "codex", spawner, outcome: echoOutcome });
+    const marker = AD9_FORBIDDEN_MARKERS[0];
+    for (const command of [
+      { command: "codex", args: ["exec"], env: {} },
+      { command: "codex", args: [...ISOLATED, `--${marker}`], env: {} },
+      { command: "codex", args: ISOLATED, env: { [marker]: "1" } },
+      { command: "codex", args: [...ISOLATED, "--approve-for-me"], env: {} },
+    ]) {
+      expect(() => runs.start(command, ROLE_REQUEST), command.args.join(" ")).toThrow(
+        /refusing to start codex/,
+      );
+    }
+    expect(processes).toEqual([]);
+    const started = runs.start({ command: "codex", args: ISOLATED, env: {} }, ROLE_REQUEST);
+    if (started.dispatch !== "headless") throw new Error("expected a headless run");
+    await started.run.wait();
+    expect(processes).toHaveLength(1);
+    await runs.dispose();
   });
 });
 

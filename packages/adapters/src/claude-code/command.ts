@@ -53,6 +53,7 @@ import {
   type SessionRef,
   type SpawnRoleRequest,
 } from "@vtc/shared";
+import { checkProfileArgs, checkSessionId } from "../common/argv.js";
 import {
   ROLE_HOME_WRITE_DENY,
   vtcHomeReadDeniedPaths,
@@ -389,6 +390,9 @@ export const claudeSandboxProfile = (
   };
 };
 
+/** The flags a Claude sandbox profile passes on the command line, each with one value. */
+const CLAUDE_PROFILE_FLAGS = ["--settings", "--tools", "--allowedTools", "--disallowedTools"];
+
 export interface ClaudeCommandOptions {
   /**
    * The compiled Claude plugin on disk (the cli's extracted `plugin:claude-code`). Every headless
@@ -420,6 +424,9 @@ export const claudeHeadlessCommand = (
   if (session !== undefined && session.host !== HOST) {
     throw new Error(`cannot resume a ${session.host} session on ${HOST}`);
   }
+  // only what `claudeSandboxProfile` emits: never a second isolation flag that would win (AD-25)
+  checkProfileArgs(HOST, request.sandbox.cliArgs, CLAUDE_PROFILE_FLAGS);
+  if (session !== undefined) checkSessionId(HOST, session.id);
   if (options.pluginDir === undefined) {
     throw new Error(
       "refusing a headless Claude role run without the compiled plugin on disk: pass `pluginDir` to the adapter so the run loads it isolated from the user's settings",

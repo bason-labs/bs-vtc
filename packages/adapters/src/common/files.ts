@@ -1,4 +1,7 @@
-/** File helpers for `install`: atomic writes, careful edits of the user's own config files. */
+/**
+ * File helpers: atomic writes and careful edits of the user's own config files (`install`), and
+ * the adapter's own private files.
+ */
 import { randomBytes } from "node:crypto";
 import {
   chmodSync,
@@ -62,6 +65,36 @@ export const writeFileAtomic = (path: string, text: string): void => {
     // the umask may have narrowed the mode it was created with
     chmodSync(temp, mode);
     renameSync(temp, target);
+  } catch (error) {
+    rmSync(temp, { force: true });
+    throw error;
+  }
+};
+
+/**
+ * Writes `text` (mode 0600) to `path`, a file VTC owns in a directory only VTC writes, through an
+ * exclusive temp file and a rename, so a reader never sees half a file. Unlike
+ * {@link writeFileAtomic} it never follows a link: an existing `path` that is not a regular file
+ * (a planted symlink) is refused, and the rename replaces the directory entry itself, never what
+ * a link points at.
+ */
+export const writeOwnFileAtomic = (path: string, text: string): void => {
+  let existing: ReturnType<typeof lstatSync> | null = null;
+  try {
+    existing = lstatSync(path);
+  } catch {
+    // a new file
+  }
+  if (existing !== null && !existing.isFile()) {
+    throw new Error(
+      `${path} is not a regular file (a link or something else is in its place); remove it and try again`,
+    );
+  }
+  const temp = tempSibling(path);
+  try {
+    writeFileSync(temp, text, { encoding: "utf8", mode: NEW_FILE_MODE, flag: "wx" });
+    chmodSync(temp, NEW_FILE_MODE);
+    renameSync(temp, path);
   } catch (error) {
     rmSync(temp, { force: true });
     throw error;

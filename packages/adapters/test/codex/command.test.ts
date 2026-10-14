@@ -1,11 +1,13 @@
 import {
   chmodSync,
+  lstatSync,
   mkdirSync,
   mkdtempSync,
   readFileSync,
   rmSync,
   statSync,
   symlinkSync,
+  writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -19,6 +21,7 @@ import {
   ROLE_DENIED_VTC,
   type RoleTools,
   type SpawnRoleRequest,
+  WAVE3_HOME_WRITE_DENY,
 } from "@vtc/shared";
 import { codexSandboxProfile } from "../../src/codex/command.js";
 import { ADAPTER_FACTORIES, createCodexAdapter } from "../../src/index.js";
@@ -196,6 +199,10 @@ describe("Codex sandboxProfile (§12.1, AD-9)", () => {
         "/v/run",
         "/v/config.yaml",
         "/v/token",
+        // spine §5 reading 103: the wave-3 directories (WAVE3_HOME_WRITE_DENY)
+        ...WAVE3_HOME_WRITE_DENY.map((glob) => `/v/${glob.replace(/\/\*\*$/u, "")}/x`),
+        "/v/research-cache",
+        "/v/design-library",
       ]) {
         expect(at("/v", tools, inside), inside).toThrow(/VTC home/);
       }
@@ -483,6 +490,17 @@ describe("Codex headlessCommand", () => {
     }
   });
 
+  it("refuses a profile that passes anything but --config overrides, so no sandbox flag is repeated", () => {
+    const sandbox = profile(READ_ONLY);
+    for (const extra of [["--sandbox", "workspace-write"], ["--add-dir", "/"], ["--config"]]) {
+      const widened = { ...sandbox, cliArgs: [...sandbox.cliArgs, ...extra] };
+      expect(
+        () => createCodexAdapter().headlessCommand(request({ sandbox: widened })),
+        extra[0],
+      ).toThrow(/sandbox profile may only pass/);
+    }
+  });
+
   it("refuses another host's session", () => {
     expect(() =>
       createCodexAdapter().headlessCommand(request(), { host: "claude-code", id: "s" }),
@@ -569,6 +587,41 @@ describe.skipIf(process.platform === "win32")("Codex scratch directory", () => {
     const dir = join(scratch(), "nested");
     await spawnWith(dir);
     expect(statSync(dir).mode & 0o777).toBe(0o700);
+  });
+
+  it("defaults to <vtcHome>/run/codex, which no role can write, never the OS temp directory (D-w)", async () => {
+    const vtcHome = scratch();
+    const { spawner, processes } = fakeSpawner((p) => {
+      p.exit(0);
+    });
+    const adapter = createCodexAdapter({ spawner, vtcHome });
+    try {
+      await adapter.spawnRole(request());
+    } finally {
+      await adapter.dispose();
+    }
+    const schemaPath = argAfter(processes[0]!.command.args, "--output-schema")!;
+    expect(schemaPath.startsWith(join(vtcHome, "run", "codex") + "/")).toBe(true);
+    expect(JSON.parse(readFileSync(schemaPath, "utf8"))).toEqual(request().outputSchema);
+    expect(statSync(join(vtcHome, "run", "codex")).mode & 0o777).toBe(0o700);
+  });
+
+  it("never writes the schema through a link planted at its path: the link's target is untouched", async () => {
+    const dir = scratch();
+    const victim = join(scratch(), "victim");
+    writeFileSync(victim, "keep me");
+    const schemaPath = argAfter(
+      createCodexAdapter({ scratchDir: dir }).headlessCommand(request()).args,
+      "--output-schema",
+    )!;
+    symlinkSync(victim, schemaPath);
+    await expect(spawnWith(dir)).rejects.toThrow(/not a regular file/);
+    expect(readFileSync(victim, "utf8")).toBe("keep me");
+    expect(lstatSync(schemaPath).isSymbolicLink()).toBe(true);
+    // a dangling link is refused as well, and nothing is created where it points
+    rmSync(victim);
+    await expect(spawnWith(dir)).rejects.toThrow(/not a regular file/);
+    expect(() => statSync(victim)).toThrow();
   });
 
   it("refuses a scratch directory others can reach, or a link planted in its place", async () => {
