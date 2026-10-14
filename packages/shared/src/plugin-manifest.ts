@@ -23,6 +23,23 @@ import { EffortSchema, ModelTierSchema, RoleKindSchema } from "./role-contract.j
 export const PLUGIN_MANIFEST_ASSET = "vtc-manifest.json";
 
 /**
+ * Where each plugin carries every agent's role prompt sections (AD-21 rule 2, spine §5 reading
+ * 118): `vtc/prompts/<agent>/{locked,editable}.md`, the trimmed `splitRolePrompt` sections the
+ * manifest's `locked_sha256` / `editable_sha256` hash. New in 4.6.0.
+ */
+export const ROLE_PROMPTS_ASSET_DIR = "vtc/prompts";
+
+export type RolePromptPart = "locked" | "editable";
+
+/** Pure: the plugin asset path of one prompt section of one compiled agent. */
+export const rolePromptAssetPath = (agent: string, part: RolePromptPart): string => {
+  if (!new RegExp(`^${AGENT_NAME_PREFIX}[a-z0-9-]{1,120}$`).test(agent)) {
+    throw new TypeError(`not a compiled agent name: ${agent}`);
+  }
+  return `${ROLE_PROMPTS_ASSET_DIR}/${agent}/${part}.md`;
+};
+
+/**
  * The prompt version of a compiled agent (§13): lower-case hex SHA-256 of the UTF-8 bytes of its
  * instructions exactly as emitted, i.e. the body after the frontmatter of a Claude Code agent
  * file, equal to `developer_instructions` of the Codex agent TOML. Host frontmatter and TOML keys
@@ -59,13 +76,22 @@ export const PluginManifestAgentSchema = z
     /** {@link promptShaFor} of the agent's instructions. */
     prompt_sha256: Sha256HexSchema,
     /**
-     * Lookback (AD-21, new in 4.5.0): SHA-256 of the role's locked core and of its compiled
-     * default editable section (`splitRolePrompt`). Once agents compile from the locked core only,
-     * the engine renders the pinned editable section first in the task pack and the prompt
-     * version is `effectivePromptSha(locked, editable)`.
+     * Lookback (AD-21, new in 4.5.0): SHA-256 of the trimmed `splitRolePrompt` sections of the
+     * agent's own role prompt (`roles/<role>/prompt.md`; an engineer profile's own sections, not
+     * the Engineer's), `locked` and `editable`; every mode of a role shares them (spine §5
+     * reading 118). The plugin carries both texts at {@link rolePromptAssetPath}. Once an agent
+     * compiles from the locked part only (`editable_in_pack`), the engine renders the pinned
+     * editable section first in the task pack and the prompt version is
+     * `effectivePromptSha(locked, editable)`.
      */
     locked_sha256: Sha256HexSchema.optional(),
     editable_sha256: Sha256HexSchema.optional(),
+    /**
+     * True when the agent carries no editable section and expects it as the task pack's
+     * opening `Role heuristics` block (`TaskPack.role_heuristics`, reading 102). Absent = false.
+     * New in 4.6.0.
+     */
+    editable_in_pack: z.boolean().optional(),
     tier: ModelTierSchema,
     effort: EffortSchema,
   })

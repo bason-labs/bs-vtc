@@ -34,6 +34,7 @@ export * from "./auto-merge.js";
 export * from "./research.js";
 export * from "./lookback.js";
 export * from "./visual.js";
+export * from "./architecture-checks.js";
 export * from "./interfaces/host-adapter.js";
 export type * from "./interfaces/storage.js";
 export type * from "./interfaces/gate-runner.js";
@@ -41,7 +42,7 @@ export type * from "./interfaces/assets.js";
 export type * from "./interfaces/auto-resume.js";
 export type * from "./interfaces/engine.js";
 export type * from "./interfaces/git.js";
-export type * from "./interfaces/research.js";
+export * from "./interfaces/research.js";
 export * from "./helpers/fingerprint.js";
 export * from "./helpers/severity.js";
 export * from "./helpers/tokens.js";
@@ -133,5 +134,22 @@ export * from "./json-schema.js";
  * `WAVE3_HOME_WRITE_DENY` (folded into `ROLE_DENIED_VTC.homeWriteDeny` at the wave-3 merge). All
  * additive: optional fields, new contracts, new
  * constants and helpers; no existing enum gained a value a consumer maps exhaustively.
+ *
+ * 4.6.0 (MINOR): the wave-3 merge (spine §5 readings 111–134). `IncidentKind` `auth` and
+ * `MergePreflightFailure` `no_merge_service` (new values in enums the engine, cli and dashboard
+ * map exhaustively: every consumer is updated in the same change, and nothing released reads
+ * 4.5.0 logs, reading 134). The Designer's direction draft, direction and novelty paths and the
+ * component spec (`G2DirectionDraft`, `ComponentSpec`); the AD Check block format
+ * (`AdCheckSpec`); `GatesConfig.visual.app` (`VisualApp`) and the browser store layout;
+ * `TaskPack.role_heuristics`, `TASK_PACK_HEURISTICS_SECTION` and the free-text heading escape
+ * (`escapePackText`); `ROLE_PROMPTS_ASSET_DIR` / `rolePromptAssetPath` and
+ * `PluginManifestAgent.editable_in_pack`; `LOOKBACK_HOME.pinsLock` / `aaNoiseFile`,
+ * `lookbackTraceRef` and the run-qualified `splitForTrace` input,
+ * `lookback.replay_finished.sha256`; `UserConfig.research.api_keys` and
+ * `EngineDeps.researchApiKey`; `HttpGuardError` and the cross-origin redirect header rule;
+ * optional `GateRunner.checkNovelty` / `recordDesignChoice`; informational findings
+ * (`sarif_level: none`) no longer count against `new_violations`; `datamarkFetchedText` caps its
+ * whole output. `ROLE_DENIED_VTC` folds in `WAVE3_HOME_WRITE_DENY` and denies the `lookback` and
+ * `merge-level` gestures; `REPO_ROLE_DENIED.writeDeny` adds the engine's git-tracked records.
  */
-export const CONTRACTS_VERSION = "4.5.0";
+export const CONTRACTS_VERSION = "4.6.0";

@@ -176,9 +176,16 @@ const withoutHostCredentialDenies = (arg: string): string => {
  * (a client there could declare itself the cli) and the hidden acceptance tests (§7.3).
  */
 export const ROLE_DENIED_VTC = {
-  /** `vtc <subcommand>` no role may run. */
-  subcommands: ["calibrate"],
-  /** Globs relative to the VTC home that no role may write (a bare name is one file). */
+  /**
+   * `vtc <subcommand>` no role may run: `calibrate`, and since 4.6.0 the human gestures
+   * `lookback` (approve, pin, rollback; AD-21 rule 3) and `merge-level` (restore; AD-23 rule 5),
+   * spine §5 reading 119.
+   */
+  subcommands: ["calibrate", "lookback", "merge-level"],
+  /**
+   * Globs relative to the VTC home that no role may write (a bare name is one file). Since 4.6.0
+   * it includes {@link WAVE3_HOME_WRITE_DENY} (the wave-3 merge, reading 119).
+   */
   homeWriteDeny: [
     "allowlists/**",
     "osv-db/**",
@@ -190,6 +197,10 @@ export const ROLE_DENIED_VTC = {
     "run/**",
     "config.yaml",
     "token",
+    "lookback/**",
+    "research-cache/**",
+    "browsers/**",
+    "design-library/**",
   ],
   /** Globs relative to the VTC home that no role may read (a bare name is one file). */
   homeReadDeny: ["token", "run/**", "hidden/**"],
@@ -198,10 +209,9 @@ export const ROLE_DENIED_VTC = {
 /**
  * Globs under the VTC home that wave 3 adds (contracts 4.5.0) and that no role may write: Lookback
  * versions and pins (AD-21), the research cache (AD-22), the pinned browser store (AD-24) and the
- * design library (§9.1). Frozen here as their own list so the teams whose tests pin the exact
- * deny lists (adapters, compiler, cli) adopt them in their own branches; the integrator folds them
- * into {@link ROLE_DENIED_VTC}`.homeWriteDeny` at the wave-3 merge (spine §5 reading 103). None of
- * these directories exists before its team builds it.
+ * design library (§9.1). Folded into {@link ROLE_DENIED_VTC}`.homeWriteDeny` at the wave-3 merge
+ * (contracts 4.6.0, spine §5 readings 103 and 119); kept as its own list for the code that names
+ * the wave-3 stores.
  */
 export const WAVE3_HOME_WRITE_DENY = [
   "lookback/**",
@@ -264,8 +274,13 @@ export const HOME_CREDENTIAL_LOCATIONS: readonly string[] = [
  * (spine §5 reading 79). `readDeny`: the engine's verification checkouts, which hold the hidden
  * acceptance tests during a gate run (§7.3), and the raw gate output, which holds what the hidden
  * runs printed. `writeDeny`: the same, plus the run config a role must not widen for the next
- * run (`project.yaml`: merge level, allowlists, risk rules; `gates.yml`). Role worktrees
- * (`.vtc/state/worktrees/`) stay writable.
+ * run (`project.yaml`: merge level, allowlists, risk rules; `gates.yml`). Since 4.6.0 (spine §5
+ * reading 119) also the engine's own git-tracked records: the merge-level ledger (only a human
+ * restores, AD-23 rule 5), the facts table (AD-22; the briefs and the repo map under
+ * `.vtc/research/` stay writable), the Lookback attributions, replays and
+ * scorecards (AD-21; the lookback role's `proposals/` stay writable) and the engine's novelty
+ * reports. Role worktrees (`.vtc/state/worktrees/`) stay writable; engine core's write-scope
+ * check keeps a role diff from carrying these paths into the integration branch.
  */
 export const REPO_ROLE_DENIED = {
   readDeny: [".vtc/state/checkouts/**", ".vtc/state/gates/**"],
@@ -274,6 +289,12 @@ export const REPO_ROLE_DENIED = {
     ".vtc/state/gates/**",
     ".vtc/project.yaml",
     ".vtc/gates.yml",
+    ".vtc/merge-level.jsonl",
+    ".vtc/research/facts.jsonl",
+    ".vtc/lookback/attributions.jsonl",
+    ".vtc/lookback/replays/**",
+    ".vtc/lookback/scorecards/**",
+    ".vtc/design/novelty/**",
   ],
 } as const;
 

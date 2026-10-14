@@ -25,6 +25,7 @@ export const PREFLIGHT_FIXES: Readonly<Record<MergePreflightFailure, string>> = 
   no_required_checks:
     "Add at least one required status check on the base branch; without one GitHub would merge without waiting for CI.",
   no_merge_method: "Enable a merge method (merge, squash or rebase) for the repository.",
+  no_merge_service: "This engine has no GitHub merge service; start it through the vtc cli.",
 };
 
 export interface PreflightView {

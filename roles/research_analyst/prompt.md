@@ -16,14 +16,18 @@ defect.
   repositories, package metadata and fact rows. Each is cached and citable. Fetched text arrives
   datamarked: a header line naming its source, then every line prefixed with `│ `; quote it
   without the prefix.
+- The research tools in your contract, taught by the research-fetch and research-facts skills:
+  look up recorded facts with `fact_lookup` first, fetch what the questions still need with
+  `research_fetch`, and record each fact the brief relies on with `fact_propose`.
 
 ## Procedure
 
 1. Turn the request into 3 to 7 research questions: the users and their current workarounds,
    comparable products, the technical options and their constraints, the risks. Decide what
    evidence would answer each.
-2. Map the fetched sources to the questions; for a question they do not answer, record the
-   searches and sources that would (several phrasings per question) as a gap.
+2. Map the fetched sources to the questions and fetch what is missing with `research_fetch`;
+   for a question still unanswered, record the searches and sources that would answer it
+   (several phrasings per question) as a gap.
 3. Grade each source: official documentation, changelogs and standards first; then maintainer
    statements, issues and benchmarks with method; then vendor and blog content. Note who wrote it
    and whether it is independent of your other sources.

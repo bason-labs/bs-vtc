@@ -174,11 +174,14 @@ export const GateResultSchema = z
         message: "monotonic violations belong to a failed L2 gate",
       });
     }
-    if (result.findings.length > result.new_violations) {
+    // Informational findings (`sarif_level: none`, e.g. the scope-creep flag) are listed but are
+    // not violations (spine §5 reading 125, since 4.6.0)
+    if (result.findings.filter((f) => f.sarif_level !== "none").length > result.new_violations) {
       ctx.addIssue({
         code: "custom",
         path: ["findings"],
-        message: "findings are new violations: no more than new_violations",
+        message:
+          "findings other than sarif_level none are new violations: no more than new_violations",
       });
     }
     if ((result.status === "skipped") !== (result.skipped_reason !== undefined)) {

@@ -11,6 +11,8 @@ import {
   effectivePromptSha,
   FetcherIdSchema,
   findForbiddenInText,
+  DESIGN_DIRECTIONS_DIR,
+  G2DirectionSchema,
   HOST_IDS,
   LOOKBACK_LIMITS,
   LOOKBACK_REPO,
@@ -25,7 +27,6 @@ import {
   FactStatusSchema,
   splitRolePrompt,
   TASK_PACK_SECTIONS,
-  G2DirectionSchema,
   type HostId,
   type PluginManifest,
 } from "@vtc/shared";
@@ -132,6 +133,13 @@ describe("prompt identity in the compiled plugins (AD-21 rules 1–2)", () => {
     expect(body).not.toContain(lastEditableLine);
     expect(body).toContain(`\`## ${EDITABLE_PACK_SECTION}\``);
     expect(file(rolePromptAssetPath("vtc-spec-verifier", "editable"))).toContain(lastEditableLine);
+    // the manifest tells the engine to render the section into the pack (contracts 4.6.0)
+    const manifest = JSON.parse(file(PLUGIN_MANIFEST_ASSET)) as {
+      agents: { name: string; editable_in_pack?: boolean }[];
+    };
+    const flag = (name: string) => manifest.agents.find((a) => a.name === name)?.editable_in_pack;
+    expect(flag("vtc-spec-verifier")).toBe(true);
+    expect(flag("vtc-architect")).toBeUndefined();
   });
 
   it("ends every agent with its own role's editable section, verbatim", () => {
@@ -240,7 +248,11 @@ describe("the architect reference skill (spec §8.1)", () => {
   });
 
   it("is preloaded by the Architect agent on Claude Code and named in its prompt", () => {
-    expect(claudeFront("vtc-architect").skills).toEqual(["vtc:architect"]);
+    expect(claudeFront("vtc-architect").skills).toEqual([
+      "vtc:architect",
+      "vtc:research-facts",
+      "vtc:research-fetch",
+    ]);
     expect(claudeBody("vtc-architect")).toContain("The `architect` skill");
     // Codex has no ${CLAUDE_SKILL_DIR}: its copy points at paths relative to SKILL.md
     expect(emitted("codex", "skills/architect/SKILL.md")).toContain("references/adr.md");
@@ -313,10 +325,42 @@ describe("the Architect and the Research Analyst cite facts (spec §8.2)", () =>
   });
 });
 
+describe("the research roles declare the role-facing tools (AD-22)", () => {
+  it.each(["architect", "research_analyst"])("%s declares every ROLE_MCP_TOOLS tool", (id) => {
+    const role = loaded.roles.find((r) => r.role.id === id)?.role;
+    expect(role?.tools.engine_tools).toEqual(ROLE_MCP_TOOLS.map((t) => t.name));
+    const agent = `vtc-${id.replaceAll("_", "-")}`;
+    expect(claudeFront(agent).skills).toEqual(
+      expect.arrayContaining(["vtc:research-facts", "vtc:research-fetch"]),
+    );
+  });
+
+  it("returns an ADR for a `changes` triage as the adr artifact", () => {
+    expect(loaded.roles.find((r) => r.role.id === "architect")?.role.output.artifacts).toContain(
+      "adr",
+    );
+    expect(oneLine(claudeBody("vtc-architect"))).toContain("`changes` gets an `adr` artifact");
+  });
+});
+
+describe("the Designer's G2 directions (§9.1, G2Direction)", () => {
+  it("returns each direction as a design_direction artifact with the G2 fields", () => {
+    const role = loaded.roles.find((r) => r.role.id === "designer")?.role;
+    expect(role?.output.artifacts).toContain("design_direction");
+    expect(role?.inputs).toContain("novelty_report");
+    const body = oneLine(claudeBody("vtc-designer"));
+    expect(body).toContain("`design_direction` artifact");
+    for (const key of Object.keys(G2DirectionSchema.shape).filter((k) => k !== "novelty")) {
+      expect(body, key).toContain(`\`${key}\``);
+    }
+    expect(body).toContain("`novelty_report`");
+  });
+});
+
 describe("the Designer's component specs and directions (§9, §9.1)", () => {
   it("has every component spec name the screens that use it", () => {
     const body = oneLine(claudeBody("vtc-designer"));
-    expect(body).toMatch(/Each component spec names its `id` .* and `screens`/);
+    expect(body).toMatch(/Each component spec names its `id` .*`screens`.* and `uses`/);
   });
 
   it("gives each direction every G2Direction field the engine does not add", () => {
@@ -325,8 +369,11 @@ describe("the Designer's component specs and directions (§9, §9.1)", () => {
       expect(body, field).toContain(`\`${field}\``);
     }
     expect(body).toContain("`.vtc/design/prototype/directions/<id>/index.html`");
-    expect(body).toMatch(/Return each direction's file as a `prototype` artifact/);
-    expect(body).toMatch(/The engine adds `first_viewport`/);
+    expect(body).toContain(`\`${DESIGN_DIRECTIONS_DIR}/<id>.json\``);
+    expect(body).toMatch(
+      /return that file as a `design_direction` artifact, and the HTML file as a `prototype` artifact/,
+    );
+    expect(body).toMatch(/engine adds `first_viewport`/);
   });
 });
 

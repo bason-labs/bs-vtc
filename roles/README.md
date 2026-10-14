@@ -139,22 +139,19 @@ human`, exits `done`, `blocked` or `unknown`, no verdicts, no success criteria a
 - **Gap findings stay with the human** (reading 19). Until sub-project 4, `spec_gap` and
   `design_gap` findings park the task for the human; the BA and Designer prompts have no
   task-scoped clarification mode.
-- **G2 directions** (§9.1). The Designer writes each direction's first viewport to
-  `.vtc/design/prototype/directions/<id>/index.html`, returns it as a `prototype` artifact and
-  lists each direction's `G2Direction` fields (`id`, `title`, `thesis`, `prototype`) in its
-  summary; the engine adds `first_viewport` and the novelty verdict. Returning the directions as
-  `design_direction` artifacts, and the Architect's `changes` ADR as `adr`, changes the two
-  `role.yaml` output lists, which the engine's role fixtures mirror, so it lands with the
-  matching fixture change at integration (proposed with this tree's handoff); until then the
-  prompts use the declared `prototype` and `design_note` types.
+- **G2 directions** (§9.1; spine §5 reading 116, contracts 4.6.0). The Designer writes each
+  direction's first viewport to `.vtc/design/prototype/directions/<id>/index.html` (a
+  `prototype` artifact) and its `G2DirectionDraft` fields (`id`, `title`, `thesis`,
+  `prototype`) to `.vtc/design/directions/<id>.json` (a `design_direction` artifact); the engine
+  adds `first_viewport` and the novelty verdict, and drops a verdict the Designer wrote. The
+  Architect returns a `changes` triage's ADR as an `adr` artifact. Both output lists landed with
+  the matching engine fixture change at the wave-3 merge.
 - **Role-facing engine tools** (AD-4 rule 3, AD-22; contracts 4.5.0). `ROLE_MCP_TOOLS`
   (`research_fetch`, `fact_lookup`, `fact_propose`) is the only engine surface a role may name
   in `tools.engine_tools`; the compiler rejects any other entry and always rejects the Lead's
   run-driving tools. An agent that declares one preloads the skill that teaches it
-  (`research-fetch`, `research-facts`). Declaring them for the Architect and the Research Analyst
-  changes their `role.yaml` contracts, which the engine's role fixtures mirror, so it lands with
-  the matching fixture change at integration; until then both work from the facts and sources in
-  their task pack.
+  (`research-fetch`, `research-facts`). The Architect and the Research Analyst declare all three
+  (with the matching engine fixture change, at the wave-3 merge).
 - **Exact paths for config and task-runner files** (readings 44, 45 and 63, Lead decisions of
   2026-10-14). The Planner's locked core tells it to name a lint, test or scanner config, or a
   `Makefile`, `justfile`, `*.mk` or `package.json` `scripts` change, by its exact path in

@@ -38,7 +38,12 @@ import {
 } from "../src/daemon.js";
 import { checkEngine } from "../src/doctor-checks.js";
 import { isVtcProject } from "../src/repo.js";
-import { passthroughOf, readUserConfig } from "../src/user-config.js";
+import {
+  passthroughOf,
+  readUserConfig,
+  researchApiKeyOf,
+  researchKeyNamesOf,
+} from "../src/user-config.js";
 import {
   buildEngineParts,
   composeEngineDeps,
@@ -200,8 +205,9 @@ describe("buildEngineParts and composeEngineDeps (AD-19)", () => {
     expect(composeEngineDeps(await buildEngineParts({ ...base, http: null }))).not.toHaveProperty(
       "http",
     );
-    // Node in development has no runtime-safe resolver: no client, so research fails closed
-    expect(composeEngineDeps(await buildEngineParts(base))).not.toHaveProperty("http");
+    // Node in development resolves with node:dns (reading 133); constructing it fetches nothing
+    expect(composeEngineDeps(await buildEngineParts(base))).toHaveProperty("http");
+    // no resolver: no client, so research fails closed
     expect(defaultHttpClient(null)).toBeUndefined();
     const client = defaultHttpClient(
       () => Promise.resolve(["10.0.0.1"]),
@@ -249,6 +255,32 @@ describe("buildEngineParts and composeEngineDeps (AD-19)", () => {
       ["codex", { pluginDir: "/vh/plugins/codex", vtcHome: "/vh", vtcVersion: VERSION }],
     ]);
     expect(createAdapters({}, { vtcHome: "/vh", pluginDir: () => "/p" })).toEqual({});
+    // the user's env_passthrough names reach headless host runs (reading 57)
+    const passed: (AdapterFactoryOptions | undefined)[] = [];
+    createAdapters(
+      { codex: (o) => (passed.push(o), c) },
+      { vtcHome: "/vh", pluginDir: () => "/p", envPassthrough: ["GH_HOST"] },
+    );
+    expect(passed[0]?.envPassthrough).toEqual(["GH_HOST"]);
+  });
+
+  it("reads each research fetcher's key from the variable the user config names (reading 120)", () => {
+    const home = tempHome();
+    expect(researchApiKeyOf(readUserConfig(home))).toBeUndefined();
+    writeFileSync(
+      join(home, USER_CONFIG_FILE),
+      "version: 1\nresearch:\n  api_keys:\n    search: SEARCH_KEY\n    github: GH_READ\n",
+    );
+    const read = readUserConfig(home);
+    expect(researchKeyNamesOf(read)).toEqual({ search: "SEARCH_KEY", github: "GH_READ" });
+    const key = researchApiKeyOf(read, { SEARCH_KEY: "k-1", GH_READ: "" });
+    expect(key?.("search")).toBe("k-1");
+    expect(key?.("github")).toBeUndefined();
+    expect(key?.("web")).toBeUndefined();
+    // the daemon keeps the named variables; the adapters get env_passthrough only
+    expect(
+      daemonEnv({ SEARCH_KEY: "k-1", OTHER: "x" }, home, Object.values(researchKeyNamesOf(read))),
+    ).toEqual({ SEARCH_KEY: "k-1", VTC_HOME: home });
   });
 
   it("threads the plugin dir into the daemon's adapters and builds the Gate Runner on its git", async () => {

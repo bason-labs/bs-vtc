@@ -45,9 +45,12 @@ import {
   MergePreflightSchema,
   RemoteMergePolicySchema,
 } from "./auto-merge.js";
+import { AdCheckSpecSchema } from "./architecture-checks.js";
 import {
+  ComponentSpecSchema,
   DesignCoverageReportSchema,
   DesignScreensFileSchema,
+  G2DirectionDraftSchema,
   G2DirectionSchema,
 } from "./design.js";
 import { HostAuthStatusSchema } from "./headless.js";
@@ -79,6 +82,7 @@ import {
   BrowserPinSchema,
   DesignLibraryEntrySchema,
   NoveltyReportSchema,
+  VisualAppSchema,
   VisualReportSchema,
   VisualSummarySchema,
 } from "./visual.js";
@@ -238,6 +242,11 @@ export const CONTRACT_SCHEMAS = {
   BrowserPin: BrowserPinSchema,
   NoveltyReport: NoveltyReportSchema,
   DesignLibraryEntry: DesignLibraryEntrySchema,
+  // ---- contracts 4.6.0 (the wave-3 merge, spine §5 readings 111-134)
+  G2DirectionDraft: G2DirectionDraftSchema,
+  ComponentSpec: ComponentSpecSchema,
+  AdCheckSpec: AdCheckSpecSchema,
+  VisualApp: VisualAppSchema,
 } as const;
 export type ContractName = keyof typeof CONTRACT_SCHEMAS;
 

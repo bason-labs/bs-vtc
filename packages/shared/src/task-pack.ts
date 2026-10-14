@@ -122,6 +122,21 @@ export const TaskPackSchema = z.strictObject({
   findings: z.array(FindingSchema).default([]),
   /** A resumed run after an escalation: the human's answer (§6.5). */
   answer: EscalationAnswerSchema.optional(),
+  /**
+   * The pinned (or compiled default) editable section of a role whose agent carries the locked
+   * core only (AD-21 rule 2, spine §5 readings 102 and 117), trimmed. Rendered as the pack's
+   * opening block, `## Role heuristics` ({@link TASK_PACK_HEURISTICS_SECTION}), before
+   * `## Dispatch`; absent for every other role. It may not contain a line that is a pack heading
+   * (`## ` and a {@link TASK_PACK_SECTIONS} name or the heuristics name). New in 4.6.0.
+   */
+  role_heuristics: z
+    .string()
+    .min(1)
+    .max(20000)
+    .refine((text) => !packHeadingIn(text), {
+      message: "role heuristics may not contain a task-pack section heading",
+    })
+    .optional(),
 });
 export type TaskPack = z.infer<typeof TaskPackSchema>;
 export type TaskPackInput = z.input<typeof TaskPackSchema>;
@@ -140,6 +155,23 @@ export const TASK_PACK_SECTIONS = [
 ] as const;
 export type TaskPackSection = (typeof TASK_PACK_SECTIONS)[number];
 
+/**
+ * The optional opening section of a pack: a switched role's editable section
+ * (`TaskPack.role_heuristics`, spine §5 reading 102). It is not one of {@link TASK_PACK_SECTIONS}:
+ * only a pack that carries it starts with it, so every other pack still starts with
+ * `## Dispatch`. New in 4.6.0.
+ */
+export const TASK_PACK_HEURISTICS_SECTION = "Role heuristics";
+
+/** Pure: whether `text` has a line that is a pack heading (`## <section>`). */
+export const packHeadingIn = (text: string): boolean => {
+  const names = new Set<string>([...TASK_PACK_SECTIONS, TASK_PACK_HEURISTICS_SECTION]);
+  return text.split("\n").some((line) => {
+    const m = /^\s*##\s+(.+?)\s*$/.exec(line);
+    return m?.[1] !== undefined && names.has(m[1]);
+  });
+};
+
 /** `.vtc/state/packs/<action_id>.md`. */
 export const taskPackPath = (actionId: string): string =>
   `.vtc/state/packs/${SlugSchema.parse(actionId)}.md`;
@@ -148,8 +180,17 @@ const list = (items: readonly string[]): string =>
   items.length === 0 ? "(none)" : items.map((item) => `- ${item}`).join("\n");
 
 /**
+ * Pure: free text as pack data. A line that starts with `#` (after any indent) gets a backslash
+ * before its first `#`, so requirement text, a finding title or a human answer can never pose as
+ * a pack heading such as `## Role heuristics` (spine §5 reading 117). New in 4.6.0.
+ */
+export const escapePackText = (text: string): string => text.replace(/^([ \t]*)#/gm, "$1\\#");
+
+/**
  * Renders a pack as Markdown: every section of {@link TASK_PACK_SECTIONS} appears, in order, as
- * a `## ` heading; an empty section says `(none)`. Pure and deterministic.
+ * a `## ` heading; an empty section says `(none)`. A pack with `role_heuristics` opens with
+ * `## Role heuristics` before them. Free text is escaped ({@link escapePackText}). Pure and
+ * deterministic.
  */
 export const renderTaskPack = (input: TaskPackInput): string => {
   const pack = TaskPackSchema.parse(input);
@@ -172,34 +213,45 @@ export const renderTaskPack = (input: TaskPackInput): string => {
     pack.intent === undefined
       ? "(none)"
       : [
-          pack.intent.statement,
+          escapePackText(pack.intent.statement),
           "",
           "Always:",
-          list(pack.intent.always),
+          list(pack.intent.always.map(escapePackText)),
           "",
           "Never:",
-          list(pack.intent.never),
+          list(pack.intent.never.map(escapePackText)),
           "",
           "Cases:",
-          list(pack.intent.io_matrix.map((c) => `${c.case}: ${c.input} → ${c.expected}`)),
+          list(
+            pack.intent.io_matrix.map((c) =>
+              escapePackText(`${c.case}: ${c.input} → ${c.expected}`),
+            ),
+          ),
         ].join("\n");
   const body: Record<TaskPackSection, string> = {
     Dispatch: list(dispatch),
     "Intent contract": intent,
-    Requirements: list(pack.requirements.map((r) => `${r.id}: ${r.text}`)),
-    "Architecture decisions": list(pack.decisions.map((d) => `${d.id}: ${d.text}`)),
+    Requirements: list(pack.requirements.map((r) => `${r.id}: ${escapePackText(r.text)}`)),
+    "Architecture decisions": list(pack.decisions.map((d) => `${d.id}: ${escapePackText(d.text)}`)),
     Inputs: list(pack.inputs.map((a) => `${a.type}: ${a.path}`)),
     "Write scope": list(pack.files_scope),
     "Gate commands": list(pack.gates.map((g) => `${g.id} (${g.layer}): ${g.command.join(" ")}`)),
     "Findings to address": list(
       pack.findings.map(
-        (f) => `${f.fingerprint.slice(0, 12)} ${f.severity} ${f.title} (${f.location.path})`,
+        (f) =>
+          `${f.fingerprint.slice(0, 12)} ${f.severity} ${escapePackText(f.title)} (${f.location.path})`,
       ),
     ),
     "Human answer":
       pack.answer === undefined
         ? "(none)"
-        : `${pack.answer.option}${pack.answer.text === undefined ? "" : `: ${pack.answer.text}`}`,
+        : `${pack.answer.option}${pack.answer.text === undefined ? "" : `: ${escapePackText(pack.answer.text)}`}`,
   };
-  return TASK_PACK_SECTIONS.map((section) => `## ${section}\n\n${body[section]}\n`).join("\n");
+  const sections = TASK_PACK_SECTIONS.map((section) => `## ${section}\n\n${body[section]}\n`);
+  return [
+    ...(pack.role_heuristics === undefined
+      ? []
+      : [`## ${TASK_PACK_HEURISTICS_SECTION}\n\n${pack.role_heuristics.trim()}\n`]),
+    ...sections,
+  ].join("\n");
 };

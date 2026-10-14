@@ -9,7 +9,9 @@ import type {
   WriteScopeReport,
 } from "../gate-result.js";
 import type { GatePhase } from "../gates-config.js";
-import type { Glob, GitSha, RelPath, Sha256Hex } from "../primitives.js";
+import type { Glob, GitSha, RelPath, Sha256Hex, Slug } from "../primitives.js";
+import type { ResearchScope } from "../research.js";
+import type { DesignLibraryEntry, NoveltyReport } from "../visual.js";
 import type { GitOps } from "./git.js";
 
 /**
@@ -38,6 +40,28 @@ export interface GateRunner {
    * `submit` (§4.2 step 3, §6.3 step 4); `run` includes it as layer L5.
    */
   checkWriteScope(request: WriteScopeCheckRequest): Promise<WriteScopeReport>;
+  /**
+   * The novelty check of one G2 direction (§9.1 step 4, AD-24 rule 8; spine §5 reading 127): a
+   * perceptual hash of its first viewport and the project's token vector against the design
+   * library of `scope`. Engine core calls it before G2 shows and writes the report to
+   * `noveltyReportPath(direction)`. Optional: without it every direction stays `unchecked`.
+   * New in 4.6.0.
+   */
+  checkNovelty?(request: NoveltyCheckRequest): Promise<NoveltyReport>;
+  /**
+   * Adds the direction a human chose at G2 to the design library of `scope` (§9.1 step 6).
+   * Optional, like {@link GateRunner.checkNovelty}. New in 4.6.0.
+   */
+  recordDesignChoice?(entry: DesignLibraryEntry, scope: ResearchScope): Promise<void>;
+}
+
+/** What {@link GateRunner.checkNovelty} compares. New in 4.6.0. */
+export interface NoveltyCheckRequest {
+  readonly direction: Slug;
+  /** Repo-relative PNG of the direction's first viewport (`G2Direction.first_viewport`). */
+  readonly firstViewport: RelPath;
+  /** The design library's scope: `researchScopeFor(project.yaml client)`; no lookup crosses it. */
+  readonly scope: ResearchScope;
 }
 
 /** Where one wrapped gate command may write and what it may not read (D-al, `GATE_SANDBOX`). */

@@ -23,4 +23,5 @@ models:
 tools:
   profile: write_scoped
   write_paths: [".vtc/research/briefs/**"]
+  engine_tools: [research_fetch, fact_lookup, fact_propose]
 budget: { context_tokens: 80000 }

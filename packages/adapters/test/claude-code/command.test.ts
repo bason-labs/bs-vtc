@@ -239,18 +239,21 @@ describe("Claude sandboxProfile (§12.1, AD-9)", () => {
   });
 
   it("denies every role running `vtc calibrate` and writing the VTC home's allowlists, scanner DB and hidden tests (D-w)", () => {
-    expect(ROLE_DENIED_VTC.subcommands).toEqual(["calibrate"]);
+    // `lookback` and `merge-level` (the human gestures) since contracts 4.6.0 (reading 119)
+    expect(ROLE_DENIED_VTC.subcommands).toEqual(["calibrate", "lookback", "merge-level"]);
     for (const tools of [READ_ONLY, WRITE_SCOPED, ENGINEER]) {
       const settings = settingsOf(profile(tools));
       const deny = settings.permissions.deny;
-      for (const rule of [
-        "Bash(vtc calibrate)",
-        "Bash(vtc calibrate:*)",
-        "Bash(npx vtc calibrate:*)",
-        "Bash(pnpm exec vtc calibrate:*)",
-        "Bash(bunx vtc calibrate:*)",
-      ]) {
-        expect(deny).toContain(rule);
+      for (const sub of ROLE_DENIED_VTC.subcommands) {
+        for (const rule of [
+          `Bash(vtc ${sub})`,
+          `Bash(vtc ${sub}:*)`,
+          `Bash(npx vtc ${sub}:*)`,
+          `Bash(pnpm exec vtc ${sub}:*)`,
+          `Bash(bunx vtc ${sub}:*)`,
+        ]) {
+          expect(deny).toContain(rule);
+        }
       }
       for (const glob of ROLE_DENIED_VTC.homeWriteDeny) {
         for (const tool of ["Edit", "Write", "NotebookEdit"]) {

@@ -94,3 +94,65 @@ describe("role, skill and plugin sources carry no AD-9 marker", () => {
     expect(findForbiddenInText(readFileSync(join(REPO_ROOT, path), "utf8"))).toEqual([]);
   });
 });
+
+/**
+ * AD-24 rule 6 (spine §5 reading 106): axe-core is MPL-2.0 and never embedded. It comes
+ * unmodified from the project or the doctor-installed store, so no production dependency closure
+ * holds it and no tracked or built file is a copy of it. Checked on every git-tracked file and on
+ * the build outputs present (`packages/*\/dist`, `apps/*\/dist`, the binary's directory).
+ */
+describe("axe-core is never embedded (AD-24 rule 6)", () => {
+  const AXE_BANNER = /\/\*!\s*axe v\d|Deque Systems, Inc\./;
+  const builtFiles = (dir: string): string[] =>
+    existsSync(dir)
+      ? readdirSync(dir).flatMap((entry) => {
+          const path = join(dir, entry);
+          if (entry === "node_modules") return [];
+          return statSync(path).isDirectory() ? builtFiles(path) : [path];
+        })
+      : [];
+  const files = [
+    ...repoFiles().map((path) => join(REPO_ROOT, path)),
+    ...workspaceDirs.flatMap((ws) => builtFiles(join(ws, "dist"))),
+  ];
+  it("no production dependency is axe-core", () => {
+    const names = new Set<string>();
+    for (const ws of workspaceDirs) {
+      const pkg = readPkg(ws);
+      for (const dep of Object.keys({ ...pkg.dependencies, ...pkg.optionalDependencies }))
+        names.add(dep);
+    }
+    expect([...names]).not.toContain("axe-core");
+  });
+  it("no tracked or built file is axe-core", () => {
+    const hits = files.filter((path) => {
+      if (/(^|\/)axe(\.min)?\.js$/.test(path)) return true;
+      try {
+        if (statSync(path).size > 64 * 1024 * 1024) return false;
+        return AXE_BANNER.test(readFileSync(path, "latin1"));
+      } catch {
+        return false;
+      }
+    });
+    expect(hits).toEqual([]);
+  });
+});
+
+/** AD-24 rule 7: every THIRD_PARTY entry carries its licence and upstream source, named in NOTICE. */
+describe("THIRD_PARTY entries are attributed (AD-24 rule 7)", () => {
+  const root = join(REPO_ROOT, "THIRD_PARTY");
+  const entries = existsSync(root)
+    ? readdirSync(root).filter((name) => statSync(join(root, name)).isDirectory())
+    : [];
+  const notice = existsSync(join(REPO_ROOT, "NOTICE"))
+    ? readFileSync(join(REPO_ROOT, "NOTICE"), "utf8")
+    : "";
+  it("has the ported detector's entry", () => {
+    expect(entries).toContain("impeccable");
+  });
+  it.each(entries)("%s has LICENSE and SOURCE and is named in NOTICE", (name) => {
+    expect(existsSync(join(root, name, "LICENSE"))).toBe(true);
+    expect(existsSync(join(root, name, "SOURCE"))).toBe(true);
+    expect(notice).toContain(name);
+  });
+});

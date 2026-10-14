@@ -10,7 +10,8 @@
  *   `user-agent`, so a fetcher's own key never leaves its origin;
  * - one deadline for the whole request (`timeoutMs`) and a byte cap on the decoded body
  *   (`maxBytes`); both reject.
- * The resolver is injected: the binary uses Bun's own DNS (`bunResolver`). Fetch resolves the host
+ * The resolver is injected: the binary uses Bun's own DNS (`bunResolver`), Node in development
+ * `node:dns` (`nodeResolver`). Fetch resolves the host
  * again when it connects, so a DNS answer that changes between the two lookups (rebinding) is a
  * residual: the address check alone cannot close it without its own socket layer (connecting to
  * the vetted address with the host name as TLS server name needs `node:https`/`node:tls`, which
@@ -19,8 +20,10 @@
  * would have to present a valid certificate for the attacker's host name, so the TLS handshake
  * fails before any request is sent. The cli team proposed a spine §7 residual row for this.
  */
+import { lookup } from "node:dns/promises";
 import { isIP } from "node:net";
 import {
+  HttpGuardError,
   isPrivateAddress,
   type HttpClient,
   type HttpRequest,
@@ -37,12 +40,8 @@ const FORBIDDEN_HEADERS = new Set(["cookie", "cookie2"]);
 const REDIRECTS = new Set([301, 302, 303, 307, 308]);
 
 /** The network guard refused a request (never retried). */
-export class HttpGuardError extends Error {
-  constructor(message: string) {
-    super(message);
-    this.name = "HttpGuardError";
-  }
-}
+/** The shared typed refusal (`@vtc/shared` `HttpGuardError`, contracts 4.6.0, reading 129). */
+export { HttpGuardError };
 
 export type Resolve = (hostname: string) => Promise<readonly string[]>;
 
@@ -55,6 +54,13 @@ export interface HttpClientDeps {
 interface BunDns {
   lookup(hostname: string): Promise<readonly { readonly address: string }[]>;
 }
+
+/**
+ * The runtime's `node:dns` resolver (every A and AAAA answer), for Node in development; Bun
+ * implements it too, but the binary prefers {@link bunResolver} (spine §5 reading 133).
+ */
+export const nodeResolver = (): Resolve => async (hostname) =>
+  (await lookup(hostname, { all: true, verbatim: true })).map((r) => r.address);
 
 /** Bun's resolver, inside the binary; `null` on a runtime without it. */
 export const bunResolver = (): Resolve | null => {
@@ -152,7 +158,9 @@ export const createHttpClient = (deps: HttpClientDeps): HttpClient => ({
     let body = request.body;
     const controller = new AbortController();
     const timer = setTimeout(() => {
-      controller.abort(new HttpGuardError(`timed out after ${String(request.timeoutMs)} ms`));
+      controller.abort(
+        new HttpGuardError(`timed out after ${String(request.timeoutMs)} ms`, "timeout"),
+      );
     }, request.timeoutMs);
     const deadline = new Promise<never>((_resolve, reject) => {
       controller.signal.addEventListener("abort", () => {

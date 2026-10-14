@@ -16,6 +16,7 @@ import {
   parsePersisted,
   USER_CONFIG_FILE,
   UserConfigSchema,
+  type FetcherId,
   type UserConfig,
 } from "@vtc/shared";
 
@@ -51,6 +52,31 @@ export const readUserConfig = (vtcHome: string): UserConfigRead => {
 /** The names to pass through: none when the file does not parse (credentials stay dropped). */
 export const passthroughOf = (read: UserConfigRead): readonly string[] =>
   read.ok ? read.config.env_passthrough : [];
+
+/**
+ * The environment variable names `research.api_keys` gives each research fetcher (AD-22 rule 1,
+ * spine §5 reading 120); none when the file does not parse. Names only: the daemon keeps them
+ * in its environment, and the values are read at call time ({@link researchApiKeyOf}).
+ */
+export const researchKeyNamesOf = (read: UserConfigRead): Partial<Record<FetcherId, string>> =>
+  read.ok ? (read.config.research?.api_keys ?? {}) : {};
+
+/**
+ * `EngineDeps.researchApiKey`: a fetcher's key read from `env` at call time, or `undefined`
+ * when none is named (then no research key is injected at all).
+ */
+export const researchApiKeyOf = (
+  read: UserConfigRead,
+  env: Readonly<Record<string, string | undefined>> = process.env,
+): ((fetcher: FetcherId) => string | undefined) | undefined => {
+  const names = researchKeyNamesOf(read);
+  if (Object.keys(names).length === 0) return undefined;
+  return (fetcher) => {
+    const name = names[fetcher];
+    const value = name === undefined ? undefined : env[name];
+    return value === undefined || value === "" ? undefined : value;
+  };
+};
 
 /** `gates.allow_unsandboxed`: false when the file does not parse (the gate sandbox stays required). */
 export const allowUnsandboxedOf = (read: UserConfigRead): boolean =>

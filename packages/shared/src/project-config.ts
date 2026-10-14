@@ -7,6 +7,7 @@ import { z } from "zod";
 import { DEFAULT_FINAL_REVIEW_SHARE } from "./feature.js";
 import { HeadlessConfigSchema } from "./headless.js";
 import { GlobSchema, HostIdSchema, SeveritySchema, SlugSchema } from "./primitives.js";
+import { FetcherIdSchema } from "./research.js";
 import { ModelTierSchema } from "./role-contract.js";
 
 /** Tracks (§6.2). */
@@ -168,6 +169,17 @@ export const UserConfigSchema = z.strictObject({
   gates: z
     .strictObject({
       allow_unsandboxed: z.boolean().default(false),
+    })
+    .optional(),
+  /**
+   * Research fetchers' own API keys (AD-22 rule 1, spine §5 reading 120): for a fetcher id
+   * (`github`, `search`, …), the name of the environment variable that holds its key. The value
+   * is read from the environment at call time (`EngineDeps.researchApiKey`), sent only to that
+   * fetcher's API and redacted as a known value; it is never written anywhere. New in 4.6.0.
+   */
+  research: z
+    .strictObject({
+      api_keys: z.partialRecord(FetcherIdSchema, EnvVarNameSchema).default({}),
     })
     .optional(),
 });

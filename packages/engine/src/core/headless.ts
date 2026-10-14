@@ -107,12 +107,6 @@ export const headlessPreflight = async (
 };
 
 /**
- * How an `incident.recorded` for a failed sign-in check starts, so it can be told from a usage
- * limit until `IncidentKind` has an `auth` kind (contract proposal).
- */
-export const AUTH_INCIDENT_PREFIX = "auth: ";
-
-/**
  * A failed preflight: nothing launches, and nothing retries in a loop. `usage` waits for the
  * reset (the timer is scheduled); `auth` records an incident and pauses the run until the human
  * signs in again and resumes; `config` parks the step for the human; `budget` parks its task.
@@ -136,19 +130,15 @@ const preflightFailed = (
     case "auth":
       // Never a retry loop: the human signs in again, then resumes (AD-25 rule 3; AD-9: VTC
       // reads no credential, only the host's own status command). The run pauses rather than
-      // parking the step: every later step on the host would fail the same check. IncidentKind
-      // has no `auth` kind yet (proposed), so the detail starts with `AUTH_INCIDENT_PREFIX`.
+      // parking the step: every later step on the host would fail the same check (spine §5
+      // reading 111)
       k.emit(h, {
         type: "incident.recorded",
         actor: "engine",
         ...(step.task === undefined ? {} : { task: step.task }),
         data: {
-          kind: "limit",
-          detail:
-            `${AUTH_INCIDENT_PREFIX}the engine did not start ${step.role} headless: ${detail}`.slice(
-              0,
-              2000,
-            ),
+          kind: "auth",
+          detail: `the engine did not start ${step.role} headless: ${detail}`.slice(0, 2000),
         },
       });
       k.emit(h, {

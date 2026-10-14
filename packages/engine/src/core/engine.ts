@@ -17,6 +17,7 @@ import {
   PACK_INPUT_TYPES,
   parseEventLog,
   remainingPct,
+  resolveRoleMode,
   type ApproveInput,
   type AnswerInput,
   type ChangeRequestInput,
@@ -44,6 +45,8 @@ import {
   type StatusResult,
   type SubmitInput,
   type SubmitResult,
+  type RoleMcpToolName,
+  type UnverifiedFactSummary,
   type UsageSnapshot,
   type VtcEvent,
 } from "@vtc/shared";
@@ -309,6 +312,8 @@ export class Engine implements Kernel {
   private roleToolHandler: RoleToolHandler | null = null;
   /** The stale-fact re-fetch before G2 (AD-22 rule 4), set by the composition; `null` = none. */
   private factRefresher: FactRefresher | null = null;
+  /** What the wired refresher last returned (`Kernel.factTable`). */
+  private checkedFacts: readonly UnverifiedFactSummary[] | null = null;
   /** The G2 showings whose stale facts were already re-fetched (`run:phase entry seq`). */
   private readonly factsRefreshed = new Set<string>();
 
@@ -909,6 +914,45 @@ export class Engine implements Kernel {
    */
   setFactRefresher(refresher: FactRefresher | null): void {
     this.factRefresher = refresher;
+    this.checkedFacts = null;
+  }
+
+  factTable(): readonly UnverifiedFactSummary[] | null {
+    return this.factRefresher === null ? null : this.checkedFacts;
+  }
+
+  /**
+   * The role of the newest in-flight role run that declares `tool` in its contract
+   * (`tools.engine_tools`), with its run; `undefined` when none does. The role-facing tools are
+   * served on the shared socket, so this is how the daemon tells which role called (spine §5
+   * reading 120).
+   */
+  roleCalling(tool: RoleMcpToolName): { readonly run: string; readonly role: string } | undefined {
+    let best: { run: string; role: string; seq: number } | undefined;
+    for (const [run, handle] of this.handles) {
+      for (const record of handle.state.roleRuns.values()) {
+        if (record.status !== "in_flight") continue;
+        const contract = this.deps.roles.get(record.role);
+        if (contract === undefined) continue;
+        const effective = resolveRoleMode(contract, record.mode);
+        if (!effective.ok || !effective.contract.tools.engine_tools.includes(tool)) continue;
+        if (best === undefined || record.seq > best.seq)
+          best = { run, role: record.role, seq: record.seq };
+      }
+    }
+    return best === undefined ? undefined : { run: best.run, role: best.role };
+  }
+
+  /**
+   * Appends an event a wired module emitted (research: `research.fetched`, `fact.recorded`) to
+   * `run`'s log, or to the active run's when `run` is absent; dropped when that run is not open
+   * (the module's own files are the record).
+   */
+  recordModuleEvent(run: string | undefined, draft: EventDraft): void {
+    const id = run ?? this.activeFrozen()?.run;
+    const handle = id === undefined ? undefined : this.handles.get(id);
+    if (handle === undefined || handle.state.run.finished_at !== undefined) return;
+    this.emit(handle, draft);
   }
 
   leadHostFor(run: string, call: CallContext): HostId | undefined {
@@ -1395,7 +1439,8 @@ export class Engine implements Kernel {
       const key = `${state.id}:${String(phaseEnteredSeq(state, state.run.phase) ?? 0)}`;
       if (!this.factsRefreshed.has(key)) {
         this.factsRefreshed.add(key);
-        await this.factRefresher(this.deps.repoRoot).catch(() => undefined);
+        const checked = await this.factRefresher(this.deps.repoRoot).catch(() => null);
+        if (checked !== null) this.checkedFacts = checked;
         gate = this.awaitingGates(handle);
       }
     }

@@ -293,11 +293,11 @@ describe("Codex sandboxProfile (§12.1, AD-9)", () => {
     // workspace-write writes nothing outside the worktree (and the OS temp directory, D-ag).
     // `vtc calibrate` confirms in an interactive terminal only, and the engine never runs a role
     // with a terminal.
-    expect(ROLE_DENIED_VTC.subcommands).toEqual(["calibrate"]);
+    expect(ROLE_DENIED_VTC.subcommands).toEqual(["calibrate", "lookback", "merge-level"]);
     for (const tools of [READ_ONLY, WRITE_SCOPED, ENGINEER]) {
       const p = profile(tools);
       const text = JSON.stringify([p.cliArgs, p.settings]);
-      expect(text).not.toContain("calibrate");
+      for (const sub of ROLE_DENIED_VTC.subcommands) expect(text).not.toContain(`vtc ${sub}`);
       for (const glob of ROLE_DENIED_VTC.homeWriteDeny) expect(text).not.toContain(glob);
       expect(p.enforced.perPathWriteDeny).toBe(false);
     }

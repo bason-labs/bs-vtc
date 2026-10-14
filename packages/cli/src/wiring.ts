@@ -17,6 +17,7 @@ import {
   type DaemonOptions,
   type EngineClient,
   type EngineDeps,
+  type FetcherId,
   type GateRunner,
   type HostAdapter,
   type HostId,
@@ -31,14 +32,19 @@ import { ensureDaemon } from "./daemon.js";
 import { contractsAtLeast } from "./bridge.js";
 import { interactiveTerminal, ttyConfirm } from "./confirm.js";
 import { createGhRemoteMerge, createGhRunner } from "./gh-remote-merge.js";
-import { bunResolver, createHttpClient, type Resolve } from "./http-client.js";
+import { bunResolver, createHttpClient, nodeResolver, type Resolve } from "./http-client.js";
 import { guardHumanOnly } from "./human-channel.js";
 import { readInstallToken } from "./token.js";
 import { requireRepoRoot, requireVtcProject } from "./repo.js";
 import { runtime } from "./runtime.js";
 import { createWakeScheduler } from "./scheduler.js";
 import { loadStorage } from "./storage.js";
-import { allowUnsandboxedOf, readUserConfig } from "./user-config.js";
+import {
+  allowUnsandboxedOf,
+  passthroughOf,
+  readUserConfig,
+  researchApiKeyOf,
+} from "./user-config.js";
 import { VERSION } from "./version.js";
 
 export { VERSION } from "./version.js";
@@ -61,16 +67,18 @@ export interface EngineParts {
   readonly remoteMerge?: RemoteMergeService;
   /** The research fetchers' HTTP client (AD-22); absent where no resolver is available. */
   readonly http?: HttpClient;
+  /** A research fetcher's own key (`~/.vtc/config.yaml` `research.api_keys`, reading 120). */
+  readonly researchApiKey?: (fetcher: FetcherId) => string | undefined;
 }
 
 /**
  * The research HTTP client over the runtime's `fetch` (AD-22 rule 1), or `undefined` when there
  * is no resolver to run the private-address guard with: the fetchers are then unavailable and
- * new facts stay UNVERIFIED, which fails closed. The binary resolves with Bun's DNS; Node in
- * development has no resolver among the runtime-safe built-ins (AD-2 rule 6).
+ * new facts stay UNVERIFIED, which fails closed. The binary resolves with Bun's DNS, Node in
+ * development with `node:dns` (a runtime-safe built-in since spine §5 reading 133).
  */
 export const defaultHttpClient = (
-  resolve: Resolve | null = bunResolver(),
+  resolve: Resolve | null = bunResolver() ?? nodeResolver(),
   fetch: typeof globalThis.fetch = globalThis.fetch,
 ): HttpClient | undefined => (resolve === null ? undefined : createHttpClient({ fetch, resolve }));
 
@@ -106,6 +114,8 @@ export interface AdapterContext {
   readonly vtcHome: string;
   /** The host's compiled plugin on disk (`CliRuntime.pluginDir`). */
   readonly pluginDir: (host: HostId, vtcHome: string) => string;
+  /** `~/.vtc/config.yaml` `env_passthrough` (D-ak): names that reach headless host runs. */
+  readonly envPassthrough?: readonly string[];
 }
 
 /**
@@ -124,6 +134,9 @@ export const createAdapters = (
       pluginDir: context.pluginDir(host, context.vtcHome),
       vtcHome: context.vtcHome,
       vtcVersion: VERSION,
+      ...(context.envPassthrough === undefined || context.envPassthrough.length === 0
+        ? {}
+        : { envPassthrough: context.envPassthrough }),
     });
   return adapters;
 };
@@ -161,8 +174,10 @@ export interface BuildEnginePartsOptions {
 export const buildEngineParts = async (options: BuildEnginePartsOptions): Promise<EngineParts> => {
   const { repoRoot, vtcHome } = options;
   const createGateRunner = options.createGateRunner ?? gates.createGateRunner;
-  const allowUnsandboxed = options.allowUnsandboxed ?? allowUnsandboxedOf(readUserConfig(vtcHome));
+  const userConfig = readUserConfig(vtcHome);
+  const allowUnsandboxed = options.allowUnsandboxed ?? allowUnsandboxedOf(userConfig);
   const http = options.http === null ? undefined : (options.http ?? defaultHttpClient());
+  const researchApiKey = researchApiKeyOf(userConfig);
   return {
     repoRoot,
     vtcHome,
@@ -181,6 +196,7 @@ export const buildEngineParts = async (options: BuildEnginePartsOptions): Promis
     adapters: createAdapters(options.adapterFactories ?? ADAPTER_FACTORIES, {
       vtcHome,
       pluginDir: options.pluginDir ?? ((host, home) => runtime().pluginDir(host, home)),
+      envPassthrough: passthroughOf(userConfig),
     }),
     assets: options.assets,
     scheduler: options.scheduler ?? createWakeScheduler(vtcHome),
@@ -189,6 +205,7 @@ export const buildEngineParts = async (options: BuildEnginePartsOptions): Promis
       options.remoteMerge ??
       createGhRemoteMerge({ repoRoot, gh: createGhRunner(repoRoot, options.ghCommand) }),
     ...(http === undefined ? {} : { http }),
+    ...(researchApiKey === undefined ? {} : { researchApiKey }),
   };
 };
 

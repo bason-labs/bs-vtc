@@ -369,6 +369,7 @@ const compileAgents = (
         instructions: agentInstructions(built, inPack),
         sections: { locked: loaded.prompt.locked.trim(), editable: loaded.prompt.editable.trim() },
         skills: needs.skills,
+        ...(inPack ? { editableInPack: true } : {}),
       });
     });
   }
@@ -387,6 +388,7 @@ const manifestAgent = (agent: CompiledAgent, file: string): PluginManifestAgent 
   // AD-21 / PluginManifestAgent: the SHA-256 of the role's trimmed `splitRolePrompt` sections.
   locked_sha256: sha256Hex(agent.sections.locked),
   editable_sha256: sha256Hex(agent.sections.editable),
+  ...(agent.editableInPack === true ? { editable_in_pack: true } : {}),
   tier: agent.model.tier,
   effort: agent.model.effort,
 });

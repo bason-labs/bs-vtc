@@ -43,6 +43,12 @@ export interface AdapterFactoryOptions {
    * the Claude install writes the session sandbox for it.
    */
   readonly vtcHome?: string;
+  /**
+   * The user's `~/.vtc/config.yaml` `env_passthrough` names (D-ak, spine §5 reading 57): they
+   * reach headless host children besides the fixed allowlist; host credential variables never
+   * do. Default: none.
+   */
+  readonly envPassthrough?: readonly string[];
 }
 
 /**
@@ -59,10 +65,12 @@ export const ADAPTER_FACTORIES: Readonly<
     createClaudeCodeAdapter({
       ...(options.pluginDir === undefined ? {} : { pluginDir: options.pluginDir }),
       ...(options.vtcHome === undefined ? {} : { vtcHome: options.vtcHome }),
+      ...(options.envPassthrough === undefined ? {} : { envPassthrough: options.envPassthrough }),
     }),
   codex: (options = {}) =>
     createCodexAdapter({
       ...(options.vtcVersion === undefined ? {} : { clientVersion: options.vtcVersion }),
       ...(options.vtcHome === undefined ? {} : { vtcHome: options.vtcHome }),
+      ...(options.envPassthrough === undefined ? {} : { envPassthrough: options.envPassthrough }),
     }),
 };

@@ -408,7 +408,11 @@ describe("calibrate", () => {
       url: "http://localhost:4000",
       ready_timeout_s: 120,
     });
-    expect(parseGatesConfig(text).visual).toEqual({ widths: [390] });
+    // the typed config carries it since contracts 4.6.0 (`GatesConfig.visual.app`, reading 121)
+    expect(parseGatesConfig(text).visual).toEqual({
+      widths: [390],
+      app: { command: ["npm", "run", "dev"], url: "http://localhost:4000", ready_timeout_s: 120 },
+    });
     expect(parseAllDocuments(text)).toHaveLength(1);
     expect(gateCommandAllowed(["npm", "run", "dev"], readAllowlist(s.home, s.repo))).toBe(true);
     expect(s.lines.join("\n")).toMatch(/npm run dev {2}\(the visual step's app server\)/);
@@ -508,11 +512,11 @@ describe("the calibrated fixture", () => {
     );
     if (outcome.status !== "dry_run") throw new Error("expected a dry run");
     // What calibrate writes once the human confirms and both runs agree (no flaky tests).
-    // The proposed app server is shown in the dry run (provisional raw key, tested above); the
-    // typed config strips it, leaving an empty visual section that is not part of the fixture.
+    // The proposed app server is shown in the dry run (`visual.app`, tested above); the fixture
+    // is the rest of the config.
     expect(visualAppOf(outcome.yaml)).toMatchObject({ command: ["pnpm", "run", "dev"] });
     const { visual, ...proposed } = parseGatesConfig(outcome.yaml);
-    expect(visual).toEqual({});
+    expect(visual?.app?.command).toEqual(["pnpm", "run", "dev"]);
     const frozen = stringifyGatesConfig({
       ...proposed,
       baseline: { ...proposed.baseline, confirmed: true },
