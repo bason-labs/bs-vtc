@@ -107,8 +107,8 @@ export const readReplayPlan = (k: Kernel, run: string): ReplayPlan | null => {
   const text = readPrivateFile(planFile(k, run));
   if (text === null) return null;
   try {
-    const plan = JSON.parse(text) as ReplayPlan;
-    return plan.v === 1 && Array.isArray(plan.replays) ? plan : null;
+    const plan = JSON.parse(text) as Partial<ReplayPlan> | null;
+    return plan?.v === 1 && Array.isArray(plan.replays) ? (plan as ReplayPlan) : null;
   } catch {
     return null;
   }
@@ -409,7 +409,7 @@ export const stepReplays = (k: Kernel, h: RunHandle): "done" | "busy" => {
     busy = true;
     const trial = progress.plan.replays[replay]?.trials[n];
     if (
-      record?.status === "submitted" &&
+      record.status === "submitted" &&
       record.head !== undefined &&
       trial !== undefined &&
       !k.isRunning(`replay-grade:${run}:${id}`)

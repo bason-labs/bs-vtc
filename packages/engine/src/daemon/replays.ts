@@ -335,8 +335,7 @@ export const createLookbackReplays = (
       : { replays, wait: `left out: ${left.join("; ")}`.slice(0, 2000) };
   },
   gradeTrial: (request) => gradeTrial(deps.gateRunner, request),
-  finishReplay: async (replay, outcomes, state) => {
-    void state;
+  finishReplay: async (replay, outcomes) => {
     const outcome = new Map<number, ReplayTrialOutcome>(outcomes.map((o) => [o.n, o]));
     const tasks = new Map<
       string,
