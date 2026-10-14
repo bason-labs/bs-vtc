@@ -147,9 +147,16 @@ export interface StartLevel {
  * ledger, then, for Level 3, the preflight on the remote and the base branch's policy. Any
  * failure, or no `RemoteMergeService`, starts the run at Level 2.
  */
-export const startMergeLevel = async (k: Kernel, config: ProjectConfig): Promise<StartLevel> => {
+export const startMergeLevel = async (
+  k: Kernel,
+  config: ProjectConfig,
+  /** An automatic run (AD-27 rule 2, D-bw): capped at Level 2, so never a Level-3 preflight. */
+  automatic = false,
+): Promise<StartLevel> => {
   const configured = config.merge_level;
-  const capped = effectiveMergeLevel(configured, readMergeLevelLedger(k.deps.repoRoot));
+  const capped = effectiveMergeLevel(configured, readMergeLevelLedger(k.deps.repoRoot), {
+    automatic,
+  });
   if (capped < 3) return { level: capped, preflight: null };
   const service = k.deps.remoteMerge;
   const fail = (failed: MergePreflightFailure[], detail: string, policy = null) => ({

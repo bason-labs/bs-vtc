@@ -45,6 +45,7 @@ import {
   pluginCatalogFrom,
   readClientSpend,
   removeEngineDiscovery,
+  replayGraderOf,
   takeEngineLock,
   writeEngineDiscovery,
   type LookbackRetro,
@@ -327,6 +328,7 @@ export const wireLookback = (
     budgetAvailable,
     gateRunner: engine.deps.gateRunner,
     now,
+    graderOf: (replay) => replayGraderOf(engine, replay),
   });
   engine.setLookbackRetro({
     plan: (state) => retroFor(state).plan({ ...state, events: [...lookbackEvents(state)] }),
@@ -474,6 +476,8 @@ export const runDaemon: RunDaemon = async (deps: EngineDeps, options) => {
       remote: "origin",
       // §11, reading 152: the user's price table budget-checks hosts that report no cost
       ...(deps.prices === undefined ? {} : { prices: deps.prices }),
+      // D-cg (reading 201): each Claude replay arm runs its own compiled plugin
+      ...(deps.armPlugins === undefined ? {} : { armPlugins: deps.armPlugins }),
     });
     cleanups.push(wireResearch(engine, deps));
     cleanups.push(wireLookback(engine, deps, plugins));

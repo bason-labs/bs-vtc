@@ -378,7 +378,10 @@ const moveHiddenTests = (k: Kernel, runId: string, taskId: string): void => {
     rmSync(staged, { recursive: true, force: true });
     return;
   }
-  const target = join(k.deps.vtcHome, hiddenTestsDir(engineRepoKey(k.deps.repoRoot), runId, taskId));
+  const target = join(
+    k.deps.vtcHome,
+    hiddenTestsDir(engineRepoKey(k.deps.repoRoot), runId, taskId),
+  );
   mkdirSync(target, { recursive: true });
   cpSync(staged, target, { recursive: true, filter: (source) => plainEntry(source) });
   rmSync(staged, { recursive: true, force: true });

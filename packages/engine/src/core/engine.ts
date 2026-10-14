@@ -51,6 +51,9 @@ import {
   type UnverifiedFactSummary,
   type UsageSnapshot,
   type VtcEvent,
+  AutomationRunRefSchema,
+  effectiveMergeLevel,
+  type AutomationRunRef,
 } from "@vtc/shared";
 import {
   committedGatesConfig,
@@ -1035,6 +1038,32 @@ export class Engine implements Kernel {
     this.notices.push(text);
   }
 
+  /** Notices for the Lead to relay, per run (`""`: whichever run's Lead asks next). */
+  private readonly relayed = new Map<string, { queue: string[]; seen: Set<string> }>();
+
+  relay(run: string | undefined, text: string): void {
+    const key = run ?? "";
+    const entry = this.relayed.get(key) ?? { queue: [], seen: new Set<string>() };
+    this.relayed.set(key, entry);
+    const value = text.slice(0, 2000);
+    if (value === "" || entry.seen.has(value)) return;
+    entry.seen.add(value);
+    entry.queue.push(value);
+  }
+
+  /** The notices the Lead of `run` relays now (at most 20 a call; the rest wait for the next). */
+  private takeRelayed(run: string): string[] {
+    const out: string[] = [];
+    for (const key of [run, ""]) {
+      const queue = this.relayed.get(key)?.queue;
+      while (queue !== undefined && queue.length > 0 && out.length < 20) {
+        const text = queue.shift();
+        if (text !== undefined) out.push(text);
+      }
+    }
+    return out;
+  }
+
   leadHostFor(run: string, call: CallContext): HostId | undefined {
     if (this.leads.has(run)) return this.leadHosts.get(run);
     return call.client === undefined ? (call.host ?? undefined) : undefined;
@@ -1361,6 +1390,30 @@ export class Engine implements Kernel {
   }
 
   async start(input: StartInput, call: CallContext): Promise<StartResult> {
+    return this.startRun(input, call, null);
+  }
+
+  /**
+   * Starts an automatic run from an automatic issue (D-cd, H-7; AD-27 rule 2): a normal run whose
+   * `run.started.automation` names the issue. The issue is its spec, so it skips the human gates
+   * G1 and G2 (the engine records them approved, unless a G2 needs a human's fact waiver); the Spec
+   * Verifier reads the issue; it never runs at merge Level 3 (`effectiveMergeLevel`'s `automatic`,
+   * D-bw); every gate, review and risk rule still applies. The upstream module starts it, through
+   * the daemon.
+   */
+  async startAutomatic(
+    input: StartInput,
+    automation: AutomationRunRef,
+    call: CallContext = { host: null },
+  ): Promise<StartResult> {
+    return this.startRun(input, call, AutomationRunRefSchema.parse(automation));
+  }
+
+  private async startRun(
+    input: StartInput,
+    call: CallContext,
+    automation: AutomationRunRef | null,
+  ): Promise<StartResult> {
     // read before the checks: nothing awaits between them and registering the run
     const { head, gates: committed, project } = await this.startGates();
     if ([...this.handles.values()].some((h) => h.state.run.finished_at === undefined)) {
@@ -1396,12 +1449,18 @@ export class Engine implements Kernel {
     this.freezeConfig(id, config, gates, committed.sha256);
     if (call.client === "bridge" && call.session !== undefined) this.setLead(id, call, "started");
     const noRemote =
-      config.merge_level >= 2 &&
+      (automation === null ? config.merge_level : Math.min(config.merge_level, 2)) >= 2 &&
       (await this.deps.workspace.remoteUrl(this.deps.remote).catch(() => null)) === null;
     // AD-23: the ledger caps the level; Level 3 needs its preflight (a failure starts at Level 2)
     const level = noRemote
-      ? { level: config.merge_level, preflight: null }
-      : await startMergeLevel(this, config);
+      ? {
+          level:
+            automation === null
+              ? config.merge_level
+              : effectiveMergeLevel(config.merge_level, [], { automatic: true }),
+          preflight: null,
+        }
+      : await startMergeLevel(this, config, automation !== null);
     return this.serial(handle, () => {
       this.emit(handle, {
         type: "run.started",
@@ -1415,6 +1474,7 @@ export class Engine implements Kernel {
           merge_level: level.level,
           pipeline_config_hash: pipelineConfigHash(config, gates),
           origin: this.origin,
+          ...(automation === null ? {} : { automation }),
         },
       });
       if (level.preflight !== null) recordMergePreflight(this, handle, level.preflight);
@@ -1561,6 +1621,11 @@ export class Engine implements Kernel {
         gate = this.awaitingGates(handle);
       }
     }
+    if (gate !== null && state.automation !== null && this.autoApproveGates(handle, gate)) {
+      // the next phase's roles start now, as after a human's approval
+      actions.push(...(await dispatchNow(this, handle, call, held)));
+      gate = this.awaitingGates(handle);
+    }
     if (gate !== null) {
       this.recordGateRequest(handle, gate);
       actions.push({
@@ -1579,6 +1644,38 @@ export class Engine implements Kernel {
           : this.waitAction(handle),
       );
     return actions;
+  }
+
+  /**
+   * An automatic run's G1 and G2 (AD-27 rule 2; D-cd, H-7): its issue is the spec, so the engine
+   * records the gate approved with what it froze, the run moves on, and the human's one step is the
+   * final PR review. A G2 that lists unverified facts needs a human's waiver with a reason (AD-22
+   * rule 4), so it stays for the human; with UI the category standard is taken (no human picks a
+   * direction). Returns whether it approved. Callers hold the run's lock.
+   */
+  private autoApproveGates(
+    handle: RunHandle,
+    gate: { gates: HumanGateId[]; artifacts: FrozenArtifact[]; extras: GateExtras },
+  ): boolean {
+    if (gate.extras.unverified_facts.length > 0) return false;
+    const issue = handle.state.automation;
+    this.recordGateRequest(handle, gate);
+    this.emit(handle, {
+      type: "gate.approved",
+      actor: "engine",
+      data: {
+        gates: gate.gates,
+        frozen: gate.artifacts,
+        ...(gate.extras.design_directions.length > 0
+          ? { design_exit: "category_standard" as const }
+          : {}),
+        waived_facts: [],
+        note: `automatic run: the issue${issue === null ? "" : ` #${String(issue.issue)}`} is its spec, so no human gate before the final PR review (AD-27 rule 2)`,
+      },
+    });
+    this.phaseTo(handle, handle.state.run.phase === "g1" ? "design" : "plan");
+    this.advance(handle);
+    return true;
   }
 
   private waitAction(handle: RunHandle): LeadAction {
@@ -1624,10 +1721,11 @@ export class Engine implements Kernel {
     // a Lead session (or an in-process caller) drives the run again: the engine stops driving it
     if (call.client === undefined || this.leads.get(state.id) === call.session)
       this.unattended.delete(state.id);
-    return this.serial(handle, async () => ({
-      run: state.id,
-      actions: await this.actionsFor(handle, call),
-    }));
+    return this.serial(handle, async () => {
+      const actions = await this.actionsFor(handle, call);
+      const notices = this.takeRelayed(state.id);
+      return { run: state.id, actions, ...(notices.length === 0 ? {} : { notices }) };
+    });
   }
 
   private actionsForFinished(state: RunState): LeadAction[] {

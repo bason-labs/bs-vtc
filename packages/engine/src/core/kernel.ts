@@ -4,6 +4,7 @@
  * the projection, notify listeners. Nothing else mutates run state (AD-7 rule 2, AD-8).
  */
 import type {
+  ArmPluginCompiler,
   AutoResumeScheduler,
   GateRunner,
   GateRunRequest,
@@ -21,6 +22,7 @@ import type {
   PullRequestService,
   RemoteMergeService,
   RoleMcpToolName,
+  RoleResult,
   SessionSandboxState,
   TaskPack,
   UnverifiedFactSummary,
@@ -79,6 +81,12 @@ export interface EngineCoreDeps {
    * host that cannot cap its own spend (Codex) starts only when its model is priced here.
    */
   readonly prices?: Readonly<Record<string, ModelPrice>>;
+  /**
+   * Replay arm plugins (`EngineDeps.armPlugins`, D-cg, spine §5 reading 201): on a host whose
+   * headless runs load the compiled agent (Claude Code) each replay arm runs its own compiled
+   * plugin. Absent: such a host's replays cannot run a candidate and wait for the next RETRO.
+   */
+  readonly armPlugins?: ArmPluginCompiler;
 }
 
 /** One engine-launched headless role run in flight (AD-25; `StatusResult.headless_runs`). */
@@ -98,6 +106,11 @@ export interface HeadlessEntry {
    * next launch from the same pool may not hand out again while this run is in flight.
    */
   readonly budget?: { readonly pool: string; readonly capUsd: number };
+  /**
+   * A replay trial's own compiled arm plugin (`SpawnRoleRequest.pluginDir`, D-cg): after the run
+   * the adapter must prove this copy loaded (`HeadlessRun.pluginLoad`), and it is removed.
+   */
+  readonly pluginDir?: string;
 }
 
 /**
@@ -216,6 +229,12 @@ export interface ReplayTrialOutcome {
   readonly n: number;
   readonly passed: boolean;
   readonly tokens: number;
+  /**
+   * The host enforced the trial's `SandboxProfileRequest.readDeny` on the user's repo
+   * (`SandboxProfile.enforced.readDeny`, spine §5 reading 178): the replay's `isolation` is
+   * `read_denied` only when every trial was. Absent: not enforced.
+   */
+  readonly readDenied?: boolean;
 }
 
 /**
@@ -248,9 +267,12 @@ export interface LookbackRetro {
    * budget, as for the lookback role); a replay that cannot start waits for the next RETRO.
    * Absent: no replays.
    */
-  replays?(
-    state: RunState,
-  ): Promise<{ readonly replays: readonly LookbackReplay[]; readonly wait?: string }>;
+  replays?(state: RunState): Promise<{
+    readonly replays: readonly LookbackReplay[];
+    readonly wait?: string;
+    /** The limit `wait` names, for its `automation.skipped` (D-cg); absent: no limit. */
+    readonly waitKind?: "weekly_window" | "budget";
+  }>;
   /**
    * The same weekly-window and budget checks, again before each trial (AD-21 rule 8): why the
    * replays must stop now, or `null`. Replays that stop wait for the next RETRO.
@@ -261,6 +283,18 @@ export interface LookbackRetro {
    * trial; `infra_error` measures nothing (the trial is not counted, and its replay waits).
    */
   gradeTrial?(request: GateRunRequest): Promise<GateVerdict>;
+  /**
+   * The verdict grader (D-ch, spine §5 reading 202): scores a verdict role's trial (a role that
+   * changes no file, `replayGraderFor` = `verdict`) by its result against the recorded outcome of
+   * the replayed dispatch (`trial.task`, `<run>:<task>`): the human's G-gate or PR verdict, the gate
+   * result, a later escaped defect. `pass` and `fail` measure the trial; `infra_error` measures
+   * nothing. Absent: verdict roles are not replayed.
+   */
+  gradeVerdict?(
+    trial: LookbackReplayTrial,
+    result: RoleResult,
+    state: RunState,
+  ): Promise<GateVerdict>;
   /**
    * The replay's result once every trial is graded (`finishReplay`, `writeReplayResult`): its
    * events (`lookback.replay_finished` with the SHA-256 of the bytes written).
@@ -379,6 +413,12 @@ export interface Kernel {
   lookbackRetro(): LookbackRetro | null;
   /** A notice for the human (the daemon prints them): what went wrong that is no run's failure. */
   notice(text: string): void;
+  /**
+   * A notice the run's Lead relays to the human once (`NextResult.notices`, contracts 5.0.0): a
+   * run notice such as `HOST_WEB_OFF_NOTICE`, or (no `run`) one for whichever run's Lead asks next,
+   * such as the automation daily summary. The same text is queued once per run.
+   */
+  relay(run: string | undefined, text: string): void;
   /** Engine-launched headless runs in flight, by action id (AD-25). */
   readonly headless: Map<string, HeadlessEntry>;
   /**
