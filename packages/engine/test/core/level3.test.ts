@@ -8,7 +8,8 @@
 import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { MERGE_LEVEL_LEDGER, type PullRequestRef } from "@vtc/shared";
+import { MERGE_LEVEL_LEDGER, type PullRequestRef, type VisualSummary } from "@vtc/shared";
+import { level3VisualStatus } from "../../src/core/level3.js";
 import { cleanupDirs, git } from "../helpers/repo.js";
 import {
   authorTests,
@@ -564,5 +565,44 @@ describe("AD-23 rules 4–5: the post-merge watch and the ledger", () => {
     expect(h.remote3.calls.filter((c) => c.startsWith("runs"))).toEqual([]);
     expect(existsSync(join(h.repo, MERGE_LEVEL_LEDGER))).toBe(false);
     await h.release();
+  });
+});
+
+describe("the Level-3 visual item (readings 124, 137)", () => {
+  const summary = (over: Partial<VisualSummary> = {}): VisualSummary => ({
+    status: "pass",
+    report: ".vtc/evidence/F-1/gates/a1/visual/report.json",
+    counts: {
+      renders: 1,
+      unreached: 0,
+      axe_violations: 0,
+      axe_incomplete: 0,
+      style_mismatches: 0,
+      diffs_over_budget: 0,
+      token_lint: 0,
+      detector: 0,
+    },
+    findings: [],
+    ...over,
+  });
+
+  it("a pass on the doctor's store (or with no toolchain named) counts", () => {
+    expect(level3VisualStatus(summary({ toolchain: "vtc" }), true)).toBe("pass");
+    expect(level3VisualStatus(summary(), true)).toBe("pass");
+  });
+
+  it("a pass on the project's own Playwright reads as skipped", () => {
+    expect(level3VisualStatus(summary({ toolchain: "project" }), true)).toBe("skipped");
+  });
+
+  it("a failure stays a failure on either toolchain", () => {
+    expect(level3VisualStatus(summary({ status: "fail", toolchain: "project" }), true)).toBe(
+      "fail",
+    );
+  });
+
+  it("no visual step: unchecked for a UI feature, n/a otherwise", () => {
+    expect(level3VisualStatus(undefined, true)).toBe("unchecked");
+    expect(level3VisualStatus(undefined, false)).toBeNull();
   });
 });

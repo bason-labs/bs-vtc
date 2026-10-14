@@ -151,5 +151,13 @@ export * from "./json-schema.js";
  * (`sarif_level: none`) no longer count against `new_violations`; `datamarkFetchedText` caps its
  * whole output. `ROLE_DENIED_VTC` folds in `WAVE3_HOME_WRITE_DENY` and denies the `lookback` and
  * `merge-level` gestures; `REPO_ROLE_DENIED.writeDeny` adds the engine's git-tracked records.
+ *
+ * 4.7.0 (MINOR): the wave-3 integration round (spine §5 readings 135–143). `IncidentKind`
+ * `prompt_selection` (the dashboard's exhaustive map updated in the same change);
+ * `VisualSummary.toolchain` / `VisualReport.toolchain` (`VisualToolchain`) and the visual report
+ * path; `LOOKBACK_HOME.tiebreaksFile` and `LookbackTiebreakRecord`; `AaNoiseRow` and the exported
+ * `RepoKeySchema`; `RESEARCH_CACHE.requestsFile` and `ResearchCacheRequestRow`; the design
+ * library layout (doc only). A GitHub `FetchRequest.repo` may no longer start a name with a dot,
+ * and `REPO_ROLE_DENIED.writeDeny` adds `.vtc/runs/**` (reading 143 says why both ship as MINOR).
  */
-export const CONTRACTS_VERSION = "4.6.0";
+export const CONTRACTS_VERSION = "4.7.0";

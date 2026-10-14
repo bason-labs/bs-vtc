@@ -119,6 +119,12 @@ export const IncidentKindSchema = z.enum([
    * retries. New in 4.6.0.
    */
   "auth",
+  /**
+   * The Lookback prompt selector threw, or returned a selection the engine refused (identity
+   * mismatch, or a canary arm other than the task's assignment); the compiled default ran (spine
+   * §5 reading 137). New in 4.7.0.
+   */
+  "prompt_selection",
 ]);
 export type IncidentKind = z.infer<typeof IncidentKindSchema>;
 

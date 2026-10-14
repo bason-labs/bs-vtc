@@ -707,44 +707,73 @@ const packFor = (k: Kernel, h: RunHandle, step: StepSpec, actionId: string): Tas
  * `TaskPack.role_heuristics` (no pack heading). Anything else, or a selector that throws, runs the
  * compiled default. The effective SHA is the selector's (core holds no locked text to hash).
  */
-const pinnedPrompt = (k: Kernel, target: PromptTarget): PinnedPrompt | null => {
+interface PinSelection {
+  readonly pinned: PinnedPrompt | null;
+  /** Why a selection was thrown away (an `incident.recorded` `prompt_selection`, reading 137). */
+  readonly problem?: string;
+}
+
+const pinnedPrompt = (k: Kernel, target: PromptTarget): PinSelection => {
   const pins = k.promptPins();
-  if (pins === null) return null;
+  if (pins === null) return { pinned: null };
   const parts = k.deps.plugins.promptParts?.(target.agent, target.host);
   // an agent that carries its own editable section cannot run a pinned one (reading 117)
-  if (parts?.editableInPack !== true || parts.lockedSha256 === undefined) return null;
+  if (parts?.editableInPack !== true || parts.lockedSha256 === undefined) return { pinned: null };
   let pinned: PinnedPrompt | null;
   try {
     pinned = pins(target);
-  } catch {
-    return null; // the compiled default runs; the selector reports its own problem
+  } catch (error) {
+    // the compiled default runs
+    const why = error instanceof Error ? error.message : String(error);
+    return { pinned: null, problem: `the prompt selector threw: ${why}` };
   }
-  if (pinned === null) return null;
+  if (pinned === null) return { pinned: null };
+  const refused = (why: string): PinSelection => ({
+    pinned: null,
+    problem: `the selected prompt version was not used (${why}); the compiled default ran`,
+  });
   const version = PromptVersionRefSchema.safeParse(pinned.version);
+  if (!version.success) return refused("a malformed version");
   if (
-    !version.success ||
     version.data.role !== target.role ||
     version.data.mode !== target.mode ||
-    version.data.host !== target.host ||
-    version.data.locked_sha256 !== parts.lockedSha256 ||
-    typeof pinned.text !== "string"
+    version.data.host !== target.host
   )
-    return null;
+    return refused("a version of another role, mode or host");
+  if (version.data.locked_sha256 !== parts.lockedSha256)
+    return refused("a version of another locked core than the compiled agent's");
+  if (typeof pinned.text !== "string") return refused("no editable text");
   const text = pinned.text.trim();
-  if (
-    text === "" ||
-    sha256Hex(text) !== version.data.editable_sha256 ||
-    !TaskPackSchema.shape.role_heuristics.safeParse(text).success
-  )
-    return null;
+  if (text === "" || sha256Hex(text) !== version.data.editable_sha256)
+    return refused("text that is not the version's editable section");
+  if (!TaskPackSchema.shape.role_heuristics.safeParse(text).success)
+    return refused("text that is not a valid Role heuristics section");
   // a canary whose arm is not this version drops the arm, never the section: the dispatch is then
   // not in the canary
+  if (pinned.canary === undefined) return { pinned: { version: version.data, text } };
   const canary = EVENT_PAYLOAD_SCHEMAS["lookback.canary_assigned"].safeParse(pinned.canary);
-  const arm =
-    canary.success && canary.data[canary.data.arm] === version.data.effective_sha256
-      ? canary.data
-      : undefined;
-  return { version: version.data, text, ...(arm === undefined ? {} : { canary: arm }) };
+  if (canary.success && canary.data[canary.data.arm] === version.data.effective_sha256)
+    return { pinned: { version: version.data, text, canary: canary.data } };
+  return {
+    pinned: { version: version.data, text },
+    problem:
+      "the canary arm the selector named is not the version it selected; the dispatch ran outside the canary",
+  };
+};
+
+/** An `incident.recorded` `prompt_selection` (reading 137): a selection the engine did not use. */
+const recordPromptSelection = (
+  k: Kernel,
+  h: RunHandle,
+  task: string | undefined,
+  detail: string,
+): void => {
+  k.emit(h, {
+    type: "incident.recorded",
+    actor: "engine",
+    ...(task === undefined ? {} : { task }),
+    data: { kind: "prompt_selection", detail: detail.slice(0, 2000) },
+  });
 };
 
 /**
@@ -768,8 +797,16 @@ const assignCanary = (
       (e.data as { candidate?: string }).candidate === canary.candidate &&
       (e.data as { baseline?: string }).baseline === canary.baseline,
   );
-  if (assigned !== undefined)
-    return (assigned.data as { arm?: string }).arm === canary.arm ? canary : undefined;
+  if (assigned !== undefined) {
+    if ((assigned.data as { arm?: string }).arm === canary.arm) return canary;
+    recordPromptSelection(
+      k,
+      h,
+      task,
+      `the canary arm ${canary.arm} differs from the task's assigned arm; the dispatch ran outside the canary`,
+    );
+    return undefined;
+  }
   k.emit(h, {
     type: "lookback.canary_assigned",
     actor: "engine",
@@ -810,7 +847,7 @@ export const dispatchStep = (
       ? k.deps.plugins.profileFor(host, task.discipline)
       : undefined;
   const agent = profile ?? agentNameFor(step.role, step.mode);
-  const pinned = pinnedPrompt(k, {
+  const selection = pinnedPrompt(k, {
     run: h.state.id,
     role: step.role,
     ...(step.mode === undefined ? {} : { mode: step.mode }),
@@ -818,6 +855,9 @@ export const dispatchStep = (
     agent,
     ...(step.task === undefined ? {} : { task: step.task }),
   });
+  if (selection.problem !== undefined)
+    recordPromptSelection(k, h, step.task, `${agent}: ${selection.problem}`);
+  const pinned = selection.pinned;
   // AD-21 rule 2, reading 117: the pinned section is the pack's opening `Role heuristics` block
   const pack = writeTaskPack(k.deps.repoRoot, {
     ...packFor(k, h, step, actionId),

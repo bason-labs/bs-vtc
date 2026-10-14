@@ -30,6 +30,11 @@ export const RESEARCH_CACHE = {
   homeDir: "research-cache",
   blobsDir: "blobs/sha256",
   indexFile: "index.jsonl",
+  /**
+   * The request behind each cached key, one {@link ResearchCacheRequestRow} per line, so a stale
+   * fact is re-fetched from the source its row records (spine §5 reading 137). New in 4.7.0.
+   */
+  requestsFile: "requests.jsonl",
 } as const;
 
 /** A cache scope: `_shared`, or `client-<slug>` for a project with `project.yaml` `client`. */
@@ -103,7 +108,16 @@ export const FetchRequestSchema = z.discriminatedUnion("fetcher", [
   }),
   z.strictObject({
     fetcher: z.literal("github"),
-    repo: z.string().regex(/^[A-Za-z0-9_.-]{1,100}\/[A-Za-z0-9_.-]{1,100}$/, "expected owner/repo"),
+    /**
+     * `owner/repo`. Neither name may start with a dot, so no `.` or `..` segment climbs out of
+     * `/repos/<owner>/<repo>` (4.7.0, spine §5 reading 137).
+     */
+    repo: z
+      .string()
+      .regex(
+        /^[A-Za-z0-9_-][A-Za-z0-9_.-]{0,99}\/[A-Za-z0-9_-][A-Za-z0-9_.-]{0,99}$/,
+        "expected owner/repo, neither starting with a dot",
+      ),
     what: z.enum(["repo", "releases", "latest_release"]),
   }),
   z.strictObject({ fetcher: z.literal("web"), url: HttpsUrlSchema }),
@@ -117,6 +131,16 @@ export const FetchRequestSchema = z.discriminatedUnion("fetcher", [
 ]);
 export type FetchRequest = z.infer<typeof FetchRequestSchema>;
 export type FetchRequestInput = z.input<typeof FetchRequestSchema>;
+
+/**
+ * One line of the research cache's `requests.jsonl` ({@link RESEARCH_CACHE}`.requestsFile`): the
+ * cache key and the request that produced it. Read with `parsePersisted`. New in 4.7.0.
+ */
+export const ResearchCacheRequestRowSchema = z.strictObject({
+  key: Sha256HexSchema,
+  request: FetchRequestSchema,
+});
+export type ResearchCacheRequestRow = z.infer<typeof ResearchCacheRequestRowSchema>;
 
 /**
  * The outcome of one fetch. `blocked` = the network guard refused it (not https, a private

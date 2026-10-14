@@ -84,6 +84,7 @@ const INCIDENT_TITLES: Readonly<Record<IncidentKind, string>> = {
   run_adopted: "Run adopted from another clone",
   milestone_commit: "Milestone commit of .vtc/ did not go through",
   auth: "A host is not signed in",
+  prompt_selection: "A pinned prompt was not used",
 };
 
 const MERGE_REASONS: Readonly<Record<EventData<"run.merge_level_changed">["reason"], string>> = {
