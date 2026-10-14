@@ -111,9 +111,11 @@ describe("prompt identity in the compiled plugins (AD-21 rules 1–2)", () => {
 
   it("switches a role only once the task pack has the section that carries its heuristics", () => {
     // The default stays empty until @vtc/shared defines the section and the engine renders it;
-    // flipping it earlier would ship agents that run without their heuristics.
+    // flipping it earlier would ship agents that run without their heuristics. A switched agent
+    // trusts only the block the pack opens with (EDITABLE_IN_PACK_NOTE), so the section must be
+    // the first one rendered, ahead of every free-text field.
     if (EDITABLE_IN_PACK_ROLES.length > 0) {
-      expect(TASK_PACK_SECTIONS as readonly string[]).toContain(EDITABLE_PACK_SECTION);
+      expect(TASK_PACK_SECTIONS[0] as string).toBe(EDITABLE_PACK_SECTION);
     }
     const ids = loaded.roles.map((r) => r.role.id);
     for (const role of EDITABLE_IN_PACK_ROLES) expect(ids).toContain(role);
