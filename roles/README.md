@@ -171,7 +171,10 @@ human`, exits `done`, `blocked` or `unknown`, no verdicts, no success criteria a
   hosts. A Codex agent file has no per-agent web switch, so the Codex adapter turns web search
   on for a headless `host_web` run. Page content is untrusted data; a page the role relies on
   is proposed with `fact_propose` as a `web` source request plus `reported_source`, so the
-  engine fetches and checks it, and a claim it cannot verify stays `unverified`.
+  engine fetches and checks it, and a claim it cannot verify stays `unverified`. The engine's
+  `research_analyst` fixture (`packages/engine/test/fixtures/roles.ts`, engine-core) gains
+  `tools.host_web: true` and `version: "3.0.0"` at the merge of this branch; until then the
+  AD-14 drift test (`packages/engine/test/core/roles.test.ts`) fails on `host_web`.
 - **The Designer method** (spec §9.1; readings 116, 174). The Designer and Visual QA preload the
   `design-craft` skill, forked from pbakaus/impeccable (Apache-2.0, see `NOTICE`): screen modes,
   new-work steps 1–5 inside the engine's dealt constraints, the per-screen Direction contract,
