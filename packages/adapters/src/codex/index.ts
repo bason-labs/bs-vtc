@@ -12,7 +12,7 @@ import { createAuthStatusRunner } from "../common/auth-status.js";
 import { createRunLauncher, subagentSpawn } from "../common/dispatch.js";
 import { envHome } from "../common/homes.js";
 import { ensurePrivateDir, writeFileAtomic } from "../common/files.js";
-import { nodeSpawner, type Spawner } from "../common/process.js";
+import { createNodeSpawner, type Spawner } from "../common/process.js";
 import { createCodexUsageSource } from "./app-server.js";
 import { CODEX_AUTH_STATUS } from "./auth.js";
 import { codexHeadlessCommand, codexSandboxProfile, codexSchemaFile, HOST } from "./command.js";
@@ -66,6 +66,12 @@ export interface CodexAdapterOptions {
    * is enforced (see `CODEX_UNIX_CONNECT_BLOCKED_PLATFORMS`). Default: `process.platform`.
    */
   readonly platform?: NodeJS.Platform;
+  /**
+   * Variable names from the user's `~/.vtc/config.yaml` `env_passthrough` (D-ak, spine §5 reading
+   * 57) that pass to host children besides the fixed allowlist; host credential variables never
+   * do. Used by the default spawner only. Default: none.
+   */
+  readonly envPassthrough?: readonly string[];
   /** How long `codex login status` may run before it is killed. Default 20 s. */
   readonly authTimeoutMs?: number;
 }
@@ -75,7 +81,8 @@ const defaultScratchDir = (): string =>
   join(tmpdir(), `vtc-codex-${String(process.getuid?.() ?? userInfo().username)}`);
 
 export const createCodexAdapter = (options: CodexAdapterOptions = {}): HostAdapter => {
-  const spawner = options.spawner ?? nodeSpawner;
+  const spawner =
+    options.spawner ?? createNodeSpawner({ envPassthrough: options.envPassthrough ?? [] });
   const scratchDir = options.scratchDir ?? defaultScratchDir();
   const commandOptions = { scratchDir };
   const profileOptions = {

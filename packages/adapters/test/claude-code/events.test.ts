@@ -229,6 +229,26 @@ describe("Claude parseEvents: limits (synthetic, documented shapes, §6.9)", () 
 });
 
 describe("Claude parseEvents: auth and errors", () => {
+  it("a stream key named like an Object.prototype member is no cap and no window", () => {
+    for (const subtype of ["constructor", "toString", "__proto__", "hasOwnProperty"]) {
+      const outcome = valid(
+        parse([JSON.stringify({ type: "result", subtype, is_error: true })]).outcome,
+      );
+      expect(outcome).toMatchObject({ kind: "error", retryable: true });
+      expect(outcome).not.toHaveProperty("cause");
+      const limited = parse([
+        JSON.stringify({
+          type: "rate_limit_event",
+          rate_limit_info: { status: "rejected", rateLimitType: subtype },
+        }),
+        JSON.stringify({ type: "result", subtype: "error_during_execution", is_error: true }),
+      ]);
+      expect(valid(limited.outcome)).toMatchObject({ kind: "limit", window: null });
+      if (limited.usage !== null)
+        expect(UsageSnapshotSchema.parse(limited.usage).windows).toEqual([]);
+    }
+  });
+
   it("a signed-out result is auth (synthetic)", () => {
     const outcome = valid(parse(fixtureLines("claude-code/stream-auth.synthetic.jsonl")).outcome);
     expect(outcome).toEqual({ kind: "auth", message: "Invalid API key · Please run /login" });

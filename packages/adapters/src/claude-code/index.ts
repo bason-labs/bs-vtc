@@ -15,7 +15,7 @@ import {
 import { createAuthStatusRunner } from "../common/auth-status.js";
 import { createRunLauncher, subagentSpawn } from "../common/dispatch.js";
 import { envHome } from "../common/homes.js";
-import { nodeSpawner, type Spawner } from "../common/process.js";
+import { createNodeSpawner, type Spawner } from "../common/process.js";
 import {
   claudeHeadlessCommand,
   claudeSandboxProfile,
@@ -67,6 +67,12 @@ export interface ClaudeCodeAdapterOptions {
    * headless runs: without it `headlessCommand`, `spawnRole` (headless) and `resume` refuse.
    */
   readonly pluginDir?: string;
+  /**
+   * Variable names from the user's `~/.vtc/config.yaml` `env_passthrough` (D-ak, spine §5 reading
+   * 57) that pass to host children besides the fixed allowlist; host credential variables never
+   * do. Used by the default spawner only. Default: none.
+   */
+  readonly envPassthrough?: readonly string[];
   /** Clock for `authStatus().checked_at`. */
   readonly now?: () => Date;
   /** How long `claude auth status` may run before it is killed. Default 20 s. */
@@ -74,8 +80,10 @@ export interface ClaudeCodeAdapterOptions {
 }
 
 export const createClaudeCodeAdapter = (options: ClaudeCodeAdapterOptions = {}): HostAdapter => {
+  const spawner =
+    options.spawner ?? createNodeSpawner({ envPassthrough: options.envPassthrough ?? [] });
   const runs = createRunLauncher({
-    spawner: options.spawner ?? nodeSpawner,
+    spawner,
     outcome: claudeOutcomeAfterExit,
     ...(options.killGraceMs === undefined ? {} : { termGraceMs: options.killGraceMs }),
     ...(options.interruptGraceMs === undefined
@@ -83,7 +91,7 @@ export const createClaudeCodeAdapter = (options: ClaudeCodeAdapterOptions = {}):
       : { interruptGraceMs: options.interruptGraceMs }),
   });
   const auth = createAuthStatusRunner({
-    spawner: options.spawner ?? nodeSpawner,
+    spawner,
     now: options.now ?? (() => new Date()),
     ...(options.authTimeoutMs === undefined ? {} : { timeoutMs: options.authTimeoutMs }),
   });

@@ -11,8 +11,9 @@
  * `taskkill /T /F` (see the `it.todo` in headless-run.test.ts).
  */
 import { spawn } from "node:child_process";
+import nodePath, { type PlatformPath } from "node:path";
 import type { Readable, Writable } from "node:stream";
-import type { HostCommand } from "@vtc/shared";
+import { findForbiddenHostArgs, type HostCommand } from "@vtc/shared";
 
 /** The signals the launcher sends, in this order when it stops a run (AD-25 rule 4). */
 export type ProcessSignal = "SIGINT" | "SIGTERM" | "SIGKILL";
@@ -52,7 +53,8 @@ const POSIX = process.platform !== "win32";
  * no credential variable (AD-9), no `NODE_OPTIONS`, no `GIT_*` location and no agent socket
  * reaches a role run. The real `HOME` (and the hosts' own config locations) stay, so the host
  * finds the user's login itself; VTC never reads it. Matched case-insensitively (Windows names
- * are), so `https_proxy` passes with `HTTPS_PROXY`.
+ * are), so `https_proxy` passes with `HTTPS_PROXY`. `PATH` passes with its absolute entries only
+ * ({@link absoluteSearchPath}).
  */
 const INHERITED_ENV: ReadonlySet<string> = new Set([
   // the user and the shell basics
@@ -105,18 +107,49 @@ const inherited = (name: string): boolean => {
 };
 
 /**
- * Pure: a host child's environment, the allowlisted part of `parent` plus the command's own
- * variables (`HostCommand.env`, which the safety contract checks).
+ * Pure: `PATH` with only its absolute entries. An empty entry, `.` or any relative entry is
+ * searched from the child's working directory (a role's worktree, where a role can plant a
+ * `node_modules/.bin/claude` or `vtc`), so a host binary or the engine bridge the host starts
+ * outside the role sandbox could be the role's own file. Those entries are dropped (§15, AD-9).
+ */
+export const absoluteSearchPath = (value: string, path: PlatformPath = nodePath): string =>
+  value
+    .split(path.delimiter)
+    .filter((entry) => entry !== "" && path.isAbsolute(entry))
+    .join(path.delimiter);
+
+/**
+ * A name from `~/.vtc/config.yaml` `env_passthrough` (D-ak, spine §5 reading 57) that may reach a
+ * host child: never a host credential variable (AD-9 markers: a headless run never switches the
+ * host to API-key mode, AD-25 rule 2) and never `PATH`, whose entries are always filtered.
+ */
+const passable = (name: string): boolean =>
+  name.toUpperCase() !== "PATH" && findForbiddenHostArgs([name]).length === 0;
+
+/**
+ * Pure: a host child's environment, the allowlisted part of `parent`, the names the user listed
+ * in `env_passthrough` (`passthrough`, minus host credential variables), plus the command's own
+ * variables (`HostCommand.env`, which the safety contract checks). `PATH` keeps only its absolute
+ * entries ({@link absoluteSearchPath}).
  */
 export const childEnvironment = (
   parent: Readonly<Record<string, string | undefined>>,
   added: Readonly<Record<string, string>>,
+  passthrough: readonly string[] = [],
 ): Record<string, string> => {
+  const listed = new Set(passthrough.filter(passable));
   const env: Record<string, string> = {};
   for (const [name, value] of Object.entries(parent)) {
-    if (value !== undefined && inherited(name)) env[name] = value;
+    if (value !== undefined && (inherited(name) || listed.has(name))) env[name] = value;
   }
-  return { ...env, ...added };
+  const merged: Record<string, string> = { ...env, ...added };
+  for (const name of Object.keys(merged)) {
+    const value = merged[name];
+    if (name.toUpperCase() === "PATH" && value !== undefined) {
+      merged[name] = absoluteSearchPath(value);
+    }
+  }
+  return merged;
 };
 
 /** How long stdout and stderr may stay open after the leader exited before they are cut. */
@@ -129,18 +162,25 @@ export interface NodeSpawnerOptions {
    * and the process counts as exited.
    */
   readonly drainMs?: number;
+  /**
+   * Variable names the user listed in `~/.vtc/config.yaml` `env_passthrough` (D-ak, spine §5
+   * reading 57), which pass to host children besides the allowlist. Host credential variables
+   * never pass ({@link childEnvironment}). Default: none.
+   */
+  readonly envPassthrough?: readonly string[];
 }
 
 /**
  * Starts real host processes, each the leader of its own process group. The child gets
- * {@link childEnvironment}: the allowlisted part of the user's environment plus `command.env`.
+ * {@link childEnvironment}: the allowlisted part of the user's environment (with an absolute-only
+ * `PATH`), the `envPassthrough` names, plus `command.env`.
  */
 export const createNodeSpawner =
   (spawnerOptions: NodeSpawnerOptions = {}): Spawner =>
   (command, options) => {
     const child = spawn(command.command, [...command.args], {
       cwd: options.cwd,
-      env: childEnvironment(process.env, command.env),
+      env: childEnvironment(process.env, command.env, spawnerOptions.envPassthrough),
       stdio: [options.stdin === "pipe" ? "pipe" : "ignore", "pipe", "pipe"],
       detached: POSIX,
       windowsHide: true,

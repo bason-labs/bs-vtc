@@ -1,3 +1,4 @@
+import { homedir, tmpdir } from "node:os";
 import { describe, expect, it } from "vitest";
 import { findForbiddenHostArgs, HostAuthStatusSchema, type HostAdapter } from "@vtc/shared";
 import { createClaudeCodeAdapter, createCodexAdapter } from "../src/index.js";
@@ -37,6 +38,16 @@ const status = async (adapter: HostAdapter) => {
 };
 
 describe("authStatus through the host's own status command (AD-25 rule 3, AD-9)", () => {
+  it("runs the status command from the user's home, never the shared temp directory (§15)", async () => {
+    for (const host of ["claude-code", "codex"] as const) {
+      const { adapter, processes } = adapterFor(host, replying(0, "{}"));
+      await status(adapter);
+      const cwd = processes[0]?.options.cwd;
+      expect(cwd).toBe(homedir());
+      expect(cwd).not.toBe(tmpdir());
+    }
+  });
+
   it("Claude: runs `claude auth status --json` with stdin closed and reads loggedIn and authMethod only", async () => {
     const { adapter, processes } = adapterFor(
       "claude-code",

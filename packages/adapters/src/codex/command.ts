@@ -20,9 +20,11 @@
  *   them anywhere, but it can copy them into its output or worktree.
  * - The role deny list (D-w): Codex has no per-command deny for a headless run, so `vtc
  *   calibrate` cannot be denied here (it confirms only in an interactive terminal, which a role
- *   run never has). Writes to everything in `ROLE_DENIED_VTC.homeWriteDeny` (D-w, D-ap: the
- *   allowlists, scanner database and binaries, hidden tests, plugin copies, discovery files and
- *   sockets, `config.yaml` and the token) are blocked because `workspace-write` writes only the
+ *   run never has). Writes to everything in `ROLE_HOME_WRITE_DENY` (`ROLE_DENIED_VTC
+ *   .homeWriteDeny` plus `WAVE3_HOME_WRITE_DENY`, through `vtcHomeWriteDeniedPaths`; D-w, D-ap,
+ *   spine §5 reading 103: the allowlists, scanner database and binaries, hidden tests, plugin
+ *   copies, discovery files and sockets, `config.yaml`, the token, and the wave-3 Lookback,
+ *   research, browser and design directories) are blocked because `workspace-write` writes only the
  *   worktree and the OS temp roots (`$TMPDIR`, `/tmp`; D-ag lets roles write there). So a profile
  *   whose worktree overlaps one of those paths is refused, and when one lies under a temp root (a VTC home in the temp
  *   directory, as in test setups) the profile takes both temp roots out of the writable set

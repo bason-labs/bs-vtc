@@ -1,7 +1,15 @@
+import { chmodSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { AD9_FORBIDDEN_MARKERS, type HostOutcome } from "@vtc/shared";
 import { startHeadlessRun, type RunExit } from "../src/common/headless-run.js";
-import { childEnvironment, createNodeSpawner, nodeSpawner } from "../src/common/process.js";
+import {
+  absoluteSearchPath,
+  childEnvironment,
+  createNodeSpawner,
+  nodeSpawner,
+} from "../src/common/process.js";
 import { fakeSpawner } from "./support/fake-spawner.js";
 
 const COMMAND = { command: "host", args: ["run"], env: {} };
@@ -242,6 +250,26 @@ describe("headless launcher (§15 hardened launcher)", () => {
     expect(details(await run.wait()).lines).toEqual(["a"]);
   });
 
+  it("a timer that fires after the process exited, while its stdout drains, is no reason to stop it", async () => {
+    const { spawner, processes } = fakeSpawner();
+    const run = startHeadlessRun({
+      command: COMMAND,
+      cwd: "/w",
+      timeoutMs: 20,
+      idleTimeoutMs: 20,
+      termGraceMs: 200,
+      spawner,
+      outcome: echoOutcome,
+    });
+    const proc = processes[0]!;
+    // the leader exits by itself; something it started holds stdout past both timeouts
+    proc.settleOnly(1);
+    const outcome = details(await run.wait());
+    expect(outcome.stop).toBeNull();
+    expect(outcome.code).toBe(1);
+    expect(proc.signals).toEqual([]);
+  });
+
   it("a process that cannot start settles with its start error", async () => {
     const { spawner } = fakeSpawner((p) => {
       p.failToStart(new Error("spawn host ENOENT"));
@@ -308,6 +336,51 @@ describe("child environment (AD-25 rule 4)", () => {
     }
   });
 
+  it("keeps only the absolute PATH entries: a relative, `.` or empty one would search the worktree (§15)", () => {
+    expect(absoluteSearchPath("rel:/usr/bin::.:./node_modules/.bin:/bin:~/bin:")).toBe(
+      "/usr/bin:/bin",
+    );
+    expect(childEnvironment({ PATH: "./node_modules/.bin:/usr/bin:" }, {})).toEqual({
+      PATH: "/usr/bin",
+    });
+    // whatever spells it, and also a PATH the command itself would add
+    expect(childEnvironment({ Path: ":/bin" }, { PATH: "x:/usr/bin" })).toEqual({
+      Path: "/bin",
+      PATH: "/usr/bin",
+    });
+  });
+
+  it("passes the user's env_passthrough names, but never a host credential variable (D-ak, AD-9)", () => {
+    const parent = {
+      ...BASE,
+      CORP_PROXY_PAC: "http://pac.local",
+      ANTHROPIC_API_KEY: "sk-x",
+      OPENAI_API_KEY: "sk-y",
+      CLAUDE_CODE_OAUTH_TOKEN: "t",
+    };
+    const env = childEnvironment(parent, {}, [
+      "CORP_PROXY_PAC",
+      "SSH_AUTH_SOCK",
+      "ANTHROPIC_API_KEY",
+      "OPENAI_API_KEY",
+      "CLAUDE_CODE_OAUTH_TOKEN",
+      "NOT_SET",
+    ]);
+    expect(env).toMatchObject({
+      CORP_PROXY_PAC: "http://pac.local",
+      SSH_AUTH_SOCK: "/tmp/agent.sock",
+    });
+    for (const name of [
+      "ANTHROPIC_API_KEY",
+      "OPENAI_API_KEY",
+      "CLAUDE_CODE_OAUTH_TOKEN",
+      "NOT_SET",
+    ]) {
+      expect(env).not.toHaveProperty(name);
+    }
+    expect(childEnvironment(BASE, {})).not.toHaveProperty("SSH_AUTH_SOCK");
+  });
+
   it("adds the command's own variables, and skips unset ones", () => {
     expect(
       childEnvironment(
@@ -336,6 +409,41 @@ describe.skipIf(process.platform === "win32")("Node spawner environment", () => 
     expect(lines).toContain(`HOME=${process.env.HOME ?? ""}`);
     expect(lines).toContain("VTC_TEST_ADDED=yes");
     expect(lines.some((l) => l.startsWith("VTC_TEST_UNLISTED="))).toBe(false);
+  });
+});
+
+describe.skipIf(process.platform === "win32")("Node spawner PATH (§15)", () => {
+  const dirs: string[] = [];
+  afterEach(() => {
+    vi.unstubAllEnvs();
+    for (const dir of dirs.splice(0)) rmSync(dir, { recursive: true, force: true });
+  });
+
+  it("never runs a host binary planted in the working directory through a relative or empty PATH entry", async () => {
+    const cwd = mkdtempSync(join(tmpdir(), "vtc-planted-"));
+    dirs.push(cwd);
+    mkdirSync(join(cwd, "rel"));
+    for (const path of [join(cwd, "rel", "vtc-fake-host"), join(cwd, "vtc-fake-host")]) {
+      writeFileSync(path, "#!/bin/sh\necho PLANTED\n");
+      chmodSync(path, 0o755);
+    }
+    for (const PATH of ["rel:/usr/bin:/bin", "/usr/bin:/bin:", ".:/usr/bin:/bin"]) {
+      vi.stubEnv("PATH", PATH);
+      let seen: RunExit | null = null;
+      const run = startHeadlessRun({
+        command: { command: "vtc-fake-host", args: [], env: {} },
+        cwd,
+        timeoutMs: 10_000,
+        spawner: nodeSpawner,
+        outcome: (lines, exit) => {
+          seen = exit;
+          return echoOutcome(lines, exit);
+        },
+      });
+      const outcome = details(await run.wait());
+      expect(outcome.lines, PATH).not.toContain("PLANTED");
+      expect(seen, PATH).toMatchObject({ error: { code: "ENOENT" } });
+    }
   });
 });
 
