@@ -131,7 +131,7 @@ const gatesAtCommit = new Map<string, Promise<CommittedGates | null>>();
 const GATES_CACHE_MAX = 64;
 
 /** `.vtc/gates.yml` committed at `commit` (`committedGatesConfig`), cached by commit. */
-const gatesAt = (k: Kernel, commit: string): Promise<CommittedGates | null> => {
+export const gatesAt = (k: Kernel, commit: string): Promise<CommittedGates | null> => {
   const key = `${k.deps.repoRoot}\0${commit}`;
   const hit = gatesAtCommit.get(key);
   if (hit !== undefined) return hit;
@@ -296,6 +296,24 @@ const message = (error: unknown): string =>
 // -------------------------------------------------------------- protected files
 
 /**
+ * The protected configs at `base` (§7.3), path → SHA-256: the files matching the
+ * `protected_configs` of the `gates.yml` committed at `base` (reading 46f), never the working
+ * tree's.
+ */
+export const protectedConfigsAt = async (k: Kernel, base: string): Promise<Map<string, string>> => {
+  const out = new Map<string, string>();
+  const globs = (await gatesAt(k, base))?.config.tests.protected_configs ?? [];
+  if (globs.length === 0) return out;
+  const listed = await runGit(k.deps.repoRoot, ["ls-tree", "-r", "--name-only", "-z", base]);
+  for (const path of listed.stdout.toString("utf8").split("\0")) {
+    if (path === "" || !globs.some((g) => globMatch(g, path))) continue;
+    const bytes = await k.deps.git.readFileAtCommit(base, path);
+    if (bytes !== undefined) out.set(path, sha256(bytes));
+  }
+  return out;
+};
+
+/**
  * Files QA wrote (by checksum at QA's commit) plus protected configs at the baseline (§7.3): the
  * `protected_configs` of the `gates.yml` committed at the baseline (reading 46f), never the
  * working tree's.
@@ -322,24 +340,9 @@ export const protectedFiles = async (
       if (bytes !== undefined) out.set(a.path, sha256(bytes));
     }
   }
-  const globs =
-    task.baseline_revision === undefined
-      ? []
-      : ((await gatesAt(k, task.baseline_revision))?.config.tests.protected_configs ?? []);
-  if (globs.length > 0 && task.baseline_revision !== undefined) {
-    const listed = await runGit(k.deps.repoRoot, [
-      "ls-tree",
-      "-r",
-      "--name-only",
-      "-z",
-      task.baseline_revision,
-    ]);
-    for (const path of listed.stdout.toString("utf8").split("\0")) {
-      if (path === "" || !globs.some((g) => globMatch(g, path))) continue;
-      const bytes = await k.deps.git.readFileAtCommit(task.baseline_revision, path);
-      if (bytes !== undefined) out.set(path, sha256(bytes));
-    }
-  }
+  if (task.baseline_revision !== undefined)
+    for (const [path, sum] of await protectedConfigsAt(k, task.baseline_revision))
+      out.set(path, sum);
   return [...out.entries()].map(([path, sum]) => ({ path, sha256: sum }));
 };
 
@@ -950,11 +953,27 @@ export const parkFeature = (
   detail: string,
   evidence: readonly Evidence[],
   riskRule?: RiskRuleReasonRule,
+  /** A Level-3 release park: retry or finish at Level 2 (D-bd). */
+  level3Release?: boolean,
 ): void => {
   setFeatureStatus(k, h, featureId, "parked", {
     parkReason: reason,
     ...(riskRule === undefined ? {} : { riskRule }),
   });
+  openFeatureEscalation(k, h, featureId, reason, detail, evidence, riskRule, level3Release);
+};
+
+/** The escalation of a parked feature (its park reason's options, or a Level-3 release's). */
+export const openFeatureEscalation = (
+  k: Kernel,
+  h: RunHandle,
+  featureId: string,
+  reason: ParkReason,
+  detail: string,
+  evidence: readonly Evidence[],
+  riskRule?: RiskRuleReasonRule,
+  level3Release?: boolean,
+): void => {
   const feature = h.state.features.get(featureId);
   const escalation = parkEscalation({
     id: nextEscalationId(h.state),
@@ -966,6 +985,7 @@ export const parkFeature = (
     evidence,
     blocks: feature?.tasks ?? [],
     now: k.now(),
+    ...(level3Release === true ? { level3Release } : {}),
   });
   k.emit(h, {
     type: "escalation.opened",

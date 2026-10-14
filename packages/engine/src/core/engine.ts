@@ -18,6 +18,7 @@ import {
   parseEventLog,
   remainingPct,
   resolveRoleMode,
+  unknownUsage,
   type ApproveInput,
   type AnswerInput,
   type ChangeRequestInput,
@@ -29,6 +30,7 @@ import {
   type GatesConfig,
   GatesConfigSchema,
   ProjectConfigSchema,
+  type HostBilling,
   type HostId,
   type HumanGateId,
   type LeadAction,
@@ -64,6 +66,7 @@ import {
 import { dispatchGuarded, inSessionRefusal, NO_LEAD_WAIT_REASON, phaseRoles } from "./dispatch.js";
 import {
   checkDirectionsNovelty,
+  designerRedispatchNote,
   designWorkSince,
   g2ApprovalProblem,
   gateExtras,
@@ -115,6 +118,8 @@ import {
 } from "./jobs.js";
 import {
   disableAutoMerges,
+  finishAtLevel2,
+  finishAtLevel2Pending,
   pollMergedFeature,
   recordMergePreflight,
   startMergeLevel,
@@ -122,6 +127,7 @@ import {
 } from "./level3.js";
 import { startRelease } from "./release.js";
 import { stepRetro } from "./retro.js";
+import { replayTrialActions } from "./replay.js";
 import { clientSpendRow, recordClientSpend } from "./spend.js";
 import { checkFinalReviewStuck, startFinalReview } from "./final-review.js";
 import {
@@ -284,6 +290,8 @@ const foreignRunText = (run: string): string =>
 
 export class Engine implements Kernel {
   readonly usage = new Map<HostId, UsageSnapshot>();
+  /** Who pays per host, from its last sign-in check (D-bq; `recordBilling`). */
+  private readonly billing = new Map<HostId, HostBilling | null>();
   readonly identicalTree = new Map<string, boolean>();
   readonly sharedTaskIds = new Set<string>();
   readonly dispatches = new Map<string, DispatchRecord>();
@@ -1018,6 +1026,11 @@ export class Engine implements Kernel {
     return this.retroLookback;
   }
 
+  /** The actions that ran `run`'s Lookback replay trials (reading 176; `replay.ts`). */
+  replayTrialActions(run: string): ReadonlySet<string> {
+    return replayTrialActions(this, run);
+  }
+
   notice(text: string): void {
     this.notices.push(text);
   }
@@ -1154,14 +1167,20 @@ export class Engine implements Kernel {
     if (["discover", "specify", "design"].includes(phase)) {
       const entered = phaseEnteredSeq(state, phase) ?? 0;
       // after a G2 re-roll only the Designer had to run again (§9.1 step 5, reading 151)
-      const done = roles.every(
-        ({ role, mode }) =>
-          lastSubmitted(
-            state,
-            { role, ...(mode === undefined ? {} : { mode }) },
-            phase === "design" ? designWorkSince(handle, role, entered) : entered,
-          )?.exit === "done",
-      );
+      const done = roles.every(({ role, mode }) => {
+        const since = phase === "design" ? designWorkSince(handle, role, entered) : entered;
+        if (
+          lastSubmitted(state, { role, ...(mode === undefined ? {} : { mode }) }, since)?.exit !==
+          "done"
+        )
+          return false;
+        // D-bt (reading 174): the Designer goes once more for too few directions
+        return !(
+          phase === "design" &&
+          role === "designer" &&
+          designerRedispatchNote(this, handle, since) !== undefined
+        );
+      });
       if (!done) return false;
       if (phase === "discover") this.phaseTo(handle, "specify");
       else if (phase === "specify")
@@ -1259,6 +1278,14 @@ export class Engine implements Kernel {
         !state.run.paused
       ) {
         startFinalReview(this, handle, feature.id);
+      }
+      if (
+        finishAtLevel2Pending(state, feature.id) &&
+        !this.isRunning(`release:${feature.id}`) &&
+        !state.run.paused
+      ) {
+        // recovery: the engine stopped while a `finish_level_2` answer was turning auto-merge off
+        finishAtLevel2(this, handle, feature.id);
       }
       if (
         state.features.get(feature.id)?.status === "ready_to_ship" &&
@@ -1728,6 +1755,11 @@ export class Engine implements Kernel {
       this.emit(handle, { type: "run.finished", actor: "engine", data: { outcome: "aborted" } });
       return;
     }
+    // D-bd (reading 158): a Level-3 park finished at Level 2 ends the run with the PR left open
+    if (effect === "finish_level_2") {
+      finishAtLevel2(this, handle, featureId);
+      return;
+    }
     const before = handle.state.events.findLast(
       (e) =>
         e.feature === featureId &&
@@ -2157,8 +2189,11 @@ export class Engine implements Kernel {
    */
   ingestUsage(incoming: UsageSnapshot): void {
     const before = this.usage.get(incoming.host);
-    const snapshot =
+    const merged =
       incoming.source === "sdk_event" ? mergeSdkUsage(before, incoming, this.now()) : incoming;
+    // who pays comes from the sign-in check, never from a usage reading (D-bq)
+    const billing = this.billing.get(merged.host);
+    const snapshot = billing === undefined ? merged : { ...merged, billing };
     this.usage.set(snapshot.host, snapshot);
     if (!significant(before, snapshot)) return;
     const state = activeRun([...this.handles.values()].map((h) => h.state));
@@ -2168,6 +2203,13 @@ export class Engine implements Kernel {
       this.emit(handle, { type: "usage.updated", actor: "engine", data: { snapshot } });
       return Promise.resolve();
     });
+  }
+
+  recordBilling(host: HostId, billing: HostBilling | null): void {
+    this.billing.set(host, billing);
+    const stored = this.usage.get(host);
+    if (stored !== undefined && (stored.billing ?? null) === billing) return;
+    this.usage.set(host, { ...(stored ?? unknownUsage(host)), billing });
   }
 
   /** The auto-resume timer fired (`vtc engine --daemon --wake`, AD-12 rule 4). */

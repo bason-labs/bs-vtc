@@ -1,0 +1,33 @@
+{
+  "v": 1,
+  "proposal": "p-engineer-1",
+  "role": "engineer",
+  "host": "codex",
+  "baseline": "66bd48956895018690691856dcdef24984eae5aeb439b91a62083358b27e2091",
+  "candidate": "5637b30259384831046013fa467654308ec439654be480cf0a60cbeb6af26942",
+  "grader_bundle_sha": "1e6ed65d77d6364eeaed5a745ba5c4985ae2b700dd85d7cf7f027bdf294a33fc",
+  "k": 3,
+  "per_task": [
+    {
+      "task": "golden-1:T-1",
+      "a": [false, false, true],
+      "b": [true, true, true],
+      "regression_set": false
+    },
+    {
+      "task": "golden-1:T-2",
+      "a": [true, true, true],
+      "b": [true, true, true],
+      "regression_set": true
+    }
+  ],
+  "aa_flip_rate": 0.0,
+  "sign_test": {
+    "n_discordant": 2,
+    "wins_b": 2,
+    "p": 0.25
+  },
+  "tokens_delta_pct": 4.5,
+  "verdict": "inconclusive",
+  "finished_at": "2026-10-14T11:40:00.000Z"
+}

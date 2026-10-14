@@ -27,6 +27,7 @@ import {
   DESIGN_SCREENS_PATH,
   DesignCoverageReportSchema,
   DesignExitSchema,
+  G2_DIRECTIONS,
   DesignLibraryEntrySchema,
   engineRepoKey,
   DesignScreensFileSchema,
@@ -162,8 +163,8 @@ const noveltyReport = (k: Kernel, direction: string): NoveltyReport | undefined 
   }
 };
 
-/** The Designer's directions (§9.1 step 3) as files describe them, at most 3, once each. */
-const directionDrafts = (k: Kernel, h: RunHandle): G2DirectionDraft[] => {
+/** Every distinct direction the Designer's latest result offers (§9.1 step 3), uncut. */
+const offeredDirections = (k: Kernel, h: RunHandle): G2DirectionDraft[] => {
   const seen = new Set<string>();
   const drafts: G2DirectionDraft[] = [];
   for (const a of submittedArtifacts(h, "designer").filter((x) => x.type === "design_direction")) {
@@ -172,7 +173,50 @@ const directionDrafts = (k: Kernel, h: RunHandle): G2DirectionDraft[] => {
     seen.add(d.id);
     drafts.push(d);
   }
-  return drafts.slice(0, 3);
+  return drafts;
+};
+
+/** The Designer's directions as G2 shows them: at most `G2_DIRECTIONS.max`, once each. */
+const directionDrafts = (k: Kernel, h: RunHandle): G2DirectionDraft[] =>
+  offeredDirections(k, h).slice(0, G2_DIRECTIONS.max);
+
+/** A new-repo UI design must offer `G2_DIRECTIONS` directions (§9.1 steps 3 and 5; D-bt). */
+const needsDirections = (h: RunHandle): boolean => h.state.run.repo === "new" && h.state.run.has_ui;
+
+/**
+ * How many distinct directions the Designer's latest result offers when that is fewer than a
+ * new-repo UI design needs (`G2_DIRECTIONS.min`, D-bt, spine §5 reading 174); `undefined` when
+ * the run needs no directions, or the Designer offered enough.
+ */
+const directionsShortfall = (k: Kernel, h: RunHandle): number | undefined => {
+  if (!needsDirections(h)) return undefined;
+  const offered = offeredDirections(k, h).length;
+  return offered < G2_DIRECTIONS.min ? offered : undefined;
+};
+
+/**
+ * D-bt (spine §5 reading 174): the note of the Designer's one re-dispatch, when its only result
+ * since its DESIGN work began (`since`, {@link designWorkSince}) offers fewer than
+ * `G2_DIRECTIONS.min` distinct directions on a new-repo UI design; `undefined` otherwise. After
+ * the second result G2 shows the shortfall as `DesignCoverageReport.directions_problem`.
+ */
+export const designerRedispatchNote = (
+  k: Kernel,
+  h: RunHandle,
+  since: number,
+): string | undefined => {
+  const results = [...h.state.roleRuns.values()].filter(
+    (r) =>
+      r.role === "designer" &&
+      r.task === undefined &&
+      r.status === "submitted" &&
+      r.exit === "done" &&
+      (r.closedSeq ?? 0) > since,
+  );
+  if (results.length !== 1) return undefined;
+  const offered = directionsShortfall(k, h);
+  if (offered === undefined) return undefined;
+  return `G2 offers ${String(G2_DIRECTIONS.min)}–${String(G2_DIRECTIONS.max)} design directions on a new UI design (§9.1 steps 3 and 5), and you offered ${String(offered)}. Return ${String(G2_DIRECTIONS.min)}–${String(G2_DIRECTIONS.max)} distinct directions (design_direction artifacts), the ones you keep included.`;
 };
 
 /** The Designer's directions for G2 with the engine's novelty verdicts (§9.1 steps 3–5), at most 3. */
@@ -493,12 +537,20 @@ export const designCoverage = (k: Kernel, h: RunHandle): DesignCoverageReport =>
         .filter((c) => SlugSchema.safeParse(c).success),
     };
   })();
+  // D-bt (reading 174): a new-repo UI design that still offers too few directions after the
+  // Designer's one re-dispatch is a blocking notice at G2
+  const offered = directionsShortfall(k, h);
   const report = {
     reqs_without_component: unmapped,
     reqs_without_screen: ui.reqs_without_screen ?? [],
     screens_without_req: ui.screens_without_req ?? [],
     components_unregistered: ui.components_unregistered ?? [],
     ...(ui.screens_problem === undefined ? {} : { screens_problem: ui.screens_problem }),
+    ...(offered === undefined
+      ? {}
+      : {
+          directions_problem: `the Designer offered ${String(offered)} distinct design direction${offered === 1 ? "" : "s"}; a new UI design needs at least ${String(G2_DIRECTIONS.min)} (reject G2 with design_exit re_roll for new ones)`,
+        }),
   };
   return DesignCoverageReportSchema.parse({
     ...report,
@@ -507,7 +559,8 @@ export const designCoverage = (k: Kernel, h: RunHandle): DesignCoverageReport =>
       report.reqs_without_screen.length === 0 &&
       report.screens_without_req.length === 0 &&
       report.components_unregistered.length === 0 &&
-      report.screens_problem === undefined,
+      report.screens_problem === undefined &&
+      report.directions_problem === undefined,
   });
 };
 
@@ -515,6 +568,7 @@ export const designCoverage = (k: Kernel, h: RunHandle): DesignCoverageReport =>
 const coverageProblems = (r: DesignCoverageReport): string[] => [
   ...r.reqs_without_component.map((id) => `${id} is mapped to no component`),
   ...(r.screens_problem === undefined ? [] : [r.screens_problem]),
+  ...(r.directions_problem === undefined ? [] : [r.directions_problem]),
   ...r.reqs_without_screen.map((id) => `${id} has no screen`),
   ...r.screens_without_req.map((id) => `screen ${id} covers no requirement`),
   ...r.components_unregistered.map((id) => `component ${id} is not registered`),

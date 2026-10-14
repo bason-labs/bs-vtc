@@ -201,7 +201,7 @@ describe("AD-23 rules 2–3: the checklist and auto-merge bound to the gated SHA
     await h.engine.answer(
       {
         escalation: escalation.id,
-        answer: { option: "clarify", text: "CI fixed", who_should_have_caught: "none" },
+        answer: { option: "retry", text: "CI fixed", who_should_have_caught: "none" },
       },
       CLAUDE,
     );
@@ -209,6 +209,154 @@ describe("AD-23 rules 2–3: the checklist and auto-merge bound to the gated SHA
     const status = h.engine.status({ run });
     expect(status.features[0]?.status).toBe("shipped");
     expect(status.run.finished_at).toBeDefined();
+    await h.release();
+  });
+
+  it("the park offers a retry or finishing at Level 2 (D-bd, reading 158)", async () => {
+    const h = level3();
+    h.remote3.checks = [[{ name: "ci", state: "failure" }]];
+    await toRelease(h);
+    const escalation = ofType(h, "escalation.opened").at(-1)?.data.escalation as {
+      options: { id: string; effect: string }[];
+      recommended: string;
+      detail: string;
+    };
+    expect(escalation.options.map((o) => [o.id, o.effect])).toEqual([
+      ["retry", "retry"],
+      ["finish-level-2", "finish_level_2"],
+    ]);
+    expect(escalation.recommended).toBe("retry");
+    expect(escalation.detail).toContain("finish at Level 2");
+    await h.release();
+  });
+
+  it("finishing at Level 2 turns off the auto-merge VTC left on, leaves the PR open and ends the run (D-bd)", async () => {
+    const h = level3();
+    h.remote3.mergeOnEnable = false;
+    const enable = h.remote3.enableAutoMerge.bind(h.remote3);
+    h.remote3.enableAutoMerge = async (request) => {
+      const pr = await enable(request);
+      h.prs.current = { ...(h.prs.current as PullRequestRef), head_sha: "d".repeat(40) };
+      return pr;
+    };
+    // the park leaves auto-merge on: GitHub refused to turn it off then
+    const disable = h.remote3.disableAutoMerge.bind(h.remote3);
+    h.remote3.disableAutoMerge = () => Promise.reject(new Error("gh: HTTP 502"));
+    await toRelease(h);
+    const run = runId(h);
+    expect(h.engine.status({ run }).features[0]?.status).toBe("parked");
+    const escalation = ofType(h, "escalation.opened", run).at(-1)?.data.escalation as {
+      id: string;
+    };
+    h.remote3.disableAutoMerge = disable;
+    const calls = h.remote3.calls.length;
+    await h.engine.answer(
+      {
+        escalation: escalation.id,
+        answer: { option: "finish-level-2", who_should_have_caught: "none" },
+      },
+      CLAUDE,
+    );
+    await h.engine.settle();
+    expect(h.remote3.calls.slice(calls)).toEqual(["disable vtc/F-1"]);
+    const status = h.engine.status({ run });
+    expect(status.features[0]).toMatchObject({
+      status: "ready_to_ship",
+      pr: { state: "open", auto_merge: "disabled" },
+    });
+    expect(status.run.finished_at).toBeDefined();
+    expect(ofType(h, "run.finished", run).at(-1)?.data).toMatchObject({ outcome: "done" });
+    // it changes no merge level: the ledger is for downgrades only (reading 158)
+    expect(existsSync(join(h.repo, MERGE_LEVEL_LEDGER))).toBe(false);
+    expect(ofType(h, "run.merge_level_changed", run)).toEqual([]);
+    await h.release();
+  });
+
+  it("finishing at Level 2 that the engine stopped in the middle of finishes on the next start", async () => {
+    const h = level3();
+    h.remote3.mergeOnEnable = false;
+    const enable = h.remote3.enableAutoMerge.bind(h.remote3);
+    h.remote3.enableAutoMerge = async (request) => {
+      const pr = await enable(request);
+      h.prs.current = { ...(h.prs.current as PullRequestRef), head_sha: "d".repeat(40) };
+      return pr;
+    };
+    const disable = h.remote3.disableAutoMerge.bind(h.remote3);
+    h.remote3.disableAutoMerge = () => Promise.reject(new Error("gh: HTTP 502"));
+    await toRelease(h);
+    const run = runId(h);
+    const escalation = ofType(h, "escalation.opened", run).at(-1)?.data.escalation as {
+      id: string;
+    };
+    // the answer's call to turn auto-merge off is in flight when the engine stops
+    let calling: () => void = () => undefined;
+    const called = new Promise<void>((resolve) => {
+      calling = resolve;
+    });
+    let hangUp: (error: Error) => void = () => undefined;
+    h.remote3.disableAutoMerge = () => {
+      calling();
+      return new Promise((_resolve, reject) => {
+        hangUp = reject;
+      });
+    };
+    await h.engine.answer(
+      {
+        escalation: escalation.id,
+        answer: { option: "finish-level-2", who_should_have_caught: "none" },
+      },
+      CLAUDE,
+    );
+    await called;
+    expect(h.engine.status({ run }).features[0]?.status).toBe("parked");
+    // the next start (the old engine lost its lock: it can no longer append)
+    h.remote3.disableAutoMerge = disable;
+    const engine = h.reopen();
+    await engine.settle();
+    hangUp(new Error("the engine stopped"));
+    expect(h.remote3.calls).toContain("disable vtc/F-1");
+    const status = engine.status({ run });
+    expect(status.features[0]).toMatchObject({
+      status: "ready_to_ship",
+      pr: { state: "open", auto_merge: "disabled" },
+    });
+    expect(status.run.finished_at).toBeDefined();
+    await engine.shutdown();
+    await h.release();
+  });
+
+  it("finishing at Level 2 whose auto-merge cannot be turned off parks again, the run left open", async () => {
+    const h = level3();
+    h.remote3.mergeOnEnable = false;
+    const enable = h.remote3.enableAutoMerge.bind(h.remote3);
+    h.remote3.enableAutoMerge = async (request) => {
+      const pr = await enable(request);
+      h.prs.current = { ...(h.prs.current as PullRequestRef), head_sha: "d".repeat(40) };
+      return pr;
+    };
+    h.remote3.disableAutoMerge = () => Promise.reject(new Error("gh: HTTP 502"));
+    await toRelease(h);
+    const run = runId(h);
+    const first = ofType(h, "escalation.opened", run).at(-1)?.data.escalation as { id: string };
+    await h.engine.answer(
+      {
+        escalation: first.id,
+        answer: { option: "finish-level-2", who_should_have_caught: "none" },
+      },
+      CLAUDE,
+    );
+    await h.engine.settle();
+    const again = ofType(h, "escalation.opened", run).at(-1)?.data.escalation as {
+      id: string;
+      detail: string;
+      options: { id: string }[];
+    };
+    expect(again.id).not.toBe(first.id);
+    expect(again.detail).toContain("could NOT turn its auto-merge off");
+    expect(again.options.map((o) => o.id)).toEqual(["retry", "finish-level-2"]);
+    const status = h.engine.status({ run });
+    expect(status.features[0]?.status).toBe("parked");
+    expect(status.run.finished_at).toBeUndefined();
     await h.release();
   });
 
