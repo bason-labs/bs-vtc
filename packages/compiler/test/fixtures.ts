@@ -12,6 +12,7 @@ const models = `models:
 export const FIXTURE: Readonly<Record<string, string>> = {
   "roles/README.md": "# roles\n",
   "roles/NOTICE": "Portions forked from agency-agents (MIT).\n",
+  "roles/CHANGELOG.md": "# Role prompt changes\n\n<!-- vtc:changelog-entries -->\n",
   "roles/_shared/result-protocol.md":
     "## Returning your result\n\nEvidence types: {{evidence_types}}.\nPack sections: {{task_pack_sections}}.\n",
   "roles/_shared/lens-reviewer.md": "## Lens reviewer\n\nCheck the diff against the checklist.\n",
@@ -101,6 +102,17 @@ budget: { context_tokens: 20000 }
     "---\nname: lead\ndescription: The VTC Lead event loop.\n---\n\nCall next, dispatch, submit.\n",
   "plugins/common/commands/vtc.md":
     "---\ndescription: Drive VTC.\nargument-hint: start|status\n---\n\nUse the lead skill. $ARGUMENTS\n",
+  "plugins/common/templates/auto-pr.md": [
+    "{{marker}}",
+    "{{note}}",
+    "{{summary}}\n{{why}}\n{{changes}}\n{{evidence}}\n{{verification}}\n{{risk}}",
+    "{{provenance}}",
+    "{{checklist}}\n",
+  ].join("\n\n"),
+  "plugins/common/templates/auto-issue.md":
+    "{{marker}}\n\n{{note}}\n{{summary}}\n{{why}}\n{{evidence}}\n{{provenance}}\n",
+  "plugins/common/templates/changelog-entry.md":
+    "### {{title}}\n\n{{hypothesis}}\n{{trace_ids}}\n{{diff}}\n{{evaluation}}\n",
   "plugins/claude-code/.claude-plugin/plugin.json": '{ "name": "vtc", "version": "0.1.0" }\n',
   "plugins/claude-code/.mcp.json":
     '{ "mcpServers": { "vtc": { "command": "vtc", "args": ["engine", "--mcp", "--host", "claude-code"] } } }\n',

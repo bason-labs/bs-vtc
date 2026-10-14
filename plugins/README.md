@@ -10,6 +10,7 @@ plugins/
   common/
     skills/lead/SKILL.md   the Lead skill: the engine loop start → next → dispatch → submit
     commands/vtc.md        the /vtc command (Claude Code: a command; Codex: the `vtc` skill)
+    templates/             the automatic PR, issue and CHANGELOG templates (AD-27, below)
   claude-code/
     .claude-plugin/plugin.json   plugin manifest
     .mcp.json                    the engine entry, equal to engineMcpServer("claude-code")
@@ -49,6 +50,21 @@ Both also get:
   `effectivePromptSha` of any pinned version (see roles/README.md, "Prompt parts and Lookback");
 - `vtc/role-contracts.json` (`ROLE_CONTRACTS_ASSET`): every role's `RoleContract`, validated with
   `RoleContractSchema`, which the engine loads from the `AssetBundle` (AD-14 rule 6);
+- `vtc/templates/auto-pr.md`, `auto-issue.md` and `changelog-entry.md` (`autoTemplateAssetPath`):
+  `common/templates/` copied verbatim, which the upstream module renders for VTC's automatic
+  issues and pull requests (AD-27; spine §5 readings 190 and 208). They use only `{{slot}}`
+  placeholders from `AUTO_TEMPLATE_SLOTS`, which the compiler never fills. The compiler requires
+  all three and checks each against `AUTO_TEMPLATE_LAYOUT`: every slot once and in the order of
+  `AUTO_TEMPLATE_SLOTS` (reading 208 (5)), and in a PR or issue the marker on the first line and
+  `{{note}}` on the next. A slot that can hold several lines stands on a line of its own; only
+  `title`, `hypothesis` and `trace_ids` may sit inside a line. A PR body: marker, note, summary,
+  why, changes, evidence, verification, risk and rollback, provenance, reviewer checklist; a
+  prompt PR's diff is in the pull request's own diff and its CHANGELOG entry. What a slot's value
+  holds: `{{note}}` is the renderer's whole NOTE callout, its `> [!NOTE]` header included, and in a
+  PR it says "For human review only: VTC never merges automatic PRs." (D-bw), so the template
+  opens no callout of its own; `{{provenance}}` is the renderer's whole `<details>` block, so the
+  template wraps it in none. That split matches the upstream module's renderer; the shared doc
+  lines on the two slots are a contract proposal of this branch;
 - `hooks/hooks.json`: `SessionStart`, `PreToolUse` and `SubagentStop` wired to
   `vtcHookCommand(event, host)` (`vtc hook <event> --host <host>`), each with the timeout
   `VTC_HOOK.timeoutMs` in seconds (spine §5 reading 31). Generated, never hand-written: the

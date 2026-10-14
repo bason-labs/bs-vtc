@@ -16,6 +16,7 @@ import {
   PluginManifestSchema,
   promptShaFor,
   ROLE_CONTRACTS_ASSET,
+  ROLES_CHANGELOG,
   ROLE_MCP_TOOLS,
   RoleContractSchema,
   sha256Hex,
@@ -41,6 +42,7 @@ import { agentInstructions, buildInstructions, type InstructionSources } from ".
 import { EDITABLE_IN_PACK_ROLES, rolePromptAssetPath } from "./prompt-parts.js";
 import { skillsForAgent, skillTextFor } from "./role-skills.js";
 import { loadRoles, type LoadedRole } from "./role-source.js";
+import { autoTemplateFiles, checkRolesChangelog } from "./templates.js";
 import type {
   CompileError,
   CompileOptions,
@@ -52,7 +54,16 @@ import type {
 
 const SKILL_NAME = /^[a-z0-9]+(-[a-z0-9]+)*$/;
 const SHARED_FRAGMENTS = new Set(["result-protocol.md", "advisor-protocol.md", "lens-reviewer.md"]);
-const IGNORED = new Set(["roles/README.md", "skills/README.md", "plugins/README.md"]);
+/**
+ * Documentation the compiler does not emit. `roles/CHANGELOG.md` (`ROLES_CHANGELOG`, D-bv) is the
+ * record of role prompt changes that automatic Lookback PRs append to.
+ */
+const IGNORED = new Set([
+  "roles/README.md",
+  ROLES_CHANGELOG,
+  "skills/README.md",
+  "plugins/README.md",
+]);
 
 interface Skill {
   readonly name: string;
@@ -242,7 +253,7 @@ const checkLayout = (files: readonly SourceFile[], errors: CompileError[]): void
     const known =
       /^roles\/[^_/][^/]*\/.+$/.test(path) ||
       /^skills\/[^/]+\/.+$/.test(path) ||
-      /^plugins\/common\/(skills|commands)\/.+$/.test(path);
+      /^plugins\/common\/(skills|commands|templates)\/.+$/.test(path);
     if (!known) errors.push({ path, message: "unexpected file; see the README of its directory" });
   }
 };
@@ -514,10 +525,13 @@ interface TargetInput {
   readonly sources: InstructionSources;
   readonly notice: string;
   readonly editableInPack: readonly string[];
+  /** The automatic PR, issue and CHANGELOG templates (`templates.ts`), already checked. */
+  readonly templates: readonly EmittedFile[];
 }
 
 /**
- * One host's plugin tree: NOTICE, skills, agents and their prompt parts, the host's hand-written
+ * One host's plugin tree: NOTICE, skills, agents and their prompt parts, the automatic PR, issue
+ * and CHANGELOG templates (`vtc/templates/`), the host's hand-written
  * files, commands (a Claude Code command, a Codex skill), the MCP entry (hand-written and checked
  * for Claude Code, generated as the portable `mcp.json` for Codex), the hook wiring,
  * `vtc/role-contracts.json` and `vtc-manifest.json`. A path emitted twice is an error, so a
@@ -532,6 +546,7 @@ const emitTarget = (host: HostId, input: TargetInput, errors: CompileError[]): E
     ...skillFiles(host, input.skills),
     ...agents.map((a) => ({ path: `agents/${a.name}.${ext}`, text: render(a) })),
     ...promptPartFiles(agents),
+    ...input.templates,
     ...verbatim(input.files, `plugins/${host}/`),
   ];
   const skills: PluginManifestSkill[] = input.skills.map((s) => ({
@@ -623,6 +638,7 @@ export const compilePlugins = (
   }
   requireFile(files, "roles/NOTICE", errors);
   requireFile(files, "roles/_shared/result-protocol.md", errors);
+  checkRolesChangelog(files, errors);
 
   const loaded = loadRoles(files);
   if (!loaded.ok) errors.push(...loaded.errors);
@@ -658,6 +674,7 @@ export const compilePlugins = (
     sources,
     notice: text("roles/NOTICE") ?? "",
     editableInPack,
+    templates: autoTemplateFiles(files, errors),
   };
   const targets = {
     "claude-code": emitTarget("claude-code", input, errors),

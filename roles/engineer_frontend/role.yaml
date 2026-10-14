@@ -4,8 +4,10 @@
 #     pasted editor-integration mission and FID were dropped, INP replaces FID)
 #   design/design-ui-finish-gate-reviewer.md (states and responsive priority are part of done)
 #   testing/testing-accessibility-auditor.md (keyboard, focus and name checks)
+# 2.0.0: build to the G2 direction the pack names (spine §5 reading 179); a locked-core
+# edit, so MAJOR (D-bm).
 id: engineer_frontend
-version: 1.0.0
+version: 2.0.0
 kind: engineer_profile
 discipline: frontend
 mission: >-

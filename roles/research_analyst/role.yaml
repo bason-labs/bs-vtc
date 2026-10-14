@@ -5,9 +5,10 @@
 #   testing/testing-tool-evaluator.md (weighted matrix for library or vendor choice)
 # New: software-source evidence tiers, citations the engine resolves, untrusted-content rule;
 # discovery with the host's own web search and page fetch (H-3, spine §5 reading 156); a
-# locked-core edit, so MAJOR (D-bm, reading 167).
+# locked-core edit, so MAJOR (D-bm, reading 167). 4.0.0: the host's web tools are named by the
+# contract's host web line, because Codex gives cached search only (D-cf, reading 200).
 id: research_analyst
-version: 3.0.0
+version: 4.0.0
 kind: core
 mission: >-
   Answer the research questions a new project or large feature raises with a brief in which every

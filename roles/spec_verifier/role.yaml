@@ -5,8 +5,10 @@
 #   specialized/specialized-workflow-architect.md ("verify against the code; report gaps only")
 #   testing/testing-accessibility-auditor.md (per-criterion conformance rule)
 #   research/research-synthesist.md ("state what was not found")
+# 3.0.0: on an automatic run the issue is the spec (D-cd, spine §5 reading 198); a locked-core
+# edit, so MAJOR (D-bm).
 id: spec_verifier
-version: 2.0.0
+version: 3.0.0
 kind: core
 mission: >-
   Judge one acceptance criterion against the evidence: PASS, FAIL or UNKNOWN, citing the tests,
