@@ -213,16 +213,34 @@ describe("AD-21 rules 1 and 2: the pinned editable section goes in the task pack
     await off.release();
   });
 
-  it("runs the compiled prompt for an agent that carries its own editable section", async () => {
-    for (const plugins of [createPluginCatalog({}), switched(LOCKED, false)]) {
+  it("applies nothing to an agent that carries its own editable section, and records why (reading 176)", async () => {
+    for (const [plugins, why] of [
+      [createPluginCatalog({}), /no manifest entry/],
+      [switched(LOCKED, false), /carries its own editable section/],
+    ] as const) {
       const h = createHarness({ plugins });
       h.engine.setPromptPins(pinning("repo_cartographer"));
       await start(h);
       const carto = only((await h.engine.next({}, CLAUDE)).actions, "repo_cartographer");
       expect(ofType(h, "role.dispatched")[0]?.data).not.toHaveProperty("editable_sha256");
       expect(readFileSync(join(h.repo, carto.pack), "utf8").startsWith("## Dispatch")).toBe(true);
+      const incidents = ofType(h, "incident.recorded").filter(
+        (e) => e.data.kind === "prompt_selection",
+      );
+      expect(incidents).toHaveLength(1);
+      expect(String(incidents[0]?.data.detail)).toMatch(/vtc-repo-cartographer/);
+      expect(String(incidents[0]?.data.detail)).toMatch(why);
       await h.release();
     }
+  });
+
+  it("records nothing for an agent that cannot take a pin when none names it", async () => {
+    const h = createHarness({ plugins: switched(LOCKED, false) });
+    h.engine.setPromptPins(pinning("engineer"));
+    await start(h);
+    only((await h.engine.next({}, CLAUDE)).actions, "repo_cartographer");
+    expect(ofType(h, "incident.recorded")).toEqual([]);
+    await h.release();
   });
 });
 

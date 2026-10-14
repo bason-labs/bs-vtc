@@ -19,6 +19,8 @@ const both = (tier: ModelTier, effort: "low" | "medium" | "high" = "medium") =>
 const role = (
   input: Omit<RoleContractInput, "version" | "budget"> & {
     readonly budget?: RoleContractInput["budget"];
+    /** The role's `version` in `roles/<role>/role.yaml` (default 1.0.0). */
+    readonly version?: string;
   },
 ): RoleContract =>
   RoleContractSchema.parse({ version: "1.0.0", budget: { context_tokens: 60_000 }, ...input });
@@ -44,6 +46,7 @@ export const FIXTURE_ROLES: readonly RoleContract[] = [
   }),
   role({
     id: "research_analyst",
+    version: "2.1.0",
     kind: "core",
     mission: "Research a new idea or a large feature with cited sources.",
     inputs: ["request", "repo_map"],
@@ -240,6 +243,8 @@ export const FIXTURE_ROLES: readonly RoleContract[] = [
   }),
   role({
     id: "spec_verifier",
+    // D-bl (spine §5 reading 166): switched to editable_in_pack, a MAJOR role version
+    version: "2.0.0",
     kind: "core",
     mission: "Judge one acceptance criterion against the built code, with evidence.",
     inputs: ["acceptance_criterion", "traceability_report", "test_results", "diff", "spec"],

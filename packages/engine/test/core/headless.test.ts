@@ -274,6 +274,39 @@ describe(
       await h.release();
     });
 
+    it("a headless Codex run of an agent that carries its own section takes a pin (reading 176)", async () => {
+      const PINNED = "Name the entry points first.";
+      const h = createHarness({
+        plugins: compiledPlugins(),
+        codex: { headless: frontHalf, authStatus: signedIn("codex", true) },
+      });
+      h.engine.setPromptPins((target) =>
+        target.role === "repo_cartographer"
+          ? {
+              version: {
+                role: target.role,
+                host: target.host,
+                locked_sha256: sha256Hex(LOCKED),
+                editable_sha256: sha256Hex(PINNED),
+                effective_sha256: effectivePromptSha(LOCKED, PINNED),
+              },
+              text: PINNED,
+            }
+          : null,
+      );
+      await start(h, CODEX);
+      await next(h, CODEX);
+      const dispatched = ofType(h, "role.dispatched")[0];
+      expect(dispatched?.prompt_sha).toBe(effectivePromptSha(LOCKED, PINNED));
+      expect(dispatched?.data.editable_sha256).toBe(sha256Hex(PINNED));
+      const pack = readFileSync(join(h.repo, String(dispatched?.data.pack)), "utf8");
+      expect(pack.startsWith(`## ${TASK_PACK_HEURISTICS_SECTION}\n\n${PINNED}\n`)).toBe(true);
+      expect(h.launched[0]?.request.prompt.startsWith(`${LOCKED}\n`)).toBe(true);
+      expect(ofType(h, "incident.recorded")).toEqual([]);
+      await h.engine.settle();
+      await h.release();
+    });
+
     it("never runs a role without its instructions: texts missing or not the manifest's fail the step", async () => {
       for (const plugins of [
         compiledPlugins({ texts: false }),
