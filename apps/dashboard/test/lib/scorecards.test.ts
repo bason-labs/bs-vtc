@@ -163,4 +163,36 @@ describe("lookbackActivity (lookback.* events)", () => {
     });
     expect(items[0]?.detail).toMatch(/no AI tiebreak.*no scorecard.*T-2, T-4/);
   });
+
+  it("says when no canary can start from a Claude-led run's proposals (readings 180 and 182(8))", () => {
+    const claude = lookbackActivity([
+      w3Event(96, "lookback.dispatched", {
+        target_role: "spec_verifier",
+        target_host: "claude-code",
+        train_failures: 2,
+      }),
+      w3Event(97, "lookback.dispatched", {
+        target_role: "engineer",
+        target_mode: "fix",
+        target_host: "claude-code",
+        train_failures: 1,
+      }),
+      w3Event(98, "lookback.dispatched", {
+        target_role: "engineer",
+        target_host: "codex",
+        train_failures: 4,
+      }),
+    ]);
+    expect(claude.noCanary).toEqual([
+      "spec_verifier · claude-code",
+      "engineer (fix) · claude-code",
+    ]);
+    const [codex, fix, verdict] = claude.items;
+    expect(verdict?.detail).toMatch(
+      /^2 attributed train failures\. No canary can start for it from a Claude-led run in this version \(spine §5 readings 180 and 182\); vtc lookback pin still pins a version\.$/,
+    );
+    expect(fix?.detail).toMatch(/No canary can start for it from a Claude-led run/);
+    expect(codex?.detail).toBe("4 attributed train failures");
+    expect(lookbackActivity(LOOKBACK_EVENTS).noCanary).toEqual(["engineer · claude-code"]);
+  });
 });

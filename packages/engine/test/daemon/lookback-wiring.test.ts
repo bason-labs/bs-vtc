@@ -516,11 +516,12 @@ describe("RETRO replays a recorded proposal end to end (AD-21 rule 6, reading 17
   }, 120_000);
 });
 
-// OPEN SPINE DEVIATION, escalated to the Lead: reading 166 says `spec_verifier` is the first role a
-// pin and a replay reach on both hosts, and §7 waits on its A/A comparison; the engine refuses
-// verdict-role replays until a verdict grader or an amendment of readings 166/176 is decided. These
-// tests pin today's interim behaviour so the gap stays visible; they do not settle it.
-describe("which replays the shipped plugins can reach today (open deviation from spine §5 readings 166 and 176, pending the Lead)", () => {
+// Spine §5 reading 180 (Lead decision 2026-10-14, pending human review): a verdict role takes pins
+// but is not replayed in v1, so with the shipped plugins on a Claude Lead no role is both pinnable
+// and replayable, and `vtc lookback approve` cannot start a canary there. Reading 182(8) sends that
+// to the human as a question; these tests keep the gap visible until it is answered (an Engineer
+// switched to editable_in_pack after its A/A on a Codex-led run, or a verdict grader).
+describe("which replays the shipped plugins can reach on a Claude Lead (spine §5 readings 180 and 182(8))", () => {
   it("compiled as shipped on a Claude Lead, no proposal's replay runs: the Engineer carries its own section, and the Spec Verifier, the one switched role, changes no file", async () => {
     const { catalog } = shippedPlugins();
     const h = createHarness({ plugins: catalog, project: { merge_level: 1 } });
@@ -656,7 +657,7 @@ describe("which replays the shipped plugins can reach today (open deviation from
       /proposal p-engineer waits for the next RETRO: vtc-engineer cannot run a candidate: it carries its own editable section/,
     );
     expect(notices).toMatch(
-      /proposal p-spec_verifier waits for the next RETRO: vtc-spec-verifier changes no file/,
+      /proposal p-spec_verifier waits for the next RETRO: vtc-spec-verifier changes no file.*\(spine §5 reading 180\)/,
     );
     await h.release();
   }, 60_000);

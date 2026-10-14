@@ -40,6 +40,18 @@ export const ROLE_PROMPTS_ASSET_DIR = "vtc/prompts";
  */
 export const EDITABLE_IN_PACK_ROLES: readonly string[] = ["spec_verifier"];
 
+/**
+ * Roles a Lookback replay can grade on a Claude-led run (spine §5 readings 176, 180 and 182(8)):
+ * the {@link EDITABLE_IN_PACK_ROLES} that change files. A Claude trial loads the compiled agent, so
+ * only a switched role runs a candidate; a verdict role leaves the same base for both arms, so the
+ * engine does not replay it (reading 180). Empty in v1: the one switched role, `spec_verifier`, is
+ * a verdict role, so no canary can start from a Claude-led run (a canary starts only from a
+ * replay); Codex-led headless runs replay every role that changes files. The dashboard's Lookback
+ * view reads it; `packages/cli`'s shipped-plugin test checks it against the engine's
+ * `replayReach` on the real compiled plugin. New in 4.12.0.
+ */
+export const CLAUDE_LEAD_REPLAYABLE_ROLES: readonly string[] = [];
+
 export type RolePromptPart = "locked" | "editable";
 
 /** Pure: the plugin asset path of one prompt section of one compiled agent. */

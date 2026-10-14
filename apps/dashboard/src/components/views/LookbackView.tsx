@@ -123,6 +123,15 @@ function Activity({ run }: { run: string }) {
         </div>
       </CardHeader>
       {truncated ? <EventLogTruncated className="mb-3" /> : null}
+      {activity.noCanary.length === 0 ? null : (
+        <p role="note" className="mb-3 text-xs text-warn-fg" data-testid="lookback-no-canary">
+          No canary can start for {activity.noCanary.join(", ")} from a Claude-led run in this
+          version: a canary starts only from a replay, and a Claude-led run replays only a role that
+          takes a pin and changes files, which no shipped role does yet (spine §5 readings 180 and
+          182). <code className="font-mono">vtc lookback pin</code> still pins a version, and a
+          Codex-led headless run replays and canaries end to end.
+        </p>
+      )}
       {activity.canaries.length === 0 ? null : (
         <ul aria-label="Canaries" className="mb-3 space-y-2">
           {activity.canaries.map((c) => (

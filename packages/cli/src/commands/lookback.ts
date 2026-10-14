@@ -22,12 +22,19 @@
  * agent (Claude Code), so the version would reach no run and each dispatch records a
  * `prompt_selection` incident. A Codex target that is not `editable_in_pack` gets a note: the pin
  * reaches its headless runs only. The gesture still goes ahead after the human's yes.
+ *
+ * `approve` also warns, while no canary of the target is running, when no replay of it can run
+ * in this version (`core.replayReach`, spine §5 readings 180 and 182(8)): a verdict role is not
+ * replayed, and on Claude Code only an `editable_in_pack` role runs a candidate. A canary starts
+ * only from a replay, so with the shipped plugins none can start from a Claude-led run; the
+ * warning says so and points at `vtc lookback pin`.
  */
 import { join } from "node:path";
 import { core, git } from "@vtc/engine";
 import {
   agentNameFor,
   engineRepoKey,
+  type HostId,
   HostIdSchema,
   redactSecrets,
   RoleIdSchema,
@@ -44,6 +51,7 @@ import {
 import {
   bytesSha256,
   checkLockedCore,
+  describeTarget,
   findPromptVersion,
   pinReach,
   planGesture,
@@ -74,6 +82,20 @@ const USAGE = [
 ].join("\n");
 
 const GESTURES: readonly Gesture[] = ["approve", "pin", "rollback"];
+
+/** Whether a canary of the target runs on this project (a pins file that cannot be read: no). */
+const canaryRunning = (vtcHome: string, repoKey: string, target: PinTarget): boolean => {
+  try {
+    return (readPinsFile(vtcHome).pins.projects[repoKey]?.canaries ?? []).some(
+      (c) =>
+        c.role === target.role &&
+        c.host === target.host &&
+        (c.mode ?? null) === (target.mode ?? null),
+    );
+  } catch {
+    return false;
+  }
+};
 
 /** The locked core this vtc's bundled plugin carries for the target's agent, or `undefined`. */
 export type LockedCoreOf = (target: PinTarget) => string | undefined;
@@ -110,10 +132,52 @@ export const editableInPackOf =
 
 export const installedEditableInPack: EditableInPackOf = editableInPackOf(() => runtime().assets);
 
+/**
+ * Whether the target's role changes files in its mode (`core.roleChangesFiles` over this vtc's
+ * bundled role contracts, `core.compiledRoleContracts`), or `undefined` when that cannot be told
+ * (no such role, or no readable contracts): the gesture then does not warn on it.
+ */
+export type ChangesFilesOf = (target: PinTarget) => boolean | undefined;
+
+/** {@link ChangesFilesOf} over an asset bundle's compiled role contracts. */
+export const changesFilesOf =
+  (assets: () => AssetBundle): ChangesFilesOf =>
+  (target) => {
+    try {
+      const contract = core.compiledRoleContracts(assets()).find((c) => c.id === target.role);
+      return contract === undefined ? undefined : core.roleChangesFiles(contract, target.mode);
+    } catch {
+      return undefined;
+    }
+  };
+
+export const installedChangesFiles: ChangesFilesOf = changesFilesOf(() => runtime().assets);
+
+const LEAD_NAME: Readonly<Record<HostId, string>> = { "claude-code": "Claude", codex: "Codex" };
+
+/**
+ * Why `approve` cannot start a canary of the target in this version, or `undefined` (readings 180
+ * and 182(8)): no replay of it can run on a run its host leads, and a canary starts only from one.
+ */
+export const noCanaryWarning = (
+  target: PinTarget,
+  editableInPack: boolean,
+  changesFiles: boolean | undefined,
+): string | undefined => {
+  const why = core.replayReach(
+    { agent: agentNameFor(target.role, target.mode), host: target.host },
+    { editableInPack, changesFiles: changesFiles ?? true },
+  );
+  return why === null
+    ? undefined
+    : `no canary of ${describeTarget(target)} can start from a ${LEAD_NAME[target.host]}-led run in this version: ${why}. vtc lookback pin pins a version without a replay (spine §5 reading 182(8))`;
+};
+
 export const createLookbackCommand = (
   deps: () => GestureDeps = defaultGestureDeps,
   lockedCore: LockedCoreOf = installedLockedCore,
   editableInPack: EditableInPackOf = installedEditableInPack,
+  changesFiles: ChangesFilesOf = installedChangesFiles,
 ): CommandSpec => ({
   name: "lookback",
   summary:
@@ -173,9 +237,15 @@ export const createLookbackCommand = (
         }
         if (checked.note !== undefined) ctx.io.out(checked.note);
         // reading 176: say before the human decides when the pin cannot reach a run
-        const reach = pinReach(target, editableInPack(target));
+        const inPack = editableInPack(target);
+        const reach = pinReach(target, inPack);
         if (reach.warning !== undefined) ctx.io.err(`vtc lookback: warning: ${reach.warning}`);
         if (reach.note !== undefined) ctx.io.out(reach.note);
+        // readings 180 and 182(8): say when no replay, so no canary, can start for the target
+        if (gesture === "approve" && !canaryRunning(ctx.vtcHome, repoKey, target)) {
+          const none = noCanaryWarning(target, inPack, changesFiles(target));
+          if (none !== undefined) ctx.io.err(`vtc lookback: warning: ${none}`);
+        }
       }
       const reason = (values.reason ?? "").trim() || `vtc lookback ${gesture} at the terminal`;
       const plan = (now: Date) => {

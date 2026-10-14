@@ -13,6 +13,9 @@
  *   the engine's own Lookback tests build their plugins from (D-bl, reading 166), and a pin
  *   reaches each such role through the engine's catalog of the real compiled plugin.
  * - An engineer profile's locked asset opens with the Engineer's prompt (D-br, reading 172).
+ * - The roles a Claude-led run can replay (switched to `editable_in_pack` and changing files) are
+ *   the shared `CLAUDE_LEAD_REPLAYABLE_ROLES` the dashboard's Lookback view reads, and the
+ *   engine's `replayReach` refuses every other compiled Claude agent (readings 180, 182(8)).
  */
 import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
@@ -21,6 +24,7 @@ import { compilePlugins, readSources } from "@vtc/compiler";
 import { core } from "@vtc/engine";
 import {
   agentNameFor,
+  CLAUDE_LEAD_REPLAYABLE_ROLES,
   EDITABLE_IN_PACK_ROLES,
   HUMAN_ONLY_TOOLS,
   rolePromptAssetPath,
@@ -143,6 +147,25 @@ describe("the compiled plugins switch exactly the shared EDITABLE_IN_PACK_ROLES 
       }
     });
   }
+});
+
+describe("the roles a Claude-led run can replay are the shared CLAUDE_LEAD_REPLAYABLE_ROLES (readings 180, 182(8))", () => {
+  it("are the switched roles that change files, and replayReach refuses every other Claude agent", () => {
+    const replayable = new Set<string>();
+    for (const agent of claudeAgents) {
+      const contract = contracts.get(agent.role);
+      if (contract === undefined) throw new Error(`no contract for ${agent.role}`);
+      const why = core.replayReach(
+        { agent: agent.name, host: "claude-code" },
+        {
+          editableInPack: agent.editable_in_pack === true,
+          changesFiles: core.roleChangesFiles(contract, agent.mode ?? undefined),
+        },
+      );
+      if (why === null) replayable.add(agent.role);
+    }
+    expect([...replayable].sort()).toEqual([...CLAUDE_LEAD_REPLAYABLE_ROLES].sort());
+  });
 });
 
 describe("an engineer profile's locked asset opens with the Engineer's prompt (D-br, reading 172)", () => {
