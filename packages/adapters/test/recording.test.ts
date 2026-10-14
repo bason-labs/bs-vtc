@@ -77,7 +77,7 @@ describe("redactRecording (live-check --record)", () => {
 });
 
 describe("redactRecording: what names the owner's own setup (closing round, spine §7)", () => {
-  it("replaces the init event's plugins, skills, commands, memory paths and messaging socket with a placeholder", () => {
+  it("replaces the init event's plugins (but vtc's own), skills, commands, memory paths and messaging socket with a placeholder", () => {
     const [line] = redactRecording(
       [
         JSON.stringify({
@@ -86,7 +86,10 @@ describe("redactRecording: what names the owner's own setup (closing round, spin
           session_id: "s",
           tools: ["Read", "StructuredOutput"],
           agents: ["Explore", "vtc:vtc-qa-judge"],
-          plugins: [{ name: "private-plugin", path: "/opt/private/plugin", source: "x@y" }],
+          plugins: [
+            { name: "private-plugin", path: "/opt/private/plugin", source: "x@y" },
+            { name: "vtc", path: "/Users/someone/arms/a", source: "vtc@inline", version: "0.1.0" },
+          ],
           skills: ["private-skill", "vtc:architect"],
           slash_commands: ["private-command"],
           memory_paths: { auto: "/somewhere/memory/" },
@@ -102,7 +105,11 @@ describe("redactRecording: what names the owner's own setup (closing round, spin
       session_id: "<session-id>",
       tools: ["Read", "StructuredOutput"],
       agents: ["Explore", "vtc:vtc-qa-judge"],
-      plugins: "<redacted>",
+      // the vtc plugin's entry is what a replay arm's load proof reads (D-cg): it stays
+      plugins: [
+        "<redacted>",
+        { name: "vtc", path: "<home>/arms/a", source: "vtc@inline", version: "0.1.0" },
+      ],
       skills: "<redacted>",
       slash_commands: "<redacted>",
       memory_paths: "<redacted>",

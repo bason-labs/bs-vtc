@@ -1,15 +1,20 @@
 /**
  * Claude Code's login state through `claude auth status --json` (AD-25 rule 3): exit 0 means
- * logged in; of the JSON only `loggedIn`, the `authMethod` label and whether `authMethod` or
+ * logged in; of the JSON only `loggedIn`, the `authMethod` label, the `apiProvider` name and whether `authMethod` or
  * `apiKeySource` names an API key are read (spine §5 reading 48, the same command `vtc doctor`
  * runs). Never a credential read (AD-9).
  *
- * Billing (D-bq, spine §5 reading 171): `api_key` when the status reports an API key (an
- * `authMethod` or `apiKeySource` that names an API-key environment variable or helper); the
- * subscription only for a known subscription login (`authMethod` `claude.ai` or `oauth_token`)
- * on Anthropic's own service (`apiProvider` absent or `firstParty`); otherwise unknown (`null`),
- * never a guess. A `third_party` login or a cloud `apiProvider` (Bedrock, Vertex, Foundry, a
- * gateway) bills that provider per token, not the subscription, so it is never `subscription`.
+ * Billing (D-bq and D-ci, spine §5 readings 171 and 203), from what the status prints:
+ * - `provider` when a third party bills: an `apiProvider` other than `firstParty` (Bedrock,
+ *   Vertex, Foundry, a gateway; 2.1.299 also names `anthropicAws` and `mantle`) or the
+ *   `third_party` method. It comes first, because that provider bills whatever API key the
+ *   environment also names.
+ * - `api_key` when the status reports an API key (an `authMethod` or `apiKeySource` that names an
+ *   API-key environment variable or helper).
+ * - `subscription` only for a first-party `claude.ai` login.
+ * - Otherwise unknown (`null`), never a guess. That includes `oauth_token`: in 2.1.299 it covers
+ *   every token source but `claude.ai` and the key helper (a `setup-token` login, but also
+ *   `ANTHROPIC_AUTH_TOKEN` for a proxy and a profile token), and the status never says which.
  */
 import type { HostBilling } from "@vtc/shared";
 import type { AuthStatusCommand } from "../common/auth-status.js";
@@ -20,19 +25,26 @@ import { CLAUDE_BINARY, HOST } from "./command.js";
 /** `api_key`, `apiKey`, `apiKeyHelper` or an API-key environment variable: billed to an API key. */
 const API_KEY = /api[_ -]?key/iu;
 
-/** The `authMethod` labels of a Claude subscription login (claude.ai sign-in, `setup-token`). */
-const SUBSCRIPTION_METHODS: ReadonlySet<string> = new Set(["claude.ai", "oauth_token"]);
+/** The `authMethod` of a Claude subscription login: the claude.ai sign-in, nothing else. */
+const SUBSCRIPTION_METHOD = "claude.ai";
 
-/** Anthropic's own service; any other `apiProvider` bills a cloud account per token. */
+/** The `authMethod` Claude prints for any login through a third-party provider. */
+const THIRD_PARTY_METHOD = "third_party";
+
+/** Anthropic's own service; any other `apiProvider` bills a cloud account or gateway. */
 const FIRST_PARTY = "firstParty";
 
 const billingOf = (status: Record<string, unknown>): HostBilling | null => {
   const method = text(status.authMethod);
   const source = text(status.apiKeySource);
-  if ([method, source].some((value) => value !== null && API_KEY.test(value))) return "api_key";
   const provider = status.apiProvider;
-  if (provider !== undefined && provider !== null && provider !== FIRST_PARTY) return null;
-  return method !== null && SUBSCRIPTION_METHODS.has(method) ? "subscription" : null;
+  // a provider value that is not a plain name: unknown
+  if (provider !== undefined && provider !== null && typeof provider !== "string") return null;
+  if ((typeof provider === "string" && provider !== FIRST_PARTY) || method === THIRD_PARTY_METHOD) {
+    return "provider";
+  }
+  if ([method, source].some((value) => value !== null && API_KEY.test(value))) return "api_key";
+  return method === SUBSCRIPTION_METHOD ? "subscription" : null;
 };
 
 export const CLAUDE_AUTH_STATUS: AuthStatusCommand = {

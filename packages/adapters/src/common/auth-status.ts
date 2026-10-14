@@ -15,7 +15,8 @@ import {
   type HostCommand,
   type HostId,
 } from "@vtc/shared";
-import type { SpawnedProcess, Spawner } from "./process.js";
+import { createCommandOutputRunner } from "./command-output.js";
+import type { Spawner } from "./process.js";
 
 /** How one host reports its login. */
 export interface AuthStatusCommand {
@@ -54,26 +55,13 @@ const MAX_OUTPUT_CHARS = 16_000;
 export const methodLabel = (value: unknown): string | null =>
   typeof value === "string" && /^[A-Za-z0-9][A-Za-z0-9 ._-]{0,99}$/u.test(value) ? value : null;
 
-/** How long to wait for the output to drain after the command exited. */
-const DRAIN_MS = 1000;
-
-/** Reads a stream's text (bounded) and resolves `done` when it ends or closes. */
-const collect = (stream: NodeJS.ReadableStream) => {
-  let text = "";
-  stream.setEncoding("utf8");
-  stream.on("data", (chunk: string) => {
-    if (text.length < MAX_OUTPUT_CHARS) text = (text + chunk).slice(0, MAX_OUTPUT_CHARS);
-  });
-  const done = new Promise<void>((resolve) => {
-    stream.once("end", resolve);
-    stream.once("close", resolve);
-  });
-  return { text: () => text, done };
-};
-
 /** Runs status commands and stops any still running on `dispose()` (§15: no orphans). */
 export const createAuthStatusRunner = (options: AuthStatusOptions) => {
-  const running = new Set<SpawnedProcess>();
+  const runner = createCommandOutputRunner({
+    spawner: options.spawner,
+    timeoutMs: options.timeoutMs ?? DEFAULT_TIMEOUT_MS,
+    maxChars: MAX_OUTPUT_CHARS,
+  });
   return {
     async check(status: AuthStatusCommand): Promise<HostAuthStatus> {
       // the method and billing are only ever reported for a login the command confirmed
@@ -89,42 +77,16 @@ export const createAuthStatusRunner = (options: AuthStatusOptions) => {
           billing: logged_in === true ? billing : null,
           checked_at: options.now().toISOString(),
         });
-      let child: SpawnedProcess;
-      try {
-        // a directory only the user can write, and no repo's: no planted file or repo settings
-        // are anywhere near the status command
-        child = options.spawner(status.command, { cwd: options.cwd ?? homedir(), stdin: "closed" });
-      } catch {
-        return result(null, null);
-      }
-      running.add(child);
-      const stdout = collect(child.stdout);
-      const stderr = collect(child.stderr);
-      const timer = setTimeout(() => {
-        child.kill("SIGKILL");
-      }, options.timeoutMs ?? DEFAULT_TIMEOUT_MS);
-      timer.unref();
-      try {
-        const exit = await child.exited;
-        if (exit.error !== null || exit.code === null) return result(null, null);
-        if (exit.code !== 0) return result(false, null);
-        let drain: NodeJS.Timeout | undefined;
-        await Promise.race([
-          Promise.all([stdout.done, stderr.done]),
-          new Promise<void>((resolve) => {
-            drain = setTimeout(resolve, DRAIN_MS);
-          }),
-        ]);
-        clearTimeout(drain);
-        const read = status.read({ stdout: stdout.text(), stderr: stderr.text() });
-        return read.loggedOut ? result(false, null) : result(true, read.method, read.billing);
-      } finally {
-        clearTimeout(timer);
-        running.delete(child);
-      }
+      // a directory only the user can write, and no repo's: no planted file or repo settings
+      // are anywhere near the status command
+      const output = await runner.run(status.command, options.cwd ?? homedir());
+      if (output.kind === "failed") return result(null, null);
+      if (output.code !== 0) return result(false, null);
+      const read = status.read({ stdout: output.stdout, stderr: output.stderr });
+      return read.loggedOut ? result(false, null) : result(true, read.method, read.billing);
     },
     dispose(): void {
-      for (const child of running) child.kill("SIGKILL");
+      runner.dispose();
     },
   };
 };

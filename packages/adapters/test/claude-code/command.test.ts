@@ -1,4 +1,5 @@
-import { homedir } from "node:os";
+import { mkdirSync, mkdtempSync, realpathSync, rmSync, symlinkSync } from "node:fs";
+import { homedir, tmpdir } from "node:os";
 import { join, win32 } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import {
@@ -158,6 +159,7 @@ describe("Claude sandboxProfile (§12.1, AD-9)", () => {
       perPathWriteDeny: true,
       network: true,
       secretsUnreadable: true,
+      readDeny: true,
     });
     expect(argAfter(p.cliArgs, "--allowedTools")).toBe(
       "Read,Grep,Glob,ToolSearch,StructuredOutput",
@@ -632,6 +634,149 @@ describe("Claude sandboxProfile (§12.1, AD-9)", () => {
     });
   });
 
+  describe("replay read isolation: SandboxProfileRequest.readDeny (spine §5 readings 178 and 204)", () => {
+    const TRIAL_CWD = "/home/dev/.vtc/guard/lookback/trials/t-1/checkout";
+    const REPO = "/work/app";
+    const withReadDeny = (tools: RoleTools, readDeny?: readonly string[], cwd = TRIAL_CWD) =>
+      createClaudeCodeAdapter(HOMES).sandboxProfile({
+        ...profileRequest(tools),
+        cwd,
+        ...(readDeny === undefined ? {} : { readDeny }),
+      });
+
+    it("denies reading every readDeny path from the file tools and from the sandboxed shell, and says so", () => {
+      for (const tools of [READ_ONLY, WRITE_SCOPED, ENGINEER, { ...READ_ONLY, host_web: true }]) {
+        const p = withReadDeny(tools, [REPO, `${REPO}/.git`]);
+        expect(p.enforced.readDeny).toBe(true);
+        const settings = settingsOf(p);
+        expect(settings.permissions.deny).toEqual(
+          expect.arrayContaining([
+            "Read(//work/app)",
+            "Read(//work/app/**)",
+            "Read(//work/app/.git)",
+            "Read(//work/app/.git/**)",
+          ]),
+        );
+        expect(settings.sandbox.filesystem.denyRead).toEqual(
+          expect.arrayContaining([REPO, `${REPO}/.git`]),
+        );
+        // everything else stays denied as before
+        expect(settings.permissions.deny.slice(0, 5)).toEqual(UNREADABLE_RULES);
+        expect(settings.sandbox.filesystem.denyRead.slice(0, UNREADABLE.length)).toEqual(
+          UNREADABLE,
+        );
+        // the profile's flags carry the same settings
+        expect(JSON.parse(argAfter(p.cliArgs, "--settings") ?? "{}")).toEqual(p.settings);
+        expect(findForbiddenHostArgs(p.cliArgs)).toEqual([]);
+      }
+    });
+
+    it("without readDeny (absent or empty) nothing more is denied, and the host still enforces every (no) path", () => {
+      const plain = withReadDeny(WRITE_SCOPED);
+      expect(withReadDeny(WRITE_SCOPED, []).settings).toEqual(plain.settings);
+      expect(settingsOf(plain).sandbox.filesystem.denyRead).toEqual(UNREADABLE);
+      expect(plain.enforced.readDeny).toBe(true);
+    });
+
+    it("refuses a readDeny path that is not absolute, or that would cover or sit inside the role's own worktree (it never narrows cwd)", () => {
+      for (const readDeny of [
+        ["work/app"],
+        ["./x"],
+        [""],
+        ["/home/dev/.vtc/guard"],
+        [`${TRIAL_CWD}/src`],
+        [TRIAL_CWD],
+      ]) {
+        expect(() => withReadDeny(READ_ONLY, readDeny), JSON.stringify(readDeny)).toThrow(
+          /readDeny/u,
+        );
+      }
+      expect(() => withReadDeny(READ_ONLY, ["/work/app\nx"])).toThrow(/control/u);
+    });
+
+    it("refuses a readDeny path with a glob character: a rule would read it as a pattern, so the real directory might not match", () => {
+      for (const path of ["/work/a*p", "/work/app?", "/work/[app]", "/work/{app,b}", "/work/a]"]) {
+        expect(() => withReadDeny(READ_ONLY, [path]), path).toThrow(/glob characters/u);
+      }
+    });
+
+    it("denies a symlinked readDeny path under its given and its real name, and a link into the worktree overlaps it", () => {
+      const real = (path: string) => path.replace(/^\/link\//u, "/real/");
+      const build = (readDeny: readonly string[], cwd = TRIAL_CWD) =>
+        claudeSandboxProfile(
+          { ...profileRequest(READ_ONLY), cwd, readDeny },
+          {
+            vtcHome: VTC_HOME,
+            codexHome: CODEX_HOME,
+            claudeConfigDir: CLAUDE_CONFIG,
+            realPath: real,
+          },
+        );
+      const p = build(["/link/app"]);
+      expect(settingsOf(p).permissions.deny).toEqual(
+        expect.arrayContaining([
+          "Read(//link/app)",
+          "Read(//link/app/**)",
+          "Read(//real/app)",
+          "Read(//real/app/**)",
+        ]),
+      );
+      expect(settingsOf(p).sandbox.filesystem.denyRead).toEqual(
+        expect.arrayContaining(["/link/app", "/real/app"]),
+      );
+      expect(p.enforced.readDeny).toBe(true);
+      // a link whose real location covers the worktree, or a worktree reached through a link
+      expect(() => build(["/link/trial"], "/real/trial/checkout")).toThrow(/overlaps/u);
+      expect(() => build(["/real/trial"], "/link/trial/checkout")).toThrow(/overlaps/u);
+      // a real location that is a pattern is refused too
+      expect(() =>
+        claudeSandboxProfile(
+          { ...profileRequest(READ_ONLY), cwd: TRIAL_CWD, readDeny: ["/link/app"] },
+          {
+            vtcHome: VTC_HOME,
+            codexHome: CODEX_HOME,
+            claudeConfigDir: CLAUDE_CONFIG,
+            realPath: () => "/real/a*",
+          },
+        ),
+      ).toThrow(/glob characters/u);
+    });
+
+    it("resolves a readDeny path through a real symlink by default (no file is read)", () => {
+      const dir = realpathSync(mkdtempSync(join(tmpdir(), "vtc-readdeny-")));
+      try {
+        mkdirSync(join(dir, "repo"));
+        symlinkSync(join(dir, "repo"), join(dir, "alias"));
+        const p = withReadDeny(READ_ONLY, [join(dir, "alias")]);
+        expect(settingsOf(p).sandbox.filesystem.denyRead).toEqual(
+          expect.arrayContaining([join(dir, "alias"), join(dir, "repo")]),
+        );
+      } finally {
+        rmSync(dir, { recursive: true, force: true });
+      }
+    });
+
+    it("builds Windows rules in Claude's drive form", () => {
+      const p = claudeSandboxProfile(
+        {
+          ...profileRequest(READ_ONLY),
+          cwd: "C:\\Users\\u\\.vtc\\guard\\t-1",
+          readDeny: ["C:\\work\\app"],
+        },
+        {
+          vtcHome: "C:\\Users\\u\\.vtc",
+          codexHome: "C:\\Users\\u\\.codex",
+          claudeConfigDir: "C:\\Users\\u\\.claude",
+          platformPath: win32,
+        },
+      );
+      expect(settingsOf(p).permissions.deny).toEqual(
+        expect.arrayContaining(["Read(//c/work/app)", "Read(//c/work/app/**)"]),
+      );
+      expect(settingsOf(p).sandbox.filesystem.denyRead).toContain("C:\\work\\app");
+    });
+  });
+
   it("only the install phase reaches package registries", () => {
     const domains = (network: "none" | "registries") =>
       (
@@ -765,6 +910,45 @@ describe("Claude headlessCommand", () => {
     expect(() => adapter.headlessCommand(request(), { host: "codex", id: "t" })).toThrow(/codex/);
     const codexSandbox = { ...profile(READ_ONLY), host: "codex" as const };
     expect(() => adapter.headlessCommand(request({ sandbox: codexSandbox }))).toThrow(/codex/);
+  });
+
+  describe("a Lookback replay arm's own plugin (D-cg, spine §5 reading 201)", () => {
+    const ARM = "/home/dev/.vtc/guard/lookback/arms/trial-1/b";
+
+    it("loads the arm's plugin directory instead of the adapter's, for that run only, fresh and resumed, and writes the debug log next to it", () => {
+      for (const session of [undefined, { host: "claude-code" as const, id: "abc-123" }]) {
+        const args = adapter.headlessCommand(request({ pluginDir: ARM }), session).args;
+        expect(args.filter((arg) => arg === "--plugin-dir")).toHaveLength(1);
+        expect(argAfter(args, "--plugin-dir")).toBe(ARM);
+        expect(args).not.toContain(PLUGIN_DIR);
+        // beside the arm dir, never in it: the host loads the arm in place, unchanged
+        expect(argAfter(args, "--debug-file")).toBe(
+          "/home/dev/.vtc/guard/lookback/arms/trial-1/b.debug.log",
+        );
+        expect(argAfter(args, "--agent")).toBe("vtc:vtc-qa-judge");
+        // the isolation of every role run still holds (AD-25), and no bypass or --bare
+        expect(headlessIsolationGaps("claude-code", args)).toEqual([]);
+        expect(findForbiddenHostArgs(args)).toEqual([]);
+        expect(findDisallowedHostArgs(args)).toEqual([]);
+      }
+      // the next run without an arm loads the adapter's plugin again, with no debug log
+      const plain = adapter.headlessCommand(request()).args;
+      expect(argAfter(plain, "--plugin-dir")).toBe(PLUGIN_DIR);
+      expect(plain).not.toContain("--debug-file");
+    });
+
+    it("runs an arm even when the adapter has no plugin of its own", () => {
+      const bare = createClaudeCodeAdapter(HOMES);
+      expect(argAfter(bare.headlessCommand(request({ pluginDir: ARM })).args, "--plugin-dir")).toBe(
+        ARM,
+      );
+    });
+
+    it("refuses an arm directory that is not an absolute path", () => {
+      for (const pluginDir of ["arms/b", "", "./b", "/"]) {
+        expect(() => adapter.headlessCommand(request({ pluginDir })), pluginDir).toThrow(/plugin/u);
+      }
+    });
   });
 
   it("names plugin agents with the plugin namespace (AD-14 rule 1)", () => {

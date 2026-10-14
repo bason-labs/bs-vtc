@@ -5,12 +5,17 @@
  * Engine-launched runs are unattended (AD-25): an isolated argv, process-group supervision, and
  * `authStatus()` through `claude auth status --json` before every start or resume.
  */
+import { readFileSync, realpathSync, rmSync, statSync } from "node:fs";
 import { homedir } from "node:os";
 import {
+  agentNameFor,
   HOST_CREDENTIAL_DENY_READ,
+  type HeadlessRun,
   type HostAdapter,
   type HostCapabilities,
+  type PluginLoadProof,
   type SessionRef,
+  type SpawnResult,
   type SpawnRoleRequest,
 } from "@vtc/shared";
 import { createAuthStatusRunner } from "../common/auth-status.js";
@@ -18,6 +23,7 @@ import { createRunLauncher, subagentSpawn } from "../common/dispatch.js";
 import { envHome } from "../common/homes.js";
 import { createNodeSpawner, type Spawner } from "../common/process.js";
 import {
+  claudeArmDebugFile,
   claudeHeadlessCommand,
   claudeSandboxProfile,
   claudeSubagentName,
@@ -26,8 +32,14 @@ import {
 import { CLAUDE_AUTH_STATUS } from "./auth.js";
 import { claudeOutcomeAfterExit, parseClaudeEvents } from "./events.js";
 import { installClaudeCode } from "./install.js";
+import { claudePluginLoadProof, DEBUG_LOG_MAX_BYTES } from "./plugin-load.js";
 
-/** §12.1: plugin agents run in the background; `sandbox.filesystem.denyWrite`; `--max-turns`, `--max-budget-usd`. */
+/**
+ * §12.1: plugin agents run in the background; `sandbox.filesystem.denyWrite`; `--max-turns`,
+ * `--max-budget-usd`. Host web is safe (D-cf, spine §5 reading 200): a `host_web` role's profile
+ * denies reading the VTC token, the host credentials and the user's credential stores, from the
+ * tools and from the shell, so a page its `WebFetch` opens cannot be handed one of them.
+ */
 export const claudeCodeCapabilities: HostCapabilities = {
   subagents: true,
   backgroundSubagents: true,
@@ -35,6 +47,7 @@ export const claudeCodeCapabilities: HostCapabilities = {
   headless: true,
   turnCap: true,
   budgetCap: true,
+  safeHostWeb: true,
 };
 
 export interface ClaudeCodeAdapterOptions {
@@ -83,7 +96,82 @@ export interface ClaudeCodeAdapterOptions {
   readonly now?: () => Date;
   /** How long `claude auth status` may run before it is killed. Default 20 s. */
   readonly authTimeoutMs?: number;
+  /**
+   * Keep a replay arm's debug log after its run has ended (default: removed once the load proof
+   * has read it). Only the D-cl check (`scripts/dcl-check.ts`) sets it, to record the log.
+   */
+  readonly keepArmDebugLogs?: boolean;
 }
+
+/** Reads a debug log for the load proof: null when it is missing, unreadable or too large. */
+const readDebugLog = (path: string): string | null => {
+  try {
+    if (statSync(path).size > DEBUG_LOG_MAX_BYTES) return null;
+    return readFileSync(path, "utf8");
+  } catch {
+    return null;
+  }
+};
+
+const realPath = (path: string): string => {
+  try {
+    return realpathSync.native(path);
+  } catch {
+    return path;
+  }
+};
+
+/**
+ * `run` with `pluginLoad()` (D-cg): after the run has ended, which plugin copy it loaded, from its
+ * stream's `init` record and its debug log ({@link claudePluginLoadProof}).
+ *
+ * The debug log can hold the trial's prompt and tool traffic, and it sits in the engine's guard
+ * directory, which roles cannot write but can read. So it lives only while the run does: as soon
+ * as the run has ended the proof is worked out once and the log is removed (unless `keepLog`, for
+ * the D-cl check), whether or not anyone calls `pluginLoad()`. Its size during the run is the
+ * host's; the proof reads at most `DEBUG_LOG_MAX_BYTES` of it. A log left by an engine crash goes
+ * with the trial directory, which the engine owns.
+ */
+const withPluginLoad = (
+  run: HeadlessRun,
+  arm: {
+    readonly armDir: string;
+    readonly agent: string;
+    readonly debugFile: string;
+    readonly keepLog: boolean;
+  },
+): HeadlessRun => {
+  const prove = async (): Promise<PluginLoadProof> => {
+    try {
+      await run.wait();
+      const lines: string[] = [];
+      for await (const line of run.lines()) lines.push(line);
+      return claudePluginLoadProof({
+        armDir: arm.armDir,
+        agent: arm.agent,
+        lines,
+        debugLog: readDebugLog(arm.debugFile),
+        realPath,
+      });
+    } catch (error) {
+      return {
+        loaded: false,
+        reason: `the load proof failed: ${error instanceof Error ? error.message : String(error)}`,
+      };
+    } finally {
+      if (!arm.keepLog) rmSync(arm.debugFile, { force: true });
+    }
+  };
+  const proof = prove();
+  return {
+    command: run.command,
+    pid: run.pid,
+    lines: () => run.lines(),
+    wait: () => run.wait(),
+    kill: () => run.kill(),
+    pluginLoad: () => proof,
+  };
+};
 
 export const createClaudeCodeAdapter = (options: ClaudeCodeAdapterOptions = {}): HostAdapter => {
   const spawner =
@@ -115,14 +203,31 @@ export const createClaudeCodeAdapter = (options: ClaudeCodeAdapterOptions = {}):
   const headlessCommand = (request: SpawnRoleRequest, session?: SessionRef) =>
     claudeHeadlessCommand(request, session, commandOptions);
   const spawn = (request: SpawnRoleRequest, session?: SessionRef) =>
-    Promise.resolve().then(() =>
-      request.dispatch === "subagent"
-        ? subagentSpawn(request, {
-            background: claudeCodeCapabilities.backgroundSubagents,
-            name: claudeSubagentName,
-          })
-        : runs.start(headlessCommand(request, session), request),
-    );
+    Promise.resolve().then((): SpawnResult => {
+      if (request.dispatch === "subagent") {
+        return subagentSpawn(request, {
+          background: claudeCodeCapabilities.backgroundSubagents,
+          name: claudeSubagentName,
+        });
+      }
+      const command = headlessCommand(request, session);
+      if (request.pluginDir === undefined) return runs.start(command, request);
+      // a replay arm (D-cg): a log left by an earlier run must never stand in for this one's
+      const debugFile = claudeArmDebugFile(request.pluginDir);
+      rmSync(debugFile, { force: true });
+      const started = runs.start(command, request);
+      if (started.dispatch !== "headless") return started;
+      const agent = claudeSubagentName(agentNameFor(request.role, request.mode));
+      return {
+        dispatch: "headless",
+        run: withPluginLoad(started.run, {
+          armDir: request.pluginDir,
+          agent,
+          debugFile,
+          keepLog: options.keepArmDebugLogs === true,
+        }),
+      };
+    });
   return {
     host: HOST,
     capabilities: claudeCodeCapabilities,

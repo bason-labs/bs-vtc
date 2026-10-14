@@ -19,7 +19,8 @@
     "typecheck": "tsc -p tsconfig.json",
     "lint": "eslint .",
     "test": "vitest run",
-    "live:check": "bun --conditions=@vtc/source scripts/live-check.ts"
+    "live:check": "bun --conditions=@vtc/source scripts/live-check.ts",
+    "live:dcl": "bun --conditions=@vtc/source scripts/dcl-check.ts"
   },
   "dependencies": {
     "@vtc/shared": "workspace:*"

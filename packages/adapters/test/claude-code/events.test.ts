@@ -104,7 +104,12 @@ describe("Claude parseEvents: recorded headless role runs (2026-10-14)", () => {
   };
 
   it("a run whose agent has the StructuredOutput tool returns structured_output, which re-validates", () => {
-    for (const fixture of ["claude-code/stream-success.jsonl", "claude-code/stream-resume.jsonl"]) {
+    for (const fixture of [
+      "claude-code/stream-success.jsonl",
+      "claude-code/stream-resume.jsonl",
+      // D-cl: the real compiled plugin, unpatched, run as a replay arm (`--plugin-dir <arm>`)
+      "claude-code/stream-arm-success.jsonl",
+    ]) {
       const parsed = parse(lines(fixture));
       const outcome = valid(parsed.outcome);
       expect(outcome, fixture).toMatchObject({
