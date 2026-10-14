@@ -217,6 +217,39 @@ describe("the macOS sandbox-exec profile", () => {
     expect(install).toContain('(deny network-outbound (remote ip "localhost:*"))');
   });
 
+  it("opens only the given loopback ports to a verify-phase command (the visual app server)", () => {
+    const wrapped = createSandboxExecSandbox({ realpath: same }).wrap(["node", "runner.mjs"], {
+      ...spec(),
+      loopbackPorts: [4173, 4173],
+    } as GateJailSpec);
+    const rules = rulesOf(wrapped.args[1] ?? "");
+    const network = rules.filter((r) => /^\((allow|deny) (network|system-socket)/.test(r));
+    expect(network).toEqual([
+      "(allow system-socket)",
+      '(allow network-outbound (remote ip "localhost:4173"))',
+      '(allow network-bind network-inbound (local ip "localhost:4173"))',
+      ...["CHECKOUT", "TEMP", "HOME"].flatMap((k) => [
+        `(allow network-bind network-inbound (local unix-socket (subpath (param "${k}"))))`,
+        `(allow network-outbound (remote unix-socket (subpath (param "${k}"))))`,
+      ]),
+    ]);
+    expect(rules.some((r) => r.includes('"localhost:*"'))).toBe(false);
+    // The install phase never reaches the host loopback, ports or not.
+    const install = rulesOf(
+      sandboxExecProfile({ ...spec({ phase: "install" }), loopbackPorts: [4173] }, same).profile,
+    );
+    expect(install).toContain('(deny network-outbound (remote ip "localhost:*"))');
+    expect(install.some((r) => r.includes("localhost:4173"))).toBe(false);
+    for (const bad of [0, 70_000, 1.5]) {
+      expect(() =>
+        createSandboxExecSandbox({ realpath: same }).wrap(["node"], {
+          ...spec(),
+          loopbackPorts: [bad],
+        } as GateJailSpec),
+      ).toThrow(/not a loopback port/);
+    }
+  });
+
   it("writes only the checkout, temp and home, /dev/null and /dev/zero and its own descriptors, never a terminal", () => {
     const rules = rulesOf(sandboxExecProfile(spec(), same).profile);
     const writes = rules.filter((r) => r.includes("file-write"));
@@ -1039,6 +1072,57 @@ const loopback = () => {
       loopback: "EPERM",
     });
     expect(readdirSync(outside)).toEqual([]);
+  });
+
+  it("reaches only the app server's own loopback port when given one (the visual step)", async () => {
+    const { createServer } = await import("node:net");
+    const work = realpathSync(tempDir("vtc-live-"));
+    const checkout = join(work, "checkout");
+    mkdirSync(checkout);
+    // A host service on another loopback port: the sandboxed command must not reach it.
+    const host = createServer((c) => c.end("HOST\n"));
+    await new Promise<void>((r) => host.listen(0, "127.0.0.1", r));
+    const hostPort = (host.address() as { port: number }).port;
+    const probe = createServer();
+    await new Promise<void>((r) => probe.listen(0, "127.0.0.1", r));
+    const appPort = (probe.address() as { port: number }).port;
+    await new Promise<void>((r) => {
+      probe.close(() => {
+        r();
+      });
+    });
+    const script = `
+const net = require("net"), fs = require("fs"), out = {};
+const server = net.createServer((c) => c.end("APP")).listen(${String(appPort)}, "127.0.0.1", () => {
+  net.connect(${String(appPort)}, "127.0.0.1").on("data", () => { out.app = "ok"; other(); }).on("error", (e) => { out.app = e.code; other(); });
+}).on("error", (e) => { out.app = "bind " + e.code; other(); });
+const other = () => net.connect(${String(hostPort)}, "127.0.0.1")
+  .on("data", () => { out.host = "connected"; done(); })
+  .on("error", (e) => { out.host = e.code; done(); });
+const done = () => { fs.writeFileSync("out.json", JSON.stringify(out)); server.close(); };
+`;
+    const jail = new GateCommandJail(detectGateSandbox().sandbox ?? UNSANDBOXED, []);
+    try {
+      const result = await jail.run({
+        phase: "verify",
+        loopbackPorts: [appPort],
+        checkout,
+        argv: [process.execPath, "-e", script],
+        cwd: checkout,
+        env: { PATH: process.env.PATH ?? "" },
+        timeoutMs: 20_000,
+        stdoutPath: join(work, "o.log"),
+        stderrPath: join(work, "e.log"),
+      });
+      expect(result.code, readFileSync(join(work, "e.log"), "utf8")).toBe(0);
+    } finally {
+      jail.dispose();
+      host.close();
+    }
+    expect(JSON.parse(readFileSync(join(checkout, "out.json"), "utf8"))).toEqual({
+      app: "ok",
+      host: "EPERM",
+    });
   });
 
   it("starts nothing outside the sandbox: no app through LaunchServices, no AppleEvent, no launchd job", async () => {

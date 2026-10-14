@@ -3,7 +3,7 @@
  * detector, the render matrix with axe, computed styles and the per-region pixel diff, the
  * browser pin, and the novelty check against the per-client design library.
  */
-export { visualAppOf, VisualAppSchema, type VisualApp } from "./app.js";
+export { appLoopbackPort, visualAppOf, VisualAppSchema, type VisualApp } from "./app.js";
 export {
   BROWSER_STORE_NODE_MODULES,
   checkProjectBrowser,
@@ -45,10 +45,14 @@ export { addedLinesWithNumbers, type AddedLine } from "./diff-lines.js";
 export {
   evaluateVisual,
   MAX_SUMMARY_FINDINGS,
+  ranOnProjectToolchain,
   styleMismatch,
+  VISUAL_NOTE_RULE,
+  VISUAL_PROJECT_TOOLCHAIN_RULE,
   visualWithoutRenders,
   type BrowserIdentity,
   type EvaluateInput,
+  type VisualNote,
   type VisualOutcome,
   type VisualSettings,
 } from "./evaluate.js";
@@ -65,6 +69,7 @@ export {
   dhash,
   hammingDistance,
   NOVELTY_THRESHOLDS,
+  noveltySeam,
   readDesignLibrary,
   recordDesignChoice,
   TOKEN_VECTOR_LENGTH,
@@ -86,7 +91,13 @@ export {
   type RunnerResult,
 } from "./protocol.js";
 export {
+  DISABLE_SIGUSR1,
+  LINUX_PTRACE_REFUSAL,
+  NO_RUNNER_NODE,
+  engineNodeExecutable,
+  resolveNodeExecutable,
   sandboxedVisualRunner,
+  type SandboxedVisualRunnerOptions,
   type VisualRunner,
   type VisualRunnerCall,
   type VisualRunnerOutcome,

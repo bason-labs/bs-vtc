@@ -112,7 +112,13 @@ import {
 import { computeScopeCreep, scopeCreepFindings, type ScopeCreep } from "./scope-creep.js";
 import { buildTraceability } from "./traceability.js";
 import { visualWithoutRenders } from "./visual/evaluate.js";
-import { sandboxedVisualRunner, type VisualRunner } from "./visual/runner.js";
+import { noveltySeam } from "./visual/novelty.js";
+import {
+  engineNodeExecutable,
+  resolveNodeExecutable,
+  sandboxedVisualRunner,
+  type VisualRunner,
+} from "./visual/runner.js";
 import { runVisualStep, type VisualToolchains } from "./visual/step.js";
 import { checkWriteScope } from "./write-scope.js";
 
@@ -131,9 +137,13 @@ export interface GateRunnerOptions {
    * Tests inject a fake and never start a browser.
    */
   readonly visualRunner?: VisualRunner;
-  /** Where the visual step finds Playwright (default: the project's, then the browser store). */
+  /** Where the visual step finds Playwright (default: the browser store, then the project's). */
   readonly visualToolchains?: VisualToolchains;
-  /** The Node the visual runner script runs with (default `node` on the gate's `PATH`). */
+  /**
+   * The absolute Node the visual runner script runs with (default: the engine's own Node when it
+   * supports `--disable-sigusr1`, else `node` on an absolute `PATH` entry outside the repository
+   * and the checkout, `resolveNodeExecutable`).
+   */
   readonly node?: string;
 }
 
@@ -1688,7 +1698,13 @@ class Run {
         runner:
           this.options.visualRunner ??
           sandboxedVisualRunner(this.jail, {
-            node: this.options.node ?? "node",
+            node:
+              this.options.node ??
+              resolveNodeExecutable(
+                this.env.PATH,
+                [this.deps.repoRoot, this.checkoutAbs],
+                engineNodeExecutable(),
+              ),
             noSandbox: NO_SANDBOX_REFUSAL,
           }),
         allowCommand: (argv) => gateCommandAllowed(argv, allowlist),
@@ -1950,5 +1966,6 @@ export const createGateRunnerWith = (
       }
       return checkWriteScope(deps.git, request, [...DEFAULT_PROTECTED_GLOBS, ...globs]);
     },
+    ...noveltySeam(deps),
   };
 };

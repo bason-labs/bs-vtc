@@ -1,3 +1,4 @@
+import { deflateSync } from "node:zlib";
 import { describe, expect, it } from "vitest";
 import { decodePng, encodePng } from "../../../src/gates/visual/png.js";
 import { deltaE, parseCssColor, toOklab, toOklch } from "../../../src/gates/visual/color.js";
@@ -22,7 +23,63 @@ describe("png", () => {
   it("rejects bytes that are not a PNG", () => {
     expect(() => decodePng(new Uint8Array([1, 2, 3]))).toThrow(/not a PNG/);
   });
+
+  it("never inflates image data past the size IHDR declares (a decompression bomb)", () => {
+    // 1x1 RGBA (5 bytes of image data) whose IDAT inflates to 64 MiB.
+    const bomb = pngWith([
+      ["IHDR", ihdr(1, 1)],
+      ["IDAT", deflateSync(Buffer.alloc(64 * 1024 * 1024))],
+      ["IEND", new Uint8Array(0)],
+    ]);
+    expect(bomb.length).toBeLessThan(200 * 1024);
+    expect(() => decodePng(bomb)).toThrow(/larger than its IHDR size/);
+  });
+
+  it("rejects image data before IHDR and a second IHDR", () => {
+    const idat = deflateSync(Buffer.alloc(5));
+    expect(() =>
+      decodePng(
+        pngWith([
+          ["IDAT", idat],
+          ["IHDR", ihdr(1, 1)],
+          ["IEND", new Uint8Array(0)],
+        ]),
+      ),
+    ).toThrow(/does not start with an IHDR/);
+    expect(() =>
+      decodePng(
+        pngWith([
+          ["IHDR", ihdr(1, 1)],
+          ["IHDR", ihdr(1, 1)],
+          ["IDAT", idat],
+        ]),
+      ),
+    ).toThrow(/more than one IHDR/);
+  });
 });
+
+/** An 8-bit RGBA IHDR body. */
+const ihdr = (width: number, height: number): Uint8Array => {
+  const header = new Uint8Array(13);
+  const view = new DataView(header.buffer);
+  view.setUint32(0, width);
+  view.setUint32(4, height);
+  header.set([8, 6, 0, 0, 0], 8);
+  return header;
+};
+
+/** A PNG made of the given chunks (CRCs zero: the decoder does not check them). */
+const pngWith = (chunks: readonly (readonly [string, Uint8Array])[]): Uint8Array => {
+  const parts: Uint8Array[] = [Uint8Array.from([137, 80, 78, 71, 13, 10, 26, 10])];
+  for (const [type, data] of chunks) {
+    const out = new Uint8Array(12 + data.length);
+    new DataView(out.buffer).setUint32(0, data.length);
+    for (let i = 0; i < 4; i += 1) out[4 + i] = type.charCodeAt(i);
+    out.set(data, 8);
+    parts.push(out);
+  }
+  return Uint8Array.from(Buffer.concat(parts));
+};
 
 describe("color", () => {
   it("parses hex, rgb, hsl, oklch and named colours", () => {
