@@ -1,0 +1,24 @@
+VTC (Virtual Tech Company)
+==========================
+
+This product includes software derived from third-party work:
+
+impeccable
+  https://github.com/pbakaus/impeccable, commit 2f98774f86bc05563876643db37e6c37c322850f
+  Copyright 2025 Paul Bakaus. Licensed under the Apache License, Version 2.0.
+  The design detector rules under packages/engine/src/gates/visual/detector/ are ported from it
+  and modified by VTC. See THIRD_PARTY/impeccable/LICENSE and THIRD_PARTY/impeccable/SOURCE.
+
+agency-agents
+  Parts of the role prompts and skill packs are forked from msitarzewski/agency-agents (MIT).
+  See roles/NOTICE.
+
+Used but not included
+---------------------
+The deterministic visual step runs these from the project's own dependencies or from the store
+`vtc doctor --install-browser` fills under ~/.vtc/browsers/; VTC neither bundles nor modifies them:
+
+  axe-core          MPL-2.0      https://github.com/dequelabs/axe-core (injected unmodified)
+  playwright-core   Apache-2.0   https://github.com/microsoft/playwright
+  pixelmatch        ISC          https://github.com/mapbox/pixelmatch
+  Chromium          BSD-3-Clause and others, installed by Playwright

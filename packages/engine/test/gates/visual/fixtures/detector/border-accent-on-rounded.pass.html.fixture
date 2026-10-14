@@ -1,0 +1,2 @@
+<div class="rounded-none border-t-4 p-6">Card</div>
+<div class="rounded-full border-t-2 animate-spin">Loading</div>
