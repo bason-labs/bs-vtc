@@ -74,7 +74,16 @@ export interface EvaluateInput {
   /** Where the report itself is written (repo-relative). */
   readonly reportPath: string;
   readonly writtenAt: string;
+  /** Whose Playwright ran the renders (`VisualSummary.toolchain`, contracts 4.7.0). */
+  readonly toolchain?: VisualToolchainId | undefined;
 }
+
+/** `VisualSummary.toolchain`: the doctor's store (`vtc`) or the project's own Playwright. */
+type VisualToolchainId = NonNullable<VisualSummary["toolchain"]>;
+
+const toolchainField = (
+  toolchain: VisualToolchainId | undefined,
+): { toolchain?: VisualToolchainId } => (toolchain === undefined ? {} : { toolchain });
 
 export interface VisualOutcome {
   readonly report: VisualReport;
@@ -91,9 +100,9 @@ export const VISUAL_NOTE_RULE = "vtc-visual/note";
 /**
  * Rule id of the note on a run whose renders, axe and pixel diff loaded the project's own
  * Playwright from the checkout under review (§5 reading 124). Such a run is not to satisfy the
- * Level-3 checklist's Final Review item, but engine core cannot read this marker (AD-13: core
- * never imports `gates/`, and the id is not a contract): the cap waits on a proposed
- * `VisualSummary.toolchain` field in `@vtc/shared`.
+ * Level-3 checklist's Final Review item. Engine core cannot read this marker (AD-13: core never
+ * imports `gates/`, and the id is not a contract): it reads `VisualSummary.toolchain` (contracts
+ * 4.7.0), which the gate runner sets too; the note stays so the human sees it.
  */
 export const VISUAL_PROJECT_TOOLCHAIN_RULE = "vtc-visual/project-toolchain";
 
@@ -129,16 +138,18 @@ export const noteFindings = (notes: readonly VisualNote[], reportPath: string): 
 
 /**
  * Whether a visual step ran on the project's own Playwright (reading 124). Only the gate runner
- * writes `GateReport.visual`, and the marker is among its first findings, so the summary's cap
- * never drops it. For the gate runner's own use and tests: engine core may not import it (AD-13)
- * and reads a `VisualSummary.toolchain` field once the contract has one.
+ * writes `GateReport.visual`: it sets `toolchain` and puts the marker among its first findings, so
+ * the summary's cap never drops it. For the gate runner's own use and tests: engine core may not
+ * import it (AD-13) and reads `VisualSummary.toolchain` itself.
  */
 export const ranOnProjectToolchain = (
-  summary: Pick<VisualSummary, "findings"> | null | undefined,
+  summary: (Pick<VisualSummary, "findings"> & Partial<VisualSummary>) | null | undefined,
 ): boolean =>
-  summary?.findings.some(
+  summary?.toolchain === "project" ||
+  (summary?.findings.some(
     (f) => f.tool === VISUAL_TOOL && f.rule_id === VISUAL_PROJECT_TOOLCHAIN_RULE,
-  ) ?? false;
+  ) ??
+    false);
 
 const COLOR_PROPERTIES = new Set(["color", "background-color", "border-top-color"]);
 const SPACING_PROPERTIES = new Set(["padding", "margin", "gap"]);
@@ -492,6 +503,7 @@ export const evaluateVisual = (input: EvaluateInput): VisualOutcome => {
     ...(input.task === undefined ? {} : { task: input.task }),
     ...(input.feature === undefined || input.task !== undefined ? {} : { feature: input.feature }),
     status,
+    ...toolchainField(input.toolchain),
     browser: input.browser,
     renders,
     axe,
@@ -503,6 +515,7 @@ export const evaluateVisual = (input: EvaluateInput): VisualOutcome => {
   const summary = VisualSummarySchema.parse({
     status,
     report: input.reportPath,
+    ...toolchainField(input.toolchain),
     counts: {
       renders: renders.length,
       unreached,
@@ -549,6 +562,8 @@ export const visualWithoutRenders = (input: {
   readonly counts?: Partial<VisualSummary["counts"]>;
   /** Visible, non-blocking notes ({@link noteFindings}). */
   readonly notes?: readonly VisualNote[];
+  /** The toolchain chosen before the step stopped, when one was. */
+  readonly toolchain?: VisualToolchainId | undefined;
 }): VisualOutcome => {
   const reason = input.reason.slice(0, 500);
   // Notes, then the finding that says why nothing rendered, then the rest: the summary keeps only
@@ -582,6 +597,7 @@ export const visualWithoutRenders = (input: {
     ...(input.feature === undefined || input.task !== undefined ? {} : { feature: input.feature }),
     status,
     ...skipped,
+    ...toolchainField(input.toolchain),
     browser: input.browser,
     findings: findings.slice(0, MAX_REPORT_FINDINGS),
     written_at: input.writtenAt,
@@ -590,6 +606,7 @@ export const visualWithoutRenders = (input: {
     status,
     report: input.reportPath,
     ...skipped,
+    ...toolchainField(input.toolchain),
     counts: { ...ZERO_COUNTS, ...input.counts },
     findings: findings.slice(0, MAX_SUMMARY_FINDINGS),
   });

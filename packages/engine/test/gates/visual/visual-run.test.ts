@@ -242,6 +242,9 @@ describe("visual step in a gate run", () => {
       );
     expect(projectCode(written.findings)).toBe(true);
     expect(ranOnProjectToolchain(report.visual)).toBe(true);
+    // the typed field engine core reads (contracts 4.7.0, reading 137)
+    expect(report.visual?.toolchain).toBe("project");
+    expect(written.toolchain).toBe("project");
     const later = await h.run({ head: h.base, visual: { screens: [] } });
     expect(later.visual?.status).toBe("pass");
     const laterNotes = later.visual?.findings.filter((f) => f.rule_id === "vtc-visual/note") ?? [];
@@ -419,6 +422,7 @@ describe("visual step in a gate run", () => {
     const passed = await ok.h.run({ head: ok.h.base, visual: { screens: [] } });
     expect(passed.visual?.status).toBe("pass");
     expect(ranOnProjectToolchain(passed.visual)).toBe(false);
+    expect(passed.visual?.toolchain).toBe("vtc");
     // VTC's own comparison code: no note about project-controlled code.
     expect(
       passed.visual?.findings.some((f) => /the project's own Playwright/.test(f.message ?? "")),
