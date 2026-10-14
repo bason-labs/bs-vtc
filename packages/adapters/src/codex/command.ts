@@ -74,6 +74,8 @@
  *   listed ones, and `enabled_tools=[]` leaves none. The command and args are pinned too, because a
  *   filter key alone on a config without `[mcp_servers.vtc]` fails to load ("invalid transport").
  *   The Lead's own session is never started here and keeps its tools.
+ * - Web search (H-3): on only for a `host_web` role (`web_search="live"`), explicitly off for
+ *   every other role; see {@link CodexWebSearch}.
  * - `codex exec` has no agent flag: a headless run gets no compiled role instructions
  *   (`developer_instructions` of `.codex/agents/vtc-*.toml`), so the role rests on the prompt
  *   (the task pack). Engine core carries the role itself (spine §5 reading 145): the compiled
@@ -102,6 +104,30 @@ export const CODEX_BINARY = "codex";
 export const HOST = "codex";
 
 type CodexSandboxMode = "read-only" | "workspace-write";
+
+/**
+ * Codex's own web search (H-3, spine §5 reading 156). `codex exec` has no `--search` flag (only
+ * the interactive CLI does, 0.162.1); the `web_search` config key takes `"live"`, `"indexed"`,
+ * `"cached"` or `"disabled"` (codex-cli 0.162.1). `--search` is "live web search: the native
+ * Responses `web_search` tool" (`codex --help`), a tool the host provider runs, so the role's
+ * sandbox and its network-off setting stay as they are. A `host_web` role gets `"live"`; every
+ * other role gets `"disabled"`, set explicitly as a top-level `--config` override rather than left
+ * to a default; a `code_sandboxed` role with `host_web` is refused. Codex also reads `web_search`
+ * under a profile in `config.toml`; whether a profile-level `"live"` wins over this top-level
+ * override is not yet checked (open under the §7 H-3 row), so this does not claim the user's
+ * config cannot turn it back on.
+ */
+export type CodexWebSearch = "live" | "disabled";
+
+const codexWebSearch = (tools: RoleTools): CodexWebSearch => {
+  if (tools.host_web !== true) return "disabled";
+  if (tools.profile === "code_sandboxed") {
+    throw new Error(
+      "refusing host web search for a code_sandboxed Codex role: a role that runs code gets no direct web (H-3, spine §5 reading 156)",
+    );
+  }
+  return "live";
+};
 
 export interface CodexProfileOptions {
   /** The absolute VTC home (`~/.vtc`, or `$VTC_HOME`), which no role may write (D-w). */
@@ -171,6 +197,7 @@ export const codexSandboxProfile = (
 ): SandboxProfile => {
   const mode: CodexSandboxMode =
     request.tools.profile === "read_only" ? "read-only" : "workspace-write";
+  const webSearch = codexWebSearch(request.tools);
   if (request.network === "registries") {
     throw new Error(
       "refusing the registries network on Codex: it cannot limit the network to package registries (§7.2), and an open network lets a role use the readable VTC install token against the engine; dependency installs are an engine-run step (D-ac)",
@@ -203,6 +230,7 @@ export const codexSandboxProfile = (
     },
     settings: {
       sandbox_mode: mode,
+      web_search: webSearch,
       ...(mode === "workspace-write"
         ? {
             sandbox_workspace_write: {
@@ -219,6 +247,8 @@ export const codexSandboxProfile = (
     cliArgs: [
       "--config",
       `sandbox_mode="${mode}"`,
+      "--config",
+      `web_search="${webSearch}"`,
       ...(mode === "workspace-write"
         ? [
             "--config",

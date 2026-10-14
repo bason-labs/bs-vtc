@@ -64,7 +64,9 @@ const addUsage = (total: TokenUsage | null, usage: unknown): TokenUsage | null =
   if (!isRecord(usage)) return total;
   const input = count(usage.input_tokens);
   const cached = Math.min(count(usage.cached_input_tokens), input);
-  // Codex counts cached input inside input_tokens; TokenUsage keeps the kinds apart (§11)
+  // Codex counts cached input inside input_tokens (exec-resume.jsonl); TokenUsage keeps the kinds
+  // apart (§11). Whether cache_write_input_tokens is also inside input_tokens or on top of it is
+  // open (every recording has it at 0): it is counted on top, which can only overcount (§7 note).
   const turn: TokenUsage = {
     in: input - cached,
     out: count(usage.output_tokens),

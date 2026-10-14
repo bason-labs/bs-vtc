@@ -1,3 +1,0 @@
-{"type":"thread.started","thread_id":"0199a7c2-4b1e-7d30-a5f2-6c8e9d1b3a47"}
-{"type":"turn.started"}
-{"type":"item.started","item":{"id":"item_0","type":"command_execution","command":"bash -lc 'pnpm test'","aggregated_output":"","status":"in_progress"}}

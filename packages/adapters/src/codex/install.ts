@@ -10,7 +10,15 @@
  *    Codex loads skills (learn.chatgpt.com/docs/build-skills: `$REPO_ROOT/.agents/skills` for the
  *    project scope, `$HOME/.agents/skills` for the user scope), each as `vtc-<name>/` with a
  *    `.vtc-generated` marker, and removes marked `vtc-*` skills a newer plugin no longer has.
- *    The plugin's hooks are not registered (spine §5 reading 94, §7 Codex hook row).
+ * The plugin itself is not registered yet. D-bn (spine §5 reading 168, amending readings 94 and
+ * 131) decided that `vtc install codex` registers it, which makes its hooks active in the Codex
+ * desktop app once the user trusts them, and reading 131 puts that registration here. It waits on
+ * the §7 "Codex plugin manifest fields" check: codex-cli 0.162.1 reads a marketplace from
+ * `.agents/plugins/marketplace.json` (`name`, `plugins[{name, source: {source: "local", path:
+ * "./…"}, policy}]`, local paths inside the marketplace root), but whether enabling it in
+ * `config.toml` is enough or `codex plugin add` must install it into Codex's plugin cache is not
+ * yet checked on a real install. Until then the skills are placed as above (the registered plugin
+ * would bring them, and their copies here then go), and the notes say the hooks do not run.
  * The notes also say how a Codex Lead's roles run (human decision H-1, spine §5 reading 99, which
  * replaces the earlier "no roles in v1"): the engine starts them itself as headless Codex runs,
  * sandboxed and budget-checked; in-session Codex roles stay refused (reading 82), and where a
@@ -187,7 +195,7 @@ export const installCodex = (request: InstallRequest): InstallResult => {
         ? []
         : [`Removed agent files the current plugin no longer has: ${removed.join(", ")}.`]),
       `Placed the vtc skills in ${skillsDir} (the Lead loop is the vtc-lead skill).`,
-      "The Codex plugin's hooks are not registered yet (the Codex hook wiring is a pending spike): the engine's own checks still apply, but the hook guard rails do not run in Codex sessions.",
+      `The vtc plugin is not registered with Codex yet (registering it turns on its hooks in the Codex desktop app once you trust them; that waits on a check against a real Codex install). Until then the skills are placed in ${skillsDir} and the hook guard rails do not run in Codex sessions; the engine's own checks still apply.`,
       "A Codex Lead's roles run as headless Codex runs the engine starts itself (codex exec, sandboxed with the network off, budget-checked, no approval prompts, and only their own engine tools on the vtc bridge: never approve, answer or change_request), never inside the Codex session (VTC cannot confirm that session keeps the network off). Where a headless Codex run cannot start (Codex not logged in, or a platform whose network-off sandbox is not yet shown to block the engine's socket), the task parks blocked: run vtc doctor, or run the Lead in Claude Code instead (vtc install --host claude-code).",
     ],
   };
