@@ -38,4 +38,5 @@ export * from "./report-render.js";
 export * from "./safe-fs.js";
 export * from "./skip.js";
 export * from "./staging.js";
+export * from "./state-dir.js";
 export * from "./triggers.js";

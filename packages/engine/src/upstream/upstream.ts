@@ -82,6 +82,7 @@ import {
   type RemoteRefs,
 } from "./remote-refs.js";
 import { createStaging, stagingRootFor, type Staging } from "./staging.js";
+import { upstreamStateDir } from "./state-dir.js";
 import { evaluateTrigger, type AutomationFact, type AutoWorkItem } from "./triggers.js";
 
 type Schemas = typeof UPSTREAM_EVENT_PAYLOAD_SCHEMAS;
@@ -272,7 +273,7 @@ export const createUpstream = (deps: UpstreamDeps): Upstream => {
   const gh = createGhServices({
     ...(deps.ghCommand === undefined ? {} : { command: deps.ghCommand }),
     stagingRoot,
-    pacing: { root: deps.vtcHome, dir: join(deps.vtcHome, "upstream", "pacing") },
+    pacing: { root: deps.vtcHome, dir: join(upstreamStateDir(deps.vtcHome), "pacing") },
   });
   const ffmpegCommand =
     deps.ffmpegCommand ?? (deps.automation.ffmpeg ? createFfmpegCommand() : undefined);
@@ -284,7 +285,7 @@ export const createUpstream = (deps: UpstreamDeps): Upstream => {
   const withRepoLock = <T>(repo: GitHubRepo, task: () => Promise<T>): Promise<T> => {
     const dir = ensureDirNoFollow(
       deps.vtcHome,
-      join(deps.vtcHome, "upstream", "locks"),
+      join(upstreamStateDir(deps.vtcHome), "locks"),
       "the automation lock",
     );
     return withFileLock(join(dir, `${repoFileName(repo)}.lock`), task);

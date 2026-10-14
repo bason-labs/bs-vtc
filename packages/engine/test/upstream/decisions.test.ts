@@ -394,9 +394,9 @@ describe("the auto-close sweep", () => {
 });
 
 describe("the ledger", () => {
-  it("lives at <vtcHome>/upstream or in the engine's guard dir (never the checkout), private and redacted", () => {
+  it("lives under <vtcHome>/guard/ (VTC's own or the engine's guard dir, never the checkout), private and redacted", () => {
     expect(ledgerPath({ kind: "upstream", vtcHome: "/h/.vtc" })).toBe(
-      "/h/.vtc/upstream/ledger.jsonl",
+      "/h/.vtc/guard/_upstream/ledger.jsonl",
     );
     expect(ledgerPath({ kind: "project", guardDir: "/h/.vtc/guard/k" })).toBe(
       "/h/.vtc/guard/k/upstream/ledger.jsonl",

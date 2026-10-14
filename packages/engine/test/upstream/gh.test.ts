@@ -12,6 +12,7 @@ import {
   lockIsStale,
   QUIET_CLOSE_MARKER,
   stripUnresolvedReferences,
+  upstreamStateDir,
   withFileLock,
   type GhResult,
 } from "../../src/upstream/index.js";
@@ -482,7 +483,7 @@ describe("the per-repo queue", () => {
 
   it("shares the interval and the hourly cap across processes through VTC's home", async () => {
     const home = tempDir("vtc-home-");
-    const pacing = { root: home, dir: join(home, "upstream", "pacing") };
+    const pacing = { root: home, dir: join(upstreamStateDir(home), "pacing") };
     const c = clock();
     // Two daemons (two queues, nothing shared in memory) writing to the same repo.
     const a = createRepoQueue({ now: c.now, sleep: c.sleep, mutatingCallsPerHour: 3, pacing });
@@ -494,7 +495,7 @@ describe("the per-repo queue", () => {
     await expect(b.write("o/r", () => Promise.resolve(ok))).rejects.toMatchObject({
       reason: "rate_limit",
     });
-    expect(existsSync(join(home, "upstream", "pacing", "o__r.json"))).toBe(true);
+    expect(existsSync(join(upstreamStateDir(home), "pacing", "o__r.json"))).toBe(true);
   });
 
   it("backs off 60 s x 2^n on the secondary limit, then skips with github_rate_limit", async () => {

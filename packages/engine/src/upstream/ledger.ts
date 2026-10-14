@@ -1,10 +1,11 @@
 /**
  * The local automation ledger (AD-27 rule 4; spine §5 reading 208): one JSON line per thing VTC saw
- * or did for a fingerprint, at `<vtcHome>/upstream/ledger.jsonl` for VTC's own repo and
+ * or did for a fingerprint, at `<vtcHome>/guard/_upstream/ledger.jsonl` for VTC's own repo and
  * `<guard dir>/upstream/ledger.jsonl` for a project's repo. The ledger is read back as trusted (the
- * heads VTC pushed, the head a close may delete, the issues VTC's quiet sweep closed), so a
- * project's ledger lives in the engine's private guard dir (`ROLE_DENIED_VTC.homeWriteDeny`
- * `guard/**`), never in the checkout, where roles and gate commands write. Append-only, mode 0600, never
+ * heads VTC pushed, the head a close may delete, the issues VTC's quiet sweep closed), so both
+ * live under `<vtcHome>/guard/` (`ROLE_DENIED_VTC.homeWriteDeny` `guard/**`): VTC's own in
+ * `upstreamStateDir`, a project's in the engine's private guard dir. Never in the checkout, where
+ * roles and gate commands write, nor elsewhere in VTC's home. Append-only, mode 0600, never
  * through a symlink (every directory below the trusted root is checked and the file is opened
  * `O_NOFOLLOW`), every line redacted. It is a cache: the remote label listing is the source of
  * truth for issue and PR state; the ledger holds what the remote cannot tell (occurrences, when VTC
@@ -14,6 +15,7 @@ import { mkdirSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { redactJson, type AutoKind } from "@vtc/shared";
 import { appendNoFollow, ensureDirNoFollow, readNoFollow } from "./safe-fs.js";
+import { upstreamStateDir } from "./state-dir.js";
 
 export type LedgerEvent =
   /** One occurrence of the fingerprint (`version`: the VTC release that saw it). */
@@ -77,7 +79,7 @@ export const ledgerPath = (
     | { readonly kind: "project"; readonly guardDir: string },
 ): string =>
   target.kind === "upstream"
-    ? join(target.vtcHome, "upstream", "ledger.jsonl")
+    ? join(upstreamStateDir(target.vtcHome), "ledger.jsonl")
     : join(target.guardDir, "upstream", "ledger.jsonl");
 
 const isEntry = (value: unknown): value is LedgerEntry => {
