@@ -250,6 +250,72 @@ export const pausedOutcome = (outcome: HostOutcome): HostOutcome => {
   };
 };
 
+/**
+ * What a run the engine stopped on budget ended with (§11: the task parked, its in-flight runs
+ * stop): unless it finished first, a failure with cause `budget`, marked stopped in the state
+ * (its task is parked), so it never counts toward the stuck limit; its reported cost still counts.
+ */
+export const budgetStoppedOutcome = (outcome: HostOutcome): HostOutcome => {
+  if (outcome.kind === "done") return outcome;
+  const detail = outcome.kind === "error" || outcome.kind === "auth" ? outcome.message : "a limit";
+  return {
+    kind: "error",
+    message: `stopped by the engine: the task's budget is used up (${detail})`.slice(0, 2000),
+    retryable: false,
+    cause: "budget",
+    tokens: outcome.kind === "auth" ? null : outcome.tokens,
+    cost_usd: outcome.kind === "auth" ? null : outcome.cost_usd,
+  };
+};
+
+/** Whether the step's task, or the run, has spent its whole budget (the preflight parks it). */
+const budgetUsedUp = (h: RunHandle, step: Pick<StepSpec, "task">): boolean => {
+  const task = step.task === undefined ? undefined : h.state.tasks.get(step.task);
+  if (task !== undefined && budgetState(task.spent_usd, task.budget_usd) === "exhausted")
+    return true;
+  const run = h.state.runBudget;
+  return run !== null && run.spent_usd >= run.budget_usd;
+};
+
+/**
+ * The USD cap of a headless run (§11; `SpawnRoleRequest.maxBudgetUsd`, which Claude enforces with
+ * `--max-budget-usd`): what is left of its pool (its task's budget, else the run's, which a
+ * task-less step's spend counts toward), less what the pool's in-flight headless runs were capped
+ * at, split evenly over the `share` runs launched from it together. `null` when no budget applies
+ * yet (before the plan sets one). A cap under one cent means nothing may launch from the pool now.
+ */
+export const headlessBudgetCap = (
+  k: Pick<Kernel, "headless">,
+  h: RunHandle,
+  step: Pick<StepSpec, "task">,
+  share = 1,
+): { readonly pool: string; readonly capUsd: number } | null => {
+  const task = step.task === undefined ? undefined : h.state.tasks.get(step.task);
+  // before the first spend is recorded, the run's budget is its features' (submit.ts `recordSpend`)
+  const features = [...h.state.features.values()];
+  const run =
+    h.state.runBudget ??
+    (features.length === 0
+      ? null
+      : {
+          budget_usd: features.reduce((sum, f) => sum + f.budget_usd, 0),
+          spent_usd: features.reduce((sum, f) => sum + f.spent_usd, 0),
+        });
+  const pool =
+    task !== undefined
+      ? { key: `task:${task.id}`, left: task.budget_usd - task.spent_usd }
+      : run !== null
+        ? { key: "run", left: run.budget_usd - run.spent_usd }
+        : null;
+  if (pool === null) return null;
+  let allotted = 0;
+  for (const entry of k.headless.values())
+    if (entry.run === h.state.id && entry.budget?.pool === pool.key)
+      allotted += entry.budget.capUsd;
+  const capUsd = Math.floor((Math.max(0, pool.left - allotted) / Math.max(1, share)) * 100) / 100;
+  return { pool: pool.key, capUsd };
+};
+
 /** The run ended (or never started): logged, then submitted like a Lead's `submit`. */
 const finishHeadless = async (
   k: Kernel,
@@ -258,7 +324,13 @@ const finishHeadless = async (
   ended: HostOutcome,
   startedAt: number,
 ): Promise<void> => {
-  const outcome = k.headless.get(actionId)?.stoppedByPause === true ? pausedOutcome(ended) : ended;
+  const entry = k.headless.get(actionId);
+  const outcome =
+    entry?.stoppedByPause === true
+      ? pausedOutcome(ended)
+      : entry?.stoppedByBudget === true
+        ? budgetStoppedOutcome(ended)
+        : ended;
   k.headless.delete(actionId);
   const run = h.state.roleRuns.get(actionId);
   if (run === undefined) return;
@@ -325,6 +397,7 @@ export const launchHeadless = async (
   step: StepSpec,
   host: HostId,
   purpose: DispatchPurpose,
+  share = 1,
 ): Promise<boolean> => {
   const adapter = k.deps.adapters[host];
   const contract = k.deps.roles.get(step.role);
@@ -339,6 +412,9 @@ export const launchHeadless = async (
     if (purpose !== "cross_family_review") refuseInSession(k, h, step, refusal);
     return false;
   }
+  // §11: a pool whose budget the in-flight runs already hold launches nothing until they end
+  const budget = headlessBudgetCap(k, h, step, share);
+  if (budget !== null && budget.capUsd < 0.01 && !budgetUsedUp(h, step)) return false;
   const check = await headlessPreflight(k, h, step, host, purpose);
   k.emit(h, {
     type: "headless.preflight",
@@ -398,11 +474,8 @@ export const launchHeadless = async (
     sandbox,
     timeoutMs: policy.wallTimeoutMs,
     idleTimeoutMs: policy.idleTimeoutMs,
-    ...(task === undefined
-      ? {}
-      : {
-          maxBudgetUsd: Math.max(0.01, Math.round((task.budget_usd - task.spent_usd) * 100) / 100),
-        }),
+    // §11: a task-less step is capped from the run's budget; steps launched together share it
+    ...(budget === null ? {} : { maxBudgetUsd: Math.max(0.01, budget.capUsd) }),
   };
   // the engine's shutdown may have landed during the awaits above, after `killHeadless` took its
   // snapshot: nothing starts now (the dispatch stays in flight, as after a crash, for vtc resume)
@@ -436,7 +509,12 @@ export const launchHeadless = async (
     pid: process.pid !== null && process.pid > 0 ? process.pid : null,
     started_at: new Date(startedAt).toISOString(),
   };
-  k.headless.set(action.action_id, { run: h.state.id, summary, process });
+  k.headless.set(action.action_id, {
+    run: h.state.id,
+    summary,
+    process,
+    ...(budget === null ? {} : { budget: { pool: budget.pool, capUsd: budget.capUsd } }),
+  });
   k.emit(h, {
     type: "headless.started",
     actor: "engine",
@@ -471,12 +549,20 @@ export const dispatchHeadless = async (
 ): Promise<void> => {
   const stop = (): boolean => h.state.run.paused || limitWait(k, h) !== null;
   let free = k.config().concurrency - inFlight(h.state).length;
-  for (const step of pendingSteps(k, h, host)) {
+  const steps = pendingSteps(k, h, host);
+  // §11: the steps of one budget pool launched in this pass split what is left of it
+  const pool = (step: StepSpec): string => (step.task === undefined ? "run" : `task:${step.task}`);
+  const left = new Map<string, number>();
+  for (const step of steps.slice(0, Math.max(0, free)))
+    left.set(pool(step), (left.get(pool(step)) ?? 0) + 1);
+  for (const step of steps) {
     if (free <= 0 || stop()) return;
     // the cross-family reviewer runs on the other family's host (§12.4)
     const where = step.host ?? host;
     const why = step.host === undefined ? purpose : "cross_family_review";
-    if (await launchHeadless(k, h, step, where, why)) free -= 1;
+    const share = left.get(pool(step)) ?? 1;
+    left.set(pool(step), Math.max(1, share - 1));
+    if (await launchHeadless(k, h, step, where, why, share)) free -= 1;
   }
 };
 

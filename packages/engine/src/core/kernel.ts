@@ -77,6 +77,16 @@ export interface HeadlessEntry {
   readonly process: HeadlessRun;
   /** Set when `vtc pause` killed it: its end is then not the role's failure. */
   stoppedByPause?: boolean;
+  /**
+   * Set when the engine killed it because its task parked on budget (§11): its end is a stop
+   * with cause `budget`, not the role's failure.
+   */
+  stoppedByBudget?: boolean;
+  /**
+   * The budget pool it was capped from (`task:<id>` or `run`, §11) and the cap in USD: what the
+   * next launch from the same pool may not hand out again while this run is in flight.
+   */
+  readonly budget?: { readonly pool: string; readonly capUsd: number };
 }
 
 /**

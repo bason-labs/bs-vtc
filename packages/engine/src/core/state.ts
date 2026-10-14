@@ -76,9 +76,15 @@ export interface RoleRunRecord {
   rejection?: { reason: string; issues: string[] };
   /**
    * A failed run the engine or the human stopped, not the role's failure: a resume superseded it
-   * ({@link SUPERSEDED_RUN_PREFIX}), or `vtc pause` killed it (`killedByPause`).
+   * ({@link SUPERSEDED_RUN_PREFIX}), `vtc pause` killed it (`killedByPause`), or the engine
+   * stopped it when its task parked on budget (`stoppedOnBudget`).
    */
   stopped?: boolean;
+  /**
+   * The engine-launched run ended with cause `budget` while its task was parked: the engine
+   * killed it on the park (§11). Engine facts only, so replay sees the same.
+   */
+  stoppedOnBudget?: boolean;
   /**
    * The engine-launched run ended killed while the run was paused (`headless.ended` with cause
    * `killed` after a `run.paused`): engine facts only, so replay sees the same.
@@ -388,6 +394,14 @@ export const applyEvent = (state: RunState, event: VtcEvent): void => {
     // `vtc pause` killed it: the pause is logged first, the kill is the engine's (headless.ts)
     if (run?.status === "in_flight" && data.cause === "killed" && state.run.paused)
       run.killedByPause = true;
+    // the engine stopped it because its task parked on budget (§11; submit.ts `stopTaskHeadless`)
+    if (
+      run?.status === "in_flight" &&
+      data.cause === "budget" &&
+      run.task !== undefined &&
+      state.tasks.get(run.task)?.status === "parked"
+    )
+      run.stoppedOnBudget = true;
   } else if (isEventOfType(event, "role.failed")) {
     const data = readEventData(event);
     const run = state.roleRuns.get(data.action_id);
@@ -395,7 +409,11 @@ export const applyEvent = (state: RunState, event: VtcEvent): void => {
       run.status = "failed";
       run.closedSeq = event.seq;
       run.costUsd = event.cost_usd ?? null;
-      if (data.message.startsWith(SUPERSEDED_RUN_PREFIX) || run.killedByPause === true)
+      if (
+        data.message.startsWith(SUPERSEDED_RUN_PREFIX) ||
+        run.killedByPause === true ||
+        run.stoppedOnBudget === true
+      )
         run.stopped = true;
     }
   } else if (isEventOfType(event, "gate.result")) {

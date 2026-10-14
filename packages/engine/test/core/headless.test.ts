@@ -20,11 +20,15 @@ import {
   type RoleResultInput,
   type SpawnRoleRequest,
 } from "@vtc/shared";
-import { headlessPreflight } from "../../src/core/headless.js";
+import {
+  budgetStoppedOutcome,
+  headlessBudgetCap,
+  headlessPreflight,
+} from "../../src/core/headless.js";
 import { consecutiveFailures } from "../../src/core/queries.js";
-import { MAX_STEP_FAILURES } from "../../src/core/submit.js";
+import { MAX_STEP_FAILURES, stopTaskHeadless } from "../../src/core/submit.js";
 import { createPluginCatalog, type CallContext, type PluginCatalog } from "../../src/core/index.js";
-import type { Kernel, RunHandle } from "../../src/core/kernel.js";
+import type { HeadlessEntry, Kernel, RunHandle } from "../../src/core/kernel.js";
 import { writeFile } from "../helpers/repo.js";
 import {
   CLAUDE,
@@ -492,6 +496,94 @@ describe("AD-25 rule 3: the budget check comes last", () => {
     expect(refused.detail).toContain("API key");
     expect(await preflightOf({ loggedIn: true, spent: 1, method: "ChatGPT" })).toMatchObject({
       ok: true,
+    });
+  });
+});
+
+describe("§11: headless runs are capped from their budget pool and stop when it parks", () => {
+  const handle = (over: {
+    readonly taskSpent?: number;
+    readonly runBudget?: { budget_usd: number; spent_usd: number } | null;
+    readonly features?: readonly { budget_usd: number; spent_usd: number }[];
+  }) =>
+    ({
+      state: {
+        id: "R-1",
+        tasks: new Map([["T-1", { id: "T-1", spent_usd: over.taskSpent ?? 1, budget_usd: 5 }]]),
+        features: new Map((over.features ?? []).map((f, i) => [`F-${String(i + 1)}`, f])),
+        runBudget: over.runBudget ?? null,
+      },
+    }) as unknown as RunHandle;
+  const entry = (pool: string, capUsd: number, run = "R-1") =>
+    ({ run, summary: { task: "T-1" }, budget: { pool, capUsd } }) as unknown as HeadlessEntry;
+  const kernel = (...entries: HeadlessEntry[]) =>
+    ({ headless: new Map(entries.map((e, i) => [`a-${String(i)}`, e])) }) as Pick<
+      Kernel,
+      "headless"
+    >;
+
+  it("a task step gets what is left of its task's budget", () => {
+    expect(headlessBudgetCap(kernel(), handle({}), { task: "T-1" })).toEqual({
+      pool: "task:T-1",
+      capUsd: 4,
+    });
+  });
+
+  it("steps launched together split it, and in-flight runs keep what they were given", () => {
+    expect(headlessBudgetCap(kernel(), handle({}), { task: "T-1" }, 2)?.capUsd).toBe(2);
+    const busy = kernel(entry("task:T-1", 3), entry("task:T-1", 9, "R-other"));
+    expect(headlessBudgetCap(busy, handle({}), { task: "T-1" })?.capUsd).toBe(1);
+    expect(
+      headlessBudgetCap(kernel(entry("task:T-1", 4)), handle({}), { task: "T-1" })?.capUsd,
+    ).toBe(0);
+  });
+
+  it("a task-less step is capped from the run's budget, its features' before any spend", () => {
+    expect(headlessBudgetCap(kernel(), handle({}), {})).toBeNull();
+    expect(
+      headlessBudgetCap(kernel(), handle({ features: [{ budget_usd: 10, spent_usd: 4 }] }), {}),
+    ).toEqual({ pool: "run", capUsd: 6 });
+    expect(
+      headlessBudgetCap(
+        kernel(entry("run", 1)),
+        handle({ runBudget: { budget_usd: 10, spent_usd: 7 } }),
+        {},
+      ),
+    ).toEqual({ pool: "run", capUsd: 2 });
+  });
+
+  it("parking a task on budget kills its in-flight runs, which end as a budget stop", async () => {
+    const kills: string[] = [];
+    const run = (task: string, id: string) =>
+      ({
+        run: "R-1",
+        summary: { task },
+        process: { kill: () => (kills.push(id), Promise.resolve()) },
+      }) as unknown as HeadlessEntry;
+    const k = {
+      headless: new Map([
+        ["a-1", run("T-1", "a-1")],
+        ["a-2", run("T-2", "a-2")],
+      ]),
+    };
+    stopTaskHeadless(k, "R-1", "T-1");
+    await Promise.resolve();
+    expect(kills).toEqual(["a-1"]);
+    expect(k.headless.get("a-1")?.stoppedByBudget).toBe(true);
+    expect(k.headless.get("a-2")?.stoppedByBudget).toBeUndefined();
+    const killed: HostOutcome = {
+      kind: "error",
+      message: "killed",
+      retryable: true,
+      cause: "killed",
+      tokens: null,
+      cost_usd: 0.2,
+    };
+    expect(budgetStoppedOutcome(killed)).toMatchObject({
+      kind: "error",
+      cause: "budget",
+      retryable: false,
+      cost_usd: 0.2,
     });
   });
 });

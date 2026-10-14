@@ -199,6 +199,20 @@ const checkBudget = (k: Kernel, h: RunHandle, taskId: string | undefined): void 
     detail: `spent $${task.spent_usd.toFixed(2)} of $${task.budget_usd.toFixed(2)}`,
     evidence: [{ type: "file", ref: `.vtc/tasks/${task.id}.md` }],
   });
+  stopTaskHeadless(k, h.state.id, task.id);
+};
+
+/**
+ * §11, AD-25: a task parked on budget runs nothing more, so its in-flight engine-launched runs
+ * are killed; each ends as a stop with cause `budget` (`budgetStoppedOutcome`), not as the role's
+ * failure.
+ */
+export const stopTaskHeadless = (k: Pick<Kernel, "headless">, run: string, task: string): void => {
+  for (const entry of k.headless.values()) {
+    if (entry.run !== run || entry.summary.task !== task) continue;
+    entry.stoppedByBudget = true;
+    void entry.process.kill().catch(() => undefined);
+  }
 };
 
 /** Statuses in which the Engineer runs next (its share is checked before it runs again). */
