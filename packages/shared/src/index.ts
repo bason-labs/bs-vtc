@@ -189,5 +189,13 @@ export * from "./json-schema.js";
  * `SandboxProfile.enforced.readDeny` and `ReplayResult.isolation` (`ReplayIsolation`). The chosen
  * G2 direction in post-G2 packs: `TaskPack.design_direction`; the key-screen design contracts'
  * path (`DESIGN_CONTRACTS_DIR`, `designContractPath`).
+ *
+ * 4.12.0 (MINOR): the closing-round fix round (spine §5 reading 182). `ROLE_DENIED_VTC
+ * .homeWriteDeny` adds `guard/**`, the engine's private directory, so every role profile and the
+ * Lead session deny writes there; `EDITABLE_IN_PACK_ROLES` moves here from `@vtc/compiler`, the
+ * one list the compiler switches and the engine's tests build from; the core event
+ * `lookback.unattributed` counts the failures the attribution tree leaves inconclusive while no
+ * AI tiebreak runs (spec §13). All additive: a new constant, a new event type and one more deny
+ * glob (a deny list only narrows what a role may do).
  */
-export const CONTRACTS_VERSION = "4.11.0";
+export const CONTRACTS_VERSION = "4.12.0";

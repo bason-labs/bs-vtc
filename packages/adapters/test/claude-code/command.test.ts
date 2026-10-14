@@ -7,6 +7,7 @@ import {
   findDisallowedHostArgs,
   findForbiddenHostArgs,
   HEADLESS_DEFAULTS,
+  HOME_CREDENTIAL_LOCATIONS,
   headlessIsolationGaps,
   hostCredentialDenyReadPaths,
   HostOutcomeSchema,
@@ -38,7 +39,13 @@ const VTC_HOME = "/home/dev/.vtc";
 const CODEX_HOME = "/home/dev/.codex";
 const CLAUDE_CONFIG = "/home/dev/.claude";
 const PLUGIN_DIR = "/opt/vtc/plugin";
-const HOMES = { vtcHome: VTC_HOME, codexHome: CODEX_HOME, claudeConfigDir: CLAUDE_CONFIG };
+const USER_HOME = "/home/dev";
+const HOMES = {
+  vtcHome: VTC_HOME,
+  codexHome: CODEX_HOME,
+  claudeConfigDir: CLAUDE_CONFIG,
+  homeDir: USER_HOME,
+};
 /** Claude's own credential file, built only through the shared deny helper (D-ad). */
 const credentialsIn = (configDir: string): string => {
   const [path] = hostCredentialDenyReadPaths({ "claude-code": configDir });
@@ -91,6 +98,8 @@ const UNREADABLE = [
   `${VTC_HOME}/hidden`,
   CODEX_HOME,
   CLAUDE_CREDENTIALS,
+  // the user's credential stores, as the Lead session and the gate sandbox deny them
+  ...HOME_CREDENTIAL_LOCATIONS.map((rel) => `${USER_HOME}/${rel}`),
 ];
 /** D-w, D-ap: what no role may write under the VTC home, as sandbox paths (directories and files). */
 const VTC_HOME_DENIED_PATHS = [
@@ -111,6 +120,9 @@ const VTC_HOME_DENIED_PATHS = [
   "research-cache",
   "browsers",
   "design-library",
+  // contracts 4.12.0: the engine's private directory (the replay plan and grades, the dispatch
+  // records, the ledger of its own writes), which it reads back as trusted
+  "guard",
 ].map((d) => `${VTC_HOME}/${d}`);
 
 const settingsOf = (p: SandboxProfile) =>
@@ -314,7 +326,7 @@ describe("Claude sandboxProfile (§12.1, AD-9)", () => {
         "Write(//srv/vtc home/allowlists/**)",
       ]),
     );
-    expect(settings.sandbox.filesystem.denyRead).toEqual([
+    expect(settings.sandbox.filesystem.denyRead.slice(0, 5)).toEqual([
       "/srv/vtc home/token",
       "/srv/vtc home/run",
       "/srv/vtc home/hidden",
@@ -337,15 +349,17 @@ describe("Claude sandboxProfile (§12.1, AD-9)", () => {
       vi.stubEnv("VTC_HOME", "/env/vtc");
       vi.stubEnv("CODEX_HOME", "/env/codex");
       vi.stubEnv("CLAUDE_CONFIG_DIR", "/env/claude");
-      expect(
-        settingsOf(createClaudeCodeAdapter().sandboxProfile(profileRequest(READ_ONLY))).sandbox
-          .filesystem.denyRead,
-      ).toEqual([
+      const denyRead = settingsOf(
+        createClaudeCodeAdapter().sandboxProfile(profileRequest(READ_ONLY)),
+      ).sandbox.filesystem.denyRead;
+      expect(denyRead).toEqual([
         "/env/vtc/token",
         "/env/vtc/run",
         "/env/vtc/hidden",
         "/env/codex",
         credentialsIn("/env/claude"),
+        // without an explicit home, the user's credential stores under os.homedir()
+        ...HOME_CREDENTIAL_LOCATIONS.map((rel) => join(homedir(), rel)),
       ]);
       const wired = ADAPTER_FACTORIES["claude-code"]!({ vtcHome: "/cli/vtc" });
       expect(
@@ -367,7 +381,7 @@ describe("Claude sandboxProfile (§12.1, AD-9)", () => {
           profileRequest(READ_ONLY),
         ),
       ).sandbox.filesystem.denyRead;
-      expect(denyRead.at(-1)).toBe(credentialsIn(join(homedir(), ".claude")));
+      expect(denyRead).toContain(credentialsIn(join(homedir(), ".claude")));
     });
   });
 
@@ -579,6 +593,25 @@ describe("Claude sandboxProfile (§12.1, AD-9)", () => {
         expect(argAfter(p.cliArgs, "--disallowedTools")?.split(",")).toEqual(
           expect.arrayContaining(["WebFetch", "WebSearch"]),
         );
+      }
+    });
+
+    it("no role, a host_web one above all, may read the user's credential stores: a fetched page cannot steer a read into a WebFetch URL", () => {
+      const adapter = createClaudeCodeAdapter({ ...HOMES, homeDir: "/home/dev" });
+      for (const tools of [RESEARCH, { ...READ_ONLY, host_web: true }, READ_ONLY, ENGINEER]) {
+        const p = adapter.sandboxProfile(profileRequest(tools));
+        const deny = settingsOf(p).permissions.deny;
+        const sandbox = (p.settings as { sandbox: { filesystem: { denyRead: string[] } } }).sandbox
+          .filesystem.denyRead;
+        for (const location of HOME_CREDENTIAL_LOCATIONS) {
+          expect(deny, location).toContain(`Read(//home/dev/${location})`);
+          expect(deny, location).toContain(`Read(//home/dev/${location}/**)`);
+          expect(sandbox, location).toContain(`/home/dev/${location}`);
+        }
+        for (const location of [".ssh", ".config/gh", ".aws", ".npmrc", ".netrc", ".pypirc"]) {
+          expect(HOME_CREDENTIAL_LOCATIONS).toContain(location);
+        }
+        expect(p.enforced.secretsUnreadable).toBe(true);
       }
     });
 

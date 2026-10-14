@@ -528,6 +528,18 @@ export const EVENT_PAYLOAD_SCHEMAS = {
   }),
   /** A Level-3 merge was reverted or broke base CI: an escaped defect for attribution (§6.7). */
   "lookback.escaped_defect": EscapedDefectSchema,
+  /**
+   * At RETRO, the run's failures the attribution tree left inconclusive (a round-cap or stuck park
+   * with no signal, or a blamed role with no dispatch on the task; spec §13 "Attribution"). The
+   * spec's AI tiebreak would answer them; v1 runs none (spine §5 reading 182, §7 row "Lookback AI
+   * tiebreak"), so they stay out of every scorecard, and this event is the visible count. New in
+   * 4.12.0.
+   */
+  "lookback.unattributed": z.strictObject({
+    failures: z.int().positive(),
+    /** The tasks they belong to (a run-level failure names none), each once. */
+    tasks: z.array(TaskIdSchema).max(500),
+  }),
   "incident.recorded": z.strictObject({
     kind: IncidentKindSchema,
     detail: z.string().min(1).max(2000),

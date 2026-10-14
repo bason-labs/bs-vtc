@@ -29,6 +29,17 @@ export const PLUGIN_MANIFEST_ASSET = "vtc-manifest.json";
  */
 export const ROLE_PROMPTS_ASSET_DIR = "vtc/prompts";
 
+/**
+ * Roles whose compiled agents carry the locked core only and take their editable section from the
+ * task pack's `Role heuristics` section (spine §5 readings 102, 142 and 166; D-bl): the roles a
+ * Lookback pin or canary reaches on either host and in either dispatch mode. The compiler
+ * switches exactly these (its default `editableInPack`), and the engine's Lookback tests build
+ * their plugins from the same list, so a change here is a change of both. Switching a role
+ * changes its compiled locked part, so it ships with a MAJOR role version (D-bm, reading 167).
+ * New in 4.12.0 (moved from `@vtc/compiler`).
+ */
+export const EDITABLE_IN_PACK_ROLES: readonly string[] = ["spec_verifier"];
+
 export type RolePromptPart = "locked" | "editable";
 
 /** Pure: the plugin asset path of one prompt section of one compiled agent. */

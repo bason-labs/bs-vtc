@@ -5,6 +5,7 @@
  * comes from tool allowlists, the Codex sandbox, the OS sandbox and the engine's write-scope check.
  */
 import {
+  engineMcpServer,
   humanChannelRequired,
   isHumanOnlyTool,
   HUMAN_ONLY_TOOLS,
@@ -59,23 +60,50 @@ const roleEngineTools = (tools: RoleTools): readonly string[] => {
 export const CLAUDE_HOST_WEB_TOOLS = ["WebSearch", "WebFetch"] as const;
 
 /**
+ * An engine tool as a headless run's `--mcp-config` bridge names it: `mcp__<server>__<tool>`
+ * (`engineMcpServer`). Under `--strict-mcp-config` it may be the only name the engine tools have
+ * (spine §7 row "Claude headless plugin agent"), so an agent lists both names.
+ */
+export const claudeBridgeToolName = (tool: string): string =>
+  `mcp__${engineMcpServer("claude-code").name}__${tool}`;
+
+/**
+ * The tools every compiled Claude agent lists besides its profile's (spine §7, live check
+ * 2026-10-14). A headless role run is `--agent vtc:<agent>`, and under `--agent` the session's
+ * tools are cut to the agent's own `tools`: `StructuredOutput` is how `--json-schema` returns the
+ * RoleResult (without it the run ends with no `structured_output` and the engine rejects it), and
+ * `ToolSearch` loads the engine tools when Claude defers them. Neither reaches a file or the
+ * network; in an in-session subagent, where neither flag applies, the host has no such tool to
+ * give and the names are inert.
+ */
+export const CLAUDE_SESSION_TOOLS = ["ToolSearch", "StructuredOutput"] as const;
+
+/**
  * Explicit tool allowlist per profile: read-only roles get no write or shell tool; write-scoped
  * roles get file writes (the engine checks the paths); only the Engineer family gets Bash; only
- * a `host_web` role gets the host's web tools. The engine MCP tools a role declares are added by
- * their plugin names; a human-only one throws.
+ * a `host_web` role gets the host's web tools. Every agent gets {@link CLAUDE_SESSION_TOOLS}. The
+ * engine MCP tools a role declares are added by their plugin names and by the headless bridge's
+ * ({@link claudeBridgeToolName}), the two names the adapter allows; a human-only one throws.
+ * `tests` in `packages/cli` check this list against the adapter's `--allowedTools` for every
+ * compiled agent.
  */
 export const claudeToolsFor = (tools: RoleTools): string[] => [
   ...READ_TOOLS,
   ...(tools.profile === "read_only" ? [] : WRITE_TOOLS),
   ...(tools.profile === "code_sandboxed" ? ["Bash"] : []),
   ...(tools.host_web === true ? CLAUDE_HOST_WEB_TOOLS : []),
-  ...roleEngineTools(tools).map(claudeEngineToolName),
+  ...CLAUDE_SESSION_TOOLS,
+  ...roleEngineTools(tools).flatMap((tool) => [
+    claudeEngineToolName(tool),
+    claudeBridgeToolName(tool),
+  ]),
 ];
 
 /**
  * What every Claude Code role agent's frontmatter `disallowedTools` names: every human-only
- * engine tool (`HUMAN_ONLY_TOOLS`) by its plugin name, on top of the `tools` allowlist that
- * never names one (D-an, spine §5 reading 71). Bare tool names only (spine §5 reading 81): in
+ * engine tool (`HUMAN_ONLY_TOOLS`) by its plugin name and by the headless bridge's
+ * ({@link claudeBridgeToolName}), on top of the `tools` allowlist that never names one (D-an,
+ * spine §5 reading 71). Bare tool names only (spine §5 reading 81): in
  * subagent frontmatter an entry with a specifier, such as `Bash(vtc calibrate *)` or
  * `Read(~/.vtc/token)`, removes the whole tool, not the matching calls
  * (code.claude.com/docs/en/sub-agents, "disallowedTools"), and with `--agent` the main thread
@@ -85,7 +113,10 @@ export const claudeToolsFor = (tools: RoleTools): string[] => [
  * `vtc install` writes (`claudeSessionPermissionDeny`, absolute paths, so they also cover a
  * `$VTC_HOME` elsewhere), and in a headless run's `--settings` (the adapter's profile).
  */
-export const CLAUDE_DENIED_TOOLS: readonly string[] = HUMAN_ONLY_TOOLS.map(claudeEngineToolName);
+export const CLAUDE_DENIED_TOOLS: readonly string[] = HUMAN_ONLY_TOOLS.flatMap((tool) => [
+  claudeEngineToolName(tool),
+  claudeBridgeToolName(tool),
+]);
 
 /** A frontmatter tool list entry is a bare tool name: a specifier would remove the whole tool. */
 const assertBareToolNames = (field: string, entries: readonly string[]): readonly string[] => {

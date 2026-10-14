@@ -5,6 +5,7 @@
  * Engine-launched runs are unattended (AD-25): an isolated argv, process-group supervision, and
  * `authStatus()` through `claude auth status --json` before every start or resume.
  */
+import { homedir } from "node:os";
 import {
   HOST_CREDENTIAL_DENY_READ,
   type HostAdapter,
@@ -63,6 +64,11 @@ export interface ClaudeCodeAdapterOptions {
    */
   readonly claudeConfigDir?: string;
   /**
+   * The user's home, whose credential stores (`HOME_CREDENTIAL_LOCATIONS`) no role may read.
+   * Default: `os.homedir()`. Only a path for the deny rules: never read.
+   */
+  readonly homeDir?: string;
+  /**
    * The compiled Claude plugin on disk; see `ClaudeCommandOptions.pluginDir`. Required for
    * headless runs: without it `headlessCommand`, `spawnRole` (headless) and `resume` refuse.
    */
@@ -103,6 +109,7 @@ export const createClaudeCodeAdapter = (options: ClaudeCodeAdapterOptions = {}):
     codexHome: options.codexHome ?? envHome(codex.configDirEnv, codex.defaultConfigDir),
     claudeConfigDir:
       options.claudeConfigDir ?? envHome(claude.configDirEnv, claude.defaultConfigDir),
+    homeDir: options.homeDir ?? homedir(),
   };
   const commandOptions = options.pluginDir === undefined ? {} : { pluginDir: options.pluginDir };
   const headlessCommand = (request: SpawnRoleRequest, session?: SessionRef) =>

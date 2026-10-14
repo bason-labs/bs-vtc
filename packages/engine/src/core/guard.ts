@@ -7,9 +7,11 @@
  * baseline of every gate run still running (`gates/`), a held git change awaiting the human (`git-hold.json`), the runs the engine could not verify when
  * it opened (`held-runs.json`), and who claimed each run's Lead role (`leads.jsonl`).
  *
- * Residual: a role whose host sandbox lets it write the user's home directory could still reach
- * this directory; the host's per-path write deny (AD-8 rule 3) is what keeps roles to their
- * worktrees, and the engine's own checks never trust anything inside the repo.
+ * No role may write here: `ROLE_DENIED_VTC.homeWriteDeny` names `guard/**` (contracts 4.12.0), so
+ * every Claude role profile and the Lead session deny it to the file tools and the sandbox, and a
+ * Codex role writes only its worktree and the temp roots. What is read back is still checked
+ * against its shape (the replay plan and trial rows, `replay.ts`), and the engine's own checks
+ * never trust anything inside the repo.
  */
 import { randomBytes } from "node:crypto";
 import {

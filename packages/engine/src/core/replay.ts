@@ -57,9 +57,15 @@
  */
 import { createHash } from "node:crypto";
 import { join } from "node:path";
+import { z } from "zod";
 import {
   agentNameFor,
   GateRunRequestSchema,
+  GitShaSchema,
+  HostIdSchema,
+  PromptVersionRefSchema,
+  RoleIdSchema,
+  SlugSchema,
   planDispatch,
   resolveRoleMode,
   TaskIdSchema,
@@ -71,6 +77,7 @@ import {
 import {
   createReplayCheckout,
   exposeReplayHead,
+  isReplayTree,
   newReplayTree,
   removeReplayCheckout,
   ReplayCheckoutTamperedError,
@@ -127,7 +134,7 @@ export interface ReplayStep {
   readonly replay: ReplayStepRef;
 }
 
-type TrialRow =
+export type TrialRow =
   /** The trial's checkout is being made (a crash before `dispatched` leaves it to remove). */
   | {
       readonly kind: "preparing";
@@ -179,20 +186,117 @@ const planCache = (k: Kernel): Map<string, ReplayPlan> => {
   return cache;
 };
 
+/**
+ * The plan and trial rows are read back as trusted after a restart (spine §5 reading 182): their
+ * directory is role-unwritable (`ROLE_DENIED_VTC.homeWriteDeny` `guard/**`, contracts 4.12.0),
+ * and each is checked against its shape on read as well, so a damaged or forged plan reads as
+ * none and a forged row is dropped, never half-read.
+ */
+const PinnedPromptShape = z.looseObject({
+  version: PromptVersionRefSchema,
+  text: z.string(),
+});
+const TrialShape = z.looseObject({
+  arm: z.enum(["a", "b", "aa"]),
+  trial: z.int().positive(),
+  task: z.string().min(1),
+  regressionSet: z.boolean(),
+  role: RoleIdSchema,
+  mode: SlugSchema.optional(),
+  host: HostIdSchema,
+  prompt: PinnedPromptShape,
+  pack: z.record(z.string(), z.unknown()),
+  base: GitShaSchema,
+  protectedPaths: z.array(z.string()).optional(),
+});
+const ReplayPlanShape = z.strictObject({
+  v: z.literal(1),
+  replays: z.array(
+    z.looseObject({
+      proposal: z.string().min(1),
+      role: RoleIdSchema,
+      mode: SlugSchema.optional(),
+      host: HostIdSchema,
+      trials: z.array(TrialShape),
+    }),
+  ),
+});
+
+/** A plan file's text as a plan, or `null` when it is not one the engine wrote. */
+export const parseReplayPlan = (text: string): ReplayPlan | null => {
+  try {
+    const parsed = ReplayPlanShape.safeParse(JSON.parse(text) as unknown);
+    return parsed.success ? (parsed.data as unknown as ReplayPlan) : null;
+  } catch {
+    return null;
+  }
+};
+
+const Index = z.int().nonnegative();
+const TrialRowShape = z.discriminatedUnion("kind", [
+  z.strictObject({
+    kind: z.literal("preparing"),
+    replay: Index,
+    n: Index,
+    action: z.string().min(1),
+    tree: z.string(),
+  }),
+  z.strictObject({
+    kind: z.literal("dispatched"),
+    replay: Index,
+    n: Index,
+    action: z.string().min(1),
+    tree: z.string(),
+  }),
+  z.strictObject({
+    kind: z.literal("graded"),
+    replay: Index,
+    n: Index,
+    passed: z.boolean(),
+    tokens: z.number().nonnegative(),
+  }),
+  z.strictObject({
+    kind: z.literal("unmeasured"),
+    replay: Index,
+    n: Index,
+    reason: z.string(),
+  }),
+  z.strictObject({ kind: z.literal("finished"), replay: Index }),
+  z.strictObject({ kind: z.literal("deferred"), reason: z.string() }),
+]);
+
+/**
+ * A rows file's text as its trial rows, in order: a line that is not a row the engine writes is
+ * dropped. A row's work tree is kept only when it is one {@link newReplayTree} made
+ * (`isReplayTree`), since engine git calls take it as their work tree; otherwise it reads as
+ * none (`""`), and the trial has no checkout to grade or remove.
+ */
+export const parseTrialRows = (text: string): TrialRow[] =>
+  text.split("\n").flatMap((line): TrialRow[] => {
+    if (line.trim() === "") return [];
+    let raw: unknown;
+    try {
+      raw = JSON.parse(line) as unknown;
+    } catch {
+      return [];
+    }
+    const parsed = TrialRowShape.safeParse(raw);
+    if (!parsed.success) return [];
+    const row = parsed.data;
+    if ((row.kind === "preparing" || row.kind === "dispatched") && !isReplayTree(row.tree))
+      return [{ ...row, tree: "" }];
+    return [row];
+  });
+
 /** The run's replay plan, or `null` before RETRO planned it. */
 export const readReplayPlan = (k: Kernel, run: string): ReplayPlan | null => {
   const cached = planCache(k).get(run);
   if (cached !== undefined) return cached;
   const text = readPrivateFile(planFile(k, run));
   if (text === null) return null;
-  try {
-    const plan = JSON.parse(text) as Partial<ReplayPlan> | null;
-    if (plan?.v !== 1 || !Array.isArray(plan.replays)) return null;
-    planCache(k).set(run, plan as ReplayPlan);
-    return plan as ReplayPlan;
-  } catch {
-    return null;
-  }
+  const plan = parseReplayPlan(text);
+  if (plan !== null) planCache(k).set(run, plan);
+  return plan;
 };
 
 const writePlan = (k: Kernel, run: string, plan: ReplayPlan): void => {
@@ -201,17 +305,8 @@ const writePlan = (k: Kernel, run: string, plan: ReplayPlan): void => {
   planCache(k).set(run, plan);
 };
 
-const readRows = (k: Kernel, run: string): TrialRow[] => {
-  const text = readPrivateFile(rowsFile(k, run)) ?? "";
-  return text.split("\n").flatMap((line): TrialRow[] => {
-    if (line.trim() === "") return [];
-    try {
-      return [JSON.parse(line) as TrialRow];
-    } catch {
-      return [];
-    }
-  });
-};
+const readRows = (k: Kernel, run: string): TrialRow[] =>
+  parseTrialRows(readPrivateFile(rowsFile(k, run)) ?? "");
 
 const appendRow = (k: Kernel, run: string, row: TrialRow): void => {
   ensurePrivateDir(replaysDir(k));

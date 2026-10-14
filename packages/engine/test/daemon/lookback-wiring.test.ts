@@ -12,6 +12,7 @@ import {
   agentNameFor,
   AttributionSchema,
   CONTRACTS_VERSION,
+  EDITABLE_IN_PACK_ROLES,
   effectivePromptSha,
   engineRepoKey,
   HOST_IDS,
@@ -161,7 +162,10 @@ const ROLES_DIR = fileURLToPath(new URL("../../../../roles/", import.meta.url));
 /**
  * The plugins as the shipped compile emits them (D-bl, spine §5 reading 166): every fixture
  * role's agents (one per mode) with their manifest SHAs and both prompt texts from
- * `roles/<role>/prompt.md`, and only `spec_verifier` switched to `editable_in_pack`.
+ * `roles/<role>/prompt.md`, and exactly the shared `EDITABLE_IN_PACK_ROLES` switched to
+ * `editable_in_pack`: the list the compiler's default switches, which `packages/cli`'s
+ * shipped-plugin test checks against the real compiled manifests. So a change that unswitches
+ * `spec_verifier` fails the pin tests below.
  */
 const shippedPlugins = (): { readonly catalog: PluginCatalog; readonly locked: string } => {
   const files: Record<string, string> = {};
@@ -174,7 +178,7 @@ const shippedPlugins = (): { readonly catalog: PluginCatalog; readonly locked: s
       const split = splitRolePrompt(readFileSync(path, "utf8"));
       if (!split.ok) throw new Error(`${contract.id}: ${split.errors.join("; ")}`);
       if (contract.id === "spec_verifier") specLocked = split.locked;
-      const switchedRole = contract.id === "spec_verifier";
+      const switchedRole = EDITABLE_IN_PACK_ROLES.includes(contract.id);
       for (const mode of [undefined, ...Object.keys(contract.modes ?? {})]) {
         const name = agentNameFor(contract.id, mode);
         files[`plugin:${host}\n${rolePromptAssetPath(name, "locked")}`] = split.locked;

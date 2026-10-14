@@ -5,6 +5,8 @@ import { HUMAN_ONLY_TOOLS, type RoleTools } from "@vtc/shared";
 import {
   CLAUDE_DENIED_TOOLS,
   CLAUDE_MODEL_ALIASES,
+  CLAUDE_SESSION_TOOLS,
+  claudeBridgeToolName,
   claudeEngineToolName,
   claudeToolsFor,
   codexFeaturesFor,
@@ -44,13 +46,15 @@ const frontmatter = (md: string): Record<string, unknown> => {
 
 describe("Claude Code agent (.md)", () => {
   it("maps tool profiles to an explicit tool allowlist", () => {
-    expect(claudeToolsFor(tools("read_only"))).toEqual(["Read", "Grep", "Glob"]);
+    const session = ["ToolSearch", "StructuredOutput"];
+    expect(claudeToolsFor(tools("read_only"))).toEqual(["Read", "Grep", "Glob", ...session]);
     expect(claudeToolsFor(tools("write_scoped"))).toEqual([
       "Read",
       "Grep",
       "Glob",
       "Write",
       "Edit",
+      ...session,
     ]);
     expect(claudeToolsFor(tools("code_sandboxed"))).toEqual([
       "Read",
@@ -59,14 +63,28 @@ describe("Claude Code agent (.md)", () => {
       "Write",
       "Edit",
       "Bash",
+      ...session,
     ]);
     expect(claudeToolsFor(tools("read_only", ["repo_map"]))).toEqual([
       "Read",
       "Grep",
       "Glob",
+      ...session,
       claudeEngineToolName("repo_map"),
+      claudeBridgeToolName("repo_map"),
     ]);
     expect(claudeEngineToolName("repo_map")).toBe("mcp__plugin_vtc_vtc__repo_map");
+    expect(claudeBridgeToolName("repo_map")).toBe("mcp__vtc__repo_map");
+  });
+
+  it("lists StructuredOutput and ToolSearch on every agent: under --agent a headless run has only the agent's tools (live check 2026-10-14)", () => {
+    expect(CLAUDE_SESSION_TOOLS).toEqual(["ToolSearch", "StructuredOutput"]);
+    for (const profile of ["read_only", "write_scoped", "code_sandboxed"] as const) {
+      const listed = String(frontmatter(renderClaudeAgent(agent({ tools: tools(profile) }))).tools);
+      expect(listed.split(", "), profile).toEqual(
+        expect.arrayContaining([...CLAUDE_SESSION_TOOLS]),
+      );
+    }
   });
 
   it("renders frontmatter and the instructions as the body", () => {
@@ -74,7 +92,7 @@ describe("Claude Code agent (.md)", () => {
     expect(frontmatter(md)).toEqual({
       name: "vtc-qa-author",
       description: 'VTC role agent "qa" (author mode). Writes acceptance tests.',
-      tools: "Read, Grep, Glob, Write, Edit",
+      tools: "Read, Grep, Glob, Write, Edit, ToolSearch, StructuredOutput",
       disallowedTools: CLAUDE_DENIED_TOOLS.join(", "),
       model: CLAUDE_MODEL_ALIASES.mid,
       effort: "medium",
@@ -86,7 +104,9 @@ describe("Claude Code agent (.md)", () => {
   it("names only bare tools in disallowedTools: a specifier would remove the whole tool (reading 81)", () => {
     // code.claude.com/docs/en/sub-agents: "An entry with a specifier, such as `Bash(git push *)`,
     // still removes the whole tool"; path and command rules live in permissions.deny instead
-    expect(CLAUDE_DENIED_TOOLS).toEqual(HUMAN_ONLY_TOOLS.map(claudeEngineToolName));
+    expect(CLAUDE_DENIED_TOOLS).toEqual(
+      HUMAN_ONLY_TOOLS.flatMap((t) => [claudeEngineToolName(t), claudeBridgeToolName(t)]),
+    );
     for (const profile of ["read_only", "write_scoped", "code_sandboxed"] as const) {
       const front = frontmatter(renderClaudeAgent(agent({ tools: tools(profile) })));
       const denied = String(front.disallowedTools).split(", ");
@@ -104,12 +124,13 @@ describe("Claude Code agent (.md)", () => {
     }
     expect(
       String(frontmatter(renderClaudeAgent(agent({ tools: tools("code_sandboxed") }))).tools),
-    ).toBe("Read, Grep, Glob, Write, Edit, Bash");
+    ).toBe("Read, Grep, Glob, Write, Edit, Bash, ToolSearch, StructuredOutput");
   });
 
-  it("denies every human-only engine tool to every agent by its plugin name (D-an, reading 71)", () => {
+  it("denies every human-only engine tool to every agent by both its names (D-an, reading 71)", () => {
     for (const tool of HUMAN_ONLY_TOOLS) {
       expect(CLAUDE_DENIED_TOOLS).toContain(claudeEngineToolName(tool));
+      expect(CLAUDE_DENIED_TOOLS).toContain(claudeBridgeToolName(tool));
     }
   });
 

@@ -23,8 +23,11 @@
  * directory changed is discarded); a change throws {@link ReplayCheckoutTamperedError}. The check
  * and the git call are not atomic: what keeps a process from planting a key between the two is
  * that every engine git call on a checkout runs after its trial ended (the role submitted, so
- * nothing of it runs any more) and that the role sandboxes deny writes under the VTC home, where
- * the git directory lives. The checks catch what a role left behind, not a writer racing them.
+ * nothing of it runs any more) and that every role profile denies writes to the engine's private
+ * directory, where the git directory lives (`ROLE_DENIED_VTC.homeWriteDeny` `guard/**` since
+ * contracts 4.12.0: Claude's deny rules and sandbox `denyWrite`; on Codex, `workspace-write`
+ * writes only the worktree and the temp roots, and a profile whose worktree overlaps a denied
+ * path is refused). The checks catch what a role left behind, not a writer racing them.
  *
  * The trial's work is committed in the checkout (its head); before the Gate Runner grades
  * `base..head` with the user's repo, the head's objects are fetched there by SHA

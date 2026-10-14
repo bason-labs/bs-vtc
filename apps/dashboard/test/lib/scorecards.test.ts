@@ -149,4 +149,18 @@ describe("lookbackActivity (lookback.* events)", () => {
     expect(replay.path).toBe(".vtc/lookback/replays/engineer-p1.json");
     expect(activity.items[0]?.detail).toMatch(/revert of cccccccc.*T-1/);
   });
+
+  it("shows the failures left without an attribution while no AI tiebreak runs (reading 182)", () => {
+    const items = lookbackActivity([
+      w3Event(95, "lookback.unattributed", { failures: 3, tasks: ["T-2", "T-4"] }),
+    ]).items;
+    expect(items).toHaveLength(1);
+    expect(items[0]).toMatchObject({
+      type: "lookback.unattributed",
+      tone: "warn",
+      title: "3 failures left unattributed",
+      path: null,
+    });
+    expect(items[0]?.detail).toMatch(/no AI tiebreak.*no scorecard.*T-2, T-4/);
+  });
 });

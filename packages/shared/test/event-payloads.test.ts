@@ -366,6 +366,7 @@ const examples: { [T in CoreEventType]: { data: EventDataInput<T>; envelope?: ob
     data: { merge_commit: COMMIT, kind: "revert", tasks: ["T-7"] },
     envelope: { feature: "F-1" },
   },
+  "lookback.unattributed": { data: { failures: 2, tasks: ["T-1", "T-2"] } },
 };
 
 const event = (type: CoreEventType) => ({
@@ -538,6 +539,7 @@ describe("EVENT_PAYLOAD_SCHEMAS", () => {
       "data.from",
     ],
     ["lookback.escaped_defect", { merge_commit: COMMIT, kind: "flaky" }, "data.kind"],
+    ["lookback.unattributed", { failures: 0, tasks: [] }, "data.failures"],
   ];
   it("has an invalid case for every core type", () => {
     expect(new Set(invalid.map(([type]) => type))).toEqual(new Set(CORE_EVENT_TYPES));

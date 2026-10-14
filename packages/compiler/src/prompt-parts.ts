@@ -37,6 +37,7 @@
  * (reading 142). The switched roles are `EDITABLE_IN_PACK_ROLES`.
  */
 import {
+  EDITABLE_IN_PACK_ROLES,
   ROLE_PROMPTS_ASSET_DIR,
   rolePromptAssetPath,
   TASK_PACK_HEURISTICS_SECTION,
@@ -46,18 +47,18 @@ import {
 export { ROLE_PROMPTS_ASSET_DIR, rolePromptAssetPath };
 
 /**
- * Roles whose agents carry the locked core only (readings 102, 166). The engine renders the
- * `Role heuristics` pack section (`TaskPack.role_heuristics`, reading 142), so a switched agent
- * gets its heuristics from the pack: the pinned version when Lookback pins one, else the compiled
- * default.
+ * Roles whose agents carry the locked core only (readings 102, 166): `EDITABLE_IN_PACK_ROLES`
+ * from `@vtc/shared` (4.12.0), the one list the engine's Lookback tests also build from. The
+ * engine renders the `Role heuristics` pack section (`TaskPack.role_heuristics`, reading 142), so
+ * a switched agent gets its heuristics from the pack: the pinned version when Lookback pins one,
+ * else the compiled default.
  *
  * The Spec Verifier is switched first (D-bl): it is dispatched once per acceptance criterion (the
  * most dispatches per run, so an A/A comparison reaches its sample size soonest), read-only and on
- * the low tier, and it is the first role a pin and a replay can reach on both hosts (reading
- * 176). Switching a role changes its compiled locked part, so it ships with a MAJOR role version
- * (D-bm, reading 167).
+ * the low tier, and it is the first role a pin can reach on both hosts (reading 176). Switching a
+ * role changes its compiled locked part, so it ships with a MAJOR role version (D-bm, reading 167).
  */
-export const EDITABLE_IN_PACK_ROLES: readonly string[] = ["spec_verifier"];
+export { EDITABLE_IN_PACK_ROLES };
 
 /**
  * The task-pack section that carries a switched role's editable section, rendered before the

@@ -259,6 +259,8 @@ describe("Codex sandboxProfile (§12.1, AD-9)", () => {
         ...WAVE3_HOME_WRITE_DENY.map((glob) => `/v/${glob.replace(/\/\*\*$/u, "")}/x`),
         "/v/research-cache",
         "/v/design-library",
+        // contracts 4.12.0: the engine's private directory
+        "/v/guard/repo-key/replays",
       ]) {
         expect(at("/v", tools, inside), inside).toThrow(/VTC home/);
       }
