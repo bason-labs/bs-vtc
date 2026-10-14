@@ -11,7 +11,15 @@ import {
   type GateReport,
   type GateRunner,
   type GateRunRequest,
+  type HeadlessRun,
   type HostAdapter,
+  type HostAuthStatus,
+  type HostId,
+  type HostOutcome,
+  type RemoteMergeService,
+  type SessionRef,
+  type SpawnRoleRequest,
+  type UsageSnapshot,
   type LeadAction,
   type PullRequestRef,
   type RoleContract,
@@ -215,6 +223,140 @@ export const fakePullRequests = (): PullRequestService & { readonly calls: strin
   };
 };
 
+/**
+ * A scripted engine-launched run (AD-25): what the role does (it may write files in
+ * `request.cwd`) and how it ends. Returning `{ outcome, lines }` also streams `lines`; a line
+ * `{"usage": <UsageSnapshot>}` is a usage event the fake's `parseEvents` reports.
+ */
+export type HeadlessScript = (
+  request: SpawnRoleRequest,
+  session: SessionRef | undefined,
+) =>
+  | HostOutcome
+  | { readonly outcome: HostOutcome; readonly lines?: readonly string[] }
+  | Promise<HostOutcome | { readonly outcome: HostOutcome; readonly lines?: readonly string[] }>;
+
+/** One engine-launched run the fake adapters started. */
+export interface Launched {
+  readonly host: HostId;
+  readonly request: SpawnRoleRequest;
+  readonly session: SessionRef | undefined;
+}
+
+export interface FakeAdapterOptions {
+  readonly capabilities?: Partial<HostAdapter["capabilities"]>;
+  /** Launches headless runs with this script; absent: a headless launch is refused. */
+  readonly headless?: HeadlessScript;
+  /** `HostAdapter.authStatus`; absent: the adapter has none. */
+  readonly authStatus?: () => Promise<HostAuthStatus>;
+}
+
+const outcomeOf = async (
+  script: ReturnType<HeadlessScript>,
+): Promise<{ outcome: HostOutcome; lines: readonly string[] }> => {
+  const value = await script;
+  return "kind" in value
+    ? { outcome: value, lines: [] }
+    : { outcome: value.outcome, lines: value.lines ?? [] };
+};
+
+const fakeAdapter = (
+  host: HostId,
+  options: FakeAdapterOptions & { readonly subagentName?: (agent: string) => string },
+  record: { spawned: string[]; launched: Launched[]; killed: string[] },
+): HostAdapter => {
+  const launch = (request: SpawnRoleRequest, session: SessionRef | undefined): HeadlessRun => {
+    const script = options.headless;
+    if (script === undefined) throw new Error("this fake host launches no headless runs");
+    record.launched.push({ host, request, session });
+    let kill: () => void = () => undefined;
+    const killed = new Promise<{ outcome: HostOutcome; lines: readonly string[] }>((resolve) => {
+      kill = () => {
+        resolve({
+          outcome: {
+            kind: "error",
+            message: "killed",
+            retryable: true,
+            cause: "killed",
+            tokens: null,
+            cost_usd: null,
+          },
+          lines: [],
+        });
+      };
+    });
+    const done = Promise.race([outcomeOf(script(request, session)), killed]);
+    return {
+      command: { command: "host", args: [], env: {} },
+      pid: 4242,
+      lines: async function* () {
+        for (const line of (await done).lines) yield line;
+      },
+      wait: async () => (await done).outcome,
+      kill: () => {
+        record.killed.push(request.role);
+        kill();
+        return Promise.resolve();
+      },
+    };
+  };
+  return {
+    host,
+    capabilities: {
+      subagents: true,
+      backgroundSubagents: true,
+      perPathWriteDeny: true,
+      headless: true,
+      turnCap: true,
+      budgetCap: true,
+      ...options.capabilities,
+    },
+    install: () => Promise.reject(new Error("not in tests")),
+    ...(options.subagentName === undefined ? {} : { subagentName: options.subagentName }),
+    spawnRole: (request) => {
+      record.spawned.push(request.role);
+      if (options.headless === undefined)
+        return Promise.reject(
+          new Error("the engine must not start a headless run in plugin-only mode"),
+        );
+      return Promise.resolve({ dispatch: "headless", run: launch(request, undefined) });
+    },
+    parseEvents: (lines) => {
+      let usage: UsageSnapshot | null = null;
+      for (const line of lines) {
+        try {
+          const parsed = JSON.parse(line) as { usage?: UsageSnapshot };
+          if (parsed.usage !== undefined) usage = parsed.usage;
+        } catch {
+          // not a usage line
+        }
+      }
+      return { outcome: null, sessionRef: null, usage, retry: null, unrecognizedLines: 0 };
+    },
+    headlessCommand: () => ({ command: "host", args: [], env: {} }),
+    resume: (session, request) => {
+      record.spawned.push(`resume:${request.role}`);
+      if (options.headless === undefined)
+        return Promise.reject(new Error("the engine must not resume headless in plugin-only mode"));
+      return Promise.resolve({ dispatch: "headless", run: launch(request, session) });
+    },
+    // Claude Code keeps the token unreadable; Codex cannot, but enforces "no network" (D-ac)
+    sandboxProfile: () => ({
+      host,
+      enforced: {
+        readOnly: false,
+        perPathWriteDeny: host === "claude-code",
+        network: true,
+        secretsUnreadable: host === "claude-code",
+      },
+      settings: {},
+      cliArgs: [],
+    }),
+    ...(options.authStatus === undefined ? {} : { authStatus: options.authStatus }),
+    dispose: () => Promise.resolve(),
+  };
+};
+
 export interface Harness {
   readonly repo: string;
   readonly remote: string;
@@ -225,6 +367,10 @@ export interface Harness {
   readonly prs: ReturnType<typeof fakePullRequests>;
   readonly scheduled: { at: Date | null; cancelled: number };
   readonly spawned: string[];
+  /** Engine-launched runs the fake adapters started (AD-25). */
+  readonly launched: Launched[];
+  /** Roles of engine-launched runs the engine killed. */
+  readonly killed: string[];
   clock: Date;
   advance(ms: number): void;
   reopen(): Engine;
@@ -248,6 +394,14 @@ export interface HarnessOptions {
   readonly plugins?: PluginCatalog;
   /** The platform roles run on (default `darwin`, where Codex roles may run in-session). */
   readonly platform?: NodeJS.Platform;
+  /** The fake Claude Code adapter launches headless runs with this script. */
+  readonly headless?: HeadlessScript;
+  /** The fake Claude Code adapter's `authStatus`. */
+  readonly authStatus?: () => Promise<HostAuthStatus>;
+  /** A Codex adapter too (absent: none is installed). */
+  readonly codex?: FakeAdapterOptions;
+  /** `EngineCoreDeps.remoteMerge` (Level 3, AD-23). */
+  readonly remoteMerge?: RemoteMergeService;
 }
 
 export const DEFAULT_GATES_YML = {
@@ -281,45 +435,21 @@ export const createHarness = (options: HarnessOptions = {}): Harness => {
   const home = tempDir("vtc-home-");
   const scheduled = { at: null as Date | null, cancelled: 0 };
   const spawned: string[] = [];
-  const adapter: HostAdapter = {
-    host: "claude-code",
-    capabilities: {
-      subagents: true,
-      backgroundSubagents: true,
-      perPathWriteDeny: true,
-      headless: true,
-      turnCap: true,
-      budgetCap: true,
-      ...options.capabilities,
+  const launched: Launched[] = [];
+  const killed: string[] = [];
+  const record = { spawned, launched, killed };
+  const adapter = fakeAdapter(
+    "claude-code",
+    {
+      ...(options.capabilities === undefined ? {} : { capabilities: options.capabilities }),
+      ...(options.headless === undefined ? {} : { headless: options.headless }),
+      ...(options.authStatus === undefined ? {} : { authStatus: options.authStatus }),
+      ...(options.subagentName === undefined ? {} : { subagentName: options.subagentName }),
     },
-    install: () => Promise.reject(new Error("not in tests")),
-    ...(options.subagentName === undefined ? {} : { subagentName: options.subagentName }),
-    spawnRole: (request) => {
-      spawned.push(request.role);
-      return Promise.reject(
-        new Error("the engine must not start a headless run in plugin-only mode"),
-      );
-    },
-    parseEvents: () => ({
-      outcome: null,
-      sessionRef: null,
-      usage: null,
-      retry: null,
-      unrecognizedLines: 0,
-    }),
-    headlessCommand: () => ({ command: "host", args: [], env: {} }),
-    resume: (_session, request) => {
-      spawned.push(`resume:${request.role}`);
-      return Promise.reject(new Error("the engine must not resume headless in plugin-only mode"));
-    },
-    sandboxProfile: () => ({
-      host: "claude-code",
-      enforced: { readOnly: false, perPathWriteDeny: false, network: false },
-      settings: {},
-      cliArgs: [],
-    }),
-    dispose: () => Promise.resolve(),
-  };
+    record,
+  );
+  const adapters: Partial<Record<HostId, HostAdapter>> = { "claude-code": adapter };
+  if (options.codex !== undefined) adapters.codex = fakeAdapter("codex", options.codex, record);
   const h = {
     repo,
     remote,
@@ -327,6 +457,8 @@ export const createHarness = (options: HarnessOptions = {}): Harness => {
     clock: new Date("2026-10-13T09:00:00.000Z"),
     scheduled,
     spawned,
+    launched,
+    killed,
   } as Harness;
   const now = (): Date => h.clock;
   const gates = fakeGates(repo, now);
@@ -340,7 +472,8 @@ export const createHarness = (options: HarnessOptions = {}): Harness => {
     git: createGitOps({ repoRoot: repo }),
     workspace: createWorkspace(repo),
     pullRequests: prs,
-    adapters: { "claude-code": adapter },
+    ...(options.remoteMerge === undefined ? {} : { remoteMerge: options.remoteMerge }),
+    adapters,
     autoResume: {
       schedule: (_root, at) => {
         scheduled.at = at;

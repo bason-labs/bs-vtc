@@ -11,16 +11,15 @@ import {
   HIDDEN_TESTS,
   inSessionDispatchRefusal,
   PACK_INPUT_TYPES,
-  planDispatch,
   resolveRoleMode,
   SESSION_DEFAULT_MODEL,
   type ArtifactRef,
   type EscalationAnswer,
   type Finding,
   type HostId,
-  type LeadAction,
   type ModelTier,
   type Phase,
+  type ResolvedModel,
   type SessionRef,
   type SpawnRoleAction,
   type TaskPackInput,
@@ -50,17 +49,19 @@ import {
 import { frozenSpecItems, taskAcceptanceCriteria } from "./read-model.js";
 import { resolveModel, roleTier } from "./roles.js";
 import { installedLensRoles, reviewersFor } from "./router.js";
-import { limitWait } from "./limits.js";
 import { parkTask, setTaskStatus } from "./parking.js";
 import { parkEscalation } from "./escalations.js";
-import {
-  checkGitNow,
-  recordDispatch,
-  sweepDispatches,
-  type DispatchRecord,
-} from "./dispatch-guard.js";
+import { recordDispatch, type DispatchRecord } from "./dispatch-guard.js";
 import { architectDepth, dealDesignConstraints, researchDepth } from "./lottery.js";
 import { prepareRoleWorktree } from "./role-worktree.js";
+
+/** A handed-out step: the Lead's action, and what an engine-launched run of it needs. */
+export interface DispatchedStep {
+  readonly action: SpawnRoleAction;
+  readonly model: ResolvedModel;
+  /** Absolute directory the role works in. */
+  readonly cwd: string;
+}
 
 export interface StepSpec {
   readonly key: string;
@@ -547,7 +548,8 @@ export const dispatchStep = (
   step: StepSpec,
   host: HostId,
   cwd: string,
-): SpawnRoleAction => {
+  dispatch: "subagent" | "headless" = "subagent",
+): DispatchedStep => {
   const contract = k.deps.roles.get(step.role);
   if (contract === undefined) throw new EngineError("invalid", `no contract for role ${step.role}`);
   const actionId = nextActionId(h.state);
@@ -581,7 +583,7 @@ export const dispatchStep = (
       action_id: actionId,
       ...(step.mode === undefined ? {} : { mode: step.mode }),
       ...(step.subject === undefined ? {} : { subject: step.subject }),
-      dispatch: "subagent",
+      dispatch,
       agent,
       pack,
       resume: resume ?? null,
@@ -599,9 +601,9 @@ export const dispatchStep = (
     `Read your task pack: ${join(k.deps.repoRoot, pack)}`,
     ...(skills.length === 0 ? [] : [`Use these skills: ${skills.join(", ")}`]),
     ...(step.note === undefined ? [] : [step.note]),
-    `Finish with exactly one RoleResult JSON object as your final message (role "${step.role}"${step.mode === undefined ? "" : `, mode "${step.mode}"`}${step.task === undefined ? "" : `, task "${step.task}"`}${step.subject === undefined ? "" : `, verdict subject "${step.subject}"`}). The Lead submits it with action_id ${actionId}.`,
+    `Finish with exactly one RoleResult JSON object as your final message (role "${step.role}"${step.mode === undefined ? "" : `, mode "${step.mode}"`}${step.task === undefined ? "" : `, task "${step.task}"`}${step.subject === undefined ? "" : `, verdict subject "${step.subject}"`}). ${dispatch === "subagent" ? `The Lead submits it with action_id ${actionId}.` : `The engine records it as action ${actionId}.`}`,
   ].join("\n");
-  return {
+  const action: SpawnRoleAction = {
     type: "spawn_role",
     action_id: actionId,
     role: step.role,
@@ -617,6 +619,7 @@ export const dispatchStep = (
     ...(model.model === undefined ? {} : { model: model.model }),
     ...(resume === undefined ? {} : { resume }),
   };
+  return { action, model, cwd };
 };
 
 /**
@@ -715,7 +718,7 @@ export const NO_LEAD_WAIT_REASON =
  * fix, answering it retries the dispatch). A phase step opens the same escalation for its phase,
  * which holds the phase until it is answered.
  */
-const refuseInSession = (k: Kernel, h: RunHandle, step: StepSpec, reason: string): void => {
+export const refuseInSession = (k: Kernel, h: RunHandle, step: StepSpec, reason: string): void => {
   if (step.task !== undefined) {
     parkTask(k, h, step.task, {
       reason: "blocked",
@@ -748,7 +751,17 @@ export const dispatchGuarded = async (
   h: RunHandle,
   step: StepSpec,
   host: HostId,
-): Promise<SpawnRoleAction | null> => {
+): Promise<SpawnRoleAction | null> =>
+  (await dispatchPrepared(k, h, step, host, "subagent"))?.action ?? null;
+
+/** {@link dispatchGuarded} for either dispatch kind, with the model and working directory. */
+export const dispatchPrepared = async (
+  k: Kernel,
+  h: RunHandle,
+  step: StepSpec,
+  host: HostId,
+  dispatch: "subagent" | "headless",
+): Promise<DispatchedStep | null> => {
   const actionId = nextActionId(h.state);
   const task = step.task === undefined ? undefined : h.state.tasks.get(step.task);
   let worktree: DispatchRecord["worktree"];
@@ -783,61 +796,5 @@ export const dispatchGuarded = async (
       : task?.worktree === undefined
         ? k.deps.repoRoot
         : join(k.deps.repoRoot, task.worktree);
-  return dispatchStep(k, h, step, host, cwd);
-};
-
-/**
- * New role runs for the Lead, within the concurrency limit (reviewers count, §6.6). In plugin-only
- * mode every role run is a Lead subagent; the engine never starts a headless run (AD-17). Headless
- * launches are not part of this engine yet: on a host that cannot run role subagents the run
- * pauses with the reason instead of waiting silently forever.
- */
-export const dispatchNow = async (
-  k: Kernel,
-  h: RunHandle,
-  call: CallContext,
-  held: { noLead: number } = { noLead: 0 },
-): Promise<LeadAction[]> => {
-  if (h.state.run.paused || h.state.run.finished_at !== undefined) return [];
-  // Runs that ended without a check (a failure, a limit, a restart) are checked before a new
-  // baseline is recorded; a git change made while a role runs stops everything (AD-7 rule 7).
-  if ((await sweepDispatches(k, h)).issues.length > 0 || checkGitNow(k, h)) return [];
-  if (limitWait(k, h) !== null) return [];
-  const host = k.hostFor(call);
-  const config = k.config();
-  const capabilities = k.deps.adapters[host]?.capabilities ?? { subagents: true, headless: false };
-  const plan = planDispatch("role", config.hosts.dispatch, capabilities);
-  if (plan !== "subagent") {
-    if (pendingSteps(k, h, host).length > 0) {
-      k.emit(h, {
-        type: "run.paused",
-        actor: "engine",
-        data: {
-          reason:
-            plan === "headless"
-              ? `${host} has no role subagents and this engine does not launch headless runs yet; run the Lead on a host with subagents, then vtc resume`
-              : `${host} cannot run roles (no subagents; hosts.dispatch ${config.hosts.dispatch}); run the Lead on a host with subagents, then vtc resume`,
-        },
-      });
-    }
-    return [];
-  }
-  const actions: LeadAction[] = [];
-  let free = config.concurrency - inFlight(h.state).length;
-  for (const step of pendingSteps(k, h, host)) {
-    if (free <= 0) break;
-    const refusal = inSessionRefusal(k, h, step, host, call);
-    if (refusal !== null) {
-      // only the run's Lead reporting its sandbox off or unknown parks the step; a caller that
-      // is not the Lead, with no Lead to ask, leaves it pending ({@link NO_LEAD_WAIT_REASON})
-      if (k.leadless(h.state.id, call)) held.noLead += 1;
-      else refuseInSession(k, h, step, refusal);
-      continue;
-    }
-    const action = await dispatchGuarded(k, h, step, host);
-    if (action === null) break;
-    actions.push(action);
-    free -= 1;
-  }
-  return actions;
+  return dispatchStep(k, h, step, host, cwd, dispatch);
 };
