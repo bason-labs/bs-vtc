@@ -1,6 +1,12 @@
 import { describe, expect, it } from "vitest";
-import { EventPageSchema, type EventPage } from "@vtc/shared";
-import { loadRunEvents, noticeForEvent, runNotices, type RunNotice } from "@/lib/notices";
+import { EventPageSchema, type EventPage, type VtcEvent } from "@vtc/shared";
+import {
+  loadRunEvents,
+  MAX_EVENT_PAGES,
+  noticeForEvent,
+  runNotices,
+  type RunNotice,
+} from "@/lib/notices";
 import { readFixture } from "../fixtures";
 import { NOTICE_EVENTS, noticeEvent } from "../notice-fixtures";
 import { w3Event, WAVE3_EVENTS } from "../wave3-fixtures";
@@ -126,7 +132,7 @@ describe("loadRunEvents", () => {
         next_after: null,
       }),
     };
-    const events = await loadRunEvents(
+    const log = await loadRunEvents(
       {
         events: (_run, after) => {
           calls.push(after);
@@ -136,13 +142,31 @@ describe("loadRunEvents", () => {
       "golden-1",
     );
     expect(calls).toEqual([0, 46]);
-    expect(events.map((e) => e.seq)).toEqual([45, 46, 47, 48, 49, 50]);
+    expect(log.events.map((e) => e.seq)).toEqual([45, 46, 47, 48, 49, 50]);
+    expect(log.truncated).toBe(false);
+  });
+
+  it("says the log is truncated when it is longer than the pages it reads", async () => {
+    let calls = 0;
+    const log = await loadRunEvents(
+      {
+        events: (_run, after) => {
+          calls += 1;
+          return Promise.resolve(
+            EventPageSchema.parse({ run: "golden-1", events: [], next_after: after + 1 }),
+          );
+        },
+      },
+      "golden-1",
+    );
+    expect(calls).toBe(MAX_EVENT_PAGES);
+    expect(log.truncated).toBe(true);
   });
 
   it("stops when a page makes no progress", async () => {
     let calls = 0;
     const stuck = EventPageSchema.parse({ run: "golden-1", events: [], next_after: 0 });
-    await loadRunEvents(
+    const log = await loadRunEvents(
       {
         events: () => {
           calls += 1;
@@ -152,6 +176,7 @@ describe("loadRunEvents", () => {
       "golden-1",
     );
     expect(calls).toBe(1);
+    expect(log.truncated).toBe(false);
   });
 });
 
@@ -227,6 +252,33 @@ describe("wave-3 notices (Level 3, headless runs, lookback; contracts 4.5.0)", (
     expect(
       runNotices([...WAVE3_EVENTS, ok]).find((n) => n.type === "headless.preflight")?.resolved,
     ).toBe(true);
+  });
+
+  it("keeps a failed preflight open when the later passing one had another purpose", () => {
+    const other = w3Event(97, "headless.preflight", {
+      host: "codex",
+      purpose: "lookback_replay",
+      ok: true,
+    });
+    expect(
+      runNotices([...WAVE3_EVENTS, other]).find((n) => n.type === "headless.preflight")?.resolved,
+    ).toBe(false);
+  });
+
+  it("marks a failed headless run resolved once a later run of the same step ends done", () => {
+    const done = (task: string, role: string) =>
+      w3Event(
+        98,
+        "headless.ended",
+        { action_id: "a-30", outcome: "done", exit_code: 0, duration_ms: 60_000 },
+        { role, host: "codex", task },
+      );
+    const ended = (events: readonly VtcEvent[]) =>
+      runNotices(events).find((n) => n.type === "headless.ended")?.resolved;
+    expect(ended(WAVE3_EVENTS)).toBe(false);
+    expect(ended([...WAVE3_EVENTS, done("T-1", "engineer")])).toBe(true);
+    expect(ended([...WAVE3_EVENTS, done("T-2", "engineer")])).toBe(false);
+    expect(ended([...WAVE3_EVENTS, done("T-1", "qa")])).toBe(false);
   });
 
   it("shows a canary rollback", () => {

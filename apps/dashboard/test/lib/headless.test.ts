@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { AutoResumeCheckSchema, HostErrorCauseSchema } from "@vtc/shared";
 import { HEADLESS_CAUSES, headlessRuns, PREFLIGHT_CHECKS } from "@/lib/headless";
-import { HEADLESS_EVENTS } from "../wave3-fixtures";
+import { HEADLESS_EVENTS, w3Event } from "../wave3-fixtures";
 
 describe("headlessRuns (headless.* events and StatusResult.headless_runs, AD-25)", () => {
   it("lists engine-launched role runs newest first with how each ended", () => {
@@ -34,6 +34,35 @@ describe("headlessRuns (headless.* events and StatusResult.headless_runs, AD-25)
     expect(runs.map((r) => r.actionId)).toEqual(["a-20", "a-13", "a-12"]);
     expect(runs[0]).toMatchObject({ role: "architect", task: null });
     expect(runs[0]?.status.label).toBe("Running");
+  });
+
+  it("does not call a start with no end running once the live engine stops reporting it", () => {
+    const runs = headlessRuns(HEADLESS_EVENTS, []);
+    expect(runs.find((r) => r.actionId === "a-13")?.status).toEqual({
+      label: "No end recorded",
+      tone: "warn",
+    });
+  });
+
+  it("says a start with no end did not finish once the run finished", () => {
+    const finished = w3Event(90, "run.finished", { outcome: "done" });
+    const status = headlessRuns([...HEADLESS_EVENTS, finished]).find(
+      (r) => r.actionId === "a-13",
+    )?.status;
+    expect(status).toEqual({ label: "Did not finish", tone: "warn" });
+  });
+
+  it("keeps a start with no end running while the live engine reports it", () => {
+    const runs = headlessRuns(HEADLESS_EVENTS, [
+      {
+        action_id: "a-13",
+        role: "qa",
+        host: "codex",
+        pid: null,
+        started_at: "2026-10-13T11:15:00.000Z",
+      },
+    ]);
+    expect(runs.find((r) => r.actionId === "a-13")?.status.live).toBe(true);
   });
 
   it("names every cause and preflight check", () => {

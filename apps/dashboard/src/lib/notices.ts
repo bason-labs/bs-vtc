@@ -272,7 +272,16 @@ const resolves = (failed: VtcEvent, notice: RunNotice, later: VtcEvent): boolean
   const preflight = eventData(failed, "headless.preflight");
   if (preflight !== null) {
     const next = eventData(later, "headless.preflight");
-    return next?.ok === true && next.host === preflight.host;
+    return next?.ok === true && next.host === preflight.host && next.purpose === preflight.purpose;
+  }
+  // A later run of the same role on the same task that ended `done` resolves a failed one.
+  if (eventData(failed, "headless.ended") !== null) {
+    return (
+      eventData(later, "headless.ended")?.outcome === "done" &&
+      failed.task !== undefined &&
+      later.task === failed.task &&
+      later.role === failed.role
+    );
   }
   return false;
 };
@@ -293,22 +302,32 @@ export const runNotices = (events: readonly VtcEvent[], feature?: string): RunNo
   return notices.sort((a, b) => b.seq - a.seq);
 };
 
-/** Upper bound on pages read for one view (2000 events a page at most). */
-const MAX_PAGES = 50;
+/** Upper bound on pages read for one view (`EVENT_PAGE_LIMIT.max` events a page). */
+export const MAX_EVENT_PAGES = 50;
+
+export interface RunEventLog {
+  /** Oldest first. */
+  readonly events: VtcEvent[];
+  /**
+   * The log is longer than {@link MAX_EVENT_PAGES} pages: the newest events were not read, so
+   * the views built from it say so instead of showing a live state as current.
+   */
+  readonly truncated: boolean;
+}
 
 /** Reads the run's whole event log, page by page (`GET /api/runs/:run/events?after=`). */
 export const loadRunEvents = async (
   client: { events(run: string, after: number, signal?: AbortSignal): Promise<EventPage> },
   run: string,
   signal?: AbortSignal,
-): Promise<VtcEvent[]> => {
+): Promise<RunEventLog> => {
   const events: VtcEvent[] = [];
   let after = 0;
-  for (let page = 0; page < MAX_PAGES; page += 1) {
+  for (let page = 0; page < MAX_EVENT_PAGES; page += 1) {
     const read = await client.events(run, after, signal);
     events.push(...read.events);
-    if (read.next_after === null || read.next_after <= after) break;
+    if (read.next_after === null || read.next_after <= after) return { events, truncated: false };
     after = read.next_after;
   }
-  return events;
+  return { events, truncated: true };
 };

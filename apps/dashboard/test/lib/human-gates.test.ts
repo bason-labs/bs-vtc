@@ -57,6 +57,17 @@ describe("gateRequests (gate.requested, spine §5 reading 109)", () => {
     expect(pendingGate([request, g1])?.outcome.id).toBe("pending");
   });
 
+  it("stops waiting once the run finished without a decision", () => {
+    const finished = w3Event(72, "run.finished", { outcome: "aborted" });
+    const [view] = gateRequests([request, finished]);
+    expect(view?.outcome).toMatchObject({
+      id: "unanswered",
+      label: "Not decided before the run ended",
+    });
+    expect(view?.outcome.live).toBeUndefined();
+    expect(pendingGate([request, finished])).toBeNull();
+  });
+
   it("shows a rejection with its note", () => {
     const rejected = w3Event(72, "gate.rejected", { gates: ["G2"], note: "Try a third direction" });
     const [view] = gateRequests([request, rejected]);

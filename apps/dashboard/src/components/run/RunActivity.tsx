@@ -26,14 +26,14 @@ export function RunActivity({ run }: { run: string }) {
   const events = useRunEvents(run, ["gates", "headless"]);
   const status = useResource("status", (c, s) => c.status(s), [runTopic(run, "status")]);
   const gate = useMemo(
-    () => (events.data === undefined ? null : pendingGate(events.data)),
+    () => (events.data === undefined ? null : pendingGate(events.data.events)),
     [events.data],
   );
   const runs = useMemo(() => {
     if (events.data === undefined) return [];
-    // `StatusResult` describes the active run only.
-    const inFlight = status.data?.run.id === run ? (status.data.headless_runs ?? []) : [];
-    return headlessRuns(events.data, inFlight);
+    // `StatusResult` describes the active run only; without it, what is in flight is unknown.
+    const inFlight = status.data?.run.id === run ? (status.data.headless_runs ?? null) : null;
+    return headlessRuns(events.data.events, inFlight);
   }, [events.data, status.data, run]);
   return (
     <>

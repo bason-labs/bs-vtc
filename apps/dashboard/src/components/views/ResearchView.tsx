@@ -11,6 +11,7 @@ import { useNow } from "@/lib/useNow";
 import { useResource } from "@/lib/useResource";
 import { useRunEvents } from "@/lib/useRunEvents";
 import { Link } from "@/components/app/Link";
+import { EventLogTruncated } from "@/components/notices/EventLogTruncated";
 import { Badge, Card, EmptyState, StatusPill } from "@/components/ui";
 import { Breadcrumbs, Loaded, MissingParam, PageHeader } from "./common";
 
@@ -89,7 +90,7 @@ export function ResearchView({ run }: { run: string | null }) {
     [file.data],
   );
   const facts = useMemo(
-    () => (parsed === null ? [] : currentFacts(parsed.rows, events.data ?? [])),
+    () => (parsed === null ? [] : currentFacts(parsed.rows, events.data?.events ?? [])),
     [parsed, events.data],
   );
   if (run === null) return <MissingParam what="run" />;
@@ -136,6 +137,7 @@ export function ResearchView({ run }: { run: string | null }) {
                 </Link>
                 ).
               </p>
+              {events.data?.truncated === true ? <EventLogTruncated className="mt-2" /> : null}
               {parsed === null || parsed.invalid.length === 0 ? null : (
                 <p role="alert" className="mt-2 text-xs text-warn-fg">
                   {parsed.invalid.length === 1 ? "Line" : "Lines"} {parsed.invalid.join(", ")} of

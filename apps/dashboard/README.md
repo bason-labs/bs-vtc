@@ -58,13 +58,18 @@ binaries must stay out of the production dependency closure (AD-2, `supply-chain
 - Wave 3 (contracts 4.5.0, spine §5 reading 109: no new route or MCP tool, everything from data
   the dashboard already receives):
   - **Gates** (`/gates/`): every `gate.requested` with the G2 design directions (novelty, the
-    first-viewport screenshot through the artifacts route, the prototype opened on the prototype
-    origin), the facts still unverified with why and the waiver reason given (`gate.approved`
+    first-viewport screenshot through the artifacts route, the prototype shown on demand in the
+    same `<iframe sandbox="allow-scripts">` as the design review, never as a page of its own), the
+    facts still unverified with why and the waiver reason given (`gate.approved`
     `fact_waivers`, `fact.waived`), the DESIGN coverage check, and the decision. The run view
-    shows a banner while a gate waits in the Lead chat.
+    shows a banner while a gate waits in the Lead chat; a request still open when the run
+    finished reads "Not decided before the run ended".
   - **Engine-launched runs** (run view): `headless.started` / `headless.ended` plus
-    `StatusResult.headless_runs` (active run only) with how each ended; a failed
-    `headless.preflight` and an unfinished run are run notices.
+    `StatusResult.headless_runs` (active run only) with how each ended. A start with no end is
+    "Running" only while the live engine reports it (or when that is unknown); otherwise "No end
+    recorded", and "Did not finish" once the run finished. A failed `headless.preflight` (resolved
+    by a later passing one of the same host and purpose) and a run that ended other than `done`
+    (resolved by a later `done` run of the same role and task) are run notices.
   - **Level 3** (feature view): the `merge.preflight` (and what to configure when the run fell to
     Level 2), the latest `feature.checklist` with each item's evidence, the auto-merge timeline
     (`feature.auto_merge_*`, `feature.post_merge_ci`, `feature.reverted`), the PR's number,
@@ -72,13 +77,17 @@ binaries must stay out of the production dependency closure (AD-2, `supply-chain
     `final_review.step_finished`. Red base CI, a revert, auto-merge turned off and a failed
     preflight are also run notices.
   - **Research** (`/research/`): the current row of every fact in `.vtc/research/facts.jsonl`
-    (superseded rows hidden, lines that break `FactRow` reported by number), what needs attention
-    first, with source, locator and any G2 waiver.
-  - **Lookback** (`/lookback/`): `.vtc/lookback/scorecards/index.json`, then each role and host's
+    (the newest row of each id; an id is hidden only when a later row supersedes it; lines that
+    break `FactRow` reported by number), what needs attention first, with source, locator and any
+    G2 waiver.
+  - **Lookback** (`/lookback/`): `.vtc/lookback/scorecards/index.json` (an entry whose path is not
+    under `.vtc/lookback/scorecards/` is reported, never fetched), then each role and host's
     latest `Scorecard`: every proportion with n and its 95% Wilson interval, "insufficient data"
     when `value` is null or n is below `LOOKBACK_LIMITS.minScorecardN`, the Engineer breakdown;
     and the run's `lookback.*` events (canaries, replays, proposals, rollbacks, escaped defects).
     A scorecard opened in the artifact view renders the same way.
+  - These views read the run's event log in pages of `EVENT_PAGE_LIMIT.max`, at most 50 pages; a
+    longer log is read oldest first and each view says that its newest events are not shown.
   - **Visual QA**: `GateReport.visual` in the gate reports, and a `VisualReport` under
     `.vtc/evidence/` in the artifact view as the render matrix (screen × state × width × theme),
     axe violations and items needing review, per-region diffs and style mismatches. Only `pass`

@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { ScorecardMetricIdSchema } from "@vtc/shared";
+import { ScorecardIndexSchema, ScorecardMetricIdSchema } from "@vtc/shared";
 import {
   groupScorecards,
   lookbackActivity,
@@ -7,6 +7,7 @@ import {
   metricRows,
   readScorecard,
   readScorecardIndex,
+  refusedScorecardPaths,
 } from "@/lib/scorecards";
 import {
   ENGINEER_SCORECARD,
@@ -92,6 +93,24 @@ describe("groupScorecards", () => {
       editable: "22222222",
       latest: true,
     });
+    expect(refusedScorecardPaths(SCORECARD_INDEX)).toEqual([]);
+  });
+
+  it("leaves out entries whose path is not under the scorecards directory", () => {
+    const [entry] = SCORECARD_INDEX.scorecards;
+    const index = ScorecardIndexSchema.parse({
+      ...SCORECARD_INDEX,
+      scorecards: [
+        ...SCORECARD_INDEX.scorecards,
+        { ...entry, path: ".vtc/spec/spec.md" },
+        { ...entry, path: ".vtc/state/run.json" },
+      ],
+    });
+    const versions = groupScorecards(index).flatMap((g) => g.versions.map((v) => v.path));
+    expect(versions).toEqual(
+      groupScorecards(SCORECARD_INDEX).flatMap((g) => g.versions.map((v) => v.path)),
+    );
+    expect(refusedScorecardPaths(index)).toEqual([".vtc/spec/spec.md", ".vtc/state/run.json"]);
   });
 });
 

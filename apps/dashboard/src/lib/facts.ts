@@ -94,7 +94,7 @@ const locatorText = (locator: FactLocator): string =>
 
 const chainLength = (row: FactRow, byId: ReadonlyMap<string, FactRow>): number => {
   let n = 0;
-  const seen = new Set<string>();
+  const seen = new Set<string>([row.id]);
   for (let id = row.supersedes; id !== undefined && !seen.has(id); n += 1) {
     seen.add(id);
     id = byId.get(id)?.supersedes;
@@ -103,22 +103,40 @@ const chainLength = (row: FactRow, byId: ReadonlyMap<string, FactRow>): number =
 };
 
 /**
- * The current row of every fact (rows no later row supersedes), what needs attention first.
- * `fact.verified` and `fact.waived` events newer than a row update its status, so a waiver
- * recorded at G2 shows with its reason before the file catches up.
+ * The newest row of every id still current, in file order. A fact id is stable for the same
+ * claim from the same source, so a new status is a new row with the same id: the newest row of
+ * an id wins. An id is hidden only when a row after that id's newest row supersedes it, so a
+ * claim recorded again after it was superseded is current again.
+ */
+const newestCurrentRows = (rows: readonly FactRow[]): FactRow[] => {
+  const newest = new Map<string, number>();
+  rows.forEach((row, i) => newest.set(row.id, i));
+  const supersededAt = new Map<string, number>();
+  rows.forEach((row, i) => {
+    if (row.supersedes !== undefined && row.supersedes !== row.id) {
+      supersededAt.set(row.supersedes, i);
+    }
+  });
+  return rows.filter((row, i) => {
+    if (newest.get(row.id) !== i) return false;
+    const at = supersededAt.get(row.id);
+    return at === undefined || at < i;
+  });
+};
+
+/**
+ * The current row of every fact (the newest row of each id, unless a later row superseded it),
+ * what needs attention first. `fact.verified` and `fact.waived` events newer than a row update
+ * its status, so a waiver recorded at G2 shows with its reason before the file catches up.
  */
 export const currentFacts = (
   rows: readonly FactRow[],
   events: readonly VtcEvent[] = [],
 ): FactView[] => {
   const byId = new Map(rows.map((r) => [r.id, r]));
-  const superseded = new Set(
-    rows.flatMap((r) => (r.supersedes === undefined ? [] : [r.supersedes])),
-  );
   const verified = eventsOfType(events, "fact.verified");
   const waived = eventsOfType(events, "fact.waived");
-  return rows
-    .filter((row) => !superseded.has(row.id))
+  return newestCurrentRows(rows)
     .map((row): FactView => {
       let status: FactStatus = row.status;
       let waiver: string | null = null;
