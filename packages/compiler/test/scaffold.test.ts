@@ -185,6 +185,19 @@ describe("scaffoldRole", () => {
     expect(refused({ contract: contract({ mission: "" }) }).join("\n")).toMatch(/mission/);
   });
 
+  it("refuses a reason that would put an AD-9 marker in any file it writes", () => {
+    // Built at run time so this file carries no marker itself.
+    const marker = ["Claude Code", "credentials"].join("-");
+    // The marker sits where role.yaml's comment wraps, so only the test stub holds it whole.
+    const reason = `${"a".repeat(90)} ${marker} keep recurring.`;
+    const result = scaffoldRole(request({ reason }), fixtureFiles());
+    expect(result.ok ? [] : result.errors).toEqual([
+      `${roleTestStubPath("release_notes")}: line 3: AD-9 marker ${marker}`,
+    ]);
+    const plain = scaffoldRole(request({ reason: `Runs hit ${marker} twice.` }), fixtureFiles());
+    expect(plain.ok ? "" : plain.errors.join("\n")).toMatch(/AD-9 marker/);
+  });
+
   it("fails on a role the compiler refuses, with the compiler's message", () => {
     const result = scaffoldRole(
       request({ contract: contract({ tools: { profile: "read_only", engine_tools: ["next"] } }) }),
@@ -249,6 +262,25 @@ describe("writeScaffold", () => {
     symlinkSync(outside, join(root, "roles", "release_notes"));
     expect(() => writeScaffold(root, scaffold)).toThrow(/symbolic link|real directory/);
     expect(existsSync(join(outside, "role.yaml"))).toBe(false);
+  });
+
+  it("writes only the role's own paths, refusing any other before the first write", () => {
+    const root = plantedRoot();
+    const scaffold = ok(scaffoldRole(request(), readSources(root).files));
+    const outside = temp();
+    const escape = `nonexistent/../../${outside.split("/").pop() ?? ""}/f`;
+    for (const path of [
+      escape,
+      "/tmp/f",
+      "roles/release_notes/../qa/role.yaml",
+      "roles/other/role.yaml",
+    ]) {
+      const bad = { ...scaffold, files: [...scaffold.files, { path, text: "x" }] };
+      expect(() => writeScaffold(root, bad), path).toThrow(/a scaffold writes only/);
+    }
+    expect(() => writeScaffold(root, { ...scaffold, role: "../x" })).toThrow(/not a role id/);
+    expect(existsSync(join(root, "roles/release_notes"))).toBe(false);
+    expect(existsSync(join(outside, "f"))).toBe(false);
   });
 
   it("removes what it wrote when a later file fails, leaving no half scaffold", () => {

@@ -238,15 +238,21 @@ human`, exits `done`, `blocked` or `unknown`, no verdicts, no success criteria a
   the line, and Visual QA returns V8 `unknown` when the contracts hold several directions, as
   reading 179 allows.
 - **Automatic runs** (D-cd, reading 198). An automatic run's issue is its spec (no G1 or G2). The
-  Spec Verifier (3.0.0) treats a run as automatic only when the engine lists the run's request,
-  which is the issue, among its pack's Inputs (a `request` entry, `{{request_input}}` in the prompt;
-  engine core adds it to the Spec Verifier's pack on an automatic run only, from
-  `run.started.automation`), never from a marker or other text in the pack. It then also checks the
-  pull request's change against the issue. The Lead relays `NextResult.notices` (the daily
-  automation summary, `HOST_WEB_OFF_NOTICE`) once, in plain words.
+  Spec Verifier (3.0.0) treats a run as automatic only when the engine lists the issue among its
+  pack's Inputs as an `automation_issue` entry (`{{automation_issue_input}}` in the prompt), never
+  from a `request` input, which a human-started run can carry too, and never from a marker or
+  other text in the pack. It then also checks the pull request's change against the issue. The
+  input type is a contract proposal of this branch (`PENDING_PACK_INPUTS`): `PACK_INPUT_TYPES`
+  gains `automation_issue`, and engine core lists it in the Spec Verifier's pack on a run whose
+  `run.started.automation` is set, and on no other run. Until it lands the Spec Verifier judges
+  every run as a human-started one, and a todo merge gate in the round-4 repo test tracks it. The
+  Lead relays `NextResult.notices` (the daily automation summary, `HOST_WEB_OFF_NOTICE`) once, in
+  plain words.
 - **The CHANGELOG anchor** (D-bv). `roles/CHANGELOG.md` (`ROLES_CHANGELOG`) holds
   `<!-- vtc:changelog-entries -->` (`ROLES_CHANGELOG_ANCHOR`) exactly once; the upstream module
-  inserts each new entry directly below it, and the compiler refuses a CHANGELOG without it.
+  inserts each new entry directly below it, and the compiler refuses a CHANGELOG without it. The
+  constant is local until the proposed shared one lands next to `ROLES_CHANGELOG`, with the
+  upstream module's `insertChangelogEntry` as its consumer (a todo merge gate tracks it).
 
 ## What the compiler emits for the engine
 

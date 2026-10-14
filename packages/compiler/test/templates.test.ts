@@ -4,6 +4,7 @@
  * both plugins at `autoTemplateAssetPath`, rendered by the upstream module.
  */
 import { describe, expect, it } from "vitest";
+import * as shared from "@vtc/shared";
 import {
   AUTO_TEMPLATE_NAMES,
   AUTO_TEMPLATE_SLOTS,
@@ -16,7 +17,6 @@ import {
   AUTO_TEMPLATE_SOURCE_DIR,
   autoTemplateErrors,
   compilePlugins,
-  NEVER_MERGES_LINE,
   ROLES_CHANGELOG_ANCHOR,
   type CompileOutput,
 } from "../src/index.js";
@@ -28,7 +28,6 @@ const PR_ORDER = [
   "summary",
   "why",
   "changes",
-  "diff",
   "evidence",
   "verification",
   "risk",
@@ -45,31 +44,25 @@ const compileOk = (overrides: Readonly<Record<string, string | null>> = {}): Com
 const sourcePath = (name: string): string => `${AUTO_TEMPLATE_SOURCE_DIR}/${name}.md`;
 
 describe("autoTemplateErrors", () => {
-  const pr = (slots: readonly string[]): string =>
-    slots
-      .map((slot) =>
-        slot === "note"
-          ? `> [!NOTE]\n> ${NEVER_MERGES_LINE}\n{{note}}`
-          : slot === "provenance"
-            ? "<details>\n<summary>Provenance</summary>\n\n{{provenance}}\n</details>"
-            : `{{${slot}}}`,
-      )
-      .join("\n\n");
+  const pr = (slots: readonly string[]): string => slots.map((slot) => `{{${slot}}}`).join("\n\n");
 
   it("accepts the PR layout in the order of spine §5 reading 208", () => {
     expect(AUTO_TEMPLATE_LAYOUT["auto-pr"]).toEqual(PR_ORDER);
     expect(autoTemplateErrors("auto-pr", pr(PR_ORDER))).toEqual([]);
   });
 
-  it("puts a prompt PR's diff right after its changes, where the renderer cuts it first", () => {
-    const layout = AUTO_TEMPLATE_LAYOUT["auto-pr"];
-    expect(layout.indexOf("diff")).toBe(layout.indexOf("changes") + 1);
+  it("follows the order of AUTO_TEMPLATE_SLOTS in every layout (reading 208 (5))", () => {
+    for (const name of AUTO_TEMPLATE_NAMES) {
+      const at = AUTO_TEMPLATE_LAYOUT[name].map((slot) => AUTO_TEMPLATE_SLOTS.indexOf(slot));
+      expect(at, name).toEqual([...at].sort((a, b) => a - b));
+    }
+    expect(AUTO_TEMPLATE_LAYOUT["auto-pr"]).not.toContain("diff");
   });
 
   it("refuses a block slot that shares its line with other text", () => {
-    expect(
-      autoTemplateErrors("auto-pr", pr(PR_ORDER).replace("\n{{note}}", "\n> {{note}}")),
-    ).toEqual(["{{note}} must stand on a line of its own: its value can span several lines"]);
+    expect(autoTemplateErrors("auto-pr", pr(PR_ORDER).replace("{{why}}", "Why: {{why}}"))).toEqual([
+      "{{why}} must stand on a line of its own: its value can span several lines",
+    ]);
     expect(
       autoTemplateErrors(
         "changelog-entry",
@@ -112,18 +105,33 @@ describe("autoTemplateErrors", () => {
     );
   });
 
-  it("refuses a PR template without the never-merge statement before the summary", () => {
-    const text = pr(PR_ORDER).replace(`> ${NEVER_MERGES_LINE}\n`, "");
-    expect(autoTemplateErrors("auto-pr", text)).toContain(
-      `the note must say "${NEVER_MERGES_LINE}" before {{summary}} (D-bw)`,
-    );
+  it("refuses a note that does not follow the marker directly", () => {
+    const text = pr(PR_ORDER).replace("{{note}}", "Opened by VTC.\n\n{{note}}");
+    expect(autoTemplateErrors("auto-pr", text)).toEqual([
+      "{{note}} must follow {{marker}} directly: the note comes before anything else",
+    ]);
   });
 
-  it("refuses provenance outside a <details> block", () => {
-    const text = pr(PR_ORDER).replace("<details>\n<summary>Provenance</summary>\n\n", "");
-    expect(autoTemplateErrors("auto-pr", text)).toContain(
-      "{{provenance}} must sit inside a <details> block",
+  it("refuses a template that opens its own NOTE callout around the note", () => {
+    for (const name of ["auto-pr", "auto-issue"] as const) {
+      const base = name === "auto-pr" ? pr(PR_ORDER) : pr(AUTO_TEMPLATE_LAYOUT["auto-issue"]);
+      const text = base.replace("{{note}}", "{{note}}\n> [!NOTE]\n> Raised automatically.");
+      expect(autoTemplateErrors(name, text), name).toEqual([
+        "the template opens no NOTE callout: the {{note}} value is the whole callout",
+      ]);
+    }
+  });
+
+  it("refuses provenance inside a <details> block of the template's own", () => {
+    const text = pr(PR_ORDER).replace(
+      "{{provenance}}",
+      "<details>\n<summary>Provenance</summary>\n\n{{provenance}}\n\n</details>",
     );
+    expect(autoTemplateErrors("auto-pr", text)).toEqual([
+      "{{provenance}} stands outside any <details> block: its value is the whole block",
+    ]);
+    const closed = pr(PR_ORDER).replace("{{why}}", "{{why}}\n\n<details>\nx\n</details>");
+    expect(autoTemplateErrors("auto-pr", closed)).toEqual([]);
   });
 });
 
@@ -192,6 +200,15 @@ describe("the CHANGELOG entry anchor (D-bv)", () => {
     expect(ROLES_CHANGELOG_ANCHOR).toBe("<!-- vtc:changelog-entries -->");
     expect(errorsFor(`# Changes\n\n${ROLES_CHANGELOG_ANCHOR}\n\n### entry\n`)).toEqual([]);
   });
+
+  it("is still local: @vtc/shared has no anchor constant yet (contract proposal)", () => {
+    // When this fails, the proposed shared ROLES_CHANGELOG_ANCHOR has landed: import it in
+    // templates.ts instead of the local copy and drop this test and the todo below.
+    expect(Object.keys(shared)).not.toContain("ROLES_CHANGELOG_ANCHOR");
+  });
+  it.todo(
+    "merge gate: ROLES_CHANGELOG_ANCHOR comes from @vtc/shared and upstream's insertChangelogEntry inserts below it (contract proposal)",
+  );
 
   it("requires roles/CHANGELOG.md", () => {
     expect(errorsFor(null)).toEqual([

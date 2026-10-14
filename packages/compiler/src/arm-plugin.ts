@@ -26,6 +26,14 @@
  *   outside. On a failure only what this call created is removed, file by file and deepest
  *   directory first, and nothing is removed once `outDir` is no longer the directory it checked.
  *   Nothing runs the real `claude`.
+ * - Accepted residual: Node has no `openat`, so between a directory's identity check and the
+ *   `open` of a file in it, a process that can write inside `outDir` could rename a directory on
+ *   the path and put a link in its place; `O_NOFOLLOW` covers only the last component. The file
+ *   would then land outside `outDir`; the containment walk fails the call, but the cleanup cannot
+ *   reach that file. It needs write access to the arm's directory while it is written: that is
+ *   under the engine's private `<vtcHome>/guard` (`ArmPluginRequest.outDir`), which every role
+ *   profile and the Lead session deny writes to (`ROLE_DENIED_VTC.homeWriteDeny`), and a trial's
+ *   arms are compiled before any of them runs.
  * - The copy uses synchronous file calls (about 180 small files per arm). That blocks the engine's
  *   event loop for the copy, which v1 accepts: a replay compiles three arms per trial, before any
  *   arm runs.

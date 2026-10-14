@@ -54,16 +54,17 @@ Both also get:
   `common/templates/` copied verbatim, which the upstream module renders for VTC's automatic
   issues and pull requests (AD-27; spine §5 readings 190 and 208). They use only `{{slot}}`
   placeholders from `AUTO_TEMPLATE_SLOTS`, which the compiler never fills. The compiler requires
-  all three and checks each against `AUTO_TEMPLATE_LAYOUT`: every slot once and in order, the
-  marker on the first line of a PR or issue, `{{provenance}}` inside a `<details>` block, and in
-  a PR the sentence "For human review only: VTC never merges automatic PRs." before the summary.
-  A slot that can hold several lines stands on a line of its own; only `title`, `hypothesis` and
-  `trace_ids` may sit inside a line. A PR body follows reading 208: marker, note, summary, why,
-  changes (with a prompt PR's `{{diff}}` closing the section, so the renderer can cut it first),
-  evidence, verification, risk and rollback, provenance, reviewer checklist. What a slot's value
-  holds: `{{note}}` continues the template's NOTE callout, so it is `> ` lines without a second
-  `[!NOTE]` header; `{{provenance}}` is the content of the template's `<details>` block, without
-  its own;
+  all three and checks each against `AUTO_TEMPLATE_LAYOUT`: every slot once and in the order of
+  `AUTO_TEMPLATE_SLOTS` (reading 208 (5)), and in a PR or issue the marker on the first line and
+  `{{note}}` on the next. A slot that can hold several lines stands on a line of its own; only
+  `title`, `hypothesis` and `trace_ids` may sit inside a line. A PR body: marker, note, summary,
+  why, changes, evidence, verification, risk and rollback, provenance, reviewer checklist; a
+  prompt PR's diff is in the pull request's own diff and its CHANGELOG entry. What a slot's value
+  holds: `{{note}}` is the renderer's whole NOTE callout, its `> [!NOTE]` header included, and in a
+  PR it says "For human review only: VTC never merges automatic PRs." (D-bw), so the template
+  opens no callout of its own; `{{provenance}}` is the renderer's whole `<details>` block, so the
+  template wraps it in none. That split matches the upstream module's renderer; the shared doc
+  lines on the two slots are a contract proposal of this branch;
 - `hooks/hooks.json`: `SessionStart`, `PreToolUse` and `SubagentStop` wired to
   `vtcHookCommand(event, host)` (`vtc hook <event> --host <host>`), each with the timeout
   `VTC_HOOK.timeoutMs` in seconds (spine §5 reading 31). Generated, never hand-written: the
