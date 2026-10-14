@@ -1,0 +1,416 @@
+/**
+ * The evidence runner (AD-27 rule 6, D-ce; research §2.3 and §3): a VTC-written ES module the
+ * recorder writes into a gate command's private temp directory and runs in the gate sandbox as
+ * `node --disable-sigusr1 vtc-visual-runner.mjs <input.json> <result.json> <key>`, the `evidence`
+ * job next to the visual step's render job (`visual/runner-script.ts`), with the same signed
+ * envelope. It imports the browser store's Playwright, launches the pinned executable, and for
+ * each shot opens one fresh context on the loopback origin of the evidence snapshot server.
+ *
+ * - Network: `context.route("**\/*")` continues only requests to the request's origin and aborts
+ *   the rest (WebSockets too, where Playwright can route them). Nothing is downloaded.
+ * - Paint (layer 2): an init script, run before any page script in every frame, adopts a
+ *   stylesheet that paints every redact selector as a solid block, drops its `::before` /
+ *   `::after` content and hides everything inside it, so every video frame and screenshot is
+ *   covered. A selector that is not valid CSS, a stylesheet the page removed, or page CSS that wins
+ *   the cascade over the paint (computed colour, pseudo content or a visible descendant, checked at
+ *   every scan) fails the shot (fail closed). Screenshots also pass `mask` / `maskColor` for the
+ *   painted selectors and the project's `visual.dynamic_regions` / `redact_selectors`, in every
+ *   frame.
+ * - Scan (layer 3): text nodes, `title` / `alt` / `aria-label` / `placeholder`, input values
+ *   (not passwords), SVG text and the document title, outside painted subtrees and `script` /
+ *   `style`, plus the text nodes joined (a token split over elements), are matched against
+ *   `SECRET_PATTERNS` and `deny_text`: in every frame of the page, before and after every
+ *   screenshot, and during a recording through a `MutationObserver` (and the `value` setters of
+ *   form fields) that hands each change to the runner with `exposeBinding`, then once more over
+ *   every frame before the context closes. A frame without the init script, or one removed before
+ *   it could be scanned, fails the shot. It scans every text in the DOM, not only what is on
+ *   screen, so it errs towards discarding. `deny_text` matches case-insensitively, as a substring
+ *   (AD-27 rule 6: any hit discards). A hit discards the file; the result names only the kinds
+ *   found. A shadow root (attached by script, or open) fails the shot, since neither the paint nor
+ *   the scan reaches into it. Text drawn into `<canvas>`, images, CSS generated content outside
+ *   painted subtrees and declarative closed shadow roots is not scanned (research §3 residual).
+ * - Video: `recordVideo` always with `size` (1280x800); the file exists only after
+ *   `context.close()`, then it is kept (renamed to the shot's name and hashed) or deleted.
+ *
+ * The script writes only into its output directory, a video directory beside it and the result
+ * file. It never throws past `main`: a failure of the whole run is the result's `error`.
+ */
+export const EVIDENCE_RUNNER_SCRIPT = String.raw`// VTC evidence runner (generated; see packages/engine/src/gates/capture/script.ts).
+import { createHash, createHmac } from "node:crypto";
+import { readFileSync, rmSync, unlinkSync, writeFileSync } from "node:fs";
+import { connect, createServer } from "node:net";
+import { dirname, join } from "node:path";
+import { pathToFileURL } from "node:url";
+
+if (!process.execArgv.includes("--disable-sigusr1")) {
+  process.stderr.write("the evidence runner must run with node --disable-sigusr1\n");
+  process.exit(2);
+}
+const key = readFileSync(process.argv[4]);
+unlinkSync(process.argv[4]);
+const input = JSON.parse(readFileSync(process.argv[2], "utf8"));
+const resultFile = process.argv[3];
+const out = { v: 1, browser: null, shots: [], files: {} };
+const save = () => {
+  const body = JSON.stringify(out);
+  const mac = createHmac("sha256", key).update(body).digest("hex");
+  writeFileSync(resultFile, JSON.stringify({ v: 1, body, mac }));
+};
+const writeOut = (name, bytes) => {
+  writeFileSync(join(input.out_dir, name), bytes);
+  out.files[name] = createHash("sha256").update(bytes).digest("hex");
+};
+const clip = (s, n) => String(s === undefined || s === null ? "" : s).slice(0, n);
+const BINDING = "__vtcEvidenceText";
+
+// ---------------------------------------------------------------- the scan (layer 3)
+const PATTERNS = input.patterns.map((p) => ({ kind: p.kind, re: new RegExp(p.source, p.flags.replace(/[gy]/g, "")) }));
+const DENY = input.deny_text
+  .map((v) => String(v).trim().toLowerCase())
+  .filter((v) => v !== "");
+const scan = (texts, hits) => {
+  if (!Array.isArray(texts)) { hits.add("unscannable"); return; }
+  for (const raw of texts) {
+    if (typeof raw !== "string") { hits.add("unscannable"); continue; }
+    if (raw === "") continue;
+    for (const p of PATTERNS) if (!hits.has(p.kind) && p.re.test(raw)) hits.add(p.kind);
+    if (hits.has("denied_text")) continue;
+    const low = raw.toLowerCase();
+    for (const d of DENY) {
+      if (low.includes(d)) { hits.add("denied_text"); break; }
+    }
+  }
+};
+
+// ---------------------------------------------------------------- in the page (layers 2 and 3)
+// Runs before any page script, in every document of the context (stringified with its config).
+function pageScript(config) {
+  const SKIP = new Set(["SCRIPT", "STYLE", "NOSCRIPT", "TEMPLATE"]);
+  const ATTRS = ["title", "alt", "aria-label", "placeholder"];
+  const state = { painted: false, broken: null };
+  const pending = new Set();
+  const list = config.paint.join(", ");
+  const send = window[config.binding];
+  const fail = (reason) => { if (!state.broken) state.broken = reason; };
+  let sheet = null;
+  try {
+    for (const selector of config.paint) document.querySelectorAll(selector);
+    sheet = new CSSStyleSheet();
+    for (const selector of config.paint) {
+      const s = ":is(" + selector + ")";
+      sheet.insertRule(s + " { color: transparent !important; -webkit-text-fill-color: transparent !important; text-shadow: none !important; background: " + config.color + " !important; border-color: " + config.color + " !important; caret-color: transparent !important; fill: transparent !important; stroke: transparent !important; }");
+      sheet.insertRule(s + " * { visibility: hidden !important; }");
+      sheet.insertRule(s + "::placeholder { color: transparent !important; }");
+      sheet.insertRule(s + "::before, " + s + "::after, " + s + " *::before, " + s + " *::after { content: none !important; }");
+    }
+    document.adoptedStyleSheets = [...document.adoptedStyleSheets, sheet];
+    state.painted = true;
+  } catch (error) {
+    state.broken = "a redact selector is not valid CSS, so nothing could be painted";
+  }
+  // Neither the paint nor the scan reaches into a shadow root: one attached by script fails closed.
+  if (typeof Element === "function" && typeof Element.prototype.attachShadow === "function") {
+    const attach = Element.prototype.attachShadow;
+    Object.defineProperty(Element.prototype, "attachShadow", {
+      value: function (...args) {
+        fail("the page attached a shadow root, which the redaction cannot cover");
+        return attach.apply(this, args);
+      },
+      writable: false,
+      configurable: false,
+    });
+  }
+  const isPainted = (el) => {
+    try { return el.matches(list); } catch { return true; }
+  };
+  // The paint holds when page CSS has not won the cascade over it: the painted element's text and
+  // generated content are invisible, and so is every element inside it.
+  const TRANSPARENT = "rgba(0, 0, 0, 0)";
+  const paintHolds = (el) => {
+    const cs = getComputedStyle(el);
+    if (cs.color !== TRANSPARENT || cs.getPropertyValue("-webkit-text-fill-color") !== TRANSPARENT) return false;
+    if (cs.textShadow !== "none") return false;
+    for (const pseudo of ["::before", "::after"]) {
+      const content = getComputedStyle(el, pseudo).content;
+      if (content !== "none" && content !== "normal") return false;
+    }
+    for (const d of el.querySelectorAll("*")) {
+      if (getComputedStyle(d).visibility !== "hidden") return false;
+    }
+    return true;
+  };
+  const checkPainted = (el) => {
+    if (!paintHolds(el)) throw new Error("page CSS overrides the redaction paint, so a painted region may show");
+  };
+  const collect = (root) => {
+    const texts = [];
+    let size = 0;
+    const push = (t) => {
+      if (typeof t !== "string" || t.trim() === "") return;
+      size += t.length;
+      if (size > config.maxChars) throw new Error("too much text on the page to scan");
+      texts.push(t);
+    };
+    const start = root && root.nodeType === 9 ? root.documentElement : root;
+    if (root && root.nodeType === 9) push(document.title);
+    if (!start || start.nodeType !== 1) return texts;
+    for (let el = start; el; el = el.parentElement) {
+      if (isPainted(el)) { checkPainted(el); return texts; }
+    }
+    const joined = [];
+    const painted = [];
+    const walker = document.createTreeWalker(start, NodeFilter.SHOW_ELEMENT | NodeFilter.SHOW_TEXT, {
+      acceptNode: (n) => {
+        if (n.nodeType !== 1) return NodeFilter.FILTER_ACCEPT;
+        if (SKIP.has(n.tagName.toUpperCase())) return NodeFilter.FILTER_REJECT;
+        if (isPainted(n)) { painted.push(n); return NodeFilter.FILTER_REJECT; }
+        return NodeFilter.FILTER_ACCEPT;
+      },
+    });
+    for (let n = walker.currentNode; n; n = walker.nextNode()) {
+      if (n.nodeType === 3) {
+        push(n.nodeValue);
+        joined.push(n.nodeValue);
+        continue;
+      }
+      if (n.shadowRoot) throw new Error("the page has a shadow root, which the scan cannot cover");
+      for (const a of ATTRS) push(n.getAttribute(a));
+      const tag = n.tagName.toUpperCase();
+      if ((tag === "INPUT" && String(n.type).toLowerCase() !== "password") || tag === "TEXTAREA" || tag === "SELECT") push(String(n.value));
+    }
+    push(joined.join(""));
+    for (const el of painted) checkPainted(el);
+    return texts;
+  };
+  const check = () => {
+    if (state.painted && !document.adoptedStyleSheets.includes(sheet)) {
+      fail("the redaction stylesheet was removed from the page");
+    }
+  };
+  const deliver = (root) => {
+    let texts;
+    try { texts = collect(root); } catch (error) { fail(String(error && error.message)); return; }
+    if (texts.length === 0) return;
+    const fn = typeof send === "function" ? send : window[config.binding];
+    if (typeof fn !== "function") { fail("the text scan binding is missing"); return; }
+    const p = Promise.resolve()
+      .then(() => fn(texts))
+      .catch(() => { fail("the text scan binding failed"); })
+      .finally(() => pending.delete(p));
+    pending.add(p);
+  };
+  if (config.video) {
+    const observer = new MutationObserver((records) => {
+      const roots = new Set();
+      for (const r of records) roots.add(r.target.nodeType === 1 ? r.target : r.target.parentElement);
+      for (const root of roots) if (root) deliver(root);
+      check();
+    });
+    // style / class / hidden too: a change there can undo the paint of a region.
+    observer.observe(document, { subtree: true, childList: true, characterData: true, attributes: true, attributeFilter: ATTRS.concat(["value", "type", "style", "class", "hidden"]) });
+    document.addEventListener("input", (e) => { if (e.target && e.target.nodeType === 1) deliver(e.target); }, true);
+    document.addEventListener("DOMContentLoaded", () => deliver(document));
+    // A value a script sets fires no mutation and no input event: scan it as it is set.
+    for (const name of ["HTMLInputElement", "HTMLTextAreaElement", "HTMLSelectElement"]) {
+      const C = window[name];
+      const d = typeof C === "function" ? Object.getOwnPropertyDescriptor(C.prototype, "value") : undefined;
+      if (!d || typeof d.set !== "function" || typeof d.get !== "function") continue;
+      Object.defineProperty(C.prototype, "value", {
+        get: d.get,
+        set: function (v) { d.set.call(this, v); deliver(this); },
+        enumerable: d.enumerable,
+        configurable: false,
+      });
+    }
+  }
+  Object.defineProperty(window, "__vtcEvidence", {
+    value: Object.freeze({
+      state: () => { check(); return { painted: state.painted, broken: state.broken }; },
+      collect: () => collect(document),
+      flush: () => Promise.all([...pending]).then(() => true),
+    }),
+    writable: false,
+    configurable: false,
+  });
+}
+
+const initScript = (video) =>
+  "(" + pageScript.toString() + ")(" +
+  JSON.stringify({ paint: input.paint, color: input.mask_color, binding: BINDING, video, maxChars: input.max_scan_chars }) +
+  ");";
+
+// Whole-page check, in every frame: redaction still in force, pending binding calls delivered,
+// every text scanned. A frame the init script did not run in (a blocked or script-written frame)
+// cannot be vouched for, so it fails the shot.
+const checkFrame = async (frame, hits, where) => {
+  const r = await frame.evaluate(async () => {
+    const e = window.__vtcEvidence;
+    if (!e) return null;
+    await e.flush();
+    const state = e.state();
+    let texts = null;
+    let error = null;
+    try { texts = e.collect(); } catch (err) { error = String(err && err.message); }
+    return { state, texts, error };
+  });
+  if (r === null || typeof r !== "object" || r.state === null || typeof r.state !== "object") {
+    throw new Error("the redaction script did not run in " + where);
+  }
+  if (r.state.painted !== true || r.state.broken) {
+    throw new Error("redaction is not in force" + (where === "the page" ? "" : " in " + where) + ": " + clip(r.state.broken || "nothing was painted", 200));
+  }
+  if (r.error) throw new Error(where + " could not be scanned: " + clip(r.error, 200));
+  scan(r.texts, hits);
+};
+const checkPage = async (page, hits, attached) => {
+  const main = page.mainFrame();
+  const frames = page.frames();
+  if (!Array.isArray(frames) || !frames.includes(main)) throw new Error("the page's frames could not be listed");
+  for (const frame of frames) await checkFrame(frame, hits, frame === main ? "the page" : "a frame of the page");
+  // A frame that came and went may have shown text no scan saw.
+  if (attached.some((f) => f.isDetached())) throw new Error("a frame was removed before its text could be scanned");
+};
+
+// ---------------------------------------------------------------- network
+const guard = async (context) => {
+  await context.route("**/*", (route) => {
+    let origin = null;
+    try { origin = new URL(route.request().url()).origin; } catch { origin = null; }
+    return origin === input.origin ? route.continue() : route.abort("blockedbyclient");
+  });
+  if (typeof context.routeWebSocket === "function") {
+    await context.routeWebSocket(/.*/, (ws) => {
+      let origin = null;
+      try { origin = new URL(ws.url().replace(/^ws/, "http")).origin; } catch { origin = null; }
+      if (origin === input.origin) ws.connectToServer();
+      else ws.close();
+    });
+  }
+};
+
+// Linux: the sandbox has a loopback of its own; relay the origin's port to the recorder's socket.
+const startRelay = (socketPath, port) =>
+  new Promise((resolve, reject) => {
+    const server = createServer((client) => {
+      const upstream = connect(socketPath);
+      const end = () => { client.destroy(); upstream.destroy(); };
+      client.on("error", end);
+      upstream.on("error", end);
+      client.pipe(upstream).pipe(client);
+    });
+    server.once("error", reject);
+    server.listen(port, "127.0.0.1", () => resolve(server));
+  });
+
+// ---------------------------------------------------------------- one shot
+const capture = async (browser, shot, index) => {
+  const record = { name: shot.name, status: "failed", hits: [] };
+  const hits = new Set();
+  const video = typeof shot.video_seconds === "number";
+  const videoDir = join(dirname(input.out_dir), "video-" + index);
+  let failure = null;
+  let page = null;
+  let png = null;
+  const attached = [];
+  const context = await browser.newContext({
+    viewport: { width: shot.width, height: shot.height },
+    deviceScaleFactor: 1,
+    locale: "en-US",
+    timezoneId: "UTC",
+    reducedMotion: "reduce",
+    serviceWorkers: "block",
+    ...(video ? { recordVideo: { dir: videoDir, size: input.video_size } } : {}),
+  });
+  try {
+    await guard(context);
+    if (video) {
+      await context.exposeBinding(BINDING, (_source, texts) => { scan(texts, hits); });
+    }
+    await context.addInitScript(initScript(video));
+    page = await context.newPage();
+    page.on("frameattached", (frame) => { attached.push(frame); });
+    const response = await page.goto(input.origin + shot.path, { waitUntil: "load", timeout: input.nav_timeout_ms });
+    if (!response) throw new Error("no response for " + clip(shot.path, 200));
+    if (response.status() >= 400) throw new Error("HTTP " + response.status() + " for " + clip(shot.path, 200));
+    if (shot.wait_for) {
+      await page.locator(shot.wait_for).first().waitFor({ state: "visible", timeout: input.nav_timeout_ms });
+    }
+    if (video) {
+      await page.waitForTimeout(Math.round(shot.video_seconds * 1000));
+      await checkPage(page, hits, attached);
+    } else {
+      await checkPage(page, hits, attached);
+      png = await page.screenshot({
+        type: "png",
+        animations: "disabled",
+        caret: "hide",
+        scale: "css",
+        mask: page.frames().flatMap((frame) => input.mask.map((s) => frame.locator(s))),
+        maskColor: input.mask_color,
+      });
+      await checkPage(page, hits, attached);
+    }
+  } catch (error) {
+    failure = clip((error && error.message) || error, 500) || "the capture failed";
+  }
+  const recording = video && page !== null ? page.video() : null;
+  // The recording is written only when its context closes.
+  await context.close().catch(() => undefined);
+  let webm = null;
+  if (recording) {
+    try {
+      webm = readFileSync(await recording.path());
+    } catch (error) {
+      failure = failure || "the recording was not written: " + clip(error && error.message, 300);
+    }
+  }
+  rmSync(videoDir, { recursive: true, force: true });
+  if (hits.size > 0) {
+    record.status = "discarded";
+    record.hits = [...hits].sort();
+  } else if (failure !== null) {
+    record.detail = failure;
+  } else {
+    const bytes = video ? webm : png;
+    if (bytes === null || bytes.length === 0) {
+      record.detail = "the capture produced no file";
+    } else {
+      writeOut(shot.name, bytes);
+      record.file = shot.name;
+      record.status = "captured";
+    }
+  }
+  return record;
+};
+
+const main = async () => {
+  const mod = await import(pathToFileURL(input.playwright).href);
+  const pw = mod.chromium ? mod : mod.default || mod;
+  if (!pw || !pw.chromium) throw new Error("the Playwright module exports no chromium");
+  let relay = null;
+  let browser = null;
+  try {
+    if (input.relay) {
+      relay = await startRelay(join(dirname(input.out_dir), "relay.sock"), Number(new URL(input.origin).port));
+    }
+    browser = await pw.chromium.launch({
+      executablePath: input.executable,
+      headless: true,
+      chromiumSandbox: false,
+      args: ["--force-device-scale-factor=1", "--hide-scrollbars", "--font-render-hinting=none"],
+    });
+    out.browser = { name: "chromium", version: clip(browser.version(), 64) || "unknown" };
+    for (let i = 0; i < input.shots.length; i += 1) {
+      out.shots.push(await capture(browser, input.shots[i], i));
+    }
+  } finally {
+    if (browser !== null) await browser.close().catch(() => undefined);
+    if (relay !== null) relay.close();
+  }
+};
+
+main().then(save, (error) => {
+  out.error = clip((error && (error.stack || error.message)) || error, 2000) || "the evidence runner failed";
+  save();
+});
+`;
