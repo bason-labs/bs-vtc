@@ -6,6 +6,7 @@ import {
   type PromptProposal,
 } from "@vtc/shared";
 import { mkdir, rm, symlink, writeFile } from "node:fs/promises";
+import type { CostRegression } from "../../src/lookback/cost-regression.js";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 import {
@@ -104,6 +105,37 @@ describe("proposal checks (AD-21 rule 4)", () => {
       type: "lookback.proposal_recorded",
       data: { proposal: "p-1", path: ".vtc/lookback/proposals/engineer/proposal.json", changes: 1 },
     });
+  });
+
+  it("refuses an id the history already recorded, so two candidates never share one replay", () => {
+    const retro = new RunLog("r2");
+    retro.add({ ...proposalRecordedEvent("engineer", proposal()) });
+    const history = [...log.events, ...retro.events];
+    const result = checkProposal({
+      role: "engineer",
+      raw: proposal(),
+      editableFile: NEW_SECTION,
+      locked: LOCKED,
+      attributions: [failure(TRAIN)],
+      history,
+      lockedShaFor,
+    });
+    expect(result.ok).toBe(false);
+    if (!result.ok)
+      expect(result.problems).toEqual([
+        "a proposal with id p-1 was already recorded: give this one a new id",
+      ]);
+    expect(
+      checkProposal({
+        role: "engineer",
+        raw: proposal({ id: "p-2" }),
+        editableFile: NEW_SECTION,
+        locked: LOCKED,
+        attributions: [failure(TRAIN)],
+        history,
+        lockedShaFor,
+      }).ok,
+    ).toBe(true);
   });
 
   it("refuses more than three changes", () => {
@@ -304,7 +336,25 @@ describe("a proposal aimed at tokens (D-bv cost regression)", () => {
   costly.gate("T-1", true);
   costly.dispatch("engineer", { task: "T-2", action: HELD_OK, tokens: 9000 });
   costly.gate("T-2", true);
-  const tokens = (trace: string, metric: "tokens_per_success" | "review_pass") =>
+  /** A cost regression of the base naming `traces` (D-bv). */
+  const regression = (traces: string[], current = base): CostRegression => ({
+    role: "engineer",
+    host: HOST,
+    baseline: { ...base, effective_sha256: "e".repeat(64) },
+    current,
+    metric: "tokens_per_success",
+    baseline_value: 1000,
+    current_value: 9000,
+    delta_pct: 800,
+    n: { baseline: 5, current: 5 },
+    since: now.toISOString(),
+    traces: traces.map((t) => ({ id: cite(t), run: "r1", trace: t, tokens: 9000 })),
+  });
+  const tokens = (
+    trace: string,
+    metric: "tokens_per_success" | "review_pass",
+    costRegressions: CostRegression[] = [regression([TRAIN_OK])],
+  ) =>
     checkProposal({
       role: "engineer",
       raw: proposal({
@@ -322,10 +372,24 @@ describe("a proposal aimed at tokens (D-bv cost regression)", () => {
       attributions: [],
       history: costly.events,
       lockedShaFor,
+      costRegressions,
     });
 
   it("may cite a train-split dispatch of the base, whose cost is the evidence", () => {
     expect(tokens(TRAIN_OK, "tokens_per_success").ok).toBe(true);
+  });
+
+  it("cites a success only when a cost regression of the base names it", () => {
+    const notNamed = `cites ${cite(TRAIN_OK)}, which is not an attributed train failure of engineer`;
+    for (const regressions of [
+      [],
+      [regression([])],
+      [regression([TRAIN_OK], { ...base, effective_sha256: "d".repeat(64) })],
+    ]) {
+      const result = tokens(TRAIN_OK, "tokens_per_success", regressions);
+      expect(result.ok).toBe(false);
+      if (!result.ok) expect(result.problems).toContain(notNamed);
+    }
   });
 
   it("still never cites a held-out dispatch", () => {

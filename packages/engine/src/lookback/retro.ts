@@ -6,9 +6,11 @@
  *   the version under review (its locked core and editable section), its train traces with what
  *   went wrong, and the human edits of its work. Held-out traces are never shown.
  * - `check`: {@link checkProposal} on what the lookback role wrote in its worktree, against the
- *   current locked core of the plugin this vtc carries and the attributions the history bears out;
- *   an accepted proposal is stored as an immutable candidate version under the VTC home
- *   ({@link storePromptVersion}) and logged as `lookback.proposal_recorded`.
+ *   current locked core of the plugin this vtc carries, the attributions the history bears out and
+ *   its cost regressions (recomputed from the history, so a change aimed at tokens cites only what
+ *   a regression of the base names); an accepted proposal is stored as an immutable candidate
+ *   version under the VTC home ({@link storePromptVersion}) and logged as
+ *   `lookback.proposal_recorded`.
  * Both read the AI tiebreaks the engine recorded for the project (`readTiebreakKeys`), so an
  * `ai_tiebreak` attribution counts only when the engine recorded its answer. Replays (AD-21 rule
  * 6) run after a proposal is recorded, through engine-core's runner (spine §5 reading 176).
@@ -26,6 +28,7 @@ import {
 } from "@vtc/shared";
 import type { LookbackRetro, LookbackRetroTarget, RunState } from "../core/index.js";
 import { readAttributions, type FailureSignal } from "./attribution.js";
+import { costRegressions } from "./cost-regression.js";
 import { lookbackEvent, type LookbackEventDraft } from "./events.js";
 import {
   candidateFrontmatter,
@@ -34,7 +37,9 @@ import {
   proposalRecordedEvent,
   readProposalFiles,
 } from "./proposals.js";
+import type { InstalledRole } from "./new-agent.js";
 import { lookbackAtRunEnd, type HumanEditDiff, type LookbackTarget } from "./run-end.js";
+import { computeScorecards } from "./scorecards.js";
 import { readTiebreakKeys } from "./tiebreaks.js";
 import { traceRef, type LockedShaFor } from "./traces.js";
 import { loadPromptVersionSync, storePromptVersion } from "./versions.js";
@@ -62,6 +67,12 @@ export interface LookbackRetroDeps {
   readonly budgetAvailable: (state: RunState) => boolean;
   readonly now: () => Date;
   readonly humanEditDiff?: HumanEditDiff;
+  /**
+   * The roles this vtc carries (the plugin catalog), for the new-agent signals (D-cd). Engine
+   * core's `LookbackRetro.plan` result has no field for them or for the cost regressions yet, so
+   * the daemon reads both from `lookbackAtRunEnd` at `run.finished` (a handoff to engine core).
+   */
+  readonly roles?: readonly InstalledRole[];
 }
 
 /** Longest editable section, trace detail and diff an input carries. */
@@ -276,6 +287,7 @@ export const createLookbackRetro = (deps: LookbackRetroDeps): LookbackRetro => {
         budgetAvailable: deps.budgetAvailable(state),
         now: deps.now(),
         ...(deps.humanEditDiff === undefined ? {} : { humanEditDiff: deps.humanEditDiff }),
+        ...(deps.roles === undefined ? {} : { roles: deps.roles }),
       });
       // spec §13: an AI tiebreak would answer the failures the tree leaves inconclusive; v1 runs
       // none (reading 182), so the run logs how many stay out of every scorecard
@@ -327,6 +339,17 @@ export const createLookbackRetro = (deps: LookbackRetroDeps): LookbackRetro => {
         lockedShaFor: deps.lockedShaFor,
         tiebreaks: recordedTiebreaks,
       });
+      const regressions = costRegressions({
+        scorecards: computeScorecards({
+          events: history,
+          attributions,
+          lockedShaFor: deps.lockedShaFor,
+          graderBundleSha: deps.graderBundleSha(),
+          now: deps.now(),
+        }),
+        history,
+        lockedShaFor: deps.lockedShaFor,
+      });
       const checked = checkProposal({
         history,
         lockedShaFor: deps.lockedShaFor,
@@ -336,6 +359,7 @@ export const createLookbackRetro = (deps: LookbackRetroDeps): LookbackRetro => {
         editableFile: files.editable,
         locked: compiled.locked,
         attributions,
+        costRegressions: regressions,
       });
       if (!checked.ok) return { ok: false, problems: [...checked.problems] };
       const base = checked.proposal.base;

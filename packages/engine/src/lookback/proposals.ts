@@ -14,19 +14,23 @@
  *   failure of that role that the history bears out (`trustedAttributions`; the role never sees
  *   held-out traces), run with the proposal's base version (same mode, host and hashes), so the
  *   base, which becomes the candidate's recorded `parent`, is a version that ran and failed. A
- *   change aimed at tokens (`target_metric` `tokens_per_success`, the cost regressions of D-bv)
- *   may also cite a train-split dispatch of the base that submitted: its cost is the evidence. A
- *   held-out trace is never accepted;
- * - it actually changes the section.
+ *   change aimed at tokens (`target_metric` `tokens_per_success`) may also cite a train-split
+ *   dispatch of the base that submitted, but only one a cost regression of the base names
+ *   (`CostRegression.traces`, D-bv): its cost is the evidence. A held-out trace is never accepted;
+ * - it actually changes the section;
+ * - its id is new: the history records no `lookback.proposal_recorded` with that id. The id names
+ *   the replay, its result file and its ledger rows, so a reused id would mix two candidates.
  * An accepted proposal becomes a candidate version file under the VTC home (immutable) and a
  * `lookback.proposal_recorded` event; promotion stays a human gesture.
  */
 import {
   editableSectionErrors,
   findForbiddenInText,
+  isEventOfType,
   LOOKBACK_REPO,
   PROMPT_MARKERS,
   PromptProposalSchema,
+  readEventData,
   RoleIdSchema,
   splitRolePrompt,
   type Attribution,
@@ -41,6 +45,7 @@ import {
   trustedAttributions,
   type AttributionHistory,
 } from "./attribution.js";
+import type { CostRegression } from "./cost-regression.js";
 import { lookbackEvent, type LookbackEventDraft } from "./events.js";
 import { readRoleWrittenText } from "./files.js";
 import { buildTraces, traceSlug, traceSplit } from "./traces.js";
@@ -103,6 +108,11 @@ export const checkProposal = (
     /** The role's current locked core (`splitRolePrompt(...).locked`). */
     readonly locked: string;
     readonly attributions: readonly Attribution[];
+    /**
+     * The cost regressions of the history (`costRegressions`); a change aimed at tokens may cite
+     * only the traces one of the base names. None: no success may be cited.
+     */
+    readonly costRegressions?: readonly CostRegression[];
   },
 ): ProposalCheck => {
   const parsed = PromptProposalSchema.safeParse(input.raw);
@@ -151,6 +161,12 @@ export const checkProposal = (
     [...ofRole, ...dispatches].filter((t) => traceSplit(t) === "holdout").map(traceSlug),
   );
   // what a change aimed at tokens may cite besides failures: the base's train-split dispatches
+  // that a cost regression of the base names
+  const named = new Set(
+    (input.costRegressions ?? [])
+      .filter((r) => samePrompt(r.current, proposal.base))
+      .flatMap((r) => r.traces.map((t) => t.id)),
+  );
   const costEvidence = new Set(
     dispatches
       .filter(
@@ -160,7 +176,8 @@ export const checkProposal = (
           t.end?.kind === "submitted" &&
           traceSplit(t) === "train",
       )
-      .map(traceSlug),
+      .map(traceSlug)
+      .filter((slug) => named.has(slug)),
   );
   for (const change of proposal.changes) {
     for (const trace of change.trace_ids) {
@@ -174,6 +191,13 @@ export const checkProposal = (
   }
   if (sectionSha(editable) === proposal.base.editable_sha256)
     problems.push("the proposal does not change the section");
+  if (
+    input.history.some(
+      (e) =>
+        isEventOfType(e, "lookback.proposal_recorded") && readEventData(e).proposal === proposal.id,
+    )
+  )
+    problems.push(`a proposal with id ${proposal.id} was already recorded: give this one a new id`);
   if (problems.length > 0) return { ok: false, problems: [...new Set(problems)] };
   const candidate = promptVersionRef({
     role: proposal.base.role,

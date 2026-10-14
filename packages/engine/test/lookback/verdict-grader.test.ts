@@ -8,12 +8,18 @@
 import { ATTRIBUTION_TREE, LOOKBACK_LIMITS, sha256Hex, VERDICT_GRADED_ROLES } from "@vtc/shared";
 import { describe, expect, it } from "vitest";
 import {
+  assembleReplay,
+  attributeRun,
   graderBundleSha,
   gradeVerdictTrial,
   LOOKBACK_METRICS_VERSION,
+  planReplayTrials,
+  planRetroReplays,
   promptVersionRef,
   recordedOutcome,
+  replayTaskKey,
   replayTasks,
+  replayTrialKey,
   traceSplit,
   VERDICT_GRADER_VERSION,
 } from "../../src/lookback/index.js";
@@ -285,6 +291,126 @@ describe("verdict-role replay tasks (D-ch)", () => {
         expected: { subject: AC, verdict: "pass" },
       },
     ]);
+  });
+
+  it("keeps two criteria of one task apart, one in each set, through plan, ledger and result", () => {
+    const log = new RunLog();
+    const AC2 = "REQ-1.AC-2";
+    const first = heldOutAction(0);
+    const second = heldOutAction(1);
+    log.taskCreated("T-1");
+    log.dispatch("engineer", { task: "T-1", feature: "F-1" });
+    log.gate("T-1", true);
+    for (const [action, subject, verdict] of [
+      [first, AC, "pass"],
+      [second, AC2, "fail"],
+    ] as const)
+      log.dispatch("spec_verifier", {
+        task: "T-1",
+        feature: "F-1",
+        action,
+        subject,
+        end: "done",
+        verdicts: [{ subject, verdict }],
+      });
+    // the escaped defect makes every criterion of T-1 a fail: AC-1's pass was wrong, AC-2's right
+    log.escapedDefect(["T-1"]);
+    const tasks = replayTasks({
+      baseline,
+      history: log.events,
+      lockedShaFor,
+      attributions: [],
+      grader: "verdict",
+    });
+    expect(tasks.map((t) => [replayTaskKey(t), t.regressionSet])).toEqual([
+      [`r1:${AC}:T-1`, false],
+      [`r1:${AC2}:T-1`, true],
+    ]);
+    const candidate = promptVersionRef({
+      role: "spec_verifier",
+      host: HOST,
+      locked: LOCKED,
+      editable: "Check every criterion against the diff.",
+    });
+    const trials = planReplayTrials({ tasks, baseline, candidate, withAa: false, k: 1 }).map(
+      (t) => ({
+        task: replayTaskKey(t.task),
+        arm: t.arm,
+        trial: t.trial,
+        regressionSet: t.task.regressionSet,
+      }),
+    );
+    expect(new Set(trials.map(replayTrialKey)).size).toBe(trials.length);
+    const planned = planRetroReplays({
+      pending: [
+        { proposal: "p-sv", role: "spec_verifier", host: HOST, changesFiles: false, trials },
+      ],
+      graded: () => new Set(),
+      weeklyRemainingPct: 80,
+      budgetAvailable: true,
+    });
+    expect(planned.launch[0]?.trials).toEqual(trials);
+    const rows = new Map(
+      trials.map((t) => [
+        replayTrialKey(t),
+        {
+          repo_key: "0123456789abcdef",
+          proposal: "p-sv",
+          baseline: baseline.effective_sha256,
+          candidate: candidate.effective_sha256,
+          ...t,
+          passed: t.arm === "b" || t.regressionSet,
+          tokens: 1000,
+          read_denied: false,
+          grader_bundle_sha: "9".repeat(64),
+          graded_at: "2026-10-15T09:00:00.000Z",
+        },
+      ]),
+    );
+    const done = assembleReplay({
+      proposal: "p-sv",
+      baseline,
+      candidate,
+      grader: "verdict",
+      planned: trials,
+      rows,
+      graderBundleSha: "9".repeat(64),
+      now: new Date("2026-10-15T09:00:00.000Z"),
+    });
+    if (!done.complete) throw new Error("incomplete");
+    expect(done.result.per_task).toEqual([
+      { task: `r1:${AC}:T-1`, a: [false], b: [true], regression_set: false },
+      { task: `r1:${AC2}:T-1`, a: [true], b: [true], regression_set: true },
+    ]);
+  });
+
+  it("never puts a gates task the baseline failed on in the regression set as well", () => {
+    const engineer = promptVersionRef({
+      role: "engineer",
+      host: HOST,
+      locked: LOCKED,
+      editable: EDITABLE,
+    });
+    const log = new RunLog();
+    const failedRound = heldOutAction(0);
+    const passedRound = heldOutAction(1);
+    log.taskCreated("T-1");
+    log.dispatch("engineer", { task: "T-1", action: failedRound });
+    log.gate("T-1", false);
+    log.dispatch("engineer", { task: "T-1", action: passedRound });
+    log.gate("T-1", true);
+    const attributions = attributeRun({
+      events: log.events,
+      lockedShaFor,
+      now: new Date("2026-10-15T09:00:00.000Z"),
+    }).attributions;
+    const tasks = replayTasks({
+      baseline: engineer,
+      history: log.events,
+      lockedShaFor,
+      attributions,
+    });
+    expect(tasks.map((t) => [replayTaskKey(t), t.regressionSet])).toEqual([["r1:T-1", false]]);
   });
 
   it("never replays a train-split dispatch", () => {

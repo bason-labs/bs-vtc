@@ -12,8 +12,14 @@
  *   `automation.skipped` with the limit's reason (`weekly_window`, `budget`, `trial_cap`).
  * - **Order.** Oldest replay first, each one's trials in plan order (interleaved arms), in whole
  *   groups (one task's trial number across its arms), so a pair is never split across RETROs. A
- *   replay whose trials are all graded comes back with none to run: it is ready to finish
- *   (`assembleReplay`).
+ *   replay whose trials are all graded comes back with none to run, whatever the limits: it is
+ *   ready to finish (`assembleReplay`).
+ * - **Unreplayable.** A replay is never launched, and comes back in `unreplayable` with its reason,
+ *   when no grader can score its role, when its plan has no trial (the baseline has no held-out
+ *   task to replay: for a verdict role, none with a recorded outcome), or when one of its trials
+ *   measured nothing (`gate_infra`, `plugin_locked`) `REPLAY_MAX_INFRA_ATTEMPTS` times; the last
+ *   also logs `automation.skipped` `plugin_locked` when the lock was the cause. The caller ends
+ *   such a replay (it is no longer pending), so each is reported once.
  */
 import {
   LOOKBACK_LIMITS,
@@ -23,7 +29,12 @@ import {
   type ReplayGrader,
 } from "@vtc/shared";
 import { lookbackEvent, type LookbackEventDraft } from "./events.js";
-import { replayTrialKey, type ReplayTrialId } from "./replay-ledger.js";
+import {
+  REPLAY_MAX_INFRA_ATTEMPTS,
+  replayTrialKey,
+  type ReplayInfraOutcome,
+  type ReplayTrialId,
+} from "./replay-ledger.js";
 
 /** The limits a replay waits on, as `automation.skipped` reasons (D-cg). */
 export type ReplayLimitReason = Extract<
@@ -117,11 +128,15 @@ const groupsOf = <T extends ReplayTrialId>(trials: readonly T[], graded: Readonl
   return groups;
 };
 
-/** Pure: the replays this RETRO launches, the ones no grader can score, and the limits it hit. */
+/** Pure: the replays this RETRO launches, the ones it never will, and the limits it hit. */
 export const planRetroReplays = <T extends ReplayTrialId>(input: {
   readonly pending: readonly PendingReplay<T>[];
   /** The trial keys (`replayTrialKey`) the ledger already graded for a proposal. */
   readonly graded: (proposal: string) => ReadonlySet<string>;
+  /** The ledger's attempts that measured nothing, by trial key (`readReplayInfra`); none when absent. */
+  readonly infra?: (
+    proposal: string,
+  ) => ReadonlyMap<string, { readonly attempts: number; readonly outcome: ReplayInfraOutcome }>;
   readonly weeklyRemainingPct: number | null;
   readonly budgetAvailable: boolean;
   /** Default `LOOKBACK_LIMITS.maxTrialsPerRetro`. */
@@ -132,17 +147,71 @@ export const planRetroReplays = <T extends ReplayTrialId>(input: {
   readonly skipped: AutomationSkippedDraft[];
 } => {
   const unreplayable: { proposal: string; reason: string }[] = [];
-  const replayable: (PendingReplay<T> & { grader: ReplayGrader })[] = [];
+  const skipped: AutomationSkippedDraft[] = [];
+  const replayable: (PendingReplay<T> & { grader: ReplayGrader; groups: T[][] })[] = [];
   for (const replay of input.pending) {
     const grader = replayGraderFor(replay.role, replay.changesFiles);
-    if (grader === null)
+    if (grader === null) {
       unreplayable.push({
         proposal: replay.proposal,
         reason: `no grader can score ${replay.role}: it changes no file and is not a verdict-graded role`,
       });
-    else replayable.push({ ...replay, grader });
+      continue;
+    }
+    if (replay.trials.length === 0) {
+      unreplayable.push({
+        proposal: replay.proposal,
+        reason:
+          grader === "verdict"
+            ? "the baseline has no held-out task with a recorded outcome to replay"
+            : "the baseline has no held-out task to replay",
+      });
+      continue;
+    }
+    const groups = groupsOf(replay.trials, input.graded(replay.proposal));
+    const infra = input.infra?.(replay.proposal);
+    const stuck = groups
+      .flat()
+      .map((t) => infra?.get(replayTrialKey(t)))
+      .find((a) => a !== undefined && a.attempts >= REPLAY_MAX_INFRA_ATTEMPTS);
+    if (stuck !== undefined) {
+      const why =
+        stuck.outcome === "plugin_locked"
+          ? "the host did not load the arm's plugin (a managed-settings lock)"
+          : "the gates could not run (gate_infra)";
+      unreplayable.push({
+        proposal: replay.proposal,
+        reason: `a trial measured nothing ${String(REPLAY_MAX_INFRA_ATTEMPTS)} times: ${why}`,
+      });
+      if (stuck.outcome === "plugin_locked")
+        skipped.push(
+          replaySkippedEvent(
+            "plugin_locked",
+            `the replay of ${replay.proposal} stops: a managed-settings lock kept the installed vtc plugin on ${String(REPLAY_MAX_INFRA_ATTEMPTS)} attempts of one trial`,
+          ),
+        );
+      continue;
+    }
+    replayable.push({ ...replay, grader, groups });
   }
-  if (replayable.length === 0) return { launch: [], unreplayable, skipped: [] };
+  const launched = (
+    replay: (typeof replayable)[number],
+    trials: T[],
+    remaining: number,
+  ): LaunchedReplay<T> => ({
+    proposal: replay.proposal,
+    role: replay.role,
+    ...(replay.mode === undefined ? {} : { mode: replay.mode }),
+    host: replay.host,
+    grader: replay.grader,
+    trials,
+    remaining,
+  });
+  // a replay with every trial graded needs no trial: it finishes whatever the limits say
+  const finished = replayable.filter((r) => r.groups.length === 0);
+  const running = replayable.filter((r) => r.groups.length > 0);
+  if (running.length === 0)
+    return { launch: finished.map((r) => launched(r, [], 0)), unreplayable, skipped };
   const limit = replayLimitReason(input);
   if (limit !== null) {
     const what =
@@ -152,12 +221,13 @@ export const planRetroReplays = <T extends ReplayTrialId>(input: {
           : `${String(Math.round(input.weeklyRemainingPct))}% of the Lead host's weekly window is left (Lookback needs ${String(LOOKBACK_LIMITS.minWeeklyRemainingPct)}%)`
         : "the Lookback budget is spent";
     return {
-      launch: [],
+      launch: finished.map((r) => launched(r, [], 0)),
       unreplayable,
       skipped: [
+        ...skipped,
         replaySkippedEvent(
           limit,
-          `${plural(replayable.length, "replay")} wait for the next RETRO: ${what}`,
+          `${plural(running.length, "replay")} wait for the next RETRO: ${what}`,
         ),
       ],
     };
@@ -167,10 +237,9 @@ export const planRetroReplays = <T extends ReplayTrialId>(input: {
   let waitingReplays = 0;
   const launch: LaunchedReplay<T>[] = [];
   for (const replay of replayable) {
-    const groups = groupsOf(replay.trials, input.graded(replay.proposal));
     const trials: T[] = [];
     let remaining = 0;
-    for (const group of groups) {
+    for (const group of replay.groups) {
       if (remaining === 0 && group.length <= left) {
         trials.push(...group);
         left -= group.length;
@@ -181,24 +250,14 @@ export const planRetroReplays = <T extends ReplayTrialId>(input: {
       waitingReplays += 1;
     }
     if (trials.length === 0 && remaining > 0) continue;
-    launch.push({
-      proposal: replay.proposal,
-      role: replay.role,
-      ...(replay.mode === undefined ? {} : { mode: replay.mode }),
-      host: replay.host,
-      grader: replay.grader,
-      trials,
-      remaining,
-    });
+    launch.push(launched(replay, trials, remaining));
   }
-  const skipped =
-    waiting === 0
-      ? []
-      : [
-          replaySkippedEvent(
-            "trial_cap",
-            `${plural(waiting, "replay trial")} of ${plural(waitingReplays, "proposal")} wait for the next RETRO: one RETRO launches at most ${String(input.cap ?? LOOKBACK_LIMITS.maxTrialsPerRetro)}`,
-          ),
-        ];
+  if (waiting > 0)
+    skipped.push(
+      replaySkippedEvent(
+        "trial_cap",
+        `${plural(waiting, "replay trial")} of ${plural(waitingReplays, "proposal")} wait for the next RETRO: one RETRO launches at most ${String(input.cap ?? LOOKBACK_LIMITS.maxTrialsPerRetro)}`,
+      ),
+    );
   return { launch, unreplayable, skipped };
 };

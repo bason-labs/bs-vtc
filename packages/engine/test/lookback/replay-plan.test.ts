@@ -14,8 +14,11 @@ import {
   finishReplay,
   planRetroReplays,
   promptVersionRef,
+  readReplayInfra,
   readReplayTrials,
+  recordReplayInfra,
   recordReplayTrial,
+  REPLAY_MAX_INFRA_ATTEMPTS,
   REPLAY_TRIALS_FILE,
   replayIsolation,
   replayLimitReason,
@@ -40,6 +43,9 @@ const candidate = promptVersionRef({
   locked: LOCKED,
   editable: "Write the failing test first.",
 });
+
+const SHAS = { baseline: baseline.effective_sha256, candidate: candidate.effective_sha256 };
+const SCOPE = { repoKey: REPO, proposal: "p-1", graderBundleSha: BUNDLE, ...SHAS };
 
 interface T {
   readonly task: string;
@@ -186,6 +192,87 @@ describe("planning a RETRO's replays (D-cg, D-ch)", () => {
     expect(planned.skipped).toEqual([]);
   });
 
+  it("finishes a fully graded replay even when the weekly window or the budget says wait", () => {
+    const done = plan(["r1:T-1"], false, 1);
+    const open2 = plan(["r1:T-2"], false, 1);
+    for (const limits of [
+      { weeklyRemainingPct: 5, budgetAvailable: true },
+      { weeklyRemainingPct: 80, budgetAvailable: false },
+    ]) {
+      const planned = planRetroReplays({
+        ...limits,
+        pending: [pending("p-1", done), pending("p-2", open2)],
+        graded: (proposal) => new Set(proposal === "p-1" ? done.map(replayTrialKey) : []),
+      });
+      expect(planned.launch).toEqual([
+        {
+          proposal: "p-1",
+          role: "engineer",
+          host: HOST,
+          grader: "gates",
+          trials: [],
+          remaining: 0,
+        },
+      ]);
+      expect(planned.skipped.map((e) => e.data.detail)).toEqual([
+        expect.stringContaining("1 replay wait"),
+      ]);
+    }
+  });
+
+  it("reports a replay with no planned trial as unreplayable instead of stalling it", () => {
+    const planned = planRetroReplays({
+      ...open,
+      pending: [
+        pending("p-sv", [], "spec_verifier", false),
+        pending("p-eng", []),
+        pending("p-ok", plan(["r1:T-1"], false, 1)),
+      ],
+      graded: () => new Set(),
+    });
+    expect(planned.launch.map((r) => r.proposal)).toEqual(["p-ok"]);
+    expect(planned.unreplayable).toEqual([
+      {
+        proposal: "p-sv",
+        reason: "the baseline has no held-out task with a recorded outcome to replay",
+      },
+      { proposal: "p-eng", reason: "the baseline has no held-out task to replay" },
+    ]);
+  });
+
+  it("stops a replay one of whose trials measured nothing too often, logging plugin_locked once", () => {
+    const trials = plan(["r1:T-1"], false, 1);
+    const [first] = trials;
+    if (first === undefined) throw new Error("no trial");
+    const attempts = (n: number, outcome: "plugin_locked" | "gate_infra") =>
+      new Map([[replayTrialKey(first), { attempts: n, outcome }]]);
+    const below = planRetroReplays({
+      ...open,
+      pending: [pending("p-1", trials)],
+      graded: () => new Set(),
+      infra: () => attempts(REPLAY_MAX_INFRA_ATTEMPTS - 1, "plugin_locked"),
+    });
+    expect(below.launch[0]?.trials).toEqual(trials);
+    const locked = planRetroReplays({
+      ...open,
+      pending: [pending("p-1", trials)],
+      graded: () => new Set(),
+      infra: () => attempts(REPLAY_MAX_INFRA_ATTEMPTS, "plugin_locked"),
+    });
+    expect(locked.launch).toEqual([]);
+    expect(locked.unreplayable[0]?.reason).toContain("managed-settings lock");
+    expect(locked.skipped.map((e) => e.data.reason)).toEqual(["plugin_locked"]);
+    expect(validateEventData("automation.skipped", locked.skipped[0]?.data ?? {}).ok).toBe(true);
+    const infra = planRetroReplays({
+      ...open,
+      pending: [pending("p-1", trials)],
+      graded: () => new Set(),
+      infra: () => attempts(REPLAY_MAX_INFRA_ATTEMPTS, "gate_infra"),
+    });
+    expect(infra.unreplayable[0]?.reason).toContain("gate_infra");
+    expect(infra.skipped).toEqual([]);
+  });
+
   it("hands back a fully graded replay with no trial to run, so it can be finished", () => {
     const trials = plan(["r1:T-1"], false, 1);
     const planned = planRetroReplays({
@@ -203,6 +290,7 @@ describe("the replay trial ledger (D-cg)", () => {
   const row = (over: Partial<ReplayTrialRow> = {}): ReplayTrialRow => ({
     repo_key: REPO,
     proposal: "p-1",
+    ...SHAS,
     task: "r1:T-1",
     arm: "a",
     trial: 1,
@@ -223,14 +311,54 @@ describe("the replay trial ledger (D-cg)", () => {
     await recordReplayTrial(vtcHome, row({ grader_bundle_sha: "8".repeat(64), arm: "aa" }));
     // a trial graded twice keeps its first grade
     await recordReplayTrial(vtcHome, row({ passed: false }));
-    const rows = await readReplayTrials(vtcHome, {
-      repoKey: REPO,
-      proposal: "p-1",
-      graderBundleSha: BUNDLE,
-    });
+    const rows = await readReplayTrials(vtcHome, SCOPE);
     expect([...rows.values()].map((r) => [r.arm, r.passed])).toEqual([
       ["a", true],
       ["b", false],
+    ]);
+  });
+
+  it("never lends one candidate's grades to another proposal that reuses its id", async () => {
+    const vtcHome = await tempDir("ledger-reuse");
+    const other = promptVersionRef({
+      role: "engineer",
+      host: HOST,
+      locked: LOCKED,
+      editable: "Skip the tests.",
+    });
+    // the first p-1 (candidate) graded T-1; a later p-1 with another candidate must start over
+    await recordReplayTrial(vtcHome, row({ passed: true, arm: "b" }));
+    const reused = await readReplayTrials(vtcHome, {
+      ...SCOPE,
+      candidate: other.effective_sha256,
+    });
+    expect(reused.size).toBe(0);
+    const otherBase = await readReplayTrials(vtcHome, {
+      ...SCOPE,
+      baseline: other.effective_sha256,
+    });
+    expect(otherBase.size).toBe(0);
+    expect((await readReplayTrials(vtcHome, SCOPE)).size).toBe(1);
+  });
+
+  it("counts a trial's attempts that measured nothing apart from its grades", async () => {
+    const vtcHome = await tempDir("ledger-infra");
+    const infra = {
+      repo_key: REPO,
+      proposal: "p-1",
+      ...SHAS,
+      task: "r1:T-1",
+      arm: "a" as const,
+      trial: 1,
+      grader_bundle_sha: BUNDLE,
+      at: now.toISOString(),
+    };
+    await recordReplayInfra(vtcHome, { ...infra, outcome: "gate_infra" });
+    await recordReplayInfra(vtcHome, { ...infra, outcome: "plugin_locked" });
+    await recordReplayInfra(vtcHome, { ...infra, proposal: "p-2", outcome: "plugin_locked" });
+    expect((await readReplayTrials(vtcHome, SCOPE)).size).toBe(0);
+    expect([...(await readReplayInfra(vtcHome, SCOPE))]).toEqual([
+      [replayTrialKey(infra), { attempts: 2, outcome: "plugin_locked" }],
     ]);
   });
 
@@ -240,11 +368,7 @@ describe("the replay trial ledger (D-cg)", () => {
     await mkdir(dirname(path), { recursive: true });
     await writeFile(path, `{"v":1,"nope":true}\nnot json\n`);
     await recordReplayTrial(vtcHome, row());
-    const rows = await readReplayTrials(vtcHome, {
-      repoKey: REPO,
-      proposal: "p-1",
-      graderBundleSha: BUNDLE,
-    });
+    const rows = await readReplayTrials(vtcHome, SCOPE);
     expect(rows.size).toBe(1);
   });
 });
@@ -284,6 +408,7 @@ describe("the replay result (readings 178, 202)", () => {
       rows.set(replayTrialKey(t), {
         repo_key: REPO,
         proposal: "p-1",
+        ...SHAS,
         task: t.task,
         arm: t.arm,
         trial: t.trial,
@@ -304,11 +429,17 @@ describe("the replay result (readings 178, 202)", () => {
       now,
     };
     expect(assembleReplay(input)).toEqual({ complete: false, missing: 1 });
+    expect(assembleReplay({ ...input, planned: [] })).toEqual({
+      complete: false,
+      missing: 0,
+      reason: "no_tasks",
+    });
     const last = planned[5];
     if (last === undefined) throw new Error("no trial");
     rows.set(replayTrialKey(last), {
       repo_key: REPO,
       proposal: "p-1",
+      ...SHAS,
       task: last.task,
       arm: last.arm,
       trial: last.trial,
@@ -341,6 +472,7 @@ describe("the replay result (readings 178, 202)", () => {
         {
           repo_key: REPO,
           proposal: "p-1",
+          ...SHAS,
           task: t.task,
           arm: t.arm,
           trial: t.trial,
