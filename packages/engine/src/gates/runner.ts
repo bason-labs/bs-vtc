@@ -62,9 +62,11 @@ import {
   type TestMetrics,
   type TestRecord,
   type ToolFinding,
+  type VisualSummary,
   type WriteScopeCheckRequest,
 } from "@vtc/shared";
 import { assertNoSymlinks, ensureRepoDir, removeRepoFile, writeRepoFile } from "../git/index.js";
+import { compiledL6 } from "./arch/index.js";
 import { classifyFailure, environmentSignatureLine } from "./classify.js";
 import { GATES_CONFIG_PATH, loadGatesConfig, parseGatesConfig, readAllowlist } from "./config.js";
 import {
@@ -107,7 +109,11 @@ import {
   resolveGateSandbox,
   type JailedResult,
 } from "./sandbox.js";
+import { computeScopeCreep, scopeCreepFindings, type ScopeCreep } from "./scope-creep.js";
 import { buildTraceability } from "./traceability.js";
+import { visualWithoutRenders } from "./visual/evaluate.js";
+import { sandboxedVisualRunner, type VisualRunner } from "./visual/runner.js";
+import { runVisualStep, type VisualToolchains } from "./visual/step.js";
 import { checkWriteScope } from "./write-scope.js";
 
 export interface GateRunnerOptions {
@@ -120,6 +126,15 @@ export interface GateRunnerOptions {
    * {@link detectGateSandbox}). Tests pass `() => null` to stand for a machine without one.
    */
   readonly detectSandbox?: () => GateSandbox | null;
+  /**
+   * Runs the visual runner script (AD-24); default: in the gate sandbox with {@link node}.
+   * Tests inject a fake and never start a browser.
+   */
+  readonly visualRunner?: VisualRunner;
+  /** Where the visual step finds Playwright (default: the project's, then the browser store). */
+  readonly visualToolchains?: VisualToolchains;
+  /** The Node the visual runner script runs with (default `node` on the gate's `PATH`). */
+  readonly node?: string;
 }
 
 /** Visible text of a gate that did not run for want of a sandbox (D-al). */
@@ -280,6 +295,11 @@ class Run {
   private readonly hiddenFiles: string[] = [];
   private diffCoverage: number | null = null;
   private config: GatesConfig | null = null;
+  /** The raw `gates.yml` text the run started with (the visual step's provisional `visual.app`). */
+  private gatesYml: string | null = null;
+  private visual: VisualSummary | null = null;
+  /** §7.4 scope creep of this run's diff, when its L2 ran for a task or feature. */
+  private scopeCreep: ScopeCreep | null = null;
   private changed: GitChangedFile[] = [];
   private baseCheckout: { rel: string; abs: string; installed: boolean } | null = null;
   /**
@@ -307,6 +327,7 @@ class Run {
     private readonly env: Readonly<Record<string, string | undefined>>,
     private readonly request: GateRunRequest,
     sandbox: GateSandbox | null,
+    private readonly options: GateRunnerOptions = {},
     private readonly configOverride?: GatesConfig,
   ) {
     if (sandbox === null) this.jail = null;
@@ -341,7 +362,14 @@ class Run {
    * readings 20 and 46b): otherwise nothing runs.
    */
   private async loadConfig(): Promise<GatesConfig | null> {
-    if (this.request.reason === "calibration") return loadGatesConfig(this.deps.repoRoot);
+    if (this.request.reason === "calibration") {
+      try {
+        this.gatesYml = readFileSync(join(this.deps.repoRoot, GATES_CONFIG_PATH), "utf8");
+      } catch {
+        this.gatesYml = null;
+      }
+      return loadGatesConfig(this.deps.repoRoot);
+    }
     const base = this.request.base.slice(0, 12);
     const bytes = await this.deps.git.readFileAtCommit(this.request.base, GATES_CONFIG_PATH);
     if (bytes === undefined) {
@@ -358,7 +386,8 @@ class Run {
         );
       }
     }
-    return parseGatesConfig(new TextDecoder().decode(bytes));
+    this.gatesYml = new TextDecoder().decode(bytes);
+    return parseGatesConfig(this.gatesYml);
   }
 
   async execute(): Promise<GateReport> {
@@ -387,6 +416,12 @@ class Run {
         ];
       }
       await this.runGates(config);
+      if (this.request.visual !== undefined) {
+        // §7.3: hidden tests never reach evidence, and the app the visual step renders into
+        // screenshots is project code: they leave the checkout first.
+        this.removeHidden();
+        await this.runVisual(config);
+      }
     } catch (error) {
       // Never throw for a gate problem (GateRunner.run): an unexpected one is gate infrastructure.
       this.note(
@@ -467,6 +502,20 @@ class Run {
       this.results.push(result);
       if (gate.phase === "install" && result.status !== "pass") installFailed = gate.id;
     }
+    const guard =
+      this.request.reason === "base_fail_check" || this.request.reason === "calibration";
+    if (!guard && (this.request.layers ?? LAYER_ORDER).includes("L6")) {
+      // §8.5: the Architect's AD Checks, compiled from the base commit's spine.
+      const compiled = await compiledL6({
+        git: this.deps.git,
+        base: this.request.base,
+        head: this.request.head,
+        changed: this.changed,
+        evidenceRoot: this.evidenceRoot,
+      });
+      this.results.push(...compiled.results);
+      this.writes.push(...compiled.writes);
+    }
     const wantsL5 =
       this.request.reason === "base_fail_check"
         ? false
@@ -479,6 +528,50 @@ class Run {
       this.results.push(await this.writeScopeResult());
     }
     this.finishL2();
+    await this.flagScopeCreep();
+  }
+
+  /**
+   * §7.4: changed files no requirement covers. One info-level finding per path on the last L2
+   * result (the run's combined L2 metrics), which keeps its status: scope creep never blocks.
+   */
+  private async flagScopeCreep(): Promise<void> {
+    const r = this.request;
+    const owner = ownerOf(r);
+    const last = this.l2.at(-1);
+    if (
+      owner === undefined ||
+      last === undefined ||
+      r.reason === "base_fail_check" ||
+      r.base === r.head
+    ) {
+      return;
+    }
+    const decoder = new TextDecoder();
+    this.scopeCreep = await computeScopeCreep({
+      changed: this.changed,
+      cases: this.l2.flatMap((o) => o.cases),
+      reqTags: r.req_tags,
+      checkoutAbs: this.checkoutAbs,
+      readHead: async (path) => {
+        const bytes = await this.headFile(path);
+        return bytes === undefined || bytes.length > 2 * 1024 * 1024
+          ? undefined
+          : decoder.decode(bytes);
+      },
+      exists: (path) => {
+        const abs = join(this.checkoutAbs, path);
+        return resolvesInside(this.checkoutAbs, abs) && existsSync(abs);
+      },
+    });
+    const result = this.results[last.index];
+    if (result === undefined || this.scopeCreep.paths.length === 0) return;
+    const findings = scopeCreepFindings(this.scopeCreep.paths, traceabilityPath(owner));
+    this.results[last.index] = {
+      ...result,
+      findings: [...result.findings, ...findings].slice(0, MAX_FINDINGS),
+      new_violations: result.new_violations + findings.length,
+    };
   }
 
   private skippedResult(gate: Gate, reason: string): GateResult {
@@ -1568,6 +1661,63 @@ class Run {
     };
   }
 
+  // ------------------------------------------------------------------ visual
+
+  /**
+   * The deterministic visual step (AD-24) the request asked for, after the gates. It never
+   * changes `verdict` (rule 5): its outcome is `GateReport.visual`, and anything unexpected in it
+   * is that step's `error`, never a crashed run.
+   */
+  private async runVisual(config: GatesConfig): Promise<void> {
+    const evidenceDir = `${this.evidenceRoot}/visual`;
+    const r = this.request;
+    try {
+      const allowlist = readAllowlist(this.deps.vtcHome, this.deps.repoRoot);
+      const step = await runVisualStep({
+        request: r,
+        repoRoot: this.deps.repoRoot,
+        vtcHome: this.deps.vtcHome,
+        checkoutAbs: this.checkoutAbs,
+        git: this.deps.git,
+        changed: this.changed,
+        config,
+        gatesYml: this.gatesYml,
+        env: this.env,
+        gateEnv: gateEnv(this.env),
+        runner:
+          this.options.visualRunner ??
+          sandboxedVisualRunner(this.jail, {
+            node: this.options.node ?? "node",
+            noSandbox: NO_SANDBOX_REFUSAL,
+          }),
+        allowCommand: (argv) => gateCommandAllowed(argv, allowlist),
+        evidenceDir,
+        logPrefix: join(this.deps.repoRoot, this.stateRoot, "visual"),
+        ...(this.options.visualToolchains === undefined
+          ? {}
+          : { toolchains: this.options.visualToolchains }),
+        now: () => this.now(),
+      });
+      this.writes.push(...step.writes);
+      this.visual = step.summary;
+    } catch (error) {
+      const reportPath = `${evidenceDir}/report.json`;
+      const outcome = visualWithoutRenders({
+        run: r.run,
+        task: r.task,
+        feature: r.feature,
+        status: "error",
+        reason: `the visual step failed: ${errorText(error)}`,
+        browser: null,
+        findings: [],
+        reportPath,
+        writtenAt: this.now().toISOString(),
+      });
+      this.writes.push({ rel: reportPath, redact: true, json: outcome.report });
+      this.visual = outcome.summary;
+    }
+  }
+
   // -------------------------------------------------------------- finishing
 
   /**
@@ -1633,12 +1783,14 @@ class Run {
           feature: r.feature,
           reqTags: r.req_tags,
           tests,
+          scopeCreep: this.scopeCreep?.paths ?? [],
           builtAt: this.now().toISOString(),
         }),
       });
+      const unjudged = this.scopeCreep?.unjudged ?? [];
       this.note(
         "traceability",
-        "scope_creep is not computed yet: it needs per-test coverage contexts (§7.4), so an empty list means not computed, not none found",
+        `scope_creep lists changed JS/TS/Python files that no test tagged with the run's requirements is in or reaches through imports (§7.4; no per-test coverage contexts are read). Not judged: ${unjudged.length === 0 ? "none" : `${unjudged.slice(0, 50).join(", ")}${unjudged.length > 50 ? ` and ${String(unjudged.length - 50)} more` : ""}`}`,
       );
     }
     const known = knownSecretValues([this.deps.repoRoot, this.checkoutAbs], this.secrets);
@@ -1656,6 +1808,7 @@ class Run {
       results,
       ...(traceability === undefined ? {} : { traceability }),
       ...this.sandboxField(),
+      ...(this.visual === null ? {} : { visual: redactJson(this.visual, known) }),
       verdict: gateReportVerdict(results),
       started_at: this.started.toISOString(),
       finished_at: this.now().toISOString(),
@@ -1750,6 +1903,7 @@ export const runWithConfig = (
     options.env ?? process.env,
     checked.request,
     resolveGateSandbox(deps, options.detectSandbox),
+    options,
     config,
   ).execute();
 };
@@ -1779,6 +1933,7 @@ export const createGateRunnerWith = (
         env,
         checked.request,
         resolveGateSandbox(deps, detect),
+        options,
       ).execute();
     },
     checkWriteScope: async (request) => {

@@ -1,6 +1,7 @@
 /**
  * Gate Runner (AD-13; owner: gate-runner team, sub-project 2): calibration, baseline, layers
- * L0–L5, the L5 write-scope and test-integrity check, hidden tests, the pinned scanner store.
+ * L0–L6, the L5 write-scope and test-integrity check, hidden tests, the pinned scanner store, and
+ * the deterministic visual stack (AD-24, `visual/`).
  * Implements `GateRunner` from @vtc/shared; the cli builds it with `createGateRunner` and injects
  * it into the daemon (AD-19). Exposes its public API from this file only and never imports
  * engine core, http or mcp. Git access goes only through the injected `GateRunnerDeps.git`
@@ -166,3 +167,6 @@ export {
   type CalibrateDeps,
   type CalibrateOutcome,
 } from "./calibrate/calibrate.js";
+
+export * as visual from "./visual/index.js";
+export * as arch from "./arch/index.js";

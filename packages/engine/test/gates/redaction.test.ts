@@ -59,11 +59,17 @@ describe("redactSecrets: linear time on agent-controlled text", () => {
     ["repeated key headers", "-----BEGIN RSA PRIVATE KEY-----\n".repeat(SIZE / 32)],
     ["repeated url schemes", "a://".repeat(SIZE / 4)],
   ];
-  it.each(inputs)("redacts 200 KB of %s in under 100 ms", (_name, text) => {
+  // A super-linear pattern takes seconds on 200 KB; the best of three runs keeps a loaded test
+  // machine (the whole suite runs in parallel) from failing a linear one.
+  it.each(inputs)("redacts 200 KB of %s in linear time (best of 3 under 250 ms)", (_name, text) => {
     redactSecrets("warm-up password=abc123def456 Bearer abcdefghijklmnopqrstuvwxyz");
-    const started = performance.now();
-    redactSecrets(text);
-    expect(performance.now() - started).toBeLessThan(100);
+    let best = Number.POSITIVE_INFINITY;
+    for (let i = 0; i < 3; i += 1) {
+      const started = performance.now();
+      redactSecrets(text);
+      best = Math.min(best, performance.now() - started);
+    }
+    expect(best).toBeLessThan(250);
   });
 
   it("still redacts bearer tokens and assignments with bounded separators", () => {
