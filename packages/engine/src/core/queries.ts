@@ -16,6 +16,7 @@ export const runsOf = (state: RunState, task: string): RoleRunRecord[] =>
 /** A reviewer run (§6.3 step 7): Spec-Verifier, Visual QA, QA judge, Security verify. */
 export const isReviewer = (run: Pick<RoleRunRecord, "role" | "mode">): boolean =>
   run.role === "spec_verifier" ||
+  run.role.startsWith("lens_") ||
   run.role === "visual_qa" ||
   (run.role === "qa" && run.mode === "judge") ||
   (run.role === "security" && run.mode === "verify");

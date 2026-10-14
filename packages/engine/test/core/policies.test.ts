@@ -706,13 +706,40 @@ describe("risk router (§6.3 steps 6–7, §7.6)", () => {
       "spec_verifier",
       "security",
     ]);
+    // Visual QA waits for its deterministic render stack (sub-project 5; spine §5 reading 92)
     expect(
       reviewersFor(
         task("T-1", { discipline: "frontend" }),
         { has_ui: true, risk_hints: [] },
         [],
       ).filter((r) => r.role === "visual_qa"),
-    ).toHaveLength(3);
+    ).toHaveLength(0);
+  });
+  it("adds a lens reviewer node per risk tag whose lens role is installed (§5.3; reading 92)", () => {
+    const lensRoles = ["lens_auth", "lens_db", "lens_payments", "lens_supply_chain"];
+    const slots = reviewersFor(
+      task("T-1", { risk_tags: ["auth", "migration", "payments", "billing", "new-dependency"] }),
+      run,
+      [],
+      { lensRoles },
+    );
+    expect(slots.filter((s) => s.role.startsWith("lens_")).map((s) => [s.id, s.subject])).toEqual([
+      ["lens-auth", "T-1"],
+      ["lens-db", "T-1"],
+      ["lens-payments", "T-1"],
+      ["lens-supply-chain", "T-1"],
+    ]);
+    // a lens role the compiled set does not have is never attached
+    expect(
+      reviewersFor(task("T-1", { risk_tags: ["infra"] }), run, [], { lensRoles }).map(
+        (s) => s.role,
+      ),
+    ).toEqual(["spec_verifier"]);
+    // no lens roles passed: none attached
+    expect(reviewersFor(task("T-1", { risk_tags: ["auth"] }), run, []).map((s) => s.role)).toEqual([
+      "spec_verifier",
+      "security",
+    ]);
   });
   it("skips reviewers on documentation-only diffs", () => {
     expect(isTrivialDiff([{ path: "README.md", status: "modified" }])).toBe(true);

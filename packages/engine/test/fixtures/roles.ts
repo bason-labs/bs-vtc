@@ -338,3 +338,17 @@ export const FIXTURE_ADVISORS: readonly RoleContract[] = [
 
 /** Every fixture contract: what a compiled `vtc/role-contracts.json` would carry. */
 export const ALL_FIXTURE_ROLES: readonly RoleContract[] = [...FIXTURE_ROLES, ...FIXTURE_ADVISORS];
+
+/** A Tier-2 lens reviewer (§5.3), as roles/lens_db/role.yaml declares it. */
+export const FIXTURE_LENS_DB: RoleContract = role({
+  id: "lens_db",
+  kind: "lens",
+  mission: "Review a task's diff that touches schema or migrations against the DB lens checklist.",
+  inputs: ["task", "diff", "gate_report"],
+  output: { artifacts: [], verdicts: [...VERDICTS] },
+  exits: ["done"],
+  reviewer: "engine",
+  models: both("mid", "high"),
+  tools: { profile: "read_only" },
+  budget: { context_tokens: 30_000 },
+});

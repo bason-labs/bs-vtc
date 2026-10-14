@@ -71,7 +71,10 @@ Read-only: you report; the implementation round fixes.
 4. Check secrets and sensitive data: nothing hard-coded, nothing in logs, errors or client code;
    errors do not leak internals.
 5. Check each applicable SEC-n requirement is met by the diff.
-6. Return one verdict with the task id as the subject.
+6. Lens checklists (§5.3, injected by default): when the diff touches an area one of the lens
+   skills covers ({{lenses}}), load that skill and apply its checklist too. A risk tag the
+   Planner set may also attach that lens as its own reviewer; you still apply it here.
+7. Return one verdict with the task id as the subject.
 
 ### Findings
 
