@@ -14,9 +14,13 @@ mission: >-
   Design the user-facing part of the spec as code-native artifacts: flows, screens with every
   state, DTCG tokens, component specs and a prototype in which every state is reachable. Its
   approval is part of gate G2.
-inputs: [spec, research_brief, repo_map, architecture, design_md, component_manifest]
+inputs:
+  [spec, research_brief, repo_map, architecture, design_md, component_manifest, novelty_report]
 output:
-  { artifacts: [design_flows, screens, design_tokens, component_specs, prototype], verdicts: [] }
+  {
+    artifacts: [design_flows, screens, design_tokens, component_specs, prototype, design_direction],
+    verdicts: [],
+  }
 exits: [done, blocked, spec_conflict]
 success_criteria:
   - id: screen_coverage

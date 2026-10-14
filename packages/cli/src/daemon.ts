@@ -25,7 +25,7 @@ import {
   type EngineSocketWelcome,
 } from "@vtc/shared";
 import { requireVtcProject } from "./repo.js";
-import { passthroughOf, readUserConfig } from "./user-config.js";
+import { passthroughOf, readUserConfig, researchKeyNamesOf } from "./user-config.js";
 
 /** True when a process with this pid exists (signal 0 only checks; EPERM means it exists). */
 export const pidAlive = (pid: number): boolean => {
@@ -267,7 +267,12 @@ export const spawnDetachedDaemon = (options: EnsureDaemonOptions): ChildProcess 
       cwd: options.repoRoot,
       detached: true,
       stdio: ["ignore", fd, fd],
-      env: daemonEnv(process.env, options.vtcHome, passthroughOf(config)),
+      // the research fetchers' key variables too (reading 120): the daemon reads them at call
+      // time; they never reach a host child (the adapters get `env_passthrough` only)
+      env: daemonEnv(process.env, options.vtcHome, [
+        ...passthroughOf(config),
+        ...Object.values(researchKeyNamesOf(config)),
+      ]),
       windowsHide: true,
     });
     child.on("error", () => undefined);

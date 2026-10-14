@@ -27,14 +27,22 @@
  * the engine renders the pinned editable section first in the task pack. No role is switched by
  * default (see `EDITABLE_IN_PACK_ROLES`).
  */
-import { AGENT_NAME_PREFIX } from "@vtc/shared";
+import {
+  ROLE_PROMPTS_ASSET_DIR,
+  rolePromptAssetPath,
+  TASK_PACK_HEURISTICS_SECTION,
+  type RolePromptPart,
+} from "@vtc/shared";
+
+export { ROLE_PROMPTS_ASSET_DIR, rolePromptAssetPath };
 
 /**
  * Roles whose agents carry the locked core only (reading 102). Empty until the switch can work
- * end to end: `@vtc/shared` must define the pack section (`TASK_PACK_SECTIONS`, a `TaskPack`
- * field and `renderTaskPack`) and the prompt-part asset path, and the engine must render the
- * pinned editable section into the pack; until then a switched agent would run without its
- * heuristics. The mechanism is exercised through `CompileOptions.editableInPack` in tests.
+ * end to end: `@vtc/shared` defines the pack section and the prompt-part asset path since 4.6.0
+ * (`TaskPack.role_heuristics`, `rolePromptAssetPath`), but the engine does not yet render the
+ * pinned editable section into the pack; until it does a switched agent would run without its
+ * heuristics (spine §5 reading 117). The mechanism is exercised through
+ * `CompileOptions.editableInPack` in tests.
  *
  * The first role to switch, in the same integration step that lands those changes, is the Spec
  * Verifier: it is dispatched once per acceptance criterion (the most dispatches per run, so the
@@ -45,23 +53,12 @@ export const EDITABLE_IN_PACK_ROLES: readonly string[] = [];
 
 /**
  * The task-pack section that carries a switched role's editable section, rendered before the
- * Dispatch section. Proposed to `@vtc/shared` with the pack change (contract proposal); the
- * switched agents' instructions name it.
+ * Dispatch section (`TaskPack.role_heuristics`, contracts 4.6.0); the switched agents'
+ * instructions name it.
  */
-export const EDITABLE_PACK_SECTION = "Role heuristics";
+export const EDITABLE_PACK_SECTION = TASK_PACK_HEURISTICS_SECTION;
 
-/** Where each plugin carries the role's prompt sections: `vtc/prompts/<agent>/<part>.md`. */
-export const ROLE_PROMPTS_ASSET_DIR = "vtc/prompts";
-
-export type PromptPart = "locked" | "editable";
-
-const AGENT_NAME = new RegExp(`^${AGENT_NAME_PREFIX}[a-z0-9-]{1,120}$`);
-
-/** The asset path of one prompt section (`splitRolePrompt`) of one compiled agent's role. */
-export const rolePromptAssetPath = (agent: string, part: PromptPart): string => {
-  if (!AGENT_NAME.test(agent)) throw new TypeError(`not a compiled agent name: ${agent}`);
-  return `${ROLE_PROMPTS_ASSET_DIR}/${agent}/${part}.md`;
-};
+export type PromptPart = RolePromptPart;
 
 /**
  * The last part of a switched agent's locked instructions. The result protocol says everything

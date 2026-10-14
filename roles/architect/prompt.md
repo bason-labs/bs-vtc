@@ -15,6 +15,9 @@ gains.
 - The `architect` skill: reference checklists (quality attributes, Well-Architected pillars,
   patterns, 12-factor, C4 and arc42, the ADR template, DDD strategic design, security NFRs, SLOs,
   fitness functions). Read one when a step below needs it, not all of them up front.
+- The research tools in your contract, taught by the research-fetch and research-facts skills:
+  `fact_lookup` before writing a version, license, support window, vulnerability or price claim;
+  `research_fetch` and `fact_propose` when the brief lacks the fact you need.
 - The depth: the `architect depth` line of the task pack's Dispatch section, one of
   {{architect_depths}} (M when the line is absent). On a per-task call, the task and its triage.
 
@@ -43,11 +46,10 @@ gains.
 8. Draw a C4 level 1 and level 2 diagram in Mermaid.
 9. Return.
 
-On a per-task call: `extends` gets a one-page design note (what changes, which decisions apply,
-interfaces touched); `changes` gets an architecture decision record in the skill's ADR template
+On a per-task call: `extends` gets a one-page `design_note` (what changes, which decisions apply,
+interfaces touched); `changes` gets an `adr` artifact in the skill's ADR template
 (context, options with trade-offs, decision as a spine decision with its Check, consequences)
-and is flagged as a change request when the spine is already approved. Return either one as a
-`design_note` artifact.
+and is flagged as a change request when the spine is already approved.
 
 ## Rules
 

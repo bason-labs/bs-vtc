@@ -13,7 +13,9 @@ Every visual decision serves the product's user and job; nothing is decoration b
 - On a new design: the direction constraints the engine dealt, in the `design constraints` line
   of the task pack's Dispatch section: colour strategy (one of {{colour_strategies}}), type
   pairing, density and grid, radius and elevation, motion, and one signature interaction. Build
-  inside them; never swap one for a pick you prefer. On a design fix: the findings to address.
+  inside them; never swap one for a pick you prefer. On a re-roll: the `novelty_report`, which
+  names the direction that was too similar to a past design; replace that direction with one
+  built from the newly dealt constraints. On a design fix: the findings to address.
 
 ## Procedure
 
@@ -31,9 +33,11 @@ Every visual decision serves the product's user and job; nothing is decoration b
    only what a requirement needs.
 5. Specify components: props, variants, and every state (default, hover, focus, active,
    disabled, loading, error). Reuse registry components before adding one. Each component spec
-   names its `id` (a slug; a registry component keeps its registry name) and `screens`: the id
-   of every screen in the screen list that uses it. A component no screen uses is not specified;
-   the engine checks requirement to screen to component coverage from these lists.
+   names its `id` (a slug; a registry component keeps its registry name), `screens`: the id of
+   every screen in the screen list that uses it, and `uses`: the id of every registry component
+   it is built from. A component no screen uses is not specified; the engine checks requirement
+   to screen to component coverage from these lists, and that every component a spec uses is
+   specified.
 6. Build the prototype in HTML with Tailwind, using only the tokens: every listed state of every
    screen renders at its route with `?state=<state>&theme=<theme>` (themes {{prototype_themes}}),
    for example `{{prototype_state_example}}`. A grayscale theme gives wireframes; the real theme
@@ -43,9 +47,10 @@ Every visual decision serves the product's user and job; nothing is decoration b
    a direction that differs from another only in colour is the same direction. Write each one to
    `{{prototype_root}}directions/<id>/index.html`. Give each direction {{g2_direction_fields}}:
    `id` a slug, `title` a short name, `thesis` one sentence, `prototype` the path of that file.
-   The engine adds `first_viewport` (its capture of that file) when it checks novelty.
-   Return each direction's file as a `prototype` artifact and list every direction's fields in
-   the summary. The human chooses at G2.
+   Write those fields as one JSON object to `{{design_directions_dir}}/<id>.json` and return
+   that file as a `design_direction` artifact, and the HTML file as a `prototype` artifact. The
+   engine adds `first_viewport` (its capture of that file) and the novelty verdict when it
+   checks novelty; never write a verdict yourself. The human chooses at G2.
 8. Return.
 
 ## Rules
@@ -65,8 +70,9 @@ Every visual decision serves the product's user and job; nothing is decoration b
 ## Output
 
 Artifacts by type: `design_flows`, `screens`, `design_tokens`, `component_specs`, `prototype`
-(the prototype and, on a new design, each direction's first viewport). In the summary, list each
-screen with its states and the requirements it covers, and each direction with its fields.
+(the prototype and, on a new design, each direction's first viewport) and, on a new design, one
+`design_direction` per direction. In the summary, list each screen with its states and the
+requirements it covers, and each direction with its fields.
 
 ## Definition of done
 

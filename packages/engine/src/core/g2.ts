@@ -24,6 +24,7 @@ import {
   DesignScreensFileSchema,
   factId,
   FactRowSchema,
+  G2DirectionDraftSchema,
   G2DirectionSchema,
   NoveltyReportSchema,
   parsePersisted,
@@ -34,6 +35,7 @@ import {
   type FactRow,
   type FrozenArtifact,
   type G2Direction,
+  type G2DirectionDraft,
   type UnverifiedFactSummary,
 } from "@vtc/shared";
 import { assertNoSymlinks } from "../git/index.js";
@@ -99,20 +101,16 @@ const slugOf = (path: string): string | null => {
 };
 
 /**
- * One `design_direction` artifact as G2 shows it: a structured file (JSON or YAML with
- * `G2Direction`'s fields, `novelty` optional), or a Markdown direction contract whose first heading
- * is its title and whose `THESIS:` line is its thesis (§9.1 Direction contract).
+ * One `design_direction` artifact as G2 shows it: a structured file (`G2DirectionDraft`, JSON or
+ * YAML, at `designDirectionPath(id)`), or a Markdown direction contract whose first heading is its
+ * title and whose `THESIS:` line is its thesis (§9.1 Direction contract). A `novelty` the Designer
+ * wrote is dropped: the verdict is the engine's (spine §5 reading 116).
  */
-const readDirection = (
-  k: Kernel,
-  path: string,
-): Omit<G2Direction, "novelty"> & { novelty?: G2Direction["novelty"] | undefined } => {
+const readDirection = (k: Kernel, path: string): G2DirectionDraft => {
   const text = read(k.deps.repoRoot, path) ?? "";
   if ([".json", ".yaml", ".yml"].includes(extname(path))) {
     try {
-      const parsed = G2DirectionSchema.partial({ novelty: true }).safeParse(
-        parseStructured(text, path),
-      );
+      const parsed = parsePersisted(G2DirectionDraftSchema, parseStructured(text, path));
       if (parsed.success) return parsed.data;
     } catch {
       // not structured: read it as a direction contract below
@@ -153,9 +151,7 @@ export const g2Directions = (k: Kernel, h: RunHandle): G2Direction[] => {
     const d = readDirection(k, a.path);
     if (seen.has(d.id)) continue;
     seen.add(d.id);
-    directions.push(
-      G2DirectionSchema.parse({ ...d, novelty: novelty.get(d.id) ?? d.novelty ?? "unchecked" }),
-    );
+    directions.push(G2DirectionSchema.parse({ ...d, novelty: novelty.get(d.id) ?? "unchecked" }));
   }
   return directions.slice(0, 3);
 };
@@ -241,7 +237,11 @@ export const unverifiedFacts = (
   research: ReadonlySet<string> = new Set(),
 ): UnverifiedFactSummary[] => {
   const out = new Map<string, UnverifiedFactSummary>();
-  for (const row of currentFacts(k.deps.repoRoot)) {
+  // the research module's re-checked view of the table when it is wired (reading 120): a status
+  // a row records is role-writable, so it is trusted only without one
+  const checked = k.factTable?.() ?? null;
+  for (const fact of checked ?? []) out.set(fact.id, fact);
+  for (const row of checked === null ? currentFacts(k.deps.repoRoot) : []) {
     if (row.status !== "unverified" && row.status !== "stale" && row.status !== "conflicting")
       continue;
     out.set(row.id, {

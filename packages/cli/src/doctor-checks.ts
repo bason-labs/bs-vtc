@@ -451,6 +451,7 @@ const PREFLIGHT_FIX: Readonly<Record<MergePreflightFailure, (base: string) => st
     `add at least one required status check on ${base} (a ruleset or branch protection), or GitHub would merge without CI`,
   no_merge_method: () =>
     "allow at least one merge method (or your access cannot read the repository settings)",
+  no_merge_service: () => "this engine has no GitHub merge service (gh) wired in",
 };
 
 /**

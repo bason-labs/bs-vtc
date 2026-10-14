@@ -98,6 +98,6 @@ describe("ROLE_DENIED_VTC (D-w)", () => {
     expect(ROLE_DENIED_VTC.homeWriteDeny).toContain(`${allowlistDir}/**`);
     expect(ROLE_DENIED_VTC.homeWriteDeny).toContain(`${HIDDEN_TESTS.homeDir}/**`);
     expect(ROLE_DENIED_VTC.homeWriteDeny).toContain("osv-db/**");
-    expect(ROLE_DENIED_VTC.subcommands).toEqual(["calibrate"]);
+    expect(ROLE_DENIED_VTC.subcommands).toEqual(["calibrate", "lookback", "merge-level"]);
   });
 });

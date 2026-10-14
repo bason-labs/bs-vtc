@@ -16,7 +16,9 @@ export * as core from "./core/index.js";
 export * as gates from "./gates/index.js";
 export * as git from "./git/index.js";
 export * as http from "./http/index.js";
+export * as lookback from "./lookback/index.js";
 export * as mcp from "./mcp/index.js";
+export * as research from "./research/index.js";
 export { runDaemon, serveSnapshot } from "./daemon/index.js";
 
 export const ENGINE_NAME = "vtc-engine";

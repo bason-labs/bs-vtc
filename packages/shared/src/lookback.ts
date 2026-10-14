@@ -38,7 +38,24 @@ export const LOOKBACK_HOME = {
   promptsDir: "lookback/prompts",
   /** The pins file (`LookbackPins`, YAML). Only a human gesture promotes; the engine rolls back. */
   pinsFile: "lookback/pins.yaml",
+  /**
+   * The lock every writer of `pins.yaml` takes, the cli's gestures and the engine's
+   * `auto_rollback` alike (spine §5 reading 128): created exclusively (`wx`) holding a token only
+   * its taker knows; older than {@link LOOKBACK_PINS_LOCK_STALE_MS} it is stale and is taken over
+   * by renaming it to a unique name (linked back if it turned out fresh); released only by the
+   * holder whose token it still holds. The pins file itself is written to a temporary file and
+   * renamed. New in 4.6.0.
+   */
+  pinsLock: "lookback/pins.lock",
+  /**
+   * The measured A/A flip rates (one JSON line per replay), under the VTC home so no role can
+   * plant a noise floor (reading 128). New in 4.6.0.
+   */
+  aaNoiseFile: "lookback/aa-noise.jsonl",
 } as const;
+
+/** When a `pins.lock` counts as stale ({@link LOOKBACK_HOME}`.pinsLock`). New in 4.6.0. */
+export const LOOKBACK_PINS_LOCK_STALE_MS = 60_000;
 
 /** Lookback files in the project (git-tracked, redacted, AD-7 rule 6). */
 export const LOOKBACK_REPO = {
@@ -177,7 +194,19 @@ export const canaryArmFor = (repoKey: string, task: string): "candidate" | "base
     ? "candidate"
     : "baseline";
 
-/** Pure: train (70%) or held-out (30%) split of a trace, by hash; the lookback role sees train only. */
+/**
+ * Pure: a trace's cross-run identity, `<run>:<action_id>` (spine §5 reading 128). Action ids
+ * restart in every run (`a-1`), so a trace is named by its run and its action id together.
+ * New in 4.6.0.
+ */
+export const lookbackTraceRef = (run: string, actionId: string): string =>
+  `${RunIdSchema.parse(run)}:${SlugSchema.parse(actionId)}`;
+
+/**
+ * Pure: train (70%) or held-out (30%) split of a trace, by hash; the lookback role sees train
+ * only. `traceId` is the run-qualified {@link lookbackTraceRef} (since 4.6.0): a bare action id
+ * would put every run's `a-1` in the same split.
+ */
 export const splitForTrace = (traceId: string): "train" | "holdout" =>
   Number.parseInt(sha256Hex(traceId).slice(0, 8), 16) % 10 < 7 ? "train" : "holdout";
 

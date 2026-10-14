@@ -54,9 +54,43 @@ export const VISUAL_DEFAULTS = {
   include_best_practice: false,
 } as const;
 
+const LOOPBACK_APP_HOSTS: ReadonlySet<string> = new Set(["127.0.0.1", "localhost", "[::1]"]);
+
+/**
+ * `.vtc/gates.yml` `visual.app`: the app server the visual step renders the implementation from
+ * (§7.5 step 2; spine §5 reading 121). Every screen state renders at
+ * `<url><route>?state=<state>&theme=<theme>`, the prototype's convention (`prototypeStatePath`),
+ * so implementation and prototype compare state by state. Human-calibrated like every gate: the
+ * `command` must pass the machine's gate allowlist (`gateCommandAllowed`), and the `url` is an
+ * http(s) loopback URL (the gate sandbox allows nothing else). New in 4.6.0.
+ */
+export const VisualAppSchema = z.strictObject({
+  /** argv, run without a shell. */
+  command: z.array(z.string().min(1).max(4096)).min(1).max(64),
+  /** Base URL the server answers on, e.g. `http://127.0.0.1:4173`. */
+  url: z
+    .url()
+    .max(2048)
+    .refine((u) => {
+      try {
+        const url = new URL(u);
+        return (
+          (url.protocol === "http:" || url.protocol === "https:") &&
+          LOOPBACK_APP_HOSTS.has(url.hostname)
+        );
+      } catch {
+        return false;
+      }
+    }, "the app server must answer on an http(s) loopback URL"),
+  /** Working directory inside the checkout. */
+  cwd: RelPathSchema.optional(),
+  ready_timeout_s: z.int().positive().max(600).default(120),
+});
+export type VisualApp = z.infer<typeof VisualAppSchema>;
+
 /**
  * `.vtc/gates.yml` `visual` (optional; absent = {@link VISUAL_DEFAULTS}). `dynamic_regions` are
- * CSS selectors masked before the pixel diff (clocks, avatars, live data).
+ * CSS selectors masked before the pixel diff (clocks, avatars, live data). `app` since 4.6.0.
  */
 export const VisualConfigSchema = z.strictObject({
   widths: z.array(z.int().min(200).max(4000)).min(1).max(6).optional(),
@@ -67,6 +101,7 @@ export const VisualConfigSchema = z.strictObject({
   axe_tags: z.array(SlugSchema).min(1).max(20).optional(),
   include_best_practice: z.boolean().optional(),
   dynamic_regions: z.array(z.string().min(1).max(300)).max(50).optional(),
+  app: VisualAppSchema.optional(),
 });
 export type VisualConfig = z.infer<typeof VisualConfigSchema>;
 
@@ -247,6 +282,23 @@ export type VisualRequest = z.infer<typeof VisualRequestSchema>;
 export const BROWSERS_DIR = "browsers";
 /** The pin `vtc doctor --install-browser` writes, relative to the VTC home. */
 export const BROWSER_PIN_FILE = "browsers/pin.json";
+/**
+ * The doctor-installed store's packages, relative to the VTC home (spine §5 reading 121):
+ * `playwright-core`, `axe-core`, `pixelmatch` and `pngjs`, installed npm-style at
+ * `browsers/node_modules/<name>`, each verified by its npm `integrity`. New in 4.6.0.
+ */
+export const BROWSER_STORE_NODE_MODULES = "browsers/node_modules";
+/**
+ * Per-repo pins of a project's own Playwright browser, relative to the VTC home:
+ * `browsers/projects/<engineRepoKey>/<sha of the executable path>.json` (`BrowserPin`,
+ * `source: project`). New in 4.6.0.
+ */
+export const PROJECT_BROWSER_PINS_DIR = "browsers/projects";
+/**
+ * The visual step's report (`VisualReport`), relative to a gate run's evidence directory;
+ * `GateReport.visual.report` names the full path. New in 4.6.0.
+ */
+export const VISUAL_REPORT_FILE = "visual/report.json";
 
 /**
  * The browser the visual step may run (AD-24 rule 3): the executable's SHA-256 is re-verified

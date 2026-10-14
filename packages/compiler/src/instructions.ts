@@ -24,6 +24,7 @@ import {
   ArchitectDepthSchema,
   ColourStrategySchema,
   ContractKindSchema,
+  DESIGN_DIRECTIONS_DIR,
   DESIGN_SCREENS_PATH,
   DisciplineSchema,
   EscalationEffectSchema,
@@ -80,6 +81,8 @@ export const PROTOCOL_VARS: Readonly<Record<string, string>> = {
   lookback_proposals_dir: LOOKBACK_REPO.proposalsDir,
   /** Where the prototype server serves from (§17); the Designer's G2 directions live under it. */
   prototype_root: ENGINE_HTTP.prototype.root,
+  /** Where the Designer writes each direction's fields (`G2DirectionDraft`, contracts 4.6.0). */
+  design_directions_dir: DESIGN_DIRECTIONS_DIR,
   /**
    * G2 (§9.1): the `G2Direction` fields the Designer gives each direction; the engine adds the
    * first-viewport capture and its novelty verdict.

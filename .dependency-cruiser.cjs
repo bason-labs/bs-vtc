@@ -2,12 +2,18 @@
 // docs/architecture/vtc-spine.md that it enforces (the AD's "Check").
 // Run: pnpm deps:check. Every rule is proven to fire by tooling/arch-tests (planted fixtures).
 
-/** Node built-ins that Bun also implements, so engine/cli/adapter code runs in the binary (AD-2 rule 6). */
+/**
+ * Node built-ins that Bun also implements, so engine/cli/adapter code runs in the binary (AD-2 rule
+ * 6). `dns`, `dns/promises` and `vm` since the wave-3 merge (spine §5 reading 133): the research
+ * HttpClient's resolver, and a time bound on L6 forbidden-pattern matching.
+ */
 const RUNTIME_SAFE_BUILTINS = [
   "assert",
   "buffer",
   "child_process",
   "crypto",
+  "dns",
+  "dns/promises",
   "events",
   "fs",
   "fs/promises",
@@ -24,6 +30,7 @@ const RUNTIME_SAFE_BUILTINS = [
   "timers/promises",
   "url",
   "util",
+  "vm",
   "zlib",
 ];
 const ENGINE_MODULES = "(core|daemon|gates|git|http|lookback|mcp|research)";
@@ -179,7 +186,7 @@ module.exports = {
     {
       name: "AD13-engine-modules-use-each-others-entry",
       comment:
-        "Engine modules (core, gates, git, http, mcp) import each other only through the other module's index.ts.",
+        "Engine modules (core, daemon, gates, git, http, lookback, mcp, research) import each other only through the other module's index.ts.",
       severity: "error",
       from: { path: `^packages/engine/src/([^/]+)/` },
       to: {

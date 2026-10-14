@@ -128,6 +128,8 @@ const FAILURE_FIX: Readonly<Record<MergePreflightFailure, string>> = {
   no_required_checks:
     "add at least one required status check on the base branch (branch protection or a ruleset), or GitHub would merge without waiting for CI",
   no_merge_method: "allow at least one merge method in the repository settings",
+  no_merge_service:
+    "run the engine through the vtc cli, which wires the gh-backed merge service (this engine has none)",
 };
 
 export interface StartLevel {
@@ -159,7 +161,7 @@ export const startMergeLevel = async (k: Kernel, config: ProjectConfig): Promise
     },
   });
   if (service === undefined)
-    return fail(["not_github"], "this engine has no GitHub merge service (gh) wired in");
+    return fail(["no_merge_service"], "this engine has no GitHub merge service (gh) wired in");
   let remote;
   try {
     remote = await service.remote();

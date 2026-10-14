@@ -35,10 +35,31 @@ export interface HttpResponse {
 
 /**
  * HTTPS only; resolves DNS and refuses private addresses (`isPrivateAddress`) on every hop; no
- * cookies; byte caps and timeouts. Errors reject.
+ * cookies; byte caps and timeouts. A redirect to another origin (scheme, host or port) forwards
+ * only `accept`, `accept-language` and `user-agent`, never `authorization` or a key header
+ * (spine §5 reading 129). Errors reject; a refusal by the guard or a timeout rejects with an
+ * {@link HttpGuardError}, anything else with a plain `Error`.
  */
 export interface HttpClient {
   request(request: HttpRequest): Promise<HttpResponse>;
+}
+
+/** The `name` of every {@link HttpGuardError}. New in 4.6.0. */
+export const HTTP_GUARD_ERROR = "HttpGuardError";
+
+/**
+ * Why an {@link HttpClient} refused a request (`guard`: https only, a private address, a byte cap,
+ * a header it will not send) or gave up on it (`timeout`). Callers match `name` and `code`, never
+ * the message. New in 4.6.0.
+ */
+export class HttpGuardError extends Error {
+  readonly code: "guard" | "timeout";
+
+  constructor(message: string, code: "guard" | "timeout" = "guard", options?: ErrorOptions) {
+    super(message, options);
+    this.name = HTTP_GUARD_ERROR;
+    this.code = code;
+  }
 }
 
 /** A per-scope, content-addressed cache under `~/.vtc/research-cache/<scope>/` (`RESEARCH_CACHE`). */

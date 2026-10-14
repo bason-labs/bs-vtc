@@ -83,6 +83,7 @@ const INCIDENT_TITLES: Readonly<Record<IncidentKind, string>> = {
   unsandboxed_gate: "Gates ran without an OS sandbox",
   run_adopted: "Run adopted from another clone",
   milestone_commit: "Milestone commit of .vtc/ did not go through",
+  auth: "A host is not signed in",
 };
 
 const MERGE_REASONS: Readonly<Record<EventData<"run.merge_level_changed">["reason"], string>> = {

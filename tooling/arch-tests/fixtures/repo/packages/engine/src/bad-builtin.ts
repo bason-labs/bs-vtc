@@ -1,2 +1,2 @@
-import { runInNewContext } from "node:vm";
-export const bad = runInNewContext;
+import { getHeapStatistics } from "node:v8";
+export const bad = getHeapStatistics;

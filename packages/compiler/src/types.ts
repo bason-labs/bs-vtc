@@ -46,6 +46,11 @@ export interface CompiledAgent {
   readonly sections: { readonly locked: string; readonly editable: string };
   /** Skills the agent preloads (`role-skills.ts`), by skill name. */
   readonly skills: readonly string[];
+  /**
+   * The agent carries the locked part only and expects its editable section as the task pack's
+   * `Role heuristics` block (`PluginManifestAgent.editable_in_pack`, reading 102).
+   */
+  readonly editableInPack?: boolean;
 }
 
 /** Options of the compile step; the defaults are the repo's policy. */

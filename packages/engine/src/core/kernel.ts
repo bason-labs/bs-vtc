@@ -17,6 +17,7 @@ import type {
   RemoteMergeService,
   RoleMcpToolName,
   SessionSandboxState,
+  UnverifiedFactSummary,
   UsageSnapshot,
   VtcEvent,
 } from "@vtc/shared";
@@ -90,9 +91,11 @@ export type RoleToolHandler = (
  * Re-fetches the facts table's stale facts (AD-22 rule 4: "before G2 the engine re-fetches stale
  * facts"); it appends the new rows to `.vtc/research/facts.jsonl`. The research module implements
  * it and the daemon hands it to the engine (`Engine.setFactRefresher`), so core never imports
- * research (AD-13 rule 12).
+ * research (AD-13 rule 12). It may return the table's facts G2 blocks on, each re-checked against
+ * the research cache: the table is git-tracked, so G2 then trusts no status a row records (spine
+ * §5 reading 120). `null`: core reads the statuses the rows record.
  */
-export type FactRefresher = (repoRoot: string) => Promise<void>;
+export type FactRefresher = (repoRoot: string) => Promise<readonly UnverifiedFactSummary[] | null>;
 
 export interface RunHandle {
   readonly state: RunState;
@@ -137,6 +140,12 @@ export class EngineError extends Error {
 
 export interface Kernel {
   readonly deps: EngineCoreDeps;
+  /**
+   * The facts-table entries G2 blocks on as the wired research module last re-checked them
+   * (`FactRefresher`), or `null` when none is wired or it has not run since the engine started
+   * (G2 then reads the statuses `facts.jsonl` records).
+   */
+  factTable?(): readonly UnverifiedFactSummary[] | null;
   /** Task ids git showed taken by another clone when the plan was made (spine §5 reading 89). */
   readonly sharedTaskIds: Set<string>;
   now(): Date;

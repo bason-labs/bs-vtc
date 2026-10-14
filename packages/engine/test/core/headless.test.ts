@@ -257,7 +257,7 @@ describe(
         expect.objectContaining({ host: "codex", purpose: "role", ok: false, failed: "auth" }),
       ]);
       expect(ofType(h, "incident.recorded").at(-1)?.data.detail).toContain("not signed in");
-      expect(String(ofType(h, "incident.recorded").at(-1)?.data.detail)).toMatch(/^auth: /);
+      expect(ofType(h, "incident.recorded").at(-1)?.data.kind).toBe("auth");
       expect(h.engine.status({}).run.paused).toBe(true);
       // the run waits for the human: more next calls check nothing and launch nothing
       await next(h, CODEX);

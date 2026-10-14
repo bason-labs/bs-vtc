@@ -32,6 +32,10 @@
     {
       "version": "4.5.0",
       "schemas_sha256": "8e67b7a264f2f1e21212ca469cffb243a7b5b5d6ad6f99b634233436b793624c"
+    },
+    {
+      "version": "4.6.0",
+      "schemas_sha256": "49ddc9b1646dc23f3f709902a6797ef1fe299da5f2f7ab4c2a527bac62617021"
     }
   ]
 }

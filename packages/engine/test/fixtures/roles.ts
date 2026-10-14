@@ -57,7 +57,11 @@ export const FIXTURE_ROLES: readonly RoleContract[] = [
     ],
     reviewer: "engine",
     models: both("mid", "high"),
-    tools: { profile: "write_scoped", write_paths: [".vtc/research/briefs/**"] },
+    tools: {
+      profile: "write_scoped",
+      write_paths: [".vtc/research/briefs/**"],
+      engine_tools: ["research_fetch", "fact_lookup", "fact_propose"],
+    },
     budget: { context_tokens: 80_000 },
   }),
   role({
@@ -82,7 +86,7 @@ export const FIXTURE_ROLES: readonly RoleContract[] = [
     kind: "core",
     mission: "Propose the architecture spine for the approved spec.",
     inputs: ["spec", "research_brief", "facts", "repo_map", "threat_model"],
-    output: { artifacts: ["architecture", "design_note"], verdicts: [] },
+    output: { artifacts: ["architecture", "design_note", "adr"], verdicts: [] },
     exits: ["done", "blocked", "spec_conflict"],
     success_criteria: [
       { id: "req_mapping", description: "Every REQ-n maps to at least one component." },
@@ -94,7 +98,11 @@ export const FIXTURE_ROLES: readonly RoleContract[] = [
     ],
     reviewer: "engine",
     models: both("top", "high"),
-    tools: { profile: "write_scoped", write_paths: [".vtc/architecture/**"] },
+    tools: {
+      profile: "write_scoped",
+      write_paths: [".vtc/architecture/**"],
+      engine_tools: ["research_fetch", "fact_lookup", "fact_propose"],
+    },
     budget: { context_tokens: 80_000 },
   }),
   role({
@@ -108,9 +116,17 @@ export const FIXTURE_ROLES: readonly RoleContract[] = [
       "architecture",
       "design_md",
       "component_manifest",
+      "novelty_report",
     ],
     output: {
-      artifacts: ["design_flows", "screens", "design_tokens", "component_specs", "prototype"],
+      artifacts: [
+        "design_flows",
+        "screens",
+        "design_tokens",
+        "component_specs",
+        "prototype",
+        "design_direction",
+      ],
       verdicts: [],
     },
     exits: ["done", "blocked", "spec_conflict"],

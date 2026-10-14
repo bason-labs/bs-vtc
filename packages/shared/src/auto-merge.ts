@@ -53,6 +53,12 @@ export const MergePreflightFailureSchema = z.enum([
   "auto_merge_disallowed",
   "no_required_checks",
   "no_merge_method",
+  /**
+   * The engine has no `RemoteMergeService` (`EngineDeps.remoteMerge` absent), so nothing can
+   * read the remote's policy or enable auto-merge (AD-23 rule 1; spine §5 reading 115). New in
+   * 4.6.0.
+   */
+  "no_merge_service",
 ]);
 export type MergePreflightFailure = z.infer<typeof MergePreflightFailureSchema>;
 

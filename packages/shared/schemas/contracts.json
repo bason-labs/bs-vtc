@@ -1,5 +1,5 @@
 {
-  "contracts_version": "4.5.0",
+  "contracts_version": "4.6.0",
   "schemas": {
     "Run": {
       "$id": "https://vtc.local/schemas/Run.json",
@@ -5878,7 +5878,8 @@
                   "gh_unauthenticated",
                   "auto_merge_disallowed",
                   "no_required_checks",
-                  "no_merge_method"
+                  "no_merge_method",
+                  "no_merge_service"
                 ]
               }
             },
@@ -6720,6 +6721,10 @@
               "type": "string",
               "minLength": 1,
               "maxLength": 1024
+            },
+            "sha256": {
+              "type": "string",
+              "pattern": "^[a-f0-9]{64}$"
             }
           },
           "required": [
@@ -6979,7 +6984,8 @@
                 "host_config_restored",
                 "unsandboxed_gate",
                 "run_adopted",
-                "milestone_commit"
+                "milestone_commit",
+                "auth"
               ]
             },
             "detail": {
@@ -11135,6 +11141,11 @@
             "who_should_have_caught"
           ],
           "additionalProperties": false
+        },
+        "role_heuristics": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 20000
         }
       },
       "required": [
@@ -12367,6 +12378,9 @@
                 "type": "string",
                 "pattern": "^[a-f0-9]{64}$"
               },
+              "editable_in_pack": {
+                "type": "boolean"
+              },
               "tier": {
                 "type": "string",
                 "enum": [
@@ -12762,6 +12776,34 @@
             }
           },
           "additionalProperties": false
+        },
+        "research": {
+          "type": "object",
+          "properties": {
+            "api_keys": {
+              "default": {},
+              "type": "object",
+              "propertyNames": {
+                "type": "string",
+                "enum": [
+                  "eol",
+                  "depsdev",
+                  "osv",
+                  "registry",
+                  "github",
+                  "web",
+                  "rss",
+                  "youtube",
+                  "search"
+                ]
+              },
+              "additionalProperties": {
+                "type": "string",
+                "pattern": "^[A-Za-z_][A-Za-z0-9_]{0,127}$"
+              }
+            }
+          },
+          "additionalProperties": false
         }
       },
       "required": [
@@ -13018,6 +13060,42 @@
                 "minLength": 1,
                 "maxLength": 300
               }
+            },
+            "app": {
+              "type": "object",
+              "properties": {
+                "command": {
+                  "minItems": 1,
+                  "maxItems": 64,
+                  "type": "array",
+                  "items": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 4096
+                  }
+                },
+                "url": {
+                  "type": "string",
+                  "maxLength": 2048,
+                  "format": "uri"
+                },
+                "cwd": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 1024
+                },
+                "ready_timeout_s": {
+                  "default": 120,
+                  "type": "integer",
+                  "exclusiveMinimum": 0,
+                  "maximum": 600
+                }
+              },
+              "required": [
+                "command",
+                "url"
+              ],
+              "additionalProperties": false
             }
           },
           "additionalProperties": false
@@ -24814,7 +24892,8 @@
               "gh_unauthenticated",
               "auto_merge_disallowed",
               "no_required_checks",
-              "no_merge_method"
+              "no_merge_method",
+              "no_merge_service"
             ]
           }
         },
@@ -29346,6 +29425,280 @@
         "phash",
         "token_vector",
         "chosen_at"
+      ],
+      "additionalProperties": false
+    },
+    "G2DirectionDraft": {
+      "$id": "https://vtc.local/schemas/G2DirectionDraft.json",
+      "title": "G2DirectionDraft",
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "string",
+          "pattern": "^[a-z0-9][a-z0-9._-]{0,63}$"
+        },
+        "title": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 120
+        },
+        "thesis": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 500
+        },
+        "prototype": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 1024
+        },
+        "first_viewport": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 1024
+        }
+      },
+      "required": [
+        "id",
+        "title",
+        "thesis",
+        "prototype"
+      ],
+      "additionalProperties": false
+    },
+    "ComponentSpec": {
+      "$id": "https://vtc.local/schemas/ComponentSpec.json",
+      "title": "ComponentSpec",
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "string",
+          "pattern": "^[a-z0-9][a-z0-9._-]{0,63}$"
+        },
+        "screens": {
+          "default": [],
+          "type": "array",
+          "items": {
+            "type": "string",
+            "pattern": "^[a-z0-9][a-z0-9._-]{0,63}$"
+          }
+        },
+        "uses": {
+          "default": [],
+          "type": "array",
+          "items": {
+            "type": "string",
+            "pattern": "^[a-z0-9][a-z0-9._-]{0,63}$"
+          }
+        }
+      },
+      "required": [
+        "id"
+      ],
+      "additionalProperties": false
+    },
+    "AdCheckSpec": {
+      "$id": "https://vtc.local/schemas/AdCheckSpec.json",
+      "title": "AdCheckSpec",
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "oneOf": [
+        {
+          "type": "object",
+          "properties": {
+            "kind": {
+              "type": "string",
+              "const": "import-boundary"
+            },
+            "mode": {
+              "default": "blocking",
+              "type": "string",
+              "enum": [
+                "blocking",
+                "warn"
+              ]
+            },
+            "from": {
+              "minItems": 1,
+              "maxItems": 50,
+              "type": "array",
+              "items": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 300
+              }
+            },
+            "forbid": {
+              "default": [],
+              "maxItems": 50,
+              "type": "array",
+              "items": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 300
+              }
+            },
+            "forbid_packages": {
+              "default": [],
+              "maxItems": 50,
+              "type": "array",
+              "items": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 200
+              }
+            },
+            "except": {
+              "default": [],
+              "maxItems": 50,
+              "type": "array",
+              "items": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 300
+              }
+            },
+            "message": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 500
+            }
+          },
+          "required": [
+            "kind",
+            "from"
+          ],
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "properties": {
+            "kind": {
+              "type": "string",
+              "const": "forbidden-dependency"
+            },
+            "mode": {
+              "default": "blocking",
+              "type": "string",
+              "enum": [
+                "blocking",
+                "warn"
+              ]
+            },
+            "packages": {
+              "minItems": 1,
+              "maxItems": 100,
+              "type": "array",
+              "items": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 200
+              }
+            },
+            "message": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 500
+            }
+          },
+          "required": [
+            "kind",
+            "packages"
+          ],
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "properties": {
+            "kind": {
+              "type": "string",
+              "const": "forbidden-pattern"
+            },
+            "mode": {
+              "default": "blocking",
+              "type": "string",
+              "enum": [
+                "blocking",
+                "warn"
+              ]
+            },
+            "paths": {
+              "minItems": 1,
+              "maxItems": 50,
+              "type": "array",
+              "items": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 300
+              }
+            },
+            "pattern": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 500
+            },
+            "except": {
+              "default": [],
+              "maxItems": 50,
+              "type": "array",
+              "items": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 300
+              }
+            },
+            "message": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 500
+            }
+          },
+          "required": [
+            "kind",
+            "paths",
+            "pattern"
+          ],
+          "additionalProperties": false
+        }
+      ]
+    },
+    "VisualApp": {
+      "$id": "https://vtc.local/schemas/VisualApp.json",
+      "title": "VisualApp",
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "type": "object",
+      "properties": {
+        "command": {
+          "minItems": 1,
+          "maxItems": 64,
+          "type": "array",
+          "items": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 4096
+          }
+        },
+        "url": {
+          "type": "string",
+          "maxLength": 2048,
+          "format": "uri"
+        },
+        "cwd": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 1024
+        },
+        "ready_timeout_s": {
+          "default": 120,
+          "type": "integer",
+          "exclusiveMinimum": 0,
+          "maximum": 600
+        }
+      },
+      "required": [
+        "command",
+        "url"
       ],
       "additionalProperties": false
     }

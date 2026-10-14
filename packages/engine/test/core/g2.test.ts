@@ -284,7 +284,8 @@ describe("G2 blocks on unverified facts until a human waives each with a reason 
         ".vtc/research/facts.jsonl",
         `${JSON.stringify(stale)}\n${JSON.stringify(again)}\n`,
       );
-      return Promise.resolve();
+      // `null`: core reads the statuses the rows record
+      return Promise.resolve(null);
     });
     const gate = await toG2(h);
     expect(refreshed).toBe(1);
@@ -380,14 +381,17 @@ describe("uncited version, licence, CVE and EOL claims in research sections (AD-
   });
 });
 
-/** The Designer's 4.5.0 outputs (roles-compiler declares them in roles/designer this wave). */
+/**
+ * The Designer declares `design_direction` (roles/designer); a `novelty_report` output stands in
+ * for the engine's novelty check, which has no seam in these tests.
+ */
 const ROLES = ALL_FIXTURE_ROLES.map((r) =>
   r.id === "designer"
     ? {
         ...r,
         output: {
           ...r.output,
-          artifacts: [...r.output.artifacts, "design_direction", "novelty_report"],
+          artifacts: [...r.output.artifacts, "novelty_report"],
         },
       }
     : r,
@@ -419,6 +423,18 @@ describe("G2 directions and the DESIGN coverage check (§9.1, §6.1)", () => {
       ".vtc/design/directions/signal.yaml",
       "id: signal\ntitle: Signal\nthesis: high-contrast and fast\nprototype: .vtc/design/prototype/signal\n",
     );
+    // a verdict the Designer wrote itself is dropped (spine §5 reading 116)
+    writeFile(
+      cwd,
+      ".vtc/design/directions/bold.json",
+      JSON.stringify({
+        id: "bold",
+        title: "Bold",
+        thesis: "loud type, one accent",
+        prototype: ".vtc/design/prototype/directions/bold/index.html",
+        novelty: "novel",
+      }),
+    );
     writeFile(
       cwd,
       ".vtc/design/directions/signal-novelty.json",
@@ -441,6 +457,7 @@ describe("G2 directions and the DESIGN coverage check (§9.1, §6.1)", () => {
       { type: "screens", path: ".vtc/design/screens.yaml" },
       { type: "design_direction", path: ".vtc/design/directions/quiet-ledger.md" },
       { type: "design_direction", path: ".vtc/design/directions/signal.yaml" },
+      { type: "design_direction", path: ".vtc/design/directions/bold.json" },
       { type: "novelty_report", path: ".vtc/design/directions/signal-novelty.json" },
       { type: "component_specs", path: ".vtc/design/components/button.yaml" },
     ];
@@ -449,7 +466,7 @@ describe("G2 directions and the DESIGN coverage check (§9.1, §6.1)", () => {
   it("shows each direction with its novelty, and the coverage report in gate.requested", async () => {
     const h = createHarness({ roles: ROLES });
     const gate = await toG2(h, { hasUi: true, designer: designerWork });
-    expect(gate.design_directions).toEqual(["quiet-ledger", "signal"]);
+    expect(gate.design_directions).toEqual(["quiet-ledger", "signal", "bold"]);
     expect(gate.directions).toEqual([
       {
         id: "quiet-ledger",
@@ -464,6 +481,13 @@ describe("G2 directions and the DESIGN coverage check (§9.1, §6.1)", () => {
         thesis: "high-contrast and fast",
         prototype: ".vtc/design/prototype/signal",
         novelty: "novel",
+      },
+      {
+        id: "bold",
+        title: "Bold",
+        thesis: "loud type, one accent",
+        prototype: ".vtc/design/prototype/directions/bold/index.html",
+        novelty: "unchecked",
       },
     ]);
     expect(ofType(h, "gate.requested").at(-1)?.data.design_coverage).toEqual({

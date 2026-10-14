@@ -14,7 +14,7 @@ mission: >-
   spine of decisions AD-n, each with Binds, Prevents, Rule and an automatable Check. Its approval
   is gate G2.
 inputs: [spec, research_brief, facts, repo_map, threat_model]
-output: { artifacts: [architecture, design_note], verdicts: [] }
+output: { artifacts: [architecture, design_note, adr], verdicts: [] }
 exits: [done, blocked, spec_conflict]
 success_criteria:
   - id: req_mapping
@@ -28,4 +28,5 @@ models:
 tools:
   profile: write_scoped
   write_paths: [".vtc/architecture/**"]
+  engine_tools: [research_fetch, fact_lookup, fact_propose]
 budget: { context_tokens: 80000 }

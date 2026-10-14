@@ -113,6 +113,12 @@ export const IncidentKindSchema = z.enum([
   "run_adopted",
   /** git refused a milestone commit of the `.vtc/` files (spine §5 reading 90). New in 4.4.0. */
   "milestone_commit",
+  /**
+   * An engine-launched start or resume was refused because the host is not signed in
+   * (`HostAdapter.authStatus()`, AD-25 rule 3; spine §5 reading 111). The run pauses; nothing
+   * retries. New in 4.6.0.
+   */
+  "auth",
 ]);
 export type IncidentKind = z.infer<typeof IncidentKindSchema>;
 
@@ -466,6 +472,11 @@ export const EVENT_PAYLOAD_SCHEMAS = {
     proposal: SlugSchema,
     verdict: ReplayVerdictSchema,
     path: RelPathSchema,
+    /**
+     * SHA-256 of the replay result file's bytes as the engine wrote them, so `vtc lookback
+     * approve` can tell the engine's file from an edited one (spine §5 reading 128). New in 4.6.0.
+     */
+    sha256: Sha256HexSchema.optional(),
   }),
   /** A task's canary arm (sticky across its fix rounds). */
   "lookback.canary_assigned": z.strictObject({

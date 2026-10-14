@@ -17,6 +17,7 @@ import type { EngineMcpToolName, ENGINE_MCP_TOOLS, SessionNonceResult } from "..
 import type { EngineDiscovery } from "../engine-instance.js";
 import type { CONTRACT_SCHEMAS } from "../json-schema.js";
 import type { HostId } from "../primitives.js";
+import type { FetcherId } from "../research.js";
 import type { AssetBundle } from "./assets.js";
 import type { AutoResumeScheduler } from "./auto-resume.js";
 import type { GateRunner } from "./gate-runner.js";
@@ -65,6 +66,13 @@ export interface EngineDeps {
    * are unavailable and every new fact stays UNVERIFIED. New in 4.5.0.
    */
   readonly http?: HttpClient;
+  /**
+   * A research fetcher's own API key by fetcher id (AD-22 rule 1, spine §5 reading 120): the
+   * value of the environment variable `~/.vtc/config.yaml` `research.api_keys` names for it, read
+   * at call time; `undefined` when none is named or set. Never a host credential (AD-9). The cli
+   * builds it; absent: no fetcher sends a key. New in 4.6.0.
+   */
+  readonly researchApiKey?: (fetcher: FetcherId) => string | undefined;
   readonly versions: EngineVersions;
   /** Clock override for tests. */
   readonly now?: () => Date;

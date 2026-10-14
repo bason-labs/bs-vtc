@@ -100,3 +100,57 @@ export const G2DirectionSchema = z.strictObject({
   novelty: z.enum(["novel", "too_similar", "unchecked"]),
 });
 export type G2Direction = z.infer<typeof G2DirectionSchema>;
+
+// ------------------------------------------------- Designer output (4.6.0)
+
+/**
+ * Where the Designer writes each G2 direction (§9.1 step 3; spine §5 reading 116): one JSON file
+ * per direction, `.vtc/design/directions/<id>.json` ({@link designDirectionPath}), returned as a
+ * `design_direction` artifact. Its first viewport is a prototype file under
+ * `.vtc/design/prototype/` (the file's `prototype`). New in 4.6.0.
+ */
+export const DESIGN_DIRECTIONS_DIR = ".vtc/design/directions";
+
+/** `.vtc/design/directions/<id>.json`. */
+export const designDirectionPath = (id: string): string =>
+  `${DESIGN_DIRECTIONS_DIR}/${SlugSchema.parse(id)}.json`;
+
+/**
+ * One `design_direction` file as the Designer writes it: {@link G2DirectionSchema} without
+ * `novelty`. The novelty verdict is the engine's (a deterministic check, AD-24 rule 8), never the
+ * Designer's: a reader parses the file with `parsePersisted`, which drops a self-declared
+ * `novelty`. New in 4.6.0.
+ */
+export const G2DirectionDraftSchema = G2DirectionSchema.omit({ novelty: true });
+export type G2DirectionDraft = z.infer<typeof G2DirectionDraftSchema>;
+
+/**
+ * Where the engine writes the novelty check's result for a direction (`NoveltyReport`,
+ * `.vtc/design/novelty/<id>.json`, {@link noveltyReportPath}). Only the engine writes it; it is
+ * the role input `novelty_report` on a re-roll. New in 4.6.0.
+ */
+export const DESIGN_NOVELTY_DIR = ".vtc/design/novelty";
+
+/** `.vtc/design/novelty/<id>.json`. */
+export const noveltyReportPath = (id: string): string =>
+  `${DESIGN_NOVELTY_DIR}/${SlugSchema.parse(id)}.json`;
+
+/**
+ * Where the Designer writes component specs (artifact type `component_specs`), one YAML file per
+ * component or a `components:` list. New in 4.6.0.
+ */
+export const COMPONENT_SPECS_DIR = ".vtc/design/components";
+
+/**
+ * The part of one component spec other packages read (§9 Consistency, §6.1 DESIGN): its registry
+ * `id`, the `screens` (ids in `screens.yaml`) that use it, and the registry components it
+ * composes (`uses`). The rest of a spec (props, variants, states) is the Designer's and a reader
+ * drops it (`parsePersisted`). The DESIGN check requires every component a spec `uses` to be
+ * registered (`DesignCoverageReport.components_unregistered`). New in 4.6.0.
+ */
+export const ComponentSpecSchema = z.strictObject({
+  id: SlugSchema,
+  screens: z.array(SlugSchema).default([]),
+  uses: z.array(SlugSchema).default([]),
+});
+export type ComponentSpec = z.infer<typeof ComponentSpecSchema>;
