@@ -90,8 +90,10 @@ const frontHalf: HeadlessScript = (request) => {
   });
 };
 
-const signedIn = (host: "claude-code" | "codex", logged_in: boolean | null) => () =>
-  Promise.resolve({ host, logged_in, method: null, checked_at: "2026-10-13T09:00:00.000Z" });
+const signedIn =
+  (host: "claude-code" | "codex", logged_in: boolean | null, method: string | null = null) =>
+  () =>
+    Promise.resolve({ host, logged_in, method, checked_at: "2026-10-13T09:00:00.000Z" });
 
 describe(
   "H-1: a Codex Lead's role steps run as engine-launched headless Codex runs",
@@ -351,12 +353,17 @@ describe("AD-25 rule 3: the budget check comes last", () => {
     readonly loggedIn: boolean;
     readonly spent: number;
     readonly runSpent?: number;
+    readonly method?: string;
   }) => {
     const k = {
       diskConfigHash: () => "a".repeat(64),
       usage: new Map(),
       now: () => new Date("2026-10-13T09:00:00.000Z"),
-      deps: { adapters: { codex: { authStatus: signedIn("codex", options.loggedIn) } } },
+      deps: {
+        adapters: {
+          codex: { authStatus: signedIn("codex", options.loggedIn, options.method ?? null) },
+        },
+      },
     } as unknown as Kernel;
     const h = {
       state: {
@@ -388,6 +395,15 @@ describe("AD-25 rule 3: the budget check comes last", () => {
   it("the sign-in check comes before the budget", async () => {
     expect(await preflightOf({ loggedIn: false, spent: 5 })).toMatchObject({ failed: "auth" });
     expect(await preflightOf({ loggedIn: true, spent: 1 })).toMatchObject({ ok: true });
+  });
+
+  it("a login with an API key fails on auth: roles run on the subscription only (reading 141)", async () => {
+    const refused = await preflightOf({ loggedIn: true, spent: 1, method: "API key" });
+    expect(refused).toMatchObject({ ok: false, failed: "auth" });
+    expect(refused.detail).toContain("API key");
+    expect(await preflightOf({ loggedIn: true, spent: 1, method: "ChatGPT" })).toMatchObject({
+      ok: true,
+    });
   });
 });
 

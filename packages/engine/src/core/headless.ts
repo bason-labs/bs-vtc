@@ -48,11 +48,15 @@ export const capabilitiesOf = (
 ): Pick<HostCapabilities, "subagents" | "headless"> =>
   k.deps.adapters[host]?.capabilities ?? NO_CAPABILITIES;
 
+/** The login method label of an API-key login (the Codex adapter's `authStatus`). */
+export const API_KEY_LOGIN = "API key";
+
 /**
  * The checks before an engine-launched start or resume (AD-25 rule 3), in order: the run is not
  * paused; the config files still give the run's `pipeline_config_hash`; the host's five-hour
  * window is not used up; the host's own sign-in check (`HostAdapter.authStatus`, when the adapter
- * has one) says logged in; the task (or the run) has budget left.
+ * has one) says logged in, and not with an API key (spec D2); the task (or the run) has budget
+ * left.
  */
 export const headlessPreflight = async (
   k: Kernel,
@@ -89,6 +93,13 @@ export const headlessPreflight = async (
         status === null || status.logged_in === null
           ? `${host}'s sign-in status command could not be run`
           : `${host}'s sign-in status command says it is not signed in`,
+      );
+    // spec D2, AD-25 rule 2: roles run on the user's subscription only, never an API key
+    // (spine §5 reading 141); the adapter reports Codex's API-key login as this label
+    if (status.method === API_KEY_LOGIN)
+      return fail(
+        "auth",
+        `${host} is signed in with an API key: VTC runs roles only on your subscription (sign in with your ChatGPT account)`,
       );
   }
   const task = step.task === undefined ? undefined : state.tasks.get(step.task);
