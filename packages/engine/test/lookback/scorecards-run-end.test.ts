@@ -4,11 +4,11 @@ import {
   ScorecardIndexSchema,
   ScorecardSchema,
   scorecardPath,
-  splitForTrace,
   validateEventData,
   wilsonInterval,
+  type Attribution,
 } from "@vtc/shared";
-import { readFile } from "node:fs/promises";
+import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 import {
@@ -18,6 +18,7 @@ import {
   lookbackTargets,
   readAttributions,
   traceRef,
+  traceSplit,
   writeScorecards,
 } from "../../src/lookback/index.js";
 import { EFFECTIVE, HOST, lockedShaFor, RunLog, tempDir } from "./log.js";
@@ -125,6 +126,7 @@ describe("lookback at run end (AD-21 rule 8)", () => {
     const result = await lookbackAtRunEnd({
       projectRoot: root,
       events: log.events,
+      history: log.events,
       lockedShaFor,
       graderBundleSha: BUNDLE,
       weeklyRemainingPct: 80,
@@ -137,7 +139,9 @@ describe("lookback at run end (AD-21 rule 8)", () => {
     expect(result.targets).toEqual([
       expect.objectContaining({ role: "engineer", host: HOST, train_failures: train.length }),
     ]);
-    expect(result.targets[0]?.traces.every((t) => splitForTrace(t) === "train")).toBe(true);
+    expect(result.targets[0]?.traces.every((t) => traceSplit(t) === "train")).toBe(true);
+    // The lookback role cites run-qualified slugs, never a bare per-run action id.
+    expect(result.targets[0]?.traces.every((t) => t.id === `${t.run}.${t.trace}`)).toBe(true);
     expect(result.events).toEqual([
       expect.objectContaining({
         type: "lookback.dispatched",
@@ -151,6 +155,7 @@ describe("lookback at run end (AD-21 rule 8)", () => {
     const again = await lookbackAtRunEnd({
       projectRoot: root,
       events: log.events,
+      history: log.events,
       lockedShaFor,
       graderBundleSha: BUNDLE,
       weeklyRemainingPct: 80,
@@ -163,7 +168,7 @@ describe("lookback at run end (AD-21 rule 8)", () => {
 
   it("waits for the weekly window and the budget", () => {
     const attributions = Array.from({ length: 12 }, (_, i) => `x-${String(i)}`)
-      .filter((t) => splitForTrace(t) === "train")
+      .filter((trace) => traceSplit({ run: "r1", trace }) === "train")
       .map((trace) => ({
         v: 1 as const,
         trace,
@@ -216,5 +221,108 @@ describe("lookback at run end (AD-21 rule 8)", () => {
         budgetAvailable: true,
       }).targets,
     ).toEqual([]);
+  });
+
+  const row = (trace: string, over: Partial<Attribution> = {}): Attribution => ({
+    v: 1,
+    trace,
+    run: "r1",
+    prompt: {
+      role: "engineer",
+      host: HOST,
+      locked_sha256: "1".repeat(64),
+      editable_sha256: "2".repeat(64),
+      effective_sha256: "3".repeat(64),
+    },
+    outcome: "failure",
+    blamed_role: "engineer",
+    method: "tree",
+    rule: "test_fails",
+    confidence: 1,
+    split: traceSplit({ run: "r1", trace }),
+    evidence: [],
+    attributed_at: now.toISOString(),
+    ...over,
+  });
+
+  it("counts no failure that blames nobody or another role", () => {
+    const train = Array.from({ length: 20 }, (_, i) => `x-${String(i)}`).filter(
+      (trace) => traceSplit({ run: "r1", trace }) === "train",
+    );
+    const unknown = train.map((t) =>
+      row(t, { method: "ai_tiebreak", rule: undefined, blamed_role: null }),
+    );
+    const other = train.map((t) => row(t, { blamed_role: "qa" }));
+    for (const attributions of [unknown, other]) {
+      expect(
+        lookbackTargets({
+          attributions,
+          fresh: new Set(attributions.map(traceRef)),
+          weeklyRemainingPct: 80,
+          budgetAvailable: true,
+        }).targets,
+      ).toEqual([]);
+    }
+  });
+
+  it("ignores planted rows: a held-out trace marked train, or a trace the run never dispatched", async () => {
+    const root = await tempDir("planted");
+    const log = failingRun(LOOKBACK_LIMITS.minTrainFailures);
+    const held = Array.from({ length: 40 }, (_, i) => `p-${String(i)}`).filter(
+      (trace) => traceSplit({ run: "r9", trace }) === "holdout",
+    );
+    const lying = held.map((trace) => row(trace, { run: "r9", split: "train" }));
+    const ghosts = Array.from({ length: 10 }, (_, i) =>
+      row(`ghost-${String(i)}`, {
+        run: "r1",
+        split: traceSplit({ run: "r1", trace: `ghost-${String(i)}` }),
+      }),
+    );
+    await mkdir(join(root, ".vtc/lookback"), { recursive: true });
+    await writeFile(
+      join(root, LOOKBACK_REPO.attributions),
+      [...lying, ...ghosts].map((r) => JSON.stringify(r)).join("\n") + "\n",
+    );
+    expect(await readAttributions(root)).toHaveLength(ghosts.length);
+    const result = await lookbackAtRunEnd({
+      projectRoot: root,
+      events: log.events,
+      history: log.events,
+      lockedShaFor,
+      graderBundleSha: BUNDLE,
+      weeklyRemainingPct: 80,
+      budgetAvailable: true,
+      now,
+    });
+    const train = result.attributions.filter((a) => a.split === "train");
+    expect(result.targets).toEqual([
+      expect.objectContaining({ role: "engineer", train_failures: train.length }),
+    ]);
+    expect(result.targets[0]?.traces.some((t) => t.trace.startsWith("ghost-"))).toBe(false);
+  });
+
+  it("keeps every run of the history in the scorecards, so a second run never shrinks n", async () => {
+    const root = await tempDir("history");
+    const first = engineerRun(6, () => true, "r1");
+    const second = engineerRun(6, () => true, "r2");
+    const common = {
+      projectRoot: root,
+      lockedShaFor,
+      graderBundleSha: BUNDLE,
+      weeklyRemainingPct: 80,
+      budgetAvailable: true,
+      now,
+    };
+    await lookbackAtRunEnd({ ...common, events: first.events, history: first.events });
+    const result = await lookbackAtRunEnd({
+      ...common,
+      events: second.events,
+      history: [...first.events, ...second.events],
+    });
+    const card = ScorecardSchema.parse(
+      JSON.parse(await readFile(join(root, scorecardPath("engineer", HOST, EFFECTIVE)), "utf8")),
+    );
+    expect(result.scorecards[0]?.metrics.first_round_gate_pass?.n).toBe(12);
+    expect(card.metrics.first_round_gate_pass?.n).toBe(12);
   });
 });

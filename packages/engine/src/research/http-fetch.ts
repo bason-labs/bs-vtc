@@ -50,6 +50,11 @@ export interface CachedFetchSpec {
   readonly body?: string;
   /** Freshness in days; defaults to `FETCHER_TTL_DAYS[fetcher]`. */
   readonly ttlDays?: number;
+  /**
+   * Checks the final URL after redirects before anything is stored: a reason makes the result
+   * `blocked` (the `web` fetcher re-checks robots.txt for a redirect to another origin).
+   */
+  readonly checkFinalUrl?: (finalUrl: string) => Promise<string | undefined>;
   /** Converts a 2xx body before it is stored and hashed. */
   readonly transform?: (body: Uint8Array, contentType: string | null) => StoredBody;
 }
@@ -64,6 +69,18 @@ const clip = (text: string): string =>
 
 const errorText = (error: unknown): string =>
   clip(error instanceof Error && error.message !== "" ? error.message : String(error));
+
+/**
+ * The cli's client rejects a guard refusal with an `Error` named `HttpGuardError` (it also uses it
+ * for its deadline, which is a timeout, not a refusal). Until `HttpClient` names the refusal in
+ * `@vtc/shared` (a contract proposal), the name is the signal.
+ */
+export const HTTP_GUARD_ERROR_NAME = "HttpGuardError";
+
+const isGuardRefusal = (error: unknown): boolean =>
+  error instanceof Error &&
+  error.name === HTTP_GUARD_ERROR_NAME &&
+  !error.message.startsWith("timed out");
 
 const isFresh = (entry: CacheEntry, now: Date): boolean =>
   now.getTime() - Date.parse(entry.retrieved_at) < entry.ttl_s * 1000;
@@ -154,6 +171,9 @@ export const cachedFetch = async (
   try {
     response = await context.http.request(request);
   } catch (error) {
+    // The network guard refused the request (a private address, a redirect off https, the cap):
+    // `blocked`, never a stale copy. Any other failure (offline, a timeout) serves stale.
+    if (isGuardRefusal(error)) return empty("blocked", null, errorText(error));
     return serveStale(errorText(error));
   }
   if (!response.url.startsWith("https://")) {
@@ -161,6 +181,10 @@ export const cachedFetch = async (
   }
   if (response.body.length > RESEARCH_HTTP_LIMITS.maxBytes) {
     return empty("blocked", response.status, "the response is over the byte cap");
+  }
+  if (response.url !== spec.url && spec.checkFinalUrl !== undefined) {
+    const refused = await spec.checkFinalUrl(response.url);
+    if (refused !== undefined) return empty("blocked", response.status, refused);
   }
   const validators = (h: Readonly<Record<string, string>>): Partial<CacheEntry> => ({
     ...(h.etag === undefined || h.etag === "" ? {} : { etag: h.etag.slice(0, 512) }),

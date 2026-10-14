@@ -3,7 +3,7 @@
  * appends, and reads that treat a missing file as absent.
  */
 import { randomBytes } from "node:crypto";
-import { appendFile, mkdir, readFile, rename, writeFile } from "node:fs/promises";
+import { appendFile, mkdir, readFile, rename, rm, writeFile } from "node:fs/promises";
 import { dirname } from "node:path";
 
 const isMissing = (error: unknown): boolean =>
@@ -25,6 +25,27 @@ export const writeAtomic = async (path: string, data: string): Promise<void> => 
   const temp = `${path}.${randomBytes(6).toString("hex")}.tmp`;
   await writeFile(temp, data);
   await rename(temp, path);
+};
+
+/**
+ * Like {@link writeAtomic}, but replaces the file only when it still holds `expected` (`undefined`:
+ * still absent) just before the rename; otherwise nothing changes and it returns `false`. This
+ * narrows a lost update to the instant between that check and the rename.
+ */
+export const writeAtomicIfUnchanged = async (
+  path: string,
+  data: string,
+  expected: string | undefined,
+): Promise<boolean> => {
+  await mkdir(dirname(path), { recursive: true });
+  const temp = `${path}.${randomBytes(6).toString("hex")}.tmp`;
+  await writeFile(temp, data);
+  if ((await readTextIfExists(path)) !== expected) {
+    await rm(temp, { force: true });
+    return false;
+  }
+  await rename(temp, path);
+  return true;
 };
 
 /** Appends whole JSON lines. */

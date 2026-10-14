@@ -10,6 +10,9 @@
 import {
   isEventOfType,
   readEventData,
+  sha256Hex,
+  SlugSchema,
+  splitForTrace,
   type HostId,
   type PromptVersionRef,
   type VtcEvent,
@@ -132,3 +135,25 @@ export const targetKey = (t: {
  */
 export const traceRef = (t: { readonly run: string; readonly trace: string }): string =>
   `${t.run}:${t.trace}`;
+
+/**
+ * A trace's train or held-out split (AD-21 rule 6), by the hash of its cross-run key
+ * ({@link traceRef}). Hashing the bare action id would fix the split per dispatch ordinal (`a-1`
+ * is in every run), so the first dispatches of every run would never be train failures.
+ */
+export const traceSplit = (t: {
+  readonly run: string;
+  readonly trace: string;
+}): "train" | "holdout" => splitForTrace(traceRef(t));
+
+/**
+ * The slug the lookback role reads and cites for a trace (`PromptProposal` `trace_ids`): the
+ * run-qualified `<run>.<action_id>` when that is a slug, else `t-` and 16 hex of the
+ * {@link traceRef}'s SHA-256. Unique across runs (action ids carry no dot).
+ */
+export const traceSlug = (t: { readonly run: string; readonly trace: string }): string => {
+  const readable = `${t.run}.${t.trace}`;
+  return SlugSchema.safeParse(readable).success
+    ? readable
+    : `t-${sha256Hex(traceRef(t)).slice(0, 16)}`;
+};

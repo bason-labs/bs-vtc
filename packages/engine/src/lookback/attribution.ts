@@ -4,15 +4,18 @@
  * line) by {@link appendAttributions}.
  *
  * 1. **Human labels** at escalation (`escalation.answered.who_should_have_caught`) are the gold
- *    standard: they replace the tree for the escalation's task (`none` blames nobody).
+ *    standard: they replace the tree for the escalation's task, feature or run (`none` blames
+ *    nobody), and a labelled escalation is a failure of its own even with no other signal.
  * 2. **The deterministic tree** (`ATTRIBUTION_TREE`) otherwise. Signals, mapped onto its rules:
  *    - a finding routed `spec_gap` → `missing_req` (BA);
  *    - a `test_adequacy` finding → `req_without_test` (QA);
- *    - a finding routed `bad_test`, a reviewer's `patch` finding (the tests passed, the behaviour
- *      is wrong) or an escaped defect (`lookback.escaped_defect`) → `test_passes_behaviour_wrong`
- *      (QA, Engineer secondary);
- *    - a failed product gate run (round, merge queue, Final Review) or a tool's `patch` finding →
- *      `test_fails` (Engineer).
+ *    - a finding routed `bad_test` or of kind `test_defect`, an escaped defect
+ *      (`lookback.escaped_defect`), or a reviewer's `patch` finding about behaviour (`correctness`,
+ *      `spec_mismatch`) after the task's latest gate run passed (the tests pass, the behaviour is
+ *      wrong) → `test_passes_behaviour_wrong` (QA, Engineer secondary);
+ *    - a failed product gate run (round, merge queue, Final Review), a tool's `patch` finding, and
+ *      any other `patch` finding (the gate failed or never ran, or it is not about behaviour:
+ *      maintainability, docs, performance…) → `test_fails` (Engineer).
  *    Credit goes to the first failure upstream: per task, the most upstream rule wins.
  * 3. A task that parked on its round cap or as stuck with no signal is **inconclusive**: it is
  *    returned for an AI tiebreak (method `ai_tiebreak`, with an "unknown" answer allowed).
@@ -29,7 +32,6 @@ import {
   LOOKBACK_REPO,
   parsePersisted,
   readEventData,
-  splitForTrace,
   type Attribution,
   type AttributionRule,
   type Evidence,
@@ -37,7 +39,7 @@ import {
 } from "@vtc/shared";
 import { join } from "node:path";
 import { appendJsonLines, readJsonLines } from "./files.js";
-import { buildTraces, traceRef, type LockedShaFor, type Trace } from "./traces.js";
+import { buildTraces, traceRef, traceSplit, type LockedShaFor, type Trace } from "./traces.js";
 
 /** Rules from the most upstream (BA) to the most downstream (Engineer). */
 export const RULES_UPSTREAM_FIRST: readonly AttributionRule[] = [
@@ -51,6 +53,9 @@ export const RULES_UPSTREAM_FIRST: readonly AttributionRule[] = [
 export const TREE_CONFIDENCE = { single: 1, contested: 0.7 } as const;
 
 const GATE_REASONS = new Set(["round", "merge_queue", "final_review"]);
+
+/** Finding categories about behaviour: only these can mean "the tests pass, the behaviour is wrong". */
+const BEHAVIOUR_CATEGORIES = new Set(["correctness", "spec_mismatch"]);
 
 export interface FailureSignal {
   readonly run: string;
@@ -94,9 +99,14 @@ const scope = (
 /** The failure signals of a run, in log order. */
 export const failureSignals = (events: readonly VtcEvent[]): FailureSignal[] => {
   const signals: FailureSignal[] = [];
+  /** The verdict of each task's latest gate run so far (`run:task`). */
+  const lastGatePassed = new Map<string, boolean>();
   for (const event of events) {
     if (isEventOfType(event, "gate.result")) {
       const report = readEventData(event);
+      const gatedTask = report.task ?? event.task;
+      if (gatedTask !== undefined)
+        lastGatePassed.set(`${event.run}:${gatedTask}`, report.verdict === "pass");
       const product = report.results.some(
         (r) =>
           r.blocking &&
@@ -113,12 +123,21 @@ export const failureSignals = (events: readonly VtcEvent[]): FailureSignal[] => 
       }
     } else if (isEventOfType(event, "finding.recorded")) {
       const { finding } = readEventData(event);
+      const task = finding.task ?? event.task;
+      const gatePassed =
+        task === undefined ? undefined : lastGatePassed.get(`${event.run}:${task}`);
       let rule: AttributionRule | undefined;
       if (finding.route === "spec_gap") rule = "missing_req";
       else if (finding.category === "test_adequacy") rule = "req_without_test";
-      else if (finding.route === "bad_test") rule = "test_passes_behaviour_wrong";
-      else if (finding.route === "patch")
-        rule = finding.source === "role" ? "test_passes_behaviour_wrong" : "test_fails";
+      else if (finding.route === "bad_test" || finding.kind === "test_defect")
+        rule = "test_passes_behaviour_wrong";
+      else if (finding.route === "patch") {
+        const behaviourWrong =
+          finding.source === "role" &&
+          BEHAVIOUR_CATEGORIES.has(finding.category) &&
+          gatePassed === true;
+        rule = behaviourWrong ? "test_passes_behaviour_wrong" : "test_fails";
+      }
       if (rule !== undefined) {
         signals.push({
           ...scope(event, finding.task, finding.feature),
@@ -181,6 +200,10 @@ export const humanLabels = (events: readonly VtcEvent[]): HumanLabel[] => {
   return labels;
 };
 
+/** Signals and labels group by task, else feature, else the run. */
+const groupKey = (s: { readonly task?: string; readonly feature?: string }): string =>
+  s.task ?? (s.feature === undefined ? "run" : `feature:${s.feature}`);
+
 /** The blamed role's latest dispatch on the task before `seq`, else its latest in the run. */
 const blamedTrace = (
   traces: readonly Trace[],
@@ -241,7 +264,7 @@ export const attributeRun = (input: {
         ...(trace.feature === undefined ? {} : { feature: trace.feature }),
         prompt: trace.prompt,
         outcome: "failure",
-        split: splitForTrace(trace.trace),
+        split: traceSplit(trace),
         attributed_at: attributedAt,
         ...fields,
         evidence: fields.evidence.slice(0, 20),
@@ -251,16 +274,14 @@ export const attributeRun = (input: {
 
   const groups = new Map<string, FailureSignal[]>();
   for (const signal of signals) {
-    const key = signal.task ?? (signal.feature === undefined ? "run" : `feature:${signal.feature}`);
+    const key = groupKey(signal);
     groups.set(key, [...(groups.get(key) ?? []), signal]);
   }
+  // A labelled escalation is a failure signal of its own, at task, feature or run scope.
+  for (const label of labels) if (!groups.has(groupKey(label))) groups.set(groupKey(label), []);
 
   for (const [key, group] of groups) {
-    const scoped = labels.filter((l) =>
-      l.task !== undefined
-        ? l.task === key
-        : l.feature !== undefined && `feature:${l.feature}` === key,
-    );
+    const scoped = labels.filter((l) => groupKey(l) === key);
     if (scoped.length > 0) {
       for (const label of scoped) {
         if (label.role === "none") continue;
@@ -317,7 +338,7 @@ export const tiebreakAttribution = (input: {
     blamed_role: input.blamed === "unknown" ? null : input.blamed,
     method: "ai_tiebreak",
     confidence: input.confidence,
-    split: splitForTrace(input.trace.trace),
+    split: traceSplit(input.trace),
     evidence: input.evidence.slice(0, 20),
     attributed_at: input.now.toISOString(),
   });
@@ -327,12 +348,30 @@ export const tiebreakAttribution = (input: {
 export const attributionsPath = (projectRoot: string): string =>
   join(projectRoot, LOOKBACK_REPO.attributions);
 
-/** Every recorded attribution (lines that do not validate are skipped). */
+/**
+ * The attribution names the failure of the role it blames, on that role's own dispatch: a row
+ * that blames nobody (an AI tiebreak's "unknown") or another role counts against no version.
+ */
+export const isRoleFailure = (a: Attribution): boolean =>
+  a.outcome === "failure" && a.blamed_role !== null && a.blamed_role === a.prompt.role;
+
+/**
+ * A role failure in the train split. The split is recomputed from the trace ({@link traceSplit}),
+ * never taken from the row: the file is git-tracked, and a planted `train` row must not hand a
+ * held-out trace to the lookback role (AD-21 rule 6).
+ */
+export const isTrainFailure = (a: Attribution): boolean =>
+  isRoleFailure(a) && a.split === "train" && traceSplit(a) === "train";
+
+/**
+ * Every recorded attribution. Lines that do not validate are skipped, and so are rows whose
+ * recorded split is not the trace's split (a hand-edited or planted row).
+ */
 export const readAttributions = async (projectRoot: string): Promise<Attribution[]> => {
   const rows: Attribution[] = [];
   for (const value of await readJsonLines(attributionsPath(projectRoot))) {
     const parsed = parsePersisted(AttributionSchema, value);
-    if (parsed.success) rows.push(parsed.data);
+    if (parsed.success && parsed.data.split === traceSplit(parsed.data)) rows.push(parsed.data);
   }
   return rows;
 };

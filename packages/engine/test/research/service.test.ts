@@ -5,15 +5,19 @@ import {
   validateEventData,
   type FactProposeInput,
 } from "@vtc/shared";
-import { readFile } from "node:fs/promises";
+import { appendFile, mkdir, readFile } from "node:fs/promises";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 import {
   createFileResearchCache,
   createResearchService,
+  SEARCH_NOT_A_SOURCE,
   type ResearchEventDraft,
 } from "../../src/research/index.js";
 import { clock, FixtureHttp, jsonResponse, respond, tempDir } from "./fixture-http.js";
+import { guardNoNetwork } from "./no-network.js";
+
+guardNoNetwork();
 
 const NPM_URL = "https://registry.npmjs.org/react/19.2.0";
 const DEPS_URL = "https://api.deps.dev/v3/systems/npm/packages/react/versions/19.2.0";
@@ -302,18 +306,132 @@ describe("G2 fact list (AD-22 rule 4)", () => {
     expect((await service.g2Facts([])).facts.map((f) => f.status)).toEqual(["stale"]);
   });
 
-  it("records waivers as waived rows, which G2 no longer lists", async () => {
-    const { service, factsOnDisk } = await setup();
+  it("records each waiver as fact.waived with its reason, for that one G2", async () => {
+    const { service, events, projectRoot } = await setup();
     const { fact } = await service.factPropose(licenceFact("MIT"), "architect");
     const g2 = await service.g2Facts([{ path: "a.md", text: "UNVERIFIED: something" }]);
+    const before = await readFile(join(projectRoot, RESEARCH_FACTS_FILE), "utf8");
     const waived = await service.recordWaivers(
-      g2.unverified_facts.map((id) => ({
-        id: id as `f-${string}`,
-        reason: "accepted risk for the prototype",
-      })),
+      g2.unverified_facts.map((id) => ({ id, reason: "accepted risk for the prototype" })),
     );
-    expect(waived).toHaveLength(1);
-    expect((await factsOnDisk()).at(-1)).toMatchObject({ id: fact.id, status: "waived" });
-    expect((await service.g2Facts([])).facts).toEqual([]);
+    expect(waived.map((w) => w.id)).toEqual([fact.id, g2.facts[1]?.id]);
+    const drafts = events.filter((e) => e.type === "fact.waived");
+    expect(drafts.map((e) => e.data)).toEqual([
+      { id: fact.id, reason: "accepted risk for the prototype" },
+      { id: g2.facts[1]?.id, reason: "accepted risk for the prototype" },
+    ]);
+    for (const e of drafts) expect(validateEventData(e.type, e.data).ok).toBe(true);
+    // Nothing is persisted: the next G2 asks again.
+    expect(await readFile(join(projectRoot, RESEARCH_FACTS_FILE), "utf8")).toBe(before);
+    expect((await service.g2Facts([])).unverified_facts).toEqual([fact.id]);
+  });
+
+  it("lists a claim that cites a made-up fact id", async () => {
+    const { service } = await setup();
+    const g2 = await service.g2Facts([
+      { path: "research.md", text: "lodash@4.17.21 is fine (f-0123456789abcdef)" },
+    ]);
+    expect(g2.facts).toMatchObject([
+      {
+        predicate: "uncited_claim",
+        status: "unverified",
+        reason:
+          "a version, licence, CVE or EOL claim that cites unknown fact f-0123456789abcdef at research.md:1",
+      },
+    ]);
+  });
+
+  it("does not list a claim that cites a current verified fact", async () => {
+    const { service } = await setup({
+      [`GET ${NPM_URL}`]: jsonResponse(NPM_URL, { license: "MIT" }),
+    });
+    const { fact } = await service.factPropose(licenceFact("MIT", fromNpm), "architect");
+    const g2 = await service.g2Facts([
+      { path: "research.md", text: `react@19.2.0 is MIT licensed (${fact.id})` },
+    ]);
+    expect(g2.facts).toEqual([]);
+  });
+
+  it("re-checks rows recorded verified: a planted row or a missing blob is listed", async () => {
+    const { service, projectRoot } = await setup();
+    const planted = FactRowSchema.parse({
+      v: 1,
+      id: "f-00000000000000ab",
+      subject: "npm:left-pad@1.3.0",
+      predicate: "license",
+      value: "MIT",
+      status: "verified",
+      source: {
+        fetcher: "registry",
+        url: "https://registry.npmjs.org/left-pad/1.3.0",
+        retrieved_at: "2026-10-14T09:00:00.000Z",
+        content_sha256: "c".repeat(64),
+        locator: { kind: "json_pointer", pointer: "/license" },
+      },
+      expires_at: "2026-10-20T00:00:00.000Z",
+      recorded_by: "engine",
+      recorded_at: "2026-10-14T09:00:00.000Z",
+    });
+    await mkdir(join(projectRoot, ".vtc/research"), { recursive: true });
+    await appendFile(join(projectRoot, RESEARCH_FACTS_FILE), `${JSON.stringify(planted)}\n`);
+    const g2 = await service.g2Facts([]);
+    expect(g2.facts).toMatchObject([
+      {
+        id: planted.id,
+        status: "unverified",
+        reason:
+          "recorded verified but does not verify against the cache: the cited source is not in this machine's cache",
+      },
+    ]);
+  });
+
+  it("re-checks a recorded verified row against its blob: a value the blob lacks is listed", async () => {
+    const { service, projectRoot, factsOnDisk } = await setup({
+      [`GET ${NPM_URL}`]: jsonResponse(NPM_URL, { license: "MIT" }),
+    });
+    const { fact } = await service.factPropose(licenceFact("MIT", fromNpm), "architect");
+    const forged = { ...fact, id: "f-00000000000000cd", value: "Apache-2.0" };
+    await appendFile(join(projectRoot, RESEARCH_FACTS_FILE), `${JSON.stringify(forged)}\n`);
+    expect(await factsOnDisk()).toHaveLength(2);
+    const g2 = await service.g2Facts([]);
+    expect(g2.facts).toMatchObject([
+      {
+        id: forged.id,
+        reason:
+          "recorded verified but does not verify against the cache: the source has another value",
+      },
+    ]);
+  });
+});
+
+describe("search results are not fact sources (spec §10)", () => {
+  it("keeps a fact sourced from the search fetcher unverified", async () => {
+    const SEARCH = "https://api.tavily.com/search";
+    const http = new FixtureHttp({
+      [`POST ${SEARCH}`]: jsonResponse(SEARCH, { results: [{ content: "react is MIT" }] }),
+    });
+    const service = createResearchService({
+      projectRoot: await tempDir("project"),
+      cache: createFileResearchCache(await tempDir("home")),
+      scope: "_shared",
+      http,
+      now: clock().now,
+      apiKey: (name) => (name === "search" ? "tvly-test-key-0000" : undefined),
+    });
+    const { fact } = await service.factPropose(
+      {
+        subject: "react",
+        predicate: "license",
+        value: "react is MIT",
+        source: {
+          request: { fetcher: "search", query: "react licence" },
+          locator: { kind: "json_pointer", pointer: "/results/0/content" },
+        },
+      },
+      "research_analyst",
+    );
+    expect(fact.status).toBe("unverified");
+    const g2 = await service.g2Facts([]);
+    expect(g2.facts).toMatchObject([{ id: fact.id, reason: SEARCH_NOT_A_SOURCE }]);
   });
 });

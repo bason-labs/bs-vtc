@@ -126,10 +126,45 @@ export const rssFetcher = apiFetcher("rss", "1", (r) => ({
 const isHtml = (contentType: string | null): boolean =>
   contentType !== null && /\btext\/html\b|application\/xhtml\+xml/i.test(contentType);
 
-/** The `web` fetcher: robots.txt first (RFC 9309), then the page, stored as markdown. */
+const WEB_VERSION = "1";
+
+/** Whether robots.txt of the URL's origin lets VTC fetch it (RFC 9309), through the cache. */
+const robotsAllowUrl = async (target: URL, context: FetchContext): Promise<boolean> => {
+  const robotsUrl = `${target.origin}/robots.txt`;
+  const robots = await cachedFetch(
+    {
+      fetcher: "web",
+      version: WEB_VERSION,
+      request: { fetcher: "web", url: robotsUrl },
+      url: robotsUrl,
+      headers: { accept: "text/plain" },
+      ttlDays: 1,
+    },
+    context,
+  );
+  // RFC 9309 §2.3.1: unreachable or a server error means "disallow all"; a 4xx means "allow all".
+  if (robots.status === "ok" && robots.content_sha256 !== null) {
+    const body = await context.cache.blob(context.scope, robots.content_sha256);
+    const text = body === undefined ? "" : new TextDecoder().decode(body);
+    const token = robotsProductToken(RESEARCH_HTTP_LIMITS.userAgent);
+    return robotsAllows(text, token, `${target.pathname}${target.search}`);
+  }
+  return (
+    robots.status === "not_found" ||
+    (robots.http_status !== null && robots.http_status >= 400 && robots.http_status < 500)
+  );
+};
+
+const ROBOTS_DISALLOW = "robots.txt disallows this page";
+
+/**
+ * The `web` fetcher: robots.txt first (RFC 9309), then the page, stored as markdown. When the page
+ * redirects to another origin, that origin's robots.txt must allow the final URL too, or nothing
+ * is stored.
+ */
 export const webFetcher: Fetcher = {
   id: "web",
-  version: "1",
+  version: WEB_VERSION,
   async fetch(request, context) {
     if (request.fetcher !== "web")
       throw new TypeError(`the web fetcher got a ${request.fetcher} request`);
@@ -137,45 +172,28 @@ export const webFetcher: Fetcher = {
     try {
       target = new URL(request.url);
     } catch {
-      return unavailable("web", this.version, request.url, context, "not a URL");
+      return unavailable("web", WEB_VERSION, request.url, context, "not a URL");
     }
-    const robotsUrl = `${target.origin}/robots.txt`;
-    const robots = await cachedFetch(
-      {
-        fetcher: "web",
-        version: this.version,
-        request: { fetcher: "web", url: robotsUrl },
-        url: robotsUrl,
-        headers: { accept: "text/plain" },
-        ttlDays: 1,
-      },
-      context,
-    );
-    // RFC 9309 §2.3.1: unreachable or a server error means "disallow all"; a 4xx means "allow all".
-    let allowed: boolean;
-    if (robots.status === "ok" && robots.content_sha256 !== null) {
-      const body = await context.cache.blob(context.scope, robots.content_sha256);
-      const text = body === undefined ? "" : new TextDecoder().decode(body);
-      const token = robotsProductToken(RESEARCH_HTTP_LIMITS.userAgent);
-      allowed = robotsAllows(text, token, `${target.pathname}${target.search}`);
-    } else {
-      allowed =
-        robots.status === "not_found" ||
-        (robots.http_status !== null && robots.http_status >= 400 && robots.http_status < 500);
-    }
-    if (!allowed) {
+    if (!(await robotsAllowUrl(target, context))) {
       return {
-        ...unavailable("web", this.version, request.url, context, "robots.txt disallows this page"),
+        ...unavailable("web", WEB_VERSION, request.url, context, ROBOTS_DISALLOW),
         status: "blocked",
       };
     }
     return cachedFetch(
       {
         fetcher: "web",
-        version: this.version,
+        version: WEB_VERSION,
         request,
         url: request.url,
         headers: { accept: "text/html, text/plain;q=0.9, */*;q=0.1" },
+        checkFinalUrl: async (finalUrl) => {
+          const final = new URL(finalUrl);
+          if (final.origin === target.origin) return undefined;
+          return (await robotsAllowUrl(final, context))
+            ? undefined
+            : `${ROBOTS_DISALLOW} (after a redirect to ${final.origin})`;
+        },
         transform: (body, contentType) =>
           isHtml(contentType)
             ? {
@@ -192,7 +210,8 @@ export const webFetcher: Fetcher = {
 /**
  * The `search` fetcher over a keyed search API the user supplies (spec §10: Exa or Tavily). It
  * uses Tavily's `POST /search` with the user's key for this fetcher; without a key it answers
- * with an error result. Results are search snippets: a fact still needs the page itself.
+ * with an error result. Results are search snippets: a fact still needs the page itself, so
+ * `fact_propose` keeps a fact sourced from `search` unverified (`SEARCH_NOT_A_SOURCE`).
  */
 export const searchFetcher: Fetcher = {
   id: "search",

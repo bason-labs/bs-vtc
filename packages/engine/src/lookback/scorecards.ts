@@ -36,6 +36,7 @@ import {
   type VtcEvent,
 } from "@vtc/shared";
 import { join } from "node:path";
+import { isRoleFailure } from "./attribution.js";
 import { readTextIfExists, writeAtomic } from "./files.js";
 import { buildTraces, traceRef, type LockedShaFor, type Trace } from "./traces.js";
 
@@ -224,7 +225,7 @@ export const computeScorecards = (input: {
   readonly now: Date;
 }): Scorecard[] => {
   const traces = buildTraces(input.events, input.lockedShaFor);
-  const failed = new Set(input.attributions.filter((a) => a.outcome === "failure").map(traceRef));
+  const failed = new Set(input.attributions.filter(isRoleFailure).map(traceRef));
   const rows = outcomes(input.events, traces, failed);
   const tasks = taskInfo(input.events);
   const versions = new Map<string, TraceOutcome[]>();

@@ -22,7 +22,7 @@ import {
 import { join } from "node:path";
 import { parseYaml, toYaml } from "../core/index.js";
 import { lookbackEvent, type LookbackEventDraft } from "./events.js";
-import { readTextIfExists, writeAtomic } from "./files.js";
+import { readTextIfExists, writeAtomicIfUnchanged } from "./files.js";
 import { sameTarget } from "./traces.js";
 import { loadPromptVersion, promptVersionRef } from "./versions.js";
 
@@ -44,9 +44,7 @@ export interface PinsRead {
   readonly exists: boolean;
 }
 
-/** Reads `~/.vtc/lookback/pins.yaml`. A missing file means no pins. */
-export const readPins = async (vtcHome: string): Promise<PinsRead> => {
-  const text = await readTextIfExists(pinsPath(vtcHome));
+const parsePins = (text: string | undefined): PinsRead => {
   if (text === undefined) return { pins: EMPTY_PINS, exists: false };
   let raw: unknown;
   try {
@@ -68,6 +66,10 @@ export const readPins = async (vtcHome: string): Promise<PinsRead> => {
   }
   return { pins: parsed.data, exists: true };
 };
+
+/** Reads `~/.vtc/lookback/pins.yaml`. A missing file means no pins. */
+export const readPins = async (vtcHome: string): Promise<PinsRead> =>
+  parsePins(await readTextIfExists(pinsPath(vtcHome)));
 
 export interface PromptSelection {
   /** The version the dispatch runs; `role.dispatched` records its `editable_sha256`. */
@@ -207,7 +209,31 @@ export const autoRollback = async (input: {
   readonly reason: string;
   readonly now: Date;
 }): Promise<LookbackEventDraft | undefined> => {
-  const { pins: before, problem, exists } = await readPins(input.vtcHome);
+  // A human gesture (`vtc lookback approve|pin|rollback`) may write pins.yaml while this runs: the
+  // file is replaced only if it still holds the bytes this rollback read, else it starts over.
+  for (let attempt = 0; attempt < PINS_WRITE_ATTEMPTS; attempt += 1) {
+    const text = await readTextIfExists(pinsPath(input.vtcHome));
+    const step = rollbackStep(parsePins(text), input);
+    if (step === undefined) return undefined;
+    if (await writeAtomicIfUnchanged(pinsPath(input.vtcHome), toYaml(step.after), text))
+      return step.event;
+  }
+  return undefined;
+};
+
+/** Attempts of {@link autoRollback} when pins.yaml keeps changing under it. */
+const PINS_WRITE_ATTEMPTS = 3;
+
+const rollbackStep = (
+  read: PinsRead,
+  input: {
+    readonly repoKey: string;
+    readonly target: PinTarget;
+    readonly reason: string;
+    readonly now: Date;
+  },
+): { readonly after: LookbackPins; readonly event: LookbackEventDraft } | undefined => {
+  const { pins: before, problem, exists } = read;
   if (problem !== undefined || !exists) return undefined;
   const project = before.projects[input.repoKey];
   const canary = project?.canaries.find((c) => sameTarget(c, input.target));
@@ -236,15 +262,17 @@ export const autoRollback = async (input: {
     ],
   });
   checkEngineWrite(before, after);
-  await writeAtomic(pinsPath(input.vtcHome), toYaml(after));
-  return lookbackEvent("lookback.rolled_back", {
-    target_role: canary.role,
-    ...(canary.mode === undefined ? {} : { target_mode: canary.mode }),
-    target_host: canary.host,
-    from: canary.candidate,
-    to: canary.baseline,
-    reason,
-  });
+  return {
+    after,
+    event: lookbackEvent("lookback.rolled_back", {
+      target_role: canary.role,
+      ...(canary.mode === undefined ? {} : { target_mode: canary.mode }),
+      target_host: canary.host,
+      from: canary.candidate,
+      to: canary.baseline,
+      reason,
+    }),
+  };
 };
 
 /**

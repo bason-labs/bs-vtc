@@ -3,10 +3,14 @@ import { describe, expect, it } from "vitest";
 import {
   htmlToMarkdown,
   robotsAllows,
+  robotsPatternMatches,
   roleFacingText,
   ROLE_TEXT_MAX_CHARS,
   scanResearchClaims,
 } from "../../src/research/index.js";
+import { guardNoNetwork } from "./no-network.js";
+
+guardNoNetwork();
 
 describe("robots.txt (RFC 9309)", () => {
   const robots = [
@@ -42,6 +46,30 @@ describe("robots.txt (RFC 9309)", () => {
     expect(robotsAllows("User-agent: *\nDisallow:\n", "x", "/a")).toBe(true);
     expect(robotsAllows("", "x", "/a")).toBe(true);
   });
+
+  it.each([
+    ["/a*b", "/axxb", true],
+    ["/a*b", "/axxbyy", true],
+    ["/a*b$", "/axxbyy", false],
+    ["/a*b$", "/axbxb", true],
+    ["/*.pdf$", "/x.pdf.pdf", true],
+    ["/a**b*", "/ab", true],
+    ["/a*b*c$", "/acb", false],
+    ["*", "/anything", true],
+    ["/$", "/", true],
+    ["/$", "/a", false],
+  ])("matches %s against %s → %s without a RegExp", (pattern, path, ok) => {
+    expect(robotsPatternMatches(pattern, path)).toBe(ok);
+  });
+
+  it("stays fast on hostile wildcard rules (no backtracking)", () => {
+    const rule = `/${"a*".repeat(12)}b`;
+    const robots = `User-agent: *\n${`Disallow: ${rule}\n`.repeat(500)}`;
+    const started = performance.now();
+    expect(robotsAllows(robots, "x", `/${"a".repeat(2000)}`)).toBe(true);
+    expect(robotsAllows(robots, "x", `/${"a".repeat(2000)}b`)).toBe(false);
+    expect(performance.now() - started).toBeLessThan(1000);
+  });
 });
 
 describe("HTML to markdown", () => {
@@ -56,6 +84,29 @@ describe("HTML to markdown", () => {
     expect(htmlToMarkdown(html)).toBe(
       "## Support & EOL\n\nVersion `22` is LTS.\n\n- one\n- two\n\n```\na  b\n  c\n```",
     );
+  });
+
+  it("keeps a lone `<` as text and drops doctype and processing markup", () => {
+    expect(htmlToMarkdown("<?xml version=1?><p>1 < 2 and 3 > 2</p>")).toBe("1 < 2 and 3 > 2");
+    expect(htmlToMarkdown("<p>open <b")).toBe("open <b");
+    expect(htmlToMarkdown("<p>a</p><!-- never closed <p>b</p>")).toBe(
+      "a\n\n<!-- never closed <p>b</p>",
+    );
+  });
+
+  it.each([
+    ["unclosed <", "<".repeat(1_000_000)],
+    ["unclosed tags", "<a ".repeat(400_000)],
+    ["unclosed scripts", "<script>".repeat(300_000)],
+    ["unclosed comments", "<!--".repeat(500_000)],
+    ["unclosed headings", "<h1>x".repeat(300_000)],
+    ["unclosed code and pre", "<pre><code>".repeat(200_000)],
+    ["many mains", "<main>".repeat(300_000)],
+    ["newline runs", `<pre>${"\n".repeat(1_000_000)}x</pre>`],
+  ])("converts a hostile page (%s) in linear time", (_name, html) => {
+    const started = performance.now();
+    htmlToMarkdown(html);
+    expect(performance.now() - started).toBeLessThan(2000);
   });
 });
 
@@ -113,14 +164,15 @@ describe("role-facing text (AD-22 rule 5)", () => {
 });
 
 describe("research claims for G2 (AD-22 rule 4)", () => {
-  it("finds UNVERIFIED tags and uncited version, licence, CVE and EOL claims", () => {
-    const claims = scanResearchClaims([
+  it("finds UNVERIFIED tags and uncited version, licence, CVE and EOL claims, headings too", () => {
+    const docs = [
       {
         path: ".vtc/spec/research.md",
         text: [
           "# Licences and versions",
           "UNVERIFIED: React 19 drops IE support",
           "We use react@19.2.0 (f-0123456789abcdef).",
+          "## Node 18 is EOL since 2025-04-30",
           "lodash 4.17.20 has CVE-2021-23337.",
           "The library is MIT licensed.",
           "Node.js 18 reached end-of-life.",
@@ -130,18 +182,41 @@ describe("research claims for G2 (AD-22 rule 4)", () => {
           "```",
         ].join("\n"),
       },
-    ]);
+    ];
+    const claims = scanResearchClaims(docs, new Set(["f-0123456789abcdef"]));
     expect(claims.map((c) => [c.kind, c.line, c.text])).toEqual([
       ["unverified_tag", 2, "React 19 drops IE support"],
-      ["uncited_claim", 4, "lodash 4.17.20 has CVE-2021-23337."],
-      ["uncited_claim", 5, "The library is MIT licensed."],
-      ["uncited_claim", 6, "Node.js 18 reached end-of-life."],
+      ["uncited_claim", 4, "## Node 18 is EOL since 2025-04-30"],
+      ["uncited_claim", 5, "lodash 4.17.20 has CVE-2021-23337."],
+      ["uncited_claim", 6, "The library is MIT licensed."],
+      ["uncited_claim", 7, "Node.js 18 reached end-of-life."],
     ]);
     // Stable ids: the same claim in the same document gets the same id.
     expect(
-      scanResearchClaims([
-        { path: ".vtc/spec/research.md", text: "UNVERIFIED: React 19 drops IE support" },
-      ])[0]?.id,
+      scanResearchClaims(
+        [{ path: ".vtc/spec/research.md", text: "UNVERIFIED: React 19 drops IE support" }],
+        new Set(),
+      )[0]?.id,
     ).toBe(claims[0]?.id);
+  });
+
+  it("lists a claim citing a fact id that is not a current row (a made-up citation)", () => {
+    const claims = scanResearchClaims(
+      [
+        {
+          path: "a.md",
+          text: [
+            "lodash@4.17.21 is fine (f-0123456789abcdef)",
+            "react@19.2.0 is MIT (f-00000000000000aa, f-0123456789abcdef)",
+            "react@19.2.0 is MIT (f-00000000000000aa)",
+          ].join("\n"),
+        },
+      ],
+      new Set(["f-00000000000000aa"]),
+    );
+    expect(claims.map((c) => [c.line, c.unknownFacts])).toEqual([
+      [1, ["f-0123456789abcdef"]],
+      [2, ["f-0123456789abcdef"]],
+    ]);
   });
 });

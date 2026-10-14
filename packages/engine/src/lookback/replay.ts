@@ -18,7 +18,10 @@ import {
   ReplayResultSchema,
   replayVerdict,
   SlugSchema,
-  splitForTrace,
+  HostIdSchema,
+  IsoDateTimeSchema,
+  RoleIdSchema,
+  Sha256HexSchema,
   type Attribution,
   type DispatchMode,
   type DispatchPlan,
@@ -29,11 +32,12 @@ import {
   type PromptVersionRef,
   type ReplayResult,
 } from "@vtc/shared";
-import { readdir } from "node:fs/promises";
 import { join } from "node:path";
+import { z } from "zod";
 import { lookbackEvent, type LookbackEventDraft } from "./events.js";
-import { readTextIfExists, writeAtomic } from "./files.js";
-import { sameTarget, traceRef, type Trace } from "./traces.js";
+import { appendJsonLines, readJsonLines, writeAtomic } from "./files.js";
+import { isRoleFailure } from "./attribution.js";
+import { sameTarget, traceRef, traceSplit, type Trace } from "./traces.js";
 
 /** Most tasks of each kind one replay runs (§13: 5–10 attributed failures). */
 export const REPLAY_MAX_TASKS = 10;
@@ -53,14 +57,14 @@ export const replayTasks = (input: {
   readonly traces: readonly Trace[];
   readonly attributions: readonly Attribution[];
 }): ReplayTask[] => {
-  const failed = new Set(input.attributions.filter((a) => a.outcome === "failure").map(traceRef));
+  const failed = new Set(input.attributions.filter(isRoleFailure).map(traceRef));
   const held = input.traces.filter(
     (t) =>
       t.task !== undefined &&
       t.prompt?.effective_sha256 === input.baseline.effective_sha256 &&
       sameTarget(t, input.baseline) &&
       t.end?.kind === "submitted" &&
-      splitForTrace(t.trace) === "holdout",
+      traceSplit(t) === "holdout",
   );
   const pick = (regressionSet: boolean): ReplayTask[] => {
     const seen = new Set<string>();
@@ -206,38 +210,65 @@ export const writeReplayResult = async (
 };
 
 /**
- * The A/A flip rate cached for a baseline (the newest replay of the same role, mode, host and
- * baseline under the same grader bundle), or `undefined`: then the replay runs its own A/A arm.
+ * The A/A noise floors the engine measured, under the VTC home (`~/.vtc/lookback/`, which no role
+ * may write: `WAVE3_HOME_WRITE_DENY`). Never read from the repo: `.vtc/lookback/replays/*.json` is
+ * git-tracked, and a planted high `aa_flip_rate` would let a regression pass `replayVerdict`.
+ */
+export const AA_NOISE_FILE = "lookback/aa-noise.jsonl";
+
+const AaNoiseRowSchema = z.strictObject({
+  v: z.literal(1),
+  role: RoleIdSchema,
+  mode: SlugSchema.optional(),
+  host: HostIdSchema,
+  baseline: Sha256HexSchema,
+  grader_bundle_sha: Sha256HexSchema,
+  aa_flip_rate: z.number().min(0).max(1),
+  measured_at: IsoDateTimeSchema,
+});
+
+/** Records the A/A flip rate a replay measured with its own `aa` arm (call it only then). */
+export const recordAaFlipRate = async (input: {
+  readonly vtcHome: string;
+  readonly baseline: PromptVersionRef;
+  readonly graderBundleSha: string;
+  readonly aaFlipRate: number;
+  readonly now: Date;
+}): Promise<void> => {
+  await appendJsonLines(join(input.vtcHome, AA_NOISE_FILE), [
+    AaNoiseRowSchema.parse({
+      v: 1,
+      role: input.baseline.role,
+      ...(input.baseline.mode === undefined ? {} : { mode: input.baseline.mode }),
+      host: input.baseline.host,
+      baseline: input.baseline.effective_sha256,
+      grader_bundle_sha: input.graderBundleSha,
+      aa_flip_rate: input.aaFlipRate,
+      measured_at: input.now.toISOString(),
+    }),
+  ]);
+};
+
+/**
+ * The A/A flip rate cached for a baseline (the newest one the engine measured for the same role,
+ * mode, host and baseline under the same grader bundle), or `undefined`: then the replay runs its
+ * own A/A arm and {@link recordAaFlipRate} keeps the result.
  */
 export const cachedAaFlipRate = async (
-  projectRoot: string,
+  vtcHome: string,
   baseline: PromptVersionRef,
   graderBundleSha: string,
 ): Promise<number | undefined> => {
-  let names: string[];
-  try {
-    names = await readdir(join(projectRoot, LOOKBACK_REPO.replaysDir));
-  } catch {
-    return undefined;
-  }
-  let best: ReplayResult | undefined;
-  for (const name of names.filter((n) => n.endsWith(".json"))) {
-    const text = await readTextIfExists(join(projectRoot, LOOKBACK_REPO.replaysDir, name));
-    if (text === undefined) continue;
-    let raw: unknown;
-    try {
-      raw = JSON.parse(text);
-    } catch {
-      continue;
-    }
-    const parsed = parsePersisted(ReplayResultSchema, raw);
+  let best: z.infer<typeof AaNoiseRowSchema> | undefined;
+  for (const value of await readJsonLines(join(vtcHome, AA_NOISE_FILE))) {
+    const parsed = parsePersisted(AaNoiseRowSchema, value);
     if (!parsed.success) continue;
     const r = parsed.data;
     if (
       r.baseline === baseline.effective_sha256 &&
       sameTarget(r, baseline) &&
       r.grader_bundle_sha === graderBundleSha &&
-      (best === undefined || r.finished_at > best.finished_at)
+      (best === undefined || r.measured_at >= best.measured_at)
     ) {
       best = r;
     }

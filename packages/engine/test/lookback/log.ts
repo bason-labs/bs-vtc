@@ -211,7 +211,7 @@ export class RunLog {
   finding(
     task: string,
     route: string,
-    options: { source?: "role" | "tool"; category?: string } = {},
+    options: { source?: "role" | "tool"; category?: string; kind?: string } = {},
   ): void {
     const source = options.source ?? "role";
     this.seqFinding += 1;
@@ -225,7 +225,7 @@ export class RunLog {
           source_name: source === "role" ? "spec_verifier" : "eslint",
           rule_id: "rule-1",
           category: options.category ?? "correctness",
-          ...(source === "role" ? { kind: "implementation_deviation" } : {}),
+          ...(source === "role" ? { kind: options.kind ?? "implementation_deviation" } : {}),
           title: "A finding",
           severity: "medium",
           confidence: 0.8,
@@ -243,18 +243,22 @@ export class RunLog {
   private seqFinding = 0;
   private escalations = 0;
 
-  /** Opens an escalation on the task and, when `who` is given, answers it. */
-  escalate(task: string, who?: string, reason = "cap"): void {
+  /**
+   * Opens an escalation on the task (or, with `null`, a run-scoped one in the `specify` phase)
+   * and, when `who` is given, answers it.
+   */
+  escalate(task: string | null, who?: string, reason = "cap"): void {
     this.escalations += 1;
     const id = `E-${String(this.escalations)}`;
+    const scope = task === null ? {} : { task };
     this.add({
       type: "escalation.opened",
-      task,
+      ...scope,
       data: {
         escalation: {
           id,
           run: this.run,
-          task,
+          ...(task === null ? { phase: "specify" } : { task }),
           reason,
           question: "How should we proceed?",
           options: [
@@ -263,7 +267,7 @@ export class RunLog {
           ],
           recommended: "hint",
           evidence: [{ type: "file_line", ref: "src/a.ts:1" }],
-          blocks: [task],
+          blocks: task === null ? [] : [task],
           created_at: "2026-10-14T10:00:00.000Z",
         },
       },
@@ -272,7 +276,7 @@ export class RunLog {
       this.add({
         type: "escalation.answered",
         actor: "human",
-        task,
+        ...scope,
         data: { escalation: id, answer: { option: "hint", who_should_have_caught: who } },
       });
     }
