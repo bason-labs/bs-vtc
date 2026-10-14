@@ -11,7 +11,9 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import {
+  findDisallowedHostArgs,
   findForbiddenHostArgs,
+  headlessIsolationGaps,
   HostOutcomeSchema,
   jsonSchemaFor,
   ROLE_DENIED_VTC,
@@ -285,9 +287,13 @@ describe("Codex headlessCommand", () => {
     expect(command.command).toBe("codex");
     expect(command.env).toEqual({});
     const args = command.args;
-    expect(args.slice(0, 2)).toEqual(["exec", "--json"]);
+    // an explicit sandbox and no approval prompt nobody could answer (AD-25 rule 1)
+    expect(args.slice(0, 4)).toEqual(["exec", "--sandbox", "read-only", "--json"]);
     expect(args).toContain('sandbox_mode="read-only"');
-    expect(args).not.toContain("--sandbox");
+    expect(argAfter(args, "-c")).toBe('approval_policy="never"');
+    expect(headlessIsolationGaps("codex", args)).toEqual([]);
+    // no automatic approver (AD-25 rule 2)
+    expect(findDisallowedHostArgs(args)).toEqual([]);
     expect(argAfter(args, "--output-schema")).toMatch(
       new RegExp(`^${dir}/role-result-[0-9a-f]{16}\\.json$`),
     );
@@ -304,11 +310,43 @@ describe("Codex headlessCommand", () => {
       host: "codex",
       id: "thr-1",
     }).args;
-    expect(args.slice(0, 3)).toEqual(["exec", "resume", "--json"]);
-    // `codex exec resume` has no --sandbox flag; the config override keeps the sandbox
+    // `codex exec resume` (0.162.1) rejects --sandbox after `resume` but takes it as an option
+    // of `exec` before it; the config override keeps the sandbox too (spine §7 "Codex resume
+    // argv" confirms which one the resumed thread applies)
+    expect(args.slice(0, 5)).toEqual(["exec", "--sandbox", "read-only", "resume", "--json"]);
     expect(args).toContain('sandbox_mode="read-only"');
-    expect(args).not.toContain("--sandbox");
+    expect(argAfter(args, "-c")).toBe('approval_policy="never"');
+    expect(headlessIsolationGaps("codex", args)).toEqual([]);
     expect(args.slice(-3)).toEqual(["--", "thr-1", "-"]);
+  });
+
+  it("names the profile's own sandbox, fresh and resumed, for every tool profile (AD-25 rule 1)", () => {
+    const adapter = createCodexAdapter({ vtcHome: VTC_HOME });
+    for (const session of [undefined, { host: "codex" as const, id: "thr-1" }]) {
+      for (const [tools, mode] of [
+        [READ_ONLY, "read-only"],
+        [WRITE_SCOPED, "workspace-write"],
+        [ENGINEER, "workspace-write"],
+      ] as const) {
+        const args = adapter.headlessCommand(request({ sandbox: profile(tools) }), session).args;
+        expect(argAfter(args, "--sandbox")).toBe(mode);
+        expect(args.indexOf("--sandbox")).toBe(1);
+        expect(args).toContain(`sandbox_mode="${mode}"`);
+        expect(headlessIsolationGaps("codex", args)).toEqual([]);
+        expect(findDisallowedHostArgs(args)).toEqual([]);
+      }
+    }
+  });
+
+  it("refuses a profile whose sandbox is not read-only or workspace-write (fail closed)", () => {
+    const sandbox = { ...profile(READ_ONLY), settings: { sandbox_mode: "full" } };
+    expect(() => createCodexAdapter().headlessCommand(request({ sandbox }))).toThrow(
+      /sandbox mode/,
+    );
+    const none = { ...profile(READ_ONLY), settings: {} };
+    expect(() => createCodexAdapter().headlessCommand(request({ sandbox: none }))).toThrow(
+      /sandbox mode/,
+    );
   });
 
   it("runs on the session's default model with only the effort set when the engine resolved no id (D-ae)", () => {
@@ -414,6 +452,28 @@ describe("Codex spawnRole", () => {
       kind: "done",
       session_ref: { host: "codex", id: "<thread-id>" },
     });
+    await adapter.dispose();
+  });
+
+  it("a resumed run is supervised by the request's idle timeout and ends with cause idle (AD-25 rule 4)", async () => {
+    const { spawner, processes } = fakeSpawner((p) => {
+      p.obeysInt = false;
+    });
+    const adapter = createCodexAdapter({
+      spawner,
+      scratchDir: scratch(),
+      interruptGraceMs: 10,
+      killGraceMs: 10,
+    });
+    const session = { host: "codex" as const, id: "thr-1" };
+    const resumed = await adapter.resume(session, request({ idleTimeoutMs: 30 }));
+    if (resumed.dispatch !== "headless") throw new Error("expected a headless run");
+    processes[0]!.emit(
+      ...fixtureLines("codex/exec-killed.synthetic.jsonl").filter((l) => l !== ""),
+    );
+    const outcome = HostOutcomeSchema.parse(await resumed.run.wait());
+    expect(outcome).toMatchObject({ kind: "error", retryable: true, cause: "idle" });
+    expect(processes[0]?.signals).toEqual(["SIGINT", "SIGTERM"]);
     await adapter.dispose();
   });
 });

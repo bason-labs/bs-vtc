@@ -2,11 +2,16 @@ import { homedir } from "node:os";
 import { join, win32 } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import {
+  engineMcpServer,
+  findDisallowedHostArgs,
   findForbiddenHostArgs,
+  HEADLESS_DEFAULTS,
+  headlessIsolationGaps,
   hostCredentialDenyReadPaths,
   HostOutcomeSchema,
   jsonSchemaFor,
   ROLE_DENIED_VTC,
+  WAVE3_HOME_WRITE_DENY,
   type RoleTools,
   type SandboxProfile,
   type SpawnRoleRequest,
@@ -81,6 +86,12 @@ const VTC_HOME_DENIED_PATHS = [
   "run",
   "config.yaml",
   "token",
+  // wave 3 (contracts 4.5.0, spine §5 reading 103): Lookback versions and pins, the research
+  // cache, the pinned browser store and the design library
+  "lookback",
+  "research-cache",
+  "browsers",
+  "design-library",
 ].map((d) => `${VTC_HOME}/${d}`);
 
 const settingsOf = (p: SandboxProfile) =>
@@ -224,6 +235,28 @@ describe("Claude sandboxProfile (§12.1, AD-9)", () => {
       expect(settings.sandbox.filesystem.denyWrite).toEqual(
         expect.arrayContaining(VTC_HOME_DENIED_PATHS),
       );
+    }
+  });
+
+  it("denies every role writing the wave-3 directories of the VTC home, from tools and from the shell (WAVE3_HOME_WRITE_DENY)", () => {
+    expect([...WAVE3_HOME_WRITE_DENY]).toEqual([
+      "lookback/**",
+      "research-cache/**",
+      "browsers/**",
+      "design-library/**",
+    ]);
+    for (const tools of [READ_ONLY, WRITE_SCOPED, ENGINEER]) {
+      const settings = settingsOf(profile(tools));
+      for (const glob of WAVE3_HOME_WRITE_DENY) {
+        for (const tool of ["Edit", "Write", "NotebookEdit"]) {
+          // once, even after the integrator folds the list into ROLE_DENIED_VTC.homeWriteDeny
+          expect(
+            settings.permissions.deny.filter((r) => r === `${tool}(//home/dev/.vtc/${glob})`),
+          ).toHaveLength(1);
+        }
+        const dir = `${VTC_HOME}/${glob.replace(/\/\*\*$/u, "")}`;
+        expect(settings.sandbox.filesystem.denyWrite.filter((p) => p === dir)).toHaveLength(1);
+      }
     }
   });
 
@@ -388,6 +421,8 @@ describe("Claude sandboxProfile (§12.1, AD-9)", () => {
       "Write(./src/**)",
       "NotebookEdit(./src/**)",
       "mcp__plugin_vtc_vtc__research_fetch",
+      // the same engine tool through the VTC-only --mcp-config server (AD-25 rule 1)
+      "mcp__vtc__research_fetch",
     ]);
     expect(argAfter(profile(WRITE_SCOPED).cliArgs, "--disallowedTools")?.split(",")).toEqual([
       "Edit(test/acceptance/**)",
@@ -468,7 +503,10 @@ describe("Claude headlessCommand", () => {
   it("runs claude -p as the role's plugin agent with stream-json, the host schema form and the prompt on stdin", () => {
     const command = adapter.headlessCommand(request({ maxTurns: 30, maxBudgetUsd: 2.5 }));
     expect(command.command).toBe("claude");
-    expect(command.env).toEqual({});
+    // set explicitly, so a -p run never waits the host's default 10 minutes for background work
+    expect(command.env).toEqual({
+      CLAUDE_CODE_PRINT_BG_WAIT_CEILING_MS: String(HEADLESS_DEFAULTS.claudeBackgroundWaitMs),
+    });
     const args = command.args;
     expect(args[0]).toBe("-p");
     expect(argAfter(args, "--output-format")).toBe("stream-json");
@@ -491,16 +529,28 @@ describe("Claude headlessCommand", () => {
     expect(findForbiddenHostArgs(args)).toEqual([]);
   });
 
-  it("loads the compiled plugin from disk and no user, project or local settings file, fresh and resumed (D-ab)", () => {
+  it("loads the compiled plugin, the user's own settings and a VTC-only MCP config, never the repo's settings or MCP servers, fresh and resumed (AD-25 rule 1, reading 108)", () => {
     for (const session of [undefined, { host: "claude-code" as const, id: "sess-9" }]) {
       const args = adapter.headlessCommand(request(), session).args;
       expect(argAfter(args, "--plugin-dir")).toBe(PLUGIN_DIR);
-      // `--restricted` ignores every settings file (user, project, local); only the VTC-authored
-      // `--settings` applies, so a committed .claude/settings.json cannot pre-approve a tool
-      expect(args).toContain("--restricted");
-      expect(args).not.toContain("--setting-sources");
+      expect(argAfter(args, "--agent")).toBe("vtc:vtc-qa-judge");
+      // the user's settings are the user's trust domain; a committed .claude/settings.json
+      // (allow rules, hooks, env, MCP enablement) or a local one is untrusted repo content
+      expect(argAfter(args, "--setting-sources")).toBe("user");
+      expect(args.filter((a) => a === "--setting-sources")).toHaveLength(1);
+      // no .mcp.json or user MCP server: only the engine bridge VTC names itself
+      expect(args).toContain("--strict-mcp-config");
+      const bridge = engineMcpServer("claude-code");
+      expect(JSON.parse(argAfter(args, "--mcp-config") ?? "")).toEqual({
+        mcpServers: { vtc: { command: bridge.command, args: [...bridge.args] } },
+      });
+      // reading 108 replaces `--restricted` (it would drop the user's settings; a §7 spike row)
+      expect(args).not.toContain("--restricted");
       expect(args.filter((a) => a === "--settings")).toHaveLength(1);
       expect(argAfter(args, "--tools")).toBe("Read,Grep,Glob,ToolSearch");
+      expect(headlessIsolationGaps("claude-code", args)).toEqual([]);
+      // API-key mode never: it would not read the user's subscription login (AD-9)
+      expect(findDisallowedHostArgs(args)).toEqual([]);
     }
   });
 
@@ -597,14 +647,39 @@ describe("Claude spawnRole and resume", () => {
     await expect(adapter.resume({ host: "codex", id: "t" }, request())).rejects.toThrow(/codex/);
   });
 
+  it("a headless run is supervised by the request's wall timeout and ends with cause timeout (AD-25 rule 4)", async () => {
+    const { spawner, processes } = fakeSpawner((p) => {
+      p.obeysInt = false;
+      p.obeysTerm = false;
+    });
+    const adapter = createClaudeCodeAdapter({
+      spawner,
+      pluginDir: PLUGIN_DIR,
+      interruptGraceMs: 10,
+      killGraceMs: 10,
+    });
+    const spawned = await adapter.spawnRole(request({ timeoutMs: 30, idleTimeoutMs: 60_000 }));
+    if (spawned.dispatch !== "headless") throw new Error("expected a headless run");
+    processes[0]!.emit(
+      ...fixtureText("claude-code/stream-killed.synthetic.jsonl")
+        .split("\n")
+        .filter((l) => l !== ""),
+    );
+    const outcome = HostOutcomeSchema.parse(await spawned.run.wait());
+    expect(outcome).toMatchObject({ kind: "error", retryable: true, cause: "timeout" });
+    expect(processes[0]?.signals).toEqual(["SIGINT", "SIGTERM", "SIGKILL"]);
+    await adapter.dispose();
+  });
+
   it("dispose kills live runs and refuses new ones", async () => {
     const { spawner, processes } = fakeSpawner();
     const adapter = createClaudeCodeAdapter({ spawner, pluginDir: PLUGIN_DIR });
     const spawned = await adapter.spawnRole(request());
     if (spawned.dispatch !== "headless") throw new Error("expected a headless run");
     await adapter.dispose();
-    expect(processes[0]?.signals).toEqual(["SIGTERM"]);
-    expect((await spawned.run.wait()).kind).toBe("error");
+    // the whole group gets SIGINT first (AD-25 rule 4); this host ends its turn on it
+    expect(processes[0]?.signals).toEqual(["SIGINT"]);
+    expect(await spawned.run.wait()).toMatchObject({ kind: "error", cause: "killed" });
     await expect(adapter.spawnRole(request())).rejects.toThrow(/disposed/);
     await adapter.dispose();
   });

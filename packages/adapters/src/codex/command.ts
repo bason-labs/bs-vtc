@@ -153,7 +153,8 @@ export const codexSandboxProfile = (
           }
         : {}),
     },
-    // config overrides, not `--sandbox`: `codex exec resume` takes only `--config` (0.162.1)
+    // config overrides, which `codex exec resume` takes too; the command adds `--sandbox` as an
+    // option of `exec` (resume itself has no such flag in 0.162.1)
     cliArgs: [
       "--config",
       `sandbox_mode="${mode}"`,
@@ -191,11 +192,27 @@ export interface CodexCommandOptions {
   readonly scratchDir: string;
 }
 
+/** The profile's sandbox mode, read back from its settings; anything else is refused. */
+const sandboxModeOf = (sandbox: SandboxProfile): CodexSandboxMode => {
+  const mode = sandbox.settings.sandbox_mode;
+  if (mode !== "read-only" && mode !== "workspace-write") {
+    throw new Error(
+      `refusing a headless Codex run: the profile's sandbox mode must be read-only or workspace-write, got ${JSON.stringify(mode)}`,
+    );
+  }
+  return mode;
+};
+
 /**
- * `codex exec --json` for a role, or `codex exec resume --json … <thread_id>` (spike 1 and the
+ * `codex exec --json` for a role, or `codex exec … resume --json … <thread_id>` (spike 1 and the
  * 4h resume check). The model is the engine's (`request.model.model`, AD-6 rule 2). The prompt
  * is read from stdin (`-`): the launcher writes it and closes stdin, so it never sits in argv.
  * The thread id follows `--`, so it is never read as an option.
+ *
+ * Unattended (AD-25 rule 1): an explicit `--sandbox` (an option of `exec`, so it stands before
+ * `resume`, which rejects it after itself in 0.162.1; the profile's `sandbox_mode` override says
+ * the same) and `-c approval_policy="never"`, so no approval request ever waits for a person.
+ * Never an automatic approver or the hook-trust bypass (AD-25 rule 2, AD-9).
  */
 export const codexHeadlessCommand = (
   request: SpawnRoleRequest,
@@ -208,13 +225,19 @@ export const codexHeadlessCommand = (
   if (session !== undefined && session.host !== HOST) {
     throw new Error(`cannot resume a ${session.host} session on ${HOST}`);
   }
+  const mode = sandboxModeOf(request.sandbox);
   return {
     command: CODEX_BINARY,
     args: [
       "exec",
+      "--sandbox",
+      mode,
       ...(session === undefined ? [] : ["resume"]),
       "--json",
       ...request.sandbox.cliArgs,
+      // nobody answers an approval request in an unattended run: none is ever asked
+      "-c",
+      'approval_policy="never"',
       "--output-schema",
       codexSchemaFile(options.scratchDir, request.outputSchema),
       // no resolved id (D-ae): the session's default model runs, only the effort is set

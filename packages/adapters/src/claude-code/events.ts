@@ -7,10 +7,14 @@
  * - `system/init`: `session_id`, `model`;
  * - `rate_limit_event`: `rate_limit_info {status: allowed|allowed_warning|rejected, resetsAt?,
  *   rateLimitType?, utilization?}` (Agent SDK docs; no recording yet);
- * - `system/api_retry`: `attempt`, `retry_delay_ms`, `error_status`, `error` (`rate_limit`, …)
- *   (Agent SDK docs; no recording yet).
- * Detection (§6.9): a rejected `rate_limit_event`, an `api_retry` for `rate_limit`, or an error
- * result / non-zero exit whose text names a limit is `limit`; a signed-out error is `auth`.
+ * - `system/api_retry`: `attempt`, `retry_delay_ms`, `error_status`, `error` (`rate_limit`,
+ *   `overloaded`, `authentication_failed`, `oauth_org_not_allowed`, `account_on_hold`,
+ *   `billing_error`, …) (Agent SDK and headless docs; no recording yet).
+ * Detection (§6.9, AD-25 rule 5: from the stream, never from the exit code alone): a rejected
+ * `rate_limit_event`, an unrecovered `api_retry` for `rate_limit`, or an error result whose text
+ * names a limit is `limit`; an unrecovered `api_retry` for a sign-in, org, hold or billing failure,
+ * or a signed-out error text, is `auth` (the engine parks, never retries in a loop); a result of
+ * `error_max_turns` / `error_max_budget_usd` is an `error` with cause `max_turns` / `budget`.
  */
 import type {
   HostOutcome,
@@ -25,6 +29,13 @@ import type {
 import { FIVE_HOUR_WINDOW_MINUTES, WEEKLY_WINDOW_MINUTES } from "@vtc/shared";
 import { classifyFailureText, resetFromLimitText } from "../common/failure-text.js";
 import type { RunExit } from "../common/headless-run.js";
+import { CLAUDE_BINARY } from "./command.js";
+import {
+  describeExit,
+  endedWithoutResult,
+  spawnFailure,
+  withStopCause,
+} from "../common/outcome.js";
 import {
   count,
   epochToIso,
@@ -50,9 +61,10 @@ interface ClaudeScan {
   readonly rateLimits: ReadonlyMap<string | null, RateLimitInfo>;
   readonly rejected: RateLimitInfo | null;
   readonly retry: StreamRetry | null;
-  readonly retriedForRateLimit: boolean;
   /** The last retry was for a rate limit and nothing ran after it: the host gave up waiting. */
   readonly rateLimitRetryUnrecovered: boolean;
+  /** The last retry was for a sign-in, org, hold or billing failure and nothing ran after it. */
+  readonly authRetryUnrecovered: boolean;
   readonly result: Record<string, unknown> | null;
   readonly unrecognized: number;
 }
@@ -63,6 +75,14 @@ const rateLimitInfo = (value: unknown): RateLimitInfo | null => {
   if (status !== "allowed" && status !== "allowed_warning" && status !== "rejected") return null;
   return { status, type: text(value.rateLimitType), resetsAt: epochToIso(value.resetsAt) };
 };
+
+/** `api_retry` errors only the user can fix: their login, org access, account or billing. */
+const AUTH_RETRY_ERRORS: ReadonlySet<string> = new Set([
+  "authentication_failed",
+  "oauth_org_not_allowed",
+  "account_on_hold",
+  "billing_error",
+]);
 
 const retryReason = (event: Record<string, unknown>): StreamRetry["reason"] => {
   const error = text(event.error) ?? "";
@@ -87,8 +107,8 @@ const scan = (lines: readonly string[]): ClaudeScan => {
   const rateLimits = new Map<string | null, RateLimitInfo>();
   let rejected: RateLimitInfo | null = null;
   let retry: StreamRetry | null = null;
-  let retriedForRateLimit = false;
   let rateLimitRetryUnrecovered = false;
+  let authRetryUnrecovered = false;
   let result: Record<string, unknown> | null = null;
   for (const event of events) {
     const type = text(event.type);
@@ -101,8 +121,8 @@ const scan = (lines: readonly string[]): ClaudeScan => {
       model = text(event.model) ?? model;
     } else if (type === "system" && event.subtype === "api_retry") {
       const reason = retryReason(event);
-      retriedForRateLimit ||= reason === "rate_limit";
       rateLimitRetryUnrecovered = reason === "rate_limit";
+      authRetryUnrecovered = AUTH_RETRY_ERRORS.has(text(event.error) ?? "");
       retry = {
         attempt: count(event.attempt),
         reason,
@@ -122,6 +142,7 @@ const scan = (lines: readonly string[]): ClaudeScan => {
     } else if (type !== "system") {
       // an assistant or tool turn after a retry: the retried request went through
       rateLimitRetryUnrecovered = false;
+      authRetryUnrecovered = false;
     }
   }
   return {
@@ -130,8 +151,8 @@ const scan = (lines: readonly string[]): ClaudeScan => {
     rateLimits,
     rejected,
     retry,
-    retriedForRateLimit,
     rateLimitRetryUnrecovered,
+    authRetryUnrecovered,
     result,
     unrecognized,
   };
@@ -205,7 +226,10 @@ const resultMessage = (result: Record<string, unknown>): string => {
 };
 
 /** Caps the run hit on purpose (`--max-turns`, `--max-budget-usd`): retrying cannot help. */
-const CAP_SUBTYPES = new Set(["error_max_turns", "error_max_budget_usd"]);
+const CAP_CAUSES: Readonly<Record<string, "max_turns" | "budget">> = {
+  error_max_turns: "max_turns",
+  error_max_budget_usd: "budget",
+};
 
 const outcomeFromResult = (s: ClaudeScan, result: Record<string, unknown>): HostOutcome => {
   const tokens = tokensOf(result);
@@ -227,16 +251,17 @@ const outcomeFromResult = (s: ClaudeScan, result: Record<string, unknown>): Host
     };
   }
   const message = resultMessage(result);
-  if (subtype !== null && CAP_SUBTYPES.has(subtype) && s.rejected === null) {
+  const cap = subtype === null ? undefined : CAP_CAUSES[subtype];
+  if (cap !== undefined && s.rejected === null) {
     // the run hit its own cap, even if it waited out a rate-limit retry on the way
-    return { kind: "error", message, retryable: false, tokens, cost_usd: cost };
+    return { kind: "error", message, retryable: false, cause: cap, tokens, cost_usd: cost };
   }
   const failure = classifyFailureText(message);
   // a rate-limit retry the run recovered from says nothing about a later, unrelated error
   if (s.rejected !== null || s.rateLimitRetryUnrecovered || failure === "limit") {
     return limitOutcome(s, message, tokens, cost);
   }
-  if (failure === "auth") return { kind: "auth", message };
+  if (s.authRetryUnrecovered || failure === "auth") return { kind: "auth", message };
   return { kind: "error", message, retryable: true, tokens, cost_usd: cost };
 };
 
@@ -272,30 +297,22 @@ export const parseClaudeEvents = (lines: readonly string[]): ParsedStream => {
 };
 
 /**
- * The outcome of a finished `claude -p` process. A result event decides it; without one, a
- * rate-limit signal, or a limit or sign-in message on stderr, decides it; otherwise a
- * non-zero exit is a retryable error (§6.9 "non-zero `-p` exit" with no other evidence).
+ * The outcome of a finished `claude -p` process (AD-25 rules 4–5). A result event decides it (an
+ * error result without a cause of its own takes the launcher's stop cause); without one, an
+ * unrecovered rate-limit or sign-in signal in the stream, or a limit or sign-in message on stderr,
+ * decides it; otherwise it is an `error` saying why the process ended: the launcher's stop
+ * (`timeout`, `idle`, `killed`), a kill from outside (exit 143 after SIGTERM: `killed`), or a bare
+ * exit (`exit_code`, §6.9 "non-zero `-p` exit" with no other evidence).
  */
 export const claudeOutcomeAfterExit = (lines: readonly string[], exit: RunExit): HostOutcome => {
   const s = scan(lines);
-  if (s.result !== null) return outcomeFromResult(s, s.result);
-  if (exit.error !== null) {
-    return {
-      kind: "error",
-      message: `could not start claude: ${exit.error.message}`,
-      retryable: false,
-      tokens: null,
-      cost_usd: null,
-    };
-  }
-  const stderr = exit.stderrTail.trim();
-  const how =
-    exit.code === null ? `was stopped by ${exit.signal ?? "a signal"}` : `exited ${exit.code}`;
-  const message = `claude ${how} without a result${stderr === "" ? "" : `: ${stderr}`}`;
-  const failure = classifyFailureText(stderr);
-  if (exit.code !== 0 && (s.rejected !== null || s.retriedForRateLimit || failure === "limit")) {
+  if (s.result !== null) return withStopCause(outcomeFromResult(s, s.result), exit);
+  if (exit.error !== null) return spawnFailure(CLAUDE_BINARY, exit.error);
+  const message = describeExit(CLAUDE_BINARY, exit, "without a result");
+  const failure = classifyFailureText(exit.stderrTail);
+  if (s.rejected !== null || s.rateLimitRetryUnrecovered || failure === "limit") {
     return limitOutcome(s, message, null, null);
   }
-  if (failure === "auth") return { kind: "auth", message };
-  return { kind: "error", message, retryable: true, tokens: null, cost_usd: null };
+  if (s.authRetryUnrecovered || failure === "auth") return { kind: "auth", message };
+  return endedWithoutResult(message, exit);
 };

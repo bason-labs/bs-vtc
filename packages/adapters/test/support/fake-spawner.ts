@@ -13,6 +13,8 @@ export class FakeProcess implements SpawnedProcess {
   readonly stdin: PassThrough | null;
   readonly signals: string[] = [];
   readonly exited: Promise<ProcessExit>;
+  /** Whether SIGINT ends the process (Claude ends its turn on it; a stuck host ignores it). */
+  obeysInt = true;
   /** Whether SIGTERM ends the process (a stuck host ignores it until SIGKILL). */
   obeysTerm = true;
   private settle: (exit: ProcessExit) => void = () => undefined;
@@ -77,10 +79,14 @@ export class FakeProcess implements SpawnedProcess {
     this.settle({ code: null, signal: null, error });
   }
 
-  kill(signal: "SIGTERM" | "SIGKILL"): void {
+  kill(signal: "SIGINT" | "SIGTERM" | "SIGKILL"): void {
     if (this.done) return;
     this.signals.push(signal);
-    if (signal === "SIGKILL" || this.obeysTerm) this.exit(null, signal);
+    const obeys =
+      signal === "SIGKILL" ||
+      (signal === "SIGTERM" && this.obeysTerm) ||
+      (signal === "SIGINT" && this.obeysInt);
+    if (obeys) this.exit(null, signal);
   }
 }
 
