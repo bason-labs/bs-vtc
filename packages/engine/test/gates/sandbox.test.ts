@@ -15,6 +15,7 @@ import {
 import { join } from "node:path";
 import { git, initRepo } from "../helpers/repo.js";
 import {
+  BROWSERS_DIR,
   GATE_SANDBOX,
   hostCredentialDenyReadPaths,
   type GateSandbox,
@@ -625,7 +626,7 @@ describe("what a gate may not read", () => {
       expect(deny).toContain(join(vtcHome, name));
     }
     for (const name of GATE_READABLE_VTC_HOME) expect(deny).not.toContain(join(vtcHome, name));
-    expect(GATE_READABLE_VTC_HOME).toEqual([SCANNERS_DIR, RULES_DIR, OSV_DB_DIR]);
+    expect(GATE_READABLE_VTC_HOME).toEqual([SCANNERS_DIR, RULES_DIR, OSV_DB_DIR, BROWSERS_DIR]);
   });
 
   it("denies the host config directories and credential files, wherever the environment moves them", () => {

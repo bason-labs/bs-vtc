@@ -20,6 +20,8 @@ export const traceabilityPath = (owner: string): string =>
 
 export type PendingWrite =
   | { readonly rel: string; readonly redact: boolean; readonly text: string }
+  /** Binary evidence (visual screenshots and diffs): written as it is, never redacted. */
+  | { readonly rel: string; readonly redact: false; readonly bytes: Uint8Array }
   | {
       readonly rel: string;
       readonly redact: boolean;
@@ -63,6 +65,10 @@ export const flushWrites = (
   knownValues: readonly string[],
 ): void => {
   for (const write of writes) {
+    if ("bytes" in write) {
+      writeRepoFile(repoRoot, write.rel, write.bytes);
+      continue;
+    }
     const json =
       "json" in write
         ? write.redact

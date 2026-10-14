@@ -666,6 +666,65 @@ export const detectToolchain = (root: string, options: DetectOptions): Detection
   return { gates, sources, tests: detectTestLayout(root), notes };
 };
 
+// ------------------------------------------------------- the visual app server
+
+/** An app server the visual step could render screens from (`gates.yml` `visual.app`). */
+export interface ProposedVisualApp {
+  readonly command: string[];
+  /** The loopback URL it answers on. */
+  readonly url: string;
+  /** The package.json script it runs. */
+  readonly script: string;
+}
+
+/** Default ports of common dev and preview servers, most specific first. */
+const SERVER_PORTS: readonly (readonly [RegExp, number])[] = [
+  [/\bvite\s+preview\b/, 4173],
+  [/\bastro\b/, 4321],
+  [/\bng\s+serve\b/, 4200],
+  [/\bwebpack(-dev-server|\s+serve)\b/, 8080],
+  [/\bnext\b|\bnuxi?\b|\breact-scripts\s+start\b|\bremix-serve\b/, 3000],
+  [/\bvite\b|\bsvelte-kit\b/, 5173],
+];
+
+/** The port a server script names (`--port 4000`, `--port=4000`, `-p 4000`, `PORT=4000`). */
+const explicitPort = (body: string): number | null => {
+  const match = /(?:--port[=\s]+|(?:^|\s)-p\s+|\bPORT=)(\d{2,5})\b/.exec(body);
+  const port = match?.[1] === undefined ? null : Number(match[1]);
+  return port !== null && port > 0 && port < 65536 ? port : null;
+};
+
+/**
+ * The visual step's app server from package.json: the first of the `dev`, `start` and `preview`
+ * scripts whose port is named or known from the server it runs, on `http://localhost:<port>`.
+ * Only a proposal: `vtc calibrate` shows it and a human confirms it (and its argv, §15).
+ */
+export const detectVisualApp = (
+  root: string,
+): { readonly app: ProposedVisualApp | null; readonly notes: string[] } => {
+  const pkg = readJson(root, "package.json");
+  const pm = nodePm(root);
+  if (pkg === null || pm === null) return { app: null, notes: [] };
+  const scripts = (pkg.scripts ?? {}) as Record<string, unknown>;
+  const notes: string[] = [];
+  for (const script of ["dev", "start", "preview"]) {
+    const body = scripts[script];
+    if (typeof body !== "string") continue;
+    const port = explicitPort(body) ?? SERVER_PORTS.find(([re]) => re.test(body))?.[1] ?? null;
+    if (port === null) {
+      notes.push(
+        `the ${script} script (${body.slice(0, 80)}) names no port vtc knows: no visual app server proposed from it`,
+      );
+      continue;
+    }
+    return {
+      app: { command: runScript(pm, script), url: `http://localhost:${String(port)}`, script },
+      notes,
+    };
+  }
+  return { app: null, notes };
+};
+
 /** The argv prefix a human confirms for a command: the tokens before its first placeholder. */
 export const allowlistPrefix = (command: readonly string[]): string[] => {
   const cut = command.findIndex((t) => /\{(base|head|changed|rules)\}/.test(t));
