@@ -26,9 +26,8 @@ import {
   DESIGN_SCREENS_PATH,
   DisciplineSchema,
   EscalationEffectSchema,
+  ENGINE_HTTP,
   EvidenceTypeSchema,
-  FactStatusSchema,
-  FetcherIdSchema,
   FindingCategorySchema,
   FindingKindSchema,
   G2DirectionSchema,
@@ -39,7 +38,6 @@ import {
   prototypeStatePath,
   ResearchDepthSchema,
   resolveRoleMode,
-  ROLE_MCP_TOOLS,
   ScorecardMetricIdSchema,
   SUMMARY_MAX_CHARS,
   TASK_PACK_SECTIONS,
@@ -52,6 +50,8 @@ import {
 import { EDITABLE_IN_PACK_NOTE } from "./prompt-parts.js";
 import { renderTemplate, selectMode } from "./role-source.js";
 import type { LoadedRole } from "./role-source.js";
+
+const ENGINE_DIRECTION_FIELDS: ReadonlySet<string> = new Set(["first_viewport", "novelty"]);
 
 /** Values every prompt part may reference as `{{name}}`. */
 export const PROTOCOL_VARS: Readonly<Record<string, string>> = {
@@ -77,13 +77,14 @@ export const PROTOCOL_VARS: Readonly<Record<string, string>> = {
   scorecard_metrics: ScorecardMetricIdSchema.options.join(", "),
   max_proposal_changes: String(LOOKBACK_LIMITS.maxProposalChanges),
   lookback_proposals_dir: LOOKBACK_REPO.proposalsDir,
-  /** Research (AD-22): the role-facing tools, the fetchers behind them and the fact statuses. */
-  role_mcp_tools: ROLE_MCP_TOOLS.map((tool) => tool.name).join(", "),
-  fetchers: FetcherIdSchema.options.join(", "),
-  fact_statuses: FactStatusSchema.options.join(", "),
-  /** G2 (§9.1): what the Designer gives each direction; the engine adds its novelty verdict. */
+  /** Where the prototype server serves from (§17); the Designer's G2 directions live under it. */
+  prototype_root: ENGINE_HTTP.prototype.root,
+  /**
+   * G2 (§9.1): the `G2Direction` fields the Designer gives each direction; the engine adds the
+   * first-viewport capture and its novelty verdict.
+   */
   g2_direction_fields: Object.keys(G2DirectionSchema.shape)
-    .filter((key) => key !== "novelty")
+    .filter((key) => !ENGINE_DIRECTION_FIELDS.has(key))
     .map((key) => `\`${key}\``)
     .join(", "),
 };

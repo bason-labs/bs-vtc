@@ -122,6 +122,10 @@ false` for all, reading 82), but the write paths are not a host deny; the engine
   `features`), so whichever load path the spike confirms can use it unchanged.
 - The Codex plugin's install path (a marketplace entry and `[plugins."vtc@<marketplace>"]`) stays
   a spine §7 spike row; the manifest and `mcp.json` follow the official portable format above.
+  The same spike settles the engine's registration on Codex: the plugin's `mcp.json` and the
+  adapter installer's `[mcp_servers.vtc]` in `config.toml` (AD-16 rule 3) both name the server
+  `vtc`, and which one Codex keeps when it loads both is undocumented, so only one of the two
+  paths stays once the spike has run.
 - AD-9 applies to every file here and every emitted file: no permission-bypass flag, no credential
   path or credential variable, not even in a "never do this" list. The compile step fails on one.
 - Host adapters' `install` only places or registers what the compiler emitted.
