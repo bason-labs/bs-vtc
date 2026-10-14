@@ -32,8 +32,8 @@ import {
   isEventOfType,
   LOOKBACK_REPO,
   parsePersisted,
+  lookbackTiebreakKey,
   readEventData,
-  sha256Hex,
   type Attribution,
   type AttributionRule,
   type Evidence,
@@ -406,23 +406,12 @@ export interface AttributionHistory {
 }
 
 /**
- * The digest that ties an `ai_tiebreak` row to the engine's own record of that answer: its trace,
- * prompt version, blame, confidence and evidence (`attributed_at` and `split` are left out).
+ * The digest that ties an `ai_tiebreak` row to the engine's own record of that answer
+ * (`LookbackTiebreakRecord.tiebreak_key`): `@vtc/shared`'s `lookbackTiebreakKey`, frozen from this
+ * function in 4.10.0 with the same digest (spine §5 reading 175), so core can key a record it
+ * writes without importing lookback.
  */
-export const tiebreakKey = (a: Attribution): string =>
-  sha256Hex(
-    JSON.stringify([
-      a.run,
-      a.trace,
-      a.prompt.role,
-      a.prompt.mode ?? null,
-      a.prompt.host,
-      a.prompt.effective_sha256,
-      a.blamed_role,
-      a.confidence,
-      a.evidence.map((e) => [e.type, e.ref]),
-    ]),
-  );
+export const tiebreakKey: (a: Attribution) => string = lookbackTiebreakKey;
 
 /** The same prompt version: role, mode, host and all three hashes. */
 export const samePrompt = (a: Attribution["prompt"], b: Attribution["prompt"]): boolean =>

@@ -7,10 +7,14 @@
 import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
-import { validateEventData, type PromptProposal } from "@vtc/shared";
+import { engineRepoKey, validateEventData, type PromptProposal } from "@vtc/shared";
 import type { RunState } from "../../src/core/index.js";
 import {
+  appendAttributions,
+  appendTiebreakRecord,
+  buildTraces,
   createLookbackRetro,
+  tiebreakAttribution,
   graderBundleSha,
   loadPromptVersionSync,
   promptVersionRef,
@@ -176,5 +180,72 @@ describe("Lookback at RETRO (AD-21 rules 4 and 8)", () => {
     if (!refused.ok) expect(refused.problems.join("\n")).toContain("current locked core");
     const codex = await retro.check({ role: "engineer", host: "codex" }, worktree, state);
     expect(codex.ok).toBe(false);
+  });
+
+  it("trusts an AI tiebreak a proposal cites only when the engine's tiebreak store records it", async () => {
+    // a run whose engineer tasks parked on their cap with no signal: inconclusive, for a tiebreak
+    const log = new RunLog("r1");
+    for (let i = 1; i <= 12; i += 1) {
+      const task = `T-${String(i)}`;
+      log.taskCreated(task, "backend", ["node"]);
+      log.dispatch("engineer", { task, tokens: 2000 });
+      log.status(task, "fixing", "parked", 4, "cap");
+    }
+    const projectRoot = await tempDir("retro-tb");
+    const vtcHome = await tempDir("retro-tb-home");
+    const trace = buildTraces(log.events, lockedShaFor).find(
+      (t) => t.task !== undefined && traceSplit(t) === "train",
+    );
+    if (trace === undefined) throw new Error("no train trace");
+    const tiebreak = tiebreakAttribution({
+      trace,
+      blamed: "engineer",
+      confidence: 0.7,
+      evidence: [],
+      now,
+    });
+    if (tiebreak === undefined) throw new Error("unversioned");
+    await appendAttributions(projectRoot, [tiebreak]);
+    const retro = createLookbackRetro({
+      projectRoot,
+      vtcHome,
+      history: () => log.events,
+      lockedShaFor,
+      compiled: (role) =>
+        role === "engineer" ? { locked: LOCKED, editable: EDITABLE } : undefined,
+      graderBundleSha: () => graderBundleSha({ judgeModel: null, gatesConfigHash: null }),
+      weeklyRemainingPct: () => 80,
+      budgetAvailable: () => true,
+      now: () => now,
+    });
+    const state = { id: "r1", events: log.events } as unknown as RunState;
+    const worktree = await tempDir("retro-tb-wt");
+    await writeProposal(worktree, {
+      v: 1,
+      id: "engineer-tiebreak",
+      base,
+      changes: [
+        {
+          hypothesis: "Asking early cuts parked tasks.",
+          target_metric: "first_round_gate_pass",
+          trace_ids: [traceSlug(tiebreak)],
+          summary: "Escalate a blocker early.",
+        },
+      ],
+      editable: "Prefer small diffs. Escalate a blocker early.",
+      created_at: now.toISOString(),
+    });
+    const unrecorded = await retro.check({ role: "engineer", host: HOST }, worktree, state);
+    expect(unrecorded.ok).toBe(false);
+    if (!unrecorded.ok)
+      expect(unrecorded.problems.join("\n")).toContain("not an attributed train failure");
+    await appendTiebreakRecord(vtcHome, {
+      attribution: tiebreak,
+      repo_key: engineRepoKey(projectRoot),
+      recorded_at: now.toISOString(),
+    });
+    expect(await retro.check({ role: "engineer", host: HOST }, worktree, state)).toMatchObject({
+      ok: true,
+    });
   });
 });

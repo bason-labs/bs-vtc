@@ -10,8 +10,10 @@
  * `indexOf` scans, and every later step walks the tokens once. No regular expression here runs
  * over markup, so many unclosed `<`, `<script` or `<!--` cost one pass, not a square.
  *
- * It is a baseline, not Readability: the research proposes `@mozilla/readability`, `linkedom` and
- * `turndown` for better extraction, which needs the integrator to add them.
+ * This dependency-free converter stays (spine §5 reading 175): `@mozilla/readability`, `linkedom`
+ * and `turndown` were declined. With H-3 the host reads pages for the role, and the `web` fetcher
+ * only has to turn a page into text a verbatim quote can be checked against, which this does
+ * deterministically (Readability's content heuristics could drop the quoted passage).
  */
 
 const DROP_ELEMENTS = new Set([

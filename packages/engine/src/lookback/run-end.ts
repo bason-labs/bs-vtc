@@ -17,7 +17,13 @@
  * of a run outside the history, of a dispatch the history does not show, or of a failure its
  * events do not show is ignored (`trustedAttributions`).
  */
-import { LOOKBACK_LIMITS, type Attribution, type Scorecard, type VtcEvent } from "@vtc/shared";
+import {
+  engineRepoKey,
+  LOOKBACK_LIMITS,
+  type Attribution,
+  type Scorecard,
+  type VtcEvent,
+} from "@vtc/shared";
 import {
   appendAttributions,
   attributeRun,
@@ -28,6 +34,7 @@ import {
 import { lookbackEvent, type LookbackEventDraft } from "./events.js";
 import { capDiff, humanEdits, LOOKBACK_MAX_HUMAN_EDITS, type HumanEdit } from "./human-edits.js";
 import { computeScorecards, writeScorecards } from "./scorecards.js";
+import { readTiebreakKeys } from "./tiebreaks.js";
 import { sameTarget, targetKey, traceRef, traceSlug, type LockedShaFor } from "./traces.js";
 
 /** Most failures one lookback dispatch reads (§13 step 1: 5–10). */
@@ -191,14 +198,22 @@ export const lookbackAtRunEnd = async (input: {
   readonly humanEditDiff?: HumanEditDiff;
   /**
    * `tiebreakKey`s of the AI tiebreaks the engine recorded where no role can write
-   * (`AttributionHistory.tiebreaks`): without them no `ai_tiebreak` row counts.
+   * (`AttributionHistory.tiebreaks`): without them no `ai_tiebreak` row counts. Absent, they are
+   * read from the tiebreak store under `vtcHome` ({@link readTiebreakKeys}) when that is given.
    */
   readonly tiebreaks?: ReadonlySet<string>;
+  /** The VTC home whose `LOOKBACK_HOME.tiebreaksFile` holds the recorded tiebreaks. */
+  readonly vtcHome?: string;
 }): Promise<RunEndResult> => {
+  const tiebreaks =
+    input.tiebreaks ??
+    (input.vtcHome === undefined
+      ? undefined
+      : await readTiebreakKeys(input.vtcHome, engineRepoKey(input.projectRoot)));
   const recorded = await readAttributions(input.projectRoot, {
     history: input.history,
     lockedShaFor: input.lockedShaFor,
-    ...(input.tiebreaks === undefined ? {} : { tiebreaks: input.tiebreaks }),
+    ...(tiebreaks === undefined ? {} : { tiebreaks }),
   });
   const result = attributeRun({
     events: input.events,
