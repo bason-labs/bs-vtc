@@ -103,4 +103,17 @@ describe("file research cache (AD-22 rule 2)", () => {
     expect(await mine.get("_shared", key)).toBeUndefined();
     expect(await mine.get("_shared", "b".repeat(64))).toBeDefined();
   });
+
+  it("loses no index line to overlapping lookups (the daemon shares one cache across calls)", async () => {
+    const cache = createFileResearchCache(await tempDir("cache"));
+    const keyOf = (i: number): string => i.toString(16).padStart(64, "0");
+    for (let i = 0; i < 20; i += 1) await cache.put("_shared", entry({ key: keyOf(i) }), body);
+    await Promise.all([cache.get("_shared", keyOf(0)), cache.get("_shared", keyOf(1))]);
+    // Entries put after the overlapping lookups, with no lookup in between: all still visible.
+    for (let i = 20; i < 50; i += 1) await cache.put("_shared", entry({ key: keyOf(i) }), body);
+    const missing: number[] = [];
+    for (let i = 0; i < 50; i += 1)
+      if ((await cache.get("_shared", keyOf(i))) === undefined) missing.push(i);
+    expect(missing).toEqual([]);
+  });
 });

@@ -68,16 +68,32 @@ export const parseJsonLines = (
 /**
  * An append-only JSONL file read incrementally: each {@link JsonlTail.read} parses only the whole
  * lines appended since the last one (a torn last line waits for its newline), and starts over when
- * the file shrank or was replaced. Other processes may append to the same file meanwhile.
+ * the file shrank or was replaced. Other processes may append to the same file meanwhile. Reads
+ * of one instance run one at a time: overlapping reads would each start at the same offset and
+ * each advance it, skipping the lines appended after.
  */
 export class JsonlTail {
   private offset = 0;
   private identity: string | undefined;
+  /** The read in flight (settled when none is); the next read starts after it. */
+  private pending: Promise<unknown> = Promise.resolve();
 
   constructor(private readonly path: string) {}
 
   /** The JSON values of the lines appended since the last read; `reset` when it starts over. */
-  async read(): Promise<{ readonly reset: boolean; readonly values: readonly unknown[] }> {
+  read(): Promise<{ readonly reset: boolean; readonly values: readonly unknown[] }> {
+    const next = this.pending.then(
+      () => this.readNow(),
+      () => this.readNow(),
+    );
+    this.pending = next.catch(() => undefined);
+    return next;
+  }
+
+  private async readNow(): Promise<{
+    readonly reset: boolean;
+    readonly values: readonly unknown[];
+  }> {
     let handle;
     try {
       handle = await open(this.path, "r");

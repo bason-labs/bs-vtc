@@ -24,6 +24,8 @@ export interface FetchQuota {
   forRun(run: string): FetchQuotaSlot;
   /** Requests the run has taken. */
   used(run: string): number;
+  /** Drops a finished run's count (call at `run.finished`, so the counts do not grow forever). */
+  forget(run: string): void;
 }
 
 export const createFetchQuota = (max: number = RESEARCH_FETCH_MAX_PER_RUN): FetchQuota => {
@@ -42,6 +44,9 @@ export const createFetchQuota = (max: number = RESEARCH_FETCH_MAX_PER_RUN): Fetc
       },
     }),
     used: (run) => used.get(run) ?? 0,
+    forget: (run) => {
+      used.delete(run);
+    },
   };
 };
 

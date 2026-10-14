@@ -51,10 +51,25 @@ const CLAIM_PATTERNS: readonly RegExp[] = [
  */
 const WINDOW = 2_000;
 const WINDOW_OVERLAP = 200;
+/**
+ * How far a window edge moves to sit next to a non-word character, so a `\b` at the edge reads
+ * as it does in the whole line (a slice starting inside `xv1.2` must not see `v1.2`). Within a
+ * longer run of word characters the edge stays put.
+ */
+const EDGE_SHIFT = 50;
+
+const isWordChar = (char: string | undefined): boolean => char !== undefined && /\w/.test(char);
 
 const hasClaim = (body: string): boolean => {
   for (let start = 0; start < body.length; start += WINDOW - WINDOW_OVERLAP) {
-    const window = body.slice(start, start + WINDOW);
+    let from = start;
+    while (from > 0 && from < start + EDGE_SHIFT && isWordChar(body[from - 1])) from += 1;
+    if (from > 0 && isWordChar(body[from - 1])) from = start;
+    const end = Math.min(start + WINDOW, body.length);
+    let to = end;
+    while (to < body.length && to > end - EDGE_SHIFT && isWordChar(body[to])) to -= 1;
+    if (to < body.length && isWordChar(body[to])) to = end;
+    const window = body.slice(from, to);
     if (CLAIM_PATTERNS.some((pattern) => pattern.test(window))) return true;
     if (start + WINDOW >= body.length) break;
   }

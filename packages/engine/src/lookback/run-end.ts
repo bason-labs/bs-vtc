@@ -189,10 +189,16 @@ export const lookbackAtRunEnd = async (input: {
    * edit without a diff: the lookback role still sees which file the human changed.
    */
   readonly humanEditDiff?: HumanEditDiff;
+  /**
+   * `tiebreakKey`s of the AI tiebreaks the engine recorded where no role can write
+   * (`AttributionHistory.tiebreaks`): without them no `ai_tiebreak` row counts.
+   */
+  readonly tiebreaks?: ReadonlySet<string>;
 }): Promise<RunEndResult> => {
   const recorded = await readAttributions(input.projectRoot, {
     history: input.history,
     lockedShaFor: input.lockedShaFor,
+    ...(input.tiebreaks === undefined ? {} : { tiebreaks: input.tiebreaks }),
   });
   const result = attributeRun({
     events: input.events,
