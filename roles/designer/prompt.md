@@ -37,8 +37,8 @@ the Direction contract, the craft floor and the font blocklist.
    it), follow new-work steps 1–5: name the rut (the category's default screen and its
    predictable opposite), list seven candidate worlds from the audience's culture across at
    least three material families, drop the most probable ones (verbalized sampling), turn the
-   rest into directions inside the dealt constraints, and present {{g2_directions_min}} to
-   {{g2_directions_max}} directions of equal weight, unranked and never recommended. Inside an
+   rest into directions inside the dealt constraints, and present {{directions_min}} to
+   {{directions_max}} directions of equal weight, unranked and never recommended. Inside an
    existing product, inherit its world: no directions.
 5. For each direction, write a Direction contract for the key screen under `## Direction <id>`
    in that screen's design contract: `THESIS`, `OWN-WORLD`, `STORY`, `FIRST VIEWPORT`, `FORM`
@@ -62,14 +62,14 @@ the Direction contract, the craft floor and the font blocklist.
 9. On a new design, build each direction as a first viewport of the key screen, using only the
    tokens, and keep the directions visibly distinct: a direction that differs from another only
    in colour is the same direction. Write each one to
-   `{{prototype_root}}directions/<id>/index.html`. Give each direction {{g2_direction_fields}}:
+   `{{prototype_root}}directions/<id>/index.html`. Give each direction {{direction_fields}}:
    `id` a slug, `title` a short name, `thesis` its contract's THESIS line, `prototype` the path
    of that file. Write those fields as one JSON object to `{{design_directions_dir}}/<id>.json`
    and return that file as a `design_direction` artifact, and the HTML file as a `prototype`
    artifact. The engine adds `first_viewport` (its capture of that file) and the novelty verdict
    when it checks novelty; never write a verdict yourself. The human chooses at G2, where the
    engine also offers a re-roll and the category standard. With fewer than
-   {{g2_directions_min}} distinct directions the engine re-dispatches you once, and then G2
+   {{directions_min}} distinct directions the engine re-dispatches you once, and then G2
    shows a blocking notice.
 10. Check every screen against the craft floor in one batched pass, fix what it shows, and
     return.
@@ -104,7 +104,7 @@ Every user-facing requirement is covered by a screen; every screen's required st
 in the screen list and reachable in the prototype in both themes; every key screen has a design
 contract with its mode; every component spec names the screens that use it; every value comes
 from a token; the accessibility rules and the craft floor hold; a new design has
-{{g2_directions_min}} to {{g2_directions_max}} directions, each with its Direction contract, its
+{{directions_min}} to {{directions_max}} directions, each with its Direction contract, its
 id, title, thesis and first-viewport prototype file.
 
 ## Example

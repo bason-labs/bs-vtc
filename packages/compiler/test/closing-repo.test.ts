@@ -118,9 +118,9 @@ describe("engineer profiles' identity covers the Engineer prompt (D-br, reading 
 });
 
 describe("the Research Analyst searches with its host's web tools (H-3, reading 156)", () => {
-  it("opts in with host_web, at version 2.1.0", () => {
+  it("opts in with host_web, at MAJOR version 3.0.0 for the locked-core edit (D-bm)", () => {
     expect(role("research_analyst")?.tools.host_web).toBe(true);
-    expect(role("research_analyst")?.version).toBe("2.1.0");
+    expect(role("research_analyst")?.version).toBe("3.0.0");
   });
 
   it("is the only role with host web tools, and never a code_sandboxed one", () => {

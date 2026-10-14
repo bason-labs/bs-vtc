@@ -340,6 +340,26 @@ const identitySections = (
   editable: loaded.prompt.editable.trim(),
 });
 
+/**
+ * The Engineer's locked core must compile verbatim (spine §5 reading 172, D-br): a profile's
+ * identity hashes the Engineer's raw sections (`identitySections`), while its instructions render
+ * them, so a placeholder or a mode block there would make the hashed text differ from what the
+ * profiles run.
+ */
+export const engineerLockedCoreErrors = (locked: string): string[] =>
+  locked.split("\n").flatMap((line, index) => {
+    const at = `locked core line ${String(index + 1)}`;
+    const trimmed = line.trim();
+    return [
+      ...(trimmed.startsWith("<!-- vtc:mode")
+        ? [`${at}: no mode block in the Engineer's locked core; profiles hash it unrendered`]
+        : []),
+      ...(/\{\{[a-z_]+\}\}/.test(line)
+        ? [`${at}: no placeholder in the Engineer's locked core; profiles hash it unrendered`]
+        : []),
+    ];
+  });
+
 const compileAgents = (
   roles: readonly LoadedRole[],
   host: HostId,
@@ -362,6 +382,7 @@ const compileAgents = (
         ...needs.errors,
         ...advisorContractErrors(role),
         ...codexModelErrors(role),
+        ...(role.id === "engineer" ? engineerLockedCoreErrors(loaded.prompt.locked) : []),
       ];
       if (built.ok && built.editable !== loaded.prompt.editable.trim()) {
         // `editableSectionErrors` makes this unreachable; a proposal must map back to prompt.md.

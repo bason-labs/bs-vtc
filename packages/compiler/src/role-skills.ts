@@ -1,11 +1,12 @@
 /**
  * Skills an agent needs in context (spec §8.1, §9.1, §10; spine AD-22): a role's own reference
- * skill (the Architect's method references, the Designer's and Visual QA's design craft) and the skill that teaches each role-facing engine tool
- * the role declares (`ROLE_MCP_TOOLS`). On Claude Code the agent preloads them through its
- * `skills` frontmatter (code.claude.com/docs/en/sub-agents, "Preload skills into subagents"),
- * because an agent without the `Skill` tool cannot load one itself; plugin skills are namespaced
- * by the plugin (`vtc:<skill>`). A Codex session lists every installed skill with its path, so a
- * Codex agent file names none.
+ * skill (the Architect's method references, the Designer's and Visual QA's design craft) and the
+ * skill that teaches each role-facing engine tool the role declares (`ROLE_MCP_TOOLS`). On Claude
+ * Code the agent preloads them through its `skills` frontmatter
+ * (code.claude.com/docs/en/sub-agents, "Preload skills into subagents"), because an agent without
+ * the `Skill` tool cannot load one itself; plugin skills are namespaced by the plugin
+ * (`vtc:<skill>`). A Codex session lists every installed skill with its path, so a Codex agent
+ * file names none.
  */
 import type { RoleMcpToolName } from "@vtc/shared";
 

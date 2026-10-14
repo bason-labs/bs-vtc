@@ -84,9 +84,12 @@ export const PROTOCOL_VARS: Readonly<Record<string, string>> = {
    * artifacts. Not a frozen path yet (a contract proposal), so it is derived from the frozen one.
    */
   design_contracts_dir: DESIGN_CONTRACTS_DIR,
-  /** How many directions G2 offers on a new-repo UI (`G2_DIRECTIONS`, D-bt). */
-  g2_directions_min: String(G2_DIRECTIONS.min),
-  g2_directions_max: String(G2_DIRECTIONS.max),
+  /**
+   * How many directions G2 offers on a new-repo UI (`G2_DIRECTIONS`, D-bt). Placeholder names
+   * carry no digits: the shared editable-section rule detects only `{{[a-z_]+}}`.
+   */
+  directions_min: String(G2_DIRECTIONS.min),
+  directions_max: String(G2_DIRECTIONS.max),
   prototype_themes: PrototypeThemeSchema.options.join(", "),
   /** One state's prototype URL path, as `prototypeStatePath` builds it. */
   prototype_state_example: prototypeStatePath("/invoices", "empty", "dark"),
@@ -114,7 +117,7 @@ export const PROTOCOL_VARS: Readonly<Record<string, string>> = {
    * G2 (§9.1): the `G2Direction` fields the Designer gives each direction; the engine adds the
    * first-viewport capture and its novelty verdict.
    */
-  g2_direction_fields: Object.keys(G2DirectionSchema.shape)
+  direction_fields: Object.keys(G2DirectionSchema.shape)
     .filter((key) => !ENGINE_DIRECTION_FIELDS.has(key))
     .map((key) => `\`${key}\``)
     .join(", "),
