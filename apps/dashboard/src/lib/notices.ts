@@ -57,6 +57,7 @@ const INCIDENT_TITLES: Readonly<Record<IncidentKind, string>> = {
   checkout_write: "Unexplained write in the checkout",
   host_config_restored: "Host config in a worktree was restored",
   unsandboxed_gate: "Gates ran without an OS sandbox",
+  run_adopted: "Run adopted from another clone",
 };
 
 const MERGE_REASONS: Readonly<Record<EventData<"run.merge_level_changed">["reason"], string>> = {
