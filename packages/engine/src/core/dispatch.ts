@@ -78,7 +78,7 @@ import { parkEscalation } from "./escalations.js";
 import { recordDispatch, type DispatchRecord } from "./dispatch-guard.js";
 import { architectDepth, dealDesignConstraints, researchDepth } from "./lottery.js";
 import { prepareRoleWorktree } from "./role-worktree.js";
-import { prepareTrial, refuseTrial, type ReplayStepRef } from "./replay.js";
+import { prepareTrial, refuseTrial, replayTrialRef, type ReplayStepRef } from "./replay.js";
 import { HEADLESS_LOADS_AGENT, pinBlocker } from "./prompt-target.js";
 
 export { HEADLESS_LOADS_AGENT } from "./prompt-target.js";
@@ -1043,6 +1043,9 @@ export const dispatchStep = (
     pinned?.canary === undefined || step.task === undefined
       ? undefined
       : assignCanary(k, h, step.task, step.role, pinned.canary);
+  // reading 177: a replay trial is marked in the log, so every reader can leave it out
+  const trialRef =
+    step.replay === undefined ? undefined : replayTrialRef(k, h.state.id, step.replay);
   k.emit(h, {
     type: "role.dispatched",
     actor: "engine",
@@ -1067,6 +1070,7 @@ export const dispatchStep = (
       resume: resume ?? null,
       ...(pinned === null ? {} : { editable_sha256: pinned.version.editable_sha256 }),
       ...(arm === undefined ? {} : { canary_arm: arm.arm }),
+      ...(trialRef === undefined ? {} : { purpose: "lookback_replay" as const, replay: trialRef }),
     },
   });
   const capabilities = k.deps.adapters[host]?.capabilities;

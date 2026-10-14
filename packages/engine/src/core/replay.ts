@@ -44,11 +44,11 @@
  * run finishes, and the replays not yet written wait for the next RETRO. The plan, the trial
  * dispatches and their grades live in the engine's private directory (`<guard>/replays/`), where
  * no role can write, so a restart picks the replays up where they stopped. That file is the only
- * record of which role runs are trials (the frozen `role.dispatched` carries no purpose), so a
- * clone or a machine without it reads trial dispatches as the run's own work (AD-7 rules 1, 5 and
- * 10). OPEN: engine-core's contract proposal (an optional `purpose` on `role.dispatched`, filed
- * with the integrator in the closing round) puts the marker in the log; once it is frozen,
- * `lookbackEvents` filters on the logged marker instead of this file.
+ * cache of which role runs are trials: since contracts 4.11.0 (spine §5 reading 177) a trial's
+ * `role.dispatched` carries `purpose: lookback_replay` and its `replay` reference, so a clone or
+ * a machine without this file still tells trial dispatches from the run's own work (AD-7 rules 1,
+ * 5 and 10); `lookbackEvents` filters on the logged marker and on this file, for logs written
+ * before 4.11.0.
  *
  * Action ids are the run's role-run count plus one, so a trial that never got its role run (its
  * checkout could not be made, or the engine stopped before the dispatch) leaves its id to the next
@@ -65,6 +65,7 @@ import {
   TaskIdSchema,
   type GateRunRequestInput,
   type HostId,
+  type ReplayTrialRef,
   type TaskPack,
 } from "@vtc/shared";
 import {
@@ -483,6 +484,18 @@ const tokensOf = (run: RoleRunRecord | undefined): number =>
 /** The trial at `t` in the run's plan. */
 const trialAt = (k: Kernel, run: string, t: TrialRef): LookbackReplayTrial | undefined =>
   readReplayPlan(k, run)?.replays[t.replay]?.trials[t.n];
+
+/**
+ * The trial a `lookback_replay` dispatch names in its `role.dispatched.replay` (contracts 4.11.0,
+ * spine §5 reading 177), or `undefined` when the plan no longer has it.
+ */
+export const replayTrialRef = (k: Kernel, run: string, t: TrialRef): ReplayTrialRef | undefined => {
+  const replay = readReplayPlan(k, run)?.replays[t.replay];
+  const trial = replay?.trials[t.n];
+  return replay === undefined || trial === undefined
+    ? undefined
+    : { proposal: replay.proposal, task: trial.task, arm: trial.arm, trial: trial.trial };
+};
 
 /** Drops the checkout of the trial at `t` that `action` ran (when one was recorded). */
 const dropTrialCheckout = (k: Kernel, run: string, t: TrialRef, action: string): void => {

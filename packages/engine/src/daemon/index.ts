@@ -245,7 +245,18 @@ export const wireLookback = (
   // a run's events as Lookback reads them: without its replay trials, which measure a version and
   // are no trace of the run's work (no attribution, no scorecard dispatch; reading 176)
   const lookbackEvents = (state: RunState): readonly VtcEvent[] => {
-    const trials = engine.replayTrialActions(state.id);
+    // reading 177: a trial is marked in the log; the private file covers logs before 4.11.0
+    const trials = new Set(engine.replayTrialActions(state.id));
+    for (const e of state.events) {
+      const data = e.data as { purpose?: unknown; action_id?: unknown };
+      if (
+        e.type === "role.dispatched" &&
+        data.purpose === "lookback_replay" &&
+        typeof data.action_id === "string"
+      ) {
+        trials.add(data.action_id);
+      }
+    }
     if (trials.size === 0) return state.events;
     return state.events.filter((e) => {
       const action = (e.data as { action_id?: unknown }).action_id;
