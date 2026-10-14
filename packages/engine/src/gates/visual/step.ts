@@ -10,10 +10,17 @@
  * - The pin does not match, the runner failed, no app server is configured or allowed: `error`
  *   (gate infrastructure, §6.8: a human sets the app server up with `vtc calibrate`).
  * - Settings come from `gates.yml` `visual` (`visualConfigFor`); `screens.yaml`, `tokens.json`
- *   and the approved prototype are read at the base commit, so a diff cannot change what verifies
- *   it. The prototype comes from a clean checkout of the base made for this step only: no gate
- *   command ever ran in it, and the sandboxed runner may read it but not write it (the app server
- *   and earlier gates can write only the verification checkout).
+ *   and the approved prototype are read at the base commit, so a diff cannot change the reference
+ *   it is compared with. The prototype comes from a clean checkout of the base made for this step
+ *   only: no gate command ever ran in it, and the sandboxed runner may read it but not write it.
+ * - The verdict comes only from a result the runner signed with a key the app server never sees,
+ *   and from images that match the hashes in it (`runner.ts`): the app server shares the runner's
+ *   sandbox and temp directory, but cannot forge either. That holds for the comparison code only
+ *   when it is VTC's: on the doctor-installed store's Playwright. On the project's own Playwright
+ *   (preferred when installed, reading 96) the runner process runs `playwright-core` from the
+ *   verification checkout, which the change under review can modify (its install scripts run
+ *   there), so the report carries a visible note saying the comparison ran on project-controlled
+ *   code. axe-core and pixelmatch come from the store whenever it has them.
  * - The images copied into evidence are capped per run ({@link MAX_VISUAL_EVIDENCE_BYTES}): diff
  *   images first, then screenshots; whatever is left out is a visible note.
  */
@@ -63,6 +70,13 @@ export const MAX_VISUAL_EVIDENCE_BYTES = 64 * 1024 * 1024;
 /** The fixed clock of every render (§7.5 determinism). */
 export const VISUAL_FIXED_TIME = "2026-01-15T12:00:00.000Z";
 const STYLE_LIMIT = 400;
+
+/**
+ * The visible note of a run on the project's own Playwright: the render, axe and the pixel diff
+ * ran in a process that loaded code the change under review can modify.
+ */
+export const PROJECT_TOOLCHAIN_NOTE = (toolchain: VisualToolchain): string =>
+  `the renders, axe and the pixel diff ran on the project's own Playwright (playwright-core ${toolchain.playwrightVersion} from the verification checkout), code the change under review can modify through its dependencies and install scripts, so this result is only as trustworthy as those packages; the store from vtc doctor --install-browser runs VTC's own comparison code but is used only when the project has no usable Playwright`;
 const NAV_TIMEOUT_MS = 30_000;
 const MAX_DETECTOR_BYTES = 2 * 1024 * 1024;
 
@@ -313,6 +327,7 @@ export const runVisualStep = async (ctx: VisualStepContext): Promise<VisualStepR
   }
   if (!check.ok) return without("error", check.reason);
   if (check.note !== undefined) visibleNotes.push(check.note);
+  if (toolchain.source === "project") visibleNotes.push(PROJECT_TOOLCHAIN_NOTE(toolchain));
   const pin = check.pin;
   const browser: BrowserIdentity = {
     name: pin.name,

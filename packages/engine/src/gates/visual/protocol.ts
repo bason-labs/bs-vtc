@@ -1,8 +1,15 @@
 /**
  * The protocol between the Gate Runner and the VTC-written visual runner script
- * (`runner-script.ts`, AD-24 rule 1): one JSON input file and one JSON result file in the
- * command's private temp directory. The result is untrusted (it comes out of a sandbox that ran
- * project code), so it is parsed with these schemas and bounded before anything reads it.
+ * (`runner-script.ts`, AD-24 rule 1): one JSON input file, one key file and one JSON result file
+ * in the command's private temp directory. The result is untrusted (it comes out of a sandbox
+ * that ran project code), so it is parsed with these schemas and bounded before anything reads it.
+ *
+ * The app server runs in the same sandbox and can write the same temp directory, so the result
+ * file alone proves nothing: the runner reads and deletes a per-run random key before it starts
+ * any project process, and wraps its result in an envelope with an HMAC under that key
+ * ({@link RunnerEnvelopeSchema}). The result lists the SHA-256 of every image it wrote
+ * (`files`). A result without a valid MAC, or an image that does not match its hash, is never
+ * used.
  */
 import { z } from "zod";
 import { VisualRenderKeySchema } from "@vtc/shared";
@@ -11,6 +18,10 @@ export const RUNNER_INPUT_FILE = "input.json";
 export const RUNNER_RESULT_FILE = "result.json";
 export const RUNNER_SCRIPT_FILE = "vtc-visual-runner.mjs";
 export const RUNNER_OUT_DIR = "out";
+/** The per-run HMAC key; the runner deletes it before it starts the app server. */
+export const RUNNER_KEY_FILE = "key";
+/** Largest result body the Gate Runner reads. */
+export const MAX_RUNNER_BODY = 16 * 1024 * 1024;
 
 /** The computed-style properties the runner collects (§7.5 step 4). */
 export const STYLE_PROPERTIES = [
@@ -73,6 +84,10 @@ export interface RunnerInput {
 const FileNameSchema = z
   .string()
   .regex(/^[A-Za-z0-9._-]{1,200}$/, "a plain file name in the runner's output directory");
+
+const Sha256Schema = z.string().regex(/^[0-9a-f]{64}$/, "a hex SHA-256");
+/** At most a screenshot, a reference and 100 region diffs per render. */
+const MAX_RUNNER_FILES = 2000 * 102;
 
 const AxeItemSchema = z.strictObject({
   rule: z.string().min(1).max(100),
@@ -140,5 +155,20 @@ export const RunnerResultSchema = z.strictObject({
   renders: z.array(RunnerRenderSchema).max(2000).default([]),
   /** A failure of the whole run (the browser did not start, the app server never answered). */
   error: z.string().min(1).max(2000).optional(),
+  /** SHA-256 (hex) of every file the runner wrote into its output directory, by name. */
+  files: z
+    .record(FileNameSchema, Sha256Schema)
+    .refine((f) => Object.keys(f).length <= MAX_RUNNER_FILES, "too many output files")
+    .default({}),
 });
 export type RunnerResult = z.infer<typeof RunnerResultSchema>;
+
+/**
+ * What the runner writes to the result file: the serialized {@link RunnerResultSchema} as `body`
+ * and `mac`, HMAC-SHA256 of `body` under the run's key (hex).
+ */
+export const RunnerEnvelopeSchema = z.strictObject({
+  v: z.literal(1),
+  body: z.string().max(MAX_RUNNER_BODY),
+  mac: Sha256Schema,
+});

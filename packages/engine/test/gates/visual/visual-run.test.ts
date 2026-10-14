@@ -224,12 +224,24 @@ describe("visual step in a gate run", () => {
     expect(existsSync(join(h.repo, shot))).toBe(true);
     const pins = join(h.home, "browsers", "projects");
     expect(existsSync(pins)).toBe(true);
-    const note = written.findings.find((f) => f.rule_id === "vtc-visual/note");
-    expect(note?.title).toMatch(/pinned the project's browser .* on first use/);
-    expect(note?.sarif_level).toBe("note");
+    const notes = written.findings.filter((f) => f.rule_id === "vtc-visual/note");
+    const pinned = notes.find((f) => /pinned the project's browser .* on first use/.test(f.title));
+    expect(pinned?.sarif_level).toBe("note");
+    // The comparison ran in a process that loaded the checkout's playwright-core: said, every run.
+    const projectCode = (fs: readonly { rule_id: string; message?: string | undefined }[]) =>
+      fs.some(
+        (f) =>
+          f.rule_id === "vtc-visual/note" &&
+          /ran on the project's own Playwright .* the change under review can modify/.test(
+            f.message ?? "",
+          ),
+      );
+    expect(projectCode(written.findings)).toBe(true);
     const later = await h.run({ head: h.base, visual: { screens: [] } });
     expect(later.visual?.status).toBe("pass");
-    expect(later.visual?.findings.some((f) => f.rule_id === "vtc-visual/note")).toBe(false);
+    const laterNotes = later.visual?.findings.filter((f) => f.rule_id === "vtc-visual/note") ?? [];
+    expect(laterNotes.some((f) => /pinned the project's browser/.test(f.title))).toBe(false);
+    expect(projectCode(laterNotes)).toBe(true);
   });
 
   it("compares with the base commit's prototype, which neither the diff nor project code can change", async () => {
@@ -273,7 +285,7 @@ describe("visual step in a gate run", () => {
     );
   });
 
-  it("uses axe-core and pixelmatch from the browser store when the project lacks them", async () => {
+  it("prefers axe-core and pixelmatch from the browser store over the project's", async () => {
     const { h, fake } = setup({
       project: "real",
       files: {
@@ -283,6 +295,13 @@ describe("visual step in a gate run", () => {
           main: "index.js",
         }),
         "node_modules/playwright-core/index.js": "",
+        "node_modules/pixelmatch/package.json": JSON.stringify({
+          name: "pixelmatch",
+          main: "index.js",
+        }),
+        "node_modules/pixelmatch/index.js": "",
+        "node_modules/axe-core/package.json": JSON.stringify({ name: "axe-core" }),
+        "node_modules/axe-core/axe.min.js": "",
       },
     });
     const store = join(h.home, "browsers", "node_modules");
@@ -321,9 +340,12 @@ describe("visual step in a gate run", () => {
 
   it("uses the doctor-installed browser and fails closed on a pin mismatch", async () => {
     const ok = setup({ store: "match" });
-    expect((await ok.h.run({ head: ok.h.base, visual: { screens: [] } })).visual?.status).toBe(
-      "pass",
-    );
+    const passed = await ok.h.run({ head: ok.h.base, visual: { screens: [] } });
+    expect(passed.visual?.status).toBe("pass");
+    // VTC's own comparison code: no note about project-controlled code.
+    expect(
+      passed.visual?.findings.some((f) => /the project's own Playwright/.test(f.message ?? "")),
+    ).toBe(false);
     const bad = setup({ store: "mismatch" });
     const report = await bad.h.run({ head: bad.h.base, visual: { screens: [] } });
     expect(report.visual?.status).toBe("error");

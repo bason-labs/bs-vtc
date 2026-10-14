@@ -230,9 +230,22 @@ A request with `visual` (`screens: []` = the full matrix) gets `GateReport.visua
 report.json`, with the screenshots and diff images beside it. It never changes `verdict`.
 Settings: `gates.yml` `visual` (`visualConfigFor`). `screens.yaml`, `tokens.json` and the
 approved prototype (`.vtc/design/prototype/`) are read at the base commit, so neither the diff
-nor project code (earlier gates, the app server) can change what verifies it: the prototype
+nor project code (earlier gates, the app server) can change the reference: the prototype
 comes from a clean checkout of the base made for the step, which no gate command ran in and
 which the sandboxed runner may read but not write; `source_hash` covers its bytes.
+
+The result is trusted only as far as the code that computed it. The app server runs in the
+runner's sandbox and can write the runner's temp directory (and a process it detaches can
+outlive it until the reaper), so the runner reads and deletes a per-run random key before it
+imports anything or starts the app, writes its result once, at the end, as an envelope with an
+HMAC-SHA256 under that key, and lists the SHA-256 of every image it wrote. A result without a
+valid MAC, or an image that is missing or changed, is `error` and never read as a verdict. On
+the doctor-installed store's Playwright the comparison code is VTC's. On the project's own
+Playwright (preferred when installed, reading 96) the runner process loads `playwright-core`
+from the verification checkout, which the change under review can modify (install scripts run
+there), so every such run carries a `vtc-visual/note` saying the comparison ran on
+project-controlled code. Limit: on Linux with `kernel.yama.ptrace_scope` 0 a process in the
+sandbox may read the memory of another process of the same user, the runner's key included.
 
 1. Token lint (`vtc-token/<kind>`) on the lines the diff added to UI files: literal colours (OKLab
    ΔE over `color_delta` from every colour token), spacing and radii off the token scale, font
@@ -246,8 +259,8 @@ which the sandboxed runner may read but not write; `source_hash` covers its byte
    `vtc-visual/note`) or the store `vtc doctor --install-browser` fills
    (`~/.vtc/browsers/node_modules/` and `BROWSER_PIN_FILE`). The executable is re-hashed against
    its pin before every run; a mismatch, an unreadable pin or a pin for another path is `error`.
-   A path seen before is never re-pinned. axe-core and pixelmatch come from the project, else
-   from the store. None: `skipped` with `VISUAL_SKIPPED_NO_BROWSER`. Nothing is downloaded here.
+   A path seen before is never re-pinned. axe-core and pixelmatch come from the store when it
+   has them, else from the project. None: `skipped` with `VISUAL_SKIPPED_NO_BROWSER`. Nothing is downloaded here.
 4. The app server: `visual.app` in `gates.yml` (`command`, a loopback `url`, `cwd`,
    `ready_timeout_s`), allowlisted like a gate. `vtc calibrate` proposes one from the package.json
    `dev`, `start` or `preview` script (its `--port`/`-p`/`PORT=` or the server's default port, on
@@ -261,11 +274,11 @@ which the sandboxed runner may read but not write; `source_hash` covers its byte
    base prototype (served through request interception) in the same run with the same
    browser: headless, DPR 1, `en-US`, `UTC`, a fixed clock, reduced motion, fonts ready,
    animations and the caret off, non-loopback requests aborted, `dynamic_regions` masked. Then
-   axe (`axe/<rule>`, an unmodified `axe.min.js` from the project or the store, never bundled),
+   axe (`axe/<rule>`, an unmodified `axe.min.js` from the store or the project, never bundled),
    computed styles against the tokens (`vtc-style/<property>`) and a pixelmatch diff per region
    (`data-vtc-region` or landmarks; `vtc-layout/pixels` over `region_budget_pct`,
    `vtc-layout/dimensions` for other sizes).
-6. Status: `error` (runner failed) > `fail` (a blocking finding) > `unchecked` (an unreached
+6. Status: `error` (runner failed, or its result or images fail the MAC and hash checks) > `fail` (a blocking finding) > `unchecked` (an unreached
    render or screen, an axe `incomplete` item, a check that could not run: never clean) > `pass`.
    Each axe `incomplete` rule per screen state is a note-level `axe/<rule>` finding that names
    what needs review.

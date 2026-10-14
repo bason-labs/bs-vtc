@@ -124,6 +124,31 @@ describe("toolchain resolution", () => {
     expect(tc?.readable).toEqual(["/opt/pw", join(home, "browsers")]);
   });
 
+  it("prefers the browser store's axe-core and pixelmatch over the checkout's", () => {
+    const checkout = tempDir("vtc-checkout-");
+    pkg(
+      join(checkout, "node_modules/playwright-core"),
+      "playwright-core",
+      { main: "index.js" },
+      { "index.js": "" },
+    );
+    pkg(join(checkout, "node_modules/axe-core"), "axe-core", {}, { "axe.min.js": "/* axe */" });
+    pkg(
+      join(checkout, "node_modules/pixelmatch"),
+      "pixelmatch",
+      { main: "index.js" },
+      { "index.js": "" },
+    );
+    const home = tempDir("vtc-home-");
+    const store = join(home, "browsers/node_modules");
+    pkg(join(store, "pixelmatch"), "pixelmatch", { main: "index.js" }, { "index.js": "" });
+    const tc = projectToolchain(checkout, { PLAYWRIGHT_BROWSERS_PATH: "/opt/pw" }, home);
+    // The store's pixelmatch; axe-core only the project has.
+    expect(tc?.pixelmatch).toBe(join(realpathSync(store), "pixelmatch/index.js"));
+    expect(tc?.axe).toBe(join(realpathSync(checkout), "node_modules/axe-core/axe.min.js"));
+    expect(tc?.readable).toEqual(["/opt/pw", join(home, "browsers")]);
+  });
+
   it("finds the doctor-installed store under the VTC home", () => {
     const home = tempDir("vtc-home-");
     expect(storeToolchain(home)).toBeNull();

@@ -4,8 +4,10 @@
  *
  * - The project's own: `playwright-core` (directly or through `playwright` / `@playwright/test`)
  *   resolved inside the verification checkout, and the browser in the user's Playwright cache.
- *   `axe-core` and `pixelmatch` come from the checkout, else from the doctor-installed store
- *   (reading 106). Its executable is pinned on first use, per repo and per executable path, under
+ *   `axe-core` and `pixelmatch` come from the doctor-installed store when it has them (code the
+ *   change under review cannot modify), else from the checkout (reading 106). The checkout's
+ *   packages are code the change can modify (install scripts run there), so a run on the
+ *   project's Playwright says so in the report (`step.ts`). Its executable is pinned on first use, per repo and per executable path, under
  *   `~/.vtc/browsers/projects/<repo-key>/<path-hash>.json`: a path seen before is always
  *   re-verified and never re-pinned, so a later run whose executable at that path hashes
  *   differently is gate infrastructure (`error`), and an unreadable pin fails closed. A first-use
@@ -171,8 +173,8 @@ const pixelmatchIn = (root: string, from: string): string | null => {
 
 /**
  * The project's own Playwright in the checkout, or `null`. axe-core and pixelmatch come from the
- * checkout, else from the doctor-installed store under `vtcHome` (reading 106), which is then
- * readable in the sandbox too.
+ * doctor-installed store under `vtcHome` when it has them, else from the checkout (reading 106);
+ * the store is then readable in the sandbox too.
  */
 export const projectToolchain = (
   checkoutAbs: string,
@@ -183,17 +185,11 @@ export const projectToolchain = (
   if (pw === null) return null;
   const browsersPath = projectBrowsersPath(env);
   const store = vtcHome === undefined ? null : join(vtcHome, BROWSERS_DIR);
-  let axe = axeIn(checkoutAbs, checkoutAbs);
-  let pixelmatch = pixelmatchIn(checkoutAbs, checkoutAbs);
-  let fromStore = false;
-  if (store !== null && axe === null) {
-    axe = axeIn(store, store);
-    fromStore ||= axe !== null;
-  }
-  if (store !== null && pixelmatch === null) {
-    pixelmatch = pixelmatchIn(store, store);
-    fromStore ||= pixelmatch !== null;
-  }
+  const storeAxe = store === null ? null : axeIn(store, store);
+  const storePixelmatch = store === null ? null : pixelmatchIn(store, store);
+  const axe = storeAxe ?? axeIn(checkoutAbs, checkoutAbs);
+  const pixelmatch = storePixelmatch ?? pixelmatchIn(checkoutAbs, checkoutAbs);
+  const fromStore = storeAxe !== null || storePixelmatch !== null;
   return {
     source: "project",
     playwright: pw.entry,
