@@ -279,7 +279,11 @@ describe("grading a verdict replay trial from the log (the RETRO seam, D-ch)", (
   });
 
   it("reads the expectation back from a verdict task key, and none from a gates key", () => {
-    const key = replayTaskKey({ run: "r1", task: "T-3", expected: { subject: AC, verdict: "fail" } });
+    const key = replayTaskKey({
+      run: "r1",
+      task: "T-3",
+      expected: { subject: AC, verdict: "fail" },
+    });
     expect(key).toBe(`r1:${AC}:fail:T-3`);
     expect(expectedOfTaskKey(key)).toEqual({ subject: AC, verdict: "fail" });
     expect(expectedOfTaskKey("r1:T-3")).toBeUndefined();
