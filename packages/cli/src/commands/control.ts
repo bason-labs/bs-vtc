@@ -142,7 +142,7 @@ const resumeCommand: CommandSpec = {
       );
       let result: RunControlResult;
       try {
-        result = (await client.call("resume", { run: flags.run, adopt: true })) as RunControlResult;
+        result = await client.call("resume", { run: flags.run, adopt: true });
       } catch (error) {
         throw new Error(toolErrorMessage(error), { cause: error });
       } finally {
