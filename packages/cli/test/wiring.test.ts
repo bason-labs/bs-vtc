@@ -238,28 +238,28 @@ describe("buildEngineParts and composeEngineDeps (AD-19)", () => {
     const seen: string[] = [];
     const report = { direction: "d1" };
     const runner = lazyGateRunner((): GateRunner => ({
-      run: async () => ({}) as never,
-      checkWriteScope: async () => ({}) as never,
-      checkNovelty: async (r) => (seen.push(`check:${r.direction}`), report as never),
-      recordDesignChoice: async (e) => void seen.push(`record:${e.direction}`),
+      run: () => Promise.resolve({} as never),
+      checkWriteScope: () => Promise.resolve({} as never),
+      checkNovelty: (r) => (seen.push(`check:${r.direction}`), Promise.resolve(report as never)),
+      recordDesignChoice: (e) => (seen.push(`record:${e.direction}`), Promise.resolve()),
     }));
     expect(typeof runner.checkNovelty).toBe("function");
     expect(typeof runner.recordDesignChoice).toBe("function");
     await expect(runner.checkNovelty?.({ direction: "d1" } as never)).resolves.toBe(report);
-    await runner.recordDesignChoice?.({ direction: "d1" } as never, "_shared" as never);
+    await runner.recordDesignChoice?.({ direction: "d1" } as never, "_shared");
     expect(seen).toEqual(["check:d1", "record:d1"]);
   });
 
   it("fails the novelty seam when the built Gate Runner has none, so the direction stays unchecked", async () => {
     const runner = lazyGateRunner((): GateRunner => ({
-      run: async () => ({}) as never,
-      checkWriteScope: async () => ({}) as never,
+      run: () => Promise.resolve({} as never),
+      checkWriteScope: () => Promise.resolve({} as never),
     }));
     await expect(runner.checkNovelty?.({ direction: "d1" } as never)).rejects.toThrow(
       /checkNovelty/,
     );
     await expect(
-      runner.recordDesignChoice?.({ direction: "d1" } as never, "_shared" as never),
+      runner.recordDesignChoice?.({ direction: "d1" } as never, "_shared"),
     ).rejects.toThrow(/recordDesignChoice/);
   });
 

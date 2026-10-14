@@ -15,11 +15,13 @@ import {
   autoRollback,
   canaryAssignedEvent,
   checkEngineWrite,
+  createPromptPins,
   pinsPath,
   PromptVersionError,
   promptVersionRef,
   readPins,
   selectPromptVersion,
+  selectPromptVersionSync,
   storePromptVersion,
 } from "../../src/lookback/index.js";
 import { writeAtomicIfUnchanged } from "../../src/lookback/files.js";
@@ -200,6 +202,93 @@ describe("prompt selection", () => {
     const broken = await select(home, "T-1");
     expect(broken.source).toBe("default");
     expect(broken.problem).toMatch(/pins.yaml/);
+  });
+});
+
+describe("engine core's synchronous prompt selector (reading 135(d))", () => {
+  const target = {
+    run: "R-1",
+    role: "engineer",
+    host: HOST,
+    agent: "vtc-engineer",
+    task: "T-1",
+  } as const;
+  const compiled = () => ({ locked: LOCKED, editable: EDITABLE });
+
+  it("selects what the asynchronous selector selects", async () => {
+    const home = await tempDir("home");
+    await storePromptVersion(home, frontmatter(), CANDIDATE_TEXT);
+    await writePins(home, {
+      v: 1,
+      projects: {
+        [REPO]: {
+          pins: [{ role: "engineer", host: HOST, effective_sha256: candidate.effective_sha256 }],
+        },
+      },
+    });
+    const input = {
+      vtcHome: home,
+      repoKey: REPO,
+      target: { role: "engineer", host: HOST },
+      task: "T-1",
+      locked: LOCKED,
+      defaultEditable: EDITABLE,
+    };
+    expect(selectPromptVersionSync(input)).toEqual(await selectPromptVersion(input));
+  });
+
+  it("returns null for the default, follows a changed pins.yaml, and throws on a pin it cannot honour", async () => {
+    const home = await tempDir("home");
+    await storePromptVersion(home, frontmatter(), CANDIDATE_TEXT);
+    const pins = createPromptPins({ vtcHome: home, repoKey: REPO, compiled });
+    expect(pins(target)).toBeNull();
+    await writePins(home, {
+      v: 1,
+      projects: {
+        [REPO]: {
+          pins: [{ role: "engineer", host: HOST, effective_sha256: candidate.effective_sha256 }],
+        },
+      },
+    });
+    expect(pins(target)).toEqual({ version: candidate, text: CANDIDATE_TEXT });
+    // an agent the plugin carries no texts for keeps its compiled prompt
+    expect(
+      createPromptPins({ vtcHome: home, repoKey: REPO, compiled: () => undefined })(target),
+    ).toBeNull();
+    await writeFile(pinsPath(home), "v: 2\nprojects: [");
+    expect(() => pins(target)).toThrow(/pins.yaml/);
+  });
+
+  it("carries the task's canary arm", async () => {
+    const home = await tempDir("home");
+    await storePromptVersion(home, frontmatter(), CANDIDATE_TEXT);
+    await writePins(home, {
+      v: 1,
+      projects: {
+        [REPO]: {
+          canaries: [
+            {
+              role: "engineer",
+              host: HOST,
+              candidate: candidate.effective_sha256,
+              baseline: EFFECTIVE,
+              started_at: now.toISOString(),
+              assignment: "task_hash_50",
+            },
+          ],
+        },
+      },
+    });
+    const pins = createPromptPins({ vtcHome: home, repoKey: REPO, compiled });
+    expect(pins({ ...target, task: taskInArm("candidate") })).toMatchObject({
+      text: CANDIDATE_TEXT,
+      canary: { arm: "candidate" },
+    });
+    // the baseline arm is the compiled default, still recorded as the arm
+    expect(pins({ ...target, task: taskInArm("baseline") })).toMatchObject({
+      text: EDITABLE,
+      canary: { arm: "baseline" },
+    });
   });
 });
 

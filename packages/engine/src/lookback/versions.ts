@@ -23,7 +23,7 @@ import {
 } from "@vtc/shared";
 import { join } from "node:path";
 import { parseYaml, toYaml } from "../core/index.js";
-import { readTextIfExists, writeNewFile } from "./files.js";
+import { readTextIfExists, readTextIfExistsSync, writeNewFile } from "./files.js";
 
 /** SHA-256 of a trimmed prompt section. */
 export const sectionSha = (section: string): string => sha256Hex(section.trim());
@@ -113,19 +113,20 @@ const parseVersionFile = (
   return { frontmatter: parsed.data, editable: normalized.slice(end + FENCE.length + 2).trim() };
 };
 
-/**
- * The editable section of a stored version, checked against the locked core it will run with:
- * `undefined` when the file is missing, malformed, or does not hash to `effectiveSha`.
- */
-export const loadPromptVersion = async (
-  vtcHome: string,
-  target: { readonly role: string; readonly mode?: string | undefined; readonly host: string },
+type StoredVersion = { readonly frontmatter: PromptVersionFrontmatter; readonly editable: string };
+type VersionTarget = {
+  readonly role: string;
+  readonly mode?: string | undefined;
+  readonly host: string;
+};
+
+/** A version file's text checked against the version it must be and the locked core it runs with. */
+const checkedVersion = (
+  text: string | undefined,
+  target: VersionTarget,
   effectiveSha: string,
   locked: string,
-): Promise<
-  { readonly frontmatter: PromptVersionFrontmatter; readonly editable: string } | undefined
-> => {
-  const text = await readTextIfExists(promptVersionPath(vtcHome, target, effectiveSha));
+): StoredVersion | undefined => {
   if (text === undefined) return undefined;
   const parsed = parseVersionFile(text);
   if (parsed === undefined) return undefined;
@@ -143,3 +144,34 @@ export const loadPromptVersion = async (
   }
   return parsed;
 };
+
+/**
+ * The editable section of a stored version, checked against the locked core it will run with:
+ * `undefined` when the file is missing, malformed, or does not hash to `effectiveSha`.
+ */
+export const loadPromptVersion = async (
+  vtcHome: string,
+  target: VersionTarget,
+  effectiveSha: string,
+  locked: string,
+): Promise<StoredVersion | undefined> =>
+  checkedVersion(
+    await readTextIfExists(promptVersionPath(vtcHome, target, effectiveSha)),
+    target,
+    effectiveSha,
+    locked,
+  );
+
+/** {@link loadPromptVersion}, synchronously (for the engine's synchronous prompt selector). */
+export const loadPromptVersionSync = (
+  vtcHome: string,
+  target: VersionTarget,
+  effectiveSha: string,
+  locked: string,
+): StoredVersion | undefined =>
+  checkedVersion(
+    readTextIfExistsSync(promptVersionPath(vtcHome, target, effectiveSha)),
+    target,
+    effectiveSha,
+    locked,
+  );
