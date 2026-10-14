@@ -14,7 +14,12 @@ export {
   type EvidenceRunner,
   type EvidenceRunnerCall,
 } from "./recorder.js";
-export { GATE_REPORT_HTML, gateReportHtml, MAX_REPORT_FINDINGS } from "./report-html.js";
+export {
+  GATE_REPORT_HTML,
+  gateReportHtml,
+  MAX_REPORT_FINDINGS,
+  scrubLocalPaths,
+} from "./report-html.js";
 export {
   DENIED_TEXT_HIT,
   EVIDENCE_MASK_COLOR,

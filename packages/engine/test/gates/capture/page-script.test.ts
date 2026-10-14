@@ -1,8 +1,9 @@
 /**
  * The evidence runner's in-page script (layers 2 and 3 of the redaction, research §3), taken
  * from the real runner source and run in a VM over a minimal fake DOM: what it paints, that a bad
- * selector or a removed stylesheet fails closed, which texts the scan collects (and never from a
- * painted subtree or a password), and that a recording hands every change to the binding.
+ * selector, a removed stylesheet, page CSS that beats the paint or a shadow root fails closed,
+ * which texts the scan collects (and never from a painted subtree or a password), and that a
+ * recording hands every change, and every value a script sets, to the binding.
  */
 import { runInNewContext } from "node:vm";
 import { describe, expect, it } from "vitest";
@@ -26,6 +27,7 @@ class El {
   parentElement: El | null = null;
   readonly childNodes: Node[] = [];
   value = "";
+  shadowRoot: object | null = null;
   constructor(
     public tagName: string,
     readonly attrs: Record<string, string> = {},
@@ -43,6 +45,10 @@ class El {
   }
   getAttribute(name: string): string | null {
     return this.attrs[name] ?? null;
+  }
+  querySelectorAll(selector: string): El[] {
+    if (selector !== "*") throw new Error(`unsupported selector ${selector}`);
+    return this.childNodes.flatMap((c) => (c instanceof El ? [c, ...c.querySelectorAll("*")] : []));
   }
   /** Supports `[attr]`, `tag[type=x]` and `.class`, in a `, ` list. */
   matches(list: string): boolean {
@@ -70,7 +76,32 @@ const pageScriptSource = (): string => {
 
 const PAINT = ["[data-vtc-redact]", "[data-vtc-secret]", "input[type=password]", ".prompt-text"];
 
-const load = (body: El, options: { paint?: string[]; video?: boolean; maxChars?: number } = {}) => {
+const TRANSPARENT = "rgba(0, 0, 0, 0)";
+interface Style {
+  color: string;
+  textFill: string;
+  textShadow: string;
+  content: string;
+  visibility: string;
+}
+/** What the paint computes to, everywhere it applies; a test overrides one element's style. */
+const PAINTED: Style = {
+  color: TRANSPARENT,
+  textFill: TRANSPARENT,
+  textShadow: "none",
+  content: "none",
+  visibility: "hidden",
+};
+
+const load = (
+  body: El,
+  options: {
+    paint?: string[];
+    video?: boolean;
+    maxChars?: number;
+    styles?: Map<El, Partial<Style>>;
+  } = {},
+) => {
   const html = h(
     "html",
     {},
@@ -116,10 +147,44 @@ const load = (body: El, options: { paint?: string[]; video?: boolean; maxChars?:
     }
     observe(): void {}
   }
+  const getComputedStyle = (el: El, pseudo?: string) => {
+    const style = { ...PAINTED, ...(options.styles?.get(el) ?? {}) };
+    return {
+      color: style.color,
+      textShadow: style.textShadow,
+      visibility: style.visibility,
+      content: pseudo === undefined ? "normal" : style.content,
+      getPropertyValue: (name: string) =>
+        name === "-webkit-text-fill-color" ? style.textFill : "",
+    };
+  };
+  // Fresh per load: the script patches these prototypes for good.
+  class Element {
+    attachShadow(this: El): object {
+      this.shadowRoot = {};
+      return this.shadowRoot;
+    }
+  }
+  class HTMLInputElement {
+    readonly tagName = "INPUT";
+  }
+  Object.defineProperty(HTMLInputElement.prototype, "value", {
+    get(this: El) {
+      return this.value;
+    },
+    set(this: El, v: string) {
+      this.value = v;
+    },
+    configurable: true,
+    enumerable: true,
+  });
   const context: Record<string, unknown> = {
     document,
     CSSStyleSheet,
     MutationObserver,
+    getComputedStyle,
+    Element,
+    HTMLInputElement,
     NodeFilter: { SHOW_ELEMENT, SHOW_TEXT, FILTER_ACCEPT, FILTER_REJECT },
     __vtcEvidenceText: (texts: string[]) => {
       sent.push(texts);
@@ -140,7 +205,7 @@ const load = (body: El, options: { paint?: string[]; video?: boolean; maxChars?:
     collect: () => string[];
     flush: () => Promise<boolean>;
   };
-  return { api, document, observers, sent };
+  return { api, document, observers, sent, context };
 };
 
 const TOKEN_A = "ghp_aaaaaaaaaaaaaaaaaa";
@@ -164,11 +229,51 @@ describe("the evidence runner's page script", () => {
     const { api, document } = load(page());
     expect(api.state()).toEqual({ painted: true, broken: null });
     const sheet = document.adoptedStyleSheets[0] as { rules: string[] };
-    expect(sheet.rules).toHaveLength(PAINT.length * 3);
+    expect(sheet.rules).toHaveLength(PAINT.length * 4);
     expect(sheet.rules[0]).toMatch(/^:is\(\[data-vtc-redact\]\) \{ color: transparent !important;/);
     expect(sheet.rules[0]).toContain("background: #1f1f1f !important");
     expect(sheet.rules[1]).toBe(":is([data-vtc-redact]) * { visibility: hidden !important; }");
     expect(sheet.rules.some((r) => r.startsWith(":is(.prompt-text) "))).toBe(true);
+    // Generated content of a painted element, and of everything inside it, is dropped.
+    expect(sheet.rules[3]).toBe(
+      ":is([data-vtc-redact])::before, :is([data-vtc-redact])::after, :is([data-vtc-redact]) *::before, :is([data-vtc-redact]) *::after { content: none !important; }",
+    );
+  });
+
+  it("fails closed when page CSS beats the paint", () => {
+    for (const [target, style] of [
+      ["root", { color: "rgb(0, 0, 0)" }],
+      ["root", { textFill: "rgb(0, 0, 0)" }],
+      ["root", { textShadow: "rgb(0, 0, 0) 1px 1px 0px" }],
+      ["root", { content: '"leak"' }],
+      ["child", { visibility: "visible" }],
+    ] as const) {
+      const body = page();
+      const painted = body.childNodes[2] as El;
+      const el = target === "root" ? painted : (painted.childNodes[1] as El);
+      const { api } = load(body, { styles: new Map([[el, style]]) });
+      expect(() => api.collect()).toThrow(/page CSS overrides the redaction paint/);
+    }
+  });
+
+  it("fails closed on a shadow root, open or attached by script", () => {
+    const body = page();
+    const host = h("div", {}, "host");
+    body.append(host);
+    const { api, context } = load(body);
+    expect(api.state().broken).toBeNull();
+    host.shadowRoot = {};
+    expect(() => api.collect()).toThrow(/shadow root/);
+    host.shadowRoot = null;
+    const element = context.Element as { prototype: { attachShadow: (this: El) => object } };
+    element.prototype.attachShadow.call(host);
+    expect(api.state().broken).toBe(
+      "the page attached a shadow root, which the redaction cannot cover",
+    );
+    // The page cannot put the original back.
+    expect(() => {
+      element.prototype.attachShadow = () => ({});
+    }).toThrow();
   });
 
   it("fails closed on a selector that is not valid CSS", () => {
@@ -235,6 +340,23 @@ describe("the evidence runner's page script", () => {
     observers[0]?.callback([{ target: secret }]);
     await api.flush();
     expect(sent).toEqual([]);
+  });
+
+  it("hands a value a script sets to the binding during a recording", async () => {
+    const body = page();
+    const input = body.childNodes[5] as El;
+    const { api, sent, context } = load(body, { video: true });
+    const proto = (context.HTMLInputElement as { prototype: object }).prototype;
+    // What `input.value = ...` in a page script does: the prototype's setter on the element.
+    Reflect.set(proto, "value", `typed ${TOKEN_A}`, input);
+    await api.flush();
+    expect(input.value).toBe(`typed ${TOKEN_A}`);
+    expect(sent.flat()).toContain(`typed ${TOKEN_A}`);
+    // A password set by script is never sent.
+    sent.length = 0;
+    Reflect.set(proto, "value", "hunter3hunter3", body.childNodes[4]);
+    await api.flush();
+    expect(sent.flat().join("\n")).not.toContain("hunter3");
   });
 
   it("observes nothing for a screenshot", () => {

@@ -8,22 +8,27 @@
  *
  * - Network: `context.route("**\/*")` continues only requests to the request's origin and aborts
  *   the rest (WebSockets too, where Playwright can route them). Nothing is downloaded.
- * - Paint (layer 2): an init script, run before any page script, adopts a stylesheet that paints
- *   every redact selector as a solid block and hides everything inside it, so every video frame
- *   and screenshot is covered. A selector that is not valid CSS, or a stylesheet the page removed,
- *   fails the shot (fail closed). Screenshots also pass `mask` / `maskColor` for the painted
- *   selectors and the project's `visual.dynamic_regions` / `redact_selectors`.
+ * - Paint (layer 2): an init script, run before any page script in every frame, adopts a
+ *   stylesheet that paints every redact selector as a solid block, drops its `::before` /
+ *   `::after` content and hides everything inside it, so every video frame and screenshot is
+ *   covered. A selector that is not valid CSS, a stylesheet the page removed, or page CSS that wins
+ *   the cascade over the paint (computed colour, pseudo content or a visible descendant, checked at
+ *   every scan) fails the shot (fail closed). Screenshots also pass `mask` / `maskColor` for the
+ *   painted selectors and the project's `visual.dynamic_regions` / `redact_selectors`, in every
+ *   frame.
  * - Scan (layer 3): text nodes, `title` / `alt` / `aria-label` / `placeholder`, input values
  *   (not passwords), SVG text and the document title, outside painted subtrees and `script` /
  *   `style`, plus the text nodes joined (a token split over elements), are matched against
- *   `SECRET_PATTERNS` and `deny_text`: before and after every screenshot, and during a recording
- *   through a `MutationObserver` that hands each change to the runner with `exposeBinding`, then
- *   once more over the whole page before the context closes. It scans every text in the DOM, not
- *   only what is on screen, so it errs towards discarding. `deny_text` matches case-insensitively,
- *   and a value shorter than four characters only as a whole word (a two-letter repo name would
- *   otherwise discard every page). A hit discards the file; the result
- *   names only the kinds found. Text drawn into `<canvas>`, images and shadow roots is not
- *   scanned (research §3 residual).
+ *   `SECRET_PATTERNS` and `deny_text`: in every frame of the page, before and after every
+ *   screenshot, and during a recording through a `MutationObserver` (and the `value` setters of
+ *   form fields) that hands each change to the runner with `exposeBinding`, then once more over
+ *   every frame before the context closes. A frame without the init script, or one removed before
+ *   it could be scanned, fails the shot. It scans every text in the DOM, not only what is on
+ *   screen, so it errs towards discarding. `deny_text` matches case-insensitively, as a substring
+ *   (AD-27 rule 6: any hit discards). A hit discards the file; the result names only the kinds
+ *   found. A shadow root (attached by script, or open) fails the shot, since neither the paint nor
+ *   the scan reaches into it. Text drawn into `<canvas>`, images, CSS generated content outside
+ *   painted subtrees and declarative closed shadow roots is not scanned (research §3 residual).
  * - Video: `recordVideo` always with `size` (1280x800); the file exists only after
  *   `context.close()`, then it is kept (renamed to the shot's name and hashed) or deleted.
  *
@@ -60,11 +65,9 @@ const BINDING = "__vtcEvidenceText";
 
 // ---------------------------------------------------------------- the scan (layer 3)
 const PATTERNS = input.patterns.map((p) => ({ kind: p.kind, re: new RegExp(p.source, p.flags.replace(/[gy]/g, "")) }));
-const escapeRe = (s) => s.replace(/[.*+?^$\\{}()|[\]\\]/g, "\\$&");
 const DENY = input.deny_text
   .map((v) => String(v).trim().toLowerCase())
-  .filter((v) => v !== "")
-  .map((v) => (v.length < 4 ? { word: new RegExp("(?:^|[^a-z0-9])" + escapeRe(v) + "(?:$|[^a-z0-9])") } : { sub: v }));
+  .filter((v) => v !== "");
 const scan = (texts, hits) => {
   if (!Array.isArray(texts)) { hits.add("unscannable"); return; }
   for (const raw of texts) {
@@ -74,7 +77,7 @@ const scan = (texts, hits) => {
     if (hits.has("denied_text")) continue;
     const low = raw.toLowerCase();
     for (const d of DENY) {
-      if (d.sub !== undefined ? low.includes(d.sub) : d.word.test(low)) { hits.add("denied_text"); break; }
+      if (low.includes(d)) { hits.add("denied_text"); break; }
     }
   }
 };
@@ -88,23 +91,56 @@ function pageScript(config) {
   const pending = new Set();
   const list = config.paint.join(", ");
   const send = window[config.binding];
+  const fail = (reason) => { if (!state.broken) state.broken = reason; };
   let sheet = null;
   try {
     for (const selector of config.paint) document.querySelectorAll(selector);
     sheet = new CSSStyleSheet();
     for (const selector of config.paint) {
       const s = ":is(" + selector + ")";
-      sheet.insertRule(s + " { color: transparent !important; -webkit-text-fill-color: transparent !important; text-shadow: none !important; background: " + config.color + " !important; border-color: " + config.color + " !important; caret-color: transparent !important; }");
+      sheet.insertRule(s + " { color: transparent !important; -webkit-text-fill-color: transparent !important; text-shadow: none !important; background: " + config.color + " !important; border-color: " + config.color + " !important; caret-color: transparent !important; fill: transparent !important; stroke: transparent !important; }");
       sheet.insertRule(s + " * { visibility: hidden !important; }");
       sheet.insertRule(s + "::placeholder { color: transparent !important; }");
+      sheet.insertRule(s + "::before, " + s + "::after, " + s + " *::before, " + s + " *::after { content: none !important; }");
     }
     document.adoptedStyleSheets = [...document.adoptedStyleSheets, sheet];
     state.painted = true;
   } catch (error) {
     state.broken = "a redact selector is not valid CSS, so nothing could be painted";
   }
+  // Neither the paint nor the scan reaches into a shadow root: one attached by script fails closed.
+  if (typeof Element === "function" && typeof Element.prototype.attachShadow === "function") {
+    const attach = Element.prototype.attachShadow;
+    Object.defineProperty(Element.prototype, "attachShadow", {
+      value: function (...args) {
+        fail("the page attached a shadow root, which the redaction cannot cover");
+        return attach.apply(this, args);
+      },
+      writable: false,
+      configurable: false,
+    });
+  }
   const isPainted = (el) => {
     try { return el.matches(list); } catch { return true; }
+  };
+  // The paint holds when page CSS has not won the cascade over it: the painted element's text and
+  // generated content are invisible, and so is every element inside it.
+  const TRANSPARENT = "rgba(0, 0, 0, 0)";
+  const paintHolds = (el) => {
+    const cs = getComputedStyle(el);
+    if (cs.color !== TRANSPARENT || cs.getPropertyValue("-webkit-text-fill-color") !== TRANSPARENT) return false;
+    if (cs.textShadow !== "none") return false;
+    for (const pseudo of ["::before", "::after"]) {
+      const content = getComputedStyle(el, pseudo).content;
+      if (content !== "none" && content !== "normal") return false;
+    }
+    for (const d of el.querySelectorAll("*")) {
+      if (getComputedStyle(d).visibility !== "hidden") return false;
+    }
+    return true;
+  };
+  const checkPainted = (el) => {
+    if (!paintHolds(el)) throw new Error("page CSS overrides the redaction paint, so a painted region may show");
   };
   const collect = (root) => {
     const texts = [];
@@ -118,10 +154,18 @@ function pageScript(config) {
     const start = root && root.nodeType === 9 ? root.documentElement : root;
     if (root && root.nodeType === 9) push(document.title);
     if (!start || start.nodeType !== 1) return texts;
-    for (let el = start; el; el = el.parentElement) if (isPainted(el)) return texts;
+    for (let el = start; el; el = el.parentElement) {
+      if (isPainted(el)) { checkPainted(el); return texts; }
+    }
     const joined = [];
+    const painted = [];
     const walker = document.createTreeWalker(start, NodeFilter.SHOW_ELEMENT | NodeFilter.SHOW_TEXT, {
-      acceptNode: (n) => (n.nodeType === 1 && (SKIP.has(n.tagName.toUpperCase()) || isPainted(n)) ? NodeFilter.FILTER_REJECT : NodeFilter.FILTER_ACCEPT),
+      acceptNode: (n) => {
+        if (n.nodeType !== 1) return NodeFilter.FILTER_ACCEPT;
+        if (SKIP.has(n.tagName.toUpperCase())) return NodeFilter.FILTER_REJECT;
+        if (isPainted(n)) { painted.push(n); return NodeFilter.FILTER_REJECT; }
+        return NodeFilter.FILTER_ACCEPT;
+      },
     });
     for (let n = walker.currentNode; n; n = walker.nextNode()) {
       if (n.nodeType === 3) {
@@ -129,27 +173,29 @@ function pageScript(config) {
         joined.push(n.nodeValue);
         continue;
       }
+      if (n.shadowRoot) throw new Error("the page has a shadow root, which the scan cannot cover");
       for (const a of ATTRS) push(n.getAttribute(a));
       const tag = n.tagName.toUpperCase();
       if ((tag === "INPUT" && String(n.type).toLowerCase() !== "password") || tag === "TEXTAREA" || tag === "SELECT") push(String(n.value));
     }
     push(joined.join(""));
+    for (const el of painted) checkPainted(el);
     return texts;
   };
   const check = () => {
     if (state.painted && !document.adoptedStyleSheets.includes(sheet)) {
-      state.broken = "the redaction stylesheet was removed from the page";
+      fail("the redaction stylesheet was removed from the page");
     }
   };
   const deliver = (root) => {
     let texts;
-    try { texts = collect(root); } catch (error) { state.broken = String(error && error.message); return; }
+    try { texts = collect(root); } catch (error) { fail(String(error && error.message)); return; }
     if (texts.length === 0) return;
     const fn = typeof send === "function" ? send : window[config.binding];
-    if (typeof fn !== "function") { state.broken = "the text scan binding is missing"; return; }
+    if (typeof fn !== "function") { fail("the text scan binding is missing"); return; }
     const p = Promise.resolve()
       .then(() => fn(texts))
-      .catch(() => { state.broken = "the text scan binding failed"; })
+      .catch(() => { fail("the text scan binding failed"); })
       .finally(() => pending.delete(p));
     pending.add(p);
   };
@@ -160,9 +206,22 @@ function pageScript(config) {
       for (const root of roots) if (root) deliver(root);
       check();
     });
-    observer.observe(document, { subtree: true, childList: true, characterData: true, attributes: true, attributeFilter: ATTRS.concat(["value", "type"]) });
+    // style / class / hidden too: a change there can undo the paint of a region.
+    observer.observe(document, { subtree: true, childList: true, characterData: true, attributes: true, attributeFilter: ATTRS.concat(["value", "type", "style", "class", "hidden"]) });
     document.addEventListener("input", (e) => { if (e.target && e.target.nodeType === 1) deliver(e.target); }, true);
     document.addEventListener("DOMContentLoaded", () => deliver(document));
+    // A value a script sets fires no mutation and no input event: scan it as it is set.
+    for (const name of ["HTMLInputElement", "HTMLTextAreaElement", "HTMLSelectElement"]) {
+      const C = window[name];
+      const d = typeof C === "function" ? Object.getOwnPropertyDescriptor(C.prototype, "value") : undefined;
+      if (!d || typeof d.set !== "function" || typeof d.get !== "function") continue;
+      Object.defineProperty(C.prototype, "value", {
+        get: d.get,
+        set: function (v) { d.set.call(this, v); deliver(this); },
+        enumerable: d.enumerable,
+        configurable: false,
+      });
+    }
   }
   Object.defineProperty(window, "__vtcEvidence", {
     value: Object.freeze({
@@ -180,9 +239,11 @@ const initScript = (video) =>
   JSON.stringify({ paint: input.paint, color: input.mask_color, binding: BINDING, video, maxChars: input.max_scan_chars }) +
   ");";
 
-// Whole-page check: redaction still in force, pending binding calls delivered, every text scanned.
-const checkPage = async (page, hits) => {
-  const r = await page.evaluate(async () => {
+// Whole-page check, in every frame: redaction still in force, pending binding calls delivered,
+// every text scanned. A frame the init script did not run in (a blocked or script-written frame)
+// cannot be vouched for, so it fails the shot.
+const checkFrame = async (frame, hits, where) => {
+  const r = await frame.evaluate(async () => {
     const e = window.__vtcEvidence;
     if (!e) return null;
     await e.flush();
@@ -193,13 +254,21 @@ const checkPage = async (page, hits) => {
     return { state, texts, error };
   });
   if (r === null || typeof r !== "object" || r.state === null || typeof r.state !== "object") {
-    throw new Error("the redaction script did not run in the page");
+    throw new Error("the redaction script did not run in " + where);
   }
   if (r.state.painted !== true || r.state.broken) {
-    throw new Error("redaction is not in force: " + clip(r.state.broken || "nothing was painted", 200));
+    throw new Error("redaction is not in force" + (where === "the page" ? "" : " in " + where) + ": " + clip(r.state.broken || "nothing was painted", 200));
   }
-  if (r.error) throw new Error("the page could not be scanned: " + clip(r.error, 200));
+  if (r.error) throw new Error(where + " could not be scanned: " + clip(r.error, 200));
   scan(r.texts, hits);
+};
+const checkPage = async (page, hits, attached) => {
+  const main = page.mainFrame();
+  const frames = page.frames();
+  if (!Array.isArray(frames) || !frames.includes(main)) throw new Error("the page's frames could not be listed");
+  for (const frame of frames) await checkFrame(frame, hits, frame === main ? "the page" : "a frame of the page");
+  // A frame that came and went may have shown text no scan saw.
+  if (attached.some((f) => f.isDetached())) throw new Error("a frame was removed before its text could be scanned");
 };
 
 // ---------------------------------------------------------------- network
@@ -242,6 +311,7 @@ const capture = async (browser, shot, index) => {
   let failure = null;
   let page = null;
   let png = null;
+  const attached = [];
   const context = await browser.newContext({
     viewport: { width: shot.width, height: shot.height },
     deviceScaleFactor: 1,
@@ -258,6 +328,7 @@ const capture = async (browser, shot, index) => {
     }
     await context.addInitScript(initScript(video));
     page = await context.newPage();
+    page.on("frameattached", (frame) => { attached.push(frame); });
     const response = await page.goto(input.origin + shot.path, { waitUntil: "load", timeout: input.nav_timeout_ms });
     if (!response) throw new Error("no response for " + clip(shot.path, 200));
     if (response.status() >= 400) throw new Error("HTTP " + response.status() + " for " + clip(shot.path, 200));
@@ -266,18 +337,18 @@ const capture = async (browser, shot, index) => {
     }
     if (video) {
       await page.waitForTimeout(Math.round(shot.video_seconds * 1000));
-      await checkPage(page, hits);
+      await checkPage(page, hits, attached);
     } else {
-      await checkPage(page, hits);
+      await checkPage(page, hits, attached);
       png = await page.screenshot({
         type: "png",
         animations: "disabled",
         caret: "hide",
         scale: "css",
-        mask: input.mask.map((s) => page.locator(s)),
+        mask: page.frames().flatMap((frame) => input.mask.map((s) => frame.locator(s))),
         maskColor: input.mask_color,
       });
-      await checkPage(page, hits);
+      await checkPage(page, hits, attached);
     }
   } catch (error) {
     failure = clip((error && error.message) || error, 500) || "the capture failed";

@@ -235,27 +235,46 @@ describe("the evidence recorder (AD-27 rule 6)", () => {
     const result = await recorder.capture(
       request({
         shots: [
-          shot("01-flow.mp4", { videoSeconds: 5 }),
+          shot("01-flow.mp4", { kind: "flow_video", videoSeconds: 5 }),
           shot("02-long.webm", { videoSeconds: EVIDENCE_LIMITS.maxReplaySeconds + 1 }),
-          shot("03-still.webm"),
+          shot("03-still.webm", { kind: "screenshot" }),
           shot("Shot.png"),
           shot("04-ok.png"),
           shot("04-ok.png"),
           shot("05-far.png", { path: "//evil.example/x" }),
           shot("06-tiny.png", { viewport: { width: 10, height: 10 } }),
+          shot("07-flow.webm", {
+            kind: "flow_video",
+            videoSeconds: EVIDENCE_LIMITS.maxFlowSeconds + 1,
+          }),
+          shot("08-flow.webm", {
+            kind: "flow_video",
+            videoSeconds: EVIDENCE_LIMITS.maxFlowSeconds,
+          }),
+          shot("09-replay.webm"),
+          shot("10-after.png", { kind: "ui_after", videoSeconds: 5 }),
+          shot("11-replay.gif", { kind: "replay_gif" }),
         ],
       }),
     );
-    expect(result.files.map((f) => f.name)).toEqual(["04-ok.png"]);
+    expect(result.files.map((f) => f.name)).toEqual(["04-ok.png", "08-flow.webm"]);
     const reasons = new Map(result.failed.map((f) => [f.name, f.reason]));
     expect(reasons.get("01-flow.mp4")).toMatch(/WebM/);
-    expect(reasons.get("02-long.webm")).toMatch(/at most 30 seconds/);
+    expect(reasons.get("02-long.webm")).toMatch(/replay_video lasts .* at most 30 seconds/);
     expect(reasons.get("03-still.webm")).toMatch(/PNG/);
     expect(reasons.get("Shot.png")).toMatch(/NN-<slug>/);
     expect(reasons.get("04-ok.png")).toMatch(/used twice/);
     expect(reasons.get("05-far.png")).toMatch(/start with one \//);
     expect(reasons.get("06-tiny.png")).toMatch(/viewport/);
-    expect(calls[0]?.input.shots.map((s) => s.name)).toEqual(["04-ok.png"]);
+    expect(reasons.get("07-flow.webm")).toMatch(/flow_video lasts .* at most 20 seconds/);
+    expect(reasons.get("09-replay.webm")).toMatch(
+      /replay_video is a recording: give it videoSeconds/,
+    );
+    expect(reasons.get("10-after.png")).toMatch(
+      /ui_after is a screenshot: it takes no videoSeconds/,
+    );
+    expect(reasons.get("11-replay.gif")).toMatch(/made from a replay_video later/);
+    expect(calls[0]?.input.shots.map((s) => s.name)).toEqual(["04-ok.png", "08-flow.webm"]);
   });
 
   it("captures nothing without the browser store, or when its pin does not match", async () => {
@@ -332,6 +351,36 @@ describe("the evidence recorder (AD-27 rule 6)", () => {
     expect(result.failed[0]).toMatchObject({ name: "02-gates.png" });
     expect(result.failed[0]?.reason).toMatch(/over its 1\.5 MB budget/);
     expect(existsSync(join(outDir, "02-gates.png"))).toBe(false);
+  });
+
+  it("fails the files that would take one capture over the per-PR byte budget", async () => {
+    const video = Buffer.alloc(EVIDENCE_LIMITS.maxVideoBytes - 1024, 1);
+    const { runner } = fakeRunner({
+      "01-replay.webm": { bytes: video },
+      "02-flow.webm": { bytes: video },
+      "03-small.png": { bytes: PNG },
+    });
+    const { recorder, outDir, request } = setup(runner);
+    const result = await recorder.capture(
+      request({
+        shots: [
+          shot("01-replay.webm", { videoSeconds: 12 }),
+          shot("02-flow.webm", { kind: "flow_video", videoSeconds: 10 }),
+          shot("03-small.png"),
+        ],
+      }),
+    );
+    expect(result.files.map((f) => f.name)).toEqual(["01-replay.webm", "03-small.png"]);
+    expect(result.files.reduce((sum, f) => sum + f.bytes, 0)).toBeLessThanOrEqual(
+      EVIDENCE_LIMITS.maxBytesPerPr,
+    );
+    expect(result.failed).toEqual([
+      {
+        name: "02-flow.webm",
+        reason: "the file would take this capture over the 10 MB evidence budget of a PR",
+      },
+    ]);
+    expect(existsSync(join(outDir, "02-flow.webm"))).toBe(false);
   });
 
   it("never keeps a file the runner reported without its bytes", async () => {
