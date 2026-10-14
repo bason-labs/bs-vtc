@@ -141,14 +141,14 @@ describe("Lookback reads the run without its trials (reading 176)", () => {
     const unmarked = {
       events: state.events.map((e) =>
         e.type === "role.dispatched" && (e.data as { action_id?: string }).action_id === "a-90"
-          ? ({
+          ? {
               ...e,
               data: {
-                ...(e.data as Record<string, unknown>),
+                ...e.data,
                 purpose: undefined,
                 replay: undefined,
               },
-            } as VtcEvent)
+            }
           : e,
       ),
     };
