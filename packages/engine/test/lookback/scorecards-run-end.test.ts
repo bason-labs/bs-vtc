@@ -21,7 +21,7 @@ import {
   traceSplit,
   writeScorecards,
 } from "../../src/lookback/index.js";
-import { EFFECTIVE, HOST, lockedShaFor, RunLog, tempDir } from "./log.js";
+import { EDITABLE_SHA, EFFECTIVE, HOST, LOCKED_SHA, lockedShaFor, RunLog, tempDir } from "./log.js";
 
 const now = new Date("2026-10-14T18:00:00.000Z");
 const BUNDLE = graderBundleSha({ judgeModel: "claude-sonnet-5", gatesConfigHash: null });
@@ -135,7 +135,9 @@ describe("lookback at run end (AD-21 rule 8)", () => {
     });
     const train = result.attributions.filter((a) => a.split === "train");
     expect(train.length).toBeGreaterThanOrEqual(LOOKBACK_LIMITS.minTrainFailures);
-    expect(await readAttributions(root)).toHaveLength(result.attributions.length);
+    expect(await readAttributions(root, { history: log.events, lockedShaFor })).toHaveLength(
+      result.attributions.length,
+    );
     expect(result.targets).toEqual([
       expect.objectContaining({ role: "engineer", host: HOST, train_failures: train.length }),
     ]);
@@ -283,7 +285,7 @@ describe("lookback at run end (AD-21 rule 8)", () => {
       join(root, LOOKBACK_REPO.attributions),
       [...lying, ...ghosts].map((r) => JSON.stringify(r)).join("\n") + "\n",
     );
-    expect(await readAttributions(root)).toHaveLength(ghosts.length);
+    expect(await readAttributions(root, { history: log.events, lockedShaFor })).toEqual([]);
     const result = await lookbackAtRunEnd({
       projectRoot: root,
       events: log.events,
@@ -299,6 +301,51 @@ describe("lookback at run end (AD-21 rule 8)", () => {
       expect.objectContaining({ role: "engineer", train_failures: train.length }),
     ]);
     expect(result.targets[0]?.traces.some((t) => t.trace.startsWith("ghost-"))).toBe(false);
+  });
+
+  it("ignores planted train rows of a run outside the history, even with the right version", async () => {
+    const root = await tempDir("outside");
+    // One real fresh train failure: alone it is below minTrainFailures.
+    const log = new RunLog("r1");
+    let action = "";
+    for (let i = 1; action === ""; i += 1) {
+      const id = `act-${String(i)}`;
+      if (traceSplit({ run: "r1", trace: id }) === "train") action = id;
+    }
+    log.dispatch("engineer", { task: "T-1", action });
+    log.gate("T-1", false);
+    const version = {
+      role: "engineer",
+      host: HOST,
+      locked_sha256: LOCKED_SHA,
+      editable_sha256: EDITABLE_SHA,
+      effective_sha256: EFFECTIVE,
+    };
+    const invented = Array.from({ length: 40 }, (_, i) => `x-${String(i)}`)
+      .filter((trace) => traceSplit({ run: "r-invented", trace }) === "train")
+      .slice(0, LOOKBACK_LIMITS.minTrainFailures)
+      .map((trace) => row(trace, { run: "r-invented", prompt: version, split: "train" }));
+    expect(invented).toHaveLength(LOOKBACK_LIMITS.minTrainFailures);
+    await mkdir(join(root, ".vtc/lookback"), { recursive: true });
+    await writeFile(
+      join(root, LOOKBACK_REPO.attributions),
+      invented.map((r) => JSON.stringify(r)).join("\n") + "\n",
+    );
+    const result = await lookbackAtRunEnd({
+      projectRoot: root,
+      events: log.events,
+      history: log.events,
+      lockedShaFor,
+      graderBundleSha: BUNDLE,
+      weeklyRemainingPct: 80,
+      budgetAvailable: true,
+      now,
+    });
+    expect(result.attributions).toEqual([
+      expect.objectContaining({ run: "r1", trace: action, split: "train" }),
+    ]);
+    expect(result.targets).toEqual([]);
+    expect(result.events).toEqual([]);
   });
 
   it("keeps every run of the history in the scorecards, so a second run never shrinks n", async () => {

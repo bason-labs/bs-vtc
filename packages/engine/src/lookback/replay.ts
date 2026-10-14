@@ -36,8 +36,8 @@ import { join } from "node:path";
 import { z } from "zod";
 import { lookbackEvent, type LookbackEventDraft } from "./events.js";
 import { appendJsonLines, readJsonLines, writeAtomic } from "./files.js";
-import { isRoleFailure } from "./attribution.js";
-import { sameTarget, traceRef, traceSplit, type Trace } from "./traces.js";
+import { isRoleFailure, trustedAttributions, type AttributionHistory } from "./attribution.js";
+import { buildTraces, sameTarget, traceRef, traceSplit } from "./traces.js";
 
 /** Most tasks of each kind one replay runs (§13: 5–10 attributed failures). */
 export const REPLAY_MAX_TASKS = 10;
@@ -51,14 +51,20 @@ export interface ReplayTask {
   readonly regressionSet: boolean;
 }
 
-/** The held-out tasks a replay of `baseline` runs. */
-export const replayTasks = (input: {
-  readonly baseline: PromptVersionRef;
-  readonly traces: readonly Trace[];
-  readonly attributions: readonly Attribution[];
-}): ReplayTask[] => {
-  const failed = new Set(input.attributions.filter(isRoleFailure).map(traceRef));
-  const held = input.traces.filter(
+/**
+ * The held-out tasks a replay of `baseline` runs. The attributions are checked against the history
+ * first ({@link trustedAttributions}): a planted failure row must not move a held-out success out
+ * of the regression set.
+ */
+export const replayTasks = (
+  input: AttributionHistory & {
+    readonly baseline: PromptVersionRef;
+    readonly attributions: readonly Attribution[];
+  },
+): ReplayTask[] => {
+  const trusted = trustedAttributions(input.attributions, input);
+  const failed = new Set(trusted.filter(isRoleFailure).map(traceRef));
+  const held = buildTraces(input.history, input.lockedShaFor).filter(
     (t) =>
       t.task !== undefined &&
       t.prompt?.effective_sha256 === input.baseline.effective_sha256 &&

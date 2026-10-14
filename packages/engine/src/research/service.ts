@@ -6,6 +6,12 @@
  *
  * A role proposes a fact; the engine decides its status. A fact is `verified` only when
  * `verifyFactLocator` resolves its locator against the cached blob whose SHA the row records.
+ *
+ * `facts.jsonl` is git-tracked and a role can write it, so G2 takes no judgement from it: a row
+ * verifies only against a blob the cache index (under the VTC home) records as that fetcher's
+ * response from the row's URL; freshness counts from the cache's own `retrieved_at`, never the
+ * row's `expires_at`; two current claims that both verify and disagree are `conflicting` whatever
+ * their rows say; and a `supersedes` counts only from a verifying row of the same source.
  */
 import {
   factId,
@@ -40,9 +46,9 @@ import {
   type RoleId,
   type UnverifiedFactSummary,
 } from "@vtc/shared";
-import type { RequestMemory } from "./cache.js";
+import type { CacheProvenance, RequestMemory } from "./cache.js";
 import { scanResearchClaims, type ResearchDocument } from "./claims.js";
-import { appendFactRows, currentFacts, readFactRows } from "./facts.js";
+import { appendFactRows, consistentFactRows, currentFacts, readFactRows } from "./facts.js";
 import { builtInFetchers } from "./fetchers.js";
 import type { CachedFetchContext } from "./http-fetch.js";
 import { roleFacingText } from "./text.js";
@@ -73,7 +79,7 @@ export type ResearchEventDraft =
 export interface ResearchServiceDeps {
   /** Absolute project root (`.vtc/research/facts.jsonl` lives under it). */
   readonly projectRoot: string;
-  readonly cache: ResearchCache & Partial<RequestMemory>;
+  readonly cache: ResearchCache & Partial<RequestMemory> & CacheProvenance;
   readonly scope: ResearchScope;
   /** Absent: fetchers are unavailable and every new fact stays unverified (`EngineDeps.http`). */
   readonly http?: HttpClient | undefined;
@@ -104,8 +110,8 @@ export interface ResearchService {
   /** `fact_propose`: fetches the source, verifies the locator and records the row. */
   factPropose(input: unknown, recordedBy: RoleId): Promise<FactProposeResult>;
   /**
-   * Before G2: re-fetches stale facts, re-checks every verified row against the cache (the file is
-   * git-tracked, so the engine trusts no recorded status it cannot reproduce), then lists every
+   * Before G2: re-fetches stale and expired facts, re-checks every row against the cache (the file
+   * is git-tracked, so the engine trusts no recorded status it cannot reproduce), then lists every
    * fact and claim G2 blocks on.
    */
   g2Facts(documents: readonly ResearchDocument[]): Promise<G2Facts>;
@@ -200,8 +206,9 @@ export const createResearchService = (deps: ResearchServiceDeps): ResearchServic
       Date.parse(result.retrieved_at) + FETCHER_TTL_DAYS[result.fetcher] * DAY_MS,
     ).toISOString();
 
-  const isExpired = (row: FactRow, at: Date): boolean =>
-    row.expires_at !== undefined && Date.parse(row.expires_at) <= at.getTime();
+  /** Past its freshness window, counted from when the cache last retrieved the blob. */
+  const isExpired = (fetcher: FetcherId, retrievedAt: string, at: Date): boolean =>
+    Date.parse(retrievedAt) + FETCHER_TTL_DAYS[fetcher] * DAY_MS <= at.getTime();
 
   const factPropose = async (rawInput: unknown, recordedBy: RoleId): Promise<FactProposeResult> => {
     const input = FactProposeInputSchema.parse(rawInput);
@@ -326,13 +333,20 @@ export const createResearchService = (deps: ResearchServiceDeps): ResearchServic
         detail: clip(`the source could not be re-fetched: ${result.detail ?? result.status}`, 500),
       };
     }
+    if (result.url !== source.url) {
+      // A fact's id names its source URL: a source that moved is a new claim to propose.
+      return {
+        row: { ...row, status: "unverified", recorded_by: "engine", recorded_at: at.toISOString() },
+        detail: clip(`the source moved to ${result.url}: propose the fact from there`, 500),
+      };
+    }
     return {
       row: {
         ...row,
-        status,
+        // A re-fetch does not settle a disagreement between sources (G2 re-derives it).
+        status: status === "verified" && row.status === "conflicting" ? "conflicting" : status,
         source: {
           ...source,
-          url: result.url,
           retrieved_at: result.retrieved_at,
           content_sha256: result.content_sha256,
         },
@@ -344,43 +358,75 @@ export const createResearchService = (deps: ResearchServiceDeps): ResearchServic
     };
   };
 
-  /** Whether a row's locator resolves in the cached blob it names, in this scope, right now. */
-  const verifiesNow = async (
-    row: FactRow,
-  ): Promise<{ readonly ok: true } | { readonly ok: false; readonly reason: string }> => {
-    if (row.source === null) return { ok: false, reason: "no source" };
-    if (row.source.fetcher === "search") return { ok: false, reason: SEARCH_NOT_A_SOURCE };
-    const body = await deps.cache.blob(scope, row.source.content_sha256);
-    if (body === undefined)
+  type Check =
+    | { readonly ok: true; readonly retrievedAt: string; readonly fetcher: FetcherId }
+    | { readonly ok: false; readonly reason: string };
+
+  /**
+   * Whether a row's locator resolves, right now and in this scope, in a blob the cache index
+   * records as the row's fetcher's response from the row's URL; with when the cache retrieved it.
+   */
+  const verifiesNow = async (row: FactRow): Promise<Check> => {
+    const source = row.source;
+    if (source === null) return { ok: false, reason: "no source" };
+    if (source.fetcher === "search") return { ok: false, reason: SEARCH_NOT_A_SOURCE };
+    const retrievedAt = await deps.cache.retrievedAt(scope, source);
+    const body =
+      retrievedAt === undefined ? undefined : await deps.cache.blob(scope, source.content_sha256);
+    if (retrievedAt === undefined || body === undefined)
       return { ok: false, reason: "the cited source is not in this machine's cache" };
-    return verifyFactLocator(row.source.locator, new TextDecoder().decode(body), row.value);
+    const check = verifyFactLocator(source.locator, new TextDecoder().decode(body), row.value);
+    return check.ok ? { ok: true, retrievedAt, fetcher: source.fetcher } : check;
   };
 
-  /** Why G2 lists a fact row (status and reason), or `undefined` when it verifies. */
-  const listing = async (
-    row: FactRow,
-  ): Promise<{ status: UnverifiedFactSummary["status"]; reason: string } | undefined> => {
-    if (row.status === "conflicting")
-      return { status: row.status, reason: "sources disagree on the value" };
-    if (row.status === "stale") {
-      return {
-        status: row.status,
-        reason: "the source is past its freshness window and could not be re-fetched",
-      };
+  /** The current facts G2 sees: a `supersedes` counts only from a row that verifies now. */
+  const currentForG2 = async (): Promise<FactRow[]> => {
+    const rows = consistentFactRows((await readFactRows(deps.projectRoot)).rows);
+    const verifying = new Set<FactRow>();
+    for (const row of rows) {
+      if (row.supersedes !== undefined && (await verifiesNow(row)).ok) verifying.add(row);
     }
-    const check = await verifiesNow(row);
+    return currentFacts(rows, (row) => verifying.has(row));
+  };
+
+  const STALE_REASON = "the source is past its freshness window and could not be re-fetched";
+
+  /**
+   * Why G2 lists a fact row (status and reason), or `undefined` when it verifies, is fresh and no
+   * other current claim that verifies disagrees with it.
+   */
+  const listing = (
+    row: FactRow,
+    checks: ReadonlyMap<FactRow, Check>,
+    current: readonly FactRow[],
+    at: Date,
+  ): { status: UnverifiedFactSummary["status"]; reason: string } | undefined => {
+    if (row.status === "stale") return { status: "stale", reason: STALE_REASON };
+    const check = checks.get(row) ?? { ok: false, reason: "not checked" };
     if (row.status === "unverified")
       return { status: row.status, reason: check.ok ? "recorded as unverified" : check.reason };
-    if (check.ok) return undefined;
-    // `verified` or `waived` rows: the file is git-tracked, so a recorded status counts only when
-    // the engine can reproduce it; a waiver covers one G2 only.
-    return {
-      status: "unverified",
-      reason:
+    if (!check.ok) {
+      // The file is git-tracked, so a recorded status counts only when the engine can reproduce
+      // it; a waiver covers one G2 only.
+      const recorded =
         row.status === "waived"
-          ? `waived at an earlier G2 (a waiver covers one G2): ${check.reason}`
-          : `recorded verified but does not verify against the cache: ${check.reason}`,
-    };
+          ? "waived at an earlier G2 (a waiver covers one G2)"
+          : `recorded ${row.status} but does not verify against the cache`;
+      return { status: "unverified", reason: `${recorded}: ${check.reason}` };
+    }
+    if (isExpired(check.fetcher, check.retrievedAt, at))
+      return { status: "stale", reason: STALE_REASON };
+    const rival = current.find(
+      (r) =>
+        r.id !== row.id &&
+        r.subject === row.subject &&
+        r.predicate === row.predicate &&
+        JSON.stringify(r.value) !== JSON.stringify(row.value) &&
+        checks.get(r)?.ok === true,
+    );
+    if (rival !== undefined)
+      return { status: "conflicting", reason: `sources disagree on the value (${rival.id})` };
+    return undefined;
   };
 
   return {
@@ -397,7 +443,7 @@ export const createResearchService = (deps: ResearchServiceDeps): ResearchServic
 
     async factLookup(rawInput) {
       const input = FactLookupInputSchema.parse(rawInput);
-      const { rows } = await readFactRows(deps.projectRoot);
+      const rows = consistentFactRows((await readFactRows(deps.projectRoot)).rows);
       let facts: FactRow[];
       if (input.ids !== undefined) {
         const newest = new Map(rows.map((r) => [r.id, r]));
@@ -419,26 +465,32 @@ export const createResearchService = (deps: ResearchServiceDeps): ResearchServic
 
     async g2Facts(documents) {
       const at = now();
-      const before = currentFacts((await readFactRows(deps.projectRoot)).rows);
-      const refreshed: FactRow[] = [];
+      const before = await currentForG2();
+      let refreshed = false;
       for (const row of before) {
-        const due = row.status === "stale" || (row.status === "verified" && isExpired(row, at));
-        if (!due || row.source === null) continue;
+        if (row.source === null || row.status === "unverified") continue;
+        let due = row.status === "stale";
+        if (!due) {
+          const check = await verifiesNow(row);
+          due = check.ok && isExpired(check.fetcher, check.retrievedAt, at);
+        }
+        if (!due) continue;
         const next = await refresh(row, at);
         if (next === undefined) continue;
         await record([next.row]);
-        refreshed.push(next.row);
+        refreshed = true;
         await emit({
           type: "fact.verified",
           actor: "engine",
           data: { id: next.row.id, status: next.row.status, detail: next.detail },
         });
       }
-      const after =
-        refreshed.length === 0 ? before : currentFacts((await readFactRows(deps.projectRoot)).rows);
+      const after = refreshed ? await currentForG2() : before;
+      const checks = new Map<FactRow, Check>();
+      for (const row of after) checks.set(row, await verifiesNow(row));
       const facts: UnverifiedFactSummary[] = [];
       for (const row of after) {
-        const listed = await listing(row);
+        const listed = listing(row, checks, after, at);
         if (listed === undefined) continue;
         facts.push({
           id: row.id,

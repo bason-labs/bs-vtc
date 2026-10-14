@@ -7,11 +7,18 @@
 export {
   CacheIntegrityError,
   createFileResearchCache,
+  type CacheProvenance,
   type FileResearchCache,
   type RequestMemory,
 } from "./cache.js";
 export { scanResearchClaims, type DocumentClaim, type ResearchDocument } from "./claims.js";
-export { appendFactRows, currentFacts, readFactRows, type FactsFile } from "./facts.js";
+export {
+  appendFactRows,
+  consistentFactRows,
+  currentFacts,
+  readFactRows,
+  type FactsFile,
+} from "./facts.js";
 export {
   builtInFetchers,
   depsdevFetcher,

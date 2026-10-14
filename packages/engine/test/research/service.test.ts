@@ -1,4 +1,5 @@
 import {
+  factId,
   FactRowSchema,
   RESEARCH_FACTS_FILE,
   researchScopeFor,
@@ -296,6 +297,23 @@ describe("G2 fact list (AD-22 rule 4)", () => {
     ]);
   });
 
+  it("lists an expired fact whose source moved: its id names the old URL", async () => {
+    const MOVED = "https://registry.npmjs.org/react/-/19.2.0";
+    const { service, time, http, events } = await setup({
+      [`GET ${NPM_URL}`]: jsonResponse(NPM_URL, { license: "MIT" }),
+    });
+    const { fact } = await service.factPropose(licenceFact("MIT", fromNpm), "architect");
+    http.set(`GET ${NPM_URL}`, jsonResponse(MOVED, { license: "MIT" }));
+    time.advanceDays(2);
+    const g2 = await service.g2Facts([]);
+    expect(g2.facts.map((f) => [f.id, f.status])).toEqual([[fact.id, "unverified"]]);
+    expect(events.find((e) => e.type === "fact.verified")?.data).toMatchObject({
+      id: fact.id,
+      status: "unverified",
+      detail: `the source moved to ${MOVED}: propose the fact from there`,
+    });
+  });
+
   it("lists an expired fact that cannot be re-fetched as stale", async () => {
     const { service, time, http } = await setup({
       [`GET ${NPM_URL}`]: jsonResponse(NPM_URL, { license: "MIT" }),
@@ -352,18 +370,27 @@ describe("G2 fact list (AD-22 rule 4)", () => {
     expect(g2.facts).toEqual([]);
   });
 
+  const plant = async (projectRoot: string, rows: readonly object[]) => {
+    await mkdir(join(projectRoot, ".vtc/research"), { recursive: true });
+    await appendFile(
+      join(projectRoot, RESEARCH_FACTS_FILE),
+      rows.map((row) => `${JSON.stringify(FactRowSchema.parse(row))}\n`).join(""),
+    );
+  };
+
   it("re-checks rows recorded verified: a planted row or a missing blob is listed", async () => {
     const { service, projectRoot } = await setup();
-    const planted = FactRowSchema.parse({
+    const url = "https://registry.npmjs.org/left-pad/1.3.0";
+    const planted = {
       v: 1,
-      id: "f-00000000000000ab",
+      id: factId("npm:left-pad@1.3.0", "license", "MIT", url),
       subject: "npm:left-pad@1.3.0",
       predicate: "license",
       value: "MIT",
       status: "verified",
       source: {
         fetcher: "registry",
-        url: "https://registry.npmjs.org/left-pad/1.3.0",
+        url,
         retrieved_at: "2026-10-14T09:00:00.000Z",
         content_sha256: "c".repeat(64),
         locator: { kind: "json_pointer", pointer: "/license" },
@@ -371,9 +398,8 @@ describe("G2 fact list (AD-22 rule 4)", () => {
       expires_at: "2026-10-20T00:00:00.000Z",
       recorded_by: "engine",
       recorded_at: "2026-10-14T09:00:00.000Z",
-    });
-    await mkdir(join(projectRoot, ".vtc/research"), { recursive: true });
-    await appendFile(join(projectRoot, RESEARCH_FACTS_FILE), `${JSON.stringify(planted)}\n`);
+    };
+    await plant(projectRoot, [planted]);
     const g2 = await service.g2Facts([]);
     expect(g2.facts).toMatchObject([
       {
@@ -390,8 +416,12 @@ describe("G2 fact list (AD-22 rule 4)", () => {
       [`GET ${NPM_URL}`]: jsonResponse(NPM_URL, { license: "MIT" }),
     });
     const { fact } = await service.factPropose(licenceFact("MIT", fromNpm), "architect");
-    const forged = { ...fact, id: "f-00000000000000cd", value: "Apache-2.0" };
-    await appendFile(join(projectRoot, RESEARCH_FACTS_FILE), `${JSON.stringify(forged)}\n`);
+    const forged = {
+      ...fact,
+      id: factId(fact.subject, fact.predicate, "Apache-2.0", NPM_URL),
+      value: "Apache-2.0",
+    };
+    await plant(projectRoot, [forged]);
     expect(await factsOnDisk()).toHaveLength(2);
     const g2 = await service.g2Facts([]);
     expect(g2.facts).toMatchObject([
@@ -400,6 +430,103 @@ describe("G2 fact list (AD-22 rule 4)", () => {
         reason:
           "recorded verified but does not verify against the cache: the source has another value",
       },
+    ]);
+  });
+
+  it("ignores a row whose id is not its claim's: it cannot take over another fact's id", async () => {
+    const { service, projectRoot } = await setup({
+      [`GET ${NPM_URL}`]: jsonResponse(NPM_URL, { license: "MIT" }),
+    });
+    const { fact } = await service.factPropose(licenceFact("MIT"), "architect");
+    expect(fact.status).toBe("unverified");
+    const verified = await service.factPropose(licenceFact("MIT", fromNpm), "architect");
+    // The verified MIT row, re-labelled with the unsourced claim's id.
+    await plant(projectRoot, [{ ...verified.fact, id: fact.id }]);
+    const g2 = await service.g2Facts([]);
+    expect(g2.facts.map((f) => [f.id, f.status])).toEqual([[fact.id, "unverified"]]);
+    expect((await service.factLookup({ ids: [fact.id] })).facts[0]?.status).toBe("unverified");
+  });
+
+  it("keeps a conflict listed when a planted row records a conflicting fact as verified", async () => {
+    const { service, projectRoot, time } = await setup({
+      [`GET ${NPM_URL}`]: jsonResponse(NPM_URL, { license: "MIT" }),
+      [`GET ${DEPS_URL}`]: jsonResponse(DEPS_URL, { licenses: ["Apache-2.0"] }),
+    });
+    const first = await service.factPropose(licenceFact("MIT", fromNpm), "architect");
+    const second = await service.factPropose(licenceFact("Apache-2.0", fromDeps), "architect");
+    const later = time.now().toISOString();
+    await plant(projectRoot, [
+      { ...first.fact, status: "verified", recorded_by: "engine", recorded_at: later },
+      { ...second.fact, status: "verified", recorded_by: "engine", recorded_at: later },
+    ]);
+    const g2 = await service.g2Facts([
+      { path: "research.md", text: `react@19.2.0 is MIT licensed (${first.fact.id})` },
+    ]);
+    expect(g2.facts.map((f) => [f.id, f.status])).toEqual([
+      [first.fact.id, "conflicting"],
+      [second.fact.id, "conflicting"],
+    ]);
+    expect(g2.facts[0]?.reason).toBe(`sources disagree on the value (${second.fact.id})`);
+  });
+
+  it("keeps a stale fact listed when a planted row records it verified with a future expiry", async () => {
+    const { service, projectRoot, http, time, factsOnDisk } = await setup({
+      [`GET ${NPM_URL}`]: jsonResponse(NPM_URL, { license: "MIT" }),
+    });
+    const { fact } = await service.factPropose(licenceFact("MIT", fromNpm), "architect");
+    http.set(`GET ${NPM_URL}`, new Error("offline"));
+    time.advanceDays(2);
+    expect((await service.g2Facts([])).facts.map((f) => f.status)).toEqual(["stale"]);
+    const stale = (await factsOnDisk()).at(-1);
+    expect(stale).toMatchObject({ id: fact.id, status: "stale" });
+    if (stale?.source === null || stale === undefined) return;
+    const at = time.now().toISOString();
+    await plant(projectRoot, [
+      {
+        ...stale,
+        status: "verified",
+        source: { ...stale.source, retrieved_at: at },
+        expires_at: "2099-01-01T00:00:00.000Z",
+        recorded_by: "engine",
+        recorded_at: at,
+      },
+    ]);
+    const g2 = await service.g2Facts([]);
+    expect(g2.facts.map((f) => [f.id, f.status])).toEqual([[fact.id, "stale"]]);
+  });
+
+  it("honours supersedes only from a verifying row of the same source", async () => {
+    const { service, projectRoot, factsOnDisk, time } = await setup({
+      [`GET ${NPM_URL}`]: jsonResponse(NPM_URL, { license: "MIT" }),
+      [`GET ${DEPS_URL}`]: jsonResponse(DEPS_URL, { licenses: ["Apache-2.0"] }),
+    });
+    const first = await service.factPropose(licenceFact("MIT", fromNpm), "architect");
+    const second = await service.factPropose(licenceFact("Apache-2.0", fromDeps), "architect");
+    const npmRow = (await factsOnDisk())[0];
+    if (npmRow?.source === null || npmRow === undefined) return;
+    const at = time.now().toISOString();
+    // The npm claim again, naming the deps.dev claim as the one it replaces: another source.
+    const otherSource = {
+      ...npmRow,
+      status: "verified",
+      supersedes: second.fact.id,
+      recorded_at: at,
+    };
+    // A deps.dev "MIT" claim that cites the npm blob: the cache never got it from deps.dev.
+    const borrowedBlob = {
+      ...npmRow,
+      id: factId(npmRow.subject, npmRow.predicate, "MIT", DEPS_URL),
+      status: "verified",
+      source: { ...npmRow.source, fetcher: "depsdev", url: DEPS_URL },
+      supersedes: second.fact.id,
+      recorded_at: at,
+    };
+    await plant(projectRoot, [otherSource, borrowedBlob]);
+    const g2 = await service.g2Facts([]);
+    expect(g2.facts.map((f) => [f.id, f.status])).toEqual([
+      [second.fact.id, "conflicting"],
+      [first.fact.id, "conflicting"],
+      [borrowedBlob.id, "unverified"],
     ]);
   });
 });

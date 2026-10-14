@@ -8,6 +8,7 @@ import { mkdir, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 import {
+  attributeRun,
   candidateFrontmatter,
   checkProposal,
   proposalPaths,
@@ -17,7 +18,7 @@ import {
   traceSlug,
   traceSplit,
 } from "../../src/lookback/index.js";
-import { EDITABLE, HOST, LOCKED, tempDir } from "./log.js";
+import { EDITABLE, HOST, LOCKED, lockedShaFor, RunLog, tempDir } from "./log.js";
 
 const base = promptVersionRef({ role: "engineer", host: HOST, locked: LOCKED, editable: EDITABLE });
 const now = new Date("2026-10-14T12:00:00.000Z");
@@ -35,20 +36,23 @@ const TRAIN = traceIn("train");
 /** What the lookback role cites: the run-qualified slug. */
 const cite = (trace: string): string => traceSlug({ run: "r1", trace });
 
-const failure = (trace: string, role = "engineer"): Attribution => ({
-  v: 1,
-  trace,
-  run: "r1",
-  prompt: { ...base, role },
-  outcome: "failure",
-  blamed_role: role,
-  method: "tree",
-  rule: "test_fails",
-  confidence: 1,
-  split: traceSplit({ run: "r1", trace }),
-  evidence: [],
-  attributed_at: now.toISOString(),
-});
+const HELD = traceIn("holdout");
+const OTHER = traceIn("train", 1);
+
+/** Run r1: engineer failures on TRAIN and HELD (failed gates), a QA failure on OTHER. */
+const log = new RunLog("r1");
+log.dispatch("engineer", { task: "T-1", action: TRAIN });
+log.gate("T-1", false);
+log.dispatch("engineer", { task: "T-2", action: HELD });
+log.gate("T-2", false);
+log.dispatch("qa", { task: "T-3", action: OTHER });
+log.finding("T-3", "patch", { category: "test_adequacy" });
+const recorded = attributeRun({ events: log.events, lockedShaFor, now }).attributions;
+const failure = (trace: string): Attribution => {
+  const row = recorded.find((a) => a.trace === trace);
+  if (row === undefined) throw new Error(`no attribution for ${trace}`);
+  return row;
+};
 
 const NEW_SECTION = "Prefer small diffs. Write the failing test first.";
 
@@ -70,7 +74,15 @@ const proposal = (over: Partial<PromptProposal> = {}): PromptProposal => ({
 });
 
 const check = (raw: unknown, editableFile = NEW_SECTION, attributions = [failure(TRAIN)]) =>
-  checkProposal({ role: "engineer", raw, editableFile, locked: LOCKED, attributions });
+  checkProposal({
+    role: "engineer",
+    raw,
+    editableFile,
+    locked: LOCKED,
+    attributions,
+    history: log.events,
+    lockedShaFor,
+  });
 
 describe("proposal checks (AD-21 rule 4)", () => {
   it("accepts a small change of the editable section and names the candidate version", () => {
@@ -128,8 +140,8 @@ describe("proposal checks (AD-21 rule 4)", () => {
   });
 
   it("refuses held-out traces and traces that are not the role's attributed failures", () => {
-    const held = traceIn("holdout");
-    const other = traceIn("train", 1);
+    const held = HELD;
+    const other = OTHER;
     const result = check(
       proposal({
         changes: [
@@ -140,7 +152,7 @@ describe("proposal checks (AD-21 rule 4)", () => {
         ],
       }),
       NEW_SECTION,
-      [failure(TRAIN), failure(held), failure(other, "qa")],
+      [failure(TRAIN), failure(held), failure(other)],
     );
     expect(result).toMatchObject({
       ok: false,
@@ -148,6 +160,40 @@ describe("proposal checks (AD-21 rule 4)", () => {
         expect.stringMatching(/held-out/),
         expect.stringMatching(/not an attributed train failure/),
         // A bare action id names a dispatch in every run: it is not a citation.
+        expect.stringMatching(/not an attributed train failure/),
+      ],
+    });
+  });
+
+  it("refuses a cited train trace whose failure row the history does not bear out", () => {
+    const ghost = traceIn("train", 2);
+    const planted: Attribution[] = [
+      // A dispatch the run never made.
+      { ...failure(TRAIN), trace: ghost, split: traceSplit({ run: "r1", trace: ghost }) },
+      // A run outside the history.
+      {
+        ...failure(TRAIN),
+        run: "r-invented",
+        split: traceSplit({ run: "r-invented", trace: TRAIN }),
+      },
+    ];
+    const invented = traceSlug({ run: "r-invented", trace: TRAIN });
+    const result = check(
+      proposal({
+        changes: [
+          {
+            ...proposal().changes[0],
+            trace_ids: [cite(ghost), invented],
+          } as PromptProposal["changes"][number],
+        ],
+      }),
+      NEW_SECTION,
+      planted,
+    );
+    expect(result).toMatchObject({
+      ok: false,
+      problems: [
+        expect.stringMatching(/not an attributed train failure/),
         expect.stringMatching(/not an attributed train failure/),
       ],
     });

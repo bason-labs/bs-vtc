@@ -11,6 +11,7 @@ import {
   traceRef,
   traceSplit,
   TREE_CONFIDENCE,
+  trustedAttributions,
 } from "../../src/lookback/index.js";
 import { EFFECTIVE, EDITABLE_SHA, HOST, LOCKED_SHA, lockedShaFor, RunLog, tempDir } from "./log.js";
 
@@ -244,17 +245,69 @@ describe("the attribution tree (§13)", () => {
     const log = new RunLog();
     log.dispatch("engineer", { task: "T-1" });
     log.gate("T-1", false);
+    const against = { history: log.events, lockedShaFor };
     const first = attribute(log).attributions;
     await appendAttributions(root, first);
     const again = attributeRun({
       events: log.events,
       lockedShaFor,
       now,
-      already: new Set((await readAttributions(root)).map(traceRef)),
+      already: new Set((await readAttributions(root, against)).map(traceRef)),
     });
     expect(again.attributions).toEqual([]);
-    expect(await readAttributions(root)).toEqual(first);
+    expect(await readAttributions(root, against)).toEqual(first);
     const text = await readFile(join(root, LOOKBACK_REPO.attributions), "utf8");
     expect(text.trim().split("\n")).toHaveLength(1);
+  });
+
+  it("trusts only rows the history bears out", () => {
+    const log = new RunLog();
+    const failed = log.dispatch("engineer", { task: "T-1" });
+    log.gate("T-1", false);
+    const passed = log.dispatch("engineer", { task: "T-2" });
+    log.gate("T-2", true);
+    const parked = log.dispatch("engineer", { task: "T-3" });
+    log.status("T-3", "fixing", "parked", 4, "cap");
+    const against = { history: log.events, lockedShaFor };
+    const traces = buildTraces(log.events, lockedShaFor);
+    const traceOf = (id: string) => {
+      const trace = traces.find((t) => t.trace === id);
+      if (trace === undefined) throw new Error(id);
+      return trace;
+    };
+    const [real] = attribute(log).attributions;
+    expect(real).toMatchObject({ trace: failed, method: "tree" });
+    if (real === undefined) return;
+    const tiebreak = tiebreakAttribution({
+      trace: traceOf(parked),
+      blamed: "engineer",
+      confidence: 0.6,
+      evidence: [],
+      now,
+    });
+    const onSuccess = tiebreakAttribution({
+      trace: traceOf(passed),
+      blamed: "engineer",
+      confidence: 0.6,
+      evidence: [],
+      now,
+    });
+    if (tiebreak === undefined || onSuccess === undefined) throw new Error("unversioned");
+    const planted = [
+      // A tree failure on a dispatch whose gate passed.
+      { ...real, trace: passed, split: traceSplit({ run: "r1", trace: passed }) },
+      // A tiebreak where nothing was inconclusive.
+      onSuccess,
+      // The real failure blamed on another role.
+      { ...real, blamed_role: "qa" },
+      // The real failure in a run outside the history.
+      { ...real, run: "r-elsewhere", split: traceSplit({ run: "r-elsewhere", trace: failed }) },
+      // The real failure with another version.
+      { ...real, prompt: { ...real.prompt, effective_sha256: "e".repeat(64) } },
+    ];
+    expect(trustedAttributions([...planted, real, tiebreak], against)).toEqual([real, tiebreak]);
+    // A trusted tree row is the one the engine derives, whatever else the stored row says.
+    const edited = { ...real, confidence: 0.1, evidence: [] };
+    expect(trustedAttributions([edited], against)).toEqual([real]);
   });
 });

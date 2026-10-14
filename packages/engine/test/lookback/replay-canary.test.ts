@@ -15,6 +15,7 @@ import { describe, expect, it } from "vitest";
 import { toYaml } from "../../src/core/index.js";
 import {
   aaFlipRate,
+  attributeRun,
   buildTraces,
   cachedAaFlipRate,
   canaryArmStats,
@@ -27,6 +28,7 @@ import {
   recordAaFlipRate,
   replayDispatchPlan,
   replayTasks,
+  tiebreakAttribution,
   tokensDeltaPct,
   traceSplit,
   writeReplayResult,
@@ -71,31 +73,63 @@ describe("replay harness (AD-21 rule 6)", () => {
     const failing = heldOutAction(0);
     const passing = heldOutAction(1);
     const train = trainAction();
-    log.dispatch("engineer", { task: "T-1", action: failing });
-    log.dispatch("engineer", { task: "T-2", action: passing });
-    log.dispatch("engineer", { task: "T-3", action: train });
-    const failure = (trace: string, blamed: string | null): Attribution =>
-      ({
-        run: "r1",
-        trace,
-        outcome: "failure",
-        blamed_role: blamed,
-        prompt: baseline,
-      }) as Attribution;
     const unknown = heldOutAction(2);
+    log.dispatch("engineer", { task: "T-1", action: failing });
+    log.gate("T-1", false);
+    log.dispatch("engineer", { task: "T-2", action: passing });
+    log.gate("T-2", true);
+    log.dispatch("engineer", { task: "T-3", action: train });
+    log.gate("T-3", false);
     log.dispatch("engineer", { task: "T-4", action: unknown });
-    const attributions = [
-      failure(failing, "engineer"),
-      failure(train, "engineer"),
-      // An AI tiebreak that blamed nobody: not a failure of this version, so a regression task.
-      failure(unknown, null),
-    ];
+    log.status("T-4", "fixing", "parked", 4, "cap");
     const traces = buildTraces(log.events, lockedShaFor);
-    const tasks = replayTasks({ baseline, traces, attributions });
+    const unknownTrace = traces.find((t) => t.trace === unknown);
+    if (unknownTrace === undefined) throw new Error("no trace");
+    // An AI tiebreak that blamed nobody: not a failure of this version, so a regression task.
+    const tiebreak = tiebreakAttribution({
+      trace: unknownTrace,
+      blamed: "unknown",
+      confidence: 0.5,
+      evidence: [],
+      now,
+    });
+    const attributions = [
+      ...attributeRun({ events: log.events, lockedShaFor, now }).attributions,
+      ...(tiebreak === undefined ? [] : [tiebreak]),
+    ];
+    expect(attributions.map((a) => a.trace)).toEqual([failing, train, unknown]);
+    const tasks = replayTasks({ baseline, history: log.events, lockedShaFor, attributions });
     expect(tasks.map((t) => [t.task, t.regressionSet])).toEqual([
       ["T-1", false],
       ["T-2", true],
       ["T-4", true],
+    ]);
+  });
+
+  it("keeps a held-out success in the regression set despite a planted failure row", () => {
+    const log = new RunLog();
+    const failing = heldOutAction(0);
+    const passing = heldOutAction(1);
+    log.dispatch("engineer", { task: "T-1", action: failing });
+    log.gate("T-1", false);
+    log.dispatch("engineer", { task: "T-2", action: passing });
+    log.gate("T-2", true);
+    const [real] = attributeRun({ events: log.events, lockedShaFor, now }).attributions;
+    if (real === undefined) throw new Error("no attribution");
+    const planted: Attribution = {
+      ...real,
+      trace: passing,
+      split: traceSplit({ run: "r1", trace: passing }),
+    };
+    const tasks = replayTasks({
+      baseline,
+      history: log.events,
+      lockedShaFor,
+      attributions: [real, planted],
+    });
+    expect(tasks.map((t) => [t.task, t.regressionSet])).toEqual([
+      ["T-1", false],
+      ["T-2", true],
     ]);
   });
 

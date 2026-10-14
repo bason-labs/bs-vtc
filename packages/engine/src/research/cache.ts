@@ -40,7 +40,23 @@ export interface RequestMemory {
   ): Promise<FetchRequest | undefined>;
 }
 
-export type FileResearchCache = ResearchCache & RequestMemory;
+/**
+ * What the cache itself recorded about a blob. The cache lives under the VTC home, out of a role's
+ * reach, so this is the engine's own word on where a blob came from and when, unlike a row of the
+ * git-tracked facts file.
+ */
+export interface CacheProvenance {
+  /**
+   * When `fetcher` last stored or revalidated blob `content_sha256` as its response from `url`
+   * (the newest such index entry), or `undefined` when the index has none.
+   */
+  retrievedAt(
+    scope: ResearchScope,
+    source: { readonly fetcher: FetcherId; readonly url: string; readonly content_sha256: string },
+  ): Promise<string | undefined>;
+}
+
+export type FileResearchCache = ResearchCache & RequestMemory & CacheProvenance;
 
 const REQUESTS_FILE = "requests.jsonl";
 
@@ -118,6 +134,20 @@ export const createFileResearchCache = (vtcHome: string): FileResearchCache => {
           request: FetchRequestSchema.parse(request),
         }),
       ]);
+    },
+
+    async retrievedAt(scope, source) {
+      let newest: string | undefined;
+      for (const entry of await readIndex(scope)) {
+        if (
+          entry.fetcher === source.fetcher &&
+          entry.url === source.url &&
+          entry.content_sha256 === source.content_sha256 &&
+          (newest === undefined || Date.parse(entry.retrieved_at) > Date.parse(newest))
+        )
+          newest = entry.retrieved_at;
+      }
+      return newest;
     },
 
     async recall(scope, source) {
