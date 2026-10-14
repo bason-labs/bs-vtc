@@ -18,3 +18,18 @@ Not yet run: the statusline JSON capture (needs a statusline config change on th
 Claude Code install), Codex agent `sandbox_mode` inheritance, a real limit-hit / auth-error
 stream, marketplace install from a release branch, signing/notarization, and token calibration
 on 5 tasks. Until then those contracts stay provisional as written in spine §7.
+
+## Help-level notes (wave 3, 2026-10-14; no model call, no session started)
+
+Read from `--help` output only, by the adapters team, for codex-cli 0.162.1 and Claude Code
+2.1.296. They narrow spine §7 rows; they do not close them.
+
+| Check | Result | Spine §7 row |
+|---|---|---|
+| `codex exec resume --help` | Accepts `-c`, `--ignore-rules`, `--output-schema` and `--json`; rejects `--sandbox` after `resume`. `--sandbox` stays an `exec` option before `resume`, and the adapter also passes the `sandbox_mode` config override. | Codex resume argv |
+| `claude --help` `--restricted` | Drops the user, project and local settings files, keeps managed settings and `--settings`, and removes command-running tools unless `--tools` names them. Whether it keeps the subscription login is still open. | Claude `--restricted` |
+
+The AD-25 stream fixtures for limit, auth, max-turns and kill are synthetic (documented shapes)
+until someone records real ones on the signed-in machine with `pnpm --filter @vtc/adapters
+live:check --record` (recipes in `packages/adapters/test/fixtures/README.md`); it spends a little
+quota and the auth stream needs a sign-out and back in.
