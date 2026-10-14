@@ -8,7 +8,11 @@ import {
 } from "@vtc/shared";
 import {
   evaluateVisual,
+  MAX_SUMMARY_FINDINGS,
+  ranOnProjectToolchain,
   styleMismatch,
+  VISUAL_NOTE_RULE,
+  VISUAL_PROJECT_TOOLCHAIN_RULE,
   visualWithoutRenders,
   type EvaluateInput,
 } from "../../../src/gates/visual/evaluate.js";
@@ -219,6 +223,57 @@ describe("evaluateVisual", () => {
       input(rendered(), { detector: [{ ...note, sarif_level: "warning" }] }),
     );
     expect(fail.summary.status).toBe("fail");
+  });
+});
+
+describe("visual notes and the project toolchain (reading 124)", () => {
+  const many: ToolFinding[] = Array.from({ length: MAX_SUMMARY_FINDINGS + 50 }, (_, i) => ({
+    tool: "vtc-design-detector",
+    rule_id: "vtc-design/side-stripe",
+    category: "design",
+    title: `stripe ${String(i)}`,
+    location: { path: "web/a.css", line: i + 1 },
+    evidence: { type: "file_line", ref: `web/a.css:${String(i + 1)}` },
+    sarif_level: "warning",
+  }));
+  const notes = [
+    "pinned the browser",
+    { rule_id: VISUAL_PROJECT_TOOLCHAIN_RULE, text: "project code" },
+  ];
+
+  it("keeps every note in the capped summary, ahead of the other findings", () => {
+    const { summary } = evaluateVisual(input(rendered(), { detector: many, notes }));
+    expect(summary.findings).toHaveLength(MAX_SUMMARY_FINDINGS);
+    expect(ruleIds(summary.findings.slice(0, 2))).toEqual([
+      VISUAL_NOTE_RULE,
+      VISUAL_PROJECT_TOOLCHAIN_RULE,
+    ]);
+    expect(summary.findings.slice(0, 2).every((f) => f.sarif_level === "note")).toBe(true);
+    expect(ranOnProjectToolchain(summary)).toBe(true);
+    const without = visualWithoutRenders({
+      run: "r1",
+      task: "T-1",
+      status: "error",
+      reason: "the render crashed",
+      browser: null,
+      findings: many,
+      notes,
+      reportPath: ".vtc/evidence/T-1/visual/report.json",
+      writtenAt: "2026-10-14T08:00:00.000Z",
+    });
+    expect(ranOnProjectToolchain(without.summary)).toBe(true);
+  });
+
+  it("tells a run on VTC's own store from one on the project's Playwright", () => {
+    const store = evaluateVisual(input(rendered(), { notes: ["pinned the browser"] }));
+    expect(ranOnProjectToolchain(store.summary)).toBe(false);
+    expect(ranOnProjectToolchain(undefined)).toBe(false);
+    expect(ranOnProjectToolchain(null)).toBe(false);
+    // A plain note that merely mentions the project's Playwright is not the marker.
+    const prose = evaluateVisual(
+      input(rendered(), { notes: ["ran on the project's own Playwright"] }),
+    );
+    expect(ranOnProjectToolchain(prose.summary)).toBe(false);
   });
 });
 

@@ -18,7 +18,9 @@ import {
 } from "@vtc/shared";
 import {
   projectToolchain,
+  ranOnProjectToolchain,
   RunnerResultSchema,
+  VISUAL_PROJECT_TOOLCHAIN_RULE,
   type RunnerInput,
   type VisualRunner,
   type VisualRunnerCall,
@@ -233,17 +235,20 @@ describe("visual step in a gate run", () => {
     const projectCode = (fs: readonly { rule_id: string; message?: string | undefined }[]) =>
       fs.some(
         (f) =>
-          f.rule_id === "vtc-visual/note" &&
+          f.rule_id === VISUAL_PROJECT_TOOLCHAIN_RULE &&
           /ran on the project's own Playwright .* the change under review can modify/.test(
             f.message ?? "",
           ),
       );
     expect(projectCode(written.findings)).toBe(true);
+    expect(ranOnProjectToolchain(report.visual)).toBe(true);
     const later = await h.run({ head: h.base, visual: { screens: [] } });
     expect(later.visual?.status).toBe("pass");
     const laterNotes = later.visual?.findings.filter((f) => f.rule_id === "vtc-visual/note") ?? [];
     expect(laterNotes.some((f) => /pinned the project's browser/.test(f.title))).toBe(false);
-    expect(projectCode(laterNotes)).toBe(true);
+    expect(projectCode(later.visual?.findings ?? [])).toBe(true);
+    // Engine core reads this to keep such a run from satisfying Level 3 (reading 124).
+    expect(ranOnProjectToolchain(later.visual)).toBe(true);
   });
 
   it("compares with the base commit's prototype, which neither the diff nor project code can change", async () => {
@@ -360,7 +365,7 @@ describe("visual step in a gate run", () => {
           "axe/image-alt",
           "vtc-style/color",
           "vtc-layout/pixels",
-          "vtc-visual/note",
+          VISUAL_PROJECT_TOOLCHAIN_RULE,
         ]),
       );
       // The location is the screens file, never this attempt's screenshot, diff image or report.
@@ -413,6 +418,7 @@ describe("visual step in a gate run", () => {
     const ok = setup({ store: "match" });
     const passed = await ok.h.run({ head: ok.h.base, visual: { screens: [] } });
     expect(passed.visual?.status).toBe("pass");
+    expect(ranOnProjectToolchain(passed.visual)).toBe(false);
     // VTC's own comparison code: no note about project-controlled code.
     expect(
       passed.visual?.findings.some((f) => /the project's own Playwright/.test(f.message ?? "")),

@@ -70,7 +70,7 @@ export interface EvaluateInput {
   /** Checks that could not run (no axe-core, no pixelmatch, no screens file…): never clean. */
   readonly notRun: readonly string[];
   /** Visible, non-blocking notes (a browser pinned on first use, evidence left out). */
-  readonly notes?: readonly string[];
+  readonly notes?: readonly VisualNote[];
   /** Where the report itself is written (repo-relative). */
   readonly reportPath: string;
   readonly writtenAt: string;
@@ -88,19 +88,55 @@ const VISUAL_TOOL = "vtc-visual";
 const AXE_TOOL = "axe-core";
 /** Rule id of a visible, non-blocking note of the step (`sarif_level: note`). */
 export const VISUAL_NOTE_RULE = "vtc-visual/note";
+/**
+ * Rule id of the note on a run whose renders, axe and pixel diff loaded the project's own
+ * Playwright from the checkout under review (§5 reading 124). Such a run does not satisfy the
+ * Level-3 checklist's Final Review item; engine core reads it with {@link ranOnProjectToolchain}.
+ */
+export const VISUAL_PROJECT_TOOLCHAIN_RULE = "vtc-visual/project-toolchain";
 
-/** One note-level finding per note (never blocking, never a pass by itself). */
-export const noteFindings = (notes: readonly string[], reportPath: string): ToolFinding[] =>
-  [...new Set(notes)].map((note) => ({
-    tool: VISUAL_TOOL,
-    rule_id: VISUAL_NOTE_RULE,
-    category: "design",
-    title: note.slice(0, 200),
-    message: note.slice(0, 4000),
-    location: { path: DESIGN_SCREENS_PATH, symbol: `note: ${note}`.slice(0, 512) },
-    evidence: { type: "command_output", ref: reportPath },
-    sarif_level: "note",
-  }));
+/** A note: plain text ({@link VISUAL_NOTE_RULE}), or text under its own `vtc-visual/` rule. */
+export type VisualNote = string | { readonly rule_id: string; readonly text: string };
+
+/**
+ * One note-level finding per distinct note (never blocking, never a pass by itself). Callers put
+ * them ahead of every other finding, so the summary's cap never drops one.
+ */
+export const noteFindings = (notes: readonly VisualNote[], reportPath: string): ToolFinding[] => {
+  const seen = new Set<string>();
+  const out: ToolFinding[] = [];
+  for (const note of notes) {
+    const { rule_id, text } =
+      typeof note === "string" ? { rule_id: VISUAL_NOTE_RULE, text: note } : note;
+    const key = `${rule_id}\n${text}`;
+    if (seen.has(key)) continue;
+    seen.add(key);
+    out.push({
+      tool: VISUAL_TOOL,
+      rule_id,
+      category: "design",
+      title: text.slice(0, 200),
+      message: text.slice(0, 4000),
+      location: { path: DESIGN_SCREENS_PATH, symbol: `note: ${text}`.slice(0, 512) },
+      evidence: { type: "command_output", ref: reportPath },
+      sarif_level: "note",
+    });
+  }
+  return out;
+};
+
+/**
+ * Whether a visual step ran on the project's own Playwright (reading 124): such a result, even a
+ * `pass`, does not satisfy Level 3. Only the gate runner writes `GateReport.visual`, and the
+ * marker is its first findings, so the summary's cap never drops it. Stands in for a toolchain
+ * field on `VisualSummary` until the contract has one.
+ */
+export const ranOnProjectToolchain = (
+  summary: Pick<VisualSummary, "findings"> | null | undefined,
+): boolean =>
+  summary?.findings.some(
+    (f) => f.tool === VISUAL_TOOL && f.rule_id === VISUAL_PROJECT_TOOLCHAIN_RULE,
+  ) ?? false;
 
 const COLOR_PROPERTIES = new Set(["color", "background-color", "border-top-color"]);
 const SPACING_PROPERTIES = new Set(["padding", "margin", "gap"]);
@@ -192,7 +228,8 @@ export const evaluateVisual = (input: EvaluateInput): VisualOutcome => {
   const axe: VisualReport["axe"] = [];
   const styles: StyleMismatch[] = [];
   const diffs: VisualReport["diffs"] = [];
-  const findings: ToolFinding[] = [];
+  // Notes first: the summary keeps only the first findings, and a note must never be cut.
+  const findings: ToolFinding[] = noteFindings(input.notes ?? [], input.reportPath);
   const unreachedBy = new Map<string, string[]>();
   const axeBy = new Map<string, { item: RunnerAxeItem; keys: string[]; shot: string | null }>();
   const incompleteBy = new Map<
@@ -397,7 +434,6 @@ export const evaluateVisual = (input: EvaluateInput): VisualOutcome => {
     });
   }
   findings.push(...input.tokenLint, ...input.detector);
-  findings.push(...noteFindings(input.notes ?? [], input.reportPath));
 
   // ------------------------------------------------------------------ status
   const blocking = findings.some(isBlocking);
@@ -492,10 +528,10 @@ export const visualWithoutRenders = (input: {
   readonly writtenAt: string;
   readonly counts?: Partial<VisualSummary["counts"]>;
   /** Visible, non-blocking notes ({@link noteFindings}). */
-  readonly notes?: readonly string[];
+  readonly notes?: readonly VisualNote[];
 }): VisualOutcome => {
   const reason = input.reason.slice(0, 500);
-  const findings = [...input.findings, ...noteFindings(input.notes ?? [], input.reportPath)];
+  const findings = [...noteFindings(input.notes ?? [], input.reportPath), ...input.findings];
   const status: VisualStatus =
     input.status === "skipped" && findings.some(isBlocking) ? "fail" : input.status;
   if (status !== "skipped") {

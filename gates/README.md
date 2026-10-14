@@ -254,8 +254,11 @@ implementation's requests to it are aborted, so it cannot embed the prototype). 
 doctor-installed store's Playwright, preferred whenever it is installed (reading 124), the
 comparison code is VTC's. Without a store the project's own Playwright runs, and the runner
 process loads `playwright-core` from the verification checkout, which the change under review
-can modify (install scripts run there), so every such run carries a `vtc-visual/note` saying the
-comparison ran on project-controlled code.
+can modify (install scripts run there), so every such run carries a note under its own rule,
+`vtc-visual/project-toolchain`, saying the comparison ran on project-controlled code. Such a run,
+even a `pass`, does not satisfy Level 3; engine core checks it with
+`visual.ranOnProjectToolchain(report.visual)` until `VisualSummary` has a toolchain field. Notes
+come first in the findings, so the summary's 200-finding cap never drops one.
 
 1. Token lint (`vtc-token/<kind>`) on the lines the diff added to UI files: literal colours (OKLab
    ΔE over `color_delta` from every colour token), spacing and radii off the token scale, font

@@ -57,8 +57,10 @@ import { detectorFindings, type DetectorFile } from "./detector/index.js";
 import { addedLinesWithNumbers } from "./diff-lines.js";
 import {
   evaluateVisual,
+  VISUAL_PROJECT_TOOLCHAIN_RULE,
   visualWithoutRenders,
   type BrowserIdentity,
+  type VisualNote,
   type VisualOutcome,
 } from "./evaluate.js";
 import { expandMatrix, parseScreens, type RenderMatrix } from "./matrix.js";
@@ -221,7 +223,7 @@ export const runVisualStep = async (ctx: VisualStepContext): Promise<VisualStepR
     writes: [{ rel: reportPath, redact: true, json: outcome.report }, ...images],
   });
   /** Visible, non-blocking notes for the report (a browser pinned on first use…). */
-  const visibleNotes: string[] = [];
+  const visibleNotes: VisualNote[] = [];
   const without = (
     status: "skipped" | "error",
     reason: string,
@@ -335,7 +337,12 @@ export const runVisualStep = async (ctx: VisualStepContext): Promise<VisualStepR
   }
   if (!check.ok) return without("error", check.reason);
   if (check.note !== undefined) visibleNotes.push(check.note);
-  if (toolchain.source === "project") visibleNotes.push(PROJECT_TOOLCHAIN_NOTE(toolchain));
+  if (toolchain.source === "project") {
+    visibleNotes.push({
+      rule_id: VISUAL_PROJECT_TOOLCHAIN_RULE,
+      text: PROJECT_TOOLCHAIN_NOTE(toolchain),
+    });
+  }
   const pin = check.pin;
   const browser: BrowserIdentity = {
     name: pin.name,
