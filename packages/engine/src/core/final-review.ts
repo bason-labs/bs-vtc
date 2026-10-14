@@ -121,17 +121,30 @@ const carriedSteps = (h: RunHandle, featureId: string, seq: number): Set<number>
       .filter((step) => FINAL_REVIEW_AI_STEPS.some((s) => s.step === step)),
   );
 
-const TEST_FILE =
-  /(^|\/)(tests?|__tests__|specs?)\/|[._-](test|spec)\.[a-z]+$|(^|\/)test_[^/]+\.py$/i;
+/**
+ * A test file by its name alone (`*.test.*`, `*.spec.*`, `*_test.go`, `test_*.py`), never by a
+ * directory it sits in: `api/specs/` or `src/spec/` can hold production code and configuration.
+ */
+const TEST_FILE = /(^|\/)[^/]+[._-](test|spec)\.[a-z0-9]+$|(^|\/)test_[^/]+\.py$/i;
+
+/**
+ * The `.vtc/` files no AI step judges: the engine's own records (the event log, evidence and
+ * release readiness, the plan-file projections, the merge-level ledger, Lookback, the gitignored
+ * state). Everything else under `.vtc/` (the frozen spec, architecture, design, research) is what
+ * step 3 verifies against.
+ */
+const ENGINE_RECORD =
+  /^\.vtc\/(?:state|runs|evidence|tasks|lookback)\/|^\.vtc\/merge-level\.jsonl$/;
 
 /**
  * Pure (§6.7a "re-runs only the steps affected by the fix"): the AI steps a fix's diff (the
- * previous round's gated head … this round's) can change the outcome of. Engine files, docs and
- * the changelog affect none (step 7 and the gates run every round). An added test only adds
- * coverage, which the gates' traceability checks again each round. A changed or deleted test can
- * weaken the coverage step 3 judged. Anything else (code, configuration, dependencies,
- * migrations) can change both the coverage and scope step 3 judged and the combined diff step 4
- * reviewed. If unsure, run it.
+ * previous round's gated head … this round's) can change the outcome of. The engine's own records,
+ * docs and the changelog affect none (step 7 and the gates run every round). An added test only
+ * adds coverage, which the gates' traceability checks again each round (and a gap there runs step
+ * 3 again). A changed or deleted test can weaken the coverage step 3 judged, and so can a change
+ * to the spec, architecture or design under `.vtc/`. Anything else (code, configuration,
+ * dependencies, migrations) can change both the coverage and scope step 3 judged and the combined
+ * diff step 4 reviewed. If unsure, run it.
  */
 export const fixAffectedSteps = (
   changes: readonly GitChangedFile[],
@@ -140,7 +153,11 @@ export const fixAffectedSteps = (
   const affected = new Set<number>();
   for (const change of changes) {
     const paths = [change.path, ...(change.oldPath === undefined ? [] : [change.oldPath])];
-    if (paths.every((p) => p.startsWith(".vtc/") || DOCS.test(p) || CHANGELOG.test(p))) continue;
+    if (paths.every((p) => ENGINE_RECORD.test(p) || DOCS.test(p) || CHANGELOG.test(p))) continue;
+    if (paths.every((p) => p.startsWith(".vtc/") && !ENGINE_RECORD.test(p))) {
+      affected.add(3);
+      continue;
+    }
     if (paths.every((p) => TEST_FILE.test(p) || matchesAny(acceptanceGlobs, p))) {
       if (change.status !== "added") affected.add(3);
       continue;
@@ -310,6 +327,12 @@ const recordGateSteps = (k: Kernel, h: RunHandle, featureId: string, report: Gat
         : { step, status: "not_run", reason: notRun[step], evidence },
     );
   }
+};
+
+/** The requirements this gate run's traceability report has no passing test for. */
+const traceabilityGaps = (k: Kernel, report: GateReport): string[] => {
+  const path = report.traceability;
+  return path === undefined ? [] : (readTraceabilityFile(k.deps.repoRoot, path)?.gaps ?? []);
 };
 
 /**
@@ -555,6 +578,23 @@ export const failFinalReview = (
       `Final Review found ${risky.finding.title} (${risky.finding.category}, ${risky.finding.severity}) at ${risky.finding.location.path}: a human decides before any fix round`,
       evidence,
       risky.rule,
+    );
+    return;
+  }
+  // a spec or design gap is a question for the human or the BA (§6.3 step 8), never an engineer
+  // fix round: the feature parks with it
+  const gaps = findings.filter((f) => f.route === "spec_gap" || f.route === "design_gap");
+  if (gaps.length > 0) {
+    parkFeature(
+      k,
+      h,
+      featureId,
+      "spec_conflict",
+      `Final Review found ${String(gaps.length)} spec or design gap(s): ${gaps
+        .slice(0, 3)
+        .map((f) => `${f.route}: ${f.title}`)
+        .join("; ")}`.slice(0, 2000),
+      [...gaps.map((f) => f.evidence), ...evidence].slice(0, 5),
     );
     return;
   }
@@ -876,7 +916,14 @@ export const startFinalReview = (k: Kernel, h: RunHandle, featureId: string): vo
         );
       else removeRepoFile(k.deps.repoRoot, releaseReadinessPath(featureId));
       recordGateSteps(k, h, featureId, report);
-      if (unaffected !== null) carryOver(k, h, featureId, unaffected);
+      // step 3 is never carried over a traceability gap of this round: it runs and fails on it
+      if (unaffected !== null)
+        carryOver(
+          k,
+          h,
+          featureId,
+          unaffected.filter((step) => step !== 3 || traceabilityGaps(k, report).length === 0),
+        );
       const seq = gatesPassedSeq(h, featureId);
       if (seq !== undefined) {
         const carried = carriedSteps(h, featureId, seq);

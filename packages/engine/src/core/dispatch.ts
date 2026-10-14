@@ -6,16 +6,17 @@
  */
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
-import { z } from "zod";
 import {
   agentNameFor,
   HIDDEN_TESTS,
   inSessionDispatchRefusal,
   PACK_INPUT_TYPES,
+  EVENT_PAYLOAD_SCHEMAS,
   PromptVersionRefSchema,
   resolveRoleMode,
   SESSION_DEFAULT_MODEL,
-  Sha256HexSchema,
+  sha256Hex,
+  TaskPackSchema,
   type ArtifactRef,
   type Escalation,
   type EscalationAnswer,
@@ -698,25 +699,25 @@ const packFor = (k: Kernel, h: RunHandle, step: StepSpec, actionId: string): Tas
 };
 
 /**
- * The pinned editable section of a dispatch (AD-21 rules 1–2), or `null` for the compiled agent's
- * own: no selector wired, or a selection that is not for this role, mode and host, is malformed,
- * has no text, or could not be made. A selection the engine cannot vouch for is never recorded
- * as a prompt version (AD-21: no ambiguous prompt identity).
+ * The pinned editable section of a dispatch (AD-21 rules 1–2, readings 117–118), or `null` for the
+ * compiled agent's own. The engine vouches for what it records: the agent must expect the section
+ * in its pack (its manifest's `editable_in_pack`) and its manifest's `locked_sha256` must be the
+ * version's; the version must be for this role, mode and host; the text, trimmed, must hash to
+ * the version's `editable_sha256` (the compiler's and Lookback's section hash) and be a valid
+ * `TaskPack.role_heuristics` (no pack heading). Anything else, or a selector that throws, runs the
+ * compiled default. The effective SHA is the selector's (core holds no locked text to hash).
  */
-const PinnedCanarySchema = z.strictObject({
-  arm: z.enum(["candidate", "baseline"]),
-  candidate: Sha256HexSchema,
-  baseline: Sha256HexSchema,
-});
-
 const pinnedPrompt = (k: Kernel, target: PromptTarget): PinnedPrompt | null => {
   const pins = k.promptPins();
   if (pins === null) return null;
+  const parts = k.deps.plugins.promptParts?.(target.agent, target.host);
+  // an agent that carries its own editable section cannot run a pinned one (reading 117)
+  if (parts?.editableInPack !== true || parts.lockedSha256 === undefined) return null;
   let pinned: PinnedPrompt | null;
   try {
     pinned = pins(target);
   } catch {
-    return null;
+    return null; // the compiled default runs; the selector reports its own problem
   }
   if (pinned === null) return null;
   const version = PromptVersionRefSchema.safeParse(pinned.version);
@@ -725,34 +726,50 @@ const pinnedPrompt = (k: Kernel, target: PromptTarget): PinnedPrompt | null => {
     version.data.role !== target.role ||
     version.data.mode !== target.mode ||
     version.data.host !== target.host ||
-    typeof pinned.text !== "string" ||
-    pinned.text.trim() === ""
+    version.data.locked_sha256 !== parts.lockedSha256 ||
+    typeof pinned.text !== "string"
   )
     return null;
-  // a malformed canary drops the arm, never the section: the dispatch is then not in the canary
-  const canary = PinnedCanarySchema.safeParse(pinned.canary);
-  const arm = canary.success ? canary.data : undefined;
-  return {
-    version: version.data,
-    text: pinned.text,
-    ...(arm === undefined ? {} : { canary: arm }),
-  };
+  const text = pinned.text.trim();
+  if (
+    text === "" ||
+    sha256Hex(text) !== version.data.editable_sha256 ||
+    !TaskPackSchema.shape.role_heuristics.safeParse(text).success
+  )
+    return null;
+  // a canary whose arm is not this version drops the arm, never the section: the dispatch is then
+  // not in the canary
+  const canary = EVENT_PAYLOAD_SCHEMAS["lookback.canary_assigned"].safeParse(pinned.canary);
+  const arm =
+    canary.success && canary.data[canary.data.arm] === version.data.effective_sha256
+      ? canary.data
+      : undefined;
+  return { version: version.data, text, ...(arm === undefined ? {} : { canary: arm }) };
 };
 
-/** A task's canary arm, logged once per (task, role): sticky across its fix rounds (AD-21 rule 7). */
+/**
+ * A task's canary arm (AD-21 rule 7), logged once per (task, role) and canary, and sticky: a
+ * later dispatch of the same canary in another arm (the pins changed under the task) runs outside
+ * the canary, so no dispatch is counted in an arm its task was not assigned. Returns the arm the
+ * dispatch records, or `undefined`.
+ */
 const assignCanary = (
   k: Kernel,
   h: RunHandle,
   task: string,
   role: string,
   canary: NonNullable<PinnedPrompt["canary"]>,
-): void => {
-  if (
-    h.state.events.some(
-      (e) => e.type === "lookback.canary_assigned" && e.task === task && e.role === role,
-    )
-  )
-    return;
+): NonNullable<PinnedPrompt["canary"]> | undefined => {
+  const assigned = h.state.events.findLast(
+    (e) =>
+      e.type === "lookback.canary_assigned" &&
+      e.task === task &&
+      e.role === role &&
+      (e.data as { candidate?: string }).candidate === canary.candidate &&
+      (e.data as { baseline?: string }).baseline === canary.baseline,
+  );
+  if (assigned !== undefined)
+    return (assigned.data as { arm?: string }).arm === canary.arm ? canary : undefined;
   k.emit(h, {
     type: "lookback.canary_assigned",
     actor: "engine",
@@ -760,6 +777,7 @@ const assignCanary = (
     role,
     data: { arm: canary.arm, candidate: canary.candidate, baseline: canary.baseline },
   });
+  return canary;
 };
 
 /**
@@ -800,17 +818,18 @@ export const dispatchStep = (
     agent,
     ...(step.task === undefined ? {} : { task: step.task }),
   });
-  const pack = writeTaskPack(
-    k.deps.repoRoot,
-    packFor(k, h, step, actionId),
-    pinned === null
-      ? undefined
-      : { text: pinned.text, effective_sha256: pinned.version.effective_sha256 },
-  );
+  // AD-21 rule 2, reading 117: the pinned section is the pack's opening `Role heuristics` block
+  const pack = writeTaskPack(k.deps.repoRoot, {
+    ...packFor(k, h, step, actionId),
+    ...(pinned === null ? {} : { role_heuristics: pinned.text }),
+  });
   const resume = step.resume !== undefined && step.resume.host === host ? step.resume : undefined;
   step.onDispatch?.();
-  if (pinned?.canary !== undefined && step.task !== undefined)
-    assignCanary(k, h, step.task, step.role, pinned.canary);
+  // a canary covers task dispatches only (its arm is sticky per task)
+  const arm =
+    pinned?.canary === undefined || step.task === undefined
+      ? undefined
+      : assignCanary(k, h, step.task, step.role, pinned.canary);
   k.emit(h, {
     type: "role.dispatched",
     actor: "engine",
@@ -834,7 +853,7 @@ export const dispatchStep = (
       pack,
       resume: resume ?? null,
       ...(pinned === null ? {} : { editable_sha256: pinned.version.editable_sha256 }),
-      ...(pinned?.canary === undefined ? {} : { canary_arm: pinned.canary.arm }),
+      ...(arm === undefined ? {} : { canary_arm: arm.arm }),
     },
   });
   const capabilities = k.deps.adapters[host]?.capabilities;

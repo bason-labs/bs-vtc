@@ -136,11 +136,14 @@ export const settleRound = (k: Kernel, h: RunHandle, taskId: string, merge: Roun
 };
 
 /**
- * A finding a Final Review AI reviewer raised (`feature` set, a role source), routed to a fix
- * task: Final Review's next round re-runs that reviewer on the integrated head (§6.7a).
+ * A finding a Final Review AI reviewer raised (`feature` set, a role source) that a fix task can
+ * settle (`patch`, `bad_test`): Final Review's next round re-runs that reviewer on the integrated
+ * head (§6.7a). A spec or design gap, or a risky finding, still holds the round.
  */
 export const checkedAtFinalReview = (finding: Finding): boolean =>
-  finding.feature !== undefined && finding.source === "role" && finding.route !== "risky";
+  finding.feature !== undefined &&
+  finding.source === "role" &&
+  (finding.route === "patch" || finding.route === "bad_test");
 
 /** All clear (§6.3 step 10): built, then into the merge queue. */
 export const markBuilt = (k: Kernel, h: RunHandle, taskId: string): void => {
