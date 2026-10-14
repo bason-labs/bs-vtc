@@ -47,6 +47,9 @@ Read a reference when a step needs it, not all of them up front.
   and heavy condensed type. Each is legitimate when the brief asks for it. Where the brief
   leaves the look free, landing in one means the self-check failed: if someone could guess the
   look from the category alone, rework it.
+- **Loaded symbols stay out of the decoration.** A subject's world does not license emblems
+  tied to militarism, supremacy or hate movements as motifs, badges or ornament; use that
+  world's neutral forms. Content that documents such a symbol as fact stays as it is.
 - **Truth binds claims, not demonstrations.** Illustrative content may be authored at full
   fidelity and labelled synthetic; prices, customers, benchmarks and capabilities the product
   does not have are never invented.
