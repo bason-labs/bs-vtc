@@ -1,4 +1,4 @@
-import { ENGINE_HTTP, type G2Direction, type VtcEvent } from "@vtc/shared";
+import { ENGINE_HTTP, type DesignExit, type G2Direction, type VtcEvent } from "@vtc/shared";
 import { eventsOfType, webUrl } from "./events";
 import { factStatusMeta } from "./facts";
 import type { StatusMeta } from "./states";
@@ -61,7 +61,14 @@ export interface GateRequestView {
   readonly directions: readonly DirectionView[];
   readonly facts: readonly GateFactView[];
   readonly coverage: { readonly ok: boolean; readonly problems: readonly string[] } | null;
+  /** The G2 exit the human took instead of a direction (§9.1 step 5), or `null`. */
+  readonly designExit: string | null;
 }
+
+const DESIGN_EXIT: Readonly<Record<DesignExit, string>> = {
+  re_roll: "Re-rolled: only the Designer works again",
+  category_standard: "Category standard: no distinct direction",
+};
 
 const overlaps = (a: readonly string[], b: readonly string[]): boolean =>
   a.some((g) => b.includes(g));
@@ -110,6 +117,7 @@ export const gateRequests = (events: readonly VtcEvent[]): GateRequestView[] => 
       const facts = data.facts ?? [];
       const factIds = data.facts?.map((f) => f.id) ?? data.unverified_facts;
       const coverage = data.design_coverage;
+      const exit = decided?.data.design_exit;
       return {
         seq: event.seq,
         at: event.ts,
@@ -117,6 +125,7 @@ export const gateRequests = (events: readonly VtcEvent[]): GateRequestView[] => 
         outcome: { id: outcome, ...OUTCOME[outcome] },
         decidedAt: decided?.event.ts ?? null,
         note: decided?.data.note ?? null,
+        designExit: exit === undefined ? null : DESIGN_EXIT[exit],
         artifacts: data.artifacts.map((a) => a.path),
         directions: directionIds.map((id) => {
           const d = details.get(id);

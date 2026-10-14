@@ -4,7 +4,7 @@
  * carries the report the approval is refused on.
  */
 import { describe, expect, it } from "vitest";
-import { CONTRACTS_VERSION, DesignCoverageReportSchema, LeadActionSchema } from "../src/index.js";
+import { DesignCoverageReportSchema, LeadActionSchema } from "../src/index.js";
 
 const EMPTY = {
   reqs_without_component: [],
@@ -14,10 +14,6 @@ const EMPTY = {
 };
 
 describe("DesignCoverageReport 4.8.0", () => {
-  it("is MINOR over 4.7.0", () => {
-    expect(CONTRACTS_VERSION).toBe("4.8.0");
-  });
-
   it("fails on a requirement no component maps, and on an unusable screens.yaml", () => {
     expect(DesignCoverageReportSchema.parse({ ...EMPTY, ok: true }).ok).toBe(true);
     const unmapped = { ...EMPTY, reqs_without_component: ["REQ-2"] };

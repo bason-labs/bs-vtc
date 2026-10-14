@@ -79,6 +79,21 @@ describe("gateRequests (gate.requested, spine §5 reading 109)", () => {
     expect(view?.note).toBe("Try a third direction");
   });
 
+  it("shows the design exit the human took: a re-roll or the category standard (reading 151)", () => {
+    const rerolled = w3Event(72, "gate.rejected", { gates: ["G2"], design_exit: "re_roll" });
+    const [view] = gateRequests([request, rerolled]);
+    expect(view?.designExit).toBe("Re-rolled: only the Designer works again");
+    const standard = w3Event(72, "gate.approved", {
+      gates: ["G2"],
+      frozen,
+      design_exit: "category_standard",
+    });
+    const [taken] = gateRequests([request, standard]);
+    expect(taken?.designExit).toBe("Category standard: no distinct direction");
+    expect(taken?.directions.every((d) => !d.chosen)).toBe(true);
+    expect(gateRequests(GATE_EVENTS)[0]?.designExit).toBeNull();
+  });
+
   it("falls back to the ids when an older engine sent no details", () => {
     const bare = w3Event(73, "gate.requested", {
       gates: ["G2"],

@@ -164,5 +164,9 @@ export * from "./json-schema.js";
  * `reqs_without_component` (the REQ → component check of §6.1 DESIGN) and `screens_problem` (a UI
  * run's missing or invalid `screens.yaml`), both counted in `ok`; `approve_gate` carries the
  * report as `design_coverage`, since an approval is refused while it fails.
+ *
+ * 4.9.0 (MINOR): the wave-3 Final Review fix round (spine §5 readings 149–155). G2's design exits
+ * (`DesignExitSchema`: `approve_gate.design_exits` / `gate.requested.design_exits`,
+ * `ApproveInput.design_exit`, `gate.approved.design_exit` and `gate.rejected.design_exit`).
  */
-export const CONTRACTS_VERSION = "4.8.0";
+export const CONTRACTS_VERSION = "4.9.0";

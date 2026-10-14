@@ -44,6 +44,10 @@
     {
       "version": "4.8.0",
       "schemas_sha256": "afb8dbd0449a7505938464face0d6e3abff76f19e65ffd3818e6ac768924b3d0"
+    },
+    {
+      "version": "4.9.0",
+      "schemas_sha256": "f2d0947e9a62fc383d85349138a848100c3e32a651ed635669b3f1a29e1342be"
     }
   ]
 }

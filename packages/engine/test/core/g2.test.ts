@@ -716,3 +716,168 @@ describe("G2 directions and the DESIGN coverage check (§9.1, §6.1)", () => {
     await h.release();
   });
 });
+
+describe("too-similar directions, re-roll and the category standard (§9.1 steps 4–5; reading 151)", () => {
+  const SCREENS = [
+    "version: 1",
+    "screens:",
+    "  - id: reset-request",
+    "    route: /reset",
+    "    states: [empty, success]",
+    "    reqs: [REQ-1, REQ-2]",
+    "",
+  ].join("\n");
+  /** Two directions with a first viewport each: `signal` and `quiet`. */
+  const designer =
+    (ids: readonly string[]) =>
+    (action: SpawnAction): { type: string; path: string }[] => {
+      const cwd = workdir(action);
+      writeFile(cwd, ".vtc/design/screens.yaml", SCREENS);
+      writeFile(
+        cwd,
+        ".vtc/design/components/button.yaml",
+        "id: button\nscreens: [reset-request]\n",
+      );
+      for (const id of ids)
+        writeFile(
+          cwd,
+          `.vtc/design/directions/${id}.yaml`,
+          `id: ${id}\ntitle: ${id}\nthesis: the ${id} direction\nprototype: .vtc/design/prototype/${id}\nfirst_viewport: .vtc/design/prototype/${id}/first.png\n`,
+        );
+      return [
+        { type: "screens", path: ".vtc/design/screens.yaml" },
+        ...ids.map((id) => ({
+          type: "design_direction",
+          path: `.vtc/design/directions/${id}.yaml`,
+        })),
+        { type: "component_specs", path: ".vtc/design/components/button.yaml" },
+      ];
+    };
+  /** `signal` is too similar to a past design; every other direction is novel. */
+  const similarSeam = (h: Harness) => {
+    const recorded: string[] = [];
+    h.gates.checkNovelty = (request) =>
+      Promise.resolve({
+        ...SIGNAL_REPORT,
+        direction: request.direction,
+        verdict: request.direction === "signal" ? "too_similar" : "novel",
+      });
+    h.gates.recordDesignChoice = (entry) => {
+      recorded.push(entry.direction);
+      return Promise.resolve();
+    };
+    return recorded;
+  };
+
+  it("offers re-roll and the category standard beside the directions", async () => {
+    const h = createHarness({ roles: ROLES });
+    similarSeam(h);
+    const gate = await toG2(h, { hasUi: true, designer: designer(["signal", "quiet"]) });
+    expect(gate.directions?.map((d) => [d.id, d.novelty])).toEqual([
+      ["signal", "too_similar"],
+      ["quiet", "novel"],
+    ]);
+    expect(gate.design_exits).toEqual(["re_roll", "category_standard"]);
+    expect(ofType(h, "gate.requested").at(-1)?.data.design_exits).toEqual([
+      "re_roll",
+      "category_standard",
+    ]);
+    await h.release();
+  });
+
+  it("refuses a pick of a too-similar direction (§9.1 step 4: reject anything too similar)", async () => {
+    const h = createHarness({ roles: ROLES });
+    const recorded = similarSeam(h);
+    const gate = await toG2(h, { hasUi: true, designer: designer(["signal", "quiet"]) });
+    await expect(
+      approve(h, gate, { ...waiveAll(gate), design_direction: "signal" }),
+    ).rejects.toThrow(/signal is too similar to a past design.*re_roll.*category_standard/);
+    expect(recorded).toEqual([]);
+    const out = await approve(h, gate, { ...waiveAll(gate), design_direction: "quiet" });
+    expect(only(out.actions, "planner").role).toBe("planner");
+    expect(recorded).toEqual(["quiet"]);
+    await h.release();
+  });
+
+  it("the category standard approves G2 with no direction and records none in the library", async () => {
+    const h = createHarness({ roles: ROLES });
+    const recorded = similarSeam(h);
+    const gate = await toG2(h, { hasUi: true, designer: designer(["signal", "quiet"]) });
+    const out = await approve(h, gate, { ...waiveAll(gate), design_exit: "category_standard" });
+    expect(only(out.actions, "planner").role).toBe("planner");
+    const approved = ofType(h, "gate.approved").at(-1)?.data;
+    expect(approved?.design_exit).toBe("category_standard");
+    expect(approved?.design_direction).toBeUndefined();
+    expect(recorded).toEqual([]);
+    await h.release();
+  });
+
+  it("a re-roll sends only the Designer back, with a fresh deal and the novelty reports", async () => {
+    const h = createHarness({ roles: ROLES });
+    similarSeam(h);
+    let first: SpawnAction | undefined;
+    const gate = await toG2(h, {
+      hasUi: true,
+      designer: (action) => {
+        first = action;
+        return designer(["signal", "quiet"])(action);
+      },
+    });
+    const back = await h.engine.approve(
+      {
+        gates: gate.gates,
+        decision: "reject",
+        frozen: gate.artifacts,
+        waived_facts: [],
+        design_exit: "re_roll",
+      },
+      CLAUDE,
+    );
+    // the Architect's and Security's work stands: only the Designer runs again
+    expect(spawns(back.actions).map((a) => a.role)).toEqual(["designer"]);
+    expect(ofType(h, "gate.rejected").at(-1)?.data.design_exit).toBe("re_roll");
+    const reroll = only(back.actions, "designer");
+    const pack = readFileSync(join(h.repo, reroll.pack), "utf8");
+    expect(pack).toContain(`novelty_report: ${noveltyReportPath("signal")}`);
+    expect(pack).not.toContain(`novelty_report: ${noveltyReportPath("quiet")}`);
+    expect(reroll.prompt).toMatch(/[Rr]e-roll/);
+    const constraints = (text: string): string | undefined =>
+      /design constraints[^\n]*/.exec(text)?.[0];
+    expect(constraints(pack)).toBeDefined();
+    expect(constraints(pack)).not.toBe(
+      constraints(readFileSync(join(h.repo, first!.pack), "utf8")),
+    );
+    // the new directions are checked again before G2 shows
+    const again = gateOf(
+      (
+        await submitResult(h, reroll, {
+          exit: "done",
+          artifacts: designer(["ember", "quiet"])(reroll),
+        })
+      ).actions,
+    );
+    expect(again.directions?.map((d) => [d.id, d.novelty])).toEqual([
+      ["ember", "novel"],
+      ["quiet", "novel"],
+    ]);
+    await h.release();
+  });
+
+  it("a re-roll needs directions on offer", async () => {
+    const h = createHarness({ roles: ROLES });
+    const gate = await toG2(h);
+    await expect(
+      h.engine.approve(
+        {
+          gates: gate.gates,
+          decision: "reject",
+          frozen: gate.artifacts,
+          waived_facts: [],
+          design_exit: "re_roll",
+        },
+        CLAUDE,
+      ),
+    ).rejects.toThrow(/no design directions/);
+    await h.release();
+  });
+});
