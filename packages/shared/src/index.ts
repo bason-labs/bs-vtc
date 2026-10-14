@@ -223,6 +223,6 @@ export * from "./json-schema.js";
  * `CODEX_HOST_WEB_SEARCH`, `HostCapabilities.safeHostWeb` and `hostWebRoute`; `planDispatch`
  * sends every `lookback_replay` trial headless (D-cg); `LOOKBACK_LIMITS.maxTrialsPerRetro`,
  * `ReplayGrader`, `ReplayResult.grader`, `VERDICT_GRADED_ROLES` and `replayGraderFor` (D-ch),
- * which supersede `CLAUDE_LEAD_REPLAYABLE_ROLES` (removed at the round's merge).
+ * which supersede `CLAUDE_LEAD_REPLAYABLE_ROLES` (removed at the round-4 merge, reading 209(2)).
  */
 export const CONTRACTS_VERSION = "5.0.0";

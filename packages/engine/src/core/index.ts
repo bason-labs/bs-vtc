@@ -149,7 +149,7 @@ export { INDEX_PATH, openEventIndex, type EventIndex } from "./event-index.js";
  * Spine §5 readings 181 and 180: the cli pin gestures use the engine's table and replay rule, not
  * copies.
  */
-export { HEADLESS_LOADS_AGENT, replayReach, roleChangesFiles } from "./prompt-target.js";
+export { HEADLESS_LOADS_AGENT, roleChangesFiles } from "./prompt-target.js";
 export { replayGraderOf, replayWaitSkipReason } from "./replay.js";
 /**
  * Automatic issues and PRs (AD-27, contracts 5.0.0): the Automation read model, the engine facts

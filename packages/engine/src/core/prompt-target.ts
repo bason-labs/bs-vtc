@@ -45,27 +45,3 @@ export const roleChangesFiles = (contract: RoleContract, mode?: string): boolean
   const role = effective.ok ? effective.contract : contract;
   return role.tools.profile !== "read_only" && role.output.artifacts.length > 0;
 };
-
-/**
- * Superseded by `replayGraderFor` (D-cg, D-ch; spine §5 readings 201, 202 and 209(2)): engine core
- * no longer uses it. It stays exported only for the cli's `vtc lookback approve` warning until the
- * cli moves to `replayGraderFor` in its branch; the round-4 merge removes it.
- *
- * Why no replay of a target can run in v1, or `null` (AD-21 rule 6; spine §5 readings 176 and
- * 180). A target's replay runs on a run its host leads, so: a role that changes no file is never
- * replayed (reading 180: both arms would leave the same base for the gates; a verdict grader would
- * reopen it), and on a host whose runs load the compiled agent ({@link HEADLESS_LOADS_AGENT}) a
- * role that is not `editable_in_pack` cannot run a candidate. Since a canary starts only from a
- * replay result that says improve, `null` is also the condition for `vtc lookback approve` to be
- * able to start one (reading 182(8)).
- */
-export const replayReach = (
-  target: { readonly agent: string; readonly host: HostId },
-  parts: { readonly editableInPack: boolean; readonly changesFiles: boolean },
-): string | null => {
-  if (!parts.changesFiles)
-    return `${target.agent} changes no file, so the gates would grade the same base for both arms; a verdict role takes pins but is not replayed in v1 until a grader scores its verdicts against the recorded outcome (spine §5 reading 180)`;
-  if (HEADLESS_LOADS_AGENT[target.host] && !parts.editableInPack)
-    return `${target.agent} replays only on a run led from ${target.host}, where every dispatch loads its compiled agent, and it is not editable_in_pack, so a trial cannot run the candidate (spine §5 readings 176 and 180)`;
-  return null;
-};
