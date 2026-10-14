@@ -126,6 +126,7 @@ import {
 } from "./level3.js";
 import { startRelease } from "./release.js";
 import { stepRetro } from "./retro.js";
+import { replayTrialActions } from "./replay.js";
 import { clientSpendRow, recordClientSpend } from "./spend.js";
 import { checkFinalReviewStuck, startFinalReview } from "./final-review.js";
 import {
@@ -1022,6 +1023,11 @@ export class Engine implements Kernel {
 
   lookbackRetro(): LookbackRetro | null {
     return this.retroLookback;
+  }
+
+  /** The actions that ran `run`'s Lookback replay trials (reading 176; `replay.ts`). */
+  replayTrialActions(run: string): ReadonlySet<string> {
+    return replayTrialActions(this, run);
   }
 
   notice(text: string): void {
