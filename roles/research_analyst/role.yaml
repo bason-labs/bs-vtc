@@ -5,7 +5,7 @@
 #   testing/testing-tool-evaluator.md (weighted matrix for library or vendor choice)
 # New: software-source evidence tiers, citations the engine resolves, untrusted-content rule.
 id: research_analyst
-version: 1.0.0
+version: 2.0.0
 kind: core
 mission: >-
   Answer the research questions a new project or large feature raises with a brief in which every

@@ -87,13 +87,36 @@ waivers always expire; the engine enforces both.
 G1 (specification) and G2 (architecture and design; on the quick-fix track both on one screen).
 Show what the engine listed, in this order for G2: the recommendation, the C4 container diagram,
 the driving scenarios, the scorecard with any robustness flag, new technologies, research red
-flags and claims still marked UNVERIFIED, the new decisions with their checks, the cost estimate,
-the assumptions, and for UI the design directions to choose from. Then ask the human to approve or
-reject. Call `approve` with `gates` as the engine listed them, `decision` (`approve` or `reject`),
+flags, the unverified facts, the new decisions with their checks, the cost estimate, the
+assumptions, and for UI the design directions to choose from. Then ask the human to approve or
+reject.
+
+- **Unverified facts.** For each entry of `facts` (one per `unverified_facts` id, in order) show
+  its subject, predicate, status (`unverified`, `stale` or `conflicting`), the engine's reason
+  and its source. G2 cannot pass while one stands: the human either sends the work back
+  (reject, or a change request) or waives it with a reason in their own words. Never suggest a
+  reason, and never waive one the human did not name.
+- **Design directions.** For each entry of `directions` show its title, its one-sentence thesis,
+  the first-viewport screenshot or the prototype path, and the engine's novelty verdict (a
+  `too_similar` one says so plainly). The human picks one by its `id`.
+
+Call `approve` with `gates` as the engine listed them, `decision` (`approve` or `reject`),
 `frozen`: every artifact exactly as the engine listed it (`path` and `sha256`), and `note` for
-the human's reasons. Only when approving G2 add `design_direction` (the direction the human
-chose) and `waived_facts` (the UNVERIFIED facts the human explicitly waives); a rejection carries
-neither. Never approve on the human's behalf.
+the human's reasons. Only when approving G2 add `design_direction` (the `id` of the direction the
+human chose), `waived_facts` (the ids of the facts the human waives) and `fact_waivers`: one
+`{ "id", "reason" }` per waived fact, with the human's reason; the engine rejects an approval
+that leaves a listed fact without one. A rejection carries none of them. Never approve on the
+human's behalf.
+
+## Lookback proposals
+
+After a run the engine may run the lookback role, which proposes changes to one role's editable
+prompt section and has them replayed. When `status` or the engine reports a proposal with its
+replay result, show the human the proposed changes (each hypothesis, target metric and the
+traces it rests on) and the replay verdict as the engine gave it, `inconclusive` included. Only a
+human promotes or pins a prompt version: give them the `vtc lookback approve`, `vtc lookback pin`
+or `vtc lookback rollback` command to run in their own terminal, which asks them to confirm.
+Never run those commands yourself, and never edit a role's prompt.
 
 ## Change requests
 

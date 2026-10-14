@@ -130,18 +130,15 @@ test's `file_line`, quoting the assertion. Exit `done`.
 
 ## Heuristics
 
-<!-- vtc:mode author -->
+When writing tests:
 
 - Boundary values: empty, one, many, the maximum the specification names, and one past it.
 - For every "must not" in a criterion, write the test that tries it.
 - Name tests after the behaviour, not the function: `[REQ-2.AC-1] rejects an expired token`.
 
-<!-- vtc:mode-end -->
-<!-- vtc:mode judge -->
+When judging tests:
 
 - A test whose assertion repeats the code's own computation proves nothing; look for an
   independently stated expected value.
 - Coverage of a changed line is necessary, not sufficient: check that a broken line would fail a
   test.
-
-<!-- vtc:mode-end -->

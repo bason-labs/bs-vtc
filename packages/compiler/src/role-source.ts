@@ -3,7 +3,13 @@
  * (locked core, then the editable section). Pure: callers pass file contents.
  */
 import { parse as parseYaml, YAMLParseError } from "yaml";
-import { RoleContractSchema, splitRolePrompt, type RoleContract } from "@vtc/shared";
+import {
+  RoleContractSchema,
+  splitRolePrompt,
+  TASK_PACK_SECTIONS,
+  type RoleContract,
+} from "@vtc/shared";
+import { EDITABLE_PACK_SECTION } from "./prompt-parts.js";
 import type { CompileError, SourceFile } from "./types.js";
 
 /** Longest `prompt.md` in lines (§5.1: "about 150 lines at most"). */
@@ -73,6 +79,47 @@ export const renderTemplate = (text: string, vars: Readonly<Record<string, strin
   return errors.length > 0 ? { ok: false, errors } : { ok: true, text: rendered };
 };
 
+const PLACEHOLDER = /\{\{[a-z_]+\}\}/;
+const HEADING = /^#{1,6}\s+(.+?)\s*#*\s*$/;
+const RESERVED_HEADINGS = new Set(
+  [...TASK_PACK_SECTIONS, EDITABLE_PACK_SECTION].map((name) => name.toLowerCase()),
+);
+
+/**
+ * What an editable section may not contain (AD-14 rule 4, AD-21; `prompt-parts.ts`). The section
+ * is one role-level text that a Lookback proposal replaces whole and that the engine may render
+ * into the task pack, so it compiles verbatim, the same for every mode and host:
+ * - no mode block: a proposal written for one mode's agent would drop the other modes' blocks
+ *   when it replaces the role's section (mode-specific rules belong in the locked core);
+ * - no `{{placeholder}}`: the compiled text, its `editable_sha256` and the proposal's text would
+ *   differ from the source a promoted proposal replaces;
+ * - no heading named after a task-pack section or the pack's heuristics section: rendered first
+ *   in the pack, such a heading would blur where the section ends and the data begins.
+ */
+export const editableSectionErrors = (section: string): string[] => {
+  const errors: string[] = [];
+  section.split("\n").forEach((line, index) => {
+    const at = `editable section line ${String(index + 1)}`;
+    const trimmed = line.trim();
+    if (trimmed.startsWith("<!-- vtc:mode")) {
+      errors.push(
+        `${at}: no mode block in the editable section; Lookback replaces the section whole, so put mode-specific rules in the locked core`,
+      );
+    }
+    const placeholder = PLACEHOLDER.exec(line);
+    if (placeholder !== null) {
+      errors.push(
+        `${at}: no placeholder (${placeholder[0]}) in the editable section; it must compile verbatim`,
+      );
+    }
+    const heading = HEADING.exec(trimmed)?.[1];
+    if (heading !== undefined && RESERVED_HEADINGS.has(heading.toLowerCase())) {
+      errors.push(`${at}: heading "${heading}" is reserved for the task pack`);
+    }
+  });
+  return errors;
+};
+
 export interface RoleSourceInput {
   /** The role's directory name under `roles/`. */
   readonly dir: string;
@@ -128,6 +175,7 @@ export const parseRoleSource = (input: RoleSourceInput): RoleSourceCheck => {
       if (!check.ok) errors.push(...check.errors.map((e) => `prompt.md: ${e}`));
     }
   }
+  if (split.ok) errors.push(...editableSectionErrors(split.editable).map((e) => `prompt.md: ${e}`));
   if (errors.length > 0 || !parsed.success || !split.ok) return { ok: false, errors };
   return {
     ok: true,
