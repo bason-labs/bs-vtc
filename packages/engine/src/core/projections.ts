@@ -9,7 +9,9 @@ import { join } from "node:path";
 import {
   EvidenceBundleSchema,
   evidenceBundlePath,
+  FinalReviewStepResultSchema,
   finalReviewStepsCovered,
+  ReleaseReadinessSchema,
   parsePersisted,
   redactJson,
   redactSecrets,
@@ -20,7 +22,9 @@ import {
   TaskPackSchema,
   TraceabilityReportSchema,
   type EvidenceBundle,
+  type FinalReviewStepResult,
   type Finding,
+  type ReleaseReadiness,
   type RoleRunSummary,
   type TaskPackInput,
   type TokenUsage,
@@ -58,12 +62,21 @@ export const finalReviewStepsRun = (
     .map((r) => r.report)
     .filter((r) => r.reason === "final_review" && r.feature === featureId)
     .at(-1);
-  if (report === undefined) return [];
-  return finalReviewStepsCovered(
-    { reason: report.reason, scope: report.scope, layers: undefined, include_hidden: true },
-    report,
-    report.traceability === undefined ? null : readTraceabilityFile(repoRoot, report.traceability),
-  );
+  // the gate run's steps (1, 2, 6), and every step whose result was a pass or a fail (wave 3)
+  const ran = finalReviewStepResults(state, featureId)
+    .filter((r) => r.status === "pass" || r.status === "fail")
+    .map((r) => r.step);
+  const covered =
+    report === undefined
+      ? []
+      : finalReviewStepsCovered(
+          { reason: report.reason, scope: report.scope, layers: undefined, include_hidden: true },
+          report,
+          report.traceability === undefined
+            ? null
+            : readTraceabilityFile(repoRoot, report.traceability),
+        );
+  return [...new Set([...covered, ...ran])].sort((a, b) => a - b);
 };
 
 /** The note on what Final Review covered, stated wherever its verdict is shown (the PR body). */
@@ -204,7 +217,7 @@ const countFindings = (findings: readonly Finding[]): EvidenceBundle["findings"]
 });
 
 /** A traceability report the Gate Runner wrote, or `null` when it is missing or invalid. */
-const readTraceabilityFile = (repoRoot: string, path: string): TraceabilityReport | null => {
+export const readTraceabilityFile = (repoRoot: string, path: string): TraceabilityReport | null => {
   try {
     const parsed = parsePersisted(
       TraceabilityReportSchema,
@@ -289,6 +302,39 @@ export const writeTaskEvidenceBundle = (
   return path;
 };
 
+/** Where the engine keeps a feature's release readiness (§6.7a step 7) for its bundle. */
+export const releaseReadinessPath = (featureId: string): string =>
+  `.vtc/evidence/${featureId}/release-readiness.json`;
+
+/** The feature's release readiness the engine kept, or `null`. */
+export const readReleaseReadiness = (
+  repoRoot: string,
+  featureId: string,
+): ReleaseReadiness | null => {
+  try {
+    const parsed = ReleaseReadinessSchema.safeParse(
+      JSON.parse(readFileSync(join(repoRoot, releaseReadinessPath(featureId)), "utf8")),
+    );
+    return parsed.success ? parsed.data : null;
+  } catch {
+    return null;
+  }
+};
+
+/** The last `final_review.step_finished` of each §6.7a step of a feature, in step order. */
+export const finalReviewStepResults = (
+  state: RunState,
+  featureId: string,
+): FinalReviewStepResult[] => {
+  const last = new Map<number, FinalReviewStepResult>();
+  for (const e of state.events)
+    if (e.type === "final_review.step_finished" && e.feature === featureId) {
+      const parsed = FinalReviewStepResultSchema.safeParse(e.data);
+      if (parsed.success) last.set(parsed.data.step, parsed.data);
+    }
+  return [...last.values()].sort((a, b) => a.step - b.step);
+};
+
 /** The feature evidence bundle (§6.7a output), written redacted to `.vtc/evidence/F-n/bundle.json`. */
 export const writeFeatureEvidenceBundle = (
   repoRoot: string,
@@ -310,6 +356,8 @@ export const writeFeatureEvidenceBundle = (
   const findings = [...state.findings.values()]
     .filter((r) => r.finding.feature === featureId || tasks.some((t) => t.id === r.finding.task))
     .map((r) => r.finding);
+  const steps = finalReviewStepResults(state, featureId);
+  const readiness = readReleaseReadiness(repoRoot, featureId);
   const bundle = EvidenceBundleSchema.parse({
     kind: "feature",
     run: state.id,
@@ -338,6 +386,8 @@ export const writeFeatureEvidenceBundle = (
       rounds: feature.round,
       steps_run: finalReviewStepsRun(repoRoot, state, featureId),
     },
+    ...(steps.length === 0 ? {} : { final_review_steps: steps }),
+    ...(readiness === null ? {} : { release_readiness: readiness }),
     spend: spendOf(tasks.flatMap((t) => runsOf(t.id))),
     written_at: now.toISOString(),
   });

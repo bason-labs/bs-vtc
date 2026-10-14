@@ -102,7 +102,13 @@ export const findingFromTool = (tool: ToolFinding, ctx: TriageContext): Finding 
     req_ids: [],
     ...(tool.snippet === undefined ? {} : { snippet: tool.snippet }),
     ...(tool.cwe === undefined ? {} : { cwe: tool.cwe }),
-    route: routeForFinding({ source: "tool", category: tool.category, severity }),
+    // a design-slop detector finding (`vtc-design/…`) goes to the Designer (§9.1, AD-24 rule 4)
+    route: routeForFinding({
+      source: "tool",
+      category: tool.category,
+      severity,
+      ruleId: tool.rule_id,
+    }),
     ...scope(ctx),
     round_first_seen: ctx.round,
     status: "open",

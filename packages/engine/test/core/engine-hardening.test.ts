@@ -26,6 +26,7 @@ import {
   createHarness,
   draft,
   only,
+  passFinalReview,
   spawns,
   SPEC_ONE,
   submitResult,
@@ -230,6 +231,7 @@ describe("every task can reach the merge (§6.3, §6.5, §6.7a)", () => {
     await build(h, fix);
     await h.engine.settle();
     expect(statusOf(h, "T-2")).toBe("done");
+    await passFinalReview(h);
     const status = h.engine.status({});
     expect(status.tasks_by_status).toEqual({ done: 2 });
     expect(status.run.finished_at).toBeDefined();

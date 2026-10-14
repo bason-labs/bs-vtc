@@ -53,10 +53,16 @@ export const prepareRoleWorktree = async (
   k: Kernel,
   run: string,
   actionId: string,
+  /** The commit to start from (a Final Review reviewer's integrated head); default the user's HEAD. */
+  at?: string,
 ): Promise<NonNullable<DispatchRecord["worktree"]>> => {
   const ws = k.deps.workspace;
   const id = roleWorktreeId(run, actionId);
-  const { worktree } = await ws.ensureTaskWorktree(id, `vtc/${id}`, await ws.resolve("HEAD"));
+  const { worktree } = await ws.ensureTaskWorktree(
+    id,
+    `vtc/${id}`,
+    at ?? (await ws.resolve("HEAD")),
+  );
   const root = join(k.deps.repoRoot, worktree);
   const inputs = [
     ...ROLE_INPUT_DIRS.flatMap((dir) => filesUnder(k.deps.repoRoot, dir, 8)),

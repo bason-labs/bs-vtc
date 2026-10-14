@@ -713,13 +713,22 @@ export const threatModel = async (h: Harness, action: SpawnAction): Promise<Lead
 };
 
 /** Drives the front half (discover, specify, G1, design, G2) up to the Planner's dispatch. */
-export const toPlanner = async (h: Harness, spec: string = SPEC): Promise<SpawnAction> => {
+export interface FrontHalfOptions {
+  /** A run with UI: the Designer runs in DESIGN and writes this `screens.yaml`. */
+  readonly screens?: string;
+}
+
+export const toPlanner = async (
+  h: Harness,
+  spec: string = SPEC,
+  options: FrontHalfOptions = {},
+): Promise<SpawnAction> => {
   await h.engine.start(
     {
       request: "Password reset\n\nUsers reset forgotten passwords.",
       track: "feature",
       repo: "existing",
-      has_ui: false,
+      has_ui: options.screens !== undefined,
       risk_hints: [],
     },
     CLAUDE,
@@ -749,19 +758,39 @@ export const toPlanner = async (h: Harness, spec: string = SPEC): Promise<SpawnA
       CLAUDE,
     )
   ).actions;
-  const architect = only(actions, "architect");
-  const isSecurity = (a: SpawnAction): boolean => a.role === "security" && a.mode === "design";
-  // with concurrency 1 Security's design step is dispatched after the Architect's
-  let security = spawns(actions).find(isSecurity);
-  writeFile(workdir(architect), ".vtc/architecture/spine.md", "# spine\n");
-  actions = (
-    await submitResult(h, architect, {
-      exit: "done",
-      artifacts: [{ type: "architecture", path: ".vtc/architecture/spine.md" }],
-    })
-  ).actions;
-  security ??= spawns(actions).find(isSecurity);
-  if (security !== undefined) actions = await threatModel(h, security);
+  // DESIGN: the Architect, Security's threat model and, with UI, the Designer, as many at a
+  // time as the concurrency allows; each is done when it is handed out
+  const pending: SpawnAction[] = [];
+  const seen = new Set<string>();
+  const collect = (list: readonly LeadAction[]): void => {
+    for (const a of spawns(list))
+      if (!seen.has(a.action_id)) {
+        seen.add(a.action_id);
+        pending.push(a);
+      }
+  };
+  collect(actions);
+  for (let step = pending.shift(); step !== undefined; step = pending.shift()) {
+    if (step.role === "security") actions = await threatModel(h, step);
+    else if (step.role === "designer") {
+      writeFile(workdir(step), ".vtc/design/screens.yaml", options.screens ?? "screens: []\n");
+      actions = (
+        await submitResult(h, step, {
+          exit: "done",
+          artifacts: [{ type: "screens", path: ".vtc/design/screens.yaml" }],
+        })
+      ).actions;
+    } else {
+      writeFile(workdir(step), ".vtc/architecture/spine.md", "# spine\n");
+      actions = (
+        await submitResult(h, step, {
+          exit: "done",
+          artifacts: [{ type: "architecture", path: ".vtc/architecture/spine.md" }],
+        })
+      ).actions;
+    }
+    collect(actions);
+  }
   const g2 = actions.find((a) => a.type === "approve_gate");
   if (g2?.type !== "approve_gate") throw new Error(`expected G2, got ${JSON.stringify(actions)}`);
   actions = (
@@ -778,8 +807,9 @@ export const throughPlan = async (
   h: Harness,
   drafts: readonly Record<string, unknown>[],
   spec: string = SPEC,
+  options: FrontHalfOptions = {},
 ): Promise<LeadAction[]> => {
-  const planner = await toPlanner(h, spec);
+  const planner = await toPlanner(h, spec, options);
   const planned = await submitResult(h, planner, { exit: "done", tasks: drafts as never });
   if (!planned.accepted) throw new Error(`plan rejected: ${JSON.stringify(planned.rejection)}`);
   await h.engine.settle();
@@ -851,4 +881,41 @@ export const reportCoverage = (h: Harness): void => {
     );
     return { ...report, traceability: path };
   });
+};
+
+/**
+ * Final Review's AI steps (§6.7a steps 3–4) for the Lead: every feature-level reviewer the
+ * engine hands out passes, citing `cite` (a file at the integrated head). Returns the actions
+ * after them (the release runs in the background; settle to see it).
+ */
+export const passFinalReview = async (
+  h: Harness,
+  cite = "src/t-1/impl.ts:1",
+): Promise<LeadAction[]> => {
+  let actions = (await h.engine.next({}, CLAUDE)).actions;
+  for (let i = 0; i < 4; i += 1) {
+    const reviewers = spawns(actions).filter(
+      (a) => a.task === undefined && a.subject?.startsWith("F-") === true,
+    );
+    if (reviewers.length === 0) break;
+    for (const reviewer of reviewers) {
+      const out = await submitResult(h, reviewer, {
+        exit: "done",
+        ...(reviewer.feature === undefined ? {} : { feature: reviewer.feature }),
+        verdicts: [
+          {
+            subject: reviewer.subject ?? "F-1",
+            verdict: "pass",
+            evidence: [{ type: "file_line", ref: cite }],
+          },
+        ],
+      });
+      if (!out.accepted)
+        throw new Error(`Final Review reviewer rejected: ${JSON.stringify(out.rejection)}`);
+    }
+    await h.engine.settle();
+    actions = (await h.engine.next({}, CLAUDE)).actions;
+  }
+  await h.engine.settle();
+  return actions;
 };
