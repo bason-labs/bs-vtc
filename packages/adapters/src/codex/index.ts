@@ -5,13 +5,12 @@
  * explicit sandbox and no approval prompts, process-group supervision, and `authStatus()` through
  * `codex login status` before every start or resume.
  */
-import { tmpdir, userInfo } from "node:os";
 import { join } from "node:path";
 import type { HostAdapter, HostCapabilities, SessionRef, SpawnRoleRequest } from "@vtc/shared";
 import { createAuthStatusRunner } from "../common/auth-status.js";
 import { createRunLauncher, subagentSpawn } from "../common/dispatch.js";
 import { envHome } from "../common/homes.js";
-import { ensurePrivateDir, writeFileAtomic } from "../common/files.js";
+import { ensurePrivateDir, writeOwnFileAtomic } from "../common/files.js";
 import { createNodeSpawner, type Spawner } from "../common/process.js";
 import { createCodexUsageSource } from "./app-server.js";
 import { CODEX_AUTH_STATUS } from "./auth.js";
@@ -37,10 +36,16 @@ export interface CodexAdapterOptions {
   readonly spawner?: Spawner;
   /**
    * A private directory (0700, created if missing, refused if anyone else can reach it) for the
-   * `--output-schema` files. Default: `<os tmp>/vtc-codex-<user id>`.
+   * `--output-schema` files, which no role may write (the engine writes the file outside any
+   * sandbox, so a role that could plant a link there could have it overwrite any file of the
+   * user's, D-w). Default: `<vtcHome>/run/codex`, under `run/**` of `ROLE_DENIED_VTC
+   * .homeWriteDeny`; never the OS temp directory, which roles may write (D-ag).
    */
   readonly scratchDir?: string;
-  /** Working directory of the `codex app-server` child. Default: the scratch directory. */
+  /**
+   * Working directory of the `codex app-server` child, a directory no role may write (a file
+   * planted in it must never be what runs, §15). Default: the scratch directory.
+   */
   readonly appServerCwd?: string;
   readonly now?: () => Date;
   readonly usagePollMs?: number;
@@ -76,20 +81,19 @@ export interface CodexAdapterOptions {
   readonly authTimeoutMs?: number;
 }
 
-/** Per user, so two users of one machine never share it (and a planted one is refused). */
-const defaultScratchDir = (): string =>
-  join(tmpdir(), `vtc-codex-${String(process.getuid?.() ?? userInfo().username)}`);
-
 export const createCodexAdapter = (options: CodexAdapterOptions = {}): HostAdapter => {
   const spawner =
     options.spawner ?? createNodeSpawner({ envPassthrough: options.envPassthrough ?? [] });
-  const scratchDir = options.scratchDir ?? defaultScratchDir();
+  const vtcHome = options.vtcHome ?? envHome("VTC_HOME", ".vtc");
+  // under `run/`, which no role can write (D-w): a role never reaches the schema file
+  const scratchDir = options.scratchDir ?? join(vtcHome, "run", "codex");
   const commandOptions = { scratchDir };
   const profileOptions = {
-    vtcHome: options.vtcHome ?? envHome("VTC_HOME", ".vtc"),
+    vtcHome,
     ...(options.platform === undefined ? {} : { platform: options.platform }),
   };
   const runs = createRunLauncher({
+    host: HOST,
     spawner,
     outcome: codexOutcomeAfterExit,
     ...(options.killGraceMs === undefined ? {} : { termGraceMs: options.killGraceMs }),
@@ -128,8 +132,9 @@ export const createCodexAdapter = (options: CodexAdapterOptions = {}): HostAdapt
       }
       const command = headlessCommand(request, session);
       ensurePrivateDir(scratchDir);
-      // atomic: another run with the same schema may be reading the file right now
-      writeFileAtomic(
+      // atomic: another run with the same schema may be reading the file right now; never
+      // through a link, whoever put one there
+      writeOwnFileAtomic(
         codexSchemaFile(scratchDir, request.outputSchema),
         JSON.stringify(request.outputSchema),
       );

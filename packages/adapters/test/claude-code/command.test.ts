@@ -613,6 +613,32 @@ describe("Claude headlessCommand", () => {
     expect(argAfter(args, "--resume")).toBe("sess-9");
   });
 
+  it("refuses a session id the host could read as an option", () => {
+    for (const id of ["-p", "--resume", "", "a b", "x".repeat(201)]) {
+      expect(() => adapter.headlessCommand(request(), { host: "claude-code", id }), id).toThrow(
+        /not a session id/,
+      );
+    }
+    const uuid = "0b9f6a52-6c1e-4d7a-9a51-2f1f0a9c7e11";
+    const args = adapter.headlessCommand(request(), { host: "claude-code", id: uuid }).args;
+    expect(argAfter(args, "--resume")).toBe(uuid);
+  });
+
+  it("refuses a sandbox profile that passes more than its own flags, so no isolation flag is repeated (AD-25 rule 1)", () => {
+    const sandbox = profile(READ_ONLY);
+    for (const extra of [
+      ["--setting-sources", "user,project"],
+      ["--mcp-config", "{}"],
+      ["--permission-mode", "default"],
+      ["--settings"],
+    ]) {
+      const widened = { ...sandbox, cliArgs: [...sandbox.cliArgs, ...extra] };
+      expect(() => adapter.headlessCommand(request({ sandbox: widened })), extra[0]).toThrow(
+        /sandbox profile may only pass/,
+      );
+    }
+  });
+
   it("refuses another host's session or sandbox profile", () => {
     expect(() => adapter.headlessCommand(request(), { host: "codex", id: "t" })).toThrow(/codex/);
     const codexSandbox = { ...profile(READ_ONLY), host: "codex" as const };

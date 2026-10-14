@@ -1,7 +1,7 @@
 /**
  * The hardened headless launcher (§15, AD-25 rule 4): one child per role run, started as the
  * leader of its own process group (the spawner's job), stdout kept line by line as the run
- * transcript, and supervision by a hard wall timeout and an optional idle timeout (no stdout line
+ * transcript (bounded: see {@link TranscriptLimits}), and supervision by a hard wall timeout and an optional idle timeout (no stdout line
  * for that long). Stopping a run, for either timeout or for `kill()`, signals the whole group:
  * SIGINT (Claude ends its turn cleanly on it), then SIGTERM after `interruptGraceMs`, then SIGKILL
  * after `termGraceMs` (`HEADLESS_DEFAULTS`). Once the process has exited, the host-specific
@@ -9,7 +9,6 @@
  * the run (`RunExit.stop`) is input to it, never a replacement for what the stream says
  * (AD-25 rule 5).
  */
-import { createInterface } from "node:readline";
 import {
   HEADLESS_DEFAULTS,
   type HeadlessRun,
@@ -38,6 +37,114 @@ export interface RunExit extends ProcessExit {
   readonly stop: RunStop | null;
 }
 
+/**
+ * How much of a run's stdout the launcher keeps, so a run's memory is bounded by bytes and not
+ * only by its wall timeout. The first `headLines` lines are always kept (where each host names
+ * its session); after them, later lines up to `tailChars` characters in all, the oldest dropped
+ * first (the terminal events the outcome needs come last). A line longer than `lineChars` keeps
+ * only its start. A reader of `lines()` that falls behind the dropped lines resumes at the oldest
+ * line still kept.
+ */
+export interface TranscriptLimits {
+  readonly headLines: number;
+  readonly tailChars: number;
+  readonly lineChars: number;
+}
+
+export const TRANSCRIPT_LIMITS: TranscriptLimits = {
+  headLines: 200,
+  tailChars: 16 * 1024 * 1024,
+  lineChars: 4 * 1024 * 1024,
+};
+
+/** The kept lines, numbered as the run printed them (a dropped line keeps its number). */
+const createTranscript = (limits: TranscriptLimits) => {
+  const head: string[] = [];
+  let tail: string[] = [];
+  // `tail[offset]` is the oldest kept later line; its number in the run is `tailStart`
+  let offset = 0;
+  let tailStart = 0;
+  let tailChars = 0;
+  return {
+    push(line: string): void {
+      if (head.length < limits.headLines) {
+        head.push(line);
+        tailStart = head.length;
+        return;
+      }
+      tail.push(line);
+      tailChars += line.length;
+      while (tailChars > limits.tailChars && tail.length - offset > 1) {
+        tailChars -= tail[offset]?.length ?? 0;
+        offset += 1;
+        tailStart += 1;
+      }
+      if (offset > 1024 && offset * 2 > tail.length) {
+        tail = tail.slice(offset);
+        offset = 0;
+      }
+    },
+    /** The line numbered `index`, or the next kept one after it; `null` when there is none yet. */
+    from(index: number): { readonly index: number; readonly line: string } | null {
+      const line = head[index];
+      if (line !== undefined) return { index, line };
+      const at = Math.max(index, tailStart);
+      const kept = tail[offset + at - tailStart];
+      return kept === undefined ? null : { index: at, line: kept };
+    },
+    all: (): string[] => [...head, ...tail.slice(offset)],
+  };
+};
+
+/**
+ * Splits a stream into lines (`\n`, a trailing `\r` dropped), each cut to `maxChars`, so one
+ * endless line cannot grow without bound. The last line is passed on even without a newline.
+ * `close()` stops reading and passes on what is buffered.
+ */
+const readLines = (
+  stream: NodeJS.ReadableStream,
+  maxChars: number,
+  onLine: (line: string) => void,
+  onClose: () => void,
+) => {
+  let partial = "";
+  let cut = false;
+  let closed = false;
+  const flush = (): void => {
+    const line = !cut && partial.endsWith("\r") ? partial.slice(0, -1) : partial;
+    partial = "";
+    cut = false;
+    onLine(line);
+  };
+  stream.setEncoding("utf8");
+  stream.on("data", (chunk: string) => {
+    if (closed) return;
+    let start = 0;
+    for (;;) {
+      const newline = chunk.indexOf("\n", start);
+      if (!cut) {
+        partial += newline === -1 ? chunk.slice(start) : chunk.slice(start, newline);
+        if (partial.length > maxChars) {
+          partial = partial.slice(0, maxChars);
+          cut = true;
+        }
+      }
+      if (newline === -1) return;
+      flush();
+      start = newline + 1;
+    }
+  });
+  const close = (): void => {
+    if (closed) return;
+    closed = true;
+    if (partial !== "" || cut) flush();
+    onClose();
+  };
+  stream.once("end", close);
+  stream.once("close", close);
+  return { close };
+};
+
 export interface HeadlessRunOptions {
   readonly command: HostCommand;
   readonly cwd: string;
@@ -64,6 +171,8 @@ export interface HeadlessRunOptions {
   readonly outcome: (lines: readonly string[], exit: RunExit) => HostOutcome;
   /** Called once when the run has settled (the adapter stops tracking it). */
   readonly onSettled?: () => void;
+  /** How much stdout is kept. Default {@link TRANSCRIPT_LIMITS}. */
+  readonly transcriptLimits?: TranscriptLimits;
 }
 
 const STDERR_TAIL_CHARS = 4000;
@@ -91,7 +200,7 @@ export const startHeadlessRun = (options: HeadlessRunOptions): HeadlessRun => {
   }
   const interruptGraceMs = options.interruptGraceMs ?? HEADLESS_DEFAULTS.interruptGraceMs;
   const termGraceMs = options.termGraceMs ?? HEADLESS_DEFAULTS.termGraceMs;
-  const seen: string[] = [];
+  const transcript = createTranscript(options.transcriptLimits ?? TRANSCRIPT_LIMITS);
   const wakeups = new Set<() => void>();
   const timers = new Set<NodeJS.Timeout>();
   let ended = false;
@@ -145,18 +254,23 @@ export const startHeadlessRun = (options: HeadlessRunOptions): HeadlessRun => {
     });
   };
 
-  const reader = createInterface({ input: child.stdout, crlfDelay: Infinity });
-  reader.on("line", (line) => {
-    seen.push(line);
-    armIdle();
-    wake();
+  let stdoutClosed: () => void = () => undefined;
+  const stdoutDone = new Promise<void>((resolve) => {
+    stdoutClosed = resolve;
   });
-  const stdoutClosed = new Promise<void>((resolve) => {
-    reader.once("close", () => {
+  const reader = readLines(
+    child.stdout,
+    (options.transcriptLimits ?? TRANSCRIPT_LIMITS).lineChars,
+    (line) => {
+      transcript.push(line);
+      armIdle();
+      wake();
+    },
+    () => {
       state.stdoutDone = true;
-      resolve();
-    });
-  });
+      stdoutClosed();
+    },
+  );
   child.stderr.setEncoding("utf8");
   child.stderr.on("data", (chunk: string) => {
     stderrTail = (stderrTail + chunk).slice(-STDERR_TAIL_CHARS);
@@ -175,7 +289,7 @@ export const startHeadlessRun = (options: HeadlessRunOptions): HeadlessRun => {
     if (exit.error === null) {
       let drain: NodeJS.Timeout | undefined;
       await Promise.race([
-        stdoutClosed,
+        stdoutDone,
         new Promise<void>((resolve) => {
           drain = setTimeout(resolve, termGraceMs);
         }),
@@ -192,7 +306,7 @@ export const startHeadlessRun = (options: HeadlessRunOptions): HeadlessRun => {
     ended = true;
     wake();
     options.onSettled?.();
-    return options.outcome(seen, { ...exit, stderrTail, endedAt, stop: state.stop });
+    return options.outcome(transcript.all(), { ...exit, stderrTail, endedAt, stop: state.stop });
   })();
 
   return {
@@ -201,10 +315,9 @@ export const startHeadlessRun = (options: HeadlessRunOptions): HeadlessRun => {
     async *lines() {
       let index = 0;
       for (;;) {
-        while (index < seen.length) {
-          const line = seen[index];
-          index += 1;
-          if (line !== undefined) yield line;
+        for (let next = transcript.from(index); next !== null; next = transcript.from(index)) {
+          index = next.index + 1;
+          yield next.line;
         }
         if (ended) return;
         await new Promise<void>((resolve) => wakeups.add(resolve));
