@@ -100,6 +100,8 @@ export class EngineError extends Error {
 
 export interface Kernel {
   readonly deps: EngineCoreDeps;
+  /** Task ids git showed taken by another clone when the plan was made (spine §5 reading 89). */
+  readonly sharedTaskIds: Set<string>;
   now(): Date;
   config(): ProjectConfig;
   /** The active run's frozen `gates.yml` (committed at its start commit, reading 46f). */

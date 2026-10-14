@@ -19,6 +19,7 @@ import {
   LeadActionSchema,
   NextResultSchema,
   RunControlResultSchema,
+  ResumeInputSchema,
   RunListSchema,
   RunScopedInputSchema,
   SessionExchangeInputSchema,
@@ -120,6 +121,7 @@ export const CONTRACT_SCHEMAS = {
   EngineSocketWelcome: EngineSocketWelcomeSchema,
   // MCP tools (AD-4)
   RunScopedInput: RunScopedInputSchema,
+  ResumeInput: ResumeInputSchema,
   StartInput: StartInputSchema,
   StartResult: StartResultSchema,
   LeadAction: LeadActionSchema,

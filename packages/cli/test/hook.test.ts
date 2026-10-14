@@ -6,8 +6,14 @@
 import { mkdirSync, readdirSync, readFileSync, symlinkSync, writeFileSync } from "node:fs";
 import { join, relative } from "node:path";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
-import { core } from "@vtc/engine";
-import { VTC_HOOK, type EngineClient, type RunningDaemon, type SpawnRoleAction } from "@vtc/shared";
+import { core, mcp } from "@vtc/engine";
+import {
+  CONTRACTS_VERSION,
+  VTC_HOOK,
+  type EngineClient,
+  type RunningDaemon,
+  type SpawnRoleAction,
+} from "@vtc/shared";
 import { createHookCommand, defaultHookCommandDeps } from "../src/commands/hook.js";
 import { liveDaemon } from "../src/daemon.js";
 import {
@@ -27,7 +33,7 @@ import {
 } from "../src/hook-rules.js";
 import { findRepoRoot } from "../src/repo.js";
 import { unfinishedRuns } from "../src/run-log.js";
-import { buildEngineParts, connectToRepoEngine, startDaemon } from "../src/wiring.js";
+import { buildEngineParts, startDaemon } from "../src/wiring.js";
 import { createDiskAssetBundle } from "../src/assets.js";
 import {
   capture,
@@ -894,7 +900,11 @@ describe("against a live daemon with a role in flight", () => {
       adapterFactories: {},
     });
     daemon = await startDaemon(parts, { wake: false });
-    client = await connectToRepoEngine(repo, home);
+    // the Lead's own bridge, its session's settings on: every role needs them (reading 81)
+    client = await mcp.connectEngineClient(daemon.discovery.mcp_socket, CONTRACTS_VERSION, {
+      bridge: "claude-code",
+      sessionSandbox: "on",
+    });
     deps = {
       vtcHome: home,
       cwd: repo,

@@ -978,7 +978,7 @@ const createIntegrationFix = (
   const feature = h.state.features.get(featureId);
   const first = findings[0];
   if (feature === undefined || first === undefined) return;
-  const id = nextNumberedId("T", usedTaskIds([h.state]));
+  const id = nextNumberedId("T", new Set([...usedTaskIds(k.allStates()), ...k.sharedTaskIds]));
   const config = k.config();
   const owners = feature.tasks
     .map((t) => h.state.tasks.get(t))

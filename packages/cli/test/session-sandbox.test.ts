@@ -468,10 +468,10 @@ describe("vtc doctor's gate sandbox check runs a confined no-op, not a version p
     ).toBeNull();
     expect(seen).toContain(BWRAP);
     expect(seen.some((line) => line.endsWith("--version"))).toBe(false);
-    // namespaces work, but there is no pasta for the install phase: none, as for the Gate Runner
+    // namespaces work, but there is no pasta: verify-phase gates run, install-phase ones park (D-aw)
     expect(
       detectGateSandbox({ ...linux, exists: bwrapOnly, probe: probeOf({ [BWRAP]: true }) }).kind,
-    ).toBeNull();
+    ).toBe("bwrap");
     const exists = (p: string): boolean => p === "/usr/bin/sandbox-exec";
     expect(detectGateSandbox({ platform: "darwin", exists, probe: probeOf({}) }).kind).toBeNull();
     expect(

@@ -21,6 +21,12 @@ export interface CommandContext {
    * first use. Control commands (`pause`, `resume`, `status`) use it; it never goes over HTTP.
    */
   readonly engine: () => Promise<EngineClient>;
+  /**
+   * A connection that proves a human (spine §5 readings 71 and 88): it asks `what` at the
+   * terminal first and sends the install token only after a yes. Throws without an interactive
+   * terminal or on a no. Absent where there is no terminal to ask (tests, the binary's own uses).
+   */
+  readonly humanEngine?: (what: string) => Promise<EngineClient>;
 }
 
 export interface CommandSpec {

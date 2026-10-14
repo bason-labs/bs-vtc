@@ -115,5 +115,45 @@ const control = (tool: "pause" | "resume", verb: string, summary: string): Comma
     }),
 });
 
+/**
+ * `vtc resume [--run <id>] [--adopt]`. `--adopt` continues here a run another clone started
+ * (spine §5 reading 88): a human decision, so it goes only over the human connection, after the
+ * terminal confirmation.
+ */
+const resumeCommand: CommandSpec = {
+  name: "resume",
+  summary: "Resume a paused or interrupted run; --adopt continues one another clone started",
+  run: (args, ctx) =>
+    guarded("resume", ctx, async () => {
+      const flags = parseFlags(args, {
+        run: { type: "string" },
+        json: { type: "boolean" },
+        adopt: { type: "boolean" },
+      }).values;
+      if (flags.adopt !== true) return control("resume", "resumed", "").run(args, ctx);
+      if (flags.run === undefined) {
+        ctx.io.err("vtc resume --adopt needs --run <id>: name the run to adopt");
+        return EXIT.usage;
+      }
+      if (ctx.humanEngine === undefined)
+        throw new Error("adopting a run needs an interactive terminal: run it yourself in one");
+      const client = await ctx.humanEngine(
+        `adopt run ${flags.run} from another clone onto this machine`,
+      );
+      let result: RunControlResult;
+      try {
+        result = (await client.call("resume", { run: flags.run, adopt: true })) as RunControlResult;
+      } catch (error) {
+        throw new Error(toolErrorMessage(error), { cause: error });
+      } finally {
+        await client.close();
+      }
+      ctx.io.out(
+        flags.json === true ? JSON.stringify(result, null, 2) : formatControl("adopted", result),
+      );
+      return EXIT.ok;
+    }),
+};
+
 export const pause = control("pause", "paused", "Kill switch: stop dispatching and merging");
-export const resume = control("resume", "resumed", "Resume a paused or interrupted run");
+export const resume = resumeCommand;

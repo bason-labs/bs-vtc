@@ -88,6 +88,8 @@ export const IncidentKindSchema = z.enum([
   "checkout_write",
   "host_config_restored",
   "unsandboxed_gate",
+  /** A human adopted a run another clone started (spine §5 reading 88). New in 4.4.0. */
+  "run_adopted",
 ]);
 export type IncidentKind = z.infer<typeof IncidentKindSchema>;
 
@@ -139,6 +141,16 @@ export const EVENT_PAYLOAD_SCHEMAS = {
     request: z.string().min(1).max(20000),
     merge_level: MergeLevelSchema,
     pipeline_config_hash: Sha256HexSchema,
+    /**
+     * The engine install that started the run (spine §5 reading 88): a random id kept in that
+     * install's private directory. Another clone's engine opens the run read-only until a human
+     * adopts it, so a git-shared log keeps one writer. Absent on runs started before 4.4.0
+     * (treated as another clone's when this install's ledger does not know the log). New in 4.4.0.
+     */
+    origin: z
+      .string()
+      .regex(/^[0-9a-f-]{8,64}$/)
+      .optional(),
   }),
   "run.phase_changed": z.strictObject({ from: PhaseSchema.nullable(), to: PhaseSchema }),
   "run.paused": z.strictObject({ reason: z.string().min(1).max(300) }),

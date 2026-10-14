@@ -299,6 +299,39 @@ describe("a restart replays only what the ledger vouches for (finding phase-role
   });
 });
 
+describe("a run another clone started (spine §5 reading 88)", () => {
+  it("is opened read-only: nothing is appended to its log until a human adopts it", async () => {
+    const h = createHarness();
+    await start(h);
+    await h.engine.settle();
+    const run = runId(h);
+    const log = join(h.repo, `.vtc/runs/${run}/events.jsonl`);
+    const started = events(h).find((e) => e.type === "run.started");
+    expect(String(started?.data.origin)).toMatch(/^[0-9a-f-]{36}$/);
+    // another install: its own private directory, so its own origin and ledger
+    rmSync(guardDirFor(h.home, h.repo), { recursive: true });
+    const before = readFileSync(log);
+    const engine = reopen(h);
+    expect(readFileSync(log).equals(before)).toBe(true);
+    expect(engine.status({ run }).run.id).toBe(run);
+    expect(spawns((await engine.next({}, CLAUDE)).actions)).toEqual([]);
+    await expect(engine.resume({ run })).rejects.toThrow(/another clone.*--adopt/);
+    expect(readFileSync(log).equals(before)).toBe(true);
+    // only a human channel adopts it
+    const cli = { host: "claude-code" as const, client: "cli" as const };
+    await expect(engine.resume({ run, adopt: true }, cli)).rejects.toMatchObject({
+      code: "forbidden",
+    });
+    await engine.resume({ run, adopt: true }, { ...cli, human: true });
+    expect(incidents(h, "run_adopted")).toContain("another clone");
+    expect(only(await next(h), "repo_cartographer").role).toBe("repo_cartographer");
+    // adopted: this install writes it from now on, so a reopen opens it as its own
+    const again = reopen(h);
+    expect(again.status({}).run.id).toBe(run);
+    await h.release();
+  });
+});
+
 describe("every role's dispatch is guarded (AD-7 rule 7)", () => {
   it("a role's write where only the engine writes: rejected, logged in full, the run pauses", async () => {
     const h = createHarness();

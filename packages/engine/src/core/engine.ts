@@ -3,7 +3,7 @@
  * on open, and answers the Lead-facing tools. The Lead only ever dispatches what `next` returns;
  * the engine decides every transition, cap, budget and route (D11).
  */
-import { createHash } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { existsSync, readFileSync, statSync } from "node:fs";
 import { setGitPreflight, setGitSigning, writeRepoFile } from "../git/index.js";
 import { join } from "node:path";
@@ -36,6 +36,7 @@ import {
   type ProjectConfig,
   type RunControlResult,
   type HumanOnlyToolName,
+  type ResumeInput,
   type RunScopedInput,
   type SessionSandboxState,
   type StartInput,
@@ -86,7 +87,13 @@ import {
   type DispatchRecord,
 } from "./dispatch-guard.js";
 import { EngineWrites, NEVER_WROTE } from "./engine-writes.js";
-import { appendPrivateFile, ensurePrivateDir, guardDirFor } from "./guard.js";
+import {
+  appendPrivateFile,
+  ensurePrivateDir,
+  guardDirFor,
+  readPrivateFile,
+  writePrivateFile,
+} from "./guard.js";
 import { openEventLog, type EventDraft } from "./event-log.js";
 import {
   downgradeNoRemote,
@@ -195,9 +202,30 @@ interface FrozenConfig {
 /** Where a run's frozen config is kept for a restart (checked against `run.started`'s hash). */
 const frozenConfigPath = (run: string): string => `.vtc/state/runs/${run}/config.json`;
 
+/** This install's origin id (spine §5 reading 88), created on first use in its private directory. */
+const installOrigin = (guardDir: string): string => {
+  const path = join(guardDir, "origin");
+  const kept = readPrivateFile(path)?.trim();
+  if (kept !== undefined && /^[0-9a-f-]{8,64}$/.test(kept)) return kept;
+  const fresh = randomUUID();
+  writePrivateFile(path, `${fresh}\n`);
+  return fresh;
+};
+
+/** The install that started a run (`run.started.origin`), when it says. */
+const runOrigin = (state: RunState): string | undefined => {
+  const started = state.events.find((e) => e.type === "run.started");
+  const origin = (started?.data as { origin?: unknown } | undefined)?.origin;
+  return typeof origin === "string" ? origin : undefined;
+};
+
+const foreignRunText = (run: string): string =>
+  `run ${run} was started by another clone's engine, so it is open here read-only (its git-shared log keeps one writer); to continue it on this machine instead, run vtc resume --run ${run} --adopt (the other clone must stop working on it)`;
+
 export class Engine implements Kernel {
   readonly usage = new Map<HostId, UsageSnapshot>();
   readonly identicalTree = new Map<string, boolean>();
+  readonly sharedTaskIds = new Set<string>();
   readonly dispatches = new Map<string, DispatchRecord>();
   readonly guardDir: string;
   readonly writes: EngineWrites;
@@ -212,6 +240,13 @@ export class Engine implements Kernel {
   private held = new Map<string, string>();
   private readonly handles = new Map<string, RunHandle>();
   private readonly finished = new Map<string, RunState>();
+  /**
+   * Unfinished runs another clone's engine started (spine §5 reading 88): replayed for reading,
+   * never appended to, until a human adopts one (`resume` with `adopt`).
+   */
+  private readonly foreign = new Map<string, RunState>();
+  /** This install's id (`run.started.origin`), kept in its private directory. */
+  readonly origin: string;
   private readonly jobs = new Map<string, Promise<void>>();
   private readonly chains = new Map<string, Promise<unknown>>();
   private readonly listeners = new Set<EventListener>();
@@ -230,6 +265,7 @@ export class Engine implements Kernel {
     this.guardDir = guardDirFor(deps.vtcHome, deps.repoRoot);
     ensurePrivateDir(this.guardDir);
     this.writes = EngineWrites.open(deps.repoRoot, join(this.guardDir, "engine-writes.jsonl"));
+    this.origin = installOrigin(this.guardDir);
   }
 
   /**
@@ -274,6 +310,17 @@ export class Engine implements Kernel {
       const rel = eventLogPath(state.id);
       const verdict = engine.writes.check(rel);
       let tampered: string | undefined;
+      if (
+        !verdict.ok &&
+        verdict.detail === NEVER_WROTE &&
+        state.run.finished_at === undefined &&
+        runOrigin(state) !== engine.origin
+      ) {
+        // another clone's run (reading 88): read-only here, so the git-shared log keeps one writer
+        engine.foreign.set(state.id, state);
+        engine.notices.push(foreignRunText(state.id));
+        continue;
+      }
       if (!verdict.ok && verdict.detail === NEVER_WROTE) {
         engine.writes.accept(rel);
         if (state.run.finished_at === undefined)
@@ -337,7 +384,11 @@ export class Engine implements Kernel {
         });
       }
     }
-    findLostLogs(engine, new Set([...engine.handles.keys(), ...engine.finished.keys()]), lost);
+    findLostLogs(
+      engine,
+      new Set([...engine.handles.keys(), ...engine.finished.keys(), ...engine.foreign.keys()]),
+      lost,
+    );
     for (const [run, reason] of lost) {
       engine.notices.push(`${reason}; run ${run} is held until vtc resume`);
       engine.held.set(run, reason);
@@ -593,6 +644,52 @@ export class Engine implements Kernel {
     });
   }
 
+  /**
+   * A human adopts a run another clone started (spine §5 reading 88): from here on this install
+   * is its one writer. Only a human channel: the cli after a terminal confirmation (install
+   * token), the run's Lead session relaying the human, or in-process (tests).
+   */
+  private adopt(run: string | undefined, call: CallContext): void {
+    if (run === undefined || !this.foreign.has(run))
+      throw new EngineError(
+        "invalid",
+        `adopt names a run another clone started; ${run ?? "no run"} is not one${this.foreign.size > 0 ? ` (those here: ${[...this.foreign.keys()].join(", ")})` : ""}`,
+      );
+    if (call.client === "cli" && call.human !== true)
+      throw new EngineError(
+        "forbidden",
+        "adopting a run is a human decision: run vtc resume --adopt yourself in an interactive terminal",
+      );
+    if (call.client === "bridge") {
+      this.claimLead(run, call);
+      if (call.session === undefined || this.leads.get(run) !== call.session)
+        throw new EngineError(
+          "forbidden",
+          "only the Lead session, relaying the human, adopts a run",
+        );
+    }
+    const state = this.foreign.get(run) as RunState;
+    const rel = eventLogPath(run);
+    this.writes.accept(rel);
+    const log = openEventLog(this.deps.repoRoot, run, this.deps.lock, {
+      now: this.deps.now,
+      secrets: () => this.secrets(),
+    });
+    const handle: RunHandle = { state, log };
+    this.foreign.delete(run);
+    this.handles.set(run, handle);
+    this.emit(handle, {
+      type: "incident.recorded",
+      actor: "human",
+      data: {
+        kind: "run_adopted",
+        detail: `run ${run} was started by another clone (origin ${runOrigin(state) ?? "unknown"}); a human adopted it on this install (origin ${this.origin}), which writes its log from now on`,
+      },
+    });
+    this.restoreFrozenConfig(handle);
+    reportUnverifiable(this, handle);
+  }
+
   /** The run's log was not what the engine wrote when the engine opened (see `open`). */
   private reportLogOnOpen(handle: RunHandle, detail: string): void {
     this.emit(handle, {
@@ -707,7 +804,11 @@ export class Engine implements Kernel {
   }
 
   allStates(): Iterable<RunState> {
-    return [...this.finished.values(), ...[...this.handles.values()].map((h) => h.state)];
+    return [
+      ...this.finished.values(),
+      ...this.foreign.values(),
+      ...[...this.handles.values()].map((h) => h.state),
+    ];
   }
 
   /** Every run, oldest first (the read model's source). */
@@ -937,6 +1038,7 @@ export class Engine implements Kernel {
       const handle = this.handles.get(run);
       if (handle !== undefined) return handle;
       if (this.finished.has(run)) throw new EngineError("finished", `run ${run} has finished`);
+      if (this.foreign.has(run)) throw new EngineError("conflict", foreignRunText(run));
       throw new EngineError("no_run", `no run ${run}`);
     }
     const state = activeRun([...this.handles.values()].map((h) => h.state));
@@ -947,6 +1049,7 @@ export class Engine implements Kernel {
 
   private stateOf(run: string | undefined): RunState {
     if (run !== undefined && this.finished.has(run)) return this.finished.get(run) as RunState;
+    if (run !== undefined && this.foreign.has(run)) return this.foreign.get(run) as RunState;
     if (run === undefined && this.handles.size === 0) {
       const last = this.states().at(-1);
       if (last !== undefined) return last;
@@ -1004,6 +1107,7 @@ export class Engine implements Kernel {
           risk_hints: input.risk_hints,
           merge_level: config.merge_level,
           pipeline_config_hash: pipelineConfigHash(config, gates),
+          origin: this.origin,
         },
       });
       // Level 2+ needs the push remote (spine §5 reading 18).
@@ -1054,6 +1158,7 @@ export class Engine implements Kernel {
       let n = 2;
       this.handles.has(id) ||
       this.finished.has(id) ||
+      this.foreign.has(id) ||
       this.held.has(id) ||
       this.writes.has(eventLogPath(id)) ||
       existsSync(join(this.deps.repoRoot, ".vtc/runs", id));
@@ -1600,7 +1705,8 @@ export class Engine implements Kernel {
    * the human's resume takes the repo as it is (`acceptCheckout`): the run's log is rewritten
    * from the engine's own events, any other file the engine wrote is taken as it now is.
    */
-  async resume(input: RunScopedInput): Promise<RunControlResult> {
+  async resume(input: ResumeInput, call: CallContext = { host: null }): Promise<RunControlResult> {
+    if (input.adopt === true) this.adopt(input.run, call);
     if (this.held.size > 0) {
       const active = activeRun([...this.handles.values()].map((h) => h.state));
       const run = input.run ?? (active === undefined ? [...this.held.keys()][0] : undefined);

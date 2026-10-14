@@ -110,7 +110,7 @@ const invoke = async (
     case "pause":
       return host.pause(input as Parameters<ToolHost["pause"]>[0]);
     case "resume":
-      return host.resume(input as Parameters<ToolHost["resume"]>[0]);
+      return host.resume(input as Parameters<ToolHost["resume"]>[0], call);
   }
 };
 
