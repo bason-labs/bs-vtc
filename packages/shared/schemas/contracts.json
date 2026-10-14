@@ -5063,7 +5063,8 @@
                 "checkout_write",
                 "host_config_restored",
                 "unsandboxed_gate",
-                "run_adopted"
+                "run_adopted",
+                "milestone_commit"
               ]
             },
             "detail": {

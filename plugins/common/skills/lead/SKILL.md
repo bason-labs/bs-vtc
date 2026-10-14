@@ -142,6 +142,12 @@ run's advisor budget.
 - Report progress briefly: phase, tasks by state, parked items and their reasons, budget and
   usage. Use `status`; do not reconstruct state yourself.
 - `pause` stops all dispatching and merging; `resume` continues a paused or interrupted run.
+- The engine commits the run's git-tracked `.vtc/` files on the checked-out branch at G1, G2,
+  Final Review and the run's end, so teammates see the run from their clones. Do not commit
+  `.vtc/` yourself; if the engine reports a milestone commit that did not go through, tell the
+  human what it said.
+- A run another clone started is read-only here. Pass `adopt: true` to `resume` only when the
+  human says, in this chat, to continue that run on this machine (the other clone stops on it).
 
 ## Never
 

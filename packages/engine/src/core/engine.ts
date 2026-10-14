@@ -212,6 +212,39 @@ const installOrigin = (guardDir: string): string => {
   return fresh;
 };
 
+/**
+ * The git-tracked `.vtc/` paths a milestone commit takes (AD-7 rule 2): the run logs and their
+ * projections, the plan files and evidence, and the documents roles write there. Never
+ * `.vtc/state/` (gitignored), `project.yaml` or `gates.yml` (the human's, reading 79).
+ */
+export const MILESTONE_PATHS: readonly string[] = [
+  ".vtc/runs",
+  ".vtc/tasks",
+  ".vtc/evidence",
+  ".vtc/spec",
+  ".vtc/architecture",
+  ".vtc/design",
+  ".vtc/research",
+  ".vtc/exports",
+  ".vtc/lookback",
+];
+
+/** The milestone an event marks (spec §6.8), or `null`. */
+const milestoneOf = (event: VtcEvent): string | null => {
+  if (event.type === "gate.approved") {
+    const gates = (event.data as { gates?: readonly string[] }).gates ?? [];
+    return `${gates.join("+")} approved`;
+  }
+  if (event.type === "feature.status_changed") {
+    const to = (event.data as { to?: string }).to;
+    if (to === "ready_to_ship") return `${event.feature ?? "feature"} passed Final Review`;
+    if (to === "shipped") return `${event.feature ?? "feature"} shipped`;
+    return null;
+  }
+  if (event.type === "run.finished") return "run finished";
+  return null;
+};
+
 /** The install that started a run (`run.started.origin`), when it says. */
 const runOrigin = (state: RunState): string | undefined => {
   const started = state.events.find((e) => e.type === "run.started");
@@ -645,6 +678,41 @@ export class Engine implements Kernel {
   }
 
   /**
+   * The milestone commit (spec §6.8, AD-7 rule 2; spine §5 reading 90), in the background after
+   * the event: the git-tracked `.vtc/` paths ({@link MILESTONE_PATHS}) are committed on the
+   * user's checked-out branch, so a teammate's clone and the dashboard's snapshot mode see the
+   * run. A commit that git refuses is an incident (`milestone_commit`) on a live run, a notice on
+   * a finished one; a skip (detached HEAD, a merge in progress, nothing changed) is neither.
+   */
+  private commitMilestone(handle: RunHandle, milestone: string): void {
+    const key = `milestone:${handle.state.id}:${String(handle.state.events.length)}`;
+    const message = `vtc: ${handle.state.id} ${milestone}`;
+    const promise = (async () => {
+      const outcome = await this.deps.workspace
+        .commitMilestone(MILESTONE_PATHS, message)
+        .catch((error: unknown) => ({
+          committed: false,
+          detail: `git refused: ${error instanceof Error ? error.message : String(error)}`,
+        }));
+      if (outcome.committed || !/refused|failed|error|hook|fatal/i.test(outcome.detail)) return;
+      const text = `the milestone commit "${message}" did not go through (${outcome.detail}); commit the .vtc/ files yourself`;
+      if (this.handles.get(handle.state.id) === handle && this.deps.lock.isHeld()) {
+        await this.serial(handle, () => {
+          this.emit(handle, {
+            type: "incident.recorded",
+            actor: "engine",
+            data: { kind: "milestone_commit", detail: text.slice(0, 2000) },
+          });
+          return Promise.resolve();
+        });
+      } else this.notices.push(text);
+    })()
+      .catch(() => undefined)
+      .finally(() => this.jobs.delete(key));
+    this.jobs.set(key, promise);
+  }
+
+  /**
    * A human adopts a run another clone started (spine §5 reading 88): from here on this install
    * is its one writer. Only a human channel: the cli after a terminal confirmation (install
    * token), the run's Lead session relaying the human, or in-process (tests).
@@ -720,6 +788,8 @@ export class Engine implements Kernel {
       this.handles.delete(handle.state.id);
       this.finished.set(handle.state.id, handle.state);
     }
+    const milestone = milestoneOf(event);
+    if (milestone !== null) this.commitMilestone(handle, milestone);
     for (const listener of this.listeners) {
       try {
         listener(event);

@@ -105,6 +105,18 @@ export interface Workspace {
    * default branch. Reads refs only; never fetches.
    */
   sharedIds(): Promise<{ readonly tasks: readonly string[]; readonly features: readonly string[] }>;
+  /**
+   * The milestone commit in the user's checkout (spec §6.8, AD-7 rule 2; spine §5 reading 90):
+   * commits exactly `paths` (those that exist; a pathspec commit, so whatever else the user
+   * staged stays staged and uncommitted) on the checked-out branch, with the user's own hooks,
+   * identity and signing. Skips (`committed: false` with why) on a detached HEAD, an engine
+   * branch, a merge, rebase or cherry-pick in progress, or nothing changed; a failed commit
+   * unstages what it staged and says why.
+   */
+  commitMilestone(
+    paths: readonly string[],
+    message: string,
+  ): Promise<{ readonly committed: boolean; readonly detail: string }>;
 }
 
 /** A path with every existing prefix resolved through `realpath` (macOS `/var` → `/private/var`). */
@@ -348,6 +360,61 @@ export const createWorkspace = (repoRoot: string): Workspace => {
       const url = await gitText(repoRoot, ["remote", "get-url", remote], { allowFailure: true });
       return url === "" ? null : url;
     },
+    commitMilestone: locked(async (paths: readonly string[], message: string) => {
+      const branch = await gitText(repoRoot, ["symbolic-ref", "--quiet", "--short", "HEAD"], {
+        allowFailure: true,
+      });
+      if (branch === "") return { committed: false, detail: "HEAD is detached" };
+      if (branch.startsWith("vtc/"))
+        return { committed: false, detail: `${branch} is an engine branch` };
+      const gitDir = await gitText(repoRoot, ["rev-parse", "--absolute-git-dir"]);
+      for (const marker of [
+        "MERGE_HEAD",
+        "CHERRY_PICK_HEAD",
+        "REVERT_HEAD",
+        "rebase-merge",
+        "rebase-apply",
+      ])
+        if (existsSync(join(gitDir, marker)))
+          return { committed: false, detail: `a ${marker} is in progress in the checkout` };
+      // what changed under `paths` (added, modified, deleted), never a symlink: the engine writes
+      // only regular files there, so a link is someone else's and is not committed
+      const status = await runGit(repoRoot, [
+        "status",
+        "--porcelain=v1",
+        "-z",
+        "--untracked-files=all",
+        "--",
+        ...paths,
+      ]);
+      const entries = status.stdout.toString("utf8").split("\0");
+      const changed: string[] = [];
+      for (let i = 0; i < entries.length; i += 1) {
+        const entry = entries[i] ?? "";
+        if (entry.length < 4) continue;
+        changed.push(entry.slice(3));
+        // a staged rename or copy names its source next: both sides go in the commit
+        if (/^[RC]/.test(entry)) {
+          i += 1;
+          if ((entries[i] ?? "") !== "") changed.push(entries[i] ?? "");
+        }
+      }
+      const files = changed.filter((p) => !isSymlink(abs(p)));
+      if (files.length === 0) return { committed: false, detail: "nothing changed" };
+      await runGit(repoRoot, ["add", "--all", "--", ...files]);
+      const result = await runGit(
+        repoRoot,
+        ["commit", "--quiet", "-m", message, "--only", "--", ...files],
+        { allowFailure: true, hooks: true, env: await commitEnv() },
+      );
+      if (result.code === 0)
+        return { committed: true, detail: `${String(files.length)} file(s) committed` };
+      await runGit(repoRoot, ["reset", "--quiet", "--", ...files], { allowFailure: true });
+      return {
+        committed: false,
+        detail: result.stderr.trim().slice(0, 500) || "git commit failed",
+      };
+    }),
     sharedIds: async () => {
       const tasks = new Set<string>();
       const features = new Set<string>();
