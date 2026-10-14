@@ -72,7 +72,7 @@ import {
 } from "./g2.js";
 import { effectiveVerdict } from "./gate-verdict.js";
 import { headlessRunsOf, killHeadless } from "./headless.js";
-import type { FactRefresher, PromptPins, RoleToolHandler } from "./kernel.js";
+import type { FactRefresher, LookbackRetro, PromptPins, RoleToolHandler } from "./kernel.js";
 import { dispatchNow, drive } from "./route.js";
 import { parkEscalation } from "./escalations.js";
 import {
@@ -121,6 +121,7 @@ import {
   watchedFeatures,
 } from "./level3.js";
 import { startRelease } from "./release.js";
+import { stepRetro } from "./retro.js";
 import { clientSpendRow, recordClientSpend } from "./spend.js";
 import { checkFinalReviewStuck, startFinalReview } from "./final-review.js";
 import {
@@ -328,6 +329,7 @@ export class Engine implements Kernel {
   private roleToolHandler: RoleToolHandler | null = null;
   /** The stale-fact re-fetch before G2 (AD-22 rule 4), set by the composition; `null` = none. */
   private factRefresher: FactRefresher | null = null;
+  private retroLookback: LookbackRetro | null = null;
   /** What the wired refresher last returned (`Kernel.factTable`). */
   private checkedFacts: readonly UnverifiedFactSummary[] | null = null;
   private pins: PromptPins | null = null;
@@ -1003,6 +1005,23 @@ export class Engine implements Kernel {
     return this.pins;
   }
 
+  /**
+   * Run the lookback role at RETRO with `lookback` (AD-21 rules 4 and 8, spine §5 reading 154): the
+   * daemon wires the lookback module's (core never imports it, AD-13 rule 12). `null`: RETRO
+   * finishes the run at once.
+   */
+  setLookbackRetro(lookback: LookbackRetro | null): void {
+    this.retroLookback = lookback;
+  }
+
+  lookbackRetro(): LookbackRetro | null {
+    return this.retroLookback;
+  }
+
+  notice(text: string): void {
+    this.notices.push(text);
+  }
+
   leadHostFor(run: string, call: CallContext): HostId | undefined {
     if (this.leads.has(run)) return this.leadHosts.get(run);
     return call.client === undefined ? (call.host ?? undefined) : undefined;
@@ -1150,6 +1169,8 @@ export class Engine implements Kernel {
       else this.phaseTo(handle, "g2");
       return true;
     }
+    // RETRO: the lookback role where Lookback asks for it, then run.finished (retro.ts)
+    if (phase === "retro") return stepRetro(this, handle);
     if (!["build", "integrate", "final_review", "release"].includes(phase)) return false;
     let changed = this.scheduleTasks(handle);
     if (checkEngineerShare(this, handle)) changed = true;

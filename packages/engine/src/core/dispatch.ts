@@ -43,6 +43,7 @@ import {
 } from "./kernel.js";
 import { finalReviewSteps } from "./final-review.js";
 import { designWorkSince, rerollInputs } from "./g2.js";
+import { retroSteps } from "./retro.js";
 import type { PromptParts } from "./plugins.js";
 import { effectiveVerdict } from "./gate-verdict.js";
 import { engineerDispatch, tierDown } from "./loop.js";
@@ -504,6 +505,8 @@ export const pendingSteps = (k: Kernel, h: RunHandle, host: HostId): StepSpec[] 
   const state = h.state;
   if (state.run.finished_at !== undefined) return [];
   const phase = state.run.phase;
+  // RETRO (§13 steps 1–2): the lookback role, one target at a time (retro.ts)
+  if (phase === "retro") return retroSteps(h);
   const phaseRoleList = phaseRoles(k, h, phase);
   if (phaseRoleList.length > 0) {
     const entered = phaseEnteredSeq(state, phase) ?? 0;

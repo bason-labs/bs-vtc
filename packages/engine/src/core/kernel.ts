@@ -150,6 +150,49 @@ export interface PinnedPrompt {
  */
 export type PromptPins = (target: PromptTarget) => PinnedPrompt | null;
 
+/** A (role, host) prompt version the lookback role proposes for (AD-21 rule 8). */
+export interface LookbackTargetRef {
+  readonly role: string;
+  readonly mode?: string;
+  readonly host: HostId;
+}
+
+/** One target the RETRO step queues the lookback role for, with what that role reads. */
+export interface LookbackRetroTarget extends LookbackTargetRef {
+  /** Its `lookback.dispatched` (attributed train failures of the version under review). */
+  readonly dispatched: EventDraft;
+  /**
+   * The Markdown the lookback role reads (`.vtc/runs/<run>/lookback-<n>.md`): the version under
+   * review with its locked core and editable section, its train traces and the human edits.
+   */
+  readonly input: string;
+}
+
+/**
+ * Lookback at RETRO (spec §13 steps 1–2; AD-21 rules 4 and 8; spine §5 reading 154): the lookback
+ * module implements it and the daemon hands it to the engine (`Engine.setLookbackRetro`), so core
+ * never imports lookback (AD-13 rule 12).
+ * - `plan`: before the run finishes, attribute its failures, rewrite the scorecards and say which
+ *   (role, host) targets get the lookback role (at least `minTrainFailures` train failures, the
+ *   weekly window and budget allowing).
+ * - `check`: the proposal the lookback role wrote for `target` in its worktree (`root`): refused
+ *   with its problems (the role is told, as for any rejected result), or accepted, stored as an
+ *   immutable candidate version under the VTC home, with its events
+ *   (`lookback.proposal_recorded`). A role that found no cause the prompt can fix writes no
+ *   proposal: accepted with no events.
+ */
+export interface LookbackRetro {
+  plan(state: RunState): Promise<{ readonly targets: readonly LookbackRetroTarget[] }>;
+  check(
+    target: LookbackTargetRef,
+    root: string,
+    state: RunState,
+  ): Promise<
+    | { readonly ok: true; readonly events: readonly EventDraft[] }
+    | { readonly ok: false; readonly problems: readonly string[] }
+  >;
+}
+
 export interface RunHandle {
   readonly state: RunState;
   readonly log: EventLogWriter;
@@ -238,6 +281,10 @@ export interface Kernel {
   readonly unattended: Set<string>;
   /** The prompt-version selector the daemon wired (`Engine.setPromptPins`), or `null`. */
   promptPins(): PromptPins | null;
+  /** Lookback at RETRO as the daemon wired it (`Engine.setLookbackRetro`), or `null`. */
+  lookbackRetro(): LookbackRetro | null;
+  /** A notice for the human (the daemon prints them): what went wrong that is no run's failure. */
+  notice(text: string): void;
   /** Engine-launched headless runs in flight, by action id (AD-25). */
   readonly headless: Map<string, HeadlessEntry>;
   /**
