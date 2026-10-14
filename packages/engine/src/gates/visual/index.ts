@@ -69,6 +69,7 @@ export {
   dhash,
   hammingDistance,
   NOVELTY_THRESHOLDS,
+  noveltySeam,
   readDesignLibrary,
   recordDesignChoice,
   TOKEN_VECTOR_LENGTH,

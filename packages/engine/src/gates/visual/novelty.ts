@@ -6,21 +6,28 @@
  * density). A direction is `too_similar` only when both distances to one library entry are under
  * their thresholds. The chosen direction is recorded in the library (§9.1 step 6).
  */
-import { existsSync, readdirSync, readFileSync } from "node:fs";
+import { existsSync, lstatSync, readdirSync, readFileSync } from "node:fs";
 import { join, relative, sep } from "node:path";
 import {
   DESIGN_LIBRARY_DIR,
   DesignLibraryEntrySchema,
   NoveltyReportSchema,
   parsePersisted,
+  ResearchScopeSchema,
   SlugSchema,
   type DesignLibraryEntry,
+  type GateRunner,
   type NoveltyReport,
 } from "@vtc/shared";
-import { writeRepoFile } from "../../git/index.js";
+import { assertNoSymlinks, writeRepoFile } from "../../git/index.js";
 import { toOklch } from "./color.js";
 import { decodePng, type RgbaImage } from "./png.js";
-import type { DesignTokens } from "./tokens.js";
+import {
+  DESIGN_TOKENS_PATH,
+  EMPTY_TOKENS,
+  parseDesignTokens,
+  type DesignTokens,
+} from "./tokens.js";
 
 /** Default thresholds: dHash Hamming distance (of 64 bits) and token-vector distance. */
 export const NOVELTY_THRESHOLDS = { phash_distance: 10, token_distance: 0.25 } as const;
@@ -198,9 +205,16 @@ export const checkNovelty = (input: NoveltyInput): NoveltyReport => {
   });
 };
 
-/** `~/.vtc/design-library/<scope>/`: one library per client (`default` without one). */
+/**
+ * `~/.vtc/design-library/<scope>/`: one library per client. The seam passes a `ResearchScope`
+ * (`_shared`, or `client-<slug>`); a plain slug is accepted too. Anything else throws.
+ */
 export const designLibraryDir = (vtcHome: string, scope: string): string =>
-  join(vtcHome, DESIGN_LIBRARY_DIR, SlugSchema.parse(scope));
+  join(
+    vtcHome,
+    DESIGN_LIBRARY_DIR,
+    ResearchScopeSchema.safeParse(scope).success ? scope : SlugSchema.parse(scope),
+  );
 
 /** The library's valid entries, sorted by id; unreadable files are skipped. */
 export const readDesignLibrary = (vtcHome: string, scope: string): DesignLibraryEntry[] => {
@@ -238,3 +252,67 @@ export const recordDesignChoice = (
   );
   return file;
 };
+
+/** A first viewport or tokens file larger than this is not read. */
+const MAX_NOVELTY_INPUT_BYTES = 32 * 1024 * 1024;
+
+/**
+ * A plain repo file's bytes, or `null` when it is missing, not a regular file, too large, or
+ * reached through a symlink or a path that leaves the repo.
+ */
+const readRepoBytes = (repoRoot: string, rel: string): Uint8Array | null => {
+  try {
+    assertNoSymlinks(repoRoot, rel);
+    const abs = join(repoRoot, ...rel.split("/"));
+    const stat = lstatSync(abs);
+    if (!stat.isFile() || stat.size > MAX_NOVELTY_INPUT_BYTES) return null;
+    return readFileSync(abs);
+  } catch {
+    return null;
+  }
+};
+
+/**
+ * `GateRunner.checkNovelty` and `recordDesignChoice` (contracts 4.6.0, spine §5 reading 127).
+ * The first viewport is read from the repo's working tree, the token vector from the project's
+ * `.vtc/design/tokens.json` (none yet: empty tokens), and the library is the request scope's
+ * only. Engine core writes the report to `noveltyReportPath`; this never writes the repo.
+ */
+export const noveltySeam = (deps: {
+  readonly repoRoot: string;
+  readonly vtcHome: string;
+}): Required<Pick<GateRunner, "checkNovelty" | "recordDesignChoice">> => ({
+  checkNovelty: (request) => {
+    try {
+      const direction = SlugSchema.parse(request.direction);
+      const scope = ResearchScopeSchema.parse(request.scope);
+      const tokensBytes = readRepoBytes(deps.repoRoot, DESIGN_TOKENS_PATH);
+      let tokens: DesignTokens = EMPTY_TOKENS;
+      if (tokensBytes !== null) {
+        try {
+          tokens = parseDesignTokens(new TextDecoder().decode(tokensBytes));
+        } catch {
+          tokens = EMPTY_TOKENS;
+        }
+      }
+      return Promise.resolve(
+        checkNovelty({
+          direction,
+          firstViewport: readRepoBytes(deps.repoRoot, request.firstViewport),
+          tokens,
+          library: readDesignLibrary(deps.vtcHome, scope),
+        }),
+      );
+    } catch (error) {
+      return Promise.reject(error instanceof Error ? error : new Error(String(error)));
+    }
+  },
+  recordDesignChoice: (entry, scope) => {
+    try {
+      recordDesignChoice(deps.vtcHome, ResearchScopeSchema.parse(scope), entry);
+      return Promise.resolve();
+    } catch (error) {
+      return Promise.reject(error instanceof Error ? error : new Error(String(error)));
+    }
+  },
+});

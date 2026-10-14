@@ -313,11 +313,13 @@ The novelty check (`visual/novelty.ts`, §9.1 step 4, reading 107) compares a di
 viewport (64-bit dHash) and token vector (OKLCH palette, type pair, radius, density) with the
 per-client design library `~/.vtc/design-library/<scope>/`; `too_similar` only when both are
 under their thresholds, judged over the whole library (the report lists the ten nearest,
-too-similar ones first). `recordDesignChoice` adds the chosen direction. Nothing calls it yet:
-engine core may not import `gates/` (AD-13 rules 1 and 7) and the frozen `GateRunner` and
-`VisualRequest` have no novelty entry, so wiring it needs a contract seam (proposed to the
-integrator: a novelty mode of `GateRunRequest.visual`, or an injected `EngineDeps` function the
-cli builds from `gates.visual.checkNovelty`).
+too-similar ones first). `recordDesignChoice` adds the chosen direction. The Gate Runner
+exposes both as the optional `GateRunner.checkNovelty` / `recordDesignChoice` (contracts 4.6.0,
+reading 127): the first viewport is read from the repo's working tree (a missing, oversized,
+symlinked or escaping path gives `unchecked`), the token vector from `.vtc/design/tokens.json`
+(none yet: empty tokens), and the library is the request's `ResearchScope` only (`_shared` or
+`client-<slug>`; a malformed scope, direction or entry rejects). Engine core writes the report
+to `noveltyReportPath` and calls `recordDesignChoice` when the human picks at G2.
 
 ## Not built yet (tracked follow-up increments)
 
@@ -338,8 +340,8 @@ cli builds from `gates.visual.checkNovelty`).
   an opt-in live test needs a local `playwright-core`, which this repo does not install. The
   render cache keyed by `source_hash` is not used yet (every run renders, and every attempt
   copies its images, up to the per-run cap). The detector ports the source-level slop rules
-  only (no live-DOM, quality or design-system drift rules). The novelty check has no caller
-  until the contract seam exists (see above).
+  only (no live-DOM, quality or design-system drift rules). Engine core does not call the
+  novelty seam yet, so every direction stays `unchecked` until it does (reading 127).
 - **Visual app server detection** knows the default ports of common dev and preview servers
   (Vite, Next, Nuxt, Astro, Angular, webpack, Create React App) and the explicit `--port`,
   `-p` and `PORT=` forms; any other server needs `visual.app` written by hand and confirmed with
