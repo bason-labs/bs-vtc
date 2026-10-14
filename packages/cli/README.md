@@ -20,7 +20,10 @@ A run parked on a usage limit resumes at the reset time through one OS timer tha
 - **Windows has no auto-resume timer** (D-aj, spine §5 reading 56). A run waiting for a usage
   reset resumes when the engine next runs on that repo (any `vtc` command or host session that
   starts it). `vtc install` and `vtc doctor` say so; `vtc install --auto-resume` fails there.
-- Engine-driven resume also needs `headless_allowed` (spine §5 reading 12).
+- **The engine launches no headless host runs in v1** (spine §5 reading 93): `headless_allowed`
+  behaves as `plugin_only`, a host without subagents pauses its run, and cross-family review is
+  skipped. The auto-resume timer wakes the engine at the reset; the run continues when the Lead
+  session calls `next`.
 - The Windows paths (`.cmd` shim execution, opening the dashboard URL) are unit-tested only.
 
 ## User settings

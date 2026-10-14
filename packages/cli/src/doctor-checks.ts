@@ -75,7 +75,11 @@ export const checkAutoResume = (env: TimerEnv): DoctorCheck => {
       status: "warn",
       detail: `the ${env.kind} runs ${program ?? "nothing"}, which no longer exists: ${fix}`,
     };
-  return { name, status: "ok", detail: `${env.kind} installed (${program})` };
+  return {
+    name,
+    status: "ok",
+    detail: `${env.kind} installed (${program}); it wakes the engine, and a waiting run continues when the Lead session calls next`,
+  };
 };
 
 /** Windows in v1 (D-aj, spine §5 reading 56): no timer; resume waits for the engine. */

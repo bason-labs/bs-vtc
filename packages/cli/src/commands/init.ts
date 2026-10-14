@@ -18,8 +18,8 @@ import { EXIT, guarded, parseFlags } from "./util.js";
 const HEADER = [
   "# VTC project settings (spec §4.3). Every value below is the spec default; edit freely.",
   "# concurrency: parallel tasks, reviewers included (1 to 3).",
-  "# hosts.dispatch: plugin_only runs every role as a subagent of your Lead session;",
-  "#   headless_allowed also lets the engine start host CLIs itself (auto-resume without a Lead).",
+  "# hosts.dispatch: plugin_only runs every role as a subagent of your Lead session.",
+  "#   This engine starts no host CLI itself yet, so headless_allowed behaves as plugin_only.",
   "",
 ].join("\n");
 
