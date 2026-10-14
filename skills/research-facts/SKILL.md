@@ -56,6 +56,35 @@ propose it:
   `UNVERIFIED:` in your output over proposing such a row.
 - `pinned_version`: the version the claim holds for, when it differs from the subject's.
 
+### A page you found with your host's web tools
+
+When your contract lists host web tools, a page you found with the host's web search or page
+fetch is a lead the engine has not seen. To rely on it, name the page as the `source` request
+(the `web` fetcher), so the engine fetches it under its network guard, caches it and checks the
+quote, and add `reported_source`: the page's `url`, `via` (`host_search` for a search result,
+`host_fetch` for a page the host fetched) and the search `query`:
+
+```json
+{
+  "subject": "nodejs@22",
+  "predicate": "eol_date",
+  "value": "<the value exactly as the page gives it>",
+  "source": {
+    "request": { "fetcher": "web", "url": "https://nodejs.org/en/about/previous-releases" },
+    "locator": { "kind": "quote", "text": "<a verbatim span of the page containing the value>" }
+  },
+  "reported_source": {
+    "url": "https://nodejs.org/en/about/previous-releases",
+    "via": "host_search",
+    "query": "nodejs 22 end of life date"
+  }
+}
+```
+
+`reported_source` is provenance, never verification: with `source: null` the row records where
+the claim came from and stays `unverified` (UNVERIFIED at G2). The same holds when the engine
+cannot fetch the page or the quote does not resolve on the engine's copy.
+
 The engine fetches or reads the cached source, checks the locator and returns the row with its
 status. A row that comes back `unverified` means your locator did not resolve: fix the locator
 from the source text, or treat the claim as unverified.

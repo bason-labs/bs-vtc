@@ -39,9 +39,10 @@ export interface CompiledAgent {
   /** The full instructions: the agent's system prompt on this host. */
   readonly instructions: string;
   /**
-   * The role's own `prompt.md` sections as `splitRolePrompt` returns them (`prompt-parts.ts`): the
-   * prompt identity the manifest records, and the default editable section, which the agent
-   * carries verbatim and a Lookback proposal replaces.
+   * The prompt identity the manifest records (`prompt-parts.ts`): the role's own `prompt.md`
+   * sections as `splitRolePrompt` returns them, trimmed, except that an engineer profile's locked
+   * section is `engineerProfileLockedSection` (spine §5 reading 172). The editable one is the
+   * default section, which the agent carries verbatim and a Lookback proposal replaces.
    */
   readonly sections: { readonly locked: string; readonly editable: string };
   /** Skills the agent preloads (`role-skills.ts`), by skill name. */

@@ -11,6 +11,7 @@ import { parse as parseYaml } from "yaml";
 import { describe, expect, it } from "vitest";
 import {
   ENGINE_HTTP,
+  engineerProfileLockedSection,
   engineMcpServer,
   ENGINE_MCP_TOOLS,
   LOOKBACK_LIMITS,
@@ -101,22 +102,30 @@ const sectionsOf = (role: string): { locked: string; editable: string } => {
 /** lookback-research's `sectionSha` (packages/engine/src/lookback/versions.ts), restated. */
 const sectionSha = (section: string): string => sha256Hex(section.trim());
 
+/**
+ * The identity sections the manifest records (AD-21 rule 1): the role's own, except an engineer
+ * profile's locked one, which is `engineerProfileLockedSection` (spine §5 reading 172, D-br).
+ */
+const identityOf = (role: string): { locked: string; editable: string } => {
+  const own = sectionsOf(role);
+  return role.startsWith("engineer_")
+    ? { ...own, locked: engineerProfileLockedSection(sectionsOf("engineer"), own.locked) }
+    : own;
+};
+
 describe("prompt identity and the prompt-section assets (AD-21 rules 1–2)", () => {
   const output = compileOk();
 
-  it.each(HOSTS)(
-    "the %s manifest SHAs are sectionSha of the role's own splitRolePrompt sections",
-    (host) => {
-      // The frozen PluginManifestAgent definition, as the engine's checkProposal checks a base.
-      const m = manifest(output, host);
-      expect(m.agents.length).toBeGreaterThan(0);
-      for (const agent of m.agents) {
-        const sections = sectionsOf(agent.role);
-        expect(agent.locked_sha256, agent.name).toBe(sectionSha(sections.locked));
-        expect(agent.editable_sha256, agent.name).toBe(sectionSha(sections.editable));
-      }
-    },
-  );
+  it.each(HOSTS)("the %s manifest SHAs are sectionSha of the role's identity sections", (host) => {
+    // The frozen PluginManifestAgent definition, as the engine's checkProposal checks a base.
+    const m = manifest(output, host);
+    expect(m.agents.length).toBeGreaterThan(0);
+    for (const agent of m.agents) {
+      const sections = identityOf(agent.role);
+      expect(agent.locked_sha256, agent.name).toBe(sectionSha(sections.locked));
+      expect(agent.editable_sha256, agent.name).toBe(sectionSha(sections.editable));
+    }
+  });
 
   it.each(HOSTS)(
     "the %s plugin carries the role's sections as assets, which split back unchanged",
@@ -124,7 +133,7 @@ describe("prompt identity and the prompt-section assets (AD-21 rules 1–2)", ()
       for (const agent of manifest(output, host).agents) {
         const locked = fileOf(output, host, rolePromptAssetPath(agent.name, "locked"));
         const editable = fileOf(output, host, rolePromptAssetPath(agent.name, "editable"));
-        expect({ locked, editable }, agent.name).toEqual(sectionsOf(agent.role));
+        expect({ locked, editable }, agent.name).toEqual(identityOf(agent.role));
         expect(agent.locked_sha256, agent.name).toBe(promptShaFor(locked));
         expect(agent.editable_sha256, agent.name).toBe(promptShaFor(editable));
         // a proposal check composes the locked core with a section and splits it again
@@ -187,7 +196,8 @@ describe("prompt identity and the prompt-section assets (AD-21 rules 1–2)", ()
     const asset = (part: "locked" | "editable"): string =>
       fileOf(output, "claude-code", rolePromptAssetPath("vtc-engineer-frontend", part));
     expect(asset("editable")).toBe("FRONTEND-EDITABLE");
-    expect(asset("locked")).toBe("FRONTEND-LOCKED");
+    // D-br: the locked identity covers the Engineer prompt the profile carries
+    expect(asset("locked")).toBe("ENGINEER-LOCKED\n\nENGINEER-EDITABLE\n\nFRONTEND-LOCKED");
     const text = instructions(output, "claude-code", "vtc-engineer-frontend");
     const order = ["ENGINEER-LOCKED", "ENGINEER-EDITABLE", "FRONTEND-LOCKED", "## Contract"].map(
       (part) => text.indexOf(part),
@@ -195,7 +205,8 @@ describe("prompt identity and the prompt-section assets (AD-21 rules 1–2)", ()
     expect(order.every((at) => at >= 0)).toBe(true);
     expect([...order].sort((a, b) => a - b)).toEqual(order);
     expect(text.endsWith("\nFRONTEND-EDITABLE")).toBe(true);
-    // an Engineer section change reaches every profile through the compile, not the identity
+    // an Engineer section change reaches every profile through the compile and its locked
+    // identity (D-br); the profile's own section, which its proposals replace, is unchanged
     const changed = compileOk({
       "roles/engineer/prompt.md": `${PROMPT_MARKERS.locked}\nENGINEER-LOCKED\n${PROMPT_MARKERS.editable}\nENGINEER-EDITABLE-2\n`,
     });
@@ -209,6 +220,7 @@ describe("prompt identity and the prompt-section assets (AD-21 rules 1–2)", ()
       "ENGINEER-EDITABLE-2",
     );
     expect(after?.editable_sha256).toBe(before?.editable_sha256);
+    expect(after?.locked_sha256).not.toBe(before?.locked_sha256);
     expect(after?.prompt_sha256).not.toBe(before?.prompt_sha256);
   });
 
@@ -224,8 +236,9 @@ describe("prompt identity and the prompt-section assets (AD-21 rules 1–2)", ()
 });
 
 describe("roles whose agents carry the locked core only (§5 reading 102)", () => {
-  it("switches no role by default until the pack section and the engine rendering land", () => {
-    expect(EDITABLE_IN_PACK_ROLES).toEqual([]);
+  it("switches only the Spec Verifier by default (D-bl, reading 166)", () => {
+    // the fixture has no spec_verifier, so every fixture agent carries its section
+    expect(EDITABLE_IN_PACK_ROLES).toEqual(["spec_verifier"]);
     const output = compileOk();
     for (const host of HOSTS) {
       for (const agent of manifest(output, host).agents) {
@@ -322,7 +335,11 @@ budget: { context_tokens: 80000 }
       fact_lookup: "research-facts",
       fact_propose: "research-facts",
     });
-    expect(ROLE_SKILLS).toEqual({ architect: ["architect"] });
+    expect(ROLE_SKILLS).toEqual({
+      architect: ["architect"],
+      designer: ["design-craft"],
+      visual_qa: ["design-craft"],
+    });
     expect(claudeFront(compileOk(ARCHITECT), "vtc-architect").skills).toEqual([
       "vtc:architect",
       "vtc:research-facts",
@@ -412,7 +429,7 @@ describe("placeholders for the wave-3 prompts", () => {
   });
 
   it("fills the G2 direction fields the Designer gives and where its prototype lives", () => {
-    expect(PROTOCOL_VARS.g2_direction_fields).toBe("`id`, `title`, `thesis`, `prototype`");
+    expect(PROTOCOL_VARS.direction_fields).toBe("`id`, `title`, `thesis`, `prototype`");
     expect(PROTOCOL_VARS.prototype_root).toBe(ENGINE_HTTP.prototype.root);
   });
 });

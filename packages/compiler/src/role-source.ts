@@ -4,12 +4,12 @@
  */
 import { parse as parseYaml, YAMLParseError } from "yaml";
 import {
+  editableSectionErrors,
+  RESERVED_EDITABLE_HEADINGS,
   RoleContractSchema,
   splitRolePrompt,
-  TASK_PACK_SECTIONS,
   type RoleContract,
 } from "@vtc/shared";
-import { EDITABLE_PACK_SECTION } from "./prompt-parts.js";
 import type { CompileError, SourceFile } from "./types.js";
 
 /** Longest `prompt.md` in lines (§5.1: "about 150 lines at most"). */
@@ -65,7 +65,11 @@ export const selectMode = (
   return errors.length > 0 ? { ok: false, errors } : { ok: true, text: kept.join("\n") };
 };
 
-/** Replaces `{{name}}` placeholders; unknown placeholders are errors. */
+/**
+ * Replaces `{{name}}` placeholders (lower-case letters and `_`: the grammar `editableSectionErrors`
+ * in `@vtc/shared` detects, so a placeholder the compiler renders is one an editable section and a
+ * Lookback proposal are refused for); unknown placeholders are errors.
+ */
 export const renderTemplate = (text: string, vars: Readonly<Record<string, string>>): TextCheck => {
   const errors: string[] = [];
   const rendered = text.replace(/\{\{([a-z_]+)\}\}/g, (whole, name: string) => {
@@ -79,49 +83,12 @@ export const renderTemplate = (text: string, vars: Readonly<Record<string, strin
   return errors.length > 0 ? { ok: false, errors } : { ok: true, text: rendered };
 };
 
-const PLACEHOLDER = /\{\{[a-z_]+\}\}/;
-const HEADING = /^#{1,6}\s+(.+?)\s*#*\s*$/;
-/** Headings an editable section may not use: the task pack's sections and its heuristics one. */
-export const RESERVED_EDITABLE_HEADINGS: readonly string[] = [
-  ...TASK_PACK_SECTIONS,
-  EDITABLE_PACK_SECTION,
-];
-const RESERVED_HEADINGS = new Set(RESERVED_EDITABLE_HEADINGS.map((name) => name.toLowerCase()));
-
 /**
- * What an editable section may not contain (AD-14 rule 4, AD-21; `prompt-parts.ts`). The section
- * is one role-level text that a Lookback proposal replaces whole and that the engine may render
- * into the task pack, so it compiles verbatim, the same for every mode and host:
- * - no mode block: a proposal written for one mode's agent would drop the other modes' blocks
- *   when it replaces the role's section (mode-specific rules belong in the locked core);
- * - no `{{placeholder}}`: the compiled text, its `editable_sha256` and the proposal's text would
- *   differ from the source a promoted proposal replaces;
- * - no heading named after a task-pack section or the pack's heuristics section: rendered first
- *   in the pack, such a heading would blur where the section ends and the data begins.
+ * What an editable section may not contain (AD-14 rule 4, AD-21): the shared rule set, which
+ * Lookback's `checkProposal` also runs on a proposed section (spine §5 reading 175). Re-exported
+ * so the compiler's callers keep one import.
  */
-export const editableSectionErrors = (section: string): string[] => {
-  const errors: string[] = [];
-  section.split("\n").forEach((line, index) => {
-    const at = `editable section line ${String(index + 1)}`;
-    const trimmed = line.trim();
-    if (trimmed.startsWith("<!-- vtc:mode")) {
-      errors.push(
-        `${at}: no mode block in the editable section; Lookback replaces the section whole, so put mode-specific rules in the locked core`,
-      );
-    }
-    const placeholder = PLACEHOLDER.exec(line);
-    if (placeholder !== null) {
-      errors.push(
-        `${at}: no placeholder (${placeholder[0]}) in the editable section; it must compile verbatim`,
-      );
-    }
-    const heading = HEADING.exec(trimmed)?.[1];
-    if (heading !== undefined && RESERVED_HEADINGS.has(heading.toLowerCase())) {
-      errors.push(`${at}: heading "${heading}" is reserved for the task pack`);
-    }
-  });
-  return errors;
-};
+export { editableSectionErrors, RESERVED_EDITABLE_HEADINGS };
 
 export interface RoleSourceInput {
   /** The role's directory name under `roles/`. */

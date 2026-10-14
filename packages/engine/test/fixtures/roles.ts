@@ -64,9 +64,8 @@ export const FIXTURE_ROLES: readonly RoleContract[] = [
       profile: "write_scoped",
       write_paths: [".vtc/research/briefs/**"],
       engine_tools: ["research_fetch", "fact_lookup", "fact_propose"],
-      // `host_web: true` (H-3, reading 156) lands in the same merge as roles-compiler's
-      // role.yaml 3.0.0 that carries it: the AD-14 drift test compares the two, and the
-      // role.yaml on this branch has no host_web yet
+      // H-3 (reading 156): the Research Analyst searches through the host's own web tools
+      host_web: true,
     },
     budget: { context_tokens: 80_000 },
   }),
