@@ -6,7 +6,16 @@
  * density). A direction is `too_similar` only when both distances to one library entry are under
  * their thresholds. The chosen direction is recorded in the library (§9.1 step 6).
  */
-import { existsSync, lstatSync, readdirSync, readFileSync } from "node:fs";
+import {
+  closeSync,
+  constants,
+  existsSync,
+  fstatSync,
+  openSync,
+  readdirSync,
+  readFileSync,
+  readSync,
+} from "node:fs";
 import { join, relative, sep } from "node:path";
 import {
   DESIGN_LIBRARY_DIR,
@@ -258,17 +267,33 @@ const MAX_NOVELTY_INPUT_BYTES = 32 * 1024 * 1024;
 
 /**
  * A plain repo file's bytes, or `null` when it is missing, not a regular file, too large, or
- * reached through a symlink or a path that leaves the repo.
+ * reached through a symlink or a path that leaves the repo. Opened once without following a final
+ * symlink and checked on the open descriptor, so the file cannot be swapped between the check and
+ * the read (non-blocking, so a FIFO put there cannot hang the engine).
  */
 const readRepoBytes = (repoRoot: string, rel: string): Uint8Array | null => {
+  let fd: number | null = null;
   try {
     assertNoSymlinks(repoRoot, rel);
-    const abs = join(repoRoot, ...rel.split("/"));
-    const stat = lstatSync(abs);
+    const flags = constants as { O_NOFOLLOW?: number; O_NONBLOCK?: number };
+    fd = openSync(
+      join(repoRoot, ...rel.split("/")),
+      constants.O_RDONLY | (flags.O_NOFOLLOW ?? 0) | (flags.O_NONBLOCK ?? 0),
+    );
+    const stat = fstatSync(fd);
     if (!stat.isFile() || stat.size > MAX_NOVELTY_INPUT_BYTES) return null;
-    return readFileSync(abs);
+    const bytes = new Uint8Array(stat.size);
+    let read = 0;
+    while (read < bytes.length) {
+      const n = readSync(fd, bytes, read, bytes.length - read, read);
+      if (n === 0) break;
+      read += n;
+    }
+    return bytes.subarray(0, read);
   } catch {
     return null;
+  } finally {
+    if (fd !== null) closeSync(fd);
   }
 };
 

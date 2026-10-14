@@ -94,6 +94,7 @@ export {
   DISABLE_SIGUSR1,
   LINUX_PTRACE_REFUSAL,
   NO_RUNNER_NODE,
+  engineNodeExecutable,
   resolveNodeExecutable,
   sandboxedVisualRunner,
   type SandboxedVisualRunnerOptions,

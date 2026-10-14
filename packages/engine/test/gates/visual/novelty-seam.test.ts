@@ -5,7 +5,9 @@
  * `recordDesignChoice` adds the chosen direction to that scope's library.
  */
 import { existsSync, mkdirSync, symlinkSync, writeFileSync } from "node:fs";
+import { execFileSync } from "node:child_process";
 import { join } from "node:path";
+import { deflateSync } from "node:zlib";
 import { afterEach, describe, expect, it } from "vitest";
 import { DESIGN_LIBRARY_DIR, NoveltyReportSchema, type DesignLibraryEntry } from "@vtc/shared";
 import { createGitOps } from "../../../src/git/index.js";
@@ -120,6 +122,40 @@ describe("GateRunner.checkNovelty / recordDesignChoice", () => {
       });
       expect(report.verdict, firstViewport).toBe("unchecked");
     }
+  });
+
+  it("is unchecked, without inflating it, when the first viewport is a decompression bomb", async () => {
+    const { runner, repo } = setup();
+    // A valid 1x1 RGBA PNG header whose IDAT inflates to 256 MiB: a few hundred KiB on disk.
+    const header = encodePng({ width: 1, height: 1, data: new Uint8Array(4) });
+    const ihdrEnd = 8 + 12 + 13;
+    const idat = deflateSync(Buffer.alloc(256 * 1024 * 1024));
+    const chunk = new Uint8Array(12 + idat.length);
+    new DataView(chunk.buffer).setUint32(0, idat.length);
+    chunk.set([73, 68, 65, 84], 4);
+    chunk.set(idat, 8);
+    const iend = header.subarray(header.length - 12);
+    writeFileSync(join(repo, VIEWPORT), Buffer.concat([header.subarray(0, ihdrEnd), chunk, iend]));
+    const before = process.memoryUsage().arrayBuffers;
+    const report = await runner.checkNovelty!({
+      direction: "warm",
+      firstViewport: VIEWPORT,
+      scope: "_shared",
+    });
+    expect(report.verdict).toBe("unchecked");
+    expect(process.memoryUsage().arrayBuffers - before).toBeLessThan(64 * 1024 * 1024);
+  });
+
+  it("is unchecked, without blocking, when the first viewport is a FIFO", async () => {
+    const { runner, repo } = setup();
+    const fifo = ".vtc/design/fifo.png";
+    execFileSync("mkfifo", [join(repo, fifo)]);
+    const report = await runner.checkNovelty!({
+      direction: "warm",
+      firstViewport: fifo,
+      scope: "_shared",
+    });
+    expect(report.verdict).toBe("unchecked");
   });
 
   it("still hashes the viewport when the project has no tokens yet", async () => {

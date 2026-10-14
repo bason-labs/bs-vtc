@@ -533,7 +533,9 @@ export const sandboxExecProfile = (
     );
   } else if (spec.phase === "verify" && extra.loopbackPorts.length > 0) {
     // The visual step's app server (AD-24): its own port of the host's loopback and no other, so
-    // neither it nor the page reaches the engine API, a local database or another listener.
+    // neither it nor the page reaches the engine API, a local database or a listener on another
+    // port. A host service already on this very port would be reachable: the visual runner
+    // refuses to start the app when something answers there (runner-script.ts).
     lines.push(
       "(allow system-socket)",
       ...[...new Set(extra.loopbackPorts)].flatMap((port) => [

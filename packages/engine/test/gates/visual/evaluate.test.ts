@@ -329,7 +329,57 @@ describe("visualWithoutRenders", () => {
     });
     expect(failed.summary.status).toBe("fail");
     expect(failed.summary.skipped_reason).toBeUndefined();
-    expect(failed.summary.findings.at(-1)?.title).toMatch(/Not rendered: no browser/);
+    // The reason comes ahead of the token-lint findings.
+    expect(failed.summary.findings[0]?.title).toMatch(/Not rendered: no browser/);
+  });
+
+  it("keeps the reason for error and unchecked under the summary's cap", () => {
+    const many: ToolFinding[] = Array.from({ length: 250 }, (_, i) => ({
+      tool: "vtc-token-lint",
+      rule_id: "vtc-token/color",
+      category: "design",
+      title: `literal colour ${String(i)}`,
+      location: { path: "a.css", line: i + 1 },
+      evidence: { type: "file_line", ref: `a.css:${String(i + 1)}` },
+      sarif_level: "note",
+    }));
+    const error = visualWithoutRenders({
+      ...base,
+      status: "error",
+      reason: "the runner crashed",
+      findings: many,
+      notes: ["a note"],
+    });
+    expect(error.summary.status).toBe("error");
+    expect(error.summary.findings).toHaveLength(200);
+    expect(error.summary.findings.map((f) => f.title)).toEqual(
+      expect.arrayContaining(["a note", "Visual step failed: the runner crashed"]),
+    );
+
+    const unchecked = evaluateVisual(
+      input(rendered(), { tokenLint: many, notRun: ["pixelmatch is not installed"] }),
+    );
+    expect(unchecked.summary.status).toBe("unchecked");
+    expect(unchecked.summary.findings).toHaveLength(200);
+    expect(unchecked.summary.findings[0]?.title).toMatch(/Visual checks not run: pixelmatch/);
+
+    const failed = evaluateVisual(
+      input(
+        RunnerResultSchema.parse({
+          v: 1,
+          browser: null,
+          renders: [],
+          error: "port 5173 is already in use",
+        }),
+        {
+          tokenLint: many,
+        },
+      ),
+    );
+    expect(failed.summary.status).toBe("error");
+    expect(failed.summary.findings[0]?.title).toMatch(
+      /Visual step failed: port 5173 is already in use/,
+    );
   });
 
   it("is error for a pin mismatch", () => {
