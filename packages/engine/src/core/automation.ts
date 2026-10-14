@@ -29,7 +29,7 @@ import {
 } from "@vtc/shared";
 import type { z } from "zod";
 import type { EventDraft } from "./event-log.js";
-import { PARSE_FAILURE_PREFIX, type RunState } from "./state.js";
+import { PARSE_FAILURE_PREFIX, PROJECT_GATES_PARK_PREFIX, type RunState } from "./state.js";
 import { featureHasUi } from "./ui.js";
 
 /** Upper bounds of the report (`AutomationReportSchema`). */
@@ -268,9 +268,12 @@ const findingIdentity = (finding: {
 
 /**
  * Pure (D-bv): the automation facts one event of `state` raises. VTC side: an incident
- * (`gate_infra`, `crash`), an adapter parse failure, a stuck loop and a replay verdict `improve`;
- * project side: a parked task VTC cannot resolve, a red post-merge CI run, a revert or a Lookback
- * escaped defect, an out-of-scope finding, and the Final Review leftovers a finished run left open.
+ * (`gate_infra`, `crash`), a task or feature `gate_infra` park (worktree, merge queue, gate
+ * sandbox or environment, browser pin: VTC's own infrastructure, reading 190 (2)), an adapter
+ * parse failure, a stuck loop and a replay verdict `improve`; project side: a parked task VTC
+ * cannot resolve, a `gate_infra` park on the project's committed `gates.yml`
+ * ({@link PROJECT_GATES_PARK_PREFIX}), a red post-merge CI run, a revert or a Lookback escaped
+ * defect, an out-of-scope finding, and the Final Review leftovers a finished run left open.
  * A cost regression comes from Lookback's scorecards, not an event ({@link costRegressionFacts}).
  */
 export const automationFacts = (state: RunState, event: VtcEvent): AutomationFact[] => {
@@ -319,7 +322,13 @@ export const automationFacts = (state: RunState, event: VtcEvent): AutomationFac
     }
     case "task.status_changed": {
       const v = parse("task.status_changed", event);
-      if (v?.to !== "parked" || v.park_reason === undefined || HUMAN_PARKS.has(v.park_reason))
+      if (
+        v?.to !== "parked" ||
+        v.park_reason === undefined ||
+        HUMAN_PARKS.has(v.park_reason) ||
+        // decided by its escalation, which carries the engine's detail (below)
+        v.park_reason === "gate_infra"
+      )
         return [];
       const task = event.task ?? "";
       const known = state.tasks.get(task);
@@ -352,6 +361,44 @@ export const automationFacts = (state: RunState, event: VtcEvent): AutomationFac
           errorClass: "engine.stuck_loop",
           task,
           detail: `a role failed or was rejected repeatedly on task ${task}`,
+        },
+      ];
+    }
+    case "escalation.opened": {
+      // a task or feature `gate_infra` park: VTC's own defect unless the project's gates.yml is
+      // the cause; only the engine opens a `gate_infra` escalation, and it writes its detail
+      const v = parse("escalation.opened", event);
+      const esc = v?.escalation;
+      if (esc?.reason !== "gate_infra") return [];
+      const detail = esc.detail ?? "";
+      const feature =
+        esc.feature ?? (esc.task === undefined ? undefined : state.tasks.get(esc.task)?.feature);
+      const scope = {
+        ...(esc.task === undefined ? {} : { task: esc.task }),
+        ...(feature === undefined ? {} : { feature }),
+      };
+      if (!detail.startsWith(PROJECT_GATES_PARK_PREFIX))
+        return [
+          {
+            ...base,
+            target: "upstream",
+            kind: "defect",
+            errorClass: "incident.gate_infra",
+            ...scope,
+            detail,
+          },
+        ];
+      const subject = esc.task === undefined ? `Feature ${esc.feature ?? ""}` : `Task ${esc.task}`;
+      return [
+        {
+          ...base,
+          target: "project",
+          kind: "parked",
+          ...scope,
+          // the project's gates.yml is one problem per run
+          ruleId: `parked/gates_config/${state.id}`,
+          title: clip(`${subject} parked: the committed gates.yml is missing or not the run's`),
+          detail,
         },
       ];
     }

@@ -24,6 +24,7 @@ import {
   type LeadAction,
   type RoleContract,
   type SandboxProfile,
+  type VtcEvent,
 } from "@vtc/shared";
 import * as core from "../../src/core/index.js";
 import { findingFromTool } from "../../src/core/triage.js";
@@ -287,6 +288,14 @@ describe("gate requests carry the run's committed gates.yml (reading 46b, c, e, 
     expect(parked).toMatchObject({ reason: "gate_infra" });
     expect(escalations(h)).toContain("not the one this run started with");
     expect(h.gates.requests).toEqual([]);
+    // the project's own gates.yml is the cause: a project issue, never a VTC defect (reading 190)
+    const opened = events(h).find((e) => e.type === "escalation.opened" && e.task === "T-1");
+    const state = h.engine.states().at(-1);
+    expect(
+      opened === undefined || state === undefined
+        ? null
+        : core.automationFacts(state, opened as unknown as VtcEvent).map((f) => [f.target, f.kind]),
+    ).toEqual([["project", "parked"]]);
     await h.release();
   });
 });
