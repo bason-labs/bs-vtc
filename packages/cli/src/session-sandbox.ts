@@ -97,8 +97,11 @@ const readRepoSettings = (repoRoot: string, rel: string): LocalSettingsRead => {
 export const readClaudeLocalSettings = (repoRoot: string): LocalSettingsRead =>
   readRepoSettings(repoRoot, CLAUDE_LOCAL_SETTINGS);
 
-/** The user's own settings file (it may be a link). */
-const readUserSettings = (path: string): LocalSettingsRead => {
+/**
+ * The user's own Claude settings file (it may be a link): `settings.json` in the Claude config
+ * directory, never the credentials beside it (AD-9).
+ */
+export const readClaudeUserSettings = (path: string): LocalSettingsRead => {
   try {
     if (!existsSync(path)) return { kind: "absent", path };
     const parsed: unknown = JSON.parse(readFileSync(path, "utf8"));
@@ -593,7 +596,7 @@ export const claudeSessionSandboxOf = (
       });
     }
   if (env.userSettings !== null) {
-    const user = readUserSettings(env.userSettings);
+    const user = readClaudeUserSettings(env.userSettings);
     reads.push({ read: user, source: source(user.path, dirname(user.path)), otherLocal: false });
   }
   for (const { read, source: from, otherLocal } of reads) {

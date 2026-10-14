@@ -46,6 +46,11 @@ except the publish job (`contents: write`, `id-token: write`, `attestations: wri
 
 ## Installing and verifying
 
+**Upgrading** (D-bo, spine §5 reading 169): the Claude Code settings `vtc install` writes change
+between releases (wave 3 added the session sandbox's write denies), so after upgrading, in each
+repo where you use VTC with Claude Code, re-run `vtc install --host claude-code`. The release
+notes, `install.sh` (when it replaces an existing `vtc`) and the Homebrew caveats say so.
+
 ```sh
 curl --proto '=https' --tlsv1.2 -fsSL https://github.com/<owner>/<repo>/releases/download/v<version>/install.sh | sh
 ```

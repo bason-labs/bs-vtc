@@ -181,6 +181,18 @@ describe("the release workflow (AD-26 rules 1-3)", () => {
     expect(publish.steps.some((s) => s.uses?.startsWith("actions/checkout@") === true)).toBe(false);
   });
 
+  it("tells existing users to re-run vtc install --host claude-code (D-bo, reading 169)", () => {
+    const publish = workflow().jobs.publish as Job;
+    const run = publish.steps.map((s) => s.run ?? "").join("\n");
+    // single-quoted, so the backticks are text and not a command substitution
+    expect(run).toMatch(
+      /echo 'Upgrading from an earlier vtc: in each repo where you use VTC with Claude Code, re-run `vtc install --host claude-code`, so its settings carry the session sandbox rules of this release\.'/,
+    );
+    expect(readFileSync(join(PRODUCT_ROOT, "packaging/README.md"), "utf8")).toMatch(
+      /re-run `vtc install --host claude-code`/,
+    );
+  });
+
   it("carries the H-2 todo in the release docs", () => {
     expect(readFileSync(join(PRODUCT_ROOT, "packaging/README.md"), "utf8")).toContain(H2_TODO);
   });
@@ -281,6 +293,10 @@ describe("the Homebrew formula", () => {
     });
     // the test block exercises the binary, not only --version
     expect(rb).toMatch(/test do[\s\S]*engine --mcp/);
+    // D-bo: an upgrade says to re-install the Claude Code settings
+    expect(rb).toMatch(
+      /def caveats[\s\S]*vtc install --host claude-code[\s\S]*session sandbox rules/,
+    );
     if (which("ruby") !== null) {
       const dir = tempDir("vtc-rb-");
       writeFileSync(join(dir, "vtc.rb"), rb);
@@ -402,6 +418,8 @@ const runInstaller = (options: {
   readonly hash?: boolean;
   readonly script?: string;
   readonly env?: Readonly<Record<string, string>>;
+  /** A vtc already installed there: an upgrade. */
+  readonly existing?: boolean;
 }): {
   status: number | null;
   stdout: string;
@@ -416,6 +434,10 @@ const runInstaller = (options: {
   );
   const home = tempDir("vtc-home-");
   const installDir = join(home, "bin-target");
+  if (options.existing === true) {
+    mkdirSync(installDir, { recursive: true });
+    writeFileSync(join(installDir, "vtc"), "#!/bin/sh\necho old\n", { mode: 0o755 });
+  }
   const result = spawnSync(join(path, "sh"), [options.script ?? INSTALLER], {
     encoding: "utf8",
     env: {
@@ -439,6 +461,20 @@ const runInstaller = (options: {
 };
 
 describe("packaging/install.sh (AD-26 rule 4)", () => {
+  it("tells an upgrading user to re-run vtc install --host claude-code (D-bo, reading 169)", () => {
+    const NOTE =
+      "vtc-install: Upgraded: in each repo where you use VTC with Claude Code, re-run vtc install --host claude-code, so its settings carry this release's session sandbox rules";
+    const upgrade = runInstaller({ fixtures: releaseFixtures(), existing: true });
+    expect(upgrade.status, upgrade.stderr).toBe(0);
+    expect(upgrade.stdout).toContain(NOTE);
+    const installed = spawnSync(join(upgrade.installDir, "vtc"), { encoding: "utf8" });
+    expect(installed.stdout.trim()).toBe(`vtc ${VERSION} linux-x64`);
+    // a first install has nothing to re-install
+    const fresh = runInstaller({ fixtures: releaseFixtures() });
+    expect(fresh.status, fresh.stderr).toBe(0);
+    expect(fresh.stdout).not.toContain("Upgraded");
+  });
+
   it("downloads over https, verifies the checksum and installs atomically", () => {
     const run = runInstaller({ fixtures: releaseFixtures() });
     expect(run.status, run.stderr).toBe(0);
