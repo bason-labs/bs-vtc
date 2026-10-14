@@ -47,6 +47,7 @@ import {
   removeEngineDiscovery,
   takeEngineLock,
   writeEngineDiscovery,
+  type LookbackRetro,
   type PluginCatalog,
   type RunState,
   type StaleLockReason,
@@ -67,6 +68,7 @@ import {
   type LockedShaFor,
 } from "../lookback/index.js";
 import { engineSocketAnswers, serveEngineSocket } from "../mcp/index.js";
+import { readTiebreakKeys, recordTiebreak } from "./tiebreaks.js";
 import {
   createFetchQuota,
   createFileResearchCache,
@@ -183,6 +185,20 @@ export const wireResearch = (
 };
 
 /**
+ * The host the lookback role of `state` runs on, and the percent of its weekly window left (AD-21
+ * rule 8, spine §5 reading 176): the run's live Lead host, else the host its limit names, else the
+ * engine's default host; `null` when that host's weekly window is unknown (then Lookback waits).
+ */
+export const lookbackWindow = (
+  engine: Pick<Engine, "liveLeadHost" | "hostFor" | "usage">,
+  state: Pick<RunState, "id" | "limit">,
+): { readonly host: HostId; readonly pct: number | null } => {
+  const host = engine.liveLeadHost(state.id) ?? state.limit?.host ?? engine.hostFor({ host: null });
+  const weekly = engine.usage.get(host)?.windows.find((w) => w.kind === "weekly");
+  return { host, pct: weekly === undefined ? null : remainingPct(weekly) };
+};
+
+/**
  * The Lookback module wired into the engine (AD-21; spine §5 reading 144):
  * - core's prompt selector (`Engine.setPromptPins`, reading 135(d)): each dispatch of an agent the
  *   plugin compiled without its editable section runs the human's pin or the task's canary arm
@@ -238,17 +254,17 @@ export const wireLookback = (
         }
       },
     );
-  const weeklyRemaining = (): number | null => {
-    const host: HostId = engine.hostFor({ host: null });
-    const weekly = engine.usage.get(host)?.windows.find((w) => w.kind === "weekly");
-    return weekly === undefined ? null : remainingPct(weekly);
-  };
+  // rule 8 (reading 176): the window of the run's Lead host, where the lookback role runs
+  const weeklyRemaining = (state: RunState): number | null => lookbackWindow(engine, state).pct;
+  // the AI tiebreak answers the engine recorded (reading 137): only these ai_tiebreak rows count
+  const tiebreaks = (): ReadonlySet<string> => readTiebreakKeys(deps.vtcHome, repoKey);
   const bundleSha = (): string =>
     graderBundleSha({ judgeModel: null, gatesConfigHash: engine.gatesConfigHash() });
   const budgetAvailable = (state: RunState): boolean =>
     state.runBudget === null || state.runBudget.spent_usd < state.runBudget.budget_usd;
-  // AD-21 rules 4 and 8: the lookback role at RETRO, before the run finishes (reading 154)
-  engine.setLookbackRetro(
+  // AD-21 rules 4 and 8: the lookback role at RETRO, before the run finishes (reading 154); the
+  // weekly window is the finishing run's Lead host's (reading 176)
+  const retroFor = (state: RunState | null): LookbackRetro =>
     createLookbackRetro({
       projectRoot: deps.repoRoot,
       vtcHome: deps.vtcHome,
@@ -257,24 +273,33 @@ export const wireLookback = (
       compiled: (role, mode, host) =>
         plugins.promptParts?.(agentNameFor(role, mode), host)?.compiled,
       graderBundleSha: bundleSha,
-      weeklyRemainingPct: weeklyRemaining,
+      weeklyRemainingPct: () => (state === null ? null : weeklyRemaining(state)),
       budgetAvailable,
       now,
-    }),
-  );
+    });
+  const checker = retroFor(null);
+  engine.setLookbackRetro({
+    plan: (state) => retroFor(state).plan(state),
+    check: (target, root, state) => checker.check(target, root, state),
+  });
   const runEnd = async (run: string): Promise<void> => {
     const state = engine.states().find((s) => s.id === run);
     if (state === undefined) return;
-    await lookbackAtRunEnd({
+    const end = await lookbackAtRunEnd({
       projectRoot: deps.repoRoot,
       events: state.events,
       history: history(),
       lockedShaFor,
       graderBundleSha: bundleSha(),
-      weeklyRemainingPct: weeklyRemaining(),
+      weeklyRemainingPct: weeklyRemaining(state),
       budgetAvailable: budgetAvailable(state),
       now: now(),
+      tiebreaks: tiebreaks(),
     });
+    // every ai_tiebreak row the engine itself produced is recorded where no role can write, so it
+    // counts at the next read (readings 137, 175)
+    for (const row of end.attributions)
+      if (row.method === "ai_tiebreak") recordTiebreak(deps.vtcHome, repoKey, row, now());
   };
   const off = engine.onEvent((event) => {
     if (event.type === "run.finished") {
