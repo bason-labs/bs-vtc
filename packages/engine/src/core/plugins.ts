@@ -38,9 +38,11 @@ export interface PromptParts {
   readonly lockedSha256?: string;
   readonly editableInPack: boolean;
   /**
-   * For an agent with `editableInPack`: its locked core and compiled default editable section as
-   * the plugin carries them (`rolePromptAssetPath`), when the bundle has both. The engine renders
-   * the default section in the pack when no pin applies (spine §5 reading 142).
+   * The agent's locked core and compiled default editable section as the plugin carries them
+   * (`rolePromptAssetPath`), when the bundle has both. For an agent with `editableInPack` the
+   * engine renders the default section in the pack when no pin applies (spine §5 reading 142);
+   * for a headless run on a host that cannot load the compiled agent (`codex exec`), the engine
+   * carries both itself (spine §5 reading 145).
    */
   readonly compiled?: { readonly locked: string; readonly editable: string };
 }
@@ -128,7 +130,7 @@ export const createPluginCatalog = (
       const entry = manifests[host]?.agents.find((a) => a.name === agent);
       if (entry === undefined) return undefined;
       const editableInPack = entry.editable_in_pack === true;
-      const compiled = editableInPack ? compiledParts(assets, host, agent) : undefined;
+      const compiled = compiledParts(assets, host, agent);
       return {
         ...(entry.locked_sha256 === undefined ? {} : { lockedSha256: entry.locked_sha256 }),
         editableInPack,

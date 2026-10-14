@@ -353,7 +353,7 @@ export const launchHeadless = async (
   }
   const prepared = await dispatchPrepared(k, h, step, host, "headless");
   if (prepared === null) return false;
-  const { action, cwd, model } = prepared;
+  const { action, cwd, model, roleCore } = prepared;
   const startedAt = k.now().getTime();
   const roleRun = h.state.roleRuns.get(action.action_id);
   const fail = async (message: string): Promise<false> => {
@@ -361,6 +361,11 @@ export const launchHeadless = async (
     return false;
   };
   if (roleRun === undefined) return fail("the dispatch was not recorded");
+  // reading 145: never a role run without its role (the host cannot load the compiled agent)
+  if (roleCore === null)
+    return fail(
+      `the compiled role instructions of ${step.role} are missing from the ${host} plugin or do not match its manifest`,
+    );
   const effective = resolveRoleMode(contract, step.mode);
   const tools = effective.ok ? effective.contract.tools : contract.tools;
   const task = step.task === undefined ? undefined : h.state.tasks.get(step.task);
@@ -388,7 +393,7 @@ export const launchHeadless = async (
     model,
     dispatch: "headless",
     cwd,
-    prompt: action.prompt,
+    prompt: roleCore === undefined ? action.prompt : `${roleCore}\n\n---\n\n${action.prompt}`,
     outputSchema: jsonSchemaFor("RoleResult", { target: "structured-output" }),
     sandbox,
     timeoutMs: policy.wallTimeoutMs,
