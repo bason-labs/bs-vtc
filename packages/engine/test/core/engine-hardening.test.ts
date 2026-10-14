@@ -383,9 +383,9 @@ describe("gates and hosts", () => {
     expect(statusOf(h, "T-1")).toBe("fixing");
     await h.release();
   });
-  it("pauses with the reason when the host cannot run role subagents", async () => {
+  it("pauses with the reason when the host cannot run role subagents and headless runs are not allowed", async () => {
+    // with headless_allowed the engine runs them headless instead (headless.test.ts, AD-25)
     const h = createHarness({
-      project: { hosts: { dispatch: "headless_allowed" } },
       capabilities: { subagents: false, backgroundSubagents: false },
     });
     await start(h);

@@ -58,13 +58,9 @@ import {
   PROJECT_CONFIG_PATH,
   type CommittedGates,
 } from "./config.js";
-import {
-  dispatchGuarded,
-  dispatchNow,
-  inSessionRefusal,
-  NO_LEAD_WAIT_REASON,
-  phaseRoles,
-} from "./dispatch.js";
+import { dispatchGuarded, inSessionRefusal, NO_LEAD_WAIT_REASON, phaseRoles } from "./dispatch.js";
+import { headlessRunsOf, killHeadless } from "./headless.js";
+import { dispatchNow, drive } from "./route.js";
 import { parkEscalation } from "./escalations.js";
 import {
   acceptCheckout,
@@ -109,6 +105,7 @@ import {
   EngineError,
   type CallContext,
   type EngineCoreDeps,
+  type HeadlessEntry,
   type Kernel,
   type RunHandle,
 } from "./kernel.js";
@@ -293,6 +290,10 @@ export class Engine implements Kernel {
   private readonly bound = new Map<string, string>();
   /** What each run's Lead session reported about its OS sandbox (D-an; absent = unknown). */
   private readonly leadSandbox = new Map<string, SessionSandboxState | undefined>();
+  /** The host each run's Lead session declared in its hello (`planDispatch`'s `leadHost`). */
+  private readonly leadHosts = new Map<string, HostId>();
+  readonly unattended = new Set<string>();
+  readonly headless = new Map<string, HeadlessEntry>();
 
   private constructor(readonly deps: EngineCoreDeps) {
     this.guardDir = guardDirFor(deps.vtcHome, deps.repoRoot);
@@ -829,9 +830,10 @@ export class Engine implements Kernel {
         this.jobs.delete(key);
       }
       if (this.handles.has(handle.state.id) && this.deps.lock.isHeld()) {
-        await this.serial(handle, () => {
+        await this.serial(handle, async () => {
           this.advance(handle);
-          return Promise.resolve();
+          // a run whose steps the engine runs headless continues without the Lead's next call
+          await drive(this, handle);
         });
       }
     })().catch(() => undefined);
@@ -862,6 +864,23 @@ export class Engine implements Kernel {
     if (preferred !== undefined) return preferred;
     const installed = HOST_IDS.find((h) => this.deps.adapters[h] !== undefined);
     return installed ?? (HOST_IDS[0] as HostId);
+  }
+
+  leadHostFor(run: string, call: CallContext): HostId | undefined {
+    if (this.leads.has(run)) return this.leadHosts.get(run);
+    return call.client === undefined ? (call.host ?? undefined) : undefined;
+  }
+
+  liveLeadHost(run: string): HostId | undefined {
+    return this.leads.has(run) ? this.leadHosts.get(run) : undefined;
+  }
+
+  diskConfigHash(): string | null {
+    try {
+      return pipelineConfigHash(this.diskProject(), this.diskGates());
+    } catch {
+      return null;
+    }
   }
 
   sessionSandboxFor(run: string, call: CallContext): SessionSandboxState | undefined {
@@ -1344,6 +1363,9 @@ export class Engine implements Kernel {
     const handle = this.handles.get(state.id);
     if (handle === undefined) return { run: state.id, actions: this.actionsForFinished(state) };
     this.claimLead(state.id, call);
+    // a Lead session (or an in-process caller) drives the run again: the engine stops driving it
+    if (call.client === undefined || this.leads.get(state.id) === call.session)
+      this.unattended.delete(state.id);
     return this.serial(handle, async () => ({
       run: state.id,
       actions: await this.actionsFor(handle, call),
@@ -1409,7 +1431,11 @@ export class Engine implements Kernel {
   }
 
   status(input: RunScopedInput): StatusResult {
-    return statusView(this.stateOf(input.run), this.usage);
+    const state = this.stateOf(input.run);
+    const view = statusView(state, this.usage);
+    // engine-launched runs in flight (AD-25); absent when there are none
+    const headless = headlessRunsOf(this, state.id);
+    return headless.length === 0 ? view : { ...view, headless_runs: headless };
   }
 
   escalations(input: RunScopedInput): EscalationList {
@@ -1623,6 +1649,8 @@ export class Engine implements Kernel {
     if (call.session === undefined) return;
     this.leads.set(run, call.session);
     this.leadSandbox.set(run, call.sessionSandbox);
+    if (call.host !== null) this.leadHosts.set(run, call.host);
+    else this.leadHosts.delete(run);
     try {
       appendPrivateFile(
         join(this.guardDir, "leads.jsonl"),
@@ -1676,6 +1704,7 @@ export class Engine implements Kernel {
       if (lead === session) {
         this.leads.delete(run);
         this.leadSandbox.delete(run);
+        this.leadHosts.delete(run);
       }
     this.bound.delete(session);
   }
@@ -1756,7 +1785,7 @@ export class Engine implements Kernel {
 
   async pause(input: RunScopedInput): Promise<RunControlResult> {
     const handle = this.resolve(input.run);
-    return this.serial(handle, () => {
+    const result = await this.serial(handle, () => {
       if (!handle.state.run.paused) {
         this.emit(handle, {
           type: "run.paused",
@@ -1764,8 +1793,12 @@ export class Engine implements Kernel {
           data: { reason: "vtc pause (kill switch)" },
         });
       }
+      this.unattended.delete(handle.state.id);
       return Promise.resolve({ run: handle.state.id, paused: true, phase: handle.state.run.phase });
     });
+    // the kill switch (§15, AD-25 rule 4): engine-launched runs stop, no orphans
+    await killHeadless(this, handle.state.id);
+    return result;
   }
 
   /**
@@ -1842,11 +1875,14 @@ export class Engine implements Kernel {
 
   /** The auto-resume timer fired (`vtc engine --daemon --wake`, AD-12 rule 4). */
   async wake(): Promise<void> {
-    for (const handle of this.handles.values()) {
-      await this.serial(handle, () => {
-        maybeAutoResume(this, handle);
+    for (const handle of [...this.handles.values()]) {
+      await this.serial(handle, async () => {
+        // §6.9 step 6: with no live Lead the engine resumes the run itself, only with
+        // `headless_allowed` (`drive` asks planDispatch for `auto_resume`)
+        if (maybeAutoResume(this, handle) && !this.leads.has(handle.state.id))
+          this.unattended.add(handle.state.id);
         this.advance(handle);
-        return Promise.resolve();
+        await drive(this, handle);
       });
     }
   }
