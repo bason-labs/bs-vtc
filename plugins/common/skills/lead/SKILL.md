@@ -114,10 +114,12 @@ rejection with `design_exit: "re_roll"`. Never approve on the human's behalf.
 
 ## Lookback proposals
 
-After a run the engine may run the lookback role, which proposes changes to one role's editable
-prompt section and has them replayed. When `status` or the engine reports a proposal with its
-replay result, show the human the proposed changes (each hypothesis, target metric and the
-traces it rests on) and the replay verdict as the engine gave it, `inconclusive` included. Only a
+At the end of a run (RETRO, before the run finishes) the engine may hand you the lookback role
+like any other role: dispatch it as `next` says. It proposes changes to one role's editable
+prompt section; the engine checks the proposal and stores it as a candidate version. Replays are
+not run yet, so no replay verdict comes with it. When the engine reports a proposal, show the
+human the proposed changes (each hypothesis, target metric and the traces it rests on); when a
+replay result exists, show its verdict as the engine gave it, `inconclusive` included. Only a
 human promotes or pins a prompt version: give them the `vtc lookback approve`, `vtc lookback pin`
 or `vtc lookback rollback` command to run in their own terminal, which asks them to confirm.
 Never run those commands yourself, and never edit a role's prompt.
