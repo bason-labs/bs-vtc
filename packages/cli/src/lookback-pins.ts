@@ -17,6 +17,7 @@
  */
 import {
   closeSync,
+  linkSync,
   lstatSync,
   mkdirSync,
   openSync,
@@ -223,12 +224,13 @@ export const planGesture = (pins: LookbackPins, request: GestureRequest): Gestur
       const replay = ReplayResultSchema.safeParse(request.replay(RelPathSchema.parse(evaluation)));
       if (!replay.success) return { ok: false, reason: `${evaluation} is not a replay result` };
       const r = replay.data;
-      if (r.candidate !== sha || r.role !== target.role || r.host !== target.host)
+      if (r.candidate !== sha || !sameTarget(r, target))
         return { ok: false, reason: `${evaluation} is the replay of another version` };
+      const evidence = `p = ${r.sign_test.p.toFixed(3)} over ${String(r.sign_test.n_discordant)} discordant tasks (${String(r.sign_test.wins_b)} won by the candidate), ${String(r.per_task.length)} tasks x ${String(r.k)} runs per arm, tokens ${r.tokens_delta_pct >= 0 ? "+" : ""}${String(r.tokens_delta_pct)}%, A/A flip rate ${r.aa_flip_rate.toFixed(2)}`;
       if (r.verdict !== "improve")
         return {
           ok: false,
-          reason: `the replay of ${short(sha)} says ${r.verdict}, not improve (p = ${r.sign_test.p.toFixed(3)}, tokens ${r.tokens_delta_pct >= 0 ? "+" : ""}${String(r.tokens_delta_pct)}%): no canary`,
+          reason: `the replay of ${short(sha)} says ${r.verdict}, not improve (${evidence}): no canary`,
         };
       const baseline = current ?? front.parent;
       if (baseline === null)
@@ -236,9 +238,14 @@ export const planGesture = (pins: LookbackPins, request: GestureRequest): Gestur
           ok: false,
           reason: `${name} has no pin and version ${short(sha)} no parent, so a canary has no baseline: pin the version that runs now first`,
         };
+      if (r.baseline !== baseline)
+        return {
+          ok: false,
+          reason: `${evaluation} compared ${short(sha)} with ${short(r.baseline)}, but the canary's baseline would be ${short(baseline)}: replay against it first`,
+        };
       return {
         ok: true,
-        summary: `Start a canary of ${short(sha)} for ${name} on this project: half its tasks (by hash) run it, half run ${short(baseline)}; the engine rolls it back on a trigger, and you promote it with vtc lookback approve again.`,
+        summary: `Start a canary of ${short(sha)} for ${name} on this project: half its tasks (by hash) run it, half run ${short(baseline)}; the engine rolls it back on a trigger, and you promote it with vtc lookback approve again.\n  evidence (${evaluation}, a file in the repo: check it): the replay says improve with ${evidence}.`,
         pins: withProject(
           {
             pins: project.pins,
@@ -332,9 +339,46 @@ export const readPins = (vtcHome: string): LookbackPins => {
 const LOCK_STALE_MS = 60_000;
 const LOCK_WAIT_MS = 5_000;
 
+const mtimeOrNull = (path: string): number | null => {
+  try {
+    return lstatSync(path).mtimeMs;
+  } catch {
+    return null;
+  }
+};
+
 /**
- * Runs `fn` holding `lookback/pins.lock` (created exclusively; one older than a minute is
- * stale), so a gesture and the engine's `auto_rollback` never interleave a read and a write.
+ * Takes a stale lock over without removing a fresh one: the lock is first renamed to a name only
+ * this process uses (atomic), and only if what was renamed is still stale is it removed. Another
+ * waiter may have replaced the stale lock with its fresh one between the age check and the rename;
+ * that fresh lock is linked back into place (`link` fails rather than overwrite a newer lock).
+ */
+const breakStaleLock = (lock: string): void => {
+  const mtime = mtimeOrNull(lock);
+  if (mtime === null || Date.now() - mtime <= LOCK_STALE_MS) return;
+  const moved = `${lock}.${randomBytes(6).toString("hex")}.stale`;
+  try {
+    renameSync(lock, moved);
+  } catch {
+    return; // removed or taken over meanwhile
+  }
+  const movedTime = mtimeOrNull(moved);
+  if (movedTime !== null && Date.now() - movedTime <= LOCK_STALE_MS) {
+    try {
+      linkSync(moved, lock);
+    } catch {
+      // a newer lock is already in place
+    }
+  }
+  rmSync(moved, { force: true });
+};
+
+/**
+ * Runs `fn` holding `lookback/pins.lock` (created exclusively with a token only this call knows;
+ * one older than a minute is stale and taken over atomically, {@link breakStaleLock}), so two
+ * gestures never interleave a read and a write. The engine's `auto_rollback` is serialised with
+ * them only once the lock is a shared contract (`LOOKBACK_HOME`; a contract proposal of the cli
+ * team): until then it is the cli's own.
  */
 export const withPinsLock = async <T>(vtcHome: string, fn: () => T): Promise<T> => {
   const dir = join(vtcHome, "lookback");
@@ -342,18 +386,20 @@ export const withPinsLock = async <T>(vtcHome: string, fn: () => T): Promise<T> 
   mkdirSync(dir, { recursive: true, mode: 0o700 });
   notALink(dir);
   const lock = join(dir, "pins.lock");
+  const token = `${String(process.pid)}.${randomBytes(8).toString("hex")}`;
   const deadline = Date.now() + LOCK_WAIT_MS;
   for (;;) {
     try {
-      closeSync(openSync(lock, "wx", 0o600));
+      const fd = openSync(lock, "wx", 0o600);
+      try {
+        writeSync(fd, token);
+      } finally {
+        closeSync(fd);
+      }
       break;
     } catch (error) {
       if ((error as { code?: unknown }).code !== "EEXIST") throw error;
-      try {
-        if (Date.now() - lstatSync(lock).mtimeMs > LOCK_STALE_MS) rmSync(lock, { force: true });
-      } catch {
-        // removed meanwhile
-      }
+      breakStaleLock(lock);
       if (Date.now() > deadline)
         throw new Error(`${lock} is held by another process; try again`, { cause: error });
       await new Promise((resolve) => setTimeout(resolve, 50));
@@ -362,7 +408,14 @@ export const withPinsLock = async <T>(vtcHome: string, fn: () => T): Promise<T> 
   try {
     return fn();
   } finally {
-    rmSync(lock, { force: true });
+    // only our own lock: a stale-lock takeover may have replaced it
+    let held = "";
+    try {
+      held = readFileSync(lock, "utf8");
+    } catch {
+      // gone already
+    }
+    if (held === token) rmSync(lock, { force: true });
   }
 };
 

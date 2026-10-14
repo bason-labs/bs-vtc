@@ -10,12 +10,15 @@
  *   rules (`…/rules/branches/<base>`) and, where readable, classic branch protection
  *   (`…/branches/<base>/protection`). A setting the user cannot read stays unknown (`null`) or
  *   absent, so the preflight fails closed.
- * - `requiredChecks`: `gh pr checks <branch> --required`, only while the PR head is the gated SHA.
+ * - `requiredChecks`: `gh pr checks <branch> --required`, only while the PR head is the gated SHA,
+ *   plus every check the base's policy requires that has not reported yet, as `pending` (AD-23
+ *   rule 2: VTC itself waits for every required check, not only GitHub).
  * - `enableAutoMerge`: `gh pr merge <n> --auto --match-head-commit <sha> --<method>`.
- * - `disableAutoMerge`: `gh pr merge <n> --disable-auto`.
+ * - `disableAutoMerge`: `gh pr merge <n> --disable-auto`, only on an open PR with auto-merge on.
  * - `baseRuns`: the check runs and commit statuses on the merge commit, each marked required when
  *   its name is one of the base's required checks (workflow-run names never match a required
- *   check's context, so the check runs are read rather than `gh run list`).
+ *   check's context, so the check runs are read rather than `gh run list`). Every list endpoint is
+ *   read with `gh api --paginate --slurp`, so a run or a rule past the first page is not missed.
  * - `findReverts`: `git log <merge>..origin/<base>` for "This reverts commit <merge>" after a
  *   fetch of the base, and merged PRs titled "Revert…" that name `#<pr>`.
  */
@@ -119,10 +122,11 @@ interface GhPrView {
   readonly autoMergeRequest?: unknown;
   readonly isInMergeQueue?: boolean;
   readonly mergeStateStatus?: string;
+  readonly baseRefName?: string;
 }
 
 const PR_FIELDS =
-  "url,number,isDraft,state,headRefOid,mergeCommit,statusCheckRollup,autoMergeRequest,isInMergeQueue,mergeStateStatus";
+  "url,number,isDraft,state,headRefOid,baseRefName,mergeCommit,statusCheckRollup,autoMergeRequest,isInMergeQueue,mergeStateStatus";
 
 /** A `gh pr view --json` object as the engine's `PullRequestRef` with the 4.5.0 fields. */
 export const pullRequestRefOf = (pr: GhPrView): PullRequestRef | null => {
@@ -235,11 +239,28 @@ export const createGhRemoteMerge = (options: GhRemoteMergeOptions): RemoteMergeS
     if (result.code !== 0) return null;
     return parseJson(result.stdout, path);
   };
+  /** Every page of a list endpoint (`gh api --paginate --slurp`), or `null` when it refuses. */
+  const apiPages = async (path: string): Promise<unknown[] | null> => {
+    const result = await call([
+      "api",
+      "--paginate",
+      "--slurp",
+      "-H",
+      "Accept: application/vnd.github+json",
+      path,
+    ]);
+    if (result.code !== 0) return null;
+    return list(parseJson(result.stdout, path));
+  };
 
-  const view = async (branch: string): Promise<PullRequestRef | null> => {
+  const viewRaw = async (branch: string): Promise<GhPrView | null> => {
     const result = await call(["pr", "view", branchArg(branch), "--json", PR_FIELDS]);
     if (result.code !== 0) return null;
-    return pullRequestRefOf(parseJson(result.stdout, "gh pr view") as GhPrView);
+    return parseJson(result.stdout, "gh pr view") as GhPrView;
+  };
+  const view = async (branch: string): Promise<PullRequestRef | null> => {
+    const raw = await viewRaw(branch);
+    return raw === null ? null : pullRequestRefOf(raw);
   };
   const mustView = async (branch: string): Promise<PullRequestRef> => {
     const pr = await view(branch);
@@ -254,7 +275,9 @@ export const createGhRemoteMerge = (options: GhRemoteMergeOptions): RemoteMergeS
   const policy = async (base: string): Promise<RemoteMergePolicy> => {
     const b = branchArg(base);
     const repo = record(await api("repos/{owner}/{repo}"));
-    const rules = list(await api(`repos/{owner}/{repo}/rules/branches/${b}`));
+    const rules =
+      (await apiPages(`repos/{owner}/{repo}/rules/branches/${b}?per_page=100`))?.flatMap(list) ??
+      [];
     const classic = record(await api(`repos/{owner}/{repo}/branches/${b}/protection`));
     const required = new Set<string>();
     let mergeQueue = false;
@@ -319,9 +342,15 @@ export const createGhRemoteMerge = (options: GhRemoteMergeOptions): RemoteMergeS
     policy,
 
     requiredChecks: async (branch, sha) => {
-      const pr = await mustView(branch);
+      const raw = await viewRaw(branch);
+      const pr = raw === null ? null : pullRequestRefOf(raw);
+      if (raw === null || pr === null) throw new Error(`no pull request for ${branch}`);
       if (pr.head_sha !== shaArg(sha))
         throw new Error(`the PR head of ${branch} is ${pr.head_sha}, not the gated ${sha}`);
+      const base = str(raw.baseRefName);
+      if (base === undefined || base === "")
+        throw new Error(`gh reported no base branch for the PR of ${branch}`);
+      const wanted = (await policy(base)).required_checks;
       const result = await call([
         "pr",
         "checks",
@@ -331,16 +360,28 @@ export const createGhRemoteMerge = (options: GhRemoteMergeOptions): RemoteMergeS
         "name,bucket",
       ]);
       // exit 8 = some checks pending; the JSON is printed either way
+      let reported: RequiredCheck[] = [];
       if (result.stdout.trim() === "") {
-        if (/no required checks/i.test(result.stderr)) return [];
-        throw new Error(`gh pr checks failed: ${result.stderr.trim().slice(0, 300)}`);
+        if (!/no required checks/i.test(result.stderr))
+          throw new Error(`gh pr checks failed: ${result.stderr.trim().slice(0, 300)}`);
+      } else {
+        reported = list(parseJson(result.stdout, "gh pr checks")).flatMap((item) => {
+          const check = record(item);
+          const name = str(check.name);
+          if (name === undefined || name === "") return [];
+          return [
+            { name: name.slice(0, 200), state: BUCKETS[str(check.bucket) ?? ""] ?? "unknown" },
+          ];
+        });
       }
-      return list(parseJson(result.stdout, "gh pr checks")).flatMap((raw) => {
-        const check = record(raw);
-        const name = str(check.name);
-        if (name === undefined || name === "") return [];
-        return [{ name: name.slice(0, 200), state: BUCKETS[str(check.bucket) ?? ""] ?? "unknown" }];
-      });
+      // a required check that has not reported on this head yet is pending, not absent
+      const seen = new Set(reported.map((c) => c.name));
+      return [
+        ...reported,
+        ...wanted
+          .filter((name) => !seen.has(name.slice(0, 200)))
+          .map((name) => ({ name: name.slice(0, 200), state: "pending" as const })),
+      ];
     },
 
     enableAutoMerge: async ({ branch, headSha, method }) => {
@@ -360,8 +401,8 @@ export const createGhRemoteMerge = (options: GhRemoteMergeOptions): RemoteMergeS
     disableAutoMerge: async (branch) => {
       const pr = await view(branch);
       if (pr === null) return null;
-      if (pr.state === "open")
-        await checked(["pr", "merge", numberOf(pr, branch), "--disable-auto"]);
+      if (pr.state !== "open" || pr.auto_merge === "not_requested") return pr;
+      await checked(["pr", "merge", numberOf(pr, branch), "--disable-auto"]);
       return view(branch);
     },
 
@@ -369,10 +410,9 @@ export const createGhRemoteMerge = (options: GhRemoteMergeOptions): RemoteMergeS
       const commit = shaArg(sha);
       const required = new Set((await policy(base)).required_checks);
       const runs = new Map<string, { id: number; run: BaseRun }>();
-      const checkRuns = list(
-        record(await api(`repos/{owner}/{repo}/commits/${commit}/check-runs?per_page=100`))
-          .check_runs,
-      );
+      const checkRuns = (
+        (await apiPages(`repos/{owner}/{repo}/commits/${commit}/check-runs?per_page=100`)) ?? []
+      ).flatMap((page) => list(record(page).check_runs));
       for (const raw of checkRuns) {
         const check = record(raw);
         const name = str(check.name);
@@ -391,9 +431,9 @@ export const createGhRemoteMerge = (options: GhRemoteMergeOptions): RemoteMergeS
           },
         });
       }
-      const statuses = list(
-        record(await api(`repos/{owner}/{repo}/commits/${commit}/status`)).statuses,
-      );
+      const statuses = (
+        (await apiPages(`repos/{owner}/{repo}/commits/${commit}/status?per_page=100`)) ?? []
+      ).flatMap((page) => list(record(page).statuses));
       for (const raw of statuses) {
         const status = record(raw);
         const name = str(status.context);

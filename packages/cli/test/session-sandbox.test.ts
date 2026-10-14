@@ -86,7 +86,13 @@ describe("the session sandbox needs sandbox.failIfUnavailable", () => {
         ...shared.sandbox,
         filesystem: {
           ...shared.sandbox.filesystem,
-          denyWrite: [...new Set([...shared.sandbox.filesystem.denyWrite, ...wave3])],
+          denyWrite: [
+            ...new Set([
+              ...shared.sandbox.filesystem.denyWrite,
+              ...wave3,
+              "/r/.vtc/merge-level.jsonl",
+            ]),
+          ],
         },
         failIfUnavailable: true,
       },
@@ -96,7 +102,10 @@ describe("the session sandbox needs sandbox.failIfUnavailable", () => {
           ...new Set([
             ...shared.permissions.deny,
             ...wave3.flatMap((p) => [`Edit(/${p})`, `Edit(/${p}/**)`]),
-            ...wave3SessionDenies(vtcHome).permissionDeny.filter((r) => r.startsWith("Bash(")),
+            "Edit(//r/.vtc/merge-level.jsonl)",
+            ...wave3SessionDenies(vtcHome, "/r").permissionDeny.filter((r) =>
+              r.startsWith("Bash("),
+            ),
           ]),
         ],
       },
@@ -104,6 +113,17 @@ describe("the session sandbox needs sandbox.failIfUnavailable", () => {
     for (const path of wave3) expect(settings.sandbox.filesystem.denyWrite).toContain(path);
     expect(settings.permissions.deny).toContain("Edit(//home/u/.vtc/lookback/**)");
     expect(settings.permissions.deny).toContain("Bash(*~/.vtc/lookback*)");
+    // only a human restores the merge level or moves a pin (AD-23 rule 5, AD-21 rule 3): the
+    // ledger is write-denied and the gesture commands are denied as Bash
+    expect(settings.sandbox.filesystem.denyWrite).toContain("/r/.vtc/merge-level.jsonl");
+    for (const rule of [
+      "Edit(//r/.vtc/merge-level.jsonl)",
+      "Bash(vtc merge-level)",
+      "Bash(vtc merge-level *)",
+      "Bash(vtc lookback)",
+      "Bash(vtc lookback *)",
+    ])
+      expect(settings.permissions.deny).toContain(rule);
     expect(
       mergeSessionSandboxSettings({}, vtcHome, { projectRoot: "/r", homeDir: "/home/u" }),
     ).toEqual(sessionSandboxSettings(vtcHome, scope));
@@ -114,12 +134,14 @@ describe("the session sandbox needs sandbox.failIfUnavailable", () => {
     write(CLAUDE_LOCAL_SETTINGS, claudeSessionSandboxSettings(vtcHome, sandboxScopeOf(repo, env)));
     const report = claudeSessionSandboxOf(repo, vtcHome, env);
     expect(report.state).toBe("off");
-    // the wave-3 write denies count as missing too, until the shared lists carry them
-    const wave3 = wave3SessionDenies(vtcHome);
+    // the cli's own denies count as missing too, as long as the shared lists do not carry them
+    // (once the integrator folds them in, they are no longer missing)
+    const shared = claudeSessionSandboxSettings(vtcHome, sandboxScopeOf(repo, env));
+    const wave3 = wave3SessionDenies(vtcHome, repo);
     expect(report.missing).toEqual([
       "sandbox.failIfUnavailable",
-      ...wave3.denyWrite,
-      ...wave3.permissionDeny,
+      ...wave3.denyWrite.filter((p) => !shared.sandbox.filesystem.denyWrite.includes(p)),
+      ...wave3.permissionDeny.filter((r) => !shared.permissions.deny.includes(r)),
     ]);
     write(CLAUDE_LOCAL_SETTINGS, {
       ...sessionSandboxSettings(vtcHome, sandboxScopeOf(repo, env)),

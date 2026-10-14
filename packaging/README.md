@@ -9,8 +9,9 @@ repository has a GitHub remote.
 - **sign + notarize once the owner has an Apple Developer ID** (H-2). Until then the release
   ships unsigned macOS binaries with SHA-256 checksums. To switch it on: store the signing
   identity and a `notarytool` keychain profile as repository secrets, remove `if: ${{ false }}`
-  from the `sign-macos` job in `.github/workflows/release.yml`, and prune
-  `macos/entitlements.plist` (Bun's documented key set) under test. Signing runs before the
+  from the `sign-macos` job in `.github/workflows/release.yml`, and check under test that
+  `macos/entitlements.plist` (only `allow-jit` and `allow-unsigned-executable-memory`) is
+  enough; add a key only when a signed smoke test needs it. Signing runs before the
   checksums, so `SHA256SUMS` always covers the signed bytes.
 - Push the rendered `vtc.rb` to a tap repository (`<owner>/homebrew-<name>`, `Formula/vtc.rb`).
 - Publish the generated plugins to the marketplace release branch (AD-16 rule 5).

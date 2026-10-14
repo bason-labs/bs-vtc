@@ -4,7 +4,7 @@
  * arguments that hold no shell metacharacter, and anything else is spawned without a shell.
  */
 import { describe, expect, it } from "vitest";
-import { windowsInvocation } from "../src/process.js";
+import { exec, windowsInvocation } from "../src/process.js";
 
 const env = {
   Path: "C:\\Windows\\system32;C:\\Users\\u\\AppData\\Roaming\\npm",
@@ -49,4 +49,26 @@ describe("windowsInvocation", () => {
       true,
     );
   });
+});
+
+describe("exec's environment", () => {
+  it.skipIf(process.platform === "win32")(
+    "inherits by default, and passes only env with inheritEnv false",
+    async () => {
+      process.env.VTC_TEST_INHERITED = "yes";
+      try {
+        const script =
+          "process.stdout.write(JSON.stringify([process.env.VTC_TEST_INHERITED ?? null, process.env.ONLY ?? null]))";
+        const inherited = await exec(process.execPath, ["-e", script], { env: { ONLY: "1" } });
+        expect(JSON.parse(inherited.stdout)).toEqual(["yes", "1"]);
+        const alone = await exec(process.execPath, ["-e", script], {
+          env: { ONLY: "1" },
+          inheritEnv: false,
+        });
+        expect(JSON.parse(alone.stdout)).toEqual([null, "1"]);
+      } finally {
+        delete process.env.VTC_TEST_INHERITED;
+      }
+    },
+  );
 });

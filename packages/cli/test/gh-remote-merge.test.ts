@@ -78,8 +78,26 @@ const prJson = (over: Record<string, unknown> = {}): Record<string, unknown> => 
   autoMergeRequest: null,
   isInMergeQueue: false,
   mergeStateStatus: "BLOCKED",
+  baseRefName: "main",
   ...over,
 });
+
+/** The base's policy, with these required checks (rules only; classic protection unreadable). */
+const requiredPolicy = (checks: readonly string[]): Responder[] => [
+  on(
+    "api --paginate --slurp -H Accept: application/vnd.github+json repos/{owner}/{repo}/rules",
+    ok([
+      [
+        {
+          type: "required_status_checks",
+          parameters: { required_status_checks: checks.map((context) => ({ context })) },
+        },
+      ],
+    ]),
+  ),
+  on("api -H Accept: application/vnd.github+json repos/{owner}/{repo}/branches", fail("HTTP 404")),
+  on("api -H Accept: application/vnd.github+json repos/{owner}/{repo}", ok({})),
+];
 
 const noGit: GitReader = () => Promise.resolve(null);
 
@@ -180,16 +198,18 @@ describe("remote and policy (AD-23 rule 1)", () => {
 
   it("reads rules, classic protection and the repo's merge settings", async () => {
     const { gh, calls } = fakeGh(
+      // every page of the rules (gh api --paginate --slurp): a rule on page 2 counts
       on(
-        "api -H Accept: application/vnd.github+json repos/{owner}/{repo}/rules/branches/main",
+        "api --paginate --slurp -H Accept: application/vnd.github+json repos/{owner}/{repo}/rules/branches/main?per_page=100",
         ok([
-          {
-            type: "required_status_checks",
-            parameters: { required_status_checks: [{ context: "ci / test" }] },
-          },
-          { type: "pull_request", parameters: { required_approving_review_count: 1 } },
-          { type: "merge_queue", parameters: {} },
-          { type: "deletion" },
+          [
+            {
+              type: "required_status_checks",
+              parameters: { required_status_checks: [{ context: "ci / test" }] },
+            },
+            { type: "pull_request", parameters: { required_approving_review_count: 1 } },
+          ],
+          [{ type: "merge_queue", parameters: {} }, { type: "deletion" }],
         ]),
       ),
       on(
@@ -226,7 +246,10 @@ describe("remote and policy (AD-23 rule 1)", () => {
 
   it("fails closed where the user cannot read a setting", async () => {
     const { gh } = fakeGh(
-      on("api -H Accept: application/vnd.github+json repos/{owner}/{repo}/rules", ok([])),
+      on(
+        "api --paginate --slurp -H Accept: application/vnd.github+json repos/{owner}/{repo}/rules",
+        ok([[]]),
+      ),
       on(
         "api -H Accept: application/vnd.github+json repos/{owner}/{repo}/branches",
         fail("HTTP 403"),
@@ -270,6 +293,7 @@ describe("the merge path (AD-23 rule 2)", () => {
   it("reads the required checks only while the PR head is the gated SHA", async () => {
     const { gh, calls } = fakeGh(
       on("pr view vtc/F-1", ok(prJson())),
+      ...requiredPolicy(["test", "lint"]),
       on("pr checks vtc/F-1 --required", {
         code: 8,
         stdout: JSON.stringify([
@@ -294,6 +318,7 @@ describe("the merge path (AD-23 rule 2)", () => {
     expect(calls.filter((c) => c[1] === "checks")).toHaveLength(1);
     const none = fakeGh(
       on("pr view", ok(prJson())),
+      ...requiredPolicy([]),
       on("pr checks", fail("no required checks reported on the 'vtc/F-1' branch")),
     );
     expect(
@@ -302,6 +327,43 @@ describe("the merge path (AD-23 rule 2)", () => {
         HEAD,
       ),
     ).toEqual([]);
+  });
+
+  it("counts a required check that has not reported yet as pending (AD-23 rule 2)", async () => {
+    const { gh, calls } = fakeGh(
+      on("pr view vtc/F-1", ok(prJson({ baseRefName: "develop" }))),
+      ...requiredPolicy(["test", "e2e"]),
+      on("pr checks vtc/F-1 --required", ok([{ name: "test", bucket: "pass" }])),
+    );
+    const service = createGhRemoteMerge({ repoRoot: "/r", gh, git: noGit });
+    expect(await service.requiredChecks("vtc/F-1", HEAD)).toEqual([
+      { name: "test", state: "success" },
+      { name: "e2e", state: "pending" },
+    ]);
+    // the policy of the PR's own base
+    expect(
+      calls.some((c) => c.at(-1) === "repos/{owner}/{repo}/rules/branches/develop?per_page=100"),
+    ).toBe(true);
+    // none reported at all: every required check is pending
+    const silent = fakeGh(
+      on("pr view", ok(prJson())),
+      ...requiredPolicy(["test"]),
+      on("pr checks", fail("no required checks reported on the 'vtc/F-1' branch")),
+    );
+    expect(
+      await createGhRemoteMerge({ repoRoot: "/r", gh: silent.gh, git: noGit }).requiredChecks(
+        "vtc/F-1",
+        HEAD,
+      ),
+    ).toEqual([{ name: "test", state: "pending" }]);
+    // no base reported: fail closed
+    const nobase = fakeGh(on("pr view", ok(prJson({ baseRefName: undefined }))));
+    await expect(
+      createGhRemoteMerge({ repoRoot: "/r", gh: nobase.gh, git: noGit }).requiredChecks(
+        "vtc/F-1",
+        HEAD,
+      ),
+    ).rejects.toThrow(/no base branch/);
   });
 
   it("enables auto-merge bound to the gated SHA, never with --admin", async () => {
@@ -353,18 +415,28 @@ describe("the merge path (AD-23 rule 2)", () => {
     expect(await service.disableAutoMerge("vtc/F-1")).toMatchObject({ number: 12 });
     expect(calls.some((c) => c.join(" ") === "pr merge 12 --disable-auto")).toBe(true);
     expect(await service.disableAutoMerge("vtc/F-2")).toBeNull();
+    // no auto-merge request on the PR: nothing to disable, gh is not asked
+    const idle = fakeGh(on("pr view vtc/F-1", ok(prJson())));
+    expect(
+      await createGhRemoteMerge({ repoRoot: "/r", gh: idle.gh, git: noGit }).disableAutoMerge(
+        "vtc/F-1",
+      ),
+    ).toMatchObject({ auto_merge: "not_requested" });
+    expect(idle.calls.some((c) => c.includes("--disable-auto"))).toBe(false);
   });
 });
 
 describe("the post-merge watch (AD-23 rule 4)", () => {
   const policyResponders = [
     on(
-      "api -H Accept: application/vnd.github+json repos/{owner}/{repo}/rules",
+      "api --paginate --slurp -H Accept: application/vnd.github+json repos/{owner}/{repo}/rules",
       ok([
-        {
-          type: "required_status_checks",
-          parameters: { required_status_checks: [{ context: "test" }, { context: "legacy" }] },
-        },
+        [
+          {
+            type: "required_status_checks",
+            parameters: { required_status_checks: [{ context: "test" }, { context: "legacy" }] },
+          },
+        ],
       ]),
     ),
     on(
@@ -376,36 +448,45 @@ describe("the post-merge watch (AD-23 rule 4)", () => {
   it("reads the merge commit's check runs and statuses, marking the required ones", async () => {
     const { gh } = fakeGh(
       ...policyResponders,
+      // two pages of check runs: the superseding re-run is on the second
       on(
-        `api -H Accept: application/vnd.github+json repos/{owner}/{repo}/commits/${MERGED}/check-runs`,
-        ok({
-          check_runs: [
-            {
-              id: 1,
-              name: "test",
-              status: "completed",
-              conclusion: "failure",
-              html_url: "https://github.com/acme/app/runs/1",
-            },
-            {
-              id: 5,
-              name: "test",
-              status: "completed",
-              conclusion: "success",
-              html_url: "https://github.com/acme/app/runs/5",
-            },
-            { id: 3, name: "lint", status: "in_progress", conclusion: null },
-            { id: 4, name: "nightly", status: "completed", conclusion: "timed_out" },
-          ],
-        }),
+        `api --paginate --slurp -H Accept: application/vnd.github+json repos/{owner}/{repo}/commits/${MERGED}/check-runs?per_page=100`,
+        ok([
+          {
+            check_runs: [
+              {
+                id: 1,
+                name: "test",
+                status: "completed",
+                conclusion: "failure",
+                html_url: "https://github.com/acme/app/runs/1",
+              },
+              { id: 3, name: "lint", status: "in_progress", conclusion: null },
+            ],
+          },
+          {
+            check_runs: [
+              {
+                id: 5,
+                name: "test",
+                status: "completed",
+                conclusion: "success",
+                html_url: "https://github.com/acme/app/runs/5",
+              },
+              { id: 4, name: "nightly", status: "completed", conclusion: "timed_out" },
+            ],
+          },
+        ]),
       ),
       on(
-        `api -H Accept: application/vnd.github+json repos/{owner}/{repo}/commits/${MERGED}/status`,
-        ok({
-          statuses: [
-            { context: "legacy", state: "error", target_url: "http://insecure.example/x" },
-          ],
-        }),
+        `api --paginate --slurp -H Accept: application/vnd.github+json repos/{owner}/{repo}/commits/${MERGED}/status`,
+        ok([
+          {
+            statuses: [
+              { context: "legacy", state: "error", target_url: "http://insecure.example/x" },
+            ],
+          },
+        ]),
       ),
       on("api -H Accept: application/vnd.github+json repos/{owner}/{repo}", ok({})),
     );

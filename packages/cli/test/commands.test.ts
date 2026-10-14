@@ -137,7 +137,6 @@ describe("vtc install", () => {
       timerHost: () => {
         throw new Error("the real launchd or systemd is never touched in tests");
       },
-      registerCodex: () => ({ written: [], notes: [] }),
       ...over,
     });
 
@@ -163,23 +162,10 @@ describe("vtc install", () => {
     const { ctx, out } = capture(repo, vtcHome);
     const options: (AdapterFactoryOptions | undefined)[] = [];
     const factory = (o?: AdapterFactoryOptions): HostAdapter => (options.push(o), adapter);
-    const registered: Parameters<InstallDeps["registerCodex"]>[0][] = [];
     const cmd = createInstallCommand(
-      installDeps(
-        {
-          factories: { codex: factory, "claude-code": factory },
-          registerCodex: (o) => {
-            registered.push(o);
-            return { written: [`${o.root}/.agents/plugins/vtc`], notes: ["registered"] };
-          },
-        },
-        "/h",
-      ),
+      installDeps({ factories: { codex: factory, "claude-code": factory } }, "/h"),
     );
     expect(await cmd.run(["--host", "codex", "--scope", "user"], ctx)).toBe(0);
-    // Codex: the plugin is registered per Codex's layout, in the home for the user scope
-    expect(registered).toEqual([{ root: "/h", pluginDir: "/plugins/codex", scope: "user" }]);
-    expect(out.join("\n")).toContain("note: registered");
     expect(requests).toEqual([
       // the VTC home goes with the request, so VTC-owned host files sit where the deny lists point
       { projectRoot: repo, home: "/h", pluginDir: "/plugins/codex", scope: "user", vtcHome },
@@ -193,14 +179,12 @@ describe("vtc install", () => {
     // (D-ah): Codex in the project, Claude Code for the user
     expect(await cmd.run(["codex"], ctx)).toBe(0);
     expect(requests.at(-1)).toMatchObject({ pluginDir: "/plugins/codex", scope: "project" });
-    expect(registered.at(-1)).toEqual({
-      root: repo,
-      pluginDir: "/plugins/codex",
-      scope: "project",
-    });
+    // Codex plugin registration is the adapter's (AD-16 rule 4, reading 94): the cli itself
+    // writes no marketplace, plugin copy or config.toml into the repo
+    expect(existsSync(join(repo, ".agents"))).toBe(false);
+    expect(existsSync(join(repo, ".codex"))).toBe(false);
     expect(await cmd.run(["claude-code"], ctx)).toBe(0);
     expect(requests.at(-1)).toMatchObject({ pluginDir: "/plugins/claude-code", scope: "user" });
-    expect(registered).toHaveLength(2);
     expect(DEFAULT_INSTALL_SCOPE).toEqual({ "claude-code": "user", codex: "project" });
     expect(await cmd.run(["codex", "claude-code"], ctx)).toBe(64);
     expect(await cmd.run(["codex", "--host", "codex"], ctx)).toBe(64);

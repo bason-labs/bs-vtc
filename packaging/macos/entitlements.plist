@@ -2,20 +2,16 @@
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <!--
   Hardened-runtime entitlements for the Bun-compiled vtc binary (spine AD-26 rule 3). Unused until
-  the owner has an Apple Developer ID (H-2): the release ships unsigned until then. This is Bun's
-  documented key set for compiled executables; prune it under test when signing is switched on.
+  the owner has an Apple Developer ID (H-2): the release ships unsigned until then. Only what the
+  JavaScriptCore JIT of a Bun-compiled executable needs. allow-dyld-environment-variables and
+  disable-library-validation are deliberately left out (they would let DYLD_INSERT_LIBRARIES inject
+  code into the signed binary); add a key only when a signed smoke test proves it is needed.
 -->
 <plist version="1.0">
   <dict>
     <key>com.apple.security.cs.allow-jit</key>
     <true/>
     <key>com.apple.security.cs.allow-unsigned-executable-memory</key>
-    <true/>
-    <key>com.apple.security.cs.disable-executable-page-protection</key>
-    <true/>
-    <key>com.apple.security.cs.allow-dyld-environment-variables</key>
-    <true/>
-    <key>com.apple.security.cs.disable-library-validation</key>
     <true/>
   </dict>
 </plist>

@@ -108,15 +108,17 @@ unpacked, into `~/.vtc/browsers/`, runs Playwright's installer for the headless 
 `PLAYWRIGHT_BROWSERS_PATH` set there, and writes the `BrowserPin` (`browsers/pin.json`) with the
 executable's SHA-256. `vtc doctor` re-checks it. Projects with their own Playwright need none of
 this; with no browser the visual gates are skipped with a visible reason. Playwright's installer
-runs on `node` from `PATH` when vtc is the single binary.
+runs on `node` from `PATH` when vtc is the single binary (so `--install-browser` needs Node.js
+there), with an allowlisted environment: no credential variable and no `PLAYWRIGHT_*` override
+reaches it.
 
 ## Codex plugin registration
 
-`vtc install codex` also registers the compiled plugin per Codex's plugin layout: a marked copy
-in `.agents/plugins/vtc/`, the local marketplace `.agents/plugins/marketplace.json` (merged into
-one that exists) and `[plugins."vtc@<marketplace>"] enabled = true` in `.codex/config.toml`, in
-the repo (project scope) or the home (user scope). The copy leaves out the plugin's MCP file: the
-engine entry is already in `config.toml`.
+`vtc install codex` writes no Codex plugin registration of its own. Registering the plugin
+(`.agents/plugins/marketplace.json`, `[plugins."vtc@<marketplace>"]`) is `HostAdapter.install`'s
+job (AD-6, AD-16 rule 4), so every file it writes passes the adapter safety contract; until the
+spine's "Codex plugin manifest fields" row closes, the install places the skills and registers no
+hooks (§5 reading 94).
 
 ## Releases
 

@@ -4,7 +4,15 @@
  * `vtc merge-level restore` (AD-23 rule 5: a `restore` ledger entry). Both refuse without an
  * interactive terminal (the AD-21 Check's cli part) and write nothing on a no.
  */
-import { existsSync, mkdirSync, readFileSync, symlinkSync, writeFileSync } from "node:fs";
+import {
+  existsSync,
+  mkdirSync,
+  readFileSync,
+  rmSync,
+  symlinkSync,
+  utimesSync,
+  writeFileSync,
+} from "node:fs";
 import { dirname, join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import { core } from "@vtc/engine";
@@ -21,7 +29,7 @@ import {
 import { createLookbackCommand } from "../src/commands/lookback.js";
 import { createMergeLevelCommand } from "../src/commands/merge-level.js";
 import { EXIT_NOT_CONFIRMED, type GestureDeps } from "../src/human-gesture.js";
-import { pinsPath } from "../src/lookback-pins.js";
+import { pinsPath, withPinsLock } from "../src/lookback-pins.js";
 import { capture, cleanupDirs, initRepo, initVtcRepo, tempHome } from "./helpers.js";
 
 afterEach(cleanupDirs);
@@ -335,6 +343,10 @@ describe("vtc lookback approve|pin|rollback (AD-21 rule 3)", () => {
     const start = await run(repo, home, ["approve", ...T, "--version", sha("d")]);
     expect(start.code, start.err).toBe(0);
     expect(start.out).toMatch(/Start a canary of dddddddd .* half run aaaaaaaa/);
+    // the human sees the evidence, and where it comes from (a repo file roles can write)
+    expect(start.out).toMatch(
+      /evidence \(\.vtc\/lookback\/replays\/p-1\.json, a file in the repo: check it\): the replay says improve with p = 0\.016 over 6 discordant tasks \(6 won by the candidate\), 1 tasks x 3 runs per arm, tokens \+4%, A\/A flip rate 0\.05/,
+    );
     const key = engineRepoKey(repo);
     expect(pinsOf(home).projects[key]?.canaries).toEqual([
       {
@@ -369,6 +381,57 @@ describe("vtc lookback approve|pin|rollback (AD-21 rule 3)", () => {
     ]);
   });
 
+  it("refuses a replay against another baseline or mode, or read through a link", async () => {
+    const repo = initVtcRepo();
+    const home = tempHome();
+    writeVersion(home, sha("a"));
+    expect((await run(repo, home, ["pin", ...T, "--version", sha("a")])).code).toBe(0);
+    // compared with b, but the canary would run against the pin a
+    writeVersion(home, sha("d"), {
+      parent: sha("a"),
+      evaluation: writeReplay(repo, sha("d"), "improve", sha("b")),
+    });
+    const other = await run(repo, home, ["approve", ...T, "--version", sha("d")]);
+    expect(other.code).toBe(1);
+    expect(other.err).toMatch(
+      /compared dddddddd with bbbbbbbb, but the canary's baseline would be aaaaaaaa/,
+    );
+    // the replay of the same role with a mode is another prompt
+    const rel = writeReplay(repo, sha("d"), "improve");
+    const text = JSON.parse(readFileSync(join(repo, rel), "utf8")) as Record<string, unknown>;
+    writeFileSync(join(repo, rel), JSON.stringify({ ...text, mode: "fix" }));
+    expect((await run(repo, home, ["approve", ...T, "--version", sha("d")])).err).toMatch(
+      /is the replay of another version/,
+    );
+    // a replay file that is a link is never followed
+    const outside = tempHome();
+    writeFileSync(join(outside, "forged.json"), JSON.stringify(text));
+    rmSync(join(repo, rel));
+    symlinkSync(join(outside, "forged.json"), join(repo, rel));
+    const linked = await run(repo, home, ["approve", ...T, "--version", sha("d")]);
+    expect(linked.code).toBe(1);
+    expect(linked.err).toMatch(/symlink/);
+    expect(pinsOf(home).projects[engineRepoKey(repo)]?.canaries).toEqual([]);
+  });
+
+  it("redacts secrets from the reason it records", async () => {
+    const repo = initVtcRepo();
+    const home = tempHome();
+    writeVersion(home, sha("a"));
+    const key = `sk-ant-${"x".repeat(30)}`;
+    const r = await run(repo, home, [
+      "pin",
+      ...T,
+      "--version",
+      sha("a"),
+      "--reason",
+      `oops ${key}`,
+    ]);
+    expect(r.code, r.err).toBe(0);
+    expect(readFileSync(pinsPath(home), "utf8")).not.toContain(key);
+    expect(pinsOf(home).history[0]?.reason).toMatch(/^oops /);
+  });
+
   it("rolls a canary back to its baseline, and a pin back to what it replaced", async () => {
     const repo = initVtcRepo();
     const home = tempHome();
@@ -376,7 +439,7 @@ describe("vtc lookback approve|pin|rollback (AD-21 rule 3)", () => {
     writeVersion(home, sha("b"));
     writeVersion(home, sha("d"), {
       parent: sha("b"),
-      evaluation: writeReplay(repo, sha("d"), "improve"),
+      evaluation: writeReplay(repo, sha("d"), "improve", sha("b")),
     });
     await run(repo, home, ["pin", ...T, "--version", sha("a")]);
     await run(repo, home, ["pin", ...T, "--version", sha("b")]);
@@ -470,5 +533,25 @@ describe("vtc lookback approve|pin|rollback (AD-21 rule 3)", () => {
     const plain = await run(initRepo(), home, ["rollback", ...T]);
     expect(plain.code).toBe(1);
     expect(plain.err).toMatch(/vtc init/);
+  });
+});
+
+describe("the pins lock", () => {
+  it("takes a stale lock over and removes only its own lock", async () => {
+    const home = tempHome();
+    const lock = join(home, "lookback", "pins.lock");
+    mkdirSync(dirname(lock), { recursive: true });
+    writeFileSync(lock, "someone.old");
+    const old = new Date(Date.now() - 120_000);
+    utimesSync(lock, old, old);
+    expect(await withPinsLock(home, () => readFileSync(lock, "utf8"))).toMatch(
+      /^\d+\.[0-9a-f]{16}$/,
+    );
+    expect(existsSync(lock)).toBe(false);
+    // a lock that is no longer ours (taken over meanwhile) is left in place
+    await withPinsLock(home, () => {
+      writeFileSync(lock, "another.holder");
+    });
+    expect(readFileSync(lock, "utf8")).toBe("another.holder");
   });
 });
