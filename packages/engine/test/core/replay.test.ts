@@ -9,8 +9,9 @@
  * that has to stop waits for the next RETRO without pausing the delivered run. Nothing a trial
  * does touches a task.
  */
-import { existsSync, readFileSync } from "node:fs";
-import { join } from "node:path";
+import { existsSync, readFileSync, realpathSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join, relative } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   effectivePromptSha,
@@ -80,6 +81,8 @@ const CANDIDATE = "Write the failing test first, then the smallest change.";
 const ROLE = "engineer";
 /** The file a trial writes when it does the work. */
 const IMPL = "src/t-1/impl.ts";
+/** A file a trial leaves ignored in its tree (an installed stub): never in the graded checkout. */
+const LEFTOVER = "node_modules/stub/index.js";
 
 /** Every agent takes its editable section from the pack (reading 117). */
 const switched: PluginCatalog = {
@@ -180,6 +183,8 @@ const fakeReplays = (
 ) => {
   const role = options.role ?? ROLE;
   const graded: GateRunRequest[] = [];
+  /** What the graded checkout held: the trial's work, and what it left ignored. */
+  const held: { impl: boolean; leftover: boolean }[] = [];
   const changes: (readonly GitChangedFile[])[] = [];
   const finished: { replay: LookbackReplay; outcomes: readonly ReplayTrialOutcome[] }[] = [];
   const retro: LookbackRetro = {
@@ -215,6 +220,10 @@ const fakeReplays = (
     ...(options.replayWait === undefined ? {} : { replayWait: options.replayWait }),
     gradeTrial: async (request) => {
       graded.push(request);
+      held.push({
+        impl: existsSync(join(repo, request.checkout, IMPL)),
+        leftover: existsSync(join(repo, request.checkout, LEFTOVER)),
+      });
       if (request.base === request.head) return false;
       const changed = await createGitOps({ repoRoot: repo }).changedFiles(
         request.base,
@@ -238,7 +247,7 @@ const fakeReplays = (
       return Promise.resolve([draft]);
     },
   };
-  return { retro, graded, changes, finished };
+  return { retro, graded, held, changes, finished };
 };
 
 /** A harness whose RETRO replays one proposal with the fake (`reach` drives it there). */
@@ -299,7 +308,7 @@ const candidateStep = (delivered: Delivered): StepSpec => ({
 });
 
 describe("RETRO runs Lookback replays (AD-21 rule 6, reading 176)", () => {
-  it("runs each trial in a clean checkout with its arm's prompt, grades its head through the user's repo, writes the result, then finishes", async () => {
+  it("runs each trial in a clean checkout outside the user's repo with its arm's prompt, grades its head in a clean verification checkout, writes the result, then finishes", async () => {
     const { h, fake, reach } = atRetro(["a", "b"]);
     const delivered = await reach();
     const taskBefore = h.engine.status({}).tasks_by_status;
@@ -314,7 +323,10 @@ describe("RETRO runs Lookback replays (AD-21 rule 6, reading 176)", () => {
       if (trial === undefined) throw new Error(`trial ${String(i)} was not handed out`);
       expect(trial.task).toBeUndefined();
       const cwd = workdir(trial);
-      expect(cwd).toBe(join(h.repo, ".vtc/state/worktrees", `R-${run.id}-${trial.action_id}`));
+      // a fresh private directory under the OS temp directory: no relative path reaches the repo
+      expect(relative(realpathSync(tmpdir()), cwd).startsWith("..")).toBe(false);
+      expect(relative(realpathSync(h.repo), cwd).startsWith("..")).toBe(true);
+      expect(readFileSync(join(cwd, ".git"), "utf8")).not.toContain(h.repo);
       // the clean checkout is at the recorded base, with no refs of the user's repo
       expect(git(cwd, "rev-parse", "HEAD")).toBe(delivered.base);
       expect(git(cwd, "for-each-ref")).toBe("");
@@ -324,18 +336,29 @@ describe("RETRO runs Lookback replays (AD-21 rule 6, reading 176)", () => {
       const dispatched = events(h).findLast((e) => e.type === "role.dispatched");
       expect(dispatched?.prompt_sha).toBe(effectivePromptSha(LOCKED, text));
       expect(dispatched?.task).toBeUndefined();
-      // the baseline's trial does nothing; the candidate's writes the implementation
+      // the baseline's trial does nothing; the candidate's writes the implementation, and
+      // leaves an ignored stub behind that a gate run in its tree would pick up
+      if (text === CANDIDATE) {
+        writeFile(cwd, ".gitignore", ".vtc/state/\nnode_modules/\n");
+        writeFile(cwd, LEFTOVER, "module.exports = () => 0;\n");
+      }
       carried = await runTrial(h, trial, text === CANDIDATE);
       expect(fake.graded).toHaveLength(i + 1);
       const request = fake.graded[i];
-      expect(request).toMatchObject({
-        base: delivered.base,
-        checkout: `.vtc/state/worktrees/R-${run.id}-${trial.action_id}`,
-      });
+      // graded in a clean verification checkout of the head, never in the trial's tree
+      expect(request?.base).toBe(delivered.base);
+      expect(request?.checkout).toMatch(/^\.vtc\/state\/checkouts\//);
+      expect(existsSync(join(h.repo, request?.checkout ?? "missing"))).toBe(false);
+      expect(fake.held[i]).toEqual({ impl: text === CANDIDATE, leftover: false });
       if (text === CANDIDATE) {
         // the head committed in the trial's private git directory, readable in the user's repo
         expect(request?.head).not.toBe(delivered.base);
-        expect(fake.changes).toEqual([[{ path: IMPL, status: "added" }]]);
+        expect(fake.changes).toEqual([
+          [
+            { path: ".gitignore", status: "modified" },
+            { path: IMPL, status: "added" },
+          ],
+        ]);
       } else expect(request?.head).toBe(delivered.base);
       expect(existsSync(cwd)).toBe(false);
     }
