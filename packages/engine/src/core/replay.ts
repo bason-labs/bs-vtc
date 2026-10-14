@@ -267,7 +267,13 @@ const tokensOf = (run: RoleRunRecord | undefined): number =>
 /** Records a trial that did not pass without a grade, and drops its checkout. */
 const failTrial = (k: Kernel, h: RunHandle, t: TrialRef, action: string | undefined): void => {
   const run = action === undefined ? undefined : h.state.roleRuns.get(action);
-  appendRow(k, h.state.id, { kind: "graded", ...t, passed: false, tokens: tokensOf(run) });
+  appendRow(k, h.state.id, {
+    kind: "graded",
+    replay: t.replay,
+    n: t.n,
+    passed: false,
+    tokens: tokensOf(run),
+  });
   if (action !== undefined) {
     const trial = readReplayPlan(k, h.state.id)?.replays[t.replay]?.trials[t.n];
     if (trial !== undefined)
