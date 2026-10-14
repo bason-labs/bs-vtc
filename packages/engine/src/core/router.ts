@@ -34,9 +34,13 @@ export const VISUAL_QA_CALLS = 3;
 /**
  * Whether the engine attaches Visual QA (spine §5 reading 92). Its judge assumes the §7.5
  * deterministic stack already ran (token lint, the Playwright route × state × viewport × theme
- * renders, axe, computed styles, pixelmatch) and judges those renders; that stack is sub-project
- * 5 and not built, so a judge with no renders could only report criteria as unchecked, which
- * blocks every UI round. Off until the stack lands; the UI's deterministic gates still run.
+ * renders, axe, computed styles, pixelmatch) and judges those renders. That stack has landed as
+ * the visual gate step (AD-24): UI rounds and Final Review step 5 run it and record
+ * `GateReport.visual`. What is still open is the judge's input: no Visual QA dispatch is fed the
+ * step's report (`VisualSummary.report`) and render evidence yet, so an attached judge could only
+ * report its criteria as unchecked, which blocks every UI round. Off until that wiring lands (spine
+ * §7 accepted residual "Visual QA not attached", whose exit is setting this to true); the
+ * deterministic visual step and the other reviewers still run.
  */
 export const VISUAL_QA: { readonly attached: boolean } = { attached: false };
 
