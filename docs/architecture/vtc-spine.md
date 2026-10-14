@@ -2971,6 +2971,23 @@ pin|approve` warn that the target cannot take a pin until its role is switched. 
       outcome and goes to the human as a question; until it is answered the loop runs end to end
       only on a Codex-led headless run.
 
+183.  **No canary from a Claude-led run, said where the human decides** (AD-21 rule 6; amends
+      readings 180 and 182(8); contracts 4.12.0, additive). _Lead decision 2026-10-14, pending
+      human review._ Until the human answers reading 182(8) (switch a role that changes files,
+      such as the Engineer after its A/A on a Codex-led headless run, to `editable_in_pack`, or
+      build the verdict grader of reading 180), the gap is stated rather than discovered. (1) The
+      engine's `core.replayReach` is the one rule for which targets a replay can grade: never a
+      role that changes no file, and on a host whose runs load the compiled agent only an
+      `editable_in_pack` one. RETRO's refusal uses it, and its notice now cites reading 180.
+      `vtc lookback approve` uses it too: while no canary of the target runs, it warns before
+      the human decides that no canary can start for the target from that host's led run, and
+      points at `vtc lookback pin`. (2) `@vtc/shared` exports `CLAUDE_LEAD_REPLAYABLE_ROLES`
+      (empty in v1), which the shipped-plugin test in `packages/cli` checks against
+      `replayReach` on the real compiled plugin. The dashboard's Lookback view shows, for each
+      Claude Code target the run queued Lookback for, that no canary can start for it from a
+      Claude-led run, that `vtc lookback pin` still pins a version, and that a Codex-led
+      headless run replays and canaries end to end.
+
 ## 6. Change process for this spine
 
 - Changing an AD, adding one, or changing a frozen contract (AD-3) needs an architecture review

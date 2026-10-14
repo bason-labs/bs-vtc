@@ -195,7 +195,9 @@ export * from "./json-schema.js";
  * Lead session deny writes there; `EDITABLE_IN_PACK_ROLES` moves here from `@vtc/compiler`, the
  * one list the compiler switches and the engine's tests build from; the core event
  * `lookback.unattributed` counts the failures the attribution tree leaves inconclusive while no
- * AI tiebreak runs (spec §13). All additive: a new constant, a new event type and one more deny
- * glob (a deny list only narrows what a role may do).
+ * AI tiebreak runs (spec §13); `CLAUDE_LEAD_REPLAYABLE_ROLES` names the roles a Claude-led run can
+ * replay (none in v1, readings 180 and 182(8)), for the dashboard's Lookback view. All additive:
+ * new constants, a new event type and one more deny glob (a deny list only narrows what a role
+ * may do).
  */
 export const CONTRACTS_VERSION = "4.12.0";

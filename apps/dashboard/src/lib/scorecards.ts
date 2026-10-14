@@ -1,4 +1,5 @@
 import {
+  CLAUDE_LEAD_REPLAYABLE_ROLES,
   isServableArtifactPath,
   LOOKBACK_LIMITS,
   LOOKBACK_REPO,
@@ -253,10 +254,13 @@ const armText = (
 const item = (event: VtcEvent): Omit<LookbackItem, "seq" | "at" | "type"> | null => {
   const dispatched = eventData(event, "lookback.dispatched");
   if (dispatched !== null) {
+    const failures = plural(dispatched.train_failures, "attributed train failure");
     return {
       tone: "neutral",
       title: `Lookback queued for ${target(dispatched.target_role, dispatched.target_mode, dispatched.target_host)}`,
-      detail: plural(dispatched.train_failures, "attributed train failure"),
+      detail: noClaudeCanary(dispatched)
+        ? `${failures}. No canary can start for it from a Claude-led run in this version (spine §5 readings 180 and 182); vtc lookback pin still pins a version.`
+        : failures,
       path: null,
     };
   }
@@ -314,13 +318,32 @@ const item = (event: VtcEvent): Omit<LookbackItem, "seq" | "at" | "type"> | null
   return null;
 };
 
-/** The run's canaries (latest state per target) and its other lookback events, newest first. */
+/**
+ * Whether a Lookback target's proposals can never reach a canary in this version (spine §5
+ * readings 180 and 182(8)): a Claude Code target's replay runs on a Claude-led run, which replays
+ * only `CLAUDE_LEAD_REPLAYABLE_ROLES` (none ship in v1), and a canary starts only from a replay.
+ */
+const noClaudeCanary = (t: { target_role: string; target_host: string }): boolean =>
+  t.target_host === "claude-code" && !CLAUDE_LEAD_REPLAYABLE_ROLES.includes(t.target_role);
+
+/**
+ * The run's canaries (latest state per target), its other lookback events, newest first, and the
+ * targets it queued Lookback for whose proposals no canary can start from in this version.
+ */
 export const lookbackActivity = (
   events: readonly VtcEvent[],
-): { readonly canaries: readonly CanaryView[]; readonly items: readonly LookbackItem[] } => {
+): {
+  readonly canaries: readonly CanaryView[];
+  readonly items: readonly LookbackItem[];
+  readonly noCanary: readonly string[];
+} => {
   const canaries = new Map<string, CanaryView>();
   const items: LookbackItem[] = [];
+  const noCanary = new Set<string>();
   for (const event of events) {
+    const queued = eventData(event, "lookback.dispatched");
+    if (queued !== null && noClaudeCanary(queued))
+      noCanary.add(target(queued.target_role, queued.target_mode, queued.target_host));
     const canary = eventData(event, "lookback.canary_evaluated");
     if (canary !== null) {
       const t = target(canary.role, canary.mode, canary.host);
@@ -339,5 +362,9 @@ export const lookbackActivity = (
     const made = item(event);
     if (made !== null) items.push({ seq: event.seq, at: event.ts, type: event.type, ...made });
   }
-  return { canaries: [...canaries.values()], items: items.sort((a, b) => b.seq - a.seq) };
+  return {
+    canaries: [...canaries.values()],
+    items: items.sort((a, b) => b.seq - a.seq),
+    noCanary: [...noCanary],
+  };
 };

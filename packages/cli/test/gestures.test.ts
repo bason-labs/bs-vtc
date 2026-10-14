@@ -33,8 +33,10 @@ import {
   type MergeLevelLedgerEntry,
 } from "@vtc/shared";
 import {
+  changesFilesOf,
   createLookbackCommand,
   editableInPackOf,
+  type ChangesFilesOf,
   type EditableInPackOf,
   type LockedCoreOf,
 } from "../src/commands/lookback.js";
@@ -432,6 +434,7 @@ const run = async (
   lockedCore: LockedCoreOf = noLockedCore,
   whileDeciding?: () => void,
   editableInPack: EditableInPackOf = () => true,
+  changesFiles: ChangesFilesOf = () => true,
 ): Promise<{ code: number; out: string; err: string }> => {
   const { ctx, out, err } = capture(repo, home);
   const deps = (): GestureDeps => {
@@ -446,7 +449,10 @@ const run = async (
           },
         };
   };
-  const code = await createLookbackCommand(deps, lockedCore, editableInPack).run(args, ctx);
+  const code = await createLookbackCommand(deps, lockedCore, editableInPack, changesFiles).run(
+    args,
+    ctx,
+  );
   return { code, out: out.join("\n"), err: err.join("\n") };
 };
 
@@ -1028,6 +1034,94 @@ describe("vtc lookback pin|approve warn when the target cannot take a pin (readi
     });
     expect(back.err).not.toMatch(/warning/);
     expect(checked).toBe(false);
+  });
+});
+
+describe("vtc lookback approve says when no canary can start (spine §5 readings 180 and 182(8))", () => {
+  it("on a Claude Code target that is a verdict role: no replay grades it, so no canary can start; pin still works", async () => {
+    const repo = initVtcRepo();
+    const home = tempHome();
+    writeVersion(home, sha("a"), { role: "spec_verifier" });
+    const args = ["--role", "spec_verifier", "--host", HOST, "--version", sha("a")];
+    const verdictRole: ChangesFilesOf = (t) => t.role !== "spec_verifier";
+    const approve = await run(
+      repo,
+      home,
+      ["approve", ...args],
+      true,
+      noLockedCore,
+      undefined,
+      () => true,
+      verdictRole,
+    );
+    expect(approve.code).toBe(1);
+    expect(approve.err).toMatch(
+      /vtc lookback: warning: no canary of spec_verifier on claude-code can start from a Claude-led run in this version: vtc-spec-verifier changes no file, so the gates would grade the same base for both arms.*\(spine §5 reading 180\)\. vtc lookback pin pins a version without a replay \(spine §5 reading 182\(8\)\)/,
+    );
+    // the warning comes before the plan's own refusal, and the human is not asked
+    expect(approve.err.indexOf("warning")).toBeLessThan(approve.err.indexOf("names no replay"));
+    const pin = await run(
+      repo,
+      home,
+      ["pin", ...args],
+      true,
+      noLockedCore,
+      undefined,
+      () => true,
+      verdictRole,
+    );
+    expect(pin.code, pin.err).toBe(0);
+    expect(pin.err).not.toMatch(/no canary/);
+  });
+
+  it("on a Claude Code target that is not editable_in_pack: a Claude-led trial runs its compiled agent", async () => {
+    const repo = initVtcRepo();
+    const home = tempHome();
+    writeVersion(home, sha("a"));
+    const r = await run(
+      repo,
+      home,
+      ["approve", ...T, "--version", sha("a")],
+      true,
+      noLockedCore,
+      undefined,
+      () => false,
+    );
+    expect(r.err).toMatch(
+      /warning: no canary of engineer on claude-code can start from a Claude-led run in this version: vtc-engineer replays only on a run led from claude-code, where every dispatch loads its compiled agent/,
+    );
+  });
+
+  it("says nothing for a role that changes files on a Codex-led run, nor for a switched one on Claude Code", async () => {
+    const repo = initVtcRepo();
+    const home = tempHome();
+    writeVersion(home, sha("a"), { host: "codex" });
+    const codex = await run(
+      repo,
+      home,
+      ["approve", "--role", ROLE, "--host", "codex", "--version", sha("a")],
+      true,
+      noLockedCore,
+      undefined,
+      () => false,
+    );
+    expect(codex.err).not.toMatch(/no canary of/);
+    writeVersion(home, sha("b"));
+    const claude = await run(repo, home, ["approve", ...T, "--version", sha("b")]);
+    expect(claude.err).not.toMatch(/no canary of/);
+  });
+
+  it("reads whether a role changes files from the bundled role contracts; unknown reads as unknown", () => {
+    const assets = createDiskAssetBundle(writePluginTrees(tempDir()));
+    const of = changesFilesOf(() => assets);
+    expect(of({ role: "engineer", host: HOST })).toBe(true);
+    expect(of({ role: "spec_verifier", host: HOST })).toBe(false);
+    expect(of({ role: "no_such_role", host: HOST })).toBeUndefined();
+    expect(
+      changesFilesOf(() => {
+        throw new Error("no bundle");
+      })({ role: "engineer", host: HOST }),
+    ).toBeUndefined();
   });
 });
 

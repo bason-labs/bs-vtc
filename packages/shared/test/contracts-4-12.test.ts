@@ -6,6 +6,7 @@
 import { describe, expect, it } from "vitest";
 import {
   claudeSessionSandboxSettings,
+  CLAUDE_LEAD_REPLAYABLE_ROLES,
   CONTRACTS_VERSION,
   EDITABLE_IN_PACK_ROLES,
   EVENT_PAYLOAD_SCHEMAS,
@@ -39,6 +40,13 @@ describe("the engine's private directory (guard-dir-not-role-write-denied)", () 
 describe("EDITABLE_IN_PACK_ROLES (D-bl, reading 166)", () => {
   it("is the one shared list, with the Spec Verifier switched", () => {
     expect(EDITABLE_IN_PACK_ROLES).toEqual(["spec_verifier"]);
+  });
+});
+
+describe("CLAUDE_LEAD_REPLAYABLE_ROLES (readings 180 and 182(8))", () => {
+  it("is empty in v1: the one switched role is a verdict role, which no replay grades", () => {
+    expect(CLAUDE_LEAD_REPLAYABLE_ROLES).toEqual([]);
+    for (const role of CLAUDE_LEAD_REPLAYABLE_ROLES) expect(EDITABLE_IN_PACK_ROLES).toContain(role);
   });
 });
 

@@ -476,9 +476,10 @@ describe("RETRO runs Lookback replays (AD-21 rule 6, reading 176)", () => {
     await h.release();
   });
 
-  // OPEN SPINE DEVIATION (readings 166, 176), escalated to the Lead: this pins the interim refusal
-  // (no trial graded on two identical bases), not a settled design. Change it with the decision.
-  it("interim, pending the Lead's decision on readings 166/176: does not replay a verdict role, since the gates would grade the same base for both arms", async () => {
+  // Spine §5 reading 180 (Lead decision 2026-10-14, pending human review): a verdict role takes
+  // pins but is not replayed in v1, since no trial is graded on two identical bases; a verdict
+  // grader reopens it. Reading 182(8) sends what this costs a Claude Lead to the human.
+  it("does not replay a verdict role, since the gates would grade the same base for both arms (reading 180)", async () => {
     const { h, fake, reach } = atRetro(["a", "b"], { role: "spec_verifier" });
     await reach("spec_verifier");
     await h.engine.settle();
@@ -493,6 +494,8 @@ describe("RETRO runs Lookback replays (AD-21 rule 6, reading 176)", () => {
     expect(h.engine.notices.join("\n")).toMatch(
       /proposal p-1 waits for the next RETRO: vtc-spec-verifier changes no file, so the gates would grade the same base for both arms/,
     );
+    expect(h.engine.notices.join("\n")).toMatch(/spine §5 reading 180/);
+    expect(h.engine.notices.join("\n")).not.toMatch(/waiting for the Lead/);
     await h.release();
   });
 
