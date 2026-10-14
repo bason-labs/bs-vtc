@@ -17,6 +17,10 @@
  * `--setting-sources user` are listed as a §7 accepted residual, read from the user's
  * `settings.json` only (D-bp); research search on the host's own web search, or the configured
  * keyed provider (H-3); and whether the user's own yt-dlp is there for YouTube transcripts (D-bs).
+ * Since round 4 (AD-27): the gh login through `gh auth status`'s exit code only, the evidence
+ * hosting gh allows and the browser capture uses, ffmpeg (optional: GIF previews), the project's
+ * automation settings and notes (`automationFor`), the neutral notice for provider billing (D-ci)
+ * and where research roles get host web search (D-cf).
  * `info` lines report and never fail.
  * `--download` fetches the missing scanners into `~/.vtc/`, each verified against its pinned
  * SHA-256 (§4.4), and refreshes the osv-scanner database into `~/.vtc/osv-db/` for the repo's
@@ -27,7 +31,16 @@ import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { ADAPTER_FACTORIES } from "@vtc/adapters";
 import { core, gates, git } from "@vtc/engine";
-import type { HostAdapter, HostAuthStatus, HostId } from "@vtc/shared";
+import type { HostAdapter, HostAuthStatus, HostId, ProjectConfig } from "@vtc/shared";
+import {
+  checkAutomation,
+  checkEvidence,
+  checkFfmpeg,
+  checkGhLogin,
+  checkHostWeb,
+  checkProviderBilling,
+} from "../automation-checks.js";
+import { probeAutomation, requestedHostingOf, type AutomationProbe } from "../automation-wiring.js";
 import {
   checkBrowser,
   defaultBrowserInstallDeps,
@@ -80,6 +93,13 @@ import { readMergeLevelLedger } from "./merge-level.js";
 import type { CommandContext, CommandSpec } from "./types.js";
 import { EXIT, guarded, parseFlags } from "./util.js";
 
+/** The user config when doctor is given none to read: every default. */
+const NO_USER_CONFIG: UserConfigRead = {
+  ok: true,
+  path: "~/.vtc/config.yaml",
+  config: { version: 1, env_passthrough: [] },
+};
+
 const MARK = { ok: "ok  ", info: "info", warn: "warn", fail: "FAIL" } as const;
 
 const readOrNull = (path: string): string | null => {
@@ -117,6 +137,16 @@ export interface DoctorCommandEnv extends DoctorEnv {
   readonly ytDlp?: () => Promise<string | null>;
   /** The environment the research search key is read from (H-3). Default: none set. */
   readonly researchEnv?: Readonly<Record<string, string | undefined>>;
+  /**
+   * Automation (AD-27): this machine's gh, login, ffmpeg and origin remote, and the `project.yaml`
+   * settings of the VTC repo doctor runs in (`null` outside one; throws when it does not load).
+   */
+  readonly automation?: {
+    readonly probe: () => Promise<AutomationProbe>;
+    readonly project: () => Promise<Pick<ProjectConfig, "upstream" | "automation"> | null>;
+  };
+  /** Each adapter's `capabilities.safeHostWeb` (D-cf). */
+  readonly hostWeb?: () => Promise<Readonly<Partial<Record<HostId, boolean>>>>;
 }
 
 /** `<name> --version` on PATH: a scanner the user installed where no pinned build exists. */
@@ -159,6 +189,22 @@ export const gatherHostAuth = async (
   return statuses.filter((s): s is HostAuthStatus => s !== null);
 };
 
+/** Constructs the adapters only to ask them; no plugin is extracted or installed. */
+const withAdapters = async <T>(
+  vtcHome: string,
+  ask: (adapters: Partial<Record<HostId, HostAdapter>>) => Promise<T>,
+): Promise<T> => {
+  const adapters = createAdapters(ADAPTER_FACTORIES, {
+    vtcHome,
+    pluginDir: (host, home) => join(home, "plugins", "doctor", host),
+  });
+  try {
+    return await ask(adapters);
+  } finally {
+    await Promise.allSettled(Object.values(adapters).map((a) => a.dispose()));
+  }
+};
+
 export const defaultDoctorEnv = (ctx: CommandContext): DoctorCommandEnv => {
   const timer = autoResumeTimer(process.platform);
   return {
@@ -192,17 +238,27 @@ export const defaultDoctorEnv = (ctx: CommandContext): DoctorCommandEnv => {
     },
     browser: { vtcHome: ctx.vtcHome, sha256: sha256OfFile },
     installBrowser: (log) => installBrowser(ctx.vtcHome, defaultBrowserInstallDeps(log)),
-    hostAuth: async () => {
-      // constructed only to ask; no plugin is extracted or installed
-      const adapters = createAdapters(ADAPTER_FACTORIES, {
-        vtcHome: ctx.vtcHome,
-        pluginDir: (host, home) => join(home, "plugins", "doctor", host),
-      });
-      try {
-        return await gatherHostAuth(adapters, () => new Date());
-      } finally {
-        await Promise.allSettled(Object.values(adapters).map((a) => a.dispose()));
-      }
+    hostAuth: () => withAdapters(ctx.vtcHome, (a) => gatherHostAuth(a, () => new Date())),
+    hostWeb: () =>
+      withAdapters(ctx.vtcHome, (adapters) =>
+        Promise.resolve(
+          Object.fromEntries(
+            Object.entries(adapters).map(([host, a]) => [
+              host,
+              a.capabilities.safeHostWeb === true,
+            ]),
+          ),
+        ),
+      ),
+    automation: {
+      probe: async () =>
+        probeAutomation(exec, { repoRoot: await findRepoRoot(ctx.cwd), login: true }),
+      project: async () => {
+        const repoRoot = await findRepoRoot(ctx.cwd);
+        return repoRoot === null || !isVtcProject(repoRoot)
+          ? null
+          : core.loadProjectConfig(repoRoot);
+      },
     },
     mergeLevel: async () => {
       const repoRoot = await findRepoRoot(ctx.cwd);
@@ -245,7 +301,7 @@ export const createDoctorCommand = (
 ): CommandSpec => ({
   name: "doctor",
   summary:
-    "Check prerequisites (runtime, git, host CLIs, versions, logins and API-key billing, gh, auto-resume timer, the user hooks and plugins role runs load, env passthrough, research search and yt-dlp, gate sandbox, session sandbox, the repo's engine and merge level, the browser, pinned scanners, osv database); --download fetches missing scanners and the osv database; --install-browser installs the visual stack's browser",
+    "Check prerequisites (runtime, git, host CLIs, versions, logins and billing, gh and its login, automation and evidence (gh --attach, ffmpeg, browser), host web search, auto-resume timer, the user hooks and plugins role runs load, env passthrough, research search and yt-dlp, gate sandbox, session sandbox, the repo's engine and merge level, the browser, pinned scanners, osv database); --download fetches missing scanners and the osv database; --install-browser installs the visual stack's browser",
   run: (args, ctx) =>
     guarded("doctor", ctx, async () => {
       const { values } = parseFlags(args, {
@@ -267,12 +323,14 @@ export const createDoctorCommand = (
         }
       }
       const checks = await runDoctorChecks(e);
-      if (e.hostAuth !== undefined) {
-        const statuses = await e.hostAuth();
+      const statuses = e.hostAuth === undefined ? null : await e.hostAuth();
+      if (statuses !== null) {
         const auth = checkHostAuth(statuses);
         if (auth !== null) checks.push(auth);
         const billing = checkHostBilling(statuses);
         if (billing !== null) checks.push(billing);
+        const provider = checkProviderBilling(statuses);
+        if (provider !== null) checks.push(provider);
       }
       if (e.claudeUserSettings !== undefined)
         checks.push(...checkClaudeUserSettings(e.claudeUserSettings()));
@@ -288,7 +346,27 @@ export const createDoctorCommand = (
         checks.push(checkGateSandbox(await e.gateSandbox(), userConfig));
       const session = e.sessionSandbox === undefined ? null : await e.sessionSandbox();
       if (session !== null) checks.push(checkSessionSandbox(session));
-      if (e.browser !== undefined) checks.push(await checkBrowser(e.browser));
+      const browser = e.browser === undefined ? null : await checkBrowser(e.browser);
+      if (browser !== null) checks.push(browser);
+      if (e.automation !== undefined) {
+        const probe = await e.automation.probe();
+        const login = checkGhLogin(probe);
+        if (login !== null) checks.push(login);
+        const user = userConfig ?? NO_USER_CONFIG;
+        checks.push(checkEvidence(probe, requestedHostingOf(user), browser));
+        checks.push(checkFfmpeg(probe.ffmpeg));
+        try {
+          const project = await e.automation.project();
+          if (project !== null) checks.push(checkAutomation(probe, user, project));
+        } catch (error) {
+          checks.push({
+            name: "automation",
+            status: "fail",
+            detail: `cannot read the project's settings: ${error instanceof Error ? error.message : String(error)}`,
+          });
+        }
+      }
+      if (e.hostWeb !== undefined) checks.push(checkHostWeb(statuses ?? [], await e.hostWeb()));
       const engine = e.engine === undefined ? null : await e.engine();
       if (engine !== null) checks.push(engine);
       if (e.mergeLevel !== undefined) {
