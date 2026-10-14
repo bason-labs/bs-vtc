@@ -98,9 +98,16 @@ import {
   startBaseCheck,
   startFinalReview,
   startMergeQueue,
-  startRelease,
   startRoundGates,
 } from "./jobs.js";
+import {
+  disableAutoMerges,
+  pollMergedFeature,
+  recordMergePreflight,
+  startMergeLevel,
+  watchedFeatures,
+} from "./level3.js";
+import { startRelease } from "./release.js";
 import {
   EngineError,
   type CallContext,
@@ -1184,6 +1191,10 @@ export class Engine implements Kernel {
     const noRemote =
       config.merge_level >= 2 &&
       (await this.deps.workspace.remoteUrl(this.deps.remote).catch(() => null)) === null;
+    // AD-23: the ledger caps the level; Level 3 needs its preflight (a failure starts at Level 2)
+    const level = noRemote
+      ? { level: config.merge_level, preflight: null }
+      : await startMergeLevel(this, config);
     return this.serial(handle, () => {
       this.emit(handle, {
         type: "run.started",
@@ -1194,11 +1205,12 @@ export class Engine implements Kernel {
           repo: input.repo,
           has_ui: input.has_ui,
           risk_hints: input.risk_hints,
-          merge_level: config.merge_level,
+          merge_level: level.level,
           pipeline_config_hash: pipelineConfigHash(config, gates),
           origin: this.origin,
         },
       });
+      if (level.preflight !== null) recordMergePreflight(this, handle, level.preflight);
       // Level 2+ needs the push remote (spine §5 reading 18).
       if (noRemote) downgradeNoRemote(this, handle);
       this.phaseTo(handle, track === "quick_fix" ? "specify" : "discover");
@@ -1508,7 +1520,12 @@ export class Engine implements Kernel {
       this,
       handle,
       featureId,
-      from === "fixing" || from === "final_review" ? "final_review" : "integrating",
+      // a Level-3 release that parked retries the release (AD-23)
+      from === "ready_to_ship"
+        ? "ready_to_ship"
+        : from === "fixing" || from === "final_review"
+          ? "final_review"
+          : "integrating",
     );
   }
 
@@ -1796,9 +1813,35 @@ export class Engine implements Kernel {
       this.unattended.delete(handle.state.id);
       return Promise.resolve({ run: handle.state.id, paused: true, phase: handle.state.run.phase });
     });
-    // the kill switch (§15, AD-25 rule 4): engine-launched runs stop, no orphans
+    // the kill switch (§15, AD-25 rule 4; AD-23 rule 6): engine-launched runs stop, no orphans,
+    // and every pending auto-merge VTC enabled is turned off
     await killHeadless(this, handle.state.id);
+    await disableAutoMerges(this, handle);
     return result;
+  }
+
+  /**
+   * One poll of every Level-3 merge still in its post-merge watch (AD-23 rule 4), finished runs
+   * included: the daemon calls it at start and on a timer. A finished run's log gets the watch's
+   * events (they belong to its feature); a downgrade goes to the git-tracked ledger.
+   */
+  async watchMerged(): Promise<void> {
+    if (this.deps.remoteMerge === undefined) return;
+    const runs: RunHandle[] = [...this.handles.values()];
+    for (const state of this.finished.values()) {
+      if (watchedFeatures(this, state).length === 0) continue;
+      runs.push({
+        state,
+        log: openEventLog(this.deps.repoRoot, state.id, this.deps.lock, {
+          now: this.deps.now,
+          secrets: () => this.secrets(),
+        }),
+      });
+    }
+    for (const handle of runs) {
+      for (const feature of watchedFeatures(this, handle.state))
+        await pollMergedFeature(this, handle, feature);
+    }
   }
 
   /**
