@@ -2,13 +2,19 @@
  * The replay harness (spec §13 step 3; AD-21 rule 6). A replay re-runs a role on recorded tasks
  * with the baseline (arm `a`) and the candidate (arm `b`), k trials each, paired on the same tasks
  * and interleaved, plus an A/A run (baseline against baseline) for the noise floor when none is
- * cached for the baseline. Each trial is a role run with purpose `lookback_replay`
- * (`planDispatch`), in a clean checkout at the task's base with no refs past it; engine core
- * dispatches it and grades it through the `GateRunner` interface ({@link gradeTrial}).
- * `replayVerdict` decides; `inconclusive` reaches the human as such, never as improved.
+ * cached for the baseline. Each trial is an engine-launched headless role run with purpose
+ * `lookback_replay` (`planDispatch`, spine §5 reading 201), in a clean checkout at the task's base
+ * with no refs past it. How a trial is graded is `replayGraderFor` (readings 201 and 202): a role
+ * that changes files through the `GateRunner` interface ({@link gradeTrial}), a verdict role by
+ * the verdict grader against the recorded outcome (`gradeVerdictTrial`). `replayVerdict` decides
+ * (the sign test and the A/A floor are the same for both graders); `inconclusive` reaches the
+ * human as such, never as improved. The result records its grader and its isolation
+ * ({@link replayIsolation}, reading 178).
  *
  * Tasks: the held-out failures of the baseline version (should improve) and held-out successes
- * (the regression set, which must not get worse beyond the A/A flip rate).
+ * (the regression set, which must not get worse beyond the A/A flip rate). For a verdict role a
+ * failure is a held-out dispatch whose recorded verdict disagrees with its recorded outcome
+ * (`recordedOutcome`), a success one that agrees.
  */
 import {
   AaNoiseRowSchema,
@@ -30,6 +36,8 @@ import {
   type HostCapabilities,
   type HostId,
   type PromptVersionRef,
+  type ReplayGrader,
+  type ReplayIsolation,
   type ReplayResult,
 } from "@vtc/shared";
 import { join } from "node:path";
@@ -37,6 +45,7 @@ import { lookbackEvent, type LookbackEventDraft } from "./events.js";
 import { appendJsonLines, readJsonLines, writeAtomic } from "./files.js";
 import { isRoleFailure, trustedAttributions, type AttributionHistory } from "./attribution.js";
 import { buildTraces, sameTarget, traceRef, traceSplit } from "./traces.js";
+import { recordedOutcome, type ExpectedVerdict } from "./verdict-grader.js";
 
 /** Most tasks of each kind one replay runs (§13: 5–10 attributed failures). */
 export const REPLAY_MAX_TASKS = 10;
@@ -48,21 +57,27 @@ export interface ReplayTask {
   readonly task: string;
   /** The task passed with the baseline: a regression-set task. */
   readonly regressionSet: boolean;
+  /**
+   * A verdict-graded replay only: the verdict a trial must give to pass (the recorded outcome of
+   * the replayed dispatch, `recordedOutcome`).
+   */
+  readonly expected?: ExpectedVerdict;
 }
 
 /**
- * The held-out tasks a replay of `baseline` runs. The attributions are checked against the history
- * first ({@link trustedAttributions}): a planted failure row must not move a held-out success out
- * of the regression set.
+ * The held-out tasks a replay of `baseline` runs. For the `gates` grader (the default) the
+ * attributions decide which traces failed, checked against the history first
+ * ({@link trustedAttributions}): a planted failure row must not move a held-out success out of the
+ * regression set. For the `verdict` grader the recorded outcome decides, from the log alone; a
+ * dispatch with none is not replayed.
  */
 export const replayTasks = (
   input: AttributionHistory & {
     readonly baseline: PromptVersionRef;
     readonly attributions: readonly Attribution[];
+    readonly grader?: ReplayGrader;
   },
 ): ReplayTask[] => {
-  const trusted = trustedAttributions(input.attributions, input);
-  const failed = new Set(trusted.filter(isRoleFailure).map(traceRef));
   const held = buildTraces(input.history, input.lockedShaFor).filter(
     (t) =>
       t.task !== undefined &&
@@ -71,15 +86,40 @@ export const replayTasks = (
       t.end?.kind === "submitted" &&
       traceSplit(t) === "holdout",
   );
+  // each held-out trace: whether the baseline failed on it and, for a verdict role, the verdict
+  // a trial must give
+  const judged: { trace: (typeof held)[number]; failed: boolean; expected?: ExpectedVerdict }[] =
+    [];
+  if (input.grader === "verdict") {
+    for (const trace of held) {
+      const outcome = recordedOutcome(input.history, trace);
+      if (outcome === undefined) continue;
+      judged.push({
+        trace,
+        failed: outcome.recorded !== outcome.expected,
+        expected: { subject: outcome.subject, verdict: outcome.expected },
+      });
+    }
+  } else {
+    const trusted = trustedAttributions(input.attributions, input);
+    const failed = new Set(trusted.filter(isRoleFailure).map(traceRef));
+    for (const trace of held) judged.push({ trace, failed: failed.has(traceRef(trace)) });
+  }
   const pick = (regressionSet: boolean): ReplayTask[] => {
     const seen = new Set<string>();
     const tasks: ReplayTask[] = [];
-    for (const t of held) {
-      if (failed.has(traceRef(t)) === regressionSet || t.task === undefined) continue;
+    for (const { trace: t, failed, expected } of judged) {
+      if (failed === regressionSet || t.task === undefined) continue;
       const key = `${t.run}:${t.task}`;
       if (seen.has(key)) continue;
       seen.add(key);
-      tasks.push({ trace: t.trace, run: t.run, task: t.task, regressionSet });
+      tasks.push({
+        trace: t.trace,
+        run: t.run,
+        task: t.task,
+        regressionSet,
+        ...(expected === undefined ? {} : { expected }),
+      });
     }
     return tasks.slice(0, REPLAY_MAX_TASKS);
   };
@@ -151,7 +191,21 @@ export const tokensDeltaPct = (a: readonly number[], b: readonly number[]): numb
   return base === 0 ? 0 : ((mean(b) - base) / base) * 100;
 };
 
-/** The replay's result, decided by `replayVerdict`. */
+/**
+ * Pure (spine §5 readings 178 and 204): how well a replay's trials were kept from the user's current
+ * tree, from what each trial's host reported (`SandboxProfile.enforced.readDeny`). `read_denied`
+ * only when every trial ran with the repo's read deny enforced; a replay with no trial is
+ * `paths_only`. A Codex trial is always `paths_only`: Codex has no per-path read deny (reading 82),
+ * so its adapter reports the read deny as not enforced (engine code never branches on a host,
+ * AD-1).
+ */
+export const replayIsolation = (readDenied: readonly boolean[]): ReplayIsolation =>
+  readDenied.length > 0 && readDenied.every(Boolean) ? "read_denied" : "paths_only";
+
+/**
+ * The replay's result, decided by `replayVerdict`. It always records its grader (`gates` unless
+ * given, reading 202) and its isolation (`paths_only` unless given, reading 178).
+ */
 export const finishReplay = (input: {
   readonly proposal: string;
   readonly baseline: PromptVersionRef;
@@ -167,6 +221,9 @@ export const finishReplay = (input: {
   readonly aaFlipRate: number;
   readonly tokensDeltaPct: number;
   readonly now: Date;
+  readonly grader?: ReplayGrader;
+  /** The trials' isolation ({@link replayIsolation}). */
+  readonly isolation?: ReplayIsolation;
 }): ReplayResult => {
   const decided = replayVerdict(input.perTask, input.aaFlipRate, input.tokensDeltaPct);
   return ReplayResultSchema.parse({
@@ -190,6 +247,8 @@ export const finishReplay = (input: {
     tokens_delta_pct: input.tokensDeltaPct,
     verdict: decided.verdict,
     finished_at: input.now.toISOString(),
+    isolation: input.isolation ?? "paths_only",
+    grader: input.grader ?? "gates",
   });
 };
 

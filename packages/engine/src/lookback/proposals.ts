@@ -13,7 +13,10 @@
  * - every trace it cites (by its run-qualified slug, `traceSlug`) is an attributed train-split
  *   failure of that role that the history bears out (`trustedAttributions`; the role never sees
  *   held-out traces), run with the proposal's base version (same mode, host and hashes), so the
- *   base, which becomes the candidate's recorded `parent`, is a version that ran and failed;
+ *   base, which becomes the candidate's recorded `parent`, is a version that ran and failed. A
+ *   change aimed at tokens (`target_metric` `tokens_per_success`, the cost regressions of D-bv)
+ *   may also cite a train-split dispatch of the base that submitted: its cost is the evidence. A
+ *   held-out trace is never accepted;
  * - it actually changes the section.
  * An accepted proposal becomes a candidate version file under the VTC home (immutable) and a
  * `lookback.proposal_recorded` event; promotion stays a human gesture.
@@ -40,7 +43,7 @@ import {
 } from "./attribution.js";
 import { lookbackEvent, type LookbackEventDraft } from "./events.js";
 import { readRoleWrittenText } from "./files.js";
-import { traceSlug, traceSplit } from "./traces.js";
+import { buildTraces, traceSlug, traceSplit } from "./traces.js";
 import { promptVersionRef, sectionSha } from "./versions.js";
 
 export type ProposalCheck =
@@ -141,13 +144,33 @@ export const checkProposal = (
     trainFailures.filter((a) => samePrompt(a.prompt, proposal.base)).map(traceSlug),
   );
   const ofRoleAnyVersion = new Set(trainFailures.map(traceSlug));
-  const heldOut = new Set(ofRole.filter((a) => traceSplit(a) === "holdout").map(traceSlug));
-  for (const trace of new Set(proposal.changes.flatMap((c) => c.trace_ids))) {
-    if (heldOut.has(trace)) problems.push(`cites held-out trace ${trace}`);
-    else if (!ofRoleAnyVersion.has(trace))
-      problems.push(`cites ${trace}, which is not an attributed train failure of ${input.role}`);
-    else if (!ofBase.has(trace))
-      problems.push(`cites ${trace}, which did not run with the proposal's base version`);
+  const dispatches = buildTraces(input.history, input.lockedShaFor).filter(
+    (t) => t.role === input.role,
+  );
+  const heldOut = new Set(
+    [...ofRole, ...dispatches].filter((t) => traceSplit(t) === "holdout").map(traceSlug),
+  );
+  // what a change aimed at tokens may cite besides failures: the base's train-split dispatches
+  const costEvidence = new Set(
+    dispatches
+      .filter(
+        (t) =>
+          t.prompt !== undefined &&
+          samePrompt(t.prompt, proposal.base) &&
+          t.end?.kind === "submitted" &&
+          traceSplit(t) === "train",
+      )
+      .map(traceSlug),
+  );
+  for (const change of proposal.changes) {
+    for (const trace of change.trace_ids) {
+      if (heldOut.has(trace)) problems.push(`cites held-out trace ${trace}`);
+      else if (ofBase.has(trace)) continue;
+      else if (change.target_metric === "tokens_per_success" && costEvidence.has(trace)) continue;
+      else if (!ofRoleAnyVersion.has(trace))
+        problems.push(`cites ${trace}, which is not an attributed train failure of ${input.role}`);
+      else problems.push(`cites ${trace}, which did not run with the proposal's base version`);
+    }
   }
   if (sectionSha(editable) === proposal.base.editable_sha256)
     problems.push("the proposal does not change the section");

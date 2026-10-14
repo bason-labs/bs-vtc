@@ -127,6 +127,37 @@ describe("Lookback at RETRO (AD-21 rules 4 and 8)", () => {
     expect(validateEventData("lookback.unattributed", plan.events?.[0]?.data ?? {}).ok).toBe(true);
   });
 
+  it("reads the weekly window of the run it plans for: one retro serves every run (reading 176)", async () => {
+    const log = failingRun();
+    const other = new RunLog("r2");
+    for (let i = 1; i <= 20; i += 1) {
+      other.dispatch("engineer", { task: `T-${String(i)}`, tokens: 2000 });
+      other.gate(`T-${String(i)}`, false);
+    }
+    const asked: string[] = [];
+    const retro = createLookbackRetro({
+      projectRoot: await tempDir("retro-window"),
+      vtcHome: await tempDir("retro-window-home"),
+      history: () => [...log.events, ...other.events],
+      lockedShaFor,
+      compiled: (role) =>
+        role === "engineer" ? { locked: LOCKED, editable: EDITABLE } : undefined,
+      graderBundleSha: () => graderBundleSha({ judgeModel: null, gatesConfigHash: null }),
+      // the Lead host of r1 has room; r2's Lead host is nearly out of its weekly window
+      weeklyRemainingPct: (state) => {
+        asked.push(state.id);
+        return state.id === "r1" ? 80 : 5;
+      },
+      budgetAvailable: () => true,
+      now: () => now,
+    });
+    const r2 = await retro.plan({ id: "r2", events: other.events } as unknown as RunState);
+    expect(r2.targets).toEqual([]);
+    const r1 = await retro.plan({ id: "r1", events: log.events } as unknown as RunState);
+    expect(r1.targets.map((t) => t.role)).toEqual(["engineer"]);
+    expect(asked).toEqual(["r2", "r1"]);
+  });
+
   it("logs nothing unattributed when the tree attributes every failure", async () => {
     const { retro, state } = await setup();
     expect((await retro.plan(state)).events ?? []).toEqual([]);
