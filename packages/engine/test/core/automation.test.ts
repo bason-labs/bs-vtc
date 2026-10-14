@@ -27,7 +27,7 @@ const ev = (
   extra: Partial<VtcEvent> = {},
   ts = "2026-10-14T10:00:00.000Z",
 ): VtcEvent =>
-  ({ v: 1, seq: (seq += 1), ts, run: "r1", type, actor: "engine", data, ...extra }) as VtcEvent;
+  ({ v: 1, seq: (seq += 1), ts, run: "r1", type, actor: "engine", data, ...extra });
 
 const stateWith = (...events: VtcEvent[]): RunState => {
   const state = emptyRunState("r1", "2026-10-14T09:00:00.000Z");
