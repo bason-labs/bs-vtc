@@ -248,6 +248,47 @@ describe("Final Review steps 3–5 and 7 (§6.7a)", () => {
     await h.release();
   });
 
+  it("a spec gap at step 3 parks the feature for the human: no engineer fix round, nothing merged", async () => {
+    const h = createHarness({ project: { merge_level: 1 } });
+    const [verifier, security] = await toFinalReview(h);
+    const out = await submitResult(h, verifier!, {
+      exit: "done",
+      feature: "F-1",
+      verdicts: [
+        {
+          subject: "F-1",
+          verdict: "fail",
+          evidence: [{ type: "file_line", ref: "src/t-1/impl.ts:1" }],
+        },
+      ],
+      findings: [
+        {
+          rule_id: "spec-ambiguity",
+          category: "correctness",
+          kind: "spec_ambiguity",
+          title: "REQ-1 does not say what an expired link shows",
+          confidence: 0.9,
+          location: { path: "src/t-1/impl.ts" },
+          evidence: { type: "file_line", ref: "src/t-1/impl.ts:1" },
+          req_ids: [],
+        },
+      ],
+    });
+    expect(out.accepted).toBe(true);
+    await review(h, security!, "pass");
+    await h.engine.settle();
+    expect(h.engine.status({}).features[0]).toMatchObject({
+      status: "parked",
+      park_reason: "spec_conflict",
+    });
+    expect(
+      events(h).some(
+        (e) => e.type === "task.created" && JSON.stringify(e.data).includes("integration_fix"),
+      ),
+    ).toBe(false);
+    await h.release();
+  });
+
   it("a changelog the repo keeps but the feature did not update fails step 7 into a fix round", async () => {
     const h = createHarness({
       project: { merge_level: 1 },
@@ -305,6 +346,45 @@ describe("a fix round re-runs only the AI steps the fix affected (§6.7a routing
     await h.release();
   });
 
+  it("step 3 is never carried over this round's traceability gap: its reviewer runs again", async () => {
+    const h = createHarness({
+      project: { merge_level: 1 },
+      files: { "CHANGELOG.md": "# Changelog\n" },
+    });
+    const reviewers = await toFinalReview(h);
+    for (const r of reviewers) await review(h, r, "pass");
+    await h.engine.settle();
+    expect(h.engine.status({}).features[0]).toMatchObject({ status: "fixing", round: 1 });
+    // from round 2 on, the gates report a requirement with no passing test
+    h.gates.reshape((request, report) => {
+      if (request.reason !== "final_review" || request.feature === undefined) return report;
+      const path = `.vtc/evidence/${request.feature}/traceability.json`;
+      writeFile(
+        h.repo,
+        path,
+        `${JSON.stringify({
+          run: request.run,
+          feature: request.feature,
+          rows: [{ req: "REQ-1", tests: [], covered: false }],
+          gaps: ["REQ-1"],
+          built_at: h.clock.toISOString(),
+        })}\n`,
+      );
+      return { ...report, traceability: path };
+    });
+    await authorTests(h, only(await nextActions(h), "qa"));
+    await build(
+      h,
+      only(await nextActions(h), "engineer"),
+      "# Changelog\n\n- Password reset\n",
+      "CHANGELOG.md",
+    );
+    await h.engine.settle();
+    expect(reviewersOf(await nextActions(h)).map((r) => r.role)).toEqual(["spec_verifier"]);
+    expect(steps(h).at(-1)).toMatchObject({ step: 4, status: "pass" });
+    await h.release();
+  });
+
   it("a fix that changed code re-runs both reviewers; the step that failed always re-runs", async () => {
     const h = createHarness({ project: { merge_level: 1 } });
     const [verifier, security] = await toFinalReview(h);
@@ -347,6 +427,17 @@ describe("a fix round re-runs only the AI steps the fix affected (§6.7a routing
     expect(fixAffectedSteps([changed("src/a.spec.ts", "deleted")], globs)).toEqual([3]);
     expect(fixAffectedSteps([changed("src/t-1/impl.ts")], globs)).toEqual([3, 4]);
     expect(fixAffectedSteps([changed("package.json")], globs)).toEqual([3, 4]);
+    // a directory named spec or test is not a test: production code and config live there too
+    expect(fixAffectedSteps([changed("api/specs/openapi.yaml")], globs)).toEqual([3, 4]);
+    expect(fixAffectedSteps([changed("src/spec/auth.ts")], globs)).toEqual([3, 4]);
+    expect(fixAffectedSteps([changed("test/fixtures/secrets.json")], globs)).toEqual([3, 4]);
+    expect(fixAffectedSteps([changed("pkg/auth_test.go")], globs)).toEqual([3]);
+    expect(fixAffectedSteps([changed("tests/test_auth.py")], globs)).toEqual([3]);
+    // the spec, architecture and design under .vtc/ are what step 3 verifies against
+    expect(fixAffectedSteps([changed(".vtc/spec/spec.md")], globs)).toEqual([3]);
+    expect(fixAffectedSteps([changed(".vtc/architecture/notes.md")], globs)).toEqual([3]);
+    expect(fixAffectedSteps([changed(".vtc/runs/r-1/events.jsonl")], globs)).toEqual([]);
+    expect(fixAffectedSteps([changed(".vtc/tasks/T-2.md", "added")], globs)).toEqual([]);
   });
 });
 

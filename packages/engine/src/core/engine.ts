@@ -62,7 +62,13 @@ import {
   type CommittedGates,
 } from "./config.js";
 import { dispatchGuarded, inSessionRefusal, NO_LEAD_WAIT_REASON, phaseRoles } from "./dispatch.js";
-import { g2ApprovalProblem, gateExtras, recordChosenDirection, type GateExtras } from "./g2.js";
+import {
+  checkDirectionsNovelty,
+  g2ApprovalProblem,
+  gateExtras,
+  recordChosenDirection,
+  type GateExtras,
+} from "./g2.js";
 import { effectiveVerdict } from "./gate-verdict.js";
 import { headlessRunsOf, killHeadless } from "./headless.js";
 import type { FactRefresher, PromptPins, RoleToolHandler } from "./kernel.js";
@@ -144,7 +150,7 @@ import {
   applyEvent,
   emptyRunState,
   projectRun,
-  STOPPED_RUN_PREFIXES,
+  SUPERSEDED_RUN_PREFIX,
   type RunState,
 } from "./state.js";
 import { ArtifactRefSchema } from "@vtc/shared";
@@ -323,6 +329,8 @@ export class Engine implements Kernel {
   private pins: PromptPins | null = null;
   /** The G2 showings whose stale facts were already re-fetched (`run:phase entry seq`). */
   private readonly factsRefreshed = new Set<string>();
+  /** The G2 showings whose directions' novelty was already checked (`run:phase entry seq`). */
+  private readonly noveltyChecked = new Set<string>();
 
   private constructor(readonly deps: EngineCoreDeps) {
     this.guardDir = guardDirFor(deps.vtcHome, deps.repoRoot);
@@ -1463,6 +1471,15 @@ export class Engine implements Kernel {
         gate = this.awaitingGates(handle);
       }
     }
+    if (gate?.gates.includes("G2") === true && this.deps.gateRunner.checkNovelty !== undefined) {
+      // before G2 shows, each direction's novelty is checked once (§9.1 step 4, reading 127)
+      const key = `${state.id}:${String(phaseEnteredSeq(state, state.run.phase) ?? 0)}`;
+      if (!this.noveltyChecked.has(key)) {
+        this.noveltyChecked.add(key);
+        await checkDirectionsNovelty(this, handle);
+        gate = this.awaitingGates(handle);
+      }
+    }
     if (gate !== null) {
       this.recordGateRequest(handle, gate);
       const { design_coverage: _coverage, ...shown } = gate.extras;
@@ -1709,11 +1726,11 @@ export class Engine implements Kernel {
         // recorded, so an approval either does both or neither
         if (input.design_direction !== undefined) {
           try {
-            recordChosenDirection(this, handle, input.design_direction);
+            await recordChosenDirection(this, handle, input.design_direction);
           } catch (error) {
             throw new EngineError(
               "conflict",
-              `the chosen direction could not be recorded in the design library under ${this.deps.vtcHome}: ${error instanceof Error ? error.message : String(error)}; fix the directory, then approve again`,
+              `the chosen direction could not be recorded in the design library: ${error instanceof Error ? error.message : String(error)}; fix it, then approve again`,
             );
           }
         }
@@ -2042,7 +2059,7 @@ export class Engine implements Kernel {
           data: {
             action_id: run.action_id,
             kind: "error",
-            message: `${STOPPED_RUN_PREFIXES.superseded} the run was resumed`,
+            message: `${SUPERSEDED_RUN_PREFIX} the run was resumed`,
             retryable: true,
           },
         });

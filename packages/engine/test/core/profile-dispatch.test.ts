@@ -120,3 +120,24 @@ describe("engineer discipline profiles (§5.2a, spine §5 reading 38)", () => {
     await h.release();
   });
 });
+
+describe("the catalog's prompt parts (AD-21, spine §5 readings 117–118)", () => {
+  it("reads an agent's locked SHA and editable_in_pack from its manifest entry", () => {
+    const locked = "a".repeat(64);
+    const [engineer, backend] = manifest.agents;
+    const catalog = createPluginCatalog({
+      "claude-code": PluginManifestSchema.parse({
+        ...manifest,
+        agents: [{ ...engineer, locked_sha256: locked, editable_in_pack: true }, backend],
+      }),
+    });
+    expect(catalog.promptParts?.(agentNameFor("engineer"), "claude-code")).toEqual({
+      lockedSha256: locked,
+      editableInPack: true,
+    });
+    expect(catalog.promptParts?.(agentNameFor("engineer_backend"), "claude-code")).toEqual({
+      editableInPack: false,
+    });
+    expect(catalog.promptParts?.(agentNameFor("engineer"), "codex")).toBeUndefined();
+  });
+});

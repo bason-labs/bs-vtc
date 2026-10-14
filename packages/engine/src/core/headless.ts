@@ -34,7 +34,6 @@ import { deferForUsage, limitWait, stillLimited } from "./limits.js";
 import { inFlight } from "./queries.js";
 import { parkTask } from "./parking.js";
 import { headlessPlatformRefusal, roleSandboxProblem, roleSandboxRequest } from "./sandbox.js";
-import { STOPPED_RUN_PREFIXES } from "./state.js";
 import { handleSubmit } from "./submit.js";
 
 const NO_CAPABILITIES: Pick<HostCapabilities, "subagents" | "headless"> = {
@@ -223,16 +222,16 @@ const spawnError = (message: string): HostOutcome => ({
 });
 
 /**
- * What a run `vtc pause` killed ended with: unless it finished first, a failure whose message says
- * the pause stopped it (`STOPPED_RUN_PREFIXES.paused`), so the run is `stopped` and never counts
- * toward the stuck limit; what the host reported it cost still counts (D-at).
+ * What a run `vtc pause` killed ended with: unless it finished first, a failure with cause
+ * `killed`. Its `headless.ended` after the logged pause marks the run `stopped` (state.ts), so it
+ * never counts toward the stuck limit; what the host reported it cost still counts (D-at).
  */
 export const pausedOutcome = (outcome: HostOutcome): HostOutcome => {
   if (outcome.kind === "done") return outcome;
   const detail = outcome.kind === "error" || outcome.kind === "auth" ? outcome.message : "a limit";
   return {
     kind: "error",
-    message: `${STOPPED_RUN_PREFIXES.paused} (the kill switch): ${detail}`.slice(0, 2000),
+    message: `stopped by vtc pause (the kill switch): ${detail}`.slice(0, 2000),
     retryable: true,
     cause: "killed",
     tokens: outcome.kind === "auth" ? null : outcome.tokens,

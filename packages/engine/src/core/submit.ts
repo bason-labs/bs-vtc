@@ -78,7 +78,7 @@ import { saveResult } from "./results.js";
 import { writePathsOf } from "./roles.js";
 import { completedReviews, evidenceContext, isReviewer, startTriage } from "./review.js";
 import { specRequirementIds } from "./spec.js";
-import type { RoleRunRecord } from "./state.js";
+import { reportedFailureMessage, type RoleRunRecord } from "./state.js";
 import { findingFromDraft, findingsFromWriteScope } from "./triage.js";
 import { recordRoundFindings, settleRound } from "./verify.js";
 
@@ -1239,7 +1239,8 @@ const handleFailure = (
     data: {
       action_id: run.action_id,
       kind: outcome.kind,
-      message: outcome.message.slice(0, 2000),
+      // a Lead or a host cannot word its failure into the engine's stop (AD-8)
+      message: reportedFailureMessage(outcome.message),
       retryable: outcome.kind === "error" ? outcome.retryable : false,
     },
   });
