@@ -121,6 +121,7 @@ import {
   watchedFeatures,
 } from "./level3.js";
 import { startRelease } from "./release.js";
+import { clientSpendRow, recordClientSpend } from "./spend.js";
 import { checkFinalReviewStuck, startFinalReview } from "./final-review.js";
 import {
   EngineError,
@@ -816,6 +817,22 @@ export class Engine implements Kernel {
     });
   }
 
+  /**
+   * Cost per client (§14, spine §5 reading 153): a finished run's spend goes to its client scope's
+   * record under the VTC home. A record that cannot be written is a notice: the run's own log
+   * still has every cost.
+   */
+  private recordClientSpend(state: RunState): void {
+    try {
+      const row = clientSpendRow(this.deps.repoRoot, this.config().client, state);
+      if (row !== null) recordClientSpend(this.deps.vtcHome, row);
+    } catch (error) {
+      this.notices.push(
+        `run ${state.id}'s spend was not added to the client's cost record: ${error instanceof Error ? error.message : String(error)}`,
+      );
+    }
+  }
+
   emit(handle: RunHandle, draft: EventDraft): VtcEvent {
     const event = handle.log.append(draft);
     const foreign = this.writes.foreign(eventLogPath(handle.state.id));
@@ -828,6 +845,7 @@ export class Engine implements Kernel {
     if (event.type === "run.finished") {
       this.handles.delete(handle.state.id);
       this.finished.set(handle.state.id, handle.state);
+      this.recordClientSpend(handle.state);
     }
     const milestone = milestoneOf(event);
     if (milestone !== null) this.commitMilestone(handle, milestone);

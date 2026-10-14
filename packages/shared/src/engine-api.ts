@@ -889,6 +889,16 @@ export const ENGINE_HTTP = {
       response: "EscalationList",
     },
     usage: { method: "GET", path: "/api/usage", auth: "token", response: "UsageReport" },
+    /**
+     * Cost per client (§14): the project's client scope from the VTC home's spend record. New in
+     * 4.9.0.
+     */
+    clientSpend: {
+      method: "GET",
+      path: "/api/spend",
+      auth: "token",
+      response: "ClientSpendReport",
+    },
     /** SSE over `fetch` (the dashboard sends the bearer header): one Event per message,
      * `id: <run>:<seq>` (`sseEventId`). */
     stream: { method: "GET", path: "/api/stream", auth: "token", response: "Event", sse: true },

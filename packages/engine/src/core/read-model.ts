@@ -25,6 +25,7 @@ import {
   type TaskDetail,
   type TaskDiff,
   type TaskList,
+  type ClientSpendReport,
   type UsageReport,
   type UsageSnapshot,
   type WorkflowGraph,
@@ -65,6 +66,11 @@ export interface ReadModelDeps {
   readonly usage: () => ReadonlyMap<HostId, UsageSnapshot>;
   /** Git history for diffs; `null` when the repo has no git (snapshot of a bare `.vtc/`). */
   readonly git: Pick<GitOps, "changedFiles" | "diff"> | null;
+  /**
+   * The project's client scope from the VTC home's spend record (§14, reading 153); absent where
+   * there is none to read.
+   */
+  readonly clientSpend?: () => ClientSpendReport;
 }
 
 export interface ReadModel {
@@ -80,6 +86,7 @@ export interface ReadModel {
   graph(run: string, scope: string, task: string | undefined): ReadResult<WorkflowGraph>;
   escalations(run: string): ReadResult<EscalationList>;
   usage(): UsageReport;
+  clientSpend(): ReadResult<ClientSpendReport>;
 }
 
 /** The run tools act on when none is named: the newest unfinished run, else the newest. */
@@ -333,5 +340,9 @@ export const createReadModel = (deps: ReadModelDeps): ReadModel => {
       }),
     escalations: (run) => withRun(run, (state) => ok(escalationListView(state))),
     usage: () => usageReportView(deps.usage(), activeRun(deps.runs()) ?? null),
+    clientSpend: () =>
+      deps.clientSpend === undefined
+        ? notFound("this dashboard has no client spend record to read")
+        : ok(deps.clientSpend()),
   };
 };

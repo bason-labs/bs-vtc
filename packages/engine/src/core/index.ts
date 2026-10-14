@@ -126,6 +126,7 @@ export {
   PROJECT_CONFIG_PATH,
 } from "./config.js";
 export { parseYaml, toYaml, YamlError } from "./yaml.js";
+export { clientSpendRow, readClientSpend, recordClientSpend } from "./spend.js";
 export { MAX_STEP_FAILURES } from "./submit.js";
 export { RESUME_JITTER_MS, MAX_LIMIT_BACKOFFS } from "./limits.js";
 export { INDEX_PATH, openEventIndex, type EventIndex } from "./event-index.js";

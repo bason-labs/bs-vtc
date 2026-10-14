@@ -293,6 +293,9 @@ export const createHttpApi = async (options: HttpApiOptions): Promise<HttpApi> =
       case "usage":
         send(res, 200, model.usage());
         return;
+      case "clientSpend":
+        send(res, 200, fromRead(model.clientSpend()));
+        return;
       case "stream":
         stream(req, res, q);
         return;

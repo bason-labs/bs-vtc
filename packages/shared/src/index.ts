@@ -35,6 +35,7 @@ export * from "./research.js";
 export * from "./lookback.js";
 export * from "./visual.js";
 export * from "./architecture-checks.js";
+export * from "./spend.js";
 export * from "./interfaces/host-adapter.js";
 export type * from "./interfaces/storage.js";
 export type * from "./interfaces/gate-runner.js";
@@ -168,6 +169,8 @@ export * from "./json-schema.js";
  * 4.9.0 (MINOR): the wave-3 Final Review fix round (spine §5 readings 149–155). G2's design exits
  * (`DesignExitSchema`: `approve_gate.design_exits` / `gate.requested.design_exits`,
  * `ApproveInput.design_exit`, `gate.approved.design_exit` and `gate.rejected.design_exit`); the
- * user's price table (`UserConfig.prices`, `ModelPriceSchema`, `priceTokens`, `EngineDeps.prices`).
+ * user's price table (`UserConfig.prices`, `ModelPriceSchema`, `priceTokens`, `EngineDeps.prices`);
+ * cost per client (`ClientSpendRow` under `CLIENT_SPEND_DIR`, `ClientSpendReport`,
+ * `clientSpendReport`, the `clientSpend` route `GET /api/spend`).
  */
 export const CONTRACTS_VERSION = "4.9.0";
