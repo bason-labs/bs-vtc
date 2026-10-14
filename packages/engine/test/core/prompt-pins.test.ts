@@ -171,6 +171,10 @@ describe("AD-21 rules 1 and 2: the pinned editable section goes in the task pack
       const carto = only((await h.engine.next({}, CLAUDE)).actions, "repo_cartographer");
       expect(ofType(h, "role.dispatched")[0]?.data).not.toHaveProperty("editable_sha256");
       expect(readFileSync(join(h.repo, carto.pack), "utf8")).not.toContain(EDITABLE);
+      // reading 137: a selection the engine throws away is an incident, not a silent drop
+      expect(
+        ofType(h, "incident.recorded").filter((e) => e.data.kind === "prompt_selection"),
+      ).toHaveLength(1);
       await h.release();
     }
   });
@@ -239,6 +243,8 @@ describe("AD-21 rule 7: a canary arm is recorded per dispatch and once per task"
     expect(engineers.map((e) => e.data.canary_arm)).toEqual(["candidate", undefined]);
     expect(engineers[1]?.prompt_sha).toBe(baseline);
     expect(ofType(h, "lookback.canary_assigned")).toHaveLength(1);
+    const incidents = ofType(h, "incident.recorded");
+    expect(incidents.map((e) => [e.task, e.data.kind])).toEqual([["T-1", "prompt_selection"]]);
     await h.release();
   });
 
@@ -255,6 +261,7 @@ describe("AD-21 rule 7: a canary arm is recorded per dispatch and once per task"
     expect(engineer?.data.editable_sha256).toBe(sha256Hex(EDITABLE));
     expect(engineer?.data).not.toHaveProperty("canary_arm");
     expect(ofType(h, "lookback.canary_assigned")).toEqual([]);
+    expect(ofType(h, "incident.recorded").map((e) => e.data.kind)).toEqual(["prompt_selection"]);
     await h.release();
   });
 });

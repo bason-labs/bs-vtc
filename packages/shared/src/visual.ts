@@ -144,6 +144,14 @@ export const VisualRenderKeySchema = z
   .string()
   .regex(/^[a-z0-9][a-z0-9._-]{0,63}:[a-z0-9][a-z0-9._-]{0,63}:\d{3,4}:(light|dark)$/);
 
+/**
+ * Whose toolchain a visual step ran on: `vtc` = the doctor-installed store under the VTC home
+ * (`BROWSER_STORE_NODE_MODULES`), `project` = the project's own Playwright loaded from the
+ * verification checkout (spine §5 reading 124). New in 4.7.0.
+ */
+export const VisualToolchainSchema = z.enum(["vtc", "project"]);
+export type VisualToolchain = z.infer<typeof VisualToolchainSchema>;
+
 const BrowserIdentitySchema = z.strictObject({
   name: z.string().min(1).max(100),
   version: z.string().min(1).max(64),
@@ -157,7 +165,13 @@ const AxeItemSchema = z.strictObject({
   nodes: z.int().nonnegative(),
 });
 
-/** The full visual evidence of one gate run, written redacted under `.vtc/evidence/<T-n|F-n>/`. */
+/**
+ * The full visual evidence of one gate run, written redacted at
+ * `.vtc/evidence/<T-n|F-n>/gates/<attempt>/visual/report.json` (a run with no owning task or
+ * feature keeps it under `.vtc/state/gates/<run>/<attempt>/evidence/visual/`). Readers follow
+ * `VisualSummary.report`, which names that path, rather than scanning for it (4.7.0, spine §5
+ * reading 137).
+ */
 export const VisualReportSchema = z
   .strictObject({
     v: z.literal(1),
@@ -166,6 +180,8 @@ export const VisualReportSchema = z
     feature: FeatureIdSchema.optional(),
     status: VisualStatusSchema,
     skipped_reason: z.string().min(1).max(500).optional(),
+    /** Whose Playwright ran the renders ({@link VisualToolchainSchema}). New in 4.7.0. */
+    toolchain: VisualToolchainSchema.optional(),
     browser: BrowserIdentitySchema.nullable(),
     renders: z
       .array(
@@ -248,6 +264,12 @@ export const VisualSummarySchema = z
     status: VisualStatusSchema,
     report: RelPathSchema.nullable(),
     skipped_reason: z.string().min(1).max(500).optional(),
+    /**
+     * Whose Playwright, axe-core and pixelmatch ran the step, set by the gate runner on every step
+     * that rendered (spine §5 readings 124, 137). A `pass` on `project` does not satisfy the
+     * Level-3 Final Review item: engine core reads it as `skipped`. New in 4.7.0.
+     */
+    toolchain: VisualToolchainSchema.optional(),
     counts: z.strictObject({
       renders: z.int().nonnegative(),
       unreached: z.int().nonnegative(),
@@ -327,7 +349,14 @@ export type BrowserPin = z.infer<typeof BrowserPinSchema>;
 
 // ------------------------------------------------------------------- novelty
 
-/** The design library under the VTC home (`~/.vtc/design-library/<scope>/`, per client, §9.1). */
+/**
+ * The design library under the VTC home, per client (§9.1, §14): one immutable
+ * {@link DesignLibraryEntry} JSON per chosen direction at
+ * `design-library/<researchScopeFor(project.client)>/<id>.json`, where `id` is
+ * `<engineRepoKey>-<12 hex>`. Engine core writes an entry when the human picks a direction at G2
+ * (through `GateRunner.recordDesignChoice`), and the novelty check reads only the project's own
+ * scope (layout documented in 4.7.0, spine §5 reading 137).
+ */
 export const DESIGN_LIBRARY_DIR = "design-library";
 
 /**

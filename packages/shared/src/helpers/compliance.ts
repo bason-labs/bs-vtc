@@ -295,6 +295,12 @@ export const REPO_ROLE_DENIED = {
     ".vtc/lookback/replays/**",
     ".vtc/lookback/scorecards/**",
     ".vtc/design/novelty/**",
+    /**
+     * The run event logs: canary promotability and the replay hash are read from them, so a role
+     * that could write one could forge `role.dispatched` or `lookback.replay_finished` (4.7.0,
+     * spine §5 reading 137). Only the engine appends.
+     */
+    ".vtc/runs/**",
   ],
 } as const;
 

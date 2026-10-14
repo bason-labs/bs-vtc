@@ -1,5 +1,5 @@
 {
-  "contracts_version": "4.6.0",
+  "contracts_version": "4.7.0",
   "schemas": {
     "Run": {
       "$id": "https://vtc.local/schemas/Run.json",
@@ -4387,6 +4387,13 @@
                   "minLength": 1,
                   "maxLength": 500
                 },
+                "toolchain": {
+                  "type": "string",
+                  "enum": [
+                    "vtc",
+                    "project"
+                  ]
+                },
                 "counts": {
                   "type": "object",
                   "properties": {
@@ -6985,7 +6992,8 @@
                 "unsandboxed_gate",
                 "run_adopted",
                 "milestone_commit",
-                "auth"
+                "auth",
+                "prompt_selection"
               ]
             },
             "detail": {
@@ -14298,6 +14306,13 @@
               "type": "string",
               "minLength": 1,
               "maxLength": 500
+            },
+            "toolchain": {
+              "type": "string",
+              "enum": [
+                "vtc",
+                "project"
+              ]
             },
             "counts": {
               "type": "object",
@@ -23586,6 +23601,13 @@
                     "minLength": 1,
                     "maxLength": 500
                   },
+                  "toolchain": {
+                    "type": "string",
+                    "enum": [
+                      "vtc",
+                      "project"
+                    ]
+                  },
                   "counts": {
                     "type": "object",
                     "properties": {
@@ -26794,7 +26816,7 @@
             },
             "repo": {
               "type": "string",
-              "pattern": "^[A-Za-z0-9_.-]{1,100}\\/[A-Za-z0-9_.-]{1,100}$"
+              "pattern": "^[A-Za-z0-9_-][A-Za-z0-9_.-]{0,99}\\/[A-Za-z0-9_-][A-Za-z0-9_.-]{0,99}$"
             },
             "what": {
               "type": "string",
@@ -27462,7 +27484,7 @@
                 },
                 "repo": {
                   "type": "string",
-                  "pattern": "^[A-Za-z0-9_.-]{1,100}\\/[A-Za-z0-9_.-]{1,100}$"
+                  "pattern": "^[A-Za-z0-9_-][A-Za-z0-9_.-]{0,99}\\/[A-Za-z0-9_-][A-Za-z0-9_.-]{0,99}$"
                 },
                 "what": {
                   "type": "string",
@@ -28106,7 +28128,7 @@
                         },
                         "repo": {
                           "type": "string",
-                          "pattern": "^[A-Za-z0-9_.-]{1,100}\\/[A-Za-z0-9_.-]{1,100}$"
+                          "pattern": "^[A-Za-z0-9_-][A-Za-z0-9_.-]{0,99}\\/[A-Za-z0-9_-][A-Za-z0-9_.-]{0,99}$"
                         },
                         "what": {
                           "type": "string",
@@ -28527,6 +28549,13 @@
           "type": "string",
           "minLength": 1,
           "maxLength": 500
+        },
+        "toolchain": {
+          "type": "string",
+          "enum": [
+            "vtc",
+            "project"
+          ]
         },
         "browser": {
           "anyOf": [
@@ -29011,6 +29040,13 @@
           "type": "string",
           "minLength": 1,
           "maxLength": 500
+        },
+        "toolchain": {
+          "type": "string",
+          "enum": [
+            "vtc",
+            "project"
+          ]
         },
         "counts": {
           "type": "object",
@@ -29699,6 +29735,374 @@
       "required": [
         "command",
         "url"
+      ],
+      "additionalProperties": false
+    },
+    "AaNoiseRow": {
+      "$id": "https://vtc.local/schemas/AaNoiseRow.json",
+      "title": "AaNoiseRow",
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "type": "object",
+      "properties": {
+        "v": {
+          "type": "number",
+          "const": 1
+        },
+        "repo_key": {
+          "type": "string",
+          "pattern": "^[a-f0-9]{16}$"
+        },
+        "role": {
+          "type": "string",
+          "pattern": "^[a-z][a-z0-9_-]{0,47}$"
+        },
+        "mode": {
+          "type": "string",
+          "pattern": "^[a-z0-9][a-z0-9._-]{0,63}$"
+        },
+        "host": {
+          "type": "string",
+          "enum": [
+            "claude-code",
+            "codex"
+          ]
+        },
+        "baseline": {
+          "type": "string",
+          "pattern": "^[a-f0-9]{64}$"
+        },
+        "grader_bundle_sha": {
+          "type": "string",
+          "pattern": "^[a-f0-9]{64}$"
+        },
+        "aa_flip_rate": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 1
+        },
+        "measured_at": {
+          "type": "string",
+          "format": "date-time",
+          "pattern": "^(?:(?:\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|(?:02)-(?:0[1-9]|1\\d|2[0-8])))T(?:(?:[01]\\d|2[0-3]):[0-5]\\d:[0-5]\\d(?:\\.\\d+)?(?:Z|([+-](?:[01]\\d|2[0-3]):[0-5]\\d)))$"
+        }
+      },
+      "required": [
+        "v",
+        "repo_key",
+        "role",
+        "host",
+        "baseline",
+        "grader_bundle_sha",
+        "aa_flip_rate",
+        "measured_at"
+      ],
+      "additionalProperties": false
+    },
+    "LookbackTiebreakRecord": {
+      "$id": "https://vtc.local/schemas/LookbackTiebreakRecord.json",
+      "title": "LookbackTiebreakRecord",
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "type": "object",
+      "properties": {
+        "v": {
+          "type": "number",
+          "const": 1
+        },
+        "tiebreak_key": {
+          "type": "string",
+          "pattern": "^[a-f0-9]{64}$"
+        },
+        "repo_key": {
+          "type": "string",
+          "pattern": "^[a-f0-9]{16}$"
+        },
+        "run": {
+          "type": "string",
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$"
+        },
+        "trace": {
+          "type": "string",
+          "pattern": "^[a-z0-9][a-z0-9._-]{0,63}$"
+        },
+        "blamed_role": {
+          "anyOf": [
+            {
+              "type": "string",
+              "pattern": "^[a-z][a-z0-9_-]{0,47}$"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "recorded_at": {
+          "type": "string",
+          "format": "date-time",
+          "pattern": "^(?:(?:\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|(?:02)-(?:0[1-9]|1\\d|2[0-8])))T(?:(?:[01]\\d|2[0-3]):[0-5]\\d:[0-5]\\d(?:\\.\\d+)?(?:Z|([+-](?:[01]\\d|2[0-3]):[0-5]\\d)))$"
+        }
+      },
+      "required": [
+        "v",
+        "tiebreak_key",
+        "repo_key",
+        "run",
+        "trace",
+        "blamed_role",
+        "recorded_at"
+      ],
+      "additionalProperties": false
+    },
+    "ResearchCacheRequestRow": {
+      "$id": "https://vtc.local/schemas/ResearchCacheRequestRow.json",
+      "title": "ResearchCacheRequestRow",
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "type": "object",
+      "properties": {
+        "key": {
+          "type": "string",
+          "pattern": "^[a-f0-9]{64}$"
+        },
+        "request": {
+          "oneOf": [
+            {
+              "type": "object",
+              "properties": {
+                "fetcher": {
+                  "type": "string",
+                  "const": "eol"
+                },
+                "product": {
+                  "type": "string",
+                  "pattern": "^[a-z0-9][a-z0-9._-]{0,63}$"
+                },
+                "release": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 64
+                }
+              },
+              "required": [
+                "fetcher",
+                "product",
+                "release"
+              ],
+              "additionalProperties": false
+            },
+            {
+              "type": "object",
+              "properties": {
+                "fetcher": {
+                  "type": "string",
+                  "const": "depsdev"
+                },
+                "system": {
+                  "type": "string",
+                  "enum": [
+                    "npm",
+                    "pypi",
+                    "go",
+                    "maven",
+                    "cargo",
+                    "nuget"
+                  ]
+                },
+                "name": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 214
+                },
+                "version": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 64
+                }
+              },
+              "required": [
+                "fetcher",
+                "system",
+                "name"
+              ],
+              "additionalProperties": false
+            },
+            {
+              "type": "object",
+              "properties": {
+                "fetcher": {
+                  "type": "string",
+                  "const": "osv"
+                },
+                "ecosystem": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 64
+                },
+                "name": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 214
+                },
+                "version": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 64
+                }
+              },
+              "required": [
+                "fetcher",
+                "ecosystem",
+                "name",
+                "version"
+              ],
+              "additionalProperties": false
+            },
+            {
+              "type": "object",
+              "properties": {
+                "fetcher": {
+                  "type": "string",
+                  "const": "registry"
+                },
+                "registry": {
+                  "type": "string",
+                  "enum": [
+                    "npm",
+                    "pypi",
+                    "crates"
+                  ]
+                },
+                "name": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 214
+                },
+                "version": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 64
+                }
+              },
+              "required": [
+                "fetcher",
+                "registry",
+                "name"
+              ],
+              "additionalProperties": false
+            },
+            {
+              "type": "object",
+              "properties": {
+                "fetcher": {
+                  "type": "string",
+                  "const": "github"
+                },
+                "repo": {
+                  "type": "string",
+                  "pattern": "^[A-Za-z0-9_-][A-Za-z0-9_.-]{0,99}\\/[A-Za-z0-9_-][A-Za-z0-9_.-]{0,99}$"
+                },
+                "what": {
+                  "type": "string",
+                  "enum": [
+                    "repo",
+                    "releases",
+                    "latest_release"
+                  ]
+                }
+              },
+              "required": [
+                "fetcher",
+                "repo",
+                "what"
+              ],
+              "additionalProperties": false
+            },
+            {
+              "type": "object",
+              "properties": {
+                "fetcher": {
+                  "type": "string",
+                  "const": "web"
+                },
+                "url": {
+                  "type": "string",
+                  "maxLength": 2048,
+                  "format": "uri"
+                }
+              },
+              "required": [
+                "fetcher",
+                "url"
+              ],
+              "additionalProperties": false
+            },
+            {
+              "type": "object",
+              "properties": {
+                "fetcher": {
+                  "type": "string",
+                  "const": "rss"
+                },
+                "url": {
+                  "type": "string",
+                  "maxLength": 2048,
+                  "format": "uri"
+                }
+              },
+              "required": [
+                "fetcher",
+                "url"
+              ],
+              "additionalProperties": false
+            },
+            {
+              "type": "object",
+              "properties": {
+                "fetcher": {
+                  "type": "string",
+                  "const": "youtube"
+                },
+                "url": {
+                  "type": "string",
+                  "maxLength": 2048,
+                  "format": "uri"
+                }
+              },
+              "required": [
+                "fetcher",
+                "url"
+              ],
+              "additionalProperties": false
+            },
+            {
+              "type": "object",
+              "properties": {
+                "fetcher": {
+                  "type": "string",
+                  "const": "search"
+                },
+                "query": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 500
+                },
+                "max_results": {
+                  "default": 5,
+                  "type": "integer",
+                  "minimum": 1,
+                  "maximum": 20
+                }
+              },
+              "required": [
+                "fetcher",
+                "query"
+              ],
+              "additionalProperties": false
+            }
+          ]
+        }
+      },
+      "required": [
+        "key",
+        "request"
       ],
       "additionalProperties": false
     }

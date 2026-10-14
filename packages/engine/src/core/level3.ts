@@ -43,6 +43,8 @@ import {
   type RequiredCheck,
   type RiskRuleId,
   type Task,
+  type VisualStatus,
+  type VisualSummary,
 } from "@vtc/shared";
 import { appendRepoFile } from "../git/index.js";
 import { parkEscalation } from "./escalations.js";
@@ -230,6 +232,20 @@ export const lastFinalReview = (h: RunHandle, featureId: string): GateReport | u
     .filter((r) => r.reason === "final_review" && r.feature === featureId)
     .at(-1);
 
+/**
+ * The visual status the Level-3 Final Review item reads (AD-23, AD-24): `null` for a feature with
+ * no UI, `unchecked` for a UI feature whose Final Review ran no visual step, and `skipped` for a
+ * `pass` on the project's own Playwright (spine §5 readings 124 and 137), which, like a run with
+ * no browser, never satisfies the item.
+ */
+export const level3VisualStatus = (
+  visual: VisualSummary | undefined,
+  hasUi: boolean,
+): VisualStatus | null => {
+  if (visual === undefined) return hasUi ? "unchecked" : null;
+  return visual.status === "pass" && visual.toolchain === "project" ? "skipped" : visual.status;
+};
+
 /** The engine-side inputs of the §6.7 checklist, each with its evidence (AD-23 rule 2). */
 export const checklistInput = (
   k: Kernel,
@@ -275,7 +291,7 @@ export const checklistInput = (
     const rule = riskRuleForPark(e.reason, e.risk_rule);
     if (rule !== null) fired.add(rule);
   }
-  const visual = report?.visual?.status ?? (featureHasUi(h.state, featureId) ? "unchecked" : null);
+  const visual = level3VisualStatus(report?.visual, featureHasUi(h.state, featureId));
   // a step of the last Final Review round that could not be checked never counts as a pass
   // (AD-23 rule 3): the round's steps are those logged after its gate run
   const reportSeq = h.state.gateReports

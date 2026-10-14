@@ -55,9 +55,11 @@ import {
 } from "./design.js";
 import { HostAuthStatusSchema } from "./headless.js";
 import {
+  AaNoiseRowSchema,
   AttributionSchema,
   CanaryStateSchema,
   LookbackPinsSchema,
+  LookbackTiebreakRecordSchema,
   PromptProposalSchema,
   PromptVersionFrontmatterSchema,
   PromptVersionRefSchema,
@@ -75,6 +77,7 @@ import {
   FactWaiverSchema,
   FetchRequestSchema,
   FetchResultSchema,
+  ResearchCacheRequestRowSchema,
   ResearchFetchInputSchema,
   ResearchFetchResultSchema,
 } from "./research.js";
@@ -247,6 +250,10 @@ export const CONTRACT_SCHEMAS = {
   ComponentSpec: ComponentSpecSchema,
   AdCheckSpec: AdCheckSpecSchema,
   VisualApp: VisualAppSchema,
+  // ---- contracts 4.7.0 (the wave-3 integration round, spine §5 readings 135-143)
+  AaNoiseRow: AaNoiseRowSchema,
+  LookbackTiebreakRecord: LookbackTiebreakRecordSchema,
+  ResearchCacheRequestRow: ResearchCacheRequestRowSchema,
 } as const;
 export type ContractName = keyof typeof CONTRACT_SCHEMAS;
 

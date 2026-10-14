@@ -52,6 +52,12 @@ export const LOOKBACK_HOME = {
    * plant a noise floor (reading 128). New in 4.6.0.
    */
   aaNoiseFile: "lookback/aa-noise.jsonl",
+  /**
+   * The AI tiebreak answers the engine recorded, one {@link LookbackTiebreakRecord} per line.
+   * Under the VTC home (never in a repo), so no role can plant one: an `ai_tiebreak` attribution
+   * counts only when its `tiebreak_key` is here (spine §5 reading 137). New in 4.7.0.
+   */
+  tiebreaksFile: "lookback/tiebreaks.jsonl",
 } as const;
 
 /** When a `pins.lock` counts as stale ({@link LOOKBACK_HOME}`.pinsLock`). New in 4.6.0. */
@@ -132,7 +138,8 @@ export type PromptVersionFrontmatter = z.infer<typeof PromptVersionFrontmatterSc
 
 // --------------------------------------------------------------------- pins
 
-const RepoKeySchema = z.string().regex(/^[a-f0-9]{16}$/, "expected an engineRepoKey");
+/** An `engineRepoKey`: how pins, A/A rows and tiebreak records name a project. Exported in 4.7.0. */
+export const RepoKeySchema = z.string().regex(/^[a-f0-9]{16}$/, "expected an engineRepoKey");
 
 const PinTargetSchema = z.strictObject({
   role: RoleIdSchema,
@@ -453,6 +460,43 @@ export const AttributionSchema = z
     path: ["rule"],
   });
 export type Attribution = z.infer<typeof AttributionSchema>;
+
+/**
+ * One AI tiebreak answer the engine recorded ({@link LOOKBACK_HOME}`.tiebreaksFile`): the digest
+ * that ties an `ai_tiebreak` {@link Attribution} row to it (the lookback module's `tiebreakKey`),
+ * the run and dispatch it answered for, and the role it blamed (`null` = "unknown"). Only the
+ * engine writes these; read with `parsePersisted`. New in 4.7.0 (spine §5 reading 137).
+ */
+export const LookbackTiebreakRecordSchema = z.strictObject({
+  v: z.literal(1),
+  tiebreak_key: Sha256HexSchema,
+  repo_key: RepoKeySchema,
+  run: RunIdSchema,
+  /** The dispatch the answer is about (`role.dispatched.action_id`). */
+  trace: SlugSchema,
+  blamed_role: RoleIdSchema.nullable(),
+  recorded_at: IsoDateTimeSchema,
+});
+export type LookbackTiebreakRecord = z.infer<typeof LookbackTiebreakRecordSchema>;
+
+/**
+ * One measured A/A flip rate ({@link LOOKBACK_HOME}`.aaNoiseFile`, one JSON line per replay that
+ * ran its own `aa` arm): the noise floor of a baseline under one grader bundle in one project.
+ * Read with `parsePersisted`. New in 4.7.0 (it was the lookback module's own shape).
+ */
+export const AaNoiseRowSchema = z.strictObject({
+  v: z.literal(1),
+  repo_key: RepoKeySchema,
+  role: RoleIdSchema,
+  mode: SlugSchema.optional(),
+  host: HostIdSchema,
+  /** The baseline's `effective_sha256`. */
+  baseline: Sha256HexSchema,
+  grader_bundle_sha: Sha256HexSchema,
+  aa_flip_rate: z.number().min(0).max(1),
+  measured_at: IsoDateTimeSchema,
+});
+export type AaNoiseRow = z.infer<typeof AaNoiseRowSchema>;
 
 // --------------------------------------------------------------- scorecards
 
