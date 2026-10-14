@@ -21,7 +21,6 @@ import {
   splitCommand,
   stringifyGatesConfig,
 } from "../../src/gates/index.js";
-import { visualAppOf } from "../../src/gates/visual/app.js";
 import { cleanupDirs, initRepo, tempDir, writeFile } from "../helpers/repo.js";
 import {
   cases,
@@ -37,6 +36,9 @@ import {
 } from "./fixture.js";
 
 afterEach(cleanupDirs);
+
+/** `visual.app` of `gates.yml` text, read only through the typed config (contracts 4.6.0). */
+const appOf = (text: string) => parseGatesConfig(text).visual?.app ?? null;
 
 const SCANNERS = ["gitleaks", "osv-scanner", "opengrep", "checkov"];
 
@@ -405,11 +407,6 @@ describe("calibrate", () => {
     await calibrate(s.deps(() => true));
     expect(s.answers[0]).toBe(question);
     const text = readFileSync(join(s.repo, ".vtc/gates.yml"), "utf8");
-    expect(visualAppOf(text)).toEqual({
-      command: ["npm", "run", "dev"],
-      url: "http://localhost:4000",
-      ready_timeout_s: 120,
-    });
     // the typed config carries it since contracts 4.6.0 (`GatesConfig.visual.app`, reading 121)
     expect(parseGatesConfig(text).visual).toEqual({
       widths: [390],
@@ -423,16 +420,47 @@ describe("calibrate", () => {
     const before = s.answers.length;
     await calibrate(s.deps(() => true));
     expect(s.answers.slice(before)).not.toContain(question);
-    expect(visualAppOf(readFileSync(join(s.repo, ".vtc/gates.yml"), "utf8"))).toMatchObject({
-      command: ["npm", "run", "dev"],
+    expect(parseGatesConfig(readFileSync(join(s.repo, ".vtc/gates.yml"), "utf8")).visual).toEqual({
+      widths: [390],
+      app: { command: ["npm", "run", "dev"], url: "http://localhost:4000", ready_timeout_s: 120 },
     });
+  });
+
+  it("keeps a hand-written visual app server and the other visual settings on re-calibration", async () => {
+    const s = setup();
+    // No package.json: nothing to propose, so only the hand-written app can be there afterwards.
+    writeFile(
+      s.repo,
+      ".vtc/gates.yml",
+      `${readFileSync(join(s.repo, ".vtc/gates.yml"), "utf8")}visual:\n  themes: [light, dark]\n  dynamic_regions: [".clock"]\n  app:\n    command: ["${NODE}", "tools/serve.mjs"]\n    url: http://127.0.0.1:4173\n    cwd: web\n    ready_timeout_s: 30\n`,
+    );
+    const outcome = await calibrate(s.deps(() => true));
+    expect(outcome).toMatchObject({ status: "frozen" });
+    const visual = {
+      themes: ["light", "dark"],
+      dynamic_regions: [".clock"],
+      app: {
+        command: [NODE, "tools/serve.mjs"],
+        url: "http://127.0.0.1:4173",
+        cwd: "web",
+        ready_timeout_s: 30,
+      },
+    };
+    if (outcome.status !== "frozen") throw new Error("not frozen");
+    expect(outcome.config.visual).toEqual(visual);
+    expect(parseGatesConfig(readFileSync(join(s.repo, ".vtc/gates.yml"), "utf8")).visual).toEqual(
+      visual,
+    );
+    expect(s.answers.some((q) => q.startsWith("Use `"))).toBe(false);
+    expect(s.lines.join("\n")).toMatch(/kept the visual app server of \.vtc\/gates\.yml/);
+    expect(gateCommandAllowed([NODE, "tools/serve.mjs"], readAllowlist(s.home, s.repo))).toBe(true);
   });
 
   it("writes no visual app server and allowlists nothing for it when the human says no", async () => {
     const s = setup();
     writeFile(s.repo, "package.json", JSON.stringify({ scripts: { dev: "vite" } }));
     await calibrate(s.deps((q) => !q.startsWith("Use `")));
-    expect(visualAppOf(readFileSync(join(s.repo, ".vtc/gates.yml"), "utf8"))).toBeNull();
+    expect(appOf(readFileSync(join(s.repo, ".vtc/gates.yml"), "utf8"))).toBeNull();
     expect(gateCommandAllowed(["npm", "run", "dev"], readAllowlist(s.home, s.repo))).toBe(false);
     expect(s.lines.join("\n")).toMatch(/no visual app server/);
   });
@@ -516,7 +544,7 @@ describe("the calibrated fixture", () => {
     // What calibrate writes once the human confirms and both runs agree (no flaky tests).
     // The proposed app server is shown in the dry run (`visual.app`, tested above); the fixture
     // is the rest of the config.
-    expect(visualAppOf(outcome.yaml)).toMatchObject({ command: ["pnpm", "run", "dev"] });
+    expect(appOf(outcome.yaml)).toMatchObject({ command: ["pnpm", "run", "dev"] });
     const { visual, ...proposed } = parseGatesConfig(outcome.yaml);
     expect(visual?.app?.command).toEqual(["pnpm", "run", "dev"]);
     const frozen = stringifyGatesConfig({

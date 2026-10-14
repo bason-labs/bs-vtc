@@ -17,6 +17,7 @@ import {
   VisualReportSchema,
 } from "@vtc/shared";
 import {
+  LINUX_PTRACE_REFUSAL,
   projectToolchain,
   ranOnProjectToolchain,
   RunnerResultSchema,
@@ -554,5 +555,85 @@ describe("visual step in a gate run", () => {
     const report = await h.run({ head: h.base, include_hidden: true, visual: { screens: [] } });
     expect(report.results.find((r) => r.layer === "L2")?.tests?.executed).toBe(2);
     expect(seenDuringRender).toBe(false);
+  });
+
+  it("names whose toolchain ran in the summary and the report, on both paths and whatever the status", async () => {
+    const read = (h: ReturnType<typeof setup>["h"], path: string | null | undefined) =>
+      VisualReportSchema.parse(JSON.parse(readFileSync(join(h.repo, path ?? ""), "utf8")));
+    const failing = (exe: string) =>
+      fakeRunner(exe, () => ({
+        diffs: [{ region: "main", mismatch_px: 900, total_px: 1000 }],
+      }));
+    // The doctor store: VTC's own comparison code, also on a failing render.
+    const store = setup({ store: "match", runner: failing });
+    const onStore = await store.h.run({ head: store.h.base, visual: { screens: ["home"] } });
+    expect(onStore.visual?.status).toBe("fail");
+    expect(onStore.visual?.toolchain).toBe("vtc");
+    expect(read(store.h, onStore.visual?.report).toolchain).toBe("vtc");
+    // The project's own Playwright, failing too.
+    const project = setup({ project: true, runner: failing });
+    const onProject = await project.h.run({ head: project.h.base, visual: { screens: ["home"] } });
+    expect(onProject.visual?.status).toBe("fail");
+    expect(onProject.visual?.toolchain).toBe("project");
+    expect(read(project.h, onProject.visual?.report).toolchain).toBe("project");
+    // Both there: the store wins, and the field says so.
+    const both = setup({ project: true, store: "match" });
+    const onBoth = await both.h.run({ head: both.h.base, visual: { screens: ["home"] } });
+    expect(onBoth.visual?.toolchain).toBe("vtc");
+    expect(read(both.h, onBoth.visual?.report).toolchain).toBe("vtc");
+    // No toolchain was chosen: no field, rather than a guess.
+    const none = setup({});
+    const without = await none.h.run({ head: none.h.base, visual: { screens: [] } });
+    expect(without.visual?.status).toBe("skipped");
+    expect(without.visual?.toolchain).toBeUndefined();
+    expect(read(none.h, without.visual?.report).toolchain).toBeUndefined();
+  });
+
+  it("is skipped, naming the sysctl, when the runner will not render under Linux ptrace_scope 0 (D-bj)", async () => {
+    const { h, fake } = setup({
+      project: true,
+      runner: (exe) => {
+        const inner = fakeRunner(exe);
+        return {
+          calls: inner.calls,
+          runner: {
+            run: (call: VisualRunnerCall) => {
+              if (call.input.mode !== "render") return inner.runner.run(call);
+              inner.calls.push(call);
+              return Promise.resolve({
+                ok: false as const,
+                skipped: true as const,
+                reason: LINUX_PTRACE_REFUSAL,
+              });
+            },
+          },
+        };
+      },
+    });
+    const report = GateReportSchema.parse(await h.run({ head: h.base, visual: { screens: [] } }));
+    expect(fake.calls.some((c) => c.input.mode === "render")).toBe(true);
+    expect(report.visual?.status).toBe("skipped");
+    expect(report.visual?.skipped_reason).toBe(LINUX_PTRACE_REFUSAL);
+    expect(report.visual?.skipped_reason).toMatch(/kernel\.yama\.ptrace_scope/);
+    expect(report.visual?.toolchain).toBe("project");
+    expect(report.visual?.counts.renders).toBe(0);
+    expect(report.verdict).toBe("pass");
+    const written = VisualReportSchema.parse(
+      JSON.parse(readFileSync(join(h.repo, report.visual?.report ?? ""), "utf8")),
+    );
+    expect(written.status).toBe("skipped");
+    expect(written.skipped_reason).toBe(LINUX_PTRACE_REFUSAL);
+    expect(written.renders).toEqual([]);
+  });
+
+  it("reads visual.app only through the typed gates.yml: an invalid one runs nothing", async () => {
+    const { h, fake } = setup({
+      project: true,
+      gatesExtra: `visual:\n  app:\n    command: ["${NODE}", "tools/serve.mjs"]\n    url: http://example.com:4173\n`,
+    });
+    const report = await h.run({ head: h.base, visual: { screens: [] } });
+    // gates.yml does not parse, so the run is gate infrastructure and nothing renders.
+    expect(report.results.find((r) => r.gate_id === "config")?.status).toBe("error");
+    expect(fake.calls).toEqual([]);
   });
 });
