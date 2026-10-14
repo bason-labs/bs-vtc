@@ -1,5 +1,4 @@
 import { PHASES, type WorkflowGraph, type WorkflowNode } from "@vtc/shared";
-import type { View } from "./router";
 
 /**
  * Evidence mode (spine AD-27 rule 6, §5 readings 199 and 208): the dashboard as the evidence
@@ -38,10 +37,10 @@ export const withEvidenceParam = (href: string, currentSearch: string): string =
   return `${url.pathname}${url.search}${url.hash}`;
 };
 
-/** The views the upstream-safe projection shows: the flow and Lookback. */
-const UPSTREAM_VIEWS: ReadonlySet<View> = new Set<View>(["run", "lookback", "not_found"]);
+/** The views (`router.ts` `View`) the upstream-safe projection shows: the flow and Lookback. */
+const UPSTREAM_VIEWS: ReadonlySet<string> = new Set(["run", "lookback", "not_found"]);
 
-export const viewShownIn = (mode: EvidenceMode, view: View): boolean =>
+export const viewShownIn = (mode: EvidenceMode, view: string): boolean =>
   mode !== "upstream" || UPSTREAM_VIEWS.has(view);
 
 const PHASE_IDS: ReadonlySet<string> = new Set(PHASES);
