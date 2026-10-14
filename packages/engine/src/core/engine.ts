@@ -62,10 +62,10 @@ import {
   type CommittedGates,
 } from "./config.js";
 import { dispatchGuarded, inSessionRefusal, NO_LEAD_WAIT_REASON, phaseRoles } from "./dispatch.js";
-import { g2ApprovalProblem, gateExtras, type GateExtras } from "./g2.js";
+import { g2ApprovalProblem, gateExtras, recordChosenDirection, type GateExtras } from "./g2.js";
 import { effectiveVerdict } from "./gate-verdict.js";
 import { headlessRunsOf, killHeadless } from "./headless.js";
-import type { FactRefresher, RoleToolHandler } from "./kernel.js";
+import type { FactRefresher, PromptPins, RoleToolHandler } from "./kernel.js";
 import { dispatchNow, drive } from "./route.js";
 import { parkEscalation } from "./escalations.js";
 import {
@@ -140,7 +140,13 @@ import { completedReviews, startTriage } from "./review.js";
 import { activeRun } from "./read-model.js";
 import { loadRuns } from "./run-store.js";
 import { schedule } from "./scheduler.js";
-import { applyEvent, emptyRunState, projectRun, type RunState } from "./state.js";
+import {
+  applyEvent,
+  emptyRunState,
+  projectRun,
+  STOPPED_RUN_PREFIXES,
+  type RunState,
+} from "./state.js";
 import { ArtifactRefSchema } from "@vtc/shared";
 import { checkEngineerShare, handleSubmit } from "./submit.js";
 import { escalationListView, openEscalations, statusView } from "./views.js";
@@ -314,6 +320,7 @@ export class Engine implements Kernel {
   private factRefresher: FactRefresher | null = null;
   /** What the wired refresher last returned (`Kernel.factTable`). */
   private checkedFacts: readonly UnverifiedFactSummary[] | null = null;
+  private pins: PromptPins | null = null;
   /** The G2 showings whose stale facts were already re-fetched (`run:phase entry seq`). */
   private readonly factsRefreshed = new Set<string>();
 
@@ -953,6 +960,18 @@ export class Engine implements Kernel {
     const handle = id === undefined ? undefined : this.handles.get(id);
     if (handle === undefined || handle.state.run.finished_at !== undefined) return;
     this.emit(handle, draft);
+  }
+
+  /**
+   * Select each dispatch's pinned editable section with `pins` (AD-21 rules 1, 2 and 7): the
+   * daemon wires the lookback module's (core never imports it, AD-13 rule 12).
+   */
+  setPromptPins(pins: PromptPins | null): void {
+    this.pins = pins;
+  }
+
+  promptPins(): PromptPins | null {
+    return this.pins;
   }
 
   leadHostFor(run: string, call: CallContext): HostId | undefined {
@@ -1686,6 +1705,18 @@ export class Engine implements Kernel {
         // AD-22 rule 4, reading 110: every unverified fact waived with a reason; one direction
         const blocked = g2ApprovalProblem(awaiting.extras, input);
         if (blocked !== null) throw new EngineError("invalid", blocked);
+        // §9.1 step 6: the chosen direction enters the design library before anything is
+        // recorded, so an approval either does both or neither
+        if (input.design_direction !== undefined) {
+          try {
+            recordChosenDirection(this, handle, input.design_direction);
+          } catch (error) {
+            throw new EngineError(
+              "conflict",
+              `the chosen direction could not be recorded in the design library under ${this.deps.vtcHome}: ${error instanceof Error ? error.message : String(error)}; fix the directory, then approve again`,
+            );
+          }
+        }
         for (const waiver of input.fact_waivers ?? [])
           this.emit(handle, { type: "fact.waived", actor: "human", data: waiver });
         this.emit(handle, {
@@ -2011,7 +2042,7 @@ export class Engine implements Kernel {
           data: {
             action_id: run.action_id,
             kind: "error",
-            message: "superseded: the run was resumed",
+            message: `${STOPPED_RUN_PREFIXES.superseded} the run was resumed`,
             retryable: true,
           },
         });

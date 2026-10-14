@@ -4,10 +4,19 @@
  * and the design coverage; an approval that does not waive every unverified fact with a reason is
  * rejected; each waiver is recorded as `fact.waived`; with directions on offer the human picks one.
  */
-import { readFileSync, symlinkSync } from "node:fs";
+import { existsSync, readdirSync, readFileSync, symlinkSync } from "node:fs";
 import { join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { factId, type ApproveInput, type FactRow, type LeadAction } from "@vtc/shared";
+import {
+  DESIGN_LIBRARY_DIR,
+  DesignLibraryEntrySchema,
+  engineRepoKey,
+  factId,
+  type ApproveInput,
+  type DesignLibraryEntry,
+  type FactRow,
+  type LeadAction,
+} from "@vtc/shared";
 import { ALL_FIXTURE_ROLES } from "../fixtures/roles.js";
 import { unverifiedFacts } from "../../src/core/g2.js";
 import type { Kernel } from "../../src/core/kernel.js";
@@ -515,6 +524,58 @@ describe("G2 directions and the DESIGN coverage check (§9.1, §6.1)", () => {
     const out = await approve(h, gate, { ...waive, design_direction: "signal" });
     expect(only(out.actions, "planner").role).toBe("planner");
     expect(ofType(h, "gate.approved").at(-1)?.data.design_direction).toBe("signal");
+    await h.release();
+  });
+
+  const library = (h: Harness, scope: string): DesignLibraryEntry[] => {
+    const dir = join(h.home, DESIGN_LIBRARY_DIR, scope);
+    if (!existsSync(dir)) return [];
+    return readdirSync(dir).map((name) =>
+      DesignLibraryEntrySchema.parse(JSON.parse(readFileSync(join(dir, name), "utf8"))),
+    );
+  };
+  const waiveAll = (gate: ApproveGate) => ({
+    waived_facts: gate.unverified_facts,
+    fact_waivers: gate.unverified_facts.map((id) => ({ id, reason: "ok" })),
+  });
+
+  it("records the chosen direction in the design library under the VTC home (§9.1 step 6)", async () => {
+    const h = createHarness({ roles: ROLES });
+    const gate = await toG2(h, { hasUi: true, designer: designerWork });
+    await approve(h, gate, { ...waiveAll(gate), design_direction: "signal" });
+    const entries = library(h, "_shared");
+    expect(entries).toEqual([
+      {
+        v: 1,
+        id: expect.stringMatching(/^[a-f0-9]{16}-[a-f0-9]{12}$/) as string,
+        project_key: engineRepoKey(h.repo),
+        direction: "signal",
+        phash: "0123456789abcdef",
+        token_vector: [0.1, 0.2],
+        chosen_at: "2026-10-13T09:00:00.000Z",
+      },
+    ]);
+    // the file is named by its id: an approval replayed never adds a second entry
+    expect(readdirSync(join(h.home, DESIGN_LIBRARY_DIR, "_shared"))).toEqual([
+      `${entries[0]?.id ?? ""}.json`,
+    ]);
+    await h.release();
+  });
+
+  it("keeps a client's directions in the client's own library", async () => {
+    const h = createHarness({ roles: ROLES, project: { client: "acme" } });
+    const gate = await toG2(h, { hasUi: true, designer: designerWork });
+    await approve(h, gate, { ...waiveAll(gate), design_direction: "signal" });
+    expect(library(h, "client-acme").map((e) => e.direction)).toEqual(["signal"]);
+    expect(library(h, "_shared")).toEqual([]);
+    await h.release();
+  });
+
+  it("a chosen direction with no novelty report has nothing to record", async () => {
+    const h = createHarness({ roles: ROLES });
+    const gate = await toG2(h, { hasUi: true, designer: designerWork });
+    await approve(h, gate, { ...waiveAll(gate), design_direction: "quiet-ledger" });
+    expect(library(h, "_shared")).toEqual([]);
     await h.release();
   });
 });

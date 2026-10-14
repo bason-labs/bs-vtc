@@ -27,6 +27,20 @@ import {
   type VtcEvent,
 } from "@vtc/shared";
 
+/**
+ * How a `role.failed` message starts when the engine or the human stopped the run (it is not the
+ * role's failure): a run `vtc pause` killed, and a run a resume superseded. Such a run is
+ * `stopped` and never counts toward the stuck limit (`consecutiveFailures`, Final Review's).
+ */
+export const STOPPED_RUN_PREFIXES = {
+  paused: "stopped by vtc pause",
+  superseded: "superseded:",
+} as const;
+
+/** True when a `role.failed` message says the run was stopped, not failed. */
+export const isStoppedRunMessage = (message: string): boolean =>
+  Object.values(STOPPED_RUN_PREFIXES).some((prefix) => message.startsWith(prefix));
+
 /** One role run (a `role.dispatched` and what became of it). */
 export interface RoleRunRecord {
   readonly action_id: string;
@@ -55,6 +69,8 @@ export interface RoleRunRecord {
   tokens: TokenUsage | null;
   costUsd: number | null;
   rejection?: { reason: string; issues: string[] };
+  /** A failed run the engine or the human stopped (`isStoppedRunMessage`): not the role's failure. */
+  stopped?: boolean;
 }
 
 export interface GateReportRecord {
@@ -360,6 +376,7 @@ export const applyEvent = (state: RunState, event: VtcEvent): void => {
       run.status = "failed";
       run.closedSeq = event.seq;
       run.costUsd = event.cost_usd ?? null;
+      if (isStoppedRunMessage(data.message)) run.stopped = true;
     }
   } else if (isEventOfType(event, "gate.result")) {
     state.gateReports.push({

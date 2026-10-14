@@ -79,12 +79,18 @@ export const failRound = (k: Kernel, h: RunHandle, taskId: string, reappeared: b
  * round; otherwise the task is built and queued. A guarded out-of-scope fault went to its owning
  * or a new task (§6.3
  * step 3), so it never fails the claimer's round: it is resolved on the claimer once the
- * claimer's own gates and reviews pass.
+ * claimer's own gates and reviews pass. A Final Review reviewer's finding on its fix task
+ * ({@link checkedAtFinalReview}) is resolved the same way: Final Review checks it again.
  */
 export const settleRound = (k: Kernel, h: RunHandle, taskId: string, merge: RoundMerge): void => {
   const task = h.state.tasks.get(taskId);
   if (task === undefined) return;
-  const open = taskFindings(h.state, taskId).filter((f) => f.status === "open");
+  const all = taskFindings(h.state, taskId).filter((f) => f.status === "open");
+  // a Final Review reviewer's finding is checked again by its own step in the next Final Review
+  // round (a failed step always runs again), not by the fix task's reviewers, who may not include
+  // that role: it never holds the fix task's round
+  const atFinalReview = all.filter(checkedAtFinalReview);
+  const open = all.filter((f) => !checkedAtFinalReview(f));
   const secret = open.find((f) => f.route === "risky");
   if (secret !== undefined) {
     parkTask(k, h, taskId, {
@@ -118,7 +124,7 @@ export const settleRound = (k: Kernel, h: RunHandle, taskId: string, merge: Roun
     failRound(k, h, taskId, merge.reappeared);
     return;
   }
-  for (const f of open.filter((x) => x.route === "out_of_scope")) {
+  for (const f of [...open.filter((x) => x.route === "out_of_scope"), ...atFinalReview]) {
     k.emit(h, {
       type: "finding.status_changed",
       actor: "engine",
@@ -128,6 +134,13 @@ export const settleRound = (k: Kernel, h: RunHandle, taskId: string, merge: Roun
   }
   markBuilt(k, h, taskId);
 };
+
+/**
+ * A finding a Final Review AI reviewer raised (`feature` set, a role source), routed to a fix
+ * task: Final Review's next round re-runs that reviewer on the integrated head (§6.7a).
+ */
+export const checkedAtFinalReview = (finding: Finding): boolean =>
+  finding.feature !== undefined && finding.source === "role" && finding.route !== "risky";
 
 /** All clear (§6.3 step 10): built, then into the merge queue. */
 export const markBuilt = (k: Kernel, h: RunHandle, taskId: string): void => {
