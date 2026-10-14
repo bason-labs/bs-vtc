@@ -62,7 +62,9 @@ export const lookbackTargets = (input: {
   for (const a of input.attributions) {
     if (!isTrainFailure(a) || a.prompt.role === LOOKBACK_ROLE) continue;
     const key = `${targetKey(a.prompt)}:${a.prompt.effective_sha256}`;
-    candidates.set(key, [...(candidates.get(key) ?? []), a]);
+    const list = candidates.get(key);
+    if (list === undefined) candidates.set(key, [a]);
+    else list.push(a);
   }
   const targets: LookbackTarget[] = [];
   for (const rows of candidates.values()) {

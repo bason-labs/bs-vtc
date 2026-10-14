@@ -219,4 +219,24 @@ describe("research claims for G2 (AD-22 rule 4)", () => {
       [2, ["f-0123456789abcdef"]],
     ]);
   });
+
+  it("stays fast on long hostile lines, and still finds a claim deep in one (no backtracking)", () => {
+    const hostile = [
+      "a@".repeat(100_000),
+      "a".repeat(200_000),
+      "1.".repeat(100_000),
+      "1".repeat(200_000),
+      "v1.".repeat(70_000),
+      "-1".repeat(100_000),
+      "f-".repeat(100_000),
+    ];
+    const started = performance.now();
+    const claims = scanResearchClaims([{ path: "a.md", text: hostile.join("\n") }], new Set());
+    expect(performance.now() - started).toBeLessThan(1000);
+    // "1.1.1" in the third line is a version; the others hold none.
+    expect(claims.map((c) => c.line)).toEqual([3]);
+
+    const deep = `${"x ".repeat(50_000)}uses lodash@4.17.20 ${"y ".repeat(50_000)}`;
+    expect(scanResearchClaims([{ path: "a.md", text: deep }], new Set())).toHaveLength(1);
+  });
 });

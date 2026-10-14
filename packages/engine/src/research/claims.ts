@@ -37,10 +37,29 @@ const CLAIM_PATTERNS: readonly RegExp[] = [
   /\bGHSA(?:-[23456789cfghjmpqrvwx]{4}){3}\b/i,
   /\b(?:MIT|ISC|Apache-2\.0|BSD-[23]-Clause|MPL-2\.0|[AL]?GPL-?[23](?:\.0)?(?:-only|-or-later)?|licen[cs]ed?)\b/i,
   /\b(?:EOL|end[- ]of[- ]life|end of support|supported until|LTS)\b/i,
-  /[\w@/.-]+@\d+(?:\.\d+)+/,
+  // One character before the `@` is enough to tell `name@1.2`; a `+` there backtracks
+  // quadratically on a long run of name characters with no version after them.
+  /[\w/.-]@\d+(?:\.\d+)+/,
   /\bv\d+\.\d+(?:\.\d+)?\b/,
   /\b\d+\.\d+\.\d+\b/,
 ];
+
+/**
+ * Lines are tested in windows of this many characters, overlapping by {@link WINDOW_OVERLAP}
+ * (longer than any claim the patterns match in full), so a role-written line of any length costs
+ * time linear in its length and a claim deep in a long line is still found.
+ */
+const WINDOW = 2_000;
+const WINDOW_OVERLAP = 200;
+
+const hasClaim = (body: string): boolean => {
+  for (let start = 0; start < body.length; start += WINDOW - WINDOW_OVERLAP) {
+    const window = body.slice(start, start + WINDOW);
+    if (CLAIM_PATTERNS.some((pattern) => pattern.test(window))) return true;
+    if (start + WINDOW >= body.length) break;
+  }
+  return false;
+};
 
 const clipText = (text: string): string => (text.length > 300 ? `${text.slice(0, 299)}…` : text);
 
@@ -85,7 +104,7 @@ export const scanResearchClaims = (
       const unknown = cited.filter((id) => !knownFacts.has(id));
       if (cited.length > 0 && unknown.length === 0) return;
       const body = line.replace(/^#+\s*/, "");
-      if (body === "" || !CLAIM_PATTERNS.some((pattern) => pattern.test(body))) return;
+      if (body === "" || !hasClaim(body)) return;
       const text = clipText(line);
       add({
         id: factId(text, "uncited_claim", doc.path, null),

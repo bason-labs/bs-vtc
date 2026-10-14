@@ -443,22 +443,38 @@ export const createResearchService = (deps: ResearchServiceDeps): ResearchServic
 
     async factLookup(rawInput) {
       const input = FactLookupInputSchema.parse(rawInput);
-      const rows = consistentFactRows((await readFactRows(deps.projectRoot)).rows);
       let facts: FactRow[];
       if (input.ids !== undefined) {
+        const rows = consistentFactRows((await readFactRows(deps.projectRoot)).rows);
         const newest = new Map(rows.map((r) => [r.id, r]));
         facts = input.ids.flatMap((id) => {
           const row = newest.get(id);
           return row === undefined ? [] : [row];
         });
       } else {
-        facts = currentFacts(rows).filter(
+        // Like G2: a `supersedes` hides a row only when the superseding row verifies now.
+        facts = (await currentForG2()).filter(
           (r) =>
             r.subject === input.subject &&
             (input.predicate === undefined || r.predicate === input.predicate),
         );
       }
-      return FactLookupResultSchema.parse({ facts: facts.slice(0, LOOKUP_MAX) });
+      // `facts.jsonl` is git-tracked: a recorded status reaches the role only when the engine can
+      // reproduce it now; otherwise the row is returned as unverified (or stale, past its window).
+      const at = now();
+      const checked: FactRow[] = [];
+      for (const row of facts.slice(0, LOOKUP_MAX)) {
+        if (row.status === "unverified" || row.status === "stale") {
+          checked.push(row);
+          continue;
+        }
+        const check = await verifiesNow(row);
+        if (!check.ok) checked.push({ ...row, status: "unverified" });
+        else if (isExpired(check.fetcher, check.retrievedAt, at))
+          checked.push({ ...row, status: "stale" });
+        else checked.push(row);
+      }
+      return FactLookupResultSchema.parse({ facts: checked });
     },
 
     factPropose,

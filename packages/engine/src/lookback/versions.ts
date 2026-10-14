@@ -23,7 +23,7 @@ import {
 } from "@vtc/shared";
 import { join } from "node:path";
 import { parseYaml, toYaml } from "../core/index.js";
-import { readTextIfExists, writeAtomic } from "./files.js";
+import { readTextIfExists, writeNewFile } from "./files.js";
 
 /** SHA-256 of a trimmed prompt section. */
 export const sectionSha = (section: string): string => sha256Hex(section.trim());
@@ -86,17 +86,13 @@ export const storePromptVersion = async (
     );
   }
   const path = promptVersionPath(vtcHome, valid.version, valid.version.effective_sha256);
+  // Published with a link, never a rename: a concurrent store (or a cli gesture) that got there
+  // first is never overwritten, and its file is checked like any existing one.
+  if (await writeNewFile(path, render(valid, editable))) return path;
   const existing = await readTextIfExists(path);
-  if (existing !== undefined) {
-    const parsed = parseVersionFile(existing);
-    if (parsed?.frontmatter.version.effective_sha256 === valid.version.effective_sha256)
-      return path;
-    throw new PromptVersionError(
-      `another version already lives at ${path}; versions are immutable`,
-    );
-  }
-  await writeAtomic(path, render(valid, editable));
-  return path;
+  const parsed = existing === undefined ? undefined : parseVersionFile(existing);
+  if (parsed?.frontmatter.version.effective_sha256 === valid.version.effective_sha256) return path;
+  throw new PromptVersionError(`another version already lives at ${path}; versions are immutable`);
 };
 
 const parseVersionFile = (

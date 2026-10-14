@@ -11,6 +11,7 @@
  * (the regression set, which must not get worse beyond the A/A flip rate).
  */
 import {
+  LOOKBACK_HOME,
   LOOKBACK_LIMITS,
   LOOKBACK_REPO,
   parsePersisted,
@@ -21,6 +22,7 @@ import {
   HostIdSchema,
   IsoDateTimeSchema,
   RoleIdSchema,
+  sha256Hex,
   Sha256HexSchema,
   type Attribution,
   type DispatchMode,
@@ -204,26 +206,30 @@ export const writeReplayResult = async (
   result: ReplayResult,
 ): Promise<LookbackEventDraft> => {
   const path = replayPath(result.proposal);
-  await writeAtomic(
-    join(projectRoot, path),
-    `${JSON.stringify(ReplayResultSchema.parse(result), null, 2)}\n`,
-  );
+  const text = `${JSON.stringify(ReplayResultSchema.parse(result), null, 2)}\n`;
+  await writeAtomic(join(projectRoot, path), text);
+  // The file's hash, so `vtc lookback approve` can tell the engine's file from an edited one.
   return lookbackEvent("lookback.replay_finished", {
     proposal: result.proposal,
     verdict: result.verdict,
     path,
+    sha256: sha256Hex(text),
   });
 };
 
 /**
- * The A/A noise floors the engine measured, under the VTC home (`~/.vtc/lookback/`, which no role
- * may write: `WAVE3_HOME_WRITE_DENY`). Never read from the repo: `.vtc/lookback/replays/*.json` is
- * git-tracked, and a planted high `aa_flip_rate` would let a regression pass `replayVerdict`.
+ * The A/A noise floors the engine measured, under the VTC home (`LOOKBACK_HOME.aaNoiseFile`, which
+ * no role may write: `WAVE3_HOME_WRITE_DENY`). Never read from the repo: `.vtc/lookback/replays/*.json` is
+ * git-tracked, and a planted high `aa_flip_rate` would let a regression pass `replayVerdict`. A row
+ * is per project (`repo_key`): a flip rate measured on one repository's tasks is no noise floor for
+ * another's. The row shape is local until a contract carries it (a contract proposal).
  */
-export const AA_NOISE_FILE = "lookback/aa-noise.jsonl";
+/** An `engineRepoKey` (the same shape `LookbackPins` keys projects by). */
+const RepoKeySchema = z.string().regex(/^[a-f0-9]{16}$/, "expected an engineRepoKey");
 
 const AaNoiseRowSchema = z.strictObject({
   v: z.literal(1),
+  repo_key: RepoKeySchema,
   role: RoleIdSchema,
   mode: SlugSchema.optional(),
   host: HostIdSchema,
@@ -233,17 +239,22 @@ const AaNoiseRowSchema = z.strictObject({
   measured_at: IsoDateTimeSchema,
 });
 
+const aaNoisePath = (vtcHome: string): string => join(vtcHome, LOOKBACK_HOME.aaNoiseFile);
+
 /** Records the A/A flip rate a replay measured with its own `aa` arm (call it only then). */
 export const recordAaFlipRate = async (input: {
   readonly vtcHome: string;
+  /** The project the replay ran on (`engineRepoKey`). */
+  readonly repoKey: string;
   readonly baseline: PromptVersionRef;
   readonly graderBundleSha: string;
   readonly aaFlipRate: number;
   readonly now: Date;
 }): Promise<void> => {
-  await appendJsonLines(join(input.vtcHome, AA_NOISE_FILE), [
+  await appendJsonLines(aaNoisePath(input.vtcHome), [
     AaNoiseRowSchema.parse({
       v: 1,
+      repo_key: input.repoKey,
       role: input.baseline.role,
       ...(input.baseline.mode === undefined ? {} : { mode: input.baseline.mode }),
       host: input.baseline.host,
@@ -256,24 +267,27 @@ export const recordAaFlipRate = async (input: {
 };
 
 /**
- * The A/A flip rate cached for a baseline (the newest one the engine measured for the same role,
- * mode, host and baseline under the same grader bundle), or `undefined`: then the replay runs its
- * own A/A arm and {@link recordAaFlipRate} keeps the result.
+ * The A/A flip rate cached for a baseline (the newest one the engine measured in the same project
+ * for the same role, mode, host and baseline under the same grader bundle), or `undefined`: then
+ * the replay runs its own A/A arm and {@link recordAaFlipRate} keeps the result.
  */
-export const cachedAaFlipRate = async (
-  vtcHome: string,
-  baseline: PromptVersionRef,
-  graderBundleSha: string,
-): Promise<number | undefined> => {
+export const cachedAaFlipRate = async (input: {
+  readonly vtcHome: string;
+  readonly repoKey: string;
+  readonly baseline: PromptVersionRef;
+  readonly graderBundleSha: string;
+}): Promise<number | undefined> => {
+  const { baseline } = input;
   let best: z.infer<typeof AaNoiseRowSchema> | undefined;
-  for (const value of await readJsonLines(join(vtcHome, AA_NOISE_FILE))) {
+  for (const value of await readJsonLines(aaNoisePath(input.vtcHome))) {
     const parsed = parsePersisted(AaNoiseRowSchema, value);
     if (!parsed.success) continue;
     const r = parsed.data;
     if (
+      r.repo_key === input.repoKey &&
       r.baseline === baseline.effective_sha256 &&
       sameTarget(r, baseline) &&
-      r.grader_bundle_sha === graderBundleSha &&
+      r.grader_bundle_sha === input.graderBundleSha &&
       (best === undefined || r.measured_at >= best.measured_at)
     ) {
       best = r;

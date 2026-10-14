@@ -8,6 +8,7 @@ import {
   buildTraces,
   readAttributions,
   tiebreakAttribution,
+  tiebreakKey,
   traceRef,
   traceSplit,
   TREE_CONFIDENCE,
@@ -142,6 +143,25 @@ describe("the attribution tree (§13)", () => {
     expect(attribute(lint).attributions[0]).toMatchObject({ trace: eng, rule: "test_fails" });
   });
 
+  it("never blames a dispatch on another task: the failure is inconclusive instead", () => {
+    const log = new RunLog();
+    log.dispatch("qa", { task: "T-2" });
+    log.dispatch("engineer", { task: "T-1" });
+    log.finding("T-1", "bad_test", { category: "test_adequacy" });
+    const result = attribute(log);
+    expect(result.attributions).toEqual([]);
+    expect(result.inconclusive).toEqual([
+      expect.objectContaining({ task: "T-1", rule: "req_without_test" }),
+    ]);
+
+    // A human label naming a role that never worked on the task blames nobody either.
+    const labelled = new RunLog();
+    labelled.dispatch("qa", { task: "T-2" });
+    labelled.dispatch("engineer", { task: "T-1" });
+    labelled.escalate("T-1", "qa", "spec_question");
+    expect(attribute(labelled).attributions).toEqual([]);
+  });
+
   it("credits the first failure upstream when several rules fire on one task", () => {
     const log = new RunLog();
     const ba = log.dispatch("ba");
@@ -268,7 +288,6 @@ describe("the attribution tree (§13)", () => {
     log.gate("T-2", true);
     const parked = log.dispatch("engineer", { task: "T-3" });
     log.status("T-3", "fixing", "parked", 4, "cap");
-    const against = { history: log.events, lockedShaFor };
     const traces = buildTraces(log.events, lockedShaFor);
     const traceOf = (id: string) => {
       const trace = traces.find((t) => t.trace === id);
@@ -293,11 +312,18 @@ describe("the attribution tree (§13)", () => {
       now,
     });
     if (tiebreak === undefined || onSuccess === undefined) throw new Error("unversioned");
+    const against = {
+      history: log.events,
+      lockedShaFor,
+      tiebreaks: new Set([tiebreakKey(tiebreak), tiebreakKey(onSuccess)]),
+    };
     const planted = [
       // A tree failure on a dispatch whose gate passed.
       { ...real, trace: passed, split: traceSplit({ run: "r1", trace: passed }) },
       // A tiebreak where nothing was inconclusive.
       onSuccess,
+      // The real tiebreak with another answer than the one the engine recorded.
+      { ...tiebreak, blamed_role: "qa", confidence: 0.9 },
       // The real failure blamed on another role.
       { ...real, blamed_role: "qa" },
       // The real failure in a run outside the history.
@@ -309,5 +335,7 @@ describe("the attribution tree (§13)", () => {
     // A trusted tree row is the one the engine derives, whatever else the stored row says.
     const edited = { ...real, confidence: 0.1, evidence: [] };
     expect(trustedAttributions([edited], against)).toEqual([real]);
+    // A tiebreak row the engine has no record of is never trusted.
+    expect(trustedAttributions([tiebreak], { history: log.events, lockedShaFor })).toEqual([]);
   });
 });
