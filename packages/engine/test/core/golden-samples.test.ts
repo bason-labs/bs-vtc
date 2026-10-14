@@ -82,11 +82,19 @@ describe("golden-run wave-3 samples", () => {
     const finished = log.events.find((e) => isEventOfType(e, "lookback.replay_finished"));
     if (finished === undefined || !isEventOfType(finished, "lookback.replay_finished"))
       throw new Error("no replay");
-    const text = read("replay-p-spec-verifier-1.json");
+    const text = read("replay-p-engineer-1.json");
     expect(readEventData(finished).sha256).toBe(sha256Hex(text));
     const result = ReplayResultSchema.parse(JSON.parse(text));
     expect(result.proposal).toBe(readEventData(finished).proposal);
     expect(result.verdict).toBe(readEventData(finished).verdict);
+    // a replay this engine can produce: a file-writing role on a Codex-led headless run (verdict
+    // roles are not replayed yet, an open question on spine readings 166 and 176)
+    expect([result.role, result.host]).toEqual(["engineer", "codex"]);
+    const dispatched = log.events.find((e) => isEventOfType(e, "lookback.dispatched"));
+    if (dispatched === undefined || !isEventOfType(dispatched, "lookback.dispatched"))
+      throw new Error("no lookback dispatch");
+    expect(readEventData(dispatched).target_role).toBe(result.role);
+    expect(readEventData(dispatched).target_host).toBe(result.host);
   });
 
   it("a gate report's visual summary names its toolchain", () => {

@@ -1,8 +1,8 @@
 {
   "v": 1,
-  "proposal": "p-spec-verifier-1",
-  "role": "spec_verifier",
-  "host": "claude-code",
+  "proposal": "p-engineer-1",
+  "role": "engineer",
+  "host": "codex",
   "baseline": "66bd48956895018690691856dcdef24984eae5aeb439b91a62083358b27e2091",
   "candidate": "5637b30259384831046013fa467654308ec439654be480cf0a60cbeb6af26942",
   "grader_bundle_sha": "1e6ed65d77d6364eeaed5a745ba5c4985ae2b700dd85d7cf7f027bdf294a33fc",

@@ -466,7 +466,9 @@ describe("RETRO runs Lookback replays (AD-21 rule 6, reading 176)", () => {
     await h.release();
   });
 
-  it("does not replay a verdict role: the gates would grade the same base for both arms", async () => {
+  // OPEN SPINE DEVIATION (readings 166, 176), escalated to the Lead: this pins the interim refusal
+  // (no trial graded on two identical bases), not a settled design. Change it with the decision.
+  it("interim, pending the Lead's decision on readings 166/176: does not replay a verdict role, since the gates would grade the same base for both arms", async () => {
     const { h, fake, reach } = atRetro(["a", "b"], { role: "spec_verifier" });
     await reach("spec_verifier");
     await h.engine.settle();

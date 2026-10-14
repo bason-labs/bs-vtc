@@ -26,9 +26,12 @@ frozen surfaces without a running engine (AD-5, AD-7, AD-12).
     `feature.auto_merge_enabled` and `feature.auto_merge_disabled`; `final_review.step_finished`;
     `fact.recorded` (one row with a host-reported `reported_source`, H-3), `fact.verified` and
     `fact.waived`; `lookback.dispatched`, `proposal_recorded`, `replay_finished` (its `sha256` is
-    that of `replay-p-spec-verifier-1.json`'s bytes), `canary_assigned`, `canary_evaluated`,
+    that of `replay-p-engineer-1.json`'s bytes), `canary_assigned`, `canary_evaluated`,
     `rolled_back` and `escaped_defect`; and a `prompt_selection` incident (reading 176);
-  - `replay-p-spec-verifier-1.json`: the `ReplayResult` that event names;
+  - `replay-p-engineer-1.json`: the `ReplayResult` that event names. The replay is an Engineer's on
+    a Codex-led headless run, a replay this engine can produce today: it refuses replays of verdict
+    roles such as `spec_verifier` (they change no file, so the gates would grade the same base for
+    both arms), an open deviation from spine readings 166 and 176 that waits for the Lead;
   - `gate-report-visual.json`: a `GateReport` whose `visual` summary names its `toolchain`;
   - `usage-billing.json`: a `UsageReport` with each host's `billing` (D-bq).
 
