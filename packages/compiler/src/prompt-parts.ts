@@ -3,26 +3,29 @@
  *
  * Every compiled agent has two parts, each rendered for its host:
  * - **locked**: the locked core(s), the generated contract, the result protocol and the host's
- *   `prompt_append`; human-only (a MAJOR role version);
- * - **editable**: the editable section(s), the only part a Lookback proposal may replace (MINOR).
- *   It compiles verbatim (`editableSectionErrors`: no mode block, no placeholder), so for every
- *   role but an engineer profile it is exactly the trimmed `splitRolePrompt(...).editable` of
- *   `roles/<role>/prompt.md`; an engineer profile's is the Engineer's section, a blank line, then
- *   the profile's.
+ *   `prompt_append`; human-only (a MAJOR role version). An engineer profile's locked part opens
+ *   with the Engineer's whole prompt, its editable section included, so a profile's proposal
+ *   never carries (or forks) the Engineer's heuristics; those change through the Engineer's own
+ *   proposals and reach every profile when they are upstreamed into `roles/engineer/prompt.md`.
+ * - **editable**: the role's own editable section, the only part a Lookback proposal may replace
+ *   (MINOR). It compiles verbatim (`editableSectionErrors`: no mode block, no placeholder), so for
+ *   every role, engineer profiles included, it is exactly the trimmed
+ *   `splitRolePrompt(...).editable` of `roles/<role>/prompt.md`, and a promoted section maps back
+ *   to that file unchanged.
  *
- * **Prompt identity** (AD-21 rule 1), as this compiler emits it: `locked_sha256` and
- * `editable_sha256` are the SHA-256 of the two compiled parts, trimmed, exactly as each plugin
- * carries them at `vtc/prompts/<agent>/{locked,editable}.md`; an agent that carries its editable
- * section has the instructions `<locked>\n<editable>`, so its `prompt_sha256` is
- * `effectivePromptSha(locked, editable)`. The frozen 4.5.0 doc comment of
- * `PluginManifestAgent.locked_sha256` reads as if it were the raw locked core of `prompt.md`;
- * that reading cannot give `prompt_sha256 === effectivePromptSha(locked, editable)`, because the
- * agent also carries the contract and the protocol. The compiled-parts definition, the asset path
- * and a shared helper are proposed to `@vtc/shared` (roles-compiler contract proposal).
+ * **Prompt identity** (AD-21 rule 1) follows the frozen `PluginManifestAgent` contract and the
+ * lookback-research engine (`sectionSha`): `locked_sha256` and `editable_sha256` are the SHA-256
+ * of the role's own trimmed `splitRolePrompt` sections of `roles/<role>/prompt.md` (an engineer
+ * profile's own sections, not the Engineer's). Every mode of a role shares them. Each plugin
+ * carries those two sections at `vtc/prompts/<agent>/{locked,editable}.md`, so the engine can take
+ * a proposal's locked core and default section from its plugin assets. The rest of the compiled
+ * locked part (the contract, the protocol, `prompt_append`, the Engineer's prompt in a profile)
+ * is not in the Lookback identity: it changes only with the role version or the compiler, and
+ * the manifest's `prompt_sha256` (the SHA of the instructions as emitted) records it.
  *
- * An agent whose role is switched to "editable in the pack" carries the locked part only: the
- * engine renders the pinned editable section first in the task pack, and its `prompt_sha256`
- * equals its `locked_sha256`. No role is switched by default (see `EDITABLE_IN_PACK_ROLES`).
+ * An agent whose role is switched to "editable in the pack" carries the compiled locked part only:
+ * the engine renders the pinned editable section first in the task pack. No role is switched by
+ * default (see `EDITABLE_IN_PACK_ROLES`).
  */
 import { AGENT_NAME_PREFIX } from "@vtc/shared";
 
@@ -47,14 +50,14 @@ export const EDITABLE_IN_PACK_ROLES: readonly string[] = [];
  */
 export const EDITABLE_PACK_SECTION = "Role heuristics";
 
-/** Where each plugin carries the prompt parts: `vtc/prompts/<agent>/<part>.md`. */
+/** Where each plugin carries the role's prompt sections: `vtc/prompts/<agent>/<part>.md`. */
 export const ROLE_PROMPTS_ASSET_DIR = "vtc/prompts";
 
 export type PromptPart = "locked" | "editable";
 
 const AGENT_NAME = new RegExp(`^${AGENT_NAME_PREFIX}[a-z0-9-]{1,120}$`);
 
-/** The asset path of one part of one compiled agent's prompt. */
+/** The asset path of one prompt section (`splitRolePrompt`) of one compiled agent's role. */
 export const rolePromptAssetPath = (agent: string, part: PromptPart): string => {
   if (!AGENT_NAME.test(agent)) throw new TypeError(`not a compiled agent name: ${agent}`);
   return `${ROLE_PROMPTS_ASSET_DIR}/${agent}/${part}.md`;

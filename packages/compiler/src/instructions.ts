@@ -1,15 +1,16 @@
 /**
  * Builds one agent's instructions from its role source (§5.1, AD-14):
  *
- * 1. the locked core: for an engineer profile, the Engineer's locked core first (§5.2a: every
- *    specialist shares the Engineer contract); for a lens reviewer, the shared lens procedure
- *    first and its lens skill's checklist after (§5.3);
+ * 1. the locked core: for an engineer profile, the Engineer's locked core and editable section
+ *    first (§5.2a: every specialist shares the Engineer contract and heuristics); for a lens
+ *    reviewer, the shared lens procedure first and its lens skill's checklist after (§5.3);
  * 2. the contract, generated from the effective role.yaml contract of the mode;
  * 3. the shared result protocol (`roles/_shared/result-protocol.md`, filled from the frozen
  *    contracts); for an advisor (§5.4), which has no task pack and whose result goes to the human
  *    rather than the engine, `roles/_shared/advisor-protocol.md` instead;
  * 4. the host's `prompt_append` (§12.3);
- * 5. the editable section(s), the part Lookback may propose changes to (AD-14 rule 4).
+ * 5. the role's own editable section, verbatim: the part Lookback may propose changes to (AD-14
+ *    rule 4).
  *
  * Parts 1–4 are the locked part and part 5 the editable part (`prompt-parts.ts`); each is rendered
  * on its own, and an agent carries `<locked>\n<editable>`, or the locked part only when its role's
@@ -237,15 +238,15 @@ export const buildInstructions = (
   if (!resolved.ok) return { ok: false, errors: [resolved.error] };
   const errors: string[] = [];
   const locked: string[] = [];
-  const editable: string[] = [];
   if (role.kind === "engineer_profile") {
     if (sources.engineer === undefined) {
       errors.push("engineer profiles build on roles/engineer, which is missing");
     } else {
+      // The Engineer's whole prompt, editable section included, is part of a profile's locked
+      // part: a profile's Lookback proposal replaces the profile's own section only, and the
+      // Engineer's section changes through the Engineer's proposals (prompt-parts.ts).
       locked.push(pick(sources.engineer.prompt.locked, undefined, sources.engineer.role, errors));
-      editable.push(
-        pick(sources.engineer.prompt.editable, undefined, sources.engineer.role, errors),
-      );
+      locked.push(pick(sources.engineer.prompt.editable, undefined, sources.engineer.role, errors));
     }
   }
   if (role.kind === "lens") {
@@ -262,7 +263,7 @@ export const buildInstructions = (
     if (checklist === undefined) errors.push(`lens roles need the skill skills/${skill}`);
     else locked.push(checklist.trim());
   }
-  editable.push(pick(prompt.editable, mode, role, errors));
+  const editable = pick(prompt.editable, mode, role, errors);
   const protocol = role.kind === "advisor" ? sources.advisorProtocol : sources.protocol;
   if (protocol === undefined) {
     errors.push("advisor roles build on roles/_shared/advisor-protocol.md, which is missing");
@@ -279,7 +280,7 @@ export const buildInstructions = (
     ...(append === undefined ? [] : [append.trim()]),
     ...(editableInPack ? [EDITABLE_IN_PACK_NOTE] : []),
   ]);
-  const editableText = render(editable);
+  const editableText = render([editable]);
   const renderErrors = [
     ...(lockedText.ok ? [] : lockedText.errors),
     ...(editableText.ok ? [] : editableText.errors),

@@ -20,6 +20,7 @@ import {
   PromptVersionRefSchema,
   ROLE_MCP_TOOLS,
   ScorecardMetricIdSchema,
+  sha256Hex,
   ResearchFetchInputSchema,
   FactStatusSchema,
   splitRolePrompt,
@@ -66,23 +67,43 @@ const claudeFront = (agent: string): Record<string, unknown> =>
   ) as Record<string, unknown>;
 const oneLine = (text: string): string => text.replace(/\s+/g, " ");
 
+/** The role's own `prompt.md` sections (`splitRolePrompt`), by role directory. */
+const sectionsOf = (dir: string): { locked: string; editable: string } => {
+  const split = splitRolePrompt(source(`roles/${dir}/prompt.md`));
+  if (!split.ok) throw new Error(split.errors.join("\n"));
+  return { locked: split.locked, editable: split.editable };
+};
+
+/** lookback-research's `sectionSha` (packages/engine/src/lookback/versions.ts), restated. */
+const sectionSha = (section: string): string => sha256Hex(section.trim());
+
 describe("prompt identity in the compiled plugins (AD-21 rules 1–2)", () => {
   it.each(HOST_IDS)(
-    "the %s manifest records the locked and editable SHA of every agent",
+    "the %s manifest records the frozen identity: sectionSha of the role's own sections",
     (host) => {
       const agents = manifest(host).agents;
       expect(agents.map((a) => a.name).sort()).toEqual(
         loaded.roles.flatMap((r) => compiledAgentNames(r.role)).sort(),
       );
-      for (const agent of agents) {
-        const locked = emitted(host, rolePromptAssetPath(agent.name, "locked"));
-        const editable = emitted(host, rolePromptAssetPath(agent.name, "editable"));
-        expect(agent.locked_sha256, agent.name).toMatch(/^[0-9a-f]{64}$/);
-        expect(agent.editable_sha256, agent.name).toMatch(/^[0-9a-f]{64}$/);
-        const carriesEditable = agent.prompt_sha256 !== agent.locked_sha256;
-        expect(carriesEditable, agent.name).toBe(!EDITABLE_IN_PACK_ROLES.includes(agent.role));
-        if (carriesEditable) {
-          expect(agent.prompt_sha256, agent.name).toBe(effectivePromptSha(locked, editable));
+      for (const { dir, role } of loaded.roles) {
+        const sections = sectionsOf(dir);
+        for (const name of compiledAgentNames(role)) {
+          const agent = agents.find((a) => a.name === name);
+          // PluginManifestAgent (4.5.0) and checkProposal's base check, for profiles too
+          expect(agent?.locked_sha256, name).toBe(sectionSha(sections.locked));
+          expect(agent?.editable_sha256, name).toBe(sectionSha(sections.editable));
+          expect(emitted(host, rolePromptAssetPath(name, "locked")), name).toBe(sections.locked);
+          expect(emitted(host, rolePromptAssetPath(name, "editable")), name).toBe(
+            sections.editable,
+          );
+          // the engine's version of the default prompt is computable from the plugin alone
+          expect(
+            effectivePromptSha(
+              emitted(host, rolePromptAssetPath(name, "locked")),
+              emitted(host, rolePromptAssetPath(name, "editable")),
+            ),
+            name,
+          ).toBe(effectivePromptSha(sections.locked, sections.editable));
         }
       }
     },
@@ -103,9 +124,7 @@ describe("prompt identity in the compiled plugins (AD-21 rules 1–2)", () => {
     if (!result.ok) throw new Error(result.errors.map((e) => e.message).join("\n"));
     const file = (path: string): string =>
       result.output.targets["claude-code"].find((f) => f.path === path)?.text ?? "";
-    const split = splitRolePrompt(source("roles/spec_verifier/prompt.md"));
-    if (!split.ok) throw new Error(split.errors.join("\n"));
-    const lastEditableLine = split.editable.trim().split("\n").at(-1) ?? "";
+    const lastEditableLine = sectionsOf("spec_verifier").editable.split("\n").at(-1) ?? "";
     expect(lastEditableLine).not.toBe("");
     const body = file("agents/vtc-spec-verifier.md");
     expect(body).not.toContain(lastEditableLine);
@@ -113,22 +132,18 @@ describe("prompt identity in the compiled plugins (AD-21 rules 1–2)", () => {
     expect(file(rolePromptAssetPath("vtc-spec-verifier", "editable"))).toContain(lastEditableLine);
   });
 
-  it("compiles every editable section verbatim, so a proposal maps back to prompt.md", () => {
-    const editableOf = (role: string): string => {
-      const split = splitRolePrompt(source(`roles/${role}/prompt.md`));
-      if (!split.ok) throw new Error(split.errors.join("\n"));
-      return split.editable;
-    };
-    for (const { role } of loaded.roles) {
-      const expected =
-        role.kind === "engineer_profile"
-          ? `${editableOf("engineer")}\n\n${editableOf(role.id)}`
-          : editableOf(role.id);
+  it("ends every agent with its own role's editable section, verbatim", () => {
+    // A proposal for any role, engineer profiles included, maps back to that role's prompt.md;
+    // a profile carries the Engineer's section in its locked part, before its own core.
+    const engineer = sectionsOf("engineer").editable;
+    for (const { dir, role } of loaded.roles) {
+      const { editable } = sectionsOf(dir);
       for (const name of compiledAgentNames(role)) {
-        for (const host of HOST_IDS) {
-          expect(emitted(host, rolePromptAssetPath(name, "editable")), `${host} ${name}`).toBe(
-            expected,
-          );
+        const body = claudeBody(name);
+        expect(body.endsWith(`\n${editable}\n`) || body.endsWith(`\n${editable}`), name).toBe(true);
+        if (role.kind === "engineer_profile") {
+          expect(body.indexOf(engineer), name).toBeGreaterThanOrEqual(0);
+          expect(body.indexOf(engineer), name).toBeLessThan(body.lastIndexOf(editable));
         }
       }
     }

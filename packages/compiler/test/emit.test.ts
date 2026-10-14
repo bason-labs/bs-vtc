@@ -31,8 +31,7 @@ const agent = (over: Partial<CompiledAgent> = {}): CompiledAgent => ({
   tools: tools("write_scoped"),
   model: { tier: "mid", effort: "medium" },
   instructions: "# Mission\n\nWrite tests.\n",
-  locked: "# Mission",
-  editable: "Write tests.",
+  sections: { locked: "# Mission", editable: "Write tests." },
   skills: [],
   ...over,
 });

@@ -10,7 +10,6 @@ import { parse as parseToml } from "smol-toml";
 import { parse as parseYaml } from "yaml";
 import { describe, expect, it } from "vitest";
 import {
-  effectivePromptSha,
   ENGINE_HTTP,
   engineMcpServer,
   ENGINE_MCP_TOOLS,
@@ -43,7 +42,7 @@ import {
   type CompileOptions,
   type CompileOutput,
 } from "../src/index.js";
-import { fixtureFiles } from "./fixtures.js";
+import { FIXTURE, fixtureFiles } from "./fixtures.js";
 
 const compile = (
   overrides: Record<string, string | null> = {},
@@ -92,49 +91,43 @@ const oneLine = (text: string): string => text.replace(/\s+/g, " ");
 
 const HOSTS: readonly HostId[] = ["claude-code", "codex"];
 
-describe("prompt parts and their SHAs (AD-21 rules 1–2)", () => {
+/** The role's own `prompt.md` sections, as the frozen contract and lookback-research read them. */
+const sectionsOf = (role: string): { locked: string; editable: string } => {
+  const split = splitRolePrompt(FIXTURE[`roles/${role}/prompt.md`] ?? "");
+  if (!split.ok) throw new Error(split.errors.join("\n"));
+  return { locked: split.locked, editable: split.editable };
+};
+
+/** lookback-research's `sectionSha` (packages/engine/src/lookback/versions.ts), restated. */
+const sectionSha = (section: string): string => sha256Hex(section.trim());
+
+describe("prompt identity and the prompt-section assets (AD-21 rules 1–2)", () => {
   const output = compileOk();
 
   it.each(HOSTS)(
-    "the %s plugin carries every agent's locked and editable part as an asset",
+    "the %s manifest SHAs are sectionSha of the role's own splitRolePrompt sections",
     (host) => {
+      // The frozen PluginManifestAgent definition, as the engine's checkProposal checks a base.
       const m = manifest(output, host);
       expect(m.agents.length).toBeGreaterThan(0);
       for (const agent of m.agents) {
+        const sections = sectionsOf(agent.role);
+        expect(agent.locked_sha256, agent.name).toBe(sectionSha(sections.locked));
+        expect(agent.editable_sha256, agent.name).toBe(sectionSha(sections.editable));
+      }
+    },
+  );
+
+  it.each(HOSTS)(
+    "the %s plugin carries the role's sections as assets, which split back unchanged",
+    (host) => {
+      for (const agent of manifest(output, host).agents) {
         const locked = fileOf(output, host, rolePromptAssetPath(agent.name, "locked"));
         const editable = fileOf(output, host, rolePromptAssetPath(agent.name, "editable"));
-        expect(locked, agent.name).not.toBe("");
-        expect(editable, agent.name).not.toBe("");
+        expect({ locked, editable }, agent.name).toEqual(sectionsOf(agent.role));
         expect(agent.locked_sha256, agent.name).toBe(promptShaFor(locked));
         expect(agent.editable_sha256, agent.name).toBe(promptShaFor(editable));
-      }
-    },
-  );
-
-  it.each(HOSTS)(
-    "on %s an agent that carries its editable section hashes to its effective SHA",
-    (host) => {
-      for (const agent of manifest(output, host).agents) {
-        const locked = fileOf(output, host, rolePromptAssetPath(agent.name, "locked"));
-        const editable = fileOf(output, host, rolePromptAssetPath(agent.name, "editable"));
-        const text = instructions(output, host, agent.name);
-        expect(text, agent.name).toBe(`${locked}\n${editable}`);
-        expect(agent.prompt_sha256, agent.name).toBe(effectivePromptSha(locked, editable));
-      }
-    },
-  );
-
-  it.each(HOSTS)(
-    "on %s the manifest SHAs are the SHAs of the trimmed compiled parts, which split back",
-    (host) => {
-      // The definition proposed to @vtc/shared: what lookback-research's `sectionSha` computes
-      // (SHA-256 of the trimmed section) over the parts each plugin carries, not over prompt.md.
-      for (const agent of manifest(output, host).agents) {
-        const locked = fileOf(output, host, rolePromptAssetPath(agent.name, "locked"));
-        const editable = fileOf(output, host, rolePromptAssetPath(agent.name, "editable"));
-        expect(agent.locked_sha256, agent.name).toBe(sha256Hex(locked.trim()));
-        expect(agent.editable_sha256, agent.name).toBe(sha256Hex(editable.trim()));
-        // a proposal check composes the locked part with a section and splits it again
+        // a proposal check composes the locked core with a section and splits it again
         const split = splitRolePrompt(
           `${PROMPT_MARKERS.locked}\n${locked}\n${PROMPT_MARKERS.editable}\n${editable}\n`,
         );
@@ -143,33 +136,80 @@ describe("prompt parts and their SHAs (AD-21 rules 1–2)", () => {
     },
   );
 
-  it("splits the parts where Lookback may edit: the editable section only", () => {
-    const locked = fileOf(output, "claude-code", rolePromptAssetPath("vtc-qa-author", "locked"));
+  it.each(HOSTS)(
+    "on %s every agent ends with its role's editable section, verbatim, after the locked part",
+    (host) => {
+      for (const agent of manifest(output, host).agents) {
+        const editable = fileOf(output, host, rolePromptAssetPath(agent.name, "editable"));
+        const text = instructions(output, host, agent.name);
+        expect(text.endsWith(`\n${editable}`), agent.name).toBe(true);
+        expect(agent.prompt_sha256, agent.name).toBe(promptShaFor(text));
+        expect(text.split(editable).length - 1, agent.name).toBe(1);
+      }
+    },
+  );
+
+  it("keeps the mode rules, the contract and the protocol out of the editable section", () => {
+    const text = instructions(output, "claude-code", "vtc-qa-author");
     const editable = fileOf(
       output,
       "claude-code",
       rolePromptAssetPath("vtc-qa-author", "editable"),
     );
+    expect(editable).toBe("QA-EDITABLE");
+    const lockedPart = text.slice(0, -editable.length);
     for (const part of ["QA-SHARED", "AUTHOR-ONLY", "## Contract", "## Returning your result"]) {
-      expect(locked).toContain(part);
+      expect(lockedPart).toContain(part);
       expect(editable).not.toContain(part);
     }
-    expect(editable).toBe("QA-EDITABLE");
-    expect(locked).not.toContain("QA-EDITABLE");
+    expect(lockedPart).not.toContain("JUDGE-ONLY");
+    // the locked asset is the raw core: both modes' blocks, no generated contract
+    const locked = fileOf(output, "claude-code", rolePromptAssetPath("vtc-qa-author", "locked"));
+    expect(locked).toBe(sectionsOf("qa").locked);
+    expect(locked).toContain("JUDGE-ONLY");
+    expect(locked).not.toContain("## Contract");
   });
 
   it("keeps a host's prompt_append in the locked part, which Lookback never edits", () => {
-    const codex = fileOf(output, "codex", rolePromptAssetPath("vtc-engineer-frontend", "locked"));
-    expect(codex).toContain("CODEX-ONLY-NOTE");
-    expect(
-      fileOf(output, "codex", rolePromptAssetPath("vtc-engineer-frontend", "editable")),
-    ).not.toContain("CODEX-ONLY-NOTE");
+    const text = instructions(output, "codex", "vtc-engineer-frontend");
+    const editable = fileOf(
+      output,
+      "codex",
+      rolePromptAssetPath("vtc-engineer-frontend", "editable"),
+    );
+    expect(text.slice(0, -editable.length)).toContain("CODEX-ONLY-NOTE");
+    expect(editable).not.toContain("CODEX-ONLY-NOTE");
   });
 
-  it("gives an engineer profile both editable sections, the Engineer's first", () => {
-    expect(
-      fileOf(output, "claude-code", rolePromptAssetPath("vtc-engineer-frontend", "editable")),
-    ).toBe("ENGINEER-EDITABLE\n\nFRONTEND-EDITABLE");
+  it("puts the Engineer's editable section in a profile's locked part, not its editable one", () => {
+    // A profile's proposal replaces the profile's own section only, so promoting it upstreams
+    // into roles/engineer_frontend/prompt.md without copying the Engineer's section there.
+    const asset = (part: "locked" | "editable"): string =>
+      fileOf(output, "claude-code", rolePromptAssetPath("vtc-engineer-frontend", part));
+    expect(asset("editable")).toBe("FRONTEND-EDITABLE");
+    expect(asset("locked")).toBe("FRONTEND-LOCKED");
+    const text = instructions(output, "claude-code", "vtc-engineer-frontend");
+    const order = ["ENGINEER-LOCKED", "ENGINEER-EDITABLE", "FRONTEND-LOCKED", "## Contract"].map(
+      (part) => text.indexOf(part),
+    );
+    expect(order.every((at) => at >= 0)).toBe(true);
+    expect([...order].sort((a, b) => a - b)).toEqual(order);
+    expect(text.endsWith("\nFRONTEND-EDITABLE")).toBe(true);
+    // an Engineer section change reaches every profile through the compile, not the identity
+    const changed = compileOk({
+      "roles/engineer/prompt.md": `${PROMPT_MARKERS.locked}\nENGINEER-LOCKED\n${PROMPT_MARKERS.editable}\nENGINEER-EDITABLE-2\n`,
+    });
+    const before = manifest(output, "claude-code").agents.find(
+      (a) => a.name === "vtc-engineer-frontend",
+    );
+    const after = manifest(changed, "claude-code").agents.find(
+      (a) => a.name === "vtc-engineer-frontend",
+    );
+    expect(instructions(changed, "claude-code", "vtc-engineer-frontend")).toContain(
+      "ENGINEER-EDITABLE-2",
+    );
+    expect(after?.editable_sha256).toBe(before?.editable_sha256);
+    expect(after?.prompt_sha256).not.toBe(before?.prompt_sha256);
   });
 
   it("names the assets by agent and part, under the plugin's vtc/ directory", () => {
@@ -186,9 +226,11 @@ describe("prompt parts and their SHAs (AD-21 rules 1–2)", () => {
 describe("roles whose agents carry the locked core only (§5 reading 102)", () => {
   it("switches no role by default until the pack section and the engine rendering land", () => {
     expect(EDITABLE_IN_PACK_ROLES).toEqual([]);
+    const output = compileOk();
     for (const host of HOSTS) {
-      for (const agent of manifest(compileOk(), host).agents) {
-        expect(agent.prompt_sha256, agent.name).not.toBe(agent.locked_sha256);
+      for (const agent of manifest(output, host).agents) {
+        const editable = fileOf(output, host, rolePromptAssetPath(agent.name, "editable"));
+        expect(instructions(output, host, agent.name), agent.name).toContain(editable);
       }
     }
   });
@@ -198,18 +240,18 @@ describe("roles whose agents carry the locked core only (§5 reading 102)", () =
   it.each(HOSTS)("on %s a switched agent carries no editable section", (host) => {
     for (const agent of ["vtc-qa-author", "vtc-qa-judge"]) {
       const text = instructions(output, host, agent);
-      const locked = fileOf(output, host, rolePromptAssetPath(agent, "locked"));
-      expect(text, agent).toBe(locked);
       expect(text, agent).not.toContain("QA-EDITABLE");
       expect(fileOf(output, host, rolePromptAssetPath(agent, "editable"))).toBe("QA-EDITABLE");
     }
   });
 
-  it.each(HOSTS)("on %s a switched agent's prompt SHA is its locked SHA", (host) => {
-    const m = manifest(output, host);
-    for (const agent of m.agents) {
-      const switched = agent.role === "qa";
-      expect(agent.prompt_sha256 === agent.locked_sha256, agent.name).toBe(switched);
+  it.each(HOSTS)("on %s switching changes the instructions but not the identity", (host) => {
+    const before = manifest(compileOk(), host).agents;
+    for (const agent of manifest(output, host).agents) {
+      const was = before.find((a) => a.name === agent.name);
+      expect(agent.locked_sha256, agent.name).toBe(was?.locked_sha256);
+      expect(agent.editable_sha256, agent.name).toBe(was?.editable_sha256);
+      expect(agent.prompt_sha256 === was?.prompt_sha256, agent.name).toBe(agent.role !== "qa");
     }
   });
 

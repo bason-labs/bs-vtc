@@ -40,12 +40,13 @@ Both also get:
 - `NOTICE`;
 - `vtc-manifest.json` (`PLUGIN_MANIFEST_ASSET`), validated against `PluginManifestSchema` from
   `@vtc/shared`: agents with role, mode, kind, discipline, version, `promptShaFor` of their
-  instructions, and the SHA-256 of their locked and default editable parts (`locked_sha256`,
-  `editable_sha256`, AD-21 rule 2); skills with kind and pack id;
-- `vtc/prompts/<agent>/locked.md` and `editable.md` (`rolePromptAssetPath`): each agent's two
-  prompt parts as rendered for the host, so the engine can render the default editable section
-  in a task pack and compute `effectivePromptSha` of any pinned version (see roles/README.md,
-  "Prompt parts and Lookback");
+  instructions, and the SHA-256 of their role's trimmed `splitRolePrompt` locked core and default
+  editable section (`locked_sha256`, `editable_sha256`, AD-21 rule 2); skills with kind and pack
+  id;
+- `vtc/prompts/<agent>/locked.md` and `editable.md` (`rolePromptAssetPath`): the two sections of
+  the agent's role, exactly as the manifest SHAs hash them, so the engine can check a proposal
+  against the locked core, render the default editable section in a task pack and compute
+  `effectivePromptSha` of any pinned version (see roles/README.md, "Prompt parts and Lookback");
 - `vtc/role-contracts.json` (`ROLE_CONTRACTS_ASSET`): every role's `RoleContract`, validated with
   `RoleContractSchema`, which the engine loads from the `AssetBundle` (AD-14 rule 6);
 - `hooks/hooks.json`: `SessionStart`, `PreToolUse` and `SubagentStop` wired to

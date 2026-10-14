@@ -50,28 +50,33 @@ The Lead is not a compiled agent: it is the main session, driven by the Lead ski
 
 ## How an agent is assembled
 
-1. Locked core: an engineer profile gets `roles/engineer`'s locked core first; a lens reviewer
-   gets `_shared/lens-reviewer.md` first and its `skills/lens-<x>` checklist after its own core.
+1. Locked core: an engineer profile gets `roles/engineer`'s whole prompt first, its locked core
+   and then its editable section; a lens reviewer gets `_shared/lens-reviewer.md` first and its
+   `skills/lens-<x>` checklist after its own core.
 2. `## Contract`, generated from the effective `role.yaml` contract of the mode.
 3. `_shared/result-protocol.md`; for an advisor, `_shared/advisor-protocol.md`.
 4. `host_overrides.<host>.prompt_append` (§12.3).
-5. The editable section(s), in the same order as the locked cores.
+5. The role's own editable section, verbatim.
 
 Parts 1 to 4 are the agent's **locked part** and part 5 its **editable part**.
 
 ## Prompt parts and Lookback (spine AD-21, §5 reading 102)
 
-- A prompt version is `effectivePromptSha(locked, editable)`. The compiler's definition of the
-  two parts is the compiled ones: `locked_sha256` and `editable_sha256` in the manifest are the
-  SHA-256 of the trimmed parts each plugin carries as `vtc/prompts/<agent>/locked.md` and
-  `editable.md` (not of the raw sections of `prompt.md`: the locked part also holds the contract,
-  the result protocol and the host's `prompt_append`). An agent that carries its editable
-  section has the instructions `<locked>` + newline + `<editable>`, so its manifest
-  `prompt_sha256` is exactly that effective SHA. The editable part is the role's editable
-  section verbatim; an engineer profile's is the Engineer's section, a blank line, then the
-  profile's. This definition, the asset path and a shared helper are proposed to `@vtc/shared`,
-  whose 4.5.0 doc comment still names `splitRolePrompt`, and must be agreed with the
-  lookback-research team before the wave-3 merge.
+- A prompt version is `effectivePromptSha(locked, editable)`, over the role's own `prompt.md`
+  sections as `splitRolePrompt` returns them: `locked_sha256` and `editable_sha256` in the
+  manifest are the SHA-256 of those trimmed sections (the frozen `PluginManifestAgent` contract,
+  and what lookback-research's `sectionSha` checks a proposal's base against). Every mode of a
+  role shares them; an engineer profile's are its own sections, not the Engineer's. Each plugin
+  carries the two sections as `vtc/prompts/<agent>/locked.md` and `editable.md`, so the engine
+  can read them from the plugin. The rest of the compiled locked part (the contract, the
+  protocol, `prompt_append`, the Engineer's prompt in a profile) is outside the Lookback identity;
+  it changes with the role version or the compiler, and the manifest's `prompt_sha256` (the SHA
+  of the instructions as emitted) records it.
+- The editable part is the role's own section verbatim, engineer profiles included, so a
+  promoted proposal maps back to `roles/<role>/prompt.md` unchanged. A profile's proposal never
+  carries the Engineer's heuristics: those sit in the profile's locked part and change only
+  through a proposal for the engineer role, which reaches every profile once it is upstreamed
+  into `roles/engineer/prompt.md` and the plugins are recompiled.
 - Reading 102 moves the editable section out of the compiled agent: the engine renders the
   pinned editable section first in the task pack, so a canary needs no plugin reinstall. The
   compiler has the switch (`EDITABLE_IN_PACK_ROLES`), but **no role is switched yet**: the frozen
@@ -82,7 +87,8 @@ Parts 1 to 4 are the agent's **locked part** and part 5 its **editable part**.
   version, in the integration step that lands them, and is compared with an A/A run before every
   role switches. A switched agent carries the locked part only, ending in a note that only the
   block its pack opens with, up to the first `## Dispatch` heading, is instructions (a heading of
-  that name further down is pack data); its `prompt_sha256` equals its `locked_sha256`.
+  that name further down is pack data). Switching changes its `prompt_sha256` but not its
+  `locked_sha256` or `editable_sha256`.
 - The lookback role writes `proposal.json` (`PromptProposal`: at most three changes, each with a
   hypothesis, a target metric and trace ids) and `editable.md` (the full proposed section) under
   `.vtc/lookback/proposals/<role>/`. It never writes `roles/`, the stored versions or the pins; a
