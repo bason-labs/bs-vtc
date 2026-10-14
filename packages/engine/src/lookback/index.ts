@@ -1,11 +1,13 @@
 /**
  * Lookback (spec §13; spine AD-21; lookback-research team). It reaches engine core only through
- * `core/index.ts` and the gates only through the `GateRunner` interface. The daemon calls
- * {@link lookbackAtRunEnd} at `run.finished`, {@link selectPromptVersion} before each dispatch,
- * {@link evaluateCanaries} as canary dispatches end, and {@link checkProposal} when the lookback
- * role submits; replays run as `lookback_replay` dispatches it plans with {@link planReplayTrials},
- * reading the A/A noise floor with {@link cachedAaFlipRate} and keeping a measured one with
- * {@link recordAaFlipRate}.
+ * `core/index.ts` and the gates only through the `GateRunner` interface. The daemon
+ * (`wireLookback`, spine §5 reading 144) hands core {@link createPromptPins} as its synchronous
+ * prompt selector, calls {@link evaluateCanaries} as canary dispatches end, and calls
+ * {@link lookbackAtRunEnd} at `run.finished` (attributions and scorecards).
+ * Not wired yet (spine §7 "Lookback role dispatch and replays"): queueing the lookback role for the
+ * targets `lookbackAtRunEnd` returns, {@link checkProposal} when that role submits, and the
+ * `lookback_replay` trials planned with {@link planReplayTrials} (reading the A/A noise floor with
+ * {@link cachedAaFlipRate}, keeping a measured one with {@link recordAaFlipRate}).
  * Human promotion is the cli's `vtc lookback approve|pin|rollback`, never an MCP tool.
  */
 export {
@@ -40,10 +42,14 @@ export {
   autoRollback,
   canaryAssignedEvent,
   checkEngineWrite,
+  createPromptPins,
   EMPTY_PINS,
   pinsPath,
   readPins,
+  readPinsSync,
   selectPromptVersion,
+  selectPromptVersionSync,
+  type CompiledPrompt,
   type PinsRead,
   type PinTarget,
   type PromptSelection,
@@ -97,6 +103,7 @@ export {
 } from "./traces.js";
 export {
   loadPromptVersion,
+  loadPromptVersionSync,
   promptVersionPath,
   PromptVersionError,
   promptVersionRef,

@@ -11,16 +11,20 @@
 import { existsSync, mkdirSync, readFileSync, statSync } from "node:fs";
 import { dirname, join } from "node:path";
 import {
+  agentNameFor,
   dotenvValues,
   ENGINE_HTTP,
+  engineRepoKey,
   ENGINE_INSTANCE,
   engineSocketFile,
   engineWindowsPipe,
   FetcherIdSchema,
   HOST_IDS,
+  remainingPct,
   researchScopeFor,
   usageFromStatuslineIngest,
   type EngineDeps,
+  type HostId,
   type ResearchScope,
   type RunDaemon,
   type RunningDaemon,
@@ -40,6 +44,7 @@ import {
   removeEngineDiscovery,
   takeEngineLock,
   writeEngineDiscovery,
+  type PluginCatalog,
   type StaleLockReason,
 } from "../core/index.js";
 import { createGhPullRequests, createGitOps, createWorkspace } from "../git/index.js";
@@ -49,6 +54,13 @@ import {
   createSessionStore,
   type PrototypeServer,
 } from "../http/index.js";
+import {
+  createPromptPins,
+  evaluateCanaries,
+  graderBundleSha,
+  lookbackAtRunEnd,
+  type LockedShaFor,
+} from "../lookback/index.js";
 import { engineSocketAnswers, serveEngineSocket } from "../mcp/index.js";
 import {
   createFetchQuota,
@@ -143,6 +155,101 @@ export const wireResearch = (
   return () => {
     off();
     clearInterval(prune);
+  };
+};
+
+/**
+ * The Lookback module wired into the engine (AD-21; spine §5 reading 144):
+ * - core's prompt selector (`Engine.setPromptPins`, reading 135(d)): each dispatch of an agent the
+ *   plugin compiled without its editable section runs the human's pin or the task's canary arm
+ *   from `~/.vtc/lookback/pins.yaml`, re-read when the file changes;
+ * - as a canary dispatch ends (`role.submitted` of a dispatch with a `canary_arm`, rule 7), the
+ *   project's canaries are evaluated over every run's events, `lookback.canary_evaluated` (and, on
+ *   a rollback verdict, the engine's `auto_rollback` and `lookback.rolled_back`) going to that run;
+ * - at `run.finished` (rule 8) the run's failures are attributed to
+ *   `.vtc/lookback/attributions.jsonl` and the scorecards of every version in the history are
+ *   rewritten under `.vtc/lookback/scorecards/`.
+ * Not wired yet (spine §7 "Lookback role dispatch and replays"): queueing the lookback role for the
+ * targets `lookbackAtRunEnd` returns, the proposal check, and the `lookback_replay` trials. The
+ * targets are therefore not logged as `lookback.dispatched`. Lookback work runs one job at a time
+ * and never fails the engine; the returned cleanup waits for the job in flight.
+ */
+export const wireLookback = (
+  engine: Engine,
+  deps: Pick<EngineDeps, "repoRoot" | "vtcHome" | "now">,
+  plugins: PluginCatalog,
+): (() => Promise<void>) => {
+  const now = deps.now ?? (() => new Date());
+  const repoKey = engineRepoKey(deps.repoRoot);
+  engine.setPromptPins(
+    createPromptPins({
+      vtcHome: deps.vtcHome,
+      repoKey,
+      compiled: (agent, host) => plugins.promptParts?.(agent, host)?.compiled,
+    }),
+  );
+  // every mode of a role shares its prompt sections (reading 118)
+  const lockedShaFor: LockedShaFor = (role, mode, host) =>
+    plugins.promptParts?.(agentNameFor(role, mode), host)?.lockedSha256;
+  const history = () => engine.states().flatMap((s) => s.events);
+  let chain: Promise<void> = Promise.resolve();
+  const enqueue = (job: () => Promise<void>): void => {
+    chain = chain.then(job).catch((error: unknown) => {
+      process.stderr.write(
+        `vtc engine: lookback: ${error instanceof Error ? error.message : String(error)}\n`,
+      );
+    });
+  };
+  const canaries = (run: string, role: string | undefined): Promise<void> =>
+    evaluateCanaries({ vtcHome: deps.vtcHome, repoKey, events: history(), now: now() }).then(
+      ({ events }) => {
+        for (const draft of events) {
+          // the canary that just got a dispatch, and every rollback
+          if (draft.type === "lookback.canary_evaluated" && draft.data.role !== role) continue;
+          engine.recordModuleEvent(run, draft);
+        }
+      },
+    );
+  const runEnd = async (run: string): Promise<void> => {
+    const state = engine.states().find((s) => s.id === run);
+    if (state === undefined) return;
+    const host: HostId = engine.hostFor({ host: null });
+    const weekly = engine.usage.get(host)?.windows.find((w) => w.kind === "weekly");
+    await lookbackAtRunEnd({
+      projectRoot: deps.repoRoot,
+      events: state.events,
+      history: history(),
+      lockedShaFor,
+      graderBundleSha: graderBundleSha({
+        judgeModel: null,
+        gatesConfigHash: engine.gatesConfigHash(),
+      }),
+      weeklyRemainingPct: weekly === undefined ? null : remainingPct(weekly),
+      budgetAvailable:
+        state.runBudget === null || state.runBudget.spent_usd < state.runBudget.budget_usd,
+      now: now(),
+    });
+  };
+  const off = engine.onEvent((event) => {
+    if (event.type === "run.finished") {
+      enqueue(() => runEnd(event.run));
+      return;
+    }
+    if (event.type !== "role.submitted") return;
+    const action = (event.data as { action_id?: string }).action_id;
+    const state = engine.states().find((s) => s.id === event.run);
+    const underCanary = state?.events.some(
+      (e) =>
+        e.type === "role.dispatched" &&
+        (e.data as { action_id?: string; canary_arm?: string }).action_id === action &&
+        (e.data as { canary_arm?: string }).canary_arm !== undefined,
+    );
+    if (underCanary === true) enqueue(() => canaries(event.run, event.role));
+  });
+  return async () => {
+    off();
+    engine.setPromptPins(null);
+    await chain;
   };
 };
 
@@ -248,6 +355,7 @@ export const runDaemon: RunDaemon = async (deps: EngineDeps, options) => {
       remote: "origin",
     });
     cleanups.push(wireResearch(engine, deps));
+    cleanups.push(wireLookback(engine, deps, plugins));
     // AD-25: shutting down kills the engine-launched runs and stops the Level-3 waits, so close
     // returns promptly and leaves no orphaned process
     cleanups.push(() => engine.shutdown());

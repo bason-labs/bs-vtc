@@ -3,7 +3,7 @@
  * appends, and reads that treat a missing file as absent.
  */
 import { randomBytes } from "node:crypto";
-import { constants } from "node:fs";
+import { constants, readFileSync } from "node:fs";
 import {
   appendFile,
   link,
@@ -24,6 +24,16 @@ const isMissing = (error: unknown): boolean =>
 export const readTextIfExists = async (path: string): Promise<string | undefined> => {
   try {
     return await readFile(path, "utf8");
+  } catch (error) {
+    if (isMissing(error)) return undefined;
+    throw error;
+  }
+};
+
+/** {@link readTextIfExists}, synchronously (the engine's prompt selector is synchronous). */
+export const readTextIfExistsSync = (path: string): string | undefined => {
+  try {
+    return readFileSync(path, "utf8");
   } catch (error) {
     if (isMissing(error)) return undefined;
     throw error;

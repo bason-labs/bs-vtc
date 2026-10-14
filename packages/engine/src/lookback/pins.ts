@@ -20,12 +20,24 @@ import {
   type LookbackPins,
   type PromptVersionRef,
 } from "@vtc/shared";
+import { statSync } from "node:fs";
 import { join } from "node:path";
-import { parseYaml, toYaml } from "../core/index.js";
+import {
+  parseYaml,
+  toYaml,
+  type PinnedPrompt,
+  type PromptPins,
+  type PromptTarget,
+} from "../core/index.js";
 import { lookbackEvent, type LookbackEventDraft } from "./events.js";
-import { readTextIfExists, withFileLock, writeAtomicIfUnchanged } from "./files.js";
+import {
+  readTextIfExists,
+  readTextIfExistsSync,
+  withFileLock,
+  writeAtomicIfUnchanged,
+} from "./files.js";
 import { sameTarget } from "./traces.js";
-import { loadPromptVersion, promptVersionRef } from "./versions.js";
+import { loadPromptVersion, loadPromptVersionSync, promptVersionRef } from "./versions.js";
 
 export interface PinTarget {
   readonly role: string;
@@ -88,11 +100,7 @@ export interface PromptSelection {
   readonly problem?: string;
 }
 
-/**
- * The prompt version a dispatch runs: the task's canary arm when a canary covers the target, else
- * the human's pin, else the compiled default. Pins come from the VTC home only.
- */
-export const selectPromptVersion = async (input: {
+interface SelectInput {
   readonly vtcHome: string;
   readonly repoKey: string;
   readonly target: PinTarget;
@@ -100,30 +108,40 @@ export const selectPromptVersion = async (input: {
   /** The role's locked core and compiled default editable section (`splitRolePrompt`). */
   readonly locked: string;
   readonly defaultEditable: string;
-}): Promise<PromptSelection> => {
-  const fallback = promptVersionRef({
-    ...input.target,
-    locked: input.locked,
-    editable: input.defaultEditable,
-  });
-  const byDefault = (problem?: string): PromptSelection => ({
-    ref: fallback,
-    editable: input.defaultEditable.trim(),
-    source: "default",
-    ...(problem === undefined ? {} : { problem }),
-  });
-  const { pins, problem } = await readPins(input.vtcHome);
-  if (problem !== undefined) return byDefault(problem);
-  const project = pins.projects[input.repoKey];
-  if (project === undefined) return byDefault();
+}
 
+/** What the pins say before any version file is read: a final selection, or a version to load. */
+type Decision =
+  | { readonly kind: "done"; readonly selection: PromptSelection }
+  | {
+      readonly kind: "load";
+      readonly wanted: string;
+      readonly source: "pin" | "canary";
+      readonly canary?: PromptSelection["canary"];
+    };
+
+const fallbackRef = (input: SelectInput): PromptVersionRef =>
+  promptVersionRef({ ...input.target, locked: input.locked, editable: input.defaultEditable });
+
+const byDefault = (input: SelectInput, problem?: string): PromptSelection => ({
+  ref: fallbackRef(input),
+  editable: input.defaultEditable.trim(),
+  source: "default",
+  ...(problem === undefined ? {} : { problem }),
+});
+
+const decide = (read: PinsRead, input: SelectInput): Decision => {
+  const done = (selection: PromptSelection): Decision => ({ kind: "done", selection });
+  if (read.problem !== undefined) return done(byDefault(input, read.problem));
+  const project = read.pins.projects[input.repoKey];
+  if (project === undefined) return done(byDefault(input));
   const canary =
     input.task === undefined
       ? undefined
       : project.canaries.find((c) => sameTarget(c, input.target));
   const pin = project.pins.find((p) => sameTarget(p, input.target));
   let wanted: string;
-  let source: PromptSelection["source"];
+  let source: "pin" | "canary";
   let arm: "candidate" | "baseline" | undefined;
   if (canary !== undefined && input.task !== undefined) {
     arm = canaryArmFor(input.repoKey, input.task);
@@ -133,26 +151,131 @@ export const selectPromptVersion = async (input: {
     wanted = pin.effective_sha256;
     source = "pin";
   } else {
-    return byDefault();
+    return done(byDefault(input));
   }
   const canaryInfo =
     canary !== undefined && arm !== undefined
       ? { canary: { arm, candidate: canary.candidate, baseline: canary.baseline } }
       : {};
+  const fallback = fallbackRef(input);
   if (wanted === fallback.effective_sha256) {
-    return { ref: fallback, editable: input.defaultEditable.trim(), source, ...canaryInfo };
+    return done({ ref: fallback, editable: input.defaultEditable.trim(), source, ...canaryInfo });
   }
-  const version = await loadPromptVersion(input.vtcHome, input.target, wanted, input.locked);
+  return { kind: "load", wanted, source, ...canaryInfo };
+};
+
+const finish = (
+  input: SelectInput,
+  decision: Extract<Decision, { kind: "load" }>,
+  version: { readonly editable: string } | undefined,
+): PromptSelection => {
   if (version === undefined) {
     return byDefault(
-      `the ${source} names version ${wanted.slice(0, 8)}, whose file is missing or does not verify against the current locked core`,
+      input,
+      `the ${decision.source} names version ${decision.wanted.slice(0, 8)}, whose file is missing or does not verify against the current locked core`,
     );
   }
   return {
     ref: promptVersionRef({ ...input.target, locked: input.locked, editable: version.editable }),
     editable: version.editable,
-    source,
-    ...canaryInfo,
+    source: decision.source,
+    ...(decision.canary === undefined ? {} : { canary: decision.canary }),
+  };
+};
+
+/**
+ * The prompt version a dispatch runs: the task's canary arm when a canary covers the target, else
+ * the human's pin, else the compiled default. Pins come from the VTC home only.
+ */
+export const selectPromptVersion = async (input: SelectInput): Promise<PromptSelection> => {
+  const decision = decide(await readPins(input.vtcHome), input);
+  if (decision.kind === "done") return decision.selection;
+  return finish(
+    input,
+    decision,
+    await loadPromptVersion(input.vtcHome, input.target, decision.wanted, input.locked),
+  );
+};
+
+/** Reads `~/.vtc/lookback/pins.yaml` synchronously. */
+export const readPinsSync = (vtcHome: string): PinsRead =>
+  parsePins(readTextIfExistsSync(pinsPath(vtcHome)));
+
+/**
+ * {@link selectPromptVersion}, synchronously, over pins already read (`read`, by default read now):
+ * engine core's prompt selector (`PromptPins`) is synchronous.
+ */
+export const selectPromptVersionSync = (
+  input: SelectInput,
+  read: PinsRead = readPinsSync(input.vtcHome),
+): PromptSelection => {
+  const decision = decide(read, input);
+  if (decision.kind === "done") return decision.selection;
+  return finish(
+    input,
+    decision,
+    loadPromptVersionSync(input.vtcHome, input.target, decision.wanted, input.locked),
+  );
+};
+
+/** The compiled agent's locked core and default editable section (the plugin carries both). */
+export type CompiledPrompt = (
+  agent: string,
+  host: HostId,
+) => { readonly locked: string; readonly editable: string } | undefined;
+
+/**
+ * Engine core's prompt selector (`Engine.setPromptPins`, AD-21 rules 1–3 and 7; spine §5 reading
+ * 135(d)) over {@link selectPromptVersionSync}. Pins are read from the VTC home only, once per
+ * change of `pins.yaml` (its size and modification time), so a gesture of the cli takes effect at
+ * the next dispatch. It returns `null` for the compiled default (core then renders the default
+ * itself), the selection for a pin or a canary arm, and throws when a pin or canary cannot be
+ * honoured (a broken pins file, a missing or unverifiable version file): core then runs the
+ * compiled default and records a `prompt_selection` incident.
+ */
+export const createPromptPins = (input: {
+  readonly vtcHome: string;
+  readonly repoKey: string;
+  readonly compiled: CompiledPrompt;
+}): PromptPins => {
+  let cached: { readonly stamp: string; readonly read: PinsRead } | null = null;
+  const pins = (): PinsRead => {
+    const stamp = ((): string => {
+      try {
+        const st = statSync(pinsPath(input.vtcHome));
+        return `${String(st.ino)}:${String(st.size)}:${String(st.mtimeMs)}`;
+      } catch {
+        return "missing";
+      }
+    })();
+    if (cached?.stamp !== stamp) cached = { stamp, read: readPinsSync(input.vtcHome) };
+    return cached.read;
+  };
+  return (target: PromptTarget): PinnedPrompt | null => {
+    const compiled = input.compiled(target.agent, target.host);
+    if (compiled === undefined) return null;
+    const selection = selectPromptVersionSync(
+      {
+        vtcHome: input.vtcHome,
+        repoKey: input.repoKey,
+        target: {
+          role: target.role,
+          ...(target.mode === undefined ? {} : { mode: target.mode }),
+          host: target.host,
+        },
+        task: target.task,
+        locked: compiled.locked,
+        defaultEditable: compiled.editable,
+      },
+      pins(),
+    );
+    if (selection.problem !== undefined) throw new Error(selection.problem);
+    if (selection.source === "default") return null;
+    return {
+      version: selection.ref,
+      text: selection.editable,
+      ...(selection.canary === undefined ? {} : { canary: selection.canary }),
+    };
   };
 };
 
