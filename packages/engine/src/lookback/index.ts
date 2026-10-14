@@ -102,7 +102,14 @@ export {
   type LookbackRetroDeps,
 } from "./retro.js";
 export { computeScorecards, writeScorecards } from "./scorecards.js";
-export { appendTiebreakRecord, readTiebreakKeys, tiebreaksPath } from "./tiebreaks.js";
+export {
+  appendTiebreakRecord,
+  readTiebreakKeys,
+  TIEBREAK_STORE_MAX_BYTES,
+  tiebreakRecordFor,
+  tiebreaksPath,
+  type TiebreakAnswer,
+} from "./tiebreaks.js";
 export {
   buildTraces,
   sameTarget,

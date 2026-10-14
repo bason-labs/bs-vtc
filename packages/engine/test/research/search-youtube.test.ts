@@ -1,7 +1,7 @@
 /**
  * H-3 (spine §5 reading 156): the `search` fetcher is an optional keyed provider with no default.
  * D-bs (reading 173): the `youtube` fetcher runs the user's own yt-dlp. Every yt-dlp here is a
- * fake: no test runs it, and no test opens a socket.
+ * fake: no test runs it, and no test opens a socket (`runProcess` itself runs a tiny `/bin/sh` script).
  */
 import {
   FetchRequestSchema,
@@ -23,6 +23,7 @@ import {
   youtubeVideoId,
   ytDlpArgs,
   ytDlpAvailable,
+  runProcess,
   type CachedFetchContext,
   type YtDlp,
   type YtDlpRun,
@@ -264,7 +265,11 @@ const fakeYtDlp = (
   };
   return {
     calls,
-    locate: () => ({ available: true, path: "/opt/tools/bin/yt-dlp" }),
+    locate: () => ({
+      available: true,
+      path: "/opt/tools/bin/yt-dlp",
+      childPathEnv: "/opt/tools/bin",
+    }),
     run,
     ...(tempRoot === undefined ? {} : { tempRoot }),
   };
@@ -312,6 +317,7 @@ describe("the youtube fetcher through the user's yt-dlp (D-bs)", () => {
     expect(call?.timeoutMs).toBeGreaterThan(0);
     expect(call?.cwd.startsWith(join(tempRoot, "vtc-yt-dlp-"))).toBe(true);
     expect(call?.env.HOME).toBe(call?.cwd);
+    expect(call?.env.PATH).toBe("/opt/tools/bin");
     // the temporary directory is gone
     expect(await readdir(tempRoot)).toEqual([]);
     const body = new TextDecoder().decode(await cache.blob("_shared", result.content_sha256 ?? ""));
@@ -454,6 +460,14 @@ describe("youtube helpers", () => {
     expect(vttToText(VTT)).not.toMatch(/-->|WEBVTT|NOTE|comment|Kind:/);
   });
 
+  it("decodes each entity once, so an escaped entity stays as written", () => {
+    expect(
+      vttToText(
+        "WEBVTT\n\n00:00.000 --> 00:01.000\nuse &amp;lt;b&amp;gt; &lt;i&gt; a&nbsp;&amp; b\n",
+      ),
+    ).toBe("use &lt;b&gt; <i> a & b");
+  });
+
   it("finds yt-dlp only on an absolute PATH entry outside the excluded directories", async () => {
     const root = await tempDir("sy-path");
     const repo = join(root, "repo");
@@ -476,8 +490,55 @@ describe("youtube helpers", () => {
     ).toMatchObject({ available: false, reason: expect.stringContaining("not found") as string });
     expect(
       ytDlpAvailable({ pathEnv: [repoBin, linkBin, userBin].join(sep), excludeDirs: [repo] }),
-    ).toEqual({ available: true, path: join(userBin, "yt-dlp") });
+    ).toEqual({
+      available: true,
+      path: join(userBin, "yt-dlp"),
+      childPathEnv: [linkBin, userBin].join(sep),
+    });
     expect(ytDlpAvailable({ pathEnv: undefined, excludeDirs: [repo] }).available).toBe(false);
+  });
+
+  it("gives the yt-dlp child no PATH entry inside the repo, as given or through a link", async () => {
+    const root = await tempDir("sy-childpath");
+    const repo = join(root, "repo");
+    const venvBin = join(repo, ".venv", "bin");
+    const userBin = join(root, "user-bin");
+    const linkToRepo = join(root, "link-to-repo-bin");
+    for (const dir of [venvBin, userBin]) await mkdir(dir, { recursive: true });
+    await writeFile(join(userBin, "yt-dlp"), "#!/usr/bin/env python3\n");
+    await chmod(join(userBin, "yt-dlp"), 0o755);
+    // a role could plant an interpreter here
+    await writeFile(join(venvBin, "python3"), "#!/bin/sh\nexit 0\n");
+    await chmod(join(venvBin, "python3"), 0o755);
+    await symlink(venvBin, linkToRepo);
+    const sep = process.platform === "win32" ? ";" : ":";
+    const located = ytDlpAvailable({
+      pathEnv: [venvBin, "relative/bin", linkToRepo, join(root, "missing"), userBin].join(sep),
+      excludeDirs: [repo],
+    });
+    expect(located).toEqual({
+      available: true,
+      path: join(userBin, "yt-dlp"),
+      childPathEnv: userBin,
+    });
+
+    const calls: { env: Readonly<Record<string, string>> }[] = [];
+    const ytDlp: YtDlp = {
+      locate: () =>
+        ytDlpAvailable({
+          pathEnv: [venvBin, linkToRepo, userBin].join(sep),
+          excludeDirs: [repo],
+        }),
+      run: (_binary, _args, options) => {
+        calls.push(options);
+        return Promise.resolve({ exitCode: 1, timedOut: false, stderr: "" });
+      },
+    };
+    await (await youtube(ytDlp)).run({ fetcher: "youtube", url: WATCH });
+    expect(calls).toHaveLength(1);
+    const childPath = (calls[0]?.env.PATH ?? "").split(sep);
+    expect(childPath).toEqual([userBin]);
+    for (const entry of childPath) expect(entry.startsWith(repo)).toBe(false);
   });
 
   it("skips a file that is not executable", async () => {
@@ -485,6 +546,47 @@ describe("youtube helpers", () => {
     await writeFile(join(bin, "yt-dlp"), "not a program");
     await chmod(join(bin, "yt-dlp"), 0o644);
     expect(ytDlpAvailable({ pathEnv: bin, excludeDirs: [] }).available).toBe(false);
+  });
+});
+
+describe.skipIf(process.platform === "win32")("runProcess (execFile, no shell)", () => {
+  const script = async (body: string) => {
+    const dir = await tempDir("sy-proc");
+    const path = join(dir, "tool.sh");
+    await writeFile(path, `#!/bin/sh\n${body}\n`);
+    await chmod(path, 0o755);
+    return { dir, path };
+  };
+
+  it("kills a run that outlives its timeout and reports it as timed out", async () => {
+    const { dir, path } = await script("sleep 5");
+    const started = Date.now();
+    const result = await runProcess(path, [], {
+      cwd: dir,
+      env: { PATH: "/usr/bin:/bin" },
+      timeoutMs: 100,
+    });
+    expect(result).toMatchObject({ timedOut: true, exitCode: null });
+    expect(Date.now() - started).toBeLessThan(4000);
+  });
+
+  it("maps an exit code and keeps stderr, and passes arguments without a shell", async () => {
+    const { dir, path } = await script('echo "boom: $1" >&2\nexit 3');
+    expect(
+      await runProcess(path, ["$(echo injected)"], {
+        cwd: dir,
+        env: { PATH: "/usr/bin:/bin" },
+        timeoutMs: 5000,
+      }),
+    ).toEqual({ exitCode: 3, timedOut: false, stderr: "boom: $(echo injected)\n" });
+    const ok = await script("exit 0");
+    expect(
+      await runProcess(ok.path, [], {
+        cwd: ok.dir,
+        env: { PATH: "/usr/bin:/bin" },
+        timeoutMs: 5000,
+      }),
+    ).toEqual({ exitCode: 0, timedOut: false, stderr: "" });
   });
 });
 
