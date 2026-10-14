@@ -53,14 +53,7 @@ import { guardGateRun } from "./dispatch-guard.js";
 import { diffLineCounts } from "./read-model.js";
 import { diffRiskHits, isTrivialDiff } from "./router.js";
 import { parkEscalation } from "./escalations.js";
-import {
-  bundleMarkdown,
-  finalReviewScopeNote,
-  finalReviewStepsRun,
-  writeFeatureEvidenceBundle,
-  writeRunSummary,
-  writeTaskEvidenceBundle,
-} from "./projections.js";
+import { writeTaskEvidenceBundle } from "./projections.js";
 import {
   gateFindings,
   gateSources,
@@ -68,7 +61,6 @@ import {
   recordRoundFindings,
   settleRound,
 } from "./verify.js";
-import { taskDetailView } from "./views.js";
 
 const sha256 = (bytes: Uint8Array): string => createHash("sha256").update(bytes).digest("hex");
 
@@ -654,7 +646,7 @@ const conflictFinding = (task: Task, detail: string, round: number): Finding => 
 };
 
 /** The branch PRs target: the repo's current branch, or `main` when HEAD is detached. */
-const baseBranch = async (repoRoot: string): Promise<string> => {
+export const baseBranch = async (repoRoot: string): Promise<string> => {
   const out = (
     await runGit(repoRoot, ["rev-parse", "--abbrev-ref", "HEAD"], { allowFailure: true })
   ).stdout
@@ -689,7 +681,7 @@ export const downgradeNoRemote = (k: Kernel, h: RunHandle): void => {
 };
 
 /** Pushes the integration branch and keeps the draft PR current (Level 2, §6.7). */
-const pushFeature = async (
+export const pushFeature = async (
   k: Kernel,
   h: RunHandle,
   featureId: string,
@@ -942,7 +934,7 @@ const setFeatureStatus = (
 
 export { setFeatureStatus };
 
-const parkFeature = (
+export const parkFeature = (
   k: Kernel,
   h: RunHandle,
   featureId: string,
@@ -1231,51 +1223,6 @@ export const startFinalReview = (k: Kernel, h: RunHandle, featureId: string): vo
           });
         }
       }
-      return Promise.resolve();
-    });
-  });
-};
-
-// -------------------------------------------------------------------- release
-
-/** RELEASE and RETRO (§6.1, §6.7): feature evidence bundle, PR ready (Level 2), run summary. */
-export const startRelease = (k: Kernel, h: RunHandle, featureId: string): void => {
-  k.spawn(h, `release:${featureId}`, async () => {
-    const written = await k.serial(h, () =>
-      Promise.resolve(
-        writeFeatureEvidenceBundle(
-          k.deps.repoRoot,
-          h.state,
-          featureId,
-          "pass",
-          k.now(),
-          k.secrets(),
-        ),
-      ),
-    );
-    await pushFeature(
-      k,
-      h,
-      featureId,
-      true,
-      written === null
-        ? finalReviewScopeNote(finalReviewStepsRun(k.deps.repoRoot, h.state, featureId))
-        : `${bundleMarkdown(written.bundle).trimEnd()}\n\n${finalReviewScopeNote(
-            written.bundle.kind === "feature" ? written.bundle.final_review.steps_run : [],
-          )}\n`,
-    );
-    await k.serial(h, () => {
-      if (h.state.run.finished_at !== undefined) return Promise.resolve();
-      k.emit(h, {
-        type: "run.phase_changed",
-        actor: "engine",
-        data: { from: h.state.run.phase, to: "retro" },
-      });
-      const roleRuns = [...h.state.tasks.keys()].flatMap(
-        (t) => taskDetailView(h.state, t)?.role_runs ?? [],
-      );
-      const summary = writeRunSummary(k.deps.repoRoot, h.state, roleRuns, k.secrets());
-      k.emit(h, { type: "run.finished", actor: "engine", data: { outcome: "done", summary } });
       return Promise.resolve();
     });
   });

@@ -16,7 +16,12 @@ import {
   type HostAuthStatus,
   type HostId,
   type HostOutcome,
+  type BaseRun,
+  type RemoteInfo,
+  type RemoteMergePolicy,
   type RemoteMergeService,
+  type RequiredCheck,
+  type RevertRef,
   type SessionRef,
   type SpawnRoleRequest,
   type UsageSnapshot,
@@ -39,7 +44,7 @@ import {
 import { createGitOps, createWorkspace, type PullRequestService } from "../../src/git/index.js";
 import { globMatch } from "../../src/core/globs.js";
 import { ALL_FIXTURE_ROLES } from "../fixtures/roles.js";
-import { addBareRemote, initRepo, tempDir, writeFile } from "./repo.js";
+import { addBareRemote, git, initRepo, tempDir, writeFile } from "./repo.js";
 
 export type SpawnAction = Extract<LeadAction, { type: "spawn_role" }>;
 
@@ -192,35 +197,129 @@ export const fakeGates = (repoRoot: string, now: () => Date): FakeGates => {
   };
 };
 
-export const fakePullRequests = (): PullRequestService & { readonly calls: string[] } => {
+export interface FakePullRequests extends PullRequestService {
+  readonly calls: string[];
+  /** The PR as the fake host has it now (tests change it: merged, closed, a moved head). */
+  current: PullRequestRef | null;
+}
+
+/** The PR service fake: one PR per repo, its head the branch's real head (as GitHub has it). */
+export const fakePullRequests = (repoRoot?: string): FakePullRequests => {
   const calls: string[] = [];
-  let pr: PullRequestRef | null = null;
-  return {
+  const headOf = (branch: string): string => {
+    if (repoRoot === undefined) return "f".repeat(40);
+    try {
+      return git(repoRoot, "rev-parse", branch);
+    } catch {
+      return "f".repeat(40);
+    }
+  };
+  const fake: FakePullRequests = {
     calls,
+    current: null,
     upsertDraft: (request) => {
       calls.push(`upsert ${request.branch} -> ${request.base}`);
-      pr = {
+      fake.current = {
         url: "https://github.com/acme/app/pull/7",
-        draft: pr?.draft ?? true,
+        draft: fake.current?.draft ?? true,
         state: "open",
-        head_sha: "f".repeat(40),
+        head_sha: headOf(request.branch),
         ci: "unknown",
+        number: 7,
       };
-      return Promise.resolve(pr);
+      return Promise.resolve(fake.current);
     },
     markReady: (branch) => {
       calls.push(`ready ${branch}`);
-      pr = {
+      fake.current = {
         url: "https://github.com/acme/app/pull/7",
         draft: false,
         state: "open",
-        head_sha: "f".repeat(40),
+        head_sha: headOf(branch),
         ci: "pending",
+        number: 7,
       };
-      return Promise.resolve(pr);
+      return Promise.resolve(fake.current);
     },
-    view: () => Promise.resolve(pr),
+    view: () => Promise.resolve(fake.current),
   };
+  return fake;
+};
+
+/** A scripted `RemoteMergeService` (AD-23) over the PR fake; every call is recorded. */
+export interface FakeRemoteMerge extends RemoteMergeService {
+  readonly calls: string[];
+  info: RemoteInfo;
+  /** `policy(base)`; a function may throw. */
+  rules: RemoteMergePolicy;
+  /** Required checks on the gated SHA, one list per call (the last repeats). */
+  checks: RequiredCheck[][];
+  /** After `enableAutoMerge`, the PR merges on the next view (default true). */
+  mergeOnEnable: boolean;
+  baseRunList: BaseRun[];
+  reverts: RevertRef[];
+}
+
+export const GREEN_POLICY: RemoteMergePolicy = {
+  base: "main",
+  auto_merge_allowed: true,
+  required_checks: ["ci"],
+  merge_methods: ["squash"],
+  merge_queue: false,
+  requires_review: false,
+  signatures_required: false,
+};
+
+export const fakeRemoteMerge = (prs: FakePullRequests): FakeRemoteMerge => {
+  const fake: FakeRemoteMerge = {
+    calls: [],
+    info: { github: true, ghAuthenticated: true },
+    rules: GREEN_POLICY,
+    checks: [[{ name: "ci", state: "success" }]],
+    mergeOnEnable: true,
+    baseRunList: [],
+    reverts: [],
+    remote: () => {
+      fake.calls.push("remote");
+      return Promise.resolve(fake.info);
+    },
+    policy: (base) => {
+      fake.calls.push(`policy ${base}`);
+      return Promise.resolve(fake.rules);
+    },
+    requiredChecks: (branch, sha) => {
+      fake.calls.push(`checks ${branch} ${sha.slice(0, 7)}`);
+      const next = fake.checks.length > 1 ? fake.checks.shift() : fake.checks[0];
+      return Promise.resolve(next ?? []);
+    },
+    enableAutoMerge: (request) => {
+      if (request.headSha.length !== 40) throw new Error("not bound to a SHA");
+      fake.calls.push(`enable ${request.branch} ${request.headSha.slice(0, 7)} ${request.method}`);
+      const pr = prs.current;
+      if (pr === null) return Promise.reject(new Error("no PR"));
+      const enabled: PullRequestRef = { ...pr, auto_merge: "enabled" };
+      prs.current = fake.mergeOnEnable
+        ? { ...enabled, state: "merged", auto_merge: "merged", merge_commit: "c".repeat(40) }
+        : enabled;
+      return Promise.resolve(enabled);
+    },
+    disableAutoMerge: (branch) => {
+      fake.calls.push(`disable ${branch}`);
+      const pr = prs.current;
+      if (pr === null) return Promise.resolve(null);
+      prs.current = { ...pr, auto_merge: "disabled" };
+      return Promise.resolve(prs.current);
+    },
+    baseRuns: (base, sha) => {
+      fake.calls.push(`runs ${base} ${sha.slice(0, 7)}`);
+      return Promise.resolve(fake.baseRunList);
+    },
+    findReverts: (base, sha) => {
+      fake.calls.push(`reverts ${base} ${sha.slice(0, 7)}`);
+      return Promise.resolve(fake.reverts);
+    },
+  };
+  return fake;
 };
 
 /**
@@ -364,7 +463,9 @@ export interface Harness {
   readonly home: string;
   readonly engine: Engine;
   readonly gates: FakeGates;
-  readonly prs: ReturnType<typeof fakePullRequests>;
+  readonly prs: FakePullRequests;
+  /** The Level-3 service fake (AD-23), when `level3` was set. */
+  readonly remote3: FakeRemoteMerge;
   readonly scheduled: { at: Date | null; cancelled: number };
   readonly spawned: string[];
   /** Engine-launched runs the fake adapters started (AD-25). */
@@ -372,6 +473,8 @@ export interface Harness {
   /** Roles of engine-launched runs the engine killed. */
   readonly killed: string[];
   clock: Date;
+  /** Replaces the engine's waits between remote polls (default: the clock moves `ms`). */
+  sleeper: ((ms: number) => Promise<void>) | null;
   advance(ms: number): void;
   reopen(): Engine;
   release(): Promise<void>;
@@ -400,8 +503,8 @@ export interface HarnessOptions {
   readonly authStatus?: () => Promise<HostAuthStatus>;
   /** A Codex adapter too (absent: none is installed). */
   readonly codex?: FakeAdapterOptions;
-  /** `EngineCoreDeps.remoteMerge` (Level 3, AD-23). */
-  readonly remoteMerge?: RemoteMergeService;
+  /** Wire a Level-3 `RemoteMergeService` fake (AD-23); `h.remote3` scripts it. */
+  readonly level3?: boolean;
 }
 
 export const DEFAULT_GATES_YML = {
@@ -459,10 +562,12 @@ export const createHarness = (options: HarnessOptions = {}): Harness => {
     spawned,
     launched,
     killed,
+    sleeper: null,
   } as Harness;
   const now = (): Date => h.clock;
   const gates = fakeGates(repo, now);
-  const prs = fakePullRequests();
+  const prs = fakePullRequests(repo);
+  const remote3 = fakeRemoteMerge(prs);
   let lock = acquireEngineLock(repo);
   const deps = (): EngineCoreDeps => ({
     repoRoot: repo,
@@ -472,7 +577,13 @@ export const createHarness = (options: HarnessOptions = {}): Harness => {
     git: createGitOps({ repoRoot: repo }),
     workspace: createWorkspace(repo),
     pullRequests: prs,
-    ...(options.remoteMerge === undefined ? {} : { remoteMerge: options.remoteMerge }),
+    ...(options.level3 === true ? { remoteMerge: remote3 } : {}),
+    // Level 3 waits between polls: the test clock moves instead of the wall clock
+    sleep: (ms: number) => {
+      if (h.sleeper !== null) return h.sleeper(ms);
+      h.clock = new Date(h.clock.getTime() + ms);
+      return Promise.resolve();
+    },
     adapters,
     autoResume: {
       schedule: (_root, at) => {
@@ -494,6 +605,7 @@ export const createHarness = (options: HarnessOptions = {}): Harness => {
   Object.assign(h, {
     gates,
     prs,
+    remote3,
     deps: deps(),
     engine: Engine.open(deps()),
     advance: (ms: number) => {
@@ -699,3 +811,30 @@ export const verdictPass = (h: Harness, action: SpawnAction, file: string) =>
       },
     ],
   });
+
+/**
+ * The fake Gate Runner reports full coverage on Final Review: it writes a traceability report
+ * (every requirement of the request covered by a passing test) the way the real one does.
+ */
+export const reportCoverage = (h: Harness): void => {
+  h.gates.reshape((request, report) => {
+    if (request.reason !== "final_review" || request.feature === undefined) return report;
+    const path = `.vtc/evidence/${request.feature}/traceability.json`;
+    writeFile(
+      h.repo,
+      path,
+      `${JSON.stringify({
+        run: request.run,
+        feature: request.feature,
+        rows: request.req_tags.map((req) => ({
+          req,
+          tests: [{ id: `[${req}] works`, status: "pass" }],
+          covered: true,
+        })),
+        gaps: [],
+        built_at: h.clock.toISOString(),
+      })}\n`,
+    );
+    return { ...report, traceability: path };
+  });
+};

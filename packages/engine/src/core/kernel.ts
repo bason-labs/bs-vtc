@@ -54,6 +54,8 @@ export interface EngineCoreDeps {
   /** What the compiled plugins hold: prompt SHAs, discipline profiles, skills (§13, §5.2a). */
   readonly plugins: PluginCatalog;
   readonly now: () => Date;
+  /** Waits between polls of the remote (Level 3); tests inject one that moves their clock. */
+  readonly sleep?: (ms: number) => Promise<void>;
   /** Uniform [0, 1) for the auto-resume jitter (§6.9 step 4). */
   readonly random: () => number;
   /** The remote Level 2 pushes to. */
