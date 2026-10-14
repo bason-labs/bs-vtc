@@ -141,9 +141,10 @@ export const checkGh = async (exec: Exec): Promise<DoctorCheck> => {
 
 /**
  * Claude Code: on PATH, and logged in per `claude auth status --json` (`loggedIn`). An
- * `apiKeyHelper` setup (named by its `authMethod` or `apiKeySource`) is a warning (D-ab, spine §5
- * reading 48): role runs ignore user settings, where the helper lives, so VTC runs need the
- * user's own subscription login. Nothing but that status command is consulted (AD-9).
+ * `apiKeyHelper` setup (named by its `authMethod` or `apiKeySource`) is a warning (D-ab; spine §5
+ * readings 108 and 130): headless role runs load the user's settings, so the helper would bill
+ * them to the API key rather than the subscription login VTC is built for. Nothing but that
+ * status command is consulted (AD-9).
  */
 export const checkClaude = async (exec: Exec): Promise<DoctorCheck> => {
   const version = await present(exec, "claude");
@@ -171,7 +172,7 @@ export const checkClaude = async (exec: Exec): Promise<DoctorCheck> => {
     return {
       name: "claude-code",
       status: "warn",
-      detail: `${version}: an apiKeyHelper setup is out of scope for v1 (role runs ignore user settings, where the helper lives): log in with your Claude subscription (run claude, then /login)`,
+      detail: `${version}: an apiKeyHelper setup is out of scope for v1 (headless role runs load your user settings, so the helper would bill them to the API key): log in with your Claude subscription (run claude, then /login)`,
     };
   return loggedIn
     ? withClaudeMinimum(
