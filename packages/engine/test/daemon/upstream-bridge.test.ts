@@ -16,15 +16,23 @@ import {
   type PromptProposal,
   type ReplayResult,
 } from "@vtc/shared";
-import type { AutomationFact, EventDraft, UpstreamWiringDeps } from "../../src/core/index.js";
+import type {
+  AutomaticRelease,
+  AutomationFact,
+  EventDraft,
+  UpstreamWiringDeps,
+} from "../../src/core/index.js";
 import {
+  automaticPrInput,
   bridgeUpstream,
   githubRepoOf,
+  projectEvidence,
   readLookbackPrInput,
   upstreamModuleFact,
   UPSTREAM_SWEEP_EVERY_MS,
   type CreateUpstreamModule,
   type LookbackPrInput,
+  type UpstreamModuleAutoPr,
   type UpstreamModuleContext,
   type UpstreamModuleDeps,
   type UpstreamModuleFact,
@@ -73,6 +81,82 @@ const fact = (over: Partial<AutomationFact>): AutomationFact => ({
   at: "2026-10-14T10:00:00.000Z",
   detail: "x",
   ...over,
+});
+
+const RELEASE: AutomaticRelease = {
+  run: "r1",
+  feature: "F-1",
+  automation: {
+    kind: "ci_failure",
+    fingerprint: "0123456789abcdef",
+    target: { kind: "project", repo: "acme/app" },
+    issue: 42,
+  },
+  head: "a".repeat(40),
+  title: "Fix the login test",
+  request: "Fix the post-merge CI failure (#42)",
+  tasks: [{ id: "T-1", title: "Repair the login check", risk_tags: ["auth"] }],
+  specVerifier: "pass",
+  steps: [
+    { step: 1, status: "pass" },
+    { step: 3, status: "pass" },
+  ],
+  change: "non_ui",
+  startedAt: "2026-10-14T09:00:00.000Z",
+  at: "2026-10-14T10:00:00.000Z",
+};
+
+const SNAPSHOT = { routes: { "/api/runs": { runs: [] } }, events: [] };
+
+describe("an automatic run's PR input (AD-27 rules 2, 3 and 6)", () => {
+  it("is the pushed head, the issue, the run's replay as evidence and the verifier's verdict", () => {
+    const input = automaticPrInput(RELEASE, SNAPSHOT, "0.4.0");
+    expect(input).toMatchObject({
+      target: "project",
+      kind: "ci_failure",
+      fingerprint: "0123456789abcdef",
+      summary: "Fix the login test",
+      source: { pushedHead: "a".repeat(40) },
+      issue: 42,
+      evidence: { plan: { run: "r1", upstreamSafe: false, change: "non_ui" }, snapshot: SNAPSHOT },
+      specVerifier: "pass",
+    });
+    // a project PR has no upstream report
+    expect(input.report).toBeUndefined();
+    expect(input.slots.why).toMatch(/issue #42 \(ci_failure\).*G1 and G2 were skipped/);
+    expect(input.slots.changes).toBe("- T-1: Repair the login check");
+    expect(input.slots.verification).toContain("- Final Review step 3: pass");
+    expect(input.slots.risk).toMatch(/^Risk tags: auth\./);
+    expect(input.slots.checklist).toContain("VTC never merges an automatic PR");
+  });
+
+  it("an upstream PR (VTC building VTC) carries the allowlisted report its body is checked against", () => {
+    const input = automaticPrInput(
+      {
+        ...RELEASE,
+        automation: {
+          kind: "defect",
+          fingerprint: "fedcba9876543210",
+          target: { kind: "upstream", repo: "bason-labs/bs-vtc" },
+          issue: 7,
+        },
+      },
+      SNAPSHOT,
+      "0.4.0",
+    );
+    expect(input.target).toBe("upstream");
+    expect(input.report).toEqual({
+      v: 1,
+      kind: "defect",
+      fingerprint: "fedcba9876543210",
+      vtc_version: "0.4.0",
+      occurrences: 1,
+      first_seen: "2026-10-14T09:00:00.000Z",
+      last_seen: "2026-10-14T10:00:00.000Z",
+      vtc_frames: [],
+      metrics: {},
+    });
+  });
 });
 
 describe("engine facts in the module's vocabulary", () => {
@@ -135,6 +219,13 @@ describe("engine facts in the module's vocabulary", () => {
     expect(upstreamModuleFact(fact({ kind: "lookback", proposal: "p-1" }))).toBeNull();
     // a project fact without a stable identity raises nothing
     expect(upstreamModuleFact(fact({ target: "project", kind: "parked" }))).toBeNull();
+  });
+
+  it("reads project.yaml automation.evidence in the module's units", () => {
+    expect(projectEvidence(undefined)).toBeUndefined();
+    expect(projectEvidence({})).toBeUndefined();
+    expect(projectEvidence({ max_mb: 1.5 })).toEqual({ maxBytes: 1572864 });
+    expect(projectEvidence({ video: false })).toEqual({ video: false });
   });
 
   it("reads owner/name from a GitHub remote", () => {
@@ -221,6 +312,11 @@ describe("bridgeUpstream", () => {
   const plumbing: CreateGitPlumbing = () => {
     throw new Error("unused");
   };
+  const gitOps = () => ({ readFileAtCommit: () => Promise.resolve(undefined) });
+  const remoteRefs = () => ({
+    fetch: () => Promise.resolve(),
+    message: () => Promise.resolve(null),
+  });
 
   const fakeModule = (answer: UpstreamModuleOutcome = { status: "ignored" }) => {
     const calls: { what: string; arg: unknown; ctx: UpstreamModuleContext }[] = [];
@@ -239,6 +335,14 @@ describe("bridgeUpstream", () => {
         sweep: (ctx) => {
           calls.push({ what: "sweep", arg: null, ctx });
           return Promise.resolve([answer]);
+        },
+        openPullRequest: (input: UpstreamModuleAutoPr, ctx) => {
+          calls.push({ what: "pr", arg: input, ctx });
+          return Promise.resolve(answer);
+        },
+        completePullRequest: (target, number, verdict, ctx) => {
+          calls.push({ what: "complete", arg: [target, number, verdict], ctx });
+          return Promise.resolve(answer);
         },
       };
     };
@@ -282,7 +386,11 @@ describe("bridgeUpstream", () => {
       clientNames: () => ["acme-client"],
       knownValues: () => ["s3cr3t-value"],
       redactSelectors: () => [".card-number"],
+      projectEvidence: () => ({ max_mb: 2, video: false }),
       lookbackPr: () => Promise.resolve(options.lookbackPr ?? "no replay"),
+      evidenceSnapshot: (run) => ({ ...SNAPSHOT, routes: { ...SNAPSHOT.routes, run } }),
+      gitOps,
+      remoteRefs,
       plumbing,
     })(deps);
     return { wiring, emitted, started };
@@ -295,6 +403,9 @@ describe("bridgeUpstream", () => {
     const deps = module.built();
     expect(deps).toMatchObject({ vtcHome: "/home/u/.vtc", guardDir: guard, vtcVersion: "0.4.0" });
     expect(deps.automation.plumbing).toBe(plumbing);
+    // engine git's readers: the Lookback PR reads files at a commit, never the work tree
+    expect(deps.gitOps).toBe(gitOps);
+    expect(deps.remoteRefs).toBe(remoteRefs);
     expect(deps.automation.upstream.repo).toBe("bason-labs/bs-vtc");
     const payload = { reason: "rate_limit", detail: "5 issues today" };
     deps.emit({ type: "automation.skipped", payload });
@@ -330,6 +441,8 @@ describe("bridgeUpstream", () => {
       },
       knownValues: ["s3cr3t-value"],
       redactSelectors: [".card-number"],
+      // project.yaml automation.evidence, in the module's units
+      evidence: { maxBytes: 2 * 1024 * 1024, video: false },
     });
     expect(call?.ctx.state().context).toEqual(CONTEXT);
     expect(call?.ctx.state().settings.upstreamRepo).toBe("bason-labs/bs-vtc");
@@ -394,5 +507,65 @@ describe("bridgeUpstream", () => {
     // now the clock is set: the next try waits a day
     await second.wiring.sweep?.();
     expect(working.calls.filter((c) => c.what === "sweep")).toHaveLength(1);
+  });
+
+  it("opens an automatic run's draft PR from its pushed head, once per head across restarts", async () => {
+    const guard = tempDir("vtc-guard-");
+    const clock = { now: new Date() };
+    const module = fakeModule({ status: "pr" });
+    const { wiring } = build(module, { guard, clock });
+    await wiring.onAutomaticRelease?.(RELEASE);
+    const [call] = module.calls;
+    expect(call?.what).toBe("pr");
+    expect(call?.arg).toEqual(
+      automaticPrInput(
+        RELEASE,
+        { ...SNAPSHOT, routes: { ...SNAPSHOT.routes, run: "r1" } },
+        "0.4.0",
+      ),
+    );
+    expect(call?.ctx.repo).toBe("acme/app");
+    // the same head again (a release that ran again), here or after a restart: no second PR
+    await wiring.onAutomaticRelease?.(RELEASE);
+    await build(module, { guard, clock }).wiring.onAutomaticRelease?.(RELEASE);
+    expect(module.calls).toHaveLength(1);
+    // a new head is a new PR input
+    await wiring.onAutomaticRelease?.({ ...RELEASE, head: "b".repeat(40) });
+    expect(module.calls).toHaveLength(2);
+  });
+
+  it("a PR that failed to open is tried again at the next release push", async () => {
+    const guard = tempDir("vtc-guard-");
+    const clock = { now: new Date() };
+    const failing = fakeModule({ status: "error", detail: "gh exploded" });
+    await expect(
+      build(failing, { guard, clock }).wiring.onAutomaticRelease?.(RELEASE),
+    ).rejects.toThrow(/gh exploded/);
+    const working = fakeModule({ status: "pr" });
+    await build(working, { guard, clock }).wiring.onAutomaticRelease?.(RELEASE);
+    expect(working.calls.map((c) => c.what)).toEqual(["pr"]);
+  });
+
+  it("marks the PR the module already opened ready on the verifier's pass, and leaves a pending one a draft", async () => {
+    const module = fakeModule({ status: "pr" });
+    const { wiring } = build(module, { guard: tempDir("vtc-guard-"), clock: { now: new Date() } });
+    await wiring.onAutomaticRelease?.({ ...RELEASE, pr: 77, specVerifier: "pending" });
+    expect(module.calls).toEqual([]);
+    await wiring.onAutomaticRelease?.({ ...RELEASE, pr: 77 });
+    expect(module.calls.map((c) => [c.what, c.arg])).toEqual([
+      ["complete", ["project", 77, "pass"]],
+    ]);
+  });
+
+  it("refuses a release whose issue is in another repo than the one the run pushed to", async () => {
+    const module = fakeModule({ status: "pr" });
+    const { wiring } = build(module, { guard: tempDir("vtc-guard-"), clock: { now: new Date() } });
+    await expect(
+      wiring.onAutomaticRelease?.({
+        ...RELEASE,
+        automation: { ...RELEASE.automation, target: { kind: "project", repo: "acme/other" } },
+      }),
+    ).rejects.toThrow(/pushed its work to acme\/app, but its issue is in acme\/other/);
+    expect(module.calls).toEqual([]);
   });
 });
