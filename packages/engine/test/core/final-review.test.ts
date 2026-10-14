@@ -197,6 +197,37 @@ describe("Final Review steps 3–5 and 7 (§6.7a)", () => {
     await h.release();
   });
 
+  it("a reviewer's finding that cites nothing at the integrated head is rejected", async () => {
+    const h = createHarness({ project: { merge_level: 1 } });
+    const [verifier] = await toFinalReview(h);
+    const out = await submitResult(h, verifier!, {
+      exit: "done",
+      feature: "F-1",
+      verdicts: [
+        {
+          subject: "F-1",
+          verdict: "pass",
+          evidence: [{ type: "file_line", ref: "src/t-1/impl.ts:1" }],
+        },
+      ],
+      findings: [
+        {
+          rule_id: "made-up",
+          category: "correctness",
+          kind: "implementation_deviation",
+          title: "an invented bug",
+          confidence: 0.9,
+          location: { path: "src/nowhere.ts" },
+          evidence: { type: "file_line", ref: "src/nowhere.ts:3" },
+          req_ids: [],
+        },
+      ],
+    });
+    expect(out.accepted).toBe(false);
+    expect(out.rejection?.reason).toBe("claim_check");
+    await h.release();
+  });
+
   it("a changelog the repo keeps but the feature did not update fails step 7 into a fix round", async () => {
     const h = createHarness({
       project: { merge_level: 1 },
