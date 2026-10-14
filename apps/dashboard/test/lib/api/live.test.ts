@@ -68,6 +68,12 @@ describe("topicsForEvent", () => {
       expect.arrayContaining(["level3", "features"]),
     );
     expect(topics("lookback.canary_evaluated")).toEqual(["lookback"]);
+    // The run's end settles a gate still open and a headless start with no end.
+    const finished = { ...byType("run.started"), type: "run.finished", data: { outcome: "done" } };
+    expect(topicsForEvent(finished)).toEqual(
+      expect.arrayContaining(["runs", "status", "gates", "headless"]),
+    );
+    expect(topicsForEvent(byType("run.started"))).not.toContain("gates");
     expect(topics("lookback.rolled_back")).toEqual(expect.arrayContaining(["lookback", "notices"]));
   });
   it("ignores event types it does not know", () => {
