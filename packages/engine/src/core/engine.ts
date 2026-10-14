@@ -968,12 +968,14 @@ export class Engine implements Kernel {
    * engine-launched run is killed (its step stays in flight, as after a crash, and the next
    * `vtc resume` supersedes it), the Level-3 waits stop
    * (a pending auto-merge stays on GitHub; the next start reads the PR again), then the jobs
-   * settle.
+   * settle. A launch that was past its last stop check when the shutdown landed kills its own
+   * run (`launchHeadless`); the second sweep after the settle catches anything left.
    */
   async shutdown(): Promise<void> {
     this.stopper.abort();
     await killHeadless(this);
     await this.settle();
+    await killHeadless(this);
   }
 
   /** True while a run has work or a job runs (the daemon's idle exit waits for this, AD-12 rule 4). */
