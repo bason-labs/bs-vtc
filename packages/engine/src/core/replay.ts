@@ -32,14 +32,23 @@
  * A replay waits for the next RETRO (it stays pending, and the next RETRO plans it again) when its
  * host is not the run's Lead host, no dispatch can run it now, or its role changes no file (a
  * verdict role: the gates would grade the same base for both arms, so nothing could tell them
- * apart; the same reason is told once per proposal). The weekly-window and budget checks run
+ * apart; the same reason is told once per proposal). That last rule is an OPEN SPINE DEVIATION,
+ * not a settled design: reading 166 names `spec_verifier` the first role a pin and a replay can
+ * reach on both hosts (reading 176), and with this rule no verdict role is ever replayed, so
+ * `vtc lookback approve` never starts a canary for one. It is escalated to the Lead (a verdict
+ * grader that scores a trial's verdict against the recorded outcome, or an amendment of readings
+ * 166 and 176 and the §7 Lookback-replays row); until it is decided the engine refuses rather
+ * than grade two identical bases. The weekly-window and budget checks run
  * again before every trial (`LookbackRetro.replayWait`, the run's budget), and a headless trial
  * whose preflight fails stops the replays the same way, without pausing the delivered run: the
  * run finishes, and the replays not yet written wait for the next RETRO. The plan, the trial
  * dispatches and their grades live in the engine's private directory (`<guard>/replays/`), where
  * no role can write, so a restart picks the replays up where they stopped. That file is the only
- * record of which role runs are trials (the frozen `role.dispatched` carries no purpose): a
- * contract proposal asks for the marker in the log.
+ * record of which role runs are trials (the frozen `role.dispatched` carries no purpose), so a
+ * clone or a machine without it reads trial dispatches as the run's own work (AD-7 rules 1, 5 and
+ * 10). OPEN: engine-core's contract proposal (an optional `purpose` on `role.dispatched`, filed
+ * with the integrator in the closing round) puts the marker in the log; once it is frozen,
+ * `lookbackEvents` filters on the logged marker instead of this file.
  *
  * Action ids are the run's role-run count plus one, so a trial that never got its role run (its
  * checkout could not be made, or the engine stopped before the dispatch) leaves its id to the next
@@ -372,7 +381,8 @@ const replayBlocker = (k: Kernel, h: RunHandle, replay: LookbackReplay): string 
   const blocker = pinBlocker(k.deps.plugins.promptParts?.(agent, replay.host), replay.host, plan);
   if (blocker !== null) return `${agent} cannot run a candidate: ${blocker}`;
   if (!changesFiles(k, replay))
-    return `${agent} changes no file, so the gates would grade the same base for both arms; a replay of a verdict role needs a grader that scores its verdicts against the recorded outcome`;
+    // OPEN SPINE DEVIATION (readings 166, 176): escalated to the Lead, see the header
+    return `${agent} changes no file, so the gates would grade the same base for both arms; a replay of a verdict role needs a grader that scores its verdicts against the recorded outcome (an open spine question on readings 166 and 176, waiting for the Lead)`;
   return replay.trials.length === 0 ? "it has no trial to run" : null;
 };
 

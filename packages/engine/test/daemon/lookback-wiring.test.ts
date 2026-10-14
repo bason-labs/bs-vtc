@@ -512,7 +512,11 @@ describe("RETRO replays a recorded proposal end to end (AD-21 rule 6, reading 17
   }, 120_000);
 });
 
-describe("which replays the shipped plugins can reach (spine §5 readings 166 and 176)", () => {
+// OPEN SPINE DEVIATION, escalated to the Lead: reading 166 says `spec_verifier` is the first role a
+// pin and a replay reach on both hosts, and §7 waits on its A/A comparison; the engine refuses
+// verdict-role replays until a verdict grader or an amendment of readings 166/176 is decided. These
+// tests pin today's interim behaviour so the gap stays visible; they do not settle it.
+describe("which replays the shipped plugins can reach today (open deviation from spine §5 readings 166 and 176, pending the Lead)", () => {
   it("compiled as shipped on a Claude Lead, no proposal's replay runs: the Engineer carries its own section, and the Spec Verifier, the one switched role, changes no file", async () => {
     const { catalog } = shippedPlugins();
     const h = createHarness({ plugins: catalog, project: { merge_level: 1 } });
