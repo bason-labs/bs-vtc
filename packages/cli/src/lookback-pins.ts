@@ -77,15 +77,11 @@ export interface PinTarget {
 }
 
 /**
- * Whether a host's headless run loads the compiled plugin agent itself: the engine's
- * `HEADLESS_LOADS_AGENT` (`core/dispatch.ts`, spine §5 reading 145), which `@vtc/engine` does not
- * export yet (contract proposal). `codex exec` has no agent flag, so the engine carries the role's
- * prompt, and a pin reaches every agent there.
+ * Whether a host's headless run loads the compiled plugin agent itself: the engine's own
+ * `HEADLESS_LOADS_AGENT` (spine §5 readings 145 and 181). `codex exec` has no agent flag, so the
+ * engine carries the role's prompt, and a pin reaches every agent there.
  */
-export const HEADLESS_LOADS_AGENT: Readonly<Record<HostId, boolean>> = {
-  "claude-code": true,
-  codex: false,
-};
+export const HEADLESS_LOADS_AGENT: Readonly<Record<HostId, boolean>> = core.HEADLESS_LOADS_AGENT;
 
 /**
  * What a pin or a canary of the target can reach (spine §5 reading 176): an `editable_in_pack`

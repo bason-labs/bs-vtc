@@ -256,23 +256,17 @@ describe("yt-dlp for YouTube transcripts (D-bs, reading 173)", () => {
       join(root, "empty"),
       join(root, "bin"),
     ].join(delimiter);
-    expect(findYtDlp({ pathEnv, platform: "linux", repoRoot: repo })).toBe(user);
+    expect(findYtDlp({ pathEnv, repoRoot: repo })).toBe(user);
     // outside a repo the repo's own entry is no exception
-    expect(
-      findYtDlp({ pathEnv: join(repo, "node_modules/.bin"), platform: "linux", repoRoot: null }),
-    ).toBe(inRepo);
-    expect(
-      findYtDlp({ pathEnv: join(repo, "node_modules/.bin"), platform: "linux", repoRoot: repo }),
-    ).toBeNull();
+    expect(findYtDlp({ pathEnv: join(repo, "node_modules/.bin"), repoRoot: null })).toBe(inRepo);
+    expect(findYtDlp({ pathEnv: join(repo, "node_modules/.bin"), repoRoot: repo })).toBeNull();
     // a link outside the repo into it does not count either
     const linked = join(root, "linked");
     mkdirSync(linked);
     symlinkSync(inRepo, join(linked, "yt-dlp"));
-    expect(findYtDlp({ pathEnv: linked, platform: "linux", repoRoot: repo })).toBeNull();
-    expect(findYtDlp({ pathEnv: "", platform: "linux", repoRoot: null })).toBeNull();
-    // Windows looks for yt-dlp.exe
-    const win = tool(join(root, "win"), "yt-dlp.exe");
-    expect(findYtDlp({ pathEnv: join(root, "win"), platform: "win32", repoRoot: null })).toBe(win);
+    expect(findYtDlp({ pathEnv: linked, repoRoot: repo })).toBeNull();
+    expect(findYtDlp({ pathEnv: "", repoRoot: null })).toBeNull();
+    // the probe is the youtube fetcher's own (reading 181), which names yt-dlp.exe on Windows
   });
 
   it("is an ok line when found and an info line when absent, never an install", async () => {
