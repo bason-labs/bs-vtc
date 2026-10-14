@@ -28,6 +28,7 @@ import {
   type ResearchScope,
   type RunDaemon,
   type SearchProvider,
+  type VtcEvent,
   type RunningDaemon,
   type RunningSnapshot,
   type ServeSnapshot,
@@ -240,7 +241,21 @@ export const wireLookback = (
   // every mode of a role shares its prompt sections (reading 118)
   const lockedShaFor: LockedShaFor = (role, mode, host) =>
     plugins.promptParts?.(agentNameFor(role, mode), host)?.lockedSha256;
-  const history = () => engine.states().flatMap((s) => s.events);
+  // a run's events as Lookback reads them: without its replay trials, which measure a version and
+  // are no trace of the run's work (no attribution, no scorecard dispatch; reading 176)
+  const lookbackEvents = (state: RunState): readonly VtcEvent[] => {
+    const trials = engine.replayTrialActions(state.id);
+    if (trials.size === 0) return state.events;
+    return state.events.filter((e) => {
+      const action = (e.data as { action_id?: unknown }).action_id;
+      return !(
+        typeof action === "string" &&
+        trials.has(action) &&
+        (e.type.startsWith("role.") || e.type.startsWith("headless."))
+      );
+    });
+  };
+  const history = () => engine.states().flatMap(lookbackEvents);
   let chain: Promise<void> = Promise.resolve();
   const enqueue = (job: () => Promise<void>): void => {
     chain = chain.then(job).catch((error: unknown) => {
@@ -299,7 +314,7 @@ export const wireLookback = (
     now,
   });
   engine.setLookbackRetro({
-    plan: (state) => retroFor(state).plan(state),
+    plan: (state) => retroFor(state).plan({ ...state, events: [...lookbackEvents(state)] }),
     check: (target, root, state) => checker.check(target, root, state),
     ...replays,
   });
@@ -308,7 +323,7 @@ export const wireLookback = (
     if (state === undefined) return;
     const end = await lookbackAtRunEnd({
       projectRoot: deps.repoRoot,
-      events: state.events,
+      events: lookbackEvents(state),
       history: history(),
       lockedShaFor,
       graderBundleSha: bundleSha(),

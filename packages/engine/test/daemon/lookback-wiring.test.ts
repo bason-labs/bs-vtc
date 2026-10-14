@@ -390,6 +390,12 @@ describe("RETRO replays a recorded proposal end to end (AD-21 rule 6, reading 17
     // the noise floor the replay measured is kept for the next one
     expect(existsSync(join(h.home, LOOKBACK_HOME.aaNoiseFile))).toBe(true);
     expect(h.engine.status({}).run.finished_at).toBeDefined();
+    // the trials measured versions: no scorecard counts them, so the candidate has none
+    const index = ScorecardIndexSchema.parse(
+      JSON.parse(readFileSync(join(h.repo, LOOKBACK_REPO.scorecardIndex), "utf8")),
+    );
+    expect(index.scorecards.length).toBeGreaterThan(0);
+    expect(index.scorecards.map((c) => c.prompt.effective_sha256)).not.toContain(candidate);
     await h.release();
   }, 120_000);
 });

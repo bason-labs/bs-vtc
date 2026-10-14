@@ -163,6 +163,14 @@ const progressOf = (k: Kernel, run: string): ReplayProgress | null => {
   return { plan, dispatched, graded, finished };
 };
 
+/**
+ * The actions that ran a run's replay trials (reading 176). Lookback reads the run without them:
+ * a trial is a measurement of a version, not a dispatch of the run's work, so it is no trace, no
+ * attribution and no scorecard dispatch.
+ */
+export const replayTrialActions = (k: Kernel, run: string): ReadonlySet<string> =>
+  new Set(progressOf(k, run)?.dispatched.values() ?? []);
+
 /** The trial a role run is, when it is one. */
 export const replayTrialOf = (
   k: Kernel,
