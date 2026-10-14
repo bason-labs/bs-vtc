@@ -15,6 +15,8 @@ export const AD9_FORBIDDEN_MARKERS = [
   "bypassPermissions",
   "--yolo",
   "danger-full-access",
+  // Codex: trusts repo hooks without the user's review (contracts 4.5.0, AD-25)
+  "dangerously-bypass-hook-trust",
   // host credentials
   ".credentials.json",
   "auth.json",
@@ -192,6 +194,21 @@ export const ROLE_DENIED_VTC = {
   /** Globs relative to the VTC home that no role may read (a bare name is one file). */
   homeReadDeny: ["token", "run/**", "hidden/**"],
 } as const;
+
+/**
+ * Globs under the VTC home that wave 3 adds (contracts 4.5.0) and that no role may write: Lookback
+ * versions and pins (AD-21), the research cache (AD-22), the pinned browser store (AD-24) and the
+ * design library (§9.1). Frozen here as their own list so the teams whose tests pin the exact
+ * deny lists (adapters, compiler, cli) adopt them in their own branches; the integrator folds them
+ * into {@link ROLE_DENIED_VTC}`.homeWriteDeny` at the wave-3 merge (spine §5 reading 103). None of
+ * these directories exists before its team builds it.
+ */
+export const WAVE3_HOME_WRITE_DENY = [
+  "lookback/**",
+  "research-cache/**",
+  "browsers/**",
+  "design-library/**",
+] as const;
 
 const vtcHomePath = (vtcHome: string, glob: string): string => {
   if (!isAbsolutePath(vtcHome) || vtcHome.includes("\\")) {

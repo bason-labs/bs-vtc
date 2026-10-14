@@ -12,7 +12,13 @@
   as `CONTRACTS_VERSION` 4.1.0 (MINOR, additive). The Lead's answers to their questions are §5
   readings 18–37, marked "Lead decision 2026-10-13, pending human review". Round 1 of the spike
   updated §7.
-- **Date:** 2026-10-13
+- **Wave-3 integration (2026-10-14, v1 completion):** the coverage rows the Phase 3 Final Review
+  marked partial or missing are built by seven teams (D-bb adds `lookback-research`) against
+  `CONTRACTS_VERSION` 4.5.0 (MINOR, additive) and the new decisions AD-21 to AD-26. The research
+  behind them is `docs/research/2026-10-14-wave3-best-practice.md`. The Lead decisions D-ay to D-bb
+  and the human decisions H-1 and H-2 are §5 readings 96–101; the integrator's readings for the
+  research's open points are 102–110.
+- **Date:** 2026-10-13 (wave 3: 2026-10-14)
 - **Source of truth:** `docs/superpowers/specs/2026-10-12-vtc-system-design.md` (the spec). Section
   numbers (§n) below refer to it. Where this document and the spec disagree, the spec wins, and
   this document gets fixed. Where the spec is silent or ambiguous, §5 records the reading used.
@@ -201,8 +207,15 @@ flowchart TB
   WriteScopeReport, TestInventory, UsageSnapshot, UsageReport, StatuslineIngest,
   WorkflowNode/Edge/Graph, HostOutcome, SubagentInstruction, EngineDiscovery, EngineSocketHello,
   EngineSocketWelcome, every MCP tool input and output (AD-4) and every HTTP request and response
-  (AD-5). Interfaces: `HostAdapter`, `Storage`, `GateRunner`, `GateSandbox`, `GitOps` (AD-13),
-  `PullRequestService`, `AssetBundle`,
+  (AD-5). Since 4.5.0 also HostAuthStatus (AD-25); RemoteMergePolicy, MergePreflight,
+  AutoMergeChecklist, MergeLevelLedgerEntry (AD-23); G2Direction, DesignCoverageReport,
+  FinalReviewStepResult, ReleaseReadiness; PromptVersionRef, PromptVersionFrontmatter,
+  LookbackPins, Attribution, Scorecard, ScorecardIndex, PromptProposal, ReplayResult, CanaryState
+  (AD-21); FetchRequest, FetchResult, CacheEntry, FactRow, FactWaiver and the role-facing tool IO
+  (AD-22); VisualReport, VisualSummary, BrowserPin, NoveltyReport, DesignLibraryEntry (AD-24).
+  Interfaces: `HostAdapter`, `Storage`, `GateRunner`, `GateSandbox`, `GitOps` (AD-13),
+  `PullRequestService`, `RemoteMergeService` (AD-23), `HttpClient`, `Fetcher`, `ResearchCache`
+  (AD-22), `AssetBundle`,
   `AutoResumeScheduler`, and the composition seam (`EngineDeps`, `RunDaemon`, `ServeSnapshot`,
   `CreateGateRunner`, `CreateGitOps`, `EngineClient`; AD-19).
 - **Prevents:** parallel teams drifting apart; hand-written JSON Schemas diverging from runtime
@@ -231,7 +244,10 @@ flowchart TB
      round 2, 4.0.0 = fix round 3; nothing consumed the earlier versions; 4.1.0 = the wave-1
      proposals, additive; 4.2.0 = the wave-2 proposals, additive except an optional
      `ResolvedModel.model` and the narrower write-scope globs, which §5 readings 51 and 63
-     justify as MINOR; 4.3.0 = the hardening round, §5 readings 69–79, additive.)
+     justify as MINOR; 4.3.0 = the hardening round, §5 readings 69–79, additive; 4.4.0 = the
+     Final Review fix round, readings 81–90, additive; 4.5.0 = wave 3, AD-21 to AD-26 and readings
+     96–110, additive: new contracts, optional fields, new core events, constants and helpers, and
+     no new value in an enum a consumer maps exhaustively.)
   5. Open vocabularies stay open on purpose: event `type` (pattern `<entity>.<verb>`; the core
      set has typed payloads, AD-7), role ids, artifact types, stack packs. Consumers ignore unknown
      values.
@@ -252,13 +268,27 @@ flowchart TB
      `statuslineTeeCommand` / `shellQuoteWord`, `hostCredentialDenyReadPaths` /
      `isHostCredentialDenyRead`, `isSecurityClass`, `claudeSessionSandboxSettings` /
      `claudeSessionSandboxState`, `inSessionDispatchAllowed`, `isHumanOnlyTool` /
-     `humanChannelRequired`, `gatesAllowUnsandboxed`, `gatesConfigNotCommitted`. Shared paths
+     `humanChannelRequired`, `gatesAllowUnsandboxed`, `gatesConfigNotCommitted`; since 4.5.0
+     `headlessPolicyFor`, `headlessIsolationGaps`, `findDisallowedHostArgs` (AD-25),
+     `level3Preflight`, `autoMergeChecklist`, `effectiveMergeLevel`, `findForbiddenGhArgs`
+     (AD-23), `effectivePromptSha`, `splitForTrace`, `canaryArmFor`, `signTestOneSided`,
+     `wilsonInterval`, `replayVerdict`, `canaryVerdict`, `scorecardPath` (AD-21), `factId`,
+     `canonicalCacheKey`, `verifyFactLocator`, `isPrivateAddress`, `researchScopeFor`,
+     `datamarkFetchedText` (AD-22), `visualConfigFor`, `visualRenderKey` (AD-24). Shared paths
      and constants:
      `ROLE_CONTRACTS_ASSET`, `PLUGIN_MANIFEST_ASSET`, `DESIGN_SCREENS_PATH`, `VTC_HOOK`,
      `KNOWN_ARTIFACT_TYPES` (the known names of the open artifact vocabulary, rule 5),
      `STATUSLINE_TEE`, `HOST_CREDENTIAL_DENY_READ`, `ROLE_DENIED_VTC`, `SECURITY_CLASS_CATEGORIES`,
      `DEFAULT_INSTALL_SCOPE`, `USER_CONFIG_FILE`, `SESSION_DEFAULT_MODEL`, `HUMAN_ONLY_TOOLS`,
-     `GATE_SANDBOX`, `GATES_CONFIG_FILE`, `SESSION_SANDBOX_OFF_REASON`.
+     `GATE_SANDBOX`, `GATES_CONFIG_FILE`, `SESSION_SANDBOX_OFF_REASON`; since 4.5.0
+     `ROLE_DISPATCH_BY_LEAD_HOST`, `HEADLESS_DEFAULTS`, `HOST_DISALLOWED_ARGS`,
+     `GH_FORBIDDEN_ARGS`, `MERGE_LEVEL_LEDGER`, `LOOKBACK_HOME`, `LOOKBACK_REPO`,
+     `LOOKBACK_LIMITS`, `RESEARCH_FACTS_FILE`, `RESEARCH_CACHE`, `FETCHER_TTL_DAYS`,
+     `ROLE_MCP_TOOLS`, `VISUAL_DEFAULTS`, `VISUAL_SKIPPED_NO_BROWSER`, `VISUAL_RULE_PREFIX`,
+     `BROWSERS_DIR`, `BROWSER_PIN_FILE`, `DESIGN_LIBRARY_DIR`, `SCOPE_CREEP_RULE_ID`,
+     `WAVE3_HOME_WRITE_DENY` (the VTC-home globs wave 3 adds to the role write-deny list; the
+     integrator folds them into `ROLE_DENIED_VTC.homeWriteDeny` at the wave-3 merge, once the
+     teams whose tests pin the exact lists have adopted them).
   7. Spine extensions to §16 are named here: the finding route `out_of_scope` (an Engineer
      `out_of_scope_fault` whose guards passed, §6.3 step 3); `RequirementRef` (`REQ-3.AC-2`)
      in `Finding.req_ids`; the Visual QA verdict `unchecked` (§7.5); `FindingDraft.kind` (the
@@ -318,7 +348,10 @@ flowchart TB
      (§4.2 step 4).
   2. Tool results are compact (§11: coarse tools, ≤ 1.5k-token returns).
   3. Role-facing tools (repo map, research fetchers, fact lookups) are added by the sub-projects
-     that own them (3, 4) as a MINOR contract change.
+     that own them (3, 4) as a MINOR contract change. Since 4.5.0 they are frozen in
+     `ROLE_MCP_TOOLS` (`research_fetch`, `fact_lookup`, `fact_propose`, AD-22), which the engine
+     serves on the same `vtc` server next to `ENGINE_MCP_TOOLS`; the Lead-facing list is
+     unchanged.
   4. **Dispatch:** `spawn_role` is always a subagent spawn the Lead performs with the action's
      `agent`, `prompt`, `background`, optional `resume` session, optional `subject` (the one
      AC a Spec-Verifier call judges) and optional `model` (the model id the engine resolved,
@@ -459,6 +492,7 @@ flowchart TB
   | `sandbox_profile` | `sandboxProfile(SandboxProfileRequest)` | **Pure.** Host settings + what the host itself enforces                                                       |
   | `read_usage`      | `readUsage?()`, `watchUsage?(cb)`       | Optional: hosts with an adapter-owned source (Codex `codex app-server`). Unknown stays `null`, never 0 (§6.9) |
   | (lifecycle)       | `dispose()`                             | Stops every child process and subscription the adapter owns. The cli calls it on shutdown.                    |
+  | (auth)            | `authStatus?()`                         | Optional (4.5.0): the host's own `claude auth status` / `codex login status`, never a credential read (AD-25) |
   1. `capabilities` declares what the host enforces and supports (§12.1), including `subagents`
      (the Lead can dispatch role subagents) and `headless`. Write scope, caps, budgets, gate
      order, schema validation and limit parking are **always** enforced by the engine, whatever
@@ -652,7 +686,8 @@ flowchart TB
 - **Rule:** never read, copy or store host credentials (`~/.claude/.credentials.json`, the
   `Claude Code-credentials` keychain item, `~/.codex/auth.json`); never use
   `--dangerously-skip-permissions`, `bypassPermissions`,
-  `--dangerously-bypass-approvals-and-sandbox`, `--yolo` or `danger-full-access`; never name the
+  `--dangerously-bypass-approvals-and-sandbox`, `--yolo`, `danger-full-access` or Codex's
+  hook-trust bypass flag (added in 4.5.0, AD-25); never name the
   credential variables `ANTHROPIC_API_KEY`, `CLAUDE_CODE_OAUTH_TOKEN` or `OPENAI_API_KEY`. Use
   explicit allow rules plus the sandbox. Git and `gh` use the user's existing auth. Gate
   commands run role-authored code, so they get the same treatment as roles: an OS sandbox that
@@ -784,8 +819,8 @@ dist/index.js}`. Typecheck (`customConditions`), tests (Vitest aliases) and
 
 ### AD-13 Engine modules and the Gate Runner seam
 
-- **Binds:** `packages/engine/src/{daemon,core,gates,git,http,mcp,storage}`, `GateRunner` in
-  `@vtc/shared`.
+- **Binds:** `packages/engine/src/{daemon,core,gates,git,http,lookback,mcp,research,storage}`,
+  `GateRunner` in `@vtc/shared`.
 - **Prevents:** the engine-core and gate-runner teams editing the same files and state; untyped
   gate output; split ownership of the write-scope check and of git code.
 - **Rule:**
@@ -854,9 +889,19 @@ dist/index.js}`. Typecheck (`customConditions`), tests (Vitest aliases) and
       `gates.allow_unsandboxed` (`GateRunnerDeps.allowUnsandboxed`) is set; then the report says
       `sandbox: "none"` and engine core records an `unsandboxed_gate` incident. Dotenv files the
       calibrated package managers load are gate-command files (§5 reading 70).
+  12. **Lookback and research** (D-bb, lookback-research team, 4.5.0). `lookback/` (AD-21) reaches
+      engine core only through `core/index.ts` and the gates only through the `GateRunner`
+      interface; it never imports `gates/`, the transports, storage drivers or `daemon/`.
+      `research/` (AD-22) is a leaf: it imports no other engine module and gets HTTP from the
+      injected `HttpClient` (`EngineDeps.http`). `core/`, `gates/` and `git/` import neither;
+      `daemon/` wires both and hands core what it needs through interfaces. The engine entry
+      gains the `lookback` and `research` namespaces when the modules land (integrator, at the
+      wave-3 merge).
 - **Check:** dependency-cruiser `AD13-engine-modules-use-each-others-entry`,
   `AD13-core-uses-the-gate-runner-interface`, `AD13-gates-never-import-engine-core`,
   `AD13-git-imports-no-engine-module`, `AD13-core-does-not-import-transports`,
+  `AD13-core-does-not-import-lookback-or-research`, `AD21-lookback-uses-core-and-the-gate-interface`,
+  `AD22-research-is-a-leaf`,
   `AD19-only-the-engine-entry-imports-the-daemon`, `AD2-storage-drivers-loaded-by-the-entry-only`
   (each proven by `tooling/arch-tests`, including a planted `daemon/` import of `gates/`);
   `engine.test.ts` (`git.createGitOps` has exactly the frozen `CreateGitOps` type);
@@ -912,21 +957,26 @@ dist/index.js}`. Typecheck (`customConditions`), tests (Vitest aliases) and
 
 ### AD-15 Teams, ownership and integration
 
-- **Binds:** every path in the repo; the six build teams; the orchestrator.
+- **Binds:** every path in the repo; the seven build teams (six until D-bb); the orchestrator.
 - **Prevents:** guaranteed merge conflicts on shared files; two teams changing one contract in
   different ways; an unowned path; a team branch quietly editing another team's files; two
   teams' export names colliding in a shared entry file.
 - **Rule:** each team owns the globs in **`tooling/ownership.json`** (the machine-readable source
   of this table) and changes nothing else; changes elsewhere go to the owner as a proposal.
 
-  | Team (sub-project)               | Scope (spec §19)                                                                                                      | Owns (summary of `tooling/ownership.json`)                                                                                                                        |
-  | -------------------------------- | --------------------------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-  | Engine core (1)                  | State/events, scheduler, pipeline, loops, triage, escalation, budgets, merge queue L1–2, daemon, MCP + HTTP           | `packages/engine/**` except the entry, package and config files and `gates/`; `fixtures/golden-run/**` (the dashboard team reviews changes)                       |
-  | Gate runner (2)                  | Calibration, baseline, L0–L5, write-scope check, hidden tests, scanner store, traceability, redaction rules           | `packages/engine/src/gates/**`, `packages/engine/test/gates/**`, `gates/**`, `packages/cli/src/commands/calibrate.ts`, `packages/shared/src/helpers/redaction.ts` |
-  | Roles + compiler (3)             | Neutral role sources, plugin sources, compiler, Claude/Codex plugin output                                            | `roles/**`, `skills/**`, `plugins/**`, `packages/compiler/**`                                                                                                     |
-  | Adapters + usage (3)             | `HostAdapter` for both hosts, stream parsers, sandbox profiles, usage sources (statusline parser, `codex app-server`) | `packages/adapters/**`                                                                                                                                            |
-  | Dashboard (6)                    | Flow Studio                                                                                                           | `apps/dashboard/**`, `fixtures/dashboard-export/**`                                                                                                               |
-  | Cli + binary (0 binary parts, 1) | `vtc` commands and wiring, stdio bridge, statusline shim, timer, assets, Bun build and storage wiring                 | `packages/cli/**` except `commands/calibrate.ts`, including the Bun build script and its `build:binary` script (AD-20)                                            |
+  | Team (sub-project)               | Scope (spec §19)                                                                                                            | Owns (summary of `tooling/ownership.json`)                                                                                                                        |
+  | -------------------------------- | --------------------------------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+  | Engine core (1)                  | State/events, scheduler, pipeline, loops, triage, escalation, budgets, merge queue L1–2, daemon, MCP + HTTP                 | `packages/engine/**` except the entry, package and config files and `gates/`; `fixtures/golden-run/**` (the dashboard team reviews changes)                       |
+  | Gate runner (2)                  | Calibration, baseline, L0–L5, write-scope check, hidden tests, scanner store, traceability, redaction rules                 | `packages/engine/src/gates/**`, `packages/engine/test/gates/**`, `gates/**`, `packages/cli/src/commands/calibrate.ts`, `packages/shared/src/helpers/redaction.ts` |
+  | Roles + compiler (3)             | Neutral role sources, plugin sources, compiler, Claude/Codex plugin output                                                  | `roles/**`, `skills/**`, `plugins/**`, `packages/compiler/**`                                                                                                     |
+  | Adapters + usage (3)             | `HostAdapter` for both hosts, stream parsers, sandbox profiles, usage sources (statusline parser, `codex app-server`)       | `packages/adapters/**`                                                                                                                                            |
+  | Dashboard (6)                    | Flow Studio                                                                                                                 | `apps/dashboard/**`, `fixtures/dashboard-export/**`                                                                                                               |
+  | Cli + binary (0 binary parts, 1) | `vtc` commands and wiring, stdio bridge, statusline shim, timer, assets, Bun build and storage wiring                       | `packages/cli/**` except `commands/calibrate.ts`, including the Bun build script and its `build:binary` script (AD-20)                                            |
+  | Lookback + research (4, 7; D-bb) | Lookback §13 (scorecards, attribution, replays, proposals, pins, canary) and research §8.2/§10/§14 (fetchers, cache, facts) | `packages/engine/src/{lookback,research}/**`, `packages/engine/test/{lookback,research}/**` (AD-13 rule 12)                                                       |
+
+  Wave 3 also gives the cli+binary team `.github/workflows/release.yml` and `packaging/**`
+  (AD-26), the gate-runner team `THIRD_PARTY/**` and `NOTICE` (the attribution of the forked
+  detector rules, AD-24), and the integrator every other file under `.github/`.
   1. **Integrator.** One integrator (the architect role of the orchestration) owns
      `packages/shared/**` (incl. `CONTRACTS_VERSION`, `schemas/contracts.json` and the ledger;
      except `helpers/redaction.ts`), `docs/**`, `tooling/**`, the root config files
@@ -999,14 +1049,15 @@ dist/index.js}`. Typecheck (`customConditions`), tests (Vitest aliases) and
 
 ### AD-17 Dispatch mode: plugin-only by default
 
-- **Binds:** `ProjectConfig.hosts.dispatch`, the engine's scheduler and auto-resume, the adapters'
-  `spawnRole`, cross-family review.
+- **Binds:** `ProjectConfig.hosts.dispatch`, `ROLE_DISPATCH_BY_LEAD_HOST`, the engine's scheduler
+  and auto-resume, the adapters' `spawnRole`, cross-family review, Lookback replays.
 - **Prevents:** shipping headless spawning before the vendor confirmation §12.5 requires; the
   engine and adapters each guessing what happens without headless runs.
 - **Rule:**
   1. `hosts.dispatch` is `plugin_only` (default) or `headless_allowed`. `planDispatch(purpose,
-mode, capabilities)` is the only decision: in `plugin_only` the engine never starts a
-     `HeadlessRun`.
+mode, capabilities, leadHost)` is the only decision. In `plugin_only` the engine starts no
+     `HeadlessRun` for a Claude Code Lead and none without a live Lead; the one exception is
+     rule 5 (H-1): a Codex Lead's role steps run headless.
   2. Plugin-only behaviour: roles run as Lead-dispatched subagents (foreground on Codex);
      auto-resume after a limit becomes `lead_redispatch`: the step stays `interrupted`, `next`
      returns `wait` until the reset, then a `spawn_role` that resumes the same session (Claude
@@ -1023,10 +1074,23 @@ resume`). This is §5 reading 12, pending the human's confirmation.
      as `blocked` with `SESSION_SANDBOX_OFF_REASON`. The rest is the §7 accepted residual
      "Plugin-only in-session roles".
   4. `headless_allowed` (a user opt-in now; the default may change once confirmation exists)
-     adds engine-launched runs for auto-resume, cross-family review and hosts without subagents.
+     adds engine-launched runs for auto-resume with no live Lead, cross-family review, hosts
+     without subagents and headless Claude runs. Since wave 3 the engine really launches them
+     (D-ba, AD-25; §5 reading 98 replaces reading 93).
+  5. **Per-Lead-host default** (D-ba, H-1; §5 readings 98–99). How a run's roles go by default is
+     one shared constant, `ROLE_DISPATCH_BY_LEAD_HOST`: `claude-code` → `subagent` (plugin-only,
+     the G2 choice), `codex` → `headless` (the engine runs a Codex Lead's role steps and Lookback
+     replays as headless Codex runs through `HostAdapter.spawnRole`, sandboxed and
+     budget-checked, without the opt-in). `auto_resume` with no live Lead and
+     `cross_family_review` still need `headless_allowed` on every host. Changing either default
+     is a one-value change, recorded through §6.
 - **Check:** `config.test.ts` (default `plugin_only`); `policy.test.ts` (`planDispatch` never
-  returns `headless` in plugin-only mode, for every purpose and capability). Sub-project 1 adds an
-  engine unit test that no `HeadlessRun` is started when the mode is `plugin_only`.
+  returns `headless` in plugin-only mode without a Lead host, for every purpose and capability);
+  `contracts-4-5.test.ts` (the per-Lead-host table: a Codex Lead's `role` and `lookback_replay`
+  are `headless` in plugin-only mode, a Claude Lead's never; `auto_resume` and
+  `cross_family_review` need the opt-in for both). Engine core adds unit tests that no
+  `HeadlessRun` is started for a Claude Lead in `plugin_only` mode and that a Codex Lead's role
+  step starts one.
 
 ### AD-18 Evidence, traceability and redaction
 
@@ -1071,7 +1135,9 @@ resume`). This is §5 reading 12, pending the human's confirmation.
   2. The cli builds `EngineDeps` (`composeEngineDeps`: install token, storage driver for the
      runtime, Gate Runner with its `GitOps`, adapters from `ADAPTER_FACTORIES`, asset bundle
      (incl. the compiled role contracts), timer, the `gh`-backed `PullRequestService`, versions)
-     and is the only caller.
+     and is the only caller. Since 4.5.0 it also passes the optional `gh`-backed
+     `RemoteMergeService` (AD-23) and the research `HttpClient` (AD-22); without them Level 3 and
+     the research fetchers are unavailable.
   3. Commands are `CommandSpec { name, summary, run(args, ctx): Promise<number> }`; `main` is
      async. `CommandContext` carries io, cwd, the VTC home and a lazy `engine()` client.
   4. **Transport.** `vtc pause`, `resume` and `status` are MCP clients of the daemon's local socket
@@ -1124,6 +1190,242 @@ resume`). This is §5 reading 12, pending the human's confirmation.
   the seeded export `fixtures/dashboard-export/`, owned by the dashboard team; asset sources;
   plugin extraction paths). Sub-project 1 adds an HTTP test serving `fixtures/dashboard-export/`
   through an `AssetBundle`; sub-project 0 checks that the binary serves the embedded export (§7).
+
+### AD-21 Lookback: prompt versions, pins and protected graders
+
+- **Binds:** `packages/engine/src/lookback/**` (lookback-research team), `roles/*/prompt.md`, the
+  compiler's agent emit and `PluginManifestAgent`, the task pack, `~/.vtc/lookback/`
+  (`LOOKBACK_HOME`), `.vtc/lookback/**` (`LOOKBACK_REPO`), `vtc lookback approve|pin|rollback`
+  (cli), `@vtc/shared` `lookback.ts`. Spec §13; research `2026-10-14-wave3-best-practice.md` §1.
+- **Prevents:** a repo or a role changing which prompt runs; scores computed by code the optimiser
+  can edit; canaries promoted on noise; ambiguous prompt identity; a canary that needs a plugin
+  reinstall.
+- **Rule:**
+  1. A prompt version is `effectivePromptSha(locked, editable)` (`PromptVersionRef`).
+     `role.dispatched` records `editable_sha256` and, under a canary, `canary_arm`; the envelope's
+     `prompt_sha` is the effective SHA.
+  2. Compiled agents carry the locked core; the engine renders the pinned editable section
+     first in the task pack (§5 reading 102). `PluginManifestAgent` records `locked_sha256` and
+     the default `editable_sha256`.
+  3. Versions are immutable files under `~/.vtc/lookback/prompts/`. Pins live only in
+     `~/.vtc/lookback/pins.yaml` (`LookbackPins`, keyed by `engineRepoKey`); a human promotes or
+     pins with `vtc lookback approve|pin|rollback` in an interactive terminal (reading 103), and
+     the engine may only roll a canary back (`auto_rollback`). Repo content never selects a
+     prompt; a `pins.yaml` inside a repo is ignored. Roles may not write `lookback/**` under the
+     VTC home (`WAVE3_HOME_WRITE_DENY`, part of `ROLE_DENIED_VTC` from the wave-3 merge).
+  4. The lookback role writes proposals only (`.vtc/lookback/proposals/<role>/`,
+     `PromptProposal`, at most three changes). The engine rejects a proposal that touches the
+     locked core (`splitRolePrompt`) or names an AD-9 marker (`findForbiddenInText`).
+  5. Graders, rubrics and metric code are engine code in a hashed bundle; `lookback/` reaches the
+     gates only through `GateRunner`. Every score stores `grader_bundle_sha`, and the judge model
+     is fixed in the bundle. Proportions carry n and a Wilson interval (`wilsonInterval`);
+     below `LOOKBACK_LIMITS.minScorecardN` a metric is "insufficient data".
+  6. Traces split 70/30 by hash (`splitForTrace`); the lookback role sees the train split only.
+     Replays are paired, k = 3 trials per task per arm, in clean checkouts with no refs past the
+     base, against an A/A flip rate; `replayVerdict` decides (`improve` needs a one-sided sign
+     test p < 0.05, no regression-set drop beyond the A/A rate, tokens up at most 20%;
+     `inconclusive` is shown as such). Promotion needs `improve` plus a human approval.
+  7. A canary splits a project's tasks 50/50 by hash (`canaryArmFor`), sticky across fix rounds;
+     `canaryVerdict` rolls back on a human flag at once, and on the §13 rate or token triggers
+     only once both arms have `LOOKBACK_LIMITS.minDispatchesPerArm` dispatches.
+  8. At `run.finished` the engine queues the lookback role for each (role, host) with at least
+     `minTrainFailures` attributed train failures, only with at least 30% of the weekly window
+     left and budget available. Replays are role runs with purpose `lookback_replay`
+     (`planDispatch`, AD-17).
+- **Check:** `contracts-4-5.test.ts` (exact sign-test values, Wilson intervals, split and canary
+  determinism, the `canaryVerdict` and `replayVerdict` tables, human-only promotion in
+  `LookbackPins`, the proposal cap); dependency-cruiser
+  `AD21-lookback-uses-core-and-the-gate-interface` and
+  `AD13-core-does-not-import-lookback-or-research` (planted in `tooling/arch-tests`); `role.test.ts`
+  / the compiler's test that agents carry no editable section and the manifest records both
+  SHAs (roles-compiler); an engine test that a `pins.yaml` planted in the repo is ignored and a
+  cli test that the gestures refuse without a terminal (lookback-research, cli-binary).
+
+### AD-22 Research fetchers, cache and facts
+
+- **Binds:** `packages/engine/src/research/**` (lookback-research team), `EngineDeps.http`
+  (`HttpClient`), `~/.vtc/research-cache/` (`RESEARCH_CACHE`), `.vtc/research/facts.jsonl`
+  (`RESEARCH_FACTS_FILE`), `ROLE_MCP_TOOLS`, G2 assembly (`approve_gate.unverified_facts` and
+  `facts`, `ApproveInput.fact_waivers`), `@vtc/shared` `research.ts`. Spec §8.2, §10, §14.
+- **Prevents:** facts from model memory; one client's context reaching another's; network access
+  in tests; SSRF and cookie scraping; fetched text steering a role; G2 passing with unverified
+  claims.
+- **Rule:**
+  1. `research/` is a leaf (AD-13 rule 12): fetchers implement `Fetcher` and get HTTP only from
+     the injected `HttpClient`, which allows HTTPS only, refuses private addresses after DNS on
+     every hop (`isPrivateAddress`), caps bytes and time, sends no cookies and no auth except the
+     fetcher's own key (named in `~/.vtc/config.yaml`, read from the environment at call time,
+     redacted as a known value). The `web` fetcher honours robots.txt.
+  2. The cache is per scope (`researchScopeFor`: `_shared` or `client-<slug>`) and no lookup
+     crosses scopes. Blobs are content-addressed; the key includes the fetcher version
+     (`canonicalCacheKey`); stale entries revalidate with RFC 9111 conditional requests, and an
+     entry served stale makes its facts `stale`. Roles may not write the cache
+     (`WAVE3_HOME_WRITE_DENY`).
+  3. A fact is `verified` only when `verifyFactLocator` resolves its JSON Pointer or verbatim
+     quote against the cached blob whose SHA the row records. Rows are appended and superseded,
+     never edited. A role proposes facts (`fact_propose`); the engine decides their status.
+  4. Before G2 the engine re-fetches stale facts and lists in `approve_gate.unverified_facts` /
+     `facts` every fact that is unverified, stale or conflicting, every `UNVERIFIED:` tag, and
+     every version, licence, CVE or EOL claim in the research sections that cites no fact. An
+     approval must waive each with a reason (`fact_waivers`, reading 110), recorded as
+     `fact.waived`; otherwise the engine rejects it.
+  5. Fetched text reaches a role datamarked and capped (`datamarkFetchedText`), redacted, as
+     data.
+- **Check:** `contracts-4-5.test.ts` (locators: an absent quote fails; cache keys; the
+  private-address table; scope naming; the waiver rule on `ApproveInput`); dependency-cruiser
+  `AD22-research-is-a-leaf`; lookback-research tests with fixture HTTP (a 304 revalidation, scope
+  isolation, a guard refusal, no test opens a socket) and an engine-core test that an approve
+  without a waiver is rejected.
+
+### AD-23 Level-3 auto-merge and the downgrade ledger
+
+- **Binds:** engine core's merge path and Final Review release, `EngineDeps.remoteMerge`
+  (`RemoteMergeService`), the cli's `gh`-backed services, `.vtc/merge-level.jsonl`
+  (`MERGE_LEVEL_LEDGER`), `vtc pause`, `vtc merge-level restore`, `vtc doctor`, `@vtc/shared`
+  `auto-merge.ts`. Spec §6.4, §6.7, D9.
+- **Prevents:** a merge without CI; merging a commit other than the gated one; the engine
+  editing human config; a downgrade lost between runs or clones; an admin bypass.
+- **Rule:**
+  1. At run start with `merge_level: 3` (and in `vtc doctor`) the engine runs `level3Preflight`
+     on `RemoteMergeService.remote()` and `policy(base)`: GitHub, `gh` logged in, auto-merge not
+     disallowed, at least one required status check on the base, a merge method. Any failure (or
+     no `RemoteMergeService`) starts the run at Level 2, records `merge.preflight` and opens an
+     escalation that says what to configure. VTC never changes repo settings (reading 104).
+  2. The merge is bound to the gated SHA: `enableAutoMerge` runs
+     `gh pr merge <n> --auto --match-head-commit <sha>`, only after every required check on that
+     SHA is `success` and
+     `autoMergeChecklist` (pure, the seven §6.7 items, each with evidence; `feature.checklist`) is
+     ok. `GH_FORBIDDEN_ARGS` (`--admin`) never appears; nothing is pushed to the base. A base that
+     requires a review waits ("awaiting review") and parks at a timeout.
+  3. A visual step that was `skipped` (no browser), `unchecked`, `fail` or `error` fails the
+     checklist's Final Review item (reading 105).
+  4. After the merge a watch (`POST_MERGE_WATCH_HOURS`) reads base CI for the merge commit
+     (`baseRuns`) and looks for reverts (`findReverts`), at each poll and at daemon start. A red
+     required run or a revert appends a `downgrade` to the ledger, records
+     `run.merge_level_changed` (`post_merge_ci_failure` / `revert`), `feature.reverted` or
+     `feature.post_merge_ci`, and `lookback.escaped_defect` with the feature's tasks.
+  5. The effective level is `effectiveMergeLevel(project.yaml merge_level, ledger)`. The engine
+     never edits `project.yaml`; only a human restores (`vtc merge-level restore`, TTY-confirmed,
+     a `restore` entry). The ledger is git-tracked, so teammates share it (D8).
+  6. `vtc pause` disables every pending auto-merge VTC enabled (`disableAutoMerge`).
+- **Check:** `contracts-4-5.test.ts` (preflight, checklist order and evidence, a moved head, a
+  skipped visual step, the ledger fold, only a human restores, `--admin` found); engine-core tests
+  with a fake `RemoteMergeService` (no required checks → Level 2; a moved head parks; a revert or
+  a red base run downgrades and records the escaped defect; pause disables auto-merge); a cli
+  test that no `gh` argv carries `GH_FORBIDDEN_ARGS`.
+
+### AD-24 Deterministic visual stack and browser provisioning
+
+- **Binds:** `packages/engine/src/gates/visual/**` (gate-runner team), `GateRunRequest.visual`,
+  `GateReport.visual` (`VisualSummary`), `GatesConfig.visual`, `vtc doctor --install-browser`,
+  `~/.vtc/browsers/` (`BROWSERS_DIR`, `BROWSER_PIN_FILE`), `~/.vtc/design-library/`,
+  `THIRD_PARTY/**` and `NOTICE`, `@vtc/shared` `visual.ts`. Spec §7.5, §9.1; D-ay.
+- **Prevents:** silent browser downloads; cross-environment pixel flakiness; an unverified browser
+  binary; copyleft code bundled into the binary; a design check that passes on something it never
+  saw.
+- **Rule:**
+  1. The visual step runs inside the gate sandbox as a gate command: a VTC-written runner script
+     in the gate's private temp directory, run with the project's Node on the project's own
+     Playwright, or on the browser `vtc doctor --install-browser` installed (an explicit command,
+     never run silently; reading 96). It is allowed by name like a pinned scanner (AD-13 rule 10).
+     No browser: the step is `skipped` with `VISUAL_SKIPPED_NO_BROWSER`.
+  2. Before every run the browser executable must match its `BrowserPin` (`executable_sha256`); a
+     mismatch is gate infrastructure (`error`). No role may write the store
+     (`WAVE3_HOME_WRITE_DENY`).
+  3. Order per §7.5: token lint, the render matrix (screen × state × width × theme from
+     `screens.yaml`, deterministic recipe: headless shell, DPR 1, fixed locale, timezone and
+     clock, reduced motion, fonts ready, every non-loopback request aborted, dynamic regions
+     masked), axe with `VISUAL_AXE_TAGS`, computed styles against the DTCG tokens, a per-region
+     pixelmatch diff against the approved prototype rendered in the same run with the same
+     browser, and the detector rules.
+  4. An unreached render or an axe `incomplete` item never passes (`VisualReportSchema`); the
+     step is `unchecked`. Findings are `ToolFinding`s with `VISUAL_RULE_PREFIX` rule ids;
+     `vtc-design/` detector findings route to the Designer (`routeForFinding`).
+  5. `GateReport.verdict` stays a function of the gate results; engine core treats the visual
+     status separately: `fail` and `unchecked` fail the gate run, `error` is gate infrastructure,
+     `skipped` is a visible note at Levels 1–2 and blocks Level 3 (AD-23 rule 3).
+  6. axe-core is never embedded in the binary: it comes unmodified from the project or from the
+     doctor-installed store, with its notice (reading 106).
+  7. The detector rules are ported to TypeScript from Apache-2.0 impeccable (no native engine):
+     `THIRD_PARTY/impeccable/LICENSE`, the upstream SHA in a `SOURCE` file, a "modified by VTC"
+     header on each derived file, a `NOTICE` entry, and no upstream branding (rule ids
+     `vtc-design/<id>`).
+  8. The novelty check (§9.1 step 4) compares a perceptual hash of the first viewport and a token
+     vector with the per-client design library (`NoveltyReport`, `DesignLibraryEntry`); no ML
+     embedding in v1 (reading 107).
+- **Check:** `contracts-4-5.test.ts` (unreached and incomplete never pass, render keys, the
+  summary, `gates.yml` `visual`, the browser pin, slop routing); gate-runner tests with a fake
+  runner (matrix expansion, unreached → `unchecked`, pin mismatch → `error`, no browser →
+  `skipped`) and one fixture test per detector rule; `tooling/arch-tests/test/supply-chain.test.ts`
+  extended by the gate-runner team so the binary embeds no `axe-core`; tests never download a
+  browser.
+
+### AD-25 Unattended headless runs (amends AD-6 and AD-17)
+
+- **Binds:** both adapters' `headlessCommand`, `spawnRole`, `resume` and `authStatus`;
+  engine core's dispatcher and the auto-resume path in the daemon; `planDispatch` and
+  `ROLE_DISPATCH_BY_LEAD_HOST`; `ProjectConfig.hosts.headless`; `@vtc/shared` `headless.ts`.
+  Spec §6.9, §12; D-ba, H-1.
+- **Prevents:** repo-controlled hooks and MCP servers in role runs; prompts that hang an
+  unattended run; retry loops after an auth failure; orphaned processes; routing defaults
+  scattered across code; outcomes guessed from exit codes.
+- **Rule:**
+  1. Every headless argv isolates the repo's host settings and MCP and denies every prompt nobody
+     can answer: `headlessIsolationGaps(host, args)` is empty. Claude: `--setting-sources user`
+     (never `project` or `local`, reading 108), `--strict-mcp-config` with a VTC-only
+     `--mcp-config`, VTC `--settings`, `--permission-mode dontAsk`, `--permission-prompts none`,
+     `--plugin-dir` + `--agent` for the compiled agent. Codex: an explicit `--sandbox` and
+     `-c approval_policy="never"`.
+  2. No API-key mode and no automatic approver: `HOST_DISALLOWED_ARGS` (`--bare`,
+     `--approve-for-me`, `--not-so-yolo`) and every AD-9 marker (including Codex's hook-trust
+     bypass) never appear.
+  3. Before every unattended start or resume the engine runs the `headless.preflight` checks in
+     order (pause flag, config hash, usage, `HostAdapter.authStatus()` through the host's own
+     status command, budget). An auth failure parks with `auth` and an incident, never a retry
+     loop.
+  4. The launcher starts the child in its own process group with `HeadlessPolicy` limits
+     (`headlessPolicyFor(hosts.headless)`, `SpawnRoleRequest.timeoutMs` / `idleTimeoutMs`): SIGINT,
+     then SIGTERM, then SIGKILL on the group; `HostOutcome` `error.cause` says why. One transcript
+     per run under `.vtc/state/`; the environment is an allowlist with the real `HOME` and no
+     credential variable.
+  5. Outcomes come from stream events (`parseEvents`), never from exit codes alone.
+  6. Routing is AD-17 rule 5: a Codex Lead's role steps run headless without the opt-in (H-1);
+     everything else headless needs `headless_allowed`. A Codex resume is priced at about twice
+     a fresh call (§7 resume row).
+- **Check:** `contracts-4-5.test.ts` (isolation gaps per host, disallowed args, the policy, the
+  routing table); the adapter safety contract (`runHostAdapterSafetyContract`) extended by the
+  adapters team with `findDisallowedHostArgs` and `headlessIsolationGaps` on every fresh and
+  resumed argv; recorded-stream fixtures for limit, auth, max-turns and kill; a fake-process test
+  that an idle timeout kills the group and leaves no orphans (adapters); engine-core tests for the
+  preflight order and the Codex-Lead dispatch.
+
+### AD-26 Release pipeline (amends AD-10 rule 6 and AD-16 rule 5)
+
+- **Binds:** `.github/workflows/release.yml`, `packaging/**` (`install.sh`, the Homebrew formula
+  template, `macos/entitlements.plist`), `packages/cli/scripts/release-*`, all cli+binary team.
+  Spec §4.4; D-az, H-2.
+- **Prevents:** mutable or unverifiable releases; a CI supply-chain compromise; installers that
+  run half-downloaded; checksums taken before signing; anything published from a local machine.
+- **Rule:**
+  1. The workflow does nothing until the repo has a remote; it triggers on a `v*` tag and a
+     `workflow_dispatch` dry run. Every `uses:` is pinned to a full commit SHA; top-level
+     permissions are `contents: read`, and only the publish job gets `contents: write`,
+     `id-token: write` and `attestations: write`. No `pull_request_target`.
+  2. It runs `pnpm install --frozen-lockfile` and `pnpm verify` with Bun 1.4.3, cross-compiles the
+     targets, smoke-tests on native runners, packages `vtc-<ver>-<os>-<arch>`, writes `SHA256SUMS`
+     (sorted, LF, `sha256sum -c` compatible), attests every asset, and publishes a draft-first,
+     immutable release with the rendered Homebrew formula.
+  3. Signing comes before checksums. macOS signing and notarization are pending the owner's
+     Apple Developer ID (H-2, reading 100): until then the job is skipped and the assets ship
+     unsigned, with checksums.
+  4. `packaging/install.sh` is POSIX sh, runs nothing until fully downloaded (`main` on the last
+     line), verifies `SHA256SUMS` with `sha256sum` or `shasum -a 256` and fails closed without
+     either, installs to `$HOME/.local/bin` (or `VTC_INSTALL_DIR`) with an atomic move, no sudo,
+     no shell-rc edits.
+  5. Nothing is pushed, tagged or published in this wave; no test touches the network.
+- **Check:** cli+binary tests: the workflow parses and every `uses:` is pinned to 40 hex with the
+  permissions above; the checksum script; `install.sh` with a stub `curl` first on `PATH` (a bad
+  checksum fails, no hash tool fails, the architecture map); the formula render.
 
 ---
 
@@ -1402,6 +1704,8 @@ doctor` warns when `claude auth status --json` shows one (it never reads credent
     source. Otherwise it keeps `project` and passes an explicit, minimal `--allowedTools` /
     `--disallowedTools` set that overrides broad project allows, and the remaining gap stays a §7
     spike item.
+    _Amended by reading 108 (wave 3): role runs use `--setting-sources user` and
+    `--strict-mcp-config`, never `project`._
 49. **Dependency installs and role networks** (§7.2 two-phase sandbox, AD-5). _Lead decision
     2026-10-14, pending human review._ A dependency install is an engine-run deterministic step
     (the Gate Runner's install phase), never a role action, on both hosts. No role on either host
@@ -1833,6 +2137,7 @@ reversible through §6. Contracts 4.4.0 carry the schema parts (all additive).
     auto-resume needs the Lead session to call `next` after the timer wakes the engine. `vtc
 init`'s header, the cli README, `vtc install --auto-resume` and `vtc doctor` say so. The
     adapters' headless commands stay built and tested for when the engine launches them.
+    _Superseded by reading 98 (wave 3): the engine launches headless runs._
 94. **Codex install places the skills; hooks stay unregistered** (AD-16 rule 4). _Lead decision
     2026-10-14, pending human review._ `vtc install codex` copies the plugin's skills to where
     Codex loads skills (learn.chatgpt.com/docs/build-skills: `<repo>/.agents/skills` for the
@@ -1840,12 +2145,124 @@ init`'s header, the cli README, `vtc install --auto-resume` and `vtc doctor` say
     a Codex Lead has the Lead loop (it can plan and steer a run, but it runs no roles in v1:
     reading 82). Codex plugin hooks run only for plugins installed in the
     Codex desktop app (developers.openai.com/plugins/build/plugins), so they are not registered;
-    the install says so (§7 row).
+    the install says so (§7 row). _Amended by reading 99 (H-1): a Codex Lead's roles run as
+    engine-launched headless Codex runs._
 95. **The project's local Claude settings stay out of git through `info/exclude` (D-ax)**
     (AD-6 rule 5; reading 71). _Lead decision 2026-10-14, pending human review._ `vtc install
 --host claude-code` keeps `.claude/settings.local.json` out of git by listing it in the
     clone's `.git/info/exclude` when nothing ignores it yet; it never edits the user's
     `.gitignore`. Accepted as is.
+
+**Readings 96–110 (2026-10-14, wave 3: v1 completion).** The Phase 3 Final Review marked coverage
+rows partial or missing; wave 3 builds them. Readings 96–98 and 101 are the Lead's decisions D-ay,
+D-az, D-ba and D-bb (**Lead decision 2026-10-14, pending human review**). Readings 99 and 100 are
+the human's own answers H-1 and H-2 (**Human decision 2026-10-14**), which override the Lead's.
+Readings 102–110 are the integrator's answers to the open points of the wave-3 research
+(`docs/research/2026-10-14-wave3-best-practice.md`, §9), also **Lead decision 2026-10-14, pending
+human review**. Contracts 4.5.0 carry the schema parts (all additive).
+
+96. **The visual stack's browser (D-ay)** (§7.5, §4.4; reading 55; AD-24). _Lead decision
+    2026-10-14, pending human review._ The visual step uses the project's own Playwright and
+    browser when they are installed. Otherwise `vtc doctor --install-browser` installs a pinned
+    `playwright-core` (verified by its npm `integrity`) and the headless-shell Chromium into
+    `~/.vtc/browsers/` and records a `BrowserPin`; it is an explicit user command, never run
+    silently. With no browser the visual gates are `skipped` with a visible reason
+    (`VISUAL_SKIPPED_NO_BROWSER`). Tests use fakes and never download a browser. This settles
+    reading 55's deferred Chromium pin.
+97. **The release pipeline (D-az)** (§4.4; AD-10 rule 6, AD-16 rule 5; AD-26). _Lead decision
+    2026-10-14, pending human review._ The repo gets the release files: a GitHub Actions release
+    workflow, a Homebrew formula template, a `curl | sh` installer that verifies a SHA-256
+    checksum, and checksum generation. Nothing is published, pushed or tagged.
+98. **Headless dispatch is built (D-ba)** (§6.9, §12; AD-17, AD-25). _Lead decision 2026-10-14,
+    pending human review._ With `headless_allowed: true` the engine launches roles itself through
+    `HostAdapter.spawnRole` on either host: engine-driven auto-resume with no live Lead,
+    cross-family review and hosts without subagents. The default stays plugin-only, which the
+    human chose at G2. The routing default per Lead host is one constant
+    (`ROLE_DISPATCH_BY_LEAD_HOST`). This replaces reading 93 and the §7 residual "No
+    engine-launched headless runs".
+99. **A Codex Lead's roles run headless (H-1)** (§12.1; AD-17 rule 5; readings 82, 94).
+    _Human decision 2026-10-14._ When a run's Lead session is Codex, the engine runs that run's
+    roles itself as headless Codex runs (`HostAdapter.spawnRole`), still sandboxed and
+    budget-checked. This is automatic and needs no `headless_allowed`. Claude Code keeps the
+    plugin-only default chosen at G2. `headless_allowed` still governs engine-driven runs with no
+    live Lead (auto-resume) and any headless run on Claude Code. `ROLE_DISPATCH_BY_LEAD_HOST`
+    is `{ claude-code: subagent, codex: headless }`, and `planDispatch` takes the Lead's host. In-
+    session Codex roles stay refused (reading 82); the refusal now names `vtc doctor` or a Claude
+    Lead as the remedy when a headless launch is impossible. This removes the §7 residual "A
+    Codex Lead runs no roles".
+100.  **Unsigned release artifacts for now (H-2)** (§4.4; AD-26 rule 3). _Human decision
+      2026-10-14._ macOS signing and notarization come later. The release ships unsigned artifacts
+      with SHA-256 checksums and publishes nothing. The release docs carry the todo "sign +
+      notarize once the owner has an Apple Developer ID" (§7 release-pipeline todo).
+101.  **A seventh team, `lookback-research` (D-bb)** (§13, §8.2, §10; AD-13 rule 12, AD-15). _Lead
+      decision 2026-10-14, pending human review._ It owns `packages/engine/src/lookback/**`,
+      `packages/engine/src/research/**` and their tests under
+      `packages/engine/test/{lookback,research}/**`, which `tooling/ownership.json` removes from
+      engine-core. Its worktree is `../bs-software-agents-wt/lookback-research` on
+      `team/lookback-research`.
+102.  **The editable section goes in the task pack** (§13 prompt versioning; AD-14, AD-21 rule 2).
+      _Lead decision 2026-10-14, pending human review._ A plugin agent's instructions are fixed
+      until the plugin is reinstalled, so a canary cannot change them per dispatch. Compiled agents
+      will carry the locked core; the engine renders the pinned editable section first in the task
+      pack, on both hosts and in plugin-only mode, with no reinstall. The section moves from the
+      system prompt to the first turn, which may weigh it less, so the roles-compiler and
+      lookback-research teams switch one role first and compare it with an A/A run before
+      switching every role (research §9 question 4).
+103.  **Pins are user-level and only a human promotes** (§13 steps 4–5; AD-21 rule 3). _Lead
+      decision 2026-10-14, pending human review._ `~/.vtc/lookback/pins.yaml` is outside every repo
+      (a repo cannot choose a prompt). `vtc lookback approve|pin|rollback` writes it after a
+      confirmation in an interactive terminal, the way `vtc calibrate` writes the gate allowlist
+      (reading 43); no MCP tool or HTTP route writes it, so `HUMAN_ONLY_TOOLS` is unchanged. Spec
+      §13 step 4 says the human approves "in the Lead chat": the Lead shows the proposal and its
+      replay result and gives the human the command. The engine itself only rolls a canary back.
+      Roles may not write `lookback/**` under the VTC home (`WAVE3_HOME_WRITE_DENY`).
+104.  **The Level-3 preflight and the merge-level ledger** (§6.7; AD-23). _Lead decision
+      2026-10-14, pending human review._ GitHub merges a PR with no required status check without
+      waiting for CI, so Level 3 runs only when the base branch has at least one required check
+      (and auto-merge is allowed, `gh` is logged in, a merge method exists); otherwise the run
+      starts at Level 2 (`merge.preflight` records why; no new merge-level reason is needed,
+      because the run never ran at Level 3). Downgrades after a revert or a red required base run
+      go to the git-tracked `.vtc/merge-level.jsonl`; the engine never edits `project.yaml`, and
+      only a human restores. Level 3 is GitHub-only (a §7 residual).
+105.  **A skipped visual step is not a Level-3 pass** (§7.5, §6.7 checklist item 1; AD-23 rule 3,
+      AD-24 rule 5). _Lead decision 2026-10-14, pending human review._ At Levels 1–2 a visual step
+      skipped for lack of a browser is a visible note and the task continues (D-ay). At Level 3
+      the checklist's Final Review item counts only `pass`: `skipped`, `unchecked`, `fail` and
+      `error` keep the PR from auto-merging.
+106.  **axe-core's licence** (§7.2 licensing; AD-2 rule 8, AD-24 rule 6). _Lead decision
+      2026-10-14, pending human review._ axe-core is MPL-2.0 (file-level copyleft). VTC never
+      bundles or modifies it: the visual runner injects an unmodified `axe.min.js` from the
+      project's own dependency or the doctor-installed store under `~/.vtc/browsers/`, and the
+      notice names it. `pixelmatch` (ISC) and `playwright-core` (Apache-2.0) are resolved the same
+      way, from the project or the store.
+107.  **Novelty check v1 without ML embeddings** (§9.1 step 4; AD-24 rule 8). _Lead decision
+      2026-10-14, pending human review._ DreamSim, DINOv2 and UIClip are Python models and do not
+      fit the Bun binary. v1 compares a 64-bit perceptual hash of the first viewport and a token
+      vector (OKLCH palette, type pair, radius, density) with the per-client design library and
+      rejects a direction only when both are too similar. ML embeddings move to v2. This is a
+      deviation from the spec, to be written back through the change process.
+108.  **Claude role runs load user settings, never project settings** (AD-9, AD-25 rule 1; amends
+      reading 48). _Lead decision 2026-10-14, pending human review._ The official headless
+      documentation says `-p` runs a repository's hooks, `env` and `.mcp.json` servers without a
+      trust prompt and names `--setting-sources user` and `--strict-mcp-config` as the remedy. A
+      Claude role run therefore loads the user's own settings (the user's trust domain), a
+      VTC-only `--mcp-config` and VTC `--settings`, never `project` or `local`. Reading 48's
+      `project` source is replaced. Whether `--restricted` keeps the subscription login and
+      isolates further is a §7 spike row.
+109.  **Wave-3 surfaces for the dashboard and the roles** (AD-4, AD-5). _Lead decision 2026-10-14,
+      pending human review._ The Lead-facing MCP tools and the HTTP routes stay as frozen in
+      4.4.0, so no running engine, cli or golden fixture breaks. Flow Studio reads the new data
+      from events (`gate.requested`, `headless.*`, `merge.preflight`, `feature.checklist`,
+      `feature.auto_merge_*`, `feature.post_merge_ci`, `feature.reverted`,
+      `final_review.step_finished`, `fact.*`, `lookback.*`), from `StatusResult.headless_runs`,
+      `PullRequestRef`'s new fields and `GateReport.visual`, and from git-tracked files through the
+      artifacts route (`.vtc/lookback/scorecards/index.json`, `.vtc/research/facts.jsonl`, visual
+      reports under `.vtc/evidence/`). The role-facing research tools are a separate list,
+      `ROLE_MCP_TOOLS`, served on the same `vtc` server (AD-4 rule 3).
+110.  **G2 fact waivers carry a reason** (§8.2; AD-22 rule 4). _Lead decision 2026-10-14, pending
+      human review._ `ApproveInput.waived_facts` keeps the ids; the new `fact_waivers` gives each a
+      reason. The engine requires a waiver with a reason for every fact
+      `approve_gate.unverified_facts` listed, and records each as `fact.waived`.
 
 ## 6. Change process for this spine
 
@@ -1911,21 +2328,38 @@ reasoning_output_tokens}`: `thread_id` is the `SessionRef` for `codex exec resum
 | Claude session sandbox for in-session roles (§5 readings 71, 79, D-an)                                                                                 | with `claudeSessionSandboxSettings` in the project's `.claude/settings.local.json`, a plugin subagent's Bash in that session cannot read `<vtcHome>/token` or `<vtcHome>/run`, the host credential files, `HOME_CREDENTIAL_LOCATIONS` or the repo's `.vtc/state/checkouts` and `.vtc/state/gates`, cannot write any `homeWriteDeny` path or the repo's `.vtc/project.yaml` and `.vtc/gates.yml`, and has no unsandboxed escape; whether managed or user settings can turn the sandbox off over the local file; and whether `pnpm`, `npm` and `git` still run in that session with `~/.npmrc` and the other credential stores read-denied | pending                                                                                                                                                                                                                                                | yes                   |
 | Codex Lead session sandbox signal (§5 reading 82)                                                                                                      | a way for the Codex bridge (an MCP server Codex starts) to learn the Lead session's effective sandbox and network, including `--sandbox`, `--yolo` and `/permissions` changes, so the engine could allow in-session Codex roles when the network is off; and whether Linux's network-off sandbox blocks a Unix-socket `connect()`                                                                                                                                                                                                                                                                                                        | pending; the docs say an agent file cannot pin the network (reading 82), so the engine refuses every in-session Codex role until this passes                                                                                                           | yes                   |
 | Claude session `permissions.deny` for role file tools (§5 reading 81)                                                                                  | with the settings `vtc install` writes, a plugin subagent of the Lead session is refused `Read` of `<vtcHome>/token`, `~/.ssh/**` and the repo's `.vtc/state/checkouts/**`, and `Edit`/`Write` of `.vtc/project.yaml`, by absolute `//` rules, including from a role worktree; and Grep/Glob honour the Read denies                                                                                                                                                                                                                                                                                                                      | pending; the official docs say Read and Edit deny rules apply to the file tools and best effort to Grep/Glob                                                                                                                                           | yes                   |
+| Claude `--restricted` (§5 reading 108, AD-25)                                                                                                          | with the subscription login, `claude -p --restricted` keeps auth and loads only managed settings and `--settings`; whether it isolates more than `--setting-sources user`                                                                                                                                                                                                                                                                                                                                                                                                                                                                | pending (wave 3)                                                                                                                                                                                                                                       | yes                   |
+| Claude headless plugin agent (AD-21, AD-25)                                                                                                            | `claude -p --plugin-dir <dir> --agent <ns:agent>` resolves the compiled plugin agent, so a headless run has the plugin run's prompt SHA                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                  | pending (wave 3); with the "Claude headless role run" row above                                                                                                                                                                                        | yes                   |
+| Codex ignore flags (§5 reading 72, AD-25)                                                                                                              | what `codex exec --ignore-user-config` and `--ignore-rules` drop, and whether a worktree's `.codex/config.toml` still loads                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                              | pending (wave 3)                                                                                                                                                                                                                                       | yes                   |
+| Codex resume argv (AD-25)                                                                                                                              | whether `codex exec resume` accepts `--output-schema`, `--sandbox` and `-C`                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                              | pending (wave 3)                                                                                                                                                                                                                                       | yes                   |
+| Codex limit and auth text (AD-25 rule 5)                                                                                                               | the `turn.failed` / `error` text of a usage limit and of a logged-out run, recorded as fixtures                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                          | pending (wave 3)                                                                                                                                                                                                                                       | yes                   |
+| Codex model ids on the owner's plan (§5 readings 26, 51)                                                                                               | whether the ids the official models page recommends (`gpt-6.1-sol`, `gpt-6-luna`, `gpt-6-astra`) are accepted on the owner's ChatGPT Plus plan, as an example top/mid/low map                                                                                                                                                                                                                                                                                                                                                                                                                                                            | pending (wave 3); adapters never hard-code ids (AD-6 rule 2)                                                                                                                                                                                           | yes                   |
+| `gh pr merge --auto` with nothing pending (AD-23)                                                                                                      | what auto-merge does on a PR with no unmet requirement (merge at once or refuse)                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                         | pending (wave 3); the preflight requires a required check either way                                                                                                                                                                                   | yes                   |
+| Non-admin reads of repo settings (AD-23 rule 1)                                                                                                        | whether a non-admin `gh` login can read `allow_auto_merge` and classic branch protection                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                 | pending (wave 3); unknown reads as `null` and the engine tries and handles the refusal                                                                                                                                                                 | yes                   |
+| GitHub revert PRs (AD-23 rule 4)                                                                                                                       | the title and body GitHub's Revert button writes, for revert detection                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                   | pending (wave 3)                                                                                                                                                                                                                                       | yes                   |
+| Chromium in the gate sandbox (AD-24)                                                                                                                   | the headless-shell Chromium inside `sandbox-exec` and `bwrap`, with Chromium's own sandbox on or off                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                     | pending (wave 3)                                                                                                                                                                                                                                       | no                    |
+| Playwright browser checksums (AD-24 rule 2)                                                                                                            | whether Playwright publishes checksums of its browser downloads, as the `BrowserPin` source                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                              | pending (wave 3); until then the pin records the installed executable's SHA-256                                                                                                                                                                        | no                    |
+| Notarizing a bare Bun binary (AD-26, H-2)                                                                                                              | staple behaviour and the minimum entitlements of a notarized single-file binary                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                          | pending the owner's Apple Developer ID                                                                                                                                                                                                                 | yes                   |
+| Merge-queue triggers (AD-23)                                                                                                                           | whether a required workflow without a `merge_group` trigger can be detected from the workflow files                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                      | pending (wave 3); `vtc doctor` warns                                                                                                                                                                                                                   | no                    |
 
 **Accepted residuals.** Risks VTC knowingly ships with in v1, each bounded by a named control.
 Engine code that relies on one cites this table.
 
-| Residual                                                  | Why it remains                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                            | What bounds it                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                   | Revisit when                                                                                                                                                                                 |
-| --------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| Plugin-only in-session roles (§5 reading 71, D-an; AD-17) | In the default `plugin_only` mode every role runs as a subagent of the human's Lead session, with no adapter sandbox profile. A code-running role's shell is confined only by that session's own Claude sandbox and the agent's tool rules; VTC cannot enforce a per-agent OS sandbox there. Write-scoped roles without a shell rely on their agent's `Edit`/`Write` deny rules and the engine's write-scope check on submit. A process with the user's uid can still declare itself a bridge, and a role shell that escapes the session sandbox can do what the user can | The engine dispatches a `code_sandboxed` role in-session on Claude Code only when the Lead session reports its sandbox `on` (`inSessionDispatchAllowed`); the session sandbox read-denies the token, sockets and hidden tests and write-denies `homeWriteDeny`; human-only tools need a human channel (`HUMAN_ONLY_TOOLS`); every write is still checked on submit (L5) and in gates; the session sandbox also read-denies the host credential files and home credential stores, and the repo's gate checkouts and raw gate output, and write-denies the run config (reading 79); the same settings' `permissions.deny` keeps the Read, Edit and Write tools off those paths, and every Claude role (not only a code-running one) needs the settings on (reading 81); no Codex role runs in-session (reading 82) | the Claude session-sandbox spike row above passes or fails, or a host offers a per-subagent OS sandbox                                                                                       |
-| Codex roles read the install token (§5 readings 79, 82)   | Codex sandboxes allow reads everywhere and have no per-path read deny, so a Codex role (headless; none runs in-session since reading 82) can read `<vtcHome>/token`, the host credential files and the hidden-test copies, and copy them into its output, a commit or a file. On Linux and Windows Codex's network-off sandbox is not shown to block a Unix-socket connect, so a role holding the token could reach the engine socket as a cli (a human channel) or as a bridge claiming the Lead                                                                         | No Codex role runs in-session (`CODEX_IN_SESSION_REFUSED_REASON`, reading 82); a headless Codex run, which the engine does not launch in v1 (reading 93), would run only on platforms in `CODEX_UNIX_CONNECT_BLOCKED_PLATFORMS` (macOS, where `connect()` fails with `EPERM`, checked with codex-cli 0.162.1) with `-c` overrides that turn its network off; every write is checked on submit (L5) and in gates                                                                                                                                                                                                                                                                                                                                                                                                  | Codex offers a per-path read deny, the Codex network spike rows pass on Linux, or the cli's human proof stops being the install token itself (a per-confirmation nonce the role cannot read) |
-| Unsandboxed gates by user opt-in (§5 reading 69, D-al)    | A machine with neither `sandbox-exec` nor `bwrap` can run gates only unconfined                                                                                                                                                                                                                                                                                                                                                                                                                                                                                           | Only the user-level `gates.allow_unsandboxed` enables it (never `project.yaml`); every such gate run records an `unsandboxed_gate` incident; the gate environment stays an allowlist with an empty `HOME`                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                        | a portable sandbox exists for that platform                                                                                                                                                  |
-| Final Review AI steps (§5 reading 91)                     | Final Review runs gate steps 1, 2 and 6 only: no whole-spec Spec-Verifier, no Security on the combined diff, no Visual QA journeys, no release-readiness check, and a merged owning task is not reopened (a fix task names it)                                                                                                                                                                                                                                                                                                                                            | A risky finding parks the feature, a surviving finding parks it as stuck, every task already passed its own reviewers and gates, and the PR body names the steps that did not run (`finalReviewScopeNote`)                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                       | sub-projects 4, 5 and 8 build feature-scoped reviewer dispatch (packs over `base…integration`, verdicts owned by the feature) and step 7                                                     |
-| Visual QA not attached (§5 reading 92)                    | Its judge needs the §7.5 deterministic render stack (Playwright matrix, axe, computed styles, pixelmatch), which sub-project 5 builds                                                                                                                                                                                                                                                                                                                                                                                                                                     | UI tasks keep their deterministic gates and the other reviewers                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                  | sub-project 5 lands the render stack as a gate step feeding Visual QA                                                                                                                        |
-| No engine-launched headless runs (§5 reading 93)          | `headless_allowed` behaves as `plugin_only`: no unattended resume, no cross-family review, no hosts without subagents                                                                                                                                                                                                                                                                                                                                                                                                                                                     | The engine pauses with a visible reason instead of hanging; the init header, README, install and doctor say so                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                   | the engine launches `HostAdapter.spawnRole` runs                                                                                                                                             |
-| A Codex Lead runs no roles (§5 readings 82, 93; F7)       | The engine refuses every in-session Codex role (no signal shows the Codex Lead session keeps the network off), steps dispatch only on the Lead session's own host, and the engine launches no headless runs, so a run led from Codex dispatches no role and every task parks `blocked`; there is no per-family host setting                                                                                                                                                                                                                                               | The refusal (`CODEX_IN_SESSION_REFUSED_REASON`) and the `vtc install codex` notes say a Codex Lead can run no roles in v1 and name the remedy: run the Lead in Claude Code (`vtc install --host claude-code`), then answer the escalation from that session; nothing runs a Codex role unconfined                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                | the Codex Lead session sandbox spike row passes, or the engine launches headless runs and gains per-family host routing                                                                      |
-| Id collisions in unsynced clones (§5 reading 89)          | Two clones that plan before either syncs can pick the same `T-n` / `F-n`                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                  | Fetched remote branches and committed plan files are skipped; a push never forces, so a clash fails loudly                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                       | ids become run-scoped (a contract change)                                                                                                                                                    |
+| Residual                                                  | Why it remains                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                            | What bounds it                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                   | Revisit when                                                                                                                                                                                                                       |
+| --------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Plugin-only in-session roles (§5 reading 71, D-an; AD-17) | In the default `plugin_only` mode every role runs as a subagent of the human's Lead session, with no adapter sandbox profile. A code-running role's shell is confined only by that session's own Claude sandbox and the agent's tool rules; VTC cannot enforce a per-agent OS sandbox there. Write-scoped roles without a shell rely on their agent's `Edit`/`Write` deny rules and the engine's write-scope check on submit. A process with the user's uid can still declare itself a bridge, and a role shell that escapes the session sandbox can do what the user can | The engine dispatches a `code_sandboxed` role in-session on Claude Code only when the Lead session reports its sandbox `on` (`inSessionDispatchAllowed`); the session sandbox read-denies the token, sockets and hidden tests and write-denies `homeWriteDeny`; human-only tools need a human channel (`HUMAN_ONLY_TOOLS`); every write is still checked on submit (L5) and in gates; the session sandbox also read-denies the host credential files and home credential stores, and the repo's gate checkouts and raw gate output, and write-denies the run config (reading 79); the same settings' `permissions.deny` keeps the Read, Edit and Write tools off those paths, and every Claude role (not only a code-running one) needs the settings on (reading 81); no Codex role runs in-session (reading 82) | the Claude session-sandbox spike row above passes or fails, or a host offers a per-subagent OS sandbox                                                                                                                             |
+| Codex roles read the install token (§5 readings 79, 82)   | Codex sandboxes allow reads everywhere and have no per-path read deny, so a Codex role (headless; none runs in-session since reading 82) can read `<vtcHome>/token`, the host credential files and the hidden-test copies, and copy them into its output, a commit or a file. On Linux and Windows Codex's network-off sandbox is not shown to block a Unix-socket connect, so a role holding the token could reach the engine socket as a cli (a human channel) or as a bridge claiming the Lead                                                                         | No Codex role runs in-session (`CODEX_IN_SESSION_REFUSED_REASON`, reading 82); a headless Codex run (which the engine launches since wave 3 for a Codex Lead and under `headless_allowed`, readings 98–99) runs only on platforms in `CODEX_UNIX_CONNECT_BLOCKED_PLATFORMS` (macOS, where `connect()` fails with `EPERM`, checked with codex-cli 0.162.1) with `-c` overrides that turn its network off; every write is checked on submit (L5) and in gates                                                                                                                                                                                                                                                                                                                                                      | Codex offers a per-path read deny, the Codex network spike rows pass on Linux, or the cli's human proof stops being the install token itself (a per-confirmation nonce the role cannot read)                                       |
+| Unsandboxed gates by user opt-in (§5 reading 69, D-al)    | A machine with neither `sandbox-exec` nor `bwrap` can run gates only unconfined                                                                                                                                                                                                                                                                                                                                                                                                                                                                                           | Only the user-level `gates.allow_unsandboxed` enables it (never `project.yaml`); every such gate run records an `unsandboxed_gate` incident; the gate environment stays an allowlist with an empty `HOME`                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                        | a portable sandbox exists for that platform                                                                                                                                                                                        |
+| Final Review AI steps (§5 reading 91)                     | Final Review runs gate steps 1, 2 and 6 only: no whole-spec Spec-Verifier, no Security on the combined diff, no Visual QA journeys, no release-readiness check, and a merged owning task is not reopened (a fix task names it)                                                                                                                                                                                                                                                                                                                                            | A risky finding parks the feature, a surviving finding parks it as stuck, every task already passed its own reviewers and gates, and the PR body names the steps that did not run (`finalReviewScopeNote`)                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                       | sub-projects 4, 5 and 8 build feature-scoped reviewer dispatch (packs over `base…integration`, verdicts owned by the feature) and step 7 (wave 3: engine-core builds steps 3–5 and 7, `FinalReviewStepResult`, `ReleaseReadiness`) |
+| Visual QA not attached (§5 reading 92)                    | Its judge needs the §7.5 deterministic render stack (Playwright matrix, axe, computed styles, pixelmatch), which sub-project 5 builds                                                                                                                                                                                                                                                                                                                                                                                                                                     | UI tasks keep their deterministic gates and the other reviewers                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                  | sub-project 5 lands the render stack as a gate step feeding Visual QA (wave 3: gate-runner builds it, AD-24)                                                                                                                       |
+| Id collisions in unsynced clones (§5 reading 89)          | Two clones that plan before either syncs can pick the same `T-n` / `F-n`                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                  | Fetched remote branches and committed plan files are skipped; a push never forces, so a clash fails loudly                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                       | ids become run-scoped (a contract change)                                                                                                                                                                                          |
+| Level 3 is GitHub-only (§5 reading 104, AD-23)            | The preflight and the post-merge watch read GitHub's rules API, `gh pr checks` and `gh run list`; other remotes have no equivalent VTC reads                                                                                                                                                                                                                                                                                                                                                                                                                              | A failed preflight starts the run at Level 2 with a reason; Levels 1 and 2 work on any remote                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                    | VTC gains a merge service for another forge                                                                                                                                                                                        |
+| Unsigned release artifacts (§5 reading 100, H-2)          | macOS signing and notarization need the owner's Apple Developer ID; a browser-downloaded unsigned binary may be quarantined                                                                                                                                                                                                                                                                                                                                                                                                                                               | `SHA256SUMS` and GitHub artifact attestations; `install.sh` verifies the checksum and fails closed; nothing is published in wave 3                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                               | the owner has an Apple Developer ID                                                                                                                                                                                                |
 
 **Release-pipeline todo.** This local build has no CI. When the repo gets one, the merge-gate job
 installs Bun 1.4.3, so the single-binary tests (`packages/cli/test/binary.test.ts`) run instead of
 skipping with a reason (AD-10 rule 6).
+
+**Release-pipeline todo (H-2, AD-26).** Sign + notarize once the owner has an Apple Developer ID.
+Until then the release workflow ships unsigned artifacts with SHA-256 checksums and attestations,
+and nothing is published from this wave.

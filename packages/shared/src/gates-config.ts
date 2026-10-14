@@ -5,6 +5,7 @@
  */
 import { z } from "zod";
 import { engineRepoKey } from "./engine-instance.js";
+import { VisualConfigSchema } from "./visual.js";
 import {
   GitShaSchema,
   GlobSchema,
@@ -177,6 +178,11 @@ export const GatesConfigSchema = z
      * a run takes it from the commit it starts on. Absent: no loopback. New in contracts 4.4.0.
      */
     sandbox: z.strictObject({ verify_loopback: z.boolean() }).optional(),
+    /**
+     * The deterministic visual step's settings (AD-24, §7.5): widths, themes, budgets, axe tags,
+     * masked regions. Absent: `VISUAL_DEFAULTS` (`visualConfigFor`). New in contracts 4.5.0.
+     */
+    visual: VisualConfigSchema.optional(),
   })
   .superRefine((config, ctx) => {
     const ids = config.gates.map((g) => g.id);

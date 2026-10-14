@@ -28,6 +28,10 @@
     {
       "version": "4.4.0",
       "schemas_sha256": "d0efb7b4b1ecfa51292cab957940f14e8fbe2de69ec83347f490cbe635b5da47"
+    },
+    {
+      "version": "4.5.0",
+      "schemas_sha256": "8e67b7a264f2f1e21212ca469cffb243a7b5b5d6ad6f99b634233436b793624c"
     }
   ]
 }

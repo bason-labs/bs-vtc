@@ -20,7 +20,8 @@ import type { HostId } from "../primitives.js";
 import type { AssetBundle } from "./assets.js";
 import type { AutoResumeScheduler } from "./auto-resume.js";
 import type { GateRunner } from "./gate-runner.js";
-import type { PullRequestService } from "./git.js";
+import type { PullRequestService, RemoteMergeService } from "./git.js";
+import type { HttpClient } from "./research.js";
 import type { HostAdapter } from "./host-adapter.js";
 import type { StorageFactory } from "./storage.js";
 
@@ -53,6 +54,17 @@ export interface EngineDeps {
    * fake. When absent the engine uses its own `gh`-backed default.
    */
   readonly pullRequests?: PullRequestService;
+  /**
+   * Level-3 auto-merge and the post-merge watch (AD-23). The cli injects the `gh`-backed one;
+   * absent: Level 3 is unavailable and runs at an effective level of 2. New in 4.5.0.
+   */
+  readonly remoteMerge?: RemoteMergeService;
+  /**
+   * The HTTP client the research fetchers use (AD-22): the cli injects one over the runtime's
+   * `fetch` with the network guard; tests inject recorded fixtures. Absent: research fetchers
+   * are unavailable and every new fact stays UNVERIFIED. New in 4.5.0.
+   */
+  readonly http?: HttpClient;
   readonly versions: EngineVersions;
   /** Clock override for tests. */
   readonly now?: () => Date;

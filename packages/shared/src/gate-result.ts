@@ -6,6 +6,7 @@
  */
 import { z } from "zod";
 import { ToolFindingSchema } from "./finding.js";
+import { VisualRequestSchema, VisualSummarySchema } from "./visual.js";
 import { GateLayerSchema, GatePhaseSchema, ReportFormatSchema } from "./gates-config.js";
 import {
   EvidenceSchema,
@@ -286,6 +287,12 @@ export const GateRunRequestSchema = z
      * commit's `gates.yml` as it is.
      */
     gates_config_hash: Sha256HexSchema.optional(),
+    /**
+     * Run the deterministic visual step (AD-24) for these screens: UI tasks name the screens
+     * whose `reqs` they cover; Final Review step 5 sends `screens: []` (all). Absent: no visual
+     * step. New in 4.5.0.
+     */
+    visual: VisualRequestSchema.optional(),
   })
   .superRefine((request, ctx) => {
     if ((request.reason === "base_fail_check") !== (request.expect === "fail")) {
@@ -381,6 +388,14 @@ export const GateReportSchema = z
      * `gates.allow_unsandboxed`, which engine core records as an `unsandboxed_gate` incident.
      */
     sandbox: GateSandboxKindSchema.optional(),
+    /**
+     * The visual step's outcome when the request asked for it (AD-24). It does not change
+     * `verdict`, which stays a function of `results`: engine core treats `fail` and `unchecked`
+     * as a failed gate run (findings in `visual.findings` go through triage), `error` as gate
+     * infrastructure, and `skipped` as a visible note that Level 3 never counts as a pass
+     * (spine §5 reading 105). New in 4.5.0.
+     */
+    visual: VisualSummarySchema.optional(),
     verdict: GateVerdictSchema,
     started_at: IsoDateTimeSchema,
     finished_at: IsoDateTimeSchema,

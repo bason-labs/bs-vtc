@@ -14,6 +14,7 @@ import {
 } from "../primitives.js";
 import type { ResolvedModel, RoleTools } from "../role-contract.js";
 import { UsageWindowKindSchema, type UsageSnapshot } from "../usage.js";
+import { HostErrorCauseSchema, type HostAuthStatus } from "../headless.js";
 
 /**
  * Terminal outcome of a role run, normalised across hosts to `done | limit | auth | error`
@@ -51,6 +52,12 @@ export const HostOutcomeSchema = z.discriminatedUnion("kind", [
     kind: z.literal("error"),
     message: z.string(),
     retryable: z.boolean(),
+    /**
+     * Why an engine-launched run ended in error (AD-25 rule 4): wall or idle timeout, a kill, the
+     * host's turn or budget cap, a bare non-zero exit, or a process that never started. Absent
+     * for a subagent failure the Lead reports. New in 4.5.0.
+     */
+    cause: HostErrorCauseSchema.optional(),
     /** Spend before the failure, when the host reported it (§11). */
     tokens: TokenUsageSchema.nullable(),
     cost_usd: z.number().nonnegative().nullable(),
@@ -203,6 +210,11 @@ export interface SpawnRoleRequest {
   readonly sandbox: SandboxProfile;
   /** Hard timeout; the launcher force-kills on expiry (§15). */
   readonly timeoutMs: number;
+  /**
+   * No stdout line for this long ends a headless run (`error`, cause `idle`; AD-25 rule 4).
+   * Absent: no idle limit. New in 4.5.0.
+   */
+  readonly idleTimeoutMs?: number;
   readonly maxTurns?: number;
   readonly maxBudgetUsd?: number;
 }
@@ -306,6 +318,14 @@ export interface HostAdapter {
    * (`codex app-server`), which `dispose()` must stop.
    */
   watchUsage?(onUpdate: (snapshot: UsageSnapshot) => void): () => void;
+  /**
+   * The host's login state through its own status command (`claude auth status`,
+   * `codex login status`; exit 0 = logged in), never by reading a credential (AD-9). The engine
+   * calls it before every unattended start or resume (AD-25 rule 3) and parks with `auth`
+   * instead of launching when it is not `true`. Absent: the host has no such command and the
+   * engine relies on the run's own auth outcome. New in 4.5.0.
+   */
+  authStatus?(): Promise<HostAuthStatus>;
   /** Stop every child process and subscription this adapter owns: no orphans (§15). Idempotent. */
   dispose(): Promise<void>;
 }

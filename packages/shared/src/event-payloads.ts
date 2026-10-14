@@ -4,7 +4,27 @@
  * outside this map stay open: consumers ignore types they do not know (AD-3 rule 5).
  */
 import { z } from "zod";
+import {
+  AutoMergeChecklistSchema,
+  AutoMergeDisabledSchema,
+  AutoMergeEnabledSchema,
+  FeatureRevertedSchema,
+  MergePreflightSchema,
+  PostMergeCiSchema,
+} from "./auto-merge.js";
+import { DesignCoverageReportSchema, G2DirectionSchema } from "./design.js";
 import { FeatureSchema, FeatureStatusSchema, PullRequestRefSchema } from "./feature.js";
+import { HeadlessEndedSchema, HeadlessPreflightSchema, HeadlessStartedSchema } from "./headless.js";
+import { CanaryStateSchema, EscapedDefectSchema, ReplayVerdictSchema } from "./lookback.js";
+import {
+  FactIdSchema,
+  FactRowSchema,
+  FactStatusSchema,
+  FactWaiverSchema,
+  ResearchFetchedSchema,
+  UnverifiedFactSummarySchema,
+} from "./research.js";
+import { FinalReviewStepResultSchema } from "./traceability.js";
 import { FindingSchema, FindingStatusSchema, WaiverSchema } from "./finding.js";
 import { GateReportSchema } from "./gate-result.js";
 import { EscalationAnswerSchema, EscalationSchema } from "./escalation.js";
@@ -16,6 +36,7 @@ import {
   IsoDateTimeSchema,
   RelPathSchema,
   RiskRuleReasonRuleSchema,
+  RoleIdSchema,
   SessionRefSchema,
   Sha256HexSchema,
   SlugSchema,
@@ -181,7 +202,23 @@ export const EVENT_PAYLOAD_SCHEMAS = {
     frozen: z.array(FrozenArtifactSchema).min(1),
     design_direction: SlugSchema.optional(),
     waived_facts: z.array(SlugSchema).default([]),
+    /** The reason given for each waived fact (`ApproveInput.fact_waivers`). New in 4.5.0. */
+    fact_waivers: z.array(FactWaiverSchema).optional(),
     note: z.string().max(4000).optional(),
+  }),
+  /**
+   * The engine asked the Lead to show a gate (`approve_gate`): what was shown, so Flow Studio can
+   * show the same G2 directions and unverified facts. New in 4.5.0.
+   */
+  "gate.requested": z.strictObject({
+    gates: z.array(HumanGateIdSchema).min(1).max(2),
+    artifacts: z.array(FrozenArtifactSchema).min(1),
+    design_directions: z.array(SlugSchema).max(3).default([]),
+    unverified_facts: z.array(SlugSchema).default([]),
+    directions: z.array(G2DirectionSchema).max(3).optional(),
+    facts: z.array(UnverifiedFactSummarySchema).optional(),
+    /** The DESIGN REQ → component → screen check, when the run has UI. */
+    design_coverage: DesignCoverageReportSchema.optional(),
   }),
   "gate.rejected": z.strictObject({
     gates: z.array(HumanGateIdSchema).min(1).max(2),
@@ -268,6 +305,14 @@ export const EVENT_PAYLOAD_SCHEMAS = {
     agent: z.string().min(1).max(128),
     pack: RelPathSchema,
     resume: SessionRefSchema.nullable(),
+    /**
+     * SHA-256 of the editable section the pack carried (AD-21): with the compiled locked core it
+     * gives the prompt version (`effectivePromptSha`), which the envelope's `prompt_sha` records.
+     * New in 4.5.0.
+     */
+    editable_sha256: Sha256HexSchema.optional(),
+    /** The Lookback canary arm this dispatch ran in, when a canary covers the role. New in 4.5.0. */
+    canary_arm: z.enum(["candidate", "baseline"]).optional(),
   }),
   "role.submitted": z
     .strictObject({
@@ -378,6 +423,68 @@ export const EVENT_PAYLOAD_SCHEMAS = {
     commit: GitShaSchema,
     level: MergeLevelSchema,
   }),
+  // ---- headless runs (AD-25), new in 4.5.0
+  /** The checks before an engine-launched start or resume (auth, usage, pause, config, budget). */
+  "headless.preflight": HeadlessPreflightSchema,
+  "headless.started": HeadlessStartedSchema,
+  "headless.ended": HeadlessEndedSchema,
+  // ---- Level 3 (AD-23), new in 4.5.0
+  /** The Level-3 preflight at run start; a failure starts the run at Level 2. */
+  "merge.preflight": MergePreflightSchema,
+  /** The §6.7 safe-to-auto-merge checklist, evaluated before enabling auto-merge. */
+  "feature.checklist": AutoMergeChecklistSchema,
+  "feature.auto_merge_enabled": AutoMergeEnabledSchema,
+  "feature.auto_merge_disabled": AutoMergeDisabledSchema,
+  "feature.post_merge_ci": PostMergeCiSchema,
+  "feature.reverted": FeatureRevertedSchema,
+  // ---- Final Review (§6.7a), new in 4.5.0
+  "final_review.step_finished": FinalReviewStepResultSchema,
+  // ---- research (AD-22), new in 4.5.0
+  "research.fetched": ResearchFetchedSchema,
+  "fact.recorded": z.strictObject({ fact: FactRowSchema }),
+  /** A fact's status changed after (re)verification or a re-fetch before G2. */
+  "fact.verified": z.strictObject({
+    id: FactIdSchema,
+    status: FactStatusSchema,
+    detail: z.string().min(1).max(500).optional(),
+  }),
+  "fact.waived": FactWaiverSchema,
+  // ---- Lookback (AD-21), new in 4.5.0
+  /** The engine queued the lookback role for one (role, host) at run end. */
+  "lookback.dispatched": z.strictObject({
+    target_role: RoleIdSchema,
+    target_mode: SlugSchema.optional(),
+    target_host: HostIdSchema,
+    train_failures: z.int().nonnegative(),
+  }),
+  "lookback.proposal_recorded": z.strictObject({
+    proposal: SlugSchema,
+    path: RelPathSchema,
+    changes: z.int().min(1).max(3),
+  }),
+  "lookback.replay_finished": z.strictObject({
+    proposal: SlugSchema,
+    verdict: ReplayVerdictSchema,
+    path: RelPathSchema,
+  }),
+  /** A task's canary arm (sticky across its fix rounds). */
+  "lookback.canary_assigned": z.strictObject({
+    arm: z.enum(["candidate", "baseline"]),
+    candidate: Sha256HexSchema,
+    baseline: Sha256HexSchema,
+  }),
+  "lookback.canary_evaluated": CanaryStateSchema,
+  /** The engine rolled a canary back (`pins.yaml` history `auto_rollback`). */
+  "lookback.rolled_back": z.strictObject({
+    target_role: RoleIdSchema,
+    target_mode: SlugSchema.optional(),
+    target_host: HostIdSchema,
+    from: Sha256HexSchema,
+    to: Sha256HexSchema,
+    reason: z.string().min(1).max(300),
+  }),
+  /** A Level-3 merge was reverted or broke base CI: an escaped defect for attribution (§6.7). */
+  "lookback.escaped_defect": EscapedDefectSchema,
   "incident.recorded": z.strictObject({
     kind: IncidentKindSchema,
     detail: z.string().min(1).max(2000),
@@ -423,6 +530,16 @@ export const EVENT_ENVELOPE_REQUIREMENTS: Readonly<
   "role.rejected": ["role"],
   "role.failed": ["role"],
   "merge.completed": ["task"],
+  "headless.started": ["role", "host"],
+  "headless.ended": ["role", "host"],
+  "feature.checklist": ["feature"],
+  "feature.auto_merge_enabled": ["feature"],
+  "feature.auto_merge_disabled": ["feature"],
+  "feature.post_merge_ci": ["feature"],
+  "feature.reverted": ["feature"],
+  "final_review.step_finished": ["feature"],
+  "lookback.canary_assigned": ["task", "role"],
+  "lookback.escaped_defect": ["feature"],
 };
 
 export const isCoreEventType = (type: string): type is CoreEventType =>

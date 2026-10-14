@@ -58,6 +58,14 @@ export const PluginManifestAgentSchema = z
     file: RelPathSchema,
     /** {@link promptShaFor} of the agent's instructions. */
     prompt_sha256: Sha256HexSchema,
+    /**
+     * Lookback (AD-21, new in 4.5.0): SHA-256 of the role's locked core and of its compiled
+     * default editable section (`splitRolePrompt`). Once agents compile from the locked core only,
+     * the engine renders the pinned editable section first in the task pack and the prompt
+     * version is `effectivePromptSha(locked, editable)`.
+     */
+    locked_sha256: Sha256HexSchema.optional(),
+    editable_sha256: Sha256HexSchema.optional(),
     tier: ModelTierSchema,
     effort: EffortSchema,
   })

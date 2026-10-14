@@ -6,6 +6,7 @@
 import { z } from "zod";
 import {
   DisciplineSchema,
+  EvidenceSchema,
   FeatureIdSchema,
   IsoDateTimeSchema,
   RelPathSchema,
@@ -144,6 +145,74 @@ export const TraceabilityReportSchema = z
 export type TraceabilityReport = z.infer<typeof TraceabilityReportSchema>;
 export type TraceabilityReportInput = z.input<typeof TraceabilityReportSchema>;
 
+// ------------------------------------------------------------ final review steps
+
+/**
+ * One §6.7a Final Review step's result (new in 4.5.0): `pass`/`fail`; `not_run` (the step does
+ * not apply, e.g. Visual QA on a feature without UI, with the reason); `unchecked` (it should
+ * have run and could not, which never counts as a pass); `skipped` (the visual step had no
+ * browser, D-ay). AI steps (3–5) cite the role verdicts they rest on.
+ */
+export const FinalReviewStepResultSchema = z
+  .strictObject({
+    step: z.int().min(1).max(7),
+    status: z.enum(["pass", "fail", "not_run", "unchecked", "skipped"]),
+    reason: z.string().min(1).max(500).optional(),
+    evidence: z.array(EvidenceSchema).default([]),
+  })
+  .refine((r) => r.status === "pass" || r.status === "fail" || r.reason !== undefined, {
+    message: "a step that did not run says why",
+    path: ["reason"],
+  });
+export type FinalReviewStepResult = z.infer<typeof FinalReviewStepResultSchema>;
+
+/** The §6.7a step 7 checklist items, in spec order. */
+export const RELEASE_READINESS_ITEMS = [
+  "migration_order",
+  "config_changes",
+  "rollback_notes",
+  "docs",
+  "changelog",
+  "feature_flags",
+] as const;
+
+/** Release readiness (§6.7a step 7): each item passes, fails or does not apply, with evidence. */
+export const ReleaseReadinessSchema = z
+  .strictObject({
+    items: z
+      .array(
+        z.strictObject({
+          id: z.enum(RELEASE_READINESS_ITEMS),
+          status: z.enum(["pass", "fail", "not_applicable"]),
+          note: z.string().min(1).max(1000).optional(),
+          evidence: z.array(EvidenceSchema).default([]),
+        }),
+      )
+      .length(RELEASE_READINESS_ITEMS.length),
+    ok: z.boolean(),
+  })
+  .superRefine((r, ctx) => {
+    if (r.items.some((item, i) => item.id !== RELEASE_READINESS_ITEMS[i])) {
+      ctx.addIssue({ code: "custom", path: ["items"], message: "items in spec order, once each" });
+    }
+    if (r.ok !== r.items.every((item) => item.status !== "fail")) {
+      ctx.addIssue({
+        code: "custom",
+        path: ["ok"],
+        message: "ok is true exactly when no item fails",
+      });
+    }
+  });
+export type ReleaseReadiness = z.infer<typeof ReleaseReadinessSchema>;
+
+/**
+ * The scope-creep flag (§7.4): the Gate Runner emits one `ToolFinding` with this rule id per
+ * `TraceabilityReport.scope_creep` path (a changed file no REQ covers), `category`
+ * `spec_mismatch`, `sarif_level` `none` (so it is `info` and routes `defer`: it is listed in the
+ * evidence bundle and shown at Final Review step 3, never blocks by itself). New in 4.5.0.
+ */
+export const SCOPE_CREEP_RULE_ID = "vtc/scope-creep";
+
 // ------------------------------------------------------------ evidence bundle
 
 const SpendSchema = z.strictObject({
@@ -225,6 +294,10 @@ export const EvidenceBundleSchema = z.discriminatedUnion("kind", [
           message: "steps_run is ascending and unique",
         }),
     }),
+    /** One result per §6.7a step, in step order (absent on bundles before 4.5.0). */
+    final_review_steps: z.array(FinalReviewStepResultSchema).max(7).optional(),
+    /** §6.7a step 7, when it ran. New in 4.5.0. */
+    release_readiness: ReleaseReadinessSchema.optional(),
     spend: SpendSchema,
     written_at: IsoDateTimeSchema,
   }),

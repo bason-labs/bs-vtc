@@ -20,6 +20,9 @@ export const KNOWN_ARTIFACT_TYPES = [
   // DESIGN
   "architecture",
   "design_note",
+  "adr",
+  "design_direction",
+  "novelty_report",
   "threat_model",
   "design_flows",
   "screens",
@@ -41,10 +44,12 @@ export const KNOWN_ARTIFACT_TYPES = [
   "findings",
   "screenshots",
   "visual_report",
+  "release_readiness",
   // Lookback
   "traces",
   "scorecard",
   "prompt_proposal",
+  "replay_result",
   // advisor inputs and outputs (§5.4, through `consult`)
   "cost_history",
   "change_request",
