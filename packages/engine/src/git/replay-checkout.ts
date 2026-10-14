@@ -7,34 +7,42 @@
  * ever made in the user's repo. Every engine git call names that directory and the checkout
  * explicitly and, like every engine git call, runs no hook.
  *
- * Limits, kept honest: the checkout sits under the user's repo (the Gate Runner grades a checkout
- * named relative to the repo root), and the host sandboxes a role runs in deny no reads there, so
- * a trial that goes looking can read the user's current files and their `.git`; the private git
- * directory keeps only git itself (and so the role's own git commands) from handing it the later
- * work. The checkout's `.git` file names that directory, so a role that can write there could
- * plant a config key, an attributes file or a hook that the engine's own `git add` would run: its
- * control files are fingerprinted when the checkout is made ({@link replayGitDirFingerprint}) and
- * checked before every later engine git call on it; a change throws
- * {@link ReplayCheckoutTamperedError} and nothing runs.
+ * The checkout's work tree is a fresh private directory (0700) under the OS temp directory
+ * ({@link newReplayTree}), outside the user's repo ({@link createReplayCheckout} refuses one
+ * inside it): no relative path from the trial reaches the user's current files or their `.git`,
+ * and its `.git` file names only the private git directory under the VTC home. Limits, kept
+ * honest: the host sandboxes deny no reads, so a trial that knows the repo's absolute path can
+ * still read it (an in-session trial runs as a subagent of the Lead's session, whose project is
+ * the user's repo); the private git directory and the out-of-repo tree keep git and the paths a
+ * role sees from handing it the later work.
+ *
+ * The `.git` file names that directory, so a role that can write there could plant a config key,
+ * an attributes file or a hook that the engine's own `git add` would run: its control files are
+ * fingerprinted when the checkout is made ({@link replayGitDirFingerprint}) and checked before
+ * every later engine git call on it; a change throws {@link ReplayCheckoutTamperedError} and
+ * nothing runs.
  *
  * The trial's work is committed in the checkout (its head); before the Gate Runner grades
  * `base..head` with the user's repo, the head's objects are fetched there by SHA
  * ({@link exposeReplayHead}: objects only, no ref, so git's own gc prunes them once they are old).
- * Then both directories are removed.
+ * The grade runs in a clean verification checkout of that head, never in the trial's tree (what a
+ * trial leaves ignored there feeds no gate). Then both directories are removed.
  */
 import { createHash } from "node:crypto";
 import {
   existsSync,
   lstatSync,
   mkdirSync,
+  mkdtempSync,
   readdirSync,
   readFileSync,
   readlinkSync,
+  realpathSync,
   rmSync,
   writeFileSync,
 } from "node:fs";
-import { dirname, join } from "node:path";
-import { assertNoSymlinks } from "./repo-files.js";
+import { tmpdir } from "node:os";
+import { dirname, isAbsolute, join, relative } from "node:path";
 import { gitText, runGit, withRepoLock } from "./exec.js";
 
 const SHA = /^([a-f0-9]{40}|[a-f0-9]{64})$/;
@@ -63,8 +71,8 @@ const FETCH_BY_SHA = [
 ] as const;
 
 export interface ReplayCheckout {
-  /** The checkout, relative to the repo root. */
-  readonly path: string;
+  /** The checkout's work tree: absolute, outside the user's repo ({@link newReplayTree}). */
+  readonly tree: string;
   /** The checkout's git directory (absolute, in the engine's private directory). */
   readonly gitDir: string;
   /** The commit it starts from. */
@@ -84,9 +92,9 @@ export class ReplayCheckoutTamperedError extends Error {
   }
 }
 
-const args = (repoRoot: string, checkout: ReplayCheckout): string[] => [
+const args = (checkout: ReplayCheckout): string[] => [
   `--git-dir=${checkout.gitDir}`,
-  `--work-tree=${join(repoRoot, checkout.path)}`,
+  `--work-tree=${checkout.tree}`,
   // no gc after a commit: it would write under `objects/info` mid-trial
   "-c",
   "gc.auto=0",
@@ -190,8 +198,22 @@ export const assertReplayCheckoutIntact = (checkout: ReplayCheckout): void => {
 };
 
 /**
- * Creates the checkout at `base` (replacing a leftover one at the same paths). The base must be a
- * commit of the user's repo; it is fetched by SHA, so the user's repo gets no ref.
+ * A fresh, empty private directory (0700, its name random) under the OS temp directory, for a
+ * trial's work tree: outside every user's repo, and never a path another user could have made
+ * first. Returned with symlinks resolved, as the role and the write-scope hook see it.
+ */
+export const newReplayTree = (): string => realpathSync(mkdtempSync(join(tmpdir(), "vtc-replay-")));
+
+/** True when `path` is `root` or lies under it. */
+const within = (root: string, path: string): boolean => {
+  const rel = relative(root, path);
+  return rel === "" || (!rel.startsWith("..") && !isAbsolute(rel));
+};
+
+/**
+ * Creates the checkout at `base` in its work tree, which must be an empty directory outside the
+ * user's repo ({@link newReplayTree}); a leftover git directory at the same path is replaced. The
+ * base must be a commit of the user's repo; it is fetched by SHA, so the user's repo gets no ref.
  */
 export const createReplayCheckout = async (
   repoRoot: string,
@@ -199,22 +221,20 @@ export const createReplayCheckout = async (
 ): Promise<void> => {
   if (!SHA.test(checkout.base))
     throw new TypeError(`expected a full git sha, got ${checkout.base}`);
-  assertNoSymlinks(repoRoot, checkout.path);
-  removeReplayCheckout(repoRoot, checkout);
-  const tree = join(repoRoot, checkout.path);
-  mkdirSync(tree, { recursive: true });
+  const { tree } = checkout;
+  if (!isAbsolute(tree)) throw new TypeError(`expected an absolute work tree, got ${tree}`);
+  if (within(realpathSync(repoRoot), realpathSync(tree)) || within(repoRoot, tree))
+    throw new TypeError(`a replay checkout never sits in the user's repo: ${tree}`);
+  if (!lstatSync(tree).isDirectory() || readdirSync(tree).length > 0)
+    throw new TypeError(`a replay checkout needs an empty directory of its own: ${tree}`);
+  rmSync(checkout.gitDir, { recursive: true, force: true });
+  rmSync(fingerprintFile(checkout), { force: true });
   mkdirSync(dirname(checkout.gitDir), { recursive: true, mode: 0o700 });
   await runGit(tree, ["init", "--quiet", `--separate-git-dir=${checkout.gitDir}`, tree]);
-  await runGit(tree, [...args(repoRoot, checkout), ...FETCH_BY_SHA, repoRoot, checkout.base], {
+  await runGit(tree, [...args(checkout), ...FETCH_BY_SHA, repoRoot, checkout.base], {
     timeoutMs: 600_000,
   });
-  await runGit(tree, [
-    ...args(repoRoot, checkout),
-    "checkout",
-    "--quiet",
-    "--detach",
-    checkout.base,
-  ]);
+  await runGit(tree, [...args(checkout), "checkout", "--quiet", "--detach", checkout.base]);
   writeFileSync(
     fingerprintFile(checkout),
     `${JSON.stringify(replayGitDirFingerprint(checkout.gitDir))}\n`,
@@ -224,12 +244,11 @@ export const createReplayCheckout = async (
 
 /** Commits what the trial left in the checkout; its head (the base when it changed nothing). */
 export const snapshotReplayCheckout = async (
-  repoRoot: string,
   checkout: ReplayCheckout,
   message: string,
 ): Promise<string> => {
-  const tree = join(repoRoot, checkout.path);
-  const git = args(repoRoot, checkout);
+  const { tree } = checkout;
+  const git = args(checkout);
   // `add` runs the clean filters the git directory names: never one a role planted there
   assertReplayCheckoutIntact(checkout);
   await runGit(tree, [...git, "add", "--all"]);
@@ -269,8 +288,8 @@ export const exposeReplayHead = async (
 };
 
 /** Removes the checkout and its git directory (best effort; a missing one is fine). */
-export const removeReplayCheckout = (repoRoot: string, checkout: ReplayCheckout): void => {
-  const tree = join(repoRoot, checkout.path);
+export const removeReplayCheckout = (checkout: ReplayCheckout): void => {
+  const { tree } = checkout;
   if (existsSync(tree)) rmSync(tree, { recursive: true, force: true });
   if (existsSync(checkout.gitDir)) rmSync(checkout.gitDir, { recursive: true, force: true });
   rmSync(fingerprintFile(checkout), { force: true });
