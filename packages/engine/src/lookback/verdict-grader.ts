@@ -21,6 +21,14 @@
  * architecture before any task exists, so they carry no verdict on a task's criterion; a human's
  * judgement of one reaches the log as an escalation label or the PR verdict above.
  *
+ * **Granularity.** A replay task is one acceptance criterion (the dispatch's subject), but every
+ * source above except the gate result speaks to the whole task or feature: a human label, an
+ * escaped defect and the PR verdict give every criterion every Spec Verifier call judged on that
+ * task (or feature) the same expected verdict. One wrongly passed criterion therefore makes `fail`
+ * the expected answer for its sibling criteria too, which favours a candidate that fails more
+ * often. Reading 202 allows this granularity (the log records no per-criterion human verdict); the
+ * bias is known, and a per-criterion source would need a contract that names the criterion.
+ *
  * Only the last call of the role on a (task, subject) is graded: an earlier call was followed by
  * another round on new work, so what happened next speaks to that round, not to the earlier
  * verdict. A dispatch that names no subject, did not submit, or has none of the evidence above has
@@ -39,8 +47,11 @@ import {
   type VtcEvent,
 } from "@vtc/shared";
 
-/** Bump when what {@link recordedOutcome} reads or how {@link gradeVerdictTrial} scores changes. */
-export const VERDICT_GRADER_VERSION = 1;
+/**
+ * Bump when what {@link recordedOutcome} reads or how a trial is scored changes. 2: a trial is
+ * scored against the expectation its task key carries (`replayTaskKey`), not the outcome at grading.
+ */
+export const VERDICT_GRADER_VERSION = 2;
 
 export type RecordedOutcomeSource = "human_label" | "escaped_defect" | "pr" | "gate";
 
@@ -226,21 +237,25 @@ export const gradeVerdictTrial = (
 
 /**
  * The verdict grader as RETRO calls it for one trial (the `gradeVerdict` seam core's
- * `LookbackRetro` names; D-ch, reading 202): the trial's verdicts scored against the recorded
- * outcome of the dispatch it replays (`at`: the recorded dispatch's run and action id, its pack's
- * `run` and `action_id`), read from `history` (the runs' events without replay trials). `pass` or
- * `fail` measure the trial ({@link gradeVerdictTrial}); `infra_error` measures nothing: the replayed
- * dispatch has no recorded outcome in the history the trial is graded against, so nothing can say
- * which verdict was right.
+ * `LookbackRetro` names; D-ch, reading 202): the trial's verdicts scored against the expectation
+ * the trial was planned with (`expected`: the `ReplayTask.expected`, or `expectedOfTaskKey` of the
+ * trial's task key). A replay can span RETROs and the history can gain evidence in between, so a
+ * trial is never graded against a recomputed outcome its task's key and regression-set membership
+ * do not carry (a changed expectation is a new replay task, `replayTaskKey`). `pass` or `fail`
+ * measure the trial ({@link gradeVerdictTrial}); `infra_error` measures nothing: the replayed
+ * dispatch (`at`: its run and action id, its pack's `run` and `action_id`) has no recorded outcome
+ * in `history` (the runs' events without replay trials) any more, so nothing can say which verdict
+ * was right. Without `expected` the trial is graded against the recorded outcome as `history`
+ * shows it now.
  */
 export const gradeVerdictReplay = (
   history: readonly VtcEvent[],
   at: { readonly run: string; readonly trace: string },
   verdicts: readonly { readonly subject: string; readonly verdict: string }[],
+  expected?: ExpectedVerdict,
 ): GateVerdict => {
   const outcome = recordedOutcome(history, at);
   if (outcome === undefined) return "infra_error";
-  return gradeVerdictTrial({ subject: outcome.subject, verdict: outcome.expected }, verdicts)
-    ? "pass"
-    : "fail";
+  const against = expected ?? { subject: outcome.subject, verdict: outcome.expected };
+  return gradeVerdictTrial(against, verdicts) ? "pass" : "fail";
 };

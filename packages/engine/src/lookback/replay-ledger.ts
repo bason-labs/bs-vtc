@@ -6,18 +6,43 @@
  *
  * The ledger lives under the VTC home (`lookback/replay-trials.jsonl`, beside the A/A noise floors),
  * which no role may write (`ROLE_DENIED_VTC`: the VTC home's `lookback/**`), never in a repo: a
- * planted pass must not decide a replay. A row counts only for the replay it measured: the project
- * (`repo_key`), the proposal, its baseline and candidate (`effective_sha256`) and the grader bundle
- * it was graded under. The proposal id is a slug the lookback role chose, so the two prompt hashes
- * keep a later proposal that reuses an id from reading another candidate's grades, and a grader
- * change starts the replay over; a trial graded twice keeps its first grade. Lines that do not
- * parse are skipped. The row shape is local until a contract carries it (a contract proposal to
- * the integrator: `LOOKBACK_HOME.replayTrialsFile` and the row schema).
+ * planted pass must not decide a replay. It is created owner-only (0600). A row counts only for
+ * the replay it measured: the project (`repo_key`), the proposal, its baseline and candidate
+ * (`effective_sha256`) and the grader bundle it was graded under. The proposal id is a slug the
+ * lookback role chose, so the two prompt hashes keep a later proposal that reuses an id from
+ * reading another candidate's grades, and a grader change starts the replay over; a trial graded
+ * twice keeps its first grade. A verdict replay's task key carries the expected verdict
+ * (`replayTaskKey`), so a row graded against an expectation the history has since overturned is
+ * no longer planned and no longer counts. Lines that do not parse are skipped; a row with fields
+ * this version does not know is read without them (`parsePersisted`), so an older vtc on the
+ * machine never drops a newer one's grades and runs those trials again.
  *
- * A trial that measured nothing (`gate_infra`, or `plugin_locked`: the host did not prove it loaded
- * the arm's plugin) is not a grade. {@link recordReplayInfra} keeps it as an attempt, and
+ * **Contract.** The row shapes and the file name are local until a contract carries them: proposed
+ * to the integrator as `LOOKBACK_HOME.replayTrialsFile` with `ReplayTrialRowSchema` and
+ * `ReplayInfraRowSchema` in shared `lookback.ts` (a MINOR), read with `parsePersisted`. At that
+ * merge these definitions are replaced by the shared exports, byte-compatible.
+ *
+ * **Not wired yet.** Engine core's `LookbackRetro` seam cannot drive the ledger as it stands:
+ * `replays()` hands back whole replays and core applies its own all-or-nothing trial cap,
+ * `gradeTrial` carries no trial identity, an unmeasured trial is set aside by core and never
+ * reported here, and `finishReplay` expects every outcome from one RETRO. Until core adopts
+ * `planRetroReplays` and a per-trial outcome hook (the contract proposal to engine core and the
+ * daemon owner: `replays()` returns `planRetroReplays().launch`, each graded or unmeasured trial
+ * calls {@link recordReplayTrial} or {@link recordReplayInfra} with its ref, tokens and read deny,
+ * `finishReplay` calls {@link assembleReplay} and logs nothing while it is incomplete), this module
+ * and `planRetroReplays` are a library no RETRO calls, and core's own cap decides.
+ *
+ * A trial that measured nothing (`gate_infra`; `plugin_locked`: the host did not prove it loaded
+ * the arm's plugin; `no_outcome`: a verdict trial whose replayed dispatch no longer has a recorded
+ * outcome) is not a grade. {@link recordReplayInfra} keeps it as an attempt, and
  * `planRetroReplays` stops launching a replay one of whose trials has failed that way
- * {@link REPLAY_MAX_INFRA_ATTEMPTS} times, so a persistent lock cannot spend every RETRO's trial cap.
+ * {@link REPLAY_MAX_INFRA_ATTEMPTS} times, so a persistent failure cannot spend every RETRO's
+ * trial cap.
+ *
+ * Reading: {@link readReplayLedger} parses the file once and indexes it by replay, so a RETRO that
+ * plans several replays reads it once. The ledger is append-only and is not compacted yet: a
+ * rewrite would race the appends of other daemons on the machine without a lock every writer
+ * takes, which the contract above is the place to add.
  *
  * {@link assembleReplay} turns a complete set of rows into the `ReplayResult` (`finishReplay`), with
  * the A/A flip rate measured by the replay's own `aa` arm or the cached one, the candidate's token
@@ -25,6 +50,7 @@
  */
 import {
   IsoDateTimeSchema,
+  parsePersisted,
   RepoKeySchema,
   Sha256HexSchema,
   SlugSchema,
@@ -48,7 +74,7 @@ const replayIdentity = {
   baseline: Sha256HexSchema,
   /** The candidate's `effective_sha256`. */
   candidate: Sha256HexSchema,
-  /** The `ReplayResult.per_task` key (`replayTaskKey`). */
+  /** The `ReplayResult.per_task` key (`replayTaskKey`; a verdict task's carries its expected verdict). */
   task: z.string().min(1).max(100),
   arm: z.enum(["a", "b", "aa"]),
   trial: z.int().min(1).max(10),
@@ -68,12 +94,13 @@ const ReplayTrialRowSchema = z.strictObject({
 export type ReplayTrialRow = Omit<z.infer<typeof ReplayTrialRowSchema>, "v">;
 
 /** Why a trial measured nothing (reading 201): no grade, an attempt. */
-export type ReplayInfraOutcome = "gate_infra" | "plugin_locked";
+export const REPLAY_INFRA_OUTCOMES = ["gate_infra", "plugin_locked", "no_outcome"] as const;
+export type ReplayInfraOutcome = (typeof REPLAY_INFRA_OUTCOMES)[number];
 
 const ReplayInfraRowSchema = z.strictObject({
   v: z.literal(1),
   ...replayIdentity,
-  outcome: z.enum(["gate_infra", "plugin_locked"]),
+  outcome: z.enum(REPLAY_INFRA_OUTCOMES),
   at: IsoDateTimeSchema,
 });
 export type ReplayInfraRow = Omit<z.infer<typeof ReplayInfraRowSchema>, "v">;
@@ -96,7 +123,7 @@ export interface ReplayLedgerScope {
 export interface ReplayTrialId {
   /**
    * The `ReplayResult.per_task` key (`replayTaskKey`: `<run>:<task>`, or for a verdict replay
-   * `<run>:<subject>:<task>`).
+   * `<run>:<subject>:<verdict>:<task>`).
    */
   readonly task: string;
   readonly arm: "a" | "b" | "aa";
@@ -109,66 +136,101 @@ export const replayTrialKey = (t: ReplayTrialId): string =>
 
 const ledgerPath = (vtcHome: string): string => join(vtcHome, REPLAY_TRIALS_FILE);
 
+/** Owner-only, as the VTC home's other private files. */
+const LEDGER_MODE = 0o600;
+
 /** Records one graded trial (call it once the trial measured something: `pass` or `fail`). */
 export const recordReplayTrial = async (vtcHome: string, row: ReplayTrialRow): Promise<void> => {
-  await appendJsonLines(ledgerPath(vtcHome), [ReplayTrialRowSchema.parse({ v: 1, ...row })]);
+  await appendJsonLines(ledgerPath(vtcHome), [ReplayTrialRowSchema.parse({ v: 1, ...row })], {
+    mode: LEDGER_MODE,
+  });
 };
 
-/** Records one attempt of a trial that measured nothing (`gate_infra` or `plugin_locked`). */
+/** Records one attempt of a trial that measured nothing (`gate_infra`, `plugin_locked`, `no_outcome`). */
 export const recordReplayInfra = async (vtcHome: string, row: ReplayInfraRow): Promise<void> => {
-  await appendJsonLines(ledgerPath(vtcHome), [ReplayInfraRowSchema.parse({ v: 1, ...row })]);
+  await appendJsonLines(ledgerPath(vtcHome), [ReplayInfraRowSchema.parse({ v: 1, ...row })], {
+    mode: LEDGER_MODE,
+  });
 };
 
-const inScope = (
-  row: {
-    readonly repo_key: string;
-    readonly proposal: string;
-    readonly baseline: string;
-    readonly candidate: string;
-    readonly grader_bundle_sha: string;
-  },
-  of: ReplayLedgerScope,
-): boolean =>
-  row.repo_key === of.repoKey &&
-  row.proposal === of.proposal &&
-  row.baseline === of.baseline &&
-  row.candidate === of.candidate &&
-  row.grader_bundle_sha === of.graderBundleSha;
+const scopeKey = (row: {
+  readonly repo_key: string;
+  readonly proposal: string;
+  readonly baseline: string;
+  readonly candidate: string;
+  readonly grader_bundle_sha: string;
+}): string =>
+  [row.repo_key, row.proposal, row.baseline, row.candidate, row.grader_bundle_sha].join("\n");
+
+const keyOfScope = (of: ReplayLedgerScope): string =>
+  scopeKey({
+    repo_key: of.repoKey,
+    proposal: of.proposal,
+    baseline: of.baseline,
+    candidate: of.candidate,
+    grader_bundle_sha: of.graderBundleSha,
+  });
+
+/** A trial's attempts that measured nothing: how many, and the last outcome. */
+export interface ReplayInfraAttempts {
+  readonly attempts: number;
+  readonly outcome: ReplayInfraOutcome;
+}
+
+/** The ledger read once, indexed by replay. */
+export interface ReplayLedger {
+  /** The graded trials of one replay, by trial key (a trial graded twice keeps its first grade). */
+  trials(of: ReplayLedgerScope): ReadonlyMap<string, ReplayTrialRow>;
+  /** The attempts of one replay's trials that measured nothing, by trial key. */
+  infra(of: ReplayLedgerScope): ReadonlyMap<string, ReplayInfraAttempts>;
+}
+
+const withoutVersion = <T extends { v: 1 }>(row: T): Omit<T, "v"> => {
+  const rest: Partial<T> = { ...row };
+  delete rest.v;
+  return rest as Omit<T, "v">;
+};
+
+/** Reads the whole ledger once (see the module comment), for every replay a RETRO plans. */
+export const readReplayLedger = async (vtcHome: string): Promise<ReplayLedger> => {
+  const trials = new Map<string, Map<string, ReplayTrialRow>>();
+  const infra = new Map<string, Map<string, { attempts: number; outcome: ReplayInfraOutcome }>>();
+  for (const value of await readJsonLines(ledgerPath(vtcHome))) {
+    const graded = parsePersisted(ReplayTrialRowSchema, value);
+    if (graded.success) {
+      const row = withoutVersion(graded.data);
+      const scope = scopeKey(row);
+      const rows = trials.get(scope) ?? new Map<string, ReplayTrialRow>();
+      const key = replayTrialKey(row);
+      if (!rows.has(key)) rows.set(key, row);
+      trials.set(scope, rows);
+      continue;
+    }
+    const attempt = parsePersisted(ReplayInfraRowSchema, value);
+    if (!attempt.success) continue;
+    const scope = scopeKey(attempt.data);
+    const rows = infra.get(scope) ?? new Map<string, { attempts: number; outcome: ReplayInfraOutcome }>();
+    const key = replayTrialKey(attempt.data);
+    rows.set(key, { attempts: (rows.get(key)?.attempts ?? 0) + 1, outcome: attempt.data.outcome });
+    infra.set(scope, rows);
+  }
+  return {
+    trials: (of) => trials.get(keyOfScope(of)) ?? new Map(),
+    infra: (of) => infra.get(keyOfScope(of)) ?? new Map(),
+  };
+};
 
 /** The graded trials of one replay (project, proposal, baseline, candidate, grader bundle), by trial key. */
 export const readReplayTrials = async (
   vtcHome: string,
   of: ReplayLedgerScope,
-): Promise<Map<string, ReplayTrialRow>> => {
-  const rows = new Map<string, ReplayTrialRow>();
-  for (const value of await readJsonLines(ledgerPath(vtcHome))) {
-    const parsed = ReplayTrialRowSchema.safeParse(value);
-    if (!parsed.success) continue;
-    const row = parsed.data;
-    if (!inScope(row, of)) continue;
-    const key = replayTrialKey(row);
-    if (!rows.has(key)) rows.set(key, row);
-  }
-  return rows;
-};
+): Promise<ReadonlyMap<string, ReplayTrialRow>> => (await readReplayLedger(vtcHome)).trials(of);
 
 /** The attempts of one replay's trials that measured nothing, by trial key: how many, and the last outcome. */
 export const readReplayInfra = async (
   vtcHome: string,
   of: ReplayLedgerScope,
-): Promise<Map<string, { readonly attempts: number; readonly outcome: ReplayInfraOutcome }>> => {
-  const attempts = new Map<string, { attempts: number; outcome: ReplayInfraOutcome }>();
-  for (const value of await readJsonLines(ledgerPath(vtcHome))) {
-    const parsed = ReplayInfraRowSchema.safeParse(value);
-    if (!parsed.success || !inScope(parsed.data, of)) continue;
-    const key = replayTrialKey(parsed.data);
-    attempts.set(key, {
-      attempts: (attempts.get(key)?.attempts ?? 0) + 1,
-      outcome: parsed.data.outcome,
-    });
-  }
-  return attempts;
-};
+): Promise<ReadonlyMap<string, ReplayInfraAttempts>> => (await readReplayLedger(vtcHome)).infra(of);
 
 /**
  * The replay's result once every planned trial has a row, or how many are still missing. A replay

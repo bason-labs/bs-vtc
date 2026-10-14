@@ -10,6 +10,7 @@ import { describe, expect, it } from "vitest";
 import {
   assembleReplay,
   attributeRun,
+  expectedOfTaskKey,
   graderBundleSha,
   gradeVerdictReplay,
   gradeVerdictTrial,
@@ -22,6 +23,7 @@ import {
   replayTasks,
   replayTrialKey,
   traceSplit,
+  type ReplayTrialRow,
   VERDICT_GRADER_VERSION,
 } from "../../src/lookback/index.js";
 import { EDITABLE, HOST, LOCKED, lockedShaFor, RunLog } from "./log.js";
@@ -263,6 +265,30 @@ describe("grading a verdict replay trial from the log (the RETRO seam, D-ch)", (
     expect(gradeVerdictReplay(log.events, at, [{ subject: AC, verdict: "pass" }])).toBe("fail");
   });
 
+  it("grades against the expectation the trial was planned with, not the outcome at grading", () => {
+    const log = judged("fail");
+    // planned while the gate result was the strongest evidence
+    const planned = { subject: AC, verdict: "pass" as const };
+    expect(recordedOutcome(log.events, at)?.expected).toBe(planned.verdict);
+    // the feature's PR is reverted before the trial is graded: `fail` would now be expected
+    log.reverted();
+    expect(recordedOutcome(log.events, at)?.expected).toBe("fail");
+    const answer = [{ subject: AC, verdict: "pass" }];
+    expect(gradeVerdictReplay(log.events, at, answer, planned)).toBe("pass");
+    expect(gradeVerdictReplay(log.events, at, answer)).toBe("fail");
+  });
+
+  it("reads the expectation back from a verdict task key, and none from a gates key", () => {
+    const key = replayTaskKey({ run: "r1", task: "T-3", expected: { subject: AC, verdict: "fail" } });
+    expect(key).toBe(`r1:${AC}:fail:T-3`);
+    expect(expectedOfTaskKey(key)).toEqual({ subject: AC, verdict: "fail" });
+    expect(expectedOfTaskKey("r1:T-3")).toBeUndefined();
+    expect(expectedOfTaskKey(`r1:a:b:${AC}:pass:T-3`)).toEqual({
+      subject: `a:b:${AC}`,
+      verdict: "pass",
+    });
+  });
+
   it("measures nothing when the replayed dispatch has no recorded outcome", () => {
     const log = judged("pass");
     const answer = [{ subject: AC, verdict: "pass" }];
@@ -352,8 +378,8 @@ describe("verdict-role replay tasks (D-ch)", () => {
       grader: "verdict",
     });
     expect(tasks.map((t) => [replayTaskKey(t), t.regressionSet])).toEqual([
-      [`r1:${AC}:T-1`, false],
-      [`r1:${AC2}:T-1`, true],
+      [`r1:${AC}:fail:T-1`, false],
+      [`r1:${AC2}:fail:T-1`, true],
     ]);
     const candidate = promptVersionRef({
       role: "spec_verifier",
@@ -372,7 +398,14 @@ describe("verdict-role replay tasks (D-ch)", () => {
     expect(new Set(trials.map(replayTrialKey)).size).toBe(trials.length);
     const planned = planRetroReplays({
       pending: [
-        { proposal: "p-sv", role: "spec_verifier", host: HOST, changesFiles: false, trials },
+        {
+          proposal: "p-sv",
+          role: "spec_verifier",
+          host: HOST,
+          changesFiles: false,
+          trials,
+          recordedAt: "2026-10-14T09:00:00.000Z",
+        },
       ],
       graded: () => new Set(),
       weeklyRemainingPct: 80,
@@ -408,8 +441,8 @@ describe("verdict-role replay tasks (D-ch)", () => {
     });
     if (!done.complete) throw new Error("incomplete");
     expect(done.result.per_task).toEqual([
-      { task: `r1:${AC}:T-1`, a: [false], b: [true], regression_set: false },
-      { task: `r1:${AC2}:T-1`, a: [true], b: [true], regression_set: true },
+      { task: `r1:${AC}:fail:T-1`, a: [false], b: [true], regression_set: false },
+      { task: `r1:${AC2}:fail:T-1`, a: [true], b: [true], regression_set: true },
     ]);
   });
 
@@ -466,6 +499,104 @@ describe("verdict-role replay tasks (D-ch)", () => {
         grader: "verdict",
       }),
     ).toEqual([]);
+  });
+});
+
+describe("a verdict replay whose recorded outcome changes between two RETROs (D-cg, D-ch)", () => {
+  it("never mixes trials graded against one expectation with trials graded against another", () => {
+    const log = new RunLog();
+    const action = heldOutAction(0);
+    log.taskCreated("T-1");
+    log.dispatch("engineer", { task: "T-1", feature: "F-1" });
+    log.gate("T-1", true);
+    log.dispatch("spec_verifier", {
+      task: "T-1",
+      feature: "F-1",
+      action,
+      subject: AC,
+      end: "done",
+      verdicts: [{ subject: AC, verdict: "pass" }],
+    });
+    const candidate = promptVersionRef({
+      role: "spec_verifier",
+      host: HOST,
+      locked: LOCKED,
+      editable: "Check every criterion against the diff.",
+    });
+    const planAt = () => {
+      const tasks = replayTasks({
+        baseline,
+        history: log.events,
+        lockedShaFor,
+        attributions: [],
+        grader: "verdict",
+      });
+      return planReplayTrials({ tasks, baseline, candidate, withAa: false, k: 1 }).map((t) => ({
+        task: replayTaskKey(t.task),
+        arm: t.arm,
+        trial: t.trial,
+        regressionSet: t.task.regressionSet,
+      }));
+    };
+    // RETRO N: the PR is still open, the gate passed: `pass` is expected, the task is a success
+    const first = planAt();
+    expect(first.map((t) => [t.task, t.regressionSet])).toEqual([
+      [`r1:${AC}:pass:T-1`, true],
+      [`r1:${AC}:pass:T-1`, true],
+    ]);
+    const rows = new Map<string, ReplayTrialRow>();
+    const [a1] = first;
+    if (a1 === undefined) throw new Error("no trial");
+    rows.set(replayTrialKey(a1), {
+      repo_key: "0123456789abcdef",
+      proposal: "p-sv",
+      baseline: baseline.effective_sha256,
+      candidate: candidate.effective_sha256,
+      task: a1.task,
+      arm: a1.arm,
+      trial: a1.trial,
+      passed: true,
+      tokens: 1000,
+      read_denied: false,
+      grader_bundle_sha: "9".repeat(64),
+      graded_at: "2026-10-15T09:00:00.000Z",
+    });
+    // before RETRO N+1 the feature is reverted: `fail` is expected, the task is now a failure
+    log.reverted();
+    const second = planAt();
+    expect(second.map((t) => [t.task, t.regressionSet])).toEqual([
+      [`r1:${AC}:fail:T-1`, false],
+      [`r1:${AC}:fail:T-1`, false],
+    ]);
+    // the grade made against `pass` is not counted: both trials of the new task run again
+    const replanned = planRetroReplays({
+      pending: [
+        {
+          proposal: "p-sv",
+          role: "spec_verifier",
+          host: HOST,
+          changesFiles: false,
+          trials: second,
+          recordedAt: "2026-10-14T09:00:00.000Z",
+        },
+      ],
+      graded: () => new Set(rows.keys()),
+      weeklyRemainingPct: 80,
+      budgetAvailable: true,
+    });
+    expect(replanned.launch[0]?.trials).toEqual(second);
+    expect(
+      assembleReplay({
+        proposal: "p-sv",
+        baseline,
+        candidate,
+        grader: "verdict",
+        planned: second,
+        rows,
+        graderBundleSha: "9".repeat(64),
+        now: new Date("2026-10-15T09:00:00.000Z"),
+      }),
+    ).toEqual({ complete: false, missing: 2 });
   });
 });
 
