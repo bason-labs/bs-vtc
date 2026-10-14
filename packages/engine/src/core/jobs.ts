@@ -7,17 +7,18 @@
 import { cpSync, existsSync, lstatSync, mkdirSync, readFileSync, rmSync } from "node:fs";
 import { join } from "node:path";
 import {
+  autoBranchName,
   capForRisk,
   engineRepoKey,
   fingerprintFinding,
   GATE_SANDBOX,
   gateExpectationMet,
   GateRunRequestSchema,
+  GitShaSchema,
   HIDDEN_TESTS,
   hiddenTestsDir,
   parsePersisted,
   redactSecrets,
-  renderAutoMarker,
   TestInventorySchema,
   type Evidence,
   type TestInventory,
@@ -30,7 +31,7 @@ import {
   type TestMetrics,
 } from "@vtc/shared";
 import { createHash } from "node:crypto";
-import { assertNoSymlinks, runGit } from "../git/index.js";
+import { assertNoSymlinks, createGitPlumbing, runGit } from "../git/index.js";
 import { taskBudgetFor } from "./budget.js";
 import {
   committedGatesConfig,
@@ -700,10 +701,62 @@ export const downgradeNoRemote = (k: Kernel, h: RunHandle): void => {
 };
 
 /**
- * Pushes the integration branch and keeps the draft PR current (Level 2, §6.7). An automatic run's
- * PR (AD-27 rules 3 and 6, H-8) opens with the hidden `vtc:auto` marker of its issue's kind and
- * fingerprint, and stays a draft after Final Review: marking it ready waits for its evidence
- * manifest, which the engine does not record.
+ * An automatic run's push (AD-27 rules 1 and 2): the integration head to `refs/heads/<dst>`
+ * (`autoBranchName`) through `GitPlumbing`, which refuses any destination `autoPushRefAllowed`
+ * rejects, the remote's default branch, and a force. Its events name the integration branch
+ * (`branch.pushed` takes `vtc/F-n` only); the remote name follows from `run.started.automation`.
+ * No PR and no task status change: see {@link pushFeature}.
+ */
+const pushAutomatic = async (
+  k: Kernel,
+  h: RunHandle,
+  featureId: string,
+  branch: string,
+  commit: string,
+  dst: string,
+): Promise<void> => {
+  let failure: string | null = null;
+  try {
+    await createGitPlumbing({ repoRoot: k.deps.repoRoot }).push(
+      k.deps.remote,
+      GitShaSchema.parse(commit),
+      `refs/heads/${dst}`,
+    );
+  } catch (error) {
+    failure = `push to ${dst}: ${error instanceof Error ? error.message : String(error)}`;
+  }
+  await k.serial(h, () => {
+    k.emit(
+      h,
+      failure === null
+        ? {
+            type: "branch.pushed",
+            actor: "engine",
+            feature: featureId,
+            data: { branch, commit },
+          }
+        : {
+            type: "branch.push_failed",
+            actor: "engine",
+            feature: featureId,
+            data: { branch, detail: failureDetail(failure, k.secrets()) },
+          },
+    );
+    return Promise.resolve();
+  });
+};
+
+/**
+ * Pushes the integration branch and keeps the draft PR current (Level 2, §6.7).
+ *
+ * An automatic run (`run.started.automation`; AD-27 rules 1, 2, 3 and 6, H-8) never goes through
+ * the Level-2 seam: its work is pushed through engine git's `GitPlumbing` (never forced, never to
+ * the default branch) to `autoBranchName(kind, fingerprint)`, its only remote branch, and the
+ * engine opens no PR for it. Its draft PR is the upstream module's: `AutoPullRequestService`
+ * applies `vtc:auto` and the kind's label (so dedupe and the per-kind cap see it), and opens
+ * nothing without an `EvidenceManifest`. The module takes no automatic run's release yet (a
+ * contract proposal to the upstream team), so until it does the work waits on that branch and its
+ * tasks stay `merged` (no open PR includes them).
  */
 export const pushFeature = async (
   k: Kernel,
@@ -723,6 +776,18 @@ export const pushFeature = async (
     return;
   }
   const commit = await ws.resolve(feature.integration_branch);
+  const automation = h.state.automation;
+  if (automation !== null) {
+    await pushAutomatic(
+      k,
+      h,
+      featureId,
+      feature.integration_branch,
+      commit,
+      autoBranchName(automation.kind, automation.fingerprint),
+    );
+    return;
+  }
   const pushed = await ws.push(k.deps.remote, feature.integration_branch);
   if (!pushed.ok) {
     await k.serial(h, () => {
@@ -740,23 +805,16 @@ export const pushFeature = async (
     return;
   }
   let pr = feature.pr;
-  const automation = h.state.automation;
   try {
-    const described =
-      body ??
-      `Draft: VTC integration of ${feature.id} (${feature.title}). Ready for review after Final Review.`;
-    const request = {
+    pr = await k.deps.pullRequests.upsertDraft({
       branch: feature.integration_branch,
       base: await baseBranch(k.deps.repoRoot),
       title: feature.title,
       body:
-        automation === null
-          ? described
-          : `${renderAutoMarker({ v: 1, kind: automation.kind, fp: automation.fingerprint })}\n\n${described}`,
-    };
-    pr = await k.deps.pullRequests.upsertDraft(request);
-    if (ready && automation === null)
-      pr = await k.deps.pullRequests.markReady(feature.integration_branch);
+        body ??
+        `Draft: VTC integration of ${feature.id} (${feature.title}). Ready for review after Final Review.`,
+    });
+    if (ready) pr = await k.deps.pullRequests.markReady(feature.integration_branch);
   } catch (error) {
     await k.serial(h, () => {
       k.emit(h, {
