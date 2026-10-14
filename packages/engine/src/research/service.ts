@@ -46,11 +46,12 @@ import {
   type RoleId,
   type UnverifiedFactSummary,
 } from "@vtc/shared";
-import type { CacheProvenance, RequestMemory } from "./cache.js";
+import type { CachePruning, CacheProvenance, RequestMemory } from "./cache.js";
 import { scanResearchClaims, type ResearchDocument } from "./claims.js";
 import { appendFactRows, consistentFactRows, currentFacts, readFactRows } from "./facts.js";
 import { builtInFetchers } from "./fetchers.js";
 import type { CachedFetchContext } from "./http-fetch.js";
+import { withQuota, type FetchQuotaSlot } from "./quota.js";
 import { roleFacingText } from "./text.js";
 
 /** An event the service asks its caller to append (actor `engine`). */
@@ -79,7 +80,7 @@ export type ResearchEventDraft =
 export interface ResearchServiceDeps {
   /** Absolute project root (`.vtc/research/facts.jsonl` lives under it). */
   readonly projectRoot: string;
-  readonly cache: ResearchCache & Partial<RequestMemory> & CacheProvenance;
+  readonly cache: ResearchCache & Partial<RequestMemory> & CacheProvenance & Partial<CachePruning>;
   readonly scope: ResearchScope;
   /** Absent: fetchers are unavailable and every new fact stays unverified (`EngineDeps.http`). */
   readonly http?: HttpClient | undefined;
@@ -89,6 +90,11 @@ export interface ResearchServiceDeps {
   /** Known secret values to redact from fetched text and fact rows. */
   readonly knownValues?: () => readonly string[];
   readonly fetchers?: ReadonlyMap<FetcherId, Fetcher>;
+  /**
+   * The role run's share of the research quota (`FetchQuota.forRun`): each network request takes
+   * one. Absent for the engine's own fetches (the G2 re-check).
+   */
+  readonly quota?: FetchQuotaSlot;
   readonly onEvent?: (event: ResearchEventDraft) => void | Promise<void>;
 }
 
@@ -121,6 +127,14 @@ export interface ResearchService {
    * lists the fact again unless it verifies by then.
    */
   recordWaivers(waivers: readonly FactWaiver[]): Promise<FactWaiver[]>;
+  /**
+   * Evicts blobs of this scope the cache no longer needs, keeping every blob a row of this
+   * project's `facts.jsonl` cites. Another project of the same scope may cite an evicted blob:
+   * its G2 re-fetches the source.
+   */
+  pruneCache(options?: {
+    readonly retentionDays?: number;
+  }): Promise<{ readonly removed: string[] }>;
 }
 
 const DAY_MS = 86_400_000;
@@ -153,7 +167,10 @@ export const createResearchService = (deps: ResearchServiceDeps): ResearchServic
     scope,
     now,
     apiKey,
-    http: deps.http ?? NO_HTTP,
+    http:
+      deps.quota === undefined
+        ? (deps.http ?? NO_HTTP)
+        : withQuota(deps.http ?? NO_HTTP, deps.quota),
     ...(deps.cache.remember !== undefined && deps.cache.recall !== undefined
       ? { requests: deps.cache as RequestMemory }
       : {}),
@@ -360,7 +377,12 @@ export const createResearchService = (deps: ResearchServiceDeps): ResearchServic
 
   type Check =
     | { readonly ok: true; readonly retrievedAt: string; readonly fetcher: FetcherId }
-    | { readonly ok: false; readonly reason: string };
+    | {
+        readonly ok: false;
+        readonly reason: string;
+        /** The index records the source but its blob is gone (evicted): re-fetch it. */
+        readonly evicted?: true;
+      };
 
   /**
    * Whether a row's locator resolves, right now and in this scope, in a blob the cache index
@@ -371,10 +393,15 @@ export const createResearchService = (deps: ResearchServiceDeps): ResearchServic
     if (source === null) return { ok: false, reason: "no source" };
     if (source.fetcher === "search") return { ok: false, reason: SEARCH_NOT_A_SOURCE };
     const retrievedAt = await deps.cache.retrievedAt(scope, source);
-    const body =
-      retrievedAt === undefined ? undefined : await deps.cache.blob(scope, source.content_sha256);
-    if (retrievedAt === undefined || body === undefined)
+    if (retrievedAt === undefined)
       return { ok: false, reason: "the cited source is not in this machine's cache" };
+    const body = await deps.cache.blob(scope, source.content_sha256);
+    if (body === undefined)
+      return {
+        ok: false,
+        reason: "the cited source's copy was evicted from the cache",
+        evicted: true,
+      };
     const check = verifyFactLocator(source.locator, new TextDecoder().decode(body), row.value);
     return check.ok ? { ok: true, retrievedAt, fetcher: source.fetcher } : check;
   };
@@ -443,22 +470,38 @@ export const createResearchService = (deps: ResearchServiceDeps): ResearchServic
 
     async factLookup(rawInput) {
       const input = FactLookupInputSchema.parse(rawInput);
-      const rows = consistentFactRows((await readFactRows(deps.projectRoot)).rows);
       let facts: FactRow[];
       if (input.ids !== undefined) {
+        const rows = consistentFactRows((await readFactRows(deps.projectRoot)).rows);
         const newest = new Map(rows.map((r) => [r.id, r]));
         facts = input.ids.flatMap((id) => {
           const row = newest.get(id);
           return row === undefined ? [] : [row];
         });
       } else {
-        facts = currentFacts(rows).filter(
+        // Like G2: a `supersedes` hides a row only when the superseding row verifies now.
+        facts = (await currentForG2()).filter(
           (r) =>
             r.subject === input.subject &&
             (input.predicate === undefined || r.predicate === input.predicate),
         );
       }
-      return FactLookupResultSchema.parse({ facts: facts.slice(0, LOOKUP_MAX) });
+      // `facts.jsonl` is git-tracked: a recorded status reaches the role only when the engine can
+      // reproduce it now; otherwise the row is returned as unverified (or stale, past its window).
+      const at = now();
+      const checked: FactRow[] = [];
+      for (const row of facts.slice(0, LOOKUP_MAX)) {
+        if (row.status === "unverified" || row.status === "stale") {
+          checked.push(row);
+          continue;
+        }
+        const check = await verifiesNow(row);
+        if (!check.ok) checked.push({ ...row, status: check.evicted ? "stale" : "unverified" });
+        else if (isExpired(check.fetcher, check.retrievedAt, at))
+          checked.push({ ...row, status: "stale" });
+        else checked.push(row);
+      }
+      return FactLookupResultSchema.parse({ facts: checked });
     },
 
     factPropose,
@@ -472,7 +515,7 @@ export const createResearchService = (deps: ResearchServiceDeps): ResearchServic
         let due = row.status === "stale";
         if (!due) {
           const check = await verifiesNow(row);
-          due = check.ok && isExpired(check.fetcher, check.retrievedAt, at);
+          due = check.ok ? isExpired(check.fetcher, check.retrievedAt, at) : check.evicted === true;
         }
         if (!due) continue;
         const next = await refresh(row, at);
@@ -521,6 +564,19 @@ export const createResearchService = (deps: ResearchServiceDeps): ResearchServic
         });
       }
       return { unverified_facts: facts.map((f) => f.id), facts };
+    },
+
+    async pruneCache(options = {}) {
+      if (deps.cache.prune === undefined) return { removed: [] };
+      const keep = new Set<string>();
+      for (const row of (await readFactRows(deps.projectRoot)).rows) {
+        if (row.source !== null) keep.add(row.source.content_sha256);
+      }
+      return deps.cache.prune(scope, {
+        now: now(),
+        keep,
+        ...(options.retentionDays === undefined ? {} : { retentionDays: options.retentionDays }),
+      });
     },
 
     async recordWaivers(waivers) {

@@ -84,12 +84,38 @@ const outcomes = (
   traces: readonly Trace[],
   failed: ReadonlySet<string>,
 ): TraceOutcome[] => {
+  // Each task's events in log order (seq ascending within a run).
   const byTask = new Map<string, VtcEvent[]>();
   for (const event of events) {
     if (event.task === undefined) continue;
     const key = taskKey(event.run, event.task);
-    byTask.set(key, [...(byTask.get(key) ?? []), event]);
+    const list = byTask.get(key);
+    if (list === undefined) byTask.set(key, [event]);
+    else list.push(event);
   }
+  const roleKeyOf = (t: Trace & { readonly task: string }): string =>
+    `${taskKey(t.run, t.task)}:${t.role}:${t.mode ?? ""}`;
+  // The seq of the same role's next dispatch on the same task (one backward pass).
+  const nextSeq = new Array<number>(traces.length).fill(Number.POSITIVE_INFINITY);
+  const laterSeq = new Map<string, number>();
+  for (let i = traces.length - 1; i >= 0; i -= 1) {
+    const t = traces[i];
+    if (t?.task === undefined) continue;
+    const key = roleKeyOf({ ...t, task: t.task });
+    nextSeq[i] = laterSeq.get(key) ?? Number.POSITIVE_INFINITY;
+    laterSeq.set(key, t.seq);
+  }
+  /** Index of the first event with a seq above `seq` (binary search). */
+  const firstAfter = (list: readonly VtcEvent[], seq: number): number => {
+    let lo = 0;
+    let hi = list.length;
+    while (lo < hi) {
+      const mid = (lo + hi) >> 1;
+      if ((list[mid]?.seq ?? Number.POSITIVE_INFINITY) > seq) hi = mid;
+      else lo = mid + 1;
+    }
+    return lo;
+  };
   const seen = new Set<string>();
   return traces.map((trace, index) => {
     const success = trace.end?.kind === "submitted" && !failed.has(traceRef(trace));
@@ -103,23 +129,18 @@ const outcomes = (
         success,
       };
     }
-    const roleKey = `${taskKey(trace.run, trace.task)}:${trace.role}:${trace.mode ?? ""}`;
+    const roleKey = roleKeyOf({ ...trace, task: trace.task });
     const firstRound = !seen.has(roleKey);
     seen.add(roleKey);
-    const next = traces
-      .slice(index + 1)
-      .find(
-        (t) =>
-          t.run === trace.run &&
-          t.task === trace.task &&
-          t.role === trace.role &&
-          t.mode === trace.mode,
-      );
-    const until = next?.seq ?? Number.POSITIVE_INFINITY;
+    const until = nextSeq[index] ?? Number.POSITIVE_INFINITY;
     const from = trace.end?.seq ?? trace.seq;
-    const window = (byTask.get(taskKey(trace.run, trace.task)) ?? []).filter(
-      (e) => e.seq > trace.seq && e.seq < until,
-    );
+    const taskEvents = byTask.get(taskKey(trace.run, trace.task)) ?? [];
+    const window: VtcEvent[] = [];
+    for (let i = firstAfter(taskEvents, trace.seq); i < taskEvents.length; i += 1) {
+      const event = taskEvents[i];
+      if (event === undefined || event.seq >= until) break;
+      window.push(event);
+    }
     let gatePassed: boolean | undefined;
     let reviewFailed = false;
     let escalated = false;
@@ -233,7 +254,9 @@ export const computeScorecards = (input: {
     const prompt = row.trace.prompt;
     if (prompt === undefined) continue;
     const key = `${prompt.role}:${prompt.mode ?? ""}:${prompt.host}:${prompt.effective_sha256}`;
-    versions.set(key, [...(versions.get(key) ?? []), row]);
+    const list = versions.get(key);
+    if (list === undefined) versions.set(key, [row]);
+    else list.push(row);
   }
   const cards: Scorecard[] = [];
   for (const group of versions.values()) {

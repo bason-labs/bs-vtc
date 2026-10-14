@@ -4,13 +4,14 @@ import {
   type Attribution,
   type PromptProposal,
 } from "@vtc/shared";
-import { mkdir, writeFile } from "node:fs/promises";
+import { mkdir, rm, symlink, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 import {
   attributeRun,
   candidateFrontmatter,
   checkProposal,
+  PROPOSAL_FILE_MAX_BYTES,
   proposalPaths,
   proposalRecordedEvent,
   promptVersionRef,
@@ -125,8 +126,26 @@ describe("proposal checks (AD-21 rule 4)", () => {
     const other = { ...base, locked_sha256: "f".repeat(64) };
     expect(check(proposal({ base: other }))).toMatchObject({
       ok: false,
-      problems: [expect.stringMatching(/current locked core/)],
+      problems: [
+        expect.stringMatching(/current locked core/),
+        expect.stringMatching(/did not run with the proposal's base version/),
+      ],
     });
+  });
+
+  it("refuses a base that is not the version the cited failures ran with", () => {
+    // Another editable section on the same locked core: a version these failures never ran.
+    const other = promptVersionRef({
+      role: "engineer",
+      host: HOST,
+      locked: LOCKED,
+      editable: "Some section no dispatch ran.",
+    });
+    expect(check(proposal({ base: other }))).toEqual({
+      ok: false,
+      problems: [expect.stringMatching(/did not run with the proposal's base version/)],
+    });
+    expect(check(proposal({ base: { ...base, mode: "repair" } }))).toMatchObject({ ok: false });
   });
 
   it("refuses a section that names an AD-9 marker", () => {
@@ -225,5 +244,26 @@ describe("proposal checks (AD-21 rule 4)", () => {
     await writeFile(join(root, paths.editable), `${NEW_SECTION}\n`);
     const files = await readProposalFiles(root, "engineer");
     expect(files === undefined ? undefined : check(files.raw, files.editable).ok).toBe(true);
+  });
+
+  it("never reads a proposal file through a symbolic link, or one over the size cap", async () => {
+    const root = await tempDir("proj");
+    const paths = proposalPaths("engineer");
+    await mkdir(join(root, ".vtc/lookback/proposals/engineer"), { recursive: true });
+    const elsewhere = join(root, "elsewhere.json");
+    await writeFile(elsewhere, JSON.stringify(proposal()));
+    await symlink(elsewhere, join(root, paths.proposal));
+    await writeFile(join(root, paths.editable), `${NEW_SECTION}\n`);
+    const linked = await readProposalFiles(root, "engineer");
+    expect(linked?.raw).toBeUndefined();
+    expect(linked?.problem).toMatch(/not a regular file/);
+    expect(check(linked?.raw, linked?.editable).ok).toBe(false);
+
+    await rm(join(root, paths.proposal));
+    await writeFile(join(root, paths.proposal), JSON.stringify(proposal()));
+    await writeFile(join(root, paths.editable), "x".repeat(PROPOSAL_FILE_MAX_BYTES + 1));
+    const large = await readProposalFiles(root, "engineer");
+    expect(large?.raw).toBeUndefined();
+    expect(large?.problem).toMatch(/larger than/);
   });
 });

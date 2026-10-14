@@ -1,5 +1,5 @@
 import { sha256Hex, type CacheEntry } from "@vtc/shared";
-import { readFile, writeFile } from "node:fs/promises";
+import { readFile, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 import { createFileResearchCache, CacheIntegrityError } from "../../src/research/index.js";
@@ -76,5 +76,44 @@ describe("file research cache (AD-22 rule 2)", () => {
       release: "22",
     });
     expect(await cache.recall("client-acme", source)).toBeUndefined();
+  });
+
+  it("sees what another process appends, waits for a torn line, and starts over on a new file", async () => {
+    const home = await tempDir("cache");
+    const mine = createFileResearchCache(home);
+    const theirs = createFileResearchCache(home);
+    expect(await mine.get("_shared", key)).toBeUndefined();
+    await theirs.put("_shared", entry(), body);
+    expect((await mine.get("_shared", key))?.retrieved_at).toBe("2026-10-14T10:00:00.000Z");
+    const source = { fetcher: "eol" as const, url: entry().url, content_sha256: sha };
+    expect(await mine.retrievedAt("_shared", source)).toBe("2026-10-14T10:00:00.000Z");
+
+    const index = join(home, "research-cache", "_shared", "index.jsonl");
+    const line = JSON.stringify(entry({ retrieved_at: "2026-10-16T10:00:00.000Z" }));
+    const before = await readFile(index, "utf8");
+    // Half a line: not read until it is whole.
+    await writeFile(index, `${before}${line.slice(0, 20)}`);
+    expect(await mine.retrievedAt("_shared", source)).toBe("2026-10-14T10:00:00.000Z");
+    await writeFile(index, `${before}${line}\n`);
+    expect(await mine.retrievedAt("_shared", source)).toBe("2026-10-16T10:00:00.000Z");
+
+    // The index replaced by a shorter one: read again from the start.
+    await rm(index);
+    await writeFile(index, `${JSON.stringify(entry({ key: "b".repeat(64) }))}\n`);
+    expect(await mine.get("_shared", key)).toBeUndefined();
+    expect(await mine.get("_shared", "b".repeat(64))).toBeDefined();
+  });
+
+  it("loses no index line to overlapping lookups (the daemon shares one cache across calls)", async () => {
+    const cache = createFileResearchCache(await tempDir("cache"));
+    const keyOf = (i: number): string => i.toString(16).padStart(64, "0");
+    for (let i = 0; i < 20; i += 1) await cache.put("_shared", entry({ key: keyOf(i) }), body);
+    await Promise.all([cache.get("_shared", keyOf(0)), cache.get("_shared", keyOf(1))]);
+    // Entries put after the overlapping lookups, with no lookup in between: all still visible.
+    for (let i = 20; i < 50; i += 1) await cache.put("_shared", entry({ key: keyOf(i) }), body);
+    const missing: number[] = [];
+    for (let i = 0; i < 50; i += 1)
+      if ((await cache.get("_shared", keyOf(i))) === undefined) missing.push(i);
+    expect(missing).toEqual([]);
   });
 });

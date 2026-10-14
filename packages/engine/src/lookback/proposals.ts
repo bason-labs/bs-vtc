@@ -10,7 +10,8 @@
  * - nothing in it names an AD-9 marker (`findForbiddenInText`);
  * - every trace it cites (by its run-qualified slug, `traceSlug`) is an attributed train-split
  *   failure of that role that the history bears out (`trustedAttributions`; the role never sees
- *   held-out traces);
+ *   held-out traces), run with the proposal's base version (same mode, host and hashes), so the
+ *   base, which becomes the candidate's recorded `parent`, is a version that ran and failed;
  * - it actually changes the section.
  * An accepted proposal becomes a candidate version file under the VTC home (immutable) and a
  * `lookback.proposal_recorded` event; promotion stays a human gesture.
@@ -28,9 +29,14 @@ import {
   type PromptVersionRef,
 } from "@vtc/shared";
 import { join } from "node:path";
-import { isTrainFailure, trustedAttributions, type AttributionHistory } from "./attribution.js";
+import {
+  isTrainFailure,
+  samePrompt,
+  trustedAttributions,
+  type AttributionHistory,
+} from "./attribution.js";
 import { lookbackEvent, type LookbackEventDraft } from "./events.js";
-import { readTextIfExists } from "./files.js";
+import { readRoleWrittenText } from "./files.js";
 import { traceSlug, traceSplit } from "./traces.js";
 import { promptVersionRef, sectionSha } from "./versions.js";
 
@@ -46,19 +52,38 @@ export const proposalPaths = (
   return { proposal: `${dir}/proposal.json`, editable: `${dir}/editable.md` };
 };
 
-/** Reads a role's proposal files; `undefined` when either is missing. */
+/** The largest proposal file the engine reads (`proposal.json` or `editable.md`). */
+export const PROPOSAL_FILE_MAX_BYTES = 256 * 1024;
+
+/**
+ * Reads a role's proposal files; `undefined` when either is missing. The directory is
+ * role-writable, so a file that is not a regular file (a symbolic link) or is over
+ * {@link PROPOSAL_FILE_MAX_BYTES} is never read: the result then carries the `problem` and no
+ * proposal, which {@link checkProposal} refuses.
+ */
 export const readProposalFiles = async (
   projectRoot: string,
   role: string,
-): Promise<{ readonly raw: unknown; readonly editable: string } | undefined> => {
+): Promise<
+  { readonly raw: unknown; readonly editable: string; readonly problem?: string } | undefined
+> => {
   const paths = proposalPaths(role);
-  const json = await readTextIfExists(join(projectRoot, paths.proposal));
-  const editable = await readTextIfExists(join(projectRoot, paths.editable));
-  if (json === undefined || editable === undefined) return undefined;
+  const json = await readRoleWrittenText(
+    join(projectRoot, paths.proposal),
+    PROPOSAL_FILE_MAX_BYTES,
+  );
+  const editable = await readRoleWrittenText(
+    join(projectRoot, paths.editable),
+    PROPOSAL_FILE_MAX_BYTES,
+  );
+  if (json.kind === "missing" || editable.kind === "missing") return undefined;
+  if (json.kind === "refused") return { raw: undefined, editable: "", problem: json.problem };
+  if (editable.kind === "refused")
+    return { raw: undefined, editable: "", problem: editable.problem };
   try {
-    return { raw: JSON.parse(json) as unknown, editable };
+    return { raw: JSON.parse(json.text) as unknown, editable: editable.text };
   } catch {
-    return { raw: undefined, editable };
+    return { raw: undefined, editable: editable.text };
   }
 };
 
@@ -105,12 +130,18 @@ export const checkProposal = (
   const ofRole = trustedAttributions(input.attributions, input).filter(
     (a) => a.prompt.role === input.role,
   );
-  const trainFailures = new Set(ofRole.filter(isTrainFailure).map(traceSlug));
+  const trainFailures = ofRole.filter(isTrainFailure);
+  const ofBase = new Set(
+    trainFailures.filter((a) => samePrompt(a.prompt, proposal.base)).map(traceSlug),
+  );
+  const ofRoleAnyVersion = new Set(trainFailures.map(traceSlug));
   const heldOut = new Set(ofRole.filter((a) => traceSplit(a) === "holdout").map(traceSlug));
   for (const trace of new Set(proposal.changes.flatMap((c) => c.trace_ids))) {
     if (heldOut.has(trace)) problems.push(`cites held-out trace ${trace}`);
-    else if (!trainFailures.has(trace))
+    else if (!ofRoleAnyVersion.has(trace))
       problems.push(`cites ${trace}, which is not an attributed train failure of ${input.role}`);
+    else if (!ofBase.has(trace))
+      problems.push(`cites ${trace}, which did not run with the proposal's base version`);
   }
   if (sectionSha(editable) === proposal.base.editable_sha256)
     problems.push("the proposal does not change the section");

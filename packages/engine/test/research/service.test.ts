@@ -409,6 +409,13 @@ describe("G2 fact list (AD-22 rule 4)", () => {
           "recorded verified but does not verify against the cache: the cited source is not in this machine's cache",
       },
     ]);
+    // fact_lookup never hands a role the planted status either.
+    for (const lookup of [
+      await service.factLookup({ ids: [planted.id] }),
+      await service.factLookup({ subject: "npm:left-pad@1.3.0" }),
+    ]) {
+      expect(lookup.facts.map((f) => [f.id, f.status])).toEqual([[planted.id, "unverified"]]);
+    }
   });
 
   it("re-checks a recorded verified row against its blob: a value the blob lacks is listed", async () => {
@@ -503,7 +510,7 @@ describe("G2 fact list (AD-22 rule 4)", () => {
     const first = await service.factPropose(licenceFact("MIT", fromNpm), "architect");
     const second = await service.factPropose(licenceFact("Apache-2.0", fromDeps), "architect");
     const npmRow = (await factsOnDisk())[0];
-    if (npmRow?.source === null || npmRow === undefined) return;
+    if (npmRow?.source === null || npmRow === undefined) throw new Error("no npm fact recorded");
     const at = time.now().toISOString();
     // The npm claim again, naming the deps.dev claim as the one it replaces: another source.
     const otherSource = {
@@ -528,6 +535,9 @@ describe("G2 fact list (AD-22 rule 4)", () => {
       [first.fact.id, "conflicting"],
       [borrowedBlob.id, "unverified"],
     ]);
+    // fact_lookup honours supersedes the same way: the deps.dev claim is not hidden.
+    const lookup = await service.factLookup({ subject: npmRow.subject });
+    expect(lookup.facts.map((f) => f.id)).toContain(second.fact.id);
   });
 });
 
