@@ -51,22 +51,36 @@ import {
 } from "../http/index.js";
 import { engineSocketAnswers, serveEngineSocket } from "../mcp/index.js";
 import {
+  createFetchQuota,
   createFileResearchCache,
   createResearchService,
   type ResearchEventDraft,
   type ResearchService,
 } from "../research/index.js";
 
+export interface ResearchWiringOptions {
+  /** Network requests per run for the role tools (`createFetchQuota`'s default when absent). */
+  readonly quotaPerRun?: number;
+  /** How often the cache is pruned (the first prune runs one interval after the start). */
+  readonly pruneEveryMs?: number;
+}
+
+/** How often the daemon prunes the research cache (lookback-research's eviction, AD-22). */
+export const RESEARCH_PRUNE_MS = 24 * 60 * 60_000;
+
 /**
  * The research module wired into the engine (AD-22, spine §5 reading 120): its handlers serve
  * the role-facing tools (`ROLE_MCP_TOOLS`), and before each G2 it re-fetches stale facts and
  * hands core the re-checked table. A call is served only while a role run that declares the tool
- * is in flight; the fact row records that role. The events it emits go to that run's log.
+ * is in flight; the fact row records that role. The events it emits go to that run's log. Each
+ * run's role calls share one research quota, dropped at `run.finished`, and the cache is pruned on
+ * a schedule (spine §5 reading 138). Returns the cleanup the daemon runs at shutdown.
  */
 export const wireResearch = (
   engine: Engine,
   deps: Pick<EngineDeps, "repoRoot" | "vtcHome" | "http" | "researchApiKey" | "now">,
-): void => {
+  options: ResearchWiringOptions = {},
+): (() => void) => {
   const scope = ((): ResearchScope => {
     try {
       return researchScopeFor(engine.config().client);
@@ -75,6 +89,9 @@ export const wireResearch = (
     }
   })();
   const cache = createFileResearchCache(deps.vtcHome);
+  // one quota for the daemon's life: the service is built per call, the per-run counts outlive it
+  // (the G2 re-check, run undefined, takes none)
+  const quota = createFetchQuota(options.quotaPerRun);
   const keyOf = deps.researchApiKey;
   const serviceFor = (run: string | undefined): ResearchService =>
     createResearchService({
@@ -82,6 +99,7 @@ export const wireResearch = (
       cache,
       scope,
       http: deps.http,
+      ...(run === undefined ? {} : { quota: quota.forRun(run) }),
       ...(deps.now === undefined ? {} : { now: deps.now }),
       ...(keyOf === undefined
         ? {}
@@ -111,6 +129,21 @@ export const wireResearch = (
     }
   });
   engine.setFactRefresher(async () => (await serviceFor(undefined).g2Facts([])).facts);
+  // a finished run's count is dropped, so the counts do not grow for the daemon's life
+  const off = engine.onEvent((event) => {
+    if (event.type === "run.finished") quota.forget(event.run);
+  });
+  // eviction of blobs nothing cites; a failed prune is retried at the next interval
+  const prune = setInterval(() => {
+    serviceFor(undefined)
+      .pruneCache()
+      .catch(() => undefined);
+  }, options.pruneEveryMs ?? RESEARCH_PRUNE_MS);
+  prune.unref();
+  return () => {
+    off();
+    clearInterval(prune);
+  };
 };
 
 /**
@@ -214,7 +247,7 @@ export const runDaemon: RunDaemon = async (deps: EngineDeps, options) => {
       random: Math.random,
       remote: "origin",
     });
-    wireResearch(engine, deps);
+    cleanups.push(wireResearch(engine, deps));
     // AD-25: shutting down kills the engine-launched runs and stops the Level-3 waits, so close
     // returns promptly and leaves no orphaned process
     cleanups.push(() => engine.shutdown());

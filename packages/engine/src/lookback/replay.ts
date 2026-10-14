@@ -11,6 +11,7 @@
  * (the regression set, which must not get worse beyond the A/A flip rate).
  */
 import {
+  AaNoiseRowSchema,
   LOOKBACK_HOME,
   LOOKBACK_LIMITS,
   LOOKBACK_REPO,
@@ -19,11 +20,8 @@ import {
   ReplayResultSchema,
   replayVerdict,
   SlugSchema,
-  HostIdSchema,
-  IsoDateTimeSchema,
-  RoleIdSchema,
   sha256Hex,
-  Sha256HexSchema,
+  type AaNoiseRow,
   type Attribution,
   type DispatchMode,
   type DispatchPlan,
@@ -35,7 +33,6 @@ import {
   type ReplayResult,
 } from "@vtc/shared";
 import { join } from "node:path";
-import { z } from "zod";
 import { lookbackEvent, type LookbackEventDraft } from "./events.js";
 import { appendJsonLines, readJsonLines, writeAtomic } from "./files.js";
 import { isRoleFailure, trustedAttributions, type AttributionHistory } from "./attribution.js";
@@ -224,21 +221,6 @@ export const writeReplayResult = async (
  * is per project (`repo_key`): a flip rate measured on one repository's tasks is no noise floor for
  * another's. The row shape is local until a contract carries it (a contract proposal).
  */
-/** An `engineRepoKey` (the same shape `LookbackPins` keys projects by). */
-const RepoKeySchema = z.string().regex(/^[a-f0-9]{16}$/, "expected an engineRepoKey");
-
-const AaNoiseRowSchema = z.strictObject({
-  v: z.literal(1),
-  repo_key: RepoKeySchema,
-  role: RoleIdSchema,
-  mode: SlugSchema.optional(),
-  host: HostIdSchema,
-  baseline: Sha256HexSchema,
-  grader_bundle_sha: Sha256HexSchema,
-  aa_flip_rate: z.number().min(0).max(1),
-  measured_at: IsoDateTimeSchema,
-});
-
 const aaNoisePath = (vtcHome: string): string => join(vtcHome, LOOKBACK_HOME.aaNoiseFile);
 
 /** Records the A/A flip rate a replay measured with its own `aa` arm (call it only then). */
@@ -278,7 +260,7 @@ export const cachedAaFlipRate = async (input: {
   readonly graderBundleSha: string;
 }): Promise<number | undefined> => {
   const { baseline } = input;
-  let best: z.infer<typeof AaNoiseRowSchema> | undefined;
+  let best: AaNoiseRow | undefined;
   for (const value of await readJsonLines(aaNoisePath(input.vtcHome))) {
     const parsed = parsePersisted(AaNoiseRowSchema, value);
     if (!parsed.success) continue;

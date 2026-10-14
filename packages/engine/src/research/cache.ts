@@ -15,9 +15,9 @@
 import {
   CacheEntrySchema,
   FETCHER_TTL_DAYS,
-  FetchRequestSchema,
   parsePersisted,
   RESEARCH_CACHE,
+  ResearchCacheRequestRowSchema,
   ResearchScopeSchema,
   Sha256HexSchema,
   type CacheEntry,
@@ -85,8 +85,6 @@ export interface CachePruning {
 
 export type FileResearchCache = ResearchCache & RequestMemory & CacheProvenance & CachePruning;
 
-const REQUESTS_FILE = "requests.jsonl";
-
 export class CacheIntegrityError extends Error {
   constructor(message: string) {
     super(message);
@@ -128,7 +126,7 @@ export const createFileResearchCache = (vtcHome: string): FileResearchCache => {
     if (index === undefined) {
       index = {
         entries: new JsonlTail(join(dir, RESEARCH_CACHE.indexFile)),
-        requestsFile: new JsonlTail(join(dir, REQUESTS_FILE)),
+        requestsFile: new JsonlTail(join(dir, RESEARCH_CACHE.requestsFile)),
         byKey: new Map(),
         bySource: new Map(),
         requests: new Map(),
@@ -158,12 +156,8 @@ export const createFileResearchCache = (vtcHome: string): FileResearchCache => {
     const requests = await index.requestsFile.read();
     if (requests.reset) index.requests.clear();
     for (const value of requests.values) {
-      if (typeof value !== "object" || value === null) continue;
-      const { key, request } = value as { key?: unknown; request?: unknown };
-      const parsedKey = Sha256HexSchema.safeParse(key);
-      const parsedRequest = FetchRequestSchema.safeParse(request);
-      if (parsedKey.success && parsedRequest.success)
-        index.requests.set(parsedKey.data, parsedRequest.data);
+      const row = parsePersisted(ResearchCacheRequestRowSchema, value);
+      if (row.success) index.requests.set(row.data.key, row.data.request);
     }
     return index;
   };
@@ -206,11 +200,8 @@ export const createFileResearchCache = (vtcHome: string): FileResearchCache => {
 
     async remember(scope, key, request) {
       if ((await scopeIndex(scope)).requests.has(key)) return;
-      await appendLines(join(scopeDir(scope), REQUESTS_FILE), [
-        JSON.stringify({
-          key: Sha256HexSchema.parse(key),
-          request: FetchRequestSchema.parse(request),
-        }),
+      await appendLines(join(scopeDir(scope), RESEARCH_CACHE.requestsFile), [
+        JSON.stringify(ResearchCacheRequestRowSchema.parse({ key, request })),
       ]);
     },
 

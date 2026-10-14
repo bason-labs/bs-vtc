@@ -10,6 +10,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { factId, RESEARCH_FACTS_FILE, type FactRow, type LeadAction } from "@vtc/shared";
 import { wireResearch } from "../../src/daemon/index.js";
 import { cleanupDirs, writeFile } from "../helpers/repo.js";
+import { FixtureHttp, jsonResponse } from "../research/fixture-http.js";
 import {
   CLAUDE,
   createHarness,
@@ -141,6 +142,39 @@ describe("the daemon wires the research module (reading 120)", () => {
     );
     expect(gate.gates).toContain("G2");
     expect(gate.unverified_facts).toContain(planted.id);
+    await h.release();
+  });
+
+  it("charges a run's role calls to one research quota (reading 138)", async () => {
+    const url = (v: string): string => `https://registry.npmjs.org/react/${v}`;
+    const http = new FixtureHttp({
+      [`GET ${url("1.0.0")}`]: jsonResponse(url("1.0.0"), { license: "MIT" }),
+      [`GET ${url("2.0.0")}`]: jsonResponse(url("2.0.0"), { license: "MIT" }),
+    });
+    const h = createHarness();
+    const stop = wireResearch(
+      h.engine,
+      { repoRoot: h.repo, vtcHome: h.home, http },
+      {
+        quotaPerRun: 1,
+      },
+    );
+    const tools = h.engine.roleTools();
+    if (tools === null) throw new Error("the role tools are not wired");
+    await toDesign(h);
+    const fetch = (version: string) =>
+      tools(
+        "research_fetch",
+        { request: { fetcher: "registry", registry: "npm", name: "react", version } },
+        CLAUDE,
+      ) as Promise<{ result: { status: string; detail?: string } }>;
+    expect((await fetch("1.0.0")).result.status).toBe("ok");
+    // each call builds its own service, and the run's quota still holds across them
+    const over = await fetch("2.0.0");
+    expect(over.result.status).toBe("blocked");
+    expect(over.result.detail).toContain("quota");
+    expect(http.count(`GET ${url("2.0.0")}`)).toBe(0);
+    stop();
     await h.release();
   });
 });
