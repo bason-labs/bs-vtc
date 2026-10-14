@@ -245,7 +245,7 @@ const defaultAutomation = async (
     probe: await probeAutomation(options.exec ?? runExec, {
       repoRoot: options.repoRoot,
       login: false,
-      // gh and ffmpeg run by name outside the repo (a repo could ship an ffmpeg.exe)
+      // gh, ffmpeg and git run by name outside the repo (a repo could ship an ffmpeg.exe)
       cwd: options.vtcHome,
       ...(options.ghCommand === undefined ? {} : { gh: options.ghCommand }),
     }),

@@ -78,6 +78,7 @@ import {
 } from "../doctor-checks.js";
 import { createGhRemoteMerge } from "../gh-remote-merge.js";
 import { exec } from "../process.js";
+import { printable } from "../human-gesture.js";
 import { findRepoRoot, isVtcProject } from "../repo.js";
 import { checkResearchSearch, checkYtDlp, findYtDlp } from "../research-checks.js";
 import {
@@ -221,6 +222,8 @@ const withAdapters = async <T>(
 
 export const defaultDoctorEnv = (ctx: CommandContext): DoctorCommandEnv => {
   const timer = autoResumeTimer(process.platform);
+  /** A directory of the user's own, never a repo, to run bare command names in. */
+  const ownDir = (): string => (existsSync(ctx.vtcHome) ? ctx.vtcHome : homedir());
   return {
     exec,
     versions: process.versions,
@@ -269,11 +272,11 @@ export const defaultDoctorEnv = (ctx: CommandContext): DoctorCommandEnv => {
         probeAutomation(exec, {
           repoRoot: await findRepoRoot(ctx.cwd),
           login: true,
-          // gh and ffmpeg run by name outside the repo (a repo could ship an ffmpeg.exe)
-          cwd: existsSync(ctx.vtcHome) ? ctx.vtcHome : homedir(),
+          // gh, ffmpeg and git run by name outside the repo (a repo could ship an ffmpeg.exe)
+          cwd: ownDir(),
         }),
       recorder: shippedAutomationFactories().evidence !== undefined,
-      checkout: (path) => inspectCheckout(exec, path),
+      checkout: (path) => inspectCheckout(exec, path, ownDir()),
       project: async () => {
         const repoRoot = await findRepoRoot(ctx.cwd);
         return repoRoot === null || !isVtcProject(repoRoot)
@@ -394,7 +397,8 @@ export const createDoctorCommand = (
           checks.push({
             name: "automation",
             status: "fail",
-            detail: `cannot read the project's settings: ${error instanceof Error ? error.message : String(error)}`,
+            // repo content: a message that quotes the file is shown with its controls escaped
+            detail: `cannot read the project's settings: ${printable(error instanceof Error ? error.message : String(error))}`,
           });
         }
       }
