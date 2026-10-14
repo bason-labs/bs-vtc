@@ -11,10 +11,7 @@ import { SAMPLE_REPLAY_TEXT, SAMPLE_RUN, samplePage } from "./golden-samples";
 
 const root = `${resolve(import.meta.dirname, "../../../fixtures/golden-run")}/`;
 
-/**
- * One golden-run API response, parsed (the exact response of a read route), or a temporary dev
- * stand-in while the golden run lacks it (`apiFixtureFile`).
- */
+/** One golden-run API response, parsed (the exact response of a read route). */
 export const readFixture = (name: string): unknown => {
   const file = apiFixtureFile(`${root}api`, name);
   if (file === null) throw new Error(`no fixture ${name}`);
@@ -22,10 +19,14 @@ export const readFixture = (name: string): unknown => {
 };
 
 /**
- * `GET /api/automation` (contracts 5.0.0): the golden run's once engine core records it, the
- * dashboard's TEMPORARY schema-valid stand-in until then (`dev-fixtures/api/README.md`).
+ * A dashboard-owned `AutomationReport` (contracts 5.0.0, `dev-fixtures/automation.json`) with the
+ * cases the golden run's `api/automation.json` does not record yet: a merged PR, a draft with
+ * complete evidence, and `privacy` and `paused` skips. The fixture server serves the golden file.
  */
-export const readAutomationFixture = (): unknown => readFixture("automation");
+export const readAutomationFixture = (): unknown =>
+  JSON.parse(
+    readFileSync(resolve(import.meta.dirname, "../dev-fixtures/automation.json"), "utf8"),
+  ) as unknown;
 
 /** A dashboard dev fixture by its `.vtc/` path (`apps/dashboard/dev-fixtures/vtc/`). */
 export const readDevFixture = (path: string): string => {
