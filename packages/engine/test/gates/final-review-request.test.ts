@@ -8,7 +8,7 @@
 import { createHash } from "node:crypto";
 import { mkdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
-import { engineRepoKey, type Feature, type Task } from "@vtc/shared";
+import { engineRepoKey, hiddenTestsDir, type Feature, type Task } from "@vtc/shared";
 import { afterEach, describe, expect, it } from "vitest";
 import { finalReviewRequest } from "../../src/core/jobs.js";
 import type { RunHandle } from "../../src/core/kernel.js";
@@ -20,7 +20,7 @@ import { cases, config, harness, testsGate } from "./fixture.js";
 afterEach(cleanupDirs);
 
 const plantHidden = (home: string, repo: string, task: string, name: string): void => {
-  const dir = join(home, "hidden", engineRepoKey(repo), task, "tests/hidden");
+  const dir = join(home, hiddenTestsDir(engineRepoKey(repo), "r1", task), "tests/hidden");
   mkdirSync(dir, { recursive: true });
   writeFileSync(join(dir, `${task}.json`), cases([{ name }]));
 };
