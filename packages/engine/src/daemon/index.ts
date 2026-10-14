@@ -24,6 +24,7 @@ import {
   remainingPct,
   researchScopeFor,
   usageFromStatuslineIngest,
+  type AutomationSettings,
   type EngineDeps,
   type HostId,
   type ResearchScope,
@@ -61,6 +62,7 @@ import {
   createGhPullRequests,
   createGitOps,
   createGitPlumbing,
+  createRemoteRefs,
   createWorkspace,
 } from "../git/index.js";
 import {
@@ -82,6 +84,7 @@ import {
 } from "../lookback/index.js";
 import { engineSocketAnswers, serveEngineSocket } from "../mcp/index.js";
 import { isGitHubRemote, wireAutomation } from "./automation.js";
+import { evidenceSnapshot } from "./evidence-snapshot.js";
 import {
   bridgeUpstream,
   readLookbackPrInput,
@@ -528,6 +531,19 @@ export const runDaemon: RunDaemon = async (deps: EngineDeps, options) => {
       .remoteUrl("origin")
       .catch(() => null);
     const createUpstream = upstreamModule();
+    // the evidence browser's frozen read routes of an automatic run (AD-27 rule 6): the engine's
+    // read model with no prototype origin, whose Automation view reads the wiring's settings
+    let automationSettings: () => AutomationSettings | null = () => null;
+    const evidenceModel = createReadModel({
+      repoRoot: deps.repoRoot,
+      mode: "live",
+      versions: deps.versions,
+      prototypeUrl: () => null,
+      runs: () => engine.states(),
+      usage: () => engine.usage,
+      git,
+      automation: () => automationSettings(),
+    });
     const automation = wireAutomation(engine, deps, {
       githubRemote: isGitHubRemote(remoteUrl),
       ...(createUpstream === undefined
@@ -544,6 +560,7 @@ export const runDaemon: RunDaemon = async (deps: EngineDeps, options) => {
               },
               knownValues: dotenvSecrets(deps.repoRoot),
               redactSelectors: () => engine.gatesConfig()?.visual?.redact_selectors,
+              projectEvidence: () => engine.config().automation?.evidence,
               lookbackPr: (fact) =>
                 readLookbackPrInput({
                   projectRoot: deps.repoRoot,
@@ -565,10 +582,14 @@ export const runDaemon: RunDaemon = async (deps: EngineDeps, options) => {
                     return stored?.editable;
                   },
                 }),
+              evidenceSnapshot: (run) => evidenceSnapshot(evidenceModel, run),
+              gitOps: (root) => createGitOps({ repoRoot: root }),
+              remoteRefs: (root) => createRemoteRefs({ repoRoot: root }),
               plumbing: createGitPlumbing,
             }),
           }),
     });
+    automationSettings = automation.settings;
     cleanups.push(() => automation.close());
     cleanups.push(
       wireLookback(engine, deps, plugins, (run) => {

@@ -10,6 +10,10 @@
  *   role-writable proposal file as it is now (D-cb);
  * - the module's `{ type, payload }` events → the engine's `upstream.*` / `automation.skipped`
  *   events, through the wiring's only sink;
+ * - an automatic run's release → `openPullRequest` from the head the run pushed to its `vtc/auto`
+ *   branch, with the run's read routes and events as the evidence snapshot (marked ready on the
+ *   Spec Verifier's pass), once per pushed head; `completePullRequest` when the module already
+ *   opened that run's PR;
  * - its sweep (auto-close, stale PRs) at most once a day after one that worked, remembered across
  *   daemon restarts;
  * - `startRun` (`Engine.startAutomatic`), passed on for the module to start an automatic run.
@@ -21,30 +25,41 @@
  */
 import { join } from "node:path";
 import {
+  GitShaSchema,
   LOOKBACK_REPO,
   parsePersisted,
   PromptProposalSchema,
   ReplayResultSchema,
+  UpstreamReportSchema,
   type AssetBundle,
+  type AutoFingerprint,
+  type AutoKind,
+  type AutoTemplateSlot,
   type AutomationContext,
   type AutomationDeps,
   type AutomationRunRef,
   type AutomationSettings,
+  type GateReport,
   type GitHubRepo,
+  type GitOps,
+  type GitSha,
   type PromptProposal,
   type ReplayResult,
   type ScorecardMetricId,
   type StartInput,
+  type UpstreamReport,
 } from "@vtc/shared";
 import {
   ensurePrivateDir,
   readPrivateFile,
   writePrivateFile,
+  type AutomaticRelease,
   type AutomationFact,
   type CreateUpstream,
   type UpstreamWiring,
 } from "../core/index.js";
-import { readRepoFileCapped } from "../git/index.js";
+import { readRepoFileCapped, type RemoteRefs } from "../git/index.js";
+import type { EvidenceSnapshot } from "./evidence-snapshot.js";
 
 // --------------------------------------------------------------- the module's shape
 
@@ -103,6 +118,11 @@ export interface UpstreamModuleContext {
   };
   readonly knownValues: readonly string[];
   readonly redactSelectors?: readonly string[];
+  /**
+   * `project.yaml` `automation.evidence` for the project repo's PRs: `max_mb` in bytes and
+   * `video` (`false`: screenshots only).
+   */
+  readonly evidence?: { readonly maxBytes?: number; readonly video?: boolean };
 }
 
 /** What the module answers; `error` is a failure the daemon reports as an engine notice. */
@@ -116,11 +136,53 @@ export interface LookbackPrInput {
   readonly proposal: PromptProposal;
 }
 
+/**
+ * An automatic PR from a branch an automatic run pushed (`upstream/upstream.ts` `AutoPrInput` with
+ * `source.pushedHead`, the parts the daemon sets).
+ */
+export interface UpstreamModuleAutoPr {
+  readonly target: "upstream" | "project";
+  readonly kind: AutoKind;
+  readonly fingerprint: AutoFingerprint;
+  /** One line for `vtc(<kind>): …`. */
+  readonly summary: string;
+  readonly slots: Partial<Record<AutoTemplateSlot, string>>;
+  readonly source: { readonly pushedHead: GitSha };
+  /** Upstream: the report the body is checked against (D-by). */
+  readonly report?: UpstreamReport | undefined;
+  readonly issue?: number | undefined;
+  readonly evidence: {
+    readonly plan: {
+      readonly run?: string;
+      readonly upstreamSafe: boolean;
+      readonly change: "ui" | "non_ui";
+    };
+    readonly snapshot: {
+      readonly routes: Readonly<Record<string, unknown>>;
+      readonly events: readonly unknown[];
+    };
+    readonly gateReport?: GateReport | undefined;
+  };
+  readonly specVerifier: "pending" | "pass" | "fail";
+}
+
 /** The module as the daemon calls it (`upstream/upstream.ts` `Upstream`). */
 export interface UpstreamModule {
   report(fact: UpstreamModuleFact, ctx: UpstreamModuleContext): Promise<UpstreamModuleOutcome>;
   openLookbackPr(
     input: LookbackPrInput,
+    ctx: UpstreamModuleContext,
+  ): Promise<UpstreamModuleOutcome>;
+  /** Opens an automatic PR: caps, evidence (or no PR), draft, then ready on the verifier's pass. */
+  openPullRequest(
+    input: UpstreamModuleAutoPr,
+    ctx: UpstreamModuleContext,
+  ): Promise<UpstreamModuleOutcome>;
+  /** Marks an automatic PR ready once its Spec-Verifier verdict passed. */
+  completePullRequest(
+    target: "upstream" | "project",
+    number: number,
+    specVerifier: "pass" | "fail",
     ctx: UpstreamModuleContext,
   ): Promise<UpstreamModuleOutcome>;
   sweep(ctx: UpstreamModuleContext): Promise<readonly UpstreamModuleOutcome[]>;
@@ -141,6 +203,13 @@ export interface UpstreamModuleDeps {
    */
   readonly startRun?: (input: StartInput, issue: AutomationRunRef) => Promise<void>;
   readonly now?: () => Date;
+  /**
+   * Reads a file at a commit (engine git): the Lookback PR reads the role prompt and the CHANGELOG
+   * at the default branch's commit it builds on, never the work tree; without it none opens.
+   */
+  readonly gitOps?: (repoRoot: string) => Pick<GitOps, "readFileAtCommit">;
+  /** Fetches the shared automation branches and reads commit messages (engine git). */
+  readonly remoteRefs?: (repoRoot: string) => RemoteRefs;
 }
 
 /** `upstream.createUpstream`. */
@@ -220,6 +289,78 @@ export const githubRepoOf = (url: string | null): GitHubRepo | null => {
     : null;
 };
 
+// ------------------------------------------------------- an automatic run's PR
+
+const bullets = (lines: readonly string[], none: string): string =>
+  lines.length === 0 ? none : lines.map((l) => `- ${l}`).join("\n");
+
+/**
+ * Pure: the module's PR input for an automatic run's release (AD-27 rules 2, 3 and 6). The body
+ * slots say what the run did, against which issue, and how it was checked; the evidence is the
+ * run's own replay (a project-repo PR, or VTC building VTC on the bs-vtc checkout, records its own
+ * run, reading 208) plus the Final Review gate report. An upstream PR carries the allowlisted
+ * report the module checks its body against (D-by).
+ */
+export const automaticPrInput = (
+  release: AutomaticRelease,
+  snapshot: EvidenceSnapshot,
+  vtcVersion: string,
+): UpstreamModuleAutoPr => {
+  const { automation } = release;
+  const issue = `#${String(automation.issue)}`;
+  const report =
+    automation.target.kind === "upstream"
+      ? UpstreamReportSchema.safeParse({
+          v: 1,
+          kind: automation.kind,
+          fingerprint: automation.fingerprint,
+          vtc_version: vtcVersion,
+          occurrences: 1,
+          first_seen: release.startedAt,
+          last_seen: release.at,
+        })
+      : undefined;
+  const risks = [...new Set(release.tasks.flatMap((t) => t.risk_tags))].sort();
+  return {
+    target: automation.target.kind,
+    kind: automation.kind,
+    fingerprint: automation.fingerprint,
+    summary: release.title,
+    slots: {
+      summary: release.title,
+      why: `VTC ran on its own for issue ${issue} (${automation.kind}). The issue is the spec, so the human gates G1 and G2 were skipped; the Spec Verifier checked the work against the issue.`,
+      changes: bullets(
+        release.tasks.map((t) => `${t.id}: ${t.title}`),
+        "No task changed code.",
+      ),
+      verification: [
+        bullets(
+          release.steps.map((s) => `Final Review step ${String(s.step)}: ${s.status}`),
+          "No Final Review step recorded a result.",
+        ),
+        ...(release.gateReport === undefined
+          ? []
+          : [`Final Review gate run: ${release.gateReport.verdict}.`]),
+      ].join("\n\n"),
+      risk: `${risks.length === 0 ? "No task carries a risk tag." : `Risk tags: ${risks.join(", ")}.`} Every gate, review and risk rule applied; a risky change would have stopped for a human. Revert the merge to roll back.`,
+      checklist: [
+        `- [ ] The change does what issue ${issue} asks, and nothing more`,
+        "- [ ] The evidence shows the run and its checks",
+        "- [ ] Merge it yourself: VTC never merges an automatic PR",
+      ].join("\n"),
+    },
+    source: { pushedHead: GitShaSchema.parse(release.head) },
+    ...(report?.success === true ? { report: report.data } : {}),
+    issue: automation.issue,
+    evidence: {
+      plan: { run: release.run, upstreamSafe: false, change: release.change },
+      snapshot,
+      ...(release.gateReport === undefined ? {} : { gateReport: release.gateReport }),
+    },
+    specVerifier: release.specVerifier,
+  };
+};
+
 // ------------------------------------------------------------- the Lookback PR input
 
 /** The largest replay result file the bridge reads. */
@@ -275,6 +416,10 @@ export const readLookbackPrInput = async (input: {
 export const UPSTREAM_SWEEP_EVERY_MS = 24 * 60 * 60_000;
 
 const SWEEP_FILE = "automation-sweep.json";
+/** The automatic runs' pushed heads the module opened a PR for (or decided on). */
+const RELEASED_FILE = "automation-released.json";
+/** How many of them the guard dir remembers. */
+const RELEASED_MAX = 200;
 
 export interface UpstreamBridgeOptions {
   /** The engine's guard dir (`Engine.guardDir`): the module's staging, the sweep clock. */
@@ -289,11 +434,32 @@ export interface UpstreamBridgeOptions {
   readonly knownValues: () => readonly string[];
   /** `gates.yml` `visual.redact_selectors`. */
   readonly redactSelectors: () => readonly string[] | undefined;
+  /** `project.yaml` `automation.evidence` (absent: the defaults). */
+  readonly projectEvidence: () =>
+    { readonly max_mb?: number | undefined; readonly video?: boolean | undefined } | undefined;
   /** A replay verdict `improve`'s PR input, or why there is none ({@link readLookbackPrInput}). */
   readonly lookbackPr: (fact: AutomationFact) => Promise<LookbackPrInput | string>;
+  /** The run's read routes and events for the evidence browser ({@link automaticPrInput}). */
+  readonly evidenceSnapshot: (run: string) => EvidenceSnapshot;
+  /** Engine git's file-at-commit reader and remote refs for a repo (`createGitOps`, `createRemoteRefs`). */
+  readonly gitOps: NonNullable<UpstreamModuleDeps["gitOps"]>;
+  readonly remoteRefs: NonNullable<UpstreamModuleDeps["remoteRefs"]>;
   /** The default plumbing when the cli injects none (`git.createGitPlumbing`). */
   readonly plumbing: NonNullable<AutomationDeps["plumbing"]>;
 }
+
+/** Pure: `automation.evidence` as the module reads it (`max_mb` in bytes), or none when unset. */
+export const projectEvidence = (
+  config:
+    { readonly max_mb?: number | undefined; readonly video?: boolean | undefined } | undefined,
+): UpstreamModuleContext["evidence"] => {
+  if (config === undefined || (config.max_mb === undefined && config.video === undefined))
+    return undefined;
+  return {
+    ...(config.max_mb === undefined ? {} : { maxBytes: Math.floor(config.max_mb * 1024 * 1024) }),
+    ...(config.video === undefined ? {} : { video: config.video }),
+  };
+};
 
 /** The module's event as an engine event draft (its payload is the event's data). */
 const asDraft = (event: { readonly type: string; readonly payload: unknown }) => ({
@@ -322,10 +488,13 @@ export const bridgeUpstream =
       },
       startRun: deps.startRun,
       now,
+      gitOps: options.gitOps,
+      remoteRefs: options.remoteRefs,
     });
     const repo = githubRepoOf(options.remoteUrl);
     const ctx = (): UpstreamModuleContext => {
       const selectors = options.redactSelectors();
+      const evidence = projectEvidence(options.projectEvidence());
       return {
         repoRoot: deps.projectRoot,
         repo,
@@ -338,6 +507,7 @@ export const bridgeUpstream =
         },
         knownValues: options.knownValues(),
         ...(selectors === undefined ? {} : { redactSelectors: selectors }),
+        ...(evidence === undefined ? {} : { evidence }),
       };
     };
     const failed = (outcome: UpstreamModuleOutcome, what: string): void => {
@@ -353,7 +523,46 @@ export const bridgeUpstream =
         return Number.NaN;
       }
     };
+    const releasedFile = join(options.guardDir, RELEASED_FILE);
+    const released = (): string[] => {
+      try {
+        const value = JSON.parse(readPrivateFile(releasedFile) ?? "[]") as unknown;
+        return Array.isArray(value) ? value.filter((v): v is string => typeof v === "string") : [];
+      } catch {
+        return [];
+      }
+    };
     return {
+      onAutomaticRelease: async (release) => {
+        const target = release.automation.target;
+        // the run pushed to this project's remote: its PR can only open in that repo
+        if (repo === null || target.repo !== repo)
+          throw new Error(
+            `run ${release.run} pushed its work to ${repo ?? "a remote that is not on GitHub"}, but its issue is in ${target.repo}`,
+          );
+        if (release.pr !== undefined) {
+          if (release.specVerifier === "pending") return;
+          failed(
+            await module.completePullRequest(target.kind, release.pr, release.specVerifier, ctx()),
+            "the automatic run's PR",
+          );
+          return;
+        }
+        // one PR per pushed head: a release that runs again (an engine restart) opens no second
+        const key = [target.kind, target.repo, release.automation.fingerprint, release.head].join(
+          " ",
+        );
+        const seen = released();
+        if (seen.includes(key)) return;
+        const input = automaticPrInput(
+          release,
+          options.evidenceSnapshot(release.run),
+          options.vtcVersion,
+        );
+        failed(await module.openPullRequest(input, ctx()), "the automatic run's PR");
+        ensurePrivateDir(options.guardDir);
+        writePrivateFile(releasedFile, `${JSON.stringify([...seen, key].slice(-RELEASED_MAX))}\n`);
+      },
       onFact: async (fact) => {
         if (fact.target === "upstream" && fact.kind === "lookback") {
           const input = await options.lookbackPr(fact);

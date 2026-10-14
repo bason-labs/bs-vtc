@@ -10,11 +10,11 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   autoBranchName,
   MERGE_LEVEL_LEDGER,
+  parseEventLog,
   TaskPackSchema,
-  type AutomationRunRef,
-  type LeadAction,
-  type StartInput,
+  type VtcEvent,
 } from "@vtc/shared";
+import { automaticReleaseOf, projectRun } from "../../src/core/index.js";
 import { cleanupDirs, git, writeFile } from "../helpers/repo.js";
 import {
   authorTests,
@@ -23,17 +23,15 @@ import {
   createHarness,
   draft,
   only,
-  passFinalReview,
-  SPEC_ONE,
   spawns,
   spineFor,
+  SPEC_ONE,
   submitResult,
-  threatModel,
   verdictPass,
   workdir,
   type Harness,
-  type SpawnAction,
 } from "../helpers/engine-harness.js";
+import { drive, driveToRelease, frontHalf, ISSUE, REQUEST } from "../helpers/automatic-run.js";
 
 vi.setConfig({ testTimeout: 40_000 });
 afterEach(cleanupDirs);
@@ -49,84 +47,6 @@ const events = (h: Harness): Line[] =>
     .trim()
     .split("\n")
     .map((l) => JSON.parse(l) as Line);
-
-const ISSUE: AutomationRunRef = {
-  kind: "ci_failure",
-  fingerprint: "0123456789abcdef",
-  target: { kind: "project", repo: "acme/app" },
-  issue: 42,
-};
-
-const REQUEST: StartInput = {
-  request: "Fix the post-merge CI failure (#42)\n\nThe login test fails on main since F-1 merged.",
-  track: "feature",
-  repo: "existing",
-  has_ui: false,
-  risk_hints: [],
-};
-
-/**
- * DISCOVER, SPECIFY and DESIGN done as the roles would; returns the Planner's dispatch, or none
- * when the run stops before PLAN. `spine` writes the Architect's n-th spine (0-based).
- */
-const drive = async (
-  h: Harness,
-  spine: (n: number) => string = () => spineFor(SPEC_ONE),
-): Promise<{ planner: SpawnAction | undefined; seen: LeadAction[] }> => {
-  const seen: LeadAction[] = [];
-  let actions = (await h.engine.next({}, CLAUDE)).actions;
-  seen.push(...actions);
-  const carto = only(actions, "repo_cartographer");
-  writeFile(workdir(carto), ".vtc/research/repo-map/map.md", "# map\n");
-  actions = (
-    await submitResult(h, carto, {
-      exit: "done",
-      artifacts: [{ type: "repo_map", path: ".vtc/research/repo-map/map.md" }],
-    })
-  ).actions;
-  seen.push(...actions);
-  const ba = only(actions, "ba");
-  writeFile(workdir(ba), ".vtc/spec/spec.md", SPEC_ONE);
-  actions = (
-    await submitResult(h, ba, {
-      exit: "done",
-      artifacts: [{ type: "spec", path: ".vtc/spec/spec.md" }],
-    })
-  ).actions;
-  seen.push(...actions);
-  const pending = spawns(actions);
-  const done = new Set<string>();
-  let planner: SpawnAction | undefined;
-  let architect = 0;
-  for (let step = pending.shift(); step !== undefined; step = pending.shift()) {
-    if (done.has(step.action_id)) continue;
-    done.add(step.action_id);
-    if (step.role === "planner") {
-      planner = step;
-      continue;
-    }
-    if (step.role === "security") actions = await threatModel(h, step);
-    else {
-      writeFile(workdir(step), ".vtc/architecture/spine.md", spine(architect));
-      architect += 1;
-      actions = (
-        await submitResult(h, step, {
-          exit: "done",
-          artifacts: [{ type: "architecture", path: ".vtc/architecture/spine.md" }],
-        })
-      ).actions;
-    }
-    seen.push(...actions);
-    pending.push(...spawns(actions));
-  }
-  return { planner, seen };
-};
-
-const frontHalf = async (h: Harness): Promise<{ planner: SpawnAction; seen: LeadAction[] }> => {
-  const { planner, seen } = await drive(h);
-  if (planner === undefined) throw new Error(`no planner: ${JSON.stringify(seen.at(-1))}`);
-  return { planner, seen };
-};
 
 /** A spine that maps no requirement to a component: the DESIGN check fails. */
 const UNMAPPED_SPINE = "# spine\n\nNo requirement map yet.\n";
@@ -252,20 +172,7 @@ describe("automatic runs (AD-27 rule 2)", () => {
   it("pushes only to its vtc/auto branch and opens no unlabelled, evidence-less PR (AD-27 rules 1, 2, 3 and 6, H-8)", async () => {
     const h = createHarness({ project: { merge_level: 2 } });
     await h.engine.startAutomatic(REQUEST, ISSUE, CLAUDE);
-    const { planner } = await frontHalf(h);
-    const planned = await submitResult(h, planner, {
-      exit: "done",
-      tasks: [draft("T-1")] as never,
-    });
-    if (!planned.accepted) throw new Error("plan rejected");
-    await h.engine.settle();
-    await authorTests(h, only((await h.engine.next({}, CLAUDE)).actions, "qa"));
-    await build(h, only((await h.engine.next({}, CLAUDE)).actions, "engineer"));
-    const verifier = only((await h.engine.next({}, CLAUDE)).actions, "spec_verifier");
-    await verdictPass(h, verifier, "src/t-1/impl.ts");
-    await h.engine.settle();
-    await passFinalReview(h);
-    await h.engine.next({}, CLAUDE);
+    await driveToRelease(h);
     expect(h.engine.status({}).run.finished_at).toBeDefined();
     const branch = autoBranchName(ISSUE.kind, ISSUE.fingerprint);
     expect(branch).toBe("vtc/auto/ci_failure/01234567");
@@ -291,6 +198,64 @@ describe("automatic runs (AD-27 rule 2)", () => {
       .map((e) => e.data.to);
     expect(statuses.at(-1)).toBe("merged");
     expect(statuses).not.toContain("done");
+    await h.release();
+  });
+
+  it("its release push is what the upstream module opens the draft PR from: the pushed head, the issue and the Spec-Verifier verdict (AD-27 rules 2 and 6)", async () => {
+    const h = createHarness({ project: { merge_level: 2 } });
+    await h.engine.startAutomatic(REQUEST, ISSUE, CLAUDE);
+    await driveToRelease(h);
+    const run = h.engine.status({}).run.id;
+    const log = parseEventLog(
+      readFileSync(join(h.repo, `.vtc/runs/${run}/events.jsonl`), "utf8"),
+    ).events;
+    // each event read against the run as it was right after it (as the daemon's listener does)
+    const releases = log.flatMap((e, i) => {
+      const release = automaticReleaseOf(projectRun(log.slice(0, i + 1)), e);
+      return release === null ? [] : [release];
+    });
+    // the pushes after each merge are no release: only the one after Final Review passed
+    expect(log.filter((e) => e.type === "branch.pushed").length).toBeGreaterThan(1);
+    expect(releases).toHaveLength(1);
+    const [release] = releases;
+    const branch = autoBranchName(ISSUE.kind, ISSUE.fingerprint);
+    const feature = h.engine.status({}).features[0];
+    expect(release).toMatchObject({
+      run,
+      feature: "F-1",
+      automation: ISSUE,
+      head: git(h.remote, "rev-parse", `refs/heads/${branch}`).trim(),
+      title: feature?.title,
+      specVerifier: "pass",
+      change: "non_ui",
+    });
+    expect(release?.request).toContain("Fix the post-merge CI failure (#42)");
+    expect(release?.tasks.map((t) => t.id)).toEqual(["T-1"]);
+    expect(release?.steps.find((s) => s.step === 3)?.status).toBe("pass");
+    expect(release?.gateReport?.reason).toBe("final_review");
+    expect(release?.pr).toBeUndefined();
+    // read again later, it names the PR the module opened for this issue meanwhile
+    const push = log.findLast((e) => e.type === "branch.pushed") as VtcEvent;
+    const opened: VtcEvent = {
+      ...push,
+      seq: (log.at(-1)?.seq ?? 0) + 1,
+      type: "upstream.pr_opened",
+      data: {
+        target: ISSUE.target,
+        kind: ISSUE.kind,
+        fingerprint: ISSUE.fingerprint,
+        number: 77,
+        url: "https://github.com/acme/app/pull/77",
+        branch,
+        issue: 42,
+        evidence: "complete",
+      },
+    };
+    expect(automaticReleaseOf(projectRun([...log, opened]), push)?.pr).toBe(77);
+    // a run the human asked for has no automatic release
+    const human = projectRun(log);
+    human.automation = null;
+    expect(automaticReleaseOf(human, push)).toBeNull();
     await h.release();
   });
 

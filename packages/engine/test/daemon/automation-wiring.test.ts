@@ -16,6 +16,7 @@ import {
   type VtcEvent,
 } from "@vtc/shared";
 import type {
+  AutomaticRelease,
   AutomationFact,
   CreateUpstream,
   Engine,
@@ -25,6 +26,7 @@ import type {
 import { isGitHubRemote, wireAutomation } from "../../src/daemon/automation.js";
 import { cleanupDirs, tempDir } from "../helpers/repo.js";
 import { CLAUDE, createHarness, type Harness } from "../helpers/engine-harness.js";
+import { driveToRelease, ISSUE, REQUEST as AUTO_REQUEST } from "../helpers/automatic-run.js";
 
 vi.setConfig({ testTimeout: 30_000 });
 afterEach(cleanupDirs);
@@ -510,6 +512,51 @@ describe("automation wiring (AD-27 rules 7 and 8)", () => {
     );
     await wiring.idle();
     expect(sweeps).toBe(1);
+    await wiring.close();
+    await h.release();
+  });
+
+  it("hands an automatic run's release to the module once, for its draft PR (AD-27 rules 2 and 6)", async () => {
+    const h = createHarness({ project: { merge_level: 2 } });
+    const releases: AutomaticRelease[] = [];
+    const create: CreateUpstream = () => ({
+      onFact: () => Promise.resolve(),
+      onAutomaticRelease: (release) => {
+        releases.push(release);
+        return Promise.resolve();
+      },
+    });
+    const wiring = wireAutomation(
+      h.engine,
+      { repoRoot: h.repo, vtcHome: h.home, automation: AUTOMATION, now: () => h.clock },
+      { githubRemote: true, createUpstream: create },
+    );
+    await h.engine.startAutomatic(AUTO_REQUEST, ISSUE, CLAUDE);
+    await driveToRelease(h);
+    await wiring.idle();
+    expect(releases).toHaveLength(1);
+    expect(releases[0]).toMatchObject({ automation: ISSUE, feature: "F-1", specVerifier: "pass" });
+    await wiring.close();
+    await h.release();
+  });
+
+  it("a release the module failed on is an engine notice, not a lost error", async () => {
+    const h = createHarness({ project: { merge_level: 2 } });
+    const create: CreateUpstream = () => ({
+      onFact: () => Promise.resolve(),
+      onAutomaticRelease: () => Promise.reject(new Error("gh exploded")),
+    });
+    const wiring = wireAutomation(
+      h.engine,
+      { repoRoot: h.repo, vtcHome: h.home, automation: AUTOMATION, now: () => h.clock },
+      { githubRemote: true, createUpstream: create },
+    );
+    await h.engine.startAutomatic(AUTO_REQUEST, ISSUE, CLAUDE);
+    await driveToRelease(h);
+    await wiring.idle();
+    expect(h.engine.notices.join("\n")).toMatch(
+      /could not open the PR of run .* \(issue #42\): gh exploded/,
+    );
     await wiring.close();
     await h.release();
   });

@@ -752,11 +752,11 @@ const pushAutomatic = async (
  * An automatic run (`run.started.automation`; AD-27 rules 1, 2, 3 and 6, H-8) never goes through
  * the Level-2 seam: its work is pushed through engine git's `GitPlumbing` (never forced, never to
  * the default branch) to `autoBranchName(kind, fingerprint)`, its only remote branch, and the
- * engine opens no PR for it. Its draft PR is the upstream module's: `AutoPullRequestService`
- * applies `vtc:auto` and the kind's label (so dedupe and the per-kind cap see it), and opens
- * nothing without an `EvidenceManifest`. The module takes no automatic run's release yet (a
- * contract proposal to the upstream team), so until it does the work waits on that branch and its
- * tasks stay `merged` (no open PR includes them).
+ * engine opens no PR for it. Its draft PR is the upstream module's: the daemon hands the release
+ * push (`automaticReleaseOf`) to the module, whose `AutoPullRequestService` applies `vtc:auto` and
+ * the kind's label (so dedupe and the per-kind cap see it), opens nothing without an
+ * `EvidenceManifest`, and marks the PR ready on the Spec Verifier's pass. The engine does not see
+ * that PR as `Feature.pr`, so the run's merged tasks stay `merged`.
  */
 export const pushFeature = async (
   k: Kernel,

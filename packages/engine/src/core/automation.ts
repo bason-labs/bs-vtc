@@ -19,6 +19,7 @@ import {
   type AutomationRunRef,
   type AutomationSettings,
   type AutoTargetKind,
+  type GateReport,
   type HostId,
   type ParkReason,
   type Scorecard,
@@ -29,6 +30,7 @@ import {
 import type { z } from "zod";
 import type { EventDraft } from "./event-log.js";
 import { PARSE_FAILURE_PREFIX, type RunState } from "./state.js";
+import { featureHasUi } from "./ui.js";
 
 /** Upper bounds of the report (`AutomationReportSchema`). */
 const MAX_ITEMS = 500;
@@ -522,6 +524,113 @@ export const costRegressionFacts = (
   return out;
 };
 
+// ------------------------------------------------- an automatic run's release
+
+/**
+ * An automatic run's release (AD-27 rules 2 and 6, H-8): the head its release pushed to its
+ * `vtc/auto` branch, which the upstream module opens the draft PR for (`vtc:auto` and the kind's
+ * label, evidence first, marked ready on the Spec Verifier's pass). The engine opens no PR for an
+ * automatic run itself (`pushFeature`).
+ */
+export interface AutomaticRelease {
+  readonly run: string;
+  readonly feature: string;
+  /** The run's issue (`run.started.automation`). */
+  readonly automation: AutomationRunRef;
+  /** The commit the release pushed to `autoBranchName(kind, fingerprint)`. */
+  readonly head: string;
+  /** The feature's title and the run's request (its issue). */
+  readonly title: string;
+  readonly request: string;
+  /** The feature's tasks that were not dropped, with their risk tags. */
+  readonly tasks: readonly {
+    readonly id: string;
+    readonly title: string;
+    readonly risk_tags: readonly string[];
+  }[];
+  /** Final Review step 3 (`pending`: no Spec-Verifier result, so the PR stays a draft). */
+  readonly specVerifier: "pass" | "fail" | "pending";
+  /** The Final Review results, step by step. */
+  readonly steps: readonly { readonly step: number; readonly status: string }[];
+  /** UI work adds before/after evidence; anything else the gate report (D-ce). */
+  readonly change: "ui" | "non_ui";
+  /** The feature's last Final Review gate run. */
+  readonly gateReport?: GateReport;
+  /** The PR the module already opened for this issue in this run (`upstream.pr_opened`). */
+  readonly pr?: number;
+  readonly startedAt: string;
+  readonly at: string;
+}
+
+/**
+ * Pure: the release `event` is, or `null`. A release is a `branch.pushed` of an automatic run's
+ * feature after the feature last passed Final Review (`ready_to_ship`), while it still is; the
+ * pushes after each merge come before that and are none. Reads `state` as of `event` or later.
+ */
+export const automaticReleaseOf = (state: RunState, event: VtcEvent): AutomaticRelease | null => {
+  const automation = state.automation;
+  if (automation === null || event.type !== "branch.pushed" || event.feature === undefined)
+    return null;
+  const pushed = parse("branch.pushed", event);
+  const feature = state.features.get(event.feature);
+  if (pushed === null || feature?.status !== "ready_to_ship") return null;
+  const passed = state.events.findLast(
+    (e) =>
+      e.type === "feature.status_changed" &&
+      e.feature === feature.id &&
+      (e.data as { to?: unknown }).to === "ready_to_ship",
+  );
+  if (passed === undefined || passed.seq > event.seq) return null;
+  const steps = new Map<number, string>();
+  for (const e of state.events) {
+    if (e.type !== "final_review.step_finished" || e.feature !== feature.id || e.seq > event.seq)
+      continue;
+    const step = parse("final_review.step_finished", e);
+    if (step !== null) steps.set(step.step, step.status);
+  }
+  const verifier = steps.get(3);
+  let pr: number | undefined;
+  for (const e of state.events) {
+    if (e.type !== "upstream.pr_opened") continue;
+    const v = parse("upstream.pr_opened", e);
+    if (
+      v !== null &&
+      v.fingerprint === automation.fingerprint &&
+      v.target.kind === automation.target.kind &&
+      v.target.repo === automation.target.repo
+    )
+      pr = v.number;
+  }
+  const tasks = feature.tasks.flatMap((id) => {
+    const task = state.tasks.get(id);
+    return task === undefined || task.status === "dropped"
+      ? []
+      : [{ id: task.id, title: task.title, risk_tags: task.risk_tags }];
+  });
+  const gateReport = state.gateReports
+    .filter(
+      (r) =>
+        r.seq < event.seq && r.report.reason === "final_review" && r.report.feature === feature.id,
+    )
+    .at(-1)?.report;
+  return {
+    run: state.id,
+    feature: feature.id,
+    automation,
+    head: pushed.commit,
+    title: feature.title,
+    request: state.request,
+    tasks,
+    specVerifier: verifier === "pass" ? "pass" : verifier === "fail" ? "fail" : "pending",
+    steps: [...steps].sort(([a], [b]) => a - b).map(([step, status]) => ({ step, status })),
+    change: featureHasUi(state, feature.id) ? "ui" : "non_ui",
+    ...(gateReport === undefined ? {} : { gateReport }),
+    ...(pr === undefined ? {} : { pr }),
+    startedAt: state.run.started_at,
+    at: event.ts,
+  };
+};
+
 // ------------------------------------------------------------- daily summary
 
 /** The `upstream.*` and `automation.skipped` events (D-ca). */
@@ -587,6 +696,11 @@ export interface UpstreamWiringDeps {
 export interface UpstreamWiring {
   /** One fact that may raise an issue or PR; the module decides (dedupe, caps, privacy). */
   onFact(fact: AutomationFact): Promise<void>;
+  /**
+   * An automatic run released its work to its `vtc/auto` branch: the module opens its draft PR
+   * (or marks the one it opened ready) from the pushed head, with evidence (AD-27 rules 2 and 6).
+   */
+  onAutomaticRelease?(release: AutomaticRelease): Promise<void>;
   /** The periodic sweep (auto-close of quiet issues, the write queue); optional. */
   sweep?(): Promise<void>;
   close?(): Promise<void>;

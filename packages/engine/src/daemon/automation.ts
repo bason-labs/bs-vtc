@@ -13,7 +13,9 @@
  * - it relays the daily summary to the Lead once per UTC day (`NextResult.notices`);
  * - after Lookback rewrites the scorecards at a run's end, it hands over each role's cost
  *   regression against its previous prompt version (`costRegressionFacts`), once per pair of
- *   versions and metric.
+ *   versions and metric;
+ * - an automatic run's release (`automaticReleaseOf`: its work pushed to its `vtc/auto` branch
+ *   after Final Review) goes to the module, which opens the run's draft PR with evidence.
  * Without `EngineDeps.automation` nothing is evaluated (the Automation view says why).
  */
 import { join } from "node:path";
@@ -33,6 +35,7 @@ import {
 } from "@vtc/shared";
 import {
   appendPrivateFile,
+  automaticReleaseOf,
   automationDailySummary,
   automationFacts,
   costRegressionFacts,
@@ -40,6 +43,7 @@ import {
   isAutomationEvent,
   readPrivateFile,
   writePrivateFile,
+  type AutomaticRelease,
   type AutomationFact,
   type CreateUpstream,
   type Engine,
@@ -287,6 +291,21 @@ export const wireAutomation = (
       );
     }
   };
+  /**
+   * An automatic run's release (AD-27 rules 2 and 6): the module opens its draft PR from the
+   * pushed head, with evidence, or marks the one it opened ready. The module checks the settings
+   * (`automation.prs`, `vtc pause`, the upstream opt-outs) and records a skip itself.
+   */
+  const released = async (release: AutomaticRelease): Promise<void> => {
+    if (upstream?.onAutomaticRelease === undefined) return;
+    try {
+      await upstream.onAutomaticRelease(release);
+    } catch (error) {
+      engine.notice(
+        `automation could not open the PR of run ${release.run} (issue #${String(release.automation.issue)}): ${error instanceof Error ? error.message : String(error)}`,
+      );
+    }
+  };
   const listener = (event: VtcEvent): void => {
     if (automation === undefined) return;
     if (event.type === "run.started") {
@@ -297,10 +316,12 @@ export const wireAutomation = (
     }
     const state = engine.states().find((s) => s.id === event.run);
     const facts = state === undefined ? [] : automationFacts(state, event);
+    const release = state === undefined ? null : automaticReleaseOf(state, event);
     // handled after the emit that raised them, one at a time
     queue = queue.then(async () => {
       maybeSummarise();
       for (const fact of facts) await handle(fact);
+      if (release !== null) await released(release);
     });
   };
   const unsubscribe = engine.onEvent(listener);
