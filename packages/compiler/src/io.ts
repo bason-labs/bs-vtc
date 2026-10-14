@@ -35,7 +35,7 @@ const decoder = new TextDecoder("utf-8", { fatal: true });
  * the open descriptor, so a file swapped for a link after the directory walk saw it is refused
  * rather than followed. Returns undefined for anything that is not a regular file.
  */
-const readRegularFile = (path: string): Buffer | undefined => {
+export const readRegularFile = (path: string): Buffer | undefined => {
   let fd: number;
   try {
     fd = openSync(path, constants.O_RDONLY | constants.O_NOFOLLOW);
@@ -112,7 +112,7 @@ const lstatOrUndefined = (path: string): ReturnType<typeof lstatSync> | undefine
  * Throws unless every directory on the way from `root` to `dir` is a real directory inside `root`
  * (or does not exist yet): removing or writing through a symbolic link would act outside the repo.
  */
-const assertRealDirectoryPath = (root: string, dir: string): void => {
+export const assertRealDirectoryPath = (root: string, dir: string): void => {
   const realRoot = realpathSync(root);
   let current = root;
   for (const part of dir.split("/")) {

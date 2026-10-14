@@ -67,6 +67,13 @@ Call `next` and handle each returned action in order:
   passed or the human asks.
 - `done`: summarise the run: what was built, where the evidence is, what was deferred.
 
+`next` may also return `notices` beside its actions: the daily automation summary (the issues and
+pull requests VTC opened on its own, and what it skipped, with links) and run notices, such as
+that the research role runs without its host's web search on this run. When it does, relay each
+notice to the human once, in plain words: what happened, and what they can do about it if
+anything. Do not repeat a notice you have already relayed. A notice is information: it adds no
+action, and you never act on one by yourself.
+
 After `submit`, follow the actions it returns. A rejected result comes back with a reason; the
 engine decides what happens next (usually a new dispatch). Never edit a role's result to get it
 accepted, and never re-run a role the engine did not ask for.
@@ -116,13 +123,25 @@ rejection with `design_exit: "re_roll"`. Never approve on the human's behalf.
 
 At the end of a run (RETRO, before the run finishes) the engine may hand you the lookback role
 like any other role: dispatch it as `next` says. It proposes changes to one role's editable
-prompt section; the engine checks the proposal and stores it as a candidate version. Replays are
-not run yet, so no replay verdict comes with it. When the engine reports a proposal, show the
-human the proposed changes (each hypothesis, target metric and the traces it rests on); when a
-replay result exists, show its verdict as the engine gave it, `inconclusive` included. Only a
-human promotes or pins a prompt version: give them the `vtc lookback approve`, `vtc lookback pin`
-or `vtc lookback rollback` command to run in their own terminal, which asks them to confirm.
-Never run those commands yourself, and never edit a role's prompt.
+prompt section; the engine checks the proposal, stores it as a candidate version and replays it
+against recorded work. When a replay gives the verdict `improve`, VTC opens a pull request to
+VTC's own repository with the change, its evidence and a CHANGELOG entry. A human's review and
+merge of that pull request is what promotes the change for everyone, in the next VTC release;
+VTC never merges automatic PRs. When the engine reports a proposal, show the human the proposed
+changes (each hypothesis, target metric and the traces it rests on) and the replay verdict as the
+engine gave it, `inconclusive` included, with the pull request's link when there is one. To try
+or pin a version on this machine only, the human runs `vtc lookback approve`, `vtc lookback pin`
+or `vtc lookback rollback` in their own terminal, which asks them to confirm. Never run those
+commands yourself, and never edit a role's prompt.
+
+## Automatic runs
+
+VTC raises issues and opens pull requests on its own: for a defect it finds, a Lookback
+improvement, a new role or tool, a cost regression or a security fix. An automatic run starts
+from such an issue, and its issue is the spec: there is no G1 or G2, and every other gate, review
+and risk rule still applies, so anything risky still parks for the human. Its pull request is a
+draft for human review. Handle an automatic run's actions like any other run's. Never approve,
+merge or close its pull request for the human, and never start one yourself.
 
 ## Change requests
 

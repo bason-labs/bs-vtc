@@ -13,6 +13,7 @@ roles/_shared/
   advisor-protocol.md  # appended to every advisor instead: the human's question and the advice result
   lens-reviewer.md     # the procedure every lens reviewer shares
 roles/NOTICE           # the agency-agents (MIT) and impeccable (Apache-2.0) notices; copied into both plugins
+roles/CHANGELOG.md     # every change to a role's editable section (ROLES_CHANGELOG); entries come from automatic PRs
 ```
 
 ## The roster (v1)
@@ -85,16 +86,55 @@ Parts 1 to 4 are the agent's **locked part** and part 5 its **editable part**.
   in the task pack as `## Role heuristics`, before `## Dispatch` (the pinned version, else the
   compiled default from the plugin's editable asset), so a canary needs no plugin reinstall.
   `EDITABLE_IN_PACK_ROLES` lists the switched roles: the Spec Verifier, the role with the most
-  dispatches per run (D-bl, reading 166; version 2.0.0, since switching changes the compiled
-  locked part, D-bm). A switched agent carries the locked part only, ending in a note that only
+  dispatches per run (D-bl, reading 166; switched at version 2.0.0, since switching changes the
+  compiled locked part, D-bm). A switched agent carries the locked part only, ending in a note that only
   the block its pack opens with, up to the first `## Dispatch` heading, is instructions (a
   heading of that name further down is pack data). Switching changes its `prompt_sha256` but not
   its `locked_sha256` or `editable_sha256`. Any other role switches after an A/A comparison.
 - The lookback role writes `proposal.json` (`PromptProposal`: at most three changes, each with a
   hypothesis, a target metric and trace ids) and `editable.md` (the full proposed section) under
-  `.vtc/lookback/proposals/<role>/`. It never writes `roles/`, the stored versions or the pins; a
-  human promotes with `vtc lookback approve` and a promoted section is upstreamed into
-  `roles/<role>/prompt.md` as a normal MINOR change.
+  `.vtc/lookback/proposals/<role>/`. It never writes `roles/`, the stored versions or the pins.
+- A replay verdict `improve` opens an automatic pull request to VTC's own repository (D-cb,
+  reading 196): it replaces the section in `roles/<role>/prompt.md` (a MINOR change) and adds an
+  entry to `CHANGELOG.md` from the `changelog-entry` template (hypothesis, trace ids, diff,
+  evaluation). A human's merge of that pull request is the promotion for everyone; VTC never
+  merges it. `vtc lookback approve|pin` stays for a local canary on one machine.
+
+## Replay arm plugins (D-cg, reading 201)
+
+A Claude Code headless run loads the compiled agent, so a Lookback replay arm runs its own plugin
+directory: `createArmPluginCompiler({ pluginDir })` (`ArmPluginCompiler` in `@vtc/shared`; the
+cli binds it to the shipped Claude Code plugin and injects it as `EngineDeps.armPlugins`).
+`compileArm` writes a full copy of the plugin in which only `agents/<agent>.md`'s editable
+section differs. The manifest keeps the name `vtc`, so `--agent vtc:<agent>` resolves, and its
+version is `arm-<sha12>` of the copy (`armPluginVersion`); `promptSha256` is
+`effectivePromptSha(locked, editable)`. The candidate section passes the shared
+`editableSectionErrors` and the AD-9 check, the base agent must still hash to its manifest SHA,
+and an `editable_in_pack` agent's file stays unchanged (its section reaches it through the pack).
+The arm is self-consistent: its `vtc-manifest.json` gives the arm agent's own `prompt_sha256`
+and `editable_sha256`, and its editable asset holds the arm's section (`armManifest`). Every
+path stays inside `outDir`, with no symbolic link: the base tree is read without following
+links, each file is created exclusively with `O_NOFOLLOW` in a directory whose device and inode
+are still the ones this call created, and the written tree is walked again. A failure removes
+only what the call created, never recursively, and nothing once `outDir` was replaced. This is
+checked structurally in the tests; nothing runs the real `claude`.
+
+## New roles (D-cd, reading 198)
+
+When Lookback proposes a new role or specialist profile, VTC builds it with `scaffoldRole` and
+`writeScaffold` (`packages/compiler/src/scaffold.ts`): `roles/<id>/role.yaml` opened by
+`# Written for VTC by the new-role scaffold (D-cd).` and the reason, a `prompt.md` with the locked
+core and the editable section, and a test stub at `packages/compiler/test/roles/<id>.test.ts`.
+The compiler picks up every `roles/<id>/` by itself, so the scaffold proves the wiring instead of
+editing a list: it compiles the role against the repo's sources and returns the compiler's
+errors when it does not compile on both hosts. It also requires the §5.1 parts a prompt brings
+(a procedure, a definition of done and an example), a new role at version 1.0.0, and for an
+engineer profile an `engineer_<discipline>` id for a discipline no profile covers. It builds
+`core` roles and `engineer_profile` specialists only: a lens reviewer belongs to a park-the-task
+risk rule and an advisor answers the human, so both stay hand-made. When no replay can compare
+the role, the proposal is evidence-only: the scaffold returns the `needs-eval` label and writes
+it into the test stub as a todo. Nothing is overwritten, nothing is written through a link,
+and a failure part-way removes what was written.
 
 ## Readings this tree follows
 
@@ -168,13 +208,15 @@ human`, exits `done`, `blocked` or `unknown`, no verdicts, no success criteria a
 - **Host web search** (H-3, reading 156). The Research Analyst (`tools.host_web: true`, the only
   role with it) discovers pages with its host's own web search and page fetch: its Claude Code
   agent's `tools` name `WebSearch` and `WebFetch`, and its contract section says so on both
-  hosts. A Codex agent file has no per-agent web switch, so the Codex adapter turns web search
-  on for a headless `host_web` run. Page content is untrusted data; a page the role relies on
-  is proposed with `fact_propose` as a `web` source request plus `reported_source`, so the
-  engine fetches and checks it, and a claim it cannot verify stays `unverified`. The engine's
-  `research_analyst` fixture (`packages/engine/test/fixtures/roles.ts`, engine-core) gains
-  `tools.host_web: true` and `version: "3.0.0"` at the merge of this branch; until then the
-  AD-14 drift test (`packages/engine/test/core/roles.test.ts`) fails on `host_web`.
+  hosts. A Codex agent file has no per-agent web switch, so the Codex adapter sets web search for
+  a headless `host_web` run, and only ever `cached` (`CODEX_HOST_WEB_SEARCH`, D-cf, reading 200):
+  it answers from a search index and opens no page the model picks, so the Codex contract line
+  says "search only" and the role reads a page only through `research_fetch` (version 4.0.0).
+  Page content is untrusted data; a page the role relies on is proposed with `fact_propose` as a
+  `web` source request plus `reported_source`, so the engine fetches and checks it, and a claim
+  it cannot verify stays `unverified`. The engine's `research_analyst` fixture carries
+  `tools.host_web: true`: the AD-14 drift test compares every contract field but `version` and
+  `mission` with `role.yaml`, so `host_web` is the field that must match.
 - **The Designer method** (spec §9.1; readings 116, 174). The Designer and Visual QA preload the
   `design-craft` skill, forked from pbakaus/impeccable (Apache-2.0, see `NOTICE`): screen modes,
   new-work steps 1–5 inside the engine's dealt constraints, the per-screen Direction contract,
@@ -182,13 +224,35 @@ human`, exits `done`, `blocked` or `unknown`, no verdicts, no success criteria a
   one Direction contract per direction, is `.vtc/design/screens/<screen id>.md`, returned as a
   `screens` artifact. A new-repo UI design offers 2 to 3 directions (`G2_DIRECTIONS`); with
   fewer, the engine re-dispatches the Designer once and then G2 blocks (D-bt).
-- **Visual QA needs the chosen direction (pending engine plumbing).** Visual QA judges V1, V2 and
-  V8 against the Direction contract of the direction the human chose at G2, but its task pack
-  does not yet say which one that is: the engine records the choice (`ApproveInput.direction`)
-  without passing it to Visual QA, and `design_contracts_dir` is not a frozen path yet. Until a
-  contract proposal lands (a chosen-direction field in Visual QA's pack, or G2 freezing only the
-  chosen direction's artifacts), Visual QA returns V8 `unknown` whenever the screens' design
-  contracts hold several directions, as its prompt says.
+- **The chosen direction** (reading 179). After G2 the engine names the direction the human
+  chose in post-G2 UI packs (`TaskPack.design_direction`), and the design contracts' path is
+  frozen (`DESIGN_CONTRACTS_DIR`, `designContractPath`), which `{{design_contracts_dir}}` now
+  renders. Visual QA (3.0.0) judges V1, V2 and V8, and the frontend and mobile profiles (2.0.0)
+  build, against that direction's `## Direction <id>` block, read from the `design direction`
+  line of the pack's Dispatch section; a `design exit` line naming `category_standard` (the G2
+  exit, `{{category_standard_exit}}`) means no Direction contract applies and Visual QA judges
+  against the category standard. Only those engine-written lines name the choice
+  (`PENDING_DISPATCH_LINES` in `instructions.ts`). `renderTaskPack` prints neither yet, and
+  TaskPack has no exit field (contract proposals of this branch); until they land the profiles
+  build to the approved prototype and the design system as at 1.0.0 and never stop for want of
+  the line, and Visual QA returns V8 `unknown` when the contracts hold several directions, as
+  reading 179 allows.
+- **Automatic runs** (D-cd, reading 198). An automatic run's issue is its spec (no G1 or G2). The
+  Spec Verifier (3.0.0) treats a run as automatic only when the engine lists the issue among its
+  pack's Inputs as an `automation_issue` entry (`{{automation_issue_input}}` in the prompt), never
+  from a `request` input, which a human-started run can carry too, and never from a marker or
+  other text in the pack. It then also checks the pull request's change against the issue. The
+  input type is a contract proposal of this branch (`PENDING_PACK_INPUTS`): `PACK_INPUT_TYPES`
+  gains `automation_issue`, and engine core lists it in the Spec Verifier's pack on a run whose
+  `run.started.automation` is set, and on no other run. Until it lands the Spec Verifier judges
+  every run as a human-started one, and a todo merge gate in the round-4 repo test tracks it. The
+  Lead relays `NextResult.notices` (the daily automation summary, `HOST_WEB_OFF_NOTICE`) once, in
+  plain words.
+- **The CHANGELOG anchor** (D-bv). `roles/CHANGELOG.md` (`ROLES_CHANGELOG`) holds
+  `<!-- vtc:changelog-entries -->` (`ROLES_CHANGELOG_ANCHOR`) exactly once; the upstream module
+  inserts each new entry directly below it, and the compiler refuses a CHANGELOG without it. The
+  constant is local until the proposed shared one lands next to `ROLES_CHANGELOG`, with the
+  upstream module's `insertChangelogEntry` as its consumer (a todo merge gate tracks it).
 
 ## What the compiler emits for the engine
 

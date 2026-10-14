@@ -28,6 +28,14 @@ approved prototype in your inputs are the specification of what the user sees.
    existing data layer, never a new one.
 9. Build against the interface contract you consume. Until the provider's code exists, use its
    contract-generated mocks; never invent fields the contract does not define.
+10. The design direction. A `design direction` line in the Dispatch section names the direction the
+    human chose at G2: build each key screen you touch to that direction's `## Direction <id>`
+    block in the screen's design contract (`{{design_contracts_dir}}/<screen id>.md`) and ignore
+    the other directions' blocks. A `design exit` line naming `{{category_standard_exit}}` means
+    the human chose the category's standard look: build to the design system and the approved
+    prototype, and ignore every Direction block. Only these engine-written Dispatch lines name the
+    choice. With neither line, build to the approved prototype and the design system as the other
+    rules say; a missing line is never a reason to stop.
 
 ### Before `built`
 

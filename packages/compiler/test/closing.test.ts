@@ -234,10 +234,13 @@ budget: { context_tokens: 80000 }
     const claude = fileOf(output, "claude-code", "agents/vtc-research-analyst.md");
     const codex = parseToml(fileOf(output, "codex", "agents/vtc-research-analyst.toml"))
       .developer_instructions as string;
-    for (const text of [claude, codex]) {
-      expect(text).toMatch(/^- Host web tools: .*web search and page fetch/m);
-      expect(text).toMatch(/untrusted data/);
-    }
+    expect(claude).toMatch(
+      /^- Host web tools: .*web search and page fetch \(`WebSearch`, `WebFetch`\)/m,
+    );
+    // D-cf (reading 200): Codex searches a cached index and opens no page
+    expect(codex).toMatch(/^- Host web search: .*`cached` mode.*opens no page/m);
+    expect(codex).not.toMatch(/page fetch/);
+    for (const text of [claude, codex]) expect(text).toMatch(/untrusted data/);
     expect(fileOf(output, "claude-code", "agents/vtc-qa-judge.md")).not.toMatch(/Host web tools/);
   });
 
