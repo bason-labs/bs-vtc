@@ -435,6 +435,7 @@ const run = async (
   whileDeciding?: () => void,
   editableInPack: EditableInPackOf = () => true,
   changesFiles: ChangesFilesOf = () => true,
+  armPlugins = true,
 ): Promise<{ code: number; out: string; err: string }> => {
   const { ctx, out, err } = capture(repo, home);
   const deps = (): GestureDeps => {
@@ -449,10 +450,13 @@ const run = async (
           },
         };
   };
-  const code = await createLookbackCommand(deps, lockedCore, editableInPack, changesFiles).run(
-    args,
-    ctx,
-  );
+  const code = await createLookbackCommand(
+    deps,
+    lockedCore,
+    editableInPack,
+    changesFiles,
+    armPlugins,
+  ).run(args, ctx);
   return { code, out: out.join("\n"), err: err.join("\n") };
 };
 
@@ -539,7 +543,13 @@ describe("vtc lookback approve|pin|rollback (AD-21 rule 3)", () => {
     });
     const start = await run(repo, home, ["approve", ...T, "--version", sha("d")]);
     expect(start.code, start.err).toBe(0);
-    expect(start.out).toMatch(/Start a canary of dddddddd .* half run aaaaaaaa/);
+    expect(start.out).toMatch(
+      /Start a local canary of dddddddd for engineer on claude-code on this machine, for this project: half its tasks \(by hash\) run it, half run aaaaaaaa/,
+    );
+    // D-cb (reading 196): the canary is local; the bs-vtc PR's merge promotes it for everyone
+    expect(start.out).toMatch(
+      /Promotion for everyone is the human's review and merge of the bs-vtc PR VTC opens for an improve verdict \(spine §5 reading 196\); this canary runs on this machine only\./,
+    );
     // the human sees the evidence, and where it comes from (a repo file roles can write)
     expect(start.out).toMatch(
       /evidence \(\.vtc\/lookback\/replays\/p-1\.json, a file in the repo: check it\): its trials, recomputed here, say improve with p = 0\.016 over 6 discordant tasks \(6 won by the candidate\), 6 tasks x 3 runs per arm, tokens \+4%, A\/A flip rate 0\.05; no lookback\.replay_finished event in the repo's logs records its hash, so it was not checked against the engine's file\./,
@@ -1037,13 +1047,13 @@ describe("vtc lookback pin|approve warn when the target cannot take a pin (readi
   });
 });
 
-describe("vtc lookback approve says when no canary can start (spine §5 readings 180 and 182(8))", () => {
-  it("on a Claude Code target that is a verdict role: no replay grades it, so no canary can start; pin still works", async () => {
+describe("vtc lookback approve says when no canary can start (spine §5 readings 201 and 202)", () => {
+  it("on a role that changes no file and no verdict grader scores: no replay, so no canary; pin still works", async () => {
     const repo = initVtcRepo();
     const home = tempHome();
-    writeVersion(home, sha("a"), { role: "spec_verifier" });
-    const args = ["--role", "spec_verifier", "--host", HOST, "--version", sha("a")];
-    const verdictRole: ChangesFilesOf = (t) => t.role !== "spec_verifier";
+    writeVersion(home, sha("a"), { role: "architect" });
+    const args = ["--role", "architect", "--host", HOST, "--version", sha("a")];
+    const readOnly: ChangesFilesOf = () => false;
     const approve = await run(
       repo,
       home,
@@ -1052,11 +1062,11 @@ describe("vtc lookback approve says when no canary can start (spine §5 readings
       noLockedCore,
       undefined,
       () => true,
-      verdictRole,
+      readOnly,
     );
     expect(approve.code).toBe(1);
     expect(approve.err).toMatch(
-      /vtc lookback: warning: no canary of spec_verifier on claude-code can start from a Claude-led run in this version: vtc-spec-verifier changes no file, so the gates would grade the same base for both arms.*\(spine §5 reading 180\)\. vtc lookback pin pins a version without a replay \(spine §5 reading 182\(8\)\)/,
+      /vtc lookback: warning: no canary of architect on claude-code can start in this version: vtc-architect changes no file and no verdict grader scores it, so no replay can grade it \(spine §5 readings 201 and 202\)\. vtc lookback pin pins a version without a replay/,
     );
     // the warning comes before the plan's own refusal, and the human is not asked
     expect(approve.err.indexOf("warning")).toBeLessThan(approve.err.indexOf("names no replay"));
@@ -1068,13 +1078,31 @@ describe("vtc lookback approve says when no canary can start (spine §5 readings
       noLockedCore,
       undefined,
       () => true,
-      verdictRole,
+      readOnly,
     );
     expect(pin.code, pin.err).toBe(0);
     expect(pin.err).not.toMatch(/no canary/);
   });
 
-  it("on a Claude Code target that is not editable_in_pack: a Claude-led trial runs its compiled agent", async () => {
+  it("not for a verdict role: the verdict grader replays the Spec Verifier (D-ch, reading 202)", async () => {
+    const repo = initVtcRepo();
+    const home = tempHome();
+    writeVersion(home, sha("a"), { role: "spec_verifier" });
+    const approve = await run(
+      repo,
+      home,
+      ["approve", "--role", "spec_verifier", "--host", HOST, "--version", sha("a")],
+      true,
+      noLockedCore,
+      undefined,
+      () => true,
+      (t) => t.role !== "spec_verifier",
+    );
+    expect(approve.err).not.toMatch(/no canary of/);
+    expect(approve.err).not.toMatch(/verdict role/);
+  });
+
+  it("not for a Claude Code target that is not editable_in_pack: its trials run their arm plugin (D-cg, reading 201)", async () => {
     const repo = initVtcRepo();
     const home = tempHome();
     writeVersion(home, sha("a"));
@@ -1087,9 +1115,61 @@ describe("vtc lookback approve says when no canary can start (spine §5 readings
       undefined,
       () => false,
     );
-    expect(r.err).toMatch(
-      /warning: no canary of engineer on claude-code can start from a Claude-led run in this version: vtc-engineer replays only on a run led from claude-code, where every dispatch loads its compiled agent/,
+    expect(r.err).not.toMatch(/no canary of/);
+    // the pin itself still cannot reach an in-session Claude dispatch (reading 176)
+    expect(r.err).toMatch(/warning: vtc-engineer on claude-code is not editable_in_pack/);
+  });
+
+  it("but warns for any Claude Code target while this build has no arm plugin compiler to build its arms", async () => {
+    const repo = initVtcRepo();
+    const home = tempHome();
+    writeVersion(home, sha("a"));
+    const args = ["approve", ...T, "--version", sha("a")];
+    const r = await run(
+      repo,
+      home,
+      args,
+      true,
+      noLockedCore,
+      undefined,
+      () => false,
+      () => true,
+      false,
     );
+    expect(r.err).toMatch(
+      /vtc lookback: warning: no canary of engineer on claude-code can start with this vtc build: each Claude Code replay arm of vtc-engineer runs its own compiled plugin \(D-cg, reading 201\), and this build has no arm plugin compiler, so its replay waits for the next RETRO\. vtc lookback pin pins a version without a replay/,
+    );
+    // an editable_in_pack Claude Code target replays through its arm plugin too; a Codex one does not
+    const home2 = tempHome();
+    writeVersion(home2, sha("b"));
+    const inPack = await run(
+      repo,
+      home2,
+      ["approve", ...T, "--version", sha("b")],
+      true,
+      noLockedCore,
+      undefined,
+      () => true,
+      () => true,
+      false,
+    );
+    expect(inPack.err).toMatch(
+      /vtc lookback: warning: no canary of engineer on claude-code can start with this vtc build: each Claude Code replay arm of vtc-engineer runs its own compiled plugin/,
+    );
+    const home3 = tempHome();
+    writeVersion(home3, sha("c"), { host: "codex" });
+    const codex = await run(
+      repo,
+      home3,
+      ["approve", "--role", ROLE, "--host", "codex", "--version", sha("c")],
+      true,
+      noLockedCore,
+      undefined,
+      () => false,
+      () => true,
+      false,
+    );
+    expect(codex.err).not.toMatch(/no canary of/);
   });
 
   it("says nothing for a role that changes files on a Codex-led run, nor for a switched one on Claude Code", async () => {

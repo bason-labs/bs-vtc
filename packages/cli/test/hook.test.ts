@@ -891,6 +891,7 @@ describe("against a live daemon with a role in flight", () => {
     repo = commitVtcConfig(initVtcRepo());
     home = tempHome();
     const parts = await buildEngineParts({
+      automation: null,
       repoRoot: repo,
       vtcHome: home,
       installToken: "k".repeat(43),

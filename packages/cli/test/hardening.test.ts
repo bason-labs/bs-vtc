@@ -461,6 +461,7 @@ describe("the gate sandbox (D-al, reading 69)", () => {
     const seen: Parameters<CreateGateRunner>[0][] = [];
     const build = async (vtcHome: string, allowUnsandboxed?: boolean) => {
       const parts = await buildEngineParts({
+        automation: null,
         repoRoot: initRepo(),
         vtcHome,
         installToken: TOKEN,
