@@ -63,7 +63,13 @@ export {
 } from "./views.js";
 export { projectGraph, taskDagGraph, taskNodeState, taskPipelineGraph } from "./graph.js";
 export { Engine, type EventListener } from "./engine.js";
-export { EngineError, type CallContext, type EngineCoreDeps, type RunHandle } from "./kernel.js";
+export {
+  EngineError,
+  type CallContext,
+  type EngineCoreDeps,
+  type RoleToolHandler,
+  type RunHandle,
+} from "./kernel.js";
 export {
   compiledRoleContracts,
   createRoleRegistry,

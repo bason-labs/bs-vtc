@@ -50,7 +50,8 @@ import {
 } from "./queries.js";
 import { frozenSpecItems, taskAcceptanceCriteria } from "./read-model.js";
 import { resolveModel, roleTier } from "./roles.js";
-import { installedLensRoles, reviewersFor } from "./router.js";
+import { crossFamilyHost } from "./cross-family.js";
+import { installedLensRoles, reviewersFor, slotMatches } from "./router.js";
 import { parkTask, setTaskStatus } from "./parking.js";
 import { parkEscalation } from "./escalations.js";
 import { recordDispatch, type DispatchRecord } from "./dispatch-guard.js";
@@ -72,6 +73,11 @@ export interface StepSpec {
   readonly task?: string;
   /** A feature-level step with no task: a Final Review reviewer (§6.7a steps 3–4). */
   readonly feature?: string;
+  /**
+   * A step the engine runs headless on this host whatever the Lead's: the cross-family reviewer
+   * (§12.4). It never becomes a Lead action.
+   */
+  readonly host?: HostId;
   readonly subject?: string;
   readonly tier?: ModelTier;
   readonly resume?: SessionRef;
@@ -187,12 +193,57 @@ const busyStep = (
       r.subject === step.subject,
   );
 
+/**
+ * The Architect's per-task step (§8.4): a task the Planner triaged `extends` gets a one-page design
+ * note, one triaged `changes` an ADR, which the engine then puts to the human as a change request
+ * on the frozen architecture (G2 is always approved before PLAN). The step runs in its own
+ * worktree like a front-half role, its subject the task. `done` once the Architect's result was
+ * accepted and no change request of it is open; `null` while it runs or waits for the human.
+ */
+export const architectTriageStep = (
+  k: Kernel,
+  h: RunHandle,
+  taskId: string,
+): StepSpec | "done" | null => {
+  const task = h.state.tasks.get(taskId);
+  if (
+    task === undefined ||
+    task.arch_triage === "fits" ||
+    k.deps.roles.get("architect") === undefined
+  )
+    return "done";
+  const filter = { role: "architect", subject: taskId };
+  if (busyStep(h, filter)) return null;
+  const accepted = [...h.state.roleRuns.values()].some(
+    (r) => r.role === "architect" && r.subject === taskId && r.status === "submitted",
+  );
+  if (accepted) {
+    const open = [...h.state.escalations.values()].some(
+      (e) => e.task === taskId && e.reason === "change_request" && e.answer === undefined,
+    );
+    return open ? null : "done";
+  }
+  const note = rejectionNote(h, filter);
+  const ask =
+    task.arch_triage === "extends"
+      ? `Per-task triage (§8.4): ${taskId} extends the approved spine. Write a one-page design note for it under .vtc/architecture/notes/${taskId}.md (artifact design_note): which components it touches and how it stays inside the spine.`
+      : `Per-task triage (§8.4): ${taskId} changes the approved architecture (a new service, datastore, integration, trust boundary, breaking interface or irreversible migration). Write an ADR for it under .vtc/architecture/adr/ (artifact adr, or design_note where your contract has no adr): the decision, the alternatives and its Check. The engine asks the human to approve the change before the task starts.`;
+  return {
+    key: `triage:${taskId}`,
+    ...filter,
+    note: [ask, ...(note === undefined ? [] : [note])].join("\n"),
+  };
+};
+
 /** Steps of one task that need a role run now. */
 const taskSteps = (k: Kernel, h: RunHandle, taskId: string, host: HostId): StepSpec[] => {
   const task = h.state.tasks.get(taskId);
   if (task?.worktree === undefined) return [];
   const steps: StepSpec[] = [];
   if (task.status === "ready") {
+    // §8.4 per-task triage: `extends` and `changes` get the Architect before QA starts
+    const triage = architectTriageStep(k, h, taskId);
+    if (triage !== "done") return triage === null ? [] : [triage];
     const step = { role: "qa", mode: "author", task: taskId };
     const waiting = pendingBaseCheck(h.state, taskId) !== undefined;
     if (!busyStep(h, step) && !k.isRunning(`gates:${taskId}`) && !waiting) {
@@ -296,11 +347,12 @@ const taskSteps = (k: Kernel, h: RunHandle, taskId: string, host: HostId): StepS
     const drop =
       budgetState(task.spent_usd, task.budget_usd) === "reviewers_drop" ||
       sharesExceeded(shareSpend(h.state, taskId), task.budget_usd).reviewers;
+    const cross = crossFamilyHost(k, h, task);
     for (const slot of reviewersFor(
       task,
       h.state.run,
       taskAcceptanceCriteria(k.deps.repoRoot, h.state, taskId),
-      { lensRoles: installedLensRoles(k.deps.roles) },
+      { lensRoles: installedLensRoles(k.deps.roles), crossFamily: cross !== undefined },
     )) {
       const filter = {
         role: slot.role,
@@ -322,8 +374,12 @@ const taskSteps = (k: Kernel, h: RunHandle, taskId: string, host: HostId): StepS
         const index = Number(slot.id.split("-").at(-1));
         if (index <= done + flying) continue;
       } else {
-        if (busyStep(h, filter)) continue;
-        if (lastSubmitted(h.state, filter, built.closedSeq ?? 0) !== undefined) continue;
+        const runs = runsOf(h.state, taskId).filter((r) => slotMatches(slot, r, cross));
+        if (runs.some((r) => r.status === "in_flight")) continue;
+        if (
+          runs.some((r) => r.status === "submitted" && (r.closedSeq ?? 0) > (built.closedSeq ?? 0))
+        )
+          continue;
       }
       const contract = k.deps.roles.get(slot.role);
       const tier =
@@ -334,6 +390,7 @@ const taskSteps = (k: Kernel, h: RunHandle, taskId: string, host: HostId): StepS
         ...filter,
         ...(tier === undefined ? {} : { tier }),
         ...(note === undefined ? {} : { note }),
+        ...(slot.crossFamily === true && cross !== undefined ? { host: cross } : {}),
       });
     }
   }
@@ -413,7 +470,7 @@ const depthsFor = (
   h: RunHandle,
   step: StepSpec,
 ): Pick<TaskPackInput, "architect_depth" | "research_depth" | "design_constraints"> => {
-  if (step.task !== undefined) return {};
+  if (step.task !== undefined || step.subject?.startsWith("T-") === true) return {};
   const run = h.state.run;
   if (step.role === "architect") {
     const spec = run.gates.G1.frozen
@@ -488,8 +545,11 @@ const frozenTypeByPath = (path: string): string => {
 const packFor = (k: Kernel, h: RunHandle, step: StepSpec, actionId: string): TaskPackInput => {
   const state = h.state;
   const task = step.task === undefined ? undefined : state.tasks.get(step.task);
+  // the task an Architect triage step is about (§8.4): its requirements, not its worktree
+  const about =
+    task ?? (step.subject?.startsWith("T-") === true ? state.tasks.get(step.subject) : undefined);
   const items = frozenSpecItems(k.deps.repoRoot, state);
-  const covers = task?.covers ?? [];
+  const covers = about?.covers ?? [];
   const requirements =
     step.feature !== undefined && task === undefined
       ? items // Final Review checks the whole spec (§6.7a step 3)
@@ -541,7 +601,7 @@ const packFor = (k: Kernel, h: RunHandle, step: StepSpec, actionId: string): Tas
   for (const gate of state.run.gates.G1.frozen.concat(state.run.gates.G2.frozen)) {
     const type = submitted.get(gate.path) ?? frozenTypeByPath(gate.path);
     if (
-      task !== undefined ||
+      about !== undefined ||
       step.feature !== undefined ||
       state.run.phase === "plan" ||
       state.run.phase === "design"
@@ -562,9 +622,9 @@ const packFor = (k: Kernel, h: RunHandle, step: StepSpec, actionId: string): Tas
       : { feature: task.feature }),
     ...(step.subject === undefined ? {} : { subject: step.subject }),
     ...depthsFor(k, h, step),
-    ...(step.task === undefined || state.intents.get(step.task) === undefined
+    ...(about === undefined || state.intents.get(about.id) === undefined
       ? {}
-      : { intent: state.intents.get(step.task) }),
+      : { intent: state.intents.get(about.id) }),
     requirements,
     decisions: [],
     inputs,

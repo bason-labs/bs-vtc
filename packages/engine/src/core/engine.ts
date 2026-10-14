@@ -62,6 +62,7 @@ import { dispatchGuarded, inSessionRefusal, NO_LEAD_WAIT_REASON, phaseRoles } fr
 import { g2ApprovalProblem, gateExtras, type GateExtras } from "./g2.js";
 import { effectiveVerdict } from "./gate-verdict.js";
 import { headlessRunsOf, killHeadless } from "./headless.js";
+import type { RoleToolHandler } from "./kernel.js";
 import { dispatchNow, drive } from "./route.js";
 import { parkEscalation } from "./escalations.js";
 import {
@@ -303,6 +304,8 @@ export class Engine implements Kernel {
   private readonly leadHosts = new Map<string, HostId>();
   readonly unattended = new Set<string>();
   readonly headless = new Map<string, HeadlessEntry>();
+  /** The role-facing research tools' handler (AD-22), set by the composition; `null` = none. */
+  private roleToolHandler: RoleToolHandler | null = null;
 
   private constructor(readonly deps: EngineCoreDeps) {
     this.guardDir = guardDirFor(deps.vtcHome, deps.repoRoot);
@@ -873,6 +876,18 @@ export class Engine implements Kernel {
     if (preferred !== undefined) return preferred;
     const installed = HOST_IDS.find((h) => this.deps.adapters[h] !== undefined);
     return installed ?? (HOST_IDS[0] as HostId);
+  }
+
+  /**
+   * Serve the role-facing tools (`ROLE_MCP_TOOLS`, AD-4 rule 3) with `handler`: the daemon wires
+   * the research module's (AD-22; core never imports it, AD-13 rule 12).
+   */
+  setRoleTools(handler: RoleToolHandler | null): void {
+    this.roleToolHandler = handler;
+  }
+
+  roleTools(): RoleToolHandler | null {
+    return this.roleToolHandler;
   }
 
   leadHostFor(run: string, call: CallContext): HostId | undefined {

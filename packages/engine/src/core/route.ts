@@ -16,7 +16,7 @@ import {
 } from "@vtc/shared";
 import { checkGitNow, sweepDispatches } from "./dispatch-guard.js";
 import { dispatchGuarded, inSessionRefusal, pendingSteps, refuseInSession } from "./dispatch.js";
-import { capabilitiesOf, dispatchHeadless } from "./headless.js";
+import { capabilitiesOf, dispatchHeadless, launchHeadless } from "./headless.js";
 import type { CallContext, Kernel, RunHandle } from "./kernel.js";
 import { limitWait } from "./limits.js";
 import { inFlight } from "./queries.js";
@@ -68,6 +68,11 @@ export const dispatchNow = async (
   let free = config.concurrency - inFlight(h.state).length;
   for (const step of pendingSteps(k, h, host)) {
     if (free <= 0) break;
+    if (step.host !== undefined) {
+      // the cross-family reviewer runs headless on the other family's host (§12.4)
+      if (await launchHeadless(k, h, step, step.host, "cross_family_review")) free -= 1;
+      continue;
+    }
     const refusal = inSessionRefusal(k, h, step, host, call);
     if (refusal !== null) {
       // only the run's Lead reporting its sandbox off or unknown parks the step; a caller that

@@ -443,12 +443,15 @@ export const dispatchHeadless = async (
   let free = k.config().concurrency - inFlight(h.state).length;
   for (const step of pendingSteps(k, h, host)) {
     if (free <= 0 || stop()) return;
-    const refusal = headlessPlatformRefusal(k, step, host);
+    // the cross-family reviewer runs on the other family's host (§12.4)
+    const where = step.host ?? host;
+    const refusal = headlessPlatformRefusal(k, step, where);
     if (refusal !== null) {
       refuseInSession(k, h, step, refusal);
       continue;
     }
-    if (await launchHeadless(k, h, step, host, purpose)) free -= 1;
+    const why = step.host === undefined ? purpose : "cross_family_review";
+    if (await launchHeadless(k, h, step, where, why)) free -= 1;
   }
 };
 

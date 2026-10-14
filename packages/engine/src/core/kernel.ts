@@ -15,6 +15,7 @@ import type {
   ProjectConfig,
   PullRequestService,
   RemoteMergeService,
+  RoleMcpToolName,
   SessionSandboxState,
   UsageSnapshot,
   VtcEvent,
@@ -73,6 +74,17 @@ export interface HeadlessEntry {
   readonly summary: HeadlessRunSummary;
   readonly process: HeadlessRun;
 }
+
+/**
+ * Runs one role-facing MCP tool (`ROLE_MCP_TOOLS`: research fetches and the facts table, AD-22)
+ * on input that passed its contract. The research module implements it; the daemon hands it to
+ * the engine (`Engine.setRoleTools`), so core never imports research (AD-13 rule 12).
+ */
+export type RoleToolHandler = (
+  name: RoleMcpToolName,
+  input: unknown,
+  call: CallContext,
+) => Promise<unknown>;
 
 export interface RunHandle {
   readonly state: RunState;
