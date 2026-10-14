@@ -144,9 +144,34 @@ describe("the release workflow (AD-26 rules 1-3)", () => {
     expect(needsOf(wf.jobs.publish as Job)).toContain("package");
   });
 
+  it("runs every job downstream of the skipped signing job under an explicit status check", () => {
+    // A skip propagates down the needs chain unless the job's `if` has a status function, so
+    // without one the jobs after sign-macos would be skipped on every tag until H-2.
+    const wf = workflow();
+    const downstream = new Set<string>(["sign-macos"]);
+    for (let grew = true; grew;) {
+      grew = false;
+      for (const [name, job] of Object.entries(wf.jobs)) {
+        if (downstream.has(name) || !needsOf(job).some((n) => downstream.has(n))) continue;
+        downstream.add(name);
+        grew = true;
+      }
+    }
+    downstream.delete("sign-macos");
+    expect([...downstream].sort()).toEqual(["package", "publish"]);
+    for (const name of downstream) {
+      const cond = String(wf.jobs[name]?.if ?? "");
+      expect(cond, name).toMatch(/!cancelled\(\)|always\(\)/);
+      for (const need of needsOf(wf.jobs[name] as Job).filter((n) => n !== "sign-macos"))
+        expect(cond, `${name} gates on ${need}`).toContain(`needs.${need}.result == 'success'`);
+    }
+  });
+
   it("publishes on tags only: attests every asset, drafts, then publishes", () => {
     const publish = workflow().jobs.publish as Job;
-    expect(publish.if).toBe("${{ github.event_name == 'push' && github.ref_type == 'tag' }}");
+    expect(publish.if).toBe(
+      "${{ !cancelled() && needs.verify.result == 'success' && needs.package.result == 'success' && github.event_name == 'push' && github.ref_type == 'tag' }}",
+    );
     const attest = publish.steps.find((s) => s.uses?.startsWith("actions/attest@") === true);
     expect(attest?.with?.["subject-path"]).toBe("release/*");
     const run = publish.steps.map((s) => s.run ?? "").join("\n");
