@@ -18,6 +18,7 @@ import {
   parseEventLog,
   remainingPct,
   resolveRoleMode,
+  unknownUsage,
   type ApproveInput,
   type AnswerInput,
   type ChangeRequestInput,
@@ -29,6 +30,7 @@ import {
   type GatesConfig,
   GatesConfigSchema,
   ProjectConfigSchema,
+  type HostBilling,
   type HostId,
   type HumanGateId,
   type LeadAction,
@@ -115,6 +117,7 @@ import {
 } from "./jobs.js";
 import {
   disableAutoMerges,
+  finishAtLevel2,
   pollMergedFeature,
   recordMergePreflight,
   startMergeLevel,
@@ -284,6 +287,8 @@ const foreignRunText = (run: string): string =>
 
 export class Engine implements Kernel {
   readonly usage = new Map<HostId, UsageSnapshot>();
+  /** Who pays per host, from its last sign-in check (D-bq; `recordBilling`). */
+  private readonly billing = new Map<HostId, HostBilling | null>();
   readonly identicalTree = new Map<string, boolean>();
   readonly sharedTaskIds = new Set<string>();
   readonly dispatches = new Map<string, DispatchRecord>();
@@ -1728,6 +1733,11 @@ export class Engine implements Kernel {
       this.emit(handle, { type: "run.finished", actor: "engine", data: { outcome: "aborted" } });
       return;
     }
+    // D-bd (reading 158): a Level-3 park finished at Level 2 ends the run with the PR left open
+    if (effect === "finish_level_2") {
+      finishAtLevel2(this, handle, featureId);
+      return;
+    }
     const before = handle.state.events.findLast(
       (e) =>
         e.feature === featureId &&
@@ -2157,8 +2167,11 @@ export class Engine implements Kernel {
    */
   ingestUsage(incoming: UsageSnapshot): void {
     const before = this.usage.get(incoming.host);
-    const snapshot =
+    const merged =
       incoming.source === "sdk_event" ? mergeSdkUsage(before, incoming, this.now()) : incoming;
+    // who pays comes from the sign-in check, never from a usage reading (D-bq)
+    const billing = this.billing.get(merged.host);
+    const snapshot = billing === undefined ? merged : { ...merged, billing };
     this.usage.set(snapshot.host, snapshot);
     if (!significant(before, snapshot)) return;
     const state = activeRun([...this.handles.values()].map((h) => h.state));
@@ -2168,6 +2181,13 @@ export class Engine implements Kernel {
       this.emit(handle, { type: "usage.updated", actor: "engine", data: { snapshot } });
       return Promise.resolve();
     });
+  }
+
+  recordBilling(host: HostId, billing: HostBilling | null): void {
+    this.billing.set(host, billing);
+    const stored = this.usage.get(host);
+    if (stored !== undefined && (stored.billing ?? null) === billing) return;
+    this.usage.set(host, { ...(stored ?? unknownUsage(host)), billing });
   }
 
   /** The auto-resume timer fired (`vtc engine --daemon --wake`, AD-12 rule 4). */
