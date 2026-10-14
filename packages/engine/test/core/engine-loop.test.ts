@@ -745,4 +745,58 @@ describe("Level 1 and Final Review fixes (§6.4, §6.7a)", () => {
     expect(fix.task).toBe("T-2");
     await h.release();
   });
+
+  it("names the owning task of a Final Review finding and gives the fix its discipline and scope", async () => {
+    const h = createHarness({ project: { merge_level: 1 } });
+    const engineer = await toEngineer(h, [draft("T-1", { discipline: "frontend" })]);
+    await build(h, engineer);
+    h.gates.queue("final_review", { fail: [toolFinding("null-deref", "high", "src/t-1/impl.ts")] });
+    await verdictPass(h, only(await next(h), "spec_verifier"), "src/t-1/impl.ts");
+    await h.engine.settle();
+    const created = eventsOf(h)
+      .filter((e) => e.type === "task.created")
+      .map(
+        (e) =>
+          e.data.task as { id: string; discipline: string; files_scope: string[]; title: string },
+      );
+    const fix = created.find((t) => t.id === "T-2");
+    expect(fix).toMatchObject({ discipline: "frontend", files_scope: ["src/t-1/**"] });
+    expect(fix?.title).toMatch(/T-1/);
+    await h.release();
+  });
+
+  it("parks the feature on a risky Final Review finding instead of a fix round", async () => {
+    const h = createHarness({ project: { merge_level: 1 } });
+    const engineer = await toEngineer(h);
+    await build(h, engineer);
+    const leak = { ...toolFinding("hardcoded-key", "critical"), category: "secret" as const };
+    h.gates.queue("final_review", { fail: [leak] });
+    await verdictPass(h, only(await next(h), "spec_verifier"), "src/t-1/impl.ts");
+    await h.engine.settle();
+    const status = h.engine.status({});
+    expect(status.features[0]).toMatchObject({ status: "parked", tasks: ["T-1"] });
+    const opened = EscalationListSchema.parse(h.engine.escalations({})).escalations.at(-1);
+    expect(opened).toMatchObject({ reason: "risk_rule", risk_rule: "committed_secret" });
+    await h.release();
+  });
+
+  it("parks the feature as stuck when a Final Review finding survives a fix round", async () => {
+    const h = createHarness({ project: { merge_level: 1 } });
+    const engineer = await toEngineer(h);
+    await build(h, engineer);
+    const same = toolFinding("off-by-one", "medium", "src/t-1/impl.ts");
+    h.gates.queue("final_review", { fail: [same] }, { fail: [same] });
+    await verdictPass(h, only(await next(h), "spec_verifier"), "src/t-1/impl.ts");
+    await h.engine.settle();
+    expect(h.engine.status({}).features[0]).toMatchObject({ status: "fixing", round: 1 });
+    // the integration fix runs its course and merges; Final Review finds the same thing again
+    await authorTests(h, only(await next(h), "qa"));
+    await build(h, only(await next(h), "engineer"), "export const y = 2;\n", "src/t-1/fix.ts");
+    await h.engine.settle();
+    const status = h.engine.status({});
+    expect(status.features[0]).toMatchObject({ status: "parked" });
+    const opened = EscalationListSchema.parse(h.engine.escalations({})).escalations.at(-1);
+    expect(opened).toMatchObject({ reason: "stuck" });
+    await h.release();
+  });
 });

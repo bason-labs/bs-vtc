@@ -24,6 +24,7 @@ import {
   type GateReport,
   type GateRunRequestInput,
   type ParkReason,
+  type RiskRuleReasonRule,
   type Task,
   type TestMetrics,
 } from "@vtc/shared";
@@ -36,7 +37,7 @@ import {
   pipelineConfigHash,
   type CommittedGates,
 } from "./config.js";
-import { globMatch } from "./globs.js";
+import { globMatch, matchesAny } from "./globs.js";
 import type { Kernel, RunHandle } from "./kernel.js";
 import { assertFeatureTransition } from "./machines.js";
 import { parkTask, setTaskStatus } from "./parking.js";
@@ -920,7 +921,7 @@ const setFeatureStatus = (
   featureId: string,
   to:
     "building" | "integrating" | "final_review" | "fixing" | "ready_to_ship" | "shipped" | "parked",
-  options: { round?: number; parkReason?: ParkReason } = {},
+  options: { round?: number; parkReason?: ParkReason; riskRule?: RiskRuleReasonRule } = {},
 ): void => {
   const feature = h.state.features.get(featureId);
   if (feature === undefined || feature.status === to) return;
@@ -934,6 +935,7 @@ const setFeatureStatus = (
       to,
       round: options.round ?? feature.round,
       ...(options.parkReason === undefined ? {} : { park_reason: options.parkReason }),
+      ...(options.riskRule === undefined ? {} : { risk_rule: options.riskRule }),
     },
   });
 };
@@ -947,14 +949,19 @@ const parkFeature = (
   reason: ParkReason,
   detail: string,
   evidence: readonly Evidence[],
+  riskRule?: RiskRuleReasonRule,
 ): void => {
-  setFeatureStatus(k, h, featureId, "parked", { parkReason: reason });
+  setFeatureStatus(k, h, featureId, "parked", {
+    parkReason: reason,
+    ...(riskRule === undefined ? {} : { riskRule }),
+  });
   const feature = h.state.features.get(featureId);
   const escalation = parkEscalation({
     id: nextEscalationId(h.state),
     run: h.state.id,
     feature: featureId,
     reason,
+    ...(riskRule === undefined ? {} : { riskRule }),
     detail,
     evidence,
     blocks: feature?.tasks ?? [],
@@ -968,7 +975,41 @@ const parkFeature = (
   });
 };
 
-/** An engine-created task for Final Review findings no single task owns (§6.7a, AD-8 rule 11). */
+/**
+ * The feature task that owns every one of `paths`: a planner task (not an earlier fix) whose
+ * `files_scope` matches them all, when exactly one does. `undefined` otherwise (no path, or the
+ * paths span tasks: a cross-task finding no single task owns, AD-8 rule 11).
+ */
+const owningTask = (tasks: readonly Task[], paths: readonly string[]): Task | undefined => {
+  if (paths.length === 0) return undefined;
+  const candidates = tasks.filter(
+    (t) =>
+      t.origin === "planner" &&
+      t.status !== "dropped" &&
+      paths.every((p) => matchesAny(t.files_scope, p)),
+  );
+  return candidates.length === 1 ? candidates[0] : undefined;
+};
+
+/**
+ * A Final Review finding risky enough to park the feature for the human instead of a fix round
+ * (§6.7a, §7.6; spine §5 reading 91): a secret, or a high or critical security or supply-chain
+ * finding.
+ */
+const riskyFinding = (
+  findings: readonly Finding[],
+): { readonly finding: Finding; readonly rule: RiskRuleReasonRule } | undefined => {
+  const secret = findings.find((f) => f.category === "secret");
+  if (secret !== undefined) return { finding: secret, rule: "committed_secret" };
+  const high = findings.find(
+    (f) =>
+      (f.category === "security" || f.category === "supply_chain") &&
+      (f.severity === "high" || f.severity === "critical"),
+  );
+  return high === undefined ? undefined : { finding: high, rule: "open_high_finding" };
+};
+
+/** An engine-created task for Final Review findings (§6.7a, AD-8 rule 11). */
 const createIntegrationFix = (
   k: Kernel,
   h: RunHandle,
@@ -984,23 +1025,32 @@ const createIntegrationFix = (
     .map((t) => h.state.tasks.get(t))
     .filter((t): t is Task => t !== undefined);
   const disciplines = owners.map((t) => t.discipline);
-  const discipline =
-    disciplines.sort(
-      (a, b) =>
-        disciplines.filter((d) => d === b).length - disciplines.filter((d) => d === a).length,
-    )[0] ?? "backend";
   const paths = [
     ...new Set(findings.map((f) => f.location.path).filter((p) => !p.startsWith(".vtc/"))),
   ];
+  // The owning task (§6.7a routing; spine §5 reading 91): the one merged planner task whose
+  // files_scope holds every finding's path. The fix then gets its discipline and scope; reopening
+  // the merged task itself is not built yet, so the fix is a new task that names it.
+  const owner = owningTask(owners, paths);
+  const discipline =
+    owner?.discipline ??
+    disciplines.sort(
+      (a, b) =>
+        disciplines.filter((d) => d === b).length - disciplines.filter((d) => d === a).length,
+    )[0] ??
+    "backend";
   const task: Task = {
     id,
-    title: `Integration fix: ${first.title}`.slice(0, 200),
+    title: (owner === undefined
+      ? `Integration fix: ${first.title}`
+      : `Final Review fix for ${owner.id}: ${first.title}`
+    ).slice(0, 200),
     feature: featureId,
     origin: "integration_fix",
     source_finding: first.fingerprint,
     covers: [],
     after: [],
-    files_scope: paths.length > 0 ? paths : ["**"],
+    files_scope: owner !== undefined ? [...owner.files_scope] : paths.length > 0 ? paths : ["**"],
     discipline,
     stack_packs: [],
     consumes_contracts: [],
@@ -1059,9 +1109,15 @@ export const finalReviewRequest = (
 };
 
 /**
- * Final Review (§6.7a): the gate steps on the integrated branch (`finalReviewRequest`). Steps 3–5
- * and 7 and routing findings back to their owning task are not built yet: every finding becomes
- * an integration-fix task, and the PR note says which steps ran (`finalReviewScopeNote`).
+ * Final Review (§6.7a): the gate steps on the integrated branch (`finalReviewRequest`, steps 1, 2
+ * and 6). A failing round: a risky finding (a secret, a high or critical security or supply-chain
+ * finding) parks the feature for the human; a finding the previous fix round left in place parks
+ * it as stuck; otherwise a fix task goes to the owning task's discipline and scope when one task
+ * owns every finding's path (`owningTask`), the feature's most common discipline otherwise. The
+ * AI steps 3–5 (Spec-Verifier on the whole spec, Security on the combined diff, Visual QA
+ * journeys), step 7 (release readiness) and reopening the merged owning task itself are not built
+ * (spine §5 reading 91, §7 residual "Final Review AI steps"); the PR note says which steps ran
+ * (`finalReviewScopeNote`).
  */
 export const startFinalReview = (k: Kernel, h: RunHandle, featureId: string): void => {
   k.spawn(h, `final:${featureId}`, async () => {
@@ -1128,6 +1184,43 @@ export const startFinalReview = (k: Kernel, h: RunHandle, featureId: string): vo
         const findings = gateFindings(report, undefined, current.round + 1, inventoryReader(k)).map(
           (f) => ({ ...f, feature: featureId }),
         );
+        const evidence = report.results.flatMap((r) => r.evidence).slice(0, 5);
+        // a finding the last fix round left in place: the loop is stuck (§6.7a "with stuck
+        // detection"; spine §5 reading 91)
+        const before = new Set(
+          [...h.state.findings.values()]
+            .map((r) => r.finding)
+            .filter((f) => f.feature === featureId && f.round_first_seen === current.round)
+            .map((f) => f.fingerprint),
+        );
+        const repeated = findings.filter((f) => before.has(f.fingerprint));
+        const risky = riskyFinding(findings);
+        if (risky !== undefined) {
+          parkFeature(
+            k,
+            h,
+            featureId,
+            "risk_rule",
+            `Final Review found ${risky.finding.title} (${risky.finding.category}, ${risky.finding.severity}) at ${risky.finding.location.path}: a human decides before any fix round`,
+            evidence,
+            risky.rule,
+          );
+          return Promise.resolve();
+        }
+        if (current.round > 0 && repeated.length > 0) {
+          parkFeature(
+            k,
+            h,
+            featureId,
+            "stuck",
+            `Final Review round ${String(current.round + 1)} found ${String(repeated.length)} finding(s) the last fix round did not resolve: ${repeated
+              .slice(0, 3)
+              .map((f) => f.title)
+              .join("; ")}`,
+            evidence,
+          );
+          return Promise.resolve();
+        }
         setFeatureStatus(k, h, featureId, "fixing", { round: current.round + 1 });
         createIntegrationFix(k, h, featureId, findings);
         if (h.state.run.phase !== "build") {
