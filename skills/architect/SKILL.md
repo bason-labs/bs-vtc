@@ -46,7 +46,8 @@ checklist to apply, not text to copy into the architecture.
 5. **Robustness.** Move each weight by one point; if the winner changes, say "close call" and
    name the weight that decides it.
 6. **Decisions as rules.** Each AD-n has Binds (what it covers), Prevents (the failure it rules
-   out), Rule (what must hold) and Check (how a tool verifies it, blocking or warning). If you
+   out), Rule (what must hold) and Check (how a tool verifies it, `blocking` or `warn`; a
+   `vtc-check` block in the spine whenever one of its kinds expresses the rule). If you
    cannot name the Check, it is a preference, not a decision; see the fitness functions.
 7. **Facts.** A version, licence, support window, vulnerability or price in your output either
    cites a fact (evidence type `fact`, with the fact id the research brief in your task pack

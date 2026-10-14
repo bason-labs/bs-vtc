@@ -35,7 +35,11 @@ a human decides. You never change a prompt yourself.
 5. Write the proposal as two files in `{{lookback_proposals_dir}}/<role>/`, where `<role>` is
    the id of the role under review:
    - `editable.md`: the full proposed editable section, exactly as it would replace the current
-     one: Markdown only, no marker comment lines, nothing from the locked core.
+     one: Markdown only, no marker comment lines, nothing from the locked core. The section
+     compiles verbatim for every mode and host, so it also has no mode block, no `{{…}}`
+     placeholder and no heading named {{editable_reserved_headings}}; label a mode-specific
+     heuristic in prose ("When judging tests: ..."). A section that breaks this fails the
+     compile when it is promoted.
    - `proposal.json`: one proposal object with these fields:
      - `v`: 1;
      - `id`: a new slug for this proposal, such as `<role>-<host>-<cause>`;

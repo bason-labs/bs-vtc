@@ -77,6 +77,11 @@ Parts 1 to 4 are the agent's **locked part** and part 5 its **editable part**.
   carries the Engineer's heuristics: those sit in the profile's locked part and change only
   through a proposal for the engineer role, which reaches every profile once it is upstreamed
   into `roles/engineer/prompt.md` and the plugins are recompiled.
+- A consequence to keep in mind when reading a profile's scorecard: an Engineer prompt change
+  alters what every profile runs but not the profile's `effective_sha256`, so the profile's
+  scorecard keeps counting across it. Compare a profile's numbers before and after an Engineer
+  role-version change only with that caveat (a contract proposal to name the Engineer base in a
+  profile's `PromptVersionRef` is open).
 - Reading 102 moves the editable section out of the compiled agent: the engine renders the
   pinned editable section first in the task pack, so a canary needs no plugin reinstall. The
   compiler has the switch (`EDITABLE_IN_PACK_ROLES`), but **no role is switched yet**: the frozen

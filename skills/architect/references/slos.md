@@ -46,6 +46,6 @@ Measure as close to the user as practical (the load balancer or client), not ins
 - Pre-production: a load test (for example k6) that runs the scenario's load and fails when the
   latency SLI misses its threshold; blocking in gate L6 when the scenario is a driver.
 - Production: a burn-rate alert (budget consumed faster than the window allows), named in the
-  operations section; it is a warning-level Check from the engine's point of view.
+  operations section; it is a `warn` Check from the engine's point of view.
 - Record the error-budget policy: what stops when the budget is spent (feature releases, for
   example) and who decides.

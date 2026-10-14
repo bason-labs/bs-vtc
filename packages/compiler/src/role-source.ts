@@ -81,9 +81,12 @@ export const renderTemplate = (text: string, vars: Readonly<Record<string, strin
 
 const PLACEHOLDER = /\{\{[a-z_]+\}\}/;
 const HEADING = /^#{1,6}\s+(.+?)\s*#*\s*$/;
-const RESERVED_HEADINGS = new Set(
-  [...TASK_PACK_SECTIONS, EDITABLE_PACK_SECTION].map((name) => name.toLowerCase()),
-);
+/** Headings an editable section may not use: the task pack's sections and its heuristics one. */
+export const RESERVED_EDITABLE_HEADINGS: readonly string[] = [
+  ...TASK_PACK_SECTIONS,
+  EDITABLE_PACK_SECTION,
+];
+const RESERVED_HEADINGS = new Set(RESERVED_EDITABLE_HEADINGS.map((name) => name.toLowerCase()));
 
 /**
  * What an editable section may not contain (AD-14 rule 4, AD-21; `prompt-parts.ts`). The section
