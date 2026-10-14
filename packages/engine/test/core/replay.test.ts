@@ -362,6 +362,11 @@ describe("RETRO runs Lookback replays (AD-21 rule 6, reading 176)", () => {
       const dispatched = events(h).findLast((e) => e.type === "role.dispatched");
       expect(dispatched?.prompt_sha).toBe(effectivePromptSha(LOCKED, text));
       expect(dispatched?.task).toBeUndefined();
+      // reading 177: the trial is marked in the log, so a clone tells it from the run's work
+      expect(dispatched?.data).toMatchObject({
+        purpose: "lookback_replay",
+        replay: { arm: i === 0 ? "a" : "b", trial: i + 1 },
+      });
       // the baseline's trial does nothing; the candidate's writes the implementation, and
       // leaves an ignored stub behind that a gate run in its tree would pick up
       if (text === CANDIDATE) {
@@ -396,6 +401,11 @@ describe("RETRO runs Lookback replays (AD-21 rule 6, reading 176)", () => {
     ]);
     const log = events(h);
     expect(log.filter((e) => e.type === "lookback.replay_finished")).toHaveLength(1);
+    // the delivered run's own dispatches carry no purpose: they are the run's work
+    const marked = log.filter(
+      (e) => e.type === "role.dispatched" && (e.data as { purpose?: string }).purpose !== undefined,
+    );
+    expect(marked).toHaveLength(2);
     expect(h.engine.status({}).run.finished_at).toBeDefined();
     // no task changed, and the user's repo got no ref
     expect(h.engine.status({}).tasks_by_status).toEqual(taskBefore);
