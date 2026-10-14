@@ -67,6 +67,7 @@ import {
   submitResult,
   throughPlan,
   verdictPass,
+  workdir,
   type Harness,
 } from "../helpers/engine-harness.js";
 
@@ -283,6 +284,58 @@ describe("RETRO reads the weekly window of the run's Lead host (AD-21 rule 8, re
     await h.release();
   });
 
+  it("through the wiring, RETRO's replays wait on the Lead host's low window, though the preferred host's is high", async () => {
+    const h = createHarness({
+      plugins: switched,
+      project: { merge_level: 1, hosts: { preferred: "codex" } },
+    });
+    // the Lead's host (Claude Code) has 10% of its week left; the preferred host (Codex) 90%
+    h.engine.ingestUsage(weekly("claude-code", 90));
+    h.engine.ingestUsage(weekly("codex", 10));
+    const unwire = wireLookback(h.engine, { repoRoot: h.repo, vtcHome: h.home }, switched);
+    const actions = await throughPlan(h, [draft("T-1")], SPEC_ONE);
+    await authorTests(h, only(actions, "qa"));
+    await build(h, only((await h.engine.next({}, CLAUDE)).actions, "engineer"));
+    // a Claude Code session holds the run as its Lead
+    const lead = {
+      host: "claude-code",
+      client: "bridge",
+      session: "lead-claude",
+      sessionSandbox: "on",
+    } as const;
+    await verdictPass(
+      h,
+      only((await h.engine.next({}, lead)).actions, "spec_verifier"),
+      "src/t-1/impl.ts",
+    );
+    await h.engine.settle();
+    const run = h.engine.status({}).run.id;
+    expect(h.engine.liveLeadHost(run)).toBe("claude-code");
+    expect(h.engine.hostFor({ host: null })).toBe("codex");
+    // a recorded proposal: RETRO would replay it, window allowing
+    h.engine.recordModuleEvent(
+      run,
+      lookbackEvent("lookback.proposal_recorded", {
+        proposal: "p-1",
+        path: ".vtc/lookback/proposals/engineer/proposal.json",
+        changes: 1,
+      }),
+    );
+    await passFinalReview(h);
+    await h.engine.settle();
+    expect(h.engine.status({}).run.finished_at).toBeDefined();
+    const log = events(h);
+    expect(log.some((e) => e.type === "lookback.dispatched")).toBe(false);
+    const retro = log.findIndex((e) => e.type === "run.phase_changed" && e.data.to === "retro");
+    expect(retro).toBeGreaterThan(0);
+    expect(log.slice(retro).filter((e) => e.type === "role.dispatched")).toEqual([]);
+    expect(h.engine.notices.join("\n")).toMatch(
+      /lookback replays of run .* wait for the next RETRO: 10% of the weekly window of claude-code \(the run's Lead host\) is left/,
+    );
+    await unwire();
+    await h.release();
+  }, 40_000);
+
   it("without a live Lead it reads the run's limit host, then the engine's default host", () => {
     const engine = {
       liveLeadHost: () => undefined,
@@ -328,12 +381,13 @@ describe("RETRO replays a recorded proposal end to end (AD-21 rule 6, reading 17
     );
     await h.engine.settle();
     const run = h.engine.status({}).run.id;
-    // a held-out dispatch of a task role in this run: its version gets a recorded proposal
+    // a held-out dispatch of a task role that writes files (a verdict role is not replayed): its
+    // version gets a recorded proposal
     const held = events(h).find(
       (e) =>
         e.type === "role.dispatched" &&
         e.task !== undefined &&
-        ["engineer", "spec_verifier"].includes(e.role ?? "") &&
+        e.role === "engineer" &&
         traceSplit({ run, trace: String(e.data.action_id) }) === "holdout",
     );
     if (held?.role === undefined) throw new Error("no held-out task dispatch to replay");
@@ -360,10 +414,9 @@ describe("RETRO replays a recorded proposal end to end (AD-21 rule 6, reading 17
       expect(readFileSync(join(h.repo, trial.pack), "utf8")).toMatch(
         new RegExp(`^## ${TASK_PACK_HEURISTICS_SECTION}\n\n(${CANDIDATE}|${DEFAULT})\n`),
       );
-      const out =
-        role === "engineer"
-          ? await submitResult(h, trial, { exit: "built" })
-          : await verdictPass(h, trial, "src/t-1/impl.ts");
+      mkdirSync(join(workdir(trial), "src/t-1"), { recursive: true });
+      writeFileSync(join(workdir(trial), "src/t-1/impl.ts"), "export const x = 2;\n");
+      const out = await submitResult(h, trial, { exit: "built" });
       carried = "actions" in out ? spawns(out.actions) : [];
       await h.engine.settle();
     }

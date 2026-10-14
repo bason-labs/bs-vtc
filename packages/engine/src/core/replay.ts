@@ -8,30 +8,42 @@
  *   at the commit that dispatch started from, with no refs past it (`createReplayCheckout`), at
  *   the path a task-less role's worktree has, so the write-scope hook and the headless sandbox
  *   apply as for any role; the pack is the recorded one, without its task (a trial changes no
- *   task), with the arm's editable section first;
+ *   task), with the arm's editable section first. A trial whose arm the dispatcher would not run
+ *   as planned (no pin can apply now) is not run at all, so no arm is ever measured with
+ *   another's prompt. The checkout's git hides the later work, but the host sandboxes deny no
+ *   reads, so a trial could still read the user's checkout (`replay-checkout.ts`);
  * - its result is checked against the role's contract, its work committed in the checkout and
- *   graded through the Gate Runner (`LookbackRetro.gradeTrial`); a rejected, failed or
- *   interrupted trial did not pass. Nothing a trial does reaches a task, the user's checkout or
- *   the integration branch;
+ *   graded through the Gate Runner (`LookbackRetro.gradeTrial`) once the head is readable in the
+ *   user's repo (`exposeReplayHead`); a rejected, failed or interrupted trial did not pass, and a
+ *   checkout whose git directory changed is an incident (`checkout_write`). Nothing a trial does
+ *   reaches a task, the user's checkout or the integration branch;
  * - once every trial of a replay is graded, Lookback writes its result
  *   (`LookbackRetro.finishReplay`: `ReplayResult`, `lookback.replay_finished` with the SHA-256).
- * A replay whose host is not the run's Lead host, or that no dispatch can run now, waits: it stays
- * pending, and the next RETRO plans it again. The plan, the trial dispatches and their grades live
- * in the engine's private directory (`<guard>/replays/`), where no role can write, so a restart
- * picks the replays up where they stopped.
+ * A replay waits for the next RETRO (it stays pending, and the next RETRO plans it again) when its
+ * host is not the run's Lead host, no dispatch can run it now, or its role changes no file (a
+ * verdict role: the gates would grade the same base for both arms, so nothing could tell them
+ * apart). The weekly-window and budget checks run again before every trial
+ * (`LookbackRetro.replayWait`, the run's budget), and a headless trial whose preflight fails stops
+ * the replays the same way, without pausing the delivered run: the run finishes, and the replays
+ * not yet written wait for the next RETRO. The plan, the trial dispatches and their grades live in
+ * the engine's private directory (`<guard>/replays/`), where no role can write, so a restart picks
+ * the replays up where they stopped.
  */
 import { join } from "node:path";
 import {
   agentNameFor,
   GateRunRequestSchema,
   planDispatch,
+  resolveRoleMode,
   type GateRunRequest,
   type HostId,
   type TaskPack,
 } from "@vtc/shared";
 import {
   createReplayCheckout,
+  exposeReplayHead,
   removeReplayCheckout,
+  ReplayCheckoutTamperedError,
   snapshotReplayCheckout,
   WORKTREES_DIR,
   type ReplayCheckout,
@@ -98,7 +110,9 @@ type TrialRow =
       readonly passed: boolean;
       readonly tokens: number;
     }
-  | { readonly kind: "finished"; readonly replay: number };
+  | { readonly kind: "finished"; readonly replay: number }
+  /** The replays stopped: the ones not yet finished wait for the next RETRO. */
+  | { readonly kind: "deferred"; readonly reason: string };
 
 const replaysDir = (k: Kernel): string => join(k.guardDir, "replays");
 const planFile = (k: Kernel, run: string): string => join(replaysDir(k), `${run}.json`);
@@ -146,6 +160,8 @@ interface ReplayProgress {
   readonly dispatched: ReadonlyMap<string, string>;
   readonly graded: ReadonlyMap<string, ReplayTrialOutcome>;
   readonly finished: ReadonlySet<number>;
+  /** Why the replays stopped, once they did. */
+  readonly deferred?: string;
 }
 
 const progressOf = (k: Kernel, run: string): ReplayProgress | null => {
@@ -154,13 +170,15 @@ const progressOf = (k: Kernel, run: string): ReplayProgress | null => {
   const dispatched = new Map<string, string>();
   const graded = new Map<string, ReplayTrialOutcome>();
   const finished = new Set<number>();
+  let deferred: string | undefined;
   for (const row of readRows(k, run)) {
     if (row.kind === "dispatched") dispatched.set(key(row), row.action);
     else if (row.kind === "graded")
       graded.set(key(row), { n: row.n, passed: row.passed, tokens: row.tokens });
-    else finished.add(row.replay);
+    else if (row.kind === "finished") finished.add(row.replay);
+    else deferred ??= row.reason;
   }
-  return { plan, dispatched, graded, finished };
+  return { plan, dispatched, graded, finished, ...(deferred === undefined ? {} : { deferred }) };
 };
 
 /**
@@ -225,7 +243,49 @@ const replayBlocker = (k: Kernel, h: RunHandle, replay: LookbackReplay): string 
   const agent = agentNameFor(replay.role, replay.mode);
   const blocker = pinBlocker(k.deps.plugins.promptParts?.(agent, replay.host), replay.host, plan);
   if (blocker !== null) return `${agent} cannot run a candidate: ${blocker}`;
+  if (!changesFiles(k, replay))
+    return `${agent} changes no file, so the gates would grade the same base for both arms; a replay of a verdict role needs a grader that scores its verdicts against the recorded outcome`;
   return replay.trials.length === 0 ? "it has no trial to run" : null;
+};
+
+/**
+ * Whether the replayed role can leave work in its checkout for the gates to grade: a role that may
+ * write files and whose contract names an artifact. A verdict role's trial leaves its head at the
+ * base, so the Gate Runner grades the same commit for every arm.
+ */
+const changesFiles = (k: Kernel, replay: Pick<LookbackReplay, "role" | "mode">): boolean => {
+  const contract = k.deps.roles.get(replay.role);
+  if (contract === undefined) return false;
+  const effective = resolveRoleMode(contract, replay.mode);
+  const role = effective.ok ? effective.contract : contract;
+  return role.tools.profile !== "read_only" && role.output.artifacts.length > 0;
+};
+
+/**
+ * Why the replays must stop now (AD-21 rule 8, reading 176), or `null`: the run's budget is spent,
+ * or the wired Lookback's weekly-window and budget checks say so. Checked before every trial.
+ */
+const replayWait = (k: Kernel, h: RunHandle): string | null => {
+  const budget = h.state.runBudget;
+  if (budget !== null && budget.spent_usd >= budget.budget_usd)
+    return `the run spent $${budget.spent_usd.toFixed(2)} of its $${budget.budget_usd.toFixed(2)} budget`;
+  try {
+    return k.lookbackRetro()?.replayWait?.(h.state) ?? null;
+  } catch (error) {
+    return `the weekly window and budget could not be checked: ${error instanceof Error ? error.message : String(error)}`;
+  }
+};
+
+/**
+ * Stops the run's replays (callers hold the run's lock): the ones not yet written wait for the
+ * next RETRO, which plans them again, and the run finishes once no trial is in flight. Nothing
+ * pauses the delivered run.
+ */
+export const deferReplays = (k: Kernel, h: RunHandle, reason: string): void => {
+  const progress = progressOf(k, h.state.id);
+  if (progress === null || progress.deferred !== undefined) return;
+  appendRow(k, h.state.id, { kind: "deferred", reason: reason.slice(0, 500) });
+  k.notice(`the lookback replays of run ${h.state.id} stop and wait for the next RETRO: ${reason}`);
 };
 
 /**
@@ -291,9 +351,10 @@ export const refuseTrial = (k: Kernel, h: RunHandle, ref: TrialRef, reason: stri
 };
 
 /**
- * Creates a trial's clean checkout and records its dispatch (callers then hand the step out with
- * the checkout as its working directory). Returns the checkout's absolute path, or `null` when it
- * could not be made: the trial then did not pass, with a notice.
+ * Records a trial's dispatch, then creates its clean checkout (callers then hand the step out with
+ * the checkout as its working directory). The row comes first, so a crash in between leaves a
+ * dispatch with no role run, whose checkout `stepReplays` removes. Returns the checkout's absolute
+ * path, or `null` when it could not be made: the trial then did not pass, with a notice.
  */
 export const prepareTrial = async (
   k: Kernel,
@@ -302,36 +363,71 @@ export const prepareTrial = async (
   action: string,
 ): Promise<string | null> => {
   const checkout = trialCheckout(k, h.state.id, action, ref.base);
+  appendRow(k, h.state.id, { kind: "dispatched", replay: ref.replay, n: ref.n, action });
   try {
     await createReplayCheckout(k.deps.repoRoot, checkout);
   } catch (error) {
     k.notice(
       `replay trial ${key(ref)} of run ${h.state.id} has no checkout at ${ref.base.slice(0, 12)}: ${error instanceof Error ? error.message : String(error)}`,
     );
-    failTrial(k, h, ref, undefined);
+    failTrial(k, h, ref, action);
     return null;
   }
-  appendRow(k, h.state.id, { kind: "dispatched", replay: ref.replay, n: ref.n, action });
   return join(k.deps.repoRoot, checkout.path);
 };
 
-/** A trial's result was accepted: commits its work in the checkout and returns the head. */
-export const snapshotTrial = (
+/**
+ * A trial's checkout whose git directory changed after the engine made it (a role wrote in the
+ * engine's private directory): an incident; the engine ran no git there, and the trial did not
+ * pass.
+ */
+const recordTrialTamper = (
+  k: Kernel,
+  h: RunHandle,
+  action: string,
+  error: ReplayCheckoutTamperedError,
+): void => {
+  k.emit(h, {
+    type: "incident.recorded",
+    actor: "engine",
+    data: {
+      kind: "checkout_write",
+      detail:
+        `replay trial ${action} changed the git directory of its checkout (${error.paths.join(", ") || "its fingerprint is gone"}); the engine ran no git there and the trial did not pass`.slice(
+          0,
+          2000,
+        ),
+    },
+  });
+};
+
+/**
+ * A trial's result was accepted (callers hold the run's lock): commits its work in the checkout
+ * and returns the head. A checkout whose git directory changed is an incident, and throws.
+ */
+export const snapshotTrial = async (
   k: Kernel,
   h: RunHandle,
   run: RoleRunRecord,
   trial: LookbackReplayTrial,
-): Promise<string> =>
-  snapshotReplayCheckout(
-    k.deps.repoRoot,
-    trialCheckout(k, h.state.id, run.action_id, trial.base),
-    `vtc: replay trial ${run.action_id}`,
-  );
+): Promise<string> => {
+  try {
+    return await snapshotReplayCheckout(
+      k.deps.repoRoot,
+      trialCheckout(k, h.state.id, run.action_id, trial.base),
+      `vtc: replay trial ${run.action_id}`,
+    );
+  } catch (error) {
+    if (error instanceof ReplayCheckoutTamperedError) recordTrialTamper(k, h, run.action_id, error);
+    throw error;
+  }
+};
 
 /**
  * Grades an accepted trial through the Gate Runner (a job): its checkout's `base..head` against
- * the gates committed at its base and the recorded pack's scope; a gate run that cannot run did
- * not pass. The checkout is removed after.
+ * the gates committed at its base and the recorded pack's scope, once the head's objects are in
+ * the user's repo (the Gate Runner's git reads that repo); a gate run that cannot run did not
+ * pass. The checkout is removed after.
  */
 export const startTrialGrade = (
   k: Kernel,
@@ -349,6 +445,7 @@ export const startTrialGrade = (
       if (gates === null) throw new Error(`no committed gates.yml at ${t.trial.base.slice(0, 12)}`);
       if (lookback?.gradeTrial === undefined) throw new Error("no Lookback grader is wired");
       const grade = lookback.gradeTrial.bind(lookback);
+      await exposeReplayHead(k.deps.repoRoot, checkout, head);
       const request: GateRunRequest = GateRunRequestSchema.parse({
         run: h.state.id,
         reason: "round",
@@ -362,6 +459,13 @@ export const startTrialGrade = (
       });
       passed = await guardGateRun(k, h, `replay trial ${action}`, () => grade(request));
     } catch (error) {
+      if (error instanceof ReplayCheckoutTamperedError) {
+        const tampered = error;
+        await k.serial(h, () => {
+          recordTrialTamper(k, h, action, tampered);
+          return Promise.resolve();
+        });
+      }
       k.notice(
         `replay trial ${action} of run ${h.state.id} could not be graded: ${error instanceof Error ? error.message : String(error)}`,
       );
@@ -381,15 +485,19 @@ export const startTrialGrade = (
   });
 };
 
-/** The next trial step, when no trial runs or waits for its grade. */
+/**
+ * The next trial step, when no trial runs or waits for its grade, and the weekly window and budget
+ * still allow one (else `stepReplays` stops the replays).
+ */
 export const replaySteps = (k: Kernel, h: RunHandle): ReplayStep[] => {
   const progress = progressOf(k, h.state.id);
-  if (progress === null) return [];
+  if (progress === null || progress.deferred !== undefined) return [];
   for (const [id, action] of progress.dispatched) {
     if (progress.graded.has(id)) continue;
     // one trial at a time: it is in flight, or its grade is not in yet
     if (h.state.roleRuns.get(action) !== undefined) return [];
   }
+  if (replayWait(k, h) !== null) return [];
   for (const [replay, r] of progress.plan.replays.entries()) {
     for (const [n, trial] of r.trials.entries()) {
       const id = key({ replay, n });
@@ -412,8 +520,9 @@ export const replaySteps = (k: Kernel, h: RunHandle): ReplayStep[] => {
 
 /**
  * RETRO's replay stage (callers hold the run's lock): plans the replays once, records the trials
- * that ended without a result, re-grades an accepted trial whose grade a restart lost, and writes
- * each replay's result once its trials are graded. `done` once nothing is left to run.
+ * that ended without a result, re-grades an accepted trial whose grade a restart lost, writes each
+ * replay's result once its trials are graded, and stops the replays when the weekly window or the
+ * budget no longer allows a trial ({@link deferReplays}). `done` once nothing is left to run.
  */
 export const stepReplays = (k: Kernel, h: RunHandle): "done" | "busy" => {
   const run = h.state.id;
@@ -453,7 +562,14 @@ export const stepReplays = (k: Kernel, h: RunHandle): "done" | "busy" => {
       const o = progress.graded.get(key({ replay: index, n }));
       return o === undefined ? [] : [o];
     });
-    if (outcomes.length < replay.trials.length) return "busy";
+    if (outcomes.length < replay.trials.length) {
+      // stopped: the replays not yet graded wait for the next RETRO
+      if (progress.deferred !== undefined) continue;
+      const wait = replayWait(k, h);
+      if (wait === null) return "busy";
+      deferReplays(k, h, wait);
+      return "done";
+    }
     const job = `replay-finish:${run}:${String(index)}`;
     if (!k.isRunning(job))
       k.spawn(h, job, async () => {

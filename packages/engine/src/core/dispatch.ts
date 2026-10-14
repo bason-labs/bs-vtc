@@ -927,6 +927,37 @@ const assignCanary = (
   return canary;
 };
 
+/**
+ * Why a replay trial cannot run its arm now (reading 176), or `null`: the arm goes through the
+ * same checks as a pin ({@link pinnedPrompt}) for the dispatch kind decided now, and anything but
+ * that exact version applied (no pin can apply to the agent here, a locked core recompiled since,
+ * a text that does not hash) refuses the trial, so no arm is ever measured with another's prompt.
+ */
+const replayArmRefusal = (
+  k: Kernel,
+  h: RunHandle,
+  step: StepSpec,
+  host: HostId,
+  dispatch: "subagent" | "headless",
+): string | null => {
+  if (step.replay === undefined) return null;
+  const want = step.replay.prompt.version.effective_sha256;
+  const selection = pinnedPrompt(
+    k,
+    {
+      run: h.state.id,
+      role: step.role,
+      ...(step.mode === undefined ? {} : { mode: step.mode }),
+      host,
+      agent: agentNameFor(step.role, step.mode),
+    },
+    dispatch,
+    step.replay.prompt,
+  );
+  if (selection.pinned?.version.effective_sha256 === want) return null;
+  return `its arm's prompt version ${want.slice(0, 12)} cannot run as planned (${selection.problem ?? "no pin applies"}), and a trial never runs another arm's prompt`;
+};
+
 /** A replay trial's pack: the recorded one in this run, without its task or feature. */
 const trialPack = (h: RunHandle, ref: ReplayStepRef, actionId: string): TaskPackInput => {
   const { task: _task, feature: _feature, role_heuristics: _heuristics, ...rest } = ref.pack;
@@ -1227,6 +1258,11 @@ export const dispatchPrepared = async (
 ): Promise<DispatchedStep | null> => {
   const actionId = nextActionId(h.state);
   if (step.replay !== undefined) {
+    const refused = replayArmRefusal(k, h, step, host, dispatch);
+    if (refused !== null) {
+      refuseTrial(k, h, step.replay, refused);
+      return null;
+    }
     // a replay trial works in its own clean checkout at the recorded base (reading 176)
     const cwd = await prepareTrial(k, h, step.replay, actionId);
     if (cwd === null) return null;

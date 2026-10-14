@@ -10,6 +10,7 @@
  *   engine's and whose starting commit is known; its trials `planReplayTrials` (with an A/A arm when
  *   no noise floor is cached for the baseline). A proposal whose versions or tasks cannot be found
  *   is left out with its reason.
+ * - `replayWait`: the same window and budget checks, which core runs again before every trial.
  * - `gradeTrial`: the lookback module's `gradeTrial` through the Gate Runner.
  * - `finishReplay`: `finishReplay` over the graded trials, `writeReplayResult` (the event carries
  *   the SHA-256 of the bytes written), and the measured A/A flip rate kept for the next replay.
@@ -68,11 +69,14 @@ export interface ReplayWiringDeps {
     mode: string | undefined,
     host: HostId,
   ) => { readonly locked: string; readonly editable: string } | undefined;
-  /** The AI tiebreak keys the engine recorded (`readTiebreakKeys`). */
-  readonly tiebreaks: () => ReadonlySet<string>;
+  /** The AI tiebreak keys the engine recorded (only those `ai_tiebreak` rows count). */
+  readonly tiebreaks: () => Promise<ReadonlySet<string>>;
   readonly graderBundleSha: () => string;
-  /** Percent of the weekly window of the run's Lead host left; `null` when unknown. */
-  readonly weeklyRemainingPct: (state: RunState) => number | null;
+  /** The run's Lead host and the percent of its weekly window left (`null` when unknown). */
+  readonly weeklyWindow: (state: RunState) => {
+    readonly host: HostId;
+    readonly pct: number | null;
+  };
   readonly budgetAvailable: (state: RunState) => boolean;
   readonly gateRunner: GateRunner;
   readonly now: () => Date;
@@ -242,24 +246,31 @@ const recordedDispatch = (
   return base === undefined ? undefined : { pack, base };
 };
 
-/** The `replays`, `gradeTrial` and `finishReplay` parts of core's `LookbackRetro`. */
+/**
+ * Why no replay trial may run now (AD-21 rule 8, reading 176: the lookback role's own checks), or
+ * `null`: the weekly window of the run's Lead host, then the budget.
+ */
+export const replayWaitReason = (deps: ReplayWiringDeps, state: RunState): string | null => {
+  const { host, pct } = deps.weeklyWindow(state);
+  const lead = `${host} (the run's Lead host)`;
+  if (pct === null || pct < LOOKBACK_LIMITS.minWeeklyRemainingPct)
+    return `${pct === null ? `the weekly window of ${lead} is unknown` : `${String(Math.round(pct))}% of the weekly window of ${lead} is left`}; a replay needs ${String(LOOKBACK_LIMITS.minWeeklyRemainingPct)}%`;
+  if (!deps.budgetAvailable(state)) return "the run has no budget left for replay trials";
+  return null;
+};
+
+/** The `replays`, `replayWait`, `gradeTrial` and `finishReplay` parts of core's `LookbackRetro`. */
 export const createLookbackReplays = (
   deps: ReplayWiringDeps,
-): Required<Pick<LookbackRetro, "replays" | "gradeTrial" | "finishReplay">> => ({
+): Required<Pick<LookbackRetro, "replays" | "replayWait" | "gradeTrial" | "finishReplay">> => ({
   replays: async (state) => {
     const history = deps.history();
     const pending = pendingProposals(history);
     if (pending.length === 0) return { replays: [] };
     // AD-21 rule 8: the same checks as the lookback role (reading 176)
-    const pct = deps.weeklyRemainingPct(state);
-    if (pct === null || pct < LOOKBACK_LIMITS.minWeeklyRemainingPct)
-      return {
-        replays: [],
-        wait: `${pct === null ? "the weekly window of the run's Lead host is unknown" : `${String(Math.round(pct))}% of the weekly window of the run's Lead host is left`}; a replay needs ${String(LOOKBACK_LIMITS.minWeeklyRemainingPct)}%`,
-      };
-    if (!deps.budgetAvailable(state))
-      return { replays: [], wait: "the run has no budget left for replay trials" };
-    const tiebreaks = deps.tiebreaks();
+    const wait = replayWaitReason(deps, state);
+    if (wait !== null) return { replays: [], wait };
+    const tiebreaks = await deps.tiebreaks();
     const attributions = await readAttributions(deps.projectRoot, {
       history,
       lockedShaFor: deps.lockedShaFor,
@@ -334,6 +345,7 @@ export const createLookbackReplays = (
       ? { replays }
       : { replays, wait: `left out: ${left.join("; ")}`.slice(0, 2000) };
   },
+  replayWait: (state) => replayWaitReason(deps, state),
   gradeTrial: (request) => gradeTrial(deps.gateRunner, request),
   finishReplay: async (replay, outcomes) => {
     const outcome = new Map<number, ReplayTrialOutcome>(outcomes.map((o) => [o.n, o]));

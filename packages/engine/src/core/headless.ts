@@ -34,6 +34,7 @@ import type { Kernel, RunHandle } from "./kernel.js";
 import { deferForUsage, limitWait, stillLimited } from "./limits.js";
 import { inFlight } from "./queries.js";
 import { parkTask } from "./parking.js";
+import { deferReplays } from "./replay.js";
 import { headlessPlatformRefusal, roleSandboxProblem, roleSandboxRequest } from "./sandbox.js";
 import { handleSubmit } from "./submit.js";
 
@@ -162,6 +163,8 @@ export const headlessPreflight = async (
  * A failed preflight: nothing launches, and nothing retries in a loop. `usage` waits for the
  * reset (the timer is scheduled); `auth` records an incident and pauses the run until the human
  * signs in again and resumes; `config` parks the step for the human; `budget` parks its task.
+ * A Lookback replay trial pauses nothing (reading 176): the replays stop and wait for the next
+ * RETRO, and the delivered run finishes (`deferReplays`; a sign-in failure is still an incident).
  */
 const preflightFailed = (
   k: Kernel,
@@ -170,6 +173,27 @@ const preflightFailed = (
   check: HeadlessPreflight,
 ): void => {
   const detail = check.detail ?? "the headless preflight failed";
+  if (step.replay !== undefined && check.failed !== undefined && check.failed !== "paused") {
+    if (check.failed === "auth")
+      k.emit(h, {
+        type: "incident.recorded",
+        actor: "engine",
+        data: {
+          kind: "auth",
+          detail:
+            `the engine did not start a replay trial of ${step.role} headless: ${detail}`.slice(
+              0,
+              2000,
+            ),
+        },
+      });
+    deferReplays(
+      k,
+      h,
+      `a headless trial of ${step.role} could not start (${check.failed}): ${detail}`,
+    );
+    return;
+  }
   switch (check.failed) {
     case "paused":
     case undefined:
