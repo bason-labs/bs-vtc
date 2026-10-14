@@ -48,9 +48,10 @@ import {
 } from "@vtc/shared";
 import { appendRepoFile } from "../git/index.js";
 import { parkEscalation } from "./escalations.js";
-import { baseBranch, parkFeature, setFeatureStatus } from "./jobs.js";
+import { baseBranch, openFeatureEscalation, parkFeature, setFeatureStatus } from "./jobs.js";
 import type { Kernel, RunHandle } from "./kernel.js";
 import { readTraceability } from "./projections.js";
+import { startRetro } from "./retro.js";
 import { featureHasUi } from "./ui.js";
 import { nextEscalationId } from "./queries.js";
 import type { RunState } from "./state.js";
@@ -406,11 +407,75 @@ const park = (
         h,
         featureId,
         "blocked",
-        `Level 3: ${detail}. The PR stays open for your review; answer to retry the auto-merge`,
+        `Level 3: ${detail}. ${LEVEL3_PARK_NOTE}`,
         evidence,
+        undefined,
+        true,
       );
     return Promise.resolve("parked" as const);
   });
+
+/** What every Level-3 release park tells the human (AD-23; D-bd, spine §5 reading 158). */
+const LEVEL3_PARK_NOTE =
+  "The PR stays open for your review; retry the auto-merge once the cause is fixed, or finish at Level 2";
+
+/**
+ * The answer `finish_level_2` to a Level-3 release park (AD-23; D-bd, spine §5 reading 158): VTC
+ * turns off any auto-merge it enabled on the feature's open PR, leaves the PR open for the human's
+ * review and ends the run as at Level 2 (the feature `ready_to_ship`, then RETRO and
+ * `run.finished`). It changes no merge level: `.vtc/merge-level.jsonl` is for downgrades only. An
+ * auto-merge that cannot be turned off parks the feature again with what the human must do, and
+ * the run stays open. Runs as the feature's release job, so no release starts beside it. Callers
+ * hold the run's lock; the feature is parked.
+ */
+export const finishAtLevel2 = (k: Kernel, h: RunHandle, featureId: string): void => {
+  k.spawn(h, `release:${featureId}`, async () => {
+    const service = k.deps.remoteMerge;
+    const feature = h.state.features.get(featureId);
+    let failure: string | null = null;
+    if (
+      service !== undefined &&
+      feature?.pr?.state === "open" &&
+      mayBeOn(h, featureId, feature.pr)
+    ) {
+      try {
+        const off = await service.disableAutoMerge(feature.integration_branch);
+        await k.serial(h, () => {
+          updatePr(k, h, featureId, off === null ? null : { ...off, auto_merge: "disabled" });
+          return Promise.resolve();
+        });
+      } catch (error) {
+        failure = message(error);
+      }
+    }
+    await k.serial(h, () => {
+      if (h.state.run.finished_at !== undefined) return Promise.resolve();
+      if (h.state.features.get(featureId)?.status !== "parked") return Promise.resolve();
+      if (failure !== null) {
+        const pr = h.state.features.get(featureId)?.pr;
+        openFeatureEscalation(
+          k,
+          h,
+          featureId,
+          "blocked",
+          `Level 3: you chose to finish at Level 2, but VTC could NOT turn its auto-merge off (${failure}): turn it off now (gh pr merge ${pr?.number === undefined ? (feature?.integration_branch ?? featureId) : String(pr.number)} --disable-auto), then answer again. ${LEVEL3_PARK_NOTE}`,
+          [],
+          undefined,
+          true,
+        );
+        return Promise.resolve();
+      }
+      setFeatureStatus(k, h, featureId, "ready_to_ship");
+      k.emit(h, {
+        type: "run.phase_changed",
+        actor: "engine",
+        data: { from: h.state.run.phase, to: "retro" },
+      });
+      startRetro(k, h);
+      return Promise.resolve();
+    });
+  });
+};
 
 /**
  * Level 3 at release (AD-23 rules 2 and 3): waits for the base's required checks on the gated SHA,

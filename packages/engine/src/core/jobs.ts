@@ -950,11 +950,27 @@ export const parkFeature = (
   detail: string,
   evidence: readonly Evidence[],
   riskRule?: RiskRuleReasonRule,
+  /** A Level-3 release park: retry or finish at Level 2 (D-bd). */
+  level3Release?: boolean,
 ): void => {
   setFeatureStatus(k, h, featureId, "parked", {
     parkReason: reason,
     ...(riskRule === undefined ? {} : { riskRule }),
   });
+  openFeatureEscalation(k, h, featureId, reason, detail, evidence, riskRule, level3Release);
+};
+
+/** The escalation of a parked feature (its park reason's options, or a Level-3 release's). */
+export const openFeatureEscalation = (
+  k: Kernel,
+  h: RunHandle,
+  featureId: string,
+  reason: ParkReason,
+  detail: string,
+  evidence: readonly Evidence[],
+  riskRule?: RiskRuleReasonRule,
+  level3Release?: boolean,
+): void => {
   const feature = h.state.features.get(featureId);
   const escalation = parkEscalation({
     id: nextEscalationId(h.state),
@@ -966,6 +982,7 @@ export const parkFeature = (
     evidence,
     blocks: feature?.tasks ?? [],
     now: k.now(),
+    ...(level3Release === true ? { level3Release } : {}),
   });
   k.emit(h, {
     type: "escalation.opened",

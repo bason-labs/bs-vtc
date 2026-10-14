@@ -31,7 +31,36 @@ export interface ParkEscalationInput {
   /** `cap` / `stuck`: who stopped making progress, for the hint option (default the Engineer). */
   readonly stuckRole?: string;
   readonly raisedBy?: string;
+  /**
+   * A feature parked at its Level-3 release (AD-23): the human retries the auto-merge or finishes
+   * at Level 2 (`finish_level_2`, spine §5 readings 115 and 158) instead of the reason's options.
+   */
+  readonly level3Release?: boolean;
 }
+
+/** What a Level-3 release park offers (AD-23; D-bd, spine §5 reading 158). */
+const LEVEL3_RELEASE_OPTIONS: {
+  question: string;
+  options: EscalationOption[];
+  recommended: string;
+} = {
+  question:
+    "The Level-3 auto-merge stopped; the PR is open for your review. Retry the auto-merge, or finish at Level 2?",
+  options: [
+    {
+      id: "retry",
+      label: "Retry the auto-merge (once the cause is fixed)",
+      effect: "retry",
+    },
+    {
+      id: "finish-level-2",
+      label:
+        "Finish at Level 2: VTC turns off any auto-merge it enabled, leaves the PR open for your review and ends the run",
+      effect: "finish_level_2",
+    },
+  ],
+  recommended: "retry",
+};
 
 const waiveOption = (now: Date, label: string): EscalationOption => ({
   id: "waive",
@@ -155,7 +184,10 @@ const optionsFor = (
 
 /** An escalation for a park (§6.5) with the standard options of its reason. */
 export const parkEscalation = (input: ParkEscalationInput): Escalation => {
-  const { question, options, recommended } = optionsFor(input.reason, input.now, input.stuckRole);
+  const { question, options, recommended } =
+    input.level3Release === true
+      ? LEVEL3_RELEASE_OPTIONS
+      : optionsFor(input.reason, input.now, input.stuckRole);
   return EscalationSchema.parse({
     id: input.id,
     run: input.run,

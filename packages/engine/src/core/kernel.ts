@@ -11,6 +11,7 @@ import type {
   HeadlessRun,
   HeadlessRunSummary,
   HostAdapter,
+  HostBilling,
   HostId,
   ModelPrice,
   ProjectConfig,
@@ -260,6 +261,13 @@ export interface Kernel {
   readonly usage: Map<HostId, UsageSnapshot>;
   /** Stores a usage reading (statusline, adapter, an engine-launched run's stream; §6.9). */
   ingestUsage(snapshot: UsageSnapshot): void;
+  /**
+   * Who pays for `host`'s role runs, from its last sign-in check (`HostAuthStatus.billing`; `null`
+   * when the check does not say): kept on the host's usage snapshot (`UsageSnapshot.billing`), so
+   * `GET /api/usage` carries it and Flow Studio shows `API_KEY_BILLING_WARNING` (D-bq, spine §5
+   * reading 171).
+   */
+  recordBilling(host: HostId, billing: HostBilling | null): void;
   /**
    * `pipelineConfigHash` of `project.yaml` and `gates.yml` as they are on disk now, or `null`
    * when they do not parse (the headless preflight's `config` check, AD-25 rule 3).

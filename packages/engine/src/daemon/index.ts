@@ -423,6 +423,19 @@ export const runDaemon: RunDaemon = async (deps: EngineDeps, options) => {
         }),
       );
     }
+    // D-bq (reading 171): who pays for each host's role runs, from its own sign-in check, so
+    // `GET /api/usage` carries an API-key login before any role runs (every engine-launched start
+    // checks again)
+    for (const host of HOST_IDS) {
+      const adapter = deps.adapters[host];
+      if (adapter?.authStatus === undefined) continue;
+      adapter.authStatus().then(
+        (status) => {
+          engine.recordBilling(host, status.billing ?? null);
+        },
+        () => undefined,
+      );
+    }
     const prototype = await createPrototypeServer(deps.repoRoot);
     cleanups.push(() => prototype.close());
     const http = await createHttpApi({
