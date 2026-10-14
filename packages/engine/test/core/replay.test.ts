@@ -25,7 +25,9 @@ import {
   type LookbackRetro,
   type PluginCatalog,
   type ReplayTrialOutcome,
+  type RunHandle,
 } from "../../src/core/index.js";
+import { refuseInSession } from "../../src/core/dispatch.js";
 import { cleanupDirs, git } from "../helpers/repo.js";
 import {
   authorTests,
@@ -124,7 +126,11 @@ const nextTrial = async (h: Harness, carried: readonly SpawnAction[]): Promise<S
   only((await h.engine.next({}, CLAUDE)).actions, "spec_verifier");
 
 /** A Lookback fake with no lookback target and one replay of `trials` arms. */
-const fakeReplays = (arms: readonly ("a" | "b")[], context: () => Delivered) => {
+const fakeReplays = (
+  arms: readonly ("a" | "b")[],
+  context: () => Delivered,
+  role = "spec_verifier",
+) => {
   const graded: GateRunRequest[] = [];
   const finished: { replay: LookbackReplay; outcomes: readonly ReplayTrialOutcome[] }[] = [];
   const retro: LookbackRetro = {
@@ -136,17 +142,17 @@ const fakeReplays = (arms: readonly ("a" | "b")[], context: () => Delivered) => 
         replays: [
           {
             proposal: "p-1",
-            role: "spec_verifier",
+            role,
             host: "claude-code",
             trials: arms.map((arm, i) => ({
               arm,
               trial: i + 1,
               task: "r-old:T-1",
               regressionSet: false,
-              role: "spec_verifier",
+              role,
               host: "claude-code" as const,
               prompt: {
-                version: version(arm === "b" ? CANDIDATE : BASELINE),
+                version: { ...version(arm === "b" ? CANDIDATE : BASELINE), role },
                 text: arm === "b" ? CANDIDATE : BASELINE,
               },
               pack,
@@ -305,6 +311,60 @@ describe("RETRO runs Lookback replays (AD-21 rule 6, reading 176)", () => {
     expect(h.engine.notices.join("\n")).toMatch(
       /proposal p-1 waits for the next RETRO: vtc-spec-verifier cannot run a candidate: it carries its own editable section/,
     );
+    await h.release();
+  });
+
+  it("a trial the dispatcher refuses did not pass; nothing is asked of the human", async () => {
+    const h = createHarness({ project: { merge_level: 1 }, plugins: switched });
+    let context: Delivered | undefined;
+    const fake = fakeReplays(["a", "b"], () => {
+      if (context === undefined) throw new Error("not at RETRO yet");
+      return context;
+    });
+    h.engine.setLookbackRetro(fake.retro);
+    const { pending } = await toRetro(h, (d) => {
+      context = d;
+    });
+    const first = await nextTrial(h, pending);
+    const state = h.engine.states().find((s) => s.run.finished_at === undefined);
+    if (state === undefined || context === undefined) throw new Error("no run at RETRO");
+    // the second trial cannot run in the Lead's session (D-an): it did not pass, no escalation
+    refuseInSession(
+      h.engine,
+      { state } as unknown as RunHandle,
+      {
+        key: "retro:replay:0-1",
+        role: "spec_verifier",
+        replay: {
+          replay: 0,
+          n: 1,
+          prompt: { version: version(CANDIDATE), text: CANDIDATE },
+          pack: context.pack,
+          base: context.base,
+        },
+      },
+      "the Lead session's sandbox is off",
+    );
+    await submitResult(h, first, {
+      exit: "done",
+      verdicts: [
+        {
+          subject: first.subject ?? "",
+          verdict: "pass",
+          evidence: [{ type: "file_line", ref: "src/t-1/impl.ts:1" }],
+        },
+      ],
+    });
+    await h.engine.settle();
+    await h.engine.next({}, CLAUDE);
+    await h.engine.settle();
+    expect(fake.graded).toHaveLength(1);
+    expect(fake.finished[0]?.outcomes.map((o) => o.passed)).toEqual([false, false]);
+    expect(h.engine.escalations({}).escalations).toEqual([]);
+    expect(h.engine.notices.join("\n")).toMatch(
+      /replay trial 0-1 of run .* was not run: the Lead session's sandbox is off/,
+    );
+    expect(h.engine.status({}).run.finished_at).toBeDefined();
     await h.release();
   });
 
