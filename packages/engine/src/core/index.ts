@@ -100,6 +100,7 @@ export {
 } from "./plugins.js";
 export {
   appendPrivateFile,
+  automationPausedByHuman,
   ensurePrivateDir,
   guardDirFor,
   GUARD_DIR,

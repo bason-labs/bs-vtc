@@ -3,7 +3,8 @@
  * spine §5 readings 189–195). The daemon is the only place the upstream module meets the engine:
  * - it resolves the project's settings (`automationFor`: the project's `upstream` / `automation`,
  *   the user's from `EngineDeps.automation`, a GitHub push remote, the cli's `gh` wiring, and
- *   `vtc pause`, which stops automation for as long as a run is paused);
+ *   `vtc pause`: the repo-level kill switch every `pause` sets, run or no run, until the human's
+ *   `vtc resume` (`automationPausedByHuman`), and any open run that is paused);
  * - it reads the engine facts that trigger automation from every event (`automationFacts`: VTC
  *   defects, replay verdict `improve`, parked tasks, red post-merge CI, reverts and escaped defects,
  *   out-of-scope findings, Final Review leftovers) and hands each to the upstream module, or
@@ -16,7 +17,9 @@
  *   versions and metric;
  * - an automatic run's release (`automaticReleaseOf`: its work pushed to its `vtc/auto` branch
  *   after Final Review) goes to the module, which opens the run's draft PR with evidence.
- * Without `EngineDeps.automation` nothing is evaluated (the Automation view says why).
+ * Without `EngineDeps.automation` nothing is evaluated (the Automation view says why). Every job
+ * runs on one queue whose failures become engine notices, so one failed step never stops the
+ * jobs after it (nor rejects `idle` / `close`).
  */
 import { join } from "node:path";
 import {
@@ -36,6 +39,7 @@ import {
 import {
   appendPrivateFile,
   automaticReleaseOf,
+  automationPausedByHuman,
   automationDailySummary,
   automationFacts,
   costRegressionFacts,
@@ -143,7 +147,9 @@ export const wireAutomation = (
 ): AutomationWiring => {
   const now = deps.now ?? (() => new Date());
   const automation = deps.automation;
+  // the human's kill switch holds while the daemon is idle too (no open run, AD-27 rule 7)
   const paused = (): boolean =>
+    automationPausedByHuman(engine.guardDir) ||
     engine.states().some((s) => s.run.finished_at === undefined && s.run.paused);
   // Precondition (the cli's): `EngineDeps.automation` is injected only after `gh auth status`
   // passed, so its presence stands for the gh login here. `AutomationDeps` carries no login of
@@ -258,7 +264,16 @@ export const wireAutomation = (
           },
           now,
         });
+  // One job at a time, in order. A job that throws (a guard-dir write, an event the log refused)
+  // is an engine notice and the next job still runs: the chain never holds a rejection.
   let queue: Promise<void> = Promise.resolve();
+  const enqueue = (what: string, job: () => void | Promise<void>): void => {
+    queue = queue.then(job).catch((error: unknown) => {
+      engine.notice(
+        `automation (${what}) failed: ${error instanceof Error ? error.message : String(error)}`,
+      );
+    });
+  };
   const handle = async (fact: AutomationFact): Promise<void> => {
     const settings = settingsNow();
     if (settings === null) return;
@@ -310,7 +325,7 @@ export const wireAutomation = (
     if (automation === undefined) return;
     if (event.type === "run.started") {
       const run = event.run;
-      queue = queue.then(() => {
+      enqueue("the pending events", () => {
         flushPending(run);
       });
     }
@@ -318,14 +333,23 @@ export const wireAutomation = (
     const facts = state === undefined ? [] : automationFacts(state, event);
     const release = state === undefined ? null : automaticReleaseOf(state, event);
     // handled after the emit that raised them, one at a time
-    queue = queue.then(async () => {
-      maybeSummarise();
-      for (const fact of facts) await handle(fact);
+    enqueue("the daily summary", maybeSummarise);
+    enqueue(`the facts of ${event.type}`, async () => {
+      for (const fact of facts) {
+        try {
+          await handle(fact);
+        } catch (error) {
+          // one fact that could not be handled never drops the ones after it
+          engine.notice(
+            `automation could not handle a ${fact.kind} fact of run ${fact.run}: ${error instanceof Error ? error.message : String(error)}`,
+          );
+        }
+      }
       if (release !== null) await released(release);
     });
   };
   const unsubscribe = engine.onEvent(listener);
-  maybeSummarise();
+  if (automation !== undefined) enqueue("the daily summary", maybeSummarise);
 
   // ---- cost regressions, after Lookback rewrote the scorecards (D-bv)
   const costSeenFile = join(guard, COST_SEEN_FILE);
@@ -339,7 +363,7 @@ export const wireAutomation = (
   };
   const scorecardsWritten = (run: string): void => {
     if (automation === undefined) return;
-    queue = queue.then(async () => {
+    enqueue("the cost regressions", async () => {
       const facts = costRegressionFacts(readScorecards(deps.repoRoot), {
         run,
         at: now().toISOString(),
@@ -363,13 +387,11 @@ export const wireAutomation = (
   const sweep = upstream?.sweep?.bind(upstream);
   const runSweep = (): void => {
     if (sweep === undefined || paused()) return;
-    queue = queue.then(() =>
-      sweep().catch((error: unknown) => {
-        engine.notice(
-          `the automation sweep failed: ${error instanceof Error ? error.message : String(error)}`,
-        );
-      }),
-    );
+    enqueue("the sweep", async () => {
+      // paused while it waited in the queue: not now
+      if (paused()) return;
+      await sweep();
+    });
   };
   if (automation !== undefined) runSweep();
   const timer =

@@ -228,15 +228,27 @@ export interface AutomationFact {
   /** A Lookback proposal and its replay result (`lookback.replay_finished`). */
   readonly proposal?: string;
   readonly replayPath?: string;
+  /**
+   * The SHA-256 of the replay result's bytes as the engine wrote them (`lookback.replay_finished`
+   * `sha256`): the result file is role-writable, so the Lookback PR is built only from bytes
+   * that still hash to it (spine §5 reading 128).
+   */
+  readonly replaySha256?: string;
   readonly mergeCommit?: string;
 }
 
-/** Park reasons that wait on the human by design, so VTC raises no issue for them. */
+/**
+ * Park reasons that wait on the human by design, so VTC raises no issue for them. `blocked` is one:
+ * a role's `exit: blocked` with a question for the human, or the engine refusing an in-session
+ * dispatch on the local setup (the Lead session's sandbox off, Codex in session), which answering
+ * retries; neither is a problem in the app VTC builds (reading 190, D-bx).
+ */
 const HUMAN_PARKS: ReadonlySet<ParkReason> = new Set([
   "risk_rule",
   "budget",
   "change_request",
   "spec_question",
+  "blocked",
 ]);
 
 /** An issue title, cut to fit. */
@@ -353,6 +365,7 @@ export const automationFacts = (state: RunState, event: VtcEvent): AutomationFac
           kind: "lookback",
           proposal: v.proposal,
           replayPath: v.path,
+          ...(v.sha256 === undefined ? {} : { replaySha256: v.sha256 }),
           detail: `the replay of proposal ${v.proposal} says improve`,
         },
       ];

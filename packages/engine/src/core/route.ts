@@ -88,10 +88,21 @@ export const dispatchNow = async (
     }
     // D-cf: a host_web role whose route is another host runs headless there; as this host's
     // subagent the compiled agent's own profile governs its web search (Claude Code's denies the
-    // credential stores)
+    // credential stores), so only a route with safe host web search runs in session. On this
+    // host without it (its web search not safe, `HOST_WEB_OFF_NOTICE`), the role runs headless
+    // with no host web search, as `dispatchHeadless` runs it, or not at all.
     const web = hostWebRouteFor(k, step, leadHost, host);
-    if (web !== null && web.host !== host) {
+    if (web !== null && (web.host !== host || !web.hostWeb)) {
       if (!web.hostWeb) k.relay(h.state.id, web.notice);
+      if (web.host === host && !capabilitiesOf(k, host).headless) {
+        refuseInSession(
+          k,
+          h,
+          step,
+          `${step.role} needs web search, which is not safe on ${host}, and ${host} cannot run it headless without it (D-cf); run the Lead on Claude Code`,
+        );
+        continue;
+      }
       if (await launchHeadless(k, h, step, web.host, "role", 1, web.hostWeb)) free -= 1;
       continue;
     }

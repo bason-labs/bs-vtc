@@ -436,6 +436,9 @@ const fakeAdapter = (
       headless: true,
       turnCap: true,
       budgetCap: true,
+      // as the real adapters report it: Claude Code's role profiles deny the credential stores,
+      // Codex's web search is not confirmed safe (D-cf)
+      safeHostWeb: host === "claude-code",
       ...options.capabilities,
     },
     install: () => Promise.reject(new Error("not in tests")),

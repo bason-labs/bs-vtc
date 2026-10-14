@@ -83,6 +83,43 @@ describe("the evidence snapshot of a run (AD-27 rule 6)", () => {
     expect(snapshot.events).toEqual(log);
   });
 
+  it("holds no other run of the repo: the run list, the status and the Automation view are this run's", () => {
+    const other = log.map((e) => ({ ...e, run: "other-1" }));
+    const opened = {
+      v: 1 as const,
+      seq: other.length + 1,
+      ts: "2026-10-13T10:00:00.000Z",
+      run: "other-1",
+      type: "upstream.issue_opened",
+      actor: "engine" as const,
+      data: {
+        target: { kind: "project", repo: "acme/app" },
+        kind: "parked",
+        fingerprint: "0123456789abcdef",
+        number: 9,
+        url: "https://github.com/acme/app/issues/9",
+      },
+    };
+    const both = createReadModel({
+      repoRoot: "/nonexistent",
+      mode: "snapshot",
+      versions: { engine: "0.0.0", contracts: "5.0.0" },
+      prototypeUrl: () => null,
+      runs: () => [state, projectRun([...other, opened] as typeof log)],
+      usage: () => new Map(),
+      git: null,
+    });
+    expect((both.automation() as { items: unknown[] }).items).toHaveLength(1);
+    const scoped = evidenceSnapshot(both, "golden-1");
+    expect(
+      (scoped.routes["/api/runs"] as { runs: { id: string }[] }).runs.map((r) => r.id),
+    ).toEqual(["golden-1"]);
+    expect((scoped.routes["/api/automation"] as { items: unknown[] }).items).toEqual([]);
+    const status = scoped.routes["/api/status"] as { run: { id: string } } | undefined;
+    expect(status === undefined || status.run.id === "golden-1").toBe(true);
+    expect(JSON.stringify(scoped.routes)).not.toContain("other-1");
+  });
+
   it("a run the model does not know has no run views", () => {
     const none = evidenceSnapshot(model, "nope-1");
     expect(none.events).toEqual([]);

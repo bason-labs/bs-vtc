@@ -30,6 +30,7 @@ import {
   parsePersisted,
   PromptProposalSchema,
   ReplayResultSchema,
+  sha256Hex,
   UpstreamReportSchema,
   type AssetBundle,
   type AutoFingerprint,
@@ -368,8 +369,10 @@ const REPLAY_FILE_MAX_BYTES = 1024 * 1024;
 
 /**
  * The `ReplayResult` and `PromptProposal` of a replay verdict `improve` (D-cb), or why there are
- * none. The replay file must be the one the event names, under `.vtc/lookback/replays/`, for
- * that proposal, saying `improve`; the proposal must be the one replayed; its editable section is
+ * none. The replay file must be the one the event names, under `.vtc/lookback/replays/`, its
+ * bytes still hashing to the SHA-256 the event recorded (the file is role-writable, so an edited
+ * one, or an event without the hash, opens no PR; spine §5 reading 128), for that proposal, saying
+ * `improve`; the proposal must be the one replayed; its editable section is
  * the candidate version Lookback stored and the replay measured (`candidateEditable`), because the
  * proposal files are role-writable and a later RETRO may have rewritten them.
  */
@@ -377,12 +380,16 @@ export const readLookbackPrInput = async (input: {
   readonly projectRoot: string;
   readonly proposal: string;
   readonly replayPath: string;
+  /** `lookback.replay_finished` `sha256`: the bytes the engine wrote. */
+  readonly replaySha256: string | undefined;
   readonly readProposal: (role: string) => Promise<unknown>;
   readonly candidateEditable: (replay: ReplayResult) => Promise<string | undefined>;
 }): Promise<LookbackPrInput | string> => {
   const path = input.replayPath;
   if (!path.startsWith(`${LOOKBACK_REPO.replaysDir}/`) || path.split("/").includes(".."))
     return `the replay result ${path} is not under ${LOOKBACK_REPO.replaysDir}`;
+  if (input.replaySha256 === undefined)
+    return `the replay result ${path} has no recorded SHA-256, so the engine's file cannot be told from an edited one`;
   let raw: unknown;
   try {
     // the engine writes it; a link (at any component) or an oversized file is never read
@@ -391,6 +398,8 @@ export const readLookbackPrInput = async (input: {
       return `the replay result ${path} is not a regular file`;
     if (!read.ok && read.reason === "too_large") return `the replay result ${path} is too large`;
     if (!read.ok) return `the replay result ${path} is missing or not JSON`;
+    if (sha256Hex(read.text) !== input.replaySha256)
+      return `the replay result ${path} was edited after the engine wrote it`;
     raw = JSON.parse(read.text);
   } catch {
     return `the replay result ${path} is missing or not JSON`;
