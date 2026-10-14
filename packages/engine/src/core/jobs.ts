@@ -442,6 +442,7 @@ export const startBaseCheck = (
             reason: "stuck",
             detail: "QA's acceptance tests did not fail on the base commit in 3 attempts",
             evidence: [{ type: "commit", ref: head }],
+            stuckRole: "qa",
           });
         }
       }

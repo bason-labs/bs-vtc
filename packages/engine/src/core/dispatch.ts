@@ -134,7 +134,13 @@ const rejectionNote = (
     )
     .at(-1);
   if (last?.status !== "rejected" || last.rejection === undefined) return undefined;
-  return `Your previous result was rejected (${last.rejection.reason}): ${last.rejection.issues.join("; ")}`;
+  // a rejected Engineer or QA author result is discarded from the task worktree (submit.ts)
+  const discarded =
+    filter.task !== undefined &&
+    (filter.role === "engineer" || (filter.role === "qa" && filter.mode === "author"))
+      ? " Its changes were discarded from the worktree: redo them within scope."
+      : "";
+  return `Your previous result was rejected (${last.rejection.reason}): ${last.rejection.issues.join("; ")}${discarded}`;
 };
 
 const interruptedSession = (
@@ -182,7 +188,14 @@ const taskSteps = (k: Kernel, h: RunHandle, taskId: string, host: HostId): StepS
         (missed
           ? "Your acceptance tests passed on the base commit. They must fail before the implementation exists (§6.3 step 2): test the new behaviour."
           : undefined);
-      steps.push({ key: `qa:${taskId}`, ...step, ...(note === undefined ? {} : { note }) });
+      // the human's hint after QA got stuck goes to QA author (parking.ts resumeTarget)
+      const answer = freshAnswer(h, taskId, lastDispatchSeq(h, taskId, "qa"));
+      steps.push({
+        key: `qa:${taskId}`,
+        ...step,
+        ...(note === undefined ? {} : { note }),
+        ...(answer === undefined ? {} : { answer }),
+      });
     }
     return steps;
   }

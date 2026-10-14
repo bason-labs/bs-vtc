@@ -84,7 +84,8 @@ export const collectRoleChanges = async (
   return { head, changes: await k.deps.git.changedFiles(worktree.base, head) };
 };
 
-const touched = (change: GitChangedFile): string[] =>
+/** The paths a change touches (both sides of a rename). */
+export const touched = (change: GitChangedFile): string[] =>
   change.oldPath === undefined ? [change.path] : [change.oldPath, change.path];
 
 /** Every change outside the role's write paths, or where only the engine writes. */
