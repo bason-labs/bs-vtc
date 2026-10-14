@@ -4,12 +4,21 @@
  * proposed fact records that role and its event lands in that run's log, and before G2 the
  * re-checked fact table replaces the statuses `facts.jsonl` records.
  */
-import { readFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, utimesSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { factId, RESEARCH_FACTS_FILE, type FactRow, type LeadAction } from "@vtc/shared";
+import {
+  factId,
+  RESEARCH_CACHE,
+  RESEARCH_FACTS_FILE,
+  type FactRow,
+  type LeadAction,
+  type VtcEvent,
+} from "@vtc/shared";
+import type { Engine } from "../../src/core/index.js";
+import { createFetchQuota } from "../../src/research/index.js";
 import { wireResearch } from "../../src/daemon/index.js";
-import { cleanupDirs, writeFile } from "../helpers/repo.js";
+import { cleanupDirs, tempDir, writeFile } from "../helpers/repo.js";
 import { FixtureHttp, jsonResponse } from "../research/fixture-http.js";
 import {
   CLAUDE,
@@ -175,6 +184,90 @@ describe("the daemon wires the research module (reading 120)", () => {
     expect(over.result.detail).toContain("quota");
     expect(http.count(`GET ${url("2.0.0")}`)).toBe(0);
     stop();
+    await h.release();
+  });
+
+  it("drops a run's quota count at run.finished (reading 138)", () => {
+    const quota = createFetchQuota(5);
+    let listener: ((event: VtcEvent) => void) | undefined;
+    const engine = {
+      config: () => ({ client: undefined }),
+      setRoleTools: () => undefined,
+      setFactRefresher: () => undefined,
+      roleCalling: () => undefined,
+      secrets: () => [],
+      recordModuleEvent: () => undefined,
+      onEvent: (fn: (event: VtcEvent) => void) => {
+        listener = fn;
+        return () => {
+          listener = undefined;
+        };
+      },
+    } as unknown as Engine;
+    const stop = wireResearch(engine, { repoRoot: tempDir(), vtcHome: tempDir() }, { quota });
+    expect(quota.forRun("R-1").take()).toBe(true);
+    expect(quota.forRun("R-2").take()).toBe(true);
+    listener?.({ type: "run.finished", run: "R-1" } as VtcEvent);
+    expect(quota.used("R-1")).toBe(0);
+    expect(quota.used("R-2")).toBe(1);
+    stop();
+    expect(listener).toBeUndefined();
+  });
+
+  it("prunes the research cache on a schedule: a blob nothing cites goes (reading 138)", async () => {
+    const h = createHarness();
+    const blobs = join(h.home, RESEARCH_CACHE.homeDir, "_shared", RESEARCH_CACHE.blobsDir);
+    mkdirSync(blobs, { recursive: true });
+    const orphan = join(blobs, "a".repeat(64));
+    writeFileSync(orphan, "stale page");
+    const old = new Date(Date.now() - 2 * 60 * 60_000);
+    utimesSync(orphan, old, old);
+    const stop = wireResearch(
+      h.engine,
+      { repoRoot: h.repo, vtcHome: h.home },
+      { pruneEveryMs: 20 },
+    );
+    await vi.waitFor(() => {
+      expect(existsSync(orphan)).toBe(false);
+    });
+    stop();
+    await h.release();
+  });
+
+  it("sends nothing through the keyed search fetcher without a search provider (H-3, reading 156)", async () => {
+    const http = new FixtureHttp();
+    const h = createHarness();
+    const key = (id: string): string | undefined => (id === "search" ? "sk-test-123" : undefined);
+    const stop = wireResearch(h.engine, {
+      repoRoot: h.repo,
+      vtcHome: h.home,
+      http,
+      researchApiKey: key,
+    });
+    await toDesign(h);
+    const search = (query: string) => {
+      const tools = h.engine.roleTools();
+      if (tools === null) throw new Error("the role tools are not wired");
+      return tools("research_fetch", { request: { fetcher: "search", query } }, CLAUDE) as Promise<{
+        result: { status: string };
+      }>;
+    };
+    expect((await search("reset tokens")).result.status).not.toBe("ok");
+    expect(http.requests).toEqual([]);
+    stop();
+    // with the user's provider the key is handed to the fetcher
+    const opted = wireResearch(h.engine, {
+      repoRoot: h.repo,
+      vtcHome: h.home,
+      http,
+      researchApiKey: key,
+      researchSearchProvider: "tavily",
+    });
+    await search("password reset token expiry");
+    expect(http.requests.map((r) => `${r.method} ${new URL(r.url).host}`)).toEqual([
+      "POST api.tavily.com",
+    ]);
+    opted();
     await h.release();
   });
 });
