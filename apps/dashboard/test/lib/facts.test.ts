@@ -1,0 +1,83 @@
+import { describe, expect, it } from "vitest";
+import { FactStatusSchema } from "@vtc/shared";
+import { currentFacts, factStatusMeta, parseFactsJsonl } from "@/lib/facts";
+import { FACT_EVENTS, FACTS_JSONL, GATE_EVENTS, w3Event } from "../wave3-fixtures";
+
+describe("parseFactsJsonl (.vtc/research/facts.jsonl)", () => {
+  it("reads every FactRow line", () => {
+    const file = parseFactsJsonl(FACTS_JSONL);
+    expect(file.rows.map((r) => r.id)).toEqual([
+      "f-0123456789abcdef",
+      "f-1111111111111111",
+      "f-fedcba9876543210",
+      "f-2222222222222222",
+    ]);
+    expect(file.invalid).toEqual([]);
+  });
+
+  it("skips blank lines and reports lines that break the contract by number", () => {
+    const file = parseFactsJsonl(`${FACTS_JSONL}\nnot json\n{"v":1,"id":"x"}\n`);
+    expect(file.rows).toHaveLength(4);
+    expect(file.invalid).toEqual([6, 7]);
+  });
+});
+
+describe("currentFacts", () => {
+  const rows = parseFactsJsonl(FACTS_JSONL).rows;
+
+  it("hides superseded rows and counts what each current row replaced", () => {
+    const facts = currentFacts(rows);
+    expect(facts.map((f) => f.id)).not.toContain("f-0123456789abcdef");
+    expect(facts.find((f) => f.id === "f-1111111111111111")?.replaced).toBe(1);
+  });
+
+  it("lists what needs attention first: unverified, conflicting, stale, then waived, verified", () => {
+    expect(currentFacts(rows).map((f) => f.status.label)).toEqual([
+      "Unverified",
+      "Stale",
+      "Verified",
+    ]);
+  });
+
+  it("shows the source, its locator and a web link only for http(s) URLs", () => {
+    const stale = currentFacts(rows).find((f) => f.id === "f-fedcba9876543210")!;
+    expect(stale.value).toBe("2027-04-30");
+    expect(stale.source).toMatchObject({
+      fetcher: "eol",
+      url: "https://endoflife.date/api/nodejs/22.json",
+      locator: "JSON pointer /eol",
+    });
+    expect(stale.expiresAt).toBe("2026-09-08T09:00:00.000Z");
+    const model = currentFacts(rows).find((f) => f.id === "f-2222222222222222")!;
+    expect(model.source).toBeNull();
+    expect(model.recordedBy).toBe("architect");
+  });
+
+  it("applies a later fact.waived event with its reason", () => {
+    const facts = currentFacts(rows, GATE_EVENTS);
+    const waived = facts.find((f) => f.id === "f-fedcba9876543210")!;
+    expect(waived.status.label).toBe("Waived");
+    expect(waived.waiver).toBe("EOL date checked by hand");
+  });
+
+  it("applies a later fact.verified event, but not one older than the row", () => {
+    const later = currentFacts(rows, [
+      w3Event(90, "fact.verified", { id: "f-2222222222222222", status: "conflicting" }),
+    ]);
+    expect(later.find((f) => f.id === "f-2222222222222222")?.status.label).toBe("Conflicting");
+    const older = currentFacts(rows, [
+      {
+        ...FACT_EVENTS[0]!,
+        ts: "2026-01-01T00:00:00.000Z",
+        data: { id: "f-2222222222222222", status: "verified" },
+      },
+    ]);
+    expect(older.find((f) => f.id === "f-2222222222222222")?.status.label).toBe("Unverified");
+  });
+
+  it("names every status", () => {
+    for (const s of FactStatusSchema.options) expect(factStatusMeta(s).label).not.toBe("");
+    expect(factStatusMeta("verified").tone).toBe("ok");
+    expect(factStatusMeta("unverified").tone).toBe("danger");
+  });
+});

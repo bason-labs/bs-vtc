@@ -30,6 +30,10 @@ export const codeForStatus = (status: number): ApiErrorCode => FALLBACK_CODES[st
 export const isAuthError = (error: unknown): boolean =>
   error instanceof ApiError && (error.code === "unauthorized" || error.code === "forbidden");
 
+/** True when the engine has no such item (e.g. a file nobody has written yet). */
+export const isNotFound = (error: unknown): boolean =>
+  error instanceof ApiError && error.code === "not_found";
+
 /** One sentence for the person looking at the page. */
 export const describeError = (error: unknown): string => {
   if (!(error instanceof ApiError)) return "Something went wrong while reading from the engine.";
