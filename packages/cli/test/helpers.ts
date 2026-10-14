@@ -8,7 +8,7 @@ import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { PassThrough } from "node:stream";
 import { fileURLToPath } from "node:url";
-import { compilePlugins, readSources } from "@vtc/compiler";
+import { compilePlugins, readSources, type CompileOptions } from "@vtc/compiler";
 import { expect } from "vitest";
 import {
   ENGINE_MCP_TOOLS,
@@ -92,16 +92,25 @@ export const initVtcRepo = (): string => initProject(initRepo());
 
 let compiled: ReturnType<typeof compilePlugins> | undefined;
 
-/** The real compiler output for `roles/`, `skills/` and `plugins/` (cached). */
-export const compiledPlugins = () => {
-  compiled ??= compilePlugins(readSources(PRODUCT_ROOT).files);
-  if (!compiled.ok) throw new Error(compiled.errors.map((e) => e.message).join("\n"));
-  return compiled.output;
+/**
+ * The real compiler output for `roles/`, `skills/` and `plugins/` (cached), or with compile
+ * options (not cached), e.g. `editableInPack` ahead of the repo's own policy.
+ */
+export const compiledPlugins = (options?: CompileOptions) => {
+  const result =
+    options === undefined
+      ? (compiled ??= compilePlugins(readSources(PRODUCT_ROOT).files))
+      : compilePlugins(readSources(PRODUCT_ROOT).files, options);
+  if (!result.ok) throw new Error(result.errors.map((e) => e.message).join("\n"));
+  return result.output;
 };
 
 /** Writes the compiled plugins under `root`; returns the namespace roots (dashboard: fixture). */
-export const writePluginTrees = (root: string): Record<AssetNamespace, string> => {
-  const out = compiledPlugins();
+export const writePluginTrees = (
+  root: string,
+  options?: CompileOptions,
+): Record<AssetNamespace, string> => {
+  const out = compiledPlugins(options);
   const roots = { dashboard: DASHBOARD_FIXTURE } as Record<AssetNamespace, string>;
   for (const host of HOST_IDS) {
     const dir = join(root, host);

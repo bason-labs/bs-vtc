@@ -493,10 +493,10 @@ describe("vtc doctor", () => {
     });
     const { ctx, out } = capture("/w", "/h");
     expect(
-      await createDoctorCommand(() => ({ exec, versions: { node: "22.12.0" } })).run([], ctx),
+      await createDoctorCommand(() => ({ exec, versions: { node: "22.13.1" } })).run([], ctx),
     ).toBe(1);
     const text = out.join("\n");
-    expect(text).toMatch(/FAIL +runtime +node 22\.12\.0: VTC needs node >= 22\.13/);
+    expect(text).toMatch(/FAIL +runtime +node 22\.13\.1: VTC needs node >= 22\.14/);
     expect(text).toMatch(/FAIL +claude-code .*not logged in/);
     expect(text).toMatch(/FAIL +codex .*not logged in/);
     expect(text).toMatch(/3 check\(s\) failed/);
@@ -564,7 +564,7 @@ describe("vtc doctor", () => {
     );
   });
 
-  it("warns about an apiKeyHelper-only Claude setup, read from claude auth status --json only (D-ab)", async () => {
+  it("warns about an apiKeyHelper Claude setup's API-key billing, read from claude auth status --json only (D-ab, D-bq)", async () => {
     for (const status of [
       { loggedIn: true, authMethod: "apiKeyHelper" },
       { loggedIn: true, authMethod: "api_key", apiKeySource: "apiKeyHelper" },
@@ -577,7 +577,7 @@ describe("vtc doctor", () => {
         await createDoctorCommand(() => ({ exec, versions: { node: "22.17.1" } })).run([], ctx),
       ).toBe(0);
       expect(out.join("\n")).toMatch(
-        /warn +claude-code +.*apiKeyHelper.*out of scope for v1.*subscription/,
+        /warn +claude-code +.*API-key billing: .*apiKeyHelper.*Role runs still run; to bill your subscription instead/,
       );
       expect(calls.filter((c) => c.startsWith("claude"))).toEqual([
         "claude --version",

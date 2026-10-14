@@ -33,6 +33,31 @@ repo. `env_passthrough` lists the credential variable names the detached daemon 
 them by default, D-ak); `vtc doctor` shows which names pass. `gates.allow_unsandboxed: true`
 lets gates run without an OS sandbox on a machine that has none (D-al); every such gate run
 records an `unsandboxed_gate` incident. A repo's `.vtc/project.yaml` can set neither.
+`research.search_provider` (H-3, spine §5 reading 156) names an optional keyed provider (`tavily`,
+`exa`) for the `search` fetcher, with its key's variable in `research.api_keys.search`; there is
+none by default, and then research search runs on the host's own web search in the Research
+Analyst's session and no search key is kept or sent. `vtc doctor` says which.
+
+## What `vtc doctor` reports since the wave-3 closing round
+
+- Node 22.14 or later in development (D-bk, reading 165).
+- **API-key billing** (D-bq, reading 171): a host whose `authStatus()` reports `billing: api_key`,
+  and a Claude `apiKeyHelper` setup, warn with `API_KEY_BILLING_WARNING`. Role runs are allowed,
+  so doctor does not fail on it.
+- **User hooks and plugins** (D-bp, reading 170): headless Claude role runs pass
+  `--setting-sources user`, so the hooks and enabled plugins in your Claude `settings.json` (and
+  the plugins' own skills and hooks) run in them. Doctor lists them as a §7 accepted residual,
+  bounded by the role's tools, every deny rule and the engine's write-scope check. It reads that
+  one file, never the credentials beside it, and shows only hook commands (secrets redacted) and
+  plugin names.
+- **yt-dlp** (D-bs, reading 173): found on an absolute PATH entry outside the repo, or an `info`
+  line saying YouTube transcripts are unavailable. VTC never installs it.
+- **Research search** (H-3): an `info` line saying it uses the host's web search, or the keyed
+  provider configured, which warns when its key variable is missing.
+
+`info` lines report and never fail. `vtc lookback pin|approve` warn when the target's agent is not
+`editable_in_pack` on a host whose runs load the compiled agent (Claude Code): the version would
+reach no run (reading 176). On Codex such a pin reaches headless runs only, which they note.
 
 ## Sandboxes
 

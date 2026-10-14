@@ -3,7 +3,9 @@
  * daemon's dependencies: the storage driver for this runtime, the Gate Runner (with the user's
  * `gates.allow_unsandboxed`, D-al), the host adapters, the asset bundle, the auto-resume timer,
  * the `gh`-backed PR service and, since contracts 4.5.0, the `gh`-backed Level-3 service (AD-23)
- * and the research HTTP client with its network guard (AD-22).
+ * and the research HTTP client with its network guard (AD-22), the research fetchers' keys and
+ * the optional keyed search provider (H-3: none by default, so search runs on the host's own web
+ * search).
  */
 import { homedir } from "node:os";
 import { join, resolve } from "node:path";
@@ -26,6 +28,7 @@ import {
   type PullRequestService,
   type RemoteMergeService,
   type RunningDaemon,
+  type SearchProvider,
   type StorageFactory,
 } from "@vtc/shared";
 import type { CliIo, CommandContext } from "./commands/types.js";
@@ -46,6 +49,7 @@ import {
   pricesOf,
   readUserConfig,
   researchApiKeyOf,
+  researchSearchProviderOf,
 } from "./user-config.js";
 import { VERSION } from "./version.js";
 
@@ -71,6 +75,11 @@ export interface EngineParts {
   readonly http?: HttpClient;
   /** A research fetcher's own key (`~/.vtc/config.yaml` `research.api_keys`, reading 120). */
   readonly researchApiKey?: (fetcher: FetcherId) => string | undefined;
+  /**
+   * The keyed provider behind the `search` fetcher (`research.search_provider`, H-3, reading
+   * 156); absent by default, when research search runs on the host's own web search.
+   */
+  readonly researchSearchProvider?: SearchProvider;
   /** The price table (`~/.vtc/config.yaml` `prices`, §11, reading 152). */
   readonly prices?: Readonly<Record<string, ModelPrice>>;
 }
@@ -198,6 +207,7 @@ export const buildEngineParts = async (options: BuildEnginePartsOptions): Promis
   const allowUnsandboxed = options.allowUnsandboxed ?? allowUnsandboxedOf(userConfig);
   const http = options.http === null ? undefined : (options.http ?? defaultHttpClient());
   const researchApiKey = researchApiKeyOf(userConfig);
+  const researchSearchProvider = researchSearchProviderOf(userConfig);
   const prices = pricesOf(userConfig);
   return {
     repoRoot,
@@ -227,6 +237,7 @@ export const buildEngineParts = async (options: BuildEnginePartsOptions): Promis
       createGhRemoteMerge({ repoRoot, gh: createGhRunner(repoRoot, options.ghCommand) }),
     ...(http === undefined ? {} : { http }),
     ...(researchApiKey === undefined ? {} : { researchApiKey }),
+    ...(researchSearchProvider === undefined ? {} : { researchSearchProvider }),
     ...(Object.keys(prices).length === 0 ? {} : { prices }),
   };
 };

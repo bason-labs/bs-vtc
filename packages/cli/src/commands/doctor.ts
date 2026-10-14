@@ -12,6 +12,12 @@
  * osv-scanner offline database. Since wave 3 also: Claude Code's minimum version for headless
  * runs (`CLAUDE_MIN_VERSION`, AD-25), each adapter's `authStatus()` (what the engine checks before
  * an unattended run), and in a VTC repo the merge level with the Level-3 preflight (AD-23 rule 1).
+ * Since the wave-3 closing round: an API-key login warns with `API_KEY_BILLING_WARNING` and fails
+ * nothing (D-bq); the user's Claude hooks and enabled plugins that headless role runs load under
+ * `--setting-sources user` are listed as a §7 accepted residual, read from the user's
+ * `settings.json` only (D-bp); research search on the host's own web search, or the configured
+ * keyed provider (H-3); and whether the user's own yt-dlp is there for YouTube transcripts (D-bs).
+ * `info` lines report and never fail.
  * `--download` fetches the missing scanners into `~/.vtc/`, each verified against its pinned
  * SHA-256 (§4.4), and refreshes the osv-scanner database into `~/.vtc/osv-db/` for the repo's
  * lockfiles. `--install-browser` (explicit only, D-ay) installs the browser store and its pin
@@ -30,9 +36,11 @@ import {
   type BrowserCheckEnv,
 } from "../browser-install.js";
 import { daemonState } from "../daemon.js";
+import { checkClaudeUserSettings } from "../claude-user-settings.js";
 import {
   checkEngine,
   checkHostAuth,
+  checkHostBilling,
   checkMergeLevel,
   checkEnvPassthrough,
   checkPrices,
@@ -48,6 +56,7 @@ import {
 import { createGhRemoteMerge } from "../gh-remote-merge.js";
 import { exec } from "../process.js";
 import { findRepoRoot, isVtcProject } from "../repo.js";
+import { checkResearchSearch, checkYtDlp, findYtDlp } from "../research-checks.js";
 import {
   checkOsvDatabase,
   checkScanners,
@@ -60,6 +69,8 @@ import { wakeRecords } from "../scheduler.js";
 import {
   claudeSessionSandboxOf,
   defaultSessionSandboxEnv,
+  readClaudeUserSettings,
+  type LocalSettingsRead,
   type SessionSandboxReport,
 } from "../session-sandbox.js";
 import { autoResumeTimer, defaultTimerHost } from "../timer.js";
@@ -69,7 +80,7 @@ import { readMergeLevelLedger } from "./merge-level.js";
 import type { CommandContext, CommandSpec } from "./types.js";
 import { EXIT, guarded, parseFlags } from "./util.js";
 
-const MARK = { ok: "ok  ", warn: "warn", fail: "FAIL" } as const;
+const MARK = { ok: "ok  ", info: "info", warn: "warn", fail: "FAIL" } as const;
 
 const readOrNull = (path: string): string | null => {
   try {
@@ -100,6 +111,12 @@ export interface DoctorCommandEnv extends DoctorEnv {
   readonly gateSandbox?: () => Promise<GateSandboxReport>;
   /** The Claude session sandbox of the repo doctor runs in (D-an), `null` outside a repo. */
   readonly sessionSandbox?: () => Promise<SessionSandboxReport | null>;
+  /** The user's Claude `settings.json`, whose hooks and plugins headless role runs load (D-bp). */
+  readonly claudeUserSettings?: () => LocalSettingsRead;
+  /** The user's own yt-dlp for YouTube transcripts, `null` when absent (D-bs). */
+  readonly ytDlp?: () => Promise<string | null>;
+  /** The environment the research search key is read from (H-3). Default: none set. */
+  readonly researchEnv?: Readonly<Record<string, string | undefined>>;
 }
 
 /** `<name> --version` on PATH: a scanner the user installed where no pinned build exists. */
@@ -211,6 +228,19 @@ export const defaultDoctorEnv = (ctx: CommandContext): DoctorCommandEnv => {
         ? null
         : claudeSessionSandboxOf(repoRoot, ctx.vtcHome, defaultSessionSandboxEnv(), ctx.cwd);
     },
+    claudeUserSettings: () => {
+      const { userSettings } = defaultSessionSandboxEnv();
+      return userSettings === null
+        ? { kind: "absent", path: "~/.claude/settings.json" }
+        : readClaudeUserSettings(userSettings);
+    },
+    ytDlp: async () =>
+      findYtDlp({
+        pathEnv: process.env.PATH ?? "",
+        platform: process.platform,
+        repoRoot: await findRepoRoot(ctx.cwd),
+      }),
+    researchEnv: process.env,
   };
 };
 
@@ -219,7 +249,7 @@ export const createDoctorCommand = (
 ): CommandSpec => ({
   name: "doctor",
   summary:
-    "Check prerequisites (runtime, git, host CLIs, versions and logins, gh, auto-resume timer, env passthrough, gate sandbox, session sandbox, the repo's engine and merge level, the browser, pinned scanners, osv database); --download fetches missing scanners and the osv database; --install-browser installs the visual stack's browser",
+    "Check prerequisites (runtime, git, host CLIs, versions, logins and API-key billing, gh, auto-resume timer, the user hooks and plugins role runs load, env passthrough, research search and yt-dlp, gate sandbox, session sandbox, the repo's engine and merge level, the browser, pinned scanners, osv database); --download fetches missing scanners and the osv database; --install-browser installs the visual stack's browser",
   run: (args, ctx) =>
     guarded("doctor", ctx, async () => {
       const { values } = parseFlags(args, {
@@ -242,13 +272,22 @@ export const createDoctorCommand = (
       }
       const checks = await runDoctorChecks(e);
       if (e.hostAuth !== undefined) {
-        const auth = checkHostAuth(await e.hostAuth());
+        const statuses = await e.hostAuth();
+        const auth = checkHostAuth(statuses);
         if (auth !== null) checks.push(auth);
+        const billing = checkHostBilling(statuses);
+        if (billing !== null) checks.push(billing);
       }
+      if (e.claudeUserSettings !== undefined)
+        checks.push(...checkClaudeUserSettings(e.claudeUserSettings()));
       const userConfig = e.userConfig?.() ?? null;
       if (userConfig !== null) checks.push(checkEnvPassthrough(userConfig));
       const prices = userConfig === null ? null : checkPrices(userConfig);
       if (prices !== null) checks.push(prices);
+      const search =
+        userConfig === null ? null : checkResearchSearch(userConfig, e.researchEnv ?? {});
+      if (search !== null) checks.push(search);
+      if (e.ytDlp !== undefined) checks.push(checkYtDlp(await e.ytDlp()));
       if (e.gateSandbox !== undefined)
         checks.push(checkGateSandbox(await e.gateSandbox(), userConfig));
       const session = e.sessionSandbox === undefined ? null : await e.sessionSandbox();
