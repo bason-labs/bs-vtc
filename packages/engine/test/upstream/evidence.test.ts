@@ -429,7 +429,8 @@ describe("prepareEvidence", () => {
     expect(recorder.requests[0]?.origin).toMatch(/^http:\/\/127\.0\.0\.1:/);
     const kept = join(
       req.keep.kind === "upstream" ? req.keep.vtcHome : "",
-      "upstream",
+      "guard",
+      "_upstream",
       "evidence",
       "01234567",
       "manifest.json",

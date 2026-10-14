@@ -7,15 +7,17 @@ import {
   type EvidenceRecorder,
   type PromptProposal,
   type ReplayResult,
+  ROLE_DENIED_VTC,
 } from "@vtc/shared";
 import { chmodSync, existsSync, writeFileSync } from "node:fs";
-import { delimiter, join } from "node:path";
+import { delimiter, join, relative, sep } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   autoFingerprint,
   createUpstream,
   projectUpstreamReport,
   UPSTREAM_EVIDENCE_ROUTE,
+  upstreamStateDir,
   type AutomationFact,
   type AutoPrInput,
   type FfmpegCommand,
@@ -1210,6 +1212,18 @@ describe("project-repo PRs", () => {
     const h = harness({ automation: { hosting: "attach" } });
     expect(await h.upstream.openPullRequest(input(), h.ctx)).toMatchObject({ status: "pr" });
     expect(existsSync(join(h.ctx.repoRoot, ".vtc", "state"))).toBe(false);
+  });
+
+  it("keeps VTC's own ledger and locks under <vtcHome>/guard/, which no role may write", async () => {
+    const h = harness();
+    await h.upstream.report(defect(), h.ctx);
+    expect(await h.upstream.report(defect(), h.ctx)).toMatchObject({ status: "issue" });
+    const state = upstreamStateDir(h.vtcHome);
+    expect(relative(h.vtcHome, state).split(sep)[0]).toBe("guard");
+    expect(ROLE_DENIED_VTC.homeWriteDeny).toContain("guard/**");
+    expect(existsSync(join(state, "ledger.jsonl"))).toBe(true);
+    expect(existsSync(join(state, "locks"))).toBe(true);
+    expect(existsSync(join(h.vtcHome, "upstream"))).toBe(false);
   });
 });
 

@@ -2,7 +2,7 @@
  * The evidence budget and manifest (D-ce; AD-27 rule 6): per-file caps by kind, then at most
  * `EVIDENCE_LIMITS.maxBytesPerPr` and `maxFilesPerPr` in priority order (motion first), and the
  * `EvidenceManifest` that lists every file with its hash, size, redaction verdict and URL. The
- * manifest is kept, redacted, at `<vtcHome>/upstream/evidence/<fp8>/` (VTC's repo) or
+ * manifest is kept, redacted, at `<vtcHome>/guard/_upstream/evidence/<fp8>/` (VTC's repo) or
  * `.vtc/evidence/auto/<fp8>/` (a project), never through a symlink: a project's `.vtc/evidence/` is
  * tracked by git, so a role could plant one there.
  */
@@ -20,6 +20,7 @@ import {
   type EvidenceManifest,
 } from "@vtc/shared";
 import { ensureDirNoFollow, writeFileNoFollow } from "../safe-fs.js";
+import { upstreamStateDir } from "../state-dir.js";
 
 export interface EvidenceFile {
   readonly name: string;
@@ -131,7 +132,7 @@ type ManifestTarget =
 /** Where a target keeps its manifests. */
 export const manifestDir = (target: ManifestTarget, fingerprint: AutoFingerprint): string =>
   target.kind === "upstream"
-    ? join(target.vtcHome, "upstream", "evidence", fingerprint.slice(0, 8))
+    ? join(upstreamStateDir(target.vtcHome), "evidence", fingerprint.slice(0, 8))
     : join(target.repoRoot, ".vtc", "evidence", "auto", fingerprint.slice(0, 8));
 
 /**
