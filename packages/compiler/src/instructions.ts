@@ -43,6 +43,7 @@ import {
   LOOKBACK_LIMITS,
   LOOKBACK_REPO,
   MAX_STACK_PACKS,
+  PACK_INPUT_TYPES,
   PrototypeThemeSchema,
   prototypeStatePath,
   RESERVED_EDITABLE_HEADINGS,
@@ -64,25 +65,30 @@ import type { LoadedRole } from "./role-source.js";
 const ENGINE_DIRECTION_FIELDS: ReadonlySet<string> = new Set(["first_viewport", "novelty"]);
 
 /**
- * The Dispatch lines the UI and Spec Verifier prompts key off that `renderTaskPack` does not print
- * yet (this branch's contract proposals; spine §5 readings 179 and 198). Each is `<label>: <value>`
- * like every Dispatch line:
+ * The Dispatch lines the UI prompts key off that `renderTaskPack` does not print yet (this
+ * branch's contract proposals; spine §5 reading 179). Each is `<label>: <value>` like every
+ * Dispatch line:
  *
  * - `design direction: <id>`, from `TaskPack.design_direction` (the G2 choice);
- * - `design exit: category_standard`, the G2 `category_standard` exit (proposed field);
- * - `automatic run: <kind>, issue #<n>`, from `run.started.automation` (proposed field).
+ * - `design exit: category_standard`, the G2 `category_standard` exit (proposed field).
  *
  * Until a line is printed the prompts fall back to their pre-round-4 behaviour: no role blocks or
- * switches mode for want of one, and no other pack text stands in for it.
+ * switches mode for want of one, and no other pack text stands in for it. An automatic run needs
+ * no Dispatch line: the engine marks it for the Spec Verifier with the run's `request` input
+ * (`PROTOCOL_VARS.request_input`, reading 198), which no other run's Spec Verifier pack carries.
  */
 export const PENDING_DISPATCH_LINES = {
   designDirection: "design direction",
   designExit: "design exit",
-  automaticRun: "automatic run",
 } as const;
 
 /** Values every prompt part may reference as `{{name}}`. */
 export const PROTOCOL_VARS: Readonly<Record<string, string>> = {
+  /**
+   * The pack input that holds the run's request (`PACK_INPUT_TYPES.request`). On an automatic run
+   * the engine gives it to the Spec Verifier, and the request is the issue (D-cd, reading 198).
+   */
+  request_input: PACK_INPUT_TYPES.request,
   /** The G2 exit that takes the category's standard look (`DesignExit`, spine §5 reading 179). */
   category_standard_exit: DesignExitSchema.enum.category_standard,
   architect_depths: ArchitectDepthSchema.options.join(", "),

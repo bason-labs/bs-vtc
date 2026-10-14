@@ -104,8 +104,8 @@ budget: { context_tokens: 20000 }
     "---\ndescription: Drive VTC.\nargument-hint: start|status\n---\n\nUse the lead skill. $ARGUMENTS\n",
   "plugins/common/templates/auto-pr.md": [
     "{{marker}}",
-    "> For human review only: VTC never merges automatic PRs. {{note}}",
-    "{{summary}}\n{{why}}\n{{changes}}\n{{evidence}}\n{{verification}}\n{{risk}}",
+    "> For human review only: VTC never merges automatic PRs.\n{{note}}",
+    "{{summary}}\n{{why}}\n{{changes}}\n{{diff}}\n{{evidence}}\n{{verification}}\n{{risk}}",
     "<details>\n{{provenance}}\n</details>",
     "{{checklist}}\n",
   ].join("\n\n"),

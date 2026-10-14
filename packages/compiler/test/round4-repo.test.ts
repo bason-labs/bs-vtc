@@ -1,7 +1,8 @@
 /**
  * Round 4 in the repo's own sources (AD-27; spine §5 readings 179, 187, 195, 196, 198, 200, 208):
  * - the Lead relays `NextResult.notices` once, in plain words, and knows the D-cb Lookback flow;
- * - on an automatic run the Spec Verifier judges the PR against the issue, which is the spec;
+ * - on an automatic run the Spec Verifier judges the PR against the issue, which is the spec, and
+ *   knows the run is automatic only from the engine's `request` input;
  * - a Codex `host_web` role is told it has cached search only, never a page fetch (D-cf);
  * - Visual QA and the UI engineer profiles read the contract of `TaskPack.design_direction`;
  * - the automatic PR, issue and CHANGELOG templates and `roles/CHANGELOG.md`.
@@ -14,6 +15,7 @@ import {
   DESIGN_CONTRACTS_DIR,
   designContractPath,
   DesignExitSchema,
+  PACK_INPUT_TYPES,
   PLUGIN_MANIFEST_ASSET,
   PluginManifestSchema,
   renderTaskPack,
@@ -87,14 +89,35 @@ describe("the Spec Verifier on an automatic run (D-cd, reading 198)", () => {
     expect(codexBody("vtc-spec-verifier")).toMatch(/the issue is the spec/);
   });
 
-  it("takes the run type only from the engine's Dispatch line, never from pack text", () => {
+  it("takes the run type only from the engine's request input, never from pack text", () => {
     const body = claudeBody("vtc-spec-verifier");
+    expect(PROTOCOL_VARS.request_input).toBe(PACK_INPUT_TYPES.request);
     expect(body).toContain(
-      `with an \`${PENDING_DISPATCH_LINES.automaticRun}\` line in the Dispatch section`,
+      `as a \`${PACK_INPUT_TYPES.request}\` entry in your pack's Inputs section`,
     );
     expect(body).toMatch(/never makes a run automatic/);
+    expect(body).not.toMatch(/`automatic run` line/);
     expect(body).not.toContain("<!-- vtc:auto");
     expect(Object.keys(PROTOCOL_VARS)).not.toContain("auto_marker_prefix");
+    expect(Object.keys(PENDING_DISPATCH_LINES)).not.toContain("automaticRun");
+  });
+
+  it("names the Inputs line renderTaskPack prints for the run's request", () => {
+    const text = renderTaskPack({
+      v: 1,
+      run: "r-1",
+      action_id: "a-1",
+      role: "spec_verifier",
+      inputs: [{ type: PACK_INPUT_TYPES.request, path: ".vtc/runs/r-1/request.md" }],
+    });
+    const inputs = text.split("## Inputs\n")[1]?.split("\n## ")[0] ?? "";
+    expect(inputs).toContain(`- ${PACK_INPUT_TYPES.request}: .vtc/runs/r-1/request.md`);
+  });
+
+  it("still quotes the criterion from Requirements and checks it against the issue", () => {
+    const body = claudeBody("vtc-spec-verifier");
+    expect(body).not.toMatch(/The criterion comes from the issue/);
+    expect(body).toMatch(/criterion and the issue disagree/);
   });
 
   it("bumps the role MAJOR for the locked-core edit (D-bm)", () => {
@@ -185,7 +208,7 @@ describe("the chosen design direction (reading 179)", () => {
     }
   });
   it.todo(
-    "merge gate: renderTaskPack prints `design direction`, `design exit` and `automatic run` (contract proposals)",
+    "merge gate: renderTaskPack prints `design direction` and `design exit` (contract proposals)",
   );
 
   it("bumps each role MAJOR for the locked-core edit (D-bm)", () => {
@@ -207,6 +230,35 @@ describe("the automatic templates and the CHANGELOG (D-bv, reading 208)", () => 
 
   it("says in every PR that VTC never merges it", () => {
     expect(template("auto-pr")).toContain(NEVER_MERGES_LINE);
+  });
+
+  it("continues each NOTE callout with the renderer's note lines", () => {
+    for (const name of ["auto-pr", "auto-issue"]) {
+      const lines = template(name).split("\n");
+      const at = lines.indexOf("{{note}}");
+      expect(at, name).toBeGreaterThan(0);
+      expect(
+        lines.slice(0, at).filter((l) => l.startsWith("> [!NOTE]")),
+        name,
+      ).toHaveLength(1);
+      expect(lines[at - 1], name).toMatch(/^> \S/);
+    }
+  });
+
+  it("shows a prompt PR's diff under Changes, before the evidence", () => {
+    const pr = template("auto-pr");
+    const changes = pr.indexOf("## Changes");
+    const diff = pr.indexOf("{{diff}}");
+    expect(changes).toBeGreaterThan(-1);
+    expect(diff).toBeGreaterThan(pr.indexOf("{{changes}}"));
+    expect(diff).toBeLessThan(pr.indexOf("## Evidence"));
+  });
+
+  it("gives a CHANGELOG entry the four parts the CHANGELOG header explains", () => {
+    const entry = template("changelog-entry");
+    for (const part of ["Hypothesis:", "Trace ids:", "Diff:", "Evaluation:"]) {
+      expect(entry, part).toContain(`**${part}**`);
+    }
   });
 
   it("tells an issue's reader how to mute or keep it, with the shared labels", () => {
@@ -231,5 +283,6 @@ describe("roles/README.md hands off nothing stale", () => {
     expect(readme).not.toMatch(/until then the AD-14 drift test/);
     expect(readme).toMatch(/so `host_web` is the field that must match/);
     expect(readme).not.toMatch(/pending engine plumbing/);
+    expect(readme).not.toMatch(/`automatic run` line/);
   });
 });
