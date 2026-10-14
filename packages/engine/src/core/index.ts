@@ -166,3 +166,4 @@ export {
   type UpstreamWiring,
   type UpstreamWiringDeps,
 } from "./automation.js";
+export { readModelState, replayTrialActionIds, withoutReplayTrialEvents } from "./replay-view.js";

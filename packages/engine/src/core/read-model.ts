@@ -3,7 +3,6 @@
  * projected run state plus the files and git history it points at. The HTTP transport maps
  * routes to these; live mode and snapshot mode share them (AD-5 rule 7).
  */
-import { automationReportView } from "./automation.js";
 import { createHash } from "node:crypto";
 import { existsSync, lstatSync, readFileSync, realpathSync } from "node:fs";
 import { join, sep } from "node:path";
@@ -33,6 +32,8 @@ import {
   type AutomationReport,
   type AutomationSettings,
 } from "@vtc/shared";
+import { automationReportView } from "./automation.js";
+import { readModelState } from "./replay-view.js";
 import { projectGraph, taskDagGraph, taskPipelineGraph } from "./graph.js";
 import { acceptanceCriteriaOf, parseSpecItems, type SpecItem } from "./spec.js";
 import type { RunState } from "./state.js";
@@ -263,7 +264,11 @@ export const taskAcceptanceCriteria = (
 };
 
 export const createReadModel = (deps: ReadModelDeps): ReadModel => {
-  const find = (run: string): RunState | undefined => deps.runs().find((r) => r.id === run);
+  // reading 177: the views leave out the run's Lookback replay trials
+  const find = (run: string): RunState | undefined => {
+    const state = deps.runs().find((r) => r.id === run);
+    return state === undefined ? undefined : readModelState(state);
+  };
   const withRun = <T>(run: string, fn: (state: RunState) => ReadResult<T>): ReadResult<T> => {
     const state = find(run);
     return state === undefined ? notFound(`no run ${run}`) : fn(state);
@@ -278,7 +283,9 @@ export const createReadModel = (deps: ReadModelDeps): ReadModel => {
     }),
     status: () => {
       const state = activeRun(deps.runs());
-      return state === undefined ? notFound("no run yet") : ok(statusView(state, deps.usage()));
+      return state === undefined
+        ? notFound("no run yet")
+        : ok(statusView(readModelState(state), deps.usage()));
     },
     runs: () => runListView(deps.runs()),
     events: (run, after, limit) =>

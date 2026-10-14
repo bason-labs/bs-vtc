@@ -1,53 +1,52 @@
 /**
- * Lookback replays at RETRO (spec §13 step 3; AD-21 rule 6; spine §5 reading 176). Once every
- * lookback target of the run is settled, RETRO asks the wired Lookback for the replays it may run
- * now (`LookbackRetro.replays`: one per proposal recorded and not yet replayed, under the same
- * weekly-window and budget checks as the lookback role) and runs their `lookback_replay` trials
- * one at a time, like any task-less role (`planDispatch`, in-session or headless):
+ * Lookback replays at RETRO (spec §13 step 3; AD-21 rule 6; spine §5 readings 176, 178, 201, 202
+ * and 205). Once every lookback target of the run is settled, RETRO asks the wired Lookback for the
+ * replays it may run now (`LookbackRetro.replays`: one per proposal recorded and not yet replayed,
+ * under the same weekly-window and budget checks as the lookback role), at most
+ * `LOOKBACK_LIMITS.maxTrialsPerRetro` trials in all, and runs their `lookback_replay` trials one at
+ * a time. Every trial is an engine-launched headless run on the run's Lead host (D-cg:
+ * `planDispatch` sends it headless whenever the host can, without `headless_allowed`; never a
+ * Lead's subagent):
  * - each trial is a recorded dispatch run again with one arm's prompt version, in a clean checkout
  *   at the commit that dispatch started from, with no refs past it (`createReplayCheckout`), in a
  *   fresh private directory outside the user's repo (`newReplayTree`, recorded with the
- *   dispatch), so no relative path reaches the user's current files or their `.git`; the
- *   headless sandbox applies there as for any role (the recorded task's protected tests kept out
- *   of its writes), and the Gate Runner's write-scope check (L5) grades its writes. The pack is
- *   the recorded one, without its task (a trial changes no task), with the arm's editable section
- *   first. A trial whose arm the dispatcher would not run as planned (no pin can apply now) is not
- *   run at all, so no arm is ever measured with another's prompt. The host sandboxes deny no
- *   reads, so a trial that knows the repo's absolute path (an in-session trial runs in the Lead's
- *   session) can still read it (`replay-checkout.ts`);
- * - its result is checked against the role's contract and its work committed in the checkout;
- *   once the head is readable in the user's repo (`exposeReplayHead`) it is graded through the
- *   Gate Runner (`LookbackRetro.gradeTrial`) in a clean verification checkout of that head, like
- *   every gate run, and as the recorded round was: the recorded task's QA-owned tests and the
- *   protected configs at the base by checksum, its hidden acceptance tests copied in. A trial whose
- *   role was rejected or failed did not pass, and a checkout whose git directory changed is an
- *   incident (`checkout_write`) and did not pass. Nothing a trial does reaches a task, the user's
- *   checkout or the integration branch;
+ *   dispatch), so no relative path reaches the user's current files or their `.git`; its sandbox
+ *   request names the user's repo and its git directory as `readDeny` (reading 178), and what the
+ *   host enforced goes to Lookback with the trial (`ReplayResult.isolation`). The pack is the
+ *   recorded one, without its task (a trial changes no task), with the arm's editable section
+ *   first. On a host whose runs load the compiled agent (Claude Code) the arm runs its own compiled
+ *   plugin (`EngineDeps.armPlugins`, `SpawnRoleRequest.pluginDir`), whose load the run must prove
+ *   (`HeadlessRun.pluginLoad`; else `gate_infra` and `automation.skipped` `plugin_locked`); on
+ *   Codex the arm goes in the pack. A trial whose arm would not run exactly as planned is not run,
+ *   so no arm is ever measured with another's prompt;
+ * - its result is checked against the role's contract. A role that changes files has its work
+ *   committed in the checkout and, once the head is readable in the user's repo
+ *   (`exposeReplayHead`), graded through the Gate Runner (`LookbackRetro.gradeTrial`) in a clean
+ *   verification checkout of that head, as the recorded round was: the recorded task's QA-owned
+ *   tests and the protected configs at the base by checksum, the recorded run's hidden acceptance
+ *   tests copied in (`<run>:<task>`, reading 205). A verdict role (`replayGraderFor` = `verdict`,
+ *   D-ch) is scored by the wired verdict grader (`LookbackRetro.gradeVerdict`) against the recorded
+ *   outcome. A trial whose role was rejected or failed did not pass, and a checkout whose git
+ *   directory changed is an incident (`checkout_write`) and did not pass. Nothing a trial does
+ *   reaches a task, the user's checkout or the integration branch;
  * - a trial that measured nothing (its arm or the dispatcher refused it, its checkout could not be
- *   made, its role run was interrupted or stopped, or its grade could not run or reported
- *   `infra_error`) is not counted as a failure: its replay is set aside for this RETRO and waits
- *   for the next one, where it is planned again from the start;
+ *   made, its role run was interrupted or stopped, its arm plugin did not load, or its grade could
+ *   not run or reported `infra_error`) is not counted as a failure: its replay is set aside for
+ *   this RETRO and waits for the next one, where it is planned again from the start;
  * - once every trial of a replay is graded, Lookback writes its result
  *   (`LookbackRetro.finishReplay`: `ReplayResult`, `lookback.replay_finished` with the SHA-256).
  * A replay waits for the next RETRO (it stays pending, and the next RETRO plans it again) when its
- * host is not the run's Lead host, no dispatch can run it now, or its role changes no file (a
- * verdict role: the gates would grade the same base for both arms, so nothing could tell them
- * apart; the same reason is told once per proposal). That last rule is spine §5 reading 180 (Lead
- * decision 2026-10-14, pending human review): a verdict role takes pins but is not replayed in v1,
- * until a verdict grader scores a trial's verdicts against the recorded outcome. With the shipped
- * plugins on a Claude Lead no role is then both pinnable and replayable, so `vtc lookback approve`
- * cannot start a canary there (`replayReach` is the shared rule, and the gesture says so); reading
- * 182(8) puts that to the human. The weekly-window and budget checks run
- * again before every trial (`LookbackRetro.replayWait`, the run's budget), and a headless trial
- * whose preflight fails stops the replays the same way, without pausing the delivered run: the
- * run finishes, and the replays not yet written wait for the next RETRO. The plan, the trial
- * dispatches and their grades live in the engine's private directory (`<guard>/replays/`), where
- * no role can write, so a restart picks the replays up where they stopped. That file is the only
- * cache of which role runs are trials: since contracts 4.11.0 (spine §5 reading 177) a trial's
- * `role.dispatched` carries `purpose: lookback_replay` and its `replay` reference, so a clone or
- * a machine without this file still tells trial dispatches from the run's own work (AD-7 rules 1,
- * 5 and 10); `lookbackEvents` filters on the logged marker and on this file, for logs written
- * before 4.11.0.
+ * host is not the run's Lead host, the host can run no headless run now, its role has no grader, or
+ * the arm plugin compiler (Claude) or the verdict grader it needs is not wired; the reason is told
+ * once per proposal. The weekly-window and budget checks run again before every trial
+ * (`LookbackRetro.replayWait`, the run's budget); a limit stops the replays with
+ * `automation.skipped` (`weekly_window`, `budget`, `trial_cap`), and a headless trial whose
+ * preflight fails stops them the same way, without pausing the delivered run: the run finishes,
+ * and the replays not yet written wait for the next RETRO. The plan, the trial dispatches and
+ * their grades live in the engine's private directory (`<guard>/replays/`), where no role can
+ * write, so a restart picks the replays up where they stopped. A trial's `role.dispatched` carries
+ * `purpose: lookback_replay` and its `replay` reference (reading 177), so a clone or a machine
+ * without that file still tells trial dispatches from the run's own work (AD-7 rules 1, 5 and 10).
  *
  * Action ids are the run's role-run count plus one, so a trial that never got its role run (its
  * checkout could not be made, or the engine stopped before the dispatch) leaves its id to the next

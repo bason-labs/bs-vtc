@@ -674,6 +674,29 @@ const frozenTypeByPath = (path: string): string => {
   return "prototype";
 };
 
+/** The post-G2 UI roles that judge against the approved direction (spine §5 reading 179). */
+const DIRECTION_ROLES: ReadonlySet<string> = new Set(["engineer", "visual_qa", "designer"]);
+
+/**
+ * The design direction the human approved at G2 (`gate.approved.design_direction`, §9.1 step 6),
+ * for a post-G2 UI dispatch of a role that judges against it (spine §5 reading 179): the latest G2
+ * approval's, absent before G2, on a run without UI, and after the `category_standard` exit.
+ */
+export const approvedDirection = (
+  state: RunHandle["state"],
+  step: Pick<StepSpec, "role">,
+): string | undefined => {
+  if (!state.run.has_ui || !DIRECTION_ROLES.has(step.role)) return undefined;
+  if (["intake", "discover", "specify", "g1", "design", "g2"].includes(state.run.phase))
+    return undefined;
+  const approval = state.events.findLast(
+    (e) =>
+      e.type === "gate.approved" && ((e.data as { gates?: string[] }).gates ?? []).includes("G2"),
+  );
+  const data = approval?.data as { design_direction?: string; design_exit?: string } | undefined;
+  return data?.design_exit === "category_standard" ? undefined : data?.design_direction;
+};
+
 /** Renders the pack for a step and writes it under `.vtc/state/packs/` (AD-14 rule 5). */
 const packFor = (k: Kernel, h: RunHandle, step: StepSpec, actionId: string): TaskPackInput => {
   const state = h.state;
@@ -745,6 +768,8 @@ const packFor = (k: Kernel, h: RunHandle, step: StepSpec, actionId: string): Tas
     )
       inputs.push({ type, path: gate.path });
   }
+  // reading 179: a post-G2 UI role judges against the direction the human approved
+  const direction = approvedDirection(state, step);
   return {
     v: 1,
     run: state.id,
@@ -759,6 +784,7 @@ const packFor = (k: Kernel, h: RunHandle, step: StepSpec, actionId: string): Tas
       : { feature: task.feature }),
     ...(step.subject === undefined ? {} : { subject: step.subject }),
     ...depthsFor(k, h, step),
+    ...(direction === undefined ? {} : { design_direction: direction }),
     ...(about === undefined || state.intents.get(about.id) === undefined
       ? {}
       : { intent: state.intents.get(about.id) }),

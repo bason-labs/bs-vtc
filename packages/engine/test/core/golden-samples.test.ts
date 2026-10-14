@@ -106,8 +106,7 @@ describe("golden-run wave-3 samples", () => {
     const result = ReplayResultSchema.parse(JSON.parse(text));
     expect(result.proposal).toBe(readEventData(finished).proposal);
     expect(result.verdict).toBe(readEventData(finished).verdict);
-    // a replay this engine can produce: a file-writing role on a Codex-led headless run (verdict
-    // roles are not replayed yet, an open question on spine readings 166 and 176)
+    // a file-writing role's replay on a Codex-led headless run, graded by the gates
     expect([result.role, result.host]).toEqual(["engineer", "codex"]);
     const dispatched = log.events.find((e) => isEventOfType(e, "lookback.dispatched"));
     if (dispatched === undefined || !isEventOfType(dispatched, "lookback.dispatched"))
