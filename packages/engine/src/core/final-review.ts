@@ -30,9 +30,7 @@ import {
   type ReleaseReadiness,
 } from "@vtc/shared";
 import { removeRepoFile, runGit, writeRepoFile } from "../git/index.js";
-import { DEFAULT_ACCEPTANCE_GLOBS } from "./config.js";
 import { effectiveVerdict } from "./gate-verdict.js";
-import { matchesAny } from "./globs.js";
 import {
   baseBranch,
   createIntegrationFix,
@@ -121,11 +119,28 @@ const carriedSteps = (h: RunHandle, featureId: string, seq: number): Set<number>
       .filter((step) => FINAL_REVIEW_AI_STEPS.some((s) => s.step === step)),
   );
 
+/** The source-code extensions a test file can have: data and config (yaml, json, toml, rego, env, sh) never count. */
+const TEST_SOURCE_EXT =
+  "(?:ts|tsx|mts|cts|js|jsx|mjs|cjs|py|go|rb|java|kt|kts|scala|rs|cs|php|swift|ex|exs)";
+
 /**
- * A test file by its name alone (`*.test.*`, `*.spec.*`, `*_test.go`, `test_*.py`), never by a
- * directory it sits in: `api/specs/` or `src/spec/` can hold production code and configuration.
+ * A test file by its name alone (`*.test.*`, `*.spec.*`, `*_test.*`, `*_spec.*`, `test_*.py`), never
+ * by a directory it sits in: `api/specs/` or `src/spec/` can hold production code and configuration.
+ * The extension must be source code (`openapi.spec.yaml`, `appsettings.test.json` and
+ * `docker-compose.test.yml` are configuration), a hyphen does not make a test (`policy-spec.ts`),
+ * and a `test_*.py` settings or config module (`test_settings.py`) is configuration.
  */
-const TEST_FILE = /(^|\/)[^/]+[._-](test|spec)\.[a-z0-9]+$|(^|\/)test_[^/]+\.py$/i;
+const TEST_NAME = new RegExp(
+  `(^|/)[^/]+[._](test|spec)\\.${TEST_SOURCE_EXT}$|(^|/)test_(?![^/]*(settings|conf))[^/]+\\.py$`,
+  "i",
+);
+
+/** Directories whose files configure CI, deployment or infrastructure, whatever their names. */
+const NON_TEST_DIR =
+  /(^|\/)(\.github|\.gitlab|\.circleci|\.buildkite|ci|deploy|deployments?|infra|infrastructure)\//i;
+
+/** A test by name and extension, outside the CI, deploy and infrastructure directories. If unsure, it is code. */
+const isTestFile = (path: string): boolean => TEST_NAME.test(path) && !NON_TEST_DIR.test(path);
 
 /**
  * The `.vtc/` files no AI step judges: the engine's own records (the event log, evidence and
@@ -144,12 +159,10 @@ const ENGINE_RECORD =
  * 3 again). A changed or deleted test can weaken the coverage step 3 judged, and so can a change
  * to the spec, architecture or design under `.vtc/`. Anything else (code, configuration,
  * dependencies, migrations) can change both the coverage and scope step 3 judged and the combined
- * diff step 4 reviewed. If unsure, run it.
+ * diff step 4 reviewed, and so does a fixture or helper next to the tests: only a file
+ * {@link isTestFile} names as a test counts as one. If unsure, run it.
  */
-export const fixAffectedSteps = (
-  changes: readonly GitChangedFile[],
-  acceptanceGlobs: readonly string[],
-): number[] => {
+export const fixAffectedSteps = (changes: readonly GitChangedFile[]): number[] => {
   const affected = new Set<number>();
   for (const change of changes) {
     const paths = [change.path, ...(change.oldPath === undefined ? [] : [change.oldPath])];
@@ -158,7 +171,7 @@ export const fixAffectedSteps = (
       affected.add(3);
       continue;
     }
-    if (paths.every((p) => TEST_FILE.test(p) || matchesAny(acceptanceGlobs, p))) {
+    if (paths.every(isTestFile)) {
       if (change.status !== "added") affected.add(3);
       continue;
     }
@@ -841,10 +854,7 @@ export const startFinalReview = (k: Kernel, h: RunHandle, featureId: string): vo
       const previous = feature.round > 0 ? previousRoundHead(h, featureId) : undefined;
       if (previous !== undefined) {
         try {
-          const affected = fixAffectedSteps(
-            await k.deps.git.changedFiles(previous, head),
-            k.gatesConfig()?.tests.acceptance_globs ?? DEFAULT_ACCEPTANCE_GLOBS,
-          );
+          const affected = fixAffectedSteps(await k.deps.git.changedFiles(previous, head));
           unaffected = FINAL_REVIEW_AI_STEPS.map((s) => s.step).filter(
             (step) => !affected.includes(step),
           );

@@ -419,25 +419,45 @@ describe("a fix round re-runs only the AI steps the fix affected (§6.7a routing
       path: string,
       status: GitChangedFile["status"] = "modified",
     ): GitChangedFile => ({ path, status });
-    const globs = ["tests/acceptance/**"];
-    expect(fixAffectedSteps([changed("CHANGELOG.md"), changed("docs/x.md")], globs)).toEqual([]);
-    expect(fixAffectedSteps([changed(".vtc/evidence/F-1/bundle.json")], globs)).toEqual([]);
-    expect(fixAffectedSteps([changed("tests/acceptance/t-2.test.ts", "added")], globs)).toEqual([]);
-    expect(fixAffectedSteps([changed("tests/acceptance/t-1.test.ts")], globs)).toEqual([3]);
-    expect(fixAffectedSteps([changed("src/a.spec.ts", "deleted")], globs)).toEqual([3]);
-    expect(fixAffectedSteps([changed("src/t-1/impl.ts")], globs)).toEqual([3, 4]);
-    expect(fixAffectedSteps([changed("package.json")], globs)).toEqual([3, 4]);
+    expect(fixAffectedSteps([changed("CHANGELOG.md"), changed("docs/x.md")])).toEqual([]);
+    expect(fixAffectedSteps([changed(".vtc/evidence/F-1/bundle.json")])).toEqual([]);
+    expect(fixAffectedSteps([changed("tests/acceptance/t-2.test.ts", "added")])).toEqual([]);
+    expect(fixAffectedSteps([changed("tests/acceptance/t-1.test.ts")])).toEqual([3]);
+    expect(fixAffectedSteps([changed("src/a.spec.ts", "deleted")])).toEqual([3]);
+    expect(fixAffectedSteps([changed("src/t-1/impl.ts")])).toEqual([3, 4]);
+    expect(fixAffectedSteps([changed("package.json")])).toEqual([3, 4]);
     // a directory named spec or test is not a test: production code and config live there too
-    expect(fixAffectedSteps([changed("api/specs/openapi.yaml")], globs)).toEqual([3, 4]);
-    expect(fixAffectedSteps([changed("src/spec/auth.ts")], globs)).toEqual([3, 4]);
-    expect(fixAffectedSteps([changed("test/fixtures/secrets.json")], globs)).toEqual([3, 4]);
-    expect(fixAffectedSteps([changed("pkg/auth_test.go")], globs)).toEqual([3]);
-    expect(fixAffectedSteps([changed("tests/test_auth.py")], globs)).toEqual([3]);
+    expect(fixAffectedSteps([changed("api/specs/openapi.yaml")])).toEqual([3, 4]);
+    expect(fixAffectedSteps([changed("src/spec/auth.ts")])).toEqual([3, 4]);
+    expect(fixAffectedSteps([changed("test/fixtures/secrets.json")])).toEqual([3, 4]);
+    expect(fixAffectedSteps([changed("pkg/auth_test.go")])).toEqual([3]);
+    expect(fixAffectedSteps([changed("tests/test_auth.py")])).toEqual([3]);
+    // a test-like name on data, config, CI or a production module is not a test either
+    for (const path of [
+      ".github/workflows/e2e-test.yml",
+      "api/openapi.spec.yaml",
+      "api/openapi-spec.yaml",
+      "api/swagger.spec.json",
+      "api/auth-spec.json",
+      "config/appsettings.test.json",
+      "deploy/docker-compose.test.yml",
+      "docker-compose.test.yml",
+      "src/auth/policy-spec.ts",
+      "src/auth/policy-spec.rego",
+      "test_settings.py",
+      "tests/test_config.py",
+      "ci/smoke.test.ts",
+      "tests/acceptance/helpers.ts",
+      "tests/acceptance/fixtures/secrets.json",
+    ]) {
+      expect(fixAffectedSteps([changed(path)]), path).toEqual([3, 4]);
+      expect(fixAffectedSteps([changed(path, "added")]), path).toEqual([3, 4]);
+    }
     // the spec, architecture and design under .vtc/ are what step 3 verifies against
-    expect(fixAffectedSteps([changed(".vtc/spec/spec.md")], globs)).toEqual([3]);
-    expect(fixAffectedSteps([changed(".vtc/architecture/notes.md")], globs)).toEqual([3]);
-    expect(fixAffectedSteps([changed(".vtc/runs/r-1/events.jsonl")], globs)).toEqual([]);
-    expect(fixAffectedSteps([changed(".vtc/tasks/T-2.md", "added")], globs)).toEqual([]);
+    expect(fixAffectedSteps([changed(".vtc/spec/spec.md")])).toEqual([3]);
+    expect(fixAffectedSteps([changed(".vtc/architecture/notes.md")])).toEqual([3]);
+    expect(fixAffectedSteps([changed(".vtc/runs/r-1/events.jsonl")])).toEqual([]);
+    expect(fixAffectedSteps([changed(".vtc/tasks/T-2.md", "added")])).toEqual([]);
   });
 });
 
