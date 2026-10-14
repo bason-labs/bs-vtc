@@ -27,7 +27,6 @@ import {
   type HostId,
   type ResearchScope,
   type RunDaemon,
-  type SearchProvider,
   type VtcEvent,
   type RunningDaemon,
   type RunningSnapshot,
@@ -66,6 +65,7 @@ import {
   evaluateCanaries,
   graderBundleSha,
   lookbackAtRunEnd,
+  readTiebreakKeys,
   type LockedShaFor,
 } from "../lookback/index.js";
 import { engineSocketAnswers, serveEngineSocket } from "../mcp/index.js";
@@ -128,7 +128,7 @@ export const wireResearch = (
   // nothing
   const provider = deps.researchSearchProvider;
   const serviceFor = (run: string | undefined): ResearchService => {
-    const service: ResearchServiceDeps & { readonly searchProvider?: SearchProvider } = {
+    const service: ResearchServiceDeps = {
       projectRoot: deps.repoRoot,
       cache,
       scope,
@@ -219,9 +219,9 @@ export const lookbackWindow = (
  * - at `run.finished` (an aborted run too) the run's failures are attributed to
  *   `.vtc/lookback/attributions.jsonl` and the scorecards of every version in the history are
  *   rewritten under `.vtc/lookback/scorecards/`. Only the AI tiebreak answers the engine recorded
- *   would let an `ai_tiebreak` row count; nothing produces one yet, so none counts (the lookback
- *   module's tiebreak store, `readTiebreakKeys` / `appendTiebreakRecord`, is wired here once the
- *   lookback-research branch that ships it is integrated).
+ *   in the lookback module's tiebreak store (`readTiebreakKeys`) let an `ai_tiebreak` row count;
+ *   nothing produces one yet (core records one through `appendTiebreakRecord` once it does), so
+ *   none counts.
  * Lookback work at `run.finished` runs one job at a time and never fails the engine; the returned
  * cleanup waits for the job in flight.
  */
@@ -288,10 +288,10 @@ export const wireLookback = (
     );
   // rule 8 (reading 176): the window of the run's Lead host, where the lookback role runs
   const weeklyRemaining = (state: RunState): number | null => lookbackWindow(engine, state).pct;
-  // the AI tiebreak answers the engine recorded (reading 137): only these ai_tiebreak rows count.
-  // No AI tiebreak is produced yet, so none is recorded and none counts (fail closed); the
-  // lookback module's store reader replaces this at integration
-  const tiebreaks = (): Promise<ReadonlySet<string>> => Promise.resolve(new Set<string>());
+  // the AI tiebreak answers the engine recorded (readings 137, 175): only these ai_tiebreak rows
+  // count, read from the engine-owned store under the VTC home (`LOOKBACK_HOME.tiebreaksFile`).
+  // No AI tiebreak is produced yet, so the store stays empty and none counts (fail closed)
+  const tiebreaks = (): Promise<ReadonlySet<string>> => readTiebreakKeys(deps.vtcHome, repoKey);
   const bundleSha = (): string =>
     graderBundleSha({ judgeModel: null, gatesConfigHash: engine.gatesConfigHash() });
   const budgetAvailable = (state: RunState): boolean =>
