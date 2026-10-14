@@ -76,7 +76,11 @@ export function StepNodeCard({
       onClick={onSelect}
       data-testid={`node-${node.id}`}
       data-state={node.state}
-      aria-label={`${node.label}, ${meta.label}. Added because: ${node.reason_added}`}
+      aria-label={
+        node.reason_added === ""
+          ? `${node.label}, ${meta.label}`
+          : `${node.label}, ${meta.label}. Added because: ${node.reason_added}`
+      }
       aria-pressed={selected}
       className={cn(
         "nodrag nopan flex h-[112px] w-[216px] flex-col rounded-2xl border bg-surface/95 p-3 text-left text-sm backdrop-blur transition hover:border-accent",
@@ -99,7 +103,9 @@ export function StepNodeCard({
         </span>
       </span>
       <span className="mt-1 line-clamp-1 font-medium">{node.label}</span>
-      <span className="mt-0.5 line-clamp-2 text-[11px] text-muted-fg">{node.reason_added}</span>
+      {node.reason_added === "" ? null : (
+        <span className="mt-0.5 line-clamp-2 text-[11px] text-muted-fg">{node.reason_added}</span>
+      )}
       {node.round !== undefined || tokens !== null ? (
         <span className="mt-auto flex gap-2 text-[11px] text-muted-fg tabular">
           {node.round !== undefined && node.cap !== undefined ? (

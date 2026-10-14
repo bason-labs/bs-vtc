@@ -15,10 +15,12 @@ import {
   type ScorecardGroup,
 } from "@/lib/scorecards";
 import { formatLocalTime } from "@/lib/time";
+import { useEvidenceMode } from "@/lib/useEvidenceMode";
 import { useNow } from "@/lib/useNow";
 import { useResource } from "@/lib/useResource";
 import { useRunEvents } from "@/lib/useRunEvents";
 import { Link } from "@/components/app/Link";
+import { ReplayResultAt } from "@/components/lookback/ReplayDetail";
 import { ScorecardDetail } from "@/components/lookback/ScorecardDetail";
 import { EventLogTruncated } from "@/components/notices/EventLogTruncated";
 import {
@@ -32,7 +34,15 @@ import {
 } from "@/components/ui";
 import { Breadcrumbs, Loaded, MissingParam, PageHeader } from "./common";
 
-function ScorecardCard({ run, group }: { run: string; group: ScorecardGroup }) {
+function ScorecardCard({
+  run,
+  group,
+  upstream,
+}: {
+  run: string;
+  group: ScorecardGroup;
+  upstream: boolean;
+}) {
   const now = useNow();
   const [latest, ...older] = group.versions;
   const path = latest?.path ?? "";
@@ -54,12 +64,14 @@ function ScorecardCard({ run, group }: { run: string; group: ScorecardGroup }) {
             </CardDescription>
           )}
         </div>
-        <Link
-          className="inline-flex items-center gap-1 text-xs text-accent-fg underline"
-          href={hrefs.artifact(run, path)}
-        >
-          <FileText aria-hidden className="size-3.5" /> scorecard.json
-        </Link>
+        {upstream ? null : (
+          <Link
+            className="inline-flex items-center gap-1 text-xs text-accent-fg underline"
+            href={hrefs.artifact(run, path)}
+          >
+            <FileText aria-hidden className="size-3.5" /> scorecard.json
+          </Link>
+        )}
       </CardHeader>
       {card.error !== null && card.data === undefined ? (
         <p className="text-sm text-danger">{describeError(card.error)}</p>
@@ -82,12 +94,16 @@ function ScorecardCard({ run, group }: { run: string; group: ScorecardGroup }) {
           <ul className="mt-1 space-y-1">
             {older.map((v) => (
               <li key={v.path}>
-                <Link
-                  className="font-mono text-accent-fg underline"
-                  href={hrefs.artifact(run, v.path)}
-                >
-                  {v.version}
-                </Link>{" "}
+                {upstream ? (
+                  <span className="font-mono">{v.version}</span>
+                ) : (
+                  <Link
+                    className="font-mono text-accent-fg underline"
+                    href={hrefs.artifact(run, v.path)}
+                  >
+                    {v.version}
+                  </Link>
+                )}{" "}
                 <span className="text-muted-fg">written {formatLocalTime(v.writtenAt, now)}</span>
               </li>
             ))}
@@ -98,13 +114,22 @@ function ScorecardCard({ run, group }: { run: string; group: ScorecardGroup }) {
   );
 }
 
-function Activity({ run }: { run: string }) {
+function Activity({ run, upstream }: { run: string; upstream: boolean }) {
   const now = useNow();
   const events = useRunEvents(run, ["lookback"]);
-  const activity = useMemo(
-    () => (events.data === undefined ? null : lookbackActivity(events.data.events)),
-    [events.data],
-  );
+  const activity = useMemo(() => {
+    if (events.data === undefined) return null;
+    const all = lookbackActivity(events.data.events);
+    // Upstream evidence (D-by): replay arms and canary numbers only; no paths, commits or task ids.
+    return upstream
+      ? {
+          canaries: all.canaries.map((c) => ({ ...c, reason: "" })),
+          items: all.items
+            .filter((i) => i.type === "lookback.replay_finished")
+            .map((i) => ({ ...i, detail: null })),
+        }
+      : all;
+  }, [events.data, upstream]);
   const truncated = events.data?.truncated === true;
   if (
     activity === null ||
@@ -118,20 +143,13 @@ function Activity({ run }: { run: string }) {
         <div>
           <CardTitle id="lookback-activity">In this run</CardTitle>
           <CardDescription>
-            Proposals, replays and canaries. Only a human promotes a prompt version.
+            Proposals, replays and canaries. Only a human promotes a prompt version: by merging the
+            pull request VTC opens to its own repo (every user, next release), or with vtc lookback
+            approve (a canary on this machine).
           </CardDescription>
         </div>
       </CardHeader>
       {truncated ? <EventLogTruncated className="mb-3" /> : null}
-      {activity.noCanary.length === 0 ? null : (
-        <p role="note" className="mb-3 text-xs text-warn-fg" data-testid="lookback-no-canary">
-          No canary can start for {activity.noCanary.join(", ")} from a Claude-led run in this
-          version: a canary starts only from a replay, and a Claude-led run replays only a role that
-          takes a pin and changes files, which no shipped role does yet (spine §5 readings 180 and
-          182). <code className="font-mono">vtc lookback pin</code> still pins a version, and a
-          Codex-led headless run replays and canaries end to end.
-        </p>
-      )}
       {activity.canaries.length === 0 ? null : (
         <ul aria-label="Canaries" className="mb-3 space-y-2">
           {activity.canaries.map((c) => (
@@ -141,7 +159,7 @@ function Activity({ run }: { run: string }) {
                 <span className="font-medium">{c.target}</span>
                 <StatusPill meta={c.verdict} />
               </p>
-              <p className="mt-0.5 text-xs text-muted-fg">{c.reason}</p>
+              {c.reason === "" ? null : <p className="mt-0.5 text-xs text-muted-fg">{c.reason}</p>}
               <ul className="mt-0.5 text-xs tabular">
                 {c.arms.map((a) => (
                   <li key={a}>{a}</li>
@@ -165,7 +183,7 @@ function Activity({ run }: { run: string }) {
                 </time>
               </p>
               {i.detail === null ? null : <p className="text-xs text-muted-fg">{i.detail}</p>}
-              {i.path === null ? null : (
+              {i.path === null || upstream ? null : (
                 <Link
                   className="font-mono text-xs break-all text-accent-fg underline"
                   href={hrefs.artifact(run, i.path)}
@@ -173,6 +191,11 @@ function Activity({ run }: { run: string }) {
                   {i.path}
                 </Link>
               )}
+              {i.type === "lookback.replay_finished" && i.path !== null ? (
+                <div className="mt-2 rounded-2xl border border-border p-3">
+                  <ReplayResultAt run={run} path={i.path} ordinals={upstream} />
+                </div>
+              ) : null}
             </li>
           ))}
         </ol>
@@ -184,10 +207,12 @@ function Activity({ run }: { run: string }) {
 /**
  * Lookback (§13, AD-21): scorecards per prompt version from
  * `.vtc/lookback/scorecards/index.json`, every proportion with n and its interval, and the run's
- * lookback events (canaries, replays, proposals, rollbacks, escaped defects).
+ * lookback events (canaries, replays, proposals, rollbacks, escaped defects). In upstream evidence
+ * mode only the scorecards, the canaries' numbers and the replay arms (tasks as ordinals).
  */
 export function LookbackView({ run }: { run: string | null }) {
   const key = run ?? "";
+  const upstream = useEvidenceMode() === "upstream";
   const index = useResource(
     run === null ? null : `artifact:${key}:${LOOKBACK_REPO.scorecardIndex}`,
     (c, s) => c.artifact(key, LOOKBACK_REPO.scorecardIndex, s),
@@ -196,16 +221,18 @@ export function LookbackView({ run }: { run: string | null }) {
   if (run === null) return <MissingParam what="run" />;
   return (
     <>
-      <Breadcrumbs
-        items={[
-          { label: "Runs", href: hrefs.runs() },
-          { label: run, href: hrefs.run(run) },
-          { label: "Lookback" },
-        ]}
-      />
+      {upstream ? null : (
+        <Breadcrumbs
+          items={[
+            { label: "Runs", href: hrefs.runs() },
+            { label: run, href: hrefs.run(run) },
+            { label: "Lookback" },
+          ]}
+        />
+      )}
       <PageHeader title="Lookback" eyebrow="Scorecards per prompt version" />
       <div className="space-y-4">
-        <Activity run={run} />
+        <Activity run={run} upstream={upstream} />
         <Loaded
           resource={index}
           missing={
@@ -229,7 +256,7 @@ export function LookbackView({ run }: { run: string | null }) {
             const refused = refusedScorecardPaths(read.value);
             return (
               <div className="space-y-4">
-                {refused.length === 0 ? null : (
+                {refused.length === 0 || upstream ? null : (
                   <p role="alert" className="text-xs text-warn-fg" data-testid="scorecards-refused">
                     The scorecard index breaks its contract: not shown, because{" "}
                     {refused.length === 1 ? "this path is" : "these paths are"} outside{" "}
@@ -240,7 +267,9 @@ export function LookbackView({ run }: { run: string | null }) {
                 {groups.length === 0 ? (
                   <EmptyState title="No scorecards yet" />
                 ) : (
-                  groups.map((g) => <ScorecardCard key={g.key} run={run} group={g} />)
+                  groups.map((g) => (
+                    <ScorecardCard key={g.key} run={run} group={g} upstream={upstream} />
+                  ))
                 )}
               </div>
             );

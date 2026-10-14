@@ -9,13 +9,8 @@ import {
   readScorecardIndex,
   refusedScorecardPaths,
 } from "@/lib/scorecards";
-import {
-  ENGINEER_SCORECARD,
-  jsonArtifact,
-  LOOKBACK_EVENTS,
-  SCORECARD_INDEX,
-  w3Event,
-} from "../wave3-fixtures";
+import { firstSample, SAMPLE_EVENTS, sampleEvent, variant } from "../golden-samples";
+import { ENGINEER_SCORECARD, jsonArtifact, SCORECARD_INDEX } from "../dev-samples";
 
 const INDEX_PATH = ".vtc/lookback/scorecards/index.json";
 
@@ -114,25 +109,19 @@ describe("groupScorecards", () => {
   });
 });
 
-describe("lookbackActivity (lookback.* events)", () => {
-  const activity = lookbackActivity(LOOKBACK_EVENTS);
+describe("lookbackActivity (lookback.* events, golden samples)", () => {
+  const activity = lookbackActivity(SAMPLE_EVENTS);
+  const evaluated = firstSample("lookback.canary_evaluated");
 
   it("keeps the latest canary state per role and host", () => {
-    const later = w3Event(91, "lookback.canary_evaluated", {
-      ...(LOOKBACK_EVENTS[3]!.data as object),
-      verdict: "continue",
-      reason: "no trigger yet",
-    });
-    const canaries = lookbackActivity([...LOOKBACK_EVENTS, later]).canaries;
+    const later = variant(evaluated, 91, { verdict: "continue", reason: "no trigger yet" });
+    const canaries = lookbackActivity([...SAMPLE_EVENTS, later]).canaries;
     expect(canaries).toHaveLength(1);
-    expect(canaries[0]).toMatchObject({
-      target: "engineer · claude-code",
-      reason: "no trigger yet",
-    });
+    expect(canaries[0]).toMatchObject({ target: "engineer · codex", reason: "no trigger yet" });
     expect(activity.canaries[0]?.verdict).toMatchObject({ tone: "danger" });
     expect(activity.canaries[0]?.arms).toEqual([
-      "candidate aaaaaaaa: 6 dispatches, 3 escalations, 1 cap hit, 10,000 tokens per dispatch",
-      "baseline bbbbbbbb: 6 dispatches, 1 escalation, 0 cap hits, 9,667 tokens per dispatch",
+      "candidate 5637b302: 6 dispatches, 2 escalations, 0 cap hits, 15,000 tokens per dispatch",
+      "baseline 66bd4895: 6 dispatches, 0 escalations, 0 cap hits, 13,333 tokens per dispatch",
     ]);
   });
 
@@ -145,14 +134,23 @@ describe("lookbackActivity (lookback.* events)", () => {
       "lookback.dispatched",
     ]);
     const replay = activity.items.find((i) => i.type === "lookback.replay_finished")!;
-    expect(replay.title).toBe("Replay of engineer-p1: inconclusive, not an improvement");
-    expect(replay.path).toBe(".vtc/lookback/replays/engineer-p1.json");
-    expect(activity.items[0]?.detail).toMatch(/revert of cccccccc.*T-1/);
+    expect(replay.title).toBe("Replay of p-engineer-1: inconclusive, not an improvement");
+    expect(replay.path).toBe(".vtc/lookback/replays/p-engineer-1.json");
+    expect(replay.detail).toBeNull();
+    expect(activity.items[0]?.detail).toMatch(/revert of bbbbbbbb.*T-1/);
+  });
+
+  it("says an improvement ships through VTC's own PR once a human merges it (D-cb)", () => {
+    const improve = variant(firstSample("lookback.replay_finished"), 92, { verdict: "improve" });
+    const [item] = lookbackActivity([improve]).items;
+    expect(item?.title).toBe("Replay of p-engineer-1: improves");
+    expect(item?.detail).toMatch(/pull request to VTC's own repo/);
+    expect(item?.detail).toMatch(/next VTC release ships the change once a human merges it/);
   });
 
   it("shows the failures left without an attribution while no AI tiebreak runs (reading 182)", () => {
     const items = lookbackActivity([
-      w3Event(95, "lookback.unattributed", { failures: 3, tasks: ["T-2", "T-4"] }),
+      sampleEvent(95, "lookback.unattributed", { failures: 3, tasks: ["T-2", "T-4"] }),
     ]).items;
     expect(items).toHaveLength(1);
     expect(items[0]).toMatchObject({
@@ -164,35 +162,14 @@ describe("lookbackActivity (lookback.* events)", () => {
     expect(items[0]?.detail).toMatch(/no AI tiebreak.*no scorecard.*T-2, T-4/);
   });
 
-  it("says when no canary can start from a Claude-led run's proposals (readings 180 and 182(8))", () => {
-    const claude = lookbackActivity([
-      w3Event(96, "lookback.dispatched", {
-        target_role: "spec_verifier",
-        target_host: "claude-code",
-        train_failures: 2,
-      }),
-      w3Event(97, "lookback.dispatched", {
-        target_role: "engineer",
-        target_mode: "fix",
-        target_host: "claude-code",
-        train_failures: 1,
-      }),
-      w3Event(98, "lookback.dispatched", {
-        target_role: "engineer",
-        target_host: "codex",
-        train_failures: 4,
-      }),
-    ]);
-    expect(claude.noCanary).toEqual([
-      "spec_verifier · claude-code",
-      "engineer (fix) · claude-code",
-    ]);
-    const [codex, fix, verdict] = claude.items;
-    expect(verdict?.detail).toMatch(
-      /^2 attributed train failures\. No canary can start for it from a Claude-led run in this version \(spine §5 readings 180 and 182\); vtc lookback pin still pins a version\.$/,
-    );
-    expect(fix?.detail).toMatch(/No canary can start for it from a Claude-led run/);
-    expect(codex?.detail).toBe("4 attributed train failures");
-    expect(lookbackActivity(LOOKBACK_EVENTS).noCanary).toEqual(["engineer · claude-code"]);
+  it("no longer says a Claude-led run cannot start a canary (D-cg, reading 201)", () => {
+    const claude = variant(firstSample("lookback.dispatched"), 96, {
+      target_role: "spec_verifier",
+      target_host: "claude-code",
+      train_failures: 2,
+    });
+    const result = lookbackActivity([claude]);
+    expect(result).not.toHaveProperty("noCanary");
+    expect(result.items[0]?.detail).toBe("2 attributed train failures");
   });
 });

@@ -1,6 +1,7 @@
 import {
   API_KEY_BILLING_WARNING,
   HOST_IDS,
+  PROVIDER_BILLING_NOTICE,
   remainingPct,
   unknownUsage,
   type HostId,
@@ -23,8 +24,10 @@ import {
  * The usage panel (§17, D15; §6.9): one card per host with the 5-hour and weekly windows (used %,
  * remaining %, the local reset time), when the data was last updated, per-model "limit reached"
  * rows, the tasks interrupted by limits and the auto-resume countdown. Missing data is "unknown",
- * never 0%. A host signed in with an API key shows `API_KEY_BILLING_WARNING` verbatim (D-bq,
- * spine §5 reading 171); unknown or absent billing shows nothing.
+ * never 0%. A host signed in with an API key shows `API_KEY_BILLING_WARNING` verbatim as a warning
+ * (D-bq, spine §5 reading 171); one billed through a cloud provider or gateway shows
+ * `PROVIDER_BILLING_NOTICE` verbatim as a neutral notice, not a warning (D-ci, reading 203);
+ * subscription, unknown or absent billing shows nothing.
  */
 export const HOST_NAMES: Readonly<Record<HostId, string>> = {
   "claude-code": "Claude Code",
@@ -63,8 +66,8 @@ export interface UsageCardModel {
   readonly updated: { readonly text: string; readonly tone: AgeTone };
   readonly windows: readonly UsageWindowModel[];
   readonly modelLimits: readonly string[];
-  /** `API_KEY_BILLING_WARNING` for an API-key login, else `null`. */
-  readonly billingWarning: string | null;
+  /** The host's billing note ({@link billingNote}), or `null`. */
+  readonly billing: BillingNote | null;
 }
 
 export interface UsagePanelModel {
@@ -120,21 +123,35 @@ const windowModel = (
   };
 };
 
-const billingWarning = (snapshot: Pick<UsageSnapshot, "billing">): string | null =>
-  snapshot.billing === "api_key" ? API_KEY_BILLING_WARNING : null;
-
-export interface BillingNotice {
-  readonly host: HostId;
-  readonly name: string;
-  readonly warning: string;
+/** A billing note: the D-bq warning (`warn`) or the D-ci notice (`neutral`), verbatim. */
+export interface BillingNote {
+  readonly tone: "warn" | "neutral";
+  readonly text: string;
 }
 
-/** The hosts whose role runs bill an API key (D-bq), in host order, for the run notices. */
+/** The note `snapshot.billing` calls for, or `null` (subscription, unknown, absent). */
+export const billingNote = (snapshot: Pick<UsageSnapshot, "billing">): BillingNote | null => {
+  switch (snapshot.billing) {
+    case "api_key":
+      return { tone: "warn", text: API_KEY_BILLING_WARNING };
+    case "provider":
+      return { tone: "neutral", text: PROVIDER_BILLING_NOTICE };
+    default:
+      return null;
+  }
+};
+
+export interface BillingNotice extends BillingNote {
+  readonly host: HostId;
+  readonly name: string;
+}
+
+/** The hosts with a billing note (D-bq, D-ci), in host order, for the run notices. */
 export const billingNotices = (report: UsageReport): BillingNotice[] =>
   HOST_IDS.flatMap((host) => {
     const snapshot = report.hosts.find((h) => h.host === host);
-    const warning = snapshot === undefined ? null : billingWarning(snapshot);
-    return warning === null ? [] : [{ host, name: HOST_NAMES[host], warning }];
+    const note = snapshot === undefined ? null : billingNote(snapshot);
+    return note === null ? [] : [{ host, name: HOST_NAMES[host], ...note }];
   });
 
 const cardModel = (
@@ -172,7 +189,7 @@ const cardModel = (
             : `resets ${formatLocalTime(limit.resets_at, now, options)}`
         }`,
     ),
-    billingWarning: billingWarning(snapshot),
+    billing: billingNote(snapshot),
   };
 };
 

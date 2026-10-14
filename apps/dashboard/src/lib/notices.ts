@@ -1,16 +1,21 @@
 import {
+  AUTOMATION_LIMITS,
   isEventOfType,
   readEventData,
+  type AutoKind,
+  type AutoTargetRef,
   type CoreEventType,
   type EventData,
   type EventPage,
   type IncidentKind,
   type VtcEvent,
 } from "@vtc/shared";
-import { eventData } from "./events";
+import { AUTO_KIND_LABELS, SKIP_REASONS } from "./automation";
+import { eventData, webUrl } from "./events";
 import { formatGateDuration } from "./gates";
 import { headlessOutcomeMeta, PREFLIGHT_CHECKS, PREFLIGHT_PURPOSES } from "./headless";
 import { AUTO_MERGE_DISABLED, PREFLIGHT_FIXES } from "./level3";
+import { withoutReplayTrials } from "./replay-trials";
 import type { Tone } from "./states";
 
 /**
@@ -22,8 +27,10 @@ import type { Tone } from "./states";
  * revert after a Level-3 merge (AD-23), an engine-launched run that did not finish or could not
  * start (AD-25) and a prompt canary rolled back (AD-21). Since 4.7.0 a pinned or canary prompt
  * the engine did not use (`prompt_selection`, spine §5 readings 137 and 176), folded into one
- * notice per detail since core records one per dispatch. The engine still owns all state: these
- * are read from the run's event log and only explained here.
+ * notice per detail since core records one per dispatch. Since 5.0.0 every automatic issue and
+ * PR VTC opened, updated or closed (`upstream.*`) and every automatic action it did not take
+ * (`automation.skipped`, with its reason; D-ca, AD-27 rule 7). The engine still owns all state:
+ * these are read from the run's event log and only explained here.
  */
 
 /** Event types that make a notice, or resolve one (a later push or PR update). */
@@ -41,6 +48,12 @@ export const NOTICE_EVENT_TYPES: ReadonlySet<CoreEventType> = new Set<CoreEventT
   "headless.preflight",
   "headless.ended",
   "lookback.rolled_back",
+  "upstream.issue_opened",
+  "upstream.issue_updated",
+  "upstream.issue_closed",
+  "upstream.pr_opened",
+  "upstream.pr_closed",
+  "automation.skipped",
 ]);
 
 export type NoticeType =
@@ -54,7 +67,13 @@ export type NoticeType =
   | "feature.reverted"
   | "headless.preflight"
   | "headless.ended"
-  | "lookback.rolled_back";
+  | "lookback.rolled_back"
+  | "upstream.issue_opened"
+  | "upstream.issue_updated"
+  | "upstream.issue_closed"
+  | "upstream.pr_opened"
+  | "upstream.pr_closed"
+  | "automation.skipped";
 
 export interface RunNotice {
   readonly seq: number;
@@ -72,6 +91,8 @@ export interface RunNotice {
   readonly resolved: boolean;
   /** How many times the engine recorded this same notice (1 unless folded). */
   readonly repeats: number;
+  /** An issue or PR VTC opened (http(s) only). */
+  readonly link?: { readonly href: string; readonly label: string };
 }
 
 const INCIDENT_TITLES: Readonly<Record<IncidentKind, string>> = {
@@ -100,9 +121,9 @@ const MERGE_REASONS: Readonly<Record<EventData<"run.merge_level_changed">["reaso
 
 type NoticeBody = Omit<
   RunNotice,
-  "seq" | "at" | "type" | "feature" | "resolved" | "evidence" | "repeats"
+  "seq" | "at" | "type" | "feature" | "resolved" | "evidence" | "repeats" | "link"
 > &
-  Partial<Pick<RunNotice, "evidence">>;
+  Partial<Pick<RunNotice, "evidence" | "link">>;
 
 /** Incident kinds that are a heads-up, not a failure: the run carries on as configured. */
 const WARN_INCIDENTS: ReadonlySet<IncidentKind> = new Set<IncidentKind>([
@@ -211,6 +232,120 @@ const wave3Body = (event: VtcEvent): NoticeBody | null => {
   return null;
 };
 
+const UPSTREAM_NOTE =
+  "Only VTC-side data went to VTC's own repo: no project code, paths, names or secrets (D-by).";
+
+const ISSUE_UPDATES: Readonly<Record<EventData<"upstream.issue_updated">["action"], string>> = {
+  commented: "commented on",
+  reopened: "reopened",
+  edited: "updated",
+};
+
+const ISSUE_CLOSES: Readonly<Record<EventData<"upstream.issue_closed">["reason"], string>> = {
+  quiet: `Not seen again for ${String(AUTOMATION_LIMITS.autoCloseQuietDays)} days.`,
+  completed: "Its fix was merged.",
+};
+
+const PR_CLOSES: Readonly<Record<EventData<"upstream.pr_closed">["reason"], string>> = {
+  superseded: "A newer proposal replaced it.",
+  issue_closed: "Its issue was closed.",
+  stale: "It went stale without a review.",
+};
+
+const issueOrPr = (
+  data: { target: AutoTargetRef; kind: AutoKind; number: number; url: string },
+  what: "issue" | "PR",
+): Pick<NoticeBody, "link" | "note"> & { readonly where: string; readonly kind: string } => {
+  const href = webUrl(data.url);
+  return {
+    where: `${what} #${String(data.number)} in ${data.target.repo}`,
+    kind: AUTO_KIND_LABELS[data.kind],
+    note: data.target.kind === "upstream" ? UPSTREAM_NOTE : null,
+    ...(href === null
+      ? {}
+      : { link: { href, label: `${what === "issue" ? "Issue" : "PR"} #${String(data.number)}` } }),
+  };
+};
+
+/** Notices of the automation events (contracts 5.0.0, D-ca); `null` for other events. */
+const automationBody = (event: VtcEvent): NoticeBody | null => {
+  const opened = eventData(event, "upstream.issue_opened");
+  if (opened !== null) {
+    const { where, kind, ...rest } = issueOrPr(opened, "issue");
+    return {
+      tone: "accent",
+      title: `VTC opened ${where}`,
+      detail:
+        opened.regression_of === undefined
+          ? kind
+          : `${kind} · regression of #${String(opened.regression_of)}`,
+      ...rest,
+    };
+  }
+  const updated = eventData(event, "upstream.issue_updated");
+  if (updated !== null) {
+    const { where, kind, ...rest } = issueOrPr(updated, "issue");
+    return {
+      tone: "neutral",
+      title: `VTC ${ISSUE_UPDATES[updated.action]} ${where}`,
+      detail: kind,
+      ...rest,
+    };
+  }
+  const closed = eventData(event, "upstream.issue_closed");
+  if (closed !== null) {
+    const { where, kind, ...rest } = issueOrPr(closed, "issue");
+    return {
+      tone: "neutral",
+      title: `VTC closed ${where}`,
+      detail: `${kind} · ${ISSUE_CLOSES[closed.reason]}`,
+      ...rest,
+    };
+  }
+  const pr = eventData(event, "upstream.pr_opened");
+  if (pr !== null) {
+    const { where, kind, note, ...rest } = issueOrPr(pr, "PR");
+    return {
+      tone: "accent",
+      title: `VTC opened draft ${where} for review`,
+      detail: [
+        kind,
+        ...(pr.issue === undefined ? [] : [`fixes issue #${String(pr.issue)}`]),
+        `evidence ${pr.evidence}`,
+      ].join(" · "),
+      note: [
+        "VTC never merges it: a human reviews and merges it.",
+        ...(note === null ? [] : [note]),
+      ].join(" "),
+      ...rest,
+    };
+  }
+  const prClosed = eventData(event, "upstream.pr_closed");
+  if (prClosed !== null) {
+    const { where, kind, ...rest } = issueOrPr(prClosed, "PR");
+    return {
+      tone: "neutral",
+      title: `VTC closed ${where}`,
+      detail: `${kind} · ${PR_CLOSES[prClosed.reason]}`,
+      ...rest,
+    };
+  }
+  const skipped = eventData(event, "automation.skipped");
+  if (skipped !== null) {
+    return {
+      tone: skipped.reason === "duplicate" || skipped.reason === "paused" ? "neutral" : "warn",
+      title: `Automatic issue or PR not raised${
+        skipped.kind === undefined
+          ? ""
+          : `: ${AUTO_KIND_LABELS[skipped.kind].charAt(0).toLowerCase()}${AUTO_KIND_LABELS[skipped.kind].slice(1)}`
+      }`,
+      detail: skipped.detail,
+      note: `Why: ${SKIP_REASONS[skipped.reason]}.`,
+    };
+  }
+  return null;
+};
+
 const body = (event: VtcEvent): NoticeBody | null => {
   if (isEventOfType(event, "branch.push_failed")) {
     const data = readEventData(event);
@@ -249,7 +384,7 @@ const body = (event: VtcEvent): NoticeBody | null => {
       note: data.reason === "no_remote" ? "Tasks reach done once merged locally (Level 1)." : null,
     };
   }
-  return wave3Body(event);
+  return wave3Body(event) ?? automationBody(event);
 };
 
 /** The notice an event makes, or `null` (other types, or a payload this version cannot read). */
@@ -309,12 +444,17 @@ const resolves = (failed: VtcEvent, notice: RunNotice, later: VtcEvent): boolean
 
 /**
  * The key of a notice that folds with every other notice of the same key, or `null`: a
- * `prompt_selection` incident is recorded at each dispatch the pin could not reach, so the same
- * detail is one notice (the newest) with how often it was recorded.
+ * `prompt_selection` incident is recorded at each dispatch the pin could not reach, and the same
+ * automatic action can be skipped again and again for one reason, so the same detail is one
+ * notice (the newest) with how often it was recorded.
  */
 const foldKey = (event: VtcEvent): string | null => {
   const incident = eventData(event, "incident.recorded");
-  return incident?.kind === "prompt_selection" ? `prompt_selection:${incident.detail}` : null;
+  if (incident?.kind === "prompt_selection") return `prompt_selection:${incident.detail}`;
+  const skipped = eventData(event, "automation.skipped");
+  return skipped === null
+    ? null
+    : `automation.skipped:${skipped.reason}:${skipped.kind ?? ""}:${skipped.detail}`;
 };
 
 /**
@@ -348,8 +488,8 @@ export const runNotices = (events: readonly VtcEvent[], feature?: string): RunNo
 export const MAX_EVENT_PAGES = 50;
 
 export interface RunEventLog {
-  /** Oldest first. */
-  readonly events: VtcEvent[];
+  /** Oldest first, without Lookback replay trials (reading 177, `withoutReplayTrials`). */
+  readonly events: readonly VtcEvent[];
   /**
    * The log is longer than {@link MAX_EVENT_PAGES} pages: the newest events were not read, so
    * the views built from it say so instead of showing a live state as current.
@@ -357,7 +497,10 @@ export interface RunEventLog {
   readonly truncated: boolean;
 }
 
-/** Reads the run's whole event log, page by page (`GET /api/runs/:run/events?after=`). */
+/**
+ * Reads the run's whole event log, page by page (`GET /api/runs/:run/events?after=`), leaving
+ * out Lookback replay trials, which are not the run's work (spine §5 reading 177).
+ */
 export const loadRunEvents = async (
   client: { events(run: string, after: number, signal?: AbortSignal): Promise<EventPage> },
   run: string,
@@ -368,8 +511,9 @@ export const loadRunEvents = async (
   for (let page = 0; page < MAX_EVENT_PAGES; page += 1) {
     const read = await client.events(run, after, signal);
     events.push(...read.events);
-    if (read.next_after === null || read.next_after <= after) return { events, truncated: false };
+    if (read.next_after === null || read.next_after <= after)
+      return { events: withoutReplayTrials(events), truncated: false };
     after = read.next_after;
   }
-  return { events, truncated: true };
+  return { events: withoutReplayTrials(events), truncated: true };
 };

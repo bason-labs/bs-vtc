@@ -2,10 +2,15 @@ import { describe, expect, it, vi } from "vitest";
 import type { VtcEvent } from "@vtc/shared";
 import { connectLiveStream, type LiveStatus } from "@/lib/api/live";
 import { ApiError } from "@/lib/api/errors";
-import { createInvalidationBus, runTopic, topicsForEvent } from "@/lib/api/topics";
+import {
+  createInvalidationBus,
+  runTopic,
+  topicKeysForEvent,
+  topicsForEvent,
+} from "@/lib/api/topics";
 import { readEventLog } from "../../fixtures";
 import { NOTICE_EVENTS } from "../../notice-fixtures";
-import { WAVE3_EVENTS } from "../../wave3-fixtures";
+import { firstSample, sampleEvent } from "../../golden-samples";
 
 const events = (): VtcEvent[] =>
   readEventLog()
@@ -52,9 +57,14 @@ describe("topicsForEvent", () => {
     expect(topicsForEvent(byType("task.status_changed"))).not.toContain("notices");
   });
   it("marks the wave-3 views stale on their events (gates, headless, Level 3, research, lookback)", () => {
-    const topics = (type: string) => topicsForEvent(WAVE3_EVENTS.find((e) => e.type === type)!);
+    const topics = (type: Parameters<typeof firstSample>[0]) => topicsForEvent(firstSample(type));
     expect(topics("gate.requested")).toEqual(expect.arrayContaining(["gates", "status"]));
-    expect(topics("gate.approved")).toEqual(expect.arrayContaining(["gates"]));
+    const approved = sampleEvent(40, "gate.approved", {
+      gates: ["G2"],
+      frozen: [{ path: ".vtc/architecture/spine.md", sha256: "f".repeat(64) }],
+      design_direction: "ledger",
+    });
+    expect(topicsForEvent(approved)).toEqual(expect.arrayContaining(["gates"]));
     expect(topics("fact.waived")).toEqual(expect.arrayContaining(["gates", "research"]));
     expect(topics("fact.verified")).toEqual(["research"]);
     expect(topics("headless.started")).toEqual(
@@ -63,7 +73,17 @@ describe("topicsForEvent", () => {
     expect(topics("headless.ended")).toEqual(expect.arrayContaining(["headless", "notices"]));
     expect(topics("merge.preflight")).toEqual(expect.arrayContaining(["level3", "notices"]));
     expect(topics("feature.checklist")).toEqual(expect.arrayContaining(["level3", "features"]));
-    expect(topics("feature.reverted")).toEqual(expect.arrayContaining(["level3", "notices"]));
+    const reverted = sampleEvent(
+      41,
+      "feature.reverted",
+      {
+        merge_commit: "c".repeat(40),
+        revert: { commit: "d".repeat(40), detected_by: "git_log" },
+        detail: "Revert of the F-1 merge found on main",
+      },
+      { feature: "F-1" },
+    );
+    expect(topicsForEvent(reverted)).toEqual(expect.arrayContaining(["level3", "notices"]));
     expect(topics("final_review.step_finished")).toEqual(
       expect.arrayContaining(["level3", "features"]),
     );
@@ -75,6 +95,25 @@ describe("topicsForEvent", () => {
     );
     expect(topicsForEvent(byType("run.started"))).not.toContain("gates");
     expect(topics("lookback.rolled_back")).toEqual(expect.arrayContaining(["lookback", "notices"]));
+  });
+  it("marks the Automation view and the notices stale on automation events (D-ca)", () => {
+    const target = { kind: "project", repo: "example-org/golden-app" } as const;
+    const opened = sampleEvent(42, "upstream.issue_opened", {
+      target,
+      kind: "parked",
+      fingerprint: "1a2b3c4d5e6f7081",
+      number: 41,
+      url: "https://github.com/example-org/golden-app/issues/41",
+    });
+    const skipped = sampleEvent(43, "automation.skipped", {
+      reason: "paused",
+      detail: "vtc pause",
+    });
+    for (const e of [opened, skipped])
+      expect(topicsForEvent(e).sort()).toEqual(["automation", "notices"]);
+    expect(topicKeysForEvent(opened)).toEqual(
+      expect.arrayContaining(["automation", runTopic(opened.run, "notices")]),
+    );
   });
   it("ignores event types it does not know", () => {
     expect(topicsForEvent({ ...byType("run.started"), type: "plugin.custom_thing" })).toEqual([]);

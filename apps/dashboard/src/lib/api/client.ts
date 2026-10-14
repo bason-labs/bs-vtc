@@ -1,5 +1,6 @@
 import {
   ArtifactContentSchema,
+  AutomationReportSchema,
   ClientSpendReportSchema,
   DesignReviewCommentInputSchema,
   DesignReviewResultSchema,
@@ -18,6 +19,7 @@ import {
   UsageReportSchema,
   WorkflowGraphSchema,
   type ArtifactContent,
+  type AutomationReport,
   type ClientSpendReport,
   type DesignReviewCommentInput,
   type DesignReviewResult,
@@ -68,6 +70,8 @@ export interface EngineClient {
   usage(signal?: AbortSignal): Promise<UsageReport>;
   /** Cost per client (§14): the project's client scope, totalled per project. */
   clientSpend(signal?: AbortSignal): Promise<ClientSpendReport>;
+  /** Automatic issues and PRs of this repo (`GET /api/automation`, D-ca; contracts 5.0.0). */
+  automation(signal?: AbortSignal): Promise<AutomationReport>;
   /**
    * The dashboard's only write (AD-5 rule 5): a click-to-pin design review comment, which the
    * engine appends to `.vtc/design/reviews/<screen>.jsonl`. Validated before it is sent.
@@ -92,6 +96,8 @@ export const createEngineClient = (options: EngineClientOptions): EngineClient =
     extra: Readonly<Record<string, string>> = {},
     body?: string,
   ) => {
+    // Only the engine's own routes, on this page's origin (AD-5; evidence mode, AD-27 rule 6).
+    if (!url.startsWith("/api/")) throw new ApiError("bad_request", "not an engine route");
     let response: Response;
     try {
       response = await options.fetch(url, {
@@ -161,6 +167,7 @@ export const createEngineClient = (options: EngineClientOptions): EngineClient =
     escalations: (run, signal) => read(EscalationListSchema, "escalations", { run }, {}, signal),
     usage: (signal) => read(UsageReportSchema, "usage", {}, {}, signal),
     clientSpend: (signal) => read(ClientSpendReportSchema, "clientSpend", {}, {}, signal),
+    automation: (signal) => read(AutomationReportSchema, "automation", {}, {}, signal),
     postDesignReview: async (input, signal) => {
       const valid = DesignReviewCommentInputSchema.safeParse(input);
       if (!valid.success)

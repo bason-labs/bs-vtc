@@ -19,7 +19,7 @@ import {
   VISUAL_SUMMARY_PTRACE,
   VISUAL_SUMMARY_SKIPPED,
   VISUAL_SUMMARY_UNCHECKED,
-} from "../wave3-fixtures";
+} from "../dev-samples";
 
 describe("visualStatusMeta (§7.5, spine §5 reading 105)", () => {
   it("counts only pass as passed", () => {

@@ -1,5 +1,10 @@
 import { describe, expect, it } from "vitest";
-import { API_KEY_BILLING_WARNING, UsageReportSchema, type UsageReport } from "@vtc/shared";
+import {
+  API_KEY_BILLING_WARNING,
+  PROVIDER_BILLING_NOTICE,
+  UsageReportSchema,
+  type UsageReport,
+} from "@vtc/shared";
 import { billingNotices, usagePanelModel } from "@/lib/usage";
 import { readFixture } from "../fixtures";
 
@@ -124,7 +129,7 @@ describe("usagePanelModel", () => {
   });
 });
 
-describe("API-key billing (D-bq, spine §5 reading 171)", () => {
+describe("Billing notes (D-bq, D-ci; spine §5 readings 171, 203)", () => {
   const withBilling = (billing: Record<string, unknown>): UsageReport =>
     UsageReportSchema.parse({
       ...golden(),
@@ -132,21 +137,31 @@ describe("API-key billing (D-bq, spine §5 reading 171)", () => {
         Object.hasOwn(billing, h.host) ? { ...h, billing: billing[h.host] } : h,
       ),
     });
+  const warning = { tone: "warn", text: API_KEY_BILLING_WARNING } as const;
+  const provider = { tone: "neutral", text: PROVIDER_BILLING_NOTICE } as const;
 
   it("warns, verbatim, on the card of a host signed in with an API key", () => {
     const model = usagePanelModel(withBilling({ codex: "api_key" }), NOW, opts);
-    expect(model.cards.map((c) => c.billingWarning)).toEqual([null, API_KEY_BILLING_WARNING]);
+    expect(model.cards.map((c) => c.billing)).toEqual([null, warning]);
     expect(billingNotices(withBilling({ codex: "api_key" }))).toEqual([
-      { host: "codex", name: "Codex", warning: API_KEY_BILLING_WARNING },
+      { host: "codex", name: "Codex", ...warning },
+    ]);
+  });
+
+  it("shows provider billing as a neutral notice, verbatim, never a warning", () => {
+    const report = withBilling({ "claude-code": "provider" });
+    expect(usagePanelModel(report, NOW, opts).cards.map((c) => c.billing)).toEqual([
+      provider,
+      null,
+    ]);
+    expect(billingNotices(report)).toEqual([
+      { host: "claude-code", name: "Claude Code", ...provider },
     ]);
   });
 
   it("says nothing for a subscription, unknown or unreported billing", () => {
     for (const report of [golden(), withBilling({ codex: "subscription", "claude-code": null })]) {
-      expect(usagePanelModel(report, NOW, opts).cards.map((c) => c.billingWarning)).toEqual([
-        null,
-        null,
-      ]);
+      expect(usagePanelModel(report, NOW, opts).cards.map((c) => c.billing)).toEqual([null, null]);
       expect(billingNotices(report)).toEqual([]);
     }
   });

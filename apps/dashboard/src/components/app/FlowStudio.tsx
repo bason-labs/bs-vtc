@@ -1,11 +1,14 @@
 "use client";
 
 import { useEffect, useRef } from "react";
+import { viewShownIn } from "@/lib/evidence-mode";
+import { useEvidenceMode } from "@/lib/useEvidenceMode";
 import { useRoute } from "@/lib/useRoute";
 import type { RunZoom } from "@/lib/router";
 import { ThemeProvider } from "@/components/theme/ThemeProvider";
 import { AppShell } from "@/components/shell/AppShell";
 import { ArtifactView } from "@/components/views/ArtifactView";
+import { AutomationView } from "@/components/views/AutomationView";
 import { DesignReviewView } from "@/components/views/DesignReviewView";
 import { EscalationsView } from "@/components/views/EscalationsView";
 import { FeatureView } from "@/components/views/FeatureView";
@@ -22,6 +25,7 @@ import { EngineProvider } from "./EngineProvider";
 
 function Views({ serverPath }: { serverPath: string }) {
   const route = useRoute(serverPath);
+  const mode = useEvidenceMode();
   const p = (name: string) => route.params.get(name);
   const main = useRef(route.view);
   useEffect(() => {
@@ -29,8 +33,17 @@ function Views({ serverPath }: { serverPath: string }) {
     if (main.current !== route.view) document.getElementById("main")?.focus();
     main.current = route.view;
   }, [route.view]);
+  useEffect(() => {
+    // Evidence mode: no animation, and free text painted out (globals.css).
+    const root = document.documentElement;
+    if (mode === "off") return;
+    root.dataset.vtcEvidence = mode;
+    return () => {
+      delete root.dataset.vtcEvidence;
+    };
+  }, [mode]);
   let view;
-  switch (route.view) {
+  switch (viewShownIn(mode, route.view) ? route.view : "hidden") {
     case "runs":
       view = <RunsView />;
       break;
@@ -69,6 +82,17 @@ function Views({ serverPath }: { serverPath: string }) {
       break;
     case "lookback":
       view = <LookbackView run={p("run")} />;
+      break;
+    case "automation":
+      view = <AutomationView />;
+      break;
+    case "hidden":
+      view = (
+        <EmptyState
+          title="Not part of the upstream evidence"
+          description="A pull request to VTC's own repo shows only the flow (role ids, task ordinals) and Lookback's metrics, scorecards and replays."
+        />
+      );
       break;
     case "not_found":
       view = (
