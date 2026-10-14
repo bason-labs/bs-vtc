@@ -114,6 +114,8 @@ const PHASE_OF_ROLE: Readonly<Record<string, Phase>> = {
   ba: "specify",
   architect: "design",
   designer: "design",
+  // Security's design mode (its verify mode always has a task, §6.1)
+  security: "design",
   planner: "plan",
 };
 

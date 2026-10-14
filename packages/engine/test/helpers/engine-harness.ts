@@ -703,6 +703,15 @@ export const draft = (id: string, over: Record<string, unknown> = {}) => ({
   ...over,
 });
 
+/** Security's design mode (§6.1 DESIGN): writes the threat model and submits it. */
+export const threatModel = async (h: Harness, action: SpawnAction): Promise<LeadAction[]> => {
+  const path = ".vtc/architecture/threat-model/model.md";
+  writeFile(workdir(action), path, "# Threat model\n\n- SEC-1: tokens are stored hashed\n");
+  return (
+    await submitResult(h, action, { exit: "done", artifacts: [{ type: "threat_model", path }] })
+  ).actions;
+};
+
 /** Drives the front half (discover, specify, G1, design, G2) up to the Planner's dispatch. */
 export const toPlanner = async (h: Harness, spec: string = SPEC): Promise<SpawnAction> => {
   await h.engine.start(
@@ -741,6 +750,9 @@ export const toPlanner = async (h: Harness, spec: string = SPEC): Promise<SpawnA
     )
   ).actions;
   const architect = only(actions, "architect");
+  const isSecurity = (a: SpawnAction): boolean => a.role === "security" && a.mode === "design";
+  // with concurrency 1 Security's design step is dispatched after the Architect's
+  let security = spawns(actions).find(isSecurity);
   writeFile(workdir(architect), ".vtc/architecture/spine.md", "# spine\n");
   actions = (
     await submitResult(h, architect, {
@@ -748,6 +760,8 @@ export const toPlanner = async (h: Harness, spec: string = SPEC): Promise<SpawnA
       artifacts: [{ type: "architecture", path: ".vtc/architecture/spine.md" }],
     })
   ).actions;
+  security ??= spawns(actions).find(isSecurity);
+  if (security !== undefined) actions = await threatModel(h, security);
   const g2 = actions.find((a) => a.type === "approve_gate");
   if (g2?.type !== "approve_gate") throw new Error(`expected G2, got ${JSON.stringify(actions)}`);
   actions = (

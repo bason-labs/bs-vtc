@@ -80,8 +80,19 @@ export interface StepSpec {
   readonly onDispatch?: () => void;
 }
 
+/**
+ * Whether the run has Security's design mode (§5.2, §6.1 DESIGN; spine §5 reading 37): the
+ * installed Security contract declares it. Without it DESIGN runs without a threat model step.
+ */
+const securityDesign = (k: Kernel): boolean =>
+  k.deps.roles.get("security")?.modes?.design !== undefined;
+
 /** Front-half roles per phase (§6.1). The deeper front half is sub-project 4. */
-export const phaseRoles = (h: RunHandle, phase: Phase): { role: string; mode?: string }[] => {
+export const phaseRoles = (
+  k: Kernel,
+  h: RunHandle,
+  phase: Phase,
+): { role: string; mode?: string }[] => {
   const run = h.state.run;
   switch (phase) {
     case "discover":
@@ -91,7 +102,12 @@ export const phaseRoles = (h: RunHandle, phase: Phase): { role: string; mode?: s
     case "specify":
       return [{ role: "ba" }];
     case "design":
-      return [{ role: "architect" }, ...(run.has_ui ? [{ role: "designer" }] : [])];
+      // §6.1: Architect, Security's threat model and the Designer (with UI) run in parallel
+      return [
+        { role: "architect" },
+        ...(securityDesign(k) ? [{ role: "security", mode: "design" }] : []),
+        ...(run.has_ui ? [{ role: "designer" }] : []),
+      ];
     case "plan":
       return [{ role: "planner" }];
     default:
@@ -324,7 +340,7 @@ export const pendingSteps = (k: Kernel, h: RunHandle, host: HostId): StepSpec[] 
   const state = h.state;
   if (state.run.finished_at !== undefined) return [];
   const phase = state.run.phase;
-  const phaseRoleList = phaseRoles(h, phase);
+  const phaseRoleList = phaseRoles(k, h, phase);
   if (phaseRoleList.length > 0) {
     const entered = phaseEnteredSeq(state, phase) ?? 0;
     const blocked = [...state.escalations.values()].some(

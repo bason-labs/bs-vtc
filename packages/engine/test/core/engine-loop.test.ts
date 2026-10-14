@@ -503,8 +503,8 @@ describe("budget controller (§11, §7.6 rule 13)", () => {
     await h.engine.settle();
     expect(taskOf(h, "T-1").parked?.reason).toBe("budget");
     const tasks = h.engine.status({});
-    // the run's spend counts the front half's four runs too (0.4), not only the task's 1.35
-    expect(tasks.budget.spent_usd).toBeCloseTo(1.75);
+    // the run's spend counts the front half's five runs too (0.5), not only the task's 1.35
+    expect(tasks.budget.spent_usd).toBeCloseTo(1.85);
     await h.engine.answer(
       { escalation: "E-1", answer: { option: "raise-2x", who_should_have_caught: "planner" } },
       CLAUDE,

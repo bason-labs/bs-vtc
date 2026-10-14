@@ -59,6 +59,7 @@ import {
   type CommittedGates,
 } from "./config.js";
 import { dispatchGuarded, inSessionRefusal, NO_LEAD_WAIT_REASON, phaseRoles } from "./dispatch.js";
+import { g2ApprovalProblem, gateExtras, type GateExtras } from "./g2.js";
 import { headlessRunsOf, killHeadless } from "./headless.js";
 import { dispatchNow, drive } from "./route.js";
 import { parkEscalation } from "./escalations.js";
@@ -986,7 +987,7 @@ export class Engine implements Kernel {
   private step(handle: RunHandle): boolean {
     const state = handle.state;
     const phase = state.run.phase;
-    const roles = phaseRoles(handle, phase);
+    const roles = phaseRoles(this, handle, phase);
     if (["discover", "specify", "design"].includes(phase)) {
       const entered = phaseEnteredSeq(state, phase) ?? 0;
       const done = roles.every(
@@ -1270,22 +1271,24 @@ export class Engine implements Kernel {
     return id;
   }
 
-  /** The gates awaiting the human in this phase, with what to show (§6.2). */
+  /** The gates awaiting the human in this phase, with what to show (§6.2, §8.6). */
   private awaitingGates(
     handle: RunHandle,
-  ): { gates: HumanGateId[]; artifacts: FrozenArtifact[] } | null {
+  ): { gates: HumanGateId[]; artifacts: FrozenArtifact[]; extras: GateExtras } | null {
     const state = handle.state;
     const phase = state.run.phase;
     if (phase !== "g1" && phase !== "g2") return null;
     const gates: HumanGateId[] =
       phase === "g1" ? ["G1"] : state.run.track === "quick_fix" ? ["G1", "G2"] : ["G2"];
-    const roles = [
-      ...(gates.includes("G1") ? ["ba"] : []),
-      ...(gates.includes("G2") ? ["architect", "designer"] : []),
+    const roles: { role: string; mode?: string }[] = [
+      ...(gates.includes("G1") ? [{ role: "ba" }] : []),
+      ...(gates.includes("G2")
+        ? [{ role: "architect" }, { role: "designer" }, { role: "security", mode: "design" }]
+        : []),
     ];
     const paths = new Set<string>();
-    for (const role of roles) {
-      const run = lastSubmitted(state, { role });
+    for (const { role, mode } of roles) {
+      const run = lastSubmitted(state, { role, ...(mode === undefined ? {} : { mode }) });
       const submitted = state.events.find(
         (e) =>
           e.type === "role.submitted" &&
@@ -1299,7 +1302,24 @@ export class Engine implements Kernel {
       const sha256 = sha256File(join(this.deps.repoRoot, path));
       return sha256 === undefined ? [] : [{ path, sha256 }];
     });
-    return artifacts.length === 0 ? null : { gates, artifacts };
+    if (artifacts.length === 0) return null;
+    return { gates, artifacts, extras: gateExtras(this, handle, gates, artifacts) };
+  }
+
+  /**
+   * `gate.requested` (§5 reading 109): what the gate shows, logged when it first shows and again
+   * whenever what it shows changes, so Flow Studio shows the same directions and facts.
+   */
+  private recordGateRequest(
+    handle: RunHandle,
+    gate: { gates: HumanGateId[]; artifacts: FrozenArtifact[]; extras: GateExtras },
+  ): void {
+    const data = { gates: gate.gates, artifacts: gate.artifacts, ...gate.extras };
+    const state = handle.state;
+    const entered = phaseEnteredSeq(state, state.run.phase) ?? 0;
+    const last = state.events.findLast((e) => e.type === "gate.requested" && e.seq > entered);
+    if (last !== undefined && JSON.stringify(last.data) === JSON.stringify(data)) return;
+    this.emit(handle, { type: "gate.requested", actor: "engine", data });
   }
 
   /** What the Lead should do now (§4.2 step 1). */
@@ -1316,12 +1336,13 @@ export class Engine implements Kernel {
     const actions: LeadAction[] = await dispatchNow(this, handle, call, held);
     const gate = this.awaitingGates(handle);
     if (gate !== null) {
+      this.recordGateRequest(handle, gate);
+      const { design_coverage: _coverage, ...shown } = gate.extras;
       actions.push({
         type: "approve_gate",
         gates: gate.gates,
         artifacts: gate.artifacts,
-        design_directions: [],
-        unverified_facts: [],
+        ...shown,
       });
     }
     const open = openEscalations(state);
@@ -1553,6 +1574,11 @@ export class Engine implements Kernel {
       if (problems.length > 0) throw new EngineError("conflict", problems.join("; "));
       const back: Phase = handle.state.run.phase === "g1" ? "specify" : "design";
       if (input.decision === "approve") {
+        // AD-22 rule 4, reading 110: every unverified fact waived with a reason; one direction
+        const blocked = g2ApprovalProblem(awaiting.extras, input);
+        if (blocked !== null) throw new EngineError("invalid", blocked);
+        for (const waiver of input.fact_waivers ?? [])
+          this.emit(handle, { type: "fact.waived", actor: "human", data: waiver });
         this.emit(handle, {
           type: "gate.approved",
           actor: "human",
@@ -1563,6 +1589,7 @@ export class Engine implements Kernel {
               ? {}
               : { design_direction: input.design_direction }),
             waived_facts: input.waived_facts,
+            ...(input.fact_waivers === undefined ? {} : { fact_waivers: input.fact_waivers }),
             ...(input.note === undefined ? {} : { note: input.note }),
           },
         });
