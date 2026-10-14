@@ -5,26 +5,27 @@
  * (both runs and the OSV database download) runs in the gate sandbox (D-al); with none, and no
  * user-level `gates.allow_unsandboxed`, calibration refuses before it asks or runs anything.
  *
- * It also sets up the visual step's app server (`visual.app`, PROVISIONAL: see `visual/app.ts`):
- * an existing valid one is kept across re-calibration; otherwise one is proposed from the
- * package.json `dev`/`start`/`preview` script (`detectVisualApp`), and only a human's yes puts
- * it into `gates.yml` and its argv into the allowlist, like every gate command (§15). Existing
- * `visual` settings are kept too.
+ * It also sets up the visual step's app server (`GatesConfig.visual.app`, contracts 4.6.0): the
+ * one in a readable `gates.yml` is kept across re-calibration (with every other `visual`
+ * setting); otherwise one is proposed from the package.json `dev`/`start`/`preview` script
+ * (`detectVisualApp`), and only a human's yes puts it into `gates.yml` and its argv into the
+ * allowlist, like every gate command (§15). `gates.yml` is written only through the typed config.
  */
-import { existsSync, readFileSync } from "node:fs";
+import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import {
   GATE_SANDBOX,
   gateCommandAllowed,
   GateRunRequestSchema,
   GatesConfigSchema,
+  VisualAppSchema,
   type GateReport,
   type GateSandbox,
   type GatesConfig,
   type GitOps,
   type TestRecord,
+  type VisualApp,
 } from "@vtc/shared";
-import { parseDocument } from "yaml";
 import { writeRepoFile } from "../../git/index.js";
 import {
   addToAllowlist,
@@ -37,7 +38,7 @@ import { downloadOsvDatabase, osvDatabaseDir, osvDatabaseReady } from "../osv-db
 import { runWithConfig } from "../runner.js";
 import { detectGateSandbox, resolveGateSandbox } from "../sandbox.js";
 import { createScannerStore, type ScannerStore } from "../scanners.js";
-import { appLoopbackPort, VisualAppSchema, visualAppOf, type VisualApp } from "../visual/app.js";
+import { appLoopbackPort } from "../visual/app.js";
 import { allowlistPrefix, detectToolchain, detectVisualApp } from "./detect.js";
 
 export interface CalibrateDeps {
@@ -108,13 +109,9 @@ export const LOOPBACK_QUESTION =
 export const visualAppQuestion = (app: Pick<VisualApp, "command" | "url">): string =>
   `Use \`${app.command.join(" ")}\` at ${app.url} as the app server the visual step renders screens from? It runs in the gate sandbox, which then may listen on and connect to port ${String(appLoopbackPort(app.url))} of this machine's loopback (on macOS the host's own loopback: any local service already on that port is reachable too, so the visual step stops with an error while one is listening there; no other port)`;
 
-/** `gates.yml` text with `visual.app` set (the typed config has no field for it yet). */
-export const withVisualApp = (yaml: string, app: VisualApp | null): string => {
-  if (app === null) return yaml;
-  const doc = parseDocument(yaml, { version: "1.2" });
-  doc.setIn(["visual", "app"], doc.createNode({ ...app, command: [...app.command] }));
-  return doc.toString({ lineWidth: 0, minContentWidth: 0, defaultStringType: "PLAIN" });
-};
+/** `config` with `visual.app` set to `app` (`null`: as it is), every other `visual` setting kept. */
+const withVisualApp = (config: GatesConfig, app: VisualApp | null): GatesConfig =>
+  app === null ? config : GatesConfigSchema.parse({ ...config, visual: { ...config.visual, app } });
 
 export const calibrate = async (
   deps: CalibrateDeps,
@@ -133,16 +130,14 @@ export const calibrate = async (
   const detection = detectToolchain(deps.repoRoot, { existing, scanners: scanners.names });
   for (const note of detection.notes) deps.out(`note: ${note}`);
 
-  // The visual step's app server: kept when gates.yml has a valid one, else proposed.
-  const gatesPath = join(deps.repoRoot, GATES_CONFIG_PATH);
-  const kept = visualAppOf(existsSync(gatesPath) ? readFileSync(gatesPath, "utf8") : null);
+  // The visual step's app server: kept when the readable gates.yml has one, else proposed.
+  const kept = existing?.visual?.app;
   let app: VisualApp | null = null;
   let proposedApp: VisualApp | null = null;
-  if (kept !== null && !("invalid" in kept)) {
+  if (kept !== undefined) {
     app = kept;
     deps.out(`note: kept the visual app server of .vtc/gates.yml: ${kept.command.join(" ")}`);
   } else {
-    if (kept !== null) deps.out(`note: ignoring the invalid visual.app: ${kept.invalid}`);
     const found = detectVisualApp(deps.repoRoot);
     for (const note of found.notes) deps.out(`note: ${note}`);
     if (found.app !== null) {
@@ -170,7 +165,7 @@ export const calibrate = async (
   if (options.dryRun === true) {
     return {
       status: "dry_run",
-      yaml: withVisualApp(stringifyGatesConfig(detected), app ?? proposedApp),
+      yaml: stringifyGatesConfig(withVisualApp(detected, app ?? proposedApp)),
     };
   }
 
@@ -335,12 +330,15 @@ export const calibrate = async (
     deps.out(`Flaky tests (different results on the same commit): ${flaky.join(", ")}`);
 
   const confirmed = await deps.confirm("Freeze this as the baseline?");
-  const config = GatesConfigSchema.parse({
-    ...proposed,
-    baseline: { ...proposed.baseline, confirmed, flaky_tests: flaky },
-    gates,
-  });
-  writeRepoFile(deps.repoRoot, GATES_CONFIG_PATH, withVisualApp(stringifyGatesConfig(config), app));
+  const config = withVisualApp(
+    GatesConfigSchema.parse({
+      ...proposed,
+      baseline: { ...proposed.baseline, confirmed, flaky_tests: flaky },
+      gates,
+    }),
+    app,
+  );
+  writeRepoFile(deps.repoRoot, GATES_CONFIG_PATH, stringifyGatesConfig(config));
   deps.out(
     confirmed
       ? `Wrote ${GATES_CONFIG_PATH} (baseline confirmed). Commit ${GATES_CONFIG_PATH} now: runs read it at their base commit and park until it is committed.`

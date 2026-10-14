@@ -248,7 +248,8 @@ the interpreter is the engine's own Node when it has the flag, else an absolute 
 version-manager shim there, such as Volta, asdf or mise, picks its interpreter and, with mise,
 an environment from config files in the checkout under review); and on Linux, where a same-user process can attach to another through
 ptrace unless Yama limits it to descendants, a render runs only with `kernel.yama.ptrace_scope`
-1 or higher (else `error`, naming the sysctl). axe, the computed styles, the region lookup and
+1 or higher (else nothing renders and the step is `skipped`, its `skipped_reason` naming the
+sysctl: a visible note at Levels 1–2, never a Level-3 pass; reading 164, D-bj). axe, the computed styles, the region lookup and
 the font wait run in an isolated world of the runner's own (CDP `Page.createIsolatedWorld`), so
 the page under review cannot replace `window.axe`, `getComputedStyle` or
 `getBoundingClientRect`; the prototype origin is served only to the reference context (the
@@ -260,11 +261,11 @@ comparison code is VTC's. Without a store the project's own Playwright runs, and
 process loads `playwright-core` from the verification checkout, which the change under review
 can modify (install scripts run there), so every such run carries a note under its own rule,
 `vtc-visual/project-toolchain`, saying the comparison ran on project-controlled code. Notes come
-first in the findings, so the summary's 200-finding cap never drops one. That such a run, even
-a `pass`, does not satisfy Level 3 is not built yet: engine core may not import `gates/`
-(AD-13), and neither the rule id nor a toolchain field is in `@vtc/shared`, so the cap waits on
-a contract change (proposed: `VisualSummary.toolchain: "store" | "project"`, written by the gate
-runner and read by engine core). Until then the note is the only signal, and
+first in the findings, so the summary's 200-finding cap never drops one. Every step that chose a
+toolchain sets `toolchain` on both `VisualSummary` and `VisualReport` (contracts 4.7.0): `vtc`
+for the store, `project` for the project's Playwright, whatever the status; a step that stopped
+before choosing one (no browser) leaves it out. Engine core reads it (`level3VisualStatus`), so a
+`pass` on `project` does not satisfy the Level-3 Final Review item (reading 124);
 `ranOnProjectToolchain` in `gates/visual/` serves the gate runner's own tests.
 
 1. Token lint (`vtc-token/<kind>`) on the lines the diff added to UI files: literal colours (OKLab
@@ -284,12 +285,15 @@ runner and read by engine core). Until then the note is the only signal, and
    `VISUAL_SKIPPED_NO_BROWSER`. The project's Playwright installed but its probe failing (a
    crash, no sandbox): `error`. Nothing is downloaded here.
 4. The app server: `visual.app` in `gates.yml` (`command`, a loopback `url`, `cwd`,
-   `ready_timeout_s`), allowlisted like a gate. `vtc calibrate` proposes one from the package.json
-   `dev`, `start` or `preview` script (its `--port`/`-p`/`PORT=` or the server's default port, on
-   `http://localhost`), and only a human's yes writes it and puts its argv in the allowlist; a
-   valid one is kept on re-calibration. Provisional: `@vtc/shared` has no field for it yet, so it
-   is read from and written to the raw YAML. Without one, or with one not allowlisted, the step
-   is `error` (gate infrastructure: a human sets it up).
+   `ready_timeout_s`), allowlisted like a gate. It is read and written only through the typed
+   config (`GatesConfig.visual.app`, `VisualApp`, contracts 4.6.0), so an invalid one makes
+   `gates.yml` invalid as a whole: the run is gate infrastructure and nothing renders.
+   `vtc calibrate` proposes one from the package.json `dev`, `start` or `preview` script (its
+   `--port`/`-p`/`PORT=` or the server's default port, on `http://localhost`), and only a human's
+   yes writes it and puts its argv in the allowlist; the one in a readable `gates.yml`, written
+   by hand or confirmed earlier, is kept on re-calibration with every other `visual` setting.
+   Without one, or with one not allowlisted, the step is `error` (gate infrastructure: a human
+   sets it up; reading 162, D-bh).
 5. The render matrix runs as one gate command in the sandbox (verify phase; on macOS the host
    loopback is opened at the app server's own port only, `GateJailSpec.loopbackPorts`, never
    the engine API or a service on another port, and `vtc calibrate`'s question names that port;
@@ -307,6 +311,8 @@ runner and read by engine core). Until then the note is the only signal, and
    `vtc-layout/dimensions` for other sizes).
 6. Status: `error` (runner failed, or its result or images fail the MAC and hash checks) > `fail` (a blocking finding) > `unchecked` (an unreached
    render or screen, an axe `incomplete` item, a check that could not run: never clean) > `pass`.
+   A step that rendered nothing on purpose (no browser, or Linux `ptrace_scope` 0) is `skipped`
+   with its reason, or `fail` when a token-lint or detector finding blocks.
    Each axe `incomplete` rule per screen state is a note-level `axe/<rule>` finding that names
    what needs review. Every finding's location is `.vtc/design/screens.yaml` with the screen
    state, render key and region, selector or note as its symbol, so it keeps its fingerprint
