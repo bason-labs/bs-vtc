@@ -219,9 +219,10 @@ export const lookbackWindow = (
  * - at `run.finished` (an aborted run too) the run's failures are attributed to
  *   `.vtc/lookback/attributions.jsonl` and the scorecards of every version in the history are
  *   rewritten under `.vtc/lookback/scorecards/`. Only the AI tiebreak answers the engine recorded
- *   in the lookback module's tiebreak store (`readTiebreakKeys`) let an `ai_tiebreak` row count;
- *   nothing produces one yet (core records one through `appendTiebreakRecord` once it does), so
- *   none counts.
+ *   in the lookback module's tiebreak store (`readTiebreakKeys`) let an `ai_tiebreak` row count.
+ *   v1 runs no AI tiebreak (spine §5 reading 182, §7 row "Lookback AI tiebreak"): the store stays
+ *   empty, no `ai_tiebreak` row counts, and RETRO logs the failures the tree left inconclusive as
+ *   `lookback.unattributed` (the plan's `events`), which the dashboard shows.
  * Lookback work at `run.finished` runs one job at a time and never fails the engine; the returned
  * cleanup waits for the job in flight.
  */
@@ -290,7 +291,7 @@ export const wireLookback = (
   const weeklyRemaining = (state: RunState): number | null => lookbackWindow(engine, state).pct;
   // the AI tiebreak answers the engine recorded (readings 137, 175): only these ai_tiebreak rows
   // count, read from the engine-owned store under the VTC home (`LOOKBACK_HOME.tiebreaksFile`).
-  // No AI tiebreak is produced yet, so the store stays empty and none counts (fail closed)
+  // v1 produces none (reading 182), so the store stays empty and none counts (fail closed)
   const tiebreaks = (): Promise<ReadonlySet<string>> => readTiebreakKeys(deps.vtcHome, repoKey);
   const bundleSha = (): string =>
     graderBundleSha({ judgeModel: null, gatesConfigHash: engine.gatesConfigHash() });

@@ -13,7 +13,8 @@ export type LookbackEventType =
   | "lookback.canary_assigned"
   | "lookback.canary_evaluated"
   | "lookback.rolled_back"
-  | "lookback.escaped_defect";
+  | "lookback.escaped_defect"
+  | "lookback.unattributed";
 
 export type LookbackEventDraft = {
   [K in LookbackEventType]: {

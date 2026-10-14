@@ -300,6 +300,17 @@ const item = (event: VtcEvent): Omit<LookbackItem, "seq" | "at" | "type"> | null
       path: null,
     };
   }
+  const unattributed = eventData(event, "lookback.unattributed");
+  if (unattributed !== null) {
+    return {
+      tone: "warn",
+      title: `${plural(unattributed.failures, "failure")} left unattributed`,
+      detail: `The attribution tree could not say which role to blame, and no AI tiebreak runs in this version, so no scorecard counts them${
+        unattributed.tasks.length === 0 ? "" : `; tasks ${unattributed.tasks.join(", ")}`
+      }`,
+      path: null,
+    };
+  }
   return null;
 };
 

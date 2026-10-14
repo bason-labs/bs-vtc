@@ -7,8 +7,9 @@
  * and `sandbox.filesystem.denyWrite`. The permission mode is pinned to `dontAsk`, so the
  * allowlist decides and anything not on it is denied; host config files are never writable.
  * The VTC home's install token, daemon sockets and hidden tests (`ROLE_DENIED_VTC.homeReadDeny`,
- * D-an), the Codex home and Claude's own credential file are never readable, from a tool or from
- * the shell (D-ad). No role may run `vtc calibrate` or write anything in
+ * D-an), the Codex home, Claude's own credential file and the user's credential stores
+ * (`HOME_CREDENTIAL_LOCATIONS`, as the Lead session and the gate sandbox deny them) are never
+ * readable, from a tool or from the shell (D-ad). No role may run `vtc calibrate` or write anything in
  * `ROLE_DENIED_VTC.homeWriteDeny` or `WAVE3_HOME_WRITE_DENY` (D-w, D-ap, spine §5 reading 103):
  * directories and single files alike. No role may call a human-only engine tool (`approve`,
  * `answer`, `change_request`; D-an) under either of its names, whatever allow rule applies.
@@ -37,8 +38,10 @@
  *
  * Structured output (spine §7, live check 2026-10-14): `--json-schema` answers through the
  * `StructuredOutput` tool, and with `--agent` the session's tools are cut to the agent's own
- * `tools` frontmatter, so the compiled agent must list it too (a contract proposal to the
- * compiler); the profile names it in `--tools` and `--allowedTools`.
+ * `tools` frontmatter, so the compiled agent lists it too (the compiler's `CLAUDE_SESSION_TOOLS`,
+ * with `ToolSearch` and each engine tool under both names); the profile names it in `--tools` and
+ * `--allowedTools`. `packages/cli`'s shipped-plugin test checks, for every compiled agent, that
+ * each bare tool this profile allows is in the agent's `tools`.
  *
  * Host web tools (H-3, spine §5 reading 156): `WebSearch` and `WebFetch` are in a role's tool set
  * and allowed only when its contract says `host_web`, and denied otherwise; never for a
@@ -52,6 +55,7 @@ import {
   agentNameFor,
   engineMcpServer,
   HEADLESS_DEFAULTS,
+  HOME_CREDENTIAL_LOCATIONS,
   HUMAN_ONLY_TOOLS,
   hostCredentialDenyReadPaths,
   isHostCredentialDenyRead,
@@ -267,6 +271,12 @@ export interface ClaudeProfileOptions {
   /** Claude's own config directory (`$CLAUDE_CONFIG_DIR`, or `~/.claude`), never read here. */
   readonly claudeConfigDir: string;
   /**
+   * The user's home, whose credential stores (`HOME_CREDENTIAL_LOCATIONS`: SSH, cloud, registry
+   * and git credentials, keychains) no role may read. Only a path for the deny rules: never read.
+   * Absent: no home rules (tests that build a profile on another platform).
+   */
+  readonly homeDir?: string;
+  /**
    * The path rules of the platform the role runs on. Default: this platform's (`node:path`);
    * tests pass `path.win32` to build a Windows profile anywhere.
    */
@@ -335,6 +345,10 @@ const unreadablePaths = (
 ) => ({
   codexHome: platform.resolve(options.codexHome),
   claudeCredentials: claudeCredentialDeny(options.claudeConfigDir, platform, shell),
+  homeCredentials:
+    options.homeDir === undefined
+      ? []
+      : HOME_CREDENTIAL_LOCATIONS.map((rel) => platform.resolve(options.homeDir ?? "", rel)),
 });
 
 /**
@@ -375,6 +389,13 @@ export const claudeSandboxProfile = (
         ...ROLE_DENIED_VTC.homeReadDeny.map((glob) => `Read(${vtcHomeRule}/${glob})`),
         `Read(${absoluteRulePath(unreadable.codexHome, platform)}/**)`,
         credentials.rule,
+        // the user's credential stores, a file or a directory each: what the Lead session and the
+        // gate sandbox deny too. A host_web role could otherwise be steered by a fetched page
+        // into reading one and carrying it out in a WebFetch URL (spine §7 H-3 row)
+        ...unreadable.homeCredentials.flatMap((path) => {
+          const rule = absoluteRulePath(path, platform);
+          return [`Read(${rule})`, `Read(${rule}/**)`];
+        }),
         ...deniedVtcCommands(),
         // a human decision is never a role's, whatever a user allow rule says (D-an)
         ...claudeHumanOnlyToolDenies(),
@@ -402,6 +423,7 @@ export const claudeSandboxProfile = (
           ...vtcHomeReadDeniedPaths(options.vtcHome, platform),
           unreadable.codexHome,
           ...(credentials.sandboxPath === undefined ? [] : [credentials.sandboxPath]),
+          ...unreadable.homeCredentials,
         ],
       },
       network: { allowedDomains: request.network === "registries" ? [...REGISTRY_DOMAINS] : [] },
@@ -449,9 +471,10 @@ export interface ClaudeCommandOptions {
  * `claude -p` for a role (fresh, or `--resume <id>`). The stream is `stream-json` so the engine
  * sees SDK rate-limit and retry events as they happen (§6.9); the final `result` event carries
  * `structured_output` for `--json-schema` once the run has called `StructuredOutput` (spike 1;
- * live check 2026-10-14, which also needs the tool in the agent's own `tools`). The run is the role's compiled plugin agent
- * (`--agent vtc:<agent>`), so it gets the role's instructions and tool list. The prompt is read
- * from stdin (the launcher writes it and closes stdin), so it never sits in argv. The
+ * live check 2026-10-14, which also needs the tool in the agent's own `tools`, as the
+ * compiler emits it). The run is the role's compiled plugin agent (`--agent vtc:<agent>`), so
+ * it gets the role's instructions and tool list. The prompt is read from stdin (the launcher
+ * writes it and closes stdin), so it never sits in argv. The
  * environment sets `CLAUDE_CODE_PRINT_BG_WAIT_CEILING_MS` explicitly, so a run never waits the
  * host's default 10 minutes for background work after its result (AD-25 rule 4).
  */

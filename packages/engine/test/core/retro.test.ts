@@ -206,6 +206,28 @@ describe("RETRO: the lookback role before run.finished (AD-21 rules 4 and 8)", (
     await broken.release();
   });
 
+  it("logs the plan's lookback.unattributed in the run before it finishes, once (reading 182)", async () => {
+    const h = harness();
+    const unattributed: EventDraft = {
+      type: "lookback.unattributed",
+      actor: "engine",
+      data: { failures: 2, tasks: ["T-1"] },
+    };
+    h.engine.setLookbackRetro({
+      plan: () => Promise.resolve({ targets: [], events: [unattributed, unattributed] }),
+      check: () => Promise.resolve({ ok: true, events: [] }),
+    });
+    await toRetro(h);
+    expect(h.engine.status({}).run.finished_at).toBeDefined();
+    const log = events(h);
+    const logged = log.filter((e) => e.type === "lookback.unattributed");
+    expect(logged.map((e) => e.data)).toEqual([{ failures: 2, tasks: ["T-1"] }]);
+    expect(log.findIndex((e) => e.type === "lookback.unattributed")).toBeLessThan(
+      log.findIndex((e) => e.type === "run.finished"),
+    );
+    await h.release();
+  });
+
   it("without Lookback wired the release finishes the run as before", async () => {
     const h = harness();
     await toRetro(h);

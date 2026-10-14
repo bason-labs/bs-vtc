@@ -232,7 +232,15 @@ export interface ReplayTrialOutcome {
  *   proposal: accepted with no events.
  */
 export interface LookbackRetro {
-  plan(state: RunState): Promise<{ readonly targets: readonly LookbackRetroTarget[] }>;
+  /**
+   * `events`: what the run logs before its targets are queued (`lookback.unattributed`, the
+   * failures the attribution tree left inconclusive; spine §5 reading 182). Core logs each type
+   * once per run, so a plan made again after a restart adds none.
+   */
+  plan(state: RunState): Promise<{
+    readonly targets: readonly LookbackRetroTarget[];
+    readonly events?: readonly EventDraft[];
+  }>;
   /**
    * The replays RETRO runs once every lookback target is settled (AD-21 rule 6, spine §5 reading
    * 176): one per proposal recorded and not yet replayed, each with its `lookback_replay` trials

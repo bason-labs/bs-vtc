@@ -24,7 +24,8 @@ import {
   type VtcEvent,
 } from "@vtc/shared";
 import type { LookbackRetro, LookbackRetroTarget, RunState } from "../core/index.js";
-import { readAttributions } from "./attribution.js";
+import { readAttributions, type FailureSignal } from "./attribution.js";
+import { lookbackEvent, type LookbackEventDraft } from "./events.js";
 import {
   candidateFrontmatter,
   checkProposal,
@@ -210,6 +211,20 @@ export const renderLookbackInput = (input: {
   return lines.join("\n");
 };
 
+/**
+ * `lookback.unattributed` for the run's inconclusive failures (spine §5 reading 182), or none:
+ * their count and their tasks, each once, in the order they failed.
+ */
+export const unattributedEvents = (
+  inconclusive: readonly FailureSignal[],
+): LookbackEventDraft[] => {
+  if (inconclusive.length === 0) return [];
+  const tasks = [
+    ...new Set(inconclusive.flatMap((f) => (f.task === undefined ? [] : [f.task]))),
+  ].slice(0, 500);
+  return [lookbackEvent("lookback.unattributed", { failures: inconclusive.length, tasks })];
+};
+
 /** The `LookbackRetro` the daemon wires into engine core. */
 export const createLookbackRetro = (deps: LookbackRetroDeps): LookbackRetro => {
   // the AI tiebreaks the engine recorded for this project (`LOOKBACK_HOME.tiebreaksFile`)
@@ -231,7 +246,10 @@ export const createLookbackRetro = (deps: LookbackRetroDeps): LookbackRetro => {
         now: deps.now(),
         ...(deps.humanEditDiff === undefined ? {} : { humanEditDiff: deps.humanEditDiff }),
       });
-      if (end.targets.length === 0) return { targets: [] };
+      // spec §13: an AI tiebreak would answer the failures the tree leaves inconclusive; v1 runs
+      // none (reading 182), so the run logs how many stay out of every scorecard
+      const events = unattributedEvents(end.inconclusive);
+      if (end.targets.length === 0) return { targets: [], events };
       const rows = await readAttributions(deps.projectRoot, {
         history,
         lockedShaFor: deps.lockedShaFor,
@@ -256,7 +274,7 @@ export const createLookbackRetro = (deps: LookbackRetroDeps): LookbackRetro => {
           },
         ];
       });
-      return { targets };
+      return { targets, events };
     },
     check: async (target, root) => {
       const files = await readProposalFiles(root, target.role);

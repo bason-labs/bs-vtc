@@ -24,8 +24,9 @@ const base = {
 const trial = { proposal: "p-engineer-1", task: "R-3:T-1", arm: "b", trial: 2 } as const;
 
 describe("contracts 4.11.0", () => {
-  it("is MINOR over 4.10.0", () => {
-    expect(CONTRACTS_VERSION).toBe("4.11.0");
+  it("is MINOR over 4.10.0 (and still in force: 4.12.0 is MINOR too)", () => {
+    expect(CONTRACTS_VERSION.split(".")[0]).toBe("4");
+    expect(Number(CONTRACTS_VERSION.split(".")[1])).toBeGreaterThanOrEqual(11);
   });
 });
 

@@ -96,6 +96,42 @@ describe("Lookback at RETRO (AD-21 rules 4 and 8)", () => {
     expect(input).toMatch(/- blamed: engineer by tree/);
   });
 
+  it("logs the run's failures the tree leaves inconclusive as lookback.unattributed: no AI tiebreak runs in v1 (reading 182)", async () => {
+    const log = new RunLog("r1");
+    for (let i = 1; i <= 3; i += 1) {
+      const task = `T-${String(i)}`;
+      log.taskCreated(task, "backend", ["node"]);
+      log.dispatch("engineer", { task, tokens: 2000 });
+      log.status(task, "fixing", "parked", 4, "cap");
+    }
+    const retro = createLookbackRetro({
+      projectRoot: await tempDir("retro-un"),
+      vtcHome: await tempDir("retro-un-home"),
+      history: () => log.events,
+      lockedShaFor,
+      compiled: () => undefined,
+      graderBundleSha: () => graderBundleSha({ judgeModel: null, gatesConfigHash: null }),
+      weeklyRemainingPct: () => 80,
+      budgetAvailable: () => true,
+      now: () => now,
+    });
+    const plan = await retro.plan({ id: "r1", events: log.events } as unknown as RunState);
+    expect(plan.targets).toEqual([]);
+    expect(plan.events).toEqual([
+      {
+        type: "lookback.unattributed",
+        actor: "engine",
+        data: { failures: 3, tasks: ["T-1", "T-2", "T-3"] },
+      },
+    ]);
+    expect(validateEventData("lookback.unattributed", plan.events?.[0]?.data ?? {}).ok).toBe(true);
+  });
+
+  it("logs nothing unattributed when the tree attributes every failure", async () => {
+    const { retro, state } = await setup();
+    expect((await retro.plan(state)).events ?? []).toEqual([]);
+  });
+
   it("accepts a proposal on the current locked core and stores it as a candidate version", async () => {
     const { projectRoot, vtcHome, log, retro, state } = await setup();
     await retro.plan(state);

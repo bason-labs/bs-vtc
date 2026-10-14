@@ -201,6 +201,12 @@ export const ROLE_DENIED_VTC = {
     "research-cache/**",
     "browsers/**",
     "design-library/**",
+    /**
+     * The engine's private directory (`<vtcHome>/guard/<repo-key>/`): the ledger of its own repo
+     * writes, the dispatch and gate baselines, the Lead claims and the Lookback replay plan,
+     * grades and trial git directories, all read back as trusted after a restart. New in 4.12.0.
+     */
+    "guard/**",
   ],
   /** Globs relative to the VTC home that no role may read (a bare name is one file). */
   homeReadDeny: ["token", "run/**", "hidden/**"],

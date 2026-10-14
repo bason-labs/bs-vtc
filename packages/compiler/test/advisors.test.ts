@@ -60,7 +60,7 @@ describe("advisor agents (§5.4)", () => {
   };
 
   it("compiles one read-only agent per advisor on both hosts", () => {
-    expect(claude).toMatch(/^tools: Read, Grep, Glob$/m);
+    expect(claude).toMatch(/^tools: Read, Grep, Glob, ToolSearch, StructuredOutput$/m);
     // a Codex agent file cannot set its sandbox (reading 82): only the shell is turned off
     expect(codex.features).toEqual({ shell_tool: false, request_permissions_tool: false });
   });
@@ -116,7 +116,7 @@ describe("advisor agents (§5.4)", () => {
         ),
     });
     const md = text(liaison, "claude-code", "agents/vtc-advisor-estimator.md");
-    expect(md).toMatch(/^tools: Read, Grep, Glob, Write, Edit$/m);
+    expect(md).toMatch(/^tools: Read, Grep, Glob, Write, Edit, ToolSearch, StructuredOutput$/m);
     expect(md).toContain("- Write paths (role.yaml): .vtc/exports/**");
     expect(md).toContain("- Output artifact types: client_export");
     const toml = parseToml(text(liaison, "codex", "agents/vtc-advisor-estimator.toml"));

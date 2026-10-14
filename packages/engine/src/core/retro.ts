@@ -181,9 +181,10 @@ export const startRetro = (k: Kernel, h: RunHandle): void => {
     return;
   k.spawn(h, `retro:${h.state.id}`, async () => {
     let targets: Awaited<ReturnType<typeof lookback.plan>>["targets"] = [];
+    let logged: Awaited<ReturnType<typeof lookback.plan>>["events"] = [];
     let problem: string | undefined;
     try {
-      ({ targets } = await lookback.plan(h.state));
+      ({ targets, events: logged = [] } = await lookback.plan(h.state));
     } catch (error) {
       problem = error instanceof Error ? error.message : String(error);
     }
@@ -192,6 +193,10 @@ export const startRetro = (k: Kernel, h: RunHandle): void => {
     await k.serial(h, () => {
       if (h.state.run.finished_at !== undefined || planned(h)) return Promise.resolve();
       if (problem !== undefined) k.notice(`lookback at the end of run ${h.state.id}: ${problem}`);
+      // once per type and run: a plan made again after a restart logs nothing twice
+      for (const draft of logged) {
+        if (!h.state.events.some((e) => e.type === draft.type)) k.emit(h, draft);
+      }
       targets.forEach((target, i) => {
         writeRepoFile(k.deps.repoRoot, lookbackInputPath(h.state.id, i + 1), target.input);
         k.emit(h, target.dispatched);
