@@ -1,4 +1,5 @@
-import { homedir } from "node:os";
+import { mkdirSync, mkdtempSync, realpathSync, rmSync, symlinkSync } from "node:fs";
+import { homedir, tmpdir } from "node:os";
 import { join, win32 } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import {
@@ -691,6 +692,68 @@ describe("Claude sandboxProfile (§12.1, AD-9)", () => {
         );
       }
       expect(() => withReadDeny(READ_ONLY, ["/work/app\nx"])).toThrow(/control/u);
+    });
+
+    it("refuses a readDeny path with a glob character: a rule would read it as a pattern, so the real directory might not match", () => {
+      for (const path of ["/work/a*p", "/work/app?", "/work/[app]", "/work/{app,b}", "/work/a]"]) {
+        expect(() => withReadDeny(READ_ONLY, [path]), path).toThrow(/glob characters/u);
+      }
+    });
+
+    it("denies a symlinked readDeny path under its given and its real name, and a link into the worktree overlaps it", () => {
+      const real = (path: string) => path.replace(/^\/link\//u, "/real/");
+      const build = (readDeny: readonly string[], cwd = TRIAL_CWD) =>
+        claudeSandboxProfile(
+          { ...profileRequest(READ_ONLY), cwd, readDeny },
+          {
+            vtcHome: VTC_HOME,
+            codexHome: CODEX_HOME,
+            claudeConfigDir: CLAUDE_CONFIG,
+            realPath: real,
+          },
+        );
+      const p = build(["/link/app"]);
+      expect(settingsOf(p).permissions.deny).toEqual(
+        expect.arrayContaining([
+          "Read(//link/app)",
+          "Read(//link/app/**)",
+          "Read(//real/app)",
+          "Read(//real/app/**)",
+        ]),
+      );
+      expect(settingsOf(p).sandbox.filesystem.denyRead).toEqual(
+        expect.arrayContaining(["/link/app", "/real/app"]),
+      );
+      expect(p.enforced.readDeny).toBe(true);
+      // a link whose real location covers the worktree, or a worktree reached through a link
+      expect(() => build(["/link/trial"], "/real/trial/checkout")).toThrow(/overlaps/u);
+      expect(() => build(["/real/trial"], "/link/trial/checkout")).toThrow(/overlaps/u);
+      // a real location that is a pattern is refused too
+      expect(() =>
+        claudeSandboxProfile(
+          { ...profileRequest(READ_ONLY), cwd: TRIAL_CWD, readDeny: ["/link/app"] },
+          {
+            vtcHome: VTC_HOME,
+            codexHome: CODEX_HOME,
+            claudeConfigDir: CLAUDE_CONFIG,
+            realPath: () => "/real/a*",
+          },
+        ),
+      ).toThrow(/glob characters/u);
+    });
+
+    it("resolves a readDeny path through a real symlink by default (no file is read)", () => {
+      const dir = realpathSync(mkdtempSync(join(tmpdir(), "vtc-readdeny-")));
+      try {
+        mkdirSync(join(dir, "repo"));
+        symlinkSync(join(dir, "repo"), join(dir, "alias"));
+        const p = withReadDeny(READ_ONLY, [join(dir, "alias")]);
+        expect(settingsOf(p).sandbox.filesystem.denyRead).toEqual(
+          expect.arrayContaining([join(dir, "alias"), join(dir, "repo")]),
+        );
+      } finally {
+        rmSync(dir, { recursive: true, force: true });
+      }
     });
 
     it("builds Windows rules in Claude's drive form", () => {

@@ -304,12 +304,33 @@ describe("Codex sandboxProfile (§12.1, AD-9)", () => {
         ["--config", 'web_search = "live"'],
         ["--config", 'web_search="indexed"'],
         ["--config", 'web_search="cached"', "--config", 'web_search="live"'],
+        // a legacy key or a profile, with no top-level mode at all
+        ["--config", "tools.web_search=true"],
+        ["--config", 'profile="x"'],
         [],
       ]) {
         expect(
           () => adapter.headlessCommand(request({ sandbox: swap(cliArgs) })),
           JSON.stringify(cliArgs),
         ).toThrow(/web search/u);
+      }
+      // beside the one allowed override: any other key that names web search, on any path, or
+      // that picks or defines a profile whose layer could carry its own
+      for (const extra of [
+        "tools.web_search=true",
+        "features.web_search_request=true",
+        "features.web_search_cached=true",
+        "features.Web_Search_Request = true",
+        'profiles.x.web_search="live"',
+        '"profiles"."x"."web_search"="live"',
+        'profile="x"',
+        "profiles={}",
+        'profiles.x.model="o"',
+      ]) {
+        const cliArgs = ["--config", `web_search="${CODEX_HOST_WEB_SEARCH}"`, "--config", extra];
+        expect(() => adapter.headlessCommand(request({ sandbox: swap(cliArgs) })), extra).toThrow(
+          /web search/u,
+        );
       }
     });
 

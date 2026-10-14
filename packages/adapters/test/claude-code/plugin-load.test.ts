@@ -3,10 +3,10 @@
  * (`stream-arm-success.jsonl`, `arm-debug-plugin-lines.log`, Claude Code 2.1.299, the real
  * compiled plugin copied unchanged into an arm) and the documented managed-settings lock line.
  */
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { jsonSchemaFor, type RoleTools, type SpawnRoleRequest } from "@vtc/shared";
 import { claudeArmDebugFile } from "../../src/claude-code/command.js";
 import { claudePluginLoadProof, PLUGIN_LOCKED_MARK } from "../../src/claude-code/plugin-load.js";
@@ -104,7 +104,7 @@ describe("HeadlessRun.pluginLoad on a replay arm's run (D-cg)", () => {
     for (const dir of dirs.splice(0)) rmSync(dir, { recursive: true, force: true });
   });
   const READ_ONLY: RoleTools = { profile: "read_only", write_paths: [], engine_tools: [] };
-  const setup = () => {
+  const setup = (keepArmDebugLogs?: boolean) => {
     const guard = mkdtempSync(join(tmpdir(), "vtc-arm-"));
     dirs.push(guard);
     const armDir = join(guard, "arms", "trial-1", "b");
@@ -117,6 +117,7 @@ describe("HeadlessRun.pluginLoad on a replay arm's run (D-cg)", () => {
       claudeConfigDir: "/home/dev/.claude",
       homeDir: "/home/dev",
       pluginDir: "/opt/vtc/plugin",
+      ...(keepArmDebugLogs === undefined ? {} : { keepArmDebugLogs }),
     });
     const request = (pluginDir?: string): SpawnRoleRequest => ({
       role: "qa",
@@ -153,6 +154,42 @@ describe("HeadlessRun.pluginLoad on a replay arm's run (D-cg)", () => {
     expect((await spawned.run.wait()).kind).toBe("done");
     expect(await spawned.run.pluginLoad?.()).toEqual({ loaded: true, dir: armDir });
     await adapter.dispose();
+  });
+
+  it("removes the debug log once the run has ended and the proof has read it; the proof is worked out once", async () => {
+    const { adapter, processes, armDir, request, stream } = setup();
+    const spawned = await adapter.spawnRole(request(armDir));
+    if (spawned.dispatch !== "headless") throw new Error("expected a headless run");
+    writeFileSync(claudeArmDebugFile(armDir), DEBUG.split(ARM).join(armDir));
+    processes[0]?.emit(...stream);
+    processes[0]?.exit(0);
+    const first = await spawned.run.pluginLoad?.();
+    expect(first).toEqual({ loaded: true, dir: armDir });
+    expect(existsSync(claudeArmDebugFile(armDir))).toBe(false);
+    expect(await spawned.run.pluginLoad?.()).toEqual(first);
+    await adapter.dispose();
+  });
+
+  it("removes the debug log after the run even when nobody asks for the proof, unless told to keep it", async () => {
+    for (const keep of [false, true]) {
+      const { adapter, processes, armDir, request, stream } = setup(keep);
+      const spawned = await adapter.spawnRole(request(armDir));
+      if (spawned.dispatch !== "headless") throw new Error("expected a headless run");
+      writeFileSync(claudeArmDebugFile(armDir), DEBUG.split(ARM).join(armDir));
+      processes[0]?.emit(...stream);
+      processes[0]?.exit(0);
+      await spawned.run.wait();
+      await adapter.dispose();
+      if (keep) {
+        await spawned.run.pluginLoad?.();
+        expect(existsSync(claudeArmDebugFile(armDir))).toBe(true);
+      } else {
+        // the proof settles on its own after the run, without a pluginLoad() call
+        await vi.waitFor(() => {
+          expect(existsSync(claudeArmDebugFile(armDir))).toBe(false);
+        });
+      }
+    }
   });
 
   it("never reads a debug log an earlier run left: it is removed before the run starts", async () => {

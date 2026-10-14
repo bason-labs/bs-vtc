@@ -1,0 +1,106 @@
+{
+  "userLive": {
+    "web_search": "live",
+    "layers": [
+      {
+        "layer": "user",
+        "web_search": "live"
+      },
+      {
+        "layer": "system",
+        "web_search": null
+      }
+    ]
+  },
+  "userLiveWithFlag": {
+    "web_search": "cached",
+    "layers": [
+      {
+        "layer": "sessionFlags",
+        "web_search": "cached"
+      },
+      {
+        "layer": "user",
+        "web_search": "live"
+      },
+      {
+        "layer": "system",
+        "web_search": null
+      }
+    ]
+  },
+  "userLayerOrder": {
+    "withoutFlag": ["MARK_USER"],
+    "withFlag": ["MARK_FLAG"]
+  },
+  "profileLayerOrder": {
+    "profileOnly": ["MARK_PROFILE"],
+    "profileAndFlag": ["MARK_FLAG"]
+  },
+  "legacyProfileKey": {
+    "ok": false,
+    "stderr": [
+      "Error: legacy `profile = \"legacy\"` config is no longer supported; use `--profile legacy` with `legacy.config.toml` instead"
+    ]
+  },
+  "untrustedProject": {
+    "layerOrder": ["MARK_USER"],
+    "configReadWithFlag": {
+      "web_search": "cached",
+      "layers": [
+        {
+          "layer": "sessionFlags",
+          "web_search": "cached"
+        },
+        {
+          "layer": "project",
+          "web_search": "live"
+        },
+        {
+          "layer": "user",
+          "web_search": null
+        },
+        {
+          "layer": "system",
+          "web_search": null
+        }
+      ]
+    }
+  },
+  "legacySearchKeys": {
+    "withoutFlag": {
+      "web_search": null,
+      "tools_web_search": null,
+      "web_search_request": true,
+      "layers": [
+        {
+          "layer": "user",
+          "web_search": null
+        },
+        {
+          "layer": "system",
+          "web_search": null
+        }
+      ]
+    },
+    "withFlag": {
+      "web_search": "disabled",
+      "tools_web_search": null,
+      "web_search_request": true,
+      "layers": [
+        {
+          "layer": "sessionFlags",
+          "web_search": "disabled"
+        },
+        {
+          "layer": "user",
+          "web_search": null
+        },
+        {
+          "layer": "system",
+          "web_search": null
+        }
+      ]
+    }
+  }
+}

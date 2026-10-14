@@ -1,5 +1,6 @@
 /**
- * Claude Code sandbox profiles and headless commands (§12.1, AD-6, AD-9). Pure.
+ * Claude Code sandbox profiles and headless commands (§12.1, AD-6, AD-9). Pure, except that a
+ * replay trial's `readDeny` paths are resolved through symlinks (no file is read).
  * Read-only roles get read tools only; write-scoped roles get file edits limited to their paths;
  * only the Engineer family gets Bash, and Bash runs inside Claude Code's OS sandbox with no
  * unsandboxed escape. The built-in tool set itself (`--tools`) is exactly the profile's, so no
@@ -71,6 +72,7 @@ import {
 } from "@vtc/shared";
 import { checkProfileArgs, checkSessionId } from "../common/argv.js";
 import {
+  canonicalPath,
   ROLE_HOME_WRITE_DENY,
   vtcHomeReadDeniedPaths,
   vtcHomeWriteDeniedPaths,
@@ -283,6 +285,12 @@ export interface ClaudeProfileOptions {
    * tests pass `path.win32` to build a Windows profile anywhere.
    */
   readonly platformPath?: PlatformPath;
+  /**
+   * Resolves a `readDeny` path to where it really is (symlinks), so a symlinked spelling (macOS
+   * `/var` and `/private/var`) is denied under both names. Default: the real location on this
+   * platform (`canonicalPath`), and the path as given under another platform's path rules.
+   */
+  readonly realPath?: (path: string) => string;
 }
 
 /** `C:/…`: a Windows drive path, after `posixAbsolute`. */
@@ -375,29 +383,56 @@ const covers = (outer: string, inner: string, platform: PlatformPath): boolean =
   return rel === "" || (!rel.startsWith("..") && !platform.isAbsolute(rel));
 };
 
+/** Characters Claude's path rules and sandbox lists read as a pattern, not as themselves. */
+const GLOB_CHARS = /[*?[\]{}]/u;
+
 /**
  * `SandboxProfileRequest.readDeny` (spine §5 reading 178), as absolute paths of the platform:
  * each must be absolute, and none may cover the role's worktree or lie inside it (the request
  * never narrows `cwd`), so a wrong request fails here instead of starting a run that cannot read
- * its own files or that reads what it should not.
+ * its own files or that reads what it should not. A path with a glob character is refused (it
+ * would be read as a pattern, so the real directory might not match and `enforced.readDeny`
+ * would claim too much), and a path whose real location differs is denied under both names.
  */
-const readDenyPaths = (request: SandboxProfileRequest, platform: PlatformPath): string[] =>
-  (request.readDeny ?? []).map((path) => {
+const readDenyPaths = (
+  request: SandboxProfileRequest,
+  platform: PlatformPath,
+  realPath: (path: string) => string,
+): string[] => {
+  const cwd = platform.resolve(request.cwd);
+  const cwds = [...new Set([cwd, realPath(cwd)])];
+  const denied = (request.readDeny ?? []).flatMap((path) => {
     if (hasControl(path)) refuseRulePath(path, "paths may not contain control characters");
+    if (GLOB_CHARS.test(path)) {
+      refuseRulePath(
+        path,
+        "a readDeny path may not contain glob characters (* ? [ ] { }), which a rule reads as a pattern",
+      );
+    }
     if (path === "" || !platform.isAbsolute(path)) {
       throw new Error(
         `refusing a Claude role profile: readDeny path ${JSON.stringify(path)} is not absolute`,
       );
     }
-    const denied = platform.resolve(path);
-    const cwd = platform.resolve(request.cwd);
-    if (covers(denied, cwd, platform) || covers(cwd, denied, platform)) {
-      throw new Error(
-        `refusing a Claude role profile: readDeny path ${JSON.stringify(path)} overlaps the role's worktree ${JSON.stringify(request.cwd)}, which readDeny never narrows (spine §5 reading 178)`,
-      );
+    const given = platform.resolve(path);
+    const names = [...new Set([given, realPath(given)])];
+    for (const name of names) {
+      if (GLOB_CHARS.test(name) || hasControl(name)) {
+        refuseRulePath(
+          name,
+          "the real location of a readDeny path may not contain glob characters",
+        );
+      }
+      if (cwds.some((dir) => covers(name, dir, platform) || covers(dir, name, platform))) {
+        throw new Error(
+          `refusing a Claude role profile: readDeny path ${JSON.stringify(path)} overlaps the role's worktree ${JSON.stringify(request.cwd)}, which readDeny never narrows (spine §5 reading 178)`,
+        );
+      }
     }
-    return denied;
+    return names;
   });
+  return [...new Set(denied)];
+};
 
 export const claudeSandboxProfile = (
   request: SandboxProfileRequest,
@@ -411,7 +446,11 @@ export const claudeSandboxProfile = (
   const deny = disallowedTools(tools, request.protectedPaths, web);
   const unreadable = unreadablePaths(options, platform, tools.profile === "code_sandboxed");
   const credentials = unreadable.claudeCredentials;
-  const readDeny = readDenyPaths(request, platform);
+  const readDeny = readDenyPaths(
+    request,
+    platform,
+    options.realPath ?? (platform === nodePath ? canonicalPath : (path: string) => path),
+  );
   const vtcHomeRule = absoluteRulePath(options.vtcHome, platform);
   // every rule here is one JSON array entry, so no character in a home path can end a rule
   const settings = {
@@ -511,7 +550,9 @@ export interface ClaudeCommandOptions {
 /**
  * Where a replay arm's run writes its debug log (D-cg): beside the arm directory, never inside it,
  * because the host loads the arm in place and it must stay unchanged until the run exits
- * (`<arms>/<trial>/<arm>` → `<arms>/<trial>/<arm>.debug.log`).
+ * (`<arms>/<trial>/<arm>` → `<arms>/<trial>/<arm>.debug.log`, in the engine's guard directory,
+ * which roles cannot write but can read). The adapter removes it before the run starts and again
+ * once the run has ended and the load proof has read it (`index.ts`).
  */
 export const claudeArmDebugFile = (armDir: string): string =>
   nodePath.join(nodePath.dirname(armDir), `${nodePath.basename(armDir)}.debug.log`);

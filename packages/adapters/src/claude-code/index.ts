@@ -13,6 +13,7 @@ import {
   type HeadlessRun,
   type HostAdapter,
   type HostCapabilities,
+  type PluginLoadProof,
   type SessionRef,
   type SpawnResult,
   type SpawnRoleRequest,
@@ -95,6 +96,11 @@ export interface ClaudeCodeAdapterOptions {
   readonly now?: () => Date;
   /** How long `claude auth status` may run before it is killed. Default 20 s. */
   readonly authTimeoutMs?: number;
+  /**
+   * Keep a replay arm's debug log after its run has ended (default: removed once the load proof
+   * has read it). Only the D-cl check (`scripts/dcl-check.ts`) sets it, to record the log.
+   */
+  readonly keepArmDebugLogs?: boolean;
 }
 
 /** Reads a debug log for the load proof: null when it is missing, unreadable or too large. */
@@ -118,29 +124,54 @@ const realPath = (path: string): string => {
 /**
  * `run` with `pluginLoad()` (D-cg): after the run has ended, which plugin copy it loaded, from its
  * stream's `init` record and its debug log ({@link claudePluginLoadProof}).
+ *
+ * The debug log can hold the trial's prompt and tool traffic, and it sits in the engine's guard
+ * directory, which roles cannot write but can read. So it lives only while the run does: as soon
+ * as the run has ended the proof is worked out once and the log is removed (unless `keepLog`, for
+ * the D-cl check), whether or not anyone calls `pluginLoad()`. Its size during the run is the
+ * host's; the proof reads at most `DEBUG_LOG_MAX_BYTES` of it. A log left by an engine crash goes
+ * with the trial directory, which the engine owns.
  */
 const withPluginLoad = (
   run: HeadlessRun,
-  arm: { readonly armDir: string; readonly agent: string; readonly debugFile: string },
-): HeadlessRun => ({
-  command: run.command,
-  pid: run.pid,
-  lines: () => run.lines(),
-  wait: () => run.wait(),
-  kill: () => run.kill(),
-  async pluginLoad() {
-    await run.wait();
-    const lines: string[] = [];
-    for await (const line of run.lines()) lines.push(line);
-    return claudePluginLoadProof({
-      armDir: arm.armDir,
-      agent: arm.agent,
-      lines,
-      debugLog: readDebugLog(arm.debugFile),
-      realPath,
-    });
+  arm: {
+    readonly armDir: string;
+    readonly agent: string;
+    readonly debugFile: string;
+    readonly keepLog: boolean;
   },
-});
+): HeadlessRun => {
+  const prove = async (): Promise<PluginLoadProof> => {
+    try {
+      await run.wait();
+      const lines: string[] = [];
+      for await (const line of run.lines()) lines.push(line);
+      return claudePluginLoadProof({
+        armDir: arm.armDir,
+        agent: arm.agent,
+        lines,
+        debugLog: readDebugLog(arm.debugFile),
+        realPath,
+      });
+    } catch (error) {
+      return {
+        loaded: false,
+        reason: `the load proof failed: ${error instanceof Error ? error.message : String(error)}`,
+      };
+    } finally {
+      if (!arm.keepLog) rmSync(arm.debugFile, { force: true });
+    }
+  };
+  const proof = prove();
+  return {
+    command: run.command,
+    pid: run.pid,
+    lines: () => run.lines(),
+    wait: () => run.wait(),
+    kill: () => run.kill(),
+    pluginLoad: () => proof,
+  };
+};
 
 export const createClaudeCodeAdapter = (options: ClaudeCodeAdapterOptions = {}): HostAdapter => {
   const spawner =
@@ -189,7 +220,12 @@ export const createClaudeCodeAdapter = (options: ClaudeCodeAdapterOptions = {}):
       const agent = claudeSubagentName(agentNameFor(request.role, request.mode));
       return {
         dispatch: "headless",
-        run: withPluginLoad(started.run, { armDir: request.pluginDir, agent, debugFile }),
+        run: withPluginLoad(started.run, {
+          armDir: request.pluginDir,
+          agent,
+          debugFile,
+          keepLog: options.keepArmDebugLogs === true,
+        }),
       };
     });
   return {
