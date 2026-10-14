@@ -103,6 +103,22 @@ export const lazyGateRunner = (create: () => GateRunner): GateRunner => {
   return {
     run: async (request) => get().run(request),
     checkWriteScope: async (request) => get().checkWriteScope(request),
+    // The optional novelty seam (AD-24 rule 8, reading 127) is forwarded too: core reads it as
+    // `gateRunner.checkNovelty?.(...)`, so a wrapper without it would leave every G2 direction
+    // `unchecked` in the shipped binary. A built runner without the method fails the call, which
+    // core treats as an unchecked direction.
+    checkNovelty: async (request) => {
+      const g = get();
+      if (g.checkNovelty === undefined) throw new Error("the Gate Runner has no checkNovelty");
+      return g.checkNovelty(request);
+    },
+    recordDesignChoice: async (entry, scope) => {
+      const g = get();
+      if (g.recordDesignChoice === undefined) {
+        throw new Error("the Gate Runner has no recordDesignChoice");
+      }
+      return g.recordDesignChoice(entry, scope);
+    },
   };
 };
 
