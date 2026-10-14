@@ -272,6 +272,59 @@ describe("AD-23 rules 2–3: the checklist and auto-merge bound to the gated SHA
     await h.release();
   });
 
+  it("finishing at Level 2 that the engine stopped in the middle of finishes on the next start", async () => {
+    const h = level3();
+    h.remote3.mergeOnEnable = false;
+    const enable = h.remote3.enableAutoMerge.bind(h.remote3);
+    h.remote3.enableAutoMerge = async (request) => {
+      const pr = await enable(request);
+      h.prs.current = { ...(h.prs.current as PullRequestRef), head_sha: "d".repeat(40) };
+      return pr;
+    };
+    const disable = h.remote3.disableAutoMerge.bind(h.remote3);
+    h.remote3.disableAutoMerge = () => Promise.reject(new Error("gh: HTTP 502"));
+    await toRelease(h);
+    const run = runId(h);
+    const escalation = ofType(h, "escalation.opened", run).at(-1)?.data.escalation as {
+      id: string;
+    };
+    // the answer's call to turn auto-merge off is in flight when the engine stops
+    let calling: () => void = () => undefined;
+    const called = new Promise<void>((resolve) => {
+      calling = resolve;
+    });
+    let hangUp: (error: Error) => void = () => undefined;
+    h.remote3.disableAutoMerge = () => {
+      calling();
+      return new Promise((_resolve, reject) => {
+        hangUp = reject;
+      });
+    };
+    await h.engine.answer(
+      {
+        escalation: escalation.id,
+        answer: { option: "finish-level-2", who_should_have_caught: "none" },
+      },
+      CLAUDE,
+    );
+    await called;
+    expect(h.engine.status({ run }).features[0]?.status).toBe("parked");
+    // the next start (the old engine lost its lock: it can no longer append)
+    h.remote3.disableAutoMerge = disable;
+    const engine = h.reopen();
+    await engine.settle();
+    hangUp(new Error("the engine stopped"));
+    expect(h.remote3.calls).toContain("disable vtc/F-1");
+    const status = engine.status({ run });
+    expect(status.features[0]).toMatchObject({
+      status: "ready_to_ship",
+      pr: { state: "open", auto_merge: "disabled" },
+    });
+    expect(status.run.finished_at).toBeDefined();
+    await engine.shutdown();
+    await h.release();
+  });
+
   it("finishing at Level 2 whose auto-merge cannot be turned off parks again, the run left open", async () => {
     const h = level3();
     h.remote3.mergeOnEnable = false;

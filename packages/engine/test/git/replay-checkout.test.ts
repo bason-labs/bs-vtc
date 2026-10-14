@@ -4,13 +4,14 @@
  * checkout, the trial's work committed there and made readable to the Gate Runner's git in the
  * user's repo; a git directory a role changed runs no engine git.
  */
-import { existsSync, mkdirSync, readFileSync, statSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, rmSync, statSync } from "node:fs";
 import { join, relative } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import {
   createGitOps,
   createReplayCheckout,
   exposeReplayHead,
+  isReplayTree,
   newReplayTree,
   removeReplayCheckout,
   ReplayCheckoutTamperedError,
@@ -126,5 +127,49 @@ describe("replay checkouts (reading 176)", () => {
     await expect(
       createReplayCheckout(repo, { tree: used, gitDir: join(tempDir(), "y.git"), base }),
     ).rejects.toThrow(/empty directory of its own/);
+  });
+
+  it("fetches only the base commit, and its head still reaches the user's full repo without making it shallow", async () => {
+    const repo = initRepo({ "src/a.ts": "export const a = 1;\n" });
+    const first = git(repo, "rev-parse", "HEAD");
+    writeFile(repo, "src/a.ts", "export const a = 2;\n");
+    git(repo, "commit", "-qam", "second");
+    const base = git(repo, "rev-parse", "HEAD");
+    const checkout: ReplayCheckout = {
+      tree: newReplayTree(),
+      gitDir: join(tempDir(), "deep.git"),
+      base,
+    };
+    await createReplayCheckout(repo, checkout);
+    // the base's parent is not in the trial's git directory
+    const parent = await runGit(
+      checkout.tree,
+      [`--git-dir=${checkout.gitDir}`, "cat-file", "-e", first],
+      { allowFailure: true },
+    );
+    expect(parent.code).not.toBe(0);
+    writeFile(checkout.tree, "src/b.ts", "export const b = 1;\n");
+    const head = await snapshotReplayCheckout(checkout, "trial");
+    await exposeReplayHead(repo, checkout, head);
+    expect(existsSync(join(repo, ".git", "shallow"))).toBe(false);
+    expect(await createGitOps({ repoRoot: repo }).changedFiles(base, head)).toEqual([
+      { path: "src/b.ts", status: "added" },
+    ]);
+    expect(git(repo, "rev-parse", `${head}^^`)).toBe(first);
+    expect(removeReplayCheckout(checkout)).toBe(true);
+  });
+
+  it("removes only a work tree it made: a path read back from a file is checked first", () => {
+    const tree = tempDir();
+    writeFile(tree, "keep.txt", "x\n");
+    const gitDir = join(tempDir(), "z.git");
+    mkdirSync(gitDir);
+    expect(isReplayTree(tree)).toBe(false);
+    const made = newReplayTree();
+    expect(isReplayTree(made)).toBe(true);
+    rmSync(made, { recursive: true });
+    expect(removeReplayCheckout({ tree, gitDir, base: "a".repeat(40) })).toBe(false);
+    expect(existsSync(join(tree, "keep.txt"))).toBe(true);
+    expect(existsSync(gitDir)).toBe(false);
   });
 });

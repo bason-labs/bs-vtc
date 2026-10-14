@@ -7,6 +7,7 @@ import type {
   AutoResumeScheduler,
   GateRunner,
   GateRunRequest,
+  GateVerdict,
   GatesConfig,
   GitOps,
   HeadlessRun,
@@ -193,6 +194,12 @@ export interface LookbackReplayTrial {
   readonly pack: TaskPack;
   /** The commit the recorded dispatch started from (the trial's checkout is at it). */
   readonly base: string;
+  /**
+   * The recorded task's QA-owned acceptance tests (repo-relative): protected by checksum at
+   * `base` when the trial is graded, as in the recorded round (§7.3), and kept out of the trial's
+   * sandbox writes. Absent: none.
+   */
+  readonly protectedPaths?: readonly string[];
 }
 
 /** The replay of one proposal: its trials, run one at a time in order. */
@@ -241,8 +248,11 @@ export interface LookbackRetro {
    * replays must stop now, or `null`. Replays that stop wait for the next RETRO.
    */
   replayWait?(state: RunState): string | null;
-  /** Grades one trial through the Gate Runner (`gradeTrial`): it passed when the gates pass. */
-  gradeTrial?(request: GateRunRequest): Promise<boolean>;
+  /**
+   * Grades one trial through the Gate Runner: the gate run's verdict. `pass` and `fail` measure the
+   * trial; `infra_error` measures nothing (the trial is not counted, and its replay waits).
+   */
+  gradeTrial?(request: GateRunRequest): Promise<GateVerdict>;
   /**
    * The replay's result once every trial is graded (`finishReplay`, `writeReplayResult`): its
    * events (`lookback.replay_finished` with the SHA-256 of the bytes written).

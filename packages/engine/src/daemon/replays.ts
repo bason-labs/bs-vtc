@@ -11,13 +11,15 @@
  *   no noise floor is cached for the baseline). A proposal whose versions or tasks cannot be found
  *   is left out with its reason.
  * - `replayWait`: the same window and budget checks, which core runs again before every trial.
- * - `gradeTrial`: the lookback module's `gradeTrial` through the Gate Runner.
+ * - `gradeTrial`: the Gate Runner's verdict on the trial (`pass`, `fail`, or `infra_error`, which
+ *   measures nothing).
  * - `finishReplay`: `finishReplay` over the graded trials, `writeReplayResult` (the event carries
  *   the SHA-256 of the bytes written), and the measured A/A flip rate kept for the next replay.
  */
 import { readdirSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import {
+  ACCEPTANCE_TESTS,
   LOOKBACK_HOME,
   LOOKBACK_LIMITS,
   parsePersisted,
@@ -42,7 +44,6 @@ import {
   aaFlipRate,
   cachedAaFlipRate,
   finishReplay,
-  gradeTrial,
   loadPromptVersionSync,
   planReplayTrials,
   promptVersionRef,
@@ -204,15 +205,18 @@ const armsOf = (
 
 /**
  * The recorded dispatch a replay task re-runs: its pack, still the engine's (the pack file of an
- * action id is rewritten by a later run's dispatch of the same id), and the commit it started from
- * (the task's last submitted head before it, else the task's workspace base).
+ * action id is rewritten by a later run's dispatch of the same id), the commit it started from
+ * (the task's last submitted head before it, else the task's workspace base), and the QA-owned
+ * acceptance tests its round protected (the last QA submission before it with any, §7.3).
  */
 const recordedDispatch = (
   history: readonly VtcEvent[],
   projectRoot: string,
   task: ReplayTask,
   role: string,
-): { readonly pack: TaskPack; readonly base: string } | undefined => {
+):
+  | { readonly pack: TaskPack; readonly base: string; readonly protectedPaths: string[] }
+  | undefined => {
   const ofRun = history.filter((e) => e.run === task.run);
   const dispatched = ofRun.find(
     (e) =>
@@ -232,8 +236,8 @@ const recordedDispatch = (
   if (pack.run !== task.run || pack.action_id !== task.trace || pack.role !== role)
     return undefined;
   const before = ofRun.filter((e) => e.task === task.task && e.seq < dispatched.seq);
-  const head = before
-    .filter((e) => e.type === "role.submitted")
+  const submitted = before.filter((e) => e.type === "role.submitted");
+  const head = submitted
     .map((e) => (e.data as { head?: string }).head)
     .filter((h): h is string => h !== undefined)
     .at(-1);
@@ -243,7 +247,17 @@ const recordedDispatch = (
     .filter((h): h is string => h !== undefined)
     .at(-1);
   const base = head ?? workspace;
-  return base === undefined ? undefined : { pack, base };
+  const protectedPaths =
+    submitted
+      .filter((e) => e.role === "qa")
+      .map((e) =>
+        ((e.data as { artifacts?: { type: string; path: string }[] }).artifacts ?? [])
+          .filter((a) => a.type === ACCEPTANCE_TESTS.artifactType)
+          .map((a) => a.path),
+      )
+      .filter((paths) => paths.length > 0)
+      .at(-1) ?? [];
+  return base === undefined ? undefined : { pack, base, protectedPaths };
 };
 
 /**
@@ -330,6 +344,7 @@ export const createLookbackReplays = (
             },
             pack: r.pack,
             base: r.base,
+            ...(r.protectedPaths.length === 0 ? {} : { protectedPaths: r.protectedPaths }),
           },
         ];
       });
@@ -346,7 +361,8 @@ export const createLookbackReplays = (
       : { replays, wait: `left out: ${left.join("; ")}`.slice(0, 2000) };
   },
   replayWait: (state) => replayWaitReason(deps, state),
-  gradeTrial: (request) => gradeTrial(deps.gateRunner, request),
+  // the verdict itself: `infra_error` measures nothing (core sets the replay aside)
+  gradeTrial: async (request) => (await deps.gateRunner.run(request)).verdict,
   finishReplay: async (replay, outcomes) => {
     const outcome = new Map<number, ReplayTrialOutcome>(outcomes.map((o) => [o.n, o]));
     const tasks = new Map<

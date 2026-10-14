@@ -19,8 +19,12 @@
  * The `.git` file names that directory, so a role that can write there could plant a config key,
  * an attributes file or a hook that the engine's own `git add` would run: its control files are
  * fingerprinted when the checkout is made ({@link replayGitDirFingerprint}) and checked before
- * every later engine git call on it; a change throws {@link ReplayCheckoutTamperedError} and
- * nothing runs.
+ * every later engine git call on it, and again after it (a result git produced while the
+ * directory changed is discarded); a change throws {@link ReplayCheckoutTamperedError}. The check
+ * and the git call are not atomic: what keeps a process from planting a key between the two is
+ * that every engine git call on a checkout runs after its trial ended (the role submitted, so
+ * nothing of it runs any more) and that the role sandboxes deny writes under the VTC home, where
+ * the git directory lives. The checks catch what a role left behind, not a writer racing them.
  *
  * The trial's work is committed in the checkout (its head); before the Gate Runner grades
  * `base..head` with the user's repo, the head's objects are fetched there by SHA
@@ -42,7 +46,7 @@ import {
   writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
-import { dirname, isAbsolute, join, relative } from "node:path";
+import { basename, dirname, isAbsolute, join, relative } from "node:path";
 import { gitText, runGit, withRepoLock } from "./exec.js";
 
 const SHA = /^([a-f0-9]{40}|[a-f0-9]{64})$/;
@@ -231,7 +235,8 @@ export const createReplayCheckout = async (
   rmSync(fingerprintFile(checkout), { force: true });
   mkdirSync(dirname(checkout.gitDir), { recursive: true, mode: 0o700 });
   await runGit(tree, ["init", "--quiet", `--separate-git-dir=${checkout.gitDir}`, tree]);
-  await runGit(tree, [...args(checkout), ...FETCH_BY_SHA, repoRoot, checkout.base], {
+  // only the base commit's tree: the trial needs no history, and every trial fetches again
+  await runGit(tree, [...args(checkout), ...FETCH_BY_SHA, "--depth=1", repoRoot, checkout.base], {
     timeoutMs: 600_000,
   });
   await runGit(tree, [...args(checkout), "checkout", "--quiet", "--detach", checkout.base]);
@@ -252,6 +257,7 @@ export const snapshotReplayCheckout = async (
   // `add` runs the clean filters the git directory names: never one a role planted there
   assertReplayCheckoutIntact(checkout);
   await runGit(tree, [...git, "add", "--all"]);
+  assertReplayCheckoutIntact(checkout);
   const staged = await runGit(tree, [...git, "diff", "--cached", "--quiet"], {
     allowFailure: true,
   });
@@ -283,14 +289,34 @@ export const exposeReplayHead = async (
   await withRepoLock(repoRoot, () =>
     runGit(repoRoot, [...FETCH_BY_SHA, checkout.gitDir, head], { timeoutMs: 600_000 }),
   );
+  assertReplayCheckoutIntact(checkout);
   const type = await gitText(repoRoot, ["cat-file", "-t", head]);
   if (type !== "commit") throw new Error(`the trial head ${head.slice(0, 12)} is not a commit`);
 };
 
-/** Removes the checkout and its git directory (best effort; a missing one is fine). */
-export const removeReplayCheckout = (checkout: ReplayCheckout): void => {
+/**
+ * Whether `tree` is a replay work tree {@link newReplayTree} made: a `vtc-replay-` directory right
+ * under the OS temp directory. Anything else is never removed as one.
+ */
+export const isReplayTree = (tree: string): boolean => {
+  if (!isAbsolute(tree) || !basename(tree).startsWith("vtc-replay-")) return false;
+  try {
+    return realpathSync(dirname(tree)) === realpathSync(tmpdir());
+  } catch {
+    return false;
+  }
+};
+
+/**
+ * Removes the checkout and its git directory (best effort; a missing one is fine). A work tree
+ * that is not a replay tree ({@link isReplayTree}: the path came back from a file, so it is checked
+ * before a recursive delete) is left alone: returns `false` then.
+ */
+export const removeReplayCheckout = (checkout: ReplayCheckout): boolean => {
   const { tree } = checkout;
-  if (existsSync(tree)) rmSync(tree, { recursive: true, force: true });
+  const ours = isReplayTree(tree);
+  if (ours && existsSync(tree)) rmSync(tree, { recursive: true, force: true });
   if (existsSync(checkout.gitDir)) rmSync(checkout.gitDir, { recursive: true, force: true });
   rmSync(fingerprintFile(checkout), { force: true });
+  return ours;
 };

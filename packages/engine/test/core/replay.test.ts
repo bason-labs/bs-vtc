@@ -168,6 +168,14 @@ interface FakeOptions {
   /** A trial's prompt version, by arm (default: the arm's own). */
   readonly versionOf?: (arm: "a" | "b") => PromptVersionRef;
   readonly replayWait?: (state: RunState) => string | null;
+  /** The recorded task's QA-owned tests, as the daemon reads them from the history. */
+  readonly protectedPaths?: readonly string[];
+  /** A replay `p-0` first, whose one trial's base is no commit of the repo. */
+  readonly brokenFirst?: boolean;
+  /** The grades (0-based, in order) the Gate Runner answers `infra_error`. */
+  readonly infraGrades?: readonly number[];
+  /** `finishReplay` throws. */
+  readonly finishFails?: boolean;
 }
 
 /**
@@ -192,47 +200,65 @@ const fakeReplays = (
     check: () => Promise.resolve({ ok: true, events: [] }),
     replays: () => {
       const { pack, base } = context();
+      const trialOf = (arm: "a" | "b", i: number, at: string) => ({
+        arm,
+        trial: i + 1,
+        task: "r-old:T-1",
+        regressionSet: false,
+        role,
+        host: "claude-code" as const,
+        prompt: {
+          version: options.versionOf?.(arm) ?? version(arm === "b" ? CANDIDATE : BASELINE, role),
+          text: arm === "b" ? CANDIDATE : BASELINE,
+        },
+        pack,
+        base: at,
+        ...(options.protectedPaths === undefined ? {} : { protectedPaths: options.protectedPaths }),
+      });
       return Promise.resolve({
         replays: [
+          ...(options.brokenFirst === true
+            ? [
+                {
+                  proposal: "p-0",
+                  role,
+                  host: "claude-code" as const,
+                  trials: [trialOf("b", 0, "f".repeat(40))],
+                },
+              ]
+            : []),
           {
             proposal: "p-1",
             role,
             host: "claude-code",
-            trials: arms.map((arm, i) => ({
-              arm,
-              trial: i + 1,
-              task: "r-old:T-1",
-              regressionSet: false,
-              role,
-              host: "claude-code" as const,
-              prompt: {
-                version:
-                  options.versionOf?.(arm) ?? version(arm === "b" ? CANDIDATE : BASELINE, role),
-                text: arm === "b" ? CANDIDATE : BASELINE,
-              },
-              pack,
-              base,
-            })),
+            trials: arms.map((arm, i) => trialOf(arm, i, base)),
           },
         ],
       });
     },
     ...(options.replayWait === undefined ? {} : { replayWait: options.replayWait }),
     gradeTrial: async (request) => {
+      const index = graded.length;
       graded.push(request);
       held.push({
         impl: existsSync(join(repo, request.checkout, IMPL)),
         leftover: existsSync(join(repo, request.checkout, LEFTOVER)),
       });
-      if (request.base === request.head) return false;
-      const changed = await createGitOps({ repoRoot: repo }).changedFiles(
-        request.base,
-        request.head,
-      );
+      if (options.infraGrades?.includes(index) === true) return "infra_error";
+      if (request.base === request.head) return "fail";
+      const ops = createGitOps({ repoRoot: repo });
+      const changed = await ops.changedFiles(request.base, request.head);
       changes.push(changed);
-      return changed.some((f) => f.path === IMPL);
+      // L5: a protected file whose checksum changed fails the run, as the Gate Runner's does
+      for (const p of request.protected) {
+        const bytes = await ops.readFileAtCommit(request.head, p.path);
+        if (bytes === undefined || sha256Hex(new TextDecoder().decode(bytes)) !== p.sha256)
+          return "fail";
+      }
+      return changed.some((f) => f.path === IMPL) ? "pass" : "fail";
     },
     finishReplay: (replay, outcomes) => {
+      if (options.finishFails === true) return Promise.reject(new Error("the disk is full"));
       finished.push({ replay, outcomes });
       const draft: EventDraft = {
         type: "lookback.replay_finished",
@@ -458,7 +484,7 @@ describe("RETRO runs Lookback replays (AD-21 rule 6, reading 176)", () => {
     await h.release();
   });
 
-  it("a trial whose arm cannot run as planned is not run: never the compiled default in its place", async () => {
+  it("a trial whose arm cannot run as planned is not run, never with the compiled default in its place: it measured nothing, and its replay waits for the next RETRO", async () => {
     // the candidate was stored against another locked core than the agent compiled now
     const stale = { ...version(CANDIDATE), locked_sha256: "f".repeat(64) };
     const { h, fake, reach } = atRetro(["a", "b"], {
@@ -477,15 +503,17 @@ describe("RETRO runs Lookback replays (AD-21 rule 6, reading 176)", () => {
     );
     expect(trials.map((e) => e.prompt_sha)).toEqual([effectivePromptSha(LOCKED, BASELINE)]);
     expect(fake.graded).toHaveLength(1);
-    expect(fake.finished[0]?.outcomes.map((o) => o.passed)).toEqual([true, false]);
+    // not counted as the candidate's failure: no result, the proposal stays pending
+    expect(fake.finished).toEqual([]);
+    expect(events(h).filter((e) => e.type === "lookback.replay_finished")).toEqual([]);
     expect(h.engine.notices.join("\n")).toMatch(
-      /replay trial 0-1 of run .* was not run: its arm's prompt version .* cannot run as planned \(the selected prompt version was not used \(a version of another locked core/,
+      /replay trial 0-1 of run .* measured nothing \(it was not run: its arm's prompt version .* cannot run as planned \(the selected prompt version was not used \(a version of another locked core.*the replay of proposal p-1 waits for the next RETRO/,
     );
     expect(h.engine.status({}).run.finished_at).toBeDefined();
     await h.release();
   });
 
-  it("a trial the dispatcher refuses did not pass; nothing is asked of the human", async () => {
+  it("a trial the dispatcher refuses measured nothing: its replay waits for the next RETRO, and nothing is asked of the human", async () => {
     const { h, fake, reach, context } = atRetro(["a", "b"]);
     const { pending } = await reach();
     const first = await nextTrial(h, pending);
@@ -502,10 +530,10 @@ describe("RETRO runs Lookback replays (AD-21 rule 6, reading 176)", () => {
     await h.engine.next({}, CLAUDE);
     await h.engine.settle();
     expect(fake.graded).toHaveLength(1);
-    expect(fake.finished[0]?.outcomes.map((o) => o.passed)).toEqual([true, false]);
+    expect(fake.finished).toEqual([]);
     expect(h.engine.escalations({}).escalations).toEqual([]);
     expect(h.engine.notices.join("\n")).toMatch(
-      /replay trial 0-1 of run .* was not run: the Lead session's sandbox is off/,
+      /replay trial 0-1 of run .* measured nothing \(it was not run: the Lead session's sandbox is off\)/,
     );
     expect(h.engine.status({}).run.finished_at).toBeDefined();
     await h.release();
@@ -574,6 +602,119 @@ describe("RETRO runs Lookback replays (AD-21 rule 6, reading 176)", () => {
     expect(fake.finished).toEqual([]);
     expect(h.engine.notices.join("\n")).toMatch(
       /stop and wait for the next RETRO: a headless trial of engineer could not start \(auth\)/,
+    );
+    expect(h.engine.status({}).run.finished_at).toBeDefined();
+    await h.release();
+  });
+
+  it("a trial whose checkout cannot be made measured nothing; the next trial, which gets its action id, is graded as itself", async () => {
+    const { h, fake, reach } = atRetro(["a", "b"], { brokenFirst: true });
+    const { pending } = await reach();
+    const retroAt = events(h).findIndex(
+      (e) => e.type === "run.phase_changed" && e.data.to === "retro",
+    );
+    // p-0's trial has no base to check out: it never got its role run
+    let carried: SpawnAction[] = pending;
+    for (const work of [false, true]) {
+      const trial = await nextTrial(h, carried);
+      if (trial === undefined) throw new Error("no trial");
+      carried = await runTrial(h, trial, work);
+    }
+    await h.engine.next({}, CLAUDE);
+    await h.engine.settle();
+    const dispatched = events(h)
+      .slice(retroAt)
+      .filter((e) => e.type === "role.dispatched");
+    expect(dispatched).toHaveLength(2);
+    // each grade is its own trial's: the baseline changed nothing, the candidate wrote the work
+    expect(fake.graded.map((r) => r.base === r.head)).toEqual([true, false]);
+    expect(fake.finished.map((f) => f.replay.proposal)).toEqual(["p-1"]);
+    expect(fake.finished[0]?.outcomes.map((o) => o.passed)).toEqual([false, true]);
+    expect(events(h).filter((e) => e.type === "incident.recorded")).toEqual([]);
+    expect(h.engine.notices.join("\n")).toMatch(
+      /replay trial 0-0 of run .* measured nothing \(no checkout at ffffffffffff: .*the replay of proposal p-0 waits for the next RETRO/s,
+    );
+    expect(h.engine.status({}).run.finished_at).toBeDefined();
+    await h.release();
+  });
+
+  it("grades a trial as its recorded round was: QA's tests protected at the base, the task's hidden tests copied in, so a candidate that edits a protected test fails", async () => {
+    const tests = "tests/acceptance/t-1.test.ts";
+    const { h, fake, reach } = atRetro(["a", "b"], { protectedPaths: [tests] });
+    const delivered = await reach();
+    const baseline = await nextTrial(h, delivered.pending);
+    if (baseline === undefined) throw new Error("no trial");
+    const carried = await runTrial(h, baseline, true);
+    const candidate = await nextTrial(h, carried);
+    if (candidate === undefined) throw new Error("no second trial");
+    // the candidate does the work and weakens QA's test
+    writeFile(workdir(candidate), tests, "test.skip('gone', () => {});\n");
+    await runTrial(h, candidate, true);
+    await h.engine.next({}, CLAUDE);
+    await h.engine.settle();
+    const atBase = readFileSync(join(worktreeOf(h, "T-1"), tests), "utf8");
+    for (const request of fake.graded) {
+      expect(request.protected).toContainEqual({ path: tests, sha256: sha256Hex(atBase) });
+      expect(request.include_hidden).toBe(true);
+      expect(request.hidden_tasks).toEqual(["T-1"]);
+    }
+    expect(fake.finished[0]?.outcomes.map((o) => o.passed)).toEqual([true, false]);
+    await h.release();
+  });
+
+  it("a gate run that reports infra_error measured nothing: the replay waits for the next RETRO instead of counting a failure", async () => {
+    const { h, fake, reach } = atRetro(["a", "b"], { infraGrades: [0] });
+    const { pending } = await reach();
+    const first = await nextTrial(h, pending);
+    if (first === undefined) throw new Error("no trial");
+    const carried = await runTrial(h, first, true);
+    // the replay is set aside: its second trial is not run
+    expect(await nextTrial(h, carried)).toBeUndefined();
+    await h.engine.settle();
+    expect(fake.graded).toHaveLength(1);
+    expect(fake.finished).toEqual([]);
+    expect(h.engine.notices.join("\n")).toMatch(
+      /replay trial 0-0 of run .* measured nothing \(its gate run reported infra_error\)/,
+    );
+    expect(h.engine.status({}).run.finished_at).toBeDefined();
+    await h.release();
+  });
+
+  it("a restart while a trial runs picks the replay up where it stopped", async () => {
+    const { h, fake, reach } = atRetro(["a", "b"]);
+    const { pending } = await reach();
+    const first = await nextTrial(h, pending);
+    if (first === undefined) throw new Error("no trial");
+    // the engine restarts while the first trial works in its checkout
+    const engine = h.reopen();
+    engine.setLookbackRetro(fake.retro);
+    const again: Harness = { ...h, engine };
+    expect(existsSync(workdir(first))).toBe(true);
+    const carried = await runTrial(again, first, false);
+    const second = await nextTrial(again, carried);
+    if (second === undefined) throw new Error("no second trial after the restart");
+    expect(second.action_id).not.toBe(first.action_id);
+    await runTrial(again, second, true);
+    await engine.next({}, CLAUDE);
+    await engine.settle();
+    expect(fake.finished[0]?.outcomes.map((o) => o.passed)).toEqual([false, true]);
+    expect(engine.status({}).run.finished_at).toBeDefined();
+    await engine.shutdown();
+    await h.release();
+  });
+
+  it("a replay whose result cannot be written is told, and the run still finishes (the proposal stays pending)", async () => {
+    const { h, fake, reach } = atRetro(["a"], { finishFails: true });
+    const { pending } = await reach();
+    const trial = await nextTrial(h, pending);
+    if (trial === undefined) throw new Error("no trial");
+    await runTrial(h, trial, true);
+    await h.engine.next({}, CLAUDE);
+    await h.engine.settle();
+    expect(fake.graded).toHaveLength(1);
+    expect(events(h).filter((e) => e.type === "lookback.replay_finished")).toEqual([]);
+    expect(h.engine.notices.join("\n")).toMatch(
+      /the replay of proposal p-1 could not be written: the disk is full/,
     );
     expect(h.engine.status({}).run.finished_at).toBeDefined();
     await h.release();

@@ -33,12 +33,15 @@ import {
   type HostId,
   type LookbackPinsInput,
   type PluginManifestAgent,
+  type TaskPack,
   type UsageSnapshot,
 } from "@vtc/shared";
 import {
   createPluginCatalog,
   pluginCatalogFrom,
   toYaml,
+  type LookbackReplay,
+  type LookbackRetro,
   type PluginCatalog,
   type RunState,
 } from "../../src/core/index.js";
@@ -54,6 +57,12 @@ import {
   traceSplit,
 } from "../../src/lookback/index.js";
 import { cleanupDirs } from "../helpers/repo.js";
+import {
+  EDITABLE as LOG_EDITABLE,
+  LOCKED as LOG_LOCKED,
+  LOCKED_SHA as LOG_LOCKED_SHA,
+  RunLog,
+} from "../lookback/log.js";
 import {
   authorTests,
   build,
@@ -284,6 +293,56 @@ describe("RETRO reads the weekly window of the run's Lead host (AD-21 rule 8, re
     await h.release();
   });
 
+  it("through the wiring, a Codex-led run's lookback plan reads the Codex window: low, no target though Claude's is high; high, a target", async () => {
+    // the plugins the run log's prompt versions were compiled from
+    const catalog: PluginCatalog = {
+      ...createPluginCatalog({}),
+      promptParts: () => ({
+        lockedSha256: LOG_LOCKED_SHA,
+        editableInPack: true,
+        compiled: { locked: LOG_LOCKED, editable: LOG_EDITABLE },
+      }),
+    };
+    // enough attributed train failures of one Engineer version for a lookback target
+    const failing = new RunLog("r-old");
+    for (let i = 1; i <= LOOKBACK_LIMITS.minTrainFailures * 4; i += 1) {
+      const task = `T-${String(i)}`;
+      failing.taskCreated(task);
+      failing.dispatch("engineer", { task });
+      failing.gate(task, false);
+    }
+    const planAt = async (codexUsed: number) => {
+      const h = createHarness({ plugins: catalog });
+      await h.engine.start(
+        {
+          request: "Password reset\n\nUsers reset forgotten passwords.",
+          track: "feature",
+          repo: "existing",
+          has_ui: false,
+          risk_hints: [],
+        },
+        { host: "codex", client: "bridge", session: "lead-codex" },
+      );
+      h.engine.ingestUsage(weekly("codex", codexUsed));
+      h.engine.ingestUsage(weekly("claude-code", 10));
+      const unwire = wireLookback(h.engine, { repoRoot: h.repo, vtcHome: h.home }, catalog);
+      const state = h.engine.states()[0];
+      if (state === undefined) throw new Error("no run");
+      expect(h.engine.liveLeadHost(state.id)).toBe("codex");
+      // the wired RETRO plan of this run, over the failing history
+      const planned = await h.engine.lookbackRetro()?.plan({ ...state, events: failing.events });
+      await unwire();
+      await h.release();
+      return planned?.targets ?? [];
+    };
+    // the Codex Lead has 10% of its week left: no lookback role, though Claude's 90% would allow it
+    expect(await planAt(90)).toEqual([]);
+    const targets = await planAt(10);
+    expect(targets.map((t) => [t.role, t.dispatched.type])).toEqual([
+      ["engineer", "lookback.dispatched"],
+    ]);
+  });
+
   it("through the wiring, RETRO's replays wait on the Lead host's low window, though the preferred host's is high", async () => {
     const h = createHarness({
       plugins: switched,
@@ -451,6 +510,148 @@ describe("RETRO replays a recorded proposal end to end (AD-21 rule 6, reading 17
     expect(index.scorecards.map((c) => c.prompt.effective_sha256)).not.toContain(candidate);
     await h.release();
   }, 120_000);
+});
+
+describe("which replays the shipped plugins can reach (spine §5 readings 166 and 176)", () => {
+  it("compiled as shipped on a Claude Lead, no proposal's replay runs: the Engineer carries its own section, and the Spec Verifier, the one switched role, changes no file", async () => {
+    const { catalog } = shippedPlugins();
+    const h = createHarness({ plugins: catalog, project: { merge_level: 1 } });
+    h.engine.ingestUsage({
+      host: "claude-code",
+      source: "statusline",
+      windows: [
+        { kind: "weekly", label: "weekly", window_minutes: 10080, used_pct: 10, resets_at: null },
+      ],
+      model_limits: [],
+      updated_at: "2026-10-13T09:00:00.000Z",
+    });
+    const unwire = wireLookback(h.engine, { repoRoot: h.repo, vtcHome: h.home }, catalog);
+    const actions = await throughPlan(h, [draft("T-1")], SPEC_ONE);
+    await authorTests(h, only(actions, "qa"));
+    await build(h, only((await h.engine.next({}, CLAUDE)).actions, "engineer"));
+    await verdictPass(
+      h,
+      only((await h.engine.next({}, CLAUDE)).actions, "spec_verifier"),
+      "src/t-1/impl.ts",
+    );
+    await h.engine.settle();
+    const run = h.engine.status({}).run.id;
+    // a candidate stored and a proposal recorded for each of the two roles
+    for (const [role, proposal] of [
+      ["engineer", "p-eng"],
+      ["spec_verifier", "p-sv"],
+    ] as const) {
+      const compiled = catalog.promptParts?.(agentNameFor(role), "claude-code")?.compiled;
+      if (compiled === undefined) throw new Error(`${role} is not compiled`);
+      const editable = `${compiled.editable}\n\nCite the evidence for every claim.`;
+      await storePromptVersion(
+        h.home,
+        {
+          v: 1,
+          version: promptVersionRef({
+            role,
+            host: "claude-code",
+            locked: compiled.locked,
+            editable,
+          }),
+          parent: effectivePromptSha(compiled.locked, compiled.editable),
+          proposal,
+          changelog: { hypothesis: "Cite.", trace_ids: ["a-1"], evaluation: null },
+          created_at: h.clock.toISOString(),
+        },
+        editable,
+      );
+      h.engine.recordModuleEvent(
+        run,
+        lookbackEvent("lookback.proposal_recorded", {
+          proposal,
+          path: `.vtc/lookback/proposals/${role}/proposal.json`,
+          changes: 1,
+        }),
+      );
+    }
+    await passFinalReview(h);
+    await h.engine.settle();
+    await unwire();
+    expect(h.engine.status({}).run.finished_at).toBeDefined();
+    const log = events(h);
+    const retro = log.findIndex((e) => e.type === "run.phase_changed" && e.data.to === "retro");
+    expect(retro).toBeGreaterThan(0);
+    expect(log.slice(retro).filter((e) => e.type === "role.dispatched")).toEqual([]);
+    expect(log.filter((e) => e.type === "lookback.replay_finished")).toEqual([]);
+    // neither has a recorded held-out dispatch of its baseline: the Engineer's dispatches carry
+    // no prompt version (its agent carries its own section), and the Spec Verifier's one task
+    // dispatch here fell in the train split
+    expect(h.engine.notices.join("\n")).toMatch(
+      /wait for the next RETRO: left out: p-eng: no held-out task of its baseline can be run again; p-sv: no held-out task of its baseline can be run again/,
+    );
+    await h.release();
+  }, 60_000);
+
+  it("compiled as shipped on a Claude Lead, core refuses both roles' replays: the Engineer cannot take a pin, the Spec Verifier changes no file", async () => {
+    const { catalog } = shippedPlugins();
+    const h = createHarness({ plugins: catalog, project: { merge_level: 1 } });
+    const replayOf = (role: string): LookbackReplay => {
+      const compiled = catalog.promptParts?.(agentNameFor(role), "claude-code")?.compiled;
+      if (compiled === undefined) throw new Error(`${role} is not compiled`);
+      const version = promptVersionRef({
+        role,
+        host: "claude-code",
+        locked: compiled.locked,
+        editable: compiled.editable,
+      });
+      return {
+        proposal: `p-${role}`,
+        role,
+        host: "claude-code",
+        trials: [
+          {
+            arm: "a",
+            trial: 1,
+            task: "r-old:T-1",
+            regressionSet: false,
+            role,
+            host: "claude-code",
+            prompt: { version, text: compiled.editable },
+            pack: {} as TaskPack,
+            base: "a".repeat(40),
+          },
+        ],
+      };
+    };
+    const retro: LookbackRetro = {
+      plan: () => Promise.resolve({ targets: [] }),
+      check: () => Promise.resolve({ ok: true, events: [] }),
+      replays: () =>
+        Promise.resolve({ replays: [replayOf("engineer"), replayOf("spec_verifier")] }),
+      gradeTrial: () => Promise.reject(new Error("never")),
+      finishReplay: () => Promise.reject(new Error("never")),
+    };
+    h.engine.setLookbackRetro(retro);
+    const actions = await throughPlan(h, [draft("T-1")], SPEC_ONE);
+    await authorTests(h, only(actions, "qa"));
+    await build(h, only((await h.engine.next({}, CLAUDE)).actions, "engineer"));
+    await verdictPass(
+      h,
+      only((await h.engine.next({}, CLAUDE)).actions, "spec_verifier"),
+      "src/t-1/impl.ts",
+    );
+    await h.engine.settle();
+    await passFinalReview(h);
+    await h.engine.settle();
+    expect(h.engine.status({}).run.finished_at).toBeDefined();
+    const log = events(h);
+    const retroAt = log.findIndex((e) => e.type === "run.phase_changed" && e.data.to === "retro");
+    expect(log.slice(retroAt).filter((e) => e.type === "role.dispatched")).toEqual([]);
+    const notices = h.engine.notices.join("\n");
+    expect(notices).toMatch(
+      /proposal p-engineer waits for the next RETRO: vtc-engineer cannot run a candidate: it carries its own editable section/,
+    );
+    expect(notices).toMatch(
+      /proposal p-spec_verifier waits for the next RETRO: vtc-spec-verifier changes no file/,
+    );
+    await h.release();
+  }, 60_000);
 });
 
 describe("the daemon wires the Lookback module (AD-21)", () => {
