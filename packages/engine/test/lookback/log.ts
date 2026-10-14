@@ -22,7 +22,7 @@ export const HOST: HostId = "claude-code";
 
 export const lockedShaFor = (): string => LOCKED_SHA;
 
-const HEAD = "b".repeat(40);
+export const HEAD = "b".repeat(40);
 const BASE = "a".repeat(40);
 
 export const tempDir = (prefix: string): Promise<string> =>
@@ -106,6 +106,12 @@ export class RunLog {
       versioned?: boolean;
       mode?: string;
       action?: string;
+      /** The one subject the call judges (a Spec-Verifier AC). */
+      subject?: string;
+      /** The verdicts its `role.submitted` records. */
+      verdicts?: { subject: string; verdict: string }[];
+      feature?: string;
+      cost?: number;
     } = {},
   ): string {
     this.actions += 1;
@@ -117,6 +123,7 @@ export class RunLog {
       model: "claude-sonnet-5",
       prompt_sha: prompt.effective,
       ...(options.task === undefined ? {} : { task: options.task }),
+      ...(options.feature === undefined ? {} : { feature: options.feature }),
     };
     this.add({
       type: "role.dispatched",
@@ -128,6 +135,7 @@ export class RunLog {
         pack: `.vtc/state/packs/${action}.md`,
         resume: null,
         ...(options.mode === undefined ? {} : { mode: options.mode }),
+        ...(options.subject === undefined ? {} : { subject: options.subject }),
         ...(options.versioned === false ? {} : { editable_sha256: prompt.editable }),
         ...(options.arm === undefined ? {} : { canary_arm: options.arm }),
       },
@@ -140,10 +148,11 @@ export class RunLog {
         actor: "role",
         ...envelope,
         tokens: tokens === null ? null : { in: tokens - 100, out: 100, cache_r: 0, cache_w: 0 },
-        cost_usd: 0.1,
+        cost_usd: options.cost ?? 0.1,
         data: {
           action_id: action,
           exit: end,
+          ...(options.verdicts === undefined ? {} : { verdicts: options.verdicts }),
           findings: 0,
           questions: 0,
           session_ref: null,
@@ -166,7 +175,7 @@ export class RunLog {
     return action;
   }
 
-  gate(task: string, pass: boolean, reason = "round"): void {
+  gate(task: string, pass: boolean, reason = "round", head = HEAD): void {
     this.add({
       type: "gate.result",
       task,
@@ -176,7 +185,7 @@ export class RunLog {
         reason,
         scope: "affected",
         base: BASE,
-        head: HEAD,
+        head,
         results: [
           pass
             ? {
@@ -280,6 +289,43 @@ export class RunLog {
         data: { escalation: id, answer: { option: "hint", who_should_have_caught: who } },
       });
     }
+  }
+
+  /** A `lookback.escaped_defect` naming `tasks` (feature F-1). */
+  escapedDefect(tasks: string[], kind: "revert" | "post_merge_ci_failure" = "revert"): void {
+    this.add({
+      type: "lookback.escaped_defect",
+      feature: "F-1",
+      data: { merge_commit: "c".repeat(40), kind, tasks },
+    });
+  }
+
+  /** The feature's PR as the engine observed it (`feature.pr_updated`, feature F-1). */
+  pr(state: "open" | "merged" | "closed", autoMerge?: "merged" | "disabled"): void {
+    this.add({
+      type: "feature.pr_updated",
+      feature: "F-1",
+      data: {
+        pr: {
+          url: "https://github.com/acme/app/pull/7",
+          draft: false,
+          state,
+          head_sha: HEAD,
+          ci: "green",
+          ...(state === "merged" ? { merge_commit: "c".repeat(40) } : {}),
+          ...(autoMerge === undefined ? {} : { auto_merge: autoMerge }),
+        },
+      },
+    });
+  }
+
+  /** The feature's merge commit was reverted (`feature.reverted`, feature F-1). */
+  reverted(): void {
+    this.add({
+      type: "feature.reverted",
+      feature: "F-1",
+      data: { merge_commit: "c".repeat(40), detail: "reverted on main" },
+    });
   }
 
   status(task: string, from: string, to: string, round: number, parkReason?: string): void {

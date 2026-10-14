@@ -6,9 +6,11 @@
  *   the version under review (its locked core and editable section), its train traces with what
  *   went wrong, and the human edits of its work. Held-out traces are never shown.
  * - `check`: {@link checkProposal} on what the lookback role wrote in its worktree, against the
- *   current locked core of the plugin this vtc carries and the attributions the history bears out;
- *   an accepted proposal is stored as an immutable candidate version under the VTC home
- *   ({@link storePromptVersion}) and logged as `lookback.proposal_recorded`.
+ *   current locked core of the plugin this vtc carries, the attributions the history bears out and
+ *   its cost regressions (recomputed from the history, so a change aimed at tokens cites only what
+ *   a regression of the base names); an accepted proposal is stored as an immutable candidate
+ *   version under the VTC home ({@link storePromptVersion}) and logged as
+ *   `lookback.proposal_recorded`.
  * Both read the AI tiebreaks the engine recorded for the project (`readTiebreakKeys`), so an
  * `ai_tiebreak` attribution counts only when the engine recorded its answer. Replays (AD-21 rule
  * 6) run after a proposal is recorded, through engine-core's runner (spine §5 reading 176).
@@ -17,6 +19,7 @@ import {
   agentNameFor,
   effectivePromptSha,
   engineRepoKey,
+  LOOKBACK_LIMITS,
   LOOKBACK_REPO,
   type Attribution,
   type HostId,
@@ -25,6 +28,7 @@ import {
 } from "@vtc/shared";
 import type { LookbackRetro, LookbackRetroTarget, RunState } from "../core/index.js";
 import { readAttributions, type FailureSignal } from "./attribution.js";
+import { costRegressions } from "./cost-regression.js";
 import { lookbackEvent, type LookbackEventDraft } from "./events.js";
 import {
   candidateFrontmatter,
@@ -33,7 +37,9 @@ import {
   proposalRecordedEvent,
   readProposalFiles,
 } from "./proposals.js";
+import type { InstalledRole } from "./new-agent.js";
 import { lookbackAtRunEnd, type HumanEditDiff, type LookbackTarget } from "./run-end.js";
+import { computeScorecards } from "./scorecards.js";
 import { readTiebreakKeys } from "./tiebreaks.js";
 import { traceRef, type LockedShaFor } from "./traces.js";
 import { loadPromptVersionSync, storePromptVersion } from "./versions.js";
@@ -53,11 +59,20 @@ export interface LookbackRetroDeps {
   readonly lockedShaFor: LockedShaFor;
   readonly compiled: CompiledTexts;
   readonly graderBundleSha: () => string;
-  /** Percent of the Lead host's weekly window left; `null` when unknown (then Lookback waits). */
-  readonly weeklyRemainingPct: () => number | null;
+  /**
+   * Percent of the weekly window left on the Lead host of the run being planned; `null` when
+   * unknown (then Lookback waits). It takes the run, so one retro serves every run (reading 176).
+   */
+  readonly weeklyRemainingPct: (state: RunState) => number | null;
   readonly budgetAvailable: (state: RunState) => boolean;
   readonly now: () => Date;
   readonly humanEditDiff?: HumanEditDiff;
+  /**
+   * The roles this vtc carries (the plugin catalog), for the new-agent signals (D-cd). Engine
+   * core's `LookbackRetro.plan` result has no field for them or for the cost regressions yet, so
+   * the daemon reads both from `lookbackAtRunEnd` at `run.finished` (a handoff to engine core).
+   */
+  readonly roles?: readonly InstalledRole[];
 }
 
 /** Longest editable section, trace detail and diff an input carries. */
@@ -198,6 +213,33 @@ export const renderLookbackInput = (input: {
       else lines.push("(no diff could be read)", "");
     }
   }
+  if (target.cost.length > 0) {
+    lines.push(
+      "## Cost regression (aim: tokens)",
+      "",
+      `This version costs more than the version before it (${target.cost[0]?.baseline.effective_sha256.slice(0, 8) ?? "?"}), beyond the ${String(LOOKBACK_LIMITS.maxTokenRisePct)}% limit:`,
+      "",
+      ...target.cost.map(
+        (r) =>
+          `- ${r.metric}: ${String(r.baseline_value)} -> ${String(r.current_value)} (+${String(Math.round(r.delta_pct))}%), n ${String(r.n.baseline)} -> ${String(r.n.current)}`,
+      ),
+      "",
+      `Aim your proposal at tokens: give each change the \`target_metric\` \`tokens_per_success\`, cut what the role spends tokens on without losing what makes it pass, and keep to at most ${String(LOOKBACK_LIMITS.maxProposalChanges)} changes to the editable section. Such a change may cite the costliest dispatches below.`,
+      "",
+    );
+    const seen = new Set<string>();
+    for (const t of target.cost.flatMap((r) => r.traces)) {
+      if (seen.has(t.id)) continue;
+      seen.add(t.id);
+      lines.push(
+        `### ${t.id}`,
+        "",
+        `- tokens ${String(t.tokens)}`,
+        ...traceDetail(input.history, t.run, t.trace).map((l) => `- ${l}`),
+        "",
+      );
+    }
+  }
   lines.push(
     "## Scorecard",
     "",
@@ -241,10 +283,11 @@ export const createLookbackRetro = (deps: LookbackRetroDeps): LookbackRetro => {
         tiebreaks: recordedTiebreaks,
         lockedShaFor: deps.lockedShaFor,
         graderBundleSha: deps.graderBundleSha(),
-        weeklyRemainingPct: deps.weeklyRemainingPct(),
+        weeklyRemainingPct: deps.weeklyRemainingPct(state),
         budgetAvailable: deps.budgetAvailable(state),
         now: deps.now(),
         ...(deps.humanEditDiff === undefined ? {} : { humanEditDiff: deps.humanEditDiff }),
+        ...(deps.roles === undefined ? {} : { roles: deps.roles }),
       });
       // spec §13: an AI tiebreak would answer the failures the tree leaves inconclusive; v1 runs
       // none (reading 182), so the run logs how many stay out of every scorecard
@@ -296,6 +339,17 @@ export const createLookbackRetro = (deps: LookbackRetroDeps): LookbackRetro => {
         lockedShaFor: deps.lockedShaFor,
         tiebreaks: recordedTiebreaks,
       });
+      const regressions = costRegressions({
+        scorecards: computeScorecards({
+          events: history,
+          attributions,
+          lockedShaFor: deps.lockedShaFor,
+          graderBundleSha: deps.graderBundleSha(),
+          now: deps.now(),
+        }),
+        history,
+        lockedShaFor: deps.lockedShaFor,
+      });
       const checked = checkProposal({
         history,
         lockedShaFor: deps.lockedShaFor,
@@ -305,6 +359,7 @@ export const createLookbackRetro = (deps: LookbackRetroDeps): LookbackRetro => {
         editableFile: files.editable,
         locked: compiled.locked,
         attributions,
+        costRegressions: regressions,
       });
       if (!checked.ok) return { ok: false, problems: [...checked.problems] };
       const base = checked.proposal.base;
