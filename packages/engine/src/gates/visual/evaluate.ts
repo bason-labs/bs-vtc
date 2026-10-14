@@ -63,6 +63,8 @@ export interface EvaluateInput {
   readonly detector: readonly ToolFinding[];
   /** Checks that could not run (no axe-core, no pixelmatch, no screens file…): never clean. */
   readonly notRun: readonly string[];
+  /** Visible, non-blocking notes (a browser pinned on first use, evidence left out). */
+  readonly notes?: readonly string[];
   /** Where the report itself is written (repo-relative). */
   readonly reportPath: string;
   readonly writtenAt: string;
@@ -78,6 +80,21 @@ export const MAX_SUMMARY_FINDINGS = 200;
 const MAX_REPORT_FINDINGS = 2000;
 const VISUAL_TOOL = "vtc-visual";
 const AXE_TOOL = "axe-core";
+/** Rule id of a visible, non-blocking note of the step (`sarif_level: note`). */
+export const VISUAL_NOTE_RULE = "vtc-visual/note";
+
+/** One note-level finding per note (never blocking, never a pass by itself). */
+export const noteFindings = (notes: readonly string[], reportPath: string): ToolFinding[] =>
+  [...new Set(notes)].map((note) => ({
+    tool: VISUAL_TOOL,
+    rule_id: VISUAL_NOTE_RULE,
+    category: "design",
+    title: note.slice(0, 200),
+    message: note.slice(0, 4000),
+    location: { path: reportPath },
+    evidence: { type: "command_output", ref: reportPath },
+    sarif_level: "note",
+  }));
 
 const COLOR_PROPERTIES = new Set(["color", "background-color", "border-top-color"]);
 const SPACING_PROPERTIES = new Set(["padding", "margin", "gap"]);
@@ -172,6 +189,10 @@ export const evaluateVisual = (input: EvaluateInput): VisualOutcome => {
   const findings: ToolFinding[] = [];
   const unreachedBy = new Map<string, string[]>();
   const axeBy = new Map<string, { item: RunnerAxeItem; keys: string[]; shot: string | null }>();
+  const incompleteBy = new Map<
+    string,
+    { item: RunnerAxeItem; keys: string[]; shot: string | null }
+  >();
   const notRun = [...input.notRun];
 
   for (const job of input.jobs) {
@@ -219,6 +240,12 @@ export const evaluateVisual = (input: EvaluateInput): VisualOutcome => {
         const entry = axeBy.get(id) ?? { item, keys: [], shot: screenshot ?? null };
         entry.keys.push(job.key);
         axeBy.set(id, entry);
+      }
+      for (const item of out.axe.incomplete) {
+        const id = `${screenState(job.key)}\u0000${item.rule}`;
+        const entry = incompleteBy.get(id) ?? { item, keys: [], shot: screenshot ?? null };
+        entry.keys.push(job.key);
+        incompleteBy.set(id, entry);
       }
     }
     if (input.tokens !== null) {
@@ -292,6 +319,27 @@ export const evaluateVisual = (input: EvaluateInput): VisualOutcome => {
       label: item.impact ?? "moderate",
     });
   }
+  // AD-24 rule 4: an incomplete item is never clean; a note-level finding names what needs review.
+  for (const { item, keys, shot } of incompleteBy.values()) {
+    findings.push({
+      tool: AXE_TOOL,
+      rule_id: `${VISUAL_RULE_PREFIX.axe}${item.rule}`,
+      category: "accessibility",
+      title: `Needs review (axe incomplete): ${item.help}`.slice(0, 200),
+      message:
+        `axe could not decide ${String(item.nodes)} element(s), e.g. ${item.targets.join(" | ") || "(no selector)"}; renders: ${keys.join(", ")}. The step stays unchecked until a human or the vision judge reviews it.`.slice(
+          0,
+          4000,
+        ),
+      location: { path: shot ?? input.reportPath, symbol: screenState(keys[0] ?? "") },
+      evidence:
+        shot === null
+          ? { type: "command_output", ref: input.reportPath }
+          : { type: "screenshot", ref: shot },
+      ...(item.targets[0] === undefined ? {} : { snippet: item.targets[0] }),
+      sarif_level: "note",
+    });
+  }
   const styleGroups = new Map<string, StyleMismatch[]>();
   for (const s of styles) {
     const id = `${s.property}\u0000${s.value}`;
@@ -343,6 +391,7 @@ export const evaluateVisual = (input: EvaluateInput): VisualOutcome => {
     });
   }
   findings.push(...input.tokenLint, ...input.detector);
+  findings.push(...noteFindings(input.notes ?? [], input.reportPath));
 
   // ------------------------------------------------------------------ status
   const blocking = findings.some(isBlocking);
@@ -436,9 +485,11 @@ export const visualWithoutRenders = (input: {
   readonly reportPath: string;
   readonly writtenAt: string;
   readonly counts?: Partial<VisualSummary["counts"]>;
+  /** Visible, non-blocking notes ({@link noteFindings}). */
+  readonly notes?: readonly string[];
 }): VisualOutcome => {
   const reason = input.reason.slice(0, 500);
-  const findings = [...input.findings];
+  const findings = [...input.findings, ...noteFindings(input.notes ?? [], input.reportPath)];
   const status: VisualStatus =
     input.status === "skipped" && findings.some(isBlocking) ? "fail" : input.status;
   if (status !== "skipped") {

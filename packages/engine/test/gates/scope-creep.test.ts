@@ -9,6 +9,7 @@ import {
   ToolFindingSchema,
   TraceabilityReportSchema,
 } from "@vtc/shared";
+import { parseJunit } from "../../src/gates/parsers/junit.js";
 import { computeScopeCreep, scopeCreepFindings } from "../../src/gates/scope-creep.js";
 import { commitAll, config, harness, testsGate, cases } from "./fixture.js";
 import { writeFile } from "../helpers/repo.js";
@@ -55,6 +56,31 @@ describe("computeScopeCreep", () => {
       input([], [{ id: "app/test_models.py::test_x[REQ-1]", file: "app/test_models.py" }]),
     );
     expect(result.paths).toEqual(["src/c.ts", "tests/untagged.test.ts"]);
+  });
+
+  it("finds a pytest test's file from its dotted classname (xunit2, no file attribute)", async () => {
+    // What `pytest --junitxml` writes by default (junit_family=xunit2).
+    const xml = `<?xml version="1.0" encoding="utf-8"?>
+<testsuites><testsuite name="pytest" errors="0" failures="0" skipped="0" tests="2">
+<testcase classname="app.test_models" name="test_x[REQ-1]" time="0.001" />
+<testcase classname="app.test_models.TestModel" name="test_y[REQ-1]" time="0.001" />
+</testsuite></testsuites>`;
+    const pytest = parseJunit(xml);
+    expect(pytest.every((c) => c.file === undefined)).toBe(true);
+    const result = await computeScopeCreep(input([], pytest));
+    expect(result.paths).toEqual(["src/c.ts", "tests/untagged.test.ts"]);
+  });
+
+  it("flags nothing when a tagged test's file cannot be found: the files are unjudged", async () => {
+    const result = await computeScopeCreep(input([], [{ id: "Suite > [REQ-1] somewhere" }]));
+    expect(result.paths).toEqual([]);
+    expect(result.unjudged).toEqual([
+      "README.md",
+      "app/models.py",
+      "app/test_models.py",
+      "src/c.ts",
+      "tests/untagged.test.ts",
+    ]);
   });
 
   it("counts only tests tagged with the run's requirements", async () => {

@@ -7,7 +7,7 @@
 import type { GateResult, GitChangedFile, GitOps, ToolFinding } from "@vtc/shared";
 import type { PendingWrite } from "../evidence.js";
 import { ARCHITECTURE_SPINE_PATH, parseAdChecks, type AdCheck } from "./checks.js";
-import { evaluateAdCheck, type ArchFile } from "./evaluate.js";
+import { evaluateAdCheck, PatternTimeoutError, type ArchFile } from "./evaluate.js";
 
 export {
   AdCheckSpecSchema,
@@ -73,15 +73,11 @@ export const compiledL6 = async (
   const { checks, invalid } = parseAdChecks(spine);
   const results: GateResult[] = [];
   const writes: PendingWrite[] = [];
-  for (const bad of invalid) {
-    const log = `${input.evidenceRoot}/${bad.id}.log`;
-    writes.push({
-      rel: log,
-      redact: true,
-      text: `${bad.ad}: the vtc-check block at ${ARCHITECTURE_SPINE_PATH}:${String(bad.line)} cannot be compiled, so its Check did not run: ${bad.problem}\n`,
-    });
+  const notRun = (id: string, text: string): void => {
+    const log = `${input.evidenceRoot}/${id}.log`;
+    writes.push({ rel: log, redact: true, text });
     results.push({
-      gate_id: bad.id,
+      gate_id: id,
       layer: "L6",
       phase: "verify",
       status: "error",
@@ -94,6 +90,12 @@ export const compiledL6 = async (
       evidence: [{ type: "command_output", ref: log }],
       duration_ms: 0,
     });
+  };
+  for (const bad of invalid) {
+    notRun(
+      bad.id,
+      `${bad.ad}: the vtc-check block at ${ARCHITECTURE_SPINE_PATH}:${String(bad.line)} cannot be compiled, so its Check did not run: ${bad.problem}\n`,
+    );
   }
   if (checks.length === 0) return { results, writes };
   const files: ArchFile[] = [];
@@ -108,7 +110,15 @@ export const compiledL6 = async (
   }
   for (const check of checks) {
     const started = Date.now();
-    const { fresh, baseline } = evaluateAdCheck(check.spec, files);
+    let evaluated;
+    try {
+      evaluated = evaluateAdCheck(check.spec, files);
+    } catch (error) {
+      if (!(error instanceof PatternTimeoutError)) throw error;
+      notRun(check.id, `${check.ad}: ${error.message}\n`);
+      continue;
+    }
+    const { fresh, baseline } = evaluated;
     const failed = fresh.length > 0;
     results.push({
       gate_id: check.id,

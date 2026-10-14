@@ -173,21 +173,20 @@ export const checkNovelty = (input: NoveltyInput): NoveltyReport => {
     });
   }
   const hash = phash;
-  const nearest = input.library
-    .map((entry) => ({
-      entry: entry.id,
-      phash_distance: hammingDistance(hash, entry.phash),
-      token_distance: tokenDistance(vector, entry.token_vector),
-    }))
-    .sort(
-      (a, b) =>
-        a.phash_distance + a.token_distance * 64 - (b.phash_distance + b.token_distance * 64),
-    )
+  const score = (n: { phash_distance: number; token_distance: number }): number =>
+    n.phash_distance + n.token_distance * 64;
+  const isTooSimilar = (n: { phash_distance: number; token_distance: number }): boolean =>
+    n.phash_distance < thresholds.phash_distance && n.token_distance < thresholds.token_distance;
+  // Judged over the whole library; only the reported list is cut to ten, too-similar ones first.
+  const all = input.library.map((entry) => ({
+    entry: entry.id,
+    phash_distance: hammingDistance(hash, entry.phash),
+    token_distance: tokenDistance(vector, entry.token_vector),
+  }));
+  const tooSimilar = all.some(isTooSimilar);
+  const nearest = all
+    .sort((a, b) => Number(isTooSimilar(b)) - Number(isTooSimilar(a)) || score(a) - score(b))
     .slice(0, 10);
-  const tooSimilar = nearest.some(
-    (n) =>
-      n.phash_distance < thresholds.phash_distance && n.token_distance < thresholds.token_distance,
-  );
   return NoveltyReportSchema.parse({
     v: 1,
     direction: input.direction,

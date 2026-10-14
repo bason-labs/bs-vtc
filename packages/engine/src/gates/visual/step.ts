@@ -8,9 +8,14 @@
  * - No browser (neither the project's Playwright nor the doctor-installed store): `skipped` with
  *   `VISUAL_SKIPPED_NO_BROWSER`.
  * - The pin does not match, the runner failed, no app server is configured or allowed: `error`
- *   (gate infrastructure, §6.8).
- * - Settings come from `gates.yml` `visual` (`visualConfigFor`); `screens.yaml` and `tokens.json`
- *   are read at the base commit, so a diff cannot change what verifies it.
+ *   (gate infrastructure, §6.8: a human sets the app server up with `vtc calibrate`).
+ * - Settings come from `gates.yml` `visual` (`visualConfigFor`); `screens.yaml`, `tokens.json`
+ *   and the approved prototype are read at the base commit, so a diff cannot change what verifies
+ *   it. The prototype comes from a clean checkout of the base made for this step only: no gate
+ *   command ever ran in it, and the sandboxed runner may read it but not write it (the app server
+ *   and earlier gates can write only the verification checkout).
+ * - The images copied into evidence are capped per run ({@link MAX_VISUAL_EVIDENCE_BYTES}): diff
+ *   images first, then screenshots; whatever is left out is a visible note.
  */
 import { createHash } from "node:crypto";
 import { lstatSync, readdirSync, readFileSync } from "node:fs";
@@ -51,8 +56,10 @@ import type { VisualRunner } from "./runner.js";
 import { isUiSource, tokenLint } from "./token-lint.js";
 import { DESIGN_TOKENS_PATH, parseDesignTokens, type DesignTokens } from "./tokens.js";
 
-/** The approved prototype in the checkout (`ENGINE_HTTP.prototype.root`). */
+/** The approved prototype, repo-relative (`ENGINE_HTTP.prototype.root`); read at the base commit. */
 export const PROTOTYPE_DIR = ".vtc/design/prototype";
+/** Most image bytes one run copies into git-tracked evidence (diff images first). */
+export const MAX_VISUAL_EVIDENCE_BYTES = 64 * 1024 * 1024;
 /** The fixed clock of every render (§7.5 determinism). */
 export const VISUAL_FIXED_TIME = "2026-01-15T12:00:00.000Z";
 const STYLE_LIMIT = 400;
@@ -63,6 +70,7 @@ export interface VisualToolchains {
   readonly project: (
     checkoutAbs: string,
     env: Readonly<Record<string, string | undefined>>,
+    vtcHome: string,
   ) => VisualToolchain | null;
   readonly store: (vtcHome: string) => VisualToolchain | null;
 }
@@ -77,7 +85,10 @@ export interface VisualStepContext {
   readonly repoRoot: string;
   readonly vtcHome: string;
   readonly checkoutAbs: string;
-  readonly git: Pick<GitOps, "diff" | "readFileAtCommit">;
+  readonly git: Pick<
+    GitOps,
+    "diff" | "readFileAtCommit" | "createCleanCheckout" | "removeCheckout"
+  >;
   readonly changed: readonly GitChangedFile[];
   readonly config: GatesConfig;
   /** The raw `gates.yml` the run started with (for the provisional `visual.app`). */
@@ -131,12 +142,18 @@ export const prototypeHash = (dir: string): string => {
   return hash.digest("hex");
 };
 
-const isDir = (abs: string): boolean => {
-  try {
-    return lstatSync(abs).isDirectory();
-  } catch {
-    return false;
+/** `rel` under `root` is a real directory, reached through no symbolic link. */
+const isPlainDir = (root: string, rel: string): boolean => {
+  let abs = root;
+  for (const part of rel.split("/")) {
+    abs = join(abs, part);
+    try {
+      if (!lstatSync(abs).isDirectory()) return false;
+    } catch {
+      return false;
+    }
   }
+  return true;
 };
 
 export const runVisualStep = async (ctx: VisualStepContext): Promise<VisualStepResult> => {
@@ -185,6 +202,8 @@ export const runVisualStep = async (ctx: VisualStepContext): Promise<VisualStepR
     summary: outcome.summary,
     writes: [{ rel: reportPath, redact: true, json: outcome.report }, ...images],
   });
+  /** Visible, non-blocking notes for the report (a browser pinned on first use…). */
+  const visibleNotes: string[] = [];
   const without = (
     status: "skipped" | "error",
     reason: string,
@@ -202,6 +221,7 @@ export const runVisualStep = async (ctx: VisualStepContext): Promise<VisualStepR
         reportPath,
         writtenAt,
         counts: staticCounts,
+        notes: visibleNotes,
       }),
     );
 
@@ -238,7 +258,7 @@ export const runVisualStep = async (ctx: VisualStepContext): Promise<VisualStepR
   let toolchain: VisualToolchain | null = null;
   let check: BrowserCheck | null = null;
   const notes: string[] = [];
-  const project = toolchains.project(ctx.checkoutAbs, ctx.env);
+  const project = toolchains.project(ctx.checkoutAbs, ctx.env, ctx.vtcHome);
   if (project !== null) {
     const probe = await ctx.runner.run({
       input: {
@@ -292,6 +312,7 @@ export const runVisualStep = async (ctx: VisualStepContext): Promise<VisualStepR
     return without("skipped", `${VISUAL_SKIPPED_NO_BROWSER}${why}`.slice(0, 500));
   }
   if (!check.ok) return without("error", check.reason);
+  if (check.note !== undefined) visibleNotes.push(check.note);
   const pin = check.pin;
   const browser: BrowserIdentity = {
     name: pin.name,
@@ -304,7 +325,7 @@ export const runVisualStep = async (ctx: VisualStepContext): Promise<VisualStepR
   if (app === null) {
     return without(
       "error",
-      "no app server for the visual step: add visual.app (command, loopback url) to .vtc/gates.yml with vtc calibrate",
+      "no app server for the visual step: run vtc calibrate, which proposes one from the package.json dev/start/preview script for a human to confirm, or add visual.app (command, loopback url) to .vtc/gates.yml and confirm it with vtc calibrate",
       browser,
     );
   }
@@ -312,7 +333,7 @@ export const runVisualStep = async (ctx: VisualStepContext): Promise<VisualStepR
   if (!ctx.allowCommand(app.command)) {
     return without(
       "error",
-      `the visual app server [${app.command.join(" ")}] is not in this machine's gate allowlist; a human confirms it with vtc calibrate (§15)`,
+      `the visual app server [${app.command.join(" ")}] is not in this machine's gate allowlist; run vtc calibrate, which asks a human to confirm it (§15)`,
       browser,
     );
   }
@@ -323,65 +344,99 @@ export const runVisualStep = async (ctx: VisualStepContext): Promise<VisualStepR
   if (toolchain.pixelmatch === null) {
     notRun.push("pixelmatch is not installed in the project or the browser store");
   }
-  const prototypeAbs = join(ctx.checkoutAbs, PROTOTYPE_DIR);
-  const hasPrototype = isDir(prototypeAbs);
-  const protoHash = hasPrototype ? prototypeHash(prototypeAbs) : "none";
+  let result = RunnerResultSchema.parse({ v: 1 });
+  let file: (name: string) => Uint8Array | null = () => null;
+  let protoHash = "none";
+  if (matrix.jobs.length > 0) {
+    // The reference: the base commit's prototype, in a checkout no gate command ever ran in.
+    let reference: string;
+    try {
+      reference = await ctx.git.createCleanCheckout(request.base);
+    } catch (error) {
+      return without(
+        "error",
+        `the clean checkout of the base for the approved prototype could not be made: ${error instanceof Error ? error.message : String(error)}`,
+        browser,
+      );
+    }
+    try {
+      const referenceAbs = join(ctx.repoRoot, reference);
+      const hasPrototype = isPlainDir(referenceAbs, PROTOTYPE_DIR);
+      const prototypeAbs = join(referenceAbs, PROTOTYPE_DIR);
+      if (hasPrototype) protoHash = prototypeHash(prototypeAbs);
+      const input: Omit<RunnerInput, "out_dir"> = {
+        ...baseInput,
+        mode: "render",
+        playwright: toolchain.playwright,
+        executable: pin.executable,
+        axe: toolchain.axe,
+        pixelmatch: toolchain.pixelmatch,
+        prototype_root: hasPrototype ? prototypeAbs : null,
+        app: {
+          command: app.command,
+          cwd: join(ctx.checkoutAbs, app.cwd ?? ""),
+          url: app.url,
+          ready_timeout_ms: app.ready_timeout_s * 1000,
+        },
+        jobs: matrix.jobs.map((j) => ({
+          key: j.key,
+          path: j.path,
+          width: j.width,
+          theme: j.theme,
+        })),
+      };
+      const outcome = await ctx.runner.run({
+        input,
+        // Read-only to the sandbox: only the verification checkout and the temp directory are writable.
+        allowRead: hasPrototype ? [...toolchain.readable, prototypeAbs] : toolchain.readable,
+        loopback: true,
+        env: browsersEnv(toolchain),
+        checkout: ctx.checkoutAbs,
+        timeoutMs: Math.min(
+          7_200_000,
+          120_000 + app.ready_timeout_s * 1000 + matrix.jobs.length * 30_000,
+        ),
+        stdoutPath: `${ctx.logPrefix}.stdout.log`,
+        stderrPath: `${ctx.logPrefix}.stderr.log`,
+      });
+      if (!outcome.ok) return without("error", outcome.reason, browser);
+      result = outcome.result;
+      file = outcome.file;
+    } finally {
+      await ctx.git.removeCheckout(reference).catch(() => undefined);
+    }
+  }
   const sourceHash = (key: string): string =>
     createHash("sha256")
       .update(`${request.head}\u0000${pin.executable_sha256}\u0000${protoHash}\u0000${key}`)
       .digest("hex");
-  let result = RunnerResultSchema.parse({ v: 1 });
-  let file: (name: string) => Uint8Array | null = () => null;
-  if (matrix.jobs.length > 0) {
-    const input: Omit<RunnerInput, "out_dir"> = {
-      ...baseInput,
-      mode: "render",
-      playwright: toolchain.playwright,
-      executable: pin.executable,
-      axe: toolchain.axe,
-      pixelmatch: toolchain.pixelmatch,
-      prototype_root: hasPrototype ? prototypeAbs : null,
-      app: {
-        command: app.command,
-        cwd: join(ctx.checkoutAbs, app.cwd ?? ""),
-        url: app.url,
-        ready_timeout_ms: app.ready_timeout_s * 1000,
-      },
-      jobs: matrix.jobs.map((j) => ({ key: j.key, path: j.path, width: j.width, theme: j.theme })),
-    };
-    const outcome = await ctx.runner.run({
-      input,
-      allowRead: toolchain.readable,
-      loopback: true,
-      env: browsersEnv(toolchain),
-      checkout: ctx.checkoutAbs,
-      timeoutMs: Math.min(
-        7_200_000,
-        120_000 + app.ready_timeout_s * 1000 + matrix.jobs.length * 30_000,
-      ),
-      stdoutPath: `${ctx.logPrefix}.stdout.log`,
-      stderrPath: `${ctx.logPrefix}.stderr.log`,
-    });
-    if (!outcome.ok) return without("error", outcome.reason, browser);
-    result = outcome.result;
-    file = outcome.file;
-  }
 
   // 6. images into evidence, then the verdict.
   const images: PendingWrite[] = [];
   const copied = new Set<string>();
+  let evidenceBytes = 0;
+  let omitted = 0;
   const evidencePath = (name: string): string => `${ctx.evidenceDir}/${name}`;
   const copy = (name: string | undefined): string | undefined => {
     if (name === undefined) return undefined;
     if (!copied.has(name)) {
       const bytes = file(name);
       if (bytes === null) return undefined;
+      if (evidenceBytes + bytes.length > MAX_VISUAL_EVIDENCE_BYTES) {
+        omitted += 1;
+        return undefined;
+      }
+      evidenceBytes += bytes.length;
       images.push({ rel: evidencePath(name), redact: false, bytes });
       copied.add(name);
     }
     return name;
   };
-  const renders = result.renders.map((r) => {
+  // Diff images (the evidence of a failure) first, then the screenshots.
+  const diffImages = result.renders.map((r) =>
+    r.diffs.map((d) => ({ ...d, diff_image: copy(d.diff_image) })),
+  );
+  const renders = result.renders.map((r, i) => {
     const screenshot = copy(r.screenshot);
     const reference =
       r.reference === undefined
@@ -391,9 +446,14 @@ export const runVisualStep = async (ctx: VisualStepContext): Promise<VisualStepR
       ...r,
       screenshot,
       ...(reference === undefined ? {} : { reference }),
-      diffs: r.diffs.map((d) => ({ ...d, diff_image: copy(d.diff_image) })),
+      diffs: diffImages[i] ?? [],
     };
   });
+  if (omitted > 0) {
+    visibleNotes.push(
+      `${String(omitted)} image(s) were left out of the evidence: this run's visual evidence reached its cap of ${String(MAX_VISUAL_EVIDENCE_BYTES / (1024 * 1024))} MiB (the verdict is unaffected)`,
+    );
+  }
   const cleaned = RunnerResultSchema.parse(JSON.parse(JSON.stringify({ ...result, renders })));
   const outcome = evaluateVisual({
     run: request.run,
@@ -410,6 +470,7 @@ export const runVisualStep = async (ctx: VisualStepContext): Promise<VisualStepR
     tokenLint: lint,
     detector,
     notRun,
+    notes: visibleNotes,
     reportPath,
     writtenAt,
   });

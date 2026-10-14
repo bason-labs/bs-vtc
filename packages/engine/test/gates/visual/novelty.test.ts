@@ -117,6 +117,33 @@ describe("checkNovelty", () => {
     ).toBe("novel");
   });
 
+  it("judges every library entry, not only the ten nearest by combined score", () => {
+    // Ten decoys a bit off in layout with the same tokens (score 1, not under the hash threshold)
+    // rank before one entry under both thresholds (score 64 × the token distance).
+    const flip = (hex: string, bit: number): string => {
+      const value = BigInt(`0x${hex}`) ^ (1n << BigInt(bit));
+      return value.toString(16).padStart(16, "0");
+    };
+    const decoys = Array.from({ length: 10 }, (_, i) => ({
+      ...entry,
+      id: `decoy-${String(i)}`,
+      phash: flip(entry.phash, i),
+      token_vector: tokenVector(cold),
+    }));
+    const similar = { ...entry, id: "similar", token_vector: tokenVector(warm) };
+    const thresholds = { phash_distance: 1, token_distance: 10 };
+    const report = checkNovelty({
+      direction: "a",
+      firstViewport: png,
+      tokens: cold,
+      library: [...decoys, similar],
+      thresholds,
+    });
+    expect(report.verdict).toBe("too_similar");
+    expect(report.nearest).toHaveLength(10);
+    expect(report.nearest[0]?.entry).toBe("similar");
+  });
+
   it("is unchecked without a readable first viewport", () => {
     const r = checkNovelty({ direction: "a", firstViewport: null, tokens: warm, library: [entry] });
     expect(r.verdict).toBe("unchecked");

@@ -101,6 +101,29 @@ describe("toolchain resolution", () => {
     expect(projectToolchain(tempDir("vtc-empty-"), {})).toBeNull();
   });
 
+  it("takes axe-core and pixelmatch from the browser store when the project has neither", () => {
+    const checkout = tempDir("vtc-checkout-");
+    pkg(
+      join(checkout, "node_modules/playwright-core"),
+      "playwright-core",
+      { main: "index.js" },
+      { "index.js": "" },
+    );
+    const home = tempDir("vtc-home-");
+    expect(projectToolchain(checkout, { PLAYWRIGHT_BROWSERS_PATH: "/opt/pw" }, home)).toMatchObject(
+      { axe: null, pixelmatch: null, readable: ["/opt/pw"] },
+    );
+    const store = join(home, "browsers/node_modules");
+    pkg(join(store, "axe-core"), "axe-core", {}, { "axe.min.js": "/* axe */" });
+    pkg(join(store, "pixelmatch"), "pixelmatch", { main: "index.js" }, { "index.js": "" });
+    const tc = projectToolchain(checkout, { PLAYWRIGHT_BROWSERS_PATH: "/opt/pw" }, home);
+    const realStore = realpathSync(store);
+    expect(tc?.source).toBe("project");
+    expect(tc?.axe).toBe(join(realStore, "axe-core/axe.min.js"));
+    expect(tc?.pixelmatch).toBe(join(realStore, "pixelmatch/index.js"));
+    expect(tc?.readable).toEqual(["/opt/pw", join(home, "browsers")]);
+  });
+
   it("finds the doctor-installed store under the VTC home", () => {
     const home = tempDir("vtc-home-");
     expect(storeToolchain(home)).toBeNull();
@@ -154,7 +177,7 @@ describe("browser pins", () => {
     };
     const first = await checkProjectBrowser(options);
     expect(first?.ok === true ? first.note : "").toMatch(/first use/);
-    const pin = JSON.parse(readFileSync(projectPinPath(home, "/repo"), "utf8")) as Record<
+    const pin = JSON.parse(readFileSync(projectPinPath(home, "/repo", exe), "utf8")) as Record<
       string,
       unknown
     >;
@@ -162,6 +185,55 @@ describe("browser pins", () => {
     expect(await checkProjectBrowser(options)).toMatchObject({ ok: true });
     writeFileSync(exe, "tampered");
     expect(reasonOf(await checkProjectBrowser(options))).toMatch(/does not match its pin/);
+  });
+
+  it("keeps one pin per executable path: a path seen before is re-verified, never re-pinned", async () => {
+    const home = tempDir("vtc-home-");
+    const cache = tempDir("vtc-cache-");
+    const a = exeIn(join(cache, "chromium-1200"), "browser a");
+    const b = exeIn(join(cache, "chromium-1300"), "browser b");
+    const at = (executable: string) => ({
+      vtcHome: home,
+      repoRoot: "/repo",
+      executable,
+      browsersPath: cache,
+      name: "chromium",
+      version: "140",
+      playwrightVersion: "1.60.0",
+      now,
+    });
+    const first = await checkProjectBrowser(at(a.exe));
+    expect(first?.ok === true ? first.note : "").toMatch(/first use/);
+    const second = await checkProjectBrowser(at(b.exe));
+    expect(second?.ok === true ? second.note : "").toMatch(/first use/);
+    writeFileSync(a.exe, "browser a, changed");
+    expect(reasonOf(await checkProjectBrowser(at(a.exe)))).toMatch(/does not match its pin/);
+    const again = await checkProjectBrowser(at(b.exe));
+    expect(again).toMatchObject({ ok: true });
+    expect(again?.ok === true ? again.note : "(no note)").toBeUndefined();
+  });
+
+  it("fails closed on an unreadable project pin or one recorded for another path", async () => {
+    const home = tempDir("vtc-home-");
+    const cache = tempDir("vtc-cache-");
+    const { exe } = exeIn(join(cache, "chromium-1200"));
+    const options = {
+      vtcHome: home,
+      repoRoot: "/repo",
+      executable: exe,
+      browsersPath: cache,
+      name: "chromium",
+      version: "140",
+      playwrightVersion: "1.60.0",
+      now,
+    };
+    await checkProjectBrowser(options);
+    const path = projectPinPath(home, "/repo", exe);
+    const pin = JSON.parse(readFileSync(path, "utf8")) as Record<string, unknown>;
+    writeFileSync(path, "{ not json");
+    expect(reasonOf(await checkProjectBrowser(options))).toMatch(/unreadable/);
+    writeFileSync(path, JSON.stringify({ ...pin, executable: "/elsewhere/chrome" }));
+    expect(reasonOf(await checkProjectBrowser(options))).toMatch(/records \/elsewhere\/chrome/);
   });
 
   it("ignores an executable outside the browsers path", async () => {

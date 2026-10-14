@@ -2,11 +2,14 @@
  * Where the visual step's Playwright, browser, axe-core and pixelmatch come from (D-ay, spine §5
  * readings 96 and 106; AD-24 rules 1, 2 and 6), and the browser pin check before every run.
  *
- * - The project's own: `playwright-core` (directly or through `playwright` / `@playwright/test`),
- *   `axe-core` and `pixelmatch` resolved inside the verification checkout, and the browser in the
- *   user's Playwright cache. Its executable is pinned on first use, per repo and per executable
- *   path, under `~/.vtc/browsers/projects/<repo-key>.json`; a later run whose executable at the
- *   same path hashes differently is gate infrastructure (`error`).
+ * - The project's own: `playwright-core` (directly or through `playwright` / `@playwright/test`)
+ *   resolved inside the verification checkout, and the browser in the user's Playwright cache.
+ *   `axe-core` and `pixelmatch` come from the checkout, else from the doctor-installed store
+ *   (reading 106). Its executable is pinned on first use, per repo and per executable path, under
+ *   `~/.vtc/browsers/projects/<repo-key>/<path-hash>.json`: a path seen before is always
+ *   re-verified and never re-pinned, so a later run whose executable at that path hashes
+ *   differently is gate infrastructure (`error`), and an unreadable pin fails closed. A first-use
+ *   pin is a visible note in the report.
  * - The store `vtc doctor --install-browser` filled: packages under `~/.vtc/browsers/node_modules/`
  *   and the browser it pinned in `BROWSER_PIN_FILE` (`source: vtc`), re-verified the same way.
  * - Neither: the step is `skipped` with `VISUAL_SKIPPED_NO_BROWSER`. Nothing is ever downloaded
@@ -166,22 +169,39 @@ const pixelmatchIn = (root: string, from: string): string | null => {
   return dir === null ? null : packageEntry(dir);
 };
 
-/** The project's own Playwright in the checkout, or `null`. */
+/**
+ * The project's own Playwright in the checkout, or `null`. axe-core and pixelmatch come from the
+ * checkout, else from the doctor-installed store under `vtcHome` (reading 106), which is then
+ * readable in the sandbox too.
+ */
 export const projectToolchain = (
   checkoutAbs: string,
   env: Readonly<Record<string, string | undefined>>,
+  vtcHome?: string,
 ): VisualToolchain | null => {
   const pw = playwrightIn(checkoutAbs, checkoutAbs);
   if (pw === null) return null;
   const browsersPath = projectBrowsersPath(env);
+  const store = vtcHome === undefined ? null : join(vtcHome, BROWSERS_DIR);
+  let axe = axeIn(checkoutAbs, checkoutAbs);
+  let pixelmatch = pixelmatchIn(checkoutAbs, checkoutAbs);
+  let fromStore = false;
+  if (store !== null && axe === null) {
+    axe = axeIn(store, store);
+    fromStore ||= axe !== null;
+  }
+  if (store !== null && pixelmatch === null) {
+    pixelmatch = pixelmatchIn(store, store);
+    fromStore ||= pixelmatch !== null;
+  }
   return {
     source: "project",
     playwright: pw.entry,
     playwrightVersion: versionOf(pw.dir),
-    axe: axeIn(checkoutAbs, checkoutAbs),
-    pixelmatch: pixelmatchIn(checkoutAbs, checkoutAbs),
+    axe,
+    pixelmatch,
     browsersPath,
-    readable: [browsersPath],
+    readable: fromStore && store !== null ? [browsersPath, store] : [browsersPath],
   };
 };
 
@@ -256,13 +276,23 @@ export const verifyPinnedBrowser = async (
       };
 };
 
-/** `~/.vtc/browsers/projects/<repo-key>.json`. */
-export const projectPinPath = (vtcHome: string, repoRoot: string): string =>
-  join(vtcHome, PROJECT_BROWSER_PINS_DIR, `${engineRepoKey(repoRoot)}.json`);
+/**
+ * `~/.vtc/browsers/projects/<repo-key>/<path-hash>.json`: one pin per repo and executable path
+ * (the real path), so a path seen before is always re-verified, never re-pinned.
+ */
+export const projectPinPath = (vtcHome: string, repoRoot: string, executable: string): string =>
+  join(
+    vtcHome,
+    PROJECT_BROWSER_PINS_DIR,
+    engineRepoKey(repoRoot),
+    `${createHash("sha256").update(executable).digest("hex").slice(0, 32)}.json`,
+  );
 
 /**
- * The project's browser at `executable` checked against its pin, pinning it on first use (and
- * again when the project moved to another executable path, e.g. a Playwright upgrade).
+ * The project's browser at `executable` checked against its pin for that path. A path without a
+ * pin is pinned on first use (a Playwright upgrade moves the executable) and the result carries
+ * a `note` the report shows; a path with a pin is re-verified (AD-24 rule 2); an unreadable pin
+ * or one recorded for another path fails closed.
  */
 export const checkProjectBrowser = async (options: {
   readonly vtcHome: string;
@@ -277,9 +307,18 @@ export const checkProjectBrowser = async (options: {
   const exe = real(options.executable);
   const root = real(options.browsersPath);
   if (exe === null || root === null || !inside(root, exe) || !statSync(exe).isFile()) return null;
-  const path = projectPinPath(options.vtcHome, options.repoRoot);
+  const path = projectPinPath(options.vtcHome, options.repoRoot, exe);
   const existing = readBrowserPin(path);
-  if (existing !== null && !("invalid" in existing) && existing.executable === exe) {
+  if (existing !== null) {
+    if ("invalid" in existing) {
+      return { ok: false, reason: `the project's browser pin is unreadable: ${existing.invalid}` };
+    }
+    if (existing.executable !== exe) {
+      return {
+        ok: false,
+        reason: `the project's browser pin ${path} records ${existing.executable}, not ${exe}`,
+      };
+    }
     return verifyPinnedBrowser(existing, options.browsersPath);
   }
   const pin = BrowserPinSchema.parse({
@@ -297,10 +336,7 @@ export const checkProjectBrowser = async (options: {
   return {
     ok: true,
     pin,
-    note:
-      existing === null
-        ? `pinned the project's browser ${exe} on first use`
-        : `the project's browser moved to ${exe}; pinned it on first use`,
+    note: `pinned the project's browser ${exe} (sha256 ${pin.executable_sha256.slice(0, 12)}) on first use`,
   };
 };
 

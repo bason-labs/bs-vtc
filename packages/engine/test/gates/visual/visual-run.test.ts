@@ -15,6 +15,7 @@ import {
   VisualReportSchema,
 } from "@vtc/shared";
 import {
+  projectToolchain,
   RunnerResultSchema,
   type RunnerInput,
   type VisualRunner,
@@ -125,7 +126,8 @@ const fakeRunner = (
 const setup = (options: {
   files?: Record<string, string>;
   gatesExtra?: string;
-  project?: boolean;
+  /** `real`: the real resolution in the checkout and the store, with the fake browser cache. */
+  project?: boolean | "real";
   store?: "match" | "mismatch";
   runner?: (exe: string) => ReturnType<typeof fakeRunner>;
 }) => {
@@ -134,7 +136,12 @@ const setup = (options: {
   const fake = options.runner?.(exe) ?? fakeRunner(exe);
   let storeDir: string | null = null;
   const toolchains: VisualToolchains = {
-    project: () => (options.project === true ? toolchain("project", browsers) : null),
+    project: (checkout, _env, home) =>
+      options.project === "real"
+        ? projectToolchain(checkout, { PLAYWRIGHT_BROWSERS_PATH: browsers }, home)
+        : options.project === true
+          ? toolchain("project", browsers)
+          : null,
     store: (home) => (storeDir === null ? null : toolchain("vtc", join(home, "browsers"))),
   };
   const h = harness(
@@ -205,6 +212,7 @@ describe("visual step in a gate run", () => {
       url: "http://127.0.0.1:4173",
     });
     expect(render?.input.prototype_root).toMatch(/\.vtc\/design\/prototype$/);
+    expect(render?.allowRead).toContain(render?.input.prototype_root);
     expect(render?.loopback).toBe(true);
     expect(render?.env.PLAYWRIGHT_BROWSERS_PATH).toBeDefined();
     expect(report.visual?.counts.renders).toBe(3);
@@ -216,6 +224,82 @@ describe("visual step in a gate run", () => {
     expect(existsSync(join(h.repo, shot))).toBe(true);
     const pins = join(h.home, "browsers", "projects");
     expect(existsSync(pins)).toBe(true);
+    const note = written.findings.find((f) => f.rule_id === "vtc-visual/note");
+    expect(note?.title).toMatch(/pinned the project's browser .* on first use/);
+    expect(note?.sarif_level).toBe("note");
+    const later = await h.run({ head: h.base, visual: { screens: [] } });
+    expect(later.visual?.status).toBe("pass");
+    expect(later.visual?.findings.some((f) => f.rule_id === "vtc-visual/note")).toBe(false);
+  });
+
+  it("compares with the base commit's prototype, which neither the diff nor project code can change", async () => {
+    const BASE_PROTOTYPE = "<main>prototype</main>\n";
+    let seen: { root: string | null; inCheckout: boolean; bytes: string | null } | null = null;
+    const { h } = setup({
+      project: true,
+      runner: (exe) => {
+        const inner = fakeRunner(exe);
+        return {
+          calls: inner.calls,
+          runner: {
+            run: (call) => {
+              if (call.input.mode === "render") {
+                // Project code (the app server, an earlier gate) rewrites the checkout's prototype.
+                const own = join(call.checkout, ".vtc/design/prototype/index.html");
+                writeFileSync(own, "<main>whatever the implementation renders</main>\n");
+                const root = call.input.prototype_root;
+                seen = {
+                  root,
+                  inCheckout:
+                    root !== null && realpathSync(root).startsWith(realpathSync(call.checkout)),
+                  bytes: root === null ? null : readFileSync(join(root, "index.html"), "utf8"),
+                };
+              }
+              return inner.runner.run(call);
+            },
+          },
+        };
+      },
+    });
+    const head = ui(h, {
+      ".vtc/design/prototype/index.html": "<main>changed by the diff</main>\n",
+    });
+    const report = await h.run({ head, files_scope: [".vtc/**"], visual: { screens: ["home"] } });
+    expect(report.visual?.status).not.toBe("error");
+    expect(seen).toMatchObject({ inCheckout: false, bytes: BASE_PROTOTYPE });
+    // The reference checkout is gone after the step.
+    expect(existsSync((seen as { root: string | null } | null)?.root ?? "/nonexistent")).toBe(
+      false,
+    );
+  });
+
+  it("uses axe-core and pixelmatch from the browser store when the project lacks them", async () => {
+    const { h, fake } = setup({
+      project: "real",
+      files: {
+        "node_modules/playwright-core/package.json": JSON.stringify({
+          name: "playwright-core",
+          version: "1.60.0",
+          main: "index.js",
+        }),
+        "node_modules/playwright-core/index.js": "",
+      },
+    });
+    const store = join(h.home, "browsers", "node_modules");
+    for (const [name, file] of [
+      ["axe-core", "axe.min.js"],
+      ["pixelmatch", "index.js"],
+    ] as const) {
+      mkdirSync(join(store, name), { recursive: true });
+      writeFileSync(join(store, name, "package.json"), JSON.stringify({ name, main: "index.js" }));
+      writeFileSync(join(store, name, file), "");
+    }
+    const report = await h.run({ head: h.base, visual: { screens: ["home"] } });
+    const render = fake.calls.find((c) => c.input.mode === "render");
+    expect(render?.input.axe).toBe(join(realpathSync(store), "axe-core", "axe.min.js"));
+    expect(render?.input.pixelmatch).toBe(join(realpathSync(store), "pixelmatch", "index.js"));
+    expect(render?.allowRead).toContain(join(h.home, "browsers"));
+    expect(report.visual?.status).toBe("pass");
   });
 
   it("renders only the requested screens", async () => {

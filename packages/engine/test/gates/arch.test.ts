@@ -6,6 +6,8 @@ import {
   importsOf,
   parseAdChecks,
 } from "../../src/gates/arch/index.js";
+import { patternProblem } from "../../src/gates/arch/checks.js";
+import { PatternTimeoutError } from "../../src/gates/arch/evaluate.js";
 import { commitAll, config, harness, testsGate, cases } from "./fixture.js";
 import { writeFile } from "../helpers/repo.js";
 
@@ -121,6 +123,41 @@ describe("AD Check evaluation", () => {
       { name: "github.com/a/b", line: 3 },
     ]);
   });
+
+  it("refuses patterns that backtrack catastrophically, and accepts ordinary ones", () => {
+    for (const bad of ["(a+)+$", "(a|ab)*c", "(\\w+\\s?)*$", "(x{1,9})+", "(a)\\1", "a.*b.*c.*d"]) {
+      expect(patternProblem(bad), bad).not.toBeNull();
+    }
+    for (const ok of [
+      "SELECT .* FROM search_",
+      "console\\.log\\(",
+      "(?:foo|bar)\\(",
+      "[(+*]+x",
+      "^import .* from ['\"]pg['\"]",
+      "\\bTODO\\b(?=:)",
+    ]) {
+      expect(patternProblem(ok), ok).toBeNull();
+    }
+    const { invalid } = parseAdChecks(
+      '### AD-2 X\n```vtc-check\nkind: forbidden-pattern\npaths: ["src/**"]\npattern: "(a+)+$"\n```\n',
+    );
+    expect(invalid[0]?.problem).toMatch(/catastrophic backtracking/);
+  });
+
+  it("stops a pattern Check that runs out of its time budget", () => {
+    const spec = {
+      kind: "forbidden-pattern" as const,
+      mode: "blocking" as const,
+      paths: ["src/**"],
+      pattern: "forbidden",
+      except: [],
+    };
+    const head = "fine\n".repeat(10_000);
+    expect(() => evaluateAdCheck(spec, [{ path: "src/x.ts", head }], 0)).toThrow(
+      PatternTimeoutError,
+    );
+    expect(evaluateAdCheck(spec, [{ path: "src/x.ts", head }]).fresh).toEqual([]);
+  });
 });
 
 describe("compiled L6 in a gate run", () => {
@@ -197,6 +234,22 @@ describe("compiled L6 in a gate run", () => {
     const none = harness({ "tests/a.json": cases([{ name: "x" }]) }, config([testsGate]));
     const r2 = await none.run({ head: none.base });
     expect(r2.results.some((r) => r.layer === "L6")).toBe(false);
+  });
+
+  it("reports a catastrophically backtracking pattern as gate infrastructure, never running it", async () => {
+    const spine =
+      '### AD-2 No a-runs\n```vtc-check\nkind: forbidden-pattern\npaths: ["src/**"]\npattern: "(a+)+$"\n```\n';
+    const h = harness({ ...files, ".vtc/architecture/spine.md": spine }, config([testsGate]));
+    writeFile(h.repo, "src/slow.ts", `// ${"a".repeat(40)}b\n`);
+    const head = commitAll(h.repo, "slow");
+    const started = Date.now();
+    const report = await h.run({ head, files_scope: ["src/**"] });
+    expect(Date.now() - started).toBeLessThan(20_000);
+    expect(report.results.find((r) => r.gate_id === "vtc-ad-2")).toMatchObject({
+      status: "error",
+      failure_class: "infra",
+    });
+    expect(report.verdict).toBe("infra_error");
   });
 
   it("does not run for base_fail_check or when L6 is not requested", async () => {

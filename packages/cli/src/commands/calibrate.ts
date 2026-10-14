@@ -2,8 +2,10 @@
  * `vtc calibrate` (spec §7.1). Owner: gate-runner team (sub-project 2). Detects the toolchain,
  * asks the human to confirm every gate command before it runs (§15: the per-machine allowlist,
  * which only a human widens), runs each gate twice on `HEAD`, records flaky tests and freezes the
- * baseline in `.vtc/gates.yml`. Confirmation needs an interactive terminal, so an agent's shell
- * can run detection but never confirm. The logic is `gates.calibrate` in the engine package.
+ * baseline in `.vtc/gates.yml`. It also proposes the visual step's app server (`visual.app`) from
+ * the package.json dev/start/preview script, which a human confirms like a gate command.
+ * Confirmation needs an interactive terminal, so an agent's shell can run detection but never
+ * confirm. The logic is `gates.calibrate` in the engine package.
  * Every gate command runs in the gate sandbox (D-al); `gates.allow_unsandboxed` is read from the
  * user config in the VTC home only, never from the repo.
  */

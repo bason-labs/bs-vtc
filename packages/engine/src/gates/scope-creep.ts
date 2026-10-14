@@ -8,6 +8,12 @@
  * stand-in for per-test coverage contexts, which most runners do not report. Files of other
  * languages, and files that are not code, cannot be judged this way and are never flagged.
  *
+ * A test's file is the runner's `file` attribute, else the path of a pytest node id
+ * (`path/test_x.py::test_y`), else a pytest dotted classname (`tests.test_models` or
+ * `tests.test_models.TestX`, pytest's default xunit2 output) mapped to the longest module path
+ * that exists (`tests/test_models.py`). When a tagged test's file cannot be found at all, coverage
+ * is incomplete, so uncovered files are listed as unjudged instead of flagged.
+ *
  * Each flagged path becomes one `ToolFinding` with `SCOPE_CREEP_RULE_ID`, category
  * `spec_mismatch` and SARIF level `none`: triage makes it `info` and routes it `defer`, so it is
  * listed in the evidence bundle and shown at Final Review step 3, and never blocks by itself.
@@ -58,6 +64,31 @@ const repoRelative = (file: string, checkoutAbs: string): string => {
   const root = checkoutAbs.replace(/\\/g, "/").replace(/\/$/, "");
   const rel = normalized.startsWith(`${root}/`) ? normalized.slice(root.length + 1) : normalized;
   return posix.normalize(rel).replace(/^\.\//, "");
+};
+
+const DOTTED = /^[A-Za-z_][\w]*(\.[A-Za-z_][\w]*)*$/;
+
+/**
+ * The repo path of a case's test file: its `file`, the path of a pytest node id, or the longest
+ * existing module path of a pytest dotted classname; `null` when none is found.
+ */
+export const caseFile = (
+  c: { readonly id: string; readonly file?: string | undefined },
+  checkoutAbs: string,
+  exists: (path: string) => boolean,
+): string | null => {
+  if (c.file !== undefined) return repoRelative(c.file, checkoutAbs);
+  const node = /^([^\s:]+\.py)::/.exec(c.id)?.[1];
+  if (node !== undefined) return repoRelative(node, checkoutAbs);
+  const cut = c.id.indexOf(" > ");
+  const classname = cut < 0 ? null : c.id.slice(0, cut).trim();
+  if (classname === null || !DOTTED.test(classname)) return null;
+  const parts = classname.split(".");
+  for (let n = parts.length; n >= 1; n -= 1) {
+    const path = `${parts.slice(0, n).join("/")}.py`;
+    if (exists(path)) return path;
+  }
+  return null;
 };
 
 /** The repo paths an import may name; empty for a package import. */
@@ -111,9 +142,12 @@ export const computeScopeCreep = async (input: ScopeCreepInput): Promise<ScopeCr
     );
   };
   const roots = new Set<string>();
+  let unresolved = false;
   for (const c of input.cases) {
-    if (c.file === undefined || !wanted(c.id)) continue;
-    roots.add(repoRelative(c.file, input.checkoutAbs));
+    if (!wanted(c.id)) continue;
+    const file = caseFile(c, input.checkoutAbs, input.exists);
+    if (file === null) unresolved = true;
+    else roots.add(file);
   }
 
   const contents = new Map<string, string | undefined>();
@@ -145,7 +179,10 @@ export const computeScopeCreep = async (input: ScopeCreepInput): Promise<ScopeCr
     }
     frontier = next;
   }
-  return { paths: judged.filter((p) => !covered.has(p)).sort(), unjudged };
+  const uncovered = judged.filter((p) => !covered.has(p)).sort();
+  // A tagged test whose file is unknown may cover any of them: none is flagged.
+  if (unresolved) return { paths: [], unjudged: [...unjudged, ...uncovered].sort() };
+  return { paths: uncovered, unjudged };
 };
 
 /** One info-level, deferred finding per scope-creep path (`SCOPE_CREEP_RULE_ID`). */

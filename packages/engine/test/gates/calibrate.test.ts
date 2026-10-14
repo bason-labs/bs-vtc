@@ -8,7 +8,9 @@ import { createGitOps } from "../../src/git/index.js";
 import {
   allowlistPrefix,
   calibrate,
+  detectVisualApp,
   LOOPBACK_QUESTION,
+  visualAppQuestion,
   DEFAULT_PROTECTED_GLOBS,
   detectToolchain,
   flakyBetween,
@@ -19,6 +21,7 @@ import {
   splitCommand,
   stringifyGatesConfig,
 } from "../../src/gates/index.js";
+import { visualAppOf } from "../../src/gates/visual/app.js";
 import { cleanupDirs, initRepo, tempDir, writeFile } from "../helpers/repo.js";
 import {
   cases,
@@ -186,6 +189,33 @@ describe("detectToolchain (§7.1 sources in order)", () => {
     const detection = detectToolchain(nodeRepo(), { existing, scanners: SCANNERS });
     expect(detection.gates.map((g) => g.id)).toEqual(["tests"]);
     expect(detection.sources).toEqual(["gates_yml"]);
+  });
+});
+
+describe("detectVisualApp (the visual step's app server)", () => {
+  it("proposes the dev script on the port its server uses", () => {
+    expect(detectVisualApp(nodeRepo()).app).toEqual({
+      command: ["pnpm", "run", "dev"],
+      url: "http://localhost:5173",
+      script: "dev",
+    });
+  });
+
+  it("prefers an explicit port, skips scripts with no known port, and needs a package.json", () => {
+    const root = tempDir("vtc-detect-");
+    writeFile(
+      root,
+      "package.json",
+      JSON.stringify({ scripts: { dev: "node server.js", start: "next start -p 4100" } }),
+    );
+    const found = detectVisualApp(root);
+    expect(found.app).toEqual({
+      command: ["npm", "run", "start"],
+      url: "http://localhost:4100",
+      script: "start",
+    });
+    expect(found.notes.join("\n")).toMatch(/dev script .* names no port/);
+    expect(detectVisualApp(tempDir("vtc-empty-")).app).toBeNull();
   });
 });
 
@@ -358,6 +388,49 @@ describe("calibrate", () => {
     ).toBe(false);
   });
 
+  it("proposes the visual app server, and only a human's yes writes it and allowlists it", async () => {
+    const s = setup();
+    writeFile(s.repo, "package.json", JSON.stringify({ scripts: { dev: "vite --port 4000" } }));
+    writeFile(
+      s.repo,
+      ".vtc/gates.yml",
+      `${readFileSync(join(s.repo, ".vtc/gates.yml"), "utf8")}visual:\n  widths: [390]\n`,
+    );
+    const question = visualAppQuestion({
+      command: ["npm", "run", "dev"],
+      url: "http://localhost:4000",
+    });
+    await calibrate(s.deps(() => true));
+    expect(s.answers[0]).toBe(question);
+    const text = readFileSync(join(s.repo, ".vtc/gates.yml"), "utf8");
+    expect(visualAppOf(text)).toEqual({
+      command: ["npm", "run", "dev"],
+      url: "http://localhost:4000",
+      ready_timeout_s: 120,
+    });
+    expect(parseGatesConfig(text).visual).toEqual({ widths: [390] });
+    expect(parseAllDocuments(text)).toHaveLength(1);
+    expect(gateCommandAllowed(["npm", "run", "dev"], readAllowlist(s.home, s.repo))).toBe(true);
+    expect(s.lines.join("\n")).toMatch(/npm run dev {2}\(the visual step's app server\)/);
+
+    // Re-calibration keeps it without asking again.
+    const before = s.answers.length;
+    await calibrate(s.deps(() => true));
+    expect(s.answers.slice(before)).not.toContain(question);
+    expect(visualAppOf(readFileSync(join(s.repo, ".vtc/gates.yml"), "utf8"))).toMatchObject({
+      command: ["npm", "run", "dev"],
+    });
+  });
+
+  it("writes no visual app server and allowlists nothing for it when the human says no", async () => {
+    const s = setup();
+    writeFile(s.repo, "package.json", JSON.stringify({ scripts: { dev: "vite" } }));
+    await calibrate(s.deps((q) => !q.startsWith("Use `")));
+    expect(visualAppOf(readFileSync(join(s.repo, ".vtc/gates.yml"), "utf8"))).toBeNull();
+    expect(gateCommandAllowed(["npm", "run", "dev"], readAllowlist(s.home, s.repo))).toBe(false);
+    expect(s.lines.join("\n")).toMatch(/no visual app server/);
+  });
+
   it("prints a dry run without running or asking", async () => {
     const s = setup();
     const outcome = await calibrate(
@@ -435,7 +508,11 @@ describe("the calibrated fixture", () => {
     );
     if (outcome.status !== "dry_run") throw new Error("expected a dry run");
     // What calibrate writes once the human confirms and both runs agree (no flaky tests).
-    const proposed = parseGatesConfig(outcome.yaml);
+    // The proposed app server is shown in the dry run (provisional raw key, tested above); the
+    // typed config strips it, leaving an empty visual section that is not part of the fixture.
+    expect(visualAppOf(outcome.yaml)).toMatchObject({ command: ["pnpm", "run", "dev"] });
+    const { visual, ...proposed } = parseGatesConfig(outcome.yaml);
+    expect(visual).toEqual({});
     const frozen = stringifyGatesConfig({
       ...proposed,
       baseline: { ...proposed.baseline, confirmed: true },

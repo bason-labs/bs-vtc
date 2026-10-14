@@ -152,6 +152,7 @@ export {
   allowlistPrefix,
   detectTestLayout,
   detectToolchain,
+  detectVisualApp,
   listFiles,
   REPORT_DIR,
   slotOf,
@@ -159,11 +160,14 @@ export {
   type Detection,
   type DetectOptions,
   type ProposedGate,
+  type ProposedVisualApp,
 } from "./calibrate/detect.js";
 export {
   calibrate,
   flakyBetween,
   LOOPBACK_QUESTION,
+  visualAppQuestion,
+  withVisualApp,
   type CalibrateDeps,
   type CalibrateOutcome,
 } from "./calibrate/calibrate.js";

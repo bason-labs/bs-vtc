@@ -197,26 +197,42 @@ the base commit (`.vtc/architecture/spine.md`), so a diff cannot loosen its own 
 
 Only new violations count: one the same file already had at the base is baseline. Findings are
 `ToolFinding`s with rule id `vtc-arch/AD-n`, category `architecture`. A block that does not parse
-reports `error` / `infra` (a Check never silently stops running). The block format is
-provisional until it is frozen in `@vtc/shared` and taught to the Architect (contract proposal).
+reports `error` / `infra` (a Check never silently stops running). A `forbidden-pattern` runs in
+the engine process, where a match cannot be interrupted, so it is bounded: a pattern that can
+backtrack catastrophically (a backreference, a repeated group that repeats inside or holds an
+alternation, more than two unbounded quantifiers) does not compile (`error` / `infra`), each line
+is matched on its first 500 characters, and one Check may spend 5 seconds over all changed
+files, checked between lines; running out of it is `error` / `infra` too. A time-bounded
+`node:vm` match is proposed to the integrator (`vm` is not in the runtime-safe built-ins). The
+block format is provisional until it is frozen in `@vtc/shared` and taught to the Architect
+(contract proposal).
 
 ## Scope creep (§7.4)
 
 Every run that executed L2 for a task or feature computes `scope_creep` for `traceability.json`:
 the changed JS/TS/Python files that no test tagged with the run's requirements (any REQ tag when
 the request names none) is in, or reaches through relative imports (a bounded walk from the
-tagged tests' source files, the deterministic stand-in for per-test coverage contexts). Other
-files are not judged; the `traceability.log` note lists them. Each flagged path is one
+tagged tests' source files, the deterministic stand-in for per-test coverage contexts). A test's
+file is the JUnit `file` attribute, a path classname, the path of a pytest node id, or the
+longest existing module path of a pytest dotted classname (`tests.test_models` →
+`tests/test_models.py`, pytest's default xunit2 output). When a tagged test's file cannot be
+found, coverage is incomplete and nothing is flagged: the uncovered files are listed as unjudged.
+Other files are not judged; the `traceability.log` note lists them. Each flagged path is one
 `ToolFinding` (`SCOPE_CREEP_RULE_ID`, category `spec_mismatch`, SARIF level `none`) on the run's
-last L2 result, which keeps its status: triage makes it `info` and defers it.
+last L2 result, which keeps its status: triage makes it `info` and defers it. The frozen
+`GateResultSchema` allows no more findings than `new_violations`, so that result's
+`new_violations` counts them too (contract proposal: a separate count for info findings).
 
 ## The deterministic visual step (AD-24, §7.5, §9.1, D-ay)
 
 A request with `visual` (`screens: []` = the full matrix) gets `GateReport.visual` (a
 `VisualSummary`) and a `VisualReport` at `.vtc/evidence/<T-n|F-n>/gates/<attempt>/visual/
 report.json`, with the screenshots and diff images beside it. It never changes `verdict`.
-Settings: `gates.yml` `visual` (`visualConfigFor`). `screens.yaml` and `tokens.json` are read at
-the base commit; the approved prototype is the checkout's `.vtc/design/prototype/`.
+Settings: `gates.yml` `visual` (`visualConfigFor`). `screens.yaml`, `tokens.json` and the
+approved prototype (`.vtc/design/prototype/`) are read at the base commit, so neither the diff
+nor project code (earlier gates, the app server) can change what verifies it: the prototype
+comes from a clean checkout of the base made for the step, which no gate command ran in and
+which the sandboxed runner may read but not write; `source_hash` covers its bytes.
 
 1. Token lint (`vtc-token/<kind>`) on the lines the diff added to UI files: literal colours (OKLab
    ΔE over `color_delta` from every colour token), spacing and radii off the token scale, font
@@ -225,17 +241,24 @@ the base commit; the approved prototype is the checkout's `.vtc/design/prototype
    Apache-2.0 impeccable (`THIRD_PARTY/impeccable/`, `NOTICE`), each with a flag and a pass
    fixture. Advisory rules report SARIF `note` and do not fail the step.
 3. The browser: the project's own Playwright (resolved inside the checkout, its browser in the
-   user's Playwright cache, pinned on first use under `~/.vtc/browsers/projects/<repo-key>.json`)
-   or the store `vtc doctor --install-browser` fills (`~/.vtc/browsers/node_modules/` and
-   `BROWSER_PIN_FILE`). The executable is re-hashed against its pin before every run; a mismatch
-   is `error`. None: `skipped` with `VISUAL_SKIPPED_NO_BROWSER`. Nothing is downloaded here.
+   user's Playwright cache, pinned per executable path on first use under
+   `~/.vtc/browsers/projects/<repo-key>/<path-hash>.json`, which the report shows as a
+   `vtc-visual/note`) or the store `vtc doctor --install-browser` fills
+   (`~/.vtc/browsers/node_modules/` and `BROWSER_PIN_FILE`). The executable is re-hashed against
+   its pin before every run; a mismatch, an unreadable pin or a pin for another path is `error`.
+   A path seen before is never re-pinned. axe-core and pixelmatch come from the project, else
+   from the store. None: `skipped` with `VISUAL_SKIPPED_NO_BROWSER`. Nothing is downloaded here.
 4. The app server: `visual.app` in `gates.yml` (`command`, a loopback `url`, `cwd`,
-   `ready_timeout_s`), allowlisted like a gate. Provisional: `@vtc/shared` has no field for it
-   yet, so it is read from the raw YAML. Without one the step is `error`.
+   `ready_timeout_s`), allowlisted like a gate. `vtc calibrate` proposes one from the package.json
+   `dev`, `start` or `preview` script (its `--port`/`-p`/`PORT=` or the server's default port, on
+   `http://localhost`), and only a human's yes writes it and puts its argv in the allowlist; a
+   valid one is kept on re-calibration. Provisional: `@vtc/shared` has no field for it yet, so it
+   is read from and written to the raw YAML. Without one, or with one not allowlisted, the step
+   is `error` (gate infrastructure: a human sets it up).
 5. The render matrix runs as one gate command in the sandbox (verify phase, loopback for the app
    server): VTC's runner script (`runner-script.ts`) in the command's private temp directory, run
    with the project's Node. Per job it renders the app at `<url><route>?state=&theme=` and the
-   prototype (served from disk through request interception) in the same run with the same
+   base prototype (served through request interception) in the same run with the same
    browser: headless, DPR 1, `en-US`, `UTC`, a fixed clock, reduced motion, fonts ready,
    animations and the caret off, non-loopback requests aborted, `dynamic_regions` masked. Then
    axe (`axe/<rule>`, an unmodified `axe.min.js` from the project or the store, never bundled),
@@ -244,11 +267,24 @@ the base commit; the approved prototype is the checkout's `.vtc/design/prototype
    `vtc-layout/dimensions` for other sizes).
 6. Status: `error` (runner failed) > `fail` (a blocking finding) > `unchecked` (an unreached
    render or screen, an axe `incomplete` item, a check that could not run: never clean) > `pass`.
+   Each axe `incomplete` rule per screen state is a note-level `axe/<rule>` finding that names
+   what needs review.
+7. Evidence: the screenshots, references and diff images go into the git-tracked evidence
+   unredacted (redaction works on text; an image cannot be redacted). This is an exemption from
+   AD-18 rule 1 recorded here and proposed to the integrator as a spine reading: a page the app
+   server renders could show a secret the app prints. Per run at most 64 MiB of images are
+   copied, diff images first; whatever is left out is a `vtc-visual/note` (the verdict is
+   computed from the runner's data, so it is unaffected).
 
 The novelty check (`visual/novelty.ts`, §9.1 step 4, reading 107) compares a direction's first
 viewport (64-bit dHash) and token vector (OKLCH palette, type pair, radius, density) with the
 per-client design library `~/.vtc/design-library/<scope>/`; `too_similar` only when both are
-under their thresholds. `recordDesignChoice` adds the chosen direction.
+under their thresholds, judged over the whole library (the report lists the ten nearest,
+too-similar ones first). `recordDesignChoice` adds the chosen direction. Nothing calls it yet:
+engine core may not import `gates/` (AD-13 rules 1 and 7) and the frozen `GateRunner` and
+`VisualRequest` have no novelty entry, so wiring it needs a contract seam (proposed to the
+integrator: a novelty mode of `GateRunRequest.visual`, or an injected `EngineDeps` function the
+cli builds from `gates.visual.checkNovelty`).
 
 ## Not built yet (tracked follow-up increments)
 
@@ -264,9 +300,15 @@ under their thresholds. `recordDesignChoice` adds the chosen direction.
   `null`, so the coverage part of the monotonic rule applies only to a hand-written L3 gate's
   `diff_coverage_pct`.
 - **Visual step, live.** No test runs a real browser: Chromium inside `sandbox-exec`/`bwrap`
-  (its own sandbox is off, `chromiumSandbox: false`; the macOS profile may need more system
-  services) is a spike. The render cache keyed by `source_hash` is not used yet (every run
-  renders). The detector ports the source-level slop rules only (no live-DOM, quality or
-  design-system drift rules). Novelty rendering of the directions' first viewports is engine
-  core's to wire (`checkNovelty` takes the PNG).
+  (its own sandbox is off, `chromiumSandbox: false`, so the gate sandbox is the only boundary
+  around the untrusted page; the macOS profile may need more system services) is a spike, and
+  an opt-in live test needs a local `playwright-core`, which this repo does not install. The
+  render cache keyed by `source_hash` is not used yet (every run renders, and every attempt
+  copies its images, up to the per-run cap). The detector ports the source-level slop rules
+  only (no live-DOM, quality or design-system drift rules). The novelty check has no caller
+  until the contract seam exists (see above).
+- **Visual app server detection** knows the default ports of common dev and preview servers
+  (Vite, Next, Nuxt, Astro, Angular, webpack, Create React App) and the explicit `--port`,
+  `-p` and `PORT=` forms; any other server needs `visual.app` written by hand and confirmed with
+  `vtc calibrate`.
 - **Scope creep** reads no per-test coverage contexts and judges only JS/TS/Python files.
