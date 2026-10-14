@@ -140,7 +140,7 @@ describe("authStatus through the host's own status command (AD-25 rule 3, AD-9)"
     expect(await status(adapter)).toMatchObject({ logged_in: true, method: null, billing: null });
   });
 
-  it("Claude: billing is the subscription unless the status reports an API key (D-bq, spine §5 reading 171)", async () => {
+  it("Claude: billing is api_key for an API key, subscription only for a known first-party subscription login, else unknown (D-bq, spine §5 reading 171)", async () => {
     const cases: readonly (readonly [
       Record<string, unknown>,
       "subscription" | "api_key" | null,
@@ -148,12 +148,23 @@ describe("authStatus through the host's own status command (AD-25 rule 3, AD-9)"
       [{ loggedIn: true, authMethod: "claude.ai" }, "subscription"],
       [{ loggedIn: true, authMethod: "claude.ai", apiKeySource: "none" }, "subscription"],
       [{ loggedIn: true, authMethod: "oauth_token" }, "subscription"],
+      [{ loggedIn: true, authMethod: "claude.ai", apiProvider: "firstParty" }, "subscription"],
       [{ loggedIn: true, authMethod: "api_key" }, "api_key"],
       [{ loggedIn: true, authMethod: "apiKeyHelper" }, "api_key"],
       [{ loggedIn: true, authMethod: "claude.ai", apiKeySource: "ANTHROPIC_API_KEY" }, "api_key"],
       [{ loggedIn: true, authMethod: "api_key", apiKeySource: "apiKeyHelper" }, "api_key"],
       // the status names no login method at all: unknown, never a guess
       [{ loggedIn: true }, null],
+      // a cloud provider bills per token, not the subscription: unknown, never "subscription"
+      [{ loggedIn: true, authMethod: "third_party", apiProvider: "bedrock" }, null],
+      [{ loggedIn: true, authMethod: "claude.ai", apiProvider: "vertex" }, null],
+      [{ loggedIn: true, authMethod: "third_party" }, null],
+      [{ loggedIn: true, authMethod: "oauth_token", apiProvider: "gateway" }, null],
+      // a method it does not know: unknown
+      [{ loggedIn: true, authMethod: "none" }, null],
+      [{ loggedIn: true, authMethod: "something_new" }, null],
+      // an API key is reported whatever the provider
+      [{ loggedIn: true, authMethod: "api_key", apiProvider: "foundry" }, "api_key"],
     ];
     for (const [json, billing] of cases) {
       const { adapter } = adapterFor("claude-code", replying(0, JSON.stringify(json)));

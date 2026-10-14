@@ -106,6 +106,9 @@ describe("Codex parseEvents: recorded headless role runs (live check 2026-10-14,
   });
 
   it("counts cache_write_input_tokens (new in the 2026-10-14 stream) as cache writes", () => {
+    // Open question (§7 note): every recording has cache_write_input_tokens at 0, so whether it
+    // is a subset of input_tokens (like cached_input_tokens) or on top of it is unconfirmed. This
+    // pins the current reading, additive, which can only overcount cost against the budget.
     const outcome = parse([
       JSON.stringify({
         type: "turn.completed",

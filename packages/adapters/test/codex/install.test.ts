@@ -85,11 +85,13 @@ describe("Codex install (AD-6 rule 5, AD-16 rules 3–4)", () => {
     expect(existsSync(join(skills, "vtc-gone"))).toBe(false);
     // D-bn (spine §5 reading 168): the plugin is to be registered, hooks included; until this
     // install does it, the notes say so and the skills stay where Codex loads skills
-    const registration = result.notes.find((note) => note.includes("D-bn"));
+    const registration = result.notes.find((note) => note.includes("not registered with Codex"));
     expect(registration).toMatch(/not registered with Codex yet/);
     expect(registration).toMatch(/hooks/);
     expect(registration).toMatch(/desktop app/);
     expect(registration).toContain(skills);
+    // the note a user reads carries no internal decision id
+    expect(result.notes.join(" ")).not.toMatch(/\bD-[a-z]{1,3}\b/u);
     // H-1 (spine §5 reading 99, replacing F7's "no roles in v1"): the engine runs a Codex Lead's
     // roles as headless Codex runs; in-session Codex roles stay refused (reading 82)
     const notes = result.notes.join(" ");

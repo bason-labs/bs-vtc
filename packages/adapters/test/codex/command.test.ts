@@ -197,7 +197,7 @@ describe("Codex sandboxProfile (§12.1, AD-9)", () => {
       }
     });
 
-    it("every other role has web search off explicitly, so the user's config.toml cannot turn it on", () => {
+    it("every other role sets web search to disabled explicitly (a top-level override; profile precedence is open, §7 H-3)", () => {
       for (const tools of [READ_ONLY, WRITE_SCOPED, ENGINEER, { ...READ_ONLY, host_web: false }]) {
         const p = profile(tools);
         expect(p.cliArgs).toContain('web_search="disabled"');
