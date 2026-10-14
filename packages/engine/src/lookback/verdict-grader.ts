@@ -31,7 +31,13 @@
  * of the hashed grader bundle ({@link VERDICT_GRADER_VERSION}, `graderBundleSha`), so a replay
  * graded by another version of it is never compared with this one.
  */
-import { isEventOfType, readEventData, type Verdict, type VtcEvent } from "@vtc/shared";
+import {
+  isEventOfType,
+  readEventData,
+  type GateVerdict,
+  type Verdict,
+  type VtcEvent,
+} from "@vtc/shared";
 
 /** Bump when what {@link recordedOutcome} reads or how {@link gradeVerdictTrial} scores changes. */
 export const VERDICT_GRADER_VERSION = 1;
@@ -216,4 +222,25 @@ export const gradeVerdictTrial = (
 ): boolean => {
   const answers = verdicts.filter((v) => v.subject === expected.subject);
   return answers.length > 0 && answers.every((v) => v.verdict === expected.verdict);
+};
+
+/**
+ * The verdict grader as RETRO calls it for one trial (the `gradeVerdict` seam core's
+ * `LookbackRetro` names; D-ch, reading 202): the trial's verdicts scored against the recorded
+ * outcome of the dispatch it replays (`at`: the recorded dispatch's run and action id, its pack's
+ * `run` and `action_id`), read from `history` (the runs' events without replay trials). `pass` or
+ * `fail` measure the trial ({@link gradeVerdictTrial}); `infra_error` measures nothing: the replayed
+ * dispatch has no recorded outcome in the history the trial is graded against, so nothing can say
+ * which verdict was right.
+ */
+export const gradeVerdictReplay = (
+  history: readonly VtcEvent[],
+  at: { readonly run: string; readonly trace: string },
+  verdicts: readonly { readonly subject: string; readonly verdict: string }[],
+): GateVerdict => {
+  const outcome = recordedOutcome(history, at);
+  if (outcome === undefined) return "infra_error";
+  return gradeVerdictTrial({ subject: outcome.subject, verdict: outcome.expected }, verdicts)
+    ? "pass"
+    : "fail";
 };
