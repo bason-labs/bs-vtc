@@ -374,6 +374,14 @@ export const createGhRemoteMerge = (options: GhRemoteMergeOptions): RemoteMergeS
           ];
         });
       }
+      // `gh pr checks` reports on whatever the head is when it runs: a push since the first read
+      // would make these the checks of another commit
+      const after = await viewRaw(branch);
+      const afterHead = after === null ? null : (pullRequestRefOf(after)?.head_sha ?? null);
+      if (afterHead !== shaArg(sha))
+        throw new Error(
+          `the PR head of ${branch} moved to ${afterHead ?? "nothing"} while its checks were read, not the gated ${sha}`,
+        );
       // a required check that has not reported on this head yet is pending, not absent
       const seen = new Set(reported.map((c) => c.name));
       return [

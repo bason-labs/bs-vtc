@@ -212,6 +212,11 @@ const MARKER = ".vtc-integrity";
  * target), in sorted order, leaving out the marker. Recorded in the marker at install, so a
  * re-run notices any later change to the package's files (`cli.js`, `axe.min.js`…) and installs
  * it again from the verified tarball.
+ *
+ * This detects drift (a partial copy, an edit, a cleanup tool), not deliberate tampering: the
+ * marker sits in the same user-writable store it describes, so whatever can rewrite a package can
+ * rewrite its marker too (and the `BrowserPin` beside it). Only the npm integrity of a freshly
+ * downloaded tarball is a real check; the store is as trustworthy as the user's own account.
  */
 export const treeHash = (dir: string): string => {
   const hash = createHash("sha256");
@@ -256,7 +261,9 @@ const installPackage = async (
   if (existsSync(marker)) {
     const [integrity, tree] = readFileSync(marker, "utf8").split("\n");
     if (integrity === pkg.integrity && tree !== undefined && tree === treeHash(target)) {
-      deps.log(`  ${pkg.name}@${pkg.version}: already installed and verified`);
+      deps.log(
+        `  ${pkg.name}@${pkg.version}: already installed, unchanged since its verified install`,
+      );
       return;
     }
     deps.log(`  ${pkg.name}@${pkg.version}: changed since it was installed; installing it again`);

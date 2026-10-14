@@ -329,6 +329,22 @@ describe("the merge path (AD-23 rule 2)", () => {
     ).toEqual([]);
   });
 
+  it("refuses checks read while a push moved the PR head off the gated SHA", async () => {
+    let views = 0;
+    const { gh } = fakeGh(
+      on("pr view vtc/F-1", () => {
+        views += 1;
+        return ok(prJson(views === 1 ? {} : { headRefOid: OTHER }));
+      }),
+      ...requiredPolicy(["test"]),
+      on("pr checks vtc/F-1 --required", ok([{ name: "test", bucket: "pass" }])),
+    );
+    await expect(
+      createGhRemoteMerge({ repoRoot: "/r", gh, git: noGit }).requiredChecks("vtc/F-1", HEAD),
+    ).rejects.toThrow(/moved to b{40} while its checks were read, not the gated a{40}/);
+    expect(views).toBe(2);
+  });
+
   it("counts a required check that has not reported yet as pending (AD-23 rule 2)", async () => {
     const { gh, calls } = fakeGh(
       on("pr view vtc/F-1", ok(prJson({ baseRefName: "develop" }))),

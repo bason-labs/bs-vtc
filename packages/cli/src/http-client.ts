@@ -181,15 +181,21 @@ export const createHttpClient = (deps: HttpClientDeps): HttpClient => ({
           if (hop >= MAX_REDIRECTS)
             throw new HttpGuardError(`more than ${String(MAX_REDIRECTS)} redirects`);
           const next = checkUrl(new URL(location, url).toString());
-          if (next.origin !== url.origin)
-            headers = Object.fromEntries(
-              Object.entries(headers).filter(([name]) => CROSS_ORIGIN_HEADERS.has(name)),
-            );
           // 301-303 turn a POST into a GET without a body; 307 and 308 keep both
           if (method === "POST" && response.status !== 307 && response.status !== 308) {
             method = "GET";
             body = undefined;
             delete headers["content-type"];
+          }
+          if (next.origin !== url.origin) {
+            // the fetcher's key may be in the body: it never goes to another origin
+            if (body !== undefined)
+              throw new HttpGuardError(
+                `a ${String(response.status)} redirect to another origin (${next.origin}) would resend the request body`,
+              );
+            headers = Object.fromEntries(
+              Object.entries(headers).filter(([name]) => CROSS_ORIGIN_HEADERS.has(name)),
+            );
           }
           url = next;
           continue;

@@ -26,3 +26,14 @@ export const defaultGestureDeps = (): GestureDeps => ({
 /** The refusal shown without a terminal. */
 export const needsTerminal = (what: string): string =>
   `${what} is a human decision: run it yourself in an interactive terminal (an agent's shell or a pipe cannot confirm it)`;
+
+// eslint-disable-next-line no-control-regex -- control characters are what this escapes
+const CONTROL = /[\u0000-\u001f\u007f-\u009f]/g;
+
+/**
+ * Text from a file someone else can write (a git-tracked ledger, a replay file), made safe to
+ * print just before a confirmation: C0 and C1 control characters and DEL are shown as `\uXXXX`
+ * escapes, so a stored terminal sequence cannot change what the human sees.
+ */
+export const printable = (text: string): string =>
+  text.replace(CONTROL, (c) => `\\u${c.charCodeAt(0).toString(16).padStart(4, "0")}`);

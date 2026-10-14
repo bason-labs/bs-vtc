@@ -24,6 +24,7 @@ import {
   defaultGestureDeps,
   EXIT_NOT_CONFIRMED,
   needsTerminal,
+  printable,
   type GestureDeps,
 } from "../human-gesture.js";
 import { requireRepoRoot, requireVtcProject, UsageError } from "../repo.js";
@@ -33,14 +34,20 @@ import { EXIT, guarded, parseFlags } from "./util.js";
 const USAGE = "usage: vtc merge-level restore [--level 1|2|3] [--reason <text>]";
 
 export interface LedgerRead {
+  /** The file's text as read ("" when it is missing). */
+  readonly text: string;
   readonly entries: readonly MergeLevelLedgerEntry[];
   /** 1-based line numbers that did not parse (skipped). */
   readonly skipped: readonly number[];
 }
 
-/** The ledger's entries in order; a missing file is empty. Lines that do not parse are skipped. */
+/**
+ * The ledger's entries in order; a missing file is empty. Lines that do not parse are skipped.
+ * The ledger is git-tracked, so a cloned repo controls it: it is never read through a symlink.
+ */
 export const readMergeLevelLedger = (repoRoot: string): LedgerRead => {
   let text = "";
+  git.assertNoSymlinks(repoRoot, MERGE_LEVEL_LEDGER);
   try {
     text = readFileSync(join(repoRoot, MERGE_LEVEL_LEDGER), "utf8");
   } catch (error) {
@@ -61,7 +68,7 @@ export const readMergeLevelLedger = (repoRoot: string): LedgerRead => {
     if (parsed.success) entries.push(parsed.data);
     else skipped.push(i + 1);
   });
-  return { entries, skipped };
+  return { text, entries, skipped };
 };
 
 const capOf = (entries: readonly MergeLevelLedgerEntry[]): MergeLevel =>
@@ -106,7 +113,7 @@ export const createMergeLevelCommand = (
       );
       if (last !== undefined)
         ctx.io.out(
-          `  last downgrade ${last.at}: ${last.reason}${last.feature === undefined ? "" : ` (${last.feature})`}: ${last.detail}`,
+          `  last downgrade ${last.at}: ${last.reason}${last.feature === undefined ? "" : ` (${printable(last.feature)})`}: ${printable(last.detail)}`,
         );
       const after = Math.min(configured, level.data);
       ctx.io.out(
@@ -119,6 +126,14 @@ export const createMergeLevelCommand = (
       if (!(await d.confirm(`Restore the merge level to ${String(after)}?`))) {
         ctx.io.out("Not confirmed: the ledger is unchanged.");
         return EXIT_NOT_CONFIRMED;
+      }
+      // a restore overrides every earlier downgrade, so it must not clear one the human never saw:
+      // the engine may have appended a downgrade (a revert, a red base run) while they decided
+      if (readMergeLevelLedger(repoRoot).text !== ledger.text) {
+        ctx.io.err(
+          `vtc merge-level: ${MERGE_LEVEL_LEDGER} changed while you decided; run it again to see the new entries`,
+        );
+        return EXIT.failed;
       }
       const reason = (values.reason ?? "").trim();
       const entry = MergeLevelLedgerEntrySchema.parse({

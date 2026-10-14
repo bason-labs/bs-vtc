@@ -5,6 +5,7 @@
  * interactive terminal (the AD-21 Check's cli part) and write nothing on a no.
  */
 import {
+  appendFileSync,
   existsSync,
   mkdirSync,
   readFileSync,
@@ -156,6 +157,50 @@ describe("vtc merge-level restore (AD-23 rule 5)", () => {
     expect(existsSync(join(clean, MERGE_LEVEL_LEDGER))).toBe(false);
   });
 
+  it("refuses when the engine appends a downgrade while the human decides", async () => {
+    const repo = levelRepo(3, [ledgerLine({})]);
+    const { ctx, err } = capture(repo, tempHome());
+    const fresh = ledgerLine({ cap: 1, reason: "revert", detail: "a new revert on main" });
+    const deps: GestureDeps = {
+      ...human(true),
+      confirm: () => {
+        // the engine's append, between what the human saw and their yes
+        appendFileSync(join(repo, MERGE_LEVEL_LEDGER), `${fresh}\n`);
+        return Promise.resolve(true);
+      },
+    };
+    expect(await createMergeLevelCommand(() => deps).run(["restore"], ctx)).toBe(1);
+    expect(err.join("\n")).toMatch(/changed while you decided; run it again/);
+    const entries = ledgerOf(repo);
+    expect(entries.map((e) => e.kind)).toEqual(["downgrade", "downgrade"]);
+    expect(effectiveMergeLevel(3, entries)).toBe(1);
+  });
+
+  it("never reads the ledger through a symlink, and escapes control characters it shows", async () => {
+    const repo = levelRepo(3, [
+      ledgerLine({ detail: "reverted\u001b[2K\u001b[1Gall clear\u009b" }),
+    ]);
+    const shown = capture(repo, tempHome());
+    expect(await createMergeLevelCommand(() => human(false)).run(["restore"], shown.ctx)).toBe(
+      EXIT_NOT_CONFIRMED,
+    );
+    const text = shown.out.join("\n");
+    expect(text).not.toContain("\u001b");
+    expect(text).not.toContain("\u009b");
+    expect(text).toContain("reverted\\u001b[2K\\u001b[1Gall clear\\u009b");
+    // a planted link to another ledger is refused, not followed
+    const outside = tempHome();
+    writeFileSync(join(outside, "ledger.jsonl"), `${ledgerLine({ cap: 1 })}\n`);
+    rmSync(join(repo, MERGE_LEVEL_LEDGER));
+    symlinkSync(join(outside, "ledger.jsonl"), join(repo, MERGE_LEVEL_LEDGER));
+    const linked = capture(repo, tempHome());
+    expect(await createMergeLevelCommand(() => human(true)).run(["restore"], linked.ctx)).toBe(1);
+    expect(linked.err.join("\n")).toMatch(/symlink/);
+    expect(
+      readFileSync(join(outside, "ledger.jsonl"), "utf8").split("\n").filter(Boolean),
+    ).toHaveLength(1);
+  });
+
   it("skips a ledger line that does not parse, and checks its arguments", async () => {
     const repo = levelRepo(3, ["{not json", ledgerLine({})]);
     const { ctx, err } = capture(repo, tempHome());
@@ -213,11 +258,27 @@ const writeVersion = (
   writeFileSync(path, `---\n${JSON.stringify(front, null, 2)}\n---\nTest first.\n`);
 };
 
+/** `wins` tasks the candidate won outright, 3 runs per arm; the sign test is P(X >= wins) = 0.5^wins. */
+const wonTasks = (wins: number) =>
+  Array.from({ length: wins }, (_, i) => ({
+    task: `T-${String(i + 1)}`,
+    a: [false, false, false],
+    b: [true, true, true],
+    regression_set: false,
+  }));
+
+/** Consistent replay files: `improve` is 6 of 6 tasks won (p = 1/64), `inconclusive` 2 of 2 (p = 1/4). */
+const REPLAYS = {
+  improve: { per_task: wonTasks(6), sign_test: { n_discordant: 6, wins_b: 6, p: 1 / 64 } },
+  inconclusive: { per_task: wonTasks(2), sign_test: { n_discordant: 2, wins_b: 2, p: 1 / 4 } },
+} as const;
+
 const writeReplay = (
   repo: string,
   candidate: string,
-  verdict: string,
+  verdict: keyof typeof REPLAYS,
   baseline = sha("a"),
+  override: Record<string, unknown> = {},
 ): string => {
   const rel = ".vtc/lookback/replays/p-1.json";
   mkdirSync(join(repo, dirname(rel)), { recursive: true });
@@ -232,14 +293,12 @@ const writeReplay = (
       candidate,
       grader_bundle_sha: sha("9"),
       k: 3,
-      per_task: [
-        { task: "T-1", a: [false, false, false], b: [true, true, true], regression_set: false },
-      ],
+      ...REPLAYS[verdict],
       aa_flip_rate: 0.05,
-      sign_test: { n_discordant: 6, wins_b: 6, p: 0.016 },
       tokens_delta_pct: 4,
       verdict,
       finished_at: "2026-10-13T09:00:00.000Z",
+      ...override,
     }),
   );
   return rel;
@@ -345,7 +404,7 @@ describe("vtc lookback approve|pin|rollback (AD-21 rule 3)", () => {
     expect(start.out).toMatch(/Start a canary of dddddddd .* half run aaaaaaaa/);
     // the human sees the evidence, and where it comes from (a repo file roles can write)
     expect(start.out).toMatch(
-      /evidence \(\.vtc\/lookback\/replays\/p-1\.json, a file in the repo: check it\): the replay says improve with p = 0\.016 over 6 discordant tasks \(6 won by the candidate\), 1 tasks x 3 runs per arm, tokens \+4%, A\/A flip rate 0\.05/,
+      /evidence \(\.vtc\/lookback\/replays\/p-1\.json, a file in the repo: check it\): its trials, recomputed here, say improve with p = 0\.016 over 6 discordant tasks \(6 won by the candidate\), 6 tasks x 3 runs per arm, tokens \+4%, A\/A flip rate 0\.05/,
     );
     const key = engineRepoKey(repo);
     expect(pinsOf(home).projects[key]?.canaries).toEqual([
@@ -379,6 +438,54 @@ describe("vtc lookback approve|pin|rollback (AD-21 rule 3)", () => {
       ["approve", sha("a"), sha("d"), "human"],
       ["promote", sha("a"), sha("d"), "human"],
     ]);
+  });
+
+  it("recomputes the replay's verdict from its trials and never trusts the file's own", async () => {
+    const repo = initVtcRepo();
+    const approve = async (override: Record<string, unknown>) => {
+      const h = tempHome();
+      writeVersion(h, sha("a"));
+      expect((await run(repo, h, ["pin", ...T, "--version", sha("a")])).code).toBe(0);
+      writeVersion(h, sha("d"), {
+        parent: sha("a"),
+        evaluation: writeReplay(repo, sha("d"), "improve", sha("a"), override),
+      });
+      const r = await run(repo, h, ["approve", ...T, "--version", sha("d")]);
+      expect(pinsOf(h).projects[engineRepoKey(repo)]?.canaries).toEqual([]);
+      return r;
+    };
+    // a hand-edited improve whose trials say inconclusive (2 of 2 won: p = 0.25)
+    const forged = await approve({ per_task: wonTasks(2) });
+    expect(forged.code).toBe(1);
+    expect(forged.err).toMatch(
+      /p-1\.json does not add up: its trials give inconclusive \(p = 0\.250 over 2 discordant tasks, 2 won by the candidate\), but the file says improve \(p = 0\.016, 6 discordant, 6 won\): no canary/,
+    );
+    // forged numbers that agree with each other but not with the trials
+    const numbers = await approve({
+      per_task: wonTasks(2),
+      sign_test: { n_discordant: 2, wins_b: 2, p: 0.01 },
+    });
+    expect(numbers.code).toBe(1);
+    expect(numbers.err).toMatch(/does not add up/);
+    // a task with fewer runs than k in one arm
+    const short = await approve({
+      per_task: [
+        ...wonTasks(5),
+        { task: "T-6", a: [false], b: [true, true, true], regression_set: false },
+      ],
+    });
+    expect(short.code).toBe(1);
+    expect(short.err).toMatch(/not a complete replay: task "T-6" does not have 3 runs per arm/);
+    // a regression-set task that drops makes the trials regress, whatever the file says
+    const regress = await approve({
+      per_task: [
+        ...wonTasks(6),
+        { task: "R-1", a: [true, true, true], b: [false, false, false], regression_set: true },
+      ],
+      sign_test: { n_discordant: 7, wins_b: 6, p: 0.0625 },
+    });
+    expect(regress.code).toBe(1);
+    expect(regress.err).toMatch(/its trials give regress/);
   });
 
   it("refuses a replay against another baseline or mode, or read through a link", async () => {
