@@ -7,6 +7,7 @@
 import {
   CONTRACTS_VERSION,
   DOMAIN_PACKS,
+  engineerProfileLockedSection,
   ENGINE_MCP_TOOLS,
   engineMcpServer,
   findForbiddenInText,
@@ -321,6 +322,24 @@ export const codexModelErrors = (role: RoleContract): string[] => {
   ];
 };
 
+/**
+ * The prompt identity sections of a role's agents (AD-21 rule 1; `prompt-parts.ts`): the role's
+ * own trimmed `prompt.md` sections, except that an engineer profile's locked section is
+ * `engineerProfileLockedSection` of the Engineer's sections and the profile's own locked core
+ * (spine §5 reading 172, D-br). `buildInstructions` has already refused a profile without the
+ * Engineer, so the fallback to the profile's own core is never emitted.
+ */
+const identitySections = (
+  loaded: LoadedRole,
+  engineer: LoadedRole | undefined,
+): { readonly locked: string; readonly editable: string } => ({
+  locked:
+    loaded.role.kind === "engineer_profile" && engineer !== undefined
+      ? engineerProfileLockedSection(engineer.prompt, loaded.prompt.locked)
+      : loaded.prompt.locked.trim(),
+  editable: loaded.prompt.editable.trim(),
+});
+
 const compileAgents = (
   roles: readonly LoadedRole[],
   host: HostId,
@@ -367,7 +386,7 @@ const compileAgents = (
         tools: built.contract.tools,
         model: built.contract.models[host],
         instructions: agentInstructions(built, inPack),
-        sections: { locked: loaded.prompt.locked.trim(), editable: loaded.prompt.editable.trim() },
+        sections: identitySections(loaded, input.sources.engineer),
         skills: needs.skills,
         ...(inPack ? { editableInPack: true } : {}),
       });
@@ -385,7 +404,7 @@ const manifestAgent = (agent: CompiledAgent, file: string): PluginManifestAgent 
   role_version: agent.roleVersion,
   file,
   prompt_sha256: promptShaFor(agent.instructions),
-  // AD-21 / PluginManifestAgent: the SHA-256 of the role's trimmed `splitRolePrompt` sections.
+  // AD-21 / PluginManifestAgent: the SHA-256 of the trimmed identity sections (`identitySections`).
   locked_sha256: sha256Hex(agent.sections.locked),
   editable_sha256: sha256Hex(agent.sections.editable),
   ...(agent.editableInPack === true ? { editable_in_pack: true } : {}),
@@ -403,7 +422,10 @@ const skillFiles = (host: HostId, skills: readonly Skill[]): EmittedFile[] =>
     s.files.map((f) => ({ path: `skills/${s.name}/${f.path}`, text: skillTextFor(host, f.text) })),
   );
 
-/** Each agent's role sections (`vtc/prompts/<agent>/{locked,editable}.md`, AD-21 rule 2). */
+/**
+ * Each agent's identity sections (`vtc/prompts/<agent>/{locked,editable}.md`, AD-21 rule 2): the
+ * texts its `locked_sha256` and `editable_sha256` hash.
+ */
 const promptPartFiles = (agents: readonly CompiledAgent[]): EmittedFile[] =>
   agents.flatMap((a) => [
     { path: rolePromptAssetPath(a.name, "locked"), text: a.sections.locked },

@@ -52,14 +52,23 @@ const roleEngineTools = (tools: RoleTools): readonly string[] => {
 };
 
 /**
+ * Claude Code's own web search and page fetch, for a role whose contract sets `host_web` (H-3,
+ * spine §5 reading 156; AD-22 rule 6). `RoleToolsSchema` refuses `host_web` on a
+ * `code_sandboxed` role, so no agent with a shell gets them.
+ */
+export const CLAUDE_HOST_WEB_TOOLS = ["WebSearch", "WebFetch"] as const;
+
+/**
  * Explicit tool allowlist per profile: read-only roles get no write or shell tool; write-scoped
- * roles get file writes (the engine checks the paths); only the Engineer family gets Bash.
- * The engine MCP tools a role declares are added by their plugin names; a human-only one throws.
+ * roles get file writes (the engine checks the paths); only the Engineer family gets Bash; only
+ * a `host_web` role gets the host's web tools. The engine MCP tools a role declares are added by
+ * their plugin names; a human-only one throws.
  */
 export const claudeToolsFor = (tools: RoleTools): string[] => [
   ...READ_TOOLS,
   ...(tools.profile === "read_only" ? [] : WRITE_TOOLS),
   ...(tools.profile === "code_sandboxed" ? ["Bash"] : []),
+  ...(tools.host_web === true ? CLAUDE_HOST_WEB_TOOLS : []),
   ...roleEngineTools(tools).map(claudeEngineToolName),
 ];
 
@@ -122,6 +131,10 @@ export const renderClaudeAgent = (agent: CompiledAgent): string =>
  * sandbox, the network and the engine bridge a Codex role gets are the parent session's; that is
  * why the engine dispatches no Codex role in-session (`inSessionDispatchRefusal`) until the
  * session's own sandbox is shown network-off.
+ *
+ * Host web search (`RoleTools.host_web`, H-3) has no per-agent switch in that list either, so a
+ * Codex agent file names none: a headless `codex exec` role run turns web search on for a
+ * `host_web` role through the adapter's own flags (spine §7, "Host web search in role runs").
  */
 export const codexFeaturesFor = (tools: RoleTools): Readonly<Record<string, false>> => ({
   ...(tools.profile === "code_sandboxed" ? {} : { shell_tool: false }),

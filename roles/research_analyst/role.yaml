@@ -3,9 +3,10 @@
 #   product/product-trend-researcher.md (competitor taxonomy incl. DIY workarounds)
 #   specialized/business-strategist.md ("what must be true", stress-test key assumptions)
 #   testing/testing-tool-evaluator.md (weighted matrix for library or vendor choice)
-# New: software-source evidence tiers, citations the engine resolves, untrusted-content rule.
+# New: software-source evidence tiers, citations the engine resolves, untrusted-content rule;
+# discovery with the host's own web search and page fetch (H-3, spine §5 reading 156).
 id: research_analyst
-version: 2.0.0
+version: 2.1.0
 kind: core
 mission: >-
   Answer the research questions a new project or large feature raises with a brief in which every
@@ -24,4 +25,5 @@ tools:
   profile: write_scoped
   write_paths: [".vtc/research/briefs/**"]
   engine_tools: [research_fetch, fact_lookup, fact_propose]
+  host_web: true
 budget: { context_tokens: 80000 }
