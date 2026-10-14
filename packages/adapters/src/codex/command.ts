@@ -53,14 +53,14 @@
  *   decision there may run the matched command outside the sandbox, with the network and full
  *   writes; whether it does is for the §7 spike row on Codex host config to confirm, and the flag
  *   makes the answer moot for role runs.
- *   `codex exec --help` (0.162.1) has no override that drops project MCP servers: `-c` sets one
- *   dotted key, the help does not say whether a table value replaces or merges, no flag skips the
- *   project `.codex/config.toml` (`--ignore-user-config` covers only `$CODEX_HOME`), and a
- *   blanket `mcp_servers={}` would also drop the engine bridge roles use (the `mcp_servers.vtc.*`
- *   keys a role run sets touch only that one server). The engine's restore of
- *   `.codex/**` before every dispatch and resume is the barrier; the §7 spike row ("Codex project
- *   config in a linked worktree") settles the override. Project hooks need persisted trust, and
- *   no run ever passes the hook-trust bypass.
+ *   MCP servers from a project `.codex/config.toml` (a linked worktree inside a trusted repo
+ *   loads its own, so a role could plant one) are turned off like the user's: `codex exec`
+ *   0.162.1 has no flag that drops them, and a `-c` table value merges into the configured
+ *   servers rather than replacing them, so the adapter lists what the run would load and turns
+ *   each one off by name (`mcp-servers.ts`, `mcp-isolation.json`). The engine's restore of
+ *   `.codex/**` before every dispatch and resume stays the barrier for the rest of a planted
+ *   project config. Project hooks need persisted trust, and no run ever passes the hook-trust
+ *   bypass.
  * - Engine tools through the bridge (D-an, spine §5 reading 71): every role run, fresh or resumed,
  *   pins the engine bridge `[mcp_servers.vtc]` (`engineMcpServer("codex")`, the entry `vtc install`
  *   writes) and limits it: `enabled_tools` is the role's `engine_tools` and nothing else, and
@@ -77,13 +77,14 @@
  * - Web search (H-3, D-cf): `cached` for a `host_web` role, explicitly `disabled` for every other
  *   role, never `live`; see {@link CodexWebSearch}. Every role run also turns off the Codex
  *   features that reach pages by another route ({@link CODEX_ROLE_FEATURES_OFF}: the apps
- *   connectors, browser and computer use). Not closed: the MCP servers in the user's own
- *   `config.toml` (a fetch or browser server, say) still load into every role run and run outside
- *   the role sandbox with the network. Claude runs drop them (`--strict-mcp-config`); `codex exec`
- *   has no such flag (above), `--ignore-user-config` would drop the rest of the user's config with
- *   them, and disabling each by name (`-c mcp_servers.<name>.enabled=false`) needs their names,
- *   which this pure builder does not have. So Codex reports `safeHostWeb` false (see `index.ts`)
- *   until the §7 H-3 row settles it.
+ *   connectors, browser and computer use, and plugins). MCP servers other than the engine bridge
+ *   (the user's own in `config.toml`, a trusted project's, a plugin's) would run outside the role
+ *   sandbox with the network, a fetch or browser server among them; Claude runs drop them
+ *   (`--strict-mcp-config`). Here the adapter lists the servers a run would load before every
+ *   start or resume and the command turns each one off by name ({@link CodexCommandOptions}
+ *   `.mcpServersOff`, `mcp-servers.ts`); plugins go off with the features above, since a
+ *   plugin's servers have no name to turn off. Codex still reports `safeHostWeb` false (see
+ *   `index.ts`) until the §7 H-3 row's open probe passes.
  * - `codex exec` has no agent flag: a headless run gets no compiled role instructions
  *   (`developer_instructions` of `.codex/agents/vtc-*.toml`), so the role rests on the prompt
  *   (the task pack). Engine core carries the role itself (spine §5 reading 145): the compiled
@@ -107,6 +108,7 @@ import {
   type SpawnRoleRequest,
 } from "@vtc/shared";
 import { checkProfileArgs } from "../common/argv.js";
+import { codexMcpServersOffOverride } from "./mcp-servers.js";
 import { canonicalPath, vtcHomeWriteDeniedPaths, within } from "../common/homes.js";
 
 export const CODEX_BINARY = "codex";
@@ -164,7 +166,11 @@ const codexWebSearch = (tools: RoleTools): CodexWebSearch => {
  * role run, whatever its tools (D-cf, D-cl): `apps`, the ChatGPT apps connectors (the
  * `codex_apps` MCP server, whose `search_service.web_run` a role with `web_search="disabled"`
  * still called in the 2026-10-15 live check, codex-cli 0.162.1), and browser and computer use.
- * No role needs them; the engine bridge is a separate MCP server and stays.
+ * Also `plugins`: an installed plugin's own MCP servers (its `.mcp.json`) have no config entry a
+ * role run could turn off by name, and only turning plugins off drops them (the D-cl offline check,
+ * `mcp-isolation.json`; see `mcp-servers.ts`). No role needs any of them: a role run loads no
+ * compiled agent or plugin (the engine carries the role in the prompt), and the engine bridge is a
+ * separate MCP server and stays.
  */
 export const CODEX_ROLE_FEATURES_OFF = [
   "apps",
@@ -172,6 +178,7 @@ export const CODEX_ROLE_FEATURES_OFF = [
   "browser_use_external",
   "in_app_browser",
   "computer_use",
+  "plugins",
 ] as const;
 
 const featureOffOverride = (feature: string): string => `features.${feature}=false`;
@@ -392,7 +399,25 @@ export const codexSchemaFile = (scratchDir: string, schema: Readonly<Record<stri
 
 export interface CodexCommandOptions {
   readonly scratchDir: string;
+  /**
+   * The MCP servers besides the engine bridge that the run would load (the user's, a trusted
+   * project's), which the command turns off (see `mcp-servers.ts`). The adapter lists them with
+   * `codex mcp list` before every start or resume; a bridge name here is ignored. Default: none.
+   */
+  readonly mcpServersOff?: readonly string[];
 }
+
+/**
+ * Throws if the profile sets the whole `mcp_servers` table: overrides apply in order, so it would
+ * replace the table that turns the user's servers off (codex-cli 0.162.1, `mcp-servers.ts`).
+ */
+const checkNoMcpTable = (cliArgs: readonly string[]): void => {
+  if (cliArgs.some((arg, i) => i % 2 === 1 && configKey(arg) === "mcp_servers")) {
+    throw new Error(
+      "refusing a headless Codex run: its profile sets the whole mcp_servers table, which would undo the override that keeps the user's MCP servers out of the role run (D-cf)",
+    );
+  }
+};
 
 /** The profile's sandbox mode, read back from its settings; anything else is refused. */
 const sandboxModeOf = (sandbox: SandboxProfile): CodexSandboxMode => {
@@ -439,12 +464,15 @@ export const codexHeadlessCommand = (
   checkProfileArgs(HOST, request.sandbox.cliArgs, ["--config"]);
   checkWebSearchArgs(request.sandbox.cliArgs);
   checkFeaturesOff(request.sandbox.cliArgs);
+  checkNoMcpTable(request.sandbox.cliArgs);
   // fail closed: without the filter every engine tool, the human-only ones too, reaches the role
   if (!request.sandbox.cliArgs.includes(codexHumanOnlyToolsOverride())) {
     throw new Error(
       "refusing a headless Codex run: the profile does not disable the human-only engine tools (approve, answer, change_request) on the engine bridge (D-an)",
     );
   }
+  const bridge = engineMcpServer(HOST).name;
+  const serversOff = (options.mcpServersOff ?? []).filter((name) => name !== bridge);
   return {
     command: CODEX_BINARY,
     args: [
@@ -453,6 +481,9 @@ export const codexHeadlessCommand = (
       mode,
       ...(session === undefined ? [] : ["resume"]),
       "--json",
+      // every MCP server but the bridge off, before the profile's bridge keys: a later
+      // whole-table override would replace them (see `mcp-servers.ts`)
+      ...(serversOff.length === 0 ? [] : ["--config", codexMcpServersOffOverride(serversOff)]),
       ...request.sandbox.cliArgs,
       // nobody answers an approval request in an unattended run: none is ever asked
       "-c",

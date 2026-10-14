@@ -41,6 +41,10 @@ describe("parseDclArgs", () => {
     expect(
       parseDclArgs(["claude-arm", "--out", "/tmp/o", "--plugin-dir", "/p", "--model", "haiku"]),
     ).toMatchObject({ target: "claude-arm", pluginDir: "/p", model: "haiku" });
+    expect(parseDclArgs(["codex-mcp", "--out", "/tmp/o"])).toMatchObject({ target: "codex-mcp" });
+    expect(() => parseDclArgs(["codex-mcp", "--out", "/tmp/o", "--mode", "cached"])).toThrow(
+      /not a flag of codex-mcp/u,
+    );
   });
 
   it("refuses a missing check or output, a flag of another check, live web search and an open URL that is not https", () => {

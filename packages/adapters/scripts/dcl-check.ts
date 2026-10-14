@@ -18,6 +18,14 @@
  *   override VTC passes. Reads the effective `web_search` through the app server's `config/read`
  *   and the layer order through `codex debug prompt-input` (a `developer_instructions` marker per
  *   layer). The `--profile` layer is measured by marker only: the app server refuses `--profile`.
+ * - `codex-mcp`: offline, in a temporary `CODEX_HOME` (never `~/.codex`), no login and no model
+ *   call. Which MCP servers a role run in a linked worktree would load (the user's, one a role
+ *   planted in the worktree's `.codex/config.toml` under a trusted repo, a plugin's), and that the
+ *   adapter's MCP check (`src/codex/mcp-servers.ts`) leaves only the engine bridge on, through
+ *   `codex mcp list --json` with the role run's real overrides. Also records why the override is
+ *   one inline table first (a dotted key cannot name a dotted server; a later table drops earlier
+ *   dotted keys) and why plugins go off (a plugin's server cannot be turned off by name). The
+ *   servers are stubs with dummy env and header values; only names and enabled flags are written.
  * - `codex-plugin [--plugin-dir <dist/codex-plugin>]`: `codex plugin marketplace add` and
  *   `codex plugin add` ONLY in a temporary `CODEX_HOME`, never `~/.codex`; records what each wrote.
  * - `claude-arm [--plugin-dir <dist/claude-plugin>] [--model <id>]`: one real `claude -p` role
@@ -59,7 +67,17 @@ import {
   type SpawnRoleRequest,
 } from "@vtc/shared";
 import { claudeArmDebugFile } from "../src/claude-code/command.js";
-import { codexSchemaFile } from "../src/codex/command.js";
+import {
+  codexHeadlessCommand,
+  codexSandboxProfile,
+  codexSchemaFile,
+} from "../src/codex/command.js";
+import {
+  codexConfigArgs,
+  createCodexMcpGuard,
+  parseCodexMcpList,
+} from "../src/codex/mcp-servers.js";
+import { createNodeSpawner } from "../src/common/process.js";
 import { createClaudeCodeAdapter, createCodexAdapter } from "../src/index.js";
 import { parseDclArgs, type DclArgs } from "./dcl-check-args.js";
 import {
@@ -386,6 +404,189 @@ const codexPrecedence = async (args: DclArgs): Promise<void> => {
   }
 };
 
+// ------------------------------------------------------------------------------- codex-mcp
+
+/** `codex mcp list --json` in a temporary `CODEX_HOME`: names and enabled flags only. */
+const mcpNames = (codexHome: string, cwd: string, configArgs: readonly string[]) => {
+  const result = codexIn(codexHome, cwd, ["mcp", "list", "--json", ...configArgs]);
+  const servers = result.ok ? parseCodexMcpList(result.stdout) : null;
+  return servers === null
+    ? {
+        ok: false,
+        error: result.stderr
+          .split("\n")
+          .filter((l) => l.trim() !== "")
+          .slice(0, 3),
+      }
+    : { ok: true, servers };
+};
+
+const codexMcp = async (args: DclArgs): Promise<void> => {
+  const codexHome = tempDir("vtc-dcl-codex-home-");
+  const repo = tempDir("vtc-dcl-codex-repo-");
+  const market = tempDir("vtc-dcl-codex-market-");
+  try {
+    // a repo the user trusts, with a role worktree inside it, as VTC lays them out
+    const git = (...argv: string[]) => execFileSync("git", argv, { cwd: repo, stdio: "ignore" });
+    git("init", "-q");
+    git(
+      "-c",
+      "user.name=vtc",
+      "-c",
+      "user.email=vtc@example.invalid",
+      "commit",
+      "-q",
+      "--allow-empty",
+      "-m",
+      "init",
+    );
+    const worktree = join(repo, ".vtc", "state", "worktrees", "T-1");
+    git("worktree", "add", "-q", "-b", "vtc-t1", worktree);
+    mkdirSync(join(worktree, ".codex"));
+    writeFileSync(
+      join(worktree, ".codex", "config.toml"),
+      '[mcp_servers.planted]\ncommand = "/bin/echo"\n',
+    );
+    // a local plugin with its own MCP server, laid out as `codex plugin add` installs one
+    // (plugin-add.json), written by hand: no `codex plugin` command runs here
+    mkdirSync(join(market, ".agents", "plugins"), { recursive: true });
+    writeFileSync(
+      join(market, ".agents", "plugins", "marketplace.json"),
+      JSON.stringify({
+        name: "mk",
+        interface: { displayName: "mk" },
+        plugins: [
+          {
+            name: "pp",
+            source: { source: "local", path: "./pp" },
+            policy: { installation: "AVAILABLE", authentication: "ON_INSTALL" },
+          },
+        ],
+      }),
+    );
+    const plugin = join(codexHome, "plugins", "cache", "mk", "pp", "0.1.0");
+    mkdirSync(join(plugin, ".codex-plugin"), { recursive: true });
+    writeFileSync(
+      join(plugin, ".codex-plugin", "plugin.json"),
+      JSON.stringify({
+        name: "pp",
+        version: "0.1.0",
+        description: "probe",
+        mcpServers: "./.mcp.json",
+      }),
+    );
+    writeFileSync(
+      join(plugin, ".mcp.json"),
+      JSON.stringify({ mcpServers: { plugfetch: { command: "/bin/echo", args: ["x"] } } }),
+    );
+    cpSync(plugin, join(market, "pp"), { recursive: true });
+    writeFileSync(
+      join(codexHome, "config.toml"),
+      [
+        "[mcp_servers.fetchy]",
+        'command = "/bin/echo"',
+        'env = { DUMMY_TOKEN = "dummy-value" }',
+        "",
+        '[mcp_servers."we.ird name"]',
+        'url = "http://127.0.0.1:9/mcp"',
+        'http_headers = { "X-Dummy" = "dummy-header" }',
+        "",
+        "[mcp_servers.off]",
+        'command = "/bin/echo"',
+        "enabled = false",
+        "",
+        "[marketplaces.mk]",
+        'source_type = "local"',
+        `source = ${JSON.stringify(market)}`,
+        "",
+        '[plugins."pp@mk"]',
+        "enabled = true",
+        "",
+        `[projects.${JSON.stringify(repo)}]`,
+        'trust_level = "trusted"',
+        "",
+      ].join("\n"),
+    );
+    // the Research Analyst's real profile and command, as the adapter builds them
+    const request: SpawnRoleRequest = {
+      role: "research_analyst",
+      model: { tier: "mid", effort: "medium" },
+      dispatch: "headless",
+      cwd: worktree,
+      prompt: "-",
+      outputSchema: jsonSchemaFor("RoleResult", { target: "structured-output" }),
+      sandbox: codexSandboxProfile(
+        {
+          tools: {
+            profile: "write_scoped",
+            write_paths: [".vtc/research/briefs/**"],
+            engine_tools: ["research_fetch"],
+            host_web: true,
+          },
+          cwd: worktree,
+          writablePaths: [],
+          protectedPaths: [],
+          network: "none",
+        },
+        { vtcHome: join(codexHome, "vtc-home") },
+      ),
+      timeoutMs: 60_000,
+    };
+    const commandOptions = { scratchDir: join(codexHome, "scratch") };
+    const node = createNodeSpawner();
+    const guard = createCodexMcpGuard({
+      spawner: (command, options) =>
+        node({ ...command, env: { ...command.env, CODEX_HOME: codexHome } }, options),
+      bridge: "vtc",
+    });
+    const probe = codexHeadlessCommand(request, commandOptions);
+    const turnOff = await guard.serversToTurnOff(worktree, codexConfigArgs(probe.args));
+    const command = codexHeadlessCommand(request, { ...commandOptions, mcpServersOff: turnOff });
+    refuseUnsafe("codex", command);
+    let confirm = "ok";
+    try {
+      await guard.confirmOff(worktree, codexConfigArgs(command.args));
+    } catch (error) {
+      confirm = error instanceof Error ? error.message : String(error);
+    }
+    guard.dispose();
+    const results = {
+      codexVersion: codexIn(codexHome, worktree, ["--version"]).stdout.trim(),
+      withoutOverrides: mcpNames(codexHome, worktree, []),
+      discovered: turnOff,
+      afterOverrides: mcpNames(codexHome, worktree, codexConfigArgs(command.args)),
+      confirmOff: confirm,
+      dottedKeyForDottedName: mcpNames(codexHome, worktree, [
+        "-c",
+        'mcp_servers."we.ird name".enabled=false',
+      ]),
+      dottedThenTable: mcpNames(codexHome, worktree, [
+        "-c",
+        'mcp_servers.vtc.command="vtc"',
+        "-c",
+        'mcp_servers={"fetchy"={enabled=false}}',
+      ]),
+      pluginServerByName: mcpNames(codexHome, worktree, [
+        "-c",
+        'mcp_servers={"plugfetch"={enabled=false}}',
+      ]),
+    };
+    const text = JSON.stringify(results, null, 2)
+      .split(codexHome)
+      .join("<codex-home>")
+      .split(repo)
+      .join("<repo>")
+      .split(market)
+      .join("<marketplace>");
+    if (/dummy/u.test(text))
+      throw new Error("refusing to write: a stub's env or header value leaked");
+    write(args.out, "codex-mcp.json", `${text}\n`);
+    console.warn(text);
+  } finally {
+    for (const dir of [codexHome, repo, market]) rmSync(dir, { recursive: true, force: true });
+  }
+};
+
 // ---------------------------------------------------------------------------- codex-plugin
 
 const tree = (root: string): string[] =>
@@ -551,6 +752,7 @@ const main = async (): Promise<void> => {
   const resolved = { ...args, out };
   if (args.target === "codex-web") await codexWeb(resolved);
   else if (args.target === "codex-precedence") await codexPrecedence(resolved);
+  else if (args.target === "codex-mcp") await codexMcp(resolved);
   else if (args.target === "codex-plugin") codexPlugin(resolved);
   else await claudeArm(resolved);
 };

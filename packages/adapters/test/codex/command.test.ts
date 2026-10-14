@@ -26,7 +26,7 @@ import {
 } from "@vtc/shared";
 import { codexSandboxProfile } from "../../src/codex/command.js";
 import { ADAPTER_FACTORIES, createCodexAdapter } from "../../src/index.js";
-import { fakeSpawner } from "../support/fake-spawner.js";
+import { codexFakeSpawner } from "../support/fake-spawner.js";
 import { fixtureLines } from "../support/fixtures.js";
 
 const CWD = "/work/app/.vtc/state/worktrees/T-1";
@@ -70,6 +70,9 @@ const OTHER_WEB_OFF = [
   "features.in_app_browser=false",
   "--config",
   "features.computer_use=false",
+  // a plugin's own MCP servers cannot be turned off by name (D-cf, `mcp-servers.ts`)
+  "--config",
+  "features.plugins=false",
 ];
 const FEATURES_OFF = {
   apps: false,
@@ -77,6 +80,7 @@ const FEATURES_OFF = {
   browser_use_external: false,
   in_app_browser: false,
   computer_use: false,
+  plugins: false,
 };
 const WEB_OFF = ["--config", 'web_search="disabled"', ...OTHER_WEB_OFF];
 const BRIDGE_SETTINGS = {
@@ -766,7 +770,7 @@ describe("Codex spawnRole", () => {
 
   it("a headless run writes the schema file, sends the prompt on stdin and ends with the recorded outcome", async () => {
     const dir = scratch();
-    const { spawner, processes } = fakeSpawner();
+    const { spawner, processes } = codexFakeSpawner();
     const adapter = createCodexAdapter({ spawner, scratchDir: dir });
     const spawned = await adapter.spawnRole(request());
     if (spawned.dispatch !== "headless") throw new Error("expected a headless run");
@@ -788,8 +792,10 @@ describe("Codex spawnRole", () => {
   });
 
   it("a resumed run is supervised by the request's idle timeout and ends with cause idle (AD-25 rule 4)", async () => {
-    const { spawner, processes } = fakeSpawner((p) => {
-      p.obeysInt = false;
+    const { spawner, processes } = codexFakeSpawner({
+      onSpawn: (p) => {
+        p.obeysInt = false;
+      },
     });
     const adapter = createCodexAdapter({
       spawner,
@@ -810,8 +816,10 @@ describe("Codex spawnRole", () => {
 
 describe.skipIf(process.platform === "win32")("Codex scratch directory", () => {
   const spawnWith = async (scratchDir: string) => {
-    const { spawner } = fakeSpawner((p) => {
-      p.exit(0);
+    const { spawner } = codexFakeSpawner({
+      onSpawn: (p) => {
+        p.exit(0);
+      },
     });
     const adapter = createCodexAdapter({ spawner, scratchDir });
     try {
@@ -829,8 +837,10 @@ describe.skipIf(process.platform === "win32")("Codex scratch directory", () => {
 
   it("defaults to <vtcHome>/run/codex, which no role can write, never the OS temp directory (D-w)", async () => {
     const vtcHome = scratch();
-    const { spawner, processes } = fakeSpawner((p) => {
-      p.exit(0);
+    const { spawner, processes } = codexFakeSpawner({
+      onSpawn: (p) => {
+        p.exit(0);
+      },
     });
     const adapter = createCodexAdapter({ spawner, vtcHome });
     try {
