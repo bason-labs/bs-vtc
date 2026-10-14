@@ -6,25 +6,34 @@
  *   the browser capture uses;
  * - `ffmpeg`: optional, GIF previews;
  * - `automation`: `automationFor` over `project.yaml`, `~/.vtc/config.yaml` and this machine;
+ * - `upstream`: the `upstream.checkout` clone exists, its origin is `upstream.repo` on
+ *   github.com, and `vtc init` ran in it;
  * - `billing`: the neutral notice for a host billed through a provider (D-ci);
  * - `host web`: where research roles get host web search (D-cf, `hostWebRoute`).
  * None of them fails doctor, except a `project.yaml` that does not load.
  */
+import { statSync } from "node:fs";
 import {
   automationFor,
-  HOST_WEB_OFF_NOTICE,
+  HOST_IDS,
+  hostWebRoute,
   PROVIDER_BILLING_NOTICE,
   type EvidenceHosting,
   type HostAuthStatus,
   type HostId,
+  type HostWebRoute,
   type ProjectConfig,
 } from "@vtc/shared";
 import {
   evidenceHostingFor,
+  PROBE_TIMEOUT_MS,
   upstreamSettingsOf,
   type AutomationProbe,
 } from "./automation-wiring.js";
 import type { DoctorCheck } from "./doctor-checks.js";
+import { isGithubUrl } from "./gh-remote-merge.js";
+import type { Exec } from "./process.js";
+import { isVtcProject } from "./repo.js";
 import type { UserConfigRead } from "./user-config.js";
 
 /** `gh auth status` (exit code only); `null` when gh is missing, which the gh line reports. */
@@ -57,14 +66,20 @@ const captureNote = (browser: DoctorCheck | null): { text: string; ok: boolean }
       };
 };
 
+const NO_RECORDER =
+  "this vtc build has no evidence recorder, so no automatic PR opens (issues still do)";
+
 /**
  * Where PR media go (reading 196) and whether capture has a browser (D-ce). `attach` asked for but
  * not possible warns, and so does capture without vtc's browser; the default never fails.
+ * `recorder: false` (this build has no `gates.createEvidenceRecorder`, merge note of
+ * `automation-wiring.ts`) warns too, so a build that can open no automatic PR says so.
  */
 export const checkEvidence = (
   probe: AutomationProbe,
   requested: EvidenceHosting,
   browser: DoctorCheck | null,
+  recorder = true,
 ): DoctorCheck => {
   const decision = evidenceHostingFor(requested, probe);
   const attachable = evidenceHostingFor("attach", probe).hosting === "attach";
@@ -75,7 +90,7 @@ export const checkEvidence = (
       : decision.hosting === "attach"
         ? `PR media are attached with gh --attach (gh ${ghVersion}, github.com)`
         : `${BRANCH} (automation.evidence_hosting: branch, the default)${attachable ? "; this gh could attach them instead (attach)" : ""}`;
-  const capture = captureNote(browser);
+  const capture = recorder ? captureNote(browser) : { text: NO_RECORDER, ok: false as boolean };
   return {
     name: "evidence",
     status: decision.fallback === undefined && capture?.ok !== false ? "ok" : "warn",
@@ -132,6 +147,70 @@ export const checkAutomation = (
   };
 };
 
+/** What doctor finds at `upstream.checkout`. */
+export interface CheckoutFacts {
+  /** The path is a directory. */
+  readonly exists: boolean;
+  /** `git remote get-url origin` in it, or `null` (not a git repo, or no origin). */
+  readonly origin: string | null;
+  /** `vtc init` ran in it (`.vtc/project.yaml` is a file). */
+  readonly vtcProject: boolean;
+}
+
+/** Looks at `upstream.checkout`: the directory, its origin remote and its `.vtc/project.yaml`. */
+export const inspectCheckout = async (exec: Exec, checkout: string): Promise<CheckoutFacts> => {
+  let exists: boolean;
+  try {
+    exists = statSync(checkout).isDirectory();
+  } catch {
+    exists = false;
+  }
+  if (!exists) return { exists, origin: null, vtcProject: false };
+  const result = await exec("git", ["remote", "get-url", "origin"], {
+    cwd: checkout,
+    timeoutMs: PROBE_TIMEOUT_MS,
+  });
+  return {
+    exists,
+    origin: result.code === 0 ? result.stdout.trim() || null : null,
+    vtcProject: isVtcProject(checkout),
+  };
+};
+
+/** `owner/name` of a github.com remote URL, lower-cased; `null` for any other URL. */
+export const githubSlugOf = (url: string): string | null => {
+  if (!isGithubUrl(url)) return null;
+  const match = /github\.com[/:]\/?([^/\s]+\/[^/\s]+?)(?:\.git)?\/?$/i.exec(url.trim());
+  return match?.[1]?.toLowerCase() ?? null;
+};
+
+/**
+ * `upstream.checkout` (D-by): a local clone of `upstream.repo` set up for VTC, which upstream PRs
+ * are opened from. A wrong one warns here instead of failing later in the engine. The origin URL is
+ * never printed (it can carry a credential); only whether it is `upstream.repo` on github.com.
+ */
+export const checkUpstreamCheckout = (
+  repo: string,
+  checkout: string,
+  facts: CheckoutFacts,
+): DoctorCheck => {
+  const warn = (why: string): DoctorCheck => ({
+    name: "upstream",
+    status: "warn",
+    detail: `upstream.checkout ${checkout} ${why}: upstream PRs cannot open from it, so upstream gets issues only`,
+  });
+  if (!facts.exists) return warn("is not a directory");
+  if (facts.origin === null) return warn("is not a git repository with an origin remote");
+  if (githubSlugOf(facts.origin) !== repo.toLowerCase())
+    return warn(`has an origin that is not github.com/${repo} (upstream.repo)`);
+  if (!facts.vtcProject) return warn("is not set up for VTC (run vtc init in it)");
+  return {
+    name: "upstream",
+    status: "ok",
+    detail: `upstream PRs from ${checkout} (origin github.com/${repo}, set up for VTC)`,
+  };
+};
+
 /** D-ci (reading 203): a host billed through a cloud provider or gateway gets a neutral notice. */
 export const checkProviderBilling = (statuses: readonly HostAuthStatus[]): DoctorCheck | null => {
   const hosts = statuses.filter((s) => s.billing === "provider").map((s) => s.host);
@@ -146,32 +225,52 @@ export const checkProviderBilling = (statuses: readonly HostAuthStatus[]): Docto
 
 const CODEX_OFF = "Codex web search: off (cached mode not confirmed; live is never used)";
 
+const LEAD_NAME: Readonly<Record<HostId, string>> = { "claude-code": "Claude", codex: "Codex" };
+
+const routeText = (route: HostWebRoute): string =>
+  !route.hostWeb
+    ? route.notice
+    : route.host === "claude-code"
+      ? "research roles search the web on Claude Code (its role profiles deny reading the credential stores)"
+      : 'research roles search the web on Codex with web_search = "cached" (it opens no page the model picks)';
+
 /**
- * D-cf (reading 200): where a research (`host_web`) role gets web search, by the rule of
- * `hostWebRoute`: Claude Code when it is logged in (its role profiles deny the credential stores),
- * else Codex with `web_search = "cached"` confirmed (`HostCapabilities.safeHostWeb`), else none:
- * the role runs on the engine's own fetchers with `HOST_WEB_OFF_NOTICE`. Never a failure.
+ * D-cf (reading 200): where a research (`host_web`) role gets web search, by the engine's own rule
+ * (`hostWebRoute`) for each host that could lead a run here. A host counts as dispatchable when it
+ * is logged in (doctor's view of `planDispatch`), and its host web as safe when its adapter says so
+ * (`HostCapabilities.safeHostWeb`): Claude Code first, else the Lead's host when safe (Codex with
+ * `web_search = "cached"` confirmed), else none, and the role runs on the engine's own fetchers
+ * with `HOST_WEB_OFF_NOTICE`. When the leads differ the line says it per lead. Never a failure.
  */
 export const checkHostWeb = (
   statuses: readonly HostAuthStatus[],
   safeHostWeb: Readonly<Partial<Record<HostId, boolean>>>,
 ): DoctorCheck => {
-  const usable = (host: HostId): boolean =>
-    statuses.some((s) => s.host === host && s.logged_in === true) && safeHostWeb[host] === true;
+  const hosts = Object.fromEntries(
+    HOST_IDS.map((host) => [
+      host,
+      {
+        dispatchable: statuses.some((s) => s.host === host && s.logged_in === true),
+        safeHostWeb: safeHostWeb[host] === true,
+      },
+    ]),
+  ) as Record<HostId, { dispatchable: boolean; safeHostWeb: boolean }>;
   const codexKnown = statuses.some((s) => s.host === "codex") || "codex" in safeHostWeb;
   const codexOff = codexKnown && safeHostWeb.codex !== true ? `; ${CODEX_OFF}` : "";
-  if (usable("claude-code"))
-    return {
-      name: "host web",
-      status: "ok",
-      detail: `research roles search the web on Claude Code (its role profiles deny reading the credential stores)${codexOff}`,
-    };
-  if (usable("codex"))
-    return {
-      name: "host web",
-      status: "ok",
-      detail:
-        'research roles search the web on Codex with web_search = "cached" (it opens no page the model picks)',
-    };
-  return { name: "host web", status: "info", detail: `${HOST_WEB_OFF_NOTICE}${codexOff}` };
+  // a run is led by a host that can be dispatched; with none, any lead gives the same answer
+  const leads = HOST_IDS.filter((host) => hosts[host].dispatchable);
+  const routes = (leads.length === 0 ? (["claude-code"] as const) : leads).map((lead) => ({
+    lead,
+    route: hostWebRoute(lead, hosts),
+  }));
+  const texts = [...new Set(routes.map((r) => routeText(r.route)))];
+  const detail =
+    texts.length === 1
+      ? (texts[0] ?? "")
+      : routes.map((r) => `on a ${LEAD_NAME[r.lead]}-led run, ${routeText(r.route)}`).join("; ");
+  return {
+    name: "host web",
+    status: routes.every((r) => r.route.hostWeb) ? "ok" : "info",
+    detail: `${detail}${codexOff}`,
+  };
 };

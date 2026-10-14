@@ -10,11 +10,20 @@
  * The login is checked only through `gh auth status`'s exit code (AD-27 rule 1): nothing it prints
  * is kept, and no token is ever read.
  *
+ * The user's settings are read live (AD-27 rule 5): `upstream.share` is an opt-out the engine
+ * checks when an item is queued and again when it is sent, and the daemon runs for long, so each
+ * read of `AutomationDeps.upstream` (and `hosting`) goes back to `~/.vtc/config.yaml`
+ * (`liveUserConfig`, re-read only when the file changed).
+ *
  * Merge note (readings 207 and 209): `git.createGitPlumbing` (engine core), the gate runner's
- * evidence recorder and the compiler's `compileArm` are built in other branches this round, so
- * {@link shippedAutomationFactories} looks them up by name and leaves each one out until it is
- * there. Without a recorder no automatic PR opens (issues still do); without `compileArm` a replay
- * on a Claude-led run waits for the next RETRO.
+ * `gates.createEvidenceRecorder` and the compiler's `createArmPluginCompiler` (roles-compiler) are
+ * built in other branches this round. {@link shippedAutomationFactories} and
+ * {@link shippedArmPluginCompilerFactory} look each one up by its export name and leave it out
+ * while it is missing; {@link ShippedSeamsFit} checks at compile time that each export, once it
+ * lands, fits its frozen seam type, so a changed signature fails the build. Without a recorder no automatic PR opens (issues still do;
+ * `vtc doctor`'s `evidence` line says so); without the arm compiler a replay on a Claude-led run
+ * waits for the next RETRO (`vtc lookback approve` warns). At that merge the integrator flips the
+ * matching flag in `test/round4-merge.ts`, which the seam tests hold the lookups to.
  */
 import * as compiler from "@vtc/compiler";
 import { gates, git } from "@vtc/engine";
@@ -22,9 +31,7 @@ import {
   DEFAULT_UPSTREAM_REPO,
   EVIDENCE_HOSTING_DEFAULT,
   GH_ATTACH_MIN_VERSION,
-  type ArmPlugin,
   type ArmPluginCompiler,
-  type ArmPluginRequest,
   type AutomationDeps,
   type CreateGitPlumbing,
   type EvidenceHosting,
@@ -75,31 +82,51 @@ export interface AutomationProbe {
 
 const firstLine = (text: string): string => text.trim().split(/\r?\n/)[0] ?? "";
 
-const versionLine = async (exec: Exec, command: string, flag: string): Promise<string | null> => {
-  const result = await exec(command, [flag], { timeoutMs: 15_000 });
+/**
+ * Each probe's limit. The daemon probes before it starts, inside `ensureDaemon`'s 20 s budget, and
+ * the three run side by side, so one slow tool cannot use most of it.
+ */
+export const PROBE_TIMEOUT_MS = 5_000;
+
+const versionLine = async (
+  exec: Exec,
+  command: string,
+  flag: string,
+  cwd: string,
+): Promise<string | null> => {
+  const result = await exec(command, [flag], { cwd, timeoutMs: PROBE_TIMEOUT_MS });
   return result.code === 0 ? firstLine(result.stdout) || command : null;
 };
 
 /**
  * Probes gh, ffmpeg and the repo's origin remote. With `login`, also `gh auth status`, of which
  * only the exit code is read (AD-27 rule 1; never `--show-token`, prompts disabled).
+ *
+ * `gh` and `ffmpeg` run by name in `cwd`, a directory of the user's own (the VTC home), never the
+ * repo: on Windows a bare name is also looked up in the working directory first, and a repo could
+ * ship an `ffmpeg.exe`. Only `git remote` runs in the repo.
  */
 export const probeAutomation = async (
   exec: Exec,
-  options: { readonly repoRoot: string | null; readonly login: boolean; readonly gh?: string },
+  options: {
+    readonly repoRoot: string | null;
+    readonly login: boolean;
+    readonly cwd: string;
+    readonly gh?: string;
+  },
 ): Promise<AutomationProbe> => {
   const gh = options.gh ?? "gh";
   const remote = async (): Promise<boolean> => {
     if (options.repoRoot === null) return false;
     const result = await exec("git", ["remote", "get-url", "--push", "origin"], {
       cwd: options.repoRoot,
-      timeoutMs: 15_000,
+      timeoutMs: PROBE_TIMEOUT_MS,
     });
     return result.code === 0 && isGithubUrl(result.stdout);
   };
   const [ghVersion, ffmpeg, githubRemote] = await Promise.all([
-    versionLine(exec, gh, "--version"),
-    versionLine(exec, "ffmpeg", "-version"),
+    versionLine(exec, gh, "--version", options.cwd),
+    versionLine(exec, "ffmpeg", "-version", options.cwd),
     remote(),
   ]);
   let ghLoggedIn: boolean | null = null;
@@ -108,6 +135,7 @@ export const probeAutomation = async (
       ghVersion !== null &&
       (
         await exec(gh, ["auth", "status"], {
+          cwd: options.cwd,
           env: { GH_PROMPT_DISABLED: "1" },
           timeoutMs: 20_000,
         })
@@ -154,8 +182,13 @@ export const evidenceHostingFor = (
 export type EvidenceRecorderDeps = Pick<GateRunnerDeps, "repoRoot" | "vtcHome"> &
   Partial<Pick<GateRunnerDeps, "git" | "allowUnsandboxed">>;
 
-/** `@vtc/compiler`'s `compileArm` as the cli binds it: an arm request and the base plugin dir. */
-export type CompileArm = (request: ArmPluginRequest, basePluginDir: string) => Promise<ArmPlugin>;
+/**
+ * `@vtc/compiler`'s `createArmPluginCompiler` (roles-compiler, D-cg): the `ArmPluginCompiler` over
+ * one compiled base plugin on disk.
+ */
+export type CreateArmPluginCompiler = (options: {
+  readonly pluginDir: string;
+}) => ArmPluginCompiler;
 
 /** The implementations behind `AutomationDeps` and `armPlugins`; each absent one is left out. */
 export interface AutomationFactories {
@@ -165,25 +198,54 @@ export interface AutomationFactories {
   readonly evidence?: (deps: EvidenceRecorderDeps) => EvidenceRecorder;
 }
 
-/** A function the namespace exports under `name`, or `undefined` while it does not. */
-const exported = (namespace: object, name: string): unknown => {
-  const value = (namespace as Readonly<Record<string, unknown>>)[name];
+/**
+ * Compile-time: `true` while `namespace` exports nothing under `key`, and once it does, whether
+ * that export is assignable to the frozen seam type `T`. {@link ShippedSeamsFit} holds each seam
+ * to it, so a changed signature fails the build at the merge instead of leaving the seam out.
+ */
+export type ShippedFits<NS, K extends string, T> = K extends keyof NS
+  ? NS[K] extends T
+    ? true
+    : false
+  : true;
+
+type Assert<T extends true> = T;
+
+/** Each seam the cli looks up by name fits its frozen type (see {@link ShippedFits}). */
+export type ShippedSeamsFit = [
+  Assert<ShippedFits<typeof git, "createGitPlumbing", CreateGitPlumbing>>,
+  Assert<
+    ShippedFits<
+      typeof gates,
+      "createEvidenceRecorder",
+      NonNullable<AutomationFactories["evidence"]>
+    >
+  >,
+  Assert<ShippedFits<typeof compiler, "createArmPluginCompiler", CreateArmPluginCompiler>>,
+];
+
+/**
+ * The function `namespace` exports under `key`, or `undefined` while it exports none. Each caller
+ * casts it to the seam type that {@link ShippedSeamsFit} checks the export against.
+ */
+const shipped = (namespace: object, key: string): unknown => {
+  const value = (namespace as Readonly<Record<string, unknown>>)[key];
   return typeof value === "function" ? value : undefined;
 };
 
 /** The shipped implementations, each once its team's branch has landed (see the merge note). */
 export const shippedAutomationFactories = (): AutomationFactories => {
-  const plumbing = exported(git, "createGitPlumbing") as CreateGitPlumbing | undefined;
-  const evidence = exported(gates, "createEvidenceRecorder") as AutomationFactories["evidence"];
+  const plumbing = shipped(git, "createGitPlumbing") as CreateGitPlumbing | undefined;
+  const evidence = shipped(gates, "createEvidenceRecorder") as AutomationFactories["evidence"];
   return {
     ...(plumbing === undefined ? {} : { plumbing }),
     ...(evidence === undefined ? {} : { evidence }),
   };
 };
 
-/** The compiler's `compileArm`, once it has landed; `undefined` before. */
-export const shippedCompileArm = (): CompileArm | undefined =>
-  exported(compiler, "compileArm") as CompileArm | undefined;
+/** The compiler's `createArmPluginCompiler`, once it has landed; `undefined` before. */
+export const shippedArmPluginCompilerFactory = (): CreateArmPluginCompiler | undefined =>
+  shipped(compiler, "createArmPluginCompiler") as CreateArmPluginCompiler | undefined;
 
 /**
  * An evidence recorder built on first use, like the Gate Runner: the daemon starts without the
@@ -200,35 +262,55 @@ const lazyRecorder = (create: () => EvidenceRecorder): EvidenceRecorder => {
 };
 
 /**
- * `EngineDeps.automation` (AD-27 rule 7): the user's upstream settings, the hosting this machine
- * allows, whether ffmpeg is there, and the engine seams that exist. The `gh`-backed issue and PR
- * services are left to the upstream module's defaults.
+ * `AutomationDeps.upstream` over the user's config as it is at each read (AD-27 rule 5): every
+ * property access reads `~/.vtc/config.yaml` again when it changed, so an opt-out (or a file that
+ * no longer parses, which turns sharing off) takes effect while the daemon runs.
+ */
+const liveUpstream = (user: () => UserConfigRead): AutomationDeps["upstream"] => {
+  const now = (): AutomationDeps["upstream"] => upstreamSettingsOf(user());
+  return Object.defineProperties({} as AutomationDeps["upstream"], {
+    repo: { enumerable: true, get: () => now().repo },
+    share: { enumerable: true, get: () => now().share },
+    checkout: { enumerable: true, get: () => now().checkout },
+  });
+};
+
+/**
+ * `EngineDeps.automation` (AD-27 rule 7): the user's upstream settings and the hosting they ask
+ * for, both read live ({@link liveUpstream}), what this machine allows (probed once, when the
+ * daemon starts), whether ffmpeg is there, and the engine seams that exist. The `gh`-backed issue
+ * and PR services are left to the upstream module's defaults.
  */
 export const buildAutomationDeps = (input: {
-  readonly user: UserConfigRead;
+  /** The user's config as it is now: `liveUserConfig` in the daemon. */
+  readonly user: () => UserConfigRead;
   readonly probe: AutomationProbe;
   readonly factories: AutomationFactories;
   readonly gateDeps: EvidenceRecorderDeps;
 }): AutomationDeps => {
-  const { factories } = input;
+  const { factories, probe, user } = input;
   const create = factories.evidence;
   return {
-    upstream: upstreamSettingsOf(input.user),
-    hosting: evidenceHostingFor(requestedHostingOf(input.user), input.probe).hosting,
-    ffmpeg: input.probe.ffmpeg !== null,
+    upstream: liveUpstream(user),
+    get hosting() {
+      return evidenceHostingFor(requestedHostingOf(user()), probe).hosting;
+    },
+    ffmpeg: probe.ffmpeg !== null,
     ...(create === undefined ? {} : { evidence: lazyRecorder(() => create(input.gateDeps)) }),
     ...(factories.plumbing === undefined ? {} : { plumbing: factories.plumbing }),
   };
 };
 
 /**
- * `EngineDeps.armPlugins` (D-cg, reading 201): `compileArm` bound to this vtc's compiled plugin of
- * the arm's host (in development the product repo's, in the binary the extracted one). The
- * directory is resolved when an arm is compiled, so the daemon extracts nothing at start.
+ * `EngineDeps.armPlugins` (D-cg, reading 201): the compiler's arm plugin compiler over this vtc's
+ * compiled plugin of the arm's host (in development the product repo's, in the binary the
+ * extracted one). The directory is resolved, and the compiler built, when an arm is compiled, so
+ * the daemon extracts nothing at start. The compiler refuses a host whose runs do not load the
+ * compiled agent (only Claude Code needs arm plugins).
  */
 export const armPluginCompiler = (
-  compile: CompileArm,
+  create: CreateArmPluginCompiler,
   pluginDir: (host: HostId) => string,
 ): ArmPluginCompiler => ({
-  compileArm: (request) => compile(request, pluginDir(request.host)),
+  compileArm: (request) => create({ pluginDir: pluginDir(request.host) }).compileArm(request),
 });

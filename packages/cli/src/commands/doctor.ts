@@ -28,6 +28,7 @@
  * (`browser-install.ts`). Exits 1 when a required check fails.
  */
 import { existsSync, readFileSync } from "node:fs";
+import { homedir } from "node:os";
 import { join } from "node:path";
 import { ADAPTER_FACTORIES } from "@vtc/adapters";
 import { core, gates, git } from "@vtc/engine";
@@ -39,8 +40,17 @@ import {
   checkGhLogin,
   checkHostWeb,
   checkProviderBilling,
+  checkUpstreamCheckout,
+  inspectCheckout,
+  type CheckoutFacts,
 } from "../automation-checks.js";
-import { probeAutomation, requestedHostingOf, type AutomationProbe } from "../automation-wiring.js";
+import {
+  probeAutomation,
+  requestedHostingOf,
+  shippedAutomationFactories,
+  upstreamSettingsOf,
+  type AutomationProbe,
+} from "../automation-wiring.js";
 import {
   checkBrowser,
   defaultBrowserInstallDeps,
@@ -144,6 +154,10 @@ export interface DoctorCommandEnv extends DoctorEnv {
   readonly automation?: {
     readonly probe: () => Promise<AutomationProbe>;
     readonly project: () => Promise<Pick<ProjectConfig, "upstream" | "automation"> | null>;
+    /** This build has the gate runner's evidence recorder (merge note); absent: not reported. */
+    readonly recorder?: boolean;
+    /** What is at `upstream.checkout` (D-by); absent: not checked. */
+    readonly checkout?: (path: string) => Promise<CheckoutFacts>;
   };
   /** Each adapter's `capabilities.safeHostWeb` (D-cf). */
   readonly hostWeb?: () => Promise<Readonly<Partial<Record<HostId, boolean>>>>;
@@ -252,7 +266,14 @@ export const defaultDoctorEnv = (ctx: CommandContext): DoctorCommandEnv => {
       ),
     automation: {
       probe: async () =>
-        probeAutomation(exec, { repoRoot: await findRepoRoot(ctx.cwd), login: true }),
+        probeAutomation(exec, {
+          repoRoot: await findRepoRoot(ctx.cwd),
+          login: true,
+          // gh and ffmpeg run by name outside the repo (a repo could ship an ffmpeg.exe)
+          cwd: existsSync(ctx.vtcHome) ? ctx.vtcHome : homedir(),
+        }),
+      recorder: shippedAutomationFactories().evidence !== undefined,
+      checkout: (path) => inspectCheckout(exec, path),
       project: async () => {
         const repoRoot = await findRepoRoot(ctx.cwd);
         return repoRoot === null || !isVtcProject(repoRoot)
@@ -353,8 +374,19 @@ export const createDoctorCommand = (
         const login = checkGhLogin(probe);
         if (login !== null) checks.push(login);
         const user = userConfig ?? NO_USER_CONFIG;
-        checks.push(checkEvidence(probe, requestedHostingOf(user), browser));
+        checks.push(
+          checkEvidence(probe, requestedHostingOf(user), browser, e.automation.recorder ?? true),
+        );
         checks.push(checkFfmpeg(probe.ffmpeg));
+        const upstream = upstreamSettingsOf(user);
+        if (upstream.checkout !== undefined && e.automation.checkout !== undefined)
+          checks.push(
+            checkUpstreamCheckout(
+              upstream.repo,
+              upstream.checkout,
+              await e.automation.checkout(upstream.checkout),
+            ),
+          );
         try {
           const project = await e.automation.project();
           if (project !== null) checks.push(checkAutomation(probe, user, project));

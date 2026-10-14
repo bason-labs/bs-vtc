@@ -9,7 +9,7 @@
  * switch the gate sandbox off, and `ProjectConfigSchema` rejects both keys.
  * Read with `parsePersisted`; a missing file is `{ version: 1 }`. Names only, never values.
  */
-import { readFileSync } from "node:fs";
+import { readFileSync, statSync } from "node:fs";
 import { join } from "node:path";
 import { core } from "@vtc/engine";
 import {
@@ -50,6 +50,31 @@ export const readUserConfig = (vtcHome: string): UserConfigRead => {
     return { ok: false, path, error: issues };
   }
   return { ok: true, path, config: parsed.data };
+};
+
+/**
+ * The user's config as it is on disk now, for a long-lived reader (the daemon, AD-27 rule 5: the
+ * `upstream.share` opt-out is checked when an item is queued and again when it is sent). Each call
+ * stats the file and reads it again only when its size, change or modification time moved (or it
+ * appeared or went), so a switch flipped while the daemon runs is seen at the next call.
+ */
+export const liveUserConfig = (
+  vtcHome: string,
+  read: (vtcHome: string) => UserConfigRead = readUserConfig,
+): (() => UserConfigRead) => {
+  let cached: { readonly key: string; readonly read: UserConfigRead } | undefined;
+  return () => {
+    let key = "missing";
+    try {
+      const s = statSync(userConfigPath(vtcHome), { bigint: true });
+      key = `${s.size}:${s.mtimeNs}:${s.ctimeNs}:${s.ino}`;
+    } catch (error) {
+      // a missing file is a state of its own; any other stat error reads afresh, uncached
+      if (!isMissing(error)) return read(vtcHome);
+    }
+    if (cached?.key !== key) cached = { key, read: read(vtcHome) };
+    return cached.read;
+  };
 };
 
 /** The names to pass through: none when the file does not parse (credentials stay dropped). */

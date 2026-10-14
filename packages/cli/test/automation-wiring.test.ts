@@ -7,8 +7,11 @@
 import { writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
+import * as compiler from "@vtc/compiler";
+import { gates, git } from "@vtc/engine";
 import {
   DEFAULT_UPSTREAM_REPO,
+  type ArmPluginCompiler,
   type ArmPluginRequest,
   type EvidenceRecorder,
   type GitPlumbing,
@@ -20,8 +23,8 @@ import {
   evidenceHostingFor,
   probeAutomation,
   requestedHostingOf,
+  shippedArmPluginCompilerFactory,
   shippedAutomationFactories,
-  shippedCompileArm,
   upstreamSettingsOf,
   type AutomationFactories,
   type AutomationProbe,
@@ -30,6 +33,7 @@ import type { Exec } from "../src/process.js";
 import { readUserConfig, type UserConfigRead } from "../src/user-config.js";
 import { buildEngineParts, composeEngineDeps } from "../src/wiring.js";
 import { cleanupDirs, fakePullRequests, tempHome } from "./helpers.js";
+import { ROUND4_LANDED } from "./round4-merge.js";
 
 afterEach(cleanupDirs);
 
@@ -135,7 +139,7 @@ const MACHINE = {
 describe("probeAutomation", () => {
   it("reads gh's version, the login by exit code only, ffmpeg and the origin remote", async () => {
     const exec = fakeExec(MACHINE);
-    expect(await probeAutomation(exec, { repoRoot: "/r", login: true })).toEqual({
+    expect(await probeAutomation(exec, { repoRoot: "/r", login: true, cwd: "/h" })).toEqual({
       ghVersion: "gh version 2.101.0 (2026-09-15)",
       ghLoggedIn: true,
       githubRemote: true,
@@ -143,15 +147,18 @@ describe("probeAutomation", () => {
     });
     const auth = exec.calls.find((c) => c.line.startsWith("gh auth"));
     // never --show-token, never a prompt; nothing gh prints is kept
-    expect(auth).toEqual({ line: "gh auth status", env: { GH_PROMPT_DISABLED: "1" } });
-    expect(exec.calls.find((c) => c.line.startsWith("git "))?.cwd).toBe("/r");
+    expect(auth).toEqual({ line: "gh auth status", env: { GH_PROMPT_DISABLED: "1" }, cwd: "/h" });
+    // only git runs in the repo; gh and ffmpeg run by name in the user's own directory, so a
+    // repo's ffmpeg.exe is never the one a bare name finds on Windows
+    for (const call of exec.calls)
+      expect(call.cwd, call.line).toBe(call.line.startsWith("git ") ? "/r" : "/h");
   });
 
   it("does not ask gh for the login unless asked, and reports what is missing", async () => {
     const exec = fakeExec({
       "git remote get-url --push origin": { code: 0, stdout: "https://ghe.example.com/o/r.git" },
     });
-    expect(await probeAutomation(exec, { repoRoot: "/r", login: false })).toEqual({
+    expect(await probeAutomation(exec, { repoRoot: "/r", login: false, cwd: "/h" })).toEqual({
       ghVersion: null,
       ghLoggedIn: null,
       githubRemote: false,
@@ -160,13 +167,20 @@ describe("probeAutomation", () => {
     expect(exec.calls.map((c) => c.line)).not.toContain("gh auth status");
     // outside a repo there is no remote to read
     const none = fakeExec(MACHINE);
-    expect((await probeAutomation(none, { repoRoot: null, login: true })).githubRemote).toBe(false);
+    expect(
+      (await probeAutomation(none, { repoRoot: null, login: true, cwd: "/h" })).githubRemote,
+    ).toBe(false);
     expect(none.calls.some((c) => c.line.startsWith("git "))).toBe(false);
   });
 
   it("runs the configured gh command", async () => {
     const exec = fakeExec({ "/opt/gh --version": { code: 0, stdout: "gh version 2.99.1" } });
-    const probe = await probeAutomation(exec, { repoRoot: null, login: false, gh: "/opt/gh" });
+    const probe = await probeAutomation(exec, {
+      repoRoot: null,
+      login: false,
+      cwd: "/h",
+      gh: "/opt/gh",
+    });
     expect(probe.ghVersion).toBe("gh version 2.99.1");
   });
 });
@@ -185,7 +199,7 @@ describe("EngineDeps.automation (AutomationDeps, AD-27 rule 7)", () => {
       evidence: () => (built++, fakeRecorder),
     };
     const deps = buildAutomationDeps({
-      user: read("version: 1\nautomation:\n  evidence_hosting: attach\n"),
+      user: () => read("version: 1\nautomation:\n  evidence_hosting: attach\n"),
       probe: { ...PROBE, ffmpeg: "ffmpeg version 7.1" },
       factories,
       gateDeps: { repoRoot: "/r", vtcHome: "/h", allowUnsandboxed: false },
@@ -208,7 +222,7 @@ describe("EngineDeps.automation (AutomationDeps, AD-27 rule 7)", () => {
 
   it("leaves out what is not there: no recorder, no plumbing, branch hosting without gh", () => {
     const deps = buildAutomationDeps({
-      user: read("version: 1\nautomation:\n  evidence_hosting: attach\n"),
+      user: () => read("version: 1\nautomation:\n  evidence_hosting: attach\n"),
       probe: { ...PROBE, ghVersion: null },
       factories: {},
       gateDeps: { repoRoot: "/r", vtcHome: "/h", allowUnsandboxed: false },
@@ -222,7 +236,7 @@ describe("EngineDeps.automation (AutomationDeps, AD-27 rule 7)", () => {
   it("passes the gate runner's own deps to the recorder, which fails its calls if it cannot be built", async () => {
     const seen: unknown[] = [];
     const deps = buildAutomationDeps({
-      user: read("version: 1\n"),
+      user: () => read("version: 1\n"),
       probe: PROBE,
       factories: {
         evidence: (d) => {
@@ -245,24 +259,28 @@ describe("EngineDeps.automation (AutomationDeps, AD-27 rule 7)", () => {
   });
 });
 
-describe("EngineDeps.armPlugins (D-cg, reading 201): compileArm bound to the shipped plugin", () => {
+/** A `createArmPluginCompiler` that records the base plugin dir of each arm it compiles. */
+const fakeArmCompiler =
+  (calls: [ArmPluginRequest, string][]) =>
+  (options: { readonly pluginDir: string }): ArmPluginCompiler => ({
+    compileArm: (request) => {
+      calls.push([request, options.pluginDir]);
+      return Promise.resolve({
+        dir: request.outDir,
+        version: "arm-0123456789ab",
+        promptSha256: "a".repeat(64),
+      });
+    },
+  });
+
+describe("EngineDeps.armPlugins (D-cg, reading 201): the compiler's arm compiler over the shipped plugin", () => {
   it("compiles each arm from that host's plugin directory, resolved only when an arm is compiled", async () => {
     const dirs: string[] = [];
     const calls: [ArmPluginRequest, string][] = [];
-    const compiler = armPluginCompiler(
-      (request, base) => {
-        calls.push([request, base]);
-        return Promise.resolve({
-          dir: request.outDir,
-          version: "arm-0123456789ab",
-          promptSha256: "a".repeat(64),
-        });
-      },
-      (host) => {
-        dirs.push(host);
-        return `/plugins/${host}`;
-      },
-    );
+    const armCompiler = armPluginCompiler(fakeArmCompiler(calls), (host) => {
+      dirs.push(host);
+      return `/plugins/${host}`;
+    });
     expect(dirs).toEqual([]);
     const request: ArmPluginRequest = {
       host: "claude-code",
@@ -270,7 +288,7 @@ describe("EngineDeps.armPlugins (D-cg, reading 201): compileArm bound to the shi
       editable: "Be brief.",
       outDir: "/h/guard/lookback/arms/t1/b",
     };
-    expect(await compiler.compileArm(request)).toMatchObject({ dir: request.outDir });
+    expect(await armCompiler.compileArm(request)).toMatchObject({ dir: request.outDir });
     expect(calls).toEqual([[request, "/plugins/claude-code"]]);
   });
 });
@@ -294,7 +312,7 @@ describe("buildEngineParts injects automation and arm plugins", () => {
       vtcHome: home,
       exec,
       automationFactories: {},
-      compileArm: null,
+      createArmPluginCompiler: null,
     });
     const deps = composeEngineDeps(parts);
     expect(deps.automation).toEqual({
@@ -312,33 +330,89 @@ describe("buildEngineParts injects automation and arm plugins", () => {
   });
 
   it("injects none with automation: null, and arm plugins over the runtime's plugin dir", async () => {
-    const seen: string[] = [];
+    const calls: [ArmPluginRequest, string][] = [];
     const parts = await buildEngineParts({
       ...base,
       automation: null,
       pluginDir: (host, home) => `${home}/plugins/${host}`,
-      compileArm: (request, dir) => {
-        seen.push(dir);
-        return Promise.resolve({ dir: request.outDir, version: "arm-x", promptSha256: "b" });
-      },
+      createArmPluginCompiler: fakeArmCompiler(calls),
     });
     const deps = composeEngineDeps(parts);
     expect(deps).not.toHaveProperty("automation");
     await deps.armPlugins?.compileArm({
-      host: "codex",
+      host: "claude-code",
       agent: "vtc-engineer",
       editable: "",
       outDir: "/o",
     });
-    expect(seen).toEqual(["/h/plugins/codex"]);
+    expect(calls.map(([, dir]) => dir)).toEqual(["/h/plugins/claude-code"]);
+  });
+
+  it("reads ~/.vtc/config.yaml again at each use: an opt-out flipped while the daemon runs is seen (AD-27 rule 5)", async () => {
+    const home = tempHome();
+    const file = join(home, "config.yaml");
+    writeFileSync(file, "version: 1\n");
+    const parts = await buildEngineParts({
+      ...base,
+      vtcHome: home,
+      exec: fakeExec(MACHINE),
+      automationFactories: {},
+      createArmPluginCompiler: null,
+    });
+    const automation = composeEngineDeps(parts).automation;
+    expect(automation?.upstream.share).toBe(true);
+    expect(automation?.hosting).toBe("branch");
+    writeFileSync(
+      file,
+      "version: 1\nupstream:\n  repo: me/vtc-fork\n  share: false\n  checkout: /src/bs-vtc\nautomation:\n  evidence_hosting: attach\n",
+    );
+    expect(automation?.upstream.share).toBe(false);
+    expect(automation?.upstream).toEqual({
+      repo: "me/vtc-fork",
+      share: false,
+      checkout: "/src/bs-vtc",
+    });
+    // this machine (gh 2.101.0, a github.com origin) allows attach, probed once at start
+    expect(automation?.hosting).toBe("attach");
+    // a file that no longer parses keeps sharing off (privacy fails closed)
+    writeFileSync(file, "version: 1\nupstream: [\n");
+    expect(automation?.upstream.share).toBe(false);
+    expect(automation?.upstream.repo).toBe(DEFAULT_UPSTREAM_REPO);
+    writeFileSync(file, "version: 1\nupstream:\n  share: true\n");
+    expect(automation?.upstream.share).toBe(true);
+    expect(automation?.upstream.checkout).toBeUndefined();
   });
 });
 
-describe("the shipped seams (merge note, readings 207 and 209)", () => {
-  it("are the engine's and compiler's own functions once they land, and left out before", () => {
+/** The names a namespace exports as functions that match `pattern`. */
+const functionsNamed = (namespace: object, pattern: RegExp): string[] =>
+  Object.entries(namespace)
+    .filter(([name, value]) => typeof value === "function" && pattern.test(name))
+    .map(([name]) => name);
+
+describe("the shipped seams (merge note, readings 207 and 209; flags in round4-merge.ts)", () => {
+  it("are found exactly when the integrator's merge flags say they have landed", () => {
     const factories = shippedAutomationFactories();
-    for (const key of Object.keys(factories)) expect(["plumbing", "evidence"]).toContain(key);
+    expect(Object.keys(factories).sort()).toEqual(
+      (["evidence", "plumbing"] as const).filter((key) => ROUND4_LANDED[key]),
+    );
     for (const f of Object.values(factories)) expect(typeof f).toBe("function");
-    expect(["undefined", "function"]).toContain(typeof shippedCompileArm());
+    expect(typeof shippedArmPluginCompilerFactory()).toBe(
+      ROUND4_LANDED.armPlugins ? "function" : "undefined",
+    );
+  });
+
+  it("leave no seam of the engine or compiler unwired under another name", () => {
+    // a renamed export would leave its seam out without a word: fail while one exists unwired
+    const factories = shippedAutomationFactories();
+    if (factories.plumbing === undefined)
+      expect(functionsNamed(git, /Plumbing/), "git plumbing export not wired").toEqual([]);
+    if (factories.evidence === undefined)
+      expect(functionsNamed(gates, /EvidenceRecorder/), "evidence recorder not wired").toEqual([]);
+    if (shippedArmPluginCompilerFactory() === undefined)
+      expect(
+        functionsNamed(compiler, /(^arm|Arm)(?=[A-Z]|$)/),
+        "arm plugin compiler not wired",
+      ).toEqual([]);
   });
 });

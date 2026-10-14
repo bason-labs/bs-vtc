@@ -435,6 +435,7 @@ const run = async (
   whileDeciding?: () => void,
   editableInPack: EditableInPackOf = () => true,
   changesFiles: ChangesFilesOf = () => true,
+  armPlugins = true,
 ): Promise<{ code: number; out: string; err: string }> => {
   const { ctx, out, err } = capture(repo, home);
   const deps = (): GestureDeps => {
@@ -449,10 +450,13 @@ const run = async (
           },
         };
   };
-  const code = await createLookbackCommand(deps, lockedCore, editableInPack, changesFiles).run(
-    args,
-    ctx,
-  );
+  const code = await createLookbackCommand(
+    deps,
+    lockedCore,
+    editableInPack,
+    changesFiles,
+    armPlugins,
+  ).run(args, ctx);
   return { code, out: out.join("\n"), err: err.join("\n") };
 };
 
@@ -1114,6 +1118,56 @@ describe("vtc lookback approve says when no canary can start (spine §5 readings
     expect(r.err).not.toMatch(/no canary of/);
     // the pin itself still cannot reach an in-session Claude dispatch (reading 176)
     expect(r.err).toMatch(/warning: vtc-engineer on claude-code is not editable_in_pack/);
+  });
+
+  it("but warns for that target while this build has no arm plugin compiler to build its arms", async () => {
+    const repo = initVtcRepo();
+    const home = tempHome();
+    writeVersion(home, sha("a"));
+    const args = ["approve", ...T, "--version", sha("a")];
+    const r = await run(
+      repo,
+      home,
+      args,
+      true,
+      noLockedCore,
+      undefined,
+      () => false,
+      () => true,
+      false,
+    );
+    expect(r.err).toMatch(
+      /vtc lookback: warning: no canary of engineer on claude-code can start with this vtc build: vtc-engineer is not editable_in_pack, so each replay arm runs its own plugin \(D-cg, reading 201\), and this build has no arm plugin compiler\. vtc lookback pin pins a version without a replay/,
+    );
+    // an editable_in_pack target, and a Codex one, need no arm plugin
+    const home2 = tempHome();
+    writeVersion(home2, sha("b"));
+    const inPack = await run(
+      repo,
+      home2,
+      ["approve", ...T, "--version", sha("b")],
+      true,
+      noLockedCore,
+      undefined,
+      () => true,
+      () => true,
+      false,
+    );
+    expect(inPack.err).not.toMatch(/no canary of/);
+    const home3 = tempHome();
+    writeVersion(home3, sha("c"), { host: "codex" });
+    const codex = await run(
+      repo,
+      home3,
+      ["approve", "--role", ROLE, "--host", "codex", "--version", sha("c")],
+      true,
+      noLockedCore,
+      undefined,
+      () => false,
+      () => true,
+      false,
+    );
+    expect(codex.err).not.toMatch(/no canary of/);
   });
 
   it("says nothing for a role that changes files on a Codex-led run, nor for a switched one on Claude Code", async () => {

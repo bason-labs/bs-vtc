@@ -30,7 +30,10 @@
  * (`replayGraderFor`, spine §5 readings 201 and 202): a role that changes no file and that no
  * verdict grader scores. Every file-writing role replays on either host (each Claude arm runs its
  * own plugin, D-cg) and the Spec Verifier through the verdict grader (D-ch). A canary starts only
- * from a replay, so the warning says so and points at `vtc lookback pin`.
+ * from a replay, so the warning says so and points at `vtc lookback pin`. It also warns for a
+ * Claude Code target that is not `editable_in_pack` while this build has no arm plugin compiler
+ * (`shippedArmPluginCompilerFactory`, merge note of `automation-wiring.ts`): its replay arms need
+ * their own plugin, which the daemon then cannot build.
  */
 import { join } from "node:path";
 import { core, git } from "@vtc/engine";
@@ -45,6 +48,7 @@ import {
   SlugSchema,
   type AssetBundle,
 } from "@vtc/shared";
+import { shippedArmPluginCompilerFactory } from "../automation-wiring.js";
 import {
   defaultGestureDeps,
   EXIT_NOT_CONFIRMED,
@@ -161,21 +165,31 @@ export const installedChangesFiles: ChangesFilesOf = changesFilesOf(() => runtim
 /**
  * Why `approve` cannot start a canary of the target, or `undefined` (readings 201 and 202): no
  * replay can grade it (`replayGraderFor`), and a canary starts only from one. Whether the role
- * changes files unknown: no warning.
+ * changes files unknown: no warning. A Claude Code target that is not `editable_in_pack` replays
+ * only through its own arm plugin (D-cg), so without an arm plugin compiler in this build
+ * (`armPlugins: false`) no replay of it can run either.
  */
 export const noCanaryWarning = (
   target: PinTarget,
   changesFiles: boolean | undefined,
-): string | undefined =>
-  changesFiles === undefined || replayGraderFor(target.role, changesFiles) !== null
-    ? undefined
-    : `no canary of ${describeTarget(target)} can start in this version: ${agentNameFor(target.role, target.mode)} changes no file and no verdict grader scores it, so no replay can grade it (spine §5 readings 201 and 202). vtc lookback pin pins a version without a replay`;
+  editableInPack = true,
+  armPlugins = true,
+): string | undefined => {
+  if (changesFiles === undefined) return undefined;
+  const agent = agentNameFor(target.role, target.mode);
+  if (replayGraderFor(target.role, changesFiles) === null)
+    return `no canary of ${describeTarget(target)} can start in this version: ${agent} changes no file and no verdict grader scores it, so no replay can grade it (spine §5 readings 201 and 202). vtc lookback pin pins a version without a replay`;
+  if (target.host === "claude-code" && !editableInPack && !armPlugins)
+    return `no canary of ${describeTarget(target)} can start with this vtc build: ${agent} is not editable_in_pack, so each replay arm runs its own plugin (D-cg, reading 201), and this build has no arm plugin compiler. vtc lookback pin pins a version without a replay`;
+  return undefined;
+};
 
 export const createLookbackCommand = (
   deps: () => GestureDeps = defaultGestureDeps,
   lockedCore: LockedCoreOf = installedLockedCore,
   editableInPack: EditableInPackOf = installedEditableInPack,
   changesFiles: ChangesFilesOf = installedChangesFiles,
+  armPlugins: boolean = shippedArmPluginCompilerFactory() !== undefined,
 ): CommandSpec => ({
   name: "lookback",
   summary:
@@ -241,7 +255,7 @@ export const createLookbackCommand = (
         if (reach.note !== undefined) ctx.io.out(reach.note);
         // readings 201 and 202: say when no replay, so no canary, can start for the target
         if (gesture === "approve" && !canaryRunning(ctx.vtcHome, repoKey, target)) {
-          const none = noCanaryWarning(target, changesFiles(target));
+          const none = noCanaryWarning(target, changesFiles(target), inPack, armPlugins);
           if (none !== undefined) ctx.io.err(`vtc lookback: warning: ${none}`);
         }
       }
