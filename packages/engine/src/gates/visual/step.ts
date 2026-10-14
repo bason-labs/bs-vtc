@@ -224,6 +224,8 @@ export const runVisualStep = async (ctx: VisualStepContext): Promise<VisualStepR
   });
   /** Visible, non-blocking notes for the report (a browser pinned on first use…). */
   const visibleNotes: VisualNote[] = [];
+  /** Whose Playwright the step runs on, once chosen (`VisualSummary.toolchain`). */
+  const ranOn: { source?: VisualToolchain["source"] } = {};
   const without = (
     status: "skipped" | "error",
     reason: string,
@@ -242,6 +244,7 @@ export const runVisualStep = async (ctx: VisualStepContext): Promise<VisualStepR
         writtenAt,
         counts: staticCounts,
         notes: visibleNotes,
+        toolchain: ranOn.source,
       }),
     );
 
@@ -335,6 +338,7 @@ export const runVisualStep = async (ctx: VisualStepContext): Promise<VisualStepR
     const why = notes.length > 0 ? ` (${notes.join("; ")})` : "";
     return without("skipped", `${VISUAL_SKIPPED_NO_BROWSER}${why}`.slice(0, 500));
   }
+  ranOn.source = toolchain.source;
   if (!check.ok) return without("error", check.reason);
   if (check.note !== undefined) visibleNotes.push(check.note);
   if (toolchain.source === "project") {
@@ -503,6 +507,7 @@ export const runVisualStep = async (ctx: VisualStepContext): Promise<VisualStepR
     notes: visibleNotes,
     reportPath,
     writtenAt,
+    toolchain: ranOn.source,
   });
   return finish(outcome, images);
 };
