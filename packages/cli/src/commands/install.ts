@@ -19,6 +19,11 @@
  * (the repo's `info/exclude`; a tracked file is refused). What still keeps the sandbox off from
  * other settings files (the repo's committed ones, the user's own) is named, never edited.
  *
+ * `vtc install codex` also registers the compiled plugin per Codex's plugin layout
+ * (`codex-registration.ts`: a marked copy under `.agents/plugins/vtc/`, the local marketplace
+ * `.agents/plugins/marketplace.json`, and `[plugins."vtc@<marketplace>"] enabled = true` in
+ * `.codex/config.toml`), in the repo for the project scope and in the home for the user scope.
+ *
  * The OS timer behind auto-resume (AD-6 rule 4, §6.9 step 4; `timer.ts`: launchd on macOS, a
  * systemd user timer on Linux) is installed only on an explicit `--auto-resume`, never silently
  * (reading 59): `vtc install --auto-resume` alone (re)installs just the timer (e.g. after the
@@ -29,6 +34,7 @@
 import { homedir } from "node:os";
 import { ADAPTER_FACTORIES } from "@vtc/adapters";
 import { DEFAULT_INSTALL_SCOPE, HostIdSchema, type HostId } from "@vtc/shared";
+import { registerCodexPlugin } from "../codex-registration.js";
 import { ttyConfirm } from "../confirm.js";
 import { findRepoRoot, UsageError } from "../repo.js";
 import { runtime } from "../runtime.js";
@@ -66,6 +72,8 @@ export interface InstallDeps {
   readonly confirm: (question: string) => Promise<boolean>;
   /** Where the Claude session sandbox state is read from (the real machine by default). */
   readonly sessionSandboxEnv: () => SessionSandboxEnv;
+  /** Registers the Codex plugin per Codex's plugin layout (`registerCodexPlugin`). */
+  readonly registerCodex: typeof registerCodexPlugin;
 }
 
 export const defaultInstallDeps = (): InstallDeps => ({
@@ -81,6 +89,7 @@ export const defaultInstallDeps = (): InstallDeps => ({
   }),
   confirm: ttyConfirm,
   sessionSandboxEnv: defaultSessionSandboxEnv,
+  registerCodex: registerCodexPlugin,
 });
 
 /**
@@ -228,12 +237,13 @@ export const createInstallCommand = (
         const pluginDir = d.pluginDir(host.data, ctx.vtcHome);
         const adapter = factory({ pluginDir, vtcHome: ctx.vtcHome, vtcVersion: VERSION });
         const repoRoot = await findRepoRoot(ctx.cwd);
+        const installScope = scope ?? DEFAULT_INSTALL_SCOPE[host.data];
         try {
           const result = await adapter.install({
             projectRoot: repoRoot ?? ctx.cwd,
             home: d.home(),
             pluginDir,
-            scope: scope ?? DEFAULT_INSTALL_SCOPE[host.data],
+            scope: installScope,
             vtcHome: ctx.vtcHome,
           });
           ctx.io.out(`Installed the VTC plugin for ${host.data}.`);
@@ -241,6 +251,15 @@ export const createInstallCommand = (
           for (const note of result.notes) ctx.io.out(`  note: ${note}`);
         } finally {
           await adapter.dispose();
+        }
+        if (host.data === "codex") {
+          const registered = d.registerCodex({
+            root: installScope === "user" ? d.home() : (repoRoot ?? ctx.cwd),
+            pluginDir,
+            scope: installScope,
+          });
+          for (const path of registered.written) ctx.io.out(`  wrote ${path}`);
+          for (const note of registered.notes) ctx.io.out(`  note: ${note}`);
         }
         if (host.data === "claude-code" && !(await installSessionSandbox(ctx, d, repoRoot)))
           failed = true;
@@ -269,7 +288,7 @@ export const createInstallCommand = (
           return EXIT.failed;
         }
         ctx.io.out(
-          `Installed the auto-resume timer (${path}): every minute it wakes the engine of a repo whose run waits on a usage reset; the run then continues when the Lead session asks for its next step (the engine starts no host CLI itself in v1). --no-auto-resume removes it.`,
+          `Installed the auto-resume timer (${path}): every minute it wakes the engine of a repo whose run waits on a usage reset; the run then continues when the Lead session asks for its next step, or, with hosts.dispatch: headless_allowed, the engine resumes it headless itself. --no-auto-resume removes it.`,
         );
       } else {
         ctx.io.out(

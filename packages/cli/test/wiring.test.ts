@@ -13,13 +13,14 @@ import { afterEach, describe, expect, it } from "vitest";
 import {
   CONTRACTS_VERSION,
   ENGINE_INSTANCE,
-  ENGINE_MCP_TOOLS,
   engineDiscoveryFile,
   ProjectConfigSchema,
   USER_CONFIG_FILE,
   type CreateGateRunner,
   type GateRunner,
   type HostAdapter,
+  type HttpClient,
+  type RemoteMergeService,
   type RunningDaemon,
 } from "@vtc/shared";
 import type { AdapterFactoryOptions } from "@vtc/adapters";
@@ -43,6 +44,7 @@ import {
   composeEngineDeps,
   connectToRepoEngine,
   createAdapters,
+  defaultHttpClient,
   disposeAdapters,
   lazyGateRunner,
   resolveVtcHome,
@@ -55,6 +57,7 @@ import {
   DASHBOARD_FIXTURE,
   fakeGateRunner,
   fakePullRequests,
+  git,
   initProject,
   commitVtcConfig,
   initRepo,
@@ -64,6 +67,7 @@ import {
   tempDir,
   tempHome,
   writePluginTrees,
+  expectServedTools,
 } from "./helpers.js";
 
 const TOKEN = "k".repeat(43);
@@ -148,6 +152,69 @@ describe("buildEngineParts and composeEngineDeps (AD-19)", () => {
     const pr = await composeEngineDeps(parts).pullRequests?.view("vtc/F-1");
     expect(pr).toMatchObject({ url: "https://github.com/o/r/pull/7", draft: true, state: "open" });
     expect(readFileSync(log, "utf8")).toMatch(/^pr view vtc\/F-1 --json /);
+  });
+
+  it("injects the gh-backed Level-3 service (AD-23), which runs gh only when called", async () => {
+    const bin = tempDir();
+    const log = join(bin, "calls.txt");
+    const gh = join(bin, "gh");
+    writeFileSync(gh, `#!/bin/sh\necho "$@" >> "${log}"\nexit 0\n`);
+    chmodSync(gh, 0o755);
+    const repo = initRepo();
+    git(repo, "remote", "add", "origin", "https://github.com/o/r.git");
+    const parts = await buildEngineParts({
+      repoRoot: repo,
+      vtcHome: tempHome(),
+      installToken: TOKEN,
+      assets: createDiskAssetBundle({}),
+      ghCommand: gh,
+      adapterFactories: {},
+    });
+    expect(existsSync(log)).toBe(false);
+    const remote = composeEngineDeps(parts).remoteMerge;
+    expect(await remote?.remote()).toEqual({ github: true, ghAuthenticated: true });
+    expect(readFileSync(log, "utf8")).toBe("auth status\n");
+    const injected = { remote: () => Promise.resolve({ github: false, ghAuthenticated: false }) };
+    const withFake = await buildEngineParts({
+      repoRoot: repo,
+      vtcHome: tempHome(),
+      installToken: TOKEN,
+      assets: createDiskAssetBundle({}),
+      remoteMerge: injected as unknown as RemoteMergeService,
+      adapterFactories: {},
+    });
+    expect(composeEngineDeps(withFake).remoteMerge).toBe(injected);
+  });
+
+  it("injects the research HTTP client only with a resolver for its network guard (AD-22)", async () => {
+    const http: HttpClient = { request: () => Promise.reject(new Error("unused")) };
+    const base = {
+      repoRoot: "/r",
+      vtcHome: "/h",
+      installToken: TOKEN,
+      assets: createDiskAssetBundle({}),
+      pullRequests: fakePullRequests(),
+      adapterFactories: {},
+    };
+    expect(composeEngineDeps(await buildEngineParts({ ...base, http })).http).toBe(http);
+    expect(composeEngineDeps(await buildEngineParts({ ...base, http: null }))).not.toHaveProperty(
+      "http",
+    );
+    // Node in development has no runtime-safe resolver: no client, so research fails closed
+    expect(composeEngineDeps(await buildEngineParts(base))).not.toHaveProperty("http");
+    expect(defaultHttpClient(null)).toBeUndefined();
+    const client = defaultHttpClient(
+      () => Promise.resolve(["10.0.0.1"]),
+      () => Promise.reject(new Error("never fetched")),
+    );
+    await expect(
+      client?.request({
+        url: "https://example.com/",
+        method: "GET",
+        timeoutMs: 1000,
+        maxBytes: 10,
+      }),
+    ).rejects.toThrow(/private address/);
   });
 
   it("builds the Gate Runner on first use, once, and passes a broken one's error to the caller", async () => {
@@ -432,9 +499,7 @@ describe("repos vtc init never set up (the plugins are user-scoped)", () => {
     });
     stdin.write(rpc(2, "tools/list"));
     const tools = (await next(/"id":2\b/)) as { result: { tools: { name: string }[] } };
-    expect(tools.result.tools.map((t) => t.name).sort()).toEqual(
-      ENGINE_MCP_TOOLS.map((t) => t.name).sort(),
-    );
+    expectServedTools(tools.result.tools.map((t) => t.name));
     stdin.write(rpc(3, "tools/call", { name: "status", arguments: {} }));
     const refused = (await next(/"id":3\b/)) as {
       result: { isError: boolean; content: { text: string }[] };

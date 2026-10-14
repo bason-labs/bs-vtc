@@ -37,6 +37,8 @@ import {
   claudeSessionSandboxSettings,
   claudeSessionSandboxState,
   hostConfigDirsOf,
+  VTC_HOME_SHELL_SPELLINGS,
+  WAVE3_HOME_WRITE_DENY,
   type HostId,
   type SessionSandboxScope,
   type SessionSandboxState,
@@ -171,8 +173,32 @@ export const sandboxToolsMissing = (
 };
 
 /**
+ * The wave-3 VTC home paths no role may write (`WAVE3_HOME_WRITE_DENY`: Lookback versions and
+ * pins, the research cache, the browser store, the design library; spine §5 reading 103), as the
+ * Lead session denies them: sandbox write denies, `Edit` rules for the file tools and the shell
+ * spellings as Bash text, exactly as the shared settings do for `homeWriteDeny`. The cli adds
+ * them itself until the integrator folds the list into `ROLE_DENIED_VTC.homeWriteDeny`; every
+ * list is deduplicated, so the fold changes nothing here.
+ */
+export const wave3SessionDenies = (
+  vtcHome: string,
+): { readonly denyWrite: string[]; readonly permissionDeny: string[] } => {
+  const base = vtcHome.length > 1 ? vtcHome.replace(/\/+$/, "") : vtcHome;
+  const roots = WAVE3_HOME_WRITE_DENY.map((glob) => glob.replace(/\/\*\*$/, ""));
+  const denyWrite = roots.map((root) => `${base}/${root}`);
+  return {
+    denyWrite,
+    permissionDeny: [
+      ...denyWrite.flatMap((path) => [`Edit(/${path})`, `Edit(/${path}/**)`]),
+      ...roots.flatMap((root) => VTC_HOME_SHELL_SPELLINGS.map((home) => `Bash(*${home}/${root}*)`)),
+    ],
+  };
+};
+
+/**
  * The settings `vtc install --host claude-code` writes: the shared ones (the sandbox and the
- * file-tool `permissions.deny` rules, spine §5 reading 81) and `failIfUnavailable`.
+ * file-tool `permissions.deny` rules, spine §5 reading 81), the wave-3 write denies
+ * ({@link wave3SessionDenies}) and `failIfUnavailable`.
  */
 export const sessionSandboxSettings = (
   vtcHome: string,
@@ -184,9 +210,17 @@ export const sessionSandboxSettings = (
   readonly permissions: ReturnType<typeof claudeSessionSandboxSettings>["permissions"];
 } => {
   const shared = claudeSessionSandboxSettings(vtcHome, scope);
+  const wave3 = wave3SessionDenies(vtcHome);
   return {
-    sandbox: { ...shared.sandbox, failIfUnavailable: true },
-    permissions: shared.permissions,
+    sandbox: {
+      ...shared.sandbox,
+      filesystem: {
+        ...shared.sandbox.filesystem,
+        denyWrite: [...new Set([...shared.sandbox.filesystem.denyWrite, ...wave3.denyWrite])],
+      },
+      failIfUnavailable: true,
+    },
+    permissions: { deny: [...new Set([...shared.permissions.deny, ...wave3.permissionDeny])] },
   };
 };
 
@@ -502,6 +536,16 @@ export const claudeSessionSandboxOf = (
   const missing = [...shared.missing];
   if (local.kind === "ok" && at(local.settings, ["sandbox", "failIfUnavailable"]) !== true)
     missing.push("sandbox.failIfUnavailable");
+  if (local.kind === "ok") {
+    const listed = (value: unknown): unknown[] => (Array.isArray(value) ? value : []);
+    const wave3 = wave3SessionDenies(vtcHome);
+    const denyWrite = listed(at(local.settings, ["sandbox", "filesystem", "denyWrite"]));
+    const deny = listed(at(local.settings, ["permissions", "deny"]));
+    for (const path of wave3.denyWrite)
+      if (!denyWrite.includes(path) && !missing.includes(path)) missing.push(path);
+    for (const rule of wave3.permissionDeny)
+      if (!deny.includes(rule) && !missing.includes(rule)) missing.push(rule);
+  }
   const widening: string[] = [];
   let unreadable = false;
   const sessionDir = canonical(cwd);

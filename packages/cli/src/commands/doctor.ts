@@ -7,19 +7,33 @@
  * daemon passes (`~/.vtc/config.yaml` `env_passthrough`, D-ak), the OS sandbox gate commands
  * run in (none fails unless the user opted in with `gates.allow_unsandboxed`, which warns; D-al),
  * the repo's Claude session sandbox and what it misses (D-an), the repo's running engine (one
- * of an incompatible `vtc` fails), Playwright's Chromium (pin deferred: a warning, D-ai), the
- * pinned scanners (`gates.createScannerStore`; Checkov without a native build warns, D-u) and the
- * osv-scanner offline database.
+ * of an incompatible `vtc` fails), the visual stack's browser against its pin (AD-24), the pinned
+ * scanners (`gates.createScannerStore`; Checkov without a native build warns, D-u) and the
+ * osv-scanner offline database. Since wave 3 also: Claude Code's minimum version for headless
+ * runs (`CLAUDE_MIN_VERSION`, AD-25), each adapter's `authStatus()` (what the engine checks before
+ * an unattended run), and in a VTC repo the merge level with the Level-3 preflight (AD-23 rule 1).
  * `--download` fetches the missing scanners into `~/.vtc/`, each verified against its pinned
  * SHA-256 (§4.4), and refreshes the osv-scanner database into `~/.vtc/osv-db/` for the repo's
- * lockfiles. Exits 1 when a required check fails.
+ * lockfiles. `--install-browser` (explicit only, D-ay) installs the browser store and its pin
+ * (`browser-install.ts`). Exits 1 when a required check fails.
  */
 import { existsSync, readFileSync } from "node:fs";
-import { gates } from "@vtc/engine";
+import { join } from "node:path";
+import { ADAPTER_FACTORIES } from "@vtc/adapters";
+import { core, gates, git } from "@vtc/engine";
+import type { HostAuthStatus } from "@vtc/shared";
+import {
+  checkBrowser,
+  defaultBrowserInstallDeps,
+  installBrowser,
+  sha256OfFile,
+  type BrowserCheckEnv,
+} from "../browser-install.js";
 import { daemonState } from "../daemon.js";
 import {
-  checkChromium,
   checkEngine,
+  checkHostAuth,
+  checkMergeLevel,
   checkEnvPassthrough,
   checkGateSandbox,
   checkSessionSandbox,
@@ -28,9 +42,11 @@ import {
   type DoctorCheck,
   type DoctorEnv,
   type GateSandboxReport,
+  type MergeLevelEnv,
 } from "../doctor-checks.js";
+import { createGhRemoteMerge } from "../gh-remote-merge.js";
 import { exec } from "../process.js";
-import { findRepoRoot } from "../repo.js";
+import { findRepoRoot, isVtcProject } from "../repo.js";
 import {
   checkOsvDatabase,
   checkScanners,
@@ -47,6 +63,8 @@ import {
 } from "../session-sandbox.js";
 import { autoResumeTimer, defaultTimerHost } from "../timer.js";
 import { readUserConfig, type UserConfigRead } from "../user-config.js";
+import { createAdapters } from "../wiring.js";
+import { readMergeLevelLedger } from "./merge-level.js";
 import type { CommandContext, CommandSpec } from "./types.js";
 import { EXIT, guarded, parseFlags } from "./util.js";
 
@@ -69,8 +87,14 @@ export interface DoctorCommandEnv extends DoctorEnv {
   readonly userConfig?: () => UserConfigRead;
   /** The running engine of the repo doctor runs in, or `null` (no repo, no daemon). */
   readonly engine?: () => Promise<DoctorCheck | null>;
-  /** Playwright's Chromium for Visual QA (§4.4). */
-  readonly chromium?: () => DoctorCheck;
+  /** The visual stack's browser pin (AD-24). */
+  readonly browser?: BrowserCheckEnv;
+  /** `--install-browser`: installs the store and writes the pin (D-ay, explicit only). */
+  readonly installBrowser?: (log: (line: string) => void) => Promise<unknown>;
+  /** Each adapter's `authStatus()` (AD-25 rule 3); hosts without one are left out. */
+  readonly hostAuth?: () => Promise<readonly HostAuthStatus[]>;
+  /** The merge level of the VTC repo doctor runs in (AD-23), `null` outside one. */
+  readonly mergeLevel?: () => Promise<MergeLevelEnv | null>;
   /** The OS sandbox gate commands run in (D-al), `null` when the machine has none. */
   readonly gateSandbox?: () => Promise<GateSandboxReport>;
   /** The Claude session sandbox of the repo doctor runs in (D-an), `null` outside a repo. */
@@ -114,7 +138,49 @@ export const defaultDoctorEnv = (ctx: CommandContext): DoctorCommandEnv => {
         ? null
         : checkEngine(repoRoot, await daemonState(ctx.vtcHome, repoRoot));
     },
-    chromium: checkChromium,
+    browser: { vtcHome: ctx.vtcHome, sha256: sha256OfFile },
+    installBrowser: (log) => installBrowser(ctx.vtcHome, defaultBrowserInstallDeps(log)),
+    hostAuth: async () => {
+      // constructed only to ask; no plugin is extracted or installed
+      const adapters = createAdapters(ADAPTER_FACTORIES, {
+        vtcHome: ctx.vtcHome,
+        pluginDir: (host, home) => join(home, "plugins", "doctor", host),
+      });
+      try {
+        const statuses = await Promise.all(
+          Object.values(adapters).map((a) => a.authStatus?.() ?? Promise.resolve(null)),
+        );
+        return statuses.filter((s): s is HostAuthStatus => s !== null);
+      } finally {
+        await Promise.allSettled(Object.values(adapters).map((a) => a.dispose()));
+      }
+    },
+    mergeLevel: async () => {
+      const repoRoot = await findRepoRoot(ctx.cwd);
+      if (repoRoot === null || !isVtcProject(repoRoot)) return null;
+      const remote = createGhRemoteMerge({ repoRoot });
+      const head = await git.runGit(
+        repoRoot,
+        ["symbolic-ref", "--short", "refs/remotes/origin/HEAD"],
+        {
+          allowFailure: true,
+        },
+      );
+      const base =
+        head.code === 0
+          ? head.stdout
+              .toString("utf8")
+              .trim()
+              .replace(/^origin\//, "")
+          : "main";
+      return {
+        configured: core.loadProjectConfig(repoRoot).merge_level,
+        ledger: readMergeLevelLedger(repoRoot).entries,
+        base: base === "" ? "main" : base,
+        remote: () => remote.remote(),
+        policy: (b) => remote.policy(b),
+      };
+    },
     gateSandbox: () => Promise.resolve(detectGateSandbox()),
     sessionSandbox: async () => {
       const repoRoot = await findRepoRoot(ctx.cwd);
@@ -130,21 +196,43 @@ export const createDoctorCommand = (
 ): CommandSpec => ({
   name: "doctor",
   summary:
-    "Check prerequisites (runtime, git, host CLIs and logins, gh, auto-resume timer, env passthrough, gate sandbox, session sandbox, the repo's engine, pinned scanners, osv database); --download fetches missing scanners and the osv database",
+    "Check prerequisites (runtime, git, host CLIs, versions and logins, gh, auto-resume timer, env passthrough, gate sandbox, session sandbox, the repo's engine and merge level, the browser, pinned scanners, osv database); --download fetches missing scanners and the osv database; --install-browser installs the visual stack's browser",
   run: (args, ctx) =>
     guarded("doctor", ctx, async () => {
-      const { values } = parseFlags(args, { download: { type: "boolean" } });
+      const { values } = parseFlags(args, {
+        download: { type: "boolean" },
+        "install-browser": { type: "boolean" },
+      });
       const e = env(ctx);
+      if (values["install-browser"] === true) {
+        if (e.installBrowser === undefined) throw new Error("this vtc cannot install a browser");
+        try {
+          await e.installBrowser((line) => {
+            ctx.io.out(line);
+          });
+        } catch (error) {
+          ctx.io.err(
+            `vtc doctor: the browser was not installed: ${error instanceof Error ? error.message : String(error)}`,
+          );
+          return EXIT.failed;
+        }
+      }
       const checks = await runDoctorChecks(e);
+      if (e.hostAuth !== undefined) {
+        const auth = checkHostAuth(await e.hostAuth());
+        if (auth !== null) checks.push(auth);
+      }
       const userConfig = e.userConfig?.() ?? null;
       if (userConfig !== null) checks.push(checkEnvPassthrough(userConfig));
       if (e.gateSandbox !== undefined)
         checks.push(checkGateSandbox(await e.gateSandbox(), userConfig));
       const session = e.sessionSandbox === undefined ? null : await e.sessionSandbox();
       if (session !== null) checks.push(checkSessionSandbox(session));
-      if (e.chromium !== undefined) checks.push(e.chromium());
+      if (e.browser !== undefined) checks.push(await checkBrowser(e.browser));
       const engine = e.engine === undefined ? null : await e.engine();
       if (engine !== null) checks.push(engine);
+      const level = e.mergeLevel === undefined ? null : await e.mergeLevel();
+      if (level !== null) checks.push(await checkMergeLevel(level));
       if (e.scanners !== undefined) {
         const mode = values.download === true ? "download" : "check";
         checks.push(
