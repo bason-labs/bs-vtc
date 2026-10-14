@@ -1161,7 +1161,12 @@ const acceptFeatureReviewer = async (
     ]);
   const missing = await unresolved(
     { ...evidenceContext(k, h, null), repoRoot: join(k.deps.repoRoot, worktree.path) },
-    [...result.claims, ...result.verdicts.flatMap((v) => v.evidence)],
+    // its findings too: at Final Review a finding becomes a fix task, so it must cite what is there
+    [
+      ...result.claims,
+      ...result.verdicts.flatMap((v) => v.evidence),
+      ...result.findings.map((f) => f.evidence),
+    ],
   );
   if (missing.length > 0)
     return reject(
