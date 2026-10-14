@@ -4,8 +4,8 @@
  * way `docs/research/spike-fixtures/` is: session, thread and event ids become placeholders, the
  * temp repo, the home directory and the user name become `<cwd>`, `<home>` and `<user>`, e-mail
  * addresses become `<email>`, and every known token format goes through `redactSecrets`. What
- * names the owner's own setup is replaced with `<redacted>`: the Claude `init` event's `plugins`,
- * `skills`, `slash_commands`, `terminal_slash_commands`, `memory_paths` and
+ * names the owner's own setup is replaced with `<redacted>`: the Claude `init` event's `plugins`
+ * (each entry but the `vtc` plugin's, which a replay arm's load proof reads), `skills`, `slash_commands`, `terminal_slash_commands`, `memory_paths` and
  * `messaging_socket_path`, every `agents` entry that is neither built in nor `vtc:`, an
  * `output_style` that is not built in, and a hook event's
  * `output`, `stdout` and `stderr` text (under `--setting-sources user` the user's own plugins and
@@ -21,6 +21,8 @@ export interface RecordingContext {
   readonly cwd: readonly string[];
   /** The login name, replaced where it stands as a word. */
   readonly user?: string;
+  /** Other paths and their placeholders (e.g. a replay arm's directory as `<arm-dir>`). */
+  readonly paths?: readonly (readonly [string, string])[];
 }
 
 /** JSON keys whose string value is an id, and the placeholder the recorded fixtures use for it. */
@@ -34,7 +36,6 @@ const REDACTED = "<redacted>";
 
 /** The Claude `init` fields that name the owner's own plugins, skills, commands and paths. */
 const INIT_PRIVATE_KEYS = [
-  "plugins",
   "skills",
   "slash_commands",
   "terminal_slash_commands",
@@ -78,6 +79,15 @@ const withoutOwnerSetup = (event: unknown): unknown => {
     if (value !== undefined && value !== null && value !== "") out[key] = REDACTED;
   }
   if (event.subtype === "init") {
+    // the vtc plugin's own entry stays (a replay arm's load proof reads it, D-cg); others go
+    const plugins = out.plugins;
+    if (Array.isArray(plugins)) {
+      out.plugins = (plugins as readonly unknown[]).map((plugin): unknown =>
+        isObject(plugin) && plugin.name === "vtc" ? plugin : REDACTED,
+      );
+    } else if (plugins !== undefined && plugins !== null && plugins !== "") {
+      out.plugins = REDACTED;
+    }
     const agents = out.agents;
     if (Array.isArray(agents)) {
       out.agents = (agents as readonly unknown[]).map((name): unknown =>
@@ -103,6 +113,7 @@ const redactText = (text: string, context: RecordingContext): string => {
   const paths: [string, string][] = [
     ...context.cwd.map((path): [string, string] => [path, "<cwd>"]),
     [context.home, "<home>"],
+    ...(context.paths ?? []).map(([path, placeholder]): [string, string] => [path, placeholder]),
   ];
   paths.sort((a, b) => b[0].length - a[0].length);
   for (const [path, placeholder] of paths) {

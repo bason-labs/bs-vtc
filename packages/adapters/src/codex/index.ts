@@ -20,7 +20,13 @@ import { installCodex } from "./install.js";
 
 /**
  * §12.1 / §20.4: subagents are spawned explicitly (foreground), no background agents in the CLI,
- * no per-path write-deny, caps enforced by the engine only.
+ * no per-path write-deny, caps enforced by the engine only. Host web is safe (D-cf, spine §5
+ * reading 200): a `host_web` role gets `web_search="cached"`, never `live`, and every role run
+ * turns off the apps connectors, browser and computer use (`CODEX_ROLE_FEATURES_OFF`). The D-cl
+ * live check (2026-10-15, codex-cli 0.162.1, `scripts/dcl-check.ts`): under both role sandboxes
+ * `cached` searched the index and opened only indexed result pages; it refused a model-picked URL
+ * no index holds ("not accessible via this tool"); a top-level `-c` beat the user's `config.toml`
+ * and a `--profile` layer; and with the apps connectors off no `codex_apps` web tool was called.
  */
 export const codexCapabilities: HostCapabilities = {
   subagents: true,
@@ -29,6 +35,7 @@ export const codexCapabilities: HostCapabilities = {
   headless: true,
   turnCap: false,
   budgetCap: false,
+  safeHostWeb: true,
 };
 
 export interface CodexAdapterOptions {
