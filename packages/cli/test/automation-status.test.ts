@@ -9,6 +9,7 @@ import type { AutomationReport, EngineDiscovery } from "@vtc/shared";
 import {
   createAutomationCommand,
   formatAutomation,
+  jsonText,
   type AutomationStatusDeps,
 } from "../src/commands/automation.js";
 import { getFromEngine } from "../src/engine-http.js";
@@ -134,6 +135,25 @@ const deps = (
     },
   });
 };
+
+describe("jsonText", () => {
+  it("escapes DEL and C1 controls as well as C0, and stays the same JSON", () => {
+    const hostile: AutomationReport = {
+      ...REPORT,
+      notes: ["8-bit CSI \u009b2J, DEL \u007f, ESC \u001b[2J"],
+    };
+    const text = jsonText(hostile);
+    // no raw control character but the layout's own newlines
+    const controls: number[] = [];
+    for (let i = 0; i < text.length; i++) {
+      const code = text.charCodeAt(i);
+      if (code !== 0x0a && (code < 0x20 || (code >= 0x7f && code <= 0x9f))) controls.push(code);
+    }
+    expect(controls).toEqual([]);
+    expect(text).toContain("8-bit CSI \\u009b2J, DEL \\u007f, ESC \\u001b[2J");
+    expect(JSON.parse(text)).toEqual(hostile);
+  });
+});
 
 describe("vtc automation status", () => {
   it("reads GET /api/automation from the repo's engine with the install token", async () => {

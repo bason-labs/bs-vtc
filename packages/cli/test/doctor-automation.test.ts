@@ -99,11 +99,11 @@ describe("evidence hosting and capture (reading 196, D-ce)", () => {
     );
   });
 
-  it("says what capture falls back to without vtc's browser (Playwright presence)", () => {
+  it("says capture needs vtc's browser, never the project's Playwright (Playwright presence)", () => {
     const check = checkEvidence(PROBE, "branch", BROWSER_NONE);
     expect(check.status).toBe("warn");
     expect(check.detail).toMatch(
-      /no browser installed by vtc: capture uses the project's own Playwright, and without one no automatic PR opens \(issues still do\); run vtc doctor --install-browser$/,
+      /no browser installed by vtc: evidence capture needs vtc's pinned browser \(never the project's own Playwright\), so no automatic PR opens \(issues still do\) until you run vtc doctor --install-browser$/,
     );
   });
 });
@@ -165,7 +165,7 @@ describe("upstream.checkout (D-by): a clone of upstream.repo set up for VTC", ()
     expect(githubSlugOf("https://gitlab.com/o/r.git")).toBeNull();
   });
 
-  it("looks at the directory, its origin (run inside it) and .vtc/project.yaml", async () => {
+  it("looks at the directory, its origin (git -C from the user's own dir) and .vtc/project.yaml", async () => {
     const calls: { line: string; cwd?: string }[] = [];
     const exec: Exec = (command, args, options) => {
       calls.push({
@@ -175,16 +175,16 @@ describe("upstream.checkout (D-by): a clone of upstream.repo set up for VTC", ()
       return Promise.resolve({ code: 0, stdout: "git@github.com:o/r.git\n", stderr: "" });
     };
     const dir = tempDir();
-    expect(await inspectCheckout(exec, dir)).toEqual({
+    expect(await inspectCheckout(exec, dir, "/h")).toEqual({
       exists: true,
       origin: "git@github.com:o/r.git",
       vtcProject: false,
     });
-    expect(calls).toEqual([{ line: "git remote get-url origin", cwd: dir }]);
+    expect(calls).toEqual([{ line: `git -C ${dir} remote get-url origin`, cwd: "/h" }]);
     mkdirSync(join(dir, ".vtc"));
     writeFileSync(join(dir, ".vtc", "project.yaml"), "version: 1\n");
-    expect((await inspectCheckout(exec, dir)).vtcProject).toBe(true);
-    expect(await inspectCheckout(exec, join(dir, "missing"))).toEqual({
+    expect((await inspectCheckout(exec, dir, "/h")).vtcProject).toBe(true);
+    expect(await inspectCheckout(exec, join(dir, "missing"), "/h")).toEqual({
       exists: false,
       origin: null,
       vtcProject: false,
@@ -406,12 +406,13 @@ describe("vtc doctor prints the automation checks", () => {
       userConfig: () => userRead(),
       automation: {
         probe: () => Promise.resolve(PROBE),
-        project: () => Promise.reject(new Error(".vtc/project.yaml: automation.issues: bad")),
+        project: () =>
+          Promise.reject(new Error(".vtc/project.yaml: automation.issues: bad\u001b[2J\u009b")),
       },
     });
     expect(broken.code).toBe(1);
     expect(broken.text).toMatch(
-      /^FAIL {2}automation {3}cannot read the project's settings: \.vtc\/project\.yaml: automation\.issues: bad/m,
+      /^FAIL {2}automation {3}cannot read the project's settings: \.vtc\/project\.yaml: automation\.issues: bad\\u001b\[2J\\u009b$/m,
     );
   });
 });

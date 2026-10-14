@@ -55,13 +55,16 @@ export const checkGhLogin = (probe: AutomationProbe): DoctorCheck | null => {
 
 const BRANCH = "PR media go to the orphan vtc-evidence branch";
 
-/** What capture runs in: vtc's pinned browser, or the project's own Playwright (AD-24). */
+/**
+ * Whether evidence capture has its browser: only vtc's pinned browser store, never the project's
+ * own Playwright (the evidence recorder; the redaction verdict must not rest on project code).
+ */
 const captureNote = (browser: DoctorCheck | null): { text: string; ok: boolean } | null => {
   if (browser === null) return null;
   return browser.status === "ok"
     ? { text: "capture uses vtc's pinned browser", ok: true }
     : {
-        text: "no browser installed by vtc: capture uses the project's own Playwright, and without one no automatic PR opens (issues still do); run vtc doctor --install-browser",
+        text: "no browser installed by vtc: evidence capture needs vtc's pinned browser (never the project's own Playwright), so no automatic PR opens (issues still do) until you run vtc doctor --install-browser",
         ok: false,
       };
 };
@@ -151,14 +154,23 @@ export const checkAutomation = (
 export interface CheckoutFacts {
   /** The path is a directory. */
   readonly exists: boolean;
-  /** `git remote get-url origin` in it, or `null` (not a git repo, or no origin). */
+  /** `git -C <checkout> remote get-url origin`, or `null` (not a git repo, or no origin). */
   readonly origin: string | null;
   /** `vtc init` ran in it (`.vtc/project.yaml` is a file). */
   readonly vtcProject: boolean;
 }
 
-/** Looks at `upstream.checkout`: the directory, its origin remote and its `.vtc/project.yaml`. */
-export const inspectCheckout = async (exec: Exec, checkout: string): Promise<CheckoutFacts> => {
+/**
+ * Looks at `upstream.checkout`: the directory, its origin remote and its `.vtc/project.yaml`. `git`
+ * runs by name in `cwd`, a directory of the user's own, and reaches the checkout with `-C`: on
+ * Windows a bare name is looked up in the working directory first, and a checkout could ship a
+ * `git.exe`.
+ */
+export const inspectCheckout = async (
+  exec: Exec,
+  checkout: string,
+  cwd: string,
+): Promise<CheckoutFacts> => {
   let exists: boolean;
   try {
     exists = statSync(checkout).isDirectory();
@@ -166,8 +178,8 @@ export const inspectCheckout = async (exec: Exec, checkout: string): Promise<Che
     exists = false;
   }
   if (!exists) return { exists, origin: null, vtcProject: false };
-  const result = await exec("git", ["remote", "get-url", "origin"], {
-    cwd: checkout,
+  const result = await exec("git", ["-C", checkout, "remote", "get-url", "origin"], {
+    cwd,
     timeoutMs: PROBE_TIMEOUT_MS,
   });
   return {

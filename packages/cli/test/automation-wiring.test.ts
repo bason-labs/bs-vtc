@@ -133,7 +133,7 @@ const MACHINE = {
   "gh --version": { code: 0, stdout: "gh version 2.101.0 (2026-09-15)\nhttps://x\n" },
   "gh auth status": { code: 0, stdout: "Logged in to github.com account someone" },
   "ffmpeg -version": { code: 0, stdout: "ffmpeg version 7.1 Copyright\n" },
-  "git remote get-url --push origin": { code: 0, stdout: "git@github.com:o/r.git\n" },
+  "git -C /r remote get-url --push origin": { code: 0, stdout: "git@github.com:o/r.git\n" },
 };
 
 describe("probeAutomation", () => {
@@ -148,15 +148,18 @@ describe("probeAutomation", () => {
     const auth = exec.calls.find((c) => c.line.startsWith("gh auth"));
     // never --show-token, never a prompt; nothing gh prints is kept
     expect(auth).toEqual({ line: "gh auth status", env: { GH_PROMPT_DISABLED: "1" }, cwd: "/h" });
-    // only git runs in the repo; gh and ffmpeg run by name in the user's own directory, so a
-    // repo's ffmpeg.exe is never the one a bare name finds on Windows
-    for (const call of exec.calls)
-      expect(call.cwd, call.line).toBe(call.line.startsWith("git ") ? "/r" : "/h");
+    // every command runs by name in the user's own directory, so a repo's ffmpeg.exe or git.exe
+    // is never the one a bare name finds on Windows; git reaches the repo with -C
+    for (const call of exec.calls) expect(call.cwd, call.line).toBe("/h");
+    expect(exec.calls.map((c) => c.line)).toContain("git -C /r remote get-url --push origin");
   });
 
   it("does not ask gh for the login unless asked, and reports what is missing", async () => {
     const exec = fakeExec({
-      "git remote get-url --push origin": { code: 0, stdout: "https://ghe.example.com/o/r.git" },
+      "git -C /r remote get-url --push origin": {
+        code: 0,
+        stdout: "https://ghe.example.com/o/r.git",
+      },
     });
     expect(await probeAutomation(exec, { repoRoot: "/r", login: false, cwd: "/h" })).toEqual({
       ghVersion: null,
@@ -324,7 +327,7 @@ describe("buildEngineParts injects automation and arm plugins", () => {
     expect(exec.calls.map((c) => c.line).sort()).toEqual([
       "ffmpeg -version",
       "gh --version",
-      "git remote get-url --push origin",
+      "git -C /r remote get-url --push origin",
     ]);
     expect(deps).not.toHaveProperty("armPlugins");
   });

@@ -118,6 +118,19 @@ const readReport = async (
   return parsed.data;
 };
 
+const DEL_AND_C1 = /[\u007f-\u009f]/g;
+
+/**
+ * The report as JSON with every control character escaped: `JSON.stringify` escapes C0 controls
+ * only, so DEL and C1 (an 8-bit CSI) are escaped here too. They can only stand inside a string,
+ * since JSON's own syntax is ASCII, so the text stays the same JSON.
+ */
+export const jsonText = (report: AutomationReport): string =>
+  JSON.stringify(report, null, 2).replace(
+    DEL_AND_C1,
+    (c) => `\\u${c.charCodeAt(0).toString(16).padStart(4, "0")}`,
+  );
+
 export const createAutomationCommand = (
   deps: () => AutomationStatusDeps = defaultAutomationStatusDeps,
 ): CommandSpec => ({
@@ -131,9 +144,7 @@ export const createAutomationCommand = (
       const repoRoot = await requireRepoRoot(ctx.cwd);
       requireVtcProject(repoRoot);
       const report = await readReport(deps(), ctx.vtcHome, repoRoot);
-      for (const line of values.json === true
-        ? [JSON.stringify(report, null, 2)]
-        : formatAutomation(report))
+      for (const line of values.json === true ? [jsonText(report)] : formatAutomation(report))
         ctx.io.out(line);
       return EXIT.ok;
     }),

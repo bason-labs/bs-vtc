@@ -102,9 +102,9 @@ const versionLine = async (
  * Probes gh, ffmpeg and the repo's origin remote. With `login`, also `gh auth status`, of which
  * only the exit code is read (AD-27 rule 1; never `--show-token`, prompts disabled).
  *
- * `gh` and `ffmpeg` run by name in `cwd`, a directory of the user's own (the VTC home), never the
- * repo: on Windows a bare name is also looked up in the working directory first, and a repo could
- * ship an `ffmpeg.exe`. Only `git remote` runs in the repo.
+ * Every command, `git` included, runs by name in `cwd`, a directory of the user's own (the VTC
+ * home), never the repo: on Windows a bare name is also looked up in the working directory first,
+ * and a repo could ship an `ffmpeg.exe` or a `git.exe`. `git` reaches the repo with `-C`.
  */
 export const probeAutomation = async (
   exec: Exec,
@@ -118,10 +118,14 @@ export const probeAutomation = async (
   const gh = options.gh ?? "gh";
   const remote = async (): Promise<boolean> => {
     if (options.repoRoot === null) return false;
-    const result = await exec("git", ["remote", "get-url", "--push", "origin"], {
-      cwd: options.repoRoot,
-      timeoutMs: PROBE_TIMEOUT_MS,
-    });
+    const result = await exec(
+      "git",
+      ["-C", options.repoRoot, "remote", "get-url", "--push", "origin"],
+      {
+        cwd: options.cwd,
+        timeoutMs: PROBE_TIMEOUT_MS,
+      },
+    );
     return result.code === 0 && isGithubUrl(result.stdout);
   };
   const [ghVersion, ffmpeg, githubRemote] = await Promise.all([
