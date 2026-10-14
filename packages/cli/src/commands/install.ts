@@ -19,6 +19,11 @@
  * (the repo's `info/exclude`; a tracked file is refused). What still keeps the sandbox off from
  * other settings files (the repo's committed ones, the user's own) is named, never edited.
  *
+ * Registering the Codex plugin (marketplace and `[plugins."vtc@…"]`) is `HostAdapter.install`'s
+ * job (AD-6, AD-16 rule 4, reading 60), so its files pass the adapter safety contract; until the
+ * spine's §7 "Codex plugin manifest fields" row closes, the Codex install places the skills only
+ * and registers no hooks (reading 94). The cli writes none of it.
+ *
  * The OS timer behind auto-resume (AD-6 rule 4, §6.9 step 4; `timer.ts`: launchd on macOS, a
  * systemd user timer on Linux) is installed only on an explicit `--auto-resume`, never silently
  * (reading 59): `vtc install --auto-resume` alone (re)installs just the timer (e.g. after the
@@ -228,12 +233,13 @@ export const createInstallCommand = (
         const pluginDir = d.pluginDir(host.data, ctx.vtcHome);
         const adapter = factory({ pluginDir, vtcHome: ctx.vtcHome, vtcVersion: VERSION });
         const repoRoot = await findRepoRoot(ctx.cwd);
+        const installScope = scope ?? DEFAULT_INSTALL_SCOPE[host.data];
         try {
           const result = await adapter.install({
             projectRoot: repoRoot ?? ctx.cwd,
             home: d.home(),
             pluginDir,
-            scope: scope ?? DEFAULT_INSTALL_SCOPE[host.data],
+            scope: installScope,
             vtcHome: ctx.vtcHome,
           });
           ctx.io.out(`Installed the VTC plugin for ${host.data}.`);
@@ -269,7 +275,7 @@ export const createInstallCommand = (
           return EXIT.failed;
         }
         ctx.io.out(
-          `Installed the auto-resume timer (${path}): every minute it wakes the engine of a repo whose run waits on a usage reset; the run then continues when the Lead session asks for its next step (the engine starts no host CLI itself in v1). --no-auto-resume removes it.`,
+          `Installed the auto-resume timer (${path}): every minute it wakes the engine of a repo whose run waits on a usage reset; the run then continues when the Lead session asks for its next step, or, with hosts.dispatch: headless_allowed, the engine resumes it headless itself. --no-auto-resume removes it.`,
         );
       } else {
         ctx.io.out(

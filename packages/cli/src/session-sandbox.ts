@@ -37,6 +37,9 @@ import {
   claudeSessionSandboxSettings,
   claudeSessionSandboxState,
   hostConfigDirsOf,
+  MERGE_LEVEL_LEDGER,
+  VTC_HOME_SHELL_SPELLINGS,
+  WAVE3_HOME_WRITE_DENY,
   type HostId,
   type SessionSandboxScope,
   type SessionSandboxState,
@@ -171,8 +174,48 @@ export const sandboxToolsMissing = (
 };
 
 /**
+ * The `vtc` subcommands that are human gestures (spine AD-21 rule 3, AD-23 rule 5; readings 103,
+ * 104): they confirm only at an interactive terminal, but a pty is not proof of a human, so the
+ * Lead session denies them as commands the way the shared rules deny `vtc calibrate`. The cli
+ * adds them until the integrator puts them in `ROLE_DENIED_VTC.subcommands` (contract proposal).
+ */
+export const GESTURE_SUBCOMMANDS = ["lookback", "merge-level"] as const;
+
+/**
+ * What the Lead session denies on top of the shared settings, until the integrator folds it into
+ * the shared lists (every list is deduplicated, so the fold changes nothing here):
+ * - the wave-3 VTC home paths no role may write (`WAVE3_HOME_WRITE_DENY`: Lookback versions and
+ *   pins, the research cache, the browser store, the design library; spine §5 reading 103), as
+ *   sandbox write denies, `Edit` rules for the file tools and the shell spellings as Bash text,
+ *   exactly as the shared settings do for `homeWriteDeny`;
+ * - the repo's merge-level ledger (`MERGE_LEVEL_LEDGER`, AD-23 rule 5: only a human restores), as
+ *   a sandbox write deny and an `Edit` rule, the way the shared settings deny `project.yaml`;
+ * - the gesture subcommands ({@link GESTURE_SUBCOMMANDS}) as Bash rules.
+ */
+export const wave3SessionDenies = (
+  vtcHome: string,
+  projectRoot: string,
+): { readonly denyWrite: string[]; readonly permissionDeny: string[] } => {
+  const base = vtcHome.length > 1 ? vtcHome.replace(/\/+$/, "") : vtcHome;
+  const roots = WAVE3_HOME_WRITE_DENY.map((glob) => glob.replace(/\/\*\*$/, ""));
+  const homePaths = roots.map((root) => `${base}/${root}`);
+  const repo = projectRoot.length > 1 ? projectRoot.replace(/\/+$/, "") : "";
+  const ledger = `${repo}/${MERGE_LEVEL_LEDGER}`;
+  return {
+    denyWrite: [...homePaths, ledger],
+    permissionDeny: [
+      ...homePaths.flatMap((path) => [`Edit(/${path})`, `Edit(/${path}/**)`]),
+      `Edit(/${ledger})`,
+      ...roots.flatMap((root) => VTC_HOME_SHELL_SPELLINGS.map((home) => `Bash(*${home}/${root}*)`)),
+      ...GESTURE_SUBCOMMANDS.flatMap((sub) => [`Bash(vtc ${sub})`, `Bash(vtc ${sub} *)`]),
+    ],
+  };
+};
+
+/**
  * The settings `vtc install --host claude-code` writes: the shared ones (the sandbox and the
- * file-tool `permissions.deny` rules, spine §5 reading 81) and `failIfUnavailable`.
+ * file-tool `permissions.deny` rules, spine §5 reading 81), the wave-3 denies
+ * ({@link wave3SessionDenies}) and `failIfUnavailable`.
  */
 export const sessionSandboxSettings = (
   vtcHome: string,
@@ -184,9 +227,17 @@ export const sessionSandboxSettings = (
   readonly permissions: ReturnType<typeof claudeSessionSandboxSettings>["permissions"];
 } => {
   const shared = claudeSessionSandboxSettings(vtcHome, scope);
+  const wave3 = wave3SessionDenies(vtcHome, scope.projectRoot);
   return {
-    sandbox: { ...shared.sandbox, failIfUnavailable: true },
-    permissions: shared.permissions,
+    sandbox: {
+      ...shared.sandbox,
+      filesystem: {
+        ...shared.sandbox.filesystem,
+        denyWrite: [...new Set([...shared.sandbox.filesystem.denyWrite, ...wave3.denyWrite])],
+      },
+      failIfUnavailable: true,
+    },
+    permissions: { deny: [...new Set([...shared.permissions.deny, ...wave3.permissionDeny])] },
   };
 };
 
@@ -247,7 +298,8 @@ const reachesGuarded = (entry: string, source: PathBase, roots: readonly string[
 export const guardedRoots = (vtcHome: string, scope?: SessionSandboxScope): string[] => {
   if (scope === undefined) return [vtcHome];
   const { denyRead, denyWrite } = claudeSessionSandboxSettings(vtcHome, scope).sandbox.filesystem;
-  return [...new Set([vtcHome, ...denyRead, ...denyWrite])];
+  const wave3 = wave3SessionDenies(vtcHome, scope.projectRoot).denyWrite;
+  return [...new Set([vtcHome, ...denyRead, ...denyWrite, ...wave3])];
 };
 
 const jsonOf = (value: unknown): string => JSON.stringify(value);
@@ -502,6 +554,16 @@ export const claudeSessionSandboxOf = (
   const missing = [...shared.missing];
   if (local.kind === "ok" && at(local.settings, ["sandbox", "failIfUnavailable"]) !== true)
     missing.push("sandbox.failIfUnavailable");
+  if (local.kind === "ok") {
+    const listed = (value: unknown): unknown[] => (Array.isArray(value) ? value : []);
+    const wave3 = wave3SessionDenies(vtcHome, repoRoot);
+    const denyWrite = listed(at(local.settings, ["sandbox", "filesystem", "denyWrite"]));
+    const deny = listed(at(local.settings, ["permissions", "deny"]));
+    for (const path of wave3.denyWrite)
+      if (!denyWrite.includes(path) && !missing.includes(path)) missing.push(path);
+    for (const rule of wave3.permissionDeny)
+      if (!deny.includes(rule) && !missing.includes(rule)) missing.push(rule);
+  }
   const widening: string[] = [];
   let unreadable = false;
   const sessionDir = canonical(cwd);

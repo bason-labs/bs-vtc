@@ -9,6 +9,8 @@ import { command as engine } from "./engine.js";
 import { command as hook } from "./hook.js";
 import { command as init } from "./init.js";
 import { command as install } from "./install.js";
+import { command as lookback } from "./lookback.js";
+import { command as mergeLevel } from "./merge-level.js";
 import { command as pause } from "./pause.js";
 import { command as resume } from "./resume.js";
 import { command as status } from "./status.js";
@@ -27,6 +29,8 @@ export const COMMANDS: readonly CommandSpec[] = [
   status,
   install,
   doctor,
+  lookback,
+  mergeLevel,
   engine,
   statuslineTee,
   hook,
