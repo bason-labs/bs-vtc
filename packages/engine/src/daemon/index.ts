@@ -75,6 +75,9 @@ export const dotenvSecrets = (repoRoot: string): (() => readonly string[]) => {
   };
 };
 
+/** How often the daemon polls Level-3 merges still in their post-merge watch (AD-23 rule 4). */
+export const POST_MERGE_POLL_MS = 15 * 60_000;
+
 /** How often the daemon checks whether it is idle (AD-12 rule 4). */
 export const IDLE_CHECK_MS = 60_000;
 
@@ -135,6 +138,7 @@ export const runDaemon: RunDaemon = async (deps: EngineDeps, options) => {
       git,
       workspace: createWorkspace(deps.repoRoot),
       pullRequests: deps.pullRequests ?? createGhPullRequests(deps.repoRoot),
+      ...(deps.remoteMerge === undefined ? {} : { remoteMerge: deps.remoteMerge }),
       adapters: deps.adapters,
       autoResume: deps.scheduler,
       roles,
@@ -143,7 +147,9 @@ export const runDaemon: RunDaemon = async (deps: EngineDeps, options) => {
       random: Math.random,
       remote: "origin",
     });
-    cleanups.push(() => engine.settle());
+    // AD-25: shutting down kills the engine-launched runs and stops the Level-3 waits, so close
+    // returns promptly and leaves no orphaned process
+    cleanups.push(() => engine.shutdown());
     for (const notice of engine.notices) process.stderr.write(`vtc engine: ${notice}\n`);
     if (stale !== undefined) {
       const holder = stale.pid === null ? "an unknown process" : `pid ${String(stale.pid)}`;
@@ -231,6 +237,16 @@ export const runDaemon: RunDaemon = async (deps: EngineDeps, options) => {
       removeEngineDiscovery(deps.vtcHome, deps.repoRoot, process.pid);
     });
     if (options.wake) await engine.wake();
+    // Level 3's post-merge watch (AD-23 rule 4): at daemon start, then on a timer
+    const watch = (): void => {
+      void engine.watchMerged().catch(() => undefined);
+    };
+    watch();
+    const watcher = setInterval(watch, POST_MERGE_POLL_MS);
+    watcher.unref();
+    cleanups.push(() => {
+      clearInterval(watcher);
+    });
     let resolveClosed: () => void = () => undefined;
     const closed = new Promise<void>((resolve) => {
       resolveClosed = resolve;

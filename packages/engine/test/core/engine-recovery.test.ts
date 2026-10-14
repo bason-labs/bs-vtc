@@ -19,6 +19,7 @@ import {
   SPEC_ONE,
   spawns,
   submitResult,
+  threatModel,
   throughPlan,
   toPlanner,
   verdictPass,
@@ -259,19 +260,23 @@ describe("questions, plans and the design phase", () => {
       exit: "done",
       artifacts: [{ type: "spec", path: ".vtc/spec/spec.md" }],
     });
-    expect(spawns(design.actions).map((a) => a.role)).toEqual(["architect", "designer"]);
-    const [architect, designer] = spawns(design.actions);
+    // §6.1 DESIGN: the Architect, Security's threat model and the Designer, in parallel (two at
+    // a time: the default concurrency)
+    expect(spawns(design.actions).map((a) => a.role)).toEqual(["architect", "security"]);
+    const [architect, security] = spawns(design.actions);
+    expect(security?.mode).toBe("design");
+    const designer = only(await threatModel(h, security!), "designer");
     writeFile(workdir(architect!), ".vtc/architecture/spine.md", "# spine\n");
-    writeFile(workdir(designer!), ".vtc/design/flows.mmd", "flowchart LR\n");
+    writeFile(workdir(designer), ".vtc/design/flows.mmd", "flowchart LR\n");
     // the Designer's pack carries its dealt constraints (§9.1 step 2), the Architect's its depth
-    expect(readFileSync(join(h.repo, designer!.pack), "utf8")).toContain("design constraints:");
+    expect(readFileSync(join(h.repo, designer.pack), "utf8")).toContain("design constraints:");
     expect(readFileSync(join(h.repo, architect!.pack), "utf8")).toContain("architect depth: S");
     await submitResult(h, architect!, {
       exit: "done",
       artifacts: [{ type: "architecture", path: ".vtc/architecture/spine.md" }],
     });
     const gate = (
-      await submitResult(h, designer!, {
+      await submitResult(h, designer, {
         exit: "done",
         artifacts: [{ type: "design_flows", path: ".vtc/design/flows.mmd" }],
       })
@@ -280,6 +285,7 @@ describe("questions, plans and the design phase", () => {
     if (gate?.type === "approve_gate")
       expect(gate.artifacts.map((a) => a.path).sort()).toEqual([
         ".vtc/architecture/spine.md",
+        ".vtc/architecture/threat-model/model.md",
         ".vtc/design/flows.mmd",
         ".vtc/spec/spec.md",
       ]);

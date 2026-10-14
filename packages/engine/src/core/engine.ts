@@ -58,13 +58,12 @@ import {
   PROJECT_CONFIG_PATH,
   type CommittedGates,
 } from "./config.js";
-import {
-  dispatchGuarded,
-  dispatchNow,
-  inSessionRefusal,
-  NO_LEAD_WAIT_REASON,
-  phaseRoles,
-} from "./dispatch.js";
+import { dispatchGuarded, inSessionRefusal, NO_LEAD_WAIT_REASON, phaseRoles } from "./dispatch.js";
+import { g2ApprovalProblem, gateExtras, type GateExtras } from "./g2.js";
+import { effectiveVerdict } from "./gate-verdict.js";
+import { headlessRunsOf, killHeadless } from "./headless.js";
+import type { FactRefresher, RoleToolHandler } from "./kernel.js";
+import { dispatchNow, drive } from "./route.js";
 import { parkEscalation } from "./escalations.js";
 import {
   acceptCheckout,
@@ -100,15 +99,23 @@ import {
   ensureWorkspace,
   setFeatureStatus,
   startBaseCheck,
-  startFinalReview,
   startMergeQueue,
-  startRelease,
   startRoundGates,
 } from "./jobs.js";
+import {
+  disableAutoMerges,
+  pollMergedFeature,
+  recordMergePreflight,
+  startMergeLevel,
+  watchedFeatures,
+} from "./level3.js";
+import { startRelease } from "./release.js";
+import { checkFinalReviewStuck, startFinalReview } from "./final-review.js";
 import {
   EngineError,
   type CallContext,
   type EngineCoreDeps,
+  type HeadlessEntry,
   type Kernel,
   type RunHandle,
 } from "./kernel.js";
@@ -293,6 +300,17 @@ export class Engine implements Kernel {
   private readonly bound = new Map<string, string>();
   /** What each run's Lead session reported about its OS sandbox (D-an; absent = unknown). */
   private readonly leadSandbox = new Map<string, SessionSandboxState | undefined>();
+  /** The host each run's Lead session declared in its hello (`planDispatch`'s `leadHost`). */
+  private readonly leadHosts = new Map<string, HostId>();
+  readonly unattended = new Set<string>();
+  readonly headless = new Map<string, HeadlessEntry>();
+  private readonly stopper = new AbortController();
+  /** The role-facing research tools' handler (AD-22), set by the composition; `null` = none. */
+  private roleToolHandler: RoleToolHandler | null = null;
+  /** The stale-fact re-fetch before G2 (AD-22 rule 4), set by the composition; `null` = none. */
+  private factRefresher: FactRefresher | null = null;
+  /** The G2 showings whose stale facts were already re-fetched (`run:phase entry seq`). */
+  private readonly factsRefreshed = new Set<string>();
 
   private constructor(readonly deps: EngineCoreDeps) {
     this.guardDir = guardDirFor(deps.vtcHome, deps.repoRoot);
@@ -803,8 +821,12 @@ export class Engine implements Kernel {
     return event;
   }
 
+  get stopping(): AbortSignal {
+    return this.stopper.signal;
+  }
+
   spawn(handle: RunHandle, key: string, job: () => Promise<void>): void {
-    if (this.jobs.has(key)) return;
+    if (this.jobs.has(key) || this.stopper.signal.aborted) return;
     const promise = (async () => {
       try {
         await job();
@@ -828,10 +850,15 @@ export class Engine implements Kernel {
       } finally {
         this.jobs.delete(key);
       }
-      if (this.handles.has(handle.state.id) && this.deps.lock.isHeld()) {
-        await this.serial(handle, () => {
+      if (
+        this.handles.has(handle.state.id) &&
+        this.deps.lock.isHeld() &&
+        !this.stopper.signal.aborted
+      ) {
+        await this.serial(handle, async () => {
           this.advance(handle);
-          return Promise.resolve();
+          // a run whose steps the engine runs headless continues without the Lead's next call
+          await drive(this, handle);
         });
       }
     })().catch(() => undefined);
@@ -862,6 +889,43 @@ export class Engine implements Kernel {
     if (preferred !== undefined) return preferred;
     const installed = HOST_IDS.find((h) => this.deps.adapters[h] !== undefined);
     return installed ?? (HOST_IDS[0] as HostId);
+  }
+
+  /**
+   * Serve the role-facing tools (`ROLE_MCP_TOOLS`, AD-4 rule 3) with `handler`: the daemon wires
+   * the research module's (AD-22; core never imports it, AD-13 rule 12).
+   */
+  setRoleTools(handler: RoleToolHandler | null): void {
+    this.roleToolHandler = handler;
+  }
+
+  roleTools(): RoleToolHandler | null {
+    return this.roleToolHandler;
+  }
+
+  /**
+   * Re-fetch stale facts with `refresher` once before each G2 shows (AD-22 rule 4): the daemon
+   * wires the research module's (core never imports it, AD-13 rule 12).
+   */
+  setFactRefresher(refresher: FactRefresher | null): void {
+    this.factRefresher = refresher;
+  }
+
+  leadHostFor(run: string, call: CallContext): HostId | undefined {
+    if (this.leads.has(run)) return this.leadHosts.get(run);
+    return call.client === undefined ? (call.host ?? undefined) : undefined;
+  }
+
+  liveLeadHost(run: string): HostId | undefined {
+    return this.leads.has(run) ? this.leadHosts.get(run) : undefined;
+  }
+
+  diskConfigHash(): string | null {
+    try {
+      return pipelineConfigHash(this.diskProject(), this.diskGates());
+    } catch {
+      return null;
+    }
   }
 
   sessionSandboxFor(run: string, call: CallContext): SessionSandboxState | undefined {
@@ -897,6 +961,21 @@ export class Engine implements Kernel {
   async settle(): Promise<void> {
     while (this.jobs.size > 0) await Promise.allSettled([...this.jobs.values()]);
     await Promise.allSettled([...this.chains.values()]);
+  }
+
+  /**
+   * The daemon's shutdown (AD-25: no orphaned processes): nothing new starts, every
+   * engine-launched run is killed (its step stays in flight, as after a crash, and the next
+   * `vtc resume` supersedes it), the Level-3 waits stop
+   * (a pending auto-merge stays on GitHub; the next start reads the PR again), then the jobs
+   * settle. A launch that was past its last stop check when the shutdown landed kills its own
+   * run (`launchHeadless`); the second sweep after the settle catches anything left.
+   */
+  async shutdown(): Promise<void> {
+    this.stopper.abort();
+    await killHeadless(this);
+    await this.settle();
+    await killHeadless(this);
   }
 
   /** True while a run has work or a job runs (the daemon's idle exit waits for this, AD-12 rule 4). */
@@ -960,7 +1039,7 @@ export class Engine implements Kernel {
   private step(handle: RunHandle): boolean {
     const state = handle.state;
     const phase = state.run.phase;
-    const roles = phaseRoles(handle, phase);
+    const roles = phaseRoles(this, handle, phase);
     if (["discover", "specify", "design"].includes(phase)) {
       const entered = phaseEnteredSeq(state, phase) ?? 0;
       const done = roles.every(
@@ -1004,7 +1083,8 @@ export class Engine implements Kernel {
         if (built?.head !== undefined && verdict === undefined) {
           startRoundGates(this, handle, task.id, built.head);
         } else if (
-          verdict?.verdict === "pass" &&
+          verdict !== undefined &&
+          effectiveVerdict(verdict) === "pass" &&
           completedReviews(this, handle, task.id) !== null
         ) {
           startTriage(this, handle, task.id);
@@ -1013,6 +1093,7 @@ export class Engine implements Kernel {
     }
     if ([...state.tasks.values()].some((t) => t.status === "queued") && !state.run.paused)
       startMergeQueue(this, handle);
+    checkFinalReviewStuck(this, handle);
     for (const feature of state.features.values()) {
       const tasks = feature.tasks
         .map((id) => state.tasks.get(id))
@@ -1165,6 +1246,10 @@ export class Engine implements Kernel {
     const noRemote =
       config.merge_level >= 2 &&
       (await this.deps.workspace.remoteUrl(this.deps.remote).catch(() => null)) === null;
+    // AD-23: the ledger caps the level; Level 3 needs its preflight (a failure starts at Level 2)
+    const level = noRemote
+      ? { level: config.merge_level, preflight: null }
+      : await startMergeLevel(this, config);
     return this.serial(handle, () => {
       this.emit(handle, {
         type: "run.started",
@@ -1175,11 +1260,12 @@ export class Engine implements Kernel {
           repo: input.repo,
           has_ui: input.has_ui,
           risk_hints: input.risk_hints,
-          merge_level: config.merge_level,
+          merge_level: level.level,
           pipeline_config_hash: pipelineConfigHash(config, gates),
           origin: this.origin,
         },
       });
+      if (level.preflight !== null) recordMergePreflight(this, handle, level.preflight);
       // Level 2+ needs the push remote (spine §5 reading 18).
       if (noRemote) downgradeNoRemote(this, handle);
       this.phaseTo(handle, track === "quick_fix" ? "specify" : "discover");
@@ -1239,22 +1325,24 @@ export class Engine implements Kernel {
     return id;
   }
 
-  /** The gates awaiting the human in this phase, with what to show (§6.2). */
+  /** The gates awaiting the human in this phase, with what to show (§6.2, §8.6). */
   private awaitingGates(
     handle: RunHandle,
-  ): { gates: HumanGateId[]; artifacts: FrozenArtifact[] } | null {
+  ): { gates: HumanGateId[]; artifacts: FrozenArtifact[]; extras: GateExtras } | null {
     const state = handle.state;
     const phase = state.run.phase;
     if (phase !== "g1" && phase !== "g2") return null;
     const gates: HumanGateId[] =
       phase === "g1" ? ["G1"] : state.run.track === "quick_fix" ? ["G1", "G2"] : ["G2"];
-    const roles = [
-      ...(gates.includes("G1") ? ["ba"] : []),
-      ...(gates.includes("G2") ? ["architect", "designer"] : []),
+    const roles: { role: string; mode?: string }[] = [
+      ...(gates.includes("G1") ? [{ role: "ba" }] : []),
+      ...(gates.includes("G2")
+        ? [{ role: "architect" }, { role: "designer" }, { role: "security", mode: "design" }]
+        : []),
     ];
     const paths = new Set<string>();
-    for (const role of roles) {
-      const run = lastSubmitted(state, { role });
+    for (const { role, mode } of roles) {
+      const run = lastSubmitted(state, { role, ...(mode === undefined ? {} : { mode }) });
       const submitted = state.events.find(
         (e) =>
           e.type === "role.submitted" &&
@@ -1268,7 +1356,24 @@ export class Engine implements Kernel {
       const sha256 = sha256File(join(this.deps.repoRoot, path));
       return sha256 === undefined ? [] : [{ path, sha256 }];
     });
-    return artifacts.length === 0 ? null : { gates, artifacts };
+    if (artifacts.length === 0) return null;
+    return { gates, artifacts, extras: gateExtras(this, handle, gates, artifacts) };
+  }
+
+  /**
+   * `gate.requested` (§5 reading 109): what the gate shows, logged when it first shows and again
+   * whenever what it shows changes, so Flow Studio shows the same directions and facts.
+   */
+  private recordGateRequest(
+    handle: RunHandle,
+    gate: { gates: HumanGateId[]; artifacts: FrozenArtifact[]; extras: GateExtras },
+  ): void {
+    const data = { gates: gate.gates, artifacts: gate.artifacts, ...gate.extras };
+    const state = handle.state;
+    const entered = phaseEnteredSeq(state, state.run.phase) ?? 0;
+    const last = state.events.findLast((e) => e.type === "gate.requested" && e.seq > entered);
+    if (last !== undefined && JSON.stringify(last.data) === JSON.stringify(data)) return;
+    this.emit(handle, { type: "gate.requested", actor: "engine", data });
   }
 
   /** What the Lead should do now (§4.2 step 1). */
@@ -1283,14 +1388,25 @@ export class Engine implements Kernel {
     this.advance(handle);
     const held = { noLead: 0 };
     const actions: LeadAction[] = await dispatchNow(this, handle, call, held);
-    const gate = this.awaitingGates(handle);
+    let gate = this.awaitingGates(handle);
+    if (gate?.gates.includes("G2") === true && this.factRefresher !== null) {
+      // before G2 shows, its stale facts are re-fetched once (AD-22 rule 4); a refresh that
+      // fails leaves them stale, and G2 lists them for a waiver
+      const key = `${state.id}:${String(phaseEnteredSeq(state, state.run.phase) ?? 0)}`;
+      if (!this.factsRefreshed.has(key)) {
+        this.factsRefreshed.add(key);
+        await this.factRefresher(this.deps.repoRoot).catch(() => undefined);
+        gate = this.awaitingGates(handle);
+      }
+    }
     if (gate !== null) {
+      this.recordGateRequest(handle, gate);
+      const { design_coverage: _coverage, ...shown } = gate.extras;
       actions.push({
         type: "approve_gate",
         gates: gate.gates,
         artifacts: gate.artifacts,
-        design_directions: [],
-        unverified_facts: [],
+        ...shown,
       });
     }
     const open = openEscalations(state);
@@ -1344,6 +1460,9 @@ export class Engine implements Kernel {
     const handle = this.handles.get(state.id);
     if (handle === undefined) return { run: state.id, actions: this.actionsForFinished(state) };
     this.claimLead(state.id, call);
+    // a Lead session (or an in-process caller) drives the run again: the engine stops driving it
+    if (call.client === undefined || this.leads.get(state.id) === call.session)
+      this.unattended.delete(state.id);
     return this.serial(handle, async () => ({
       run: state.id,
       actions: await this.actionsFor(handle, call),
@@ -1409,7 +1528,11 @@ export class Engine implements Kernel {
   }
 
   status(input: RunScopedInput): StatusResult {
-    return statusView(this.stateOf(input.run), this.usage);
+    const state = this.stateOf(input.run);
+    const view = statusView(state, this.usage);
+    // engine-launched runs in flight (AD-25); absent when there are none
+    const headless = headlessRunsOf(this, state.id);
+    return headless.length === 0 ? view : { ...view, headless_runs: headless };
   }
 
   escalations(input: RunScopedInput): EscalationList {
@@ -1482,7 +1605,12 @@ export class Engine implements Kernel {
       this,
       handle,
       featureId,
-      from === "fixing" || from === "final_review" ? "final_review" : "integrating",
+      // a Level-3 release that parked retries the release (AD-23)
+      from === "ready_to_ship"
+        ? "ready_to_ship"
+        : from === "fixing" || from === "final_review"
+          ? "final_review"
+          : "integrating",
     );
   }
 
@@ -1510,6 +1638,11 @@ export class Engine implements Kernel {
       if (problems.length > 0) throw new EngineError("conflict", problems.join("; "));
       const back: Phase = handle.state.run.phase === "g1" ? "specify" : "design";
       if (input.decision === "approve") {
+        // AD-22 rule 4, reading 110: every unverified fact waived with a reason; one direction
+        const blocked = g2ApprovalProblem(awaiting.extras, input);
+        if (blocked !== null) throw new EngineError("invalid", blocked);
+        for (const waiver of input.fact_waivers ?? [])
+          this.emit(handle, { type: "fact.waived", actor: "human", data: waiver });
         this.emit(handle, {
           type: "gate.approved",
           actor: "human",
@@ -1520,6 +1653,7 @@ export class Engine implements Kernel {
               ? {}
               : { design_direction: input.design_direction }),
             waived_facts: input.waived_facts,
+            ...(input.fact_waivers === undefined ? {} : { fact_waivers: input.fact_waivers }),
             ...(input.note === undefined ? {} : { note: input.note }),
           },
         });
@@ -1623,6 +1757,8 @@ export class Engine implements Kernel {
     if (call.session === undefined) return;
     this.leads.set(run, call.session);
     this.leadSandbox.set(run, call.sessionSandbox);
+    if (call.host !== null) this.leadHosts.set(run, call.host);
+    else this.leadHosts.delete(run);
     try {
       appendPrivateFile(
         join(this.guardDir, "leads.jsonl"),
@@ -1676,6 +1812,7 @@ export class Engine implements Kernel {
       if (lead === session) {
         this.leads.delete(run);
         this.leadSandbox.delete(run);
+        this.leadHosts.delete(run);
       }
     this.bound.delete(session);
   }
@@ -1756,7 +1893,7 @@ export class Engine implements Kernel {
 
   async pause(input: RunScopedInput): Promise<RunControlResult> {
     const handle = this.resolve(input.run);
-    return this.serial(handle, () => {
+    const result = await this.serial(handle, () => {
       if (!handle.state.run.paused) {
         this.emit(handle, {
           type: "run.paused",
@@ -1764,8 +1901,38 @@ export class Engine implements Kernel {
           data: { reason: "vtc pause (kill switch)" },
         });
       }
+      this.unattended.delete(handle.state.id);
       return Promise.resolve({ run: handle.state.id, paused: true, phase: handle.state.run.phase });
     });
+    // the kill switch (§15, AD-25 rule 4; AD-23 rule 6): engine-launched runs stop, no orphans,
+    // and every pending auto-merge VTC enabled is turned off
+    await killHeadless(this, handle.state.id);
+    await disableAutoMerges(this, handle);
+    return result;
+  }
+
+  /**
+   * One poll of every Level-3 merge still in its post-merge watch (AD-23 rule 4), finished runs
+   * included: the daemon calls it at start and on a timer. A finished run's log gets the watch's
+   * events (they belong to its feature); a downgrade goes to the git-tracked ledger.
+   */
+  async watchMerged(): Promise<void> {
+    if (this.deps.remoteMerge === undefined) return;
+    const runs: RunHandle[] = [...this.handles.values()];
+    for (const state of this.finished.values()) {
+      if (watchedFeatures(this, state).length === 0) continue;
+      runs.push({
+        state,
+        log: openEventLog(this.deps.repoRoot, state.id, this.deps.lock, {
+          now: this.deps.now,
+          secrets: () => this.secrets(),
+        }),
+      });
+    }
+    for (const handle of runs) {
+      for (const feature of watchedFeatures(this, handle.state))
+        await pollMergedFeature(this, handle, feature);
+    }
   }
 
   /**
@@ -1842,11 +2009,14 @@ export class Engine implements Kernel {
 
   /** The auto-resume timer fired (`vtc engine --daemon --wake`, AD-12 rule 4). */
   async wake(): Promise<void> {
-    for (const handle of this.handles.values()) {
-      await this.serial(handle, () => {
-        maybeAutoResume(this, handle);
+    for (const handle of [...this.handles.values()]) {
+      await this.serial(handle, async () => {
+        // §6.9 step 6: with no live Lead the engine resumes the run itself, only with
+        // `headless_allowed` (`drive` asks planDispatch for `auto_resume`)
+        if (maybeAutoResume(this, handle) && !this.leads.has(handle.state.id))
+          this.unattended.add(handle.state.id);
         this.advance(handle);
-        return Promise.resolve();
+        await drive(this, handle);
       });
     }
   }

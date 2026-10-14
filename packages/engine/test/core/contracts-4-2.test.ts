@@ -36,6 +36,7 @@ import {
   DEFAULT_GATES_YML,
   draft,
   only,
+  passFinalReview,
   SPEC_ONE,
   spawns,
   submitResult,
@@ -229,6 +230,7 @@ describe("gate requests carry the run's committed gates.yml (reading 46b, c, e, 
     await build(h, await toEngineer(h));
     await verdictPass(h, only(await next(h), "spec_verifier"), "src/t-1/impl.ts");
     await h.engine.settle();
+    await passFinalReview(h);
     const hash = sha256(`${committedGates(h)}\n`);
     expect(h.gates.requests.map((r) => r.reason)).toEqual(
       expect.arrayContaining(["base_fail_check", "round", "merge_queue", "final_review"]),
@@ -244,7 +246,8 @@ describe("gate requests carry the run's committed gates.yml (reading 46b, c, e, 
     const bundle = EvidenceBundleSchema.parse(
       JSON.parse(readFileSync(join(h.repo, ".vtc/evidence/F-1/bundle.json"), "utf8")),
     );
-    expect(bundle.kind === "feature" && bundle.final_review.steps_run).toEqual([1, 2, 6]);
+    // and, since wave 3, the AI steps 3–4 and release readiness (7); no UI, so no step 5
+    expect(bundle.kind === "feature" && bundle.final_review.steps_run).toEqual([1, 2, 3, 4, 6, 7]);
     expect(core.finalReviewScopeNote([1, 2, 6])).toContain("3, 4, 5, 7 did not run");
     await h.release();
   });

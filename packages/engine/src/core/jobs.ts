@@ -10,7 +10,6 @@ import {
   capForRisk,
   engineRepoKey,
   fingerprintFinding,
-  FINAL_REVIEW_CAP,
   GATE_SANDBOX,
   gateExpectationMet,
   GateRunRequestSchema,
@@ -39,6 +38,7 @@ import {
 } from "./config.js";
 import { globMatch, matchesAny } from "./globs.js";
 import type { Kernel, RunHandle } from "./kernel.js";
+import { effectiveVerdict } from "./gate-verdict.js";
 import { assertFeatureTransition } from "./machines.js";
 import { parkTask, setTaskStatus } from "./parking.js";
 import {
@@ -52,15 +52,9 @@ import {
 import { guardGateRun } from "./dispatch-guard.js";
 import { diffLineCounts } from "./read-model.js";
 import { diffRiskHits, isTrivialDiff } from "./router.js";
+import { screensFor, taskHasUi } from "./ui.js";
 import { parkEscalation } from "./escalations.js";
-import {
-  bundleMarkdown,
-  finalReviewScopeNote,
-  finalReviewStepsRun,
-  writeFeatureEvidenceBundle,
-  writeRunSummary,
-  writeTaskEvidenceBundle,
-} from "./projections.js";
+import { writeTaskEvidenceBundle } from "./projections.js";
 import {
   gateFindings,
   gateSources,
@@ -68,7 +62,6 @@ import {
   recordRoundFindings,
   settleRound,
 } from "./verify.js";
-import { taskDetailView } from "./views.js";
 
 const sha256 = (bytes: Uint8Array): string => createHash("sha256").update(bytes).digest("hex");
 
@@ -238,7 +231,7 @@ export const onlyFlaky = (report: GateReport): boolean => {
  * §6.3 step 8: a flaky result gets one re-run. Returns every report in order (each is logged);
  * the last one decides. A second flaky failure routes like any failure.
  */
-const runGatesRetryingFlaky = async (
+export const runGatesRetryingFlaky = async (
   k: Kernel,
   h: RunHandle,
   request: Omit<GateRunRequestInput, "checkout" | "gates_config_hash">,
@@ -526,6 +519,8 @@ export const startRoundGates = (k: Kernel, h: RunHandle, taskId: string, head: s
     const base = task.baseline_revision;
     let reports: GateReport[];
     let router: { hits: ReturnType<typeof diffRiskHits>; trivial: boolean } | null = null;
+    // AD-24: a UI task's screens get the deterministic visual step
+    const screens = taskHasUi(h.state, task) ? screensFor(k.deps.repoRoot, task) : [];
     try {
       const protectedList = await protectedFiles(k, h, task);
       const compare = previousMetrics(h, taskId);
@@ -541,8 +536,10 @@ export const startRoundGates = (k: Kernel, h: RunHandle, taskId: string, head: s
         req_tags: task.covers,
         ...(compare === undefined ? {} : { compare_to: compare }),
         include_hidden: true,
+        ...(screens.length === 0 ? {} : { visual: { screens } }),
       });
-      if (reports.at(-1)?.verdict === "pass") {
+      const last = reports.at(-1);
+      if (last !== undefined && effectiveVerdict(last) === "pass") {
         const files = await k.deps.git.changedFiles(base, head);
         const counts = diffLineCounts(await k.deps.git.diff(base, head));
         let changedLines = 0;
@@ -595,19 +592,22 @@ const applyRoundGates = (
   report: GateReport,
   router: { hits: ReturnType<typeof diffRiskHits>; trivial: boolean } | null,
 ): void => {
-  if (report.verdict === "infra_error") {
+  const verdict = effectiveVerdict(report);
+  if (verdict === "infra_error") {
     parkInfra(
       k,
       h,
       task.id,
-      "a blocking gate failed for infrastructure or environment reasons",
+      report.verdict === "infra_error"
+        ? "a blocking gate failed for infrastructure or environment reasons"
+        : "the visual step failed for infrastructure reasons (a browser that does not match its pin, or a crash)",
       report.results.flatMap((r) => r.evidence).slice(0, 5),
     );
     return;
   }
   const fresh = gateFindings(report, task.id, Math.max(1, task.round), inventoryReader(k));
   const merge = recordRoundFindings(k, h, task.id, fresh, gateSources(h, task.id, fresh));
-  if (report.verdict === "fail") {
+  if (verdict === "fail") {
     settleRound(k, h, task.id, merge);
     return;
   }
@@ -654,7 +654,7 @@ const conflictFinding = (task: Task, detail: string, round: number): Finding => 
 };
 
 /** The branch PRs target: the repo's current branch, or `main` when HEAD is detached. */
-const baseBranch = async (repoRoot: string): Promise<string> => {
+export const baseBranch = async (repoRoot: string): Promise<string> => {
   const out = (
     await runGit(repoRoot, ["rev-parse", "--abbrev-ref", "HEAD"], { allowFailure: true })
   ).stdout
@@ -689,7 +689,7 @@ export const downgradeNoRemote = (k: Kernel, h: RunHandle): void => {
 };
 
 /** Pushes the integration branch and keeps the draft PR current (Level 2, §6.7). */
-const pushFeature = async (
+export const pushFeature = async (
   k: Kernel,
   h: RunHandle,
   featureId: string,
@@ -942,7 +942,7 @@ const setFeatureStatus = (
 
 export { setFeatureStatus };
 
-const parkFeature = (
+export const parkFeature = (
   k: Kernel,
   h: RunHandle,
   featureId: string,
@@ -996,7 +996,7 @@ const owningTask = (tasks: readonly Task[], paths: readonly string[]): Task | un
  * (§6.7a, §7.6; spine §5 reading 91): a secret, or a high or critical security or supply-chain
  * finding.
  */
-const riskyFinding = (
+export const riskyFinding = (
   findings: readonly Finding[],
 ): { readonly finding: Finding; readonly rule: RiskRuleReasonRule } | undefined => {
   const secret = findings.find((f) => f.category === "secret");
@@ -1010,7 +1010,7 @@ const riskyFinding = (
 };
 
 /** An engine-created task for Final Review findings (§6.7a, AD-8 rule 11). */
-const createIntegrationFix = (
+export const createIntegrationFix = (
   k: Kernel,
   h: RunHandle,
   featureId: string,
@@ -1108,175 +1108,6 @@ export const finalReviewRequest = (
   };
 };
 
-/**
- * Final Review (§6.7a): the gate steps on the integrated branch (`finalReviewRequest`, steps 1, 2
- * and 6). A failing round: a risky finding (a secret, a high or critical security or supply-chain
- * finding) parks the feature for the human; a finding the previous fix round left in place parks
- * it as stuck; otherwise a fix task goes to the owning task's discipline and scope when one task
- * owns every finding's path (`owningTask`), the feature's most common discipline otherwise. The
- * AI steps 3–5 (Spec-Verifier on the whole spec, Security on the combined diff, Visual QA
- * journeys), step 7 (release readiness) and reopening the merged owning task itself are not built
- * (spine §5 reading 91, §7 residual "Final Review AI steps"); the PR note says which steps ran
- * (`finalReviewScopeNote`).
- */
-export const startFinalReview = (k: Kernel, h: RunHandle, featureId: string): void => {
-  k.spawn(h, `final:${featureId}`, async () => {
-    const feature = h.state.features.get(featureId);
-    if (feature === undefined) return;
-    const ws = k.deps.workspace;
-    let reports: GateReport[];
-    try {
-      const head = await ws.resolve(feature.integration_branch);
-      const base =
-        (
-          await runGit(k.deps.repoRoot, ["merge-base", await baseBranch(k.deps.repoRoot), head], {
-            allowFailure: true,
-          })
-        ).stdout
-          .toString("utf8")
-          .trim() || head;
-      const covers = [...new Set(feature.tasks.flatMap((t) => h.state.tasks.get(t)?.covers ?? []))];
-      reports = await runGatesRetryingFlaky(
-        k,
-        h,
-        finalReviewRequest(h, featureId, { base, head, req_tags: covers }),
-      );
-    } catch (error) {
-      await k.serial(h, () => {
-        parkFeature(
-          k,
-          h,
-          featureId,
-          "gate_infra",
-          `Final Review gates could not run: ${message(error)}`,
-          [],
-        );
-        return Promise.resolve();
-      });
-      return;
-    }
-    await k.serial(h, () => {
-      for (const r of reports) emitGateResult(k, h, r);
-      const report = reports.at(-1);
-      const current = h.state.features.get(featureId);
-      if (report === undefined || current?.status !== "final_review") return Promise.resolve();
-      if (report.verdict === "infra_error") {
-        parkFeature(
-          k,
-          h,
-          featureId,
-          "gate_infra",
-          "Final Review gates failed for infrastructure reasons",
-          report.results.flatMap((r) => r.evidence).slice(0, 5),
-        );
-      } else if (report.verdict === "pass") {
-        setFeatureStatus(k, h, featureId, "ready_to_ship");
-      } else if (current.round + 1 > FINAL_REVIEW_CAP) {
-        parkFeature(
-          k,
-          h,
-          featureId,
-          "cap",
-          `Final Review reached its ${String(FINAL_REVIEW_CAP)}-round cap`,
-          report.results.flatMap((r) => r.evidence).slice(0, 5),
-        );
-      } else {
-        const findings = gateFindings(report, undefined, current.round + 1, inventoryReader(k)).map(
-          (f) => ({ ...f, feature: featureId }),
-        );
-        const evidence = report.results.flatMap((r) => r.evidence).slice(0, 5);
-        // a finding the last fix round left in place: the loop is stuck (§6.7a "with stuck
-        // detection"; spine §5 reading 91)
-        const before = new Set(
-          [...h.state.findings.values()]
-            .map((r) => r.finding)
-            .filter((f) => f.feature === featureId && f.round_first_seen === current.round)
-            .map((f) => f.fingerprint),
-        );
-        const repeated = findings.filter((f) => before.has(f.fingerprint));
-        const risky = riskyFinding(findings);
-        if (risky !== undefined) {
-          parkFeature(
-            k,
-            h,
-            featureId,
-            "risk_rule",
-            `Final Review found ${risky.finding.title} (${risky.finding.category}, ${risky.finding.severity}) at ${risky.finding.location.path}: a human decides before any fix round`,
-            evidence,
-            risky.rule,
-          );
-          return Promise.resolve();
-        }
-        if (current.round > 0 && repeated.length > 0) {
-          parkFeature(
-            k,
-            h,
-            featureId,
-            "stuck",
-            `Final Review round ${String(current.round + 1)} found ${String(repeated.length)} finding(s) the last fix round did not resolve: ${repeated
-              .slice(0, 3)
-              .map((f) => f.title)
-              .join("; ")}`,
-            evidence,
-          );
-          return Promise.resolve();
-        }
-        setFeatureStatus(k, h, featureId, "fixing", { round: current.round + 1 });
-        createIntegrationFix(k, h, featureId, findings);
-        if (h.state.run.phase !== "build") {
-          k.emit(h, {
-            type: "run.phase_changed",
-            actor: "engine",
-            data: { from: h.state.run.phase, to: "build" },
-          });
-        }
-      }
-      return Promise.resolve();
-    });
-  });
-};
-
-// -------------------------------------------------------------------- release
-
-/** RELEASE and RETRO (§6.1, §6.7): feature evidence bundle, PR ready (Level 2), run summary. */
-export const startRelease = (k: Kernel, h: RunHandle, featureId: string): void => {
-  k.spawn(h, `release:${featureId}`, async () => {
-    const written = await k.serial(h, () =>
-      Promise.resolve(
-        writeFeatureEvidenceBundle(
-          k.deps.repoRoot,
-          h.state,
-          featureId,
-          "pass",
-          k.now(),
-          k.secrets(),
-        ),
-      ),
-    );
-    await pushFeature(
-      k,
-      h,
-      featureId,
-      true,
-      written === null
-        ? finalReviewScopeNote(finalReviewStepsRun(k.deps.repoRoot, h.state, featureId))
-        : `${bundleMarkdown(written.bundle).trimEnd()}\n\n${finalReviewScopeNote(
-            written.bundle.kind === "feature" ? written.bundle.final_review.steps_run : [],
-          )}\n`,
-    );
-    await k.serial(h, () => {
-      if (h.state.run.finished_at !== undefined) return Promise.resolve();
-      k.emit(h, {
-        type: "run.phase_changed",
-        actor: "engine",
-        data: { from: h.state.run.phase, to: "retro" },
-      });
-      const roleRuns = [...h.state.tasks.keys()].flatMap(
-        (t) => taskDetailView(h.state, t)?.role_runs ?? [],
-      );
-      const summary = writeRunSummary(k.deps.repoRoot, h.state, roleRuns, k.secrets());
-      k.emit(h, { type: "run.finished", actor: "engine", data: { outcome: "done", summary } });
-      return Promise.resolve();
-    });
-  });
-};
+/** A failed Final Review report's findings for the feature's next round (inventories read). */
+export const gateReportFindings = (k: Kernel, report: GateReport, round: number): Finding[] =>
+  gateFindings(report, undefined, round, inventoryReader(k));

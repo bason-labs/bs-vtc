@@ -11,16 +11,16 @@ import {
   HIDDEN_TESTS,
   inSessionDispatchRefusal,
   PACK_INPUT_TYPES,
-  planDispatch,
   resolveRoleMode,
   SESSION_DEFAULT_MODEL,
   type ArtifactRef,
+  type Escalation,
   type EscalationAnswer,
   type Finding,
   type HostId,
-  type LeadAction,
   type ModelTier,
   type Phase,
+  type ResolvedModel,
   type SessionRef,
   type SpawnRoleAction,
   type TaskPackInput,
@@ -29,6 +29,8 @@ import { restoreHostConfig } from "../git/index.js";
 import { budgetState, sharesExceeded } from "./budget.js";
 import { DEFAULT_ACCEPTANCE_GLOBS } from "./config.js";
 import { EngineError, type CallContext, type Kernel, type RunHandle } from "./kernel.js";
+import { finalReviewSteps } from "./final-review.js";
+import { effectiveVerdict } from "./gate-verdict.js";
 import { engineerDispatch, tierDown } from "./loop.js";
 import { writeTaskPack } from "./projections.js";
 import {
@@ -49,24 +51,34 @@ import {
 } from "./queries.js";
 import { frozenSpecItems, taskAcceptanceCriteria } from "./read-model.js";
 import { resolveModel, roleTier } from "./roles.js";
-import { installedLensRoles, reviewersFor } from "./router.js";
-import { limitWait } from "./limits.js";
+import { crossFamilyHost } from "./cross-family.js";
+import { installedLensRoles, reviewersFor, slotMatches } from "./router.js";
 import { parkTask, setTaskStatus } from "./parking.js";
 import { parkEscalation } from "./escalations.js";
-import {
-  checkGitNow,
-  recordDispatch,
-  sweepDispatches,
-  type DispatchRecord,
-} from "./dispatch-guard.js";
+import { recordDispatch, type DispatchRecord } from "./dispatch-guard.js";
 import { architectDepth, dealDesignConstraints, researchDepth } from "./lottery.js";
 import { prepareRoleWorktree } from "./role-worktree.js";
+
+/** A handed-out step: the Lead's action, and what an engine-launched run of it needs. */
+export interface DispatchedStep {
+  readonly action: SpawnRoleAction;
+  readonly model: ResolvedModel;
+  /** Absolute directory the role works in. */
+  readonly cwd: string;
+}
 
 export interface StepSpec {
   readonly key: string;
   readonly role: string;
   readonly mode?: string;
   readonly task?: string;
+  /** A feature-level step with no task: a Final Review reviewer (§6.7a steps 3–4). */
+  readonly feature?: string;
+  /**
+   * A step the engine runs headless on this host whatever the Lead's: the cross-family reviewer
+   * (§12.4). It never becomes a Lead action.
+   */
+  readonly host?: HostId;
   readonly subject?: string;
   readonly tier?: ModelTier;
   readonly resume?: SessionRef;
@@ -79,8 +91,19 @@ export interface StepSpec {
   readonly onDispatch?: () => void;
 }
 
+/**
+ * Whether the run has Security's design mode (§5.2, §6.1 DESIGN; spine §5 reading 37): the
+ * installed Security contract declares it. Without it DESIGN runs without a threat model step.
+ */
+const securityDesign = (k: Kernel): boolean =>
+  k.deps.roles.get("security")?.modes?.design !== undefined;
+
 /** Front-half roles per phase (§6.1). The deeper front half is sub-project 4. */
-export const phaseRoles = (h: RunHandle, phase: Phase): { role: string; mode?: string }[] => {
+export const phaseRoles = (
+  k: Kernel,
+  h: RunHandle,
+  phase: Phase,
+): { role: string; mode?: string }[] => {
   const run = h.state.run;
   switch (phase) {
     case "discover":
@@ -90,7 +113,12 @@ export const phaseRoles = (h: RunHandle, phase: Phase): { role: string; mode?: s
     case "specify":
       return [{ role: "ba" }];
     case "design":
-      return [{ role: "architect" }, ...(run.has_ui ? [{ role: "designer" }] : [])];
+      // §6.1: Architect, Security's threat model and the Designer (with UI) run in parallel
+      return [
+        { role: "architect" },
+        ...(securityDesign(k) ? [{ role: "security", mode: "design" }] : []),
+        ...(run.has_ui ? [{ role: "designer" }] : []),
+      ];
     case "plan":
       return [{ role: "planner" }];
     default:
@@ -166,12 +194,108 @@ const busyStep = (
       r.subject === step.subject,
   );
 
+/**
+ * The Architect's per-task step (§8.4): a task the Planner triaged `extends` gets a one-page design
+ * note, one triaged `changes` an ADR, which the engine then puts to the human as a change request
+ * on the frozen architecture (G2 is always approved before PLAN). The step runs in its own
+ * worktree like a front-half role, its subject the task. `done` once the Architect's result was
+ * accepted and no change request of it is open; `null` while it runs or waits for the human.
+ */
+export const architectTriageStep = (
+  k: Kernel,
+  h: RunHandle,
+  taskId: string,
+): StepSpec | "done" | null => {
+  const task = h.state.tasks.get(taskId);
+  if (
+    task === undefined ||
+    task.arch_triage === "fits" ||
+    k.deps.roles.get("architect") === undefined
+  )
+    return "done";
+  const filter = { role: "architect", subject: taskId };
+  if (busyStep(h, filter)) return null;
+  const accepted = [...h.state.roleRuns.values()]
+    .filter((r) => r.role === "architect" && r.subject === taskId && r.status === "submitted")
+    .sort((a, b) => (a.closedSeq ?? 0) - (b.closedSeq ?? 0))
+    .at(-1);
+  let rejected: string | undefined;
+  if (accepted !== undefined) {
+    const open = [...h.state.escalations.values()].some(
+      (e) => e.task === taskId && e.reason === "change_request" && e.answer === undefined,
+    );
+    if (open) return null;
+    // a change request the human rejected never lets the task build on it (AD-8 rule 1): the
+    // task parked on the rejection, and once the human answered that park the Architect triages
+    // it again with the answer
+    rejected = rejectedTriageChange(h, taskId, accepted.closedSeq ?? 0);
+    if (rejected === undefined) return "done";
+  }
+  const note = [rejected, rejectionNote(h, filter)].filter((n) => n !== undefined).join("\n");
+  const ask =
+    task.arch_triage === "extends"
+      ? `Per-task triage (§8.4): ${taskId} extends the approved spine. Write a one-page design note for it under .vtc/architecture/notes/${taskId}.md (artifact design_note): which components it touches and how it stays inside the spine.`
+      : `Per-task triage (§8.4): ${taskId} changes the approved architecture (a new service, datastore, integration, trust boundary, breaking interface or irreversible migration). Write an ADR for it under .vtc/architecture/adr/ (artifact adr, or design_note where your contract has no adr): the decision, the alternatives and its Check. The engine asks the human to approve the change before the task starts.`;
+  return {
+    key: `triage:${taskId}`,
+    ...filter,
+    note: [ask, ...(note === "" ? [] : [note])].join("\n"),
+  };
+};
+
+/** The change-request answer `answer` picked on `escalation`, by its option's effect. */
+const answerEffect = (escalation: Escalation): string | undefined =>
+  escalation.answer === undefined
+    ? undefined
+    : escalation.options.find((o) => o.id === escalation.answer?.option)?.effect;
+
+/**
+ * When the change request the Architect's last accepted triage of `taskId` opened (after
+ * `sinceSeq`) was rejected by the human: the note for the next triage (the rejection and the
+ * human's answers since). `undefined` when there is none or it was not rejected.
+ */
+const rejectedTriageChange = (
+  h: RunHandle,
+  taskId: string,
+  sinceSeq: number,
+): string | undefined => {
+  const opened = h.state.events.findLast((e) => {
+    if (e.type !== "escalation.opened" || e.task !== taskId || e.seq <= sinceSeq) return false;
+    const escalation = (e.data as { escalation?: Partial<Escalation> }).escalation;
+    return escalation?.reason === "change_request" && escalation.raised_by === "architect";
+  });
+  const id = (opened?.data as { escalation?: { id?: string } } | undefined)?.escalation?.id;
+  const cr = id === undefined ? undefined : h.state.escalations.get(id);
+  if (cr === undefined || answerEffect(cr) !== "reject_change") return undefined;
+  const answered = (e: { type: string; data: unknown }): EscalationAnswer | undefined =>
+    e.type === "escalation.answered" ? (e.data as { answer?: EscalationAnswer }).answer : undefined;
+  const rejectedAt =
+    h.state.events.findLast(
+      (e) =>
+        e.type === "escalation.answered" &&
+        (e.data as { escalation?: string }).escalation === cr.id,
+    )?.seq ?? 0;
+  const answers = h.state.events
+    .filter((e) => e.task === taskId && e.seq > rejectedAt)
+    .flatMap((e) => {
+      const text = answered(e)?.text;
+      return text === undefined ? [] : [text];
+    });
+  return [
+    `The human rejected the change request ${cr.id} for your previous ADR of ${taskId}${cr.answer?.text === undefined ? "" : ` ("${cr.answer.text}")`}. Do not build on the rejected change: write a new ADR that fits the human's answer, or say the task is blocked.`,
+    ...answers.map((a) => `The human's answer: ${a}`),
+  ].join("\n");
+};
+
 /** Steps of one task that need a role run now. */
 const taskSteps = (k: Kernel, h: RunHandle, taskId: string, host: HostId): StepSpec[] => {
   const task = h.state.tasks.get(taskId);
   if (task?.worktree === undefined) return [];
   const steps: StepSpec[] = [];
   if (task.status === "ready") {
+    // §8.4 per-task triage: `extends` and `changes` get the Architect before QA starts
+    const triage = architectTriageStep(k, h, taskId);
+    if (triage !== "done") return triage === null ? [] : [triage];
     const step = { role: "qa", mode: "author", task: taskId };
     const waiting = pendingBaseCheck(h.state, taskId) !== undefined;
     if (!busyStep(h, step) && !k.isRunning(`gates:${taskId}`) && !waiting) {
@@ -269,16 +393,18 @@ const taskSteps = (k: Kernel, h: RunHandle, taskId: string, host: HostId): StepS
   if (task.status === "verifying") {
     const built = lastBuilt(h.state, taskId);
     if (built?.head === undefined || k.isRunning(`gates:${taskId}`)) return [];
-    if (roundVerdict(h.state, taskId)?.verdict !== "pass") return [];
+    const round = roundVerdict(h.state, taskId);
+    if (round === undefined || effectiveVerdict(round) !== "pass") return [];
     // At 70% of the budget, or once the reviewers used their 25% share, they drop a tier (§11).
     const drop =
       budgetState(task.spent_usd, task.budget_usd) === "reviewers_drop" ||
       sharesExceeded(shareSpend(h.state, taskId), task.budget_usd).reviewers;
+    const cross = crossFamilyHost(k, h, task);
     for (const slot of reviewersFor(
       task,
       h.state.run,
       taskAcceptanceCriteria(k.deps.repoRoot, h.state, taskId),
-      { lensRoles: installedLensRoles(k.deps.roles) },
+      { lensRoles: installedLensRoles(k.deps.roles), crossFamily: cross !== undefined },
     )) {
       const filter = {
         role: slot.role,
@@ -300,8 +426,12 @@ const taskSteps = (k: Kernel, h: RunHandle, taskId: string, host: HostId): StepS
         const index = Number(slot.id.split("-").at(-1));
         if (index <= done + flying) continue;
       } else {
-        if (busyStep(h, filter)) continue;
-        if (lastSubmitted(h.state, filter, built.closedSeq ?? 0) !== undefined) continue;
+        const runs = runsOf(h.state, taskId).filter((r) => slotMatches(slot, r, cross));
+        if (runs.some((r) => r.status === "in_flight")) continue;
+        if (
+          runs.some((r) => r.status === "submitted" && (r.closedSeq ?? 0) > (built.closedSeq ?? 0))
+        )
+          continue;
       }
       const contract = k.deps.roles.get(slot.role);
       const tier =
@@ -312,6 +442,7 @@ const taskSteps = (k: Kernel, h: RunHandle, taskId: string, host: HostId): StepS
         ...filter,
         ...(tier === undefined ? {} : { tier }),
         ...(note === undefined ? {} : { note }),
+        ...(slot.crossFamily === true && cross !== undefined ? { host: cross } : {}),
       });
     }
   }
@@ -323,7 +454,7 @@ export const pendingSteps = (k: Kernel, h: RunHandle, host: HostId): StepSpec[] 
   const state = h.state;
   if (state.run.finished_at !== undefined) return [];
   const phase = state.run.phase;
-  const phaseRoleList = phaseRoles(h, phase);
+  const phaseRoleList = phaseRoles(k, h, phase);
   if (phaseRoleList.length > 0) {
     const entered = phaseEnteredSeq(state, phase) ?? 0;
     const blocked = [...state.escalations.values()].some(
@@ -355,7 +486,11 @@ export const pendingSteps = (k: Kernel, h: RunHandle, host: HostId): StepSpec[] 
       ];
     });
   }
-  return planOrder(state).flatMap((task) => taskSteps(k, h, task.id, host));
+  return [
+    ...planOrder(state).flatMap((task) => taskSteps(k, h, task.id, host)),
+    // Final Review's AI steps, once per feature on its integrated branch (§6.7a steps 3–4)
+    ...finalReviewSteps(k, h),
+  ];
 };
 
 /** The answer to the latest run-scoped escalation of `phase` given after the role's last dispatch. */
@@ -387,7 +522,7 @@ const depthsFor = (
   h: RunHandle,
   step: StepSpec,
 ): Pick<TaskPackInput, "architect_depth" | "research_depth" | "design_constraints"> => {
-  if (step.task !== undefined) return {};
+  if (step.task !== undefined || step.subject?.startsWith("T-") === true) return {};
   const run = h.state.run;
   if (step.role === "architect") {
     const spec = run.gates.G1.frozen
@@ -462,13 +597,19 @@ const frozenTypeByPath = (path: string): string => {
 const packFor = (k: Kernel, h: RunHandle, step: StepSpec, actionId: string): TaskPackInput => {
   const state = h.state;
   const task = step.task === undefined ? undefined : state.tasks.get(step.task);
+  // the task an Architect triage step is about (§8.4): its requirements, not its worktree
+  const about =
+    task ?? (step.subject?.startsWith("T-") === true ? state.tasks.get(step.subject) : undefined);
   const items = frozenSpecItems(k.deps.repoRoot, state);
-  const covers = task?.covers ?? [];
-  const requirements = items.filter((i) =>
-    step.subject !== undefined && /^(REQ|SEC)-/.test(step.subject)
-      ? i.id === step.subject || step.subject.startsWith(`${i.id}.`)
-      : covers.some((c) => i.id === c || i.id.startsWith(`${c}.`)),
-  );
+  const covers = about?.covers ?? [];
+  const requirements =
+    step.feature !== undefined && task === undefined
+      ? items // Final Review checks the whole spec (§6.7a step 3)
+      : items.filter((i) =>
+          step.subject !== undefined && /^(REQ|SEC)-/.test(step.subject)
+            ? i.id === step.subject || step.subject.startsWith(`${i.id}.`)
+            : covers.some((c) => i.id === c || i.id.startsWith(`${c}.`)),
+        );
   const gates = k.gatesConfig();
   const contract = k.deps.roles.get(step.role);
   const writeScope =
@@ -511,7 +652,12 @@ const packFor = (k: Kernel, h: RunHandle, step: StepSpec, actionId: string): Tas
   }
   for (const gate of state.run.gates.G1.frozen.concat(state.run.gates.G2.frozen)) {
     const type = submitted.get(gate.path) ?? frozenTypeByPath(gate.path);
-    if (task !== undefined || state.run.phase === "plan" || state.run.phase === "design")
+    if (
+      about !== undefined ||
+      step.feature !== undefined ||
+      state.run.phase === "plan" ||
+      state.run.phase === "design"
+    )
       inputs.push({ type, path: gate.path });
   }
   return {
@@ -521,12 +667,16 @@ const packFor = (k: Kernel, h: RunHandle, step: StepSpec, actionId: string): Tas
     role: step.role,
     ...(step.mode === undefined ? {} : { mode: step.mode }),
     ...(step.task === undefined ? {} : { task: step.task }),
-    ...(task === undefined ? {} : { feature: task.feature }),
+    ...(task === undefined
+      ? step.feature === undefined
+        ? {}
+        : { feature: step.feature }
+      : { feature: task.feature }),
     ...(step.subject === undefined ? {} : { subject: step.subject }),
     ...depthsFor(k, h, step),
-    ...(step.task === undefined || state.intents.get(step.task) === undefined
+    ...(about === undefined || state.intents.get(about.id) === undefined
       ? {}
-      : { intent: state.intents.get(step.task) }),
+      : { intent: state.intents.get(about.id) }),
     requirements,
     decisions: [],
     inputs,
@@ -547,7 +697,8 @@ export const dispatchStep = (
   step: StepSpec,
   host: HostId,
   cwd: string,
-): SpawnRoleAction => {
+  dispatch: "subagent" | "headless" = "subagent",
+): DispatchedStep => {
   const contract = k.deps.roles.get(step.role);
   if (contract === undefined) throw new EngineError("invalid", `no contract for role ${step.role}`);
   const actionId = nextActionId(h.state);
@@ -572,7 +723,11 @@ export const dispatchStep = (
     type: "role.dispatched",
     actor: "engine",
     role: step.role,
-    ...(step.task === undefined ? {} : { task: step.task, feature: task?.feature }),
+    ...(step.task === undefined
+      ? step.feature === undefined
+        ? {}
+        : { feature: step.feature }
+      : { task: step.task, feature: task?.feature }),
     prompt_sha: k.deps.plugins.promptSha(agent, host),
     host,
     // D-ae: no resolved id means the host session's model, recorded as such
@@ -581,7 +736,7 @@ export const dispatchStep = (
       action_id: actionId,
       ...(step.mode === undefined ? {} : { mode: step.mode }),
       ...(step.subject === undefined ? {} : { subject: step.subject }),
-      dispatch: "subagent",
+      dispatch,
       agent,
       pack,
       resume: resume ?? null,
@@ -599,15 +754,19 @@ export const dispatchStep = (
     `Read your task pack: ${join(k.deps.repoRoot, pack)}`,
     ...(skills.length === 0 ? [] : [`Use these skills: ${skills.join(", ")}`]),
     ...(step.note === undefined ? [] : [step.note]),
-    `Finish with exactly one RoleResult JSON object as your final message (role "${step.role}"${step.mode === undefined ? "" : `, mode "${step.mode}"`}${step.task === undefined ? "" : `, task "${step.task}"`}${step.subject === undefined ? "" : `, verdict subject "${step.subject}"`}). The Lead submits it with action_id ${actionId}.`,
+    `Finish with exactly one RoleResult JSON object as your final message (role "${step.role}"${step.mode === undefined ? "" : `, mode "${step.mode}"`}${step.task === undefined ? "" : `, task "${step.task}"`}${step.task === undefined && step.feature !== undefined ? `, feature "${step.feature}"` : ""}${step.subject === undefined ? "" : `, verdict subject "${step.subject}"`}). ${dispatch === "subagent" ? `The Lead submits it with action_id ${actionId}.` : `The engine records it as action ${actionId}.`}`,
   ].join("\n");
-  return {
+  const action: SpawnRoleAction = {
     type: "spawn_role",
     action_id: actionId,
     role: step.role,
     ...(step.mode === undefined ? {} : { mode: step.mode }),
     ...(step.task === undefined ? {} : { task: step.task }),
-    ...(task === undefined ? {} : { feature: task.feature }),
+    ...(task === undefined
+      ? step.feature === undefined
+        ? {}
+        : { feature: step.feature }
+      : { feature: task.feature }),
     ...(step.subject === undefined ? {} : { subject: step.subject }),
     pack,
     // AD-14 rule 1: the host's adapter adds its plugin namespace; the log keeps the base name
@@ -617,6 +776,7 @@ export const dispatchStep = (
     ...(model.model === undefined ? {} : { model: model.model }),
     ...(resume === undefined ? {} : { resume }),
   };
+  return { action, model, cwd };
 };
 
 /**
@@ -715,7 +875,7 @@ export const NO_LEAD_WAIT_REASON =
  * fix, answering it retries the dispatch). A phase step opens the same escalation for its phase,
  * which holds the phase until it is answered.
  */
-const refuseInSession = (k: Kernel, h: RunHandle, step: StepSpec, reason: string): void => {
+export const refuseInSession = (k: Kernel, h: RunHandle, step: StepSpec, reason: string): void => {
   if (step.task !== undefined) {
     parkTask(k, h, step.task, {
       reason: "blocked",
@@ -748,13 +908,29 @@ export const dispatchGuarded = async (
   h: RunHandle,
   step: StepSpec,
   host: HostId,
-): Promise<SpawnRoleAction | null> => {
+): Promise<SpawnRoleAction | null> =>
+  (await dispatchPrepared(k, h, step, host, "subagent"))?.action ?? null;
+
+/** {@link dispatchGuarded} for either dispatch kind, with the model and working directory. */
+export const dispatchPrepared = async (
+  k: Kernel,
+  h: RunHandle,
+  step: StepSpec,
+  host: HostId,
+  dispatch: "subagent" | "headless",
+): Promise<DispatchedStep | null> => {
   const actionId = nextActionId(h.state);
   const task = step.task === undefined ? undefined : h.state.tasks.get(step.task);
   let worktree: DispatchRecord["worktree"];
   if (task === undefined) {
     try {
-      worktree = await prepareRoleWorktree(k, h.state.id, actionId);
+      // a Final Review reviewer reads the feature's integrated branch (§6.7a)
+      const feature = step.feature === undefined ? undefined : h.state.features.get(step.feature);
+      const at =
+        feature === undefined
+          ? undefined
+          : await k.deps.workspace.resolve(feature.integration_branch);
+      worktree = await prepareRoleWorktree(k, h.state.id, actionId, at);
     } catch (error) {
       k.emit(h, {
         type: "run.paused",
@@ -783,61 +959,5 @@ export const dispatchGuarded = async (
       : task?.worktree === undefined
         ? k.deps.repoRoot
         : join(k.deps.repoRoot, task.worktree);
-  return dispatchStep(k, h, step, host, cwd);
-};
-
-/**
- * New role runs for the Lead, within the concurrency limit (reviewers count, §6.6). In plugin-only
- * mode every role run is a Lead subagent; the engine never starts a headless run (AD-17). Headless
- * launches are not part of this engine yet: on a host that cannot run role subagents the run
- * pauses with the reason instead of waiting silently forever.
- */
-export const dispatchNow = async (
-  k: Kernel,
-  h: RunHandle,
-  call: CallContext,
-  held: { noLead: number } = { noLead: 0 },
-): Promise<LeadAction[]> => {
-  if (h.state.run.paused || h.state.run.finished_at !== undefined) return [];
-  // Runs that ended without a check (a failure, a limit, a restart) are checked before a new
-  // baseline is recorded; a git change made while a role runs stops everything (AD-7 rule 7).
-  if ((await sweepDispatches(k, h)).issues.length > 0 || checkGitNow(k, h)) return [];
-  if (limitWait(k, h) !== null) return [];
-  const host = k.hostFor(call);
-  const config = k.config();
-  const capabilities = k.deps.adapters[host]?.capabilities ?? { subagents: true, headless: false };
-  const plan = planDispatch("role", config.hosts.dispatch, capabilities);
-  if (plan !== "subagent") {
-    if (pendingSteps(k, h, host).length > 0) {
-      k.emit(h, {
-        type: "run.paused",
-        actor: "engine",
-        data: {
-          reason:
-            plan === "headless"
-              ? `${host} has no role subagents and this engine does not launch headless runs yet; run the Lead on a host with subagents, then vtc resume`
-              : `${host} cannot run roles (no subagents; hosts.dispatch ${config.hosts.dispatch}); run the Lead on a host with subagents, then vtc resume`,
-        },
-      });
-    }
-    return [];
-  }
-  const actions: LeadAction[] = [];
-  let free = config.concurrency - inFlight(h.state).length;
-  for (const step of pendingSteps(k, h, host)) {
-    if (free <= 0) break;
-    const refusal = inSessionRefusal(k, h, step, host, call);
-    if (refusal !== null) {
-      // only the run's Lead reporting its sandbox off or unknown parks the step; a caller that
-      // is not the Lead, with no Lead to ask, leaves it pending ({@link NO_LEAD_WAIT_REASON})
-      if (k.leadless(h.state.id, call)) held.noLead += 1;
-      else refuseInSession(k, h, step, refusal);
-      continue;
-    }
-    const action = await dispatchGuarded(k, h, step, host);
-    if (action === null) break;
-    actions.push(action);
-    free -= 1;
-  }
-  return actions;
+  return dispatchStep(k, h, step, host, cwd, dispatch);
 };

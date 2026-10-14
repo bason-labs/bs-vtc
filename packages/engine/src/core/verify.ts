@@ -7,6 +7,7 @@ import type { Evidence, Finding, GateReport, TestInventory } from "@vtc/shared";
 import type { Kernel, RunHandle } from "./kernel.js";
 import { decideAfterFailedRound, findingRiskRule } from "./loop.js";
 import { parkTask, setTaskStatus } from "./parking.js";
+import { visualFindings } from "./gate-verdict.js";
 import { taskFindings } from "./queries.js";
 import {
   findingFromFailingTest,
@@ -149,6 +150,8 @@ export const gateFindings = (
 ): Finding[] => {
   const ctx = { ...(taskId === undefined ? {} : { task: taskId }), round };
   const out: Finding[] = [];
+  // AD-24 rule 5: a failed or unchecked visual step's findings are triaged like any tool's
+  for (const tool of visualFindings(report)) out.push(findingFromTool(tool, ctx));
   for (const result of report.results) {
     for (const tool of result.findings) out.push(findingFromTool(tool, ctx));
     const failed = result.blocking && (result.status === "fail" || result.status === "error");

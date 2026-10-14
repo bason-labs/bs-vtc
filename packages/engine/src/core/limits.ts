@@ -3,7 +3,8 @@
  * worktree and session, persists the reset time and pending steps (`limit.hit`) and schedules the
  * OS timer at the reset plus 1–2 minutes of jitter. In plugin-only mode the engine launches
  * nothing itself: `next` answers `wait` until then, re-reads usage, and then hands the Lead a
- * `spawn_role` that resumes the same session (`lead_redispatch`).
+ * `spawn_role` that resumes the same session (`lead_redispatch`). With `headless_allowed` and no
+ * live Lead the timer's wake resumes the steps as engine-launched runs (AD-17 rule 2, AD-25).
  */
 import type { HostFailureOutcome, HostId, TaskStatus } from "@vtc/shared";
 import type { Kernel, RunHandle } from "./kernel.js";
@@ -71,6 +72,29 @@ export const recordLimit = (
   schedule(k, at);
 };
 
+/**
+ * An engine-launched start or resume found the host still limited (the headless preflight's
+ * `usage` check, AD-25 rule 3): nothing launches, dispatching waits until the reset plus jitter,
+ * and the timer is scheduled, as after a limit hit (§6.9 steps 2–4).
+ */
+export const deferForUsage = (k: Kernel, h: RunHandle, host: HostId, resetsAt: string): void => {
+  const at = resumeAt(k, resetsAt);
+  k.emit(h, {
+    type: "limit.hit",
+    actor: "engine",
+    data: {
+      host,
+      window: "five_hour",
+      model: null,
+      resets_at: resetsAt,
+      session_ref: h.state.limit?.sessionRef ?? null,
+      pending_action_ids: [...(h.state.limit?.pendingActionIds ?? [])],
+      auto_resume_at: at,
+    },
+  });
+  schedule(k, at);
+};
+
 /** While a limit is active, when dispatching may resume; `null` when nothing is waiting. */
 export const limitWait = (k: Kernel, h: RunHandle): string | null => {
   const at = h.state.limit?.autoResumeAt ?? null;
@@ -78,7 +102,8 @@ export const limitWait = (k: Kernel, h: RunHandle): string | null => {
   return Date.parse(at) > k.now().getTime() ? at : null;
 };
 
-const stillLimited = (k: Kernel, host: HostId): string | null => {
+/** The reset time while `host`'s five-hour window is used up, else `null` (§6.9 step 5). */
+export const stillLimited = (k: Kernel, host: HostId): string | null => {
   const window = k.usage.get(host)?.windows.find((w) => w.kind === "five_hour");
   if (window?.used_pct === null || window === undefined || window.used_pct < 100) return null;
   if (window.resets_at === null || Date.parse(window.resets_at) <= k.now().getTime()) return null;
@@ -116,8 +141,9 @@ export const maybeAutoResume = (k: Kernel, h: RunHandle): boolean => {
     schedule(k, at);
     return false;
   }
-  // Resuming is a Lead re-dispatch (plugin-only, `lead_redispatch`): this engine launches no
-  // headless runs, so `headless_allowed` resumes the same way.
+  // Resuming re-dispatches the interrupted steps: through the Lead (plugin-only,
+  // `lead_redispatch`), or, with no live Lead and `headless_allowed`, as engine-launched resumes
+  // (`Engine.wake`, `drive` in headless.ts).
   k.emit(h, { type: "run.resumed", actor: "engine", data: { auto: true } });
   for (const task of [...h.state.tasks.values()]) {
     if (task.status !== "interrupted") continue;

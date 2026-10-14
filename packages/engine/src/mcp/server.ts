@@ -18,10 +18,12 @@ import {
   CONTRACT_SCHEMAS,
   ENGINE_MCP_TOOLS,
   jsonSchemaFor,
+  ROLE_MCP_TOOLS,
   type ContractName,
   type EngineMcpToolName,
+  type RoleMcpToolName,
 } from "@vtc/shared";
-import { EngineError, type CallContext, type Engine } from "../core/index.js";
+import { EngineError, type CallContext, type Engine, type RoleToolHandler } from "../core/index.js";
 
 /** The newest MCP protocol revision this server speaks (the SDK's). */
 export const MCP_PROTOCOL_VERSION: string = LATEST_PROTOCOL_VERSION;
@@ -47,7 +49,15 @@ export type ToolHost = Pick<
 > & {
   /** A connection closed: its session can no longer be the Lead's (see `CallContext.session`). */
   sessionClosed?(session: string): void;
+  /**
+   * The role-facing research tools (`ROLE_MCP_TOOLS`, AD-4 rule 3, AD-22), served on the same
+   * server next to the Lead's when the engine has a handler for them (the daemon wires the
+   * research module's); absent: they are not listed.
+   */
+  roleTools?(): RoleToolHandler | null;
 };
+
+export type { RoleToolHandler };
 
 const isRecord = (value: unknown): value is Record<string, unknown> =>
   typeof value === "object" && value !== null && !Array.isArray(value);
@@ -59,14 +69,15 @@ const objectSchema = (name: ContractName): Record<string, unknown> => {
 };
 
 export interface ToolDefinition {
-  readonly name: EngineMcpToolName;
+  readonly name: EngineMcpToolName | RoleMcpToolName;
   readonly description: string;
   readonly inputSchema: { type: "object" } & Record<string, unknown>;
   readonly outputSchema: { type: "object" } & Record<string, unknown>;
 }
 
-export const toolDefinitions = (): ToolDefinition[] =>
-  ENGINE_MCP_TOOLS.map((tool) => ({
+/** The tools `tools/list` names: the Lead's, and the role-facing ones when `roles` is set. */
+export const toolDefinitions = (roles = false): ToolDefinition[] =>
+  [...ENGINE_MCP_TOOLS, ...(roles ? ROLE_MCP_TOOLS : [])].map((tool) => ({
     name: tool.name,
     description: tool.purpose,
     inputSchema: objectSchema(tool.input) as ToolDefinition["inputSchema"],
@@ -126,6 +137,25 @@ export const callTool = async (
   args: unknown,
   call: CallContext,
 ): Promise<CallToolResult> => {
+  const roleTool = ROLE_MCP_TOOLS.find((t) => t.name === name);
+  const handler = host.roleTools?.() ?? null;
+  if (roleTool !== undefined && handler !== null) {
+    const input = CONTRACT_SCHEMAS[roleTool.input].safeParse(args ?? {});
+    if (!input.success)
+      return toolError(`invalid ${roleTool.input}: ${issuesOf(input.error).join("; ")}`);
+    try {
+      const output = await handler(roleTool.name, input.data, call);
+      const checked = CONTRACT_SCHEMAS[roleTool.output].safeParse(output);
+      if (!checked.success)
+        return toolError(
+          `internal: ${roleTool.output} did not validate: ${issuesOf(checked.error).join("; ")}`,
+        );
+      return { ...toolText(output), structuredContent: output as Record<string, unknown> };
+    } catch (error) {
+      if (error instanceof EngineError) return toolError(`${error.code}: ${error.message}`);
+      return toolError(`internal: ${error instanceof Error ? error.message : String(error)}`);
+    }
+  }
   const tool = ENGINE_MCP_TOOLS.find((t) => t.name === name);
   if (tool === undefined) return toolError(`unknown tool ${name}`);
   const parsed = CONTRACT_SCHEMAS[tool.input].safeParse(args ?? {});
@@ -171,7 +201,9 @@ export const createMcpServer = (
     { name: "vtc", version: options.serverVersion },
     { capabilities: { tools: { listChanged: false } } },
   );
-  mcp.server.setRequestHandler(ListToolsRequestSchema, () => ({ tools: toolDefinitions() }));
+  mcp.server.setRequestHandler(ListToolsRequestSchema, () => ({
+    tools: toolDefinitions((host.roleTools?.() ?? null) !== null),
+  }));
   mcp.server.setRequestHandler(CallToolRequestSchema, (request) =>
     callTool(host, request.params.name, request.params.arguments, options.call),
   );

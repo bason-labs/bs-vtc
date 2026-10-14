@@ -93,7 +93,31 @@ export interface ReviewerSlot {
   readonly label: string;
   /** The router rule that added it (shown in Flow Studio, §17). */
   readonly reason: string;
+  /** Run by the other host family, headless (§12.4); its runs are told apart by their host. */
+  readonly crossFamily?: true;
 }
+
+/**
+ * Whether a reviewer run fills a slot: same role, mode and subject, and, while a task has a
+ * cross-family reviewer on `crossHost`, the cross-family slot takes only that host's runs and every
+ * other slot only the other hosts'.
+ */
+export const slotMatches = (
+  slot: Pick<ReviewerSlot, "role" | "mode" | "subject" | "crossFamily">,
+  run: {
+    readonly role: string;
+    readonly mode?: string;
+    readonly subject?: string;
+    readonly host: string;
+  },
+  crossHost: string | undefined,
+): boolean =>
+  run.role === slot.role &&
+  run.mode === slot.mode &&
+  run.subject === slot.subject &&
+  (slot.crossFamily === true
+    ? run.host === crossHost
+    : crossHost === undefined || run.host !== crossHost);
 
 const slug = (text: string): string => text.toLowerCase().replace(/[^a-z0-9]+/g, "-");
 
@@ -113,7 +137,11 @@ export const reviewersFor = (
   task: Pick<Task, "id" | "risk" | "risk_tags" | "discipline" | "covers">,
   run: { readonly has_ui: boolean; readonly risk_hints: readonly string[] },
   acceptanceCriteria: readonly string[],
-  options: { readonly lensRoles?: readonly string[] } = {},
+  options: {
+    readonly lensRoles?: readonly string[];
+    /** The task gets a cross-family reviewer (`crossFamilyHost`, §12.4). */
+    readonly crossFamily?: boolean;
+  } = {},
 ): ReviewerSlot[] => {
   const slots: ReviewerSlot[] = [];
   const subjects = acceptanceCriteria.length > 0 ? acceptanceCriteria : task.covers;
@@ -134,6 +162,17 @@ export const reviewersFor = (
       subject: task.id,
       label: "QA judge",
       reason: "risk high (§6.3 step 7)",
+    });
+  }
+  if (options.crossFamily === true && task.risk === "high") {
+    slots.push({
+      id: "cross-family",
+      role: "qa",
+      mode: "judge",
+      subject: task.id,
+      crossFamily: true,
+      label: "Cross-family review",
+      reason: "hosts.cross_family_review on a high-risk task (§12.4)",
     });
   }
   const tags = [...task.risk_tags];

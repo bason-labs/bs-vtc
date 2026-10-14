@@ -26,6 +26,7 @@ import {
   createHarness,
   draft,
   only,
+  passFinalReview,
   result,
   SPEC_ONE,
   spawns,
@@ -298,15 +299,16 @@ describe("packs carry what the engine decides (spine §5 reading 32)", () => {
 });
 
 describe("the feature evidence bundle names the Final Review steps run (§6.7a)", () => {
-  it("steps_run is [1]", async () => {
+  it("steps_run is [1, 3, 4, 7]: the gate run, the AI reviewers and release readiness (wave 3)", async () => {
     const h = createHarness({ project: { merge_level: 1 } });
     await build(h, await toEngineer(h));
     await verdictPass(h, only(await next(h), "spec_verifier"), "src/t-1/impl.ts");
     await h.engine.settle();
+    await passFinalReview(h);
     const bundle = EvidenceBundleSchema.parse(
       JSON.parse(readFileSync(join(h.repo, ".vtc/evidence/F-1/bundle.json"), "utf8")),
     );
-    expect(bundle.kind === "feature" && bundle.final_review.steps_run).toEqual([1]);
+    expect(bundle.kind === "feature" && bundle.final_review.steps_run).toEqual([1, 3, 4, 7]);
     await h.release();
   });
 });

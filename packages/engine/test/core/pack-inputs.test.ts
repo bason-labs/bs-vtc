@@ -15,6 +15,7 @@ import {
   SPEC_ONE,
   spawns,
   submitResult,
+  threatModel,
   workdir,
   type Harness,
   type SpawnAction,
@@ -74,21 +75,23 @@ describe("pack inputs by declared artifact type (AD-14 rule 5)", () => {
       artifacts: [{ type: "spec", path: ".vtc/spec/spec.md" }],
     });
     const design = await approveGate(h, g1.actions);
-    const [architect, designer] = spawns(design);
+    const [architect, security] = spawns(design);
     expect(architect?.role).toBe("architect");
-    expect(designer?.role).toBe("designer");
-    for (const role of [architect!, designer!]) {
+    expect(security).toMatchObject({ role: "security", mode: "design" });
+    // two at a time (the default concurrency): the Designer once Security is done
+    const designer = only(await threatModel(h, security!), "designer");
+    for (const role of [architect!, designer]) {
       expect(inputsOf(h, role)).toContain("repo_map: .vtc/research/repo-map/map.md");
       expect(inputsOf(h, role)).toContain("spec: .vtc/spec/spec.md");
     }
     writeFile(workdir(architect!), ".vtc/architecture/spine.md", "# spine\n");
-    writeFile(workdir(designer!), ".vtc/design/flows.mmd", "flowchart LR\n");
-    writeFile(workdir(designer!), ".vtc/design/screens.yaml", "screens: []\n");
+    writeFile(workdir(designer), ".vtc/design/flows.mmd", "flowchart LR\n");
+    writeFile(workdir(designer), ".vtc/design/screens.yaml", "screens: []\n");
     await submitResult(h, architect!, {
       exit: "done",
       artifacts: [{ type: "architecture", path: ".vtc/architecture/spine.md" }],
     });
-    const g2 = await submitResult(h, designer!, {
+    const g2 = await submitResult(h, designer, {
       exit: "done",
       artifacts: [
         { type: "design_flows", path: ".vtc/design/flows.mmd" },

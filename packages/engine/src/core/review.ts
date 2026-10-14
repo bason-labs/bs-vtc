@@ -9,7 +9,8 @@ import type { Kernel, RunHandle } from "./kernel.js";
 import { isReviewer, lastBuilt } from "./queries.js";
 import { frozenSpecItems, taskAcceptanceCriteria } from "./read-model.js";
 import { loadResult } from "./results.js";
-import { installedLensRoles, reviewersFor, VISUAL_QA_CALLS } from "./router.js";
+import { crossFamilyHost } from "./cross-family.js";
+import { installedLensRoles, reviewersFor, slotMatches, VISUAL_QA_CALLS } from "./router.js";
 import type { RoleRunRecord } from "./state.js";
 import { findingFromDraft, findingFromVerdict } from "./triage.js";
 import { recordRoundFindings, settleRound } from "./verify.js";
@@ -46,11 +47,12 @@ export const completedReviews = (
   const built = lastBuilt(h.state, taskId);
   if (task === undefined || built === undefined) return null;
   const since = built.closedSeq ?? 0;
+  const cross = crossFamilyHost(k, h, task);
   const slots = reviewersFor(
     task,
     h.state.run,
     taskAcceptanceCriteria(k.deps.repoRoot, h.state, taskId),
-    { lensRoles: installedLensRoles(k.deps.roles) },
+    { lensRoles: installedLensRoles(k.deps.roles), crossFamily: cross !== undefined },
   );
   const runs = [...h.state.roleRuns.values()].filter(
     (r) =>
@@ -59,9 +61,7 @@ export const completedReviews = (
   const complete = slots.every((slot) =>
     slot.role === "visual_qa"
       ? runs.filter((r) => r.role === "visual_qa").length >= VISUAL_QA_CALLS
-      : runs.some(
-          (r) => r.role === slot.role && r.mode === slot.mode && r.subject === slot.subject,
-        ),
+      : runs.some((r) => slotMatches(slot, r, cross)),
   );
   return complete ? runs : null;
 };
