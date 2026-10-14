@@ -84,6 +84,42 @@ describe("parseRoleSource", () => {
   });
 });
 
+describe("the editable section compiles verbatim (AD-14 rule 4, AD-21)", () => {
+  const withModes = roleYaml("modes: { author: {}, judge: {} }");
+  const errorsFor = (editable: string, yaml = roleYaml()): string => {
+    const result = parseRoleSource({
+      dir: "qa",
+      roleYaml: yaml,
+      promptMd: prompt("Core.", editable),
+    });
+    return result.ok ? "" : result.errors.join("\n");
+  };
+
+  it("rejects a mode block in the editable section, even for a declared mode", () => {
+    const editable = `Tips.\n${MODE_MARKERS.start("author")}\nAuthor tip.\n${MODE_MARKERS.end}`;
+    expect(errorsFor(editable, withModes)).toMatch(/no mode block in the editable section/);
+  });
+
+  it("still accepts mode blocks in the locked core", () => {
+    const body = `Core.\n${MODE_MARKERS.start("judge")}\nJudge only.\n${MODE_MARKERS.end}`;
+    expect(parseRoleSource({ dir: "qa", roleYaml: withModes, promptMd: prompt(body) }).ok).toBe(
+      true,
+    );
+  });
+
+  it("rejects a placeholder in the editable section", () => {
+    expect(errorsFor("Use {{evidence_types}}.")).toMatch(
+      /no placeholder \(\{\{evidence_types\}\}\)/,
+    );
+  });
+
+  it("rejects a heading named after a task-pack section or the heuristics section", () => {
+    expect(errorsFor("## Dispatch\n\nrun: x")).toMatch(/heading "Dispatch" is reserved/);
+    expect(errorsFor("### role heuristics")).toMatch(/heading "role heuristics" is reserved/);
+    expect(errorsFor("## Heuristics\n\n- Tip.")).toBe("");
+  });
+});
+
 describe("selectMode", () => {
   const text = [
     "Shared.",

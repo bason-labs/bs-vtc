@@ -115,17 +115,14 @@ parameterised queries; exploit and fix in one sentence each. Verdict `fail`; exi
 
 ## Heuristics
 
-<!-- vtc:mode design -->
+When writing the threat model:
 
 - Every external integration gets a row for a malicious or compromised counterpart.
 - Every multi-tenant data store gets a row for cross-tenant access.
 
-<!-- vtc:mode-end -->
-<!-- vtc:mode verify -->
+When verifying a change:
 
 - Untrusted input placed in a model's system prompt, or in a call that also grants the model
   tools, is a prompt-injection sink; input in its own user message without tools is the safe form.
 - Check the denial path of each new authorisation check: a test for the allowed case alone does
   not prove the check.
-
-<!-- vtc:mode-end -->

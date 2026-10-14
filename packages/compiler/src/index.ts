@@ -13,3 +13,6 @@ export * from "./advisors.js";
 export * from "./compile.js";
 export * from "./io.js";
 export * from "./hooks.js";
+export * from "./prompt-parts.js";
+export * from "./role-skills.js";
+export * from "./codex-plugin.js";

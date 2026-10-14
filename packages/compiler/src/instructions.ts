@@ -1,15 +1,20 @@
 /**
  * Builds one agent's instructions from its role source (§5.1, AD-14):
  *
- * 1. the locked core: for an engineer profile, the Engineer's locked core first (§5.2a: every
- *    specialist shares the Engineer contract); for a lens reviewer, the shared lens procedure
- *    first and its lens skill's checklist after (§5.3);
+ * 1. the locked core: for an engineer profile, the Engineer's locked core and editable section
+ *    first (§5.2a: every specialist shares the Engineer contract and heuristics); for a lens
+ *    reviewer, the shared lens procedure first and its lens skill's checklist after (§5.3);
  * 2. the contract, generated from the effective role.yaml contract of the mode;
  * 3. the shared result protocol (`roles/_shared/result-protocol.md`, filled from the frozen
  *    contracts); for an advisor (§5.4), which has no task pack and whose result goes to the human
  *    rather than the engine, `roles/_shared/advisor-protocol.md` instead;
- * 4. the editable section(s), the part Lookback may propose changes to (AD-14 rule 4);
- * 5. the host's `prompt_append` (§12.3).
+ * 4. the host's `prompt_append` (§12.3);
+ * 5. the role's own editable section, verbatim: the part Lookback may propose changes to (AD-14
+ *    rule 4).
+ *
+ * Parts 1–4 are the locked part and part 5 the editable part (`prompt-parts.ts`); each is rendered
+ * on its own, and an agent carries `<locked>\n<editable>`, or the locked part only when its role's
+ * editable section goes in the task pack (§5 reading 102).
  *
  * Mode blocks are resolved per mode, so each mode's agent carries only its own rules. Every part
  * may use `{{name}}` placeholders filled from the frozen contracts (`PROTOCOL_VARS`) and from the
@@ -22,14 +27,19 @@ import {
   DESIGN_SCREENS_PATH,
   DisciplineSchema,
   EscalationEffectSchema,
+  ENGINE_HTTP,
   EvidenceTypeSchema,
   FindingCategorySchema,
   FindingKindSchema,
+  G2DirectionSchema,
+  LOOKBACK_LIMITS,
+  LOOKBACK_REPO,
   MAX_STACK_PACKS,
   PrototypeThemeSchema,
   prototypeStatePath,
   ResearchDepthSchema,
   resolveRoleMode,
+  ScorecardMetricIdSchema,
   SUMMARY_MAX_CHARS,
   TASK_PACK_SECTIONS,
   VerdictQuestionTypeSchema,
@@ -38,8 +48,11 @@ import {
   type RoleContract,
   type RoleExit,
 } from "@vtc/shared";
+import { EDITABLE_IN_PACK_NOTE } from "./prompt-parts.js";
 import { renderTemplate, selectMode } from "./role-source.js";
 import type { LoadedRole } from "./role-source.js";
+
+const ENGINE_DIRECTION_FIELDS: ReadonlySet<string> = new Set(["first_viewport", "novelty"]);
 
 /** Values every prompt part may reference as `{{name}}`. */
 export const PROTOCOL_VARS: Readonly<Record<string, string>> = {
@@ -61,6 +74,20 @@ export const PROTOCOL_VARS: Readonly<Record<string, string>> = {
   finding_kinds: FindingKindSchema.options.join(", "),
   summary_max_chars: String(SUMMARY_MAX_CHARS),
   verdict_question_types: VerdictQuestionTypeSchema.options.join(", "),
+  /** Lookback (AD-21): the metrics a proposal may target, its change cap and where it goes. */
+  scorecard_metrics: ScorecardMetricIdSchema.options.join(", "),
+  max_proposal_changes: String(LOOKBACK_LIMITS.maxProposalChanges),
+  lookback_proposals_dir: LOOKBACK_REPO.proposalsDir,
+  /** Where the prototype server serves from (§17); the Designer's G2 directions live under it. */
+  prototype_root: ENGINE_HTTP.prototype.root,
+  /**
+   * G2 (§9.1): the `G2Direction` fields the Designer gives each direction; the engine adds the
+   * first-viewport capture and its novelty verdict.
+   */
+  g2_direction_fields: Object.keys(G2DirectionSchema.shape)
+    .filter((key) => !ENGINE_DIRECTION_FIELDS.has(key))
+    .map((key) => `\`${key}\``)
+    .join(", "),
 };
 
 const list = (items: readonly string[]): string => (items.length === 0 ? "none" : items.join(", "));
@@ -166,9 +193,21 @@ export interface InstructionSources {
   readonly vars: Readonly<Record<string, string>>;
 }
 
+/** One agent's prompt parts, each rendered and trimmed (`prompt-parts.ts`). */
 export type InstructionsResult =
-  | { readonly ok: true; readonly text: string; readonly contract: EffectiveRoleContract }
+  | {
+      readonly ok: true;
+      readonly locked: string;
+      readonly editable: string;
+      readonly contract: EffectiveRoleContract;
+    }
   | { readonly ok: false; readonly errors: readonly string[] };
+
+/** What an agent carries: both parts, or the locked part only (§5 reading 102). */
+export const agentInstructions = (
+  parts: { readonly locked: string; readonly editable: string },
+  editableInPack: boolean,
+): string => (editableInPack ? parts.locked : `${parts.locked}\n${parts.editable}`);
 
 /** `lens_supply_chain` → `lens-supply-chain`. */
 export const lensSkillName = (roleId: string): string => roleId.replaceAll("_", "-");
@@ -192,21 +231,22 @@ export const buildInstructions = (
   mode: string | undefined,
   host: HostId,
   sources: InstructionSources,
+  editableInPack = false,
 ): InstructionsResult => {
   const { role, prompt } = loaded;
   const resolved = resolveRoleMode(role, mode);
   if (!resolved.ok) return { ok: false, errors: [resolved.error] };
   const errors: string[] = [];
   const locked: string[] = [];
-  const editable: string[] = [];
   if (role.kind === "engineer_profile") {
     if (sources.engineer === undefined) {
       errors.push("engineer profiles build on roles/engineer, which is missing");
     } else {
+      // The Engineer's whole prompt, editable section included, is part of a profile's locked
+      // part: a profile's Lookback proposal replaces the profile's own section only, and the
+      // Engineer's section changes through the Engineer's proposals (prompt-parts.ts).
       locked.push(pick(sources.engineer.prompt.locked, undefined, sources.engineer.role, errors));
-      editable.push(
-        pick(sources.engineer.prompt.editable, undefined, sources.engineer.role, errors),
-      );
+      locked.push(pick(sources.engineer.prompt.editable, undefined, sources.engineer.role, errors));
     }
   }
   if (role.kind === "lens") {
@@ -223,21 +263,36 @@ export const buildInstructions = (
     if (checklist === undefined) errors.push(`lens roles need the skill skills/${skill}`);
     else locked.push(checklist.trim());
   }
-  editable.push(pick(prompt.editable, mode, role, errors));
+  const editable = pick(prompt.editable, mode, role, errors);
   const protocol = role.kind === "advisor" ? sources.advisorProtocol : sources.protocol;
   if (protocol === undefined) {
     errors.push("advisor roles build on roles/_shared/advisor-protocol.md, which is missing");
   }
   if (errors.length > 0 || protocol === undefined) return { ok: false, errors };
   const append = role.host_overrides?.[host]?.prompt_append;
-  const parts = [
+  const vars = { ...PROTOCOL_VARS, ...sources.vars };
+  const render = (parts: readonly string[]): ReturnType<typeof renderTemplate> =>
+    renderTemplate(parts.filter((part) => part !== "").join("\n\n"), vars);
+  const lockedText = render([
     ...locked,
     renderContract(role, resolved.contract),
     protocol.trim(),
-    ...editable,
     ...(append === undefined ? [] : [append.trim()]),
-  ].filter((part) => part !== "");
-  const rendered = renderTemplate(`${parts.join("\n\n")}\n`, { ...PROTOCOL_VARS, ...sources.vars });
-  if (!rendered.ok) return { ok: false, errors: rendered.errors };
-  return { ok: true, text: rendered.text, contract: resolved.contract };
+    ...(editableInPack ? [EDITABLE_IN_PACK_NOTE] : []),
+  ]);
+  const editableText = render([editable]);
+  const renderErrors = [
+    ...(lockedText.ok ? [] : lockedText.errors),
+    ...(editableText.ok ? [] : editableText.errors),
+  ];
+  if (!lockedText.ok || !editableText.ok) return { ok: false, errors: renderErrors };
+  if (editableText.text.trim() === "") {
+    return { ok: false, errors: ["the editable section is empty; Lookback needs one to revise"] };
+  }
+  return {
+    ok: true,
+    locked: lockedText.text.trim(),
+    editable: editableText.text.trim(),
+    contract: resolved.contract,
+  };
 };

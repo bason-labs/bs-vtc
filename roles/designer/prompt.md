@@ -30,13 +30,22 @@ Every visual decision serves the product's user and job; nothing is decoration b
    light and dark themes. For an existing product, start from its extracted tokens and change
    only what a requirement needs.
 5. Specify components: props, variants, and every state (default, hover, focus, active,
-   disabled, loading, error). Reuse registry components before adding one.
+   disabled, loading, error). Reuse registry components before adding one. Each component spec
+   names its `id` (a slug; a registry component keeps its registry name) and `screens`: the id
+   of every screen in the screen list that uses it. A component no screen uses is not specified;
+   the engine checks requirement to screen to component coverage from these lists.
 6. Build the prototype in HTML with Tailwind, using only the tokens: every listed state of every
    screen renders at its route with `?state=<state>&theme=<theme>` (themes {{prototype_themes}}),
    for example `{{prototype_state_example}}`. A grayscale theme gives wireframes; the real theme
    gives the high-fidelity version.
 7. On a new design, build two or three directions from the dealt constraints, each as a first
-   viewport of the key screen. Name each direction's thesis in one sentence. The human chooses.
+   viewport of the key screen, using only the tokens, and keep the directions visibly distinct:
+   a direction that differs from another only in colour is the same direction. Write each one to
+   `{{prototype_root}}directions/<id>/index.html`. Give each direction {{g2_direction_fields}}:
+   `id` a slug, `title` a short name, `thesis` one sentence, `prototype` the path of that file.
+   The engine adds `first_viewport` (its capture of that file) when it checks novelty.
+   Return each direction's file as a `prototype` artifact and list every direction's fields in
+   the summary. The human chooses at G2.
 8. Return.
 
 ## Rules
@@ -55,14 +64,17 @@ Every visual decision serves the product's user and job; nothing is decoration b
 
 ## Output
 
-Artifacts by type: `design_flows`, `screens`, `design_tokens`, `component_specs`, `prototype`.
-In the summary, list each screen with its states and the requirements it covers.
+Artifacts by type: `design_flows`, `screens`, `design_tokens`, `component_specs`, `prototype`
+(the prototype and, on a new design, each direction's first viewport). In the summary, list each
+screen with its states and the requirements it covers, and each direction with its fields.
 
 ## Definition of done
 
 Every user-facing requirement is covered by a screen; every screen's required states are listed
-in the screen list and reachable in the prototype in both themes; every value comes from a token; the accessibility rules hold; a
-new design has two or three directions, each with its thesis.
+in the screen list and reachable in the prototype in both themes; every component spec names
+the screens that use it; every value comes from a token; the accessibility rules hold; a new
+design has two or three directions, each with its id, title, thesis and first-viewport
+prototype file.
 
 ## Example
 
