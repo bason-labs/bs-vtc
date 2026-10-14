@@ -1,7 +1,6 @@
 import {
   LOOKBACK_LIMITS,
   PROMPT_MARKERS,
-  splitForTrace,
   type Attribution,
   type PromptProposal,
 } from "@vtc/shared";
@@ -15,22 +14,26 @@ import {
   proposalRecordedEvent,
   promptVersionRef,
   readProposalFiles,
+  traceSlug,
+  traceSplit,
 } from "../../src/lookback/index.js";
 import { EDITABLE, HOST, LOCKED, tempDir } from "./log.js";
 
 const base = promptVersionRef({ role: "engineer", host: HOST, locked: LOCKED, editable: EDITABLE });
 const now = new Date("2026-10-14T12:00:00.000Z");
 
-/** Trace ids that land in the train or held-out split. */
+/** Action ids of run r1 that land in the train or held-out split. */
 const traceIn = (split: "train" | "holdout", skip = 0): string => {
   let seen = 0;
   for (let i = 1; i < 500; i += 1) {
     const id = `a-${String(i)}`;
-    if (splitForTrace(id) === split && seen++ === skip) return id;
+    if (traceSplit({ run: "r1", trace: id }) === split && seen++ === skip) return id;
   }
   throw new Error("no trace");
 };
 const TRAIN = traceIn("train");
+/** What the lookback role cites: the run-qualified slug. */
+const cite = (trace: string): string => traceSlug({ run: "r1", trace });
 
 const failure = (trace: string, role = "engineer"): Attribution => ({
   v: 1,
@@ -42,7 +45,7 @@ const failure = (trace: string, role = "engineer"): Attribution => ({
   method: "tree",
   rule: "test_fails",
   confidence: 1,
-  split: splitForTrace(trace),
+  split: traceSplit({ run: "r1", trace }),
   evidence: [],
   attributed_at: now.toISOString(),
 });
@@ -57,7 +60,7 @@ const proposal = (over: Partial<PromptProposal> = {}): PromptProposal => ({
     {
       hypothesis: "Writing the failing test first cuts fix rounds.",
       target_metric: "rounds_to_done",
-      trace_ids: [TRAIN],
+      trace_ids: [cite(TRAIN)],
       summary: "Ask for the failing test first.",
     },
   ],
@@ -81,7 +84,7 @@ describe("proposal checks (AD-21 rule 4)", () => {
     expect(fm).toMatchObject({
       parent: base.effective_sha256,
       proposal: "p-1",
-      changelog: { trace_ids: [TRAIN] },
+      changelog: { trace_ids: [cite(TRAIN)] },
     });
     expect(proposalRecordedEvent("engineer", result.proposal)).toMatchObject({
       type: "lookback.proposal_recorded",
@@ -132,20 +135,31 @@ describe("proposal checks (AD-21 rule 4)", () => {
         changes: [
           {
             ...proposal().changes[0],
-            trace_ids: [held, other],
+            trace_ids: [cite(held), cite(other), TRAIN],
           } as PromptProposal["changes"][number],
         ],
       }),
       NEW_SECTION,
-      [failure(TRAIN), failure(other, "qa")],
+      [failure(TRAIN), failure(held), failure(other, "qa")],
     );
     expect(result).toMatchObject({
       ok: false,
       problems: [
         expect.stringMatching(/held-out/),
-        expect.stringMatching(/not an attributed failure/),
+        expect.stringMatching(/not an attributed train failure/),
+        // A bare action id names a dispatch in every run: it is not a citation.
+        expect.stringMatching(/not an attributed train failure/),
       ],
     });
+  });
+
+  it("splits by run and action: the same action id lands in either split across runs", () => {
+    const runs = Array.from({ length: 40 }, (_, i) => `r${String(i)}`);
+    const splits = new Set(runs.map((run) => traceSplit({ run, trace: "a-1" })));
+    expect(splits).toEqual(new Set(["train", "holdout"]));
+    expect(traceSlug({ run: "r20261014-101500", trace: "a-1" })).toBe("r20261014-101500.a-1");
+    // A run id that is not a slug (upper case) still gets a unique slug.
+    expect(traceSlug({ run: "R1", trace: "a-1" })).toMatch(/^t-[a-f0-9]{16}$/);
   });
 
   it("refuses a mismatched editable.md and a proposal that changes nothing", () => {

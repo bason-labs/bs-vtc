@@ -1,19 +1,21 @@
 import {
+  canonicalCacheKey,
   FetchResultSchema,
   type FetchContext,
   type FetchRequestInput,
   FetchRequestSchema,
 } from "@vtc/shared";
-import net from "node:net";
-import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
+import { describe, expect, it } from "vitest";
 import {
   builtInFetchers,
   cachedFetch,
   createFileResearchCache,
+  HTTP_GUARD_ERROR_NAME,
   RESEARCH_HTTP_LIMITS,
   type CachedFetchContext,
 } from "../../src/research/index.js";
 import { clock, FixtureHttp, jsonResponse, respond, tempDir } from "./fixture-http.js";
+import { guardNoNetwork } from "./no-network.js";
 
 const EOL_URL = "https://endoflife.date/api/v1/products/nodejs/releases/22";
 const fetchers = builtInFetchers();
@@ -40,19 +42,7 @@ const setup = async (routes: ConstructorParameters<typeof FixtureHttp>[0] = {}) 
   return { http, cache, time, keys, context, run };
 };
 
-// AD-22 Check: no research test opens a socket. Any attempt fails the test loudly.
-const connect = vi.fn(() => {
-  throw new Error("a research test tried to open a socket");
-});
-const realFetch = globalThis.fetch;
-beforeAll(() => {
-  vi.spyOn(net.Socket.prototype, "connect").mockImplementation(connect);
-  globalThis.fetch = () => Promise.reject(new Error("a research test called fetch"));
-});
-afterAll(() => {
-  globalThis.fetch = realFetch;
-  expect(connect).not.toHaveBeenCalled();
-});
+guardNoNetwork();
 
 describe("cached fetch (RFC 9111 revalidation)", () => {
   it("fetches once, then serves a hit within the TTL", async () => {
@@ -317,5 +307,61 @@ describe("web fetcher", () => {
     });
     expect((await run2({ fetcher: "web", url: other })).status).toBe("blocked");
     expect(http2.count(`GET ${other}`)).toBe(0);
+  });
+
+  it("re-checks robots.txt when the page redirects to another origin", async () => {
+    const moved = "https://mirror.example.org/guide/install";
+    const mirrorRobots = "https://mirror.example.org/robots.txt";
+    const { cache, run } = await setup({
+      [`GET ${robots}`]: respond(robots, 404, ""),
+      [`GET ${page}`]: respond(moved, 200, html, { "content-type": "text/html" }),
+      [`GET ${mirrorRobots}`]: respond(mirrorRobots, 200, "User-agent: *\nDisallow: /guide\n", {
+        "content-type": "text/plain",
+      }),
+    });
+    const result = await run({ fetcher: "web", url: page });
+    expect(result).toMatchObject({
+      status: "blocked",
+      content_sha256: null,
+      detail: "robots.txt disallows this page (after a redirect to https://mirror.example.org)",
+    });
+    // Nothing was stored for the page.
+    const key = canonicalCacheKey("1", FetchRequestSchema.parse({ fetcher: "web", url: page }));
+    expect(await cache.get("_shared", key)).toBeUndefined();
+  });
+});
+
+describe("network guard refusals (AD-22 rule 1)", () => {
+  const guardError = (message: string): Error => {
+    const error = new Error(message);
+    error.name = HTTP_GUARD_ERROR_NAME;
+    return error;
+  };
+
+  it("reports a refusal by the client's guard (a private address) as blocked, never stale", async () => {
+    const { http, time, run } = await setup({
+      [`GET ${EOL_URL}`]: jsonResponse(EOL_URL, { isEol: false }),
+    });
+    await run({ fetcher: "eol", product: "nodejs", release: "22" });
+    time.advanceDays(8);
+    http.set(
+      `GET ${EOL_URL}`,
+      guardError("endoflife.date resolves to a private address (10.0.0.5)"),
+    );
+    expect(await run({ fetcher: "eol", product: "nodejs", release: "22" })).toMatchObject({
+      status: "blocked",
+      content_sha256: null,
+      detail: "endoflife.date resolves to a private address (10.0.0.5)",
+    });
+  });
+
+  it("still serves stale on the client's timeout, which is not a refusal", async () => {
+    const { http, time, run } = await setup({
+      [`GET ${EOL_URL}`]: jsonResponse(EOL_URL, { isEol: false }),
+    });
+    await run({ fetcher: "eol", product: "nodejs", release: "22" });
+    time.advanceDays(8);
+    http.set(`GET ${EOL_URL}`, guardError("timed out after 20000 ms"));
+    expect((await run({ fetcher: "eol", product: "nodejs", release: "22" })).cache).toBe("stale");
   });
 });

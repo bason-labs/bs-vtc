@@ -3,23 +3,29 @@
  * {@link lookbackAtRunEnd} once per finished run; it:
  * 1. attributes the run's failures and appends them to `.vtc/lookback/attributions.jsonl`
  *    (traces already there are skipped, so a re-run after a restart adds nothing);
- * 2. recomputes the scorecards of every version in the given history and rewrites the index;
+ * 2. recomputes the scorecards of every version in the history (the events of every run the
+ *    scorecards cover; required, so a card is never rewritten from one run) and rewrites the index;
  * 3. decides which (role, host) targets get the lookback role ({@link lookbackTargets}): at least
  *    `minTrainFailures` attributed train failures of the version that ran, at least one of them new
  *    in this run, `minWeeklyRemainingPct` of the weekly window left and budget available.
  * It returns the `lookback.dispatched` drafts and what each lookback dispatch reads (train traces
  * only); engine core queues the dispatches like any role step.
+ *
+ * `attributions.jsonl` is git-tracked, so its rows are checked before they count: the split is
+ * recomputed ({@link isTrainFailure}), and a row of a run in the history must name a dispatch of
+ * that run with the same prompt version, or it is ignored.
  */
 import { LOOKBACK_LIMITS, type Attribution, type Scorecard, type VtcEvent } from "@vtc/shared";
 import {
   appendAttributions,
   attributeRun,
+  isTrainFailure,
   readAttributions,
   type FailureSignal,
 } from "./attribution.js";
 import { lookbackEvent, type LookbackEventDraft } from "./events.js";
 import { computeScorecards, writeScorecards } from "./scorecards.js";
-import { targetKey, traceRef, type LockedShaFor } from "./traces.js";
+import { buildTraces, targetKey, traceRef, traceSlug, type LockedShaFor } from "./traces.js";
 
 /** Most failures one lookback dispatch reads (§13 step 1: 5–10). */
 export const LOOKBACK_MAX_TRACES = 10;
@@ -34,8 +40,11 @@ export interface LookbackTarget {
   /** The version the failures ran with (the proposal's base). */
   readonly base: Attribution["prompt"];
   readonly train_failures: number;
-  /** The train-split failure traces the lookback role reads (never held-out ones). */
-  readonly traces: readonly string[];
+  /**
+   * The train-split failure traces the lookback role reads (never held-out ones): `id` is the
+   * run-qualified slug it cites in `trace_ids` ({@link traceSlug}).
+   */
+  readonly traces: readonly { readonly id: string; readonly run: string; readonly trace: string }[];
 }
 
 export type LookbackSkipReason = "weekly_window" | "budget";
@@ -51,7 +60,7 @@ export const lookbackTargets = (input: {
 }): { readonly targets: LookbackTarget[]; readonly skipped?: LookbackSkipReason } => {
   const candidates = new Map<string, Attribution[]>();
   for (const a of input.attributions) {
-    if (a.outcome !== "failure" || a.split !== "train" || a.prompt.role === LOOKBACK_ROLE) continue;
+    if (!isTrainFailure(a) || a.prompt.role === LOOKBACK_ROLE) continue;
     const key = `${targetKey(a.prompt)}:${a.prompt.effective_sha256}`;
     candidates.set(key, [...(candidates.get(key) ?? []), a]);
   }
@@ -66,7 +75,9 @@ export const lookbackTargets = (input: {
       host: base.host,
       base,
       train_failures: rows.length,
-      traces: rows.slice(-LOOKBACK_MAX_TRACES).map((a) => a.trace),
+      traces: rows
+        .slice(-LOOKBACK_MAX_TRACES)
+        .map((a) => ({ id: traceSlug(a), run: a.run, trace: a.trace })),
     });
   }
   if (targets.length === 0) return { targets };
@@ -93,15 +104,25 @@ export const lookbackAtRunEnd = async (input: {
   readonly projectRoot: string;
   /** The finished run's events. */
   readonly events: readonly VtcEvent[];
-  /** Events of every run the scorecards cover (defaults to this run's). */
-  readonly history?: readonly VtcEvent[];
+  /** Events of every run the scorecards cover, the finished run's included. */
+  readonly history: readonly VtcEvent[];
   readonly lockedShaFor: LockedShaFor;
   readonly graderBundleSha: string;
   readonly weeklyRemainingPct: number | null;
   readonly budgetAvailable: boolean;
   readonly now: Date;
 }): Promise<RunEndResult> => {
-  const recorded = await readAttributions(input.projectRoot);
+  // Rows of a run in the history must name one of its dispatches, with the version it ran.
+  const dispatched = new Map(
+    buildTraces(input.history, input.lockedShaFor).map((t) => [
+      traceRef(t),
+      t.prompt?.effective_sha256,
+    ]),
+  );
+  const historyRuns = new Set(input.history.map((e) => e.run));
+  const recorded = (await readAttributions(input.projectRoot)).filter(
+    (a) => !historyRuns.has(a.run) || dispatched.get(traceRef(a)) === a.prompt.effective_sha256,
+  );
   const result = attributeRun({
     events: input.events,
     lockedShaFor: input.lockedShaFor,
@@ -111,7 +132,7 @@ export const lookbackAtRunEnd = async (input: {
   await appendAttributions(input.projectRoot, result.attributions);
   const all = [...recorded, ...result.attributions];
   const scorecards = computeScorecards({
-    events: input.history ?? input.events,
+    events: input.history,
     attributions: all,
     lockedShaFor: input.lockedShaFor,
     graderBundleSha: input.graderBundleSha,

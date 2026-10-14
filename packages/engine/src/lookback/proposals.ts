@@ -8,8 +8,8 @@
  *   proposed section must split back (`splitRolePrompt`) into the same locked core and section, so
  *   a section that smuggles in a prompt marker is refused;
  * - nothing in it names an AD-9 marker (`findForbiddenInText`);
- * - every trace it cites is an attributed train-split failure of that role (the role never sees
- *   held-out traces);
+ * - every trace it cites (by its run-qualified slug, `traceSlug`) is an attributed train-split
+ *   failure of that role (the role never sees held-out traces);
  * - it actually changes the section.
  * An accepted proposal becomes a candidate version file under the VTC home (immutable) and a
  * `lookback.proposal_recorded` event; promotion stays a human gesture.
@@ -20,7 +20,6 @@ import {
   PROMPT_MARKERS,
   PromptProposalSchema,
   RoleIdSchema,
-  splitForTrace,
   splitRolePrompt,
   type Attribution,
   type PromptProposal,
@@ -28,8 +27,10 @@ import {
   type PromptVersionRef,
 } from "@vtc/shared";
 import { join } from "node:path";
+import { isTrainFailure } from "./attribution.js";
 import { lookbackEvent, type LookbackEventDraft } from "./events.js";
 import { readTextIfExists } from "./files.js";
+import { traceSlug, traceSplit } from "./traces.js";
 import { promptVersionRef, sectionSha } from "./versions.js";
 
 export type ProposalCheck =
@@ -98,15 +99,13 @@ export const checkProposal = (input: {
   for (const hit of texts.flatMap((t) => findForbiddenInText(t))) {
     problems.push(`names a forbidden marker (${hit.marker})`);
   }
-  const trainFailures = new Set(
-    input.attributions
-      .filter((a) => a.outcome === "failure" && a.split === "train" && a.prompt.role === input.role)
-      .map((a) => a.trace),
-  );
+  const ofRole = input.attributions.filter((a) => a.prompt.role === input.role);
+  const trainFailures = new Set(ofRole.filter(isTrainFailure).map(traceSlug));
+  const heldOut = new Set(ofRole.filter((a) => traceSplit(a) === "holdout").map(traceSlug));
   for (const trace of new Set(proposal.changes.flatMap((c) => c.trace_ids))) {
-    if (splitForTrace(trace) === "holdout") problems.push(`cites held-out trace ${trace}`);
+    if (heldOut.has(trace)) problems.push(`cites held-out trace ${trace}`);
     else if (!trainFailures.has(trace))
-      problems.push(`cites ${trace}, which is not an attributed failure of ${input.role}`);
+      problems.push(`cites ${trace}, which is not an attributed train failure of ${input.role}`);
   }
   if (sectionSha(editable) === proposal.base.editable_sha256)
     problems.push("the proposal does not change the section");

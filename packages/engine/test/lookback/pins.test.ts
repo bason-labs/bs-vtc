@@ -5,7 +5,7 @@ import {
   type LookbackPinsInput,
   type PromptVersionFrontmatter,
 } from "@vtc/shared";
-import { mkdir, readFile, writeFile } from "node:fs/promises";
+import { mkdir, readdir, readFile, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 import { parseYaml, toYaml } from "../../src/core/index.js";
@@ -20,6 +20,7 @@ import {
   selectPromptVersion,
   storePromptVersion,
 } from "../../src/lookback/index.js";
+import { writeAtomicIfUnchanged } from "../../src/lookback/files.js";
 import { EDITABLE, EFFECTIVE, HOST, LOCKED, tempDir } from "./log.js";
 
 const REPO = "0123456789abcdef";
@@ -298,5 +299,21 @@ describe("the engine's only pins write: auto_rollback", () => {
     expect(() => {
       checkEngineWrite(before, before);
     }).toThrow(/history must grow/);
+  });
+});
+
+describe("pins.yaml writes never lose a human gesture", () => {
+  it("replaces the file only when it still holds the bytes the engine read", async () => {
+    const dir = await tempDir("cas");
+    const path = join(dir, "lookback", "pins.yaml");
+    expect(await writeAtomicIfUnchanged(path, "engine\n", undefined)).toBe(true);
+    // A human gesture wrote in between: the engine's stale write is dropped, not applied.
+    await writeFile(path, "human\n");
+    expect(await writeAtomicIfUnchanged(path, "engine again\n", "engine\n")).toBe(false);
+    expect(await readFile(path, "utf8")).toBe("human\n");
+    expect(await writeAtomicIfUnchanged(path, "engine again\n", "human\n")).toBe(true);
+    expect(await readFile(path, "utf8")).toBe("engine again\n");
+    // No temp file is left behind either way.
+    expect((await readdir(join(dir, "lookback"))).sort()).toEqual(["pins.yaml"]);
   });
 });

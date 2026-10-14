@@ -4,6 +4,9 @@ import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 import { createFileResearchCache, CacheIntegrityError } from "../../src/research/index.js";
 import { tempDir } from "./fixture-http.js";
+import { guardNoNetwork } from "./no-network.js";
+
+guardNoNetwork();
 
 const body = new TextEncoder().encode('{"latest":"22.11.0"}');
 const sha = sha256Hex('{"latest":"22.11.0"}');

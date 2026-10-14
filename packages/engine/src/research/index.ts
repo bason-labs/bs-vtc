@@ -27,14 +27,16 @@ export {
 export { htmlToMarkdown } from "./html.js";
 export {
   cachedFetch,
+  HTTP_GUARD_ERROR_NAME,
   RESEARCH_HTTP_LIMITS,
   type CachedFetchContext,
   type CachedFetchSpec,
   type StoredBody,
 } from "./http-fetch.js";
-export { robotsAllows } from "./robots.js";
+export { robotsAllows, robotsPatternMatches } from "./robots.js";
 export {
   createResearchService,
+  SEARCH_NOT_A_SOURCE,
   type G2Facts,
   type ResearchEventDraft,
   type ResearchService,

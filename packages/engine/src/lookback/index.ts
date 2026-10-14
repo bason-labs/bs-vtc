@@ -3,7 +3,9 @@
  * `core/index.ts` and the gates only through the `GateRunner` interface. The daemon calls
  * {@link lookbackAtRunEnd} at `run.finished`, {@link selectPromptVersion} before each dispatch,
  * {@link evaluateCanaries} as canary dispatches end, and {@link checkProposal} when the lookback
- * role submits; replays run as `lookback_replay` dispatches it plans with {@link planReplayTrials}.
+ * role submits; replays run as `lookback_replay` dispatches it plans with {@link planReplayTrials},
+ * reading the A/A noise floor with {@link cachedAaFlipRate} and keeping a measured one with
+ * {@link recordAaFlipRate}.
  * Human promotion is the cli's `vtc lookback approve|pin|rollback`, never an MCP tool.
  */
 export {
@@ -12,6 +14,8 @@ export {
   attributionsPath,
   failureSignals,
   humanLabels,
+  isRoleFailure,
+  isTrainFailure,
   readAttributions,
   RULES_UPSTREAM_FIRST,
   tiebreakAttribution,
@@ -48,6 +52,7 @@ export {
   finishReplay,
   gradeTrial,
   planReplayTrials,
+  recordAaFlipRate,
   replayDispatchPlan,
   REPLAY_MAX_TASKS,
   replayPath,
@@ -71,6 +76,8 @@ export {
   sameTarget,
   targetKey,
   traceRef,
+  traceSlug,
+  traceSplit,
   type LockedShaFor,
   type Trace,
   type TraceEnd,

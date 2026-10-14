@@ -13,11 +13,13 @@ import {
   FactLookupResultSchema,
   FactProposeInputSchema,
   FactProposeResultSchema,
+  FactWaiverSchema,
   FETCHER_TTL_DAYS,
   FetchRequestSchema,
   ResearchFetchInputSchema,
   ResearchFetchResultSchema,
   ResearchScopeSchema,
+  redactSecrets,
   verifyFactLocator,
   type EventDataInput,
   type FactLocator,
@@ -61,6 +63,11 @@ export type ResearchEventDraft =
       readonly type: "fact.verified";
       readonly actor: "engine";
       readonly data: EventDataInput<"fact.verified">;
+    }
+  | {
+      readonly type: "fact.waived";
+      readonly actor: "engine";
+      readonly data: EventDataInput<"fact.waived">;
     };
 
 export interface ResearchServiceDeps {
@@ -96,10 +103,18 @@ export interface ResearchService {
   factLookup(input: unknown): Promise<FactLookupResult>;
   /** `fact_propose`: fetches the source, verifies the locator and records the row. */
   factPropose(input: unknown, recordedBy: RoleId): Promise<FactProposeResult>;
-  /** Before G2: re-fetches stale facts, then lists every fact and claim G2 blocks on. */
+  /**
+   * Before G2: re-fetches stale facts, re-checks every verified row against the cache (the file is
+   * git-tracked, so the engine trusts no recorded status it cannot reproduce), then lists every
+   * fact and claim G2 blocks on.
+   */
   g2Facts(documents: readonly ResearchDocument[]): Promise<G2Facts>;
-  /** After an approval: a `waived` row for each waived fact row (claims have no row). */
-  recordWaivers(waivers: readonly FactWaiver[]): Promise<FactRow[]>;
+  /**
+   * After an approval: emits `fact.waived` (id and reason) for each waiver and returns them. A
+   * waiver covers the one G2 it was given at: nothing is written to `facts.jsonl`, so the next G2
+   * lists the fact again unless it verifies by then.
+   */
+  recordWaivers(waivers: readonly FactWaiver[]): Promise<FactWaiver[]>;
 }
 
 const DAY_MS = 86_400_000;
@@ -108,6 +123,10 @@ const DAY_MS = 86_400_000;
 export const NO_HTTP_DETAIL = "no HTTP client: research fetchers are unavailable";
 const NO_HTTP: HttpClient = { request: () => Promise.reject(new Error(NO_HTTP_DETAIL)) };
 const LOOKUP_MAX = 50;
+
+/** Why a fact from the `search` fetcher stays unverified (spec §10: a snippet is not the source). */
+export const SEARCH_NOT_A_SOURCE =
+  "a search result is a snippet, not the source: cite the page itself";
 
 const clip = (text: string, max: number): string =>
   text.length > max ? `${text.slice(0, max - 1)}…` : text;
@@ -169,6 +188,7 @@ export const createResearchService = (deps: ResearchServiceDeps): ResearchServic
     if (result.status !== "ok" || body === undefined) {
       return { status: "unverified", reason: `the source could not be fetched (${result.status})` };
     }
+    if (result.fetcher === "search") return { status: "unverified", reason: SEARCH_NOT_A_SOURCE };
     const check = verifyFactLocator(locator, new TextDecoder().decode(body), value);
     if (!check.ok) return { status: "unverified", reason: check.reason };
     if (result.cache === "stale") return { status: "stale", reason: "the source was served stale" };
@@ -324,16 +344,43 @@ export const createResearchService = (deps: ResearchServiceDeps): ResearchServic
     };
   };
 
-  /** Why a listed fact is not verified, for the G2 screen. */
-  const reasonFor = async (row: FactRow): Promise<string> => {
-    if (row.status === "conflicting") return "sources disagree on the value";
-    if (row.status === "stale")
-      return "the source is past its freshness window and could not be re-fetched";
-    if (row.source === null) return "no source";
+  /** Whether a row's locator resolves in the cached blob it names, in this scope, right now. */
+  const verifiesNow = async (
+    row: FactRow,
+  ): Promise<{ readonly ok: true } | { readonly ok: false; readonly reason: string }> => {
+    if (row.source === null) return { ok: false, reason: "no source" };
+    if (row.source.fetcher === "search") return { ok: false, reason: SEARCH_NOT_A_SOURCE };
     const body = await deps.cache.blob(scope, row.source.content_sha256);
-    if (body === undefined) return "the cited source is not in this machine's cache";
-    const check = verifyFactLocator(row.source.locator, new TextDecoder().decode(body), row.value);
-    return check.ok ? "recorded as unverified" : check.reason;
+    if (body === undefined)
+      return { ok: false, reason: "the cited source is not in this machine's cache" };
+    return verifyFactLocator(row.source.locator, new TextDecoder().decode(body), row.value);
+  };
+
+  /** Why G2 lists a fact row (status and reason), or `undefined` when it verifies. */
+  const listing = async (
+    row: FactRow,
+  ): Promise<{ status: UnverifiedFactSummary["status"]; reason: string } | undefined> => {
+    if (row.status === "conflicting")
+      return { status: row.status, reason: "sources disagree on the value" };
+    if (row.status === "stale") {
+      return {
+        status: row.status,
+        reason: "the source is past its freshness window and could not be re-fetched",
+      };
+    }
+    const check = await verifiesNow(row);
+    if (row.status === "unverified")
+      return { status: row.status, reason: check.ok ? "recorded as unverified" : check.reason };
+    if (check.ok) return undefined;
+    // `verified` or `waived` rows: the file is git-tracked, so a recorded status counts only when
+    // the engine can reproduce it; a waiver covers one G2 only.
+    return {
+      status: "unverified",
+      reason:
+        row.status === "waived"
+          ? `waived at an earlier G2 (a waiver covers one G2): ${check.reason}`
+          : `recorded verified but does not verify against the cache: ${check.reason}`,
+    };
   };
 
   return {
@@ -391,49 +438,54 @@ export const createResearchService = (deps: ResearchServiceDeps): ResearchServic
         refreshed.length === 0 ? before : currentFacts((await readFactRows(deps.projectRoot)).rows);
       const facts: UnverifiedFactSummary[] = [];
       for (const row of after) {
-        if (row.status !== "unverified" && row.status !== "stale" && row.status !== "conflicting")
-          continue;
+        const listed = await listing(row);
+        if (listed === undefined) continue;
         facts.push({
           id: row.id,
-          subject: row.subject,
+          subject: clip(row.subject, 300),
           predicate: row.predicate,
-          status: row.status,
-          reason: clip(await reasonFor(row), 500),
+          status: listed.status,
+          reason: clip(listed.reason, 500),
           ...(row.source === null ? {} : { source_url: row.source.url }),
         });
       }
       const listed = new Set(facts.map((f) => f.id));
-      for (const claim of scanResearchClaims(documents)) {
+      const known = new Set(after.map((row) => row.id));
+      for (const claim of scanResearchClaims(documents, known)) {
         if (listed.has(claim.id)) continue;
         listed.add(claim.id);
+        const where = `${claim.path}:${String(claim.line)}`;
+        let reason: string;
+        if (claim.kind === "unverified_tag") reason = `an UNVERIFIED: tag at ${where}`;
+        else if (claim.unknownFacts !== undefined)
+          reason = `a version, licence, CVE or EOL claim that cites unknown fact ${claim.unknownFacts.join(", ")} at ${where}`;
+        else reason = `a version, licence, CVE or EOL claim that cites no fact at ${where}`;
         facts.push({
           id: claim.id,
           subject: claim.text,
           predicate: claim.kind === "unverified_tag" ? "unverified_claim" : "uncited_claim",
           status: "unverified",
-          reason: clip(
-            claim.kind === "unverified_tag"
-              ? `an UNVERIFIED: tag at ${claim.path}:${String(claim.line)}`
-              : `a version, licence, CVE or EOL claim that cites no fact at ${claim.path}:${String(claim.line)}`,
-            500,
-          ),
+          reason: clip(reason, 500),
         });
       }
       return { unverified_facts: facts.map((f) => f.id), facts };
     },
 
     async recordWaivers(waivers) {
-      const current = new Map(
-        currentFacts((await readFactRows(deps.projectRoot)).rows).map((r) => [r.id, r]),
-      );
-      const at = now().toISOString();
-      const rows: FactRow[] = [];
-      for (const waiver of waivers) {
-        const row = current.get(waiver.id);
-        if (row === undefined || row.status === "waived") continue;
-        rows.push({ ...row, status: "waived", recorded_by: "engine", recorded_at: at });
+      const recorded: FactWaiver[] = [];
+      const seen = new Set<string>();
+      for (const raw of waivers) {
+        const waiver = FactWaiverSchema.parse(raw);
+        if (seen.has(waiver.id)) continue;
+        seen.add(waiver.id);
+        const data: FactWaiver = {
+          id: waiver.id,
+          reason: redactSecrets(waiver.reason, knownValues()),
+        };
+        await emit({ type: "fact.waived", actor: "engine", data });
+        recorded.push(data);
       }
-      return rows.length === 0 ? [] : record(rows);
+      return recorded;
     },
   };
 };

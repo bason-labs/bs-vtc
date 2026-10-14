@@ -2,8 +2,8 @@ import {
   canaryArmFor,
   LookbackPinsSchema,
   ReplayResultSchema,
-  splitForTrace,
   validateEventData,
+  type Attribution,
   type GateReport,
   type GateRunner,
   type GateRunRequest,
@@ -24,9 +24,11 @@ import {
   pinsPath,
   planReplayTrials,
   promptVersionRef,
+  recordAaFlipRate,
   replayDispatchPlan,
   replayTasks,
   tokensDeltaPct,
+  traceSplit,
   writeReplayResult,
   type ReplayTask,
 } from "../../src/lookback/index.js";
@@ -52,14 +54,14 @@ const heldOutAction = (skip: number): string => {
   let seen = 0;
   for (let i = 1; i < 1000; i += 1) {
     const id = `act-${String(i)}`;
-    if (splitForTrace(id) === "holdout" && seen++ === skip) return id;
+    if (traceSplit({ run: "r1", trace: id }) === "holdout" && seen++ === skip) return id;
   }
   throw new Error("none");
 };
 
 const trainAction = (): string => {
   for (let i = 1; i < 1000; i += 1)
-    if (splitForTrace(`act-${String(i)}`) === "train") return `act-${String(i)}`;
+    if (traceSplit({ run: "r1", trace: `act-${String(i)}` }) === "train") return `act-${String(i)}`;
   throw new Error("none");
 };
 
@@ -72,17 +74,28 @@ describe("replay harness (AD-21 rule 6)", () => {
     log.dispatch("engineer", { task: "T-1", action: failing });
     log.dispatch("engineer", { task: "T-2", action: passing });
     log.dispatch("engineer", { task: "T-3", action: train });
+    const failure = (trace: string, blamed: string | null): Attribution =>
+      ({
+        run: "r1",
+        trace,
+        outcome: "failure",
+        blamed_role: blamed,
+        prompt: baseline,
+      }) as Attribution;
+    const unknown = heldOutAction(2);
+    log.dispatch("engineer", { task: "T-4", action: unknown });
+    const attributions = [
+      failure(failing, "engineer"),
+      failure(train, "engineer"),
+      // An AI tiebreak that blamed nobody: not a failure of this version, so a regression task.
+      failure(unknown, null),
+    ];
     const traces = buildTraces(log.events, lockedShaFor);
-    const attributions = [failing, train].map(
-      (trace) =>
-        ({ run: "r1", trace, outcome: "failure" }) as Parameters<
-          typeof replayTasks
-        >[0]["attributions"][number],
-    );
     const tasks = replayTasks({ baseline, traces, attributions });
     expect(tasks.map((t) => [t.task, t.regressionSet])).toEqual([
       ["T-1", false],
       ["T-2", true],
+      ["T-4", true],
     ]);
   });
 
@@ -161,7 +174,8 @@ describe("replay harness (AD-21 rule 6)", () => {
     expect(costly.verdict).toBe("inconclusive");
 
     const root = await tempDir("replay");
-    expect(await cachedAaFlipRate(root, baseline, BUNDLE)).toBeUndefined();
+    const home = await tempDir("home");
+    expect(await cachedAaFlipRate(home, baseline, BUNDLE)).toBeUndefined();
     const event = await writeReplayResult(root, result);
     expect(event).toMatchObject({
       type: "lookback.replay_finished",
@@ -173,8 +187,19 @@ describe("replay harness (AD-21 rule 6)", () => {
         JSON.parse(await readFile(join(root, ".vtc/lookback/replays/p-1.json"), "utf8")),
       ),
     ).toEqual(result);
-    expect(await cachedAaFlipRate(root, baseline, BUNDLE)).toBe(0.1);
-    expect(await cachedAaFlipRate(root, baseline, "8".repeat(64))).toBeUndefined();
+    // A replay file in the repo is git-tracked and role-writable: never a source of the floor.
+    await writeReplayResult(root, { ...result, proposal: "p-planted", aa_flip_rate: 0.9 });
+    expect(await cachedAaFlipRate(home, baseline, BUNDLE)).toBeUndefined();
+    await recordAaFlipRate({
+      vtcHome: home,
+      baseline,
+      graderBundleSha: BUNDLE,
+      aaFlipRate: 0.1,
+      now,
+    });
+    expect(await cachedAaFlipRate(home, baseline, BUNDLE)).toBe(0.1);
+    expect(await cachedAaFlipRate(home, baseline, "8".repeat(64))).toBeUndefined();
+    expect(await cachedAaFlipRate(home, candidate, BUNDLE)).toBeUndefined();
   });
 });
 
@@ -201,8 +226,19 @@ describe("canaries (AD-21 rule 7)", () => {
     await writeFile(pinsPath(home), toYaml(LookbackPinsSchema.parse(pins)));
   };
 
-  /** A run where every task's dispatch records its arm; `candidateTokens` per candidate dispatch. */
-  const canaryRun = (perArm: number, candidateTokens: number, escalateCandidate = 0): RunLog => {
+  /**
+   * A run where every task's dispatch records its arm; `candidateTokens` per candidate dispatch;
+   * the first `escalate[arm]` tasks of an arm escalate and the first `cap[arm]` park on the cap.
+   */
+  const canaryRun = (
+    perArm: number,
+    candidateTokens: number,
+    escalateCandidate = 0,
+    more: {
+      escalate?: { candidate?: number; baseline?: number };
+      cap?: { candidate?: number; baseline?: number };
+    } = {},
+  ): RunLog => {
     const log = new RunLog();
     let n = 0;
     const counts = { candidate: 0, baseline: 0 };
@@ -223,6 +259,8 @@ describe("canaries (AD-21 rule 7)", () => {
         ...(prompt === undefined ? {} : { prompt }),
       });
       if (arm === "candidate" && counts.candidate <= escalateCandidate) log.escalate(task);
+      if (counts[arm] <= (more.escalate?.[arm] ?? 0)) log.escalate(task);
+      if (counts[arm] <= (more.cap?.[arm] ?? 0)) log.status(task, "fixing", "parked", 4, "cap");
     }
     expect(n).toBe(perArm * 2);
     return log;
@@ -275,6 +313,41 @@ describe("canaries (AD-21 rule 7)", () => {
     expect(
       (await evaluateCanaries({ vtcHome: home, repoKey: REPO, events: [], now })).states,
     ).toEqual([]);
+  });
+
+  it("counts cap hits and rolls back when escalations plus cap hits reach 2x the baseline", async () => {
+    const home = await tempDir("home");
+    await writeCanary(home);
+    const log = canaryRun(5, 1000, 0, {
+      escalate: { candidate: 1, baseline: 1 },
+      cap: { candidate: 1 },
+    });
+    const result = await evaluateCanaries({
+      vtcHome: home,
+      repoKey: REPO,
+      events: log.events,
+      now,
+    });
+    expect(result.states[0]).toMatchObject({
+      arms: {
+        candidate: { dispatches: 5, escalations: 1, cap_hits: 1 },
+        baseline: { dispatches: 5, escalations: 1, cap_hits: 0 },
+      },
+      verdict: "rollback",
+      reason: "escalations and cap hits at 2x the baseline or more",
+    });
+    expect(result.events.map((e) => e.type)).toEqual([
+      "lookback.canary_evaluated",
+      "lookback.rolled_back",
+    ]);
+
+    // Below 2x (the same rate in both arms) it keeps running.
+    await writeCanary(home);
+    const even = canaryRun(5, 1000, 0, { cap: { candidate: 1, baseline: 1 } });
+    expect(
+      (await evaluateCanaries({ vtcHome: home, repoKey: REPO, events: even.events, now })).states[0]
+        ?.verdict,
+    ).toBe("continue");
   });
 
   it("rolls back at once on a human regression flag", async () => {

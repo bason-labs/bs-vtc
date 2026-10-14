@@ -1,4 +1,4 @@
-import { AttributionSchema, LOOKBACK_REPO, splitForTrace } from "@vtc/shared";
+import { AttributionSchema, LOOKBACK_REPO } from "@vtc/shared";
 import { readFile } from "node:fs/promises";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
@@ -9,6 +9,7 @@ import {
   readAttributions,
   tiebreakAttribution,
   traceRef,
+  traceSplit,
   TREE_CONFIDENCE,
 } from "../../src/lookback/index.js";
 import { EFFECTIVE, EDITABLE_SHA, HOST, LOCKED_SHA, lockedShaFor, RunLog, tempDir } from "./log.js";
@@ -55,7 +56,7 @@ describe("the attribution tree (§13)", () => {
       method: "tree",
       rule: "test_fails",
       confidence: TREE_CONFIDENCE.single,
-      split: splitForTrace(eng),
+      split: traceSplit({ run: "r1", trace: eng }),
       task: "T-1",
     });
     expect(() => AttributionSchema.parse(attributions[0])).not.toThrow();
@@ -66,12 +67,54 @@ describe("the attribution tree (§13)", () => {
     const qa = log.dispatch("qa", { task: "T-1" });
     log.dispatch("engineer", { task: "T-1" });
     log.gate("T-1", true);
-    log.finding("T-1", "patch");
+    log.finding("T-1", "patch", { category: "correctness" });
     const { attributions } = attribute(log);
     expect(attributions[0]).toMatchObject({
       trace: qa,
       blamed_role: "qa",
       secondary_role: "engineer",
+      rule: "test_passes_behaviour_wrong",
+    });
+  });
+
+  it("blames the Engineer for a reviewer's patch finding when the gate failed, never ran, or it is not about behaviour", () => {
+    const failed = new RunLog();
+    failed.dispatch("qa", { task: "T-1" });
+    const eng = failed.dispatch("engineer", { task: "T-1" });
+    failed.gate("T-1", false);
+    failed.finding("T-1", "patch", { category: "maintainability" });
+    failed.finding("T-1", "patch", { category: "correctness" });
+    expect(attribute(failed).attributions).toEqual([
+      expect.objectContaining({
+        trace: eng,
+        blamed_role: "engineer",
+        rule: "test_fails",
+        confidence: TREE_CONFIDENCE.single,
+      }),
+    ]);
+
+    const ungated = new RunLog();
+    ungated.dispatch("qa", { task: "T-1" });
+    const eng2 = ungated.dispatch("engineer", { task: "T-1" });
+    ungated.finding("T-1", "patch", { category: "correctness" });
+    expect(attribute(ungated).attributions[0]).toMatchObject({ trace: eng2, rule: "test_fails" });
+
+    const style = new RunLog();
+    style.dispatch("qa", { task: "T-1" });
+    const eng3 = style.dispatch("engineer", { task: "T-1" });
+    style.gate("T-1", true);
+    for (const category of ["maintainability", "docs", "performance"])
+      style.finding("T-1", "patch", { category });
+    expect(attribute(style).attributions[0]).toMatchObject({ trace: eng3, rule: "test_fails" });
+  });
+
+  it("blames QA for a test_defect finding whatever its route", () => {
+    const log = new RunLog();
+    const qa = log.dispatch("qa", { task: "T-1" });
+    log.dispatch("engineer", { task: "T-1" });
+    log.finding("T-1", "patch", { kind: "test_defect", category: "test_integrity" });
+    expect(attribute(log).attributions[0]).toMatchObject({
+      trace: qa,
       rule: "test_passes_behaviour_wrong",
     });
   });
@@ -128,6 +171,23 @@ describe("the attribution tree (§13)", () => {
     none.gate("T-1", false);
     none.escalate("T-1", "none");
     expect(attribute(none).attributions).toEqual([]);
+  });
+
+  it("treats a labelled escalation as a failure of its own, at task or run scope", () => {
+    const task = new RunLog();
+    const qa = task.dispatch("qa", { task: "T-1" });
+    task.dispatch("engineer", { task: "T-1" });
+    task.escalate("T-1", "qa", "spec_question");
+    expect(attribute(task).attributions).toEqual([
+      expect.objectContaining({ trace: qa, blamed_role: "qa", method: "human" }),
+    ]);
+
+    const run = new RunLog();
+    const ba = run.dispatch("ba");
+    run.escalate(null, "ba", "spec_question");
+    expect(attribute(run).attributions).toEqual([
+      expect.objectContaining({ trace: ba, blamed_role: "ba", method: "human" }),
+    ]);
   });
 
   it("returns a cap park with no signal as inconclusive, for an AI tiebreak", () => {
