@@ -10,8 +10,8 @@
  * installation pushing the shared branch is not a VTC defect. The opt-outs are checked again
  * right before the evidence branch is pushed (`beforePublish`).
  */
-import { copyFileSync, existsSync, mkdirSync, readFileSync, statSync } from "node:fs";
-import { join } from "node:path";
+import { existsSync, mkdirSync, realpathSync, statSync } from "node:fs";
+import { dirname, join, relative, isAbsolute } from "node:path";
 import {
   EVIDENCE_LIMITS,
   EvidenceFileNameSchema,
@@ -29,9 +29,15 @@ import {
   type GitPlumbing,
 } from "@vtc/shared";
 import type { RemoteRefs } from "../remote-refs.js";
+import { createExclusive, readRegularFileNoFollow } from "../safe-fs.js";
 import { isAutomationSkip } from "../skip.js";
 import { makeGif, type FfmpegCommand } from "./gif.js";
-import { attachmentsFor, publishToEvidenceBranch, renderEvidenceSection } from "./hosting.js";
+import {
+  attachmentsFor,
+  publishToEvidenceBranch,
+  renderEvidenceSection,
+  type MissingEvidence,
+} from "./hosting.js";
 import {
   applyEvidenceBudget,
   buildManifest,
@@ -76,12 +82,19 @@ export interface EvidenceRequest {
   };
   /** Non-UI fixes: the gate report to render and screenshot. */
   readonly gateReport?: GateReport | undefined;
-  /** UI changes: the visual gate's redacted before/after PNGs (absolute paths). */
+  /**
+   * UI changes: the visual gate's redacted before/after PNGs (absolute paths, inside `shotsRoot`).
+   * They live in the project checkout, where a role could plant a symlink, so each is read
+   * `O_NOFOLLOW`, must be a regular PNG file within `EVIDENCE_LIMITS.maxPngBytes`, and its
+   * directory must resolve inside `shotsRoot`; any other is left out (the set goes partial).
+   */
   readonly uiShots?: readonly {
     readonly before: string;
     readonly after: string;
     readonly label: string;
   }[];
+  /** The checkout the UI shots come from; without it no UI shot is read. */
+  readonly shotsRoot?: string | undefined;
   /** `visual.redact_selectors` of the project. */
   readonly redactSelectors?: readonly string[];
   /** Known secret values (redacted from the snapshot, refused on screen). */
@@ -175,6 +188,34 @@ const twice = async <T>(step: () => Promise<T>): Promise<T | null> => {
   return null;
 };
 
+/** The PNG signature. */
+const PNG_MAGIC = [0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a];
+
+const isPng = (bytes: Uint8Array): boolean => PNG_MAGIC.every((b, i) => bytes[i] === b);
+
+/** A name a recorder returns for a file in its output directory: one plain segment. */
+const PLAIN_NAME = /^[A-Za-z0-9][A-Za-z0-9._-]{0,80}$/;
+
+/** Whether `path`'s directory resolves inside `root` (both through their real paths). */
+const insideRoot = (path: string, root: string): boolean => {
+  try {
+    const rel = relative(realpathSync(root), realpathSync(dirname(path)));
+    return rel === "" || (!rel.startsWith("..") && !isAbsolute(rel));
+  } catch {
+    return false;
+  }
+};
+
+/**
+ * A UI shot's bytes when it is safe to publish: inside `root`, a regular PNG file (never through
+ * a symlink) within the PNG budget; else `null`.
+ */
+const readUiShot = (path: string, root: string | undefined): Uint8Array | null => {
+  if (root === undefined || !isAbsolute(path) || !insideRoot(path, root)) return null;
+  const bytes = readRegularFileNoFollow(path, EVIDENCE_LIMITS.maxPngBytes);
+  return bytes !== null && isPng(bytes) ? bytes : null;
+};
+
 const nextName = (files: readonly EvidenceFile[], slug: string, ext: string): string => {
   const used = files.map((f) => Number(f.name.slice(0, 2)));
   const n = Math.max(0, ...used) + 1;
@@ -197,7 +238,10 @@ export const prepareEvidence = async (
         report: gateReport,
         outDir: reportDir,
       });
-      return new Uint8Array(readFileSync(join(reportDir, html)));
+      if (!PLAIN_NAME.test(html)) throw new Error("the gate report name is not a plain file name");
+      const bytes = readRegularFileNoFollow(join(reportDir, html), EVIDENCE_LIMITS.maxBytesPerPr);
+      if (bytes === null) throw new Error("the gate report is not a readable file");
+      return bytes;
     });
     if (page === null) return { ok: false, detail: "the gate report did not render (2 tries)" };
     pages[GATE_REPORT_PAGE] = page;
@@ -235,17 +279,18 @@ export const prepareEvidence = async (
         ["ui_before", shot.before],
         ["ui_after", shot.after],
       ] as const) {
-        if (!existsSync(source)) continue;
+        const bytes = readUiShot(source, request.shotsRoot);
+        if (bytes === null) continue;
         const slug = `${kind === "ui_before" ? "ui-before" : "ui-after"}-${shot.label
           .toLowerCase()
           .replace(/[^a-z0-9-]+/g, "-")
           .slice(0, 30)}`;
         const name = nextName(files, slug, "png");
-        copyFileSync(source, join(stagingDir, name));
+        if (!createExclusive(join(stagingDir, name), bytes)) continue;
         files.push({
           name,
           kind,
-          bytes: statSync(join(stagingDir, name)).size,
+          bytes: bytes.length,
           alt: `${ALT[kind]} (${shot.label})`,
         });
       }
@@ -270,7 +315,21 @@ export const prepareEvidence = async (
       detail: `no evidence file was captured (${String(captured.reasons.length)} failed shot(s))`,
     };
   }
-  const complete = evidenceComplete(kept, requiredEvidenceKinds(request.plan, deps.hosting));
+  const required = requiredEvidenceKinds(request.plan, deps.hosting);
+  const complete = evidenceComplete(kept, required);
+  const missing: MissingEvidence[] = required
+    .filter((kind) => !kept.some((f) => f.kind === kind))
+    .map((kind) => ({
+      kind,
+      reason: files.some((f) => f.kind === kind)
+        ? "budget"
+        : request.plan.video === false &&
+            (kind === "replay_video" || kind === "flow_video" || kind === "replay_gif")
+          ? "video_off"
+          : kind === "replay_gif" && (!deps.ffmpeg || deps.ffmpegCommand === undefined)
+            ? "no_ffmpeg"
+            : "not_captured",
+    }));
   let urls: Map<string, string> | undefined;
   if (deps.hosting === "branch") {
     const plumbing = deps.plumbing;
@@ -316,6 +375,7 @@ export const prepareEvidence = async (
       files: kept,
       ...(urls === undefined ? {} : { urls }),
       partial: !complete,
+      missing,
     }),
     attach: attachmentsFor(deps.hosting, kept),
     partial: !complete,

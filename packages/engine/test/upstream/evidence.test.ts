@@ -33,6 +33,20 @@ import { fakeAssets, fakePlumbing, fakeRecorder, fakeRemoteRefs } from "./fakes.
 
 afterEach(cleanupDirs);
 
+/** A file with the PNG signature and `body` after it. */
+const png = (body: string): Uint8Array =>
+  new Uint8Array([
+    0x89,
+    0x50,
+    0x4e,
+    0x47,
+    0x0d,
+    0x0a,
+    0x1a,
+    0x0a,
+    ...new TextEncoder().encode(body),
+  ]);
+
 const FP = "0123456789abcdef";
 
 const get = (
@@ -598,15 +612,19 @@ describe("prepareEvidence", () => {
 
   it("copies the visual gate's before/after for UI changes, never for upstream-safe ones", async () => {
     const shots = tempDir();
-    writeFileSync(join(shots, "before.png"), "b");
-    writeFileSync(join(shots, "after.png"), "a");
+    writeFileSync(join(shots, "before.png"), png("b"));
+    writeFileSync(join(shots, "after.png"), png("a"));
     const uiShots = [
       { before: join(shots, "before.png"), after: join(shots, "after.png"), label: "Desktop 1280" },
     ];
     const staging = tempDir();
     const ui = await prepareEvidence(
       staging,
-      request({ plan: { run: "R1", upstreamSafe: false, change: "ui", flowPath: "/x" }, uiShots }),
+      request({
+        plan: { run: "R1", upstreamSafe: false, change: "ui", flowPath: "/x" },
+        uiShots,
+        shotsRoot: shots,
+      }),
       {
         recorder: fakeRecorder(),
         assets: fakeAssets(),
@@ -623,10 +641,14 @@ describe("prepareEvidence", () => {
       "04-ui-before-desktop-1280.png",
       "05-ui-after-desktop-1280.png",
     ]);
-    expect(statSync(join(staging, "04-ui-before-desktop-1280.png")).size).toBe(1);
+    expect(statSync(join(staging, "04-ui-before-desktop-1280.png")).size).toBe(png("b").length);
     const upstream = await prepareEvidence(
       tempDir(),
-      request({ plan: { upstreamSafe: true, change: "ui", flowPath: "/x" }, uiShots }),
+      request({
+        plan: { upstreamSafe: true, change: "ui", flowPath: "/x" },
+        uiShots,
+        shotsRoot: shots,
+      }),
       {
         recorder: fakeRecorder(),
         assets: fakeAssets(),
@@ -639,5 +661,101 @@ describe("prepareEvidence", () => {
       "replay_video",
       "screenshot",
     ]);
+  });
+
+  it("never publishes a planted symlink, a non-PNG or a shot outside the checkout as a UI shot", async () => {
+    const checkout = tempDir("vtc-checkout-");
+    const outside = tempDir("vtc-outside-");
+    writeFileSync(join(outside, "id_ed25519"), "-----BEGIN OPENSSH PRIVATE KEY-----");
+    writeFileSync(join(outside, "photo.png"), png("private"));
+    const evidence = join(checkout, ".vtc", "evidence", "visual");
+    mkdirSync(evidence, { recursive: true });
+    // A symlink at the shot path, a text file named .png, a symlinked directory, a real PNG
+    // outside the checkout, and one good shot.
+    symlinkSync(join(outside, "id_ed25519"), join(evidence, "before.png"));
+    writeFileSync(join(evidence, "after.png"), "not a png");
+    symlinkSync(outside, join(checkout, ".vtc", "evidence", "linked"));
+    writeFileSync(join(evidence, "good.png"), png("good"));
+    const staging = tempDir();
+    const outcome = await prepareEvidence(
+      staging,
+      request({
+        plan: { run: "R1", upstreamSafe: false, change: "ui" },
+        shotsRoot: checkout,
+        uiShots: [
+          { before: join(evidence, "before.png"), after: join(evidence, "after.png"), label: "a" },
+          {
+            before: join(checkout, ".vtc", "evidence", "linked", "photo.png"),
+            after: join(outside, "photo.png"),
+            label: "b",
+          },
+          { before: join(evidence, "good.png"), after: join(evidence, "missing.png"), label: "c" },
+        ],
+      }),
+      {
+        recorder: fakeRecorder(),
+        assets: fakeAssets(),
+        hosting: "attach",
+        ffmpeg: false,
+        now: () => new Date(),
+      },
+    );
+    expect(outcome.ok).toBe(true);
+    const names = outcome.ok ? outcome.manifest.files.map((f) => f.name) : [];
+    expect(names.filter((n) => n.includes("ui-"))).toEqual(["03-ui-before-c.png"]);
+    for (const name of readdirSync(staging)) {
+      expect(readFileSync(join(staging, name), "utf8")).not.toContain("PRIVATE KEY");
+      expect(readFileSync(join(staging, name), "utf8")).not.toContain("private");
+    }
+    // The set is partial, and the note names what is missing and why.
+    expect(outcome.ok && outcome.partial).toBe(true);
+    expect(outcome.ok ? outcome.section : "").toContain(
+      "no UI after screenshot (it could not be captured)",
+    );
+    expect(outcome.ok ? outcome.section : "").not.toContain("ffmpeg");
+  });
+
+  it("refuses a gate report name that is not a plain file name", async () => {
+    const outside = tempDir("vtc-outside-");
+    writeFileSync(join(outside, "secret.html"), "<html>secret</html>");
+    const inner = fakeRecorder();
+    const outcome = await prepareEvidence(tempDir(), request(), {
+      recorder: {
+        capture: (r) => inner.capture(r),
+        renderGateReport: () => Promise.resolve({ html: join("..", "..", outside, "secret.html") }),
+      },
+      assets: fakeAssets(),
+      hosting: "attach",
+      ffmpeg: false,
+      now: () => new Date(),
+    });
+    expect(outcome).toEqual({ ok: false, detail: "the gate report did not render (2 tries)" });
+  });
+
+  it("names the missing kinds in the partial note: recordings off, no ffmpeg, the budget", () => {
+    const files = [
+      { name: "01-final-state.png", kind: "screenshot" as const, bytes: 1, alt: "Final" },
+    ];
+    const off = renderEvidenceSection({
+      hosting: "attach",
+      files,
+      partial: true,
+      missing: [{ kind: "replay_video", reason: "video_off" }],
+    });
+    expect(off).toContain(
+      "no replay recording (recordings are off in `automation.evidence.video`)",
+    );
+    expect(off).not.toContain("ffmpeg");
+    const gif = renderEvidenceSection({
+      hosting: "branch",
+      files,
+      partial: true,
+      missing: [
+        { kind: "replay_gif", reason: "no_ffmpeg" },
+        { kind: "chart", reason: "budget" },
+      ],
+    });
+    expect(gif).toContain("no inline motion preview (install ffmpeg for GIF previews)");
+    expect(gif).toContain("no chart (left out to stay within the evidence size budget)");
   });
 });

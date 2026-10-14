@@ -7,6 +7,7 @@
  * The list → decide → write sequence of a target repo runs under a lock file in VTC's home, so the
  * daemons of several projects reporting to the same repo never race each other.
  */
+import { mkdirSync } from "node:fs";
 import { join } from "node:path";
 import {
   AUTO_LABELS,
@@ -65,6 +66,8 @@ import {
   assertUpstreamSafe,
   projectDenylist,
   projectUpstreamReport,
+  redactProjectText,
+  selfDenylist,
   type ProjectIdentity,
 } from "./privacy.js";
 import { buildLookbackPr, UPSTREAM_EVIDENCE_ROUTE } from "./lookback-pr.js";
@@ -298,6 +301,12 @@ export const createUpstream = (deps: UpstreamDeps): Upstream => {
   const repoOf = (target: "upstream" | "project", ctx: ProjectContext): GitHubRepo | null =>
     target === "upstream" ? deps.automation.upstream.repo : ctx.repo;
 
+  /** The engine's guard dir, created 0700 if the engine has not yet (the project ledger's root). */
+  const privateGuardDir = (): string => {
+    mkdirSync(deps.guardDir, { recursive: true, mode: 0o700 });
+    return deps.guardDir;
+  };
+
   const ledgerFor = (target: "upstream" | "project", ctx: ProjectContext): Ledger =>
     target === "upstream"
       ? openLedger(
@@ -306,9 +315,9 @@ export const createUpstream = (deps: UpstreamDeps): Upstream => {
           deps.vtcHome,
         )
       : openLedger(
-          ledgerPath({ kind: "project", repoRoot: ctx.repoRoot }),
+          ledgerPath({ kind: "project", guardDir: privateGuardDir() }),
           ctx.knownValues,
-          ctx.repoRoot,
+          deps.guardDir,
         );
 
   /** The opt-outs and controls; checked when an item is queued and again when it is sent. */
@@ -372,11 +381,24 @@ export const createUpstream = (deps: UpstreamDeps): Upstream => {
     }
   };
 
-  const privacyCheck = (ctx: ProjectContext) => ({
-    knownValues: ctx.knownValues,
-    denylist: projectDenylist(ctx.identity),
-    upstreamRepo: deps.automation.upstream.repo,
-  });
+  /**
+   * "VTC builds VTC" (spine §5 reading 208 (1)): the project is VTC's own repo, so its public
+   * identifiers are not project secrets in an upstream text or on screen.
+   */
+  const isSelf = (ctx: ProjectContext): boolean =>
+    ctx.repo === deps.automation.upstream.repo ||
+    (deps.automation.upstream.checkout !== undefined &&
+      ctx.repoRoot === deps.automation.upstream.checkout);
+
+  const privacyCheck = (ctx: ProjectContext) => {
+    const denylist = projectDenylist(ctx.identity);
+    const upstreamRepo = deps.automation.upstream.repo;
+    return {
+      knownValues: ctx.knownValues,
+      denylist: isSelf(ctx) ? selfDenylist(denylist, upstreamRepo) : denylist,
+      upstreamRepo,
+    };
+  };
 
   const disclosure = (host?: string, model?: string) => ({
     vtcVersion: deps.vtcVersion,
@@ -629,23 +651,27 @@ export const createUpstream = (deps: UpstreamDeps): Upstream => {
   };
 
   /**
-   * Commits `input.source.changes` on the default branch and pushes `vtc/auto/<kind>/<fp8>`
-   * without force. It first fetches every automatic branch (another
-   * installation may have pushed this one, or a human closed its PR and left it). When the branch
-   * exists (the open PR this one supersedes, or the fresh remote-tracking ref), the new commit
-   * descends from its head so the push is a fast-forward, and only when that head is VTC's: one
-   * this installation pushed (its ledger) or one carrying VTC's `Generated-by: VTC` trailer
-   * (another installation's). A branch whose head is anyone else's is left alone and the PR
-   * skipped.
+   * Where `vtc/auto/<kind>/<fp8>` stands and what VTC's next commit on it descends from. It first
+   * fetches every automatic branch (another installation may have pushed this one, or a human
+   * closed its PR and left it). When the branch exists (the open PR this one supersedes, or the
+   * fresh remote-tracking ref), the new commit descends from its head so the push is a
+   * fast-forward, and only when that head is VTC's: one this installation pushed (its ledger) or
+   * one carrying VTC's `Generated-by: VTC` trailer (another installation's). A branch whose head is
+   * anyone else's is left alone and the PR skipped (`duplicate`). Run once before any evidence is
+   * captured or published, and again right before the push.
    */
-  const commitAndPush = async (
+  const autoBranchState = async (
     input: AutoPrInput,
     repoRoot: string,
     base: string,
     at: { readonly repo: GitHubRepo; readonly ledger: Ledger; readonly open?: AutoPrRef },
-  ): Promise<GitSha> => {
+  ): Promise<{
+    readonly plumbing: ReturnType<NonNullable<AutomationDeps["plumbing"]>>;
+    readonly baseSha: GitSha;
+    readonly parents: GitSha[];
+    readonly dst: string;
+  }> => {
     const branch = autoBranchName(input.kind, input.fingerprint);
-    if ("pushedHead" in input.source) return input.source.pushedHead;
     const factory = deps.automation.plumbing;
     if (factory === undefined) throw new Error("no git plumbing was injected");
     const plumbing = factory({ repoRoot });
@@ -675,13 +701,30 @@ export const createUpstream = (deps: UpstreamDeps): Upstream => {
       }
       parents = [current, baseSha];
     }
-    const sha = await plumbing.commit({
-      base: baseSha,
-      parents,
+    return { plumbing, baseSha, parents, dst };
+  };
+
+  /**
+   * Commits `input.source.changes` on the default branch and pushes `vtc/auto/<kind>/<fp8>`
+   * without force, on VTC's own head of the branch ({@link autoBranchState}). `title` is the PR's
+   * title as checked (upstream) or redacted (project).
+   */
+  const commitAndPush = async (
+    input: AutoPrInput,
+    title: string,
+    repoRoot: string,
+    base: string,
+    at: { readonly repo: GitHubRepo; readonly ledger: Ledger; readonly open?: AutoPrRef },
+  ): Promise<GitSha> => {
+    if (!("changes" in input.source)) return input.source.pushedHead;
+    const state = await autoBranchState(input, repoRoot, base, at);
+    const sha = await state.plumbing.commit({
+      base: state.baseSha,
+      parents: state.parents,
       changes: input.source.changes,
-      message: `${renderTitle(input.kind, input.summary)}\n\nGenerated-by: VTC ${deps.vtcVersion}`,
+      message: `${title}\n\nGenerated-by: VTC ${deps.vtcVersion}`,
     });
-    await plumbing.push("origin", sha, dst);
+    await state.plumbing.push("origin", sha, state.dst);
     return sha;
   };
 
@@ -740,13 +783,35 @@ export const createUpstream = (deps: UpstreamDeps): Upstream => {
         ...(input.role === undefined ? {} : { role: input.role }),
       });
       if (early.action === "skip") throw new AutomationSkip(early.reason, early.detail);
+      const ledger = ledgerFor(input.target, ctx);
+      // AD-27 rule 4: a fingerprint a human muted is never raised again, as an issue or a PR.
+      const issueState = decideIssue({
+        fingerprint: input.fingerprint,
+        issues: await issues.listAutomatic(repo),
+        record: ledger.record(repo, input.fingerprint),
+        now: now(),
+        material: false,
+      });
+      if (issueState.action === "skip" && issueState.reason === "muted") {
+        throw new AutomationSkip("muted", `issue #${String(issueState.number)} is muted`);
+      }
       const template = loadAutoTemplate(deps.assets, "auto-pr");
-      const title = renderTitle(input.kind, input.summary);
+      // AD-27 rule 5: a project-repo PR may hold project details, but its title, slots and body
+      // still pass the shared redaction. An upstream PR is never redacted-and-sent: its texts are
+      // checked below and refused with `privacy` on any hit.
+      const clean = (text: string): string =>
+        upstream ? text : redactProjectText(text, ctx.knownValues);
+      const title = clean(renderTitle(input.kind, clean(input.summary)));
+      const slots: TemplateSlots = upstream
+        ? input.slots
+        : Object.fromEntries(
+            Object.entries(input.slots).map(([slot, text]) => [slot, clean(text)]),
+          );
       const check = privacyCheck(ctx);
       const branch = autoBranchName(input.kind, input.fingerprint);
       const bodyWith = (evidence: string, status: "complete" | "partial"): string =>
         renderBody(template, {
-          ...input.slots,
+          ...slots,
           marker: renderAutoMarker({
             v: 1,
             kind: input.kind,
@@ -787,7 +852,17 @@ export const createUpstream = (deps: UpstreamDeps): Upstream => {
         );
         assertNoProjectPaths(modelText);
       }
-      const ledger = ledgerFor(input.target, ctx);
+      const base = await defaultBranch(repo);
+      // The branch is checked before any evidence is captured or published, so a branch VTC
+      // must leave alone gets no media on the evidence branch either.
+      if ("changes" in input.source) {
+        const open = early.supersede.find((p) => p.headRefName === branch);
+        await autoBranchState(input, repoRoot, base, {
+          repo,
+          ledger,
+          ...(open === undefined ? {} : { open }),
+        });
+      }
       const hosting = deps.automation.hosting;
       return withStaging(async (staging) => {
         gate(input.target, "prs", ctx);
@@ -803,7 +878,9 @@ export const createUpstream = (deps: UpstreamDeps): Upstream => {
             plan,
             snapshot,
             gateReport: input.evidence.gateReport,
-            ...(input.evidence.uiShots === undefined ? {} : { uiShots: input.evidence.uiShots }),
+            ...(input.evidence.uiShots === undefined
+              ? {}
+              : { uiShots: input.evidence.uiShots, shotsRoot: repoRoot }),
             ...(ctx.redactSelectors === undefined ? {} : { redactSelectors: ctx.redactSelectors }),
             knownValues: ctx.knownValues,
             ...(upstream ? { denylist: check.denylist } : {}),
@@ -835,7 +912,7 @@ export const createUpstream = (deps: UpstreamDeps): Upstream => {
           throw new AutomationSkip("evidence_failed", evidence.detail);
         }
         const status = evidence.partial ? "partial" : "complete";
-        const body = bodyWith(evidence.section, status);
+        const body = clean(bodyWith(evidence.section, status));
         if (upstream && report !== undefined) assertUpstreamSafe(report, [body], check);
         const labels = [
           AUTO_LABELS.auto,
@@ -853,12 +930,11 @@ export const createUpstream = (deps: UpstreamDeps): Upstream => {
             ...(input.role === undefined ? {} : { role: input.role }),
           });
           if (cap.action === "skip") throw new AutomationSkip(cap.reason, cap.detail);
-          const base = await defaultBranch(repo);
           // The new head is pushed before the superseded PR is closed, so a refused push leaves
           // the older PR as it was.
           gate(input.target, "prs", ctx);
           const open = cap.supersede.find((p) => p.headRefName === branch);
-          const head = await commitAndPush(input, repoRoot, base, {
+          const head = await commitAndPush(input, title, repoRoot, base, {
             repo,
             ledger,
             ...(open === undefined ? {} : { open }),

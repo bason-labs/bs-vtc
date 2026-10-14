@@ -10,6 +10,7 @@ import { randomBytes } from "node:crypto";
 import {
   closeSync,
   constants,
+  fstatSync,
   lstatSync,
   mkdirSync,
   openSync,
@@ -22,6 +23,8 @@ import { basename, isAbsolute, join, relative, sep } from "node:path";
 
 /** `O_NOFOLLOW` where the platform has it (macOS, Linux; Windows has none). */
 const NOFOLLOW: number = (constants as Partial<typeof constants>).O_NOFOLLOW ?? 0;
+/** `O_NONBLOCK`, so opening a planted FIFO never blocks (it is then refused as not a file). */
+const NONBLOCK: number = (constants as Partial<typeof constants>).O_NONBLOCK ?? 0;
 
 const code = (error: unknown): string | undefined =>
   typeof error === "object" && error !== null && "code" in error ? String(error.code) : undefined;
@@ -116,8 +119,30 @@ export const readNoFollow = (path: string, what = "VTC state"): string | null =>
   }
 };
 
+/**
+ * The bytes of `path` when it is a regular file of at most `maxBytes`, opened `O_NOFOLLOW` (a
+ * symlink, a directory, a device or an oversized file gives `null`, as does a missing file). Used
+ * for files VTC publishes from a project checkout, where a role could plant a symlink.
+ */
+export const readRegularFileNoFollow = (path: string, maxBytes: number): Uint8Array | null => {
+  let fd: number;
+  try {
+    fd = openSync(path, constants.O_RDONLY | NOFOLLOW | NONBLOCK);
+  } catch {
+    return null;
+  }
+  try {
+    const stat = fstatSync(fd);
+    if (!stat.isFile() || stat.size > maxBytes) return null;
+    const bytes = new Uint8Array(readFileSync(fd));
+    return bytes.length > maxBytes ? null : bytes;
+  } finally {
+    closeSync(fd);
+  }
+};
+
 /** Creates `path` exclusively (`O_EXCL|O_NOFOLLOW`) with `text`; false when it already exists. */
-export const createExclusive = (path: string, text: string): boolean => {
+export const createExclusive = (path: string, text: string | Uint8Array): boolean => {
   let fd: number;
   try {
     fd = openSync(
@@ -130,7 +155,8 @@ export const createExclusive = (path: string, text: string): boolean => {
     throw error;
   }
   try {
-    writeSync(fd, text);
+    if (typeof text === "string") writeSync(fd, text);
+    else writeSync(fd, text);
   } finally {
     closeSync(fd);
   }

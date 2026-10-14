@@ -11,7 +11,9 @@ import {
   loadAutoTemplate,
   projectDenylist,
   projectUpstreamReport,
+  redactProjectText,
   renderBody,
+  selfDenylist,
   upstreamIssueSlots,
   vtcFramesFromStack,
   type UpstreamFacts,
@@ -114,6 +116,32 @@ describe("the denylist", () => {
     expect(containsDenied("role implementer on Initech's app", deny)).toBe(true);
     expect(containsDenied("INITECH", deny)).toBe(true);
     expect(containsDenied("initechnology", deny)).toBe(false);
+  });
+});
+
+describe("VTC builds VTC", () => {
+  it("leaves the upstream repo's public identifiers out of its own denylist, keeping local paths", () => {
+    const own = projectDenylist({
+      repo: "bason-labs/bs-vtc",
+      remoteUrl: "git@github.com:bason-labs/bs-vtc.git",
+      repoRoot: "/Users/bason/Documents/bason-labs/bs-vtc",
+      clientNames: ["Initech"],
+      homeDir: "/Users/bason",
+    });
+    const self = selfDenylist(own, "bason-labs/bs-vtc");
+    expect(self).toEqual(["/Users/bason", "/Users/bason/Documents/bason-labs/bs-vtc", "Initech"]);
+    expect(containsDenied("fix the bs-vtc engine crash in bason-labs", self)).toBe(false);
+    expect(containsDenied("see /Users/bason/notes", self)).toBe(true);
+  });
+});
+
+describe("project-repo text", () => {
+  it("passes the shared redaction: known values and token formats", () => {
+    const text = redactProjectText(`key sk-live-payroll-SECRET-1234 and ghp_${"a".repeat(36)}`, [
+      "sk-live-payroll-SECRET-1234",
+    ]);
+    expect(text).not.toContain("SECRET-1234");
+    expect(text).not.toContain("ghp_aaaa");
   });
 });
 

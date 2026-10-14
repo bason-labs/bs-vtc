@@ -70,13 +70,22 @@ export type IssueDecision =
 
 const byNumberDesc = (a: AutoIssueRef, b: AutoIssueRef): number => b.number - a.number;
 
+/** The later of two timestamps in ms; `null` when neither parses. */
+const latestTime = (...times: readonly (string | null | undefined)[]): number | null => {
+  const parsed = times
+    .map((t) => (t === null || t === undefined ? Number.NaN : Date.parse(t)))
+    .filter((t) => Number.isFinite(t));
+  return parsed.length === 0 ? null : Math.max(...parsed);
+};
+
 /**
  * The dedupe table (spine §5 reading 208 (3)):
  * - no issue carries the fingerprint → create;
  * - any issue with it is labelled `vtc:muted`, or the latest was closed as not planned by a human
  *   → muted, never raised again;
  * - an open issue → update it (comment only on a material change), at most once per
- *   `commentIntervalHours`, otherwise a duplicate;
+ *   `commentIntervalHours` since the later of the ledger's last write and the issue's `updatedAt`,
+ *   otherwise a duplicate;
  * - the latest closed as completed (or with no reason) → a new regression issue;
  * - the latest closed by VTC's own quiet sweep → reopen. The remote says so (its quiet-close
  *   comment, {@link RemoteIssueFacts}), so another machine or a wiped ledger agrees; the ledger is
@@ -94,9 +103,11 @@ export const decideIssue = (input: {
   if (muted !== undefined) return { action: "skip", reason: "muted", number: muted.number };
   const open = matches.find((i) => i.state === "open");
   if (open !== undefined) {
-    const last = input.record?.lastWriteAt;
+    // The last write is the later of this machine's ledger and the issue's own update time, so
+    // another installation's edit or comment (or a wiped ledger) still holds VTC to one a day.
+    const last = latestTime(input.record?.lastWriteAt, open.updatedAt);
     const interval = AUTOMATION_LIMITS.commentIntervalHours * HOUR_MS;
-    if (last !== null && last !== undefined && input.now.getTime() - Date.parse(last) < interval) {
+    if (last !== null && input.now.getTime() - last < interval) {
       return { action: "skip", reason: "duplicate", number: open.number };
     }
     return { action: "update", number: open.number, comment: input.material };
@@ -195,8 +206,10 @@ export const planPrCap = (input: {
 
 /**
  * Open automatic issues to close as quiet (AD-27 rule 4): the fingerprint has not recurred for
- * `autoCloseQuietDays` (the ledger's last occurrence, else the issue's last update), no open PR
- * carries it, it lacks `vtc:keep`, and nobody but VTC commented.
+ * `autoCloseQuietDays`, no open PR carries it, it lacks `vtc:keep`, and nobody but VTC commented.
+ * The last occurrence is the later of this machine's ledger and the issue's last update, since
+ * every installation that sees the fingerprint again edits the issue's occurrence table: one
+ * installation's old ledger never closes an issue another keeps seeing.
  */
 export const planQuietSweep = (input: {
   readonly repo: string;
@@ -211,8 +224,11 @@ export const planQuietSweep = (input: {
     if (issue.state !== "open" || issue.marker === null) return false;
     if (issue.labels.includes(AUTO_LABELS.keep) || issue.humanActivity) return false;
     if (prFps.has(issue.marker.fp)) return false;
-    const last = input.ledger.record(input.repo, issue.marker.fp)?.lastSeen ?? issue.updatedAt;
-    return input.now.getTime() - Date.parse(last) >= quietMs;
+    const last = latestTime(
+      input.ledger.record(input.repo, issue.marker.fp)?.lastSeen,
+      issue.updatedAt,
+    );
+    return last !== null && input.now.getTime() - last >= quietMs;
   });
 };
 
