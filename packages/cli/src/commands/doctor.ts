@@ -21,7 +21,7 @@ import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { ADAPTER_FACTORIES } from "@vtc/adapters";
 import { core, gates, git } from "@vtc/engine";
-import type { HostAuthStatus } from "@vtc/shared";
+import type { HostAdapter, HostAuthStatus, HostId } from "@vtc/shared";
 import {
   checkBrowser,
   defaultBrowserInstallDeps,
@@ -117,6 +117,30 @@ export const engineBaseBranch = (abbrevHead: string): string => {
   return out === "" || out === "HEAD" || out.startsWith("vtc/") ? "main" : out;
 };
 
+/**
+ * Every adapter's `authStatus()` (AD-25 rule 3). One that rejects (its host CLI is missing, say)
+ * counts as `logged_in: null`, "its status command did not run", so doctor still reports every
+ * other check; adapters without a status command are left out.
+ */
+export const gatherHostAuth = async (
+  adapters: Partial<Record<HostId, Pick<HostAdapter, "authStatus">>>,
+  now: () => Date,
+): Promise<HostAuthStatus[]> => {
+  const statuses = await Promise.all(
+    (Object.entries(adapters) as [HostId, Pick<HostAdapter, "authStatus">][]).map(
+      async ([host, adapter]): Promise<HostAuthStatus | null> => {
+        if (adapter.authStatus === undefined) return null;
+        try {
+          return await adapter.authStatus();
+        } catch {
+          return { host, logged_in: null, method: null, checked_at: now().toISOString() };
+        }
+      },
+    ),
+  );
+  return statuses.filter((s): s is HostAuthStatus => s !== null);
+};
+
 export const defaultDoctorEnv = (ctx: CommandContext): DoctorCommandEnv => {
   const timer = autoResumeTimer(process.platform);
   return {
@@ -157,10 +181,7 @@ export const defaultDoctorEnv = (ctx: CommandContext): DoctorCommandEnv => {
         pluginDir: (host, home) => join(home, "plugins", "doctor", host),
       });
       try {
-        const statuses = await Promise.all(
-          Object.values(adapters).map((a) => a.authStatus?.() ?? Promise.resolve(null)),
-        );
-        return statuses.filter((s): s is HostAuthStatus => s !== null);
+        return await gatherHostAuth(adapters, () => new Date());
       } finally {
         await Promise.allSettled(Object.values(adapters).map((a) => a.dispose()));
       }
@@ -232,8 +253,19 @@ export const createDoctorCommand = (
       if (e.browser !== undefined) checks.push(await checkBrowser(e.browser));
       const engine = e.engine === undefined ? null : await e.engine();
       if (engine !== null) checks.push(engine);
-      const level = e.mergeLevel === undefined ? null : await e.mergeLevel();
-      if (level !== null) checks.push(await checkMergeLevel(level));
+      if (e.mergeLevel !== undefined) {
+        try {
+          const level = await e.mergeLevel();
+          if (level !== null) checks.push(await checkMergeLevel(level));
+        } catch (error) {
+          // e.g. the ledger is a symlink: report it and run the other checks
+          checks.push({
+            name: "merge level",
+            status: "fail",
+            detail: `cannot read it: ${error instanceof Error ? error.message : String(error)}`,
+          });
+        }
+      }
       if (e.scanners !== undefined) {
         const mode = values.download === true ? "download" : "check";
         checks.push(

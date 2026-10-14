@@ -73,16 +73,20 @@ Some decisions are a human's alone, so their commands write a file directly afte
 an interactive terminal (an agent's shell or a pipe cannot confirm), like `vtc calibrate`
 (readings 43, 103 and 104). Without a terminal they print what they would do and exit 3.
 
-- `vtc lookback approve|pin|rollback --role <role> [--mode <mode>] --host <host>` moves Lookback's
-  prompt pins in `~/.vtc/lookback/pins.yaml` for the repo it runs in (AD-21). `approve --version
-<sha>` starts a canary once the version's replay result says `improve`, and promotes it when
-  run again; `pin --version <sha>` pins a version outright; `rollback` ends the canary or moves the
-  pin back to what it replaced. Every gesture is recorded in the file's history as a human's. No
+- `vtc lookback approve|pin|rollback --role <role> [--mode <mode>] --host <host> [--reason <text>]`
+  moves Lookback's prompt pins in `~/.vtc/lookback/pins.yaml` for the repo it runs in (AD-21).
+  `approve --version <sha>` starts a canary once the version's replay result says `improve`
+  (recomputed from its trials with the shared `replayVerdict`; the file's own verdict and sign
+  test must agree with it, since roles can write the repo), and promotes it when run again; `pin --version <sha>` pins a version outright; `rollback` ends the canary or moves the
+  pin back to what it replaced. Every gesture is recorded in the file's history as a human's,
+  with the redacted `--reason`. No
   MCP tool or HTTP route writes the file, and a `pins.yaml` inside a repo is never read.
 - `vtc merge-level restore [--level 1|2|3] [--reason <text>]` raises the merge level again after
   the engine lowered it (a revert or a red required base run), by appending a `restore` entry to
   the git-tracked `.vtc/merge-level.jsonl` (AD-23). Commit it so teammates share it. The engine
-  never edits `project.yaml`.
+  never edits `project.yaml`. The ledger is never read through a symlink, its text is shown with
+  control characters escaped, and if the engine appends to it while you decide, nothing is written
+  and you run the command again (a restore must not clear a downgrade you did not see).
 
 ## Level 3 and research (contracts 4.5.0)
 
@@ -106,7 +110,9 @@ The daemon gets two more services from the cli (AD-19 rule 2):
 `pixelmatch` and `pngjs`, each pinned by version and verified by its npm integrity before it is
 unpacked, into `~/.vtc/browsers/`, runs Playwright's installer for the headless shell with
 `PLAYWRIGHT_BROWSERS_PATH` set there, and writes the `BrowserPin` (`browsers/pin.json`) with the
-executable's SHA-256. `vtc doctor` re-checks it. Projects with their own Playwright need none of
+executable's SHA-256. `vtc doctor` re-checks it. A re-run skips a package whose files still match
+the tree hash recorded at its verified install; that catches drift, not tampering, since the
+record lives in the same user-writable store. Projects with their own Playwright need none of
 this; with no browser the visual gates are skipped with a visible reason. Playwright's installer
 runs on `node` from `PATH` when vtc is the single binary (so `--install-browser` needs Node.js
 there), with an allowlisted environment: no credential variable and no `PLAYWRIGHT_*` override

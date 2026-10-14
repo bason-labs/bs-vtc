@@ -6,7 +6,8 @@
  * `by: human`.
  *
  * - `approve <version>`: with no canary for the target, starts one (candidate vs. the current
- *   pin, or the version's parent) once the version's replay result says `improve` (AD-21 rule 6);
+ *   pin, or the version's parent) once the version's replay result says `improve` (AD-21 rule 6):
+ *   recomputed here from its trials with the shared `replayVerdict`, never taken from the file;
  *   with that version already the canary's candidate, promotes it to the pin.
  * - `pin <version>`: pins a version outright (ends any canary for the target).
  * - `rollback`: ends the target's canary (back to its baseline), or else moves the pin back to
@@ -38,10 +39,12 @@ import {
   PromptVersionFrontmatterSchema,
   ReplayResultSchema,
   RelPathSchema,
+  replayVerdict,
   type HostId,
   type LookbackPins,
   type PromptVersionFrontmatter,
 } from "@vtc/shared";
+import { printable } from "./human-gesture.js";
 
 export type Gesture = "approve" | "pin" | "rollback";
 
@@ -226,11 +229,35 @@ export const planGesture = (pins: LookbackPins, request: GestureRequest): Gestur
       const r = replay.data;
       if (r.candidate !== sha || !sameTarget(r, target))
         return { ok: false, reason: `${evaluation} is the replay of another version` };
-      const evidence = `p = ${r.sign_test.p.toFixed(3)} over ${String(r.sign_test.n_discordant)} discordant tasks (${String(r.sign_test.wins_b)} won by the candidate), ${String(r.per_task.length)} tasks x ${String(r.k)} runs per arm, tokens ${r.tokens_delta_pct >= 0 ? "+" : ""}${String(r.tokens_delta_pct)}%, A/A flip rate ${r.aa_flip_rate.toFixed(2)}`;
-      if (r.verdict !== "improve")
+      // the file is in the repo, where roles can write: its verdict and sign test are never
+      // trusted, but recomputed from its trials with the shared decision rule (AD-21 rule 6)
+      const uneven = r.per_task.find((t) => t.a.length !== r.k || t.b.length !== r.k);
+      if (uneven !== undefined)
         return {
           ok: false,
-          reason: `the replay of ${short(sha)} says ${r.verdict}, not improve (${evidence}): no canary`,
+          reason: `${evaluation} is not a complete replay: task ${printable(JSON.stringify(uneven.task))} does not have ${String(r.k)} runs per arm`,
+        };
+      const computed = replayVerdict(
+        r.per_task.map((t) => ({ task: t.task, a: t.a, b: t.b, regressionSet: t.regression_set })),
+        r.aa_flip_rate,
+        r.tokens_delta_pct,
+      );
+      const st = computed.signTest;
+      if (
+        computed.verdict !== r.verdict ||
+        st.n_discordant !== r.sign_test.n_discordant ||
+        st.wins_b !== r.sign_test.wins_b ||
+        Math.abs(st.p - r.sign_test.p) > 1e-9
+      )
+        return {
+          ok: false,
+          reason: `${evaluation} does not add up: its trials give ${computed.verdict} (p = ${st.p.toFixed(3)} over ${String(st.n_discordant)} discordant tasks, ${String(st.wins_b)} won by the candidate), but the file says ${r.verdict} (p = ${r.sign_test.p.toFixed(3)}, ${String(r.sign_test.n_discordant)} discordant, ${String(r.sign_test.wins_b)} won): no canary`,
+        };
+      const evidence = `p = ${st.p.toFixed(3)} over ${String(st.n_discordant)} discordant tasks (${String(st.wins_b)} won by the candidate), ${String(r.per_task.length)} tasks x ${String(r.k)} runs per arm, tokens ${r.tokens_delta_pct >= 0 ? "+" : ""}${String(r.tokens_delta_pct)}%, A/A flip rate ${r.aa_flip_rate.toFixed(2)}`;
+      if (computed.verdict !== "improve")
+        return {
+          ok: false,
+          reason: `the replay of ${short(sha)} says ${computed.verdict}, not improve (${evidence}): no canary`,
         };
       const baseline = current ?? front.parent;
       if (baseline === null)
@@ -245,7 +272,7 @@ export const planGesture = (pins: LookbackPins, request: GestureRequest): Gestur
         };
       return {
         ok: true,
-        summary: `Start a canary of ${short(sha)} for ${name} on this project: half its tasks (by hash) run it, half run ${short(baseline)}; the engine rolls it back on a trigger, and you promote it with vtc lookback approve again.\n  evidence (${evaluation}, a file in the repo: check it): the replay says improve with ${evidence}.`,
+        summary: `Start a canary of ${short(sha)} for ${name} on this project: half its tasks (by hash) run it, half run ${short(baseline)}; the engine rolls it back on a trigger, and you promote it with vtc lookback approve again.\n  evidence (${evaluation}, a file in the repo: check it): its trials, recomputed here, say improve with ${evidence}.`,
         pins: withProject(
           {
             pins: project.pins,

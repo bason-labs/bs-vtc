@@ -205,6 +205,37 @@ describe("the research HttpClient (AD-22 rule 1)", () => {
     ]);
   });
 
+  it("never resends a body to another origin: a cross-origin 307 or 308 with one is refused", async () => {
+    for (const status of [307, 308]) {
+      const { fetch, seen } = fakeFetch({
+        "https://api.example.org/search": () => redirect(status, "https://example.com/collect"),
+      });
+      await expect(
+        createHttpClient({ fetch, resolve: PUBLIC }).request({
+          ...GET("https://api.example.org/search"),
+          method: "POST",
+          body: '{"api_key":"k"}',
+          headers: { "content-type": "application/json" },
+        }),
+      ).rejects.toThrow(/redirect to another origin .* would resend the request body/);
+      expect(seen.map((s) => s.url)).toEqual(["https://api.example.org/search"]);
+    }
+    // a 303 drops the body first, so the GET may go on to the other origin
+    const { fetch, seen } = fakeFetch({
+      "https://api.example.org/search": () => redirect(303, "https://example.com/result"),
+      "https://example.com/result": () => ok("r"),
+    });
+    await createHttpClient({ fetch, resolve: PUBLIC }).request({
+      ...GET("https://api.example.org/search"),
+      method: "POST",
+      body: '{"api_key":"k"}',
+    });
+    expect(seen.map((s) => [s.url, s.method, s.body])).toEqual([
+      ["https://api.example.org/search", "POST", '{"api_key":"k"}'],
+      ["https://example.com/result", "GET", undefined],
+    ]);
+  });
+
   it("sends no cookies and returns none", async () => {
     const { fetch, seen } = fakeFetch({
       "https://example.com/": () => ok("x", { "set-cookie": "sid=1", etag: '"e"' }),

@@ -35,7 +35,12 @@ import {
   type BrowserInstallDeps,
   type PinnedPackage,
 } from "../src/browser-install.js";
-import { createDoctorCommand, defaultDoctorEnv, engineBaseBranch } from "../src/commands/doctor.js";
+import {
+  createDoctorCommand,
+  defaultDoctorEnv,
+  engineBaseBranch,
+  gatherHostAuth,
+} from "../src/commands/doctor.js";
 import {
   CLAUDE_MIN_VERSION,
   checkHostAuth,
@@ -179,7 +184,9 @@ describe("vtc doctor --install-browser (AD-24, D-ay)", () => {
     const again = fakeDeps(bodies);
     await installBrowser(home, again, packages);
     expect(again.downloads).toEqual([]);
-    expect(again.lines.join("\n")).toMatch(/already installed and verified/);
+    expect(again.lines.join("\n")).toMatch(
+      /already installed, unchanged since its verified install/,
+    );
     // a package changed in the store after its install is noticed and installed again
     const cli = join(store, "node_modules/playwright-core/cli.js");
     const original = readFileSync(cli, "utf8");
@@ -435,6 +442,46 @@ describe("vtc doctor: host versions and auth (AD-25)", () => {
       hostAuth: () => Promise.resolve([s("codex", true, "ChatGPT")]),
     })).run([], ctx);
     expect(out.join("\n")).toMatch(/ok +host auth +codex logged in \(ChatGPT\)/);
+  });
+
+  it("counts an adapter whose status command throws as unknown, and runs every other check", async () => {
+    const at = new Date("2026-10-14T10:00:00.000Z");
+    const s = (
+      host: HostAuthStatus["host"],
+      loggedIn: boolean,
+      method: string,
+    ): HostAuthStatus => ({
+      host,
+      logged_in: loggedIn,
+      method,
+      checked_at: at.toISOString(),
+    });
+    const statuses = await gatherHostAuth(
+      {
+        "claude-code": { authStatus: () => Promise.reject(new Error("spawn claude ENOENT")) },
+        codex: { authStatus: () => Promise.resolve(s("codex", true, "ChatGPT")) },
+      },
+      () => at,
+    );
+    expect(statuses).toEqual([
+      { host: "claude-code", logged_in: null, method: null, checked_at: at.toISOString() },
+      s("codex", true, "ChatGPT"),
+    ]);
+    // no status command at all: left out
+    expect(await gatherHostAuth({ codex: {} }, () => at)).toEqual([]);
+    // a merge-level env that throws (a symlinked ledger) is a failed check, not a crashed doctor
+    const { ctx, out } = capture("/w", "/h");
+    const quiet: Exec = () => Promise.resolve({ code: 0, stdout: "", stderr: "" });
+    const code = await createDoctorCommand(() => ({
+      exec: quiet,
+      versions: { node: "22.17.1" },
+      hostAuth: () => Promise.resolve([s("codex", true, "ChatGPT")]),
+      mergeLevel: () => Promise.reject(new Error(".vtc/merge-level.jsonl is a symlink")),
+    })).run([], ctx);
+    expect(code).toBe(1);
+    const text = out.join("\n");
+    expect(text).toMatch(/FAIL +merge level +cannot read it: .*is a symlink/);
+    expect(text).toMatch(/ok +host auth +codex logged in/);
   });
 });
 

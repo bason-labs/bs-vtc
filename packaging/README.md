@@ -7,9 +7,16 @@ repository has a GitHub remote.
 ## Todo
 
 - **sign + notarize once the owner has an Apple Developer ID** (H-2). Until then the release
-  ships unsigned macOS binaries with SHA-256 checksums. To switch it on: store the signing
-  identity and a `notarytool` keychain profile as repository secrets, remove `if: ${{ false }}`
-  from the `sign-macos` job in `.github/workflows/release.yml`, and check under test that
+  ships unsigned macOS binaries with SHA-256 checksums. The `sign-macos` job's body is a
+  placeholder, not a working recipe: a runner starts with no certificate and no notary profile.
+  To switch it on: store the Developer ID certificate (a base64 `.p12` and its password) and the
+  notary credentials (an App Store Connect API key, or Apple ID, team ID and app-specific
+  password) as repository secrets; add steps before `codesign` that create a temporary keychain,
+  import the certificate into it (`security create-keychain`, `security import`,
+  `security set-key-partition-list`) and save the notary credentials into it with
+  `xcrun notarytool store-credentials <profile> --keychain <that keychain>`, plus a final step
+  that deletes the keychain; then remove `if: ${{ false }}` from the job in
+  `.github/workflows/release.yml`, and check under test that
   `macos/entitlements.plist` (only `allow-jit` and `allow-unsigned-executable-memory`) is
   enough; add a key only when a signed smoke test needs it. Signing runs before the
   checksums, so `SHA256SUMS` always covers the signed bytes.

@@ -6,9 +6,9 @@
  * or HTTP route writes it, and a `pins.yaml` inside a repo is never read. The Lead shows the
  * proposal and its replay result in chat and gives the human the command.
  *
- *   vtc lookback approve  --role <role> [--mode <mode>] --host <host> --version <sha>
- *   vtc lookback pin      --role <role> [--mode <mode>] --host <host> --version <sha>
- *   vtc lookback rollback --role <role> [--mode <mode>] --host <host>
+ *   vtc lookback approve  --role <role> [--mode <mode>] --host <host> --version <sha> [--reason <text>]
+ *   vtc lookback pin      --role <role> [--mode <mode>] --host <host> --version <sha> [--reason <text>]
+ *   vtc lookback rollback --role <role> [--mode <mode>] --host <host> [--reason <text>]
  *
  * The planning is `lookback-pins.ts`.
  */
@@ -36,12 +36,13 @@ import type { CommandSpec } from "./types.js";
 import { EXIT, guarded, parseFlags } from "./util.js";
 
 const USAGE = [
-  "usage: vtc lookback approve  --role <role> [--mode <mode>] --host <host> --version <sha>",
-  "       vtc lookback pin      --role <role> [--mode <mode>] --host <host> --version <sha>",
-  "       vtc lookback rollback --role <role> [--mode <mode>] --host <host>",
+  "usage: vtc lookback approve  --role <role> [--mode <mode>] --host <host> --version <sha> [--reason <text>]",
+  "       vtc lookback pin      --role <role> [--mode <mode>] --host <host> --version <sha> [--reason <text>]",
+  "       vtc lookback rollback --role <role> [--mode <mode>] --host <host> [--reason <text>]",
   "  approve   start a canary of a version whose replay says improve; again to promote it",
   "  pin       pin a version outright (ends a canary)",
   "  rollback  end the canary, or move the pin back to the version it replaced",
+  "  --reason  why, recorded (secrets redacted) in the pins.yaml history",
 ].join("\n");
 
 const GESTURES: readonly Gesture[] = ["approve", "pin", "rollback"];
