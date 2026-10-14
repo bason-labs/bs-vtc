@@ -68,6 +68,9 @@ export {
   type CallContext,
   type EngineCoreDeps,
   type FactRefresher,
+  type PinnedPrompt,
+  type PromptPins,
+  type PromptTarget,
   type RoleToolHandler,
   type RunHandle,
 } from "./kernel.js";

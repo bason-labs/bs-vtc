@@ -13,14 +13,27 @@
  *   fact id. An approval must waive each one with a reason (`fact_waivers`). The stale facts are
  *   re-fetched first, through the injected refresher (`Engine.setFactRefresher`).
  * Role-written files are read without following a symlink (a role could plant one to a host file).
+ * - **The chosen direction** enters the per-client design library once G2 is approved
+ *   (`recordChosenDirection`, §9.1 step 6).
  * - **Design coverage**: every requirement of the frozen spec has a screen, every screen covers a
  *   requirement, and every component the component specs use is registered.
  */
-import { existsSync, lstatSync, readdirSync, readFileSync } from "node:fs";
+import {
+  existsSync,
+  lstatSync,
+  mkdirSync,
+  readdirSync,
+  readFileSync,
+  renameSync,
+  writeFileSync,
+} from "node:fs";
 import { basename, dirname, extname, join } from "node:path";
 import {
+  DESIGN_LIBRARY_DIR,
   DESIGN_SCREENS_PATH,
   DesignCoverageReportSchema,
+  DesignLibraryEntrySchema,
+  engineRepoKey,
   DesignScreensFileSchema,
   factId,
   FactRowSchema,
@@ -29,6 +42,8 @@ import {
   NoveltyReportSchema,
   parsePersisted,
   RESEARCH_FACTS_FILE,
+  researchScopeFor,
+  sha256Hex,
   SlugSchema,
   type ApproveInput,
   type DesignCoverageReport,
@@ -36,6 +51,7 @@ import {
   type FrozenArtifact,
   type G2Direction,
   type G2DirectionDraft,
+  type NoveltyReport,
   type UnverifiedFactSummary,
 } from "@vtc/shared";
 import { assertNoSymlinks } from "../git/index.js";
@@ -130,21 +146,29 @@ const readDirection = (k: Kernel, path: string): G2DirectionDraft => {
   };
 };
 
-/** The Designer's directions for G2 with their novelty verdicts (§9.1 steps 3–5), at most 3. */
-export const g2Directions = (k: Kernel, h: RunHandle): G2Direction[] => {
-  const artifacts = submittedArtifacts(h, "designer");
-  const novelty = new Map<string, G2Direction["novelty"]>();
-  for (const a of artifacts.filter((x) => x.type === "novelty_report")) {
+/** The Designer's novelty reports (§9.1 step 4), by direction; an unreadable one is left out. */
+const noveltyReports = (k: Kernel, h: RunHandle): Map<string, NoveltyReport> => {
+  const reports = new Map<string, NoveltyReport>();
+  for (const a of submittedArtifacts(h, "designer").filter((x) => x.type === "novelty_report")) {
     try {
       const parsed = parsePersisted(
         NoveltyReportSchema,
         JSON.parse(read(k.deps.repoRoot, a.path) ?? "") as unknown,
       );
-      if (parsed.success) novelty.set(parsed.data.direction, parsed.data.verdict);
+      if (parsed.success) reports.set(parsed.data.direction, parsed.data);
     } catch {
       // an unreadable report leaves the direction unchecked
     }
   }
+  return reports;
+};
+
+/** The Designer's directions for G2 with their novelty verdicts (§9.1 steps 3–5), at most 3. */
+export const g2Directions = (k: Kernel, h: RunHandle): G2Direction[] => {
+  const artifacts = submittedArtifacts(h, "designer");
+  const novelty = new Map(
+    [...noveltyReports(k, h)].map(([direction, report]) => [direction, report.verdict] as const),
+  );
   const seen = new Set<string>();
   const directions: G2Direction[] = [];
   for (const a of artifacts.filter((x) => x.type === "design_direction")) {
@@ -154,6 +178,41 @@ export const g2Directions = (k: Kernel, h: RunHandle): G2Direction[] => {
     directions.push(G2DirectionSchema.parse({ ...d, novelty: novelty.get(d.id) ?? "unchecked" }));
   }
   return directions.slice(0, 3);
+};
+
+/**
+ * §9.1 step 6: the direction the human chose at G2 enters the design library under the VTC home
+ * (`~/.vtc/design-library/<scope>/<id>.json`, `DesignLibraryEntry`), in the project's client
+ * scope (`_shared` or `client-<slug>`, as for research, §14), so the novelty check of later
+ * projects steers away from it. The entry carries the perceptual hash and token vector of the
+ * direction's novelty report; a direction with none has nothing to compare and is not recorded.
+ * The id is fixed per repo, run and direction, so recording twice writes one file. Returns the
+ * entry's path, or `null`.
+ */
+export const recordChosenDirection = (
+  k: Kernel,
+  h: RunHandle,
+  direction: string,
+): string | null => {
+  const report = noveltyReports(k, h).get(direction);
+  if (report === undefined) return null;
+  const key = engineRepoKey(k.deps.repoRoot);
+  const entry = DesignLibraryEntrySchema.parse({
+    v: 1,
+    id: `${key}-${sha256Hex(`${h.state.id}\n${direction}`).slice(0, 12)}`,
+    project_key: key,
+    direction,
+    phash: report.phash,
+    token_vector: report.token_vector,
+    chosen_at: k.now().toISOString(),
+  });
+  const dir = join(k.deps.vtcHome, DESIGN_LIBRARY_DIR, researchScopeFor(k.config().client));
+  mkdirSync(dir, { recursive: true, mode: 0o700 });
+  const path = join(dir, `${entry.id}.json`);
+  const temp = `${path}.${String(process.pid)}.tmp`;
+  writeFileSync(temp, `${JSON.stringify(entry, null, 2)}\n`, { mode: 0o600 });
+  renameSync(temp, path);
+  return path;
 };
 
 // --------------------------------------------------------------------- facts

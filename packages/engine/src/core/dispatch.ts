@@ -6,13 +6,16 @@
  */
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
+import { z } from "zod";
 import {
   agentNameFor,
   HIDDEN_TESTS,
   inSessionDispatchRefusal,
   PACK_INPUT_TYPES,
+  PromptVersionRefSchema,
   resolveRoleMode,
   SESSION_DEFAULT_MODEL,
+  Sha256HexSchema,
   type ArtifactRef,
   type Escalation,
   type EscalationAnswer,
@@ -28,7 +31,14 @@ import {
 import { restoreHostConfig } from "../git/index.js";
 import { budgetState, sharesExceeded } from "./budget.js";
 import { DEFAULT_ACCEPTANCE_GLOBS } from "./config.js";
-import { EngineError, type CallContext, type Kernel, type RunHandle } from "./kernel.js";
+import {
+  EngineError,
+  type CallContext,
+  type Kernel,
+  type PinnedPrompt,
+  type PromptTarget,
+  type RunHandle,
+} from "./kernel.js";
 import { finalReviewSteps } from "./final-review.js";
 import { effectiveVerdict } from "./gate-verdict.js";
 import { engineerDispatch, tierDown } from "./loop.js";
@@ -688,8 +698,74 @@ const packFor = (k: Kernel, h: RunHandle, step: StepSpec, actionId: string): Tas
 };
 
 /**
- * Hands out one step: writes its pack, logs `role.dispatched` (prompt SHA and the resolved
- * model), returns the Lead action. `cwd` is where the role works (its worktree).
+ * The pinned editable section of a dispatch (AD-21 rules 1–2), or `null` for the compiled agent's
+ * own: no selector wired, or a selection that is not for this role, mode and host, is malformed,
+ * has no text, or could not be made. A selection the engine cannot vouch for is never recorded
+ * as a prompt version (AD-21: no ambiguous prompt identity).
+ */
+const PinnedCanarySchema = z.strictObject({
+  arm: z.enum(["candidate", "baseline"]),
+  candidate: Sha256HexSchema,
+  baseline: Sha256HexSchema,
+});
+
+const pinnedPrompt = (k: Kernel, target: PromptTarget): PinnedPrompt | null => {
+  const pins = k.promptPins();
+  if (pins === null) return null;
+  let pinned: PinnedPrompt | null;
+  try {
+    pinned = pins(target);
+  } catch {
+    return null;
+  }
+  if (pinned === null) return null;
+  const version = PromptVersionRefSchema.safeParse(pinned.version);
+  if (
+    !version.success ||
+    version.data.role !== target.role ||
+    version.data.mode !== target.mode ||
+    version.data.host !== target.host ||
+    typeof pinned.text !== "string" ||
+    pinned.text.trim() === ""
+  )
+    return null;
+  // a malformed canary drops the arm, never the section: the dispatch is then not in the canary
+  const canary = PinnedCanarySchema.safeParse(pinned.canary);
+  const arm = canary.success ? canary.data : undefined;
+  return {
+    version: version.data,
+    text: pinned.text,
+    ...(arm === undefined ? {} : { canary: arm }),
+  };
+};
+
+/** A task's canary arm, logged once per (task, role): sticky across its fix rounds (AD-21 rule 7). */
+const assignCanary = (
+  k: Kernel,
+  h: RunHandle,
+  task: string,
+  role: string,
+  canary: NonNullable<PinnedPrompt["canary"]>,
+): void => {
+  if (
+    h.state.events.some(
+      (e) => e.type === "lookback.canary_assigned" && e.task === task && e.role === role,
+    )
+  )
+    return;
+  k.emit(h, {
+    type: "lookback.canary_assigned",
+    actor: "engine",
+    task,
+    role,
+    data: { arm: canary.arm, candidate: canary.candidate, baseline: canary.baseline },
+  });
+};
+
+/**
+ * Hands out one step: writes its pack (the pinned editable section first, AD-21), logs
+ * `role.dispatched` (prompt version and the resolved model), returns the Lead action. `cwd` is
+ * where the role works (its worktree).
  */
 export const dispatchStep = (
   k: Kernel,
@@ -707,7 +783,6 @@ export const dispatchStep = (
     ...(step.mode === undefined ? {} : { mode: step.mode }),
     ...(step.tier === undefined ? {} : { tier: step.tier }),
   });
-  const pack = writeTaskPack(k.deps.repoRoot, packFor(k, h, step, actionId));
   const task = step.task === undefined ? undefined : h.state.tasks.get(step.task);
   // §5.2a, spine §5 reading 38: an Engineer task runs as its discipline's compiled profile agent
   // when the host's plugin has one; the dispatched role stays `engineer` (the family shares the
@@ -717,8 +792,25 @@ export const dispatchStep = (
       ? k.deps.plugins.profileFor(host, task.discipline)
       : undefined;
   const agent = profile ?? agentNameFor(step.role, step.mode);
+  const pinned = pinnedPrompt(k, {
+    run: h.state.id,
+    role: step.role,
+    ...(step.mode === undefined ? {} : { mode: step.mode }),
+    host,
+    agent,
+    ...(step.task === undefined ? {} : { task: step.task }),
+  });
+  const pack = writeTaskPack(
+    k.deps.repoRoot,
+    packFor(k, h, step, actionId),
+    pinned === null
+      ? undefined
+      : { text: pinned.text, effective_sha256: pinned.version.effective_sha256 },
+  );
   const resume = step.resume !== undefined && step.resume.host === host ? step.resume : undefined;
   step.onDispatch?.();
+  if (pinned?.canary !== undefined && step.task !== undefined)
+    assignCanary(k, h, step.task, step.role, pinned.canary);
   k.emit(h, {
     type: "role.dispatched",
     actor: "engine",
@@ -728,7 +820,8 @@ export const dispatchStep = (
         ? {}
         : { feature: step.feature }
       : { task: step.task, feature: task?.feature }),
-    prompt_sha: k.deps.plugins.promptSha(agent, host),
+    // AD-21 rule 1: with a pinned editable section the prompt version is the effective SHA
+    prompt_sha: pinned?.version.effective_sha256 ?? k.deps.plugins.promptSha(agent, host),
     host,
     // D-ae: no resolved id means the host session's model, recorded as such
     model: model.model ?? SESSION_DEFAULT_MODEL,
@@ -740,6 +833,8 @@ export const dispatchStep = (
       agent,
       pack,
       resume: resume ?? null,
+      ...(pinned === null ? {} : { editable_sha256: pinned.version.editable_sha256 }),
+      ...(pinned?.canary === undefined ? {} : { canary_arm: pinned.canary.arm }),
     },
   });
   const capabilities = k.deps.adapters[host]?.capabilities;

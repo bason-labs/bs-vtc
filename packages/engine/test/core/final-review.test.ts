@@ -13,10 +13,11 @@ import {
   VISUAL_SKIPPED_NO_BROWSER,
   type GateReport,
   type GitChangedFile,
+  type LeadAction,
   type VisualSummary,
 } from "@vtc/shared";
 import { effectiveVerdict, visualFindings } from "../../src/core/gate-verdict.js";
-import { releaseReadiness, visualStep } from "../../src/core/final-review.js";
+import { fixAffectedSteps, releaseReadiness, visualStep } from "../../src/core/final-review.js";
 import { cleanupDirs, writeFile } from "../helpers/repo.js";
 import {
   authorTests,
@@ -261,6 +262,91 @@ describe("Final Review steps 3–5 and 7 (§6.7a)", () => {
     });
     expect(h.engine.status({}).features[0]?.status).toBe("fixing");
     await h.release();
+  });
+});
+
+describe("a fix round re-runs only the AI steps the fix affected (§6.7a routing)", () => {
+  const nextActions = async (h: Harness) => (await h.engine.next({}, CLAUDE)).actions;
+  const reviewersOf = (actions: readonly LeadAction[]) =>
+    spawns(actions).filter((a) => a.feature === "F-1" && a.task === undefined);
+
+  it("a fix that only touched the changelog (and added a test) carries steps 3 and 4 over", async () => {
+    const h = createHarness({
+      project: { merge_level: 1 },
+      files: { "CHANGELOG.md": "# Changelog\n" },
+    });
+    const reviewers = await toFinalReview(h);
+    for (const r of reviewers) await review(h, r, "pass");
+    await h.engine.settle();
+    expect(h.engine.status({}).features[0]).toMatchObject({ status: "fixing", round: 1 });
+    await authorTests(h, only(await nextActions(h), "qa"));
+    await build(
+      h,
+      only(await nextActions(h), "engineer"),
+      "# Changelog\n\n- Password reset\n",
+      "CHANGELOG.md",
+    );
+    await h.engine.settle();
+    const after = await nextActions(h);
+    expect(reviewersOf(after)).toEqual([]);
+    const round2 = steps(h).slice(-7);
+    expect(round2.map((s) => [s.step, s.status])).toEqual([
+      [1, "pass"],
+      [2, "not_run"],
+      [5, "not_run"],
+      [6, "not_run"],
+      [3, "pass"],
+      [4, "pass"],
+      [7, "pass"],
+    ]);
+    expect(round2[4]?.reason).toMatch(/carried over from round 1/);
+    expect(round2[5]?.reason).toMatch(/carried over from round 1/);
+    expect(h.engine.status({}).features[0]?.status).toBe("ready_to_ship");
+    await h.release();
+  });
+
+  it("a fix that changed code re-runs both reviewers; the step that failed always re-runs", async () => {
+    const h = createHarness({ project: { merge_level: 1 } });
+    const [verifier, security] = await toFinalReview(h);
+    await review(h, verifier!, "fail");
+    await review(h, security!, "pass");
+    await h.engine.settle();
+    expect(h.engine.status({}).features[0]).toMatchObject({ status: "fixing", round: 1 });
+    await authorTests(h, only(await nextActions(h), "qa"));
+    await build(
+      h,
+      only(await nextActions(h), "engineer"),
+      "export const y = 2;\n",
+      "src/t-1/fix.ts",
+    );
+    await h.engine.settle();
+    const nxt = await nextActions(h);
+    // the reviewer's finding on the fix task waits for Final Review, not for a task reviewer
+    // the fix task never had: the task merged after one round
+    expect(
+      events(h).filter((e) => e.type === "role.dispatched" && e.role === "engineer"),
+    ).toHaveLength(2);
+    const again = reviewersOf(nxt);
+    expect(again.map((r) => r.role)).toEqual(["spec_verifier", "security"]);
+    for (const r of again) await review(h, r, "pass");
+    await h.engine.settle();
+    expect(h.engine.status({}).features[0]?.status).toBe("ready_to_ship");
+    await h.release();
+  });
+
+  it("which steps a fix affects, from its diff", () => {
+    const changed = (
+      path: string,
+      status: GitChangedFile["status"] = "modified",
+    ): GitChangedFile => ({ path, status });
+    const globs = ["tests/acceptance/**"];
+    expect(fixAffectedSteps([changed("CHANGELOG.md"), changed("docs/x.md")], globs)).toEqual([]);
+    expect(fixAffectedSteps([changed(".vtc/evidence/F-1/bundle.json")], globs)).toEqual([]);
+    expect(fixAffectedSteps([changed("tests/acceptance/t-2.test.ts", "added")], globs)).toEqual([]);
+    expect(fixAffectedSteps([changed("tests/acceptance/t-1.test.ts")], globs)).toEqual([3]);
+    expect(fixAffectedSteps([changed("src/a.spec.ts", "deleted")], globs)).toEqual([3]);
+    expect(fixAffectedSteps([changed("src/t-1/impl.ts")], globs)).toEqual([3, 4]);
+    expect(fixAffectedSteps([changed("package.json")], globs)).toEqual([3, 4]);
   });
 });
 

@@ -160,14 +160,23 @@ export const writePlanFile = (
  * Renders and writes one task pack (gitignored, AD-14 rule 5), plus the same pack as `TaskPack`
  * JSON next to it (`taskPackJsonPath`): the structured write scope `vtc hook` reads (reading 67).
  */
-export const writeTaskPack = (repoRoot: string, pack: TaskPackInput): string => {
+export const writeTaskPack = (
+  repoRoot: string,
+  pack: TaskPackInput,
+  editable?: { readonly text: string; readonly effective_sha256: string },
+): string => {
   const path = taskPackPath(pack.action_id);
   write(
     repoRoot,
     taskPackJsonPath(pack.action_id),
     `${JSON.stringify(TaskPackSchema.parse(pack))}\n`,
   );
-  write(repoRoot, path, renderTaskPack(pack));
+  // AD-21 rule 2 (reading 102): the pinned editable section comes first, before the task
+  const preface =
+    editable === undefined
+      ? ""
+      : `# Role instructions (prompt version ${editable.effective_sha256.slice(0, 12)})\n\n${editable.text.trim()}\n\n---\n\n`;
+  write(repoRoot, path, `${preface}${renderTaskPack(pack)}`);
   return path;
 };
 
