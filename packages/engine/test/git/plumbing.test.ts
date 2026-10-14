@@ -8,7 +8,7 @@ import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import { autoBranchName, EVIDENCE_BRANCH, type CreateGitPlumbing } from "@vtc/shared";
 import { createGitPlumbing } from "../../src/git/index.js";
-import { addBareRemote, cleanupDirs, git, initRepo, writeFile } from "../helpers/repo.js";
+import { addBareRemote, cleanupDirs, git, initRepo, tempDir, writeFile } from "../helpers/repo.js";
 
 afterEach(cleanupDirs);
 
@@ -123,6 +123,22 @@ describe("git.createGitPlumbing (the frozen CreateGitPlumbing seam)", () => {
     await expect(plumbing.updateRef(AUTO, two, head)).rejects.toThrow();
     await plumbing.updateRef(AUTO, two, one);
     expect(await plumbing.resolve(AUTO)).toBe(two);
+  });
+
+  it("never moves an automatic branch a linked worktree of the repo has checked out", async () => {
+    const repo = initRepo();
+    const plumbing = createGitPlumbing({ repoRoot: repo });
+    const head = git(repo, "rev-parse", "HEAD");
+    await plumbing.updateRef(AUTO, head, null);
+    git(repo, "worktree", "add", "-q", join(tempDir(), "wt"), AUTO.replace("refs/heads/", ""));
+    const next = await plumbing.commit({
+      base: head,
+      parents: [head],
+      changes: [{ path: "x", bytes: bytes("1") }],
+      message: "1",
+    });
+    await expect(plumbing.updateRef(AUTO, next, head)).rejects.toThrow(/checked out in a worktree/);
+    expect(await plumbing.resolve(AUTO)).toBe(head);
   });
 
   it("writes no ref outside the automatic branches and the evidence branch", async () => {

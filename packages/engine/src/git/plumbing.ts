@@ -148,6 +148,12 @@ export const createGitPlumbing: CreateGitPlumbing = ({ repoRoot }): GitPlumbing 
       refuse(
         `${ref} is checked out here; the automation plumbing never moves a checked-out branch`,
       );
+    // nor one a linked worktree of this repo has checked out (its index and files would lag)
+    const worktrees = (await text(["worktree", "list", "--porcelain"])).split("\n");
+    if (worktrees.includes(`branch ${ref}`))
+      refuse(
+        `${ref} is checked out in a worktree of this repo; the automation plumbing never moves a checked-out branch`,
+      );
     await git(["update-ref", "-m", "vtc: automation", ref, next, old]);
   };
 

@@ -496,7 +496,7 @@ describe("RETRO runs Lookback replays as headless runs (AD-21 rule 6, readings 1
       });
       // D-cg: the arm's own compiled plugin, under the engine's private area, loaded in place
       expect(trial.request.pluginDir).toBe(
-        join(h.home, "guard", "lookback", "arms", `${run}--0-${String(i)}`, i === 0 ? "a" : "b"),
+        join(h.engine.guardDir, "lookback", "arms", `${run}--0-${String(i)}`, i === 0 ? "a" : "b"),
       );
       expect(trial.pluginDirPresent).toBe(true);
       expect(existsSync(trial.request.pluginDir ?? "")).toBe(false);

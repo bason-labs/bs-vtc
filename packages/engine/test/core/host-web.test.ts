@@ -78,9 +78,12 @@ describe("host_web roles are routed where host web search is safe (D-cf, reading
     expect(
       h.sandboxRequests.find((r) => r.cwd === h.launched[0]?.request.cwd)?.tools.host_web,
     ).toBe(false);
-    expect(first.notices).toEqual([HOST_WEB_OFF_NOTICE]);
+    // the engine-driven dispatch relays it while it runs, so it reaches the first `next` or, when
+    // that dispatch finished after the notices were taken, the one after the settle: once in all
     const second = await h.engine.next({}, CODEX);
-    expect(second.notices).toBeUndefined();
+    expect([...(first.notices ?? []), ...(second.notices ?? [])]).toEqual([HOST_WEB_OFF_NOTICE]);
+    const third = await h.engine.next({}, CODEX);
+    expect(third.notices).toBeUndefined();
     await h.release();
   });
 

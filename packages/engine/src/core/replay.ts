@@ -83,6 +83,7 @@ import {
   isReplayTree,
   newReplayTree,
   removeReplayCheckout,
+  repoGitDirs,
   ReplayCheckoutTamperedError,
   snapshotReplayCheckout,
   type ReplayCheckout,
@@ -1032,27 +1033,38 @@ export const recordTrialIsolation = (
   });
 };
 
+const gitDirsOf = new WeakMap<Kernel, Promise<string[]>>();
+
 /**
  * What a `lookback_replay` trial's sandbox may not read (spine §5 reading 178, D-cj): the user's
- * repo root and its git directory, so a trial in its checkout outside the repo reads neither the
- * current tree nor later refs.
+ * repo root and its git directories (`repoGitDirs`: with a linked worktree, its own and the common
+ * one, both outside the root), so a trial in its checkout outside the repo reads neither the
+ * current tree nor later refs. The git directories are asked once per engine.
  */
-export const trialReadDeny = (k: Kernel): string[] => [
-  k.deps.repoRoot,
-  join(k.deps.repoRoot, ".git"),
-];
+export const trialReadDeny = async (k: Kernel): Promise<string[]> => {
+  let dirs = gitDirsOf.get(k);
+  if (dirs === undefined) {
+    dirs = repoGitDirs(k.deps.repoRoot);
+    gitDirsOf.set(k, dirs);
+  }
+  return [k.deps.repoRoot, ...(await dirs)];
+};
+
+/** The parent of every arm plugin directory ({@link armPluginDir}). */
+export const armPluginsRoot = (k: Kernel): string => join(k.guardDir, "lookback", "arms");
 
 /**
  * Where a trial's arm plugin is compiled (D-cg, spine §5 reading 201):
- * `<vtcHome>/guard/lookback/arms/<trial>/<arm>/`, under the engine's private area no role can
- * write; the host loads it in place, so it stays until the run exits.
+ * `<guard>/lookback/arms/<run>--<trial>/<arm>/`, under the engine's own repo-keyed private area
+ * (`Kernel.guardDir`, so two engines on two repos never share one) no role can write; the host
+ * loads it in place, so it stays until the run exits.
  */
 export const armPluginDir = (
   k: Kernel,
   run: string,
   t: TrialRef,
   arm: LookbackReplayTrial["arm"],
-): string => join(k.deps.vtcHome, "guard", "lookback", "arms", `${run}--${key(t)}`, arm);
+): string => join(armPluginsRoot(k), `${run}--${key(t)}`, arm);
 
 /**
  * A trial whose run did not prove its arm plugin loaded (`HeadlessRun.pluginLoad`, D-cg): a

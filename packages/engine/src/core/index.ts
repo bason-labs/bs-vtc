@@ -158,6 +158,7 @@ export { replayGraderOf, replayWaitSkipReason } from "./replay.js";
  */
 export {
   AUTOMATION_OFF_NOTE,
+  AUTOMATION_SNAPSHOT_NOTE,
   automationDailySummary,
   automationFacts,
   automationReportView,
@@ -169,4 +170,9 @@ export {
   type UpstreamWiring,
   type UpstreamWiringDeps,
 } from "./automation.js";
-export { readModelState, replayTrialActionIds, withoutReplayTrialEvents } from "./replay-view.js";
+export {
+  isReplayTrialEvent,
+  readModelState,
+  replayTrialActionIds,
+  withoutReplayTrialEvents,
+} from "./replay-view.js";

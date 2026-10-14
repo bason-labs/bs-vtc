@@ -46,6 +46,7 @@ import {
 } from "./replay.js";
 import { headlessPlatformRefusal, roleSandboxProblem, roleSandboxRequest } from "./sandbox.js";
 import { hostWebRouteFor } from "./host-web.js";
+import { PARSE_FAILURE_PREFIX } from "./state.js";
 import { handleSubmit } from "./submit.js";
 
 const NO_CAPABILITIES: Pick<HostCapabilities, "subagents" | "headless"> = {
@@ -287,10 +288,11 @@ export const submitInputFor = (actionId: string, outcome: HostOutcome): SubmitIn
       action_id: actionId,
       outcome: {
         kind: "error",
-        message: `the role's final output is not a RoleResult: ${parsed.error.issues
-          .slice(0, 5)
-          .map((i) => `${i.path.join(".") || "(root)"}: ${i.message}`)
-          .join("; ")}`.slice(0, 2000),
+        message:
+          `${PARSE_FAILURE_PREFIX} the role's final output is not a RoleResult: ${parsed.error.issues
+            .slice(0, 5)
+            .map((i) => `${i.path.join(".") || "(root)"}: ${i.message}`)
+            .join("; ")}`.slice(0, 2000),
         retryable: true,
         tokens: outcome.tokens,
         cost_usd: outcome.cost_usd,
@@ -476,7 +478,13 @@ const finishHeadless = async (
       return;
     }
   }
-  await handleSubmit(k, h, submitInputFor(actionId, outcome));
+  // a done run's failure is the engine's parse failure, worded by the engine (AD-8)
+  await handleSubmit(
+    k,
+    h,
+    submitInputFor(actionId, outcome),
+    outcome.kind === "done" ? "engine" : "reported",
+  );
 };
 
 /** Reads the run's stream (its usage events reach the usage store), then its outcome. */
@@ -598,7 +606,7 @@ export const launchHeadless = async (
             : await protectedFiles(k, h, task)
         ).map((p) => p.path),
         // reading 178: a trial may read neither the user's repo nor its git directory
-        ...(step.replay === undefined ? {} : { readDeny: trialReadDeny(k) }),
+        ...(step.replay === undefined ? {} : { readDeny: await trialReadDeny(k) }),
       },
     ),
   );

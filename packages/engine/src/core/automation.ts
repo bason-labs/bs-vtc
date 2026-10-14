@@ -28,7 +28,7 @@ import {
 } from "@vtc/shared";
 import type { z } from "zod";
 import type { EventDraft } from "./event-log.js";
-import type { RunState } from "./state.js";
+import { PARSE_FAILURE_PREFIX, type RunState } from "./state.js";
 
 /** Upper bounds of the report (`AutomationReportSchema`). */
 const MAX_ITEMS = 500;
@@ -38,6 +38,10 @@ const MAX_NOTES = 20;
 /** The note when no automation wiring is present (`EngineDeps.automation` absent, D-bz). */
 export const AUTOMATION_OFF_NOTE =
   "automatic issues and PRs are off: this engine was started without automation (run VTC through the vtc cli with gh logged in)";
+
+/** The note of a committed snapshot (`vtc dashboard`): its settings are not known there. */
+export const AUTOMATION_SNAPSHOT_NOTE =
+  "a snapshot shows the automatic issues and PRs its committed run logs record; the project's automation settings are not known in a snapshot";
 
 type Payload<T extends keyof typeof EVENT_PAYLOAD_SCHEMAS> = z.infer<
   (typeof EVENT_PAYLOAD_SCHEMAS)[T]
@@ -61,6 +65,7 @@ const itemKey = (v: { target: { repo: string }; kind: string; fingerprint: strin
 export const automationReportView = (
   events: readonly VtcEvent[],
   settings: AutomationSettings | null,
+  offNote: string = AUTOMATION_OFF_NOTE,
 ): AutomationReport => {
   const items = new Map<string, AutomationItem>();
   const skipped: AutomationReport["skipped"][number][] = [];
@@ -166,7 +171,7 @@ export const automationReportView = (
     upstream: settings?.upstream ?? false,
     upstream_repo: settings?.upstreamRepo ?? DEFAULT_UPSTREAM_REPO,
     evidence_hosting: settings?.evidenceHosting ?? EVIDENCE_HOSTING_DEFAULT,
-    notes: (settings === null ? [AUTOMATION_OFF_NOTE] : settings.notes)
+    notes: (settings === null ? [offNote] : settings.notes)
       .slice(0, MAX_NOTES)
       .map((n) => n.slice(0, 300)),
     items: latest([...items.values()]).slice(0, MAX_ITEMS),
@@ -247,9 +252,6 @@ const findingIdentity = (finding: {
   ...(finding.location.path === undefined ? {} : { path: finding.location.path }),
 });
 
-/** The marker of a headless result the adapter could not parse (`submitInputFor`). */
-const PARSE_FAILURE = "final output is not a RoleResult";
-
 /**
  * Pure (D-bv): the automation facts one event of `state` raises. VTC side: an incident
  * (`gate_infra`, `crash`), an adapter parse failure, a stuck loop and a replay verdict `improve`;
@@ -287,7 +289,8 @@ export const automationFacts = (state: RunState, event: VtcEvent): AutomationFac
     }
     case "role.failed": {
       const v = parse("role.failed", event);
-      if (v === null || !v.message.includes(PARSE_FAILURE)) return [];
+      // only the engine opens a message with the prefix (`reportedFailureMessage`, AD-8)
+      if (v === null || !v.message.startsWith(PARSE_FAILURE_PREFIX)) return [];
       return [
         {
           ...base,

@@ -10,11 +10,13 @@ import { parseEventLog, type VtcEvent } from "@vtc/shared";
 import {
   applyEvent,
   createReadModel,
+  isReplayTrialEvent,
   readModelState,
+  type Engine,
   type RunState,
 } from "../../src/core/index.js";
 import { emptyRunState } from "../../src/core/state.js";
-import { lookbackEventsOf } from "../../src/daemon/index.js";
+import { liveEvents, lookbackEventsOf } from "../../src/daemon/index.js";
 
 const golden = parseEventLog(
   readFileSync(new URL("../../../../fixtures/golden-run/events.jsonl", import.meta.url), "utf8"),
@@ -118,6 +120,24 @@ describe("replay trials in the read models (reading 177)", () => {
     const task = model.task(state.id, "T-1");
     if (!task.ok) throw new Error(task.message);
     expect(JSON.stringify(task.body)).not.toContain("a-90");
+  });
+
+  it("the live event stream leaves the trial out too, so a reload shows what it showed", () => {
+    const state = withTrial();
+    let emit: ((event: VtcEvent) => void) | undefined;
+    const engine = {
+      states: () => [state],
+      onEvent: (fn: (event: VtcEvent) => void) => {
+        emit = fn;
+        return () => undefined;
+      },
+    } as unknown as Pick<Engine, "onEvent" | "states">;
+    const seen: VtcEvent[] = [];
+    liveEvents(engine, (e) => seen.push(e));
+    for (const e of state.events) emit?.(e);
+    expect(seen.map((e) => e.seq)).toEqual(golden.map((e) => e.seq));
+    const trial = state.events.filter((e) => e.seq > (golden.at(-1)?.seq ?? 0));
+    expect(trial.map((e) => isReplayTrialEvent(state, e))).toEqual([true, true, true]);
   });
 
   it("a run without a trial is its own view", () => {

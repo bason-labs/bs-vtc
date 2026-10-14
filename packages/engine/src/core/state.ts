@@ -37,15 +37,26 @@ import {
 export const SUPERSEDED_RUN_PREFIX = "superseded:";
 
 /**
- * A failure message a Lead or a host supplied, as the engine logs it: one that opens like the
- * engine's own stop ({@link SUPERSEDED_RUN_PREFIX}) is prefixed `reported: `, so a role or host
- * can never mark its own run stopped (AD-8: the engine decides).
+ * How the engine's own `role.failed` starts for a headless run whose final output is not a
+ * `RoleResult` (`submitInputFor`): the automation trigger of an upstream `adapter.parse_failure`
+ * defect (D-bv) matches it. Only the engine writes it, as {@link SUPERSEDED_RUN_PREFIX}.
  */
-export const reportedFailureMessage = (message: string): string =>
-  (message.trimStart().startsWith(SUPERSEDED_RUN_PREFIX) ? `reported: ${message}` : message).slice(
-    0,
-    2000,
-  );
+export const PARSE_FAILURE_PREFIX = "unparsed:";
+
+/**
+ * A failure message a Lead or a host supplied, as the engine logs it: one that opens like one of
+ * the engine's own ({@link SUPERSEDED_RUN_PREFIX}, {@link PARSE_FAILURE_PREFIX}) is prefixed
+ * `reported: `, so a role or host can never mark its own run stopped, nor word its failure into an
+ * upstream defect (AD-8: the engine decides).
+ */
+export const reportedFailureMessage = (message: string): string => {
+  const opening = message.trimStart();
+  return (
+    [SUPERSEDED_RUN_PREFIX, PARSE_FAILURE_PREFIX].some((p) => opening.startsWith(p))
+      ? `reported: ${message}`
+      : message
+  ).slice(0, 2000);
+};
 
 /** One role run (a `role.dispatched` and what became of it). */
 export interface RoleRunRecord {

@@ -32,7 +32,7 @@ import {
   type AutomationReport,
   type AutomationSettings,
 } from "@vtc/shared";
-import { automationReportView } from "./automation.js";
+import { AUTOMATION_SNAPSHOT_NOTE, automationReportView } from "./automation.js";
 import { readModelState } from "./replay-view.js";
 import { projectGraph, taskDagGraph, taskPipelineGraph } from "./graph.js";
 import { acceptanceCriteriaOf, parseSpecItems, type SpecItem } from "./spec.js";
@@ -365,6 +365,7 @@ export const createReadModel = (deps: ReadModelDeps): ReadModel => {
       automationReportView(
         deps.runs().flatMap((state) => state.events),
         deps.automation?.() ?? null,
+        ...(deps.mode === "snapshot" ? [AUTOMATION_SNAPSHOT_NOTE] : []),
       ),
   };
 };
