@@ -8,7 +8,7 @@
  * read at run time.
  */
 export const ROUND4_LANDED: Readonly<
-  Record<"plumbing" | "evidence" | "armPlugins" | "autoTemplates", boolean>
+  Record<"plumbing" | "evidence" | "armPlugins" | "autoTemplates" | "replayGrader", boolean>
 > = {
   /** team/engine-core: `git.createGitPlumbing` (`AutomationDeps.plumbing`). */
   plumbing: false,
@@ -21,4 +21,9 @@ export const ROUND4_LANDED: Readonly<
    * changelog-entry}.md` (`AUTO_TEMPLATE_NAMES`, AD-27).
    */
   autoTemplates: false,
+  /**
+   * team/engine-core: `core.replayGraderOf`, the grader engine core's replay gate, trial
+   * submission and daemon take a replay's grader from (`replayGraderFor`, reading 209(2)).
+   */
+  replayGrader: false,
 };
