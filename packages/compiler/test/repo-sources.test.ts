@@ -442,13 +442,15 @@ describe("spine §5 readings 27, 29 and 37 (write scopes of the research and des
     expect(role("security")?.modes?.verify?.tools?.profile).toBe("read_only");
   });
 
-  it("lets only the Architect and the Research Analyst declare the research tools (AD-22)", () => {
+  it("declares no research tools yet, pending the engine's fixture contracts (AD-22)", () => {
+    // roles/README.md: the Architect and the Research Analyst declare `engine_tools` once the
+    // engine's fixture contracts carry them; flip this to those two roles in that change.
     const declaring = roles.filter(
       (r) =>
         r.tools.engine_tools.length > 0 ||
         Object.values(r.modes ?? {}).some((m) => (m.tools?.engine_tools ?? []).length > 0),
     );
-    for (const r of declaring) expect(["architect", "research_analyst"]).toContain(r.id);
+    expect(declaring.map((r) => r.id)).toEqual([]);
   });
 });
 

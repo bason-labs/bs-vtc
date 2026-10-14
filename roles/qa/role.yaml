@@ -6,7 +6,7 @@
 #   engineering/engineering-llm-post-training-engineer.md ("exit 0 is not a pass")
 # New: REQ tags on every test, assertion provenance, scenario cards, spec questions, judge mode.
 id: qa
-version: 1.0.0
+version: 1.1.0
 kind: core
 mission: >-
   Own the task's acceptance tests: in author mode write them from the acceptance criteria before

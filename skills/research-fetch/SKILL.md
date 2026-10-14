@@ -15,21 +15,30 @@ before citing it.
 
 ## Which fetcher answers which question
 
-| Question                                               | Fetcher    | Request                                                                      |
-| ------------------------------------------------------ | ---------- | ---------------------------------------------------------------------------- |
-| Is a runtime, framework or OS release still supported? | `eol`      | `{ "fetcher": "eol", "product": "nodejs", "release": "22" }`                 |
-| A package's versions, licence, dependencies, Scorecard | `depsdev`  | `{ "fetcher": "depsdev", "system": "npm", "name": "react", "version": "…" }` |
-| Known vulnerabilities of a package version             | `osv`      | `{ "fetcher": "osv", "ecosystem": "npm", "name": "react", "version": "…" }`  |
-| Does a package exist; its latest version and metadata  | `registry` | `{ "fetcher": "registry", "registry": "npm", "name": "react" }`              |
-| Is a repository maintained; its releases               | `github`   | `{ "fetcher": "github", "repo": "owner/name", "what": "latest_release" }`    |
-| Official documentation at the pinned version, a page   | `web`      | `{ "fetcher": "web", "url": "https://…" }`                                   |
-| A changelog or release feed                            | `rss`      | `{ "fetcher": "rss", "url": "https://…" }`                                   |
-| A talk or tutorial transcript                          | `youtube`  | `{ "fetcher": "youtube", "url": "https://…" }`                               |
-| Finding candidate pages to fetch                       | `search`   | `{ "fetcher": "search", "query": "…", "max_results": 5 }`                    |
+The tool takes one request, wrapped in a `request` key. A full call's input:
+
+```json
+{ "request": { "fetcher": "eol", "product": "nodejs", "release": "22" } }
+```
+
+The `request` for each fetcher:
+
+| Question                                               | Fetcher    | Request                                                                           |
+| ------------------------------------------------------ | ---------- | --------------------------------------------------------------------------------- |
+| Is a runtime, framework or OS release still supported? | `eol`      | `{ "fetcher": "eol", "product": "nodejs", "release": "22" }`                      |
+| A package's versions, licence, dependencies, Scorecard | `depsdev`  | `{ "fetcher": "depsdev", "system": "npm", "name": "react", "version": "19.0.0" }` |
+| Known vulnerabilities of a package version             | `osv`      | `{ "fetcher": "osv", "ecosystem": "npm", "name": "react", "version": "19.0.0" }`  |
+| Does a package exist; its latest version and metadata  | `registry` | `{ "fetcher": "registry", "registry": "npm", "name": "react" }`                   |
+| Is a repository maintained; its releases               | `github`   | `{ "fetcher": "github", "repo": "owner/name", "what": "latest_release" }`         |
+| Official documentation at the pinned version, a page   | `web`      | `{ "fetcher": "web", "url": "https://nodejs.org/docs/latest-v22.x/api/" }`        |
+| A changelog or release feed                            | `rss`      | `{ "fetcher": "rss", "url": "https://nodejs.org/en/feed/releases.xml" }`          |
+| A talk or tutorial transcript                          | `youtube`  | `{ "fetcher": "youtube", "url": "https://www.youtube.com/watch?v=VIDEO_ID" }`     |
+| Finding candidate pages to fetch                       | `search`   | `{ "fetcher": "search", "query": "nodejs 22 end of life", "max_results": 5 }`     |
 
 Field values: `depsdev` `system` is one of npm, pypi, go, maven, cargo, nuget; `registry` is one
 of npm, pypi, crates; `github` `what` is one of repo, releases, latest_release. URLs are
-`https://` only. Leave out an optional `version` to ask about the package as a whole.
+`https://` only. `version` is required for `osv`; for `depsdev` and `registry` it is optional:
+leave it out to ask about the package as a whole.
 
 Prefer the most structured source: `eol`, `depsdev`, `osv` and `registry` return JSON a fact can
 point into; a web page needs a verbatim quote. Prefer the vendor's own documentation over a

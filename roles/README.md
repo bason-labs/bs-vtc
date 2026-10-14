@@ -36,10 +36,16 @@ The Lead is not a compiled agent: it is the main session, driven by the Lead ski
   exactly one `<!-- vtc:editable -->` line; everything after it is the editable section Lookback
   may propose changes to (MINOR; proposals go to `.vtc/lookback/proposals/<role>/editable.md`).
 - Mode blocks: lines between `<!-- vtc:mode <mode> -->` and `<!-- vtc:mode-end -->` reach only
-  that mode's agent; text outside blocks reaches every mode. Blocks may appear in both sections.
+  that mode's agent; text outside blocks reaches every mode. Blocks may appear only in the
+  locked core.
 - Placeholders such as `{{evidence_types}}`, `{{disciplines}}`, `{{contract_kinds}}`,
   `{{max_stack_packs}}`, `{{stack_packs}}`, `{{domain_packs}}` and `{{lenses}}` are filled at
   compile time from `@vtc/shared` and from `skills/`, so prompts never restate an enum by hand.
+  Placeholders, too, may appear only in the locked core.
+- The editable section compiles verbatim (no mode block, no placeholder, no heading named after a
+  task-pack section), so a Lookback proposal written against one agent's editable part maps back
+  to the role's `prompt.md` unchanged. Mode-specific heuristics are labelled in prose ("When
+  judging tests:") and reach every mode's agent.
 - Facts about versions, licenses, vulnerabilities or prices never come from model memory.
 
 ## How an agent is assembled
@@ -55,18 +61,28 @@ Parts 1 to 4 are the agent's **locked part** and part 5 its **editable part**.
 
 ## Prompt parts and Lookback (spine AD-21, §5 reading 102)
 
-- A prompt version is `effectivePromptSha(locked, editable)`. An agent that carries its editable
+- A prompt version is `effectivePromptSha(locked, editable)`. The compiler's definition of the
+  two parts is the compiled ones: `locked_sha256` and `editable_sha256` in the manifest are the
+  SHA-256 of the trimmed parts each plugin carries as `vtc/prompts/<agent>/locked.md` and
+  `editable.md` (not of the raw sections of `prompt.md`: the locked part also holds the contract,
+  the result protocol and the host's `prompt_append`). An agent that carries its editable
   section has the instructions `<locked>` + newline + `<editable>`, so its manifest
-  `prompt_sha256` is exactly that effective SHA. The manifest also records `locked_sha256` and
-  `editable_sha256` for every agent, and each plugin carries both parts as
-  `vtc/prompts/<agent>/locked.md` and `editable.md`.
+  `prompt_sha256` is exactly that effective SHA. The editable part is the role's editable
+  section verbatim; an engineer profile's is the Engineer's section, a blank line, then the
+  profile's. This definition, the asset path and a shared helper are proposed to `@vtc/shared`,
+  whose 4.5.0 doc comment still names `splitRolePrompt`, and must be agreed with the
+  lookback-research team before the wave-3 merge.
 - Reading 102 moves the editable section out of the compiled agent: the engine renders the
-  pinned editable section first in the task pack, so a canary needs no plugin reinstall. One
-  role goes first (`EDITABLE_IN_PACK_ROLES`: `spec_verifier`, the role with the most dispatches
-  per run) and is compared with an A/A run before every role switches. A switched agent carries
-  the locked part only, ending in a note that its heuristics come first in the task pack's
-  `Role heuristics` section, the one part of the pack that is instructions; its `prompt_sha256`
-  equals its `locked_sha256`, which is how the engine tells a switched agent apart.
+  pinned editable section first in the task pack, so a canary needs no plugin reinstall. The
+  compiler has the switch (`EDITABLE_IN_PACK_ROLES`), but **no role is switched yet**: the frozen
+  task pack has no section for it and the engine does not render one, so a switched agent would
+  run without its heuristics. The pack section (`Role heuristics`, opening the pack before
+  `## Dispatch`), a `TaskPack` field for it and the asset path are proposed to `@vtc/shared`; the
+  Spec Verifier (the role with the most dispatches per run) switches first, with a MAJOR role
+  version, in the integration step that lands them, and is compared with an A/A run before every
+  role switches. A switched agent carries the locked part only, ending in a note that only the
+  block its pack opens with, up to the first `## Dispatch` heading, is instructions (a heading of
+  that name further down is pack data); its `prompt_sha256` equals its `locked_sha256`.
 - The lookback role writes `proposal.json` (`PromptProposal`: at most three changes, each with a
   hypothesis, a target metric and trace ids) and `editable.md` (the full proposed section) under
   `.vtc/lookback/proposals/<role>/`. It never writes `roles/`, the stored versions or the pins; a
@@ -117,6 +133,14 @@ human`, exits `done`, `blocked` or `unknown`, no verdicts, no success criteria a
 - **Gap findings stay with the human** (reading 19). Until sub-project 4, `spec_gap` and
   `design_gap` findings park the task for the human; the BA and Designer prompts have no
   task-scoped clarification mode.
+- **G2 directions** (§9.1). The Designer writes each direction's first viewport to
+  `.vtc/design/prototype/directions/<id>/index.html`, returns it as a `prototype` artifact and
+  lists each direction's `G2Direction` fields (`id`, `title`, `thesis`, `prototype`) in its
+  summary; the engine adds `first_viewport` and the novelty verdict. Returning the directions as
+  `design_direction` artifacts, and the Architect's `changes` ADR as `adr`, changes the two
+  `role.yaml` output lists, which the engine's role fixtures mirror, so it lands with the
+  matching fixture change at integration (proposed with this tree's handoff); until then the
+  prompts use the declared `prototype` and `design_note` types.
 - **Role-facing engine tools** (AD-4 rule 3, AD-22; contracts 4.5.0). `ROLE_MCP_TOOLS`
   (`research_fetch`, `fact_lookup`, `fact_propose`) is the only engine surface a role may name
   in `tools.engine_tools`; the compiler rejects any other entry and always rejects the Lead's

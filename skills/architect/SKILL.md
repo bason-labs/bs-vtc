@@ -49,8 +49,8 @@ checklist to apply, not text to copy into the architecture.
    out), Rule (what must hold) and Check (how a tool verifies it, blocking or warning). If you
    cannot name the Check, it is a preference, not a decision; see the fitness functions.
 7. **Facts.** A version, licence, support window, vulnerability or price in your output either
-   cites a fact (evidence type `fact`, from the research skills' `fact_lookup`) or is written
-   `UNVERIFIED: <claim>`. The engine lists every `UNVERIFIED:` tag at G2, and each one blocks
+   cites a fact (evidence type `fact`, with the fact id the research brief in your task pack
+   cites) or is written `UNVERIFIED: <claim>`. The engine lists every `UNVERIFIED:` tag at G2, and each one blocks
    approval until a human waives it with a reason.
 
 ## Triage outputs (§8.4)

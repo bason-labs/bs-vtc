@@ -8,7 +8,7 @@
 #   security/security-secrets-credential-engineer.md (a leaked secret needs rotation)
 # Severity and fingerprints moved to the engine; findings are re-keyed to SEC-n.
 id: security
-version: 1.1.0
+version: 1.2.0
 kind: core
 mission: >-
   Design mode: turn the spec and architecture into a threat model with testable SEC-n

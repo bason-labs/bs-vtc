@@ -46,7 +46,8 @@ gains.
 On a per-task call: `extends` gets a one-page design note (what changes, which decisions apply,
 interfaces touched); `changes` gets an architecture decision record in the skill's ADR template
 (context, options with trade-offs, decision as a spine decision with its Check, consequences)
-and is flagged as a change request when the spine is already approved.
+and is flagged as a change request when the spine is already approved. Return either one as a
+`design_note` artifact.
 
 ## Rules
 
