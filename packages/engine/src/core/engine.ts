@@ -66,6 +66,7 @@ import {
 import { dispatchGuarded, inSessionRefusal, NO_LEAD_WAIT_REASON, phaseRoles } from "./dispatch.js";
 import {
   checkDirectionsNovelty,
+  designerRedispatchNote,
   designWorkSince,
   g2ApprovalProblem,
   gateExtras,
@@ -1159,14 +1160,20 @@ export class Engine implements Kernel {
     if (["discover", "specify", "design"].includes(phase)) {
       const entered = phaseEnteredSeq(state, phase) ?? 0;
       // after a G2 re-roll only the Designer had to run again (§9.1 step 5, reading 151)
-      const done = roles.every(
-        ({ role, mode }) =>
-          lastSubmitted(
-            state,
-            { role, ...(mode === undefined ? {} : { mode }) },
-            phase === "design" ? designWorkSince(handle, role, entered) : entered,
-          )?.exit === "done",
-      );
+      const done = roles.every(({ role, mode }) => {
+        const since = phase === "design" ? designWorkSince(handle, role, entered) : entered;
+        if (
+          lastSubmitted(state, { role, ...(mode === undefined ? {} : { mode }) }, since)?.exit !==
+          "done"
+        )
+          return false;
+        // D-bt (reading 174): the Designer goes once more for too few directions
+        return !(
+          phase === "design" &&
+          role === "designer" &&
+          designerRedispatchNote(this, handle, since) !== undefined
+        );
+      });
       if (!done) return false;
       if (phase === "discover") this.phaseTo(handle, "specify");
       else if (phase === "specify")

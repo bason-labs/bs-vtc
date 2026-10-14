@@ -42,7 +42,7 @@ import {
   type RunHandle,
 } from "./kernel.js";
 import { finalReviewSteps } from "./final-review.js";
-import { designWorkSince, rerollInputs } from "./g2.js";
+import { designerRedispatchNote, designWorkSince, rerollInputs } from "./g2.js";
 import { retroSteps } from "./retro.js";
 import type { PromptParts } from "./plugins.js";
 import { effectiveVerdict } from "./gate-verdict.js";
@@ -519,9 +519,13 @@ export const pendingSteps = (k: Kernel, h: RunHandle, host: HostId): StepSpec[] 
     return phaseRoleList.flatMap(({ role, mode }) => {
       const filter = { role, ...(mode === undefined ? {} : { mode }) };
       if (busyStep(h, filter)) return [];
-      const done = lastSubmitted(state, filter, designWorkSince(h, role, entered));
-      if (done !== undefined && done.exit === "done") return [];
-      const note = rejectionNote(h, filter);
+      const since = designWorkSince(h, role, entered);
+      const done = lastSubmitted(state, filter, since);
+      // D-bt (reading 174): too few directions on a new UI design send the Designer back once
+      const again =
+        phase === "design" && role === "designer" ? designerRedispatchNote(k, h, since) : undefined;
+      if (done !== undefined && done.exit === "done" && again === undefined) return [];
+      const note = [rejectionNote(h, filter), again].filter((n) => n !== undefined).join("\n");
       const decision = [...state.events]
         .reverse()
         .find((e) => e.type === "gate.rejected" || e.type === "gate.approved");
@@ -530,7 +534,9 @@ export const pendingSteps = (k: Kernel, h: RunHandle, host: HostId): StepSpec[] 
           ? `The human rejected the gate${(decision.data as { note?: string }).note === undefined ? "." : `: ${(decision.data as { note?: string }).note ?? ""}`}`
           : undefined;
       const rerolled = role === "designer" ? reroll : undefined;
-      const combined = [note, gateNote, rerolled?.note].filter((n) => n !== undefined).join("\n");
+      const combined = [note === "" ? undefined : note, gateNote, rerolled?.note]
+        .filter((n) => n !== undefined)
+        .join("\n");
       const answer = phaseAnswer(h, phase, role);
       return [
         {

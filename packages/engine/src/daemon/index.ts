@@ -27,6 +27,7 @@ import {
   type HostId,
   type ResearchScope,
   type RunDaemon,
+  type SearchProvider,
   type RunningDaemon,
   type RunningSnapshot,
   type ServeSnapshot,
@@ -70,13 +71,17 @@ import {
   createFetchQuota,
   createFileResearchCache,
   createResearchService,
+  type FetchQuota,
   type ResearchEventDraft,
   type ResearchService,
+  type ResearchServiceDeps,
 } from "../research/index.js";
 
 export interface ResearchWiringOptions {
   /** Network requests per run for the role tools (`createFetchQuota`'s default when absent). */
   readonly quotaPerRun?: number;
+  /** The per-run research quota itself (default `createFetchQuota(quotaPerRun)`). */
+  readonly quota?: FetchQuota;
   /** How often the cache is pruned (the first prune runs one interval after the start). */
   readonly pruneEveryMs?: number;
 }
@@ -90,11 +95,17 @@ export const RESEARCH_PRUNE_MS = 24 * 60 * 60_000;
  * hands core the re-checked table. A call is served only while a role run that declares the tool
  * is in flight; the fact row records that role. The events it emits go to that run's log. Each
  * run's role calls share one research quota, dropped at `run.finished`, and the cache is pruned on
- * a schedule (spine §5 reading 138). Returns the cleanup the daemon runs at shutdown.
+ * a schedule (spine §5 reading 138). Search runs on the host's own web search in the role session
+ * (H-3, reading 156): the keyed `search` fetcher is the user's opt-in (`researchSearchProvider`,
+ * no default), handed to the service, and without it that fetcher gets no key, so it sends
+ * nothing. Returns the cleanup the daemon runs at shutdown.
  */
 export const wireResearch = (
   engine: Engine,
-  deps: Pick<EngineDeps, "repoRoot" | "vtcHome" | "http" | "researchApiKey" | "now">,
+  deps: Pick<
+    EngineDeps,
+    "repoRoot" | "vtcHome" | "http" | "researchApiKey" | "researchSearchProvider" | "now"
+  >,
   options: ResearchWiringOptions = {},
 ): (() => void) => {
   const scope = ((): ResearchScope => {
@@ -107,14 +118,19 @@ export const wireResearch = (
   const cache = createFileResearchCache(deps.vtcHome);
   // one quota for the daemon's life: the service is built per call, the per-run counts outlive it
   // (the G2 re-check, run undefined, takes none)
-  const quota = createFetchQuota(options.quotaPerRun);
+  const quota = options.quota ?? createFetchQuota(options.quotaPerRun);
   const keyOf = deps.researchApiKey;
-  const serviceFor = (run: string | undefined): ResearchService =>
-    createResearchService({
+  // H-3 (reading 156): search runs on the host's own web search in the role session; the keyed
+  // `search` fetcher is an opt-in with no default, so without a provider it gets no key and sends
+  // nothing
+  const provider = deps.researchSearchProvider;
+  const serviceFor = (run: string | undefined): ResearchService => {
+    const service: ResearchServiceDeps & { readonly searchProvider?: SearchProvider } = {
       projectRoot: deps.repoRoot,
       cache,
       scope,
       http: deps.http,
+      ...(provider === undefined ? {} : { searchProvider: provider }),
       ...(run === undefined ? {} : { quota: quota.forRun(run) }),
       ...(deps.now === undefined ? {} : { now: deps.now }),
       ...(keyOf === undefined
@@ -122,14 +138,18 @@ export const wireResearch = (
         : {
             apiKey: (fetcher: string) => {
               const id = FetcherIdSchema.safeParse(fetcher);
-              return id.success ? keyOf(id.data) : undefined;
+              if (!id.success) return undefined;
+              if (id.data === "search" && provider === undefined) return undefined;
+              return keyOf(id.data);
             },
           }),
       knownValues: () => engine.secrets(),
       onEvent: (event: ResearchEventDraft) => {
         engine.recordModuleEvent(run, event);
       },
-    });
+    };
+    return createResearchService(service);
+  };
   engine.setRoleTools(async (name, input) => {
     const caller = engine.roleCalling(name);
     if (caller === undefined)
