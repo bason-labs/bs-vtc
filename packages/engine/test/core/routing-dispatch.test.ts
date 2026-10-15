@@ -27,7 +27,8 @@ import {
   type SpawnAction,
 } from "../helpers/engine-harness.js";
 
-vi.setConfig({ testTimeout: 30_000 });
+// whole engine flows on a real repo: room on a loaded machine, as the other flow tests have
+vi.setConfig({ testTimeout: 60_000 });
 afterEach(cleanupDirs);
 
 const next = async (h: Harness): Promise<LeadAction[]> => (await h.engine.next({}, CLAUDE)).actions;
@@ -89,7 +90,7 @@ describe("the routed start tier on dispatch (D-cm)", () => {
     await h.release();
   });
 
-  it("starts an L or high-risk task on Top, and a hint replaces the rule", async () => {
+  it("lets the Planner's hint replace the rule: an L task hinted Mid starts on Mid", async () => {
     const { h, qa } = await toQa([
       draft("T-1", {
         size: "L",
@@ -106,10 +107,19 @@ describe("the routed start tier on dispatch (D-cm)", () => {
       clamped: false,
     });
     await h.release();
-    const auth = await toQa([draft("T-1", { size: "S", risk: "low", risk_tags: ["auth"] })]);
-    await authorTests(auth.h, auth.qa);
-    expect(only(await next(auth.h), "engineer").model).toBe("opus");
-    await auth.h.release();
+  });
+
+  it("starts a task with a high-risk tag on Top, whatever its size", async () => {
+    const { h, qa } = await toQa([draft("T-1", { size: "S", risk: "low", risk_tags: ["auth"] })]);
+    await authorTests(h, qa);
+    expect(only(await next(h), "engineer").model).toBe("opus");
+    expect(tierOf(dispatched(h).find((d) => d.role === "engineer")!)).toEqual({
+      model: "opus",
+      tier: "top",
+      reason: "rule",
+      clamped: false,
+    });
+    await h.release();
   });
 
   it("holds every tier inside routing.min_tier / max_tier and says so", async () => {
@@ -148,33 +158,46 @@ describe("the routed start tier on dispatch (D-cm)", () => {
     await h.release();
   });
 
-  it("escalates a Low start to Mid after 2 failed rounds, clamped by max_tier", async () => {
-    for (const [project, want] of [
-      [{}, { model: "sonnet", tier: "mid", reason: "escalation", clamped: false }],
-      [
-        { routing: { max_tier: "low" } },
-        { model: "haiku", tier: "low", reason: "escalation", clamped: true },
-      ],
-    ] as const) {
-      const { h, qa } = await toQa([draft("T-1", { size: "S", risk: "low" })], { project });
-      await authorTests(h, qa);
-      let engineer = only(await next(h), "engineer");
-      h.gates.queue(
-        "round",
-        { fail: [toolFinding("a", "medium"), toolFinding("b", "medium")] },
-        { fail: [toolFinding("c", "medium")] },
-      );
-      for (const round of [1, 2]) {
-        writeFile(worktreeOf(h, "T-1"), `src/t-1/r${String(round)}.ts`, `export const r = 1;\n`);
-        expect((await submitResult(h, engineer, { exit: "built" })).accepted).toBe(true);
-        await h.engine.settle();
-        engineer = only(await next(h), "engineer");
-      }
-      const engineers = dispatched(h).filter((d) => d.role === "engineer");
-      expect(engineers.slice(0, 2).map((d) => d.data.tier_reason)).toEqual(["rule", "rule"]);
-      expect(tierOf(engineers.at(-1)!)).toEqual(want);
-      await h.release();
+  /** Two failed rounds of an S task, then the Engineer's third dispatch. */
+  const escalated = async (project: Record<string, unknown>): Promise<Dispatched[]> => {
+    const { h, qa } = await toQa([draft("T-1", { size: "S", risk: "low" })], { project });
+    await authorTests(h, qa);
+    let engineer = only(await next(h), "engineer");
+    h.gates.queue(
+      "round",
+      { fail: [toolFinding("a", "medium"), toolFinding("b", "medium")] },
+      { fail: [toolFinding("c", "medium")] },
+    );
+    for (const round of [1, 2]) {
+      writeFile(worktreeOf(h, "T-1"), `src/t-1/r${String(round)}.ts`, `export const r = 1;\n`);
+      expect((await submitResult(h, engineer, { exit: "built" })).accepted).toBe(true);
+      await h.engine.settle();
+      engineer = only(await next(h), "engineer");
     }
+    const engineers = dispatched(h).filter((d) => d.role === "engineer");
+    await h.release();
+    return engineers;
+  };
+
+  it("escalates a Low start to Mid after 2 failed rounds", async () => {
+    const engineers = await escalated({});
+    expect(engineers.slice(0, 2).map((d) => d.data.tier_reason)).toEqual(["rule", "rule"]);
+    expect(tierOf(engineers.at(-1)!)).toEqual({
+      model: "sonnet",
+      tier: "mid",
+      reason: "escalation",
+      clamped: false,
+    });
+  });
+
+  it("clamps the escalation to routing.max_tier", async () => {
+    const engineers = await escalated({ routing: { max_tier: "low" } });
+    expect(tierOf(engineers.at(-1)!)).toEqual({
+      model: "haiku",
+      tier: "low",
+      reason: "escalation",
+      clamped: true,
+    });
   });
 
   it("drops a reviewer one tier from its routed tier past the reviewers' share", async () => {

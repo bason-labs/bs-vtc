@@ -579,12 +579,12 @@ describe("RETRO runs Lookback replays as headless runs (AD-21 rule 6, readings 1
   });
 
   it("runs every trial on the tier its recorded dispatch ran on, never re-routed (D-cm, reading 218 (7))", async () => {
-    const recorded = atRetro(["a", "b"], {
+    const { h, trials, reach } = atRetro(["a", "b"], {
       tier: { tier: "low", reason: "rule", clamped: false },
     });
-    await recorded.reach();
+    await reach();
     expect(
-      recorded.trials.runs.map((t) => ({
+      trials.runs.map((t) => ({
         model: t.dispatched?.model,
         tier: t.dispatched?.data.tier,
         reason: t.dispatched?.data.tier_reason,
@@ -593,16 +593,18 @@ describe("RETRO runs Lookback replays as headless runs (AD-21 rule 6, readings 1
       { model: "haiku", tier: "low", reason: "rule" },
       { model: "haiku", tier: "low", reason: "rule" },
     ]);
-    await recorded.h.release();
-    // a dispatch logged before 5.4.0 recorded no tier: the role's own
-    const older = atRetro(["a"]);
-    await older.reach();
-    expect(older.trials.runs[0]?.dispatched?.data).toMatchObject({
+    await h.release();
+  });
+
+  it("runs a trial of a dispatch logged before 5.4.0 (no tier recorded) on the role's own tier", async () => {
+    const { h, trials, reach } = atRetro(["a"]);
+    await reach();
+    expect(trials.runs[0]?.dispatched?.data).toMatchObject({
       tier: "mid",
       tier_reason: "role",
       tier_clamped: false,
     });
-    await older.h.release();
+    await h.release();
   });
 
   it("hands Lookback the trials' enforced read deny: read_denied only when the host enforced it (reading 178)", async () => {
