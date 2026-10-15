@@ -16,7 +16,9 @@
  *   automation branches (every `vtc/auto/<kind>/<fp8>` and `vtc-evidence`), only into the
  *   remote's own remote-tracking refs (`refs/remotes/<remote>/…`), never a local branch, a tag,
  *   the index or the work tree; the user's own git and credentials, no prompt;
- * - message: a commit's full message from the object itself, or `null` when the repo lacks it.
+ * - message: a commit's full message from the object itself, or `null` when the repo lacks it;
+ * - changedPaths and mergeBase (contracts 5.5.0): read only, full object ids only, so the upstream
+ *   module can refuse an automatic PR that touches files its kind may not before it opens (AD-8).
  */
 import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -230,5 +232,40 @@ export const createGitPlumbing: CreateGitPlumbing = ({ repoRoot }): GitPlumbing 
     return at < 0 ? "" : raw.slice(at + 2);
   };
 
-  return { resolve, commit, updateRef, push, fetch, message };
+  const changedPaths: NonNullable<GitPlumbing["changedPaths"]> = async (from, to) => {
+    const base = sha(from, "the base");
+    const head = sha(to, "the head");
+    // three dots: against the merge base; no renames, so a rename names both of its paths; -z, so
+    // a path with any byte stays one path; never an external diff driver or textconv
+    const out = await runGit(repoRoot, [
+      "diff",
+      "--name-only",
+      "--no-renames",
+      "--no-ext-diff",
+      "--no-textconv",
+      "-z",
+      "--end-of-options",
+      `${base}...${head}`,
+      "--",
+    ]);
+    return out.stdout
+      .toString("utf8")
+      .split("\0")
+      .filter((p) => p !== "");
+  };
+
+  const mergeBase: NonNullable<GitPlumbing["mergeBase"]> = async (a, b) => {
+    const left = sha(a, "a commit");
+    const right = sha(b, "a commit");
+    const result = await runGit(repoRoot, ["merge-base", "--end-of-options", left, right], {
+      allowFailure: true,
+    });
+    // exit 1 with no output: no common ancestor; anything else is git's failure
+    if (result.code === 1 && result.stdout.toString("utf8").trim() === "") return null;
+    if (result.code !== 0)
+      throw new Error(`git merge-base failed: ${result.stderr.trim().slice(0, 500)}`);
+    return sha(result.stdout.toString("utf8").trim(), "the merge base");
+  };
+
+  return { resolve, commit, updateRef, push, fetch, message, changedPaths, mergeBase };
 };

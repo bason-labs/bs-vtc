@@ -282,4 +282,48 @@ describe("git.createGitPlumbing (the frozen CreateGitPlumbing seam)", () => {
       }),
     ).resolves.toMatch(/^[a-f0-9]{40}$/);
   });
+
+  it("lists the paths a head changes against its merge base, renames as both paths (contracts 5.5.0)", async () => {
+    const repo = initRepo({
+      "packages/shared/src/tier-routing.ts": "export const T = 1;\n",
+      "src/old name.ts": "x\n",
+    });
+    const cut = git(repo, "rev-parse", "HEAD");
+    git(repo, "checkout", "--quiet", "-b", "work");
+    writeFile(repo, "packages/shared/src/tier-routing.ts", "export const T = 2;\n");
+    git(repo, "mv", "src/old name.ts", "src/new.ts");
+    git(repo, "commit", "--quiet", "-am", "work");
+    const head = git(repo, "rev-parse", "HEAD");
+    // the default branch moves on: its own change is not the head's
+    git(repo, "checkout", "--quiet", "main");
+    writeFile(repo, "README.md", "# moved on\n");
+    git(repo, "add", "README.md");
+    git(repo, "commit", "--quiet", "-m", "main moves");
+    const main = git(repo, "rev-parse", "HEAD");
+    const plumbing = createGitPlumbing({ repoRoot: repo });
+    expect(await plumbing.mergeBase?.(main, head)).toBe(cut);
+    expect([...((await plumbing.changedPaths?.(main, head)) ?? [])].sort()).toEqual([
+      "packages/shared/src/tier-routing.ts",
+      "src/new.ts",
+      "src/old name.ts",
+    ]);
+    expect(await plumbing.changedPaths?.(head, head)).toEqual([]);
+  });
+
+  it("has no merge base for unrelated histories, and refuses what is not a full object id", async () => {
+    const repo = initRepo();
+    const plumbing = createGitPlumbing({ repoRoot: repo });
+    const head = git(repo, "rev-parse", "HEAD");
+    const orphan = await plumbing.commit({
+      base: null,
+      parents: [],
+      changes: [{ path: "a.txt", bytes: bytes("a\n") }],
+      message: "orphan",
+    });
+    expect(await plumbing.mergeBase?.(head, orphan)).toBeNull();
+    await expect(plumbing.changedPaths?.("--output=x", head)).rejects.toThrow(/full git object id/);
+    await expect(plumbing.mergeBase?.(head, "HEAD")).rejects.toThrow(/full git object id/);
+    // an unknown object is git's failure, not an empty list
+    await expect(plumbing.changedPaths?.("f".repeat(40), head)).rejects.toThrow();
+  });
 });

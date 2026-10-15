@@ -280,6 +280,7 @@ export const routeStep = (
   step: Pick<StepSpec, "role" | "mode" | "task" | "replay">,
   host: HostId,
   change?: TierChange,
+  steps?: number,
 ): TierRoute => {
   const contract = k.deps.roles.get(step.role);
   const own = contract === undefined ? "mid" : roleTier(contract, host, step.mode);
@@ -295,6 +296,7 @@ export const routeStep = (
       config: k.config(),
     },
     change,
+    steps,
   );
 };
 
@@ -480,15 +482,22 @@ const taskSteps = (k: Kernel, h: RunHandle, taskId: string, host: HostId): StepS
       return steps;
     }
     const round = task.status === "tests_authored" ? 1 : Math.max(1, task.round);
-    // D-cm: the Engineer starts on its routed tier and escalates one tier up from it (clamped)
-    const start = routeStep(k, h, { role: "engineer", task: taskId }, host);
+    // D-cm: the Engineer starts on its routed tier and escalates one tier up from it after every
+    // 2 failed rounds (Low → Mid → Top, reading 218(4)), clamped each time
+    const engineerStep = { role: "engineer", task: taskId };
+    const start = routeStep(k, h, engineerStep, host);
     const plan = engineerDispatch(start.tier, round);
     const route = plan.escalated
-      ? routeStep(k, h, { role: "engineer", task: taskId }, host, "escalation")
+      ? routeStep(k, h, engineerStep, host, "escalation", plan.steps)
       : start;
+    // a later escalation the project's clamp holds on the same tier keeps the session
+    const fresh =
+      plan.freshSession &&
+      (plan.steps <= 1 ||
+        routeStep(k, h, engineerStep, host, "escalation", plan.steps - 1).tier !== route.tier);
     const resume =
       interruptedSession(h, { role: "engineer", task: taskId }) ??
-      (plan.freshSession || round === 1 ? undefined : task.session_ref);
+      (fresh || round === 1 ? undefined : task.session_ref);
     const answer = freshAnswer(h, taskId, lastDispatchSeq(h, taskId, "engineer"));
     const note = rejectionNote(h, { role: "engineer", task: taskId });
     steps.push({

@@ -416,7 +416,11 @@ export const automaticPrInput = (
         "- [ ] Merge it yourself: VTC never merges an automatic PR",
       ].join("\n"),
     },
-    source: { pushedHead: GitShaSchema.parse(release.head) },
+    // D-ct: the cut point is the before side of a UI PR's evidence (reading 231)
+    source: {
+      pushedHead: GitShaSchema.parse(release.head),
+      ...(release.base === undefined ? {} : { base: GitShaSchema.parse(release.base) }),
+    },
     ...(report?.success === true ? { report: report.data } : {}),
     issue: automation.issue,
     evidence: {

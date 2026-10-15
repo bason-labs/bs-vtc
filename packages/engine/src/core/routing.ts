@@ -123,12 +123,16 @@ export const startTier = (input: RouteInput): TierRoute => {
 };
 
 /**
- * Pure: the tier a role run is dispatched on: its start ({@link startTier}), or one tier up from it
- * (`escalation`) or down (`budget_drop`), clamped again. `clamped` says whether the bounds moved the
- * tier this route asked for.
+ * Pure: the tier a role run is dispatched on: its start ({@link startTier}), or `steps` tiers up
+ * from it (`escalation`; one by default, two for a Low start's second escalation, reading 218(4))
+ * or one down (`budget_drop`), clamped again. `clamped` says whether the bounds moved the tier this
+ * route asked for.
  */
-export const routeTier = (input: RouteInput, change?: TierChange): TierRoute => {
+export const routeTier = (input: RouteInput, change?: TierChange, steps = 1): TierRoute => {
   const start = startTier(input);
   if (change === undefined) return start;
-  return settle(input, change === "escalation" ? tierUp(start.tier) : tierDown(start.tier), change);
+  if (change === "budget_drop") return settle(input, tierDown(start.tier), change);
+  let tier = start.tier;
+  for (let i = 0; i < Math.max(1, steps); i++) tier = tierUp(tier);
+  return settle(input, tier, change);
 };

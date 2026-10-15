@@ -12,9 +12,11 @@ import {
   PARTIAL_EVIDENCE_REASONS,
   SKIP_REASONS,
 } from "@/lib/automation";
-import { readAutomationFixture } from "../fixtures";
+import { readFixture } from "../fixtures";
 
-const report = (): AutomationReport => AutomationReportSchema.parse(readAutomationFixture());
+/** Engine core's golden `GET /api/automation`: a draft with complete evidence, a merged PR and
+ * the error, paused, privacy and rate-limit skips. */
+const report = (): AutomationReport => AutomationReportSchema.parse(readFixture("automation"));
 
 describe("automationView (D-ca, AD-27 rule 7)", () => {
   it("says what is on, where upstream reports go and how evidence is hosted", () => {
@@ -22,7 +24,7 @@ describe("automationView (D-ca, AD-27 rule 7)", () => {
     expect(view.switches).toEqual([
       { id: "issues", label: "Issues", on: true },
       { id: "prs", label: "Pull requests", on: true },
-      { id: "upstream", label: "Reports to bason-labs/bs-vtc", on: true },
+      { id: "upstream", label: "Reports to bason-labs/bs-vtc", on: false },
     ]);
     expect(view.off).toBe(false);
     expect(view.hosting).toBe("committed to the orphan vtc-evidence branch");
@@ -44,20 +46,24 @@ describe("automationView (D-ca, AD-27 rule 7)", () => {
     const { items } = automationView(report());
     expect(items.map((i) => i.last)).toEqual([...items.map((i) => i.last)].sort().reverse());
     const ci = items.find((i) => i.kind === "Post-merge CI failure")!;
-    expect(ci.target).toBe("This project · example-org/golden-app");
+    expect(ci.target).toBe("This project · acme/invoices");
     expect(ci.issue).toMatchObject({
-      label: "Issue #41",
-      href: "https://github.com/example-org/golden-app/issues/41",
-      state: { label: "open" },
+      label: "Issue #12",
+      href: "https://github.com/acme/invoices/issues/12",
+      state: { label: "closed" },
     });
     expect(ci.pr).toMatchObject({
-      label: "PR #42",
-      href: "https://github.com/example-org/golden-app/pull/42",
-      state: { label: "draft" },
+      label: "PR #13",
+      href: "https://github.com/acme/invoices/pull/13",
+      state: { label: "merged" },
       evidence: { label: "evidence complete", tone: "ok" },
     });
+    const draft = items.find((i) => i.pr?.state.label === "draft")!;
+    expect(draft.target).toBe("VTC · bason-labs/bs-vtc");
+    expect(draft.pr?.evidence).toMatchObject({ label: "evidence complete", tone: "ok" });
     const lookback = items.find((i) => i.kind === "Lookback prompt change")!;
     expect(lookback.target).toBe("VTC · bason-labs/bs-vtc");
+    expect(lookback.issue).toBeNull();
     expect(lookback.pr?.evidence).toMatchObject({ label: "evidence partial", tone: "warn" });
     const merged = items.find((i) => i.pr?.state.label === "merged");
     expect(merged?.pr?.state.tone).toBe("ok");
@@ -78,7 +84,10 @@ describe("automationView (D-ca, AD-27 rule 7)", () => {
   it("lists the latest skips newest first, each with its reason", () => {
     const { skipped } = automationView(report());
     expect(skipped.map((s) => s.at)).toEqual([...skipped.map((s) => s.at)].sort().reverse());
-    expect(skipped[0]).toMatchObject({ reason: SKIP_REASONS.rate_limit });
+    expect(skipped[0]).toMatchObject({ reason: SKIP_REASONS.error });
+    expect(skipped.map((s) => s.reason)).toEqual(
+      expect.arrayContaining([SKIP_REASONS.paused, SKIP_REASONS.privacy, SKIP_REASONS.rate_limit]),
+    );
     expect(skipped.every((s) => s.detail.length > 0)).toBe(true);
   });
 

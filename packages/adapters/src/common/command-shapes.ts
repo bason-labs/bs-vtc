@@ -15,7 +15,14 @@
  * in-session hook (`vtc hook pre-tool-use`, reading 221) should shape a call through this same
  * function (exported from `@vtc/adapters`), so a headless and an in-session call count alike.
  */
-import { commandShapes, MAX_SHAPES_PER_COMMAND, type CommandShape } from "@vtc/shared";
+import {
+  commandShapes,
+  heredocAt,
+  MAX_SHAPES_PER_COMMAND,
+  skipHeredocBodies,
+  type CommandShape,
+  type Heredoc,
+} from "@vtc/shared";
 
 /** Shells whose `-c` (alone or among other one-letter flags, `-lc`) takes a script. */
 const SHELLS: ReadonlySet<string> = new Set(["sh", "bash", "zsh", "dash", "ksh"]);
@@ -30,10 +37,13 @@ const shellQuote = (word: string): string =>
  * with backslash escapes, a backslash outside quotes escapes one character), and the rest of the
  * line from the first unquoted command separator on (`;`, `&`, `|`, parentheses, a newline, as
  * `commandShapes` splits; the `&` of a redirection such as `2>&1` is none), `""` when there is
- * none. Lenient: an unclosed quote runs to the end.
+ * none. A here-document the first command opens (`<<EOF`) has its body cut out of the rest, as
+ * `commandShapes` skips it (contracts 5.6.0), so no body line is read as a command. Lenient: an
+ * unclosed quote runs to the end.
  */
 const firstCommand = (line: string): { readonly words: string[]; readonly rest: string } => {
   const words: string[] = [];
+  const heredocs: Heredoc[] = [];
   let word = "";
   let inWord = false;
   let i = 0;
@@ -55,6 +65,17 @@ const firstCommand = (line: string): { readonly words: string[]; readonly rest: 
         if (line[i] === "\\" && i + 1 < line.length && '"\\$`'.includes(line[i + 1] ?? "")) i += 1;
         word += line[i] ?? "";
       }
+    } else if (c === "<" && line[i + 1] === "<" && line[i + 2] !== "<") {
+      // a here-document: the operator and its delimiter are a word of this command; its body,
+      // after this line, is data
+      if (inWord) words.push(word);
+      const heredoc = heredocAt(line, i);
+      if (heredoc !== null) heredocs.push(heredoc.doc);
+      const next = heredoc?.next ?? i + 2;
+      words.push(line.slice(i, next));
+      word = "";
+      inWord = false;
+      i = next - 1;
     } else if (c === "<" || c === ">" || (c === "&" && line[i + 1] === ">")) {
       // a redirection (`>out`, `2>&1`, `&>log`) is a word of this command, never its end; it
       // starts a word of its own unless a file descriptor number leads it
@@ -80,7 +101,14 @@ const firstCommand = (line: string): { readonly words: string[]; readonly rest: 
     }
   }
   if (inWord) words.push(word);
-  return { words, rest: line.slice(i) };
+  if (heredocs.length === 0 || i >= line.length) return { words, rest: line.slice(i) };
+  // the bodies start on the line after the operators' line
+  const newline = line.indexOf("\n", i);
+  if (newline < 0) return { words, rest: line.slice(i) };
+  return {
+    words,
+    rest: line.slice(i, newline + 1) + line.slice(skipHeredocBodies(line, newline + 1, heredocs)),
+  };
 };
 
 const baseName = (program: string): string => program.slice(program.lastIndexOf("/") + 1);

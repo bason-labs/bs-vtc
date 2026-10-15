@@ -84,6 +84,10 @@
     {
       "version": "5.5.0",
       "schemas_sha256": "bbb9bae3f8df2b4aace5c131f178f625a7399bf0294294280f8f9af7101ff8b3"
+    },
+    {
+      "version": "5.6.0",
+      "schemas_sha256": "c16a6ca5c0a184501088b3d6be04410ed693a6c77abf50b6d34ecdbce2601a7c"
     }
   ]
 }

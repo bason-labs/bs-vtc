@@ -176,6 +176,7 @@ export {
   toolShapeUpstreamKey,
   toolSignalFacts,
   TOOL_SUBCOMMAND_PROGRAMS,
+  TOOL_UPSTREAM_PROGRAMS,
   type AutomaticRelease,
   type AutomationFact,
   type CreateUpstream,

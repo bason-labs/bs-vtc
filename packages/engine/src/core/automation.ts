@@ -8,6 +8,9 @@
 import {
   AutomationReportSchema,
   CAPABILITY_SIGNAL_MIN,
+  COMMAND_SHAPE_OTHER,
+  COMMAND_SHAPE_PATH,
+  COMMAND_SHAPE_SUBCOMMAND_PROGRAMS,
   CommandShapeCountSchema,
   commandShapeKey,
   DEFAULT_UPSTREAM_REPO,
@@ -656,17 +659,142 @@ export const TOOL_SUBCOMMAND_PROGRAMS: ReadonlySet<string> = new Set([
 ]);
 
 /**
- * Pure (D-cs): the key of a shape as it may leave the machine: `commandShapeKey` with the
+ * The programs whose name a `tool` fact may send to VTC's repo (D-by; spine §5 reading 232): VTC's
+ * own vocabulary of common developer tools, the shared subcommand programs among them. Any other
+ * `program` stays in the project's run log: it may be the project's own script or CLI, or a body
+ * line a log recorded before contracts 5.6.0 read as a command. A script named by a path
+ * (`<path>`) or a word the lexer could not name (`<other>`) carries no text and is kept.
+ */
+export const TOOL_UPSTREAM_PROGRAMS: ReadonlySet<string> = new Set([
+  ...COMMAND_SHAPE_SUBCOMMAND_PROGRAMS,
+  COMMAND_SHAPE_PATH,
+  COMMAND_SHAPE_OTHER,
+  ...[
+    "awk",
+    "base64",
+    "basename",
+    "bash",
+    "bundle",
+    "bunx",
+    "cat",
+    "cd",
+    "chmod",
+    "column",
+    "composer",
+    "cp",
+    "curl",
+    "cut",
+    "dart",
+    "date",
+    "diff",
+    "dig",
+    "dirname",
+    "du",
+    "echo",
+    "eslint",
+    "export",
+    "ffmpeg",
+    "file",
+    "find",
+    "flutter",
+    "gem",
+    "gradle",
+    "grep",
+    "gzip",
+    "head",
+    "java",
+    "javac",
+    "jest",
+    "jq",
+    "kill",
+    "less",
+    "ln",
+    "ls",
+    "lsof",
+    "make",
+    "mkdir",
+    "mv",
+    "mvn",
+    "mypy",
+    "mysql",
+    "nc",
+    "node",
+    "npx",
+    "openssl",
+    "patch",
+    "perl",
+    "php",
+    "pnpx",
+    "printf",
+    "prettier",
+    "ps",
+    "psql",
+    "pwd",
+    "pytest",
+    "python",
+    "python3",
+    "readlink",
+    "realpath",
+    "redis-cli",
+    "rg",
+    "rm",
+    "rmdir",
+    "rsync",
+    "ruby",
+    "ruff",
+    "scp",
+    "sed",
+    "seq",
+    "sh",
+    "sha256sum",
+    "shasum",
+    "sleep",
+    "sort",
+    "source",
+    "sqlite3",
+    "ssh",
+    "stat",
+    "swift",
+    "tail",
+    "tar",
+    "tee",
+    "test",
+    "timeout",
+    "touch",
+    "tr",
+    "tree",
+    "tsc",
+    "uname",
+    "uniq",
+    "unzip",
+    "vitest",
+    "wc",
+    "wget",
+    "which",
+    "xargs",
+    "xcodebuild",
+    "yq",
+    "zip",
+    "zsh",
+  ],
+]);
+
+/**
+ * Pure (D-cs): the key of a shape as it may leave the machine, or `null` when it may not: a
+ * program outside {@link TOOL_UPSTREAM_PROGRAMS} stays local; otherwise `commandShapeKey` with the
  * subcommand kept only for a {@link TOOL_SUBCOMMAND_PROGRAMS} program (`-` otherwise), so a
  * project's host or database name never reaches VTC's repo (reading 221 (1): the shape key and the
- * task count only). The run's log keeps the full shape.
+ * task count only). The flag hash holds flag names only (contracts 5.6.0: no attached value). The
+ * run's log keeps the full shape.
  */
-export const toolShapeUpstreamKey = (shape: CommandShape): string =>
-  commandShapeKey(
-    TOOL_SUBCOMMAND_PROGRAMS.has(shape.program)
-      ? shape
-      : { program: shape.program, flags: shape.flags },
-  );
+export const toolShapeUpstreamKey = (shape: CommandShape): string | null =>
+  TOOL_UPSTREAM_PROGRAMS.has(shape.program)
+    ? commandShapeKey(
+        TOOL_SUBCOMMAND_PROGRAMS.has(shape.program)
+          ? shape
+          : { program: shape.program, flags: shape.flags },
+      )
+    : null;
 
 /**
  * Pure (D-cs "tool signal"; spine §5 reading 221 (1), spec §13 tool promotion): a shell command
@@ -690,6 +818,7 @@ export const toolSignalFacts = (
         const shape = CommandShapeCountSchema.safeParse(raw);
         if (!shape.success) continue;
         const key = toolShapeUpstreamKey(shape.data);
+        if (key === null) continue;
         const set = tasks.get(key) ?? new Set<string>();
         set.add(`${state.id}:${event.task}`);
         tasks.set(key, set);
@@ -768,7 +897,8 @@ const COST_METRICS: readonly ScorecardMetricId[] = [
 /**
  * Pure: whether `current` is worse than `baseline` beyond `LOOKBACK_LIMITS` (the canary rollback
  * limits, §13 step 6): tokens per success up more than `maxTokenRisePct`, or the escalation or
- * cap-hit rate at `rollbackRateRatio` times its baseline or more.
+ * cap-hit rate above 0 and at `rollbackRateRatio` times its baseline or more, a zero baseline
+ * included (reading 230(5)).
  */
 export const costWorsened = (
   metric: ScorecardMetricId,
@@ -778,7 +908,8 @@ export const costWorsened = (
   if (metric === "tokens_per_success")
     return baseline > 0 && current > baseline * (1 + LOOKBACK_LIMITS.maxTokenRisePct / 100);
   if (metric === "escalations_per_100" || metric === "cap_hits_per_100")
-    return baseline > 0 && current >= baseline * LOOKBACK_LIMITS.rollbackRateRatio;
+    // reading 230(5): a zero baseline counts once the current rate is above 0
+    return current > 0 && current >= baseline * LOOKBACK_LIMITS.rollbackRateRatio;
   return false;
 };
 
@@ -850,6 +981,13 @@ export interface AutomaticRelease {
   readonly automation: AutomationRunRef;
   /** The commit the release pushed to `autoBranchName(kind, fingerprint)`. */
   readonly head: string;
+  /**
+   * The run's cut point (D-ct; spine §5 reading 231): the commit the feature's integration branch
+   * was cut from, its first task's `task.workspace_assigned.baseline_revision`. The UI evidence
+   * renders it as the before side; never the default branch's tip, which may have moved on.
+   * Absent when no task of the feature got a workspace.
+   */
+  readonly base?: string;
   /** The feature's title and the run's request (its issue). */
   readonly title: string;
   readonly request: string;
@@ -918,6 +1056,18 @@ export const automaticReleaseOf = (state: RunState, event: VtcEvent): AutomaticR
       ? []
       : [{ id: task.id, title: task.title, risk_tags: task.risk_tags }];
   });
+  // the integration branch is cut at its first task's workspace and only merged into after, so
+  // the first baseline of the feature's tasks is the cut point
+  const members = new Set(feature.tasks);
+  const cut = state.events.find(
+    (e) =>
+      e.type === "task.workspace_assigned" &&
+      e.task !== undefined &&
+      members.has(e.task) &&
+      e.seq <= event.seq,
+  );
+  const base =
+    cut === undefined ? undefined : parse("task.workspace_assigned", cut)?.baseline_revision;
   const gateReport = state.gateReports
     .filter(
       (r) =>
@@ -929,6 +1079,7 @@ export const automaticReleaseOf = (state: RunState, event: VtcEvent): AutomaticR
     feature: feature.id,
     automation,
     head: pushed.commit,
+    ...(base === undefined ? {} : { base }),
     title: feature.title,
     request: state.request,
     tasks,

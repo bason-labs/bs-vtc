@@ -495,26 +495,53 @@ describe("loop controller (§6.3 step 9)", () => {
       tier: "mid",
       freshSession: false,
       escalated: false,
+      steps: 0,
     });
     expect(engineerDispatch("mid", 2)).toEqual({
       tier: "mid",
       freshSession: false,
       escalated: false,
+      steps: 0,
     });
     expect(engineerDispatch("mid", 3)).toEqual({
       tier: "top",
       freshSession: true,
       escalated: true,
+      steps: 1,
     });
     expect(engineerDispatch("mid", 4)).toEqual({
       tier: "top",
       freshSession: false,
       escalated: true,
+      steps: 1,
     });
     expect(engineerDispatch("top", 3)).toEqual({
       tier: "top",
       freshSession: true,
       escalated: true,
+      steps: 1,
+    });
+  });
+  it("escalates a Low start again after 2 further failed rounds: Low → Mid → Top (reading 218(4))", () => {
+    expect(engineerDispatch("low", 3)).toEqual({
+      tier: "mid",
+      freshSession: true,
+      escalated: true,
+      steps: 1,
+    });
+    expect(engineerDispatch("low", 4)).toMatchObject({ tier: "mid", freshSession: false });
+    expect(engineerDispatch("low", 5)).toEqual({
+      tier: "top",
+      freshSession: true,
+      escalated: true,
+      steps: 2,
+    });
+    // a start already at Top after the first step gains no further step and keeps its session
+    expect(engineerDispatch("mid", 5)).toEqual({
+      tier: "top",
+      freshSession: false,
+      escalated: true,
+      steps: 2,
     });
   });
   it("rule 9: a high finding still open after one fix round; rule 8: repeated test integrity", () => {

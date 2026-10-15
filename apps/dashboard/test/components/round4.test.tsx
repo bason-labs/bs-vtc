@@ -1,6 +1,6 @@
 import { API_KEY_BILLING_WARNING, EventSchema, PROVIDER_BILLING_NOTICE } from "@vtc/shared";
 import { describe, expect, it } from "vitest";
-import { readAutomationFixture, readFixture } from "../fixtures";
+import { readFixture } from "../fixtures";
 import { firstSample, SAMPLE_RUN, SAMPLE_USAGE, sampleEvent, variant } from "../golden-samples";
 import { renderApp, screen, within } from "./render";
 
@@ -117,7 +117,7 @@ describe("Replay trials are not the run's work (reading 177)", () => {
 describe("Automation view (D-ca, AD-27 rule 7)", () => {
   it("reads GET /api/automation and shows the switches, notes, items and skips", async () => {
     const app = renderApp("/automation/", {
-      "/api/automation": () => Response.json(readAutomationFixture()),
+      "/api/automation": () => Response.json(readFixture("automation")),
     });
     const items = await screen.findByRole("list", { name: "Automatic issues and PRs" });
     expect(
@@ -125,25 +125,29 @@ describe("Automation view (D-ca, AD-27 rule 7)", () => {
     ).toBe(true);
     expect(screen.getByRole("heading", { name: "Automation is on" })).toBeInTheDocument();
     expect(screen.getByTestId("switch-upstream")).toHaveTextContent(
-      "Reports to bason-labs/bs-vtc: on",
+      "Reports to bason-labs/bs-vtc: off",
     );
     expect(screen.getByRole("list", { name: "Automation notes" })).toHaveTextContent(
-      "ffmpeg is not installed",
+      "upstream reports are off for this project",
     );
-    const ci = within(items).getByTestId("automation-item-1a2b3c4d5e6f7081");
-    expect(within(ci).getByRole("link", { name: /Issue #41/ })).toHaveAttribute(
+    const ci = within(items).getByTestId("automation-item-0123456789abcdef");
+    expect(within(ci).getByRole("link", { name: /Issue #12/ })).toHaveAttribute(
       "href",
-      "https://github.com/example-org/golden-app/issues/41",
+      "https://github.com/acme/invoices/issues/12",
     );
-    expect(within(ci).getByRole("link", { name: /PR #42/ })).toHaveAttribute("target", "_blank");
-    expect(ci).toHaveTextContent("draft");
+    expect(within(ci).getByRole("link", { name: /PR #13/ })).toHaveAttribute("target", "_blank");
+    expect(ci).toHaveTextContent("merged");
     expect(ci).toHaveTextContent("evidence complete");
-    const lookback = within(items).getByTestId("automation-item-9f8e7d6c5b4a3921");
+    const draft = within(items).getByTestId("automation-item-5555666677778888");
+    expect(draft).toHaveTextContent("draft");
+    expect(draft).toHaveTextContent("evidence complete");
+    const lookback = within(items).getByTestId("automation-item-1111222233334444");
     expect(lookback).toHaveTextContent("evidence partial");
     expect(lookback).toHaveTextContent("VTC · bason-labs/bs-vtc");
     const skipped = screen.getByRole("list", { name: "Skipped automatic actions" });
     expect(skipped).toHaveTextContent("a VTC rate limit was reached");
     expect(skipped).toHaveTextContent("the privacy check refused the content");
+    expect(skipped).toHaveTextContent("VTC is paused (vtc pause)");
   });
 
   it("says when automation is off, with the note that says why", async () => {

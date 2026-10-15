@@ -52,6 +52,7 @@ export const SKIP_REASONS: Readonly<Record<AutomationSkipReason, string>> = {
   plugin_locked: "a replay arm's plugin did not load (managed settings)",
   stale_baseline: "the replay measured another prompt than VTC's default branch now has",
   error: "it failed with an error (the detail says which)",
+  out_of_scope: "the PR changed files its kind may not change (the detail names them)",
 };
 
 /**

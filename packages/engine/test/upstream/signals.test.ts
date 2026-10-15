@@ -13,7 +13,7 @@ import {
   type AutomationFact,
 } from "../../src/upstream/index.js";
 import { cleanupDirs } from "../helpers/repo.js";
-import { harness } from "./harness.js";
+import { BASE_SHA, harness } from "./harness.js";
 
 afterEach(cleanupDirs);
 
@@ -158,5 +158,111 @@ describe("routing-table changes (D-cn)", () => {
     expect(started).toHaveLength(1);
     expect(started[0]).toContain("Change only the values of `DEFAULT_ROUTING_TABLE`");
     expect(started[0]).toContain("`CONTRACTS_VERSION`");
+  });
+
+  /** Raises the routing issue of `subject` on the bs-vtc checkout and opens its run's PR. */
+  const routingPr = async (
+    changed: readonly string[],
+    options: { base?: string; noDiff?: boolean } = {},
+  ) => {
+    const h = harness({ self: true });
+    const head = "7".repeat(40);
+    h.plumbing.changed.set(head, changed);
+    if (options.noDiff === true)
+      (h.plumbing as { changedPaths?: unknown }).changedPaths = undefined;
+    const subject = routingConfigSubject("engineer", "M", "tagged");
+    await h.upstream.report(
+      improvement("config", subject, { "routing.from_tier": 1, "routing.to_tier": 2 }),
+      h.ctx,
+    );
+    const issue = h.github.state.issues[0];
+    const fp = issue?.marker?.fp ?? "";
+    const outcome = await h.upstream.openPullRequest(
+      {
+        target: "upstream",
+        kind: "config",
+        fingerprint: fp,
+        summary: "start engineer M tagged tasks on top",
+        slots: { summary: "Routing table change." },
+        source: {
+          pushedHead: head,
+          ...(options.base === undefined ? {} : { base: options.base }),
+        },
+        issue: issue?.number,
+        report: {
+          v: 1,
+          kind: "config",
+          fingerprint: fp,
+          vtc_version: "0.4.0",
+          vtc_frames: [],
+          metrics: {},
+          occurrences: 1,
+          first_seen: "2026-10-15T11:00:00.000Z",
+          last_seen: "2026-10-15T11:00:00.000Z",
+        },
+        specVerifier: "pass",
+        evidence: {
+          plan: { run: "R7", upstreamSafe: false, change: "non_ui" },
+          snapshot: { routes: {}, events: [] },
+          gateReport: {} as never,
+        },
+      },
+      h.ctx,
+    );
+    return { h, outcome, head };
+  };
+
+  it("opens a routing run's PR that changes only the routing table, diffed from the cut point or the default branch", async () => {
+    const { h, outcome, head } = await routingPr([ROUTING_TABLE_FILE]);
+    expect(outcome).toMatchObject({ status: "pr" });
+    expect(h.github.state.prs).toHaveLength(1);
+    // no cut point recorded: against the remote default branch's tip
+    expect(h.plumbing.diffs).toEqual([[BASE_SHA, head]]);
+    const cut = "5".repeat(40);
+    const withCut = await routingPr([ROUTING_TABLE_FILE], { base: cut });
+    expect(withCut.outcome).toMatchObject({ status: "pr" });
+    expect(withCut.h.plumbing.diffs).toEqual([[cut, head]]);
+  });
+
+  it("refuses a routing run's PR that touches any other file before it opens (AD-8)", async () => {
+    const { h, outcome } = await routingPr([ROUTING_TABLE_FILE, "packages/shared/src/index.ts"]);
+    expect(outcome).toMatchObject({ status: "skipped", reason: "out_of_scope" });
+    expect(h.github.state.prs).toEqual([]);
+    const skipped = h.events.find((e) => e.type === "automation.skipped");
+    expect(skipped?.payload).toMatchObject({ reason: "out_of_scope", kind: "config" });
+    expect(JSON.stringify(skipped?.payload)).toContain("packages/shared/src/index.ts");
+  });
+
+  it("fails closed when the plumbing cannot list the changed paths", async () => {
+    const { h, outcome } = await routingPr([ROUTING_TABLE_FILE], { noDiff: true });
+    expect(outcome).toMatchObject({ status: "skipped", reason: "out_of_scope" });
+    expect(h.github.state.prs).toEqual([]);
+  });
+
+  it("names the tier the cell moves to, from the routing fact's metrics", async () => {
+    const h = harness();
+    await h.upstream.report(
+      improvement("config", routingConfigSubject("engineer", "M", "tagged"), {
+        "routing.from_tier": 1,
+        "routing.to_tier": 2,
+        "routing.current_tier": 1,
+        "routing.shared": 0,
+        "routing.replay_planned": 0,
+      }),
+      h.ctx,
+    );
+    const body = h.github.state.issues[0]?.body ?? "";
+    expect(body).toContain("Move the start tier from `mid` to `top`");
+    expect(body).toContain("`roles.engineer`");
+    // a rank outside the tiers renders no tier name
+    const other = harness();
+    await other.upstream.report(
+      improvement("config", routingConfigSubject("engineer", "M", "tagged"), {
+        "routing.from_tier": 1,
+        "routing.to_tier": 7,
+      }),
+      other.ctx,
+    );
+    expect(other.github.state.issues[0]?.body).not.toContain("Move the start tier");
   });
 });

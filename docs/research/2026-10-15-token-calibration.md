@@ -6,6 +6,13 @@ after, and gives an offline estimate to compare the measurement with. The measur
 host runs, which no test and no team may make (D-cl allows the adapters team's named scripts only),
 so the Lead runs it after the round-5 merge.
 
+**Status (2026-10-15, the round-5 fix round; spine §5 reading 232):** not run yet. The fix round
+could make no real host run either, so this note still holds the protocol and the offline estimate
+only; the measured table below is empty until the Lead (or the human) runs the two arms. Because
+the estimate predicts a total rise driven by the reviewers, the default `routing.start:
+difficulty` should not ship in a release before the measurement, or before the human decides the
+reviewer-tier question below.
+
 ## What changes
 
 | Run                                         | Before (`routing.start: role`)  | After (`routing.start: difficulty`)                     |
@@ -14,7 +21,7 @@ so the Lead runs it after the round-5 merge.
 | QA author                                   | Mid                             | as the rule, never below Mid                            |
 | QA judge, lens roles, Security verify       | Mid                             | as the rule                                             |
 | Spec Verifier (one call per AC)             | Low                             | as the rule                                             |
-| Escalation after 2 failed rounds            | one tier up, fresh session      | the same, from the routed start                         |
+| Escalation after 2 failed rounds            | one tier up, fresh session      | one tier up from the routed start after every 2 failed rounds (Low → Mid → Top) |
 | Reviewers at 70% of budget                  | one tier down                   | the same, from the routed tier                          |
 | Non-task roles (BA, Architect, Planner, …) | `role.yaml`                     | unchanged                                               |
 
@@ -76,9 +83,17 @@ What the estimate says, to check against the measurement:
   agrees, the cheaper fix is a per-role cell in the routing table (`DEFAULT_ROUTING_TABLE.roles`,
   for example the Spec Verifier keeping Low below L), which Lookback can propose with evidence
   (D-cn), or a human decision that reviewers never start below their own tier.
-- **Low burns rounds.** A Low start escalates only after 2 failed rounds. With the low-risk round
-  cap of 3, an S task that fails twice on Low has one Mid round left before it parks. Watch the
-  parks and rounds of the S tasks in the after arm.
-- **Codex.** Until D-co fills `DEFAULT_TIER_MODELS.codex`, a routed tier changes only the
-  reasoning effort on Codex (`TIER_EFFORT_WITHOUT_MODEL`), so a Codex calibration measures effort,
-  not models.
+- **Low burns rounds.** A Low start escalates to Mid after 2 failed rounds and to Top after 2
+  more (reading 232). With the low-risk round cap of 3, an S task that fails twice on Low still
+  has only one Mid round left before it parks, and it reaches Top only under a cap of 5. Watch
+  the parks and rounds of the S tasks in the after arm.
+- **Codex.** `DEFAULT_TIER_MODELS.codex` holds the ids from the Codex model docs since the
+  round-5 merge (reading 229(4): `gpt-6-luna` Low, `gpt-6.1-sol` Mid, `gpt-6-astra` Top), so a
+  Codex calibration measures models as on Claude Code. Whether the owner's plan accepts those
+  ids is still the §7 row "Codex model ids on the owner's plan".
+
+## Measurement
+
+Not run yet (see the status above). Record per task: arm, tiers dispatched (with reasons), rounds,
+escalations, parks, first-round gate pass, review pass, tokens and `cost_usd`; then the totals of
+each arm.

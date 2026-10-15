@@ -1,5 +1,5 @@
 {
-  "contracts_version": "5.5.0",
+  "contracts_version": "5.6.0",
   "schemas": {
     "Run": {
       "$id": "https://vtc.local/schemas/Run.json",
@@ -7925,7 +7925,8 @@
                 "trial_cap",
                 "plugin_locked",
                 "stale_baseline",
-                "error"
+                "error",
+                "out_of_scope"
               ]
             },
             "target": {
@@ -33234,7 +33235,8 @@
                   "trial_cap",
                   "plugin_locked",
                   "stale_baseline",
-                  "error"
+                  "error",
+                  "out_of_scope"
                 ]
               },
               "kind": {

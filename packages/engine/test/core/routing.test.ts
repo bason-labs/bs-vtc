@@ -246,6 +246,20 @@ describe("routeTier: escalation and the reviewers' budget drop (D-cm)", () => {
     expect(routeTier(input(task("L")), "escalation").tier).toBe("top");
   });
 
+  it("escalates a second time from the start: Low → Mid → Top (reading 218(4))", () => {
+    expect(routeTier(input(task("S")), "escalation", 2)).toEqual({
+      tier: "top",
+      reason: "escalation",
+      clamped: false,
+    });
+    expect(routeTier(input(task("M")), "escalation", 2).tier).toBe("top");
+    expect(routeTier(input(task("S"), { routing: { max_tier: "mid" } }), "escalation", 2)).toEqual({
+      tier: "mid",
+      reason: "escalation",
+      clamped: true,
+    });
+  });
+
   it("clamps an escalation to max_tier", () => {
     expect(routeTier(input(task("M"), { routing: { max_tier: "mid" } }), "escalation")).toEqual({
       tier: "mid",
