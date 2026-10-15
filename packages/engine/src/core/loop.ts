@@ -98,17 +98,33 @@ export const tierDown = (tier: ModelTier): ModelTier => TIER_DOWN[tier];
 export const ESCALATE_AFTER_FAILED_ROUNDS = 2;
 
 /**
- * The Engineer's tier and session for round `round`: from round 3 on (after 2 failed rounds) one
- * tier up; the escalation round itself starts a fresh session.
+ * The Engineer's tier and session for round `round`: one tier up after every
+ * {@link ESCALATE_AFTER_FAILED_ROUNDS} failed rounds, counted from the routed start (D-cm, reading
+ * 218(4)): a Low start runs on Mid from round 3 and on Top from round 5, as far as its cap allows.
+ * `steps` is the number of tiers up (before the project's clamp). The first escalation starts a
+ * fresh session; a later one does when it changes the tier.
  */
 export const engineerDispatch = (
   baseTier: ModelTier,
   round: number,
-): { readonly tier: ModelTier; readonly freshSession: boolean; readonly escalated: boolean } => {
-  const escalated = round > ESCALATE_AFTER_FAILED_ROUNDS;
+): {
+  readonly tier: ModelTier;
+  readonly freshSession: boolean;
+  readonly escalated: boolean;
+  readonly steps: number;
+} => {
+  const steps = Math.max(0, Math.floor((round - 1) / ESCALATE_AFTER_FAILED_ROUNDS));
+  const tierAfter = (n: number): ModelTier => {
+    let tier = baseTier;
+    for (let i = 0; i < n; i++) tier = tierUp(tier);
+    return tier;
+  };
+  const tier = tierAfter(steps);
+  const boundary = steps > 0 && round === steps * ESCALATE_AFTER_FAILED_ROUNDS + 1;
   return {
-    tier: escalated ? tierUp(baseTier) : baseTier,
-    freshSession: round === ESCALATE_AFTER_FAILED_ROUNDS + 1,
-    escalated,
+    tier,
+    freshSession: boundary && (steps === 1 || tier !== tierAfter(steps - 1)),
+    escalated: steps > 0,
+    steps,
   };
 };

@@ -509,6 +509,13 @@ export const AutomationSkipReasonSchema = z.enum([
    * crash in the module); `detail` is the redacted message. New in 5.4.0.
    */
   "error",
+  /**
+   * An automatic PR changes files its kind may not change, or the plumbing cannot list them: a
+   * routing-table PR (D-cn) changes only `packages/shared/src/tier-routing.ts` (spine §5 readings
+   * 219 and 228(6)). It is refused before it opens (AD-8); `detail` names the other paths. New in
+   * 5.6.0.
+   */
+  "out_of_scope",
 ]);
 export type AutomationSkipReason = z.infer<typeof AutomationSkipReasonSchema>;
 

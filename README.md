@@ -49,10 +49,13 @@ human reviews (spine AD-27). It never merges anything it opened on its own.
    in VTC's repo, and so does a version that got worse than its own runs 14 days earlier (a model
    or host update). So does a run in which three or more tasks of one size ran out of budget, or
    three or more tasks hit their fix-round cap: VTC's defaults may need changing. A shell command
-   shape (the program, its subcommand and its flag names, never a value) that roles ran in three
-   or more tasks, and a missing capability named on two or more escalations, become tool and
-   capability issues. Lookback also scores each start tier by task size and risk, and a start tier
-   that keeps escalating, or a cheaper one that does as well, becomes a routing issue. Once a day VTC
+   shape (the program, its subcommand and its flag names, never a value; the lines of a
+   here-document are never read as commands) that roles ran in three or more tasks, and a missing
+   capability named on two or more escalations, become tool and capability issues; only a common
+   developer tool's name leaves your machine, so your own scripts stay local. Lookback also scores
+   each start tier by task size and risk, and a start tier that keeps escalating, or a cheaper one
+   that does as well, becomes a routing issue. Its PR may change only the routing table's file:
+   VTC checks the changed files with git and opens no PR that touches anything else. Once a day VTC
    also scans its own dependencies (the lockfile it was built from) offline with osv-scanner,
    against the database `vtc calibrate` downloads, and each advisory becomes a security issue.
 2. **It proposes.** For a role with enough attributed failures, the lookback role proposes at most
@@ -90,12 +93,11 @@ human reviews (spine AD-27). It never merges anything it opened on its own.
    everyone, in the next VTC release; `vtc lookback approve` still lets you try a candidate on one
    machine first.
 
-Not yet available (each is an owned followup in the spine, §5 readings 215, 216 and 231):
+Not yet available (each is an owned followup in the spine, §5 readings 215, 216, 231 and 232):
 
-- Before and after screenshots of a UI change in an automatic PR, and a video of the changed
-  flow. The gate runner renders the base commit, but an automatic run does not yet record the
-  commit it was cut from, so a UI PR is still labelled `evidence: partial`. The flow video shows
-  the first screen only until flows can be scripted.
+- A video of the changed flow in a UI PR. An automatic run's UI PR shows before and after
+  screenshots of the commit its branch was cut from and of its head, but its flow video shows the
+  first screen only until flows can be scripted.
 - Replay evidence for a routing change (the same prompt run on two start tiers). A routing issue
   carries the routing scorecard as its evidence.
 - Resuming a replay that a limit stopped partway. It starts again from the beginning at the next

@@ -111,7 +111,78 @@ const ASSIGNMENT = /^[A-Za-z_][A-Za-z0-9_]*=/;
 const PLAIN_PROGRAM = /^[A-Za-z0-9][A-Za-z0-9._+-]{0,63}$/;
 const SUBCOMMAND = /^[a-z][a-z0-9:_-]{0,39}$/;
 
-/** Splits a shell line into words and separators; quotes group, backslashes escape. Lenient. */
+/**
+ * A here-document whose operator (`<<WORD`, `<<-WORD`) a shell lexer read: its body comes on the
+ * lines after the operator's line. New in 5.6.0.
+ */
+export interface Heredoc {
+  readonly delimiter: string;
+  /** `<<-`: leading tabs of the body's lines, the delimiter line's included, are stripped. */
+  readonly strip: boolean;
+}
+
+/**
+ * Pure: the index after the bodies of `pending` here-documents, read in order from `from` (the
+ * start of the line after their operators' line): each runs to the line that equals its delimiter
+ * (tab-stripped for `<<-`), or to the end of the input when none does. The one copy of the rule
+ * `commandShapes` and the adapters' shell-wrapper reader both skip bodies by. New in 5.6.0.
+ */
+export const skipHeredocBodies = (
+  line: string,
+  from: number,
+  pending: readonly Heredoc[],
+): number => {
+  let at = from;
+  for (const doc of pending) {
+    while (at < line.length) {
+      const end = line.indexOf("\n", at);
+      const text = line.slice(at, end < 0 ? line.length : end).replace(/\r$/, "");
+      at = end < 0 ? line.length : end + 1;
+      if ((doc.strip ? text.replace(/^\t+/, "") : text) === doc.delimiter) break;
+    }
+  }
+  return at;
+};
+
+/**
+ * Pure: the here-document operator at `at` (`<<`, the caller has ruled out the here-string `<<<`):
+ * its delimiter word with quotes and backslashes removed, and the index after it; `null` when no
+ * word follows. New in 5.6.0.
+ */
+export const heredocAt = (
+  line: string,
+  at: number,
+): { readonly doc: Heredoc; readonly next: number } | null => {
+  let j = at + 2;
+  const strip = line[j] === "-";
+  if (strip) j += 1;
+  while (line[j] === " " || line[j] === "\t") j += 1;
+  let delimiter = "";
+  while (j < line.length) {
+    const d = line[j] ?? "";
+    if (d === "\\" && j + 1 < line.length) {
+      delimiter += line[j + 1] ?? "";
+      j += 2;
+    } else if (d === "'" || d === '"') {
+      const end = line.indexOf(d, j + 1);
+      const stop = end < 0 ? line.length : end;
+      delimiter += line.slice(j + 1, stop);
+      j = stop + 1;
+    } else if (" \t\r\n;&|()<>".includes(d)) break;
+    else {
+      delimiter += d;
+      j += 1;
+    }
+  }
+  return delimiter === "" ? null : { doc: { delimiter, strip }, next: j };
+};
+
+/**
+ * Splits a shell line into words and separators; quotes group, backslashes escape. A here-document
+ * (`<<WORD`, `<<-WORD`, the word quoted or not) is a redirection whose body, the lines after its
+ * line up to the delimiter, is data: it yields no word, so no body line is read as a command
+ * (5.6.0). Lenient.
+ */
 const lex = (
   line: string,
 ): { readonly text: string; readonly quoted: boolean; readonly sep: boolean }[] => {
@@ -119,6 +190,7 @@ const lex = (
   let word = "";
   let quoted = false;
   let inWord = false;
+  let pending: Heredoc[] = [];
   const flush = (): void => {
     if (inWord) out.push({ text: word, quoted, sep: false });
     word = "";
@@ -139,6 +211,18 @@ const lex = (
       quoted = true;
       inWord = true;
       i = stop;
+    } else if (line.startsWith("<<<", i)) {
+      word += "<<<";
+      inWord = true;
+      i += 2;
+    } else if (two === "<<") {
+      flush();
+      const heredoc = heredocAt(line, i);
+      if (heredoc === null) i += 1;
+      else {
+        pending.push(heredoc.doc);
+        i = heredoc.next - 1;
+      }
     } else if (two === "&&" || two === "||") {
       flush();
       out.push({ text: two, quoted: false, sep: true });
@@ -146,6 +230,10 @@ const lex = (
     } else if (SEPARATORS.has(c)) {
       flush();
       out.push({ text: c, quoted: false, sep: true });
+      if (c === "\n" && pending.length > 0) {
+        i = skipHeredocBodies(line, i + 1, pending) - 1;
+        pending = [];
+      }
     } else if (c === " " || c === "\t" || c === "\r") {
       flush();
     } else {
@@ -155,6 +243,17 @@ const lex = (
   }
   flush();
   return out;
+};
+
+/**
+ * A flag word's name with no value byte (5.6.0): a long flag keeps its name (`--token=x` is
+ * `--token`); a single-dash word keeps its first letter, since `-pVALUE` cannot be told from
+ * combined short flags (`-la` is `-l`, `-uroot` is `-u`); a numeric flag is `-#` (`head -20`).
+ */
+const flagName = (text: string): string => {
+  if (text.startsWith("--")) return text.split("=")[0] ?? text;
+  const first = text[1] ?? "";
+  return /^[0-9]$/.test(first) ? "-#" : `-${first}`;
 };
 
 const shapeOf = (
@@ -192,7 +291,7 @@ const shapeOf = (
       words
         .slice(at + 1)
         .filter((w) => !w.quoted && w.text.startsWith("-") && w.text !== "-" && w.text !== "--")
-        .map((w) => w.text.split("=")[0] ?? w.text),
+        .map((w) => flagName(w.text)),
     ),
   ].sort();
   return {
@@ -208,9 +307,9 @@ const shapeOf = (
  * `VAR=value` assignments and an `env` prefix are skipped; a program named by a path is
  * {@link COMMAND_SHAPE_PATH}; the subcommand is the word right after the program when the program
  * is one of {@link COMMAND_SHAPE_SUBCOMMAND_PROGRAMS} and the word is a plain lower-case word. No
- * argument value or path survives: only flag names, hashed. Known limit: a flag that carries its
- * value with no `=` (`-pVALUE`) cannot be told from combined short flags (`-la`), so it is hashed
- * with the flag names, never stored in plain text.
+ * argument value or path survives: only flag names, hashed, and no value byte reaches the hash (a
+ * single-dash word keeps its first letter, a long flag its name, a numeric flag is `-#`; 5.6.0). A
+ * here-document's body is skipped, never shaped (5.6.0).
  */
 export const commandShapes = (command: string): CommandShape[] => {
   const shapes: CommandShape[] = [];

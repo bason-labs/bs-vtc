@@ -116,7 +116,8 @@ const pct = (baseline: number, current: number): number =>
 /**
  * Pure: whether a cost or quality metric worsened beyond `LOOKBACK_LIMITS` against its baseline:
  * tokens per success or per task rising more than `maxTokenRisePct`, or the escalation or cap-hit
- * rate reaching `rollbackRateRatio` times its baseline.
+ * rate above 0 and at least `rollbackRateRatio` times its baseline, a zero baseline included
+ * (reading 230(5)).
  */
 export const costRegressed = (
   metric: ScorecardMetricId | "tokens_per_task",
@@ -129,7 +130,9 @@ export const costRegressed = (
       return pct(baseline, current) > LOOKBACK_LIMITS.maxTokenRisePct;
     case "escalations_per_100":
     case "cap_hits_per_100":
-      return baseline > 0 && current >= baseline * LOOKBACK_LIMITS.rollbackRateRatio;
+      // reading 230(5): the canary's rule for every source, a zero baseline included, so a drift
+      // that makes an unchanged prompt start escalating (D-cr) raises an issue
+      return current > 0 && current >= baseline * LOOKBACK_LIMITS.rollbackRateRatio;
     default:
       return false;
   }

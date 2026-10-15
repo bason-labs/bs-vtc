@@ -139,6 +139,42 @@ describe("toolSignalFacts (D-cs)", () => {
   });
 });
 
+describe("what a tool fact may send (D-cs, D-by; contracts 5.6.0)", () => {
+  it("gives two commands that differ only in an attached flag value one upstream key", () => {
+    const [a] = commandShapes("mysql -uroot -pS3cret orders");
+    const [b] = commandShapes("mysql -uadmin -phunter2 orders");
+    expect(toolShapeUpstreamKey(a!)).toBe(toolShapeUpstreamKey(b!));
+  });
+
+  it("sends no program VTC does not know: a body line a log recorded before 5.6.0 stays local", () => {
+    // a pre-5.6.0 log read each line of a here-document as a command
+    const leaked = { program: "hunter2pass", flags: GIT.flags, count: 1 };
+    const states = ["T-1", "T-2", "T-3"].map((task, i) => ({
+      id: `R-${String(i)}`,
+      events: [
+        {
+          type: "role.submitted",
+          task,
+          data: {
+            action_id: "a",
+            exit: "done",
+            findings: 0,
+            questions: 0,
+            session_ref: null,
+            command_shapes: [leaked, { ...GIT, count: 1 }],
+          },
+        } as unknown as VtcEvent,
+      ],
+    }));
+    expect(toolShapeUpstreamKey(leaked)).toBeNull();
+    const facts = toolSignalFacts(states, BASE);
+    expect(JSON.stringify(facts)).not.toContain("hunter2pass");
+    expect(facts.map((f) => f.subject)).toEqual([commandShapeKey(GIT)]);
+    // a script named by its path or a program the lexer could not name carries no text: kept
+    expect(toolShapeUpstreamKey({ program: "<path>", flags: GIT.flags })).not.toBeNull();
+  });
+});
+
 describe("capabilitySignalFacts (D-cs)", () => {
   it("raises a slug named on 2 escalations, by a role or the Lead, with the count only", () => {
     const one = [{ id: "R-1", events: [escalation("E-1", "browser_automation")] }];

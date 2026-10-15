@@ -101,7 +101,7 @@ import {
 } from "./remote-refs.js";
 import { createStaging, stagingRootFor, type Staging } from "./staging.js";
 import { upstreamStateDir } from "./state-dir.js";
-import { projectSubject, routingSubjectOfBody } from "./subject.js";
+import { projectSubject, ROUTING_TABLE_FILE, routingSubjectOfBody } from "./subject.js";
 import {
   evaluateTrigger,
   fixableItem,
@@ -1051,6 +1051,40 @@ export const createUpstream = (deps: UpstreamDeps): Upstream => {
     return sha;
   };
 
+  /**
+   * Refuses (`out_of_scope`) a routing-table PR whose change touches any path but
+   * {@link ROUTING_TABLE_FILE}: the paths the module would commit, or, for a run's pushed head,
+   * the paths git lists against the run's cut point (else the remote default branch's tip).
+   * Fails closed when the plumbing cannot list them.
+   */
+  const assertRoutingScope = async (
+    source: PrSource,
+    repoRoot: string,
+    defaultName: string,
+  ): Promise<void> => {
+    let paths: readonly string[];
+    if ("changes" in source) paths = source.changes.map((c) => c.path);
+    else {
+      const plumbing = deps.automation.plumbing?.({ repoRoot });
+      const from =
+        source.base ?? (await plumbing?.resolve(`refs/remotes/origin/${defaultName}`)) ?? null;
+      if (plumbing?.changedPaths === undefined || from === null)
+        throw new AutomationSkip(
+          "out_of_scope",
+          "a routing-table PR whose changed paths cannot be listed is not opened",
+        );
+      paths = await plumbing.changedPaths(from, source.pushedHead);
+    }
+    const others = [...new Set(paths)].filter((p) => p !== ROUTING_TABLE_FILE).sort();
+    if (others.length > 0)
+      throw new AutomationSkip(
+        "out_of_scope",
+        `a routing-table PR changes only ${ROUTING_TABLE_FILE}; this one also changes ${others
+          .slice(0, 10)
+          .join(", ")}${others.length > 10 ? ` and ${String(others.length - 10)} more` : ""}`,
+      );
+  };
+
   const openPullRequest = (input: AutoPrInput, ctx: ProjectContext): Promise<AutomationOutcome> =>
     serial(`pr:${input.target}:${input.fingerprint}`, () => openPullRequestNow(input, ctx));
 
@@ -1208,6 +1242,10 @@ export const createUpstream = (deps: UpstreamDeps): Upstream => {
         assertNoProjectPaths(modelText);
       }
       const base = await defaultBranch(repo);
+      // D-cn (readings 219, 228(6)): a routing-table PR changes only the routing table's file,
+      // checked from git before anything opens or is published (AD-8); the issue's instruction
+      // to the run is no guard
+      if (routing) await assertRoutingScope(input.source, repoRoot, base);
       // The branch is checked before any evidence is captured or published, so a branch VTC
       // must leave alone gets no media on the evidence branch either.
       if ("changes" in input.source) {

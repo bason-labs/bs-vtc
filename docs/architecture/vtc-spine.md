@@ -3836,6 +3836,61 @@ followups the merge leaves open.
       `partial_reason`. _Cli:_ none beyond keeping the doctor's routing view on the shared rule. The
       token calibration (reading 227(5)) is the Lead's, after the merge.
 
+**Reading 232 (2026-10-15, the round-5 fix round).** The integrator's, **Lead decision 2026-10-15,
+pending human review**: what the fix round on the round-5 merge's findings delivered, contracts
+5.6.0 (MINOR), and what stays open.
+
+232.  **The round-5 fix round; contracts 5.6.0 is MINOR** (AD-3 rule 4; AD-8; D-by; readings 218,
+      219, 221, 223, 226, 228 and 230(5); closes the matching items of reading 231). _Lead decision
+      2026-10-15, pending human review._ (1) _The cut point (D-ct):_ `AutomaticRelease.base` is the
+      commit the feature's integration branch was cut from, its first task's
+      `task.workspace_assigned.baseline_revision` (the branch is cut at the first workspace and only
+      merged into after); the daemon's bridge passes `source: { pushedHead, base }`, so an automatic
+      UI PR renders the cut point as its before side and comes out `evidence: complete` (a daemon
+      test through the real bridge and upstream module). A release with no workspace has no base and
+      stays `capture_failed`, as reading 230(2) has it; no enum value is added. (2) _A routing PR's
+      scope (D-cn, reading 228(6)):_ engine core's `createGitPlumbing` implements `changedPaths`
+      (`git diff --name-only --no-renames -z base...head`, read only, full object ids only) and
+      `mergeBase`. Before a routing-table PR opens, the upstream module lists the paths the run's
+      head changes against its cut point (else the remote default branch's tip) and refuses the PR
+      with the new `AutomationSkipReason` `out_of_scope` when any path is not
+      `packages/shared/src/tier-routing.ts`, or when the plumbing cannot list them (fail closed);
+      the detail names the other paths and stays local. The routing issue names the move by tier
+      (`Move the start tier from mid to top in roles.<role>'s cell only`) from
+      `ROUTING_FACT_METRICS`. (3) _A zero baseline (D-cr, reading 230(5)):_ the upstream module's
+      `costRegressed` and engine core's `costWorsened` raise a rate metric when the current rate is
+      above 0 and at least `rollbackRateRatio` times the baseline, a zero baseline included, so a
+      drift that makes an unchanged prompt start escalating opens a cost issue. (4) _Low → Mid → Top
+      (D-cm, reading 218(4)):_ the Engineer goes one tier up from its routed start after every
+      `ESCALATE_AFTER_FAILED_ROUNDS` (2) failed rounds, clamped each time: a Low start runs on Mid
+      from round 3 and on Top from round 5 when its cap allows (`routeTier` takes the number of
+      steps); the first escalation starts a fresh session, a later one does when it changes the
+      tier. (5) _Command shapes (D-cs, D-by; amends reading 228(4)):_ `commandShapes` skips a
+      here-document's body (`<<WORD`, `<<-WORD`, the word quoted or not; not the here-string `<<<`)
+      up to its delimiter line, so no body line is recorded as a program, and the adapters' shell
+      wrapper reader skips the same bodies through the shared `heredocAt` / `skipHeredocBodies`; a
+      flag word reaches the flag hash by its name only (a single-dash word by its first letter, a
+      long flag by its name, a numeric flag as `-#`), so an attached value (`-pS3cret`, `-I/abs`)
+      no longer reaches a hash an upstream subject carries. Reading 228(4)'s known limit is
+      withdrawn; a shape key recorded before 5.6.0 may differ from the same command's key now. A
+      `tool` fact sends a program only from engine core's `TOOL_UPSTREAM_PROGRAMS` (VTC's list of
+      common developer tools, the shared subcommand programs, `<path>` and `<other>`); any other
+      program stays in the project's log, which also keeps a body line an older log recorded from
+      leaving the machine. (6) _The dashboard's Automation tests_ read engine core's golden
+      `api/automation.json` (a draft with complete evidence, a merged PR, the `error`, `paused`,
+      `privacy` and `rate_limit` skips); `dev-fixtures/automation.json` is deleted, which closes the
+      dashboard's round-4 followup reading 231 had not carried. (7) _Still open_, each the named
+      team's scope next round with reading 231's other items: _engine core and lookback-research_,
+      the tier arm of a `lookback_replay` trial (`LookbackReplayTrial.tier` and its result shape, a
+      contract the integrator takes in the next MINOR with its producer), the RETRO trial budget
+      passed to `lookbackRoutingStep` and a graded tier replay on a routing proposal
+      (`routing.replay_verdict`); _gate runner_, a scripted changed-flow video once
+      `BeforeAfterRequest.flow` exists (how a run names its changed flow is a question to the
+      human); _engine core and upstream_, the `RemoteRefs` seam's removal (engine core's plumbing has
+      had `fetch` and `message` since round 5); _the Lead_, the token calibration's two arms
+      (`docs/research/2026-10-15-token-calibration.md`, real host runs, which the fix round could not
+      make) and, with it, the reviewer-tier question that note raises (a question to the human).
+
 ## 6. Change process for this spine
 
 - Changing an AD, adding one, or changing a frozen contract (AD-3) needs an architecture review

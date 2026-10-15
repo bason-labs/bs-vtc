@@ -2,7 +2,12 @@
  * Slots of an upstream issue (D-by; AD-27 rule 5): rendered from an `UpstreamReport` alone, so
  * nothing but VTC-side data can reach VTC's own repo.
  */
-import { renderAutoMarker, type UpstreamReport } from "@vtc/shared";
+import {
+  renderAutoMarker,
+  ROUTING_FACT_METRICS,
+  TIER_ORDER,
+  type UpstreamReport,
+} from "@vtc/shared";
 import { renderNote, renderTitle, UNAVAILABLE, type TemplateSlots } from "./body.js";
 import { routingCellLine, routingChangeRule, type UpstreamSubject } from "./subject.js";
 
@@ -29,8 +34,46 @@ const subjectSymptom = (subject: UpstreamSubject): string => {
   }
 };
 
+/** The tier a rank of {@link ROUTING_FACT_METRICS} names, or undefined for any other number. */
+const tierNamed = (rank: number | undefined): string | undefined =>
+  rank === undefined || !Number.isInteger(rank) ? undefined : TIER_ORDER[rank];
+
+/**
+ * Pure: the routing issue's target from the fact's metrics (D-cn; reading 228(3)): the tier the
+ * cell moves from and to by name, whose cells change and whether a tier replay was planned; none
+ * when the ranks name no tier.
+ */
+const routingTargetLines = (
+  subject: Extract<UpstreamSubject, { kind: "routing" }>,
+  metrics: Readonly<Record<string, number>>,
+): string[] => {
+  const from = tierNamed(metrics[ROUTING_FACT_METRICS.fromTier]);
+  const to = tierNamed(metrics[ROUTING_FACT_METRICS.toTier]);
+  if (from === undefined || to === undefined) return [];
+  const shared = metrics[ROUTING_FACT_METRICS.shared];
+  const where =
+    shared === 1
+      ? "the shared cell"
+      : shared === 0
+        ? `\`roles.${subject.role}\`'s cell only`
+        : "the cell";
+  const replay = metrics[ROUTING_FACT_METRICS.replayPlanned];
+  return [
+    `Move the start tier from \`${from}\` to \`${to}\` in ${where}.${
+      replay === undefined
+        ? ""
+        : replay > 0
+          ? " A tier replay was planned."
+          : " No tier replay was planned."
+    }`,
+  ];
+};
+
 /** Pure: the issue's lines that say what the subject is, in VTC's vocabulary only. */
-const subjectLines = (subject: UpstreamSubject): string[] => {
+const subjectLines = (
+  subject: UpstreamSubject,
+  metrics: Readonly<Record<string, number>> = {},
+): string[] => {
   switch (subject.kind) {
     case "tool":
       return [
@@ -39,7 +82,12 @@ const subjectLines = (subject: UpstreamSubject): string[] => {
     case "capability":
       return [`Missing capability: \`${subject.slug}\` (the escalations' reasons stay local).`];
     case "routing":
-      return [routingCellLine(subject), "", routingChangeRule(subject)];
+      return [
+        routingCellLine(subject),
+        "",
+        ...routingTargetLines(subject, metrics),
+        routingChangeRule(subject),
+      ];
     case "config":
       return [`Config key: \`${subject.key}\``];
   }
@@ -95,7 +143,7 @@ export const upstreamIssueSlots = (
   const { subject } = options;
   const metrics = Object.entries(report.metrics);
   const evidence = [
-    ...(subject === undefined ? [] : [...subjectLines(subject), ""]),
+    ...(subject === undefined ? [] : [...subjectLines(subject, report.metrics), ""]),
     ...(report.vtc_frames.length === 0 ? [] : ["VTC frames:", "```", ...report.vtc_frames, "```"]),
     ...(metrics.length === 0
       ? []

@@ -227,7 +227,16 @@ describe("automatic runs (AD-27 rule 2)", () => {
     const h = createHarness({ project: { merge_level: 2 } });
     await h.engine.startAutomatic(REQUEST, ISSUE, CLAUDE);
     await driveToRelease(h);
+    // the default branch moves on after the cut: the release still names the cut point
+    writeFile(h.repo, "later.txt", "a human's later commit\n");
+    git(h.repo, "add", "later.txt");
+    git(h.repo, "commit", "--quiet", "-m", "later");
     const run = h.engine.status({}).run.id;
+    const branch = autoBranchName(ISSUE.kind, ISSUE.fingerprint);
+    const pushed = git(h.remote, "rev-parse", `refs/heads/${branch}`).trim();
+    // the commit the run's branch was cut from (D-ct, reading 231): where the pushed work and the
+    // default branch part, before a later commit moves the default branch on
+    const cut = git(h.repo, "merge-base", pushed, "HEAD").trim();
     const log = parseEventLog(
       readFileSync(join(h.repo, `.vtc/runs/${run}/events.jsonl`), "utf8"),
     ).events;
@@ -240,7 +249,6 @@ describe("automatic runs (AD-27 rule 2)", () => {
     expect(log.filter((e) => e.type === "branch.pushed").length).toBeGreaterThan(1);
     expect(releases).toHaveLength(1);
     const [release] = releases;
-    const branch = autoBranchName(ISSUE.kind, ISSUE.fingerprint);
     const feature = h.engine.status({}).features[0];
     expect(release).toMatchObject({
       run,
@@ -250,7 +258,9 @@ describe("automatic runs (AD-27 rule 2)", () => {
       title: feature?.title,
       specVerifier: "pass",
       change: "non_ui",
+      base: cut,
     });
+    expect(git(h.repo, "rev-parse", "HEAD").trim()).not.toBe(cut);
     expect(release?.request).toContain("Fix the post-merge CI failure (#42)");
     expect(release?.tasks.map((t) => t.id)).toEqual(["T-1"]);
     expect(release?.steps.find((s) => s.step === 3)?.status).toBe("pass");

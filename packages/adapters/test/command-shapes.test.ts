@@ -14,7 +14,10 @@ import { fixtureLines } from "./support/fixtures.js";
 const claude = createClaudeCodeAdapter();
 const codex = createCodexAdapter();
 
-/** The `flags` hash `commandShapes` gives a set of flag names. */
+/**
+ * The `flags` hash `commandShapes` gives a set of flag names (5.6.0: a single-dash word counts by
+ * its first letter, so `-rf` is `-r`, and no attached value reaches the hash).
+ */
 const flags = (...names: string[]): string =>
   createHash("sha256")
     .update([...new Set(names)].sort().join("\n"))
@@ -73,11 +76,11 @@ describe("shellCallShapes: one host command field → shapes only", () => {
   it("shapes the commands after a wrapper on the same line too, never the wrapper's own arguments", () => {
     expect(shellCallShapes("bash -lc ls && rm -rf x")).toEqual([
       shape("ls"),
-      shape("rm", undefined, "-rf"),
+      shape("rm", undefined, "-r"),
     ]);
     expect(shellCallShapes("bash -lc 'ls' ; rm -rf build")).toEqual([
       shape("ls"),
-      shape("rm", undefined, "-rf"),
+      shape("rm", undefined, "-r"),
     ]);
     expect(shellCallShapes("bash -lc 'git status'\nmake test")).toEqual([
       shape("git", "status"),
@@ -86,7 +89,7 @@ describe("shellCallShapes: one host command field → shapes only", () => {
     // `$0`, positional arguments and redirections belong to the wrapper and name no command
     expect(shellCallShapes("bash -c 'make build' runner extra")).toEqual([shape("make")]);
     expect(shellCallShapes("bash -lc 'ls -la' 2>&1 | tee log")).toEqual([
-      shape("ls", undefined, "-la"),
+      shape("ls", undefined, "-l"),
       shape("tee"),
     ]);
     expect(shellCallShapes("bash -lc 'ls'>out.txt")).toEqual([shape("ls")]);
@@ -121,6 +124,29 @@ describe("shellCallShapes: one host command field → shapes only", () => {
     ]);
   });
 
+  it("never reads a here-document's body as a command, inside a wrapper or after it (contracts 5.6.0)", () => {
+    expect(
+      shellCallShapes("cat > notes.txt <<EOF\nacmecorp quarterly secret\nhunter2\nEOF"),
+    ).toEqual([shape("cat")]);
+    expect(shellCallShapes("bash -lc 'cat <<X\nhunter2\nX'")).toEqual([shape("cat")]);
+    // the wrapper's own heredoc: its body is skipped before the rest of the line is shaped
+    expect(
+      shellCallShapes("bash -lc 'cat' <<EOF ; ls\nhunter2\nprodsecret\nEOF\ngit status"),
+    ).toEqual([shape("cat"), shape("ls"), shape("git", "status")]);
+    expect(shellCallShapes("bash -lc 'cat' <<-'EOF'\n\thunter2\n\tEOF\nls")).toEqual([
+      shape("cat"),
+      shape("ls"),
+    ]);
+    for (const command of [
+      "cat <<EOF\nhunter2\nEOF",
+      "bash -lc 'cat <<X\nhunter2\nX'",
+      "bash -lc 'cat' <<EOF\nhunter2\nEOF",
+      ["bash", "-lc", "cat <<X\nhunter2\nX"],
+    ]) {
+      expect(JSON.stringify(shellCallShapes(command))).not.toMatch(/hunter2|prodsecret|acmecorp/);
+    }
+  });
+
   it("gives no shape for anything that is not a command", () => {
     for (const value of [undefined, null, 42, {}, ["git", 1], "", "   "]) {
       expect(shellCallShapes(value)).toEqual([]);
@@ -137,7 +163,7 @@ describe("Claude parseEvents: Bash tool_use → commandShapes (D-cs)", () => {
       shape("cd"),
       shape("git", "status", "--porcelain"),
       shape("gh", "pr", "--repo", "--limit"),
-      shape("curl", undefined, "-sS", "-H"),
+      shape("curl", undefined, "-s", "-H"),
       shape("jq"),
       shape("<path>", undefined, "--env", "--password"),
     ]);

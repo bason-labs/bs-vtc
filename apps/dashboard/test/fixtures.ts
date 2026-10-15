@@ -18,16 +18,6 @@ export const readFixture = (name: string): unknown => {
   return JSON.parse(readFileSync(file, "utf8")) as unknown;
 };
 
-/**
- * A dashboard-owned `AutomationReport` (contracts 5.0.0, `dev-fixtures/automation.json`) with the
- * cases the golden run's `api/automation.json` does not record yet: a merged PR, a draft with
- * complete evidence, and `privacy` and `paused` skips. The fixture server serves the golden file.
- */
-export const readAutomationFixture = (): unknown =>
-  JSON.parse(
-    readFileSync(resolve(import.meta.dirname, "../dev-fixtures/automation.json"), "utf8"),
-  ) as unknown;
-
 /** A dashboard dev fixture by its `.vtc/` path (`apps/dashboard/dev-fixtures/vtc/`). */
 export const readDevFixture = (path: string): string => {
   const file = devArtifactFile(path);

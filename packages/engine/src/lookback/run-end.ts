@@ -383,8 +383,8 @@ export const DRIFT_BASELINE_SUFFIX = "@time_window";
  *   (`costRegressionFacts` from the scorecards), and `cost_per_task` is no scorecard metric the
  *   fact can carry, so neither is repeated here (`costReportFields` still reports both; widening
  *   the fact's metric to `cost_per_task` is a contract proposal to engine core). A quality-rate
- *   drift from a zero earlier rate is mapped too; the upstream module's `costRegressed` still
- *   wants a rate baseline above zero (a contract proposal to the upstream team).
+ *   drift from a zero earlier rate is mapped too, and the upstream module's `costRegressed` raises
+ *   it (reading 230(5)).
  * A routing change (D-cn) is RETRO's fact: the daemon raises it from `lookbackRoutingStep`'s
  * cells.
  */

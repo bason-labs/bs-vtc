@@ -222,8 +222,7 @@ describe("the drift baseline (D-cr)", () => {
       costReportFields(regression),
     );
     const [fact] = lookbackRunEndFacts("r2", { costRegressions: found }, now.toISOString());
-    // the fact Lookback hands over; the upstream module's `costRegressed` still wants a baseline
-    // above zero for a rate (a contract proposal to the upstream team aligns it with the canary rule)
+    // the fact Lookback hands over; the upstream module's `costRegressed` raises it (reading 230(5))
     expect(fact).toMatchObject({
       kind: "cost",
       source: "lookback.drift",
@@ -232,6 +231,10 @@ describe("the drift baseline (D-cr)", () => {
       current: 40,
     });
     expect(upstreamFact(fact)).toBeDefined();
+    expect(evaluateTrigger(upstreamFact(fact), { vtcVersion: "0.5.0" })).toMatchObject({
+      target: "upstream",
+      kind: "cost",
+    });
     // zero both times: quiet; and a cost metric from zero is never compared
     const steady = [
       ...runAt("r1", "2026-09-01T10:00:00.000Z", 10, { tokens: 1000, cost: 0 }),

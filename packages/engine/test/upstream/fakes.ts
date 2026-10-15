@@ -270,6 +270,12 @@ export interface FakePlumbing extends GitPlumbing {
   }[];
   readonly refs: Map<string, string>;
   readonly pushes: { remote: string; sha: string; dst: string }[];
+  /**
+   * The paths a pushed head changes (`changedPaths`), by head; a head not listed changes none.
+   * `changedPaths` records each `[base, head]` it was asked for in `diffs`.
+   */
+  readonly changed: Map<string, readonly string[]>;
+  readonly diffs: [string, string][];
 }
 
 /**
@@ -286,6 +292,8 @@ export const fakePlumbing = (
   const remote = sharing?.remote ?? new Map<string, string>();
   const commits: FakePlumbing["commits"] = sharing?.commits ?? [];
   const pushes: FakePlumbing["pushes"] = [];
+  const changed = new Map<string, readonly string[]>();
+  const diffs: [string, string][] = [];
   const descends = (sha: string, ancestor: string): boolean => {
     if (sha === ancestor) return true;
     const commit = commits.find((c) => c.sha === sha);
@@ -296,6 +304,13 @@ export const fakePlumbing = (
     refs: map,
     remote,
     pushes,
+    changed,
+    diffs,
+    changedPaths: (base, head) => {
+      diffs.push([base, head]);
+      return Promise.resolve(changed.get(head) ?? []);
+    },
+    mergeBase: (a, b) => Promise.resolve(descends(b, a) ? a : descends(a, b) ? b : null),
     resolve: (ref) => Promise.resolve(map.get(ref) ?? null),
     commit: (request) => {
       const sha = createHash("sha1")

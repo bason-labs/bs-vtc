@@ -19,6 +19,7 @@ import {
   automationFacts,
   automationReportView,
   costRegressionFacts,
+  costWorsened,
   createReadModel,
   type RunState,
 } from "../../src/core/index.js";
@@ -758,5 +759,17 @@ describe("cost regressions from Lookback's scorecards (D-bv)", () => {
         meta,
       ),
     ).toEqual([]);
+  });
+});
+
+describe("costWorsened (reading 230(5): a zero rate baseline counts)", () => {
+  it("raises a rate from zero once it is above 0, and keeps the ratio otherwise", () => {
+    expect(costWorsened("escalations_per_100", 0, 40)).toBe(true);
+    expect(costWorsened("cap_hits_per_100", 0, 1)).toBe(true);
+    expect(costWorsened("escalations_per_100", 0, 0)).toBe(false);
+    expect(costWorsened("escalations_per_100", 2, 4)).toBe(true);
+    expect(costWorsened("escalations_per_100", 2, 3)).toBe(false);
+    // tokens per success from zero is never compared
+    expect(costWorsened("tokens_per_success", 0, 1000)).toBe(false);
   });
 });

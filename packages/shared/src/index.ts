@@ -287,5 +287,15 @@ export * from "./json-schema.js";
  * (`TierHint`, reading 228), `AUTO_TEMPLATE_SLOTS`' `diff` is the CHANGELOG entry's, the
  * `RoutingScorecard` cost cell's `n` counts priced tasks, `AutomationReport.evidence_hosting` is
  * the resolved hosting, and the daemon reads the user's `lookback` config itself. All additive.
+ *
+ * 5.6.0 (MINOR): the round-5 fix round (spine §5 reading 232). `commandShapes` keeps no argument
+ * value in any form: a here-document's body (`<<WORD`, `<<-WORD`) is data, never a command, and a
+ * flag word reaches the flag hash by its name only (a single-dash word by its first letter, a long
+ * flag by its name, a numeric flag as `-#`), so `-pS3cret` and `-pOther` hash alike; the shared
+ * heredoc rule is exported (`heredocAt`, `skipHeredocBodies`, `Heredoc`) for the adapters' shell
+ * wrapper reader. A shape key recorded before 5.6.0 may differ from the same command's key now
+ * (its flag hash). `AutomationSkipReason` `out_of_scope`: an automatic PR that changes files its
+ * kind may not (a routing-table PR, reading 228(6)) is refused before it opens (the dashboard's
+ * exhaustive map updated in the same change). All additive.
  */
-export const CONTRACTS_VERSION = "5.5.0";
+export const CONTRACTS_VERSION = "5.6.0";

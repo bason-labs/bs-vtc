@@ -179,17 +179,19 @@ describe("the routed start tier on dispatch (D-cm)", () => {
     await h.release();
   });
 
-  /** Two failed rounds of an S task, then the Engineer's third dispatch. */
-  const escalated = async (project: Record<string, unknown>): Promise<Dispatched[]> => {
+  /** `failed` (default 2) failed rounds of an S task, then the Engineer's next dispatch. */
+  const escalated = async (project: Record<string, unknown>, failed = 2): Promise<Dispatched[]> => {
     const { h, qa } = await toQa([draft("T-1", { size: "S", risk: "low" })], { project });
     await authorTests(h, qa);
     let engineer = only(await next(h), "engineer");
-    h.gates.queue(
-      "round",
-      { fail: [toolFinding("a", "medium"), toolFinding("b", "medium")] },
-      { fail: [toolFinding("c", "medium")] },
-    );
-    for (const round of [1, 2]) {
+    // each round fixes some findings and keeps one fewer open, so the task is never stuck
+    const rounds = Array.from({ length: failed }, (_v, i) => ({
+      fail: Array.from({ length: failed - i }, (_w, j) =>
+        toolFinding(`f${String(i)}-${String(j)}`, "medium"),
+      ),
+    }));
+    h.gates.queue("round", ...rounds);
+    for (let round = 1; round <= failed; round++) {
       writeFile(worktreeOf(h, "T-1"), `src/t-1/r${String(round)}.ts`, `export const r = 1;\n`);
       expect((await submitResult(h, engineer, { exit: "built" })).accepted).toBe(true);
       await h.engine.settle();
@@ -206,6 +208,23 @@ describe("the routed start tier on dispatch (D-cm)", () => {
     expect(tierOf(engineers.at(-1)!)).toEqual({
       model: "sonnet",
       tier: "mid",
+      reason: "escalation",
+      clamped: false,
+    });
+  });
+
+  it("escalates a Low start to Mid, then Top after 2 further failed rounds", async () => {
+    const engineers = await escalated({ caps: { low: 5 } }, 4);
+    expect(engineers.map((d) => [d.data.tier, d.data.tier_reason])).toEqual([
+      ["low", "rule"],
+      ["low", "rule"],
+      ["mid", "escalation"],
+      ["mid", "escalation"],
+      ["top", "escalation"],
+    ]);
+    expect(tierOf(engineers.at(-1)!)).toEqual({
+      model: "opus",
+      tier: "top",
       reason: "escalation",
       clamped: false,
     });
