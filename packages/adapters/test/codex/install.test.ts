@@ -31,9 +31,11 @@ const setup = () => {
   writeFixturePlugin("codex", pluginDir);
   return { home, projectRoot, pluginDir };
 };
-/** An adapter whose `codex plugin …` commands a fake answers (never the real binary). */
-const codexAdapter = () =>
-  createCodexAdapter({ spawner: codexFakeSpawner().spawner, codexHome: "/fake/codex-home" });
+/**
+ * An adapter whose `codex plugin …` commands a fake answers (never the real binary); the Codex
+ * home is the default, `<InstallRequest.home>/.codex`.
+ */
+const codexAdapter = () => createCodexAdapter({ spawner: codexFakeSpawner().spawner });
 
 const TABLE = [
   "# Managed by `vtc install`: the vtc engine bridge (rewritten on install).",

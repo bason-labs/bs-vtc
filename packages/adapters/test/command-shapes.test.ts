@@ -26,7 +26,11 @@ const shape = (program: string, subcommand?: string, ...names: string[]): Comman
   flags: flags(...names),
 });
 
-/** Every value, path and secret the synthetic streams put into a shell call. */
+/**
+ * Every value, path and secret the synthetic streams put into a shell call. None sits right after
+ * a program as a plain lower-case word, which `commandShapes` keeps as the subcommand (the shared
+ * contract's known limit, pinned below).
+ */
 const NEVER_KEPT = [
   "/Users/alice",
   "alice",
@@ -66,6 +70,29 @@ describe("shellCallShapes: one host command field → shapes only", () => {
     ]);
   });
 
+  it("shapes the commands after a wrapper on the same line too, never the wrapper's own arguments", () => {
+    expect(shellCallShapes("bash -lc ls && rm -rf x")).toEqual([
+      shape("ls"),
+      shape("rm", undefined, "-rf"),
+    ]);
+    expect(shellCallShapes("bash -lc 'ls' ; rm -rf build")).toEqual([
+      shape("ls"),
+      shape("rm", undefined, "-rf"),
+    ]);
+    expect(shellCallShapes("bash -lc 'git status'\nmake test")).toEqual([
+      shape("git", "status"),
+      shape("make", "test"),
+    ]);
+    // `$0`, positional arguments and redirections belong to the wrapper and name no command
+    expect(shellCallShapes("bash -c 'make build' runner extra")).toEqual([shape("make", "build")]);
+    expect(shellCallShapes("bash -lc 'ls -la' 2>&1 | tee log")).toEqual([
+      shape("ls", undefined, "-la"),
+      shape("tee", "log"),
+    ]);
+    expect(shellCallShapes("bash -lc 'ls'>out.txt")).toEqual([shape("ls")]);
+    expect(shellCallShapes("bash -lc ls &>log")).toEqual([shape("ls")]);
+  });
+
   it("keeps a non-wrapper command as it is: a shell named by path with no -c, or another program", () => {
     expect(shellCallShapes("bash ./scripts/x.sh")).toEqual([shape("bash")]);
     expect(shellCallShapes("bash -l")).toEqual([shape("bash", undefined, "-l")]);
@@ -77,6 +104,21 @@ describe("shellCallShapes: one host command field → shapes only", () => {
       shape("git", "commit", "-m"),
     ]);
     expect(shellCallShapes(["echo", "it's"])).toEqual([shape("echo")]);
+  });
+
+  it("pins the shared contract's known limit: a plain lower-case word after the program is kept as its subcommand, a bare value too", () => {
+    // `commandShapes` (@vtc/shared, frozen) keeps the word after any program when it is a plain
+    // lower-case word; for a program without subcommands that word is an argument value. Raised
+    // with the integrator as a contract proposal; until it changes, this is what reaches a shape.
+    expect(shellCallShapes("echo hunter2")).toEqual([shape("echo", "hunter2")]);
+    expect(shellCallShapes("cd work/secret-project && cat secrets")).toEqual([
+      shape("cd"),
+      shape("cat", "secrets"),
+    ]);
+    // a path, an upper-case or quoted word, or anything with a dot or slash is never kept
+    expect(shellCallShapes("cat ./secrets 'hunter2' Hunter2 api.example.com")).toEqual([
+      shape("cat"),
+    ]);
   });
 
   it("gives no shape for anything that is not a command", () => {

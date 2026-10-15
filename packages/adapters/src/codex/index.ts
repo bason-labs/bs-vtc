@@ -118,9 +118,11 @@ export interface CodexAdapterOptions {
    */
   readonly mcpListTimeoutMs?: number;
   /**
-   * The Codex home `install` registers the plugin in (`codex plugin …` runs with this
-   * `CODEX_HOME`). Default: `$CODEX_HOME`, else `<InstallRequest.home>/.codex`, where Codex
-   * itself looks.
+   * The user's Codex home (the cli passes its `$CODEX_HOME`): `install` places the user-scope
+   * agents and `config.toml` there and registers the plugin in it (`codex plugin …` runs with this
+   * `CODEX_HOME`). Default: `<InstallRequest.home>/.codex`, where Codex looks without
+   * `$CODEX_HOME`; never read from this process's environment, so an install into a temporary
+   * home stays inside it (AD-6 rule 5).
    */
   readonly codexHome?: string;
   /** How long one `codex plugin …` command of `install` may run before it is killed. Default 60 s. */
@@ -232,11 +234,7 @@ export const createCodexAdapter = (options: CodexAdapterOptions = {}): HostAdapt
       Promise.resolve().then(() =>
         installCodex(request, {
           run: (command, cwd) => installCommands.run(command, cwd),
-          codexHome:
-            options.codexHome ??
-            (process.env.CODEX_HOME === undefined || process.env.CODEX_HOME === ""
-              ? join(request.home, ".codex")
-              : process.env.CODEX_HOME),
+          codexHome: options.codexHome ?? join(request.home, ".codex"),
         }),
       ),
     spawnRole: (request) => spawn(request),

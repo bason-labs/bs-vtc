@@ -14,7 +14,10 @@
  * `alreadyAdded: true`, and `plugin add` again refreshes the cached copy even at the same version,
  * so a re-install updates the plugin. The same name from another directory (a moved VTC home) is
  * refused ("already added from a different source"); `marketplace remove` then drops only the
- * `[marketplaces.vtc-local]` entry, and the add is retried once. With the plugin installed and
+ * `[marketplaces.vtc-local]` entry, and the add is retried once. It is removed only when the
+ * `source` Codex recorded for it in `<codexHome>/config.toml` is VTC's own layout (a
+ * `plugins/codex-marketplace` directory, an older VTC home); a `vtc-local` from anywhere else (or
+ * one whose source cannot be read) is the user's, and the install refuses, naming it. With the plugin installed and
  * the installer's `[mcp_servers.vtc]` in `config.toml`, `codex mcp list` shows one `vtc` server,
  * the config's (the plugin's own `mcp.json` entry runs from the cache directory instead).
  *
@@ -23,10 +26,11 @@
  * (`features.plugins=false`, `CODEX_ROLE_FEATURES_OFF`), so its hooks and MCP server stay out of
  * role runs.
  */
-import { join } from "node:path";
+import { mkdirSync } from "node:fs";
+import { basename, dirname, join } from "node:path";
 import type { HostCommand } from "@vtc/shared";
 import type { CommandOutput } from "../common/command-output.js";
-import { replaceDirectory, writeJson } from "../common/files.js";
+import { readTextOrNull, replaceDirectory, writeOwnFileAtomic } from "../common/files.js";
 import { parseJsonObject, text } from "../common/json.js";
 import { CODEX_BINARY } from "./command.js";
 
@@ -54,7 +58,9 @@ export const codexMarketplaceIndex = (plugin: string) => ({
 export const writeCodexMarketplace = (pluginDir: string, root: string, plugin: string): string => {
   replaceDirectory(pluginDir, join(root, plugin));
   const index = join(root, ".agents", "plugins", "marketplace.json");
-  writeJson(index, codexMarketplaceIndex(plugin));
+  // a file only VTC writes (under `plugins/**`): never through a link, whoever put one there
+  mkdirSync(dirname(index), { recursive: true });
+  writeOwnFileAtomic(index, `${JSON.stringify(codexMarketplaceIndex(plugin), null, 2)}\n`);
   return index;
 };
 
@@ -78,7 +84,11 @@ const MOVED_SOURCE = /already added from a different source/iu;
 
 const describe = (command: HostCommand, output: CommandOutput): string => {
   const line = `codex ${command.args.join(" ")}`;
-  if (output.kind === "failed") return `${line} could not run (is codex on PATH?)`;
+  if (output.kind === "failed") {
+    return output.timedOut === true
+      ? `${line} did not finish in time and was stopped (is codex waiting on something?)`
+      : `${line} could not run (is codex on PATH?)`;
+  }
   const said = (output.stderr.trim() || output.stdout.trim()).slice(-400);
   return `${line} exited ${output.code}${said === "" ? "" : `: ${said}`}`;
 };
@@ -98,7 +108,53 @@ export interface CodexPluginRegistration {
   readonly installedPath: string;
   readonly pluginId: string;
   readonly version: string | null;
+  /** The source of the older VTC marketplace this install replaced, if it replaced one. */
+  readonly replacedSource: string | null;
 }
+
+/** A TOML table header's dotted name without quotes or spaces, or null for a non-header line. */
+const tomlHeader = (line: string): string | null => {
+  const match = /^\s*\[\[?([^\]]+)\]\]?\s*(#.*)?$/u.exec(line);
+  return match?.[1] === undefined ? null : match[1].replace(/["'\s]/gu, "");
+};
+
+/** A one-line TOML string value (`"..."` or `'...'`), or null for anything else. */
+const tomlString = (raw: string): string | null => {
+  if (raw.startsWith("'") && raw.endsWith("'") && raw.length >= 2) return raw.slice(1, -1);
+  if (!raw.startsWith('"')) return null;
+  try {
+    const value: unknown = JSON.parse(raw);
+    return typeof value === "string" ? value : null;
+  } catch {
+    return null;
+  }
+};
+
+/**
+ * Pure: the `source` of `[marketplaces.<name>]` in a Codex `config.toml` (where codex-cli
+ * 0.162.1 records an added marketplace, `plugin-reinstall.json`), or null when there is none or
+ * it is not a one-line string. Approximate: a line reader, not a TOML parser; anything it cannot
+ * read is null, which refuses the removal.
+ */
+export const codexMarketplaceSource = (config: string, name: string): string | null => {
+  let inTable = false;
+  for (const line of config.split("\n")) {
+    const header = tomlHeader(line);
+    if (header !== null) {
+      inTable = header === `marketplaces.${name}`;
+      continue;
+    }
+    const value = inTable ? /^\s*source\s*=\s*(\S.*?)\s*(#[^"']*)?$/u.exec(line)?.[1] : undefined;
+    if (value !== undefined) return tomlString(value);
+  }
+  return null;
+};
+
+/** Whether a marketplace source is VTC's own layout (`<vtcHome>/plugins/codex-marketplace`). */
+const isVtcMarketplace = (source: string): boolean => {
+  const dir = source.replace(/\/+$/u, "");
+  return basename(dir) === "codex-marketplace" && basename(dirname(dir)) === "plugins";
+};
 
 /**
  * Registers the marketplace at `root` and installs `plugin` from it into `codexHome`. Throws,
@@ -110,8 +166,18 @@ export const registerCodexPlugin = async (
 ): Promise<CodexPluginRegistration> => {
   const commands = codexPluginCommands(options.root, options.codexHome, options.plugin);
   let added = await run(commands.addMarketplace, options.root);
+  let replacedSource: string | null = null;
   if (added.kind === "exited" && added.code !== 0 && MOVED_SOURCE.test(added.stderr)) {
-    // VTC's own marketplace name from an older VTC home: drop that entry, then add this one
+    // VTC's own marketplace name from an older VTC home: drop that entry, then add this one;
+    // never a `vtc-local` that is not VTC's layout (the user's own), nor one whose source is unknown
+    const config = join(options.codexHome, "config.toml");
+    const source = codexMarketplaceSource(readTextOrNull(config) ?? "", CODEX_MARKETPLACE);
+    if (source === null || !isVtcMarketplace(source)) {
+      throw new Error(
+        `a Codex marketplace named ${CODEX_MARKETPLACE} is already added from ${source === null ? `a source VTC cannot read in ${config}` : source}, which is not a VTC marketplace; VTC leaves it alone. Remove it (codex plugin marketplace remove ${CODEX_MARKETPLACE}) if it is no longer wanted`,
+      );
+    }
+    replacedSource = source;
     const removed = await run(commands.removeMarketplace, options.root);
     if (removed.kind !== "exited" || removed.code !== 0) {
       throw new Error(describe(commands.removeMarketplace, removed));
@@ -132,5 +198,5 @@ export const registerCodexPlugin = async (
       `codex plugin add reported ${JSON.stringify(installed.pluginId)} at ${JSON.stringify(installed.installedPath)}, expected ${pluginId} with its installed path`,
     );
   }
-  return { installedPath, pluginId, version: text(installed.version) };
+  return { installedPath, pluginId, version: text(installed.version), replacedSource };
 };

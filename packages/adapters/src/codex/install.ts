@@ -2,7 +2,7 @@
  * Codex `install` (§4.4, §12.1, AD-6 rule 5, AD-16 rules 3–4). Places what the compiler emitted,
  * authoring nothing:
  * 1. copies the compiled agent files (`agents/vtc-*.toml`, listed in `vtc-manifest.json`) into
- *    `.codex/agents/` (the repo's for the project scope, `<home>/.codex/agents/` for the user
+ *    `.codex/agents/` (the repo's for the project scope, `<codexHome>/agents/` for the user
  *    scope) and removes VTC agent files a newer plugin no longer lists;
  * 2. writes the engine entry `[mcp_servers.vtc]` = `engineMcpServer("codex")` into that scope's
  *    `config.toml`, replacing only that table and keeping everything else byte for byte;
@@ -14,7 +14,11 @@
  *    under the VTC home, `codex plugin marketplace add` and `codex plugin add`
  *    (`plugin-registration.ts`), which makes its hooks active in the Codex desktop app once the
  *    user trusts them. Registration goes to the user's Codex home whatever the scope (Codex keeps
- *    marketplaces and plugins per user). The skills stay placed as in step 3 too: whether a Codex
+ *    marketplaces and plugins per user).
+ * The Codex home is resolved once (`CodexInstallDeps.codexHome`) and is both where the user-scope
+ * agents and `config.toml` go and where the plugin is registered, so one install never splits
+ * across two Codex homes. It comes from injected input only, never the ambient environment: the
+ * cli's `codexHome` (its `$CODEX_HOME`), else `<InstallRequest.home>/.codex` (AD-6 rule 5). The skills stay placed as in step 3 too: whether a Codex
  *    CLI session loads a registered plugin's skills is not yet checked, and the placed copies are
  *    the path shown to work.
  * The notes also say how a Codex Lead's roles run (human decision H-1, spine §5 reading 99, which
@@ -133,10 +137,12 @@ const isGeneratedAgent = (path: string): boolean => {
 };
 
 /** Steps 1–3, synchronous: the files in the repo or the user's home. */
-const placeCodexFiles = (request: InstallRequest): InstallResult & { readonly plugin: string } => {
+const placeCodexFiles = (
+  request: InstallRequest,
+  codexHome: string,
+): InstallResult & { readonly plugin: string } => {
   const manifest = readPluginManifest(request.pluginDir, "codex");
-  const codexDir =
-    request.scope === "user" ? join(request.home, ".codex") : join(request.projectRoot, ".codex");
+  const codexDir = request.scope === "user" ? codexHome : join(request.projectRoot, ".codex");
   const agentsDir = join(codexDir, "agents");
   const written: string[] = [];
 
@@ -209,7 +215,10 @@ const placeCodexFiles = (request: InstallRequest): InstallResult & { readonly pl
 export interface CodexInstallDeps {
   /** Runs `codex plugin …` (a short command whose output is read; tests pass a fake). */
   readonly run: RunCommand;
-  /** The Codex home the plugin is registered in (`$CODEX_HOME`, else `<home>/.codex`). */
+  /**
+   * The user's Codex home: where the user-scope agents and `config.toml` go and where the plugin
+   * is registered (the cli's `$CODEX_HOME`, else `<InstallRequest.home>/.codex`).
+   */
   readonly codexHome: string;
 }
 
@@ -222,7 +231,7 @@ export const installCodex = async (
   request: InstallRequest,
   deps: CodexInstallDeps,
 ): Promise<InstallResult> => {
-  const { plugin, written, notes } = placeCodexFiles(request);
+  const { plugin, written, notes } = placeCodexFiles(request, deps.codexHome);
   const root = codexMarketplaceDir(request.vtcHome ?? join(request.home, ".vtc"));
   const index = writeCodexMarketplace(request.pluginDir, root, plugin);
   let registered;
@@ -239,6 +248,11 @@ export const installCodex = async (
     written: [...written, ...filesUnder(join(root, plugin)), index],
     notes: [
       ...notes,
+      ...(registered.replacedSource === null
+        ? []
+        : [
+            `Replaced the ${CODEX_MARKETPLACE} marketplace an earlier VTC home registered (${registered.replacedSource}).`,
+          ]),
       `Registered the ${plugin} plugin with Codex as ${registered.pluginId} from the ${CODEX_MARKETPLACE} marketplace in ${root}${registered.version === null ? "" : ` (version ${registered.version})`}, for your Codex user (${deps.codexHome}; Codex keeps its copy in ${registered.installedPath}). Its hooks run in the Codex desktop app once you trust them there; the engine's headless role runs never load it.`,
     ],
   };
