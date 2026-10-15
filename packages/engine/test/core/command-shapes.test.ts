@@ -4,7 +4,7 @@
  * in-session subagent's from the hook's spool in the engine's private directory, which the engine
  * drains for the dispatch (agent, working directory, time) and truncates.
  */
-import { readFileSync, writeFileSync } from "node:fs";
+import { readdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import {
@@ -17,7 +17,8 @@ import {
 } from "@vtc/shared";
 import { capabilitySignalFacts, loadRuns, type CallContext } from "../../src/core/index.js";
 import { drainCommandShapeSpool, SPOOL_ROW_MAX_AGE_MS } from "../../src/core/command-shapes.js";
-import { ensurePrivateDir } from "../../src/core/guard.js";
+import { appendPrivateFile, ensurePrivateDir } from "../../src/core/guard.js";
+import type * as Guard from "../../src/core/guard.js";
 import { cleanupDirs, tempDir, writeFile } from "../helpers/repo.js";
 import {
   authorTests,
@@ -32,6 +33,20 @@ import {
   type Harness,
   type HeadlessScript,
 } from "../helpers/engine-harness.js";
+
+// lets a test act as the hook while the drain reads the spool it moved away
+const hook = vi.hoisted(() => ({ duringRead: undefined as (() => void) | undefined }));
+vi.mock("../../src/core/guard.js", async (original) => {
+  const real = await original<typeof Guard>();
+  return {
+    ...real,
+    readPrivateFile: (abs: string) => {
+      const text = real.readPrivateFile(abs);
+      hook.duringRead?.();
+      return text;
+    },
+  };
+});
 
 vi.setConfig({ testTimeout: 30_000 });
 afterEach(cleanupDirs);
@@ -82,13 +97,38 @@ describe("drainCommandShapeSpool (D-cs)", () => {
     expect(drainCommandShapeSpool(dir, match, now)).toEqual([]);
   });
 
-  it("drops rows no dispatch can claim any more, and keeps a line still being written", () => {
+  it("drops rows no dispatch can claim any more, and a line its writer can no longer finish", () => {
     const dir = tempDir("guard-");
     const old = new Date(now.getTime() - SPOOL_ROW_MAX_AGE_MS - 1).toISOString();
+    // the drain moved the spool away, so its writer would finish this line in the moved file
     const partial = '{"v":1,"at":"2026';
     writeFileSync(spool(dir), `${row({ at: old, agent: "x" })}${row({ agent: "y" })}${partial}`);
     expect(drainCommandShapeSpool(dir, match, now)).toEqual([]);
-    expect(readFileSync(spool(dir), "utf8")).toBe(`${row({ agent: "y" })}${partial}`);
+    expect(readFileSync(spool(dir), "utf8")).toBe(row({ agent: "y" }));
+    // nothing but the spool is left behind
+    expect(readdirSync(dir)).toEqual([COMMAND_SHAPE_SPOOL_FILE]);
+  });
+
+  it("keeps a row the hook appends while the drain runs, and returns rows in the order written", () => {
+    const dir = tempDir("guard-");
+    const late = row({ agent: "vtc:vtc-engineer-backend", command: "pnpm lint" });
+    const mine = row({ at: "2026-10-13T09:30:00.000Z", command: "pnpm build" });
+    writeFileSync(spool(dir), row({ agent: "z" }));
+    // an earlier drain put a kept row back after a newer one
+    appendPrivateFile(spool(dir), `${mine}${row({})}`);
+    hook.duringRead = () => {
+      appendPrivateFile(spool(dir), late);
+    };
+    try {
+      expect(drainCommandShapeSpool(dir, match, now)).toEqual([
+        shape("git status --short"),
+        shape("pnpm build"),
+      ]);
+    } finally {
+      hook.duringRead = undefined;
+    }
+    // the row appended mid-drain survives, ahead of the row put back
+    expect(readFileSync(spool(dir), "utf8")).toBe(`${late}${row({ agent: "z" })}`);
   });
 
   it("finds nothing in a missing spool", () => {

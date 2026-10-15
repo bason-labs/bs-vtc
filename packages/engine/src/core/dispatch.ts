@@ -298,6 +298,21 @@ export const routeStep = (
   );
 };
 
+/**
+ * D-cm: the tier a step is dispatched on: the route its planner gave it, or, for a step its planner
+ * did not route (the phase roles), {@link routeStep}'s (the role's own tier, clamped). The headless
+ * preflight prices this same tier.
+ */
+export const stepRoute = (
+  k: Kernel,
+  h: RunHandle,
+  step: Pick<StepSpec, "role" | "mode" | "task" | "replay" | "tier" | "tierReason" | "tierClamped">,
+  host: HostId,
+): TierRoute =>
+  step.tier !== undefined && step.tierReason !== undefined
+    ? { tier: step.tier, reason: step.tierReason, clamped: step.tierClamped ?? false }
+    : routeStep(k, h, step, host);
+
 /** The step fields of a route. */
 const routed = (
   route: TierRoute,
@@ -1184,11 +1199,7 @@ export const dispatchStep = (
   if (contract === undefined) throw new EngineError("invalid", `no contract for role ${step.role}`);
   const actionId = nextActionId(h.state);
   const config = k.config();
-  // D-cm: the step's route, or the role's own tier for a step its planner did not route
-  const route: TierRoute =
-    step.tier !== undefined && step.tierReason !== undefined
-      ? { tier: step.tier, reason: step.tierReason, clamped: step.tierClamped ?? false }
-      : routeStep(k, h, step, host);
+  const route = stepRoute(k, h, step, host);
   const model = resolveModel(contract, host, config, {
     ...(step.mode === undefined ? {} : { mode: step.mode }),
     tier: route.tier,

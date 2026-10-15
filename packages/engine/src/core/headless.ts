@@ -30,7 +30,13 @@ import {
 } from "@vtc/shared";
 import { budgetState } from "./budget.js";
 import { dispatchWriteScope } from "./dispatch-scope.js";
-import { dispatchPrepared, pendingSteps, refuseInSession, type StepSpec } from "./dispatch.js";
+import {
+  dispatchPrepared,
+  pendingSteps,
+  refuseInSession,
+  stepRoute,
+  type StepSpec,
+} from "./dispatch.js";
 import { protectedFiles } from "./jobs.js";
 import { resolveModel } from "./roles.js";
 import type { Kernel, RunHandle } from "./kernel.js";
@@ -116,7 +122,8 @@ const unpricedDetail = (detail: string): boolean =>
 export const headlessPreflight = async (
   k: Kernel,
   h: RunHandle,
-  step: Pick<StepSpec, "task"> & Partial<Pick<StepSpec, "role" | "mode" | "tier">>,
+  step: Pick<StepSpec, "task"> &
+    Partial<Pick<StepSpec, "role" | "mode" | "tier" | "tierReason" | "tierClamped" | "replay">>,
   host: HostId,
   purpose: DispatchPurpose,
 ): Promise<HeadlessPreflight> => {
@@ -153,8 +160,19 @@ export const headlessPreflight = async (
     // `UsageSnapshot.billing`, so Flow Studio shows `API_KEY_BILLING_WARNING`
     k.recordBilling(host, status.billing ?? null);
   }
+  // priced on the tier the step will be dispatched on (`stepRoute`: a phase role's is clamped too)
   const unpriced =
-    step.role === undefined ? null : unpricedRun(k, { ...step, role: step.role }, host);
+    step.role === undefined
+      ? null
+      : unpricedRun(
+          k,
+          {
+            ...step,
+            role: step.role,
+            tier: stepRoute(k, h, { ...step, role: step.role }, host).tier,
+          },
+          host,
+        );
   if (unpriced !== null) return fail("budget", unpriced);
   const task = step.task === undefined ? undefined : state.tasks.get(step.task);
   if (task !== undefined && budgetState(task.spent_usd, task.budget_usd) === "exhausted")

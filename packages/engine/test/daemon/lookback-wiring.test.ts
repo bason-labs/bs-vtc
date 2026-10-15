@@ -778,6 +778,7 @@ describe("Lookback tunes routing at RETRO (D-cn, spine §5 reading 219)", () => 
     await unwire();
     const run = h.engine.status({}).run.id;
     expect(asked).toHaveLength(1);
+    expect(asked[0]?.phase).toBe("retro");
     expect(asked[0]?.history).toBeGreaterThan(0);
     expect(found).toEqual([
       {

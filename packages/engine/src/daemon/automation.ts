@@ -412,15 +412,26 @@ export const wireAutomation = (
 
   /**
    * An automatic action that failed unexpectedly (a `gh` or git error, a crash in the module):
-   * an engine notice, and an `automation.skipped` `error` with the redacted message (contracts
-   * 5.4.0), so the Automation view shows it too. Recording the skip never throws.
+   * an engine notice, and an `automation.skipped` `error`, both with the message redacted (the
+   * pattern rules and the engine's known secret values; contracts 5.4.0), so the Automation view
+   * shows it too. Recording the skip never throws.
    */
   const failed = (
     text: string,
     error: unknown,
     about: { readonly run?: string; readonly kind?: AutomationFact["kind"] } = {},
   ): void => {
-    const message = `${text}: ${error instanceof Error ? error.message : String(error)}`;
+    // gh and git errors can carry a credentialed remote URL or a project secret
+    let known: readonly string[] = [];
+    try {
+      known = engine.secrets();
+    } catch {
+      // an unreadable .env: the pattern rules still apply
+    }
+    const message = redactSecrets(
+      `${text}: ${error instanceof Error ? error.message : String(error)}`,
+      known,
+    );
     engine.notice(message);
     if (automation === undefined) return;
     try {
@@ -431,7 +442,7 @@ export const wireAutomation = (
           data: {
             reason: "error",
             ...(about.kind === undefined ? {} : { kind: about.kind }),
-            detail: redactSecrets(message).slice(0, 500),
+            detail: message.slice(0, 500),
           },
         },
         about.run,

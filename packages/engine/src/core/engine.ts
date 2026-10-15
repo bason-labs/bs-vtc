@@ -115,6 +115,7 @@ import { openEventLog, type EventDraft } from "./event-log.js";
 import {
   downgradeNoRemote,
   ensureWorkspace,
+  failureDetail,
   rebaseReopened,
   setFeatureStatus,
   startBaseCheck,
@@ -1416,8 +1417,20 @@ export class Engine implements Kernel {
     // a daemon-started run has no Lead: the engine drives it now when the project allows
     // unattended runs (`drive`, reading 212(6)); otherwise the next Lead session's `next` does
     const handle = this.handles.get(started.run);
-    if (handle !== undefined && this.liveLeadHost(started.run) === undefined)
-      await this.serial(handle, () => drive(this, handle));
+    if (handle !== undefined && this.liveLeadHost(started.run) === undefined) {
+      try {
+        await this.serial(handle, () => drive(this, handle));
+      } catch (error) {
+        // the run started: a failed drive is told, not a failed start (the next job, wake or Lead
+        // call drives it again)
+        this.notice(
+          failureDetail(
+            `automatic run ${started.run} started, but driving it failed: ${error instanceof Error ? error.message : String(error)}`,
+            this.secrets(),
+          ),
+        );
+      }
+    }
     return started;
   }
 

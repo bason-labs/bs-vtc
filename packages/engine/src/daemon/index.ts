@@ -31,6 +31,7 @@ import {
   type ResearchScope,
   type RunDaemon,
   type TaskRiskClass,
+  type TaskSize,
   type VtcEvent,
   type RunningDaemon,
   type RunningSnapshot,
@@ -313,7 +314,7 @@ export const newAgentFact = (run: string, signal: NewAgentSignal, at: string): A
  */
 export interface RoutingProposalCell {
   readonly role: string;
-  readonly size: "S" | "M" | "L";
+  readonly size: TaskSize;
   readonly risk: TaskRiskClass;
   readonly metrics?: Readonly<Record<string, number>>;
   readonly detail: string;
@@ -741,6 +742,10 @@ export const runDaemon: RunDaemon = async (deps: EngineDeps, options) => {
             automation.improvements(signals.map((s) => newAgentFact(run, s, now().toISOString())));
           },
         },
+        // D-cn (reading 219) merge followup: the 6th argument, `routing: { propose: <Lookback's
+        // routing scorecard writer and proposals>, found: (run, facts) =>
+        // automation.improvements(facts) }`, is wired once lookback-research's writer lands;
+        // until then RETRO writes no routing scorecard
       ),
     );
     // AD-25: shutting down kills the engine-launched runs and stops the Level-3 waits, so close

@@ -457,4 +457,26 @@ describe("automatic runs (AD-27 rule 2)", () => {
       await h.release();
     }
   });
+
+  it("a drive that fails after the run started is a notice, not a failed start", async () => {
+    const h = createHarness({
+      project: { merge_level: 1, hosts: { dispatch: "headless_allowed" } },
+    });
+    // the start's own serial step runs; the drive after it fails
+    const serial = h.engine.serial.bind(h.engine);
+    let calls = 0;
+    const spy = vi.spyOn(h.engine, "serial").mockImplementation((handle, fn) => {
+      calls += 1;
+      return calls === 2 ? Promise.reject(new Error("the drive crashed")) : serial(handle, fn);
+    });
+    const started = await h.engine.startAutomatic(REQUEST, ISSUE, { host: null });
+    spy.mockRestore();
+    expect(calls).toBe(2);
+    expect(started.run).toBe(h.engine.status({}).run.id);
+    expect(h.engine.notices.join("\n")).toContain(
+      `automatic run ${started.run} started, but driving it failed: the drive crashed`,
+    );
+    await h.engine.pause({});
+    await h.release();
+  });
 });
