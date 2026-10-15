@@ -32,6 +32,7 @@ not settle it. Facts cite a fact row or are marked UNVERIFIED.>
 ### As a spine decision
 
 - Binds: <code, modules, artifacts>
+- Covers: <the REQ-n and SEC-n ids it serves>
 - Prevents: <the failure it rules out>
 - Rule: <what must hold>
 - Check: <one `vtc-check` block per check a kind expresses, or `Check: <tool> <rule>, blocking|warn`>

@@ -52,14 +52,16 @@ covering every requirement and nothing more.
 
 ## Start tier
 
-The engine picks the model tier each task's Engineer, QA and reviewers start on from the task's
-`size` and risk, by this table:
+The engine picks a task's start tier from its `size` and risk, by this table:
 
 {{routing_table}}
 
+{{routing_roles}}
+
 So an accurate `size`, `risk` and `risk_tags` are what route a task well. The engine then keeps
 the tier within the project's limits, and QA writing a task's acceptance tests never starts
-below {{qa_author_min_tier}}, whatever the table or a hint says.
+below {{qa_author_min_tier}}, whatever the table or a hint says. After a failed round a role moves
+up from its start, within the task's round cap: {{tier_escalation}}.
 
 Set `tier_hint` only when the table clearly misjudges the task: `tier` (one of {{model_tiers}}),
 `reason` and `detail`, one sentence on why, with no code and no secrets. The `reason` is one code:

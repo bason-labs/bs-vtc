@@ -10,9 +10,10 @@
 #     of skill/SKILL.src.md and the font blocklist; modified by VTC (the roll is the engine's
 #     constraints lottery, the human chooses at G2; the method is in skills/design-craft)
 # New: code-native artifacts (Mermaid flows, screens.yaml, DTCG tokens, an HTML prototype with
-# every state reachable), directions from the engine's constraints roll (§9.1).
+# every state reachable), directions from the engine's constraints roll (§9.1); 4.0.0 adds the
+# flows file (D-ct) and the G2 coverage-loop fixes (H-13).
 id: designer
-version: 3.0.0
+version: 4.0.0
 kind: core
 mission: >-
   Design the user-facing part of the spec as code-native artifacts: flows, screens with every

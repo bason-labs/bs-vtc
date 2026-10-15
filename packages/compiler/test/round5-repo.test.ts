@@ -198,7 +198,8 @@ describe("the Planner's tier_hint (H-9, D-cm, reading 218)", () => {
   });
 
   it("bumps the Planner MAJOR for the locked-core edit (D-bm)", () => {
-    expect(version("planner")).toBe("2.0.0");
+    // 2.0.0 here; 3.0.0 since round 6 (D-cu, D-cv)
+    expect(Number(version("planner")?.split(".")[0])).toBeGreaterThanOrEqual(2);
   });
 
   const draft: TaskDraftInput = {

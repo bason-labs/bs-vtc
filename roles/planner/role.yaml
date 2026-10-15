@@ -7,9 +7,10 @@
 #   product/product-sprint-prioritizer.md (probability x impact risk scoring)
 # New: the TaskDraft contract (covers, after, files_scope, one discipline, stack packs,
 # interface contracts, risk, architecture triage, intent contract, the start-tier table and the
-# reason-coded tier_hint of D-cm).
+# reason-coded tier_hint of D-cm; since 3.0.0 the table starts the producers only, D-cu, and a
+# Low start escalates after every failed round, D-cv).
 id: planner
-version: 2.0.0
+version: 3.0.0
 kind: core
 mission: >-
   Split the approved spec, architecture and design into a dependency-ordered set of small tasks,
