@@ -122,9 +122,6 @@ describe("the Spec Verifier on an automatic run (D-cd, reading 198)", () => {
     expect(PACK_INPUT_TYPES.automationIssue).toBe("automation_issue");
     expect(Object.keys(compiler)).not.toContain("PENDING_PACK_INPUTS");
   });
-  it.todo(
-    "merge gate: engine core lists automation_issue in the Spec Verifier's pack on automatic runs only (engine-core followup)",
-  );
 
   it("still quotes the criterion from Requirements and checks it against the issue", () => {
     const body = claudeBody("vtc-spec-verifier");

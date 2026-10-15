@@ -33,9 +33,11 @@ export const NEVER_MERGES_LINE = "For human review only: VTC never merges automa
  * The slots of each template, each exactly once and in this order, which is also their order in
  * `AUTO_TEMPLATE_SLOTS` (spine §5 reading 208 (5)). A PR body: marker, note, summary, why,
  * changes, evidence, verification, risk, provenance, checklist; a prompt PR's diff is in the pull
- * request's own diff and its CHANGELOG entry, not in the body. An issue has no changes,
- * verification, risk or checklist. A CHANGELOG entry (`ROLES_CHANGELOG`, D-bv) records the
- * hypothesis, the trace ids, the diff and the evaluation.
+ * request's own diff and its CHANGELOG entry, not in the body (only a prompt PR has a `diff`
+ * value, so a body slot would read "unavailable" on every other PR). An issue has no changes,
+ * verification or risk, and ends with the reviewer checklist the upstream renderer fills for
+ * every issue kind. A CHANGELOG entry (`ROLES_CHANGELOG`, D-bv) records the hypothesis, the trace
+ * ids, the diff and the evaluation.
  */
 export const AUTO_TEMPLATE_LAYOUT: Readonly<Record<AutoTemplateName, readonly AutoTemplateSlot[]>> =
   {
@@ -51,7 +53,7 @@ export const AUTO_TEMPLATE_LAYOUT: Readonly<Record<AutoTemplateName, readonly Au
       "provenance",
       "checklist",
     ],
-    "auto-issue": ["marker", "note", "summary", "why", "evidence", "provenance"],
+    "auto-issue": ["marker", "note", "summary", "why", "evidence", "provenance", "checklist"],
     "changelog-entry": ["title", "hypothesis", "trace_ids", "diff", "evaluation"],
   };
 

@@ -31,6 +31,7 @@ import {
   DESIGN_CONTRACTS_DIR,
   DESIGN_DIRECTIONS_DIR,
   DESIGN_SCREENS_PATH,
+  DEFAULT_ROUTING_TABLE,
   DesignExitSchema,
   DisciplineSchema,
   EscalationEffectSchema,
@@ -43,9 +44,11 @@ import {
   LOOKBACK_LIMITS,
   LOOKBACK_REPO,
   MAX_STACK_PACKS,
+  ModelTierSchema,
   PACK_INPUT_TYPES,
   PrototypeThemeSchema,
   prototypeStatePath,
+  QA_AUTHOR_MIN_TIER,
   RESERVED_EDITABLE_HEADINGS,
   ResearchDepthSchema,
   resolveRoleMode,
@@ -60,6 +63,7 @@ import {
 } from "@vtc/shared";
 import { EDITABLE_IN_PACK_NOTE } from "./prompt-parts.js";
 import { renderTemplate, selectMode } from "./role-source.js";
+import { renderHighRiskTags, renderRoutingTable, tierHintReasons } from "./routing.js";
 import type { LoadedRole } from "./role-source.js";
 
 const ENGINE_DIRECTION_FIELDS: ReadonlySet<string> = new Set(["first_viewport", "novelty"]);
@@ -121,6 +125,17 @@ export const PROTOCOL_VARS: Readonly<Record<string, string>> = {
   contract_kinds: ContractKindSchema.options.join(", "),
   disciplines: DisciplineSchema.options.join(", "),
   max_stack_packs: String(MAX_STACK_PACKS),
+  /**
+   * The Planner's view of difficulty routing (H-9, D-cm, reading 218): the table the engine picks
+   * each task's start tier from, the tiers a `tier_hint` may name, its reason codes by direction
+   * (`TierHintReasonSchema`) and QA author's floor (`QA_AUTHOR_MIN_TIER`, spec §5.2).
+   */
+  routing_table: renderRoutingTable(DEFAULT_ROUTING_TABLE),
+  high_risk_tags: renderHighRiskTags(DEFAULT_ROUTING_TABLE),
+  model_tiers: ModelTierSchema.options.map((tier) => `\`${tier}\``).join(", "),
+  tier_hint_raise_reasons: tierHintReasons("raise"),
+  tier_hint_lower_reasons: tierHintReasons("lower"),
+  qa_author_min_tier: `\`${QA_AUTHOR_MIN_TIER}\``,
   escalation_effects: EscalationEffectSchema.options.join(", "),
   evidence_types: EvidenceTypeSchema.options.join(", "),
   task_pack_sections: TASK_PACK_SECTIONS.join(", "),

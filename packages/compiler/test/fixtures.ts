@@ -110,7 +110,7 @@ budget: { context_tokens: 20000 }
     "{{checklist}}\n",
   ].join("\n\n"),
   "plugins/common/templates/auto-issue.md":
-    "{{marker}}\n\n{{note}}\n{{summary}}\n{{why}}\n{{evidence}}\n{{provenance}}\n",
+    "{{marker}}\n\n{{note}}\n{{summary}}\n{{why}}\n{{evidence}}\n{{provenance}}\n{{checklist}}\n",
   "plugins/common/templates/changelog-entry.md":
     "### {{title}}\n\n{{hypothesis}}\n{{trace_ids}}\n{{diff}}\n{{evaluation}}\n",
   "plugins/claude-code/.claude-plugin/plugin.json": '{ "name": "vtc", "version": "0.1.0" }\n',

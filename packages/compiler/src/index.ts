@@ -9,6 +9,7 @@ export * from "./frontmatter.js";
 export * from "./toml.js";
 export * from "./hosts.js";
 export * from "./instructions.js";
+export * from "./routing.js";
 export * from "./advisors.js";
 export * from "./compile.js";
 export * from "./io.js";
