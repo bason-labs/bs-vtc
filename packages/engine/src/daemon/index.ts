@@ -23,12 +23,14 @@ import {
   HOST_IDS,
   remainingPct,
   researchScopeFor,
+  routingConfigSubject,
   usageFromStatuslineIngest,
   type AutomationSettings,
   type EngineDeps,
   type HostId,
   type ResearchScope,
   type RunDaemon,
+  type TaskRiskClass,
   type VtcEvent,
   type RunningDaemon,
   type RunningSnapshot,
@@ -304,6 +306,54 @@ export const newAgentFact = (run: string, signal: NewAgentSignal, at: string): A
   };
 };
 
+/**
+ * One routing-table cell Lookback proposes to change (D-cn, spine §5 reading 219): the cell
+ * (role, size, risk class), the scorecard numbers that support it, and the engine's own text (it
+ * stays local). The upstream module fingerprints it by its subject.
+ */
+export interface RoutingProposalCell {
+  readonly role: string;
+  readonly size: "S" | "M" | "L";
+  readonly risk: TaskRiskClass;
+  readonly metrics?: Readonly<Record<string, number>>;
+  readonly detail: string;
+}
+
+/**
+ * Lookback's routing step at RETRO (D-cn): write the routing scorecard
+ * (`.vtc/lookback/scorecards/routing.json`, `RoutingScorecard`) from the history and return the
+ * cells whose start tier it proposes to change. The lookback module implements it (the
+ * lookback-research team's routing scorecard writer and routing proposals); the daemon calls it
+ * through the `LookbackRetro` seam it hands core.
+ */
+export type RoutingLookback = (input: {
+  readonly projectRoot: string;
+  /** Every run's events as Lookback reads them (without replay trials, reading 177). */
+  readonly history: readonly VtcEvent[];
+  readonly graderBundleSha: string;
+  readonly now: Date;
+}) => Promise<readonly RoutingProposalCell[]>;
+
+/**
+ * A routing proposal (D-cn) as an automation fact of `run`: a `config` improvement whose subject
+ * is the cell (`routingConfigSubject`, `routing.<role>.<size>.<risk>`), with the scorecard numbers
+ * only; the PR it leads to changes the values of `DEFAULT_ROUTING_TABLE` (spine §5 reading 219).
+ */
+export const routingConfigFact = (
+  run: string,
+  cell: RoutingProposalCell,
+  at: string,
+): AutomationFact => ({
+  target: "upstream",
+  kind: "config",
+  run,
+  source: "lookback.routing",
+  at,
+  subject: routingConfigSubject(cell.role, cell.size, cell.risk),
+  ...(cell.metrics === undefined ? {} : { metrics: cell.metrics }),
+  detail: cell.detail.slice(0, 2000),
+});
+
 export const wireLookback = (
   engine: Engine,
   deps: Pick<EngineDeps, "repoRoot" | "vtcHome" | "now">,
@@ -317,6 +367,15 @@ export const wireLookback = (
   newAgents?: {
     readonly roles: () => readonly InstalledRole[];
     readonly found: (run: string, signals: readonly NewAgentSignal[]) => void;
+  },
+  /**
+   * D-cn (spine §5 reading 219): Lookback's routing step, run at RETRO through the `LookbackRetro`
+   * seam once the run's plan is made, and where its proposals go as `config` facts (the
+   * automation's improvements). Absent: no routing scorecard and no routing proposal.
+   */
+  routing?: {
+    readonly propose: RoutingLookback;
+    readonly found: (run: string, facts: readonly AutomationFact[]) => void;
   },
 ): (() => Promise<void>) => {
   const now = deps.now ?? (() => new Date());
@@ -396,8 +455,31 @@ export const wireLookback = (
     now,
     graderOf: (replay) => replayGraderOf(engine, replay),
   });
+  // D-cn: the routing scorecard and proposals at RETRO, on the Lookback queue so RETRO never waits
+  // on them; a step that fails is told on stderr and the run goes on
+  const routingAtRetro = (run: string): void => {
+    if (routing === undefined) return;
+    enqueue(async () => {
+      const cells = await routing.propose({
+        projectRoot: deps.repoRoot,
+        history: history(),
+        graderBundleSha: bundleSha(),
+        now: now(),
+      });
+      const at = now().toISOString();
+      if (cells.length > 0)
+        routing.found(
+          run,
+          cells.map((cell) => routingConfigFact(run, cell, at)),
+        );
+    });
+  };
   engine.setLookbackRetro({
-    plan: (state) => retroFor(state).plan({ ...state, events: [...lookbackEvents(state)] }),
+    plan: async (state) => {
+      const plan = await retroFor(state).plan({ ...state, events: [...lookbackEvents(state)] });
+      routingAtRetro(state.id);
+      return plan;
+    },
     check: (target, root, state) => checker.check(target, root, state),
     ...replays,
   });

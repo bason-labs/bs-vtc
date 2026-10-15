@@ -89,6 +89,9 @@
       "prompt_sha": "4444444444444444444444444444444444444444444444444444444444444444",
       "host": "claude-code",
       "model": "claude-sonnet-5",
+      "tier": "mid",
+      "tier_reason": "rule",
+      "tier_clamped": true,
       "dispatched_at": "2026-10-13T09:15:00.000Z",
       "exit": "built",
       "verdicts": []

@@ -16,6 +16,10 @@ frozen surfaces without a running engine (AD-5, AD-7, AD-12).
   (`?scope=task_dag`) and `graph-task-T-2` (`?scope=task&task=T-2`, with a `loop_guard`
   back-edge), and `usage`; `client-spend`; and `automation`, which comes from the
   `samples/automation-events.jsonl` log below, because this run takes no automatic action.
+- the one recorded dispatch (`a-1`) carries the 5.4.0 routing record (`role.dispatched` `tier`
+  `mid`, `tier_reason` `rule`, `tier_clamped`: the project's `routing.max_tier` held the auth-tagged
+  task's Top start; `RoleRunSummary` in `api/task-T-1.json` repeats it, H-9) and its shell calls
+  as shapes (`role.submitted.command_shapes`, D-cs).
 - `packs/a-1.json`: the `TaskPack` behind the one recorded dispatch (`a-1`), rendered by
   `renderTaskPack` to `.vtc/state/packs/a-1.md`.
 
@@ -45,7 +49,10 @@ frozen surfaces without a running engine (AD-5, AD-7, AD-12).
     an `api_key` host;
   - `facts.jsonl`: a `.vtc/research/facts.jsonl` row with a host-reported `reported_source` (H-3);
   - `automation-events.jsonl` (`golden-auto`): an automatic run (`run.started.automation`) and
-    every `upstream.*` and `automation.skipped` event (AD-27, D-ca);
+    every `upstream.*` and `automation.skipped` event (AD-27, D-ca); since contracts 5.4.0 also
+    its release push to `vtc/auto/<kind>/<fp8>` (`branch.pushed.remote_ref`), a fix PR that
+    merged (its issue closed as `completed`), a draft PR with complete evidence for a D-cs `tool`
+    improvement, and the `privacy`, `paused` and `error` skips the Automation view labels;
   - the `GET /api/automation` answer for that log (`AutomationReport`, with the project opted out
     of upstream reports) is `api/automation.json`: the golden run's own log has no automatic
     action, so the route's snapshot comes from this sample log (spine §5 reading 209(3)).

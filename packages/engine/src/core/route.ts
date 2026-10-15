@@ -181,7 +181,10 @@ export const drive = async (k: Kernel, h: RunHandle): Promise<void> => {
   if (lead !== undefined) {
     purpose = "role";
     host = lead;
-  } else if (k.unattended.has(state.id)) {
+  } else if (k.unattended.has(state.id) || state.automation !== null) {
+    // an automatic run with no live Lead is unattended by nature (spine §5 reading 212(6)): the
+    // engine drives it headless only where the project allows unattended runs
+    // (`headless_allowed`, AD-25); otherwise it waits for the next Lead session
     purpose = "auto_resume";
     host = state.limit?.host ?? k.hostFor({ host: null });
   } else {

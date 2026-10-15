@@ -11,6 +11,48 @@
         "kind": "upstream",
         "repo": "bason-labs/bs-vtc"
       },
+      "kind": "tool",
+      "fingerprint": "5555666677778888",
+      "issue": {
+        "number": 50,
+        "url": "https://github.com/bason-labs/bs-vtc/issues/50",
+        "state": "open"
+      },
+      "pr": {
+        "number": 51,
+        "url": "https://github.com/bason-labs/bs-vtc/pull/51",
+        "state": "draft",
+        "evidence": "complete"
+      },
+      "first_at": "2026-10-14T10:10:00.000Z",
+      "last_at": "2026-10-14T10:12:00.000Z"
+    },
+    {
+      "target": {
+        "kind": "project",
+        "repo": "acme/invoices"
+      },
+      "kind": "ci_failure",
+      "fingerprint": "0123456789abcdef",
+      "issue": {
+        "number": 12,
+        "url": "https://github.com/acme/invoices/issues/12",
+        "state": "closed"
+      },
+      "pr": {
+        "number": 13,
+        "url": "https://github.com/acme/invoices/pull/13",
+        "state": "merged",
+        "evidence": "complete"
+      },
+      "first_at": "2026-10-14T08:01:00.000Z",
+      "last_at": "2026-10-14T10:05:00.000Z"
+    },
+    {
+      "target": {
+        "kind": "upstream",
+        "repo": "bason-labs/bs-vtc"
+      },
       "kind": "lookback",
       "fingerprint": "1111222233334444",
       "issue": null,
@@ -38,30 +80,26 @@
       "pr": null,
       "first_at": "2026-10-14T09:31:00.000Z",
       "last_at": "2026-10-14T09:32:00.000Z"
-    },
-    {
-      "target": {
-        "kind": "project",
-        "repo": "acme/invoices"
-      },
-      "kind": "ci_failure",
-      "fingerprint": "0123456789abcdef",
-      "issue": {
-        "number": 12,
-        "url": "https://github.com/acme/invoices/issues/12",
-        "state": "open"
-      },
-      "pr": {
-        "number": 13,
-        "url": "https://github.com/acme/invoices/pull/13",
-        "state": "draft",
-        "evidence": "complete"
-      },
-      "first_at": "2026-10-14T08:01:00.000Z",
-      "last_at": "2026-10-14T09:30:00.000Z"
     }
   ],
   "skipped": [
+    {
+      "at": "2026-10-14T10:40:00.000Z",
+      "reason": "error",
+      "kind": "defect",
+      "detail": "automation could not handle a defect fact of run golden-auto: gh failed: HTTP 502 (token [REDACTED:github_token])"
+    },
+    {
+      "at": "2026-10-14T10:30:00.000Z",
+      "reason": "paused",
+      "detail": "vtc pause: no automatic action until vtc resume"
+    },
+    {
+      "at": "2026-10-14T10:20:00.000Z",
+      "reason": "privacy",
+      "kind": "cost",
+      "detail": "the upstream report named a project path; nothing was sent"
+    },
     {
       "at": "2026-10-14T09:37:00.000Z",
       "reason": "trial_cap",

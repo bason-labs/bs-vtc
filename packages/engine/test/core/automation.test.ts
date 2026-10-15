@@ -513,6 +513,36 @@ describe("GET /api/automation (AutomationReport)", () => {
     ]);
   });
 
+  it("shows a PR as merged once its issue closed as completed (its fix merged); a quiet close does not", () => {
+    const item = { target, kind: "ci_failure", fingerprint: "0123456789abcdef" } as const;
+    const pr = ev(
+      "upstream.pr_opened",
+      {
+        ...item,
+        number: 4,
+        url: "https://github.com/acme/app/pull/4",
+        branch: "vtc/auto/ci_failure/01234567",
+        issue: 3,
+        evidence: "complete",
+      },
+      {},
+      "2026-10-14T11:00:00.000Z",
+    );
+    const closed = (reason: "completed" | "quiet") =>
+      ev(
+        "upstream.issue_closed",
+        { ...item, number: 3, url: "https://github.com/acme/app/issues/3", reason },
+        {},
+        "2026-10-14T12:00:00.000Z",
+      );
+    expect(automationReportView([pr, closed("completed")], settings).items[0]?.pr?.state).toBe(
+      "merged",
+    );
+    expect(automationReportView([pr, closed("quiet")], settings).items[0]?.pr?.state).toBe("draft");
+    // an issue closed with no PR has none to merge
+    expect(automationReportView([closed("completed")], settings).items[0]?.pr).toBeNull();
+  });
+
   it("without automation wiring, everything is off with a note", () => {
     const report = automationReportView([], null);
     expect(report).toMatchObject({

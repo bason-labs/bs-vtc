@@ -181,7 +181,8 @@ const directionDrafts = (k: Kernel, h: RunHandle): G2DirectionDraft[] =>
   offeredDirections(k, h).slice(0, G2_DIRECTIONS.max);
 
 /** A new-repo UI design must offer `G2_DIRECTIONS` directions (§9.1 steps 3 and 5; D-bt). */
-const needsDirections = (h: RunHandle): boolean => h.state.run.repo === "new" && h.state.run.has_ui;
+const needsDirections = (h: RunHandle): boolean =>
+  h.state.run.repo === "new" && h.state.run.has_ui && h.state.automation === null;
 
 /**
  * How many distinct directions the Designer's latest result offers when that is fewer than a
@@ -499,7 +500,8 @@ export const designCoverage = (k: Kernel, h: RunHandle): DesignCoverageReport =>
     .join("\n");
   const unmapped = reqs.filter((req) => !names(architecture, req));
   const ui = ((): Partial<Omit<DesignCoverageReport, "reqs_without_component" | "ok">> => {
-    if (!h.state.run.has_ui) return {};
+    // an automatic run does no UI design (reading 223): its DESIGN check is the spine's alone
+    if (!h.state.run.has_ui || h.state.automation !== null) return {};
     const text = read(k.deps.repoRoot, DESIGN_SCREENS_PATH);
     if (text === null) return { screens_problem: `the Designer wrote no ${DESIGN_SCREENS_PATH}` };
     let screens;
