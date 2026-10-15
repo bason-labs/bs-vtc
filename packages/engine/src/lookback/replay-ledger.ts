@@ -20,15 +20,11 @@
  * **Contract.** The file name and the row shapes are contracts 5.1.0's
  * `LOOKBACK_HOME.replayTrialsFile`, `ReplayTrialRowSchema` and `ReplayInfraRowSchema` (AD-3).
  *
- * **Not wired yet.** Engine core's `LookbackRetro` seam cannot drive the ledger as it stands:
- * `replays()` hands back whole replays and core applies its own all-or-nothing trial cap,
- * `gradeTrial` carries no trial identity, an unmeasured trial is set aside by core and never
- * reported here, and `finishReplay` expects every outcome from one RETRO. Until core adopts
- * `planRetroReplays` and a per-trial outcome hook (the contract proposal to engine core and the
- * daemon owner: `replays()` returns `planRetroReplays().launch`, each graded or unmeasured trial
- * calls {@link recordReplayTrial} or {@link recordReplayInfra} with its ref, tokens and read deny,
- * `finishReplay` calls {@link assembleReplay} and logs nothing while it is incomplete), this module
- * and `planRetroReplays` are a library no RETRO calls, and core's own cap decides.
+ * **Who drives it.** Engine core's RETRO runner (`daemon/replays.ts`, through core's
+ * `LookbackRetro`): `replays()` returns `planRetroReplays().launch` (the trials the ledger has not
+ * graded, under the D-cq pace), `recordTrial` calls {@link recordReplayTrial} or
+ * {@link recordReplayInfra} for each graded or unmeasured trial with its ref, tokens and read deny,
+ * and `finishReplay` calls {@link assembleReplay}, writing nothing while a trial is missing.
  *
  * A trial that measured nothing (`gate_infra`; `plugin_locked`: the host did not prove it loaded
  * the arm's plugin; `no_outcome`: a verdict trial whose replayed dispatch no longer has a recorded

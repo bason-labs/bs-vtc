@@ -26,8 +26,8 @@
  *   also logs `automation.skipped` `plugin_locked` when the lock was the cause. The caller ends
  *   such a replay (it is no longer pending), so each is reported once.
  *
- * Not wired yet: engine core's RETRO applies its own whole-replay trial cap and does not call this
- * (see the `replay-ledger` module comment for the contract proposal that makes this the one cap).
+ * Engine core's RETRO runner (`daemon/replays.ts`) calls this each RETRO; it applies no trial cap
+ * of its own, so this is the one cap (see the `replay-ledger` module comment).
  */
 import {
   LOOKBACK_LIMITS,
@@ -156,6 +156,11 @@ export const planRetroReplays = <T extends ReplayTrialId>(input: {
    * cap is `lookbackPaceFor(user, weeklyRemainingPct).maxTrialsPerRetro` (D-cq).
    */
   readonly user?: Pick<UserConfig, "lookback">;
+  /**
+   * The per-RETRO trial cap, when the caller computed it (engine core's daemon passes
+   * `lookbackPaceFor(user, weeklyRemainingPct).maxTrialsPerRetro`); it wins over `user`'s.
+   */
+  readonly cap?: number;
 }): {
   readonly launch: LaunchedReplay<T>[];
   readonly unreplayable: { readonly proposal: string; readonly reason: string }[];
@@ -257,7 +262,10 @@ export const planRetroReplays = <T extends ReplayTrialId>(input: {
       ],
     };
   }
-  const cap = lookbackPaceFor(input.user, input.weeklyRemainingPct).maxTrialsPerRetro;
+  const cap = Math.max(
+    0,
+    input.cap ?? lookbackPaceFor(input.user, input.weeklyRemainingPct).maxTrialsPerRetro,
+  );
   let left = cap;
   let waiting = 0;
   let waitingReplays = 0;

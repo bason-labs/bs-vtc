@@ -20,10 +20,9 @@
  * recorded)
  * and writes it with {@link writeReplayResult} (whose `lookback.replay_finished` carries the
  * SHA-256 of the bytes written), reading the A/A noise floor with {@link cachedAaFlipRate} and
- * keeping a measured one with {@link recordAaFlipRate}. Engine core's `LookbackRetro` seam does not
- * drive {@link planRetroReplays} and the ledger yet (core caps whole replays itself and has no
- * per-trial outcome hook): a contract proposal to engine core and the daemon owner, see the
- * `replay-ledger` module comment.
+ * keeping a measured one with {@link recordAaFlipRate}. Engine core's RETRO runner
+ * (`daemon/replays.ts`, its `LookbackRetro` `replays` / `recordTrial` / `finishReplay`) drives
+ * {@link planRetroReplays} and the ledger; see the `replay-ledger` module comment.
  * At the run's end Lookback also returns what engine core hands the upstream module: cost
  * regressions ({@link costRegressions}, D-bv; their lookback target is aimed at tokens) and
  * missing specialists ({@link newAgentSignals}, D-cd, evidence-only), with the VTC-side report

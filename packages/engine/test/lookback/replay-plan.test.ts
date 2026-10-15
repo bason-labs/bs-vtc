@@ -227,6 +227,24 @@ describe("planning a RETRO's replays (D-cg, D-ch)", () => {
     expect(sooner.launch[0]?.trials.length).toBe(9);
   });
 
+  it("takes an explicit cap over the pace, as engine core's daemon passes one (D-cq)", () => {
+    const replays = [pending("p-1", plan(["r1:T-1", "r1:T-2"], true))];
+    // engine core's runner: `cap: lookbackPaceFor(undefined, pct).maxTrialsPerRetro`
+    const planned = planRetroReplays({
+      ...open,
+      user: { lookback: { max_trials_per_retro: 6, max_trials_per_retro_boosted: 9 } },
+      cap: 3,
+      pending: replays,
+      graded: () => new Set(),
+    });
+    expect(planned.launch[0]?.trials.length).toBe(3);
+    expect(planned.skipped[0]?.data.detail).toContain("at most 3");
+    // a cap below one whole group launches nothing; every trial waits
+    const none = planRetroReplays({ ...open, cap: 0, pending: replays, graded: () => new Set() });
+    expect(none.launch).toEqual([]);
+    expect(none.skipped.map((e) => e.data.reason)).toEqual(["trial_cap"]);
+  });
+
   it("fills the cap oldest replay first, whatever order the caller passes", () => {
     const older = plan(["r1:T-1", "r1:T-2"], true);
     const newer = plan(["r1:T-3", "r1:T-4"], true);
