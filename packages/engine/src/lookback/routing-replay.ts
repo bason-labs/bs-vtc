@@ -36,7 +36,7 @@ import {
   type VtcEvent,
 } from "@vtc/shared";
 import { join } from "node:path";
-import { readTextIfExists, writeAtomic } from "./files.js";
+import { readRoleWrittenText, writeAtomic } from "./files.js";
 import {
   recordReplayInfra,
   recordReplayTrial,
@@ -200,6 +200,35 @@ export const routingReplayCosts = (
   return costs;
 };
 
+/**
+ * Pure: the trials of tier replay `proposal` that did not run on their arm's tier, by trial key
+ * (`replayTrialKey`), from the replay trials' own events: a dispatch whose `replay.tier` is absent
+ * (it ran on the recorded tier, as a prompt replay does), whose `tier` differs from it, that the
+ * project's bounds moved (`tier_clamped`) or that ran on the host's default model
+ * (`model_fallback`, D-cx). Such a trial measures another tier than the one its arm compares, so
+ * the replay cannot be graded. A dispatch with no `tier` (a log from before 5.4.0) says nothing.
+ */
+export const routingReplayOffTier = (
+  events: readonly VtcEvent[],
+  proposal: string,
+): Set<string> => {
+  const off = new Set<string>();
+  for (const event of events) {
+    if (!isEventOfType(event, "role.dispatched")) continue;
+    const data = readEventData(event);
+    const ref = data.replay;
+    if (ref?.proposal !== proposal || data.tier === undefined) continue;
+    if (
+      ref.tier === undefined ||
+      data.tier !== ref.tier ||
+      data.tier_clamped === true ||
+      data.model_fallback !== undefined
+    )
+      off.add(replayTrialKey(ref));
+  }
+  return off;
+};
+
 const meanOf = (xs: readonly number[]): number =>
   xs.length === 0 ? 0 : xs.reduce((s, x) => s + x, 0) / xs.length;
 
@@ -304,6 +333,9 @@ export const assembleRoutingReplay = (input: {
   return { complete: true, result, trials: planned.length };
 };
 
+/** Far above any result written here; a larger file there is not one. */
+const RESULT_MAX_BYTES = 256 * 1024;
+
 /** The result without its time, to tell a new grade from the one already written. */
 const sameGrade = (text: string | undefined, result: RoutingReplayResult): boolean => {
   if (text === undefined) return false;
@@ -322,7 +354,9 @@ const sameGrade = (text: string | undefined, result: RoutingReplayResult): boole
 /**
  * Writes a graded tier replay at `routingReplayPath(result.id)` (git-tracked, for people; the
  * routing step decides from the ledger, never from this file). A result that only differs from the
- * one already there by its time is not written again, so a later RETRO does not churn the file.
+ * one already there by its time is not written again, so a later RETRO does not churn the file; the
+ * one there is read without following a symlink and within a size cap (`readRoleWrittenText`), and
+ * anything else there is replaced.
  * Returns the repo-relative path and whether it was written.
  */
 export const writeRoutingReplayResult = async (
@@ -331,7 +365,9 @@ export const writeRoutingReplayResult = async (
 ): Promise<{ readonly path: string; readonly written: boolean }> => {
   const path = routingReplayPath(result.id);
   const full = join(projectRoot, path);
-  if (sameGrade(await readTextIfExists(full), result)) return { path, written: false };
+  // the path is in the repo: a symlink, a device or an oversized file there is never the result
+  const existing = await readRoleWrittenText(full, RESULT_MAX_BYTES);
+  if (existing.kind === "text" && sameGrade(existing.text, result)) return { path, written: false };
   await writeAtomic(full, `${JSON.stringify(RoutingReplayResultSchema.parse(result), null, 2)}\n`);
   return { path, written: true };
 };

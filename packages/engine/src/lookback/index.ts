@@ -34,9 +34,10 @@
  * `RoutingLookback` seam: it writes the routing scorecard and returns the routing-table cells it
  * proposes to change for the producer roles (D-cu; {@link routingProposalCells}), which the daemon
  * raises as `config` facts (`wireLookback`'s `routing` argument). Given the RETRO's remaining trial
- * budget it plans tier replays of those changes (the same prompt on both arms, arm `a` on the
- * current start tier and arm `b` on the proposed one; {@link planRoutingReplayTrials}), returns the
- * trials to launch on its cells' `replays`, grades a replay whose trials the ledger holds
+ * budget and a caller that launches replays it plans tier replays of those changes (the same prompt
+ * on both arms, arm `a` on the current start tier and arm `b` on the proposed one;
+ * {@link planRoutingReplayTrials}), returns the trials to launch on its cells' `replays` and the
+ * `automation.skipped` drafts on `skipped`, grades a replay whose trials the ledger holds
  * ({@link recordRoutingReplayTrial}, {@link assembleRoutingReplay}) into a `RoutingReplayResult`,
  * and raises a change's fact only once its replay is graded and backs it.
  * AI tiebreak answers are recorded with {@link appendTiebreakRecord} under the VTC home; only
@@ -208,6 +209,7 @@ export {
   planRoutingReplayTrials,
   recordRoutingReplayTrial,
   routingReplayCosts,
+  routingReplayOffTier,
   routingReplayScope,
   writeRoutingReplayResult,
   type RoutingReplayLaunch,

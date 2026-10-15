@@ -155,6 +155,25 @@ describe("the routing scorecard (D-cn)", () => {
     ]);
   });
 
+  it("never counts a Top start as escalated by the rule: it has no tier to rise to (D-cv)", () => {
+    const log = new RunLog();
+    for (let i = 1; i <= 10; i += 1) {
+      const task = `T-${String(i)}`;
+      const n = i <= 6 ? 3 : 1;
+      log.taskCreated(task, "backend", [], { size: "L", risk: "low", riskTags: [] });
+      for (let round = 1; round <= n; round += 1) {
+        log.status(task, round === 1 ? "tests_authored" : "fixing", "building", round);
+        log.dispatch("engineer", { task, tier: "top", tierReason: "rule" });
+        log.gate(task, round === n);
+      }
+    }
+    const [cell, ...rest] = scorecardOf(log).cells;
+    expect(rest).toEqual([]);
+    expect([cell?.size, cell?.start_tier, cell?.tasks]).toEqual(["L", "top", 10]);
+    // escalationSteps("top", 3) = 1, but a Top start stays on Top
+    expect(cell?.escalated.value).toBe(0);
+  });
+
   it("classes risk with taskRiskClass and keeps modes, hosts and start reasons apart", () => {
     const log = new RunLog();
     routedTask(log, "T-1", { riskTags: ["ui"], tier: "mid" });

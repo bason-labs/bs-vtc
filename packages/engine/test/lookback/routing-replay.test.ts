@@ -20,8 +20,8 @@ import {
   type RoutingTable,
   type VtcEvent,
 } from "@vtc/shared";
-import { readFile, stat } from "node:fs/promises";
-import { join } from "node:path";
+import { lstat, mkdir, readFile, stat, symlink, writeFile } from "node:fs/promises";
+import { dirname, join } from "node:path";
 import { describe, expect, it } from "vitest";
 import { type RoutingLookback } from "../../src/daemon/index.js";
 import {
@@ -31,6 +31,7 @@ import {
   readReplayLedger,
   recordRoutingReplayTrial,
   routingReplayCosts,
+  routingReplayOffTier,
   traceSplit,
   type ReplayTrialRow,
   type RoutingReplayLaunch,
@@ -130,6 +131,7 @@ const step = (
     trialBudget?: number;
     replayEvents?: readonly VtcEvent[];
     graderBundleSha?: string;
+    launchesReplays?: boolean;
   } = {},
 ) =>
   lookbackRoutingStep({
@@ -141,6 +143,7 @@ const step = (
     lockedShaFor,
     vtcHome: s.home,
     pace: PACE,
+    launchesReplays: extra.launchesReplays ?? true,
     ...(extra.trialBudget === undefined ? {} : { trialBudget: extra.trialBudget }),
     ...(extra.replayEvents === undefined ? {} : { replayEvents: extra.replayEvents }),
   });
@@ -220,9 +223,10 @@ describe("planning a tier replay (D-cn, reading 247(6))", () => {
     );
   });
 
-  it("fits engine core's routing seam with the trial budget", () => {
+  it("is assignable to engine core's RoutingLookback seam (its replay inputs are optional)", () => {
+    // a compile-time check: the seam's input has no trial budget yet (see the contract proposal)
     const seam: RoutingLookback = lookbackRoutingStep;
-    expect(typeof seam).toBe("function");
+    expect(seam).toBe(lookbackRoutingStep);
   });
 
   it("plans the replay within the RETRO's trial budget and withholds the fact until it is graded", async () => {
@@ -339,6 +343,10 @@ describe("planning a tier replay (D-cn, reading 247(6))", () => {
     // and with no budget the graded verdict still decides: no scorecard-alone fact
     const broke = await step(s, history, { trialBudget: 0 });
     expect([...broke]).toEqual([]);
+    // an absent budget counts as none: the graded verdict decides too
+    const unbudgeted = await step(s, history);
+    expect([...unbudgeted]).toEqual([]);
+    expect(unbudgeted.replays).toEqual([]);
   });
 
   it("backs a cheaper start whose arm holds quality (no_change)", async () => {
@@ -392,12 +400,38 @@ describe("planning a tier replay (D-cn, reading 247(6))", () => {
   it("keeps a replay in progress waiting, with no fact, when this RETRO has no budget left", async () => {
     const s = await setup("waiting");
     const history = lowStarts();
-    const [launch] = (await step(s, history, { trialBudget: 2 })).replays;
+    const first = await step(s, history, { trialBudget: 2 });
+    const [launch] = first.replays;
     expect(launch?.trials).toHaveLength(2);
+    // the trials that wait are logged as automation.skipped trial_cap
+    expect(first.skipped.map((e) => [e.type, e.data.reason, e.data.kind])).toEqual([
+      ["automation.skipped", "trial_cap", "lookback"],
+    ]);
+    expect(first.skipped[0]?.data.detail).toContain("40 tier replay trials of 1 routing change");
     await grade(s, LOW_MID, launch?.trials ?? [], higherFixes);
-    const out = await step(s, history, { trialBudget: 0 });
-    expect([...out]).toEqual([]);
-    expect(out.replays).toEqual([]);
+    for (const budget of [0, undefined]) {
+      const out = await step(s, history, budget === undefined ? {} : { trialBudget: budget });
+      expect([...out]).toEqual([]);
+      expect(out.replays).toEqual([]);
+      expect(out.skipped.map((e) => e.data.reason)).toEqual(["trial_cap"]);
+    }
+  });
+
+  it("starts no replay for a caller that does not launch them, and continues one already started", async () => {
+    const s = await setup("unconfirmed");
+    const history = lowStarts();
+    // core passes a budget but does not say it launches `replays`: the scorecard alone
+    const fresh = await step(s, history, { trialBudget: 24, launchesReplays: false });
+    expect(fresh.replays).toEqual([]);
+    expect(fresh.skipped).toEqual([]);
+    expect(fresh).toHaveLength(1);
+    expect(fresh[0]?.metrics[ROUTING_FACT_METRICS.replayPlanned]).toBe(0);
+    // a replay the ledger holds trials of was launched by someone: it continues, the fact waits
+    const [launch] = (await step(s, history, { trialBudget: 2 })).replays;
+    await grade(s, LOW_MID, launch?.trials ?? [], higherFixes);
+    const started = await step(s, history, { trialBudget: 24, launchesReplays: false });
+    expect([...started]).toEqual([]);
+    expect(started.replays[0]?.trials).toHaveLength(24);
   });
 
   it("starts over under another prompt version or grader bundle", async () => {
@@ -433,6 +467,88 @@ describe("planning a tier replay (D-cn, reading 247(6))", () => {
       });
     const out = await step(s, history, { trialBudget: 24 });
     expect(out.replays).toEqual([]);
+    expect(out[0]?.metrics[ROUTING_FACT_METRICS.replayPlanned]).toBe(0);
+    // gate_infra is not a plugin lock: nothing to log
+    expect(out.skipped).toEqual([]);
+  });
+
+  it("logs automation.skipped plugin_locked when a plugin lock stops the replay", async () => {
+    const s = await setup("locked");
+    const history = lowStarts();
+    const [launch] = (await step(s, history, { trialBudget: 24 })).replays;
+    const [stuck] = launch?.trials ?? [];
+    if (stuck === undefined) throw new Error("no trial");
+    for (let i = 0; i < 3; i += 1)
+      await recordRoutingReplayTrial(s.home, {
+        repoKey: s.repoKey,
+        proposal: LOW_MID,
+        prompt: EFFECTIVE,
+        graderBundleSha: BUNDLE,
+        trial: stuck,
+        record: { kind: "unmeasured", outcome: "plugin_locked" },
+        at: now,
+      });
+    const out = await step(s, history, { trialBudget: 24 });
+    expect(out.replays).toEqual([]);
+    expect(out[0]?.metrics[ROUTING_FACT_METRICS.replayPlanned]).toBe(0);
+    expect(out.skipped.map((e) => e.data.reason)).toEqual(["plugin_locked"]);
+    expect(out.skipped[0]?.data.detail).toContain(LOW_MID);
+  });
+
+  it("falls back to the scorecard, and launches no more, when a ledger row has another tier than its arm", async () => {
+    const s = await setup("row-tier");
+    const history = lowStarts();
+    const [launch] = (await step(s, history, { trialBudget: 24 })).replays;
+    const [first, ...rest] = launch?.trials ?? [];
+    if (first === undefined) throw new Error("no trial");
+    // the trial ran on Top, not on its arm's Low: a later row of the right tier would not count
+    await grade(s, LOW_MID, [{ ...first, tier: "top" }], higherFixes);
+    await grade(s, LOW_MID, [first, ...rest], higherFixes);
+    for (let retro = 0; retro < 2; retro += 1) {
+      const out = await step(s, history, { trialBudget: 24 });
+      expect(out.replays).toEqual([]);
+      expect(out).toHaveLength(1);
+      expect(out[0]?.metrics[ROUTING_FACT_METRICS.replayPlanned]).toBe(0);
+      expect(out[0]?.metrics).not.toHaveProperty(ROUTING_FACT_METRICS.replayVerdict);
+    }
+  });
+
+  it("refuses to grade a replay one of whose trials ran clamped or on another tier", async () => {
+    const s = await setup("clamped");
+    const history = lowStarts();
+    const trials = await runToEnd(s, history, higherFixes);
+    const armB = trials.find((t) => t.arm === "b");
+    if (armB === undefined) throw new Error("no arm b");
+    const ref = { proposal: LOW_MID, task: armB.task, arm: armB.arm, trial: armB.trial };
+    // the project's max_tier kept arm b on Low, though its rows say Mid
+    const clamped = new RunLog();
+    clamped.dispatch("engineer", {
+      task: "T-1",
+      tier: "low",
+      tierReason: "rule",
+      tierClamped: true,
+      replay: { ...ref, tier: "mid" },
+    });
+    const out = await step(s, history, { trialBudget: 24, replayEvents: clamped.events });
+    expect(out.replays).toEqual([]);
+    expect(out).toHaveLength(1);
+    expect(out[0]?.metrics[ROUTING_FACT_METRICS.replayPlanned]).toBe(0);
+    // the same trials on their arms' tiers grade as before
+    const fine = new RunLog();
+    fine.dispatch("engineer", { task: "T-1", tier: "mid", replay: { ...ref, tier: "mid" } });
+    const graded = await step(s, history, { trialBudget: 24, replayEvents: fine.events });
+    expect(graded[0]?.metrics[ROUTING_FACT_METRICS.replayVerdict]).toBe(
+      ROUTING_REPLAY_VERDICT_CODES.improve,
+    );
+  });
+
+  it("carries the scorecard alone for a role whose id is too long for a replay id", async () => {
+    // "routing-" + 45 + "-s-none-low-mid": 68 characters, more than a slug's 64
+    const long = `engineer_${"x".repeat(36)}`;
+    const s = await setup("long-role");
+    const out = await step(s, lowStarts([long]), { trialBudget: 24 });
+    expect(out.replays).toEqual([]);
+    expect(out.map((c) => c.role)).toEqual([long]);
     expect(out[0]?.metrics[ROUTING_FACT_METRICS.replayPlanned]).toBe(0);
   });
 
@@ -487,6 +603,21 @@ describe("planning a tier replay (D-cn, reading 247(6))", () => {
     });
     expect(await readFile(path, "utf8")).toBe(text);
     expect((await stat(path)).mtimeMs).toBe(before.mtimeMs);
+  });
+
+  it("replaces a symlink at the result's path without reading through it", async () => {
+    const s = await setup("result-link");
+    const history = lowStarts();
+    await runToEnd(s, history, higherFixes);
+    const path = join(s.root, routingReplayPath(LOW_MID));
+    const elsewhere = join(s.home, "elsewhere.json");
+    await writeFile(elsewhere, "kept\n");
+    await mkdir(dirname(path), { recursive: true });
+    await symlink(elsewhere, path);
+    await step(s, history, { trialBudget: 24 });
+    expect((await lstat(path)).isFile()).toBe(true);
+    expect((await resultOf(s, LOW_MID)).verdict).toBe("improve");
+    expect(await readFile(elsewhere, "utf8")).toBe("kept\n");
   });
 });
 
@@ -558,6 +689,38 @@ describe("grading a tier replay (RoutingReplayResult)", () => {
     unpriced.set(key(last), null);
     const partial = assembleRoutingReplay({ ...input(rows), costs: unpriced });
     expect(partial.complete && partial.result.cost_delta_pct).toBeNull();
+  });
+
+  it("names the trials that did not run on their arm's tier", () => {
+    const log = new RunLog();
+    const ref = (task: string, tier?: ModelTier) => ({
+      proposal: MID_LOW,
+      task,
+      arm: "b" as const,
+      trial: 1,
+      ...(tier === undefined ? {} : { tier }),
+    });
+    log.dispatch("engineer", { task: "T-1", tier: "low", replay: ref("r1:ok", "low") });
+    log.dispatch("engineer", { task: "T-1", tier: "mid", replay: ref("r1:other", "low") });
+    log.dispatch("engineer", {
+      task: "T-1",
+      tier: "low",
+      tierClamped: true,
+      replay: ref("r1:clamped", "low"),
+    });
+    // no arm tier: core ran it on the recorded tier, as a prompt replay
+    log.dispatch("engineer", { task: "T-1", tier: "mid", replay: ref("r1:untiered") });
+    // no dispatched tier (a log from before 5.4.0) says nothing
+    log.dispatch("engineer", { task: "T-1", replay: ref("r1:unknown", "low") });
+    // another replay's trial is not this one's
+    log.dispatch("engineer", {
+      task: "T-1",
+      tier: "top",
+      replay: { ...ref("r1:theirs", "low"), proposal: LOW_MID },
+    });
+    expect([...routingReplayOffTier(log.events, MID_LOW)].sort()).toEqual(
+      ["r1:clamped\nb\n1", "r1:other\nb\n1", "r1:untiered\nb\n1"].sort(),
+    );
   });
 
   it("reads each trial's cost from the replay trial events", () => {
