@@ -98,6 +98,55 @@ describe("the recorded outcome of a verdict dispatch (D-ch)", () => {
     });
   });
 
+  it("lets evidence that names the criterion win over task-level evidence (reading 212(4))", () => {
+    const AC2 = "REQ-1.AC-2";
+    const log = new RunLog();
+    log.taskCreated("T-1");
+    log.dispatch("engineer", { task: "T-1", feature: "F-1" });
+    log.gate("T-1", true);
+    for (const [action, subject] of [
+      ["sv-1", AC],
+      ["sv-2", AC2],
+    ] as const)
+      log.dispatch("spec_verifier", {
+        task: "T-1",
+        feature: "F-1",
+        action,
+        subject,
+        end: "done",
+        verdicts: [{ subject, verdict: "pass" }],
+      });
+    // the human names AC-1 as the Spec Verifier's miss; AC-2 is not named
+    log.escalate("T-1", "spec_verifier", "blocked", [{ type: "spec_ref", ref: `spec.md#${AC}` }]);
+    log.pr("merged");
+    expect(recordedOutcome(log.events, { run: "r1", trace: "sv-1" })).toMatchObject({
+      subject: AC,
+      expected: "fail",
+      source: "human_label",
+    });
+    // task-level evidence applies only to a criterion with none of its own: the merged PR
+    expect(recordedOutcome(log.events, { run: "r1", trace: "sv-2" })).toMatchObject({
+      subject: AC2,
+      expected: "pass",
+      source: "pr",
+    });
+  });
+
+  it("reads a label naming the requirement as naming each of its criteria", () => {
+    const log = judged("pass");
+    log.escalate("T-1", "spec_verifier", "blocked", [{ type: "spec_ref", ref: "REQ-1" }]);
+    expect(recordedOutcome(log.events, { run: "r1", trace: "sv-1" })?.source).toBe("human_label");
+    const other = judged("pass");
+    other.escalate("T-1", "spec_verifier", "blocked", [{ type: "spec_ref", ref: "REQ-12" }]);
+    expect(recordedOutcome(other.events, { run: "r1", trace: "sv-1" })?.source).toBe("gate");
+  });
+
+  it("keeps a label that names no criterion as task-level evidence for every criterion", () => {
+    const log = judged("pass");
+    log.escalate("T-1", "spec_verifier", "blocked", [{ type: "file_line", ref: "src/a.ts:1" }]);
+    expect(recordedOutcome(log.events, { run: "r1", trace: "sv-1" })?.source).toBe("human_label");
+  });
+
   it("does not count a human label that blames another role", () => {
     const log = judged("pass");
     log.escalate("T-1", "qa", "blocked");

@@ -217,11 +217,15 @@ export const renderLookbackInput = (input: {
     lines.push(
       "## Cost regression (aim: tokens)",
       "",
-      `This version costs more than the version before it (${target.cost[0]?.baseline.effective_sha256.slice(0, 8) ?? "?"}), beyond the ${String(LOOKBACK_LIMITS.maxTokenRisePct)}% limit:`,
+      `This version costs more than its baseline, beyond the ${String(LOOKBACK_LIMITS.maxTokenRisePct)}% limit:`,
       "",
       ...target.cost.map(
         (r) =>
-          `- ${r.metric}: ${String(r.baseline_value)} -> ${String(r.current_value)} (+${String(Math.round(r.delta_pct))}%), n ${String(r.n.baseline)} -> ${String(r.n.current)}`,
+          `- ${r.metric}: ${String(r.baseline_value)} -> ${String(r.current_value)} (+${String(Math.round(r.delta_pct))}%), n ${String(r.n.baseline)} -> ${String(r.n.current)}; baseline: ${
+            r.baseline_kind === "time_window"
+              ? `this same version ${String(LOOKBACK_LIMITS.driftWindowDays)} days earlier (a model or host change may be the cause)`
+              : `the version before it (${r.baseline.effective_sha256.slice(0, 8)})`
+          }`,
       ),
       "",
       `Aim your proposal at tokens: give each change the \`target_metric\` \`tokens_per_success\`, cut what the role spends tokens on without losing what makes it pass, and keep to at most ${String(LOOKBACK_LIMITS.maxProposalChanges)} changes to the editable section. Such a change may cite the costliest dispatches below.`,
@@ -349,6 +353,7 @@ export const createLookbackRetro = (deps: LookbackRetroDeps): LookbackRetro => {
         }),
         history,
         lockedShaFor: deps.lockedShaFor,
+        attributions,
       });
       const checked = checkProposal({
         history,

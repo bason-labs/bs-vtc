@@ -12,7 +12,8 @@
  * ({@link replayIsolation}, reading 178).
  *
  * Tasks: the held-out failures of the baseline version (should improve) and held-out successes
- * (the regression set, which must not get worse beyond the A/A flip rate). For a verdict role a
+ * (the regression set, which must not get worse beyond the A/A flip rate), sampled at the replay
+ * pace (D-cq, spine §5 reading 224; `lookbackPaceFor`: 6 + 6 by default). For a verdict role a
  * failure is a held-out dispatch whose recorded verdict disagrees with its recorded outcome
  * (`recordedOutcome`), a success one that agrees.
  */
@@ -35,6 +36,7 @@ import {
   type GateRunRequest,
   type HostCapabilities,
   type HostId,
+  type LookbackPace,
   type PromptVersionRef,
   type ReplayGrader,
   type ReplayIsolation,
@@ -46,9 +48,6 @@ import { appendJsonLines, readJsonLines, writeAtomic } from "./files.js";
 import { isRoleFailure, trustedAttributions, type AttributionHistory } from "./attribution.js";
 import { buildTraces, sameTarget, traceRef, traceSplit } from "./traces.js";
 import { recordedOutcome, type ExpectedVerdict } from "./verdict-grader.js";
-
-/** Most tasks of each kind one replay runs (§13: 5–10 attributed failures). */
-export const REPLAY_MAX_TASKS = 10;
 
 export interface ReplayTask {
   /** The recorded dispatch the trial re-runs (its pack and base commit). */
@@ -106,13 +105,20 @@ export const expectedOfTaskKey = (key: string): ExpectedVerdict | undefined => {
  * success out of the regression set. For the `verdict` grader the recorded outcome decides, from
  * the log alone; a dispatch with none is not replayed. A task the baseline failed on is never also
  * in the regression set (a task with a failed round and a passed one is a failure to fix), so one
- * key never stands for both.
+ * key never stands for both. The sample (the pace's failures, then its regression tasks) is the
+ * first in log order, so it stays the same as the history grows and a replay the trial cap spreads
+ * over several RETROs keeps its graded trials (D-cq: about 5 RETROs at the base cap).
  */
 export const replayTasks = (
   input: AttributionHistory & {
     readonly baseline: PromptVersionRef;
     readonly attributions: readonly Attribution[];
     readonly grader?: ReplayGrader;
+    /**
+     * How many failures and regression tasks to sample (D-cq, `lookbackPaceFor` of the user's
+     * config); default `LOOKBACK_LIMITS.replayFailureTasks` / `replayRegressionTasks`.
+     */
+    readonly pace?: Pick<LookbackPace, "failureTasks" | "regressionTasks">;
   },
 ): ReplayTask[] => {
   const held = buildTraces(input.history, input.lockedShaFor).filter(
@@ -175,7 +181,12 @@ export const replayTasks = (
         ...(expected === undefined ? {} : { expected }),
       });
     }
-    return tasks.slice(0, REPLAY_MAX_TASKS);
+    return tasks.slice(
+      0,
+      regressionSet
+        ? (input.pace?.regressionTasks ?? LOOKBACK_LIMITS.replayRegressionTasks)
+        : (input.pace?.failureTasks ?? LOOKBACK_LIMITS.replayFailureTasks),
+    );
   };
   return [...pick(false), ...pick(true)];
 };
