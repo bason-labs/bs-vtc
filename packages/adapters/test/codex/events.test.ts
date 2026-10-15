@@ -309,31 +309,51 @@ describe("Codex model refusal (D-cx)", () => {
     });
   });
 
-  it("reads it the same after the process exits, whatever the exit status or launcher stop", () => {
-    expect(codexOutcomeAfterExit(refused, exit(1))).toMatchObject({
-      kind: "error",
-      cause: "model_refused",
-      retryable: true,
-      message: ONE_LINE,
-    });
-    expect(codexOutcomeAfterExit(refused, exit(1, "", null, IDLE))).toMatchObject({
-      cause: "model_refused",
-    });
-    // only the error event, then a bare exit
-    const errorOnly = refused.filter((l) => !l.includes('"turn.failed"'));
-    expect(codexOutcomeAfterExit(errorOnly, exit(1))).toMatchObject({
-      kind: "error",
-      cause: "model_refused",
-      message: ONE_LINE,
-    });
-  });
-
   const asked = (model?: string) => ({
     model: {
       tier: "mid" as const,
       effort: "medium" as const,
       ...(model === undefined ? {} : { model }),
     },
+  });
+  const REFUSED_ID = asked("vtc-probe-no-such-model");
+
+  it("reads it the same after the process exits, whatever the exit status or launcher stop", () => {
+    expect(codexOutcomeAfterExit(refused, exit(1), REFUSED_ID)).toMatchObject({
+      kind: "error",
+      cause: "model_refused",
+      retryable: true,
+      message: ONE_LINE,
+    });
+    expect(codexOutcomeAfterExit(refused, exit(1, "", null, IDLE), REFUSED_ID)).toMatchObject({
+      cause: "model_refused",
+    });
+    // only the error event, then a bare exit
+    const errorOnly = refused.filter((l) => !l.includes('"turn.failed"'));
+    expect(codexOutcomeAfterExit(errorOnly, exit(1), REFUSED_ID)).toMatchObject({
+      kind: "error",
+      cause: "model_refused",
+      message: ONE_LINE,
+    });
+  });
+
+  it("a run that asked for no model id never reads a refusal on its stream: the default refused too is an ordinary error (reading 244)", () => {
+    const errorOnly = refused.filter((l) => !l.includes('"turn.failed"'));
+    for (const request of [asked(), undefined]) {
+      const failed = valid(codexOutcomeAfterExit(refused, exit(1), request));
+      expect(failed).toMatchObject({ kind: "error", retryable: true });
+      expect(failed.kind === "error" && failed.cause).toBeUndefined();
+      // a launcher stop names the cause, as for any failed turn without one of its own
+      expect(codexOutcomeAfterExit(refused, exit(1, "", null, IDLE), request)).toMatchObject({
+        kind: "error",
+        cause: "idle",
+      });
+      expect(codexOutcomeAfterExit(errorOnly, exit(1), request)).toMatchObject({
+        kind: "error",
+        retryable: true,
+        cause: "exit_code",
+      });
+    }
   });
 
   it("reads a refusal printed on stderr when the stream has none and it names the id asked for", () => {
