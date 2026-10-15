@@ -122,6 +122,10 @@ export const automationReportView = (
           touch(v, event.ts, (item) => ({
             ...item,
             issue: { number: v.number, url: v.url, state: "closed" },
+            // closed as `completed`: its fix PR merged (the module closes it on the merge)
+            ...(v.reason === "completed" && item.pr !== null && item.pr.state !== "closed"
+              ? { pr: { ...item.pr, state: "merged" as const } }
+              : {}),
           }));
         break;
       }

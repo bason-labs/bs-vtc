@@ -161,6 +161,14 @@ export interface StepSpec {
 const securityDesign = (k: Kernel): boolean =>
   k.deps.roles.get("security")?.modes?.design !== undefined;
 
+/**
+ * Whether DESIGN does UI design work (the Designer, its directions and prototype; §6.1, §9.1): a
+ * run with UI the human asked for. An automatic run with UI (`has_ui` from its issue's paths, spine
+ * §5 reading 223) does none: G2 stays the engine's and nothing waits on a prototype.
+ */
+export const designWork = (h: Pick<RunHandle, "state">): boolean =>
+  h.state.run.has_ui && h.state.automation === null;
+
 /** Front-half roles per phase (§6.1). The deeper front half is sub-project 4. */
 export const phaseRoles = (
   k: Kernel,
@@ -176,11 +184,14 @@ export const phaseRoles = (
     case "specify":
       return [{ role: "ba" }];
     case "design":
-      // §6.1: Architect, Security's threat model and the Designer (with UI) run in parallel
+      // §6.1: Architect, Security's threat model and the Designer (with UI) run in parallel. An
+      // automatic run's UI is the project's as it is (its issue is the spec, reading 223): no
+      // Designer, no directions and no prototype; its UI tasks are checked against the
+      // project's own screens
       return [
         { role: "architect" },
         ...(securityDesign(k) ? [{ role: "security", mode: "design" }] : []),
-        ...(run.has_ui ? [{ role: "designer" }] : []),
+        ...(designWork(h) ? [{ role: "designer" }] : []),
       ];
     case "plan":
       return [{ role: "planner" }];

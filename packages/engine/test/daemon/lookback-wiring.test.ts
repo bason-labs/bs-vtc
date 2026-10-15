@@ -47,7 +47,13 @@ import {
   type RunState,
 } from "../../src/core/index.js";
 import { ALL_FIXTURE_ROLES } from "../fixtures/roles.js";
-import { lookbackWindow, newAgentFact, wireLookback } from "../../src/daemon/index.js";
+import {
+  lookbackWindow,
+  newAgentFact,
+  routingConfigFact,
+  wireLookback,
+  type RoutingLookback,
+} from "../../src/daemon/index.js";
 import {
   lookbackEvent,
   lookbackTargets,
@@ -713,6 +719,83 @@ describe("Lookback's new-agent signals reach automation (D-cd)", () => {
     );
     expect(stack.subject).toBe("engineer_globexpay");
     expect(stack).not.toHaveProperty("role");
+  });
+});
+
+describe("Lookback tunes routing at RETRO (D-cn, spine §5 reading 219)", () => {
+  it("calls the routing step through the LookbackRetro seam at RETRO and hands its proposals on as config facts", async () => {
+    const h = createHarness({ plugins: switched, project: { merge_level: 1 } });
+    const asked: { history: number; phase: string }[] = [];
+    const propose: RoutingLookback = (input) => {
+      asked.push({ history: input.history.length, phase: h.engine.status({}).run.phase });
+      return Promise.resolve([
+        {
+          role: "engineer",
+          size: "S",
+          risk: "none",
+          metrics: { "routing.tasks": 12, "routing.escalated_pct": 60 },
+          detail: "S engineer tasks started on Low escalate 60% of the time",
+        },
+      ]);
+    };
+    const found: { run: string; facts: readonly unknown[] }[] = [];
+    const unwire = wireLookback(
+      h.engine,
+      { repoRoot: h.repo, vtcHome: h.home },
+      switched,
+      undefined,
+      undefined,
+      { propose, found: (run, facts) => found.push({ run, facts }) },
+    );
+    const actions = await throughPlan(h, [draft("T-1")], SPEC_ONE);
+    await authorTests(h, only(actions, "qa"));
+    await build(h, only((await h.engine.next({}, CLAUDE)).actions, "engineer"));
+    await verdictPass(
+      h,
+      only((await h.engine.next({}, CLAUDE)).actions, "spec_verifier"),
+      "src/t-1/impl.ts",
+    );
+    await h.engine.settle();
+    expect(asked).toEqual([]);
+    await passFinalReview(h);
+    await unwire();
+    const run = h.engine.status({}).run.id;
+    expect(asked).toHaveLength(1);
+    expect(asked[0]?.history).toBeGreaterThan(0);
+    expect(found).toEqual([
+      {
+        run,
+        facts: [
+          expect.objectContaining({
+            target: "upstream",
+            kind: "config",
+            run,
+            source: "lookback.routing",
+            subject: "routing.engineer.S.none",
+            metrics: { "routing.tasks": 12, "routing.escalated_pct": 60 },
+          }),
+        ],
+      },
+    ]);
+    await h.release();
+  }, 40_000);
+
+  it("names the routing-table cell as the config subject", () => {
+    expect(
+      routingConfigFact(
+        "r1",
+        { role: "spec_verifier", size: "M", risk: "tagged", detail: "x" },
+        "2026-10-15T08:00:00.000Z",
+      ),
+    ).toEqual({
+      target: "upstream",
+      kind: "config",
+      run: "r1",
+      source: "lookback.routing",
+      at: "2026-10-15T08:00:00.000Z",
+      subject: "routing.spec_verifier.M.tagged",
+      detail: "x",
+    });
   });
 });
 

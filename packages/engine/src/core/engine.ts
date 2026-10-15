@@ -1412,7 +1412,13 @@ export class Engine implements Kernel {
     automation: AutomationRunRef,
     call: CallContext = { host: null },
   ): Promise<StartResult> {
-    return this.startRun(input, call, AutomationRunRefSchema.parse(automation));
+    const started = await this.startRun(input, call, AutomationRunRefSchema.parse(automation));
+    // a daemon-started run has no Lead: the engine drives it now when the project allows
+    // unattended runs (`drive`, reading 212(6)); otherwise the next Lead session's `next` does
+    const handle = this.handles.get(started.run);
+    if (handle !== undefined && this.liveLeadHost(started.run) === undefined)
+      await this.serial(handle, () => drive(this, handle));
+    return started;
   }
 
   private async startRun(

@@ -19,6 +19,7 @@ import {
   type EventDraft,
 } from "../../src/core/index.js";
 import { wireAutomation } from "../../src/daemon/automation.js";
+import { routingConfigFact } from "../../src/daemon/index.js";
 import { bridgeUpstream } from "../../src/daemon/upstream-bridge.js";
 import { createUpstream } from "../../src/upstream/index.js";
 import { cleanupDirs, tempDir } from "../helpers/repo.js";
@@ -132,7 +133,7 @@ describe("capabilitySignalFacts (D-cs)", () => {
 });
 
 describe("the tool and capability signals become VTC issues (D-cs)", () => {
-  it("hands both to the upstream module at a run's end, which opens one issue each", async () => {
+  it("hands both to the upstream module at a run's end, which opens one issue each; a routing proposal too (D-cn)", async () => {
     const github = memoryGitHub({ now: () => new Date(AT) });
     const automation: AutomationDeps = {
       issues: github.issues,
@@ -216,18 +217,35 @@ describe("the tool and capability signals become VTC issues (D-cs)", () => {
       data: { outcome: "completed" },
     } as unknown as VtcEvent);
     await wiring.idle();
+    // D-cn: a routing proposal Lookback made at RETRO is a config fact, raised the same way
+    wiring.improvements([
+      routingConfigFact(
+        "R-1",
+        {
+          role: "engineer",
+          size: "S",
+          risk: "none",
+          metrics: { "routing.tasks": 12 },
+          detail: "a local note about the project's tasks",
+        },
+        AT,
+      ),
+    ]);
+    await wiring.idle();
     expect(
       github.state.issues
         .map((i) => [i.repo, i.labels.find((l) => l.startsWith("vtc:kind/"))])
         .sort(),
     ).toEqual([
       ["bason-labs/bs-vtc", "vtc:kind/capability"],
+      ["bason-labs/bs-vtc", "vtc:kind/config"],
       ["bason-labs/bs-vtc", "vtc:kind/tool"],
     ]);
     // nothing of the project: no reason text, no command values
     const bodies = JSON.stringify(github.state.issues);
     expect(bodies).not.toContain("the Lead's reason");
     expect(bodies).not.toContain("vitest run");
+    expect(bodies).not.toContain("a local note");
     await wiring.close();
   });
 });
