@@ -225,16 +225,27 @@ site-packages startup files (`*.pth`, `sitecustomize.py`, `usercustomize.py`).
 The install phase keeps the configured order and runs in two passes (`scriptsFreeInstall`, each
 form checked against the real package manager by `tool-tamper.live.test.ts`, opt-in with
 `VTC_LIVE_PM=1`): `npm ci --ignore-scripts` then `npm ci` again; `pnpm install --ignore-scripts`
-then `pnpm rebuild --pending` (a second `pnpm install` leaves the skipped builds unbuilt);
-`bun install --ignore-scripts` then `bun install` again; `go mod download` and `cargo fetch` as
-they are. The leading install gates with no such form run as configured first; then the gates
+then `pnpm rebuild --recursive --pending`, keeping the install's `-C`/`--dir` (a second
+`pnpm install` leaves the skipped builds unbuilt, and a non-recursive rebuild at a workspace root
+builds the root project only; a `pnpm install --filter` has no two passes);
+`bun install --ignore-scripts` then `bun install --force` (a second plain `bun install` of a
+workspace skips its packages' dependency scripts); `go mod download` and `cargo fetch` as they
+are. The live test covers a single project and a workspace for each. The leading install gates with no such form run as configured first; then the gates
 after them that have one, up to the next that has none, run their first pass; then the tools are
 hashed; then those gates' second passes run, in order; then the remaining install gates run as
-configured. `vtc calibrate` asks the human to confirm each second pass (`pnpm rebuild --pending`)
+configured. `vtc calibrate` asks the human to confirm each second pass (`pnpm rebuild --recursive --pending`)
 with the install it belongs to. A first pass's logs are `<id>.scripts-free.*`.
 
 `vtc calibrate` writes the `project` tool of each check gate whose executable is installed in the
-working tree (`withCheckTools`), package scripts included; pinned scanners need none.
+working tree (`withCheckTools`), package scripts included; pinned scanners need none. A Node lint
+gate's tool also lists the installed ESLint plugins, shareable configs and parsers its
+package.json names (`eslint-plugin-*`, `@scope/eslint-plugin*`, `eslint-config-*`,
+`typescript-eslint`, `@typescript-eslint/*`), since ESLint loads them through its config.
+
+Just before each gate runs, the runner derives its tool from its command again: an executable it
+now resolves to outside the hashed paths (an install script that planted a
+`node_modules/.bin/<name>` nearer the gate's cwd) fails the gate as tampering at that executable,
+and a command that no longer runs the hashed tool (a rewritten package script) does not run.
 
 Known limits (the first two are said per run in `_tool-integrity.log`, a name no gate's log can
 have):
@@ -245,9 +256,10 @@ have):
   hashed then, and the log names it.
 - A verify gate with no project tool (its executable is outside the checkout, its package script
   names nothing installed, or it picks other packages to run in) is listed as not verified.
-- What a tool loads by configuration rather than by dependency (an ESLint plugin the project's
-  config names, a test runner's setup files) is not part of the tool unless `gates.yml` lists it
-  in `paths` (its dependency closure is then hashed too).
+- What a tool loads by configuration rather than by dependency (an ESLint plugin the
+  package.json does not name, a pytest plugin such as `pytest-cov`, a test runner's setup files)
+  is not part of the tool unless `gates.yml` lists it in `paths` (its dependency closure is then
+  hashed too).
 - The base checkout, which computes the baseline facts (which violations are pre-existing),
   runs its install gates as configured and its tools unverified. Its install scripts are code
   already merged, but a base tool they changed could make the baseline facts wrong.

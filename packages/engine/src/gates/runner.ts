@@ -231,6 +231,9 @@ type ToolBaseline =
   | { readonly paths: readonly string[]; readonly snapshot: ToolSnapshot }
   | { readonly paths: readonly string[]; readonly problem: string };
 
+/** The snapshot of a tool with no file (H-14). */
+const EMPTY_TOOL: ToolSnapshot = hashTool("", []);
+
 /** The finding tool name of a tampered tool (H-14). */
 const TOOL_INTEGRITY = "vtc-tool-integrity";
 
@@ -362,6 +365,11 @@ class Run {
   private readonly baselines = new Map<string, Promise<BaselineFacts>>();
   /** Each verify gate's `project` tool as hashed after the scripts-free install (H-14), by gate id. */
   private readonly tools = new Map<string, ToolBaseline>();
+  /**
+   * What each verify gate's command resolved to (`deriveProjectTool`'s paths, or `null`) when its
+   * tool was hashed, by gate id: {@link verifyTool} derives it again just before the gate runs.
+   */
+  private readonly derivedAtHash = new Map<string, readonly string[] | null>();
   private readonly attempt: string;
   private readonly evidenceRoot: string;
   private readonly stateRoot: string;
@@ -654,11 +662,9 @@ class Run {
     | { readonly tool: Extract<CheckTool, { source: "project" }> }
     | { readonly paths: readonly string[]; readonly problem: string }
     | null {
-    if (gate.phase !== "verify" || this.isPinnedScanner(gate)) return null;
-    if (gate.tool?.source === "pinned") return null;
-    const derived = resolvesInside(this.checkoutAbs, join(this.checkoutAbs, gate.cwd ?? ""))
-      ? deriveProjectTool(this.checkoutAbs, gate.cwd ?? "", gate.command)
-      : null;
+    if (!this.mayHaveProjectTool(gate) || gate.tool?.source === "pinned") return null;
+    const derived = this.deriveTool(gate);
+    this.derivedAtHash.set(gate.id, derived?.paths ?? null);
     if (gate.tool === undefined) return derived === null ? null : { tool: derived };
     const paths = gate.tool.paths;
     const missing = (derived?.paths ?? []).filter((p) => !toolPathsCover(paths, p));
@@ -669,6 +675,45 @@ class Run {
       };
     }
     return { tool: gate.tool };
+  }
+
+  /** Whether a gate can have a `project` tool: a verify gate, neither a pinned scanner nor pinned. */
+  private mayHaveProjectTool(gate: Gate): boolean {
+    return gate.phase === "verify" && !this.isPinnedScanner(gate) && gate.tool?.source !== "pinned";
+  }
+
+  /** The `project` tool the gate's command resolves to in the run checkout now, or `null`. */
+  private deriveTool(gate: Gate): Extract<CheckTool, { source: "project" }> | null {
+    return resolvesInside(this.checkoutAbs, join(this.checkoutAbs, gate.cwd ?? ""))
+      ? deriveProjectTool(this.checkoutAbs, gate.cwd ?? "", gate.command)
+      : null;
+  }
+
+  /**
+   * Derives the gate's tool again just before it runs (H-14): an install script or an earlier gate
+   * that planted an executable the command now resolves to first (a `node_modules/.bin/<name>`
+   * nearer the gate's cwd), or that changed which executable it runs, did so after the hash.
+   * Returns the paths it now runs that the hashed paths do not cover, a refusal when it no longer
+   * runs a tool in the checkout although it did then, or `null`.
+   */
+  private rederived(
+    gate: Gate,
+    hashedPaths: readonly string[],
+  ): { readonly added: readonly string[] } | { readonly refused: string } | null {
+    if (!this.mayHaveProjectTool(gate) || !this.derivedAtHash.has(gate.id)) return null;
+    const then = this.derivedAtHash.get(gate.id) ?? null;
+    const now = this.deriveTool(gate)?.paths ?? null;
+    if (now === null) {
+      return then === null
+        ? null
+        : {
+            refused: `not run: its command no longer runs the tool hashed after the scripts-free install (${then.join(", ")}); the install phase or an earlier gate changed what it resolves to`,
+          };
+    }
+    const uncovered = now.filter((p) => !toolPathsCover(hashedPaths, p));
+    if (uncovered.length === 0) return null;
+    const files = uncovered.filter((p) => !/[*?{}[\]]/.test(p));
+    return { added: files.length > 0 ? files : uncovered };
   }
 
   /** Hashes a gate's `project` tool in the run checkout, once per set of paths. */
@@ -742,35 +787,45 @@ class Run {
    * Re-hashes the gate's `project` tool just before it runs (H-14): `tampered` lists every file
    * the install phase or an earlier gate changed, added or removed since the scripts-free hash. A
    * tool that grew past the hash limits since then is tampered with at the file that crossed
-   * them; one whose paths match no file, then or now, does not run.
+   * them; one whose paths match no file, then or now, does not run. Then the command's tool is
+   * derived again ({@link rederived}): an executable it now runs outside the hashed paths is
+   * tampering at that executable, and a command that no longer runs the hashed tool does not run.
    */
   private verifyTool(
     gate: Gate,
   ): { refused: string } | { tool?: ToolIntegrity; tampered?: readonly string[] } {
     const baseline = this.tools.get(gate.id);
-    if (baseline === undefined) return {};
-    if ("problem" in baseline) return { refused: `not run: ${baseline.problem}` };
+    if (baseline !== undefined && "problem" in baseline) {
+      return { refused: `not run: ${baseline.problem}` };
+    }
     const tool = (tampered: readonly string[]): ToolIntegrity => ({
       source: "project",
-      sha256: baseline.snapshot.sha256,
+      // A gate whose command ran no tool in the checkout when tools were hashed: none, no file.
+      sha256: (baseline?.snapshot ?? EMPTY_TOOL).sha256,
       tampered: tampered.slice(0, 50),
     });
-    let now: ToolSnapshot;
-    try {
-      now = hashTool(this.checkoutAbs, baseline.paths);
-    } catch (error) {
-      if (error instanceof ToolHashLimitError) {
-        return { tool: tool([error.path]), tampered: [error.path] };
+    if (baseline !== undefined) {
+      let now: ToolSnapshot;
+      try {
+        now = hashTool(this.checkoutAbs, baseline.paths);
+      } catch (error) {
+        if (error instanceof ToolHashLimitError) {
+          return { tool: tool([error.path]), tampered: [error.path] };
+        }
+        return { refused: `not run: its tool could not be hashed again: ${errorText(error)}` };
       }
-      return { refused: `not run: its tool could not be hashed again: ${errorText(error)}` };
+      if (baseline.snapshot.files.size === 0 && now.files.size === 0) {
+        return {
+          refused: `not run: its tool paths (${baseline.paths.join(", ")}) match no file in the checkout; re-run vtc calibrate`,
+        };
+      }
+      const tampered = changedToolFiles(baseline.snapshot, now);
+      if (tampered.length > 0) return { tool: tool(tampered), tampered };
     }
-    if (baseline.snapshot.files.size === 0 && now.files.size === 0) {
-      return {
-        refused: `not run: its tool paths (${baseline.paths.join(", ")}) match no file in the checkout; re-run vtc calibrate`,
-      };
-    }
-    const tampered = changedToolFiles(baseline.snapshot, now);
-    return tampered.length === 0 ? { tool: tool([]) } : { tool: tool(tampered), tampered };
+    const again = this.rederived(gate, baseline?.paths ?? []);
+    if (again !== null && "refused" in again) return again;
+    if (again !== null) return { tool: tool(again.added), tampered: again.added };
+    return baseline === undefined ? {} : { tool: tool([]) };
   }
 
   /**

@@ -40,15 +40,37 @@ describe("scriptsFreeInstall: an install in two passes, the first running no lif
       free: ["npm", "ci", "--ignore-scripts"],
       build: ["npm", "ci"],
     });
-    // A second pnpm install leaves the pending builds; `pnpm rebuild --pending` runs them.
+    // A second pnpm install leaves the pending builds; a recursive `pnpm rebuild --pending` runs
+    // them in every workspace project, not the root project only.
     expect(scriptsFreeInstall(["/usr/local/bin/pnpm", "install", "--frozen-lockfile"])).toEqual({
       free: ["/usr/local/bin/pnpm", "install", "--frozen-lockfile", "--ignore-scripts"],
-      build: ["/usr/local/bin/pnpm", "rebuild", "--pending"],
+      build: ["/usr/local/bin/pnpm", "rebuild", "--recursive", "--pending"],
     });
+    // A second plain bun install of a workspace skips its packages' dependency scripts.
     expect(scriptsFreeInstall(["bun", "install", "--frozen-lockfile"])).toEqual({
       free: ["bun", "install", "--frozen-lockfile", "--ignore-scripts"],
-      build: ["bun", "install", "--frozen-lockfile"],
+      build: ["bun", "install", "--frozen-lockfile", "--force"],
     });
+  });
+
+  it("rebuilds where a pnpm install ran, and makes no two passes of one that picks projects", () => {
+    expect(scriptsFreeInstall(["pnpm", "-C", "app", "install", "--frozen-lockfile"])).toEqual({
+      free: ["pnpm", "-C", "app", "install", "--frozen-lockfile", "--ignore-scripts"],
+      build: ["pnpm", "-C", "app", "rebuild", "--recursive", "--pending"],
+    });
+    expect(scriptsFreeInstall(["pnpm", "install", "--dir=app"])?.build).toEqual([
+      "pnpm",
+      "--dir",
+      "app",
+      "rebuild",
+      "--recursive",
+      "--pending",
+    ]);
+    expect(scriptsFreeInstall(["pnpm", "install", "--filter", "a"])).toBeNull();
+    expect(scriptsFreeInstall(["pnpm", "--filter=a", "install"])).toBeNull();
+    expect(scriptsFreeInstall(["pnpm", "-F", "a", "i"])).toBeNull();
+    expect(scriptsFreeInstall(["pnpm", "add", "lint"])).toBeNull();
+    expect(scriptsFreeInstall(["pnpm", "install", "-C"])).toBeNull();
   });
 
   it("takes an install that runs no project code as it is, once", () => {
