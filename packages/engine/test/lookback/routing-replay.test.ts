@@ -5,7 +5,8 @@
  * across RETROs, grades it into a `RoutingReplayResult` with the paired sign test, and raises the
  * routing `config` fact only once the replay is graded, its trials' events show each ran on its
  * arm's tier, and it backs the change (`routingReplayBacks`). With no budget, or through engine
- * core's seam (`lookbackRoutingStep`), the fact carries the scorecard alone, as before.
+ * core's seam (`lookbackRoutingStep`), the fact carries the scorecard alone, as before; through the
+ * seam, a change whose replay the budget had room for says in its detail that it was not replayed.
  */
 import {
   engineRepoKey,
@@ -468,10 +469,10 @@ describe("planning a tier replay (D-cn, reading 247(6))", () => {
     }
   });
 
-  it("through the seam, launches and grades no tier replay: the scorecard alone", async () => {
+  it("through the seam, launches and grades no tier replay, and says when one was due (reading 247(6) not met)", async () => {
     const s = await setup("seam");
     const history = lowStarts();
-    const seam = () =>
+    const seam = (trialBudget?: number) =>
       lookbackRoutingStep({
         table: DCM,
         projectRoot: s.root,
@@ -481,13 +482,29 @@ describe("planning a tier replay (D-cn, reading 247(6))", () => {
         lockedShaFor,
         vtcHome: s.home,
         pace: PACE,
+        ...(trialBudget === undefined ? {} : { trialBudget }),
       });
-    const fresh = await seam();
-    expect(fresh).toHaveLength(1);
-    expect(fresh[0]?.metrics[ROUTING_FACT_METRICS.replayPlanned]).toBe(0);
+    // no budget, or one too small for a pair: no replay was due
+    for (const budget of [undefined, 0, 1]) {
+      const cells = await seam(budget);
+      expect(cells).toHaveLength(1);
+      expect(cells[0]?.metrics[ROUTING_FACT_METRICS.replayPlanned]).toBe(0);
+      expect(cells[0]?.detail).toContain("No tier replay backs it");
+      expect(cells[0]?.detail).not.toContain("247(6)");
+    }
+    // a budget with room for the replay: the fact still goes out on the scorecard alone (the seam
+    // cannot launch), and its detail tells the human the replay the reading asks for did not run
+    const [due, ...others] = await seam(24);
+    expect(others).toEqual([]);
+    expect(due?.metrics[ROUTING_FACT_METRICS.replayPlanned]).toBe(0);
+    expect(due?.metrics).not.toHaveProperty(ROUTING_FACT_METRICS.replayVerdict);
+    expect(due?.detail).toContain("A tier replay fit this RETRO's trial budget");
+    expect(due?.detail).toContain("spine reading 247(6) is not met");
+    // nothing launched through the seam: the ledger holds no row of the replay
+    await expect(readFile(join(s.home, LOOKBACK_HOME.replayTrialsFile), "utf8")).rejects.toThrow();
     // a replay the ledger holds every trial of: the seam has no trial events to grade it on
     await runToEnd(s, history, () => true);
-    const [cell, ...rest] = await seam();
+    const [cell, ...rest] = await seam(24);
     expect(rest).toEqual([]);
     expect(cell?.metrics[ROUTING_FACT_METRICS.replayPlanned]).toBe(0);
     expect(cell?.metrics).not.toHaveProperty(ROUTING_FACT_METRICS.replayVerdict);
