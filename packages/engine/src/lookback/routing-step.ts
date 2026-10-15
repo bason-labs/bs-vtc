@@ -6,7 +6,10 @@
  *   AD-27 issue -> PR path; the PR changes only the values of `DEFAULT_ROUTING_TABLE`). The seam
  *   carries neither the tier replays to launch nor the replay trials' events, so through it every
  *   change carries the scorecard alone (`routing.replay_planned` 0): no tier replay is launched
- *   or graded.
+ *   or graded. That does not meet reading 247(6) when the RETRO's trial budget has room for a
+ *   replay; such a change's detail says it was not replayed (`RoutingEvidence.replayDue`). Meeting
+ *   it needs engine core to call {@link routingReplayStep} at RETRO (a contract proposal of the
+ *   lookback-research team, round 6).
  * - {@link routingReplayStep} is the same step with tier replays, for a caller that launches the
  *   trials it returns and hands back their events: it returns the cells, the trials to launch and
  *   the `automation.skipped` drafts as one {@link RoutingStepResult}.
@@ -159,10 +162,18 @@ const currentPrompt = (
   return undefined;
 };
 
-const routingStep = async (
-  input: RoutingStepInput,
-  tiered: { readonly trialBudget: number; readonly events: readonly VtcEvent[] } | undefined,
-): Promise<RoutingStepResult> => {
+/**
+ * How the step treats tier replays: `launch` true, the caller launches what it returns and hands
+ * back the trials' `events`; false (engine core's seam today), nothing can be launched or graded,
+ * so a change whose replay the budget would launch carries the scorecard with `replayDue`.
+ */
+interface Tiered {
+  readonly trialBudget: number;
+  readonly events: readonly VtcEvent[];
+  readonly launch: boolean;
+}
+
+const routingStep = async (input: RoutingStepInput, tiered: Tiered): Promise<RoutingStepResult> => {
   const table = input.table ?? DEFAULT_ROUTING_TABLE;
   const repoKey = engineRepoKey(input.projectRoot);
   const tiebreaks =
@@ -188,12 +199,7 @@ const routingStep = async (
   await writeRoutingScorecard(input.projectRoot, card);
   const proposals = routingProposals(card, table);
   const { vtcHome, lockedShaFor } = input;
-  if (
-    tiered === undefined ||
-    proposals.changes.length === 0 ||
-    vtcHome === undefined ||
-    lockedShaFor === undefined
-  )
+  if (proposals.changes.length === 0 || vtcHome === undefined || lockedShaFor === undefined)
     return done(routingProposalCells(proposals));
 
   const ledger = await readReplayLedger(vtcHome);
@@ -322,6 +328,14 @@ const routingStep = async (
 
   const evidence = new Map<RoutingChange, RoutingEvidence | null>();
   for (const change of proposals.changes) evidence.set(change, await tierReplay(change));
+  // no launch and no trial events: a replay the budget would launch (none can have started or be
+  // graded without them) is recorded as due on a fact that carries the scorecard alone
+  if (!tiered.launch)
+    return done(
+      routingProposalCells(proposals, (c) =>
+        evidence.get(c) === null ? { kind: "scorecard", replayDue: true } : scorecard,
+      ),
+    );
   if (waiting > 0)
     skipped.push(
       replaySkippedEvent(
@@ -349,12 +363,23 @@ const routingStep = async (
 
 /**
  * The routing step through engine core's `RoutingLookback` seam: the scorecard and the cells, every
- * change on its scorecard evidence alone (the seam can neither launch tier replays nor hand back
- * their events, so none is launched or graded; a trial budget it passes is not used).
+ * change on its scorecard evidence alone. The seam can neither launch tier replays nor hand back
+ * their events, so none is launched or graded, which falls short of reading 247(6) (the routing
+ * fact after the graded replay whenever the budget allows one). Until engine core drives
+ * {@link routingReplayStep} instead, the shortfall is made visible: a change whose tier replay the
+ * passed `trialBudget` has room for (whole pairs, in the proposals' order, as
+ * {@link routingReplayStep} would launch them) says in its detail that it was not replayed
+ * (`RoutingEvidence.replayDue`); nothing is written to the ledger and no replay result is written.
  */
 export const lookbackRoutingStep = async (
-  input: RoutingStepInput,
-): Promise<RoutingProposalCell[]> => [...(await routingStep(input, undefined)).cells];
+  input: RoutingStepInput & {
+    /** What is left of the RETRO's trial cap for tier replays (D-cq); absent counts as 0. */
+    readonly trialBudget?: number;
+  },
+): Promise<RoutingProposalCell[]> => [
+  ...(await routingStep(input, { trialBudget: input.trialBudget ?? 0, events: [], launch: false }))
+    .cells,
+];
 
 /**
  * The routing step with tier replays. The caller launches every trial of the returned `replays`
@@ -382,4 +407,8 @@ export const routingReplayStep = async (
     readonly replayEvents: readonly VtcEvent[];
   },
 ): Promise<RoutingStepResult> =>
-  routingStep(input, { trialBudget: input.trialBudget ?? 0, events: input.replayEvents });
+  routingStep(input, {
+    trialBudget: input.trialBudget ?? 0,
+    events: input.replayEvents,
+    launch: true,
+  });

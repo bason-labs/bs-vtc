@@ -34,7 +34,9 @@
  * `RoutingLookback` seam: it writes the routing scorecard and returns the routing-table cells it
  * proposes to change for the producer roles (D-cu; {@link routingProposalCells}), which the daemon
  * raises as `config` facts (`wireLookback`'s `routing` argument); through that seam every change
- * carries its scorecard evidence alone. {@link routingReplayStep} is the same step with tier
+ * carries its scorecard evidence alone, short of reading 247(6), and a change whose tier replay
+ * the RETRO's trial budget had room for says in its detail that it was not replayed (until engine
+ * core drives {@link routingReplayStep}). {@link routingReplayStep} is the same step with tier
  * replays (for a caller that launches them and hands back their events): within the RETRO's
  * remaining trial budget it plans tier replays of those changes (the same prompt on both arms, arm
  * `a` on the current start tier and arm `b` on the proposed one; {@link planRoutingReplayTrials}),

@@ -406,10 +406,13 @@ export interface RoutingChange {
 /**
  * What backs a change beside the scorecard (D-cn, reading 247(6)): nothing (`scorecard`, the fact
  * says `routing.replay_planned` 0), or the graded tier replay that backs it
- * (`routingReplayBacks`), whose verdict and trial count the fact carries.
+ * (`routingReplayBacks`), whose verdict and trial count the fact carries. `replayDue`: the RETRO's
+ * trial budget had room for this change's tier replay, but the caller could not launch it (engine
+ * core's `RoutingLookback` seam carries no launches, `lookbackRoutingStep`), so the fact goes out
+ * on the scorecard alone against reading 247(6), and its detail says so for the human.
  */
 export type RoutingEvidence =
-  | { readonly kind: "scorecard" }
+  | { readonly kind: "scorecard"; readonly replayDue?: true }
   | { readonly kind: "replay"; readonly result: RoutingReplayResult };
 
 const SCORECARD_ONLY: RoutingEvidence = { kind: "scorecard" };
@@ -792,7 +795,9 @@ const signedPct = (value: number): string => `${value > 0 ? "+" : ""}${String(Ma
 /** What the evidence beside the scorecard says, in VTC's vocabulary. */
 const replaySentence = (change: RoutingChange, evidence: RoutingEvidence): string => {
   if (evidence.kind === "scorecard")
-    return "No tier replay backs it; the scorecard is the evidence.";
+    return evidence.replayDue === true
+      ? "No tier replay backs it; the scorecard is the evidence. A tier replay fit this RETRO's trial budget, but the engine cannot launch tier replays yet, so this change was not replayed before it was proposed (spine reading 247(6) is not met)."
+      : "No tier replay backs it; the scorecard is the evidence.";
   const r = evidence.result;
   const cost = r.cost_delta_pct === null ? "" : `, cost ${signedPct(r.cost_delta_pct)}`;
   return `A tier replay backs it: ${r.verdict} over ${String(routingReplayTrialCount(r))} trials of ${String(r.per_task.length)} held-out tasks, ${change.to} against ${change.from} on the same prompt (tokens ${signedPct(r.tokens_delta_pct)}${cost}).`;
