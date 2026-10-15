@@ -1,8 +1,9 @@
 "use client";
 
-import { ShieldQuestion } from "lucide-react";
+import { ListChecks, ShieldQuestion } from "lucide-react";
 import { useMemo } from "react";
 import { runTopic } from "@/lib/api/topics";
+import { coverageLoop } from "@/lib/design-coverage";
 import { headlessRuns, inFlightHeadless } from "@/lib/headless";
 import { pendingGate } from "@/lib/human-gates";
 import { hrefs } from "@/lib/router";
@@ -12,6 +13,8 @@ import { useResource } from "@/lib/useResource";
 import { useRunEvents } from "@/lib/useRunEvents";
 import { useEngine } from "@/components/app/EngineProvider";
 import { Link } from "@/components/app/Link";
+import { CoverageParked } from "@/components/gates/CoverageLoopCard";
+import { RoleRunNoteLines } from "@/components/run/RoleRunNoteLines";
 import { Card, CardDescription, CardHeader, CardTitle, StatusPill } from "@/components/ui";
 import { REDACT } from "@/lib/redact";
 
@@ -19,7 +22,8 @@ const plural = (n: number, one: string, many = `${one}s`): string =>
   `${String(n)} ${n === 1 ? one : many}`;
 
 /**
- * Above the run's graph: a gate waiting for the human (with what it asks), and the role runs
+ * Above the run's graph: the G2 coverage loop while it has not completed (H-13), a gate waiting
+ * for the human (with what it asks), and the role runs
  * the engine launched itself (AD-25: a Codex Lead's roles, auto-resume), from the event log and
  * `StatusResult.headless_runs`. Shows nothing when there is neither.
  */
@@ -32,12 +36,35 @@ export function RunActivity({ run }: { run: string }) {
     () => (events.data === undefined ? null : pendingGate(events.data.events)),
     [events.data],
   );
+  const loop = useMemo(() => {
+    const view = events.data === undefined ? null : coverageLoop(events.data.events);
+    // Shown until the loop completes, or until the human answered the escalation it parked on.
+    return view === null || view.state.id === "complete" || view.park?.answered === true
+      ? null
+      : view;
+  }, [events.data]);
   const runs = useMemo(() => {
     if (events.data === undefined) return [];
     return headlessRuns(events.data.events, inFlightHeadless(status.data, run, health));
   }, [events.data, status.data, run, health]);
   return (
     <>
+      {loop === null ? null : (
+        <Card role="status" aria-label="Design coverage loop" className="mb-4 border-warn/50">
+          <div className="space-y-2 text-sm">
+            <p className="flex flex-wrap items-center gap-2">
+              <ListChecks aria-hidden className="size-4 text-warn-fg" />
+              <span className="font-medium">Design coverage before G2</span>
+              <StatusPill meta={loop.state} />
+              <span className="text-muted-fg">{loop.headline}</span>
+              <Link className="ml-auto text-accent-fg underline" href={hrefs.gates(run)}>
+                See the coverage check
+              </Link>
+            </p>
+            <CoverageParked run={run} loop={loop} />
+          </div>
+        </Card>
+      )}
       {gate === null ? null : (
         <Card role="status" aria-label="Gate waiting" className="mb-4 border-accent/50">
           <p className="flex flex-wrap items-center gap-2 text-sm">
@@ -101,6 +128,7 @@ export function RunActivity({ run }: { run: string }) {
                 <p className="mt-0.5 text-xs text-muted-fg" {...REDACT}>
                   <span className="font-mono">{r.actionId}</span> · {r.detail}
                 </p>
+                <RoleRunNoteLines note={r.note} />
               </li>
             ))}
           </ul>

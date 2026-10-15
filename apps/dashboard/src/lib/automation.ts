@@ -108,7 +108,13 @@ export interface AutomationItemView {
   readonly target: string;
   readonly fingerprint: string;
   readonly issue: AutomationLink | null;
-  readonly pr: (AutomationLink & { readonly evidence: StatusMeta }) | null;
+  readonly pr:
+    | (AutomationLink & {
+        readonly evidence: StatusMeta;
+        /** Why the evidence is partial, when it is and the engine knows (D-ct), else `null`. */
+        readonly partialReason: string | null;
+      })
+    | null;
   readonly first: string;
   readonly last: string;
 }
@@ -156,6 +162,10 @@ const itemView = (item: AutomationItem): AutomationItemView => ({
           href: webUrl(item.pr.url),
           state: PR_STATES[item.pr.state],
           evidence: EVIDENCE[item.pr.evidence],
+          partialReason:
+            item.pr.evidence === "partial" && item.pr.partial_reason !== undefined
+              ? PARTIAL_EVIDENCE_REASONS[item.pr.partial_reason]
+              : null,
         },
   first: item.first_at,
   last: item.last_at,

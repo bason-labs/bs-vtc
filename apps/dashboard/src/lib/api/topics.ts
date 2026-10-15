@@ -29,7 +29,7 @@ const TASK_SCOPED: readonly RunTopicName[] = ["tasks", "graph", "status"];
 
 /**
  * The views that read the run's event log for wave-3 data (spine §5 reading 109) re-read it on
- * these topics: `gates` (G1/G2 requests, directions, unverified facts), `headless`
+ * these topics: `gates` (G1/G2 requests, directions, unverified facts, the G2 coverage loop), `headless`
  * (engine-launched runs), `level3` (preflight, checklist, auto-merge, Final Review steps),
  * `research` (facts) and `lookback`.
  */
@@ -75,6 +75,9 @@ const entityTopics = (event: VtcEvent): string[] => {
       return ["features", "level3"];
     case "headless":
       return ["headless", "status", "graph", ...task];
+    case "design":
+      // A coverage check before G2 (H-13): the gates view shows the loop's status.
+      return ["gates"];
     case "fact":
       return event.type === "fact.waived" ? ["research", "gates"] : ["research"];
     case "research":
@@ -85,6 +88,15 @@ const entityTopics = (event: VtcEvent): string[] => {
     case "automation":
       return ["automation"];
     case "role":
+      // A design role's submit can end a coverage fix round (H-13): the gates view re-reads.
+      return [
+        ...task,
+        "graph",
+        ...(event.type === "role.submitted" &&
+        (event.role === "architect" || event.role === "designer")
+          ? ["gates"]
+          : []),
+      ];
     case "finding":
       return [...task, "graph"];
     case "escalation":

@@ -9,7 +9,8 @@ import {
 } from "@vtc/shared";
 
 /**
- * Difficulty-based model routing on the task view (H-9, D-cm; spine §5 reading 218(6)): the tier
+ * Difficulty-based model routing on the task view (H-9, D-cm, with D-cu's reviewer starts and D-cv's
+ * Low-start escalation; spine §5 readings 218(6), 241, 242): the tier
  * each role run started on and why (`RoleRunSummary.tier`, `tier_reason`, `tier_clamped`), and
  * the Planner's reason-coded tier hint for the task (`Task.tier_hint`). A run logged before 5.4.0
  * has no tier, and nothing is shown for it.
@@ -22,9 +23,9 @@ export const TIER_LABELS: Readonly<Record<ModelTier, string>> = {
 
 export const TIER_REASON_LABELS: Readonly<Record<TierReason, string>> = {
   role: "the role's own tier (role.yaml)",
-  rule: "the routing table, from the task's size and risk",
+  rule: "the routing table, from the task's size and risk (security verify and the cross-family reviewer: one tier up on a high-risk task)",
   planner_hint: "the Planner's tier hint for this task",
-  escalation: "one tier up after 2 failed rounds",
+  escalation: "one tier up: after every failed round from a Low start, after every 2 otherwise",
   budget_drop: "one tier down: reviewers reached 70% of the budget or their share",
 };
 
