@@ -339,6 +339,12 @@ to `noveltyReportPath` and calls `recordDesignChoice` when the human picks at G2
 
 ## Not built yet (tracked follow-up increments)
 
+- **Before/after flow video.** `BeforeAfterRequest` has no flow steps, so the `flow_video` of
+  each side (`capture/before-after.ts`) records the first rendered screen loading and then idle
+  for `flowSeconds`, with no interaction; a real changed-flow recording needs flow steps in the
+  contract. On macOS the app's port is checked free before the app starts, but nothing ties the
+  listening socket to the app (the host loopback is shared), so a server bound to that port in
+  between, beside an app that falls back to another port, would be captured instead.
 - **Registry-only install network and sandbox denials.** The install phase gets the full
   network (no host-level registry filter exists in `sandbox-exec` or `bwrap`), and a gate that
   fails because the sandbox refused something (`EPERM`, "Operation not permitted") is classified

@@ -5,6 +5,9 @@
  */
 export {
   BEFORE_AFTER_FILE_LIMIT_REASON,
+  BEFORE_AFTER_LOGS_KEPT,
+  BEFORE_AFTER_NO_UNSANDBOXED,
+  BEFORE_AFTER_OTHER_REPO,
   BEFORE_AFTER_STATE_DIR,
   buildGatesOf,
   captureBeforeAfter,
@@ -16,6 +19,7 @@ export {
   createEvidenceRecorder,
   EVIDENCE_NO_BROWSER,
   EVIDENCE_NO_SANDBOX,
+  EVIDENCE_PTRACE_REFUSAL,
   sandboxedEvidenceRunner,
   type EvidenceRecorderDeps,
   type EvidenceRecorderOptions,

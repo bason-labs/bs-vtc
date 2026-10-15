@@ -5,7 +5,15 @@
  * fake sandbox, and a fake Playwright module that fetches each page from the fake app server. No
  * browser, no network beyond the loopback, nothing downloaded.
  */
-import { existsSync, mkdirSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
+import {
+  existsSync,
+  mkdirSync,
+  readdirSync,
+  readFileSync,
+  symlinkSync,
+  utimesSync,
+  writeFileSync,
+} from "node:fs";
 import { createServer as createHttpServer } from "node:http";
 import { createServer, type AddressInfo } from "node:net";
 import { join } from "node:path";
@@ -20,14 +28,24 @@ import {
 import { describe, expect, it } from "vitest";
 import {
   BEFORE_AFTER_FILE_LIMIT_REASON,
+  BEFORE_AFTER_LOGS_KEPT,
+  BEFORE_AFTER_NO_UNSANDBOXED,
+  BEFORE_AFTER_OTHER_REPO,
+  BEFORE_AFTER_STATE_DIR,
+  buildGatesOf,
+  captureBeforeAfter,
   createEvidenceRecorder,
+  EVIDENCE_PTRACE_REFUSAL,
   sandboxedEvidenceRunner,
+  type BeforeAfterContext,
+  type CaptureTarget,
+  type EvidenceRecorderDeps,
   type EvidenceRecorderOptions,
 } from "../../../src/gates/capture/index.js";
+import { parseGatesConfig } from "../../../src/gates/config.js";
 import { GateCommandJail } from "../../../src/gates/sandbox.js";
-import { LINUX_PTRACE_REFUSAL } from "../../../src/gates/visual/index.js";
 import { addToAllowlist } from "../../../src/gates/index.js";
-import { CHECKOUTS_DIR } from "../../../src/git/index.js";
+import { CHECKOUTS_DIR, createGitOps } from "../../../src/git/index.js";
 import { git, initRepo, tempDir, writeFile } from "../../helpers/repo.js";
 import { commitAll, config, NODE, recordingSandbox } from "../fixture.js";
 
@@ -110,10 +128,14 @@ writeFileSync("dist/index.html", page);
 `,
   // Serves dist/index.html (and the path it was asked for); "crash" in src/mode.txt exits at once.
   "tools/serve.mjs": `import { createServer } from "node:http";
-import { readFileSync } from "node:fs";
+import { existsSync, readFileSync } from "node:fs";
+import { join } from "node:path";
 const mode = readFileSync("src/mode.txt", "utf8").trim();
 if (mode === "crash") process.exit(3);
-const body = readFileSync("dist/index.html", "utf8");
+// "snoop": project code looking for the evidence runner's input (its denied values) beside it.
+const input = join(process.env.TMPDIR ?? "/nowhere", "input.json");
+const snoop = mode === "snoop" ? (existsSync(input) ? " input visible" : " input gone") : "";
+const body = readFileSync("dist/index.html", "utf8") + snoop;
 createServer((req, res) => {
   res.writeHead(200, { "content-type": "text/html" });
   // "once": answers the readiness check and one page, then stops mid-capture.
@@ -122,6 +144,21 @@ createServer((req, res) => {
 }).listen(Number(process.argv[2]), "127.0.0.1");
 `,
   "tools/never.mjs": `process.exit(9);\n`,
+  // A build gate that looks for what an earlier command of the capture left: another command's
+  // temp directory with a runner's files in it (7), or the other side's HOME (8).
+  "tools/snoop.mjs": `import { existsSync, readdirSync, writeFileSync } from "node:fs";
+import { dirname, join } from "node:path";
+const tmp = process.env.TMPDIR;
+const root = dirname(tmp);
+for (const name of readdirSync(root)) {
+  const dir = join(root, name);
+  if (!name.startsWith("tmp-") || dir === tmp) continue;
+  if (existsSync(join(dir, "input.json")) || existsSync(join(dir, "out"))) process.exit(7);
+}
+const mark = join(process.env.HOME, "side-was-here");
+if (existsSync(mark)) process.exit(8);
+writeFileSync(mark, "x");
+`,
 };
 
 const SCREENS = `version: 1
@@ -174,6 +211,9 @@ interface Setup {
   head?: { page?: string; mode?: string };
   allow?: readonly (readonly string[])[];
   sandbox?: GateSandbox | null;
+  /** `null`: the recorder gets no GitOps. */
+  git?: null;
+  deps?: Partial<EvidenceRecorderDeps>;
   options?: Partial<EvidenceRecorderOptions>;
 }
 
@@ -212,7 +252,13 @@ const setup = async (s: Setup = {}) => {
   const recording = recordingSandbox();
   const sandbox = s.sandbox === undefined ? recording.sandbox : s.sandbox;
   const recorder = createEvidenceRecorder(
-    { vtcHome: home, repoRoot: repo, ...(sandbox === null ? {} : { sandbox }) },
+    {
+      vtcHome: home,
+      repoRoot: repo,
+      ...(s.git === null ? {} : { git: createGitOps({ repoRoot: repo }) }),
+      ...(sandbox === null ? {} : { sandbox }),
+      ...s.deps,
+    },
     {
       node: NODE,
       env: { PATH: process.env.PATH ?? "" },
@@ -538,6 +584,153 @@ describe("UI before/after evidence (D-ct, reading 223)", () => {
       "the new page at /app/invoices?state=empty&theme=light",
     );
   });
+
+  it("keeps the runner's input (its denied values) from the app server, and each side from the other", async () => {
+    const snoop: Gate = { id: "snoop", layer: "L0", command: [NODE, "tools/snoop.mjs"] };
+    const h = await setup({
+      gates: [install, build, snoop],
+      base: { mode: "snoop" },
+      head: { mode: "snoop" },
+    });
+    const result = await h.capture({ screens: ["home"], denyText: ["hunter2-secret"] });
+    // The head's build gates ran after the base's runner: they found nothing of it, nor its HOME.
+    expect(result.partial).toBeUndefined();
+    expect(read(h.outDir, "01-ui1-w1280-light-before.png")).toContain("input gone");
+    expect(read(h.outDir, "02-ui1-w1280-light-after.png")).toContain("input gone");
+    // Each side ran in a jail of its own.
+    const homes = new Set(h.specs.map((s) => s.home));
+    expect(homes.size).toBe(2);
+  });
+
+  it("builds nothing without the injected GitOps, or for another repository", async () => {
+    const none = await setup({ git: null });
+    const r = await none.capture();
+    expect(r.partial?.reason).toBe("capture_failed");
+    expect(none.argvs).toEqual([]);
+    const h = await setup();
+    const other = initRepo({ "README.md": "another project\n" });
+    const elsewhere = await h.capture({ repoRoot: other });
+    expect(elsewhere).toEqual({
+      files: [],
+      failed: [],
+      partial: { reason: "capture_failed", detail: BEFORE_AFTER_OTHER_REPO },
+    });
+    expect(h.argvs).toEqual([]);
+  });
+
+  it("never builds unconfined, even with gates.allow_unsandboxed", async () => {
+    const h = await setup({ sandbox: null, deps: { allowUnsandboxed: true } });
+    const result = await h.capture();
+    expect(result).toEqual({
+      files: [],
+      failed: [],
+      partial: { reason: "capture_failed", detail: BEFORE_AFTER_NO_UNSANDBOXED },
+    });
+    expect(existsSync(join(h.repo, CHECKOUTS_DIR))).toBe(false);
+    expect(existsSync(join(h.repo, BEFORE_AFTER_STATE_DIR))).toBe(false);
+  });
+
+  it("builds nothing on a Linux host whose ptrace policy is open, and says so for evidence", async () => {
+    const h = await setup({ options: { platform: "linux", ptraceScope: () => "0" } });
+    const result = await h.capture();
+    expect(result.partial).toEqual({ reason: "capture_failed", detail: EVIDENCE_PTRACE_REFUSAL });
+    expect(result.partial?.detail).not.toContain("visual step");
+    expect(h.argvs).toEqual([]);
+  });
+
+  it("keeps each capture's build logs apart, made without links, and only the newest", async () => {
+    const h = await setup();
+    const logs = join(h.repo, BEFORE_AFTER_STATE_DIR);
+    mkdirSync(logs, { recursive: true });
+    for (let i = 0; i < BEFORE_AFTER_LOGS_KEPT + 2; i += 1) {
+      const old = join(logs, `old-${String(i)}`);
+      mkdirSync(old);
+      utimesSync(old, new Date(2020, 0, 1 + i), new Date(2020, 0, 1 + i));
+    }
+    await h.capture({ screens: ["home"] });
+    await h.capture({ screens: ["home"] });
+    const kept = readdirSync(logs);
+    expect(kept).toHaveLength(BEFORE_AFTER_LOGS_KEPT);
+    const mine = kept.filter((n) => n.startsWith(`${h.base.slice(0, 12)}-${h.head.slice(0, 12)}-`));
+    expect(mine).toHaveLength(2);
+    // A link in the way: nothing is built.
+    const linked = await setup();
+    mkdirSync(join(linked.repo, ".vtc/state/gates"), { recursive: true });
+    symlinkSync(tempDir("vtc-ba-elsewhere-"), join(linked.repo, BEFORE_AFTER_STATE_DIR));
+    const refused = await linked.capture();
+    expect(refused.partial?.reason).toBe("capture_failed");
+    expect(linked.argvs).toEqual([]);
+  });
+});
+
+describe("before/after building blocks", () => {
+  it("leaves pinned scanners out of the build gates: they check, they do not build", () => {
+    const parsed = parseGatesConfig(
+      config([
+        install,
+        build,
+        { id: "secrets", layer: "L0", command: ["gitleaks", "detect"] },
+        { id: "lint", layer: "L0", command: [NODE, "lint.mjs", "{changed}"] },
+      ]),
+    );
+    expect(buildGatesOf(parsed).map((g) => g.id)).toEqual(["install", "build"]);
+  });
+
+  it("gives the base at most half of the PR's bytes, and the head the rest", async () => {
+    const repo = tempDir("vtc-ba-fake-repo-");
+    mkdirSync(join(repo, "co"));
+    const home = tempDir("vtc-ba-fake-home-");
+    const app = { command: [NODE, "serve.mjs"], url: "http://127.0.0.1:4173" };
+    addToAllowlist(home, repo, [[NODE]], new Date("2026-10-13T08:00:00.000Z"));
+    const files: Record<string, string> = {
+      // Only a check gate: nothing is built.
+      ".vtc/gates.yml": config([tests], { visual: { widths: [1280], themes: ["light"], app } }),
+      ".vtc/design/screens.yaml": SCREENS,
+    };
+    const budgets: number[] = [];
+    const ctx: BeforeAfterContext = {
+      vtcHome: home,
+      repoRoot: repo,
+      env: {},
+      sandbox: () => recordingSandbox().sandbox,
+      git: {
+        readFileAtCommit: (_sha, path) => {
+          const text = files[path];
+          return Promise.resolve(text === undefined ? undefined : new TextEncoder().encode(text));
+        },
+        createCleanCheckout: () => Promise.resolve("co"),
+        removeCheckout: () => Promise.resolve(),
+      },
+      hostProblem: () => null,
+      browserProblem: () => Promise.resolve(null),
+      capture: (request, target: CaptureTarget) => {
+        const budget = target.budgetBytes ?? 0;
+        budgets.push(budget);
+        // Each side takes all it is given.
+        return Promise.resolve({
+          files: request.shots
+            .slice(0, 1)
+            .map((s) => ({ name: s.name, kind: s.kind, bytes: budget })),
+          failed: [],
+          app: "served",
+        });
+      },
+    };
+    const result = await captureBeforeAfter(ctx, {
+      repoRoot: repo,
+      base: "a".repeat(40),
+      head: "b".repeat(40),
+      outDir: join(repo, "out"),
+      screens: ["home"],
+      redactSelectors: [],
+      denyText: [],
+    });
+    expect(budgets).toEqual([
+      Math.floor(EVIDENCE_LIMITS.maxBytesPerPr / 2),
+      EVIDENCE_LIMITS.maxBytesPerPr - Math.floor(EVIDENCE_LIMITS.maxBytesPerPr / 2),
+    ]);
+    expect(result.files.map((f) => f.kind)).toEqual(["ui_before", "ui_after"]);
+  });
 });
 
 describe("the evidence runner with an app server on Linux (reading 164)", () => {
@@ -577,7 +770,7 @@ describe("the evidence runner with an app server on Linux (reading 164)", () => 
         env: {},
         timeoutMs: 1000,
       });
-      expect(outcome).toEqual({ ok: false, reason: LINUX_PTRACE_REFUSAL });
+      expect(outcome).toEqual({ ok: false, reason: EVIDENCE_PTRACE_REFUSAL });
       expect(jail.ran).toBe(false);
     } finally {
       jail.dispose();

@@ -1091,6 +1091,23 @@ export class GateCommandJail {
     return { ...result, tempDir, network: wrapped.network };
   }
 
+  /**
+   * Removes one command's temp directory (`JailedResult.tempDir`) once its caller has read back
+   * what it needs, so no later command of the run can read it (never throws). Anything else is
+   * left alone.
+   */
+  removeTempDir(tempDir: string): void {
+    if (this.root === null || dirname(tempDir) !== this.root) return;
+    if (!/^tmp-\d+$/.test(basename(tempDir))) return;
+    try {
+      if (lstatSync(tempDir).isSymbolicLink()) return;
+      makeWritable(tempDir);
+      rmSync(tempDir, { recursive: true, force: true });
+    } catch {
+      // best effort: dispose() removes the whole run
+    }
+  }
+
   /** Removes the run's home and temp directories (never throws). */
   dispose(): void {
     if (this.root === null) return;

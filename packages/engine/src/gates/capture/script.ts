@@ -40,7 +40,12 @@
  *   does not start, does not answer in time or stops during the capture fails the whole run
  *   (`app: "failed"`, no shot kept). Its output is discarded, so no reason carries project text.
  *   The run's key is read and deleted before the app starts, as in the visual runner, so the app
- *   cannot sign a result.
+ *   cannot sign a result; so is the input, whose `deny_text` holds the run's known secret values.
+ *   Known limit: on macOS the sandbox shares the host's loopback, so the free-port check before
+ *   the spawn and the app's bind are not atomic. A server another process binds to that port in
+ *   between, beside an app that falls back to another port instead of exiting (Vite without
+ *   `strictPort`), would answer the readiness and liveness probes; nothing ties the listening
+ *   socket to the child. Linux gives the sandbox a loopback of its own, where this cannot happen.
  *
  * The script writes only into its output directory, a video directory beside it and the result
  * file. It never throws past `main`: a failure of the whole run is the result's `error`.
@@ -59,7 +64,10 @@ if (!process.execArgv.includes("--disable-sigusr1")) {
 }
 const key = readFileSync(process.argv[4]);
 unlinkSync(process.argv[4]);
+// The input holds deny_text (the run's known secret values): kept in memory only, its file deleted
+// before Playwright is imported or the app server starts, so no project code can read it.
 const input = JSON.parse(readFileSync(process.argv[2], "utf8"));
+unlinkSync(process.argv[2]);
 const resultFile = process.argv[3];
 const out = { v: 1, browser: null, shots: [], files: {} };
 const save = () => {
