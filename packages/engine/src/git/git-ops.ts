@@ -66,10 +66,10 @@ export const createGitOps: CreateGitOps = ({ repoRoot }): GitOps => ({
   readFileAtCommit: async (commit: GitSha, path: RelPath) => {
     assertSha(commit);
     const spec = `${commit}:${path}`;
-    // `-t` fails for a missing object, so it also answers "does it exist" (one process less)
-    const type = await runGit(repoRoot, ["cat-file", "-t", spec], { allowFailure: true });
-    if (type.code !== 0 || type.stdout.toString("utf8").trim() !== "blob") return undefined;
-    return new Uint8Array((await runGit(repoRoot, ["cat-file", "blob", spec])).stdout);
+    // one process: `cat-file blob` fails for a missing path and for a tree alike (D-cz: the engine
+    // spawns git hundreds of times per run, and each spawn is the cost under load)
+    const blob = await runGit(repoRoot, ["cat-file", "blob", spec], { allowFailure: true });
+    return blob.code === 0 ? new Uint8Array(blob.stdout) : undefined;
   },
   createCleanCheckout: (commit: GitSha) => {
     assertSha(commit);
@@ -90,10 +90,13 @@ export const createGitOps: CreateGitOps = ({ repoRoot }): GitOps => ({
 
 const removeCheckoutNow = async (repoRoot: string, checkout: string): Promise<void> => {
   {
-    await runGit(repoRoot, ["worktree", "remove", "--force", checkout], { allowFailure: true });
-    if (existsSync(join(repoRoot, checkout))) {
-      rmSync(join(repoRoot, checkout), { recursive: true, force: true });
-    }
-    await runGit(repoRoot, ["worktree", "prune"], { allowFailure: true });
+    const removed = await runGit(repoRoot, ["worktree", "remove", "--force", checkout], {
+      allowFailure: true,
+    });
+    const left = existsSync(join(repoRoot, checkout));
+    if (left) rmSync(join(repoRoot, checkout), { recursive: true, force: true });
+    // a clean removal leaves no registration to prune (D-cz: one process less per checkout)
+    if (removed.code !== 0 || left)
+      await runGit(repoRoot, ["worktree", "prune"], { allowFailure: true });
   }
 };

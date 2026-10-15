@@ -189,7 +189,7 @@ export {
   replayTrialActionIds,
   withoutReplayTrialEvents,
 } from "./replay-view.js";
-/** Difficulty-based routing (H-9, D-cm; spine §5 reading 218). */
+/** Difficulty-based routing (H-9, D-cm, D-cu, D-cv; spine §5 readings 218, 241 and 242). */
 export {
   routeTier,
   ruleTier,
@@ -199,3 +199,9 @@ export {
   type TierChange,
   type TierRoute,
 } from "./routing.js";
+/** The G2 coverage loop (H-13; spine §5 reading 237). */
+export { coverageGapsFor, coverageProblems, runCoverageCheck } from "./design-loop.js";
+/** The model id fallback (D-cx; spine §5 reading 244): the refusals `vtc doctor` reads. */
+export { MODEL_REFUSAL_TTL_MS, modelRefusalsPath, readModelRefusals } from "./model-fallback.js";
+/** H-12 (spine §5 reading 236): the prices a host's runs are counted with. */
+export { hostPrices, pricedCost } from "./submit.js";

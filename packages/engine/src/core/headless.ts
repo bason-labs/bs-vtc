@@ -30,15 +30,8 @@ import {
 } from "@vtc/shared";
 import { budgetState } from "./budget.js";
 import { dispatchWriteScope } from "./dispatch-scope.js";
-import {
-  dispatchPrepared,
-  pendingSteps,
-  refuseInSession,
-  stepRoute,
-  type StepSpec,
-} from "./dispatch.js";
+import { dispatchPrepared, pendingSteps, refuseInSession, type StepSpec } from "./dispatch.js";
 import { protectedFiles } from "./jobs.js";
-import { resolveModel } from "./roles.js";
 import type { Kernel, RunHandle } from "./kernel.js";
 import { deferForUsage, limitWait, stillLimited } from "./limits.js";
 import { inFlight } from "./queries.js";
@@ -54,7 +47,8 @@ import {
 import { headlessPlatformRefusal, roleSandboxProblem, roleSandboxRequest } from "./sandbox.js";
 import { hostWebRouteFor } from "./host-web.js";
 import { PARSE_FAILURE_PREFIX } from "./state.js";
-import { handleSubmit } from "./submit.js";
+import { closeRefusedRun, handleSubmit } from "./submit.js";
+import { recordModelRefusal, refusalDetail } from "./model-fallback.js";
 
 const NO_CAPABILITIES: Pick<HostCapabilities, "subagents" | "headless"> = {
   subagents: false,
@@ -69,55 +63,13 @@ export const capabilitiesOf = (
   k.deps.adapters[host]?.capabilities ?? NO_CAPABILITIES;
 
 /**
- * The model id a step runs on `host` (`resolveModel`), or `undefined`: the host session's model,
- * which no price table can price.
- */
-const stepModel = (
-  k: Kernel,
-  step: Pick<StepSpec, "role" | "mode" | "tier">,
-  host: HostId,
-): string | undefined => {
-  const contract = k.deps.roles.get(step.role);
-  return contract === undefined
-    ? undefined
-    : resolveModel(contract, host, k.config(), {
-        ...(step.mode === undefined ? {} : { mode: step.mode }),
-        ...(step.tier === undefined ? {} : { tier: step.tier }),
-      }).model;
-};
-
-/**
- * Why a run on `host` cannot be budget-checked, or `null` (§11, H-1; spine §5 reading 152): a
- * host that cannot cap its own spend (`HostCapabilities.budgetCap` false: Codex, which reports no
- * cost either) is priced from the user's price table, so its model needs an id and a price there.
- * A model missing from the price table is an error, never $0.
- */
-export const unpricedRun = (
-  k: Kernel,
-  step: Pick<StepSpec, "role" | "mode" | "tier">,
-  host: HostId,
-): string | null => {
-  const adapter = k.deps.adapters[host];
-  if (adapter === undefined || adapter.capabilities.budgetCap) return null;
-  const model = stepModel(k, step, host);
-  if (model === undefined)
-    return `${step.role} has no ${host} model id (set hosts.models.${host} in .vtc/project.yaml), so its run cannot be priced and budget-checked (§11)`;
-  if (k.deps.prices?.[model] === undefined)
-    return `no list price for ${host} model ${model} in ~/.vtc/config.yaml prices: ${host} reports no cost, so the engine prices its tokens to budget-check the run (§11: a model missing from the price table is an error)`;
-  return null;
-};
-
-/** Whether a failed budget check was {@link unpricedRun}'s (the fix is a price, not a raise). */
-const unpricedDetail = (detail: string): boolean =>
-  detail.includes("cannot be priced") || detail.includes("no list price");
-
-/**
  * The checks before an engine-launched start or resume (AD-25 rule 3), in order: the run is not
  * paused; the config files still give the run's `pipeline_config_hash`; the host's five-hour
  * window is not used up; the host's own sign-in check (`HostAdapter.authStatus`, when the adapter
  * has one) says logged in (an API-key login is allowed, and who pays is kept on the host's usage
- * snapshot for the API-key billing warning: D-bq, spine §5 reading 171); the budget: the run can be priced
- * ({@link unpricedRun}, when the step names its role) and the task (or the run) has budget left.
+ * snapshot for the API-key billing warning: D-bq, spine §5 reading 171); the budget: the task (or the
+ * run) has budget left. A model with no known price never fails it (H-12, spine §5 reading 236,
+ * replacing reading 152's refusal): its run is counted at its host's price ceiling once it ends.
  */
 export const headlessPreflight = async (
   k: Kernel,
@@ -160,20 +112,6 @@ export const headlessPreflight = async (
     // `UsageSnapshot.billing`, so Flow Studio shows `API_KEY_BILLING_WARNING`
     k.recordBilling(host, status.billing ?? null);
   }
-  // priced on the tier the step will be dispatched on (`stepRoute`: a phase role's is clamped too)
-  const unpriced =
-    step.role === undefined
-      ? null
-      : unpricedRun(
-          k,
-          {
-            ...step,
-            role: step.role,
-            tier: stepRoute(k, h, { ...step, role: step.role }, host).tier,
-          },
-          host,
-        );
-  if (unpriced !== null) return fail("budget", unpriced);
   const task = step.task === undefined ? undefined : state.tasks.get(step.task);
   if (task !== undefined && budgetState(task.spent_usd, task.budget_usd) === "exhausted")
     return fail(
@@ -275,10 +213,7 @@ const preflightFailed = (
         type: "run.paused",
         actor: "engine",
         data: {
-          reason: (unpricedDetail(detail)
-            ? `${detail}; then vtc resume`
-            : `${detail}: raise the budget, then vtc resume`
-          ).slice(0, 300),
+          reason: `${detail}: raise the budget, then vtc resume`.slice(0, 300),
         },
       });
       return;
@@ -468,6 +403,18 @@ const finishHeadless = async (
       duration_ms: Math.max(0, k.now().getTime() - startedAt),
     },
   });
+  // D-cx (reading 244): the host refused the run's model before any work; `headless.ended` closed
+  // it as stopped, so the step runs once more on the host default
+  if (run.modelRefused === true && run.closedSeq === h.state.events.at(-1)?.seq) {
+    recordModelRefusal(
+      k,
+      run.host,
+      run.model,
+      outcome.kind === "error" ? refusalDetail(outcome.message) : undefined,
+    );
+    await closeRefusedRun(k, h, run, shapes);
+    return;
+  }
   if (run.status !== "in_flight") return; // superseded (a resume) while it ran
   // killed by the engine's shutdown: not the role's failure; the run stays in flight, as after a
   // crash, and the next `vtc resume` supersedes it

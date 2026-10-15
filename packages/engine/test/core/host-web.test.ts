@@ -5,16 +5,19 @@
  * (`HostCapabilities.safeHostWeb`); else on the Lead's host without host web search, with the
  * engine's own fetchers, and the run shows `HOST_WEB_OFF_NOTICE` in `NextResult.notices` once.
  */
-import { describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it } from "vitest";
 import { HOST_WEB_OFF_NOTICE, type HostOutcome } from "@vtc/shared";
 import type { CallContext } from "../../src/core/index.js";
-import { writeFile } from "../helpers/repo.js";
+import { cleanupDirs, writeFile } from "../helpers/repo.js";
 import {
   CLAUDE,
   createHarness,
   type Harness,
   type HeadlessScript,
 } from "../helpers/engine-harness.js";
+
+// the temp repos and VTC homes go after each test
+afterEach(cleanupDirs);
 
 const CODEX: CallContext = { host: "codex" };
 

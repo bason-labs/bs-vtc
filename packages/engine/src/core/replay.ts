@@ -76,6 +76,7 @@ import {
   type GateRunRequestInput,
   type GateVerdict,
   type HostId,
+  type ModelTier,
   type ReplayGrader,
   type ReplayTrialRef,
   type RoleResult,
@@ -131,8 +132,10 @@ export interface ReplayStepRef extends TrialRef {
   readonly base: string;
   /** The recorded task's protected tests (`LookbackReplayTrial.protectedPaths`). */
   readonly protectedPaths?: readonly string[];
-  /** The recorded dispatch's tier (`LookbackReplayTrial.tier`): the trial runs on it. */
+  /** The recorded dispatch's tier (`LookbackReplayTrial.tier`): a prompt trial runs on it. */
   readonly tier?: TierRoute;
+  /** A tier replay's arm tier (`LookbackReplayTrial.armTier`, D-cn): the trial runs on it. */
+  readonly armTier?: ModelTier;
 }
 
 /** The trial step RETRO wants now (a `StepSpec` the dispatcher hands out). */
@@ -233,6 +236,7 @@ const TrialShape = z.looseObject({
   tier: z
     .strictObject({ tier: ModelTierSchema, reason: TierReasonSchema, clamped: z.boolean() })
     .optional(),
+  armTier: ModelTierSchema.optional(),
 });
 const ReplayPlanShape = z.strictObject({
   v: z.literal(1),
@@ -712,7 +716,14 @@ export const replayTrialRef = (k: Kernel, run: string, t: TrialRef): ReplayTrial
   const trial = replay?.trials[t.n];
   return replay === undefined || trial === undefined
     ? undefined
-    : { proposal: replay.proposal, task: trial.task, arm: trial.arm, trial: trial.trial };
+    : {
+        proposal: replay.proposal,
+        task: trial.task,
+        arm: trial.arm,
+        trial: trial.trial,
+        // D-cn: a tier replay's arm runs on its tier, which the dispatch says (reading 247(6))
+        ...(trial.armTier === undefined ? {} : { tier: trial.armTier }),
+      };
 };
 
 /** Drops the checkout of the trial at `t` that `action` ran (when one was recorded). */
@@ -1182,6 +1193,7 @@ export const replaySteps = (k: Kernel, h: RunHandle): ReplayStep[] => {
             base: trial.base,
             ...(trial.protectedPaths === undefined ? {} : { protectedPaths: trial.protectedPaths }),
             ...(trial.tier === undefined ? {} : { tier: trial.tier }),
+            ...(trial.armTier === undefined ? {} : { armTier: trial.armTier }),
           },
         },
       ];

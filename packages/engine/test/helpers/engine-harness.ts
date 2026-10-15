@@ -5,6 +5,7 @@
  */
 import { createHash } from "node:crypto";
 import { join } from "node:path";
+import { afterEach } from "vitest";
 import {
   commandShapes,
   GateReportSchema,
@@ -23,6 +24,7 @@ import {
   type HostId,
   type HostOutcome,
   type ModelPriceInput,
+  type PriceTable,
   type RoutingTable,
   type BaseRun,
   type RemoteInfo,
@@ -363,6 +365,8 @@ export interface FakeAdapterOptions {
   readonly pluginLoad?: ((request: SpawnRoleRequest) => PluginLoadProof) | null;
   /** The sandbox enforces `SandboxProfileRequest.readDeny` (reading 178). */
   readonly readDeny?: boolean;
+  /** `HostAdapter.defaultPrices` (H-12); absent: the adapter ships no price table. */
+  readonly defaultPrices?: PriceTable;
 }
 
 const outcomeOf = async (
@@ -445,6 +449,7 @@ const fakeAdapter = (
       ...options.capabilities,
     },
     install: () => Promise.reject(new Error("not in tests")),
+    ...(options.defaultPrices === undefined ? {} : { defaultPrices: options.defaultPrices }),
     ...(options.subagentName === undefined ? {} : { subagentName: options.subagentName }),
     spawnRole: (request) => {
       record.spawned.push(request.role);
@@ -594,6 +599,23 @@ export const DEFAULT_GATES_YML = {
   ],
 };
 
+/**
+ * The teardowns of the harnesses whose test has not released them yet (D-cz; spine §5 reading
+ * 246). A test that fails or times out never reaches its `release()`, and vitest cannot stop its
+ * body: its engine would keep running jobs (gates, merges, git) and the abandoned body would keep
+ * driving it, under the next tests of the same worker, which then slow down and time out in turn.
+ * After each test every harness still live is shut down (`Engine.shutdown`: nothing new starts,
+ * the engine-launched runs are killed) and its lock released, so an abandoned engine stops instead
+ * of loading the worker.
+ */
+const live = new Set<() => Promise<void>>();
+
+afterEach(async () => {
+  const pending = [...live];
+  live.clear();
+  await Promise.allSettled(pending.map((teardown) => teardown()));
+});
+
 export const createHarness = (options: HarnessOptions = {}): Harness => {
   const files: Record<string, string> = {
     "README.md": "# app\n",
@@ -688,12 +710,21 @@ export const createHarness = (options: HarnessOptions = {}): Harness => {
           ),
         }),
   });
+  const engines: Engine[] = [Engine.open(deps())];
+  // never awaited to the end: a test may hold a job open on purpose (`gates.hold`), and the
+  // shutdown's abort, which stops all new work, happens before its first wait
+  const teardown = (): Promise<void> => {
+    for (const engine of engines) void engine.shutdown().catch(() => undefined);
+    lock.release();
+    return Promise.resolve();
+  };
+  live.add(teardown);
   Object.assign(h, {
     gates,
     prs,
     remote3,
     deps: deps(),
-    engine: Engine.open(deps()),
+    engine: engines[0],
     advance: (ms: number) => {
       h.clock = new Date(h.clock.getTime() + ms);
     },
@@ -701,9 +732,12 @@ export const createHarness = (options: HarnessOptions = {}): Harness => {
       lock.release();
       // the old engine's lock is gone: it can no longer append (AD-12)
       lock = acquireEngineLock(repo);
-      return Engine.open(deps());
+      const engine = Engine.open(deps());
+      engines.push(engine);
+      return engine;
     },
     release: async () => {
+      live.delete(teardown);
       await h.engine.settle();
       lock.release();
     },

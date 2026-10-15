@@ -17,6 +17,7 @@ import type {
   HostBilling,
   HostId,
   ModelPrice,
+  ModelTier,
   ProjectConfig,
   PromptVersionRef,
   PullRequestService,
@@ -81,9 +82,10 @@ export interface EngineCoreDeps {
    */
   readonly platform?: NodeJS.Platform;
   /**
-   * The user's price table (`~/.vtc/config.yaml` `prices`, §11; spine §5 reading 152): the engine
-   * prices a run's tokens from it when the host reported no cost, and an engine-launched run on a
-   * host that cannot cap its own spend (Codex) starts only when its model is priced here.
+   * The user's price overrides (`~/.vtc/config.yaml` `prices`, §11; H-12, spine §5 reading 236):
+   * over each host adapter's default table (`HostAdapter.defaultPrices`), model by model, the
+   * engine prices a run's tokens when the host reported no cost. A model priced nowhere never
+   * blocks a run: its cost is unknown and the budget counts it at the host's price ceiling.
    */
   readonly prices?: Readonly<Record<string, ModelPrice>>;
   /**
@@ -230,6 +232,13 @@ export interface LookbackReplayTrial {
    * dispatch logged before 5.4.0): the role's own tier.
    */
   readonly tier?: TierRoute;
+  /**
+   * The tier arm of a tier replay (D-cn; spine §5 reading 247(6); `ReplayTrialRef.tier`): the
+   * trial runs on this tier, not its recorded one, with the same prompt on both arms. An exception
+   * to reading 218(7) for routing replays only (`proposal` a `routingReplayId`); the trial's
+   * `role.dispatched.replay` and its ledger rows carry it. Absent: a prompt replay.
+   */
+  readonly armTier?: ModelTier;
 }
 
 /** The replay of one proposal: its trials, run one at a time in order. */
@@ -311,6 +320,12 @@ export type RoutingLookback = (input: {
   ) => string | undefined;
   /** The VTC home whose recorded AI tiebreaks let an `ai_tiebreak` attribution count. */
   readonly vtcHome: string;
+  /**
+   * What is left of this RETRO's trial cap (`lookbackPaceFor(...).maxTrialsPerRetro`, D-cq) after
+   * the prompt replays it launches (D-cn; spine §5 reading 247(6)): the tier replays a routing
+   * change may plan. 0 while the weekly window or the budget holds the replays back.
+   */
+  readonly trialBudget?: number;
 }) => Promise<readonly RoutingProposalCell[]>;
 
 /** An `automation.skipped` draft, the only event `LookbackRetro.replays` may hand core to log. */

@@ -21,6 +21,7 @@ import {
   engineWindowsPipe,
   FetcherIdSchema,
   HOST_IDS,
+  lookbackPaceFor,
   remainingPct,
   researchScopeFor,
   routingConfigSubject,
@@ -34,6 +35,7 @@ import {
   type RunningDaemon,
   type RunningSnapshot,
   type ServeSnapshot,
+  type UserConfig,
 } from "@vtc/shared";
 import {
   compiledRoleContracts,
@@ -55,6 +57,7 @@ import {
   takeEngineLock,
   writeEngineDiscovery,
   type AutomationFact,
+  type LookbackReplay,
   type LookbackRetro,
   type PluginCatalog,
   type RoutingLookback,
@@ -262,6 +265,24 @@ export const lookbackWindow = (
 };
 
 /**
+ * What is left of a RETRO's trial cap for the routing step's tier replays (D-cn; spine §5 reading
+ * 247(6)): the pace's `maxTrialsPerRetro` (`lookbackPaceFor`, D-cq) less the trials of the prompt
+ * replays the RETRO launches; 0 while a limit (the weekly window, the budget) holds them back.
+ */
+export const routingTrialBudget = (
+  user: UserConfig["lookback"],
+  weeklyRemainingPct: number | null,
+  planned: { readonly replays: readonly LookbackReplay[]; readonly waitKind?: string },
+): number => {
+  if (planned.waitKind !== undefined) return 0;
+  const launched = planned.replays.reduce((n, r) => n + r.trials.length, 0);
+  return Math.max(
+    0,
+    lookbackPaceFor({ lookback: user }, weeklyRemainingPct).maxTrialsPerRetro - launched,
+  );
+};
+
+/**
  * The Lookback module wired into the engine (AD-21; spine §5 reading 144):
  * - core's prompt selector (`Engine.setPromptPins`, reading 135(d)): each dispatch of an agent the
  *   plugin compiled without its editable section runs the human's pin or the task's canary arm
@@ -426,6 +447,9 @@ export const wireLookback = (
       now,
       ...(newAgents === undefined ? {} : { roles: newAgents.roles() }),
     });
+  const lookbackConfig = liveLookbackConfig(deps.vtcHome, (message) => {
+    process.stderr.write(`vtc engine: lookback: ${message}\n`);
+  });
   // AD-21 rule 6 (reading 176): after the targets, RETRO replays every proposal not yet replayed
   const replays = createLookbackReplays({
     projectRoot: deps.repoRoot,
@@ -442,13 +466,13 @@ export const wireLookback = (
     now,
     graderOf: (replay) => replayGraderOf(engine, replay),
     // D-cq (reading 224): the user's replay pace, `~/.vtc/config.yaml` `lookback`
-    lookback: liveLookbackConfig(deps.vtcHome, (message) => {
-      process.stderr.write(`vtc engine: lookback: ${message}\n`);
-    }),
+    lookback: lookbackConfig,
   });
   // D-cn: the routing scorecard and proposals at RETRO, on the Lookback queue so RETRO never waits
-  // on them; a step that fails is told on stderr and the run goes on
-  const routingAtRetro = (run: string): void => {
+  // on them; a step that fails is told on stderr and the run goes on. It runs once the RETRO's
+  // prompt replays are planned, with what is left of the RETRO's trial cap for tier replays
+  // (reading 247(6))
+  const routingAtRetro = (run: string, trialBudget: number): void => {
     if (routing === undefined) return;
     enqueue(async () => {
       const cells = await routing.propose({
@@ -458,6 +482,7 @@ export const wireLookback = (
         now: now(),
         lockedShaFor,
         vtcHome: deps.vtcHome,
+        trialBudget,
       });
       const at = now().toISOString();
       if (cells.length > 0)
@@ -468,13 +493,17 @@ export const wireLookback = (
     });
   };
   engine.setLookbackRetro({
-    plan: async (state) => {
-      const plan = await retro().plan({ ...state, events: [...lookbackEvents(state)] });
-      routingAtRetro(state.id);
-      return plan;
-    },
+    plan: (state) => retro().plan({ ...state, events: [...lookbackEvents(state)] }),
     check: (target, root, state) => retro().check(target, root, state),
     ...replays,
+    replays: async (state) => {
+      const planned = await replays.replays(state);
+      routingAtRetro(
+        state.id,
+        routingTrialBudget(lookbackConfig(), weeklyRemaining(state), planned),
+      );
+      return planned;
+    },
   });
   const runEnd = async (run: string): Promise<void> => {
     const state = engine.states().find((s) => s.id === run);
@@ -632,7 +661,7 @@ export const runDaemon: RunDaemon = async (deps: EngineDeps, options) => {
       now,
       random: Math.random,
       remote: "origin",
-      // §11, reading 152: the user's price table budget-checks hosts that report no cost
+      // §11, H-12 (reading 236): the user's price overrides, over each adapter's default table
       ...(deps.prices === undefined ? {} : { prices: deps.prices }),
       // D-cg (reading 201): each Claude replay arm runs its own compiled plugin
       ...(deps.armPlugins === undefined ? {} : { armPlugins: deps.armPlugins }),

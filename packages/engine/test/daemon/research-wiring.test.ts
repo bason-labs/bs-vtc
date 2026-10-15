@@ -135,7 +135,12 @@ describe("the daemon wires the research module (reading 120)", () => {
     const design = await toDesign(h);
     const architect = only(design, "architect");
     const security = only(design, "security");
-    writeFile(workdir(architect), ".vtc/architecture/spine.md", "# Spine\n");
+    // the spine maps every REQ, so the coverage loop shows G2 at once (H-13)
+    writeFile(
+      workdir(architect),
+      ".vtc/architecture/spine.md",
+      "# Spine\n\n## Requirement map\n\n- REQ-1, REQ-2: the reset flow\n",
+    );
     await submitResult(h, architect, {
       exit: "done",
       artifacts: [{ type: "architecture", path: ".vtc/architecture/spine.md" }],

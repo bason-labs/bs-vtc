@@ -92,12 +92,24 @@ export const gitDirOf = (repoRoot: string): string | null => {
 const sha = (bytes: string | Uint8Array): string =>
   createHash("sha256").update(bytes).digest("hex");
 
+/**
+ * File hashes, cached on the file's inode, size, mtime and ctime (a write always moves ctime, which
+ * no user can set back): the fingerprint runs before every engine git call while a role is in
+ * flight, so an unchanged hook is not read and hashed again each time (D-cz).
+ */
+const hashCache = new Map<string, { readonly stamp: string; readonly hash: string }>();
+
 const fingerprintOf = (abs: string): string | undefined => {
   try {
     const stat = lstatSync(abs);
     if (stat.isSymbolicLink()) return `symlink:${readlinkSync(abs)}`;
     if (stat.isDirectory()) return undefined;
-    return sha(readFileSync(abs));
+    const stamp = `${String(stat.ino)}:${String(stat.size)}:${String(stat.mtimeMs)}:${String(stat.ctimeMs)}`;
+    const hit = hashCache.get(abs);
+    if (hit?.stamp === stamp) return hit.hash;
+    const hash = sha(readFileSync(abs));
+    hashCache.set(abs, { stamp, hash });
+    return hash;
   } catch {
     return undefined;
   }

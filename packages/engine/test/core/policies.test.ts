@@ -38,7 +38,7 @@ import { budgetState, raisedBudget, taskBudgetFor } from "../../src/core/budget.
 import { diffRiskHits, isTrivialDiff, reviewersFor } from "../../src/core/router.js";
 import { globMatch, globsOverlap } from "../../src/core/globs.js";
 import { acceptanceCriteriaOf, parseSpecItems } from "../../src/core/spec.js";
-import { ProjectConfigSchema } from "@vtc/shared";
+import { escalationSteps, ProjectConfigSchema } from "@vtc/shared";
 
 // ------------------------------------------------------------------ helpers
 
@@ -522,27 +522,44 @@ describe("loop controller (§6.3 step 9)", () => {
       steps: 1,
     });
   });
-  it("escalates a Low start again after 2 further failed rounds: Low → Mid → Top (reading 218(4))", () => {
-    expect(engineerDispatch("low", 3)).toEqual({
+  it("escalates a Low start one tier after every failed round: Low, Mid, Top (D-cv, reading 242)", () => {
+    expect(engineerDispatch("low", 1)).toEqual({
+      tier: "low",
+      freshSession: false,
+      escalated: false,
+      steps: 0,
+    });
+    expect(engineerDispatch("low", 2)).toEqual({
       tier: "mid",
       freshSession: true,
       escalated: true,
       steps: 1,
     });
-    expect(engineerDispatch("low", 4)).toMatchObject({ tier: "mid", freshSession: false });
-    expect(engineerDispatch("low", 5)).toEqual({
+    expect(engineerDispatch("low", 3)).toEqual({
       tier: "top",
       freshSession: true,
       escalated: true,
       steps: 2,
     });
-    // a start already at Top after the first step gains no further step and keeps its session
+    // past Top the tier holds, so the session does too
+    expect(engineerDispatch("low", 4)).toEqual({
+      tier: "top",
+      freshSession: false,
+      escalated: true,
+      steps: 3,
+    });
+    // a Mid start keeps the 2-round step and reaches Top once
     expect(engineerDispatch("mid", 5)).toEqual({
       tier: "top",
       freshSession: false,
       escalated: true,
       steps: 2,
     });
+  });
+  it("uses the shared escalationSteps for every start and round", () => {
+    for (const start of ["low", "mid", "top"] as const)
+      for (let round = 1; round <= 6; round++)
+        expect(engineerDispatch(start, round).steps).toBe(escalationSteps(start, round));
   });
   it("rule 9: a high finding still open after one fix round; rule 8: repeated test integrity", () => {
     const high = finding({ category: "security", severity: "high", round_first_seen: 1 });

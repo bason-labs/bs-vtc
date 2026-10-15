@@ -67,8 +67,10 @@ import {
   type CommittedGates,
 } from "./config.js";
 import { dispatchGuarded, inSessionRefusal, NO_LEAD_WAIT_REASON, phaseRoles } from "./dispatch.js";
+import { coverageRedoSince, isChangeSpecAnswer, runCoverageCheck } from "./design-loop.js";
 import {
   checkDirectionsNovelty,
+  designCoverage,
   designerRedispatchNote,
   designWorkSince,
   g2ApprovalProblem,
@@ -171,16 +173,9 @@ import {
   type RunState,
 } from "./state.js";
 import { ArtifactRefSchema } from "@vtc/shared";
-import { checkEngineerShare, handleSubmit } from "./submit.js";
+import { checkEngineerShare, handleSubmit, takeCommandShapes } from "./submit.js";
 import { escalationListView, openEscalations, statusView } from "./views.js";
 import { crashIncident } from "./vtc-stack.js";
-
-/**
- * How many times the engine itself rejects an automatic run's failed DESIGN check (AD-27 rule 2,
- * reading 198) before it leaves G2 for the human: bounded, so a design that keeps failing never
- * loops unattended.
- */
-const AUTO_GATE_REJECTS = 2;
 
 const sha256File = (path: string): string | undefined =>
   existsSync(path) ? createHash("sha256").update(readFileSync(path)).digest("hex") : undefined;
@@ -1202,12 +1197,17 @@ export class Engine implements Kernel {
     const roles = phaseRoles(this, handle, phase);
     if (["discover", "specify", "design"].includes(phase)) {
       const entered = phaseEnteredSeq(state, phase) ?? 0;
-      // after a G2 re-roll only the Designer had to run again (§9.1 step 5, reading 151)
+      // after a G2 re-roll only the Designer had to run again (§9.1 step 5, reading 151); in the
+      // coverage loop (H-13) the roles it re-dispatched hand in their work again
       const done = roles.every(({ role, mode }) => {
         const since = phase === "design" ? designWorkSince(handle, role, entered) : entered;
+        const redo = phase === "design" ? coverageRedoSince(handle, role) : 0;
         if (
-          lastSubmitted(state, { role, ...(mode === undefined ? {} : { mode }) }, since)?.exit !==
-          "done"
+          lastSubmitted(
+            state,
+            { role, ...(mode === undefined ? {} : { mode }) },
+            Math.max(since, redo),
+          )?.exit !== "done"
         )
           return false;
         // D-bt (reading 174): the Designer goes once more for too few directions
@@ -1221,7 +1221,17 @@ export class Engine implements Kernel {
       if (phase === "discover") this.phaseTo(handle, "specify");
       else if (phase === "specify")
         this.phaseTo(handle, state.run.track === "quick_fix" ? "design" : "g1");
-      else this.phaseTo(handle, "g2");
+      else {
+        // H-13 (reading 237): G2 shows only once the DESIGN check's coverage is complete
+        const loop = runCoverageCheck(
+          this,
+          handle,
+          () => designCoverage(this, handle),
+          roles.map((r) => r.role),
+        );
+        if (loop === "held") return false;
+        if (loop === "complete") this.phaseTo(handle, "g2");
+      }
       return true;
     }
     // RETRO: the lookback role where Lookback asks for it, then run.finished (retro.ts)
@@ -1677,9 +1687,9 @@ export class Engine implements Kernel {
    * final PR review. A G2 that lists unverified facts needs a human's waiver with a reason (AD-22
    * rule 4), so it stays for the human; with UI the category standard is taken (no human picks a
    * direction). Every other G2 rule still holds (reading 198): a failed DESIGN check is never
-   * approved; the engine rejects G2 with the check's problems as its note, so the Architect and
-   * Designer fix it, at most `AUTO_GATE_REJECTS` times, then leaves it for the human. Returns
-   * whether it decided the gate. Callers hold the run's lock.
+   * approved. Its coverage gaps are the coverage loop's (H-13, reading 237: the Architect fixes
+   * them before G2 shows, or the run parks for the human); anything else that blocks the approval
+   * leaves G2 for the human. Returns whether it decided the gate. Callers hold the run's lock.
    */
   private autoApproveGates(
     handle: RunHandle,
@@ -1693,25 +1703,9 @@ export class Engine implements Kernel {
       fact_waivers: [],
       ...(exit === undefined ? {} : { design_exit: exit }),
     });
-    if (blocked !== null) {
-      const rejected = state.events.filter(
-        (e) => e.type === "gate.rejected" && e.actor === "engine",
-      ).length;
-      if (rejected >= AUTO_GATE_REJECTS) return false;
-      this.recordGateRequest(handle, gate);
-      this.emit(handle, {
-        type: "gate.rejected",
-        actor: "engine",
-        data: { gates: gate.gates, note: `automatic run: ${blocked}`.slice(0, 4000) },
-      });
-      // as a human's rejection (`approve`): back to the phase whose roles fix it
-      this.phaseTo(
-        handle,
-        state.run.track === "quick_fix" || state.run.phase === "g1" ? "specify" : "design",
-      );
-      this.advance(handle);
-      return true;
-    }
+    // H-13 (reading 237): the coverage loop closed every coverage gap before G2 showed, and it
+    // parks for the human when it cannot; a G2 that still fails is left for the human too
+    if (blocked !== null) return false;
     this.recordGateRequest(handle, gate);
     this.emit(handle, {
       type: "gate.approved",
@@ -1821,12 +1815,17 @@ export class Engine implements Kernel {
         reason: "schema" as const,
         issues: issues.slice(0, 20).map((i) => i.slice(0, 500)),
       };
+      const shapes = takeCommandShapes(this, handle, run);
       this.emit(handle, {
         type: "role.rejected",
         actor: "engine",
         role: run.role,
         ...(run.task === undefined ? {} : { task: run.task }),
-        data: { action_id: actionId, ...rejection },
+        data: {
+          action_id: actionId,
+          ...rejection,
+          ...(shapes.length === 0 ? {} : { command_shapes: shapes }),
+        },
       });
       return {
         run: handle.state.id,
@@ -1894,6 +1893,12 @@ export class Engine implements Kernel {
         this.resumeFeature(handle, escalation.feature, effect);
       }
       applyAnswer(this, handle, escalation, input.answer);
+      // H-13 (reading 237(5)): the coverage loop's `change_spec` goes back to SPECIFY and G1
+      if (
+        handle.state.run.phase === "design" &&
+        isChangeSpecAnswer(handle, escalation.id, input.answer.option)
+      )
+        this.phaseTo(handle, "specify");
       this.advance(handle);
       return { run: handle.state.id, actions: await this.actionsFor(handle, call) };
     });

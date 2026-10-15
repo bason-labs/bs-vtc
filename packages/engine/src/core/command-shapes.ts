@@ -11,16 +11,21 @@
  * {@link SPOOL_ROW_MAX_AGE_MS} (no dispatch can claim it any more); the rest stays for the runs
  * still in flight. Only the engine drains, under the run's lock.
  *
- * Known limit: a row names no dispatch, only its agent and `cwd`, so when several runs of one agent
- * are in flight in one working directory (the per-AC Spec Verifier calls, the three Visual QA
- * calls) the first of them to submit takes the rows of all of them, and a run working at the repo
- * root takes the rows of every task worktree under it. The tool signal counts distinct tasks, so
- * its facts hold; only the per-run `command_shapes` record can be misattributed.
+ * A row may name its dispatch (`CommandShapeSpoolRow.action`, contracts 5.7.0; spine §5 reading
+ * 247(9)): the hook names one only when the daemon's in-flight dispatches for that agent and `cwd`
+ * number one. The engine honours the name only when that action is in flight for the row's agent
+ * and `cwd` ({@link SpoolMatch.actionFits}): then the row is that dispatch's alone, taken by its
+ * drain and left by every other. A name that does not fit is ignored, and the row is matched by
+ * agent and `cwd` like an unnamed one.
  *
- * Accepted limit: only an accepted run records its shapes, because the contract carries
- * `command_shapes` on `role.submitted` alone. A rejected or failed run's rows are still drained (so
- * a later run cannot claim them) and dropped: the tool signal counts the tool use of runs whose
- * work was accepted, which is the use worth promoting to an engine tool (§13).
+ * Known limit: an unnamed row names only its agent and `cwd`, so when several runs of one agent are
+ * in flight in one working directory (the per-AC Spec Verifier calls, the three Visual QA calls)
+ * the first of them to submit takes the rows of all of them, and a run working at the repo root
+ * takes the rows of every task worktree under it. The tool signal counts distinct tasks, so its
+ * facts hold; only the per-run `command_shapes` record can be misattributed.
+ *
+ * Every run records its shapes: `role.submitted`, and since 5.7.0 `role.rejected` and `role.failed`
+ * too (reading 247(9)), so the tool signal counts tool use from runs the engine did not accept.
  */
 import { randomBytes } from "node:crypto";
 import { lstatSync, realpathSync, renameSync } from "node:fs";
@@ -42,9 +47,16 @@ export interface SpoolMatch {
   readonly cwd: string;
   /** When it was dispatched (ISO). */
   readonly since: string;
+  /** The dispatch's `action_id`: a row that names it (and fits) is this dispatch's. */
+  readonly action?: string;
+  /**
+   * Whether `action` is in flight for `agent` and `cwd` (a row's own): only then is a row's
+   * `action` honoured. Absent: no row's `action` is.
+   */
+  readonly actionFits?: (action: string, agent: string, cwd: string) => boolean;
 }
 
-const inside = (dir: string, path: string): boolean => {
+export const inside = (dir: string, path: string): boolean => {
   const rel = relative(dir, path);
   return rel === "" || (!rel.startsWith("..") && !isAbsolute(rel));
 };
@@ -57,7 +69,7 @@ const realOr = (path: string): string => {
   }
 };
 
-const agentMatches = (agents: readonly string[], agent: string): boolean =>
+export const agentMatches = (agents: readonly string[], agent: string): boolean =>
   agents.some((a) => agent === a || agent.endsWith(`:${a}`));
 
 /**
@@ -104,12 +116,15 @@ export const drainCommandShapeSpool = (
       }
       const at = row === undefined ? Number.NaN : Date.parse(row.at);
       if (row === undefined || Number.isNaN(at) || at < oldest) continue;
-      if (
-        at >= since &&
-        at <= now.getTime() &&
-        agentMatches(match.agents, row.agent) &&
-        dirs.some((d) => inside(d, row.cwd))
-      ) {
+      const named =
+        row.action !== undefined && match.actionFits?.(row.action, row.agent, row.cwd) === true
+          ? row.action
+          : undefined;
+      const mine =
+        named !== undefined
+          ? named === match.action
+          : agentMatches(match.agents, row.agent) && dirs.some((d) => inside(d, row.cwd));
+      if (at >= since && at <= now.getTime() && mine) {
         claimed.push({ at, shape: row.shape });
         continue;
       }

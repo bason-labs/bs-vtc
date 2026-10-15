@@ -1,6 +1,8 @@
 /**
- * D-cm (H-9; spine §5 reading 218): the start tier of every role run dispatched for a task follows
- * the task's difficulty, a test per rule.
+ * D-cm (H-9; spine §5 reading 218) and D-cu (reading 241): the start tier of a producer run (the
+ * Engineer family, QA author) follows the task's difficulty; a reviewer starts on its own tier,
+ * raised one tier on a high-risk task for Security verify and the cross-family reviewer. A test per
+ * rule.
  */
 import { describe, expect, it } from "vitest";
 import {
@@ -51,6 +53,7 @@ const input = (
   ...(over.mode === undefined ? {} : { mode: over.mode }),
   ...(t === undefined ? {} : { task: t }),
   roleTier: over.roleTier ?? ("top" satisfies ModelTier),
+  ...(over.crossFamily === undefined ? {} : { crossFamily: over.crossFamily }),
   ...(over.routing === undefined ? {} : { config: { routing: over.routing } }),
   table: over.table ?? DCM,
 });
@@ -95,31 +98,130 @@ describe("startTier: the routing table (D-cm)", () => {
     expect(startTier(input(task("S", { risk: "med" }))).tier).toBe("low");
   });
 
-  it("routes QA judge and every reviewer slot by the same rule", () => {
+  it("routes every Engineer profile and QA author by the table (D-cu)", () => {
     for (const [role, mode] of [
-      ["qa", "judge"],
-      ["spec_verifier", undefined],
-      ["security", "verify"],
-      ["visual_qa", undefined],
-      ["lens_accessibility", undefined],
+      ["engineer", undefined],
+      ["engineer_frontend", undefined],
+      ["qa", "author"],
     ] as const)
       expect(
-        startTier(input(task("M"), { role, ...(mode === undefined ? {} : { mode }) })),
-      ).toEqual({ tier: "mid", reason: "rule", clamped: false });
+        startTier(
+          input(task("L"), { role, roleTier: "low", ...(mode === undefined ? {} : { mode }) }),
+        ),
+      ).toEqual({ tier: "top", reason: "rule", clamped: false });
   });
 
   it("applies a role's own table cells, cell by cell", () => {
     const table = RoutingTableSchema.parse({
       ...DCM,
-      roles: { spec_verifier: { by_size: { M: "low" }, tagged_floor: "low" } },
+      roles: { engineer: { by_size: { M: "low" }, tagged_floor: "low" } },
     });
-    expect(ruleTier(task("M"), "spec_verifier", table)).toBe("low");
+    expect(ruleTier(task("M"), "engineer", table)).toBe("low");
     // the cells it does not name stay the shared ones
-    expect(ruleTier(task("L"), "spec_verifier", table)).toBe("top");
-    expect(ruleTier(task("S", { risk_tags: ["perf"] }), "spec_verifier", table)).toBe("low");
-    expect(ruleTier(task("S", { risk_tags: ["auth"] }), "spec_verifier", table)).toBe("top");
+    expect(ruleTier(task("L"), "engineer", table)).toBe("top");
+    expect(ruleTier(task("S", { risk_tags: ["perf"] }), "engineer", table)).toBe("low");
+    expect(ruleTier(task("S", { risk_tags: ["auth"] }), "engineer", table)).toBe("top");
     // another role keeps the shared rule
-    expect(ruleTier(task("M"), "engineer", table)).toBe("mid");
+    expect(ruleTier(task("M"), "qa", table)).toBe("mid");
+    expect(startTier(input(task("M"), { table })).tier).toBe("low");
+  });
+});
+
+describe("startTier: reviewers start on their own tier (D-cu, reading 241)", () => {
+  const REVIEWERS = [
+    ["qa", "judge"],
+    ["spec_verifier", undefined],
+    ["security", "verify"],
+    ["visual_qa", undefined],
+    ["lens_accessibility", undefined],
+  ] as const;
+  const who = (role: string, mode: string | undefined) => ({
+    role,
+    ...(mode === undefined ? {} : { mode }),
+  });
+
+  it("starts every reviewer on its role.yaml tier whatever the task's size or tags, reason role", () => {
+    for (const [role, mode] of REVIEWERS)
+      for (const roleTier of ["low", "mid", "top"] as const)
+        for (const t of [task("S"), task("L"), task("S", { risk_tags: ["perf"] })])
+          expect(startTier(input(t, { ...who(role, mode), roleTier }))).toEqual({
+            tier: roleTier,
+            reason: "role",
+            clamped: false,
+          });
+  });
+
+  it("ignores the Planner's hint and a table override for a reviewer", () => {
+    const table = RoutingTableSchema.parse({
+      ...DCM,
+      roles: { spec_verifier: { by_size: { M: "top" } } },
+    });
+    expect(
+      startTier(
+        input(task("M", { tier_hint: { tier: "top", reason: "concurrency" } }), {
+          role: "spec_verifier",
+          roleTier: "low",
+          table,
+        }),
+      ),
+    ).toEqual({ tier: "low", reason: "role", clamped: false });
+  });
+
+  it("raises Security verify one tier on a high-risk task, reason rule, at most Top", () => {
+    const security = who("security", "verify");
+    for (const t of [task("S", { risk: "high" }), task("M", { risk_tags: ["auth"] })]) {
+      expect(startTier(input(t, { ...security, roleTier: "low" }))).toEqual({
+        tier: "mid",
+        reason: "rule",
+        clamped: false,
+      });
+      expect(startTier(input(t, { ...security, roleTier: "mid" })).tier).toBe("top");
+      expect(startTier(input(t, { ...security, roleTier: "top" }))).toEqual({
+        tier: "top",
+        reason: "rule",
+        clamped: false,
+      });
+    }
+    // a merely tagged task, or Security in design mode, keeps the role tier
+    expect(
+      startTier(input(task("S", { risk_tags: ["perf"] }), { ...security, roleTier: "mid" })),
+    ).toEqual({ tier: "mid", reason: "role", clamped: false });
+  });
+
+  it("raises the cross-family reviewer on a high-risk task, never the same-host QA judge or the Spec Verifier", () => {
+    const high = task("M", { risk: "high" });
+    const judge = who("qa", "judge");
+    expect(startTier(input(high, { ...judge, roleTier: "mid", crossFamily: true }))).toEqual({
+      tier: "top",
+      reason: "rule",
+      clamped: false,
+    });
+    expect(startTier(input(high, { ...judge, roleTier: "mid" }))).toEqual({
+      tier: "mid",
+      reason: "role",
+      clamped: false,
+    });
+    for (const crossFamily of [false, true])
+      expect(
+        startTier(input(high, { role: "spec_verifier", roleTier: "low", crossFamily })),
+      ).toEqual({ tier: "low", reason: "role", clamped: false });
+  });
+
+  it("clamps a reviewer's start to routing.min_tier / max_tier", () => {
+    expect(
+      startTier(
+        input(task("S", { risk: "high" }), {
+          ...who("security", "verify"),
+          roleTier: "mid",
+          routing: { max_tier: "mid" },
+        }),
+      ),
+    ).toEqual({ tier: "mid", reason: "rule", clamped: true });
+    expect(
+      startTier(
+        input(task("S"), { role: "spec_verifier", roleTier: "low", routing: { min_tier: "mid" } }),
+      ),
+    ).toEqual({ tier: "mid", reason: "role", clamped: true });
   });
 });
 
@@ -140,7 +242,7 @@ describe("startTier: the Planner's hint (D-cm)", () => {
     const low: TierHint = { tier: "low", reason: "mechanical" };
     for (const [role, mode] of [
       ["engineer", undefined],
-      ["security", "verify"],
+      ["qa", "author"],
     ] as const) {
       const who = { role, ...(mode === undefined ? {} : { mode }) };
       expect(startTier(input(task("S", { risk_tags: ["auth"], tier_hint: low }), who))).toEqual({
@@ -153,12 +255,12 @@ describe("startTier: the Planner's hint (D-cm)", () => {
     // a role's own high floor bounds its hint instead
     const table = RoutingTableSchema.parse({
       ...DCM,
-      roles: { spec_verifier: { high_floor: "mid" } },
+      roles: { engineer: { high_floor: "mid" } },
     });
     expect(
       startTier(
         input(task("S", { risk_tags: ["payments"], tier_hint: low }), {
-          role: "spec_verifier",
+          role: "engineer",
           table,
         }),
       ),
@@ -221,7 +323,9 @@ describe("startTier: the project's min/max and QA author's floor (D-cm)", () => 
       startTier(input(task("M", { tier_hint: { tier: "low", reason: "boilerplate" } }), qa)).tier,
     ).toBe("mid");
     // QA judge has no such floor
-    expect(startTier(input(task("S"), { role: "qa", mode: "judge" })).tier).toBe("low");
+    expect(startTier(input(task("S"), { role: "qa", mode: "judge", roleTier: "low" })).tier).toBe(
+      "low",
+    );
   });
 });
 
@@ -294,18 +398,29 @@ describe("routeTier: escalation and the reviewers' budget drop (D-cm)", () => {
     });
   });
 
-  it("drops a reviewer one tier from its routed tier, clamped to min_tier", () => {
-    expect(routeTier(input(task("L"), { role: "spec_verifier" }), "budget_drop")).toEqual({
-      tier: "mid",
-      reason: "budget_drop",
-      clamped: false,
-    });
+  it("drops a reviewer one tier from its own start tier, clamped to min_tier", () => {
+    expect(
+      routeTier(input(task("S"), { role: "spec_verifier", roleTier: "top" }), "budget_drop"),
+    ).toEqual({ tier: "mid", reason: "budget_drop", clamped: false });
     expect(
       routeTier(
-        input(task("M"), { role: "spec_verifier", routing: { min_tier: "mid" } }),
+        input(task("M"), { role: "spec_verifier", roleTier: "mid", routing: { min_tier: "mid" } }),
         "budget_drop",
       ),
     ).toEqual({ tier: "mid", reason: "budget_drop", clamped: true });
+    // the high-risk raise is the start Security verify drops from
+    expect(
+      routeTier(
+        input(task("S", { risk: "high" }), { role: "security", mode: "verify", roleTier: "mid" }),
+        "budget_drop",
+      ),
+    ).toEqual({ tier: "mid", reason: "budget_drop", clamped: false });
+  });
+
+  it("escalates a reviewer from its own start tier", () => {
+    expect(
+      routeTier(input(task("L"), { role: "spec_verifier", roleTier: "low" }), "escalation"),
+    ).toEqual({ tier: "mid", reason: "escalation", clamped: false });
   });
 
   it("keeps QA author's floor on any change", () => {
