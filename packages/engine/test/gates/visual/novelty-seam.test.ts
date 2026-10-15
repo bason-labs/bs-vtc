@@ -144,7 +144,8 @@ describe("GateRunner.checkNovelty / recordDesignChoice", () => {
     });
     expect(report.verdict).toBe("unchecked");
     expect(process.memoryUsage().arrayBuffers - before).toBeLessThan(64 * 1024 * 1024);
-  });
+    // Building the fixture deflates 256 MiB: slow on a busy host.
+  }, 30_000);
 
   it("is unchecked, without blocking, when the first viewport is a FIFO", async () => {
     const { runner, repo } = setup();

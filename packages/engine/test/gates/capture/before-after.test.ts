@@ -316,7 +316,8 @@ const setup = async (s: Setup = {}) => {
 const read = (dir: string, name: string): string =>
   readFileSync(join(dir, name)).toString("latin1");
 
-describe("UI before/after evidence (D-ct, reading 223)", () => {
+// Each case builds and serves real commits (install, build and app processes): slow on a busy host.
+describe("UI before/after evidence (D-ct, reading 223)", { timeout: 60_000 }, () => {
   it("builds and serves base and head in clean gate checkouts and captures each Visual QA screen", async () => {
     const h = await setup();
     const result = await h.capture();

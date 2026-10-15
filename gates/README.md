@@ -356,10 +356,16 @@ to `noveltyReportPath` and calls `recordDesignChoice` when the human picks at G2
 - **L3 detection.** Calibrate proposes no diff-cover gate and `line_coverage_pct` is always
   `null`, so the coverage part of the monotonic rule applies only to a hand-written L3 gate's
   `diff_coverage_pct`.
-- **Visual step, live.** No test runs a real browser: Chromium inside `sandbox-exec`/`bwrap`
+- **Visual step, live.** No default test runs a real browser: Chromium inside `sandbox-exec`/`bwrap`
   (its own sandbox is off, `chromiumSandbox: false`, so the gate sandbox is the only boundary
   around the untrusted page; the macOS profile may need more system services) is a spike, and
-  an opt-in live test needs a local `playwright-core`, which this repo does not install. The
+  an opt-in live test needs a local `playwright-core`, which this repo does not install. For
+  before/after evidence, `test/gates/capture/before-after.live.test.ts` is that opt-in test: with
+  `VTC_LIVE_BROWSER=1` and `VTC_LIVE_VTC_HOME` naming a throwaway VTC home where
+  `VTC_HOME=<dir> vtc doctor --install-browser` ran, it builds, serves and renders a base and a
+  head in Chromium inside this machine's gate sandbox (screens, flow WebM, a denied value
+  discarding the head's frame). It has not yet run against a real browser (no store is installed
+  where it was written), so the Chromium-in-sandbox profile is still unproven. The
   render cache keyed by `source_hash` is not used yet (every run renders, and every attempt
   copies its images, up to the per-run cap). The detector ports the source-level slop rules
   only (no live-DOM, quality or design-system drift rules). Engine core does not call the
