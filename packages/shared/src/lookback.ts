@@ -66,6 +66,15 @@ export const LOOKBACK_HOME = {
    * `parsePersisted` and skip a line that does not parse.
    */
   tiebreaksFile: "lookback/tiebreaks.jsonl",
+  /**
+   * The replay trial ledger (D-cg, spine §5 reading 201): one {@link ReplayTrialRow} per graded
+   * trial and one {@link ReplayInfraRow} per trial that measured nothing, kept across RETROs so a
+   * replay larger than `LOOKBACK_LIMITS.maxTrialsPerRetro` continues where it stopped. Only the
+   * engine writes it (append-only, created `0600`); roles may not (`ROLE_DENIED_VTC`: the VTC
+   * home's `lookback/**`), so no planted grade can decide a replay. Readers parse each line with
+   * `parsePersisted` and skip a line that does not parse. New in 5.1.0.
+   */
+  replayTrialsFile: "lookback/replay-trials.jsonl",
 } as const;
 
 /** When a `pins.lock` counts as stale ({@link LOOKBACK_HOME}`.pinsLock`). New in 4.6.0. */
@@ -337,7 +346,8 @@ export type RoleDispatchPurpose = z.infer<typeof RoleDispatchPurposeSchema>;
 /**
  * The Lookback replay trial a `lookback_replay` dispatch is (`role.dispatched.replay`, AD-21
  * rule 6): the proposal it measures, the replayed task (the `ReplayResult.per_task` key,
- * `<run>:<task>`), the arm (`a` the baseline, `b` the candidate, `aa` the baseline's second arm)
+ * `<run>:<task>`, or for a verdict replay `<run>:<subject>:<verdict>:<task>`, so two criteria of
+ * one task stay two entries; 5.1.0), the arm (`a` the baseline, `b` the candidate, `aa` the baseline's second arm)
  * and the 1-based trial number. New in 4.11.0.
  */
 export const ReplayTrialRefSchema = z.strictObject({
@@ -595,6 +605,56 @@ export const AaNoiseRowSchema = z.strictObject({
   measured_at: IsoDateTimeSchema,
 });
 export type AaNoiseRow = z.infer<typeof AaNoiseRowSchema>;
+
+/** What identifies the replay and trial a {@link LOOKBACK_HOME}`.replayTrialsFile` row is for. */
+const replayLedgerIdentity = {
+  repo_key: RepoKeySchema,
+  proposal: SlugSchema,
+  /** The baseline's `effective_sha256`. */
+  baseline: Sha256HexSchema,
+  /** The candidate's `effective_sha256`. */
+  candidate: Sha256HexSchema,
+  /** The `ReplayResult.per_task` key (see {@link ReplayTrialRefSchema}`.task`). */
+  task: z.string().min(1).max(100),
+  arm: z.enum(["a", "b", "aa"]),
+  trial: z.int().min(1).max(10),
+  grader_bundle_sha: Sha256HexSchema,
+};
+
+/**
+ * One graded replay trial ({@link LOOKBACK_HOME}`.replayTrialsFile`, D-cg): it counts only for the
+ * replay it measured (project, proposal, baseline, candidate and grader bundle); a trial graded
+ * twice keeps its first grade. Read with `parsePersisted`. New in 5.1.0 (it was the lookback
+ * module's own shape).
+ */
+export const ReplayTrialRowSchema = z.strictObject({
+  v: z.literal(1),
+  ...replayLedgerIdentity,
+  passed: z.boolean(),
+  /** Input plus output tokens the trial used. */
+  tokens: z.int().nonnegative(),
+  /** The host enforced the repo's read deny on the trial (`SandboxProfile.enforced.readDeny`). */
+  read_denied: z.boolean(),
+  graded_at: IsoDateTimeSchema,
+});
+export type ReplayTrialRow = z.infer<typeof ReplayTrialRowSchema>;
+
+/**
+ * Why a replay trial measured nothing (reading 201): the gates could not run (`gate_infra`), the
+ * host did not prove it loaded the arm's plugin (`plugin_locked`), or a verdict trial's replayed
+ * dispatch has no recorded outcome any more (`no_outcome`). An attempt, not a grade. New in 5.1.0.
+ */
+export const ReplayInfraOutcomeSchema = z.enum(["gate_infra", "plugin_locked", "no_outcome"]);
+export type ReplayInfraOutcome = z.infer<typeof ReplayInfraOutcomeSchema>;
+
+/** One replay trial that measured nothing ({@link ReplayInfraOutcomeSchema}). New in 5.1.0. */
+export const ReplayInfraRowSchema = z.strictObject({
+  v: z.literal(1),
+  ...replayLedgerIdentity,
+  outcome: ReplayInfraOutcomeSchema,
+  at: IsoDateTimeSchema,
+});
+export type ReplayInfraRow = z.infer<typeof ReplayInfraRowSchema>;
 
 // --------------------------------------------------------------- scorecards
 

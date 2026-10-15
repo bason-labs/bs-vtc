@@ -10,6 +10,7 @@ import {
   AUTO_TEMPLATE_SLOTS,
   autoTemplateAssetPath,
   ROLES_CHANGELOG,
+  ROLES_CHANGELOG_ANCHOR,
   type AutoTemplateName,
   type AutoTemplateSlot,
 } from "@vtc/shared";
@@ -155,14 +156,6 @@ export const autoTemplateFiles = (
   }
   return emitted;
 };
-
-/**
- * The line in `roles/CHANGELOG.md` (`ROLES_CHANGELOG`) directly below which the upstream module
- * inserts each new entry, newest first (D-bv). Local until the proposed shared constant lands next
- * to `ROLES_CHANGELOG` (a contract proposal of this branch, with the upstream module as its
- * consumer); a todo merge gate in the template tests tracks it.
- */
-export const ROLES_CHANGELOG_ANCHOR = "<!-- vtc:changelog-entries -->";
 
 /**
  * Checks `roles/CHANGELOG.md`: it is required and holds {@link ROLES_CHANGELOG_ANCHOR} exactly

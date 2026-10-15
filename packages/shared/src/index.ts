@@ -224,5 +224,19 @@ export * from "./json-schema.js";
  * sends every `lookback_replay` trial headless (D-cg); `LOOKBACK_LIMITS.maxTrialsPerRetro`,
  * `ReplayGrader`, `ReplayResult.grader`, `VERDICT_GRADED_ROLES` and `replayGraderFor` (D-ch),
  * which supersede `CLAUDE_LEAD_REPLAYABLE_ROLES` (removed at the round-4 merge, reading 209(2)).
+ *
+ * 5.1.0 (MINOR): the round-4 merge (spine §5 readings 210–214). `LOOKBACK_HOME.replayTrialsFile`
+ * with `ReplayTrialRow` / `ReplayInfraRow` (`ReplayInfraOutcomeSchema`), the replay trial ledger
+ * the lookback module kept locally (D-cg); a verdict replay's task key is
+ * `<run>:<subject>:<verdict>:<task>` (doc only). `TaskPack.design_exit` and the Dispatch lines
+ * `design direction: <id>` / `design exit: category_standard` (reading 179 as amended);
+ * `PACK_INPUT_TYPES.automationIssue` (reading 198). `QUIET_CLOSE_MARKER`, `ROLES_CHANGELOG_ANCHOR`,
+ * `EVIDENCE_MODE_PARAM` / `EVIDENCE_MODE_VALUES`, and what the `note` and `provenance` template
+ * slots hold. `AutoIssueRef.createdAt` / `closedQuietByVtc` (optional). `REPO_ROLE_DENIED
+ * .writeDeny` adds `.vtc/evidence/auto/**`. Doc: `AutomationDeps.upstream` is read live,
+ * `AutomationDeps.hosting` is probed when the daemon starts, and `headlessCommand` reflects what
+ * the adapter last read from the host. All additive: new constants, optional fields, new
+ * schemas, and one more deny glob. `CLAUDE_LEAD_REPLAYABLE_ROLES` is gone, as 5.0.0 planned
+ * (reading 209(2)).
  */
-export const CONTRACTS_VERSION = "5.0.0";
+export const CONTRACTS_VERSION = "5.1.0";

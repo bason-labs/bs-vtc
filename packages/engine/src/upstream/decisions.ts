@@ -8,6 +8,7 @@
 import {
   AUTO_LABELS,
   AUTOMATION_LIMITS,
+  QUIET_CLOSE_MARKER,
   type AutoIssueRef,
   type AutoKind,
   type AutoPrRef,
@@ -17,12 +18,8 @@ import type { Ledger, LedgerRecord } from "./ledger.js";
 const HOUR_MS = 3_600_000;
 const DAY_MS = 24 * HOUR_MS;
 
-/**
- * The hidden marker of the comment VTC's quiet sweep closes an issue with (beside
- * `AUTO_COMMENT_MARKER`), so any installation can tell VTC's quiet close from a human's
- * not-planned close by reading the issue, without this machine's ledger.
- */
-export const QUIET_CLOSE_MARKER = "<!-- vtc:quiet-close -->";
+/** The quiet-close comment marker (contracts 5.1.0, `@vtc/shared`). */
+export { QUIET_CLOSE_MARKER };
 
 /** VTC closes right after its quiet-close comment; a later close is a human's. */
 export const QUIET_CLOSE_WINDOW_MS = 15 * 60_000;

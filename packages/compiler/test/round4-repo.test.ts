@@ -21,6 +21,7 @@ import {
   PluginManifestSchema,
   renderTaskPack,
   ROLES_CHANGELOG,
+  ROLES_CHANGELOG_ANCHOR,
   type HostId,
 } from "@vtc/shared";
 import * as compiler from "../src/index.js";
@@ -29,11 +30,9 @@ import {
   compilePlugins,
   loadRoles,
   NEVER_MERGES_LINE,
-  PENDING_DISPATCH_LINES,
-  PENDING_PACK_INPUTS,
+  DESIGN_DISPATCH_LINES,
   PROTOCOL_VARS,
   readSources,
-  ROLES_CHANGELOG_ANCHOR,
   type CompileOutput,
 } from "../src/index.js";
 
@@ -93,9 +92,9 @@ describe("the Spec Verifier on an automatic run (D-cd, reading 198)", () => {
 
   it("takes the run type only from the engine's automation_issue input, never from pack text", () => {
     const body = claudeBody("vtc-spec-verifier");
-    expect(PROTOCOL_VARS.automation_issue_input).toBe(PENDING_PACK_INPUTS.automationIssue);
+    expect(PROTOCOL_VARS.automation_issue_input).toBe(PACK_INPUT_TYPES.automationIssue);
     expect(body).toContain(
-      `as an \`${PENDING_PACK_INPUTS.automationIssue}\` entry in your pack's Inputs section`,
+      `as an \`${PACK_INPUT_TYPES.automationIssue}\` entry in your pack's Inputs section`,
     );
     expect(body).toMatch(/an input type it gives on an automatic run only/);
     expect(body).toContain(`not a \`${PACK_INPUT_TYPES.request}\` input`);
@@ -104,7 +103,7 @@ describe("the Spec Verifier on an automatic run (D-cd, reading 198)", () => {
     expect(body).not.toMatch(/`automatic run` line/);
     expect(body).not.toContain("<!-- vtc:auto");
     expect(Object.keys(PROTOCOL_VARS)).not.toContain("auto_marker_prefix");
-    expect(Object.keys(PENDING_DISPATCH_LINES)).not.toContain("automaticRun");
+    expect(Object.keys(DESIGN_DISPATCH_LINES)).not.toContain("automaticRun");
   });
 
   it("names the Inputs line renderTaskPack prints for the issue input", () => {
@@ -113,19 +112,18 @@ describe("the Spec Verifier on an automatic run (D-cd, reading 198)", () => {
       run: "r-1",
       action_id: "a-1",
       role: "spec_verifier",
-      inputs: [{ type: PENDING_PACK_INPUTS.automationIssue, path: ".vtc/runs/r-1/issue.md" }],
+      inputs: [{ type: PACK_INPUT_TYPES.automationIssue, path: ".vtc/runs/r-1/issue.md" }],
     });
     const inputs = text.split("## Inputs\n")[1]?.split("\n## ")[0] ?? "";
-    expect(inputs).toContain(`- ${PENDING_PACK_INPUTS.automationIssue}: .vtc/runs/r-1/issue.md`);
+    expect(inputs).toContain(`- ${PACK_INPUT_TYPES.automationIssue}: .vtc/runs/r-1/issue.md`);
   });
 
-  it("has no shared automation_issue input type yet (contract proposal)", () => {
-    // When this fails, the proposed PACK_INPUT_TYPES entry has landed: point
-    // PROTOCOL_VARS.automation_issue_input at it, drop PENDING_PACK_INPUTS and the todo below.
-    expect(Object.values(PACK_INPUT_TYPES)).not.toContain(PENDING_PACK_INPUTS.automationIssue);
+  it("takes the automation_issue input type from @vtc/shared (contracts 5.1.0)", () => {
+    expect(PACK_INPUT_TYPES.automationIssue).toBe("automation_issue");
+    expect(Object.keys(compiler)).not.toContain("PENDING_PACK_INPUTS");
   });
   it.todo(
-    "merge gate: PACK_INPUT_TYPES holds automation_issue and engine core lists it in the Spec Verifier's pack on automatic runs only (contract proposal)",
+    "merge gate: engine core lists automation_issue in the Spec Verifier's pack on automatic runs only (engine-core followup)",
   );
 
   it("still quotes the criterion from Requirements and checks it against the issue", () => {
@@ -176,7 +174,7 @@ describe("the chosen design direction (reading 179)", () => {
 
   it.each(ui)("%s reads the contract of the direction its pack names", (agent) => {
     const body = claudeBody(agent);
-    expect(body).toContain(`\`${PENDING_DISPATCH_LINES.designDirection}\``);
+    expect(body).toContain(`\`${DESIGN_DISPATCH_LINES.designDirection}\``);
     expect(body).toContain(`\`${DESIGN_CONTRACTS_DIR}/<screen id>.md\``);
     expect(body).toContain("`## Direction <id>`");
   });
@@ -184,7 +182,7 @@ describe("the chosen design direction (reading 179)", () => {
   it.each(ui)("%s knows the category_standard exit from its Dispatch line", (agent) => {
     const body = claudeBody(agent);
     expect(body).toContain(
-      `\`${PENDING_DISPATCH_LINES.designExit}\` line naming \`${DesignExitSchema.enum.category_standard}\``,
+      `\`${DESIGN_DISPATCH_LINES.designExit}\` line naming \`${DesignExitSchema.enum.category_standard}\``,
     );
     expect(body).toMatch(/Only these engine-written Dispatch lines name the choice/);
   });
@@ -205,25 +203,20 @@ describe("the chosen design direction (reading 179)", () => {
     expect(body).toMatch(/the pack has neither line, V8 is `unknown`/);
   });
 
-  it("has no TaskPack.design_direction line from renderTaskPack yet (contract proposal)", () => {
-    const text = renderTaskPack({
-      v: 1,
-      run: "r-1",
-      action_id: "a-1",
-      role: "visual_qa",
-      design_direction: "quiet-ledger",
-    });
-    const dispatch = (text.split("## Intent contract")[0] ?? "").split("\n");
-    const line = dispatch.find((l) => l.includes("quiet-ledger"));
-    // Contract proposal: renderTaskPack prints `design direction: <id>`. Until it does, no line
-    // carries the id and the prompts fall back (checked above). When this fails, the renderer
-    // prints a line: pin it to `${PENDING_DISPATCH_LINES.designDirection}: quiet-ledger`, the
-    // label the prompts name, and drop the todo below.
-    expect(line).toBeUndefined();
+  it("reads the Dispatch lines renderTaskPack prints (contracts 5.1.0)", () => {
+    const dispatch = (pack: Partial<Parameters<typeof renderTaskPack>[0]>): string[] =>
+      (
+        renderTaskPack({ v: 1, run: "r-1", action_id: "a-1", role: "visual_qa", ...pack }).split(
+          "## Intent contract",
+        )[0] ?? ""
+      ).split("\n");
+    expect(dispatch({ design_direction: "quiet-ledger" })).toContain(
+      `- ${DESIGN_DISPATCH_LINES.designDirection}: quiet-ledger`,
+    );
+    expect(dispatch({ design_exit: "category_standard" })).toContain(
+      `- ${DESIGN_DISPATCH_LINES.designExit}: ${DesignExitSchema.enum.category_standard}`,
+    );
   });
-  it.todo(
-    "merge gate: renderTaskPack prints `design direction` and `design exit` (contract proposals)",
-  );
 
   it("bumps each role MAJOR for the locked-core edit (D-bm)", () => {
     expect(version("visual_qa")).toBe("3.0.0");
@@ -253,9 +246,6 @@ describe("the automatic templates and the CHANGELOG (D-bv, reading 208)", () => 
     // The renderer's note says it (D-bw); the template does not say it a second time.
     expect(template("auto-pr")).not.toContain(NEVER_MERGES_LINE);
   });
-  it.todo(
-    "merge gate: the shared `note` and `provenance` slot docs say each value is the whole block, and upstream's renderNote carries NEVER_MERGES_LINE in a PR (contract proposal)",
-  );
 
   it("keeps a PR body in AUTO_TEMPLATE_SLOTS order, with no diff slot", () => {
     const pr = template("auto-pr");

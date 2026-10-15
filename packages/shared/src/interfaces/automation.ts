@@ -45,6 +45,17 @@ export interface AutoIssueRef {
   readonly updatedAt: string;
   /** A comment without `AUTO_COMMENT_MARKER` exists (VTC posts as the user, so not by author). */
   readonly humanActivity: boolean;
+  /**
+   * When the issue was opened (`gh --json createdAt`), so the daily cap counts from the remote
+   * listing (reading 208). Absent from a service that does not report it: the ledger decides.
+   * New in 5.1.0.
+   */
+  readonly createdAt?: string;
+  /**
+   * VTC's quiet sweep closed it: closed as not planned, right after a comment carrying
+   * `QUIET_CLOSE_MARKER`. Absent from a service that does not report it. New in 5.1.0.
+   */
+  readonly closedQuietByVtc?: boolean;
 }
 
 export interface AutoIssueRequest {
@@ -218,7 +229,12 @@ export interface AutomationDeps {
   /** Absent: no capture is possible, so no automatic PR opens (issues still do). */
   readonly evidence?: EvidenceRecorder;
   readonly plumbing?: CreateGitPlumbing;
-  /** `~/.vtc/config.yaml` `upstream` (D-bz, D-by). */
+  /**
+   * `~/.vtc/config.yaml` `upstream` (D-bz, D-by). The cli supplies live getters for `repo`,
+   * `share` and `checkout`: consumers read each field at each use and never spread, clone or parse
+   * the object once, so a `share: false` set between queueing and sending an item still stops it
+   * (AD-27 rule 5).
+   */
   readonly upstream: {
     readonly repo: GitHubRepo;
     /** The user-level switch for all projects; default true. */
@@ -226,7 +242,10 @@ export interface AutomationDeps {
     /** Absolute path of a local bs-vtc clone set up for VTC, for upstream PRs; absent: issues only. */
     readonly checkout?: string;
   };
-  /** Resolved by the cli (`vtc doctor` caches it): `gh --version` and the remote host. */
+  /**
+   * Resolved by the cli when the daemon starts (`gh --version` and the remote host); the user's
+   * `automation.evidence_hosting` is read live.
+   */
   readonly hosting: EvidenceHosting;
   /** ffmpeg is on PATH (GIF previews; without it, `branch` hosting marks evidence partial). */
   readonly ffmpeg: boolean;

@@ -8,6 +8,7 @@
  * `spawn_role` action and the `role.dispatched` event carry that path.
  */
 import { z } from "zod";
+import { DesignExitSchema } from "./design.js";
 import { EscalationAnswerSchema } from "./escalation.js";
 import { FindingSchema } from "./finding.js";
 import { GateLayerSchema } from "./gates-config.js";
@@ -40,6 +41,13 @@ export const PACK_INPUT_TYPES = {
    * the advisor's inputs (§5.4). `request` stays the run's request, never the question.
    */
   advisorQuestion: "advisor_question",
+  /**
+   * The issue an automatic run works on (`run.started.automation`, D-cd; spine §5 reading 198),
+   * written by the engine under the run directory. Engine core lists it in the Spec Verifier's
+   * pack on an automatic run and on no other run, so the verifier checks the PR against the issue
+   * (the issue is the spec). New in 5.1.0.
+   */
+  automationIssue: "automation_issue",
 } as const;
 
 /**
@@ -99,9 +107,18 @@ export const TaskPackSchema = z.strictObject({
    * human approved at G2 (`ApproveInput.design_direction`), so the role judges against that
    * direction's contract in each key screen's design contract (`designContractPath`, §9.1;
    * spine §5 reading 179). Absent before G2, on a run with one direction, and after the
-   * `category_standard` exit. New in 4.11.0.
+   * `category_standard` exit. New in 4.11.0. Printed as the Dispatch line
+   * `design direction: <id>` (5.1.0).
    */
   design_direction: SlugSchema.optional(),
+  /**
+   * Post-G2 UI dispatches after the G2 `category_standard` exit (§9.1 step 5): the build follows
+   * the category standard, not one of the 2–3 directions the design contracts still hold, so
+   * `design_direction` is absent and roles need this to tell the exit from a missing line. Printed
+   * as the Dispatch line `design exit: category_standard`. New in 5.1.0 (spine §5 reading 179 as
+   * amended by reading 211).
+   */
+  design_exit: DesignExitSchema.extract(["category_standard"]).optional(),
   /** The task's immutable intent contract (§6.3 plan file). */
   intent: IntentContractSchema.optional(),
   /** The REQs and ACs in scope, with their frozen text. */
@@ -216,6 +233,8 @@ export const renderTaskPack = (input: TaskPackInput): string => {
       : [
           `design constraints: colour strategy ${pack.design_constraints.colour_strategy}; type pairing ${pack.design_constraints.type_pairing}; density and grid ${pack.design_constraints.density_grid}; radius and elevation ${pack.design_constraints.radius_elevation}; motion ${pack.design_constraints.motion}; signature interaction ${pack.design_constraints.signature_interaction}`,
         ]),
+    ...(pack.design_direction === undefined ? [] : [`design direction: ${pack.design_direction}`]),
+    ...(pack.design_exit === undefined ? [] : [`design exit: ${pack.design_exit}`]),
   ];
   const intent =
     pack.intent === undefined

@@ -134,6 +134,14 @@ export interface AutoMarker {
 /** The hidden marker of every comment VTC writes; a comment without it is human activity. */
 export const AUTO_COMMENT_MARKER = "<!-- vtc:comment -->";
 
+/**
+ * The hidden marker of the comment VTC's quiet sweep closes an issue with (beside
+ * {@link AUTO_COMMENT_MARKER}), so every installation can tell VTC's quiet close (reopen when the
+ * fingerprint recurs) from a human's not-planned close (never raised again), AD-27 rule 4. New in
+ * 5.1.0 (it was the upstream module's own constant).
+ */
+export const QUIET_CLOSE_MARKER = "<!-- vtc:quiet-close -->";
+
 /** Pure: `<!-- vtc:auto v=1 kind=<kind> fp=<fp>[ role=<role>] -->`. */
 export const renderAutoMarker = (marker: AutoMarker): string => {
   AutoKindSchema.parse(marker.kind);
@@ -368,6 +376,12 @@ export const autoTemplateAssetPath = (name: AutoTemplateName): string =>
  * The slots a template may use; the renderer fills each one (or "unavailable") and refuses a
  * template that names any other. Order in a PR body: marker, note, summary, why, changes,
  * evidence, verification, risk, provenance, checklist (spine §5 reading 208).
+ *
+ * What two slot values hold (5.1.0, spine §5 reading 212): `note` is the whole NOTE callout,
+ * `> [!NOTE]` header included, and in a PR it says "For human review only: VTC never merges
+ * automatic PRs." (D-bw); `provenance` is the whole `<details>` block, `<summary>` included.
+ * Templates wrap neither. `diff` is a prompt PR's fenced diff and follows `changes`. Every slot
+ * except `title`, `hypothesis` and `trace_ids` stands on a line of its own.
  */
 export const AUTO_TEMPLATE_SLOTS = [
   "marker",
@@ -390,6 +404,24 @@ export type AutoTemplateSlot = (typeof AUTO_TEMPLATE_SLOTS)[number];
 
 /** VTC's own CHANGELOG of role prompt changes, in the bs-vtc repo (D-bv). */
 export const ROLES_CHANGELOG = "roles/CHANGELOG.md";
+
+/**
+ * The line of {@link ROLES_CHANGELOG} directly below which each new entry is inserted, newest
+ * first, below the file's explanatory header. The compiler requires it exactly once, on its own
+ * line. New in 5.1.0.
+ */
+export const ROLES_CHANGELOG_ANCHOR = "<!-- vtc:changelog-entries -->";
+
+/**
+ * The dashboard's evidence mode (AD-27 rule 6; spine §5 readings 208 and 212): the query
+ * parameter the evidence recorder opens the dashboard with on the loopback snapshot server, and
+ * its values. `full` (`?evidence=1`) shows a run's own replay, read-only; `upstream`
+ * (`?evidence=upstream`) shows only the upstream-safe projection for a bs-vtc PR caused by a
+ * project run. In both the dashboard reads the frozen read routes the snapshot server serves.
+ * New in 5.1.0.
+ */
+export const EVIDENCE_MODE_PARAM = "evidence";
+export const EVIDENCE_MODE_VALUES = { full: "1", upstream: "upstream" } as const;
 
 // ------------------------------------------------------------------ events
 
