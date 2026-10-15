@@ -263,6 +263,8 @@ export interface Harness {
   readonly base: string;
   /** Every spec the harness's fake sandbox wrapped, in order. */
   readonly specs: readonly GateSandboxSpec[];
+  /** Every argv the harness's fake sandbox wrapped, in order. */
+  readonly argvs: readonly (readonly string[])[];
   readonly run: (request: Partial<GateRunRequestInput> & { head: string }) => Promise<GateReport>;
   /** Like `run`, but hands the request to the runner unparsed (a malformed caller). */
   readonly runUnparsed: (
@@ -365,6 +367,7 @@ export const harness = (
     home,
     base,
     specs: recording.specs,
+    argvs: recording.argvs,
     run: async (partial) => {
       const checkout = await gitOps.createCleanCheckout(partial.head);
       try {

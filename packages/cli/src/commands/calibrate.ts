@@ -3,7 +3,10 @@
  * asks the human to confirm every gate command before it runs (§15: the per-machine allowlist,
  * which only a human widens), runs each gate twice on `HEAD`, records flaky tests and freezes the
  * baseline in `.vtc/gates.yml`. It also proposes the visual step's app server (`visual.app`) from
- * the package.json dev/start/preview script, which a human confirms like a gate command.
+ * the package.json dev/start/preview script, which a human confirms like a gate command, and
+ * records each check gate's tool (H-14, `GateSchema.tool`): the project's own lint, type-check or
+ * test tool as installed in the working tree, which every gate run verifies by content hash, so an
+ * install script that replaces it fails the gate as tampering.
  * Confirmation needs an interactive terminal, so an agent's shell can run detection but never
  * confirm. The logic is `gates.calibrate` in the engine package.
  * Every gate command runs in the gate sandbox (D-al); `gates.allow_unsandboxed` is read from the

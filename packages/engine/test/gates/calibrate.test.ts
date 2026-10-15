@@ -1,5 +1,5 @@
 /** Toolchain detection and `vtc calibrate` (§7.1, §15). */
-import { readFileSync } from "node:fs";
+import { mkdirSync, readFileSync, symlinkSync } from "node:fs";
 import { join } from "node:path";
 import { GATE_SANDBOX, GatesConfigSchema, gateCommandAllowed } from "@vtc/shared";
 import { afterEach, describe, expect, it } from "vitest";
@@ -517,6 +517,47 @@ describe("calibrate", () => {
         ]),
       ),
     ).toEqual(["b", "c", "d"]);
+  });
+});
+
+describe("calibrate records each check gate's tool (H-14, reading 238)", () => {
+  it("writes the project tool installed in the working tree, and none for scripts or pinned scanners", async () => {
+    const root = nodeRepo();
+    for (const [pkg, file] of [
+      ["eslint", "bin/eslint.js"],
+      ["vitest", "vitest.mjs"],
+    ] as const) {
+      writeFile(root, `node_modules/${pkg}/package.json`, JSON.stringify({ name: pkg }));
+      writeFile(root, `node_modules/${pkg}/${file}`, "#!/usr/bin/env node\n");
+      mkdirSync(join(root, "node_modules/.bin"), { recursive: true });
+      symlinkSync(`../${pkg}/${file}`, join(root, "node_modules/.bin", pkg));
+    }
+    const lines: string[] = [];
+    const outcome = await calibrate(
+      {
+        repoRoot: root,
+        vtcHome: tempDir(),
+        git: createGitOps({ repoRoot: initRepo() }),
+        revision: "4f1c2a9e8b7d6c5f4e3d2c1b0a9f8e7d6c5b4a39",
+        out: (line) => lines.push(line),
+        confirm: () => Promise.resolve(false),
+        scanners: { names: SCANNERS, ensure: () => Promise.reject(new Error("no downloads")) },
+      },
+      { dryRun: true },
+    );
+    if (outcome.status !== "dry_run") throw new Error("expected a dry run");
+    const tools = Object.fromEntries(
+      parseGatesConfig(outcome.yaml).gates.map((g) => [g.id, g.tool ?? null]),
+    );
+    expect(tools).toMatchObject({
+      install: null,
+      build: null,
+      lint: { source: "project", paths: ["node_modules/.bin/eslint", "node_modules/eslint/**"] },
+      test: { source: "project", paths: ["node_modules/.bin/vitest", "node_modules/vitest/**"] },
+      secrets: null,
+      dependencies: null,
+    });
+    expect(lines.join("\n")).toMatch(/recorded the check tool of lint, test/);
   });
 });
 

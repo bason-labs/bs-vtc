@@ -15,6 +15,7 @@ import {
   EVIDENCE_PAINT_DEFAULTS,
   sandboxedEvidenceRunner,
   type EvidenceRunnerCall,
+  type EvidenceRunnerFlowStep,
 } from "../../../src/gates/capture/index.js";
 import { GateCommandJail, type GateJailSpec } from "../../../src/gates/sandbox.js";
 import type { VisualToolchain } from "../../../src/gates/visual/index.js";
@@ -34,7 +35,7 @@ import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 const here = dirname(fileURLToPath(import.meta.url));
 const scenario = JSON.parse(readFileSync(join(here, "scenario.json"), "utf8"));
-const log = { launch: null, contexts: [], routes: [], ws: 0, continued: [], aborted: [], init: [], bindings: [], order: [], screenshots: [], waited: [], videoPathBeforeClose: 0, fetched: [] };
+const log = { launch: null, contexts: [], routes: [], ws: 0, continued: [], aborted: [], init: [], bindings: [], order: [], screenshots: [], waited: [], videoPathBeforeClose: 0, fetched: [], actions: [], checks: 0 };
 const flush = () => writeFileSync(join(here, "log.json"), JSON.stringify(log));
 const PNG = Buffer.from("89504e470d0a1a0a", "hex");
 const request = async (ctx, url) => {
@@ -75,11 +76,18 @@ export const chromium = {
             let path = "/";
             const handlers = {};
             const locator = (selector) => {
-              const loc = { selector, first: () => loc, waitFor: async () => { if (selector === ".never") throw new Error("Timeout 30000ms exceeded waiting for .never"); } };
+              const never = () => { if (selector === ".never") throw new Error("Timeout 30000ms exceeded waiting for .never"); };
+              const loc = {
+                selector,
+                first: () => loc,
+                waitFor: async (o) => { never(); log.actions.push(["wait_for", selector, o && o.state]); },
+                click: async () => { never(); log.actions.push(["click", selector]); },
+                fill: async (value) => { never(); log.actions.push(["fill", selector, value]); },
+              };
               return loc;
             };
             const frame = (spec) => ({
-              evaluate: async () => (spec().script === false ? null : { state: spec().state || { painted: true, broken: null }, texts: spec().texts || [], error: null }),
+              evaluate: async () => { log.checks += 1; return spec().script === false ? null : { state: spec().state || { painted: true, broken: null }, texts: spec().texts || [], error: null }; },
               locator,
               isDetached: () => spec().detached === true,
             });
@@ -89,8 +97,10 @@ export const chromium = {
               on: (event, fn) => { handlers[event] = fn; },
               mainFrame: () => main,
               frames: () => [main, ...children.filter((f) => !f.isDetached())],
+              keyboard: { press: async (key) => { log.actions.push(["press", key]); } },
               goto: async (url) => {
                 path = new URL(url).pathname;
+                log.actions.push(["goto", path]);
                 const first = await request(ctx, url);
                 for (const extra of scenario.extraRequests || []) await request(ctx, extra);
                 if (scenario.fetch) log.fetched.push(await (await fetch(url)).text());
@@ -463,6 +473,121 @@ describe("evidence runner script (AD-27 rule 6)", () => {
       "02-missing.png": "HTTP 404 for /missing",
       "03-wait.png": "Timeout 30000ms exceeded waiting for .never",
     });
+  });
+});
+
+describe("evidence runner script: a scripted flow (D-ct, reading 247(7))", () => {
+  const flowCall = (
+    tools: string,
+    steps: readonly EvidenceRunnerFlowStep[],
+    videoSeconds = 2,
+  ): EvidenceRunnerCall => ({
+    input: {
+      v: 1,
+      playwright: join(tools, "playwright.mjs"),
+      executable: "/fake/chrome-headless-shell",
+      origin: "http://127.0.0.1:45678",
+      relay: false,
+      video_size: { width: 1280, height: 800 },
+      nav_timeout_ms: 30_000,
+      paint: [...EVIDENCE_PAINT_DEFAULTS],
+      mask: [...EVIDENCE_PAINT_DEFAULTS],
+      mask_color: "#1f1f1f",
+      patterns: SECRET_PATTERNS.map((p) => ({
+        kind: p.kind,
+        source: p.pattern.source,
+        flags: p.pattern.flags,
+      })),
+      deny_text: ["acme-client"],
+      deny_substring_min: 4,
+      max_scan_chars: 100_000,
+      shots: [
+        {
+          name: "01-flow.webm",
+          path: "/start",
+          width: 1280,
+          height: 800,
+          video_seconds: videoSeconds,
+          flow: { steps },
+        },
+      ],
+    },
+    allowRead: [tools],
+    port: 45678,
+    env: { PATH: process.env.PATH ?? "" },
+    timeoutMs: 60_000,
+  });
+
+  const run = async (scenario: object, steps: readonly EvidenceRunnerFlowStep[], seconds = 2) => {
+    const tools = fakeTools(scenario);
+    const jail = new GateCommandJail(recordingSandbox().sandbox, []);
+    try {
+      const outcome = await sandboxedEvidenceRunner(jail, NODE).run(
+        flowCall(tools, steps, seconds),
+      );
+      if (!outcome.ok) throw new Error(outcome.reason);
+      const log = JSON.parse(readFileSync(join(tools, "log.json"), "utf8")) as {
+        actions: unknown[][];
+        checks: number;
+        waited: number[];
+      };
+      return { shot: outcome.result.shots[0], log };
+    } finally {
+      jail.dispose();
+    }
+  };
+
+  it("runs every step while it records, scanning the page before each step and at the end", async () => {
+    const { shot, log } = await run({ pages: { "/start": { texts: ["Invoices"] } } }, [
+      { action: "click", selector: "#pay" },
+      { action: "fill", selector: "#amount", value: "42.00" },
+      { action: "press", key: "Enter" },
+      { action: "goto", path: "/paid" },
+      { action: "wait_for", selector: ".receipt" },
+      { action: "wait", ms: 100 },
+    ]);
+    expect(shot).toMatchObject({ status: "captured", flow: "scripted", file: "01-flow.webm" });
+    expect(log.actions).toEqual([
+      ["goto", "/start"],
+      ["click", "#pay"],
+      ["fill", "#amount", "42.00"],
+      ["press", "Enter"],
+      ["goto", "/paid"],
+      ["wait_for", ".receipt", "visible"],
+    ]);
+    // A check before each of the 6 steps and one at the end, never fewer.
+    expect(log.checks).toBe(7);
+    // The wait step, then the last frame held within the recording's time.
+    expect(log.waited[0]).toBe(100);
+    expect(log.waited[1]).toBeGreaterThan(0);
+    expect(log.waited[1]).toBeLessThanOrEqual(1000);
+  });
+
+  it("ends the flow as failed at a step that fails or runs out of time, and keeps the recording", async () => {
+    const failing = await run({ pages: { "/start": { texts: ["Invoices"] } } }, [
+      { action: "click", selector: ".never" },
+      { action: "click", selector: "#after" },
+    ]);
+    expect(failing.shot).toMatchObject({ status: "captured", flow: "failed" });
+    expect(failing.log.actions).toEqual([["goto", "/start"]]);
+    const late = await run(
+      { pages: { "/start": { texts: ["Invoices"] } } },
+      [{ action: "wait", ms: 5000 }],
+      1,
+    );
+    expect(late.shot).toMatchObject({ status: "captured", flow: "failed" });
+    expect(late.log.waited).toEqual([]);
+  });
+
+  it("discards the recording when a page the flow reached shows a denied value", async () => {
+    const { shot } = await run(
+      {
+        pages: { "/start": { texts: ["Invoices"] }, "/client": { texts: ["ACME-CLIENT ledger"] } },
+      },
+      [{ action: "goto", path: "/client" }],
+    );
+    expect(shot).toMatchObject({ status: "discarded", hits: ["denied_text"] });
+    expect(shot?.file).toBeUndefined();
   });
 });
 
