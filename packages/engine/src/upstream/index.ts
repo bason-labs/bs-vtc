@@ -40,4 +40,6 @@ export * from "./safe-fs.js";
 export * from "./skip.js";
 export * from "./staging.js";
 export * from "./state-dir.js";
+export * from "./subject.js";
 export * from "./triggers.js";
+export * from "./ui-paths.js";

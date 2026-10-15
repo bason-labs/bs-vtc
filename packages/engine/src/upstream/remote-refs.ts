@@ -2,13 +2,14 @@
  * Fresh remote truth for the two shared branches VTC pushes without force: the `vtc-evidence`
  * branch and `vtc/auto/<kind>/<fp8>`. Every VTC installation reporting to bs-vtc pushes to them,
  * so a checkout must fetch right before it builds a commit on them, or its push is a
- * non-fast-forward. The frozen `GitPlumbing` (contracts 5.x) has no fetch and cannot read a
- * commit message; until a contract adds both to it, the daemon injects them as
- * `UpstreamDeps.remoteRefs` (engine git, the user's own git and credentials).
+ * non-fast-forward. Contracts 5.4.0 adds `fetch` and `message` to `GitPlumbing` (optional); the
+ * module uses the plumbing's own when it has both, and the daemon's `UpstreamDeps.remoteRefs`
+ * (engine git, the user's own git and credentials) until engine core's plumbing implements them,
+ * when this seam goes.
  */
 import type { GitSha } from "@vtc/shared";
 
-/** What the upstream module needs besides `GitPlumbing` (a contract proposal adds it there). */
+/** `GitPlumbing.fetch` / `message` as one seam (the plumbing's own, or the daemon's fallback). */
 export interface RemoteRefs {
   /**
    * `git fetch --no-tags --prune <remote> <refspecs…>` in the repo: updates only the

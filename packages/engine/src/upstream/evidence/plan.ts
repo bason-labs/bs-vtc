@@ -3,7 +3,9 @@
  * - every PR: a dashboard replay video of the producing run plus a key screenshot (for a bs-vtc
  *   PR caused by a project run, the upstream-safe projection instead of that run's replay);
  * - UI changes: the visual gate's before/after screenshots and a changed-flow video of at most
- *   `EVIDENCE_LIMITS.maxFlowSeconds`;
+ *   `EVIDENCE_LIMITS.maxFlowSeconds`; for an automatic run's PR the gate runner renders both
+ *   commits itself (`EvidenceRecorder.captureBeforeAfter`, D-ct), which the pipeline asks for;
+ * - a routing-table change (D-cn): the routing scorecard chart besides the change's own evidence;
  * - prompt, agent or cost changes: the scorecard and replay charts;
  * - non-UI fixes: the gate report (`EvidenceRecorder.renderGateReport`), screenshotted.
  * A project's `automation.evidence.video: false` drops the recordings (screenshots only, which
@@ -47,6 +49,16 @@ export interface EvidencePlanInput {
   readonly flowPath?: string | undefined;
   /** `false`: no recordings, screenshots only (a project's `automation.evidence.video`). */
   readonly video?: boolean | undefined;
+  /**
+   * A routing-table change (D-cn): the routing scorecard (`LOOKBACK_REPO.routingScorecard`) is
+   * charted from the Lookback view too, and a complete set holds that chart.
+   */
+  readonly routing?: boolean | undefined;
+  /**
+   * With `routing`: no routing scorecard holds the change's cell (role, size, risk), so its chart
+   * is not taken and the set stays partial instead of charting unrelated cells.
+   */
+  readonly routingUnavailable?: boolean | undefined;
 }
 
 /**
@@ -62,6 +74,8 @@ export const EVIDENCE_READY = {
   flow: 'ol[aria-label="Nodes"]',
   /** The rendered gate report's heading. */
   gateReport: "h1",
+  /** The Lookback view's routing scorecard (D-cn). */
+  routing: '[data-testid="routing-scorecard"]',
 } as const;
 
 const mode = (input: EvidencePlanInput): string =>
@@ -126,6 +140,14 @@ export const planEvidenceShots = (input: EvidencePlanInput): EvidenceShot[] => {
       waitFor: EVIDENCE_READY.replay,
     });
   }
+  if (input.routing === true && input.routingUnavailable !== true) {
+    add({
+      kind: "chart",
+      path: pagePath(input, "lookback"),
+      viewport: DESKTOP_VIEWPORT,
+      waitFor: EVIDENCE_READY.routing,
+    });
+  }
   if (input.change === "non_ui") {
     add({
       kind: "gate_report",
@@ -154,10 +176,14 @@ export const planEvidenceShots = (input: EvidencePlanInput): EvidenceShot[] => {
   });
 };
 
-/** Pure: the kinds a complete evidence set holds for `change` (D-ce). */
+/**
+ * Pure: the kinds a complete evidence set holds for `change` (D-ce). `beforeAfter`: the recorder
+ * renders the base and the head itself (D-ct), changed flow included.
+ */
 export const requiredEvidenceKinds = (
-  input: Pick<EvidencePlanInput, "change" | "upstreamSafe" | "flowPath">,
+  input: Pick<EvidencePlanInput, "change" | "upstreamSafe" | "flowPath" | "routing">,
   hosting: EvidenceHosting,
+  options: { readonly beforeAfter?: boolean } = {},
 ): EvidenceFileKind[] => {
   const kinds: EvidenceFileKind[] = ["replay_video", "screenshot"];
   // `branch` hosting cannot play a WebM inline, so the GIF is its motion evidence; with
@@ -165,9 +191,14 @@ export const requiredEvidenceKinds = (
   if (hosting === "branch") kinds.push("replay_gif");
   if (input.change === "ui" && !input.upstreamSafe) {
     kinds.push("ui_before", "ui_after");
-    if (input.flowPath !== undefined) kinds.push("flow_video");
+    if (input.flowPath !== undefined || options.beforeAfter === true) kinds.push("flow_video");
   }
-  if (input.change === "prompt" || input.change === "agent" || input.change === "cost") {
+  if (
+    input.change === "prompt" ||
+    input.change === "agent" ||
+    input.change === "cost" ||
+    input.routing === true
+  ) {
     kinds.push("chart");
   }
   if (input.change === "non_ui") kinds.push("gate_report");

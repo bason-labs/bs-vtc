@@ -5,8 +5,8 @@
  * ({@link UPSTREAM_EVIDENCE_RUN}) from VTC-side data only (the `UpstreamReport`, the replay's
  * numbers with tasks as ordinals, the role's scorecards without their breakdown), and the
  * dashboard projects them again in `?evidence=upstream` mode. The routes are the ones the Lookback
- * view reads (`/api/health`, `/api/runs`, the run's events, the scorecard index, each scorecard
- * and the replay result), keyed as the dashboard asks for them (`pathname?search`), so the
+ * view reads (`/api/health`, `/api/runs`, the run's events, the scorecard index, each scorecard,
+ * the routing scorecard of D-cn and the replay result), keyed as the dashboard asks for them (`pathname?search`), so the
  * recorded page shows the scorecard and replay charts, not "No run selected".
  */
 import {
@@ -15,10 +15,12 @@ import {
   EVENT_PAGE_LIMIT,
   LOOKBACK_REPO,
   ReplayResultSchema,
+  RoutingScorecardSchema,
   scorecardPath,
   ScorecardSchema,
   sha256Hex,
   type ReplayResult,
+  type RoutingScorecard,
   type Scorecard,
   type UpstreamReport,
 } from "@vtc/shared";
@@ -38,6 +40,11 @@ export interface UpstreamEvidenceData {
   readonly replay?: ReplayResult;
   /** The role's scorecards (VTC-side numbers): projected without their breakdown. */
   readonly scorecards?: readonly Scorecard[];
+  /**
+   * The routing scorecard (D-cn, `LOOKBACK_REPO.routingScorecard`): VTC vocabulary and numbers
+   * only (role, mode, host, size, risk class, tiers, metrics), checked against its strict schema.
+   */
+  readonly routingScorecard?: RoutingScorecard;
 }
 
 export interface UpstreamEvidenceSnapshot {
@@ -74,7 +81,8 @@ const path = (route: keyof typeof ENGINE_HTTP.routes, run = UPSTREAM_EVIDENCE_RU
 export const artifactRouteKey = (run: string, rel: string): string =>
   `${path("artifact", run)}?${new URLSearchParams({ path: rel }).toString()}`;
 
-const artifact = (run: string, rel: string, value: unknown) => {
+/** Pure: the `ArtifactContent` body of a JSON artifact of `run` (the dashboard's artifact route). */
+export const jsonArtifact = (run: string, rel: string, value: unknown) => {
   const content = `${JSON.stringify(value, null, 2)}\n`;
   return {
     run,
@@ -123,7 +131,7 @@ export const upstreamEvidenceSnapshot = (input: {
   const events: unknown[] = [];
   const replay = input.data?.replay;
   if (replay !== undefined) {
-    const projected = artifact(run, UPSTREAM_REPLAY_PATH, upstreamReplay(replay));
+    const projected = jsonArtifact(run, UPSTREAM_REPLAY_PATH, upstreamReplay(replay));
     routes[artifactRouteKey(run, UPSTREAM_REPLAY_PATH)] = projected;
     events.push({
       v: 1,
@@ -150,15 +158,24 @@ export const upstreamEvidenceSnapshot = (input: {
         written_at: c.written_at,
       })),
     };
-    routes[artifactRouteKey(run, LOOKBACK_REPO.scorecardIndex)] = artifact(
+    routes[artifactRouteKey(run, LOOKBACK_REPO.scorecardIndex)] = jsonArtifact(
       run,
       LOOKBACK_REPO.scorecardIndex,
       index,
     );
     for (const [i, card] of cards.entries()) {
       const rel = index.scorecards[i]?.path ?? "";
-      routes[artifactRouteKey(run, rel)] = artifact(run, rel, card);
+      routes[artifactRouteKey(run, rel)] = jsonArtifact(run, rel, card);
     }
+  }
+  const routing = input.data?.routingScorecard;
+  if (routing !== undefined) {
+    const rel = LOOKBACK_REPO.routingScorecard;
+    routes[artifactRouteKey(run, rel)] = jsonArtifact(
+      run,
+      rel,
+      RoutingScorecardSchema.parse(routing),
+    );
   }
   const page = { run, events, next_after: null };
   routes[path("runEvents")] = page;

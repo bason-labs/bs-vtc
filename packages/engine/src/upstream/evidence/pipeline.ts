@@ -2,8 +2,10 @@
  * One PR's evidence, end to end (D-ce, H-8; AD-27 rule 6): render the gate report when the change
  * is not a UI one, serve a redacted snapshot on the loopback, capture the planned shots through the
  * injected `EvidenceRecorder` (retrying failed shots once), add the visual gate's before/after
- * screenshots, make a GIF when ffmpeg is present, apply the budget, publish (`branch` or
- * `attach`), and write the manifest. No file at all, a gate report that does not render, or an
+ * screenshots, or, for an automatic run's UI PR, have the gate runner render the base and the head
+ * (`EvidenceRecorder.captureBeforeAfter`, D-ct), make a GIF when ffmpeg is present, apply the
+ * budget, publish (`branch` or `attach`), and write the manifest. A partial set says why
+ * (`EvidencePartialReason`) when the cause is known. No file at all, a gate report that does not render, or an
  * evidence branch that cannot be pushed (each tried twice; each push attempt fetches the shared
  * branch and rebuilds first) fails the step and no PR opens. A capture failure makes the caller
  * raise "evidence capture failed"; a refused push (`pushRefused`) does not, since another
@@ -23,14 +25,16 @@ import {
   type EvidenceFileKind,
   type EvidenceHosting,
   type EvidenceManifest,
+  type EvidencePartialReason,
   type EvidenceRecorder,
   type EvidenceShot,
   type GateReport,
   type GitHubRepo,
   type GitPlumbing,
+  type GitSha,
 } from "@vtc/shared";
 import type { RemoteRefs } from "../remote-refs.js";
-import { createExclusive, readRegularFileNoFollow } from "../safe-fs.js";
+import { createExclusive, ensureDirNoFollow, readRegularFileNoFollow } from "../safe-fs.js";
 import { isAutomationSkip } from "../skip.js";
 import { makeGif, type FfmpegCommand } from "./gif.js";
 import {
@@ -96,6 +100,23 @@ export interface EvidenceRequest {
   }[];
   /** The checkout the UI shots come from; without it no UI shot is read. */
   readonly shotsRoot?: string | undefined;
+  /**
+   * D-ct: an automatic run's UI PR at its release. The recorder checks `base` out a second time
+   * in the gate sandbox, builds and serves it, and renders the Visual QA screens of both commits
+   * (`captureBeforeAfter`), with the changed flow recorded for at most `flowSeconds`
+   * (≤ `EVIDENCE_LIMITS.maxFlowSeconds`) unless recordings are off. `base` is the commit the
+   * automatic branch was cut from; `null`: the caller does not know it, so nothing is rendered and
+   * the set is partial (`capture_failed`), never a "before" of some other commit.
+   */
+  readonly beforeAfter?:
+    | {
+        readonly repoRoot: string;
+        readonly base: GitSha | null;
+        readonly head: GitSha;
+        readonly screens?: readonly string[] | undefined;
+        readonly flowSeconds?: number | undefined;
+      }
+    | undefined;
   /** `visual.redact_selectors` of the project. */
   readonly redactSelectors?: readonly string[];
   /** Known secret values (redacted from the snapshot, refused on screen). */
@@ -130,6 +151,8 @@ export type EvidenceOutcome =
       /** `attach` hosting: the files to pass as `--attach`. */
       readonly attach: readonly EvidenceAttachment[];
       readonly partial: boolean;
+      /** Why the set is partial, when the cause is known (D-ct). */
+      readonly partialReason?: EvidencePartialReason;
     }
   | {
       readonly ok: false;
@@ -208,6 +231,17 @@ const PNG_MAGIC = [0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a];
 
 const isPng = (bytes: Uint8Array): boolean => PNG_MAGIC.every((b, i) => bytes[i] === b);
 
+/** WebM's EBML header. */
+const WEBM_MAGIC = [0x1a, 0x45, 0xdf, 0xa3];
+/** MP4's `ftyp` box type, at offset 4. */
+const MP4_FTYP = [0x66, 0x74, 0x79, 0x70];
+
+/** Whether `bytes` open as the container `ext` names (`webm` or `mp4`). */
+const isVideo = (bytes: Uint8Array, ext: string): boolean =>
+  ext === "webm"
+    ? WEBM_MAGIC.every((b, i) => bytes[i] === b)
+    : ext === "mp4" && MP4_FTYP.every((b, i) => bytes[i + 4] === b);
+
 /** A name a recorder returns for a file in its output directory: one plain segment. */
 const PLAIN_NAME = /^[A-Za-z0-9][A-Za-z0-9._-]{0,80}$/;
 
@@ -235,6 +269,90 @@ const nextName = (files: readonly EvidenceFile[], slug: string, ext: string): st
   const used = files.map((f) => Number(f.name.slice(0, 2)));
   const n = Math.max(0, ...used) + 1;
   return EvidenceFileNameSchema.parse(`${String(n).padStart(2, "0")}-${slug}.${ext}`);
+};
+
+/** The kinds a before/after capture returns (D-ct). */
+const BEFORE_AFTER_KINDS: ReadonlySet<EvidenceFileKind> = new Set([
+  "ui_before",
+  "ui_after",
+  "flow_video",
+]);
+
+/**
+ * D-ct: the gate runner's before/after of an automatic run's UI PR, copied into the staging
+ * directory under fresh neutral names. The recorder writes into a directory of its own, and each
+ * file it names must be a neutral name of a before/after kind, a regular file (never through a
+ * symlink) within its kind's cap, a PNG or a WebM/MP4 as its kind says; any other is left out.
+ * Returns the files and, when a side is missing, why.
+ */
+const captureBeforeAfter = async (
+  stagingDir: string,
+  request: EvidenceRequest,
+  recorder: EvidenceRecorder,
+  existing: readonly EvidenceFile[],
+): Promise<{ files: EvidenceFile[]; reason?: EvidencePartialReason }> => {
+  const target = request.beforeAfter;
+  if (target === undefined) return { files: [] };
+  // a recorder from before 5.4.0 cannot render the base: no before/after at all
+  const method = recorder.captureBeforeAfter?.bind(recorder);
+  if (method === undefined) return { files: [], reason: "capture_failed" };
+  // no known cut point: nothing was built, and a "before" of another commit would mislead
+  const base = target.base;
+  if (base === null) return { files: [], reason: "capture_failed" };
+  const video = request.plan.video !== false;
+  const outDir = ensureDirNoFollow(stagingDir, join(stagingDir, "before-after"), "the evidence");
+  const flowSeconds = Math.min(
+    EVIDENCE_LIMITS.maxFlowSeconds,
+    target.flowSeconds ?? EVIDENCE_LIMITS.maxFlowSeconds,
+  );
+  const result = await twice(() =>
+    method({
+      repoRoot: target.repoRoot,
+      base,
+      head: target.head,
+      outDir,
+      ...(target.screens === undefined ? {} : { screens: target.screens }),
+      ...(video && flowSeconds > 0 ? { flowSeconds } : {}),
+      redactSelectors: [...BASE_REDACT_SELECTORS, ...(request.redactSelectors ?? [])],
+      denyText: [...request.knownValues, ...(request.denylist ?? [])],
+    }),
+  );
+  if (result === null) return { files: [], reason: "capture_failed" };
+  const files: EvidenceFile[] = [];
+  for (const file of result.files) {
+    if (!BEFORE_AFTER_KINDS.has(file.kind) || (!video && file.kind === "flow_video")) continue;
+    if (!EvidenceFileNameSchema.safeParse(file.name).success) continue;
+    const dot = file.name.lastIndexOf(".");
+    const ext = file.name.slice(dot + 1);
+    const motion = file.kind === "flow_video";
+    if (motion ? ext !== "webm" && ext !== "mp4" : ext !== "png") continue;
+    const bytes = readRegularFileNoFollow(
+      join(outDir, file.name),
+      motion ? EVIDENCE_LIMITS.maxVideoBytes : EVIDENCE_LIMITS.maxPngBytes,
+    );
+    if (bytes === null || !(motion ? isVideo(bytes, ext) : isPng(bytes))) continue;
+    const name = nextName([...existing, ...files], file.name.slice(3, dot), ext);
+    if (!createExclusive(join(stagingDir, name), bytes)) continue;
+    files.push({ name, kind: file.kind, bytes: bytes.length, alt: ALT[file.kind] });
+  }
+  const has = (kind: EvidenceFileKind): boolean => files.some((f) => f.kind === kind);
+  const missing = !has("ui_before") || !has("ui_after") || (video && !has("flow_video"));
+  const reason = result.partial?.reason ?? (missing ? "capture_failed" : undefined);
+  return { files, ...(reason === undefined ? {} : { reason }) };
+};
+
+/**
+ * Pure: why an incomplete set is partial, from what it lacks: recordings off, then no ffmpeg
+ * under `branch` hosting, then a capture that failed; a set cut by the budget alone has no reason.
+ */
+const partialReasonOf = (
+  missing: readonly MissingEvidence[],
+): EvidencePartialReason | undefined => {
+  const reasons = new Set(missing.map((m) => m.reason));
+  if (reasons.has("video_off")) return "video_off";
+  if (reasons.has("no_ffmpeg")) return "no_ffmpeg";
+  if (reasons.has("not_captured")) return "capture_failed";
+  return undefined;
 };
 
 /** Runs the pipeline in `stagingDir` (the per-action staging directory the PR is opened from). */
@@ -311,6 +429,14 @@ export const prepareEvidence = async (
       }
     }
   }
+  const beforeAfter =
+    request.beforeAfter !== undefined && request.plan.change === "ui" && !request.plan.upstreamSafe;
+  let beforeAfterReason: EvidencePartialReason | undefined;
+  if (beforeAfter) {
+    const got = await captureBeforeAfter(stagingDir, request, deps.recorder, files);
+    files.push(...got.files);
+    beforeAfterReason = got.reason;
+  }
   const video = files.find((f) => f.kind === "replay_video");
   if (deps.ffmpeg && deps.ffmpegCommand !== undefined && video !== undefined) {
     const output = nextName(files, "replay-preview", "gif");
@@ -330,8 +456,7 @@ export const prepareEvidence = async (
       detail: `no evidence file was captured (${String(captured.reasons.length)} failed shot(s))`,
     };
   }
-  const required = requiredEvidenceKinds(request.plan, deps.hosting);
-  const complete = evidenceComplete(kept, required);
+  const required = requiredEvidenceKinds(request.plan, deps.hosting, { beforeAfter });
   const missing: MissingEvidence[] = required
     .filter((kind) => !kept.some((f) => f.kind === kind))
     .map((kind) => ({
@@ -345,6 +470,9 @@ export const prepareEvidence = async (
             ? "no_ffmpeg"
             : "not_captured",
     }));
+  // the recorder's own reason (the base did not build, …) says more than the missing kinds
+  const partialReason = beforeAfterReason ?? partialReasonOf(missing);
+  const complete = evidenceComplete(kept, required) && beforeAfterReason === undefined;
   let urls: Map<string, string> | undefined;
   if (deps.hosting === "branch") {
     const plumbing = deps.plumbing;
@@ -392,6 +520,7 @@ export const prepareEvidence = async (
     files: kept,
     ...(urls === undefined ? {} : { urls }),
     complete,
+    ...(complete || partialReason === undefined ? {} : { partialReason }),
     capturedAt: deps.now().toISOString(),
   });
   writeManifest(manifest, request.keep, request.knownValues);
@@ -404,8 +533,10 @@ export const prepareEvidence = async (
       ...(urls === undefined ? {} : { urls }),
       partial: !complete,
       missing,
+      reason: complete ? undefined : partialReason,
     }),
     attach: attachmentsFor(deps.hosting, kept),
     partial: !complete,
+    ...(complete || partialReason === undefined ? {} : { partialReason }),
   };
 };
