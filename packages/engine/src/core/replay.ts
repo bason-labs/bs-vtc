@@ -656,7 +656,16 @@ export const planReplays = async (k: Kernel, h: RunHandle): Promise<ReplayPlan> 
             ),
           );
       }
-      skipped.push(...(planned.events ?? []));
+      // AD-8: Lookback hands core only its `automation.skipped` drafts; any other type is dropped
+      for (const event of planned.events ?? []) {
+        // the seam's type says `automation.skipped`; the module behind it is checked all the same
+        const type: string = (event as EventDraft).type;
+        if (type === "automation.skipped") skipped.push(event);
+        else
+          k.notice(
+            `lookback replays of run ${h.state.id} handed core a ${type} event to log; only automation.skipped is logged through this seam, so it is dropped`,
+          );
+      }
       for (const replay of planned.replays) {
         const why = replayBlocker(k, h, replay);
         if (why !== null) {

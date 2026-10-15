@@ -26,6 +26,8 @@ import type {
   RoleResult,
   SessionSandboxState,
   TaskPack,
+  TaskRiskClass,
+  TaskSize,
   UnverifiedFactSummary,
   UsageSnapshot,
   VtcEvent,
@@ -265,6 +267,49 @@ export interface ReplayTrialOutcome {
 }
 
 /**
+ * One routing-table cell Lookback proposes to change (D-cn, spine §5 reading 219): the cell
+ * (role, size, risk class), the scorecard numbers that support it, and the engine's own text (it
+ * stays local). The upstream module fingerprints it by its subject.
+ */
+export interface RoutingProposalCell {
+  readonly role: string;
+  readonly size: TaskSize;
+  readonly risk: TaskRiskClass;
+  readonly metrics?: Readonly<Record<string, number>>;
+  readonly detail: string;
+}
+
+/**
+ * Lookback's routing step at RETRO (D-cn): write the routing scorecard
+ * (`.vtc/lookback/scorecards/routing.json`, `RoutingScorecard`) from the history and return the
+ * cells whose start tier it proposes to change. The lookback module implements it (the
+ * lookback-research team's routing scorecard writer and routing proposals, `lookback/`, which names
+ * this type from core's index); the daemon calls it at RETRO, beside the `LookbackRetro` seam it
+ * hands core. Core itself never calls it.
+ */
+export type RoutingLookback = (input: {
+  readonly projectRoot: string;
+  /** Every run's events as Lookback reads them (without replay trials, reading 177). */
+  readonly history: readonly VtcEvent[];
+  readonly graderBundleSha: string;
+  readonly now: Date;
+  /**
+   * The locked prompt section of each dispatch's version, with which Lookback trusts the rows of
+   * `attributions.jsonl` (a failed dispatch counts against its tier's `tokens_per_success`).
+   */
+  readonly lockedShaFor: (
+    role: string,
+    mode: string | undefined,
+    host: HostId,
+  ) => string | undefined;
+  /** The VTC home whose recorded AI tiebreaks let an `ai_tiebreak` attribution count. */
+  readonly vtcHome: string;
+}) => Promise<readonly RoutingProposalCell[]>;
+
+/** An `automation.skipped` draft, the only event `LookbackRetro.replays` may hand core to log. */
+export type LookbackSkippedDraft = EventDraft & { readonly type: "automation.skipped" };
+
+/**
  * Lookback at RETRO (spec §13 steps 1–2; AD-21 rules 4 and 8; spine §5 reading 154): the lookback
  * module implements it and the daemon hands it to the engine (`Engine.setLookbackRetro`), so core
  * never imports lookback (AD-13 rule 12).
@@ -295,14 +340,16 @@ export interface LookbackRetro {
    * already graded left out), so a replay may come with only some of its trials, or none when
    * every trial is graded and it is ready to finish; core applies no trial cap of its own.
    * `wait` says why some cannot start now; `events` are Lookback's `automation.skipped` drafts
-   * for the limits it hit (D-cg), which the run logs. Absent: no replays.
+   * for the limits it hit (D-cg), which the run logs; core logs no other type through this seam
+   * (AD-8: the engine decides every state transition) and drops one with a notice. Absent: no
+   * replays.
    */
   replays?(state: RunState): Promise<{
     readonly replays: readonly LookbackReplay[];
     readonly wait?: string;
     /** The limit `wait` names, for its `automation.skipped` (D-cg); absent: no limit. */
     readonly waitKind?: "weekly_window" | "budget";
-    readonly events?: readonly EventDraft[];
+    readonly events?: readonly LookbackSkippedDraft[];
   }>;
   /**
    * Keeps one trial's outcome in Lookback's trial ledger as it is known (D-cg, spine §5 reading

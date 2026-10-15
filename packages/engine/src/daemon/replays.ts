@@ -12,8 +12,11 @@
  *   graded are left out, a replay whose trial measured nothing `REPLAY_MAX_INFRA_ATTEMPTS` times is
  *   left out, and the weekly window of the run's Lead host, the budget and the per-RETRO cap
  *   (`lookbackPaceFor`, D-cq: 36 while more than half the window is left) bound the rest, each
- *   limit an `automation.skipped` the run logs. A proposal whose versions or tasks cannot be found
- *   is left out with its reason.
+ *   limit an `automation.skipped` the run logs. The user's `~/.vtc/config.yaml` `lookback` section
+ *   (`lookback`, {@link liveLookbackConfig}) sets that pace: the per-RETRO cap, and how many
+ *   failure tasks and regression tasks one replay samples (the first of each `replayTasks` lists,
+ *   so the plan stays the same from one RETRO to the next while new runs add held-out tasks). A
+ *   proposal whose versions or tasks cannot be found is left out with its reason.
  * - `recordTrial`: each trial's grade (`recordReplayTrial`) or infrastructure attempt
  *   (`recordReplayInfra`) in the ledger under the VTC home, as core learns it, so a replay
  *   continues across RETROs.
@@ -28,7 +31,7 @@
  *   `writeReplayResult` (the event carries the SHA-256 of the bytes written), and the measured A/A
  *   flip rate kept for the next replay; nothing while trials are still missing.
  */
-import { readdirSync, readFileSync } from "node:fs";
+import { readdirSync, readFileSync, statSync } from "node:fs";
 import { join } from "node:path";
 import {
   ACCEPTANCE_TESTS,
@@ -38,13 +41,17 @@ import {
   parsePersisted,
   PromptVersionFrontmatterSchema,
   TaskPackSchema,
+  USER_CONFIG_FILE,
+  UserConfigSchema,
   type GateRunner,
   type HostId,
+  type LookbackPace,
   type ModelTier,
   type PromptVersionRef,
   type ReplayGrader,
   type TaskPack,
   type TierReason,
+  type UserConfig,
   type VtcEvent,
 } from "@vtc/shared";
 import {
@@ -107,7 +114,89 @@ export interface ReplayWiringDeps {
   readonly now: () => Date;
   /** How a replay's trials were graded (`replayGraderFor`); absent: `gates`. */
   readonly graderOf?: (replay: LookbackReplay) => ReplayGrader | null;
+  /**
+   * The user's replay pace (D-cq, spine §5 reading 224): `~/.vtc/config.yaml` `lookback` as it is
+   * now ({@link liveLookbackConfig}); absent or `undefined`: `LOOKBACK_LIMITS`.
+   */
+  readonly lookback?: () => UserConfig["lookback"];
 }
+
+/** The `lookback` section of a user config file's text, or why it does not parse. */
+export const parseLookbackSection = (
+  text: string,
+):
+  | { readonly ok: true; readonly lookback: UserConfig["lookback"] }
+  | { readonly ok: false; readonly error: string } => {
+  let raw: unknown;
+  try {
+    raw = parseYaml(text);
+  } catch (error) {
+    return { ok: false, error: error instanceof Error ? error.message : String(error) };
+  }
+  const section =
+    typeof raw === "object" && raw !== null ? (raw as { lookback?: unknown }).lookback : undefined;
+  const parsed = parsePersisted(UserConfigSchema.shape.lookback, section);
+  if (!parsed.success)
+    return {
+      ok: false,
+      error: parsed.error.issues
+        .map((i) => `lookback.${i.path.map(String).join(".")}: ${i.message}`)
+        .join("; "),
+    };
+  return { ok: true, lookback: parsed.data };
+};
+
+/**
+ * D-cq (spine §5 reading 224): the `lookback` section of `<vtcHome>/config.yaml`
+ * (`USER_CONFIG_FILE`, `UserConfigSchema`) as it is on disk now, re-read when the file changes, so
+ * a pace the user sets while the daemon runs applies at the next RETRO. Only this section is read
+ * (the cli reads the rest): a missing file is `undefined` (the `LOOKBACK_LIMITS` defaults), and so
+ * is a section that does not parse, told once through `warn`.
+ */
+export const liveLookbackConfig = (
+  vtcHome: string,
+  warn: (message: string) => void,
+): (() => UserConfig["lookback"]) => {
+  const path = join(vtcHome, USER_CONFIG_FILE);
+  let cached: { readonly key: string; readonly lookback: UserConfig["lookback"] } | undefined;
+  return () => {
+    let key = "missing";
+    try {
+      const s = statSync(path, { bigint: true });
+      key = `${String(s.size)}:${String(s.mtimeNs)}:${String(s.ctimeNs)}:${String(s.ino)}`;
+    } catch {
+      // missing or unreadable: the defaults
+    }
+    if (cached?.key === key) return cached.lookback;
+    let lookback: UserConfig["lookback"] = undefined;
+    if (key !== "missing") {
+      try {
+        const parsed = parseLookbackSection(readFileSync(path, "utf8"));
+        if (parsed.ok) lookback = parsed.lookback;
+        else warn(`${path}: ${parsed.error}; the replay pace uses the defaults`);
+      } catch (error) {
+        warn(
+          `${path}: ${error instanceof Error ? error.message : String(error)}; the replay pace uses the defaults`,
+        );
+      }
+    }
+    cached = { key, lookback };
+    return lookback;
+  };
+};
+
+/**
+ * Pure (D-cq): a replay's tasks sampled to the pace, the first `failureTasks` failure tasks and the
+ * first `regressionTasks` regression-set tasks, in `replayTasks`' order.
+ */
+export const sampleReplayTasks = <T extends { readonly task: Pick<ReplayTask, "regressionSet"> }>(
+  tasks: readonly T[],
+  pace: Pick<LookbackPace, "failureTasks" | "regressionTasks">,
+): T[] => {
+  const failures = tasks.filter((t) => !t.task.regressionSet).slice(0, pace.failureTasks);
+  const regressions = tasks.filter((t) => t.task.regressionSet).slice(0, pace.regressionTasks);
+  return [...failures, ...regressions];
+};
 
 /** A version with the editable section it carries (trimmed). */
 interface Arm {
@@ -384,17 +473,21 @@ export const createLookbackReplays = (
             host,
             trials: [],
           });
-    const resolved = replayTasks({
-      history,
-      lockedShaFor: deps.lockedShaFor,
-      tiebreaks: context.tiebreaks,
-      baseline: baseline.version,
-      attributions: context.attributions,
-      ...(grader === "verdict" ? { grader } : {}),
-    }).flatMap((task) => {
-      const recorded = recordedDispatch(history, deps.projectRoot, task, role);
-      return recorded === undefined ? [] : [{ task, ...recorded }];
-    });
+    // D-cq: the tasks that can run again, sampled to the user's pace
+    const resolved = sampleReplayTasks(
+      replayTasks({
+        history,
+        lockedShaFor: deps.lockedShaFor,
+        tiebreaks: context.tiebreaks,
+        baseline: baseline.version,
+        attributions: context.attributions,
+        ...(grader === "verdict" ? { grader } : {}),
+      }).flatMap((task) => {
+        const recorded = recordedDispatch(history, deps.projectRoot, task, role);
+        return recorded === undefined ? [] : [{ task, ...recorded }];
+      }),
+      lookbackPaceFor({ lookback: deps.lookback?.() }, null),
+    );
     if (resolved.length === 0) return "no held-out task of its baseline can be run again";
     const recorded = new Map(resolved.map((r) => [`${r.task.run}:${r.task.trace}`, r]));
     const withAa =
@@ -499,7 +592,7 @@ export const createLookbackReplays = (
         },
         weeklyRemainingPct: pct,
         budgetAvailable: deps.budgetAvailable(state),
-        cap: lookbackPaceFor(undefined, pct).maxTrialsPerRetro,
+        cap: lookbackPaceFor({ lookback: deps.lookback?.() }, pct).maxTrialsPerRetro,
       });
       for (const u of launch.unreplayable) left.push(`${u.proposal}: ${u.reason}`);
       // the lookback role's own checks first (reading 176): a limit says why nothing runs now,

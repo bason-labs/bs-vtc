@@ -4,7 +4,8 @@
  * dispatch that ends gets its canary evaluated in the run's log, and `run.finished` attributes the
  * run and writes the scorecards the dashboard lists.
  */
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { fileURLToPath } from "node:url";
@@ -20,6 +21,7 @@ import {
   LOOKBACK_LIMITS,
   LOOKBACK_REPO,
   LookbackPinsSchema,
+  lookbackPaceFor,
   PLUGIN_MANIFEST_ASSET,
   PluginManifestSchema,
   promptShaFor,
@@ -54,6 +56,7 @@ import {
   wireLookback,
   type RoutingLookback,
 } from "../../src/daemon/index.js";
+import { liveLookbackConfig, sampleReplayTasks } from "../../src/daemon/replays.js";
 import {
   lookbackEvent,
   lookbackTargets,
@@ -425,83 +428,103 @@ describe("RETRO reads the weekly window of the run's Lead host (AD-21 rule 8, re
   });
 });
 
+/**
+ * A delivered run whose held-out Engineer dispatch gets a recorded proposal (`p-1`), carried
+ * through RETRO with the Lookback wiring on, `usedPct` of the Claude weekly window used and, when
+ * given, `config` as the user's `~/.vtc/config.yaml`; returns once the run finished and the
+ * wiring is off.
+ */
+const replayAtRetro = async (
+  options: { readonly usedPct?: number; readonly config?: string } = {},
+) => {
+  const trialPacks: string[] = [];
+  const h = createHarness({
+    plugins: switched,
+    project: { merge_level: 1 },
+    // D-cg: every trial is an engine-launched headless run with its arm's compiled plugin
+    armPlugins: {
+      compileArm: (request) =>
+        Promise.resolve({
+          dir: request.outDir,
+          version: "arm-000000000000",
+          promptSha256: effectivePromptSha(LOCKED, request.editable),
+        }),
+    },
+    headless: (request) => {
+      const pack = /^Read your task pack: (.*)$/m.exec(request.prompt)?.[1] ?? "";
+      trialPacks.push(readFileSync(pack, "utf8"));
+      mkdirSync(join(request.cwd, "src/t-1"), { recursive: true });
+      writeFileSync(join(request.cwd, "src/t-1/impl.ts"), "export const x = 2;\n");
+      return {
+        kind: "done",
+        session_ref: null,
+        output: { role: request.role, summary: "done", exit: "built" },
+        model: "sonnet",
+        tokens: { in: 100, out: 50, cache_r: 0, cache_w: 0 },
+        cost_usd: 0.1,
+      };
+    },
+  });
+  if (options.config !== undefined) writeFileSync(join(h.home, "config.yaml"), options.config);
+  h.engine.ingestUsage({
+    host: "claude-code",
+    source: "statusline",
+    windows: [
+      {
+        kind: "weekly",
+        label: "weekly",
+        window_minutes: 10080,
+        used_pct: options.usedPct ?? 10,
+        resets_at: null,
+      },
+    ],
+    model_limits: [],
+    updated_at: "2026-10-13T09:00:00.000Z",
+  });
+  const unwire = wireLookback(h.engine, { repoRoot: h.repo, vtcHome: h.home }, switched);
+  const actions = await throughPlan(h, [draft("T-1")], SPEC_ONE);
+  await authorTests(h, only(actions, "qa"));
+  await build(h, only((await h.engine.next({}, CLAUDE)).actions, "engineer"));
+  await verdictPass(
+    h,
+    only((await h.engine.next({}, CLAUDE)).actions, "spec_verifier"),
+    "src/t-1/impl.ts",
+  );
+  await h.engine.settle();
+  const run = h.engine.status({}).run.id;
+  // a held-out dispatch of a task role that writes files (a verdict role is not replayed): its
+  // version gets a recorded proposal
+  const held = events(h).find(
+    (e) =>
+      e.type === "role.dispatched" &&
+      e.task !== undefined &&
+      e.role === "engineer" &&
+      traceSplit({ run, trace: String(e.data.action_id) }) === "holdout",
+  );
+  if (held?.role === undefined) throw new Error("no held-out task dispatch to replay");
+  const role = held.role;
+  const candidate = await store(h, role);
+  h.engine.recordModuleEvent(
+    run,
+    lookbackEvent("lookback.proposal_recorded", {
+      proposal: "p-1",
+      path: `.vtc/lookback/proposals/${role}/proposal.json`,
+      changes: 1,
+    }),
+  );
+  const carried = spawns(await passFinalReview(h));
+  await h.engine.settle();
+  for (let i = 0; i < 2 && h.engine.status({}).run.finished_at === undefined; i += 1) {
+    carried.push(...spawns((await h.engine.next({}, CLAUDE)).actions));
+    await h.engine.settle();
+  }
+  await unwire();
+  return { h, trialPacks, held, role, candidate, carried };
+};
+
 describe("RETRO replays a recorded proposal end to end (AD-21 rule 6, readings 176 and 201)", () => {
   it("runs its trials headless with each arm's own plugin, grades them through the Gate Runner and writes the result with its SHA-256", async () => {
-    const trialPacks: string[] = [];
-    const h = createHarness({
-      plugins: switched,
-      project: { merge_level: 1 },
-      // D-cg: every trial is an engine-launched headless run with its arm's compiled plugin
-      armPlugins: {
-        compileArm: (request) =>
-          Promise.resolve({
-            dir: request.outDir,
-            version: "arm-000000000000",
-            promptSha256: effectivePromptSha(LOCKED, request.editable),
-          }),
-      },
-      headless: (request) => {
-        const pack = /^Read your task pack: (.*)$/m.exec(request.prompt)?.[1] ?? "";
-        trialPacks.push(readFileSync(pack, "utf8"));
-        mkdirSync(join(request.cwd, "src/t-1"), { recursive: true });
-        writeFileSync(join(request.cwd, "src/t-1/impl.ts"), "export const x = 2;\n");
-        return {
-          kind: "done",
-          session_ref: null,
-          output: { role: request.role, summary: "done", exit: "built" },
-          model: "sonnet",
-          tokens: { in: 100, out: 50, cache_r: 0, cache_w: 0 },
-          cost_usd: 0.1,
-        };
-      },
-    });
-    h.engine.ingestUsage({
-      host: "claude-code",
-      source: "statusline",
-      windows: [
-        { kind: "weekly", label: "weekly", window_minutes: 10080, used_pct: 10, resets_at: null },
-      ],
-      model_limits: [],
-      updated_at: "2026-10-13T09:00:00.000Z",
-    });
-    const unwire = wireLookback(h.engine, { repoRoot: h.repo, vtcHome: h.home }, switched);
-    const actions = await throughPlan(h, [draft("T-1")], SPEC_ONE);
-    await authorTests(h, only(actions, "qa"));
-    await build(h, only((await h.engine.next({}, CLAUDE)).actions, "engineer"));
-    await verdictPass(
-      h,
-      only((await h.engine.next({}, CLAUDE)).actions, "spec_verifier"),
-      "src/t-1/impl.ts",
-    );
-    await h.engine.settle();
-    const run = h.engine.status({}).run.id;
-    // a held-out dispatch of a task role that writes files (a verdict role is not replayed): its
-    // version gets a recorded proposal
-    const held = events(h).find(
-      (e) =>
-        e.type === "role.dispatched" &&
-        e.task !== undefined &&
-        e.role === "engineer" &&
-        traceSplit({ run, trace: String(e.data.action_id) }) === "holdout",
-    );
-    if (held?.role === undefined) throw new Error("no held-out task dispatch to replay");
-    const role = held.role;
-    const candidate = await store(h, role);
-    h.engine.recordModuleEvent(
-      run,
-      lookbackEvent("lookback.proposal_recorded", {
-        proposal: "p-1",
-        path: `.vtc/lookback/proposals/${role}/proposal.json`,
-        changes: 1,
-      }),
-    );
-    const carried = spawns(await passFinalReview(h));
-    await h.engine.settle();
-    for (let i = 0; i < 2 && h.engine.status({}).run.finished_at === undefined; i += 1) {
-      carried.push(...spawns((await h.engine.next({}, CLAUDE)).actions));
-      await h.engine.settle();
-    }
-    await unwire();
+    const { h, trialPacks, held, role, candidate, carried } = await replayAtRetro();
     // no trial is a Lead's subagent
     expect(carried.filter((a) => a.role === role)).toEqual([]);
     // D-cm (reading 218 (7)): every trial runs on the tier the replayed dispatch recorded
@@ -559,6 +582,73 @@ describe("RETRO replays a recorded proposal end to end (AD-21 rule 6, readings 1
     expect(index.scorecards.map((c) => c.prompt.effective_sha256)).not.toContain(candidate);
     await h.release();
   }, 120_000);
+
+  it("paces RETRO by the user's config (D-cq, reading 224): max_trials_per_retro: 6 caps one RETRO at 6 trials, the rest a trial_cap skip", async () => {
+    // 40% of the weekly window left: above the replay floor, below the boost threshold
+    const { h, trialPacks } = await replayAtRetro({
+      usedPct: 60,
+      config: "version: 1\nlookback:\n  max_trials_per_retro: 6\n",
+    });
+    expect(trialPacks).toHaveLength(6);
+    const skipped = events(h).filter(
+      (e) => e.type === "automation.skipped" && e.data.reason === "trial_cap",
+    );
+    expect(skipped).toHaveLength(1);
+    // the replay is not complete: it continues at the next RETRO
+    expect(events(h).filter((e) => e.type === "lookback.replay_finished")).toEqual([]);
+    expect(h.engine.status({}).run.finished_at).toBeDefined();
+    await h.release();
+  }, 120_000);
+
+  it("samples a replay's tasks to the user's pace: replay_regression_tasks: 0 leaves a replay of a passed task with none, and it waits", async () => {
+    const { h, trialPacks } = await replayAtRetro({
+      config: "version: 1\nlookback:\n  replay_regression_tasks: 0\n",
+    });
+    expect(trialPacks).toEqual([]);
+    expect(h.engine.notices.join("\n")).toMatch(
+      /p-1: no held-out task of its baseline can be run again/,
+    );
+    expect(events(h).filter((e) => e.type === "lookback.replay_finished")).toEqual([]);
+    expect(h.engine.status({}).run.finished_at).toBeDefined();
+    await h.release();
+  }, 120_000);
+});
+
+describe("the user's replay pace file (D-cq)", () => {
+  it("reads only the lookback section, re-reads it when the file changes, and falls back to the defaults on a bad section", () => {
+    const home = mkdtempSync(join(tmpdir(), "vtc-pace-"));
+    const warned: string[] = [];
+    const pace = liveLookbackConfig(home, (m) => warned.push(m));
+    expect(pace()).toBeUndefined();
+    writeFileSync(
+      join(home, "config.yaml"),
+      "version: 1\nprices: not-a-table\nlookback:\n  max_trials_per_retro: 6\n",
+    );
+    expect(lookbackPaceFor({ lookback: pace() }, 40).maxTrialsPerRetro).toBe(6);
+    // the boosted default still applies while more than half the window is left
+    expect(lookbackPaceFor({ lookback: pace() }, 90).maxTrialsPerRetro).toBe(
+      LOOKBACK_LIMITS.maxTrialsPerRetroBoosted,
+    );
+    writeFileSync(join(home, "config.yaml"), "version: 1\nlookback:\n  max_trials_per_retro: 0\n");
+    expect(pace()).toBeUndefined();
+    expect(warned).toHaveLength(1);
+    expect(warned[0]).toMatch(/lookback\.max_trials_per_retro/);
+    // told once per change of the file
+    pace();
+    expect(warned).toHaveLength(1);
+    rmSync(home, { recursive: true, force: true });
+  });
+
+  it("samples the first failure tasks and regression tasks in replayTasks' order", () => {
+    const t = (id: string, regressionSet: boolean) => ({ id, task: { regressionSet } });
+    const tasks = [t("f1", false), t("f2", false), t("f3", false), t("r1", true), t("r2", true)];
+    expect(
+      sampleReplayTasks(tasks, { failureTasks: 2, regressionTasks: 1 }).map((x) => x.id),
+    ).toEqual(["f1", "f2", "r1"]);
+    expect(
+      sampleReplayTasks(tasks, { failureTasks: 6, regressionTasks: 0 }).map((x) => x.id),
+    ).toEqual(["f1", "f2", "f3"]);
+  });
 });
 
 // Spine §5 readings 201 and 202 (D-cg, D-ch): on a Claude Lead every file-writing role replays
@@ -737,6 +827,40 @@ describe("Lookback's new-agent signals reach automation (D-cd)", () => {
     expect(stack.subject).toBe("engineer_globexpay");
     expect(stack).not.toHaveProperty("role");
   });
+
+  it("reads the installed roles at each RETRO, not once at wiring: a role installed while the daemon runs is seen", async () => {
+    const h = createHarness({ plugins: switched, project: { merge_level: 1 } });
+    let reads = 0;
+    const unwire = wireLookback(
+      h.engine,
+      { repoRoot: h.repo, vtcHome: h.home },
+      switched,
+      undefined,
+      {
+        roles: () => {
+          reads += 1;
+          return [];
+        },
+        found: () => undefined,
+      },
+    );
+    expect(reads).toBe(0);
+    const actions = await throughPlan(h, [draft("T-1")], SPEC_ONE);
+    await authorTests(h, only(actions, "qa"));
+    await build(h, only((await h.engine.next({}, CLAUDE)).actions, "engineer"));
+    await verdictPass(
+      h,
+      only((await h.engine.next({}, CLAUDE)).actions, "spec_verifier"),
+      "src/t-1/impl.ts",
+    );
+    await h.engine.settle();
+    expect(reads).toBe(0);
+    await passFinalReview(h);
+    await unwire();
+    // RETRO's plan read them, and the run's end read them again
+    expect(reads).toBeGreaterThanOrEqual(2);
+    await h.release();
+  }, 40_000);
 });
 
 describe("Lookback tunes routing at RETRO (D-cn, spine §5 reading 219)", () => {

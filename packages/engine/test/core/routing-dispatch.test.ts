@@ -6,7 +6,7 @@
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { EVENT_PAYLOAD_SCHEMAS, type LeadAction } from "@vtc/shared";
+import { EVENT_PAYLOAD_SCHEMAS, type HostOutcome, type LeadAction } from "@vtc/shared";
 import { loadRuns, resolveModel, taskDetailView } from "../../src/core/index.js";
 import { ALL_FIXTURE_ROLES } from "../fixtures/roles.js";
 import { cleanupDirs, writeFile } from "../helpers/repo.js";
@@ -21,9 +21,11 @@ import {
   throughPlan,
   toolFinding,
   worktreeOf,
+  spawns,
   SPEC_ONE,
   type Harness,
   type HarnessOptions,
+  type HeadlessScript,
   type SpawnAction,
 } from "../helpers/engine-harness.js";
 
@@ -257,6 +259,82 @@ describe("the routed start tier on dispatch (D-cm)", () => {
       { model: "opus", tier: "top", reason: "rule", clamped: false },
       { model: "sonnet", tier: "mid", reason: "budget_drop", clamped: false },
     ]);
+    await h.release();
+  });
+});
+
+describe("the reviewers' routed tiers in a whole flow (D-cm)", () => {
+  /** The cross-family QA judge's headless run: it passes the task. */
+  const crossJudge: HeadlessScript = (request): HostOutcome => ({
+    kind: "done",
+    session_ref: null,
+    output: {
+      role: "qa",
+      mode: "judge",
+      task: "T-1",
+      summary: "reviewed",
+      exit: "done",
+      verdicts: [
+        {
+          subject: "T-1",
+          verdict: "pass",
+          evidence: [{ type: "file_line", ref: "src/t-1/impl.ts:1" }],
+        },
+      ],
+    },
+    model: request.model.model ?? null,
+    tokens: null,
+    cost_usd: 0.2,
+  });
+
+  it("routes the QA judge and the cross-family reviewer of a high-risk task on Top by the rule, the latter on its own host", async () => {
+    const h = createHarness({
+      project: {
+        merge_level: 1,
+        concurrency: 3,
+        hosts: { dispatch: "headless_allowed", cross_family_review: true },
+      },
+      codex: { headless: crossJudge },
+    });
+    const actions = await throughPlan(h, [draft("T-1", { risk: "high" })], SPEC_ONE);
+    await authorTests(h, only(actions, "qa"));
+    await build(h, only(await next(h), "engineer"));
+    const reviews = spawns(await next(h));
+    expect(reviews.map((r) => `${r.role}/${r.mode ?? ""}`)).toContain("qa/judge");
+    // the cross-family reviewer is the other family's, launched headless on Codex
+    expect(h.launched.map((l) => [l.host, l.request.role, l.request.mode])).toEqual([
+      ["codex", "qa", "judge"],
+    ]);
+    const judges = dispatched(h).filter((d) => d.role === "qa" && d.data.mode === "judge");
+    expect(judges).toHaveLength(2);
+    for (const d of judges)
+      expect(d.data).toMatchObject({ tier: "top", tier_reason: "rule", tier_clamped: false });
+    // and the model is each host's own for Top
+    expect(h.launched[0]?.request.model.tier).toBe("top");
+    await h.engine.settle();
+    await h.release();
+  });
+
+  it("drops a reviewer one tier at 70% of the task budget, inside its share", async () => {
+    const h = createHarness({
+      project: { concurrency: 1, budgets: { task_usd: { S: 1, M: 1, L: 1 } } },
+    });
+    const actions = await throughPlan(h, [draft("T-1", { size: "L", risk: "low" })], SPEC_ONE);
+    await authorTests(h, only(actions, "qa"));
+    // QA author $0.10 and the Engineer $0.65: 75% of the $1 budget, no reviewer spend yet
+    const engineer = only(await next(h), "engineer");
+    writeFile(worktreeOf(h, "T-1"), "src/t-1/impl.ts", "export const x = 1;\n");
+    expect((await submitResult(h, engineer, { exit: "built" }, 0.65)).accepted).toBe(true);
+    await h.engine.settle();
+    only(await next(h), "spec_verifier");
+    const [reviewer] = dispatched(h).filter((d) => d.role === "spec_verifier");
+    // the L task's rule tier is Top: the drop takes it to Mid
+    expect(tierOf(reviewer!)).toEqual({
+      model: "sonnet",
+      tier: "mid",
+      reason: "budget_drop",
+      clamped: false,
+    });
     await h.release();
   });
 });
