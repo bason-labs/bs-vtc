@@ -133,8 +133,9 @@ binaries must stay out of the production dependency closure (AD-2, `supply-chain
     - **Routing scorecard** (Lookback view and artifact view, D-cn):
       `.vtc/lookback/scorecards/routing.json` per role, mode and host, one row per size, risk
       class and start tier: both pass rates with their 95% interval (drawn on a 0–100% track),
-      tokens per success, the escalated share and the cost per task ("unpriced" when the host
-      reports none), and which cells Lookback does not read yet (fewer than
+      tokens per success, the escalated share and the cost per task ("unpriced" when no task of a
+      read cell has a cost, "4 of 14 tasks priced" when too few do: Lookback's `n` counts the
+      priced tasks), and which cells Lookback does not read yet (fewer than
       `LOOKBACK_LIMITS.routingMinTasks` tasks). In `?evidence=upstream` it shows without a path or
       link, and not at all while RETRO has not written one; `[data-testid="routing-scorecard"]`
       is the ready marker a routing PR's chart shot waits for.

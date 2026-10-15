@@ -88,17 +88,8 @@ export interface RoutingScorecardView {
 const metric = (kind: MetricKind, m: MetricValue | undefined): RoutingMetric | null => {
   if (m === undefined) return null;
   const value = m.value;
-  if (isInsufficient(m) || value === null) {
-    // A cost with enough tasks but no value: the host reports no price (`cost_per_task_usd`).
-    const unpriced = kind === "usd" && value === null && m.n >= LOOKBACK_LIMITS.minScorecardN;
-    return {
-      value: unpriced ? "unpriced" : "insufficient data",
-      interval: null,
-      n: m.n,
-      insufficient: true,
-      mark: null,
-    };
-  }
+  if (isInsufficient(m) || value === null)
+    return { value: "insufficient data", interval: null, n: m.n, insufficient: true, mark: null };
   if (kind !== "proportion")
     return {
       value: valueText(kind, value),
@@ -115,6 +106,20 @@ const metric = (kind: MetricKind, m: MetricValue | undefined): RoutingMetric | n
     insufficient: false,
     mark: { value, low, high },
   };
+};
+
+/**
+ * The cost per task. Lookback averages over the tasks whose every submitted dispatch has a cost,
+ * so its `n` counts priced tasks: `0` on a cell big enough to read means no task was priced, and
+ * a smaller `n` than the cell's tasks means too few were.
+ */
+const costMetric = (c: Cell): RoutingMetric | null => {
+  const m = c.cost_per_task_usd;
+  const shown = metric("usd", m);
+  if (shown === null || !shown.insufficient || c.tasks < LOOKBACK_LIMITS.minScorecardN)
+    return shown;
+  if (m.n === 0 || m.n >= LOOKBACK_LIMITS.minScorecardN) return { ...shown, value: "unpriced" };
+  return { ...shown, value: `${String(m.n)} of ${String(c.tasks)} tasks priced` };
 };
 
 const cellOrder = (a: Cell, b: Cell): number =>
@@ -135,7 +140,7 @@ const cellView = (c: Cell): RoutingCellView => ({
   reviewPass: metric("proportion", c.metrics.review_pass),
   tokensPerSuccess: metric("tokens", c.metrics.tokens_per_success),
   escalated: metric("proportion", c.escalated),
-  costPerTask: metric("usd", c.cost_per_task_usd),
+  costPerTask: costMetric(c),
 });
 
 /** The scorecard grouped by role (and mode) and host, each group's cells in table order. */
