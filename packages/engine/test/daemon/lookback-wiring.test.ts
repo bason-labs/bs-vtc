@@ -59,6 +59,7 @@ import {
 import { liveLookbackConfig, sampleReplayTasks } from "../../src/daemon/replays.js";
 import {
   lookbackEvent,
+  lookbackRoutingStep,
   lookbackTargets,
   pinsPath,
   promptVersionRef,
@@ -931,6 +932,39 @@ describe("Lookback tunes routing at RETRO (D-cn, spine §5 reading 219)", () => 
         ],
       },
     ]);
+    await h.release();
+  }, 40_000);
+
+  it("runs Lookback's own routing step through the seam at RETRO: the routing scorecard is written (merge glue)", async () => {
+    const h = createHarness({ plugins: switched, project: { merge_level: 1 } });
+    const found: unknown[] = [];
+    const unwire = wireLookback(
+      h.engine,
+      { repoRoot: h.repo, vtcHome: h.home },
+      switched,
+      undefined,
+      undefined,
+      { propose: lookbackRoutingStep, found: (_run, facts) => found.push(...facts) },
+    );
+    const actions = await throughPlan(h, [draft("T-1")], SPEC_ONE);
+    await authorTests(h, only(actions, "qa"));
+    await build(h, only((await h.engine.next({}, CLAUDE)).actions, "engineer"));
+    await verdictPass(
+      h,
+      only((await h.engine.next({}, CLAUDE)).actions, "spec_verifier"),
+      "src/t-1/impl.ts",
+    );
+    await h.engine.settle();
+    expect(existsSync(join(h.repo, LOOKBACK_REPO.routingScorecard))).toBe(false);
+    await passFinalReview(h);
+    await unwire();
+    // one run is far below LOOKBACK_LIMITS.routingMinTasks: the cells are written, none is read,
+    // so nothing is proposed
+    const card = JSON.parse(readFileSync(join(h.repo, LOOKBACK_REPO.routingScorecard), "utf8")) as {
+      cells: unknown[];
+    };
+    expect(card.cells.length).toBeGreaterThan(0);
+    expect(found).toEqual([]);
     await h.release();
   }, 40_000);
 
