@@ -3,6 +3,20 @@
 All notable changes to `vtc` are listed here. Versions follow semver; while the version is 0.x,
 any release may change behaviour. Role prompt changes have their own log in `roles/CHANGELOG.md`.
 
+## Unreleased
+
+- **No price table to fill (H-12).** A host that reports no cost (Codex) ships its default
+  prices with vtc, from the provider's public API pricing page with that page's URL and date.
+  `prices` in `~/.vtc/config.yaml` now only overrides a model, and never has to be set.
+  `vtc doctor` shows each shipped table's source and date and your overrides. It warns only when
+  such a host has no known price at all, and no longer asks you to fill the table.
+- **Refused model ids (D-cx).** When a host refuses a model id on your plan, the run falls back
+  to the host default. `vtc doctor` lists each refused id with its last time and the host's
+  message.
+- **Release notes from this file (H-16).** The release workflow takes each release's notes from
+  its section here, checks the section exists before building, and publishes only to the
+  private repository's GitHub Releases.
+
 ## v0.1.0 (2026-10-15)
 
 The first internal release. It is private to the bason-labs/bs-vtc repository and not published
