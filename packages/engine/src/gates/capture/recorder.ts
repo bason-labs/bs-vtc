@@ -46,8 +46,8 @@ import {
   type EvidenceShot,
   type GateReport,
   type GateSandbox,
+  type GitOps,
 } from "@vtc/shared";
-import { createGitOps } from "../../git/index.js";
 import { loadGatesConfig } from "../config.js";
 import { gateEnv } from "../exec.js";
 import {
@@ -65,7 +65,6 @@ import {
 import { appLoopbackPort } from "../visual/app.js";
 import {
   engineNodeExecutable,
-  LINUX_PTRACE_REFUSAL,
   NO_RUNNER_NODE,
   readPtraceScope,
   resolveNodeExecutable,
@@ -120,8 +119,13 @@ export interface EvidenceRecorderDeps {
   readonly repoRoot?: string;
   /** The gate sandbox (D-al); absent: detected. */
   readonly sandbox?: GateSandbox;
-  /** `~/.vtc/config.yaml` `gates.allow_unsandboxed`. */
+  /** `~/.vtc/config.yaml` `gates.allow_unsandboxed` (never for the before/after builds). */
   readonly allowUnsandboxed?: boolean;
+  /**
+   * The engine's `GitOps` over `repoRoot` (AD-13 rule 4: the cli builds it with
+   * `git.createGitOps` and injects it; `gates/` writes no git code). Absent: no before/after.
+   */
+  readonly git?: GitOps;
 }
 
 export interface EvidenceRecorderOptions {
@@ -146,6 +150,19 @@ export const EVIDENCE_NO_BROWSER =
 /** Why nothing is captured without a sandbox. */
 export const EVIDENCE_NO_SANDBOX =
   "no gate sandbox on this machine (vtc doctor says why), so no evidence is captured";
+/** Why no app server is served for evidence on a Linux host whose ptrace policy is open (reading 164). */
+export const EVIDENCE_PTRACE_REFUSAL =
+  "no UI evidence is captured on this Linux host: kernel.yama.ptrace_scope is 0 or absent, so the app server (project code in the evidence runner's sandbox, as the same user) could attach to the runner and sign any result; set kernel.yama.ptrace_scope to 1 or higher (sysctl) to capture it";
+
+/** {@link EVIDENCE_PTRACE_REFUSAL} on a Linux host whose ptrace policy is open, else `null`. */
+const ptraceProblem = (host: {
+  readonly platform?: NodeJS.Platform;
+  readonly ptraceScope?: () => string | null;
+}): string | null => {
+  if ((host.platform ?? process.platform) !== "linux") return null;
+  const scope = Number((host.ptraceScope ?? readPtraceScope)() ?? "0");
+  return scope >= 1 ? null : EVIDENCE_PTRACE_REFUSAL;
+};
 
 const NAV_TIMEOUT_MS = 30_000;
 const LOOPBACK_ORIGIN = /^http:\/\/127\.0\.0\.1:([1-9]\d{0,4})$/;
@@ -206,7 +223,8 @@ const shotProblem = (shot: EvidenceShot): string | null => {
 /**
  * The runner in the gate sandbox; `jail` is `null` without a sandbox (nothing runs). With an app
  * server (before/after), a Linux host whose ptrace policy would let the app reach the runner runs
- * nothing ({@link LINUX_PTRACE_REFUSAL}, reading 164), as in the visual step.
+ * nothing ({@link EVIDENCE_PTRACE_REFUSAL}, reading 164), as in the visual step. The command's
+ * temp directory is removed as soon as its result and files are read back.
  */
 export const sandboxedEvidenceRunner = (
   jail: GateCommandJail | null,
@@ -219,11 +237,14 @@ export const sandboxedEvidenceRunner = (
   run: async (call) => {
     if (jail === null) return { ok: false, reason: EVIDENCE_NO_SANDBOX };
     if (node === null || !isAbsolute(node)) return { ok: false, reason: NO_RUNNER_NODE };
-    if (call.input.app != null && (host.platform ?? process.platform) === "linux") {
-      const scope = Number((host.ptraceScope ?? readPtraceScope)() ?? "0");
-      if (!(scope >= 1)) return { ok: false, reason: LINUX_PTRACE_REFUSAL };
+    if (call.input.app != null) {
+      const refused = ptraceProblem(host);
+      if (refused !== null) return { ok: false, reason: refused };
     }
     const logs = mkdtempSync(join(tmpdir(), "vtc-evidence-logs-"));
+    // The command's temp directory (input, result, output): removed as soon as it is read back,
+    // so no later command in the same jail can read it.
+    let tempDir = null as string | null;
     let relay: Server | null = null;
     const sockets = new Set<Socket>();
     let relayError: string | null = null;
@@ -244,6 +265,7 @@ export const sandboxedEvidenceRunner = (
           stdoutPath: join(logs, "stdout.log"),
           stderrPath: join(logs, "stderr.log"),
           setup: (tmp) => {
+            tempDir = tmp;
             if (!call.input.relay) return;
             const path = join(tmp, "relay.sock");
             if (Buffer.byteLength(path) > MAX_SOCKET_PATH) {
@@ -276,11 +298,17 @@ export const sandboxedEvidenceRunner = (
         EvidenceRunnerResultSchema,
       );
       const failed = relayError as string | null;
-      return failed === null ? outcome : { ok: false, reason: failed };
+      if (failed !== null) return { ok: false, reason: failed };
+      if (!outcome.ok) return outcome;
+      // Read back now: the temp directory is removed below.
+      const files = new Map<string, Uint8Array | null>();
+      for (const name of Object.keys(outcome.result.files)) files.set(name, outcome.file(name));
+      return { ok: true, result: outcome.result, file: (name) => files.get(name) ?? null };
     } finally {
       (relay as Server | null)?.close();
       for (const socket of sockets) socket.destroy();
       rmSync(logs, { recursive: true, force: true });
+      if (tempDir !== null) jail.removeTempDir(tempDir);
     }
   },
 });
@@ -418,7 +446,6 @@ export const createEvidenceRecorder = (
     });
     const recording = shots.reduce((sum, s) => sum + (s.videoSeconds ?? 0), 0);
     const app = target.app;
-    // The jail's temp directory holds the runner's files until they are copied out below.
     try {
       const outcome = await runner.run({
         input: {
@@ -533,10 +560,19 @@ export const createEvidenceRecorder = (
     captureBeforeAfter(
       {
         vtcHome: deps.vtcHome,
+        repoRoot: deps.repoRoot,
         env,
         sandbox: () =>
           resolveGateSandbox(deps, options.detectSandbox ?? (() => detectGateSandbox().sandbox)),
-        git: (repoRoot) => createGitOps({ repoRoot }),
+        git: deps.git,
+        // The default runner refuses an app server here anyway; asked first, nothing is built.
+        hostProblem: () =>
+          options.runner === undefined
+            ? ptraceProblem({
+                ...(options.platform === undefined ? {} : { platform: options.platform }),
+                ...(options.ptraceScope === undefined ? {} : { ptraceScope: options.ptraceScope }),
+              })
+            : null,
         browserProblem: async () => {
           const toolchain = toolchainOf(deps.vtcHome);
           const check = toolchain === null ? null : await checkBrowser(deps.vtcHome);
@@ -564,8 +600,8 @@ export const createEvidenceRecorder = (
 };
 
 /**
- * Copies the files the runner captured, and that passed the scan and the budget, into `outDir`
- * (from the jail's temp directory, before it is removed); everything else is a failed shot.
+ * Copies the files the runner captured, and that passed the scan and the budget, into `outDir`;
+ * everything else is a failed shot.
  */
 const keep = (
   outcome: Extract<SignedScriptOutcome<EvidenceRunnerResult>, { ok: true }>,

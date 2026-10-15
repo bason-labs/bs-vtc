@@ -5,12 +5,21 @@
  * build gates in the gate sandbox, then the app server of the project's committed `gates.yml`
  * (`visual.app`, read at the base like every gate) served in that checkout by the evidence runner,
  * which renders the Visual QA screens (`screens.yaml`, or the request's `screens`) at the Visual
- * QA widths and themes (`visualConfigFor`) and, with `flowSeconds`, records the changed flow.
+ * QA widths and themes (`visualConfigFor`) and, with `flowSeconds`, records a flow video.
  * Build time, no AI tokens; nothing is downloaded at capture time.
  *
+ * - Git: only the engine's `GitOps` the cli injects (AD-13 rule 4), over the recorder's own
+ *   `repoRoot`; a request for another repository, or a recorder without either, captures nothing.
+ * - Sandbox: each side gets a gate sandbox jail of its own (its own `HOME` and temp directories,
+ *   removed before the next side starts), so nothing one commit's code leaves behind reaches the
+ *   other. Never unconfined: `gates.allow_unsandboxed` does not apply, since the commits are built
+ *   and served only for evidence. On a Linux host whose ptrace policy is open, nothing is built
+ *   (`EVIDENCE_PTRACE_REFUSAL`).
+ *
  * - Commands: only what this machine's gate allowlist confirms (§15): the build gates and
- *   `visual.app.command`. A gate that needs a diff (`{changed}`, `{rules}`) or only runs when
- *   some paths change (`when_changed`) is a check, not a build, and does not run here.
+ *   `visual.app.command`. A gate that needs a diff (`{changed}`, `{rules}`), only runs when some
+ *   paths change (`when_changed`) or runs a pinned scanner is a check, not a build, and does not
+ *   run here.
  * - Redaction: every frame passes the same layers as `capture` (the request's `redactSelectors`,
  *   VTC's defaults and the committed `visual.redact_selectors` painted and masked,
  *   `visual.dynamic_regions` masked, the text scan against `SECRET_PATTERNS` and `denyText`, fail
@@ -18,16 +27,25 @@
  * - Names and budget: `NN-ui<k>-w<width>-<theme>-before|after.png` (`ui_before` / `ui_after`) and
  *   `NN-flow-before|after.webm` (`flow_video`), numbered so each pair sorts together; neutral, with
  *   no project text. At most `EVIDENCE_LIMITS.maxFilesPerPr` files and `maxBytesPerPr` bytes in
- *   all: renders past the file budget are left out and listed in `failed`
+ *   all, the base at most half of the bytes so the head's "after" files always have room:
+ *   renders past the file budget are left out and listed in `failed`
  *   ({@link BEFORE_AFTER_FILE_LIMIT_REASON}).
+ * - Flow video (known limit): `BeforeAfterRequest` has no flow steps, so the `flow_video` of each
+ *   side records the first rendered screen (the first job of the matrix) loading and then left
+ *   idle for `flowSeconds`, with reduced motion and no interaction. A real changed-flow
+ *   recording needs flow steps in the contract.
  * - Partial: whatever was captured is returned, with `partial` when a side or a shot is missing:
  *   `base_build_failed` / `base_serve_failed` for the base, `no_visual_app`, `no_browser`, and
  *   `capture_failed` for everything else (the head, a discarded or failed shot, a bad request).
  *   Every detail is VTC's own fixed text with no project text in it (no gate ids, commands, paths
  *   or app output).
- * - Build logs stay local under `.vtc/state/gates/before-after/` (AD-18).
+ * - Build logs stay local under `.vtc/state/gates/before-after/<base>-<head>-<unique>/` (AD-18),
+ *   made without following links; only the newest {@link BEFORE_AFTER_LOGS_KEPT} are kept.
+ * - Known limit (macOS): the app's port is checked free before it starts, but the check and the
+ *   bind are not atomic on the shared host loopback (`script.ts`).
  */
-import { existsSync, realpathSync } from "node:fs";
+import { randomBytes } from "node:crypto";
+import { existsSync, lstatSync, readdirSync, realpathSync, rmSync } from "node:fs";
 import { isAbsolute, join, relative, sep } from "node:path";
 import {
   DESIGN_SCREENS_PATH,
@@ -46,10 +64,12 @@ import {
   type GitOps,
   type GitSha,
 } from "@vtc/shared";
+import { ensureRepoDir } from "../../git/index.js";
 import { GATES_CONFIG_PATH, parseGatesConfig, readAllowlist } from "../config.js";
 import { GATES_STATE_DIR } from "../evidence.js";
 import { gateEnv } from "../exec.js";
 import { GateCommandJail, gateReadPolicy } from "../sandbox.js";
+import { SCANNER_PINS } from "../scanner-pins.js";
 import { expandMatrix, parseScreens, type RenderJob } from "../visual/matrix.js";
 import { cleanReason } from "./clean.js";
 import { EVIDENCE_VIDEO_SIZE, UI_VIEWPORT_HEIGHT } from "./protocol.js";
@@ -59,18 +79,29 @@ import type { CaptureTarget, TargetCaptureResult } from "./target.js";
 export const BEFORE_AFTER_FILE_LIMIT_REASON = `left out: a PR carries at most ${String(EVIDENCE_LIMITS.maxFilesPerPr)} evidence files; name fewer screens to capture this one`;
 /** Where the raw output of the base and head builds stays (gitignored, never evidence). */
 export const BEFORE_AFTER_STATE_DIR = `${GATES_STATE_DIR}/before-after`;
+/** How many captures' build logs are kept under {@link BEFORE_AFTER_STATE_DIR}. */
+export const BEFORE_AFTER_LOGS_KEPT = 10;
+/** Why nothing is built when the only sandbox is the unconfined opt-in. */
+export const BEFORE_AFTER_NO_UNSANDBOXED =
+  "no gate sandbox on this machine (vtc doctor says why), and gates.allow_unsandboxed does not apply to evidence: the commits are built and served only for evidence, never unconfined, so neither is built";
+/** Why nothing is built for a request about another repository. */
+export const BEFORE_AFTER_OTHER_REPO =
+  "the before/after request names another repository than the one this evidence recorder captures for";
 
 /** What the before/after capture needs from the recorder that owns it. */
 export interface BeforeAfterContext {
   readonly vtcHome: string;
+  /** The project the recorder captures for; absent: nothing is built. */
+  readonly repoRoot: string | undefined;
   /** The engine's environment, scrubbed (`gateEnv`) before any command sees it. */
   readonly env: Readonly<Record<string, string | undefined>>;
-  /** The gate sandbox (D-al), or `null`: nothing is built. */
+  /** The gate sandbox (D-al), or `null`: nothing is built; nor with the unconfined opt-in. */
   readonly sandbox: () => GateSandbox | null;
-  /** Git over the project checkout the run belongs to. */
-  readonly git: (
-    repoRoot: string,
-  ) => Pick<GitOps, "readFileAtCommit" | "createCleanCheckout" | "removeCheckout">;
+  /** The engine's injected git over `repoRoot` (AD-13 rule 4); absent: nothing is built. */
+  readonly git:
+    Pick<GitOps, "readFileAtCommit" | "createCleanCheckout" | "removeCheckout"> | undefined;
+  /** Why this host cannot serve an app beside the runner (Linux ptrace policy), or `null`. */
+  readonly hostProblem: () => string | null;
   /** The doctor-installed browser store and its pin: `null` when it is ready. */
   readonly browserProblem: () => Promise<{
     readonly reason: EvidencePartialReason;
@@ -88,7 +119,6 @@ interface PartialNote {
   readonly reason: EvidencePartialReason;
   readonly detail: string;
 }
-type BuildGit = ReturnType<BeforeAfterContext["git"]>;
 
 const inside = (root: string, path: string): boolean => {
   const rel = relative(root, path);
@@ -121,20 +151,59 @@ const requestProblem = (r: BeforeAfterRequest): string | null => {
   return null;
 };
 
+/** Both paths name the same existing directory. */
+const sameDir = (a: string, b: string): boolean => {
+  try {
+    return realpathSync(a) === realpathSync(b);
+  } catch {
+    return false;
+  }
+};
+
+const PINNED_SCANNERS: readonly string[] = SCANNER_PINS.scanners.map((s) => s.name);
+
 /**
  * The gates that make a commit servable: every install-phase gate, then every unconditional L0
- * (build, typecheck) gate. A gate that needs a diff or runs only for some paths is a check.
+ * (build, typecheck) gate. A gate that needs a diff, runs only for some paths or runs a pinned
+ * scanner is a check.
  */
-export const buildGatesOf = (config: GatesConfig): readonly Gate[] => [
+export const buildGatesOf = (
+  config: GatesConfig,
+  scanners: readonly string[] = PINNED_SCANNERS,
+): readonly Gate[] => [
   ...config.gates.filter((g) => g.phase === "install"),
   ...config.gates.filter(
     (g) =>
       g.phase === "verify" &&
       g.layer === "L0" &&
       g.when_changed === undefined &&
+      !scanners.includes(g.command[0] ?? "") &&
       !g.command.some((t) => t.includes("{changed}") || t.includes("{rules}")),
   ),
 ];
+
+/**
+ * A fresh build-log directory of one capture under {@link BEFORE_AFTER_STATE_DIR}, made without
+ * following links, after the oldest beyond {@link BEFORE_AFTER_LOGS_KEPT} are removed.
+ */
+const newLogDir = (repoRoot: string, base: GitSha, head: GitSha): string => {
+  const unique = `${Date.now().toString(36)}-${randomBytes(4).toString("hex")}`;
+  const rel = `${BEFORE_AFTER_STATE_DIR}/${base.slice(0, 12)}-${head.slice(0, 12)}-${unique}`;
+  ensureRepoDir(repoRoot, BEFORE_AFTER_STATE_DIR);
+  const parent = join(repoRoot, BEFORE_AFTER_STATE_DIR);
+  try {
+    const old = readdirSync(parent, { withFileTypes: true })
+      .filter((e) => e.isDirectory())
+      .map((e) => ({ path: join(parent, e.name), at: lstatSync(join(parent, e.name)).mtimeMs }))
+      .sort((a, b) => b.at - a.at)
+      .slice(BEFORE_AFTER_LOGS_KEPT - 1);
+    for (const dir of old) rmSync(dir.path, { recursive: true, force: true });
+  } catch {
+    // best effort: old logs only take space
+  }
+  ensureRepoDir(repoRoot, rel);
+  return join(repoRoot, rel);
+};
 
 /** One planned before/after pair, and the flow recording on both sides. */
 interface Plan {
@@ -272,12 +341,18 @@ export const captureBeforeAfter = async (
   const problem = requestProblem(request);
   if (problem !== null)
     return stop("capture_failed", `the before/after request is not valid: ${problem}`);
+  const { git, repoRoot } = ctx;
+  if (git === undefined || repoRoot === undefined) {
+    return stop(
+      "capture_failed",
+      "this evidence recorder has no project repository and git (the cli injects both), so nothing is built",
+    );
+  }
+  if (!sameDir(repoRoot, request.repoRoot)) return stop("capture_failed", BEFORE_AFTER_OTHER_REPO);
 
-  let git: BuildGit;
   let config: GatesConfig;
   let screensText: string | null;
   try {
-    git = ctx.git(request.repoRoot);
     const bytes = await git.readFileAtCommit(request.base, GATES_CONFIG_PATH);
     if (bytes === undefined) {
       return stop(
@@ -313,7 +388,7 @@ export const captureBeforeAfter = async (
       "the committed .vtc/gates.yml has no visual.app to serve the UI from",
     );
   }
-  const allowlist = readAllowlist(ctx.vtcHome, request.repoRoot);
+  const allowlist = readAllowlist(ctx.vtcHome, repoRoot);
   const allowed = (argv: readonly string[]): boolean => gateCommandAllowed(argv, allowlist);
   if (!allowed(app.command)) {
     return stop(
@@ -325,6 +400,8 @@ export const captureBeforeAfter = async (
   // Nothing is built for a capture that cannot happen.
   const browser = await ctx.browserProblem();
   if (browser !== null) return stop(browser.reason, browser.detail);
+  const host = ctx.hostProblem();
+  if (host !== null) return stop("capture_failed", host);
   const sandbox = ctx.sandbox();
   if (sandbox === null) {
     return stop(
@@ -332,6 +409,8 @@ export const captureBeforeAfter = async (
       "no gate sandbox on this machine (vtc doctor says why), so neither commit is built",
     );
   }
+  // The unconfined opt-in is for a project's own gates, never for building commits as evidence.
+  if (sandbox.kind === "none") return stop("capture_failed", BEFORE_AFTER_NO_UNSANDBOXED);
   // The Visual QA screens at the Visual QA widths and themes.
   if (screensText === null) {
     return stop(
@@ -365,22 +444,30 @@ export const captureBeforeAfter = async (
   const plan = planBeforeAfter(jobs, app.url, request.flowSeconds);
   for (const name of plan.dropped) failed.push({ name, reason: BEFORE_AFTER_FILE_LIMIT_REASON });
 
-  const policy = gateReadPolicy({ vtcHome: ctx.vtcHome, env: ctx.env, repoRoot: request.repoRoot });
-  const jail = new GateCommandJail(sandbox, policy.denyRead, policy);
+  const policy = gateReadPolicy({ vtcHome: ctx.vtcHome, env: ctx.env, repoRoot });
   const gates = buildGatesOf(config);
   const origin = new URL(app.url).origin;
   const visual = {
     redact: config.visual?.redact_selectors ?? [],
     dynamic: config.visual?.dynamic_regions ?? [],
   };
-  const logPrefix = join(
-    request.repoRoot,
-    BEFORE_AFTER_STATE_DIR,
-    `${request.base.slice(0, 12)}-${request.head.slice(0, 12)}`,
-  );
+  let logPrefix: string;
+  try {
+    logPrefix = newLogDir(repoRoot, request.base, request.head);
+  } catch {
+    return stop(
+      "capture_failed",
+      `the build log directory ${BEFORE_AFTER_STATE_DIR} could not be made (a link or a file is in its way)`,
+    );
+  }
   let bytes = 0;
 
-  const runSide = async (side: Side, commit: GitSha, shots: readonly EvidenceShot[]) => {
+  const runSide = async (
+    side: Side,
+    commit: GitSha,
+    shots: readonly EvidenceShot[],
+    budgetBytes: number,
+  ) => {
     const lost: EvidencePartialReason = side === "base" ? "base_build_failed" : "capture_failed";
     let rel: string;
     try {
@@ -389,8 +476,10 @@ export const captureBeforeAfter = async (
       note(lost, `the clean gate checkout of the ${side} could not be made`);
       return;
     }
+    // A jail of the side's own: nothing the other commit's code left in HOME or a temp directory.
+    const jail = new GateCommandJail(sandbox, policy.denyRead, policy);
     try {
-      const checkout = join(request.repoRoot, rel);
+      const checkout = join(repoRoot, rel);
       const built = await build(
         jail,
         gates,
@@ -433,7 +522,7 @@ export const captureBeforeAfter = async (
             checkout,
           },
           jail,
-          budgetBytes: EVIDENCE_LIMITS.maxBytesPerPr - bytes,
+          budgetBytes,
           colorSchemes: plan.schemes,
         },
       );
@@ -454,16 +543,14 @@ export const captureBeforeAfter = async (
     } catch {
       note(lost, `the ${side} could not be built and served`);
     } finally {
+      jail.dispose();
       await git.removeCheckout(rel).catch(() => undefined);
     }
   };
 
-  try {
-    await runSide("base", request.base, plan.before);
-    await runSide("head", request.head, plan.after);
-  } finally {
-    jail.dispose();
-  }
+  // The base gets at most half of the bytes: the head's "after" files matter more.
+  await runSide("base", request.base, plan.before, Math.floor(EVIDENCE_LIMITS.maxBytesPerPr / 2));
+  await runSide("head", request.head, plan.after, EVIDENCE_LIMITS.maxBytesPerPr - bytes);
   // Pairs read in order: before, after, ..., then the flow recordings.
   files.sort((a, b) => a.name.localeCompare(b.name));
   return result();
