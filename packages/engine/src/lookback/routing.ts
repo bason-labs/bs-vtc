@@ -98,13 +98,14 @@ const higherOf = (a: ModelTier, b: ModelTier): ModelTier => (tierRank(a) >= tier
  * Pure: the start tier the routing table gives `role` for a task of `size` and `risk` (D-cm,
  * reading 218(2)), before the project's `routing.min_tier` / `max_tier` and QA author's floor. A
  * `roles.<role>` override replaces the shared field it names. The floors are floors: a tagged task
- * starts at least on `tagged_floor`, a high-risk one at least on `high_floor` (and `tagged_floor`,
- * since a high-risk task is tagged).
+ * starts on the higher of `by_size` and `tagged_floor`, a high-risk one on the higher of `by_size`
+ * and `high_floor` (`tagged_floor` is not its floor: a `risk: high` task may carry no tag).
  *
- * **A temporary mirror** of the table lookup in engine core's router (`core/routing.ts`, reading
- * 218), which shared does not export: the contract proposal moves one pure `routedStartTier` into
- * `packages/shared/src/tier-routing.ts` for both to use. Until it lands, a conformance test against
- * engine core's routing for every role, size and risk class is due at integration (same proposal).
+ * **A temporary mirror** of `ruleTier` in engine core's router (`core/routing.ts`, reading 218),
+ * which shared does not export: the contract proposal moves one pure function into
+ * `packages/shared/src/tier-routing.ts` for both to use. Until it lands, the conformance cases in
+ * this module's tests follow `ruleTier` as engine core's branch has it (a test importing it is due
+ * at integration, same proposal).
  */
 export const routedStartTier = (
   table: RoutingTable,
@@ -115,8 +116,12 @@ export const routedStartTier = (
   const own = table.roles?.[role];
   const bySize = own?.by_size?.[size] ?? table.by_size[size];
   if (risk === "none") return bySize;
-  const tagged = higherOf(bySize, own?.tagged_floor ?? table.tagged_floor);
-  return risk === "tagged" ? tagged : higherOf(tagged, own?.high_floor ?? table.high_floor);
+  return higherOf(
+    bySize,
+    risk === "tagged"
+      ? (own?.tagged_floor ?? table.tagged_floor)
+      : (own?.high_floor ?? table.high_floor),
+  );
 };
 
 // ----------------------------------------------------------------- scorecard
@@ -731,6 +736,70 @@ export const routingProposals = (
     dropped,
   };
 };
+
+/**
+ * One routing-table cell Lookback proposes to change, as engine core's daemon takes it through its
+ * `RoutingLookback` seam (`RoutingProposalCell`) and turns it into a `config` fact
+ * (`routingConfigFact`, subject {@link routingConfigSubject}): the cell, the change's numbers (the
+ * fact's metrics, D-by) and a sentence in VTC's vocabulary naming the `DEFAULT_ROUTING_TABLE` edit.
+ */
+export interface RoutingProposalCell {
+  readonly role: string;
+  readonly size: TaskSize;
+  readonly risk: TaskRiskClass;
+  readonly metrics: Readonly<Record<string, number>>;
+  readonly detail: string;
+}
+
+/** The `DEFAULT_ROUTING_TABLE` field a change sets: shared, or under `roles.<role>`. */
+const tableField = (change: RoutingChange): string => {
+  const field =
+    change.risk === "none"
+      ? `by_size.${change.size}`
+      : change.risk === "tagged"
+        ? "tagged_floor"
+        : "high_floor";
+  return change.scope === "shared" ? field : `roles.${change.role}.${field}`;
+};
+
+const percent = (value: number | null): string =>
+  value === null ? "an unknown share" : `${String(Math.round(value * 100))}%`;
+
+/** Why the scorecard backs the change, in numbers. */
+const evidenceOf = (change: RoutingChange): string => {
+  const { current, candidate } = change;
+  if (change.direction === "higher" || candidate === undefined)
+    return `${percent(current.escalated.value)} of ${String(current.tasks)} tasks escalated from ${current.start_tier}`;
+  const rates = PASS_METRICS.flatMap((id) => {
+    const now = current.metrics[id]?.value ?? null;
+    const then = candidate.metrics[id]?.value ?? null;
+    return now === null || then === null ? [] : [`${id} ${String(then)} against ${String(now)}`];
+  });
+  return `${String(candidate.tasks)} tasks started on ${candidate.start_tier} matched quality within ${String(LOOKBACK_LIMITS.routingQualityMarginPct)} points (${rates.join(", ")}), ${percent(candidate.escalated.value)} escalated`;
+};
+
+/**
+ * Pure (D-cn): each change of `proposals` as the cell engine core's routing seam returns, in the
+ * changes' order. The detail names the edit the PR makes (spine §5 reading 219: only the values of
+ * `DEFAULT_ROUTING_TABLE` change) and the cells it lifts; it holds no project data.
+ */
+export const routingProposalCells = (proposals: RoutingProposals): RoutingProposalCell[] =>
+  proposals.changes.map((change, i) => {
+    const lifts = change.lifted.map((l) => `${l.size}/${l.risk} on ${l.to}`);
+    const detail = [
+      `${change.role} ${change.size}/${change.risk}: start on ${change.to} instead of ${change.from} (${evidenceOf(change)}).`,
+      `In DEFAULT_ROUTING_TABLE (packages/shared/src/tier-routing.ts) set ${tableField(change)} to "${change.to}"${change.scope === "shared" ? ", shared by every routed role" : ""}.`,
+      ...(lifts.length === 0 ? [] : [`This also starts ${lifts.join(", ")}.`]),
+      ...(change.replay === null ? [] : ["A tier replay is planned."]),
+    ].join(" ");
+    return {
+      role: change.role,
+      size: change.size,
+      risk: change.risk,
+      metrics: proposals.facts[i]?.metrics ?? {},
+      detail: detail.slice(0, 2000),
+    };
+  });
 
 /**
  * The held-out tasks a tier replay of `cell` runs (the first dispatch of each, at most
