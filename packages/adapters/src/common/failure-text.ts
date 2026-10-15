@@ -55,19 +55,30 @@ export const resetFromWaitText = (text: string, endedAt: string): string | null 
 };
 
 /**
- * A host refusing the model id a run asked for (D-cx, spine §5 reading 244). Recorded (codex-cli
- * 0.162.1, ChatGPT plan, 2026-10-15, `test/fixtures/codex/exec-model-refused.jsonl`): "The '<id>'
- * model is not supported when using Codex with a ChatGPT account." The other wordings are the
- * API's documented `model_not_found` ("does not exist or you do not have access to it") and the
- * plan wording D-cx names ("not available"). A bare "not found" is not one: Codex prints "Model
- * metadata for `<id>` not found" for ids it accepts too.
+ * A host refusing the model id a run asked for (D-cx, spine §5 reading 244). Only wordings that
+ * name a refusal of a model for this sign-in, never a model merely near a failure word (a capacity
+ * error "model is unavailable, try again", a config file that "does not exist"):
+ * - recorded (codex-cli 0.162.1, ChatGPT plan, 2026-10-15, `test/fixtures/codex/exec-model-refused.jsonl`):
+ *   "The '<id>' model is not supported when using Codex with a ChatGPT account.";
+ * - the API's documented `model_not_found`: "The model `<id>` does not exist or you do not have
+ *   access to it.", and "do not have access to the model";
+ * - the plan wording D-cx names: "model … not available on/for your plan (or account)".
+ * A bare "not found" is not one: Codex prints "Model metadata for `<id>` not found" for ids it
+ * accepts too.
  */
 const MODEL_REFUSAL_TEXT =
-  /\bmodel\b[^\n]{0,120}?\b(?:is not supported|not supported when|is not available|not available (?:on|for|to|in)|is unavailable|does not exist)\b|\bmodel_not_found\b|\bdo(?:es)? not have access to (?:the )?model\b/i;
+  /\bmodel\b[^\n]{0,120}?\bnot supported when using\b|\bmodel_not_found\b|\bdoes not exist or you do not have access to it\b|\bdo(?:es)? not have access to (?:the )?model\b|\bmodel\b[^\n]{0,120}?\bnot available (?:on|for|to|with|in) (?:your|this) (?:current )?(?:plan|account|subscription|tier)\b/i;
 
-/** Whether `text` says the host refused the requested model (never a limit or a sign-in text). */
-export const isModelRefusalText = (text: string): boolean =>
-  MODEL_REFUSAL_TEXT.test(text) && classifyFailureText(text) === null;
+/**
+ * Whether `text` says the host refused the requested model (never a limit or a sign-in text). With
+ * `modelId` (the id the run asked for), the refusal must also name that id on the same line: what
+ * free-form text (stderr) needs, where nothing else ties the words to this run's model.
+ */
+export const isModelRefusalText = (text: string, modelId?: string): boolean => {
+  if (classifyFailureText(text) !== null) return false;
+  if (modelId === undefined) return MODEL_REFUSAL_TEXT.test(text);
+  return text.split("\n").some((line) => MODEL_REFUSAL_TEXT.test(line) && line.includes(modelId));
+};
 
 /** At most this many characters of a host's one-line message (`ModelFallback.detail`). */
 const ONE_LINE_CHARS = 300;

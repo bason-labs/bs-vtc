@@ -4,7 +4,16 @@
  * for real with `sh`, on temp files only; the live checks themselves never run in tests.
  */
 import { execFileSync } from "node:child_process";
-import { mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import {
+  mkdirSync,
+  mkdtempSync,
+  readdirSync,
+  readFileSync,
+  realpathSync,
+  rmSync,
+  symlinkSync,
+  writeFileSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
@@ -24,6 +33,7 @@ import {
   vtcHookShim,
   withCodexEphemeral,
 } from "../scripts/h15-check-lib.js";
+import { outsideRepo } from "../scripts/live-common.js";
 import { fixtureLines } from "./support/fixtures.js";
 
 const dirs: string[] = [];
@@ -291,5 +301,32 @@ describe("stream facts", () => {
       ),
     ).toEqual({ session: 14, week: 73 });
     expect(usageCommandPercents("nothing")).toEqual({ session: null, week: null });
+  });
+});
+
+describe("outsideRepo (the live checks' --out)", () => {
+  it("accepts a directory outside the repo, existing or not", () => {
+    const root = realpathSync(temp());
+    const repo = join(root, "repo");
+    mkdirSync(repo);
+    expect(outsideRepo(join(root, "out"), repo)).toBe(join(root, "out"));
+    expect(outsideRepo(join(root, "new", "deeper"), repo)).toBe(join(root, "new", "deeper"));
+    expect(outsideRepo(root, repo)).toBe(root);
+  });
+
+  it("refuses the repo, a directory in it (also one named `..out`) and a link into it", () => {
+    const root = realpathSync(temp());
+    const repo = join(root, "repo");
+    mkdirSync(join(repo, "inside"), { recursive: true });
+    symlinkSync(join(repo, "inside"), join(root, "link"));
+    for (const out of [
+      repo,
+      join(repo, "inside"),
+      join(repo, "..out"),
+      join(root, "link"),
+      join(root, "link", "not-yet"),
+    ]) {
+      expect(() => outsideRepo(out, repo), out).toThrow(/--out must be outside the repo/);
+    }
   });
 });

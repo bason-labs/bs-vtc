@@ -208,7 +208,8 @@ describe("Claude parseEvents: recorded headless role runs (2026-10-14)", () => {
    * (`five_hour` 0.13, `seven_day` 0.73) and, 12 s later, Claude Code's own `/usage`: "Current
    * session: 14% used · resets Oct 15 at 11:39pm", "Current week (all models): 73% used · resets
    * Oct 19 at 8:59pm" (UTC+7), the same resets as the stream's. An earlier pair read 0.12 / 0.72
-   * against 13% / 73%. So it is the 0–1 fraction of the percentage `/usage` prints.
+   * against 13% / 73%. So it is the 0–1 fraction of the percentage `/usage` prints, read up to one
+   * point low (the stream's event comes before the run's own use): never treated as exact.
    */
   it("maps unifiedWindows utilization, a confirmed 0–1 fraction, to used_pct", () => {
     const usage = UsageSnapshotSchema.parse(

@@ -5,7 +5,7 @@
  */
 import { mkdtempSync, realpathSync, writeFileSync } from "node:fs";
 import { homedir, tmpdir, userInfo } from "node:os";
-import { join, relative, resolve } from "node:path";
+import { basename, dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import {
   findDisallowedHostArgs,
   findForbiddenHostArgs,
@@ -56,11 +56,33 @@ export const context = (paths: readonly string[]): RecordingContext => ({
   user: userInfo().username,
 });
 
-/** `--out` must be outside the repo: raw files can name the owner's own setup. */
-export const outsideRepo = (out: string): string => {
-  const resolved = resolve(out);
-  if (!relative(REPO_ROOT, resolved).startsWith("..")) {
+/** `path` with its nearest existing ancestor's symlinks resolved (the rest may not exist yet). */
+const realpathOfNearest = (path: string): string => {
+  const missing: string[] = [];
+  let current = resolve(path);
+  for (;;) {
+    try {
+      return join(realpathSync(current), ...missing.reverse());
+    } catch {
+      const parent = dirname(current);
+      if (parent === current) return resolve(path);
+      missing.push(basename(current));
+      current = parent;
+    }
+  }
+};
+
+/**
+ * `--out` must be outside the repo: raw files can name the owner's own setup. Compared after
+ * resolving symlinks (an `--out` linked into the repo is inside it), and only `..` itself or a
+ * path starting with `../` is outside (a directory named `..out` in the repo is inside). Returns
+ * the resolved path.
+ */
+export const outsideRepo = (out: string, repoRoot: string = REPO_ROOT): string => {
+  const real = realpathOfNearest(out);
+  const rel = relative(realpathOfNearest(repoRoot), real);
+  if (!(rel === ".." || rel.startsWith(`..${sep}`) || isAbsolute(rel))) {
     throw new Error("--out must be outside the repo: raw files can name the owner's own setup");
   }
-  return resolved;
+  return real;
 };

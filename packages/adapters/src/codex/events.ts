@@ -21,6 +21,7 @@ import {
   type HostOutcome,
   type ParsedStream,
   type SessionRef,
+  type SpawnRoleRequest,
   type TokenUsage,
 } from "@vtc/shared";
 import { shellCallShapes } from "../common/command-shapes.js";
@@ -197,13 +198,15 @@ const sessionRef = (s: CodexScan): SessionRef | null =>
 /**
  * `endedAt`: when the run ended, known only to the launcher. The message gives the wait as text
  * relative to then; without it (the pure `parseEvents`) the reset stays unknown and the engine
- * re-reads app-server usage.
+ * re-reads app-server usage. `readsRefusal`: whether the failure may be a model refusal; false
+ * for one built from stderr, which `codexOutcomeAfterExit` checks against the requested id itself.
  */
 const failureOutcome = (
   s: CodexScan,
   failure: Failure,
   retryable: boolean,
   endedAt: string | null = null,
+  readsRefusal = true,
 ): HostOutcome => {
   const byText = classifyFailureText(failure.message);
   if (failure.info === "usagelimitexceeded" || byText === "limit") {
@@ -222,7 +225,9 @@ const failureOutcome = (
   if (failure.info === "unauthorized" || byText === "auth") {
     return { kind: "auth", message: failure.message };
   }
-  if (!s.worked && isModelRefusalText(failure.message)) return modelRefused(s, failure.message);
+  if (readsRefusal && !s.worked && isModelRefusalText(failure.message)) {
+    return modelRefused(s, failure.message);
+  }
   return { kind: "error", message: failure.message, retryable, tokens: s.tokens, cost_usd: null };
 };
 
@@ -278,9 +283,15 @@ export const parseCodexEvents = (lines: readonly string[]): ParsedStream => {
  * they never decide): its last turn (a failed turn without a limit or sign-in signal takes the
  * launcher's stop cause); else a limit or sign-in signal in its last `error` event or on stderr;
  * else an `error` saying why the process ended: the launcher's stop (`timeout`, `idle`,
- * `killed`), a kill from outside (`killed`) or a bare exit (`exit_code`).
+ * `killed`), a kill from outside (`killed`) or a bare exit (`exit_code`). `request`: the run's
+ * own request; a refusal read from stderr, which is free-form, counts only when it names the
+ * model id the run asked for (D-cx), so a run without one never reads a refusal there.
  */
-export const codexOutcomeAfterExit = (lines: readonly string[], exit: RunExit): HostOutcome => {
+export const codexOutcomeAfterExit = (
+  lines: readonly string[],
+  exit: RunExit,
+  request?: Pick<SpawnRoleRequest, "model">,
+): HostOutcome => {
   const s = scan(lines);
   const outcome = outcomeOf(s, exit.endedAt);
   if (outcome !== null) return withStopCause(outcome, exit);
@@ -288,9 +299,18 @@ export const codexOutcomeAfterExit = (lines: readonly string[], exit: RunExit): 
   const lastError =
     s.lastError === null ? null : failureOutcome(s, s.lastError, true, exit.endedAt);
   if (lastError !== null && decides(lastError)) return lastError;
-  if (!s.worked && isModelRefusalText(exit.stderrTail)) return modelRefused(s, exit.stderrTail);
+  const requested = request?.model.model;
+  if (!s.worked && requested !== undefined && isModelRefusalText(exit.stderrTail, requested)) {
+    return modelRefused(s, exit.stderrTail);
+  }
   const message = describeExit(CODEX_BINARY, exit, "before the turn finished");
-  const byStderr = failureOutcome(s, { message, info: null, resetsAt: null }, true, exit.endedAt);
+  const byStderr = failureOutcome(
+    s,
+    { message, info: null, resetsAt: null },
+    true,
+    exit.endedAt,
+    false,
+  );
   if (decides(byStderr)) return byStderr;
   return endedWithoutResult(
     s.lastError === null ? message : `${message}; last error: ${s.lastError.message}`,

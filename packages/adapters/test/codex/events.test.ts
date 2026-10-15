@@ -328,18 +328,48 @@ describe("Codex model refusal (D-cx)", () => {
     });
   });
 
-  it("reads a refusal printed on stderr when the stream has none", () => {
-    expect(
-      codexOutcomeAfterExit(
-        [],
-        exit(1, "Error: model 'plan-model-x' is not available on your current plan\n"),
-      ),
-    ).toMatchObject({
+  const asked = (model?: string) => ({
+    model: {
+      tier: "mid" as const,
+      effort: "medium" as const,
+      ...(model === undefined ? {} : { model }),
+    },
+  });
+
+  it("reads a refusal printed on stderr when the stream has none and it names the id asked for", () => {
+    const stderr = "Error: model 'plan-model-x' is not available on your current plan\n";
+    expect(codexOutcomeAfterExit([], exit(1, stderr), asked("plan-model-x"))).toMatchObject({
       kind: "error",
       cause: "model_refused",
       retryable: true,
       message: "Error: model 'plan-model-x' is not available on your current plan",
     });
+    // stderr is free-form: a refusal naming another id, or a run that asked for no id, is no
+    // refusal of this run's model
+    for (const request of [asked("other-model"), asked(), undefined]) {
+      const outcome = codexOutcomeAfterExit([], exit(1, stderr), request);
+      expect(outcome).toMatchObject({ kind: "error", cause: "exit_code" });
+    }
+  });
+
+  it("never reads a transient or unrelated failure that mentions a model as a refusal", () => {
+    for (const text of [
+      "stream error: model is unavailable, try again later",
+      "The model is currently overloaded; model is not available right now",
+      "error: the model output schema file /tmp/x.json does not exist",
+      "MCP server `vtc` failed: Model Context Protocol config file does not exist",
+      "model profile 'deep': file /home/u/.codex/profiles/deep.toml does not exist",
+      "The 'plan-model-x' model is not supported in this request: unknown parameter",
+    ]) {
+      const stream = parse([
+        JSON.stringify({ type: "thread.started", thread_id: THREAD }),
+        JSON.stringify({ type: "turn.failed", error: { message: text } }),
+      ]).outcome;
+      expect(stream, text).toMatchObject({ kind: "error", retryable: true });
+      expect(stream?.kind === "error" && stream.cause, text).toBeUndefined();
+      const onStderr = codexOutcomeAfterExit([], exit(1, `${text}\n`), asked("plan-model-x"));
+      expect(onStderr, text).toMatchObject({ kind: "error", cause: "exit_code" });
+    }
   });
 
   it("recognises the other wordings a host may use for a refused model", () => {

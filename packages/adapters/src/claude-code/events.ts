@@ -94,7 +94,11 @@ interface ClaudeScan {
 
 /**
  * `utilization` as a percentage (one decimal), only for a number in 0–1: the unit a recording
- * confirmed (H-10). Anything else is unknown, never a guess.
+ * confirmed (H-10). Anything else is unknown, never a guess. Not exact: in both recorded pairs the
+ * stream read up to one point below Claude Code's own `/usage` taken seconds later (0.13 against
+ * 14% for the session window; the week once matched, once ran one low), so a limit plan must
+ * leave that point of headroom. It is not rounded up: the gap was not constant, and the stream's
+ * event comes before the run's own use.
  */
 const usedPctOf = (utilization: unknown): number | null =>
   typeof utilization === "number" && utilization >= 0 && utilization <= 1
