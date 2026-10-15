@@ -3,11 +3,12 @@
  * is not a UI one, serve a redacted snapshot on the loopback, capture the planned shots through the
  * injected `EvidenceRecorder` (retrying failed shots once), add the visual gate's before/after
  * screenshots, or, for an automatic run's UI PR, have the gate runner render the base and the head
- * (`EvidenceRecorder.captureBeforeAfter`, D-ct), make a GIF when ffmpeg is present, apply the
- * budget, publish (`branch` or `attach`), and write the manifest. A partial set says why
- * (`EvidencePartialReason`) when the cause is known. No file at all, a gate report that does not render, or an
- * evidence branch that cannot be pushed (each tried twice; each push attempt fetches the shared
- * branch and rebuilds first) fails the step and no PR opens. A capture failure makes the caller
+ * (`EvidenceRecorder.captureBeforeAfter`, D-ct) with the changed flow scripted on both sides
+ * when the caller chose one (`BeforeAfterRequest.flow`, captioned per side), make a GIF when
+ * ffmpeg is present, apply the budget, publish (`branch` or `attach`), and write the manifest. A
+ * partial set says why (`EvidencePartialReason`) when the cause is known. No file at all, a gate
+ * report that does not render, or an evidence branch that cannot be pushed (each tried twice;
+ * each push attempt fetches the shared branch and rebuilds first) fails the step and no PR opens. A capture failure makes the caller
  * raise "evidence capture failed"; a refused push (`pushRefused`) does not, since another
  * installation pushing the shared branch is not a VTC defect. The opt-outs are checked again
  * right before the evidence branch is pushed (`beforePublish`).
@@ -36,6 +37,7 @@ import {
 import type { RemoteRefs } from "../remote-refs.js";
 import { createExclusive, ensureDirNoFollow, readRegularFileNoFollow } from "../safe-fs.js";
 import { isAutomationSkip } from "../skip.js";
+import { flowVideoAlt } from "./flow.js";
 import { makeGif, type FfmpegCommand } from "./gif.js";
 import {
   attachmentsFor,
@@ -69,15 +71,6 @@ const ALT: Readonly<Record<EvidenceFileKind, string>> = {
   chart: "Scorecard and replay chart",
   gate_report: "Gate report and test results",
 };
-
-/**
- * The caption of a before/after `flow_video` (D-ct): `BeforeAfterRequest` names no flow steps yet,
- * so the gate runner records each side's first rendered screen loading and then left idle (its
- * known limit, spine §5 reading 233). The caption says so, never "the changed flow", until a run
- * can name its changed flow (`BeforeAfterRequest.flow`, a question to the human).
- */
-export const BEFORE_AFTER_FLOW_ALT =
-  "First rendered screen, loading then idle (no changed-flow steps are recorded yet)";
 
 export interface EvidenceRequest {
   readonly kind: AutoKind;
@@ -124,6 +117,12 @@ export interface EvidenceRequest {
         readonly head: GitSha;
         readonly screens?: readonly string[] | undefined;
         readonly flowSeconds?: number | undefined;
+        /**
+         * The flow to script on both sides (`BeforeAfterRequest.flow`, chosen with
+         * `changedFlow`); each side's video is captioned from the recorder's
+         * `BeforeAfterResult.flow` for it (reading 247(7)). Absent: the first-screen recording.
+         */
+        readonly flow?: string | undefined;
       }
     | undefined;
   /** `visual.redact_selectors` of the project. */
@@ -322,6 +321,7 @@ const captureBeforeAfter = async (
       outDir,
       ...(target.screens === undefined ? {} : { screens: target.screens }),
       ...(video && flowSeconds > 0 ? { flowSeconds } : {}),
+      ...(video && flowSeconds > 0 && target.flow !== undefined ? { flow: target.flow } : {}),
       redactSelectors: [...BASE_REDACT_SELECTORS, ...(request.redactSelectors ?? [])],
       denyText: [...request.knownValues, ...(request.denylist ?? [])],
     }),
@@ -342,12 +342,9 @@ const captureBeforeAfter = async (
     if (bytes === null || !(motion ? isVideo(bytes, ext) : isPng(bytes))) continue;
     const name = nextName([...existing, ...files], file.name.slice(3, dot), ext);
     if (!createExclusive(join(stagingDir, name), bytes)) continue;
-    const side = /-before$/.test(file.name.slice(0, dot))
-      ? " (before)"
-      : /-after$/.test(file.name.slice(0, dot))
-        ? " (after)"
-        : "";
-    const alt = motion ? `${BEFORE_AFTER_FLOW_ALT}${side}` : ALT[file.kind];
+    const stem = file.name.slice(0, dot);
+    const side = /-before$/.test(stem) ? "before" : /-after$/.test(stem) ? "after" : undefined;
+    const alt = motion ? flowVideoAlt(target.flow, result.flow, side) : ALT[file.kind];
     files.push({ name, kind: file.kind, bytes: bytes.length, alt });
   }
   const has = (kind: EvidenceFileKind): boolean => files.some((f) => f.kind === kind);

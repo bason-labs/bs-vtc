@@ -6,14 +6,23 @@
  */
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
-import { DEFAULT_ROUTING_TABLE, routedStartTier, type RoutingTable } from "@vtc/shared";
+import {
+  DEFAULT_ROUTING_TABLE,
+  ROUTING_REPLAY_VERDICT_CODES,
+  routedStartTier,
+  type RoutingTable,
+} from "@vtc/shared";
 import { describe, expect, it } from "vitest";
 import {
   applyRoutingMove,
+  buildRoutingPr,
   readRoutingTableSource,
   renderRoutingTableLiteral,
   routingMoveOfBody,
   routingMoveOfMetrics,
+  routingReplayLine,
+  routingReplayOfBody,
+  routingReplayOfMetrics,
   routingSubject,
   writeRoutingTableSource,
   ROUTING_TABLE_FILE,
@@ -175,5 +184,87 @@ describe("applying a move to the table (pure)", () => {
         scope: "shared",
       }),
     ).toThrow(expect.objectContaining({ reason: "out_of_scope" }));
+  });
+});
+
+describe("the graded tier replay a routing fact carries (pure; reading 247(6))", () => {
+  const graded = (verdict: keyof typeof ROUTING_REPLAY_VERDICT_CODES, trials: number) => ({
+    "routing.replay_verdict": ROUTING_REPLAY_VERDICT_CODES[verdict],
+    "routing.replay_trials": trials,
+  });
+
+  it("decodes the verdict and the trial count, and nothing short of both", () => {
+    expect(routingReplayOfMetrics(graded("improve", 24))).toEqual({
+      verdict: "improve",
+      trials: 24,
+    });
+    expect(routingReplayOfMetrics(graded("no_change", 6))).toEqual({
+      verdict: "no_change",
+      trials: 6,
+    });
+    for (const bad of [
+      undefined,
+      {},
+      { "routing.replay_verdict": 1 },
+      { "routing.replay_trials": 24 },
+      { "routing.replay_verdict": 7, "routing.replay_trials": 24 },
+      { "routing.replay_verdict": 0.5, "routing.replay_trials": 24 },
+      { "routing.replay_verdict": 1, "routing.replay_trials": 0 },
+      { "routing.replay_verdict": 1, "routing.replay_trials": 2.5 },
+    ])
+      expect(routingReplayOfMetrics(bad), JSON.stringify(bad)).toBeNull();
+  });
+
+  it("writes the issue's replay line and reads the same replay back from it", () => {
+    const cheaper = { from: "mid", to: "low", scope: "shared" } as const;
+    const higher = { from: "mid", to: "top", scope: "role" } as const;
+    const line = routingReplayLine({ verdict: "no_change", trials: 12 }, cheaper);
+    expect(line).toBe("A graded tier replay backs the move: verdict `no_change` over 12 trials.");
+    expect(routingReplayOfBody(`x\n${line}\ny`)).toEqual({ verdict: "no_change", trials: 12 });
+    // a higher tier needs `improve`: `no_change` does not back it, and the line says so
+    expect(routingReplayLine({ verdict: "no_change", trials: 12 }, higher)).toBe(
+      "A graded tier replay does not back the move: verdict `no_change` over 12 trials.",
+    );
+    expect(routingReplayOfBody("No tier replay was planned.")).toBeNull();
+    expect(routingReplayOfBody(undefined)).toBeNull();
+    expect(
+      routingReplayOfBody("A graded tier replay backs the move: verdict `great` over 12 trials."),
+    ).toBeNull();
+  });
+
+  const SUBJECT = subject("routing.engineer.M.tagged");
+  const MOVE = { from: "mid", to: "top", scope: "role" } as const;
+  const verification = (replay?: Parameters<typeof buildRoutingPr>[0]["replay"]) =>
+    buildRoutingPr({
+      subject: SUBJECT,
+      move: MOVE,
+      source: writeRoutingTableSource(SOURCE, DCM),
+      vtcVersion: "0.4.0",
+      issue: 3,
+      ...(replay === undefined ? {} : { replay }),
+    }).slots.verification ?? "";
+
+  it("cites the graded replay's verdict and trial count in the PR, never its local path", () => {
+    const text = verification({ verdict: "improve", trials: 24 });
+    expect(text).toContain(
+      "A graded tier replay backs this change: verdict `improve` over 24 trials",
+    );
+    expect(text).not.toContain("only evidence");
+    expect(text).not.toMatch(/routing-replays|\.json/);
+  });
+
+  it("says when the graded replay does not back the change", () => {
+    expect(verification({ verdict: "inconclusive", trials: 8 })).toContain(
+      "A graded tier replay does not back this change: verdict `inconclusive` over 8 trials",
+    );
+  });
+
+  it("says the scorecard is the only evidence without a graded replay", () => {
+    for (const text of [verification(), verification(null)]) {
+      expect(text).toContain(
+        "No tier replay backs this change, so the routing scorecard is the only evidence.",
+      );
+      expect(text).not.toContain("graded tier replay");
+    }
   });
 });

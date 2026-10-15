@@ -1,0 +1,62 @@
+{
+  "v": 1,
+  "kind": "synthetic",
+  "note": "The expected shape, before the Lead's H-15 run (spine §5 reading 239): GitHub's Revert button titles the PR 'Revert \"<title>\"', writes the body 'Reverts <owner>/<repo>#<n>', pushes 'revert-<n>-<head>', and its commit says 'This reverts commit <merge>'. The Lead's run writes revert.recorded.json beside this file with what GitHub actually wrote.",
+  "recorded_at": "2026-10-16T09:08:07.000Z",
+  "tools": {
+    "gh": "gh version 2.x (synthetic)",
+    "git": "git version 2.x (synthetic)"
+  },
+  "repo": "bason-labs/bs-vtc",
+  "method": "merge",
+  "branches": {
+    "base": "vtc-h15/20261016T090807Z/base",
+    "feature": "vtc-h15/20261016T090807Z/feature"
+  },
+  "merge": {
+    "pr": 12,
+    "title": "H-15 merge probe 20261016T090807Z",
+    "merge_commit": "9f1e2d3c4b5a69788796a5b4c3d2e1f0a9b8c7d6",
+    "auto": {
+      "exit": 0,
+      "output": "",
+      "merged_at_once": true
+    }
+  },
+  "revert": {
+    "via": "api",
+    "pr": 13,
+    "title": "Revert \"H-15 merge probe 20261016T090807Z\"",
+    "body": "Reverts bason-labs/bs-vtc#12",
+    "head": "revert-12-vtc-h15/20261016T090807Z/feature",
+    "merge_commit": "7a8b9c0d1e2f30415263748596a7b8c9d0e1f203",
+    "commits": [
+      {
+        "sha": "7a8b9c0d1e2f30415263748596a7b8c9d0e1f203",
+        "message": "Merge pull request #13 from bason-labs/revert-12-vtc-h15/20261016T090807Z/feature\n\nRevert \"H-15 merge probe 20261016T090807Z\""
+      },
+      {
+        "sha": "4d5e6f708192a3b4c5d6e7f8091a2b3c4d5e6f70",
+        "message": "Revert \"H-15 merge probe 20261016T090807Z\"\n\nThis reverts commit 9f1e2d3c4b5a69788796a5b4c3d2e1f0a9b8c7d6, reversing\nchanges made to 3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c."
+      }
+    ]
+  },
+  "listed": [
+    {
+      "number": 13,
+      "title": "Revert \"H-15 merge probe 20261016T090807Z\"",
+      "body": "Reverts bason-labs/bs-vtc#12",
+      "merge_commit": "7a8b9c0d1e2f30415263748596a7b8c9d0e1f203"
+    },
+    {
+      "number": 12,
+      "title": "H-15 merge probe 20261016T090807Z",
+      "body": "Throwaway PR of the H-15 merge and revert check (spine §5 reading 239). Safe to delete.",
+      "merge_commit": "9f1e2d3c4b5a69788796a5b4c3d2e1f0a9b8c7d6"
+    }
+  ],
+  "detection": {
+    "git_log": true,
+    "pr_reference": true
+  }
+}
