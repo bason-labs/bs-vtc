@@ -742,9 +742,15 @@ describe("Lookback's new-agent signals reach automation (D-cd)", () => {
 describe("Lookback tunes routing at RETRO (D-cn, spine §5 reading 219)", () => {
   it("calls the routing step through the LookbackRetro seam at RETRO and hands its proposals on as config facts", async () => {
     const h = createHarness({ plugins: switched, project: { merge_level: 1 } });
-    const asked: { history: number; phase: string }[] = [];
+    const asked: { history: number; phase: string; vtcHome: string; locked: unknown }[] = [];
     const propose: RoutingLookback = (input) => {
-      asked.push({ history: input.history.length, phase: h.engine.status({}).run.phase });
+      asked.push({
+        history: input.history.length,
+        phase: h.engine.status({}).run.phase,
+        vtcHome: input.vtcHome,
+        // the attribution reader's view of the prompt versions (reading 176)
+        locked: input.lockedShaFor("spec_verifier", undefined, "claude-code"),
+      });
       return Promise.resolve([
         {
           role: "engineer",
@@ -780,6 +786,12 @@ describe("Lookback tunes routing at RETRO (D-cn, spine §5 reading 219)", () => 
     expect(asked).toHaveLength(1);
     expect(asked[0]?.phase).toBe("retro");
     expect(asked[0]?.history).toBeGreaterThan(0);
+    // what Lookback's step needs to read the trusted attributions and the recorded AI tiebreaks
+    expect(asked[0]?.vtcHome).toBe(h.home);
+    expect(asked[0]?.locked).toEqual(expect.any(String));
+    expect(asked[0]?.locked).toBe(
+      switched.promptParts?.(agentNameFor("spec_verifier", undefined), "claude-code")?.lockedSha256,
+    );
     expect(found).toEqual([
       {
         run,
