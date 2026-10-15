@@ -1,7 +1,8 @@
 /**
  * The control commands `vtc status`, `vtc pause` and `vtc resume` (AD-19 rule 4): MCP clients of
  * the repo's daemon socket through `ctx.engine()`, never HTTP. `--run <id>` names a run; the
- * engine acts on the active one otherwise. `--json` prints the tool's output as is.
+ * engine acts on the active one otherwise. `--json` prints the tool's output as is. `pause` and
+ * `resume` with no run to act on still set or clear the automation kill switch and exit 0.
  */
 import type { ControlResult, StatusResult, UsageReport } from "@vtc/shared";
 import type { CommandContext, CommandSpec } from "./types.js";
@@ -49,10 +50,22 @@ export const formatStatus = (status: StatusResult): string[] => {
   ];
 };
 
-const formatControl = (verb: string, result: ControlResult): string =>
-  result.run === null
-    ? `No run to ${verb === "paused" ? "pause" : "resume"}; automation is ${result.automation_paused ? "paused" : "on"}`
-    : `Run ${result.run} ${verb}: ${result.paused ? "paused" : "running"} (phase ${result.phase})`;
+/** The repo's automation kill switch as `pause` / `resume` left it (AD-27 rule 7). */
+const killSwitch = (paused: boolean): string =>
+  paused ? "automation is paused" : "automation is on";
+
+/**
+ * A `pause` / `resume` result as text (contracts 5.4.0, reading 227 (2)): a run's state with the
+ * kill switch when the engine reports it, or, with no run to act on, the kill switch alone. A call
+ * without a run is a success: the switch took effect (reading 212(15)'s non-zero exit is gone).
+ */
+export const formatControl = (verb: string, result: ControlResult): string => {
+  if (result.run === null)
+    return `No run to ${verb === "paused" ? "pause" : "resume"}; ${killSwitch(result.automation_paused)}${result.automation_paused ? " (automatic issues and PRs stay off until vtc resume)" : ""}`;
+  const automation =
+    result.automation_paused === undefined ? "" : `; ${killSwitch(result.automation_paused)}`;
+  return `Run ${result.run} ${verb}: ${result.paused ? "paused" : "running"} (phase ${result.phase})${automation}`;
+};
 
 const runFlags = (args: readonly string[]) =>
   parseFlags(args, { run: { type: "string" }, json: { type: "boolean" } }).values;

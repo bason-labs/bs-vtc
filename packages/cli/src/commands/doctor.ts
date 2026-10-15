@@ -21,6 +21,10 @@
  * hosting gh allows and the browser capture uses, ffmpeg (optional: GIF previews), the project's
  * automation settings and notes (`automationFor`), the neutral notice for provider billing (D-ci)
  * and where research roles get host web search (D-cf).
+ * Since round 5 (H-9): the effective routing (`routing-view.ts`, also `vtc config`): the routing
+ * table and the project's `routing` range (a `min_tier` above `max_tier` fails), each host's tier
+ * → model map (effort only where a tier has no model id), and the user's Lookback replay pace
+ * (an invalid `~/.vtc/config.yaml` `lookback` fails).
  * `info` lines report and never fail.
  * `--download` fetches the missing scanners into `~/.vtc/`, each verified against its pinned
  * SHA-256 (§4.4), and refreshes the osv-scanner database into `~/.vtc/osv-db/` for the repo's
@@ -45,8 +49,8 @@ import {
   type CheckoutFacts,
 } from "../automation-checks.js";
 import {
+  hostingRequestOf,
   probeAutomation,
-  requestedHostingOf,
   shippedAutomationFactories,
   upstreamSettingsOf,
   type AutomationProbe,
@@ -80,6 +84,13 @@ import { createGhRemoteMerge } from "../gh-remote-merge.js";
 import { exec } from "../process.js";
 import { printable } from "../human-gesture.js";
 import { findRepoRoot, isVtcProject } from "../repo.js";
+import {
+  readProjectRouting,
+  routingChecks,
+  routingView,
+  type ProjectRoutingRead,
+  type WeeklyWindows,
+} from "../routing-view.js";
 import { checkResearchSearch, checkYtDlp, findYtDlp } from "../research-checks.js";
 import {
   checkOsvDatabase,
@@ -100,6 +111,7 @@ import {
 import { autoResumeTimer, defaultTimerHost } from "../timer.js";
 import { readUserConfig, type UserConfigRead } from "../user-config.js";
 import { createAdapters } from "../wiring.js";
+import { readWeeklyWindows } from "./config.js";
 import { readMergeLevelLedger } from "./merge-level.js";
 import type { CommandContext, CommandSpec } from "./types.js";
 import { EXIT, guarded, parseFlags } from "./util.js";
@@ -155,13 +167,21 @@ export interface DoctorCommandEnv extends DoctorEnv {
   readonly automation?: {
     readonly probe: () => Promise<AutomationProbe>;
     readonly project: () => Promise<Pick<ProjectConfig, "upstream" | "automation"> | null>;
-    /** This build has the gate runner's evidence recorder (merge note); absent: not reported. */
+    /** This build has the gate runner's evidence recorder; absent: not reported. */
     readonly recorder?: boolean;
     /** What is at `upstream.checkout` (D-by); absent: not checked. */
     readonly checkout?: (path: string) => Promise<CheckoutFacts>;
   };
   /** Each adapter's `capabilities.safeHostWeb` (D-cf). */
   readonly hostWeb?: () => Promise<Readonly<Partial<Record<HostId, boolean>>>>;
+  /**
+   * The effective routing (H-9, `routing-view.ts`): the project's `routing` and `hosts.models`,
+   * and each host's weekly window from the repo's running engine (never started for it).
+   */
+  readonly routing?: {
+    readonly project: () => Promise<ProjectRoutingRead>;
+    readonly weekly: () => Promise<WeeklyWindows>;
+  };
 }
 
 /** `<name> --version` on PATH: a scanner the user installed where no pinned build exists. */
@@ -314,6 +334,10 @@ export const defaultDoctorEnv = (ctx: CommandContext): DoctorCommandEnv => {
         ? { kind: "absent", path: "~/.claude/settings.json" }
         : readClaudeUserSettings(userSettings);
     },
+    routing: {
+      project: async () => readProjectRouting(await findRepoRoot(ctx.cwd)),
+      weekly: async () => readWeeklyWindows(ctx.vtcHome, await findRepoRoot(ctx.cwd)),
+    },
     ytDlp: async () =>
       findYtDlp({ pathEnv: process.env.PATH ?? "", repoRoot: await findRepoRoot(ctx.cwd) }),
     researchEnv: process.env,
@@ -325,7 +349,7 @@ export const createDoctorCommand = (
 ): CommandSpec => ({
   name: "doctor",
   summary:
-    "Check prerequisites (runtime, git, host CLIs, versions, logins and billing, gh and its login, automation and evidence (gh --attach, ffmpeg, browser), host web search, auto-resume timer, the user hooks and plugins role runs load, env passthrough, research search and yt-dlp, gate sandbox, session sandbox, the repo's engine and merge level, the browser, pinned scanners, osv database); --download fetches missing scanners and the osv database; --install-browser installs the visual stack's browser",
+    "Check prerequisites (runtime, git, host CLIs, versions, logins and billing, gh and its login, automation and evidence (gh --attach, ffmpeg, browser), host web search, routing (tier table, project range, models per tier, Lookback pace), auto-resume timer, the user hooks and plugins role runs load, env passthrough, research search and yt-dlp, gate sandbox, session sandbox, the repo's engine and merge level, the browser, pinned scanners, osv database); --download fetches missing scanners and the osv database; --install-browser installs the visual stack's browser",
   run: (args, ctx) =>
     guarded("doctor", ctx, async () => {
       const { values } = parseFlags(args, {
@@ -378,7 +402,7 @@ export const createDoctorCommand = (
         if (login !== null) checks.push(login);
         const user = userConfig ?? NO_USER_CONFIG;
         checks.push(
-          checkEvidence(probe, requestedHostingOf(user), browser, e.automation.recorder ?? true),
+          checkEvidence(probe, hostingRequestOf(user), browser, e.automation.recorder ?? true),
         );
         checks.push(checkFfmpeg(probe.ffmpeg));
         const upstream = upstreamSettingsOf(user);
@@ -403,6 +427,12 @@ export const createDoctorCommand = (
         }
       }
       if (e.hostWeb !== undefined) checks.push(checkHostWeb(statuses ?? [], await e.hostWeb()));
+      if (e.routing !== undefined) {
+        const [project, weekly] = await Promise.all([e.routing.project(), e.routing.weekly()]);
+        checks.push(
+          ...routingChecks(routingView({ project, user: userConfig ?? NO_USER_CONFIG, weekly })),
+        );
+      }
       const engine = e.engine === undefined ? null : await e.engine();
       if (engine !== null) checks.push(engine);
       if (e.mergeLevel !== undefined) {

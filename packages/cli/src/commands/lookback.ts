@@ -29,12 +29,13 @@
  * `approve` also warns, while no canary of the target is running, when no replay of it can run
  * (`replayGraderFor`, spine §5 readings 201 and 202): a role that changes no file and that no
  * verdict grader scores. Every file-writing role replays on either host (each Claude arm runs its
- * own plugin, D-cg) and the Spec Verifier through the verdict grader (D-ch). A canary starts only
- * from a replay, so the warning says so and points at `vtc lookback pin`. It also warns for any
- * Claude Code target, `editable_in_pack` or not, while this build has no arm plugin compiler
- * (`shippedArmPluginCompilerFactory`, merge note of `automation-wiring.ts`): every Claude replay
- * arm runs its own compiled plugin (reading 201), which the daemon then cannot build, so the
- * replay waits for the next RETRO.
+ * own plugin, D-cg) and the Spec Verifier through the verdict grader (D-ch), which the engine's
+ * daemon always wires (its `LookbackRetro.gradeVerdict`), so a verdict role gets no warning. A
+ * canary starts only from a replay, so the warning says so and points at `vtc lookback pin`. It
+ * also warns for any Claude Code target, `editable_in_pack` or not, while this build has no arm
+ * plugin compiler (`shippedArmPluginCompilerFactory`, the engine seams of `automation-wiring.ts`):
+ * every Claude replay arm runs its own compiled plugin (reading 201), which the daemon then cannot
+ * build, so the replay waits for the next RETRO.
  */
 import { join } from "node:path";
 import { core, git } from "@vtc/engine";

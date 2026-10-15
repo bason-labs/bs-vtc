@@ -2,8 +2,8 @@
  * `vtc doctor`'s automation checks (spine AD-27 rules 1, 6 and 7; readings 189, 194, 196, 200 and
  * 203; owner: cli+binary team):
  * - `gh login`: `gh auth status`'s exit code only (no token, nothing it prints);
- * - `evidence`: the hosting PR media get (`branch`, or `attach` with gh ≥ 2.99.0 on github.com) and
- *   the browser capture uses;
+ * - `evidence`: the hosting PR media get (`attach` with gh ≥ 2.99.0 on github.com, asked for when
+ *   the user set nothing (D-cc); else the `vtc-evidence` branch) and the browser capture uses;
  * - `ffmpeg`: optional, GIF previews;
  * - `automation`: `automationFor` over `project.yaml`, `~/.vtc/config.yaml` and this machine;
  * - `upstream`: the `upstream.checkout` clone exists, its origin is `upstream.repo` on
@@ -18,7 +18,6 @@ import {
   HOST_IDS,
   hostWebRoute,
   PROVIDER_BILLING_NOTICE,
-  type EvidenceHosting,
   type HostAuthStatus,
   type HostId,
   type HostWebRoute,
@@ -29,6 +28,7 @@ import {
   PROBE_TIMEOUT_MS,
   upstreamSettingsOf,
   type AutomationProbe,
+  type HostingRequest,
 } from "./automation-wiring.js";
 import type { DoctorCheck } from "./doctor-checks.js";
 import { isGithubUrl } from "./gh-remote-merge.js";
@@ -72,32 +72,59 @@ const captureNote = (browser: DoctorCheck | null): { text: string; ok: boolean }
 const NO_RECORDER =
   "this vtc build has no evidence recorder, so no automatic PR opens (issues still do)";
 
+/** The hosting line, and whether it warns: only an `attach` the user set that cannot be had. */
+const hostingNote = (
+  probe: AutomationProbe,
+  request: HostingRequest,
+): { readonly text: string; readonly warn: boolean } => {
+  const decision = evidenceHostingFor(request.hosting, probe);
+  const ghVersion = /\d+\.\d+\.\d+/.exec(probe.ghVersion ?? "")?.[0] ?? "";
+  if (decision.hosting === "attach")
+    return {
+      text: `PR media are attached with gh --attach (gh ${ghVersion}, github.com${request.source === "preferred" ? "; the default, automation.evidence_hosting unset" : ""})`,
+      warn: false,
+    };
+  if (decision.fallback !== undefined)
+    return request.source === "user"
+      ? {
+          text: `automation.evidence_hosting is attach, but ${decision.fallback}: ${BRANCH} instead`,
+          warn: true,
+        }
+      : {
+          text: `${BRANCH}: the default gh --attach is not possible here (${decision.fallback})`,
+          warn: false,
+        };
+  if (request.source === "unreadable")
+    return {
+      text: `${BRANCH} (~/.vtc/config.yaml does not parse, so the hosting that is always possible)`,
+      warn: false,
+    };
+  const attachable = evidenceHostingFor("attach", probe).hosting === "attach";
+  return {
+    text: `${BRANCH} (automation.evidence_hosting: branch)${attachable ? "; this gh could attach them instead (attach)" : ""}`,
+    warn: false,
+  };
+};
+
 /**
- * Where PR media go (reading 196) and whether capture has a browser (D-ce). `attach` asked for but
- * not possible warns, and so does capture without vtc's browser; the default never fails.
- * `recorder: false` (this build has no `gates.createEvidenceRecorder`, merge note of
- * `automation-wiring.ts`) warns too, so a build that can open no automatic PR says so.
+ * Where PR media go (readings 196 and 225) and whether capture has a browser (D-ce). With nothing
+ * set VTC asks for `attach` (D-cc) and falls back to the branch where gh is older than 2.99.0 or the
+ * remote is not github.com, which is said, not warned; an `attach` the user set but cannot have
+ * warns, and so does capture without vtc's browser. `recorder: false` (a build without
+ * `gates.createEvidenceRecorder`) warns too, so a build that can open no automatic PR says so.
  */
 export const checkEvidence = (
   probe: AutomationProbe,
-  requested: EvidenceHosting,
+  request: HostingRequest,
   browser: DoctorCheck | null,
   recorder = true,
 ): DoctorCheck => {
-  const decision = evidenceHostingFor(requested, probe);
-  const attachable = evidenceHostingFor("attach", probe).hosting === "attach";
-  const ghVersion = /\d+\.\d+\.\d+/.exec(probe.ghVersion ?? "")?.[0] ?? "";
-  const hosting =
-    decision.fallback !== undefined
-      ? `automation.evidence_hosting is attach, but ${decision.fallback}: ${BRANCH} instead`
-      : decision.hosting === "attach"
-        ? `PR media are attached with gh --attach (gh ${ghVersion}, github.com)`
-        : `${BRANCH} (automation.evidence_hosting: branch, the default)${attachable ? "; this gh could attach them instead (attach)" : ""}`;
+  const hosting = hostingNote(probe, request);
   const capture = recorder ? captureNote(browser) : { text: NO_RECORDER, ok: false as boolean };
   return {
     name: "evidence",
-    status: decision.fallback === undefined && capture?.ok !== false ? "ok" : "warn",
-    detail: capture === null ? hosting : `${hosting}; ${capture.text}`,
+    status: !hosting.warn && capture?.ok !== false ? "ok" : "warn",
+    detail: capture === null ? hosting.text : `${hosting.text}; ${capture.text}`,
   };
 };
 
