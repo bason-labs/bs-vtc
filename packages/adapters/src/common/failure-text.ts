@@ -53,3 +53,45 @@ export const resetFromWaitText = (text: string, endedAt: string): string | null 
   }
   return ms === 0 ? null : new Date(start + ms).toISOString();
 };
+
+/**
+ * A host refusing the model id a run asked for (D-cx, spine §5 reading 244). Recorded (codex-cli
+ * 0.162.1, ChatGPT plan, 2026-10-15, `test/fixtures/codex/exec-model-refused.jsonl`): "The '<id>'
+ * model is not supported when using Codex with a ChatGPT account." The other wordings are the
+ * API's documented `model_not_found` ("does not exist or you do not have access to it") and the
+ * plan wording D-cx names ("not available"). A bare "not found" is not one: Codex prints "Model
+ * metadata for `<id>` not found" for ids it accepts too.
+ */
+const MODEL_REFUSAL_TEXT =
+  /\bmodel\b[^\n]{0,120}?\b(?:is not supported|not supported when|is not available|not available (?:on|for|to|in)|is unavailable|does not exist)\b|\bmodel_not_found\b|\bdo(?:es)? not have access to (?:the )?model\b/i;
+
+/** Whether `text` says the host refused the requested model (never a limit or a sign-in text). */
+export const isModelRefusalText = (text: string): boolean =>
+  MODEL_REFUSAL_TEXT.test(text) && classifyFailureText(text) === null;
+
+/** At most this many characters of a host's one-line message (`ModelFallback.detail`). */
+const ONE_LINE_CHARS = 300;
+
+/**
+ * The host's own one-line message: the `error.message` (or `message`) inside a JSON error body
+ * when the text is one (Codex passes the API's 400 through as JSON text), else the first line
+ * that names a model refusal, else the first non-empty line; whitespace collapsed and cut to 300
+ * characters.
+ */
+export const hostMessageLine = (text: string): string => {
+  let inner: string | null = null;
+  try {
+    const body = JSON.parse(text) as unknown;
+    if (typeof body === "object" && body !== null) {
+      const record = body as { error?: { message?: unknown }; message?: unknown };
+      const message = record.error?.message ?? record.message;
+      if (typeof message === "string") inner = message;
+    }
+  } catch {
+    // not JSON
+  }
+  const lines = (inner ?? text).split("\n").map((line) => line.replace(/\s+/g, " ").trim());
+  const line =
+    lines.find((l) => MODEL_REFUSAL_TEXT.test(l)) ?? lines.find((l) => l !== "") ?? text.trim();
+  return line.length > ONE_LINE_CHARS ? `${line.slice(0, ONE_LINE_CHARS - 1)}…` : line;
+};

@@ -167,6 +167,18 @@ describe("Codex parseEvents: limits and auth (synthetic, documented shapes, §6.
     });
   });
 
+  it("the recorded logged-out run is auth, from its text alone (H-15, temporary CODEX_HOME)", () => {
+    // codex-cli 0.162.1, 2026-10-15: ten `Reconnecting... n/5` errors (WebSocket, then HTTPS),
+    // then a 401 with no `codexErrorInfo`; `codex login status` said "Not logged in" (exit 1)
+    const recorded = lines("codex/exec-signed-out.jsonl");
+    const message =
+      "unexpected status 401 Unauthorized: Missing bearer or basic authentication in header, url: https://api.openai.com/v1/responses, cf-ray: <cf-ray>, request id: <request-id>";
+    expect(valid(parse(recorded).outcome)).toEqual({ kind: "auth", message });
+    expect(codexOutcomeAfterExit(recorded, exit(1))).toEqual({ kind: "auth", message });
+    // the reconnect notices alone, before the turn fails, already read as a sign-in problem
+    expect(codexOutcomeAfterExit(recorded.slice(0, 4), exit(1)).kind).toBe("auth");
+  });
+
   it("any other failed turn is a retryable error", () => {
     const outcome = parse([
       JSON.stringify({ type: "turn.failed", error: { message: "stream disconnected" } }),
@@ -271,5 +283,115 @@ describe("Codex outcome after the process exits", () => {
 
   it("Codex has no turn cap of its own (§12.1): max_turns never comes from a Codex stream", () => {
     expect(adapter.capabilities.turnCap).toBe(false);
+  });
+});
+
+/**
+ * D-cx (spine §5 reading 244): Codex refuses a model id before any work. Recorded 2026-10-15
+ * (codex-cli 0.162.1, a ChatGPT plan, `live:h15 codex-model-refusal`): a warning item about the
+ * model's metadata, then `error` and `turn.failed` carrying the API's 400 as JSON text, "The '<id>'
+ * model is not supported when using Codex with a ChatGPT account." The engine retries without
+ * `-m`, so the adapter only names the cause and never retries itself.
+ */
+describe("Codex model refusal (D-cx)", () => {
+  const refused = lines("codex/exec-model-refused.jsonl");
+  const ONE_LINE =
+    "The 'vtc-probe-no-such-model' model is not supported when using Codex with a ChatGPT account.";
+
+  it("reads the recorded refusal as error, cause model_refused, retryable, with the host's one-line message", () => {
+    expect(valid(parse(refused).outcome)).toEqual({
+      kind: "error",
+      cause: "model_refused",
+      retryable: true,
+      message: ONE_LINE,
+      tokens: null,
+      cost_usd: null,
+    });
+  });
+
+  it("reads it the same after the process exits, whatever the exit status or launcher stop", () => {
+    expect(codexOutcomeAfterExit(refused, exit(1))).toMatchObject({
+      kind: "error",
+      cause: "model_refused",
+      retryable: true,
+      message: ONE_LINE,
+    });
+    expect(codexOutcomeAfterExit(refused, exit(1, "", null, IDLE))).toMatchObject({
+      cause: "model_refused",
+    });
+    // only the error event, then a bare exit
+    const errorOnly = refused.filter((l) => !l.includes('"turn.failed"'));
+    expect(codexOutcomeAfterExit(errorOnly, exit(1))).toMatchObject({
+      kind: "error",
+      cause: "model_refused",
+      message: ONE_LINE,
+    });
+  });
+
+  it("reads a refusal printed on stderr when the stream has none", () => {
+    expect(
+      codexOutcomeAfterExit(
+        [],
+        exit(1, "Error: model 'plan-model-x' is not available on your current plan\n"),
+      ),
+    ).toMatchObject({
+      kind: "error",
+      cause: "model_refused",
+      retryable: true,
+      message: "Error: model 'plan-model-x' is not available on your current plan",
+    });
+  });
+
+  it("recognises the other wordings a host may use for a refused model", () => {
+    for (const text of [
+      "The 'plan-model-x' model is not supported when using Codex with a ChatGPT account.",
+      "model_not_found: The model `plan-model-x` does not exist or you do not have access to it.",
+      "You do not have access to the model plan-model-x.",
+      "Model plan-model-x is not available for your plan",
+    ]) {
+      const outcome = parse([
+        JSON.stringify({ type: "thread.started", thread_id: THREAD }),
+        JSON.stringify({ type: "turn.failed", error: { message: text } }),
+      ]).outcome;
+      expect(outcome, text).toMatchObject({ kind: "error", cause: "model_refused" });
+    }
+  });
+
+  it("is never the cause once the run has done work, or when the text names no refusal", () => {
+    const afterWork = parse([
+      JSON.stringify({ type: "thread.started", thread_id: THREAD }),
+      JSON.stringify({
+        type: "item.completed",
+        item: { id: "item_1", type: "agent_message", text: "working" },
+      }),
+      JSON.stringify({
+        type: "turn.failed",
+        error: {
+          message:
+            "The 'plan-model-x' model is not supported when using Codex with a ChatGPT account.",
+        },
+      }),
+    ]).outcome;
+    expect(afterWork).toMatchObject({ kind: "error" });
+    expect(afterWork?.kind === "error" && afterWork.cause).toBeUndefined();
+    // the metadata warning alone is not a refusal: an accepted id the CLI does not know prints it
+    const warningOnly = codexOutcomeAfterExit(
+      [refused[0] ?? "", refused[1] ?? ""],
+      exit(1, "Model metadata for `x` not found. Defaulting to fallback metadata"),
+    );
+    expect(warningOnly).toMatchObject({ kind: "error", cause: "exit_code" });
+  });
+
+  it("a limit or a sign-in failure still wins over a refusal wording", () => {
+    const limit = parse([
+      JSON.stringify({
+        type: "turn.failed",
+        error: {
+          message: "model not available: usage limit reached",
+          codexErrorInfo: "usageLimitExceeded",
+        },
+      }),
+    ]).outcome;
+    expect(limit?.kind).toBe("limit");
   });
 });

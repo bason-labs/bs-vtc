@@ -9,11 +9,27 @@
  * "bash -lc ls","status":"in_progress"}}`): a shell call is a `command_execution` item, seen on
  * `item.started` and again on `item.completed`; its `command` only ever becomes
  * `ParsedStream.commandShapes` (D-cs), once per item id (an item without an id counts on
- * `item.completed` only).
+ * `item.completed` only). Recorded (D-cx, 2026-10-15, `exec-model-refused.jsonl`): a model id the
+ * sign-in may not use ends in `error` and `turn.failed` with the API's 400 as JSON text ("The '<id>'
+ * model is not supported when using Codex with a ChatGPT account."), before any work; that is
+ * `error` with cause `model_refused` and the host's one-line message, and the engine retries the
+ * dispatch once without `-m`.
  */
-import type { CommandShape, HostOutcome, ParsedStream, SessionRef, TokenUsage } from "@vtc/shared";
+import {
+  redactSecrets,
+  type CommandShape,
+  type HostOutcome,
+  type ParsedStream,
+  type SessionRef,
+  type TokenUsage,
+} from "@vtc/shared";
 import { shellCallShapes } from "../common/command-shapes.js";
-import { classifyFailureText, resetFromWaitText } from "../common/failure-text.js";
+import {
+  classifyFailureText,
+  hostMessageLine,
+  isModelRefusalText,
+  resetFromWaitText,
+} from "../common/failure-text.js";
 import type { RunExit } from "../common/headless-run.js";
 import { CODEX_BINARY } from "./command.js";
 import {
@@ -49,6 +65,11 @@ interface CodexScan {
   readonly lastError: Failure | null;
   /** The shapes of the run's `command_execution` items, in order (D-cs). */
   readonly commandShapes: readonly CommandShape[];
+  /**
+   * The run did work: an item other than Codex's own `error` notice (a message, a command, a
+   * search), or tokens spent. A model refusal is read only before any (D-cx).
+   */
+  readonly worked: boolean;
   readonly unrecognized: number;
 }
 
@@ -125,9 +146,12 @@ const scan = (lines: readonly string[]): CodexScan => {
   let lastError: Failure | null = null;
   const commandShapes: CommandShape[] = [];
   const shellCallsSeen = new Set<string>();
+  let worked = false;
   for (const event of events) {
     const item = isRecord(event.item) ? event.item : {};
     if (typeof event.type === "string" && ITEM_EVENTS.has(event.type)) {
+      // Codex reports its own warnings as `error` items (the recorded refusal starts with one)
+      if (item.type !== "error") worked = true;
       const call = shellCommand(event.type, item, shellCallsSeen);
       if (call !== undefined) commandShapes.push(...shellCallShapes(call.command));
     }
@@ -153,7 +177,18 @@ const scan = (lines: readonly string[]): CodexScan => {
         if (typeof event.type !== "string") unrecognized += 1;
     }
   }
-  return { threadId, lastMessage, tokens, terminal, lastError, commandShapes, unrecognized };
+  if (tokens !== null && tokens.in + tokens.out + tokens.cache_r + tokens.cache_w > 0)
+    worked = true;
+  return {
+    threadId,
+    lastMessage,
+    tokens,
+    terminal,
+    lastError,
+    commandShapes,
+    worked,
+    unrecognized,
+  };
 };
 
 const sessionRef = (s: CodexScan): SessionRef | null =>
@@ -187,8 +222,28 @@ const failureOutcome = (
   if (failure.info === "unauthorized" || byText === "auth") {
     return { kind: "auth", message: failure.message };
   }
+  if (!s.worked && isModelRefusalText(failure.message)) return modelRefused(s, failure.message);
   return { kind: "error", message: failure.message, retryable, tokens: s.tokens, cost_usd: null };
 };
+
+/**
+ * Codex refused the model id the run asked for, before any work (D-cx, spine §5 reading 244):
+ * retryable, because the engine dispatches once more without `-m`; the adapter never retries
+ * itself. The message is the host's own line (`ModelFallback.detail`).
+ */
+const modelRefused = (s: CodexScan, text: string): HostOutcome => ({
+  kind: "error",
+  // the line goes into the event log (AD-18)
+  message: hostMessageLine(redactSecrets(text)),
+  retryable: true,
+  cause: "model_refused",
+  tokens: s.tokens,
+  cost_usd: null,
+});
+
+/** An outcome that decides the run on its own: anything but an error without a cause of its own. */
+const decides = (outcome: HostOutcome): boolean =>
+  outcome.kind !== "error" || outcome.cause === "model_refused";
 
 const doneOutcome = (s: CodexScan): HostOutcome => ({
   kind: "done",
@@ -197,7 +252,7 @@ const doneOutcome = (s: CodexScan): HostOutcome => ({
   output: s.lastMessage === null ? null : (parseJsonObject(s.lastMessage) ?? s.lastMessage),
   model: null,
   tokens: s.tokens,
-  // a subscription run has no per-call price; the engine prices tokens at list rates (§11)
+  // a subscription run has no per-call price; the engine prices tokens from `defaultPrices` (H-12)
   cost_usd: null,
 });
 
@@ -232,10 +287,11 @@ export const codexOutcomeAfterExit = (lines: readonly string[], exit: RunExit): 
   if (exit.error !== null) return spawnFailure(CODEX_BINARY, exit.error);
   const lastError =
     s.lastError === null ? null : failureOutcome(s, s.lastError, true, exit.endedAt);
-  if (lastError !== null && lastError.kind !== "error") return lastError;
+  if (lastError !== null && decides(lastError)) return lastError;
+  if (!s.worked && isModelRefusalText(exit.stderrTail)) return modelRefused(s, exit.stderrTail);
   const message = describeExit(CODEX_BINARY, exit, "before the turn finished");
   const byStderr = failureOutcome(s, { message, info: null, resetsAt: null }, true, exit.endedAt);
-  if (byStderr.kind !== "error") return byStderr;
+  if (decides(byStderr)) return byStderr;
   return endedWithoutResult(
     s.lastError === null ? message : `${message}; last error: ${s.lastError.message}`,
     exit,

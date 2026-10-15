@@ -20,7 +20,8 @@
     "lint": "eslint .",
     "test": "vitest run",
     "live:check": "bun --conditions=@vtc/source scripts/live-check.ts",
-    "live:dcl": "bun --conditions=@vtc/source scripts/dcl-check.ts"
+    "live:dcl": "bun --conditions=@vtc/source scripts/dcl-check.ts",
+    "live:h15": "bun --conditions=@vtc/source scripts/h15-check.ts"
   },
   "dependencies": {
     "@vtc/shared": "workspace:*"
