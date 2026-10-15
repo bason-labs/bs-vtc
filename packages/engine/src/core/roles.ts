@@ -24,15 +24,19 @@ import {
 } from "@vtc/shared";
 
 /**
- * Model id per tier and host, used when `project.yaml` sets none (`hosts.models`). Codex has no
- * built-in ids until a spike names them (spine §5 readings 26 and 51, D-ae): a Codex role with no
- * explicit or project model runs on the host session's model with only the resolved effort.
+ * Model id per tier and host, used when `project.yaml` sets none (`hosts.models`). Codex's ids come
+ * from the official model docs (D-co, spine §5 readings 220 and 228); whether the owner's plan
+ * accepts them is the §7 row "Codex model ids on the owner's plan", and `hosts.models` overrides
+ * them. A tier that still resolves to no id varies its effort only (`TIER_EFFORT_WITHOUT_MODEL`).
  */
 export const DEFAULT_TIER_MODELS: Readonly<
   Record<HostId, Readonly<Partial<Record<ModelTier, string>>>>
 > = {
   "claude-code": { top: "opus", mid: "sonnet", low: "haiku" },
-  codex: {},
+  // D-co (spine §5 readings 220 and 228): the official Codex model docs
+  // (developers.openai.com/codex/models, read 2026-10-15): Astra the most capable, GPT-6.1 Sol
+  // near-Astra at a lower cost, 6 Luna the most efficient. Plan availability stays the §7 row
+  codex: { top: "gpt-6-astra", mid: "gpt-6.1-sol", low: "gpt-6-luna" },
 };
 
 /** The roles the engine's flow dispatches by id (§6.1, §6.3): a compiled set must cover them. */

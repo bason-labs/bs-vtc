@@ -73,8 +73,11 @@ export type TierHintReason = z.infer<typeof TierHintReasonSchema>;
 
 /**
  * The Planner's optional start-tier override for one task (D-cm), on `TaskDraft.tier_hint` and
- * kept on the task (`Task.tier_hint`) so replay sees it. The engine clamps it to the project's
- * `[min_tier, max_tier]` and, for QA author, to {@link QA_AUTHOR_MIN_TIER}.
+ * kept on the task (`Task.tier_hint`) so replay sees it. On a high-risk task (`taskRiskClass`
+ * `high`) the hint is first raised to the role's `high_floor` (a high-risk task never starts below
+ * it, spine §5 readings 218(2) and 228); the engine then clamps it to the project's
+ * `[min_tier, max_tier]` and, for QA author, to {@link QA_AUTHOR_MIN_TIER}. Either move is
+ * reported as `tier_clamped: true`.
  */
 export const TierHintSchema = z.strictObject({
   tier: ModelTierSchema,
@@ -119,7 +122,10 @@ export const RoutingTableSchema = z.strictObject({
   by_size: z.strictObject({ S: ModelTierSchema, M: ModelTierSchema, L: ModelTierSchema }),
   /** The lowest start tier of a task with any risk tag. */
   tagged_floor: ModelTierSchema,
-  /** The start tier of a high-risk task (a tag in `high_risk_tags`, or `risk: high`). */
+  /**
+   * The lowest start tier of a high-risk task (a tag in `high_risk_tags`, or `risk: high`): the
+   * floor under `by_size`, and under a Planner hint too (reading 228).
+   */
   high_floor: ModelTierSchema,
   /** Planner risk tags that make a task high risk. */
   high_risk_tags: z.array(SlugSchema).min(1).max(50),
@@ -153,6 +159,51 @@ export const taskRiskClass = (
     return "high";
   return task.risk_tags.length > 0 ? "tagged" : "none";
 };
+
+/**
+ * Pure (D-cm; spine §5 readings 218(2) and 228): the start tier the routing table gives `role` for
+ * a task of `size` and risk class `risk`, before any Planner hint, the project's `routing.min_tier`
+ * / `max_tier` and QA author's floor. A `roles.<role>` override replaces the shared field it names
+ * (`role` undefined: the shared cells). The floors are floors: risk `none` starts on `by_size`,
+ * `tagged` on the higher of `by_size` and `tagged_floor`, `high` on the higher of `by_size` and
+ * `high_floor`. The one copy of the rule: engine core's router dispatches with it, Lookback
+ * measures against it, the compiler renders the Planner's table and the cli shows the table from
+ * it. New in 5.5.0.
+ */
+export const routedStartTier = (
+  table: RoutingTable,
+  role: string | undefined,
+  size: "S" | "M" | "L",
+  risk: TaskRiskClass,
+): ModelTier => {
+  const own = role === undefined ? undefined : table.roles?.[role];
+  const bySize = own?.by_size?.[size] ?? table.by_size[size];
+  if (risk === "none") return bySize;
+  const floor =
+    risk === "tagged"
+      ? (own?.tagged_floor ?? table.tagged_floor)
+      : (own?.high_floor ?? table.high_floor);
+  return tierRank(bySize) >= tierRank(floor) ? bySize : floor;
+};
+
+/**
+ * The fixed metric names of a routing `config` fact (D-cn, subject `routing.<role>.<size>.<risk>`),
+ * as Lookback sends them and the upstream module renders them (spine §5 reading 228): the tier
+ * ranks ({@link tierRank}) the cell moves from and to and the cell's current start, whether the
+ * shared cell (1) or one role's override (0) changes, whether a tier replay was planned, and how
+ * many other cells the change lifts with it, each named `routing.lifted.<size>_<risk>` (size in
+ * lower case) with its new rank. The scorecard numbers beside them are
+ * `routing.<metric>.current` and `.candidate`. Numbers only (D-by). New in 5.5.0.
+ */
+export const ROUTING_FACT_METRICS = {
+  fromTier: "routing.from_tier",
+  toTier: "routing.to_tier",
+  currentTier: "routing.current_tier",
+  shared: "routing.shared",
+  replayPlanned: "routing.replay_planned",
+  lifted: "routing.lifted",
+  liftedPrefix: "routing.lifted.",
+} as const;
 
 /** How a project starts per-task roles: by difficulty (the default) or on each role's own tier. */
 export const RoutingStartSchema = z.enum(["difficulty", "role"]);

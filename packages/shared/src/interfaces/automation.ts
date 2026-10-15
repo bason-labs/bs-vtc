@@ -179,6 +179,15 @@ export interface GitPlumbing {
    * `Generated-by: VTC` trailer). New in 5.4.0.
    */
   message?(sha: GitSha): Promise<string | null>;
+  /**
+   * The repo-relative paths `head` changes against its merge base with `base`
+   * (`git diff --name-only base...head`), so the upstream module can refuse an automatic PR that
+   * touches files its kind may not (a routing PR changes only `packages/shared/src/tier-routing.ts`,
+   * reading 219) before it opens (AD-8). Throws when git fails. New in 5.5.0.
+   */
+  changedPaths?(base: GitSha, head: GitSha): Promise<readonly string[]>;
+  /** The merge base of two commits (`git merge-base`), or `null` when they share none. New in 5.5.0. */
+  mergeBase?(a: GitSha, b: GitSha): Promise<GitSha | null>;
 }
 
 /** Engine core implements it as `git.createGitPlumbing`. */

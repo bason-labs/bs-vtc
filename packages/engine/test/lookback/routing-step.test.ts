@@ -9,15 +9,13 @@ import {
   LOOKBACK_REPO,
   RoutingScorecardSchema,
   RoutingTableSchema,
-  routingConfigSubject,
   type RoutingScorecard,
-  type TaskRiskClass,
   type VtcEvent,
 } from "@vtc/shared";
 import { readFile } from "node:fs/promises";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
-import type { AutomationFact } from "../../src/core/index.js";
+import { routingConfigFact, type RoutingLookback } from "../../src/daemon/index.js";
 import { upstreamModuleFact } from "../../src/daemon/upstream-bridge.js";
 import {
   appendAttributions,
@@ -34,36 +32,6 @@ import { HOST, lockedShaFor, RunLog, tempDir } from "./log.js";
 
 const BUNDLE = "9".repeat(64);
 const now = new Date("2026-10-15T09:00:00.000Z");
-
-/**
- * Engine core's seam, as `packages/engine/src/daemon/index.ts` declares it on its branch
- * (`RoutingLookback`, `RoutingProposalCell`): the step must be assignable to it.
- */
-interface RoutingProposalCell {
-  readonly role: string;
-  readonly size: "S" | "M" | "L";
-  readonly risk: TaskRiskClass;
-  readonly metrics?: Readonly<Record<string, number>>;
-  readonly detail: string;
-}
-type RoutingLookback = (input: {
-  readonly projectRoot: string;
-  readonly history: readonly VtcEvent[];
-  readonly graderBundleSha: string;
-  readonly now: Date;
-}) => Promise<readonly RoutingProposalCell[]>;
-
-/** Engine core's `routingConfigFact`, as its branch builds the fact from a cell. */
-const routingConfigFact = (run: string, cell: RoutingProposalCell, at: string): AutomationFact => ({
-  target: "upstream",
-  kind: "config",
-  run,
-  source: "lookback.routing",
-  at,
-  subject: routingConfigSubject(cell.role, cell.size, cell.risk),
-  ...(cell.metrics === undefined ? {} : { metrics: cell.metrics }),
-  detail: cell.detail.slice(0, 2000),
-});
 
 /** `n` S tasks (no risk tag) the Engineer started on Low; the first `escalated` escalated to Mid. */
 const lowStarts = (n: number, escalated: number, role = "engineer"): VtcEvent[] => {

@@ -7,11 +7,13 @@ import { spawn } from "node:child_process";
 import { chmodSync, existsSync, mkdirSync, readFileSync, unlinkSync, writeFileSync } from "node:fs";
 import { request } from "node:http";
 import { createServer, type Socket } from "node:net";
+import { homedir } from "node:os";
 import { join } from "node:path";
 import { PassThrough } from "node:stream";
 import { afterEach, describe, expect, it } from "vitest";
 import {
   CONTRACTS_VERSION,
+  hostConfigDirsOf,
   ENGINE_INSTANCE,
   engineDiscoveryFile,
   ProjectConfigSchema,
@@ -409,8 +411,14 @@ describe("buildEngineParts and composeEngineDeps (AD-19)", () => {
         return fakeGateRunner();
       },
     });
+    // the Codex home the cli resolved ($CODEX_HOME, else ~/.codex), never read by the adapters
     expect(seen).toEqual([
-      { pluginDir: "/extracted/claude-code", vtcHome: "/vh", vtcVersion: VERSION },
+      {
+        pluginDir: "/extracted/claude-code",
+        vtcHome: "/vh",
+        vtcVersion: VERSION,
+        codexHome: hostConfigDirsOf(process.env, homedir()).codex,
+      },
     ]);
     expect(gateDeps).toEqual([]); // built on first use
     await parts.gateRunner.checkWriteScope({} as never).catch(() => undefined);

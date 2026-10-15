@@ -339,19 +339,20 @@ describe("the reviewers' routed tiers in a whole flow (D-cm)", () => {
   });
 });
 
-describe("a tier with no model id varies the effort (D-co interim)", () => {
-  it("takes the higher of the role's effort and the tier's", () => {
+describe("a tier with a model id keeps the role's effort (D-co, reading 228)", () => {
+  it("since the docs' Codex ids, every tier of both hosts names a model and the role's effort holds", () => {
     const engineer = ALL_FIXTURE_ROLES.find((r) => r.id === "engineer")!;
     const config = { hosts: { dispatch: "plugin_only" } } as never;
     expect(resolveModel(engineer, "codex", config, { tier: "top" })).toEqual({
       tier: "top",
-      effort: "high",
+      effort: engineer.models.codex.effort,
+      model: "gpt-6-astra",
     });
     expect(resolveModel(engineer, "codex", config, { tier: "low" })).toEqual({
       tier: "low",
       effort: engineer.models.codex.effort,
+      model: "gpt-6-luna",
     });
-    // a resolved model id keeps the role's effort
     expect(resolveModel(engineer, "claude-code", config, { tier: "top" })).toEqual({
       tier: "top",
       effort: engineer.models["claude-code"].effort,

@@ -138,7 +138,13 @@ export const automationReportView = (
           touch(v, event.ts, (item) => ({
             ...item,
             // VTC opens every automatic PR as a draft (D-bw)
-            pr: { number: v.number, url: v.url, state: "draft", evidence: v.evidence },
+            pr: {
+              number: v.number,
+              url: v.url,
+              state: "draft",
+              evidence: v.evidence,
+              ...(v.partial_reason === undefined ? {} : { partial_reason: v.partial_reason }),
+            },
           }));
         break;
       }
@@ -152,6 +158,9 @@ export const automationReportView = (
               url: v.url,
               state: "closed",
               evidence: item.pr?.evidence ?? "partial",
+              ...(item.pr?.partial_reason === undefined
+                ? {}
+                : { partial_reason: item.pr.partial_reason }),
             },
           }));
         break;

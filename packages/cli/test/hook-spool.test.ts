@@ -9,11 +9,13 @@ import { execFileSync } from "node:child_process";
 import { existsSync, mkdirSync, readFileSync, statSync, symlinkSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { afterAll, describe, expect, it } from "vitest";
+import { shellCallShapes } from "@vtc/adapters";
 import { core } from "@vtc/engine";
 import {
   COMMAND_SHAPE_SPOOL_FILE,
   CommandShapeSpoolRowSchema,
   commandShapes,
+  HEADLESS_ROLE_ENV,
   VTC_HOOK,
 } from "@vtc/shared";
 import { runHook, type HookDeps } from "../src/hook.js";
@@ -115,6 +117,24 @@ describe("the command-shape spool (D-cs, reading 221)", () => {
     expect(rows).toHaveLength(1);
     expect(rows[0]).not.toHaveProperty("session");
     expect(rows[0]?.shape).toEqual(commandShapes("git log --oneline")[0]);
+  });
+
+  it("shapes a shell wrapper as its script, as a headless run's stream does (merge glue, shellCallShapes)", async () => {
+    const home = tempHome();
+    await runHook(
+      "pre-tool-use",
+      "claude-code",
+      bash("bash -lc 'git status --short' && pnpm test"),
+      depsFor(home),
+    );
+    const rows = rowsOf(home) as { shape: unknown }[];
+    expect(rows.map((r) => r.shape)).toEqual(
+      shellCallShapes("bash -lc 'git status --short' && pnpm test"),
+    );
+    expect(rows.map((r) => r.shape)).toEqual([
+      commandShapes("git status --short")[0],
+      commandShapes("pnpm test")[0],
+    ]);
   });
 
   it("records nothing for anyone but a VTC role agent, for other tools, or without a live daemon", async () => {
@@ -221,5 +241,67 @@ describe("the command-shape spool (D-cs, reading 221)", () => {
       ),
     ).toEqual({ code: 0 });
     expect(existsSync(spoolOf(home))).toBe(false);
+  });
+});
+
+describe("an engine-launched headless role run (hook contract rule 7, contracts 5.5.0)", () => {
+  const marked = { [HEADLESS_ROLE_ENV]: "vtc:vtc-engineer-backend" };
+
+  it("spools nothing: the adapter's stream records a headless run's shapes", async () => {
+    const home = tempHome();
+    const outcome = await runHook(
+      "pre-tool-use",
+      "claude-code",
+      bash("pnpm test"),
+      depsFor(home, { env: marked }),
+    );
+    expect(outcome).toEqual({ code: VTC_HOOK.exit.allow });
+    expect(existsSync(spoolOf(home))).toBe(false);
+  });
+
+  it("applies the role rules from the marker when the input carries no agent_type", async () => {
+    const home = tempHome();
+    const run = { id: "r1", run: { id: "r1" }, tasks: new Map(), roleRuns: new Map() };
+    const input = bash("git push origin main", { agent_type: undefined });
+    const unmarked = await runHook(
+      "pre-tool-use",
+      "claude-code",
+      input,
+      depsFor(home, { loadRuns: () => [run as never] }),
+    );
+    expect(unmarked.code).toBe(VTC_HOOK.exit.allow);
+    const blocked = await runHook(
+      "pre-tool-use",
+      "claude-code",
+      input,
+      depsFor(home, { loadRuns: () => [run as never], env: marked }),
+    );
+    expect(blocked.code).toBe(VTC_HOOK.exit.block);
+    // a marker that names no VTC role agent is ignored
+    const other = await runHook(
+      "pre-tool-use",
+      "claude-code",
+      input,
+      depsFor(home, {
+        loadRuns: () => [run as never],
+        env: { [HEADLESS_ROLE_ENV]: "general-purpose" },
+      }),
+    );
+    expect(other.code).toBe(VTC_HOOK.exit.allow);
+  });
+
+  it("prints no resume hint at session start", async () => {
+    const home = tempHome();
+    const deps = depsFor(home, {
+      unfinishedRuns: () =>
+        Promise.resolve([{ id: "r1", track: "feature", phase: "build", paused: false }] as never),
+    });
+    const lead = await runHook("session-start", "claude-code", JSON.stringify({ cwd: REPO }), deps);
+    expect(lead.stdout).toMatch(/Resume run\?/);
+    const role = await runHook("session-start", "claude-code", JSON.stringify({ cwd: REPO }), {
+      ...deps,
+      env: marked,
+    });
+    expect(role).toEqual({ code: VTC_HOOK.exit.allow });
   });
 });

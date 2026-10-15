@@ -5,12 +5,15 @@
 import { describe, expect, it } from "vitest";
 import {
   DEFAULT_ROUTING_TABLE,
+  routedStartTier,
   RoutingTableSchema,
+  taskRiskClass,
   type ModelTier,
   type RoutingConfig,
   type TierHint,
 } from "@vtc/shared";
 import { routeTier, ruleTier, startTier, type RouteInput } from "../../src/core/routing.js";
+import { routedStartTier as lookbackStartTier } from "../../src/lookback/index.js";
 
 const task = (
   size: "S" | "M" | "L",
@@ -273,5 +276,41 @@ describe("routeTier: escalation and the reviewers' budget drop (D-cm)", () => {
 
   it("without a change is the start", () => {
     expect(routeTier(input(task("M")))).toEqual(startTier(input(task("M"))));
+  });
+});
+
+describe("one start-tier rule (contracts 5.5.0, merge conformance)", () => {
+  it("the router's table tier is the shared routedStartTier, which Lookback measures against, for every role, size and risk class", () => {
+    const tables = [
+      DEFAULT_ROUTING_TABLE,
+      RoutingTableSchema.parse({
+        ...DEFAULT_ROUTING_TABLE,
+        by_size: { S: "low", M: "low", L: "mid" },
+        tagged_floor: "low",
+        high_floor: "mid",
+        roles: {
+          spec_verifier: { by_size: { M: "top" }, tagged_floor: "top" },
+          qa: { high_floor: "low" },
+        },
+      }),
+    ];
+    const tasks = [
+      { risk: "low" as const, risk_tags: [] },
+      { risk: "med" as const, risk_tags: ["ui"] },
+      { risk: "low" as const, risk_tags: ["auth"] },
+      { risk: "high" as const, risk_tags: [] },
+    ];
+    let cases = 0;
+    for (const table of tables)
+      for (const role of ["engineer", "spec_verifier", "qa", "security"])
+        for (const size of ["S", "M", "L"] as const)
+          for (const t of tasks) {
+            const routed = { size, ...t };
+            const risk = taskRiskClass(routed, table);
+            expect(ruleTier(routed, role, table)).toBe(routedStartTier(table, role, size, risk));
+            expect(lookbackStartTier(table, role, size, risk)).toBe(ruleTier(routed, role, table));
+            cases += 1;
+          }
+    expect(cases).toBe(96);
   });
 });

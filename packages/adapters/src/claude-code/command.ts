@@ -58,6 +58,7 @@ import {
   agentNameFor,
   engineMcpServer,
   HEADLESS_DEFAULTS,
+  HEADLESS_ROLE_ENV,
   HOME_CREDENTIAL_LOCATIONS,
   HUMAN_ONLY_TOOLS,
   hostCredentialDenyReadPaths,
@@ -649,6 +650,9 @@ export const claudeHeadlessCommand = (
     ],
     env: {
       CLAUDE_CODE_PRINT_BG_WAIT_CEILING_MS: String(HEADLESS_DEFAULTS.claudeBackgroundWaitMs),
+      // hook contract rule 7 (5.5.0): the plugin's hooks run here too, and this marks the
+      // session as an engine-launched role run whatever the hook input carries
+      [HEADLESS_ROLE_ENV]: claudeSubagentName(agentNameFor(request.role, request.mode)),
     },
   };
 };

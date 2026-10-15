@@ -40,6 +40,12 @@
  * 5. `subagent-stop`: for a VTC role agent, print a reminder on stdout that the Lead must
  *    `submit` its result (or failure). Never blocks.
  * 6. The command finishes within `VTC_HOOK.timeoutMs`; the plugin's hook timeout is set to it.
+ * 7. An engine-launched headless role run carries {@link HEADLESS_ROLE_ENV} in its environment
+ *    (5.5.0; spine §5 reading 228): the agent name the host was given. `vtc hook` reads it as the
+ *    role agent when the input has no `agent_type`, so `session-start` stays silent in every role
+ *    session and `pre-tool-use` applies rule 4's role checks; `pre-tool-use` appends no
+ *    command-shape spool row for a headless run (its adapter's stream already records the shapes,
+ *    and the engine drops a headless run's spool rows).
  * The host-side event names and input fields are provisional until the spike (§7).
  */
 import { z } from "zod";
@@ -54,6 +60,14 @@ export const VTC_HOOK = {
   maxReasonChars: 500,
   exit: { allow: 0, block: 2 },
 } as const;
+
+/**
+ * The environment variable a host adapter sets on every headless role command it builds (fresh and
+ * resumed): the agent name it passes the host (e.g. `vtc:vtc-engineer-backend`). The plugin's hooks
+ * run inside headless role runs too, and the hook input alone may not tell a headless run from an
+ * in-session subagent, so this marker does (hook contract rule 7). New in 5.5.0.
+ */
+export const HEADLESS_ROLE_ENV = "VTC_HEADLESS_ROLE";
 
 /** The command a host plugin runs for `event`: `vtc hook <event> --host <host>`. */
 export const vtcHookCommand = (

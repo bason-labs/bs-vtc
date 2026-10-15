@@ -403,6 +403,8 @@ describe("vtc install --host claude-code with the real Claude adapter: one write
       ...defaultInstallDeps(),
       factories: ADAPTER_FACTORIES,
       home: () => env.homeDir,
+      // the real adapters write under the test's home, never the machine's $CODEX_HOME
+      codexHome: (home) => `${home}/.codex`,
       pluginDir: (host) => plugins[`plugin:${host}`],
       platform: "darwin",
       timerHost: () => {

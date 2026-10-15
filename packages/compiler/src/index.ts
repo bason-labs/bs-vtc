@@ -9,8 +9,8 @@ export * from "./frontmatter.js";
 export * from "./toml.js";
 export * from "./hosts.js";
 export * from "./instructions.js";
-// `routingStartTier` stays internal: the start-tier rule is engine core's (`core/routing.ts`),
-// and this copy only renders the Planner's table until a shared `startTierFor` exists.
+// `routingStartTier` stays internal: it only reads the shared rule (`routedStartTier`,
+// @vtc/shared) to render the Planner's table.
 export {
   renderHighRiskTags,
   renderRoutingTable,

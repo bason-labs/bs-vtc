@@ -37,6 +37,7 @@ import { tmpdir } from "node:os";
 import { basename, dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import { core, git } from "@vtc/engine";
 import {
+  HEADLESS_ROLE_ENV,
   VTC_HOOK,
   VtcHookInputSchema,
   type EngineDiscovery,
@@ -78,7 +79,22 @@ export interface HookDeps {
   readonly deadline?: number;
   /** The clock of the command-shape spool rows (D-cs); the system clock by default. */
   readonly now?: () => Date;
+  /**
+   * The hook process's environment, where an engine-launched headless role run carries
+   * `HEADLESS_ROLE_ENV` (hook contract rule 7, contracts 5.5.0); `process.env` by default.
+   */
+  readonly env?: Readonly<Record<string, string | undefined>>;
 }
+
+/** The role agent an engine-launched headless run marks itself as (rule 7), if any. */
+const headlessRoleOf = (deps: HookDeps): string | undefined => {
+  const marked = (deps.env ?? process.env)[HEADLESS_ROLE_ENV];
+  return isVtcRoleAgent(marked) ? marked : undefined;
+};
+
+/** The VTC role agent making the call: the host's `agent_type`, else the headless marker. */
+const roleAgentOf = (input: VtcHookInput, deps: HookDeps): string | undefined =>
+  isVtcRoleAgent(input.agent_type) ? input.agent_type : headlessRoleOf(deps);
 
 /**
  * The OS temp directory (D-ag, spine §5 reading 53): an absolute `$TMPDIR`, the runtime's
@@ -312,15 +328,17 @@ const spoolShapes = async (
 };
 
 const preToolUse = async (input: VtcHookInput, deps: HookDeps): Promise<HookOutcome> => {
-  const agentType = input.agent_type;
-  if (!isVtcRoleAgent(agentType)) return ALLOW;
+  const agentType = roleAgentOf(input, deps);
+  if (agentType === undefined) return ALLOW;
   const shell = shellCommandOf(input.tool_input ?? {});
   const liveRepo = liveRepoOf(input, deps);
   const outcome = await guardWrites(input, agentType, shell, liveRepo, deps);
   if (
     outcome.code === VTC_HOOK.exit.allow &&
     shell !== null &&
-    SHELL_TOOLS.has(input.tool_name ?? "")
+    SHELL_TOOLS.has(input.tool_name ?? "") &&
+    // a headless run's shapes come from its adapter's stream (rule 7)
+    headlessRoleOf(deps) === undefined
   )
     await spoolShapes(input, agentType, shell, liveRepo, deps);
   return outcome;
@@ -347,7 +365,7 @@ const resumeHint = (run: UnfinishedRun): string => {
  * ids, tracks and phases through, and the output is bounded.
  */
 const sessionStart = async (input: VtcHookInput, deps: HookDeps): Promise<HookOutcome> => {
-  if (isVtcRoleAgent(input.agent_type)) return ALLOW;
+  if (isVtcRoleAgent(input.agent_type) || headlessRoleOf(deps) !== undefined) return ALLOW;
   const repoRoot = await deps.findRepoRoot(input.cwd ?? deps.cwd);
   if (repoRoot === null) return ALLOW;
   const read = deps.unfinishedRuns ?? unfinishedRuns;

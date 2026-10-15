@@ -417,8 +417,10 @@ export const autoTemplateAssetPath = (name: AutoTemplateName): string =>
  * What two slot values hold (5.1.0, spine §5 reading 212): `note` is the whole NOTE callout,
  * `> [!NOTE]` header included, and in a PR it says "For human review only: VTC never merges
  * automatic PRs." (D-bw); `provenance` is the whole `<details>` block, `<summary>` included.
- * Templates wrap neither. `diff` is a prompt PR's fenced diff and follows `changes`. Every slot
- * except `title`, `hypothesis` and `trace_ids` stands on a line of its own.
+ * Templates wrap neither. `diff` is a prompt PR's fenced diff, used by the CHANGELOG entry; a PR
+ * body has no `diff` slot (the PR's own files and its CHANGELOG entry carry it, 5.5.0 doc). An
+ * issue body ends with `checklist`. Every slot except `title`, `hypothesis` and `trace_ids` stands
+ * on a line of its own.
  */
 export const AUTO_TEMPLATE_SLOTS = [
   "marker",
@@ -575,6 +577,11 @@ export const AutomationItemSchema = z.strictObject({
       url: z.url().max(500),
       state: z.enum(["draft", "open", "closed", "merged"]),
       evidence: z.enum(["complete", "partial"]),
+      /**
+       * Why the evidence is partial, when it is and the cause is known (D-ct), from the PR's
+       * `upstream.pr_opened`. New in 5.5.0.
+       */
+      partial_reason: EvidencePartialReasonSchema.optional(),
     })
     .nullable(),
   first_at: IsoDateTimeSchema,
@@ -592,6 +599,10 @@ export const AutomationReportSchema = z.strictObject({
   /** Upstream reporting to {@link DEFAULT_UPSTREAM_REPO} (or the user's `upstream.repo`). */
   upstream: z.boolean(),
   upstream_repo: GitHubRepoSchema,
+  /**
+   * The hosting the daemon resolved (`AutomationDeps.hosting`: `attach` unless gh is older than
+   * 2.99.0 or the remote is not github.com, reading 225), not the raw setting (5.5.0 doc).
+   */
   evidence_hosting: EvidenceHostingSchema,
   /** Visible notes: no GitHub remote, gh logged out, paused, sharing off, no ffmpeg. */
   notes: z.array(z.string().min(1).max(300)).max(20),

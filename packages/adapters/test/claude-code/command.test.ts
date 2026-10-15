@@ -8,6 +8,7 @@ import {
   findDisallowedHostArgs,
   findForbiddenHostArgs,
   HEADLESS_DEFAULTS,
+  HEADLESS_ROLE_ENV,
   HOME_CREDENTIAL_LOCATIONS,
   headlessIsolationGaps,
   hostCredentialDenyReadPaths,
@@ -798,6 +799,8 @@ describe("Claude headlessCommand", () => {
     // set explicitly, so a -p run never waits the host's default 10 minutes for background work
     expect(command.env).toEqual({
       CLAUDE_CODE_PRINT_BG_WAIT_CEILING_MS: String(HEADLESS_DEFAULTS.claudeBackgroundWaitMs),
+      // hook contract rule 7: the plugin's hooks know this is a headless role run
+      [HEADLESS_ROLE_ENV]: "vtc:vtc-qa-judge",
     });
     const args = command.args;
     expect(args[0]).toBe("-p");

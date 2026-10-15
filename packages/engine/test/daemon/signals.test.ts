@@ -7,6 +7,7 @@
 import { afterEach, describe, expect, it } from "vitest";
 import {
   commandShapeKey,
+  COMMAND_SHAPE_SUBCOMMAND_PROGRAMS,
   commandShapes,
   countCommandShapes,
   type AutomationDeps,
@@ -124,10 +125,17 @@ describe("toolSignalFacts (D-cs)", () => {
       "ssh -",
     ]);
     expect(TOOL_SUBCOMMAND_PROGRAMS.has("git")).toBe(true);
-    // the run's own log keeps the full shape
-    const [ssh] = commandShapes("ssh prod-db uptime");
-    expect(ssh?.subcommand).toBe("prod-db");
-    expect(toolShapeUpstreamKey(ssh!)).toBe(commandShapeKey({ program: "ssh", flags: ssh!.flags }));
+    // since 5.5.0 the shape itself keeps no subcommand after ssh (reading 228)
+    expect(commandShapes("ssh prod-db uptime")[0]?.subcommand).toBeUndefined();
+    // the run's own log keeps a package manager's script name; the upstream key leaves it out
+    const [script] = commandShapes("pnpm acme-migrate");
+    expect(script?.subcommand).toBe("acme-migrate");
+    expect(toolShapeUpstreamKey(script!)).toBe(
+      commandShapeKey({ program: "pnpm", flags: script!.flags }),
+    );
+    // the upstream list only narrows the shared one (a program outside it has no subcommand)
+    for (const program of TOOL_SUBCOMMAND_PROGRAMS)
+      expect(COMMAND_SHAPE_SUBCOMMAND_PROGRAMS).toContain(program);
   });
 });
 

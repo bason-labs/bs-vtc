@@ -36,7 +36,13 @@ import { homedir } from "node:os";
 import { join } from "node:path";
 import { ADAPTER_FACTORIES } from "@vtc/adapters";
 import { core, gates, git } from "@vtc/engine";
-import type { HostAdapter, HostAuthStatus, HostId, ProjectConfig } from "@vtc/shared";
+import {
+  hostConfigDirsOf,
+  type HostAdapter,
+  type HostAuthStatus,
+  type HostId,
+  type ProjectConfig,
+} from "@vtc/shared";
 import {
   checkAutomation,
   checkEvidence,
@@ -232,6 +238,7 @@ const withAdapters = async <T>(
   const adapters = createAdapters(ADAPTER_FACTORIES, {
     vtcHome,
     pluginDir: (host, home) => join(home, "plugins", "doctor", host),
+    codexHome: hostConfigDirsOf(process.env, homedir()).codex,
   });
   try {
     return await ask(adapters);
