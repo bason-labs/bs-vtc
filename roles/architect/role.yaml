@@ -5,9 +5,10 @@
 #   engineering/engineering-api-platform-engineer.md (compatibility rules)
 #   testing/testing-tool-evaluator.md (weighted options; an absent category is not a failed one)
 # New: the §8 method (quality-attribute scenarios, boring baseline, scorecard, robustness check),
-# AD-n with Binds/Prevents/Rule/Check, facts only from the engine's fetchers.
+# AD-n with Binds/Covers/Prevents/Rule/Check, facts only from the engine's fetchers; 4.0.0 adds
+# Covers and the G2 coverage-loop fixes (H-13).
 id: architect
-version: 3.0.0
+version: 4.0.0
 kind: core
 mission: >-
   Decide the architecture for the approved spec: candidates, a scored recommendation and the

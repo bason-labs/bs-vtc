@@ -29,7 +29,9 @@ import {
   ColourStrategySchema,
   ContractKindSchema,
   DESIGN_CONTRACTS_DIR,
+  DESIGN_COVERAGE_LOOP,
   DESIGN_DIRECTIONS_DIR,
+  DESIGN_FLOWS_PATH,
   DESIGN_SCREENS_PATH,
   DEFAULT_ROUTING_TABLE,
   DesignExitSchema,
@@ -39,6 +41,8 @@ import {
   EvidenceTypeSchema,
   FindingCategorySchema,
   FindingKindSchema,
+  FLOW_LIMITS,
+  FlowStepSchema,
   G2_DIRECTIONS,
   G2DirectionSchema,
   LOOKBACK_LIMITS,
@@ -56,6 +60,8 @@ import {
   SUMMARY_MAX_CHARS,
   TASK_PACK_SECTIONS,
   VerdictQuestionTypeSchema,
+  type DESIGN_COVERAGE_ESCALATION_OPTIONS,
+  type DesignCoverageGaps,
   type EffectiveRoleContract,
   type HostId,
   type RoleContract,
@@ -63,7 +69,13 @@ import {
 } from "@vtc/shared";
 import { EDITABLE_IN_PACK_NOTE } from "./prompt-parts.js";
 import { renderTemplate, selectMode } from "./role-source.js";
-import { renderHighRiskTags, renderRoutingTable, tierHintReasons } from "./routing.js";
+import {
+  renderHighRiskTags,
+  renderRoutingTable,
+  renderStartRoles,
+  renderTierEscalation,
+  tierHintReasons,
+} from "./routing.js";
 import type { LoadedRole } from "./role-source.js";
 
 const ENGINE_DIRECTION_FIELDS: ReadonlySet<string> = new Set(["first_viewport", "novelty"]);
@@ -84,6 +96,26 @@ export const DESIGN_DISPATCH_LINES = {
   designDirection: "design direction",
   designExit: "design exit",
 } as const;
+
+/**
+ * The Dispatch lines of a G2 coverage-loop dispatch (H-13; spine §5 reading 237), one label per
+ * `DesignCoverageGaps` field, as `renderTaskPack` prints `TaskPack.coverage_gaps` (contracts
+ * 5.7.0): `coverage round: <n> of <max>`, then `<label>: <ids>` for each non-empty list and
+ * `screens.yaml problem: <text>`. A `Record` over the fields, so a new gap kind fails the
+ * typecheck until it has a label; the repo test checks each label against the renderer.
+ */
+export const COVERAGE_DISPATCH_LINES: Readonly<Record<keyof DesignCoverageGaps, string>> = {
+  round: "coverage round",
+  reqs_without_component: "requirements no AD or component names",
+  reqs_without_screen: "UI requirements with no screen",
+  screens_without_req: "screens with no requirement",
+  components_unregistered: "components not registered",
+  screens_problem: "screens.yaml problem",
+};
+
+/** The coverage escalation's option that sends the human's text to the Architect (H-13). */
+const INSTRUCT_ARCHITECT: (typeof DESIGN_COVERAGE_ESCALATION_OPTIONS)[number] =
+  "instruct_architect";
 
 /** Values every prompt part may reference as `{{name}}`. */
 export const PROTOCOL_VARS: Readonly<Record<string, string>> = {
@@ -119,6 +151,32 @@ export const PROTOCOL_VARS: Readonly<Record<string, string>> = {
    */
   directions_min: String(G2_DIRECTIONS.min),
   directions_max: String(G2_DIRECTIONS.max),
+  /**
+   * The G2 coverage loop (H-13, reading 237): the Dispatch lines of a gap-fix dispatch for the
+   * Architect and the Designer, its round cap, and the escalation option whose text reaches the
+   * Architect as the pack's Human answer.
+   */
+  coverage_round_line: COVERAGE_DISPATCH_LINES.round,
+  coverage_max_rounds: String(DESIGN_COVERAGE_LOOP.maxRounds),
+  coverage_reqs_line: COVERAGE_DISPATCH_LINES.reqs_without_component,
+  coverage_ui_reqs_line: COVERAGE_DISPATCH_LINES.reqs_without_screen,
+  coverage_screens_line: COVERAGE_DISPATCH_LINES.screens_without_req,
+  coverage_components_line: COVERAGE_DISPATCH_LINES.components_unregistered,
+  coverage_screens_problem_line: COVERAGE_DISPATCH_LINES.screens_problem,
+  instruct_architect_option: INSTRUCT_ARCHITECT,
+  /**
+   * The Designer's flows file (D-ct, D-ce; reading 247(7)): its path, the step actions
+   * (`FlowStepSchema`) and the bounds (`FLOW_LIMITS`).
+   */
+  design_flows_path: DESIGN_FLOWS_PATH,
+  flow_step_actions: FlowStepSchema.options
+    .map((o) => {
+      const fields = Object.keys(o.shape).filter((key) => key !== "action");
+      return `\`${o.shape.action.value}\` (${fields.map((f) => `\`${f}\``).join(", ")})`;
+    })
+    .join(", "),
+  flow_max_steps: String(FLOW_LIMITS.maxSteps),
+  flow_max_wait_ms: String(FLOW_LIMITS.maxWaitMs),
   prototype_themes: PrototypeThemeSchema.options.join(", "),
   /** One state's prototype URL path, as `prototypeStatePath` builds it. */
   prototype_state_example: prototypeStatePath("/invoices", "empty", "dark"),
@@ -131,6 +189,12 @@ export const PROTOCOL_VARS: Readonly<Record<string, string>> = {
    * (`TierHintReasonSchema`) and QA author's floor (`QA_AUTHOR_MIN_TIER`, spec §5.2).
    */
   routing_table: renderRoutingTable(DEFAULT_ROUTING_TABLE),
+  /**
+   * Who the table starts and how a start tier escalates (D-cu, D-cv; readings 241, 242), rendered
+   * from `routedByDifficulty`, `reviewerStartTier` and `escalationSteps`.
+   */
+  routing_roles: renderStartRoles(),
+  tier_escalation: renderTierEscalation(),
   high_risk_tags: renderHighRiskTags(DEFAULT_ROUTING_TABLE),
   model_tiers: ModelTierSchema.options.map((tier) => `\`${tier}\``).join(", "),
   tier_hint_raise_reasons: tierHintReasons("raise"),

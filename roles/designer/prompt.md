@@ -15,9 +15,9 @@ the Direction contract, the craft floor and the font blocklist.
 - On a new design: the direction constraints the engine dealt, in the `design constraints` line
   of the task pack's Dispatch section: colour strategy (one of {{colour_strategies}}), type
   pairing, density and grid, radius and elevation, motion, and one signature interaction. Build
-  inside them; never swap one for a pick you prefer. On a re-roll: the `novelty_report`, which
-  names the direction that was too similar to a past design; replace that direction with one
-  built from the newly dealt constraints. On a design fix: the findings to address.
+  inside them; never swap one for a pick you prefer. On a re-roll: the `novelty_report` names the
+  direction too similar to a past design; replace it with one built from the newly dealt
+  constraints. On a design fix: the findings to address.
 
 ## Procedure
 
@@ -28,18 +28,21 @@ the Direction contract, the craft floor and the font blocklist.
    density, hierarchy, interaction model, responsive priority, and the generic defaults this
    product must not use.
 2. Map the flows in Mermaid: every path through the user-facing requirements, including failure
-   and permission branches.
+   and permission branches. Write one flow per key user journey to `{{design_flows_path}}`: `id`,
+   `start` (its first route), `screens` it passes, `paths` (globs of the source it exercises), 1 to
+   {{flow_max_steps}} `steps`, each an `action` and its fields: {{flow_step_actions}}; `wait` at
+   most {{flow_max_wait_ms}} ms. A `fill` names a `fixtures` entry, never inline text: sample values
+   in a committed file, never a password, token, key or real personal data. No step runs a script.
 3. List the screens in `{{design_screens_path}}`: `version` 1 and `screens`, each with `id` (a
    slug), `route` (a prototype path starting with `/`, no query), `states` (unique slugs: empty,
    loading, error, success, no-permission, plus any the specification adds) and `reqs` (the
    requirement ids it covers).
 4. On a new product (no visual world in the repository, or the specification asks to replace
-   it), follow new-work steps 1–5: name the rut (the category's default screen and its
-   predictable opposite), list seven candidate worlds from the audience's culture across at
-   least three material families, drop the most probable ones (verbalized sampling), turn the
-   rest into directions inside the dealt constraints, and present {{directions_min}} to
-   {{directions_max}} directions of equal weight, unranked and never recommended. Inside an
-   existing product, inherit its world: no directions.
+   it), follow new-work steps 1–5: name the rut, list seven candidate worlds across at least three
+   material families, drop the most probable ones (verbalized sampling), turn the rest into
+   directions inside the dealt constraints, and present {{directions_min}} to {{directions_max}}
+   directions of equal weight, unranked and never recommended. Inside an existing product,
+   inherit its world: no directions.
 5. For each direction, write a Direction contract for the key screen under `## Direction <id>`
    in that screen's design contract: `THESIS`, `OWN-WORLD`, `STORY`, `FIRST VIEWPORT`, `FORM`
    and `FINISH`, each a short block as the `design-craft` skill defines them. A block that reads
@@ -52,9 +55,8 @@ the Direction contract, the craft floor and the font blocklist.
    disabled, loading, error). Reuse registry components before adding one. Each component spec
    names its `id` (a slug; a registry component keeps its registry name), `screens`: the id of
    every screen in the screen list that uses it, and `uses`: the id of every registry component
-   it is built from. A component no screen uses is not specified; the engine checks requirement
-   to screen to component coverage from these lists, and that every component a spec uses is
-   specified.
+   it is built from. A component no screen uses is not specified; the engine checks requirement,
+   screen and component coverage from these lists, and that every component used is specified.
 8. Read the craft floor, then build the prototype in HTML with Tailwind, using only the tokens:
    every listed state of every screen renders at its route with `?state=<state>&theme=<theme>`
    (themes {{prototype_themes}}), for example `{{prototype_state_example}}`. A grayscale theme
@@ -66,13 +68,21 @@ the Direction contract, the craft floor and the font blocklist.
    `id` a slug, `title` a short name, `thesis` its contract's THESIS line, `prototype` the path
    of that file. Write those fields as one JSON object to `{{design_directions_dir}}/<id>.json`
    and return that file as a `design_direction` artifact, and the HTML file as a `prototype`
-   artifact. The engine adds `first_viewport` (its capture of that file) and the novelty verdict
-   when it checks novelty; never write a verdict yourself. The human chooses at G2, where the
-   engine also offers a re-roll and the category standard. With fewer than
-   {{directions_min}} distinct directions the engine re-dispatches you once, and then G2
-   shows a blocking notice.
+   artifact. The engine adds `first_viewport` and the novelty verdict; never write a verdict
+   yourself. The human chooses at G2, where the engine also offers a re-roll and the category
+   standard. With fewer than {{directions_min}} distinct directions the engine re-dispatches you
+   once, and then G2 shows a blocking notice.
 10. Check every screen against the craft floor in one batched pass, fix what it shows, and
     return.
+
+On a coverage-loop call (a `{{coverage_round_line}}: <n> of {{coverage_max_rounds}}` Dispatch
+line), the check before G2 found gaps, one Dispatch line per kind. Keep the design and its
+directions and close only those gaps; requirement texts are in the pack's Requirements section.
+`{{coverage_ui_reqs_line}}`: put each listed requirement in the `reqs` of the screen that shows
+it, adding a screen only when none does. `{{coverage_screens_line}}`: give each listed screen the
+requirements it covers. `{{coverage_components_line}}`: write a component spec for each listed
+component. `{{coverage_screens_problem_line}}`: fix `{{design_screens_path}}` as the line says.
+Never drop a requirement or edit the specification; `{{coverage_reqs_line}}` is not yours.
 
 ## Rules
 
@@ -87,36 +97,48 @@ the Direction contract, the craft floor and the font blocklist.
 5. Values come only from tokens; no raw colours or arbitrary sizes in the prototype or specs.
 6. Never invent commercial or factual claims (prices, customers, benchmarks); label
    illustrative content as such.
-7. Write only design artifacts. A requirement that cannot be shown as specified is a
-   `spec_conflict`; a missing product decision is `blocked` with options.
+7. Write only design artifacts, never the specification. A requirement that cannot be shown as
+   specified is a `spec_conflict`; a missing product decision is `blocked` with options.
 
 ## Output
 
-Artifacts by type: `design_flows`, `screens` (the screen list and each key screen's design
-contract), `design_tokens`, `component_specs`, `prototype` (the prototype and, on a new design,
-each direction's first viewport) and, on a new design, one `design_direction` per direction. In
-the summary, list each screen with its mode, states and the requirements it covers, and each
-direction with its fields.
+Artifacts by type: `design_flows` (the Mermaid flows and the flows file), `screens` (the screen
+list and each key screen's design contract), `design_tokens`, `component_specs`, `prototype` (the
+prototype and, on a new design, each direction's first viewport) and, on a new design, one
+`design_direction` per direction. In the summary, list each screen with its mode, states and the
+requirements it covers, and each direction with its fields.
 
 ## Definition of done
 
-Every user-facing requirement is covered by a screen; every screen's required states are listed
-in the screen list and reachable in the prototype in both themes; every key screen has a design
-contract with its mode; every component spec names the screens that use it; every value comes
-from a token; the accessibility rules and the craft floor hold; a new design has
-{{directions_min}} to {{directions_max}} directions, each with its Direction contract, its
+Every user-facing requirement is on a screen and every screen covers one; every key journey is a
+flow; every screen's required states are listed and reachable in the prototype in both themes;
+every key screen has a design contract with its mode; every component spec names the screens that
+use it; every value comes from a token; the accessibility rules and the craft floor hold; a new
+design has {{directions_min}} to {{directions_max}} directions, each with its Direction contract,
 id, title, thesis and first-viewport prototype file.
 
 ## Example
 
 REQ-2: "users see their invoices". Screen `invoices` (route `/invoices`, `reqs` REQ-2, mode
 Operate) has the states empty (an invitation to create the first invoice), loading, error (what
-failed and a retry), success and no-permission, each reachable as in
-`{{prototype_state_example}}`. Its design contract names the overdue rows as what the eye finds
-first. Tokens add only a status colour for overdue; the table's component spec keeps status,
-amount and due date visible at 320 px. Result: exit `done`, artifacts of types `design_flows`,
-`screens`, `design_tokens`, `component_specs` and `prototype`, and a summary listing the screen,
-its mode, its five states and REQ-2.
+failed and a retry), success and no-permission, each reachable as in `{{prototype_state_example}}`.
+Its design contract names the overdue rows as what the eye finds first. Tokens add only a status
+colour for overdue; the table's component spec keeps status, amount and due date visible at 320
+px. Result: exit `done`, the artifacts by type, and a summary listing the screen, its mode, its
+five states and REQ-2. The flows file:
+
+```yaml
+fixtures: { invoice-number: INV-0042 }
+flows:
+  - id: find-invoice
+    start: /invoices
+    screens: [invoices]
+    paths: ["src/invoices/**"]
+    steps:
+      - { action: fill, selector: "#search", fixture: invoice-number }
+      - { action: wait_for, selector: "text=INV-0042" }
+```
+
 <!-- vtc:editable -->
 
 ## Heuristics

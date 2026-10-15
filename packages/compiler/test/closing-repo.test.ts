@@ -314,7 +314,8 @@ describe("the Designer and Visual QA follow the fork (spec §9.1; D-bt, reading 
   const visual = (): string => oneLine(claudeBody("vtc-visual-qa"));
 
   it("bumps both roles MAJOR for the locked-core edits (D-bm)", () => {
-    expect(role("designer")?.version).toBe("3.0.0");
+    // 3.0.0 here; 4.0.0 since round 6 (the flows file and the coverage loop)
+    expect(Number(role("designer")?.version.split(".")[0])).toBeGreaterThanOrEqual(3);
     expect(role("visual_qa")?.version).toBe("3.0.0");
   });
 

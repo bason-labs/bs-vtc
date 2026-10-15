@@ -34,8 +34,8 @@ engine checks them itself. The tools in the table are what a prose Check names f
 ## Writing the Check
 
 The spine lives at `.vtc/architecture/spine.md`. Each AD is a heading (`### AD-3: <title>`), and
-its Checks sit under that heading with no other heading between them: write Binds, Prevents and
-Rule as bold list items, not as sub-headings, or the engine will not know which AD a block
+its Checks sit under that heading with no other heading between them: write Binds, Covers,
+Prevents and Rule as bold list items, not as sub-headings, or the engine will not know which AD a block
 belongs to. A Check takes one of two forms.
 
 ### A `vtc-check` block: compiled into gate L6
@@ -65,6 +65,7 @@ An AD with one example of each kind:
 ### AD-3: Search module owns its tables
 
 - **Binds:** src/search/ and the search tables.
+- **Covers:** REQ-4.
 - **Prevents:** other modules querying the search tables directly.
 - **Rule:** only src/search/ imports the search table definitions or the search engine client.
 - **Check:**
