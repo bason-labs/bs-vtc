@@ -180,6 +180,40 @@ calibrate`, while on Linux it gets a private loopback. Unix sockets inside the
   test runs it. The reaper confirms before its `kill`, so a gate that kills it in the microseconds between the
   two is not detected. Under `gates.allow_unsandboxed` nothing of this applies.
 
+## Check tools install scripts cannot replace (H-14, spine §5 reading 238)
+
+Install-phase code the role controls (a dependency's or a workspace package's lifecycle script)
+could replace the lint tool, or any other check tool, under `node_modules` before L1 runs
+(reading 80(c)). Each verify-phase gate's tool (`GateSchema.tool`, `runner.ts`,
+`tool-integrity.ts`) is therefore one of:
+
+- `pinned` `{pin}`: a `gates/scanners.json` pin, run from VTC's store and re-verified against its
+  `binary_sha256` before each use. `command[0]` names the tool (a gate whose command starts with
+  anything else does not run); the store's path replaces it. Every pinned scanner is one, with
+  or without `tool`. `GateResult.tool.sha256` is the hash of the binary that ran.
+- `project` `{paths}` (checkout-relative globs, e.g. `node_modules/.bin/eslint` and
+  `node_modules/eslint/**`): the install phase runs in two passes. First each install gate's
+  scripts-free form (npm, pnpm, Bun and Yarn Classic `--ignore-scripts`, Yarn Berry
+  `--mode=skip-build`; `go mod download` and `cargo fetch` run no project code as they are), then
+  the tool's files are hashed (sorted path and content hash per line; a link is its target), then
+  the install gates run as configured (their lifecycle scripts). Just before the gate the files
+  are hashed again: any file changed, added or removed fails the gate without running it,
+  `status: fail`, failure class `product`, one finding `vtc/tool-tampered` in category `security`,
+  and `GateResult.tool.tampered` lists the files (the evidence log lists them all). An earlier
+  verify gate (an L0 build) that touches the tool is caught the same way.
+- absent: the runner derives a `project` tool from `command[0]`: the executable it resolves to
+  inside the checkout (unwrapping `pnpm exec`, `npx`, `npm exec`, `yarn`, `bunx`, `uv run`,
+  `poetry run`) and the package it belongs to (a pnpm shell shim is followed to its package).
+  A command whose executable is outside the checkout (`node` on `PATH`, `go vet`) has none:
+  install-phase code cannot write there. A package script (`pnpm run lint`) has none either.
+
+`vtc calibrate` writes the `project` tool of each check gate whose executable is installed in the
+working tree (`withCheckTools`); pinned scanners need none. Known limit: an install gate with no
+scripts-free form VTC knows (`uv sync`, `poetry install`, a custom script) runs before the tools
+are hashed, so what its own scripts write into a tool is not detected; the run's
+`tool-integrity.log` says so. A tool's dependencies (an ESLint plugin, a package the test runner
+imports) are not part of its paths unless `gates.yml` lists them.
+
 ## L6 compiled from the Architect's AD Checks (§8.5)
 
 Besides the calibrated L6 gates (an external fitness tool in `gates.yml`), every run that includes
@@ -337,14 +371,29 @@ symlinked or escaping path gives `unchecked`), the token vector from `.vtc/desig
 `client-<slug>`; a malformed scope, direction or entry rejects). Engine core writes the report
 to `noveltyReportPath` and calls `recordDesignChoice` when the human picks at G2.
 
+## UI before/after and the scripted flow (D-ct, spine §5 readings 223 and 247(7))
+
+`EvidenceRecorder.captureBeforeAfter` (`capture/before-after.ts`) builds and serves the base and
+the head in clean gate checkouts and renders the Visual QA screens of each. With `flowSeconds` it
+also records a `flow_video` of each side. With `flow` (a flow id the upstream module chose with
+`selectDesignFlow`), each side reads that flow from its own commit's `.vtc/design/flows.yaml`
+and its recording starts at the flow's `start` route and runs its steps (goto, click, fill with
+the file's named fixture, press, wait for, wait up to `FLOW_LIMITS.maxWaitMs`), all within
+`flowSeconds`, then holds the last frame for up to a second. The page is checked and scanned
+(paint in force, `SECRET_PATTERNS`, `denyText`) before every step and at the end, besides the
+recording's live scan, so a page a step reached that shows a denied value discards the video.
+`BeforeAfterResult.flow` says per side what the video shows: `scripted`, `idle` (no such flow, or
+no readable flows file, at that commit: the first screen is recorded as without a flow) or
+`failed` (a step failed or ran out of time; the recording up to it is kept). No step's error text
+is reported, since a selector is project text.
+
 ## Not built yet (tracked follow-up increments)
 
-- **Before/after flow video.** `BeforeAfterRequest` has no flow steps, so the `flow_video` of
-  each side (`capture/before-after.ts`) records the first rendered screen loading and then idle
-  for `flowSeconds`, with no interaction; a real changed-flow recording needs flow steps in the
-  contract. On macOS the app's port is checked free before the app starts, but nothing ties the
-  listening socket to the app (the host loopback is shared), so a server bound to that port in
-  between, beside an app that falls back to another port, would be captured instead.
+- **Before/after on macOS.** The app's port is checked free before the app starts, but nothing
+  ties the listening socket to the app (the host loopback is shared), so a server bound to that
+  port in between, beside an app that falls back to another port, would be captured instead.
+  The scripted flow (`BeforeAfterRequest.flow`) has run only against the fake Playwright of the
+  tests; the opt-in live test records the first screen, not a scripted flow.
 - **Registry-only install network and sandbox denials.** The install phase gets the full
   network (no host-level registry filter exists in `sandbox-exec` or `bwrap`), and a gate that
   fails because the sandbox refused something (`EPERM`, "Operation not permitted") is classified

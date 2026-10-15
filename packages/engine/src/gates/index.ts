@@ -173,9 +173,19 @@ export {
   flakyBetween,
   LOOPBACK_QUESTION,
   visualAppQuestion,
+  withCheckTools,
   type CalibrateDeps,
   type CalibrateOutcome,
 } from "./calibrate/calibrate.js";
+export {
+  changedToolFiles,
+  deriveProjectTool,
+  hashTool,
+  scriptsFreeInstall,
+  TOOL_HASH_LIMITS,
+  type ToolHashLimits,
+  type ToolSnapshot,
+} from "./tool-integrity.js";
 
 export {
   createEvidenceRecorder,

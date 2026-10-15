@@ -10,6 +10,9 @@
  * setting); otherwise one is proposed from the package.json `dev`/`start`/`preview` script
  * (`detectVisualApp`), and only a human's yes puts it into `gates.yml` and its argv into the
  * allowlist, like every gate command (§15). `gates.yml` is written only through the typed config.
+ *
+ * Each check gate gets its tool (H-14, `GateSchema.tool`, {@link withCheckTools}): the `project`
+ * tool installed in the working tree, which the Gate Runner verifies by content hash at each run.
  */
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
@@ -38,8 +41,9 @@ import { downloadOsvDatabase, osvDatabaseDir, osvDatabaseReady } from "../osv-db
 import { runWithConfig } from "../runner.js";
 import { detectGateSandbox, resolveGateSandbox } from "../sandbox.js";
 import { createScannerStore, type ScannerStore } from "../scanners.js";
+import { deriveProjectTool } from "../tool-integrity.js";
 import { appLoopbackPort } from "../visual/app.js";
-import { allowlistPrefix, detectToolchain, detectVisualApp } from "./detect.js";
+import { allowlistPrefix, detectToolchain, detectVisualApp, type ProposedGate } from "./detect.js";
 
 export interface CalibrateDeps {
   readonly repoRoot: string;
@@ -109,6 +113,36 @@ export const LOOPBACK_QUESTION =
 export const visualAppQuestion = (app: Pick<VisualApp, "command" | "url">): string =>
   `Use \`${app.command.join(" ")}\` at ${app.url} as the app server the visual step renders screens from? It runs in the gate sandbox, which then may listen on and connect to port ${String(appLoopbackPort(app.url))} of this machine's loopback (on macOS the host's own loopback: any local service already on that port is reachable too, so the visual step stops with an error while one is listening there; no other port)`;
 
+/**
+ * Each check gate's tool (H-14, spine §5 reading 238; `GateSchema.tool`): a verify-phase gate
+ * whose executable is installed in the working tree (`node_modules/.bin`, a virtual environment,
+ * a file of the repository) gets the `project` tool `deriveProjectTool` finds, which the Gate
+ * Runner then verifies by content hash at every run. A pinned scanner always runs from the store
+ * and needs none; a gate that already names its tool keeps it. A gate with no tool found here
+ * (a package script, a tool outside the repository, or one not installed in the working tree)
+ * gets none, and each run derives one from its command when it can.
+ */
+export const withCheckTools = (
+  repoRoot: string,
+  gates: readonly ProposedGate[],
+  scanners: readonly string[],
+): { readonly gates: ProposedGate[]; readonly recorded: string[]; readonly none: string[] } => {
+  const recorded: string[] = [];
+  const none: string[] = [];
+  const out = gates.map((gate) => {
+    if (gate.phase === "install" || gate.tool !== undefined) return gate;
+    if (scanners.includes(gate.command[0] ?? "")) return gate;
+    const tool = deriveProjectTool(repoRoot, gate.cwd ?? "", gate.command);
+    if (tool === null) {
+      none.push(gate.id);
+      return gate;
+    }
+    recorded.push(gate.id);
+    return { ...gate, tool };
+  });
+  return { gates: out, recorded, none };
+};
+
 /** `config` with `visual.app` set to `app` (`null`: as it is), every other `visual` setting kept. */
 const withVisualApp = (config: GatesConfig, app: VisualApp | null): GatesConfig =>
   app === null ? config : GatesConfigSchema.parse({ ...config, visual: { ...config.visual, app } });
@@ -149,6 +183,17 @@ export const calibrate = async (
       "no gate commands detected; write .vtc/gates.yml by hand and run vtc calibrate again",
     );
 
+  const tools = withCheckTools(deps.repoRoot, detection.gates, scanners.names);
+  if (tools.recorded.length > 0) {
+    deps.out(
+      `note: recorded the check tool of ${tools.recorded.join(", ")}: each run verifies its files by content hash, and an install script that changes one fails that gate (H-14)`,
+    );
+  }
+  if (tools.none.length > 0) {
+    deps.out(
+      `note: no check tool in this working tree for ${tools.none.join(", ")} (a package script, a tool outside the repository, or not installed here): each run derives one from the command when it can`,
+    );
+  }
   const detected = GatesConfigSchema.parse({
     version: 1,
     baseline: {
@@ -159,7 +204,7 @@ export const calibrate = async (
     },
     sources: detection.sources,
     tests: detection.tests,
-    gates: detection.gates,
+    gates: tools.gates,
     ...(existing?.visual === undefined ? {} : { visual: existing.visual }),
   });
   if (options.dryRun === true) {

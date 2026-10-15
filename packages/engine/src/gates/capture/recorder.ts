@@ -434,6 +434,7 @@ export const createEvidenceRecorder = (
     }
     const runnerShots: EvidenceRunnerShot[] = shots.map((s) => {
       const scheme = target.colorSchemes?.get(s.name);
+      const flow = s.videoSeconds === undefined ? undefined : target.flows?.get(s.name);
       return {
         name: s.name,
         path: s.path,
@@ -442,6 +443,7 @@ export const createEvidenceRecorder = (
         ...(s.videoSeconds === undefined ? {} : { video_seconds: s.videoSeconds }),
         ...(s.waitFor === undefined ? {} : { wait_for: s.waitFor }),
         ...(scheme === undefined ? {} : { color_scheme: scheme }),
+        ...(flow === undefined ? {} : { flow }),
       };
     });
     const recording = shots.reduce((sum, s) => sum + (s.videoSeconds ?? 0), 0);
@@ -511,7 +513,17 @@ export const createEvidenceRecorder = (
         failed,
         target.budgetBytes ?? EVIDENCE_LIMITS.maxBytesPerPr,
       );
-      return served === undefined ? kept : { ...kept, app: served };
+      const flows = new Map<string, "scripted" | "failed">();
+      for (const shot of outcome.result.shots) {
+        if (shot.flow !== undefined && target.flows?.has(shot.name) === true) {
+          flows.set(shot.name, shot.flow);
+        }
+      }
+      return {
+        ...kept,
+        ...(served === undefined ? {} : { app: served }),
+        ...(flows.size === 0 ? {} : { flows }),
+      };
     } finally {
       ownJail?.dispose();
     }

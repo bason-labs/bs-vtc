@@ -19,6 +19,11 @@
  * - Nothing an earlier gate wrote in the checkout feeds a later verifying gate (spine §5 reading
  *   80): pinned scanners run in a clean checkout of their own (head, and base for the baseline),
  *   and L1 runs after every file it guards was put back to the head commit.
+ * - Check tools that install scripts cannot replace (H-14, spine §5 reading 238,
+ *   `tool-integrity.ts`): a pinned tool runs from VTC's store, re-verified before each use; a
+ *   `project` tool (the gate's `tool`, or derived from its command) is hashed after a scripts-free
+ *   install and again just before its gate, and any change fails the gate as tampering
+ *   (`GateResult.tool`).
  */
 import { createHash } from "node:crypto";
 import {
@@ -46,6 +51,8 @@ import {
   normalizeSeverity,
   redactJson,
   redactSecrets,
+  TOOL_TAMPER_RULE_ID,
+  type CheckTool,
   type Evidence,
   type FailureClass,
   type Gate,
@@ -63,6 +70,7 @@ import {
   type TestMetrics,
   type TestRecord,
   type ToolFinding,
+  type ToolIntegrity,
   type VisualSummary,
   type WriteScopeCheckRequest,
 } from "@vtc/shared";
@@ -111,6 +119,13 @@ import {
   type JailedResult,
 } from "./sandbox.js";
 import { computeScopeCreep, scopeCreepFindings, type ScopeCreep } from "./scope-creep.js";
+import {
+  changedToolFiles,
+  deriveProjectTool,
+  hashTool,
+  scriptsFreeInstall,
+  type ToolSnapshot,
+} from "./tool-integrity.js";
 import { buildTraceability } from "./traceability.js";
 import { visualWithoutRenders } from "./visual/evaluate.js";
 import { noveltySeam } from "./visual/novelty.js";
@@ -189,6 +204,8 @@ interface Prepared {
   readonly outputs: readonly string[];
   /** Checkout-relative rule files a pinned scanner reads. */
   readonly configs: readonly string[];
+  /** A store-verified pinned tool (H-14): its source and the SHA-256 of the binary that runs. */
+  readonly tool?: ToolIntegrity;
 }
 
 interface Execution {
@@ -197,7 +214,19 @@ interface Execution {
   readonly exec?: ExecResult;
   readonly reportText?: string;
   readonly reportProblem?: string;
+  /** How the gate's tool was verified (H-14); with `tampered` the gate did not run. */
+  readonly tool?: ToolIntegrity;
+  /** Every tool file the install phase or an earlier gate changed, added or removed. */
+  readonly tampered?: readonly string[];
 }
+
+/** A `project` tool hashed after the scripts-free install (H-14), or why it could not be. */
+type ToolBaseline =
+  | { readonly paths: readonly string[]; readonly snapshot: ToolSnapshot }
+  | { readonly paths: readonly string[]; readonly problem: string };
+
+/** The finding tool name of a tampered tool (H-14). */
+const TOOL_INTEGRITY = "vtc-tool-integrity";
 
 interface BaselineFacts {
   readonly failingTests: ReadonlySet<string>;
@@ -322,6 +351,8 @@ class Run {
   /** Bytes of files at the head commit, read once per path. */
   private readonly headFiles = new Map<string, Promise<Uint8Array | undefined>>();
   private readonly baselines = new Map<string, Promise<BaselineFacts>>();
+  /** Each verify gate's `project` tool as hashed after the scripts-free install (H-14), by gate id. */
+  private readonly tools = new Map<string, ToolBaseline>();
   private readonly attempt: string;
   private readonly evidenceRoot: string;
   private readonly stateRoot: string;
@@ -483,25 +514,28 @@ class Run {
    * checkout (and the reaper has stopped whatever the install commands left).
    */
   private async runGates(config: GatesConfig): Promise<void> {
-    let installFailed: string | null = null;
     let hiddenCopied = false;
     const gates = this.selectGates(config);
     if (gates.some((g) => g.phase === "verify" && g.layer === "L1")) {
       // Before any command ran: the checkout is still the clean head commit.
       this.guardedAtStart = walkGuarded(this.checkoutAbs, this.lintGuarded);
     }
-    for (const gate of gates) {
+    const verify = gates.filter((g) => g.phase !== "install");
+    const installFailed = await this.runInstall(
+      gates.filter((g) => g.phase === "install"),
+      verify,
+      config,
+    );
+    for (const gate of verify) {
       if (installFailed !== null) {
         this.results.push(this.skippedResult(gate, `install gate ${installFailed} did not pass`));
         continue;
       }
-      if (gate.phase !== "install" && !hiddenCopied) {
+      if (!hiddenCopied) {
         hiddenCopied = true;
         this.copyHidden();
       }
-      const result = await this.runGate(gate, config);
-      this.results.push(result);
-      if (gate.phase === "install" && result.status !== "pass") installFailed = gate.id;
+      this.results.push(await this.runGate(gate, config));
     }
     const guard =
       this.request.reason === "base_fail_check" || this.request.reason === "calibration";
@@ -530,6 +564,170 @@ class Run {
     }
     this.finishL2();
     await this.flagScopeCreep();
+  }
+
+  /**
+   * The install phase in two passes (H-14, spine §5 reading 238): every install gate's
+   * scripts-free form (`scriptsFreeInstall`) first, then the hash of each verify gate's `project`
+   * tool, then the install gates as configured, which run the lifecycle scripts. An install gate
+   * with no scripts-free form runs as configured in the first pass, before the hash, and the
+   * evidence says so. Results are reported once per gate, in config order: a failed first pass is
+   * that gate's result. Returns the id of the install gate that did not pass, or `null`.
+   */
+  private async runInstall(
+    install: readonly Gate[],
+    verify: readonly Gate[],
+    config: GatesConfig,
+  ): Promise<string | null> {
+    const results = new Map<string, GateResult>();
+    let failed: string | null = null;
+    const plans = install.map((gate) => ({ gate, free: scriptsFreeInstall(gate.command) }));
+    const unverified: string[] = [];
+    for (const { gate, free } of plans) {
+      if (failed !== null) {
+        results.set(gate.id, this.skippedResult(gate, `install gate ${failed} did not pass`));
+        continue;
+      }
+      if (free === null) unverified.push(gate.id);
+      const first =
+        free?.rerun === true
+          ? await this.runGate(
+              { ...gate, id: `${gate.id}-scripts-free`, command: free.argv },
+              config,
+            )
+          : await this.runGate(free === null ? gate : { ...gate, command: free.argv }, config);
+      if (first.status !== "pass") {
+        failed = gate.id;
+        results.set(gate.id, { ...first, gate_id: gate.id });
+      } else if (free?.rerun !== true) results.set(gate.id, first);
+    }
+    if (failed === null) this.hashTools(verify, unverified);
+    for (const { gate } of plans) {
+      if (results.has(gate.id)) continue;
+      if (failed !== null) {
+        results.set(gate.id, this.skippedResult(gate, `install gate ${failed} did not pass`));
+        continue;
+      }
+      const result = await this.runGate(gate, config);
+      results.set(gate.id, result);
+      if (result.status !== "pass") failed = gate.id;
+    }
+    for (const { gate } of plans) {
+      const result = results.get(gate.id);
+      if (result !== undefined) this.results.push(result);
+    }
+    return failed;
+  }
+
+  /**
+   * A verify gate's `project` tool (H-14): its `tool`, or, when that is absent, the one derived
+   * from its command. A pinned scanner always runs from the store and has none.
+   */
+  private projectToolOf(gate: Gate): Extract<CheckTool, { source: "project" }> | null {
+    if (gate.phase !== "verify" || this.isPinnedScanner(gate)) return null;
+    if (gate.tool !== undefined) return gate.tool.source === "project" ? gate.tool : null;
+    if (!resolvesInside(this.checkoutAbs, join(this.checkoutAbs, gate.cwd ?? ""))) return null;
+    return deriveProjectTool(this.checkoutAbs, gate.cwd ?? "", gate.command);
+  }
+
+  /** Hashes each verify gate's `project` tool in the run checkout, once per set of paths. */
+  private hashTools(verify: readonly Gate[], unverifiedInstalls: readonly string[]): void {
+    const byPaths = new Map<string, ToolBaseline>();
+    for (const gate of verify) {
+      const tool = this.projectToolOf(gate);
+      if (tool === null) continue;
+      const key = tool.paths.join("\u0000");
+      let hashed = byPaths.get(key);
+      if (hashed === undefined) {
+        try {
+          hashed = { paths: tool.paths, snapshot: hashTool(this.checkoutAbs, tool.paths) };
+        } catch (error) {
+          hashed = { paths: tool.paths, problem: errorText(error) };
+        }
+        byPaths.set(key, hashed);
+      }
+      this.tools.set(gate.id, hashed);
+    }
+    if (this.tools.size > 0 && unverifiedInstalls.length > 0) {
+      this.note(
+        "tool-integrity",
+        `install gate(s) ${unverifiedInstalls.join(", ")} have no scripts-free form VTC knows (npm, pnpm, Yarn and Bun installs, go mod download and cargo fetch have one), so they ran before the check tools were hashed: a file their scripts wrote into a tool is not detected (H-14)`,
+      );
+    }
+  }
+
+  /**
+   * Re-hashes the gate's `project` tool just before it runs (H-14): `tampered` lists every file
+   * the install phase or an earlier gate changed, added or removed since the scripts-free hash.
+   */
+  private verifyTool(
+    gate: Gate,
+  ): { refused: string } | { tool?: ToolIntegrity; tampered?: readonly string[] } {
+    const baseline = this.tools.get(gate.id);
+    if (baseline === undefined) return {};
+    if ("problem" in baseline) {
+      return { refused: `not run: its tool could not be hashed: ${baseline.problem}` };
+    }
+    let now: ToolSnapshot;
+    try {
+      now = hashTool(this.checkoutAbs, baseline.paths);
+    } catch (error) {
+      return { refused: `not run: its tool could not be hashed again: ${errorText(error)}` };
+    }
+    const tampered = changedToolFiles(baseline.snapshot, now);
+    const tool: ToolIntegrity = {
+      source: "project",
+      sha256: baseline.snapshot.sha256,
+      tampered: tampered.slice(0, 50),
+    };
+    return tampered.length === 0 ? { tool } : { tool, tampered };
+  }
+
+  /**
+   * A gate whose tool was tampered with (H-14): it did not run, and it fails as a product problem
+   * with one security finding, so the §7.6 risk rules treat it as one.
+   */
+  private tamperedResult(
+    gate: Gate,
+    tool: ToolIntegrity,
+    tampered: readonly string[],
+    logRel: string,
+    durationMs: number,
+  ): GateResult {
+    const shown = tampered.slice(0, 500);
+    const more = tampered.length - shown.length;
+    this.writes.push({
+      rel: logRel,
+      redact: true,
+      text: `not run: ${String(tampered.length)} file(s) of this gate's tool changed after the scripts-free install was hashed (by an install-phase script or an earlier gate), so the tool cannot be trusted (H-14):\n${shown.join("\n")}${more > 0 ? `\n... and ${String(more)} more` : ""}\n`,
+    });
+    const evidence: Evidence = { type: "command_output", ref: logRel };
+    const title = `the tool of gate ${gate.id} was changed after it was hashed (${String(tampered.length)} file(s))`;
+    return {
+      gate_id: gate.id,
+      layer: gate.layer,
+      phase: gate.phase,
+      status: "fail",
+      blocking: gate.blocking,
+      new_violations: 1,
+      baseline_violations: 0,
+      monotonic: [],
+      findings: [
+        {
+          tool: TOOL_INTEGRITY,
+          rule_id: TOOL_TAMPER_RULE_ID,
+          category: "security",
+          title: title.slice(0, 200),
+          location: { path: tampered[0] ?? gate.id },
+          evidence,
+          label: "high",
+        },
+      ],
+      failure_class: "product",
+      evidence: [evidence],
+      duration_ms: durationMs,
+      tool,
+    };
   }
 
   /**
@@ -645,6 +843,20 @@ class Run {
     }
     const [first, ...rest] = gate.command;
     let argv0 = first ?? "";
+    if (gate.tool?.source === "pinned") {
+      // H-14: a pinned tool runs from VTC's store; command[0] names it.
+      if (!this.scanners.names.includes(gate.tool.pin)) {
+        return {
+          refused: `not run: its tool pin ${gate.tool.pin} is not one of VTC's pinned tools (gates/scanners.json)`,
+        };
+      }
+      if (argv0 !== gate.tool.pin) {
+        return {
+          refused: `not run: its tool is the pinned ${gate.tool.pin}, so its command must start with ${gate.tool.pin}`,
+        };
+      }
+    }
+    let tool: ToolIntegrity | undefined;
     const extraEnv: Record<string, string> = {};
     const scanner = this.scanners.names.includes(argv0);
     let outputs: readonly string[] = [];
@@ -668,7 +880,13 @@ class Run {
         extraEnv[OSV_DB_ENV] = osvDatabaseDir(this.deps.vtcHome);
       }
       try {
+        // Re-verified by the store before each use; the hash is of the file that then runs.
         const binary = await this.scanners.ensure(argv0);
+        tool = {
+          source: "pinned",
+          sha256: createHash("sha256").update(readFileSync(binary)).digest("hex"),
+          tampered: [],
+        };
         argv0 = binary;
       } catch (error) {
         if (!(error instanceof ScannerUnavailableError) || !USER_INSTALLED_SCANNERS.includes(argv0))
@@ -705,7 +923,14 @@ class Run {
       );
     }
     argv.push(...extraArgs);
-    return { argv, env: gateEnv(this.env, extraEnv), scanner, outputs, configs };
+    return {
+      argv,
+      env: gateEnv(this.env, extraEnv),
+      scanner,
+      outputs,
+      configs,
+      ...(tool === undefined ? {} : { tool }),
+    };
   }
 
   /**
@@ -760,6 +985,17 @@ class Run {
         };
       }
     }
+    let tool = prepared.tool;
+    if (head && checkoutAbs === this.checkoutAbs) {
+      // H-14: the tool's files as they were after the scripts-free install, or the gate fails.
+      const verified = this.verifyTool(gate);
+      if ("refused" in verified) return { refused: verified.refused };
+      if (verified.tampered !== undefined && verified.tool !== undefined) {
+        return { tool: verified.tool, tampered: verified.tampered };
+      }
+      tool = verified.tool ?? tool;
+    }
+    const toolField = tool === undefined ? {} : { tool };
     const baseGlobs =
       gate.layer === "L1"
         ? (this.config?.tests.protected_configs ?? [])
@@ -789,11 +1025,17 @@ class Run {
       restore?.();
     }
     if (exec.leftover !== undefined) return { refused: `stopped: ${exec.leftover}` };
-    if (reportAbs === null || exec.spawnError !== undefined || exec.timedOut) return { exec };
-    if (!existsSync(reportAbs) || !resolvesInside(checkoutAbs, reportAbs)) {
-      return { exec, reportProblem: `report ${gate.report?.path ?? ""} was not written` };
+    if (reportAbs === null || exec.spawnError !== undefined || exec.timedOut) {
+      return { exec, ...toolField };
     }
-    return { exec, reportText: readFileSync(reportAbs, "utf8") };
+    if (!existsSync(reportAbs) || !resolvesInside(checkoutAbs, reportAbs)) {
+      return {
+        exec,
+        reportProblem: `report ${gate.report?.path ?? ""} was not written`,
+        ...toolField,
+      };
+    }
+    return { exec, reportText: readFileSync(reportAbs, "utf8"), ...toolField };
   }
 
   /** Files L1 reads with the commit's (or, where the diff changed them, the base's) version. */
@@ -959,6 +1201,16 @@ class Run {
       this.note(gate.id, execution.refused);
       return this.infraResult(gate.id, gate.layer, gate.phase, gate.blocking, logRel);
     }
+    if (execution.tampered !== undefined && execution.tool !== undefined) {
+      return this.tamperedResult(
+        gate,
+        execution.tool,
+        execution.tampered,
+        logRel,
+        Date.now() - started,
+      );
+    }
+    const toolField = execution.tool === undefined ? {} : { tool: execution.tool };
     const exec = execution.exec;
     if (exec === undefined)
       return this.infraResult(gate.id, gate.layer, gate.phase, gate.blocking, logRel);
@@ -979,15 +1231,18 @@ class Run {
         redact: true,
         text: `${reason}\n${hiddenRun ? "" : exec.tail}`,
       });
-      return this.infraResult(
-        gate.id,
-        gate.layer,
-        gate.phase,
-        gate.blocking,
-        logRel,
-        classifyFailure({ spawnError: exec.spawnError, timedOut: exec.timedOut, log: "" }),
-        duration,
-      );
+      return {
+        ...this.infraResult(
+          gate.id,
+          gate.layer,
+          gate.phase,
+          gate.blocking,
+          logRel,
+          classifyFailure({ spawnError: exec.spawnError, timedOut: exec.timedOut, log: "" }),
+          duration,
+        ),
+        ...toolField,
+      };
     }
     if (execution.reportProblem !== undefined) {
       this.writes.push({
@@ -1000,15 +1255,10 @@ class Run {
         reportProblem: execution.reportProblem,
         log: exec.tail,
       });
-      return this.infraResult(
-        gate.id,
-        gate.layer,
-        gate.phase,
-        gate.blocking,
-        logRel,
-        cls,
-        duration,
-      );
+      return {
+        ...this.infraResult(gate.id, gate.layer, gate.phase, gate.blocking, logRel, cls, duration),
+        ...toolField,
+      };
     }
     const reportRel =
       gate.report === undefined
@@ -1027,6 +1277,7 @@ class Run {
       phase: gate.phase,
       blocking: gate.blocking,
       duration_ms: duration,
+      ...toolField,
       ...(gate.report === undefined || reportRel === undefined
         ? {}
         : { report: { format: gate.report.format, path: reportRel } }),
@@ -1069,15 +1320,18 @@ class Run {
         redact: true,
         text: `${problem}\n${hiddenRun ? "" : exec.tail}`,
       });
-      return this.infraResult(
-        gate.id,
-        gate.layer,
-        gate.phase,
-        gate.blocking,
-        logRel,
-        "infra",
-        duration,
-      );
+      return {
+        ...this.infraResult(
+          gate.id,
+          gate.layer,
+          gate.phase,
+          gate.blocking,
+          logRel,
+          "infra",
+          duration,
+        ),
+        ...toolField,
+      };
     }
     if (
       gate.report !== undefined &&
