@@ -28,12 +28,16 @@
  *   servers are stubs with dummy env and header values; only names and enabled flags are written.
  * - `codex-plugin [--plugin-dir <dist/codex-plugin>]`: `codex plugin marketplace add` and
  *   `codex plugin add` ONLY in a temporary `CODEX_HOME`, never `~/.codex`; records what each wrote.
- * - `claude-arm [--plugin-dir <dist/claude-plugin>] [--model <id>]`: one real `claude -p` role
+ * - `claude-arm [--plugin-dir <dist/claude-plugin>] [--model <id>] [--vtc-bin <cli bin.js>]`: one
+ *   real `claude -p` role
  *   run whose plugin is a replay arm: an unchanged copy of the real compiled plugin (no scratch
  *   patch) under a temporary guard dir, launched as D-cg launches an arm (`SpawnRoleRequest
  *   .pluginDir`, `--debug-file` beside it) with a replay `readDeny`. Writes the redacted stream (the
  *   success fixture), the `init` record's plugin and agent fields, the debug-log lines about
- *   plugins, and what `HeadlessRun.pluginLoad()` concluded.
+ *   plugins, and what `HeadlessRun.pluginLoad()` concluded. Round-5 items: `vtc` is on `PATH`
+ *   (a recording shim in front of the built cli, with a temporary `VTC_HOME`), and the summary
+ *   lists each `vtc hook` call (event, input keys, `agent_type`, the headless-role variable, exit
+ *   status, output size) and every hook the stream reports.
  *
  * `--out` gets raw files (`*.raw.*`, which can name the owner's own plugins and paths: read them,
  * never commit them) and redacted ones, for the owner to read before any becomes a fixture.
@@ -43,24 +47,20 @@ import {
   cpSync,
   existsSync,
   mkdirSync,
-  mkdtempSync,
   readdirSync,
   readFileSync,
-  realpathSync,
   rmSync,
   statSync,
   writeFileSync,
 } from "node:fs";
-import { homedir, tmpdir, userInfo } from "node:os";
+import { homedir } from "node:os";
 import { join, relative, resolve } from "node:path";
 import {
   ASSET_SOURCES,
   CODEX_HOST_WEB_SEARCH,
-  findDisallowedHostArgs,
-  findForbiddenHostArgs,
   fromStructuredOutput,
-  headlessIsolationGaps,
   headlessPolicyFor,
+  HEADLESS_ROLE_ENV,
   HostOutcomeSchema,
   jsonSchemaFor,
   type HostCommand,
@@ -82,38 +82,22 @@ import { createClaudeCodeAdapter, createCodexAdapter } from "../src/index.js";
 import { parseDclArgs, type DclArgs } from "./dcl-check-args.js";
 import {
   armInitFields,
+  hookResponses,
   pluginDebugLines,
   summarizeCodexWebSearch,
   swapWebSearch,
 } from "./dcl-check-lib.js";
+import { hookCallSummary, vtcHookShim, type HookCallSummary } from "./h15-check-lib.js";
+import {
+  context,
+  jsonl,
+  outsideRepo,
+  refuseUnsafe,
+  REPO_ROOT,
+  tempDir,
+  write,
+} from "./live-common.js";
 import { redactRecording, type RecordingContext } from "./recording.js";
-
-const REPO_ROOT = resolve(import.meta.dirname, "..", "..", "..");
-
-const write = (dir: string, name: string, text: string): void => {
-  writeFileSync(join(dir, name), text, "utf8");
-  console.warn(`wrote ${join(dir, name)}`);
-};
-
-const jsonl = (lines: readonly string[]): string => lines.map((line) => `${line}\n`).join("");
-
-const refuseUnsafe = (host: "claude-code" | "codex", command: HostCommand): void => {
-  const refused = [
-    ...findForbiddenHostArgs([command.command, ...command.args]),
-    ...findDisallowedHostArgs(command.args),
-    ...headlessIsolationGaps(host, command.args).map((gap) => `missing ${gap}`),
-  ];
-  if (refused.length > 0) throw new Error(`refusing to run: ${refused.join(", ")}`);
-  console.warn(`$ ${command.command} ${command.args.map((a) => JSON.stringify(a)).join(" ")}`);
-};
-
-const tempDir = (prefix: string): string => realpathSync(mkdtempSync(join(tmpdir(), prefix)));
-
-const context = (paths: readonly string[]): RecordingContext => ({
-  home: homedir(),
-  cwd: paths,
-  user: userInfo().username,
-});
 
 // ------------------------------------------------------------------------------ codex-web
 
@@ -663,10 +647,53 @@ const codexPlugin = (args: DclArgs): void => {
 const ARM_PROMPT =
   'Do not read or change any file. Reply only with a RoleResult: role "qa", exit "done", summary "live ok", and every other field null.';
 
+/**
+ * Puts `vtc` on `PATH` for the run's plugin hooks (round-5 items): a shim in a temp bin directory
+ * that records each hook call (`h15-check-lib.ts` `vtcHookShim`) and then runs the real cli under
+ * `node`, with a temporary `VTC_HOME`, so the hooks never touch the user's own.
+ */
+const vtcOnPath = (args: DclArgs, bin: string, vtcHome: string): string => {
+  const calls = join(bin, "calls");
+  mkdirSync(calls);
+  const node = execFileSync("which", ["node"], { encoding: "utf8" }).trim();
+  const cli = resolve(args.vtcBin ?? join(REPO_ROOT, "packages", "cli", "dist", "bin.js"));
+  if (!existsSync(cli)) throw new Error(`no vtc cli at ${cli}: build it first (pnpm build)`);
+  writeFileSync(join(bin, "vtc"), vtcHookShim([node, cli], calls, HEADLESS_ROLE_ENV), {
+    mode: 0o755,
+  });
+  process.env.PATH = `${bin}:${process.env.PATH ?? ""}`;
+  process.env.VTC_HOME = vtcHome;
+  return calls;
+};
+
+/** The shim's recorded hook calls, one summary per call, in the order they were made. */
+const hookCalls = (calls: string): HookCallSummary[] => {
+  const read = (base: string, ext: string): string => {
+    const path = join(calls, `${base}.${ext}`);
+    return existsSync(path) ? readFileSync(path, "utf8") : "";
+  };
+  const bases = [...new Set(readdirSync(calls).map((name) => name.replace(/\.[a-z]+$/u, "")))];
+  return bases
+    .map((base) => ({ base, at: statSync(join(calls, `${base}.in`)).mtimeMs }))
+    .sort((a, b) => a.at - b.at)
+    .map(({ base }) =>
+      hookCallSummary({
+        argv: read(base, "argv"),
+        input: read(base, "in"),
+        role: read(base, "role"),
+        code: read(base, "code"),
+        stdout: read(base, "out"),
+        stderr: read(base, "err"),
+      }),
+    );
+};
+
 const claudeArm = async (args: DclArgs): Promise<void> => {
   const guard = tempDir("vtc-dcl-guard-");
   const cwd = tempDir("vtc-dcl-trial-");
   const repo = tempDir("vtc-dcl-repo-");
+  const bin = tempDir("vtc-dcl-bin-");
+  const vtcHome = tempDir("vtc-dcl-vtc-home-");
   const armDir = join(guard, "lookback", "arms", "trial-1", "a");
   const plugin = resolve(args.pluginDir ?? join(REPO_ROOT, ASSET_SOURCES["plugin:claude-code"]));
   try {
@@ -674,9 +701,10 @@ const claudeArm = async (args: DclArgs): Promise<void> => {
     mkdirSync(join(guard, "lookback", "arms", "trial-1"), { recursive: true });
     cpSync(plugin, armDir, { recursive: true });
     execFileSync("git", ["init", "-q"], { cwd });
+    const calls = vtcOnPath(args, bin, vtcHome);
     // the adapter has no plugin of its own here: the arm is the only one the run can load
     // keeps the arm's debug log after the run, so the check can record it
-    const adapter = createClaudeCodeAdapter({ keepArmDebugLogs: true });
+    const adapter = createClaudeCodeAdapter({ keepArmDebugLogs: true, vtcHome });
     const login = await adapter.authStatus?.();
     console.warn(`auth: ${JSON.stringify(login)}`);
     if (login?.logged_in !== true) throw new Error("claude is not logged in: not starting");
@@ -734,20 +762,24 @@ const claudeArm = async (args: DclArgs): Promise<void> => {
       pluginLoad: proof.loaded ? { loaded: true, dir: relative(guard, proof.dir) } : proof,
       init: armInitFields(stream),
       debugLogBytes: statSync(debugFile, { throwIfNoEntry: false })?.size ?? 0,
+      // round-5 items: `vtc` on PATH; each `vtc hook` call (agent_type, exit, output) and every
+      // hook the stream reports
+      claudeVersion: execFileSync("claude", ["--version"], { encoding: "utf8" }).trim(),
+      date: new Date().toISOString().slice(0, 10),
+      vtcHookCalls: hookCalls(calls),
+      hookResponses: hookResponses(stream),
     };
     write(args.out, "claude-arm.summary.json", `${JSON.stringify(summary, null, 2)}\n`);
     console.warn(JSON.stringify(summary, null, 2));
   } finally {
-    for (const dir of [guard, cwd, repo]) rmSync(dir, { recursive: true, force: true });
+    for (const dir of [guard, cwd, repo, bin, vtcHome])
+      rmSync(dir, { recursive: true, force: true });
   }
 };
 
 const main = async (): Promise<void> => {
   const args = parseDclArgs(process.argv.slice(2));
-  const out = resolve(args.out);
-  if (!relative(REPO_ROOT, out).startsWith("..")) {
-    throw new Error("--out must be outside the repo: raw files can name the owner's own setup");
-  }
+  const out = outsideRepo(args.out);
   mkdirSync(out, { recursive: true });
   const resolved = { ...args, out };
   if (args.target === "codex-web") await codexWeb(resolved);

@@ -27,6 +27,7 @@ import { codexHeadlessCommand, codexSandboxProfile, codexSchemaFile, HOST } from
 import { codexOutcomeAfterExit, parseCodexEvents } from "./events.js";
 import { codexConfigArgs, createCodexMcpGuard } from "./mcp-servers.js";
 import { installCodex } from "./install.js";
+import { CODEX_DEFAULT_PRICES } from "./prices.js";
 
 /**
  * §12.1 / §20.4: subagents are spawned explicitly (foreground), no background agents in the CLI,
@@ -230,6 +231,8 @@ export const createCodexAdapter = (options: CodexAdapterOptions = {}): HostAdapt
   return {
     host: HOST,
     capabilities: codexCapabilities,
+    // Codex reports no cost: the engine prices its runs from this table (H-12, reading 236)
+    defaultPrices: CODEX_DEFAULT_PRICES,
     install: (request) =>
       Promise.resolve().then(() =>
         installCodex(request, {

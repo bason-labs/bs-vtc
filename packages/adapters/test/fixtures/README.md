@@ -28,7 +28,7 @@ AD-25 asks for limit, auth, max-turns and kill streams. What exists today:
 | Stream    | Claude                                    | Codex                                            |
 | --------- | ----------------------------------------- | ------------------------------------------------ |
 | limit     | synthetic                                 | synthetic                                        |
-| auth      | synthetic                                 | synthetic                                        |
+| auth      | synthetic                                 | recorded (`exec-signed-out.jsonl`, H-15)         |
 | max-turns | synthetic; both recordings missed the cap | none: Codex has no turn cap of its own (§12.1)   |
 | kill      | synthetic                                 | recorded (`thread.started`, `turn.started`, end) |
 
@@ -36,12 +36,12 @@ To record a stream, run the command below on the signed-in machine. The header o
 `scripts/live-check.ts` has the full recipe. Read every recording before it replaces a
 synthetic file.
 
-| Stream    | Command (`pnpm --filter @vtc/adapters live:check …`)                                    |
-| --------- | --------------------------------------------------------------------------------------- |
-| max-turns | `claude-code --max-turns 1 --record <file>` with a prompt that needs a tool turn        |
-| kill      | `<host> --kill-after 3000 --record <file>`                                              |
-| auth      | sign the host out with its own command, then `<host> --signed-out --record <file>`      |
-| limit     | `<host> --record <file>` while the host reports its limit reached (it cannot be forced) |
+| Stream    | Command (`pnpm --filter @vtc/adapters live:check …`)                                                                              |
+| --------- | --------------------------------------------------------------------------------------------------------------------------------- |
+| max-turns | `claude-code --max-turns 1 --record <file>` with a prompt that needs a tool turn                                                  |
+| kill      | `<host> --kill-after 3000 --record <file>`                                                                                        |
+| auth      | Codex: `live:h15 codex-signed-out` (a temporary `CODEX_HOME`, never a sign-out); Claude: none yet (H-15 never signs the user out) |
+| limit     | `<host> --record <file>` while the host reports its limit reached (it cannot be forced)                                           |
 
 `--max-turns 1` with the live check's trivial prompt does not hit the cap. Without the
 `StructuredOutput` tool the reply takes one turn. With it, the closing `StructuredOutput` call
@@ -113,3 +113,20 @@ Spike recordings and synthetic files:
 | `codex/app-server-rateLimits-updated.synthetic.json` | synthetic: `account/rateLimits/updated` notification                                                                                                                           |
 | `claude-code/stream-bash-calls.synthetic.jsonl`      | synthetic (D-cs): `Bash` `tool_use` blocks, one repeated, one a subagent's, one `Read`; commands with paths and fake secrets                                                   |
 | `codex/exec-command-execution.synthetic.jsonl`       | synthetic (D-cs): `command_execution` items (the documented `bash -lc ls` sample line verbatim, `item.started`/`updated`/`completed`, argv arrays) with paths and fake secrets |
+
+H-15 and D-cx live-check recordings (2026-10-15, Claude Code 2.1.299, codex-cli 0.162.1, spine §5
+readings 234, 239 and 244). Made with `pnpm --filter @vtc/adapters live:h15 <check> --out <dir>`
+(`scripts/h15-check.ts`) or `live:dcl claude-arm` (`scripts/dcl-check.ts`), redacted the same
+way, and read before they were copied here. Codex probes ran `--ephemeral` and Claude probes
+`--no-session-persistence`, so nothing was saved in the owner's `~/.codex` or `~/.claude`.
+
+| File                                       | What it shows                                                                                                                                                                                                                                                                                                              |
+| ------------------------------------------ | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `codex/exec-model-refused.jsonl`           | `live:h15 codex-model-refusal` (D-cx): `-m vtc-probe-no-such-model` on the owner's ChatGPT sign-in. A "Model metadata … not found" `error` item, then `error` and `turn.failed` with the API's 400 as JSON text: "The '<id>' model is not supported when using Codex with a ChatGPT account." No work, no tokens.          |
+| `codex/exec-signed-out.jsonl`              | `live:h15 codex-signed-out`: a fresh temporary `CODEX_HOME` (`codex login status`: "Not logged in", exit 1). Ten `Reconnecting... n/5` errors (WebSocket, then HTTPS), then a 401 "Missing bearer or basic authentication" with no `codexErrorInfo`. `cf-ray` and request ids replaced with `<cf-ray>` and `<request-id>`. |
+| `claude-code/stream-usage-unit.jsonl`      | `live:h15 claude-usage-unit` (H-10): a trivial `--setting-sources ""` run whose `rate_limit_event` reads `five_hour` 0.13 and `seven_day` 0.73. Claude Code's own `/usage`, 12 s later, printed 14% and 73% with the same resets, so `utilization` is a 0–1 fraction.                                                      |
+| `claude-code/stream-arm-vtc-on-path.jsonl` | `live:dcl claude-arm` with `vtc` on `PATH` (round-5 items): the plugin's `SessionStart` hook exits 0 with no output (it exited 127 in `stream-arm-success.jsonl`), and the engine bridge `vtc` is `connected` in `init`. The shim recorded `agent_type` `vtc:vtc-qa-judge` in the hook's input.                            |
+
+Not recorded: a Codex limit text. `live:h15 codex-limit` read the plan at 15% (five hours) and 2%
+(weekly) on 2026-10-15, and a limit cannot be forced; it records the text once a window is at its
+limit.
