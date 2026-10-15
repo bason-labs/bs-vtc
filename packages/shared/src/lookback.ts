@@ -100,6 +100,11 @@ export const LOOKBACK_REPO = {
    * risk, start tier). New in 5.4.0.
    */
   routingScorecard: ".vtc/lookback/scorecards/routing.json",
+  /**
+   * Graded tier replays (D-cn, `RoutingReplayResult`): `<id>.json`, the id from
+   * {@link routingReplayId}. New in 5.7.0.
+   */
+  routingReplaysDir: ".vtc/lookback/replays/routing",
 } as const;
 
 /** Thresholds of the §13 loop. Engine code and tests read them from here only. */
@@ -391,6 +396,13 @@ export const ReplayTrialRefSchema = z.strictObject({
   task: z.string().min(1).max(100),
   arm: z.enum(["a", "b", "aa"]),
   trial: z.int().min(1).max(10),
+  /**
+   * The tier arm of a tier replay (D-cn; spine §5 reading 247(6)): the tier this arm runs on, the
+   * same prompt on both arms. An exception to reading 218(7)'s "a replay holds the recorded tier"
+   * for routing replays only (`proposal` is a {@link routingReplayId}). Absent: a prompt replay, on
+   * the recorded tier. New in 5.7.0.
+   */
+  tier: ModelTierSchema.optional(),
 });
 export type ReplayTrialRef = z.infer<typeof ReplayTrialRefSchema>;
 
@@ -468,6 +480,99 @@ export const ReplayResultSchema = z.strictObject({
   grader: ReplayGraderSchema.optional(),
 });
 export type ReplayResult = z.infer<typeof ReplayResultSchema>;
+
+// ------------------------------------------------------------ tier replays
+
+/**
+ * Pure (D-cn; spine §5 reading 247(6)): the proposal id of a tier replay of one routing cell
+ * (`routing.<role>.<size>.<risk>`) from tier `from` (arm `a`) to `to` (arm `b`), used as
+ * `ReplayTrialRef.proposal`, the ledger's `proposal` and the result's file name. New in 5.7.0.
+ */
+export const routingReplayId = (
+  role: string,
+  size: "S" | "M" | "L",
+  risk: "none" | "tagged" | "high",
+  from: "low" | "mid" | "top",
+  to: "low" | "mid" | "top",
+): string =>
+  SlugSchema.parse(
+    `routing-${RoleIdSchema.parse(role)}-${size.toLowerCase()}-${TaskRiskClassSchema.parse(risk)}-${ModelTierSchema.parse(from)}-${ModelTierSchema.parse(to)}`,
+  );
+
+/** `.vtc/lookback/replays/routing/<id>.json`. New in 5.7.0. */
+export const routingReplayPath = (id: string): string =>
+  `${LOOKBACK_REPO.routingReplaysDir}/${SlugSchema.parse(id)}.json`;
+
+/**
+ * A graded tier replay (D-cn; spine §5 reading 247(6)): the same prompt version on both arms, arm
+ * `a` on the cell's current start tier and arm `b` on the proposed one, k trials per task, graded
+ * like a prompt replay (`replayGraderFor`) and judged by the same paired sign test. `verdict` is
+ * arm `b` against arm `a` on quality; `tokens_delta_pct` and `cost_delta_pct` say what `b` costs
+ * relative to `a` (cost `null` when an arm is unpriced). Written by the lookback module only.
+ * New in 5.7.0.
+ */
+export const RoutingReplayResultSchema = z.strictObject({
+  v: z.literal(1),
+  id: SlugSchema,
+  /** `routing.<role>.<size>.<risk>` (`routingConfigSubject`). */
+  subject: z.string().regex(/^routing\.[a-z][a-z0-9_-]{0,47}\.(S|M|L)\.(none|tagged|high)$/),
+  role: RoleIdSchema,
+  mode: SlugSchema.optional(),
+  host: HostIdSchema,
+  /** The prompt version both arms ran (`effective_sha256`). */
+  prompt: Sha256HexSchema,
+  tiers: z.strictObject({ a: ModelTierSchema, b: ModelTierSchema }),
+  grader_bundle_sha: Sha256HexSchema,
+  grader: ReplayGraderSchema,
+  k: z.int().min(1).max(10),
+  per_task: z
+    .array(
+      z.strictObject({
+        task: z.string().min(1).max(100),
+        a: z.array(z.boolean()),
+        b: z.array(z.boolean()),
+        regression_set: z.boolean(),
+      }),
+    )
+    .min(1),
+  sign_test: z.strictObject({
+    n_discordant: z.int().nonnegative(),
+    wins_b: z.int().nonnegative(),
+    p: z.number().min(0).max(1),
+  }),
+  tokens_delta_pct: z.number(),
+  cost_delta_pct: z.number().nullable(),
+  verdict: ReplayVerdictSchema,
+  isolation: ReplayIsolationSchema,
+  finished_at: IsoDateTimeSchema,
+});
+export type RoutingReplayResult = z.infer<typeof RoutingReplayResultSchema>;
+
+/**
+ * Pure (D-cn; spine §5 reading 247(6)): whether a graded tier replay backs a routing change. A
+ * `cheaper` change needs the cheaper arm to hold quality (`no_change` or `improve`); a `higher`
+ * change needs the higher arm to do better (`improve`). `inconclusive` and `regress` back neither.
+ * New in 5.7.0.
+ */
+export const routingReplayBacks = (
+  direction: "cheaper" | "higher",
+  verdict: ReplayVerdict,
+): boolean =>
+  direction === "cheaper"
+    ? verdict === "no_change" || verdict === "improve"
+    : verdict === "improve";
+
+/**
+ * `routing.replay_verdict` as a number (D-by: a fact carries numbers only): the
+ * `ReplayVerdict` of the graded tier replay, arm `b` (the proposed tier) against arm `a` (the
+ * current one). New in 5.7.0.
+ */
+export const ROUTING_REPLAY_VERDICT_CODES = {
+  regress: -1,
+  no_change: 0,
+  improve: 1,
+  inconclusive: 2,
+} as const satisfies Readonly<Record<ReplayVerdict, number>>;
 
 // ------------------------------------------------------------------- canary
 
@@ -655,6 +760,11 @@ const replayLedgerIdentity = {
   arm: z.enum(["a", "b", "aa"]),
   trial: z.int().min(1).max(10),
   grader_bundle_sha: Sha256HexSchema,
+  /**
+   * A tier replay's arm tier ({@link ReplayTrialRefSchema}`.tier`); for one, `baseline` and
+   * `candidate` are the same prompt version. Absent: a prompt replay. New in 5.7.0.
+   */
+  tier: ModelTierSchema.optional(),
 };
 
 /**

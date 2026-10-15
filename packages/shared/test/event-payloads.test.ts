@@ -215,6 +215,21 @@ const examples: { [T in CoreEventType]: { data: EventDataInput<T>; envelope?: ob
       unverified_facts: ["f-0123456789abcdef"],
     },
   },
+  "design.coverage_checked": {
+    data: {
+      check: 1,
+      max_rounds: 3,
+      report: {
+        reqs_without_component: ["REQ-2"],
+        reqs_without_screen: [],
+        screens_without_req: [],
+        components_unregistered: [],
+        ok: false,
+      },
+      outcome: "fixing",
+      redispatched: ["architect"],
+    },
+  },
   "headless.preflight": {
     data: { host: "codex", purpose: "role", ok: false, failed: "auth", detail: "logged out" },
   },
@@ -519,6 +534,12 @@ describe("EVENT_PAYLOAD_SCHEMAS", () => {
     // ---- contracts 4.5.0
     ["gate.requested", { gates: ["G2"], artifacts: [] }, "data.artifacts"],
     ["headless.preflight", { host: "codex", purpose: "role", ok: false }, "data.failed"],
+    // ---- contracts 5.7.0
+    [
+      "design.coverage_checked",
+      { ...examples["design.coverage_checked"].data, outcome: "parked" },
+      "data.redispatched",
+    ],
     [
       "headless.started",
       { ...examples["headless.started"].data, wall_timeout_ms: 0 },

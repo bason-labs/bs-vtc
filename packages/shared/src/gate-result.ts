@@ -118,6 +118,28 @@ export const MonotonicViolationSchema = z.strictObject({
 });
 export type MonotonicViolation = z.infer<typeof MonotonicViolationSchema>;
 
+/**
+ * The rule id of the finding a gate reports when its tool was tampered with (H-14): category
+ * `security`, so the §7.6 risk rules treat it as a security problem, never as an ordinary lint
+ * failure. New in 5.7.0.
+ */
+export const TOOL_TAMPER_RULE_ID = "vtc/tool-tampered";
+
+/**
+ * How a check gate's tool was verified (H-14; `CheckTool`): its source, the SHA-256 it was checked
+ * against (a `pinned` tool's `binary_sha256`; for a `project` tool the hash of its files, sorted
+ * path and content hash per line, taken before the install phase's scripts ran), and the tool
+ * files the install phase changed, added or removed. A non-empty `tampered` fails the gate
+ * (`status: fail`, `failure_class: product`) with one {@link TOOL_TAMPER_RULE_ID} finding. New in
+ * 5.7.0.
+ */
+export const ToolIntegritySchema = z.strictObject({
+  source: z.enum(["pinned", "project"]),
+  sha256: Sha256HexSchema,
+  tampered: z.array(RelPathSchema).max(50).default([]),
+});
+export type ToolIntegrity = z.infer<typeof ToolIntegritySchema>;
+
 /** The result of one gate in one run. */
 export const GateResultSchema = z
   .strictObject({
@@ -147,8 +169,21 @@ export const GateResultSchema = z
     duration_ms: z.int().nonnegative(),
     /** Why a gate was skipped, e.g. `when_changed` did not match. */
     skipped_reason: z.string().min(1).max(300).optional(),
+    /** How the gate's tool was verified (H-14, {@link ToolIntegritySchema}). New in 5.7.0. */
+    tool: ToolIntegritySchema.optional(),
   })
   .superRefine((result, ctx) => {
+    if (
+      result.tool !== undefined &&
+      result.tool.tampered.length > 0 &&
+      (result.status !== "fail" || result.failure_class !== "product")
+    ) {
+      ctx.addIssue({
+        code: "custom",
+        path: ["tool", "tampered"],
+        message: "a tampered tool fails its gate with failure class product",
+      });
+    }
     const failed = result.status === "fail" || result.status === "error";
     if (failed && result.failure_class === undefined) {
       ctx.addIssue({

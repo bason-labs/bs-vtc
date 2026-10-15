@@ -15,6 +15,12 @@
  *   tier down at 70% of the budget, park at 100%; `hosts.models` still maps a tier to a model id.
  * `role.dispatched` records the tier and why (`tier_reason`, {@link TierReasonSchema}).
  *
+ * 5.7.0 (D-cu, D-cv; spine §5 reading 241): the rule routes the producers only (the Engineer
+ * family and QA author, {@link routedByDifficulty}); a reviewer starts on its own `role.yaml` tier,
+ * raised one tier on a high-risk task for Security verify and the cross-family reviewer only
+ * ({@link reviewerStartTier}). A Low start escalates after every failed round, a Mid or Top start
+ * after every 2 ({@link escalationSteps}).
+ *
  * The routing function and the dispatch wiring are engine core's (`core/routing.ts`); this file
  * holds the shapes, the table and the pure pieces every consumer must agree on. Lookback proposes
  * changes to {@link DEFAULT_ROUTING_TABLE} through the AD-27 issue → PR path (D-cn): such a PR
@@ -89,10 +95,12 @@ export type TierHint = z.infer<typeof TierHintSchema>;
 
 /**
  * Why a dispatch runs on its tier (`role.dispatched.tier_reason`, `RoleRunSummary.tier_reason`):
- * `role` the role's own `role.yaml` tier (a role the rule does not route, or `routing.start:
- * role`); `rule` the routing table; `planner_hint` the task's {@link TierHint}; `escalation` one
- * tier up after 2 failed rounds; `budget_drop` a reviewer one tier down at 70% of the budget or
- * past the reviewers' share.
+ * `role` the role's own `role.yaml` tier (a role the rule does not route, every reviewer since
+ * 5.7.0 (D-cu), or `routing.start: role`); `rule` the routing table, or (5.7.0) the one-tier raise
+ * of Security verify and the cross-family reviewer on a high-risk task ({@link reviewerStartTier});
+ * `planner_hint` the task's {@link TierHint}; `escalation` a tier up after failed rounds
+ * ({@link escalationSteps}); `budget_drop` a reviewer one tier down at 70% of the budget or past
+ * the reviewers' share.
  */
 export const TierReasonSchema = z.enum([
   "role",
@@ -138,7 +146,10 @@ export const RoutingTableSchema = z.strictObject({
 });
 export type RoutingTable = z.infer<typeof RoutingTableSchema>;
 
-/** VTC's routing table (D-cm). */
+/**
+ * VTC's routing table (D-cm). Since 5.7.0 (D-cu) it starts the producers only
+ * ({@link routedByDifficulty}); a `roles` override for a reviewer has no effect.
+ */
 export const DEFAULT_ROUTING_TABLE: RoutingTable = RoutingTableSchema.parse({
   v: 1,
   by_size: { S: "low", M: "mid", L: "top" },
@@ -203,7 +214,68 @@ export const ROUTING_FACT_METRICS = {
   replayPlanned: "routing.replay_planned",
   lifted: "routing.lifted",
   liftedPrefix: "routing.lifted.",
+  /**
+   * The graded tier replay's verdict (`ROUTING_REPLAY_VERDICT_CODES`); absent when no tier
+   * replay backs the change (D-cn, reading 247(6)). New in 5.7.0.
+   */
+  replayVerdict: "routing.replay_verdict",
+  /** Trials the tier replay graded, both arms (reading 247(6)). New in 5.7.0. */
+  replayTrials: "routing.replay_trials",
 } as const;
+
+/**
+ * Pure (D-cu; spine §5 reading 241): whether the routing table picks a run's start tier. Only the
+ * producers are routed by difficulty: the Engineer family (`engineer` and every `engineer_*`
+ * profile) and QA in author mode. Every reviewer (Spec Verifier, QA judge, Security verify, Visual
+ * QA, the lens roles, the cross-family reviewer) and every task-less role starts on its own
+ * `role.yaml` tier ({@link reviewerStartTier} for the reviewers). New in 5.7.0.
+ */
+export const routedByDifficulty = (role: string, mode?: string): boolean =>
+  role === "engineer" || role.startsWith("engineer_") || (role === "qa" && mode === "author");
+
+/**
+ * Pure (D-cu; spine §5 reading 241): a reviewer's start tier before the project's
+ * `routing.min_tier` / `max_tier` clamp. A reviewer starts on its own `role.yaml` tier (reason
+ * `role`), with one exception: on a high-risk task (risk class `high`, {@link taskRiskClass}),
+ * Security in verify mode and the cross-family reviewer start one tier above it, at most Top
+ * (reason `rule`). The Spec Verifier always starts on its own tier. Escalation, the 70% budget drop
+ * and the clamps still apply afterwards. New in 5.7.0.
+ */
+export const reviewerStartTier = (input: {
+  readonly role: string;
+  readonly mode?: string | undefined;
+  /** The role's own `role.yaml` tier on the dispatch's host. */
+  readonly roleTier: ModelTier;
+  readonly risk: TaskRiskClass;
+  /** The run fills the task's cross-family reviewer slot (§12.4). */
+  readonly crossFamily?: boolean | undefined;
+}): { readonly tier: ModelTier; readonly reason: "role" | "rule" } => {
+  const raised =
+    input.risk === "high" &&
+    (input.crossFamily === true || (input.role === "security" && input.mode === "verify"));
+  if (!raised) return { tier: input.roleTier, reason: "role" };
+  const next = TIER_ORDER[Math.min(tierRank(input.roleTier) + 1, TIER_ORDER.length - 1)];
+  return { tier: next ?? "top", reason: "rule" };
+};
+
+/**
+ * Failed rounds before each one-tier escalation (spec §6.3 step 9; D-cm, D-cv): a start on Low
+ * moves up after every failed round, a start on Mid or Top after every 2. New in 5.7.0.
+ */
+export const TIER_ESCALATION = { afterFailedRounds: 2, lowStartAfterFailedRounds: 1 } as const;
+
+/**
+ * Pure (D-cv; spine §5 reading 242; closes the finding "a Low start never reaches Top"): how many
+ * tiers above its routed start a role runs in fix round `round` (1-based), before the clamps. A
+ * task that starts on Low runs Low in round 1, Mid in round 2 and Top from round 3, within the
+ * normal round cap; a Mid or Top start goes up one tier after every 2 failed rounds. `start` is the
+ * routed start after the project's clamp. New in 5.7.0.
+ */
+export const escalationSteps = (start: ModelTier, round: number): number => {
+  const every =
+    start === "low" ? TIER_ESCALATION.lowStartAfterFailedRounds : TIER_ESCALATION.afterFailedRounds;
+  return Math.max(0, Math.floor((Math.max(1, Math.trunc(round)) - 1) / every));
+};
 
 /** How a project starts per-task roles: by difficulty (the default) or on each role's own tier. */
 export const RoutingStartSchema = z.enum(["difficulty", "role"]);

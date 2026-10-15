@@ -297,5 +297,28 @@ export * from "./json-schema.js";
  * (its flag hash). `AutomationSkipReason` `out_of_scope`: an automatic PR that changes files its
  * kind may not (a routing-table PR, reading 228(6)) is refused before it opens (the dashboard's
  * exhaustive map updated in the same change). All additive.
+ *
+ * 5.7.0 (MINOR): round 6 (spine §5 readings 234–248). Routing (D-cu, D-cv): `routedByDifficulty`
+ * (the table starts the producers only), `reviewerStartTier` (a reviewer on its own tier, Security
+ * verify and the cross-family reviewer one tier up on a high-risk task), `TIER_ESCALATION` and
+ * `escalationSteps` (a Low start escalates every failed round). Prices (H-12): `PriceTable`,
+ * `HostAdapter.defaultPrices`, `effectivePrices`, `priceCeiling`, `priceRun`,
+ * `role.submitted.budget_usd`; `UserConfig.prices` becomes an optional override (doc). The G2
+ * coverage loop (H-13): `DESIGN_COVERAGE_LOOP`, `designCoverageComplete`,
+ * `designCoverageRedispatch`, `DesignCoverageGaps` on `TaskPack.coverage_gaps` (Dispatch lines),
+ * the `design.coverage_checked` event (`DesignCoverageChecked`),
+ * `DESIGN_COVERAGE_ESCALATION_OPTIONS`; a REQ an AD names counts as covered (doc). Check tools
+ * (H-14): `GateSchema.tool` (`CheckTool`), `GateResult.tool` (`ToolIntegrity`),
+ * `TOOL_TAMPER_RULE_ID`. Codex model fallback (D-cx): `HostErrorCause` `model_refused` (the
+ * dashboard's exhaustive map updated in the same change), `role.dispatched.model_fallback`
+ * (`ModelFallback`), `MODEL_REFUSALS_FILE` and `ModelRefusalRow`. The round-5 carryover: the tier
+ * arm of a replay (`ReplayTrialRef.tier`, the ledger rows' `tier`, `RoutingReplayResult`,
+ * `routingReplayId` / `routingReplayPath`, `routingReplayBacks`,
+ * `LOOKBACK_REPO.routingReplaysDir`, `ROUTING_FACT_METRICS.replayVerdict` / `replayTrials`,
+ * `ROUTING_REPLAY_VERDICT_CODES`); scripted flows (`DESIGN_FLOWS_PATH`, `DesignFlowsFile`,
+ * `FlowStep`, `FLOW_LIMITS`, `selectDesignFlow`, `BeforeAfterRequest.flow`,
+ * `BeforeAfterResult.flow`); a typed `UpstreamReport.subject` (`UpstreamSubject`,
+ * `UPSTREAM_CONFIG_KEYS`, `upstreamSubjectKey`); `command_shapes` on `role.failed` and
+ * `role.rejected`; `CommandShapeSpoolRow.action`. All additive.
  */
-export const CONTRACTS_VERSION = "5.6.0";
+export const CONTRACTS_VERSION = "5.7.0";

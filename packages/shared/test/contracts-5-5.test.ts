@@ -65,7 +65,8 @@ describe("contracts 5.5.0", () => {
   });
 
   it("names the routing fact's fixed metrics as Lookback sends them", () => {
-    expect(ROUTING_FACT_METRICS).toEqual({
+    // 5.7.0 adds the tier replay's metrics (contracts-5-7.test.ts pins the whole set)
+    expect(ROUTING_FACT_METRICS).toMatchObject({
       fromTier: "routing.from_tier",
       toTier: "routing.to_tier",
       currentTier: "routing.current_tier",

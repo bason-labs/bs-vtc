@@ -25,6 +25,7 @@ export const HEADLESS_CAUSES: Readonly<Record<HostErrorCause, string>> = {
   budget: "budget cap reached",
   exit_code: "exited without a final result",
   spawn: "the process never started",
+  model_refused: "the host refused the model (retried on its default)",
 };
 
 export const PREFLIGHT_CHECKS: Readonly<Record<AutoResumeCheck, string>> = {

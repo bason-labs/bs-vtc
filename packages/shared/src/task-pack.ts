@@ -8,7 +8,7 @@
  * `spawn_role` action and the `role.dispatched` event carry that path.
  */
 import { z } from "zod";
-import { DesignExitSchema } from "./design.js";
+import { DESIGN_COVERAGE_LOOP, DesignCoverageGapsSchema, DesignExitSchema } from "./design.js";
 import { EscalationAnswerSchema } from "./escalation.js";
 import { FindingSchema } from "./finding.js";
 import { GateLayerSchema } from "./gates-config.js";
@@ -119,6 +119,13 @@ export const TaskPackSchema = z.strictObject({
    * amended by reading 211).
    */
   design_exit: DesignExitSchema.extract(["category_standard"]).optional(),
+  /**
+   * Architect and Designer dispatches of the G2 coverage loop (H-13; spine §5 reading 237): the
+   * fix round and the DESIGN check's gaps this dispatch must close (`designCoverageGaps`), ids
+   * only. Printed as Dispatch lines (`coverage round: <n> of <max>`, then one line per non-empty
+   * list). Absent on every other dispatch. New in 5.7.0.
+   */
+  coverage_gaps: DesignCoverageGapsSchema.optional(),
   /** The task's immutable intent contract (§6.3 plan file). */
   intent: IntentContractSchema.optional(),
   /** The REQs and ACs in scope, with their frozen text. */
@@ -211,6 +218,23 @@ const list = (items: readonly string[]): string =>
  */
 export const escapePackText = (text: string): string => text.replace(/^([ \t]*)#/gm, "$1\\#");
 
+/** The Dispatch lines of a coverage-loop dispatch (`TaskPack.coverage_gaps`, 5.7.0). */
+const coverageLines = (gaps: TaskPack["coverage_gaps"]): string[] => {
+  if (gaps === undefined) return [];
+  const line = (label: string, ids: readonly string[]): string[] =>
+    ids.length === 0 ? [] : [`${label}: ${ids.join(", ")}`];
+  return [
+    `coverage round: ${String(gaps.round)} of ${String(DESIGN_COVERAGE_LOOP.maxRounds)}`,
+    ...line("requirements no AD or component names", gaps.reqs_without_component),
+    ...line("UI requirements with no screen", gaps.reqs_without_screen),
+    ...line("screens with no requirement", gaps.screens_without_req),
+    ...line("components not registered", gaps.components_unregistered),
+    ...(gaps.screens_problem === undefined
+      ? []
+      : [`screens.yaml problem: ${escapePackText(gaps.screens_problem.replace(/\s+/g, " "))}`]),
+  ];
+};
+
 /**
  * Renders a pack as Markdown: every section of {@link TASK_PACK_SECTIONS} appears, in order, as
  * a `## ` heading; an empty section says `(none)`. A pack with `role_heuristics` opens with
@@ -235,6 +259,7 @@ export const renderTaskPack = (input: TaskPackInput): string => {
         ]),
     ...(pack.design_direction === undefined ? [] : [`design direction: ${pack.design_direction}`]),
     ...(pack.design_exit === undefined ? [] : [`design exit: ${pack.design_exit}`]),
+    ...coverageLines(pack.coverage_gaps),
   ];
   const intent =
     pack.intent === undefined

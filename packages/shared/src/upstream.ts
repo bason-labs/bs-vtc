@@ -20,6 +20,8 @@ import {
   Sha256HexSchema,
   SlugSchema,
 } from "./primitives.js";
+import { CommandShapeSchema, commandShapeKey } from "./signals.js";
+import { TaskRiskClassSchema, routingConfigSubject } from "./tier-routing.js";
 
 // -------------------------------------------------------------------- kinds
 
@@ -234,6 +236,56 @@ export const VtcFrameSchema = z
 export const UpstreamMetricNameSchema = z.string().regex(/^[a-z][a-z0-9_.]{0,63}$/);
 
 /**
+ * VTC's own cap and budget keys a `config` signal may name (engine core's `configSignalFacts`),
+ * enumerated: no other dotted key leaves the project. New in 5.7.0.
+ */
+export const UPSTREAM_CONFIG_KEYS = [
+  "budget.task_s",
+  "budget.task_m",
+  "budget.task_l",
+  "caps.fix_rounds",
+] as const;
+
+/**
+ * The typed subject of an improvement report (D-cs, D-cn, D-by; spine §5 reading 247(8)), so the
+ * issue and PR bodies are rendered from the allowlisted report alone, never from a subject string:
+ * - `tool`: a command shape (program, subcommand, flag-set hash), never an argument or a path;
+ * - `capability`: the missing capability's slug; its reason never leaves the project;
+ * - `routing`: one routing-table cell (role, size, risk class), `routing.<role>.<size>.<risk>`;
+ * - `config`: one of {@link UPSTREAM_CONFIG_KEYS}.
+ * New in 5.7.0.
+ */
+export const UpstreamSubjectSchema = z.discriminatedUnion("kind", [
+  z.strictObject({ kind: z.literal("tool"), shape: CommandShapeSchema }),
+  z.strictObject({ kind: z.literal("capability"), slug: SlugSchema }),
+  z.strictObject({
+    kind: z.literal("routing"),
+    role: RoleIdSchema,
+    size: z.enum(["S", "M", "L"]),
+    risk: TaskRiskClassSchema,
+  }),
+  z.strictObject({ kind: z.literal("config"), key: z.enum(UPSTREAM_CONFIG_KEYS) }),
+]);
+export type UpstreamSubject = z.infer<typeof UpstreamSubjectSchema>;
+
+/**
+ * Pure: the subject's key as facts and fingerprints name it: a tool shape's `commandShapeKey`, a
+ * capability's slug, `routingConfigSubject` for a routing cell, the config key. New in 5.7.0.
+ */
+export const upstreamSubjectKey = (subject: UpstreamSubject): string => {
+  switch (subject.kind) {
+    case "tool":
+      return commandShapeKey(subject.shape);
+    case "capability":
+      return subject.slug;
+    case "routing":
+      return routingConfigSubject(subject.role, subject.size, subject.risk);
+    case "config":
+      return subject.key;
+  }
+};
+
+/**
  * Everything VTC may send to the upstream repo about one finding (D-by): VTC-side data only. The
  * upstream module builds it with an allowlist projection, never by deleting fields from a richer
  * object; the issue and PR bodies, the CHANGELOG entry and the evidence for an upstream target are
@@ -268,6 +320,12 @@ export const UpstreamReportSchema = z.strictObject({
     .regex(/^[a-z][a-z0-9_.]{0,79}$/)
     .optional(),
   vtc_frames: z.array(VtcFrameSchema).max(3).default([]),
+  /**
+   * What an improvement is about, typed ({@link UpstreamSubjectSchema}); set on every report of
+   * kind `tool`, `capability` and `config`, which the module renders from it alone. Absent on
+   * other kinds. New in 5.7.0.
+   */
+  subject: UpstreamSubjectSchema.optional(),
   /** Numbers only: scorecard deltas, replay stats, the A/A flip rate, tokens, cost. */
   metrics: z.record(UpstreamMetricNameSchema, z.number()).default({}),
   occurrences: z.int().positive(),

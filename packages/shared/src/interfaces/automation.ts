@@ -256,6 +256,15 @@ export interface BeforeAfterRequest {
   readonly screens?: readonly string[];
   /** Record the changed flow for at most this long (≤ `EVIDENCE_LIMITS.maxFlowSeconds`); absent: no video. */
   readonly flowSeconds?: number;
+  /**
+   * The id of the flow to script on both sides (`.vtc/design/flows.yaml`, `DesignFlowsFileSchema`;
+   * D-ct; spine §5 reading 247(7)), chosen by the upstream module with `selectDesignFlow` from the
+   * head's flows file. Each side reads the flow from its own commit's flows file and runs its
+   * steps while it records, within `flowSeconds`; a side whose file lacks the flow, or whose steps
+   * fail, records the first screen as before and says so in {@link BeforeAfterResult}`.flow`.
+   * Absent: no flow is scripted (the first-screen recording). New in 5.7.0.
+   */
+  readonly flow?: string;
   readonly redactSelectors: readonly string[];
   readonly denyText: readonly string[];
 }
@@ -269,6 +278,17 @@ export interface BeforeAfterResult {
    * not build or serve, no `visual.app`, no browser, …) and a detail that holds no project text.
    */
   readonly partial?: { readonly reason: EvidencePartialReason; readonly detail: string };
+  /**
+   * What each side's `flow_video` shows when the request named a `flow`: `scripted` (every step
+   * ran), `idle` (the side's flows file has no such flow, so the first screen was recorded) or
+   * `failed` (a step failed; the recording up to it is kept). The PR caption follows it. New in
+   * 5.7.0.
+   */
+  readonly flow?: {
+    readonly id: string;
+    readonly before: "scripted" | "idle" | "failed";
+    readonly after: "scripted" | "idle" | "failed";
+  };
 }
 
 /**
