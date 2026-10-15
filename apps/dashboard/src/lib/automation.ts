@@ -6,6 +6,7 @@ import {
   type AutomationSkipReason,
   type AutoTargetRef,
   type EvidenceHosting,
+  type EvidencePartialReason,
 } from "@vtc/shared";
 import { webUrl } from "./events";
 import type { StatusMeta } from "./states";
@@ -50,7 +51,21 @@ export const SKIP_REASONS: Readonly<Record<AutomationSkipReason, string>> = {
   trial_cap: "the replay trial cap for this retro is reached",
   plugin_locked: "a replay arm's plugin did not load (managed settings)",
   stale_baseline: "the replay measured another prompt than VTC's default branch now has",
-  error: "the action failed with an error (see the detail)",
+  error: "it failed with an error (the detail says which)",
+};
+
+/**
+ * Why an automatic PR's evidence is partial (D-ct; spine §5 reading 223), as
+ * `upstream.pr_opened.partial_reason` names it.
+ */
+export const PARTIAL_EVIDENCE_REASONS: Readonly<Record<EvidencePartialReason, string>> = {
+  base_build_failed: "the base commit did not build, so there is no before picture",
+  base_serve_failed: "the base commit did not serve, so there is no before picture",
+  no_visual_app: "the project names no app to render (gates.yml visual.app)",
+  no_browser: "no browser is installed for the capture (vtc doctor installs one)",
+  video_off: "video is turned off (automation.evidence.video: false)",
+  no_ffmpeg: "ffmpeg is not installed, so the recording is linked as WebM only (no GIF or MP4)",
+  capture_failed: "a capture failed after its retry",
 };
 
 const HOSTING: Readonly<Record<EvidenceHosting, string>> = {

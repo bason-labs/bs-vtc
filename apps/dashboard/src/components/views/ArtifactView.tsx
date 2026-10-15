@@ -3,12 +3,14 @@
 import { isServableArtifactPath, LOOKBACK_REPO } from "@vtc/shared";
 import { readEvidence } from "@/lib/evidence";
 import { isReplayPath, readReplayResult } from "@/lib/replays";
+import { readRoutingScorecard } from "@/lib/routing-scorecard";
 import { readScorecard } from "@/lib/scorecards";
 import { imageDataUrl, readVisualReport } from "@/lib/visual";
 import { hrefs } from "@/lib/router";
 import { useResource } from "@/lib/useResource";
 import { EvidenceDocView } from "@/components/evidence/EvidenceView";
 import { ReplayDetail } from "@/components/lookback/ReplayDetail";
+import { RoutingScorecardDetail } from "@/components/lookback/RoutingScorecard";
 import { ScorecardDetail } from "@/components/lookback/ScorecardDetail";
 import { VisualReportView } from "@/components/visual/VisualReportView";
 import { Card, EmptyState } from "@/components/ui";
@@ -32,7 +34,7 @@ function ArtifactText({ content }: { content: string }) {
  * as JSON so agent-written HTML never runs on this origin (AD-5 rule 10). Evidence bundles and
  * traceability reports (AD-18) are rendered as the REQ → test → result matrix, visual QA reports
  * (AD-24, at the path `VisualSummary.report` names) as the render matrix with axe results and
- * diffs, Lookback scorecards and replay results (with their grader) as such, raw JSON on demand. Screenshots and
+ * diffs, Lookback scorecards (the routing scorecard too) and replay results (with their grader) as such, raw JSON on demand. Screenshots and
  * diff images (raster only) are shown as images.
  */
 export function ArtifactView({ run, path }: { run: string | null; path: string | null }) {
@@ -88,14 +90,20 @@ export function ArtifactView({ run, path }: { run: string | null; path: string |
             const text = <ArtifactText content={a.content} />;
             const evidence = readEvidence(a);
             const visual = evidence === null ? readVisualReport(a) : null;
-            const scorecard = a.path.startsWith(`${LOOKBACK_REPO.scorecardsDir}/`)
-              ? readScorecard(a)
-              : null;
+            const routing =
+              a.path === LOOKBACK_REPO.routingScorecard ? readRoutingScorecard(a) : null;
+            const scorecard =
+              routing === null && a.path.startsWith(`${LOOKBACK_REPO.scorecardsDir}/`)
+                ? readScorecard(a)
+                : null;
             const replay = isReplayPath(a.path) ? readReplayResult(a) : null;
-            if (scorecard?.ok === true || replay?.ok === true) {
+            if (routing?.ok === true || scorecard?.ok === true || replay?.ok === true) {
               return (
                 <div className="space-y-4">
                   <Card>
+                    {routing?.ok === true ? (
+                      <RoutingScorecardDetail scorecard={routing.value} />
+                    ) : null}
                     {scorecard?.ok === true ? (
                       <ScorecardDetail scorecard={scorecard.value} />
                     ) : null}

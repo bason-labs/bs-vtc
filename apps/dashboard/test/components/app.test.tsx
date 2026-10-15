@@ -72,7 +72,11 @@ describe("Flow Studio against the golden run", () => {
     const user = userEvent.setup();
     renderApp("/run/?run=golden-1&zoom=tasks");
     const canvas = await screen.findByTestId("flow-canvas");
-    within(canvas).getByTestId("node-t-2").focus();
+    // React Flow fills the canvas from its store in an effect after the canvas itself mounts, so
+    // under load the node can be missing for a moment after the canvas shows (the round-4 flake).
+    const node = await within(canvas).findByTestId("node-t-2");
+    node.focus();
+    expect(node).toHaveFocus();
     await user.keyboard("{Enter}");
     expect(await screen.findByTestId("run-node-drawer")).toBeInTheDocument();
     expect(window.location.search).toContain("node=t-2");

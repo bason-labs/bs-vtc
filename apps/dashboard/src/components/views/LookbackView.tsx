@@ -21,6 +21,7 @@ import { useResource } from "@/lib/useResource";
 import { useRunEvents } from "@/lib/useRunEvents";
 import { Link } from "@/components/app/Link";
 import { ReplayResultAt } from "@/components/lookback/ReplayDetail";
+import { RoutingScorecardCard } from "@/components/lookback/RoutingScorecard";
 import { ScorecardDetail } from "@/components/lookback/ScorecardDetail";
 import { EventLogTruncated } from "@/components/notices/EventLogTruncated";
 import {
@@ -206,9 +207,10 @@ function Activity({ run, upstream }: { run: string; upstream: boolean }) {
 
 /**
  * Lookback (§13, AD-21): scorecards per prompt version from
- * `.vtc/lookback/scorecards/index.json`, every proportion with n and its interval, and the run's
- * lookback events (canaries, replays, proposals, rollbacks, escaped defects). In upstream evidence
- * mode only the scorecards, the canaries' numbers and the replay arms (tasks as ordinals).
+ * `.vtc/lookback/scorecards/index.json`, every proportion with n and its interval, the routing
+ * scorecard (D-cn), and the run's lookback events (canaries, replays, proposals, rollbacks,
+ * escaped defects). In upstream evidence mode only the scorecards, the routing scorecard, the
+ * canaries' numbers and the replay arms (tasks as ordinals).
  */
 export function LookbackView({ run }: { run: string | null }) {
   const key = run ?? "";
@@ -233,6 +235,7 @@ export function LookbackView({ run }: { run: string | null }) {
       <PageHeader title="Lookback" eyebrow="Scorecards per prompt version" />
       <div className="space-y-4">
         <Activity run={run} upstream={upstream} />
+        <RoutingScorecardCard run={run} upstream={upstream} />
         <Loaded
           resource={index}
           missing={

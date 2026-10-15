@@ -35,7 +35,7 @@ export const readScorecard = (artifact: ArtifactContent): Read<Scorecard> =>
 
 // ------------------------------------------------------------------ metrics
 
-type MetricKind = "proportion" | "average_rounds" | "per_100" | "tokens";
+export type MetricKind = "proportion" | "average_rounds" | "per_100" | "tokens" | "usd";
 
 export const METRIC_LABELS: Readonly<
   Record<
@@ -62,11 +62,11 @@ export interface MetricRow {
   readonly insufficient: boolean;
 }
 
-type MetricValue = NonNullable<Scorecard["metrics"][ScorecardMetricId]>;
+export type MetricValue = NonNullable<Scorecard["metrics"][ScorecardMetricId]>;
 
 const pct = (x: number): string => `${String(Math.round(x * 100))}%`;
 
-const valueText = (kind: MetricKind, value: number): string => {
+export const valueText = (kind: MetricKind, value: number): string => {
   switch (kind) {
     case "proportion":
       return pct(value);
@@ -76,16 +76,31 @@ const valueText = (kind: MetricKind, value: number): string => {
       return `${String(Math.round(value * 10) / 10)} per 100 tasks`;
     case "tokens":
       return `${Math.round(value).toLocaleString("en-US")} tokens`;
+    case "usd":
+      return `$${value.toFixed(2)}`;
   }
 };
 
+/** A proportion's 95% interval: the one written, else the Wilson interval of its value and n. */
+export const proportionInterval = (
+  m: MetricValue & { value: number },
+): { readonly low: number; readonly high: number } =>
+  m.ci_low !== null && m.ci_high !== null
+    ? { low: m.ci_low, high: m.ci_high }
+    : wilsonInterval(Math.round(Math.min(1, Math.max(0, m.value)) * m.n), m.n);
+
 const intervalText = (m: MetricValue & { value: number }): string => {
-  const { low, high } =
-    m.ci_low !== null && m.ci_high !== null
-      ? { low: m.ci_low, high: m.ci_high }
-      : wilsonInterval(Math.round(Math.min(1, Math.max(0, m.value)) * m.n), m.n);
+  const { low, high } = proportionInterval(m);
   return `95% CI ${String(Math.round(low * 100))}–${pct(high)}`;
 };
+
+/** Whether a metric has too little data to show a value (AD-21 rule 5). */
+export const isInsufficient = (m: MetricValue): boolean =>
+  m.value === null || m.n < LOOKBACK_LIMITS.minScorecardN;
+
+/** `40–81%`: a proportion's interval as the tables show it. */
+export const intervalRange = (m: MetricValue & { value: number }): string =>
+  intervalText(m).replace(/^95% CI /, "");
 
 /** One row per metric the scorecard has, in contract order. */
 export const metricRows = (metrics: Scorecard["metrics"]): MetricRow[] =>
@@ -94,7 +109,7 @@ export const metricRows = (metrics: Scorecard["metrics"]): MetricRow[] =>
     if (m === undefined) return [];
     const meta = METRIC_LABELS[id];
     const min = LOOKBACK_LIMITS.minScorecardN;
-    if (m.value === null || m.n < min) {
+    if (isInsufficient(m) || m.value === null) {
       return [
         {
           id,

@@ -5,6 +5,7 @@ import {
   ENGINEER_SCORECARD,
   FACT_ROWS,
   PNG_BASE64,
+  ROUTING_SCORECARD,
   SCORECARD_INDEX,
   VISUAL_DIR,
   VISUAL_REPORT,
@@ -20,6 +21,7 @@ describe("wave-3 dev fixtures", () => {
     expect(SCORECARD_INDEX.scorecards.length).toBeGreaterThan(0);
     expect(ENGINEER_SCORECARD.prompt.role).toBe("engineer");
     expect(FACT_ROWS.length).toBeGreaterThan(0);
+    expect(ROUTING_SCORECARD.cells.length).toBeGreaterThan(0);
   });
 
   it("serve a screenshot base64-encoded, like the engine", () => {
