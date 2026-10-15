@@ -124,7 +124,14 @@ export class RunLog {
       /** `role.dispatched.tier_clamped`: the project's bounds or QA author's floor moved it. */
       tierClamped?: boolean;
       /** A Lookback replay trial (`purpose: lookback_replay`). */
-      replay?: { proposal: string; task: string; arm: "a" | "b" | "aa"; trial: number };
+      replay?: {
+        proposal: string;
+        task: string;
+        arm: "a" | "b" | "aa";
+        trial: number;
+        /** A tier replay's arm tier (`ReplayTrialRef.tier`, 5.7.0). */
+        tier?: "low" | "mid" | "top";
+      };
     } = {},
   ): string {
     this.actions += 1;
