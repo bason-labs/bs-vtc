@@ -46,14 +46,51 @@ upstream:
   share: true # false: no upstream reports from any project (default true)
   checkout: /abs/path/bs-vtc # a local clone set up for VTC; absent: upstream issues only
 automation:
-  evidence_hosting: branch # or attach (gh >= 2.99.0 and a github.com remote)
+  evidence_hosting: attach # the default (D-cc); or branch, the orphan vtc-evidence branch
 ```
 
-A file that does not parse keeps upstream reports off. The project's own `upstream.share` and
+With `evidence_hosting` unset, VTC asks for `gh --attach` (D-cc, spine §5 reading 225) and falls
+back to the `vtc-evidence` branch when gh is older than 2.99.0 or the origin remote is not
+github.com. A file that does not parse keeps upstream reports off and uses the branch. The project's own `upstream.share` and
 `automation.{issues,prs,evidence}` live in `.vtc/project.yaml`, which the engine reads at the run's
 commit. `vtc automation status [--json]` prints the repo's Automation report: whether issues, PRs
 and upstream reports are on and why not, the open automatic issues and PRs with their links, and
-the latest skips. `vtc pause` stops automation too.
+the latest skips. `vtc pause` stops automation too, run or no run: without a run to act on,
+`vtc pause` and `vtc resume` set or clear the kill switch, say so and exit 0 (`--json` prints the
+engine's answer).
+
+The Lookback replay pace (D-cq, spine §5 reading 224) is user-level too, since replays spend your
+weekly window; every key is optional (defaults in `LOOKBACK_LIMITS`):
+
+```yaml
+lookback:
+  replay_failure_tasks: 6 # recent failures one replay samples
+  replay_regression_tasks: 6 # regression tasks one replay samples
+  max_trials_per_retro: 24 # trials one RETRO may launch
+  max_trials_per_retro_boosted: 36 # the cap while the Lead host's weekly window allows
+  boost_above_weekly_pct: 50 # ... more than this % of it left
+```
+
+## Routing: `vtc config` (H-9)
+
+`vtc config [--json]` shows, and never changes, the effective routing of the repo it runs in:
+the routing table (`DEFAULT_ROUTING_TABLE` and any per-role overrides), the project's
+`routing` (`start`, `min_tier`, `max_tier`) with the start tier of each task size and risk class
+inside that range, each host's tier → model map (`project.yaml` `hosts.models` over the built-in
+map; a tier with no model id varies the reasoning effort only, as Codex does until its ids are
+set, D-co), and the Lookback pace above with the cap that applies now for each host whose weekly
+window the repo's running engine reports (none is started for it). It exits 1 when
+`routing.min_tier` is above `routing.max_tier` or the `lookback` section is invalid; `vtc doctor`
+shows the same as its `routing`, `models` and `lookback` lines and fails the same two.
+
+## The tool signal's spool (D-cs)
+
+For each `Bash` call of a VTC role agent that it does not block, `vtc hook pre-tool-use` appends
+one row per command shape (`commandShapes`: the program, its subcommand and a hash of the flag
+names; never the command, an argument value or a path) to
+`~/.vtc/guard/<repo-key>/command-shapes.jsonl`, while the repo's engine runs to drain it. The file
+is appended with `O_APPEND`, created 0600, never through a symlink; a failure loses the row, never
+the call.
 
 ## What `vtc doctor` reports since the wave-3 closing round
 
@@ -75,10 +112,10 @@ the latest skips. `vtc pause` stops automation too.
 ## What `vtc doctor` reports since round 4 (AD-27)
 
 - **gh login**: `gh auth status`, its exit code only (no token is read, nothing it prints is kept).
-- **evidence**: where PR media go: the orphan `vtc-evidence` branch (the default), or `gh
---attach` when `automation.evidence_hosting: attach`, gh is 2.99.0 or later and the origin
-  remote is on github.com (it warns and falls back to the branch otherwise); and whether capture
-  has vtc's pinned browser.
+- **evidence**: where PR media go: `gh --attach` (the default since D-cc) when gh is 2.99.0 or
+  later and the origin remote is on github.com, else the orphan `vtc-evidence` branch (said, not
+  warned; an `attach` you set yourself warns when it falls back), or the branch when you set
+  `automation.evidence_hosting: branch`; and whether capture has vtc's pinned browser.
 - **ffmpeg**: optional; without it GIF previews are off (`info`).
 - **automation**: `automationFor` over `project.yaml`, `~/.vtc/config.yaml`, the origin remote and
   the gh login, with its notes.

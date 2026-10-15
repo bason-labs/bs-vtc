@@ -11,6 +11,7 @@ import {
   DEFAULT_INSTALL_SCOPE,
   ENGINE_HTTP,
   ProjectConfigSchema,
+  type ControlResult,
   type EngineClient,
   type HostAdapter,
   type InstallRequest,
@@ -434,6 +435,52 @@ describe("vtc status / pause / resume (AD-19 rule 4)", () => {
     expect(human).toEqual(['resume {"run":"r9","adopt":true}', "close"]);
     expect(plain).toEqual([]);
     expect(err.join("\n")).toMatch(/--adopt needs --run/);
+  });
+
+  it("vtc pause / resume without a run exit 0 and say the kill switch state (reading 227 (2))", async () => {
+    const answers: Record<string, ControlResult> = {
+      pause: { run: null, automation_paused: true },
+      resume: { run: null, automation_paused: false },
+    };
+    const calls: string[] = [];
+    const client: EngineClient = {
+      call: (tool, input) => {
+        calls.push(`${tool} ${JSON.stringify(input)}`);
+        return Promise.resolve(answers[tool] as never);
+      },
+      close: () => Promise.resolve(),
+    };
+    const { ctx, out, err } = capture("/w", "/h", () => Promise.resolve(client));
+    expect(await pause.run([], ctx)).toBe(0);
+    expect(await resume.run([], ctx)).toBe(0);
+    expect(await pause.run(["--json"], ctx)).toBe(0);
+    expect(calls).toEqual(["pause {}", "resume {}", "pause {}"]);
+    expect(out.slice(0, 2)).toEqual([
+      "No run to pause; automation is paused (automatic issues and PRs stay off until vtc resume)",
+      "No run to resume; automation is on",
+    ]);
+    expect(JSON.parse(out.at(-1) ?? "")).toEqual({ run: null, automation_paused: true });
+    expect(err).toEqual([]);
+  });
+
+  it("says the kill switch state for a run when the engine reports it", async () => {
+    const client: EngineClient = {
+      call: (tool) =>
+        Promise.resolve({
+          run: "r1",
+          paused: tool === "pause",
+          phase: "build",
+          automation_paused: tool === "pause",
+        } as never),
+      close: () => Promise.resolve(),
+    };
+    const { ctx, out } = capture("/w", "/h", () => Promise.resolve(client));
+    expect(await pause.run([], ctx)).toBe(0);
+    expect(await resume.run([], ctx)).toBe(0);
+    expect(out).toEqual([
+      "Run r1 paused: paused (phase build); automation is paused",
+      "Run r1 resumed: running (phase build); automation is on",
+    ]);
   });
 
   it("shows unknown usage as unknown, never 0% (§6.9)", () => {

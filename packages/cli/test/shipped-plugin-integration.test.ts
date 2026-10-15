@@ -15,12 +15,10 @@
  * - An engineer profile's locked asset opens with the Engineer's prompt (D-br, reading 172).
  * - The roles a Claude-led run can replay are the list `replayGraderFor` derives (D-cg, D-ch;
  *   readings 201, 202 and 209(2), which retire `CLAUDE_LEAD_REPLAYABLE_ROLES`): every role that
- *   changes files, graded by the gates, and the verdict roles, graded by the verdict grader. Once
- *   engine core's switch has landed (merge flag), the engine's replay gate grades each compiled
- *   Claude agent the same way (`core.replayGraderOf`).
+ *   changes files, graded by the gates, and the verdict roles, graded by the verdict grader. The
+ *   engine's replay gate grades each compiled Claude agent the same way (`core.replayGraderOf`).
  * - Each compiled plugin carries the automatic PR, issue and CHANGELOG templates the upstream
- *   module renders (`AUTO_TEMPLATE_NAMES` under `AUTO_TEMPLATES_ASSET_DIR`, AD-27), once the
- *   integrator's merge flag says roles-compiler's round 4 has landed (`round4-merge.ts`).
+ *   module renders (`AUTO_TEMPLATE_NAMES` under `AUTO_TEMPLATES_ASSET_DIR`, AD-27).
  */
 import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
@@ -43,8 +41,6 @@ import {
   type RoleContract,
 } from "@vtc/shared";
 
-import { ROUND4_LANDED } from "./round4-merge.js";
-
 const REPO_ROOT = fileURLToPath(new URL("../../../", import.meta.url));
 
 const compiled = (() => {
@@ -61,7 +57,7 @@ const compiled = (() => {
 
 /**
  * Engine core's `core.replayGraderOf` (reading 209(2)) as the replay test calls it: of the kernel
- * it reads only the role registry. Looked up by name, since it lands in engine core's branch.
+ * it reads only the role registry, so the test passes that alone.
  */
 type ReplayGraderOf = (
   kernel: { readonly deps: { readonly roles: core.RoleRegistry } },
@@ -197,25 +193,16 @@ describe("the roles a Claude-led run can replay are the list replayGraderFor der
   });
 
   // reading 209(2): engine core's replay gate, trial submission and daemon take a replay's grader
-  // from `core.replayGraderOf`, held here to the merge flag and then to `replayGraderFor`
-  const engineGraderOf = (core as Readonly<Record<string, unknown>>)["replayGraderOf"];
-
-  it("are graded by the engine as replayGraderFor says, once engine core's switch has landed (merge flag)", () => {
-    expect(typeof engineGraderOf === "function").toBe(ROUND4_LANDED.replayGrader);
+  // from `core.replayGraderOf`, held here to `replayGraderFor`
+  it("the engine's replay gate gives every compiled Claude agent the grader replayGraderFor derives", () => {
+    // only the kernel's role registry is read; anything more fails here, not in a live RETRO
+    const kernel = { deps: { roles: core.createRoleRegistry([...contracts.values()]) } };
+    const graderOf = core.replayGraderOf as unknown as ReplayGraderOf;
+    for (const g of graded) {
+      const target = { role: g.agent.role, ...(g.agent.mode ? { mode: g.agent.mode } : {}) };
+      expect(graderOf(kernel, target), g.agent.name).toBe(g.grader);
+    }
   });
-
-  it.runIf(ROUND4_LANDED.replayGrader)(
-    "the engine's replay gate gives every compiled Claude agent the grader replayGraderFor derives",
-    () => {
-      // only the kernel's role registry is read; anything more fails here, not in a live RETRO
-      const kernel = { deps: { roles: core.createRoleRegistry([...contracts.values()]) } };
-      const graderOf = engineGraderOf as ReplayGraderOf;
-      for (const g of graded) {
-        const target = { role: g.agent.role, ...(g.agent.mode ? { mode: g.agent.mode } : {}) };
-        expect(graderOf(kernel, target), g.agent.name).toBe(g.grader);
-      }
-    },
-  );
 
   it("include every editable_in_pack role, and never a role that writes nothing and has no verdict grader", () => {
     for (const role of EDITABLE_IN_PACK_ROLES) expect(replayable).toContain(role);
@@ -226,23 +213,10 @@ describe("the roles a Claude-led run can replay are the list replayGraderFor der
   });
 });
 
-/**
- * The templates are roles-compiler's this round (AD-27, reading 189). Whether this checkout must
- * carry them is the integrator's merge flag (`round4-merge.ts`), not the templates themselves: the
- * first test fails when they ship before the flag is flipped, and with the flag on, every host must
- * carry all three at their path.
- */
-const shippedTemplates = (["claude-code", "codex"] as const).flatMap((host) =>
-  AUTO_TEMPLATE_NAMES.filter((name) => fileOf(host, autoTemplateAssetPath(name)) !== undefined),
-);
-
+/** The templates are roles-compiler's (AD-27, reading 189): every host carries all three. */
 describe("the compiled plugins carry the automatic PR, issue and CHANGELOG templates (AD-27)", () => {
-  it("ship exactly when the round-4 merge flag says they have landed", () => {
-    expect(shippedTemplates.length > 0).toBe(ROUND4_LANDED.autoTemplates);
-  });
-
   for (const host of ["claude-code", "codex"] as const)
-    it.runIf(ROUND4_LANDED.autoTemplates)(host, () => {
+    it(host, () => {
       for (const name of AUTO_TEMPLATE_NAMES) {
         const path = autoTemplateAssetPath(name);
         expect(path).toBe(`vtc/templates/${name}.md`);

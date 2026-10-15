@@ -4,6 +4,7 @@
  */
 import { command as automation } from "./automation.js";
 import { command as calibrate } from "./calibrate.js";
+import { command as config } from "./config.js";
 import { command as dashboard } from "./dashboard.js";
 import { command as doctor } from "./doctor.js";
 import { command as engine } from "./engine.js";
@@ -30,6 +31,7 @@ export const COMMANDS: readonly CommandSpec[] = [
   status,
   install,
   doctor,
+  config,
   lookback,
   automation,
   mergeLevel,
