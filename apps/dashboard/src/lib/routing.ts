@@ -1,10 +1,11 @@
-import type {
-  ModelTier,
-  RoleRunSummary,
-  TaskDetail,
-  TierHint,
-  TierHintReason,
-  TierReason,
+import {
+  QA_AUTHOR_MIN_TIER,
+  type ModelTier,
+  type RoleRunSummary,
+  type TaskDetail,
+  type TierHint,
+  type TierHintReason,
+  type TierReason,
 } from "@vtc/shared";
 
 /**
@@ -40,13 +41,28 @@ export const TIER_HINT_REASON_LABELS: Readonly<Record<TierHintReason, string>> =
   well_specified: "it is so fully specified that a cheaper model suffices",
 };
 
-export const CLAMPED_TEXT = "clamped by project routing";
+/**
+ * `tier_clamped` (contracts 5.4.0): the project's `routing.min_tier` / `max_tier` or QA author's
+ * floor ({@link QA_AUTHOR_MIN_TIER}, applied last and winning over `max_tier`; reading 218(4))
+ * moved the tier. The log does not say which, so a QA author run held on the floor names both.
+ */
+export const CLAMPED_TEXT = "clamped by project routing (min_tier / max_tier)";
+export const QA_FLOOR_CLAMPED_TEXT = `held at QA author's ${TIER_LABELS[QA_AUTHOR_MIN_TIER]} floor (or by project routing)`;
+
+/** Why a clamped run's tier moved: QA author's floor when the run sits on it, else the project. */
+const clampedText = (run: RoleRunSummary): string =>
+  run.role === "qa" && run.mode === "author" && run.tier === QA_AUTHOR_MIN_TIER
+    ? QA_FLOOR_CLAMPED_TEXT
+    : CLAMPED_TEXT;
 
 export interface TierView {
   /** `Low`, `Mid` or `Top`. */
   readonly tier: string;
   readonly reason: string;
-  /** {@link CLAMPED_TEXT} when the project's routing moved the tier, else `null`. */
+  /**
+   * {@link QA_FLOOR_CLAMPED_TEXT} or {@link CLAMPED_TEXT} when `tier_clamped` says the tier was
+   * moved, else `null`.
+   */
   readonly clamped: string | null;
 }
 
@@ -57,7 +73,7 @@ export const roleRunTier = (run: RoleRunSummary): TierView | null =>
     : {
         tier: TIER_LABELS[run.tier],
         reason: TIER_REASON_LABELS[run.tier_reason],
-        clamped: run.tier_clamped === true ? CLAMPED_TEXT : null,
+        clamped: run.tier_clamped === true ? clampedText(run) : null,
       };
 
 /** `Started on Mid: the routing table, …` — one line for the run lists. */

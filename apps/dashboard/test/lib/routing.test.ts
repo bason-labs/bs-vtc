@@ -8,6 +8,8 @@ import {
   type TaskDetail,
 } from "@vtc/shared";
 import {
+  CLAMPED_TEXT,
+  QA_FLOOR_CLAMPED_TEXT,
   roleRunTier,
   taskRouting,
   TIER_HINT_REASON_LABELS,
@@ -63,12 +65,24 @@ describe("roleRunTier", () => {
     expect(roleRunTier(run!)).toMatchObject({
       tier: "Mid",
       reason: TIER_REASON_LABELS.planner_hint,
-      clamped: "clamped by project routing",
+      clamped: "clamped by project routing (min_tier / max_tier)",
     });
     const [unclamped] = withRuns([
       { tier: "top", tier_reason: "escalation", tier_clamped: false },
     ]).role_runs;
     expect(roleRunTier(unclamped!)?.clamped).toBeNull();
+  });
+
+  it("names QA author's floor when a clamped QA author run sits on it (spine reading 218(4))", () => {
+    const [onFloor, qaReview, qaTop] = withRuns([
+      { role: "qa", mode: "author", tier: "mid", tier_reason: "rule", tier_clamped: true },
+      { role: "qa", mode: "review", tier: "mid", tier_reason: "rule", tier_clamped: true },
+      { role: "qa", mode: "author", tier: "top", tier_reason: "rule", tier_clamped: true },
+    ]).role_runs;
+    expect(roleRunTier(onFloor!)?.clamped).toBe(QA_FLOOR_CLAMPED_TEXT);
+    expect(QA_FLOOR_CLAMPED_TEXT).toBe("held at QA author's Mid floor (or by project routing)");
+    expect(roleRunTier(qaReview!)?.clamped).toBe(CLAMPED_TEXT);
+    expect(roleRunTier(qaTop!)?.clamped).toBe(CLAMPED_TEXT);
   });
 
   it("shows nothing for a run logged before 5.4.0 (no tier)", () => {
@@ -119,7 +133,7 @@ describe("taskRouting", () => {
       ["a-4", "qa (author)", "Mid"],
       ["a-1", "engineer", "Mid"],
     ]);
-    expect(routing.runs[1]?.tier.clamped).toBe("clamped by project routing");
+    expect(routing.runs[1]?.tier.clamped).toBe(QA_FLOOR_CLAMPED_TEXT);
     expect(routing.hint?.code).toBe("mechanical");
   });
 

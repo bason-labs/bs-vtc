@@ -110,13 +110,15 @@ const metric = (kind: MetricKind, m: MetricValue | undefined): RoutingMetric | n
 
 /**
  * The cost per task. Lookback averages over the tasks whose every submitted dispatch has a cost,
- * so its `n` counts priced tasks: `0` on a cell big enough to read means no task was priced, and
- * a smaller `n` than the cell's tasks means too few were.
+ * so its `n` counts priced tasks. On a cell Lookback reads (at least `routingMinTasks` tasks, the
+ * same test as {@link RoutingCellView.read}): `n` 0, or a `null` value with `n` at the per-metric
+ * minimum (the contract's "when unpriced"), means unpriced, and a smaller `n` than
+ * `minScorecardN` means too few tasks were priced.
  */
 const costMetric = (c: Cell): RoutingMetric | null => {
   const m = c.cost_per_task_usd;
   const shown = metric("usd", m);
-  if (shown === null || !shown.insufficient || c.tasks < LOOKBACK_LIMITS.minScorecardN)
+  if (shown === null || !shown.insufficient || c.tasks < LOOKBACK_LIMITS.routingMinTasks)
     return shown;
   if (m.n === 0 || m.n >= LOOKBACK_LIMITS.minScorecardN) return { ...shown, value: "unpriced" };
   return { ...shown, value: `${String(m.n)} of ${String(c.tasks)} tasks priced` };
