@@ -22,6 +22,7 @@ import {
   GitShaSchema,
   HostIdSchema,
   IsoDateTimeSchema,
+  ModelTierSchema,
   RelPathSchema,
   RoleIdSchema,
   RunIdSchema,
@@ -29,6 +30,8 @@ import {
   SlugSchema,
   TaskIdSchema,
 } from "./primitives.js";
+import { TaskSizeSchema } from "./task.js";
+import { TaskRiskClassSchema } from "./tier-routing.js";
 
 // ------------------------------------------------------------------- places
 
@@ -92,6 +95,11 @@ export const LOOKBACK_REPO = {
   replaysDir: ".vtc/lookback/replays",
   /** One `Attribution` per line. */
   attributions: ".vtc/lookback/attributions.jsonl",
+  /**
+   * The routing scorecard (D-cn, `RoutingScorecard`): quality per token for each (role, size,
+   * risk, start tier). New in 5.4.0.
+   */
+  routingScorecard: ".vtc/lookback/scorecards/routing.json",
 } as const;
 
 /** Thresholds of the §13 loop. Engine code and tests read them from here only. */
@@ -121,6 +129,34 @@ export const LOOKBACK_LIMITS = {
    * rest wait for the next RETRO with `automation.skipped` reason `trial_cap`. New in 5.0.0.
    */
   maxTrialsPerRetro: 24,
+  /**
+   * The higher per-RETRO trial cap while more than {@link LOOKBACK_LIMITS}`.boostAboveWeeklyPct`
+   * of the Lead host's weekly window is left (D-cq). New in 5.4.0.
+   */
+  maxTrialsPerRetroBoosted: 36,
+  /** Weekly window left, in percent, above which the boosted cap applies (D-cq). New in 5.4.0. */
+  boostAboveWeeklyPct: 50,
+  /**
+   * Recent failure tasks and regression tasks one replay samples (D-cq): with k = 3 and the A/A
+   * arm about 108 trials, about 5 RETROs at the base cap. New in 5.4.0.
+   */
+  replayFailureTasks: 6,
+  replayRegressionTasks: 6,
+  /**
+   * The drift baseline (D-cr): a prompt version is also compared with its own earlier window of
+   * this many days, so a model or host update that degrades an unchanged prompt raises a cost or
+   * quality regression. New in 5.4.0.
+   */
+  driftWindowDays: 14,
+  /**
+   * Routing proposals (D-cn): a (role, size, risk, tier) cell needs this many tasks before
+   * Lookback reads it; a cheaper start tier "matches quality" when its pass rates are within
+   * `routingQualityMarginPct` points of the current tier's; a start tier "keeps escalating" when
+   * at least `routingEscalationPct` percent of its tasks escalated. New in 5.4.0.
+   */
+  routingMinTasks: 10,
+  routingQualityMarginPct: 5,
+  routingEscalationPct: 50,
 } as const;
 
 // ----------------------------------------------------------------- identity
@@ -702,6 +738,41 @@ export const ScorecardSchema = z.strictObject({
   written_at: IsoDateTimeSchema,
 });
 export type Scorecard = z.infer<typeof ScorecardSchema>;
+
+/**
+ * `.vtc/lookback/scorecards/routing.json` (D-cn): quality per token for each (role, mode, host,
+ * size, risk class, start tier) cell of the routing table, from the `role.dispatched` tier
+ * records, so Lookback can propose a cheaper start tier that matches quality or a higher one for a
+ * start tier that keeps escalating. Replay trials are left out (reading 177). New in 5.4.0.
+ */
+export const RoutingScorecardSchema = z.strictObject({
+  v: z.literal(1),
+  grader_bundle_sha: Sha256HexSchema,
+  window: z.strictObject({ from: IsoDateTimeSchema, to: IsoDateTimeSchema }),
+  cells: z
+    .array(
+      z.strictObject({
+        role: RoleIdSchema,
+        mode: SlugSchema.optional(),
+        host: HostIdSchema,
+        size: TaskSizeSchema,
+        risk: TaskRiskClassSchema,
+        /** The tier the task's first dispatch of the role started on. */
+        start_tier: ModelTierSchema,
+        /** Whether the start came from the table or a Planner hint (`TierReason`). */
+        start_reason: z.enum(["rule", "planner_hint", "role"]),
+        tasks: z.int().nonnegative(),
+        metrics: MetricsSchema,
+        /** Share of the cell's tasks whose tier escalated (Wilson interval). */
+        escalated: MetricValueSchema,
+        /** Mean reported cost per task in USD; `null` value below the minimum n or when unpriced. */
+        cost_per_task_usd: MetricValueSchema,
+      }),
+    )
+    .max(1000),
+  written_at: IsoDateTimeSchema,
+});
+export type RoutingScorecard = z.infer<typeof RoutingScorecardSchema>;
 
 /** Pure: where a scorecard goes. */
 export const scorecardPath = (role: string, host: string, effectiveSha: string): string =>

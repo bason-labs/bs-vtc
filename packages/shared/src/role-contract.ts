@@ -3,6 +3,10 @@ import { z } from "zod";
 import { RETURN_CAP_TOKENS } from "./helpers/tokens.js";
 import {
   ArtifactTypeSchema,
+  EffortSchema,
+  ModelTierSchema,
+  type Effort,
+  type ModelTier,
   DisciplineSchema,
   WriteScopeGlobSchema,
   HostIdSchema,
@@ -13,12 +17,8 @@ import {
 } from "./primitives.js";
 import { RoleExitSchema, VerdictSchema, type RoleExit } from "./role-result.js";
 
-/** Model tier (§5.2 footnote): maps per host, e.g. Claude top/mid/low = Opus/Sonnet/Haiku. */
-export const ModelTierSchema = z.enum(["top", "mid", "low"]);
-export type ModelTier = z.infer<typeof ModelTierSchema>;
-
-export const EffortSchema = z.enum(["low", "medium", "high"]);
-export type Effort = z.infer<typeof EffortSchema>;
+/** Model tier and effort (defined in `primitives.ts` since 5.4.0, re-exported here). */
+export { EffortSchema, ModelTierSchema, type Effort, type ModelTier } from "./primitives.js";
 
 export const RoleHostModelSchema = z.strictObject({
   tier: ModelTierSchema,

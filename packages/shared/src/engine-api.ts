@@ -22,6 +22,7 @@ import {
   GitShaSchema,
   HostIdSchema,
   IsoDateTimeSchema,
+  ModelTierSchema,
   RelPathSchema,
   RiskRuleReasonRuleSchema,
   RoleIdSchema,
@@ -49,6 +50,7 @@ import {
   RunSchema,
 } from "./run.js";
 import { RejectReasonSchema } from "./event-payloads.js";
+import { TierReasonSchema } from "./tier-routing.js";
 import { checkParkRiskRule, ParkReasonSchema, TaskSchema, TaskStatusSchema } from "./task.js";
 import { STATUSLINE_INGEST_MAX_BYTES, UsageReportSchema } from "./usage.js";
 
@@ -122,14 +124,14 @@ export const ENGINE_MCP_TOOLS = [
     purpose:
       "Kill switch: stop dispatching and merging; in-flight steps finish or are interrupted.",
     input: "RunScopedInput",
-    output: "RunControlResult",
+    output: "ControlResult",
   },
   {
     name: "resume",
     purpose:
       "Resume a paused or interrupted run, rebuilding state from the event log. adopt: continue here a run another clone started (human only).",
     input: "ResumeInput",
-    output: "RunControlResult",
+    output: "ControlResult",
   },
 ] as const;
 export type EngineMcpToolName = (typeof ENGINE_MCP_TOOLS)[number]["name"];
@@ -536,8 +538,28 @@ export const RunControlResultSchema = z.strictObject({
   run: RunIdSchema,
   paused: z.boolean(),
   phase: PhaseSchema,
+  /**
+   * Whether the repo's automation kill switch is set after the call (`vtc pause` sets it, `vtc
+   * resume` clears it; AD-27 rule 7). Absent from an engine before 5.4.0. New in 5.4.0.
+   */
+  automation_paused: z.boolean().optional(),
 });
 export type RunControlResult = z.infer<typeof RunControlResultSchema>;
+
+/**
+ * `pause` / `resume` when the repo has no run to act on (reading 212(15) closed): the call still
+ * sets or clears the automation kill switch and says so. Where 5.3.0 answered such a call with
+ * the `no_run` error, 5.4.0 answers with this. New in 5.4.0.
+ */
+export const NoRunControlResultSchema = z.strictObject({
+  run: z.null(),
+  automation_paused: z.boolean(),
+});
+export type NoRunControlResult = z.infer<typeof NoRunControlResultSchema>;
+
+/** The output of `pause` and `resume` (AD-4): a run's state, or the kill switch alone. New in 5.4.0. */
+export const ControlResultSchema = z.union([RunControlResultSchema, NoRunControlResultSchema]);
+export type ControlResult = z.infer<typeof ControlResultSchema>;
 
 /** The run summary: `status` tool output and `GET /api/status` (for the active run). */
 export const StatusResultSchema = z.strictObject({
@@ -637,6 +659,13 @@ export const RoleRunSummarySchema = z.strictObject({
   host: HostIdSchema,
   /** The dispatched model id, or `SESSION_DEFAULT_MODEL` when none was resolved (D-ae). */
   model: z.string().min(1).max(200),
+  /**
+   * The tier the run started on and why (`role.dispatched.tier` / `tier_reason`, H-9, D-cm), for
+   * the task view; absent for a dispatch logged before 5.4.0. New in 5.4.0.
+   */
+  tier: ModelTierSchema.optional(),
+  tier_reason: TierReasonSchema.optional(),
+  tier_clamped: z.boolean().optional(),
   dispatched_at: IsoDateTimeSchema,
   /** `null` while the run is in flight, failed or was rejected. */
   exit: RoleExitSchema.nullable(),

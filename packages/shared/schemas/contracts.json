@@ -1,5 +1,5 @@
 {
-  "contracts_version": "5.3.0",
+  "contracts_version": "5.4.0",
   "schemas": {
     "Run": {
       "$id": "https://vtc.local/schemas/Run.json",
@@ -384,6 +384,44 @@
             "L"
           ]
         },
+        "tier_hint": {
+          "type": "object",
+          "properties": {
+            "tier": {
+              "type": "string",
+              "enum": [
+                "top",
+                "mid",
+                "low"
+              ]
+            },
+            "reason": {
+              "type": "string",
+              "enum": [
+                "cross_cutting",
+                "novel_logic",
+                "concurrency",
+                "subtle_invariants",
+                "large_context",
+                "unfamiliar_stack",
+                "mechanical",
+                "boilerplate",
+                "docs_or_config",
+                "well_specified"
+              ]
+            },
+            "detail": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 300
+            }
+          },
+          "required": [
+            "tier",
+            "reason"
+          ],
+          "additionalProperties": false
+        },
         "arch_triage": {
           "type": "string",
           "enum": [
@@ -671,6 +709,44 @@
             "L"
           ]
         },
+        "tier_hint": {
+          "type": "object",
+          "properties": {
+            "tier": {
+              "type": "string",
+              "enum": [
+                "top",
+                "mid",
+                "low"
+              ]
+            },
+            "reason": {
+              "type": "string",
+              "enum": [
+                "cross_cutting",
+                "novel_logic",
+                "concurrency",
+                "subtle_invariants",
+                "large_context",
+                "unfamiliar_stack",
+                "mechanical",
+                "boilerplate",
+                "docs_or_config",
+                "well_specified"
+              ]
+            },
+            "detail": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 300
+            }
+          },
+          "required": [
+            "tier",
+            "reason"
+          ],
+          "additionalProperties": false
+        },
         "arch_triage": {
           "type": "string",
           "enum": [
@@ -936,6 +1012,44 @@
             "M",
             "L"
           ]
+        },
+        "tier_hint": {
+          "type": "object",
+          "properties": {
+            "tier": {
+              "type": "string",
+              "enum": [
+                "top",
+                "mid",
+                "low"
+              ]
+            },
+            "reason": {
+              "type": "string",
+              "enum": [
+                "cross_cutting",
+                "novel_logic",
+                "concurrency",
+                "subtle_invariants",
+                "large_context",
+                "unfamiliar_stack",
+                "mechanical",
+                "boilerplate",
+                "docs_or_config",
+                "well_specified"
+              ]
+            },
+            "detail": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 300
+            }
+          },
+          "required": [
+            "tier",
+            "reason"
+          ],
+          "additionalProperties": false
         },
         "arch_triage": {
           "type": "string",
@@ -1769,6 +1883,25 @@
             ],
             "additionalProperties": false
           }
+        },
+        "missing_capability": {
+          "type": "object",
+          "properties": {
+            "slug": {
+              "type": "string",
+              "pattern": "^[a-z0-9][a-z0-9._-]{0,63}$"
+            },
+            "reason": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 300
+            }
+          },
+          "required": [
+            "slug",
+            "reason"
+          ],
+          "additionalProperties": false
         }
       },
       "required": [
@@ -1958,6 +2091,25 @@
           "type": "string",
           "pattern": "^[a-z][a-z0-9_-]{0,47}$"
         },
+        "missing_capability": {
+          "type": "object",
+          "properties": {
+            "slug": {
+              "type": "string",
+              "pattern": "^[a-z0-9][a-z0-9._-]{0,63}$"
+            },
+            "reason": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 300
+            }
+          },
+          "required": [
+            "slug",
+            "reason"
+          ],
+          "additionalProperties": false
+        },
         "created_at": {
           "type": "string",
           "format": "date-time",
@@ -1977,6 +2129,25 @@
             "who_should_have_caught": {
               "type": "string",
               "pattern": "^[a-z][a-z0-9_-]{0,47}$"
+            },
+            "missing_capability": {
+              "type": "object",
+              "properties": {
+                "slug": {
+                  "type": "string",
+                  "pattern": "^[a-z0-9][a-z0-9._-]{0,63}$"
+                },
+                "reason": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 300
+                }
+              },
+              "required": [
+                "slug",
+                "reason"
+              ],
+              "additionalProperties": false
             }
           },
           "required": [
@@ -2947,6 +3118,44 @@
                     "L"
                   ]
                 },
+                "tier_hint": {
+                  "type": "object",
+                  "properties": {
+                    "tier": {
+                      "type": "string",
+                      "enum": [
+                        "top",
+                        "mid",
+                        "low"
+                      ]
+                    },
+                    "reason": {
+                      "type": "string",
+                      "enum": [
+                        "cross_cutting",
+                        "novel_logic",
+                        "concurrency",
+                        "subtle_invariants",
+                        "large_context",
+                        "unfamiliar_stack",
+                        "mechanical",
+                        "boilerplate",
+                        "docs_or_config",
+                        "well_specified"
+                      ]
+                    },
+                    "detail": {
+                      "type": "string",
+                      "minLength": 1,
+                      "maxLength": 300
+                    }
+                  },
+                  "required": [
+                    "tier",
+                    "reason"
+                  ],
+                  "additionalProperties": false
+                },
                 "arch_triage": {
                   "type": "string",
                   "enum": [
@@ -3705,6 +3914,10 @@
             "commit": {
               "type": "string",
               "pattern": "^([a-f0-9]{40}|[a-f0-9]{64})$"
+            },
+            "remote_ref": {
+              "type": "string",
+              "pattern": "^(vtc\\/F-[1-9]\\d*|vtc\\/auto\\/[a-z_]+\\/[a-f0-9]{8})$"
             }
           },
           "required": [
@@ -3724,6 +3937,10 @@
               "type": "string",
               "minLength": 1,
               "maxLength": 2000
+            },
+            "remote_ref": {
+              "type": "string",
+              "pattern": "^(vtc\\/F-[1-9]\\d*|vtc\\/auto\\/[a-z_]+\\/[a-f0-9]{8})$"
             }
           },
           "required": [
@@ -3858,6 +4075,27 @@
                 "trial"
               ],
               "additionalProperties": false
+            },
+            "tier": {
+              "type": "string",
+              "enum": [
+                "top",
+                "mid",
+                "low"
+              ]
+            },
+            "tier_reason": {
+              "type": "string",
+              "enum": [
+                "role",
+                "rule",
+                "planner_hint",
+                "escalation",
+                "budget_drop"
+              ]
+            },
+            "tier_clamped": {
+              "type": "boolean"
             }
           },
           "required": [
@@ -3983,6 +4221,38 @@
             "head": {
               "type": "string",
               "pattern": "^([a-f0-9]{40}|[a-f0-9]{64})$"
+            },
+            "command_shapes": {
+              "maxItems": 100,
+              "type": "array",
+              "items": {
+                "type": "object",
+                "properties": {
+                  "program": {
+                    "type": "string",
+                    "pattern": "^(<path>|<other>|[A-Za-z0-9][A-Za-z0-9._+-]{0,63})$"
+                  },
+                  "subcommand": {
+                    "type": "string",
+                    "pattern": "^[a-z][a-z0-9:_-]{0,39}$"
+                  },
+                  "flags": {
+                    "type": "string",
+                    "pattern": "^[a-f0-9]{12}$"
+                  },
+                  "count": {
+                    "type": "integer",
+                    "exclusiveMinimum": 0,
+                    "maximum": 100000
+                  }
+                },
+                "required": [
+                  "program",
+                  "flags",
+                  "count"
+                ],
+                "additionalProperties": false
+              }
             }
           },
           "required": [
@@ -5277,6 +5547,25 @@
                   "type": "string",
                   "pattern": "^[a-z][a-z0-9_-]{0,47}$"
                 },
+                "missing_capability": {
+                  "type": "object",
+                  "properties": {
+                    "slug": {
+                      "type": "string",
+                      "pattern": "^[a-z0-9][a-z0-9._-]{0,63}$"
+                    },
+                    "reason": {
+                      "type": "string",
+                      "minLength": 1,
+                      "maxLength": 300
+                    }
+                  },
+                  "required": [
+                    "slug",
+                    "reason"
+                  ],
+                  "additionalProperties": false
+                },
                 "created_at": {
                   "type": "string",
                   "format": "date-time",
@@ -5296,6 +5585,25 @@
                     "who_should_have_caught": {
                       "type": "string",
                       "pattern": "^[a-z][a-z0-9_-]{0,47}$"
+                    },
+                    "missing_capability": {
+                      "type": "object",
+                      "properties": {
+                        "slug": {
+                          "type": "string",
+                          "pattern": "^[a-z0-9][a-z0-9._-]{0,63}$"
+                        },
+                        "reason": {
+                          "type": "string",
+                          "minLength": 1,
+                          "maxLength": 300
+                        }
+                      },
+                      "required": [
+                        "slug",
+                        "reason"
+                      ],
+                      "additionalProperties": false
                     }
                   },
                   "required": [
@@ -5349,6 +5657,25 @@
                 "who_should_have_caught": {
                   "type": "string",
                   "pattern": "^[a-z][a-z0-9_-]{0,47}$"
+                },
+                "missing_capability": {
+                  "type": "object",
+                  "properties": {
+                    "slug": {
+                      "type": "string",
+                      "pattern": "^[a-z0-9][a-z0-9._-]{0,63}$"
+                    },
+                    "reason": {
+                      "type": "string",
+                      "minLength": 1,
+                      "maxLength": 300
+                    }
+                  },
+                  "required": [
+                    "slug",
+                    "reason"
+                  ],
+                  "additionalProperties": false
                 }
               },
               "required": [
@@ -7475,6 +7802,18 @@
                 "complete",
                 "partial"
               ]
+            },
+            "partial_reason": {
+              "type": "string",
+              "enum": [
+                "base_build_failed",
+                "base_serve_failed",
+                "no_visual_app",
+                "no_browser",
+                "video_off",
+                "no_ffmpeg",
+                "capture_failed"
+              ]
             }
           },
           "required": [
@@ -7585,7 +7924,8 @@
                 "budget",
                 "trial_cap",
                 "plugin_locked",
-                "stale_baseline"
+                "stale_baseline",
+                "error"
               ]
             },
             "target": {
@@ -8152,6 +8492,25 @@
                       ],
                       "additionalProperties": false
                     }
+                  },
+                  "missing_capability": {
+                    "type": "object",
+                    "properties": {
+                      "slug": {
+                        "type": "string",
+                        "pattern": "^[a-z0-9][a-z0-9._-]{0,63}$"
+                      },
+                      "reason": {
+                        "type": "string",
+                        "minLength": 1,
+                        "maxLength": 300
+                      }
+                    },
+                    "required": [
+                      "slug",
+                      "reason"
+                    ],
+                    "additionalProperties": false
                   }
                 },
                 "required": [
@@ -8317,6 +8676,44 @@
                       "M",
                       "L"
                     ]
+                  },
+                  "tier_hint": {
+                    "type": "object",
+                    "properties": {
+                      "tier": {
+                        "type": "string",
+                        "enum": [
+                          "top",
+                          "mid",
+                          "low"
+                        ]
+                      },
+                      "reason": {
+                        "type": "string",
+                        "enum": [
+                          "cross_cutting",
+                          "novel_logic",
+                          "concurrency",
+                          "subtle_invariants",
+                          "large_context",
+                          "unfamiliar_stack",
+                          "mechanical",
+                          "boilerplate",
+                          "docs_or_config",
+                          "well_specified"
+                        ]
+                      },
+                      "detail": {
+                        "type": "string",
+                        "minLength": 1,
+                        "maxLength": 300
+                      }
+                    },
+                    "required": [
+                      "tier",
+                      "reason"
+                    ],
+                    "additionalProperties": false
                   },
                   "arch_triage": {
                     "type": "string",
@@ -8846,6 +9243,25 @@
                       ],
                       "additionalProperties": false
                     }
+                  },
+                  "missing_capability": {
+                    "type": "object",
+                    "properties": {
+                      "slug": {
+                        "type": "string",
+                        "pattern": "^[a-z0-9][a-z0-9._-]{0,63}$"
+                      },
+                      "reason": {
+                        "type": "string",
+                        "minLength": 1,
+                        "maxLength": 300
+                      }
+                    },
+                    "required": [
+                      "slug",
+                      "reason"
+                    ],
+                    "additionalProperties": false
                   }
                 },
                 "required": [
@@ -9011,6 +9427,44 @@
                       "M",
                       "L"
                     ]
+                  },
+                  "tier_hint": {
+                    "type": "object",
+                    "properties": {
+                      "tier": {
+                        "type": "string",
+                        "enum": [
+                          "top",
+                          "mid",
+                          "low"
+                        ]
+                      },
+                      "reason": {
+                        "type": "string",
+                        "enum": [
+                          "cross_cutting",
+                          "novel_logic",
+                          "concurrency",
+                          "subtle_invariants",
+                          "large_context",
+                          "unfamiliar_stack",
+                          "mechanical",
+                          "boilerplate",
+                          "docs_or_config",
+                          "well_specified"
+                        ]
+                      },
+                      "detail": {
+                        "type": "string",
+                        "minLength": 1,
+                        "maxLength": 300
+                      }
+                    },
+                    "required": [
+                      "tier",
+                      "reason"
+                    ],
+                    "additionalProperties": false
                   },
                   "arch_triage": {
                     "type": "string",
@@ -9278,6 +9732,25 @@
                     ],
                     "additionalProperties": false
                   }
+                },
+                "missing_capability": {
+                  "type": "object",
+                  "properties": {
+                    "slug": {
+                      "type": "string",
+                      "pattern": "^[a-z0-9][a-z0-9._-]{0,63}$"
+                    },
+                    "reason": {
+                      "type": "string",
+                      "minLength": 1,
+                      "maxLength": 300
+                    }
+                  },
+                  "required": [
+                    "slug",
+                    "reason"
+                  ],
+                  "additionalProperties": false
                 }
               },
               "required": [
@@ -9645,6 +10118,25 @@
                       ],
                       "additionalProperties": false
                     }
+                  },
+                  "missing_capability": {
+                    "type": "object",
+                    "properties": {
+                      "slug": {
+                        "type": "string",
+                        "pattern": "^[a-z0-9][a-z0-9._-]{0,63}$"
+                      },
+                      "reason": {
+                        "type": "string",
+                        "minLength": 1,
+                        "maxLength": 300
+                      }
+                    },
+                    "required": [
+                      "slug",
+                      "reason"
+                    ],
+                    "additionalProperties": false
                   }
                 },
                 "required": [
@@ -9810,6 +10302,44 @@
                       "M",
                       "L"
                     ]
+                  },
+                  "tier_hint": {
+                    "type": "object",
+                    "properties": {
+                      "tier": {
+                        "type": "string",
+                        "enum": [
+                          "top",
+                          "mid",
+                          "low"
+                        ]
+                      },
+                      "reason": {
+                        "type": "string",
+                        "enum": [
+                          "cross_cutting",
+                          "novel_logic",
+                          "concurrency",
+                          "subtle_invariants",
+                          "large_context",
+                          "unfamiliar_stack",
+                          "mechanical",
+                          "boilerplate",
+                          "docs_or_config",
+                          "well_specified"
+                        ]
+                      },
+                      "detail": {
+                        "type": "string",
+                        "minLength": 1,
+                        "maxLength": 300
+                      }
+                    },
+                    "required": [
+                      "tier",
+                      "reason"
+                    ],
+                    "additionalProperties": false
                   },
                   "arch_triage": {
                     "type": "string",
@@ -10359,6 +10889,25 @@
                       ],
                       "additionalProperties": false
                     }
+                  },
+                  "missing_capability": {
+                    "type": "object",
+                    "properties": {
+                      "slug": {
+                        "type": "string",
+                        "pattern": "^[a-z0-9][a-z0-9._-]{0,63}$"
+                      },
+                      "reason": {
+                        "type": "string",
+                        "minLength": 1,
+                        "maxLength": 300
+                      }
+                    },
+                    "required": [
+                      "slug",
+                      "reason"
+                    ],
+                    "additionalProperties": false
                   }
                 },
                 "required": [
@@ -10524,6 +11073,44 @@
                       "M",
                       "L"
                     ]
+                  },
+                  "tier_hint": {
+                    "type": "object",
+                    "properties": {
+                      "tier": {
+                        "type": "string",
+                        "enum": [
+                          "top",
+                          "mid",
+                          "low"
+                        ]
+                      },
+                      "reason": {
+                        "type": "string",
+                        "enum": [
+                          "cross_cutting",
+                          "novel_logic",
+                          "concurrency",
+                          "subtle_invariants",
+                          "large_context",
+                          "unfamiliar_stack",
+                          "mechanical",
+                          "boilerplate",
+                          "docs_or_config",
+                          "well_specified"
+                        ]
+                      },
+                      "detail": {
+                        "type": "string",
+                        "minLength": 1,
+                        "maxLength": 300
+                      }
+                    },
+                    "required": [
+                      "tier",
+                      "reason"
+                    ],
+                    "additionalProperties": false
                   },
                   "arch_triage": {
                     "type": "string",
@@ -11844,6 +12431,25 @@
             "who_should_have_caught": {
               "type": "string",
               "pattern": "^[a-z][a-z0-9_-]{0,47}$"
+            },
+            "missing_capability": {
+              "type": "object",
+              "properties": {
+                "slug": {
+                  "type": "string",
+                  "pattern": "^[a-z0-9][a-z0-9._-]{0,63}$"
+                },
+                "reason": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 300
+                }
+              },
+              "required": [
+                "slug",
+                "reason"
+              ],
+              "additionalProperties": false
             }
           },
           "required": [
@@ -13404,6 +14010,35 @@
           },
           "additionalProperties": false
         },
+        "routing": {
+          "type": "object",
+          "properties": {
+            "start": {
+              "type": "string",
+              "enum": [
+                "difficulty",
+                "role"
+              ]
+            },
+            "min_tier": {
+              "type": "string",
+              "enum": [
+                "top",
+                "mid",
+                "low"
+              ]
+            },
+            "max_tier": {
+              "type": "string",
+              "enum": [
+                "top",
+                "mid",
+                "low"
+              ]
+            }
+          },
+          "additionalProperties": false
+        },
         "concurrency": {
           "default": 2,
           "type": "integer",
@@ -13625,6 +14260,37 @@
                 "branch",
                 "attach"
               ]
+            }
+          },
+          "additionalProperties": false
+        },
+        "lookback": {
+          "type": "object",
+          "properties": {
+            "replay_failure_tasks": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 50
+            },
+            "replay_regression_tasks": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 50
+            },
+            "max_trials_per_retro": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 500
+            },
+            "max_trials_per_retro_boosted": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 500
+            },
+            "boost_above_weekly_pct": {
+              "type": "number",
+              "minimum": 0,
+              "maximum": 100
             }
           },
           "additionalProperties": false
@@ -18195,6 +18861,25 @@
                               ],
                               "additionalProperties": false
                             }
+                          },
+                          "missing_capability": {
+                            "type": "object",
+                            "properties": {
+                              "slug": {
+                                "type": "string",
+                                "pattern": "^[a-z0-9][a-z0-9._-]{0,63}$"
+                              },
+                              "reason": {
+                                "type": "string",
+                                "minLength": 1,
+                                "maxLength": 300
+                              }
+                            },
+                            "required": [
+                              "slug",
+                              "reason"
+                            ],
+                            "additionalProperties": false
                           }
                         },
                         "required": [
@@ -18360,6 +19045,44 @@
                               "M",
                               "L"
                             ]
+                          },
+                          "tier_hint": {
+                            "type": "object",
+                            "properties": {
+                              "tier": {
+                                "type": "string",
+                                "enum": [
+                                  "top",
+                                  "mid",
+                                  "low"
+                                ]
+                              },
+                              "reason": {
+                                "type": "string",
+                                "enum": [
+                                  "cross_cutting",
+                                  "novel_logic",
+                                  "concurrency",
+                                  "subtle_invariants",
+                                  "large_context",
+                                  "unfamiliar_stack",
+                                  "mechanical",
+                                  "boilerplate",
+                                  "docs_or_config",
+                                  "well_specified"
+                                ]
+                              },
+                              "detail": {
+                                "type": "string",
+                                "minLength": 1,
+                                "maxLength": 300
+                              }
+                            },
+                            "required": [
+                              "tier",
+                              "reason"
+                            ],
+                            "additionalProperties": false
                           },
                           "arch_triage": {
                             "type": "string",
@@ -18889,6 +19612,25 @@
                               ],
                               "additionalProperties": false
                             }
+                          },
+                          "missing_capability": {
+                            "type": "object",
+                            "properties": {
+                              "slug": {
+                                "type": "string",
+                                "pattern": "^[a-z0-9][a-z0-9._-]{0,63}$"
+                              },
+                              "reason": {
+                                "type": "string",
+                                "minLength": 1,
+                                "maxLength": 300
+                              }
+                            },
+                            "required": [
+                              "slug",
+                              "reason"
+                            ],
+                            "additionalProperties": false
                           }
                         },
                         "required": [
@@ -19054,6 +19796,44 @@
                               "M",
                               "L"
                             ]
+                          },
+                          "tier_hint": {
+                            "type": "object",
+                            "properties": {
+                              "tier": {
+                                "type": "string",
+                                "enum": [
+                                  "top",
+                                  "mid",
+                                  "low"
+                                ]
+                              },
+                              "reason": {
+                                "type": "string",
+                                "enum": [
+                                  "cross_cutting",
+                                  "novel_logic",
+                                  "concurrency",
+                                  "subtle_invariants",
+                                  "large_context",
+                                  "unfamiliar_stack",
+                                  "mechanical",
+                                  "boilerplate",
+                                  "docs_or_config",
+                                  "well_specified"
+                                ]
+                              },
+                              "detail": {
+                                "type": "string",
+                                "minLength": 1,
+                                "maxLength": 300
+                              }
+                            },
+                            "required": [
+                              "tier",
+                              "reason"
+                            ],
+                            "additionalProperties": false
                           },
                           "arch_triage": {
                             "type": "string",
@@ -19321,6 +20101,25 @@
                             ],
                             "additionalProperties": false
                           }
+                        },
+                        "missing_capability": {
+                          "type": "object",
+                          "properties": {
+                            "slug": {
+                              "type": "string",
+                              "pattern": "^[a-z0-9][a-z0-9._-]{0,63}$"
+                            },
+                            "reason": {
+                              "type": "string",
+                              "minLength": 1,
+                              "maxLength": 300
+                            }
+                          },
+                          "required": [
+                            "slug",
+                            "reason"
+                          ],
+                          "additionalProperties": false
                         }
                       },
                       "required": [
@@ -19688,6 +20487,25 @@
                               ],
                               "additionalProperties": false
                             }
+                          },
+                          "missing_capability": {
+                            "type": "object",
+                            "properties": {
+                              "slug": {
+                                "type": "string",
+                                "pattern": "^[a-z0-9][a-z0-9._-]{0,63}$"
+                              },
+                              "reason": {
+                                "type": "string",
+                                "minLength": 1,
+                                "maxLength": 300
+                              }
+                            },
+                            "required": [
+                              "slug",
+                              "reason"
+                            ],
+                            "additionalProperties": false
                           }
                         },
                         "required": [
@@ -19853,6 +20671,44 @@
                               "M",
                               "L"
                             ]
+                          },
+                          "tier_hint": {
+                            "type": "object",
+                            "properties": {
+                              "tier": {
+                                "type": "string",
+                                "enum": [
+                                  "top",
+                                  "mid",
+                                  "low"
+                                ]
+                              },
+                              "reason": {
+                                "type": "string",
+                                "enum": [
+                                  "cross_cutting",
+                                  "novel_logic",
+                                  "concurrency",
+                                  "subtle_invariants",
+                                  "large_context",
+                                  "unfamiliar_stack",
+                                  "mechanical",
+                                  "boilerplate",
+                                  "docs_or_config",
+                                  "well_specified"
+                                ]
+                              },
+                              "detail": {
+                                "type": "string",
+                                "minLength": 1,
+                                "maxLength": 300
+                              }
+                            },
+                            "required": [
+                              "tier",
+                              "reason"
+                            ],
+                            "additionalProperties": false
                           },
                           "arch_triage": {
                             "type": "string",
@@ -20402,6 +21258,25 @@
                               ],
                               "additionalProperties": false
                             }
+                          },
+                          "missing_capability": {
+                            "type": "object",
+                            "properties": {
+                              "slug": {
+                                "type": "string",
+                                "pattern": "^[a-z0-9][a-z0-9._-]{0,63}$"
+                              },
+                              "reason": {
+                                "type": "string",
+                                "minLength": 1,
+                                "maxLength": 300
+                              }
+                            },
+                            "required": [
+                              "slug",
+                              "reason"
+                            ],
+                            "additionalProperties": false
                           }
                         },
                         "required": [
@@ -20567,6 +21442,44 @@
                               "M",
                               "L"
                             ]
+                          },
+                          "tier_hint": {
+                            "type": "object",
+                            "properties": {
+                              "tier": {
+                                "type": "string",
+                                "enum": [
+                                  "top",
+                                  "mid",
+                                  "low"
+                                ]
+                              },
+                              "reason": {
+                                "type": "string",
+                                "enum": [
+                                  "cross_cutting",
+                                  "novel_logic",
+                                  "concurrency",
+                                  "subtle_invariants",
+                                  "large_context",
+                                  "unfamiliar_stack",
+                                  "mechanical",
+                                  "boilerplate",
+                                  "docs_or_config",
+                                  "well_specified"
+                                ]
+                              },
+                              "detail": {
+                                "type": "string",
+                                "minLength": 1,
+                                "maxLength": 300
+                              }
+                            },
+                            "required": [
+                              "tier",
+                              "reason"
+                            ],
+                            "additionalProperties": false
                           },
                           "arch_triage": {
                             "type": "string",
@@ -22570,6 +23483,25 @@
                 "type": "string",
                 "pattern": "^[a-z][a-z0-9_-]{0,47}$"
               },
+              "missing_capability": {
+                "type": "object",
+                "properties": {
+                  "slug": {
+                    "type": "string",
+                    "pattern": "^[a-z0-9][a-z0-9._-]{0,63}$"
+                  },
+                  "reason": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 300
+                  }
+                },
+                "required": [
+                  "slug",
+                  "reason"
+                ],
+                "additionalProperties": false
+              },
               "created_at": {
                 "type": "string",
                 "format": "date-time",
@@ -22589,6 +23521,25 @@
                   "who_should_have_caught": {
                     "type": "string",
                     "pattern": "^[a-z][a-z0-9_-]{0,47}$"
+                  },
+                  "missing_capability": {
+                    "type": "object",
+                    "properties": {
+                      "slug": {
+                        "type": "string",
+                        "pattern": "^[a-z0-9][a-z0-9._-]{0,63}$"
+                      },
+                      "reason": {
+                        "type": "string",
+                        "minLength": 1,
+                        "maxLength": 300
+                      }
+                    },
+                    "required": [
+                      "slug",
+                      "reason"
+                    ],
+                    "additionalProperties": false
                   }
                 },
                 "required": [
@@ -22651,6 +23602,25 @@
             "who_should_have_caught": {
               "type": "string",
               "pattern": "^[a-z][a-z0-9_-]{0,47}$"
+            },
+            "missing_capability": {
+              "type": "object",
+              "properties": {
+                "slug": {
+                  "type": "string",
+                  "pattern": "^[a-z0-9][a-z0-9._-]{0,63}$"
+                },
+                "reason": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 300
+                }
+              },
+              "required": [
+                "slug",
+                "reason"
+              ],
+              "additionalProperties": false
             }
           },
           "required": [
@@ -23022,6 +23992,9 @@
             "release",
             "retro"
           ]
+        },
+        "automation_paused": {
+          "type": "boolean"
         }
       },
       "required": [
@@ -23501,6 +24474,44 @@
                   "L"
                 ]
               },
+              "tier_hint": {
+                "type": "object",
+                "properties": {
+                  "tier": {
+                    "type": "string",
+                    "enum": [
+                      "top",
+                      "mid",
+                      "low"
+                    ]
+                  },
+                  "reason": {
+                    "type": "string",
+                    "enum": [
+                      "cross_cutting",
+                      "novel_logic",
+                      "concurrency",
+                      "subtle_invariants",
+                      "large_context",
+                      "unfamiliar_stack",
+                      "mechanical",
+                      "boilerplate",
+                      "docs_or_config",
+                      "well_specified"
+                    ]
+                  },
+                  "detail": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 300
+                  }
+                },
+                "required": [
+                  "tier",
+                  "reason"
+                ],
+                "additionalProperties": false
+              },
               "arch_triage": {
                 "type": "string",
                 "enum": [
@@ -23827,6 +24838,44 @@
                 "M",
                 "L"
               ]
+            },
+            "tier_hint": {
+              "type": "object",
+              "properties": {
+                "tier": {
+                  "type": "string",
+                  "enum": [
+                    "top",
+                    "mid",
+                    "low"
+                  ]
+                },
+                "reason": {
+                  "type": "string",
+                  "enum": [
+                    "cross_cutting",
+                    "novel_logic",
+                    "concurrency",
+                    "subtle_invariants",
+                    "large_context",
+                    "unfamiliar_stack",
+                    "mechanical",
+                    "boilerplate",
+                    "docs_or_config",
+                    "well_specified"
+                  ]
+                },
+                "detail": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 300
+                }
+              },
+              "required": [
+                "tier",
+                "reason"
+              ],
+              "additionalProperties": false
             },
             "arch_triage": {
               "type": "string",
@@ -25115,6 +26164,25 @@
                 "type": "string",
                 "pattern": "^[a-z][a-z0-9_-]{0,47}$"
               },
+              "missing_capability": {
+                "type": "object",
+                "properties": {
+                  "slug": {
+                    "type": "string",
+                    "pattern": "^[a-z0-9][a-z0-9._-]{0,63}$"
+                  },
+                  "reason": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 300
+                  }
+                },
+                "required": [
+                  "slug",
+                  "reason"
+                ],
+                "additionalProperties": false
+              },
               "created_at": {
                 "type": "string",
                 "format": "date-time",
@@ -25134,6 +26202,25 @@
                   "who_should_have_caught": {
                     "type": "string",
                     "pattern": "^[a-z][a-z0-9_-]{0,47}$"
+                  },
+                  "missing_capability": {
+                    "type": "object",
+                    "properties": {
+                      "slug": {
+                        "type": "string",
+                        "pattern": "^[a-z0-9][a-z0-9._-]{0,63}$"
+                      },
+                      "reason": {
+                        "type": "string",
+                        "minLength": 1,
+                        "maxLength": 300
+                      }
+                    },
+                    "required": [
+                      "slug",
+                      "reason"
+                    ],
+                    "additionalProperties": false
                   }
                 },
                 "required": [
@@ -25198,6 +26285,27 @@
                 "type": "string",
                 "minLength": 1,
                 "maxLength": 200
+              },
+              "tier": {
+                "type": "string",
+                "enum": [
+                  "top",
+                  "mid",
+                  "low"
+                ]
+              },
+              "tier_reason": {
+                "type": "string",
+                "enum": [
+                  "role",
+                  "rule",
+                  "planner_hint",
+                  "escalation",
+                  "budget_drop"
+                ]
+              },
+              "tier_clamped": {
+                "type": "boolean"
               },
               "dispatched_at": {
                 "type": "string",
@@ -31867,6 +32975,18 @@
         "complete": {
           "type": "boolean"
         },
+        "partial_reason": {
+          "type": "string",
+          "enum": [
+            "base_build_failed",
+            "base_serve_failed",
+            "no_visual_app",
+            "no_browser",
+            "video_off",
+            "no_ffmpeg",
+            "capture_failed"
+          ]
+        },
         "captured_at": {
           "type": "string",
           "format": "date-time",
@@ -32101,7 +33221,8 @@
                   "budget",
                   "trial_cap",
                   "plugin_locked",
-                  "stale_baseline"
+                  "stale_baseline",
+                  "error"
                 ]
               },
               "kind": {
@@ -32305,6 +33426,499 @@
         "grader_bundle_sha",
         "outcome",
         "at"
+      ],
+      "additionalProperties": false
+    },
+    "ControlResult": {
+      "$id": "https://vtc.local/schemas/ControlResult.json",
+      "title": "ControlResult",
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "anyOf": [
+        {
+          "type": "object",
+          "properties": {
+            "run": {
+              "type": "string",
+              "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$"
+            },
+            "paused": {
+              "type": "boolean"
+            },
+            "phase": {
+              "type": "string",
+              "enum": [
+                "intake",
+                "discover",
+                "specify",
+                "g1",
+                "design",
+                "g2",
+                "plan",
+                "build",
+                "integrate",
+                "final_review",
+                "release",
+                "retro"
+              ]
+            },
+            "automation_paused": {
+              "type": "boolean"
+            }
+          },
+          "required": [
+            "run",
+            "paused",
+            "phase"
+          ],
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "properties": {
+            "run": {
+              "type": "null"
+            },
+            "automation_paused": {
+              "type": "boolean"
+            }
+          },
+          "required": [
+            "run",
+            "automation_paused"
+          ],
+          "additionalProperties": false
+        }
+      ]
+    },
+    "RoutingTable": {
+      "$id": "https://vtc.local/schemas/RoutingTable.json",
+      "title": "RoutingTable",
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "type": "object",
+      "properties": {
+        "v": {
+          "type": "number",
+          "const": 1
+        },
+        "by_size": {
+          "type": "object",
+          "properties": {
+            "S": {
+              "type": "string",
+              "enum": [
+                "top",
+                "mid",
+                "low"
+              ]
+            },
+            "M": {
+              "type": "string",
+              "enum": [
+                "top",
+                "mid",
+                "low"
+              ]
+            },
+            "L": {
+              "type": "string",
+              "enum": [
+                "top",
+                "mid",
+                "low"
+              ]
+            }
+          },
+          "required": [
+            "S",
+            "M",
+            "L"
+          ],
+          "additionalProperties": false
+        },
+        "tagged_floor": {
+          "type": "string",
+          "enum": [
+            "top",
+            "mid",
+            "low"
+          ]
+        },
+        "high_floor": {
+          "type": "string",
+          "enum": [
+            "top",
+            "mid",
+            "low"
+          ]
+        },
+        "high_risk_tags": {
+          "minItems": 1,
+          "maxItems": 50,
+          "type": "array",
+          "items": {
+            "type": "string",
+            "pattern": "^[a-z0-9][a-z0-9._-]{0,63}$"
+          }
+        },
+        "roles": {
+          "type": "object",
+          "propertyNames": {
+            "type": "string",
+            "pattern": "^[a-z][a-z0-9_-]{0,47}$"
+          },
+          "additionalProperties": {
+            "type": "object",
+            "properties": {
+              "by_size": {
+                "type": "object",
+                "propertyNames": {
+                  "type": "string",
+                  "enum": [
+                    "S",
+                    "M",
+                    "L"
+                  ]
+                },
+                "additionalProperties": {
+                  "type": "string",
+                  "enum": [
+                    "top",
+                    "mid",
+                    "low"
+                  ]
+                }
+              },
+              "tagged_floor": {
+                "type": "string",
+                "enum": [
+                  "top",
+                  "mid",
+                  "low"
+                ]
+              },
+              "high_floor": {
+                "type": "string",
+                "enum": [
+                  "top",
+                  "mid",
+                  "low"
+                ]
+              }
+            },
+            "additionalProperties": false
+          }
+        }
+      },
+      "required": [
+        "v",
+        "by_size",
+        "tagged_floor",
+        "high_floor",
+        "high_risk_tags"
+      ],
+      "additionalProperties": false
+    },
+    "RoutingScorecard": {
+      "$id": "https://vtc.local/schemas/RoutingScorecard.json",
+      "title": "RoutingScorecard",
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "type": "object",
+      "properties": {
+        "v": {
+          "type": "number",
+          "const": 1
+        },
+        "grader_bundle_sha": {
+          "type": "string",
+          "pattern": "^[a-f0-9]{64}$"
+        },
+        "window": {
+          "type": "object",
+          "properties": {
+            "from": {
+              "type": "string",
+              "format": "date-time",
+              "pattern": "^(?:(?:\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|(?:02)-(?:0[1-9]|1\\d|2[0-8])))T(?:(?:[01]\\d|2[0-3]):[0-5]\\d:[0-5]\\d(?:\\.\\d+)?(?:Z|([+-](?:[01]\\d|2[0-3]):[0-5]\\d)))$"
+            },
+            "to": {
+              "type": "string",
+              "format": "date-time",
+              "pattern": "^(?:(?:\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|(?:02)-(?:0[1-9]|1\\d|2[0-8])))T(?:(?:[01]\\d|2[0-3]):[0-5]\\d:[0-5]\\d(?:\\.\\d+)?(?:Z|([+-](?:[01]\\d|2[0-3]):[0-5]\\d)))$"
+            }
+          },
+          "required": [
+            "from",
+            "to"
+          ],
+          "additionalProperties": false
+        },
+        "cells": {
+          "maxItems": 1000,
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "role": {
+                "type": "string",
+                "pattern": "^[a-z][a-z0-9_-]{0,47}$"
+              },
+              "mode": {
+                "type": "string",
+                "pattern": "^[a-z0-9][a-z0-9._-]{0,63}$"
+              },
+              "host": {
+                "type": "string",
+                "enum": [
+                  "claude-code",
+                  "codex"
+                ]
+              },
+              "size": {
+                "type": "string",
+                "enum": [
+                  "S",
+                  "M",
+                  "L"
+                ]
+              },
+              "risk": {
+                "type": "string",
+                "enum": [
+                  "none",
+                  "tagged",
+                  "high"
+                ]
+              },
+              "start_tier": {
+                "type": "string",
+                "enum": [
+                  "top",
+                  "mid",
+                  "low"
+                ]
+              },
+              "start_reason": {
+                "type": "string",
+                "enum": [
+                  "rule",
+                  "planner_hint",
+                  "role"
+                ]
+              },
+              "tasks": {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 9007199254740991
+              },
+              "metrics": {
+                "type": "object",
+                "propertyNames": {
+                  "type": "string",
+                  "enum": [
+                    "first_round_gate_pass",
+                    "review_pass",
+                    "rounds_to_done",
+                    "escalations_per_100",
+                    "cap_hits_per_100",
+                    "tokens_per_success"
+                  ]
+                },
+                "additionalProperties": {
+                  "type": "object",
+                  "properties": {
+                    "value": {
+                      "type": [
+                        "number",
+                        "null"
+                      ]
+                    },
+                    "ci_low": {
+                      "type": [
+                        "number",
+                        "null"
+                      ]
+                    },
+                    "ci_high": {
+                      "type": [
+                        "number",
+                        "null"
+                      ]
+                    },
+                    "n": {
+                      "type": "integer",
+                      "minimum": 0,
+                      "maximum": 9007199254740991
+                    }
+                  },
+                  "required": [
+                    "value",
+                    "ci_low",
+                    "ci_high",
+                    "n"
+                  ],
+                  "additionalProperties": false
+                }
+              },
+              "escalated": {
+                "type": "object",
+                "properties": {
+                  "value": {
+                    "type": [
+                      "number",
+                      "null"
+                    ]
+                  },
+                  "ci_low": {
+                    "type": [
+                      "number",
+                      "null"
+                    ]
+                  },
+                  "ci_high": {
+                    "type": [
+                      "number",
+                      "null"
+                    ]
+                  },
+                  "n": {
+                    "type": "integer",
+                    "minimum": 0,
+                    "maximum": 9007199254740991
+                  }
+                },
+                "required": [
+                  "value",
+                  "ci_low",
+                  "ci_high",
+                  "n"
+                ],
+                "additionalProperties": false
+              },
+              "cost_per_task_usd": {
+                "type": "object",
+                "properties": {
+                  "value": {
+                    "type": [
+                      "number",
+                      "null"
+                    ]
+                  },
+                  "ci_low": {
+                    "type": [
+                      "number",
+                      "null"
+                    ]
+                  },
+                  "ci_high": {
+                    "type": [
+                      "number",
+                      "null"
+                    ]
+                  },
+                  "n": {
+                    "type": "integer",
+                    "minimum": 0,
+                    "maximum": 9007199254740991
+                  }
+                },
+                "required": [
+                  "value",
+                  "ci_low",
+                  "ci_high",
+                  "n"
+                ],
+                "additionalProperties": false
+              }
+            },
+            "required": [
+              "role",
+              "host",
+              "size",
+              "risk",
+              "start_tier",
+              "start_reason",
+              "tasks",
+              "metrics",
+              "escalated",
+              "cost_per_task_usd"
+            ],
+            "additionalProperties": false
+          }
+        },
+        "written_at": {
+          "type": "string",
+          "format": "date-time",
+          "pattern": "^(?:(?:\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|(?:02)-(?:0[1-9]|1\\d|2[0-8])))T(?:(?:[01]\\d|2[0-3]):[0-5]\\d:[0-5]\\d(?:\\.\\d+)?(?:Z|([+-](?:[01]\\d|2[0-3]):[0-5]\\d)))$"
+        }
+      },
+      "required": [
+        "v",
+        "grader_bundle_sha",
+        "window",
+        "cells",
+        "written_at"
+      ],
+      "additionalProperties": false
+    },
+    "CommandShapeSpoolRow": {
+      "$id": "https://vtc.local/schemas/CommandShapeSpoolRow.json",
+      "title": "CommandShapeSpoolRow",
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "type": "object",
+      "properties": {
+        "v": {
+          "type": "number",
+          "const": 1
+        },
+        "at": {
+          "type": "string",
+          "format": "date-time",
+          "pattern": "^(?:(?:\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|(?:02)-(?:0[1-9]|1\\d|2[0-8])))T(?:(?:[01]\\d|2[0-3]):[0-5]\\d:[0-5]\\d(?:\\.\\d+)?(?:Z|([+-](?:[01]\\d|2[0-3]):[0-5]\\d)))$"
+        },
+        "agent": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 256
+        },
+        "session": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 256
+        },
+        "cwd": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 4096
+        },
+        "shape": {
+          "type": "object",
+          "properties": {
+            "program": {
+              "type": "string",
+              "pattern": "^(<path>|<other>|[A-Za-z0-9][A-Za-z0-9._+-]{0,63})$"
+            },
+            "subcommand": {
+              "type": "string",
+              "pattern": "^[a-z][a-z0-9:_-]{0,39}$"
+            },
+            "flags": {
+              "type": "string",
+              "pattern": "^[a-f0-9]{12}$"
+            }
+          },
+          "required": [
+            "program",
+            "flags"
+          ],
+          "additionalProperties": false
+        }
+      },
+      "required": [
+        "v",
+        "at",
+        "agent",
+        "cwd",
+        "shape"
       ],
       "additionalProperties": false
     }

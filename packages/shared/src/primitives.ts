@@ -172,6 +172,18 @@ export type Severity = z.infer<typeof SeveritySchema>;
 export const RiskSchema = z.enum(["low", "med", "high"]);
 export type Risk = z.infer<typeof RiskSchema>;
 
+/**
+ * Model tier (§5.2 footnote): maps per host, e.g. Claude top/mid/low = Opus/Sonnet/Haiku. Lives
+ * here since 5.4.0 so the task contracts can name it (difficulty routing, H-9); `role-contract.ts`
+ * re-exports it.
+ */
+export const ModelTierSchema = z.enum(["top", "mid", "low"]);
+export type ModelTier = z.infer<typeof ModelTierSchema>;
+
+/** Reasoning effort of a role run (§5.2); `role-contract.ts` re-exports it. */
+export const EffortSchema = z.enum(["low", "medium", "high"]);
+export type Effort = z.infer<typeof EffortSchema>;
+
 /** Token counts by type (§11 measurement, §16 Event.tokens). */
 export const TokenUsageSchema = z.strictObject({
   in: z.int().nonnegative(),

@@ -295,6 +295,13 @@ export type UpstreamReportInput = z.input<typeof UpstreamReportSchema>;
 export const EvidenceHostingSchema = z.enum(["branch", "attach"]);
 export type EvidenceHosting = z.infer<typeof EvidenceHostingSchema>;
 export const EVIDENCE_HOSTING_DEFAULT: EvidenceHosting = "branch";
+/**
+ * The hosting VTC asks for when the user set none (D-cc's live check, spine §5 reading 225): `gh
+ * --attach` is confirmed as the primary evidence path, so an unset `automation.evidence_hosting`
+ * requests `attach`; the cli's resolution falls back to {@link EVIDENCE_HOSTING_DEFAULT} when gh is
+ * older than {@link GH_ATTACH_MIN_VERSION} or the remote is not github.com. New in 5.4.0.
+ */
+export const EVIDENCE_HOSTING_PREFERRED: EvidenceHosting = "attach";
 /** The first gh release with `--attach` on `pr|issue create|edit|comment` (2026-09-01). */
 export const GH_ATTACH_MIN_VERSION = "2.99.0";
 
@@ -339,6 +346,23 @@ export const EvidenceFileNameSchema = z
   .regex(/^\d{2}-[a-z0-9-]{1,60}\.(png|gif|webm|mp4)$/, "expected NN-<slug>.<png|gif|webm|mp4>");
 
 /**
+ * Why a PR's evidence is `partial` (D-ct; spine §5 reading 223): the base commit did not build or
+ * serve in the gate sandbox, so there is no "before"; the project has no `visual.app` to render;
+ * no doctor-installed browser; video turned off (`automation.evidence.video: false`) or no
+ * ffmpeg under `branch` hosting; or a capture failed past its retry. New in 5.4.0.
+ */
+export const EvidencePartialReasonSchema = z.enum([
+  "base_build_failed",
+  "base_serve_failed",
+  "no_visual_app",
+  "no_browser",
+  "video_off",
+  "no_ffmpeg",
+  "capture_failed",
+]);
+export type EvidencePartialReason = z.infer<typeof EvidencePartialReasonSchema>;
+
+/**
  * `manifest.json` of one PR's evidence (D-ce): every file with its hash, size and redaction verdict,
  * and the URL it was published under. `complete` is false when a kind D-ce asks for is missing
  * (no ffmpeg in `branch` hosting: the WebM link and screenshots only), which labels the PR
@@ -365,6 +389,8 @@ export const EvidenceManifestSchema = z.strictObject({
     .min(1)
     .max(EVIDENCE_LIMITS.maxFilesPerPr),
   complete: z.boolean(),
+  /** Why `complete` is false, when the cause is known (D-ct). New in 5.4.0. */
+  partial_reason: EvidencePartialReasonSchema.optional(),
   captured_at: IsoDateTimeSchema,
 });
 export type EvidenceManifest = z.infer<typeof EvidenceManifestSchema>;
@@ -476,6 +502,11 @@ export const AutomationSkipReasonSchema = z.enum([
    * that change, so it is not opened. New in 5.2.0.
    */
   "stale_baseline",
+  /**
+   * An automatic action failed for a reason none of the above names (a `gh` or git error, a
+   * crash in the module); `detail` is the redacted message. New in 5.4.0.
+   */
+  "error",
 ]);
 export type AutomationSkipReason = z.infer<typeof AutomationSkipReasonSchema>;
 
@@ -507,6 +538,8 @@ export const UPSTREAM_EVENT_PAYLOAD_SCHEMAS = {
     branch: z.string().regex(/^vtc\/auto\/[a-z_]+\/[a-f0-9]{8}$/),
     issue: z.int().positive().optional(),
     evidence: z.enum(["complete", "partial"]),
+    /** Why the evidence is partial, when it is and the cause is known (D-ct). New in 5.4.0. */
+    partial_reason: EvidencePartialReasonSchema.optional(),
   }),
   /** VTC closed its own PR (a newer proposal superseded it, its issue closed, or it went stale). */
   "upstream.pr_closed": IssueOrPrSchema.extend({

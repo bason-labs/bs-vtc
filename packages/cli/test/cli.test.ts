@@ -5,6 +5,7 @@ import { afterAll, describe, expect, expectTypeOf, it } from "vitest";
 import { runDaemon } from "@vtc/engine";
 import {
   CONTRACTS_VERSION,
+  type ControlResult,
   type EngineClient,
   type EngineDeps,
   type EngineToolInput,
@@ -82,7 +83,7 @@ describe("composition seam (AD-19)", () => {
   it("control commands reach the daemon over MCP through a typed client", () => {
     expectTypeOf<CommandContext["engine"]>().returns.resolves.toEqualTypeOf<EngineClient>();
     expectTypeOf<EngineToolInput<"pause">>().toEqualTypeOf<{ run?: string | undefined }>();
-    expectTypeOf<EngineToolOutput<"pause">>().toHaveProperty("paused").toEqualTypeOf<boolean>();
+    expectTypeOf<EngineToolOutput<"pause">>().toEqualTypeOf<ControlResult>();
   });
   it("opens the engine client lazily and once", async () => {
     let connects = 0;

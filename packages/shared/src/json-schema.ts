@@ -19,6 +19,7 @@ import {
   LeadActionSchema,
   NextResultSchema,
   RunControlResultSchema,
+  ControlResultSchema,
   ResumeInputSchema,
   RunListSchema,
   RunScopedInputSchema,
@@ -66,6 +67,7 @@ import {
   ReplayInfraRowSchema,
   ReplayResultSchema,
   ReplayTrialRowSchema,
+  RoutingScorecardSchema,
   ScorecardIndexSchema,
   ScorecardSchema,
 } from "./lookback.js";
@@ -128,6 +130,8 @@ import {
   UpstreamReportSchema,
 } from "./upstream.js";
 import { WorkflowEdgeSchema, WorkflowGraphSchema, WorkflowNodeSchema } from "./workflow.js";
+import { CommandShapeSpoolRowSchema } from "./signals.js";
+import { RoutingTableSchema } from "./tier-routing.js";
 
 /** Every frozen contract by name. */
 export const CONTRACT_SCHEMAS = {
@@ -272,6 +276,11 @@ export const CONTRACT_SCHEMAS = {
   // ---- contracts 5.1.0 (the round-4 merge, spine §5 readings 210-214)
   ReplayTrialRow: ReplayTrialRowSchema,
   ReplayInfraRow: ReplayInfraRowSchema,
+  // ---- contracts 5.4.0 (round 5: difficulty routing and the improvement signals, readings 217-226)
+  ControlResult: ControlResultSchema,
+  RoutingTable: RoutingTableSchema,
+  RoutingScorecard: RoutingScorecardSchema,
+  CommandShapeSpoolRow: CommandShapeSpoolRowSchema,
 } as const;
 export type ContractName = keyof typeof CONTRACT_SCHEMAS;
 

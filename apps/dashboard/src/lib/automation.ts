@@ -50,6 +50,7 @@ export const SKIP_REASONS: Readonly<Record<AutomationSkipReason, string>> = {
   trial_cap: "the replay trial cap for this retro is reached",
   plugin_locked: "a replay arm's plugin did not load (managed settings)",
   stale_baseline: "the replay measured another prompt than VTC's default branch now has",
+  error: "the action failed with an error (see the detail)",
 };
 
 const HOSTING: Readonly<Record<EvidenceHosting, string>> = {

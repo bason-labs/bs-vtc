@@ -35,11 +35,14 @@ import { FindingSchema, FindingStatusSchema, WaiverSchema } from "./finding.js";
 import { GateReportSchema } from "./gate-result.js";
 import { AutomationRunRefSchema, UPSTREAM_EVENT_PAYLOAD_SCHEMAS } from "./upstream.js";
 import { EscalationAnswerSchema, EscalationSchema } from "./escalation.js";
+import { CommandShapeCountSchema, MAX_COMMAND_SHAPES_PER_RUN } from "./signals.js";
+import { TierReasonSchema } from "./tier-routing.js";
 import {
   EscalationIdSchema,
   EvidenceSchema,
   GitShaSchema,
   HostIdSchema,
+  ModelTierSchema,
   IsoDateTimeSchema,
   RelPathSchema,
   RiskRuleReasonRuleSchema,
@@ -134,6 +137,17 @@ export const IncidentKindSchema = z.enum([
   "prompt_selection",
 ]);
 export type IncidentKind = z.infer<typeof IncidentKindSchema>;
+
+/**
+ * A remote branch an engine push writes (`branch.pushed.remote_ref`): an integration branch, or an
+ * automatic run's `vtc/auto/<kind>/<fp8>` (AD-27, `autoBranchName`). New in 5.4.0.
+ */
+const RemoteBranchSchema = z
+  .string()
+  .regex(
+    /^(vtc\/F-[1-9]\d*|vtc\/auto\/[a-z_]+\/[a-f0-9]{8})$/,
+    "expected vtc/F-n or vtc/auto/<kind>/<fp8>",
+  );
 
 const parkedConsistency = (
   value: {
@@ -316,6 +330,8 @@ export const EVENT_PAYLOAD_SCHEMAS = {
   "branch.pushed": z.strictObject({
     branch: z.string().regex(/^vtc\/F-[1-9]\d*$/, "expected integration branch vtc/F-n"),
     commit: GitShaSchema,
+    /** The remote branch the push wrote when it is not `branch` (an automatic run's, AD-27). New in 5.4.0. */
+    remote_ref: RemoteBranchSchema.optional(),
   }),
   /**
    * A Level-2+ push of the integration branch failed (§6.7). Its merged tasks stay `merged`;
@@ -324,6 +340,8 @@ export const EVENT_PAYLOAD_SCHEMAS = {
   "branch.push_failed": z.strictObject({
     branch: z.string().regex(/^vtc\/F-[1-9]\d*$/, "expected integration branch vtc/F-n"),
     detail: z.string().min(1).max(2000),
+    /** The remote branch the push tried to write when it is not `branch`. New in 5.4.0. */
+    remote_ref: RemoteBranchSchema.optional(),
   }),
   /** Opening, updating or readying the feature's PR failed (§6.7); `detail` is redacted. */
   "feature.pr_failed": z.strictObject({ detail: z.string().min(1).max(2000) }),
@@ -355,10 +373,27 @@ export const EVENT_PAYLOAD_SCHEMAS = {
       purpose: RoleDispatchPurposeSchema.optional(),
       /** The trial a `lookback_replay` dispatch is; present exactly then. New in 4.11.0. */
       replay: ReplayTrialRefSchema.optional(),
+      /**
+       * The tier the dispatch runs on and why (H-9, D-cm): `role`, `rule`, `planner_hint`,
+       * `escalation` or `budget_drop` (`TierReasonSchema`). `tier_clamped`: the project's
+       * `routing.min_tier` / `max_tier` or QA author's floor moved it. Both tier fields are set
+       * together; absent on logs written before 5.4.0. New in 5.4.0.
+       */
+      tier: ModelTierSchema.optional(),
+      tier_reason: TierReasonSchema.optional(),
+      tier_clamped: z.boolean().optional(),
     })
     .refine((v) => (v.purpose === "lookback_replay") === (v.replay !== undefined), {
       message: "replay names the trial exactly when purpose is lookback_replay",
       path: ["replay"],
+    })
+    .refine((v) => (v.tier === undefined) === (v.tier_reason === undefined), {
+      message: "tier and tier_reason are set together",
+      path: ["tier_reason"],
+    })
+    .refine((v) => v.tier_clamped === undefined || v.tier !== undefined, {
+      message: "tier_clamped needs tier",
+      path: ["tier_clamped"],
     }),
   "role.submitted": z
     .strictObject({
@@ -380,6 +415,12 @@ export const EVENT_PAYLOAD_SCHEMAS = {
        * Required for `built`.
        */
       head: GitShaSchema.optional(),
+      /**
+       * The run's shell calls as normalised shapes (D-cs, `CommandShape`: program, subcommand and a
+       * flag-name hash, never a value or a path), most used first; the source of the `tool`
+       * signal. Absent: none recorded. New in 5.4.0.
+       */
+      command_shapes: z.array(CommandShapeCountSchema).max(MAX_COMMAND_SHAPES_PER_RUN).optional(),
     })
     .refine((v) => v.exit !== "built" || v.head !== undefined, {
       message: "a built result names the commit it built (head)",
