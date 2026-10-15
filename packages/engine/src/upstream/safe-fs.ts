@@ -141,6 +141,31 @@ export const readRegularFileNoFollow = (path: string, maxBytes: number): Uint8Ar
   }
 };
 
+/**
+ * {@link readRegularFileNoFollow} of `root/rel` where no directory between `root` (trusted) and the
+ * file may be a symlink or a non-directory either (`O_NOFOLLOW` guards the last component only);
+ * `rel` is `/`-separated and plain (no empty, `.` or `..` segment). `null` on any refusal.
+ */
+export const readRegularFileBelow = (
+  root: string,
+  rel: string,
+  maxBytes: number,
+): Uint8Array | null => {
+  const segments = rel.split("/");
+  if (isAbsolute(rel) || segments.some((s) => s === "" || s === "." || s === "..")) return null;
+  let current = root;
+  for (const segment of segments.slice(0, -1)) {
+    current = join(current, segment);
+    try {
+      const stat = lstatSync(current);
+      if (stat.isSymbolicLink() || !stat.isDirectory()) return null;
+    } catch {
+      return null;
+    }
+  }
+  return readRegularFileNoFollow(join(current, segments.at(-1) ?? ""), maxBytes);
+};
+
 /** Creates `path` exclusively (`O_EXCL|O_NOFOLLOW`) with `text`; false when it already exists. */
 export const createExclusive = (path: string, text: string | Uint8Array): boolean => {
   let fd: number;

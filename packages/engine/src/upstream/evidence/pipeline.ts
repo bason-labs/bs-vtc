@@ -34,7 +34,7 @@ import {
   type GitSha,
 } from "@vtc/shared";
 import type { RemoteRefs } from "../remote-refs.js";
-import { createExclusive, readRegularFileNoFollow } from "../safe-fs.js";
+import { createExclusive, ensureDirNoFollow, readRegularFileNoFollow } from "../safe-fs.js";
 import { isAutomationSkip } from "../skip.js";
 import { makeGif, type FfmpegCommand } from "./gif.js";
 import {
@@ -104,8 +104,9 @@ export interface EvidenceRequest {
    * D-ct: an automatic run's UI PR at its release. The recorder checks `base` out a second time
    * in the gate sandbox, builds and serves it, and renders the Visual QA screens of both commits
    * (`captureBeforeAfter`), with the changed flow recorded for at most `flowSeconds`
-   * (≤ `EVIDENCE_LIMITS.maxFlowSeconds`) unless recordings are off. `base` null: the default
-   * branch is not available locally, so there is no before (`base_build_failed`).
+   * (≤ `EVIDENCE_LIMITS.maxFlowSeconds`) unless recordings are off. `base` is the commit the
+   * automatic branch was cut from; `null`: the caller does not know it, so nothing is rendered and
+   * the set is partial (`capture_failed`), never a "before" of some other commit.
    */
   readonly beforeAfter?:
     | {
@@ -230,6 +231,17 @@ const PNG_MAGIC = [0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a];
 
 const isPng = (bytes: Uint8Array): boolean => PNG_MAGIC.every((b, i) => bytes[i] === b);
 
+/** WebM's EBML header. */
+const WEBM_MAGIC = [0x1a, 0x45, 0xdf, 0xa3];
+/** MP4's `ftyp` box type, at offset 4. */
+const MP4_FTYP = [0x66, 0x74, 0x79, 0x70];
+
+/** Whether `bytes` open as the container `ext` names (`webm` or `mp4`). */
+const isVideo = (bytes: Uint8Array, ext: string): boolean =>
+  ext === "webm"
+    ? WEBM_MAGIC.every((b, i) => bytes[i] === b)
+    : ext === "mp4" && MP4_FTYP.every((b, i) => bytes[i + 4] === b);
+
 /** A name a recorder returns for a file in its output directory: one plain segment. */
 const PLAIN_NAME = /^[A-Za-z0-9][A-Za-z0-9._-]{0,80}$/;
 
@@ -284,11 +296,11 @@ const captureBeforeAfter = async (
   // a recorder from before 5.4.0 cannot render the base: no before/after at all
   const method = recorder.captureBeforeAfter?.bind(recorder);
   if (method === undefined) return { files: [], reason: "capture_failed" };
+  // no known cut point: nothing was built, and a "before" of another commit would mislead
   const base = target.base;
-  if (base === null) return { files: [], reason: "base_build_failed" };
+  if (base === null) return { files: [], reason: "capture_failed" };
   const video = request.plan.video !== false;
-  const outDir = join(stagingDir, "before-after");
-  mkdirSync(outDir, { recursive: true, mode: 0o700 });
+  const outDir = ensureDirNoFollow(stagingDir, join(stagingDir, "before-after"), "the evidence");
   const flowSeconds = Math.min(
     EVIDENCE_LIMITS.maxFlowSeconds,
     target.flowSeconds ?? EVIDENCE_LIMITS.maxFlowSeconds,
@@ -318,7 +330,7 @@ const captureBeforeAfter = async (
       join(outDir, file.name),
       motion ? EVIDENCE_LIMITS.maxVideoBytes : EVIDENCE_LIMITS.maxPngBytes,
     );
-    if (bytes === null || bytes.length === 0 || (!motion && !isPng(bytes))) continue;
+    if (bytes === null || !(motion ? isVideo(bytes, ext) : isPng(bytes))) continue;
     const name = nextName([...existing, ...files], file.name.slice(3, dot), ext);
     if (!createExclusive(join(stagingDir, name), bytes)) continue;
     files.push({ name, kind: file.kind, bytes: bytes.length, alt: ALT[file.kind] });

@@ -90,7 +90,7 @@ import {
   type UpstreamEvidenceData,
 } from "./evidence/upstream-snapshot.js";
 import { upstreamIssueSlots } from "./report-render.js";
-import { ensureDirNoFollow, readRegularFileNoFollow, repoFileName } from "./safe-fs.js";
+import { ensureDirNoFollow, readRegularFileBelow, repoFileName } from "./safe-fs.js";
 import { AutomationSkip, isAutomationSkip } from "./skip.js";
 import { createKeyedSerial } from "./queue.js";
 import {
@@ -224,10 +224,16 @@ export type AutomationOutcome =
   | { readonly status: "pr_closed"; readonly number: number; readonly url: string }
   | { readonly status: "error"; readonly detail: string };
 
-/** What an automatic PR changes: commit these files, or a branch the run already pushed. */
+/**
+ * What an automatic PR changes: commit these files, or a branch the run already pushed. With
+ * `pushedHead`, `base` is the default-branch commit the run's branch was cut from (the run's
+ * recorded start commit); a UI PR's before/after renders it as the "before" (D-ct). Without it
+ * the module does not guess (the default branch may have moved since the cut), so no before/after
+ * is rendered and the evidence is partial (`capture_failed`).
+ */
 export type PrSource =
   | { readonly changes: readonly PlumbingChange[]; readonly message: string }
-  | { readonly pushedHead: GitSha };
+  | { readonly pushedHead: GitSha; readonly base?: GitSha | undefined };
 
 export interface AutoPrInput {
   readonly target: "upstream" | "project";
@@ -338,12 +344,14 @@ const ownIssue = (
 
 /**
  * A checkout's routing scorecard (D-cn, `LOOKBACK_REPO.routingScorecard`), never through a
- * symlink and only when it is valid as its strict contract (VTC vocabulary and numbers); else
- * `undefined` (the chart is then not captured and the evidence says so).
+ * symlink (the file or any directory below the checkout) and only when it is valid as its strict
+ * contract (VTC vocabulary and numbers); else `undefined` (the chart is then not captured and the
+ * evidence says so).
  */
 const readRoutingScorecard = (repoRoot: string): RoutingScorecard | undefined => {
-  const bytes = readRegularFileNoFollow(
-    join(repoRoot, LOOKBACK_REPO.routingScorecard),
+  const bytes = readRegularFileBelow(
+    repoRoot,
+    LOOKBACK_REPO.routingScorecard,
     ROUTING_SCORECARD_MAX_BYTES,
   );
   if (bytes === null) return undefined;
@@ -355,19 +363,29 @@ const readRoutingScorecard = (repoRoot: string): RoutingScorecard | undefined =>
   }
 };
 
-/** The run's snapshot with its routing scorecard served, unless the caller's already is. */
+/** Pure: whether a routing scorecard holds the cell a routing change is about (D-cn). */
+const holdsCell = (
+  card: RoutingScorecard,
+  cell: { readonly role: string; readonly size: string; readonly risk: string },
+): boolean =>
+  card.cells.some((c) => c.role === cell.role && c.size === cell.size && c.risk === cell.risk);
+
+/**
+ * A routing change's snapshot (D-cn): the run's routing scorecard route serves exactly `card`, the
+ * one checked to hold the change's cell, or nothing when there is none, so the page never charts a
+ * scorecard of unrelated cells. Any other PR's snapshot is left as it is.
+ */
 const withRoutingRoute = (
   snapshot: AutoPrInput["evidence"]["snapshot"],
   run: string | undefined,
+  routing: boolean,
   card: RoutingScorecard | undefined,
 ): AutoPrInput["evidence"]["snapshot"] => {
-  if (card === undefined || run === undefined) return snapshot;
+  if (!routing || run === undefined) return snapshot;
   const key = artifactRouteKey(run, LOOKBACK_REPO.routingScorecard);
-  if (snapshot.routes[key] !== undefined) return snapshot;
-  return {
-    ...snapshot,
-    routes: { ...snapshot.routes, [key]: jsonArtifact(run, LOOKBACK_REPO.routingScorecard, card) },
-  };
+  const routes = Object.fromEntries(Object.entries(snapshot.routes).filter(([k]) => k !== key));
+  if (card !== undefined) routes[key] = jsonArtifact(run, LOOKBACK_REPO.routingScorecard, card);
+  return { ...snapshot, routes };
 };
 
 const QUIET_COMMENT = (version: string): string =>
@@ -638,6 +656,8 @@ export const createUpstream = (deps: UpstreamDeps): Upstream => {
       event: "seen",
       at: item.at,
       version: deps.vtcVersion,
+      // D-ct: kept for this machine's pickup, which then never reads it from the issue body
+      ...(item.target === "upstream" ? { ui: framesTouchUi(item.facts.frames ?? []) } : {}),
     });
     const record = ledger.record(repo, item.fingerprint);
     if ((record?.count ?? 0) < item.minOccurrences) {
@@ -874,12 +894,20 @@ export const createUpstream = (deps: UpstreamDeps): Upstream => {
   const pickup = async (ctx: ProjectContext): Promise<readonly AutomationRunRef[]> => {
     if (!mayStartRun("upstream", ctx)) return [];
     const repo = deps.automation.upstream.repo;
-    const listed = await issues.listAutomatic(repo);
-    const answered = new Set(
-      (await pullRequests.listOpenAutomatic(repo)).flatMap((p) =>
-        p.marker === null ? [] : [p.marker.fp],
-      ),
-    );
+    let listed: readonly AutoIssueRef[];
+    let answered: ReadonlySet<string>;
+    try {
+      listed = await issues.listAutomatic(repo);
+      answered = new Set(
+        (await pullRequests.listOpenAutomatic(repo)).flatMap((p) =>
+          p.marker === null ? [] : [p.marker.fp],
+        ),
+      );
+    } catch (error) {
+      failure(error, { target: "upstream" }, ctx);
+      return [];
+    }
+    const ledger = ledgerFor("upstream", ctx);
     const asked: AutomationRunRef[] = [];
     for (const issue of listed) {
       const marker = issue.marker;
@@ -897,8 +925,11 @@ export const createUpstream = (deps: UpstreamDeps): Upstream => {
           ),
           track: "quick_fix",
           repo: "existing",
-          // D-ct: the VTC frames the issue lists decide whether its PR records UI before/after
-          has_ui: framesTouchUi(framesFromIssueBody(issue.body)),
+          // D-ct: whether its PR records UI before/after, from this machine's ledger when this
+          // installation raised the issue; only another installation's issue is read from the
+          // VTC frames its body lists (as listed, so a frame only ever decides this)
+          has_ui:
+            ledger.record(repo, marker.fp)?.ui ?? framesTouchUi(framesFromIssueBody(issue.body)),
           risk_hints: [],
         },
         {
@@ -1020,16 +1051,6 @@ export const createUpstream = (deps: UpstreamDeps): Upstream => {
     return sha;
   };
 
-  /** The default branch's commit in `repoRoot` (the remote-tracking ref first), or `null`. */
-  const defaultBranchSha = async (repoRoot: string, base: string): Promise<GitSha | null> => {
-    const plumbing = deps.automation.plumbing?.({ repoRoot });
-    if (plumbing === undefined) return null;
-    return (
-      (await plumbing.resolve(`refs/remotes/origin/${base}`)) ??
-      (await plumbing.resolve(`refs/heads/${base}`))
-    );
-  };
-
   const openPullRequest = (input: AutoPrInput, ctx: ProjectContext): Promise<AutomationOutcome> =>
     serial(`pr:${input.target}:${input.fingerprint}`, () => openPullRequestNow(input, ctx));
 
@@ -1065,20 +1086,31 @@ export const createUpstream = (deps: UpstreamDeps): Upstream => {
       const projectEvidence = upstream ? undefined : ctx.evidence;
       const listedIssues = await issues.listAutomatic(repo);
       // D-cn: a routing-table change (its issue names a routing cell) charts the routing
-      // scorecard, from the caller's VTC-side data or the run's own checkout.
-      const routing =
-        input.kind === "config" &&
-        routingSubjectOfBody(ownIssue(listedIssues, input)?.body) !== null;
-      const routingCard = routing
-        ? (input.evidence.upstream?.routingScorecard ?? readRoutingScorecard(ctx.repoRoot))
-        : undefined;
+      // scorecard. The body is as listed, which anyone may edit, so its cell counts only when it
+      // is the very subject the PR's fingerprint was made from.
+      const bodyCell =
+        input.kind === "config" ? routingSubjectOfBody(ownIssue(listedIssues, input)?.body) : null;
+      const cell =
+        bodyCell !== null &&
+        autoFingerprint({ kind: "config", subject: bodyCell.key }) === input.fingerprint
+          ? bodyCell
+          : null;
+      const routing = cell !== null;
+      // the caller's VTC-side card, else the run's own checkout's: only one that holds the cell
+      // (a project's Lookback may have raised it, so bs-vtc's own card can lack it)
+      const routingCard =
+        cell === null
+          ? undefined
+          : [input.evidence.upstream?.routingScorecard, readRoutingScorecard(ctx.repoRoot)].find(
+              (card): card is RoutingScorecard => card !== undefined && holdsCell(card, cell),
+            );
       // Reading 212(3): the upstream-safe page reads the dashboard's own frozen routes of a
       // synthetic run, built here from the report and VTC-side data only, never the caller's
       // routes or the run's events.
-      const safeData: UpstreamEvidenceData | undefined =
-        routingCard === undefined
-          ? input.evidence.upstream
-          : { ...input.evidence.upstream, routingScorecard: routingCard };
+      const { routingScorecard: _unchecked, ...otherData } = input.evidence.upstream ?? {};
+      const safeData: UpstreamEvidenceData | undefined = routing
+        ? { ...otherData, ...(routingCard === undefined ? {} : { routingScorecard: routingCard }) }
+        : input.evidence.upstream;
       const safeSnapshot =
         upstreamSafe && report !== undefined
           ? upstreamEvidenceSnapshot({
@@ -1091,11 +1123,13 @@ export const createUpstream = (deps: UpstreamDeps): Upstream => {
         ...input.evidence.plan,
         ...(safeSnapshot === undefined ? {} : { upstreamSafe: true, run: safeSnapshot.run }),
         ...(projectEvidence?.video === false ? { video: false } : {}),
-        ...(routing ? { routing: true } : {}),
+        ...(routing
+          ? { routing: true, ...(routingCard === undefined ? { routingUnavailable: true } : {}) }
+          : {}),
       };
       const snapshot =
         safeSnapshot === undefined
-          ? withRoutingRoute(input.evidence.snapshot, input.evidence.plan.run, routingCard)
+          ? withRoutingRoute(input.evidence.snapshot, input.evidence.plan.run, routing, routingCard)
           : { routes: safeSnapshot.routes, events: safeSnapshot.events };
       const early = planPrCap({
         open: await pullRequests.listOpenAutomatic(repo),
@@ -1185,12 +1219,13 @@ export const createUpstream = (deps: UpstreamDeps): Upstream => {
         });
       }
       // D-ct: an automatic run's UI PR (Final Review of an automatic run only) has the gate
-      // runner render its base and its head; the base is the default branch the PR merges into.
+      // runner render its base and its head. The base is the commit the run's branch was cut
+      // from, as the caller recorded it; never the default branch's tip, which may have moved.
       const beforeAfter =
         "pushedHead" in input.source && plan.change === "ui" && !plan.upstreamSafe
           ? {
               repoRoot,
-              base: await defaultBranchSha(repoRoot, base),
+              base: input.source.base ?? null,
               head: input.source.pushedHead,
             }
           : undefined;
@@ -1455,7 +1490,7 @@ export const createUpstream = (deps: UpstreamDeps): Upstream => {
       const repo = repoOf(target, ctx);
       if (repo === null) throw new AutomationSkip("no_github_remote", "no target repo");
       const pr = (await pullRequests.listOpenAutomatic(repo)).find((p) => p.number === number);
-      if (pr === undefined) return { status: "error", detail: `PR #${String(number)} is not open` };
+      if (pr === undefined) throw new Error(`PR #${String(number)} is not open`);
       const evidence = pr.labels.includes(AUTO_LABELS.evidencePartial) ? "partial" : "complete";
       if (specVerifier !== "pass") {
         return { status: "pr", number, url: pr.url, ready: false, evidence };

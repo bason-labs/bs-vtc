@@ -60,6 +60,9 @@ describe("the subject patterns (pure)", () => {
       ["config", "routing.engineer.XL.none"],
       ["config", "routing.Engineer.S.none"],
       ["config", "budget task s"],
+      // only VTC's enumerated cap and budget keys, never any dotted key
+      ["config", "payroll_portal.export_retries"],
+      ["config", "budget.task_xl"],
     ] as const) {
       expect(() => projectSubject(kind, subject), subject).toThrow(/vocabulary/);
     }

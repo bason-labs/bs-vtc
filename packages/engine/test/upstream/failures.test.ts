@@ -48,6 +48,33 @@ describe("unexpected failures are events (reason error)", () => {
       ),
     ).toBe(true);
   });
+
+  it("a pickup whose listing fails is an error event and asks for no run", async () => {
+    const h = harness({ self: true, startRun: () => Promise.resolve() });
+    h.github.pullRequests.listOpenAutomatic = () => Promise.reject(new Error("gh: HTTP 503"));
+    expect(await h.upstream.pickup(h.ctx)).toEqual([]);
+    const skip = h.events.find((e) => e.type === "automation.skipped");
+    expect(skip?.payload).toMatchObject({
+      reason: "error",
+      target: { kind: "upstream", repo: UPSTREAM },
+    });
+  });
+
+  it("completing a PR that is not open is an error event", async () => {
+    const h = harness();
+    expect(await h.upstream.completePullRequest("project", 42, "pass", h.ctx)).toMatchObject({
+      status: "error",
+      detail: "PR #42 is not open",
+    });
+    expect(
+      h.events.some(
+        (e) =>
+          e.type === "automation.skipped" &&
+          e.payload.reason === "error" &&
+          e.payload.detail === "PR #42 is not open",
+      ),
+    ).toBe(true);
+  });
 });
 
 describe("GitPlumbing.fetch / message (contracts 5.4.0)", () => {

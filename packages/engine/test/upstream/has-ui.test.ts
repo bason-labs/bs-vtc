@@ -134,4 +134,34 @@ describe("an automatic run's has_ui (D-ct)", () => {
     ]);
     expect(own.started.map((r) => r.input.has_ui)).toEqual([true, false]);
   });
+
+  it("pickup on the machine that raised the issue reads has_ui from its ledger, not the body", async () => {
+    const elsewhere = harness();
+    for (let i = 0; i < 2; i += 1)
+      await elsewhere.upstream.report(defect({ stack: DASHBOARD_STACK }), elsewhere.ctx);
+    for (let i = 0; i < 2; i += 1)
+      await elsewhere.upstream.report(
+        defect({ stack: ENGINE_STACK, errorClass: "engine.crash" }),
+        elsewhere.ctx,
+      );
+    // a collaborator edits the bodies: the dashboard frame moves to the engine defect's issue
+    const frame = "dashboard/components/views/lookbackview:render";
+    elsewhere.github.state.issues = elsewhere.github.state.issues.map((issue) =>
+      issue.body.includes(frame)
+        ? { ...issue, body: issue.body.split(frame).join("") }
+        : { ...issue, body: `${issue.body}\n${frame}\n` },
+    );
+    expect(
+      elsewhere.github.state.issues.map((i) => framesTouchUi(framesFromIssueBody(i.body))),
+    ).toEqual([false, true]);
+    const own = runs();
+    const h = harness({
+      shared: elsewhere,
+      sameHome: true,
+      startRun: own.startRun,
+      self: true,
+    });
+    await h.upstream.pickup(h.ctx);
+    expect(own.started.map((r) => r.input.has_ui)).toEqual([true, false]);
+  });
 });
