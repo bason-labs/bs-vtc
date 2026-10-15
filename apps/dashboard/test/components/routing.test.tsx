@@ -20,7 +20,9 @@ const notFound = () =>
 /** The golden T-2 with role runs (from the golden T-1's) and a Planner hint, as 5.4.0 serves it. */
 const routedTask = () => {
   const t2 = TaskDetailSchema.parse(readFixture("task-T-2"));
-  const [run] = TaskDetailSchema.parse(readFixture("task-T-1")).role_runs;
+  // the golden run is routed since engine core's 5.4.0 log; drop its tier so each case sets its own
+  const [golden] = TaskDetailSchema.parse(readFixture("task-T-1")).role_runs;
+  const { tier: _tier, tier_reason: _reason, tier_clamped: _clamped, ...run } = golden!;
   const runs: Partial<RoleRunSummary>[] = [
     { action_id: "a-1", tier: "low", tier_reason: "planner_hint" },
     { action_id: "a-2", tier: "mid", tier_reason: "escalation", tier_clamped: true },
