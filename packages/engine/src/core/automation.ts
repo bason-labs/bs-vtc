@@ -208,6 +208,12 @@ export const automationReportView = (
 // ------------------------------------------------------------------ triggers
 
 /**
+ * The metric of a `cost` fact: a scorecard metric, or `cost_per_task` (the mean reported cost per
+ * task Lookback's drift compares, D-cr), which is no scorecard metric. Engine core's own type.
+ */
+export type CostFactMetric = ScorecardMetricId | "cost_per_task";
+
+/**
  * One engine fact that may raise an automatic issue or PR (D-bv; AD-27): the daemon reads it from
  * the run's events and hands it to the upstream module, which owns the fingerprint, dedupe, caps,
  * the privacy projection (`UpstreamReport` for an upstream target) and what to raise. A fact holds
@@ -247,8 +253,11 @@ export interface AutomationFact {
   readonly title?: string;
   /** The project-relative path a project problem cites, when it has one. */
   readonly path?: string;
-  /** A cost regression (`kind` `cost`): the scorecard metric that worsened. */
-  readonly metric?: ScorecardMetricId;
+  /**
+   * A cost regression (`kind` `cost`): the metric that worsened, a scorecard metric or Lookback's
+   * `cost_per_task` (a drift, D-cr; spine §5 reading 233).
+   */
+  readonly metric?: CostFactMetric;
   /** A cost regression: the metric under the baseline version and under the current one. */
   readonly baseline?: number;
   readonly current?: number;

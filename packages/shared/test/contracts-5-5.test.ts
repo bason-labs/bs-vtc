@@ -20,6 +20,7 @@ import {
   type GitPlumbing,
   type GitSha,
 } from "../src/index.js";
+import { DCM_TABLE } from "./fixtures.js";
 
 const SIZES = ["S", "M", "L"] as const;
 
@@ -29,12 +30,12 @@ describe("contracts 5.5.0", () => {
   });
 
   describe("routedStartTier (D-cm, readings 218(2) and 228)", () => {
-    it("gives the default table's cells: S Low, M Mid, L Top; a tag lifts to Mid, high risk to Top", () => {
+    it("gives D-cm's cells: S Low, M Mid, L Top; a tag lifts to Mid, high risk to Top", () => {
       const grid = Object.fromEntries(
         SIZES.map((size) => [
           size,
           TaskRiskClassSchema.options.map((risk) =>
-            routedStartTier(DEFAULT_ROUTING_TABLE, "engineer", size, risk),
+            routedStartTier(DCM_TABLE, "engineer", size, risk),
           ),
         ]),
       );

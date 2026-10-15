@@ -64,7 +64,7 @@ import {
   type CreateUpstream,
   type UpstreamWiring,
 } from "../core/index.js";
-import { readRepoFileCapped, type RemoteRefs } from "../git/index.js";
+import { readRepoFileCapped } from "../git/index.js";
 import type { EvidenceSnapshot } from "./evidence-snapshot.js";
 
 // --------------------------------------------------------------- the module's shape
@@ -91,7 +91,7 @@ export type UpstreamModuleFact =
       readonly role: string;
       readonly host?: string | undefined;
       readonly model?: string | undefined;
-      readonly metric: ScorecardMetricId;
+      readonly metric: ScorecardMetricId | "cost_per_task";
       readonly baselinePromptSha: string;
       readonly promptSha?: string | undefined;
       readonly baseline: number;
@@ -241,8 +241,6 @@ export interface UpstreamModuleDeps {
    * at the default branch's commit it builds on, never the work tree; without it none opens.
    */
   readonly gitOps?: (repoRoot: string) => Pick<GitOps, "readFileAtCommit">;
-  /** Fetches the shared automation branches and reads commit messages (engine git). */
-  readonly remoteRefs?: (repoRoot: string) => RemoteRefs;
 }
 
 /** `upstream.createUpstream`. */
@@ -528,9 +526,8 @@ export interface UpstreamBridgeOptions {
   readonly scorecards?: (role: string, host: string) => readonly Scorecard[];
   /** The run's read routes and events for the evidence browser ({@link automaticPrInput}). */
   readonly evidenceSnapshot: (run: string) => EvidenceSnapshot;
-  /** Engine git's file-at-commit reader and remote refs for a repo (`createGitOps`, `createRemoteRefs`). */
+  /** Engine git's file-at-commit reader for a repo (`createGitOps`). */
   readonly gitOps: NonNullable<UpstreamModuleDeps["gitOps"]>;
-  readonly remoteRefs: NonNullable<UpstreamModuleDeps["remoteRefs"]>;
   /** The default plumbing when the cli injects none (`git.createGitPlumbing`). */
   readonly plumbing: NonNullable<AutomationDeps["plumbing"]>;
 }
@@ -576,7 +573,6 @@ export const bridgeUpstream =
       startRun: deps.startRun,
       now,
       gitOps: options.gitOps,
-      remoteRefs: options.remoteRefs,
     });
     const repo = githubRepoOf(options.remoteUrl);
     const ctx = (): UpstreamModuleContext => {

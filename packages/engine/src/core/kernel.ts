@@ -24,6 +24,7 @@ import type {
   ReplayInfraOutcome,
   RoleMcpToolName,
   RoleResult,
+  RoutingTable,
   SessionSandboxState,
   TaskPack,
   TaskRiskClass,
@@ -91,6 +92,12 @@ export interface EngineCoreDeps {
    * plugin. Absent: such a host's replays cannot run a candidate and wait for the next RETRO.
    */
   readonly armPlugins?: ArmPluginCompiler;
+  /**
+   * The routing table per-task roles start by (D-cm). Absent: `DEFAULT_ROUTING_TABLE`, as the
+   * daemon wires it. Its tiers move through reviewed D-cn routing PRs (spine §5 reading 233), so
+   * the engine's flow tests route with D-cm's own table instead of pinning the default's values.
+   */
+  readonly routingTable?: RoutingTable;
 }
 
 /** One engine-launched headless role run in flight (AD-25; `StatusResult.headless_runs`). */

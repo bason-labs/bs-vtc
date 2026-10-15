@@ -6,6 +6,8 @@
  *   `EVIDENCE_LIMITS.maxFlowSeconds`; for an automatic run's PR the gate runner renders both
  *   commits itself (`EvidenceRecorder.captureBeforeAfter`, D-ct), which the pipeline asks for;
  * - a routing-table change (D-cn): the routing scorecard chart besides the change's own evidence;
+ *   the module's own routing PR (`config`, reading 233) has no run, so its upstream-safe page
+ *   is the routing scorecard and its recordings wait for that chart, not for a replay;
  * - prompt, agent or cost changes: the scorecard and replay charts;
  * - non-UI fixes: the gate report (`EvidenceRecorder.renderGateReport`), screenshotted.
  * A project's `automation.evidence.video: false` drops the recordings (screenshots only, which
@@ -21,8 +23,11 @@ import {
 } from "@vtc/shared";
 import { UPSTREAM_EVIDENCE_RUN } from "./upstream-snapshot.js";
 
-/** What changed, which decides the evidence beyond the replay. */
-export type ChangeClass = "ui" | "prompt" | "agent" | "cost" | "non_ui";
+/**
+ * What changed, which decides the evidence beyond the replay. `config`: a value-only config change
+ * the module made itself (the routing-table PR, D-cn): no run, so no gate report.
+ */
+export type ChangeClass = "ui" | "prompt" | "agent" | "cost" | "non_ui" | "config";
 
 export const DESKTOP_VIEWPORT = { width: 1280, height: 800 } as const;
 
@@ -96,7 +101,11 @@ const pagePath = (input: EvidencePlanInput, view: "run" | "lookback"): string =>
 
 /** What a page of `view` shows once it has its data. */
 const readyFor = (input: EvidencePlanInput, view: "run" | "lookback"): string =>
-  input.upstreamSafe || view === "lookback" ? EVIDENCE_READY.replay : EVIDENCE_READY.flow;
+  input.change === "config" && input.upstreamSafe
+    ? EVIDENCE_READY.routing
+    : input.upstreamSafe || view === "lookback"
+      ? EVIDENCE_READY.replay
+      : EVIDENCE_READY.flow;
 
 /** Pure: the shots to capture, with neutral `NN-<slug>.<ext>` names. */
 export const planEvidenceShots = (input: EvidencePlanInput): EvidenceShot[] => {

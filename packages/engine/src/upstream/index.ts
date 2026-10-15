@@ -36,6 +36,7 @@ export * from "./privacy.js";
 export * from "./queue.js";
 export * from "./remote-refs.js";
 export * from "./report-render.js";
+export * from "./routing-pr.js";
 export * from "./safe-fs.js";
 export * from "./skip.js";
 export * from "./staging.js";

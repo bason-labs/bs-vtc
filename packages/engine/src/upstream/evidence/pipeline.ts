@@ -70,6 +70,15 @@ const ALT: Readonly<Record<EvidenceFileKind, string>> = {
   gate_report: "Gate report and test results",
 };
 
+/**
+ * The caption of a before/after `flow_video` (D-ct): `BeforeAfterRequest` names no flow steps yet,
+ * so the gate runner records each side's first rendered screen loading and then left idle (its
+ * known limit, spine §5 reading 233). The caption says so, never "the changed flow", until a run
+ * can name its changed flow (`BeforeAfterRequest.flow`, a question to the human).
+ */
+export const BEFORE_AFTER_FLOW_ALT =
+  "First rendered screen, loading then idle (no changed-flow steps are recorded yet)";
+
 export interface EvidenceRequest {
   readonly kind: AutoKind;
   readonly fingerprint: AutoFingerprint;
@@ -333,7 +342,13 @@ const captureBeforeAfter = async (
     if (bytes === null || !(motion ? isVideo(bytes, ext) : isPng(bytes))) continue;
     const name = nextName([...existing, ...files], file.name.slice(3, dot), ext);
     if (!createExclusive(join(stagingDir, name), bytes)) continue;
-    files.push({ name, kind: file.kind, bytes: bytes.length, alt: ALT[file.kind] });
+    const side = /-before$/.test(file.name.slice(0, dot))
+      ? " (before)"
+      : /-after$/.test(file.name.slice(0, dot))
+        ? " (after)"
+        : "";
+    const alt = motion ? `${BEFORE_AFTER_FLOW_ALT}${side}` : ALT[file.kind];
+    files.push({ name, kind: file.kind, bytes: bytes.length, alt });
   }
   const has = (kind: EvidenceFileKind): boolean => files.some((f) => f.kind === kind);
   const missing = !has("ui_before") || !has("ui_after") || (video && !has("flow_video"));

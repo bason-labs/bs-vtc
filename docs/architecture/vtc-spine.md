@@ -3891,6 +3891,63 @@ pending human review**: what the fix round on the round-5 merge's findings deliv
       (`docs/research/2026-10-15-token-calibration.md`, real host runs, which the fix round could not
       make) and, with it, the reviewer-tier question that note raises (a question to the human).
 
+**Reading 233 (2026-10-15, the round-5 second fix round).** The integrator's, **Lead decision
+2026-10-15, pending human review**: the routing PR made by the upstream module itself, routing
+tests that no longer pin the tunable table, and the owned followups this round closes. No contract
+changes (contracts stay 5.6.0).
+
+233.  **A routing PR is the module's own value edit; tests do not pin the tunable table** (D-cn,
+      D-ct, D-cr; AD-8, AD-27; amends readings 219, 228(6) and 232(2), closes the matching items of
+      readings 231 and 232(7)). _Lead decision 2026-10-15, pending human review._ (1) _No run
+      answers a routing issue._ A routing issue (a `config` subject naming a routing cell) used to
+      start a normal `quick_fix` run, but that run's own flow changes more than the table: QA
+      author commits acceptance tests, Final Review step 7 asks for a CHANGELOG entry where a
+      `CHANGELOG*` file exists, and the tests that pinned the table's values had to change, so the
+      scope check of reading 232(2) refused every real routing PR. The upstream module now answers
+      the issue with its own PR, as it does a Lookback prompt PR (`openRoutingPr`,
+      `buildRoutingPr` in `upstream/routing-pr.ts`): it reads `DEFAULT_ROUTING_TABLE` in
+      `packages/shared/src/tier-routing.ts` at the default branch's commit of the bs-vtc checkout
+      (the plain object literal only, fail closed on anything else), moves the cell named by the
+      fact's `ROUTING_FACT_METRICS` (`routing.from_tier`, `routing.to_tier`, `routing.shared`;
+      the field is Lookback's `tableField`: `by_size.<size>` for no tag, `tagged_floor`,
+      `high_floor`, shared or under `roles.<role>`), refuses `stale_baseline` when the table no
+      longer starts the cell on `from` and `out_of_scope` when one value cannot start it on `to`,
+      writes the literal back in the file's own Prettier form, and commits that one file on
+      `vtc/auto/config/<fp8>`. The PR is upstream-safe (the routing scorecard chart; new evidence
+      change class `config`, whose recordings wait for that chart and which has no gate report)
+      and marked ready with no Spec Verifier, like a Lookback PR; the human merges it. The
+      installation that raises the issue opens the PR after it lets go of the repo lock, when it
+      has a bs-vtc checkout and `automation.prs` is on; else the checkout's `pickup` does, reading
+      the move from the issue's "Move the start tier" line (as listed: it only picks one of the
+      three tiers for the issue's own cell, and the PR is reviewed). The scope check of reading
+      232(2) stays for a run's pushed head. (2) _Tests do not pin the tunable table._ The rule
+      tests of shared, the compiler, the cli and engine core read D-cm's table as a fixture (the
+      engine's flow harness routes with it through engine core's own `EngineCoreDeps.routingTable`,
+      absent in the daemon, so `DEFAULT_ROUTING_TABLE` applies); the tests that read the default
+      derive their expectations from it. With a Lookback-style change of the default (a shared
+      cell and two `roles` overrides) the whole suite and `prettier --check` pass. A real-git test
+      drives a routing fact through the module to an opened PR whose branch changes only the table.
+      (3) _Tier replay (D-cn "with replay evidence where possible")_ stays open: a replay trial
+      still runs on its recorded tier (reading 218(7)), so a routing PR says in its body that no
+      tier replay backs it and the scorecard is the only evidence; the tier arm, the RETRO trial
+      budget for `lookbackRoutingStep` and a graded `routing.replay_verdict` remain engine core's
+      and lookback-research's (reading 232(7)), and whether a routing PR should wait for that
+      verdict is a question to the human. (4) _The before/after flow video (D-ct)_ is captioned for
+      what it shows, "First rendered screen, loading then idle (no changed-flow steps are recorded
+      yet)", never "the changed flow", until a run can name its changed flow
+      (`BeforeAfterRequest.flow`, a question to the human, reading 232(7)). (5) _The `RemoteRefs`
+      seam is gone:_ `UpstreamDeps.remoteRefs`, the bridge's option, the daemon's binding and
+      `git.createRemoteRefs` are removed; the module fetches and reads commit messages only
+      through `GitPlumbing.fetch` / `message`, and without them builds on the refs as last fetched
+      (a stale ref makes the never-forced push fail). (6) _`cost_per_task` drift reaches the
+      automation:_ engine core's `cost` fact takes `CostFactMetric` (a scorecard metric or
+      `cost_per_task`), `lookbackRunEndFacts` hands a `cost_per_task` time-window drift on, and the
+      upstream module's `costRegressed` raises it by the token rule (`maxTokenRisePct`). (7) _The
+      token calibration_ (reading 227(5)) is still not measured: it needs real host runs, which no
+      team and no test may make; whether `routing.start: difficulty` ships as the default before it
+      (the offline estimate predicts about +68% on its 5-task mix, all from the reviewers) is a
+      question to the human.
+
 ## 6. Change process for this spine
 
 - Changing an AD, adding one, or changing a frozen contract (AD-3) needs an architecture review

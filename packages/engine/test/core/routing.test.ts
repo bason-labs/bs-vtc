@@ -10,6 +10,7 @@ import {
   taskRiskClass,
   type ModelTier,
   type RoutingConfig,
+  type RoutingTable,
   type TierHint,
 } from "@vtc/shared";
 import { routeTier, ruleTier, startTier, type RouteInput } from "../../src/core/routing.js";
@@ -29,6 +30,19 @@ const task = (
   ...(over.tier_hint === undefined ? {} : { tier_hint: over.tier_hint }),
 });
 
+/**
+ * D-cm's table as decided (reading 218(2)): the rule tests route with it, since
+ * `DEFAULT_ROUTING_TABLE`'s tiers move through reviewed D-cn routing PRs that change
+ * `tier-routing.ts` only (reading 233).
+ */
+const DCM: RoutingTable = {
+  v: 1,
+  by_size: { S: "low", M: "mid", L: "top" },
+  tagged_floor: "mid",
+  high_floor: "top",
+  high_risk_tags: ["auth", "payments", "data", "security", "migration"],
+};
+
 const input = (
   t: RouteInput["task"],
   over: Partial<Omit<RouteInput, "task">> & { routing?: RoutingConfig } = {},
@@ -38,10 +52,22 @@ const input = (
   ...(t === undefined ? {} : { task: t }),
   roleTier: over.roleTier ?? ("top" satisfies ModelTier),
   ...(over.routing === undefined ? {} : { config: { routing: over.routing } }),
-  ...(over.table === undefined ? {} : { table: over.table }),
+  table: over.table ?? DCM,
 });
 
 describe("startTier: the routing table (D-cm)", () => {
+  it("routes with DEFAULT_ROUTING_TABLE when no table is given", () => {
+    for (const size of ["S", "M", "L"] as const)
+      for (const t of [
+        task(size),
+        task(size, { risk_tags: ["perf"] }),
+        task(size, { risk: "high" }),
+      ])
+        expect(startTier({ role: "engineer", task: t, roleTier: "top" }).tier).toBe(
+          routedStartTier(DEFAULT_ROUTING_TABLE, "engineer", size, taskRiskClass(t)),
+        );
+  });
+
   it("starts an S task with no risk tag on Low", () => {
     expect(startTier(input(task("S")))).toEqual({ tier: "low", reason: "rule", clamped: false });
   });
@@ -84,7 +110,7 @@ describe("startTier: the routing table (D-cm)", () => {
 
   it("applies a role's own table cells, cell by cell", () => {
     const table = RoutingTableSchema.parse({
-      ...DEFAULT_ROUTING_TABLE,
+      ...DCM,
       roles: { spec_verifier: { by_size: { M: "low" }, tagged_floor: "low" } },
     });
     expect(ruleTier(task("M"), "spec_verifier", table)).toBe("low");
@@ -126,7 +152,7 @@ describe("startTier: the Planner's hint (D-cm)", () => {
     }
     // a role's own high floor bounds its hint instead
     const table = RoutingTableSchema.parse({
-      ...DEFAULT_ROUTING_TABLE,
+      ...DCM,
       roles: { spec_verifier: { high_floor: "mid" } },
     });
     expect(

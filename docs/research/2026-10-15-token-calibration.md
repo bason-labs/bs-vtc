@@ -6,12 +6,14 @@ after, and gives an offline estimate to compare the measurement with. The measur
 host runs, which no test and no team may make (D-cl allows the adapters team's named scripts only),
 so the Lead runs it after the round-5 merge.
 
-**Status (2026-10-15, the round-5 fix round; spine §5 reading 232):** not run yet. The fix round
-could make no real host run either, so this note still holds the protocol and the offline estimate
-only; the measured table below is empty until the Lead (or the human) runs the two arms. Because
-the estimate predicts a total rise driven by the reviewers, the default `routing.start:
-difficulty` should not ship in a release before the measurement, or before the human decides the
-reviewer-tier question below.
+**Status (2026-10-15, the round-5 second fix round; spine §5 readings 232 and 233):** not run
+yet. Neither fix round could make a real host run, so this note still holds the protocol and the
+offline estimate only; the measured table below is empty until the Lead (or the human) runs the
+two arms. Because the estimate predicts a total rise driven by the reviewers, the default
+`routing.start: difficulty` should not ship in a release before the measurement, or before the
+human decides the reviewer-tier question below; reading 233 puts that question to the human. A
+reviewer's own cells can now also reach the table through a routing PR the upstream module makes
+itself (reading 233), once Lookback's scorecard shows the cost.
 
 ## What changes
 

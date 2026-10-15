@@ -379,12 +379,10 @@ export const DRIFT_BASELINE_SUFFIX = "@time_window";
  * `run.finished` (`wireLookback`'s `drift` argument).
  * - each drift regression (`baseline_kind: time_window`, D-cr) as a `cost` fact whose
  *   `baselinePromptSha` is the version's SHA plus {@link DRIFT_BASELINE_SUFFIX} and `promptSha` the
- *   version's own. A regression against the version before is engine core's
- *   (`costRegressionFacts` from the scorecards), and `cost_per_task` is no scorecard metric the
- *   fact can carry, so neither is repeated here (`costReportFields` still reports both; widening
- *   the fact's metric to `cost_per_task` is a contract proposal to engine core). A quality-rate
- *   drift from a zero earlier rate is mapped too, and the upstream module's `costRegressed` raises
- *   it (reading 230(5)).
+ *   version's own, `cost_per_task` included (engine core's fact carries it, spine §5 reading 233).
+ *   A regression against the version before is engine core's (`costRegressionFacts` from the
+ *   scorecards), so it is not repeated here. A quality-rate drift from a zero earlier rate is
+ *   mapped too, and the upstream module's `costRegressed` raises it (reading 230(5)).
  * A routing change (D-cn) is RETRO's fact: the daemon raises it from `lookbackRoutingStep`'s
  * cells.
  */
@@ -396,7 +394,11 @@ export const lookbackRunEndFacts = (
   const out: AutomationFact[] = [];
   for (const r of result.costRegressions) {
     if (r.baseline_kind !== "time_window") continue;
-    const metric = ScorecardMetricIdSchema.safeParse(r.metric);
+    // `cost_per_task` is no scorecard metric, but the automation cost fact carries it (reading 233)
+    const metric =
+      r.metric === "cost_per_task"
+        ? ({ success: true, data: r.metric } as const)
+        : ScorecardMetricIdSchema.safeParse(r.metric);
     if (!metric.success) continue;
     out.push({
       target: "upstream",

@@ -1,12 +1,13 @@
 /**
- * `git.createRemoteRefs` (AD-13 rule 4, AD-27 rule 1): the fetch and commit-message reading the
- * upstream module needs besides the frozen `GitPlumbing` (its `RemoteRefs`), so it builds on the
- * remote's truth for the shared branches (`vtc/auto/*`, `vtc-evidence`) and recognises another
- * installation's commits by their trailer. Against temp repos and a local bare remote; no network.
+ * `GitPlumbing.fetch` / `message` (contracts 5.4.0; AD-13 rule 4, AD-27 rule 1): the fetch and
+ * commit-message reading the upstream module needs, so it builds on the remote's truth for the
+ * shared branches (`vtc/auto/*`, `vtc-evidence`) and recognises another installation's commits by
+ * their trailer. They replaced `git.createRemoteRefs`, removed with the module's seam (spine §5
+ * reading 233). Against temp repos and a local bare remote; no network.
  */
 import { afterEach, describe, expect, it } from "vitest";
 import { autoBranchName, EVIDENCE_BRANCH } from "@vtc/shared";
-import { createGitPlumbing, createRemoteRefs, type RemoteRefs } from "../../src/git/index.js";
+import { createGitPlumbing } from "../../src/git/index.js";
 import { addBareRemote, cleanupDirs, git, initRepo, tempDir } from "../helpers/repo.js";
 
 afterEach(cleanupDirs);
@@ -33,8 +34,13 @@ const refs = (repo: string): string[] =>
     .split("\n")
     .filter((r) => r !== "");
 
-/** `GitPlumbing.fetch` / `message` (contracts 5.4.0), as the seam they replace. */
-const plumbingRefs = ({ repoRoot }: { readonly repoRoot: string }): RemoteRefs => {
+interface RemoteReads {
+  fetch(remote: string, refspecs: readonly string[]): Promise<void>;
+  message(sha: string): Promise<string | null>;
+}
+
+/** `GitPlumbing.fetch` / `message` (contracts 5.4.0). */
+const plumbingRefs = ({ repoRoot }: { readonly repoRoot: string }): RemoteReads => {
   const plumbing = createGitPlumbing({ repoRoot });
   return {
     fetch: (remote, refspecs) => plumbing.fetch?.(remote, refspecs) ?? Promise.reject(new Error()),
@@ -42,10 +48,7 @@ const plumbingRefs = ({ repoRoot }: { readonly repoRoot: string }): RemoteRefs =
   };
 };
 
-describe.each([
-  ["git.createGitPlumbing fetch and message", plumbingRefs],
-  ["git.createRemoteRefs (kept for the upstream module)", createRemoteRefs],
-])("%s", (_name, make) => {
+describe.each([["git.createGitPlumbing fetch and message", plumbingRefs]])("%s", (_name, make) => {
   it("fetches the automatic branches and the evidence branch into remote-tracking refs only", async () => {
     const { repo, head } = setup();
     const before = git(repo, "rev-parse", "HEAD");

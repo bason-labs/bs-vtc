@@ -8,7 +8,6 @@ import {
   type AutomationFact,
   type FfmpegCommand,
   type ProjectContext,
-  type RemoteRefs,
   type UpstreamEvent,
 } from "../../src/upstream/index.js";
 import { tempDir } from "../helpers/repo.js";
@@ -51,10 +50,8 @@ export const harness = (
     sameHome?: boolean;
     /** With `shared`: its own clone of the shared remote (another installation's checkout). */
     clone?: boolean;
-    /** Wire `UpstreamDeps.remoteRefs` (fetch and commit messages) over the fake plumbing. */
+    /** The fake plumbing's `fetch` and `message` (contracts 5.4.0) over its fake remote. */
     remoteRefs?: boolean;
-    /** A `UpstreamDeps.remoteRefs` of the test's own (wins over `remoteRefs`). */
-    remoteRefsSeam?: (repoRoot: string) => RemoteRefs;
     noGitOps?: boolean;
     ffmpegCommand?: FfmpegCommand;
     evidence?: ProjectContext["evidence"];
@@ -69,6 +66,13 @@ export const harness = (
     options.shared !== undefined && options.clone !== true
       ? options.shared.plumbing
       : fakePlumbing({ "refs/remotes/origin/main": BASE_SHA }, options.shared?.plumbing);
+  if (options.remoteRefs === true) {
+    const refs = fakeRemoteRefs(plumbing);
+    Object.assign(plumbing, {
+      fetch: (remote: string, refspecs: readonly string[]) => refs.fetch(remote, refspecs),
+      message: (sha: string) => refs.message(sha),
+    });
+  }
   const github =
     options.shared?.github ?? memoryGitHub({ remote: plumbing.remote, now: () => clock.now });
   const events: UpstreamEvent[] = [];
@@ -134,11 +138,6 @@ export const harness = (
           }),
         }),
     ...(options.ffmpegCommand === undefined ? {} : { ffmpegCommand: options.ffmpegCommand }),
-    ...(options.remoteRefsSeam !== undefined
-      ? { remoteRefs: options.remoteRefsSeam }
-      : options.remoteRefs === true
-        ? { remoteRefs: () => fakeRemoteRefs(plumbing) }
-        : {}),
     ...(options.startRun === undefined ? {} : { startRun: options.startRun }),
   });
   return {

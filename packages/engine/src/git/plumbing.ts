@@ -12,10 +12,10 @@
  *   on the remote; a local update names the value it expects; a push is never forced (no `+`, no
  *   `--force`) and is refused when its destination is the remote's default branch, or when the
  *   remote names none (the first branch pushed to an empty repo would become its default);
- * - fetch (contracts 5.4.0, replacing the upstream module's `RemoteRefs` seam): only the shared
- *   automation branches (every `vtc/auto/<kind>/<fp8>` and `vtc-evidence`), only into the
- *   remote's own remote-tracking refs (`refs/remotes/<remote>/…`), never a local branch, a tag,
- *   the index or the work tree; the user's own git and credentials, no prompt;
+ * - fetch (contracts 5.4.0; the upstream module's only fetch since its `RemoteRefs` seam went):
+ *   only the shared automation branches (every `vtc/auto/<kind>/<fp8>` and `vtc-evidence`), only
+ *   into the remote's own remote-tracking refs (`refs/remotes/<remote>/…`), never a local branch,
+ *   a tag, the index or the work tree; the user's own git and credentials, no prompt;
  * - message: a commit's full message from the object itself, or `null` when the repo lacks it;
  * - changedPaths and mergeBase (contracts 5.5.0): read only, full object ids only, so the upstream
  *   module can refuse an automatic PR that touches files its kind may not before it opens (AD-8).

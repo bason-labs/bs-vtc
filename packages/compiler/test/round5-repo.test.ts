@@ -17,6 +17,7 @@ import {
   TaskDraftSchema,
   TierHintReasonSchema,
   type HostId,
+  type RoutingTable,
   type TaskDraftInput,
 } from "@vtc/shared";
 import {
@@ -53,10 +54,22 @@ const agentBody = (host: HostId, agent: string): string =>
 const version = (id: string): string | undefined =>
   loaded.roles.find((r) => r.role.id === id)?.role.version;
 const HOSTS: readonly HostId[] = ["claude-code", "codex"];
+/**
+ * D-cm's table as decided (spine §5 reading 218(2)): the rule and rendering tests read it, since
+ * `DEFAULT_ROUTING_TABLE`'s tiers move through reviewed D-cn routing PRs that change
+ * `tier-routing.ts` only (reading 233); what the Planner is shown is checked against the default.
+ */
+const DCM: RoutingTable = {
+  v: 1,
+  by_size: { S: "low", M: "mid", L: "top" },
+  tagged_floor: "mid",
+  high_floor: "top",
+  high_risk_tags: ["auth", "payments", "data", "security", "migration"],
+};
 
 describe("the routing table as the Planner reads it (D-cm, reading 218)", () => {
   it("starts S untagged Low, M or a tagged S Mid, L or any high-risk tag Top", () => {
-    const t = DEFAULT_ROUTING_TABLE;
+    const t = DCM;
     expect(routingStartTier(t, "S", "none")).toBe("low");
     expect(routingStartTier(t, "S", "tagged")).toBe("mid");
     expect(routingStartTier(t, "M", "none")).toBe("mid");
@@ -69,7 +82,7 @@ describe("the routing table as the Planner reads it (D-cm, reading 218)", () => 
 
   it("treats the floors as floors: a bigger size keeps its own higher tier", () => {
     const t = RoutingTableSchema.parse({
-      ...DEFAULT_ROUTING_TABLE,
+      ...DCM,
       by_size: { S: "low", M: "top", L: "top" },
       tagged_floor: "mid",
       high_floor: "mid",
@@ -80,18 +93,17 @@ describe("the routing table as the Planner reads it (D-cm, reading 218)", () => 
   });
 
   it("renders every cell, the high-risk tags and `risk: high` from the table", () => {
-    const text = renderRoutingTable(DEFAULT_ROUTING_TABLE);
+    const text = renderRoutingTable(DCM);
     expect(text).toContain("| S | `low` | `mid` | `top` |");
     expect(text).toContain("| M | `mid` | `mid` | `top` |");
     expect(text).toContain("| L | `top` | `top` | `top` |");
-    for (const tag of DEFAULT_ROUTING_TABLE.high_risk_tags)
-      expect(text, tag).toContain(`\`${tag}\``);
+    for (const tag of DCM.high_risk_tags) expect(text, tag).toContain(`\`${tag}\``);
     expect(text).toContain("`risk: high`");
   });
 
   it("follows the table's values, not a hand-typed copy", () => {
     const changed = RoutingTableSchema.parse({
-      ...DEFAULT_ROUTING_TABLE,
+      ...DCM,
       by_size: { S: "mid", M: "mid", L: "top" },
       high_risk_tags: ["auth", "billing"],
     });
@@ -102,9 +114,9 @@ describe("the routing table as the Planner reads it (D-cm, reading 218)", () => 
   });
 
   it("says which roles depart from the shared cells when a reviewed change added some", () => {
-    expect(renderRoutingTable(DEFAULT_ROUTING_TABLE)).not.toMatch(/start differently/);
+    expect(renderRoutingTable(DCM)).not.toMatch(/start differently/);
     const withRole = RoutingTableSchema.parse({
-      ...DEFAULT_ROUTING_TABLE,
+      ...DCM,
       roles: { visual_qa: { by_size: { S: "mid" } } },
     });
     expect(renderRoutingTable(withRole)).toMatch(
@@ -146,7 +158,14 @@ describe("the Planner's tier_hint (H-9, D-cm, reading 218)", () => {
 
   it.each(HOSTS)("shows the %s agent the routing table and its rules", (host) => {
     const body = oneLine(agentBody(host, "vtc-planner"));
-    expect(body).toContain("| S | `low` | `mid` | `top` |");
+    // the default table's own cells, whatever a reviewed routing PR made them
+    for (const size of ["S", "M", "L"]) {
+      const row = renderRoutingTable(DEFAULT_ROUTING_TABLE)
+        .split("\n")
+        .find((l) => l.startsWith(`| ${size} |`));
+      expect(row, size).toMatch(/^\| [SML] \| `(low|mid|top)` \|/);
+      expect(body, size).toContain(row);
+    }
     expect(body).toContain("`risk: high` counts as a high-risk tag");
     for (const tag of DEFAULT_ROUTING_TABLE.high_risk_tags)
       expect(body, tag).toContain(`\`${tag}\``);

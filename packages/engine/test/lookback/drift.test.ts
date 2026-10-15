@@ -260,25 +260,37 @@ describe("the run-end automation facts (AD-27 issue -> PR path)", () => {
   ];
   const at = now.toISOString();
 
-  it("maps a drift regression to a cost fact the upstream module takes, cost per task left out", () => {
+  it("maps each drift regression to a cost fact the upstream module takes, cost per task too", () => {
     const facts = lookbackRunEndFacts("r2", { costRegressions: regressionsOf(drifting) }, at);
+    const common = {
+      target: "upstream",
+      kind: "cost",
+      run: "r2",
+      source: "lookback.drift",
+      role: "engineer",
+      host: HOST,
+      promptSha: EFFECTIVE,
+      baselinePromptSha: `${EFFECTIVE}${DRIFT_BASELINE_SUFFIX}`,
+    };
     expect(facts).toMatchObject([
-      {
-        target: "upstream",
-        kind: "cost",
-        run: "r2",
-        source: "lookback.drift",
-        role: "engineer",
-        host: HOST,
-        promptSha: EFFECTIVE,
-        baselinePromptSha: `${EFFECTIVE}${DRIFT_BASELINE_SUFFIX}`,
-        metric: "tokens_per_success",
-        baseline: 1000,
-        current: 1500,
-      },
+      { ...common, metric: "tokens_per_success", baseline: 1000, current: 1500 },
+      // spine §5 reading 233: the automation cost fact carries `cost_per_task` (engine core's type)
+      { ...common, metric: "cost_per_task", baseline: 0.1, current: 0.2 },
     ]);
-    const item = evaluateTrigger(upstreamFact(facts[0]), { vtcVersion: "0.5.0" });
-    expect(item).toMatchObject({ target: "upstream", kind: "cost" });
+    for (const fact of facts) {
+      const item = evaluateTrigger(upstreamFact(fact), { vtcVersion: "0.5.0" });
+      expect(item, fact.metric).toMatchObject({ target: "upstream", kind: "cost" });
+    }
+    // the two metrics of one drifting version are two issues, never one
+    const [a, b] = facts.map(
+      (f) => evaluateTrigger(upstreamFact(f), { vtcVersion: "0.5.0" })?.fingerprint,
+    );
+    expect(a).not.toBe(b);
+    const cost = evaluateTrigger(upstreamFact(facts[1]), { vtcVersion: "0.5.0" });
+    expect(cost?.target === "upstream" ? cost.facts.metrics : undefined).toMatchObject({
+      "baseline.cost_per_task": 0.1,
+      "current.cost_per_task": 0.2,
+    });
   });
 
   it("gives a drift of V and a later version's regression against V distinct fingerprints", () => {

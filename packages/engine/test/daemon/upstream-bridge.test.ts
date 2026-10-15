@@ -421,10 +421,6 @@ describe("bridgeUpstream", () => {
     throw new Error("unused");
   };
   const gitOps = () => ({ readFileAtCommit: () => Promise.resolve(undefined) });
-  const remoteRefs = () => ({
-    fetch: () => Promise.resolve(),
-    message: () => Promise.resolve(null),
-  });
 
   const fakeModule = (
     answer: UpstreamModuleOutcome = { status: "ignored" },
@@ -505,7 +501,6 @@ describe("bridgeUpstream", () => {
       lookbackPr: () => Promise.resolve(options.lookbackPr ?? "no replay"),
       evidenceSnapshot: (run) => ({ ...SNAPSHOT, routes: { ...SNAPSHOT.routes, run } }),
       gitOps,
-      remoteRefs,
       plumbing,
     })(deps);
     return { wiring, emitted, started };
@@ -520,7 +515,8 @@ describe("bridgeUpstream", () => {
     expect(deps.automation.plumbing).toBe(plumbing);
     // engine git's readers: the Lookback PR reads files at a commit, never the work tree
     expect(deps.gitOps).toBe(gitOps);
-    expect(deps.remoteRefs).toBe(remoteRefs);
+    // no RemoteRefs seam: the plumbing's own fetch and message (spine §5 reading 233)
+    expect(deps).not.toHaveProperty("remoteRefs");
     expect(deps.automation.upstream.repo).toBe("bason-labs/bs-vtc");
     const payload = { reason: "rate_limit", detail: "5 issues today" };
     deps.emit({ type: "automation.skipped", payload });
