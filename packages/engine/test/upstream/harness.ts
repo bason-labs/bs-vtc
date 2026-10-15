@@ -35,6 +35,8 @@ export interface Harness {
   readonly vtcHome: string;
   /** The bs-vtc checkout's files at `BASE_SHA` (what `gitOps.readFileAtCommit` serves). */
   readonly files: Map<string, string>;
+  /** Files at any other commit (a run's pushed head), by commit, for `gitOps.readFileAtCommit`. */
+  readonly filesAt: Map<string, Map<string, string>>;
   setContext(change: Partial<AutomationContext>): void;
   setShare(share: boolean): void;
 }
@@ -79,6 +81,7 @@ export const harness = (
   const repoRoot = options.shared?.ctx.repoRoot ?? tempDir("vtc-project-");
   const checkout = options.shared?.checkout ?? tempDir("vtc-checkout-");
   const files = options.shared?.files ?? new Map<string, string>();
+  const filesAt = options.shared?.filesAt ?? new Map<string, Map<string, string>>();
   const vtcHome =
     options.shared !== undefined && options.sameHome === true
       ? options.shared.vtcHome
@@ -130,7 +133,7 @@ export const harness = (
       : {
           gitOps: () => ({
             readFileAtCommit: (sha, path) => {
-              const text = sha === BASE_SHA ? files.get(path) : undefined;
+              const text = sha === BASE_SHA ? files.get(path) : filesAt.get(sha)?.get(path);
               return Promise.resolve(
                 text === undefined ? undefined : new TextEncoder().encode(text),
               );
@@ -150,6 +153,7 @@ export const harness = (
     checkout,
     vtcHome,
     files,
+    filesAt,
     setContext: (change) => {
       context = { ...context, ...change };
     },

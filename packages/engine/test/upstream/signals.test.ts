@@ -6,9 +6,16 @@
  */
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
-import { routedStartTier, routingConfigSubject, type RoutingTable } from "@vtc/shared";
+import {
+  ROUTING_REPLAY_VERDICT_CODES,
+  routedStartTier,
+  routingConfigSubject,
+  upstreamSubjectKey,
+  type RoutingTable,
+} from "@vtc/shared";
 import { afterEach, describe, expect, it } from "vitest";
 import {
+  autoFingerprint,
   projectSubject,
   readRoutingTableSource,
   ROUTING_TABLE_FILE,
@@ -149,7 +156,9 @@ describe("routing-table changes (D-cn)", () => {
     expect(issue?.body).toContain("`roles.engineer`");
     expect(issue?.body).toContain("| routing.escalated_pct | 64 |");
     expect(issue?.body).toContain("Check the routing scorecard charts");
-    expect(routingSubjectOfBody(issue?.body)).toMatchObject({ key: subject });
+    const cell = routingSubjectOfBody(issue?.body);
+    expect(cell).toEqual({ kind: "routing", role: "engineer", size: "M", risk: "tagged" });
+    expect(cell === null ? null : upstreamSubjectKey(cell)).toBe(subject);
     // a cap or budget key stays a plain config change
     await h.upstream.report(improvement("config", "caps.fix_rounds"), h.ctx);
     expect(h.github.state.issues[1]?.title).toBe("vtc(config): config change `caps.fix_rounds`");
@@ -206,6 +215,69 @@ describe("routing-table changes (D-cn)", () => {
     await h.upstream.report(improvement("config", subject, MOVE_TO_TOP), h.ctx);
     expect(h.github.state.prs).toHaveLength(1);
     expect(started).toEqual([]);
+  });
+
+  const REPLAYED = {
+    ...MOVE_TO_TOP,
+    "routing.replay_planned": 1,
+    "routing.replay_verdict": ROUTING_REPLAY_VERDICT_CODES.improve,
+    "routing.replay_trials": 24,
+  };
+
+  it("cites the graded tier replay in the issue and the PR when the fact carries one", async () => {
+    const h = harness({ self: true });
+    h.files.set(ROUTING_TABLE_FILE, TABLE_SOURCE);
+    await h.upstream.report(
+      improvement("config", routingConfigSubject("engineer", "M", "tagged"), REPLAYED),
+      h.ctx,
+    );
+    expect(h.github.state.issues[0]?.body).toContain(
+      "A graded tier replay backs the move: verdict `improve` over 24 trials.",
+    );
+    const body = h.github.state.prs[0]?.body ?? "";
+    expect(body).toContain(
+      "A graded tier replay backs this change: verdict `improve` over 24 trials",
+    );
+    expect(body).not.toContain("only evidence");
+    // the RoutingReplayResult stays on the machine that graded it
+    expect(body).not.toMatch(/routing-replays|\.vtc\/lookback/);
+  });
+
+  it("pickup cites the replay another installation's routing issue names", async () => {
+    const elsewhere = harness({ noGitOps: true });
+    await elsewhere.upstream.report(
+      improvement("config", routingConfigSubject("engineer", "M", "tagged"), REPLAYED),
+      elsewhere.ctx,
+    );
+    const h = harness({ shared: elsewhere, self: true });
+    h.files.set(ROUTING_TABLE_FILE, TABLE_SOURCE);
+    await h.upstream.pickup(h.ctx);
+    expect(h.github.state.prs[0]?.body).toContain(
+      "A graded tier replay backs this change: verdict `improve` over 24 trials",
+    );
+  });
+
+  it("pickup refuses another installation's routing issue of a reviewer cell (D-cu)", async () => {
+    const elsewhere = harness({ noGitOps: true });
+    const subject = routingConfigSubject("spec_verifier", "M", "tagged");
+    await elsewhere.upstream.report(improvement("config", subject, MOVE_TO_TOP), elsewhere.ctx);
+    // an older VTC raised it before D-cu: plant its issue as listed
+    expect(elsewhere.github.state.issues).toEqual([]);
+    const engineer = routingConfigSubject("engineer", "M", "tagged");
+    await elsewhere.upstream.report(improvement("config", engineer, MOVE_TO_TOP), elsewhere.ctx);
+    const fp = autoFingerprint({ kind: "config", subject });
+    elsewhere.github.state.issues = elsewhere.github.state.issues.map((i) => ({
+      ...i,
+      body: i.body.replaceAll(i.marker?.fp ?? "-", fp).replaceAll("engineer", "spec_verifier"),
+      marker: i.marker === null ? null : { ...i.marker, fp },
+    }));
+    const h = harness({ shared: elsewhere, self: true });
+    h.files.set(ROUTING_TABLE_FILE, TABLE_SOURCE);
+    await h.upstream.pickup(h.ctx);
+    expect(h.github.state.prs).toEqual([]);
+    expect(h.events.find((e) => e.type === "automation.skipped")?.payload).toMatchObject({
+      reason: "out_of_scope",
+    });
   });
 
   it("refuses a move from a tier the table no longer starts the cell on (stale_baseline)", async () => {

@@ -1089,6 +1089,8 @@ describe("bs-vtc PRs caused by a project run", () => {
         },
         report: projectUpstreamReport({
           kind: "config",
+          // a config report carries its typed subject (reading 247(8))
+          subject: "caps.fix_rounds",
           fingerprint: fp,
           vtcVersion: "0.4.0",
           occurrences: 1,
@@ -1309,6 +1311,8 @@ describe("what leaves for the upstream repo", () => {
     },
     report: projectUpstreamReport({
       kind: "config",
+      // a config report carries its typed subject (reading 247(8))
+      subject: "caps.fix_rounds",
       fingerprint: fp,
       vtcVersion: "0.4.0",
       occurrences: 1,
@@ -1609,6 +1613,8 @@ describe("VTC builds VTC (the project is bs-vtc itself)", () => {
         },
         report: projectUpstreamReport({
           kind: "config",
+          // a config report carries its typed subject (reading 247(8))
+          subject: "caps.fix_rounds",
           fingerprint: fp,
           vtcVersion: "0.4.0",
           occurrences: 1,
@@ -1648,6 +1654,8 @@ describe("VTC builds VTC (the project is bs-vtc itself)", () => {
           source: { changes: [], message: "x" },
           report: projectUpstreamReport({
             kind: "config",
+            // a config report carries its typed subject (reading 247(8))
+            subject: "caps.fix_rounds",
             fingerprint: "1111111111111111",
             vtcVersion: "0.4.0",
             occurrences: 1,

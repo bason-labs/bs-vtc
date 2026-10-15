@@ -19,6 +19,7 @@ export type {
 } from "./upstream.js";
 export * from "./body.js";
 export * from "./decisions.js";
+export * from "./evidence/flow.js";
 export * from "./evidence/gif.js";
 export * from "./evidence/hosting.js";
 export * from "./evidence/manifest.js";

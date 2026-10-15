@@ -1,15 +1,19 @@
 /**
  * Slots of an upstream issue (D-by; AD-27 rule 5): rendered from an `UpstreamReport` alone, so
- * nothing but VTC-side data can reach VTC's own repo.
+ * nothing but VTC-side data can reach VTC's own repo. What an improvement is about comes from the
+ * report's typed `subject` (spine §5 reading 247(8)), never from a subject string.
  */
 import {
   renderAutoMarker,
   ROUTING_FACT_METRICS,
   TIER_ORDER,
+  type ModelTier,
   type UpstreamReport,
+  type UpstreamSubject,
 } from "@vtc/shared";
 import { renderNote, renderTitle, UNAVAILABLE, type TemplateSlots } from "./body.js";
-import { routingCellLine, routingChangeRule, type UpstreamSubject } from "./subject.js";
+import { routingReplayLine, routingReplayOfMetrics } from "./routing-pr.js";
+import { routingCellLine, routingChangeRule, type RoutingSubject } from "./subject.js";
 
 const code = (value: string | undefined): string =>
   value === undefined ? UNAVAILABLE : `\`${value}\``;
@@ -35,16 +39,17 @@ const subjectSymptom = (subject: UpstreamSubject): string => {
 };
 
 /** The tier a rank of {@link ROUTING_FACT_METRICS} names, or undefined for any other number. */
-const tierNamed = (rank: number | undefined): string | undefined =>
+const tierNamed = (rank: number | undefined): ModelTier | undefined =>
   rank === undefined || !Number.isInteger(rank) ? undefined : TIER_ORDER[rank];
 
 /**
  * Pure: the routing issue's target from the fact's metrics (D-cn; reading 228(3)): the tier the
- * cell moves from and to by name, whose cells change and whether a tier replay was planned; none
- * when the ranks name no tier.
+ * cell moves from and to by name, whose cells change and whether a tier replay was planned, then
+ * the graded tier replay's verdict and trial count when the fact carries one (reading 247(6));
+ * none when the ranks name no tier.
  */
 const routingTargetLines = (
-  subject: Extract<UpstreamSubject, { kind: "routing" }>,
+  subject: RoutingSubject,
   metrics: Readonly<Record<string, number>>,
 ): string[] => {
   const from = tierNamed(metrics[ROUTING_FACT_METRICS.fromTier]);
@@ -57,15 +62,17 @@ const routingTargetLines = (
       : shared === 0
         ? `\`roles.${subject.role}\`'s cell only`
         : "the cell";
-  const replay = metrics[ROUTING_FACT_METRICS.replayPlanned];
+  const planned = metrics[ROUTING_FACT_METRICS.replayPlanned];
+  const graded = routingReplayOfMetrics(metrics);
   return [
     `Move the start tier from \`${from}\` to \`${to}\` in ${where}.${
-      replay === undefined
+      planned === undefined
         ? ""
-        : replay > 0
+        : planned > 0
           ? " A tier replay was planned."
           : " No tier replay was planned."
     }`,
+    ...(graded === null ? [] : [routingReplayLine(graded, { from, to })]),
   ];
 };
 
@@ -94,8 +101,8 @@ const subjectLines = (
 };
 
 /** Pure: the one-line symptom of an upstream report, for its title. */
-export const reportSymptom = (report: UpstreamReport, subject?: UpstreamSubject): string => {
-  if (subject !== undefined) return subjectSymptom(subject);
+export const reportSymptom = (report: UpstreamReport): string => {
+  if (report.subject !== undefined) return subjectSymptom(report.subject);
   switch (report.kind) {
     case "defect":
       return `${report.error_class ?? "defect"} in ${report.role ?? "the engine"}`;
@@ -130,17 +137,14 @@ const ROUTING_CHECKLIST: readonly string[] = [
 ];
 
 /**
- * Pure: the issue slots of `report` (`regressionOf`: the closed issue it recurs after; `subject`:
- * the improvement's projected subject, see `subject.ts`).
+ * Pure: the issue slots of `report` (`regressionOf`: the closed issue it recurs after). An
+ * improvement's subject lines come from `report.subject` alone.
  */
 export const upstreamIssueSlots = (
   report: UpstreamReport,
-  options: {
-    readonly regressionOf?: number | undefined;
-    readonly subject?: UpstreamSubject | undefined;
-  } = {},
+  options: { readonly regressionOf?: number | undefined } = {},
 ): TemplateSlots => {
-  const { subject } = options;
+  const { subject } = report;
   const metrics = Object.entries(report.metrics);
   const evidence = [
     ...(subject === undefined ? [] : [...subjectLines(subject, report.metrics), ""]),
@@ -161,12 +165,12 @@ export const upstreamIssueSlots = (
       pr: false,
       disclosure: { vtcVersion: report.vtc_version, host: report.host, model: report.model },
     }),
-    title: renderTitle(report.kind, reportSymptom(report, subject)),
+    title: renderTitle(report.kind, reportSymptom(report)),
     summary: [
       ...(options.regressionOf === undefined
         ? []
         : [`Regression of #${String(options.regressionOf)}.`]),
-      `${reportSymptom(report, subject)}.`,
+      `${reportSymptom(report)}.`,
     ].join(" "),
     why: [
       "| occurrences | first seen | last seen | VTC |",
