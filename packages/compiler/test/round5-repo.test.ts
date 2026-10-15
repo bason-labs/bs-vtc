@@ -26,10 +26,10 @@ import {
   PROTOCOL_VARS,
   readSources,
   renderRoutingTable,
-  routingStartTier,
   TIER_HINT_REASON_DIRECTION,
   type CompileOutput,
 } from "../src/index.js";
+import { routingStartTier } from "../src/routing.js";
 
 const ROOT = fileURLToPath(new URL("../../../", import.meta.url));
 const read = readSources(ROOT);
@@ -163,6 +163,13 @@ describe("the Planner's tier_hint (H-9, D-cm, reading 218)", () => {
     );
     expect(locked).toContain("{{high_risk_tags}}");
     expect(locked).toMatch(/`risk_tags`/);
+    // The rendered list is the only list of high-risk tags: a reviewed change to the table's
+    // values (D-cn) reaches step 8 with no hand edit, so step 8 names none of them by hand.
+    const step8 = locked.split(" 8. ")[1]?.split(" 9. ")[0] ?? "";
+    expect(step8).toContain("{{high_risk_tags}}");
+    for (const tag of DEFAULT_ROUTING_TABLE.high_risk_tags) {
+      expect(step8.replace("{{high_risk_tags}}", ""), tag).not.toMatch(new RegExp(`\\b${tag}\\b`));
+    }
   });
 
   it("lists tier_hint among the task draft's fields", () => {
@@ -246,6 +253,8 @@ describe("missing capabilities in questions (D-cs, reading 221)", () => {
     expect(protocol).toMatch(/`reason`/);
     expect(protocol).toMatch(/a capability you lack \(a tool, an engine fetcher, a runner\)/);
     expect(protocol).toMatch(/Otherwise leave it out/);
+    // One separator, as the shared MissingCapability examples use, so repeats count together.
+    expect(protocol).toMatch(/words joined by `_` only/);
     const perRole = read.files.filter(
       (f) => /^roles\/[^_][^/]*\/prompt\.md$/.test(f.path) && f.text.includes("missing_capability"),
     );
@@ -280,6 +289,7 @@ describe("missing capabilities in questions (D-cs, reading 221)", () => {
     const lead = oneLine(source("plugins/common/skills/lead/SKILL.md"));
     expect(lead).toMatch(/`missing_capability`/);
     expect(lead).toMatch(/only when the answer shows the role lacked a capability/);
+    expect(lead).toMatch(/words joined by `_` only/);
   });
 });
 
@@ -302,8 +312,13 @@ describe("the templates match what the upstream renderer fills (merge cross-chec
     expect(template("auto-issue")).toMatch(/## Reviewer checklist\n\n\{\{checklist\}\}\n$/);
   });
 
-  it("keeps the diff out of a PR body: only a prompt PR has one, in its files and CHANGELOG entry", () => {
-    expect(slotsOf(template("auto-pr"))).not.toContain("diff");
+  it("puts a prompt PR's diff right after the changes, as the shared doc and the renderer do", () => {
+    // AUTO_TEMPLATE_SLOTS doc: "`diff` is a prompt PR's fenced diff and follows `changes`"; the
+    // upstream module fills it in a prompt PR's body and drops it first when the body is too long.
+    const pr = slotsOf(template("auto-pr"));
+    expect(pr).toEqual(AUTO_TEMPLATE_LAYOUT["auto-pr"]);
+    expect(pr.slice(pr.indexOf("changes"), pr.indexOf("changes") + 2)).toEqual(["changes", "diff"]);
+    expect(template("auto-pr")).toMatch(/^\{\{diff\}\}$/m);
     expect(slotsOf(template("changelog-entry"))).toContain("diff");
   });
 });

@@ -253,8 +253,9 @@ human`, exits `done`, `blocked` or `unknown`, no verdicts, no success criteria a
 - **Template slots** (reading 212 (2), the round-5 cross-check with the upstream renderer). The
   `note` value is the whole NOTE callout and `provenance` the whole `<details>` block, so the
   templates wrap neither. An issue ends with `{{checklist}}`: the renderer fills a reviewer
-  checklist for every issue kind. A PR body has no `{{diff}}`: only a prompt PR has a diff value,
-  and it is in the pull request's own files and its CHANGELOG entry.
+  checklist for every issue kind. A PR body carries `{{diff}}` right after `{{changes}}`, as the
+  shared doc on `AUTO_TEMPLATE_SLOTS` says: the renderer fills it with a prompt PR's fenced diff
+  (the first part it drops when a body is too long), and it reads "unavailable" on any other PR.
 - **Start tier and `tier_hint`** (H-9, D-cm, reading 218). The Planner (2.0.0) sees the routing
   table the engine starts each task's Engineer, QA and reviewers on (`{{routing_table}}`, rendered
   from `DEFAULT_ROUTING_TABLE`, so a reviewed change to its values reaches the prompt at the next

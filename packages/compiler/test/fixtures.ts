@@ -105,7 +105,7 @@ budget: { context_tokens: 20000 }
   "plugins/common/templates/auto-pr.md": [
     "{{marker}}",
     "{{note}}",
-    "{{summary}}\n{{why}}\n{{changes}}\n{{evidence}}\n{{verification}}\n{{risk}}",
+    "{{summary}}\n{{why}}\n{{changes}}\n{{diff}}\n{{evidence}}\n{{verification}}\n{{risk}}",
     "{{provenance}}",
     "{{checklist}}\n",
   ].join("\n\n"),

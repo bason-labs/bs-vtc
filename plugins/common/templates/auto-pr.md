@@ -14,6 +14,8 @@
 
 {{changes}}
 
+{{diff}}
+
 ## Evidence
 
 {{evidence}}

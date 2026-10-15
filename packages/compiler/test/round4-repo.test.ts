@@ -244,11 +244,12 @@ describe("the automatic templates and the CHANGELOG (D-bv, reading 208)", () => 
     expect(template("auto-pr")).not.toContain(NEVER_MERGES_LINE);
   });
 
-  it("keeps a PR body in AUTO_TEMPLATE_SLOTS order, with no diff slot", () => {
+  it("keeps a PR body in AUTO_TEMPLATE_SLOTS order, with the diff right after the changes", () => {
     const pr = template("auto-pr");
     const slots = [...pr.matchAll(/\{\{([a-z_]+)\}\}/g)].map((m) => m[1] ?? "");
-    expect(slots).toEqual(AUTO_TEMPLATE_SLOTS.filter((slot) => slots.includes(slot)));
-    expect(slots).not.toContain("diff");
+    const rest = slots.filter((slot) => slot !== "diff");
+    expect(rest).toEqual(AUTO_TEMPLATE_SLOTS.filter((slot) => rest.includes(slot)));
+    expect(slots[slots.indexOf("changes") + 1]).toBe("diff");
   });
 
   it("leaves the provenance <details> block to the renderer's provenance value", () => {

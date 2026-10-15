@@ -15,9 +15,9 @@ contract above and rejects anything that breaks it.
   - `blocked` needs `question`: one `question`, 2 to 4 `options` (`id`, `label`, `effect` one of
     {{escalation_effects}}), `recommended` (an option id) and `evidence`. When what blocks you is
     a capability you lack (a tool, an engine fetcher, a runner), also give `missing_capability`:
-    `slug`, a short lower-case name with words joined by `_` or `-` (`browser_runner`,
-    `db-migration-tool`), and `reason`, one sentence on what it would let you do. Otherwise leave
-    it out.
+    `slug`, a short lower-case name of the capability with words joined by `_` only
+    (`browser_runner`, `db_migration_tool`), and `reason`, one sentence on what it would let you
+    do, with no secrets. Otherwise leave it out.
   - `spec_conflict` needs `conflict`: `req_ids` and `detail`.
   - `out_of_scope_fault` needs `fault`: `path`, `line`, `evidence` and `detail`.
 - `summary`: what you did and what you found, at most {{summary_max_chars}} characters. No
