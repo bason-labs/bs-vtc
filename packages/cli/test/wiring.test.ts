@@ -371,7 +371,7 @@ describe("buildEngineParts and composeEngineDeps (AD-19)", () => {
     expect(researchSearchProviderOf(readUserConfig(named))).toBeUndefined();
   });
 
-  it("reads the price table the engine budget-checks unpriced hosts with (§11, reading 152)", () => {
+  it("reads the user's price overrides (§11; H-12, reading 236)", () => {
     const home = tempHome();
     expect(pricesOf(readUserConfig(home))).toEqual({});
     writeFileSync(
@@ -386,7 +386,7 @@ describe("buildEngineParts and composeEngineDeps (AD-19)", () => {
         cache_write_per_mtok: 0,
       },
     });
-    // a file that does not parse prices nothing: unpriced hosts then run no engine-launched role
+    // a file that does not parse overrides nothing: the shipped tables then apply as they are
     writeFileSync(join(home, USER_CONFIG_FILE), "version: 1\nprices:\n  gpt-test: free\n");
     expect(pricesOf(readUserConfig(home))).toEqual({});
   });

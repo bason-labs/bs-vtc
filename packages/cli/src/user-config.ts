@@ -4,7 +4,7 @@
  * `env_passthrough`, the credential variable names the detached daemon keeps (AD-9: it drops
  * them by default), `gates.allow_unsandboxed` (D-al, reading 69), the opt-in to run gates
  * without an OS sandbox on a machine that has none, the research fetchers' key variables and
- * the optional search provider (readings 120, 156) and the price table (reading 152). They are
+ * the optional search provider (readings 120, 156) and the price overrides (reading 236). They are
  * read only from the VTC home: `.vtc/project.yaml` is committed, so a repo could otherwise ask for the user's secrets or
  * switch the gate sandbox off, and `ProjectConfigSchema` rejects both keys.
  * Read with `parsePersisted`; a missing file is `{ version: 1 }`. Names only, never values.
@@ -136,9 +136,9 @@ export const allowUnsandboxedOf = (read: UserConfigRead): boolean =>
   read.ok && gatesAllowUnsandboxed(read.config);
 
 /**
- * `prices` (§11, H-1; spine §5 reading 152): the engine's price table, model id → list price.
- * Empty when the file does not parse: then no model is priced, and a host that reports no cost
- * (Codex) runs no engine-launched role, which fails closed.
+ * `prices` (§11; H-12, spine §5 reading 236): the user's optional per-model override of the
+ * adapters' shipped price tables (`prices.ts`), model id → list price. Empty when the file does
+ * not parse: then nothing is overridden and the shipped tables apply.
  */
 export const pricesOf = (read: UserConfigRead): Readonly<Record<string, ModelPrice>> =>
   read.ok ? (read.config.prices ?? {}) : {};
