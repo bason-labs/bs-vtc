@@ -6,9 +6,11 @@
 import { createHash } from "node:crypto";
 import { join } from "node:path";
 import {
+  commandShapes,
   GateReportSchema,
   ModelPriceSchema,
   SubmitInputSchema,
+  type CommandShape,
   type GateReport,
   type GateRunner,
   type GateRunRequest,
@@ -453,15 +455,25 @@ const fakeAdapter = (
     },
     parseEvents: (lines) => {
       let usage: UsageSnapshot | null = null;
+      // D-cs: a `{"command": "..."}` line is a shell call the adapter shapes
+      const shapes: CommandShape[] = [];
       for (const line of lines) {
         try {
-          const parsed = JSON.parse(line) as { usage?: UsageSnapshot };
+          const parsed = JSON.parse(line) as { usage?: UsageSnapshot; command?: string };
           if (parsed.usage !== undefined) usage = parsed.usage;
+          if (typeof parsed.command === "string") shapes.push(...commandShapes(parsed.command));
         } catch {
           // not a usage line
         }
       }
-      return { outcome: null, sessionRef: null, usage, retry: null, unrecognizedLines: 0 };
+      return {
+        outcome: null,
+        sessionRef: null,
+        usage,
+        retry: null,
+        unrecognizedLines: 0,
+        ...(shapes.length === 0 ? {} : { commandShapes: shapes }),
+      };
     },
     headlessCommand: () => ({ command: "host", args: [], env: {} }),
     resume: (session, request) => {

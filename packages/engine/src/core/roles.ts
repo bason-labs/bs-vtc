@@ -8,10 +8,13 @@
  * built-in tier map.
  */
 import {
+  EffortSchema,
   resolveRoleMode,
   ROLE_CONTRACTS_ASSET,
   RoleContractSchema,
+  TIER_EFFORT_WITHOUT_MODEL,
   type AssetBundle,
+  type Effort,
   type AssetNamespace,
   type HostId,
   type ModelTier,
@@ -124,9 +127,15 @@ export const roleTier = (contract: RoleContract, host: HostId, mode?: string): M
   return models[host].tier;
 };
 
+const EFFORT_ORDER: readonly Effort[] = EffortSchema.options;
+const higherEffort = (a: Effort, b: Effort): Effort =>
+  EFFORT_ORDER.indexOf(a) >= EFFORT_ORDER.indexOf(b) ? a : b;
+
 /**
- * The model of a role run (AD-6 rule 2): explicit role model, project map, built-in map. Without
- * any of them `model` is absent: the host session's default model runs it (spine §5 reading 51).
+ * The model of a role run (AD-6 rule 2): explicit role model (only on the role's own tier), project
+ * map, built-in map. Without any of them `model` is absent: the host session's default model runs
+ * it (spine §5 reading 51), and the tier varies the reasoning effort instead (D-co interim, spine
+ * §5 reading 220: `TIER_EFFORT_WITHOUT_MODEL`, the role's own higher effort kept).
  */
 export const resolveModel = (
   contract: RoleContract,
@@ -142,5 +151,7 @@ export const resolveModel = (
   const explicit =
     options.tier === undefined || options.tier === entry.tier ? entry.model : undefined;
   const model = explicit ?? config.hosts.models?.[host]?.[tier] ?? DEFAULT_TIER_MODELS[host][tier];
-  return { tier, effort: entry.effort, ...(model === undefined ? {} : { model }) };
+  return model === undefined
+    ? { tier, effort: higherEffort(entry.effort, TIER_EFFORT_WITHOUT_MODEL[tier]) }
+    : { tier, effort: entry.effort, model };
 };

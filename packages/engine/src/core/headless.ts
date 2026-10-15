@@ -21,6 +21,7 @@ import {
   type HeadlessRunSummary,
   type HostCapabilities,
   type HostId,
+  type CommandShape,
   type HostOutcome,
   type PluginLoadProof,
   type SpawnResult,
@@ -29,7 +30,13 @@ import {
 } from "@vtc/shared";
 import { budgetState } from "./budget.js";
 import { dispatchWriteScope } from "./dispatch-scope.js";
-import { dispatchPrepared, pendingSteps, refuseInSession, type StepSpec } from "./dispatch.js";
+import {
+  dispatchPrepared,
+  pendingSteps,
+  refuseInSession,
+  stepRoute,
+  type StepSpec,
+} from "./dispatch.js";
 import { protectedFiles } from "./jobs.js";
 import { resolveModel } from "./roles.js";
 import type { Kernel, RunHandle } from "./kernel.js";
@@ -115,7 +122,8 @@ const unpricedDetail = (detail: string): boolean =>
 export const headlessPreflight = async (
   k: Kernel,
   h: RunHandle,
-  step: Pick<StepSpec, "task"> & Partial<Pick<StepSpec, "role" | "mode" | "tier">>,
+  step: Pick<StepSpec, "task"> &
+    Partial<Pick<StepSpec, "role" | "mode" | "tier" | "tierReason" | "tierClamped" | "replay">>,
   host: HostId,
   purpose: DispatchPurpose,
 ): Promise<HeadlessPreflight> => {
@@ -152,8 +160,19 @@ export const headlessPreflight = async (
     // `UsageSnapshot.billing`, so Flow Studio shows `API_KEY_BILLING_WARNING`
     k.recordBilling(host, status.billing ?? null);
   }
+  // priced on the tier the step will be dispatched on (`stepRoute`: a phase role's is clamped too)
   const unpriced =
-    step.role === undefined ? null : unpricedRun(k, { ...step, role: step.role }, host);
+    step.role === undefined
+      ? null
+      : unpricedRun(
+          k,
+          {
+            ...step,
+            role: step.role,
+            tier: stepRoute(k, h, { ...step, role: step.role }, host).tier,
+          },
+          host,
+        );
   if (unpriced !== null) return fail("budget", unpriced);
   const task = step.task === undefined ? undefined : state.tasks.get(step.task);
   if (task !== undefined && budgetState(task.spent_usd, task.budget_usd) === "exhausted")
@@ -422,6 +441,8 @@ const finishHeadless = async (
   ended: HostOutcome,
   startedAt: number,
   proof?: PluginLoadProof,
+  /** The run's shell-call shapes from its stream (D-cs). */
+  shapes?: readonly CommandShape[],
 ): Promise<void> => {
   const entry = k.headless.get(actionId);
   const outcome =
@@ -484,8 +505,12 @@ const finishHeadless = async (
     h,
     submitInputFor(actionId, outcome),
     outcome.kind === "done" ? "engine" : "reported",
+    shapes,
   );
 };
+
+/** Most shapes the engine keeps from one run's stream (a runaway loop of shell calls). */
+const MAX_STREAM_SHAPES = 100_000;
 
 /** Reads the run's stream (its usage events reach the usage store), then its outcome. */
 const watch = async (
@@ -497,10 +522,14 @@ const watch = async (
   startedAt: number,
 ): Promise<void> => {
   const adapter = k.deps.adapters[host];
+  // D-cs: the run's shell calls as shapes, as its adapter reads them from the stream
+  const shapes: CommandShape[] = [];
   try {
     for await (const line of process.lines()) {
-      const usage = adapter?.parseEvents([line]).usage ?? null;
+      const parsed = adapter?.parseEvents([line]);
+      const usage = parsed?.usage ?? null;
       if (usage !== null) k.ingestUsage(usage);
+      if (shapes.length < MAX_STREAM_SHAPES) shapes.push(...(parsed?.commandShapes ?? []));
     }
   } catch {
     // the outcome below says what happened
@@ -523,7 +552,7 @@ const watch = async (
             reason: `the load proof could not be read: ${error instanceof Error ? error.message : String(error)}`,
           }),
         );
-  await k.serial(h, () => finishHeadless(k, h, actionId, outcome, startedAt, proof));
+  await k.serial(h, () => finishHeadless(k, h, actionId, outcome, startedAt, proof, shapes));
 };
 
 /**

@@ -713,12 +713,17 @@ describe("GET /api/automation (AD-27 rule 7, D-ca)", () => {
     const report = AutomationReportSchema.parse(JSON.parse(reply.body));
     expect(report.items.map((i) => [i.kind, i.issue?.number ?? null, i.pr?.state ?? null])).toEqual(
       [
+        ["tool", 50, "draft"],
+        // its issue closed as completed: the fix PR merged
+        ["ci_failure", 12, "merged"],
         ["lookback", null, "closed"],
         ["defect", 41, null],
-        ["ci_failure", 12, "draft"],
       ],
     );
     expect(report.skipped.map((s) => s.reason)).toEqual([
+      "error",
+      "paused",
+      "privacy",
       "trial_cap",
       "plugin_locked",
       "rate_limit",

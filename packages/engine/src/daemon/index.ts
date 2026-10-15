@@ -23,6 +23,7 @@ import {
   HOST_IDS,
   remainingPct,
   researchScopeFor,
+  routingConfigSubject,
   usageFromStatuslineIngest,
   type AutomationSettings,
   type EngineDeps,
@@ -56,6 +57,8 @@ import {
   type AutomationFact,
   type LookbackRetro,
   type PluginCatalog,
+  type RoutingLookback,
+  type RoutingProposalCell,
   type RunState,
   type StaleLockReason,
 } from "../core/index.js";
@@ -95,7 +98,7 @@ import {
   readLookbackPrInput,
   type CreateUpstreamModule,
 } from "./upstream-bridge.js";
-import { createLookbackReplays } from "./replays.js";
+import { createLookbackReplays, liveLookbackConfig } from "./replays.js";
 import { createUpstream } from "../upstream/index.js";
 import {
   createFetchQuota,
@@ -304,6 +307,30 @@ export const newAgentFact = (run: string, signal: NewAgentSignal, at: string): A
   };
 };
 
+// D-cn's seam (`RoutingLookback`, `RoutingProposalCell`) lives in core's index, so the lookback
+// module's routing step names the type it implements without importing the daemon (AD-13 rule 12)
+export type { RoutingLookback, RoutingProposalCell };
+
+/**
+ * A routing proposal (D-cn) as an automation fact of `run`: a `config` improvement whose subject
+ * is the cell (`routingConfigSubject`, `routing.<role>.<size>.<risk>`), with the scorecard numbers
+ * only; the PR it leads to changes the values of `DEFAULT_ROUTING_TABLE` (spine §5 reading 219).
+ */
+export const routingConfigFact = (
+  run: string,
+  cell: RoutingProposalCell,
+  at: string,
+): AutomationFact => ({
+  target: "upstream",
+  kind: "config",
+  run,
+  source: "lookback.routing",
+  at,
+  subject: routingConfigSubject(cell.role, cell.size, cell.risk),
+  ...(cell.metrics === undefined ? {} : { metrics: cell.metrics }),
+  detail: cell.detail.slice(0, 2000),
+});
+
 export const wireLookback = (
   engine: Engine,
   deps: Pick<EngineDeps, "repoRoot" | "vtcHome" | "now">,
@@ -317,6 +344,15 @@ export const wireLookback = (
   newAgents?: {
     readonly roles: () => readonly InstalledRole[];
     readonly found: (run: string, signals: readonly NewAgentSignal[]) => void;
+  },
+  /**
+   * D-cn (spine §5 reading 219): Lookback's routing step, run at RETRO through the `LookbackRetro`
+   * seam once the run's plan is made, and where its proposals go as `config` facts (the
+   * automation's improvements). Absent: no routing scorecard and no routing proposal.
+   */
+  routing?: {
+    readonly propose: RoutingLookback;
+    readonly found: (run: string, facts: readonly AutomationFact[]) => void;
   },
 ): (() => Promise<void>) => {
   const now = deps.now ?? (() => new Date());
@@ -365,8 +401,9 @@ export const wireLookback = (
   const budgetAvailable = (state: RunState): boolean =>
     state.runBudget === null || state.runBudget.spent_usd < state.runBudget.budget_usd;
   // AD-21 rules 4 and 8: the lookback role at RETRO, before the run finishes (reading 154); the
-  // weekly window is the finishing run's Lead host's (reading 176)
-  const retroFor = (state: RunState | null): LookbackRetro =>
+  // weekly window is the planned run's Lead host's (reading 176). Built per call, so each RETRO
+  // sees the roles installed then (D-cd), as the run's end does
+  const retro = (): LookbackRetro =>
     createLookbackRetro({
       projectRoot: deps.repoRoot,
       vtcHome: deps.vtcHome,
@@ -375,11 +412,11 @@ export const wireLookback = (
       compiled: (role, mode, host) =>
         plugins.promptParts?.(agentNameFor(role, mode), host)?.compiled,
       graderBundleSha: bundleSha,
-      weeklyRemainingPct: () => (state === null ? null : weeklyRemaining(state)),
+      weeklyRemainingPct: weeklyRemaining,
       budgetAvailable,
       now,
+      ...(newAgents === undefined ? {} : { roles: newAgents.roles() }),
     });
-  const checker = retroFor(null);
   // AD-21 rule 6 (reading 176): after the targets, RETRO replays every proposal not yet replayed
   const replays = createLookbackReplays({
     projectRoot: deps.repoRoot,
@@ -395,10 +432,39 @@ export const wireLookback = (
     gateRunner: engine.deps.gateRunner,
     now,
     graderOf: (replay) => replayGraderOf(engine, replay),
+    // D-cq (reading 224): the user's replay pace, `~/.vtc/config.yaml` `lookback`
+    lookback: liveLookbackConfig(deps.vtcHome, (message) => {
+      process.stderr.write(`vtc engine: lookback: ${message}\n`);
+    }),
   });
+  // D-cn: the routing scorecard and proposals at RETRO, on the Lookback queue so RETRO never waits
+  // on them; a step that fails is told on stderr and the run goes on
+  const routingAtRetro = (run: string): void => {
+    if (routing === undefined) return;
+    enqueue(async () => {
+      const cells = await routing.propose({
+        projectRoot: deps.repoRoot,
+        history: history(),
+        graderBundleSha: bundleSha(),
+        now: now(),
+        lockedShaFor,
+        vtcHome: deps.vtcHome,
+      });
+      const at = now().toISOString();
+      if (cells.length > 0)
+        routing.found(
+          run,
+          cells.map((cell) => routingConfigFact(run, cell, at)),
+        );
+    });
+  };
   engine.setLookbackRetro({
-    plan: (state) => retroFor(state).plan({ ...state, events: [...lookbackEvents(state)] }),
-    check: (target, root, state) => checker.check(target, root, state),
+    plan: async (state) => {
+      const plan = await retro().plan({ ...state, events: [...lookbackEvents(state)] });
+      routingAtRetro(state.id);
+      return plan;
+    },
+    check: (target, root, state) => retro().check(target, root, state),
     ...replays,
   });
   const runEnd = async (run: string): Promise<void> => {
@@ -661,6 +727,11 @@ export const runDaemon: RunDaemon = async (deps: EngineDeps, options) => {
             automation.improvements(signals.map((s) => newAgentFact(run, s, now().toISOString())));
           },
         },
+        // D-cn (reading 219) merge followup: the 6th argument, `routing: { propose:
+        // lookbackRoutingStep, found: (run, facts) => automation.improvements(facts) }`, is wired
+        // once lookback-research's step (lookback/routing-step.ts) lands, typed as core's
+        // `RoutingLookback` (from `../core/index.js`); a daemon test then runs it at RETRO. Until
+        // then RETRO writes no routing scorecard
       ),
     );
     // AD-25: shutting down kills the engine-launched runs and stops the Level-3 waits, so close

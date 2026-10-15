@@ -3,13 +3,23 @@
  * `replays`, `gradeTrial` and `finishReplay` parts of core's `LookbackRetro`, over the lookback
  * module (core never imports lookback, AD-13 rule 12).
  * - `replays`: every proposal recorded (`lookback.proposal_recorded`) and not yet replayed
- *   (`lookback.replay_finished`), in the history of every run, under the lookback role's own checks
- *   (the weekly window of the run's Lead host and the budget); its candidate is the immutable
+ *   (`lookback.replay_finished`), in the history of every run; its candidate is the immutable
  *   version stored for it, its baseline the version it was proposed against; its tasks the held-out
  *   failures and successes of the baseline (`replayTasks`) whose recorded pack is still the
- *   engine's and whose starting commit is known; its trials `planReplayTrials` (with an A/A arm when
- *   no noise floor is cached for the baseline). A proposal whose versions or tasks cannot be found
- *   is left out with its reason.
+ *   engine's and whose starting commit is known; its full plan `planReplayTrials` (with an A/A arm
+ *   when no noise floor is cached for the baseline). Which trials this RETRO launches is
+ *   `planRetroReplays` (D-cg, reading 201): the trials the ledger (`readReplayLedger`) already
+ *   graded are left out, a replay whose trial measured nothing `REPLAY_MAX_INFRA_ATTEMPTS` times is
+ *   left out, and the weekly window of the run's Lead host, the budget and the per-RETRO cap
+ *   (`lookbackPaceFor`, D-cq: 36 while more than half the window is left) bound the rest, each
+ *   limit an `automation.skipped` the run logs. The user's `~/.vtc/config.yaml` `lookback` section
+ *   (`lookback`, {@link liveLookbackConfig}) sets that pace: the per-RETRO cap, and how many
+ *   failure tasks and regression tasks one replay samples (the first of each `replayTasks` lists,
+ *   so the plan stays the same from one RETRO to the next while new runs add held-out tasks). A
+ *   proposal whose versions or tasks cannot be found is left out with its reason.
+ * - `recordTrial`: each trial's grade (`recordReplayTrial`) or infrastructure attempt
+ *   (`recordReplayInfra`) in the ledger under the VTC home, as core learns it, so a replay
+ *   continues across RETROs.
  * - `replayWait`: the same window and budget checks, which core runs again before every trial.
  * - `gradeTrial`: the Gate Runner's verdict on the trial (`pass`, `fail`, or `infra_error`, which
  *   measures nothing).
@@ -17,24 +27,31 @@
  *   grader against the recorded outcome of the dispatch it replays (`gradeVerdictReplay`); its
  *   held-out tasks are the dispatches with a recorded outcome (`replayTasks` with the `verdict`
  *   grader), keyed with the expected verdict.
- * - `finishReplay`: `finishReplay` over the graded trials, `writeReplayResult` (the event carries
- *   the SHA-256 of the bytes written), and the measured A/A flip rate kept for the next replay.
+ * - `finishReplay`: once the ledger holds every trial of the replay's plan, `assembleReplay` and
+ *   `writeReplayResult` (the event carries the SHA-256 of the bytes written), and the measured A/A
+ *   flip rate kept for the next replay; nothing while trials are still missing.
  */
-import { readdirSync, readFileSync } from "node:fs";
+import { readdirSync, readFileSync, statSync } from "node:fs";
 import { join } from "node:path";
 import {
   ACCEPTANCE_TESTS,
   LOOKBACK_HOME,
   LOOKBACK_LIMITS,
+  lookbackPaceFor,
   parsePersisted,
   PromptVersionFrontmatterSchema,
   TaskPackSchema,
+  USER_CONFIG_FILE,
+  UserConfigSchema,
   type GateRunner,
   type HostId,
+  type LookbackPace,
+  type ModelTier,
   type PromptVersionRef,
   type ReplayGrader,
-  type ReplayIsolation,
   type TaskPack,
+  type TierReason,
+  type UserConfig,
   type VtcEvent,
 } from "@vtc/shared";
 import {
@@ -44,25 +61,29 @@ import {
   type LookbackReplay,
   type LookbackReplayTrial,
   type LookbackRetro,
-  type ReplayTrialOutcome,
   type RunState,
+  type TierRoute,
 } from "../core/index.js";
 import {
-  aaFlipRate,
+  assembleReplay,
   cachedAaFlipRate,
   expectedOfTaskKey,
-  finishReplay,
   gradeVerdictReplay,
   loadPromptVersionSync,
   planReplayTrials,
+  planRetroReplays,
   promptVersionRef,
   readAttributions,
+  readReplayLedger,
   recordAaFlipRate,
+  recordReplayInfra,
+  recordReplayTrial,
   replayTaskKey,
   replayTasks,
-  tokensDeltaPct,
   writeReplayResult,
   type LockedShaFor,
+  type PendingReplay,
+  type ReplayLedgerScope,
   type ReplayTask,
 } from "../lookback/index.js";
 
@@ -93,7 +114,89 @@ export interface ReplayWiringDeps {
   readonly now: () => Date;
   /** How a replay's trials were graded (`replayGraderFor`); absent: `gates`. */
   readonly graderOf?: (replay: LookbackReplay) => ReplayGrader | null;
+  /**
+   * The user's replay pace (D-cq, spine §5 reading 224): `~/.vtc/config.yaml` `lookback` as it is
+   * now ({@link liveLookbackConfig}); absent or `undefined`: `LOOKBACK_LIMITS`.
+   */
+  readonly lookback?: () => UserConfig["lookback"];
 }
+
+/** The `lookback` section of a user config file's text, or why it does not parse. */
+export const parseLookbackSection = (
+  text: string,
+):
+  | { readonly ok: true; readonly lookback: UserConfig["lookback"] }
+  | { readonly ok: false; readonly error: string } => {
+  let raw: unknown;
+  try {
+    raw = parseYaml(text);
+  } catch (error) {
+    return { ok: false, error: error instanceof Error ? error.message : String(error) };
+  }
+  const section =
+    typeof raw === "object" && raw !== null ? (raw as { lookback?: unknown }).lookback : undefined;
+  const parsed = parsePersisted(UserConfigSchema.shape.lookback, section);
+  if (!parsed.success)
+    return {
+      ok: false,
+      error: parsed.error.issues
+        .map((i) => `lookback.${i.path.map(String).join(".")}: ${i.message}`)
+        .join("; "),
+    };
+  return { ok: true, lookback: parsed.data };
+};
+
+/**
+ * D-cq (spine §5 reading 224): the `lookback` section of `<vtcHome>/config.yaml`
+ * (`USER_CONFIG_FILE`, `UserConfigSchema`) as it is on disk now, re-read when the file changes, so
+ * a pace the user sets while the daemon runs applies at the next RETRO. Only this section is read
+ * (the cli reads the rest): a missing file is `undefined` (the `LOOKBACK_LIMITS` defaults), and so
+ * is a section that does not parse, told once through `warn`.
+ */
+export const liveLookbackConfig = (
+  vtcHome: string,
+  warn: (message: string) => void,
+): (() => UserConfig["lookback"]) => {
+  const path = join(vtcHome, USER_CONFIG_FILE);
+  let cached: { readonly key: string; readonly lookback: UserConfig["lookback"] } | undefined;
+  return () => {
+    let key = "missing";
+    try {
+      const s = statSync(path, { bigint: true });
+      key = `${String(s.size)}:${String(s.mtimeNs)}:${String(s.ctimeNs)}:${String(s.ino)}`;
+    } catch {
+      // missing or unreadable: the defaults
+    }
+    if (cached?.key === key) return cached.lookback;
+    let lookback: UserConfig["lookback"] = undefined;
+    if (key !== "missing") {
+      try {
+        const parsed = parseLookbackSection(readFileSync(path, "utf8"));
+        if (parsed.ok) lookback = parsed.lookback;
+        else warn(`${path}: ${parsed.error}; the replay pace uses the defaults`);
+      } catch (error) {
+        warn(
+          `${path}: ${error instanceof Error ? error.message : String(error)}; the replay pace uses the defaults`,
+        );
+      }
+    }
+    cached = { key, lookback };
+    return lookback;
+  };
+};
+
+/**
+ * Pure (D-cq): a replay's tasks sampled to the pace, the first `failureTasks` failure tasks and the
+ * first `regressionTasks` regression-set tasks, in `replayTasks`' order.
+ */
+export const sampleReplayTasks = <T extends { readonly task: Pick<ReplayTask, "regressionSet"> }>(
+  tasks: readonly T[],
+  pace: Pick<LookbackPace, "failureTasks" | "regressionTasks">,
+): T[] => {
+  const failures = tasks.filter((t) => !t.task.regressionSet).slice(0, pace.failureTasks);
+  const regressions = tasks.filter((t) => t.task.regressionSet).slice(0, pace.regressionTasks);
+  return [...failures, ...regressions];
+};
 
 /** A version with the editable section it carries (trimmed). */
 interface Arm {
@@ -104,19 +207,20 @@ interface Arm {
 /** The proposals recorded in the history and not yet replayed, oldest first, with their role. */
 export const pendingProposals = (
   history: readonly VtcEvent[],
-): { readonly proposal: string; readonly role: string }[] => {
-  const pending = new Map<string, string>();
+): { readonly proposal: string; readonly role: string; readonly at: string }[] => {
+  const pending = new Map<string, { role: string; at: string }>();
   for (const e of history) {
     if (e.type === "lookback.proposal_recorded") {
       const data = e.data as { proposal: string; path: string };
       // `.vtc/lookback/proposals/<role>/proposal.json`
       const role = data.path.split("/").at(-2);
-      if (role !== undefined && !pending.has(data.proposal)) pending.set(data.proposal, role);
+      if (role !== undefined && !pending.has(data.proposal))
+        pending.set(data.proposal, { role, at: e.ts });
     } else if (e.type === "lookback.replay_finished") {
       pending.delete((e.data as { proposal: string }).proposal);
     }
   }
-  return [...pending].map(([proposal, role]) => ({ proposal, role }));
+  return [...pending].map(([proposal, { role, at }]) => ({ proposal, role, at }));
 };
 
 const FENCE = "---";
@@ -227,7 +331,12 @@ const recordedDispatch = (
   task: ReplayTask,
   role: string,
 ):
-  | { readonly pack: TaskPack; readonly base: string; readonly protectedPaths: string[] }
+  | {
+      readonly pack: TaskPack;
+      readonly base: string;
+      readonly protectedPaths: string[];
+      readonly tier?: TierRoute;
+    }
   | undefined => {
   const ofRun = history.filter((e) => e.run === task.run);
   const dispatched = ofRun.find(
@@ -269,7 +378,23 @@ const recordedDispatch = (
       )
       .filter((paths) => paths.length > 0)
       .at(-1) ?? [];
-  return base === undefined ? undefined : { pack, base, protectedPaths };
+  // D-cm (reading 218 (7)): the trial runs on the tier the recorded dispatch ran on
+  const recorded = dispatched.data as {
+    tier?: ModelTier;
+    tier_reason?: TierReason;
+    tier_clamped?: boolean;
+  };
+  const tier: TierRoute | undefined =
+    recorded.tier === undefined || recorded.tier_reason === undefined
+      ? undefined
+      : {
+          tier: recorded.tier,
+          reason: recorded.tier_reason,
+          clamped: recorded.tier_clamped ?? false,
+        };
+  return base === undefined
+    ? undefined
+    : { pack, base, protectedPaths, ...(tier === undefined ? {} : { tier }) };
 };
 
 /**
@@ -285,195 +410,289 @@ export const replayWaitReason = (deps: ReplayWiringDeps, state: RunState): strin
   return null;
 };
 
+/** A proposal's replay as planned in full: its arms, grader and every trial of its plan. */
+interface FullPlan {
+  readonly baseline: Arm;
+  readonly candidate: Arm;
+  /** `null`: nothing can grade the role (`planRetroReplays` leaves it out with the reason). */
+  readonly grader: ReplayGrader | null;
+  readonly mode?: string;
+  readonly host: HostId;
+  readonly trials: readonly LookbackReplayTrial[];
+}
+
+/** The ledger scope of a replay (its project, proposal, arms and grader bundle). */
+const scopeOf = (
+  deps: ReplayWiringDeps,
+  proposal: string,
+  arms: Pick<FullPlan, "baseline" | "candidate">,
+): ReplayLedgerScope => ({
+  repoKey: deps.repoKey,
+  proposal,
+  baseline: arms.baseline.version.effective_sha256,
+  candidate: arms.candidate.version.effective_sha256,
+  graderBundleSha: deps.graderBundleSha(),
+});
+
 /**
- * The `replays`, `replayWait`, `gradeTrial`, `gradeVerdict` and `finishReplay` parts of core's
- * `LookbackRetro`.
+ * The `replays`, `replayWait`, `recordTrial`, `gradeTrial`, `gradeVerdict` and `finishReplay`
+ * parts of core's `LookbackRetro`.
  */
 export const createLookbackReplays = (
   deps: ReplayWiringDeps,
 ): Required<
-  Pick<LookbackRetro, "replays" | "replayWait" | "gradeTrial" | "gradeVerdict" | "finishReplay">
-> => ({
-  replays: async (state) => {
-    const history = deps.history();
-    const pending = pendingProposals(history);
-    if (pending.length === 0) return { replays: [] };
-    // AD-21 rule 8: the same checks as the lookback role (reading 176)
-    const wait = replayWaitReason(deps, state);
-    if (wait !== null) return { replays: [], wait, waitKind: replayWaitSkipReason(wait) };
+  Pick<
+    LookbackRetro,
+    "replays" | "replayWait" | "recordTrial" | "gradeTrial" | "gradeVerdict" | "finishReplay"
+  >
+> => {
+  /** A proposal's full plan from the history now, or why it has none. */
+  const fullPlan = async (
+    history: readonly VtcEvent[],
+    proposal: string,
+    role: string,
+    context: {
+      readonly tiebreaks: ReadonlySet<string>;
+      readonly attributions: Awaited<ReturnType<typeof readAttributions>>;
+    },
+  ): Promise<FullPlan | string> => {
+    const arms = armsOf(deps, proposal, role);
+    if (typeof arms === "string") return arms;
+    const { baseline, candidate } = arms;
+    const mode = baseline.version.mode;
+    const host = baseline.version.host;
+    // D-ch: a verdict role's held-out tasks are the dispatches with a recorded outcome, each
+    // keyed with the verdict a trial must give (`replayTaskKey`)
+    const grader =
+      deps.graderOf === undefined
+        ? "gates"
+        : deps.graderOf({
+            proposal,
+            role,
+            ...(mode === undefined ? {} : { mode }),
+            host,
+            trials: [],
+          });
+    // D-cq: the tasks that can run again, sampled to the user's pace
+    const resolved = sampleReplayTasks(
+      replayTasks({
+        history,
+        lockedShaFor: deps.lockedShaFor,
+        tiebreaks: context.tiebreaks,
+        baseline: baseline.version,
+        attributions: context.attributions,
+        ...(grader === "verdict" ? { grader } : {}),
+      }).flatMap((task) => {
+        const recorded = recordedDispatch(history, deps.projectRoot, task, role);
+        return recorded === undefined ? [] : [{ task, ...recorded }];
+      }),
+      lookbackPaceFor({ lookback: deps.lookback?.() }, null),
+    );
+    if (resolved.length === 0) return "no held-out task of its baseline can be run again";
+    const recorded = new Map(resolved.map((r) => [`${r.task.run}:${r.task.trace}`, r]));
+    const withAa =
+      (await cachedAaFlipRate({
+        vtcHome: deps.vtcHome,
+        repoKey: deps.repoKey,
+        baseline: baseline.version,
+        graderBundleSha: deps.graderBundleSha(),
+      })) === undefined;
+    const trials = planReplayTrials({
+      tasks: resolved.map((r) => r.task),
+      baseline: baseline.version,
+      candidate: candidate.version,
+      withAa,
+    }).flatMap((t): LookbackReplayTrial[] => {
+      const r = recorded.get(`${t.task.run}:${t.task.trace}`);
+      if (r === undefined) return [];
+      return [
+        {
+          arm: t.arm,
+          trial: t.trial,
+          // a verdict task's key carries its expected verdict (two criteria of one task are
+          // two entries, reading 211)
+          task: replayTaskKey(t.task),
+          regressionSet: t.task.regressionSet,
+          role,
+          ...(mode === undefined ? {} : { mode }),
+          host,
+          prompt: {
+            version: t.prompt,
+            text: t.arm === "b" ? candidate.text : baseline.text,
+          },
+          pack: r.pack,
+          base: r.base,
+          ...(r.protectedPaths.length === 0 ? {} : { protectedPaths: r.protectedPaths }),
+          ...(r.tier === undefined ? {} : { tier: r.tier }),
+        },
+      ];
+    });
+    return {
+      baseline,
+      candidate,
+      grader,
+      ...(mode === undefined ? {} : { mode }),
+      host,
+      trials,
+    };
+  };
+  const context = async (history: readonly VtcEvent[]) => {
     const tiebreaks = await deps.tiebreaks();
     const attributions = await readAttributions(deps.projectRoot, {
       history,
       lockedShaFor: deps.lockedShaFor,
       tiebreaks,
     });
-    const replays: LookbackReplay[] = [];
-    const left: string[] = [];
-    for (const { proposal, role } of pending) {
-      const arms = armsOf(deps, proposal, role);
-      if (typeof arms === "string") {
-        left.push(`${proposal}: ${arms}`);
-        continue;
-      }
-      const { baseline, candidate } = arms;
-      // D-ch: a verdict role's held-out tasks are the dispatches with a recorded outcome, each
-      // keyed with the verdict a trial must give (`replayTaskKey`)
-      const grader =
-        deps.graderOf?.({
+    return { tiebreaks, attributions };
+  };
+  return {
+    replays: async (state) => {
+      const history = deps.history();
+      const pending = pendingProposals(history);
+      if (pending.length === 0) return { replays: [] };
+      const known = await context(history);
+      const ledger = await readReplayLedger(deps.vtcHome);
+      const left: string[] = [];
+      const plans = new Map<string, FullPlan>();
+      const full: PendingReplay<LookbackReplayTrial>[] = [];
+      for (const { proposal, role, at } of pending) {
+        const planned = await fullPlan(history, proposal, role, known);
+        if (typeof planned === "string") {
+          left.push(`${proposal}: ${planned}`);
+          continue;
+        }
+        plans.set(proposal, planned);
+        full.push({
           proposal,
           role,
-          ...(baseline.version.mode === undefined ? {} : { mode: baseline.version.mode }),
-          host: baseline.version.host,
-          trials: [],
-        }) ?? "gates";
-      const resolved = replayTasks({
-        history,
-        lockedShaFor: deps.lockedShaFor,
-        tiebreaks,
-        baseline: baseline.version,
-        attributions,
-        ...(grader === "verdict" ? { grader } : {}),
-      }).flatMap((task) => {
-        const recorded = recordedDispatch(history, deps.projectRoot, task, role);
-        return recorded === undefined ? [] : [{ task, ...recorded }];
-      });
-      if (resolved.length === 0) {
-        left.push(`${proposal}: no held-out task of its baseline can be run again`);
-        continue;
+          ...(planned.mode === undefined ? {} : { mode: planned.mode }),
+          host: planned.host,
+          recordedAt: at,
+          // `planRetroReplays` asks `replayGraderFor` again: a gates-graded role changes files
+          changesFiles: planned.grader === "gates",
+          trials: planned.trials,
+        });
       }
-      const recorded = new Map(resolved.map((r) => [`${r.task.run}:${r.task.trace}`, r]));
-      const withAa =
-        (await cachedAaFlipRate({
-          vtcHome: deps.vtcHome,
-          repoKey: deps.repoKey,
-          baseline: baseline.version,
-          graderBundleSha: deps.graderBundleSha(),
-        })) === undefined;
-      const trials = planReplayTrials({
-        tasks: resolved.map((r) => r.task),
-        baseline: baseline.version,
-        candidate: candidate.version,
-        withAa,
-      }).flatMap((t): LookbackReplayTrial[] => {
-        const r = recorded.get(`${t.task.run}:${t.task.trace}`);
-        if (r === undefined) return [];
-        return [
-          {
-            arm: t.arm,
-            trial: t.trial,
-            // a verdict task's key carries its expected verdict (two criteria of one task are
-            // two entries, reading 211)
-            task: replayTaskKey(t.task),
-            regressionSet: t.task.regressionSet,
-            role,
-            ...(baseline.version.mode === undefined ? {} : { mode: baseline.version.mode }),
-            host: baseline.version.host,
-            prompt: {
-              version: t.prompt,
-              text: t.arm === "b" ? candidate.text : baseline.text,
-            },
-            pack: r.pack,
-            base: r.base,
-            ...(r.protectedPaths.length === 0 ? {} : { protectedPaths: r.protectedPaths }),
-          },
-        ];
-      });
-      replays.push({
-        proposal,
-        role,
-        ...(baseline.version.mode === undefined ? {} : { mode: baseline.version.mode }),
-        host: baseline.version.host,
-        trials,
-      });
-    }
-    return left.length === 0
-      ? { replays }
-      : { replays, wait: `left out: ${left.join("; ")}`.slice(0, 2000) };
-  },
-  replayWait: (state) => replayWaitReason(deps, state),
-  // the verdict itself: `infra_error` measures nothing (core sets the replay aside)
-  gradeTrial: async (request) => (await deps.gateRunner.run(request)).verdict,
-  // D-ch (reading 212(4)): a verdict role's trial scored against the recorded outcome of the
-  // dispatch it replays (its recorded pack's run and action id), the expectation its task key
-  // carries; `infra_error` when that dispatch has no recorded outcome any more
-  gradeVerdict: (trial, result) =>
-    Promise.resolve(
-      gradeVerdictReplay(
-        deps.history(),
-        { run: trial.pack.run, trace: trial.pack.action_id },
-        result.verdicts,
-        expectedOfTaskKey(trial.task),
-      ),
-    ),
-  finishReplay: async (replay, outcomes) => {
-    const outcome = new Map<number, ReplayTrialOutcome>(outcomes.map((o) => [o.n, o]));
-    const tasks = new Map<
-      string,
-      { a: boolean[]; b: boolean[]; aa: boolean[]; regressionSet: boolean }
-    >();
-    const tokens: { a: number[]; b: number[] } = { a: [], b: [] };
-    let k = 1;
-    for (const [n, trial] of replay.trials.entries()) {
-      const o = outcome.get(n);
-      if (o === undefined)
-        throw new Error(`trial ${String(n)} of ${replay.proposal} is not graded`);
-      const row = tasks.get(trial.task) ?? {
-        a: [],
-        b: [],
-        aa: [],
-        regressionSet: trial.regressionSet,
+      // D-cg (reading 201): the trials this RETRO launches, under the lookback role's own checks
+      // (the weekly window of the run's Lead host, the budget, AD-21 rule 8) and D-cq's cap
+      const { pct } = deps.weeklyWindow(state);
+      const scope = (proposal: string): ReplayLedgerScope | undefined => {
+        const plan = plans.get(proposal);
+        return plan === undefined ? undefined : scopeOf(deps, proposal, plan);
       };
-      row[trial.arm].push(o.passed);
-      tasks.set(trial.task, row);
-      if (trial.arm !== "aa") tokens[trial.arm].push(o.tokens);
-      k = Math.max(k, trial.trial);
-    }
-    const baseline = replay.trials.find((t) => t.arm === "a")?.prompt.version;
-    const candidate = replay.trials.find((t) => t.arm === "b")?.prompt.version;
-    if (baseline === undefined || candidate === undefined)
-      throw new Error(`${replay.proposal} has no trial of each arm`);
-    const rows = [...tasks.values()];
-    const measured = rows.some((r) => r.aa.length > 0);
-    const graderBundleSha = deps.graderBundleSha();
-    const aa = measured
-      ? aaFlipRate(rows.filter((r) => r.aa.length > 0).map((r) => ({ a: r.a, aa: r.aa })))
-      : ((await cachedAaFlipRate({
-          vtcHome: deps.vtcHome,
-          repoKey: deps.repoKey,
-          baseline,
-          graderBundleSha,
-        })) ?? 0);
-    if (measured)
-      await recordAaFlipRate({
+      const launch = planRetroReplays({
+        pending: full,
+        graded: (proposal) => {
+          const of = scope(proposal);
+          return new Set(of === undefined ? [] : ledger.trials(of).keys());
+        },
+        infra: (proposal) => {
+          const of = scope(proposal);
+          return of === undefined ? new Map() : ledger.infra(of);
+        },
+        weeklyRemainingPct: pct,
+        budgetAvailable: deps.budgetAvailable(state),
+        cap: lookbackPaceFor({ lookback: deps.lookback?.() }, pct).maxTrialsPerRetro,
+      });
+      for (const u of launch.unreplayable) left.push(`${u.proposal}: ${u.reason}`);
+      // the lookback role's own checks first (reading 176): a limit says why nothing runs now,
+      // logged once (Lookback's own skip when it had a replay to hold back, else core's)
+      const limit = replayWaitReason(deps, state);
+      const wait = [limit, left.length === 0 ? null : `left out: ${left.join("; ")}`]
+        .filter((w): w is string => w !== null)
+        .join("; ");
+      const replays: LookbackReplay[] = launch.launch.map((l) => ({
+        proposal: l.proposal,
+        role: l.role,
+        ...(l.mode === undefined ? {} : { mode: l.mode }),
+        host: l.host,
+        trials: l.trials,
+      }));
+      const limited = launch.skipped.some((e) => e.data.reason !== "plugin_locked");
+      return {
+        replays,
+        ...(wait === "" ? {} : { wait: wait.slice(0, 2000) }),
+        ...(limit === null || limited ? {} : { waitKind: replayWaitSkipReason(limit) }),
+        ...(launch.skipped.length === 0 ? {} : { events: launch.skipped }),
+      };
+    },
+    replayWait: (state) => replayWaitReason(deps, state),
+    // D-cg (reading 201): every grade and every infrastructure attempt, as core learns it
+    recordTrial: async (replay, trial, record) => {
+      const arms = armsOf(deps, replay.proposal, replay.role);
+      if (typeof arms === "string") throw new Error(arms);
+      const identity = {
+        repo_key: deps.repoKey,
+        proposal: replay.proposal,
+        baseline: arms.baseline.version.effective_sha256,
+        candidate: arms.candidate.version.effective_sha256,
+        task: trial.task,
+        arm: trial.arm,
+        trial: trial.trial,
+        grader_bundle_sha: deps.graderBundleSha(),
+      };
+      const at = deps.now().toISOString();
+      if (record.kind === "graded")
+        await recordReplayTrial(deps.vtcHome, {
+          ...identity,
+          passed: record.passed,
+          tokens: Math.max(0, Math.round(record.tokens)),
+          read_denied: record.readDenied,
+          graded_at: at,
+        });
+      else await recordReplayInfra(deps.vtcHome, { ...identity, outcome: record.outcome, at });
+    },
+    // the verdict itself: `infra_error` measures nothing (core sets the replay aside)
+    gradeTrial: async (request) => (await deps.gateRunner.run(request)).verdict,
+    // D-ch (reading 212(4)): a verdict role's trial scored against the recorded outcome of the
+    // dispatch it replays (its recorded pack's run and action id), the expectation its task key
+    // carries; `infra_error` when that dispatch has no recorded outcome any more
+    gradeVerdict: (trial, result) =>
+      Promise.resolve(
+        gradeVerdictReplay(
+          deps.history(),
+          { run: trial.pack.run, trace: trial.pack.action_id },
+          result.verdicts,
+          expectedOfTaskKey(trial.task),
+        ),
+      ),
+    // the result once the ledger holds every trial of the plan; nothing while some are missing
+    finishReplay: async (replay) => {
+      const history = deps.history();
+      const planned = await fullPlan(history, replay.proposal, replay.role, await context(history));
+      if (typeof planned === "string")
+        throw new Error(`${replay.proposal} has no plan any more: ${planned}`);
+      const scope = scopeOf(deps, replay.proposal, planned);
+      const rows = (await readReplayLedger(deps.vtcHome)).trials(scope);
+      const graderBundleSha = scope.graderBundleSha;
+      const cached = await cachedAaFlipRate({
         vtcHome: deps.vtcHome,
         repoKey: deps.repoKey,
-        baseline,
+        baseline: planned.baseline.version,
         graderBundleSha,
-        aaFlipRate: aa,
+      });
+      const assembled = assembleReplay({
+        proposal: replay.proposal,
+        baseline: planned.baseline.version,
+        candidate: planned.candidate.version,
+        grader: planned.grader ?? "gates",
+        planned: planned.trials,
+        rows,
+        ...(cached === undefined ? {} : { cachedAaFlipRate: cached }),
+        graderBundleSha,
         now: deps.now(),
       });
-    const result = finishReplay({
-      proposal: replay.proposal,
-      baseline,
-      candidate,
-      graderBundleSha,
-      k,
-      perTask: [...tasks].map(([task, r]) => ({
-        task,
-        a: r.a,
-        b: r.b,
-        regressionSet: r.regressionSet,
-      })),
-      aaFlipRate: aa,
-      tokensDeltaPct: tokensDeltaPct(tokens.a, tokens.b),
-      now: deps.now(),
-    });
-    // reading 178: read_denied only when the host enforced every trial's read deny; the grader
-    // that scored the trials (D-ch; replayGraderFor)
-    const isolation: ReplayIsolation = outcomes.every((o) => o.readDenied === true)
-      ? "read_denied"
-      : "paths_only";
-    const grader: ReplayGrader = deps.graderOf?.(replay) ?? "gates";
-    return [await writeReplayResult(deps.projectRoot, { ...result, isolation, grader })];
-  },
-});
+      if (!assembled.complete) return [];
+      if (assembled.measuredAaFlipRate !== undefined)
+        await recordAaFlipRate({
+          vtcHome: deps.vtcHome,
+          repoKey: deps.repoKey,
+          baseline: planned.baseline.version,
+          graderBundleSha,
+          aaFlipRate: assembled.measuredAaFlipRate,
+          now: deps.now(),
+        });
+      return [await writeReplayResult(deps.projectRoot, assembled.result)];
+    },
+  };
+};

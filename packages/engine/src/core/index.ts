@@ -71,14 +71,18 @@ export {
   type FactRefresher,
   type LookbackRetro,
   type LookbackReplay,
+  type LookbackSkippedDraft,
   type LookbackReplayTrial,
   type LookbackRetroTarget,
   type ReplayTrialOutcome,
+  type ReplayTrialRecord,
   type LookbackTargetRef,
   type PinnedPrompt,
   type PromptPins,
   type PromptTarget,
   type RoleToolHandler,
+  type RoutingLookback,
+  type RoutingProposalCell,
   type RunHandle,
 } from "./kernel.js";
 export {
@@ -165,9 +169,13 @@ export {
   automationFacts,
   automationReportView,
   automaticReleaseOf,
+  capabilitySignalFacts,
   costRegressionFacts,
   costWorsened,
   isAutomationEvent,
+  toolShapeUpstreamKey,
+  toolSignalFacts,
+  TOOL_SUBCOMMAND_PROGRAMS,
   type AutomaticRelease,
   type AutomationFact,
   type CreateUpstream,
@@ -180,3 +188,13 @@ export {
   replayTrialActionIds,
   withoutReplayTrialEvents,
 } from "./replay-view.js";
+/** Difficulty-based routing (H-9, D-cm; spine §5 reading 218). */
+export {
+  routeTier,
+  ruleTier,
+  startTier,
+  type RouteInput,
+  type RouteTask,
+  type TierChange,
+  type TierRoute,
+} from "./routing.js";
