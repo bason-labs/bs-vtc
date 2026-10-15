@@ -38,6 +38,7 @@ import {
   type LookbackReplay,
   type LookbackReplayTrial,
   type LookbackRetro,
+  type LookbackSkippedDraft,
   type PluginCatalog,
   type ReplayTrialOutcome,
   type ReplayTrialRecord,
@@ -279,7 +280,10 @@ interface FakeOptions {
   readonly gradeVerdict?: LookbackRetro["gradeVerdict"];
   /** The tier the recorded dispatch ran on (D-cm); absent: a log from before 5.4.0. */
   readonly tier?: LookbackReplayTrial["tier"];
-  /** `automation.skipped` drafts Lookback's plan returns (its limits, `planRetroReplays`). */
+  /**
+   * `automation.skipped` drafts Lookback's plan returns (its limits, `planRetroReplays`); any
+   * other type is a planted one core must drop.
+   */
   readonly events?: readonly EventDraft[];
   /** The replay comes with no trial: every one was graded at an earlier RETRO. */
   readonly noTrials?: boolean;
@@ -350,7 +354,9 @@ const fakeReplays = (
                   ).flat(),
           },
         ],
-        ...(options.events === undefined ? {} : { events: options.events }),
+        ...(options.events === undefined
+          ? {}
+          : { events: options.events as readonly LookbackSkippedDraft[] }),
       });
     },
     recordTrial: (_replay, trial, record) => {
@@ -930,6 +936,32 @@ describe("RETRO runs Lookback replays as headless runs (AD-21 rule 6, readings 1
     expect(fake.finished).toHaveLength(1);
     expect(retroEvents(h).find((e) => e.type === "automation.skipped")?.data).toEqual(skipped.data);
     expect(h.engine.status({}).run.finished_at).toBeDefined();
+    await h.release();
+  });
+
+  it("logs only Lookback's automation.skipped drafts: a planted event of another type is dropped with a notice (AD-8)", async () => {
+    const skipped: EventDraft = {
+      type: "automation.skipped",
+      actor: "engine",
+      data: { reason: "trial_cap", kind: "lookback", detail: "2 replay trials wait" },
+    };
+    const planted: EventDraft = {
+      type: "task.status_changed",
+      actor: "engine",
+      task: "T-1",
+      data: { from: "done", to: "blocked" },
+    };
+    const { h, reach } = atRetro(["a", "b"], { events: [planted, skipped] });
+    await reach();
+    const retro = retroEvents(h);
+    expect(retro.filter((e) => e.type === "automation.skipped").map((e) => e.data)).toEqual([
+      skipped.data,
+    ]);
+    expect(retro.filter((e) => e.type === "task.status_changed")).toEqual([]);
+    expect(h.engine.notices.join("\n")).toMatch(
+      /handed core a task\.status_changed event to log; .* it is dropped/,
+    );
+    expect(h.engine.status({}).tasks_by_status).toMatchObject({ done: 1 });
     await h.release();
   });
 

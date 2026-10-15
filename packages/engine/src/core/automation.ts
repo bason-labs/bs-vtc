@@ -24,6 +24,7 @@ import {
   type AutomationRunRef,
   type AutomationSettings,
   type AutoTargetKind,
+  type CommandShape,
   type GateReport,
   type HostId,
   type ParkReason,
@@ -122,7 +123,9 @@ export const automationReportView = (
           touch(v, event.ts, (item) => ({
             ...item,
             issue: { number: v.number, url: v.url, state: "closed" },
-            // closed as `completed`: its fix PR merged (the module closes it on the merge)
+            // closed as `completed`: its fix PR merged. The event contract defines `completed`
+            // so (`UPSTREAM_EVENT_PAYLOAD_SCHEMAS["upstream.issue_closed"]`), and the upstream
+            // module may emit it for nothing else; the contract has no merge event of its own
             ...(v.reason === "completed" && item.pr !== null && item.pr.state !== "closed"
               ? { pr: { ...item.pr, state: "merged" as const } }
               : {}),
@@ -624,11 +627,45 @@ export const configSignalFacts = (
 // ------------------------------------------------------ tool and capability (D-cs)
 
 /**
+ * Programs whose word after the program is one of the program's own fixed subcommands (`git
+ * rebase`, `docker compose`), never a name of the project's. For any other program that word may be
+ * a host, a database, a script or a package of the project (`ssh prod-db`, `psql acme_orders`,
+ * `pnpm acme-migrate`), so an upstream tool fact leaves it out (`toolShapeUpstreamKey`).
+ */
+export const TOOL_SUBCOMMAND_PROGRAMS: ReadonlySet<string> = new Set([
+  "brew",
+  "cargo",
+  "docker",
+  "gh",
+  "git",
+  "go",
+  "helm",
+  "kubectl",
+  "npm",
+  "podman",
+  "terraform",
+]);
+
+/**
+ * Pure (D-cs): the key of a shape as it may leave the machine: `commandShapeKey` with the
+ * subcommand kept only for a {@link TOOL_SUBCOMMAND_PROGRAMS} program (`-` otherwise), so a
+ * project's host or database name never reaches VTC's repo (reading 221 (1): the shape key and the
+ * task count only). The run's log keeps the full shape.
+ */
+export const toolShapeUpstreamKey = (shape: CommandShape): string =>
+  commandShapeKey(
+    TOOL_SUBCOMMAND_PROGRAMS.has(shape.program)
+      ? shape
+      : { program: shape.program, flags: shape.flags },
+  );
+
+/**
  * Pure (D-cs "tool signal"; spine §5 reading 221 (1), spec §13 tool promotion): a shell command
- * shape (`role.submitted.command_shapes`, `commandShapeKey`) the roles ran in
+ * shape (`role.submitted.command_shapes`, keyed by {@link toolShapeUpstreamKey}) the roles ran in
  * `TOOL_SIGNAL_MIN_TASKS` or more distinct tasks across the repo's runs raises one `tool` fact. The
- * subject is the shape's key (a program, a subcommand and a flag-name hash: never a value or a
- * path) and the only number the task count, so the report carries nothing of the project.
+ * subject is that key (a program, a subcommand of a known multi-command program and a flag-name
+ * hash: never a value, a path or a name of the project) and the only number the task count, so the
+ * report carries nothing of the project.
  */
 export const toolSignalFacts = (
   states: readonly Pick<RunState, "id" | "events">[],
@@ -643,7 +680,7 @@ export const toolSignalFacts = (
       for (const raw of shapes) {
         const shape = CommandShapeCountSchema.safeParse(raw);
         if (!shape.success) continue;
-        const key = commandShapeKey(shape.data);
+        const key = toolShapeUpstreamKey(shape.data);
         const set = tasks.get(key) ?? new Set<string>();
         set.add(`${state.id}:${event.task}`);
         tasks.set(key, set);

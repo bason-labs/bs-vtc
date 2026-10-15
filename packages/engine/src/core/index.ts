@@ -71,6 +71,7 @@ export {
   type FactRefresher,
   type LookbackRetro,
   type LookbackReplay,
+  type LookbackSkippedDraft,
   type LookbackReplayTrial,
   type LookbackRetroTarget,
   type ReplayTrialOutcome,
@@ -80,6 +81,8 @@ export {
   type PromptPins,
   type PromptTarget,
   type RoleToolHandler,
+  type RoutingLookback,
+  type RoutingProposalCell,
   type RunHandle,
 } from "./kernel.js";
 export {
@@ -170,7 +173,9 @@ export {
   costRegressionFacts,
   costWorsened,
   isAutomationEvent,
+  toolShapeUpstreamKey,
   toolSignalFacts,
+  TOOL_SUBCOMMAND_PROGRAMS,
   type AutomaticRelease,
   type AutomationFact,
   type CreateUpstream,

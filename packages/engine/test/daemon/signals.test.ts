@@ -14,7 +14,9 @@ import {
 } from "@vtc/shared";
 import {
   capabilitySignalFacts,
+  toolShapeUpstreamKey,
   toolSignalFacts,
+  TOOL_SUBCOMMAND_PROGRAMS,
   type Engine,
   type EventDraft,
 } from "../../src/core/index.js";
@@ -95,13 +97,37 @@ describe("toolSignalFacts (D-cs)", () => {
         ...BASE,
         target: "upstream",
         kind: "tool",
-        subject: commandShapeKey(PNPM),
+        // pnpm's next word may be a project script: the upstream subject leaves it out
+        subject: commandShapeKey({ program: "pnpm", flags: PNPM.flags }),
         metrics: { "tool.tasks": 3 },
         detail: expect.stringContaining("3 tasks") as string,
       },
     ]);
     // R-1's T-1 and R-2's T-1 are two tasks; git status ran in 1 + 1 of them
     expect(JSON.stringify(toolSignalFacts(states, BASE))).not.toContain(commandShapeKey(GIT));
+  });
+
+  it("never sends a project's host or database name: only a known multi-command program keeps its subcommand", () => {
+    const states = ["T-1", "T-2", "T-3"].map((task, i) => ({
+      id: `R-${String(i)}`,
+      events: [
+        submitted(task, "ssh prod-db uptime", "psql acme_orders -c 'select 1'", "git rebase main"),
+      ],
+    }));
+    const facts = toolSignalFacts(states, BASE);
+    const text = JSON.stringify(facts);
+    expect(text).not.toContain("prod-db");
+    expect(text).not.toContain("acme_orders");
+    expect(facts.map((f) => (f.subject ?? "").split(" ").slice(0, 2).join(" "))).toEqual([
+      "git rebase",
+      "psql -",
+      "ssh -",
+    ]);
+    expect(TOOL_SUBCOMMAND_PROGRAMS.has("git")).toBe(true);
+    // the run's own log keeps the full shape
+    const [ssh] = commandShapes("ssh prod-db uptime");
+    expect(ssh?.subcommand).toBe("prod-db");
+    expect(toolShapeUpstreamKey(ssh!)).toBe(commandShapeKey({ program: "ssh", flags: ssh!.flags }));
   });
 });
 

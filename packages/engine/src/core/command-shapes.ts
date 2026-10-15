@@ -16,6 +16,11 @@
  * calls) the first of them to submit takes the rows of all of them, and a run working at the repo
  * root takes the rows of every task worktree under it. The tool signal counts distinct tasks, so
  * its facts hold; only the per-run `command_shapes` record can be misattributed.
+ *
+ * Accepted limit: only an accepted run records its shapes, because the contract carries
+ * `command_shapes` on `role.submitted` alone. A rejected or failed run's rows are still drained (so
+ * a later run cannot claim them) and dropped: the tool signal counts the tool use of runs whose
+ * work was accepted, which is the use worth promoting to an engine tool (§13).
  */
 import { randomBytes } from "node:crypto";
 import { lstatSync, realpathSync, renameSync } from "node:fs";
