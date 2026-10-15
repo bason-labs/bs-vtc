@@ -1,14 +1,20 @@
 /**
  * Lookback's routing step at RETRO (D-cn; spine §5 reading 219: "RETRO writes a routing
- * scorecard"). Engine core's daemon calls {@link lookbackRoutingStep} through its `RoutingLookback`
- * seam (`wireLookback(..., { propose, found })`) once the run's RETRO plan is made, and turns each
- * cell it returns into a `config` improvement fact (`routingConfigFact`) for the upstream module
- * (the AD-27 issue -> PR path; the PR changes only the values of `DEFAULT_ROUTING_TABLE`).
+ * scorecard"). {@link lookbackRoutingStep} fits engine core's `RoutingLookback` seam
+ * (`wireLookback(..., { propose, found })`), through which the daemon is to call it once the run's
+ * RETRO plan is made and turn each cell it returns into a `config` improvement fact
+ * (`routingConfigFact`) for the upstream module (the AD-27 issue -> PR path; the PR changes only
+ * the values of `DEFAULT_ROUTING_TABLE`). **Not wired yet:** engine core's branch leaves the
+ * optional `routing` argument of `wireLookback` out ("merge followup"); passing
+ * `{ propose: lookbackRoutingStep, found: (run, facts) => automation.improvements(facts) }` is a
+ * contract proposal to engine core, and until it lands RETRO writes no routing scorecard.
  *
  * The step recomputes the routing scorecard from the history (`computeRoutingScorecard`), writes it
  * at `LOOKBACK_REPO.routingScorecard` when it has a cell, and returns the cells
  * `routingProposals` backs (`routingProposalCells`). Its evidence is the scorecard: a tier replay
- * needs a tier arm that replay dispatch does not have yet (reading 218(7)), so none is planned here.
+ * needs a tier arm that replay dispatch does not have yet (reading 218(7); a contract proposal), so
+ * none is planned here. A change the table cannot make alone (`RoutingProposals.dropped`) is no
+ * cell of the seam; the scorecard written here keeps its evidence.
  */
 import {
   DEFAULT_ROUTING_TABLE,

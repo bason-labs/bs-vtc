@@ -20,13 +20,19 @@
  * read from every later event), and both need `minScorecardN` data points per metric. The same two
  * cost metrics are compared (a quality drop with attributed failures shows as a rise in tokens per
  * success, since failures earn no success), and so is quality without attributed failures:
- * `escalations_per_100` and `cap_hits_per_100`, a regression when the latest window's rate is at
- * least `LOOKBACK_LIMITS.rollbackRateRatio` times the earlier one's (engine core's rule for the
- * version before). Each is marked `baseline_kind: time_window` with both `windows`, and its
- * baseline and current name the same version.
+ * `escalations_per_100` and `cap_hits_per_100`, a regression when the latest window's rate is
+ * above zero and at least `LOOKBACK_LIMITS.rollbackRateRatio` times the earlier one's: the shared
+ * canary rule (`canaryVerdict`), so a healthy prompt that never escalated and starts escalating
+ * after a model or host update is caught (a zero earlier rate counts; both windows still need
+ * `minScorecardN` dispatches). Against a zero earlier rate a rise has no percentage: its
+ * `delta_pct` is then the absolute rise of the rate (per 100). Each is marked
+ * `baseline_kind: time_window` with both `windows`, and its baseline and current name the same
+ * version. The cost metrics divide by their baseline, so a zero baseline is never compared.
  *
- * Engine core raises the `cost` issue from either (the upstream module, `costReportFields`;
- * `lookbackRunEndFacts` maps a drift regression to its automation fact) and RETRO queues the
+ * The `cost` issue is engine core's to raise (the upstream module, `costReportFields`):
+ * `lookbackRunEndFacts` maps a drift regression to its automation fact for engine core's daemon
+ * to hand over at the run's end (that call is a contract proposal to engine core, not yet wired),
+ * and RETRO queues the
  * lookback role with a target aimed at tokens (`lookbackTargets`, a cost metric only), whose
  * proposal is checked like any other (at most three changes, editable section only); its changes
  * aimed at tokens may cite the costliest train-split dispatches the regression names.
@@ -90,7 +96,10 @@ export interface CostRegression {
   readonly metric: CostMetric;
   readonly baseline_value: number;
   readonly current_value: number;
-  /** The rise in percent of the baseline (two decimals). */
+  /**
+   * The rise in percent of the baseline (two decimals); always finite. From a zero baseline (a
+   * quality rate only) it is the absolute rise of the rate, per 100.
+   */
   readonly delta_pct: number;
   readonly n: { readonly baseline: number; readonly current: number };
   /**
@@ -183,11 +192,19 @@ const costPerTask = (
 
 const DAY_MS = 24 * 60 * 60 * 1000;
 
-/** Whether `metric` regressed from `from` to `to` (both known, `from` above zero). */
+/** The quality rates (drift only): compared by ratio, from a zero baseline too. */
+const isRateMetric = (metric: CostMetric): boolean =>
+  metric === "escalations_per_100" || metric === "cap_hits_per_100";
+
+/**
+ * Whether `metric` regressed from `from` to `to` (both known). A rate follows the shared canary
+ * rule (`rc > 0 && rc >= rollbackRateRatio * rb`, a zero baseline included); a cost metric needs
+ * a baseline above zero, since its rise is a percentage of it.
+ */
 const regressed = (metric: CostMetric, from: number, to: number): boolean =>
-  metric === "escalations_per_100" || metric === "cap_hits_per_100"
-    ? to >= from * LOOKBACK_LIMITS.rollbackRateRatio
-    : ((to - from) / from) * 100 > LOOKBACK_LIMITS.maxTokenRisePct;
+  isRateMetric(metric)
+    ? to > 0 && to >= from * LOOKBACK_LIMITS.rollbackRateRatio
+    : from > 0 && ((to - from) / from) * 100 > LOOKBACK_LIMITS.maxTokenRisePct;
 
 /**
  * The cost regressions of every target's current version against its baseline version and
@@ -246,8 +263,7 @@ export const costRegressions = (input: {
     for (const [metric, before, after] of pairs) {
       const from = before?.value ?? null;
       const to = after?.value ?? null;
-      if (from === null || to === null || from <= 0 || before === undefined || after === undefined)
-        continue;
+      if (from === null || to === null || before === undefined || after === undefined) continue;
       if (!regressed(metric, from, to)) continue;
       const { prompt } = current;
       found.push({
@@ -260,7 +276,8 @@ export const costRegressions = (input: {
         metric,
         baseline_value: from,
         current_value: to,
-        delta_pct: round(((to - from) / from) * 100, 2),
+        // a rise from zero has no percentage (only a rate gets here): the absolute rise instead
+        delta_pct: round(from > 0 ? ((to - from) / from) * 100 : to - from, 2),
         n: { baseline: before.n, current: after.n },
         since: windows === undefined ? current.window.from : windows.current.from,
         ...(windows === undefined ? {} : { windows }),

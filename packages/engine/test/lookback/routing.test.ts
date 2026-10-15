@@ -301,7 +301,7 @@ describe("routing proposals (D-cn)", () => {
     const out = routingProposals(
       card([
         cell({ tier: "mid", pass: 0.95, review: 0.9 }),
-        cell({ tier: "low", reason: "planner_hint", pass: 0.95 - margin, review: 0.9, cost: 0.03 }),
+        cell({ tier: "low", reason: "role", pass: 0.95 - margin, review: 0.9, cost: 0.03 }),
       ]),
       DEFAULT_ROUTING_TABLE,
     );
@@ -339,9 +339,9 @@ describe("routing proposals (D-cn)", () => {
 
   it("keeps the start tier when the cheaper tier misses the margin or keeps escalating", () => {
     for (const cheaper of [
-      cell({ tier: "low", reason: "planner_hint", pass: 0.8 }),
-      cell({ tier: "low", reason: "planner_hint", pass: 1, review: 0.7 }),
-      cell({ tier: "low", reason: "planner_hint", pass: 1, escalated: 0.6 }),
+      cell({ tier: "low", reason: "role", pass: 0.8 }),
+      cell({ tier: "low", reason: "role", pass: 1, review: 0.7 }),
+      cell({ tier: "low", reason: "role", pass: 1, escalated: 0.6 }),
     ]) {
       const out = routingProposals(
         card([cell({ tier: "mid", pass: 1, review: 0.95 }), cheaper]),
@@ -504,7 +504,7 @@ describe("routing proposals (D-cn)", () => {
           mode: "author",
           size: "M",
           tier: "low",
-          reason: "planner_hint",
+          reason: "role",
           pass: 1,
         }),
       ]),
@@ -518,7 +518,7 @@ describe("routing proposals (D-cn)", () => {
     const out = routingProposals(
       card([
         cell({ size: "S", risk: "high", tier: "top", pass: 1 }),
-        cell({ size: "S", risk: "high", tier: "mid", reason: "planner_hint", pass: 1 }),
+        cell({ size: "S", risk: "high", tier: "mid", reason: "role", pass: 1 }),
       ]),
       DEFAULT_ROUTING_TABLE,
     );
@@ -528,11 +528,88 @@ describe("routing proposals (D-cn)", () => {
     expect(out.dropped[0]?.reason).toContain("M.high");
   });
 
+  it("never takes a Planner-hinted cell as a cheaper tier's evidence (a biased sample)", () => {
+    const current = cell({ tier: "mid", pass: 0.95 });
+    const hinted = cell({ tier: "low", reason: "planner_hint", pass: 0.95, tasks: 40 });
+    const out = routingProposals(card([current, hinted]), DEFAULT_ROUTING_TABLE);
+    expect(out).toEqual({ table: null, changes: [], facts: [], dropped: [] });
+    // the same numbers from a `routing.start: role` project are evidence
+    const role = routingProposals(
+      card([current, { ...hinted, start_reason: "role" }]),
+      DEFAULT_ROUTING_TABLE,
+    );
+    expect(role.changes.map((c) => [c.subject, c.to])).toEqual([
+      ["routing.engineer.M.none", "low"],
+    ]);
+    // a hinted cell beside a rule or role cell of the same tier is not what is read
+    const mixed = routingProposals(
+      card([current, hinted, cell({ tier: "low", reason: "role", pass: 0.5, tasks: 10 })]),
+      DEFAULT_ROUTING_TABLE,
+    );
+    expect(mixed.changes).toEqual([]);
+  });
+
+  it("blocks a cheaper start when another host compared the cheaper tier and found it worse", () => {
+    const other = { host: "codex" as const };
+    const out = routingProposals(
+      card([
+        cell({ tier: "mid", pass: 0.95 }),
+        cell({ tier: "low", reason: "role", pass: 0.95 }),
+        { ...cell({ tier: "mid", pass: 0.95 }), ...other },
+        { ...cell({ tier: "low", reason: "role", pass: 0.5 }), ...other },
+      ]),
+      DEFAULT_ROUTING_TABLE,
+    );
+    expect(out).toEqual({ table: null, changes: [], facts: [], dropped: [] });
+  });
+
+  it("raises the start when one host keeps escalating and another is steady (safety first)", () => {
+    const out = routingProposals(
+      card([
+        cell({ size: "S", tier: "low", escalated: 0.8 }),
+        { ...cell({ size: "S", tier: "low", escalated: 0 }), host: "codex" as const },
+      ]),
+      DEFAULT_ROUTING_TABLE,
+    );
+    expect(out.changes.map((c) => [c.subject, c.direction, c.from, c.to, c.scope])).toEqual([
+      ["routing.engineer.S.none", "higher", "low", "mid", "role"],
+    ]);
+    // the evidence named is the escalating host's cell
+    expect(out.changes[0]?.current.host).toBe(HOST);
+  });
+
+  it("proposes the cheapest tier that matches quality when several do", () => {
+    // tagged_floor top: lowering L/none moves no other cell
+    const table = RoutingTableSchema.parse({ ...DEFAULT_ROUTING_TABLE, tagged_floor: "top" });
+    const both = routingProposals(
+      card([
+        cell({ size: "L", tier: "top", pass: 0.95 }),
+        cell({ size: "L", tier: "mid", reason: "role", pass: 0.95 }),
+        cell({ size: "L", tier: "low", reason: "role", pass: 0.95 }),
+      ]),
+      table,
+    );
+    expect(both.dropped).toEqual([]);
+    expect(both.changes.map((c) => [c.subject, c.from, c.to, c.candidate?.start_tier])).toEqual([
+      ["routing.engineer.L.none", "top", "low", "low"],
+    ]);
+    expect(both.table?.roles).toEqual({ engineer: { by_size: { L: "low" } } });
+    // low falls short: mid is proposed
+    const midOnly = routingProposals(
+      card([
+        cell({ size: "L", tier: "top", pass: 0.95 }),
+        cell({ size: "L", tier: "mid", reason: "role", pass: 0.95 }),
+        cell({ size: "L", tier: "low", reason: "role", pass: 0.5 }),
+      ]),
+      table,
+    );
+    expect(midOnly.changes.map((c) => [c.subject, c.to])).toEqual([
+      ["routing.engineer.L.none", "mid"],
+    ]);
+  });
+
   it("plans a tier replay only while the trial budget allows; else the scorecard is the evidence", () => {
-    const cells = [
-      cell({ tier: "mid", pass: 1 }),
-      cell({ tier: "low", reason: "planner_hint", pass: 1 }),
-    ];
+    const cells = [cell({ tier: "mid", pass: 1 }), cell({ tier: "low", reason: "role", pass: 1 })];
     // 12 tasks, 6 + 6 sampled, k 3, two arms
     const trials = 12 * LOOKBACK_LIMITS.replayTrials * 2;
     const funded = routingProposals(card(cells), DEFAULT_ROUTING_TABLE, { trialBudget: trials });

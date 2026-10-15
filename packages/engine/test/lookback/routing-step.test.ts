@@ -282,7 +282,7 @@ describe("routingProposalCells (D-cn)", () => {
     const cheaper = {
       ...current,
       start_tier: "low" as const,
-      start_reason: "planner_hint" as const,
+      start_reason: "role" as const,
       metrics: { first_round_gate_pass: metric(0.92, 12) },
     };
     const [cell] = routingProposalCells(routingProposals(card([current, cheaper])));

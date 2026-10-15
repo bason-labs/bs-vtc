@@ -204,6 +204,50 @@ describe("the drift baseline (D-cr)", () => {
     ];
     expect(regressionsOf(mild)).toEqual([]);
   });
+
+  it("catches a healthy prompt that starts escalating: 0 -> 40 per 100, as the canary rule does", () => {
+    const history = [
+      ...runAt("r1", "2026-09-01T10:00:00.000Z", 10, { tokens: 1000, cost: 0.1 }),
+      ...runAt("r2", "2026-09-20T10:00:00.000Z", 10, { tokens: 1000, cost: 0.1, escalate: 4 }),
+    ];
+    const found = regressionsOf(history);
+    expect(
+      found.map((r) => [r.baseline_kind, r.metric, r.baseline_value, r.current_value, r.delta_pct]),
+    ).toEqual([["time_window", "escalations_per_100", 0, 40, 40]]);
+    // the delta is finite, so the report fields and the fact stay JSON numbers
+    const [regression] = found;
+    if (regression === undefined) throw new Error("none");
+    expect(Number.isFinite(regression.delta_pct)).toBe(true);
+    expect(JSON.parse(JSON.stringify(costReportFields(regression)))).toEqual(
+      costReportFields(regression),
+    );
+    const [fact] = lookbackRunEndFacts("r2", { costRegressions: found }, now.toISOString());
+    // the fact Lookback hands over; the upstream module's `costRegressed` still wants a baseline
+    // above zero for a rate (a contract proposal to the upstream team aligns it with the canary rule)
+    expect(fact).toMatchObject({
+      kind: "cost",
+      source: "lookback.drift",
+      metric: "escalations_per_100",
+      baseline: 0,
+      current: 40,
+    });
+    expect(upstreamFact(fact)).toBeDefined();
+    // zero both times: quiet; and a cost metric from zero is never compared
+    const steady = [
+      ...runAt("r1", "2026-09-01T10:00:00.000Z", 10, { tokens: 1000, cost: 0 }),
+      ...runAt("r2", "2026-09-20T10:00:00.000Z", 10, { tokens: 1000, cost: 0.1 }),
+    ];
+    expect(regressionsOf(steady)).toEqual([]);
+    // a zero earlier window below minScorecardN dispatches is no baseline
+    const thin = [
+      ...runAt("r1", "2026-09-01T10:00:00.000Z", LOOKBACK_LIMITS.minScorecardN - 1, {
+        tokens: 1000,
+        cost: 0.1,
+      }),
+      ...runAt("r2", "2026-09-20T10:00:00.000Z", 10, { tokens: 1000, cost: 0.1, escalate: 4 }),
+    ];
+    expect(regressionsOf(thin)).toEqual([]);
+  });
 });
 
 describe("the run-end automation facts (AD-27 issue -> PR path)", () => {
