@@ -13,7 +13,10 @@
  * submitted dispatches reported per task, over tasks where every one reported a cost. A dispatch
  * logged before contracts 5.4.0 has no tier and is skipped; a `lookback_replay` trial is no work of
  * the run and is left out (reading 177); a first dispatch whose reason is `escalation` or
- * `budget_drop` names no start tier and is skipped. Below `LOOKBACK_LIMITS.minScorecardN` a value is
+ * `budget_drop` names no start tier and is skipped, and so is one the project's `routing.min_tier`
+ * / `max_tier` moved (`tier_clamped`): it measures the project's bound, not the table. QA author's
+ * clamp to its floor is kept, since every QA author start is floored ({@link routingProposals}
+ * compares against the floored tier). Below `LOOKBACK_LIMITS.minScorecardN` a value is
  * `null` ("insufficient data"), as on every scorecard; the card records the grader bundle it was
  * scored under.
  *
@@ -21,7 +24,8 @@
  * tasks. For each (role, mode, host, size, risk) group whose current start tier (the table's,
  * {@link routedStartTier}) has a readable cell:
  * - _higher_: at least `routingEscalationPct` percent of its tasks escalated, so the start moves
- *   one tier up;
+ *   one tier up (a change that would move the table's cell by two tiers, as QA author's floored
+ *   start does when its modes share one `roles.qa` cell, is dropped);
  * - _cheaper_: a cheaper start tier's readable cell has every pass rate the current cell measures
  *   (`first_round_gate_pass`, `review_pass`) within `routingQualityMarginPct` points and does not
  *   keep escalating itself; the cheapest such tier is proposed. QA in author mode is never proposed
@@ -30,11 +34,16 @@
  * wins (safety first), and a group that compared a cheaper tier and found it worse blocks a
  * _cheaper_ one. A change backed by two or more roles that no other role contradicts changes the
  * shared table; otherwise it goes under `roles.<role>` (D-cn: "one role's cells under `roles` when
- * only that role differs"). A change the table cannot make without moving another cell (the floors
- * are shared by every size) is dropped with its reason. Each accepted change is a `config`
- * improvement fact (subject {@link routingConfigSubject}) carrying numbers only (D-by), and a tier
- * replay (the same prompt on both arms, the start tier differing) is planned for it only while the
- * caller's trial budget allows; otherwise the scorecard is the evidence.
+ * only that role differs"). The table's floors are floors (a tagged start is the higher of
+ * `by_size` and `tagged_floor`), so raising a start lifts the cells that floor on it: a _higher_
+ * change is made when every other cell it moves only goes up, and it names those `lifted` cells.
+ * A _cheaper_ change the table cannot make without moving another cell (the floors are shared by
+ * every size) is dropped with its reason. Each accepted change is a `config` improvement fact
+ * (subject {@link routingConfigSubject}) carrying numbers only (D-by), and a tier replay (the same
+ * prompt on both arms, the start tier differing) is planned for it only while the caller's trial
+ * budget allows; otherwise the scorecard is the evidence. A planned tier replay is a plan only:
+ * replay dispatch has no tier arm yet (reading 218(7) holds a trial on its recorded tier), so the
+ * fact says `routing.replay_planned`, never that a replay ran.
  */
 import {
   DEFAULT_ROUTING_TABLE,
@@ -91,6 +100,11 @@ const higherOf = (a: ModelTier, b: ModelTier): ModelTier => (tierRank(a) >= tier
  * `roles.<role>` override replaces the shared field it names. The floors are floors: a tagged task
  * starts at least on `tagged_floor`, a high-risk one at least on `high_floor` (and `tagged_floor`,
  * since a high-risk task is tagged).
+ *
+ * **A temporary mirror** of the table lookup in engine core's router (`core/routing.ts`, reading
+ * 218), which shared does not export: the contract proposal moves one pure `routedStartTier` into
+ * `packages/shared/src/tier-routing.ts` for both to use. Until it lands, a conformance test against
+ * engine core's routing for every role, size and risk class is due at integration (same proposal).
  */
 export const routedStartTier = (
   table: RoutingTable,
@@ -126,10 +140,12 @@ const taskShapes = (events: readonly VtcEvent[], table: RoutingTable): Map<strin
 interface Dispatch {
   readonly tier?: ModelTier;
   readonly reason?: string;
+  /** `role.dispatched.tier_clamped`: the project's bounds or QA author's floor moved the tier. */
+  readonly clamped: boolean;
   readonly replay: boolean;
 }
 
-/** Each dispatch's tier, tier reason and whether it is a replay trial, by `<run>:<action_id>`. */
+/** Each dispatch's tier, tier reason, clamp and whether it is a replay trial, by `<run>:<action_id>`. */
 const dispatchFacts = (events: readonly VtcEvent[]): Map<string, Dispatch> => {
   const out = new Map<string, Dispatch>();
   for (const event of events) {
@@ -138,6 +154,7 @@ const dispatchFacts = (events: readonly VtcEvent[]): Map<string, Dispatch> => {
     out.set(`${event.run}:${data.action_id}`, {
       ...(data.tier === undefined ? {} : { tier: data.tier }),
       ...(data.tier_reason === undefined ? {} : { reason: data.tier_reason }),
+      clamped: data.tier_clamped === true,
       replay: data.purpose === "lookback_replay",
     });
   }
@@ -198,6 +215,10 @@ const taskStarts = (
     const fact = facts.get(traceRef(first));
     if (shape === undefined || fact?.tier === undefined || fact.reason === undefined) continue;
     if (!START_REASONS.has(fact.reason)) continue;
+    // a clamped start measures the project's bound; QA author's floor is the one clamp kept
+    const floored =
+      first.role === "qa" && first.mode === "author" && fact.tier === QA_AUTHOR_MIN_TIER;
+    if (fact.clamped && !floored) continue;
     starts.push({
       key,
       first: { ...first, task: first.task },
@@ -326,10 +347,22 @@ export interface RoutingTierReplay {
   readonly size: TaskSize;
   readonly risk: TaskRiskClass;
   readonly arms: { readonly a: ModelTier; readonly b: ModelTier };
-  /** Held-out tasks of the current cell to replay ({@link routingReplayTasks}). */
+  /**
+   * An upper bound on the tasks to replay: the current cell's tasks, at most the pace's failures
+   * plus regression tasks. The tasks that run are {@link routingReplayTasks}' (held-out and
+   * submitted only, each bucket capped), which can be fewer.
+   */
   readonly tasks: number;
-  /** `tasks` × k × 2 arms: what it takes from the trial budget. */
+  /** `tasks` × k × 2 arms: what it reserves from the trial budget (an upper bound too). */
   readonly trials: number;
+}
+
+/** A cell a _higher_ change lifts with it. */
+export interface RoutingLift {
+  readonly size: TaskSize;
+  readonly risk: TaskRiskClass;
+  readonly from: ModelTier;
+  readonly to: ModelTier;
 }
 
 /** One change to the routing table Lookback proposes, with the cells that back it. */
@@ -344,6 +377,11 @@ export interface RoutingChange {
   readonly to: ModelTier;
   /** `shared`: the table's own cell; `role`: the role's `roles.<role>` override. */
   readonly scope: "shared" | "role";
+  /**
+   * Other cells a _higher_ change lifts with it, because they floor on the field it raises (a
+   * tagged cell on `by_size`, a size's tagged cell on `tagged_floor`); each only goes up.
+   */
+  readonly lifted: readonly RoutingLift[];
   /** The current start tier's cell (the group with the most tasks). */
   readonly current: RoutingCell;
   /** The cheaper tier's cell that matched quality (a `cheaper` change only). */
@@ -370,7 +408,10 @@ export interface RoutingProposals {
   readonly table: RoutingTable | null;
   readonly changes: readonly RoutingChange[];
   readonly facts: readonly RoutingConfigFact[];
-  /** Changes the scorecard backs but the table cannot make alone, with why. */
+  /**
+   * Changes the scorecard backs but the table cannot make alone, with why: a _cheaper_ start that
+   * would move another cell, or a _higher_ one that would move a cell two tiers.
+   */
   readonly dropped: readonly { readonly subject: string; readonly reason: string }[];
 }
 
@@ -485,10 +526,14 @@ const factOf = (change: RoutingChange, at: string): RoutingConfigFact => {
   const metrics: Record<string, number> = {
     "routing.from_tier": tierRank(change.from),
     "routing.to_tier": tierRank(change.to),
+    "routing.current_tier": tierRank(change.current.start_tier),
     "routing.shared": change.scope === "shared" ? 1 : 0,
-    "routing.replay": change.replay === null ? 0 : 1,
+    "routing.replay_planned": change.replay === null ? 0 : 1,
     "routing.tasks.current": change.current.tasks,
+    "routing.lifted": change.lifted.length,
   };
+  for (const lift of change.lifted)
+    metrics[`routing.lifted.${lift.size.toLowerCase()}_${lift.risk}`] = tierRank(lift.to);
   const put = (name: string, value: number | null | undefined): void => {
     if (value !== null && value !== undefined) metrics[name] = value;
   };
@@ -548,8 +593,9 @@ export const routingProposals = (
     byCell.set(key, [...(byCell.get(key) ?? []), decision]);
   }
   // 2. one decision per (role, size, risk): higher wins; a group that kept blocks cheaper
-  type Wanted = Omit<RoutingChange, "scope" | "replay" | "subject">;
+  type Wanted = Omit<RoutingChange, "scope" | "replay" | "subject" | "lifted">;
   const wanted: Wanted[] = [];
+  const dropped: { subject: string; reason: string }[] = [];
   const best = (list: readonly GroupDecision[]) =>
     [...list].sort((a, b) => b.current.tasks - a.current.tasks)[0];
   for (const [key, decisions] of byCell) {
@@ -566,6 +612,14 @@ export const routingProposals = (
       .map((d) => (d.kind === "higher" || d.kind === "cheaper" ? d.to : from))
       .reduce((a, b) => higherOf(a, b));
     if (to === from) continue;
+    if (evidence.kind === "higher" && tierRank(to) - tierRank(from) > 1) {
+      // QA author's start is floored above the table's: its modes share the role's one cell
+      dropped.push({
+        subject: routingConfigSubject(role, size as TaskSize, risk as TaskRiskClass),
+        reason: `starting ${size}/${risk} on ${to} would move ${role}'s table start two tiers from ${from}; every mode of the role shares that cell`,
+      });
+      continue;
+    }
     wanted.push({
       role,
       size: size as TaskSize,
@@ -599,7 +653,8 @@ export const routingProposals = (
     });
     return !others && !blocked;
   };
-  // 4. apply in a stable order; drop a change that moves a cell no evidence asked for
+  // 4. apply in a stable order: a higher change may lift the cells that floor on it; a cheaper
+  // one that moves a cell no evidence asked for is dropped
   wanted.sort(
     (a, b) =>
       a.role.localeCompare(b.role) ||
@@ -608,33 +663,41 @@ export const routingProposals = (
   );
   let next = table;
   const accepted: Omit<RoutingChange, "replay">[] = [];
-  const dropped: { subject: string; reason: string }[] = [];
-  const sharedDone = new Set<string>();
+  const sharedDone = new Map<string, readonly RoutingLift[]>();
   for (const w of wanted) {
     const subject = routingConfigSubject(w.role, w.size, w.risk);
     const scope = sharedOk(w) ? "shared" : "role";
-    if (scope === "shared" && sharedDone.has(sharedKey(w))) {
-      accepted.push({ ...w, subject, scope });
+    const done = scope === "shared" ? sharedDone.get(sharedKey(w)) : undefined;
+    if (done !== undefined) {
+      accepted.push({ ...w, subject, scope, lifted: done });
       continue;
     }
     const probe = scope === "shared" ? SHARED_PROBE : w.role;
     const trial = withCell(next, scope === "shared" ? undefined : w.role, w.size, w.risk, w.to);
     const before = grid(next, probe);
     const after = grid(trial, probe);
-    const moved = [...after].filter(([cell, tier]) => before.get(cell) !== tier).map(([c]) => c);
-    if (after.get(cellOf(w)) !== w.to || moved.some((c) => c !== cellOf(w))) {
+    const others = [...after]
+      .filter(([cell, tier]) => cell !== cellOf(w) && before.get(cell) !== tier)
+      .map(([cell, to]) => ({ cell, from: before.get(cell) ?? to, to }));
+    const reached = after.get(cellOf(w)) === w.to;
+    const liftsOnly =
+      w.direction === "higher" && others.every((o) => tierRank(o.to) > tierRank(o.from));
+    if (!reached || (others.length > 0 && !liftsOnly)) {
       dropped.push({
         subject,
-        reason:
-          after.get(cellOf(w)) !== w.to
-            ? `the table cannot start ${w.size}/${w.risk} on ${w.to} without changing another cell`
-            : `starting ${w.size}/${w.risk} on ${w.to} would also move ${moved.filter((c) => c !== cellOf(w)).join(", ")}`,
+        reason: !reached
+          ? `the table cannot start ${w.size}/${w.risk} on ${w.to} without changing another cell`
+          : `starting ${w.size}/${w.risk} on ${w.to} would also move ${others.map((o) => o.cell).join(", ")}`,
       });
       continue;
     }
+    const lifted: RoutingLift[] = others.map((o) => {
+      const [size = "S", risk = "none"] = o.cell.split(".");
+      return { size: size as TaskSize, risk: risk as TaskRiskClass, from: o.from, to: o.to };
+    });
     next = trial;
-    if (scope === "shared") sharedDone.add(sharedKey(w));
-    accepted.push({ ...w, subject, scope });
+    if (scope === "shared") sharedDone.set(sharedKey(w), lifted);
+    accepted.push({ ...w, subject, scope, lifted });
   }
   // 5. tier replays while the trial budget lasts
   const k = options.k ?? LOOKBACK_LIMITS.replayTrials;

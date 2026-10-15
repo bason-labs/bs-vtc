@@ -28,7 +28,9 @@
  * regressions ({@link costRegressions}, D-bv; their lookback target is aimed at tokens) and
  * missing specialists ({@link newAgentSignals}, D-cd, evidence-only), with the VTC-side report
  * fields of each ({@link costReportFields}, {@link newAgentReportFields}); an `improve` verdict's
- * fields ({@link improvementReportFields}) open the bs-vtc PR.
+ * fields ({@link improvementReportFields}) open the bs-vtc PR. {@link lookbackRunEndFacts} maps the
+ * drift regressions (D-cr) and the routing changes (D-cn) to the automation facts the daemon hands
+ * the upstream module.
  * AI tiebreak answers are recorded with {@link appendTiebreakRecord} under the VTC home; only
  * those {@link readTiebreakKeys} returns let an `ai_tiebreak` attribution count.
  * Promotion (D-cb, spine §5 reading 196): for everyone, the human's merge of the bs-vtc PR an
@@ -57,6 +59,8 @@ export { canaryArmStats, evaluateCanaries } from "./canary.js";
 export {
   COST_TRACES_MAX,
   costRegressions,
+  isTokenMetric,
+  type CostBaselineKind,
   type CostMetric,
   type CostRegression,
   type CostTrace,
@@ -155,8 +159,10 @@ export {
   type LookbackReportFields,
 } from "./reports.js";
 export {
+  DRIFT_BASELINE_SUFFIX,
   LOOKBACK_MAX_TRACES,
   lookbackAtRunEnd,
+  lookbackRunEndFacts,
   lookbackTargets,
   type HumanEditDiff,
   type LookbackDispatched,

@@ -17,6 +17,8 @@
  *    `LOOKBACK_REPO.routingScorecard` when it has a cell, and returns the routing proposals it backs
  *    (`routingProposals`, scorecard evidence only: tier replays need the RETRO's trial budget, so
  *    engine core calls `routingProposals` again there with what is left of it).
+ * {@link lookbackRunEndFacts} maps what of steps 4 and 5 engine core does not raise itself to the
+ * automation facts the daemon hands the upstream module (the AD-27 issue → PR path).
  * It returns the `lookback.dispatched` drafts and what each lookback dispatch reads: train traces
  * only, plus the human edits of the version under review (§13 step 1, {@link humanEdits}) with
  * their diffs when the caller injects a reader. Engine core queues the dispatches like any role
@@ -29,6 +31,7 @@
 import {
   DEFAULT_ROUTING_TABLE,
   engineRepoKey,
+  ScorecardMetricIdSchema,
   isEventOfType,
   LOOKBACK_LIMITS,
   readEventData,
@@ -38,6 +41,7 @@ import {
   type Scorecard,
   type VtcEvent,
 } from "@vtc/shared";
+import type { AutomationFact } from "../core/index.js";
 import {
   appendAttributions,
   attributeRun,
@@ -46,7 +50,7 @@ import {
   type FailureSignal,
 } from "./attribution.js";
 import { lookbackEvent, type LookbackEventDraft } from "./events.js";
-import { costRegressions, type CostRegression } from "./cost-regression.js";
+import { costRegressions, isTokenMetric, type CostRegression } from "./cost-regression.js";
 import { capDiff, humanEdits, LOOKBACK_MAX_HUMAN_EDITS, type HumanEdit } from "./human-edits.js";
 import { newAgentSignals, type InstalledRole, type NewAgentSignal } from "./new-agent.js";
 import {
@@ -140,9 +144,9 @@ export const lookbackTargets = (input: {
   /** Human edits of the history ({@link humanEdits}); only train-split ones are shown. */
   readonly humanEdits?: readonly HumanEdit[];
   /**
-   * Cost regressions of current versions (D-bv, `costRegressions`): each makes its version a
-   * target aimed at tokens, unless a lookback run was dispatched for the target since that
-   * version first ran ({@link LookbackDispatched}).
+   * Cost regressions of current versions (D-bv, `costRegressions`): each of a cost metric
+   * (`isTokenMetric`) makes its version a target aimed at tokens, unless a lookback run was
+   * dispatched for the target since that version first ran ({@link LookbackDispatched}).
    */
   readonly costRegressions?: readonly CostRegression[];
   readonly lookbackDispatched?: readonly LookbackDispatched[];
@@ -158,7 +162,8 @@ export const lookbackTargets = (input: {
   }
   const costOf = new Map<string, CostRegression[]>();
   for (const r of input.costRegressions ?? []) {
-    if (r.role === LOOKBACK_ROLE) continue;
+    // a quality-rate drift (escalations, cap hits) is an upstream fact only, not a token target
+    if (r.role === LOOKBACK_ROLE || !isTokenMetric(r.metric)) continue;
     const key = versionKey(r.current);
     costOf.set(key, [...(costOf.get(key) ?? []), r]);
   }
@@ -388,4 +393,65 @@ export const lookbackAtRunEnd = async (input: {
     routingScorecard,
     routing: routingProposals(routingScorecard, routingTable),
   };
+};
+
+/**
+ * What a drift regression's fact names as its baseline (D-cr): the version's own SHA with this
+ * suffix. The upstream module's `cost` fingerprint is (role, metric, baseline SHA), so a drift of
+ * version V never shares a fingerprint, and so an issue, with a later version W's regression
+ * against V (baseline V); repeated drifts of V share one and dedupe.
+ */
+export const DRIFT_BASELINE_SUFFIX = "@time_window";
+
+/**
+ * Pure: the automation facts of a run's end that engine core does not raise itself, for the daemon
+ * to hand the upstream module (AD-27 rule 8; spine §5 readings 219 and 226):
+ * - each drift regression (`baseline_kind: time_window`, D-cr) as a `cost` fact whose
+ *   `baselinePromptSha` is the version's SHA plus {@link DRIFT_BASELINE_SUFFIX} and `promptSha` the
+ *   version's own. A regression against the version before is engine core's
+ *   (`costRegressionFacts` from the scorecards), and `cost_per_task` is no scorecard metric the
+ *   fact can carry, so neither is repeated here (`costReportFields` still reports both);
+ * - each routing change (D-cn) as a `config` improvement with its subject and numbers.
+ */
+export const lookbackRunEndFacts = (
+  run: string,
+  result: Pick<RunEndResult, "costRegressions" | "routing">,
+  at: string,
+): AutomationFact[] => {
+  const out: AutomationFact[] = [];
+  for (const r of result.costRegressions) {
+    if (r.baseline_kind !== "time_window") continue;
+    const metric = ScorecardMetricIdSchema.safeParse(r.metric);
+    if (!metric.success) continue;
+    out.push({
+      target: "upstream",
+      kind: "cost",
+      run,
+      source: "lookback.drift",
+      at,
+      role: r.role,
+      ...(r.mode === undefined ? {} : { mode: r.mode }),
+      host: r.host,
+      promptSha: r.current.effective_sha256,
+      baselinePromptSha: `${r.baseline.effective_sha256}${DRIFT_BASELINE_SUFFIX}`,
+      metric: metric.data,
+      baseline: r.baseline_value,
+      current: r.current_value,
+      detail: `${r.role} on ${r.host}: ${r.metric} went from ${String(r.baseline_value)} to ${String(r.current_value)} against the same prompt version ${String(LOOKBACK_LIMITS.driftWindowDays)} days earlier`,
+    });
+  }
+  for (const f of result.routing.facts) {
+    out.push({
+      target: "upstream",
+      kind: f.kind,
+      run,
+      source: "lookback.routing",
+      at: f.at,
+      role: f.role,
+      subject: f.subject,
+      metrics: f.metrics,
+      detail: `the routing scorecard backs a start-tier change for ${f.subject}`,
+    });
+  }
+  return out;
 };

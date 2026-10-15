@@ -257,29 +257,17 @@ export interface TimeWindow {
   readonly to: string;
 }
 
-const within = (ts: string, window: TimeWindow): boolean => {
-  const t = Date.parse(ts);
-  return t > Date.parse(window.from) && t <= Date.parse(window.to);
-};
-
-/**
- * The scorecard of every prompt version the events dispatched. With `dispatchedIn`, only the
- * dispatches made in that window count (their outcomes are still read from every later event): the
- * drift baseline compares a version with its own earlier window (D-cr).
- */
+/** The scorecard of every prompt version the events dispatched. */
 export const computeScorecards = (input: {
   readonly events: readonly VtcEvent[];
   readonly attributions: readonly Attribution[];
   readonly lockedShaFor: LockedShaFor;
   readonly graderBundleSha: string;
   readonly now: Date;
-  readonly dispatchedIn?: TimeWindow;
 }): Scorecard[] => {
   const traces = buildTraces(input.events, input.lockedShaFor);
   const failed = new Set(input.attributions.filter(isRoleFailure).map(traceRef));
-  const rows = traceOutcomes(input.events, traces, failed).filter(
-    (r) => input.dispatchedIn === undefined || within(r.trace.ts, input.dispatchedIn),
-  );
+  const rows = traceOutcomes(input.events, traces, failed);
   const tasks = taskInfo(input.events);
   const versions = new Map<string, TraceOutcome[]>();
   for (const row of rows) {
