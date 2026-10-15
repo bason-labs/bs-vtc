@@ -36,24 +36,48 @@ covering every requirement and nothing more.
 7. Pick at most {{max_stack_packs}} stack packs per task from: {{stack_packs}}. Only packs for
    technology the task actually touches.
 8. Set `risk` (low, med, high) by probability times impact of getting it wrong, and `risk_tags`
-   for sensitive areas the task touches (auth, payments, pii, migration, infra, public-api,
-   new-dependency).
+   for the sensitive areas the task touches. The high-risk tags are {{high_risk_tags}}: use one
+   whenever the task touches that area, since the start tier follows the tags (see Start tier).
+   Tag other sensitive areas too, for example `pii`, `infra`, `public-api` or `new-dependency`.
 9. Set `arch_triage`: `fits` (no new service, data store, integration or trust boundary),
    `extends` (adds within the architecture) or `changes` (a new service, data store, integration,
    cross-cutting concern, breaking interface or trust boundary).
-10. Write each task's intent contract: a one-paragraph statement quoting the requirement, Always
+10. Leave each task's model to the engine (see Start tier). Add a `tier_hint` only when the table
+    clearly misjudges the task.
+11. Write each task's intent contract: a one-paragraph statement quoting the requirement, Always
     and Never boundaries, and an I/O and edge-case matrix of concrete cases.
-11. Attack the plan: name at least three ways it could fail (an ordering race, a shared file, a
+12. Attack the plan: name at least three ways it could fail (an ordering race, a shared file, a
     missing migration step, an uncovered edge case) and fix the tasks, not the prose.
-12. Return the tasks.
+13. Return the tasks.
+
+## Start tier
+
+The engine picks the model tier each task's Engineer, QA and reviewers start on from the task's
+`size` and risk, by this table:
+
+{{routing_table}}
+
+So an accurate `size`, `risk` and `risk_tags` are what route a task well. The engine then keeps
+the tier within the project's limits, and QA writing a task's acceptance tests never starts
+below {{qa_author_min_tier}}, whatever the table or a hint says.
+
+Set `tier_hint` only when the table clearly misjudges the task: `tier` (one of {{model_tiers}}),
+`reason` and `detail`, one sentence on why, with no code and no secrets. The `reason` is one code:
+
+- for a task harder than its size and tags say: {{tier_hint_raise_reasons}};
+- for a task easier than they say: {{tier_hint_lower_reasons}}.
+
+Most tasks carry no `tier_hint`. Never set one that names the table's own tier, and never use
+one to make up for a wrong size or a missing tag: fix those instead. The engine logs every hint
+and keeps it on the task.
 
 ## Output
 
 `tasks`: one task draft per task with `id` (`T-1`, `T-2`, ...), `title`, `covers`, `after`,
 `files_scope`, `discipline`, `stack_packs`, `provides_contract`, `consumes_contracts`, `risk`,
-`risk_tags`, `size`, `arch_triage` and `intent` (`statement`, `always`, `never`, `io_matrix` of
-`case`, `input`, `expected`). Never set status, rounds, caps, budgets or branches: the engine
-derives them.
+`risk_tags`, `size`, `arch_triage`, `intent` (`statement`, `always`, `never`, `io_matrix` of
+`case`, `input`, `expected`) and, rarely, `tier_hint` (`tier`, `reason`, `detail`). Never set
+status, rounds, caps, budgets, branches or a model: the engine derives them.
 
 ## Rules
 

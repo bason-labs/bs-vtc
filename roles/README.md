@@ -243,15 +243,32 @@ human`, exits `done`, `blocked` or `unknown`, no verdicts, no success criteria a
   from a `request` input, which a human-started run can carry too, and never from a marker or
   other text in the pack. It then also checks the pull request's change against the issue. The
   input type is `PACK_INPUT_TYPES.automationIssue` (contracts 5.1.0); engine core lists it in the
-  Spec Verifier's pack on a run whose `run.started.automation` is set, and on no other run. Until
-  engine core does, the Spec Verifier judges every run as a human-started one, and a todo merge
-  gate in the round-4 repo test tracks it. The
-  Lead relays `NextResult.notices` (the daily automation summary, `HOST_WEB_OFF_NOTICE`) once, in
+  Spec Verifier's pack on a run whose `run.started.automation` is set, and on no other run
+  (`core/dispatch.ts`, since round 4). The Lead relays `NextResult.notices` (the daily automation summary, `HOST_WEB_OFF_NOTICE`) once, in
   plain words.
 - **The CHANGELOG anchor** (D-bv). `roles/CHANGELOG.md` (`ROLES_CHANGELOG`) holds
   `<!-- vtc:changelog-entries -->` (`ROLES_CHANGELOG_ANCHOR`) exactly once; the upstream module
   inserts each new entry directly below it (`insertChangelogEntry`), and the compiler refuses a
   CHANGELOG without it. The constant is shared (`@vtc/shared`, contracts 5.1.0).
+- **Template slots** (reading 212 (2), the round-5 cross-check with the upstream renderer). The
+  `note` value is the whole NOTE callout and `provenance` the whole `<details>` block, so the
+  templates wrap neither. An issue ends with `{{checklist}}`: the renderer fills a reviewer
+  checklist for every issue kind. A PR body carries `{{diff}}` right after `{{changes}}`, as the
+  shared doc on `AUTO_TEMPLATE_SLOTS` says: the renderer fills it with a prompt PR's fenced diff
+  (the first part it drops when a body is too long), and it reads "unavailable" on any other PR.
+- **Start tier and `tier_hint`** (H-9, D-cm, reading 218). The Planner (2.0.0) sees the routing
+  table the engine starts each task's Engineer, QA and reviewers on (`{{routing_table}}`, rendered
+  from `DEFAULT_ROUTING_TABLE`, so a reviewed change to its values reaches the prompt at the next
+  compile), the high-risk tags, and QA author's floor (`QA_AUTHOR_MIN_TIER`). It sets a
+  `tier_hint` (`tier`, a `TierHintReason` code, a one-sentence `detail`) only when the table
+  clearly misjudges a task; the codes are rendered from `TierHintReasonSchema`, split into raising
+  and lowering ones by `TIER_HINT_REASON_DIRECTION` in `packages/compiler/src/routing.ts`, which
+  fails the typecheck when a new code is not placed.
+- **Missing capabilities** (D-cs, reading 221). `_shared/result-protocol.md` tells every role that
+  asks a question to add `missing_capability` (`slug`, `reason`) only when what blocks it is a
+  capability it lacks (a tool, an engine fetcher, a runner); no role prompt repeats it. The Lead
+  adds one to an answer only when the human's answer shows a missing capability the escalation
+  does not already name, so one escalation counts once.
 
 ## What the compiler emits for the engine
 

@@ -28,6 +28,7 @@ const PR_ORDER = [
   "summary",
   "why",
   "changes",
+  "diff",
   "evidence",
   "verification",
   "risk",
@@ -53,10 +54,16 @@ describe("autoTemplateErrors", () => {
 
   it("follows the order of AUTO_TEMPLATE_SLOTS in every layout (reading 208 (5))", () => {
     for (const name of AUTO_TEMPLATE_NAMES) {
-      const at = AUTO_TEMPLATE_LAYOUT[name].map((slot) => AUTO_TEMPLATE_SLOTS.indexOf(slot));
+      // The shared doc places a PR body's `diff` right after `changes`; every other slot keeps
+      // its AUTO_TEMPLATE_SLOTS order.
+      const rest = AUTO_TEMPLATE_LAYOUT[name].filter(
+        (slot) => name !== "auto-pr" || slot !== "diff",
+      );
+      const at = rest.map((slot) => AUTO_TEMPLATE_SLOTS.indexOf(slot));
       expect(at, name).toEqual([...at].sort((a, b) => a - b));
     }
-    expect(AUTO_TEMPLATE_LAYOUT["auto-pr"]).not.toContain("diff");
+    const pr = AUTO_TEMPLATE_LAYOUT["auto-pr"];
+    expect(pr[pr.indexOf("changes") + 1]).toBe("diff");
   });
 
   it("refuses a block slot that shares its line with other text", () => {
