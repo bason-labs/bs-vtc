@@ -69,6 +69,44 @@ describe("automation notices", () => {
     expect(notice?.note).toMatch(/never merges/);
   });
 
+  it("says why a PR's evidence is partial (D-ct)", () => {
+    const notice = noticeForEvent(
+      sampleEvent(39, "upstream.pr_opened", {
+        ...ref(project, 143),
+        branch: "vtc/auto/ci_failure/1a2b3c4d",
+        evidence: "partial",
+        partial_reason: "base_build_failed",
+      }),
+    );
+    expect(notice?.detail).toBe(
+      "Post-merge CI failure · evidence partial: the base commit did not build, so there is no before picture",
+    );
+    const complete = noticeForEvent(
+      sampleEvent(40, "upstream.pr_opened", {
+        ...ref(project, 144),
+        branch: "vtc/auto/ci_failure/1a2b3c4d",
+        evidence: "complete",
+      }),
+    );
+    expect(complete?.detail).toBe("Post-merge CI failure · evidence complete");
+  });
+
+  it("shows a skip that failed with an error as a warning with its detail", () => {
+    const notice = noticeForEvent(
+      sampleEvent(41, "automation.skipped", {
+        reason: "error",
+        target: project,
+        kind: "ci_failure",
+        detail: "git push: remote rejected",
+      }),
+    );
+    expect(notice).toMatchObject({
+      tone: "warn",
+      detail: "git push: remote rejected",
+      note: "Why: it failed with an error (the detail says which).",
+    });
+  });
+
   it("shows updates and closes with their reason", () => {
     const updated = noticeForEvent(
       sampleEvent(33, "upstream.issue_updated", { ...ref(project, 41), action: "reopened" }),

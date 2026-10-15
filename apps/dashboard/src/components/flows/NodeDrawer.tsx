@@ -4,6 +4,7 @@ import type { TaskDetail, WorkflowNode } from "@vtc/shared";
 import { ExternalLink, FileText } from "lucide-react";
 import { useMemo } from "react";
 import { nodeDrawerModel } from "@/lib/flows/drawer";
+import { roleRunTier, tierSentence } from "@/lib/routing";
 import { hrefs } from "@/lib/router";
 import { nodeStateMeta } from "@/lib/states";
 import { formatLocalTime } from "@/lib/time";
@@ -101,20 +102,35 @@ export function NodeDrawer({ run, node, detail, onClose }: NodeDrawerProps) {
           {model.roleRuns.length === 0 ? null : (
             <Section title="Role runs" count={model.roleRuns.length}>
               <ul className="space-y-2 text-xs">
-                {model.roleRuns.map((r) => (
-                  <li key={r.action_id} className="space-y-0.5 rounded-xl border border-border p-2">
-                    <p className="font-medium">
-                      {r.action_id} · {r.host} · {r.model}
-                    </p>
-                    <p className="text-muted-fg">
-                      exit {r.exit ?? "in flight"} · prompt{" "}
-                      <span className="font-mono">{r.prompt_sha.slice(0, 12)}</span>
-                    </p>
-                    {r.verdicts.length === 0 ? null : (
-                      <p>{r.verdicts.map((v) => `${v.subject}: ${v.verdict}`).join(" · ")}</p>
-                    )}
-                  </li>
-                ))}
+                {model.roleRuns.map((r) => {
+                  const tier = roleRunTier(r);
+                  return (
+                    <li
+                      key={r.action_id}
+                      className="space-y-0.5 rounded-xl border border-border p-2"
+                      data-testid={`role-run-${r.action_id}`}
+                    >
+                      <p className="font-medium">
+                        <span {...REDACT}>{r.action_id}</span> · {r.host} · {r.model}
+                      </p>
+                      {tier === null ? null : (
+                        <p>
+                          {tierSentence(tier)}
+                          {tier.clamped === null ? null : (
+                            <span className="text-warn-fg"> · {tier.clamped}</span>
+                          )}
+                        </p>
+                      )}
+                      <p className="text-muted-fg">
+                        exit {r.exit ?? "in flight"} · prompt{" "}
+                        <span className="font-mono">{r.prompt_sha.slice(0, 12)}</span>
+                      </p>
+                      {r.verdicts.length === 0 ? null : (
+                        <p>{r.verdicts.map((v) => `${v.subject}: ${v.verdict}`).join(" · ")}</p>
+                      )}
+                    </li>
+                  );
+                })}
               </ul>
             </Section>
           )}

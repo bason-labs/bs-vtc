@@ -123,6 +123,24 @@ binaries must stay out of the production dependency closure (AD-2, `supply-chain
     - **Replay trials** (`role.dispatched` with `purpose: lookback_replay`, its `role.*` results
       and the headless run that carried it) are left out of every view built from the event log
       and do not mark the flow or task views stale (reading 177).
+  - Round 5 (contracts 5.4.0, spine §5 readings 218, 219, 223 and 227):
+    - **Model routing** (task view, H-9 / D-cm): for each role run with a recorded tier
+      (`RoleRunSummary.tier`, `tier_reason`, `tier_clamped`) the tier it started on and why (the
+      role's own tier, the routing table, the Planner's hint, an escalation or a budget drop), with
+      "clamped by project routing" when the project's `routing.min_tier` / `max_tier` moved it,
+      and the task's Planner hint (`Task.tier_hint`) with its reason code and sentence. The node
+      drawer's role runs say the same. A run logged before 5.4.0 has no tier and shows nothing.
+    - **Routing scorecard** (Lookback view and artifact view, D-cn):
+      `.vtc/lookback/scorecards/routing.json` per role, mode and host, one row per size, risk
+      class and start tier: both pass rates with their 95% interval (drawn on a 0–100% track),
+      tokens per success, the escalated share and the cost per task ("unpriced" when the host
+      reports none), and which cells Lookback does not read yet (fewer than
+      `LOOKBACK_LIMITS.routingMinTasks` tasks). In `?evidence=upstream` it shows without a path or
+      link, and not at all while RETRO has not written one; `[data-testid="routing-scorecard"]`
+      is the ready marker a routing PR's chart shot waits for.
+    - **Automation**: a skip with reason `error` reads "it failed with an error (the detail says
+      which)"; an `upstream.pr_opened` notice with partial evidence says why
+      (`partial_reason`, D-ct).
   - These views read the run's event log in pages of `EVENT_PAGE_LIMIT.max`, at most 50 pages; a
     longer log is read oldest first and each view says that its newest events are not shown.
   - **Visual QA**: `GateReport.visual` in the gate reports, with a link to the report at the path
@@ -150,7 +168,7 @@ Development (AD-5 rule 8):
   event log replayed as SSE, any well-formed nonce accepted), plus the dashboard's own
   `dev-fixtures/` (an evidence bundle, traceability report and visual QA report with a screenshot
   for T-1, Lookback scorecards, research facts, `screens.yaml`, pins, and a
-  sample prototype on port 4311 with `PROTOTYPE_CSP`); it keeps posted pins in memory. `pnpm dev`
+  sample prototype on port 4311 with `PROTOTYPE_CSP`, and a routing scorecard); it keeps posted pins in memory. `pnpm dev`
   proxies `/api/*` to it (`VTC_DEV_API` overrides the target). Open the dashboard on
   `http://127.0.0.1:…`, not `localhost`: the prototype's CSP allows framing by `127.0.0.1` only. `pnpm build && pnpm dev:fixtures --static out [--live]`
   serves the real export by the engine's AD-20 rules on `http://127.0.0.1:4310/`.
