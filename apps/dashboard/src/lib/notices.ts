@@ -10,7 +10,7 @@ import {
   type IncidentKind,
   type VtcEvent,
 } from "@vtc/shared";
-import { AUTO_KIND_LABELS, SKIP_REASONS } from "./automation";
+import { AUTO_KIND_LABELS, PARTIAL_EVIDENCE_REASONS, SKIP_REASONS } from "./automation";
 import { eventData, webUrl } from "./events";
 import { formatGateDuration } from "./gates";
 import { headlessOutcomeMeta, PREFLIGHT_CHECKS, PREFLIGHT_PURPOSES } from "./headless";
@@ -311,7 +311,9 @@ const automationBody = (event: VtcEvent): NoticeBody | null => {
       detail: [
         kind,
         ...(pr.issue === undefined ? [] : [`fixes issue #${String(pr.issue)}`]),
-        `evidence ${pr.evidence}`,
+        pr.evidence === "partial" && pr.partial_reason !== undefined
+          ? `evidence partial: ${PARTIAL_EVIDENCE_REASONS[pr.partial_reason]}`
+          : `evidence ${pr.evidence}`,
       ].join(" · "),
       note: [
         "VTC never merges it: a human reviews and merges it.",

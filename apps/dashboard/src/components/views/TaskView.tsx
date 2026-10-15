@@ -8,6 +8,7 @@ import { useResource } from "@/lib/useResource";
 import { FlowCanvas } from "@/components/flows/FlowCanvas";
 import { NodeDrawer } from "@/components/flows/NodeDrawer";
 import { NodeList } from "@/components/flows/NodeList";
+import { TaskRouting } from "@/components/routing/TaskRouting";
 import { Badge, StatusPill } from "@/components/ui";
 import { Breadcrumbs, Loaded, MissingParam, PageHeader } from "./common";
 
@@ -80,6 +81,11 @@ export function TaskView({
           </div>
         )}
       </Loaded>
+      {detail.data === undefined ? null : (
+        <div className="mt-4">
+          <TaskRouting detail={detail.data} />
+        </div>
+      )}
       <NodeDrawer run={run} node={selected} detail={detail.data ?? null} onClose={close} />
     </>
   );

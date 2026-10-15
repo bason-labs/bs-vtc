@@ -1,5 +1,7 @@
 import {
   FactRowSchema,
+  LOOKBACK_REPO,
+  RoutingScorecardSchema,
   ScorecardIndexSchema,
   ScorecardSchema,
   VisualReportSchema,
@@ -47,6 +49,11 @@ export const SCORECARD_INDEX = ScorecardIndexSchema.parse(
 );
 export const ENGINEER_SCORECARD = ScorecardSchema.parse(
   JSON.parse(readDevFixture(SCORECARD_INDEX.scorecards[0]?.path ?? "")),
+);
+
+/** The routing scorecard (D-cn, contracts 5.4.0) until lookback-research records one. */
+export const ROUTING_SCORECARD = RoutingScorecardSchema.parse(
+  JSON.parse(readDevFixture(LOOKBACK_REPO.routingScorecard)),
 );
 
 export const FACTS_JSONL = readDevFixture(".vtc/research/facts.jsonl");

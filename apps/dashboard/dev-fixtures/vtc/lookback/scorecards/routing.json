@@ -1,0 +1,258 @@
+{
+  "v": 1,
+  "grader_bundle_sha": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+  "window": {
+    "from": "2026-10-01T00:00:00.000Z",
+    "to": "2026-10-14T00:00:00.000Z"
+  },
+  "cells": [
+    {
+      "role": "engineer",
+      "host": "claude-code",
+      "size": "S",
+      "risk": "none",
+      "start_tier": "low",
+      "start_reason": "rule",
+      "tasks": 14,
+      "metrics": {
+        "first_round_gate_pass": {
+          "value": 0.7143,
+          "ci_low": 0.4535,
+          "ci_high": 0.8828,
+          "n": 14
+        },
+        "review_pass": {
+          "value": 0.8571,
+          "ci_low": 0.6006,
+          "ci_high": 0.9599,
+          "n": 14
+        },
+        "tokens_per_success": {
+          "value": 182000,
+          "ci_low": null,
+          "ci_high": null,
+          "n": 14
+        }
+      },
+      "escalated": {
+        "value": 0.2143,
+        "ci_low": 0.0757,
+        "ci_high": 0.4759,
+        "n": 14
+      },
+      "cost_per_task_usd": {
+        "value": 0.42,
+        "ci_low": null,
+        "ci_high": null,
+        "n": 14
+      }
+    },
+    {
+      "role": "engineer",
+      "host": "claude-code",
+      "size": "S",
+      "risk": "none",
+      "start_tier": "mid",
+      "start_reason": "rule",
+      "tasks": 12,
+      "metrics": {
+        "first_round_gate_pass": {
+          "value": 0.75,
+          "ci_low": 0.4677,
+          "ci_high": 0.9111,
+          "n": 12
+        },
+        "review_pass": {
+          "value": 0.9167,
+          "ci_low": 0.6461,
+          "ci_high": 0.9851,
+          "n": 12
+        },
+        "tokens_per_success": {
+          "value": 264000,
+          "ci_low": null,
+          "ci_high": null,
+          "n": 12
+        }
+      },
+      "escalated": {
+        "value": 0.0833,
+        "ci_low": 0.0149,
+        "ci_high": 0.3539,
+        "n": 12
+      },
+      "cost_per_task_usd": {
+        "value": 0.97,
+        "ci_low": null,
+        "ci_high": null,
+        "n": 12
+      }
+    },
+    {
+      "role": "engineer",
+      "host": "claude-code",
+      "size": "M",
+      "risk": "tagged",
+      "start_tier": "mid",
+      "start_reason": "rule",
+      "tasks": 11,
+      "metrics": {
+        "first_round_gate_pass": {
+          "value": 0.5455,
+          "ci_low": 0.2801,
+          "ci_high": 0.7873,
+          "n": 11
+        },
+        "review_pass": {
+          "value": 0.7273,
+          "ci_low": 0.4344,
+          "ci_high": 0.9025,
+          "n": 11
+        },
+        "tokens_per_success": {
+          "value": 391000,
+          "ci_low": null,
+          "ci_high": null,
+          "n": 11
+        }
+      },
+      "escalated": {
+        "value": 0.5455,
+        "ci_low": 0.2801,
+        "ci_high": 0.7873,
+        "n": 11
+      },
+      "cost_per_task_usd": {
+        "value": 1.84,
+        "ci_low": null,
+        "ci_high": null,
+        "n": 11
+      }
+    },
+    {
+      "role": "engineer",
+      "host": "claude-code",
+      "size": "M",
+      "risk": "none",
+      "start_tier": "top",
+      "start_reason": "planner_hint",
+      "tasks": 3,
+      "metrics": {
+        "first_round_gate_pass": {
+          "value": null,
+          "ci_low": null,
+          "ci_high": null,
+          "n": 3
+        },
+        "review_pass": {
+          "value": null,
+          "ci_low": null,
+          "ci_high": null,
+          "n": 3
+        },
+        "tokens_per_success": {
+          "value": null,
+          "ci_low": null,
+          "ci_high": null,
+          "n": 3
+        }
+      },
+      "escalated": {
+        "value": null,
+        "ci_low": null,
+        "ci_high": null,
+        "n": 3
+      },
+      "cost_per_task_usd": {
+        "value": null,
+        "ci_low": null,
+        "ci_high": null,
+        "n": 3
+      }
+    },
+    {
+      "role": "engineer",
+      "host": "claude-code",
+      "size": "L",
+      "risk": "high",
+      "start_tier": "top",
+      "start_reason": "rule",
+      "tasks": 4,
+      "metrics": {
+        "first_round_gate_pass": {
+          "value": null,
+          "ci_low": null,
+          "ci_high": null,
+          "n": 4
+        },
+        "review_pass": {
+          "value": null,
+          "ci_low": null,
+          "ci_high": null,
+          "n": 4
+        },
+        "tokens_per_success": {
+          "value": null,
+          "ci_low": null,
+          "ci_high": null,
+          "n": 4
+        }
+      },
+      "escalated": {
+        "value": null,
+        "ci_low": null,
+        "ci_high": null,
+        "n": 4
+      },
+      "cost_per_task_usd": {
+        "value": null,
+        "ci_low": null,
+        "ci_high": null,
+        "n": 4
+      }
+    },
+    {
+      "role": "qa",
+      "mode": "author",
+      "host": "codex",
+      "size": "M",
+      "risk": "none",
+      "start_tier": "mid",
+      "start_reason": "rule",
+      "tasks": 10,
+      "metrics": {
+        "first_round_gate_pass": {
+          "value": 0.8,
+          "ci_low": 0.4902,
+          "ci_high": 0.9433,
+          "n": 10
+        },
+        "review_pass": {
+          "value": 0.9,
+          "ci_low": 0.5958,
+          "ci_high": 0.9821,
+          "n": 10
+        },
+        "tokens_per_success": {
+          "value": 150000,
+          "ci_low": null,
+          "ci_high": null,
+          "n": 10
+        }
+      },
+      "escalated": {
+        "value": 0.2,
+        "ci_low": 0.0567,
+        "ci_high": 0.5098,
+        "n": 10
+      },
+      "cost_per_task_usd": {
+        "value": null,
+        "ci_low": null,
+        "ci_high": null,
+        "n": 10
+      }
+    }
+  ],
+  "written_at": "2026-10-14T12:00:00.000Z"
+}
