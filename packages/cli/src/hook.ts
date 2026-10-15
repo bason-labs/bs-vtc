@@ -13,6 +13,10 @@
  * staging entries (QA author mode's hidden tests, reading 65) and the OS temp directory
  * ({@link osTempDirs}). The engine stays the enforcement point.
  *
+ * Since round 5 (D-cs, spine §5 reading 221): a VTC role agent's shell call (`Bash`) that is not
+ * blocked also appends its command shapes to the engine's private spool while the repo's daemon
+ * is alive (`command-spool.ts`): the shape only, never the command; it never blocks.
+ *
  * Known limit: the host's hook input names the calling agent but not which of its dispatches it
  * serves. With concurrency 2-3, two in-flight dispatches can share an agent (two `vtc-engineer`
  * tasks). When the input's `cwd` lies in one of their worktrees, only that dispatch counts;
@@ -47,6 +51,7 @@ import {
   shellCommandOf,
   writeTargets,
 } from "./hook-rules.js";
+import { appendSpoolRows, SHELL_TOOLS, spoolRowsOf } from "./command-spool.js";
 import { unfinishedRuns, type UnfinishedRun } from "./run-log.js";
 
 export interface HookOutcome {
@@ -71,6 +76,8 @@ export interface HookDeps {
   readonly unfinishedRuns?: (repoRoot: string, deadline: number) => Promise<UnfinishedRun[]>;
   /** When the hook must have answered (epoch ms); `VTC_HOOK.timeoutMs` from now by default. */
   readonly deadline?: number;
+  /** The clock of the command-shape spool rows (D-cs); the system clock by default. */
+  readonly now?: () => Date;
 }
 
 /**
@@ -96,13 +103,28 @@ const block = (reason: string): HookOutcome => ({
   stderr: reason.slice(0, VTC_HOOK.maxReasonChars),
 });
 
+/** The repo the hook's `cwd` is in, when its daemon is alive; `null` otherwise. */
+type LiveRepo = () => Promise<string | null>;
+
+/** {@link LiveRepo} asked at most once per hook call (the write guard and the spool share it). */
+const liveRepoOf = (input: VtcHookInput, deps: HookDeps): LiveRepo => {
+  let found: Promise<string | null> | undefined;
+  return () =>
+    (found ??= (async () => {
+      const repoRoot = await deps.findRepoRoot(input.cwd ?? deps.cwd);
+      if (repoRoot === null || (await deps.liveDaemon(deps.vtcHome, repoRoot)) === null)
+        return null;
+      return repoRoot;
+    })());
+};
+
 /** The repo's unfinished run, when its daemon is alive. */
 const activeRunOf = async (
-  input: VtcHookInput,
+  liveRepo: LiveRepo,
   deps: HookDeps,
 ): Promise<{ repoRoot: string; run: RunState } | null> => {
-  const repoRoot = await deps.findRepoRoot(input.cwd ?? deps.cwd);
-  if (repoRoot === null || (await deps.liveDaemon(deps.vtcHome, repoRoot)) === null) return null;
+  const repoRoot = await liveRepo();
+  if (repoRoot === null) return null;
   const run = core.activeRun([...deps.loadRuns(repoRoot)]);
   return run === undefined || run.run.finished_at !== undefined ? null : { repoRoot, run };
 };
@@ -213,15 +235,19 @@ const writeViolation = (
   return `${path || target} is outside your write scope (${scope.length === 0 ? "read-only" : scope.join(", ")})`;
 };
 
-const preToolUse = async (input: VtcHookInput, deps: HookDeps): Promise<HookOutcome> => {
-  if (!isVtcRoleAgent(input.agent_type)) return ALLOW;
-  const agent = agentBaseName(input.agent_type);
-  const toolInput = input.tool_input ?? {};
-  const shell = shellCommandOf(toolInput);
+/** The write guard of a role agent's call (contract rule 4): allow, or block with the reason. */
+const guardWrites = async (
+  input: VtcHookInput,
+  agentType: string,
+  shell: string | null,
+  liveRepo: LiveRepo,
+  deps: HookDeps,
+): Promise<HookOutcome> => {
+  const agent = agentBaseName(agentType);
   const gitWrite = shell === null ? null : gitWriteIn(shell);
-  const targets = writeTargets(input.tool_name, toolInput, input.cwd ?? deps.cwd);
+  const targets = writeTargets(input.tool_name, input.tool_input ?? {}, input.cwd ?? deps.cwd);
   if (gitWrite === null && targets.length === 0) return ALLOW;
-  const active = await activeRunOf(input, deps);
+  const active = await activeRunOf(liveRepo, deps);
   if (active === null) return ALLOW;
   if (gitWrite !== null)
     return block(
@@ -254,6 +280,50 @@ const preToolUse = async (input: VtcHookInput, deps: HookDeps): Promise<HookOutc
       return block(`VTC: ${violation}. Write only inside your task pack's write scope.`);
   }
   return ALLOW;
+};
+
+/**
+ * D-cs (reading 221): the shapes of a role agent's shell call go to the engine's spool
+ * (`command-spool.ts`), only while the repo's daemon is alive to drain it and the deadline has
+ * not passed. Never the raw command; any failure is swallowed, so it never blocks.
+ */
+const spoolShapes = async (
+  input: VtcHookInput,
+  agentType: string,
+  shell: string,
+  liveRepo: LiveRepo,
+  deps: HookDeps,
+): Promise<void> => {
+  try {
+    if (shell.trim() === "") return;
+    const repoRoot = await liveRepo();
+    if (repoRoot === null || Date.now() >= (deps.deadline ?? Infinity)) return;
+    const rows = spoolRowsOf({
+      command: shell,
+      agent: agentType,
+      session: input.session_id,
+      cwd: input.cwd ?? deps.cwd,
+      at: (deps.now ?? (() => new Date()))(),
+    });
+    appendSpoolRows(deps.vtcHome, repoRoot, rows);
+  } catch {
+    // fail open: a lost row loses one tool-signal count, never the call
+  }
+};
+
+const preToolUse = async (input: VtcHookInput, deps: HookDeps): Promise<HookOutcome> => {
+  const agentType = input.agent_type;
+  if (!isVtcRoleAgent(agentType)) return ALLOW;
+  const shell = shellCommandOf(input.tool_input ?? {});
+  const liveRepo = liveRepoOf(input, deps);
+  const outcome = await guardWrites(input, agentType, shell, liveRepo, deps);
+  if (
+    outcome.code === VTC_HOOK.exit.allow &&
+    shell !== null &&
+    SHELL_TOOLS.has(input.tool_name ?? "")
+  )
+    await spoolShapes(input, agentType, shell, liveRepo, deps);
+  return outcome;
 };
 
 /** At most this many runs get a hint, the newest; older ones are counted in one line. */
@@ -294,7 +364,7 @@ const sessionStart = async (input: VtcHookInput, deps: HookDeps): Promise<HookOu
 
 const subagentStop = async (input: VtcHookInput, deps: HookDeps): Promise<HookOutcome> => {
   if (!isVtcRoleAgent(input.agent_type)) return ALLOW;
-  if ((await activeRunOf(input, deps)) === null) return ALLOW;
+  if ((await activeRunOf(liveRepoOf(input, deps), deps)) === null) return ALLOW;
   return {
     code: VTC_HOOK.exit.allow,
     stdout: `VTC: role agent ${agentBaseName(input.agent_type)} has stopped. Submit its outcome with the vtc \`submit\` tool and the action_id of its spawn_role action: kind "result" with its RoleResult, or kind "failure" with the reason it did not finish.\n`,

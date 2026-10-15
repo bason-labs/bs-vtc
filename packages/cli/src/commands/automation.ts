@@ -121,11 +121,11 @@ const readReport = async (
 const DEL_AND_C1 = /[\u007f-\u009f]/g;
 
 /**
- * The report as JSON with every control character escaped: `JSON.stringify` escapes C0 controls
+ * A report as JSON with every control character escaped: `JSON.stringify` escapes C0 controls
  * only, so DEL and C1 (an 8-bit CSI) are escaped here too. They can only stand inside a string,
  * since JSON's own syntax is ASCII, so the text stays the same JSON.
  */
-export const jsonText = (report: AutomationReport): string =>
+export const jsonText = (report: unknown): string =>
   JSON.stringify(report, null, 2).replace(
     DEL_AND_C1,
     (c) => `\\u${c.charCodeAt(0).toString(16).padStart(4, "0")}`,

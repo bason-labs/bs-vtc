@@ -26,7 +26,7 @@ import {
   inspectCheckout,
   type CheckoutFacts,
 } from "../src/automation-checks.js";
-import type { AutomationProbe } from "../src/automation-wiring.js";
+import type { AutomationProbe, HostingRequest } from "../src/automation-wiring.js";
 import { createDoctorCommand, type DoctorCommandEnv } from "../src/commands/doctor.js";
 import type { DoctorCheck } from "../src/doctor-checks.js";
 import type { Exec } from "../src/process.js";
@@ -47,6 +47,10 @@ const userRead = (config: Partial<UserConfig> = {}): UserConfigRead => ({
   path: "/h/config.yaml",
   config: { version: 1, env_passthrough: [], ...config },
 });
+
+const USER_BRANCH: HostingRequest = { hosting: "branch", source: "user" };
+const USER_ATTACH: HostingRequest = { hosting: "attach", source: "user" };
+const PREFERRED: HostingRequest = { hosting: "attach", source: "preferred" };
 
 const BROWSER_OK: DoctorCheck = { name: "browser", status: "ok", detail: "chromium 140" };
 const BROWSER_NONE: DoctorCheck = { name: "browser", status: "warn", detail: "none" };
@@ -72,17 +76,17 @@ describe("the gh login (AD-27 rule 1: gh auth status, exit code only)", () => {
 });
 
 describe("evidence hosting and capture (reading 196, D-ce)", () => {
-  it("names the default branch hosting, and that this gh could attach", () => {
-    expect(checkEvidence(PROBE, "branch", BROWSER_OK)).toEqual({
+  it("names the branch hosting the user chose, and that this gh could attach", () => {
+    expect(checkEvidence(PROBE, USER_BRANCH, BROWSER_OK)).toEqual({
       name: "evidence",
       status: "ok",
       detail:
-        "PR media go to the orphan vtc-evidence branch (automation.evidence_hosting: branch, the default); this gh could attach them instead (attach); capture uses vtc's pinned browser",
+        "PR media go to the orphan vtc-evidence branch (automation.evidence_hosting: branch); this gh could attach them instead (attach); capture uses vtc's pinned browser",
     });
   });
 
   it("attaches with gh --attach when asked and allowed", () => {
-    expect(checkEvidence(PROBE, "attach", BROWSER_OK).detail).toMatch(
+    expect(checkEvidence(PROBE, USER_ATTACH, BROWSER_OK).detail).toMatch(
       /^PR media are attached with gh --attach \(gh 2\.101\.0, github\.com\); capture uses vtc's pinned browser$/,
     );
   });
@@ -90,7 +94,7 @@ describe("evidence hosting and capture (reading 196, D-ce)", () => {
   it("warns when attach was asked for but this gh or remote cannot do it", () => {
     const check = checkEvidence(
       { ...PROBE, ghVersion: "gh version 2.98.0 (2026-08-01)" },
-      "attach",
+      USER_ATTACH,
       BROWSER_OK,
     );
     expect(check.status).toBe("warn");
@@ -99,8 +103,42 @@ describe("evidence hosting and capture (reading 196, D-ce)", () => {
     );
   });
 
+  it("attaches by default when the user set nothing and gh and the remote allow it (D-cc)", () => {
+    expect(checkEvidence(PROBE, PREFERRED, BROWSER_OK)).toEqual({
+      name: "evidence",
+      status: "ok",
+      detail:
+        "PR media are attached with gh --attach (gh 2.101.0, github.com; the default, automation.evidence_hosting unset); capture uses vtc's pinned browser",
+    });
+  });
+
+  it("falls back to the branch without a warning when the default attach is not possible", () => {
+    const old = checkEvidence(
+      { ...PROBE, ghVersion: "gh version 2.98.0 (2026-08-01)" },
+      PREFERRED,
+      BROWSER_OK,
+    );
+    expect(old).toEqual({
+      name: "evidence",
+      status: "ok",
+      detail:
+        "PR media go to the orphan vtc-evidence branch: the default gh --attach is not possible here (gh version 2.98.0 is older than 2.99.0, the first with --attach); capture uses vtc's pinned browser",
+    });
+    expect(checkEvidence({ ...PROBE, githubRemote: false }, PREFERRED, BROWSER_OK).detail).toMatch(
+      /not possible here \(the origin remote is not on github\.com/,
+    );
+  });
+
+  it("keeps the branch when ~/.vtc/config.yaml does not parse", () => {
+    expect(
+      checkEvidence(PROBE, { hosting: "branch", source: "unreadable" }, BROWSER_OK).detail,
+    ).toMatch(
+      /^PR media go to the orphan vtc-evidence branch \(~\/\.vtc\/config\.yaml does not parse, so the hosting that is always possible\)/,
+    );
+  });
+
   it("says capture needs vtc's browser, never the project's Playwright (Playwright presence)", () => {
-    const check = checkEvidence(PROBE, "branch", BROWSER_NONE);
+    const check = checkEvidence(PROBE, USER_BRANCH, BROWSER_NONE);
     expect(check.status).toBe("warn");
     expect(check.detail).toMatch(
       /no browser installed by vtc: evidence capture needs vtc's pinned browser \(never the project's own Playwright\), so no automatic PR opens \(issues still do\) until you run vtc doctor --install-browser$/,
@@ -108,9 +146,9 @@ describe("evidence hosting and capture (reading 196, D-ce)", () => {
   });
 });
 
-describe("a build without the evidence recorder (merge note, readings 207 and 209)", () => {
+describe("a build without the evidence recorder (readings 207 and 209)", () => {
   it("warns that no automatic PR opens, in place of the capture note", () => {
-    const check = checkEvidence(PROBE, "branch", BROWSER_OK, false);
+    const check = checkEvidence(PROBE, USER_BRANCH, BROWSER_OK, false);
     expect(check.status).toBe("warn");
     expect(check.detail).toMatch(
       /; this vtc build has no evidence recorder, so no automatic PR opens \(issues still do\)$/,
@@ -358,7 +396,9 @@ describe("vtc doctor prints the automation checks", () => {
     });
     expect(code).toBe(0);
     expect(text).toMatch(/^warn {2}gh login {5}not logged in \(gh auth status\)/m);
-    expect(text).toMatch(/^ok {4}evidence {5}PR media go to the orphan vtc-evidence branch/m);
+    expect(text).toMatch(
+      /^ok {4}evidence {5}PR media are attached with gh --attach .*the default/m,
+    );
     expect(text).toMatch(/^info {2}ffmpeg {7}not on PATH \(optional\): GIF previews off/m);
     expect(text).toMatch(/^info {2}automation {3}issues off, PRs off/m);
     expect(text).toMatch(/^info {2}billing {6}claude-code: billed through your cloud provider/m);
