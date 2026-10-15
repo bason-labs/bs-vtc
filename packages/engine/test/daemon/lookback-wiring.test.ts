@@ -47,7 +47,7 @@ import {
   type RunState,
 } from "../../src/core/index.js";
 import { ALL_FIXTURE_ROLES } from "../fixtures/roles.js";
-import { lookbackWindow, wireLookback } from "../../src/daemon/index.js";
+import { lookbackWindow, newAgentFact, wireLookback } from "../../src/daemon/index.js";
 import {
   lookbackEvent,
   lookbackTargets,
@@ -683,6 +683,39 @@ describe("which replays the shipped plugins can reach on a Claude Lead (spine §
   }, 60_000);
 });
 
+describe("Lookback's new-agent signals reach automation (D-cd)", () => {
+  it("as a new_agent fact whose subject is the proposed role; only a role VTC named after a shipped discipline may leave the machine", () => {
+    const signal = {
+      kind: "new_agent" as const,
+      basis: "discipline_failures" as const,
+      proposed_role: "engineer_mobile",
+      discipline: "mobile" as const,
+      stack_packs: [],
+      failures: 4,
+      escalations: 0,
+      traces: ["r1:a-1"],
+      evidence_only: true as const,
+      labels: ["needs-eval"],
+    };
+    expect(newAgentFact("r1", signal, "2026-10-15T08:00:00.000Z")).toMatchObject({
+      target: "upstream",
+      kind: "new_agent",
+      run: "r1",
+      subject: "engineer_mobile",
+      role: "engineer_mobile",
+      metrics: { failures: 4, escalations: 0 },
+    });
+    // a stack named in the project (say after a client) is fingerprinted, never sent
+    const stack = newAgentFact(
+      "r1",
+      { ...signal, basis: "stack_failures", proposed_role: "engineer_globexpay" },
+      "2026-10-15T08:00:00.000Z",
+    );
+    expect(stack.subject).toBe("engineer_globexpay");
+    expect(stack).not.toHaveProperty("role");
+  });
+});
+
 describe("the daemon wires the Lookback module (AD-21)", () => {
   it("compiled as shipped (spec_verifier switched, D-bl), a human's pin reaches the Spec Verifier's pack (reading 176)", async () => {
     const { catalog, locked } = shippedPlugins();
@@ -819,6 +852,8 @@ describe("the daemon wires the Lookback module (AD-21)", () => {
         written.push([run, existsSync(join(h.repo, LOOKBACK_REPO.scorecardIndex))]);
       },
     );
+    // D-ch: RETRO can replay a verdict role (the Spec Verifier) through the verdict grader
+    expect(h.engine.lookbackRetro()).toHaveProperty("gradeVerdict", expect.any(Function));
     const actions = await throughPlan(h, [draft("T-1")], SPEC_ONE);
     await authorTests(h, only(actions, "qa"));
     await build(h, only((await h.engine.next({}, CLAUDE)).actions, "engineer"));

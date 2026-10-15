@@ -10,6 +10,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   autoBranchName,
   MERGE_LEVEL_LEDGER,
+  PACK_INPUT_TYPES,
   parseEventLog,
   TaskPackSchema,
   type VtcEvent,
@@ -307,7 +308,7 @@ describe("automatic runs (AD-27 rule 2)", () => {
     await h.release();
   });
 
-  it("the Spec Verifier reads the issue (the run's request), and every gate still runs", async () => {
+  it("the Spec Verifier reads the issue as its automation_issue input (reading 212(16)), and every gate still runs", async () => {
     const h = createHarness({ project: { merge_level: 1 } });
     await h.engine.startAutomatic(REQUEST, ISSUE, CLAUDE);
     const { planner } = await frontHalf(h);
@@ -325,7 +326,12 @@ describe("automatic runs (AD-27 rule 2)", () => {
       JSON.parse(readFileSync(join(h.repo, verifier.pack.replace(/\.md$/, ".json")), "utf8")),
     );
     const run = h.engine.status({}).run.id;
-    expect(pack.inputs).toContainEqual({ type: "request", path: `.vtc/runs/${run}/request.md` });
+    expect(pack.inputs).toContainEqual({
+      type: PACK_INPUT_TYPES.automationIssue,
+      path: `.vtc/runs/${run}/request.md`,
+    });
+    // only the engine's automation_issue input says the run is automatic, never a request input
+    expect(pack.inputs.filter((i) => i.type === "request")).toEqual([]);
     // the base-fail check and the round's gates ran as for any run
     expect(h.gates.requests.map((r) => r.reason)).toEqual(
       expect.arrayContaining(["base_fail_check", "round"]),

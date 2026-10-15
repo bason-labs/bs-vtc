@@ -217,6 +217,38 @@ describe("engine facts in the module's vocabulary", () => {
       run: "r1",
       at: "2026-10-14T10:00:00.000Z",
     });
+    // D-bv (4): an advisory in VTC's own dependencies (the daemon hands one over only on VTC's
+    // own repo)
+    expect(
+      upstreamModuleFact(
+        fact({ kind: "security", advisory: { id: "GHSA-aaaa-bbbb-cccc", package: "zod" } }),
+      ),
+    ).toEqual({
+      type: "security_advisory",
+      advisoryId: "GHSA-aaaa-bbbb-cccc",
+      package: "zod",
+      at: "2026-10-14T10:00:00.000Z",
+    });
+    // D-cd: Lookback's new-agent signal
+    expect(
+      upstreamModuleFact(
+        fact({
+          kind: "new_agent",
+          subject: "engineer_ml",
+          role: "engineer_ml",
+          metrics: { failures: 4, escalations: 0 },
+        }),
+      ),
+    ).toEqual({
+      type: "improvement",
+      kind: "new_agent",
+      subject: "engineer_ml",
+      role: "engineer_ml",
+      metrics: { failures: 4, escalations: 0 },
+      at: "2026-10-14T10:00:00.000Z",
+    });
+    expect(upstreamModuleFact(fact({ kind: "security" }))).toBeNull();
+    expect(upstreamModuleFact(fact({ kind: "new_agent" }))).toBeNull();
     expect(upstreamModuleFact(fact({ kind: "lookback", proposal: "p-1" }))).toBeNull();
     // a project fact without a stable identity raises nothing
     expect(upstreamModuleFact(fact({ target: "project", kind: "parked" }))).toBeNull();

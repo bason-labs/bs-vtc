@@ -688,6 +688,19 @@ export const approvedDirection = (
   state: RunHandle["state"],
   step: Pick<StepSpec, "role">,
 ): string | undefined => {
+  const g2 = approvedDesign(state, step);
+  return g2?.design_exit === "category_standard" ? undefined : g2?.design_direction;
+};
+
+/**
+ * What the latest G2 approval chose, for a post-G2 UI dispatch of a role that judges against it
+ * (spine §5 readings 179 and 211), or `undefined` before G2, on a run without UI, or for any other
+ * role.
+ */
+const approvedDesign = (
+  state: RunHandle["state"],
+  step: Pick<StepSpec, "role">,
+): { readonly design_direction?: string; readonly design_exit?: string } | undefined => {
   if (!state.run.has_ui || !DIRECTION_ROLES.has(step.role)) return undefined;
   if (["intake", "discover", "specify", "g1", "design", "g2"].includes(state.run.phase))
     return undefined;
@@ -695,9 +708,21 @@ export const approvedDirection = (
     (e) =>
       e.type === "gate.approved" && ((e.data as { gates?: string[] }).gates ?? []).includes("G2"),
   );
-  const data = approval?.data as { design_direction?: string; design_exit?: string } | undefined;
-  return data?.design_exit === "category_standard" ? undefined : data?.design_direction;
+  return approval?.data;
 };
+
+/**
+ * `TaskPack.design_exit` (spine §5 reading 211, amending 179): `category_standard` when the human
+ * took that exit at G2, for the same post-G2 UI roles {@link approvedDirection} serves, so they
+ * can tell "build the category standard" from "no direction known".
+ */
+export const approvedDesignExit = (
+  state: RunHandle["state"],
+  step: Pick<StepSpec, "role">,
+): "category_standard" | undefined =>
+  approvedDesign(state, step)?.design_exit === "category_standard"
+    ? "category_standard"
+    : undefined;
 
 /** Renders the pack for a step and writes it under `.vtc/state/packs/` (AD-14 rule 5). */
 const packFor = (k: Kernel, h: RunHandle, step: StepSpec, actionId: string): TaskPackInput => {
@@ -732,8 +757,12 @@ const packFor = (k: Kernel, h: RunHandle, step: StepSpec, actionId: string): Tas
     inputs.push({ type: "request", path: `.vtc/runs/${state.id}/request.md` });
   } else if (state.automation !== null && step.role === "spec_verifier") {
     // an automatic run's issue is its spec: the Spec Verifier checks the work against it too
-    // (AD-27 rule 2, D-cd)
-    inputs.push({ type: "request", path: `.vtc/runs/${state.id}/request.md` });
+    // (AD-27 rule 2, D-cd), and only this input type tells it the run is automatic (reading
+    // 212(16))
+    inputs.push({
+      type: PACK_INPUT_TYPES.automationIssue,
+      path: `.vtc/runs/${state.id}/request.md`,
+    });
   }
   if (task !== undefined && step.role === "engineer") {
     const qa = lastQaAuthor(state, task.id);
@@ -772,6 +801,7 @@ const packFor = (k: Kernel, h: RunHandle, step: StepSpec, actionId: string): Tas
   }
   // reading 179: a post-G2 UI role judges against the direction the human approved
   const direction = approvedDirection(state, step);
+  const designExit = approvedDesignExit(state, step);
   return {
     v: 1,
     run: state.id,
@@ -787,6 +817,7 @@ const packFor = (k: Kernel, h: RunHandle, step: StepSpec, actionId: string): Tas
     ...(step.subject === undefined ? {} : { subject: step.subject }),
     ...depthsFor(k, h, step),
     ...(direction === undefined ? {} : { design_direction: direction }),
+    ...(designExit === undefined ? {} : { design_exit: designExit }),
     ...(about === undefined || state.intents.get(about.id) === undefined
       ? {}
       : { intent: state.intents.get(about.id) }),

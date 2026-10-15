@@ -8,7 +8,8 @@
  * `automation.*`) are not read here: the engine reads them at the run's commit.
  *
  * The login is checked only through `gh auth status`'s exit code (AD-27 rule 1): nothing it prints
- * is kept, and no token is ever read.
+ * is kept, and no token is ever read. The daemon asks through `AutomationDeps.ghLogin`
+ * ({@link ghLoginProbe}) when it starts and then periodically (D-bz).
  *
  * The user's settings are read live (AD-27 rule 5): `upstream.share` is an opt-out the engine
  * checks when an item is queued and again when it is sent, and the daemon runs for long, so each
@@ -72,7 +73,7 @@ export const requestedHostingOf = (read: UserConfigRead): EvidenceHosting =>
 export interface AutomationProbe {
   /** `gh --version`'s first line, or `null` when gh is not on PATH. */
   readonly ghVersion: string | null;
-  /** `gh auth status` exited 0; `null` when it was not asked (the daemon never asks). */
+  /** `gh auth status` exited 0; `null` when it was not asked (the daemon asks later, `ghLogin`). */
   readonly ghLoggedIn: boolean | null;
   /** The repo's `origin` push URL is on github.com (`isGithubUrl`; GHES is not). */
   readonly githubRemote: boolean;
@@ -134,17 +135,37 @@ export const probeAutomation = async (
     remote(),
   ]);
   let ghLoggedIn: boolean | null = null;
-  if (options.login)
-    ghLoggedIn =
-      ghVersion !== null &&
-      (
-        await exec(gh, ["auth", "status"], {
-          cwd: options.cwd,
-          env: { GH_PROMPT_DISABLED: "1" },
-          timeoutMs: 20_000,
-        })
-      ).code === 0;
+  if (options.login) ghLoggedIn = ghVersion !== null && (await ghAuthStatus(exec, gh, options.cwd));
   return { ghVersion, ghLoggedIn, githubRemote, ffmpeg };
+};
+
+/**
+ * Whether `gh auth status` exits 0 (AD-27 rule 1): only the exit code is read, prompts are
+ * disabled, and the command runs by name in the user's own directory.
+ */
+const ghAuthStatus = async (exec: Exec, gh: string, cwd: string): Promise<boolean> =>
+  (
+    await exec(gh, ["auth", "status"], {
+      cwd,
+      env: { GH_PROMPT_DISABLED: "1" },
+      timeoutMs: 20_000,
+    })
+  ).code === 0;
+
+/**
+ * `AutomationDeps.ghLogin` (D-bz, contracts 5.2.0): the daemon asks it when it starts and then
+ * periodically, so a logged-out gh turns automation off with a visible note. Without gh on PATH
+ * (`ghVersion` null at the daemon's probe) it answers `false` and runs nothing.
+ */
+export const ghLoginProbe = (
+  exec: Exec,
+  options: { readonly ghVersion: string | null; readonly cwd: string; readonly gh?: string },
+): (() => Promise<boolean>) => {
+  const gh = options.gh ?? "gh";
+  return () =>
+    options.ghVersion === null
+      ? Promise.resolve(false)
+      : ghAuthStatus(exec, gh, options.cwd).catch(() => false);
 };
 
 /** The hosting PR media get, and why it is not the one the user asked for. */
@@ -291,6 +312,8 @@ export const buildAutomationDeps = (input: {
   readonly probe: AutomationProbe;
   readonly factories: AutomationFactories;
   readonly gateDeps: EvidenceRecorderDeps;
+  /** `AutomationDeps.ghLogin` ({@link ghLoginProbe}); absent: none is passed. */
+  readonly ghLogin?: () => Promise<boolean>;
 }): AutomationDeps => {
   const { factories, probe, user } = input;
   const create = factories.evidence;
@@ -302,6 +325,7 @@ export const buildAutomationDeps = (input: {
     ffmpeg: probe.ffmpeg !== null,
     ...(create === undefined ? {} : { evidence: lazyRecorder(() => create(input.gateDeps)) }),
     ...(factories.plumbing === undefined ? {} : { plumbing: factories.plumbing }),
+    ...(input.ghLogin === undefined ? {} : { ghLogin: input.ghLogin }),
   };
 };
 

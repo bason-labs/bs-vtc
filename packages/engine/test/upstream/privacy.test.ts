@@ -96,6 +96,29 @@ describe("the allowlist projection", () => {
   });
 });
 
+describe("the model id sent upstream", () => {
+  it("keeps a public model id and sends any other as custom: an ARN, a gateway alias or a path never leaves", () => {
+    const model = (id: string): string | undefined =>
+      projectUpstreamReport(facts({ model: id })).model;
+    expect(model("gpt-5.5-codex")).toBe("gpt-5.5-codex");
+    expect(model("opus")).toBe("opus");
+    expect(model("opus[1m]")).toBe("opus");
+    expect(model("claude-sonnet-4-5-20250929")).toBe("claude-sonnet-4-5-20250929");
+    expect(model("us.anthropic.claude-sonnet-4-5-20250929-v1:0")).toBe(
+      "us.anthropic.claude-sonnet-4-5-20250929-v1:0",
+    );
+    expect(model("claude-sonnet-4-5@20250929")).toBe("claude-sonnet-4-5@20250929");
+    expect(model("o4-mini")).toBe("o4-mini");
+    // D-ci provider billing: an application inference profile ARN holds the AWS account id
+    expect(
+      model("arn:aws:bedrock:us-east-1:123456789012:application-inference-profile/abc123"),
+    ).toBe("custom");
+    expect(model("payroll-gateway-prod")).toBe("custom");
+    expect(model("projects/acme-prod/locations/us/endpoints/42")).toBe("custom");
+    expect(model("claude-sonnet-4-5-123456789012")).toBe("custom");
+  });
+});
+
 describe("the denylist", () => {
   it("names the repo, owner, remote path, root segments, clients and home", () => {
     const deny = projectDenylist(IDENTITY);
@@ -115,7 +138,34 @@ describe("the denylist", () => {
     expect(deny).not.toContain("clients");
     expect(containsDenied("role implementer on Initech's app", deny)).toBe(true);
     expect(containsDenied("INITECH", deny)).toBe(true);
-    expect(containsDenied("initechnology", deny)).toBe(false);
+    // spine §5 reading 212(12): a value of 4 or more characters matches as a substring, so a
+    // client or repo name joined to other letters is still the project's name
+    expect(containsDenied("initechnology", deny)).toBe(true);
+    expect(containsDenied("the InitechPortal service", deny)).toBe(true);
+    expect(containsDenied("acmeApi", projectDenylist({ clientNames: ["acme"] }))).toBe(true);
+    expect(containsDenied("globexpay", deny)).toBe(true);
+  });
+
+  it("matches a value under 4 characters as a whole word only (reading 212(12))", () => {
+    const deny = projectDenylist({ clientNames: ["Ion"] });
+    expect(containsDenied("the Ion client", deny)).toBe(true);
+    expect(containsDenied("a validation error", deny)).toBe(false);
+    expect(containsDenied("IonPortal", deny)).toBe(false);
+  });
+
+  it("leaves VTC's own vocabulary out of the denylist, so a substring match cannot refuse every report", () => {
+    const deny = projectDenylist({
+      repoRoot: "/Users/alice/work/roles/prompt",
+      clientNames: ["Lookback", "Replay"],
+      homeDir: "/Users/alice",
+    });
+    expect(deny).not.toContain("roles");
+    expect(deny).not.toContain("prompt");
+    expect(deny).not.toContain("Lookback");
+    expect(deny).not.toContain("Replay");
+    expect(containsDenied("roles/engineer/prompt.md: improve the lookback replay", deny)).toBe(
+      false,
+    );
   });
 });
 
@@ -154,13 +204,17 @@ describe("redaction fails closed", () => {
     expect(() => {
       assertUpstreamSafe(report, ["token ghp_" + "a".repeat(36)], CHECK);
     }).toThrow(expect.objectContaining({ reason: "privacy" }) as Error);
-    const leaky = projectUpstreamReport(facts({ model: "sk-live-payroll-SECRET-1234" }));
+    // the projection sends such a model id as `custom`; the check still refuses one that got in
+    expect(projectUpstreamReport(facts({ model: "sk-live-payroll-SECRET-1234" })).model).toBe(
+      "custom",
+    );
+    const leaky = { ...projectUpstreamReport(facts()), model: "sk-live-payroll-SECRET-1234" };
     expect(() => {
       assertUpstreamSafe(leaky, [], CHECK);
     }).toThrow(expect.objectContaining({ reason: "privacy" }) as Error);
   });
   it("skips with privacy when a project identifier appears, and never says which", () => {
-    const report = projectUpstreamReport(facts({ model: "globex-tuned" }));
+    const report = { ...projectUpstreamReport(facts()), model: "globex-tuned" };
     try {
       assertUpstreamSafe(report, [], CHECK);
       expect.unreachable();

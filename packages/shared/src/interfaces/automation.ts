@@ -249,4 +249,12 @@ export interface AutomationDeps {
   readonly hosting: EvidenceHosting;
   /** ffmpeg is on PATH (GIF previews; without it, `branch` hosting marks evidence partial). */
   readonly ffmpeg: boolean;
+  /**
+   * Whether the user's `gh` is logged in now (D-bz): `gh auth status`'s exit code only, prompts
+   * disabled, nothing it prints kept and no token read (AD-27 rule 1); `false` without gh. The
+   * daemon asks when it starts and again on its sweep timer, and `AutomationContext.ghLoggedIn`
+   * is the last answer, so a logged-out gh turns automation off with a visible note. Absent: the
+   * caller checked the login before it injected automation. New in 5.2.0.
+   */
+  readonly ghLogin?: () => Promise<boolean>;
 }

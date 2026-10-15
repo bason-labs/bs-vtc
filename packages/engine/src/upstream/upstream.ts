@@ -34,6 +34,9 @@ import {
   type PlumbingChange,
   type PromptProposal,
   type ReplayResult,
+  type Scorecard,
+  type AutomationRunRef,
+  type StartInput,
   type UpstreamReport,
 } from "@vtc/shared";
 import type { z } from "zod";
@@ -70,7 +73,16 @@ import {
   selfDenylist,
   type ProjectIdentity,
 } from "./privacy.js";
-import { buildLookbackPr, UPSTREAM_EVIDENCE_ROUTE } from "./lookback-pr.js";
+import {
+  buildLookbackPr,
+  isEngineerProfileYaml,
+  roleYamlPath,
+  rolePromptIdentitySha,
+} from "./lookback-pr.js";
+import {
+  upstreamEvidenceSnapshot,
+  type UpstreamEvidenceData,
+} from "./evidence/upstream-snapshot.js";
 import { upstreamIssueSlots } from "./report-render.js";
 import { ensureDirNoFollow, repoFileName } from "./safe-fs.js";
 import { AutomationSkip, isAutomationSkip } from "./skip.js";
@@ -83,7 +95,12 @@ import {
 } from "./remote-refs.js";
 import { createStaging, stagingRootFor, type Staging } from "./staging.js";
 import { upstreamStateDir } from "./state-dir.js";
-import { evaluateTrigger, type AutomationFact, type AutoWorkItem } from "./triggers.js";
+import {
+  evaluateTrigger,
+  fixableItem,
+  type AutomationFact,
+  type AutoWorkItem,
+} from "./triggers.js";
 
 type Schemas = typeof UPSTREAM_EVENT_PAYLOAD_SCHEMAS;
 export type UpstreamEventType = keyof Schemas;
@@ -160,7 +177,18 @@ export interface UpstreamDeps {
    * this installation's ledger counts as someone else's.
    */
   readonly remoteRefs?: (repoRoot: string) => RemoteRefs;
+  /**
+   * Starts an automatic run from one of its issues (D-bv "a fixable one becomes a normal VTC run",
+   * D-cd; AD-27 rule 2): the daemon's `Engine.startAutomatic`, which queues the run until no other
+   * run of the repo is open. The module calls it once, right after it opened the issue of a
+   * fixable item (`fixableItem`) with `automation.prs` on; for a VTC-repo item only when the
+   * project is the bs-vtc checkout itself ("VTC builds VTC"). Absent: no run is started.
+   */
+  readonly startRun?: (input: StartInput, issue: AutomationRunRef) => Promise<void>;
 }
+
+/** The longest request an automatic run is started with (`StartInput.request` holds 20 000). */
+const RUN_REQUEST_MAX = 12_000;
 
 export type AutomationOutcome =
   /** The fact raises nothing. */
@@ -222,6 +250,12 @@ export interface AutoPrInput {
       readonly after: string;
       readonly label: string;
     }[];
+    /**
+     * An upstream-safe page's VTC-side data (a Lookback replay, the role's scorecards): the
+     * module builds that page's read routes from it and the report, never from `snapshot`
+     * (reading 212(3)).
+     */
+    readonly upstream?: UpstreamEvidenceData;
   };
   /**
    * The Spec-Verifier verdict so far (AD-27 rule 2): the PR is marked ready only on `pass`, or on
@@ -245,7 +279,12 @@ export interface Upstream {
    * `vtc/auto/lookback/<fp8>`, opens a draft with upstream-safe evidence, then marks it ready.
    */
   openLookbackPr(
-    input: { readonly replay: ReplayResult; readonly proposal: PromptProposal },
+    input: {
+      readonly replay: ReplayResult;
+      readonly proposal: PromptProposal;
+      /** The role's scorecards (VTC-side numbers), for the evidence charts. */
+      readonly scorecards?: readonly Scorecard[];
+    },
     ctx: ProjectContext,
   ): Promise<AutomationOutcome>;
   /** Marks an automatic PR ready once its Spec-Verifier verdict passed (automatic runs). */
@@ -549,6 +588,7 @@ export const createUpstream = (deps: UpstreamDeps): Upstream => {
             url: issue.url,
             ...(regressionOf === undefined ? {} : { regression_of: regressionOf }),
           });
+          await startFixRun(item, repo, issue.number, rendered, ctx);
           return { status: "issue", action: "opened", number: issue.number, url: issue.url };
         }
         case "update": {
@@ -620,6 +660,54 @@ export const createUpstream = (deps: UpstreamDeps): Upstream => {
         }
       }
     });
+  };
+
+  /**
+   * D-bv / D-cd (AD-27 rule 2): the issue just opened for a fixable item becomes an automatic run,
+   * whose spec is the issue (G1 and G2 skipped; the Spec Verifier checks the PR against it). Only
+   * with `automation.prs` on, and for a VTC-repo item only on the bs-vtc checkout itself (another
+   * project's engine cannot build bs-vtc). A run that cannot be started leaves the issue as it is.
+   */
+  const startFixRun = async (
+    item: AutoWorkItem,
+    repo: GitHubRepo,
+    number: number,
+    rendered: { readonly title: string; readonly body: string },
+    ctx: ProjectContext,
+  ): Promise<void> => {
+    const start = deps.startRun;
+    if (start === undefined || !fixableItem(item)) return;
+    if (item.target === "upstream" && !isSelf(ctx)) return;
+    const { settings, context } = ctx.state();
+    if (context.paused || !settings.prs) return;
+    if (item.target === "upstream" && !settings.upstream) return;
+    const issue = `${repo}#${String(number)}`;
+    const spec =
+      item.target === "project"
+        ? `${rendered.title}\n\n${redactSecrets(item.detail, ctx.knownValues)}`
+        : rendered.body;
+    const request = [
+      `Fix ${issue}: ${rendered.title}`,
+      "",
+      `VTC raised this issue itself and started this run from it; the issue is the spec (D-bv, D-cd).`,
+      "",
+      spec,
+    ]
+      .join("\n")
+      .slice(0, RUN_REQUEST_MAX);
+    try {
+      await start(
+        { request, track: "quick_fix", repo: "existing", has_ui: false, risk_hints: [] },
+        {
+          kind: item.kind,
+          fingerprint: item.fingerprint,
+          target: { kind: item.target, repo },
+          issue: number,
+        },
+      );
+    } catch {
+      // the issue stands; the daemon reports a run it could not start
+    }
   };
 
   /** "evidence capture failed" (D-ce): a VTC defect in VTC's own repo. */
@@ -756,27 +844,33 @@ export const createUpstream = (deps: UpstreamDeps): Upstream => {
         throw new AutomationSkip("privacy", "an upstream PR needs its upstream report");
       }
       // Reading 208: a bs-vtc PR not built on the bs-vtc checkout itself was caused by a project
-      // run, so its evidence is the upstream-safe projection only, whatever the caller passed.
-      const upstreamSafe = upstream && ctx.repoRoot !== deps.automation.upstream.checkout;
+      // run, so its evidence is the upstream-safe projection only, whatever the caller passed;
+      // a caller may also ask for it (a Lookback PR always does).
+      const upstreamSafe =
+        upstream &&
+        (ctx.repoRoot !== deps.automation.upstream.checkout || input.evidence.plan.upstreamSafe);
       // A project's `automation.evidence` settings apply to its own repo's PRs.
       const projectEvidence = upstream ? undefined : ctx.evidence;
+      // Reading 212(3): the upstream-safe page reads the dashboard's own frozen routes of a
+      // synthetic run, built here from the report and VTC-side data only, never the caller's
+      // routes or the run's events.
+      const safeSnapshot =
+        upstreamSafe && report !== undefined
+          ? upstreamEvidenceSnapshot({
+              report,
+              ...(input.evidence.upstream === undefined ? {} : { data: input.evidence.upstream }),
+              vtcVersion: deps.vtcVersion,
+            })
+          : undefined;
       const plan = {
         ...input.evidence.plan,
-        ...(upstreamSafe ? { upstreamSafe: true } : {}),
+        ...(safeSnapshot === undefined ? {} : { upstreamSafe: true, run: safeSnapshot.run }),
         ...(projectEvidence?.video === false ? { video: false } : {}),
       };
-      const snapshot = upstreamSafe
-        ? {
-            routes: {
-              [UPSTREAM_EVIDENCE_ROUTE]: input.evidence.snapshot.routes[
-                UPSTREAM_EVIDENCE_ROUTE
-              ] ?? {
-                report,
-              },
-            },
-            events: [],
-          }
-        : input.evidence.snapshot;
+      const snapshot =
+        safeSnapshot === undefined
+          ? input.evidence.snapshot
+          : { routes: safeSnapshot.routes, events: safeSnapshot.events };
       const early = planPrCap({
         open: await pullRequests.listOpenAutomatic(repo),
         kind: input.kind,
@@ -1020,7 +1114,11 @@ export const createUpstream = (deps: UpstreamDeps): Upstream => {
   };
 
   const openLookbackPr = (
-    input: { readonly replay: ReplayResult; readonly proposal: PromptProposal },
+    input: {
+      readonly replay: ReplayResult;
+      readonly proposal: PromptProposal;
+      readonly scorecards?: readonly Scorecard[];
+    },
     ctx: ProjectContext,
   ): Promise<AutomationOutcome> =>
     guarded({ target: "upstream", kind: "lookback" }, ctx, async () => {
@@ -1054,6 +1152,20 @@ export const createUpstream = (deps: UpstreamDeps): Upstream => {
       const promptPath = `roles/${input.replay.role}/prompt.md`;
       const prompt = await read(promptPath);
       if (prompt === null) throw new Error(`${promptPath} is missing on ${base}`);
+      // The PR replaces the whole editable section, and its evidence measured the replay's
+      // baseline: on any other base (an older VTC release, or a later merged change of the role)
+      // the diff would silently revert that change under evidence it does not match.
+      const profile = isEngineerProfileYaml(await read(roleYamlPath(input.replay.role)));
+      const current = rolePromptIdentitySha(
+        prompt,
+        profile ? await read("roles/engineer/prompt.md") : null,
+      );
+      if (current !== input.replay.baseline) {
+        throw new AutomationSkip(
+          "stale_baseline",
+          `the ${input.replay.role} prompt on ${base} (${current?.slice(0, 12) ?? "unreadable"}) is not the baseline the replay measured (${input.replay.baseline.slice(0, 12)})`,
+        );
+      }
       const parts = buildLookbackPr({
         replay: input.replay,
         proposal: input.proposal,
@@ -1081,7 +1193,11 @@ export const createUpstream = (deps: UpstreamDeps): Upstream => {
           specVerifier: "none",
           evidence: {
             plan: { upstreamSafe: true, change: "prompt" },
-            snapshot: parts.snapshot,
+            snapshot: { routes: {}, events: [] },
+            upstream: {
+              ...parts.evidence,
+              ...(input.scorecards === undefined ? {} : { scorecards: input.scorecards }),
+            },
           },
         },
         ctx,

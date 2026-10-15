@@ -6,8 +6,9 @@
  * the replay statistics with tasks as ordinals.
  */
 import {
+  effectivePromptSha,
+  engineerProfileLockedSection,
   PROMPT_MARKERS,
-  renderAutoMarker,
   ROLES_CHANGELOG,
   ROLES_CHANGELOG_ANCHOR,
   splitRolePrompt,
@@ -16,14 +17,38 @@ import {
   type UpstreamReport,
 } from "@vtc/shared";
 import { fillTemplate, type TemplateSlots } from "./body.js";
+import type { UpstreamEvidenceData } from "./evidence/upstream-snapshot.js";
 import { autoFingerprint } from "./fingerprint.js";
 import { projectUpstreamReport } from "./privacy.js";
 
-/** Where the dashboard's upstream-safe evidence mode reads its snapshot (reading 208). */
-export const UPSTREAM_EVIDENCE_ROUTE = "/api/evidence/upstream";
-
 /** The path of a role's prompt in VTC's repo. */
 export const rolePromptPath = (role: string): string => `roles/${role}/prompt.md`;
+
+/** The path of a role's contract in VTC's repo. */
+export const roleYamlPath = (role: string): string => `roles/${role}/role.yaml`;
+
+/** Pure: whether a `role.yaml` declares an engineer profile (§5.2a). */
+export const isEngineerProfileYaml = (yaml: string | null): boolean =>
+  yaml !== null && /^kind:\s*["']?engineer_profile["']?\s*(?:#.*)?$/m.test(yaml);
+
+/**
+ * Pure: the prompt identity Lookback measures for a role (`effectivePromptSha` of its sections,
+ * AD-21 rule 1; the compiler's `prompt-parts.ts`), from `roles/<role>/prompt.md` as read: an
+ * engineer profile's locked section opens with the Engineer's whole prompt
+ * (`engineerProfileLockedSection`), so `engineerPrompt` is `roles/engineer/prompt.md` for a
+ * profile and `null` for any other role. `null` when a prompt does not split.
+ */
+export const rolePromptIdentitySha = (
+  prompt: string,
+  engineerPrompt: string | null,
+): string | null => {
+  const own = splitRolePrompt(prompt);
+  if (!own.ok) return null;
+  if (engineerPrompt === null) return effectivePromptSha(own.locked, own.editable);
+  const engineer = splitRolePrompt(engineerPrompt);
+  if (!engineer.ok) return null;
+  return effectivePromptSha(engineerProfileLockedSection(engineer, own.locked), own.editable);
+};
 
 /**
  * Pure: `prompt` with everything after the editable marker replaced by `editable`; the locked core
@@ -131,11 +156,11 @@ export interface LookbackPrParts {
    * trace ids, and the prompt lines it adds), which the path-shape check reads (D-by).
    */
   readonly freeTexts: readonly string[];
-  /** The upstream-safe snapshot the evidence browser sees. */
-  readonly snapshot: {
-    readonly routes: Readonly<Record<string, unknown>>;
-    readonly events: readonly unknown[];
-  };
+  /**
+   * What the upstream-safe evidence page shows beyond the report (reading 212(3)): the replay,
+   * which the module projects to ordinals with the scorecards it is given.
+   */
+  readonly evidence: UpstreamEvidenceData;
 }
 
 const table = (rows: readonly (readonly [string, string])[]): string =>
@@ -255,29 +280,6 @@ export const buildLookbackPr = (input: {
       { path: rolePromptPath(replay.role), text: nextPrompt },
       { path: ROLES_CHANGELOG, text: insertChangelogEntry(input.changelog, entry) },
     ],
-    snapshot: {
-      routes: {
-        [UPSTREAM_EVIDENCE_ROUTE]: {
-          marker: renderAutoMarker({ v: 1, kind: "lookback", fp: fingerprint, role: replay.role }),
-          report,
-          replay: {
-            role: replay.role,
-            host: replay.host,
-            k: replay.k,
-            verdict: replay.verdict,
-            aa_flip_rate: replay.aa_flip_rate,
-            sign_test: replay.sign_test,
-            tokens_delta_pct: replay.tokens_delta_pct,
-            per_task: replay.per_task.map((t, i) => ({
-              task: `task-${String(i + 1)}`,
-              a: t.a,
-              b: t.b,
-              regression_set: t.regression_set,
-            })),
-          },
-        },
-      },
-      events: [],
-    },
+    evidence: { replay },
   };
 };

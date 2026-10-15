@@ -38,6 +38,7 @@ import {
 import {
   armPluginCompiler,
   buildAutomationDeps,
+  ghLoginProbe,
   probeAutomation,
   shippedArmPluginCompilerFactory,
   shippedAutomationFactories,
@@ -220,7 +221,7 @@ export interface BuildEnginePartsOptions {
    * `EngineDeps.automation` (AD-27 rule 7). Default: {@link buildAutomationDeps} over the user
    * config, read live (`liveUserConfig`: an opt-out flipped while the daemon runs is seen), and a
    * probe of this machine when the daemon starts (`gh --version`, `ffmpeg -version`, the origin
-   * remote; never the login). `null` injects none.
+   * remote), and `ghLogin`, which the daemon asks for the login (D-bz). `null` injects none.
    */
   readonly automation?: AutomationDeps | null;
   /** The seams behind the default automation. Default: {@link shippedAutomationFactories}. */
@@ -239,16 +240,18 @@ export interface BuildEnginePartsOptions {
 const defaultAutomation = async (
   options: BuildEnginePartsOptions,
   allowUnsandboxed: boolean,
-): Promise<AutomationDeps> =>
-  buildAutomationDeps({
+): Promise<AutomationDeps> => {
+  const exec = options.exec ?? runExec;
+  const probe = await probeAutomation(exec, {
+    repoRoot: options.repoRoot,
+    login: false,
+    // gh, ffmpeg and git run by name outside the repo (a repo could ship an ffmpeg.exe)
+    cwd: options.vtcHome,
+    ...(options.ghCommand === undefined ? {} : { gh: options.ghCommand }),
+  });
+  return buildAutomationDeps({
     user: liveUserConfig(options.vtcHome),
-    probe: await probeAutomation(options.exec ?? runExec, {
-      repoRoot: options.repoRoot,
-      login: false,
-      // gh, ffmpeg and git run by name outside the repo (a repo could ship an ffmpeg.exe)
-      cwd: options.vtcHome,
-      ...(options.ghCommand === undefined ? {} : { gh: options.ghCommand }),
-    }),
+    probe,
     factories: options.automationFactories ?? shippedAutomationFactories(),
     gateDeps: {
       repoRoot: options.repoRoot,
@@ -256,7 +259,14 @@ const defaultAutomation = async (
       git: git.createGitOps({ repoRoot: options.repoRoot }),
       allowUnsandboxed,
     },
+    // D-bz: the daemon asks gh for the login when it starts and periodically, not here
+    ghLogin: ghLoginProbe(exec, {
+      ghVersion: probe.ghVersion,
+      cwd: options.vtcHome,
+      ...(options.ghCommand === undefined ? {} : { gh: options.ghCommand }),
+    }),
   });
+};
 
 /** Builds every part `vtc engine --daemon` injects. Constructing them starts no process. */
 export const buildEngineParts = async (options: BuildEnginePartsOptions): Promise<EngineParts> => {

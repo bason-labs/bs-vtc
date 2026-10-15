@@ -248,3 +248,35 @@ export const evaluateTrigger = (
     }
   }
 };
+
+/** Project kinds a VTC run can work on (D-bv): every one but a park VTC could not resolve. */
+const FIXABLE_PROJECT_KINDS: ReadonlySet<string> = new Set([
+  "ci_failure",
+  "escaped_defect",
+  "finding",
+  "final_review",
+]);
+
+/** VTC-repo kinds a VTC run on the bs-vtc checkout builds a PR for (D-bv (4), D-cd). */
+const FIXABLE_UPSTREAM_KINDS: ReadonlySet<string> = new Set([
+  "security",
+  "new_agent",
+  "tool",
+  "config",
+  "capability",
+]);
+
+/**
+ * Pure (D-bv, D-cd; AD-27 rule 2): whether an item's issue becomes an automatic VTC run once it
+ * opens. Project items: a post-merge CI failure, an escaped defect, an out-of-scope finding and a
+ * Final Review leftover; never a parked task, which VTC already could not resolve (a run would
+ * park again). VTC-repo items: a dependency advisory (the bump), every D-cd improvement, and a
+ * defect whose VTC stack frames locate it (a "clear fix", D-bv (2)); never a cost regression (a
+ * Lookback proposal answers it) or a Lookback verdict (its own PR). Whether the run can start here
+ * (an upstream item only on the bs-vtc checkout itself, `automation.prs`) is the module's check.
+ */
+export const fixableItem = (item: AutoWorkItem): boolean => {
+  if (item.target === "project") return FIXABLE_PROJECT_KINDS.has(item.kind);
+  if (FIXABLE_UPSTREAM_KINDS.has(item.kind)) return true;
+  return item.kind === "defect" && (item.facts.frames?.length ?? 0) > 0;
+};
