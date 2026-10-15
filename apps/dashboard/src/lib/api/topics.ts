@@ -100,6 +100,13 @@ const entityTopics = (event: VtcEvent): string[] => {
     case "finding":
       return [...task, "graph"];
     case "escalation":
+      // An answer can settle a parked coverage loop (H-13): the gates and run views re-read.
+      return [
+        "escalations",
+        "status",
+        ...task,
+        ...(event.type === "escalation.answered" ? ["gates"] : []),
+      ];
     case "change_request":
     case "spec":
       return ["escalations", "status", ...task];

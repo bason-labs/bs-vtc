@@ -17,7 +17,7 @@ import {
   samplePage,
   variant,
 } from "../golden-samples";
-import { renderApp, screen, within } from "./render";
+import { act, openStream, renderApp, screen, waitFor, within } from "./render";
 
 /**
  * Round 6 (contracts 5.7.0): the G2 coverage loop before G2 (H-13; spine §5 reading 237), why an
@@ -125,21 +125,57 @@ describe("Run view: the coverage loop until it completes (H-13)", () => {
     expect(screen.queryByRole("status", { name: "Gate waiting" })).toBeNull();
   });
 
+  const answered = sampleEvent(43, "escalation.answered", {
+    escalation: "E-4",
+    answer: {
+      option: "instruct_architect",
+      text: "Map REQ-5 to AD-3",
+      who_should_have_caught: "architect",
+    },
+  });
+
   it("stops showing a parked loop once the human answered its escalation", async () => {
-    const answered = sampleEvent(43, "escalation.answered", {
-      escalation: "E-4",
-      answer: {
-        option: "instruct_architect",
-        text: "Map REQ-5 to AD-3",
-        who_should_have_caught: "architect",
-      },
-    });
     renderApp("/run/?run=golden-1", {
       "/api/runs/golden-1/events": () =>
         Response.json(goldenPageWithSamples([], [fixing, parked, answered, ...HEADLESS_VARIANTS])),
     });
     await screen.findByRole("list", { name: "Headless runs" });
     expect(screen.queryByRole("status", { name: "Design coverage loop" })).toBeNull();
+  });
+
+  it("drops the parked loop live when the stream reports the answer", async () => {
+    const before = goldenPageWithSamples([], [fixing, parked]);
+    const after = goldenPageWithSamples([], [fixing, parked, answered]);
+    const answer = after.events.at(-1)!;
+    let page = before;
+    let push: ((s: string) => void) | null = null;
+    renderApp("/run/?run=golden-1", {
+      "/api/health": () =>
+        Response.json({
+          ...(readFixture("health") as object),
+          mode: "live",
+          contracts_version: "5.7.0",
+        }),
+      "/api/runs/golden-1/events": () => Response.json(page),
+      "/api/stream": () => {
+        const res = openStream();
+        const stream = new TransformStream<Uint8Array, Uint8Array>();
+        const writer = stream.writable.getWriter();
+        push = (s) => void writer.write(new TextEncoder().encode(s));
+        return new Response(stream.readable, { headers: res.headers });
+      },
+    });
+    const loop = await screen.findByRole("status", { name: "Design coverage loop" });
+    expect(within(loop).getByRole("alert")).toBeInTheDocument();
+    expect(await screen.findByTestId("connection")).toHaveTextContent("Live");
+    page = after;
+    await act(async () => {
+      push?.(`id: golden-1:${String(answer.seq)}\ndata: ${JSON.stringify(answer)}\n\n`);
+      await new Promise((r) => setTimeout(r, 400));
+    });
+    await waitFor(() => {
+      expect(screen.queryByRole("status", { name: "Design coverage loop" })).toBeNull();
+    });
   });
 
   it("shows nothing once coverage is complete", async () => {
@@ -237,6 +273,24 @@ describe("Role runs: an unpriced model's cost (H-12) and a model fallback (D-cx)
     );
     expect(within(run).getByTestId("run-fallback")).toHaveTextContent(
       "The host refused gpt-6-astra; ran on the host default",
+    );
+  });
+
+  it("says when the event log the notes come from is longer than the dashboard reads", async () => {
+    renderApp("/task/?run=golden-1&task=T-2", {
+      // Every page answers "more after": the reader stops at its page cap.
+      "/api/runs/golden-1/events": (_init: RequestInit | undefined, url: string) => {
+        const after = Number(new URL(url, "http://127.0.0.1").searchParams.get("after"));
+        const page = goldenPageWithSamples([], [fallback, unpriced]);
+        return Response.json({
+          ...page,
+          events: after === 0 ? page.events : [],
+          next_after: after + 1,
+        });
+      },
+    });
+    expect(await screen.findByTestId("event-log-truncated")).toHaveTextContent(
+      "The newest events are not shown",
     );
   });
 

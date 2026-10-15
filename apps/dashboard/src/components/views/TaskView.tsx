@@ -10,6 +10,7 @@ import { useRunEvents } from "@/lib/useRunEvents";
 import { FlowCanvas } from "@/components/flows/FlowCanvas";
 import { NodeDrawer } from "@/components/flows/NodeDrawer";
 import { NodeList } from "@/components/flows/NodeList";
+import { EventLogTruncated } from "@/components/notices/EventLogTruncated";
 import { TaskRouting } from "@/components/routing/TaskRouting";
 import { Badge, StatusPill } from "@/components/ui";
 import { Breadcrumbs, Loaded, MissingParam, PageHeader } from "./common";
@@ -38,7 +39,8 @@ export function TaskView({
     (c, s) => c.task(r, t, s),
     ok ? [runTopic(r, `task:${t}`), runTopic(r, "tasks")] : [],
   );
-  // Each role run's cost (H-12) and model fallback (D-cx) are in the event log only.
+  // Each role run's cost (H-12) and model fallback (D-cx) are in the event log only: the role
+  // runs' notes come from it, and a log longer than the dashboard reads says so below.
   const events = useRunEvents(ok ? r : null, [`task:${t}`]);
   const notes = useMemo(
     () => (events.data === undefined ? undefined : roleRunNotes(events.data.events)),
@@ -94,6 +96,7 @@ export function TaskView({
           <TaskRouting detail={detail.data} />
         </div>
       )}
+      {events.data?.truncated === true ? <EventLogTruncated className="mt-4" /> : null}
       <NodeDrawer
         run={run}
         node={selected}
