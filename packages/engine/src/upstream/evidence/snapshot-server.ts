@@ -128,8 +128,14 @@ export const startSnapshotServer = async (
       return;
     }
     if (url.pathname === "/api" || url.pathname.startsWith("/api/")) {
+      // as asked, then with the query as `URLSearchParams` writes it (the dashboard's `routeUrl`
+      // encodes an artifact path's slashes), then the path alone
       const key = `${url.pathname}${url.search}`;
-      const body = routes[key] ?? routes[url.pathname];
+      const query = url.searchParams.toString();
+      const body =
+        routes[key] ??
+        (query === "" ? undefined : routes[`${url.pathname}?${query}`]) ??
+        routes[url.pathname];
       if (body === undefined) {
         notFound(res);
         return;

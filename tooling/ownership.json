@@ -69,6 +69,10 @@
       "packages/engine/test/lookback/**",
       "packages/engine/test/research/**"
     ],
-    "upstream": ["packages/engine/src/upstream/**", "packages/engine/test/upstream/**"]
+    "upstream": [
+      "packages/engine/src/upstream/**",
+      "packages/engine/test/upstream/**",
+      "fixtures/upstream-evidence/**"
+    ]
   }
 }

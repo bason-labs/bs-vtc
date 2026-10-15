@@ -3,8 +3,9 @@
  * The module (`upstream/`, the upstream team's) owns what to raise: its facts, fingerprints,
  * dedupe, caps, privacy projection and evidence. The daemon hands it engine facts in the module's
  * own vocabulary and a context to check them against, and turns what it reports into events:
- * - a VTC defect → `vtc_defect`; a cost regression → `cost_regression`; a project problem →
- *   `project_problem` (with the engine's stable `ruleId`);
+ * - a VTC defect → `vtc_defect`; a cost regression → `cost_regression`; an advisory in VTC's own
+ *   dependencies → `security_advisory`; Lookback's new-agent signal → `improvement` (D-cd); a
+ *   project problem → `project_problem` (with the engine's stable `ruleId`);
  * - a replay verdict `improve` → `openLookbackPr` with the `ReplayResult` and its `PromptProposal`,
  *   whose editable section is the stored candidate version the replay measured, never the
  *   role-writable proposal file as it is now (D-cb);
@@ -16,7 +17,8 @@
  *   opened that run's PR;
  * - its sweep (auto-close, stale PRs) at most once a day after one that worked, remembered across
  *   daemon restarts;
- * - `startRun` (`Engine.startAutomatic`), passed on for the module to start an automatic run.
+ * - `startRun` (`Engine.startAutomatic`, queued by the wiring), which the module calls once it
+ *   opened the issue of a fixable item.
  *
  * The module is not imported here: {@link UpstreamModule} and {@link UpstreamModuleDeps} are the
  * structural shape of `createUpstream` (`upstream/upstream.ts`), and the daemon passes that factory
@@ -46,6 +48,7 @@ import {
   type GitSha,
   type PromptProposal,
   type ReplayResult,
+  type Scorecard,
   type ScorecardMetricId,
   type StartInput,
   type UpstreamReport,
@@ -92,6 +95,22 @@ export type UpstreamModuleFact =
       readonly at: string;
     }
   | {
+      /** An OSV advisory in VTC's own dependencies (D-bv (4)). */
+      readonly type: "security_advisory";
+      readonly advisoryId: string;
+      readonly package: string;
+      readonly at: string;
+    }
+  | {
+      /** A D-cd improvement: Lookback's new-agent signal (and, later, tool, config, capability). */
+      readonly type: "improvement";
+      readonly kind: "new_agent" | "tool" | "config" | "capability";
+      readonly subject: string;
+      readonly role?: string | undefined;
+      readonly metrics?: Readonly<Record<string, number>> | undefined;
+      readonly at: string;
+    }
+  | {
       readonly type: "project_problem";
       readonly kind: ProjectProblemKind;
       readonly ruleId: string;
@@ -135,6 +154,8 @@ export interface UpstreamModuleOutcome {
 export interface LookbackPrInput {
   readonly replay: ReplayResult;
   readonly proposal: PromptProposal;
+  /** The role's scorecards on the replay's host, for the evidence charts (reading 212(3)). */
+  readonly scorecards?: readonly Scorecard[];
 }
 
 /**
@@ -199,8 +220,8 @@ export interface UpstreamModuleDeps {
   readonly emit: (event: { readonly type: string; readonly payload: unknown }) => void;
   /**
    * Starts an automatic run from one of its issues (D-bv "a fixable one becomes a normal VTC run";
-   * AD-27 rule 2): `Engine.startAutomatic`. The module's `UpstreamDeps` has no such hook yet (a
-   * contract proposal to the upstream team); until it takes one, nothing calls it.
+   * D-cd; AD-27 rule 2): the wiring queues it for `Engine.startAutomatic` until no run of the repo
+   * is open. The module calls it right after it opened a fixable item's issue (`fixableItem`).
    */
   readonly startRun?: (input: StartInput, issue: AutomationRunRef) => Promise<void>;
   readonly now?: () => Date;
@@ -250,6 +271,28 @@ export const upstreamModuleFact = (fact: AutomationFact): UpstreamModuleFact | n
         promptSha: fact.promptSha,
         baseline: fact.baseline,
         current: fact.current,
+        at: fact.at,
+      };
+    if (fact.kind === "security" && fact.advisory !== undefined)
+      return {
+        type: "security_advisory",
+        advisoryId: fact.advisory.id,
+        package: fact.advisory.package,
+        at: fact.at,
+      };
+    if (
+      (fact.kind === "new_agent" ||
+        fact.kind === "tool" ||
+        fact.kind === "config" ||
+        fact.kind === "capability") &&
+      fact.subject !== undefined
+    )
+      return {
+        type: "improvement",
+        kind: fact.kind,
+        subject: fact.subject,
+        ...(fact.role === undefined ? {} : { role: fact.role }),
+        ...(fact.metrics === undefined ? {} : { metrics: fact.metrics }),
         at: fact.at,
       };
     return null;
@@ -448,6 +491,11 @@ export interface UpstreamBridgeOptions {
     { readonly max_mb?: number | undefined; readonly video?: boolean | undefined } | undefined;
   /** A replay verdict `improve`'s PR input, or why there is none ({@link readLookbackPrInput}). */
   readonly lookbackPr: (fact: AutomationFact) => Promise<LookbackPrInput | string>;
+  /**
+   * The project's scorecards of a role on a host (Lookback's index), which the Lookback PR's
+   * upstream-safe evidence charts (VTC-side numbers only; the module drops their breakdown).
+   */
+  readonly scorecards?: (role: string, host: string) => readonly Scorecard[];
   /** The run's read routes and events for the evidence browser ({@link automaticPrInput}). */
   readonly evidenceSnapshot: (run: string) => EvidenceSnapshot;
   /** Engine git's file-at-commit reader and remote refs for a repo (`createGitOps`, `createRemoteRefs`). */
@@ -576,7 +624,14 @@ export const bridgeUpstream =
         if (fact.target === "upstream" && fact.kind === "lookback") {
           const input = await options.lookbackPr(fact);
           if (typeof input === "string") throw new Error(`no Lookback PR: ${input}`);
-          failed(await module.openLookbackPr(input, ctx()), "the Lookback PR");
+          const scorecards = options.scorecards?.(input.replay.role, input.replay.host) ?? [];
+          failed(
+            await module.openLookbackPr(
+              { ...input, ...(scorecards.length === 0 ? {} : { scorecards }) },
+              ctx(),
+            ),
+            "the Lookback PR",
+          );
           return;
         }
         const mapped = upstreamModuleFact(fact);

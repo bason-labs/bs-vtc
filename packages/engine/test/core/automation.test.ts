@@ -273,6 +273,48 @@ describe("automation triggers (D-bv)", () => {
     ).toEqual([]);
   });
 
+  it("an advisory the dependency gate found (osv-scanner) is a VTC-repo security fact too, with only its id and package (D-bv (4))", () => {
+    const advisory = {
+      ...FINDING,
+      source: "tool",
+      source_name: "osv-scanner",
+      rule_id: "GHSA-aaaa-bbbb-cccc",
+      category: "supply_chain",
+      title: "zod@4.6.7: a parsing flaw",
+      location: { path: "pnpm-lock.yaml", symbol: "zod@4.6.7" },
+      evidence: { type: "command_output", ref: "gates/1/osv.json" },
+      route: "patch",
+    };
+    const { kind: _kind, ...tool } = advisory;
+    const raised = automationFacts(
+      stateWith(),
+      ev("finding.recorded", { finding: tool }, { task: "T-2" }),
+    );
+    expect(raised).toEqual([
+      expect.objectContaining({
+        target: "upstream",
+        kind: "security",
+        advisory: { id: "GHSA-aaaa-bbbb-cccc", package: "zod" },
+      }),
+    ]);
+    // a scoped package keeps its scope; a finding of another tool is none
+    const scoped = automationFacts(
+      stateWith(),
+      ev(
+        "finding.recorded",
+        { finding: { ...tool, location: { path: "pnpm-lock.yaml", symbol: "@vtc/x@1.0.0" } } },
+        { task: "T-2" },
+      ),
+    );
+    expect(scoped[0]?.advisory).toEqual({ id: "GHSA-aaaa-bbbb-cccc", package: "@vtc/x" });
+    expect(
+      automationFacts(
+        stateWith(),
+        ev("finding.recorded", { finding: { ...tool, source_name: "gitleaks" } }, { task: "T-2" }),
+      ),
+    ).toEqual([]);
+  });
+
   it("Final Review leftovers: the feature findings a finished run left open", () => {
     const leftover = { ...FINDING, route: "defer", status: "deferred", feature: "F-1" };
     const { task: _task, ...featureFinding } = leftover;
@@ -430,6 +472,41 @@ describe("GET /api/automation (AutomationReport)", () => {
       }).automation().notes;
     expect(notes("snapshot")).toEqual([AUTOMATION_SNAPSHOT_NOTE]);
     expect(notes("live")).toEqual([AUTOMATION_OFF_NOTE]);
+  });
+
+  it("shows the automatic actions taken while no run was open, before any run's log holds them (D-ca)", () => {
+    const between = {
+      v: 1,
+      run: "",
+      seq: 1,
+      ts: "2026-10-13T10:00:00.000Z",
+      type: "upstream.issue_closed",
+      actor: "engine",
+      data: {
+        target: { kind: "upstream", repo: "bason-labs/bs-vtc" },
+        kind: "defect",
+        fingerprint: "0123456789abcdef",
+        number: 7,
+        url: "https://github.com/bason-labs/bs-vtc/issues/7",
+        reason: "quiet",
+      },
+    } as unknown as VtcEvent;
+    const report = createReadModel({
+      repoRoot: "/nonexistent",
+      mode: "live",
+      versions: { engine: "0.0.0", contracts: "5.2.0" },
+      prototypeUrl: () => null,
+      runs: () => [stateWith()],
+      usage: () => new Map(),
+      git: null,
+      automationEvents: () => [between],
+    }).automation();
+    expect(report.items).toEqual([
+      expect.objectContaining({
+        fingerprint: "0123456789abcdef",
+        issue: expect.objectContaining({ number: 7, state: "closed" }) as object,
+      }),
+    ]);
   });
 });
 

@@ -1,6 +1,10 @@
 /** The upstream module end to end with in-memory fakes (AD-27; D-cc: no real gh, git or GitHub). */
 import {
   automationFor,
+  type AutomationRunRef,
+  type StartInput,
+  effectivePromptSha,
+  engineerProfileLockedSection,
   splitRolePrompt,
   type AutomationContext,
   type AutomationDeps,
@@ -16,7 +20,8 @@ import {
   autoFingerprint,
   createUpstream,
   projectUpstreamReport,
-  UPSTREAM_EVIDENCE_ROUTE,
+  UPSTREAM_EVIDENCE_RUN,
+  UPSTREAM_REPLAY_PATH,
   upstreamStateDir,
   type AutomationFact,
   type AutoPrInput,
@@ -71,6 +76,10 @@ const harness = (
     noGitOps?: boolean;
     ffmpegCommand?: FfmpegCommand;
     evidence?: ProjectContext["evidence"];
+    /** `UpstreamDeps.startRun`: an automatic run started from an issue. */
+    startRun?: NonNullable<Parameters<typeof createUpstream>[0]["startRun"]>;
+    /** The project is the bs-vtc checkout itself ("VTC builds VTC"). */
+    self?: boolean;
   } = {},
 ): Harness => {
   const clock = options.shared?.clock ?? { now: new Date("2026-10-15T12:00:00Z") };
@@ -101,8 +110,8 @@ const harness = (
     ...options.automation,
   };
   const ctx: ProjectContext = {
-    repoRoot,
-    repo: PROJECT,
+    repoRoot: options.self === true ? checkout : repoRoot,
+    repo: options.self === true ? UPSTREAM : PROJECT,
     state: () => {
       const c = { ...context, ...options.contexts?.() };
       return {
@@ -144,6 +153,7 @@ const harness = (
         }),
     ...(options.ffmpegCommand === undefined ? {} : { ffmpegCommand: options.ffmpegCommand }),
     ...(options.remoteRefs === true ? { remoteRefs: () => fakeRemoteRefs(plumbing) } : {}),
+    ...(options.startRun === undefined ? {} : { startRun: options.startRun }),
   });
   return {
     github,
@@ -361,21 +371,26 @@ describe("raising upstream issues", () => {
 
   it("fails closed on privacy: nothing is sent when a project identifier or secret shows", async () => {
     const h = harness();
-    const fact = defect({ model: "globex-tuned" });
+    const fact = defect({ mode: "globex-tuned" });
     await h.upstream.report(fact, h.ctx);
     expect(await h.upstream.report(fact, h.ctx)).toMatchObject({
-      status: "skipped",
-      reason: "privacy",
-    });
-    const secret = defect({ errorClass: "engine.crash", model: "sk-live-payroll-SECRET-1234" });
-    await h.upstream.report(secret, h.ctx);
-    expect(await h.upstream.report(secret, h.ctx)).toMatchObject({
       status: "skipped",
       reason: "privacy",
     });
     expect(h.github.state.issues).toHaveLength(0);
     const skip = h.events.find((e) => e.type === "automation.skipped");
     expect(JSON.stringify(skip)).not.toMatch(/globex|SECRET/i);
+  });
+
+  it("sends a model id that is not public as custom: an inference-profile ARN's account id never leaves", async () => {
+    const h = harness();
+    const arn = "arn:aws:bedrock:us-east-1:123456789012:application-inference-profile/abc123";
+    const fact = defect({ errorClass: "engine.crash", model: arn });
+    await h.upstream.report(fact, h.ctx);
+    expect(await h.upstream.report(fact, h.ctx)).toMatchObject({ status: "issue" });
+    const body = JSON.stringify(h.github.state.issues);
+    expect(body).not.toMatch(/123456789012|arn:aws/);
+    expect(body).toMatch(/custom/);
   });
 
   it("raises project issues in the project's repo, redacted, and only with a GitHub remote", async () => {
@@ -407,6 +422,92 @@ describe("raising upstream issues", () => {
   });
 });
 
+describe("a fixable issue becomes an automatic run (D-bv, D-cd; AD-27 rule 2)", () => {
+  type Started = { input: StartInput; ref: AutomationRunRef };
+  const recorder = () => {
+    const runs: Started[] = [];
+    return {
+      runs,
+      startRun: (input: StartInput, ref: AutomationRunRef): Promise<void> => {
+        runs.push({ input, ref });
+        return Promise.resolve();
+      },
+    };
+  };
+  const problem = (
+    over: Partial<Extract<AutomationFact, { type: "project_problem" }>> = {},
+  ): AutomationFact => ({
+    type: "project_problem",
+    kind: "ci_failure",
+    ruleId: `post_merge_ci/${"a".repeat(40)}`,
+    title: "Required checks red after merge aaaaaaaaaaaa",
+    detail: "the required checks on the base are red after merge aaaaaaaaaaaa",
+    run: "R7",
+    at: "2026-10-15T11:00:00Z",
+    ...over,
+  });
+
+  it("starts the run for a fixable project issue once it opens, with the issue as its spec", async () => {
+    const started = recorder();
+    const h = harness({ startRun: started.startRun });
+    const outcome = await h.upstream.report(problem(), h.ctx);
+    expect(outcome).toMatchObject({ status: "issue", action: "opened", number: 1 });
+    expect(started.runs).toHaveLength(1);
+    const [run] = started.runs;
+    expect(run?.ref).toEqual({
+      kind: "ci_failure",
+      fingerprint: expect.stringMatching(/^[0-9a-f]{16}$/) as string,
+      target: { kind: "project", repo: PROJECT },
+      issue: 1,
+    });
+    expect(run?.input).toMatchObject({ track: "quick_fix", repo: "existing", risk_hints: [] });
+    expect(run?.input.request).toContain(`${PROJECT}#1`);
+    expect(run?.input.request).toContain("Required checks red after merge");
+    // seen again: a comment on the open issue, never a second run
+    h.clock.now = new Date("2026-10-16T13:00:00Z");
+    expect(await h.upstream.report(problem(), h.ctx)).toMatchObject({ status: "issue" });
+    expect(started.runs).toHaveLength(1);
+  });
+
+  it("starts none for a parked task (VTC could not resolve it), nor while automation.prs is off", async () => {
+    const started = recorder();
+    const h = harness({ startRun: started.startRun });
+    await h.upstream.report(problem({ kind: "parked", ruleId: "parked/stuck/R7/T-4" }), h.ctx);
+    expect(started.runs).toEqual([]);
+    const off = harness({ startRun: started.startRun });
+    const ctx: ProjectContext = {
+      ...off.ctx,
+      state: () => {
+        const now = off.ctx.state();
+        return { ...now, settings: { ...now.settings, prs: false } };
+      },
+    };
+    expect(await off.upstream.report(problem(), ctx)).toMatchObject({ status: "issue" });
+    expect(started.runs).toEqual([]);
+  });
+
+  it("an upstream item starts a run only on the bs-vtc checkout itself (VTC builds VTC)", async () => {
+    const advisory: AutomationFact = {
+      type: "security_advisory",
+      advisoryId: "GHSA-aaaa-bbbb-cccc",
+      package: "zod",
+      at: "2026-10-15T11:00:00Z",
+    };
+    const elsewhere = recorder();
+    const project = harness({ startRun: elsewhere.startRun });
+    expect(await project.upstream.report(advisory, project.ctx)).toMatchObject({
+      status: "issue",
+    });
+    // the issue is in bs-vtc; this project's engine cannot build bs-vtc
+    expect(elsewhere.runs).toEqual([]);
+    const self = recorder();
+    const own = harness({ startRun: self.startRun, self: true });
+    expect(await own.upstream.report(advisory, own.ctx)).toMatchObject({ status: "issue" });
+    expect(self.runs.map((r) => r.ref.target)).toEqual([{ kind: "upstream", repo: UPSTREAM }]);
+    expect(self.runs[0]?.input.request).toContain("GHSA-aaaa-bbbb-cccc");
+  });
+});
+
 const PROMPT = `<!-- vtc:locked -->
 # Implementer
 
@@ -417,12 +518,19 @@ Prefer small commits.
 Run the tests before you finish.
 `;
 
+/** The prompt identity Lookback measured: `PROMPT`'s sections, as the replay's baseline. */
+const PROMPT_SHA = ((): string => {
+  const split = splitRolePrompt(PROMPT);
+  if (!split.ok) throw new Error("PROMPT does not split");
+  return effectivePromptSha(split.locked, split.editable);
+})();
+
 const replay = (over: Partial<ReplayResult> = {}): ReplayResult => ({
   v: 1,
   proposal: "implementer-steps",
   role: "implementer",
   host: "codex",
-  baseline: "a".repeat(64),
+  baseline: PROMPT_SHA,
   candidate: "b".repeat(64),
   grader_bundle_sha: "c".repeat(64),
   k: 3,
@@ -444,7 +552,7 @@ const proposal: PromptProposal = {
   base: {
     role: "implementer",
     host: "codex",
-    effective_sha256: "a".repeat(64),
+    effective_sha256: PROMPT_SHA,
   } as PromptProposal["base"],
   changes: [
     {
@@ -527,6 +635,106 @@ describe("the Lookback PR", () => {
       evidence: "partial",
       branch: `vtc/auto/lookback/${fp.slice(0, 8)}`,
     });
+  });
+
+  it("records the Lookback view of the upstream-safe snapshot: the replay and the role's scorecards, never the project's run (reading 212(3))", async () => {
+    const seen: { paths: string[]; status: Record<string, number> } = { paths: [], status: {} };
+    const inner = fakeRecorder();
+    const recorder: EvidenceRecorder = {
+      renderGateReport: (request) => inner.renderGateReport(request),
+      capture: async (request) => {
+        seen.paths = [...new Set(request.shots.map((s) => s.path))];
+        for (const rel of [UPSTREAM_REPLAY_PATH, ".vtc/lookback/scorecards/index.json"]) {
+          const url = `/api/runs/${UPSTREAM_EVIDENCE_RUN}/artifacts?${new URLSearchParams({ path: rel }).toString()}`;
+          seen.status[rel] = (await fetch(new URL(url, request.origin))).status;
+        }
+        return inner.capture(request);
+      },
+    };
+    const h = harness({ automation: { evidence: recorder } });
+    withCheckout(h);
+    const card = {
+      v: 1 as const,
+      prompt: {
+        role: "implementer",
+        host: "codex" as const,
+        locked_sha256: "1".repeat(64),
+        editable_sha256: "2".repeat(64),
+        effective_sha256: PROMPT_SHA,
+      },
+      grader_bundle_sha: "c".repeat(64),
+      window: { from: "2026-10-01T00:00:00.000Z", to: "2026-10-14T00:00:00.000Z" },
+      metrics: { tokens_per_success: { value: 41000, ci_low: null, ci_high: null, n: 15 } },
+      breakdown: [],
+      written_at: "2026-10-14T00:00:00.000Z",
+    };
+    expect(
+      await h.upstream.openLookbackPr({ replay: replay(), proposal, scorecards: [card] }, h.ctx),
+    ).toMatchObject({ status: "pr" });
+    expect(seen.paths).toEqual([`/lookback/?run=${UPSTREAM_EVIDENCE_RUN}&evidence=upstream`]);
+    expect(seen.status).toEqual({
+      [UPSTREAM_REPLAY_PATH]: 200,
+      ".vtc/lookback/scorecards/index.json": 200,
+    });
+  });
+
+  it("opens no PR when the default branch's prompt is not the replay's baseline: its diff would revert a merged change (stale_baseline)", async () => {
+    const h = harness();
+    withCheckout(h);
+    // a later Lookback PR of the role merged meanwhile: the editable section moved on
+    h.files.set(
+      "roles/implementer/prompt.md",
+      PROMPT.replace("Prefer small commits.", "Prefer small, reviewed commits."),
+    );
+    expect(await h.upstream.openLookbackPr({ replay: replay(), proposal }, h.ctx)).toMatchObject({
+      status: "skipped",
+      reason: "stale_baseline",
+    });
+    expect(h.github.state.prs).toHaveLength(0);
+    expect(h.plumbing.commits).toHaveLength(0);
+    expect(h.events).toEqual([
+      expect.objectContaining({
+        type: "automation.skipped",
+        payload: expect.objectContaining({ reason: "stale_baseline", kind: "lookback" }) as object,
+      }),
+    ]);
+  });
+
+  it("measures an engineer profile's baseline as Lookback does: the Engineer's whole prompt opens its locked section", async () => {
+    const h = harness();
+    const ENGINEER =
+      "<!-- vtc:locked -->\n# Engineer\n\nShared contract.\n\n<!-- vtc:editable -->\nTest first.\n";
+    const PROFILE =
+      "<!-- vtc:locked -->\n# Backend\n\nContract-first endpoints.\n\n<!-- vtc:editable -->\nPrefer small commits.\n";
+    h.files.set("roles/engineer/prompt.md", ENGINEER);
+    h.files.set("roles/engineer_backend/prompt.md", PROFILE);
+    h.files.set(
+      "roles/engineer_backend/role.yaml",
+      "id: engineer_backend\nkind: engineer_profile\n",
+    );
+    h.files.set("roles/CHANGELOG.md", "# Role prompt changes\n");
+    const e = splitRolePrompt(ENGINEER);
+    const p = splitRolePrompt(PROFILE);
+    if (!e.ok || !p.ok) throw new Error("fixtures do not split");
+    const baseline = effectivePromptSha(engineerProfileLockedSection(e, p.locked), p.editable);
+    const backend = {
+      ...proposal,
+      id: "backend-steps",
+      base: { ...proposal.base, role: "engineer_backend", effective_sha256: baseline },
+      editable: "Plan the steps first.\nPrefer small commits.",
+    } as PromptProposal;
+    const ran = replay({ proposal: "backend-steps", role: "engineer_backend", baseline });
+    expect(
+      await h.upstream.openLookbackPr({ replay: ran, proposal: backend }, h.ctx),
+    ).toMatchObject({ status: "pr" });
+    // a changed Engineer prompt is a new version of every profile: that replay is stale
+    h.files.set("roles/engineer/prompt.md", ENGINEER.replace("Test first.", "Test first, always."));
+    expect(
+      await h.upstream.openLookbackPr(
+        { replay: { ...ran, finished_at: "2026-10-16T10:00:00Z" }, proposal: backend },
+        h.ctx,
+      ),
+    ).toMatchObject({ status: "skipped", reason: "stale_baseline" });
   });
 
   const lookbackBranch = `refs/heads/vtc/auto/lookback/${autoFingerprint({
@@ -741,12 +949,22 @@ describe("bs-vtc PRs caused by a project run", () => {
     const recorder: EvidenceRecorder = {
       renderGateReport: (request) => inner.renderGateReport(request),
       capture: async (request) => {
-        for (const path of ["/api/runs/R7/status", UPSTREAM_EVIDENCE_ROUTE]) {
+        for (const path of [
+          "/api/runs/R7/status",
+          "/api/evidence/upstream",
+          "/api/health",
+          `/api/runs/${UPSTREAM_EVIDENCE_RUN}/events`,
+        ]) {
           probes[path] = (await fetch(new URL(path, request.origin))).status;
         }
-        expect(request.shots.every((s) => s.path.startsWith("/lookback/?evidence=upstream"))).toBe(
-          true,
-        );
+        // reading 212(3): the dashboard's own routes of the synthetic run, and every shot waits
+        // for its data, so an empty page fails the capture
+        expect(
+          request.shots.every((s) =>
+            s.path.startsWith(`/lookback/?run=${UPSTREAM_EVIDENCE_RUN}&evidence=upstream`),
+          ),
+        ).toBe(true);
+        expect(request.shots.every((s) => s.waitFor !== undefined)).toBe(true);
         expect(request.denyText).toContain("payroll-portal");
         return inner.capture(request);
       },
@@ -784,7 +1002,12 @@ describe("bs-vtc PRs caused by a project run", () => {
       h.ctx,
     );
     expect(outcome).toMatchObject({ status: "pr" });
-    expect(probes).toEqual({ "/api/runs/R7/status": 404, [UPSTREAM_EVIDENCE_ROUTE]: 200 });
+    expect(probes).toEqual({
+      "/api/runs/R7/status": 404,
+      "/api/evidence/upstream": 404,
+      "/api/health": 200,
+      [`/api/runs/${UPSTREAM_EVIDENCE_RUN}/events`]: 200,
+    });
   });
 });
 
@@ -1122,6 +1345,23 @@ describe("evidence settings and the GIF", () => {
     });
     expect(h.github.state.prs).toHaveLength(0);
     expect(h.github.state.issues).toHaveLength(0);
+  });
+
+  it("raises 'evidence capture failed' when the evidence branch cannot be published for any other reason (no remote, no auth)", async () => {
+    const h = harness();
+    const push = h.plumbing.push.bind(h.plumbing);
+    h.plumbing.push = (remote, sha, dst) =>
+      dst === "refs/heads/vtc-evidence"
+        ? Promise.reject(new Error("fatal: Authentication failed for 'https://github.com/'"))
+        : push(remote, sha, dst);
+    expect(await h.upstream.openPullRequest(prInput(), h.ctx)).toMatchObject({
+      status: "skipped",
+      reason: "evidence_failed",
+    });
+    expect(h.github.state.prs).toHaveLength(0);
+    expect(h.github.state.issues.map((i) => i.title)).toEqual([
+      expect.stringMatching(/evidence/i) as string,
+    ]);
   });
 
   it("fetches the evidence branch another installation pushed, so its PR opens", async () => {

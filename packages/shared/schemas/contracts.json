@@ -1,5 +1,5 @@
 {
-  "contracts_version": "5.1.0",
+  "contracts_version": "5.2.0",
   "schemas": {
     "Run": {
       "$id": "https://vtc.local/schemas/Run.json",
@@ -7584,7 +7584,8 @@
                 "weekly_window",
                 "budget",
                 "trial_cap",
-                "plugin_locked"
+                "plugin_locked",
+                "stale_baseline"
               ]
             },
             "target": {
@@ -31684,7 +31685,7 @@
         },
         "model": {
           "type": "string",
-          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:/@-]{0,199}$"
+          "pattern": "^(?![Aa][Rr][Nn]:)(?!.*\\d{12})[A-Za-z0-9][A-Za-z0-9._:/@-]{0,199}$"
         },
         "prompt_sha": {
           "type": "string",
@@ -32094,7 +32095,8 @@
                   "weekly_window",
                   "budget",
                   "trial_cap",
-                  "plugin_locked"
+                  "plugin_locked",
+                  "stale_baseline"
                 ]
               },
               "kind": {

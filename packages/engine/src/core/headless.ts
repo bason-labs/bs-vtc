@@ -540,7 +540,10 @@ export const launchHeadless = async (
   host: HostId,
   purpose: DispatchPurpose,
   share = 1,
-  /** `false`: a `host_web` role runs without its host's web search (D-cf, `hostWebRoute`). */
+  /**
+   * `false`: a `host_web` role runs without its host's web search (D-cf, `hostWebRoute`). `true`
+   * still gives it only on a host whose web search is safe (`HostCapabilities.safeHostWeb`).
+   */
   hostWeb = true,
 ): Promise<boolean> => {
   const adapter = k.deps.adapters[host];
@@ -590,8 +593,14 @@ export const launchHeadless = async (
     );
   const effective = resolveRoleMode(contract, step.mode);
   const declared = effective.ok ? effective.contract.tools : contract.tools;
-  // D-cf: no safe host web search on the route, so none at all (the engine's fetchers remain)
-  const tools = hostWeb ? declared : { ...declared, host_web: false };
+  // D-cf: no safe host web search on the route, so none at all (the engine's fetchers remain).
+  // Whatever the caller decided, a host whose web search is not confirmed safe never gets it: a
+  // Lookback replay trial runs on the run's Lead host without `hostWebRoute` (both arms on one
+  // host), and Codex, with no per-path read deny, must never fetch pages the model picks there.
+  const tools =
+    hostWeb && adapter.capabilities.safeHostWeb === true
+      ? declared
+      : { ...declared, host_web: false };
   const task = step.task === undefined ? undefined : h.state.tasks.get(step.task);
   const sandbox = adapter.sandboxProfile(
     roleSandboxRequest(

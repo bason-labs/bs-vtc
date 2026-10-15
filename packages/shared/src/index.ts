@@ -238,5 +238,11 @@ export * from "./json-schema.js";
  * the adapter last read from the host. All additive: new constants, optional fields, new
  * schemas, and one more deny glob. `CLAUDE_LEAD_REPLAYABLE_ROLES` is gone, as 5.0.0 planned
  * (reading 209(2)).
+ *
+ * 5.2.0 (MINOR): the round-4 fix round (spine §5 reading 215). `AutomationSkipReason`
+ * `stale_baseline` (a Lookback PR whose replay measured another prompt than the upstream default
+ * branch's); `UpstreamReport.model` refuses an ARN and a 12-digit run (an account id): the
+ * engine is its only producer and never persists it, and it now sends a non-public model id as
+ * `custom`; `AutomationDeps.ghLogin` (optional), the gh-login probe readings 211 and 214 deferred.
  */
-export const CONTRACTS_VERSION = "5.1.0";
+export const CONTRACTS_VERSION = "5.2.0";

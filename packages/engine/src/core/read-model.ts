@@ -31,6 +31,7 @@ import {
   type WorkflowGraph,
   type AutomationReport,
   type AutomationSettings,
+  type VtcEvent,
 } from "@vtc/shared";
 import { AUTOMATION_SNAPSHOT_NOTE, automationReportView } from "./automation.js";
 import { readModelState } from "./replay-view.js";
@@ -80,6 +81,11 @@ export interface ReadModelDeps {
    * has no automation wiring (`EngineDeps.automation` absent). Absent: `null`.
    */
   readonly automation?: () => AutomationSettings | null;
+  /**
+   * Automation events no run's log holds yet (recorded while no run was open, D-ca), which the
+   * Automation view shows with the runs' own. Absent: none.
+   */
+  readonly automationEvents?: () => readonly VtcEvent[];
 }
 
 export interface ReadModel {
@@ -363,7 +369,7 @@ export const createReadModel = (deps: ReadModelDeps): ReadModel => {
         : ok(deps.clientSpend()),
     automation: () =>
       automationReportView(
-        deps.runs().flatMap((state) => state.events),
+        [...deps.runs().flatMap((state) => state.events), ...(deps.automationEvents?.() ?? [])],
         deps.automation?.() ?? null,
         ...(deps.mode === "snapshot" ? [AUTOMATION_SNAPSHOT_NOTE] : []),
       ),

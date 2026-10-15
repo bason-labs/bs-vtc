@@ -322,14 +322,45 @@ describe("buildEngineParts injects automation and arm plugins", () => {
       upstream: { repo: DEFAULT_UPSTREAM_REPO, share: false },
       hosting: "branch",
       ffmpeg: true,
+      ghLogin: expect.any(Function) as unknown,
     });
-    // the daemon never asks for the login; the engine checks it when it acts
+    // building asks for no login; the daemon asks through ghLogin when it starts (D-bz)
     expect(exec.calls.map((c) => c.line).sort()).toEqual([
       "ffmpeg -version",
       "gh --version",
       "git -C /r remote get-url --push origin",
     ]);
+    expect(await deps.automation?.ghLogin?.()).toBe(true);
+    // gh auth status's exit code only: never --show-token, never a prompt
+    expect(exec.calls.at(-1)).toEqual({
+      line: "gh auth status",
+      env: { GH_PROMPT_DISABLED: "1" },
+      cwd: home,
+    });
     expect(deps).not.toHaveProperty("armPlugins");
+  });
+
+  it("reports gh as logged out when gh auth status fails, and without gh asks nothing", async () => {
+    const home = tempHome();
+    const loggedOut = fakeExec({ ...MACHINE, "gh auth status": { code: 1 } });
+    const parts = await buildEngineParts({
+      ...base,
+      vtcHome: home,
+      exec: loggedOut,
+      automationFactories: {},
+      createArmPluginCompiler: null,
+    });
+    expect(await composeEngineDeps(parts).automation?.ghLogin?.()).toBe(false);
+    const noGh = fakeExec({ "ffmpeg -version": MACHINE["ffmpeg -version"] });
+    const without = await buildEngineParts({
+      ...base,
+      vtcHome: home,
+      exec: noGh,
+      automationFactories: {},
+      createArmPluginCompiler: null,
+    });
+    expect(await composeEngineDeps(without).automation?.ghLogin?.()).toBe(false);
+    expect(noGh.calls.map((c) => c.line)).not.toContain("gh auth status");
   });
 
   it("injects none with automation: null, and arm plugins over the runtime's plugin dir", async () => {

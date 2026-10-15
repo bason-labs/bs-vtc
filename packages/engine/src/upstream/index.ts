@@ -25,6 +25,7 @@ export * from "./evidence/manifest.js";
 export * from "./evidence/pipeline.js";
 export * from "./evidence/plan.js";
 export * from "./evidence/snapshot-server.js";
+export * from "./evidence/upstream-snapshot.js";
 export * from "./file-lock.js";
 export * from "./fingerprint.js";
 export * from "./gh.js";

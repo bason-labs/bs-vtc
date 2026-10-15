@@ -46,6 +46,7 @@ import {
 } from "../../src/core/index.js";
 import { refuseInSession, type StepSpec } from "../../src/core/dispatch.js";
 import { createGitOps } from "../../src/git/index.js";
+import { createLookbackReplays, type ReplayWiringDeps } from "../../src/daemon/replays.js";
 import { cleanupDirs, git, writeFile } from "../helpers/repo.js";
 import {
   authorTests,
@@ -723,6 +724,65 @@ describe("RETRO runs Lookback replays as headless runs (AD-21 rule 6, readings 1
     expect(fake.finished[0]?.outcomes.map((o) => o.passed)).toEqual([false, true]);
     expect(h.engine.status({}).run.finished_at).toBeDefined();
     await h.release();
+  });
+
+  it("the daemon's verdict grader (D-ch) scores a Spec Verifier trial against the recorded outcome of the dispatch it replays, and the replay finishes", async () => {
+    const held: { h?: Harness } = {};
+    const real = createLookbackReplays({
+      history: () => held.h?.engine.states().flatMap((s) => s.events) ?? [],
+    } as unknown as ReplayWiringDeps).gradeVerdict;
+    const {
+      h: harness,
+      fake,
+      trials,
+      reach,
+    } = atRetro(["a", "b"], {
+      role: "spec_verifier",
+      gradeVerdict: real,
+    });
+    held.h = harness;
+    // arm a judges the criterion failed, arm b passed: the recorded outcome (the gates passed
+    // on the head the replayed dispatch judged) says pass
+    trials.set((t) => ({
+      result: {
+        exit: "done",
+        verdicts: [
+          {
+            subject: String(t.dispatched?.data.subject),
+            verdict: t.text === CANDIDATE ? "pass" : "fail",
+            evidence: [{ type: "file_line", ref: `${IMPL}:1` }],
+          },
+        ],
+      },
+    }));
+    await reach("spec_verifier");
+    expect(trials.runs).toHaveLength(2);
+    expect(fake.graded).toEqual([]);
+    expect(fake.finished[0]?.outcomes.map((o) => o.passed)).toEqual([false, true]);
+    expect(events(harness).filter((e) => e.type === "lookback.replay_finished")).toHaveLength(1);
+    expect(harness.engine.notices.join("\n")).not.toMatch(/no verdict grader is wired/);
+    await harness.release();
+  });
+
+  it("a host_web role's trial gets its host's web search only where that is safe (D-cf): on a host like Codex, whose web search is not confirmed safe, it runs without", async () => {
+    const hostWebOfTrials = async (safeHostWeb: boolean): Promise<(boolean | undefined)[]> => {
+      const { h, trials, reach } = atRetro(["a", "b"], {
+        role: "research_analyst",
+        harness: { capabilities: { safeHostWeb } },
+      });
+      trials.set(() => ({ work: true }));
+      await reach();
+      const ran = trials.runs.filter((t) => t.request.role === "research_analyst");
+      expect(ran.length).toBeGreaterThan(0);
+      // each trial's sandbox profile was asked for with the tools it runs with
+      const cwds = new Set(ran.map((t) => t.cwd));
+      const asked = h.sandboxRequests.filter((r) => cwds.has(r.cwd)).map((r) => r.tools.host_web);
+      expect(asked).toHaveLength(ran.length);
+      await h.release();
+      return asked;
+    };
+    expect(new Set(await hostWebOfTrials(false))).toEqual(new Set([false]));
+    expect(new Set(await hostWebOfTrials(true))).toEqual(new Set([true]));
   });
 
   it("a trial whose arm cannot run as planned is not run, never with the compiled default in its place: it measured nothing, and its replay waits for the next RETRO", async () => {

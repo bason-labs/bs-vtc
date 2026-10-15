@@ -84,9 +84,14 @@ const started = async (h: Harness): Promise<string> => (await h.engine.start(REQ
 
 /** An engine stand-in whose runs a test opens, finishes and pauses at will. */
 const fakeEngine = () => {
-  const runs = new Map<string, { finished: boolean; paused: boolean }>();
+  const runs = new Map<
+    string,
+    { finished: boolean; paused: boolean; automation?: { issue: number; target: { repo: string } } }
+  >();
+  const automatic: { input: StartInput; issue: unknown }[] = [];
   const recorded: { run: string; type: string; data: unknown }[] = [];
   const notices: string[] = [];
+  const relayed: string[] = [];
   /** While set, recording an event throws (a full disk, a log the engine refuses). */
   const failRecord = { on: false };
   let listener: ((event: VtcEvent) => void) | undefined;
@@ -99,8 +104,23 @@ const fakeEngine = () => {
           ...(r.finished ? { finished_at: "2026-10-13T09:00:00.000Z" } : {}),
           paused: r.paused,
         },
+        automation: r.automation ?? null,
+        findings: new Map(),
         events: [],
       })),
+    startAutomatic: (input: StartInput, issue: { issue: number; target: { repo: string } }) => {
+      if ([...runs.values()].some((r) => !r.finished))
+        return Promise.reject(
+          Object.assign(new Error("a run is already active in this repo"), { code: "run_active" }),
+        );
+      automatic.push({ input, issue });
+      runs.set(`R-${String(runs.size + 1)}`, { finished: false, paused: false, automation: issue });
+      return Promise.resolve({
+        run: `R-${String(runs.size)}`,
+        track: input.track,
+        phase: "discover",
+      });
+    },
     config: () => ({}),
     recordModuleEvent: (run: string, draft: EventDraft): boolean => {
       if (failRecord.on) throw new Error("the event log refused the append");
@@ -115,7 +135,9 @@ const fakeEngine = () => {
         listener = undefined;
       };
     },
-    relay: () => undefined,
+    relay: (_run: string | undefined, text: string) => {
+      relayed.push(text);
+    },
     notice: (text: string) => {
       notices.push(text);
     },
@@ -125,6 +147,8 @@ const fakeEngine = () => {
     runs,
     recorded,
     notices,
+    relayed,
+    automatic,
     failRecord,
     /** An event of `run` reaches the wiring's listener. */
     event: (event: Pick<VtcEvent, "type" | "run" | "data"> & Partial<VtcEvent>) => {
@@ -211,6 +235,60 @@ describe("automation wiring (AD-27 rules 7 and 8)", () => {
       reason: "paused",
       kind: "defect",
     });
+    await wiring.close();
+    await h.release();
+  });
+
+  it("asks gh whether it is logged in (D-bz): logged out, automation is off with the note and facts skip as gh_unavailable, until a later probe says it is", async () => {
+    const h = createHarness();
+    const up = fakeUpstream();
+    let loggedIn = false;
+    let probes = 0;
+    const wiring = wireAutomation(
+      h.engine,
+      {
+        repoRoot: h.repo,
+        vtcHome: h.home,
+        automation: {
+          ...AUTOMATION,
+          ghLogin: () => {
+            probes += 1;
+            return Promise.resolve(loggedIn);
+          },
+        },
+        now: () => h.clock,
+      },
+      { githubRemote: true, createUpstream: up.create },
+    );
+    await wiring.idle();
+    expect(probes).toBe(1);
+    expect(wiring.settings()).toMatchObject({ issues: false, prs: false, upstream: false });
+    expect(wiring.settings()?.notes).toContain(
+      "automatic issues and PRs are off: gh is not logged in (run gh auth login)",
+    );
+    const run = await started(h);
+    h.engine.recordModuleEvent(run, {
+      type: "incident.recorded",
+      actor: "engine",
+      data: { kind: "crash", detail: "a job failed" },
+    });
+    await wiring.idle();
+    expect(up.facts).toEqual([]);
+    expect(eventsOf(h, run).find((e) => e.type === "automation.skipped")?.data).toMatchObject({
+      reason: "gh_unavailable",
+      kind: "defect",
+    });
+    // the human runs gh auth login; the next probe (a run's start, or the hourly timer) sees it
+    loggedIn = true;
+    await wiring.refreshLogin();
+    expect(wiring.settings()).toMatchObject({ issues: true, prs: true, upstream: true });
+    h.engine.recordModuleEvent(run, {
+      type: "incident.recorded",
+      actor: "engine",
+      data: { kind: "crash", detail: "a job failed again" },
+    });
+    await wiring.idle();
+    expect(up.facts.map((f) => f.kind)).toEqual(["defect"]);
     await wiring.close();
     await h.release();
   });
@@ -356,6 +434,7 @@ describe("automation wiring (AD-27 rules 7 and 8)", () => {
       issue: 42,
     };
     await up.deps().startRun(REQUEST, issue);
+    await wiring.idle();
     const run = h.engine.status({}).run.id;
     expect(eventsOf(h, run).find((e) => e.type === "run.started")?.data.automation).toEqual(issue);
     await wiring.close();
@@ -406,6 +485,76 @@ describe("automation wiring (AD-27 rules 7 and 8)", () => {
     );
     expect(notices[0]).toContain("https://github.com/acme/app/pull/12");
     expect((await h.engine.next({}, CLAUDE)).notices).toBeUndefined();
+    await wiring.close();
+    await h.release();
+  });
+
+  /** Two scorecards of the Engineer: version b's tokens per success 50% over version a's. */
+  const writeRegressedCards = (repo: string): void => {
+    const card = (effective: string, from: string, tokens: number): Scorecard => ({
+      v: 1,
+      prompt: {
+        role: "engineer",
+        host: "claude-code",
+        locked_sha256: "1".repeat(64),
+        editable_sha256: effective,
+        effective_sha256: effective,
+      },
+      grader_bundle_sha: "9".repeat(64),
+      window: { from, to: "2026-10-12T00:00:00.000Z" },
+      metrics: { tokens_per_success: { value: tokens, ci_low: null, ci_high: null, n: 20 } },
+      breakdown: [],
+      written_at: "2026-10-12T00:00:00.000Z",
+    });
+    const cards = [
+      card("a".repeat(64), "2026-10-01T00:00:00.000Z", 10000),
+      card("b".repeat(64), "2026-10-05T00:00:00.000Z", 15000),
+    ];
+    const index = {
+      v: 1,
+      scorecards: cards.map((c) => ({
+        prompt: c.prompt,
+        path: scorecardPath(c.prompt.role, c.prompt.host, c.prompt.effective_sha256),
+        written_at: c.written_at,
+      })),
+    };
+    for (const [c, entry] of cards.map((c, i) => [c, index.scorecards[i]] as const)) {
+      const file = join(repo, entry?.path ?? "");
+      mkdirSync(join(file, ".."), { recursive: true });
+      writeFileSync(file, JSON.stringify(c));
+    }
+    writeFileSync(join(repo, ".vtc/lookback/scorecards/index.json"), JSON.stringify(index));
+  };
+
+  it("a cost regression skipped while automation was paused is raised at the first evaluation after resume (reading 212(8))", async () => {
+    const h = createHarness();
+    const up = fakeUpstream();
+    const wiring = wireAutomation(
+      h.engine,
+      { repoRoot: h.repo, vtcHome: h.home, automation: AUTOMATION, now: () => h.clock },
+      { githubRemote: true, createUpstream: up.create },
+    );
+    const run = await started(h);
+    writeRegressedCards(h.repo);
+    setAutomationPaused(h.engine.guardDir, "2026-10-13T09:00:00.000Z");
+    wiring.scorecardsWritten(run);
+    await wiring.idle();
+    expect(up.facts).toEqual([]);
+    expect(eventsOf(h, run).filter((e) => e.type === "automation.skipped")).toEqual([
+      expect.objectContaining({
+        data: expect.objectContaining({ reason: "paused", kind: "cost" }) as object,
+      }),
+    ]);
+    setAutomationPaused(h.engine.guardDir, null);
+    wiring.scorecardsWritten(run);
+    await wiring.idle();
+    expect(up.facts).toEqual([
+      expect.objectContaining({ kind: "cost", role: "engineer", metric: "tokens_per_success" }),
+    ]);
+    // handed over once: the next evaluation does not raise it again
+    wiring.scorecardsWritten(run);
+    await wiring.idle();
+    expect(up.facts).toHaveLength(1);
     await wiring.close();
     await h.release();
   });
@@ -674,6 +823,133 @@ describe("automation wiring (AD-27 rules 7 and 8)", () => {
       vi.useRealTimers();
     }
     await h.release();
+  });
+
+  it("an automatic action taken while no run is open is visible at once: in the wiring's pending events and in the next daily summary (D-ca)", async () => {
+    const fake = fakeEngine();
+    const up = fakeUpstream();
+    let clock = new Date("2026-10-13T09:00:00.000Z");
+    const wiring = wireAutomation(
+      fake.engine,
+      { repoRoot: tempDir(), vtcHome: tempDir(), automation: AUTOMATION, now: () => clock },
+      { githubRemote: true, createUpstream: up.create },
+    );
+    await wiring.idle();
+    // the daily sweep closes a quiet issue between runs
+    clock = new Date("2026-10-13T10:00:00.000Z");
+    up.deps().emit({
+      type: "upstream.issue_closed",
+      actor: "engine",
+      data: {
+        target: { kind: "upstream", repo: "bason-labs/bs-vtc" },
+        kind: "defect",
+        fingerprint: "0123456789abcdef",
+        number: 7,
+        url: "https://github.com/bason-labs/bs-vtc/issues/7",
+        reason: "quiet",
+      },
+    });
+    expect(wiring.pendingEvents()).toEqual([
+      expect.objectContaining({
+        type: "upstream.issue_closed",
+        ts: "2026-10-13T10:00:00.000Z",
+        data: expect.objectContaining({ number: 7 }) as object,
+      }),
+    ]);
+    // the next UTC day's summary counts it, though no run's log holds it yet
+    clock = new Date("2026-10-14T08:00:00.000Z");
+    fake.runs.set("R-2", { finished: false, paused: false });
+    fake.event({ type: "run.paused", run: "R-2", data: { reason: "x" } });
+    await wiring.idle();
+    expect(fake.relayed).toEqual([expect.stringMatching(/1 closed/) as string]);
+    await wiring.close();
+  });
+
+  it("hands an advisory in the dependencies over only on VTC's own repo, and Lookback's new-agent signals as improvements (D-bv (4), D-cd)", async () => {
+    const advisory = {
+      type: "finding.recorded",
+      run: "R-1",
+      task: "T-1",
+      data: {
+        finding: {
+          fingerprint: "5".repeat(64),
+          source: "tool",
+          source_name: "osv-scanner",
+          rule_id: "GHSA-aaaa-bbbb-cccc",
+          category: "supply_chain",
+          title: "zod@4.6.7: a parsing flaw",
+          severity: "high",
+          confidence: 1,
+          location: { path: "pnpm-lock.yaml", symbol: "zod@4.6.7" },
+          evidence: { type: "command_output", ref: "gates/1/osv.json" },
+          req_ids: [],
+          route: "patch",
+          task: "T-1",
+          round_first_seen: 1,
+          status: "open",
+        },
+      },
+    } as const;
+    for (const vtcRepo of [false, true]) {
+      const fake = fakeEngine();
+      const up = fakeUpstream();
+      const wiring = wireAutomation(
+        fake.engine,
+        { repoRoot: tempDir(), vtcHome: tempDir(), automation: AUTOMATION },
+        { githubRemote: true, createUpstream: up.create, vtcRepo: () => vtcRepo },
+      );
+      fake.runs.set("R-1", { finished: false, paused: false });
+      fake.event(advisory);
+      await wiring.idle();
+      expect(up.facts.map((f) => f.kind)).toEqual(vtcRepo ? ["security"] : []);
+      // another project's dependencies are not VTC's: nothing raised, nothing skipped
+      expect(fake.recorded.filter((r) => r.type === "automation.skipped")).toEqual([]);
+      wiring.improvements([
+        {
+          target: "upstream",
+          kind: "new_agent",
+          run: "R-1",
+          source: "lookback.new_agent",
+          at: "2026-10-13T09:00:00.000Z",
+          subject: "engineer_ml",
+          metrics: { failures: 4, escalations: 0 },
+          detail: "4 Engineer failures on ml tasks with no fitting profile",
+        },
+      ]);
+      await wiring.idle();
+      expect(up.facts.map((f) => f.kind)).toEqual(
+        vtcRepo ? ["security", "new_agent"] : ["new_agent"],
+      );
+      await wiring.close();
+    }
+  });
+
+  it("an automatic run the module asks for while another run is open waits, and starts once that run finishes, once per issue (D-bv)", async () => {
+    const fake = fakeEngine();
+    const up = fakeUpstream();
+    const wiring = wireAutomation(
+      fake.engine,
+      { repoRoot: tempDir(), vtcHome: tempDir(), automation: AUTOMATION },
+      { githubRemote: true, createUpstream: up.create },
+    );
+    fake.runs.set("R-1", { finished: false, paused: false });
+    await up.deps().startRun(AUTO_REQUEST, ISSUE);
+    await up.deps().startRun(AUTO_REQUEST, ISSUE);
+    await wiring.idle();
+    expect(fake.automatic).toEqual([]);
+    expect(fake.notices).toEqual([]);
+    // the human's run finishes: the queued run starts, once
+    fake.runs.set("R-1", { finished: true, paused: false });
+    fake.event({ type: "run.finished", run: "R-1", data: {} });
+    await wiring.idle();
+    expect(fake.automatic).toEqual([{ input: AUTO_REQUEST, issue: ISSUE }]);
+    // its run finishes too: nothing starts again for the same issue
+    fake.runs.set("R-2", { finished: true, paused: false, automation: ISSUE });
+    await up.deps().startRun(AUTO_REQUEST, ISSUE);
+    fake.event({ type: "run.finished", run: "R-2", data: {} });
+    await wiring.idle();
+    expect(fake.automatic).toHaveLength(1);
+    await wiring.close();
   });
 
   it("while the kill switch is set, a fact of a finished run is an automation.skipped (paused)", async () => {

@@ -13,6 +13,7 @@
 import { existsSync, mkdirSync, realpathSync, statSync } from "node:fs";
 import { dirname, join, relative, isAbsolute } from "node:path";
 import {
+  redactSecrets,
   EVIDENCE_LIMITS,
   EvidenceFileNameSchema,
   type AssetBundle,
@@ -177,15 +178,29 @@ const capture = async (
 };
 
 /** Runs `step` up to `EVIDENCE_LIMITS.captureAttempts` times; `null` when every try threw. */
-const twice = async <T>(step: () => Promise<T>): Promise<T | null> => {
+const twice = async <T>(step: () => Promise<T>, failures: unknown[] = []): Promise<T | null> => {
   for (let attempt = 0; attempt < EVIDENCE_LIMITS.captureAttempts; attempt += 1) {
     try {
       return await step();
     } catch (error) {
       if (isAutomationSkip(error)) throw error;
+      failures.push(error);
     }
   }
   return null;
+};
+
+/**
+ * Whether a publish failure was a race with another writer of the shared evidence branch: git
+ * refused the push as not a fast-forward (`[rejected]`, `non-fast-forward`, `fetch first`, a stale
+ * lease), or the local ref moved under `update-ref`. Anything else (no remote, an auth failure, a
+ * plumbing error) is an evidence capture failure (D-ce), which raises its issue.
+ */
+export const isPublishRace = (error: unknown): boolean => {
+  const message = error instanceof Error ? error.message : String(error);
+  return /\[rejected\]|non-fast-forward|fetch first|stale info|\bref moved\b|cannot lock ref|but expected/i.test(
+    message,
+  );
 };
 
 /** The PNG signature. */
@@ -334,6 +349,7 @@ export const prepareEvidence = async (
   if (deps.hosting === "branch") {
     const plumbing = deps.plumbing;
     if (plumbing === undefined) return { ok: false, detail: "branch hosting needs git plumbing" };
+    const failures: unknown[] = [];
     const published = await twice(() => {
       deps.beforePublish?.();
       return publishToEvidenceBranch({
@@ -346,12 +362,24 @@ export const prepareEvidence = async (
         at: deps.now(),
         refs: deps.refs,
       });
-    });
+    }, failures);
     if (published === null) {
+      // only a race with another installation is a refused push; every other failure is the
+      // evidence capture failing, which raises "evidence capture failed" (D-ce)
+      if (failures.length > 0 && failures.every(isPublishRace)) {
+        return {
+          ok: false,
+          detail: "the evidence branch could not be pushed (2 tries, each after a fetch)",
+          pushRefused: true,
+        };
+      }
+      const last = failures.at(-1);
       return {
         ok: false,
-        detail: "the evidence branch could not be pushed (2 tries, each after a fetch)",
-        pushRefused: true,
+        detail: `the evidence branch could not be published: ${redactSecrets(
+          last instanceof Error ? last.message : String(last),
+          request.knownValues,
+        ).slice(0, 300)}`,
       };
     }
     urls = published;

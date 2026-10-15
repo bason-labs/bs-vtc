@@ -28,6 +28,29 @@ export interface UpstreamFacts {
   readonly advisory?: { readonly id: string; readonly package: string } | undefined;
 }
 
+/** What an upstream report says for a model id that is not a public one ({@link upstreamModelId}). */
+export const CUSTOM_MODEL = "custom";
+
+/** Public model ids: the hosts' aliases, Anthropic's (first-party, Bedrock, Vertex) and OpenAI's. */
+const PUBLIC_MODEL_IDS: readonly RegExp[] = [
+  /^(?:opus|sonnet|haiku|default|best|opusplan)$/,
+  /^(?:(?:us|eu|apac|global|jp|au)\.)?(?:anthropic\.)?claude-[a-z0-9][a-z0-9.-]{0,80}(?::\d{1,3})?(?:@\d{8})?$/,
+  /^(?:gpt-[a-z0-9][a-z0-9.-]{0,40}|o\d(?:-[a-z0-9]{1,20}){0,3}|codex-[a-z0-9][a-z0-9.-]{0,40})$/,
+];
+
+/**
+ * Pure (D-by; D-ci): the model id an upstream report may carry. The configured id is project
+ * config (`hosts.models`), and with provider billing it is often an inference-profile ARN (which
+ * holds the cloud account id), a deployment path or a gateway alias named after the client: only
+ * a public model id is sent as is (a host's `[1m]` context suffix dropped), anything else as
+ * {@link CUSTOM_MODEL}. A run of 12 digits (an AWS account id) is never public.
+ */
+export const upstreamModelId = (model: string): string => {
+  const id = model.trim().replace(/\[1m\]$/i, "");
+  if (/\d{12}/.test(id)) return CUSTOM_MODEL;
+  return PUBLIC_MODEL_IDS.some((re) => re.test(id)) ? id : CUSTOM_MODEL;
+};
+
 /**
  * Pure: the allowlist projection of `facts`. Unknown or malformed values fail the strict schema,
  * which skips with `privacy` (a value that does not look like VTC-side data is never sent).
@@ -41,7 +64,7 @@ export const projectUpstreamReport = (facts: UpstreamFacts): UpstreamReport => {
     ...(facts.role === undefined ? {} : { role: facts.role }),
     ...(facts.mode === undefined ? {} : { mode: facts.mode }),
     ...(facts.host === undefined ? {} : { host: facts.host }),
-    ...(facts.model === undefined ? {} : { model: facts.model }),
+    ...(facts.model === undefined ? {} : { model: upstreamModelId(facts.model) }),
     ...(facts.promptSha === undefined ? {} : { prompt_sha: facts.promptSha }),
     ...(facts.errorClass === undefined ? {} : { error_class: facts.errorClass }),
     vtc_frames: [...(facts.frames ?? [])].slice(0, 3),
@@ -119,6 +142,31 @@ const GENERIC = new Set([
   "root",
   "admin",
   "user",
+  // VTC's own vocabulary, which every upstream text names: a value of 4 or more characters
+  // matches as a substring (reading 212(12)), so these would refuse every report
+  "roles",
+  "role",
+  "prompt",
+  "prompts",
+  "lookback",
+  "replay",
+  "replays",
+  "scorecard",
+  "scorecards",
+  "gates",
+  "evidence",
+  "upstream",
+  "automation",
+  "release",
+  "changelog",
+  "plugins",
+  "skills",
+  "docs",
+  "tooling",
+  "fixtures",
+  "test",
+  "tests",
+  "main",
 ]);
 
 const MIN_TOKEN = 3;
@@ -199,12 +247,22 @@ export const selfDenylist = (denylist: readonly string[], upstreamRepo: string):
 
 const escape = (s: string): string => s.replace(/[.*+?^${}()|[\]\\/-]/g, "\\$&");
 
-/** Pure: whether `text` contains a denylisted identifier (case-insensitive, whole token). */
-export const containsDenied = (text: string, denylist: readonly string[]): boolean =>
-  denylist.some((token) => {
-    if (token.includes("/")) return text.toLowerCase().includes(token.toLowerCase());
+/** Denylist values shorter than this match as a whole word only (spine §5 reading 212(12)). */
+export const DENY_SUBSTRING_MIN = 4;
+
+/**
+ * Pure: whether `text` contains a denylisted identifier, case-insensitive (spine §5 reading
+ * 212(12)): a value of {@link DENY_SUBSTRING_MIN} or more characters (or any path) as a substring,
+ * so `InitechPortal` or `acmeApi` still names the project; a shorter one as a whole word.
+ */
+export const containsDenied = (text: string, denylist: readonly string[]): boolean => {
+  const lower = text.toLowerCase();
+  return denylist.some((token) => {
+    if (token.includes("/") || token.length >= DENY_SUBSTRING_MIN)
+      return lower.includes(token.toLowerCase());
     return new RegExp(`(?<![A-Za-z0-9])${escape(token)}(?![A-Za-z0-9])`, "i").test(text);
   });
+};
 
 export interface UpstreamPrivacyCheck {
   readonly knownValues: readonly string[];

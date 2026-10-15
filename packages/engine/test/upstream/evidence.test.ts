@@ -19,7 +19,9 @@ import {
   gifArgs,
   hasVtcTrailer,
   makeGif,
+  EVIDENCE_READY,
   planEvidenceShots,
+  UPSTREAM_EVIDENCE_RUN,
   prepareEvidence,
   publishToEvidenceBranch,
   renderEvidenceSection,
@@ -148,8 +150,25 @@ describe("what to record", () => {
       change: "ui",
       flowPath: "/x",
     });
-    expect(upstream.every((s) => s.path.startsWith("/lookback/?evidence=upstream"))).toBe(true);
+    // reading 212(3): the Lookback view of the snapshot's synthetic run, never the project's run
+    expect(
+      upstream.every((s) => s.path === `/lookback/?run=${UPSTREAM_EVIDENCE_RUN}&evidence=upstream`),
+    ).toBe(true);
     expect(upstream.map((s) => s.name)).toEqual(["01-replay.webm", "02-final-state.png"]);
+    // every shot waits for its page's data: an empty or error page fails the capture
+    const charts = planEvidenceShots({ upstreamSafe: true, change: "prompt" });
+    expect(charts.map((s) => s.waitFor)).toEqual([
+      EVIDENCE_READY.replay,
+      EVIDENCE_READY.replay,
+      EVIDENCE_READY.scorecard,
+      EVIDENCE_READY.replay,
+    ]);
+    const full = planEvidenceShots({ run: "R1", upstreamSafe: false, change: "non_ui" });
+    expect(full.map((s) => [s.path, s.waitFor])).toEqual([
+      ["/run/?run=R1&evidence=1", EVIDENCE_READY.flow],
+      ["/run/?run=R1&evidence=1", EVIDENCE_READY.flow],
+      ["/evidence/gate-report.html", EVIDENCE_READY.gateReport],
+    ]);
   });
   it("drops every recording when a project turns video off (screenshots only)", () => {
     const shots = planEvidenceShots({
@@ -495,6 +514,29 @@ describe("prepareEvidence", () => {
       pushRefused: true,
     });
     expect(plumbing.commits).toHaveLength(2);
+  });
+
+  it("a publish failure that is no non-fast-forward race is a capture failure, not a refused push (D-ce)", async () => {
+    for (const message of [
+      "git push origin failed (128): fatal: could not read Username for 'https://github.com': terminal prompts disabled",
+      "fatal: 'origin' does not appear to be a git repository",
+      "git mktree failed (128): fatal: corrupt tree",
+    ]) {
+      const plumbing = fakePlumbing();
+      const broken = { ...plumbing, push: () => Promise.reject(new Error(message)) };
+      const failed = await prepareEvidence(tempDir(), request(), {
+        recorder: fakeRecorder(),
+        assets: fakeAssets(),
+        hosting: "branch",
+        ffmpeg: false,
+        plumbing: broken,
+        now: () => new Date(),
+      });
+      expect(failed).toEqual({
+        ok: false,
+        detail: expect.stringContaining("could not be published") as string,
+      });
+    }
   });
 
   it("fetches and rebuilds once when another installation pushed between the fetch and the push", async () => {

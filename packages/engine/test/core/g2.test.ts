@@ -868,16 +868,23 @@ describe("too-similar directions, re-roll and the category standard (§9.1 steps
     const planner = only(out.actions, "planner");
     // the Planner is no UI role that judges a direction
     expect(packJson(h, planner).design_direction).toBeUndefined();
-    expect((await engineerPack(h, planner)).design_direction).toBe("quiet");
+    const pack = await engineerPack(h, planner);
+    expect(pack.design_direction).toBe("quiet");
+    expect(pack.design_exit).toBeUndefined();
     await h.release();
   });
 
-  it("after the category standard no pack names a direction", async () => {
+  it("after the category standard no pack names a direction, and the UI roles' packs say design_exit (reading 211)", async () => {
     const h = createHarness({ roles: ROLES });
     similarSeam(h);
     const gate = await toG2(h, { hasUi: true, designer: designer(["signal", "quiet"]) });
     const out = await approve(h, gate, { ...waiveAll(gate), design_exit: "category_standard" });
-    expect((await engineerPack(h, only(out.actions, "planner"))).design_direction).toBeUndefined();
+    const planner = only(out.actions, "planner");
+    // the Planner is no UI role that judges a direction
+    expect(packJson(h, planner).design_exit).toBeUndefined();
+    const pack = await engineerPack(h, planner);
+    expect(pack.design_direction).toBeUndefined();
+    expect(pack.design_exit).toBe("category_standard");
     await h.release();
   });
 

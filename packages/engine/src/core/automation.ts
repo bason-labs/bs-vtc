@@ -235,7 +235,29 @@ export interface AutomationFact {
    */
   readonly replaySha256?: string;
   readonly mergeCommit?: string;
+  /**
+   * A security fact (`kind` `security`): the advisory id and the package (name only, never the
+   * lockfile or a path) an osv-scanner finding names (D-bv (4)). The daemon hands it on only when
+   * the project is VTC's own repo: another project's dependencies are not VTC's.
+   */
+  readonly advisory?: { readonly id: string; readonly package: string };
+  /**
+   * A D-cd improvement (`kind` `new_agent`, `tool`, `config`, `capability`): what it is about, in
+   * VTC's vocabulary (a role id, a tool or setting name). The upstream module fingerprints it and
+   * never sends it unless it is VTC's own (`newAgentReportFields`).
+   */
+  readonly subject?: string;
+  /** A D-cd improvement's numbers (failures, escalations). */
+  readonly metrics?: Readonly<Record<string, number>>;
 }
+
+/** `name@version` of an osv-scanner finding's symbol → the package name (scope kept). */
+const advisoryPackage = (symbol: string | undefined): string | undefined => {
+  if (symbol === undefined) return undefined;
+  const at = symbol.lastIndexOf("@");
+  const name = at > 0 ? symbol.slice(0, at) : symbol;
+  return /^(@[a-z0-9._-]+\/)?[a-z0-9._-]{1,214}$/.test(name) ? name : undefined;
+};
 
 /**
  * Park reasons that wait on the human by design, so VTC raises no issue for them. `blocked` is one:
@@ -469,8 +491,28 @@ export const automationFacts = (state: RunState, event: VtcEvent): AutomationFac
     }
     case "finding.recorded": {
       const v = parse("finding.recorded", event);
-      if (v?.finding.route !== "out_of_scope") return [];
+      if (v === null) return [];
+      // D-bv (4): an advisory in the project's dependencies; on VTC's own repo (the bs-vtc
+      // checkout, "VTC builds VTC") those are VTC's dependencies, which the daemon decides
+      const pkg =
+        v.finding.source_name === "osv-scanner" && v.finding.category === "supply_chain"
+          ? advisoryPackage(v.finding.location.symbol)
+          : undefined;
+      const security: AutomationFact[] =
+        pkg === undefined || !/^[A-Za-z0-9][A-Za-z0-9._:-]{0,63}$/.test(v.finding.rule_id)
+          ? []
+          : [
+              {
+                ...base,
+                target: "upstream",
+                kind: "security",
+                advisory: { id: v.finding.rule_id, package: pkg },
+                detail: `the dependency gate found ${v.finding.rule_id} in ${pkg}`,
+              },
+            ];
+      if (v.finding.route !== "out_of_scope") return security;
       return [
+        ...security,
         {
           ...base,
           target: "project",
@@ -747,7 +789,10 @@ export interface UpstreamWiringDeps {
    * in `run`'s log (absent: the active run, else the next run to start).
    */
   readonly emit: (draft: EventDraft, run?: string) => void;
-  /** Starts an automatic run from an issue (a fixable project finding, D-bv; AD-27 rule 2). */
+  /**
+   * Starts an automatic run from an issue (a fixable item, D-bv, D-cd; AD-27 rule 2): queued until
+   * no run of the repo is open and automation is not paused, one run per issue.
+   */
   readonly startRun: (input: StartInput, issue: AutomationRunRef) => Promise<void>;
   readonly now: () => Date;
 }

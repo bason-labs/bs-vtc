@@ -244,10 +244,15 @@ export const UpstreamReportSchema = z.strictObject({
   role: RoleIdSchema.optional(),
   mode: SlugSchema.optional(),
   host: HostIdSchema.optional(),
-  /** The model id the host reported (no account or project data). */
+  /**
+   * The model id the host reported (no account or project data): a public model id, or `custom`
+   * for any other (the upstream module maps an inference-profile ARN, a deployment path or a
+   * gateway alias to `custom`, D-by). Never an ARN, and never a run of 12 digits (an AWS account
+   * id). Narrowed in 5.2.0.
+   */
   model: z
     .string()
-    .regex(/^[A-Za-z0-9][A-Za-z0-9._:/@-]{0,199}$/)
+    .regex(/^(?![Aa][Rr][Nn]:)(?!.*\d{12})[A-Za-z0-9][A-Za-z0-9._:/@-]{0,199}$/)
     .optional(),
   /** `effective_sha256` of the prompt version involved. */
   prompt_sha: Sha256HexSchema.optional(),
@@ -459,6 +464,12 @@ export const AutomationSkipReasonSchema = z.enum([
   "trial_cap",
   /** A replay arm's plugin did not load (a managed-settings lock shadowed it, spine §5 reading 201). */
   "plugin_locked",
+  /**
+   * A Lookback PR's replay measured another prompt than the one on the upstream repo's default
+   * branch (an older VTC release, or a later merged change of the role): its diff would revert
+   * that change, so it is not opened. New in 5.2.0.
+   */
+  "stale_baseline",
 ]);
 export type AutomationSkipReason = z.infer<typeof AutomationSkipReasonSchema>;
 

@@ -1,0 +1,114 @@
+{
+  "run": "vtc-upstream",
+  "pages": [
+    "/lookback/?run=vtc-upstream&evidence=upstream"
+  ],
+  "waitFor": [
+    "[data-testid=\"replay\"]",
+    "[data-testid^=\"scorecard-group-\"]"
+  ],
+  "routes": {
+    "/api/health": {
+      "ok": true,
+      "mode": "live",
+      "engine_version": "0.4.0",
+      "contracts_version": "5.2.0",
+      "prototype_url": null
+    },
+    "/api/runs": {
+      "runs": [
+        {
+          "id": "vtc-upstream",
+          "track": "feature",
+          "phase": "retro",
+          "paused": false,
+          "started_at": "2026-10-15T10:00:00.000Z",
+          "finished_at": "2026-10-15T10:00:00.000Z"
+        }
+      ]
+    },
+    "/api/runs/vtc-upstream/artifacts?path=.vtc%2Flookback%2Freplays%2Fproposal.json": {
+      "run": "vtc-upstream",
+      "path": ".vtc/lookback/replays/proposal.json",
+      "sha256": "df77438a602adea8b3713ff6c7e986ede689eb3d8422d7300b7c3abc1aa7e323",
+      "size": 1005,
+      "media_type": "application/json",
+      "encoding": "utf8",
+      "content": "{\n  \"v\": 1,\n  \"proposal\": \"proposal\",\n  \"role\": \"engineer\",\n  \"host\": \"claude-code\",\n  \"baseline\": \"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\n  \"candidate\": \"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\",\n  \"grader_bundle_sha\": \"cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc\",\n  \"k\": 3,\n  \"per_task\": [\n    {\n      \"task\": \"task-1\",\n      \"a\": [\n        false,\n        false,\n        true\n      ],\n      \"b\": [\n        true,\n        true,\n        true\n      ],\n      \"regression_set\": false\n    },\n    {\n      \"task\": \"task-2\",\n      \"a\": [\n        true,\n        true,\n        true\n      ],\n      \"b\": [\n        true,\n        true,\n        true\n      ],\n      \"regression_set\": true\n    }\n  ],\n  \"aa_flip_rate\": 0.05,\n  \"sign_test\": {\n    \"n_discordant\": 3,\n    \"wins_b\": 3,\n    \"p\": 0.125\n  },\n  \"tokens_delta_pct\": -8,\n  \"verdict\": \"improve\",\n  \"finished_at\": \"2026-10-15T10:00:00.000Z\",\n  \"isolation\": \"paths_only\",\n  \"grader\": \"gates\"\n}\n"
+    },
+    "/api/runs/vtc-upstream/artifacts?path=.vtc%2Flookback%2Fscorecards%2Findex.json": {
+      "run": "vtc-upstream",
+      "path": ".vtc/lookback/scorecards/index.json",
+      "sha256": "a69cb068df604ad75c32a5e733b5a83e1efe8948250bea57acb116668e12441a",
+      "size": 551,
+      "media_type": "application/json",
+      "encoding": "utf8",
+      "content": "{\n  \"v\": 1,\n  \"scorecards\": [\n    {\n      \"prompt\": {\n        \"role\": \"engineer\",\n        \"host\": \"claude-code\",\n        \"locked_sha256\": \"1111111111111111111111111111111111111111111111111111111111111111\",\n        \"editable_sha256\": \"2222222222222222222222222222222222222222222222222222222222222222\",\n        \"effective_sha256\": \"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\"\n      },\n      \"path\": \".vtc/lookback/scorecards/engineer/claude-code/aaaaaaaa/scorecard.json\",\n      \"written_at\": \"2026-10-14T00:00:00.000Z\"\n    }\n  ]\n}\n"
+    },
+    "/api/runs/vtc-upstream/artifacts?path=.vtc%2Flookback%2Fscorecards%2Fengineer%2Fclaude-code%2Faaaaaaaa%2Fscorecard.json": {
+      "run": "vtc-upstream",
+      "path": ".vtc/lookback/scorecards/engineer/claude-code/aaaaaaaa/scorecard.json",
+      "sha256": "ecc12ad99134659d4672b0152ff7414afd640c6bc4ee2b72d5f35b5d7b97f5bd",
+      "size": 855,
+      "media_type": "application/json",
+      "encoding": "utf8",
+      "content": "{\n  \"v\": 1,\n  \"prompt\": {\n    \"role\": \"engineer\",\n    \"host\": \"claude-code\",\n    \"locked_sha256\": \"1111111111111111111111111111111111111111111111111111111111111111\",\n    \"editable_sha256\": \"2222222222222222222222222222222222222222222222222222222222222222\",\n    \"effective_sha256\": \"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\"\n  },\n  \"grader_bundle_sha\": \"cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc\",\n  \"window\": {\n    \"from\": \"2026-10-01T00:00:00.000Z\",\n    \"to\": \"2026-10-14T00:00:00.000Z\"\n  },\n  \"metrics\": {\n    \"first_round_gate_pass\": {\n      \"value\": 0.6,\n      \"ci_low\": 0.4,\n      \"ci_high\": 0.77,\n      \"n\": 25\n    },\n    \"tokens_per_success\": {\n      \"value\": 41000,\n      \"ci_low\": null,\n      \"ci_high\": null,\n      \"n\": 15\n    }\n  },\n  \"breakdown\": [],\n  \"written_at\": \"2026-10-14T00:00:00.000Z\"\n}\n"
+    },
+    "/api/runs/vtc-upstream/events": {
+      "run": "vtc-upstream",
+      "events": [
+        {
+          "v": 1,
+          "run": "vtc-upstream",
+          "seq": 1,
+          "ts": "2026-10-15T10:00:00.000Z",
+          "type": "lookback.replay_finished",
+          "actor": "engine",
+          "data": {
+            "proposal": "proposal",
+            "verdict": "improve",
+            "path": ".vtc/lookback/replays/proposal.json",
+            "sha256": "df77438a602adea8b3713ff6c7e986ede689eb3d8422d7300b7c3abc1aa7e323"
+          }
+        }
+      ],
+      "next_after": null
+    },
+    "/api/runs/vtc-upstream/events?after=0&limit=2000": {
+      "run": "vtc-upstream",
+      "events": [
+        {
+          "v": 1,
+          "run": "vtc-upstream",
+          "seq": 1,
+          "ts": "2026-10-15T10:00:00.000Z",
+          "type": "lookback.replay_finished",
+          "actor": "engine",
+          "data": {
+            "proposal": "proposal",
+            "verdict": "improve",
+            "path": ".vtc/lookback/replays/proposal.json",
+            "sha256": "df77438a602adea8b3713ff6c7e986ede689eb3d8422d7300b7c3abc1aa7e323"
+          }
+        }
+      ],
+      "next_after": null
+    }
+  },
+  "events": [
+    {
+      "v": 1,
+      "run": "vtc-upstream",
+      "seq": 1,
+      "ts": "2026-10-15T10:00:00.000Z",
+      "type": "lookback.replay_finished",
+      "actor": "engine",
+      "data": {
+        "proposal": "proposal",
+        "verdict": "improve",
+        "path": ".vtc/lookback/replays/proposal.json",
+        "sha256": "df77438a602adea8b3713ff6c7e986ede689eb3d8422d7300b7c3abc1aa7e323"
+      }
+    }
+  ]
+}

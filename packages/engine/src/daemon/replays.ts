@@ -13,6 +13,10 @@
  * - `replayWait`: the same window and budget checks, which core runs again before every trial.
  * - `gradeTrial`: the Gate Runner's verdict on the trial (`pass`, `fail`, or `infra_error`, which
  *   measures nothing).
+ * - `gradeVerdict` (D-ch): a verdict role's trial (the Spec Verifier's) scored by the verdict
+ *   grader against the recorded outcome of the dispatch it replays (`gradeVerdictReplay`); its
+ *   held-out tasks are the dispatches with a recorded outcome (`replayTasks` with the `verdict`
+ *   grader), keyed with the expected verdict.
  * - `finishReplay`: `finishReplay` over the graded trials, `writeReplayResult` (the event carries
  *   the SHA-256 of the bytes written), and the measured A/A flip rate kept for the next replay.
  */
@@ -46,12 +50,15 @@ import {
 import {
   aaFlipRate,
   cachedAaFlipRate,
+  expectedOfTaskKey,
   finishReplay,
+  gradeVerdictReplay,
   loadPromptVersionSync,
   planReplayTrials,
   promptVersionRef,
   readAttributions,
   recordAaFlipRate,
+  replayTaskKey,
   replayTasks,
   tokensDeltaPct,
   writeReplayResult,
@@ -278,10 +285,15 @@ export const replayWaitReason = (deps: ReplayWiringDeps, state: RunState): strin
   return null;
 };
 
-/** The `replays`, `replayWait`, `gradeTrial` and `finishReplay` parts of core's `LookbackRetro`. */
+/**
+ * The `replays`, `replayWait`, `gradeTrial`, `gradeVerdict` and `finishReplay` parts of core's
+ * `LookbackRetro`.
+ */
 export const createLookbackReplays = (
   deps: ReplayWiringDeps,
-): Required<Pick<LookbackRetro, "replays" | "replayWait" | "gradeTrial" | "finishReplay">> => ({
+): Required<
+  Pick<LookbackRetro, "replays" | "replayWait" | "gradeTrial" | "gradeVerdict" | "finishReplay">
+> => ({
   replays: async (state) => {
     const history = deps.history();
     const pending = pendingProposals(history);
@@ -304,12 +316,23 @@ export const createLookbackReplays = (
         continue;
       }
       const { baseline, candidate } = arms;
+      // D-ch: a verdict role's held-out tasks are the dispatches with a recorded outcome, each
+      // keyed with the verdict a trial must give (`replayTaskKey`)
+      const grader =
+        deps.graderOf?.({
+          proposal,
+          role,
+          ...(baseline.version.mode === undefined ? {} : { mode: baseline.version.mode }),
+          host: baseline.version.host,
+          trials: [],
+        }) ?? "gates";
       const resolved = replayTasks({
         history,
         lockedShaFor: deps.lockedShaFor,
         tiebreaks,
         baseline: baseline.version,
         attributions,
+        ...(grader === "verdict" ? { grader } : {}),
       }).flatMap((task) => {
         const recorded = recordedDispatch(history, deps.projectRoot, task, role);
         return recorded === undefined ? [] : [{ task, ...recorded }];
@@ -338,7 +361,9 @@ export const createLookbackReplays = (
           {
             arm: t.arm,
             trial: t.trial,
-            task: `${t.task.run}:${t.task.task}`,
+            // a verdict task's key carries its expected verdict (two criteria of one task are
+            // two entries, reading 211)
+            task: replayTaskKey(t.task),
             regressionSet: t.task.regressionSet,
             role,
             ...(baseline.version.mode === undefined ? {} : { mode: baseline.version.mode }),
@@ -368,6 +393,18 @@ export const createLookbackReplays = (
   replayWait: (state) => replayWaitReason(deps, state),
   // the verdict itself: `infra_error` measures nothing (core sets the replay aside)
   gradeTrial: async (request) => (await deps.gateRunner.run(request)).verdict,
+  // D-ch (reading 212(4)): a verdict role's trial scored against the recorded outcome of the
+  // dispatch it replays (its recorded pack's run and action id), the expectation its task key
+  // carries; `infra_error` when that dispatch has no recorded outcome any more
+  gradeVerdict: (trial, result) =>
+    Promise.resolve(
+      gradeVerdictReplay(
+        deps.history(),
+        { run: trial.pack.run, trace: trial.pack.action_id },
+        result.verdicts,
+        expectedOfTaskKey(trial.task),
+      ),
+    ),
   finishReplay: async (replay, outcomes) => {
     const outcome = new Map<number, ReplayTrialOutcome>(outcomes.map((o) => [o.n, o]));
     const tasks = new Map<

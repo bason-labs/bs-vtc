@@ -9,7 +9,7 @@
  * (the Gate Runner arrives in `EngineDeps`) and never loads a storage driver (the cli injects
  * `openStorage`).
  */
-import { existsSync, mkdirSync, readFileSync, statSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, realpathSync, statSync } from "node:fs";
 import { dirname, join } from "node:path";
 import {
   agentNameFor,
@@ -53,6 +53,7 @@ import {
   withoutReplayTrialEvents,
   takeEngineLock,
   writeEngineDiscovery,
+  type AutomationFact,
   type LookbackRetro,
   type PluginCatalog,
   type RunState,
@@ -78,15 +79,19 @@ import {
   graderBundleSha,
   loadPromptVersion,
   lookbackAtRunEnd,
+  newAgentReportFields,
   readProposalFiles,
   readTiebreakKeys,
+  type InstalledRole,
   type LockedShaFor,
+  type NewAgentSignal,
 } from "../lookback/index.js";
 import { engineSocketAnswers, serveEngineSocket } from "../mcp/index.js";
-import { isGitHubRemote, wireAutomation } from "./automation.js";
+import { isGitHubRemote, readScorecards, wireAutomation } from "./automation.js";
 import { evidenceSnapshot } from "./evidence-snapshot.js";
 import {
   bridgeUpstream,
+  githubRepoOf,
   readLookbackPrInput,
   type CreateUpstreamModule,
 } from "./upstream-bridge.js";
@@ -279,12 +284,40 @@ export const lookbackWindow = (
  * Lookback work at `run.finished` runs one job at a time and never fails the engine; the returned
  * cleanup waits for the job in flight.
  */
+/**
+ * A new-agent signal (D-cd) as an automation fact of `run`: its subject is the proposed role (the
+ * module fingerprints it), and only `newAgentReportFields`' VTC-side fields may leave the machine
+ * (the role only when VTC named it after a shipped discipline).
+ */
+export const newAgentFact = (run: string, signal: NewAgentSignal, at: string): AutomationFact => {
+  const report = newAgentReportFields(signal);
+  return {
+    target: "upstream",
+    kind: "new_agent",
+    run,
+    source: "lookback.new_agent",
+    at,
+    subject: signal.proposed_role,
+    ...(report.role === undefined ? {} : { role: report.role }),
+    ...(report.metrics === undefined ? {} : { metrics: report.metrics }),
+    detail: `${String(signal.failures)} failure(s) and ${String(signal.escalations)} escalation(s) point to a missing specialist (${signal.basis})`,
+  };
+};
+
 export const wireLookback = (
   engine: Engine,
   deps: Pick<EngineDeps, "repoRoot" | "vtcHome" | "now">,
   plugins: PluginCatalog,
   /** After the scorecards are rewritten at a run's end (the automation's cost regressions). */
   onScorecards?: (run: string) => void,
+  /**
+   * D-cd: the roles this vtc carries, and where Lookback's new-agent signals of a run's end go
+   * (the automation's improvements). Absent: no new-agent signals.
+   */
+  newAgents?: {
+    readonly roles: () => readonly InstalledRole[];
+    readonly found: (run: string, signals: readonly NewAgentSignal[]) => void;
+  },
 ): (() => Promise<void>) => {
   const now = deps.now ?? (() => new Date());
   const repoKey = engineRepoKey(deps.repoRoot);
@@ -371,7 +404,7 @@ export const wireLookback = (
   const runEnd = async (run: string): Promise<void> => {
     const state = engine.states().find((s) => s.id === run);
     if (state === undefined) return;
-    await lookbackAtRunEnd({
+    const result = await lookbackAtRunEnd({
       projectRoot: deps.repoRoot,
       events: lookbackEvents(state),
       history: history(),
@@ -381,7 +414,10 @@ export const wireLookback = (
       budgetAvailable: budgetAvailable(state),
       now: now(),
       tiebreaks: await tiebreaks(),
+      ...(newAgents === undefined ? {} : { roles: newAgents.roles() }),
     });
+    if (newAgents !== undefined && result.newAgents.length > 0)
+      newAgents.found(run, result.newAgents);
   };
   const off = engine.onEvent((event) => {
     if (event.type === "run.finished") {
@@ -542,8 +578,23 @@ export const runDaemon: RunDaemon = async (deps: EngineDeps, options) => {
       git,
       automation: () => automationSettings(),
     });
+    // D-bv (4): only on VTC's own repo are the dependencies the gates scan VTC's
+    const projectRepo = githubRepoOf(remoteUrl);
+    const vtcRepo = (): boolean => {
+      const own = deps.automation?.upstream;
+      if (own === undefined) return false;
+      if (projectRepo !== null && projectRepo === own.repo) return true;
+      const checkout = own.checkout;
+      if (checkout === undefined) return false;
+      try {
+        return realpathSync(checkout) === realpathSync(deps.repoRoot);
+      } catch {
+        return false;
+      }
+    };
     const automation = wireAutomation(engine, deps, {
       githubRemote: isGitHubRemote(remoteUrl),
+      vtcRepo,
       createUpstream: bridgeUpstream(upstreamModule, {
         guardDir: engine.guardDir,
         vtcVersion: deps.versions.engine,
@@ -579,6 +630,10 @@ export const runDaemon: RunDaemon = async (deps: EngineDeps, options) => {
             },
           }),
         evidenceSnapshot: (run) => evidenceSnapshot(evidenceModel, run),
+        scorecards: (role, host) =>
+          readScorecards(deps.repoRoot).filter(
+            (c) => c.prompt.role === role && c.prompt.host === host,
+          ),
         gitOps: (root) => createGitOps({ repoRoot: root }),
         remoteRefs: (root) => createRemoteRefs({ repoRoot: root }),
         plumbing: createGitPlumbing,
@@ -586,10 +641,27 @@ export const runDaemon: RunDaemon = async (deps: EngineDeps, options) => {
     });
     automationSettings = automation.settings;
     cleanups.push(() => automation.close());
+    // D-cd: the roles this vtc carries, for Lookback's new-agent signals
+    const installed: InstalledRole[] = compiledRoleContracts(deps.assets).map((c) => ({
+      id: c.id,
+      kind: c.kind,
+      ...(c.discipline === undefined ? {} : { discipline: c.discipline }),
+    }));
     cleanups.push(
-      wireLookback(engine, deps, plugins, (run) => {
-        automation.scorecardsWritten(run);
-      }),
+      wireLookback(
+        engine,
+        deps,
+        plugins,
+        (run) => {
+          automation.scorecardsWritten(run);
+        },
+        {
+          roles: () => installed,
+          found: (run, signals) => {
+            automation.improvements(signals.map((s) => newAgentFact(run, s, now().toISOString())));
+          },
+        },
+      ),
     );
     // AD-25: shutting down kills the engine-launched runs and stops the Level-3 waits, so close
     // returns promptly and leaves no orphaned process
@@ -655,8 +727,10 @@ export const runDaemon: RunDaemon = async (deps: EngineDeps, options) => {
         git,
         // §14, reading 153: the project's client scope (the config the engine runs with)
         clientSpend: () => readClientSpend(deps.vtcHome, engine.config().client),
-        // D-ca: the Automation view's settings and notes (automationFor)
+        // D-ca: the Automation view's settings and notes (automationFor), and the actions taken
+        // while no run was open, which no run's log holds yet
         automation: automation.settings,
+        automationEvents: automation.pendingEvents,
       }),
       installToken: deps.installToken,
       sessions: createSessionStore(now),
