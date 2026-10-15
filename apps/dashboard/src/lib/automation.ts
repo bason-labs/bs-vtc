@@ -64,7 +64,7 @@ export const PARTIAL_EVIDENCE_REASONS: Readonly<Record<EvidencePartialReason, st
   no_visual_app: "the project names no app to render (gates.yml visual.app)",
   no_browser: "no browser is installed for the capture (vtc doctor installs one)",
   video_off: "video is turned off (automation.evidence.video: false)",
-  no_ffmpeg: "ffmpeg is not installed, so no video was recorded",
+  no_ffmpeg: "ffmpeg is not installed, so the recording is linked as WebM only (no GIF or MP4)",
   capture_failed: "a capture failed after its retry",
 };
 

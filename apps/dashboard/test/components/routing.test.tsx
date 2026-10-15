@@ -26,6 +26,14 @@ const routedTask = () => {
     { action_id: "a-2", tier: "mid", tier_reason: "escalation", tier_clamped: true },
     { action_id: "a-3" },
     { action_id: "a-4", role: "spec_verifier", tier: "mid", tier_reason: "budget_drop" },
+    {
+      action_id: "a-5",
+      role: "qa",
+      mode: "author",
+      tier: "mid",
+      tier_reason: "rule",
+      tier_clamped: true,
+    },
   ];
   return TaskDetailSchema.parse({
     ...t2,
@@ -58,15 +66,19 @@ describe("task view: the starting tier of each role run (H-9, D-cm)", () => {
     expect(hint).toHaveTextContent("The endpoint and its tests are spelled out in the plan.");
     const runs = within(routing).getByRole("list", { name: "Role runs and their tier" });
     const items = within(runs).getAllByRole("listitem");
-    expect(items).toHaveLength(3);
+    expect(items).toHaveLength(4);
     expect(items[0]).toHaveTextContent("a-1");
     expect(items[0]).toHaveTextContent(TIER_REASON_LABELS.planner_hint);
     expect(items[0]).not.toHaveTextContent("clamped");
     expect(items[1]).toHaveTextContent("Mid");
     expect(items[1]).toHaveTextContent(TIER_REASON_LABELS.escalation);
-    expect(items[1]).toHaveTextContent("clamped by project routing");
+    expect(items[1]).toHaveTextContent("clamped by project routing (min_tier / max_tier)");
     expect(items[2]).toHaveTextContent("spec_verifier");
     expect(items[2]).toHaveTextContent(TIER_REASON_LABELS.budget_drop);
+    expect(items[2]).not.toHaveTextContent("clamped");
+    // QA author lifted to its Mid floor: the floor is named, not only project routing
+    expect(items[3]).toHaveTextContent("qa (author)");
+    expect(items[3]).toHaveTextContent("held at QA author's Mid floor (or by project routing)");
     // a-3 was logged before 5.4.0: no tier, so it is not listed
     expect(runs).not.toHaveTextContent("a-3");
   });
@@ -87,7 +99,7 @@ describe("task view: the starting tier of each role run (H-9, D-cm)", () => {
       "role-run-a-3",
     ]);
     expect(runs[0]).toHaveTextContent(`Started on Low: ${TIER_REASON_LABELS.planner_hint}`);
-    expect(runs[1]).toHaveTextContent("clamped by project routing");
+    expect(runs[1]).toHaveTextContent("clamped by project routing (min_tier / max_tier)");
     expect(runs[2]).not.toHaveTextContent("Started on");
   });
 

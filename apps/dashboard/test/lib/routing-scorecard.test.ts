@@ -90,6 +90,20 @@ describe("routingScorecardView", () => {
     expect(v.groups[0]?.cells[0]?.costPerTask?.value).toBe("4 of 14 tasks priced");
   });
 
+  it("says unpriced when a read cell has no cost although n reaches the minimum", () => {
+    const cell = ROUTING_SCORECARD.cells[0]!;
+    const n = LOOKBACK_LIMITS.minScorecardN;
+    const cost = { value: null, ci_low: null, ci_high: null, n };
+    const v = routingScorecardView({
+      ...ROUTING_SCORECARD,
+      cells: [
+        { ...cell, tasks: Math.max(n, LOOKBACK_LIMITS.routingMinTasks), cost_per_task_usd: cost },
+      ],
+    });
+    expect(v.groups[0]?.cells[0]?.read).toBe(true);
+    expect(v.groups[0]?.cells[0]?.costPerTask).toMatchObject({ value: "unpriced", mark: null });
+  });
+
   it("says insufficient data, not unpriced, for a cell below the minimum without a cost", () => {
     const cell = ROUTING_SCORECARD.cells[0]!;
     const cost = { value: null, ci_low: null, ci_high: null, n: 0 };

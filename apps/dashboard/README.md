@@ -127,7 +127,10 @@ binaries must stay out of the production dependency closure (AD-2, `supply-chain
     - **Model routing** (task view, H-9 / D-cm): for each role run with a recorded tier
       (`RoleRunSummary.tier`, `tier_reason`, `tier_clamped`) the tier it started on and why (the
       role's own tier, the routing table, the Planner's hint, an escalation or a budget drop), with
-      "clamped by project routing" when the project's `routing.min_tier` / `max_tier` moved it,
+      "clamped by project routing (min_tier / max_tier)" when `tier_clamped` is set, or "held at
+      QA author's Mid floor (or by project routing)" for a QA author run clamped onto
+      `QA_AUTHOR_MIN_TIER` (the floor applies after `min_tier` / `max_tier` and wins; the log does
+      not say which moved it),
       and the task's Planner hint (`Task.tier_hint`) with its reason code and sentence. The node
       drawer's role runs say the same. A run logged before 5.4.0 has no tier and shows nothing.
     - **Routing scorecard** (Lookback view and artifact view, D-cn):
