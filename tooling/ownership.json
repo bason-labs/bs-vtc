@@ -61,7 +61,8 @@
       "packages/cli/**",
       "!packages/cli/src/commands/calibrate.ts",
       ".github/workflows/release.yml",
-      "packaging/**"
+      "packaging/**",
+      "CHANGELOG.md"
     ],
     "lookback-research": [
       "packages/engine/src/lookback/**",
