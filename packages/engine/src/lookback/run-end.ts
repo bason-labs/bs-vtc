@@ -375,9 +375,8 @@ export const DRIFT_BASELINE_SUFFIX = "@time_window";
 
 /**
  * Pure: the automation facts of a run's end that engine core does not raise itself, for the daemon
- * to hand the upstream module (AD-27 rule 8; spine §5 reading 226). **Not wired yet:** engine
- * core's daemon does not call it at `run.finished`; that call is a contract proposal to engine
- * core, and until it lands a drift regression only becomes a lookback target aimed at tokens.
+ * to hand the upstream module (AD-27 rule 8; spine §5 reading 226). The daemon calls it at
+ * `run.finished` (`wireLookback`'s `drift` argument).
  * - each drift regression (`baseline_kind: time_window`, D-cr) as a `cost` fact whose
  *   `baselinePromptSha` is the version's SHA plus {@link DRIFT_BASELINE_SUFFIX} and `promptSha` the
  *   version's own. A regression against the version before is engine core's
@@ -386,7 +385,7 @@ export const DRIFT_BASELINE_SUFFIX = "@time_window";
  *   the fact's metric to `cost_per_task` is a contract proposal to engine core). A quality-rate
  *   drift from a zero earlier rate is mapped too; the upstream module's `costRegressed` still
  *   wants a rate baseline above zero (a contract proposal to the upstream team).
- * A routing change (D-cn) is RETRO's fact: the daemon is to raise it from `lookbackRoutingStep`'s
+ * A routing change (D-cn) is RETRO's fact: the daemon raises it from `lookbackRoutingStep`'s
  * cells.
  */
 export const lookbackRunEndFacts = (

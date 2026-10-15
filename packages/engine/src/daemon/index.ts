@@ -82,6 +82,8 @@ import {
   graderBundleSha,
   loadPromptVersion,
   lookbackAtRunEnd,
+  lookbackRoutingStep,
+  lookbackRunEndFacts,
   newAgentReportFields,
   readProposalFiles,
   readTiebreakKeys,
@@ -354,6 +356,14 @@ export const wireLookback = (
     readonly propose: RoutingLookback;
     readonly found: (run: string, facts: readonly AutomationFact[]) => void;
   },
+  /**
+   * D-cr (spine §5 reading 226): where a run's end hands Lookback's drift regressions (a prompt
+   * version against its own earlier window, `lookbackRunEndFacts`) as `cost` facts (the
+   * automation's improvements). Absent: a drift only becomes a lookback target.
+   */
+  drift?: {
+    readonly found: (run: string, facts: readonly AutomationFact[]) => void;
+  },
 ): (() => Promise<void>) => {
   const now = deps.now ?? (() => new Date());
   const repoKey = engineRepoKey(deps.repoRoot);
@@ -484,6 +494,10 @@ export const wireLookback = (
     });
     if (newAgents !== undefined && result.newAgents.length > 0)
       newAgents.found(run, result.newAgents);
+    if (drift !== undefined) {
+      const facts = lookbackRunEndFacts(run, result, now().toISOString());
+      if (facts.length > 0) drift.found(run, facts);
+    }
   };
   const off = engine.onEvent((event) => {
     if (event.type === "run.finished") {
@@ -727,11 +741,19 @@ export const runDaemon: RunDaemon = async (deps: EngineDeps, options) => {
             automation.improvements(signals.map((s) => newAgentFact(run, s, now().toISOString())));
           },
         },
-        // D-cn (reading 219) merge followup: the 6th argument, `routing: { propose:
-        // lookbackRoutingStep, found: (run, facts) => automation.improvements(facts) }`, is wired
-        // once lookback-research's step (lookback/routing-step.ts) lands, typed as core's
-        // `RoutingLookback` (from `../core/index.js`); a daemon test then runs it at RETRO. Until
-        // then RETRO writes no routing scorecard
+        // D-cn (reading 219): RETRO writes the routing scorecard and raises its config facts
+        {
+          propose: lookbackRoutingStep,
+          found: (_run, facts) => {
+            automation.improvements(facts);
+          },
+        },
+        // D-cr (reading 226): a run's end raises its drift regressions as cost facts
+        {
+          found: (_run, facts) => {
+            automation.improvements(facts);
+          },
+        },
       ),
     );
     // AD-25: shutting down kills the engine-launched runs and stops the Level-3 waits, so close
