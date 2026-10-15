@@ -16,7 +16,15 @@
  */
 import { spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
-import { existsSync, lstatSync, readdirSync, readFileSync, readlinkSync, statSync } from "node:fs";
+import {
+  existsSync,
+  lstatSync,
+  readdirSync,
+  readFileSync,
+  readlinkSync,
+  statSync,
+  type Stats,
+} from "node:fs";
 import { homedir } from "node:os";
 import { dirname, isAbsolute, join, resolve } from "node:path";
 import { gitEnv } from "./env.js";
@@ -93,22 +101,45 @@ const sha = (bytes: string | Uint8Array): string =>
   createHash("sha256").update(bytes).digest("hex");
 
 /**
- * File hashes, cached on the file's inode, size, mtime and ctime (a write always moves ctime, which
- * no user can set back): the fingerprint runs before every engine git call while a role is in
- * flight, so an unchanged hook is not read and hashed again each time (D-cz).
+ * Git's racy-clean rule: a file changed within this long of when it was read may be rewritten with
+ * the same size in the same timestamp tick (1–2 s on HFS+, FAT and some network or overlay file
+ * systems), leaving its stat unchanged, so a cached read of it is never trusted.
  */
-const hashCache = new Map<string, { readonly stamp: string; readonly hash: string }>();
+const RACY_MS = 2_000;
+
+interface FileStamp {
+  readonly stamp: string;
+  /** The file had not changed for {@link RACY_MS} when it was read: its stamp can be trusted. */
+  readonly settled: boolean;
+}
+
+const fileStamp = (stat: Stats, readAt: number): FileStamp => ({
+  stamp: `${String(stat.ino)}:${String(stat.size)}:${String(stat.mtimeMs)}:${String(stat.ctimeMs)}`,
+  settled: Math.max(stat.mtimeMs, stat.ctimeMs) < readAt - RACY_MS,
+});
+
+/** The cached read is still the file's: same stamp, and that stamp was not racy when read. */
+const fresh = (hit: FileStamp, now: FileStamp): boolean => hit.settled && hit.stamp === now.stamp;
+
+/**
+ * File hashes, cached on the file's inode, size, mtime and ctime (a write always moves ctime, which
+ * no user can set back), except while the file is racily new ({@link RACY_MS}): the fingerprint
+ * runs before every engine git call while a role is in flight, so an unchanged hook is not read
+ * and hashed again each time (D-cz).
+ */
+const hashCache = new Map<string, FileStamp & { readonly hash: string }>();
 
 const fingerprintOf = (abs: string): string | undefined => {
   try {
+    const readAt = Date.now();
     const stat = lstatSync(abs);
     if (stat.isSymbolicLink()) return `symlink:${readlinkSync(abs)}`;
     if (stat.isDirectory()) return undefined;
-    const stamp = `${String(stat.ino)}:${String(stat.size)}:${String(stat.mtimeMs)}:${String(stat.ctimeMs)}`;
+    const stamp = fileStamp(stat, readAt);
     const hit = hashCache.get(abs);
-    if (hit?.stamp === stamp) return hit.hash;
+    if (hit !== undefined && fresh(hit, stamp)) return hit.hash;
     const hash = sha(readFileSync(abs));
-    hashCache.set(abs, { stamp, hash });
+    hashCache.set(abs, { ...stamp, hash });
     return hash;
   } catch {
     return undefined;
@@ -143,8 +174,7 @@ const filesUnder = (dir: string, depth: number): string[] => {
   });
 };
 
-interface ConfigRead {
-  readonly stamp: string;
+interface ConfigRead extends FileStamp {
   /** `key → values`, in file order; `null` when git could not parse the file. */
   readonly entries: ReadonlyMap<string, readonly string[]> | null;
   readonly raw: string;
@@ -152,26 +182,35 @@ interface ConfigRead {
 
 const configCache = new Map<string, ConfigRead>();
 
-const stampOf = (abs: string): string | null => {
+const stampOf = (abs: string): FileStamp | null => {
   try {
-    const s = statSync(abs);
-    return `${String(s.ino)}:${String(s.size)}:${String(s.mtimeMs)}:${String(s.ctimeMs)}`;
+    const readAt = Date.now();
+    return fileStamp(statSync(abs), readAt);
   } catch {
     return null;
   }
 };
 
-/** The entries of one config file (git's parser, no includes), cached on the file's stat. */
+/**
+ * The entries of one config file (git's parser, no includes), cached on the file's stat; while the
+ * file is racily new ({@link RACY_MS}) its bytes are read again and git parses it again only when
+ * they changed.
+ */
 const readConfig = (abs: string): ConfigRead | null => {
   const stamp = stampOf(abs);
   if (stamp === null) return null;
   const hit = configCache.get(abs);
-  if (hit?.stamp === stamp) return hit;
+  if (hit !== undefined && fresh(hit, stamp)) return hit;
   let raw: string;
   try {
     raw = readFileSync(abs, "utf8");
   } catch {
     return null;
+  }
+  if (hit?.raw === raw) {
+    const reread: ConfigRead = { ...stamp, entries: hit.entries, raw };
+    configCache.set(abs, reread);
+    return reread;
   }
   const out = spawnSync("git", ["config", "--file", abs, "--no-includes", "--list", "-z"], {
     env: gitEnv(),
@@ -191,7 +230,7 @@ const readConfig = (abs: string): ConfigRead | null => {
       entries.set(key, list);
     }
   }
-  const read: ConfigRead = { stamp, entries, raw };
+  const read: ConfigRead = { ...stamp, entries, raw };
   configCache.set(abs, read);
   return read;
 };

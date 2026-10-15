@@ -16,7 +16,26 @@ import {
 } from "@vtc/shared";
 import type { CallContext } from "../../src/core/index.js";
 import { cleanupDirs, tempDir, writeFile } from "../helpers/repo.js";
-import { createHarness, type Harness, type HeadlessScript } from "../helpers/engine-harness.js";
+import {
+  compactRefusals,
+  MODEL_REFUSALS_COMPACT_AT,
+  readModelRefusals,
+  recordModelRefusal,
+  refusalDetail,
+} from "../../src/core/model-fallback.js";
+import {
+  authorTests,
+  build,
+  CLAUDE,
+  createHarness,
+  draft,
+  only,
+  SPEC_ONE,
+  spawns,
+  throughPlan,
+  type Harness,
+  type HeadlessScript,
+} from "../helpers/engine-harness.js";
 
 vi.setConfig({ testTimeout: 30_000 });
 afterEach(cleanupDirs);
@@ -26,6 +45,7 @@ const CODEX: CallContext = { host: "codex" };
 interface Line {
   type: string;
   role?: string;
+  host?: string;
   model?: string;
   data: Record<string, unknown>;
 }
@@ -203,5 +223,123 @@ describe("the model id fallback (D-cx, reading 244)", () => {
     expect(readFileSync(outside, "utf8")).toBe("");
     expect(h.launched.map((l) => l.request.model.model)).toEqual(["gpt-test", undefined]);
     await h.release();
+  });
+
+  it("a refused task role (the cross-family QA judge on Codex) retries on its tier: no failure, no fix round", async () => {
+    // refused while it asks for a model; a passing verdict on the host default
+    const judge: HeadlessScript = (request) =>
+      request.model.model !== undefined
+        ? refused
+        : {
+            kind: "done",
+            session_ref: null,
+            output: {
+              role: "qa",
+              mode: "judge",
+              task: "T-1",
+              summary: "reviewed",
+              exit: "done",
+              verdicts: [
+                {
+                  subject: "T-1",
+                  verdict: "pass",
+                  evidence: [{ type: "file_line", ref: "src/t-1/impl.ts:1" }],
+                },
+              ],
+            },
+            model: null,
+            tokens: null,
+            cost_usd: 0.1,
+          };
+    const h = createHarness({
+      project: {
+        merge_level: 1,
+        concurrency: 3,
+        hosts: { dispatch: "headless_allowed", cross_family_review: true },
+      },
+      codex: { headless: judge, authStatus: signedIn },
+    });
+    const actions = await throughPlan(h, [draft("T-1", { risk: "high" })], SPEC_ONE);
+    await authorTests(h, only(actions, "qa"));
+    await build(h, only((await h.engine.next({}, CLAUDE)).actions, "engineer"));
+    const round = (): number | undefined => h.engine.states().at(-1)?.tasks.get("T-1")?.round;
+    const roundBefore = round();
+    spawns((await h.engine.next({}, CLAUDE)).actions);
+    await h.engine.settle();
+    await h.engine.next({}, CLAUDE);
+    await h.engine.settle();
+    const judges = ofType(h, "role.dispatched").filter(
+      (e) => e.role === "qa" && e.host === "codex" && e.data.mode === "judge",
+    );
+    expect(judges).toHaveLength(2);
+    const [first, retry] = judges;
+    expect(first?.data.model_fallback).toBeUndefined();
+    expect(retry?.data.model_fallback).toMatchObject({
+      requested: first?.model,
+      reason: "model_refused",
+    });
+    // the retry is the same step on the same tier, with no model flag
+    expect(retry?.data.tier).toBe(first?.data.tier);
+    expect(h.launched.map((l) => [l.host, l.request.model.model])).toEqual([
+      ["codex", first?.model],
+      ["codex", undefined],
+    ]);
+    // the refused attempt is neither a role failure nor a fix round
+    expect(ofType(h, "role.failed")).toEqual([]);
+    expect(round()).toBe(roundBefore);
+    expect(
+      ofType(h, "role.submitted").filter((e) => e.role === "qa" && e.host === "codex"),
+    ).toHaveLength(1);
+    await h.release();
+  });
+
+  it("redacts the host's refusal text before it is kept (AD-18)", () => {
+    const secret = "s3cr3t-value-from-dotenv";
+    const detail = refusalDetail(`model refused; env VTC_KEY=${secret}\nretry later`, [secret]);
+    expect(detail).toBeDefined();
+    expect(detail).not.toContain(secret);
+    expect(detail).toMatch(/^model refused; env VTC_KEY=.* retry later$/);
+  });
+
+  it("compacts the refusals file past its cap: the last day's rows and the latest per host and model stay", () => {
+    const home = tempDir("vtc-home-");
+    const now = Date.parse("2026-10-13T09:00:00.000Z");
+    const old = (i: number) => ({
+      v: 1 as const,
+      at: new Date(now - 3 * 86_400_000 + i * 1000).toISOString(),
+      host: "codex" as const,
+      model: `gpt-old-${String(i % 3)}`,
+    });
+    mkdirSync(dirname(join(home, MODEL_REFUSALS_FILE)), { recursive: true });
+    writeFileSync(
+      join(home, MODEL_REFUSALS_FILE),
+      Array.from(
+        { length: MODEL_REFUSALS_COMPACT_AT },
+        (_, i) => `${JSON.stringify(old(i))}\n`,
+      ).join(""),
+    );
+    const k = { deps: { vtcHome: home }, now: () => new Date(now) } as unknown as Parameters<
+      typeof recordModelRefusal
+    >[0];
+    recordModelRefusal(k, "codex", "gpt-new", "not on your plan");
+    const rows = readModelRefusals(home);
+    expect(rows.map((r) => r.model).sort()).toEqual([
+      "gpt-new",
+      "gpt-old-0",
+      "gpt-old-1",
+      "gpt-old-2",
+    ]);
+    expect(rows.at(-1)).toMatchObject({ model: "gpt-new", detail: "not on your plan" });
+    expect(rows).toHaveLength(4);
+    // the latest row per model is the one kept
+    const last = (model: string) =>
+      Array.from({ length: MODEL_REFUSALS_COMPACT_AT }, (_, i) => old(i))
+        .filter((r) => r.model === model)
+        .at(-1);
+    expect(rows.find((r) => r.model === "gpt-old-0")).toEqual(last("gpt-old-0"));
+    expect(lstatSync(join(home, MODEL_REFUSALS_FILE)).mode & 0o777).toBe(0o600);
+    // a recent row is never dropped
+    const recent = { ...old(0), at: new Date(now - 1000).toISOString(), model: "gpt-old-1" };
+    expect(compactRefusals([recent, old(1)], now)).toEqual([recent, old(1)]);
   });
 });

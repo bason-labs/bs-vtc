@@ -410,7 +410,7 @@ const finishHeadless = async (
       k,
       run.host,
       run.model,
-      outcome.kind === "error" ? refusalDetail(outcome.message) : undefined,
+      outcome.kind === "error" ? refusalDetail(outcome.message, k.secrets()) : undefined,
     );
     await closeRefusedRun(k, h, run, shapes);
     return;
