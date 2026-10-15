@@ -37,6 +37,8 @@ export * from "./visual.js";
 export * from "./architecture-checks.js";
 export * from "./spend.js";
 export * from "./upstream.js";
+export * from "./tier-routing.js";
+export * from "./signals.js";
 export * from "./interfaces/host-adapter.js";
 export type * from "./interfaces/storage.js";
 export type * from "./interfaces/gate-runner.js";
@@ -252,5 +254,26 @@ export * from "./json-schema.js";
  * checkout's engine can start a run from an issue another project's daemon opened;
  * `AutomationDeps.vtcAdvisories` (optional), the daily offline scan of VTC's own dependencies.
  * All additive.
+ *
+ * 5.4.0 (MINOR): round 5, difficulty-based model routing and the improvement signals (spine §5
+ * readings 217–227; H-9, D-cm..D-ct). `tier-routing.ts`: `TaskDraft.tier_hint` / `Task.tier_hint`
+ * (`TierHint`, reason-coded), `RoutingTable` and `DEFAULT_ROUTING_TABLE`, `taskRiskClass`,
+ * `clampTier`, `QA_AUTHOR_MIN_TIER`, `project.yaml` `routing` (`start`, `min_tier`, `max_tier`;
+ * `routingFor`), `TIER_EFFORT_WITHOUT_MODEL` (D-co's interim), `routingConfigSubject`;
+ * `role.dispatched.tier` / `tier_reason` / `tier_clamped` and the same on `RoleRunSummary`
+ * (`TierReason`). `signals.ts` (D-cs): `CommandShape` and `commandShapes`,
+ * `role.submitted.command_shapes`, `ParsedStream.commandShapes`, the hook's spool
+ * (`COMMAND_SHAPE_SPOOL_FILE`, `CommandShapeSpoolRow`), `MissingCapability` on `Question`,
+ * `Escalation` and `EscalationAnswer`, `TOOL_SIGNAL_MIN_TASKS` and `CAPABILITY_SIGNAL_MIN`.
+ * Lookback (D-cn, D-cq, D-cr): `RoutingScorecard` (`LOOKBACK_REPO.routingScorecard`), the pace
+ * and drift limits in `LOOKBACK_LIMITS`, `~/.vtc/config.yaml` `lookback` and `lookbackPaceFor`.
+ * Evidence (D-ct, D-cc): `EvidenceRecorder.captureBeforeAfter` (optional), `EvidencePartialReason`
+ * on `EvidenceManifest` and `upstream.pr_opened`, `touchesUi` / `UI_FILE_EXTENSIONS`,
+ * `EVIDENCE_HOSTING_PREFERRED`. Followups of readings 211 and 212: `GitPlumbing.fetch` /
+ * `message` (optional), `AutomationSkipReason` `error` (the dashboard's exhaustive map updated in
+ * the same change), `ControlResult` for `pause` / `resume` (a `NoRunControlResult` where 5.3.0
+ * answered `no_run`, so an older reader sees a refused call either way) and
+ * `RunControlResult.automation_paused`, `branch.pushed` / `push_failed` `remote_ref`. `ModelTier`
+ * and `Effort` move to `primitives.ts` (re-exported from `role-contract.ts`; same schemas).
  */
-export const CONTRACTS_VERSION = "5.3.0";
+export const CONTRACTS_VERSION = "5.4.0";

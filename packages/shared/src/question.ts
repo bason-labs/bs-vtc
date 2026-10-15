@@ -6,6 +6,7 @@
  */
 import { z } from "zod";
 import { EvidenceSchema, IsoDateTimeSchema, SlugSchema } from "./primitives.js";
+import { MissingCapabilitySchema } from "./signals.js";
 
 /**
  * What choosing an option does (§6.5 typical answers). `clarify` answers a spec question;
@@ -94,6 +95,11 @@ export const QuestionSchema = z
     recommended: SlugSchema,
     /** Every question cites what prompted it (principle 3), e.g. `spec_ref` REQ-3.AC-2. */
     evidence: z.array(EvidenceSchema).min(1),
+    /**
+     * A capability the role lacked to finish (D-cs), e.g. a tool or an engine fetcher; recurring
+     * slugs raise a `capability` improvement. Only when that is what blocked it. New in 5.4.0.
+     */
+    missing_capability: MissingCapabilitySchema.optional(),
   })
   .superRefine(checkEscalationOptions);
 export type Question = z.infer<typeof QuestionSchema>;

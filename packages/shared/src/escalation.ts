@@ -20,6 +20,7 @@ import {
 import { checkEscalationOptions, EscalationOptionSchema, type Question } from "./question.js";
 import { PhaseSchema, type Phase } from "./run.js";
 import { ParkReasonSchema, type ParkReason } from "./task.js";
+import { MissingCapabilitySchema } from "./signals.js";
 
 /** Reason categories (§6.5) plus `spec_question` (§6.3) and `blocked` (role exit). */
 export const EscalationReasonSchema = ParkReasonSchema;
@@ -31,6 +32,11 @@ export const EscalationAnswerSchema = z.strictObject({
   text: z.string().max(4000).optional(),
   /** Role id that should have caught this, or `none`. Gold-standard attribution label (§13). */
   who_should_have_caught: RoleIdSchema,
+  /**
+   * The capability the Lead says was missing (D-cs), when the escalation came down to one; it
+   * counts toward the `capability` signal like the role's own. New in 5.4.0.
+   */
+  missing_capability: MissingCapabilitySchema.optional(),
 });
 export type EscalationAnswer = z.infer<typeof EscalationAnswerSchema>;
 
@@ -64,6 +70,8 @@ export const EscalationSchema = z
     blocks: z.array(TaskIdSchema).default([]),
     /** Role that raised the question, if any (e.g. `qa` for a spec_question). */
     raised_by: RoleIdSchema.optional(),
+    /** The capability the raising role said it lacked (`Question.missing_capability`, D-cs). New in 5.4.0. */
+    missing_capability: MissingCapabilitySchema.optional(),
     created_at: IsoDateTimeSchema,
     answer: EscalationAnswerSchema.optional(),
     answered_at: IsoDateTimeSchema.optional(),
@@ -136,6 +144,9 @@ export const escalationFromQuestion = (
     options: question.options,
     recommended: question.recommended,
     evidence: question.evidence,
+    ...(question.missing_capability === undefined
+      ? {}
+      : { missing_capability: question.missing_capability }),
   });
 
 const DEDICATED_REASON_RULE: Readonly<Partial<Record<ParkReason, RiskRuleId>>> = {

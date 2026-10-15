@@ -24,6 +24,7 @@ import type {
   AutoMarker,
   EvidenceFileKind,
   EvidenceHosting,
+  EvidencePartialReason,
   GitHubRepo,
 } from "../upstream.js";
 
@@ -163,6 +164,21 @@ export interface GitPlumbing {
    * rejects or that names the default branch.
    */
   push(remote: string, sha: GitSha, dst: string): Promise<void>;
+  /**
+   * `git fetch --no-tags --prune <remote> <refspecs…>`, into remote-tracking refs only
+   * (`refs/remotes/<remote>/…`), and only for the shared automation branches (every
+   * `vtc/auto/<kind>/<fp8>` and `vtc-evidence`); never a local branch, a tag, the index or the
+   * work tree; the user's own git and credentials, no prompt. Rejects on a refspec outside that
+   * set or when git fails. Replaces the upstream module's `RemoteRefs.fetch` seam. Optional so an
+   * implementation before 5.4.0 still compiles; engine core's has it from round 5. New in 5.4.0.
+   */
+  fetch?(remote: string, refspecs: readonly string[]): Promise<void>;
+  /**
+   * A commit's full message, read from the object (`git cat-file commit`), or `null` when the repo
+   * lacks it; replaces `RemoteRefs.message` (another installation's head is recognised by its
+   * `Generated-by: VTC` trailer). New in 5.4.0.
+   */
+  message?(sha: GitSha): Promise<string | null>;
 }
 
 /** Engine core implements it as `git.createGitPlumbing`. */
@@ -209,10 +225,52 @@ export interface EvidenceCaptureResult {
 }
 
 /**
+ * A UI before/after capture for an automatic PR (D-ct; spine §5 reading 223): Final Review of an
+ * automatic run whose change touches UI only. The gate runner checks out `base` a second time in
+ * a clean gate checkout, installs, builds and serves it in the gate sandbox with the project's
+ * committed `gates.yml` (`visual.app`), renders the Visual QA screens at the Visual QA viewports,
+ * and does the same for `head`; with `flowSeconds` it also records the changed flow on both.
+ * Every frame passes the same redaction as {@link EvidenceCaptureRequest}. It costs build time,
+ * no AI tokens.
+ */
+export interface BeforeAfterRequest {
+  /** Absolute path of the project checkout the run belongs to (read only; never its work tree). */
+  readonly repoRoot: string;
+  /** The PR's base: the default branch commit the automatic branch was cut from. */
+  readonly base: GitSha;
+  /** The PR's head. */
+  readonly head: GitSha;
+  /** Absolute output directory (the per-action staging directory). */
+  readonly outDir: string;
+  /** Screen ids (`screens.yaml`) the change touches; absent: every Visual QA screen. */
+  readonly screens?: readonly string[];
+  /** Record the changed flow for at most this long (≤ `EVIDENCE_LIMITS.maxFlowSeconds`); absent: no video. */
+  readonly flowSeconds?: number;
+  readonly redactSelectors: readonly string[];
+  readonly denyText: readonly string[];
+}
+
+export interface BeforeAfterResult {
+  /** `ui_before` / `ui_after` screenshots and `flow_video` files, by their neutral names. */
+  readonly files: EvidenceCaptureResult["files"];
+  readonly failed: EvidenceCaptureResult["failed"];
+  /**
+   * Set when a side is missing: the PR keeps `evidence: partial` with this reason (the base did
+   * not build or serve, no `visual.app`, no browser, …) and a detail that holds no project text.
+   */
+  readonly partial?: { readonly reason: EvidencePartialReason; readonly detail: string };
+}
+
+/**
  * Evidence capture (D-ce), implemented by the gate-runner team over the visual toolchain and the
  * gate sandbox (AD-24); nothing is downloaded at capture time.
  */
 export interface EvidenceRecorder {
+  /**
+   * UI before/after (D-ct, {@link BeforeAfterRequest}). Optional so a recorder before 5.4.0 still
+   * compiles; absent, a UI automatic PR stays `evidence: partial` (reading 212(10)). New in 5.4.0.
+   */
+  captureBeforeAfter?(request: BeforeAfterRequest): Promise<BeforeAfterResult>;
   capture(request: EvidenceCaptureRequest): Promise<EvidenceCaptureResult>;
   /**
    * Renders a gate report and its test results to self-contained HTML in `outDir` (the non-UI

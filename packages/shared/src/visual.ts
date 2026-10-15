@@ -112,6 +112,33 @@ export const VisualConfigSchema = z.strictObject({
 });
 export type VisualConfig = z.infer<typeof VisualConfigSchema>;
 
+/**
+ * File extensions that make a change "touch UI" (D-ct): an automatic run's `has_ui` comes from the
+ * paths its issue touches (`touchesUi`), not always false. New in 5.4.0.
+ */
+export const UI_FILE_EXTENSIONS: readonly string[] = [
+  ".tsx",
+  ".jsx",
+  ".vue",
+  ".svelte",
+  ".astro",
+  ".html",
+  ".css",
+  ".scss",
+  ".sass",
+  ".less",
+];
+
+/**
+ * Pure (D-ct): whether any repo-relative path is a UI file ({@link UI_FILE_EXTENSIONS}, case
+ * insensitive). An issue with no known path touches no UI. New in 5.4.0.
+ */
+export const touchesUi = (paths: readonly string[]): boolean =>
+  paths.some((p) => {
+    const lower = p.toLowerCase();
+    return UI_FILE_EXTENSIONS.some((ext) => lower.endsWith(ext));
+  });
+
 /** Pure: a project's visual settings with the defaults filled in. */
 export const visualConfigFor = (config: VisualConfig | undefined) => ({
   widths: config?.widths ?? [...VISUAL_DEFAULTS.widths],

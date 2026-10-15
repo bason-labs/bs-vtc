@@ -14,7 +14,9 @@ import {
   type TokenUsage,
 } from "./primitives.js";
 import { FetcherIdSchema, SearchProviderSchema } from "./research.js";
+import { LOOKBACK_LIMITS } from "./lookback.js";
 import { ModelTierSchema } from "./role-contract.js";
+import { RoutingConfigSchema } from "./tier-routing.js";
 import {
   DEFAULT_UPSTREAM_REPO,
   EVIDENCE_HOSTING_DEFAULT,
@@ -113,6 +115,14 @@ export const ProjectConfigSchema = z.strictObject({
         .optional(),
     })
     .prefault({}),
+  /**
+   * Difficulty-based model routing (H-9, D-cm; `RoutingConfig`): `start: role` keeps each role's
+   * own tier; `min_tier` / `max_tier` bound every tier the engine picks for this project, and win
+   * over the routing table, a Planner hint, an escalation and a budget drop (QA author keeps its
+   * floor). `hosts.models` still maps the chosen tier to a model id. Absent: start by difficulty
+   * on the full range. New in 5.4.0.
+   */
+  routing: RoutingConfigSchema.optional(),
   /** Parallel tasks (reviewers count toward it). Default 2; §11 bounds it to 1–3. */
   concurrency: z.int().min(1).max(3).default(2),
   usage: z
@@ -304,7 +314,54 @@ export const UserConfigSchema = z.strictObject({
    * New in 5.0.0.
    */
   automation: z.strictObject({ evidence_hosting: EvidenceHostingSchema.optional() }).optional(),
+  /**
+   * Lookback replay pace (D-cq), user-level because replays spend the user's weekly window: how
+   * many recent failures and regression tasks one replay samples, the trials one RETRO may
+   * launch, and the higher cap while more than `boost_above_weekly_pct` of the Lead host's weekly
+   * window is left. Absent fields: `LOOKBACK_LIMITS` (`lookbackPaceFor`). New in 5.4.0.
+   */
+  lookback: z
+    .strictObject({
+      replay_failure_tasks: z.int().min(1).max(50).optional(),
+      replay_regression_tasks: z.int().min(0).max(50).optional(),
+      max_trials_per_retro: z.int().min(1).max(500).optional(),
+      max_trials_per_retro_boosted: z.int().min(1).max(500).optional(),
+      boost_above_weekly_pct: z.number().min(0).max(100).optional(),
+    })
+    .optional(),
 });
+
+/** One RETRO's replay pace (D-cq), from {@link lookbackPaceFor}. */
+export interface LookbackPace {
+  readonly failureTasks: number;
+  readonly regressionTasks: number;
+  /** The per-RETRO trial cap that applies now (the boosted one while the weekly window allows). */
+  readonly maxTrialsPerRetro: number;
+}
+
+/**
+ * Pure (D-cq): the replay pace for a RETRO. `weeklyRemainingPct` is the Lead host's weekly window
+ * left, in percent, or `null` when unknown (then the base cap applies). The boosted cap never
+ * goes below the base cap. New in 5.4.0.
+ */
+export const lookbackPaceFor = (
+  user: Pick<UserConfig, "lookback"> | undefined,
+  weeklyRemainingPct: number | null,
+): LookbackPace => {
+  const l = user?.lookback;
+  const base = l?.max_trials_per_retro ?? LOOKBACK_LIMITS.maxTrialsPerRetro;
+  const boosted = Math.max(
+    base,
+    l?.max_trials_per_retro_boosted ?? LOOKBACK_LIMITS.maxTrialsPerRetroBoosted,
+  );
+  const threshold = l?.boost_above_weekly_pct ?? LOOKBACK_LIMITS.boostAboveWeeklyPct;
+  return {
+    failureTasks: l?.replay_failure_tasks ?? LOOKBACK_LIMITS.replayFailureTasks,
+    regressionTasks: l?.replay_regression_tasks ?? LOOKBACK_LIMITS.replayRegressionTasks,
+    maxTrialsPerRetro:
+      weeklyRemainingPct !== null && weeklyRemainingPct > threshold ? boosted : base,
+  };
+};
 
 /** `gates.allow_unsandboxed` of a parsed user config; false when the section is absent. */
 export const gatesAllowUnsandboxed = (config: Pick<UserConfig, "gates">): boolean =>

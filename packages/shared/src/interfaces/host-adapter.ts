@@ -16,6 +16,7 @@ import type { ResolvedModel, RoleTools } from "../role-contract.js";
 import { UsageWindowKindSchema, type UsageSnapshot } from "../usage.js";
 import { HostErrorCauseSchema, type HostAuthStatus } from "../headless.js";
 import type { PluginLoadProof } from "./lookback.js";
+import type { CommandShape } from "../signals.js";
 
 /**
  * Terminal outcome of a role run, normalised across hosts to `done | limit | auth | error`
@@ -311,6 +312,13 @@ export interface ParsedStream {
   readonly retry: StreamRetry | null;
   /** Lines that were not valid host events (counted, never thrown). */
   readonly unrecognizedLines: number;
+  /**
+   * The run's shell calls so far as normalised shapes (D-cs): the adapter passes each command
+   * string it reads from the stream (Claude `Bash` `tool_use` input, Codex `command_execution`)
+   * through `commandShapes` and keeps only the shapes, in order; the engine counts them onto
+   * `role.submitted.command_shapes`. Absent: the adapter records none. New in 5.4.0.
+   */
+  readonly commandShapes?: readonly CommandShape[];
 }
 
 export interface HostAdapter {

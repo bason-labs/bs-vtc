@@ -3,7 +3,7 @@
  * the repo's daemon socket through `ctx.engine()`, never HTTP. `--run <id>` names a run; the
  * engine acts on the active one otherwise. `--json` prints the tool's output as is.
  */
-import type { RunControlResult, StatusResult, UsageReport } from "@vtc/shared";
+import type { ControlResult, StatusResult, UsageReport } from "@vtc/shared";
 import type { CommandContext, CommandSpec } from "./types.js";
 import { EXIT, guarded, parseFlags } from "./util.js";
 
@@ -49,8 +49,10 @@ export const formatStatus = (status: StatusResult): string[] => {
   ];
 };
 
-const formatControl = (verb: string, result: RunControlResult): string =>
-  `Run ${result.run} ${verb}: ${result.paused ? "paused" : "running"} (phase ${result.phase})`;
+const formatControl = (verb: string, result: ControlResult): string =>
+  result.run === null
+    ? `No run to ${verb === "paused" ? "pause" : "resume"}; automation is ${result.automation_paused ? "paused" : "on"}`
+    : `Run ${result.run} ${verb}: ${result.paused ? "paused" : "running"} (phase ${result.phase})`;
 
 const runFlags = (args: readonly string[]) =>
   parseFlags(args, { run: { type: "string" }, json: { type: "boolean" } }).values;
@@ -140,7 +142,7 @@ const resumeCommand: CommandSpec = {
       const client = await ctx.humanEngine(
         `adopt run ${flags.run} from another clone onto this machine`,
       );
-      let result: RunControlResult;
+      let result: ControlResult;
       try {
         result = await client.call("resume", { run: flags.run, adopt: true });
       } catch (error) {

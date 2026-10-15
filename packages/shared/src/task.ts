@@ -15,6 +15,7 @@ import {
   TaskIdSchema,
   type Risk,
 } from "./primitives.js";
+import { TierHintSchema } from "./tier-routing.js";
 
 /**
  * §6.4 main path plus side states. `fixing(n/cap)` is `fixing` + `round`/`cap`.
@@ -226,6 +227,11 @@ export const TaskSchema = z
     risk_tags: z.array(SlugSchema).default([]),
     cap: z.int().min(3).max(5),
     size: TaskSizeSchema,
+    /**
+     * The Planner's start-tier override (D-cm, `TierHint`), kept so replay routes the task as it
+     * was routed. Absent: the routing table decides. New in 5.4.0.
+     */
+    tier_hint: TierHintSchema.optional(),
     arch_triage: ArchTriageSchema,
     budget_usd: z.number().positive(),
     spent_usd: z.number().nonnegative().default(0),
@@ -342,6 +348,12 @@ export const TaskDraftSchema = z
     /** Planner risk tags (§5.2); the §7.6 risk rules still decide parking. */
     risk_tags: z.array(SlugSchema).default([]),
     size: TaskSizeSchema,
+    /**
+     * Optional start-tier override with a reason code (D-cm): only when the size and risk tags
+     * clearly misjudge the task's difficulty. The engine clamps it to the project's routing range
+     * and logs it. New in 5.4.0.
+     */
+    tier_hint: TierHintSchema.optional(),
     arch_triage: ArchTriageSchema,
     intent: IntentContractSchema,
   })
