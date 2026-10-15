@@ -14,10 +14,12 @@ import {
   HealthResultSchema,
   LOOKBACK_REPO,
   ReplayResultSchema,
+  RoutingScorecardSchema,
   RunListSchema,
   ScorecardIndexSchema,
   ScorecardSchema,
   type ReplayResult,
+  type RoutingScorecard,
   type Scorecard,
 } from "@vtc/shared";
 import {
@@ -75,6 +77,27 @@ const CARD: Scorecard = {
   written_at: "2026-10-14T00:00:00.000Z",
 };
 
+const ROUTING: RoutingScorecard = {
+  v: 1,
+  grader_bundle_sha: "c".repeat(64),
+  window: { from: "2026-10-01T00:00:00.000Z", to: "2026-10-14T00:00:00.000Z" },
+  cells: [
+    {
+      role: "engineer",
+      host: "claude-code",
+      size: "S",
+      risk: "none",
+      start_tier: "low",
+      start_reason: "rule",
+      tasks: 12,
+      metrics: { first_round_gate_pass: { value: 0.75, ci_low: 0.47, ci_high: 0.91, n: 12 } },
+      escalated: { value: 0.58, ci_low: 0.32, ci_high: 0.81, n: 12 },
+      cost_per_task_usd: { value: 0.42, ci_low: 0.3, ci_high: 0.55, n: 12 },
+    },
+  ],
+  written_at: "2026-10-14T00:00:00.000Z",
+};
+
 const snapshot = () =>
   upstreamEvidenceSnapshot({
     report: projectUpstreamReport({
@@ -89,7 +112,7 @@ const snapshot = () =>
       firstSeen: "2026-10-15T10:00:00.000Z",
       lastSeen: "2026-10-15T10:00:00.000Z",
     }),
-    data: { replay: REPLAY, scorecards: [CARD] },
+    data: { replay: REPLAY, scorecards: [CARD], routingScorecard: ROUTING },
     vtcVersion: "0.4.0",
   });
 
@@ -139,6 +162,13 @@ describe("the upstream-safe evidence snapshot (reading 212(3))", () => {
       JSON.parse((await artifact(index.scorecards[0]?.path ?? "")).content),
     );
     expect(card.metrics.first_round_gate_pass?.value).toBe(0.6);
+    // D-cn: the routing scorecard, for a routing-table PR's charts
+    const routing = RoutingScorecardSchema.parse(
+      JSON.parse((await artifact(LOOKBACK_REPO.routingScorecard)).content),
+    );
+    expect(routing.cells.map((c) => [c.role, c.size, c.risk, c.start_tier])).toEqual([
+      ["engineer", "S", "none", "low"],
+    ]);
     // the module's own route of round 4 is gone
     expect((await fetch(new URL("/api/evidence/upstream", server.origin))).status).toBe(404);
   });

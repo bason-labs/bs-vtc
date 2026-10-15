@@ -54,6 +54,15 @@
       "encoding": "utf8",
       "content": "{\n  \"v\": 1,\n  \"prompt\": {\n    \"role\": \"engineer\",\n    \"host\": \"claude-code\",\n    \"locked_sha256\": \"1111111111111111111111111111111111111111111111111111111111111111\",\n    \"editable_sha256\": \"2222222222222222222222222222222222222222222222222222222222222222\",\n    \"effective_sha256\": \"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\"\n  },\n  \"grader_bundle_sha\": \"cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc\",\n  \"window\": {\n    \"from\": \"2026-10-01T00:00:00.000Z\",\n    \"to\": \"2026-10-14T00:00:00.000Z\"\n  },\n  \"metrics\": {\n    \"first_round_gate_pass\": {\n      \"value\": 0.6,\n      \"ci_low\": 0.4,\n      \"ci_high\": 0.77,\n      \"n\": 25\n    },\n    \"tokens_per_success\": {\n      \"value\": 41000,\n      \"ci_low\": null,\n      \"ci_high\": null,\n      \"n\": 15\n    }\n  },\n  \"breakdown\": [],\n  \"written_at\": \"2026-10-14T00:00:00.000Z\"\n}\n"
     },
+    "/api/runs/vtc-upstream/artifacts?path=.vtc%2Flookback%2Fscorecards%2Frouting.json": {
+      "run": "vtc-upstream",
+      "path": ".vtc/lookback/scorecards/routing.json",
+      "sha256": "ca2b2aaa935fd779fba735b1cf9e39da5967e6f84f195f5387e0cebcaa16e785",
+      "size": 857,
+      "media_type": "application/json",
+      "encoding": "utf8",
+      "content": "{\n  \"v\": 1,\n  \"grader_bundle_sha\": \"cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc\",\n  \"window\": {\n    \"from\": \"2026-10-01T00:00:00.000Z\",\n    \"to\": \"2026-10-14T00:00:00.000Z\"\n  },\n  \"cells\": [\n    {\n      \"role\": \"engineer\",\n      \"host\": \"claude-code\",\n      \"size\": \"S\",\n      \"risk\": \"none\",\n      \"start_tier\": \"low\",\n      \"start_reason\": \"rule\",\n      \"tasks\": 12,\n      \"metrics\": {\n        \"first_round_gate_pass\": {\n          \"value\": 0.75,\n          \"ci_low\": 0.47,\n          \"ci_high\": 0.91,\n          \"n\": 12\n        }\n      },\n      \"escalated\": {\n        \"value\": 0.58,\n        \"ci_low\": 0.32,\n        \"ci_high\": 0.81,\n        \"n\": 12\n      },\n      \"cost_per_task_usd\": {\n        \"value\": 0.42,\n        \"ci_low\": 0.3,\n        \"ci_high\": 0.55,\n        \"n\": 12\n      }\n    }\n  ],\n  \"written_at\": \"2026-10-14T00:00:00.000Z\"\n}\n"
+    },
     "/api/runs/vtc-upstream/events": {
       "run": "vtc-upstream",
       "events": [

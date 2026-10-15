@@ -18,6 +18,7 @@ import {
   type EvidenceFileKind,
   type EvidenceHosting,
   type EvidenceManifest,
+  type EvidencePartialReason,
 } from "@vtc/shared";
 import { ensureDirNoFollow, writeFileNoFollow } from "../safe-fs.js";
 import { upstreamStateDir } from "../state-dir.js";
@@ -101,6 +102,8 @@ export const buildManifest = (input: {
   readonly files: readonly EvidenceFile[];
   readonly urls?: ReadonlyMap<string, string>;
   readonly complete: boolean;
+  /** Why `complete` is false, when known (D-ct). */
+  readonly partialReason?: EvidencePartialReason | undefined;
   readonly capturedAt: string;
 }): EvidenceManifest =>
   EvidenceManifestSchema.parse({
@@ -122,6 +125,9 @@ export const buildManifest = (input: {
       };
     }),
     complete: input.complete,
+    ...(input.complete || input.partialReason === undefined
+      ? {}
+      : { partial_reason: input.partialReason }),
     captured_at: input.capturedAt,
   });
 
