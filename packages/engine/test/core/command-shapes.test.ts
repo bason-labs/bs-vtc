@@ -15,7 +15,7 @@ import {
   type HostOutcome,
   type LeadAction,
 } from "@vtc/shared";
-import type { CallContext } from "../../src/core/index.js";
+import { capabilitySignalFacts, loadRuns, type CallContext } from "../../src/core/index.js";
 import { drainCommandShapeSpool, SPOOL_ROW_MAX_AGE_MS } from "../../src/core/command-shapes.js";
 import { ensurePrivateDir } from "../../src/core/guard.js";
 import { cleanupDirs, tempDir, writeFile } from "../helpers/repo.js";
@@ -25,8 +25,10 @@ import {
   draft,
   only,
   SPEC_ONE,
+  submitResult,
   throughPlan,
   workdir,
+  worktreeOf,
   type Harness,
   type HeadlessScript,
 } from "../helpers/engine-harness.js";
@@ -95,6 +97,7 @@ describe("drainCommandShapeSpool (D-cs)", () => {
 });
 
 const CODEX: CallContext = { host: "codex" };
+const CLAUDE_LEAD: CallContext = { host: "claude-code", sessionSandbox: "on" };
 interface Line {
   type: string;
   role?: string;
@@ -191,6 +194,90 @@ describe("role.submitted.command_shapes (D-cs)", () => {
       ]),
     );
     expect((submitted(h, "repo_cartographer")[0]?.data.command_shapes as unknown[]).length).toBe(3);
+    await h.release();
+  });
+});
+
+describe("missing_capability on the escalation records (D-cs)", () => {
+  it("keeps the role's on escalation.opened and the Lead's on escalation.answered; two raise a capability fact", async () => {
+    const h = createHarness();
+    const actions = await throughPlan(h, [draft("T-1")], SPEC_ONE);
+    const qa = only(actions, "qa");
+    writeFile(worktreeOf(h, "T-1"), "tests/acceptance/t-1.test.ts", "test\n");
+    await submitResult(h, qa, {
+      exit: "done",
+      acceptance_tests: ["t"],
+      artifacts: [{ type: "acceptance_test", path: "tests/acceptance/t-1.test.ts" }],
+      questions: [
+        {
+          question: "Which browser runs the flow?",
+          options: [
+            { id: "yes", label: "Yes", effect: "clarify" },
+            { id: "no", label: "No", effect: "clarify" },
+          ],
+          recommended: "yes",
+          evidence: [{ type: "spec_ref", ref: "REQ-1.AC-1" }],
+          missing_capability: {
+            slug: "browser_automation",
+            reason: "the acceptance flow needs a browser",
+          },
+        },
+      ],
+    });
+    await h.engine.settle();
+    const [question] = h.engine.escalations({}).escalations;
+    expect(question?.missing_capability).toEqual({
+      slug: "browser_automation",
+      reason: "the acceptance flow needs a browser",
+    });
+    await h.engine.answer(
+      {
+        escalation: question?.id ?? "",
+        answer: {
+          option: "yes",
+          who_should_have_caught: "none",
+          missing_capability: { slug: "browser_automation", reason: "no headless browser tool" },
+        },
+      },
+      CLAUDE_LEAD,
+    );
+    const log = readFileSync(
+      join(h.repo, `.vtc/runs/${h.engine.status({}).run.id}/events.jsonl`),
+      "utf8",
+    )
+      .trim()
+      .split("\n")
+      .map((l) => JSON.parse(l) as Line);
+    const answered = log.find((e) => e.type === "escalation.answered");
+    expect(answered?.data.answer).toMatchObject({
+      missing_capability: { slug: "browser_automation", reason: "no headless browser tool" },
+    });
+    // one escalation named it (twice): no signal yet
+    const [run] = loadRuns(h.repo);
+    const base = { run: "r", source: "run.finished", at: "2026-10-13T09:00:00.000Z" };
+    expect(capabilitySignalFacts([run!.state], base)).toEqual([]);
+    // another run's escalation with the same slug makes two
+    const other = {
+      id: "r-other",
+      events: [
+        {
+          type: "escalation.opened",
+          data: {
+            escalation: {
+              id: "E-1",
+              missing_capability: { slug: "browser_automation", reason: "x" },
+            },
+          },
+        },
+      ] as never,
+    };
+    expect(capabilitySignalFacts([run!.state, other], base)).toMatchObject([
+      {
+        kind: "capability",
+        subject: "browser_automation",
+        metrics: { "capability.escalations": 2 },
+      },
+    ]);
     await h.release();
   });
 });

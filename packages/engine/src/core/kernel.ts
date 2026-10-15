@@ -231,6 +231,25 @@ export interface LookbackReplay {
   readonly trials: readonly LookbackReplayTrial[];
 }
 
+/**
+ * What one replay trial came to, for Lookback's trial ledger (D-cg, spine §5 reading 201): a grade
+ * (`passed`, the tokens it used, whether the host enforced its read deny), or an attempt that
+ * measured nothing for an infrastructure reason the ledger counts (`ReplayInfraOutcome`). A trial
+ * that measured nothing for another reason (the engine stopped, its run was interrupted or
+ * refused) is not recorded: it is simply planned again.
+ */
+export type ReplayTrialRecord =
+  | {
+      readonly kind: "graded";
+      readonly passed: boolean;
+      readonly tokens: number;
+      readonly readDenied: boolean;
+    }
+  | {
+      readonly kind: "unmeasured";
+      readonly outcome: "gate_infra" | "plugin_locked" | "no_outcome";
+    };
+
 /** A graded trial: its index in `LookbackReplay.trials`, whether it passed, the tokens it used. */
 export interface ReplayTrialOutcome {
   readonly n: number;
@@ -269,17 +288,32 @@ export interface LookbackRetro {
   }>;
   /**
    * The replays RETRO runs once every lookback target is settled (AD-21 rule 6, spine §5 reading
-   * 176): one per proposal recorded and not yet replayed, each with its `lookback_replay` trials
-   * in order (`planReplayTrials`). `wait` says why none can start now (the weekly window or the
-   * budget, as for the lookback role); a replay that cannot start waits for the next RETRO.
-   * Absent: no replays.
+   * 176): one per proposal recorded and not yet replayed, each with the `lookback_replay` trials
+   * this RETRO launches, in order. Lookback decides which (`planRetroReplays`: the grader, the
+   * weekly window, the budget and `LOOKBACK_LIMITS.maxTrialsPerRetro`, the trials its ledger
+   * already graded left out), so a replay may come with only some of its trials, or none when
+   * every trial is graded and it is ready to finish; core applies no trial cap of its own.
+   * `wait` says why some cannot start now; `events` are Lookback's `automation.skipped` drafts
+   * for the limits it hit (D-cg), which the run logs. Absent: no replays.
    */
   replays?(state: RunState): Promise<{
     readonly replays: readonly LookbackReplay[];
     readonly wait?: string;
     /** The limit `wait` names, for its `automation.skipped` (D-cg); absent: no limit. */
     readonly waitKind?: "weekly_window" | "budget";
+    readonly events?: readonly EventDraft[];
   }>;
+  /**
+   * Keeps one trial's outcome in Lookback's trial ledger as it is known (D-cg, spine §5 reading
+   * 201), so a replay continues across RETROs and a trial that keeps measuring nothing stops its
+   * replay. Absent: no ledger.
+   */
+  recordTrial?(
+    replay: LookbackReplay,
+    trial: LookbackReplayTrial,
+    record: ReplayTrialRecord,
+    state: RunState,
+  ): Promise<void>;
   /**
    * The same weekly-window and budget checks, again before each trial (AD-21 rule 8): why the
    * replays must stop now, or `null`. Replays that stop wait for the next RETRO.
@@ -303,8 +337,10 @@ export interface LookbackRetro {
     state: RunState,
   ): Promise<GateVerdict>;
   /**
-   * The replay's result once every trial is graded (`finishReplay`, `writeReplayResult`): its
-   * events (`lookback.replay_finished` with the SHA-256 of the bytes written).
+   * Called once every trial this RETRO launched for the replay is graded: the replay's result once
+   * its ledger holds every trial of its plan (`assembleReplay`, `writeReplayResult`), with its
+   * events (`lookback.replay_finished` with the SHA-256 of the bytes written); no events while
+   * trials are still missing (they run at a later RETRO).
    */
   finishReplay?(
     replay: LookbackReplay,

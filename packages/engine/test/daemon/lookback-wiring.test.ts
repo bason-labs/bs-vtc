@@ -504,6 +504,15 @@ describe("RETRO replays a recorded proposal end to end (AD-21 rule 6, readings 1
     await unwire();
     // no trial is a Lead's subagent
     expect(carried.filter((a) => a.role === role)).toEqual([]);
+    // D-cm (reading 218 (7)): every trial runs on the tier the replayed dispatch recorded
+    const trialTiers = events(h)
+      .filter((e) => e.type === "role.dispatched" && e.data.purpose === "lookback_replay")
+      .map((e) => [e.data.tier, e.data.tier_reason]);
+    expect(trialTiers.length).toBeGreaterThan(0);
+    expect(new Set(trialTiers.map((t) => t.join(" ")))).toEqual(
+      new Set([[held.data.tier, held.data.tier_reason].join(" ")]),
+    );
+    expect(held.data.tier_reason).toBe("rule");
     const trials = trialPacks.length;
     for (const pack of trialPacks)
       expect(pack).toMatch(
@@ -533,6 +542,14 @@ describe("RETRO replays a recorded proposal end to end (AD-21 rule 6, readings 1
     });
     // the noise floor the replay measured is kept for the next one
     expect(existsSync(join(h.home, LOOKBACK_HOME.aaNoiseFile))).toBe(true);
+    // D-cg (reading 201): every grade is in the trial ledger under the VTC home, which the result
+    // was assembled from, so a replay can continue across RETROs
+    const ledger = readFileSync(join(h.home, LOOKBACK_HOME.replayTrialsFile), "utf8")
+      .trim()
+      .split("\n")
+      .map((l) => JSON.parse(l) as { proposal: string; candidate: string; passed?: boolean });
+    expect(ledger).toHaveLength(trials);
+    expect(ledger.every((r) => r.proposal === "p-1" && r.candidate === candidate)).toBe(true);
     expect(h.engine.status({}).run.finished_at).toBeDefined();
     // the trials measured versions: no scorecard counts them, so the candidate has none
     const index = ScorecardIndexSchema.parse(
