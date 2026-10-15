@@ -321,7 +321,10 @@
         "dispatch": "subagent",
         "agent": "vtc-engineer",
         "pack": ".vtc/state/packs/a-1.md",
-        "resume": null
+        "resume": null,
+        "tier": "mid",
+        "tier_reason": "rule",
+        "tier_clamped": true
       },
       "prompt_sha": "4444444444444444444444444444444444444444444444444444444444444444",
       "host": "claude-code",
@@ -345,7 +348,21 @@
           "host": "claude-code",
           "id": "sess-t1"
         },
-        "head": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+        "head": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        "command_shapes": [
+          {
+            "program": "pnpm",
+            "subcommand": "test",
+            "flags": "e3b0c44298fc",
+            "count": 3
+          },
+          {
+            "program": "git",
+            "subcommand": "status",
+            "flags": "a11f88902550",
+            "count": 1
+          }
+        ]
       },
       "prompt_sha": "4444444444444444444444444444444444444444444444444444444444444444",
       "host": "claude-code",

@@ -121,6 +121,30 @@ describe(
       await h.release();
     });
 
+    it("prices a phase role on the tier it is dispatched on: its own tier clamped by routing.max_tier (D-cm)", async () => {
+      // the cartographer's own tier is mid; max_tier low dispatches it on low, which alone is priced
+      const h = createHarness({
+        project: {
+          hosts: { models: { codex: { top: "gpt-top", mid: "gpt-mid", low: "gpt-low" } } },
+          routing: { max_tier: "low" },
+        },
+        codex: codexHost,
+        prices: { "gpt-low": PRICE },
+      });
+      await start(h);
+      await next(h);
+      await h.engine.settle();
+      expect(ofType(h, "headless.preflight")[0]?.data).toMatchObject({ host: "codex", ok: true });
+      const dispatched = ofType(h, "role.dispatched").find((e) => e.role === "repo_cartographer");
+      expect(dispatched?.model).toBe("gpt-low");
+      expect(dispatched?.data).toMatchObject({
+        tier: "low",
+        tier_reason: "role",
+        tier_clamped: true,
+      });
+      await h.release();
+    });
+
     it("a Codex role with no model id (the session's model) cannot be priced either", async () => {
       const h = createHarness({ codex: codexHost, prices: { "gpt-test": PRICE } });
       await start(h);

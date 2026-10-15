@@ -11,12 +11,14 @@ import { join } from "node:path";
 import {
   capForRisk,
   checkResultAgainstContract,
+  countCommandShapes,
   escalationFromQuestion,
   HIDDEN_TESTS,
   priceTokens,
   redactSecrets,
   resolveRoleMode,
   type ArtifactRef,
+  type CommandShape,
   type Finding,
   type HostFailureOutcome,
   type Phase,
@@ -31,6 +33,7 @@ import {
   type TokenUsage,
 } from "@vtc/shared";
 import { budgetState, sharesExceeded, taskBudgetFor, usd } from "./budget.js";
+import { drainCommandShapeSpool } from "./command-shapes.js";
 import { DEFAULT_ACCEPTANCE_GLOBS } from "./config.js";
 import { resolves, unresolved } from "./evidence.js";
 import { matchesAny } from "./globs.js";
@@ -363,8 +366,10 @@ const emitSubmitted = (
     readonly head?: string;
     readonly artifacts?: readonly ArtifactRef[];
     readonly session?: SessionRef;
+    readonly commandShapes?: readonly CommandShape[];
   },
 ): void => {
+  const shapes = countCommandShapes(extras.commandShapes ?? []);
   k.emit(h, {
     type: "role.submitted",
     actor: "role",
@@ -387,8 +392,49 @@ const emitSubmitted = (
       artifacts: extras.artifacts ?? result.artifacts.map(({ type, path }) => ({ type, path })),
       session_ref: extras.session ?? null,
       ...(extras.head === undefined ? {} : { head: extras.head }),
+      // D-cs (reading 221 (1)): the run's shell calls as shapes, in the local run log only
+      ...(shapes.length === 0 ? {} : { command_shapes: shapes }),
     },
   });
+};
+
+/**
+ * Where a role run worked (`dispatchPrepared`): its own worktree, its task's, else the repo.
+ */
+const runCwd = (
+  k: Kernel,
+  h: RunHandle,
+  run: RoleRunRecord,
+  worktree: { readonly path: string } | undefined,
+): string => {
+  if (worktree !== undefined) return join(k.deps.repoRoot, worktree.path);
+  const task = run.task === undefined ? undefined : h.state.tasks.get(run.task);
+  return task?.worktree === undefined ? k.deps.repoRoot : join(k.deps.repoRoot, task.worktree);
+};
+
+/**
+ * The shell-call shapes of a role run (D-cs): a headless run's come from its stream (`fromStream`);
+ * an in-session subagent's from the hook's spool, which is drained for every run (a headless
+ * run's rows, if its host ran the hook too, are dropped, never counted twice).
+ */
+const runCommandShapes = (
+  k: Kernel,
+  h: RunHandle,
+  run: RoleRunRecord,
+  worktree: { readonly path: string } | undefined,
+  fromStream: readonly CommandShape[] | undefined,
+): readonly CommandShape[] => {
+  const named = k.deps.adapters[run.host]?.subagentName?.(run.agent);
+  const spooled = drainCommandShapeSpool(
+    k.guardDir,
+    {
+      agents: named === undefined || named === run.agent ? [run.agent] : [run.agent, named],
+      cwd: runCwd(k, h, run, worktree),
+      since: run.dispatched_at,
+    },
+    k.now(),
+  );
+  return run.dispatch === "headless" ? (fromStream ?? []) : spooled;
 };
 
 const phaseEscalation = (
@@ -1430,6 +1476,8 @@ export const handleSubmit = async (
   h: RunHandle,
   submitted: SubmitInput,
   worded: FailureWording = "reported",
+  /** A headless run's shell-call shapes from its stream (D-cs, `ParsedStream.commandShapes`). */
+  streamShapes?: readonly CommandShape[],
 ): Promise<SubmitOutcome> => {
   const run = h.state.roleRuns.get(submitted.action_id);
   const input = run === undefined ? submitted : pricedSubmit(k, run, submitted);
@@ -1455,6 +1503,8 @@ export const handleSubmit = async (
   // alike (AD-7 rule 7); the record goes only once checked.
   const writes = checkRun(k, h, run);
   const record = k.dispatches.get(recordKey(h.state.id, run.action_id));
+  // D-cs: taken from the spool now, so a rejected or failed run's rows go too
+  const commandShapes = runCommandShapes(k, h, run, record?.worktree, streamShapes);
   const close = async (keepWorktree: boolean): Promise<void> => {
     // nothing is re-dispatched over writes no one has looked at: the human resumes
     reportFindings(k, h, run, writes);
@@ -1502,6 +1552,7 @@ export const handleSubmit = async (
     ...(outcome.head === undefined ? {} : { head: outcome.head }),
     ...(outcome.artifacts === undefined ? {} : { artifacts: outcome.artifacts }),
     ...(input.session_ref === undefined ? {} : { session: input.session_ref }),
+    commandShapes,
   });
   // The host session the run used: later rounds and answers resume it (§6.3 step 8, §6.5).
   const task = run.task === undefined ? undefined : h.state.tasks.get(run.task);

@@ -405,10 +405,9 @@ describe("every role's dispatch is guarded (AD-7 rule 7)", () => {
     const engine = reopen(h);
     writeFile(h.repo, ".vtc/tasks/T-7.md", "late\n");
     await engine.pause({});
-    const resumed = await engine.resume({});
-    expect(resumed.paused).toBe(true);
+    expect(await engine.resume({})).toMatchObject({ paused: true });
     expect(incidents(h, "checkout_write")).toContain(".vtc/tasks/T-7.md");
-    expect((await engine.resume({})).paused).toBe(false);
+    expect(await engine.resume({})).toMatchObject({ paused: false });
     await h.release();
   });
 });

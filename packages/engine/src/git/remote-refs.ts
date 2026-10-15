@@ -1,17 +1,12 @@
 /**
- * Fresh remote truth for the automation's shared branches (AD-13 rule 4, AD-27 rule 1): the
- * upstream module's `RemoteRefs`, the fetch and commit-message reading the frozen `GitPlumbing`
- * lacks. Every VTC installation reporting to one repo pushes `vtc/auto/<kind>/<fp8>` and
- * `vtc-evidence` without force, so the module fetches them right before it builds on them and
- * recognises another installation's head by its `Generated-by: VTC` trailer. The daemon injects
- * it (`UpstreamDeps.remoteRefs`).
- * - fetch: only those branches, only into the remote's own remote-tracking refs
- *   (`refs/remotes/<remote>/…`), never a local branch, a tag, the index or the work tree; the
- *   user's own git and credentials, no prompt;
- * - message: a commit's full message from the object itself, or `null` when the repo lacks it.
+ * The upstream module's `RemoteRefs` seam (AD-13 rule 4, AD-27 rule 1), kept while the module
+ * still takes `UpstreamDeps.remoteRefs`: since contracts 5.4.0 `GitPlumbing.fetch` and
+ * `GitPlumbing.message` (`createGitPlumbing`) do the work, with the same checks (only the shared
+ * automation branches, only into the remote's remote-tracking refs; a commit's message from the
+ * object). Remove it once the upstream module reads both from `GitPlumbing`.
  */
-import { GitShaSchema, type GitSha } from "@vtc/shared";
-import { gitText, runGit } from "./exec.js";
+import type { GitSha } from "@vtc/shared";
+import { createGitPlumbing } from "./plumbing.js";
 
 /** What the upstream module needs besides `GitPlumbing` (`upstream/remote-refs.ts`). */
 export interface RemoteRefs {
@@ -21,48 +16,14 @@ export interface RemoteRefs {
   message(sha: GitSha): Promise<string | null>;
 }
 
-/** The shared branches a refspec may name: every automatic branch, one of them, the evidence branch. */
-const SHARED_SOURCE = /^refs\/heads\/(vtc\/auto\/\*|vtc\/auto\/[a-z_]+\/[a-f0-9]{8}|vtc-evidence)$/;
-
-/** `[+]refs/heads/<shared>:refs/remotes/<remote>/<same>`, or why not. */
-const checkRefspec = (remote: string, refspec: string): string | null => {
-  const [src, dst, ...rest] = refspec.replace(/^\+/, "").split(":");
-  const branch = SHARED_SOURCE.exec(src ?? "")?.[1];
-  if (rest.length > 0 || branch === undefined || dst !== `refs/remotes/${remote}/${branch}`)
-    return `the refspec ${JSON.stringify(refspec)} is not a shared automation branch into refs/remotes/${remote}/`;
-  return null;
+/** `git.createRemoteRefs`: {@link RemoteRefs} for one repo directory, over `createGitPlumbing`. */
+export const createRemoteRefs = ({ repoRoot }: { readonly repoRoot: string }): RemoteRefs => {
+  const plumbing = createGitPlumbing({ repoRoot });
+  return {
+    fetch: (remote, refspecs) =>
+      plumbing.fetch?.(remote, refspecs) ??
+      Promise.reject(new Error("createGitPlumbing has no fetch")),
+    message: (sha) =>
+      plumbing.message?.(sha) ?? Promise.reject(new Error("createGitPlumbing has no message")),
+  };
 };
-
-/** `git.createRemoteRefs`: {@link RemoteRefs} for one repo directory. */
-export const createRemoteRefs = ({ repoRoot }: { readonly repoRoot: string }): RemoteRefs => ({
-  fetch: async (remote, refspecs) => {
-    const remotes = (await gitText(repoRoot, ["remote"])).split("\n").filter((r) => r !== "");
-    if (!remotes.includes(remote)) throw new Error(`${JSON.stringify(remote)} is not a remote`);
-    if (refspecs.length === 0) throw new Error("no refspec to fetch");
-    for (const refspec of refspecs) {
-      const why = checkRefspec(remote, refspec);
-      if (why !== null) throw new Error(why);
-    }
-    await runGit(repoRoot, [
-      "fetch",
-      "--quiet",
-      "--no-tags",
-      "--prune",
-      "--no-recurse-submodules",
-      "--no-write-fetch-head",
-      "--no-auto-maintenance",
-      "--end-of-options",
-      remote,
-      ...refspecs,
-    ]);
-  },
-  message: async (sha) => {
-    if (!GitShaSchema.safeParse(sha).success) return null;
-    const result = await runGit(repoRoot, ["cat-file", "commit", sha], { allowFailure: true });
-    if (result.code !== 0) return null;
-    // the raw object: headers, a blank line, then the message as written
-    const raw = result.stdout.toString("utf8");
-    const at = raw.indexOf("\n\n");
-    return at < 0 ? "" : raw.slice(at + 2);
-  },
-});

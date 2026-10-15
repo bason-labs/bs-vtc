@@ -83,6 +83,7 @@ const fakeUpstream = () => {
 const started = async (h: Harness): Promise<string> => (await h.engine.start(REQUEST, CLAUDE)).run;
 
 /** An engine stand-in whose runs a test opens, finishes and pauses at will. */
+const KNOWN_SECRET = "plain-project-value-4711";
 const fakeEngine = () => {
   const runs = new Map<
     string,
@@ -122,6 +123,8 @@ const fakeEngine = () => {
       });
     },
     config: () => ({}),
+    /** The project's known secret values (its `.env`). */
+    secrets: () => [KNOWN_SECRET],
     recordModuleEvent: (run: string, draft: EventDraft): boolean => {
       if (failRecord.on) throw new Error("the event log refused the append");
       const r = runs.get(run);
@@ -746,6 +749,46 @@ describe("automation wiring (AD-27 rules 7 and 8)", () => {
     await expect(wiring.close()).resolves.toBeUndefined();
   });
 
+  it("a fact the module fails on is an automation.skipped error with the redacted message (contracts 5.4.0)", async () => {
+    const fake = fakeEngine();
+    const wiring = wireAutomation(
+      fake.engine,
+      { repoRoot: tempDir(), vtcHome: tempDir(), automation: AUTOMATION },
+      {
+        githubRemote: true,
+        createUpstream: () => ({
+          onFact: () =>
+            Promise.reject(
+              new Error(
+                `gh failed: token ghp_abcdefghijklmnopqrstuvwxyz0123456789 value ${KNOWN_SECRET}`,
+              ),
+            ),
+        }),
+      },
+    );
+    fake.runs.set("R-1", { finished: false, paused: false });
+    fake.event({ type: "incident.recorded", run: "R-1", data: { kind: "crash", detail: "x" } });
+    await wiring.idle();
+    const skipped = fake.recorded.filter((r) => r.type === "automation.skipped");
+    expect(skipped).toEqual([
+      {
+        run: "R-1",
+        type: "automation.skipped",
+        data: expect.objectContaining({ reason: "error", kind: "defect" }) as unknown,
+      },
+    ]);
+    const detail = (skipped[0]?.data as { detail: string }).detail;
+    expect(detail).toContain("gh failed");
+    expect(detail).not.toContain("ghp_abcdefghijklmnopqrstuvwxyz0123456789");
+    // the engine's known secret values are redacted too, in the event and in the notice
+    expect(detail).not.toContain(KNOWN_SECRET);
+    // still an engine notice too
+    expect(fake.notices.join("\n")).toContain("could not handle a defect fact");
+    expect(fake.notices.join("\n")).not.toContain(KNOWN_SECRET);
+    expect(fake.notices.join("\n")).not.toContain("ghp_abcdefghijklmnopqrstuvwxyz0123456789");
+    await wiring.close();
+  });
+
   it("a guard-dir write that throws is an engine notice, and a later fact is still handled", async () => {
     const h = createHarness();
     const up = fakeUpstream();
@@ -798,10 +841,9 @@ describe("automation wiring (AD-27 rules 7 and 8)", () => {
       );
       await wiring.idle();
       expect(sweeps).toBe(1);
-      // idle: no run to pause, but automation stops all the same
-      await expect(h.engine.pause({})).rejects.toThrow(
-        /no active run to pause; automatic issues and PRs are paused until vtc resume/,
-      );
+      // idle: no run to pause, but automation stops all the same, and the answer says so
+      // (NoRunControlResult, contracts 5.4.0)
+      expect(await h.engine.pause({})).toEqual({ run: null, automation_paused: true });
       expect(automationPausedByHuman(h.engine.guardDir)).toBe(true);
       expect(wiring.settings()).toMatchObject({ issues: false, prs: false, upstream: false });
       expect(wiring.settings()?.notes).toContain("automation is paused (vtc pause)");
@@ -812,8 +854,8 @@ describe("automation wiring (AD-27 rules 7 and 8)", () => {
       await started(h);
       expect(automationPausedByHuman(h.engine.guardDir)).toBe(true);
       expect(wiring.settings()?.notes).toContain("automation is paused (vtc pause)");
-      // the human's resume does
-      await h.engine.resume({});
+      // the human's resume does, and says so
+      expect(await h.engine.resume({})).toMatchObject({ automation_paused: false });
       expect(automationPausedByHuman(h.engine.guardDir)).toBe(false);
       vi.advanceTimersByTime(1000);
       await wiring.idle();

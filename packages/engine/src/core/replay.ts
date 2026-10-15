@@ -2,9 +2,12 @@
  * Lookback replays at RETRO (spec §13 step 3; AD-21 rule 6; spine §5 readings 176, 178, 201, 202
  * and 205). Once every lookback target of the run is settled, RETRO asks the wired Lookback for the
  * replays it may run now (`LookbackRetro.replays`: one per proposal recorded and not yet replayed,
- * under the same weekly-window and budget checks as the lookback role), at most
- * `LOOKBACK_LIMITS.maxTrialsPerRetro` trials in all, and runs their `lookback_replay` trials one at
- * a time. Every trial is an engine-launched headless run on the run's Lead host (D-cg:
+ * under the same weekly-window and budget checks as the lookback role, with the trials Lookback
+ * launches this RETRO: at most `LOOKBACK_LIMITS.maxTrialsPerRetro` in all, the ones its trial
+ * ledger already graded left out, `planRetroReplays`), and runs their `lookback_replay` trials one
+ * at a time. Each trial's grade, and each attempt that measured nothing for an infrastructure
+ * reason, goes to the ledger as it is known (`LookbackRetro.recordTrial`), so a replay continues
+ * across RETROs. Every trial is an engine-launched headless run on the run's Lead host (D-cg:
  * `planDispatch` sends it headless whenever the host can, without `headless_allowed`; never a
  * Lead's subagent):
  * - each trial is a recorded dispatch run again with one arm's prompt version, in a clean checkout
@@ -61,12 +64,13 @@ import {
   GateRunRequestSchema,
   GitShaSchema,
   HostIdSchema,
+  ModelTierSchema,
   PromptVersionRefSchema,
   RoleIdSchema,
   SlugSchema,
+  TierReasonSchema,
   planDispatch,
   HiddenTestsEntrySchema,
-  LOOKBACK_LIMITS,
   replayGraderFor,
   type AutomationSkipReason,
   type GateRunRequestInput,
@@ -98,11 +102,13 @@ import type {
   LookbackReplayTrial,
   PinnedPrompt,
   ReplayTrialOutcome,
+  ReplayTrialRecord,
   RunHandle,
 } from "./kernel.js";
 import { HEADLESS_LOADS_AGENT, pinBlocker, roleChangesFiles } from "./prompt-target.js";
 import { countsAsFailure } from "./queries.js";
 import type { RoleRunRecord } from "./state.js";
+import type { TierRoute } from "./routing.js";
 
 /** The replays RETRO planned for a run, as kept in the private directory. */
 export interface ReplayPlan {
@@ -125,6 +131,8 @@ export interface ReplayStepRef extends TrialRef {
   readonly base: string;
   /** The recorded task's protected tests (`LookbackReplayTrial.protectedPaths`). */
   readonly protectedPaths?: readonly string[];
+  /** The recorded dispatch's tier (`LookbackReplayTrial.tier`): the trial runs on it. */
+  readonly tier?: TierRoute;
 }
 
 /** The trial step RETRO wants now (a `StepSpec` the dispatcher hands out). */
@@ -222,6 +230,9 @@ const TrialShape = z.looseObject({
   pack: z.record(z.string(), z.unknown()),
   base: GitShaSchema,
   protectedPaths: z.array(z.string()).optional(),
+  tier: z
+    .strictObject({ tier: ModelTierSchema, reason: TierReasonSchema, clamped: z.boolean() })
+    .optional(),
 });
 const ReplayPlanShape = z.strictObject({
   v: z.literal(1),
@@ -510,6 +521,8 @@ export const replayGraderOf = (
  * section goes in the pack, which needs the agent's locked core in its manifest.
  */
 const replayBlocker = (k: Kernel, h: RunHandle, replay: LookbackReplay): string | null => {
+  // every trial graded at earlier RETROs: nothing runs, the replay only finishes
+  if (replay.trials.length === 0) return null;
   const lead = leadHostOf(k, h);
   if (replay.host !== lead)
     return `its trials run on ${replay.host}, and this run's Lead runs on ${lead}`;
@@ -542,7 +555,7 @@ const replayBlocker = (k: Kernel, h: RunHandle, replay: LookbackReplay): string 
     );
     if (blocker !== null) return `${agent} cannot run a candidate: ${blocker}`;
   }
-  return replay.trials.length === 0 ? "it has no trial to run" : null;
+  return null;
 };
 
 /**
@@ -620,10 +633,11 @@ const tellLeftOut = (k: Kernel, proposal: string, why: string): void => {
 
 /**
  * Plans the run's replays (a job's work; the plan is written whatever happens, so RETRO never
- * plans twice): the wired Lookback's replays the run can start, each one's trials in order, at
- * most `LOOKBACK_LIMITS.maxTrialsPerRetro` trials in all (D-cg). One that cannot start is left out
- * with a notice (it stays pending for the next RETRO); one a limit stops (the weekly window, the
- * budget, the trial cap) is also an `automation.skipped`.
+ * plans twice): the wired Lookback's replays the run can start, with the trials Lookback launches
+ * this RETRO in order (Lookback applies `LOOKBACK_LIMITS.maxTrialsPerRetro` and its ledger,
+ * `planRetroReplays`; core has no cap of its own, D-cg). One that cannot start is left out with a
+ * notice (it stays pending for the next RETRO); a limit Lookback hit (the weekly window, the
+ * budget, the trial cap) is an `automation.skipped`.
  */
 export const planReplays = async (k: Kernel, h: RunHandle): Promise<ReplayPlan> => {
   const lookback = k.lookbackRetro();
@@ -642,25 +656,22 @@ export const planReplays = async (k: Kernel, h: RunHandle): Promise<ReplayPlan> 
             ),
           );
       }
-      let room = LOOKBACK_LIMITS.maxTrialsPerRetro;
+      // AD-8: Lookback hands core only its `automation.skipped` drafts; any other type is dropped
+      for (const event of planned.events ?? []) {
+        // the seam's type says `automation.skipped`; the module behind it is checked all the same
+        const type: string = (event as EventDraft).type;
+        if (type === "automation.skipped") skipped.push(event);
+        else
+          k.notice(
+            `lookback replays of run ${h.state.id} handed core a ${type} event to log; only automation.skipped is logged through this seam, so it is dropped`,
+          );
+      }
       for (const replay of planned.replays) {
         const why = replayBlocker(k, h, replay);
         if (why !== null) {
           tellLeftOut(k, replay.proposal, why);
           continue;
         }
-        if (replay.trials.length > room) {
-          const cap = `the per-RETRO cap of ${String(LOOKBACK_LIMITS.maxTrialsPerRetro)} trials is reached (${String(replay.trials.length)} more would run)`;
-          tellLeftOut(k, replay.proposal, cap);
-          skipped.push(
-            replaySkipped(
-              "trial_cap",
-              `the replay of proposal ${replay.proposal} waits for the next RETRO: ${cap}`,
-            ),
-          );
-          continue;
-        }
-        room -= replay.trials.length;
         replays.push(replay);
       }
     } catch (error) {
@@ -710,15 +721,58 @@ const dropTrialCheckout = (k: Kernel, run: string, t: TrialRef, action: string):
   if (trial !== undefined) dropCheckout(k, run, trialCheckout(k, run, t, action, trial.base));
 };
 
+const recordJob = (run: string, t: TrialRef): string => `replay-record:${run}:${key(t)}`;
+
+/**
+ * Hands one trial's outcome to Lookback's trial ledger (`LookbackRetro.recordTrial`, D-cg), as a
+ * job: a ledger that cannot be written is a notice, and the trial is planned again later.
+ */
+const recordTrialOutcome = (
+  k: Kernel,
+  h: RunHandle,
+  t: TrialRef,
+  record: ReplayTrialRecord,
+): void => {
+  const lookback = k.lookbackRetro();
+  const replay = readReplayPlan(k, h.state.id)?.replays[t.replay];
+  const trial = replay?.trials[t.n];
+  if (lookback?.recordTrial === undefined || replay === undefined || trial === undefined) return;
+  const hook = lookback.recordTrial.bind(lookback);
+  const job = recordJob(h.state.id, t);
+  if (k.isRunning(job)) return;
+  const state = h.state;
+  k.spawn(h, job, async () => {
+    try {
+      await hook(replay, trial, record, state);
+    } catch (error) {
+      k.notice(
+        `the trial ledger could not keep replay trial ${key(t)} of proposal ${replay.proposal}: ${error instanceof Error ? error.message : String(error)}`,
+      );
+    }
+  });
+};
+
+/** Appends a trial's grade and hands it to the ledger (callers hold the run's lock). */
+const gradeTrialRow = (
+  k: Kernel,
+  h: RunHandle,
+  t: TrialRef,
+  action: string,
+  passed: boolean,
+): void => {
+  const tokens = tokensOf(h.state.roleRuns.get(action));
+  appendRow(k, h.state.id, { kind: "graded", replay: t.replay, n: t.n, passed, tokens });
+  recordTrialOutcome(k, h, t, {
+    kind: "graded",
+    passed,
+    tokens,
+    readDenied: progressOf(k, h.state.id)?.readDenied.has(key(t)) === true,
+  });
+};
+
 /** Records a trial whose role ran and was rejected or failed: it did not pass. */
 const failTrial = (k: Kernel, h: RunHandle, t: TrialRef, action: string): void => {
-  appendRow(k, h.state.id, {
-    kind: "graded",
-    replay: t.replay,
-    n: t.n,
-    passed: false,
-    tokens: tokensOf(h.state.roleRuns.get(action)),
-  });
+  gradeTrialRow(k, h, t, action, false);
   dropTrialCheckout(k, h.state.id, t, action);
 };
 
@@ -732,6 +786,8 @@ const unmeasuredTrial = (
   t: TrialRef,
   action: string | undefined,
   reason: string,
+  /** The ledger's infrastructure outcome, when it is one the ledger counts (D-cg). */
+  infra?: ReplayInfraKind,
 ): void => {
   appendRow(k, h.state.id, {
     kind: "unmeasured",
@@ -739,6 +795,7 @@ const unmeasuredTrial = (
     n: t.n,
     reason: reason.slice(0, 500),
   });
+  if (infra !== undefined) recordTrialOutcome(k, h, t, { kind: "unmeasured", outcome: infra });
   if (action !== undefined) dropTrialCheckout(k, h.state.id, t, action);
   const proposal = readReplayPlan(k, h.state.id)?.replays[t.replay]?.proposal ?? "?";
   k.notice(
@@ -877,8 +934,12 @@ export const hiddenTaskOf = (trial: Pick<LookbackReplayTrial, "task">): string |
   return HiddenTestsEntrySchema.safeParse(trial.task).success ? trial.task : undefined;
 };
 
+/** The infrastructure outcomes Lookback's trial ledger counts (`ReplayInfraOutcome`). */
+type ReplayInfraKind = Extract<ReplayTrialRecord, { kind: "unmeasured" }>["outcome"];
+
 /** What a grade came to: a measurement, or nothing measured with the reason. */
-type GradeOutcome = { readonly passed: boolean } | { readonly unmeasured: string };
+type GradeOutcome =
+  { readonly passed: boolean } | { readonly unmeasured: string; readonly infra?: ReplayInfraKind };
 
 /**
  * Grades an accepted trial through the Gate Runner (a job): its `base..head` against the gates
@@ -929,7 +990,7 @@ export const startTrialGrade = (
           await k.deps.git.removeCheckout(clean);
         }
       });
-      outcome = gradeOutcome(verdict, "gate run");
+      outcome = gradeOutcome(verdict, "gate run", "gate_infra");
     } catch (error) {
       if (error instanceof ReplayCheckoutTamperedError) {
         // the role changed its checkout's git directory: its doing, so it did not pass
@@ -942,6 +1003,7 @@ export const startTrialGrade = (
       } else
         outcome = {
           unmeasured: `it could not be graded: ${error instanceof Error ? error.message : String(error)}`,
+          infra: "gate_infra",
         };
     }
     await settleGrade(k, h, t, action, outcome, checkout);
@@ -963,23 +1025,18 @@ const settleGrade = (
       dropCheckout(k, h.state.id, checkout);
       return Promise.resolve();
     }
-    if ("unmeasured" in outcome) unmeasuredTrial(k, h, t, action, outcome.unmeasured);
+    if ("unmeasured" in outcome)
+      unmeasuredTrial(k, h, t, action, outcome.unmeasured, outcome.infra);
     else {
-      appendRow(k, h.state.id, {
-        kind: "graded",
-        replay: t.replay,
-        n: t.n,
-        passed: outcome.passed,
-        tokens: tokensOf(h.state.roleRuns.get(action)),
-      });
+      gradeTrialRow(k, h, t, action, outcome.passed);
       dropCheckout(k, h.state.id, checkout);
     }
     return Promise.resolve();
   });
 
-const gradeOutcome = (verdict: GateVerdict, what: string): GradeOutcome =>
+const gradeOutcome = (verdict: GateVerdict, what: string, infra: ReplayInfraKind): GradeOutcome =>
   verdict === "infra_error"
-    ? { unmeasured: `its ${what} reported infra_error` }
+    ? { unmeasured: `its ${what} reported infra_error`, infra }
     : { passed: verdict === "pass" };
 
 /**
@@ -1001,9 +1058,11 @@ export const startVerdictGrade = (
     let outcome: GradeOutcome;
     try {
       if (lookback?.gradeVerdict === undefined) throw new Error("no verdict grader is wired");
+      // a verdict grade's infra_error: the replayed dispatch has no recorded outcome any more
       outcome = gradeOutcome(
         await lookback.gradeVerdict(t.trial, result, h.state),
         "verdict grade",
+        "no_outcome",
       );
     } catch (error) {
       outcome = {
@@ -1087,7 +1146,7 @@ export const armPluginNotLoaded = (
     data: { kind: "gate_infra", detail: detail.slice(0, 2000) },
   });
   k.emit(h, replaySkipped("plugin_locked", detail));
-  unmeasuredTrial(k, h, t, action, `gate_infra: ${why}`);
+  unmeasuredTrial(k, h, t, action, `gate_infra: ${why}`, "plugin_locked");
 };
 
 /**
@@ -1122,6 +1181,7 @@ export const replaySteps = (k: Kernel, h: RunHandle): ReplayStep[] => {
             pack: trial.pack,
             base: trial.base,
             ...(trial.protectedPaths === undefined ? {} : { protectedPaths: trial.protectedPaths }),
+            ...(trial.tier === undefined ? {} : { tier: trial.tier }),
           },
         },
       ];
@@ -1202,6 +1262,9 @@ export const stepReplays = (k: Kernel, h: RunHandle): "done" | "busy" => {
       deferReplays(k, h, wait);
       return "done";
     }
+    // the ledger keeps every grade before the result is assembled from it
+    if (replay.trials.some((_t, n) => k.isRunning(recordJob(run, { replay: index, n }))))
+      return "busy";
     const job = `replay-finish:${run}:${String(index)}`;
     if (!k.isRunning(job))
       k.spawn(h, job, async () => {

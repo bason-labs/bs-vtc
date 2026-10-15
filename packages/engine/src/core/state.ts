@@ -16,11 +16,13 @@ import {
   type HostId,
   type IntentContract,
   type MergeLevel,
+  type ModelTier,
   type RoleExit,
   type Run,
   type SessionRef,
   type Task,
   type TaskStatus,
+  type TierReason,
   type TokenUsage,
   type UsageSnapshot,
   type Verdict,
@@ -79,6 +81,10 @@ export interface RoleRunRecord {
   readonly host: HostId;
   readonly model: string;
   readonly dispatched_at: string;
+  /** The tier the run started on and why (H-9, D-cm); absent on a log written before 5.4.0. */
+  readonly tier?: ModelTier;
+  readonly tier_reason?: TierReason;
+  readonly tier_clamped?: boolean;
   readonly dispatch: "subagent" | "headless";
   readonly agent: string;
   readonly pack: string;
@@ -382,6 +388,13 @@ export const applyEvent = (state: RunState, event: VtcEvent): void => {
       host: event.host ?? (HOST_IDS[0] as HostId),
       model: event.model ?? "unknown",
       dispatched_at: event.ts,
+      ...(data.tier === undefined || data.tier_reason === undefined
+        ? {}
+        : {
+            tier: data.tier,
+            tier_reason: data.tier_reason,
+            ...(data.tier_clamped === undefined ? {} : { tier_clamped: data.tier_clamped }),
+          }),
       dispatch: data.dispatch,
       agent: data.agent,
       pack: data.pack,
