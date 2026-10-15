@@ -333,6 +333,13 @@ export type RoutingLookback = (input: {
   readonly history: readonly VtcEvent[];
   readonly graderBundleSha: string;
   readonly now: Date;
+  /**
+   * The locked prompt section of each dispatch's version, with which Lookback trusts the rows of
+   * `attributions.jsonl` (a failed dispatch counts against its tier's `tokens_per_success`).
+   */
+  readonly lockedShaFor: LockedShaFor;
+  /** The VTC home whose recorded AI tiebreaks let an `ai_tiebreak` attribution count. */
+  readonly vtcHome: string;
 }) => Promise<readonly RoutingProposalCell[]>;
 
 /**
@@ -464,6 +471,8 @@ export const wireLookback = (
         history: history(),
         graderBundleSha: bundleSha(),
         now: now(),
+        lockedShaFor,
+        vtcHome: deps.vtcHome,
       });
       const at = now().toISOString();
       if (cells.length > 0)
@@ -742,10 +751,10 @@ export const runDaemon: RunDaemon = async (deps: EngineDeps, options) => {
             automation.improvements(signals.map((s) => newAgentFact(run, s, now().toISOString())));
           },
         },
-        // D-cn (reading 219) merge followup: the 6th argument, `routing: { propose: <Lookback's
-        // routing scorecard writer and proposals>, found: (run, facts) =>
-        // automation.improvements(facts) }`, is wired once lookback-research's writer lands;
-        // until then RETRO writes no routing scorecard
+        // D-cn (reading 219) merge followup: the 6th argument, `routing: { propose:
+        // lookbackRoutingStep, found: (run, facts) => automation.improvements(facts) }`, is wired
+        // once lookback-research's step (lookback/routing-step.ts) lands; its input takes this
+        // seam's as is. Until then RETRO writes no routing scorecard
       ),
     );
     // AD-25: shutting down kills the engine-launched runs and stops the Level-3 waits, so close
