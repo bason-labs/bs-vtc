@@ -156,6 +156,8 @@ describe("planning a RETRO's replays (D-cg, D-ch)", () => {
     const second = plan(["r1:T-3", "r1:T-4"], true);
     const planned = planRetroReplays({
       ...open,
+      // at most half the weekly window left: the base cap (D-cq)
+      weeklyRemainingPct: LOOKBACK_LIMITS.boostAboveWeeklyPct,
       pending: [pending("p-1", first), pending("p-2", second)],
       graded: () => new Set(),
     });
@@ -169,11 +171,68 @@ describe("planning a RETRO's replays (D-cg, D-ch)", () => {
     expect(validateEventData("automation.skipped", planned.skipped[0]?.data ?? {}).ok).toBe(true);
   });
 
+  it("launches up to the boosted cap while more than half the weekly window is left (D-cq)", () => {
+    expect(LOOKBACK_LIMITS.maxTrialsPerRetroBoosted).toBe(36);
+    // three replays of 18 trials: two fit under 36
+    const replays = [1, 2, 3].map((i) =>
+      pending(`p-${String(i)}`, plan([`r1:T-${String(2 * i - 1)}`, `r1:T-${String(2 * i)}`], true)),
+    );
+    const boosted = planRetroReplays({
+      weeklyRemainingPct: LOOKBACK_LIMITS.boostAboveWeeklyPct + 1,
+      budgetAvailable: true,
+      pending: replays,
+      graded: () => new Set(),
+    });
+    expect(boosted.launch.map((r) => [r.proposal, r.trials.length, r.remaining])).toEqual([
+      ["p-1", 18, 0],
+      ["p-2", 18, 0],
+    ]);
+    expect(boosted.skipped[0]?.data.detail).toContain("at most 36");
+    const base = planRetroReplays({
+      weeklyRemainingPct: LOOKBACK_LIMITS.boostAboveWeeklyPct,
+      budgetAvailable: true,
+      pending: replays,
+      graded: () => new Set(),
+    });
+    expect(base.launch.map((r) => [r.proposal, r.trials.length])).toEqual([
+      ["p-1", 18],
+      ["p-2", 6],
+    ]);
+  });
+
+  it("takes the trial caps from the user's lookback config (D-cq)", () => {
+    const replays = [pending("p-1", plan(["r1:T-1", "r1:T-2"], true))];
+    const user = { lookback: { max_trials_per_retro: 6, max_trials_per_retro_boosted: 9 } };
+    for (const [weeklyRemainingPct, trials] of [
+      [40, 6],
+      [80, 9],
+    ] as const) {
+      const planned = planRetroReplays({
+        weeklyRemainingPct,
+        budgetAvailable: true,
+        user,
+        pending: replays,
+        graded: () => new Set(),
+      });
+      expect(planned.launch[0]?.trials.length).toBe(trials);
+    }
+    // a lower boost threshold boosts sooner
+    const sooner = planRetroReplays({
+      weeklyRemainingPct: 40,
+      budgetAvailable: true,
+      user: { lookback: { ...user.lookback, boost_above_weekly_pct: 30 } },
+      pending: replays,
+      graded: () => new Set(),
+    });
+    expect(sooner.launch[0]?.trials.length).toBe(9);
+  });
+
   it("fills the cap oldest replay first, whatever order the caller passes", () => {
     const older = plan(["r1:T-1", "r1:T-2"], true);
     const newer = plan(["r1:T-3", "r1:T-4"], true);
     const planned = planRetroReplays({
       ...open,
+      weeklyRemainingPct: 40,
       pending: [
         pending("p-new", newer, "engineer", true, HOST, "2026-10-09T09:00:00.000Z"),
         pending("p-old", older, "engineer", true, HOST, "2026-10-02T09:00:00.000Z"),
@@ -190,7 +249,7 @@ describe("planning a RETRO's replays (D-cg, D-ch)", () => {
     // pairs of 2 (no A/A arm): a cap of 5 launches two whole pairs
     const planned = planRetroReplays({
       ...open,
-      cap: 5,
+      user: { lookback: { max_trials_per_retro: 5, max_trials_per_retro_boosted: 5 } },
       pending: [pending("p-1", plan(["r1:T-1", "r1:T-2"], false))],
       graded: () => new Set(),
     });

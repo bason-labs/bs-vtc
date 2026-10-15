@@ -9,8 +9,9 @@
  * {@link renderLookbackInput} writes, and {@link checkProposal} runs when it submits.
  * Replays (AD-21 rule 6, spine §5 readings 176, 201 and 202): engine-core's runner plans the
  * `lookback_replay` trials of each proposal ({@link replayTasks} with the role's grader,
- * {@link planReplayTrials}), launches what {@link planRetroReplays} allows this RETRO (a grader
- * that can score the role, the weekly window, the budget and `maxTrialsPerRetro`, each limit an
+ * {@link planReplayTrials}; the sample and the trial cap at the replay pace, `lookbackPaceFor`,
+ * D-cq), launches what {@link planRetroReplays} allows this RETRO (a grader that can score the
+ * role, the weekly window, the budget and the pace's trial cap, each limit an
  * `automation.skipped` draft), grades each trial with {@link gradeTrial} (the gates) or
  * {@link gradeVerdictReplay} (a verdict role against the expectation its task key carries,
  * {@link expectedOfTaskKey}; `infra_error` when the replayed dispatch has no recorded outcome), keeps
@@ -109,7 +110,6 @@ export {
   recordAaFlipRate,
   replayDispatchPlan,
   replayIsolation,
-  REPLAY_MAX_TASKS,
   replayPath,
   expectedOfTaskKey,
   replayTaskKey,
@@ -171,7 +171,19 @@ export {
   type CompiledTexts,
   type LookbackRetroDeps,
 } from "./retro.js";
-export { computeScorecards, writeScorecards } from "./scorecards.js";
+export {
+  computeRoutingScorecard,
+  routedStartTier,
+  routingProposals,
+  routingReplayTasks,
+  writeRoutingScorecard,
+  type RoutingCell,
+  type RoutingChange,
+  type RoutingConfigFact,
+  type RoutingProposals,
+  type RoutingTierReplay,
+} from "./routing.js";
+export { computeScorecards, writeScorecards, type TimeWindow } from "./scorecards.js";
 export {
   appendTiebreakRecord,
   readTiebreakKeys,

@@ -1,6 +1,6 @@
 /**
  * The replay trial ledger (D-cg; spine §5 reading 201; AD-21 rules 6 and 8). One RETRO launches at
- * most `LOOKBACK_LIMITS.maxTrialsPerRetro` trials (`planRetroReplays`), and a replay of k = 3
+ * most the replay pace's trial cap (`lookbackPaceFor`, D-cq; `planRetroReplays`), and a replay of k = 3
  * trials per task and arm needs more than that to reach the sign test's level, so the graded trials
  * of a replay are kept across RETROs here, and the next RETRO runs only the ones still missing.
  *

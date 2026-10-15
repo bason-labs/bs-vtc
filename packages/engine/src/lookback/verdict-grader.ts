@@ -8,7 +8,9 @@
  * {@link recordedOutcome} reads it, strongest evidence first:
  * 1. `human_label`: a later escalation on the task (or its feature) answered with
  *    `who_should_have_caught` naming the role. The human's label is the gold standard (spec §13):
- *    the role missed something, so the verdict should have been `fail`.
+ *    the role missed something, so the verdict should have been `fail`. A label whose escalation
+ *    names criteria (a `spec_ref` evidence ref holding an AC or requirement id; a requirement names
+ *    each of its criteria) speaks to those criteria only; one that names none speaks to the task.
  * 2. `escaped_defect`: a later `lookback.escaped_defect` naming the task (or, naming no task, its
  *    feature): the work was wrong, so `fail`.
  * 3. `pr`: the human's verdict on the feature's PR after the dispatch: reverted (`feature.reverted`)
@@ -21,13 +23,13 @@
  * architecture before any task exists, so they carry no verdict on a task's criterion; a human's
  * judgement of one reaches the log as an escalation label or the PR verdict above.
  *
- * **Granularity.** A replay task is one acceptance criterion (the dispatch's subject), but every
- * source above except the gate result speaks to the whole task or feature: a human label, an
- * escaped defect and the PR verdict give every criterion every Spec Verifier call judged on that
- * task (or feature) the same expected verdict. One wrongly passed criterion therefore makes `fail`
- * the expected answer for its sibling criteria too, which favours a candidate that fails more
- * often. Reading 202 allows this granularity (the log records no per-criterion human verdict); the
- * bias is known, and a per-criterion source would need a contract that names the criterion.
+ * **Granularity** (spine §5 reading 212(4), amending reading 202). A replay task is one acceptance
+ * criterion (the dispatch's subject). Evidence that names the criterion wins: a human label naming
+ * it decides it. Task-level evidence (a label naming no criterion, an escaped defect, the PR
+ * verdict, the gate result) applies only to a criterion no label names; a label naming other
+ * criteria of the task says nothing about this one. A task-level label still gives every criterion
+ * of the task the same `fail`, which favours a candidate that fails more often; naming the
+ * criterion in the escalation's evidence avoids it.
  *
  * Only the last call of the role on a (task, subject) is graded: an earlier call was followed by
  * another round on new work, so what happened next speaks to that round, not to the earlier
@@ -50,8 +52,9 @@ import {
 /**
  * Bump when what {@link recordedOutcome} reads or how a trial is scored changes. 2: a trial is
  * scored against the expectation its task key carries (`replayTaskKey`), not the outcome at grading.
+ * 3: a human label naming criteria decides those criteria only (reading 212(4)).
  */
-export const VERDICT_GRADER_VERSION = 2;
+export const VERDICT_GRADER_VERSION = 3;
 
 export type RecordedOutcomeSource = "human_label" | "escaped_defect" | "pr" | "gate";
 
@@ -86,33 +89,52 @@ const featureOfTask = (events: readonly VtcEvent[], task: string): string | unde
   return undefined;
 };
 
-/** The human label after `seq` that blames `role` for the task or its feature, if any. */
+/** AC or requirement ids in an evidence ref (`spec.md#REQ-3.AC-2`, `REQ-3`). */
+const CRITERION_ID = /(?<![A-Za-z0-9])(?:REQ|SEC)-[1-9]\d*(?:\.AC-[1-9]\d*)?(?![0-9])/g;
+
+/** Whether criterion id `named` names `subject` (a requirement names each of its criteria). */
+const names = (named: string, subject: string): boolean =>
+  named === subject || subject.startsWith(`${named}.`);
+
+/**
+ * The human labels after `seq` that blame `role` for the task or its feature: `criterion` when
+ * one names `subject`, `task` when none does but one names no criterion at all, else `undefined`
+ * (reading 212(4)).
+ */
 const humanLabel = (
   events: readonly VtcEvent[],
   seq: number,
   role: string,
   task: string | undefined,
   feature: string | undefined,
-): boolean => {
-  const scopes = new Map<string, { task?: string; feature?: string }>();
+  subject: string,
+): "criterion" | "task" | undefined => {
+  const scopes = new Map<string, { task?: string; feature?: string; criteria: string[] }>();
+  let found: "task" | undefined;
   for (const event of events) {
     if (isEventOfType(event, "escalation.opened")) {
       const { escalation } = readEventData(event);
       scopes.set(escalation.id, {
         ...(escalation.task === undefined ? {} : { task: escalation.task }),
         ...(escalation.feature === undefined ? {} : { feature: escalation.feature }),
+        criteria: escalation.evidence
+          .filter((e) => e.type === "spec_ref")
+          .flatMap((e) => e.ref.match(CRITERION_ID) ?? []),
       });
     } else if (isEventOfType(event, "escalation.answered") && event.seq > seq) {
       const data = readEventData(event);
       if (data.answer.who_should_have_caught !== role) continue;
       const scope = scopes.get(data.escalation);
       if (scope === undefined) continue;
-      if (task !== undefined && scope.task === task) return true;
-      if (scope.task === undefined && feature !== undefined && scope.feature === feature)
-        return true;
+      const inScope =
+        (task !== undefined && scope.task === task) ||
+        (scope.task === undefined && feature !== undefined && scope.feature === feature);
+      if (!inScope) continue;
+      if (scope.criteria.some((c) => names(c, subject))) return "criterion";
+      if (scope.criteria.length === 0) found = "task";
     }
   }
-  return false;
+  return found;
 };
 
 const escapedDefect = (
@@ -215,7 +237,8 @@ export const recordedOutcome = (
     expected,
     source,
   });
-  if (humanLabel(events, submitted.seq, role, task, feature)) return outcome("fail", "human_label");
+  if (humanLabel(events, submitted.seq, role, task, feature, subject) !== undefined)
+    return outcome("fail", "human_label");
   if (escapedDefect(events, submitted.seq, task, feature)) return outcome("fail", "escaped_defect");
   const pr = prVerdict(events, submitted.seq, feature);
   if (pr !== undefined) return outcome(pr, "pr");

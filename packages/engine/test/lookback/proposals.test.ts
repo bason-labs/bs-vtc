@@ -340,6 +340,7 @@ describe("a proposal aimed at tokens (D-bv cost regression)", () => {
   const regression = (traces: string[], current = base): CostRegression => ({
     role: "engineer",
     host: HOST,
+    baseline_kind: "previous_version",
     baseline: { ...base, effective_sha256: "e".repeat(64) },
     current,
     metric: "tokens_per_success",

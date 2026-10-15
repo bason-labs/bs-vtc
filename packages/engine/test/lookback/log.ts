@@ -57,7 +57,12 @@ export class RunLog {
     return parsed;
   }
 
-  taskCreated(task: string, discipline = "backend", stackPacks: string[] = []): void {
+  taskCreated(
+    task: string,
+    discipline = "backend",
+    stackPacks: string[] = [],
+    shape: { size?: "S" | "M" | "L"; risk?: "low" | "med" | "high"; riskTags?: string[] } = {},
+  ): void {
     this.add({
       type: "task.created",
       task,
@@ -73,16 +78,16 @@ export class RunLog {
           discipline,
           stack_packs: stackPacks,
           consumes_contracts: [],
-          risk: "med",
+          risk: shape.risk ?? "med",
           cap: 4,
-          size: "M",
+          size: shape.size ?? "M",
           arch_triage: "fits",
           budget_usd: 5,
           spent_usd: 0,
           status: "draft",
           round: 0,
           deferred: [],
-          risk_tags: [],
+          risk_tags: shape.riskTags ?? [],
         },
         intent: {
           statement: "Do the thing.",
@@ -111,7 +116,13 @@ export class RunLog {
       /** The verdicts its `role.submitted` records. */
       verdicts?: { subject: string; verdict: string }[];
       feature?: string;
-      cost?: number;
+      /** `null`: the host reported no cost. */
+      cost?: number | null;
+      /** The routed tier and why (`role.dispatched.tier`, `tier_reason`; 5.4.0). */
+      tier?: "low" | "mid" | "top";
+      tierReason?: "role" | "rule" | "planner_hint" | "escalation" | "budget_drop";
+      /** A Lookback replay trial (`purpose: lookback_replay`). */
+      replay?: { proposal: string; task: string; arm: "a" | "b" | "aa"; trial: number };
     } = {},
   ): string {
     this.actions += 1;
@@ -138,6 +149,12 @@ export class RunLog {
         ...(options.subject === undefined ? {} : { subject: options.subject }),
         ...(options.versioned === false ? {} : { editable_sha256: prompt.editable }),
         ...(options.arm === undefined ? {} : { canary_arm: options.arm }),
+        ...(options.tier === undefined
+          ? {}
+          : { tier: options.tier, tier_reason: options.tierReason ?? "rule" }),
+        ...(options.replay === undefined
+          ? {}
+          : { purpose: "lookback_replay", replay: options.replay }),
       },
     });
     const end = options.end ?? "built";
@@ -148,7 +165,7 @@ export class RunLog {
         actor: "role",
         ...envelope,
         tokens: tokens === null ? null : { in: tokens - 100, out: 100, cache_r: 0, cache_w: 0 },
-        cost_usd: options.cost ?? 0.1,
+        cost_usd: options.cost === undefined ? 0.1 : options.cost,
         data: {
           action_id: action,
           exit: end,
@@ -256,7 +273,12 @@ export class RunLog {
    * Opens an escalation on the task (or, with `null`, a run-scoped one in the `specify` phase)
    * and, when `who` is given, answers it.
    */
-  escalate(task: string | null, who?: string, reason = "cap"): void {
+  escalate(
+    task: string | null,
+    who?: string,
+    reason = "cap",
+    evidence: { type: string; ref: string }[] = [{ type: "file_line", ref: "src/a.ts:1" }],
+  ): void {
     this.escalations += 1;
     const id = `E-${String(this.escalations)}`;
     const scope = task === null ? {} : { task };
@@ -275,7 +297,7 @@ export class RunLog {
             { id: "drop", label: "Drop it", effect: "drop" },
           ],
           recommended: "hint",
-          evidence: [{ type: "file_line", ref: "src/a.ts:1" }],
+          evidence,
           blocks: task === null ? [] : [task],
           created_at: "2026-10-14T10:00:00.000Z",
         },

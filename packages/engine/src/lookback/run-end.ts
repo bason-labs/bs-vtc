@@ -11,8 +11,12 @@
  *    `costRegressions`; once per version, aimed at tokens); `minWeeklyRemainingPct` of the weekly
  *    window left and budget available;
  * 4. returns what engine core hands the upstream module (spine §5 readings 190 and 198): the cost
- *    regressions, and, when the installed roles are given, the new-agent signals
- *    (`newAgentSignals`, D-cd).
+ *    regressions (against the version before and the version's own earlier window, D-cr), and,
+ *    when the installed roles are given, the new-agent signals (`newAgentSignals`, D-cd);
+ * 5. recomputes the routing scorecard (D-cn, `computeRoutingScorecard`), writes it at
+ *    `LOOKBACK_REPO.routingScorecard` when it has a cell, and returns the routing proposals it backs
+ *    (`routingProposals`, scorecard evidence only: tier replays need the RETRO's trial budget, so
+ *    engine core calls `routingProposals` again there with what is left of it).
  * It returns the `lookback.dispatched` drafts and what each lookback dispatch reads: train traces
  * only, plus the human edits of the version under review (§13 step 1, {@link humanEdits}) with
  * their diffs when the caller injects a reader. Engine core queues the dispatches like any role
@@ -23,11 +27,14 @@
  * events do not show is ignored (`trustedAttributions`).
  */
 import {
+  DEFAULT_ROUTING_TABLE,
   engineRepoKey,
   isEventOfType,
   LOOKBACK_LIMITS,
   readEventData,
   type Attribution,
+  type RoutingScorecard,
+  type RoutingTable,
   type Scorecard,
   type VtcEvent,
 } from "@vtc/shared";
@@ -42,6 +49,12 @@ import { lookbackEvent, type LookbackEventDraft } from "./events.js";
 import { costRegressions, type CostRegression } from "./cost-regression.js";
 import { capDiff, humanEdits, LOOKBACK_MAX_HUMAN_EDITS, type HumanEdit } from "./human-edits.js";
 import { newAgentSignals, type InstalledRole, type NewAgentSignal } from "./new-agent.js";
+import {
+  computeRoutingScorecard,
+  routingProposals,
+  writeRoutingScorecard,
+  type RoutingProposals,
+} from "./routing.js";
 import { computeScorecards, writeScorecards } from "./scorecards.js";
 import { readTiebreakKeys } from "./tiebreaks.js";
 import { sameTarget, targetKey, traceRef, traceSlug, type LockedShaFor } from "./traces.js";
@@ -251,6 +264,10 @@ export interface RunEndResult {
   readonly costRegressions: CostRegression[];
   /** Missing specialists (D-cd), when the installed roles were given; else empty. */
   readonly newAgents: NewAgentSignal[];
+  /** The routing scorecard of the history (D-cn); written only when it has a cell. */
+  readonly routingScorecard: RoutingScorecard;
+  /** The routing-table changes it backs, with their `config` facts (scorecard evidence only). */
+  readonly routing: RoutingProposals;
 }
 
 export const lookbackAtRunEnd = async (input: {
@@ -279,6 +296,8 @@ export const lookbackAtRunEnd = async (input: {
   readonly vtcHome?: string;
   /** The roles this vtc carries (the plugin catalog); absent: no new-agent signals. */
   readonly roles?: readonly InstalledRole[];
+  /** The routing table the run routed with; default `DEFAULT_ROUTING_TABLE`. */
+  readonly routingTable?: RoutingTable;
 }): Promise<RunEndResult> => {
   const tiebreaks =
     input.tiebreaks ??
@@ -315,11 +334,22 @@ export const lookbackAtRunEnd = async (input: {
     const newest = latest.get(targetKey(a.prompt));
     return newest === undefined || newest === a.prompt.effective_sha256;
   });
+  const routingTable = input.routingTable ?? DEFAULT_ROUTING_TABLE;
+  const routingScorecard = computeRoutingScorecard({
+    history: input.history,
+    attributions: all,
+    graderBundleSha: input.graderBundleSha,
+    now: input.now,
+    table: routingTable,
+  });
+  if (routingScorecard.cells.length > 0)
+    await writeRoutingScorecard(input.projectRoot, routingScorecard);
   const edits = humanEdits(input.history, input.lockedShaFor);
   const regressions = costRegressions({
     scorecards,
     history: input.history,
     lockedShaFor: input.lockedShaFor,
+    attributions: all,
   });
   const chosen = lookbackTargets({
     attributions: current,
@@ -355,5 +385,7 @@ export const lookbackAtRunEnd = async (input: {
       input.roles === undefined
         ? []
         : newAgentSignals({ attributions: all, history: input.history, roles: input.roles }),
+    routingScorecard,
+    routing: routingProposals(routingScorecard, routingTable),
   };
 };

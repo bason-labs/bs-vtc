@@ -1,0 +1,499 @@
+/**
+ * Lookback tunes routing (D-cn; spine §5 reading 219): the routing scorecard from the
+ * `role.dispatched` tier records (`RoutingScorecard`), the routing-table proposals it backs and the
+ * `config` facts engine core hands the upstream module.
+ */
+import {
+  DEFAULT_ROUTING_TABLE,
+  LOOKBACK_LIMITS,
+  LOOKBACK_REPO,
+  RoutingScorecardSchema,
+  RoutingTableSchema,
+  routingConfigSubject,
+  type ModelTier,
+  type RoutingScorecard,
+} from "@vtc/shared";
+import { readFile } from "node:fs/promises";
+import { join } from "node:path";
+import { describe, expect, it } from "vitest";
+import {
+  computeRoutingScorecard,
+  lookbackAtRunEnd,
+  routedStartTier,
+  routingProposals,
+  routingReplayTasks,
+  traceSplit,
+  writeRoutingScorecard,
+  type RoutingCell,
+} from "../../src/lookback/index.js";
+import { HOST, lockedShaFor, RunLog, tempDir } from "./log.js";
+
+const BUNDLE = "9".repeat(64);
+const now = new Date("2026-10-15T09:00:00.000Z");
+
+/** A task of `size` (default S, no risk tag) and its Engineer dispatches. */
+const routedTask = (
+  log: RunLog,
+  task: string,
+  options: {
+    size?: "S" | "M" | "L";
+    risk?: "low" | "med" | "high";
+    riskTags?: string[];
+    tier?: ModelTier;
+    reason?: "rule" | "planner_hint" | "role";
+    pass?: boolean;
+    escalate?: boolean;
+    role?: string;
+    mode?: string;
+    cost?: number | null;
+    action?: string;
+  } = {},
+): void => {
+  log.taskCreated(task, "backend", [], {
+    size: options.size ?? "S",
+    risk: options.risk ?? "low",
+    riskTags: options.riskTags ?? [],
+  });
+  const role = options.role ?? "engineer";
+  log.dispatch(role, {
+    task,
+    tier: options.tier ?? "low",
+    tierReason: options.reason ?? "rule",
+    ...(options.mode === undefined ? {} : { mode: options.mode }),
+    ...(options.cost === undefined ? {} : { cost: options.cost }),
+    ...(options.action === undefined ? {} : { action: options.action }),
+  });
+  log.gate(task, options.pass ?? true);
+  if (options.escalate === true) {
+    log.dispatch(role, {
+      task,
+      tier: "mid",
+      tierReason: "escalation",
+      ...(options.mode === undefined ? {} : { mode: options.mode }),
+    });
+    log.gate(task, true);
+  }
+};
+
+const scorecardOf = (log: RunLog): RoutingScorecard =>
+  computeRoutingScorecard({ history: log.events, graderBundleSha: BUNDLE, now });
+
+describe("the routing scorecard (D-cn)", () => {
+  it("scores each task's first dispatch cell from its tier record, with the scorecard metrics", () => {
+    const log = new RunLog();
+    for (let i = 1; i <= 12; i += 1) routedTask(log, `T-${String(i)}`, { cost: 0.2 });
+    const card = scorecardOf(log);
+    expect(RoutingScorecardSchema.safeParse(card).success).toBe(true);
+    expect(card.grader_bundle_sha).toBe(BUNDLE);
+    expect(card.cells).toHaveLength(1);
+    const [cell] = card.cells;
+    expect(cell).toMatchObject({
+      role: "engineer",
+      host: HOST,
+      size: "S",
+      risk: "none",
+      start_tier: "low",
+      start_reason: "rule",
+      tasks: 12,
+      escalated: { value: 0, n: 12 },
+      cost_per_task_usd: { value: 0.2, n: 12 },
+    });
+    expect(cell?.metrics.first_round_gate_pass).toMatchObject({ value: 1, n: 12 });
+    expect(cell?.metrics.tokens_per_success).toMatchObject({ value: 1000, n: 12 });
+  });
+
+  it("counts a task whose role escalated a tier, and its later rounds, in the cell it started in", () => {
+    const log = new RunLog();
+    for (let i = 1; i <= 12; i += 1)
+      routedTask(log, `T-${String(i)}`, { pass: i > 6, escalate: i <= 6 });
+    const card = scorecardOf(log);
+    expect(card.cells.map((c) => [c.start_tier, c.start_reason, c.tasks])).toEqual([
+      ["low", "rule", 12],
+    ]);
+    const [cell] = card.cells;
+    expect(cell?.escalated.value).toBe(0.5);
+    expect(cell?.escalated.ci_low).toBeGreaterThan(0);
+    expect(cell?.escalated.ci_high).toBeLessThan(1);
+    expect(cell?.metrics.first_round_gate_pass?.value).toBe(0.5);
+    // 6 tasks of two dispatches and 6 of one at 0.1 each
+    expect(cell?.cost_per_task_usd.value).toBeCloseTo((6 * 0.2 + 6 * 0.1) / 12);
+  });
+
+  it("classes risk with taskRiskClass and keeps modes, hosts and start reasons apart", () => {
+    const log = new RunLog();
+    routedTask(log, "T-1", { riskTags: ["ui"], tier: "mid" });
+    routedTask(log, "T-2", { riskTags: ["auth"], tier: "top" });
+    routedTask(log, "T-3", { risk: "high", tier: "top" });
+    routedTask(log, "T-4", { size: "M", tier: "low", reason: "planner_hint" });
+    routedTask(log, "T-5", { role: "qa", mode: "author", tier: "mid" });
+    routedTask(log, "T-6", { role: "qa", mode: "judge", tier: "low" });
+    const cells = scorecardOf(log).cells.map((c) => [
+      c.role,
+      c.mode ?? "",
+      c.size,
+      c.risk,
+      c.start_tier,
+      c.start_reason,
+    ]);
+    expect(cells).toEqual([
+      ["engineer", "", "S", "tagged", "mid", "rule"],
+      ["engineer", "", "S", "high", "top", "rule"],
+      ["engineer", "", "M", "none", "low", "planner_hint"],
+      ["qa", "author", "S", "none", "mid", "rule"],
+      ["qa", "judge", "S", "none", "low", "rule"],
+    ]);
+    expect(scorecardOf(log).cells[1]?.tasks).toBe(2);
+  });
+
+  it("shows insufficient data below the minimum n, and no cost when a dispatch was unpriced", () => {
+    const log = new RunLog();
+    for (let i = 1; i <= 12; i += 1)
+      routedTask(log, `T-${String(i)}`, { cost: i <= 3 ? null : 0.1 });
+    const [cell] = scorecardOf(log).cells;
+    expect(cell?.cost_per_task_usd).toEqual({ value: null, ci_low: null, ci_high: null, n: 9 });
+    const small = new RunLog();
+    for (let i = 1; i <= 3; i += 1) routedTask(small, `T-${String(i)}`);
+    const [few] = scorecardOf(small).cells;
+    expect(few?.escalated).toEqual({ value: null, ci_low: null, ci_high: null, n: 3 });
+    expect(few?.metrics.first_round_gate_pass?.value).toBeNull();
+  });
+
+  it("skips logs written before 5.4.0 (no tier) and leaves replay trials out (reading 177)", () => {
+    const log = new RunLog();
+    log.taskCreated("T-1", "backend", [], { size: "S", risk: "low" });
+    log.dispatch("engineer", { task: "T-1" });
+    log.gate("T-1", true);
+    log.taskCreated("T-2", "backend", [], { size: "S", risk: "low" });
+    log.dispatch("engineer", {
+      task: "T-2",
+      tier: "top",
+      tierReason: "rule",
+      replay: { proposal: "p-1", task: "r0:T-2", arm: "a", trial: 1 },
+    });
+    log.dispatch("engineer", { task: "T-2", tier: "low", tierReason: "rule" });
+    log.gate("T-2", true);
+    const card = scorecardOf(log);
+    expect(card.cells.map((c) => [c.start_tier, c.tasks])).toEqual([["low", 1]]);
+  });
+
+  it("is written at LOOKBACK_REPO.routingScorecard", async () => {
+    const root = await tempDir("routing");
+    const log = new RunLog();
+    routedTask(log, "T-1");
+    const card = scorecardOf(log);
+    expect(await writeRoutingScorecard(root, card)).toBe(LOOKBACK_REPO.routingScorecard);
+    const text = await readFile(join(root, LOOKBACK_REPO.routingScorecard), "utf8");
+    expect(RoutingScorecardSchema.parse(JSON.parse(text))).toEqual(card);
+  });
+});
+
+// ------------------------------------------------------------------ proposals
+
+const metric = (value: number | null, n: number) => ({ value, ci_low: null, ci_high: null, n });
+
+/** A scorecard cell with pass rates, an escalation share and a cost. */
+const cell = (c: {
+  role?: string;
+  mode?: string;
+  size?: "S" | "M" | "L";
+  risk?: "none" | "tagged" | "high";
+  tier: ModelTier;
+  reason?: "rule" | "planner_hint" | "role";
+  tasks?: number;
+  pass?: number;
+  review?: number;
+  escalated?: number;
+  cost?: number;
+}): RoutingCell => {
+  const tasks = c.tasks ?? 12;
+  return {
+    role: c.role ?? "engineer",
+    ...(c.mode === undefined ? {} : { mode: c.mode }),
+    host: HOST,
+    size: c.size ?? "M",
+    risk: c.risk ?? "none",
+    start_tier: c.tier,
+    start_reason: c.reason ?? "rule",
+    tasks,
+    metrics: {
+      first_round_gate_pass: metric(c.pass ?? 1, tasks),
+      ...(c.review === undefined ? {} : { review_pass: metric(c.review, tasks) }),
+    },
+    escalated: metric(c.escalated ?? 0, tasks),
+    cost_per_task_usd: metric(c.cost ?? 0.1, tasks),
+  };
+};
+
+const card = (cells: RoutingCell[]): RoutingScorecard => ({
+  v: 1,
+  grader_bundle_sha: BUNDLE,
+  window: { from: now.toISOString(), to: now.toISOString() },
+  cells,
+  written_at: now.toISOString(),
+});
+
+describe("routing proposals (D-cn)", () => {
+  it("reads the table's start tier, with a role's override and the floors", () => {
+    const table = RoutingTableSchema.parse({
+      ...DEFAULT_ROUTING_TABLE,
+      roles: { spec_verifier: { by_size: { M: "low" }, tagged_floor: "low" } },
+    });
+    expect(routedStartTier(table, "engineer", "S", "none")).toBe("low");
+    expect(routedStartTier(table, "engineer", "S", "tagged")).toBe("mid");
+    expect(routedStartTier(table, "engineer", "S", "high")).toBe("top");
+    expect(routedStartTier(table, "engineer", "L", "tagged")).toBe("top");
+    expect(routedStartTier(table, "spec_verifier", "M", "none")).toBe("low");
+    expect(routedStartTier(table, "spec_verifier", "M", "tagged")).toBe("low");
+  });
+
+  it("proposes a cheaper start when the cheaper tier's pass rates are within the margin", () => {
+    const margin = LOOKBACK_LIMITS.routingQualityMarginPct / 100;
+    const out = routingProposals(
+      card([
+        cell({ tier: "mid", pass: 0.95, review: 0.9 }),
+        cell({ tier: "low", reason: "planner_hint", pass: 0.95 - margin, review: 0.9, cost: 0.03 }),
+      ]),
+      DEFAULT_ROUTING_TABLE,
+    );
+    expect(out.changes.map((c) => [c.subject, c.direction, c.from, c.to, c.scope])).toEqual([
+      [routingConfigSubject("engineer", "M", "none"), "cheaper", "mid", "low", "role"],
+    ]);
+    // one role differs: its own override, the shared cells unchanged
+    expect(out.table).toEqual({
+      ...DEFAULT_ROUTING_TABLE,
+      roles: { engineer: { by_size: { M: "low" } } },
+    });
+    expect(RoutingTableSchema.safeParse(out.table).success).toBe(true);
+    expect(out.facts).toMatchObject([
+      {
+        type: "improvement",
+        kind: "config",
+        subject: "routing.engineer.M.none",
+        role: "engineer",
+        metrics: {
+          "routing.from_tier": 1,
+          "routing.to_tier": 0,
+          "routing.shared": 0,
+          "routing.replay": 0,
+          "routing.tasks.current": 12,
+          "routing.first_round_gate_pass.current": 0.95,
+          "routing.cost_per_task_usd.candidate": 0.03,
+        },
+        at: now.toISOString(),
+      },
+    ]);
+    for (const name of Object.keys(out.facts[0]?.metrics ?? {}))
+      expect(name).toMatch(/^[a-z][a-z0-9_.]{0,63}$/);
+  });
+
+  it("keeps the start tier when the cheaper tier misses the margin or keeps escalating", () => {
+    for (const cheaper of [
+      cell({ tier: "low", reason: "planner_hint", pass: 0.8 }),
+      cell({ tier: "low", reason: "planner_hint", pass: 1, review: 0.7 }),
+      cell({ tier: "low", reason: "planner_hint", pass: 1, escalated: 0.6 }),
+    ]) {
+      const out = routingProposals(
+        card([cell({ tier: "mid", pass: 1, review: 0.95 }), cheaper]),
+        DEFAULT_ROUTING_TABLE,
+      );
+      expect(out.changes).toEqual([]);
+      expect(out.table).toBeNull();
+    }
+  });
+
+  it("proposes a higher start for a start tier that keeps escalating", () => {
+    const share = LOOKBACK_LIMITS.routingEscalationPct / 100;
+    const out = routingProposals(
+      card([cell({ size: "S", tier: "low", escalated: share })]),
+      DEFAULT_ROUTING_TABLE,
+    );
+    expect(out.changes.map((c) => [c.subject, c.direction, c.from, c.to])).toEqual([
+      ["routing.engineer.S.none", "higher", "low", "mid"],
+    ]);
+    expect(out.table?.roles).toEqual({ engineer: { by_size: { S: "mid" } } });
+    const below = routingProposals(
+      card([cell({ size: "S", tier: "low", escalated: share - 0.01 })]),
+      DEFAULT_ROUTING_TABLE,
+    );
+    expect(below.changes).toEqual([]);
+  });
+
+  it("reads no cell below routingMinTasks tasks", () => {
+    const few = LOOKBACK_LIMITS.routingMinTasks - 1;
+    const out = routingProposals(
+      card([cell({ size: "S", tier: "low", escalated: 0.9, tasks: few })]),
+      DEFAULT_ROUTING_TABLE,
+    );
+    expect(out).toEqual({ table: null, changes: [], facts: [], dropped: [] });
+  });
+
+  it("changes the shared cell when two roles show the same change and none objects", () => {
+    const out = routingProposals(
+      card([
+        cell({ size: "S", tier: "low", escalated: 0.7 }),
+        cell({ role: "spec_verifier", size: "S", tier: "low", escalated: 0.8 }),
+      ]),
+      DEFAULT_ROUTING_TABLE,
+    );
+    expect(out.changes.map((c) => [c.role, c.scope, c.to])).toEqual([
+      ["engineer", "shared", "mid"],
+      ["spec_verifier", "shared", "mid"],
+    ]);
+    expect(out.table).toEqual({
+      ...DEFAULT_ROUTING_TABLE,
+      by_size: { S: "mid", M: "mid", L: "top" },
+    });
+    expect(out.facts.map((f) => f.subject)).toEqual([
+      "routing.engineer.S.none",
+      "routing.spec_verifier.S.none",
+    ]);
+    // a third role whose S cell is fine keeps the change per role
+    const objected = routingProposals(
+      card([
+        cell({ size: "S", tier: "low", escalated: 0.7 }),
+        cell({ role: "spec_verifier", size: "S", tier: "low", escalated: 0.8 }),
+        cell({ role: "security", size: "S", tier: "low", escalated: 0 }),
+      ]),
+      DEFAULT_ROUTING_TABLE,
+    );
+    expect(objected.changes.map((c) => c.scope)).toEqual(["role", "role"]);
+    expect(objected.table?.by_size).toEqual(DEFAULT_ROUTING_TABLE.by_size);
+    expect(objected.table?.roles).toEqual({
+      engineer: { by_size: { S: "mid" } },
+      spec_verifier: { by_size: { S: "mid" } },
+    });
+  });
+
+  it("never proposes QA author below its floor", () => {
+    const out = routingProposals(
+      card([
+        cell({ role: "qa", mode: "author", size: "M", tier: "mid", pass: 1 }),
+        cell({
+          role: "qa",
+          mode: "author",
+          size: "M",
+          tier: "low",
+          reason: "planner_hint",
+          pass: 1,
+        }),
+      ]),
+      DEFAULT_ROUTING_TABLE,
+    );
+    expect(out.changes).toEqual([]);
+  });
+
+  it("drops a change the table cannot make without moving another cell", () => {
+    // high_floor is shared by every size: S high on mid would also start M high on mid
+    const out = routingProposals(
+      card([
+        cell({ size: "S", risk: "high", tier: "top", pass: 1 }),
+        cell({ size: "S", risk: "high", tier: "mid", reason: "planner_hint", pass: 1 }),
+      ]),
+      DEFAULT_ROUTING_TABLE,
+    );
+    expect(out.changes).toEqual([]);
+    expect(out.table).toBeNull();
+    expect(out.dropped.map((d) => d.subject)).toEqual(["routing.engineer.S.high"]);
+    expect(out.dropped[0]?.reason).toContain("M.high");
+  });
+
+  it("plans a tier replay only while the trial budget allows; else the scorecard is the evidence", () => {
+    const cells = [
+      cell({ tier: "mid", pass: 1 }),
+      cell({ tier: "low", reason: "planner_hint", pass: 1 }),
+    ];
+    // 12 tasks, 6 + 6 sampled, k 3, two arms
+    const trials = 12 * LOOKBACK_LIMITS.replayTrials * 2;
+    const funded = routingProposals(card(cells), DEFAULT_ROUTING_TABLE, { trialBudget: trials });
+    expect(funded.changes[0]?.replay).toEqual({
+      role: "engineer",
+      host: HOST,
+      size: "M",
+      risk: "none",
+      arms: { a: "mid", b: "low" },
+      tasks: 12,
+      trials,
+    });
+    expect(funded.facts[0]?.metrics["routing.replay"]).toBe(1);
+    const short = routingProposals(card(cells), DEFAULT_ROUTING_TABLE, {
+      trialBudget: trials - 1,
+    });
+    expect(short.changes[0]?.replay).toBeNull();
+    const paced = routingProposals(card(cells), DEFAULT_ROUTING_TABLE, {
+      trialBudget: 100,
+      pace: { failureTasks: 2, regressionTasks: 2 },
+    });
+    expect(paced.changes[0]?.replay?.trials).toBe(4 * LOOKBACK_LIMITS.replayTrials * 2);
+  });
+
+  it("selects held-out tasks of the current cell for a tier replay, failures first", () => {
+    const log = new RunLog();
+    let n = 0;
+    for (let i = 1; n < 6 && i < 1000; i += 1) {
+      const action = `act-${String(i)}`;
+      if (traceSplit({ run: "r1", trace: action }) !== "holdout") continue;
+      n += 1;
+      routedTask(log, `T-${String(n)}`, { action, escalate: n <= 2 });
+    }
+    const tasks = routingReplayTasks({
+      history: log.events,
+      cell: { role: "engineer", host: HOST, size: "S", risk: "none", start_tier: "low" },
+      pace: { failureTasks: 1, regressionTasks: 2 },
+    });
+    expect(tasks.map((t) => [t.task, t.regressionSet])).toEqual([
+      ["T-1", false],
+      ["T-3", true],
+      ["T-4", true],
+    ]);
+  });
+});
+
+describe("routing at the run's end (D-cn)", () => {
+  it("writes the routing scorecard and returns the proposals and their config facts", async () => {
+    const root = await tempDir("routing-end");
+    const log = new RunLog();
+    for (let i = 1; i <= 12; i += 1)
+      routedTask(log, `T-${String(i)}`, { pass: i > 7, escalate: i <= 7 });
+    const end = await lookbackAtRunEnd({
+      projectRoot: root,
+      events: log.events,
+      history: log.events,
+      lockedShaFor,
+      graderBundleSha: BUNDLE,
+      weeklyRemainingPct: 80,
+      budgetAvailable: true,
+      now,
+    });
+    expect(end.routingScorecard.cells.map((c) => [c.start_tier, c.tasks])).toEqual([["low", 12]]);
+    const written = JSON.parse(
+      await readFile(join(root, LOOKBACK_REPO.routingScorecard), "utf8"),
+    ) as unknown;
+    expect(RoutingScorecardSchema.parse(written)).toEqual(end.routingScorecard);
+    expect(end.routing.changes.map((c) => [c.subject, c.direction, c.to, c.replay])).toEqual([
+      ["routing.engineer.S.none", "higher", "mid", null],
+    ]);
+    expect(end.routing.facts.map((f) => [f.kind, f.subject])).toEqual([
+      ["config", "routing.engineer.S.none"],
+    ]);
+  });
+
+  it("writes nothing for a history without tier records", async () => {
+    const root = await tempDir("routing-none");
+    const log = new RunLog();
+    log.dispatch("engineer", { task: "T-1" });
+    log.gate("T-1", true);
+    const end = await lookbackAtRunEnd({
+      projectRoot: root,
+      events: log.events,
+      history: log.events,
+      lockedShaFor,
+      graderBundleSha: BUNDLE,
+      weeklyRemainingPct: 80,
+      budgetAvailable: true,
+      now,
+    });
+    expect(end.routingScorecard.cells).toEqual([]);
+    expect(end.routing.table).toBeNull();
+    await expect(readFile(join(root, LOOKBACK_REPO.routingScorecard), "utf8")).rejects.toThrow();
+  });
+});
