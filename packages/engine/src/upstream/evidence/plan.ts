@@ -54,6 +54,11 @@ export interface EvidencePlanInput {
    * charted from the Lookback view too, and a complete set holds that chart.
    */
   readonly routing?: boolean | undefined;
+  /**
+   * With `routing`: no routing scorecard holds the change's cell (role, size, risk), so its chart
+   * is not taken and the set stays partial instead of charting unrelated cells.
+   */
+  readonly routingUnavailable?: boolean | undefined;
 }
 
 /**
@@ -135,7 +140,7 @@ export const planEvidenceShots = (input: EvidencePlanInput): EvidenceShot[] => {
       waitFor: EVIDENCE_READY.replay,
     });
   }
-  if (input.routing === true) {
+  if (input.routing === true && input.routingUnavailable !== true) {
     add({
       kind: "chart",
       path: pagePath(input, "lookback"),

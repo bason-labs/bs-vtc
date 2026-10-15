@@ -8,7 +8,9 @@
  *   never an argument value or a path;
  * - `capability`: the missing capability's slug only; its reason text never leaves the project;
  * - `config`: `routing.<role>.<size>.<risk>` (`routingConfigSubject`, D-cn) is a routing-table
- *   change; any other is a cap or budget key such as `budget.task_s` or `caps.fix_rounds`.
+ *   change; any other is one of the cap and budget keys VTC's config signals raise
+ *   (`configSignalFacts`: `budget.task_s`, `budget.task_m`, `budget.task_l`, `caps.fix_rounds`),
+ *   enumerated, never any dotted key.
  * A subject that does not fit its pattern fails closed with `privacy`. `new_agent` subjects are
  * not rendered (the report's role names the proposal).
  */
@@ -35,7 +37,13 @@ export type UpstreamSubject =
   | { readonly kind: "config"; readonly key: string };
 
 const ROUTING = /^routing\.([^.]+)\.(S|M|L)\.([a-z]+)$/;
-const CONFIG_KEY = /^[a-z][a-z0-9_]{0,39}(?:\.[a-z0-9_]{1,40}){0,3}$/;
+/** VTC's own cap and budget keys a config signal names (engine core's `configSignalFacts`). */
+const CONFIG_KEYS: ReadonlySet<string> = new Set([
+  "budget.task_s",
+  "budget.task_m",
+  "budget.task_l",
+  "caps.fix_rounds",
+]);
 
 const refuse = (kind: string): never => {
   throw new AutomationSkip("privacy", `the ${kind} subject is not in VTC's vocabulary`);
@@ -88,7 +96,7 @@ export const projectSubject = (
     }
     case "config": {
       if (text.startsWith("routing.")) return routingSubject(text) ?? refuse(kind);
-      return CONFIG_KEY.test(text) ? { kind: "config", key: text } : refuse(kind);
+      return CONFIG_KEYS.has(text) ? { kind: "config", key: text } : refuse(kind);
     }
   }
 };

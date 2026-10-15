@@ -40,6 +40,11 @@ export interface LedgerEntry {
   /** `pr_opened`: the head commit VTC pushed (a close deletes the branch only at this head). */
   readonly head?: string;
   readonly version?: string;
+  /**
+   * `seen` of a VTC-repo item: whether its VTC frames point into UI (`framesTouchUi`), kept so a
+   * pickup on this machine reads it from here, not from the issue body anyone may edit.
+   */
+  readonly ui?: boolean;
 }
 
 export interface LedgerRecord {
@@ -62,6 +67,8 @@ export interface LedgerRecord {
   /** `versions` when VTC last commented on (or opened) the issue. */
   readonly versionsAtComment: readonly string[];
   readonly quietClosed: readonly number[];
+  /** The last `seen` entry's `ui`, or `null` when none carried one. */
+  readonly ui: boolean | null;
 }
 
 export interface Ledger {
@@ -113,6 +120,7 @@ const fold = (entries: readonly LedgerEntry[]): LedgerRecord | undefined => {
     countAtComment: 0,
     versionsAtComment: [],
     quietClosed: [],
+    ui: null,
   };
   for (const e of entries) {
     switch (e.event) {
@@ -126,6 +134,7 @@ const fold = (entries: readonly LedgerEntry[]): LedgerRecord | undefined => {
             e.version === undefined || record.versions.includes(e.version)
               ? record.versions
               : [...record.versions, e.version],
+          ui: typeof e.ui === "boolean" ? e.ui : record.ui,
         };
         break;
       case "issue_opened":
