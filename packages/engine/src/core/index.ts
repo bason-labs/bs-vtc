@@ -63,6 +63,7 @@ export {
 } from "./views.js";
 export { projectGraph, taskDagGraph, taskNodeState, taskPipelineGraph } from "./graph.js";
 export { Engine, type EventListener } from "./engine.js";
+export { crashIncident, VTC_SOURCE_ROOTS, vtcSourceRoots, vtcStackFrames } from "./vtc-stack.js";
 export {
   EngineError,
   type CallContext,

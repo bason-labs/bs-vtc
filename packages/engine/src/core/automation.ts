@@ -200,6 +200,11 @@ export interface AutomationFact {
   readonly at: string;
   /** The error class of a VTC defect (`incident.gate_infra`, `adapter.parse_failure`, …). */
   readonly errorClass?: string;
+  /**
+   * A crash's VTC stack frames, root-relative (`incident.recorded.stack`, `vtcStackFrames`): the
+   * upstream module keeps the top VTC frames, which locate the defect (D-bv (2)).
+   */
+  readonly stack?: string;
   readonly role?: string;
   readonly mode?: string;
   readonly host?: HostId;
@@ -322,6 +327,7 @@ export const automationFacts = (state: RunState, event: VtcEvent): AutomationFac
           target: "upstream",
           kind: "defect",
           errorClass: `incident.${v.kind}`,
+          ...(v.stack === undefined ? {} : { stack: v.stack }),
           detail: v.detail,
         },
       ];
@@ -525,26 +531,85 @@ export const automationFacts = (state: RunState, event: VtcEvent): AutomationFac
       ];
     }
     case "run.finished":
-      // Final Review leftovers: the feature findings the finished run left open or deferred
-      return [...state.findings.values()]
-        .map((r) => r.finding)
-        .filter(
-          (f) =>
-            f.feature !== undefined &&
-            f.task === undefined &&
-            (f.status === "open" || f.status === "deferred"),
-        )
-        .map((f) => ({
-          ...base,
-          target: "project" as const,
-          kind: "final_review" as const,
-          ...(f.feature === undefined ? {} : { feature: f.feature }),
-          ...findingIdentity(f),
-          detail: `a Final Review finding left ${f.status}: ${f.title}`,
-        }));
+      // Final Review leftovers: the feature findings the finished run left open or deferred;
+      // and VTC's own config signals (budgets, caps) the run's parks show
+      return [
+        ...configSignalFacts(state, base),
+        ...[...state.findings.values()]
+          .map((r) => r.finding)
+          .filter(
+            (f) =>
+              f.feature !== undefined &&
+              f.task === undefined &&
+              (f.status === "open" || f.status === "deferred"),
+          )
+          .map((f) => ({
+            ...base,
+            target: "project" as const,
+            kind: "final_review" as const,
+            ...(f.feature === undefined ? {} : { feature: f.feature }),
+            ...findingIdentity(f),
+            detail: `a Final Review finding left ${f.status}: ${f.title}`,
+          })),
+      ];
     default:
       return [];
   }
+};
+
+/** A config signal needs this many distinct tasks of a run (as §13's tool promotion counts). */
+export const CONFIG_SIGNAL_MIN_TASKS = 3;
+
+/**
+ * Pure (D-cd "workflow and config improvements"; spine §5 reading 216): VTC's own defaults the
+ * finished run's parks put in question. Three or more tasks of one size parked on their budget
+ * (`budget.task_<size>`: the §11 initial budgets), or three or more tasks parked on their fix-round
+ * cap (`caps.fix_rounds`). The subject and the metric names are VTC's vocabulary and the values
+ * counts, so the upstream report carries nothing of the project.
+ */
+export const configSignalFacts = (
+  state: RunState,
+  base: Pick<AutomationFact, "run" | "source" | "at">,
+): AutomationFact[] => {
+  const parked = new Map<string, Set<string>>();
+  for (const event of state.events) {
+    if (event.type !== "task.status_changed" || event.task === undefined) continue;
+    const data = event.data as { to?: unknown; park_reason?: unknown };
+    if (data.to !== "parked" || (data.park_reason !== "budget" && data.park_reason !== "cap"))
+      continue;
+    const set = parked.get(data.park_reason) ?? new Set<string>();
+    set.add(event.task);
+    parked.set(data.park_reason, set);
+  }
+  const sizeOf = (task: string): string | undefined => state.tasks.get(task)?.size;
+  const out: AutomationFact[] = [];
+  for (const size of ["S", "M", "L"] as const) {
+    const tasks = [...(parked.get("budget") ?? [])].filter((t) => sizeOf(t) === size);
+    if (tasks.length < CONFIG_SIGNAL_MIN_TASKS) continue;
+    const s = size.toLowerCase();
+    out.push({
+      ...base,
+      target: "upstream",
+      kind: "config",
+      subject: `budget.task_${s}`,
+      metrics: {
+        [`budget.${s}.parked_tasks`]: tasks.length,
+        [`budget.${s}.tasks`]: [...state.tasks.keys()].filter((t) => sizeOf(t) === size).length,
+      },
+      detail: `${String(tasks.length)} ${size} tasks parked on their budget in one run`,
+    });
+  }
+  const capped = parked.get("cap")?.size ?? 0;
+  if (capped >= CONFIG_SIGNAL_MIN_TASKS)
+    out.push({
+      ...base,
+      target: "upstream",
+      kind: "config",
+      subject: "caps.fix_rounds",
+      metrics: { "caps.parked_tasks": capped, "caps.tasks": state.tasks.size },
+      detail: `${String(capped)} tasks parked on their fix-round cap in one run`,
+    });
+  return out;
 };
 
 // ------------------------------------------------------------ cost regression

@@ -26,6 +26,7 @@ import {
   shippedArmPluginCompilerFactory,
   shippedAutomationFactories,
   upstreamSettingsOf,
+  vtcAdvisoriesScan,
   type AutomationFactories,
   type AutomationProbe,
 } from "../src/automation-wiring.js";
@@ -276,6 +277,67 @@ const fakeArmCompiler =
     },
   });
 
+describe("AutomationDeps.vtcAdvisories (D-bv (4), reading 216): VTC's own lockfile, scanned offline", () => {
+  const LOCK = new TextEncoder().encode("lockfileVersion: '9.0'\n");
+  const scanners: gates.ScannerStore = {
+    names: ["osv-scanner"],
+    ensure: () => Promise.reject(new Error("no scanner in a test")),
+  };
+
+  it("hands the gates' offline scan this vtc's lockfile, and reads its advisories", async () => {
+    const seen: gates.OsvScanRequest[] = [];
+    const scan = vtcAdvisoriesScan({
+      vtcHome: "/h",
+      lockfile: () => LOCK,
+      allowUnsandboxed: true,
+      scanners,
+      scan: (request) => {
+        seen.push(request);
+        return Promise.resolve({
+          ok: true,
+          advisories: [{ id: "GHSA-aaaa-bbbb-cccc", package: "vite" }],
+        });
+      },
+    });
+    expect(await scan()).toEqual([{ id: "GHSA-aaaa-bbbb-cccc", package: "vite" }]);
+    expect(seen[0]).toMatchObject({
+      vtcHome: "/h",
+      lockfile: LOCK,
+      scanners,
+      allowUnsandboxed: true,
+      logDir: join("/h", "logs", "osv-scan"),
+    });
+  });
+
+  it("answers null without a lockfile or the offline database, and fails on a scan error", async () => {
+    let calls = 0;
+    const none = vtcAdvisoriesScan({
+      vtcHome: "/h",
+      lockfile: () => undefined,
+      allowUnsandboxed: false,
+      scanners,
+      scan: () => {
+        calls += 1;
+        return Promise.resolve({ ok: true, advisories: [] });
+      },
+    });
+    expect(await none()).toBeNull();
+    expect(calls).toBe(0);
+    const answer = (result: gates.OsvScanResult) =>
+      vtcAdvisoriesScan({
+        vtcHome: "/h",
+        lockfile: () => LOCK,
+        allowUnsandboxed: false,
+        scanners,
+        scan: () => Promise.resolve(result),
+      })();
+    expect(await answer({ ok: false, reason: "no_database", detail: "no db" })).toBeNull();
+    await expect(answer({ ok: false, reason: "failed", detail: "exit code 2" })).rejects.toThrow(
+      /exit code 2/,
+    );
+  });
+});
+
 describe("EngineDeps.armPlugins (D-cg, reading 201): the compiler's arm compiler over the shipped plugin", () => {
   it("compiles each arm from that host's plugin directory, resolved only when an arm is compiled", async () => {
     const dirs: string[] = [];
@@ -323,6 +385,8 @@ describe("buildEngineParts injects automation and arm plugins", () => {
       hosting: "branch",
       ffmpeg: true,
       ghLogin: expect.any(Function) as unknown,
+      // D-bv (4): the daily offline scan of this vtc's own lockfile (reading 216)
+      vtcAdvisories: expect.any(Function) as unknown,
     });
     // building asks for no login; the daemon asks through ghLogin when it starts (D-bz)
     expect(exec.calls.map((c) => c.line).sort()).toEqual([

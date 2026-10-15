@@ -44,8 +44,12 @@ human reviews (spine AD-27). It never merges anything it opened on its own.
 1. **It notices.** At the end of each run (RETRO), Lookback scores every role from the event log:
    pass rates, review rounds, escalations, tokens and cost. The engine also records VTC's own
    defects: engine incidents, gate infrastructure errors, adapter parse failures, crashes and
-   stuck loops. Each recurring defect, and each cost regression against a role's previous prompt,
-   becomes an issue in VTC's repo.
+   stuck loops. A crash keeps the stack frames that lie in VTC's own code, which locate it. Each
+   recurring defect, and each cost regression against a role's previous prompt, becomes an issue
+   in VTC's repo. So does a run in which three or more tasks of one size ran out of budget, or
+   three or more tasks hit their fix-round cap: VTC's defaults may need changing. Once a day VTC
+   also scans its own dependencies (the lockfile it was built from) offline with osv-scanner,
+   against the database `vtc calibrate` downloads, and each advisory becomes a security issue.
 2. **It proposes.** For a role with enough attributed failures, the lookback role proposes at most
    three changes to the editable part of that role's prompt. When failures keep landing in a
    discipline that no specialist serves, or escalations keep naming a role VTC does not have,
@@ -64,10 +68,14 @@ human reviews (spine AD-27). It never merges anything it opened on its own.
    resolve, a CI failure after merge, a reverted change, an out-of-scope finding, Final Review
    leftovers) become issues in your project's repo. A fixable one (anything but a parked task)
    then becomes a normal VTC run, with the issue as its spec. The run starts once the current run
-   has finished, and it opens a draft PR on its `vtc/auto` branch. When you run VTC on a bs-vtc
-   checkout ("VTC builds VTC"), the same happens for VTC's own repo: a defect VTC can locate in its
-   own code, an advisory that the dependency gate finds in VTC's dependencies (the PR bumps the
-   dependency), and a new-agent issue.
+   has finished, and it opens a draft PR on its `vtc/auto` branch. Issues VTC works on itself
+   are labelled `vtc:fixable`. For VTC's own repo the same happens on the bs-vtc checkout set as
+   `upstream.checkout` in `~/.vtc/config.yaml` ("VTC builds VTC"): a crash VTC located in its own
+   code, an advisory in VTC's dependencies (the PR bumps the dependency), a new-agent issue (the
+   run builds the role with the new-role scaffold, and its PR is labelled `needs-eval`) and a
+   change to its defaults. The checkout's VTC also picks up these issues when another of your
+   projects raised them, and starts their runs one at a time. A defect without VTC stack frames
+   (a parse failure, a stuck loop) stays an issue for a human.
 6. **It shows its evidence.** Every automatic PR carries a recording of the dashboard and key
    screenshots. A PR caused by your project's run shows only a VTC-side view: the scorecard and
    replay charts, with tasks numbered rather than named. Any other PR shows the run that produced
@@ -77,18 +85,17 @@ human reviews (spine AD-27). It never merges anything it opened on its own.
    everyone, in the next VTC release; `vtc lookback approve` still lets you try a candidate on one
    machine first.
 
-Not yet available (each is an owned followup in the spine, §5 reading 215):
+Not yet available (each is an owned followup in the spine, §5 readings 215 and 216):
 
 - Before and after screenshots of a UI change, and a video of the changed flow. Until the gate
   runner can render the base commit, a UI PR is labelled `evidence: partial`.
-- Scanning the dependencies of an installed VTC binary for advisories. Today only a bs-vtc
-  checkout's own dependency gate finds them.
-- Issues and PRs for a new engine tool, a change to caps, budgets or routing, or a missing
-  capability. Nothing produces these signals yet.
-- Starting a fix run for a VTC defect from a project that is not the bs-vtc checkout. The issue
-  is raised, and the fix waits until someone runs VTC on the checkout.
+- Issues and PRs for a new engine tool, a routing change or a missing capability. Nothing
+  produces these signals yet.
 - Resuming a replay that a limit stopped partway. It starts again from the beginning at the next
   RETRO.
+
+A fix for VTC's own repo runs only on a bs-vtc checkout. Until VTC runs on one, its issues wait
+there for a human.
 
 What keeps this safe and quiet:
 

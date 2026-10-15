@@ -171,6 +171,7 @@ import {
 import { ArtifactRefSchema } from "@vtc/shared";
 import { checkEngineerShare, handleSubmit } from "./submit.js";
 import { escalationListView, openEscalations, statusView } from "./views.js";
+import { crashIncident } from "./vtc-stack.js";
 
 /**
  * How many times the engine itself rejects an automatic run's failed DESIGN check (AD-27 rule 2,
@@ -895,17 +896,11 @@ export class Engine implements Kernel {
       } catch (error) {
         if (!this.deps.lock.isHeld()) return; // another engine took over: this one stops (AD-12)
         await this.serial(handle, () => {
+          // with the VTC frames of its stack, which locate the defect (reading 216)
           this.emit(handle, {
             type: "incident.recorded",
             actor: "engine",
-            data: {
-              kind: "crash",
-              detail:
-                `background job ${key} failed: ${error instanceof Error ? error.message : String(error)}`.slice(
-                  0,
-                  2000,
-                ),
-            },
+            data: crashIncident(key, error),
           });
           return Promise.resolve();
         });

@@ -94,11 +94,13 @@ export const ghIssue = (fields: {
   stateReason?: string;
   labels?: string[];
   body?: string;
+  title?: string;
   updatedAt?: string;
   comments?: string[];
 }): Record<string, unknown> => ({
   number: fields.number,
   url: `https://github.com/o/r/issues/${String(fields.number)}`,
+  title: fields.title ?? "vtc(defect): x",
   state: fields.state ?? "OPEN",
   stateReason: fields.stateReason ?? "",
   labels: (fields.labels ?? ["vtc:auto"]).map((name) => ({ name })),

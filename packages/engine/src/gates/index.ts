@@ -116,13 +116,18 @@ export {
   type ScannerArgsContext,
 } from "./scanner-args.js";
 export {
+  advisoriesFromOsvReport,
   downloadOsvDatabase,
   OSV_DB_DIR,
   OSV_DB_ENV,
   OSV_DB_STAMP,
   osvDatabaseDir,
   osvDatabaseReady,
+  scanLockfileAdvisories,
   type OsvDownloadRequest,
+  type OsvScanRequest,
+  type OsvScanResult,
+  type VtcAdvisory,
 } from "./osv-db.js";
 export {
   DEFAULT_PROTECTED_GLOBS,

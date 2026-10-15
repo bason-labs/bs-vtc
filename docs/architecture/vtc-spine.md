@@ -1530,7 +1530,7 @@ resume`). This is §5 reading 12, pending the human's confirmation.
      every VTC comment carries `AUTO_COMMENT_MARKER`. Dedupe matches markers from a label listing
      (`listAutomatic`), never GitHub search. Labels: `vtc:auto` plus `autoKindLabel(kind)`, and
      `AUTO_LABELS` for regression, muted, keep, security, `evidence: partial`, `needs-eval`,
-     `vtc:test`.
+     `vtc:test`, and `vtc:fixable` on an issue VTC works on itself (reading 216).
   4. _Noise (D-bx)._ `AUTOMATION_LIMITS`: 5 new issues per repo per day, 3 open automatic PRs per
      kind, 1 open Lookback PR per role, at most one comment per issue a day; an open issue gets a
      comment, not a duplicate; a fingerprint a human closed as not planned or labelled
@@ -3533,6 +3533,48 @@ plugin add` only in a temporary `CODEX_HOME`, never `~/.codex`; one `claude -p` 
       and capability signals, and wire the trial ledger and `planRetroReplays` as core's one
       trial cap; engine core lets a project's daemon hand a fixable VTC defect to the bs-vtc
       checkout's engine (today it waits until VTC runs there).
+216.  **The round-4 closing fixes** (AD-27; reading 215's owned followups; D-bv (2) and (4), D-cd,
+      D-ce). _Lead decision 2026-10-15, pending human review._ The integrator closes what the
+      closing review found still open in reading 215. (1) _A located defect_ (D-bv (2), D-by): a
+      background job that throws records `incident.recorded.stack`, the `at` lines of its stack
+      that lie in VTC's own sources, each made relative to VTC's source root (or kept as the
+      single-file binary's virtual-root frame), never the message, a project frame or the install
+      path, because the run log is git-tracked (`vtcStackFrames`, `crashIncident`); the automation
+      fact and the bridge's `vtc_defect` carry it, and the module's `vtcFramesFromStack` turns
+      it into the report's `vtc_frames`. A defect with VTC frames is fixable; an adapter parse
+      failure, a `gate_infra` incident and a stuck loop have none and stay issues only. (2) _Which
+      engine fixes a VTC-repo issue_: an upstream run starts only when the project is the
+      configured `upstream.checkout`, compared by real path as the daemon does (a trailing slash
+      or a symlinked spelling is the same checkout; a clone whose remote is `upstream.repo` is
+      not), and the same check decides that a bs-vtc PR records its own run rather than the
+      upstream-safe projection, so a run can no longer push a branch whose PR then skips with
+      `no_upstream_checkout` or opens with partial evidence. (3) _Pickup_ (closes reading 215's
+      "today it waits"): every fixable automatic issue carries `vtc:fixable` (`fixableItem`); at
+      each of its ticks the bs-vtc checkout's daemon lists VTC's repo and asks `startRun` for
+      every open issue that `fixableUpstreamIssue` accepts (an advisory, a D-cd improvement, or a
+      defect labelled `vtc:fixable`; never a closed or muted one) and that no open automatic PR
+      answers, with the issue's listed title and body as the spec; a recurrence of an open
+      fixable VTC-repo issue on the checkout asks too. The daemon's queue starts each issue's run
+      once, as before. A human may label a defect `vtc:fixable` to ask for a run. (4) _VTC's own
+      dependencies_ (D-bv (4); closes reading 215(4)'s "not built"): `AutomationDeps.vtcAdvisories`
+      scans the lockfile this VTC was built from (embedded in the binary; the product repo's in
+      development) with the pinned osv-scanner, offline, against the database `vtc calibrate`
+      downloaded, in the gate sandbox's verify phase (`scanLockfileAdvisories`); without that
+      database it scans and downloads nothing. Every daemon asks once a day (not while paused)
+      and hands each advisory over as a `security` fact with source `vtc.dependency_scan`, which
+      is VTC's on every project, unlike a dependency gate's finding (reading 215(4)). (5) _Config
+      signals and new agents_ (D-cd; amends reading 215(5)): at a run's end, three or more tasks
+      of one size parked on their budget raise a `config` fact `budget.task_<size>`, and three or
+      more tasks parked on their fix-round cap raise `caps.fix_rounds` (`configSignalFacts`; VTC
+      vocabulary and counts only). A `new_agent` run's request points at the new-role scaffold
+      (`scaffoldRole`, `writeScaffold`), and its PR carries `needs-eval`. (6) Contracts 5.3.0
+      (MINOR): `incident.recorded.stack`, `AUTO_LABELS.fixable`, `AutoIssueRef.title` / `body`,
+      `AutomationDeps.vtcAdvisories`. Still open, as product questions for the human: the `tool`
+      signal (the engine records no role's shell commands, so "a script recurring in 3 or more
+      tasks" has no source) and the `capability` signal (an escalation names no capability in a
+      structured field); and the UI before/after evidence of D-ce, which needs the gate runner to
+      install, build and serve the base commit a second time at Final Review (reading 215's
+      owned followup stands until the human decides that cost).
 
 ## 6. Change process for this spine
 

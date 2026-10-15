@@ -59,6 +59,7 @@ interface GhIssue {
   readonly state?: string;
   readonly stateReason?: string | null;
   readonly labels?: readonly GhLabel[];
+  readonly title?: string;
   readonly body?: string;
   readonly updatedAt?: string;
   readonly createdAt?: string;
@@ -77,7 +78,7 @@ interface GhPr {
 }
 
 const ISSUE_FIELDS =
-  "number,url,state,stateReason,labels,body,updatedAt,createdAt,closedAt,comments";
+  "number,url,state,stateReason,labels,title,body,updatedAt,createdAt,closedAt,comments";
 const PR_FIELDS = "number,url,headRefName,headRefOid,isDraft,state,labels,body";
 const LIST_LIMIT = "1000";
 
@@ -91,6 +92,7 @@ const LABEL_COLORS: Readonly<Record<string, string>> = {
   [AUTO_LABELS.evidencePartial]: "fbca04",
   [AUTO_LABELS.needsEval]: "f9d0c4",
   [AUTO_LABELS.test]: "ededed",
+  [AUTO_LABELS.fixable]: "1d76db",
 };
 
 const labelNames = (labels: readonly GhLabel[] | undefined): string[] =>
@@ -128,6 +130,8 @@ export const issueFromGh = (issue: GhIssue): RemoteIssueRef | null => {
     updatedAt: issue.updatedAt ?? new Date(0).toISOString(),
     humanActivity: comments.some((c) => !c.body.includes(AUTO_COMMENT_MARKER)),
     ...(issue.createdAt === undefined ? {} : { createdAt: issue.createdAt }),
+    ...(issue.title === undefined ? {} : { title: issue.title }),
+    ...(issue.body === undefined ? {} : { body: issue.body }),
     closedQuietByVtc:
       state === "closed" && isQuietCloseByVtc({ stateReason, closedAt: issue.closedAt, comments }),
   };

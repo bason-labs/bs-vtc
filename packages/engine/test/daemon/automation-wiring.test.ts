@@ -924,6 +924,63 @@ describe("automation wiring (AD-27 rules 7 and 8)", () => {
     }
   });
 
+  it("scans VTC's own dependencies once a day, on any project, and raises each advisory (D-bv (4), reading 216)", async () => {
+    const guardHome = tempDir();
+    let answer: { id: string; package: string }[] | null = null;
+    let scans = 0;
+    const automation: AutomationDeps = {
+      ...AUTOMATION,
+      vtcAdvisories: () => {
+        scans += 1;
+        return Promise.resolve(answer);
+      },
+    };
+    let clock = new Date("2026-10-13T09:00:00.000Z");
+    const fake = fakeEngine();
+    fake.runs.set("R-1", { finished: true, paused: false });
+    const up = fakeUpstream();
+    const open = () =>
+      wireAutomation(
+        fake.engine,
+        { repoRoot: tempDir(), vtcHome: guardHome, automation, now: () => clock },
+        // not VTC's own repo: a gate's advisory here is the project's, but the scan's are VTC's
+        { githubRemote: true, createUpstream: up.create, vtcRepo: () => false, sweepEveryMs: 5 },
+      );
+    // no database yet: nothing raised, and asked again at the next tick
+    const first = open();
+    await first.idle();
+    await new Promise((r) => setTimeout(r, 30));
+    await first.idle();
+    await first.close();
+    expect(scans).toBeGreaterThan(1);
+    expect(up.facts).toEqual([]);
+    answer = [
+      { id: "GHSA-aaaa-bbbb-cccc", package: "vite" },
+      { id: "GHSA-dddd-eeee-ffff", package: "@babel/core" },
+    ];
+    const second = open();
+    await second.idle();
+    expect(
+      up.facts.map((f) => [f.target, f.kind, f.source, f.advisory?.id, f.advisory?.package]),
+    ).toEqual([
+      ["upstream", "security", "vtc.dependency_scan", "GHSA-aaaa-bbbb-cccc", "vite"],
+      ["upstream", "security", "vtc.dependency_scan", "GHSA-dddd-eeee-ffff", "@babel/core"],
+    ]);
+    await second.close();
+    // a restarted daemon the same day scans nothing again; a day later it does
+    const before = scans;
+    const third = open();
+    await third.idle();
+    await third.close();
+    expect(scans).toBe(before);
+    clock = new Date("2026-10-14T09:00:01.000Z");
+    const fourth = open();
+    await fourth.idle();
+    await fourth.close();
+    expect(scans).toBe(before + 1);
+    expect(up.facts).toHaveLength(4);
+  });
+
   it("an automatic run the module asks for while another run is open waits, and starts once that run finishes, once per issue (D-bv)", async () => {
     const fake = fakeEngine();
     const up = fakeUpstream();

@@ -7,7 +7,7 @@
  * The list → decide → write sequence of a target repo runs under a lock file in VTC's home, so the
  * daemons of several projects reporting to the same repo never race each other.
  */
-import { mkdirSync } from "node:fs";
+import { mkdirSync, realpathSync } from "node:fs";
 import { join } from "node:path";
 import {
   AUTO_LABELS,
@@ -98,6 +98,7 @@ import { upstreamStateDir } from "./state-dir.js";
 import {
   evaluateTrigger,
   fixableItem,
+  fixableUpstreamIssue,
   type AutomationFact,
   type AutoWorkItem,
 } from "./triggers.js";
@@ -181,8 +182,10 @@ export interface UpstreamDeps {
    * Starts an automatic run from one of its issues (D-bv "a fixable one becomes a normal VTC run",
    * D-cd; AD-27 rule 2): the daemon's `Engine.startAutomatic`, which queues the run until no other
    * run of the repo is open. The module calls it once, right after it opened the issue of a
-   * fixable item (`fixableItem`) with `automation.prs` on; for a VTC-repo item only when the
-   * project is the bs-vtc checkout itself ("VTC builds VTC"). Absent: no run is started.
+   * fixable item (`fixableItem`) with `automation.prs` on, or saw it again while it is open; for
+   * a VTC-repo item only when the project is the configured `upstream.checkout` itself ("VTC
+   * builds VTC"), which also picks up the fixable issues other projects' daemons opened
+   * (`pickup`). Absent: no run is started. The daemon queues each issue's run once.
    */
   readonly startRun?: (input: StartInput, issue: AutomationRunRef) => Promise<void>;
 }
@@ -296,6 +299,13 @@ export interface Upstream {
   ): Promise<AutomationOutcome>;
   /** The daily sweep: quiet issues closed, PRs of closed issues closed. */
   sweep(ctx: ProjectContext): Promise<AutomationOutcome[]>;
+  /**
+   * On the bs-vtc checkout only ("VTC builds VTC", D-bv (2), D-cd; reading 216): asks `startRun`
+   * for every open VTC-repo issue VTC can fix (`fixableUpstreamIssue`) that no open PR answers
+   * yet, whichever installation opened it, with the issue's title and body as the spec. Returns
+   * the issues it asked for; the daemon starts each issue's run at most once.
+   */
+  pickup(ctx: ProjectContext): Promise<readonly AutomationRunRef[]>;
   /** The services in use (the injected ones, or the gh-backed defaults). */
   readonly services: {
     readonly issues: IssueService;
@@ -422,13 +432,27 @@ export const createUpstream = (deps: UpstreamDeps): Upstream => {
   };
 
   /**
+   * The project is the configured bs-vtc checkout, compared by real path as the daemon does (a
+   * trailing slash or a symlinked spelling is the same checkout; reading 216). Only there does an
+   * upstream item become a run, because the run's PR is built and pushed from that checkout, and
+   * only there does a bs-vtc PR record its own run instead of the upstream-safe projection.
+   */
+  const onUpstreamCheckout = (ctx: ProjectContext): boolean => {
+    const checkout = deps.automation.upstream.checkout;
+    if (checkout === undefined) return false;
+    try {
+      return realpathSync(ctx.repoRoot) === realpathSync(checkout);
+    } catch {
+      return false;
+    }
+  };
+
+  /**
    * "VTC builds VTC" (spine §5 reading 208 (1)): the project is VTC's own repo, so its public
    * identifiers are not project secrets in an upstream text or on screen.
    */
   const isSelf = (ctx: ProjectContext): boolean =>
-    ctx.repo === deps.automation.upstream.repo ||
-    (deps.automation.upstream.checkout !== undefined &&
-      ctx.repoRoot === deps.automation.upstream.checkout);
+    ctx.repo === deps.automation.upstream.repo || onUpstreamCheckout(ctx);
 
   const privacyCheck = (ctx: ProjectContext) => {
     const denylist = projectDenylist(ctx.identity);
@@ -559,6 +583,8 @@ export const createUpstream = (deps: UpstreamDeps): Upstream => {
           autoKindLabel(item.kind),
           ...(item.kind === "security" ? [AUTO_LABELS.security] : []),
           ...(regressionOf === undefined ? [] : [AUTO_LABELS.regression]),
+          // VTC works on it itself: here, or on the bs-vtc checkout (`pickup`)
+          ...(fixableItem(item) ? [AUTO_LABELS.fixable] : []),
         ],
       };
       const target = { kind: item.target, repo };
@@ -630,6 +656,10 @@ export const createUpstream = (deps: UpstreamDeps): Upstream => {
             url,
             action,
           });
+          // on the bs-vtc checkout, an open fixable issue another project's daemon raised: the
+          // daemon starts its run once (a project's own issue asked when it opened)
+          if (item.target === "upstream")
+            await startFixRun(item, repo, decision.number, rendered, ctx);
           return { status: "issue", action, number: decision.number, url };
         }
         case "reopen": {
@@ -656,6 +686,8 @@ export const createUpstream = (deps: UpstreamDeps): Upstream => {
             url,
             action: "reopened",
           });
+          if (item.target === "upstream")
+            await startFixRun(item, repo, decision.number, rendered, ctx);
           return { status: "issue", action: "reopened", number: decision.number, url };
         }
       }
@@ -663,10 +695,54 @@ export const createUpstream = (deps: UpstreamDeps): Upstream => {
   };
 
   /**
-   * D-bv / D-cd (AD-27 rule 2): the issue just opened for a fixable item becomes an automatic run,
-   * whose spec is the issue (G1 and G2 skipped; the Spec Verifier checks the PR against it). Only
-   * with `automation.prs` on, and for a VTC-repo item only on the bs-vtc checkout itself (another
-   * project's engine cannot build bs-vtc). A run that cannot be started leaves the issue as it is.
+   * Whether an automatic run may start here now: `automation.prs` on, not paused, and for a
+   * VTC-repo issue only on the bs-vtc checkout itself with upstream reporting on (another
+   * project's engine cannot build bs-vtc, and the PR is pushed from the checkout).
+   */
+  const mayStartRun = (target: "upstream" | "project", ctx: ProjectContext): boolean => {
+    if (deps.startRun === undefined) return false;
+    if (target === "upstream" && !onUpstreamCheckout(ctx)) return false;
+    const { settings, context } = ctx.state();
+    if (context.paused || !context.ghLoggedIn || !settings.prs) return false;
+    return target === "project" || (settings.upstream && deps.automation.upstream.share);
+  };
+
+  /** The request of an automatic run: the issue is its spec (G1 and G2 skipped, AD-27 rule 2). */
+  const runRequest = (issue: string, title: string, spec: string, kind: AutoKind): string =>
+    [
+      `Fix ${issue}: ${title}`,
+      "",
+      `VTC raised this issue itself and started this run from it; the issue is the spec (D-bv, D-cd).`,
+      ...(kind === "new_agent"
+        ? [
+            "",
+            "Build the proposed role with the new-role scaffold (`scaffoldRole` and `writeScaffold` in `packages/compiler/src/scaffold.ts`): it writes `roles/<id>/role.yaml`, `prompt.md` and the test stub, and proves the compiler wiring on both hosts.",
+          ]
+        : []),
+      "",
+      spec,
+    ]
+      .join("\n")
+      .slice(0, RUN_REQUEST_MAX);
+
+  /** Asks the daemon for an issue's run; one that cannot be started leaves the issue as it is. */
+  const askRun = async (
+    input: StartInput,
+    ref: AutomationRunRef,
+  ): Promise<AutomationRunRef | null> => {
+    try {
+      await deps.startRun?.(input, ref);
+      return ref;
+    } catch {
+      // the issue stands; the daemon reports a run it could not start
+      return null;
+    }
+  };
+
+  /**
+   * D-bv / D-cd (AD-27 rule 2): the issue of a fixable item becomes an automatic run, whose spec
+   * is the issue (G1 and G2 skipped; the Spec Verifier checks the PR against it), when it opens
+   * or is seen again while open ({@link mayStartRun}; the daemon starts one run per issue).
    */
   const startFixRun = async (
     item: AutoWorkItem,
@@ -675,39 +751,72 @@ export const createUpstream = (deps: UpstreamDeps): Upstream => {
     rendered: { readonly title: string; readonly body: string },
     ctx: ProjectContext,
   ): Promise<void> => {
-    const start = deps.startRun;
-    if (start === undefined || !fixableItem(item)) return;
-    if (item.target === "upstream" && !isSelf(ctx)) return;
-    const { settings, context } = ctx.state();
-    if (context.paused || !settings.prs) return;
-    if (item.target === "upstream" && !settings.upstream) return;
-    const issue = `${repo}#${String(number)}`;
+    if (!fixableItem(item) || !mayStartRun(item.target, ctx)) return;
     const spec =
       item.target === "project"
         ? `${rendered.title}\n\n${redactSecrets(item.detail, ctx.knownValues)}`
         : rendered.body;
-    const request = [
-      `Fix ${issue}: ${rendered.title}`,
-      "",
-      `VTC raised this issue itself and started this run from it; the issue is the spec (D-bv, D-cd).`,
-      "",
-      spec,
-    ]
-      .join("\n")
-      .slice(0, RUN_REQUEST_MAX);
-    try {
-      await start(
-        { request, track: "quick_fix", repo: "existing", has_ui: false, risk_hints: [] },
+    await askRun(
+      {
+        request: runRequest(`${repo}#${String(number)}`, rendered.title, spec, item.kind),
+        track: "quick_fix",
+        repo: "existing",
+        has_ui: false,
+        risk_hints: [],
+      },
+      {
+        kind: item.kind,
+        fingerprint: item.fingerprint,
+        target: { kind: item.target, repo },
+        issue: number,
+      },
+    );
+  };
+
+  /**
+   * "VTC builds VTC" for the issues other installations opened (reading 216): on the bs-vtc
+   * checkout, every open fixable VTC-repo issue that no open PR answers asks for its run, with
+   * the issue's title and body as listed as its spec.
+   */
+  const pickup = async (ctx: ProjectContext): Promise<readonly AutomationRunRef[]> => {
+    if (!mayStartRun("upstream", ctx)) return [];
+    const repo = deps.automation.upstream.repo;
+    const listed = await issues.listAutomatic(repo);
+    const answered = new Set(
+      (await pullRequests.listOpenAutomatic(repo)).flatMap((p) =>
+        p.marker === null ? [] : [p.marker.fp],
+      ),
+    );
+    const asked: AutomationRunRef[] = [];
+    for (const issue of listed) {
+      const marker = issue.marker;
+      if (marker === null || !fixableUpstreamIssue(issue) || answered.has(marker.fp)) continue;
+      if (!mayStartRun("upstream", ctx)) break;
+      // the request is written into the checkout's run log: the shared redaction first
+      const clean = (text: string): string => redactSecrets(text, ctx.knownValues);
+      const ref = await askRun(
         {
-          kind: item.kind,
-          fingerprint: item.fingerprint,
-          target: { kind: item.target, repo },
-          issue: number,
+          request: runRequest(
+            `${repo}#${String(issue.number)}`,
+            clean(issue.title ?? renderTitle(marker.kind, marker.kind)),
+            clean(issue.body ?? issue.url),
+            marker.kind,
+          ),
+          track: "quick_fix",
+          repo: "existing",
+          has_ui: false,
+          risk_hints: [],
+        },
+        {
+          kind: marker.kind,
+          fingerprint: marker.fp,
+          target: { kind: "upstream", repo },
+          issue: issue.number,
         },
       );
-    } catch {
-      // the issue stands; the daemon reports a run it could not start
+      if (ref !== null) asked.push(ref);
     }
+    return asked;
   };
 
   /** "evidence capture failed" (D-ce): a VTC defect in VTC's own repo. */
@@ -847,8 +956,7 @@ export const createUpstream = (deps: UpstreamDeps): Upstream => {
       // run, so its evidence is the upstream-safe projection only, whatever the caller passed;
       // a caller may also ask for it (a Lookback PR always does).
       const upstreamSafe =
-        upstream &&
-        (ctx.repoRoot !== deps.automation.upstream.checkout || input.evidence.plan.upstreamSafe);
+        upstream && (!onUpstreamCheckout(ctx) || input.evidence.plan.upstreamSafe);
       // A project's `automation.evidence` settings apply to its own repo's PRs.
       const projectEvidence = upstream ? undefined : ctx.evidence;
       // Reading 212(3): the upstream-safe page reads the dashboard's own frozen routes of a
@@ -1324,6 +1432,7 @@ export const createUpstream = (deps: UpstreamDeps): Upstream => {
     openPullRequest,
     openLookbackPr,
     completePullRequest,
+    pickup,
     sweep: async (ctx) => {
       const results: AutomationOutcome[] = [];
       for (const target of ["upstream", "project"] as const) {

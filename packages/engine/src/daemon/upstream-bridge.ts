@@ -18,7 +18,8 @@
  * - its sweep (auto-close, stale PRs) at most once a day after one that worked, remembered across
  *   daemon restarts;
  * - `startRun` (`Engine.startAutomatic`, queued by the wiring), which the module calls once it
- *   opened the issue of a fixable item.
+ *   opened the issue of a fixable item, and, on the bs-vtc checkout, for every open fixable issue
+ *   another installation opened (`pickup`, at each of the wiring's ticks).
  *
  * The module is not imported here: {@link UpstreamModule} and {@link UpstreamModuleDeps} are the
  * structural shape of `createUpstream` (`upstream/upstream.ts`), and the daemon passes that factory
@@ -27,6 +28,7 @@
  */
 import { join } from "node:path";
 import {
+  AUTO_LABELS,
   GitShaSchema,
   LOOKBACK_REPO,
   parsePersisted,
@@ -80,6 +82,8 @@ export type UpstreamModuleFact =
       readonly host?: string | undefined;
       readonly model?: string | undefined;
       readonly promptSha?: string | undefined;
+      /** A crash's VTC frames (root-relative `at` lines); the module keeps the top three. */
+      readonly stack?: string | undefined;
       readonly at: string;
     }
   | {
@@ -186,6 +190,8 @@ export interface UpstreamModuleAutoPr {
     readonly gateReport?: GateReport | undefined;
   };
   readonly specVerifier: "pending" | "pass" | "fail";
+  /** Labels beside `vtc:auto` and the kind's (a new agent's PR: `needs-eval`, D-cd). */
+  readonly extraLabels?: readonly string[];
 }
 
 /** The module as the daemon calls it (`upstream/upstream.ts` `Upstream`). */
@@ -208,6 +214,11 @@ export interface UpstreamModule {
     ctx: UpstreamModuleContext,
   ): Promise<UpstreamModuleOutcome>;
   sweep(ctx: UpstreamModuleContext): Promise<readonly UpstreamModuleOutcome[]>;
+  /**
+   * On the bs-vtc checkout: asks `startRun` for the open fixable VTC-repo issues no PR answers
+   * yet, whichever installation opened them (reading 216); elsewhere it asks for none.
+   */
+  pickup(ctx: UpstreamModuleContext): Promise<readonly AutomationRunRef[]>;
 }
 
 /** What the module is built with (`upstream/upstream.ts` `UpstreamDeps`, the parts the daemon sets). */
@@ -251,6 +262,7 @@ export const upstreamModuleFact = (fact: AutomationFact): UpstreamModuleFact | n
         host: fact.host,
         model: fact.model,
         promptSha: fact.promptSha,
+        ...(fact.stack === undefined ? {} : { stack: fact.stack }),
         at: fact.at,
       };
     if (
@@ -402,6 +414,9 @@ export const automaticPrInput = (
       ...(release.gateReport === undefined ? {} : { gateReport: release.gateReport }),
     },
     specVerifier: release.specVerifier,
+    // D-cd: a new role has no recorded dispatches a replay could run again, so its PR is
+    // evidence-only and says so
+    ...(automation.kind === "new_agent" ? { extraLabels: [AUTO_LABELS.needsEval] } : {}),
   };
 };
 
@@ -639,22 +654,31 @@ export const bridgeUpstream =
         failed(await module.report(mapped, ctx()), `the ${fact.kind} report`);
       },
       sweep: async () => {
+        // "VTC builds VTC" (reading 216): every tick, the bs-vtc checkout's engine asks for the
+        // runs of the fixable issues other projects' daemons opened (the wiring queues each once)
+        // (one that fails is told with the sweep's outcome and never stops the sweep)
+        const failures: string[] = [];
+        try {
+          await module.pickup(ctx());
+        } catch (error) {
+          failures.push(
+            `picking up the fixable issues: ${error instanceof Error ? error.message : String(error)}`,
+          );
+        }
         const at = now();
         const last = lastSweep();
-        if (!Number.isNaN(last) && at.getTime() - last < UPSTREAM_SWEEP_EVERY_MS) return;
-        const outcomes = await module.sweep(ctx());
-        const errors = outcomes.filter((o) => o.status === "error");
-        if (errors.length > 0)
-          throw new Error(
-            errors
-              .map((o) => o.detail ?? "error")
-              .join("; ")
-              .slice(0, 500),
-          );
-        // the clock moves only after a sweep that worked: a failed one is tried again at the
-        // wiring's next tick, not a day later
-        ensurePrivateDir(options.guardDir);
-        writePrivateFile(sweepFile, `${JSON.stringify({ at: at.toISOString() })}\n`);
+        const due = Number.isNaN(last) || at.getTime() - last >= UPSTREAM_SWEEP_EVERY_MS;
+        if (due) {
+          const errors = (await module.sweep(ctx())).filter((o) => o.status === "error");
+          // the clock moves only after a sweep that worked: a failed one is tried again at the
+          // wiring's next tick, not a day later
+          if (errors.length === 0) {
+            ensurePrivateDir(options.guardDir);
+            writePrivateFile(sweepFile, `${JSON.stringify({ at: at.toISOString() })}\n`);
+          }
+          failures.push(...errors.map((o) => o.detail ?? "error"));
+        }
+        if (failures.length > 0) throw new Error(failures.join("; ").slice(0, 500));
       },
     };
   };

@@ -1,5 +1,5 @@
 {
-  "contracts_version": "5.2.0",
+  "contracts_version": "5.3.0",
   "schemas": {
     "Run": {
       "$id": "https://vtc.local/schemas/Run.json",
@@ -7678,6 +7678,11 @@
                 "exclusiveMinimum": 0,
                 "maximum": 9007199254740991
               }
+            },
+            "stack": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 4000
             },
             "evidence": {
               "default": [],

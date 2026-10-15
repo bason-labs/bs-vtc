@@ -325,6 +325,72 @@ describe("automation triggers (D-bv)", () => {
   });
 });
 
+describe("config signals at a run's end (D-cd; spine §5 reading 216)", () => {
+  /** A finished run whose tasks of `sizes` parked for `reason` (each once, some twice). */
+  const run = (parks: readonly { task: string; size: "S" | "M" | "L"; reason: string }[]) => {
+    const state = stateWith();
+    for (const p of parks) {
+      state.tasks.set(p.task, { id: p.task, size: p.size } as never);
+      state.events.push(
+        ev(
+          "task.status_changed",
+          { from: "building", to: "parked", park_reason: p.reason, round: 1 },
+          {
+            task: p.task,
+          },
+        ),
+      );
+    }
+    state.tasks.set("T-9", { id: "T-9", size: "M" } as never);
+    return automationFacts(state, ev("run.finished", { outcome: "delivered" }));
+  };
+
+  it("raises a config improvement when 3 or more tasks of one size hit their budget", () => {
+    const facts = run([
+      { task: "T-1", size: "M", reason: "budget" },
+      { task: "T-2", size: "M", reason: "budget" },
+      { task: "T-2", size: "M", reason: "budget" },
+      { task: "T-3", size: "M", reason: "budget" },
+      { task: "T-4", size: "S", reason: "budget" },
+    ]);
+    expect(facts).toEqual([
+      expect.objectContaining({
+        target: "upstream",
+        kind: "config",
+        subject: "budget.task_m",
+        metrics: { "budget.m.parked_tasks": 3, "budget.m.tasks": 4 },
+      }),
+    ]);
+  });
+
+  it("raises one when 3 or more tasks hit their fix-round cap", () => {
+    const facts = run([
+      { task: "T-1", size: "S", reason: "cap" },
+      { task: "T-2", size: "M", reason: "cap" },
+      { task: "T-3", size: "L", reason: "cap" },
+    ]);
+    expect(facts).toEqual([
+      expect.objectContaining({
+        target: "upstream",
+        kind: "config",
+        subject: "caps.fix_rounds",
+        metrics: { "caps.parked_tasks": 3, "caps.tasks": 4 },
+      }),
+    ]);
+  });
+
+  it("raises none below 3 tasks, nor for another park reason", () => {
+    expect(
+      run([
+        { task: "T-1", size: "M", reason: "budget" },
+        { task: "T-2", size: "M", reason: "budget" },
+        { task: "T-3", size: "M", reason: "stuck" },
+        { task: "T-4", size: "M", reason: "cap" },
+      ]),
+    ).toEqual([]);
+  });
+});
+
 describe("the daily summary (D-ca)", () => {
   it("counts what automation did with links, and is null when nothing happened", () => {
     const opened = ev("upstream.issue_opened", {

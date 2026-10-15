@@ -180,6 +180,12 @@ export const AUTO_LABELS = {
   evidencePartial: "evidence: partial",
   needsEval: "needs-eval",
   test: "vtc:test",
+  /**
+   * An automatic issue VTC will work on itself (`fixableItem`): its run starts once the issue
+   * opens, and an upstream one waits for the bs-vtc checkout's engine, which picks up every open
+   * `vtc:fixable` issue no run has worked on (D-bv (2), D-cd). New in 5.3.0.
+   */
+  fixable: "vtc:fixable",
 } as const;
 
 /** Pure: the kind label every automatic issue and PR carries beside `vtc:auto` (D-bx). */

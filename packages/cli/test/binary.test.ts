@@ -24,6 +24,7 @@ import {
   DASHBOARD_FIXTURE,
   commitVtcConfig,
   initRepo,
+  PRODUCT_ROOT,
   tempDir,
   tempHome,
   writePluginTrees,
@@ -49,6 +50,11 @@ describe("the binary build script", () => {
     );
     expect(entry).toContain(`"task/index.html": a`);
     expect(entry).toMatch(/runBinary\(\{\n {2}"dashboard": \{/);
+    // the lockfile it was built from, for the daily scan of VTC's own dependencies (reading 216)
+    expect(entry).toContain(
+      `import lockfile from ${JSON.stringify(join(PRODUCT_ROOT, "pnpm-lock.yaml"))} with { type: "file" };`,
+    );
+    expect(entry).toMatch(/\n\}, lockfile\);\n$/);
   });
 });
 
