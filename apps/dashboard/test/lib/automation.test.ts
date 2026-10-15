@@ -3,9 +3,15 @@ import {
   AutoKindSchema,
   AutomationReportSchema,
   AutomationSkipReasonSchema,
+  EvidencePartialReasonSchema,
   type AutomationReport,
 } from "@vtc/shared";
-import { AUTO_KIND_LABELS, automationView, SKIP_REASONS } from "@/lib/automation";
+import {
+  AUTO_KIND_LABELS,
+  automationView,
+  PARTIAL_EVIDENCE_REASONS,
+  SKIP_REASONS,
+} from "@/lib/automation";
 import { readAutomationFixture } from "../fixtures";
 
 const report = (): AutomationReport => AutomationReportSchema.parse(readAutomationFixture());
@@ -76,8 +82,31 @@ describe("automationView (D-ca, AD-27 rule 7)", () => {
     expect(skipped.every((s) => s.detail.length > 0)).toBe(true);
   });
 
-  it("names every kind and skip reason", () => {
+  it("names every kind, skip reason and partial-evidence reason", () => {
     for (const k of AutoKindSchema.options) expect(AUTO_KIND_LABELS[k]).not.toBe("");
     for (const r of AutomationSkipReasonSchema.options) expect(SKIP_REASONS[r]).not.toBe("");
+    for (const r of EvidencePartialReasonSchema.options)
+      expect(PARTIAL_EVIDENCE_REASONS[r]).not.toBe("");
+  });
+
+  it("says an action failed with an error, with the redacted detail (contracts 5.4.0)", () => {
+    const { skipped } = automationView({
+      ...report(),
+      skipped: [
+        {
+          at: "2026-10-15T08:00:00.000Z",
+          reason: "error",
+          kind: "ci_failure",
+          detail: "gh pr create: HTTP 502",
+        },
+      ],
+    });
+    expect(skipped).toEqual([
+      expect.objectContaining({
+        reason: "it failed with an error (the detail says which)",
+        kind: "Post-merge CI failure",
+        detail: "gh pr create: HTTP 502",
+      }),
+    ]);
   });
 });
