@@ -302,9 +302,11 @@ export const LeadActionSchema = z.discriminatedUnion("type", [
      */
     facts: z.array(UnverifiedFactSummarySchema).optional(),
     /**
-     * G2: the DESIGN check (§6.1, `DesignCoverageReport`); while its `ok` is false the engine
-     * refuses an approval, and the human rejects G2 with a note so the design roles fix it
-     * (spine §5 reading 146). New in 4.8.0.
+     * G2: the DESIGN check (§6.1, `DesignCoverageReport`). Since 5.7.0 (H-13; spine §5 reading
+     * 237) G2 is offered only once its coverage part is complete (`designCoverageComplete`): the
+     * engine's coverage loop re-dispatches the Architect and the Designer first, and parks the run
+     * with an escalation when it cannot close the gaps, so there is no "approve anyway". The
+     * engine still refuses an approval while `ok` is false (a `directions_problem`). New in 4.8.0.
      */
     design_coverage: DesignCoverageReportSchema.optional(),
     /**

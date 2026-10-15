@@ -358,6 +358,15 @@ export const CommandShapeSpoolRowSchema = z.strictObject({
   /** The hook's absolute `cwd` (the role's worktree), which maps the call to its dispatch. */
   cwd: z.string().min(1).max(4096),
   shape: CommandShapeSchema,
+  /**
+   * The dispatch the call belongs to (its `action_id`), when the hook can name exactly one: the
+   * daemon's in-flight dispatches for this agent and `cwd` (which hook rule 4 already reads for the
+   * write scope) number one. Absent (no daemon answer, or parallel runs of one agent in one
+   * worktree such as the per-AC Spec Verifier calls): the engine matches the row by `agent` and
+   * `cwd` as before. The engine still checks that a named action is in flight for that agent and
+   * `cwd` before it counts the row (spine §5 reading 247(9)). New in 5.7.0.
+   */
+  action: SlugSchema.optional(),
 });
 export type CommandShapeSpoolRow = z.infer<typeof CommandShapeSpoolRowSchema>;
 

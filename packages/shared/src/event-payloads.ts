@@ -12,9 +12,19 @@ import {
   MergePreflightSchema,
   PostMergeCiSchema,
 } from "./auto-merge.js";
-import { DesignCoverageReportSchema, DesignExitSchema, G2DirectionSchema } from "./design.js";
+import {
+  DesignCoverageCheckedSchema,
+  DesignCoverageReportSchema,
+  DesignExitSchema,
+  G2DirectionSchema,
+} from "./design.js";
 import { FeatureSchema, FeatureStatusSchema, PullRequestRefSchema } from "./feature.js";
-import { HeadlessEndedSchema, HeadlessPreflightSchema, HeadlessStartedSchema } from "./headless.js";
+import {
+  HeadlessEndedSchema,
+  HeadlessPreflightSchema,
+  HeadlessStartedSchema,
+  ModelFallbackSchema,
+} from "./headless.js";
 import {
   CanaryStateSchema,
   RoleDispatchPurposeSchema,
@@ -264,6 +274,12 @@ export const EVENT_PAYLOAD_SCHEMAS = {
     /** The exits offered beside the directions (`approve_gate.design_exits`). New in 4.9.0. */
     design_exits: z.array(DesignExitSchema).max(2).optional(),
   }),
+  /**
+   * One DESIGN check of the G2 coverage loop (H-13; spine §5 reading 237;
+   * `DesignCoverageCheckedSchema`): logged before G2 is shown, so Flow Studio shows the loop's
+   * status. New in 5.7.0.
+   */
+  "design.coverage_checked": DesignCoverageCheckedSchema,
   "gate.rejected": z.strictObject({
     gates: z.array(HumanGateIdSchema).min(1).max(2),
     note: z.string().max(4000).optional(),
@@ -382,6 +398,12 @@ export const EVENT_PAYLOAD_SCHEMAS = {
       tier: ModelTierSchema.optional(),
       tier_reason: TierReasonSchema.optional(),
       tier_clamped: z.boolean().optional(),
+      /**
+       * The host refused the model this dispatch resolved on an earlier attempt, so this attempt
+       * passes no model flag and runs on the host's default (D-cx; spine §5 reading 244). The
+       * envelope's `model` is then the host default as far as known. New in 5.7.0.
+       */
+      model_fallback: ModelFallbackSchema.optional(),
     })
     .refine((v) => (v.purpose === "lookback_replay") === (v.replay !== undefined), {
       message: "replay names the trial exactly when purpose is lookback_replay",
@@ -421,6 +443,14 @@ export const EVENT_PAYLOAD_SCHEMAS = {
        * signal. Absent: none recorded. New in 5.4.0.
        */
       command_shapes: z.array(CommandShapeCountSchema).max(MAX_COMMAND_SHAPES_PER_RUN).optional(),
+      /**
+       * What the run counts toward the task, feature and run budgets when that differs from the
+       * envelope's `cost_usd` (H-12; spine §5 reading 236): a run whose model has no known price
+       * keeps `cost_usd` `null` (shown as unknown) and counts its tokens at the price ceiling of
+       * its host's known prices (`priceCeiling`). Absent: the budget counts `cost_usd`. New in
+       * 5.7.0.
+       */
+      budget_usd: z.number().nonnegative().max(1_000_000).optional(),
     })
     .refine((v) => v.exit !== "built" || v.head !== undefined, {
       message: "a built result names the commit it built (head)",
@@ -430,12 +460,19 @@ export const EVENT_PAYLOAD_SCHEMAS = {
     action_id: SlugSchema,
     reason: RejectReasonSchema,
     issues: z.array(z.string().min(1).max(500)).max(20).default([]),
+    /**
+     * The rejected run's shell calls as shapes (D-cs), as on `role.submitted`, so the `tool`
+     * signal counts tool use from runs the engine did not accept. New in 5.7.0.
+     */
+    command_shapes: z.array(CommandShapeCountSchema).max(MAX_COMMAND_SHAPES_PER_RUN).optional(),
   }),
   "role.failed": z.strictObject({
     action_id: SlugSchema,
     kind: z.enum(["auth", "error"]),
     message: z.string().max(2000),
     retryable: z.boolean(),
+    /** The failed run's shell calls as shapes (D-cs), as on `role.submitted`. New in 5.7.0. */
+    command_shapes: z.array(CommandShapeCountSchema).max(MAX_COMMAND_SHAPES_PER_RUN).optional(),
   }),
   "gate.result": GateReportSchema,
   "finding.recorded": z.strictObject({ finding: FindingSchema }),

@@ -17,6 +17,7 @@ import { UsageWindowKindSchema, type UsageSnapshot } from "../usage.js";
 import { HostErrorCauseSchema, type HostAuthStatus } from "../headless.js";
 import type { PluginLoadProof } from "./lookback.js";
 import type { CommandShape } from "../signals.js";
+import type { PriceTable } from "../project-config.js";
 
 /**
  * Terminal outcome of a role run, normalised across hosts to `done | limit | auth | error`
@@ -324,6 +325,14 @@ export interface ParsedStream {
 export interface HostAdapter {
   readonly host: HostId;
   readonly capabilities: HostCapabilities;
+  /**
+   * The host's default price table (H-12; spine §5 reading 236): list prices from the provider's
+   * public API pricing page, with its URL and as-of date, shipped with VTC and refreshed each
+   * release. The engine prices a run with no host-reported cost from it, the user's `prices`
+   * overriding per model (`effectivePrices`). Absent: the host reports its own cost (Claude Code).
+   * New in 5.7.0.
+   */
+  readonly defaultPrices?: PriceTable;
   /** Install plugin/agents/MCP registration for this host (§4.4 getting it running). */
   install(request: InstallRequest): Promise<InstallResult>;
   /** Start a role as an in-session subagent instruction or a headless process. */

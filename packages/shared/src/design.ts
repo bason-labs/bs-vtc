@@ -4,7 +4,13 @@
  * render matrix (§7.5) read them, so the shape lives here (AD-3).
  */
 import { z } from "zod";
-import { RelPathSchema, RequirementRefSchema, SlugSchema } from "./primitives.js";
+import {
+  EscalationIdSchema,
+  GlobSchema,
+  RelPathSchema,
+  RequirementRefSchema,
+  SlugSchema,
+} from "./primitives.js";
 
 /** Where the Designer writes the screen list (git-tracked, AD-7 rule 6). */
 export const DESIGN_SCREENS_PATH = ".vtc/design/screens.yaml";
@@ -78,13 +84,16 @@ export const prototypeStatePath = (route: string, state: string, theme: Prototyp
 /**
  * The DESIGN check of REQ → component → screen coverage (spec §9, §6.1 DESIGN), computed by engine
  * core before G2 from the frozen spec, the Architect's architecture artifact (its
- * requirement-to-component map), `screens.yaml` (each screen's `reqs`) and the Designer's
+ * requirement-to-component map, and since 5.7.0 (H-13) the REQs each AD names: a REQ an AD or a
+ * component names is covered), `screens.yaml` (each screen's `reqs`) and the Designer's
  * component specs (artifact type `component_specs`, which name the screens each component is used
  * on) against the component registry. `ok` = every requirement is mapped to a component, every UI
  * requirement has a screen, every screen covers a requirement, every component the specs use is
  * registered, a UI run's `screens.yaml` is there and valid, and a new-repo UI design offers
- * {@link G2_DIRECTIONS} directions. A G2 approval is refused while `ok` is false (spine §5
- * reading 146). New in 4.5.0; `reqs_without_component` and `screens_problem` new in 4.8.0;
+ * {@link G2_DIRECTIONS} directions. Since 5.7.0 (H-13; spine §5 reading 237) G2 is not
+ * shown until the coverage part is complete ({@link designCoverageComplete}): a failed check
+ * re-dispatches the Architect and the Designer ({@link DESIGN_COVERAGE_LOOP}); before 5.7.0 a G2
+ * approval was refused while `ok` was false and the human rejected G2 (reading 146). New in 4.5.0; `reqs_without_component` and `screens_problem` new in 4.8.0;
  * `directions_problem` new in 4.10.0.
  */
 export const DesignCoverageReportSchema = z
@@ -119,6 +128,119 @@ export const DesignCoverageReportSchema = z
     },
   );
 export type DesignCoverageReport = z.infer<typeof DesignCoverageReportSchema>;
+
+// ------------------------------------------------ coverage loop (5.7.0)
+
+/**
+ * The G2 coverage loop (H-13; spine §5 reading 237; replaces reading 146's "reject and redo"):
+ * engine core runs the DESIGN check before G2 is shown. While the coverage part fails
+ * ({@link designCoverageComplete}), it re-dispatches the roles {@link designCoverageRedispatch}
+ * names with the gaps ({@link DesignCoverageGaps}, `TaskPack.coverage_gaps`) and checks again, at
+ * most `maxRounds` fix rounds, with the stuck detection of the other fix loops (the same gaps after
+ * a round). G2 is shown only when coverage is complete; at the cap, or stuck, the run parks with a
+ * DESIGN-phase escalation (reason `cap` or `stuck`) that names the uncovered REQs and offers
+ * {@link DESIGN_COVERAGE_ESCALATION_OPTIONS}. No "approve anyway". New in 5.7.0.
+ */
+export const DESIGN_COVERAGE_LOOP = { maxRounds: 3 } as const;
+
+/**
+ * The options of the coverage loop's escalation (H-13): change the spec (the run goes back to
+ * SPECIFY and G1), or tell the Architect what to do (the answer reaches the next Architect
+ * dispatch as `TaskPack.answer`, and the loop runs again with a fresh round budget). New in 5.7.0.
+ */
+export const DESIGN_COVERAGE_ESCALATION_OPTIONS = ["change_spec", "instruct_architect"] as const;
+
+/**
+ * Pure (H-13): whether the coverage part of a DESIGN check is complete: every REQ named by an AD
+ * or a component, every UI REQ on a screen, every screen covering a REQ, every component a spec
+ * uses registered, and a usable `screens.yaml`. `directions_problem` is not coverage: it keeps
+ * its own rule (one Designer re-dispatch, then a blocking G2 notice, reading 174). New in 5.7.0.
+ */
+export const designCoverageComplete = (report: DesignCoverageReport): boolean =>
+  report.reqs_without_component.length === 0 &&
+  report.reqs_without_screen.length === 0 &&
+  report.screens_without_req.length === 0 &&
+  report.components_unregistered.length === 0 &&
+  report.screens_problem === undefined;
+
+/** The design roles the coverage loop re-dispatches. New in 5.7.0. */
+export const DesignCoverageRoleSchema = z.enum(["architect", "designer"]);
+export type DesignCoverageRole = z.infer<typeof DesignCoverageRoleSchema>;
+
+/**
+ * Pure (H-13): who fixes a failed coverage check. A REQ no AD or component names goes to the
+ * Architect; a UI REQ with no screen, a screen with no REQ, an unregistered component or an
+ * unusable `screens.yaml` goes to the Designer. Architect first: the Designer works from its
+ * output. New in 5.7.0.
+ */
+export const designCoverageRedispatch = (report: DesignCoverageReport): DesignCoverageRole[] => [
+  ...(report.reqs_without_component.length > 0 ? (["architect"] as const) : []),
+  ...(report.reqs_without_screen.length > 0 ||
+  report.screens_without_req.length > 0 ||
+  report.components_unregistered.length > 0 ||
+  report.screens_problem !== undefined
+    ? (["designer"] as const)
+    : []),
+];
+
+/**
+ * The gaps a coverage-loop re-dispatch fixes (`TaskPack.coverage_gaps`, H-13), printed as Dispatch
+ * lines: the fix round and the check's lists, ids only (the REQ texts are in the pack's
+ * requirements). New in 5.7.0.
+ */
+export const DesignCoverageGapsSchema = z.strictObject({
+  round: z.int().min(1).max(DESIGN_COVERAGE_LOOP.maxRounds),
+  reqs_without_component: z.array(RequirementRefSchema).default([]),
+  reqs_without_screen: z.array(RequirementRefSchema).default([]),
+  screens_without_req: z.array(SlugSchema).default([]),
+  components_unregistered: z.array(SlugSchema).default([]),
+  screens_problem: z.string().min(1).max(300).optional(),
+});
+export type DesignCoverageGaps = z.infer<typeof DesignCoverageGapsSchema>;
+
+/** Pure: the gaps of a failed check for fix round `round`. New in 5.7.0. */
+export const designCoverageGaps = (
+  report: DesignCoverageReport,
+  round: number,
+): DesignCoverageGaps =>
+  DesignCoverageGapsSchema.parse({
+    round,
+    reqs_without_component: report.reqs_without_component,
+    reqs_without_screen: report.reqs_without_screen,
+    screens_without_req: report.screens_without_req,
+    components_unregistered: report.components_unregistered,
+    ...(report.screens_problem === undefined ? {} : { screens_problem: report.screens_problem }),
+  });
+
+/**
+ * Payload of `design.coverage_checked` (H-13): one DESIGN check of the coverage loop, logged by
+ * engine core before G2, so Flow Studio can show the loop's status. `check` counts from 1 (the
+ * first check, before any fix round); `outcome` `complete` (G2 follows), `fixing` (the roles in
+ * `redispatched` run fix round `check`), or `parked` (`park_reason` `cap` or `stuck`, and the
+ * escalation that names the uncovered REQs). New in 5.7.0.
+ */
+export const DesignCoverageCheckedSchema = z
+  .strictObject({
+    check: z
+      .int()
+      .min(1)
+      .max(DESIGN_COVERAGE_LOOP.maxRounds + 1),
+    max_rounds: z.int().min(1).max(10),
+    report: DesignCoverageReportSchema,
+    outcome: z.enum(["complete", "fixing", "parked"]),
+    redispatched: z.array(DesignCoverageRoleSchema).max(2).default([]),
+    park_reason: z.enum(["cap", "stuck"]).optional(),
+    escalation: EscalationIdSchema.optional(),
+  })
+  .refine((v) => (v.outcome === "fixing") === v.redispatched.length > 0, {
+    message: "a fixing check names the roles it re-dispatches, and only a fixing check does",
+    path: ["redispatched"],
+  })
+  .refine((v) => (v.outcome === "parked") === (v.park_reason !== undefined), {
+    message: "park_reason is required for, and only allowed with, a parked check",
+    path: ["park_reason"],
+  });
+export type DesignCoverageChecked = z.infer<typeof DesignCoverageCheckedSchema>;
 
 /**
  * How many design directions G2 offers on a new-repo UI design (§9.1 steps 3 and 5; spine §5
@@ -212,3 +334,108 @@ export const ComponentSpecSchema = z.strictObject({
   uses: z.array(SlugSchema).default([]),
 });
 export type ComponentSpec = z.infer<typeof ComponentSpecSchema>;
+
+// ------------------------------------------------------- flows (5.7.0)
+
+/**
+ * Where a project names its user flows (D-ct, D-ce; spine §5 reading 247(7)): `.vtc/design/flows.yaml`,
+ * git-tracked, written by the Designer beside `screens.yaml` (and editable by the human). The gate
+ * runner scripts one of them on both sides of an automatic UI PR so the PR's `flow_video` shows
+ * the changed flow ({@link DesignFlowsFileSchema}, `BeforeAfterRequest.flow`). New in 5.7.0.
+ */
+export const DESIGN_FLOWS_PATH = ".vtc/design/flows.yaml";
+
+/** Bounds of a flows file and of one scripted flow. New in 5.7.0. */
+export const FLOW_LIMITS = {
+  maxFlows: 50,
+  maxSteps: 20,
+  maxWaitMs: 5000,
+  maxFixtures: 50,
+  maxFixtureChars: 200,
+} as const;
+
+const FlowRouteSchema = DesignScreenSchema.shape.route;
+/** A Playwright selector (CSS, `role=…`, `text=…`), one line. */
+const FlowSelectorSchema = z.string().regex(/^[^\r\n]{1,300}$/, "a one-line selector");
+
+/**
+ * One scripted step: open a route of the app (`goto`), click, fill a field with a named fixture
+ * of the file (never inline text), press a key, wait for a selector, or wait a bounded time. No
+ * script, no URL outside the app's origin. New in 5.7.0.
+ */
+export const FlowStepSchema = z.discriminatedUnion("action", [
+  z.strictObject({ action: z.literal("goto"), route: FlowRouteSchema }),
+  z.strictObject({ action: z.literal("click"), selector: FlowSelectorSchema }),
+  z.strictObject({ action: z.literal("fill"), selector: FlowSelectorSchema, fixture: SlugSchema }),
+  z.strictObject({
+    action: z.literal("press"),
+    key: z.string().regex(/^[A-Za-z0-9+]{1,30}$/, "a key name like Enter or Control+a"),
+  }),
+  z.strictObject({ action: z.literal("wait_for"), selector: FlowSelectorSchema }),
+  z.strictObject({ action: z.literal("wait"), ms: z.int().min(1).max(FLOW_LIMITS.maxWaitMs) }),
+]);
+export type FlowStep = z.infer<typeof FlowStepSchema>;
+
+/**
+ * One user flow: where it starts, the screens (`screens.yaml` ids) it passes and the source globs
+ * whose change it exercises (what selects it for a PR, {@link selectDesignFlow}), and its steps.
+ * New in 5.7.0.
+ */
+export const DesignFlowSchema = z
+  .strictObject({
+    id: SlugSchema,
+    start: FlowRouteSchema,
+    screens: z.array(SlugSchema).max(20).default([]),
+    paths: z.array(GlobSchema).max(50).default([]),
+    steps: z.array(FlowStepSchema).min(1).max(FLOW_LIMITS.maxSteps),
+  })
+  .refine((flow) => flow.screens.length > 0 || flow.paths.length > 0, {
+    message: "a flow names the screens it passes or the paths it exercises",
+    path: ["paths"],
+  });
+export type DesignFlow = z.infer<typeof DesignFlowSchema>;
+
+/** `.vtc/design/flows.yaml`. Readers parse it with `parsePersisted`. New in 5.7.0. */
+export const DesignFlowsFileSchema = z
+  .strictObject({
+    version: z.literal(1).default(1),
+    /** Values the `fill` steps type, by name; no secret belongs here (the file is committed). */
+    fixtures: z
+      .record(SlugSchema, z.string().max(FLOW_LIMITS.maxFixtureChars))
+      .refine((f) => Object.keys(f).length <= FLOW_LIMITS.maxFixtures, "too many fixtures")
+      .default({}),
+    flows: z.array(DesignFlowSchema).max(FLOW_LIMITS.maxFlows),
+  })
+  .superRefine((file, ctx) => {
+    const ids = file.flows.map((f) => f.id);
+    if (new Set(ids).size !== ids.length) {
+      ctx.addIssue({ code: "custom", path: ["flows"], message: "flow ids must be unique" });
+    }
+    file.flows.forEach((flow, i) => {
+      flow.steps.forEach((step, j) => {
+        if (step.action === "fill" && !Object.hasOwn(file.fixtures, step.fixture)) {
+          ctx.addIssue({
+            code: "custom",
+            path: ["flows", i, "steps", j, "fixture"],
+            message: `unknown fixture ${step.fixture}`,
+          });
+        }
+      });
+    });
+  });
+export type DesignFlowsFile = z.infer<typeof DesignFlowsFileSchema>;
+export type DesignFlowsFileInput = z.input<typeof DesignFlowsFileSchema>;
+
+/**
+ * Pure (D-ct; spine §5 reading 247(7)): the flow an automatic UI PR records, from the head's flows
+ * file: the first flow, in file order, one of whose `paths` matches a changed path, else the first
+ * that passes a touched screen; `undefined` when none does (the PR keeps the first-screen
+ * recording, captioned as such). `match` is the caller's glob matcher (the engine's). New in 5.7.0.
+ */
+export const selectDesignFlow = (
+  file: DesignFlowsFile,
+  change: { readonly changedPaths: readonly string[]; readonly screens?: readonly string[] },
+  match: (glob: string, path: string) => boolean,
+): DesignFlow | undefined =>
+  file.flows.find((f) => f.paths.some((g) => change.changedPaths.some((p) => match(g, p)))) ??
+  file.flows.find((f) => f.screens.some((s) => (change.screens ?? []).includes(s)));

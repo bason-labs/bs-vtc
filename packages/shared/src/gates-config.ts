@@ -40,6 +40,29 @@ export type ReportFormat = z.infer<typeof ReportFormatSchema>;
 export const GatePhaseSchema = z.enum(["install", "verify"]);
 export type GatePhase = z.infer<typeof GatePhaseSchema>;
 
+/**
+ * Where a check gate's tool comes from (H-14; spine §5 readings 80(c) and 238): install-phase code
+ * the role controls must not be able to replace the lint tool (or any other check tool) before
+ * the gate runs it.
+ * - `pinned`: a VTC-owned copy, one of the product's pins in `gates/scanners.json` by `name`
+ *   ({@link ScannerPinSchema}), run from VTC's store and re-verified against its `binary_sha256`
+ *   before each use; the gate's `command[0]` names the tool, the store's path replaces it.
+ * - `project`: the project's own tool, the files under `paths` (for example
+ *   `node_modules/eslint/**` and `node_modules/.bin/eslint`). The gate runner hashes them after a
+ *   scripts-free install, before any install-phase lifecycle script runs, and again before the
+ *   gate; any change, addition or removal fails the gate as tampering
+ *   (`GateResult.tool.tampered`).
+ * New in 5.7.0.
+ */
+export const CheckToolSchema = z.discriminatedUnion("source", [
+  z.strictObject({ source: z.literal("pinned"), pin: SlugSchema }),
+  z.strictObject({
+    source: z.literal("project"),
+    paths: z.array(GlobSchema).min(1).max(50),
+  }),
+]);
+export type CheckTool = z.infer<typeof CheckToolSchema>;
+
 export const GateSchema = z
   .strictObject({
     id: SlugSchema,
@@ -60,6 +83,14 @@ export const GateSchema = z
     blocking: z.boolean().default(true),
     /** Run only when the diff touches these globs (e.g. Checkov only when IaC changes, §7.2 L4). */
     when_changed: z.array(GlobSchema).optional(),
+    /**
+     * The check tool's source (H-14, {@link CheckToolSchema}), set by `vtc calibrate` for every
+     * verify-phase gate that runs a tool (lint, type check, scanners other than the pinned
+     * scanners, which always run from the store). Absent on such a gate: the gate runner derives a
+     * `project` tool from `command[0]` (the resolved executable and the package it belongs to).
+     * New in 5.7.0.
+     */
+    tool: CheckToolSchema.optional(),
   })
   .superRefine((gate, ctx) => {
     if (!gate.blocking && gate.layer !== "L6") {

@@ -49,12 +49,14 @@ import {
 import { AdCheckSpecSchema } from "./architecture-checks.js";
 import {
   ComponentSpecSchema,
+  DesignCoverageCheckedSchema,
   DesignCoverageReportSchema,
+  DesignFlowsFileSchema,
   DesignScreensFileSchema,
   G2DirectionDraftSchema,
   G2DirectionSchema,
 } from "./design.js";
-import { HostAuthStatusSchema } from "./headless.js";
+import { HostAuthStatusSchema, ModelRefusalRowSchema } from "./headless.js";
 import {
   AaNoiseRowSchema,
   AttributionSchema,
@@ -67,6 +69,7 @@ import {
   ReplayInfraRowSchema,
   ReplayResultSchema,
   ReplayTrialRowSchema,
+  RoutingReplayResultSchema,
   RoutingScorecardSchema,
   ScorecardIndexSchema,
   ScorecardSchema,
@@ -108,7 +111,7 @@ import {
 import { GateAllowlistSchema, GatesConfigSchema, ScannerPinsSchema } from "./gates-config.js";
 import { HostOutcomeSchema, SubagentInstructionSchema } from "./interfaces/host-adapter.js";
 import { PluginManifestSchema } from "./plugin-manifest.js";
-import { ProjectConfigSchema, UserConfigSchema } from "./project-config.js";
+import { PriceTableSchema, ProjectConfigSchema, UserConfigSchema } from "./project-config.js";
 import { QuestionSchema } from "./question.js";
 import { RoleContractSchema } from "./role-contract.js";
 import { RoleResultSchema } from "./role-result.js";
@@ -281,6 +284,12 @@ export const CONTRACT_SCHEMAS = {
   RoutingTable: RoutingTableSchema,
   RoutingScorecard: RoutingScorecardSchema,
   CommandShapeSpoolRow: CommandShapeSpoolRowSchema,
+  // ---- contracts 5.7.0 (round 6: H-12..H-14, D-cu..D-cx and the round-5 carryover, readings 234-248)
+  PriceTable: PriceTableSchema,
+  ModelRefusalRow: ModelRefusalRowSchema,
+  DesignCoverageChecked: DesignCoverageCheckedSchema,
+  DesignFlowsFile: DesignFlowsFileSchema,
+  RoutingReplayResult: RoutingReplayResultSchema,
 } as const;
 export type ContractName = keyof typeof CONTRACT_SCHEMAS;
 

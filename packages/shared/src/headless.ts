@@ -93,7 +93,11 @@ export const headlessPolicyFor = (headless: HeadlessConfig | undefined): Headles
 /**
  * Why a headless run ended in `error` (`HostOutcome` `error.cause`): the wall timeout, the idle
  * timeout, a kill (exit 143 after SIGTERM, or `vtc pause`), the host's turn cap, its budget cap, a
- * non-zero exit with no terminal stream event, or a process that never started.
+ * non-zero exit with no terminal stream event, or a process that never started. `model_refused`
+ * (5.7.0, D-cx; spine §5 reading 244): the host refused the model id the run asked for ("model
+ * not available" on the user's plan, or similar), before any work; the adapter reads it from the
+ * host's own error text, and the engine runs the dispatch once more without a model flag
+ * ({@link ModelFallbackSchema}), so a refusal never fails the role.
  */
 export const HostErrorCauseSchema = z.enum([
   "timeout",
@@ -103,8 +107,49 @@ export const HostErrorCauseSchema = z.enum([
   "budget",
   "exit_code",
   "spawn",
+  "model_refused",
 ]);
 export type HostErrorCause = z.infer<typeof HostErrorCauseSchema>;
+
+/** A model id as a host names it (no ARN, no account data; the same form as a priced model id). */
+const HostModelIdSchema = z
+  .string()
+  .min(1)
+  .max(200)
+  .regex(/^[A-Za-z0-9][A-Za-z0-9._:/@-]*$/, "a model id");
+
+/**
+ * Why a dispatch runs on the host's default model instead of the one it resolved
+ * (`role.dispatched.model_fallback`, D-cx; spine §5 reading 244): the host refused `requested` for
+ * the run before (`reason` `model_refused`, the previous attempt's `HostOutcome` `error.cause`).
+ * The retry passes no model flag (the host session's default, D-ae) and is made once per
+ * dispatch; a second refusal is an ordinary error. `detail` is the host's one-line message,
+ * trimmed, which stays in the project's run log. New in 5.7.0.
+ */
+export const ModelFallbackSchema = z.strictObject({
+  requested: HostModelIdSchema,
+  reason: z.literal("model_refused"),
+  detail: z.string().min(1).max(300).optional(),
+});
+export type ModelFallback = z.infer<typeof ModelFallbackSchema>;
+
+/**
+ * The model ids a host refused on this machine's sign-in (D-cx): `engines/model-refusals.jsonl`
+ * under the VTC home ({@link MODEL_REFUSALS_FILE}), one {@link ModelRefusalRow} per refusal,
+ * appended by the engine only (created `0600`, a symlink refused; `engines/` is role-denied).
+ * `vtc doctor` lists each (host, model) refused with its last time; the engine may skip the
+ * model flag for an id refused within the last day instead of asking again. New in 5.7.0.
+ */
+export const MODEL_REFUSALS_FILE = "engines/model-refusals.jsonl";
+
+export const ModelRefusalRowSchema = z.strictObject({
+  v: z.literal(1),
+  at: IsoDateTimeSchema,
+  host: HostIdSchema,
+  model: HostModelIdSchema,
+  detail: z.string().min(1).max(300).optional(),
+});
+export type ModelRefusalRow = z.infer<typeof ModelRefusalRowSchema>;
 
 // --------------------------------------------------------------------- auth
 /**

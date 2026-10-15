@@ -238,6 +238,79 @@ export const priceTokens = (tokens: TokenUsage, price: ModelPrice): number => {
 };
 
 /**
+ * A host's default price table (H-12; spine §5 reading 236): list prices taken from the
+ * provider's public API pricing page, with that page's URL and the date they were read, shipped
+ * with VTC by the host's adapter (`HostAdapter.defaultPrices`) and refreshed with each VTC release.
+ * The user never has to fill a table: `~/.vtc/config.yaml` `prices` may override any model, never
+ * must. New in 5.7.0.
+ */
+export const PriceTableSchema = z.strictObject({
+  v: z.literal(1),
+  /** The public pricing page the prices were read from (https only). */
+  source_url: z.url().refine((u) => u.startsWith("https://"), "a price source must use https"),
+  /** The day the prices were read (`YYYY-MM-DD`). */
+  as_of: z.iso.date(),
+  prices: z
+    .record(PricedModelIdSchema, ModelPriceSchema)
+    .refine((table) => Object.keys(table).length <= 200, "at most 200 priced models"),
+});
+export type PriceTable = z.infer<typeof PriceTableSchema>;
+export type PriceTableInput = z.input<typeof PriceTableSchema>;
+
+/**
+ * Pure (H-12): the prices the engine uses for one host, the user's `prices` over the host's
+ * default table, model by model. Either may be absent. New in 5.7.0.
+ */
+export const effectivePrices = (
+  defaults: PriceTable | undefined,
+  user: Readonly<Record<string, ModelPrice>> | undefined,
+): Readonly<Record<string, ModelPrice>> => ({ ...(defaults?.prices ?? {}), ...(user ?? {}) });
+
+/**
+ * Pure (H-12): the price ceiling of a set of known prices: each token type at the highest price
+ * any of them charges for it, so tokens counted at the ceiling are never under-counted. `undefined`
+ * when no price is known. New in 5.7.0.
+ */
+export const priceCeiling = (prices: readonly ModelPrice[]): ModelPrice | undefined => {
+  if (prices.length === 0) return undefined;
+  const max = (pick: (p: ModelPrice) => number): number => Math.max(...prices.map(pick));
+  return {
+    input_per_mtok: max((p) => p.input_per_mtok),
+    cached_input_per_mtok: max((p) => p.cached_input_per_mtok),
+    output_per_mtok: max((p) => p.output_per_mtok),
+    cache_write_per_mtok: max((p) => p.cache_write_per_mtok),
+  };
+};
+
+/**
+ * Pure (H-12; replaces reading 152's refusal of unpriced runs): what a run with `tokens` on
+ * `model` costs and what it counts toward budgets, given its host's effective prices
+ * ({@link effectivePrices}). A listed model: both are its price. A model with no known price never
+ * blocks a run: its cost is unknown (`cost_usd: null`, shown as "unknown") and the budget counts
+ * its tokens at the {@link priceCeiling} of the host's known prices (`budget_usd`; `null` only when
+ * the host has no known price at all, which `vtc doctor` warns about). New in 5.7.0.
+ */
+export const priceRun = (
+  tokens: TokenUsage,
+  model: string | null | undefined,
+  prices: Readonly<Record<string, ModelPrice>>,
+): {
+  readonly cost_usd: number | null;
+  readonly budget_usd: number | null;
+  readonly basis: "listed" | "ceiling" | "none";
+} => {
+  const listed = model === null || model === undefined ? undefined : prices[model];
+  if (listed !== undefined) {
+    const usd = priceTokens(tokens, listed);
+    return { cost_usd: usd, budget_usd: usd, basis: "listed" };
+  }
+  const ceiling = priceCeiling(Object.values(prices));
+  return ceiling === undefined
+    ? { cost_usd: null, budget_usd: null, basis: "none" }
+    : { cost_usd: null, budget_usd: priceTokens(tokens, ceiling), basis: "ceiling" };
+};
+
+/**
  * `~/.vtc/config.yaml`: settings that belong to the person and the machine, never to a repo.
  * Read with `parsePersisted`; a missing file is `{ version: 1 }`.
  * - `env_passthrough` (D-ak, spine §5 reading 57): the detached daemon drops credential
@@ -252,11 +325,12 @@ export const priceTokens = (tokens: TokenUsage, price: ModelPrice): number => {
  *   records an `unsandboxed_gate` incident. Like `env_passthrough` it exists only here, never in
  *   `project.yaml`, so a repo cannot switch the gate sandbox off.
  * - `prices` (§11, H-1; spine §5 reading 152): the engine's price table, model id → list price
- *   ({@link ModelPriceSchema}). The engine prices a run's tokens from it only when the host reported
- *   no cost (Codex reports none). An engine-launched run on a host that cannot cap its own spend
- *   (Codex) must be priceable here, or it does not start: a model missing from the price table is
- *   an error, never $0 (§11). Only here, never in `project.yaml`: a repo could otherwise price its
- *   own runs at zero. New in 4.9.0.
+ *   ({@link ModelPriceSchema}). The engine prices a run's tokens only when the host reported no
+ *   cost (Codex reports none). Only here, never in `project.yaml`: a repo could otherwise price its
+ *   own runs at zero. New in 4.9.0. Since 5.7.0 (H-12; spine §5 reading 236) it is an optional
+ *   override over the host adapter's default table ({@link PriceTableSchema},
+ *   {@link effectivePrices}); a model with no known price never blocks a run (its cost is unknown
+ *   and the budget counts it at the {@link priceCeiling}, {@link priceRun}).
  */
 export const UserConfigSchema = z.strictObject({
   version: z.literal(1),
