@@ -18,3 +18,7 @@ it for good, or `vtc:keep` to keep it open while it is quiet.
 {{evidence}}
 
 {{provenance}}
+
+## Reviewer checklist
+
+{{checklist}}

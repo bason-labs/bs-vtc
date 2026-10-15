@@ -122,9 +122,6 @@ describe("the Spec Verifier on an automatic run (D-cd, reading 198)", () => {
     expect(PACK_INPUT_TYPES.automationIssue).toBe("automation_issue");
     expect(Object.keys(compiler)).not.toContain("PENDING_PACK_INPUTS");
   });
-  it.todo(
-    "merge gate: engine core lists automation_issue in the Spec Verifier's pack on automatic runs only (engine-core followup)",
-  );
 
   it("still quotes the criterion from Requirements and checks it against the issue", () => {
     const body = claudeBody("vtc-spec-verifier");
@@ -247,11 +244,12 @@ describe("the automatic templates and the CHANGELOG (D-bv, reading 208)", () => 
     expect(template("auto-pr")).not.toContain(NEVER_MERGES_LINE);
   });
 
-  it("keeps a PR body in AUTO_TEMPLATE_SLOTS order, with no diff slot", () => {
+  it("keeps a PR body in AUTO_TEMPLATE_SLOTS order, with the diff right after the changes", () => {
     const pr = template("auto-pr");
     const slots = [...pr.matchAll(/\{\{([a-z_]+)\}\}/g)].map((m) => m[1] ?? "");
-    expect(slots).toEqual(AUTO_TEMPLATE_SLOTS.filter((slot) => slots.includes(slot)));
-    expect(slots).not.toContain("diff");
+    const rest = slots.filter((slot) => slot !== "diff");
+    expect(rest).toEqual(AUTO_TEMPLATE_SLOTS.filter((slot) => rest.includes(slot)));
+    expect(slots[slots.indexOf("changes") + 1]).toBe("diff");
   });
 
   it("leaves the provenance <details> block to the renderer's provenance value", () => {

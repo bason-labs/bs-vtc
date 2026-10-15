@@ -30,12 +30,15 @@ export const AUTO_TEMPLATE_SOURCE_DIR = "plugins/common/templates";
 export const NEVER_MERGES_LINE = "For human review only: VTC never merges automatic PRs.";
 
 /**
- * The slots of each template, each exactly once and in this order, which is also their order in
- * `AUTO_TEMPLATE_SLOTS` (spine §5 reading 208 (5)). A PR body: marker, note, summary, why,
- * changes, evidence, verification, risk, provenance, checklist; a prompt PR's diff is in the pull
- * request's own diff and its CHANGELOG entry, not in the body. An issue has no changes,
- * verification, risk or checklist. A CHANGELOG entry (`ROLES_CHANGELOG`, D-bv) records the
- * hypothesis, the trace ids, the diff and the evaluation.
+ * The slots of each template, each exactly once and in this order (spine §5 reading 208 (5)): the
+ * order of `AUTO_TEMPLATE_SLOTS`, except that a PR body's `diff` follows `changes`, as the shared
+ * doc on `AUTO_TEMPLATE_SLOTS` says. A PR body: marker, note, summary,
+ * why, changes, diff, evidence, verification, risk, provenance, checklist; the upstream renderer
+ * fills `diff` with a prompt PR's fenced diff (and drops it first when a body is too long), and it
+ * reads "unavailable" on every other PR. An issue has no changes, diff, verification or risk, and
+ * ends with the reviewer checklist the upstream renderer fills for every issue kind. A CHANGELOG
+ * entry (`ROLES_CHANGELOG`, D-bv) records the hypothesis, the trace ids, the diff and the
+ * evaluation.
  */
 export const AUTO_TEMPLATE_LAYOUT: Readonly<Record<AutoTemplateName, readonly AutoTemplateSlot[]>> =
   {
@@ -45,13 +48,14 @@ export const AUTO_TEMPLATE_LAYOUT: Readonly<Record<AutoTemplateName, readonly Au
       "summary",
       "why",
       "changes",
+      "diff",
       "evidence",
       "verification",
       "risk",
       "provenance",
       "checklist",
     ],
-    "auto-issue": ["marker", "note", "summary", "why", "evidence", "provenance"],
+    "auto-issue": ["marker", "note", "summary", "why", "evidence", "provenance", "checklist"],
     "changelog-entry": ["title", "hypothesis", "trace_ids", "diff", "evaluation"],
   };
 

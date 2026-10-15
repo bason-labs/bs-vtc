@@ -55,16 +55,19 @@ Both also get:
   issues and pull requests (AD-27; spine §5 readings 190 and 208). They use only `{{slot}}`
   placeholders from `AUTO_TEMPLATE_SLOTS`, which the compiler never fills. The compiler requires
   all three and checks each against `AUTO_TEMPLATE_LAYOUT`: every slot once and in the order of
-  `AUTO_TEMPLATE_SLOTS` (reading 208 (5)), and in a PR or issue the marker on the first line and
-  `{{note}}` on the next. A slot that can hold several lines stands on a line of its own; only
-  `title`, `hypothesis` and `trace_ids` may sit inside a line. A PR body: marker, note, summary,
-  why, changes, evidence, verification, risk and rollback, provenance, reviewer checklist; a
-  prompt PR's diff is in the pull request's own diff and its CHANGELOG entry. What a slot's value
-  holds: `{{note}}` is the renderer's whole NOTE callout, its `> [!NOTE]` header included, and in a
-  PR it says "For human review only: VTC never merges automatic PRs." (D-bw), so the template
+  `AUTO_TEMPLATE_SLOTS` (reading 208 (5)), except that a PR body's `{{diff}}` follows
+  `{{changes}}` as the shared doc on `AUTO_TEMPLATE_SLOTS` says, and in a PR or issue the marker
+  on the first line and `{{note}}` on the next. A slot that can hold several lines stands on a
+  line of its own; only `title`, `hypothesis` and `trace_ids` may sit inside a line. A PR body:
+  marker, note, summary, why, changes, diff, evidence, verification, risk and rollback,
+  provenance, reviewer checklist. The upstream renderer fills `{{diff}}` with a prompt PR's
+  fenced diff and drops it first when a body is too long; on any other PR it reads
+  "unavailable". What a slot's value holds: `{{note}}` is the renderer's whole NOTE callout, its
+  `> [!NOTE]` header included, and in a PR it says "For human review only: VTC never merges automatic PRs." (D-bw), so the template
   opens no callout of its own; `{{provenance}}` is the renderer's whole `<details>` block, so the
-  template wraps it in none. That split matches the upstream module's renderer; the shared doc
-  lines on the two slots are a contract proposal of this branch;
+  template wraps it in none. That split matches the upstream module's renderer and the shared
+  doc on `AUTO_TEMPLATE_SLOTS` (contracts 5.1.0, reading 212 (2)). An issue ends with the
+  reviewer checklist the renderer fills for every issue kind;
 - `hooks/hooks.json`: `SessionStart`, `PreToolUse` and `SubagentStop` wired to
   `vtcHookCommand(event, host)` (`vtc hook <event> --host <host>`), each with the timeout
   `VTC_HOOK.timeoutMs` in seconds (spine §5 reading 31). Generated, never hand-written: the
@@ -78,6 +81,49 @@ Both also get:
   Nothing is blocked, since a missing command is not the block exit, but the noise is constant.
   Whether the adapter's install checks for `vtc` or the hooks run through a plugin-root shim is
   proposed as a question for the hook-wiring spike row (spine §7).
+
+  **Hooks in headless role runs** (round 5, the adapters' D-cl question; proposed by
+  roles-compiler for adapters and the cli to confirm). An engine-launched headless Claude role
+  run loads this same plugin (`--plugin-dir`), so its hooks run there too. The compiler emits one
+  plugin with one hook set for the Lead and the role runs, and no hook-free role-run variant:
+  - `SessionStart` is a no-op in a role run by design: `vtc hook session-start` returns at once,
+    printing nothing, when the session's `agent_type` is a VTC role agent, so no resume hint
+    reaches a role's context. Only the Lead's session gets one.
+  - `PreToolUse` stays on in role runs: it is the same extra layer of defence against a role's
+    git or out-of-scope write as for an in-session subagent.
+  - The D-cl run's exit 127 was a dev run with no `vtc` on `PATH`. A missing command is not the
+    block exit, so it fails open; the adapter treats a hook error as noise, never as a role
+    failure. An installed VTC has `vtc` on `PATH` (the plugin's MCP server needs it too), so no
+    extra `PATH` entry is added for role runs.
+  - Since `PreToolUse` also runs in headless role runs, a command-shape spool row (D-cs) can come
+    from one. The engine takes a headless dispatch's shapes from the adapter's
+    `ParsedStream.commandShapes` only and drains spool rows into in-session dispatches only, so
+    a shell call is never counted twice.
+
+  Cross-checked against the code the other two teams own at build/foundation 268298c (no peer
+  session was running, so the check is against their shipped code and tests, not live):
+  - cli: `sessionStart` in `packages/cli/src/hook.ts` returns at once for `isVtcRoleAgent`
+    (`hook-rules.ts`, which accepts the namespaced `vtc:vtc-*` form), and `hook.test.ts` ("gives a
+    VTC role session no hint") pins it; `preToolUse` acts only for role agents.
+  - adapters: `parseClaudeEvents` (`packages/adapters/src/claude-code/events.ts`) takes a run's
+    outcome from its `result` event, so a `system` `hook_started`/`hook_response` event never
+    changes it; the recorded streams (`test/fixtures/claude-code/stream-success.jsonl`,
+    `stream-arm-success.jsonl`) carry the D-cl `SessionStart` `hook_response` with `exit_code`
+    127 and still parse as a success (`events.test.ts`).
+  - One assumption is still unconfirmed live: that Claude Code puts `agent_type` (`vtc:<agent>`)
+    in a headless `--agent` run's hook input, for `SessionStart` and for `PreToolUse` alike. The
+    D-cl run had no `vtc` on `PATH`, so the hook never read its input. Both behaviours above rest
+    on it: `sessionStart` stays silent only for a role agent, and `preToolUse` returns allow at
+    once when `isVtcRoleAgent(input.agent_type)` is false (`packages/cli/src/hook.ts`). Without
+    the field, a role run would get the Lead's resume hint, and the `PreToolUse` defence layer
+    would do nothing in every headless role run, not only when `vtc` is off `PATH`. The engine
+    stays the enforcement point either way (AD-8 rule 3), so this is a gap in a defence layer,
+    not a bypass. The next adapters arm check with `vtc` on `PATH` confirms both events: no
+    resume hint reaches the role's transcript, and a role's out-of-scope `Write` is denied by
+    the hook. If the field is missing, the fix stays outside the compiler and covers both
+    events: the adapter marks its headless runs (for example an environment variable it sets on
+    the child, naming the role agent) and `vtc hook` reads that mark when `agent_type` is
+    absent, a cli and adapters change with a `@vtc/shared` hook-contract line.
 
 - **Role agents cannot reach the Lead's tools.** Claude Code agents get an explicit `tools:`
   allowlist: the read tools, file writes for write-scoped profiles, `Bash` for the Engineer
