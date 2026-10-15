@@ -28,7 +28,10 @@
  *   start does when its modes share one `roles.qa` cell, is dropped);
  * - _cheaper_: a cheaper start tier's readable cell has every pass rate the current cell measures
  *   (`first_round_gate_pass`, `review_pass`) within `routingQualityMarginPct` points and does not
- *   keep escalating itself; the cheapest such tier is proposed. QA in author mode is never proposed
+ *   keep escalating itself; the cheapest such tier is proposed. Only a `rule` or `role` cell (a
+ *   `routing.start: role` project starts every task on the role's tier) is such evidence: a
+ *   `planner_hint` cell holds the tasks the Planner judged unlike their size and tags (reading
+ *   218(3)), a biased sample of the (size, risk) cell. QA in author mode is never proposed
  *   below `QA_AUTHOR_MIN_TIER` (spec §5.2).
  * The groups of one (role, size, risk) cell of the table agree, or nothing changes: any _higher_
  * wins (safety first), and a group that compared a cheaper tier and found it worse blocks a
@@ -43,7 +46,11 @@
  * prompt on both arms, the start tier differing) is planned for it only while the caller's trial
  * budget allows; otherwise the scorecard is the evidence. A planned tier replay is a plan only:
  * replay dispatch has no tier arm yet (reading 218(7) holds a trial on its recorded tier), so the
- * fact says `routing.replay_planned`, never that a replay ran.
+ * fact says `routing.replay_planned`, never that a replay ran. That arm (a `lookback_replay` trial
+ * that runs on a given tier) is a contract proposal to engine core; until it lands
+ * `lookbackRoutingStep` passes no trial budget, so no tier replay is planned and
+ * {@link routingReplayTasks} has no caller: reading 219's "a tier replay where the trial budget
+ * allows" is open scope.
  */
 import {
   DEFAULT_ROUTING_TABLE,
@@ -463,9 +470,11 @@ const decide = (
   const pick = (tier: ModelTier): RoutingCell | undefined => {
     const at = cells.filter((c) => c.start_tier === tier);
     const best = (list: readonly RoutingCell[]) => [...list].sort((a, b) => b.tasks - a.tasks)[0];
+    // a cheaper tier's evidence is never a Planner-hinted cell: the Planner put those tasks there
+    // because their size and tags misjudge them (reading 218(3)), so they do not speak for the cell
     return tier === current
       ? (best(at.filter((c) => c.start_reason === "rule")) ?? best(at))
-      : best(at);
+      : best(at.filter((c) => c.start_reason !== "planner_hint"));
   };
   const now = pick(current);
   if (!readable(now)) return undefined;
