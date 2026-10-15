@@ -25,14 +25,21 @@ import { readFixture } from "../fixtures";
  */
 const golden = (): TaskDetail => TaskDetailSchema.parse(readFixture("task-T-1"));
 
+/** A golden role run without the tier fields, as a run logged before 5.4.0 reads. */
+const unrouted = (run: RoleRunSummary): RoleRunSummary => {
+  const { tier: _tier, tier_reason: _reason, tier_clamped: _clamped, ...rest } = run;
+  return rest;
+};
+
 /** The golden T-1 with its role runs changed, checked against the contract. */
 const withRuns = (
   runs: readonly Partial<RoleRunSummary>[],
   task: Partial<TaskDetail["task"]> = {},
 ): TaskDetail => {
   const base = golden();
-  const [first] = base.role_runs;
-  if (first === undefined) throw new Error("the golden T-1 has no role run");
+  const [routed] = base.role_runs;
+  if (routed === undefined) throw new Error("the golden T-1 has no role run");
+  const first = unrouted(routed);
   return TaskDetailSchema.parse({
     ...base,
     task: { ...base.task, ...task },
@@ -86,7 +93,7 @@ describe("roleRunTier", () => {
   });
 
   it("shows nothing for a run logged before 5.4.0 (no tier)", () => {
-    expect(roleRunTier(golden().role_runs[0]!)).toBeNull();
+    expect(roleRunTier(unrouted(golden().role_runs[0]!))).toBeNull();
   });
 });
 
@@ -138,6 +145,10 @@ describe("taskRouting", () => {
   });
 
   it("is empty for a task with neither a hint nor a routed run", () => {
-    expect(taskRouting(golden())).toEqual({ hint: null, runs: [] });
+    const base = golden();
+    expect(taskRouting({ ...base, role_runs: base.role_runs.map(unrouted) })).toEqual({
+      hint: null,
+      runs: [],
+    });
   });
 });
