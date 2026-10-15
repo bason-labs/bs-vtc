@@ -14,12 +14,14 @@ import { existsSync, readFileSync } from "node:fs";
 import { createServer, type AddressInfo } from "node:net";
 import { isAbsolute, join } from "node:path";
 import { type BeforeAfterRequest } from "@vtc/shared";
-import { describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it } from "vitest";
 import { createEvidenceRecorder } from "../../../src/gates/capture/index.js";
 import { addToAllowlist } from "../../../src/gates/index.js";
 import { createGitOps } from "../../../src/git/index.js";
-import { git, initRepo, tempDir, writeFile } from "../../helpers/repo.js";
+import { cleanupDirs, git, initRepo, tempDir, writeFile } from "../../helpers/repo.js";
 import { commitAll, config, NODE } from "../fixture.js";
+
+afterEach(cleanupDirs);
 
 const home = process.env.VTC_LIVE_VTC_HOME ?? "";
 const live = process.env.VTC_LIVE_BROWSER === "1" && isAbsolute(home) && existsSync(home);
@@ -33,6 +35,7 @@ copyFileSync("src/page.html", "dist/index.html");
 /** Serves dist/index.html, with a secret-looking account number the redaction must paint. */
 const SERVE = `import { createServer } from "node:http";
 import { readFileSync } from "node:fs";
+
 const page = readFileSync("dist/index.html", "utf8");
 createServer((req, res) => {
   res.writeHead(200, { "content-type": "text/html; charset=utf-8" });

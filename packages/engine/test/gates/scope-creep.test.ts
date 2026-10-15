@@ -1,6 +1,6 @@
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
-import { describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it } from "vitest";
 import {
   GateReportSchema,
   routeForFinding,
@@ -12,7 +12,9 @@ import {
 import { parseJunit } from "../../src/gates/parsers/junit.js";
 import { computeScopeCreep, scopeCreepFindings } from "../../src/gates/scope-creep.js";
 import { commitAll, config, harness, testsGate, cases } from "./fixture.js";
-import { writeFile } from "../helpers/repo.js";
+import { cleanupDirs, writeFile } from "../helpers/repo.js";
+
+afterEach(cleanupDirs);
 
 const FILES: Record<string, string> = {
   "tests/a.test.ts": 'import { a } from "../src/a";\nit("[REQ-1] a", () => a());\n',

@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it } from "vitest";
 import { finalReviewStepsCovered, GateReportSchema, ToolFindingSchema } from "@vtc/shared";
 import {
   dependenciesOf,
@@ -9,7 +9,9 @@ import {
 import { patternProblem } from "../../src/gates/arch/checks.js";
 import { PatternTimeoutError } from "../../src/gates/arch/evaluate.js";
 import { commitAll, config, harness, testsGate, cases } from "./fixture.js";
-import { writeFile } from "../helpers/repo.js";
+import { cleanupDirs, writeFile } from "../helpers/repo.js";
+
+afterEach(cleanupDirs);
 
 const SPINE = `# Spine
 
