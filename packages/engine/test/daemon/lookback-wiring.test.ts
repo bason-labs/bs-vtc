@@ -55,6 +55,7 @@ import {
   routingConfigFact,
   routingTrialBudget,
   wireLookback,
+  withRoutingAtRetro,
   type RoutingLookback,
 } from "../../src/daemon/index.js";
 import { liveLookbackConfig, sampleReplayTasks } from "../../src/daemon/replays.js";
@@ -891,6 +892,24 @@ describe("the routing step's trial budget (D-cn, reading 247(6))", () => {
   it("is 0 while a limit holds the replays back", () => {
     expect(routingTrialBudget(undefined, null, { replays: [], waitKind: "weekly_window" })).toBe(0);
     expect(routingTrialBudget(undefined, null, { replays: [], waitKind: "budget" })).toBe(0);
+  });
+
+  it("runs the routing step after the replays are planned, and with no trials when planning fails", async () => {
+    const calls: { state: string; planned: string | null }[] = [];
+    const routing = (state: string, planned: string | null): void => {
+      calls.push({ state, planned });
+    };
+    await expect(withRoutingAtRetro(() => Promise.resolve("planned"), routing)("r1")).resolves.toBe(
+      "planned",
+    );
+    const failing = withRoutingAtRetro((): Promise<string> => {
+      throw new Error("replay planning failed");
+    }, routing);
+    await expect(failing("r2")).rejects.toThrow("replay planning failed");
+    expect(calls).toEqual([
+      { state: "r1", planned: "planned" },
+      { state: "r2", planned: null },
+    ]);
   });
 });
 

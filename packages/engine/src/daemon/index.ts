@@ -283,6 +283,26 @@ export const routingTrialBudget = (
 };
 
 /**
+ * D-cn at RETRO: the routing step runs once the RETRO's prompt replays are planned, with what is
+ * left of the trial cap (reading 247(6)); when planning them fails it still runs, with no trials
+ * (`planned` is `null`), so the routing scorecard and proposals never depend on the replays.
+ */
+export const withRoutingAtRetro =
+  <S, P>(
+    plan: (state: S) => Promise<P>,
+    routing: (state: S, planned: P | null) => void,
+  ): ((state: S) => Promise<P>) =>
+  async (state) => {
+    let planned: P | null = null;
+    try {
+      planned = await plan(state);
+      return planned;
+    } finally {
+      routing(state, planned);
+    }
+  };
+
+/**
  * The Lookback module wired into the engine (AD-21; spine §5 reading 144):
  * - core's prompt selector (`Engine.setPromptPins`, reading 135(d)): each dispatch of an agent the
  *   plugin compiled without its editable section runs the human's pin or the task's canary arm
@@ -496,14 +516,14 @@ export const wireLookback = (
     plan: (state) => retro().plan({ ...state, events: [...lookbackEvents(state)] }),
     check: (target, root, state) => retro().check(target, root, state),
     ...replays,
-    replays: async (state) => {
-      const planned = await replays.replays(state);
+    replays: withRoutingAtRetro(replays.replays, (state, planned) => {
       routingAtRetro(
         state.id,
-        routingTrialBudget(lookbackConfig(), weeklyRemaining(state), planned),
+        planned === null
+          ? 0
+          : routingTrialBudget(lookbackConfig(), weeklyRemaining(state), planned),
       );
-      return planned;
-    },
+    }),
   });
   const runEnd = async (run: string): Promise<void> => {
     const state = engine.states().find((s) => s.id === run);

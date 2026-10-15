@@ -13,23 +13,37 @@ import { dirname, join } from "node:path";
 import {
   MODEL_REFUSALS_FILE,
   ModelRefusalRowSchema,
+  redactSecrets,
   type HostId,
   type ModelFallback,
   type ModelRefusalRow,
 } from "@vtc/shared";
-import { appendPrivateFile, ensurePrivateDir, readPrivateFile } from "./guard.js";
+import { appendPrivateFile, ensurePrivateDir, readPrivateFile, writePrivateFile } from "./guard.js";
 import type { Kernel, RunHandle } from "./kernel.js";
 import type { RoleRunRecord } from "./state.js";
 
 /** How long a refusal stands for the "skip the flag" rule (reading 244: the last day). */
 export const MODEL_REFUSAL_TTL_MS = 24 * 60 * 60 * 1000;
 
+/**
+ * The file is compacted once it holds more rows than this (every dispatch with a model id reads
+ * it): the rows of the last day and the latest row per host and model are kept.
+ */
+export const MODEL_REFUSALS_COMPACT_AT = 200;
+
 /** `<vtcHome>/engines/model-refusals.jsonl`. */
 export const modelRefusalsPath = (vtcHome: string): string => join(vtcHome, MODEL_REFUSALS_FILE);
 
-/** The host's message as one trimmed line (`ModelFallback.detail`, at most 300 characters). */
-export const refusalDetail = (message: string): string | undefined => {
-  const line = message.replace(/\s+/g, " ").trim().slice(0, 300).trim();
+/**
+ * The host's message as one trimmed line (`ModelFallback.detail`, at most 300 characters),
+ * redacted first (AD-18: host error text can echo environment or config fragments): it goes to the
+ * long-lived refusals file and the run log.
+ */
+export const refusalDetail = (
+  message: string,
+  secrets: readonly string[] = [],
+): string | undefined => {
+  const line = redactSecrets(message, secrets).replace(/\s+/g, " ").trim().slice(0, 300).trim();
   return line === "" ? undefined : line;
 };
 
@@ -51,9 +65,28 @@ export const recordModelRefusal = (
     });
     ensurePrivateDir(dirname(path));
     appendPrivateFile(path, `${JSON.stringify(row)}\n`);
+    const rows = readModelRefusals(k.deps.vtcHome);
+    if (rows.length > MODEL_REFUSALS_COMPACT_AT) {
+      const kept = compactRefusals(rows, k.now().getTime());
+      writePrivateFile(path, kept.map((r) => `${JSON.stringify(r)}\n`).join(""));
+    }
   } catch {
     // an unwritable home or a model id the row cannot hold: the fallback still runs
   }
+};
+
+/** The rows of the last day, and the latest row of each host and model, oldest first. */
+export const compactRefusals = (
+  rows: readonly ModelRefusalRow[],
+  nowMs: number,
+): ModelRefusalRow[] => {
+  const latest = new Map<string, ModelRefusalRow>();
+  for (const row of rows) latest.set(`${row.host}\0${row.model}`, row);
+  const keep = new Set(latest.values());
+  return rows.filter((row) => {
+    const at = Date.parse(row.at);
+    return keep.has(row) || (Number.isFinite(at) && nowMs - at < MODEL_REFUSAL_TTL_MS);
+  });
 };
 
 /** The refusal rows on file, oldest first; a line that is not a row is skipped. */
