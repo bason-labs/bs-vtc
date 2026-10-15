@@ -155,23 +155,79 @@ export const fakeMcpList = (
   );
 };
 
+const isCodexPlugin = (process: FakeProcess): boolean =>
+  process.command.command === "codex" && process.command.args[0] === "plugin";
+
+/**
+ * Answers a fake `codex plugin …` the way codex-cli 0.162.1 does on a first install
+ * (`test/fixtures/codex/plugin-add.json`): `marketplace add <dir> --json` registers `vtc-local`,
+ * `marketplace remove` removes it, and `add <plugin>@vtc-local --json` reports its cached copy
+ * under the command's `CODEX_HOME`. Anything else exits 2.
+ */
+export const answerCodexPlugin = (process: FakeProcess): void => {
+  const args = process.command.args;
+  const codexHome = process.command.env.CODEX_HOME ?? "<no CODEX_HOME>";
+  if (args[1] === "marketplace" && args[2] === "add") {
+    process.emit(
+      JSON.stringify(
+        { marketplaceName: "vtc-local", installedRoot: args[3], alreadyAdded: false },
+        null,
+        2,
+      ),
+    );
+    process.exit(0);
+  } else if (args[1] === "marketplace" && args[2] === "remove") {
+    process.emit(`Removed marketplace \`${args[3]}\`.`);
+    process.exit(0);
+  } else if (args[1] === "add" && args[2] !== undefined) {
+    const [name, marketplace] = args[2].split("@");
+    process.emit(
+      JSON.stringify(
+        {
+          pluginId: args[2],
+          name,
+          marketplaceName: marketplace,
+          version: "0.1.0",
+          installedPath: `${codexHome}/plugins/cache/${marketplace}/${name}/0.1.0`,
+          authPolicy: "ON_INSTALL",
+        },
+        null,
+        2,
+      ),
+    );
+    process.exit(0);
+  } else {
+    process.writeStderr(`error: unexpected codex ${args.join(" ")}`);
+    process.exit(2);
+  }
+};
+
 /**
  * A fake spawner for the Codex adapter: each `codex mcp list --json` it is asked for (the MCP
  * isolation check before every headless run) is answered at once from `servers` (default: none)
- * and recorded in `mcpLists`, never in `processes`; `onMcpList` replaces that answer. Every other
- * command behaves as in {@link fakeSpawner}.
+ * and recorded in `mcpLists`, never in `processes`; `onMcpList` replaces that answer. Each
+ * `codex plugin …` (`install`) is answered by {@link answerCodexPlugin} (or `onPlugin`) and
+ * recorded in `plugins`. Every other command behaves as in {@link fakeSpawner}.
  */
 export const codexFakeSpawner = (
   options: {
     readonly onSpawn?: (process: FakeProcess) => void;
     readonly servers?: readonly FakeMcpServer[];
     readonly onMcpList?: (process: FakeProcess) => void;
+    /** Replaces {@link answerCodexPlugin} for `codex plugin …` (recorded in `plugins`). */
+    readonly onPlugin?: (process: FakeProcess) => void;
   } = {},
 ) => {
   const processes: FakeProcess[] = [];
   const mcpLists: FakeProcess[] = [];
+  const plugins: FakeProcess[] = [];
   const spawner: Spawner = (command, spawnOptions) => {
     const process = new FakeProcess(command, spawnOptions);
+    if (isCodexPlugin(process)) {
+      plugins.push(process);
+      (options.onPlugin ?? answerCodexPlugin)(process);
+      return process;
+    }
     if (isCodexMcpList(process)) {
       mcpLists.push(process);
       if (options.onMcpList !== undefined) {
@@ -186,5 +242,5 @@ export const codexFakeSpawner = (
     options.onSpawn?.(process);
     return process;
   };
-  return { spawner, processes, mcpLists };
+  return { spawner, processes, mcpLists, plugins };
 };

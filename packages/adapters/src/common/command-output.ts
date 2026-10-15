@@ -9,8 +9,11 @@ import type { SpawnedProcess, Spawner } from "./process.js";
 
 /** What a short command left behind. */
 export type CommandOutput =
-  /** It could not start, was killed (timeout or `dispose()`), or exited by a signal. */
-  | { readonly kind: "failed" }
+  /**
+   * It could not start, was killed (timeout or `dispose()`), or exited by a signal; `timedOut`
+   * when the timeout killed it (a command that started but did not finish in time).
+   */
+  | { readonly kind: "failed"; readonly timedOut?: true }
   | {
       readonly kind: "exited";
       readonly code: number;
@@ -58,15 +61,19 @@ export const createCommandOutputRunner = (options: CommandOutputOptions) => {
         return { kind: "failed" };
       }
       running.add(child);
+      const killed = { byTimeout: false };
       const stdout = collect(child.stdout, options.maxChars);
       const stderr = collect(child.stderr, options.maxChars);
       const timer = setTimeout(() => {
+        killed.byTimeout = true;
         child.kill("SIGKILL");
       }, options.timeoutMs);
       timer.unref();
       try {
         const exit = await child.exited;
-        if (exit.error !== null || exit.code === null) return { kind: "failed" };
+        if (exit.error !== null || exit.code === null) {
+          return killed.byTimeout ? { kind: "failed", timedOut: true } : { kind: "failed" };
+        }
         let drain: NodeJS.Timeout | undefined;
         await Promise.race([
           Promise.all([stdout.done, stderr.done]),

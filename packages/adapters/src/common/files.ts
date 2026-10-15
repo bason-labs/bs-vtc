@@ -9,6 +9,7 @@ import {
   existsSync,
   lstatSync,
   mkdirSync,
+  readdirSync,
   readFileSync,
   realpathSync,
   renameSync,
@@ -100,6 +101,13 @@ export const writeOwnFileAtomic = (path: string, text: string): void => {
     throw error;
   }
 };
+
+/** Every file below `dir` (recursively), as absolute paths when `dir` is absolute. */
+export const filesUnder = (dir: string): string[] =>
+  readdirSync(dir, { withFileTypes: true }).flatMap((entry) => {
+    const path = join(dir, entry.name);
+    return entry.isDirectory() ? filesUnder(path) : [path];
+  });
 
 export const readTextOrNull = (path: string): string | null =>
   existsSync(path) ? readFileSync(path, "utf8") : null;

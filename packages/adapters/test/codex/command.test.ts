@@ -19,9 +19,11 @@ import {
   headlessIsolationGaps,
   HostOutcomeSchema,
   jsonSchemaFor,
+  ModelTierSchema,
   ROLE_DENIED_VTC,
   type RoleTools,
   type SpawnRoleRequest,
+  TIER_EFFORT_WITHOUT_MODEL,
   WAVE3_HOME_WRITE_DENY,
 } from "@vtc/shared";
 import { codexSandboxProfile } from "../../src/codex/command.js";
@@ -624,6 +626,43 @@ describe("Codex headlessCommand", () => {
       expect(args).not.toContain("-m");
       expect(args.some((a) => a.startsWith("model="))).toBe(false);
       expect(args).toContain('model_reasoning_effort="medium"');
+    }
+  });
+
+  it("D-co interim: with no model id each routed tier still changes the run, through its effort only (TIER_EFFORT_WITHOUT_MODEL)", () => {
+    const adapter = ADAPTER_FACTORIES.codex!({ vtcHome: VTC_HOME });
+    const efforts = new Set<string>();
+    for (const tier of ModelTierSchema.options) {
+      for (const session of [undefined, { host: "codex" as const, id: "thr-1" }]) {
+        const effort = TIER_EFFORT_WITHOUT_MODEL[tier];
+        const args = adapter.headlessCommand(request({ model: { tier, effort } }), session).args;
+        expect(args, tier).not.toContain("--model");
+        expect(args, tier).not.toContain("-m");
+        // exactly one effort override, the resolved one
+        const set = args.filter((a) => a.startsWith("model_reasoning_effort="));
+        expect(set, tier).toEqual([`model_reasoning_effort="${effort}"`]);
+        expect(args[args.indexOf(set[0]!) - 1]).toBe("--config");
+        efforts.add(set[0]!);
+      }
+    }
+    expect(efforts.size).toBe(3);
+  });
+
+  it("D-co: once an id is resolved, every tier passes it as --model alongside its effort, fresh or resumed", () => {
+    const adapter = createCodexAdapter({ vtcHome: VTC_HOME });
+    for (const tier of ModelTierSchema.options) {
+      for (const session of [undefined, { host: "codex" as const, id: "thr-1" }]) {
+        const model = { tier, effort: "low" as const, model: `id-${tier}` };
+        const args = adapter.headlessCommand(request({ model }), session).args;
+        expect(
+          args.filter((a) => a === "--model"),
+          tier,
+        ).toHaveLength(1);
+        expect(argAfter(args, "--model"), tier).toBe(`id-${tier}`);
+        expect(args, tier).toContain('model_reasoning_effort="low"');
+        // before the `--` that ends the options
+        expect(args.indexOf("--model")).toBeLessThan(args.indexOf("--"));
+      }
     }
   });
 
