@@ -24,18 +24,29 @@
  *   form fields) that hands each change to the runner with `exposeBinding`, then once more over
  *   every frame before the context closes. A frame without the init script, or one removed before
  *   it could be scanned, fails the shot. It scans every text in the DOM, not only what is on
- *   screen, so it errs towards discarding. `deny_text` matches case-insensitively, as a substring
- *   (AD-27 rule 6: any hit discards). A hit discards the file; the result names only the kinds
+ *   screen, so it errs towards discarding. `deny_text` matches case-insensitively (AD-27 rule 6:
+ *   any hit discards): as a substring, or as a whole word for a value under `deny_substring_min`
+ *   characters without a `/` (spine §5 reading 212(12)). A hit discards the file; the result names only the kinds
  *   found. A shadow root (attached by script, or open) fails the shot, since neither the paint nor
  *   the scan reaches into it. Text drawn into `<canvas>`, images, CSS generated content outside
  *   painted subtrees and declarative closed shadow roots is not scanned (research §3 residual).
  * - Video: `recordVideo` always with `size` (1280x800); the file exists only after
  *   `context.close()`, then it is kept (renamed to the shot's name and hashed) or deleted.
  *
+ * - App server (UI before/after, D-ct; spine §5 reading 223): with `app`, the script imports
+ *   Playwright first, checks that nothing already answers on the app's loopback port, starts the
+ *   app (`visual.app` of the commit's clean gate checkout) detached in a process group of its own,
+ *   waits until it answers, captures every shot from its origin, and kills the group. An app that
+ *   does not start, does not answer in time or stops during the capture fails the whole run
+ *   (`app: "failed"`, no shot kept). Its output is discarded, so no reason carries project text.
+ *   The run's key is read and deleted before the app starts, as in the visual runner, so the app
+ *   cannot sign a result.
+ *
  * The script writes only into its output directory, a video directory beside it and the result
  * file. It never throws past `main`: a failure of the whole run is the result's `error`.
  */
 export const EVIDENCE_RUNNER_SCRIPT = String.raw`// VTC evidence runner (generated; see packages/engine/src/gates/capture/script.ts).
+import { spawn } from "node:child_process";
 import { createHash, createHmac } from "node:crypto";
 import { readFileSync, rmSync, unlinkSync, writeFileSync } from "node:fs";
 import { connect, createServer } from "node:net";
@@ -65,9 +76,16 @@ const BINDING = "__vtcEvidenceText";
 
 // ---------------------------------------------------------------- the scan (layer 3)
 const PATTERNS = input.patterns.map((p) => ({ kind: p.kind, re: new RegExp(p.source, p.flags.replace(/[gy]/g, "")) }));
+// A short value (no "/") matches as a whole word, a longer one or a path as a substring.
+const escapeRe = (s) => s.replace(/[.*+?^${"$"}{}()|[\]\\/-]/g, "\\$&");
 const DENY = input.deny_text
   .map((v) => String(v).trim().toLowerCase())
-  .filter((v) => v !== "");
+  .filter((v) => v !== "")
+  .map((v) => {
+    if (v.length >= input.deny_substring_min || v.includes("/")) return (low) => low.includes(v);
+    const word = new RegExp("(?<![a-z0-9])" + escapeRe(v) + "(?![a-z0-9])");
+    return (low) => word.test(low);
+  });
 const scan = (texts, hits) => {
   if (!Array.isArray(texts)) { hits.add("unscannable"); return; }
   for (const raw of texts) {
@@ -76,8 +94,8 @@ const scan = (texts, hits) => {
     for (const p of PATTERNS) if (!hits.has(p.kind) && p.re.test(raw)) hits.add(p.kind);
     if (hits.has("denied_text")) continue;
     const low = raw.toLowerCase();
-    for (const d of DENY) {
-      if (low.includes(d)) { hits.add("denied_text"); break; }
+    for (const denied of DENY) {
+      if (denied(low)) { hits.add("denied_text"); break; }
     }
   }
 };
@@ -319,6 +337,7 @@ const capture = async (browser, shot, index) => {
     timezoneId: "UTC",
     reducedMotion: "reduce",
     serviceWorkers: "block",
+    ...(shot.color_scheme ? { colorScheme: shot.color_scheme } : {}),
     ...(video ? { recordVideo: { dir: videoDir, size: input.video_size } } : {}),
   });
   try {
@@ -383,15 +402,77 @@ const capture = async (browser, shot, index) => {
   return record;
 };
 
+// ---------------------------------------------------------------- the app server (before/after)
+// Whether something accepts connections at host:port: on macOS the sandbox shares the host's
+// loopback at the app's port, so a server already there (the developer's own dev server) would
+// answer in place of the commit under capture.
+const portTaken = (host, port) => new Promise((done) => {
+  const socket = connect({ host, port });
+  const finish = (taken) => { socket.destroy(); done(taken); };
+  socket.setTimeout(2000, () => finish(false));
+  socket.once("connect", () => finish(true));
+  socket.once("error", () => finish(false));
+});
+
+// Its output is project text: it is never kept, so no reason can carry it.
+const startApp = async (app) => {
+  const url = new URL(app.url);
+  const port = Number(url.port || (url.protocol === "https:" ? 443 : 80));
+  for (const host of new Set([url.hostname.replace(/^\[|\]$/g, ""), "127.0.0.1", "::1"])) {
+    if (await portTaken(host, port)) {
+      throw new Error("port " + port + " is already in use on the loopback: a server this capture did not start answers there, so nothing is captured from it");
+    }
+  }
+  const child = spawn(app.command[0], app.command.slice(1), {
+    cwd: app.cwd,
+    stdio: ["ignore", "ignore", "ignore"],
+    detached: true,
+    env: process.env,
+  });
+  let exited = null;
+  child.on("exit", (code, signal) => { exited = code === null ? String(signal) : "exit " + String(code); });
+  child.on("error", () => { exited = "it could not be spawned"; });
+  const started = { child, exited: () => exited };
+  const deadline = Date.now() + app.ready_timeout_ms;
+  while (Date.now() < deadline) {
+    if (exited !== null) throw new Error("the app server stopped (" + exited + ") before it answered");
+    try {
+      const response = await fetch(app.url, { redirect: "manual" });
+      // Answered, and by a live child (one that failed to bind would have exited).
+      if (response.status < 500 && exited === null) return started;
+    } catch {
+      // not listening yet
+    }
+    await new Promise((r) => setTimeout(r, 250));
+  }
+  stopApp(started);
+  throw new Error("the app server did not answer within " + app.ready_timeout_ms + " ms");
+};
+
+const stopApp = (app) => {
+  try { process.kill(-app.child.pid, "SIGKILL"); } catch { try { app.child.kill("SIGKILL"); } catch { /* gone */ } }
+};
+
 const main = async () => {
+  // Imported before the app server starts, so it cannot swap the module under the runner.
   const mod = await import(pathToFileURL(input.playwright).href);
   const pw = mod.chromium ? mod : mod.default || mod;
   if (!pw || !pw.chromium) throw new Error("the Playwright module exports no chromium");
   let relay = null;
   let browser = null;
+  let app = null;
   try {
     if (input.relay) {
       relay = await startRelay(join(dirname(input.out_dir), "relay.sock"), Number(new URL(input.origin).port));
+    }
+    if (input.app) {
+      try {
+        app = await startApp(input.app);
+      } catch (error) {
+        out.app = "failed";
+        throw error;
+      }
+      out.app = "served";
     }
     browser = await pw.chromium.launch({
       executablePath: input.executable,
@@ -403,8 +484,27 @@ const main = async () => {
     for (let i = 0; i < input.shots.length; i += 1) {
       out.shots.push(await capture(browser, input.shots[i], i));
     }
+    // The app server died during the capture: whatever answered on its port was not its code. It
+    // must still answer now, and its process must still be the one this run started.
+    if (app !== null) {
+      let alive = app.exited() === null;
+      if (alive) {
+        try {
+          const response = await fetch(input.app.url, { redirect: "manual" });
+          alive = response.status < 500 && app.exited() === null;
+        } catch {
+          alive = false;
+        }
+      }
+      if (!alive) {
+        out.app = "failed";
+        out.shots = [];
+        throw new Error("the app server stopped (" + (app.exited() || "it no longer answers") + ") during the capture, so what was captured from its port is not the commit's code");
+      }
+    }
   } finally {
     if (browser !== null) await browser.close().catch(() => undefined);
+    if (app !== null) stopApp(app);
     if (relay !== null) relay.close();
   }
 };

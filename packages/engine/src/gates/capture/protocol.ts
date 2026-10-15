@@ -26,6 +26,14 @@ export const EVIDENCE_PAINT_DEFAULTS: readonly string[] = [
 export const DENIED_TEXT_HIT = "denied_text";
 /** Most characters one page scan may hand over; more is a failed shot (never a partial scan). */
 export const MAX_SCAN_CHARS = 4_000_000;
+/**
+ * `denyText` values shorter than this (and holding no `/`) match only as a whole word, longer ones
+ * as a substring, case-insensitively (spine §5 reading 212(12); the upstream module's
+ * `DENY_SUBSTRING_MIN`), so a two-letter owner does not discard every page.
+ */
+export const DENY_SUBSTRING_MIN = 4;
+/** The viewport height of a Visual QA screen (the visual step renders at this height too). */
+export const UI_VIEWPORT_HEIGHT = 900;
 
 export interface EvidenceRunnerShot {
   readonly name: string;
@@ -36,6 +44,23 @@ export interface EvidenceRunnerShot {
   /** Present: a recording of this many seconds; absent: a PNG screenshot. */
   readonly video_seconds?: number;
   readonly wait_for?: string;
+  /** The page's `prefers-color-scheme` (a Visual QA screen's theme); absent: the browser's. */
+  readonly color_scheme?: "light" | "dark";
+}
+
+/**
+ * The app server the runner starts in the gate sandbox before it captures (UI before/after, D-ct;
+ * spine §5 reading 223): `gates.yml` `visual.app` of the commit's clean gate checkout, the same
+ * way the visual step starts it (`visual/runner-script.ts`). `origin` is then the app URL's origin.
+ */
+export interface EvidenceRunnerApp {
+  /** argv, run without a shell, detached in a process group of its own. */
+  readonly command: readonly string[];
+  /** Absolute working directory inside the commit's gate checkout. */
+  readonly cwd: string;
+  /** The app's loopback URL (`VisualApp.url`). */
+  readonly url: string;
+  readonly ready_timeout_ms: number;
 }
 
 export interface EvidenceRunnerInput {
@@ -67,10 +92,16 @@ export interface EvidenceRunnerInput {
     readonly source: string;
     readonly flags: string;
   }[];
-  /** Values that must not be visible (case-insensitive). */
+  /**
+   * Values that must not be visible (case-insensitive): a substring match, or a whole-word one
+   * below `deny_substring_min` characters ({@link DENY_SUBSTRING_MIN}).
+   */
   readonly deny_text: readonly string[];
+  readonly deny_substring_min: number;
   readonly max_scan_chars: number;
   readonly shots: readonly EvidenceRunnerShot[];
+  /** Start this app server first and capture from it; absent or `null`: `origin` already serves. */
+  readonly app?: EvidenceRunnerApp | null;
 }
 
 const FileNameSchema = z
@@ -101,6 +132,11 @@ export const EvidenceRunnerResultSchema = z.strictObject({
   shots: z.array(EvidenceRunnerShotResultSchema).max(EVIDENCE_LIMITS.maxFilesPerPr).default([]),
   /** A failure of the whole run (the browser did not start). */
   error: z.string().min(1).max(2000).optional(),
+  /**
+   * With an `app`: `served` once it answered and stayed up through every shot, `failed` when it
+   * did not start, did not answer in time or exited during the capture.
+   */
+  app: z.enum(["served", "failed"]).optional(),
   files: z
     .record(FileNameSchema, Sha256Schema)
     .refine((f) => Object.keys(f).length <= EVIDENCE_LIMITS.maxFilesPerPr, "too many output files")
