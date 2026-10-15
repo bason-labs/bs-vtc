@@ -109,6 +109,25 @@ describe("the routed start tier on dispatch (D-cm)", () => {
     await h.release();
   });
 
+  it("never lets a hint start a high-risk task's Engineer or Security reviewer below Top", async () => {
+    const { h, qa } = await toQa([
+      draft("T-1", {
+        size: "S",
+        risk: "low",
+        risk_tags: ["auth"],
+        tier_hint: { tier: "low", reason: "mechanical" },
+      }),
+    ]);
+    await authorTests(h, qa);
+    await build(h, only(await next(h), "engineer"));
+    only(await next(h), "security");
+    const top = { model: "opus", tier: "top", reason: "planner_hint", clamped: true };
+    expect(tierOf(dispatched(h).find((d) => d.role === "engineer")!)).toEqual(top);
+    const security = dispatched(h).find((d) => d.role === "security" && d.data.mode === "verify");
+    expect(tierOf(security!)).toEqual(top);
+    await h.release();
+  });
+
   it("starts a task with a high-risk tag on Top, whatever its size", async () => {
     const { h, qa } = await toQa([draft("T-1", { size: "S", risk: "low", risk_tags: ["auth"] })]);
     await authorTests(h, qa);

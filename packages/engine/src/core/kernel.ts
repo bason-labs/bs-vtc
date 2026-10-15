@@ -21,6 +21,7 @@ import type {
   PromptVersionRef,
   PullRequestService,
   RemoteMergeService,
+  ReplayInfraOutcome,
   RoleMcpToolName,
   RoleResult,
   SessionSandboxState,
@@ -247,7 +248,7 @@ export type ReplayTrialRecord =
     }
   | {
       readonly kind: "unmeasured";
-      readonly outcome: "gate_infra" | "plugin_locked" | "no_outcome";
+      readonly outcome: ReplayInfraOutcome;
     };
 
 /** A graded trial: its index in `LookbackReplay.trials`, whether it passed, the tokens it used. */

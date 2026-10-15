@@ -106,6 +106,54 @@ describe("startTier: the Planner's hint (D-cm)", () => {
       startTier(input(task("L", { tier_hint: { tier: "low", reason: "mechanical" } }))).tier,
     ).toBe("low");
   });
+
+  it("never lowers a high-risk task below its high floor (reading 218(2))", () => {
+    const low: TierHint = { tier: "low", reason: "mechanical" };
+    for (const [role, mode] of [
+      ["engineer", undefined],
+      ["security", "verify"],
+    ] as const) {
+      const who = { role, ...(mode === undefined ? {} : { mode }) };
+      expect(startTier(input(task("S", { risk_tags: ["auth"], tier_hint: low }), who))).toEqual({
+        tier: "top",
+        reason: "planner_hint",
+        clamped: true,
+      });
+      expect(startTier(input(task("S", { risk: "high", tier_hint: low }), who)).tier).toBe("top");
+    }
+    // a role's own high floor bounds its hint instead
+    const table = RoutingTableSchema.parse({
+      ...DEFAULT_ROUTING_TABLE,
+      roles: { spec_verifier: { high_floor: "mid" } },
+    });
+    expect(
+      startTier(
+        input(task("S", { risk_tags: ["payments"], tier_hint: low }), {
+          role: "spec_verifier",
+          table,
+        }),
+      ),
+    ).toEqual({ tier: "mid", reason: "planner_hint", clamped: true });
+    // a hint on a merely tagged task still lowers it
+    expect(startTier(input(task("S", { risk_tags: ["perf"], tier_hint: low })))).toEqual({
+      tier: "low",
+      reason: "planner_hint",
+      clamped: false,
+    });
+    // a hint at or above the floor is not moved; max_tier still bounds the floored hint
+    expect(
+      startTier(
+        input(
+          task("S", { risk_tags: ["auth"], tier_hint: { tier: "top", reason: "concurrency" } }),
+        ),
+      ),
+    ).toEqual({ tier: "top", reason: "planner_hint", clamped: false });
+    expect(
+      startTier(
+        input(task("S", { risk_tags: ["auth"], tier_hint: low }), { routing: { max_tier: "mid" } }),
+      ),
+    ).toEqual({ tier: "mid", reason: "planner_hint", clamped: true });
+  });
 });
 
 describe("startTier: the project's min/max and QA author's floor (D-cm)", () => {

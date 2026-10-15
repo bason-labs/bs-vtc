@@ -83,6 +83,7 @@ const fakeUpstream = () => {
 const started = async (h: Harness): Promise<string> => (await h.engine.start(REQUEST, CLAUDE)).run;
 
 /** An engine stand-in whose runs a test opens, finishes and pauses at will. */
+const KNOWN_SECRET = "plain-project-value-4711";
 const fakeEngine = () => {
   const runs = new Map<
     string,
@@ -122,6 +123,8 @@ const fakeEngine = () => {
       });
     },
     config: () => ({}),
+    /** The project's known secret values (its `.env`). */
+    secrets: () => [KNOWN_SECRET],
     recordModuleEvent: (run: string, draft: EventDraft): boolean => {
       if (failRecord.on) throw new Error("the event log refused the append");
       const r = runs.get(run);
@@ -755,7 +758,11 @@ describe("automation wiring (AD-27 rules 7 and 8)", () => {
         githubRemote: true,
         createUpstream: () => ({
           onFact: () =>
-            Promise.reject(new Error("gh failed: token ghp_abcdefghijklmnopqrstuvwxyz0123456789")),
+            Promise.reject(
+              new Error(
+                `gh failed: token ghp_abcdefghijklmnopqrstuvwxyz0123456789 value ${KNOWN_SECRET}`,
+              ),
+            ),
         }),
       },
     );
@@ -773,8 +780,12 @@ describe("automation wiring (AD-27 rules 7 and 8)", () => {
     const detail = (skipped[0]?.data as { detail: string }).detail;
     expect(detail).toContain("gh failed");
     expect(detail).not.toContain("ghp_abcdefghijklmnopqrstuvwxyz0123456789");
+    // the engine's known secret values are redacted too, in the event and in the notice
+    expect(detail).not.toContain(KNOWN_SECRET);
     // still an engine notice too
     expect(fake.notices.join("\n")).toContain("could not handle a defect fact");
+    expect(fake.notices.join("\n")).not.toContain(KNOWN_SECRET);
+    expect(fake.notices.join("\n")).not.toContain("ghp_abcdefghijklmnopqrstuvwxyz0123456789");
     await wiring.close();
   });
 
