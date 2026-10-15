@@ -96,7 +96,7 @@ Spike recordings and synthetic files:
 
 | File                                                 | Source                                                                                                                                                                         |
 | ---------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| `claude-code/statusline.json`                        | documented statusline payload (statusline capture still pending)                                                                                                               |
+| `claude-code/statusline.json`                        | documented statusline payload (no capture: skipped by human decision H-10, 2026-10-15)                                                                                         |
 | `claude-code/p-json-schema-result.json`              | recorded: `claude -p --output-format json --json-schema` (spike 1)                                                                                                             |
 | `claude-code/stream-limit-rejected.synthetic.jsonl`  | synthetic: `rate_limit_event` rejected (five_hour) then an error result                                                                                                        |
 | `claude-code/stream-model-limit.synthetic.jsonl`     | synthetic: per-model (`seven_day_opus`) rejection                                                                                                                              |
@@ -128,8 +128,8 @@ way, and read before they were copied here. Codex probes ran `--ephemeral` and C
 | `claude-code/stream-arm-vtc-on-path.jsonl` | `live:dcl claude-arm` with `vtc` on `PATH` (round-5 items): the plugin's `SessionStart` hook exits 0 with no output (it exited 127 in `stream-arm-success.jsonl`), and the engine bridge `vtc` is `connected` in `init`. The shim recorded `agent_type` `vtc:vtc-qa-judge` in the hook's input.                            |
 
 Not recorded: a Codex limit text. `live:h15 codex-limit` read the plan at 15% (five hours) and 2%
-(weekly) on 2026-10-15, and a limit cannot be forced; it records the text once a window is at its
-limit.
+(weekly) on 2026-10-15, and again 15% and 2% at 12:41 UTC that day (codex-cli 0.162.1). A limit
+cannot be forced; it records the text once a window is at its limit.
 
 H-15 Claude results with no fixture (the adapter reads nothing from these runs; the summaries are
 the result). Claude Code 2.1.299, a claude.ai `team` sign-in, model `haiku`, 2026-10-15:
