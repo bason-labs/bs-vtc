@@ -294,6 +294,7 @@ export const routeStep = (
       task,
       roleTier: own,
       config: k.config(),
+      table: k.deps.routingTable,
     },
     change,
     steps,

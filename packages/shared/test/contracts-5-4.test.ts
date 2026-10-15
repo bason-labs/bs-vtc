@@ -34,6 +34,7 @@ import {
   routingConfigSubject,
   routingFor,
   RoutingScorecardSchema,
+  routedStartTier,
   RoutingTableSchema,
   sha256Hex,
   TaskDraftSchema,
@@ -48,7 +49,7 @@ import {
   type GitPlumbing,
   type ParsedStream,
 } from "../src/index.js";
-import { NOW, SHA, validTaskDraft } from "./fixtures.js";
+import { DCM_TABLE, NOW, SHA, validTaskDraft } from "./fixtures.js";
 
 describe("contracts 5.4.0", () => {
   it("is MINOR over 5.3.0", () => {
@@ -57,14 +58,20 @@ describe("contracts 5.4.0", () => {
 
   describe("difficulty routing (H-9, D-cm)", () => {
     it("starts S Low, M or a tagged task Mid, L or a high-risk task Top", () => {
-      expect(DEFAULT_ROUTING_TABLE.by_size).toEqual({ S: "low", M: "mid", L: "top" });
-      expect(DEFAULT_ROUTING_TABLE.tagged_floor).toBe("mid");
-      expect(DEFAULT_ROUTING_TABLE.high_floor).toBe("top");
+      // D-cm's table as decided (reading 218(2)). `DEFAULT_ROUTING_TABLE` started equal to it and
+      // its tiers move only through a reviewed D-cn routing PR, which changes that one file
+      // (reading 233): its tier values are not pinned here, or no such PR could pass.
+      expect(RoutingTableSchema.parse(DCM_TABLE)).toEqual(DCM_TABLE);
+      expect(routedStartTier(DCM_TABLE, "engineer", "S", "none")).toBe("low");
+      expect(routedStartTier(DCM_TABLE, "engineer", "S", "tagged")).toBe("mid");
+      expect(routedStartTier(DCM_TABLE, "engineer", "M", "none")).toBe("mid");
+      expect(routedStartTier(DCM_TABLE, "engineer", "L", "none")).toBe("top");
+      expect(routedStartTier(DCM_TABLE, "engineer", "S", "high")).toBe("top");
+      // a routing PR moves tiers only: the tags and the shape stay
       expect([...DEFAULT_ROUTING_TABLE.high_risk_tags].sort()).toEqual(
         ["auth", "data", "migration", "payments", "security"].sort(),
       );
       expect(RoutingTableSchema.safeParse(DEFAULT_ROUTING_TABLE).success).toBe(true);
-      expect(DEFAULT_ROUTING_TABLE.roles).toBeUndefined();
       // a reviewed Lookback PR may give one role its own cells (D-cn)
       expect(
         RoutingTableSchema.safeParse({

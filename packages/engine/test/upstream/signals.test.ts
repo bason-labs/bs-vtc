@@ -4,18 +4,32 @@
  * count (never the reason), and a `config` issue whose subject starts `routing.` is a
  * routing-table change, all through the kind's pattern, the redaction and the denylist.
  */
-import { routingConfigSubject } from "@vtc/shared";
+import { readFileSync } from "node:fs";
+import { join } from "node:path";
+import { routedStartTier, routingConfigSubject, type RoutingTable } from "@vtc/shared";
 import { afterEach, describe, expect, it } from "vitest";
 import {
   projectSubject,
+  readRoutingTableSource,
   ROUTING_TABLE_FILE,
   routingSubjectOfBody,
+  writeRoutingTableSource,
   type AutomationFact,
 } from "../../src/upstream/index.js";
 import { cleanupDirs } from "../helpers/repo.js";
 import { BASE_SHA, harness } from "./harness.js";
 
 afterEach(cleanupDirs);
+
+const REPO = join(import.meta.dirname, "../../../..");
+/** D-cm's table (reading 218(2)) in the repo's own file: the moves below start from its tiers. */
+const DCM: RoutingTable = {
+  v: 1,
+  by_size: { S: "low", M: "mid", L: "top" },
+  tagged_floor: "mid",
+  high_floor: "top",
+  high_risk_tags: ["auth", "payments", "data", "security", "migration"],
+};
 
 const improvement = (
   kind: "tool" | "capability" | "config",
@@ -142,7 +156,19 @@ describe("routing-table changes (D-cn)", () => {
     expect(routingSubjectOfBody(h.github.state.issues[1]?.body)).toBeNull();
   });
 
-  it("the run a routing issue starts on the bs-vtc checkout carries the rule", async () => {
+  const TABLE_SOURCE = writeRoutingTableSource(
+    readFileSync(join(REPO, ROUTING_TABLE_FILE), "utf8"),
+    DCM,
+  );
+  const MOVE_TO_TOP = {
+    "routing.from_tier": 1,
+    "routing.to_tier": 2,
+    "routing.current_tier": 1,
+    "routing.shared": 0,
+    "routing.replay_planned": 0,
+  };
+
+  it("answers a routing issue with the module's own one-file PR, never a run (reading 233)", async () => {
     const started: string[] = [];
     const h = harness({
       self: true,
@@ -151,16 +177,94 @@ describe("routing-table changes (D-cn)", () => {
         return Promise.resolve();
       },
     });
-    await h.upstream.report(
-      improvement("config", routingConfigSubject("qa", "S", "none"), { "routing.tasks": 12 }),
-      h.ctx,
-    );
-    expect(started).toHaveLength(1);
-    expect(started[0]).toContain("Change only the values of `DEFAULT_ROUTING_TABLE`");
-    expect(started[0]).toContain("`CONTRACTS_VERSION`");
+    h.files.set(ROUTING_TABLE_FILE, TABLE_SOURCE);
+    const subject = routingConfigSubject("engineer", "M", "tagged");
+    await h.upstream.report(improvement("config", subject, MOVE_TO_TOP), h.ctx);
+    expect(started).toEqual([]);
+    expect(h.github.state.prs).toHaveLength(1);
+    const pr = h.github.state.prs[0];
+    expect(pr?.title).toBe("vtc(config): start engineer M tasks with a risk tag on top");
+    expect(pr?.body).toContain("`DEFAULT_ROUTING_TABLE.roles.engineer.tagged_floor`");
+    expect(pr?.body).toContain(`#${String(h.github.state.issues[0]?.number)}`);
+    // the evidence says what it is: the scorecard, no tier replay yet (reading 233)
+    expect(pr?.body).toContain("No tier replay backs this change");
+    // no Spec Verifier for a value the module set itself: ready for the human to merge
+    expect(pr?.isDraft).toBe(false);
+    // one commit, one file: the table with the engineer's own cell moved
+    const commit = h.plumbing.commits.at(-1);
+    expect(commit?.base).toBe(BASE_SHA);
+    expect(commit?.changes.map((c) => c.path)).toEqual([ROUTING_TABLE_FILE]);
+    const text = new TextDecoder().decode(commit?.changes[0]?.bytes ?? new Uint8Array());
+    const table = readRoutingTableSource(text);
+    expect(table.roles).toEqual({ engineer: { tagged_floor: "top" } });
+    expect(routedStartTier(table, "engineer", "M", "tagged")).toBe("top");
+    expect(routedStartTier(table, "qa", "M", "tagged")).toBe("mid");
+    // the scope check ran on the commit's paths and let it through
+    expect(h.events.filter((e) => e.type === "automation.skipped")).toEqual([]);
+    // seen again while its PR is open: nothing more
+    h.clock.now = new Date(h.clock.now.getTime() + 2 * 24 * 3600 * 1000);
+    await h.upstream.report(improvement("config", subject, MOVE_TO_TOP), h.ctx);
+    expect(h.github.state.prs).toHaveLength(1);
+    expect(started).toEqual([]);
   });
 
-  /** Raises the routing issue of `subject` on the bs-vtc checkout and opens its run's PR. */
+  it("refuses a move from a tier the table no longer starts the cell on (stale_baseline)", async () => {
+    const h = harness({ self: true });
+    h.files.set(ROUTING_TABLE_FILE, TABLE_SOURCE);
+    await h.upstream.report(
+      improvement("config", routingConfigSubject("engineer", "M", "tagged"), {
+        ...MOVE_TO_TOP,
+        "routing.from_tier": 0,
+      }),
+      h.ctx,
+    );
+    expect(h.github.state.prs).toEqual([]);
+    expect(h.events.find((e) => e.type === "automation.skipped")?.payload).toMatchObject({
+      reason: "stale_baseline",
+    });
+  });
+
+  it("pickup answers another installation's routing issue with the PR, asking for no run", async () => {
+    // the raising installation has no bs-vtc checkout to edit the table at
+    const elsewhere = harness({ noGitOps: true });
+    await elsewhere.upstream.report(
+      improvement("config", routingConfigSubject("qa", "S", "none"), {
+        ...MOVE_TO_TOP,
+        "routing.from_tier": 0,
+        "routing.to_tier": 1,
+        "routing.shared": 1,
+      }),
+      elsewhere.ctx,
+    );
+    expect(elsewhere.github.state.issues).toHaveLength(1);
+    expect(elsewhere.github.state.prs).toEqual([]);
+    const started: string[] = [];
+    const h = harness({
+      shared: elsewhere,
+      self: true,
+      startRun: (input) => {
+        started.push(input.request);
+        return Promise.resolve();
+      },
+    });
+    h.files.set(ROUTING_TABLE_FILE, TABLE_SOURCE);
+    expect(await h.upstream.pickup(h.ctx)).toEqual([]);
+    expect(started).toEqual([]);
+    expect(h.github.state.prs).toHaveLength(1);
+    const text = new TextDecoder().decode(
+      h.plumbing.commits.at(-1)?.changes[0]?.bytes ?? new Uint8Array(),
+    );
+    expect(readRoutingTableSource(text).by_size).toEqual({ S: "mid", M: "mid", L: "top" });
+    // answered: a second pickup opens nothing more
+    await h.upstream.pickup(h.ctx);
+    expect(h.github.state.prs).toHaveLength(1);
+  });
+
+  /**
+   * Raises the routing issue of `subject` on the bs-vtc checkout (no move in its metrics, so the
+   * module opens no PR of its own) and opens a run's pushed head for it, as a run started from a
+   * routing issue before reading 233 would: the scope check still guards that path.
+   */
   const routingPr = async (
     changed: readonly string[],
     options: { base?: string; noDiff?: boolean } = {},

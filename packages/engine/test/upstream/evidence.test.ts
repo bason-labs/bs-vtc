@@ -26,6 +26,7 @@ import {
   publishToEvidenceBranch,
   renderEvidenceSection,
   replayIntervalMs,
+  requiredEvidenceKinds,
   startSnapshotServer,
   type EvidenceRequest,
   type FfmpegCommand,
@@ -170,6 +171,17 @@ describe("what to record", () => {
       ["/evidence/gate-report.html", EVIDENCE_READY.gateReport],
     ]);
   });
+  it("records the module's own routing PR from its routing scorecard: no replay, no gate report", () => {
+    const plan = { upstreamSafe: true, change: "config", routing: true } as const;
+    const shots = planEvidenceShots(plan);
+    expect(shots.map((s) => [s.kind, s.waitFor])).toEqual([
+      ["replay_video", EVIDENCE_READY.routing],
+      ["screenshot", EVIDENCE_READY.routing],
+      ["chart", EVIDENCE_READY.routing],
+    ]);
+    expect(requiredEvidenceKinds(plan, "attach")).toEqual(["replay_video", "screenshot", "chart"]);
+  });
+
   it("drops every recording when a project turns video off (screenshots only)", () => {
     const shots = planEvidenceShots({
       run: "R1",

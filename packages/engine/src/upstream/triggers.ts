@@ -42,7 +42,7 @@ export type AutomationFact =
       readonly role: string;
       readonly host?: string | undefined;
       readonly model?: string | undefined;
-      readonly metric: ScorecardMetricId | "tokens_per_task";
+      readonly metric: ScorecardMetricId | "tokens_per_task" | "cost_per_task";
       readonly baselinePromptSha: string;
       readonly promptSha?: string | undefined;
       readonly baseline: number;
@@ -115,18 +115,20 @@ const pct = (baseline: number, current: number): number =>
 
 /**
  * Pure: whether a cost or quality metric worsened beyond `LOOKBACK_LIMITS` against its baseline:
- * tokens per success or per task rising more than `maxTokenRisePct`, or the escalation or cap-hit
+ * tokens per success or per task, or the cost per task (a Lookback drift, reading 233), rising more
+ * than `maxTokenRisePct`, or the escalation or cap-hit
  * rate above 0 and at least `rollbackRateRatio` times its baseline, a zero baseline included
  * (reading 230(5)).
  */
 export const costRegressed = (
-  metric: ScorecardMetricId | "tokens_per_task",
+  metric: ScorecardMetricId | "tokens_per_task" | "cost_per_task",
   baseline: number,
   current: number,
 ): boolean => {
   switch (metric) {
     case "tokens_per_success":
     case "tokens_per_task":
+    case "cost_per_task":
       return pct(baseline, current) > LOOKBACK_LIMITS.maxTokenRisePct;
     case "escalations_per_100":
     case "cap_hits_per_100":

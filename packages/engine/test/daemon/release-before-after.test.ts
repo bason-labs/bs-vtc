@@ -107,10 +107,6 @@ const wire = () => {
       lookbackPr: () => Promise.resolve("none"),
       evidenceSnapshot: () => ({ routes: {}, events: [] }),
       gitOps: () => ({ readFileAtCommit: () => Promise.resolve(undefined) }),
-      remoteRefs: () => ({
-        fetch: () => Promise.resolve(),
-        message: () => Promise.resolve(null),
-      }),
       plumbing: () => plumbing,
     },
   )({

@@ -1,7 +1,8 @@
 /**
  * Round-4 followups closed in contracts 5.4.0 (spine §5 reading 227 (2)): an unexpected failure is
  * visible as `automation.skipped` reason `error` with the redacted message, and the injected
- * `GitPlumbing`'s own `fetch` / `message` replace the module's `remoteRefs` seam when present.
+ * `GitPlumbing`'s own `fetch` / `message` are the only remote reads (the module's `remoteRefs`
+ * seam is gone, spine §5 reading 233).
  */
 import type { GitPlumbing } from "@vtc/shared";
 import { afterEach, describe, expect, it } from "vitest";
@@ -96,23 +97,8 @@ describe("GitPlumbing.fetch / message (contracts 5.4.0)", () => {
     },
   };
 
-  const seam = () => {
-    const used: string[] = [];
-    return {
-      used,
-      remoteRefsSeam: () => ({
-        fetch: (_remote: string, refspecs: readonly string[]) => {
-          used.push(...refspecs);
-          return Promise.resolve();
-        },
-        message: () => Promise.resolve(null),
-      }),
-    };
-  };
-
-  it("fetches through the plumbing when it has fetch and message, not through remoteRefs", async () => {
-    const fallback = seam();
-    const h = harness({ remoteRefsSeam: fallback.remoteRefsSeam });
+  it("fetches through the plumbing's fetch and message", async () => {
+    const h = harness();
     const viaPlumbing = fakeRemoteRefs(h.plumbing);
     Object.assign(h.plumbing, {
       fetch: (remote: string, refspecs: readonly string[]) => viaPlumbing.fetch(remote, refspecs),
@@ -125,13 +111,11 @@ describe("GitPlumbing.fetch / message (contracts 5.4.0)", () => {
         "+refs/heads/vtc-evidence:refs/remotes/origin/vtc-evidence",
       ]),
     );
-    expect(fallback.used).toEqual([]);
   });
 
-  it("falls back to remoteRefs when the plumbing has neither", async () => {
-    const fallback = seam();
-    const h = harness({ remoteRefsSeam: fallback.remoteRefsSeam });
+  it("fetches nothing when the plumbing has neither: the non-forced push decides", async () => {
+    const h = harness();
+    expect("fetch" in h.plumbing).toBe(false);
     expect(await h.upstream.openPullRequest(input, h.ctx)).toMatchObject({ status: "pr" });
-    expect(fallback.used).toContain("+refs/heads/vtc/auto/*:refs/remotes/origin/vtc/auto/*");
   });
 });

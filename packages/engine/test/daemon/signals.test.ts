@@ -268,10 +268,6 @@ describe("the tool and capability signals become VTC issues (D-cs)", () => {
           lookbackPr: () => Promise.resolve("none"),
           evidenceSnapshot: () => ({ routes: {}, events: [] }),
           gitOps: () => ({ readFileAtCommit: () => Promise.resolve(undefined) }),
-          remoteRefs: () => ({
-            fetch: () => Promise.resolve(),
-            message: () => Promise.resolve(null),
-          }),
           plumbing: () => {
             throw new Error("no PR in this test");
           },

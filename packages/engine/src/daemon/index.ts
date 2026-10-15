@@ -66,7 +66,6 @@ import {
   createGhPullRequests,
   createGitOps,
   createGitPlumbing,
-  createRemoteRefs,
   createWorkspace,
 } from "../git/index.js";
 import {
@@ -715,7 +714,6 @@ export const runDaemon: RunDaemon = async (deps: EngineDeps, options) => {
             (c) => c.prompt.role === role && c.prompt.host === host,
           ),
         gitOps: (root) => createGitOps({ repoRoot: root }),
-        remoteRefs: (root) => createRemoteRefs({ repoRoot: root }),
         plumbing: createGitPlumbing,
       }),
     });

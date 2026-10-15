@@ -132,6 +132,10 @@ describe("an automatic run's UI PR (D-ct)", () => {
       "04-ui-after-home.png",
       "05-changed-flow.webm",
     ]);
+    // the recorder renders no changed-flow steps yet (spine §5 reading 233): its video says what
+    // it shows, the first screen loading and then idle, never "the changed flow"
+    expect(pr?.body).toContain("First rendered screen, loading then idle");
+    expect(pr?.body).not.toContain("The changed flow");
     expect(opened(h.events)).toMatchObject({ evidence: "complete" });
     expect(opened(h.events)).not.toHaveProperty("partial_reason");
     const kept = manifest(h.ctx.repoRoot);

@@ -4,7 +4,6 @@
  * `config` facts engine core hands the upstream module.
  */
 import {
-  DEFAULT_ROUTING_TABLE,
   LOOKBACK_LIMITS,
   LOOKBACK_REPO,
   RoutingScorecardSchema,
@@ -12,6 +11,7 @@ import {
   routingConfigSubject,
   type ModelTier,
   type RoutingScorecard,
+  type RoutingTable,
 } from "@vtc/shared";
 import { readFile } from "node:fs/promises";
 import { join } from "node:path";
@@ -26,6 +26,19 @@ import {
   type RoutingCell,
 } from "../../src/lookback/index.js";
 import { HOST, RunLog, tempDir } from "./log.js";
+
+/**
+ * D-cm's routing table as decided (spine §5 reading 218(2)): the proposal tests measure against
+ * it, since `DEFAULT_ROUTING_TABLE`'s tiers move through reviewed D-cn routing PRs that change
+ * `tier-routing.ts` only (reading 233).
+ */
+const DCM: RoutingTable = {
+  v: 1,
+  by_size: { S: "low", M: "mid", L: "top" },
+  tagged_floor: "mid",
+  high_floor: "top",
+  high_risk_tags: ["auth", "payments", "data", "security", "migration"],
+};
 
 const BUNDLE = "9".repeat(64);
 const now = new Date("2026-10-15T09:00:00.000Z");
@@ -269,7 +282,7 @@ const card = (cells: RoutingCell[]): RoutingScorecard => ({
 describe("routing proposals (D-cn)", () => {
   it("reads the table's start tier, with a role's override and the floors", () => {
     const table = RoutingTableSchema.parse({
-      ...DEFAULT_ROUTING_TABLE,
+      ...DCM,
       roles: { spec_verifier: { by_size: { M: "low" }, tagged_floor: "low" } },
     });
     expect(routedStartTier(table, "engineer", "S", "none")).toBe("low");
@@ -284,7 +297,7 @@ describe("routing proposals (D-cn)", () => {
     // core/routing.ts `ruleTier`: a high-risk task starts on the higher of `by_size` and
     // `high_floor`; `tagged_floor` is not its floor (a `risk: high` task may carry no tag)
     const table = RoutingTableSchema.parse({
-      ...DEFAULT_ROUTING_TABLE,
+      ...DCM,
       tagged_floor: "top",
       high_floor: "mid",
       roles: { qa: { high_floor: "low" } },
@@ -303,14 +316,14 @@ describe("routing proposals (D-cn)", () => {
         cell({ tier: "mid", pass: 0.95, review: 0.9 }),
         cell({ tier: "low", reason: "role", pass: 0.95 - margin, review: 0.9, cost: 0.03 }),
       ]),
-      DEFAULT_ROUTING_TABLE,
+      DCM,
     );
     expect(out.changes.map((c) => [c.subject, c.direction, c.from, c.to, c.scope])).toEqual([
       [routingConfigSubject("engineer", "M", "none"), "cheaper", "mid", "low", "role"],
     ]);
     // one role differs: its own override, the shared cells unchanged
     expect(out.table).toEqual({
-      ...DEFAULT_ROUTING_TABLE,
+      ...DCM,
       roles: { engineer: { by_size: { M: "low" } } },
     });
     expect(RoutingTableSchema.safeParse(out.table).success).toBe(true);
@@ -345,7 +358,7 @@ describe("routing proposals (D-cn)", () => {
     ]) {
       const out = routingProposals(
         card([cell({ tier: "mid", pass: 1, review: 0.95 }), cheaper]),
-        DEFAULT_ROUTING_TABLE,
+        DCM,
       );
       expect(out.changes).toEqual([]);
       expect(out.table).toBeNull();
@@ -354,27 +367,21 @@ describe("routing proposals (D-cn)", () => {
 
   it("proposes a higher start for a start tier that keeps escalating", () => {
     const share = LOOKBACK_LIMITS.routingEscalationPct / 100;
-    const out = routingProposals(
-      card([cell({ size: "S", tier: "low", escalated: share })]),
-      DEFAULT_ROUTING_TABLE,
-    );
+    const out = routingProposals(card([cell({ size: "S", tier: "low", escalated: share })]), DCM);
     expect(out.changes.map((c) => [c.subject, c.direction, c.from, c.to])).toEqual([
       ["routing.engineer.S.none", "higher", "low", "mid"],
     ]);
     expect(out.table?.roles).toEqual({ engineer: { by_size: { S: "mid" } } });
     const below = routingProposals(
       card([cell({ size: "S", tier: "low", escalated: share - 0.01 })]),
-      DEFAULT_ROUTING_TABLE,
+      DCM,
     );
     expect(below.changes).toEqual([]);
   });
 
   it("lifts the cells that floor on a raised start, and names them", () => {
     // M/none mid -> top raises by_size.M, which M tagged floors on
-    const m = routingProposals(
-      card([cell({ size: "M", tier: "mid", escalated: 0.9 })]),
-      DEFAULT_ROUTING_TABLE,
-    );
+    const m = routingProposals(card([cell({ size: "M", tier: "mid", escalated: 0.9 })]), DCM);
     expect(m.dropped).toEqual([]);
     expect(m.changes.map((c) => [c.subject, c.direction, c.from, c.to, c.lifted])).toEqual([
       [
@@ -395,7 +402,7 @@ describe("routing proposals (D-cn)", () => {
     // S tagged mid -> top raises tagged_floor, which every size's tagged cell floors on
     const tagged = routingProposals(
       card([cell({ size: "S", risk: "tagged", tier: "mid", escalated: 0.9 })]),
-      DEFAULT_ROUTING_TABLE,
+      DCM,
     );
     expect(tagged.changes.map((c) => [c.subject, c.to, c.lifted])).toEqual([
       ["routing.engineer.S.tagged", "top", [{ size: "M", risk: "tagged", from: "mid", to: "top" }]],
@@ -403,7 +410,7 @@ describe("routing proposals (D-cn)", () => {
     expect(tagged.table?.roles).toEqual({ engineer: { tagged_floor: "top" } });
     const mTagged = routingProposals(
       card([cell({ size: "M", risk: "tagged", tier: "mid", escalated: 0.9 })]),
-      DEFAULT_ROUTING_TABLE,
+      DCM,
     );
     expect(mTagged.changes.map((c) => [c.subject, c.to, c.lifted.map((l) => l.size)])).toEqual([
       ["routing.engineer.M.tagged", "top", ["S"]],
@@ -416,7 +423,7 @@ describe("routing proposals (D-cn)", () => {
         cell({ size: "M", tier: "mid", escalated: 0.7 }),
         cell({ role: "spec_verifier", size: "M", tier: "mid", escalated: 0.8 }),
       ]),
-      DEFAULT_ROUTING_TABLE,
+      DCM,
     );
     expect(out.dropped).toEqual([]);
     expect(out.changes.map((c) => [c.role, c.scope, c.to, c.lifted.length])).toEqual([
@@ -428,7 +435,7 @@ describe("routing proposals (D-cn)", () => {
 
   it("drops QA author's escalation on S/none (two tiers for QA judge) but keeps judge's own", () => {
     const author = cell({ role: "qa", mode: "author", size: "S", tier: "mid", escalated: 0.9 });
-    const out = routingProposals(card([author]), DEFAULT_ROUTING_TABLE);
+    const out = routingProposals(card([author]), DCM);
     expect(out.changes).toEqual([]);
     expect(out.dropped.map((d) => d.subject)).toEqual(["routing.qa.S.none"]);
     expect(out.dropped[0]?.reason).toContain("two tiers");
@@ -437,7 +444,7 @@ describe("routing proposals (D-cn)", () => {
         cell({ role: "qa", mode: "author", size: "S", tier: "mid" }),
         cell({ role: "qa", mode: "judge", size: "S", tier: "low", escalated: 0.9 }),
       ]),
-      DEFAULT_ROUTING_TABLE,
+      DCM,
     );
     expect(judge.changes.map((c) => [c.subject, c.from, c.to])).toEqual([
       ["routing.qa.S.none", "low", "mid"],
@@ -453,7 +460,7 @@ describe("routing proposals (D-cn)", () => {
     const few = LOOKBACK_LIMITS.routingMinTasks - 1;
     const out = routingProposals(
       card([cell({ size: "S", tier: "low", escalated: 0.9, tasks: few })]),
-      DEFAULT_ROUTING_TABLE,
+      DCM,
     );
     expect(out).toEqual({ table: null, changes: [], facts: [], dropped: [] });
   });
@@ -464,14 +471,14 @@ describe("routing proposals (D-cn)", () => {
         cell({ size: "S", tier: "low", escalated: 0.7 }),
         cell({ role: "spec_verifier", size: "S", tier: "low", escalated: 0.8 }),
       ]),
-      DEFAULT_ROUTING_TABLE,
+      DCM,
     );
     expect(out.changes.map((c) => [c.role, c.scope, c.to])).toEqual([
       ["engineer", "shared", "mid"],
       ["spec_verifier", "shared", "mid"],
     ]);
     expect(out.table).toEqual({
-      ...DEFAULT_ROUTING_TABLE,
+      ...DCM,
       by_size: { S: "mid", M: "mid", L: "top" },
     });
     expect(out.facts.map((f) => f.subject)).toEqual([
@@ -485,10 +492,10 @@ describe("routing proposals (D-cn)", () => {
         cell({ role: "spec_verifier", size: "S", tier: "low", escalated: 0.8 }),
         cell({ role: "security", size: "S", tier: "low", escalated: 0 }),
       ]),
-      DEFAULT_ROUTING_TABLE,
+      DCM,
     );
     expect(objected.changes.map((c) => c.scope)).toEqual(["role", "role"]);
-    expect(objected.table?.by_size).toEqual(DEFAULT_ROUTING_TABLE.by_size);
+    expect(objected.table?.by_size).toEqual(DCM.by_size);
     expect(objected.table?.roles).toEqual({
       engineer: { by_size: { S: "mid" } },
       spec_verifier: { by_size: { S: "mid" } },
@@ -508,7 +515,7 @@ describe("routing proposals (D-cn)", () => {
           pass: 1,
         }),
       ]),
-      DEFAULT_ROUTING_TABLE,
+      DCM,
     );
     expect(out.changes).toEqual([]);
   });
@@ -520,7 +527,7 @@ describe("routing proposals (D-cn)", () => {
         cell({ size: "S", risk: "high", tier: "top", pass: 1 }),
         cell({ size: "S", risk: "high", tier: "mid", reason: "role", pass: 1 }),
       ]),
-      DEFAULT_ROUTING_TABLE,
+      DCM,
     );
     expect(out.changes).toEqual([]);
     expect(out.table).toBeNull();
@@ -531,20 +538,17 @@ describe("routing proposals (D-cn)", () => {
   it("never takes a Planner-hinted cell as a cheaper tier's evidence (a biased sample)", () => {
     const current = cell({ tier: "mid", pass: 0.95 });
     const hinted = cell({ tier: "low", reason: "planner_hint", pass: 0.95, tasks: 40 });
-    const out = routingProposals(card([current, hinted]), DEFAULT_ROUTING_TABLE);
+    const out = routingProposals(card([current, hinted]), DCM);
     expect(out).toEqual({ table: null, changes: [], facts: [], dropped: [] });
     // the same numbers from a `routing.start: role` project are evidence
-    const role = routingProposals(
-      card([current, { ...hinted, start_reason: "role" }]),
-      DEFAULT_ROUTING_TABLE,
-    );
+    const role = routingProposals(card([current, { ...hinted, start_reason: "role" }]), DCM);
     expect(role.changes.map((c) => [c.subject, c.to])).toEqual([
       ["routing.engineer.M.none", "low"],
     ]);
     // a hinted cell beside a rule or role cell of the same tier is not what is read
     const mixed = routingProposals(
       card([current, hinted, cell({ tier: "low", reason: "role", pass: 0.5, tasks: 10 })]),
-      DEFAULT_ROUTING_TABLE,
+      DCM,
     );
     expect(mixed.changes).toEqual([]);
   });
@@ -558,7 +562,7 @@ describe("routing proposals (D-cn)", () => {
         { ...cell({ tier: "mid", pass: 0.95 }), ...other },
         { ...cell({ tier: "low", reason: "role", pass: 0.5 }), ...other },
       ]),
-      DEFAULT_ROUTING_TABLE,
+      DCM,
     );
     expect(out).toEqual({ table: null, changes: [], facts: [], dropped: [] });
   });
@@ -569,7 +573,7 @@ describe("routing proposals (D-cn)", () => {
         cell({ size: "S", tier: "low", escalated: 0.8 }),
         { ...cell({ size: "S", tier: "low", escalated: 0 }), host: "codex" as const },
       ]),
-      DEFAULT_ROUTING_TABLE,
+      DCM,
     );
     expect(out.changes.map((c) => [c.subject, c.direction, c.from, c.to, c.scope])).toEqual([
       ["routing.engineer.S.none", "higher", "low", "mid", "role"],
@@ -580,7 +584,7 @@ describe("routing proposals (D-cn)", () => {
 
   it("proposes the cheapest tier that matches quality when several do", () => {
     // tagged_floor top: lowering L/none moves no other cell
-    const table = RoutingTableSchema.parse({ ...DEFAULT_ROUTING_TABLE, tagged_floor: "top" });
+    const table = RoutingTableSchema.parse({ ...DCM, tagged_floor: "top" });
     const both = routingProposals(
       card([
         cell({ size: "L", tier: "top", pass: 0.95 }),
@@ -612,7 +616,7 @@ describe("routing proposals (D-cn)", () => {
     const cells = [cell({ tier: "mid", pass: 1 }), cell({ tier: "low", reason: "role", pass: 1 })];
     // 12 tasks, 6 + 6 sampled, k 3, two arms
     const trials = 12 * LOOKBACK_LIMITS.replayTrials * 2;
-    const funded = routingProposals(card(cells), DEFAULT_ROUTING_TABLE, { trialBudget: trials });
+    const funded = routingProposals(card(cells), DCM, { trialBudget: trials });
     expect(funded.changes[0]?.replay).toEqual({
       role: "engineer",
       host: HOST,
@@ -625,11 +629,11 @@ describe("routing proposals (D-cn)", () => {
     // a plan, not a replay that ran: replay dispatch has no tier arm yet
     expect(funded.facts[0]?.metrics["routing.replay_planned"]).toBe(1);
     expect(funded.facts[0]?.metrics).not.toHaveProperty("routing.replay");
-    const short = routingProposals(card(cells), DEFAULT_ROUTING_TABLE, {
+    const short = routingProposals(card(cells), DCM, {
       trialBudget: trials - 1,
     });
     expect(short.changes[0]?.replay).toBeNull();
-    const paced = routingProposals(card(cells), DEFAULT_ROUTING_TABLE, {
+    const paced = routingProposals(card(cells), DCM, {
       trialBudget: 100,
       pace: { failureTasks: 2, regressionTasks: 2 },
     });

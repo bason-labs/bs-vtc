@@ -23,6 +23,7 @@ import {
   type HostId,
   type HostOutcome,
   type ModelPriceInput,
+  type RoutingTable,
   type BaseRun,
   type RemoteInfo,
   type RemoteMergePolicy,
@@ -562,7 +563,22 @@ export interface HarnessOptions {
   readonly level3?: boolean;
   /** The user's price table (`~/.vtc/config.yaml` `prices`, §11). */
   readonly prices?: Readonly<Record<string, ModelPriceInput>>;
+  /** The routing table (default {@link DCM_ROUTING_TABLE}, never the tunable default's values). */
+  readonly routingTable?: RoutingTable;
 }
+
+/**
+ * D-cm's routing table as decided (spine §5 reading 218(2)): the engine's flow tests route with
+ * it. `DEFAULT_ROUTING_TABLE` started equal to it, and its tiers move through reviewed D-cn
+ * routing PRs that change `tier-routing.ts` only (reading 233), which no test may then block.
+ */
+export const DCM_ROUTING_TABLE: RoutingTable = {
+  v: 1,
+  by_size: { S: "low", M: "mid", L: "top" },
+  tagged_floor: "mid",
+  high_floor: "top",
+  high_risk_tags: ["auth", "payments", "data", "security", "migration"],
+};
 
 export const DEFAULT_GATES_YML = {
   version: 1,
@@ -663,6 +679,7 @@ export const createHarness = (options: HarnessOptions = {}): Harness => {
     remote: "origin",
     platform: options.platform ?? "darwin",
     ...(options.armPlugins === undefined ? {} : { armPlugins: options.armPlugins }),
+    routingTable: options.routingTable ?? DCM_ROUTING_TABLE,
     ...(options.prices === undefined
       ? {}
       : {

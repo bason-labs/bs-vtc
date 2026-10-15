@@ -4,9 +4,23 @@ import type {
   GatesConfigInput,
   RoleContractInput,
   RoleResultInput,
+  RoutingTable,
   TaskInput,
   VtcEventInput,
 } from "../src/index.js";
+
+/**
+ * D-cm's routing table as the Lead decided it (spine §5 reading 218(2)): the rule tests' table.
+ * `DEFAULT_ROUTING_TABLE` started equal to it, and its tiers move through reviewed D-cn routing
+ * PRs that change `tier-routing.ts` only (reading 233), so no test pins the default's tiers.
+ */
+export const DCM_TABLE: RoutingTable = {
+  v: 1,
+  by_size: { S: "low", M: "mid", L: "top" },
+  tagged_floor: "mid",
+  high_floor: "top",
+  high_risk_tags: ["auth", "payments", "data", "security", "migration"],
+};
 
 export const SHA = "a".repeat(64);
 /** A full 40-hex git commit id. */

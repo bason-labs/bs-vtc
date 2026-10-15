@@ -42,6 +42,19 @@ const projectYaml = (yaml: string): ProjectRoutingRead => {
   return readProjectRouting(repo);
 };
 
+/**
+ * D-cm's table as decided (spine §5 reading 218(2)): the view's rule tests read it, since the
+ * default's tiers move through reviewed D-cn routing PRs that change `tier-routing.ts` only
+ * (reading 233).
+ */
+const DCM: RoutingTable = {
+  v: 1,
+  by_size: { S: "low", M: "mid", L: "top" },
+  tagged_floor: "mid",
+  high_floor: "top",
+  high_risk_tags: ["auth", "payments", "data", "security", "migration"],
+};
+
 const DEFAULT_USER = userYaml("version: 1\n");
 const DEFAULT_PROJECT = projectYaml("version: 1\n");
 
@@ -75,8 +88,16 @@ describe("reading the project's routing", () => {
 
 describe("the routing view (H-9, D-cm)", () => {
   it("shows the table, the full default range and each size and risk class's start tier", () => {
-    const view = routingView({ project: DEFAULT_PROJECT, user: DEFAULT_USER, weekly: NO_WEEKLY });
-    expect(view.table).toEqual(DEFAULT_ROUTING_TABLE);
+    expect(
+      routingView({ project: DEFAULT_PROJECT, user: DEFAULT_USER, weekly: NO_WEEKLY }).table,
+    ).toEqual(DEFAULT_ROUTING_TABLE);
+    const view = routingView({
+      project: DEFAULT_PROJECT,
+      user: DEFAULT_USER,
+      weekly: NO_WEEKLY,
+      table: DCM,
+    });
+    expect(view.table).toEqual(DCM);
     expect(view.project).toEqual({
       found: true,
       start: "difficulty",
@@ -119,7 +140,7 @@ describe("the routing view (H-9, D-cm)", () => {
 
   it("applies a role's own cells from the table's roles overrides (D-cn)", () => {
     const table: RoutingTable = RoutingTableSchema.parse({
-      ...DEFAULT_ROUTING_TABLE,
+      ...DCM,
       roles: { spec_verifier: { by_size: { S: "mid" }, high_floor: "mid" } },
     });
     const view = routingView({
@@ -219,11 +240,22 @@ describe("the routing view (H-9, D-cm)", () => {
 });
 
 describe("doctor's routing checks", () => {
-  const checks = (project: ProjectRoutingRead, user: UserConfigRead = DEFAULT_USER) =>
-    routingChecks(routingView({ project, user, weekly: NO_WEEKLY }));
+  const checks = (
+    project: ProjectRoutingRead,
+    user: UserConfigRead = DEFAULT_USER,
+    table?: RoutingTable,
+  ) =>
+    routingChecks(
+      routingView({ project, user, weekly: NO_WEEKLY, ...(table === undefined ? {} : { table }) }),
+    );
 
   it("reports routing, models and the Lookback pace, failing none of them by default", () => {
-    const list = checks(DEFAULT_PROJECT);
+    expect(checks(DEFAULT_PROJECT).map((c) => [c.name, c.status])).toEqual([
+      ["routing", "ok"],
+      ["models", "info"],
+      ["lookback", "ok"],
+    ]);
+    const list = checks(DEFAULT_PROJECT, DEFAULT_USER, DCM);
     expect(list.map((c) => [c.name, c.status])).toEqual([
       ["routing", "ok"],
       ["models", "info"],
@@ -317,7 +349,7 @@ describe("vtc doctor prints the routing checks (H-9)", () => {
   it("adds routing, models and lookback lines, failing none of them by default", async () => {
     const { code, text } = await doctor(DEFAULT_PROJECT);
     expect(code).toBe(0);
-    expect(text).toMatch(/^ok {4}routing {6}per-task roles start by task difficulty: S low/m);
+    expect(text).toMatch(/^ok {4}routing {6}per-task roles start by task difficulty: S \w+/m);
     expect(text).toMatch(/^info {2}models {7}claude-code: low haiku, mid sonnet, top opus/m);
     expect(text).toMatch(/^ok {4}lookback {5}6 recent failures .*claude-code 80% left: 36/m);
   });

@@ -5,11 +5,11 @@
  * routing-table cells it proposes to change, which the daemon turns into `config` facts.
  */
 import {
-  DEFAULT_ROUTING_TABLE,
   LOOKBACK_REPO,
   RoutingScorecardSchema,
   RoutingTableSchema,
   type RoutingScorecard,
+  type RoutingTable,
   type VtcEvent,
 } from "@vtc/shared";
 import { readFile } from "node:fs/promises";
@@ -29,6 +29,19 @@ import {
 } from "../../src/lookback/index.js";
 import { evaluateTrigger } from "../../src/upstream/index.js";
 import { HOST, lockedShaFor, RunLog, tempDir } from "./log.js";
+
+/**
+ * D-cm's routing table as decided (spine §5 reading 218(2)): the proposal tests measure against
+ * it, since `DEFAULT_ROUTING_TABLE`'s tiers move through reviewed D-cn routing PRs that change
+ * `tier-routing.ts` only (reading 233).
+ */
+const DCM: RoutingTable = {
+  v: 1,
+  by_size: { S: "low", M: "mid", L: "top" },
+  tagged_floor: "mid",
+  high_floor: "top",
+  high_risk_tags: ["auth", "payments", "data", "security", "migration"],
+};
 
 const BUNDLE = "9".repeat(64);
 const now = new Date("2026-10-15T09:00:00.000Z");
@@ -59,6 +72,7 @@ describe("the routing step at RETRO (D-cn, engine core's RoutingLookback seam)",
     const root = await tempDir("routing-step");
     const history = lowStarts(12, 7);
     const cells = await lookbackRoutingStep({
+      table: DCM,
       projectRoot: root,
       history,
       graderBundleSha: BUNDLE,
@@ -91,6 +105,7 @@ describe("the routing step at RETRO (D-cn, engine core's RoutingLookback seam)",
     log.dispatch("engineer", { task: "T-1" });
     log.gate("T-1", true);
     const cells = await lookbackRoutingStep({
+      table: DCM,
       projectRoot: root,
       history: log.events,
       graderBundleSha: BUNDLE,
@@ -103,6 +118,7 @@ describe("the routing step at RETRO (D-cn, engine core's RoutingLookback seam)",
   it("writes the scorecard but proposes nothing for a start tier that does well", async () => {
     const root = await tempDir("routing-step-steady");
     const cells = await lookbackRoutingStep({
+      table: DCM,
       projectRoot: root,
       history: lowStarts(12, 0),
       graderBundleSha: BUNDLE,
@@ -130,6 +146,7 @@ describe("the routing step at RETRO (D-cn, engine core's RoutingLookback seam)",
     expect(attributions.length).toBeGreaterThan(0);
     await appendAttributions(root, attributions);
     await lookbackRoutingStep({
+      table: DCM,
       projectRoot: root,
       history: log.events,
       graderBundleSha: BUNDLE,
@@ -158,6 +175,7 @@ describe("the routing step at RETRO (D-cn, engine core's RoutingLookback seam)",
     const root = await tempDir("routing-step-fact");
     const at = now.toISOString();
     const [cell] = await lookbackRoutingStep({
+      table: DCM,
       projectRoot: root,
       history: lowStarts(12, 7),
       graderBundleSha: BUNDLE,
@@ -176,6 +194,7 @@ describe("the routing step at RETRO (D-cn, engine core's RoutingLookback seam)",
     expect(item).toMatchObject({ target: "upstream", kind: "config" });
     // the same proposal at the next RETRO dedupes onto the same issue
     const [again] = await lookbackRoutingStep({
+      table: DCM,
       projectRoot: root,
       history: lowStarts(13, 8),
       graderBundleSha: BUNDLE,
@@ -213,7 +232,7 @@ describe("routingProposalCells (D-cn)", () => {
   it("names the shared field when two roles back the change", () => {
     const proposals = routingProposals(
       card([escalating("engineer", "S", "none"), escalating("spec_verifier", "S", "none")]),
-      DEFAULT_ROUTING_TABLE,
+      DCM,
     );
     const cells = routingProposalCells(proposals);
     expect(cells.map((c) => [c.role, c.size, c.risk])).toEqual([
@@ -227,17 +246,14 @@ describe("routingProposalCells (D-cn)", () => {
     }
     expect(proposals.table).toEqual(
       RoutingTableSchema.parse({
-        ...DEFAULT_ROUTING_TABLE,
+        ...DCM,
         by_size: { S: "mid", M: "mid", L: "top" },
       }),
     );
   });
 
   it("names a role's floor and the cells a higher floor lifts", () => {
-    const proposals = routingProposals(
-      card([{ ...escalating("engineer", "M", "tagged") }]),
-      DEFAULT_ROUTING_TABLE,
-    );
+    const proposals = routingProposals(card([{ ...escalating("engineer", "M", "tagged") }]), DCM);
     const [cell] = routingProposalCells(proposals);
     expect(cell?.detail).toContain('set roles.engineer.tagged_floor to "top"');
     expect(cell?.detail).toContain("also starts S/tagged on top");

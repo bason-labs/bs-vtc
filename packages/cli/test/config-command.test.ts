@@ -45,7 +45,8 @@ describe("vtc config", () => {
     expect(await createConfigCommand(env()).run([], ctx)).toBe(0);
     const text = out.join("\n");
     expect(text).toMatch(/^Routing \(H-9\)/);
-    expect(text).toMatch(/table v1: S low, M mid, L top/);
+    // the table's tiers move through reviewed D-cn PRs (spine §5 reading 233): its shape here
+    expect(text).toMatch(/table v1: S (low|mid|top), M (low|mid|top), L (low|mid|top)/);
     expect(text).toMatch(/start tier by task size and risk, tiers low\.\.top/);
     expect(text).toMatch(/claude-code: low haiku, mid sonnet, top opus/);
     expect(text).toMatch(/codex: low gpt-6-luna, mid gpt-6\.1-sol, top gpt-6-astra/);

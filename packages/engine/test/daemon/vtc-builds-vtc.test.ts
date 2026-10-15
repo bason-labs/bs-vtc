@@ -107,10 +107,6 @@ describe("VTC builds VTC: a project's crash is fixed by the bs-vtc checkout's en
             lookbackPr: () => Promise.resolve("none"),
             evidenceSnapshot: () => ({ routes: {}, events: [] }),
             gitOps: () => ({ readFileAtCommit: () => Promise.resolve(undefined) }),
-            remoteRefs: () => ({
-              fetch: () => Promise.resolve(),
-              message: () => Promise.resolve(null),
-            }),
             plumbing: () => {
               throw new Error("no PR in this test");
             },

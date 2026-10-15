@@ -12,6 +12,8 @@ import { join } from "node:path";
 import {
   AUTO_LABELS,
   LOOKBACK_REPO,
+  ROUTING_FACT_METRICS,
+  TIER_ORDER,
   RoutingScorecardSchema,
   autoBranchName,
   autoKindLabel,
@@ -101,7 +103,19 @@ import {
 } from "./remote-refs.js";
 import { createStaging, stagingRootFor, type Staging } from "./staging.js";
 import { upstreamStateDir } from "./state-dir.js";
-import { projectSubject, ROUTING_TABLE_FILE, routingSubjectOfBody } from "./subject.js";
+import {
+  buildRoutingPr,
+  routingMoveOfBody,
+  routingMoveOfMetrics,
+  type RoutingMove,
+} from "./routing-pr.js";
+import {
+  projectSubject,
+  ROUTING_TABLE_FILE,
+  routingSubject,
+  routingSubjectOfBody,
+  type UpstreamSubject,
+} from "./subject.js";
 import {
   evaluateTrigger,
   fixableItem,
@@ -176,17 +190,6 @@ export interface UpstreamDeps {
    * dropped; absent, only the single-file binary's own frames count (fail closed).
    */
   readonly vtcRoots?: readonly string[];
-  /**
-   * Fetch and commit-message reading for a repo (engine git). Right before VTC builds a commit on
-   * a shared branch (`vtc-evidence`, `vtc/auto/*`) it fetches that branch, and it recognises a
-   * head another VTC installation pushed by its `Generated-by: VTC` trailer. The injected
-   * `GitPlumbing`'s own `fetch` and `message` (contracts 5.4.0) are used when it has both; this is
-   * the fallback until engine core's plumbing implements them. With neither, VTC builds on the
-   * remote-tracking refs as last fetched by the user's own git: a stale ref then makes the (never
-   * forced) push fail, the PR is skipped and no "evidence capture failed" is raised; and a branch
-   * head missing from this installation's ledger counts as someone else's.
-   */
-  readonly remoteRefs?: (repoRoot: string) => RemoteRefs;
   /**
    * Starts an automatic run from one of its issues (D-bv "a fixable one becomes a normal VTC run",
    * D-cd; AD-27 rule 2): the daemon's `Engine.startAutomatic`, which queues the run until no other
@@ -415,15 +418,20 @@ export const createUpstream = (deps: UpstreamDeps): Upstream => {
     return withFileLock(join(dir, `${repoFileName(repo)}.lock`), task);
   };
   /**
-   * Fetch and commit messages for a repo: the injected plumbing's own (contracts 5.4.0) when it
-   * has both, else the daemon's `remoteRefs` seam, else none.
+   * Fetch and commit messages for a repo: the injected plumbing's own (`GitPlumbing.fetch` and
+   * `message`, contracts 5.4.0), or none. Before every commit or push on a shared branch
+   * (`vtc-evidence`, `vtc/auto/*`) the module fetches that branch, and it recognises a head another
+   * VTC installation pushed by its `Generated-by: VTC` trailer. Without them VTC builds on the
+   * remote-tracking refs as last fetched by the user's own git: a stale ref then makes the (never
+   * forced) push fail, the PR is skipped and no "evidence capture failed" is raised; and a branch
+   * head missing from this installation's ledger counts as someone else's. (The daemon's
+   * `RemoteRefs` fallback is gone, spine §5 reading 233.)
    */
   const remoteRefsFor = (repoRoot: string): RemoteRefs | undefined => {
     const plumbing = deps.automation.plumbing?.({ repoRoot });
     const fetch = plumbing?.fetch?.bind(plumbing);
     const message = plumbing?.message?.bind(plumbing);
-    if (fetch !== undefined && message !== undefined) return { fetch, message };
-    return deps.remoteRefs?.(repoRoot);
+    return fetch !== undefined && message !== undefined ? { fetch, message } : undefined;
   };
 
   const issues = deps.automation.issues ?? gh.issues;
@@ -639,7 +647,13 @@ export const createUpstream = (deps: UpstreamDeps): Upstream => {
       gate(item.target, "issues", ctx);
       const repo = repoOf(item.target, ctx);
       if (repo === null) throw new AutomationSkip("no_github_remote", "no target repo");
-      return withRepoLock(repo, () => raiseLocked(item, ctx, repo));
+      // work that must not hold the repo lock (a routing issue's PR takes it itself)
+      const after: (() => Promise<unknown>)[] = [];
+      const outcome = await withRepoLock(repo, () =>
+        raiseLocked(item, ctx, repo, (task) => after.push(task)),
+      );
+      for (const task of after) await task();
+      return outcome;
     });
   };
 
@@ -647,6 +661,7 @@ export const createUpstream = (deps: UpstreamDeps): Upstream => {
     item: AutoWorkItem,
     ctx: ProjectContext,
     repo: GitHubRepo,
+    defer: (task: () => Promise<unknown>) => void,
   ): Promise<AutomationOutcome> => {
     const ledger = ledgerFor(item.target, ctx);
     ledger.append({
@@ -722,7 +737,7 @@ export const createUpstream = (deps: UpstreamDeps): Upstream => {
             url: issue.url,
             ...(regressionOf === undefined ? {} : { regression_of: regressionOf }),
           });
-          await startFixRun(item, repo, issue.number, rendered, ctx);
+          await startFixRun(item, repo, issue.number, rendered, ctx, defer);
           return { status: "issue", action: "opened", number: issue.number, url: issue.url };
         }
         case "update": {
@@ -767,7 +782,7 @@ export const createUpstream = (deps: UpstreamDeps): Upstream => {
           // on the bs-vtc checkout, an open fixable issue another project's daemon raised: the
           // daemon starts its run once (a project's own issue asked when it opened)
           if (item.target === "upstream")
-            await startFixRun(item, repo, decision.number, rendered, ctx);
+            await startFixRun(item, repo, decision.number, rendered, ctx, defer);
           return { status: "issue", action, number: decision.number, url };
         }
         case "reopen": {
@@ -795,7 +810,7 @@ export const createUpstream = (deps: UpstreamDeps): Upstream => {
             action: "reopened",
           });
           if (item.target === "upstream")
-            await startFixRun(item, repo, decision.number, rendered, ctx);
+            await startFixRun(item, repo, decision.number, rendered, ctx, defer);
           return { status: "issue", action: "reopened", number: decision.number, url };
         }
       }
@@ -856,10 +871,30 @@ export const createUpstream = (deps: UpstreamDeps): Upstream => {
     item: AutoWorkItem,
     repo: GitHubRepo,
     number: number,
-    rendered: { readonly title: string; readonly body: string },
+    rendered: { readonly title: string; readonly body: string; readonly report?: UpstreamReport },
     ctx: ProjectContext,
+    defer: (task: () => Promise<unknown>) => void,
   ): Promise<void> => {
-    if (!fixableItem(item) || !mayStartRun(item.target, ctx)) return;
+    if (!fixableItem(item)) return;
+    // D-cn (reading 233): a routing-table change is the module's own PR, never a run
+    if (item.target === "upstream" && item.kind === "config") {
+      const subject = routingSubject(item.subject ?? "");
+      if (subject !== null) {
+        const move = routingMoveOfMetrics(item.facts.metrics);
+        const report = rendered.report;
+        // after the raise lets go of the repo lock, which opening the PR takes itself
+        if (move !== null && report !== undefined)
+          defer(() =>
+            answerRouting(
+              repo,
+              { subject, move, fingerprint: item.fingerprint, issue: number, report },
+              ctx,
+            ),
+          );
+        return;
+      }
+    }
+    if (!mayStartRun(item.target, ctx)) return;
     const spec =
       item.target === "project"
         ? `${rendered.title}\n\n${redactSecrets(item.detail, ctx.knownValues)}`
@@ -887,12 +922,141 @@ export const createUpstream = (deps: UpstreamDeps): Upstream => {
   };
 
   /**
+   * Whether the module may open a routing-table PR now (D-cn, reading 233): as for an automatic
+   * run (`automation.prs` on, not paused, gh logged in, upstream reporting on), with a bs-vtc
+   * checkout to read the table at and commit on.
+   */
+  const mayOpenRoutingPr = (ctx: ProjectContext): boolean => {
+    if (deps.automation.upstream.checkout === undefined || deps.gitOps === undefined) return false;
+    const { settings, context } = ctx.state();
+    if (context.paused || !context.ghLoggedIn || !settings.prs) return false;
+    return settings.upstream && deps.automation.upstream.share;
+  };
+
+  /** The upstream report of a routing PR whose issue another installation opened (VTC-side only). */
+  const routingReport = (
+    fingerprint: AutoFingerprint,
+    cell: Extract<UpstreamSubject, { kind: "routing" }>,
+    move: RoutingMove,
+  ): UpstreamReport => {
+    const at = now().toISOString();
+    return projectUpstreamReport({
+      kind: "config",
+      fingerprint,
+      vtcVersion: deps.vtcVersion,
+      role: cell.role,
+      metrics: {
+        [ROUTING_FACT_METRICS.fromTier]: TIER_ORDER.indexOf(move.from),
+        [ROUTING_FACT_METRICS.toTier]: TIER_ORDER.indexOf(move.to),
+        [ROUTING_FACT_METRICS.shared]: move.scope === "shared" ? 1 : 0,
+      },
+      occurrences: 1,
+      firstSeen: at,
+      lastSeen: at,
+    });
+  };
+
+  /** A routing issue this installation raised or saw again: its PR, unless one answers it. */
+  const answerRouting = async (
+    repo: GitHubRepo,
+    input: Parameters<typeof openRoutingPr>[0],
+    ctx: ProjectContext,
+  ): Promise<void> => {
+    if (!mayOpenRoutingPr(ctx)) return;
+    try {
+      const open = await pullRequests.listOpenAutomatic(repo);
+      if (open.some((p) => p.marker?.fp === input.fingerprint)) return;
+    } catch (error) {
+      failure(error, { target: "upstream", kind: "config", fingerprint: input.fingerprint }, ctx);
+      return;
+    }
+    await openRoutingPr(input, ctx);
+  };
+
+  /**
+   * D-cn (spine §5 reading 233): the routing issue's PR, made by the module itself like a Lookback
+   * prompt PR: `DEFAULT_ROUTING_TABLE` read at the default branch's commit on the bs-vtc checkout,
+   * the cell moved by one value (`buildRoutingPr`, which fails closed on a moved table or a move one
+   * value cannot make), committed as the only change of `vtc/auto/config/<fp8>`, and opened with
+   * the routing scorecard charts as its upstream-safe evidence. No automatic run makes it, so no
+   * QA author tests, CHANGELOG entry or test edit rides along; the human merges it.
+   */
+  const openRoutingPr = (
+    input: {
+      readonly subject: Extract<UpstreamSubject, { kind: "routing" }>;
+      readonly move: RoutingMove;
+      readonly fingerprint: AutoFingerprint;
+      readonly issue: number;
+      readonly report: UpstreamReport;
+    },
+    ctx: ProjectContext,
+  ): Promise<AutomationOutcome> =>
+    guarded(
+      { target: "upstream", kind: "config", fingerprint: input.fingerprint },
+      ctx,
+      async () => {
+        gate("upstream", "prs", ctx);
+        const checkout = deps.automation.upstream.checkout;
+        const gitOps = deps.gitOps;
+        if (checkout === undefined || gitOps === undefined) {
+          throw new AutomationSkip(
+            "no_upstream_checkout",
+            "no bs-vtc checkout VTC can read the routing table at is set up",
+          );
+        }
+        const factory = deps.automation.plumbing;
+        if (factory === undefined) throw new Error("no git plumbing was injected");
+        const repo = deps.automation.upstream.repo;
+        const base = await defaultBranch(repo);
+        const plumbing = factory({ repoRoot: checkout });
+        // the commit the PR's branch is built on (`autoBranchState` resolves the same one)
+        const baseSha =
+          (await plumbing.resolve(`refs/remotes/origin/${base}`)) ??
+          (await plumbing.resolve(`refs/heads/${base}`));
+        if (baseSha === null)
+          throw new Error(`the default branch ${base} is not available locally`);
+        const bytes = await gitOps(checkout).readFileAtCommit(baseSha, ROUTING_TABLE_FILE);
+        if (bytes === undefined) throw new Error(`${ROUTING_TABLE_FILE} is missing on ${base}`);
+        const parts = buildRoutingPr({
+          subject: input.subject,
+          move: input.move,
+          source: new TextDecoder().decode(bytes),
+          vtcVersion: deps.vtcVersion,
+          issue: input.issue,
+        });
+        return openPullRequest(
+          {
+            target: "upstream",
+            kind: "config",
+            fingerprint: input.fingerprint,
+            summary: parts.summary,
+            slots: parts.slots,
+            source: {
+              changes: [{ path: ROUTING_TABLE_FILE, bytes: new TextEncoder().encode(parts.text) }],
+              message: parts.summary,
+            },
+            report: input.report,
+            issue: input.issue,
+            specVerifier: "none",
+            evidence: {
+              plan: { upstreamSafe: true, change: "config" },
+              snapshot: { routes: {}, events: [] },
+            },
+          },
+          ctx,
+        );
+      },
+    );
+
+  /**
    * "VTC builds VTC" for the issues other installations opened (reading 216): on the bs-vtc
    * checkout, every open fixable VTC-repo issue that no open PR answers asks for its run, with
-   * the issue's title and body as listed as its spec.
+   * the issue's title and body as listed as its spec; a routing issue gets the module's own PR
+   * instead, never a run (reading 233).
    */
   const pickup = async (ctx: ProjectContext): Promise<readonly AutomationRunRef[]> => {
-    if (!mayStartRun("upstream", ctx)) return [];
+    const routingPrs = onUpstreamCheckout(ctx) && mayOpenRoutingPr(ctx);
+    if (!mayStartRun("upstream", ctx) && !routingPrs) return [];
     const repo = deps.automation.upstream.repo;
     let listed: readonly AutoIssueRef[];
     let answered: ReadonlySet<string>;
@@ -912,7 +1076,28 @@ export const createUpstream = (deps: UpstreamDeps): Upstream => {
     for (const issue of listed) {
       const marker = issue.marker;
       if (marker === null || !fixableUpstreamIssue(issue) || answered.has(marker.fp)) continue;
-      if (!mayStartRun("upstream", ctx)) break;
+      // D-cn (reading 233): a routing issue is answered by the module's own PR, never a run
+      const cell = marker.kind === "config" ? routingSubjectOfBody(issue.body) : null;
+      if (cell !== null) {
+        const move = routingMoveOfBody(issue.body, cell);
+        if (
+          routingPrs &&
+          move !== null &&
+          autoFingerprint({ kind: "config", subject: cell.key }) === marker.fp
+        )
+          await openRoutingPr(
+            {
+              subject: cell,
+              move,
+              fingerprint: marker.fp,
+              issue: issue.number,
+              report: routingReport(marker.fp, cell, move),
+            },
+            ctx,
+          );
+        continue;
+      }
+      if (!mayStartRun("upstream", ctx)) continue;
       // the request is written into the checkout's run log: the shared redaction first
       const clean = (text: string): string => redactSecrets(text, ctx.knownValues);
       const ref = await askRun(

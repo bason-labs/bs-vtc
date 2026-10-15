@@ -124,12 +124,15 @@ export const routingSubjectOfBody = (
 };
 
 /**
- * Pure: what an automatic run must keep to for a routing-table change (D-cn): only the values of
+ * Pure: what a routing-table change keeps to (D-cn): only the values of
  * {@link ROUTING_TABLE_CONSTANT} in {@link ROUTING_TABLE_FILE}, the shared cell or the role's
- * `roles.<role>` cells; no schema change and no `CONTRACTS_VERSION` bump.
+ * `roles.<role>` cells; no schema change and no `CONTRACTS_VERSION` bump. The upstream module
+ * makes that edit itself (`buildRoutingPr`, spine §5 reading 233); no automatic run answers the
+ * issue, so nothing a run's flow requires (acceptance tests, a CHANGELOG entry) can ride along.
  */
 export const routingChangeRule = (subject: Extract<UpstreamSubject, { kind: "routing" }>): string =>
   [
     `Change only the values of \`${ROUTING_TABLE_CONSTANT}\` in \`${ROUTING_TABLE_FILE}\`: the shared cell for size ${subject.size} with risk class \`${subject.risk}\`, or, when only \`${subject.role}\` differs, its cells under \`roles.${subject.role}\`.`,
     "Do not change the schema, any other file or `CONTRACTS_VERSION`; the routing scorecard charts are the evidence and the human merges it.",
+    "VTC opens this PR itself, with no run.",
   ].join(" ");
