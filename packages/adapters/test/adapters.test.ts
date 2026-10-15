@@ -16,12 +16,13 @@ import {
   type AdapterFactoryOptions,
 } from "../src/index.js";
 import { runHostAdapterSafetyContract } from "./host-adapter-contract.js";
+import { codexFakeSpawner } from "./support/fake-spawner.js";
 
 /**
- * Codex host web stays off (spine §7 H-3 row): the D-cl `cached` open probe returned "Internal
- * Error" for a model-picked example.com URL, which cannot tell "no live fetch" from "fetched and
- * failed", and the user's own MCP servers still load into a Codex role run. Flip this only when
- * the §7 row records both as passed.
+ * Codex host web stays off (spine §7 H-3 row; D-cp, §5 reading 222): the D-cl `cached` open probe
+ * returned "Internal Error" for a model-picked example.com URL, which cannot tell "no live fetch"
+ * from "fetched and failed", and no external probe server is set up to settle it. Revisit only if
+ * OpenAI documents that `cached` has no fetch path.
  */
 const CODEX_SAFE_HOST_WEB = false;
 
@@ -58,6 +59,8 @@ for (const host of HOST_IDS) {
         pluginDir: `/opt/vtc/plugins/${host}`,
         vtcHome: "/home/dev/.vtc",
         vtcVersion: "0.0.0",
+        // `install` runs `codex plugin …`: answered by a fake, never the real binary
+        spawner: codexFakeSpawner().spawner,
       }),
     );
   }

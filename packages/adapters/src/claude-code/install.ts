@@ -22,7 +22,7 @@
  * marketplace always lives under the VTC home (spine §5 readings 60 and 83).
  * The exact marketplace form is provisional until the spike tries it on a real install (spine §7).
  */
-import { existsSync, readdirSync } from "node:fs";
+import { existsSync } from "node:fs";
 import { join } from "node:path";
 import {
   findForbiddenHostArgs,
@@ -32,7 +32,13 @@ import {
   type InstallRequest,
   type InstallResult,
 } from "@vtc/shared";
-import { readJsonSettings, replaceDirectory, writeFileAtomic, writeJson } from "../common/files.js";
+import {
+  filesUnder,
+  readJsonSettings,
+  replaceDirectory,
+  writeFileAtomic,
+  writeJson,
+} from "../common/files.js";
 import { isRecord, text } from "../common/json.js";
 import { insidePlugin, readPluginManifest } from "../common/plugin.js";
 import {
@@ -59,12 +65,6 @@ const frozenTee = (command: string): string =>
   command.startsWith(LEGACY_WRAP)
     ? `${TEE} ${STATUSLINE_TEE.separator} ${command.slice(LEGACY_WRAP.length)}`
     : command;
-
-const filesUnder = (dir: string): string[] =>
-  readdirSync(dir, { withFileTypes: true }).flatMap((entry) => {
-    const path = join(dir, entry.name);
-    return entry.isDirectory() ? filesUnder(path) : [path];
-  });
 
 const statusLineCommand = (settings: Record<string, unknown>): string | null => {
   const line = settings.statusLine;

@@ -5,6 +5,9 @@
  * - `result`: `subtype`, `is_error`, `result` text, `structured_output` (with `--json-schema`),
  *   `usage`, `total_cost_usd`, `modelUsage`, `session_id` (recorded, spike 1);
  * - `system/init`: `session_id`, `model`;
+ * - `assistant`: `message.content[]` blocks; a `tool_use` named `Bash` carries the shell script as
+ *   `input.command` (the documented shape; no recording has a shell call yet), which only becomes
+ *   `ParsedStream.commandShapes` (D-cs), once per block id;
  * - `rate_limit_event`: `rate_limit_info {status: allowed|allowed_warning|rejected, resetsAt?,
  *   rateLimitType?, overageStatus?, unifiedWindows?: {five_hour, seven_day: {utilization,
  *   resetsAt}}}` (recorded 2026-10-14; `utilization` read 0.16 then 0.32, apparently a 0–1
@@ -19,6 +22,7 @@
  * `error_max_turns` / `error_max_budget_usd` is an `error` with cause `max_turns` / `budget`.
  */
 import type {
+  CommandShape,
   HostOutcome,
   ParsedStream,
   SessionRef,
@@ -29,6 +33,7 @@ import type {
   UsageWindowKind,
 } from "@vtc/shared";
 import { FIVE_HOUR_WINDOW_MINUTES, WEEKLY_WINDOW_MINUTES } from "@vtc/shared";
+import { shellCallShapes } from "../common/command-shapes.js";
 import { classifyFailureText, resetFromLimitText } from "../common/failure-text.js";
 import type { RunExit } from "../common/headless-run.js";
 import { CLAUDE_BINARY } from "./command.js";
@@ -73,6 +78,8 @@ interface ClaudeScan {
   /** The last retry was for a sign-in, org, hold or billing failure and nothing ran after it. */
   readonly authRetryUnrecovered: boolean;
   readonly result: Record<string, unknown> | null;
+  /** The shapes of the run's `Bash` calls, in order (D-cs). */
+  readonly commandShapes: readonly CommandShape[];
   readonly unrecognized: number;
 }
 
@@ -114,6 +121,29 @@ const retryReason = (event: Record<string, unknown>): StreamRetry["reason"] => {
   return "other";
 };
 
+/** Claude's shell tool: its `tool_use` input carries the script as `command`. */
+const SHELL_TOOL = "Bash";
+
+/**
+ * Each new `Bash` `tool_use` block of an assistant message (the role's own or a subagent's), once
+ * per block id: its `input.command`, for `shellCallShapes`.
+ */
+const shellCommands = (event: Record<string, unknown>, seen: Set<string>): unknown[] => {
+  const message = isRecord(event.message) ? event.message : null;
+  const content = Array.isArray(message?.content) ? message.content : [];
+  const commands: unknown[] = [];
+  for (const block of content) {
+    if (!isRecord(block) || block.type !== "tool_use" || block.name !== SHELL_TOOL) continue;
+    const id = text(block.id);
+    if (id !== null) {
+      if (seen.has(id)) continue;
+      seen.add(id);
+    }
+    if (isRecord(block.input)) commands.push(block.input.command);
+  }
+  return commands;
+};
+
 /** The events of a stream; a single pretty-printed `--output-format json` document counts too. */
 const eventsOf = (lines: readonly string[]) => {
   const parsed = parseJsonLines(lines);
@@ -134,6 +164,8 @@ const scan = (lines: readonly string[]): ClaudeScan => {
   let rateLimitRetryUnrecovered = false;
   let authRetryUnrecovered = false;
   let result: Record<string, unknown> | null = null;
+  const commandShapes: CommandShape[] = [];
+  const shellCallsSeen = new Set<string>();
   for (const event of events) {
     const type = text(event.type);
     if (type === null) {
@@ -165,6 +197,11 @@ const scan = (lines: readonly string[]): ClaudeScan => {
     } else if (type === "result") {
       result = event;
     } else if (type !== "system") {
+      if (type === "assistant") {
+        for (const command of shellCommands(event, shellCallsSeen)) {
+          commandShapes.push(...shellCallShapes(command));
+        }
+      }
       // an assistant or tool turn after a retry: the retried request went through
       rateLimitRetryUnrecovered = false;
       authRetryUnrecovered = false;
@@ -180,6 +217,7 @@ const scan = (lines: readonly string[]): ClaudeScan => {
     rateLimitRetryUnrecovered,
     authRetryUnrecovered,
     result,
+    commandShapes,
     unrecognized,
   };
 };
@@ -325,6 +363,7 @@ export const parseClaudeEvents = (lines: readonly string[]): ParsedStream => {
     usage: usageOf(s),
     retry: s.retry,
     unrecognizedLines: s.unrecognized,
+    commandShapes: s.commandShapes,
   };
 };
 

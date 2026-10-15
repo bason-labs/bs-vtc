@@ -1,0 +1,12 @@
+{"type":"thread.started","thread_id":"0199a7c2-4b1e-7d30-a5f2-6c8e9d1b3a47"}
+{"type":"turn.started"}
+{"type":"item.started","item":{"id":"item_1","type":"command_execution","command":"bash -lc ls","status":"in_progress"}}
+{"type":"item.completed","item":{"id":"item_1","type":"command_execution","command":"bash -lc ls","aggregated_output":"README.md\nsrc\n","exit_code":0,"status":"completed"}}
+{"type":"item.started","item":{"id":"item_2","type":"command_execution","command":"/bin/zsh -lc 'cd /Users/alice/work/app && OPENAI_API_KEY=sk-proj-FAKE123secret pnpm --filter @vtc/adapters test -- --reporter=dot'","status":"in_progress"}}
+{"type":"item.updated","item":{"id":"item_2","type":"command_execution","command":"/bin/zsh -lc 'cd /Users/alice/work/app && OPENAI_API_KEY=sk-proj-FAKE123secret pnpm --filter @vtc/adapters test -- --reporter=dot'","status":"in_progress"}}
+{"type":"item.completed","item":{"id":"item_2","type":"command_execution","command":"/bin/zsh -lc 'cd /Users/alice/work/app && OPENAI_API_KEY=sk-proj-FAKE123secret pnpm --filter @vtc/adapters test -- --reporter=dot'","aggregated_output":"ok","exit_code":0,"status":"completed"}}
+{"type":"item.completed","item":{"id":"item_3","type":"command_execution","command":["git","-C","/Users/alice/work/app","commit","-m","fix: rotate ghp_FAKEt0ken0123456789abcdefABCDEF0123"],"aggregated_output":"","exit_code":0,"status":"completed"}}
+{"type":"item.completed","item":{"id":"item_4","type":"command_execution","command":["bash","-lc","npm run build --silent"],"aggregated_output":"","exit_code":0,"status":"completed"}}
+{"type":"item.completed","item":{"id":"item_5","type":"file_change","changes":[{"path":"/Users/alice/work/app/src/x.ts","kind":"update"}],"status":"completed"}}
+{"type":"item.completed","item":{"id":"item_6","type":"agent_message","text":"{\"ok\":true}"}}
+{"type":"turn.completed","usage":{"input_tokens":1000,"cached_input_tokens":0,"output_tokens":50}}

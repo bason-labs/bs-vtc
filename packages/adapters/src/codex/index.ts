@@ -16,6 +16,7 @@ import {
   type SpawnRoleRequest,
 } from "@vtc/shared";
 import { createAuthStatusRunner } from "../common/auth-status.js";
+import { createCommandOutputRunner } from "../common/command-output.js";
 import { createRunLauncher, subagentSpawn } from "../common/dispatch.js";
 import { envHome } from "../common/homes.js";
 import { ensurePrivateDir, writeOwnFileAtomic } from "../common/files.js";
@@ -38,8 +39,8 @@ import { installCodex } from "./install.js";
  * - Handed a fresh `https://example.com/<random>` URL, `cached` tried `open_page` and the tool
  *   returned one result titled "Internal Error" with no page text; the role then reported it could
  *   not open the page. That cannot tell "no live fetch" from "fetched and failed", so it does not
- *   show the property reading 200 needs: that no page the model picks is fetched. Settling it
- *   needs a probe URL on a server whose requests can be watched.
+ *   show the property reading 200 needs: that no page the model picks is fetched. No external
+ *   probe server is set up to settle it (D-cp, spine §5 reading 222).
  * - A top-level `-c web_search=...` beat the user's `config.toml` and an untrusted project
  *   `.codex/config.toml` (`config/read`); VTC never passes `--profile`, whose layer was compared
  *   only through `developer_instructions` markers (`precedence.json`).
@@ -48,7 +49,10 @@ import { installCodex } from "./install.js";
  *   are kept out of every role run: plugins are off, and before every start or resume the adapter
  *   lists the rest with `codex mcp list` and turns each off by name, then checks that none is left
  *   on, or refuses the run (`mcp-servers.ts`; offline check `mcp-isolation.json`). That closes the
- *   second §7 H-3 item; the open probe above is the one left before this flag can turn on.
+ *   second §7 H-3 item.
+ * So `safeHostWeb` stays false (D-cp, reading 222): `host_web` roles go to Claude Code, or run
+ * without host web plus the `web` fetcher (`hostWebRoute`). It is revisited only if OpenAI
+ * documents that `cached` has no fetch path.
  */
 export const codexCapabilities: HostCapabilities = {
   subagents: true,
@@ -113,6 +117,14 @@ export interface CodexAdapterOptions {
    * before it is killed and the run refused. Default 20 s.
    */
   readonly mcpListTimeoutMs?: number;
+  /**
+   * The Codex home `install` registers the plugin in (`codex plugin …` runs with this
+   * `CODEX_HOME`). Default: `$CODEX_HOME`, else `<InstallRequest.home>/.codex`, where Codex
+   * itself looks.
+   */
+  readonly codexHome?: string;
+  /** How long one `codex plugin …` command of `install` may run before it is killed. Default 60 s. */
+  readonly installCommandTimeoutMs?: number;
 }
 
 /** How many role cwds' MCP server names the adapter remembers for `headlessCommand`. */
@@ -142,6 +154,11 @@ export const createCodexAdapter = (options: CodexAdapterOptions = {}): HostAdapt
     spawner,
     now: options.now ?? (() => new Date()),
     ...(options.authTimeoutMs === undefined ? {} : { timeoutMs: options.authTimeoutMs }),
+  });
+  const installCommands = createCommandOutputRunner({
+    spawner,
+    timeoutMs: options.installCommandTimeoutMs ?? 60_000,
+    maxChars: 64 * 1024,
   });
   let usage: ReturnType<typeof createCodexUsageSource> | null = null;
   const usageSource = () => {
@@ -211,7 +228,17 @@ export const createCodexAdapter = (options: CodexAdapterOptions = {}): HostAdapt
   return {
     host: HOST,
     capabilities: codexCapabilities,
-    install: (request) => Promise.resolve().then(() => installCodex(request)),
+    install: (request) =>
+      Promise.resolve().then(() =>
+        installCodex(request, {
+          run: (command, cwd) => installCommands.run(command, cwd),
+          codexHome:
+            options.codexHome ??
+            (process.env.CODEX_HOME === undefined || process.env.CODEX_HOME === ""
+              ? join(request.home, ".codex")
+              : process.env.CODEX_HOME),
+        }),
+      ),
     spawnRole: (request) => spawn(request),
     parseEvents: parseCodexEvents,
     headlessCommand,
@@ -228,6 +255,7 @@ export const createCodexAdapter = (options: CodexAdapterOptions = {}): HostAdapt
     async dispose() {
       auth.dispose();
       mcp.dispose();
+      installCommands.dispose();
       await Promise.all([runs.dispose(), usage?.dispose()]);
     },
   };
