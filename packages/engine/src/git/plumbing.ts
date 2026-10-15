@@ -11,7 +11,12 @@
  * - refs: only the automatic branches and the evidence branch (`autoPushRefAllowed`), locally and
  *   on the remote; a local update names the value it expects; a push is never forced (no `+`, no
  *   `--force`) and is refused when its destination is the remote's default branch, or when the
- *   remote names none (the first branch pushed to an empty repo would become its default).
+ *   remote names none (the first branch pushed to an empty repo would become its default);
+ * - fetch (contracts 5.4.0, replacing the upstream module's `RemoteRefs` seam): only the shared
+ *   automation branches (every `vtc/auto/<kind>/<fp8>` and `vtc-evidence`), only into the
+ *   remote's own remote-tracking refs (`refs/remotes/<remote>/…`), never a local branch, a tag,
+ *   the index or the work tree; the user's own git and credentials, no prompt;
+ * - message: a commit's full message from the object itself, or `null` when the repo lacks it.
  */
 import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -62,6 +67,18 @@ const writableRef = (ref: string, verb: string): string =>
       );
 
 const USER = { userSigning: true } as const satisfies GitRunOptions;
+
+/** The shared branches a refspec may name: every automatic branch, one of them, the evidence branch. */
+const SHARED_SOURCE = /^refs\/heads\/(vtc\/auto\/\*|vtc\/auto\/[a-z_]+\/[a-f0-9]{8}|vtc-evidence)$/;
+
+/** `[+]refs/heads/<shared>:refs/remotes/<remote>/<same>`, or why not. */
+const refspecProblem = (remote: string, refspec: string): string | null => {
+  const [src, dst, ...rest] = refspec.replace(/^\+/, "").split(":");
+  const branch = SHARED_SOURCE.exec(src ?? "")?.[1];
+  if (rest.length > 0 || branch === undefined || dst !== `refs/remotes/${remote}/${branch}`)
+    return `the refspec ${JSON.stringify(refspec)} is not a shared automation branch into refs/remotes/${remote}/`;
+  return null;
+};
 
 /** `git.createGitPlumbing`: the frozen `CreateGitPlumbing` seam for one repo directory. */
 export const createGitPlumbing: CreateGitPlumbing = ({ repoRoot }): GitPlumbing => {
@@ -181,5 +198,37 @@ export const createGitPlumbing: CreateGitPlumbing = ({ repoRoot }): GitPlumbing 
     await git(["push", "--", remote, `${next}:${dst}`], { hooks: true });
   };
 
-  return { resolve, commit, updateRef, push };
+  const fetch: NonNullable<GitPlumbing["fetch"]> = async (remote, refspecs) => {
+    const remotes = (await gitText(repoRoot, ["remote"])).split("\n").filter((r) => r !== "");
+    if (!remotes.includes(remote)) refuse(`${JSON.stringify(remote)} is not a remote`);
+    if (refspecs.length === 0) refuse("no refspec to fetch");
+    for (const refspec of refspecs) {
+      const why = refspecProblem(remote, refspec);
+      if (why !== null) refuse(why);
+    }
+    await runGit(repoRoot, [
+      "fetch",
+      "--quiet",
+      "--no-tags",
+      "--prune",
+      "--no-recurse-submodules",
+      "--no-write-fetch-head",
+      "--no-auto-maintenance",
+      "--end-of-options",
+      remote,
+      ...refspecs,
+    ]);
+  };
+
+  const message: NonNullable<GitPlumbing["message"]> = async (value) => {
+    if (!GitShaSchema.safeParse(value).success) return null;
+    const result = await runGit(repoRoot, ["cat-file", "commit", value], { allowFailure: true });
+    if (result.code !== 0) return null;
+    // the raw object: headers, a blank line, then the message as written
+    const raw = result.stdout.toString("utf8");
+    const at = raw.indexOf("\n\n");
+    return at < 0 ? "" : raw.slice(at + 2);
+  };
+
+  return { resolve, commit, updateRef, push, fetch, message };
 };

@@ -6,7 +6,7 @@
  */
 import { afterEach, describe, expect, it } from "vitest";
 import { autoBranchName, EVIDENCE_BRANCH } from "@vtc/shared";
-import { createRemoteRefs } from "../../src/git/index.js";
+import { createGitPlumbing, createRemoteRefs, type RemoteRefs } from "../../src/git/index.js";
 import { addBareRemote, cleanupDirs, git, initRepo, tempDir } from "../helpers/repo.js";
 
 afterEach(cleanupDirs);
@@ -33,11 +33,23 @@ const refs = (repo: string): string[] =>
     .split("\n")
     .filter((r) => r !== "");
 
-describe("git.createRemoteRefs", () => {
+/** `GitPlumbing.fetch` / `message` (contracts 5.4.0), as the seam they replace. */
+const plumbingRefs = ({ repoRoot }: { readonly repoRoot: string }): RemoteRefs => {
+  const plumbing = createGitPlumbing({ repoRoot });
+  return {
+    fetch: (remote, refspecs) => plumbing.fetch?.(remote, refspecs) ?? Promise.reject(new Error()),
+    message: (sha) => plumbing.message?.(sha) ?? Promise.resolve(null),
+  };
+};
+
+describe.each([
+  ["git.createGitPlumbing fetch and message", plumbingRefs],
+  ["git.createRemoteRefs (kept for the upstream module)", createRemoteRefs],
+])("%s", (_name, make) => {
   it("fetches the automatic branches and the evidence branch into remote-tracking refs only", async () => {
     const { repo, head } = setup();
     const before = git(repo, "rev-parse", "HEAD");
-    const remoteRefs = createRemoteRefs({ repoRoot: repo });
+    const remoteRefs = make({ repoRoot: repo });
     await remoteRefs.fetch("origin", [AUTO_ALL]);
     expect(git(repo, "rev-parse", `refs/remotes/origin/${BRANCH}`)).toBe(head);
     await remoteRefs.fetch("origin", [
@@ -52,7 +64,7 @@ describe("git.createRemoteRefs", () => {
 
   it("prunes an automatic branch the remote no longer has", async () => {
     const { repo, other } = setup();
-    const remoteRefs = createRemoteRefs({ repoRoot: repo });
+    const remoteRefs = make({ repoRoot: repo });
     await remoteRefs.fetch("origin", [AUTO_ALL]);
     git(other, "push", "--quiet", "origin", `:refs/heads/${BRANCH}`);
     await remoteRefs.fetch("origin", [AUTO_ALL]);
@@ -61,7 +73,7 @@ describe("git.createRemoteRefs", () => {
 
   it("refuses any other refspec, an unknown remote and an option, before git runs", async () => {
     const { repo } = setup();
-    const remoteRefs = createRemoteRefs({ repoRoot: repo });
+    const remoteRefs = make({ repoRoot: repo });
     for (const refspec of [
       "+refs/heads/main:refs/remotes/origin/main",
       `+refs/heads/${BRANCH}:refs/heads/${BRANCH}`,
@@ -78,7 +90,7 @@ describe("git.createRemoteRefs", () => {
 
   it("reads a local commit's full message, or null", async () => {
     const { repo, head } = setup();
-    const remoteRefs = createRemoteRefs({ repoRoot: repo });
+    const remoteRefs = make({ repoRoot: repo });
     expect(await remoteRefs.message(head)).toBeNull();
     await remoteRefs.fetch("origin", [AUTO_ALL]);
     expect(await remoteRefs.message(head)).toBe("fix it\n\nGenerated-by: VTC 0.4.0\n");

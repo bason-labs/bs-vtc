@@ -61,9 +61,11 @@ import {
   GateRunRequestSchema,
   GitShaSchema,
   HostIdSchema,
+  ModelTierSchema,
   PromptVersionRefSchema,
   RoleIdSchema,
   SlugSchema,
+  TierReasonSchema,
   planDispatch,
   HiddenTestsEntrySchema,
   LOOKBACK_LIMITS,
@@ -103,6 +105,7 @@ import type {
 import { HEADLESS_LOADS_AGENT, pinBlocker, roleChangesFiles } from "./prompt-target.js";
 import { countsAsFailure } from "./queries.js";
 import type { RoleRunRecord } from "./state.js";
+import type { TierRoute } from "./routing.js";
 
 /** The replays RETRO planned for a run, as kept in the private directory. */
 export interface ReplayPlan {
@@ -125,6 +128,8 @@ export interface ReplayStepRef extends TrialRef {
   readonly base: string;
   /** The recorded task's protected tests (`LookbackReplayTrial.protectedPaths`). */
   readonly protectedPaths?: readonly string[];
+  /** The recorded dispatch's tier (`LookbackReplayTrial.tier`): the trial runs on it. */
+  readonly tier?: TierRoute;
 }
 
 /** The trial step RETRO wants now (a `StepSpec` the dispatcher hands out). */
@@ -222,6 +227,9 @@ const TrialShape = z.looseObject({
   pack: z.record(z.string(), z.unknown()),
   base: GitShaSchema,
   protectedPaths: z.array(z.string()).optional(),
+  tier: z
+    .strictObject({ tier: ModelTierSchema, reason: TierReasonSchema, clamped: z.boolean() })
+    .optional(),
 });
 const ReplayPlanShape = z.strictObject({
   v: z.literal(1),
@@ -1122,6 +1130,7 @@ export const replaySteps = (k: Kernel, h: RunHandle): ReplayStep[] => {
             pack: trial.pack,
             base: trial.base,
             ...(trial.protectedPaths === undefined ? {} : { protectedPaths: trial.protectedPaths }),
+            ...(trial.tier === undefined ? {} : { tier: trial.tier }),
           },
         },
       ];

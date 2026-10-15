@@ -35,6 +35,7 @@ import {
   AutomationRunRefSchema,
   automationFor,
   isCoreEventType,
+  redactSecrets,
   LOOKBACK_REPO,
   ScorecardIndexSchema,
   ScorecardSchema,
@@ -55,7 +56,9 @@ import {
   automationPausedByHuman,
   automationDailySummary,
   automationFacts,
+  capabilitySignalFacts,
   costRegressionFacts,
+  toolSignalFacts,
   ensurePrivateDir,
   isAutomationEvent,
   readPrivateFile,
@@ -394,8 +397,9 @@ export const wireAutomation = (
       // a run that cannot start here (the committed config, a held run) is told and dropped:
       // its issue stays open for the human
       writeQueued(queued);
-      engine.notice(
-        `automation could not start the automatic run for issue ${next.issue.target.repo}#${String(next.issue.issue)}: ${error instanceof Error ? error.message : String(error)}`,
+      failed(
+        `automation could not start the automatic run for issue ${next.issue.target.repo}#${String(next.issue.issue)}`,
+        error,
       );
     }
   };
@@ -406,14 +410,43 @@ export const wireAutomation = (
     enqueue("the automatic runs", startQueued);
   };
 
+  /**
+   * An automatic action that failed unexpectedly (a `gh` or git error, a crash in the module):
+   * an engine notice, and an `automation.skipped` `error` with the redacted message (contracts
+   * 5.4.0), so the Automation view shows it too. Recording the skip never throws.
+   */
+  const failed = (
+    text: string,
+    error: unknown,
+    about: { readonly run?: string; readonly kind?: AutomationFact["kind"] } = {},
+  ): void => {
+    const message = `${text}: ${error instanceof Error ? error.message : String(error)}`;
+    engine.notice(message);
+    if (automation === undefined) return;
+    try {
+      emit(
+        {
+          type: "automation.skipped",
+          actor: "engine",
+          data: {
+            reason: "error",
+            ...(about.kind === undefined ? {} : { kind: about.kind }),
+            detail: redactSecrets(message).slice(0, 500),
+          },
+        },
+        about.run,
+      );
+    } catch {
+      // the notice above says it; the event log refused the skip
+    }
+  };
+
   // One job at a time, in order. A job that throws (a guard-dir write, an event the log refused)
   // is an engine notice and the next job still runs: the chain never holds a rejection.
   let queue: Promise<void> = Promise.resolve();
   const enqueue = (what: string, job: () => void | Promise<void>): void => {
     queue = queue.then(job).catch((error: unknown) => {
-      engine.notice(
-        `automation (${what}) failed: ${error instanceof Error ? error.message : String(error)}`,
-      );
+      failed(`automation (${what}) failed`, error);
     });
   };
   /**
@@ -457,9 +490,10 @@ export const wireAutomation = (
       await upstream.onFact(fact);
       return true;
     } catch (error) {
-      engine.notice(
-        `automation could not handle a ${fact.kind} fact of run ${fact.run}: ${error instanceof Error ? error.message : String(error)}`,
-      );
+      failed(`automation could not handle a ${fact.kind} fact of run ${fact.run}`, error, {
+        run: fact.run,
+        kind: fact.kind,
+      });
       return false;
     }
   };
@@ -473,8 +507,10 @@ export const wireAutomation = (
     try {
       await upstream.onAutomaticRelease(release);
     } catch (error) {
-      engine.notice(
-        `automation could not open the PR of run ${release.run} (issue #${String(release.automation.issue)}): ${error instanceof Error ? error.message : String(error)}`,
+      failed(
+        `automation could not open the PR of run ${release.run} (issue #${String(release.automation.issue)})`,
+        error,
+        { run: release.run },
       );
     }
   };
@@ -501,8 +537,17 @@ export const wireAutomation = (
         flushPending(run);
       });
     }
-    const state = engine.states().find((s) => s.id === event.run);
-    const facts = state === undefined ? [] : automationFacts(state, event);
+    const states = engine.states();
+    const state = states.find((s) => s.id === event.run);
+    const base = { run: event.run, source: event.type, at: event.ts };
+    const facts = [
+      ...(state === undefined ? [] : automationFacts(state, event)),
+      // D-cs (reading 221): the tool and capability signals count across the repo's runs, so a
+      // finished run raises what every run so far shows (the module dedupes on the subject)
+      ...(event.type === "run.finished"
+        ? [...toolSignalFacts(states, base), ...capabilitySignalFacts(states, base)]
+        : []),
+    ];
     const release = state === undefined ? null : automaticReleaseOf(state, event);
     // handled after the emit that raised them, one at a time
     enqueue("the daily summary", maybeSummarise);
@@ -512,9 +557,10 @@ export const wireAutomation = (
           await handle(fact);
         } catch (error) {
           // one fact that could not be handled never drops the ones after it
-          engine.notice(
-            `automation could not handle a ${fact.kind} fact of run ${fact.run}: ${error instanceof Error ? error.message : String(error)}`,
-          );
+          failed(`automation could not handle a ${fact.kind} fact of run ${fact.run}`, error, {
+            run: fact.run,
+            kind: fact.kind,
+          });
         }
       }
       if (release !== null) await released(release);
@@ -599,9 +645,7 @@ export const wireAutomation = (
         found = await scan();
       } catch (error) {
         found = [];
-        engine.notice(
-          `automation could not scan VTC's own dependencies: ${error instanceof Error ? error.message : String(error)}`,
-        );
+        failed("automation could not scan VTC's own dependencies", error, { kind: "security" });
       }
       // no offline database yet: asked again at the next tick (vtc doctor says how to get it)
       if (found === null) return;

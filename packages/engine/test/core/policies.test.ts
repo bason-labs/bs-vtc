@@ -491,11 +491,31 @@ describe("loop controller (§6.3 step 9)", () => {
     expect(stuckReason(signals({ round: 2, findings: [r1, lighter] }))).toBeNull();
   });
   it("escalates the Engineer one tier, in a fresh session, after 2 failed rounds", () => {
-    expect(engineerDispatch("mid", 1)).toEqual({ tier: "mid", freshSession: false });
-    expect(engineerDispatch("mid", 2)).toEqual({ tier: "mid", freshSession: false });
-    expect(engineerDispatch("mid", 3)).toEqual({ tier: "top", freshSession: true });
-    expect(engineerDispatch("mid", 4)).toEqual({ tier: "top", freshSession: false });
-    expect(engineerDispatch("top", 3)).toEqual({ tier: "top", freshSession: true });
+    expect(engineerDispatch("mid", 1)).toEqual({
+      tier: "mid",
+      freshSession: false,
+      escalated: false,
+    });
+    expect(engineerDispatch("mid", 2)).toEqual({
+      tier: "mid",
+      freshSession: false,
+      escalated: false,
+    });
+    expect(engineerDispatch("mid", 3)).toEqual({
+      tier: "top",
+      freshSession: true,
+      escalated: true,
+    });
+    expect(engineerDispatch("mid", 4)).toEqual({
+      tier: "top",
+      freshSession: false,
+      escalated: true,
+    });
+    expect(engineerDispatch("top", 3)).toEqual({
+      tier: "top",
+      freshSession: true,
+      escalated: true,
+    });
   });
   it("rule 9: a high finding still open after one fix round; rule 8: repeated test integrity", () => {
     const high = finding({ category: "security", severity: "high", round_first_seen: 1 });

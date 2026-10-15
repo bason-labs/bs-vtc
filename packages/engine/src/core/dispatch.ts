@@ -31,6 +31,7 @@ import {
   type SessionRef,
   type SpawnRoleAction,
   type TaskPackInput,
+  type TierReason,
 } from "@vtc/shared";
 import { restoreHostConfig } from "../git/index.js";
 import { budgetState, sharesExceeded } from "./budget.js";
@@ -49,7 +50,8 @@ import { designerRedispatchNote, designWorkSince, rerollInputs } from "./g2.js";
 import { retroSteps } from "./retro.js";
 import type { PromptParts } from "./plugins.js";
 import { effectiveVerdict } from "./gate-verdict.js";
-import { engineerDispatch, tierDown } from "./loop.js";
+import { engineerDispatch } from "./loop.js";
+import { routeTier, type TierChange, type TierRoute } from "./routing.js";
 import { writeTaskPack } from "./projections.js";
 import {
   awaitingReopenRebase,
@@ -127,7 +129,14 @@ export interface StepSpec {
    */
   readonly host?: HostId;
   readonly subject?: string;
+  /**
+   * The tier the step runs on (H-9, D-cm: `routing.ts`), with why (`tierReason`) and whether the
+   * project's bounds or QA author's floor moved it (`tierClamped`). Set by the step's planner for
+   * every role run of a task; a step without `tierReason` is routed when it is handed out.
+   */
   readonly tier?: ModelTier;
+  readonly tierReason?: TierReason;
+  readonly tierClamped?: boolean;
   readonly resume?: SessionRef;
   readonly findings?: readonly Finding[];
   readonly answer?: EscalationAnswer;
@@ -247,6 +256,45 @@ const busyStep = (
       r.task === step.task &&
       r.subject === step.subject,
   );
+
+/**
+ * The tier a step runs on (H-9, D-cm; spine §5 reading 218): {@link routeTier} over the step's
+ * task, the role's own tier on `host` and the project's `routing`. A step with no task keeps its
+ * role's tier (reason `role`). A Lookback replay trial runs on the tier its recorded dispatch ran
+ * on (reading 218 (7)), or the role's own for a dispatch logged before 5.4.0, never re-routed.
+ */
+export const routeStep = (
+  k: Kernel,
+  h: RunHandle,
+  step: Pick<StepSpec, "role" | "mode" | "task" | "replay">,
+  host: HostId,
+  change?: TierChange,
+): TierRoute => {
+  const contract = k.deps.roles.get(step.role);
+  const own = contract === undefined ? "mid" : roleTier(contract, host, step.mode);
+  if (step.replay !== undefined)
+    return step.replay.tier ?? { tier: own, reason: "role", clamped: false };
+  const task = step.task === undefined ? undefined : h.state.tasks.get(step.task);
+  return routeTier(
+    {
+      role: step.role,
+      mode: step.mode,
+      task,
+      roleTier: own,
+      config: k.config(),
+    },
+    change,
+  );
+};
+
+/** The step fields of a route. */
+const routed = (
+  route: TierRoute,
+): Required<Pick<StepSpec, "tier" | "tierReason" | "tierClamped">> => ({
+  tier: route.tier,
+  tierReason: route.reason,
+  tierClamped: route.clamped,
+});
 
 /**
  * The Architect's per-task step (§8.4): a task the Planner triaged `extends` gets a one-page design
@@ -371,6 +419,7 @@ const taskSteps = (k: Kernel, h: RunHandle, taskId: string, host: HostId): StepS
       steps.push({
         key: `qa:${taskId}`,
         ...step,
+        ...routed(routeStep(k, h, step, host)),
         ...(note === undefined ? {} : { note }),
         ...(answer === undefined ? {} : { answer }),
       });
@@ -395,19 +444,22 @@ const taskSteps = (k: Kernel, h: RunHandle, taskId: string, host: HostId): StepS
       fixingSince,
     );
     if (task.status === "fixing" && badTests.length > 0 && qaSince === undefined) {
+      const qaFix = { role: "qa", mode: "author", task: taskId };
       steps.push({
         key: `qa-fix:${taskId}`,
-        role: "qa",
-        mode: "author",
-        task: taskId,
+        ...qaFix,
+        ...routed(routeStep(k, h, qaFix, host)),
         findings: badTests,
       });
       return steps;
     }
     const round = task.status === "tests_authored" ? 1 : Math.max(1, task.round);
-    const contract = k.deps.roles.get("engineer");
-    const baseTier = contract === undefined ? "mid" : roleTier(contract, host);
-    const plan = engineerDispatch(baseTier, round);
+    // D-cm: the Engineer starts on its routed tier and escalates one tier up from it (clamped)
+    const start = routeStep(k, h, { role: "engineer", task: taskId }, host);
+    const plan = engineerDispatch(start.tier, round);
+    const route = plan.escalated
+      ? routeStep(k, h, { role: "engineer", task: taskId }, host, "escalation")
+      : start;
     const resume =
       interruptedSession(h, { role: "engineer", task: taskId }) ??
       (plan.freshSession || round === 1 ? undefined : task.session_ref);
@@ -417,7 +469,7 @@ const taskSteps = (k: Kernel, h: RunHandle, taskId: string, host: HostId): StepS
       key: `engineer:${taskId}`,
       role: "engineer",
       task: taskId,
-      tier: plan.tier,
+      ...routed(route),
       ...(resume === undefined ? {} : { resume }),
       findings: [
         ...taskFindings(h.state, taskId).filter(
@@ -495,9 +547,15 @@ const taskSteps = (k: Kernel, h: RunHandle, taskId: string, host: HostId): StepS
         )
           continue;
       }
-      const contract = k.deps.roles.get(slot.role);
-      const tier =
-        contract !== undefined && drop ? tierDown(roleTier(contract, host, slot.mode)) : undefined;
+      // D-cm: every reviewer starts on its routed tier (the cross-family one on its own host) and
+      // drops one tier from it (clamped)
+      const route = routeStep(
+        k,
+        h,
+        filter,
+        slot.crossFamily === true && cross !== undefined ? cross : host,
+        drop ? "budget_drop" : undefined,
+      );
       const judge =
         slot.role === "visual_qa" && visual !== undefined
           ? visualJudgeStep(visual, `task ${taskId}'s screens`)
@@ -508,7 +566,7 @@ const taskSteps = (k: Kernel, h: RunHandle, taskId: string, host: HostId): StepS
       steps.push({
         key: `review:${taskId}:${slot.id}`,
         ...filter,
-        ...(tier === undefined ? {} : { tier }),
+        ...routed(route),
         ...(note === "" ? {} : { note }),
         ...(judge === undefined ? {} : { inputs: judge.inputs }),
         ...(slot.crossFamily === true && cross !== undefined ? { host: cross } : {}),
@@ -1115,9 +1173,14 @@ export const dispatchStep = (
   if (contract === undefined) throw new EngineError("invalid", `no contract for role ${step.role}`);
   const actionId = nextActionId(h.state);
   const config = k.config();
+  // D-cm: the step's route, or the role's own tier for a step its planner did not route
+  const route: TierRoute =
+    step.tier !== undefined && step.tierReason !== undefined
+      ? { tier: step.tier, reason: step.tierReason, clamped: step.tierClamped ?? false }
+      : routeStep(k, h, step, host);
   const model = resolveModel(contract, host, config, {
     ...(step.mode === undefined ? {} : { mode: step.mode }),
-    ...(step.tier === undefined ? {} : { tier: step.tier }),
+    tier: route.tier,
   });
   const task = step.task === undefined ? undefined : h.state.tasks.get(step.task);
   // §5.2a, spine §5 reading 38: an Engineer task runs as its discipline's compiled profile agent
@@ -1206,6 +1269,10 @@ export const dispatchStep = (
       ...(pinned === null ? {} : { editable_sha256: pinned.version.editable_sha256 }),
       ...(arm === undefined ? {} : { canary_arm: arm.arm }),
       ...(trialRef === undefined ? {} : { purpose: "lookback_replay" as const, replay: trialRef }),
+      // H-9, D-cm (reading 218 (6)): the tier and why, always together
+      tier: route.tier,
+      tier_reason: route.reason,
+      tier_clamped: route.clamped,
     },
   });
   const capabilities = k.deps.adapters[host]?.capabilities;

@@ -7,7 +7,12 @@
  */
 import {
   AutomationReportSchema,
+  CAPABILITY_SIGNAL_MIN,
+  CommandShapeCountSchema,
+  commandShapeKey,
   DEFAULT_UPSTREAM_REPO,
+  MissingCapabilitySchema,
+  TOOL_SIGNAL_MIN_TASKS,
   EVENT_PAYLOAD_SCHEMAS,
   EVIDENCE_HOSTING_DEFAULT,
   LOOKBACK_LIMITS,
@@ -610,6 +615,95 @@ export const configSignalFacts = (
       detail: `${String(capped)} tasks parked on their fix-round cap in one run`,
     });
   return out;
+};
+
+// ------------------------------------------------------ tool and capability (D-cs)
+
+/**
+ * Pure (D-cs "tool signal"; spine §5 reading 221 (1), spec §13 tool promotion): a shell command
+ * shape (`role.submitted.command_shapes`, `commandShapeKey`) the roles ran in
+ * `TOOL_SIGNAL_MIN_TASKS` or more distinct tasks across the repo's runs raises one `tool` fact. The
+ * subject is the shape's key (a program, a subcommand and a flag-name hash: never a value or a
+ * path) and the only number the task count, so the report carries nothing of the project.
+ */
+export const toolSignalFacts = (
+  states: readonly Pick<RunState, "id" | "events">[],
+  base: Pick<AutomationFact, "run" | "source" | "at">,
+): AutomationFact[] => {
+  const tasks = new Map<string, Set<string>>();
+  for (const state of states)
+    for (const event of state.events) {
+      if (event.type !== "role.submitted" || event.task === undefined) continue;
+      const shapes = (event.data as { command_shapes?: unknown }).command_shapes;
+      if (!Array.isArray(shapes)) continue;
+      for (const raw of shapes) {
+        const shape = CommandShapeCountSchema.safeParse(raw);
+        if (!shape.success) continue;
+        const key = commandShapeKey(shape.data);
+        const set = tasks.get(key) ?? new Set<string>();
+        set.add(`${state.id}:${event.task}`);
+        tasks.set(key, set);
+      }
+    }
+  return [...tasks]
+    .filter(([, set]) => set.size >= TOOL_SIGNAL_MIN_TASKS)
+    .sort(([a], [b]) => a.localeCompare(b))
+    .map(([key, set]) => ({
+      ...base,
+      target: "upstream" as const,
+      kind: "tool" as const,
+      subject: key,
+      metrics: { "tool.tasks": set.size },
+      detail: `the roles ran \`${key}\` in ${String(set.size)} tasks: a candidate engine tool (§13)`,
+    }));
+};
+
+/**
+ * Pure (D-cs "capability signal"; spine §5 reading 221 (2)): a `missing_capability` slug the roles
+ * (`escalation.opened`, from `Question.missing_capability`) or the Lead (`escalation.answered`)
+ * named on `CAPABILITY_SIGNAL_MIN` or more escalations across the repo's runs raises one
+ * `capability` fact: the slug and the count only (an escalation naming it twice counts once); the
+ * reason text stays in the project's log.
+ */
+export const capabilitySignalFacts = (
+  states: readonly Pick<RunState, "id" | "events">[],
+  base: Pick<AutomationFact, "run" | "source" | "at">,
+): AutomationFact[] => {
+  const seen = new Map<string, Set<string>>();
+  const count = (slug: unknown, escalation: string): void => {
+    const parsed = MissingCapabilitySchema.shape.slug.safeParse(slug);
+    if (!parsed.success) return;
+    const set = seen.get(parsed.data) ?? new Set<string>();
+    set.add(escalation);
+    seen.set(parsed.data, set);
+  };
+  for (const state of states)
+    for (const event of state.events) {
+      if (event.type === "escalation.opened") {
+        const e = (
+          event.data as { escalation?: { id?: string; missing_capability?: { slug?: unknown } } }
+        ).escalation;
+        if (e?.id !== undefined) count(e.missing_capability?.slug, `${state.id}:${e.id}`);
+      } else if (event.type === "escalation.answered") {
+        const data = event.data as {
+          escalation?: string;
+          answer?: { missing_capability?: { slug?: unknown } };
+        };
+        if (data.escalation !== undefined)
+          count(data.answer?.missing_capability?.slug, `${state.id}:${data.escalation}`);
+      }
+    }
+  return [...seen]
+    .filter(([, set]) => set.size >= CAPABILITY_SIGNAL_MIN)
+    .sort(([a], [b]) => a.localeCompare(b))
+    .map(([slug, set]) => ({
+      ...base,
+      target: "upstream" as const,
+      kind: "capability" as const,
+      subject: slug,
+      metrics: { "capability.escalations": set.size },
+      detail: `${String(set.size)} escalations named the missing capability ${slug}`,
+    }));
 };
 
 // ------------------------------------------------------------ cost regression

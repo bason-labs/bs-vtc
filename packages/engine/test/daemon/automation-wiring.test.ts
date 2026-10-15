@@ -746,6 +746,38 @@ describe("automation wiring (AD-27 rules 7 and 8)", () => {
     await expect(wiring.close()).resolves.toBeUndefined();
   });
 
+  it("a fact the module fails on is an automation.skipped error with the redacted message (contracts 5.4.0)", async () => {
+    const fake = fakeEngine();
+    const wiring = wireAutomation(
+      fake.engine,
+      { repoRoot: tempDir(), vtcHome: tempDir(), automation: AUTOMATION },
+      {
+        githubRemote: true,
+        createUpstream: () => ({
+          onFact: () =>
+            Promise.reject(new Error("gh failed: token ghp_abcdefghijklmnopqrstuvwxyz0123456789")),
+        }),
+      },
+    );
+    fake.runs.set("R-1", { finished: false, paused: false });
+    fake.event({ type: "incident.recorded", run: "R-1", data: { kind: "crash", detail: "x" } });
+    await wiring.idle();
+    const skipped = fake.recorded.filter((r) => r.type === "automation.skipped");
+    expect(skipped).toEqual([
+      {
+        run: "R-1",
+        type: "automation.skipped",
+        data: expect.objectContaining({ reason: "error", kind: "defect" }) as unknown,
+      },
+    ]);
+    const detail = (skipped[0]?.data as { detail: string }).detail;
+    expect(detail).toContain("gh failed");
+    expect(detail).not.toContain("ghp_abcdefghijklmnopqrstuvwxyz0123456789");
+    // still an engine notice too
+    expect(fake.notices.join("\n")).toContain("could not handle a defect fact");
+    await wiring.close();
+  });
+
   it("a guard-dir write that throws is an engine notice, and a later fact is still handled", async () => {
     const h = createHarness();
     const up = fakeUpstream();
@@ -798,10 +830,9 @@ describe("automation wiring (AD-27 rules 7 and 8)", () => {
       );
       await wiring.idle();
       expect(sweeps).toBe(1);
-      // idle: no run to pause, but automation stops all the same
-      await expect(h.engine.pause({})).rejects.toThrow(
-        /no active run to pause; automatic issues and PRs are paused until vtc resume/,
-      );
+      // idle: no run to pause, but automation stops all the same, and the answer says so
+      // (NoRunControlResult, contracts 5.4.0)
+      expect(await h.engine.pause({})).toEqual({ run: null, automation_paused: true });
       expect(automationPausedByHuman(h.engine.guardDir)).toBe(true);
       expect(wiring.settings()).toMatchObject({ issues: false, prs: false, upstream: false });
       expect(wiring.settings()?.notes).toContain("automation is paused (vtc pause)");
@@ -812,8 +843,8 @@ describe("automation wiring (AD-27 rules 7 and 8)", () => {
       await started(h);
       expect(automationPausedByHuman(h.engine.guardDir)).toBe(true);
       expect(wiring.settings()?.notes).toContain("automation is paused (vtc pause)");
-      // the human's resume does
-      await h.engine.resume({});
+      // the human's resume does, and says so
+      expect(await h.engine.resume({})).toMatchObject({ automation_paused: false });
       expect(automationPausedByHuman(h.engine.guardDir)).toBe(false);
       vi.advanceTimersByTime(1000);
       await wiring.idle();

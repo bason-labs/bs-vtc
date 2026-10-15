@@ -36,6 +36,7 @@ import type { EventDraft, EventLogWriter } from "./event-log.js";
 import type { EngineLock } from "./lock.js";
 import type { PluginCatalog } from "./plugins.js";
 import type { RoleRegistry } from "./roles.js";
+import type { TierRoute } from "./routing.js";
 import type { RunState } from "./state.js";
 
 export interface EngineCoreDeps {
@@ -213,6 +214,12 @@ export interface LookbackReplayTrial {
    * sandbox writes. Absent: none.
    */
   readonly protectedPaths?: readonly string[];
+  /**
+   * The tier the recorded dispatch ran on and why (`role.dispatched.tier`, H-9, D-cm): the trial
+   * runs on it, so an arm measures a prompt, not a tier (spine §5 reading 218 (7)). Absent (a
+   * dispatch logged before 5.4.0): the role's own tier.
+   */
+  readonly tier?: TierRoute;
 }
 
 /** The replay of one proposal: its trials, run one at a time in order. */
