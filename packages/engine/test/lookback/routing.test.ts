@@ -40,7 +40,8 @@ const routedTask = (
     risk?: "low" | "med" | "high";
     riskTags?: string[];
     tier?: ModelTier;
-    reason?: "rule" | "planner_hint" | "role";
+    reason?: "rule" | "planner_hint" | "role" | "escalation" | "budget_drop";
+    clamped?: boolean;
     pass?: boolean;
     escalate?: boolean;
     role?: string;
@@ -59,6 +60,7 @@ const routedTask = (
     task,
     tier: options.tier ?? "low",
     tierReason: options.reason ?? "rule",
+    ...(options.clamped === undefined ? {} : { tierClamped: options.clamped }),
     ...(options.mode === undefined ? {} : { mode: options.mode }),
     ...(options.cost === undefined ? {} : { cost: options.cost }),
     ...(options.action === undefined ? {} : { action: options.action }),
@@ -176,6 +178,39 @@ describe("the routing scorecard (D-cn)", () => {
     expect(card.cells.map((c) => [c.start_tier, c.tasks])).toEqual([["low", 1]]);
   });
 
+  it("skips a task whose first dispatch names no start tier (escalation, budget drop, untiered)", () => {
+    const log = new RunLog();
+    routedTask(log, "T-1", { reason: "budget_drop" });
+    routedTask(log, "T-2", { reason: "escalation", tier: "mid" });
+    // the first dispatch logged before 5.4.0, a later one tiered: the whole task is skipped
+    log.taskCreated("T-3", "backend", [], { size: "S", risk: "low" });
+    log.dispatch("engineer", { task: "T-3" });
+    log.gate("T-3", false);
+    log.dispatch("engineer", { task: "T-3", tier: "low", tierReason: "rule" });
+    log.gate("T-3", true);
+    routedTask(log, "T-4");
+    const card = scorecardOf(log);
+    expect(card.cells.map((c) => [c.start_tier, c.start_reason, c.tasks])).toEqual([
+      ["low", "rule", 1],
+    ]);
+  });
+
+  it("skips a start the project's bounds clamped, but keeps QA author's floor", () => {
+    const log = new RunLog();
+    // routing.min_tier mid moved an S task off the table's low
+    routedTask(log, "T-1", { tier: "mid", clamped: true });
+    routedTask(log, "T-2", { tier: "low" });
+    // QA author on S/none: the table says low, its floor says mid
+    routedTask(log, "T-3", { role: "qa", mode: "author", tier: "mid", clamped: true });
+    // QA author moved to top by a project bound, not its floor: skipped
+    routedTask(log, "T-4", { role: "qa", mode: "author", size: "L", tier: "top", clamped: true });
+    const cells = scorecardOf(log).cells.map((c) => [c.role, c.mode ?? "", c.start_tier, c.tasks]);
+    expect(cells).toEqual([
+      ["engineer", "", "low", 1],
+      ["qa", "author", "mid", 1],
+    ]);
+  });
+
   it("is written at LOOKBACK_REPO.routingScorecard", async () => {
     const root = await tempDir("routing");
     const log = new RunLog();
@@ -274,7 +309,8 @@ describe("routing proposals (D-cn)", () => {
           "routing.from_tier": 1,
           "routing.to_tier": 0,
           "routing.shared": 0,
-          "routing.replay": 0,
+          "routing.replay_planned": 0,
+          "routing.lifted": 0,
           "routing.tasks.current": 12,
           "routing.first_round_gate_pass.current": 0.95,
           "routing.cost_per_task_usd.candidate": 0.03,
@@ -316,6 +352,86 @@ describe("routing proposals (D-cn)", () => {
       DEFAULT_ROUTING_TABLE,
     );
     expect(below.changes).toEqual([]);
+  });
+
+  it("lifts the cells that floor on a raised start, and names them", () => {
+    // M/none mid -> top raises by_size.M, which M tagged floors on
+    const m = routingProposals(
+      card([cell({ size: "M", tier: "mid", escalated: 0.9 })]),
+      DEFAULT_ROUTING_TABLE,
+    );
+    expect(m.dropped).toEqual([]);
+    expect(m.changes.map((c) => [c.subject, c.direction, c.from, c.to, c.lifted])).toEqual([
+      [
+        "routing.engineer.M.none",
+        "higher",
+        "mid",
+        "top",
+        [{ size: "M", risk: "tagged", from: "mid", to: "top" }],
+      ],
+    ]);
+    expect(m.table?.roles).toEqual({ engineer: { by_size: { M: "top" } } });
+    expect(m.facts[0]?.metrics).toMatchObject({
+      "routing.lifted": 1,
+      "routing.lifted.m_tagged": 2,
+    });
+    for (const name of Object.keys(m.facts[0]?.metrics ?? {}))
+      expect(name).toMatch(/^[a-z][a-z0-9_.]{0,63}$/);
+    // S tagged mid -> top raises tagged_floor, which every size's tagged cell floors on
+    const tagged = routingProposals(
+      card([cell({ size: "S", risk: "tagged", tier: "mid", escalated: 0.9 })]),
+      DEFAULT_ROUTING_TABLE,
+    );
+    expect(tagged.changes.map((c) => [c.subject, c.to, c.lifted])).toEqual([
+      ["routing.engineer.S.tagged", "top", [{ size: "M", risk: "tagged", from: "mid", to: "top" }]],
+    ]);
+    expect(tagged.table?.roles).toEqual({ engineer: { tagged_floor: "top" } });
+    const mTagged = routingProposals(
+      card([cell({ size: "M", risk: "tagged", tier: "mid", escalated: 0.9 })]),
+      DEFAULT_ROUTING_TABLE,
+    );
+    expect(mTagged.changes.map((c) => [c.subject, c.to, c.lifted.map((l) => l.size)])).toEqual([
+      ["routing.engineer.M.tagged", "top", ["S"]],
+    ]);
+  });
+
+  it("raises the shared cell, lifts included, when two roles keep escalating on M/none", () => {
+    const out = routingProposals(
+      card([
+        cell({ size: "M", tier: "mid", escalated: 0.7 }),
+        cell({ role: "spec_verifier", size: "M", tier: "mid", escalated: 0.8 }),
+      ]),
+      DEFAULT_ROUTING_TABLE,
+    );
+    expect(out.dropped).toEqual([]);
+    expect(out.changes.map((c) => [c.role, c.scope, c.to, c.lifted.length])).toEqual([
+      ["engineer", "shared", "top", 1],
+      ["spec_verifier", "shared", "top", 1],
+    ]);
+    expect(out.table?.by_size).toEqual({ S: "low", M: "top", L: "top" });
+  });
+
+  it("drops QA author's escalation on S/none (two tiers for QA judge) but keeps judge's own", () => {
+    const author = cell({ role: "qa", mode: "author", size: "S", tier: "mid", escalated: 0.9 });
+    const out = routingProposals(card([author]), DEFAULT_ROUTING_TABLE);
+    expect(out.changes).toEqual([]);
+    expect(out.dropped.map((d) => d.subject)).toEqual(["routing.qa.S.none"]);
+    expect(out.dropped[0]?.reason).toContain("two tiers");
+    const judge = routingProposals(
+      card([
+        cell({ role: "qa", mode: "author", size: "S", tier: "mid" }),
+        cell({ role: "qa", mode: "judge", size: "S", tier: "low", escalated: 0.9 }),
+      ]),
+      DEFAULT_ROUTING_TABLE,
+    );
+    expect(judge.changes.map((c) => [c.subject, c.from, c.to])).toEqual([
+      ["routing.qa.S.none", "low", "mid"],
+    ]);
+    expect(judge.facts[0]?.metrics).toMatchObject({
+      "routing.from_tier": 0,
+      "routing.current_tier": 0,
+      "routing.to_tier": 1,
+    });
   });
 
   it("reads no cell below routingMinTasks tasks", () => {
@@ -414,7 +530,9 @@ describe("routing proposals (D-cn)", () => {
       tasks: 12,
       trials,
     });
-    expect(funded.facts[0]?.metrics["routing.replay"]).toBe(1);
+    // a plan, not a replay that ran: replay dispatch has no tier arm yet
+    expect(funded.facts[0]?.metrics["routing.replay_planned"]).toBe(1);
+    expect(funded.facts[0]?.metrics).not.toHaveProperty("routing.replay");
     const short = routingProposals(card(cells), DEFAULT_ROUTING_TABLE, {
       trialBudget: trials - 1,
     });

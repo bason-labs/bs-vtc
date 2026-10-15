@@ -121,6 +121,8 @@ export class RunLog {
       /** The routed tier and why (`role.dispatched.tier`, `tier_reason`; 5.4.0). */
       tier?: "low" | "mid" | "top";
       tierReason?: "role" | "rule" | "planner_hint" | "escalation" | "budget_drop";
+      /** `role.dispatched.tier_clamped`: the project's bounds or QA author's floor moved it. */
+      tierClamped?: boolean;
       /** A Lookback replay trial (`purpose: lookback_replay`). */
       replay?: { proposal: string; task: string; arm: "a" | "b" | "aa"; trial: number };
     } = {},
@@ -151,7 +153,11 @@ export class RunLog {
         ...(options.arm === undefined ? {} : { canary_arm: options.arm }),
         ...(options.tier === undefined
           ? {}
-          : { tier: options.tier, tier_reason: options.tierReason ?? "rule" }),
+          : {
+              tier: options.tier,
+              tier_reason: options.tierReason ?? "rule",
+              ...(options.tierClamped === undefined ? {} : { tier_clamped: options.tierClamped }),
+            }),
         ...(options.replay === undefined
           ? {}
           : { purpose: "lookback_replay", replay: options.replay }),

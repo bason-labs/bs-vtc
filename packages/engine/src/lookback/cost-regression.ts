@@ -18,15 +18,18 @@
  * latest window is the `LOOKBACK_LIMITS.driftWindowDays` days up to its last dispatch, its baseline
  * the same number of days before that; each window counts the dispatches made in it (their outcomes
  * read from every later event), and both need `minScorecardN` data points per metric. The same two
- * metrics are compared (a quality drop shows as a rise in tokens per success, since failures earn
- * no success), and a rise above the limit is a regression marked `baseline_kind: time_window` with
- * both `windows`, whose baseline and current name the same version.
+ * cost metrics are compared (a quality drop with attributed failures shows as a rise in tokens per
+ * success, since failures earn no success), and so is quality without attributed failures:
+ * `escalations_per_100` and `cap_hits_per_100`, a regression when the latest window's rate is at
+ * least `LOOKBACK_LIMITS.rollbackRateRatio` times the earlier one's (engine core's rule for the
+ * version before). Each is marked `baseline_kind: time_window` with both `windows`, and its
+ * baseline and current name the same version.
  *
- * Engine core raises the `cost` issue from either (the
- * upstream module, `costReportFields`) and RETRO queues the lookback role with a target aimed at
- * tokens (`lookbackTargets`), whose proposal is checked like any other (at most three changes,
- * editable section only); its changes aimed at tokens may cite the costliest train-split
- * dispatches the regression names.
+ * Engine core raises the `cost` issue from either (the upstream module, `costReportFields`;
+ * `lookbackRunEndFacts` maps a drift regression to its automation fact) and RETRO queues the
+ * lookback role with a target aimed at tokens (`lookbackTargets`, a cost metric only), whose
+ * proposal is checked like any other (at most three changes, editable section only); its changes
+ * aimed at tokens may cite the costliest train-split dispatches the regression names.
  */
 import {
   isEventOfType,
@@ -37,17 +40,35 @@ import {
   type Scorecard,
   type VtcEvent,
 } from "@vtc/shared";
-import { computeScorecards, type TimeWindow } from "./scorecards.js";
+import { isRoleFailure } from "./attribution.js";
+import {
+  metricsOf,
+  taskInfo,
+  traceOutcomes,
+  type TaskInfo,
+  type TimeWindow,
+  type TraceOutcome,
+} from "./scorecards.js";
 import {
   buildTraces,
   targetKey,
+  traceRef,
   traceSlug,
   traceSplit,
   type LockedShaFor,
   type Trace,
 } from "./traces.js";
 
-export type CostMetric = "tokens_per_success" | "cost_per_task";
+/**
+ * What regressed: the two cost metrics, and (drift baseline only) the two quality rates engine core
+ * also watches for the version before.
+ */
+export type CostMetric =
+  "tokens_per_success" | "cost_per_task" | "escalations_per_100" | "cap_hits_per_100";
+
+/** The cost metrics: a regression in one of them aims a lookback target at tokens. */
+export const isTokenMetric = (metric: CostMetric): boolean =>
+  metric === "tokens_per_success" || metric === "cost_per_task";
 
 /**
  * What a regression was measured against (D-cr): the version that ran before (`previous_version`)
@@ -111,15 +132,8 @@ const inWindow = (ts: string, window: TimeWindow | undefined): boolean => {
   return t > Date.parse(window.from) && t <= Date.parse(window.to);
 };
 
-/**
- * Mean reported cost per task of each version (`versionKey` → value and n), over the dispatches
- * made in `window` when one is given.
- */
-const costPerTask = (
-  history: readonly VtcEvent[],
-  traces: readonly Trace[],
-  window?: TimeWindow,
-): Map<string, NonNullable<Measured>> => {
+/** Each submitted dispatch's reported cost (`null`: none), by `<run>:<action_id>`. */
+const dispatchCosts = (history: readonly VtcEvent[]): Map<string, number | null> => {
   const cost = new Map<string, number | null>();
   for (const event of history) {
     if (!isEventOfType(event, "role.submitted")) continue;
@@ -129,6 +143,18 @@ const costPerTask = (
       typeof priced === "number" ? priced : null,
     );
   }
+  return cost;
+};
+
+/**
+ * Mean reported cost per task of each version (`versionKey` → value and n), over the dispatches
+ * made in `window` when one is given.
+ */
+const costPerTask = (
+  cost: ReadonlyMap<string, number | null>,
+  traces: readonly Trace[],
+  window?: TimeWindow,
+): Map<string, NonNullable<Measured>> => {
   // version -> task -> summed cost (null once any dispatch of it reported none)
   const perTask = new Map<string, Map<string, number | null>>();
   for (const t of traces) {
@@ -157,6 +183,12 @@ const costPerTask = (
 
 const DAY_MS = 24 * 60 * 60 * 1000;
 
+/** Whether `metric` regressed from `from` to `to` (both known, `from` above zero). */
+const regressed = (metric: CostMetric, from: number, to: number): boolean =>
+  metric === "escalations_per_100" || metric === "cap_hits_per_100"
+    ? to >= from * LOOKBACK_LIMITS.rollbackRateRatio
+    : ((to - from) / from) * 100 > LOOKBACK_LIMITS.maxTokenRisePct;
+
 /**
  * The cost regressions of every target's current version against its baseline version and
  * against its own earlier window (D-cr). `attributions` decide which dispatches failed in the drift
@@ -175,7 +207,21 @@ export const costRegressions = (input: {
     byTarget.set(key, [...(byTarget.get(key) ?? []), card]);
   }
   const traces = buildTraces(input.history, input.lockedShaFor);
-  const costs = costPerTask(input.history, traces);
+  const cost = dispatchCosts(input.history);
+  const costs = costPerTask(cost, traces);
+  // the drift windows' outcomes, computed once for every target (lazily: only a target with an
+  // earlier window needs them)
+  let drift: { outcomes: TraceOutcome[]; tasks: Map<string, TaskInfo> } | undefined;
+  const driftInputs = () => {
+    if (drift === undefined) {
+      const failed = new Set((input.attributions ?? []).filter(isRoleFailure).map(traceRef));
+      drift = {
+        outcomes: traceOutcomes(input.history, traces, failed),
+        tasks: taskInfo(input.history),
+      };
+    }
+    return drift;
+  };
   const costliest = (version: PromptVersionRef, window?: TimeWindow): CostTrace[] =>
     traces
       .filter(
@@ -195,47 +241,46 @@ export const costRegressions = (input: {
     current: Scorecard,
     baseline: PromptVersionRef,
     pairs: readonly (readonly [CostMetric, Measured, Measured])[],
-    drift?: { readonly baseline: TimeWindow; readonly current: TimeWindow },
+    windows?: { readonly baseline: TimeWindow; readonly current: TimeWindow },
   ): void => {
     for (const [metric, before, after] of pairs) {
       const from = before?.value ?? null;
       const to = after?.value ?? null;
       if (from === null || to === null || from <= 0 || before === undefined || after === undefined)
         continue;
-      const delta = ((to - from) / from) * 100;
-      if (delta <= LOOKBACK_LIMITS.maxTokenRisePct) continue;
+      if (!regressed(metric, from, to)) continue;
       const { prompt } = current;
       found.push({
         role: prompt.role,
         ...(prompt.mode === undefined ? {} : { mode: prompt.mode }),
         host: prompt.host,
-        baseline_kind: drift === undefined ? "previous_version" : "time_window",
+        baseline_kind: windows === undefined ? "previous_version" : "time_window",
         baseline,
         current: prompt,
         metric,
         baseline_value: from,
         current_value: to,
-        delta_pct: round(delta, 2),
+        delta_pct: round(((to - from) / from) * 100, 2),
         n: { baseline: before.n, current: after.n },
-        since: drift === undefined ? current.window.from : drift.current.from,
-        ...(drift === undefined ? {} : { windows: drift }),
-        traces: costliest(prompt, drift?.current),
+        since: windows === undefined ? current.window.from : windows.current.from,
+        ...(windows === undefined ? {} : { windows }),
+        traces: costliest(prompt, windows?.current),
       });
     }
   };
-  /** The version's own scorecard and cost per task over the dispatches made in `window`. */
+  /** The version's scorecard metrics and cost per task over the dispatches made in `window`. */
   const windowed = (card: Scorecard, window: TimeWindow) => {
-    const own = computeScorecards({
-      events: input.history,
-      attributions: input.attributions ?? [],
-      lockedShaFor: input.lockedShaFor,
-      graderBundleSha: card.grader_bundle_sha,
-      now: new Date(card.written_at),
-      dispatchedIn: window,
-    }).find((c) => versionKey(c.prompt) === versionKey(card.prompt));
+    const { outcomes, tasks } = driftInputs();
+    const version = versionKey(card.prompt);
+    const rows = outcomes.filter(
+      (o) =>
+        o.trace.prompt !== undefined &&
+        versionKey(o.trace.prompt) === version &&
+        inWindow(o.trace.ts, window),
+    );
     return {
-      tokens: own?.metrics.tokens_per_success,
-      cost: costPerTask(input.history, traces, window).get(versionKey(card.prompt)),
+      metrics: metricsOf(rows, tasks),
+      cost: costPerTask(cost, traces, window).get(version),
     };
   };
   for (const cards of byTarget.values()) {
@@ -259,21 +304,27 @@ export const costRegressions = (input: {
     if (Number.isNaN(end)) continue;
     const span = LOOKBACK_LIMITS.driftWindowDays * DAY_MS;
     const iso = (ms: number): string => new Date(ms).toISOString();
-    const drift = {
+    const windows = {
       baseline: { from: iso(end - 2 * span), to: iso(end - span) },
       current: { from: iso(end - span), to: current.window.to },
     };
     if (Date.parse(current.window.from) > end - span) continue;
-    const before = windowed(current, drift.baseline);
-    const after = windowed(current, drift.current);
+    const before = windowed(current, windows.baseline);
+    const after = windowed(current, windows.current);
     compare(
       current,
       current.prompt,
       [
-        ["tokens_per_success", before.tokens, after.tokens],
+        ["tokens_per_success", before.metrics.tokens_per_success, after.metrics.tokens_per_success],
         ["cost_per_task", before.cost, after.cost],
+        [
+          "escalations_per_100",
+          before.metrics.escalations_per_100,
+          after.metrics.escalations_per_100,
+        ],
+        ["cap_hits_per_100", before.metrics.cap_hits_per_100, after.metrics.cap_hits_per_100],
       ],
-      drift,
+      windows,
     );
   }
   return found;
