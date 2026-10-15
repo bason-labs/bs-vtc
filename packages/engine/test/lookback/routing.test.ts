@@ -18,7 +18,6 @@ import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 import {
   computeRoutingScorecard,
-  lookbackAtRunEnd,
   routedStartTier,
   routingProposals,
   routingReplayTasks,
@@ -26,7 +25,7 @@ import {
   writeRoutingScorecard,
   type RoutingCell,
 } from "../../src/lookback/index.js";
-import { HOST, lockedShaFor, RunLog, tempDir } from "./log.js";
+import { HOST, RunLog, tempDir } from "./log.js";
 
 const BUNDLE = "9".repeat(64);
 const now = new Date("2026-10-15T09:00:00.000Z");
@@ -279,6 +278,22 @@ describe("routing proposals (D-cn)", () => {
     expect(routedStartTier(table, "engineer", "L", "tagged")).toBe("top");
     expect(routedStartTier(table, "spec_verifier", "M", "none")).toBe("low");
     expect(routedStartTier(table, "spec_verifier", "M", "tagged")).toBe("low");
+  });
+
+  it("reads a high-risk cell as engine core's router does: by size, floored on high_floor alone", () => {
+    // core/routing.ts `ruleTier`: a high-risk task starts on the higher of `by_size` and
+    // `high_floor`; `tagged_floor` is not its floor (a `risk: high` task may carry no tag)
+    const table = RoutingTableSchema.parse({
+      ...DEFAULT_ROUTING_TABLE,
+      tagged_floor: "top",
+      high_floor: "mid",
+      roles: { qa: { high_floor: "low" } },
+    });
+    expect(routedStartTier(table, "engineer", "S", "tagged")).toBe("top");
+    expect(routedStartTier(table, "engineer", "S", "high")).toBe("mid");
+    expect(routedStartTier(table, "engineer", "L", "high")).toBe("top");
+    expect(routedStartTier(table, "qa", "S", "high")).toBe("low");
+    expect(routedStartTier(table, "qa", "M", "high")).toBe("mid");
   });
 
   it("proposes a cheaper start when the cheaper tier's pass rates are within the margin", () => {
@@ -563,55 +578,5 @@ describe("routing proposals (D-cn)", () => {
       ["T-3", true],
       ["T-4", true],
     ]);
-  });
-});
-
-describe("routing at the run's end (D-cn)", () => {
-  it("writes the routing scorecard and returns the proposals and their config facts", async () => {
-    const root = await tempDir("routing-end");
-    const log = new RunLog();
-    for (let i = 1; i <= 12; i += 1)
-      routedTask(log, `T-${String(i)}`, { pass: i > 7, escalate: i <= 7 });
-    const end = await lookbackAtRunEnd({
-      projectRoot: root,
-      events: log.events,
-      history: log.events,
-      lockedShaFor,
-      graderBundleSha: BUNDLE,
-      weeklyRemainingPct: 80,
-      budgetAvailable: true,
-      now,
-    });
-    expect(end.routingScorecard.cells.map((c) => [c.start_tier, c.tasks])).toEqual([["low", 12]]);
-    const written = JSON.parse(
-      await readFile(join(root, LOOKBACK_REPO.routingScorecard), "utf8"),
-    ) as unknown;
-    expect(RoutingScorecardSchema.parse(written)).toEqual(end.routingScorecard);
-    expect(end.routing.changes.map((c) => [c.subject, c.direction, c.to, c.replay])).toEqual([
-      ["routing.engineer.S.none", "higher", "mid", null],
-    ]);
-    expect(end.routing.facts.map((f) => [f.kind, f.subject])).toEqual([
-      ["config", "routing.engineer.S.none"],
-    ]);
-  });
-
-  it("writes nothing for a history without tier records", async () => {
-    const root = await tempDir("routing-none");
-    const log = new RunLog();
-    log.dispatch("engineer", { task: "T-1" });
-    log.gate("T-1", true);
-    const end = await lookbackAtRunEnd({
-      projectRoot: root,
-      events: log.events,
-      history: log.events,
-      lockedShaFor,
-      graderBundleSha: BUNDLE,
-      weeklyRemainingPct: 80,
-      budgetAvailable: true,
-      now,
-    });
-    expect(end.routingScorecard.cells).toEqual([]);
-    expect(end.routing.table).toBeNull();
-    await expect(readFile(join(root, LOOKBACK_REPO.routingScorecard), "utf8")).rejects.toThrow();
   });
 });

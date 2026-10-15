@@ -16,7 +16,6 @@ import {
   isRoleFailure,
   lookbackRunEndFacts,
   lookbackTargets,
-  routingProposals,
 } from "../../src/lookback/index.js";
 import { evaluateTrigger } from "../../src/upstream/index.js";
 import { EFFECTIVE, HOST, lockedShaFor, RunLog } from "./log.js";
@@ -215,11 +214,7 @@ describe("the run-end automation facts (AD-27 issue -> PR path)", () => {
   const at = now.toISOString();
 
   it("maps a drift regression to a cost fact the upstream module takes, cost per task left out", () => {
-    const facts = lookbackRunEndFacts(
-      "r2",
-      { costRegressions: regressionsOf(drifting), routing: routingProposals(emptyCard) },
-      at,
-    );
+    const facts = lookbackRunEndFacts("r2", { costRegressions: regressionsOf(drifting) }, at);
     expect(facts).toMatchObject([
       {
         target: "upstream",
@@ -240,11 +235,7 @@ describe("the run-end automation facts (AD-27 issue -> PR path)", () => {
   });
 
   it("gives a drift of V and a later version's regression against V distinct fingerprints", () => {
-    const [drift] = lookbackRunEndFacts(
-      "r2",
-      { costRegressions: regressionsOf(drifting), routing: routingProposals(emptyCard) },
-      at,
-    );
+    const [drift] = lookbackRunEndFacts("r2", { costRegressions: regressionsOf(drifting) }, at);
     if (drift === undefined) throw new Error("no drift fact");
     // engine core's previous-version fact (`costRegressionFacts`) of W against V
     const later: AutomationFact = {
@@ -268,62 +259,12 @@ describe("the run-end automation facts (AD-27 issue -> PR path)", () => {
     expect(b?.fingerprint).toBeDefined();
     expect(a?.fingerprint).not.toBe(b?.fingerprint);
     // the same drift seen at the next run's end dedupes onto the same issue
-    const [again] = lookbackRunEndFacts(
-      "r3",
-      { costRegressions: regressionsOf(drifting), routing: routingProposals(emptyCard) },
-      at,
-    );
+    const [again] = lookbackRunEndFacts("r3", { costRegressions: regressionsOf(drifting) }, at);
     expect(evaluateTrigger(upstreamFact(again), { vtcVersion: "0.5.0" })?.fingerprint).toBe(
       a?.fingerprint,
     );
   });
-
-  it("maps each routing change to a config improvement fact", () => {
-    const facts = lookbackRunEndFacts(
-      "r2",
-      { costRegressions: [], routing: routingProposals(escalatingCard) },
-      at,
-    );
-    expect(facts).toMatchObject([
-      {
-        target: "upstream",
-        kind: "config",
-        run: "r2",
-        source: "lookback.routing",
-        role: "engineer",
-        subject: "routing.engineer.S.none",
-      },
-    ]);
-    const item = evaluateTrigger(upstreamFact(facts[0]), { vtcVersion: "0.5.0" });
-    expect(item).toMatchObject({ target: "upstream", kind: "config" });
-  });
 });
-
-const emptyCard = {
-  v: 1 as const,
-  grader_bundle_sha: BUNDLE,
-  window: { from: now.toISOString(), to: now.toISOString() },
-  cells: [],
-  written_at: now.toISOString(),
-};
-
-const escalatingCard = {
-  ...emptyCard,
-  cells: [
-    {
-      role: "engineer",
-      host: HOST,
-      size: "S" as const,
-      risk: "none" as const,
-      start_tier: "low" as const,
-      start_reason: "rule" as const,
-      tasks: 12,
-      metrics: {},
-      escalated: { value: 0.9, ci_low: null, ci_high: null, n: 12 },
-      cost_per_task_usd: { value: 0.1, ci_low: null, ci_high: null, n: 12 },
-    },
-  ],
-};
 
 /** The upstream module's fact for an engine fact, as the daemon's bridge maps it. */
 const upstreamFact = (fact: AutomationFact | undefined) => {
