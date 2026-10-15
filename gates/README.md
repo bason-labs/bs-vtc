@@ -220,7 +220,11 @@ tampering, and nothing there is listed). With a Node package the hash includes i
 closure (`dependencies`, `optionalDependencies` and `peerDependencies`, resolved the way Node
 does, in pnpm through the virtual store); with a virtual environment's script, the distribution
 whose console script it is, every distribution it requires (extras left out), and the
-site-packages startup files (`*.pth`, `sitecustomize.py`, `usercustomize.py`).
+site-packages startup files (`*.pth`, `sitecustomize.py`, `usercustomize.py`). For pytest, every
+installed distribution that declares a `pytest11` entry point (`pytest-cov`, `pytest-xdist`, one an
+install script planted) and what it requires are part of the tool too: pytest loads them all at
+start-up whether or not anything requires them, so an install script that edits, adds or turns on
+a plugin fails the gate as tampering.
 
 The install phase keeps the configured order and runs in two passes (`scriptsFreeInstall`, each
 form checked against the real package manager by `tool-tamper.live.test.ts`, opt-in with
@@ -257,9 +261,12 @@ have):
 - A verify gate with no project tool (its executable is outside the checkout, its package script
   names nothing installed, or it picks other packages to run in) is listed as not verified.
 - What a tool loads by configuration rather than by dependency (an ESLint plugin the
-  package.json does not name, a pytest plugin such as `pytest-cov`, a test runner's setup files)
-  is not part of the tool unless `gates.yml` lists it in `paths` (its dependency closure is then
-  hashed too).
+  package.json does not name, a pytest plugin named by `-p` or `pytest_plugins` that declares no
+  `pytest11` entry point, a test runner's setup files) is not part of the tool unless `gates.yml`
+  lists it in `paths` (its dependency closure is then hashed too).
+- A command that runs a module through the interpreter (`python -m pytest`) resolves to the
+  interpreter, which belongs to no distribution: only the interpreter's script is hashed. The
+  commands `vtc calibrate` writes run the tool's own script (`uv run pytest`).
 - The base checkout, which computes the baseline facts (which violations are pre-existing),
   runs its install gates as configured and its tools unverified. Its install scripts are code
   already merged, but a base tool they changed could make the baseline facts wrong.

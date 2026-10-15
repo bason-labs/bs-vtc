@@ -19,7 +19,7 @@
  *   (pnpm's `node_modules/<name>` points into `node_modules/.pnpm`) and the link itself is a line;
  *   nothing outside the checkout is ever read (a path that leads out is the line
  *   `outside-checkout`). A Node package's dependency closure and a Python virtual environment
- *   script's distribution closure are hashed with it.
+ *   script's distribution closure (with pytest's `pytest11` plugins) are hashed with it.
  * - {@link changedToolFiles}: the files the install phase changed, added or removed.
  * - {@link deriveProjectTool}: a `project` tool from a gate command: the executable it resolves to
  *   inside the checkout (unwrapping `pnpm exec`, `npx`, `npm exec`, `yarn`, `bunx`, `uv run`,
@@ -271,6 +271,29 @@ const providesScript = (text: string, wanted: string): boolean => {
   return false;
 };
 
+/** The normalized distribution name of a `.dist-info` directory (`pytest_cov-6.0.dist-info`). */
+const distName = (distInfo: string): string => {
+  const stem = distInfo.slice(0, -".dist-info".length);
+  const at = stem.lastIndexOf("-");
+  return normalizePy(at > 0 ? stem.slice(0, at) : stem);
+};
+
+/**
+ * The entry-point groups a distribution's tool loads from every installed distribution, whether or
+ * not anything requires it: pytest loads each `pytest11` plugin (pytest-cov, a planted one) at
+ * start-up, so the plugins are part of pytest's tool.
+ */
+const AUTOLOADED_ENTRY_POINTS: Readonly<Record<string, readonly string[]>> = {
+  pytest: ["pytest11"],
+};
+
+/** Whether a dist-info's entry_points.txt has a section for one of `groups`. */
+const declaresGroup = (text: string, groups: readonly string[]): boolean =>
+  text.split(/\r?\n/).some((raw) => {
+    const line = raw.trim();
+    return line.startsWith("[") && line.endsWith("]") && groups.includes(line.slice(1, -1).trim());
+  });
+
 /**
  * Hashes the files under `globs` in `root` (see the module doc). Throws a
  * {@link ToolHashLimitError} when there are more files or bytes than `limits` allow.
@@ -283,8 +306,9 @@ const providesScript = (text: string, wanted: string): boolean => {
  *   and each link on the way as its own line;
  * - a glob that names a virtual environment's script (`<venv>/bin/<name>`, beside a
  *   `pyvenv.cfg`) adds the files of the distribution whose console script it is and of every
- *   distribution it requires (by `Requires-Dist`, extras left out), each by the top-level names
- *   its `RECORD` lists, and the site-packages startup files (`*.pth`, `sitecustomize.py`,
+ *   distribution it requires (by `Requires-Dist`, extras left out), for pytest every installed
+ *   `pytest11` plugin and its requirements too (pytest loads them all at start-up), each by the
+ *   top-level names its `RECORD` lists, and the site-packages startup files (`*.pth`, `sitecustomize.py`,
  *   `usercustomize.py`).
  *
  * No process of the checkout runs while it hashes (the runner's reaper stopped them). A file's
@@ -444,18 +468,33 @@ export const hashTool = (
       }
       const dists = new Map<string, string>();
       for (const name of names) {
-        if (!name.endsWith(".dist-info")) continue;
-        const stem = name.slice(0, -".dist-info".length);
-        const at = stem.lastIndexOf("-");
-        dists.set(normalizePy(at > 0 ? stem.slice(0, at) : stem), name);
+        if (name.endsWith(".dist-info")) dists.set(distName(name), name);
       }
-      const owner = [...dists.values()].find((dist) =>
-        providesScript(readSmall(root, join(site, dist, "entry_points.txt")) ?? "", wanted),
-      );
+      const entryPoints = new Map<string, string>();
+      const entryPointsOf = (dist: string): string => {
+        let text = entryPoints.get(dist);
+        if (text === undefined) {
+          text = readSmall(root, join(site, dist, "entry_points.txt")) ?? "";
+          entryPoints.set(dist, text);
+        }
+        return text;
+      };
+      const owner = [...dists.values()].find((dist) => providesScript(entryPointsOf(dist), wanted));
       if (owner === undefined) continue;
       const seen = new Set([owner]);
       const queue = [owner];
+      const enqueue = (dep: string): void => {
+        if (seen.has(dep)) return;
+        seen.add(dep);
+        queue.push(dep);
+      };
       for (let dist = queue.shift(); dist !== undefined; dist = queue.shift()) {
+        const groups = AUTOLOADED_ENTRY_POINTS[distName(dist)] ?? [];
+        if (groups.length > 0) {
+          for (const other of dists.values()) {
+            if (declaresGroup(entryPointsOf(other), groups)) enqueue(other);
+          }
+        }
         const record = readSmall(root, join(site, dist, "RECORD"), 16 * 1024 * 1024) ?? "";
         const tops = new Set<string>([dist]);
         for (const line of record.split(/\r?\n/)) {
@@ -470,10 +509,7 @@ export const hashTool = (
           const match = /^Requires-Dist:\s*([A-Za-z0-9][A-Za-z0-9._-]*)/.exec(line);
           if (match?.[1] === undefined || /\bextra\s*==/.test(line)) continue;
           const dep = dists.get(normalizePy(match[1]));
-          if (dep !== undefined && !seen.has(dep)) {
-            seen.add(dep);
-            queue.push(dep);
-          }
+          if (dep !== undefined) enqueue(dep);
         }
       }
     }

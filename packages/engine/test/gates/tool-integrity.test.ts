@@ -299,6 +299,104 @@ describe("hashTool: a tool's dependencies are part of it", () => {
       `${site}/pluggy/_hooks.py`,
     ]);
   });
+
+  describe("the pytest plugins pytest loads through its own entry points", () => {
+    const site = ".venv/lib/python3.12/site-packages";
+    const dist = (
+      root: string,
+      name: string,
+      top: string,
+      opts: { entryPoints?: string; requires?: string[] } = {},
+    ): void => {
+      const info = `${site}/${name}-1.0.dist-info`;
+      put(root, `${info}/RECORD`, `${top}/__init__.py,,\n${name}-1.0.dist-info/RECORD,,\n`);
+      put(
+        root,
+        `${info}/METADATA`,
+        [`Name: ${name}`, ...(opts.requires ?? []).map((r) => `Requires-Dist: ${r}`), ""].join(
+          "\n",
+        ),
+      );
+      if (opts.entryPoints !== undefined) put(root, `${info}/entry_points.txt`, opts.entryPoints);
+      put(root, `${site}/${top}/__init__.py`, top);
+    };
+    const venv = (root: string): void => {
+      put(root, ".venv/pyvenv.cfg", "home = /usr/bin\n");
+      put(root, ".venv/bin/pytest", "#!/usr/bin/env python\n");
+      dist(root, "pytest", "pytest", {
+        entryPoints: "[console_scripts]\npytest = pytest:console_main\n",
+      });
+      // pytest-cov: a pytest11 plugin pytest loads although nothing requires it, and what it requires.
+      dist(root, "pytest_cov", "pytest_cov", {
+        entryPoints: "[pytest11]\npytest_cov = pytest_cov.plugin\n",
+        requires: ["coverage[toml]>=7.5"],
+      });
+      dist(root, "coverage", "coverage", {
+        entryPoints: "[console_scripts]\ncoverage = coverage.cmdline:main\n",
+      });
+      // A distribution with other entry points only is not pytest's.
+      dist(root, "black", "black", {
+        entryPoints: "[console_scripts]\nblack = black:patched_main\n",
+      });
+    };
+
+    it("hashes every installed pytest11 plugin and what it requires with pytest", () => {
+      const root = tempDir();
+      venv(root);
+      const keys = [...hashTool(root, [".venv/bin/pytest"]).files.keys()];
+      expect(keys).toContain(`${site}/pytest_cov/__init__.py`);
+      expect(keys).toContain(`${site}/pytest_cov-1.0.dist-info/entry_points.txt`);
+      expect(keys).toContain(`${site}/coverage/__init__.py`);
+      expect(keys.some((k) => k.startsWith(`${site}/black`))).toBe(false);
+    });
+
+    it("sees a plugin an install script edits, adds or turns on", () => {
+      const root = tempDir();
+      venv(root);
+      const before = hashTool(root, [".venv/bin/pytest"]);
+      put(root, `${site}/pytest_cov/__init__.py`, "evil");
+      expect(changedToolFiles(before, hashTool(root, [".venv/bin/pytest"]))).toEqual([
+        `${site}/pytest_cov/__init__.py`,
+      ]);
+
+      const planted = tempDir();
+      venv(planted);
+      const clean = hashTool(planted, [".venv/bin/pytest"]);
+      dist(planted, "pytest_evil", "pytest_evil", {
+        entryPoints: "[pytest11]\nevil = pytest_evil\n",
+      });
+      expect(changedToolFiles(clean, hashTool(planted, [".venv/bin/pytest"]))).toEqual([
+        `${site}/pytest_evil-1.0.dist-info/METADATA`,
+        `${site}/pytest_evil-1.0.dist-info/RECORD`,
+        `${site}/pytest_evil-1.0.dist-info/entry_points.txt`,
+        `${site}/pytest_evil/__init__.py`,
+      ]);
+
+      const turned = tempDir();
+      venv(turned);
+      const off = hashTool(turned, [".venv/bin/pytest"]);
+      put(
+        turned,
+        `${site}/black-1.0.dist-info/entry_points.txt`,
+        "[console_scripts]\nblack = black:patched_main\n[pytest11]\nblack = black\n",
+      );
+      expect(changedToolFiles(off, hashTool(turned, [".venv/bin/pytest"]))).toEqual([
+        `${site}/black-1.0.dist-info/METADATA`,
+        `${site}/black-1.0.dist-info/RECORD`,
+        `${site}/black-1.0.dist-info/entry_points.txt`,
+        `${site}/black/__init__.py`,
+      ]);
+    });
+
+    it("adds no pytest plugin to a tool that is not pytest", () => {
+      const root = tempDir();
+      venv(root);
+      put(root, ".venv/bin/black", "#!/usr/bin/env python\n");
+      const keys = [...hashTool(root, [".venv/bin/black"]).files.keys()];
+      expect(keys).toContain(`${site}/black/__init__.py`);
+      expect(keys.some((k) => k.includes("pytest"))).toBe(false);
+    });
+  });
 });
 
 describe("toolPathsCover: configured paths against what the command runs", () => {
