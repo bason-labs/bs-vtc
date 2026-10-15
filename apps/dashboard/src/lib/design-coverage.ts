@@ -1,6 +1,7 @@
 import type {
   DESIGN_COVERAGE_ESCALATION_OPTIONS,
   DesignCoverageChecked,
+  DesignCoverageReport,
   DesignCoverageRole,
   VtcEvent,
 } from "@vtc/shared";
@@ -15,7 +16,7 @@ import type { StatusMeta } from "./states";
  * escalation that names the uncovered REQs. Each check is a `design.coverage_checked` event.
  * There is no "approve anyway": G2 is shown only after a complete check.
  */
-export type CoverageLoopStateId = "checking" | "fixing" | "complete" | "parked";
+export type CoverageLoopStateId = DesignCoverageChecked["outcome"] | "checking";
 
 const STATES: Readonly<Record<CoverageLoopStateId, StatusMeta>> = {
   checking: { label: "Checking again", tone: "accent", live: true },
@@ -37,11 +38,12 @@ export const COVERAGE_ESCALATION_OPTIONS: Readonly<
   instruct_architect: "tell the Architect what to do (the loop then runs again)",
 };
 
-type GapId =
-  | "reqs_without_component"
-  | "reqs_without_screen"
-  | "screens_without_req"
-  | "components_unregistered";
+/** The report's gap lists, from the contract: a list key added later needs a label here. */
+type GapId = {
+  [K in keyof DesignCoverageReport]-?: DesignCoverageReport[K] extends readonly unknown[]
+    ? K
+    : never;
+}[keyof DesignCoverageReport];
 
 const GAP_LABELS: Readonly<Record<GapId, string>> = {
   reqs_without_component: "Requirements no AD or component names",

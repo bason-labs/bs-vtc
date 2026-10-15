@@ -217,6 +217,18 @@ describe("coverageLoop (design.coverage_checked, H-13)", () => {
   it("marks the gates view stale on a coverage check", () => {
     expect(topicsForEvent(fixing(40, 1))).toContain("gates");
   });
+
+  it("marks the gates view stale when the human answers an escalation", () => {
+    const answered = sampleEvent(44, "escalation.answered", {
+      escalation: "E-4",
+      answer: {
+        option: "instruct_architect",
+        text: "Map REQ-5 to AD-3",
+        who_should_have_caught: "architect",
+      },
+    });
+    expect(topicsForEvent(answered)).toEqual(expect.arrayContaining(["escalations", "gates"]));
+  });
 });
 
 describe("G2 appears only after a complete coverage check (H-13)", () => {
