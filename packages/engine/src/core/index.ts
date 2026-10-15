@@ -74,6 +74,7 @@ export {
   type LookbackReplayTrial,
   type LookbackRetroTarget,
   type ReplayTrialOutcome,
+  type ReplayTrialRecord,
   type LookbackTargetRef,
   type PinnedPrompt,
   type PromptPins,

@@ -17,7 +17,6 @@ import { join, relative } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   effectivePromptSha,
-  LOOKBACK_LIMITS,
   sha256Hex,
   TASK_PACK_HEURISTICS_SECTION,
   TaskPackSchema,
@@ -41,6 +40,7 @@ import {
   type LookbackRetro,
   type PluginCatalog,
   type ReplayTrialOutcome,
+  type ReplayTrialRecord,
   type RunHandle,
   type RunState,
 } from "../../src/core/index.js";
@@ -279,6 +279,10 @@ interface FakeOptions {
   readonly gradeVerdict?: LookbackRetro["gradeVerdict"];
   /** The tier the recorded dispatch ran on (D-cm); absent: a log from before 5.4.0. */
   readonly tier?: LookbackReplayTrial["tier"];
+  /** `automation.skipped` drafts Lookback's plan returns (its limits, `planRetroReplays`). */
+  readonly events?: readonly EventDraft[];
+  /** The replay comes with no trial: every one was graded at an earlier RETRO. */
+  readonly noTrials?: boolean;
 }
 
 /**
@@ -298,6 +302,8 @@ const fakeReplays = (
   const held: { impl: boolean; leftover: boolean }[] = [];
   const changes: (readonly GitChangedFile[])[] = [];
   const finished: { replay: LookbackReplay; outcomes: readonly ReplayTrialOutcome[] }[] = [];
+  /** What the trial ledger was handed (`recordTrial`), in order. */
+  const recorded: { arm: string; trial: number; record: ReplayTrialRecord }[] = [];
   const retro: LookbackRetro = {
     plan: () => Promise.resolve({ targets: [] }),
     check: () => Promise.resolve({ ok: true, events: [] }),
@@ -336,12 +342,20 @@ const fakeReplays = (
             proposal: "p-1",
             role,
             host: "claude-code" as const,
-            trials: Array.from({ length: per }, (_x, k) =>
-              arms.map((arm, i) => trialOf(arm, k * arms.length + i, base)),
-            ).flat(),
+            trials:
+              options.noTrials === true
+                ? []
+                : Array.from({ length: per }, (_x, k) =>
+                    arms.map((arm, i) => trialOf(arm, k * arms.length + i, base)),
+                  ).flat(),
           },
         ],
+        ...(options.events === undefined ? {} : { events: options.events }),
       });
+    },
+    recordTrial: (_replay, trial, record) => {
+      recorded.push({ arm: trial.arm, trial: trial.trial, record });
+      return Promise.resolve();
     },
     ...(options.replayWait === undefined ? {} : { replayWait: options.replayWait }),
     ...(options.gradeVerdict === undefined ? {} : { gradeVerdict: options.gradeVerdict }),
@@ -381,7 +395,7 @@ const fakeReplays = (
       return Promise.resolve([draft]);
     },
   };
-  return { retro, graded, held, changes, finished };
+  return { retro, graded, held, changes, finished, recorded };
 };
 
 /** A harness whose RETRO replays one proposal with the fake (`reach` drives it there). */
@@ -614,6 +628,10 @@ describe("RETRO runs Lookback replays as headless runs (AD-21 rule 6, readings 1
     expect(trials.runs).toHaveLength(1);
     expect(fake.graded).toEqual([]);
     expect(fake.finished).toEqual([]);
+    // the ledger counts the attempt, so a lock that persists stops the replay (planRetroReplays)
+    expect(fake.recorded).toEqual([
+      { arm: "a", trial: 1, record: { kind: "unmeasured", outcome: "plugin_locked" } },
+    ]);
     const log = retroEvents(h);
     expect(
       String(
@@ -892,22 +910,52 @@ describe("RETRO runs Lookback replays as headless runs (AD-21 rule 6, readings 1
     expect(replayWaitSkipReason("the run has no budget left for replay trials")).toBe("budget");
   });
 
-  it("caps the trials one RETRO runs (LOOKBACK_LIMITS.maxTrialsPerRetro): a replay past the cap waits with automation.skipped trial_cap", async () => {
-    const per = Math.floor(LOOKBACK_LIMITS.maxTrialsPerRetro / 2) + 1;
-    const { h, fake, trials, reach } = atRetro(["a", "b"], { perArm: per });
+  it("applies no trial cap of its own: Lookback decides what a RETRO launches (planRetroReplays) and its trial_cap skip is logged (D-cg)", async () => {
+    const per = 2;
+    const skipped: EventDraft = {
+      type: "automation.skipped",
+      actor: "engine",
+      data: {
+        reason: "trial_cap",
+        kind: "lookback",
+        detail: "12 replay trials of 1 proposal wait for the next RETRO",
+      },
+    };
+    const { h, fake, trials, reach } = atRetro(["a", "b"], { perArm: per, events: [skipped] });
+    await reach();
+    // every trial Lookback handed over ran: the cap is Lookback's
+    expect(trials.runs).toHaveLength(per * 2);
+    expect(fake.finished).toHaveLength(1);
+    expect(retroEvents(h).find((e) => e.type === "automation.skipped")?.data).toEqual(skipped.data);
+    expect(h.engine.status({}).run.finished_at).toBeDefined();
+    await h.release();
+  });
+
+  it("hands every trial's grade to the trial ledger before the replay finishes (D-cg)", async () => {
+    const { h, fake, reach } = atRetro(["a", "b"]);
+    await reach();
+    expect(fake.recorded).toEqual([
+      {
+        arm: "a",
+        trial: 1,
+        record: { kind: "graded", passed: false, tokens: 150, readDenied: false },
+      },
+      {
+        arm: "b",
+        trial: 2,
+        record: { kind: "graded", passed: true, tokens: 150, readDenied: false },
+      },
+    ]);
+    expect(fake.finished).toHaveLength(1);
+    await h.release();
+  });
+
+  it("a replay whose trials were all graded at earlier RETROs only finishes: nothing runs", async () => {
+    const { h, fake, trials, reach } = atRetro(["a", "b"], { noTrials: true });
     await reach();
     expect(trials.runs).toEqual([]);
-    expect(fake.finished).toEqual([]);
-    expect(retroEvents(h).find((e) => e.type === "automation.skipped")?.data).toMatchObject({
-      reason: "trial_cap",
-      kind: "lookback",
-    });
-    expect(h.engine.notices.join("\n")).toMatch(
-      new RegExp(
-        `the per-RETRO cap of ${String(LOOKBACK_LIMITS.maxTrialsPerRetro)} trials is reached`,
-      ),
-    );
-    expect(h.engine.status({}).run.finished_at).toBeDefined();
+    expect(fake.finished.map((f) => [f.replay.proposal, f.outcomes])).toEqual([["p-1", []]]);
+    expect(retroEvents(h).some((e) => e.type === "lookback.replay_finished")).toBe(true);
     await h.release();
   });
 

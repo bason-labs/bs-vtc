@@ -423,22 +423,20 @@ export const wireLookback = (
     graderBundleSha({ judgeModel: null, gatesConfigHash: engine.gatesConfigHash() });
   const budgetAvailable = (state: RunState): boolean =>
     state.runBudget === null || state.runBudget.spent_usd < state.runBudget.budget_usd;
-  // AD-21 rules 4 and 8: the lookback role at RETRO, before the run finishes (reading 154); the
-  // weekly window is the finishing run's Lead host's (reading 176)
-  const retroFor = (state: RunState | null): LookbackRetro =>
-    createLookbackRetro({
-      projectRoot: deps.repoRoot,
-      vtcHome: deps.vtcHome,
-      history,
-      lockedShaFor,
-      compiled: (role, mode, host) =>
-        plugins.promptParts?.(agentNameFor(role, mode), host)?.compiled,
-      graderBundleSha: bundleSha,
-      weeklyRemainingPct: () => (state === null ? null : weeklyRemaining(state)),
-      budgetAvailable,
-      now,
-    });
-  const checker = retroFor(null);
+  // AD-21 rules 4 and 8: the lookback role at RETRO, before the run finishes (reading 154); one
+  // retro serves every run: the weekly window is the planned run's Lead host's (reading 176)
+  const retro: LookbackRetro = createLookbackRetro({
+    projectRoot: deps.repoRoot,
+    vtcHome: deps.vtcHome,
+    history,
+    lockedShaFor,
+    compiled: (role, mode, host) => plugins.promptParts?.(agentNameFor(role, mode), host)?.compiled,
+    graderBundleSha: bundleSha,
+    weeklyRemainingPct: weeklyRemaining,
+    budgetAvailable,
+    now,
+    ...(newAgents === undefined ? {} : { roles: newAgents.roles() }),
+  });
   // AD-21 rule 6 (reading 176): after the targets, RETRO replays every proposal not yet replayed
   const replays = createLookbackReplays({
     projectRoot: deps.repoRoot,
@@ -476,11 +474,11 @@ export const wireLookback = (
   };
   engine.setLookbackRetro({
     plan: async (state) => {
-      const plan = await retroFor(state).plan({ ...state, events: [...lookbackEvents(state)] });
+      const plan = await retro.plan({ ...state, events: [...lookbackEvents(state)] });
       routingAtRetro(state.id);
       return plan;
     },
-    check: (target, root, state) => checker.check(target, root, state),
+    check: (target, root, state) => retro.check(target, root, state),
     ...replays,
   });
   const runEnd = async (run: string): Promise<void> => {
