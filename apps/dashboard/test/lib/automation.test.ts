@@ -71,6 +71,19 @@ describe("automationView (D-ca, AD-27 rule 7)", () => {
     expect(issueOnly?.issue?.state.label).toBe("closed");
   });
 
+  it("says why a PR's evidence is partial when the engine knows (AutomationItem.pr.partial_reason)", () => {
+    const base = report();
+    const withPr = base.items.find((i) => i.pr !== null)!;
+    const view = (pr: Partial<NonNullable<typeof withPr.pr>>) =>
+      automationView({ ...base, items: [{ ...withPr, pr: { ...withPr.pr!, ...pr } }] }).items[0]
+        ?.pr;
+    const partial = view({ evidence: "partial", partial_reason: "base_build_failed" });
+    expect(partial?.evidence).toMatchObject({ label: "evidence partial", tone: "warn" });
+    expect(partial?.partialReason).toBe(PARTIAL_EVIDENCE_REASONS.base_build_failed);
+    expect(view({ evidence: "partial", partial_reason: undefined })?.partialReason).toBeNull();
+    expect(view({ evidence: "complete", partial_reason: undefined })?.partialReason).toBeNull();
+  });
+
   it("never links anything but http(s)", () => {
     const base = report();
     const [first] = base.items;

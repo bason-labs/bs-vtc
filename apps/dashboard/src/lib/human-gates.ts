@@ -10,7 +10,8 @@ import type { StatusMeta } from "./states";
  * with fewer than two directions, the blocking `directions_problem` (D-bt, reading 174), then the
  * decision
  * (`gate.approved` / `gate.rejected`). Approval happens in the Lead chat; this only shows it.
- * A request still open when the run finished (`run.finished`) no longer waits for anyone.
+ * A request still open when the run finished (`run.finished`) no longer waits for anyone, and a G2
+ * followed by a new coverage check (`design.coverage_checked`, H-13) will be asked again.
  */
 export type GateOutcomeId = "pending" | "approved" | "rejected" | "superseded" | "unanswered";
 
@@ -88,6 +89,7 @@ export const gateRequests = (events: readonly VtcEvent[]): GateRequestView[] => 
   const rejections = eventsOfType(events, "gate.rejected");
   const waivedEvents = eventsOfType(events, "fact.waived");
   const finished = eventsOfType(events, "run.finished")[0];
+  const coverageChecks = eventsOfType(events, "design.coverage_checked");
   return requests
     .map(({ event, data }): GateRequestView => {
       const approved = approvals.find(
@@ -99,9 +101,13 @@ export const gateRequests = (events: readonly VtcEvent[]): GateRequestView[] => 
       const decision = [approved, rejected]
         .filter((d) => d !== undefined)
         .sort((a, b) => a.event.seq - b.event.seq)[0];
-      const newer = requests.find(
-        (r) => r.event.seq > event.seq && overlaps(r.data.gates, data.gates),
-      );
+      // A G2 is offered only after a complete coverage check (H-13): a check after it means the
+      // design is being reworked, and G2 will be asked again.
+      const newer =
+        requests.find((r) => r.event.seq > event.seq && overlaps(r.data.gates, data.gates)) ??
+        (data.gates.includes("G2")
+          ? coverageChecks.find((c) => c.event.seq > event.seq)
+          : undefined);
       let outcome: GateOutcomeId = "pending";
       if (decision !== undefined && (newer === undefined || decision.event.seq < newer.event.seq)) {
         outcome = decision === approved ? "approved" : "rejected";
