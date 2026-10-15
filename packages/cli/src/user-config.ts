@@ -25,7 +25,16 @@ import {
 
 export type UserConfigRead =
   | { readonly ok: true; readonly path: string; readonly config: UserConfig }
-  | { readonly ok: false; readonly path: string; readonly error: string };
+  | {
+      readonly ok: false;
+      readonly path: string;
+      readonly error: string;
+      /**
+       * The YAML document when it parsed but did not fit `UserConfigSchema`, so one section can
+       * still be checked on its own (`vtc doctor`'s `lookback` line). Never acted on.
+       */
+      readonly raw?: unknown;
+    };
 
 export const userConfigPath = (vtcHome: string): string => join(vtcHome, USER_CONFIG_FILE);
 
@@ -47,7 +56,7 @@ export const readUserConfig = (vtcHome: string): UserConfigRead => {
     const issues = parsed.error.issues
       .map((i) => `${i.path.map(String).join(".") || "(root)"}: ${i.message}`)
       .join("; ");
-    return { ok: false, path, error: issues };
+    return { ok: false, path, error: issues, raw };
   }
   return { ok: true, path, config: parsed.data };
 };

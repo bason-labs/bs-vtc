@@ -11,8 +11,11 @@ import * as compiler from "@vtc/compiler";
 import { gates, git } from "@vtc/engine";
 import {
   DEFAULT_UPSTREAM_REPO,
+  EVIDENCE_HOSTING_PREFERRED,
   type ArmPluginCompiler,
   type ArmPluginRequest,
+  type BeforeAfterRequest,
+  type BeforeAfterResult,
   type EvidenceRecorder,
   type GitPlumbing,
 } from "@vtc/shared";
@@ -21,6 +24,7 @@ import {
   armPluginCompiler,
   buildAutomationDeps,
   evidenceHostingFor,
+  hostingRequestOf,
   probeAutomation,
   requestedHostingOf,
   shippedArmPluginCompilerFactory,
@@ -34,7 +38,6 @@ import type { Exec } from "../src/process.js";
 import { readUserConfig, type UserConfigRead } from "../src/user-config.js";
 import { buildEngineParts, composeEngineDeps } from "../src/wiring.js";
 import { cleanupDirs, fakePullRequests, tempHome } from "./helpers.js";
-import { ROUND4_LANDED } from "./round4-merge.js";
 
 afterEach(cleanupDirs);
 
@@ -57,7 +60,18 @@ describe("~/.vtc/config.yaml upstream and automation.evidence_hosting (D-bz, D-b
       repo: DEFAULT_UPSTREAM_REPO,
       share: true,
     });
-    expect(requestedHostingOf(read("version: 1\n"))).toBe("branch");
+    // D-cc (reading 225): with no evidence_hosting set, VTC asks for gh --attach
+    expect(requestedHostingOf(read("version: 1\n"))).toBe(EVIDENCE_HOSTING_PREFERRED);
+    expect(hostingRequestOf(read("version: 1\n"))).toEqual({
+      hosting: "attach",
+      source: "preferred",
+    });
+  });
+
+  it("keeps the user's own evidence_hosting, branch included", () => {
+    const branch = read("version: 1\nautomation:\n  evidence_hosting: branch\n");
+    expect(requestedHostingOf(branch)).toBe("branch");
+    expect(hostingRequestOf(branch)).toEqual({ hosting: "branch", source: "user" });
   });
 
   it("takes the user's repo, share switch and absolute checkout", () => {
@@ -77,7 +91,9 @@ describe("~/.vtc/config.yaml upstream and automation.evidence_hosting (D-bz, D-b
     expect(relative.ok).toBe(false);
     // privacy fails closed: the user may have switched sharing off in the file that broke
     expect(upstreamSettingsOf(relative)).toEqual({ repo: DEFAULT_UPSTREAM_REPO, share: false });
+    // the user may have chosen branch in the file that broke: the always-possible branch hosting
     expect(requestedHostingOf(relative)).toBe("branch");
+    expect(hostingRequestOf(relative).source).toBe("unreadable");
   });
 });
 
@@ -91,6 +107,23 @@ describe("evidence hosting (reading 196): attach only with gh >= 2.99.0 and a gi
     expect(
       evidenceHostingFor("attach", { ...PROBE, ghVersion: "gh version 2.99.0 (2026-09-01)" }),
     ).toEqual({ hosting: "attach" });
+  });
+
+  it("the preferred attach resolves like a requested one: attach where possible, else branch", () => {
+    const user = (yaml: string) => evidenceHostingFor(requestedHostingOf(read(yaml)), PROBE);
+    expect(user("version: 1\n")).toEqual({ hosting: "attach" });
+    expect(
+      evidenceHostingFor(requestedHostingOf(read("version: 1\n")), {
+        ...PROBE,
+        ghVersion: "gh version 2.98.2 (2026-08-01)",
+      }).hosting,
+    ).toBe("branch");
+    expect(
+      evidenceHostingFor(requestedHostingOf(read("version: 1\n")), {
+        ...PROBE,
+        githubRemote: false,
+      }).hosting,
+    ).toBe("branch");
   });
 
   it("falls back to branch, saying why, on an older or missing gh or a remote off github.com", () => {
@@ -261,6 +294,53 @@ describe("EngineDeps.automation (AutomationDeps, AD-27 rule 7)", () => {
     ).rejects.toThrow(/no toolchain/);
     expect(seen).toEqual([{ repoRoot: "/r", vtcHome: "/h", allowUnsandboxed: true }]);
   });
+
+  const BEFORE_AFTER: BeforeAfterRequest = {
+    repoRoot: "/r",
+    base: "a".repeat(40),
+    head: "b".repeat(40),
+    outDir: "/o",
+    redactSelectors: [],
+    denyText: [],
+  };
+
+  it("forwards the UI before/after capture to a recorder that has one (D-ct, reading 223)", async () => {
+    const asked: BeforeAfterRequest[] = [];
+    const result: BeforeAfterResult = {
+      files: [{ name: "01-home-before.png", kind: "ui_before", bytes: 10 }],
+      failed: [],
+    };
+    const deps = buildAutomationDeps({
+      user: () => read("version: 1\n"),
+      probe: PROBE,
+      factories: {
+        evidence: () => ({
+          ...fakeRecorder,
+          captureBeforeAfter: (request) => (asked.push(request), Promise.resolve(result)),
+        }),
+      },
+      gateDeps: { repoRoot: "/r", vtcHome: "/h" },
+    });
+    expect(await deps.evidence?.captureBeforeAfter?.(BEFORE_AFTER)).toEqual(result);
+    expect(asked).toEqual([BEFORE_AFTER]);
+  });
+
+  it("answers partial, never silently nothing, when the built recorder has no before/after capture", async () => {
+    const deps = buildAutomationDeps({
+      user: () => read("version: 1\n"),
+      probe: PROBE,
+      factories: { evidence: () => fakeRecorder },
+      gateDeps: { repoRoot: "/r", vtcHome: "/h" },
+    });
+    expect(await deps.evidence?.captureBeforeAfter?.(BEFORE_AFTER)).toEqual({
+      files: [],
+      failed: [],
+      partial: {
+        reason: "capture_failed",
+        detail: "this vtc build's evidence recorder has no UI before/after capture",
+      },
+    });
+  });
 });
 
 /** A `createArmPluginCompiler` that records the base plugin dir of each arm it compiles. */
@@ -382,7 +462,8 @@ describe("buildEngineParts injects automation and arm plugins", () => {
     const deps = composeEngineDeps(parts);
     expect(deps.automation).toEqual({
       upstream: { repo: DEFAULT_UPSTREAM_REPO, share: false },
-      hosting: "branch",
+      // D-cc: no evidence_hosting set, gh 2.101.0 and a github.com remote: gh --attach
+      hosting: "attach",
       ffmpeg: true,
       ghLogin: expect.any(Function) as unknown,
       // D-bv (4): the daily offline scan of this vtc's own lockfile (reading 216)
@@ -449,7 +530,7 @@ describe("buildEngineParts injects automation and arm plugins", () => {
   it("reads ~/.vtc/config.yaml again at each use: an opt-out flipped while the daemon runs is seen (AD-27 rule 5)", async () => {
     const home = tempHome();
     const file = join(home, "config.yaml");
-    writeFileSync(file, "version: 1\n");
+    writeFileSync(file, "version: 1\nautomation:\n  evidence_hosting: branch\n");
     const parts = await buildEngineParts({
       ...base,
       vtcHome: home,
@@ -482,35 +563,12 @@ describe("buildEngineParts injects automation and arm plugins", () => {
   });
 });
 
-/** The names a namespace exports as functions that match `pattern`. */
-const functionsNamed = (namespace: object, pattern: RegExp): string[] =>
-  Object.entries(namespace)
-    .filter(([name, value]) => typeof value === "function" && pattern.test(name))
-    .map(([name]) => name);
-
-describe("the shipped seams (merge note, readings 207 and 209; flags in round4-merge.ts)", () => {
-  it("are found exactly when the integrator's merge flags say they have landed", () => {
+describe("the shipped seams (readings 207 and 209; all landed in the round-4 merge)", () => {
+  it("are all found under their export names, as functions", () => {
     const factories = shippedAutomationFactories();
-    expect(Object.keys(factories).sort()).toEqual(
-      (["evidence", "plumbing"] as const).filter((key) => ROUND4_LANDED[key]),
-    );
-    for (const f of Object.values(factories)) expect(typeof f).toBe("function");
-    expect(typeof shippedArmPluginCompilerFactory()).toBe(
-      ROUND4_LANDED.armPlugins ? "function" : "undefined",
-    );
-  });
-
-  it("leave no seam of the engine or compiler unwired under another name", () => {
-    // a renamed export would leave its seam out without a word: fail while one exists unwired
-    const factories = shippedAutomationFactories();
-    if (factories.plumbing === undefined)
-      expect(functionsNamed(git, /Plumbing/), "git plumbing export not wired").toEqual([]);
-    if (factories.evidence === undefined)
-      expect(functionsNamed(gates, /EvidenceRecorder/), "evidence recorder not wired").toEqual([]);
-    if (shippedArmPluginCompilerFactory() === undefined)
-      expect(
-        functionsNamed(compiler, /(^arm|Arm)(?=[A-Z]|$)/),
-        "arm plugin compiler not wired",
-      ).toEqual([]);
+    expect(Object.keys(factories).sort()).toEqual(["evidence", "plumbing"]);
+    expect(factories.plumbing).toBe(git.createGitPlumbing);
+    expect(factories.evidence).toBe(gates.createEvidenceRecorder);
+    expect(shippedArmPluginCompilerFactory()).toBe(compiler.createArmPluginCompiler);
   });
 });

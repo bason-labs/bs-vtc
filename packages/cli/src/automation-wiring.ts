@@ -16,15 +16,15 @@
  * read of `AutomationDeps.upstream` (and `hosting`) goes back to `~/.vtc/config.yaml`
  * (`liveUserConfig`, re-read only when the file changed).
  *
- * Merge note (readings 207 and 209): `git.createGitPlumbing` (engine core), the gate runner's
- * `gates.createEvidenceRecorder` and the compiler's `createArmPluginCompiler` (roles-compiler) are
- * built in other branches this round. {@link shippedAutomationFactories} and
+ * The engine seams (readings 207 and 209): `git.createGitPlumbing` (engine core), the gate runner's
+ * `gates.createEvidenceRecorder` and the compiler's `createArmPluginCompiler` (roles-compiler), all
+ * landed in the round-4 merge. {@link shippedAutomationFactories} and
  * {@link shippedArmPluginCompilerFactory} look each one up by its export name and leave it out
- * while it is missing; {@link ShippedSeamsFit} checks at compile time that each export, once it
- * lands, fits its frozen seam type, so a changed signature fails the build. Without a recorder no automatic PR opens (issues still do;
- * `vtc doctor`'s `evidence` line says so); without the arm compiler a replay on a Claude-led run
- * waits for the next RETRO (`vtc lookback approve` warns). At that merge the integrator flips the
- * matching flag in `test/round4-merge.ts`, which the seam tests hold the lookups to.
+ * while it is missing; {@link ShippedSeamsFit} checks at compile time that each export fits its
+ * frozen seam type, so a changed signature fails the build, and the seam tests require all three.
+ * Without a recorder no automatic PR opens (issues still do; `vtc doctor`'s `evidence` line says
+ * so); without the arm compiler a replay on a Claude-led run waits for the next RETRO (`vtc
+ * lookback approve` warns).
  */
 import { join } from "node:path";
 import * as compiler from "@vtc/compiler";
@@ -32,9 +32,11 @@ import { gates, git } from "@vtc/engine";
 import {
   DEFAULT_UPSTREAM_REPO,
   EVIDENCE_HOSTING_DEFAULT,
+  EVIDENCE_HOSTING_PREFERRED,
   GH_ATTACH_MIN_VERSION,
   type ArmPluginCompiler,
   type AutomationDeps,
+  type BeforeAfterResult,
   type CreateGitPlumbing,
   type EvidenceHosting,
   type EvidenceRecorder,
@@ -64,9 +66,33 @@ export const upstreamSettingsOf = (read: UserConfigRead): AutomationDeps["upstre
   };
 };
 
-/** `automation.evidence_hosting` as the user set it; `branch` (the default) when unset or unreadable. */
+/** The hosting VTC asks for, and where that choice comes from. */
+export interface HostingRequest {
+  readonly hosting: EvidenceHosting;
+  /**
+   * `user`: `automation.evidence_hosting` as the user set it. `preferred`: none set, so
+   * `EVIDENCE_HOSTING_PREFERRED` (`attach`, D-cc, reading 225). `unreadable`: the file does not
+   * parse, so `EVIDENCE_HOSTING_DEFAULT` (`branch`, always possible): the user may have chosen
+   * it in the file that broke.
+   */
+  readonly source: "user" | "preferred" | "unreadable";
+}
+
+/** The hosting VTC asks for (D-cc): the user's, else `attach`; `branch` when the file is unreadable. */
+export const hostingRequestOf = (read: UserConfigRead): HostingRequest => {
+  if (!read.ok) return { hosting: EVIDENCE_HOSTING_DEFAULT, source: "unreadable" };
+  const set = read.config.automation?.evidence_hosting;
+  return set === undefined
+    ? { hosting: EVIDENCE_HOSTING_PREFERRED, source: "preferred" }
+    : { hosting: set, source: "user" };
+};
+
+/**
+ * The hosting VTC asks for ({@link hostingRequestOf}); {@link evidenceHostingFor} falls back to
+ * `branch` where gh is older than 2.99.0 or the remote is not github.com.
+ */
 export const requestedHostingOf = (read: UserConfigRead): EvidenceHosting =>
-  (read.ok ? read.config.automation?.evidence_hosting : undefined) ?? EVIDENCE_HOSTING_DEFAULT;
+  hostingRequestOf(read).hosting;
 
 // --------------------------------------------------------------------- probe
 
@@ -205,14 +231,14 @@ export const vtcAdvisoriesScan = (options: {
 /** The hosting PR media get, and why it is not the one the user asked for. */
 export interface HostingDecision {
   readonly hosting: EvidenceHosting;
-  /** Set when the user asked for `attach` and this machine or repo cannot do it. */
+  /** Set when `attach` was asked for and this machine or repo cannot do it. */
   readonly fallback?: string;
 }
 
 /**
- * Reading 196: `attach` (`gh … --attach`) only when gh is at least `GH_ATTACH_MIN_VERSION` and the
- * origin remote is on github.com; otherwise the orphan `vtc-evidence` branch. `branch` is the
- * default and always possible.
+ * Readings 196 and 225: `attach` (`gh … --attach`, asked for when the user set nothing) only when
+ * gh is at least `GH_ATTACH_MIN_VERSION` and the origin remote is on github.com; otherwise the
+ * orphan `vtc-evidence` branch, which is always possible.
  */
 export const evidenceHostingFor = (
   requested: EvidenceHosting,
@@ -292,7 +318,7 @@ const shipped = (namespace: object, key: string): unknown => {
   return typeof value === "function" ? value : undefined;
 };
 
-/** The shipped implementations, each once its team's branch has landed (see the merge note). */
+/** The shipped implementations of the engine seams (see the header). */
 export const shippedAutomationFactories = (): AutomationFactories => {
   const plumbing = shipped(git, "createGitPlumbing") as CreateGitPlumbing | undefined;
   const evidence = shipped(gates, "createEvidenceRecorder") as AutomationFactories["evidence"];
@@ -306,15 +332,34 @@ export const shippedAutomationFactories = (): AutomationFactories => {
 export const shippedArmPluginCompilerFactory = (): CreateArmPluginCompiler | undefined =>
   shipped(compiler, "createArmPluginCompiler") as CreateArmPluginCompiler | undefined;
 
+/** What a built recorder without `captureBeforeAfter` (before contracts 5.4.0) answers. */
+const NO_BEFORE_AFTER: BeforeAfterResult = {
+  files: [],
+  failed: [],
+  partial: {
+    reason: "capture_failed",
+    detail: "this vtc build's evidence recorder has no UI before/after capture",
+  },
+};
+
 /**
  * An evidence recorder built on first use, like the Gate Runner: the daemon starts without the
  * visual toolchain, and a recorder that cannot be built fails the capture that needed it, which
- * the upstream module retries once and then reports as "evidence capture failed" (D-ce).
+ * the upstream module retries once and then reports as "evidence capture failed" (D-ce). Every
+ * method is forwarded, the UI before/after capture of D-ct (reading 223) too: whether the built
+ * recorder has one is known only once it is built, so without one the call answers `partial`
+ * and the PR is labelled `evidence: partial` with the reason, never left without a word.
  */
 const lazyRecorder = (create: () => EvidenceRecorder): EvidenceRecorder => {
   let recorder: EvidenceRecorder | undefined;
   const get = (): EvidenceRecorder => (recorder ??= create());
   return {
+    captureBeforeAfter: async (request) => {
+      const built = get();
+      return built.captureBeforeAfter === undefined
+        ? NO_BEFORE_AFTER
+        : built.captureBeforeAfter(request);
+    },
     capture: async (request) => get().capture(request),
     renderGateReport: async (request) => get().renderGateReport(request),
   };
