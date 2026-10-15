@@ -63,8 +63,10 @@ Both also get:
   holds: `{{note}}` is the renderer's whole NOTE callout, its `> [!NOTE]` header included, and in a
   PR it says "For human review only: VTC never merges automatic PRs." (D-bw), so the template
   opens no callout of its own; `{{provenance}}` is the renderer's whole `<details>` block, so the
-  template wraps it in none. That split matches the upstream module's renderer; the shared doc
-  lines on the two slots are a contract proposal of this branch;
+  template wraps it in none. That split matches the upstream module's renderer and the shared
+  doc on `AUTO_TEMPLATE_SLOTS` (contracts 5.1.0, reading 212 (2)). An issue ends with the
+  reviewer checklist the renderer fills for every issue kind; a PR body has no `{{diff}}`, since
+  only a prompt PR has one and it is in the PR's files and its CHANGELOG entry;
 - `hooks/hooks.json`: `SessionStart`, `PreToolUse` and `SubagentStop` wired to
   `vtcHookCommand(event, host)` (`vtc hook <event> --host <host>`), each with the timeout
   `VTC_HOOK.timeoutMs` in seconds (spine §5 reading 31). Generated, never hand-written: the
@@ -78,6 +80,24 @@ Both also get:
   Nothing is blocked, since a missing command is not the block exit, but the noise is constant.
   Whether the adapter's install checks for `vtc` or the hooks run through a plugin-root shim is
   proposed as a question for the hook-wiring spike row (spine §7).
+
+  **Hooks in headless role runs** (round 5, the adapters' D-cl question; proposed by
+  roles-compiler for adapters and the cli to confirm). An engine-launched headless Claude role
+  run loads this same plugin (`--plugin-dir`), so its hooks run there too. The compiler emits one
+  plugin with one hook set for the Lead and the role runs, and no hook-free role-run variant:
+  - `SessionStart` is a no-op in a role run by design: `vtc hook session-start` returns at once,
+    printing nothing, when the session's `agent_type` is a VTC role agent, so no resume hint
+    reaches a role's context. Only the Lead's session gets one.
+  - `PreToolUse` stays on in role runs: it is the same extra layer of defence against a role's
+    git or out-of-scope write as for an in-session subagent.
+  - The D-cl run's exit 127 was a dev run with no `vtc` on `PATH`. A missing command is not the
+    block exit, so it fails open; the adapter treats a hook error as noise, never as a role
+    failure. An installed VTC has `vtc` on `PATH` (the plugin's MCP server needs it too), so no
+    extra `PATH` entry is added for role runs.
+  - Since `PreToolUse` also runs in headless role runs, a command-shape spool row (D-cs) can come
+    from one. The engine takes a headless dispatch's shapes from the adapter's
+    `ParsedStream.commandShapes` only and drains spool rows into in-session dispatches only, so
+    a shell call is never counted twice.
 
 - **Role agents cannot reach the Lead's tools.** Claude Code agents get an explicit `tools:`
   allowlist: the read tools, file writes for write-scoped profiles, `Bash` for the Engineer

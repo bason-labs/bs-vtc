@@ -13,7 +13,11 @@ contract above and rejects anything that breaks it.
   ones it does not list).
 - `exit`: one of your contract's exits.
   - `blocked` needs `question`: one `question`, 2 to 4 `options` (`id`, `label`, `effect` one of
-    {{escalation_effects}}), `recommended` (an option id) and `evidence`.
+    {{escalation_effects}}), `recommended` (an option id) and `evidence`. When what blocks you is
+    a capability you lack (a tool, an engine fetcher, a runner), also give `missing_capability`:
+    `slug`, a short lower-case name with words joined by `_` or `-` (`browser_runner`,
+    `db-migration-tool`), and `reason`, one sentence on what it would let you do. Otherwise leave
+    it out.
   - `spec_conflict` needs `conflict`: `req_ids` and `detail`.
   - `out_of_scope_fault` needs `fault`: `path`, `line`, `evidence` and `detail`.
 - `summary`: what you did and what you found, at most {{summary_max_chars}} characters. No
@@ -22,7 +26,8 @@ contract above and rejects anything that breaks it.
 - `findings`: one per problem: `rule_id`, `category` (one of {{finding_categories}}), `kind` (one
   of {{finding_kinds}}), `title`, `confidence` (0 to 1), `location` (`path`, optional `line`,
   `end_line`, `symbol`), `evidence`, `req_ids`. Leave severity out: the engine sets it.
-- `questions`: spec questions you could work around for now, in the shape of `question`.
+- `questions`: spec questions you could work around for now, in the shape of `question`, with
+  `missing_capability` under the same rule.
 - `artifacts`: what you wrote, each `type` (an output artifact type of your contract) and
   repo-relative `path`.
 - `claims`: the facts your result relies on, as evidence.

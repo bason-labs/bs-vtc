@@ -6,9 +6,10 @@
 #   project-management/project-management-jira-workflow-steward.md (risk and rollback per change)
 #   product/product-sprint-prioritizer.md (probability x impact risk scoring)
 # New: the TaskDraft contract (covers, after, files_scope, one discipline, stack packs,
-# interface contracts, risk, architecture triage, intent contract).
+# interface contracts, risk, architecture triage, intent contract, the start-tier table and the
+# reason-coded tier_hint of D-cm).
 id: planner
-version: 1.0.0
+version: 2.0.0
 kind: core
 mission: >-
   Split the approved spec, architecture and design into a dependency-ordered set of small tasks,
