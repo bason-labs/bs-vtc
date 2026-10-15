@@ -6,8 +6,10 @@
  * (`lookback-pr.ts`).
  */
 import {
+  AUTO_LABELS,
   LOOKBACK_LIMITS,
   type AutoFingerprint,
+  type AutoIssueRef,
   type AutoKind,
   type ScorecardMetricId,
 } from "@vtc/shared";
@@ -279,4 +281,19 @@ export const fixableItem = (item: AutoWorkItem): boolean => {
   if (item.target === "project") return FIXABLE_PROJECT_KINDS.has(item.kind);
   if (FIXABLE_UPSTREAM_KINDS.has(item.kind)) return true;
   return item.kind === "defect" && (item.facts.frames?.length ?? 0) > 0;
+};
+
+/**
+ * Pure (reading 216): whether an open VTC-repo issue, as listed, is one the bs-vtc checkout's
+ * engine works on: a kind that is always fixable, or a defect whose VTC frames located it (the
+ * `vtc:fixable` label the raising installation set, `fixableItem`); never a closed or muted one.
+ */
+export const fixableUpstreamIssue = (
+  issue: Pick<AutoIssueRef, "state" | "labels" | "marker">,
+): boolean => {
+  const kind = issue.marker?.kind;
+  if (kind === undefined || issue.state !== "open") return false;
+  if (issue.labels.includes(AUTO_LABELS.muted)) return false;
+  if (FIXABLE_UPSTREAM_KINDS.has(kind)) return true;
+  return kind === "defect" && issue.labels.includes(AUTO_LABELS.fixable);
 };

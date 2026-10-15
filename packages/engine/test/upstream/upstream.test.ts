@@ -13,7 +13,7 @@ import {
   type ReplayResult,
   ROLE_DENIED_VTC,
 } from "@vtc/shared";
-import { chmodSync, existsSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, symlinkSync, writeFileSync } from "node:fs";
 import { delimiter, join, relative, sep } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import {
@@ -197,7 +197,8 @@ describe("raising upstream issues", () => {
     expect(opened).toMatchObject({ status: "issue", action: "opened" });
     const [issue] = h.github.state.issues;
     expect(issue?.repo).toBe(UPSTREAM);
-    expect(issue?.labels).toEqual(["vtc:auto", "vtc:kind/defect"]);
+    // its VTC frame locates it: VTC fixes it itself on the bs-vtc checkout (reading 216)
+    expect(issue?.labels).toEqual(["vtc:auto", "vtc:kind/defect", "vtc:fixable"]);
     expect(issue?.title).toBe("vtc(defect): adapter.parse_failure in implementer");
     expect(issue?.body).toContain("| 2 |");
     for (const word of ["alice", "globex", "payroll", "acme"]) {
@@ -315,6 +316,7 @@ describe("raising upstream issues", () => {
       "vtc:auto",
       "vtc:kind/security",
       "vtc:security",
+      "vtc:fixable",
     ]);
   });
 
@@ -505,6 +507,269 @@ describe("a fixable issue becomes an automatic run (D-bv, D-cd; AD-27 rule 2)", 
     expect(await own.upstream.report(advisory, own.ctx)).toMatchObject({ status: "issue" });
     expect(self.runs.map((r) => r.ref.target)).toEqual([{ kind: "upstream", repo: UPSTREAM }]);
     expect(self.runs[0]?.input.request).toContain("GHSA-aaaa-bbbb-cccc");
+  });
+});
+
+describe("VTC builds VTC: which engine starts the fix run (reading 216)", () => {
+  type Started = { input: StartInput; ref: AutomationRunRef };
+  const recorder = () => {
+    const runs: Started[] = [];
+    return {
+      runs,
+      startRun: (input: StartInput, ref: AutomationRunRef): Promise<void> => {
+        runs.push({ input, ref });
+        return Promise.resolve();
+      },
+    };
+  };
+  /** A crash as engine core records it: the VTC frames only, root-relative. */
+  const crash = (over: Partial<Extract<AutomationFact, { type: "vtc_defect" }>> = {}) =>
+    defect({
+      errorClass: "incident.crash",
+      role: undefined,
+      host: undefined,
+      model: undefined,
+      stack: "    at Engine.spawn (packages/engine/src/core/engine.ts:900:11)",
+      ...over,
+    });
+  const advisory: AutomationFact = {
+    type: "security_advisory",
+    advisoryId: "GHSA-aaaa-bbbb-cccc",
+    package: "zod",
+    at: "2026-10-15T11:00:00Z",
+  };
+
+  it("a crash's VTC frames make its defect fixable: labelled, and fixed on the checkout", async () => {
+    const self = recorder();
+    const own = harness({ startRun: self.startRun, self: true });
+    await own.upstream.report(crash(), own.ctx);
+    expect(await own.upstream.report(crash(), own.ctx)).toMatchObject({
+      status: "issue",
+      action: "opened",
+    });
+    expect(own.github.state.issues[0]?.labels).toEqual([
+      "vtc:auto",
+      "vtc:kind/defect",
+      "vtc:fixable",
+    ]);
+    expect(own.github.state.issues[0]?.body).toContain("engine/core/engine:Engine.spawn");
+    expect(self.runs.map((r) => r.ref.kind)).toEqual(["defect"]);
+    // a defect with no VTC frame cannot be located: an issue, no label, no run
+    const other = recorder();
+    const h = harness({ startRun: other.startRun, self: true });
+    await h.upstream.report(
+      crash({ stack: undefined, errorClass: "adapter.parse_failure" }),
+      h.ctx,
+    );
+    await h.upstream.report(
+      crash({ stack: undefined, errorClass: "adapter.parse_failure" }),
+      h.ctx,
+    );
+    expect(h.github.state.issues[0]?.labels).toEqual(["vtc:auto", "vtc:kind/defect"]);
+    expect(other.runs).toEqual([]);
+  });
+
+  it("starts no upstream run on a clone that is not the configured checkout, or with none set", async () => {
+    const started = recorder();
+    // the remote is bs-vtc, but the run would build in another clone than the PR's checkout
+    const clone = harness({ startRun: started.startRun });
+    const ctx: ProjectContext = { ...clone.ctx, repo: UPSTREAM };
+    expect(await clone.upstream.report(advisory, ctx)).toMatchObject({ status: "issue" });
+    const unset = harness({
+      startRun: started.startRun,
+      automation: { upstream: { repo: UPSTREAM, share: true } },
+    });
+    expect(await unset.upstream.report(advisory, { ...unset.ctx, repo: UPSTREAM })).toMatchObject({
+      status: "issue",
+    });
+    expect(started.runs).toEqual([]);
+  });
+
+  it("knows the checkout by its real path, whatever its spelling", async () => {
+    for (const spelling of ["link", "slash"] as const) {
+      const started = recorder();
+      const h = harness({ startRun: started.startRun, self: true });
+      const repoRoot =
+        spelling === "slash"
+          ? `${h.checkout}/`
+          : ((): string => {
+              const link = join(tempDir("vtc-link-"), "bs-vtc");
+              symlinkSync(h.checkout, link);
+              return link;
+            })();
+      expect(await h.upstream.report(advisory, { ...h.ctx, repoRoot })).toMatchObject({
+        status: "issue",
+      });
+      expect(started.runs).toHaveLength(1);
+    }
+  });
+
+  it("a PR built on the checkout under another spelling records the run's own replay", async () => {
+    let request: Parameters<EvidenceRecorder["capture"]>[0] | undefined;
+    const inner = fakeRecorder();
+    const recorder: EvidenceRecorder = {
+      renderGateReport: (r) => inner.renderGateReport(r),
+      capture: (r) => {
+        request = r;
+        return inner.capture(r);
+      },
+    };
+    const h = harness({ automation: { evidence: recorder, hosting: "attach" }, self: true });
+    const fp = autoFingerprint({
+      kind: "security",
+      advisoryId: "GHSA-aaaa-bbbb-cccc",
+      package: "zod",
+    });
+    const outcome = await h.upstream.openPullRequest(
+      {
+        target: "upstream",
+        kind: "security",
+        fingerprint: fp,
+        summary: "bump zod",
+        slots: { summary: "Bumps zod." },
+        source: { pushedHead: "7".repeat(40) },
+        report: projectUpstreamReport({
+          kind: "security",
+          fingerprint: fp,
+          vtcVersion: "0.4.0",
+          occurrences: 1,
+          firstSeen: "2026-10-15T00:00:00Z",
+          lastSeen: "2026-10-15T00:00:00Z",
+        }),
+        specVerifier: "pass",
+        evidence: {
+          plan: { run: "R7", upstreamSafe: false, change: "non_ui" },
+          snapshot: { routes: { "/api/runs/R7/status": { title: "bump" } }, events: [] },
+          gateReport: {} as never,
+        },
+      },
+      { ...h.ctx, repoRoot: `${h.checkout}/` },
+    );
+    expect(outcome).toMatchObject({ status: "pr", evidence: "complete" });
+    expect(request?.shots.some((s) => s.path.includes(UPSTREAM_EVIDENCE_RUN))).toBe(false);
+    expect(request?.shots.some((s) => s.path.includes("run=R7"))).toBe(true);
+  });
+
+  it("the checkout's engine picks up the fixable issues another project's daemon opened", async () => {
+    const project = harness();
+    await project.upstream.report(crash(), project.ctx);
+    await project.upstream.report(crash(), project.ctx);
+    await project.upstream.report(advisory, project.ctx);
+    // not fixable: no VTC frame
+    await project.upstream.report(
+      crash({ stack: undefined, errorClass: "engine.stuck_loop" }),
+      project.ctx,
+    );
+    await project.upstream.report(
+      crash({ stack: undefined, errorClass: "engine.stuck_loop" }),
+      project.ctx,
+    );
+    expect(project.github.state.issues.map((i) => i.number)).toEqual([1, 2, 3]);
+    // a project's engine cannot build bs-vtc: it picks up nothing
+    const nobody = recorder();
+    const elsewhere = harness({ shared: project, startRun: nobody.startRun });
+    expect(await elsewhere.upstream.pickup(elsewhere.ctx)).toEqual([]);
+    expect(nobody.runs).toEqual([]);
+
+    const self = recorder();
+    const own = harness({ shared: project, clone: true, self: true, startRun: self.startRun });
+    const asked = await own.upstream.pickup(own.ctx);
+    expect(asked.map((r) => [r.kind, r.issue])).toEqual([
+      ["defect", 1],
+      ["security", 2],
+    ]);
+    expect(self.runs.map((r) => r.ref.target)).toEqual([
+      { kind: "upstream", repo: UPSTREAM },
+      { kind: "upstream", repo: UPSTREAM },
+    ]);
+    // the issue is the spec: its title and body, as the project's daemon wrote them
+    expect(self.runs[0]?.input.request).toContain(`${UPSTREAM}#1`);
+    expect(self.runs[0]?.input.request).toContain("engine/core/engine:Engine.spawn");
+    expect(self.runs[1]?.input.request).toContain("GHSA-aaaa-bbbb-cccc");
+    expect(self.runs[0]?.input).toMatchObject({ track: "quick_fix", repo: "existing" });
+  });
+
+  it("picks up no issue a human muted or closed, none with an open PR, and none while off", async () => {
+    const project = harness();
+    await project.upstream.report(advisory, project.ctx);
+    await project.upstream.report(
+      { ...advisory, advisoryId: "GHSA-dddd-eeee-ffff", package: "vite" },
+      project.ctx,
+    );
+    await project.upstream.report(
+      { ...advisory, advisoryId: "GHSA-gggg-hhhh-iiii", package: "react" },
+      project.ctx,
+    );
+    project.github.human(1, { label: "vtc:muted" });
+    project.github.human(2, { close: "completed" });
+    const self = recorder();
+    const own = harness({ shared: project, clone: true, self: true, startRun: self.startRun });
+    const third = project.github.state.issues.find((i) => i.number === 3);
+    const fp = third?.marker?.fp ?? "";
+    // a PR already answers #3 (another installation's run)
+    project.github.state.prs.push({
+      number: 9,
+      url: "https://github.com/bason-labs/bs-vtc/pull/9",
+      headRefName: `vtc/auto/security/${fp.slice(0, 8)}`,
+      headSha: "9".repeat(40),
+      isDraft: true,
+      state: "open",
+      labels: ["vtc:auto", "vtc:kind/security"],
+      marker: { v: 1, kind: "security", fp },
+      title: "vtc(security): bump react",
+      body: "",
+      base: "main",
+      repo: UPSTREAM,
+      attached: [],
+      comments: [],
+      branchDeleted: false,
+    });
+    expect(await own.upstream.pickup(own.ctx)).toEqual([]);
+    project.github.state.prs = [];
+    own.setContext({ paused: true });
+    expect(await own.upstream.pickup(own.ctx)).toEqual([]);
+    own.setContext({ paused: false });
+    const off: ProjectContext = {
+      ...own.ctx,
+      state: () => {
+        const now = own.ctx.state();
+        return { ...now, settings: { ...now.settings, prs: false } };
+      },
+    };
+    expect(await own.upstream.pickup(off)).toEqual([]);
+    expect(self.runs).toEqual([]);
+    expect((await own.upstream.pickup(own.ctx)).map((r) => r.issue)).toEqual([3]);
+  });
+
+  it("on the checkout, a recurrence of an open fixable issue asks for its run too", async () => {
+    const project = harness();
+    await project.upstream.report(advisory, project.ctx);
+    const self = recorder();
+    const own = harness({ shared: project, clone: true, self: true, startRun: self.startRun });
+    own.clock.now = new Date("2026-10-16T13:00:00Z");
+    expect(await own.upstream.report(advisory, own.ctx)).toMatchObject({
+      status: "issue",
+      number: 1,
+    });
+    expect(self.runs.map((r) => r.ref.issue)).toEqual([1]);
+  });
+
+  it("points a new agent's run at the role scaffold", async () => {
+    const self = recorder();
+    const own = harness({ startRun: self.startRun, self: true });
+    const outcome = await own.upstream.report(
+      {
+        type: "improvement",
+        kind: "new_agent",
+        subject: "engineer_ml",
+        role: "engineer_ml",
+        metrics: { failures: 4 },
+        at: "2026-10-15T11:00:00Z",
+      },
+      own.ctx,
+    );
+    expect(outcome).toMatchObject({ status: "issue", action: "opened" });
+    expect(self.runs[0]?.input.request).toContain("scaffoldRole");
   });
 });
 

@@ -555,6 +555,14 @@ export const EVENT_PAYLOAD_SCHEMAS = {
     detail: z.string().min(1).max(2000),
     /** For `log_corruption`: 1-based lines `parseEventLog` reported. */
     invalid_lines: z.array(z.int().positive()).default([]),
+    /**
+     * For `crash`: the `at …` lines of the error's stack that lie in VTC's own sources, each path
+     * relative to VTC's source root (or the single-file binary's virtual root), never the error's
+     * message and never a frame outside VTC (the log is git-tracked). The upstream module turns
+     * them into an `UpstreamReport`'s `vtc_frames`, which locate the defect (D-bv (2), D-by).
+     * New in 5.3.0.
+     */
+    stack: z.string().min(1).max(4000).optional(),
     evidence: z.array(EvidenceSchema).default([]),
   }),
 } as const;

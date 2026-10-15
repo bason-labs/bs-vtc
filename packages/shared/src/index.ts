@@ -244,5 +244,13 @@ export * from "./json-schema.js";
  * branch's); `UpstreamReport.model` refuses an ARN and a 12-digit run (an account id): the
  * engine is its only producer and never persists it, and it now sends a non-public model id as
  * `custom`; `AutomationDeps.ghLogin` (optional), the gh-login probe readings 211 and 214 deferred.
+ *
+ * 5.3.0 (MINOR): the round-4 closing fixes (spine §5 reading 216). `incident.recorded.stack`
+ * (optional): a crash keeps the VTC frames of its stack, root-relative, so a VTC defect can be
+ * located and fixed by an automatic run; `AUTO_LABELS.fixable` (`vtc:fixable`), the label of an
+ * automatic issue VTC works on itself; `AutoIssueRef.title` / `body` (optional), so the bs-vtc
+ * checkout's engine can start a run from an issue another project's daemon opened;
+ * `AutomationDeps.vtcAdvisories` (optional), the daily offline scan of VTC's own dependencies.
+ * All additive.
  */
-export const CONTRACTS_VERSION = "5.2.0";
+export const CONTRACTS_VERSION = "5.3.0";

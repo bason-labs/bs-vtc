@@ -26,6 +26,7 @@
  * waits for the next RETRO (`vtc lookback approve` warns). At that merge the integrator flips the
  * matching flag in `test/round4-merge.ts`, which the seam tests hold the lookups to.
  */
+import { join } from "node:path";
 import * as compiler from "@vtc/compiler";
 import { gates, git } from "@vtc/engine";
 import {
@@ -166,6 +167,39 @@ export const ghLoginProbe = (
     options.ghVersion === null
       ? Promise.resolve(false)
       : ghAuthStatus(exec, gh, options.cwd).catch(() => false);
+};
+
+/**
+ * `AutomationDeps.vtcAdvisories` (D-bv (4), contracts 5.3.0, spine §5 reading 216): the gates'
+ * offline osv-scanner pass over the lockfile this `vtc` was built from (`CliRuntime.vtcLockfile`),
+ * with the pinned scanner and the database `vtc calibrate` downloaded, in the gate sandbox (or
+ * unconfined only under the user's `gates.allow_unsandboxed`). `null` without a lockfile or the
+ * database (nothing is downloaded for it); a scan that failed throws, and the daemon tells it.
+ */
+export const vtcAdvisoriesScan = (options: {
+  readonly vtcHome: string;
+  readonly lockfile: () => Uint8Array | undefined;
+  readonly allowUnsandboxed: boolean;
+  /** Default: the gate runner's pinned scanner store. */
+  readonly scanners?: gates.ScannerStore;
+  /** Default: `gates.scanLockfileAdvisories`. */
+  readonly scan?: (request: gates.OsvScanRequest) => Promise<gates.OsvScanResult>;
+}): NonNullable<AutomationDeps["vtcAdvisories"]> => {
+  return async () => {
+    const lockfile = options.lockfile();
+    if (lockfile === undefined) return null;
+    const result = await (options.scan ?? gates.scanLockfileAdvisories)({
+      vtcHome: options.vtcHome,
+      scanners: options.scanners ?? gates.createScannerStore({ vtcHome: options.vtcHome }),
+      lockfile,
+      logDir: join(options.vtcHome, "logs", "osv-scan"),
+      env: process.env,
+      allowUnsandboxed: options.allowUnsandboxed,
+    });
+    if (result.ok) return result.advisories;
+    if (result.reason === "no_database") return null;
+    throw new Error(result.detail);
+  };
 };
 
 /** The hosting PR media get, and why it is not the one the user asked for. */
@@ -314,6 +348,8 @@ export const buildAutomationDeps = (input: {
   readonly gateDeps: EvidenceRecorderDeps;
   /** `AutomationDeps.ghLogin` ({@link ghLoginProbe}); absent: none is passed. */
   readonly ghLogin?: () => Promise<boolean>;
+  /** `AutomationDeps.vtcAdvisories` ({@link vtcAdvisoriesScan}); absent: none is passed. */
+  readonly vtcAdvisories?: AutomationDeps["vtcAdvisories"];
 }): AutomationDeps => {
   const { factories, probe, user } = input;
   const create = factories.evidence;
@@ -326,6 +362,7 @@ export const buildAutomationDeps = (input: {
     ...(create === undefined ? {} : { evidence: lazyRecorder(() => create(input.gateDeps)) }),
     ...(factories.plumbing === undefined ? {} : { plumbing: factories.plumbing }),
     ...(input.ghLogin === undefined ? {} : { ghLogin: input.ghLogin }),
+    ...(input.vtcAdvisories === undefined ? {} : { vtcAdvisories: input.vtcAdvisories }),
   };
 };
 

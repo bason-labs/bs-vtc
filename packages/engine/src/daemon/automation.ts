@@ -21,6 +21,8 @@
  * - the automatic runs the module asks for (a fixable issue, D-bv, D-cd) wait in the engine's
  *   private area until no run of the repo is open and automation is not paused, and each issue
  *   starts one run at most (`Engine.startAutomatic`).
+ * - once a day it scans VTC's own dependencies (`AutomationDeps.vtcAdvisories`, the lockfile this
+ *   VTC was built from) and hands each advisory over as a VTC-repo security fact, on any project;
  * - it asks `AutomationDeps.ghLogin` whether gh is logged in (at start, at each run's start and on
  *   its timer): logged out, automation is off with the D-bz note and facts skip as
  *   `gh_unavailable`.
@@ -118,6 +120,15 @@ export const isGitHubRemote = (url: string | null): boolean =>
 const SUMMARY_FILE = "automation-summary.json";
 const PENDING_FILE = "automation-pending.jsonl";
 const COST_SEEN_FILE = "automation-cost-seen.json";
+/** When VTC's own dependencies were last scanned (`AutomationDeps.vtcAdvisories`). */
+const ADVISORIES_FILE = "automation-advisories.json";
+/** VTC's own dependencies are scanned at most this often. */
+export const VTC_ADVISORIES_EVERY_MS = 24 * 60 * 60_000;
+/**
+ * The `AutomationFact.source` of an advisory the daily scan found in VTC's own lockfile: VTC's
+ * dependencies whatever project the daemon runs for (unlike a dependency gate's finding).
+ */
+export const VTC_DEPENDENCY_SCAN = "vtc.dependency_scan";
 /** Automatic runs the module asked for that wait for the repo's open run to finish. */
 const RUNS_FILE = "automation-runs.json";
 /** How many queued automatic runs the guard dir keeps. */
@@ -412,8 +423,14 @@ export const wireAutomation = (
   const handle = async (fact: AutomationFact): Promise<boolean> => {
     const settings = settingsNow();
     if (settings === null) return false;
-    // D-bv (4): another project's dependency advisories are not VTC's (no issue, no skip)
-    if (fact.kind === "security" && fact.target === "upstream" && options.vtcRepo?.() !== true)
+    // D-bv (4): another project's dependency advisories are not VTC's (no issue, no skip); the
+    // daily scan of VTC's own lockfile is VTC's on every project
+    if (
+      fact.kind === "security" &&
+      fact.target === "upstream" &&
+      fact.source !== VTC_DEPENDENCY_SCAN &&
+      options.vtcRepo?.() !== true
+    )
       return false;
     const skip = automationSkipReason(fact, settings, context());
     if (skip !== null) {
@@ -555,6 +572,55 @@ export const wireAutomation = (
     });
   };
 
+  // ---- VTC's own dependencies (D-bv (4), reading 216): the lockfile this VTC was built from,
+  // scanned offline at most once a day; each advisory is a security fact for VTC's repo
+  const advisoriesFile = join(guard, ADVISORIES_FILE);
+  const lastAdvisoryScan = (): number => {
+    try {
+      const value = JSON.parse(readPrivateFile(advisoriesFile) ?? "null") as {
+        at?: unknown;
+      } | null;
+      return typeof value?.at === "string" ? Date.parse(value.at) : Number.NaN;
+    } catch {
+      return Number.NaN;
+    }
+  };
+  const scanAdvisories = (): void => {
+    const scan = automation?.vtcAdvisories;
+    if (scan === undefined || upstream === null) return;
+    enqueue("VTC's dependency scan", async () => {
+      // paused: not now, and the day's scan waits for the resume
+      if (paused()) return;
+      const at = now();
+      const last = lastAdvisoryScan();
+      if (!Number.isNaN(last) && at.getTime() - last < VTC_ADVISORIES_EVERY_MS) return;
+      let found: Awaited<ReturnType<typeof scan>>;
+      try {
+        found = await scan();
+      } catch (error) {
+        found = [];
+        engine.notice(
+          `automation could not scan VTC's own dependencies: ${error instanceof Error ? error.message : String(error)}`,
+        );
+      }
+      // no offline database yet: asked again at the next tick (vtc doctor says how to get it)
+      if (found === null) return;
+      ensurePrivateDir(guard);
+      writePrivateFile(advisoriesFile, `${JSON.stringify({ at: at.toISOString() })}\n`);
+      const run = engine.states().at(-1)?.id ?? "";
+      for (const advisory of found)
+        await handle({
+          target: "upstream",
+          kind: "security",
+          run,
+          source: VTC_DEPENDENCY_SCAN,
+          at: at.toISOString(),
+          advisory: { id: advisory.id, package: advisory.package },
+          detail: `the daily scan of VTC's own dependencies found ${advisory.id} in ${advisory.package}`,
+        });
+    });
+  };
+
   // ---- the module's sweep: tried at start and then on a timer (the module paces it)
   const sweep = upstream?.sweep?.bind(upstream);
   const runSweep = (): void => {
@@ -566,10 +632,12 @@ export const wireAutomation = (
     });
   };
   if (automation !== undefined) runSweep();
+  scanAdvisories();
   const tick = (): void => {
     // the login can change while the daemon runs (gh auth login / logout)
     if (automation?.ghLogin !== undefined) enqueue("the gh login", probeLogin);
     runSweep();
+    scanAdvisories();
     // a queued automatic run whose wait ended without a run.finished (a resume after a pause)
     enqueue("the automatic runs", startQueued);
   };

@@ -7,8 +7,9 @@ import { createEmbeddedAssetBundle, type EmbeddedAssetFiles } from "../assets.js
 import { runProcess } from "../index.js";
 import { binaryRuntime, configureRuntime } from "../runtime.js";
 
-export const runBinary = (files: EmbeddedAssetFiles): void => {
-  configureRuntime(binaryRuntime(createEmbeddedAssetBundle(files), process.execPath));
+/** `lockfile`: the embedded `pnpm-lock.yaml` the binary was built from (reading 216). */
+export const runBinary = (files: EmbeddedAssetFiles, lockfile?: string): void => {
+  configureRuntime(binaryRuntime(createEmbeddedAssetBundle(files), process.execPath, lockfile));
   void runProcess(process.argv.slice(2)).then((code) => {
     process.exitCode = code;
   });

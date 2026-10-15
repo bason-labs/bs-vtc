@@ -64,8 +64,14 @@ const listFiles = (root: string): string[] => {
   return out.sort();
 };
 
-/** The generated entry: one embedded-file import per asset, then `runBinary`. */
-export const renderEntry = (sources: Readonly<Record<string, string>>): string => {
+/**
+ * The generated entry: one embedded-file import per asset, the lockfile the binary is built from
+ * (the daemon's daily scan of VTC's own dependencies reads it, reading 216), then `runBinary`.
+ */
+export const renderEntry = (
+  sources: Readonly<Record<string, string>>,
+  lockfile: string = join(PRODUCT_ROOT, "pnpm-lock.yaml"),
+): string => {
   const imports: string[] = [];
   const manifest: Record<string, Record<string, string>> = {};
   let n = 0;
@@ -89,7 +95,8 @@ export const renderEntry = (sources: Readonly<Record<string, string>>): string =
   return [
     `import { runBinary } from ${JSON.stringify(join(CLI_ROOT, "src/binary/main.ts"))};`,
     ...imports,
-    `runBinary({\n${body}\n});`,
+    `import lockfile from ${JSON.stringify(lockfile)} with { type: "file" };`,
+    `runBinary({\n${body}\n}, lockfile);`,
     "",
   ].join("\n");
 };

@@ -160,6 +160,23 @@ describe("an automatic run's PR input (AD-27 rules 2, 3 and 6)", () => {
   });
 });
 
+describe("a new-agent run's PR (D-cd)", () => {
+  const newAgent: AutomaticRelease = {
+    ...RELEASE,
+    automation: {
+      kind: "new_agent",
+      fingerprint: "fedcba9876543210",
+      target: { kind: "upstream", repo: "bason-labs/bs-vtc" },
+      issue: 9,
+    },
+  };
+
+  it("is labelled needs-eval: no replay can evaluate a role that does not exist yet", () => {
+    expect(automaticPrInput(newAgent, SNAPSHOT, "0.4.0").extraLabels).toEqual(["needs-eval"]);
+    expect(automaticPrInput(RELEASE, SNAPSHOT, "0.4.0").extraLabels).toBeUndefined();
+  });
+});
+
 describe("engine facts in the module's vocabulary", () => {
   it("maps VTC defects, cost regressions and project problems; a Lookback fact is a PR", () => {
     expect(
@@ -246,6 +263,19 @@ describe("engine facts in the module's vocabulary", () => {
       role: "engineer_ml",
       metrics: { failures: 4, escalations: 0 },
       at: "2026-10-14T10:00:00.000Z",
+    });
+    // a crash's VTC frames locate the defect (D-bv (2), reading 216)
+    expect(
+      upstreamModuleFact(
+        fact({
+          errorClass: "incident.crash",
+          stack: "    at readPlan (packages/engine/src/core/plan.ts:12:7)",
+        }),
+      ),
+    ).toMatchObject({
+      type: "vtc_defect",
+      errorClass: "incident.crash",
+      stack: "    at readPlan (packages/engine/src/core/plan.ts:12:7)",
     });
     expect(upstreamModuleFact(fact({ kind: "security" }))).toBeNull();
     expect(upstreamModuleFact(fact({ kind: "new_agent" }))).toBeNull();
@@ -386,7 +416,10 @@ describe("bridgeUpstream", () => {
     message: () => Promise.resolve(null),
   });
 
-  const fakeModule = (answer: UpstreamModuleOutcome = { status: "ignored" }) => {
+  const fakeModule = (
+    answer: UpstreamModuleOutcome = { status: "ignored" },
+    pickupFails = false,
+  ) => {
     const calls: { what: string; arg: unknown; ctx: UpstreamModuleContext }[] = [];
     let built: UpstreamModuleDeps | undefined;
     const create: CreateUpstreamModule = (deps) => {
@@ -411,6 +444,10 @@ describe("bridgeUpstream", () => {
         completePullRequest: (target, number, verdict, ctx) => {
           calls.push({ what: "complete", arg: [target, number, verdict], ctx });
           return Promise.resolve(answer);
+        },
+        pickup: (ctx) => {
+          calls.push({ what: "pickup", arg: null, ctx });
+          return pickupFails ? Promise.reject(new Error("gh is down")) : Promise.resolve([]);
         },
       };
     };
@@ -559,6 +596,27 @@ describe("bridgeUpstream", () => {
     clock.now = new Date(clock.now.getTime() + 1);
     await restarted.wiring.sweep?.();
     expect(module.calls.filter((c) => c.what === "sweep")).toHaveLength(2);
+  });
+
+  it("picks up the fixable issues on every tick, not once a day (reading 216)", async () => {
+    const guard = tempDir("vtc-guard-");
+    const clock = { now: new Date("2026-10-14T10:00:00.000Z") };
+    const module = fakeModule();
+    const { wiring } = build(module, { guard, clock });
+    await wiring.sweep?.();
+    clock.now = new Date(clock.now.getTime() + 60 * 60_000);
+    await wiring.sweep?.();
+    expect(module.calls.filter((c) => c.what === "pickup")).toHaveLength(2);
+    expect(module.calls.filter((c) => c.what === "sweep")).toHaveLength(1);
+    expect(module.calls.find((c) => c.what === "pickup")?.ctx.repoRoot).toBe("/work/acme-app");
+    // a pickup that failed is told, and never stops (or repeats) the day's sweep
+    const failing = fakeModule({ status: "ignored" }, true);
+    const other = build(failing, { guard: tempDir("vtc-guard-"), clock });
+    await expect(other.wiring.sweep?.()).rejects.toThrow(
+      /picking up the fixable issues: gh is down/,
+    );
+    await expect(other.wiring.sweep?.()).rejects.toThrow(/gh is down/);
+    expect(failing.calls.filter((c) => c.what === "sweep")).toHaveLength(1);
   });
 
   it("a sweep that failed is tried again at the next tick, not a day later", async () => {

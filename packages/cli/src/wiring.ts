@@ -39,6 +39,7 @@ import {
   armPluginCompiler,
   buildAutomationDeps,
   ghLoginProbe,
+  vtcAdvisoriesScan,
   probeAutomation,
   shippedArmPluginCompilerFactory,
   shippedAutomationFactories,
@@ -264,6 +265,12 @@ const defaultAutomation = async (
       ghVersion: probe.ghVersion,
       cwd: options.vtcHome,
       ...(options.ghCommand === undefined ? {} : { gh: options.ghCommand }),
+    }),
+    // D-bv (4): the daemon scans this vtc's own lockfile offline once a day (reading 216)
+    vtcAdvisories: vtcAdvisoriesScan({
+      vtcHome: options.vtcHome,
+      lockfile: () => runtime().vtcLockfile(),
+      allowUnsandboxed,
     }),
   });
 };

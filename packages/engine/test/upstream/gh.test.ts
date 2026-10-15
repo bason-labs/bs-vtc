@@ -151,6 +151,9 @@ describe("gh-backed services with a stub gh", () => {
       [2, "open", null, true],
     ]);
     expect(list[0]?.marker?.fp).toBe(FP);
+    // the issue's title and body: the spec of a run the bs-vtc checkout starts from it
+    expect(list[0]?.body).toBe(MARKER);
+    expect(list[0]?.title).toBe("vtc(defect): x");
     const [call] = gh.calls();
     expect(call?.args.slice(0, 8)).toEqual([
       "issue",
@@ -163,6 +166,9 @@ describe("gh-backed services with a stub gh", () => {
       "all",
     ]);
     expect(call?.args.join(" ")).not.toMatch(/search/);
+    expect(call?.args[call.args.indexOf("--json") + 1]?.split(",")).toEqual(
+      expect.arrayContaining(["title", "body"]),
+    );
   });
 
   it("reads the remote facts: when an issue opened, and whether VTC's quiet sweep closed it", () => {

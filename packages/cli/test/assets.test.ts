@@ -55,6 +55,23 @@ describe("the development bundle (ASSET_SOURCES on disk)", () => {
     expect(devRuntime("/p").pluginDir("codex", "/h")).toBe("/p/dist/codex-plugin");
   });
 
+  it("reads the lockfile this vtc was built from: the product repo's, or the binary's embedded one", () => {
+    // D-bv (4), reading 216: the daily scan of VTC's own dependencies reads it
+    expect(new TextDecoder().decode(devRuntime().vtcLockfile())).toBe(
+      readFileSync(join(PRODUCT_ROOT, "pnpm-lock.yaml"), "utf8"),
+    );
+    expect(devRuntime(tempDir()).vtcLockfile()).toBeUndefined();
+    const dir = tempDir();
+    writeFileSync(join(dir, "pnpm-lock.yaml"), "lockfileVersion: '9.0'\n");
+    const disk = createDiskAssetBundle({});
+    expect(
+      new TextDecoder().decode(
+        binaryRuntime(disk, "/usr/local/bin/vtc", join(dir, "pnpm-lock.yaml")).vtcLockfile(),
+      ),
+    ).toBe("lockfileVersion: '9.0'\n");
+    expect(binaryRuntime(disk, "/usr/local/bin/vtc").vtcLockfile()).toBeUndefined();
+  });
+
   it("serves the dashboard export by AD-20's mapping", () => {
     const bundle = createDiskAssetBundle({ dashboard: DASHBOARD_FIXTURE });
     const has = (p: string): boolean => bundle.read("dashboard", p) !== undefined;

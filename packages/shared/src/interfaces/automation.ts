@@ -56,6 +56,13 @@ export interface AutoIssueRef {
    * `QUIET_CLOSE_MARKER`. Absent from a service that does not report it. New in 5.1.0.
    */
   readonly closedQuietByVtc?: boolean;
+  /**
+   * The issue's title and body as listed (`gh --json title,body`): an automatic run started from
+   * an issue another installation opened takes them as its spec. Absent from a service that does
+   * not report them. New in 5.3.0.
+   */
+  readonly title?: string;
+  readonly body?: string;
 }
 
 export interface AutoIssueRequest {
@@ -257,4 +264,16 @@ export interface AutomationDeps {
    * caller checked the login before it injected automation. New in 5.2.0.
    */
   readonly ghLogin?: () => Promise<boolean>;
+  /**
+   * Scans VTC's own dependencies for advisories (D-bv (4), spine §5 reading 216): the lockfile this
+   * VTC was built from (embedded in the binary; the product repo's in development), read by the
+   * pinned osv-scanner offline against the database `vtc calibrate` downloaded, in the gate
+   * sandbox. Each advisory id and package name; `null` when it cannot scan (no database: nothing
+   * is downloaded for it). The daemon asks at most once a day and raises each advisory as a
+   * `security` issue in VTC's repo, whatever project it runs for. Absent: not scanned. New in
+   * 5.3.0.
+   */
+  readonly vtcAdvisories?: () => Promise<
+    readonly { readonly id: string; readonly package: string }[] | null
+  >;
 }
