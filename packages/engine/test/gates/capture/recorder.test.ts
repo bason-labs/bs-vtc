@@ -326,6 +326,13 @@ describe("the evidence recorder (AD-27 rule 6)", () => {
     );
   });
 
+  it("removes a short denied value from a reason only as a whole word (reading 212(12))", () => {
+    expect(cleanReason("the build of the UI failed", ["ui"])).toBe(
+      "the build of the [REDACTED] failed",
+    );
+    expect(cleanReason("AcmeCorp failed", ["acme"])).toBe("[REDACTED]Corp failed");
+  });
+
   it("fails every shot with a clean reason when the runner fails", async () => {
     const failing: EvidenceRunner = {
       run: () => Promise.resolve({ ok: false, reason: "the evidence runner timed out for acme" }),

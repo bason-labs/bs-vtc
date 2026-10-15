@@ -310,23 +310,28 @@ describe("evidence runner script (AD-27 rule 6)", () => {
     expect(() => readFileSync(join(outDir, "01-page.png"))).toThrow();
   });
 
-  it("matches a denied value as a substring, however short (any hit discards)", async () => {
+  it("matches a short denied value as a whole word only, a longer one as a substring (reading 212(12))", async () => {
     const { recorder, request } = setup({
       pages: {
-        "/word": { texts: ["Open the Acme UI"] },
+        "/word": { texts: ["Open the UI"] },
         "/inside": { texts: ["build passed"] },
+        "/glued": { texts: ["AcmeCorp dashboard"] },
+        "/path": { texts: ["served from /a/x"] },
         "/clean": { texts: ["all gates pass"] },
       },
     });
-    const shots = ["/word", "/inside", "/clean"].map((path, i) => ({
+    const paths = ["/word", "/inside", "/glued", "/path", "/clean"];
+    const shots = paths.map((path, i) => ({
       name: `0${String(i + 1)}-page.png`,
       kind: "screenshot" as const,
       path,
       viewport: { width: 1280, height: 800 },
     }));
-    const result = await recorder.capture(request({ shots, denyText: ["ui"] }));
-    expect(result.files.map((f) => f.name)).toEqual(["03-page.png"]);
-    expect(result.failed.map((f) => f.name)).toEqual(["01-page.png", "02-page.png"]);
+    // "ui" is under 4 characters: "the UI" hits (only "ui" can), "build" does not. "acme" is 4: "AcmeCorp" hits.
+    // "/a" holds a slash, so it is a path and matches as a substring.
+    const result = await recorder.capture(request({ shots, denyText: ["ui", "acme", "/a"] }));
+    expect(result.files.map((f) => f.name)).toEqual(["02-page.png", "05-page.png"]);
+    expect(result.failed.map((f) => f.name)).toEqual(["01-page.png", "03-page.png", "04-page.png"]);
   });
 
   it("scans every frame of the page, and fails a frame it cannot vouch for", async () => {
@@ -515,6 +520,7 @@ describe("evidence runner script on Linux: the socket relay (bwrap)", () => {
         flags: p.pattern.flags,
       })),
       deny_text: [],
+      deny_substring_min: 4,
       max_scan_chars: 100_000,
       shots: [{ name: "01-page.png", path: "/hello", width: 1280, height: 800 }],
     },

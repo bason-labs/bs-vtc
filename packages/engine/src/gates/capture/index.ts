@@ -4,10 +4,22 @@
  * is the non-UI evidence.
  */
 export {
-  cleanReason,
+  BEFORE_AFTER_FILE_LIMIT_REASON,
+  BEFORE_AFTER_LOGS_KEPT,
+  BEFORE_AFTER_NO_UNSANDBOXED,
+  BEFORE_AFTER_OTHER_REPO,
+  BEFORE_AFTER_STATE_DIR,
+  buildGatesOf,
+  captureBeforeAfter,
+  planBeforeAfter,
+  type BeforeAfterContext,
+} from "./before-after.js";
+export { cleanReason, deniedPattern } from "./clean.js";
+export {
   createEvidenceRecorder,
   EVIDENCE_NO_BROWSER,
   EVIDENCE_NO_SANDBOX,
+  EVIDENCE_PTRACE_REFUSAL,
   sandboxedEvidenceRunner,
   type EvidenceRecorderDeps,
   type EvidenceRecorderOptions,
@@ -22,13 +34,17 @@ export {
 } from "./report-html.js";
 export {
   DENIED_TEXT_HIT,
+  DENY_SUBSTRING_MIN,
   EVIDENCE_MASK_COLOR,
   EVIDENCE_PAINT_DEFAULTS,
   EVIDENCE_VIDEO_SIZE,
   EvidenceRunnerResultSchema,
   MAX_SCAN_CHARS,
+  UI_VIEWPORT_HEIGHT,
+  type EvidenceRunnerApp,
   type EvidenceRunnerInput,
   type EvidenceRunnerResult,
   type EvidenceRunnerShot,
 } from "./protocol.js";
 export { EVIDENCE_RUNNER_SCRIPT } from "./script.js";
+export type { CaptureTarget, TargetCaptureResult } from "./target.js";
