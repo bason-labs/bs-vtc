@@ -13,6 +13,7 @@
  *
  * Each check gate gets its tool (H-14, `GateSchema.tool`, {@link withCheckTools}): the `project`
  * tool installed in the working tree, which the Gate Runner verifies by content hash at each run.
+ * The confirmed commands include the second pass of each two-pass install (`scriptsFreeInstall`).
  */
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
@@ -41,7 +42,7 @@ import { downloadOsvDatabase, osvDatabaseDir, osvDatabaseReady } from "../osv-db
 import { runWithConfig } from "../runner.js";
 import { detectGateSandbox, resolveGateSandbox } from "../sandbox.js";
 import { createScannerStore, type ScannerStore } from "../scanners.js";
-import { deriveProjectTool } from "../tool-integrity.js";
+import { deriveProjectTool, scriptsFreeInstall } from "../tool-integrity.js";
 import { appLoopbackPort } from "../visual/app.js";
 import { allowlistPrefix, detectToolchain, detectVisualApp, type ProposedGate } from "./detect.js";
 
@@ -117,10 +118,11 @@ export const visualAppQuestion = (app: Pick<VisualApp, "command" | "url">): stri
  * Each check gate's tool (H-14, spine §5 reading 238; `GateSchema.tool`): a verify-phase gate
  * whose executable is installed in the working tree (`node_modules/.bin`, a virtual environment,
  * a file of the repository) gets the `project` tool `deriveProjectTool` finds, which the Gate
- * Runner then verifies by content hash at every run. A pinned scanner always runs from the store
- * and needs none; a gate that already names its tool keeps it. A gate with no tool found here
- * (a package script, a tool outside the repository, or one not installed in the working tree)
- * gets none, and each run derives one from its command when it can.
+ * Runner then verifies by content hash at every run; a package script's gate gets the tools its
+ * commands run (`pnpm typecheck` running `tsc`). A pinned scanner always runs from the store and
+ * needs none; a gate that already names its tool keeps it. A gate with no tool found here (a
+ * script that runs nothing installed, a tool outside the repository, or one not installed in the
+ * working tree) gets none, and each run derives one from its command when it can.
  */
 export const withCheckTools = (
   repoRoot: string,
@@ -191,7 +193,7 @@ export const calibrate = async (
   }
   if (tools.none.length > 0) {
     deps.out(
-      `note: no check tool in this working tree for ${tools.none.join(", ")} (a package script, a tool outside the repository, or not installed here): each run derives one from the command when it can`,
+      `note: no check tool in this working tree for ${tools.none.join(", ")} (a script that runs nothing installed, a tool outside the repository, or not installed here): each run derives one from the command when it can`,
     );
   }
   const detected = GatesConfigSchema.parse({
@@ -256,11 +258,16 @@ export const calibrate = async (
     }
   }
 
-  // 1. Every command a human has not confirmed on this machine, before anything runs (§15).
+  // 1. Every command a human has not confirmed on this machine, before anything runs (§15),
+  // with the second pass of each two-pass install (H-14: `pnpm rebuild --pending` after
+  // `pnpm install --ignore-scripts`), which runs the scripts the install skipped.
   const allowlist = readAllowlist(deps.vtcHome, deps.repoRoot);
   const pending: string[][] = [];
   const commands = [
-    ...detected.gates.map((g) => g.command),
+    ...detected.gates.flatMap((g) => {
+      const build = g.phase === "install" ? scriptsFreeInstall(g.command)?.build : null;
+      return build === null || build === undefined ? [g.command] : [g.command, build];
+    }),
     ...(app === null ? [] : [app.command]),
   ];
   for (const command of commands) {

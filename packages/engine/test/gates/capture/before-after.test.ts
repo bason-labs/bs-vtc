@@ -579,6 +579,14 @@ describe("UI before/after evidence (D-ct, reading 223)", { timeout: 60_000 }, ()
     expect(read(h.outDir, "02-ui1-w1280-light-after.png")).toContain("the new page");
   });
 
+  it("says a side that recorded nothing failed its flow, even where that commit has no flow", async () => {
+    const h = await setup({ base: { page: "broken" }, head: { flows: flowsFile([]) } });
+    const result = await h.capture({ screens: ["invoices"], flowSeconds: 3, flow: "pay-invoice" });
+    expect(result.partial?.reason).toBe("base_build_failed");
+    expect(result.files.some((f) => f.name === "03-flow-before.webm")).toBe(false);
+    expect(result.flow).toEqual({ id: "pay-invoice", before: "failed", after: "scripted" });
+  });
+
   it("returns the head's screens with base_serve_failed when the base's app does not serve", async () => {
     const h = await setup({ base: { mode: "crash" } });
     const result = await h.capture();

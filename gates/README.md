@@ -191,29 +191,66 @@ could replace the lint tool, or any other check tool, under `node_modules` befor
   `binary_sha256` before each use. `command[0]` names the tool (a gate whose command starts with
   anything else does not run); the store's path replaces it, and such a gate never runs a
   user-installed copy (the Checkov fallback of D-u is for gates without `tool`). Every pinned
-  scanner is one, with or without `tool`. `GateResult.tool.sha256` is the hash of the binary that ran.
+  scanner is one, with or without `tool`. `GateResult.tool.sha256` is the pin's `binary_sha256`
+  the store just verified the binary against.
 - `project` `{paths}` (checkout-relative globs, e.g. `node_modules/.bin/eslint` and
-  `node_modules/eslint/**`): the install phase runs in two passes. First each install gate's
-  scripts-free form (npm, pnpm, Bun and Yarn Classic `--ignore-scripts`, Yarn Berry
-  `--mode=skip-build`; `go mod download` and `cargo fetch` run no project code as they are), then
-  the tool's files are hashed (sorted path and content hash per line; a link is its target), then
-  the install gates run as configured (their lifecycle scripts). Just before the gate the files
-  are hashed again: any file changed, added or removed fails the gate without running it,
-  `status: fail`, failure class `product`, one finding `vtc/tool-tampered` in category `security`,
-  and `GateResult.tool.tampered` lists the files (the evidence log lists them all). An earlier
-  verify gate (an L0 build) that touches the tool is caught the same way.
-- absent: the runner derives a `project` tool from `command[0]`: the executable it resolves to
+  `node_modules/eslint/**`): the files are hashed after the scripts-free install (below), before
+  any install-phase script runs, and again just before the gate: any file changed, added or
+  removed fails the gate without running it, `status: fail`, failure class `product`, one finding
+  `vtc/tool-tampered` in category `security`, and `GateResult.tool.tampered` lists the files (the
+  evidence log lists them all). An earlier verify gate (an L0 build) that touches the tool is
+  caught the same way, and so is a tool that grew past the hash limits (50,000 files, 1 GiB)
+  since it was hashed. A gate whose `paths` do not cover what its command runs now (stale after
+  a dependency change), or match no file at all, does not run (`error`, `infra`: re-run
+  `vtc calibrate`).
+- absent: the runner derives a `project` tool from the command: the executable it resolves to
   inside the checkout (unwrapping `pnpm exec`, `npx`, `npm exec`, `yarn`, `bunx`, `uv run`,
-  `poetry run`) and the package it belongs to (a pnpm shell shim is followed to its package).
-  A command whose executable is outside the checkout (`node` on `PATH`, `go vet`) has none:
-  install-phase code cannot write there. A package script (`pnpm run lint`) has none either.
+  `poetry run`, skipping flag values and following `-C`/`--dir`/`--cwd`) and the package it
+  belongs to (a pnpm shell shim is followed to its package). A package script (`pnpm typecheck`,
+  `npm run lint`) is resolved through its body: each of its commands (`tsc --noEmit`,
+  `eslint . && tsc`) adds its tool. A command whose executable is outside the checkout (`node`
+  on `PATH`, `go vet`) has none: install-phase code cannot write there. A command that picks
+  other packages to run in (`pnpm --filter`, `npm --workspace`) has none either.
+
+What is hashed (`hashTool`): one line per file, its checkout-relative path and the SHA-256 of its
+bytes, or `link:<target>` for a link, which is never followed; only a glob's own base is followed
+when it is a link (pnpm's `node_modules/<name>`). Nothing outside the checkout is ever read: a
+path that leads out is the line `outside-checkout` (so re-pointing a tool at a home directory is
+tampering, and nothing there is listed). With a Node package the hash includes its dependency
+closure (`dependencies`, `optionalDependencies` and `peerDependencies`, resolved the way Node
+does, in pnpm through the virtual store); with a virtual environment's script, the distribution
+whose console script it is, every distribution it requires (extras left out), and the
+site-packages startup files (`*.pth`, `sitecustomize.py`, `usercustomize.py`).
+
+The install phase keeps the configured order and runs in two passes (`scriptsFreeInstall`, each
+form checked against the real package manager by `tool-tamper.live.test.ts`, opt-in with
+`VTC_LIVE_PM=1`): `npm ci --ignore-scripts` then `npm ci` again; `pnpm install --ignore-scripts`
+then `pnpm rebuild --pending` (a second `pnpm install` leaves the skipped builds unbuilt);
+`bun install --ignore-scripts` then `bun install` again; `go mod download` and `cargo fetch` as
+they are. The leading install gates with no such form run as configured first; then the gates
+after them that have one, up to the next that has none, run their first pass; then the tools are
+hashed; then those gates' second passes run, in order; then the remaining install gates run as
+configured. `vtc calibrate` asks the human to confirm each second pass (`pnpm rebuild --pending`)
+with the install it belongs to. A first pass's logs are `<id>.scripts-free.*`.
 
 `vtc calibrate` writes the `project` tool of each check gate whose executable is installed in the
-working tree (`withCheckTools`); pinned scanners need none. Known limit: an install gate with no
-scripts-free form VTC knows (`uv sync`, `poetry install`, a custom script) runs before the tools
-are hashed, so what its own scripts write into a tool is not detected; the run's
-`tool-integrity.log` says so. A tool's dependencies (an ESLint plugin, a package the test runner
-imports) are not part of its paths unless `gates.yml` lists them.
+working tree (`withCheckTools`), package scripts included; pinned scanners need none.
+
+Known limits (the first two are said per run in `_tool-integrity.log`, a name no gate's log can
+have):
+
+- An install gate with no scripts-free form VTC knows (`npm install`, any Yarn install, `uv sync`,
+  `poetry install`, a custom script) runs its scripts outside the two passes: what they write into
+  a tool before the tool is hashed is not detected. A tool first found after such a gate ran is
+  hashed then, and the log names it.
+- A verify gate with no project tool (its executable is outside the checkout, its package script
+  names nothing installed, or it picks other packages to run in) is listed as not verified.
+- What a tool loads by configuration rather than by dependency (an ESLint plugin the project's
+  config names, a test runner's setup files) is not part of the tool unless `gates.yml` lists it
+  in `paths` (its dependency closure is then hashed too).
+- The base checkout, which computes the baseline facts (which violations are pre-existing),
+  runs its install gates as configured and its tools unverified. Its install scripts are code
+  already merged, but a base tool they changed could make the baseline facts wrong.
 
 ## L6 compiled from the Architect's AD Checks (§8.5)
 
