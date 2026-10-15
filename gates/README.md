@@ -189,8 +189,9 @@ could replace the lint tool, or any other check tool, under `node_modules` befor
 
 - `pinned` `{pin}`: a `gates/scanners.json` pin, run from VTC's store and re-verified against its
   `binary_sha256` before each use. `command[0]` names the tool (a gate whose command starts with
-  anything else does not run); the store's path replaces it. Every pinned scanner is one, with
-  or without `tool`. `GateResult.tool.sha256` is the hash of the binary that ran.
+  anything else does not run); the store's path replaces it, and such a gate never runs a
+  user-installed copy (the Checkov fallback of D-u is for gates without `tool`). Every pinned
+  scanner is one, with or without `tool`. `GateResult.tool.sha256` is the hash of the binary that ran.
 - `project` `{paths}` (checkout-relative globs, e.g. `node_modules/.bin/eslint` and
   `node_modules/eslint/**`): the install phase runs in two passes. First each install gate's
   scripts-free form (npm, pnpm, Bun and Yarn Classic `--ignore-scripts`, Yarn Berry

@@ -9,6 +9,7 @@ import { chmodSync, readdirSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { TOOL_TAMPER_RULE_ID, type GateReport, type GateResult } from "@vtc/shared";
 import { afterEach, describe, expect, it } from "vitest";
+import { ScannerUnavailableError } from "../../src/gates/index.js";
 import { cleanupDirs, tempDir, writeFile } from "../helpers/repo.js";
 import { commitAll, config, harness, leaksGate, NODE, TOOLS } from "./fixture.js";
 
@@ -192,6 +193,57 @@ describe("H-14: a pinned tool runs from VTC's store", () => {
       status: "pass",
       tool: { source: "pinned", sha256: sha, tampered: [] },
     });
+  });
+
+  it("never runs a user-installed copy for a gate that names its pinned tool", async () => {
+    // Checkov is the scanner a user may install where VTC pins no build (D-u): not when the gate
+    // asks for the pinned tool.
+    const bin = tempDir("vtc-path-");
+    writeFile(
+      bin,
+      "checkov",
+      `#!/usr/bin/env node
+const { mkdirSync, writeFileSync } = require("node:fs");
+const dir = process.argv[process.argv.indexOf("--output-file-path") + 1];
+mkdirSync(dir, { recursive: true });
+writeFileSync(dir + "/results_sarif.sarif", JSON.stringify({ version: "2.1.0", runs: [{ tool: { driver: { name: "checkov" } }, results: [] }] }));
+`,
+    );
+    chmodSync(join(bin, "checkov"), 0o755);
+    const iac = {
+      id: "iac",
+      layer: "L4" as const,
+      command: [
+        "checkov",
+        "-d",
+        ".",
+        "--quiet",
+        "-o",
+        "sarif",
+        "--output-file-path",
+        ".vtc/state/gates/checkov",
+      ],
+      report: { format: "sarif" as const, path: ".vtc/state/gates/checkov/results_sarif.sarif" },
+    };
+    const options = {
+      scanners: () => ({
+        names: ["checkov"],
+        ensure: (name: string) => Promise.reject(new ScannerUnavailableError(name, "darwin-arm64")),
+      }),
+      env: { ...process.env, PATH: `${bin}:${process.env.PATH ?? ""}` },
+    };
+    // Without a tool the user's own Checkov runs, as before.
+    const own = harness({ "infra/main.tf": "resource {}\n" }, config([iac]), options);
+    expect(result(await own.run({ head: own.base, layers: ["L4"] }), "iac").status).toBe("pass");
+    const h = harness(
+      { "infra/main.tf": "resource {}\n" },
+      config([{ ...iac, tool: { source: "pinned", pin: "checkov" } }]),
+      options,
+    );
+    const gate = result(await h.run({ head: h.base, layers: ["L4"] }), "iac");
+    expect(gate).toMatchObject({ status: "error", failure_class: "infra" });
+    expect(gate.tool).toBeUndefined();
+    expect(h.argvs.some((a) => a[0]?.endsWith("/checkov") === true)).toBe(false);
   });
 
   it("does not run a gate whose command does not start with its pinned tool", async () => {

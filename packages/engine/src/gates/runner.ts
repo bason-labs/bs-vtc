@@ -889,7 +889,12 @@ class Run {
         };
         argv0 = binary;
       } catch (error) {
-        if (!(error instanceof ScannerUnavailableError) || !USER_INSTALLED_SCANNERS.includes(argv0))
+        // A gate that names its pinned tool (H-14) runs only the store's verified copy.
+        if (
+          !(error instanceof ScannerUnavailableError) ||
+          !USER_INSTALLED_SCANNERS.includes(argv0) ||
+          gate.tool?.source === "pinned"
+        )
           return { refused: `not run: ${errorText(error)}` };
         // D-u (spine §5 reading 41): no native build here, so the user installs it themselves.
         const own = findUserInstalled(argv0, this.env.PATH, [this.deps.repoRoot, checkoutAbs]);
