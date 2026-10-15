@@ -99,6 +99,24 @@ Both also get:
     `ParsedStream.commandShapes` only and drains spool rows into in-session dispatches only, so
     a shell call is never counted twice.
 
+  Cross-checked against the code the other two teams own at build/foundation 268298c (no peer
+  session was running, so the check is against their shipped code and tests, not live):
+  - cli: `sessionStart` in `packages/cli/src/hook.ts` returns at once for `isVtcRoleAgent`
+    (`hook-rules.ts`, which accepts the namespaced `vtc:vtc-*` form), and `hook.test.ts` ("gives a
+    VTC role session no hint") pins it; `preToolUse` acts only for role agents.
+  - adapters: `parseClaudeEvents` (`packages/adapters/src/claude-code/events.ts`) takes a run's
+    outcome from its `result` event, so a `system` `hook_started`/`hook_response` event never
+    changes it; the recorded streams (`test/fixtures/claude-code/stream-success.jsonl`,
+    `stream-arm-success.jsonl`) carry the D-cl `SessionStart` `hook_response` with `exit_code`
+    127 and still parse as a success (`events.test.ts`).
+  - One assumption is still unconfirmed live: that Claude Code puts `agent_type` (`vtc:<agent>`)
+    in a headless `--agent` run's `SessionStart` input. The D-cl run had no `vtc` on `PATH`, so
+    the hook never read its input. The next adapters arm check with `vtc` on `PATH` confirms it
+    (the hook prints nothing and no resume hint reaches the role's transcript). If the field is
+    missing, the fix stays outside the compiler: the adapter marks its headless runs (for
+    example an environment variable it sets on the child) and `vtc hook session-start` checks
+    that mark too, a cli and adapters change with a `@vtc/shared` hook-contract line.
+
 - **Role agents cannot reach the Lead's tools.** Claude Code agents get an explicit `tools:`
   allowlist: the read tools, file writes for write-scoped profiles, `Bash` for the Engineer
   family only, and only the role-facing engine tools their contract declares (`ROLE_MCP_TOOLS`:
