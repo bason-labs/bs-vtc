@@ -1,8 +1,9 @@
 # Release pipeline (spine AD-26; owner: cli+binary team; docs: packaging/README.md).
 #
 # Does nothing until the repository has a GitHub remote. A `v*` tag verifies, cross-compiles,
-# smoke-tests on native runners, packages, checksums, attests and publishes a draft-first
-# release; a manual run (workflow_dispatch) is a dry run that stops before publishing.
+# smoke-tests on native runners, packages, checksums, attests (when the repository variable
+# VTC_ATTEST is true) and publishes a draft-first release; a manual run (workflow_dispatch) is a
+# dry run that stops before publishing.
 #
 # Supply chain: every action is pinned to a full commit SHA (the tag is in the comment); the
 # workflow token is read-only except in the publish job; no cache is restored into a release
@@ -235,7 +236,8 @@ jobs:
     # adds an implicit success() that carries that skip down the needs chain and skips this job.
     if: ${{ !cancelled() && needs.verify.result == 'success' && needs.package.result == 'success' && github.event_name == 'push' && github.ref_type == 'tag' }}
     runs-on: ubuntu-24.04
-    environment: release
+    # No `environment:` here: a private repository on GitHub Free has no environments. On a paid
+    # plan, add `environment: release` with required reviewers.
     permissions:
       contents: write
       id-token: write
@@ -245,7 +247,10 @@ jobs:
         with:
           name: release
           path: release
-      - uses: actions/attest@508db95dd578ae2727ebd6217d5ba78e4fbda05d # v4.2.1
+      # Artifact attestations need a public repository or GitHub Enterprise Cloud. Set the
+      # repository variable VTC_ATTEST=true where they are available.
+      - if: ${{ vars.VTC_ATTEST == 'true' }}
+        uses: actions/attest@508db95dd578ae2727ebd6217d5ba78e4fbda05d # v4.2.1
         with:
           subject-path: release/*
       - name: Draft, upload, then publish (immutable once published)
@@ -253,10 +258,13 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           GH_REPO: ${{ github.repository }}
           TAG: ${{ github.ref_name }}
+          ATTESTED: ${{ vars.VTC_ATTEST == 'true' }}
         run: |
           {
             echo "Verify a download: sha256sum -c SHA256SUMS --ignore-missing"
-            echo "Verify its provenance: gh attestation verify <file> -R $GH_REPO"
+            if [ "$ATTESTED" = "true" ]; then
+              echo "Verify its provenance: gh attestation verify <file> -R $GH_REPO"
+            fi
             echo
             echo "The macOS binaries are not signed or notarized yet (pending the owner's Apple Developer ID)."
             echo
