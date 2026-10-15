@@ -86,9 +86,8 @@ import {
   type TaskSize,
   type VtcEvent,
 } from "@vtc/shared";
-import { join } from "node:path";
 import { isRoleFailure } from "./attribution.js";
-import { writeAtomic } from "./files.js";
+import { writeRepoFileAtomic } from "./files.js";
 import type { ReplayTask } from "./replay.js";
 import {
   insufficient,
@@ -363,8 +362,9 @@ export const writeRoutingScorecard = async (
   projectRoot: string,
   card: RoutingScorecard,
 ): Promise<string> => {
-  await writeAtomic(
-    join(projectRoot, LOOKBACK_REPO.routingScorecard),
+  await writeRepoFileAtomic(
+    projectRoot,
+    LOOKBACK_REPO.routingScorecard,
     `${JSON.stringify(RoutingScorecardSchema.parse(card), null, 2)}\n`,
   );
   return LOOKBACK_REPO.routingScorecard;

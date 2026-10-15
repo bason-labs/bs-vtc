@@ -111,8 +111,7 @@ describe("the routing step at RETRO (D-cn, engine core's RoutingLookback seam)",
       graderBundleSha: BUNDLE,
       now,
     });
-    expect([...cells]).toEqual([]);
-    expect(cells.replays).toEqual([]);
+    expect(cells).toEqual([]);
     await expect(readFile(join(root, LOOKBACK_REPO.routingScorecard), "utf8")).rejects.toThrow();
   });
 
@@ -125,8 +124,7 @@ describe("the routing step at RETRO (D-cn, engine core's RoutingLookback seam)",
       graderBundleSha: BUNDLE,
       now,
     });
-    expect([...cells]).toEqual([]);
-    expect(cells.replays).toEqual([]);
+    expect(cells).toEqual([]);
     const written = JSON.parse(
       await readFile(join(root, LOOKBACK_REPO.routingScorecard), "utf8"),
     ) as RoutingScorecard;
