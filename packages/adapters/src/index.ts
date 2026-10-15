@@ -2,6 +2,7 @@
 import type { HostAdapter, HostCapabilities, HostId } from "@vtc/shared";
 import { claudeCodeCapabilities, createClaudeCodeAdapter } from "./claude-code/index.js";
 import { codexCapabilities, createCodexAdapter } from "./codex/index.js";
+import type { Spawner } from "./common/process.js";
 
 export {
   claudeCodeCapabilities,
@@ -16,6 +17,7 @@ export {
   createCodexAdapter,
   type CodexAdapterOptions,
 } from "./codex/index.js";
+export { shellCallShapes } from "./common/command-shapes.js";
 export type { ProcessExit, SpawnedProcess, Spawner, SpawnOptions } from "./common/process.js";
 
 export const HOST_CAPABILITIES: Readonly<Record<HostId, HostCapabilities>> = {
@@ -24,7 +26,8 @@ export const HOST_CAPABILITIES: Readonly<Record<HostId, HostCapabilities>> = {
 };
 
 /**
- * What the cli passes when it constructs an adapter: `{ pluginDir, vtcHome, vtcVersion }`.
+ * What the cli passes when it constructs an adapter: `{ pluginDir, vtcHome, vtcVersion,
+ * codexHome }`.
  * Models are not here: the engine resolves every model id (`SpawnRoleRequest.model`, AD-6
  * rule 2), and with none resolved the host session's default model runs (D-ae).
  */
@@ -44,11 +47,24 @@ export interface AdapterFactoryOptions {
    */
   readonly vtcHome?: string;
   /**
+   * The absolute Codex home the cli resolved (`$CODEX_HOME`, else `~/.codex`; shared
+   * `hostConfigDirsOf(process.env, homedir()).codex`). Codex installs its user-scope agents and
+   * `config.toml` there and registers the plugin in it; Claude Code keeps every role from reading
+   * it. Default: Codex `<InstallRequest.home>/.codex`; Claude Code `$CODEX_HOME`, else `~/.codex`.
+   */
+  readonly codexHome?: string;
+  /**
    * The user's `~/.vtc/config.yaml` `env_passthrough` names (D-ak, spine §5 reading 57): they
    * reach headless host children besides the fixed allowlist; host credential variables never
    * do. Default: none.
    */
   readonly envPassthrough?: readonly string[];
+  /**
+   * Tests only: starts host processes instead of the real spawner, so a test that runs the
+   * factory-built adapter (the safety contract, `install`) never starts a real host binary. The
+   * cli never passes it.
+   */
+  readonly spawner?: Spawner;
 }
 
 /**
@@ -65,12 +81,16 @@ export const ADAPTER_FACTORIES: Readonly<
     createClaudeCodeAdapter({
       ...(options.pluginDir === undefined ? {} : { pluginDir: options.pluginDir }),
       ...(options.vtcHome === undefined ? {} : { vtcHome: options.vtcHome }),
+      ...(options.codexHome === undefined ? {} : { codexHome: options.codexHome }),
       ...(options.envPassthrough === undefined ? {} : { envPassthrough: options.envPassthrough }),
+      ...(options.spawner === undefined ? {} : { spawner: options.spawner }),
     }),
   codex: (options = {}) =>
     createCodexAdapter({
       ...(options.vtcVersion === undefined ? {} : { clientVersion: options.vtcVersion }),
       ...(options.vtcHome === undefined ? {} : { vtcHome: options.vtcHome }),
+      ...(options.codexHome === undefined ? {} : { codexHome: options.codexHome }),
       ...(options.envPassthrough === undefined ? {} : { envPassthrough: options.envPassthrough }),
+      ...(options.spawner === undefined ? {} : { spawner: options.spawner }),
     }),
 };

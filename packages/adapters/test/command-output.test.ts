@@ -58,7 +58,7 @@ describe("createCommandOutputRunner", () => {
       timeoutMs: 10,
       maxChars: 10,
     });
-    expect(await timed.run(COMMAND, "/work")).toEqual({ kind: "failed" });
+    expect(await timed.run(COMMAND, "/work")).toEqual({ kind: "failed", timedOut: true });
     expect(hanging.processes[0]!.signals).toEqual(["SIGKILL"]);
     const stopped = fakeSpawner();
     const disposed = createCommandOutputRunner({

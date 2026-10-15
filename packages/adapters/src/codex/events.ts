@@ -4,9 +4,15 @@
  * agent_message}` → `turn.completed {usage}`; `thread_id` is the `SessionRef`. The stream carries
  * no rate-limit data (usage comes from `codex app-server`). Documented, not yet recorded: a limit
  * hit is `turn.failed` with `codexErrorInfo: usageLimitExceeded` (§6.9) and a failure message;
- * `error {message}` events report stream errors.
+ * `error {message}` events report stream errors. Documented (learn.chatgpt.com/docs/non-interactive-mode,
+ * the sample `{"type":"item.started","item":{"id":"item_1","type":"command_execution","command":
+ * "bash -lc ls","status":"in_progress"}}`): a shell call is a `command_execution` item, seen on
+ * `item.started` and again on `item.completed`; its `command` only ever becomes
+ * `ParsedStream.commandShapes` (D-cs), once per item id (an item without an id counts on
+ * `item.completed` only).
  */
-import type { HostOutcome, ParsedStream, SessionRef, TokenUsage } from "@vtc/shared";
+import type { CommandShape, HostOutcome, ParsedStream, SessionRef, TokenUsage } from "@vtc/shared";
+import { shellCallShapes } from "../common/command-shapes.js";
 import { classifyFailureText, resetFromWaitText } from "../common/failure-text.js";
 import type { RunExit } from "../common/headless-run.js";
 import { CODEX_BINARY } from "./command.js";
@@ -41,6 +47,8 @@ interface CodexScan {
   /** The last terminal event: a completed or a failed turn. */
   readonly terminal: "completed" | Failure | null;
   readonly lastError: Failure | null;
+  /** The shapes of the run's `command_execution` items, in order (D-cs). */
+  readonly commandShapes: readonly CommandShape[];
   readonly unrecognized: number;
 }
 
@@ -83,6 +91,30 @@ const addUsage = (total: TokenUsage | null, usage: unknown): TokenUsage | null =
       };
 };
 
+/** The item events that carry an item (`item.started`, `item.updated`, `item.completed`). */
+const ITEM_EVENTS: ReadonlySet<string> = new Set([
+  "item.started",
+  "item.updated",
+  "item.completed",
+]);
+
+/**
+ * A new `command_execution` item's `command`, once per item id; `undefined` when the event is not
+ * one or its item was already counted.
+ */
+const shellCommand = (
+  type: string,
+  item: Record<string, unknown>,
+  seen: Set<string>,
+): { readonly command: unknown } | undefined => {
+  if (item.type !== "command_execution") return undefined;
+  const id = text(item.id);
+  if (id === null) return type === "item.completed" ? { command: item.command } : undefined;
+  if (seen.has(id)) return undefined;
+  seen.add(id);
+  return { command: item.command };
+};
+
 const scan = (lines: readonly string[]): CodexScan => {
   const { events, unrecognized: unparsed } = parseJsonLines(lines);
   let unrecognized = unparsed;
@@ -91,16 +123,21 @@ const scan = (lines: readonly string[]): CodexScan => {
   let tokens: TokenUsage | null = null;
   let terminal: CodexScan["terminal"] = null;
   let lastError: Failure | null = null;
+  const commandShapes: CommandShape[] = [];
+  const shellCallsSeen = new Set<string>();
   for (const event of events) {
+    const item = isRecord(event.item) ? event.item : {};
+    if (typeof event.type === "string" && ITEM_EVENTS.has(event.type)) {
+      const call = shellCommand(event.type, item, shellCallsSeen);
+      if (call !== undefined) commandShapes.push(...shellCallShapes(call.command));
+    }
     switch (event.type) {
       case "thread.started":
         threadId = text(event.thread_id) ?? threadId;
         break;
-      case "item.completed": {
-        const item = isRecord(event.item) ? event.item : {};
+      case "item.completed":
         if (item.type === "agent_message") lastMessage = text(item.text) ?? lastMessage;
         break;
-      }
       case "turn.completed":
         tokens = addUsage(tokens, event.usage);
         terminal = "completed";
@@ -116,7 +153,7 @@ const scan = (lines: readonly string[]): CodexScan => {
         if (typeof event.type !== "string") unrecognized += 1;
     }
   }
-  return { threadId, lastMessage, tokens, terminal, lastError, unrecognized };
+  return { threadId, lastMessage, tokens, terminal, lastError, commandShapes, unrecognized };
 };
 
 const sessionRef = (s: CodexScan): SessionRef | null =>
@@ -177,6 +214,7 @@ export const parseCodexEvents = (lines: readonly string[]): ParsedStream => {
     usage: null,
     retry: null,
     unrecognizedLines: s.unrecognized,
+    commandShapes: s.commandShapes,
   };
 };
 
