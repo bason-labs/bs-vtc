@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it } from "vitest";
 import { NoveltyReportSchema } from "@vtc/shared";
 import {
   checkNovelty,
@@ -12,7 +12,9 @@ import {
 } from "../../../src/gates/visual/novelty.js";
 import { encodePng, type RgbaImage } from "../../../src/gates/visual/png.js";
 import { parseDesignTokens } from "../../../src/gates/visual/tokens.js";
-import { tempDir } from "../../helpers/repo.js";
+import { cleanupDirs, tempDir } from "../../helpers/repo.js";
+
+afterEach(cleanupDirs);
 
 /** A 90×80 image: a horizontal gradient, optionally flipped, with a dark block. */
 const image = (flip: boolean, block = false): RgbaImage => {

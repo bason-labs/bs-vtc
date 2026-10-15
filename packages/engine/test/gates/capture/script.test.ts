@@ -19,8 +19,10 @@ import {
 } from "../../../src/gates/capture/index.js";
 import { GateCommandJail, type GateJailSpec } from "../../../src/gates/sandbox.js";
 import type { VisualToolchain } from "../../../src/gates/visual/index.js";
-import { tempDir } from "../../helpers/repo.js";
+import { cleanupDirs, tempDir } from "../../helpers/repo.js";
 import { NODE, recordingSandbox } from "../fixture.js";
+
+afterEach(cleanupDirs);
 
 /**
  * A Playwright stand-in. `scenario.json` next to it says, per path, what the page check answers
@@ -33,6 +35,7 @@ const FAKE_PLAYWRIGHT = String.raw`
 import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
+
 const here = dirname(fileURLToPath(import.meta.url));
 const scenario = JSON.parse(readFileSync(join(here, "scenario.json"), "utf8"));
 const log = { launch: null, contexts: [], routes: [], ws: 0, continued: [], aborted: [], init: [], bindings: [], order: [], screenshots: [], waited: [], videoPathBeforeClose: 0, fetched: [], actions: [], checks: 0 };

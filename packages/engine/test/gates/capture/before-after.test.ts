@@ -25,7 +25,7 @@ import {
   type GatesConfigInput,
   type GateSandbox,
 } from "@vtc/shared";
-import { describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it } from "vitest";
 import {
   BEFORE_AFTER_FILE_LIMIT_REASON,
   BEFORE_AFTER_LOGS_KEPT,
@@ -46,8 +46,10 @@ import { parseGatesConfig } from "../../../src/gates/config.js";
 import { GateCommandJail } from "../../../src/gates/sandbox.js";
 import { addToAllowlist } from "../../../src/gates/index.js";
 import { CHECKOUTS_DIR, createGitOps } from "../../../src/git/index.js";
-import { git, initRepo, tempDir, writeFile } from "../../helpers/repo.js";
+import { cleanupDirs, git, initRepo, tempDir, writeFile } from "../../helpers/repo.js";
 import { commitAll, config, NODE, recordingSandbox } from "../fixture.js";
+
+afterEach(cleanupDirs);
 
 /**
  * A Playwright stand-in: `goto` really fetches the page from the app server, the page's text is
@@ -155,6 +157,7 @@ createServer((req, res) => {
   // temp directory with a runner's files in it (7), or the other side's HOME (8).
   "tools/snoop.mjs": `import { existsSync, readdirSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
+
 const tmp = process.env.TMPDIR;
 const root = dirname(tmp);
 for (const name of readdirSync(root)) {

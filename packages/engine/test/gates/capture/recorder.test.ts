@@ -20,7 +20,7 @@ import {
   type EvidenceCaptureRequest,
   type EvidenceShot,
 } from "@vtc/shared";
-import { describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it } from "vitest";
 import {
   cleanReason,
   createEvidenceRecorder,
@@ -32,8 +32,10 @@ import {
   type EvidenceRunnerResult,
 } from "../../../src/gates/capture/index.js";
 import type { VisualToolchain } from "../../../src/gates/visual/index.js";
-import { tempDir } from "../../helpers/repo.js";
+import { cleanupDirs, tempDir } from "../../helpers/repo.js";
 import { config, testsGate } from "../fixture.js";
+
+afterEach(cleanupDirs);
 
 const PNG = Buffer.from("89504e470d0a1a0a0000000d49484452", "hex");
 const WEBM = Buffer.from("1a45dfa3", "hex");
