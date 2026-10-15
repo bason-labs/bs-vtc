@@ -84,7 +84,10 @@ export const routingReplayOfMetrics = (
 };
 
 /** Pure: whether `replay` backs `move` (`routingReplayBacks`: cheaper holds, higher improves). */
-const backs = (replay: RoutingReplay, move: Pick<RoutingMove, "from" | "to">): boolean =>
+export const routingReplayBacksMove = (
+  replay: RoutingReplay,
+  move: Pick<RoutingMove, "from" | "to">,
+): boolean =>
   routingReplayBacks(
     tierRank(move.to) > tierRank(move.from) ? "higher" : "cheaper",
     replay.verdict,
@@ -98,7 +101,7 @@ export const routingReplayLine = (
   replay: RoutingReplay,
   move: Pick<RoutingMove, "from" | "to">,
 ): string =>
-  `A graded tier replay ${backs(replay, move) ? "backs" : "does not back"} the move: verdict \`${replay.verdict}\` over ${String(replay.trials)} trials.`;
+  `A graded tier replay ${routingReplayBacksMove(replay, move) ? "backs" : "does not back"} the move: verdict \`${replay.verdict}\` over ${String(replay.trials)} trials.`;
 
 /**
  * Pure: the graded replay a routing issue's body cites (the line {@link routingReplayLine} wrote),
@@ -292,15 +295,31 @@ const RISK_TEXT: Readonly<Record<RoutingSubject["risk"], string>> = {
 };
 
 /**
+ * Where the graded replay a routing PR cites comes from: this machine's own routing fact
+ * (`fact`, Lookback graded it here), or the routing issue's body as listed (`issue`: another
+ * installation's issue, which anyone with edit access may change, so VTC only cites it).
+ */
+export type RoutingReplaySource = "fact" | "issue";
+
+/**
  * Pure: what the PR says of the graded tier replay (reading 247(6)): its verdict and trial count
  * when the fact carries one (the result file stays local), else that the scorecard is the only
- * evidence.
+ * evidence. A replay read from the issue's body is worded as the issue's claim, never as a fact
+ * VTC checked.
  */
-const replayText = (replay: RoutingReplay | null, move: RoutingMove): string => {
+const replayText = (
+  replay: RoutingReplay | null,
+  move: RoutingMove,
+  source: RoutingReplaySource,
+): string => {
   if (replay === null)
     return "No tier replay backs this change, so the routing scorecard is the only evidence.";
-  const cited = `verdict \`${replay.verdict}\` over ${String(replay.trials)} trials (Lookback ran the cell's recorded tasks on both tiers and graded them; the replay result stays on the machine that ran it)`;
-  return backs(replay, move)
+  const verdict = `verdict \`${replay.verdict}\` over ${String(replay.trials)} trials`;
+  const backing = routingReplayBacksMove(replay, move);
+  if (source === "issue")
+    return `The issue cites a graded tier replay that ${backing ? "backs" : "does not back"} this change: ${verdict}, as the issue lists it (another installation's Lookback graded it; VTC did not run or check that replay here). Check the routing scorecard charts below before merging.`;
+  const cited = `${verdict} (Lookback ran the cell's recorded tasks on both tiers and graded them; the replay result stays on the machine that ran it)`;
+  return backing
     ? `A graded tier replay backs this change: ${cited}. The routing scorecard charts below are the rest of the evidence.`
     : `A graded tier replay does not back this change: ${cited}. Check the routing scorecard charts below before merging.`;
 };
@@ -324,9 +343,12 @@ export const buildRoutingPr = (input: {
   readonly issue?: number | undefined;
   /** The graded tier replay the routing fact carries (reading 247(6)); absent: the scorecard alone. */
   readonly replay?: RoutingReplay | null | undefined;
+  /** Where `replay` comes from (default `fact`); an `issue` replay is only cited, never claimed. */
+  readonly replaySource?: RoutingReplaySource | undefined;
 }): RoutingPrParts => {
   const { subject, move } = input;
   const replay = input.replay ?? null;
+  const replaySource = input.replaySource ?? "fact";
   const key = upstreamSubjectKey(subject);
   const table = readRoutingTableSource(input.source);
   const next = applyRoutingMove(table, subject, move);
@@ -341,13 +363,13 @@ export const buildRoutingPr = (input: {
     text,
     summary: `start ${subject.role} ${subject.size} tasks with ${RISK_TEXT[subject.risk]} on ${move.to}`,
     slots: {
-      summary: `Lookback's routing scorecard${replay !== null && backs(replay, move) ? " and a graded tier replay back" : " backs"} starting ${subject.size} tasks with ${RISK_TEXT[subject.risk]} on \`${move.to}\` instead of \`${move.from}\` for ${who}${input.issue === undefined ? "" : ` (#${String(input.issue)})`}.`,
+      summary: `Lookback's routing scorecard${replaySource === "fact" && replay !== null && routingReplayBacksMove(replay, move) ? " and a graded tier replay back" : " backs"} starting ${subject.size} tasks with ${RISK_TEXT[subject.risk]} on \`${move.to}\` instead of \`${move.from}\` for ${who}${input.issue === undefined ? "" : ` (#${String(input.issue)})`}.`,
       why: `Routing cell \`${key}\`. The routing scorecard charts below are the evidence (quality per token, the escalation share and the cost per task of each start tier).`,
       changes: `- \`${ROUTING_TABLE_FILE}\`: the value of \`${ROUTING_TABLE_CONSTANT}.${field}\` only; no schema change and no \`CONTRACTS_VERSION\` bump`,
       diff,
       verification: [
         "VTC made this edit itself from the routing fact (no run): it read the table at the base commit, checked the cell still starts on the tier Lookback measured, and checked the edited table starts it on the new tier.",
-        replayText(replay, move),
+        replayText(replay, move, replaySource),
       ].join("\n\n"),
       risk: "A value-only change of the routing table: the next runs start this cell on another tier. Revert this PR to roll back; Lookback's routing scorecard keeps measuring the cell.",
       provenance: [

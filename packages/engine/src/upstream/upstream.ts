@@ -113,6 +113,8 @@ import {
   routingMoveOfMetrics,
   routingReplayOfBody,
   routingReplayOfMetrics,
+  routingReplayBacksMove,
+  type RoutingReplaySource,
   type RoutingMove,
   type RoutingReplay,
 } from "./routing-pr.js";
@@ -241,6 +243,9 @@ export type AutomationOutcome =
  * is rendered and the evidence is partial (`capture_failed`). `screens` are the `screens.yaml` ids
  * the run's tasks touched, when the caller knows them: the before/after renders those screens, and
  * a flow that passes one is scripted when no flow's globs match a changed path (reading 247(7)).
+ * The daemon's bridge (`daemon/upstream-bridge.ts`, engine-core) does not set `screens` yet, so
+ * until it does both the screen restriction and the screen fallback are inert in production and a
+ * flow is selected by changed paths alone.
  */
 export type PrSource =
   | { readonly changes: readonly PlumbingChange[]; readonly message: string }
@@ -1026,6 +1031,11 @@ export const createUpstream = (deps: UpstreamDeps): Upstream => {
       readonly issue: number;
       /** Its typed `subject` is the cell; the body is rendered from it alone (reading 247(8)). */
       readonly report: UpstreamReport;
+      /**
+       * Where the report's graded replay comes from (default `fact`): `issue` when it was read
+       * from another installation's routing issue as listed, which the PR only cites.
+       */
+      readonly replaySource?: RoutingReplaySource | undefined;
     },
     ctx: ProjectContext,
   ): Promise<AutomationOutcome> =>
@@ -1038,6 +1048,18 @@ export const createUpstream = (deps: UpstreamDeps): Upstream => {
           throw new AutomationSkip("privacy", "a routing PR needs its report's routing cell");
         // D-cu (reading 241): only a producer's cell moves on the routing table
         assertProducerCell(subject);
+        const replay = routingReplayOfMetrics(input.report.metrics);
+        // reading 247(6): Lookback raises a routing fact only after a replay that backs the move,
+        // so an issue as listed that cites one which does not is not the module's to answer
+        if (
+          input.replaySource === "issue" &&
+          replay !== null &&
+          !routingReplayBacksMove(replay, input.move)
+        )
+          throw new AutomationSkip(
+            "out_of_scope",
+            "the routing issue cites a graded tier replay that does not back its move",
+          );
         gate("upstream", "prs", ctx);
         const checkout = deps.automation.upstream.checkout;
         const gitOps = deps.gitOps;
@@ -1066,8 +1088,9 @@ export const createUpstream = (deps: UpstreamDeps): Upstream => {
           source: new TextDecoder().decode(bytes),
           vtcVersion: deps.vtcVersion,
           issue: input.issue,
-          // reading 247(6): the graded tier replay, when the fact carries one
-          replay: routingReplayOfMetrics(input.report.metrics),
+          // reading 247(6): the graded tier replay, when the fact (or the issue) carries one
+          replay,
+          replaySource: input.replaySource,
         });
         return openPullRequest(
           {
@@ -1136,6 +1159,7 @@ export const createUpstream = (deps: UpstreamDeps): Upstream => {
               fingerprint: marker.fp,
               issue: issue.number,
               report: routingReport(marker.fp, cell, move, routingReplayOfBody(issue.body)),
+              replaySource: "issue",
             },
             ctx,
           );

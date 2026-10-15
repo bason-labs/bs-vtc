@@ -241,20 +241,42 @@ export type RevertCheckRecord = z.infer<typeof RevertCheckRecordSchema>;
 
 /**
  * Pure: whether AD-23 rule 4's two reads (`RemoteMergeService.findReverts`, `@vtc/shared`
- * interfaces/git.ts) find the revert in a record: a commit after the merge whose message says
- * "This reverts commit <merge>", and a PR titled "Revert…" whose body names `#<pr>` or
- * `/pull/<pr>`.
+ * interfaces/git.ts) find the revert in a record, read the way `findReverts` reads them: a commit
+ * after the merge whose message says "This reverts commit <merge>" (the `git log` read), and,
+ * among the merged PRs `gh pr list --base <base> --state merged` lists (`listed`), one with a
+ * merge commit, titled "Revert…", whose body names `#<pr>` or `/pull/<pr>` (the PR read). The PR
+ * read counts only when that listed PR's merge commit is the revert's own.
  */
 export const detectRevert = (
-  record: Pick<RevertCheckRecord, "merge" | "revert">,
+  record: Pick<RevertCheckRecord, "merge" | "revert" | "listed">,
 ): { readonly git_log: boolean; readonly pr_reference: boolean } => {
   const mention = new RegExp(`(#|/pull/)${String(record.merge.pr)}(?![0-9])`);
   return {
     git_log: record.revert.commits.some((c) =>
       c.message.includes(`This reverts commit ${record.merge.merge_commit}`),
     ),
-    pr_reference: /^revert/i.test(record.revert.title) && mention.test(record.revert.body),
+    pr_reference: record.listed.some(
+      (p) =>
+        p.merge_commit !== null &&
+        /^[0-9a-f]{40}$/.test(p.merge_commit) &&
+        p.merge_commit === record.revert.merge_commit &&
+        /^revert/i.test(p.title) &&
+        mention.test(p.body),
+    ),
   };
+};
+
+/**
+ * Pure: whether a checkout's `origin` URL is `repo` (`<owner>/<name>`) on github.com: the owner
+ * must follow `github.com/` or `github.com:`, so `git@github.com:other/bs-vtc.git` is not
+ * `owner/bs-vtc`. Every push and delete goes to `origin`, while `gh` reads and merges `--repo`.
+ */
+export const originIsRepo = (origin: string, repo: string): boolean => {
+  const escaped = repo.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  return new RegExp(
+    `^(?:https://(?:[^@/]+@)?|ssh://git@|git@)github\\.com[:/]${escaped}(?:\\.git)?/?$`,
+    "i",
+  ).test(origin.trim());
 };
 
 // ---------------------------------------------------------------------- the live run (Lead)
@@ -294,12 +316,7 @@ const live = async (args: RevertCheckArgs): Promise<void> => {
 
   // preflight: the checkout's origin is the repo, gh is signed in, the method is allowed
   const origin = must("git remote get-url origin", git(["remote", "get-url", "origin"]));
-  if (
-    !origin
-      .toLowerCase()
-      .replace(/\.git$/, "")
-      .endsWith(args.repo.toLowerCase())
-  )
+  if (!originIsRepo(origin, args.repo))
     throw new Error(`origin (${origin}) is not ${args.repo}: run this from a bs-vtc checkout`);
   must("gh auth status", gh(["auth", "status"]));
   const settings = JSON.parse(
@@ -530,6 +547,8 @@ const live = async (args: RevertCheckArgs): Promise<void> => {
             base,
             "--state",
             "merged",
+            "--limit",
+            "20",
             "--json",
             "number,title,body,mergeCommit",
           ]),
@@ -568,7 +587,7 @@ const live = async (args: RevertCheckArgs): Promise<void> => {
       branches: { base, feature },
       ...partial,
       listed,
-      detection: detectRevert(partial),
+      detection: detectRevert({ ...partial, listed }),
     });
     const text = `${JSON.stringify(record, null, 2)}\n`;
     if (args.record === undefined) process.stdout.write(text);

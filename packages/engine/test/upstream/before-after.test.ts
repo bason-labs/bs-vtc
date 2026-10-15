@@ -21,7 +21,9 @@ import { afterEach, describe, expect, it } from "vitest";
 import {
   artifactRouteKey,
   BEFORE_AFTER_FLOW_ALT,
+  boundedFlowGlobMatch,
   changedFlow,
+  FIRST_SCREEN_ALT,
   EVIDENCE_READY,
   FLOWS_FILE_MAX_BYTES,
   flowVideoAlt,
@@ -29,6 +31,7 @@ import {
   type AutoPrInput,
   type UpstreamEvent,
 } from "../../src/upstream/index.js";
+import { globMatch } from "../../src/core/index.js";
 import { cleanupDirs, tempDir } from "../helpers/repo.js";
 import { fakeRecorder, type FakeRecorder } from "./fakes.js";
 import { BASE_SHA, harness } from "./harness.js";
@@ -355,6 +358,111 @@ describe("choosing and captioning the changed flow (pure)", () => {
     ).toBeUndefined();
   });
 
+  it("matches flow globs exactly as the engine's globMatch does", () => {
+    const match = boundedFlowGlobMatch();
+    const globs = [
+      "src/cart/**",
+      "**/*.tsx",
+      "src/**/Total.tsx",
+      "src/*/a.ts",
+      "src/?art/a.ts",
+      "**",
+      "src/**",
+      "**/x",
+      "a/**/b/**/c",
+      "src/{cart,auth}/*.ts",
+      "src/{cart,}/a.ts",
+      "{**/a,b}",
+      "src/ca**/a.ts",
+      "src/***/a.ts",
+      "a.b+c/(x)/[y]",
+      "src/}x,y",
+      "src/{a,{b}}",
+      "src/{a",
+      "README.md",
+    ];
+    const paths = [
+      "src/cart/a.ts",
+      "src/cart/deep/b.tsx",
+      "src/auth/a.ts",
+      "src/a.ts",
+      "src//a.ts",
+      "src/Total.tsx",
+      "src/x/y/Total.tsx",
+      "README.md",
+      "x",
+      "a/x",
+      "a/b/c",
+      "a/q/b/r/s/c",
+      "b",
+      "q/a",
+      "a.b+c/(x)/[y]",
+      "src/}x,y",
+      "src/ca/a.ts",
+      "src/cabc/a.ts",
+      "src/line\nbreak",
+      "src/\u{1F600}/a.ts",
+      "",
+    ];
+    for (const glob of globs)
+      for (const path of paths) {
+        let expected: boolean;
+        try {
+          expected = globMatch(glob, path);
+        } catch {
+          // core cannot build the expression (nested or unclosed braces): never a match
+          expected = false;
+        }
+        expect(match(glob, path), `${glob} ~ ${JSON.stringify(path)}`).toBe(expected);
+      }
+  });
+
+  it("selects quickly for a pathological glob against a deep path (no backtracking)", async () => {
+    // `**/` twelve times and more: core's backtracking expression takes minutes on such a path
+    const evil = `${"**/".repeat(40)}x`;
+    const starry = `${"*a".repeat(40)}b`;
+    const flows = [
+      "flows:",
+      "  - id: evil",
+      "    start: /",
+      `    paths: ["${evil}", "${starry}"]`,
+      "    steps:",
+      "      - { action: wait, ms: 10 }",
+      "",
+    ].join("\n");
+    const deep = `${Array.from({ length: 60 }, (_, i) => `d${String(i)}`).join("/")}/y`;
+    // and `*a` forty times against one long segment of `a`s with no `b`
+    const long = "a".repeat(1000);
+    const started = performance.now();
+    expect(
+      await changedFlow({ readFlowsFile: read(flows), changedPaths: paths([deep, long]) }),
+    ).toBeUndefined();
+    expect(
+      await changedFlow({
+        readFlowsFile: read(flows),
+        changedPaths: paths([deep.replace(/y$/, "x")]),
+      }),
+    ).toBe("evil");
+    expect(performance.now() - started).toBeLessThan(2000);
+  });
+
+  it("names no flow once the selection's matching budget is spent", async () => {
+    expect(
+      await changedFlow({
+        readFlowsFile: read(FLOWS_YAML),
+        changedPaths: paths(["src/cart/a.ts"]),
+        matchBudget: 10,
+      }),
+    ).toBeUndefined();
+    // the same change within the default budget
+    expect(
+      await changedFlow({
+        readFlowsFile: read(FLOWS_YAML),
+        changedPaths: paths(["src/cart/a.ts"]),
+      }),
+    ).toBe("checkout");
+  });
+
   it("captions a side by what the gate runner reports for the requested flow", () => {
     const flow = { id: "checkout", before: "scripted", after: "idle" } as const;
     expect(flowVideoAlt("checkout", flow, "before")).toBe(
@@ -363,16 +471,21 @@ describe("choosing and captioning the changed flow (pure)", () => {
     expect(flowVideoAlt("checkout", flow, "after")).toBe(
       'First rendered screen, loading then idle: this side has no flow "checkout" (after)',
     );
-    // a video of no known side: one caption only when both sides agree
-    expect(flowVideoAlt("checkout", flow, undefined)).toBe(BEFORE_AFTER_FLOW_ALT);
+    // a video of no known side: one caption only when both sides agree, else both sides'
+    expect(flowVideoAlt("checkout", flow, undefined)).toBe(
+      'A recording of the changed flow "checkout" (before: scripted, after: idle)',
+    );
     expect(
       flowVideoAlt("checkout", { id: "checkout", before: "failed", after: "failed" }, undefined),
     ).toBe('The changed flow "checkout" up to the step that failed');
-    // no flow asked for, or a report of another flow: the first-screen caption
+    // no flow asked for: the first-screen caption, which says no flow matches
     expect(flowVideoAlt(undefined, flow, "before")).toBe(`${BEFORE_AFTER_FLOW_ALT} (before)`);
-    expect(flowVideoAlt("sign-in", flow, "before")).toBe(`${BEFORE_AFTER_FLOW_ALT} (before)`);
-    expect(flowVideoAlt("checkout", undefined, "after")).toBe(`${BEFORE_AFTER_FLOW_ALT} (after)`);
     expect(BEFORE_AFTER_FLOW_ALT).toMatch(/^First rendered screen, loading then idle/);
+    // a flow asked for but a report of another flow, or none: the first-screen caption, with no
+    // claim that no flow matches (one did)
+    expect(flowVideoAlt("sign-in", flow, "before")).toBe(`${FIRST_SCREEN_ALT} (before)`);
+    expect(flowVideoAlt("checkout", undefined, "after")).toBe(`${FIRST_SCREEN_ALT} (after)`);
+    expect(FIRST_SCREEN_ALT).toBe("First rendered screen, loading then idle");
   });
 });
 
@@ -446,6 +559,8 @@ describe("the scripted flow of an automatic UI PR (D-ct; reading 247(7))", () =>
     expect(recorder.beforeAfter[0]?.flow).toBe("checkout");
     expect(h.github.state.prs[0]?.body).toContain("First rendered screen, loading then idle");
     expect(h.github.state.prs[0]?.body).not.toContain("The changed flow");
+    // a flow did match: the caption gives no false reason
+    expect(h.github.state.prs[0]?.body).not.toContain("no scripted flow matches");
   });
 
   it("names no flow when none matches, or the flows file is missing or invalid", async () => {
