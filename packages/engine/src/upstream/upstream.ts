@@ -11,6 +11,8 @@ import { mkdirSync, realpathSync } from "node:fs";
 import { join } from "node:path";
 import {
   AUTO_LABELS,
+  LOOKBACK_REPO,
+  RoutingScorecardSchema,
   autoBranchName,
   autoKindLabel,
   autoPushRefAllowed,
@@ -20,6 +22,7 @@ import {
   type AssetBundle,
   type AutoFingerprint,
   type AutoKind,
+  type AutoIssueRef,
   type AutoPrRef,
   type AutomationContext,
   type AutomationDeps,
@@ -34,6 +37,7 @@ import {
   type PlumbingChange,
   type PromptProposal,
   type ReplayResult,
+  type RoutingScorecard,
   type Scorecard,
   type AutomationRunRef,
   type StartInput,
@@ -80,11 +84,13 @@ import {
   rolePromptIdentitySha,
 } from "./lookback-pr.js";
 import {
+  artifactRouteKey,
+  jsonArtifact,
   upstreamEvidenceSnapshot,
   type UpstreamEvidenceData,
 } from "./evidence/upstream-snapshot.js";
 import { upstreamIssueSlots } from "./report-render.js";
-import { ensureDirNoFollow, repoFileName } from "./safe-fs.js";
+import { ensureDirNoFollow, readRegularFileNoFollow, repoFileName } from "./safe-fs.js";
 import { AutomationSkip, isAutomationSkip } from "./skip.js";
 import { createKeyedSerial } from "./queue.js";
 import {
@@ -95,6 +101,7 @@ import {
 } from "./remote-refs.js";
 import { createStaging, stagingRootFor, type Staging } from "./staging.js";
 import { upstreamStateDir } from "./state-dir.js";
+import { projectSubject, routingSubjectOfBody } from "./subject.js";
 import {
   evaluateTrigger,
   fixableItem,
@@ -102,6 +109,7 @@ import {
   type AutomationFact,
   type AutoWorkItem,
 } from "./triggers.js";
+import { framesFromIssueBody, framesTouchUi, projectTouchesUi } from "./ui-paths.js";
 
 type Schemas = typeof UPSTREAM_EVENT_PAYLOAD_SCHEMAS;
 export type UpstreamEventType = keyof Schemas;
@@ -145,9 +153,9 @@ export interface UpstreamDeps {
   /** The compiled plugins' templates and the dashboard export. */
   readonly assets: AssetBundle;
   /**
-   * Every action and skip as an event (D-ca). An `{ status: "error" }` outcome (a gh, git or
-   * template failure) has no event of its own (contracts 5.0.0 has no such skip reason; a contract
-   * proposal adds one): the daemon records it, e.g. as an incident note, so it stays visible.
+   * Every action and skip as an event (D-ca). An unexpected failure (a gh, git or template error)
+   * is `automation.skipped` with reason `error` and the redacted message (contracts 5.4.0), and
+   * the call still answers `{ status: "error" }`, so the daemon can retry it.
    */
   readonly emit: (event: UpstreamEvent) => void;
   readonly now?: () => Date;
@@ -169,13 +177,14 @@ export interface UpstreamDeps {
    */
   readonly vtcRoots?: readonly string[];
   /**
-   * Fetch and commit-message reading for a repo (engine git; `GitPlumbing` has neither, see
-   * `remote-refs.ts`). Right before VTC builds a commit on a shared branch (`vtc-evidence`,
-   * `vtc/auto/*`) it fetches that branch, and it recognises a head another VTC installation
-   * pushed by its `Generated-by: VTC` trailer. Absent, VTC builds on the remote-tracking refs as
-   * last fetched by the user's own git: a stale ref then makes the (never forced) push fail, the
-   * PR is skipped and no "evidence capture failed" is raised; and a branch head missing from
-   * this installation's ledger counts as someone else's.
+   * Fetch and commit-message reading for a repo (engine git). Right before VTC builds a commit on
+   * a shared branch (`vtc-evidence`, `vtc/auto/*`) it fetches that branch, and it recognises a
+   * head another VTC installation pushed by its `Generated-by: VTC` trailer. The injected
+   * `GitPlumbing`'s own `fetch` and `message` (contracts 5.4.0) are used when it has both; this is
+   * the fallback until engine core's plumbing implements them. With neither, VTC builds on the
+   * remote-tracking refs as last fetched by the user's own git: a stale ref then makes the (never
+   * forced) push fail, the PR is skipped and no "evidence capture failed" is raised; and a branch
+   * head missing from this installation's ledger counts as someone else's.
    */
   readonly remoteRefs?: (repoRoot: string) => RemoteRefs;
   /**
@@ -313,6 +322,54 @@ export interface Upstream {
   };
 }
 
+/** The largest routing scorecard the module reads from a checkout. */
+const ROUTING_SCORECARD_MAX_BYTES = 1024 * 1024;
+
+/** The automatic issue a PR answers: the one it closes, else the open one of its fingerprint. */
+const ownIssue = (
+  listed: readonly AutoIssueRef[],
+  input: Pick<AutoPrInput, "issue" | "fingerprint">,
+): AutoIssueRef | undefined =>
+  listed.find((i) =>
+    input.issue === undefined
+      ? i.state === "open" && i.marker?.fp === input.fingerprint
+      : i.number === input.issue && i.marker?.fp === input.fingerprint,
+  );
+
+/**
+ * A checkout's routing scorecard (D-cn, `LOOKBACK_REPO.routingScorecard`), never through a
+ * symlink and only when it is valid as its strict contract (VTC vocabulary and numbers); else
+ * `undefined` (the chart is then not captured and the evidence says so).
+ */
+const readRoutingScorecard = (repoRoot: string): RoutingScorecard | undefined => {
+  const bytes = readRegularFileNoFollow(
+    join(repoRoot, LOOKBACK_REPO.routingScorecard),
+    ROUTING_SCORECARD_MAX_BYTES,
+  );
+  if (bytes === null) return undefined;
+  try {
+    const parsed = RoutingScorecardSchema.safeParse(JSON.parse(new TextDecoder().decode(bytes)));
+    return parsed.success ? parsed.data : undefined;
+  } catch {
+    return undefined;
+  }
+};
+
+/** The run's snapshot with its routing scorecard served, unless the caller's already is. */
+const withRoutingRoute = (
+  snapshot: AutoPrInput["evidence"]["snapshot"],
+  run: string | undefined,
+  card: RoutingScorecard | undefined,
+): AutoPrInput["evidence"]["snapshot"] => {
+  if (card === undefined || run === undefined) return snapshot;
+  const key = artifactRouteKey(run, LOOKBACK_REPO.routingScorecard);
+  if (snapshot.routes[key] !== undefined) return snapshot;
+  return {
+    ...snapshot,
+    routes: { ...snapshot.routes, [key]: jsonArtifact(run, LOOKBACK_REPO.routingScorecard, card) },
+  };
+};
+
 const QUIET_COMMENT = (version: string): string =>
   `${QUIET_CLOSE_MARKER}\nNot seen for 14 days as of VTC ${version}. VTC reopens this issue if it recurs; label it \`${AUTO_LABELS.keep}\` to keep it open or \`${AUTO_LABELS.muted}\` to stop it for good.`;
 
@@ -339,6 +396,18 @@ export const createUpstream = (deps: UpstreamDeps): Upstream => {
     );
     return withFileLock(join(dir, `${repoFileName(repo)}.lock`), task);
   };
+  /**
+   * Fetch and commit messages for a repo: the injected plumbing's own (contracts 5.4.0) when it
+   * has both, else the daemon's `remoteRefs` seam, else none.
+   */
+  const remoteRefsFor = (repoRoot: string): RemoteRefs | undefined => {
+    const plumbing = deps.automation.plumbing?.({ repoRoot });
+    const fetch = plumbing?.fetch?.bind(plumbing);
+    const message = plumbing?.message?.bind(plumbing);
+    if (fetch !== undefined && message !== undefined) return { fetch, message };
+    return deps.remoteRefs?.(repoRoot);
+  };
+
   const issues = deps.automation.issues ?? gh.issues;
   const pullRequests = deps.automation.pullRequests ?? gh.pullRequests;
   const defaultBranch = deps.defaultBranch ?? gh.defaultBranch;
@@ -409,6 +478,23 @@ export const createUpstream = (deps: UpstreamDeps): Upstream => {
     return { status: "skipped", reason: error.reason, detail: error.detail };
   };
 
+  /**
+   * An unexpected failure (AD-27 rule 7; contracts 5.4.0): visible as `automation.skipped` with
+   * reason `error` and the message through the shared redaction, and answered as `error` so the
+   * daemon can retry the action.
+   */
+  const failure = (
+    error: unknown,
+    meta: { target?: "upstream" | "project"; kind?: AutoKind; fingerprint?: string },
+    ctx: ProjectContext,
+  ): AutomationOutcome => {
+    const raw = error instanceof Error ? error.message : String(error);
+    const detail =
+      redactSecrets(raw, ctx.knownValues).trim().slice(0, 500) || "an automatic action failed";
+    skipped(new AutomationSkip("error", detail), meta, ctx);
+    return { status: "error", detail };
+  };
+
   const guarded = async (
     meta: { target?: "upstream" | "project"; kind?: AutoKind; fingerprint?: string },
     ctx: ProjectContext,
@@ -418,7 +504,7 @@ export const createUpstream = (deps: UpstreamDeps): Upstream => {
       return await body();
     } catch (error) {
       if (isAutomationSkip(error)) return skipped(error, meta, ctx);
-      return { status: "error", detail: error instanceof Error ? error.message : String(error) };
+      return failure(error, meta, ctx);
     }
   };
 
@@ -487,7 +573,9 @@ export const createUpstream = (deps: UpstreamDeps): Upstream => {
         firstSeen: record?.firstSeen ?? at,
         lastSeen: record?.lastSeen ?? at,
       });
-      const slots = upstreamIssueSlots(report, { regressionOf });
+      // D-cs, D-cn: a tool, capability or config subject, through its kind's pattern only
+      const subject = projectSubject(item.kind, item.subject);
+      const slots = upstreamIssueSlots(report, { regressionOf, subject });
       const title = slots.title ?? renderTitle(item.kind, item.kind);
       const body = renderBody(template, slots);
       assertUpstreamSafe(report, [title, body], privacyCheck(ctx));
@@ -756,12 +844,17 @@ export const createUpstream = (deps: UpstreamDeps): Upstream => {
       item.target === "project"
         ? `${rendered.title}\n\n${redactSecrets(item.detail, ctx.knownValues)}`
         : rendered.body;
+    // D-ct: the paths the issue touches decide whether its PR records UI before/after
+    const hasUi =
+      item.target === "project"
+        ? projectTouchesUi(item.paths)
+        : framesTouchUi(item.facts.frames ?? []);
     await askRun(
       {
         request: runRequest(`${repo}#${String(number)}`, rendered.title, spec, item.kind),
         track: "quick_fix",
         repo: "existing",
-        has_ui: false,
+        has_ui: hasUi,
         risk_hints: [],
       },
       {
@@ -804,7 +897,8 @@ export const createUpstream = (deps: UpstreamDeps): Upstream => {
           ),
           track: "quick_fix",
           repo: "existing",
-          has_ui: false,
+          // D-ct: the VTC frames the issue lists decide whether its PR records UI before/after
+          has_ui: framesTouchUi(framesFromIssueBody(issue.body)),
           risk_hints: [],
         },
         {
@@ -873,7 +967,7 @@ export const createUpstream = (deps: UpstreamDeps): Upstream => {
     const factory = deps.automation.plumbing;
     if (factory === undefined) throw new Error("no git plumbing was injected");
     const plumbing = factory({ repoRoot });
-    const refs = deps.remoteRefs?.(repoRoot);
+    const refs = remoteRefsFor(repoRoot);
     // Only the automatic branches: the base stays the commit a Lookback PR read its files at.
     await refreshRemote(refs, "origin", [AUTO_BRANCHES_REFSPEC]);
     const baseSha =
@@ -926,6 +1020,16 @@ export const createUpstream = (deps: UpstreamDeps): Upstream => {
     return sha;
   };
 
+  /** The default branch's commit in `repoRoot` (the remote-tracking ref first), or `null`. */
+  const defaultBranchSha = async (repoRoot: string, base: string): Promise<GitSha | null> => {
+    const plumbing = deps.automation.plumbing?.({ repoRoot });
+    if (plumbing === undefined) return null;
+    return (
+      (await plumbing.resolve(`refs/remotes/origin/${base}`)) ??
+      (await plumbing.resolve(`refs/heads/${base}`))
+    );
+  };
+
   const openPullRequest = (input: AutoPrInput, ctx: ProjectContext): Promise<AutomationOutcome> =>
     serial(`pr:${input.target}:${input.fingerprint}`, () => openPullRequestNow(input, ctx));
 
@@ -959,14 +1063,27 @@ export const createUpstream = (deps: UpstreamDeps): Upstream => {
         upstream && (!onUpstreamCheckout(ctx) || input.evidence.plan.upstreamSafe);
       // A project's `automation.evidence` settings apply to its own repo's PRs.
       const projectEvidence = upstream ? undefined : ctx.evidence;
+      const listedIssues = await issues.listAutomatic(repo);
+      // D-cn: a routing-table change (its issue names a routing cell) charts the routing
+      // scorecard, from the caller's VTC-side data or the run's own checkout.
+      const routing =
+        input.kind === "config" &&
+        routingSubjectOfBody(ownIssue(listedIssues, input)?.body) !== null;
+      const routingCard = routing
+        ? (input.evidence.upstream?.routingScorecard ?? readRoutingScorecard(ctx.repoRoot))
+        : undefined;
       // Reading 212(3): the upstream-safe page reads the dashboard's own frozen routes of a
       // synthetic run, built here from the report and VTC-side data only, never the caller's
       // routes or the run's events.
+      const safeData: UpstreamEvidenceData | undefined =
+        routingCard === undefined
+          ? input.evidence.upstream
+          : { ...input.evidence.upstream, routingScorecard: routingCard };
       const safeSnapshot =
         upstreamSafe && report !== undefined
           ? upstreamEvidenceSnapshot({
               report,
-              ...(input.evidence.upstream === undefined ? {} : { data: input.evidence.upstream }),
+              ...(safeData === undefined ? {} : { data: safeData }),
               vtcVersion: deps.vtcVersion,
             })
           : undefined;
@@ -974,10 +1091,11 @@ export const createUpstream = (deps: UpstreamDeps): Upstream => {
         ...input.evidence.plan,
         ...(safeSnapshot === undefined ? {} : { upstreamSafe: true, run: safeSnapshot.run }),
         ...(projectEvidence?.video === false ? { video: false } : {}),
+        ...(routing ? { routing: true } : {}),
       };
       const snapshot =
         safeSnapshot === undefined
-          ? input.evidence.snapshot
+          ? withRoutingRoute(input.evidence.snapshot, input.evidence.plan.run, routingCard)
           : { routes: safeSnapshot.routes, events: safeSnapshot.events };
       const early = planPrCap({
         open: await pullRequests.listOpenAutomatic(repo),
@@ -990,7 +1108,7 @@ export const createUpstream = (deps: UpstreamDeps): Upstream => {
       // AD-27 rule 4: a fingerprint a human muted is never raised again, as an issue or a PR.
       const issueState = decideIssue({
         fingerprint: input.fingerprint,
-        issues: await issues.listAutomatic(repo),
+        issues: listedIssues,
         record: ledger.record(repo, input.fingerprint),
         now: now(),
         material: false,
@@ -1066,6 +1184,16 @@ export const createUpstream = (deps: UpstreamDeps): Upstream => {
           ...(open === undefined ? {} : { open }),
         });
       }
+      // D-ct: an automatic run's UI PR (Final Review of an automatic run only) has the gate
+      // runner render its base and its head; the base is the default branch the PR merges into.
+      const beforeAfter =
+        "pushedHead" in input.source && plan.change === "ui" && !plan.upstreamSafe
+          ? {
+              repoRoot,
+              base: await defaultBranchSha(repoRoot, base),
+              head: input.source.pushedHead,
+            }
+          : undefined;
       const hosting = deps.automation.hosting;
       return withStaging(async (staging) => {
         gate(input.target, "prs", ctx);
@@ -1090,6 +1218,7 @@ export const createUpstream = (deps: UpstreamDeps): Upstream => {
             ...(projectEvidence?.maxBytes === undefined
               ? {}
               : { maxBytes: projectEvidence.maxBytes }),
+            ...(beforeAfter === undefined ? {} : { beforeAfter }),
           },
           {
             recorder,
@@ -1101,7 +1230,7 @@ export const createUpstream = (deps: UpstreamDeps): Upstream => {
               hosting === "branch" && deps.automation.plumbing !== undefined
                 ? deps.automation.plumbing({ repoRoot })
                 : undefined,
-            refs: deps.remoteRefs?.(repoRoot),
+            refs: remoteRefsFor(repoRoot),
             now,
             beforePublish: () => {
               gate(input.target, "prs", ctx);
@@ -1208,6 +1337,9 @@ export const createUpstream = (deps: UpstreamDeps): Upstream => {
             branch,
             ...(input.issue === undefined ? {} : { issue: input.issue }),
             evidence: finalStatus,
+            ...(finalStatus === "partial" && evidence.partialReason !== undefined
+              ? { partial_reason: evidence.partialReason }
+              : {}),
           });
           // AD-27 rule 2: ready only on the Spec Verifier's pass, or for a kind that has none
           // (never for a branch an automatic run pushed, which always has one).
@@ -1439,10 +1571,7 @@ export const createUpstream = (deps: UpstreamDeps): Upstream => {
         try {
           results.push(...(await sweepTarget(target, ctx)));
         } catch (error) {
-          results.push({
-            status: "error",
-            detail: error instanceof Error ? error.message : String(error),
-          });
+          results.push(failure(error, { target }, ctx));
         }
       }
       return results;

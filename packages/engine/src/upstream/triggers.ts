@@ -90,6 +90,11 @@ export type AutoWorkItem =
       readonly minOccurrences: number;
       /** Without occurrence counts: the module adds them from the ledger at send time. */
       readonly facts: Omit<UpstreamFacts, "occurrences" | "firstSeen" | "lastSeen">;
+      /**
+       * A D-cd improvement's subject as the fact named it; the issue renders it only through its
+       * kind's pattern (`projectSubject`, D-cs), never as given.
+       */
+      readonly subject?: string | undefined;
       readonly at: string;
     }
   | {
@@ -100,6 +105,8 @@ export type AutoWorkItem =
       readonly title: string;
       readonly detail: string;
       readonly run?: string | undefined;
+      /** The project-relative paths the problem names (its `path`), for `has_ui` (D-ct). */
+      readonly paths: readonly string[];
       readonly at: string;
     };
 
@@ -227,6 +234,7 @@ export const evaluateTrigger = (
         fingerprint,
         minOccurrences: 1,
         facts: { ...base, kind: fact.kind, fingerprint, role: fact.role, metrics: fact.metrics },
+        subject: fact.subject,
         at: fact.at,
       };
     }
@@ -245,6 +253,7 @@ export const evaluateTrigger = (
         title: fact.title,
         detail: fact.detail,
         run: fact.run,
+        paths: fact.path === undefined ? [] : [fact.path],
         at: fact.at,
       };
     }

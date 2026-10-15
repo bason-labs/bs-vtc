@@ -17,6 +17,7 @@ import {
   type EvidenceAttachment,
   type EvidenceFileKind,
   type EvidenceHosting,
+  type EvidencePartialReason,
   type GitHubRepo,
   type GitPlumbing,
 } from "@vtc/shared";
@@ -93,6 +94,8 @@ export const renderEvidenceSection = (input: {
   readonly partial: boolean;
   /** What a partial set lacks, and why; the note names each (absent: a plain "partial" note). */
   readonly missing?: readonly MissingEvidence[];
+  /** Why the set is partial, when known (D-ct): said first. */
+  readonly reason?: EvidencePartialReason | undefined;
 }): string => {
   const order = (f: EvidenceFile): number =>
     f.kind === "replay_gif" ? 0 : isVideo(f.name) ? 1 : 2;
@@ -107,11 +110,12 @@ export const renderEvidenceSection = (input: {
     });
   if (input.partial) {
     const missing = input.missing ?? [];
+    const why = input.reason === undefined ? "" : ` (${PARTIAL_REASON[input.reason]})`;
     lines.push(
       "",
       missing.length === 0
-        ? "_Evidence is partial._"
-        : `_Evidence is partial: ${missing.map((m) => `no ${MISSING_LABEL[m.kind]} (${MISSING_REASON[m.reason]})`).join("; ")}._`,
+        ? `_Evidence is partial${why}._`
+        : `_Evidence is partial${why}: ${missing.map((m) => `no ${MISSING_LABEL[m.kind]} (${MISSING_REASON[m.reason]})`).join("; ")}._`,
     );
   }
   return lines.join("\n\n");
@@ -141,6 +145,17 @@ const MISSING_REASON: Readonly<Record<MissingEvidenceReason, string>> = {
   video_off: "recordings are off in `automation.evidence.video`",
   budget: "left out to stay within the evidence size budget",
   not_captured: "it could not be captured",
+};
+
+/** What each `EvidencePartialReason` says in the body (D-ct). */
+const PARTIAL_REASON: Readonly<Record<EvidencePartialReason, string>> = {
+  base_build_failed: "the base commit did not build in the gate sandbox, so there is no before",
+  base_serve_failed: "the base commit did not serve in the gate sandbox, so there is no before",
+  no_visual_app: "the project's gates.yml has no visual app to render",
+  no_browser: "no browser is installed for capture; run vtc doctor",
+  video_off: "recordings are off in `automation.evidence.video`",
+  no_ffmpeg: "no ffmpeg for the inline previews `branch` hosting needs",
+  capture_failed: "a capture failed after its retry",
 };
 
 /** Pure: the `--attach` list of `attach` hosting (empty for `branch`). */
