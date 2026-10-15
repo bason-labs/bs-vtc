@@ -11,8 +11,9 @@
  * includes the rounds and escalations it led to. `escalated` is the share of the cell's tasks the
  * role escalated on (Wilson interval) by the shared rule (D-cv, `escalationSteps`): a task counts
  * when the role ran on it in a fix round in which the rule moves its start tier up (a Low start from
- * round 2, a Mid or Top start from round 3; the round is the task's `task.status_changed` round at
- * the dispatch), or when a dispatch of it was logged as an `escalation`. So a log written before
+ * round 2, a Mid start from round 3; a Top start has no tier above it; the round is the task's
+ * `task.status_changed` round at the dispatch), or when a dispatch of it was logged as an
+ * `escalation`. So a log written before
  * D-cv, whose Low start ran its second round on Low, measures what the rule does now.
  * `cost_per_task_usd` is the mean cost the role's submitted dispatches reported per task, over
  * tasks where every one reported a cost. A dispatch logged before contracts 5.4.0 has no tier and is
@@ -177,19 +178,23 @@ const dispatchFacts = (events: readonly VtcEvent[]): Map<string, Dispatch> => {
 /**
  * Whether the role escalated on a task it started on `start` (D-cv): one of its dispatches ran in a
  * round in which the shared rule (`escalationSteps`) moves the start up, or was logged as an
- * `escalation`.
+ * `escalation`. The rule counts only for a start below Top: a Top start has no tier to escalate
+ * to, so its later rounds are fix rounds on Top, not escalations.
  */
 const escalatedOn = (
   start: ModelTier,
   traces: readonly Trace[],
   facts: ReadonlyMap<string, Dispatch>,
-): boolean =>
-  traces.some((t) => {
+): boolean => {
+  const canRise = tierRank(start) < tierRank("top");
+  return traces.some((t) => {
     const fact = facts.get(traceRef(t));
     return (
-      fact !== undefined && (fact.reason === "escalation" || escalationSteps(start, fact.round) > 0)
+      fact !== undefined &&
+      (fact.reason === "escalation" || (canRise && escalationSteps(start, fact.round) > 0))
     );
   });
+};
 
 /** Each submitted dispatch's reported cost (`null`: none), by `<run>:<action_id>`. */
 const dispatchCosts = (events: readonly VtcEvent[]): Map<string, number | null> => {
@@ -626,7 +631,7 @@ export const routingProposals = (
     byCell.set(key, [...(byCell.get(key) ?? []), decision]);
   }
   // 2. one decision per (role, size, risk): higher wins; a group that kept blocks cheaper
-  type Wanted = Omit<RoutingChange, "scope" | "replay" | "subject" | "lifted">;
+  type Wanted = Omit<RoutingChange, "scope" | "subject" | "lifted">;
   const wanted: Wanted[] = [];
   const dropped: { subject: string; reason: string }[] = [];
   const best = (list: readonly GroupDecision[]) =>

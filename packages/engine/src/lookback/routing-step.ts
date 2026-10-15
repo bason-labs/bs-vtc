@@ -11,28 +11,42 @@
  * (`RoutingProposals.dropped`) is no cell of the seam; the scorecard written here keeps its
  * evidence.
  *
- * **Tier replays** (reading 247(6)). Given the RETRO's trial budget (`trialBudget`: what is left of
- * the D-cq per-RETRO cap, `lookbackPaceFor`, after the prompt replays), the VTC home and the locked
- * prompt sections, each change, in the proposals' order, gets one of:
+ * **Tier replays** (reading 247(6)). Given the VTC home and the locked prompt sections, each
+ * change, in the proposals' order, gets one of:
  * - _graded_: the replay ledger holds every trial of its tier replay (`routing-replay.ts`) under the
  *   prompt version the role runs now and the current grader bundle: the step grades it
  *   (`assembleRoutingReplay`), writes the `RoutingReplayResult`, and raises the fact with the verdict
- *   only when `routingReplayBacks(direction, verdict)`; otherwise no fact for the window;
- * - _running_: some of its trials are graded, or the budget has room for at least one whole pair:
- *   the trials that fit are returned to launch (`replays`, whole pairs within the budget, which
- *   each launch draws down) and no fact is raised until the replay is graded; a replay continues
- *   at the next RETRO from what the ledger holds;
- * - _scorecard alone_ (`routing.replay_planned` 0, as before 5.7.0): no budget for a new replay,
- *   no held-out task to replay, no prompt version known for the role, or a trial that measured
- *   nothing `REPLAY_MAX_INFRA_ATTEMPTS` times.
- * Without a trial budget (or the VTC home, or the locked sections) every change carries the
- * scorecard alone. The roles of one shared change move together: when any of them is withheld,
- * none of the shared change's facts is raised, so a shared cell never moves on part of its
- * evidence.
+ *   only when `routingReplayBacks(direction, verdict)`; otherwise no fact for the window. A graded
+ *   replay decides whatever the trial budget, so a RETRO without one never raises the scorecard
+ *   fact a graded replay refused;
+ * - _running_: the replay has started (the ledger holds a grade or an attempt of one of its
+ *   trials), or the caller launches replays (`launchesReplays`) and the RETRO's trial budget
+ *   (`trialBudget`: what is left of the D-cq per-RETRO cap, `lookbackPaceFor`, after the prompt
+ *   replays; absent counts as none) has room for at least one whole pair: the trials that fit are
+ *   returned to launch (`replays`, whole pairs within the budget, which each launch draws down) and
+ *   no fact is raised until the replay is graded; a replay continues at the next RETRO from what
+ *   the ledger holds, and one whose trials wait for a later RETRO logs `automation.skipped`
+ *   `trial_cap`;
+ * - _scorecard alone_ (`routing.replay_planned` 0, as before 5.7.0): no budget for a new replay, a
+ *   caller that does not say it launches them, no held-out task to replay, no prompt version known
+ *   for the role, no replay id for the role (`routingReplayId`'s length bound), a trial that
+ *   measured nothing `REPLAY_MAX_INFRA_ATTEMPTS` times (`automation.skipped` `plugin_locked` when a
+ *   plugin lock was the cause), or a trial that ran on another tier than its arm's: a ledger row
+ *   of another tier, or a trial event that the project's bounds clamped, that a model fallback
+ *   moved or that ran on another tier (`routingReplayOffTier`). Such a replay can never be graded,
+ *   so it is not launched again.
+ * Without the VTC home or the locked sections every change carries the scorecard alone.
  *
- * The replays come back on the returned cells (`RoutingStepCells.replays`) so the result still
- * fits the seam's cell list; engine core launches them as `lookback_replay` trials on their arm's
- * tier (`ReplayTrialRef.tier`) and records each outcome with `recordRoutingReplayTrial`.
+ * **Shared changes.** The roles of one shared change move together: when any of them is withheld
+ * (its replay runs, or was graded and does not back the change), none of the shared change's facts
+ * is raised. A role whose replay cannot run (the scorecard-alone cases above) does not hold the
+ * others: its fact carries its scorecard evidence (`routing.replay_planned` 0) beside the other
+ * roles' graded replays, since requiring a replay from it would block the shared cell for good.
+ *
+ * The replays and the skip drafts come back on the returned cells (`RoutingStepCells.replays`,
+ * `.skipped`) so the result still fits the seam's cell list; engine core launches the replays as
+ * `lookback_replay` trials on their arm's tier (`ReplayTrialRef.tier`), records each outcome with
+ * `recordRoutingReplayTrial`, logs the drafts, and hands the trials' events back as `replayEvents`.
  */
 import {
   DEFAULT_ROUTING_TABLE,
@@ -47,7 +61,11 @@ import {
 } from "@vtc/shared";
 import { readAttributions } from "./attribution.js";
 import { readReplayLedger, REPLAY_MAX_INFRA_ATTEMPTS, replayTrialKey } from "./replay-ledger.js";
-import { ungradedTrialGroups } from "./replay-plan.js";
+import {
+  replaySkippedEvent,
+  ungradedTrialGroups,
+  type AutomationSkippedDraft,
+} from "./replay-plan.js";
 import { cachedAaFlipRate } from "./replay.js";
 import {
   computeRoutingScorecard,
@@ -63,6 +81,7 @@ import {
   assembleRoutingReplay,
   planRoutingReplayTrials,
   routingReplayCosts,
+  routingReplayOffTier,
   routingReplayScope,
   writeRoutingReplayResult,
   type RoutingReplayLaunch,
@@ -71,15 +90,31 @@ import {
 import { readTiebreakKeys } from "./tiebreaks.js";
 import { buildTraces, sameTarget, type LockedShaFor, type Trace } from "./traces.js";
 
-/** The cells to raise, with the tier replay trials this RETRO launches. */
+/**
+ * The cells to raise, with the tier replay trials this RETRO launches and the `automation.skipped`
+ * drafts (D-cg) for engine core to log.
+ */
 export type RoutingStepCells = RoutingProposalCell[] & {
   readonly replays: readonly RoutingReplayLaunch[];
+  readonly skipped: readonly AutomationSkippedDraft[];
 };
 
-const withReplays = (
+const stepCells = (
   cells: RoutingProposalCell[],
-  replays: readonly RoutingReplayLaunch[],
-): RoutingStepCells => Object.assign(cells, { replays });
+  replays: readonly RoutingReplayLaunch[] = [],
+  skipped: readonly AutomationSkippedDraft[] = [],
+): RoutingStepCells => Object.assign(cells, { replays, skipped });
+
+const plural = (n: number, word: string): string => `${String(n)} ${word}${n === 1 ? "" : "s"}`;
+
+/** `routingReplayId`, or `undefined` for a role id too long for the replay id (a slug). */
+const replayIdOf = (change: RoutingChange): string | undefined => {
+  try {
+    return routingReplayId(change.role, change.size, change.risk, change.from, change.to);
+  } catch {
+    return undefined;
+  }
+};
 
 /**
  * The prompt version `target` runs now: that of its latest dispatch in the history with a known
@@ -115,14 +150,23 @@ export const lookbackRoutingStep = async (input: {
   readonly table?: RoutingTable;
   /**
    * The replay trials this RETRO may still launch (D-cq: `lookbackPaceFor`'s per-RETRO cap less
-   * the prompt replays' trials). Absent: no tier replay; every change carries the scorecard alone.
+   * the prompt replays' trials). Absent counts as 0: no trial is launched, but a graded replay
+   * still decides its change and a started one still holds its fact.
    */
   readonly trialBudget?: number;
+  /**
+   * The caller launches every trial of the returned `replays` and records each outcome
+   * (`recordRoutingReplayTrial`). Without it, no new tier replay starts (its change carries the
+   * scorecard alone), so a caller that drops `replays` cannot withhold every routing fact; a
+   * replay the ledger already holds trials of continues.
+   */
+  readonly launchesReplays?: boolean;
   /** How many failure and regression tasks one replay samples (D-cq); default `LOOKBACK_LIMITS`. */
   readonly pace?: Pick<LookbackPace, "failureTasks" | "regressionTasks">;
   /**
    * The replay trials' own events (`purpose: lookback_replay`, left out of `history`), whose
-   * reported costs give a graded tier replay its `cost_delta_pct`. Absent: the cost is unknown.
+   * reported costs give a graded tier replay its `cost_delta_pct` and whose dispatched tiers show a
+   * trial that did not run on its arm's tier (`routingReplayOffTier`). Absent: the cost is unknown.
    */
   readonly replayEvents?: readonly VtcEvent[];
 }): Promise<RoutingStepCells> => {
@@ -147,22 +191,20 @@ export const lookbackRoutingStep = async (input: {
     now: input.now,
     table,
   });
-  if (card.cells.length === 0) return withReplays([], []);
+  if (card.cells.length === 0) return stepCells([]);
   await writeRoutingScorecard(input.projectRoot, card);
   const proposals = routingProposals(card, table);
-  const { vtcHome, lockedShaFor, trialBudget } = input;
-  if (
-    proposals.changes.length === 0 ||
-    trialBudget === undefined ||
-    vtcHome === undefined ||
-    lockedShaFor === undefined
-  )
-    return withReplays(routingProposalCells(proposals), []);
+  const { vtcHome, lockedShaFor } = input;
+  if (proposals.changes.length === 0 || vtcHome === undefined || lockedShaFor === undefined)
+    return stepCells(routingProposalCells(proposals));
 
   const ledger = await readReplayLedger(vtcHome);
   const traces = buildTraces(input.history, lockedShaFor);
-  let budget = Math.max(0, Math.floor(trialBudget));
+  let budget = Math.max(0, Math.floor(input.trialBudget ?? 0));
   const replays: RoutingReplayLaunch[] = [];
+  const skipped: AutomationSkippedDraft[] = [];
+  let waiting = 0;
+  let waitingReplays = 0;
   const scorecard: RoutingEvidence = { kind: "scorecard" };
 
   /** One change's evidence (`null`: withheld) and the trials it launches now. */
@@ -185,7 +227,8 @@ export const lookbackRoutingStep = async (input: {
       ...(input.pace === undefined ? {} : { pace: input.pace }),
     });
     if (tasks.length === 0) return scorecard;
-    const id = routingReplayId(change.role, change.size, change.risk, change.from, change.to);
+    const id = replayIdOf(change);
+    if (id === undefined) return scorecard;
     const planned = planRoutingReplayTrials({ tasks, from: change.from, to: change.to });
     const scope = routingReplayScope({
       repoKey,
@@ -194,6 +237,17 @@ export const lookbackRoutingStep = async (input: {
       graderBundleSha: input.graderBundleSha,
     });
     const rows = ledger.trials(scope);
+    // a trial that ran on another tier than its arm's measures nothing this replay compares; the
+    // ledger keeps a trial's first row, so it would never be graded: the replay stops
+    const offTier = routingReplayOffTier(input.replayEvents ?? [], id);
+    if (
+      planned.some((t) => {
+        const key = replayTrialKey(t);
+        const row = rows.get(key);
+        return offTier.has(key) || (row !== undefined && row.tier !== t.tier);
+      })
+    )
+      return scorecard;
     const aaFlipRate = await cachedAaFlipRate({
       vtcHome,
       repoKey,
@@ -222,20 +276,25 @@ export const lookbackRoutingStep = async (input: {
         ? { kind: "replay", result: assembled.result }
         : null;
     }
-    // a row counts for its arm's tier only (`assembleRoutingReplay`)
-    const graded = new Set(
-      planned
-        .filter((t) => rows.get(replayTrialKey(t))?.tier === t.tier)
-        .map((t) => replayTrialKey(t)),
-    );
+    const graded = new Set(planned.map((t) => replayTrialKey(t)).filter((key) => rows.has(key)));
     const groups = ungradedTrialGroups(planned, graded);
     const infra = ledger.infra(scope);
-    if (
-      groups
-        .flat()
-        .some((t) => (infra.get(replayTrialKey(t))?.attempts ?? 0) >= REPLAY_MAX_INFRA_ATTEMPTS)
-    )
+    const stuck = groups
+      .flat()
+      .map((t) => infra.get(replayTrialKey(t)))
+      .find((a) => a !== undefined && a.attempts >= REPLAY_MAX_INFRA_ATTEMPTS);
+    if (stuck !== undefined) {
+      if (stuck.outcome === "plugin_locked")
+        skipped.push(
+          replaySkippedEvent(
+            "plugin_locked",
+            `the tier replay of ${id} stops: a managed-settings lock kept the installed vtc plugin on ${String(REPLAY_MAX_INFRA_ATTEMPTS)} attempts of one trial; its change carries the scorecard alone`,
+          ),
+        );
       return scorecard;
+    }
+    const started = graded.size > 0 || planned.some((t) => infra.has(replayTrialKey(t)));
+    if (!started && input.launchesReplays !== true) return scorecard;
     const launch: RoutingReplayTrial[] = [];
     let remaining = 0;
     for (const group of groups) {
@@ -244,7 +303,11 @@ export const lookbackRoutingStep = async (input: {
         budget -= group.length;
       } else remaining += group.length;
     }
-    if (launch.length === 0 && graded.size === 0) return scorecard;
+    if (launch.length === 0 && !started) return scorecard;
+    if (remaining > 0) {
+      waiting += remaining;
+      waitingReplays += 1;
+    }
     if (launch.length > 0)
       replays.push({
         proposal: id,
@@ -260,6 +323,13 @@ export const lookbackRoutingStep = async (input: {
 
   const evidence = new Map<RoutingChange, RoutingEvidence | null>();
   for (const change of proposals.changes) evidence.set(change, await tierReplay(change));
+  if (waiting > 0)
+    skipped.push(
+      replaySkippedEvent(
+        "trial_cap",
+        `${plural(waiting, "tier replay trial")} of ${plural(waitingReplays, "routing change")} wait for the next RETRO: this RETRO's trial budget is spent`,
+      ),
+    );
   // one shared change moves on all of its roles' evidence, or not at all
   const sharedKey = (c: RoutingChange) => `${c.size}.${c.risk}\n${c.direction}\n${c.to}`;
   const withheld = new Set(
@@ -267,12 +337,13 @@ export const lookbackRoutingStep = async (input: {
       .filter((c) => c.scope === "shared" && evidence.get(c) === null)
       .map(sharedKey),
   );
-  return withReplays(
+  return stepCells(
     routingProposalCells(proposals, (c) => {
       if (c.scope === "shared" && withheld.has(sharedKey(c))) return null;
       const backing = evidence.get(c);
       return backing === undefined ? scorecard : backing;
     }),
     replays,
+    skipped,
   );
 };
