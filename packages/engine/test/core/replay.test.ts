@@ -76,6 +76,7 @@ interface Line {
   task?: string;
   feature?: string;
   prompt_sha?: string;
+  model?: string;
   data: Record<string, unknown>;
 }
 const eventsOf = (repo: string, run: string): Line[] =>
@@ -276,6 +277,8 @@ interface FakeOptions {
   readonly perArm?: number;
   /** The verdict grader (D-ch); absent: none is wired. */
   readonly gradeVerdict?: LookbackRetro["gradeVerdict"];
+  /** The tier the recorded dispatch ran on (D-cm); absent: a log from before 5.4.0. */
+  readonly tier?: LookbackReplayTrial["tier"];
 }
 
 /**
@@ -314,6 +317,7 @@ const fakeReplays = (
         pack,
         base: at,
         ...(options.protectedPaths === undefined ? {} : { protectedPaths: options.protectedPaths }),
+        ...(options.tier === undefined ? {} : { tier: options.tier }),
       });
       const per = options.perArm ?? 1;
       return Promise.resolve({
@@ -558,6 +562,33 @@ describe("RETRO runs Lookback replays as headless runs (AD-21 rule 6, readings 1
     expect(fake.finished[0]?.outcomes.map((o) => o.passed)).toEqual([false, true]);
     expect(h.engine.status({}).run.finished_at).toBeDefined();
     await h.release();
+  });
+
+  it("runs every trial on the tier its recorded dispatch ran on, never re-routed (D-cm, reading 218 (7))", async () => {
+    const recorded = atRetro(["a", "b"], {
+      tier: { tier: "low", reason: "rule", clamped: false },
+    });
+    await recorded.reach();
+    expect(
+      recorded.trials.runs.map((t) => ({
+        model: t.dispatched?.model,
+        tier: t.dispatched?.data.tier,
+        reason: t.dispatched?.data.tier_reason,
+      })),
+    ).toEqual([
+      { model: "haiku", tier: "low", reason: "rule" },
+      { model: "haiku", tier: "low", reason: "rule" },
+    ]);
+    await recorded.h.release();
+    // a dispatch logged before 5.4.0 recorded no tier: the role's own
+    const older = atRetro(["a"]);
+    await older.reach();
+    expect(older.trials.runs[0]?.dispatched?.data).toMatchObject({
+      tier: "mid",
+      tier_reason: "role",
+      tier_clamped: false,
+    });
+    await older.h.release();
   });
 
   it("hands Lookback the trials' enforced read deny: read_denied only when the host enforced it (reading 178)", async () => {

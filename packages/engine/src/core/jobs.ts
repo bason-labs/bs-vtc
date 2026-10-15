@@ -721,7 +721,7 @@ export const downgradeNoRemote = (k: Kernel, h: RunHandle): void => {
  * An automatic run's push (AD-27 rules 1 and 2): the integration head to `refs/heads/<dst>`
  * (`autoBranchName`) through `GitPlumbing`, which refuses any destination `autoPushRefAllowed`
  * rejects, the remote's default branch, and a force. Its events name the integration branch
- * (`branch.pushed` takes `vtc/F-n` only); the remote name follows from `run.started.automation`.
+ * and the remote branch it wrote (`remote_ref`, contracts 5.4.0).
  * No PR and no task status change: see {@link pushFeature}.
  */
 const pushAutomatic = async (
@@ -750,13 +750,14 @@ const pushAutomatic = async (
             type: "branch.pushed",
             actor: "engine",
             feature: featureId,
-            data: { branch, commit },
+            // the remote branch it wrote (contracts 5.4.0): `vtc/auto/<kind>/<fp8>`
+            data: { branch, commit, remote_ref: dst },
           }
         : {
             type: "branch.push_failed",
             actor: "engine",
             feature: featureId,
-            data: { branch, detail: failureDetail(failure, k.secrets()) },
+            data: { branch, detail: failureDetail(failure, k.secrets()), remote_ref: dst },
           },
     );
     return Promise.resolve();

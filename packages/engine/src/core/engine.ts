@@ -37,7 +37,7 @@ import {
   type NextResult,
   type Phase,
   type ProjectConfig,
-  type RunControlResult,
+  type ControlResult,
   type HumanOnlyToolName,
   type ResumeInput,
   type RunScopedInput,
@@ -104,6 +104,7 @@ import {
 import { EngineWrites, NEVER_WROTE } from "./engine-writes.js";
 import {
   appendPrivateFile,
+  automationPausedByHuman,
   ensurePrivateDir,
   guardDirFor,
   readPrivateFile,
@@ -2215,7 +2216,7 @@ export class Engine implements Kernel {
     });
   }
 
-  async pause(input: RunScopedInput): Promise<RunControlResult> {
+  async pause(input: RunScopedInput): Promise<ControlResult> {
     // the kill switch stops automation for the whole repo, run or no run, until vtc resume
     // (spec §15; AD-27 rule 7): the daemon's automation reads it (`automationPausedByHuman`)
     setAutomationPaused(this.guardDir, this.now().toISOString());
@@ -2223,11 +2224,9 @@ export class Engine implements Kernel {
     try {
       handle = this.resolve(input.run);
     } catch (error) {
+      // no run to pause: the kill switch alone, said so (contracts 5.4.0, reading 212(15))
       if (error instanceof EngineError && error.code === "no_run" && input.run === undefined)
-        throw new EngineError(
-          "no_run",
-          "no active run to pause; automatic issues and PRs are paused until vtc resume",
-        );
+        return { run: null, automation_paused: automationPausedByHuman(this.guardDir) };
       throw error;
     }
     const result = await this.serial(handle, () => {
@@ -2239,7 +2238,12 @@ export class Engine implements Kernel {
         });
       }
       this.unattended.delete(handle.state.id);
-      return Promise.resolve({ run: handle.state.id, paused: true, phase: handle.state.run.phase });
+      return Promise.resolve({
+        run: handle.state.id,
+        paused: true,
+        phase: handle.state.run.phase,
+        automation_paused: automationPausedByHuman(this.guardDir),
+      });
     });
     // the kill switch (§15, AD-25 rule 4; AD-23 rule 6): engine-launched runs stop, no orphans,
     // and every pending auto-merge VTC enabled is turned off
@@ -2279,11 +2283,12 @@ export class Engine implements Kernel {
    * the human's resume takes the repo as it is (`acceptCheckout`): the run's log is rewritten
    * from the engine's own events, any other file the engine wrote is taken as it now is.
    */
-  async resume(input: ResumeInput, call: CallContext = { host: null }): Promise<RunControlResult> {
+  async resume(input: ResumeInput, call: CallContext = { host: null }): Promise<ControlResult> {
     if (input.adopt === true) this.adopt(input.run, call);
     // the human's resume lifts the repo-level automation kill switch `pause` set (an open run
     // that stays paused still holds automation)
-    const automationWasPaused = setAutomationPaused(this.guardDir, null);
+    setAutomationPaused(this.guardDir, null);
+    const automationPaused = (): boolean => automationPausedByHuman(this.guardDir);
     if (this.held.size > 0) {
       const active = activeRun([...this.handles.values()].map((h) => h.state));
       const run = input.run ?? (active === undefined ? [...this.held.keys()][0] : undefined);
@@ -2291,23 +2296,16 @@ export class Engine implements Kernel {
         // a held run that is not active (lost, or finished): the human takes the repo as it is
         await releaseHeldRuns(this, this.held);
         const phase: Phase = this.finished.get(run)?.run.phase ?? "intake";
-        return { run, paused: false, phase };
+        return { run, paused: false, phase, automation_paused: automationPaused() };
       }
     }
     let handle: RunHandle;
     try {
       handle = this.resolve(input.run);
     } catch (error) {
-      if (
-        automationWasPaused &&
-        error instanceof EngineError &&
-        error.code === "no_run" &&
-        input.run === undefined
-      )
-        throw new EngineError(
-          "no_run",
-          "no active run to resume; automatic issues and PRs are back on",
-        );
+      // no run to resume: the kill switch alone, said so (contracts 5.4.0, reading 212(15))
+      if (error instanceof EngineError && error.code === "no_run" && input.run === undefined)
+        return { run: null, automation_paused: automationPaused() };
       throw error;
     }
     return this.serial(handle, async () => {
@@ -2335,7 +2333,12 @@ export class Engine implements Kernel {
       }
       maybeAutoResume(this, handle);
       this.advance(handle);
-      return { run: state.id, paused: state.run.paused, phase: state.run.phase };
+      return {
+        run: state.id,
+        paused: state.run.paused,
+        phase: state.run.phase,
+        automation_paused: automationPaused(),
+      };
     });
   }
 

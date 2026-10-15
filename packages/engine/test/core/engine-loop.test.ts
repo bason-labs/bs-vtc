@@ -689,10 +689,9 @@ describe("kill switch and resume (§6.7 guardrails, AD-4)", () => {
   it("pause stops dispatching and merging; resume supersedes stale role runs", async () => {
     const h = createHarness();
     const engineer = await toEngineer(h);
-    expect(await h.engine.pause({})).toMatchObject({ paused: true });
+    expect(await h.engine.pause({})).toMatchObject({ paused: true, automation_paused: true });
     expect((await next(h))[0]).toMatchObject({ type: "wait" });
-    const resumed = await h.engine.resume({});
-    expect(resumed.paused).toBe(false);
+    expect(await h.engine.resume({})).toMatchObject({ paused: false, automation_paused: false });
     const late = await submitResult(h, engineer, { exit: "built" });
     expect(late).toMatchObject({ accepted: false, rejection: { reason: "stale_action" } });
     expect(spawns(late.actions).map((a) => a.role)).toEqual(["engineer"]);

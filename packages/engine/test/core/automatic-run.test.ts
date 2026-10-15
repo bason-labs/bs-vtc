@@ -207,8 +207,10 @@ describe("automatic runs (AD-27 rule 2)", () => {
     );
     const pushes = events(h).filter((e) => e.type === "branch.pushed");
     expect(pushes.length).toBeGreaterThan(0);
-    // the events name the integration branch whose head went to the automatic one
-    for (const e of pushes) expect(e.data.branch).toBe(integration);
+    // the events name the integration branch whose head went to the automatic one, and the
+    // automatic branch it wrote (`remote_ref`, contracts 5.4.0)
+    for (const e of pushes)
+      expect(e.data).toMatchObject({ branch: integration, remote_ref: branch });
     // no PR through the Level-2 seam: its draft PR is the upstream module's, labelled and with
     // evidence; until then the merged task is in no open PR
     expect(h.prs.calls).toEqual([]);
@@ -303,6 +305,7 @@ describe("automatic runs (AD-27 rule 2)", () => {
     const failed = events(h).filter((e) => e.type === "branch.push_failed");
     expect(failed.length).toBeGreaterThan(0);
     expect(failed[0]?.data.detail).toContain(`push to ${branch}`);
+    expect(failed[0]?.data.remote_ref).toBe(branch);
     expect(git(h.remote, "rev-parse", `refs/heads/${branch}`).trim()).toBe(human);
     expect(h.prs.calls).toEqual([]);
     await h.release();

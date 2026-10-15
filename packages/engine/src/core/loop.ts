@@ -104,10 +104,11 @@ export const ESCALATE_AFTER_FAILED_ROUNDS = 2;
 export const engineerDispatch = (
   baseTier: ModelTier,
   round: number,
-): { readonly tier: ModelTier; readonly freshSession: boolean } => {
+): { readonly tier: ModelTier; readonly freshSession: boolean; readonly escalated: boolean } => {
   const escalated = round > ESCALATE_AFTER_FAILED_ROUNDS;
   return {
     tier: escalated ? tierUp(baseTier) : baseTier,
     freshSession: round === ESCALATE_AFTER_FAILED_ROUNDS + 1,
+    escalated,
   };
 };

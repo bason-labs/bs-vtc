@@ -31,10 +31,12 @@ import {
   TaskPackSchema,
   type GateRunner,
   type HostId,
+  type ModelTier,
   type PromptVersionRef,
   type ReplayGrader,
   type ReplayIsolation,
   type TaskPack,
+  type TierReason,
   type VtcEvent,
 } from "@vtc/shared";
 import {
@@ -46,6 +48,7 @@ import {
   type LookbackRetro,
   type ReplayTrialOutcome,
   type RunState,
+  type TierRoute,
 } from "../core/index.js";
 import {
   aaFlipRate,
@@ -227,7 +230,12 @@ const recordedDispatch = (
   task: ReplayTask,
   role: string,
 ):
-  | { readonly pack: TaskPack; readonly base: string; readonly protectedPaths: string[] }
+  | {
+      readonly pack: TaskPack;
+      readonly base: string;
+      readonly protectedPaths: string[];
+      readonly tier?: TierRoute;
+    }
   | undefined => {
   const ofRun = history.filter((e) => e.run === task.run);
   const dispatched = ofRun.find(
@@ -269,7 +277,23 @@ const recordedDispatch = (
       )
       .filter((paths) => paths.length > 0)
       .at(-1) ?? [];
-  return base === undefined ? undefined : { pack, base, protectedPaths };
+  // D-cm (reading 218 (7)): the trial runs on the tier the recorded dispatch ran on
+  const recorded = dispatched.data as {
+    tier?: ModelTier;
+    tier_reason?: TierReason;
+    tier_clamped?: boolean;
+  };
+  const tier: TierRoute | undefined =
+    recorded.tier === undefined || recorded.tier_reason === undefined
+      ? undefined
+      : {
+          tier: recorded.tier,
+          reason: recorded.tier_reason,
+          clamped: recorded.tier_clamped ?? false,
+        };
+  return base === undefined
+    ? undefined
+    : { pack, base, protectedPaths, ...(tier === undefined ? {} : { tier }) };
 };
 
 /**
@@ -375,6 +399,7 @@ export const createLookbackReplays = (
             pack: r.pack,
             base: r.base,
             ...(r.protectedPaths.length === 0 ? {} : { protectedPaths: r.protectedPaths }),
+            ...(r.tier === undefined ? {} : { tier: r.tier }),
           },
         ];
       });

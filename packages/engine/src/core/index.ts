@@ -165,9 +165,11 @@ export {
   automationFacts,
   automationReportView,
   automaticReleaseOf,
+  capabilitySignalFacts,
   costRegressionFacts,
   costWorsened,
   isAutomationEvent,
+  toolSignalFacts,
   type AutomaticRelease,
   type AutomationFact,
   type CreateUpstream,
@@ -180,3 +182,13 @@ export {
   replayTrialActionIds,
   withoutReplayTrialEvents,
 } from "./replay-view.js";
+/** Difficulty-based routing (H-9, D-cm; spine §5 reading 218). */
+export {
+  routeTier,
+  ruleTier,
+  startTier,
+  type RouteInput,
+  type RouteTask,
+  type TierChange,
+  type TierRoute,
+} from "./routing.js";

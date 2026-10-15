@@ -21,6 +21,7 @@ import {
   type HeadlessRunSummary,
   type HostCapabilities,
   type HostId,
+  type CommandShape,
   type HostOutcome,
   type PluginLoadProof,
   type SpawnResult,
@@ -422,6 +423,8 @@ const finishHeadless = async (
   ended: HostOutcome,
   startedAt: number,
   proof?: PluginLoadProof,
+  /** The run's shell-call shapes from its stream (D-cs). */
+  shapes?: readonly CommandShape[],
 ): Promise<void> => {
   const entry = k.headless.get(actionId);
   const outcome =
@@ -484,8 +487,12 @@ const finishHeadless = async (
     h,
     submitInputFor(actionId, outcome),
     outcome.kind === "done" ? "engine" : "reported",
+    shapes,
   );
 };
+
+/** Most shapes the engine keeps from one run's stream (a runaway loop of shell calls). */
+const MAX_STREAM_SHAPES = 100_000;
 
 /** Reads the run's stream (its usage events reach the usage store), then its outcome. */
 const watch = async (
@@ -497,10 +504,14 @@ const watch = async (
   startedAt: number,
 ): Promise<void> => {
   const adapter = k.deps.adapters[host];
+  // D-cs: the run's shell calls as shapes, as its adapter reads them from the stream
+  const shapes: CommandShape[] = [];
   try {
     for await (const line of process.lines()) {
-      const usage = adapter?.parseEvents([line]).usage ?? null;
+      const parsed = adapter?.parseEvents([line]);
+      const usage = parsed?.usage ?? null;
       if (usage !== null) k.ingestUsage(usage);
+      if (shapes.length < MAX_STREAM_SHAPES) shapes.push(...(parsed?.commandShapes ?? []));
     }
   } catch {
     // the outcome below says what happened
@@ -523,7 +534,7 @@ const watch = async (
             reason: `the load proof could not be read: ${error instanceof Error ? error.message : String(error)}`,
           }),
         );
-  await k.serial(h, () => finishHeadless(k, h, actionId, outcome, startedAt, proof));
+  await k.serial(h, () => finishHeadless(k, h, actionId, outcome, startedAt, proof, shapes));
 };
 
 /**
