@@ -9,6 +9,7 @@ import {
   PROMPT_MARKERS,
   renderAutoMarker,
   ROLES_CHANGELOG,
+  ROLES_CHANGELOG_ANCHOR,
   splitRolePrompt,
   type PromptProposal,
   type ReplayResult,
@@ -77,11 +78,23 @@ export const lineDiff = (before: string, after: string): string => {
   return out.join("\n");
 };
 
-/** Pure: `existing` CHANGELOG with `entry` first after its title (newest first). */
+/**
+ * Pure: `existing` CHANGELOG with `entry` first (newest first): directly below the
+ * `ROLES_CHANGELOG_ANCHOR` line, so the file's explanatory header stays on top; a file without the
+ * anchor takes it after its `# ` title.
+ */
 export const insertChangelogEntry = (existing: string | null, entry: string): string => {
   const block = `${entry.trim()}\n`;
   if (existing === null || existing.trim() === "") return `# Role prompt changes\n\n${block}`;
   const lines = existing.split("\n");
+  const anchor = lines.findIndex((line) => line.trim() === ROLES_CHANGELOG_ANCHOR);
+  if (anchor >= 0) {
+    const rest = lines
+      .slice(anchor + 1)
+      .join("\n")
+      .replace(/^\n+/, "");
+    return `${lines.slice(0, anchor + 1).join("\n")}\n\n${block}${rest === "" ? "" : `\n${rest}`}`;
+  }
   if (lines[0]?.startsWith("# ") === true) {
     const rest = lines.slice(1).join("\n").replace(/^\n+/, "");
     return `${lines[0]}\n\n${block}${rest === "" ? "" : `\n${rest}`}`;

@@ -17,10 +17,8 @@
  * this version does not know is read without them (`parsePersisted`), so an older vtc on the
  * machine never drops a newer one's grades and runs those trials again.
  *
- * **Contract.** The row shapes and the file name are local until a contract carries them: proposed
- * to the integrator as `LOOKBACK_HOME.replayTrialsFile` with `ReplayTrialRowSchema` and
- * `ReplayInfraRowSchema` in shared `lookback.ts` (a MINOR), read with `parsePersisted`. At that
- * merge these definitions are replaced by the shared exports, byte-compatible.
+ * **Contract.** The file name and the row shapes are contracts 5.1.0's
+ * `LOOKBACK_HOME.replayTrialsFile`, `ReplayTrialRowSchema` and `ReplayInfraRowSchema` (AD-3).
  *
  * **Not wired yet.** Engine core's `LookbackRetro` seam cannot drive the ledger as it stands:
  * `replays()` hands back whole replays and core applies its own all-or-nothing trial cap,
@@ -49,61 +47,34 @@
  * change, the grader (reading 202) and the isolation every trial ran under (reading 178).
  */
 import {
-  IsoDateTimeSchema,
+  LOOKBACK_HOME,
   parsePersisted,
-  RepoKeySchema,
-  Sha256HexSchema,
-  SlugSchema,
+  ReplayInfraOutcomeSchema,
+  ReplayInfraRowSchema,
+  ReplayTrialRowSchema,
   type PromptVersionRef,
   type ReplayGrader,
+  type ReplayInfraOutcome,
+  type ReplayInfraRow as SharedReplayInfraRow,
   type ReplayResult,
+  type ReplayTrialRow as SharedReplayTrialRow,
 } from "@vtc/shared";
 import { join } from "node:path";
-import { z } from "zod";
 import { appendJsonLines, readJsonLines } from "./files.js";
 import { aaFlipRate, finishReplay, replayIsolation, tokensDeltaPct } from "./replay.js";
 
 /** The ledger, relative to the VTC home (under `lookback/`, which roles may not write). */
-export const REPLAY_TRIALS_FILE = "lookback/replay-trials.jsonl";
+export const REPLAY_TRIALS_FILE = LOOKBACK_HOME.replayTrialsFile;
 
-/** What identifies the replay a ledger row belongs to. */
-const replayIdentity = {
-  repo_key: RepoKeySchema,
-  proposal: SlugSchema,
-  /** The baseline's `effective_sha256`. */
-  baseline: Sha256HexSchema,
-  /** The candidate's `effective_sha256`. */
-  candidate: Sha256HexSchema,
-  /** The `ReplayResult.per_task` key (`replayTaskKey`; a verdict task's carries its expected verdict). */
-  task: z.string().min(1).max(100),
-  arm: z.enum(["a", "b", "aa"]),
-  trial: z.int().min(1).max(10),
-  grader_bundle_sha: Sha256HexSchema,
-};
-
-const ReplayTrialRowSchema = z.strictObject({
-  v: z.literal(1),
-  ...replayIdentity,
-  passed: z.boolean(),
-  /** Input plus output tokens the trial used. */
-  tokens: z.int().nonnegative(),
-  /** The host enforced the repo's read deny on the trial (`SandboxProfile.enforced.readDeny`). */
-  read_denied: z.boolean(),
-  graded_at: IsoDateTimeSchema,
-});
-export type ReplayTrialRow = Omit<z.infer<typeof ReplayTrialRowSchema>, "v">;
+/** A graded trial as the ledger stores it, without the row version. */
+export type ReplayTrialRow = Omit<SharedReplayTrialRow, "v">;
 
 /** Why a trial measured nothing (reading 201): no grade, an attempt. */
-export const REPLAY_INFRA_OUTCOMES = ["gate_infra", "plugin_locked", "no_outcome"] as const;
-export type ReplayInfraOutcome = (typeof REPLAY_INFRA_OUTCOMES)[number];
+export const REPLAY_INFRA_OUTCOMES = ReplayInfraOutcomeSchema.options;
+export type { ReplayInfraOutcome };
 
-const ReplayInfraRowSchema = z.strictObject({
-  v: z.literal(1),
-  ...replayIdentity,
-  outcome: z.enum(REPLAY_INFRA_OUTCOMES),
-  at: IsoDateTimeSchema,
-});
-export type ReplayInfraRow = Omit<z.infer<typeof ReplayInfraRowSchema>, "v">;
+/** A trial that measured nothing as the ledger stores it, without the row version. */
+export type ReplayInfraRow = Omit<SharedReplayInfraRow, "v">;
 
 /** Attempts of one trial that measured nothing before its replay stops being launched. */
 export const REPLAY_MAX_INFRA_ATTEMPTS = 3;

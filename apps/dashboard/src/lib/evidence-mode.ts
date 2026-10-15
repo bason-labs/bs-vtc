@@ -1,4 +1,10 @@
-import { PHASES, type WorkflowGraph, type WorkflowNode } from "@vtc/shared";
+import {
+  EVIDENCE_MODE_PARAM,
+  EVIDENCE_MODE_VALUES,
+  PHASES,
+  type WorkflowGraph,
+  type WorkflowNode,
+} from "@vtc/shared";
 
 /**
  * Evidence mode (spine AD-27 rule 6, §5 readings 199 and 208): the dashboard as the evidence
@@ -18,12 +24,13 @@ import { PHASES, type WorkflowGraph, type WorkflowNode } from "@vtc/shared";
  */
 export type EvidenceMode = "off" | "full" | "upstream";
 
-export const EVIDENCE_PARAM = "evidence";
+/** The query parameter the evidence recorder opens the dashboard with (contracts 5.1.0). */
+export const EVIDENCE_PARAM = EVIDENCE_MODE_PARAM;
 
 export const evidenceModeOf = (search: string): EvidenceMode => {
   const value = new URLSearchParams(search).get(EVIDENCE_PARAM);
-  if (value === "1") return "full";
-  if (value === "upstream") return "upstream";
+  if (value === EVIDENCE_MODE_VALUES.full) return "full";
+  if (value === EVIDENCE_MODE_VALUES.upstream) return "upstream";
   return "off";
 };
 
@@ -33,7 +40,7 @@ export const withEvidenceParam = (href: string, currentSearch: string): string =
   if (mode === "off") return href;
   const url = new URL(href, "http://flow.studio");
   if (url.searchParams.has(EVIDENCE_PARAM)) return href;
-  url.searchParams.set(EVIDENCE_PARAM, mode === "full" ? "1" : "upstream");
+  url.searchParams.set(EVIDENCE_PARAM, EVIDENCE_MODE_VALUES[mode]);
   return `${url.pathname}${url.search}${url.hash}`;
 };
 

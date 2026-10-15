@@ -65,42 +65,28 @@ import type { LoadedRole } from "./role-source.js";
 const ENGINE_DIRECTION_FIELDS: ReadonlySet<string> = new Set(["first_viewport", "novelty"]);
 
 /**
- * The Dispatch lines the UI prompts key off that `renderTaskPack` does not print yet (this
- * branch's contract proposals; spine §5 reading 179). Each is `<label>: <value>` like every
- * Dispatch line:
+ * The Dispatch lines the UI prompts key off, as `renderTaskPack` prints them (contracts 5.1.0;
+ * spine §5 reading 179 as amended by reading 211). Each is `<label>: <value>` like every Dispatch
+ * line:
  *
  * - `design direction: <id>`, from `TaskPack.design_direction` (the G2 choice);
- * - `design exit: category_standard`, the G2 `category_standard` exit (proposed field).
+ * - `design exit: category_standard`, from `TaskPack.design_exit` (the G2 `category_standard`
+ *   exit).
  *
- * Until a line is printed the prompts fall back to their pre-round-4 behaviour: no role blocks or
- * switches mode for want of one, and no other pack text stands in for it.
+ * A pack with neither line keeps the prompts' pre-round-4 behaviour: no role blocks or switches
+ * mode for want of one, and no other pack text stands in for it.
  */
-export const PENDING_DISPATCH_LINES = {
+export const DESIGN_DISPATCH_LINES = {
   designDirection: "design direction",
   designExit: "design exit",
-} as const;
-
-/**
- * The pack input types the prompts key off that `PACK_INPUT_TYPES` does not hold yet (this
- * branch's contract proposals):
- *
- * - `automation_issue`: the issue an automatic run works on (`run.started.automation`, D-cd,
- *   reading 198), which engine core lists in the Spec Verifier's pack on an automatic run only.
- *   It is the Spec Verifier's only sign that a run is automatic; the run's `request` is not, since
- *   a human-started run can carry one too.
- *
- * Until the engine sends it, the Spec Verifier judges every criterion as on a human-started run.
- */
-export const PENDING_PACK_INPUTS = {
-  automationIssue: "automation_issue",
 } as const;
 
 /** Values every prompt part may reference as `{{name}}`. */
 export const PROTOCOL_VARS: Readonly<Record<string, string>> = {
   /** The pack input that holds the run's request (`PACK_INPUT_TYPES.request`). */
   request_input: PACK_INPUT_TYPES.request,
-  /** The pack input that marks an automatic run and holds its issue (proposed; D-cd, reading 198). */
-  automation_issue_input: PENDING_PACK_INPUTS.automationIssue,
+  /** The pack input that marks an automatic run and holds its issue (D-cd, reading 198). */
+  automation_issue_input: PACK_INPUT_TYPES.automationIssue,
   /** The G2 exit that takes the category's standard look (`DesignExit`, spine §5 reading 179). */
   category_standard_exit: DesignExitSchema.enum.category_standard,
   architect_depths: ArchitectDepthSchema.options.join(", "),

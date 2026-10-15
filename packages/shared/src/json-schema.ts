@@ -63,7 +63,9 @@ import {
   PromptProposalSchema,
   PromptVersionFrontmatterSchema,
   PromptVersionRefSchema,
+  ReplayInfraRowSchema,
   ReplayResultSchema,
+  ReplayTrialRowSchema,
   ScorecardIndexSchema,
   ScorecardSchema,
 } from "./lookback.js";
@@ -267,6 +269,9 @@ export const CONTRACT_SCHEMAS = {
   UpstreamReport: UpstreamReportSchema,
   EvidenceManifest: EvidenceManifestSchema,
   AutomationReport: AutomationReportSchema,
+  // ---- contracts 5.1.0 (the round-4 merge, spine §5 readings 210-214)
+  ReplayTrialRow: ReplayTrialRowSchema,
+  ReplayInfraRow: ReplayInfraRowSchema,
 } as const;
 export type ContractName = keyof typeof CONTRACT_SCHEMAS;
 

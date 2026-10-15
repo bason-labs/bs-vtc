@@ -333,8 +333,10 @@ export interface HostAdapter {
    */
   parseEvents(lines: readonly string[]): ParsedStream;
   /**
-   * Pure: the command a headless run of `request` executes (a resume when `session` is given).
-   * `spawnRole` and `resume` must start exactly this command; the safety contract checks it.
+   * The command a headless run of `request` executes (a resume when `session` is given), given what
+   * the adapter last read from the host before a start or resume (Codex: the MCP servers it turns
+   * off, listed with `codex mcp list` in the role's cwd). `spawnRole` and `resume` start exactly
+   * this command as it is at that moment; the safety contract checks it.
    */
   headlessCommand(request: SpawnRoleRequest, session?: SessionRef): HostCommand;
   /** Resume a session with new input (same worktree and session, §6.5; after a reset, §6.9). */

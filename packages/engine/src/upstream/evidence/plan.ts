@@ -10,6 +10,8 @@
  * leaves the set incomplete: `evidence: partial`).
  */
 import {
+  EVIDENCE_MODE_PARAM,
+  EVIDENCE_MODE_VALUES,
   EVIDENCE_LIMITS,
   type EvidenceFileKind,
   type EvidenceHosting,
@@ -46,8 +48,8 @@ export interface EvidencePlanInput {
 /** The page a replay or a chart is recorded from on the snapshot origin. */
 const pagePath = (input: EvidencePlanInput, hash = ""): string =>
   input.upstreamSafe || input.run === undefined
-    ? `/lookback/?evidence=upstream${hash}`
-    : `/run/?run=${encodeURIComponent(input.run)}&evidence=1${hash}`;
+    ? `/lookback/?${EVIDENCE_MODE_PARAM}=${EVIDENCE_MODE_VALUES.upstream}${hash}`
+    : `/run/?run=${encodeURIComponent(input.run)}&${EVIDENCE_MODE_PARAM}=${EVIDENCE_MODE_VALUES.full}${hash}`;
 
 /** Pure: the shots to capture, with neutral `NN-<slug>.<ext>` names. */
 export const planEvidenceShots = (input: EvidencePlanInput): EvidenceShot[] => {

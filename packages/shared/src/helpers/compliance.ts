@@ -307,6 +307,11 @@ export const REPO_ROLE_DENIED = {
      * spine §5 reading 137). Only the engine appends.
      */
     ".vtc/runs/**",
+    /**
+     * A project's automatic-PR evidence manifests (`.vtc/evidence/auto/<fp8>/`, AD-27 rule 6):
+     * only the engine's upstream module writes them. New in 5.1.0.
+     */
+    ".vtc/evidence/auto/**",
   ],
 } as const;
 

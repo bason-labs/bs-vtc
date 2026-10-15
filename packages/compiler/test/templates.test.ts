@@ -4,20 +4,20 @@
  * both plugins at `autoTemplateAssetPath`, rendered by the upstream module.
  */
 import { describe, expect, it } from "vitest";
-import * as shared from "@vtc/shared";
+import * as compiler from "../src/index.js";
 import {
   AUTO_TEMPLATE_NAMES,
   AUTO_TEMPLATE_SLOTS,
   autoTemplateAssetPath,
   HOST_IDS,
   ROLES_CHANGELOG,
+  ROLES_CHANGELOG_ANCHOR,
 } from "@vtc/shared";
 import {
   AUTO_TEMPLATE_LAYOUT,
   AUTO_TEMPLATE_SOURCE_DIR,
   autoTemplateErrors,
   compilePlugins,
-  ROLES_CHANGELOG_ANCHOR,
   type CompileOutput,
 } from "../src/index.js";
 import { fixtureFiles } from "./fixtures.js";
@@ -201,14 +201,9 @@ describe("the CHANGELOG entry anchor (D-bv)", () => {
     expect(errorsFor(`# Changes\n\n${ROLES_CHANGELOG_ANCHOR}\n\n### entry\n`)).toEqual([]);
   });
 
-  it("is still local: @vtc/shared has no anchor constant yet (contract proposal)", () => {
-    // When this fails, the proposed shared ROLES_CHANGELOG_ANCHOR has landed: import it in
-    // templates.ts instead of the local copy and drop this test and the todo below.
-    expect(Object.keys(shared)).not.toContain("ROLES_CHANGELOG_ANCHOR");
+  it("comes from @vtc/shared, with no local copy (contracts 5.1.0)", () => {
+    expect(Object.keys(compiler)).not.toContain("ROLES_CHANGELOG_ANCHOR");
   });
-  it.todo(
-    "merge gate: ROLES_CHANGELOG_ANCHOR comes from @vtc/shared and upstream's insertChangelogEntry inserts below it (contract proposal)",
-  );
 
   it("requires roles/CHANGELOG.md", () => {
     expect(errorsFor(null)).toEqual([

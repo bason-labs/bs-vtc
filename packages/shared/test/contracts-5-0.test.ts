@@ -51,7 +51,7 @@ const FP = "0123456789abcdef";
 
 describe("contracts 5.0.0", () => {
   it("is MAJOR over 4.12.0", () => {
-    expect(CONTRACTS_VERSION).toBe("5.0.0");
+    expect(CONTRACTS_VERSION.split(".")[0]).toBe("5");
   });
 });
 
