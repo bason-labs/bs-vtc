@@ -37,7 +37,8 @@ import { isAbsolute, join } from "node:path";
 import {
   EVIDENCE_LIMITS,
   EvidenceFileNameSchema,
-  redactSecrets,
+  type BeforeAfterRequest,
+  type BeforeAfterResult,
   SECRET_PATTERNS,
   type EvidenceCaptureRequest,
   type EvidenceCaptureResult,
@@ -45,6 +46,7 @@ import {
   type EvidenceShot,
   type GateReport,
   type GateSandbox,
+  type GitOps,
 } from "@vtc/shared";
 import { loadGatesConfig } from "../config.js";
 import { gateEnv } from "../exec.js";
@@ -60,14 +62,17 @@ import {
   type BrowserCheck,
   type VisualToolchain,
 } from "../visual/browser.js";
+import { appLoopbackPort } from "../visual/app.js";
 import {
   engineNodeExecutable,
   NO_RUNNER_NODE,
+  readPtraceScope,
   resolveNodeExecutable,
   runSignedScript,
   type SignedScriptOutcome,
 } from "../visual/runner.js";
 import {
+  DENY_SUBSTRING_MIN,
   EVIDENCE_MASK_COLOR,
   EVIDENCE_PAINT_DEFAULTS,
   EVIDENCE_VIDEO_SIZE,
@@ -77,8 +82,11 @@ import {
   type EvidenceRunnerResult,
   type EvidenceRunnerShot,
 } from "./protocol.js";
+import { captureBeforeAfter } from "./before-after.js";
+import { cleanReason } from "./clean.js";
 import { gateReportHtml, GATE_REPORT_HTML } from "./report-html.js";
 import { EVIDENCE_RUNNER_SCRIPT } from "./script.js";
+import type { CaptureTarget, TargetCaptureResult } from "./target.js";
 
 export interface EvidenceRunnerCall {
   readonly input: Omit<EvidenceRunnerInput, "out_dir">;
@@ -88,6 +96,11 @@ export interface EvidenceRunnerCall {
   readonly port: number;
   readonly env: Readonly<Record<string, string>>;
   readonly timeoutMs: number;
+  /**
+   * With `input.app`: the absolute clean gate checkout the app is served from, the only directory
+   * the script and the app may write besides their temp directory. Absent: the jail's home.
+   */
+  readonly checkout?: string;
 }
 
 /** Runs the evidence script; the default is {@link sandboxedEvidenceRunner}. */
@@ -106,8 +119,13 @@ export interface EvidenceRecorderDeps {
   readonly repoRoot?: string;
   /** The gate sandbox (D-al); absent: detected. */
   readonly sandbox?: GateSandbox;
-  /** `~/.vtc/config.yaml` `gates.allow_unsandboxed`. */
+  /** `~/.vtc/config.yaml` `gates.allow_unsandboxed` (never for the before/after builds). */
   readonly allowUnsandboxed?: boolean;
+  /**
+   * The engine's `GitOps` over `repoRoot` (AD-13 rule 4: the cli builds it with
+   * `git.createGitOps` and injects it; `gates/` writes no git code). Absent: no before/after.
+   */
+  readonly git?: GitOps;
 }
 
 export interface EvidenceRecorderOptions {
@@ -121,6 +139,9 @@ export interface EvidenceRecorderOptions {
   /** Test seams: the browser store and its pin check. */
   readonly toolchain?: (vtcHome: string) => VisualToolchain | null;
   readonly checkBrowser?: (vtcHome: string) => Promise<BrowserCheck | null>;
+  /** Test seams of the default runner: the host platform and its ptrace policy (reading 164). */
+  readonly platform?: NodeJS.Platform;
+  readonly ptraceScope?: () => string | null;
 }
 
 /** Why nothing is captured without the doctor-installed browser store. */
@@ -129,10 +150,22 @@ export const EVIDENCE_NO_BROWSER =
 /** Why nothing is captured without a sandbox. */
 export const EVIDENCE_NO_SANDBOX =
   "no gate sandbox on this machine (vtc doctor says why), so no evidence is captured";
+/** Why no app server is served for evidence on a Linux host whose ptrace policy is open (reading 164). */
+export const EVIDENCE_PTRACE_REFUSAL =
+  "no UI evidence is captured on this Linux host: kernel.yama.ptrace_scope is 0 or absent, so the app server (project code in the evidence runner's sandbox, as the same user) could attach to the runner and sign any result; set kernel.yama.ptrace_scope to 1 or higher (sysctl) to capture it";
+
+/** {@link EVIDENCE_PTRACE_REFUSAL} on a Linux host whose ptrace policy is open, else `null`. */
+const ptraceProblem = (host: {
+  readonly platform?: NodeJS.Platform;
+  readonly ptraceScope?: () => string | null;
+}): string | null => {
+  if ((host.platform ?? process.platform) !== "linux") return null;
+  const scope = Number((host.ptraceScope ?? readPtraceScope)() ?? "0");
+  return scope >= 1 ? null : EVIDENCE_PTRACE_REFUSAL;
+};
 
 const NAV_TIMEOUT_MS = 30_000;
 const LOOPBACK_ORIGIN = /^http:\/\/127\.0\.0\.1:([1-9]\d{0,4})$/;
-const MAX_REASON = 300;
 /** Longest Unix socket path (Linux `sun_path` is 108 bytes with its NUL). */
 const MAX_SOCKET_PATH = 107;
 
@@ -144,17 +177,6 @@ const SCREENSHOT_KINDS: ReadonlySet<EvidenceShot["kind"]> = new Set([
   "chart",
   "gate_report",
 ]);
-
-/** A reason with no secret and no `denyText` value in it. */
-export const cleanReason = (text: string, denyText: readonly string[]): string => {
-  let out = redactSecrets(text, denyText);
-  for (const value of denyText) {
-    const v = value.trim();
-    if (v === "") continue;
-    out = out.replace(new RegExp(v.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"), "gi"), "[REDACTED]");
-  }
-  return out.length > MAX_REASON ? `${out.slice(0, MAX_REASON - 1)}…` : out;
-};
 
 /** Why a shot cannot be captured as asked, or `null`. */
 const shotProblem = (shot: EvidenceShot): string | null => {
@@ -198,15 +220,31 @@ const shotProblem = (shot: EvidenceShot): string | null => {
   return null;
 };
 
-/** The runner in the gate sandbox; `jail` is `null` without a sandbox (nothing runs). */
+/**
+ * The runner in the gate sandbox; `jail` is `null` without a sandbox (nothing runs). With an app
+ * server (before/after), a Linux host whose ptrace policy would let the app reach the runner runs
+ * nothing ({@link EVIDENCE_PTRACE_REFUSAL}, reading 164), as in the visual step. The command's
+ * temp directory is removed as soon as its result and files are read back.
+ */
 export const sandboxedEvidenceRunner = (
   jail: GateCommandJail | null,
   node: string | null,
+  host: {
+    readonly platform?: NodeJS.Platform;
+    readonly ptraceScope?: () => string | null;
+  } = {},
 ): EvidenceRunner => ({
   run: async (call) => {
     if (jail === null) return { ok: false, reason: EVIDENCE_NO_SANDBOX };
     if (node === null || !isAbsolute(node)) return { ok: false, reason: NO_RUNNER_NODE };
+    if (call.input.app != null) {
+      const refused = ptraceProblem(host);
+      if (refused !== null) return { ok: false, reason: refused };
+    }
     const logs = mkdtempSync(join(tmpdir(), "vtc-evidence-logs-"));
+    // The command's temp directory (input, result, output): removed as soon as it is read back,
+    // so no later command in the same jail can read it.
+    let tempDir = null as string | null;
     let relay: Server | null = null;
     const sockets = new Set<Socket>();
     let relayError: string | null = null;
@@ -222,11 +260,12 @@ export const sandboxedEvidenceRunner = (
           // Linux relays through a socket instead: its sandbox opens no host port.
           loopbackPort: call.input.relay ? null : call.port,
           env: call.env,
-          checkout: jail.homeDir(),
+          checkout: call.checkout ?? jail.homeDir(),
           timeoutMs: call.timeoutMs,
           stdoutPath: join(logs, "stdout.log"),
           stderrPath: join(logs, "stderr.log"),
           setup: (tmp) => {
+            tempDir = tmp;
             if (!call.input.relay) return;
             const path = join(tmp, "relay.sock");
             if (Buffer.byteLength(path) > MAX_SOCKET_PATH) {
@@ -259,11 +298,17 @@ export const sandboxedEvidenceRunner = (
         EvidenceRunnerResultSchema,
       );
       const failed = relayError as string | null;
-      return failed === null ? outcome : { ok: false, reason: failed };
+      if (failed !== null) return { ok: false, reason: failed };
+      if (!outcome.ok) return outcome;
+      // Read back now: the temp directory is removed below.
+      const files = new Map<string, Uint8Array | null>();
+      for (const name of Object.keys(outcome.result.files)) files.set(name, outcome.file(name));
+      return { ok: true, result: outcome.result, file: (name) => files.get(name) ?? null };
     } finally {
       (relay as Server | null)?.close();
       for (const socket of sockets) socket.destroy();
       rmSync(logs, { recursive: true, force: true });
+      if (tempDir !== null) jail.removeTempDir(tempDir);
     }
   },
 });
@@ -277,22 +322,49 @@ export const createEvidenceRecorder = (
   const toolchainOf = options.toolchain ?? storeToolchain;
   const checkBrowser = options.checkBrowser ?? checkStoreBrowser;
 
-  const capture = async (request: EvidenceCaptureRequest): Promise<EvidenceCaptureResult> => {
+  /** One capture of `request` against `target` (the public `capture`, or one before/after side). */
+  const captureShots = async (
+    request: EvidenceCaptureRequest,
+    target: CaptureTarget,
+  ): Promise<TargetCaptureResult> => {
     const deny = [...new Set(request.denyText.map((v) => v.trim()).filter((v) => v !== ""))];
     const failed: { name: string; reason: string }[] = [];
-    const failAll = (reason: string, shots: readonly { readonly name: string }[]) => {
+    const failAll = (
+      reason: string,
+      shots: readonly { readonly name: string }[],
+      app?: "served" | "failed",
+    ): TargetCaptureResult => {
       const clean = cleanReason(reason, deny);
       return {
         files: [],
         failed: [...failed, ...shots.map((s) => ({ name: s.name, reason: clean }))],
+        ...(app === undefined ? {} : { app }),
       };
     };
 
-    // The request: a loopback origin, an output directory, shots within the budget.
-    const origin = LOOPBACK_ORIGIN.exec(request.origin);
-    const port = origin === null ? 0 : Number(origin[1]);
-    if (origin === null || port > 65_535) {
-      return failAll("the capture origin is not http://127.0.0.1:<port>", request.shots);
+    // The request: a loopback origin (the app's own, when one is served), an output directory,
+    // shots within the budget.
+    let port = 0;
+    if (target.app === undefined) {
+      const origin = LOOPBACK_ORIGIN.exec(request.origin);
+      port = origin === null ? 0 : Number(origin[1]);
+      if (origin === null || port > 65_535) {
+        return failAll("the capture origin is not http://127.0.0.1:<port>", request.shots);
+      }
+    } else {
+      let appOrigin: string | null;
+      try {
+        appOrigin = new URL(target.app.url).origin;
+        port = appLoopbackPort(target.app.url);
+      } catch {
+        appOrigin = null;
+      }
+      if (appOrigin === null || appOrigin !== request.origin || !isAbsolute(target.app.cwd)) {
+        return failAll(
+          "the capture origin is not the app server's own loopback origin",
+          request.shots,
+        );
+      }
     }
     if (!isAbsolute(request.outDir)) return failAll("outDir is not absolute", request.shots);
     const names = new Set<string>();
@@ -310,24 +382,11 @@ export const createEvidenceRecorder = (
     }
     if (shots.length === 0) return { files: [], failed };
 
-    // The project's own selectors (gates.yml `visual`), read now; unreadable fails closed.
-    let visual: { redact: readonly string[]; dynamic: readonly string[] } = {
-      redact: [],
-      dynamic: [],
-    };
-    if (deps.repoRoot !== undefined) {
-      try {
-        const config = loadGatesConfig(deps.repoRoot);
-        visual = {
-          redact: config?.visual?.redact_selectors ?? [],
-          dynamic: config?.visual?.dynamic_regions ?? [],
-        };
-      } catch (error) {
-        return failAll(
-          `.vtc/gates.yml could not be read, so its visual.redact_selectors are unknown: ${error instanceof Error ? error.message : String(error)}`,
-          shots,
-        );
-      }
+    let visual: ReturnType<CaptureTarget["visual"]>;
+    try {
+      visual = target.visual();
+    } catch (error) {
+      return failAll(error instanceof Error ? error.message : String(error), shots);
     }
     const paint = [
       ...new Set([...EVIDENCE_PAINT_DEFAULTS, ...request.redactSelectors, ...visual.redact]),
@@ -340,37 +399,53 @@ export const createEvidenceRecorder = (
     if (toolchain === null || check === null) return failAll(EVIDENCE_NO_BROWSER, shots);
     if (!check.ok) return failAll(check.reason, shots);
 
-    let jail: GateCommandJail | null = null;
+    // The jail: the target's (left open for its caller), else one of this capture's own.
+    let jail: GateCommandJail | null = target.jail === undefined ? null : target.jail;
+    let ownJail: GateCommandJail | null = null;
     let runner = options.runner;
     if (runner === undefined) {
-      const sandbox = resolveGateSandbox(
-        deps,
-        options.detectSandbox ?? (() => detectGateSandbox().sandbox),
-      );
-      if (sandbox !== null) {
-        const policy = gateReadPolicy({
-          vtcHome: deps.vtcHome,
-          env,
-          ...(deps.repoRoot === undefined ? {} : { repoRoot: deps.repoRoot }),
-        });
-        jail = new GateCommandJail(sandbox, policy.denyRead, policy);
+      if (target.jail === undefined) {
+        const sandbox = resolveGateSandbox(
+          deps,
+          options.detectSandbox ?? (() => detectGateSandbox().sandbox),
+        );
+        if (sandbox !== null) {
+          const policy = gateReadPolicy({
+            vtcHome: deps.vtcHome,
+            env,
+            ...(deps.repoRoot === undefined ? {} : { repoRoot: deps.repoRoot }),
+          });
+          ownJail = new GateCommandJail(sandbox, policy.denyRead, policy);
+          jail = ownJail;
+        }
       }
-      const exclude = deps.repoRoot === undefined ? [] : [deps.repoRoot];
+      const exclude = [
+        ...(deps.repoRoot === undefined ? [] : [deps.repoRoot]),
+        ...(target.app === undefined ? [] : [target.app.checkout]),
+      ];
       runner = sandboxedEvidenceRunner(
         jail,
         options.node ?? resolveNodeExecutable(env.PATH, exclude, engineNodeExecutable()),
+        {
+          ...(options.platform === undefined ? {} : { platform: options.platform }),
+          ...(options.ptraceScope === undefined ? {} : { ptraceScope: options.ptraceScope }),
+        },
       );
     }
-    const runnerShots: EvidenceRunnerShot[] = shots.map((s) => ({
-      name: s.name,
-      path: s.path,
-      width: s.viewport.width,
-      height: s.viewport.height,
-      ...(s.videoSeconds === undefined ? {} : { video_seconds: s.videoSeconds }),
-      ...(s.waitFor === undefined ? {} : { wait_for: s.waitFor }),
-    }));
+    const runnerShots: EvidenceRunnerShot[] = shots.map((s) => {
+      const scheme = target.colorSchemes?.get(s.name);
+      return {
+        name: s.name,
+        path: s.path,
+        width: s.viewport.width,
+        height: s.viewport.height,
+        ...(s.videoSeconds === undefined ? {} : { video_seconds: s.videoSeconds }),
+        ...(s.waitFor === undefined ? {} : { wait_for: s.waitFor }),
+        ...(scheme === undefined ? {} : { color_scheme: scheme }),
+      };
+    });
     const recording = shots.reduce((sum, s) => sum + (s.videoSeconds ?? 0), 0);
-    // The jail's temp directory holds the runner's files until they are copied out below.
+    const app = target.app;
     try {
       const outcome = await runner.run({
         input: {
@@ -378,7 +453,8 @@ export const createEvidenceRecorder = (
           playwright: toolchain.playwright,
           executable: check.pin.executable,
           origin: request.origin,
-          relay: jail?.kind === "bwrap",
+          // An app is served inside the sandbox, on its own loopback: nothing to relay.
+          relay: app === undefined && jail?.kind === "bwrap",
           video_size: { ...EVIDENCE_VIDEO_SIZE },
           nav_timeout_ms: NAV_TIMEOUT_MS,
           paint,
@@ -390,22 +466,77 @@ export const createEvidenceRecorder = (
             flags: p.pattern.flags,
           })),
           deny_text: deny,
+          deny_substring_min: DENY_SUBSTRING_MIN,
           max_scan_chars: MAX_SCAN_CHARS,
           shots: runnerShots,
+          app:
+            app === undefined
+              ? null
+              : {
+                  command: app.command,
+                  cwd: app.cwd,
+                  url: app.url,
+                  ready_timeout_ms: app.readyTimeoutMs,
+                },
         },
         allowRead: toolchain.readable,
         port,
         env: { ...gateEnv(env), PLAYWRIGHT_BROWSERS_PATH: toolchain.browsersPath },
-        timeoutMs: Math.min(600_000, 60_000 + shots.length * 2 * NAV_TIMEOUT_MS + recording * 1000),
+        timeoutMs: Math.min(
+          app === undefined ? 600_000 : 600_000 + app.readyTimeoutMs,
+          60_000 +
+            shots.length * 2 * NAV_TIMEOUT_MS +
+            recording * 1000 +
+            (app === undefined ? 0 : app.readyTimeoutMs),
+        ),
+        ...(app === undefined ? {} : { checkout: app.checkout }),
       });
       if (!outcome.ok) return failAll(outcome.reason, shots);
+      const served = outcome.result.app;
       if (outcome.result.error !== undefined) {
-        return failAll(`the evidence runner failed: ${outcome.result.error}`, shots);
+        return failAll(`the evidence runner failed: ${outcome.result.error}`, shots, served);
       }
-      return keep(outcome, shots, request.outDir, deny, failed);
+      if (app !== undefined && served !== "served") {
+        return failAll(
+          "the evidence runner did not say that the app server served",
+          shots,
+          "failed",
+        );
+      }
+      const kept = keep(
+        outcome,
+        shots,
+        request.outDir,
+        deny,
+        failed,
+        target.budgetBytes ?? EVIDENCE_LIMITS.maxBytesPerPr,
+      );
+      return served === undefined ? kept : { ...kept, app: served };
     } finally {
-      jail?.dispose();
+      ownJail?.dispose();
     }
+  };
+
+  const capture = async (request: EvidenceCaptureRequest): Promise<EvidenceCaptureResult> => {
+    // The project's own selectors (gates.yml `visual`), read at each capture.
+    const visual = (): ReturnType<CaptureTarget["visual"]> => {
+      if (deps.repoRoot === undefined) return { redact: [], dynamic: [] };
+      let config;
+      try {
+        config = loadGatesConfig(deps.repoRoot);
+      } catch (error) {
+        throw new Error(
+          `.vtc/gates.yml could not be read, so its visual.redact_selectors are unknown: ${error instanceof Error ? error.message : String(error)}`,
+          { cause: error },
+        );
+      }
+      return {
+        redact: config?.visual?.redact_selectors ?? [],
+        dynamic: config?.visual?.dynamic_regions ?? [],
+      };
+    };
+    const { files, failed } = await captureShots(request, { visual });
+    return { files, failed };
   };
 
   const renderGateReport = (request: {
@@ -425,12 +556,52 @@ export const createEvidenceRecorder = (
     }
   };
 
-  return { capture, renderGateReport };
+  const beforeAfter = (request: BeforeAfterRequest): Promise<BeforeAfterResult> =>
+    captureBeforeAfter(
+      {
+        vtcHome: deps.vtcHome,
+        repoRoot: deps.repoRoot,
+        env,
+        sandbox: () =>
+          resolveGateSandbox(deps, options.detectSandbox ?? (() => detectGateSandbox().sandbox)),
+        git: deps.git,
+        // The default runner refuses an app server here anyway; asked first, nothing is built.
+        hostProblem: () =>
+          options.runner === undefined
+            ? ptraceProblem({
+                ...(options.platform === undefined ? {} : { platform: options.platform }),
+                ...(options.ptraceScope === undefined ? {} : { ptraceScope: options.ptraceScope }),
+              })
+            : null,
+        browserProblem: async () => {
+          const toolchain = toolchainOf(deps.vtcHome);
+          const check = toolchain === null ? null : await checkBrowser(deps.vtcHome);
+          if (toolchain === null || check === null) {
+            return { reason: "no_browser", detail: EVIDENCE_NO_BROWSER };
+          }
+          return check.ok
+            ? null
+            : {
+                reason: "capture_failed",
+                detail:
+                  "the doctor-installed browser does not match its pin; vtc doctor --install-browser installs it again",
+              };
+        },
+        capture: captureShots,
+      },
+      request,
+    ).catch(() => ({
+      files: [],
+      failed: [],
+      partial: { reason: "capture_failed", detail: "the before/after capture failed unexpectedly" },
+    }));
+
+  return { capture, captureBeforeAfter: beforeAfter, renderGateReport };
 };
 
 /**
- * Copies the files the runner captured, and that passed the scan and the budget, into `outDir`
- * (from the jail's temp directory, before it is removed); everything else is a failed shot.
+ * Copies the files the runner captured, and that passed the scan and the budget, into `outDir`;
+ * everything else is a failed shot.
  */
 const keep = (
   outcome: Extract<SignedScriptOutcome<EvidenceRunnerResult>, { ok: true }>,
@@ -438,6 +609,7 @@ const keep = (
   outDir: string,
   deny: readonly string[],
   failed: { name: string; reason: string }[],
+  budget: number,
 ): EvidenceCaptureResult => {
   mkdirSync(outDir, { recursive: true });
   const files: { name: string; kind: EvidenceShot["kind"]; bytes: number }[] = [];
@@ -472,7 +644,7 @@ const keep = (
       );
       continue;
     }
-    if (total + bytes.length > EVIDENCE_LIMITS.maxBytesPerPr) {
+    if (total + bytes.length > budget) {
       fail(
         `the file would take this capture over the ${(EVIDENCE_LIMITS.maxBytesPerPr / (1024 * 1024)).toFixed(0)} MB evidence budget of a PR`,
       );

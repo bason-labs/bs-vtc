@@ -587,7 +587,8 @@ describe("visual step in a gate run", () => {
     expect(without.visual?.status).toBe("skipped");
     expect(without.visual?.toolchain).toBeUndefined();
     expect(read(none.h, without.visual?.report).toolchain).toBeUndefined();
-  });
+    // Four full gate runs (store, project, both, neither).
+  }, 30_000);
 
   it("is skipped, naming the sysctl, when the runner will not render under Linux ptrace_scope 0 (D-bj)", async () => {
     const { h, fake } = setup({

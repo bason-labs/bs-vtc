@@ -848,6 +848,39 @@ describe("a jail: per-run home, per-command temp dirs", () => {
     expect(existsSync(home)).toBe(false);
   });
 
+  it("removes one command's temp directory on request, and nothing outside the run's own", async () => {
+    const work = tempDir("vtc-jail-");
+    const checkout = join(work, "checkout");
+    mkdirSync(checkout);
+    const { sandbox } = recording();
+    const jail = new GateCommandJail(sandbox, []);
+    const run = () =>
+      jail.run({
+        phase: "verify",
+        checkout,
+        argv: [process.execPath, "-e", ""],
+        cwd: checkout,
+        env: sandboxEnvInput(),
+        timeoutMs: 20_000,
+        stdoutPath: join(work, "o"),
+        stderrPath: join(work, "e"),
+        setup: (tmp) => {
+          mkdirSync(join(tmp, "out"));
+          writeFileSync(join(tmp, "out", "input.json"), "{}");
+        },
+      });
+    const first = await run();
+    const second = await run();
+    jail.removeTempDir(first.tempDir);
+    expect(existsSync(first.tempDir)).toBe(false);
+    expect(existsSync(second.tempDir)).toBe(true);
+    jail.removeTempDir(checkout);
+    jail.removeTempDir(jail.homeDir());
+    expect(existsSync(checkout)).toBe(true);
+    expect(existsSync(jail.homeDir())).toBe(true);
+    jail.dispose();
+  });
+
   it("hands the sandbox the hidden and readable roots and, for a reaper, a sentinel it cannot read", async () => {
     const work = tempDir("vtc-jail-");
     const checkout = join(work, "checkout");

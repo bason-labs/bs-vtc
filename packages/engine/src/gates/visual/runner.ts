@@ -222,7 +222,7 @@ export const resolveNodeExecutable = (
 };
 
 /** `kernel.yama.ptrace_scope` of this host, or `null` when the kernel has no Yama. */
-const readPtraceScope = (): string | null => {
+export const readPtraceScope = (): string | null => {
   try {
     return readFileSync("/proc/sys/kernel/yama/ptrace_scope", "utf8").trim();
   } catch {
