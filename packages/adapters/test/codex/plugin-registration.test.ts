@@ -4,12 +4,22 @@
  * `codex plugin add vtc@vtc-local --json`, every one with the Codex home in `CODEX_HOME`. A fake
  * answers every `codex` command; no test starts the real binary.
  */
-import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import {
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  readdirSync,
+  rmSync,
+  symlinkSync,
+  writeFileSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { findDisallowedHostArgs, findForbiddenHostArgs } from "@vtc/shared";
-import { createCodexAdapter } from "../../src/index.js";
+import { ADAPTER_FACTORIES, createCodexAdapter } from "../../src/index.js";
+import { codexMarketplaceSource } from "../../src/codex/plugin-registration.js";
 import { vtcHomeWriteDeniedPaths, within } from "../../src/common/homes.js";
 import { answerCodexPlugin, codexFakeSpawner, type FakeProcess } from "../support/fake-spawner.js";
 import { fixtureJson } from "../support/fixtures.js";
@@ -38,7 +48,11 @@ const MOVED_SOURCE_STDERR = (
 ).steps.find((step) => step.exit === 1)?.stderr;
 
 const install = (
-  options: { onPlugin?: (process: FakeProcess) => void; codexHome?: string | null } = {},
+  options: {
+    onPlugin?: (process: FakeProcess) => void;
+    codexHome?: string | null;
+    installCommandTimeoutMs?: number;
+  } = {},
   request: Partial<Parameters<ReturnType<typeof createCodexAdapter>["install"]>[0]> = {},
 ) => {
   const env = setup();
@@ -48,6 +62,9 @@ const install = (
   const adapter = createCodexAdapter({
     spawner: fake.spawner,
     ...(options.codexHome === null ? {} : { codexHome: options.codexHome ?? CODEX_HOME }),
+    ...(options.installCommandTimeoutMs === undefined
+      ? {}
+      : { installCommandTimeoutMs: options.installCommandTimeoutMs }),
   });
   const run = adapter.install({ ...env, scope: "project", ...request });
   return { env, fake, run, adapter };
@@ -100,26 +117,51 @@ describe("Codex install registers the plugin (D-bn, readings 168 and 213)", () =
     expect(vtcHomeWriteDeniedPaths(vtcHome).some((denied) => within(denied, root))).toBe(true);
   });
 
-  it("registers in $CODEX_HOME when it is set, else in <home>/.codex, where Codex itself looks", async () => {
-    vi.stubEnv("CODEX_HOME", "");
-    const unset = install({ codexHome: null });
-    await unset.run;
-    expect(unset.fake.plugins[0]?.command.env).toEqual({
-      CODEX_HOME: join(unset.env.home, ".codex"),
-    });
+  it("never reads $CODEX_HOME itself: without an injected Codex home everything goes to <home>/.codex", async () => {
     vi.stubEnv("CODEX_HOME", "/elsewhere/codex");
-    const set = install({ codexHome: null });
-    await set.run;
-    expect(set.fake.plugins.map((p) => p.command.env.CODEX_HOME)).toEqual([
-      "/elsewhere/codex",
-      "/elsewhere/codex",
+    const { env, fake, run } = install({ codexHome: null }, { scope: "user" });
+    const result = await run;
+    const codexHome = join(env.home, ".codex");
+    expect(fake.plugins.map((p) => p.command.env.CODEX_HOME)).toEqual([codexHome, codexHome]);
+    expect(readdirSync(join(codexHome, "agents")).sort()).toEqual([
+      "vtc-engineer.toml",
+      "vtc-qa-judge.toml",
     ]);
+    expect(existsSync(join(codexHome, "config.toml"))).toBe(true);
+    // nothing written outside the injected home
+    for (const path of result.written) expect(path.startsWith(`${env.home}/`), path).toBe(true);
+  });
+
+  it("puts the user-scope agents, config.toml and the registration in one Codex home, the injected one", async () => {
+    vi.stubEnv("CODEX_HOME", "/elsewhere/codex");
+    const codexHome = temp("vtc-codex-home-");
+    const { env, fake, run } = install({ codexHome }, { scope: "user" });
+    const result = await run;
+    expect(fake.plugins.map((p) => p.command.env.CODEX_HOME)).toEqual([codexHome, codexHome]);
+    expect(result.written).toContain(join(codexHome, "agents", "vtc-engineer.toml"));
+    expect(result.written).toContain(join(codexHome, "config.toml"));
+    expect(readFileSync(join(codexHome, "config.toml"), "utf8")).toContain("[mcp_servers.vtc]");
+    expect(existsSync(join(env.home, ".codex"))).toBe(false);
+    expect(result.notes.join(" ")).toContain(`(${codexHome};`);
+  });
+
+  it("the factory forwards the cli's Codex home to the install", async () => {
+    const env = setup();
+    const codexHome = temp("vtc-codex-home-");
+    const fake = codexFakeSpawner();
+    const adapter = ADAPTER_FACTORIES.codex?.({ spawner: fake.spawner, codexHome });
+    await adapter?.install({ ...env, scope: "user" });
+    expect(fake.plugins.map((p) => p.command.env.CODEX_HOME)).toEqual([codexHome, codexHome]);
+    expect(existsSync(join(codexHome, "agents", "vtc-engineer.toml"))).toBe(true);
   });
 
   it("a re-install refreshes the marketplace copy, so a plugin file a newer build dropped is gone", async () => {
     const env = setup();
     const fake = codexFakeSpawner();
-    const adapter = createCodexAdapter({ spawner: fake.spawner, codexHome: CODEX_HOME });
+    const adapter = createCodexAdapter({
+      spawner: fake.spawner,
+      codexHome: temp("vtc-codex-home-"),
+    });
     await adapter.install({ ...env, scope: "user" });
     const stale = join(env.home, ".vtc", "plugins", "codex-marketplace", "vtc", "stale.txt");
     writeFileSync(stale, "old");
@@ -133,25 +175,88 @@ describe("Codex install registers the plugin (D-bn, readings 168 and 213)", () =
     ]);
   });
 
-  it("a marketplace of the same name from another directory (a moved VTC home) is removed, then added again", async () => {
+  /** A fake that refuses the first `marketplace add` the way codex-cli 0.162.1 did. */
+  const refuseFirstAdd = () => {
     let refused = false;
-    const { fake, run } = install({
-      onPlugin: (process) => {
-        if (!refused && process.command.args[2] === "add") {
-          refused = true;
-          // what codex-cli 0.162.1 said in a temporary CODEX_HOME (plugin-reinstall.json)
-          process.writeStderr(`${MOVED_SOURCE_STDERR}\n`);
-          process.exit(1);
-        } else answerCodexPlugin(process);
-      },
-    });
-    await run;
+    return (process: FakeProcess) => {
+      if (!refused && process.command.args[2] === "add") {
+        refused = true;
+        // what codex-cli 0.162.1 said in a temporary CODEX_HOME (plugin-reinstall.json)
+        process.writeStderr(`${MOVED_SOURCE_STDERR}\n`);
+        process.exit(1);
+      } else answerCodexPlugin(process);
+    };
+  };
+  /** A Codex home whose config.toml records `vtc-local` from `source`. */
+  const codexHomeWith = (source: string): string => {
+    const codexHome = temp("vtc-codex-home-");
+    writeFileSync(
+      join(codexHome, "config.toml"),
+      `[marketplaces.vtc-local]\nsource_type = "local"\nsource = ${JSON.stringify(source)}\n`,
+    );
+    return codexHome;
+  };
+
+  it("a VTC marketplace of the same name from another VTC home is removed, then added again, and the note names it", async () => {
+    const old = "/Users/dev/old-vtc/plugins/codex-marketplace";
+    const { fake, run } = install({ onPlugin: refuseFirstAdd(), codexHome: codexHomeWith(old) });
+    const result = await run;
     expect(fake.plugins.map((p) => p.command.args.slice(0, 4).join(" "))).toEqual([
       expect.stringMatching(/^plugin marketplace add \//u),
       "plugin marketplace remove vtc-local",
       expect.stringMatching(/^plugin marketplace add \//u),
       "plugin add vtc@vtc-local --json",
     ]);
+    expect(result.notes.join(" ")).toContain(`registered (${old})`);
+  });
+
+  it("never removes a vtc-local marketplace that is not VTC's own, or whose source it cannot read", async () => {
+    for (const codexHome of [codexHomeWith("/Users/dev/my-plugins"), temp("vtc-codex-home-")]) {
+      const { fake, run } = install({ onPlugin: refuseFirstAdd(), codexHome });
+      await expect(run).rejects.toThrow(
+        /marketplace named vtc-local is already added from .*which is not a VTC marketplace; VTC leaves it alone/u,
+      );
+      expect(fake.plugins.map((p) => p.command.args[2])).toEqual(["add"]);
+    }
+  });
+
+  it("reads the recorded marketplace source from config.toml, approximately", () => {
+    const config = [
+      "[marketplaces.other]",
+      'source = "/x"',
+      "",
+      '[marketplaces."vtc-local"] # VTC',
+      'source_type = "local"',
+      "source = '/a/plugins/codex-marketplace' # added by vtc",
+      "",
+    ].join("\n");
+    expect(codexMarketplaceSource(config, "vtc-local")).toBe("/a/plugins/codex-marketplace");
+    expect(
+      codexMarketplaceSource('[marketplaces.vtc-local]\nsource = "/a \\"b\\""\n', "vtc-local"),
+    ).toBe('/a "b"');
+    expect(codexMarketplaceSource("[marketplaces.vtc-local]\nsource = [1]\n", "vtc-local")).toBe(
+      null,
+    );
+    expect(codexMarketplaceSource('source = "/x"\n', "vtc-local")).toBe(null);
+  });
+
+  it("never writes the marketplace index through a link planted at its path", async () => {
+    const vtcHome = temp("vtc-vtchome-");
+    const victim = join(temp("vtc-victim-"), "target.json");
+    writeFileSync(victim, "untouched");
+    const dir = join(vtcHome, "plugins", "codex-marketplace", ".agents", "plugins");
+    mkdirSync(dir, { recursive: true });
+    symlinkSync(victim, join(dir, "marketplace.json"));
+    const { run } = install({}, { vtcHome });
+    await expect(run).rejects.toThrow();
+    expect(readFileSync(victim, "utf8")).toBe("untouched");
+  });
+
+  it("says a codex plugin command that hung was stopped, not that codex is missing", async () => {
+    const { run } = install({ onPlugin: () => undefined, installCommandTimeoutMs: 10 });
+    await expect(run).rejects.toThrow(
+      /codex plugin marketplace add .* did not finish in time and was stopped/u,
+    );
   });
 
   it("fails the install, naming the command and what was placed, when codex cannot run", async () => {
