@@ -73,10 +73,31 @@ describe("routingScorecardView", () => {
     expect(large.costPerTask?.value).toBe("insufficient data");
   });
 
-  it("says unpriced when a read cell has no cost", () => {
+  it("says unpriced when none of a read cell's tasks has a price (Lookback writes n 0)", () => {
     const qa = view.groups[1]!.cells[0]!;
     expect(qa.read).toBe(true);
-    expect(qa.costPerTask?.value).toBe("unpriced");
+    expect(ROUTING_SCORECARD.cells.at(-1)?.cost_per_task_usd).toMatchObject({ value: null, n: 0 });
+    expect(qa.costPerTask).toMatchObject({ value: "unpriced", insufficient: true, mark: null });
+  });
+
+  it("says how many tasks were priced when too few of a read cell's tasks have a price", () => {
+    const cell = ROUTING_SCORECARD.cells[0]!;
+    const cost = { value: null, ci_low: null, ci_high: null, n: 4 };
+    const v = routingScorecardView({
+      ...ROUTING_SCORECARD,
+      cells: [{ ...cell, cost_per_task_usd: cost }],
+    });
+    expect(v.groups[0]?.cells[0]?.costPerTask?.value).toBe("4 of 14 tasks priced");
+  });
+
+  it("says insufficient data, not unpriced, for a cell below the minimum without a cost", () => {
+    const cell = ROUTING_SCORECARD.cells[0]!;
+    const cost = { value: null, ci_low: null, ci_high: null, n: 0 };
+    const v = routingScorecardView({
+      ...ROUTING_SCORECARD,
+      cells: [{ ...cell, tasks: 3, cost_per_task_usd: cost }],
+    });
+    expect(v.groups[0]?.cells[0]?.costPerTask?.value).toBe("insufficient data");
   });
 
   it("shows a metric the cell does not record as absent", () => {
