@@ -81,13 +81,13 @@ describe("shellCallShapes: one host command field → shapes only", () => {
     ]);
     expect(shellCallShapes("bash -lc 'git status'\nmake test")).toEqual([
       shape("git", "status"),
-      shape("make", "test"),
+      shape("make"),
     ]);
     // `$0`, positional arguments and redirections belong to the wrapper and name no command
-    expect(shellCallShapes("bash -c 'make build' runner extra")).toEqual([shape("make", "build")]);
+    expect(shellCallShapes("bash -c 'make build' runner extra")).toEqual([shape("make")]);
     expect(shellCallShapes("bash -lc 'ls -la' 2>&1 | tee log")).toEqual([
       shape("ls", undefined, "-la"),
-      shape("tee", "log"),
+      shape("tee"),
     ]);
     expect(shellCallShapes("bash -lc 'ls'>out.txt")).toEqual([shape("ls")]);
     expect(shellCallShapes("bash -lc ls &>log")).toEqual([shape("ls")]);
@@ -106,15 +106,15 @@ describe("shellCallShapes: one host command field → shapes only", () => {
     expect(shellCallShapes(["echo", "it's"])).toEqual([shape("echo")]);
   });
 
-  it("pins the shared contract's known limit: a plain lower-case word after the program is kept as its subcommand, a bare value too", () => {
-    // `commandShapes` (@vtc/shared, frozen) keeps the word after any program when it is a plain
-    // lower-case word; for a program without subcommands that word is an argument value. Raised
-    // with the integrator as a contract proposal; until it changes, this is what reaches a shape.
-    expect(shellCallShapes("echo hunter2")).toEqual([shape("echo", "hunter2")]);
+  it("keeps no argument value as a subcommand: only a program with subcommands has one (contracts 5.5.0)", () => {
+    // `commandShapes` (@vtc/shared) keeps the word after the program only for the programs in
+    // COMMAND_SHAPE_SUBCOMMAND_PROGRAMS (spine §5 reading 228, amending 221(1))
+    expect(shellCallShapes("echo hunter2")).toEqual([shape("echo")]);
     expect(shellCallShapes("cd work/secret-project && cat secrets")).toEqual([
       shape("cd"),
-      shape("cat", "secrets"),
+      shape("cat"),
     ]);
+    expect(shellCallShapes("git status")).toEqual([shape("git", "status")]);
     // a path, an upper-case or quoted word, or anything with a dot or slash is never kept
     expect(shellCallShapes("cat ./secrets 'hunter2' Hunter2 api.example.com")).toEqual([
       shape("cat"),
@@ -200,7 +200,7 @@ describe("Codex parseEvents: command_execution → commandShapes (D-cs)", () => 
         JSON.stringify({ type: "item.started", item: noId }),
         JSON.stringify({ type: "item.completed", item: noId }),
       ]).commandShapes,
-    ).toEqual([shape("make", "test")]);
+    ).toEqual([shape("make")]);
   });
 
   it("records nothing for the recorded runs, which ran no shell command", () => {

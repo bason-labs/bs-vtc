@@ -145,14 +145,15 @@ describe(
       await h.release();
     });
 
-    it("a Codex role with no model id (the session's model) cannot be priced either", async () => {
+    it("a Codex role on the docs' built-in id (D-co) is priced from the price table too: unpriced, it never starts", async () => {
       const h = createHarness({ codex: codexHost, prices: { "gpt-test": PRICE } });
       await start(h);
       await next(h);
       expect(h.launched).toEqual([]);
       const preflight = ofType(h, "headless.preflight")[0]?.data;
       expect(preflight).toMatchObject({ ok: false, failed: "budget" });
-      expect(preflight?.detail).toContain("hosts.models.codex");
+      // the cartographer's own tier is mid: DEFAULT_TIER_MODELS.codex.mid
+      expect(preflight?.detail).toMatch(/gpt-6\.1-sol.*prices/);
       await h.release();
     });
 

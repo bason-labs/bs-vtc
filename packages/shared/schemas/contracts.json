@@ -1,5 +1,5 @@
 {
-  "contracts_version": "5.4.0",
+  "contracts_version": "5.5.0",
   "schemas": {
     "Run": {
       "$id": "https://vtc.local/schemas/Run.json",
@@ -33152,6 +33152,18 @@
                         "enum": [
                           "complete",
                           "partial"
+                        ]
+                      },
+                      "partial_reason": {
+                        "type": "string",
+                        "enum": [
+                          "base_build_failed",
+                          "base_serve_failed",
+                          "no_visual_app",
+                          "no_browser",
+                          "video_off",
+                          "no_ffmpeg",
+                          "capture_failed"
                         ]
                       }
                     },

@@ -61,6 +61,51 @@ export const MAX_SHAPES_PER_COMMAND = 20;
 export const commandShapeKey = (shape: CommandShape): string =>
   `${shape.program} ${shape.subcommand ?? "-"} ${shape.flags}`;
 
+/**
+ * The programs whose next word is a subcommand (`git status`, `pnpm install`, `docker build`), not
+ * an argument (spine §5 reading 228, amending 221(1)). After any other program the next word is an
+ * argument (a file, a host, a database, a make target such as `make deploy-acme`, or a value such
+ * as `echo hunter2`), so no subcommand is recorded. A package manager's next word may still be a
+ * script of the project (`pnpm acme-migrate`): that stays in the project's own run log, and the
+ * key a `tool` fact sends upstream keeps the subcommand only for engine core's stricter list
+ * (`toolShapeUpstreamKey`). New in 5.5.0.
+ */
+export const COMMAND_SHAPE_SUBCOMMAND_PROGRAMS: readonly string[] = [
+  "apt",
+  "apt-get",
+  "aws",
+  "az",
+  "brew",
+  "bun",
+  "cargo",
+  "claude",
+  "codex",
+  "conda",
+  "deno",
+  "docker",
+  "dotnet",
+  "gcloud",
+  "gh",
+  "git",
+  "go",
+  "helm",
+  "kubectl",
+  "npm",
+  "pip",
+  "pip3",
+  "pnpm",
+  "podman",
+  "poetry",
+  "rustup",
+  "systemctl",
+  "terraform",
+  "turbo",
+  "uv",
+  "vtc",
+  "yarn",
+];
+const SUBCOMMAND_PROGRAMS: ReadonlySet<string> = new Set(COMMAND_SHAPE_SUBCOMMAND_PROGRAMS);
+
 const SEPARATORS = new Set(["&&", "||", ";", "|", "&", "\n", "(", ")"]);
 const ASSIGNMENT = /^[A-Za-z_][A-Za-z0-9_]*=/;
 const PLAIN_PROGRAM = /^[A-Za-z0-9][A-Za-z0-9._+-]{0,63}$/;
@@ -136,7 +181,12 @@ const shapeOf = (
       : COMMAND_SHAPE_OTHER;
   const next = words[at + 1];
   const subcommand =
-    next !== undefined && !next.quoted && SUBCOMMAND.test(next.text) ? next.text : undefined;
+    SUBCOMMAND_PROGRAMS.has(program) &&
+    next !== undefined &&
+    !next.quoted &&
+    SUBCOMMAND.test(next.text)
+      ? next.text
+      : undefined;
   const flags = [
     ...new Set(
       words
@@ -156,8 +206,11 @@ const shapeOf = (
  * Pure (D-cs): the shapes of one shell command line, one per simple command (split at `&&`, `||`,
  * `;`, `|`, `&`, newlines and parentheses), at most {@link MAX_SHAPES_PER_COMMAND}. Leading
  * `VAR=value` assignments and an `env` prefix are skipped; a program named by a path is
- * {@link COMMAND_SHAPE_PATH}; the subcommand is the word right after the program when it is a
- * plain lower-case word. No argument value or path survives: only flag names, hashed.
+ * {@link COMMAND_SHAPE_PATH}; the subcommand is the word right after the program when the program
+ * is one of {@link COMMAND_SHAPE_SUBCOMMAND_PROGRAMS} and the word is a plain lower-case word. No
+ * argument value or path survives: only flag names, hashed. Known limit: a flag that carries its
+ * value with no `=` (`-pVALUE`) cannot be told from combined short flags (`-la`), so it is hashed
+ * with the flag names, never stored in plain text.
  */
 export const commandShapes = (command: string): CommandShape[] => {
   const shapes: CommandShape[] = [];

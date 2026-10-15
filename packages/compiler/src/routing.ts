@@ -7,8 +7,8 @@
  * prompt at the next compile with no hand edit.
  */
 import {
+  routedStartTier,
   TaskRiskClassSchema,
-  tierRank,
   TierHintReasonSchema,
   type ModelTier,
   type RoutingTable,
@@ -18,29 +18,16 @@ import {
 
 const SIZES = ["S", "M", "L"] as const;
 
-const higher = (a: ModelTier, b: ModelTier): ModelTier => (tierRank(a) >= tierRank(b) ? a : b);
-
 /**
  * Pure: the start tier the table gives a task of `size` and risk class `risk`, before any hint
- * or project clamp: the size's tier, raised to `tagged_floor` for any risk tag and to
- * `high_floor` for a high-risk one (the floors are lower bounds, as their names say, and reading
- * 218 (2): a high-risk task never starts below Top).
- *
- * A second copy of engine core's rule (`core/routing.ts`), used only to render the Planner's
- * table, so it is not exported from the package. It goes once `@vtc/shared` has a pure
- * `startTierFor(table, size, riskClass)` that engine core and the compiler both call (a contract
- * proposal of this branch).
+ * or project clamp: the shared cells of `routedStartTier` (contracts 5.5.0), the one rule engine
+ * core's router dispatches with, so the Planner's table is the engine's.
  */
 export const routingStartTier = (
   table: RoutingTable,
   size: (typeof SIZES)[number],
   risk: TaskRiskClass,
-): ModelTier => {
-  const bySize = table.by_size[size];
-  if (risk === "high") return higher(bySize, table.high_floor);
-  if (risk === "tagged") return higher(bySize, table.tagged_floor);
-  return bySize;
-};
+): ModelTier => routedStartTier(table, undefined, size, risk);
 
 const code = (text: string): string => `\`${text}\``;
 

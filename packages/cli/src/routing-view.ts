@@ -6,15 +6,15 @@
  *   start tier each size and risk class gets inside that range (QA in author mode never below
  *   `QA_AUTHOR_MIN_TIER`);
  * - per host, the tier → model map: `project.yaml` `hosts.models` over the engine's built-in
- *   `DEFAULT_TIER_MODELS`; a tier with no model id varies the reasoning effort only
- *   (`TIER_EFFORT_WITHOUT_MODEL`; Codex until D-co fills its ids);
+ *   `DEFAULT_TIER_MODELS` (Codex's from its model docs since D-co); a tier with no model id varies
+ *   the reasoning effort only (`TIER_EFFORT_WITHOUT_MODEL`);
  * - the user's Lookback replay pace (`~/.vtc/config.yaml` `lookback`, `lookbackPaceFor`), with the
  *   cap that applies now for each host whose weekly window the repo's running engine reports.
  *
  * It only reads. The start tier of a cell is the table's tier for the size, raised to
  * `tagged_floor` for a task with a risk tag and to `high_floor` for a high-risk one
- * (`taskRiskClass`), then held in the project's range: the rule of reading 218 (2) and (4). Engine
- * core's routing function decides each dispatch; this is the table it reads, laid out.
+ * (`taskRiskClass`), then held in the project's range: the rule of reading 218 (2) and (4), read
+ * through the shared `routedStartTier` engine core's routing function dispatches with.
  *
  * `project.yaml` is repo content: every string taken from it is printed with its control
  * characters escaped (`printable`).
@@ -31,11 +31,11 @@ import {
   parsePersisted,
   ProjectConfigSchema,
   QA_AUTHOR_MIN_TIER,
+  routedStartTier,
   routingFor,
   RoutingConfigSchema,
   TIER_EFFORT_WITHOUT_MODEL,
   TIER_ORDER,
-  tierRank,
   UserConfigSchema,
   type Effort,
   type HostId,
@@ -189,24 +189,20 @@ export interface RoutingView {
   };
 }
 
-const higher = (a: ModelTier, b: ModelTier): ModelTier => (tierRank(a) >= tierRank(b) ? a : b);
-
-/** The start tiers of the table (with one role's override), held in `[min, max]`. */
+/**
+ * The start tiers of the table (one role's cells when `role` names one), held in `[min, max]`: the
+ * shared rule (`routedStartTier`, contracts 5.5.0) engine core's router dispatches with.
+ */
 const startTiersOf = (
   table: RoutingTable,
-  override: RoutingRoleOverride | undefined,
+  role: string | undefined,
   min: ModelTier,
   max: ModelTier,
 ): StartTiers => {
-  const tagged = override?.tagged_floor ?? table.tagged_floor;
-  const high = override?.high_floor ?? table.high_floor;
-  const cell = (size: Size, risk: TaskRiskClass): ModelTier => {
-    const base = override?.by_size?.[size] ?? table.by_size[size];
-    const raised = risk === "none" ? base : higher(base, risk === "tagged" ? tagged : high);
-    return clampTier(raised, min, max);
-  };
   const row = (size: Size) =>
-    Object.fromEntries(RISKS.map((r) => [r, cell(size, r)])) as Record<TaskRiskClass, ModelTier>;
+    Object.fromEntries(
+      RISKS.map((r) => [r, clampTier(routedStartTier(table, role, size, r), min, max)]),
+    ) as Record<TaskRiskClass, ModelTier>;
   return { S: row("S"), M: row("M"), L: row("L") };
 };
 
@@ -270,9 +266,9 @@ export const routingView = (input: {
     start_tiers: ruleOn ? startTiersOf(table, undefined, routing.min, routing.max) : null,
     role_start_tiers: ruleOn
       ? Object.fromEntries(
-          Object.entries(table.roles ?? {}).map(([role, override]) => [
+          Object.keys(table.roles ?? {}).map((role) => [
             role,
-            startTiersOf(table, override, routing.min, routing.max),
+            startTiersOf(table, role, routing.min, routing.max),
           ]),
         )
       : {},

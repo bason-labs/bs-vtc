@@ -23,6 +23,9 @@ export const sharedConfig = defineConfig({
   },
   test: {
     environment: "node",
+    // a test behaves as in a Lead session even when an engine-launched headless role run (VTC
+    // building VTC) runs it: `HEADLESS_ROLE_ENV` (@vtc/shared hook contract rule 7) is cleared
+    env: { VTC_HEADLESS_ROLE: "" },
     include: ["src/**/*.test.ts", "test/**/*.test.ts"],
     passWithNoTests: false,
     restoreMocks: true,

@@ -18,6 +18,7 @@ import {
   clampTier,
   DEFAULT_ROUTING_TABLE,
   QA_AUTHOR_MIN_TIER,
+  routedStartTier,
   routingFor,
   taskRiskClass,
   tierRank,
@@ -67,23 +68,15 @@ const higher = (a: ModelTier, b: ModelTier): ModelTier => (tierRank(a) >= tierRa
 const qaAuthor = (input: Pick<RouteInput, "role" | "mode">): boolean =>
   input.role === "qa" && input.mode === "author";
 
-/** Pure: the routing table's tier for a task and role (no hint, no clamp). */
+/**
+ * Pure: the routing table's tier for a task and role (no hint, no clamp): the shared rule
+ * (`routedStartTier`, contracts 5.5.0), which Lookback, the compiler and the cli read too.
+ */
 export const ruleTier = (
   task: RouteTask,
   role: string,
   table: RoutingTable = DEFAULT_ROUTING_TABLE,
-): ModelTier => {
-  const own = table.roles?.[role];
-  const bySize = own?.by_size?.[task.size] ?? table.by_size[task.size];
-  switch (taskRiskClass(task, table)) {
-    case "none":
-      return bySize;
-    case "tagged":
-      return higher(bySize, own?.tagged_floor ?? table.tagged_floor);
-    case "high":
-      return higher(bySize, own?.high_floor ?? table.high_floor);
-  }
-};
+): ModelTier => routedStartTier(table, role, task.size, taskRiskClass(task, table));
 
 /**
  * `candidate` raised to `floor` (if any), inside the project's bounds, then QA author's floor.

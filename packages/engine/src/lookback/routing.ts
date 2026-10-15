@@ -59,6 +59,7 @@ import {
   LOOKBACK_REPO,
   QA_AUTHOR_MIN_TIER,
   readEventData,
+  routedStartTier,
   routingConfigSubject,
   RoutingScorecardSchema,
   RoutingTableSchema,
@@ -102,34 +103,13 @@ const MAX_CELLS = 1000;
 const higherOf = (a: ModelTier, b: ModelTier): ModelTier => (tierRank(a) >= tierRank(b) ? a : b);
 
 /**
- * Pure: the start tier the routing table gives `role` for a task of `size` and `risk` (D-cm,
- * reading 218(2)), before the project's `routing.min_tier` / `max_tier` and QA author's floor. A
- * `roles.<role>` override replaces the shared field it names. The floors are floors: a tagged task
- * starts on the higher of `by_size` and `tagged_floor`, a high-risk one on the higher of `by_size`
- * and `high_floor` (`tagged_floor` is not its floor: a `risk: high` task may carry no tag).
- *
- * **A temporary mirror** of `ruleTier` in engine core's router (`core/routing.ts`, reading 218),
- * which shared does not export: the contract proposal moves one pure function into
- * `packages/shared/src/tier-routing.ts` for both to use. Until it lands, the conformance cases in
- * this module's tests follow `ruleTier` as engine core's branch has it (a test importing it is due
- * at integration, same proposal).
+ * The start tier the routing table gives `role` for a task of `size` and `risk` (D-cm, reading
+ * 218(2)), before the project's `routing.min_tier` / `max_tier` and QA author's floor: the shared
+ * rule (`routedStartTier` in `@vtc/shared`, contracts 5.5.0), the one engine core's router
+ * dispatches with, so Lookback measures against the start tier the engine picks. Re-exported for
+ * this module's callers.
  */
-export const routedStartTier = (
-  table: RoutingTable,
-  role: string,
-  size: TaskSize,
-  risk: TaskRiskClass,
-): ModelTier => {
-  const own = table.roles?.[role];
-  const bySize = own?.by_size?.[size] ?? table.by_size[size];
-  if (risk === "none") return bySize;
-  return higherOf(
-    bySize,
-    risk === "tagged"
-      ? (own?.tagged_floor ?? table.tagged_floor)
-      : (own?.high_floor ?? table.high_floor),
-  );
-};
+export { routedStartTier };
 
 // ----------------------------------------------------------------- scorecard
 

@@ -151,16 +151,15 @@ describe("the routing view (H-9, D-cm)", () => {
       mid: { model: "sonnet", source: "built_in" },
       top: { model: "opus", source: "built_in" },
     });
+    // D-co (spine §5 reading 228): the docs' Codex ids are built in
     expect(view.models.codex).toEqual({
-      low: { model: null, source: null, effort: "low" },
-      mid: { model: null, source: null, effort: "medium" },
-      top: { model: null, source: null, effort: "high" },
+      low: { model: "gpt-6-luna", source: "built_in" },
+      mid: { model: "gpt-6.1-sol", source: "built_in" },
+      top: { model: "gpt-6-astra", source: "built_in" },
     });
     const text = formatRoutingView(view).join("\n");
     expect(text).toMatch(/claude-code: low sonnet \(project\.yaml\), mid sonnet, top opus/);
-    expect(text).toMatch(
-      /codex: no model id for any tier, so a tier varies the reasoning effort only \(low low, mid medium, top high\)/,
-    );
+    expect(text).toMatch(/codex: low gpt-6-luna, mid gpt-6\.1-sol, top gpt-6-astra/);
   });
 
   it("shows the Lookback pace with the base and boosted caps, and the cap that applies now", () => {
@@ -234,7 +233,7 @@ describe("doctor's routing checks", () => {
       "per-task roles start by task difficulty: S low, M mid, L top; any risk tag at least mid; high risk (auth, payments, data, security, migration, or risk: high) top; tiers low..top (.vtc/project.yaml routing unset); QA in author mode never below mid",
     );
     expect(list[1]?.detail).toMatch(
-      /^claude-code: low haiku, mid sonnet, top opus; codex: no model id for any tier, so a tier varies the reasoning effort only/,
+      /^claude-code: low haiku, mid sonnet, top opus; codex: low gpt-6-luna, mid gpt-6\.1-sol, top gpt-6-astra/,
     );
     expect(checks({ kind: "none" })[0]).toMatchObject({ status: "info" });
   });

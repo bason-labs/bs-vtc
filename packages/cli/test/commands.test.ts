@@ -138,6 +138,7 @@ describe("vtc install", () => {
       timerHost: () => {
         throw new Error("the real launchd or systemd is never touched in tests");
       },
+      codexHome: (h) => `${h}/.codex`,
       ...over,
     });
 
@@ -171,7 +172,10 @@ describe("vtc install", () => {
       // the VTC home goes with the request, so VTC-owned host files sit where the deny lists point
       { projectRoot: repo, home: "/h", pluginDir: "/plugins/codex", scope: "user", vtcHome },
     ]);
-    expect(options).toEqual([{ pluginDir: "/plugins/codex", vtcHome, vtcVersion: VERSION }]);
+    // the Codex home the cli resolved ($CODEX_HOME, else <home>/.codex; AD-6 rule 5)
+    expect(options).toEqual([
+      { pluginDir: "/plugins/codex", vtcHome, vtcVersion: VERSION, codexHome: "/h/.codex" },
+    ]);
     expect(disposed).toBe(1);
     expect(existsSync(installTokenPath(vtcHome))).toBe(true);
     expect(out.join("\n")).toContain("note: trust the hooks");
@@ -672,5 +676,16 @@ describe("vtc doctor", () => {
       ok: true,
       config: { env_passthrough: ["GH_TOKEN"] },
     });
+  });
+});
+
+describe("vtc install hands the adapters the resolved Codex home (AD-6 rule 5)", () => {
+  it("takes $CODEX_HOME when it is set, else <home>/.codex", () => {
+    const resolve = defaultInstallDeps().codexHome;
+    expect(resolve).toBeDefined();
+    const moved = process.env.CODEX_HOME;
+    expect(resolve?.("/h")).toBe(
+      moved !== undefined && moved.startsWith("/") ? moved : "/h/.codex",
+    );
   });
 });

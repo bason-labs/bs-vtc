@@ -148,6 +148,8 @@ export const FIXTURE_ROLES: readonly RoleContract[] = [
   }),
   role({
     id: "planner",
+    // D-bm: the Planner's locked-core edit (tier_hint, round 5) is MAJOR, as roles/planner/role.yaml
+    version: "2.0.0",
     kind: "core",
     mission: "Split the approved design into tasks with intent contracts.",
     inputs: ["spec", "architecture", "threat_model", "design_flows", "screens", "repo_map"],

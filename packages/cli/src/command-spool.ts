@@ -1,7 +1,8 @@
 /**
  * The tool signal's spool (D-cs; spine §5 reading 221, `@vtc/shared` signals.ts): for each shell
  * call of a VTC role agent in a Lead session, `vtc hook pre-tool-use` appends one
- * `CommandShapeSpoolRow` per shape of the command (`commandShapes`) to
+ * `CommandShapeSpoolRow` per shape of the command (`shellCallShapes` from `@vtc/adapters`, the
+ * same shaping a headless run's stream gets, so a `bash -lc` wrapper counts as its script) to
  * `<vtcHome>/guard/<repo-key>/command-shapes.jsonl` (`core.guardDirFor`,
  * `COMMAND_SHAPE_SPOOL_FILE`), the engine's private directory, which no role may write. The engine
  * drains it into the dispatch's `role.submitted`.
@@ -14,11 +15,11 @@
  */
 import { closeSync, constants, fstatSync, openSync, writeSync } from "node:fs";
 import { isAbsolute, join, resolve } from "node:path";
+import { shellCallShapes } from "@vtc/adapters";
 import { core } from "@vtc/engine";
 import {
   COMMAND_SHAPE_SPOOL_FILE,
   CommandShapeSpoolRowSchema,
-  commandShapes,
   type CommandShapeSpoolRow,
 } from "@vtc/shared";
 
@@ -41,7 +42,7 @@ export const spoolRowsOf = (input: {
     ...(input.session === undefined || input.session === "" ? {} : { session: input.session }),
     cwd: resolve(input.cwd),
   };
-  return commandShapes(input.command).flatMap((shape) => {
+  return shellCallShapes(input.command).flatMap((shape) => {
     const row = CommandShapeSpoolRowSchema.safeParse({ ...base, shape });
     return row.success ? [row.data] : [];
   });

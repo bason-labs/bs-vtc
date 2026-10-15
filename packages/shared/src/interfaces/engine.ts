@@ -38,7 +38,11 @@ export interface EngineVersions {
 export interface EngineDeps {
   /** Absolute repo root (the daemon serves exactly one repo, AD-12). */
   readonly repoRoot: string;
-  /** Absolute VTC home (`~/.vtc`): discovery, sockets, hidden tests. */
+  /**
+   * Absolute VTC home (`~/.vtc`): discovery, sockets, hidden tests. The daemon reads the user's
+   * `config.yaml` `lookback` section (D-cq's replay pace) from it itself, live at each RETRO, so
+   * EngineDeps carries no lookback setting (5.5.0 doc; spine §5 reading 228).
+   */
   readonly vtcHome: string;
   /**
    * The per-install token (AD-5 rule 2), read by the cli from `ENGINE_INSTANCE.tokenFile`. The

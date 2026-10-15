@@ -48,7 +48,7 @@ describe("vtc config", () => {
     expect(text).toMatch(/table v1: S low, M mid, L top/);
     expect(text).toMatch(/start tier by task size and risk, tiers low\.\.top/);
     expect(text).toMatch(/claude-code: low haiku, mid sonnet, top opus/);
-    expect(text).toMatch(/codex: no model id for any tier/);
+    expect(text).toMatch(/codex: low gpt-6-luna, mid gpt-6\.1-sol, top gpt-6-astra/);
     expect(text).toMatch(/24 trials per RETRO, 36 while/);
   });
 

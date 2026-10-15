@@ -33,7 +33,7 @@
  */
 import { homedir } from "node:os";
 import { ADAPTER_FACTORIES } from "@vtc/adapters";
-import { DEFAULT_INSTALL_SCOPE, HostIdSchema, type HostId } from "@vtc/shared";
+import { DEFAULT_INSTALL_SCOPE, hostConfigDirsOf, HostIdSchema, type HostId } from "@vtc/shared";
 import { ttyConfirm } from "../confirm.js";
 import { findRepoRoot, UsageError } from "../repo.js";
 import { runtime } from "../runtime.js";
@@ -71,6 +71,12 @@ export interface InstallDeps {
   readonly confirm: (question: string) => Promise<boolean>;
   /** Where the Claude session sandbox state is read from (the real machine by default). */
   readonly sessionSandboxEnv: () => SessionSandboxEnv;
+  /**
+   * The Codex home for the user's home (`$CODEX_HOME`, else `<home>/.codex`), passed to the
+   * adapters, which no longer read `CODEX_HOME` themselves (AD-6 rule 5). Absent:
+   * `<home>/.codex`.
+   */
+  readonly codexHome?: (home: string) => string;
 }
 
 export const defaultInstallDeps = (): InstallDeps => ({
@@ -86,6 +92,7 @@ export const defaultInstallDeps = (): InstallDeps => ({
   }),
   confirm: ttyConfirm,
   sessionSandboxEnv: defaultSessionSandboxEnv,
+  codexHome: (home) => hostConfigDirsOf(process.env, home).codex,
 });
 
 /**
@@ -231,7 +238,13 @@ export const createInstallCommand = (
         if (factory === undefined)
           throw new Error(`this build of vtc has no ${host.data} adapter yet`);
         const pluginDir = d.pluginDir(host.data, ctx.vtcHome);
-        const adapter = factory({ pluginDir, vtcHome: ctx.vtcHome, vtcVersion: VERSION });
+        const codexHome = (d.codexHome ?? ((home) => hostConfigDirsOf({}, home).codex))(d.home());
+        const adapter = factory({
+          pluginDir,
+          vtcHome: ctx.vtcHome,
+          vtcVersion: VERSION,
+          codexHome,
+        });
         const repoRoot = await findRepoRoot(ctx.cwd);
         const installScope = scope ?? DEFAULT_INSTALL_SCOPE[host.data];
         try {

@@ -765,7 +765,11 @@ export const RoutingScorecardSchema = z.strictObject({
         metrics: MetricsSchema,
         /** Share of the cell's tasks whose tier escalated (Wilson interval). */
         escalated: MetricValueSchema,
-        /** Mean reported cost per task in USD; `null` value below the minimum n or when unpriced. */
+        /**
+         * Mean reported cost per task in USD over the priced tasks (each of whose submitted
+         * dispatches reported a cost); its `n` counts those tasks, so `n` 0 on a cell with tasks
+         * means unpriced, and a `null` value with `n` above 0 means below the minimum n (5.5.0 doc).
+         */
         cost_per_task_usd: MetricValueSchema,
       }),
     )

@@ -15,6 +15,7 @@ import { ADAPTER_FACTORIES, type AdapterFactoryOptions } from "@vtc/adapters";
 import { ENGINE_NAME, gates, git, mcp, runDaemon } from "@vtc/engine";
 import {
   CONTRACTS_VERSION,
+  hostConfigDirsOf,
   type ArmPluginCompiler,
   type AssetBundle,
   type AutomationDeps,
@@ -166,6 +167,11 @@ export interface AdapterContext {
   readonly pluginDir: (host: HostId, vtcHome: string) => string;
   /** `~/.vtc/config.yaml` `env_passthrough` (D-ak): names that reach headless host runs. */
   readonly envPassthrough?: readonly string[];
+  /**
+   * The Codex home (`$CODEX_HOME`, else `~/.codex`; `hostConfigDirsOf(process.env, homedir())`),
+   * which the adapters no longer read themselves (AD-6 rule 5). Absent: each adapter's default.
+   */
+  readonly codexHome?: string;
 }
 
 /**
@@ -184,6 +190,7 @@ export const createAdapters = (
       pluginDir: context.pluginDir(host, context.vtcHome),
       vtcHome: context.vtcHome,
       vtcVersion: VERSION,
+      ...(context.codexHome === undefined ? {} : { codexHome: context.codexHome }),
       ...(context.envPassthrough === undefined || context.envPassthrough.length === 0
         ? {}
         : { envPassthrough: context.envPassthrough }),
@@ -313,6 +320,7 @@ export const buildEngineParts = async (options: BuildEnginePartsOptions): Promis
       vtcHome,
       pluginDir,
       envPassthrough: passthroughOf(userConfig),
+      codexHome: hostConfigDirsOf(process.env, homedir()).codex,
     }),
     assets: options.assets,
     scheduler: options.scheduler ?? createWakeScheduler(vtcHome),

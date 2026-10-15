@@ -275,5 +275,17 @@ export * from "./json-schema.js";
  * answered `no_run`, so an older reader sees a refused call either way) and
  * `RunControlResult.automation_paused`, `branch.pushed` / `push_failed` `remote_ref`. `ModelTier`
  * and `Effort` move to `primitives.ts` (re-exported from `role-contract.ts`; same schemas).
+ *
+ * 5.5.0 (MINOR): the round-5 merge (spine §5 readings 228–231). `routedStartTier`, the one pure
+ * copy of the routing table's start-tier rule (engine core, Lookback, the compiler and the cli
+ * call it); `ROUTING_FACT_METRICS`, the metric names of a routing `config` fact;
+ * `COMMAND_SHAPE_SUBCOMMAND_PROGRAMS`: `commandShapes` records a subcommand only after a program
+ * that has subcommands, so no argument value survives as one (amends reading 221(1));
+ * `HEADLESS_ROLE_ENV` and hook contract rule 7 (the headless role run marker);
+ * `AutomationItem.pr.partial_reason` (optional); `GitPlumbing.changedPaths` / `mergeBase`
+ * (optional). Doc only: a Planner hint on a high-risk task is raised to `high_floor`
+ * (`TierHint`, reading 228), `AUTO_TEMPLATE_SLOTS`' `diff` is the CHANGELOG entry's, the
+ * `RoutingScorecard` cost cell's `n` counts priced tasks, `AutomationReport.evidence_hosting` is
+ * the resolved hosting, and the daemon reads the user's `lookback` config itself. All additive.
  */
-export const CONTRACTS_VERSION = "5.4.0";
+export const CONTRACTS_VERSION = "5.5.0";

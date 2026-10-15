@@ -104,14 +104,21 @@ const contract = (id: string): RoleContract => {
 };
 
 describe("Codex runs on the session's model (D-ae, spine §5 reading 51)", () => {
-  it("has no built-in Codex ids, so resolveModel names no model without an explicit one", () => {
-    expect(core.DEFAULT_TIER_MODELS.codex).toEqual({});
+  it("names the docs' Codex ids per tier since D-co (reading 228); a project override still wins", () => {
+    expect(core.DEFAULT_TIER_MODELS.codex).toEqual({
+      top: "gpt-6-astra",
+      mid: "gpt-6.1-sol",
+      low: "gpt-6-luna",
+    });
     const engineer = contract("engineer");
     const hosts = { hosts: { preferred: undefined, dispatch: "plugin_only" } } as never;
     const resolved = core.resolveModel(engineer, "codex", hosts);
-    expect(resolved).toEqual({ tier: "mid", effort: engineer.models.codex.effort });
-    expect("model" in resolved).toBe(false);
-    // a project override or an explicit role model still names one
+    expect(resolved).toEqual({
+      tier: "mid",
+      effort: engineer.models.codex.effort,
+      model: "gpt-6.1-sol",
+    });
+    // a project override or an explicit role model still names its own
     const overridden = core.resolveModel(engineer, "codex", {
       hosts: { dispatch: "plugin_only", models: { codex: { mid: "gpt-x" } } },
     } as never);
