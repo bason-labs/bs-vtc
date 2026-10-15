@@ -252,9 +252,35 @@ describe("routing-table changes (D-cn)", () => {
     const h = harness({ shared: elsewhere, self: true });
     h.files.set(ROUTING_TABLE_FILE, TABLE_SOURCE);
     await h.upstream.pickup(h.ctx);
-    expect(h.github.state.prs[0]?.body).toContain(
-      "A graded tier replay backs this change: verdict `improve` over 24 trials",
+    const body = h.github.state.prs[0]?.body ?? "";
+    // as the issue's claim, never as a replay VTC ran or checked
+    expect(body).toContain(
+      "The issue cites a graded tier replay that backs this change: verdict `improve` over 24 trials, as the issue lists it",
     );
+    expect(body).not.toContain("A graded tier replay backs this change");
+    expect(body).not.toContain("Lookback ran the cell's recorded tasks");
+  });
+
+  it("pickup refuses another installation's routing issue whose cited replay does not back the move", async () => {
+    const elsewhere = harness({ noGitOps: true });
+    await elsewhere.upstream.report(
+      improvement("config", routingConfigSubject("engineer", "M", "tagged"), {
+        ...REPLAYED,
+        "routing.replay_verdict": ROUTING_REPLAY_VERDICT_CODES.no_change,
+      }),
+      elsewhere.ctx,
+    );
+    expect(elsewhere.github.state.issues[0]?.body).toContain(
+      "A graded tier replay does not back the move",
+    );
+    const h = harness({ shared: elsewhere, self: true });
+    h.files.set(ROUTING_TABLE_FILE, TABLE_SOURCE);
+    await h.upstream.pickup(h.ctx);
+    expect(h.github.state.prs).toEqual([]);
+    expect(h.events.find((e) => e.type === "automation.skipped")?.payload).toMatchObject({
+      reason: "out_of_scope",
+      kind: "config",
+    });
   });
 
   it("pickup refuses another installation's routing issue of a reviewer cell (D-cu)", async () => {
@@ -407,6 +433,74 @@ describe("routing-table changes (D-cn)", () => {
     const skipped = h.events.find((e) => e.type === "automation.skipped");
     expect(skipped?.payload).toMatchObject({ reason: "out_of_scope", kind: "config" });
     expect(JSON.stringify(skipped?.payload)).toContain("packages/shared/src/index.ts");
+  });
+
+  it("refuses a run's PR of a reviewer's cell (D-cu), by its report's subject or its issue", async () => {
+    const subject = routingConfigSubject("spec_verifier", "M", "high");
+    const fp = autoFingerprint({ kind: "config", subject });
+    const runPr = (h: ReturnType<typeof harness>, withSubject: boolean, issue?: number) =>
+      h.upstream.openPullRequest(
+        {
+          target: "upstream",
+          kind: "config",
+          fingerprint: fp,
+          summary: "start spec_verifier M high-risk tasks on top",
+          slots: { summary: "Routing table change." },
+          source: { pushedHead: "7".repeat(40) },
+          issue,
+          report: {
+            v: 1,
+            kind: "config",
+            fingerprint: fp,
+            vtc_version: "0.4.0",
+            vtc_frames: [],
+            metrics: {},
+            occurrences: 1,
+            first_seen: "2026-10-15T11:00:00.000Z",
+            last_seen: "2026-10-15T11:00:00.000Z",
+            ...(withSubject
+              ? { subject: { kind: "routing", role: "spec_verifier", size: "M", risk: "high" } }
+              : {}),
+          },
+          specVerifier: "pass",
+          evidence: {
+            plan: { run: "R7", upstreamSafe: false, change: "non_ui" },
+            snapshot: { routes: {}, events: [] },
+            gateReport: {} as never,
+          },
+        },
+        h.ctx,
+      );
+    // the report's typed subject is the reviewer's cell
+    const bySubject = harness({ self: true });
+    bySubject.plumbing.changed.set("7".repeat(40), [ROUTING_TABLE_FILE]);
+    expect(await runPr(bySubject, true)).toMatchObject({
+      status: "skipped",
+      reason: "out_of_scope",
+    });
+    expect(bySubject.github.state.prs).toEqual([]);
+    // no subject on the report: the cell its issue names (an older VTC raised it before D-cu)
+    const byIssue = harness({ self: true });
+    byIssue.plumbing.changed.set("7".repeat(40), [ROUTING_TABLE_FILE]);
+    await byIssue.upstream.report(
+      improvement("config", routingConfigSubject("engineer", "M", "high"), {
+        "routing.from_tier": 1,
+        "routing.to_tier": 2,
+      }),
+      byIssue.ctx,
+    );
+    byIssue.github.state.issues = byIssue.github.state.issues.map((i) => ({
+      ...i,
+      body: i.body.replaceAll(i.marker?.fp ?? "-", fp).replaceAll("engineer", "spec_verifier"),
+      marker: i.marker === null ? null : { ...i.marker, fp },
+    }));
+    const planted = byIssue.github.state.issues[0];
+    expect(routingSubjectOfBody(planted?.body)).toMatchObject({ role: "spec_verifier" });
+    expect(await runPr(byIssue, false, planted?.number)).toMatchObject({
+      status: "skipped",
+      reason: "out_of_scope",
+    });
+    expect(byIssue.github.state.prs).toEqual([]);
   });
 
   it("fails closed when the plumbing cannot list the changed paths", async () => {

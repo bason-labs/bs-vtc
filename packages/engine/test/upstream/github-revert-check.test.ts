@@ -10,6 +10,7 @@ import { describe, expect, it } from "vitest";
 import {
   assertThrowaway,
   detectRevert,
+  originIsRepo,
   parseRevertCheckArgs,
   revertBranchOf,
   RevertCheckRecordSchema,
@@ -147,18 +148,65 @@ describe("the fixture shape and what revert detection reads from it", () => {
         ...record,
         revert: {
           ...record.revert,
-          title: `Back out "${record.merge.title}"`,
           commits: record.revert.commits.map((c) => ({ ...c, message: "Back out the probe" })),
         },
+        listed: record.listed.map((p) => ({ ...p, title: `Back out "${record.merge.title}"` })),
       }),
     ).toEqual({ git_log: false, pr_reference: false });
     // a mention of #12 is not a mention of #1
+    expect(detectRevert({ ...record, merge: { ...record.merge, pr: 1 } }).pr_reference).toBe(false);
+  });
+
+  it("reads the PR reference from the merged PRs as listed, as findReverts does", () => {
+    const record = fixture();
+    // the revert PR missing from `gh pr list --state merged`: the PR read misses it
     expect(
       detectRevert({
         ...record,
-        merge: { ...record.merge, pr: 1 },
-        revert: { ...record.revert, body: "Reverts bason-labs/bs-vtc#12" },
+        listed: record.listed.filter((p) => p.number !== record.revert.pr),
       }).pr_reference,
     ).toBe(false);
+    // listed without a merge commit: findReverts skips it
+    expect(
+      detectRevert({
+        ...record,
+        listed: record.listed.map((p) =>
+          p.number === record.revert.pr ? { ...p, merge_commit: null } : p,
+        ),
+      }).pr_reference,
+    ).toBe(false);
+    // `gh pr view`'s title and body do not count; only the listed entry's
+    expect(
+      detectRevert({
+        ...record,
+        revert: { ...record.revert, title: "Probe", body: "" },
+      }).pr_reference,
+    ).toBe(true);
+  });
+});
+
+describe("the preflight's origin check", () => {
+  it("accepts the repo's own origin in its URL forms", () => {
+    for (const origin of [
+      "git@github.com:bason-labs/bs-vtc.git",
+      "git@github.com:bason-labs/bs-vtc",
+      "https://github.com/bason-labs/bs-vtc.git",
+      "https://github.com/Bason-Labs/BS-VTC",
+      "https://user@github.com/bason-labs/bs-vtc.git",
+      "ssh://git@github.com/bason-labs/bs-vtc.git",
+    ])
+      expect(originIsRepo(origin, "bason-labs/bs-vtc"), origin).toBe(true);
+  });
+
+  it("refuses another owner's repo of the same name, or another host", () => {
+    for (const origin of [
+      "git@github.com:evilowner/bs-vtc.git",
+      "git@github.com:evil-bason-labs/bs-vtc.git",
+      "https://github.com/xbason-labs/bs-vtc",
+      "https://example.com/bason-labs/bs-vtc.git",
+      "https://github.com.evil/bason-labs/bs-vtc.git",
+      "git@github.com:bason-labs/bs-vtc-fork.git",
+    ])
+      expect(originIsRepo(origin, "bason-labs/bs-vtc"), origin).toBe(false);
   });
 });
