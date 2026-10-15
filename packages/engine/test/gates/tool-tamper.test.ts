@@ -11,7 +11,7 @@ import { TOOL_TAMPER_RULE_ID, type GateReport, type GateResult } from "@vtc/shar
 import { afterEach, describe, expect, it } from "vitest";
 import { ScannerUnavailableError } from "../../src/gates/index.js";
 import { cleanupDirs, tempDir, writeFile } from "../helpers/repo.js";
-import { commitAll, config, harness, leaksGate, NODE, TOOLS } from "./fixture.js";
+import { commitAll, config, fakeScanners, harness, leaksGate, NODE, TOOLS } from "./fixture.js";
 
 afterEach(cleanupDirs);
 
@@ -83,6 +83,13 @@ const explicitLint = {
 const lintRan = (argvs: readonly (readonly string[])[]): boolean =>
   argvs.some((a) => a.some((t) => t.includes("lint-tool")) && a.includes(REPORT));
 
+/** The text of one evidence log of the run's (only) attempt. */
+const evidenceLog = (repo: string, name: string): string => {
+  const evidenceRoot = join(repo, ".vtc/evidence/T-1/gates");
+  const attempt = readdirSync(evidenceRoot)[0] ?? "";
+  return readFileSync(join(evidenceRoot, attempt, name), "utf8");
+};
+
 describe("H-14: a project check tool is hashed after a scripts-free install", () => {
   it("installs without scripts, hashes the tool, installs with scripts, and runs the verified tool", async () => {
     const { h, npm } = setup([explicitLint]);
@@ -148,6 +155,10 @@ describe("H-14: a project check tool is hashed after a scripts-free install", ()
     const clean = await h.run({ head: commitAll(h.repo), layers: ["L0", "L1"] });
     expect(result(clean, "lint")).toMatchObject({ status: "pass", tool: { tampered: [] } });
     expect(lintRan(h.argvs)).toBe(true);
+    // The build gate runs a committed script with the node on PATH: no tool VTC verifies.
+    expect(evidenceLog(h.repo, "_tool-integrity.log")).toMatch(
+      /gate\(s\) build run no tool VTC verifies/,
+    );
 
     writeFile(
       h.repo,
@@ -162,27 +173,137 @@ describe("H-14: a project check tool is hashed after a scripts-free install", ()
     });
   });
 
-  it("says when an install gate has no scripts-free form, and hashes after it", async () => {
+  it("runs a leading install gate with no scripts-free form first, says so, and hashes after it", async () => {
     const plain = {
       id: "deps",
       layer: "L0" as const,
       phase: "install" as const,
       command: [NODE, "tools/install.mjs"],
     };
-    const h = harness({ "src/a.ts": "export const a = 1;\n" }, config([plain, explicitLint]));
+    const h = harness(
+      {
+        "src/a.ts": "export const a = 1;\n",
+        "vendor/lint.mjs": LINT,
+        "tools/install.mjs":
+          'import { copyFileSync, mkdirSync } from "node:fs";\nmkdirSync("node_modules/lint-tool", { recursive: true });\ncopyFileSync("vendor/lint.mjs", "node_modules/lint-tool/lint.mjs");\n',
+      },
+      config([plain, explicitLint]),
+    );
+    writeFile(h.repo, "src/a.ts", "export const a = 2; // TODO\n");
+    const report = await h.run({ head: commitAll(h.repo), layers: ["L1"] });
+    expect(h.argvs.filter((a) => a.includes("tools/install.mjs")).length).toBeGreaterThan(0);
+    expect(result(report, "deps").status).toBe("pass");
+    expect(result(report, "lint")).toMatchObject({ status: "fail", tool: { tampered: [] } });
+    const log = evidenceLog(h.repo, "_tool-integrity.log");
+    expect(log).toMatch(/deps have no scripts-free form/);
+    expect(log).not.toMatch(/first found/);
+  });
+
+  it("keeps the configured order: a plain install gate runs after the scripts it needs", async () => {
+    // The plain gate needs the dependency's postinstall output and writes into node_modules,
+    // which a later run of the package manager's install would delete.
+    const gen = {
+      id: "generate",
+      layer: "L0" as const,
+      phase: "install" as const,
+      command: [NODE, "tools/gen.mjs"],
+    };
+    const check = {
+      id: "build",
+      layer: "L0" as const,
+      command: [NODE, "tools/check.mjs"],
+      tool: { source: "project" as const, paths: ["node_modules/.prisma/**"] },
+    };
+    const { h, npm } = setup([gen, check, explicitLint], {
+      "postinstall.mjs":
+        'import { writeFileSync } from "node:fs";\nwriteFileSync("node_modules/.built", "native");\n',
+      "tools/gen.mjs":
+        'import { existsSync, mkdirSync, writeFileSync } from "node:fs";\nif (!existsSync("node_modules/.built")) process.exit(3);\nmkdirSync("node_modules/.prisma", { recursive: true });\nwriteFileSync("node_modules/.prisma/client.js", "generated");\n',
+      "tools/check.mjs":
+        'import { existsSync } from "node:fs";\nprocess.exit(existsSync("node_modules/.prisma/client.js") ? 0 : 4);\n',
+    });
+    writeFile(h.repo, "src/a.ts", "export const a = 2;\n");
+    const report = await h.run({ head: commitAll(h.repo), layers: ["L0", "L1"] });
+    const order = h.argvs
+      .filter((a) => a[0] === npm || a.includes("tools/gen.mjs"))
+      .slice(0, 3)
+      .map((a) => (a[0] === npm ? a.slice(1).join(" ") : "gen"));
+    expect(order).toEqual(["ci --ignore-scripts", "ci", "gen"]);
+    expect(report.results.map((r) => [r.gate_id, r.status])).toEqual([
+      ["install", "pass"],
+      ["generate", "pass"],
+      ["build", "pass"],
+      ["lint", "pass"],
+    ]);
+    expect(result(report, "lint").tool?.tampered).toEqual([]);
+    // What the plain gate wrote is hashed once it ran, and the evidence says so.
+    expect(result(report, "build").tool?.tampered).toEqual([]);
+    const log = evidenceLog(h.repo, "_tool-integrity.log");
+    expect(log).toMatch(/generate have no scripts-free form/);
+    expect(log).toMatch(
+      /the tools of gate\(s\) build were first found after those install gates ran/,
+    );
+  });
+
+  it("does not run a gate whose tool paths are stale or match nothing", async () => {
+    const stale = {
+      id: "lint",
+      layer: "L1" as const,
+      command: ["node_modules/.bin/lint-tool", REPORT, "{changed}"],
+      report: { format: "json" as const, path: REPORT },
+      tool: { source: "project" as const, paths: ["node_modules/.pnpm/lint-tool@0.9.0/**"] },
+    };
+    const nothing = {
+      ...explicitLint,
+      id: "lint-nothing",
+      tool: { source: "project" as const, paths: ["node_modules/not-installed/**"] },
+    };
+    const { h } = setup([stale, nothing]);
     writeFile(h.repo, "src/a.ts", "export const a = 2;\n");
     const report = await h.run({ head: commitAll(h.repo), layers: ["L1"] });
-    expect(h.argvs.filter((a) => a.includes("tools/install.mjs"))).toHaveLength(1);
-    expect(result(report, "deps").status).toBe("pass");
-    const evidenceRoot = join(h.repo, ".vtc/evidence/T-1/gates");
-    const attempt = readdirSync(evidenceRoot)[0] ?? "";
-    expect(readFileSync(join(evidenceRoot, attempt, "tool-integrity.log"), "utf8")).toMatch(
-      /deps have no scripts-free form/,
+    for (const id of ["lint", "lint-nothing"]) {
+      expect(result(report, id)).toMatchObject({ status: "error", failure_class: "infra" });
+    }
+    expect(evidenceLog(h.repo, "lint.log")).toMatch(
+      /runs node_modules\/\.bin\/lint-tool, node_modules\/lint-tool\/\*\*, which its tool paths in gates\.yml do not cover.*re-run vtc calibrate/,
     );
+    expect(evidenceLog(h.repo, "lint-nothing.log")).toMatch(
+      /match no file in the checkout; re-run vtc calibrate/,
+    );
+    expect(lintRan(h.argvs)).toBe(false);
+  });
+
+  it("fails a tool grown past the hash limits since the hash as tampering, not infrastructure", async () => {
+    const { h } = setup([explicitLint], {
+      // Sparse: past the byte limit, with nothing written.
+      "postinstall.mjs": `import { closeSync, openSync, truncateSync } from "node:fs";\ncloseSync(openSync("node_modules/lint-tool/big.bin", "w"));\ntruncateSync("node_modules/lint-tool/big.bin", ${String(1024 ** 3 + 1)});\n`,
+    });
+    writeFile(h.repo, "src/a.ts", "export const a = 2;\n");
+    const report = await h.run({ head: commitAll(h.repo), layers: ["L1"] });
+    expect(result(report, "lint")).toMatchObject({
+      status: "fail",
+      failure_class: "product",
+      tool: { tampered: ["node_modules/lint-tool/big.bin"] },
+    });
+    expect(result(report, "lint").findings[0]?.rule_id).toBe(TOOL_TAMPER_RULE_ID);
   });
 });
 
 describe("H-14: a pinned tool runs from VTC's store", () => {
+  it("reports the pinned binary SHA-256 the store verified the binary against", async () => {
+    const pinned = "ab".repeat(32);
+    const h = harness({ "src/a.ts": "export const a = 1;\n" }, config([leaksGate]), {
+      scanners: (home) => ({ ...fakeScanners(home), pinnedBinarySha256: () => pinned }),
+    });
+    writeFile(h.repo, "src/a.ts", "export const a = 2;\n");
+    const report = await h.run({ head: commitAll(h.repo), layers: ["L4"] });
+    expect(result(report, "secrets").tool).toEqual({
+      source: "pinned",
+      sha256: pinned,
+      tampered: [],
+    });
+  });
+
   it("reports the SHA-256 of the store-verified binary that ran", async () => {
     const h = harness({ "src/a.ts": "export const a = 1;\n" }, config([leaksGate]));
     writeFile(h.repo, "src/a.ts", "export const a = 2;\n");

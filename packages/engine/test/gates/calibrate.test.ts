@@ -521,16 +521,22 @@ describe("calibrate", () => {
 });
 
 describe("calibrate records each check gate's tool (H-14, reading 238)", () => {
-  it("writes the project tool installed in the working tree, and none for scripts or pinned scanners", async () => {
+  it("writes the project tool installed in the working tree, a package script's too, and none for pinned scanners", async () => {
     const root = nodeRepo();
-    for (const [pkg, file] of [
-      ["eslint", "bin/eslint.js"],
-      ["vitest", "vitest.mjs"],
+    const manifest = JSON.parse(readFileSync(join(root, "package.json"), "utf8")) as {
+      scripts: Record<string, string>;
+    };
+    manifest.scripts.typecheck = "tsc --noEmit";
+    writeFile(root, "package.json", JSON.stringify(manifest));
+    for (const [pkg, file, bin] of [
+      ["eslint", "bin/eslint.js", "eslint"],
+      ["vitest", "vitest.mjs", "vitest"],
+      ["typescript", "bin/tsc", "tsc"],
     ] as const) {
       writeFile(root, `node_modules/${pkg}/package.json`, JSON.stringify({ name: pkg }));
       writeFile(root, `node_modules/${pkg}/${file}`, "#!/usr/bin/env node\n");
       mkdirSync(join(root, "node_modules/.bin"), { recursive: true });
-      symlinkSync(`../${pkg}/${file}`, join(root, "node_modules/.bin", pkg));
+      symlinkSync(`../${pkg}/${file}`, join(root, "node_modules/.bin", bin));
     }
     const lines: string[] = [];
     const outcome = await calibrate(
@@ -549,15 +555,45 @@ describe("calibrate records each check gate's tool (H-14, reading 238)", () => {
     const tools = Object.fromEntries(
       parseGatesConfig(outcome.yaml).gates.map((g) => [g.id, g.tool ?? null]),
     );
-    expect(tools).toMatchObject({
+    const tsc = {
+      source: "project",
+      paths: ["node_modules/.bin/tsc", "node_modules/typescript/**"],
+    };
+    expect(tools).toEqual({
       install: null,
-      build: null,
+      // Package scripts: `pnpm run build` runs `tsc -b`, `pnpm typecheck` runs `tsc --noEmit`.
+      build: tsc,
+      typecheck: tsc,
       lint: { source: "project", paths: ["node_modules/.bin/eslint", "node_modules/eslint/**"] },
       test: { source: "project", paths: ["node_modules/.bin/vitest", "node_modules/vitest/**"] },
       secrets: null,
       dependencies: null,
+      sast: null,
+      iac: null,
+      // `depcruise` is not installed in this working tree.
+      arch: null,
     });
-    expect(lines.join("\n")).toMatch(/recorded the check tool of lint, test/);
+    expect(lines.join("\n")).toMatch(/recorded the check tool of build, typecheck, lint, test/);
+  });
+
+  it("asks the human to confirm the second pass of a two-pass install too", async () => {
+    const root = nodeRepo();
+    const outcome = await calibrate({
+      repoRoot: root,
+      vtcHome: tempDir(),
+      git: createGitOps({ repoRoot: initRepo() }),
+      revision: "4f1c2a9e8b7d6c5f4e3d2c1b0a9f8e7d6c5b4a39",
+      out: () => undefined,
+      confirm: () => Promise.resolve(false),
+      scanners: { names: SCANNERS, ensure: () => Promise.reject(new Error("no downloads")) },
+      detectSandbox: () => null,
+      allowUnsandboxed: true,
+    });
+    if (outcome.status !== "commands_not_confirmed") throw new Error("expected no confirmation");
+    expect(outcome.pending.slice(0, 2)).toEqual([
+      ["pnpm", "install", "--frozen-lockfile"],
+      ["pnpm", "rebuild", "--pending"],
+    ]);
   });
 });
 

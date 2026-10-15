@@ -659,6 +659,16 @@ export const captureBeforeAfter = async (
   // The base gets at most half of the bytes: the head's "after" files matter more.
   await runSide("base", request.base, plan.before, Math.floor(EVIDENCE_LIMITS.maxBytesPerPr / 2));
   await runSide("head", request.head, plan.after, EVIDENCE_LIMITS.maxBytesPerPr - bytes);
+  // A side whose recording is not among the files recorded nothing (it did not build or serve,
+  // or its recording was discarded): `failed`, whether or not that commit has the flow.
+  const kept = new Set(files.map((f) => f.name));
+  for (const [side, shots] of [
+    ["base", plan.before],
+    ["head", plan.after],
+  ] as const) {
+    if (shots.some((s) => s.kind === "flow_video" && !kept.has(s.name)))
+      flowStatus[side] = "failed";
+  }
   // Pairs read in order: before, after, ..., then the flow recordings.
   files.sort((a, b) => a.name.localeCompare(b.name));
   if (flowId !== undefined && plan.before.some((s) => s.kind === "flow_video")) {
