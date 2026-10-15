@@ -125,8 +125,14 @@ export interface LaunchedReplay<T extends ReplayTrialId> {
 
 const plural = (n: number, word: string): string => `${String(n)} ${word}${n === 1 ? "" : "s"}`;
 
-/** The ungraded trials of a plan in whole groups (one task's trial number across its arms). */
-const groupsOf = <T extends ReplayTrialId>(trials: readonly T[], graded: ReadonlySet<string>) => {
+/**
+ * Pure: the ungraded trials of a plan in whole groups (one task's trial number across its arms), in
+ * plan order; a RETRO launches whole groups only, so a pair is never split across RETROs.
+ */
+export const ungradedTrialGroups = <T extends ReplayTrialId>(
+  trials: readonly T[],
+  graded: ReadonlySet<string>,
+): T[][] => {
   const groups: T[][] = [];
   let key: string | undefined;
   for (const t of trials) {
@@ -196,7 +202,7 @@ export const planRetroReplays = <T extends ReplayTrialId>(input: {
       });
       continue;
     }
-    const groups = groupsOf(replay.trials, input.graded(replay.proposal));
+    const groups = ungradedTrialGroups(replay.trials, input.graded(replay.proposal));
     const infra = input.infra?.(replay.proposal);
     const stuck = groups
       .flat()

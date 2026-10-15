@@ -111,7 +111,8 @@ describe("the routing step at RETRO (D-cn, engine core's RoutingLookback seam)",
       graderBundleSha: BUNDLE,
       now,
     });
-    expect(cells).toEqual([]);
+    expect([...cells]).toEqual([]);
+    expect(cells.replays).toEqual([]);
     await expect(readFile(join(root, LOOKBACK_REPO.routingScorecard), "utf8")).rejects.toThrow();
   });
 
@@ -124,7 +125,8 @@ describe("the routing step at RETRO (D-cn, engine core's RoutingLookback seam)",
       graderBundleSha: BUNDLE,
       now,
     });
-    expect(cells).toEqual([]);
+    expect([...cells]).toEqual([]);
+    expect(cells.replays).toEqual([]);
     const written = JSON.parse(
       await readFile(join(root, LOOKBACK_REPO.routingScorecard), "utf8"),
     ) as RoutingScorecard;
@@ -231,13 +233,13 @@ describe("routingProposalCells (D-cn)", () => {
 
   it("names the shared field when two roles back the change", () => {
     const proposals = routingProposals(
-      card([escalating("engineer", "S", "none"), escalating("spec_verifier", "S", "none")]),
+      card([escalating("engineer", "S", "none"), escalating("engineer_backend", "S", "none")]),
       DCM,
     );
     const cells = routingProposalCells(proposals);
     expect(cells.map((c) => [c.role, c.size, c.risk])).toEqual([
       ["engineer", "S", "none"],
-      ["spec_verifier", "S", "none"],
+      ["engineer_backend", "S", "none"],
     ]);
     for (const c of cells) {
       expect(c.detail).toContain('set by_size.S to "mid"');

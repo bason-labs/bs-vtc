@@ -1,6 +1,6 @@
 /**
- * Lookback tunes routing (D-cn; spine §5 reading 219; H-9, D-cm). Pure, except
- * {@link writeRoutingScorecard}.
+ * Lookback tunes routing (D-cn; spine §5 readings 219, 241, 242 and 247(6); H-9, D-cm, D-cu, D-cv).
+ * Pure, except {@link writeRoutingScorecard}.
  *
  * **The routing scorecard** ({@link computeRoutingScorecard}, `RoutingScorecard` at
  * `LOOKBACK_REPO.routingScorecard`): for each task, the first dispatch of each (role, mode) names a
@@ -8,24 +8,32 @@
  * `role.dispatched.tier` / `tier_reason` and the task's Planner size and risk
  * (`taskRiskClass` under the routing table). The cell's metrics are the scorecard metrics
  * (`metricsOf`) over every dispatch of that (role, mode) on its tasks, so what a start tier cost
- * includes the rounds and escalations it led to. `escalated` is the share of the cell's tasks with an
- * `escalation` dispatch of the role (Wilson interval); `cost_per_task_usd` the mean cost the role's
- * submitted dispatches reported per task, over tasks where every one reported a cost. A dispatch
- * logged before contracts 5.4.0 has no tier and is skipped; a `lookback_replay` trial is no work of
- * the run and is left out (reading 177); a first dispatch whose reason is `escalation` or
- * `budget_drop` names no start tier and is skipped, and so is one the project's `routing.min_tier`
- * / `max_tier` moved (`tier_clamped`): it measures the project's bound, not the table. QA author's
- * clamp to its floor is kept, since every QA author start is floored ({@link routingProposals}
- * compares against the floored tier). Below `LOOKBACK_LIMITS.minScorecardN` a value is
- * `null` ("insufficient data"), as on every scorecard; the card records the grader bundle it was
- * scored under.
+ * includes the rounds and escalations it led to. `escalated` is the share of the cell's tasks the
+ * role escalated on (Wilson interval) by the shared rule (D-cv, `escalationSteps`): a task counts
+ * when the role ran on it in a fix round in which the rule moves its start tier up (a Low start from
+ * round 2, a Mid or Top start from round 3; the round is the task's `task.status_changed` round at
+ * the dispatch), or when a dispatch of it was logged as an `escalation`. So a log written before
+ * D-cv, whose Low start ran its second round on Low, measures what the rule does now.
+ * `cost_per_task_usd` is the mean cost the role's submitted dispatches reported per task, over
+ * tasks where every one reported a cost. A dispatch logged before contracts 5.4.0 has no tier and is
+ * skipped; a `lookback_replay` trial is no work of the run and is left out (reading 177); a first
+ * dispatch whose reason is `escalation` or `budget_drop` names no start tier and is skipped, and so
+ * is one the project's `routing.min_tier` / `max_tier` moved (`tier_clamped`): it measures the
+ * project's bound, not the table. QA author's clamp to its floor is kept, since every QA author
+ * start is floored ({@link routingProposals} compares against the floored tier). Below
+ * `LOOKBACK_LIMITS.minScorecardN` a value is `null` ("insufficient data"), as on every scorecard;
+ * the card records the grader bundle it was scored under. Reviewer cells stay on the card as
+ * information: since D-cu a reviewer starts on its own `role.yaml` tier, which the table does not
+ * set.
  *
- * **Proposals** ({@link routingProposals}): a cell is read from `LOOKBACK_LIMITS.routingMinTasks`
- * tasks. For each (role, mode, host, size, risk) group whose current start tier (the table's,
- * {@link routedStartTier}) has a readable cell:
+ * **Proposals** ({@link routingProposals}): only the producers' cells (`routedByDifficulty`: the
+ * Engineer family and QA author, D-cu) are read; a reviewer's cell neither proposes, backs nor
+ * blocks a change. A cell is read from `LOOKBACK_LIMITS.routingMinTasks` tasks. For each (role,
+ * mode, host, size, risk) group whose current start tier (the table's, {@link routedStartTier}) has
+ * a readable cell:
  * - _higher_: at least `routingEscalationPct` percent of its tasks escalated, so the start moves
  *   one tier up (a change that would move the table's cell by two tiers, as QA author's floored
- *   start does when its modes share one `roles.qa` cell, is dropped);
+ *   start does on a cell the table starts on Low, is dropped);
  * - _cheaper_: a cheaper start tier's readable cell has every pass rate the current cell measures
  *   (`first_round_gate_pass`, `review_pass`) within `routingQualityMarginPct` points and does not
  *   keep escalating itself; the cheapest such tier is proposed. Only a `rule` or `role` cell (a
@@ -42,34 +50,34 @@
  * change is made when every other cell it moves only goes up, and it names those `lifted` cells.
  * A _cheaper_ change the table cannot make without moving another cell (the floors are shared by
  * every size) is dropped with its reason. Each accepted change is a `config` improvement fact
- * (subject {@link routingConfigSubject}) carrying numbers only (D-by), and a tier replay (the same
- * prompt on both arms, the start tier differing) is planned for it only while the caller's trial
- * budget allows; otherwise the scorecard is the evidence. A planned tier replay is a plan only:
- * replay dispatch has no tier arm yet (reading 218(7) holds a trial on its recorded tier), so the
- * fact says `routing.replay_planned`, never that a replay ran. That arm (a `lookback_replay` trial
- * that runs on a given tier) is a contract proposal to engine core; until it lands
- * `lookbackRoutingStep` passes no trial budget, so no tier replay is planned and
- * {@link routingReplayTasks} has no caller: reading 219's "a tier replay where the trial budget
- * allows" is open scope.
+ * (subject {@link routingConfigSubject}) carrying numbers only (D-by), and the evidence beside the
+ * scorecard ({@link RoutingEvidence}): none (`routing.replay_planned` 0), or the graded tier replay
+ * that backs it (`routing.replay_verdict`, `routing.replay_trials`). The tier replay itself is
+ * `routing-replay.ts`'s; the routing step decides which evidence a change carries, and withholds
+ * the fact while a replay runs or when it does not back the change.
  */
 import {
   DEFAULT_ROUTING_TABLE,
+  escalationSteps,
   isEventOfType,
   LOOKBACK_LIMITS,
   LOOKBACK_REPO,
   QA_AUTHOR_MIN_TIER,
   readEventData,
+  routedByDifficulty,
   routedStartTier,
   routingConfigSubject,
+  ROUTING_FACT_METRICS,
+  ROUTING_REPLAY_VERDICT_CODES,
   RoutingScorecardSchema,
   RoutingTableSchema,
   taskRiskClass,
   TIER_ORDER,
   tierRank,
   type Attribution,
-  type HostId,
   type LookbackPace,
   type ModelTier,
+  type RoutingReplayResult,
   type RoutingRoleOverride,
   type RoutingScorecard,
   type RoutingTable,
@@ -135,23 +143,53 @@ interface Dispatch {
   /** `role.dispatched.tier_clamped`: the project's bounds or QA author's floor moved the tier. */
   readonly clamped: boolean;
   readonly replay: boolean;
+  /** The task's fix round when it was dispatched (its last `task.status_changed.round`, at least 1). */
+  readonly round: number;
 }
 
-/** Each dispatch's tier, tier reason, clamp and whether it is a replay trial, by `<run>:<action_id>`. */
+/**
+ * Each dispatch's tier, tier reason, clamp, whether it is a replay trial and the round its task was
+ * in, by `<run>:<action_id>`.
+ */
 const dispatchFacts = (events: readonly VtcEvent[]): Map<string, Dispatch> => {
   const out = new Map<string, Dispatch>();
+  const rounds = new Map<string, number>();
   for (const event of events) {
+    if (isEventOfType(event, "task.status_changed")) {
+      if (event.task !== undefined)
+        rounds.set(`${event.run}:${event.task}`, readEventData(event).round);
+      continue;
+    }
     if (!isEventOfType(event, "role.dispatched")) continue;
     const data = readEventData(event);
+    const round = event.task === undefined ? undefined : rounds.get(`${event.run}:${event.task}`);
     out.set(`${event.run}:${data.action_id}`, {
       ...(data.tier === undefined ? {} : { tier: data.tier }),
       ...(data.tier_reason === undefined ? {} : { reason: data.tier_reason }),
       clamped: data.tier_clamped === true,
       replay: data.purpose === "lookback_replay",
+      round: Math.max(1, round ?? 1),
     });
   }
   return out;
 };
+
+/**
+ * Whether the role escalated on a task it started on `start` (D-cv): one of its dispatches ran in a
+ * round in which the shared rule (`escalationSteps`) moves the start up, or was logged as an
+ * `escalation`.
+ */
+const escalatedOn = (
+  start: ModelTier,
+  traces: readonly Trace[],
+  facts: ReadonlyMap<string, Dispatch>,
+): boolean =>
+  traces.some((t) => {
+    const fact = facts.get(traceRef(t));
+    return (
+      fact !== undefined && (fact.reason === "escalation" || escalationSteps(start, fact.round) > 0)
+    );
+  });
 
 /** Each submitted dispatch's reported cost (`null`: none), by `<run>:<action_id>`. */
 const dispatchCosts = (events: readonly VtcEvent[]): Map<string, number | null> => {
@@ -268,9 +306,7 @@ export const computeRoutingScorecard = (input: {
         return o === undefined ? [] : [o];
       }),
     );
-    const escalated = group.filter((s) =>
-      s.traces.some((t) => facts.get(traceRef(t))?.reason === "escalation"),
-    ).length;
+    const escalated = group.filter((s) => escalatedOn(s.cell.start_tier, s.traces, facts)).length;
     const priced: number[] = [];
     for (const s of group) {
       const submitted = s.traces.filter((t) => t.end?.kind === "submitted");
@@ -331,24 +367,6 @@ export const writeRoutingScorecard = async (
 
 // ----------------------------------------------------------------- proposals
 
-/** A planned tier replay: the same prompt on both arms, arm `a` on `from`, arm `b` on `to`. */
-export interface RoutingTierReplay {
-  readonly role: string;
-  readonly mode?: string;
-  readonly host: HostId;
-  readonly size: TaskSize;
-  readonly risk: TaskRiskClass;
-  readonly arms: { readonly a: ModelTier; readonly b: ModelTier };
-  /**
-   * An upper bound on the tasks to replay: the current cell's tasks, at most the pace's failures
-   * plus regression tasks. The tasks that run are {@link routingReplayTasks}' (held-out and
-   * submitted only, each bucket capped), which can be fewer.
-   */
-  readonly tasks: number;
-  /** `tasks` × k × 2 arms: what it reserves from the trial budget (an upper bound too). */
-  readonly trials: number;
-}
-
 /** A cell a _higher_ change lifts with it. */
 export interface RoutingLift {
   readonly size: TaskSize;
@@ -378,9 +396,22 @@ export interface RoutingChange {
   readonly current: RoutingCell;
   /** The cheaper tier's cell that matched quality (a `cheaper` change only). */
   readonly candidate?: RoutingCell;
-  /** `null`: the trial budget does not allow one; the scorecard is the evidence. */
-  readonly replay: RoutingTierReplay | null;
 }
+
+/**
+ * What backs a change beside the scorecard (D-cn, reading 247(6)): nothing (`scorecard`, the fact
+ * says `routing.replay_planned` 0), or the graded tier replay that backs it
+ * (`routingReplayBacks`), whose verdict and trial count the fact carries.
+ */
+export type RoutingEvidence =
+  | { readonly kind: "scorecard" }
+  | { readonly kind: "replay"; readonly result: RoutingReplayResult };
+
+const SCORECARD_ONLY: RoutingEvidence = { kind: "scorecard" };
+
+/** The trials a graded tier replay counted, both arms. */
+export const routingReplayTrialCount = (result: RoutingReplayResult): number =>
+  result.per_task.reduce((n, t) => n + t.a.length + t.b.length, 0);
 
 /**
  * A `config` improvement fact (D-cd, D-cs (3)) as engine core hands it to the upstream module:
@@ -399,6 +430,7 @@ export interface RoutingProposals {
   /** The proposed `DEFAULT_ROUTING_TABLE` value; `null` when nothing changes. */
   readonly table: RoutingTable | null;
   readonly changes: readonly RoutingChange[];
+  /** Each change's fact on the scorecard alone, in the changes' order. */
   readonly facts: readonly RoutingConfigFact[];
   /**
    * Changes the scorecard backs but the table cannot make alone, with why: a _cheaper_ start that
@@ -516,18 +548,30 @@ const withCell = (
 /** A routed role that has no override: how the shared cells read. */
 const SHARED_PROBE = "__shared__";
 
-const factOf = (change: RoutingChange, at: string): RoutingConfigFact => {
+/**
+ * Pure: a change's fact metrics (D-by: numbers only; the fixed names are `ROUTING_FACT_METRICS`),
+ * with the evidence beside the scorecard.
+ */
+export const routingFactMetrics = (
+  change: RoutingChange,
+  evidence: RoutingEvidence = SCORECARD_ONLY,
+): Record<string, number> => {
+  const m = ROUTING_FACT_METRICS;
   const metrics: Record<string, number> = {
-    "routing.from_tier": tierRank(change.from),
-    "routing.to_tier": tierRank(change.to),
-    "routing.current_tier": tierRank(change.current.start_tier),
-    "routing.shared": change.scope === "shared" ? 1 : 0,
-    "routing.replay_planned": change.replay === null ? 0 : 1,
+    [m.fromTier]: tierRank(change.from),
+    [m.toTier]: tierRank(change.to),
+    [m.currentTier]: tierRank(change.current.start_tier),
+    [m.shared]: change.scope === "shared" ? 1 : 0,
+    [m.replayPlanned]: evidence.kind === "replay" ? 1 : 0,
     "routing.tasks.current": change.current.tasks,
-    "routing.lifted": change.lifted.length,
+    [m.lifted]: change.lifted.length,
   };
+  if (evidence.kind === "replay") {
+    metrics[m.replayVerdict] = ROUTING_REPLAY_VERDICT_CODES[evidence.result.verdict];
+    metrics[m.replayTrials] = routingReplayTrialCount(evidence.result);
+  }
   for (const lift of change.lifted)
-    metrics[`routing.lifted.${lift.size.toLowerCase()}_${lift.risk}`] = tierRank(lift.to);
+    metrics[`${m.liftedPrefix}${lift.size.toLowerCase()}_${lift.risk}`] = tierRank(lift.to);
   const put = (name: string, value: number | null | undefined): void => {
     if (value !== null && value !== undefined) metrics[name] = value;
   };
@@ -541,35 +585,30 @@ const factOf = (change: RoutingChange, at: string): RoutingConfigFact => {
     for (const id of PASS_METRICS)
       put(`routing.${id}.candidate`, change.candidate.metrics[id]?.value);
   }
-  return {
-    type: "improvement",
-    kind: "config",
-    subject: change.subject,
-    role: change.role,
-    metrics,
-    at,
-  };
+  return metrics;
 };
 
+const factOf = (change: RoutingChange, at: string): RoutingConfigFact => ({
+  type: "improvement",
+  kind: "config",
+  subject: change.subject,
+  role: change.role,
+  metrics: routingFactMetrics(change),
+  at,
+});
+
 /**
- * Pure (D-cn): the routing-table changes the scorecard backs (see the module comment), the
- * proposed table value and the `config` facts. `trialBudget` is what is left of this RETRO's trial
- * cap after the prompt replays (default 0: scorecard evidence only); each change takes a tier
- * replay of `min(cell tasks, pace.failureTasks + pace.regressionTasks)` tasks × `k` × 2 arms from it,
- * in order, while it lasts.
+ * Pure (D-cn, D-cu): the routing-table changes the scorecard backs (see the module comment), the
+ * proposed table value and each change's `config` fact on the scorecard alone.
  */
 export const routingProposals = (
   scorecard: RoutingScorecard,
   table: RoutingTable = DEFAULT_ROUTING_TABLE,
-  options: {
-    readonly trialBudget?: number;
-    readonly pace?: Pick<LookbackPace, "failureTasks" | "regressionTasks">;
-    readonly k?: number;
-  } = {},
 ): RoutingProposals => {
-  // 1. each (role, mode, host, size, risk) group's decision
+  // 1. each (role, mode, host, size, risk) group's decision, for the producers only (D-cu)
   const groups = new Map<string, RoutingCell[]>();
   for (const cell of scorecard.cells) {
+    if (!routedByDifficulty(cell.role, cell.mode)) continue;
     const key = [cell.role, cell.mode ?? "", cell.host, cell.size, cell.risk].join("\n");
     const list = groups.get(key);
     if (list === undefined) groups.set(key, [cell]);
@@ -607,10 +646,11 @@ export const routingProposals = (
       .reduce((a, b) => higherOf(a, b));
     if (to === from) continue;
     if (evidence.kind === "higher" && tierRank(to) - tierRank(from) > 1) {
-      // QA author's start is floored above the table's: its modes share the role's one cell
+      // QA author's start is floored above the table's: one tier up from the floor is two tiers
+      // up in the table, and a higher change moves one tier at a time
       dropped.push({
         subject: routingConfigSubject(role, size as TaskSize, risk as TaskRiskClass),
-        reason: `starting ${size}/${risk} on ${to} would move ${role}'s table start two tiers from ${from}; every mode of the role shares that cell`,
+        reason: `starting ${size}/${risk} on ${to} would move ${role}'s table start two tiers from ${from}; its start is floored above the table's`,
       });
       continue;
     }
@@ -656,14 +696,14 @@ export const routingProposals = (
       RISKS.indexOf(a.risk) - RISKS.indexOf(b.risk),
   );
   let next = table;
-  const accepted: Omit<RoutingChange, "replay">[] = [];
+  const changes: RoutingChange[] = [];
   const sharedDone = new Map<string, readonly RoutingLift[]>();
   for (const w of wanted) {
     const subject = routingConfigSubject(w.role, w.size, w.risk);
     const scope = sharedOk(w) ? "shared" : "role";
     const done = scope === "shared" ? sharedDone.get(sharedKey(w)) : undefined;
     if (done !== undefined) {
-      accepted.push({ ...w, subject, scope, lifted: done });
+      changes.push({ ...w, subject, scope, lifted: done });
       continue;
     }
     const probe = scope === "shared" ? SHARED_PROBE : w.role;
@@ -691,33 +731,8 @@ export const routingProposals = (
     });
     next = trial;
     if (scope === "shared") sharedDone.set(sharedKey(w), lifted);
-    accepted.push({ ...w, subject, scope, lifted });
+    changes.push({ ...w, subject, scope, lifted });
   }
-  // 5. tier replays while the trial budget lasts
-  const k = options.k ?? LOOKBACK_LIMITS.replayTrials;
-  const sample =
-    (options.pace?.failureTasks ?? LOOKBACK_LIMITS.replayFailureTasks) +
-    (options.pace?.regressionTasks ?? LOOKBACK_LIMITS.replayRegressionTasks);
-  let budget = options.trialBudget ?? 0;
-  const changes: RoutingChange[] = accepted.map((c) => {
-    const tasks = Math.min(c.current.tasks, sample);
-    const trials = tasks * k * 2;
-    if (tasks === 0 || trials > budget) return { ...c, replay: null };
-    budget -= trials;
-    return {
-      ...c,
-      replay: {
-        role: c.current.role,
-        ...(c.current.mode === undefined ? {} : { mode: c.current.mode }),
-        host: c.current.host,
-        size: c.size,
-        risk: c.risk,
-        arms: { a: c.from, b: c.to },
-        tasks,
-        trials,
-      },
-    };
-  });
   return {
     table: changes.length === 0 ? null : RoutingTableSchema.parse(next),
     changes,
@@ -767,35 +782,56 @@ const evidenceOf = (change: RoutingChange): string => {
   return `${String(candidate.tasks)} tasks started on ${candidate.start_tier} matched quality within ${String(LOOKBACK_LIMITS.routingQualityMarginPct)} points (${rates.join(", ")}), ${percent(candidate.escalated.value)} escalated`;
 };
 
+const signedPct = (value: number): string => `${value > 0 ? "+" : ""}${String(Math.round(value))}%`;
+
+/** What the evidence beside the scorecard says, in VTC's vocabulary. */
+const replaySentence = (change: RoutingChange, evidence: RoutingEvidence): string => {
+  if (evidence.kind === "scorecard")
+    return "No tier replay backs it; the scorecard is the evidence.";
+  const r = evidence.result;
+  const cost = r.cost_delta_pct === null ? "" : `, cost ${signedPct(r.cost_delta_pct)}`;
+  return `A tier replay backs it: ${r.verdict} over ${String(routingReplayTrialCount(r))} trials of ${String(r.per_task.length)} held-out tasks, ${change.to} against ${change.from} on the same prompt (tokens ${signedPct(r.tokens_delta_pct)}${cost}).`;
+};
+
 /**
  * Pure (D-cn): each change of `proposals` as the cell engine core's routing seam returns, in the
- * changes' order. The detail names the edit the PR makes (spine §5 reading 219: only the values of
- * `DEFAULT_ROUTING_TABLE` change) and the cells it lifts; it holds no project data.
+ * changes' order. `evidence` says what backs each change beside the scorecard; `null` withholds the
+ * change (a tier replay still runs, or it does not back the change); absent, every change carries
+ * the scorecard alone. The detail names the edit the PR makes (spine §5 reading 219: only the
+ * values of `DEFAULT_ROUTING_TABLE` change), the cells it lifts and the evidence; it holds no
+ * project data.
  */
-export const routingProposalCells = (proposals: RoutingProposals): RoutingProposalCell[] =>
-  proposals.changes.map((change, i) => {
+export const routingProposalCells = (
+  proposals: RoutingProposals,
+  evidence: (change: RoutingChange) => RoutingEvidence | null = () => SCORECARD_ONLY,
+): RoutingProposalCell[] =>
+  proposals.changes.flatMap((change) => {
+    const backing = evidence(change);
+    if (backing === null) return [];
     const lifts = change.lifted.map((l) => `${l.size}/${l.risk} on ${l.to}`);
     const detail = [
       `${change.role} ${change.size}/${change.risk}: start on ${change.to} instead of ${change.from} (${evidenceOf(change)}).`,
       `In DEFAULT_ROUTING_TABLE (packages/shared/src/tier-routing.ts) set ${tableField(change)} to "${change.to}"${change.scope === "shared" ? ", shared by every routed role" : ""}.`,
       ...(lifts.length === 0 ? [] : [`This also starts ${lifts.join(", ")}.`]),
-      ...(change.replay === null ? [] : ["A tier replay is planned."]),
+      replaySentence(change, backing),
     ].join(" ");
-    return {
-      role: change.role,
-      size: change.size,
-      risk: change.risk,
-      metrics: proposals.facts[i]?.metrics ?? {},
-      detail: detail.slice(0, 2000),
-    };
+    return [
+      {
+        role: change.role,
+        size: change.size,
+        risk: change.risk,
+        metrics: routingFactMetrics(change, backing),
+        detail: detail.slice(0, 2000),
+      },
+    ];
   });
 
 /**
  * The held-out tasks a tier replay of `cell` runs (the first dispatch of each, at most
  * `pace.failureTasks` that failed at their start tier and `pace.regressionTasks` that did not, in
  * log order so the sample is stable as the history grows). A task failed at its start tier when
- * the role escalated a tier on it or its first dispatch is an attributed role failure. A train-split
- * task is never replayed (AD-21 rule 6).
+ * the role escalated on it (D-cv, as the scorecard counts it) or its first dispatch is an attributed
+ * role failure. A train-split task is never replayed (AD-21 rule 6).
  */
 export const routingReplayTasks = (input: {
   readonly history: readonly VtcEvent[];
@@ -827,9 +863,7 @@ export const routingReplayTasks = (input: {
       s.first.end?.kind !== "submitted"
     )
       continue;
-    const fail =
-      failed.has(traceRef(s.first)) ||
-      s.traces.some((t) => facts.get(traceRef(t))?.reason === "escalation");
+    const fail = failed.has(traceRef(s.first)) || escalatedOn(c.start_tier, s.traces, facts);
     const bucket = fail ? picked.failures : picked.regression;
     if (bucket.length >= (fail ? limit.failures : limit.regression)) continue;
     bucket.push({

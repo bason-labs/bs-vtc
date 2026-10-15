@@ -30,10 +30,15 @@
  * fields ({@link improvementReportFields}) open the bs-vtc PR. {@link lookbackRunEndFacts} maps the
  * drift regressions (D-cr) to the automation facts the daemon hands the upstream module at
  * `run.finished` (`wireLookback`'s `drift` argument).
- * At RETRO (D-cn, spine §5 reading 219) {@link lookbackRoutingStep} fits engine core's
+ * At RETRO (D-cn, spine §5 readings 219 and 247(6)) {@link lookbackRoutingStep} fits engine core's
  * `RoutingLookback` seam: it writes the routing scorecard and returns the routing-table cells it
- * proposes to change ({@link routingProposalCells}), which the daemon raises as `config` facts
- * (`wireLookback`'s `routing` argument).
+ * proposes to change for the producer roles (D-cu; {@link routingProposalCells}), which the daemon
+ * raises as `config` facts (`wireLookback`'s `routing` argument). Given the RETRO's remaining trial
+ * budget it plans tier replays of those changes (the same prompt on both arms, arm `a` on the
+ * current start tier and arm `b` on the proposed one; {@link planRoutingReplayTrials}), returns the
+ * trials to launch on its cells' `replays`, grades a replay whose trials the ledger holds
+ * ({@link recordRoutingReplayTrial}, {@link assembleRoutingReplay}) into a `RoutingReplayResult`,
+ * and raises a change's fact only once its replay is graded and backs it.
  * AI tiebreak answers are recorded with {@link appendTiebreakRecord} under the VTC home; only
  * those {@link readTiebreakKeys} returns let an `ai_tiebreak` attribution count.
  * Promotion (D-cb, spine §5 reading 196): for everyone, the human's merge of the bs-vtc PR an
@@ -150,6 +155,7 @@ export {
   REPLAY_LIMIT_REASONS,
   replayLimitReason,
   replaySkippedEvent,
+  ungradedTrialGroups,
   type AutomationSkippedDraft,
   type LaunchedReplay,
   type PendingReplay,
@@ -183,19 +189,32 @@ export {
 export {
   computeRoutingScorecard,
   routedStartTier,
+  routingFactMetrics,
   routingProposalCells,
   routingProposals,
   routingReplayTasks,
+  routingReplayTrialCount,
   writeRoutingScorecard,
   type RoutingCell,
   type RoutingChange,
   type RoutingConfigFact,
+  type RoutingEvidence,
   type RoutingLift,
   type RoutingProposalCell,
   type RoutingProposals,
-  type RoutingTierReplay,
 } from "./routing.js";
-export { lookbackRoutingStep } from "./routing-step.js";
+export {
+  assembleRoutingReplay,
+  planRoutingReplayTrials,
+  recordRoutingReplayTrial,
+  routingReplayCosts,
+  routingReplayScope,
+  writeRoutingReplayResult,
+  type RoutingReplayLaunch,
+  type RoutingReplayTrial,
+  type RoutingTrialRecord,
+} from "./routing-replay.js";
+export { lookbackRoutingStep, type RoutingStepCells } from "./routing-step.js";
 export { computeScorecards, writeScorecards, type TimeWindow } from "./scorecards.js";
 export {
   appendTiebreakRecord,

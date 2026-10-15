@@ -133,6 +133,28 @@ describe("the routing scorecard (D-cn)", () => {
     expect(cell?.cost_per_task_usd.value).toBeCloseTo((6 * 0.2 + 6 * 0.1) / 12);
   });
 
+  it("counts a task as escalated by the shared rule (D-cv): a Low start after 1 failed round, Mid after 2", () => {
+    const log = new RunLog();
+    // logs from before D-cv: later rounds ran on the start tier, logged with reason `rule`
+    const rounds = (task: string, size: "S" | "M", tier: ModelTier, n: number): void => {
+      log.taskCreated(task, "backend", [], { size, risk: "low", riskTags: [] });
+      for (let round = 1; round <= n; round += 1) {
+        log.status(task, round === 1 ? "tests_authored" : "fixing", "building", round);
+        log.dispatch("engineer", { task, tier, tierReason: "rule" });
+        log.gate(task, round === n);
+      }
+    };
+    for (let i = 1; i <= 10; i += 1) rounds(`T-${String(i)}`, "S", "low", i <= 6 ? 2 : 1);
+    for (let i = 1; i <= 10; i += 1) rounds(`T-${String(10 + i)}`, "M", "mid", i <= 3 ? 3 : 2);
+    const card = scorecardOf(log);
+    expect(card.cells.map((c) => [c.size, c.start_tier, c.tasks, c.escalated.value])).toEqual([
+      // escalationSteps("low", 2) = 1: a second round on a Low start is an escalation
+      ["S", "low", 10, 0.6],
+      // escalationSteps("mid", 2) = 0, escalationSteps("mid", 3) = 1
+      ["M", "mid", 10, 0.3],
+    ]);
+  });
+
   it("classes risk with taskRiskClass and keeps modes, hosts and start reasons apart", () => {
     const log = new RunLog();
     routedTask(log, "T-1", { riskTags: ["ui"], tier: "mid" });
@@ -283,14 +305,14 @@ describe("routing proposals (D-cn)", () => {
   it("reads the table's start tier, with a role's override and the floors", () => {
     const table = RoutingTableSchema.parse({
       ...DCM,
-      roles: { spec_verifier: { by_size: { M: "low" }, tagged_floor: "low" } },
+      roles: { engineer_backend: { by_size: { M: "low" }, tagged_floor: "low" } },
     });
     expect(routedStartTier(table, "engineer", "S", "none")).toBe("low");
     expect(routedStartTier(table, "engineer", "S", "tagged")).toBe("mid");
     expect(routedStartTier(table, "engineer", "S", "high")).toBe("top");
     expect(routedStartTier(table, "engineer", "L", "tagged")).toBe("top");
-    expect(routedStartTier(table, "spec_verifier", "M", "none")).toBe("low");
-    expect(routedStartTier(table, "spec_verifier", "M", "tagged")).toBe("low");
+    expect(routedStartTier(table, "engineer_backend", "M", "none")).toBe("low");
+    expect(routedStartTier(table, "engineer_backend", "M", "tagged")).toBe("low");
   });
 
   it("reads a high-risk cell as engine core's router does: by size, floored on high_floor alone", () => {
@@ -421,38 +443,64 @@ describe("routing proposals (D-cn)", () => {
     const out = routingProposals(
       card([
         cell({ size: "M", tier: "mid", escalated: 0.7 }),
-        cell({ role: "spec_verifier", size: "M", tier: "mid", escalated: 0.8 }),
+        cell({ role: "engineer_frontend", size: "M", tier: "mid", escalated: 0.8 }),
       ]),
       DCM,
     );
     expect(out.dropped).toEqual([]);
     expect(out.changes.map((c) => [c.role, c.scope, c.to, c.lifted.length])).toEqual([
       ["engineer", "shared", "top", 1],
-      ["spec_verifier", "shared", "top", 1],
+      ["engineer_frontend", "shared", "top", 1],
     ]);
     expect(out.table?.by_size).toEqual({ S: "low", M: "top", L: "top" });
   });
 
-  it("drops QA author's escalation on S/none (two tiers for QA judge) but keeps judge's own", () => {
+  it("drops QA author's escalation on S/none: its floored start is two tiers above the table's", () => {
     const author = cell({ role: "qa", mode: "author", size: "S", tier: "mid", escalated: 0.9 });
     const out = routingProposals(card([author]), DCM);
     expect(out.changes).toEqual([]);
     expect(out.dropped.map((d) => d.subject)).toEqual(["routing.qa.S.none"]);
     expect(out.dropped[0]?.reason).toContain("two tiers");
-    const judge = routingProposals(
+  });
+
+  it("proposes producer cells only (D-cu): a reviewer's cell is informational", () => {
+    // every reviewer starts on its own role.yaml tier, so the table cannot move it
+    const reviewers = [
+      cell({ role: "spec_verifier", size: "S", tier: "low", escalated: 0.9 }),
+      cell({ role: "qa", mode: "judge", size: "S", tier: "low", escalated: 0.9 }),
+      cell({ role: "security", mode: "verify", size: "M", tier: "mid", escalated: 0.9 }),
+      cell({ role: "lens_api", size: "L", tier: "top", pass: 1 }),
+      cell({ role: "lens_api", size: "L", tier: "mid", reason: "role", pass: 1 }),
+    ];
+    expect(routingProposals(card(reviewers), DCM)).toEqual({
+      table: null,
+      changes: [],
+      facts: [],
+      dropped: [],
+    });
+    // nor does a reviewer back or object to a producer's change: the Engineer's stays its own
+    const out = routingProposals(
+      card([cell({ size: "S", tier: "low", escalated: 0.8 }), ...reviewers]),
+      DCM,
+    );
+    expect(out.changes.map((c) => [c.role, c.subject, c.scope])).toEqual([
+      ["engineer", "routing.engineer.S.none", "role"],
+    ]);
+    // QA in author mode is a producer
+    const qa = routingProposals(
       card([
-        cell({ role: "qa", mode: "author", size: "S", tier: "mid" }),
-        cell({ role: "qa", mode: "judge", size: "S", tier: "low", escalated: 0.9 }),
+        cell({ role: "qa", mode: "author", size: "M", tier: "mid", escalated: 0.9 }),
+        cell({ role: "qa", mode: "judge", size: "M", tier: "mid", escalated: 0 }),
       ]),
       DCM,
     );
-    expect(judge.changes.map((c) => [c.subject, c.from, c.to])).toEqual([
-      ["routing.qa.S.none", "low", "mid"],
+    expect(qa.changes.map((c) => [c.subject, c.from, c.to])).toEqual([
+      ["routing.qa.M.none", "mid", "top"],
     ]);
-    expect(judge.facts[0]?.metrics).toMatchObject({
-      "routing.from_tier": 0,
-      "routing.current_tier": 0,
-      "routing.to_tier": 1,
+    expect(qa.facts[0]?.metrics).toMatchObject({
+      "routing.from_tier": 1,
+      "routing.current_tier": 1,
+      "routing.to_tier": 2,
     });
   });
 
@@ -469,13 +517,13 @@ describe("routing proposals (D-cn)", () => {
     const out = routingProposals(
       card([
         cell({ size: "S", tier: "low", escalated: 0.7 }),
-        cell({ role: "spec_verifier", size: "S", tier: "low", escalated: 0.8 }),
+        cell({ role: "engineer_backend", size: "S", tier: "low", escalated: 0.8 }),
       ]),
       DCM,
     );
     expect(out.changes.map((c) => [c.role, c.scope, c.to])).toEqual([
       ["engineer", "shared", "mid"],
-      ["spec_verifier", "shared", "mid"],
+      ["engineer_backend", "shared", "mid"],
     ]);
     expect(out.table).toEqual({
       ...DCM,
@@ -483,14 +531,14 @@ describe("routing proposals (D-cn)", () => {
     });
     expect(out.facts.map((f) => f.subject)).toEqual([
       "routing.engineer.S.none",
-      "routing.spec_verifier.S.none",
+      "routing.engineer_backend.S.none",
     ]);
-    // a third role whose S cell is fine keeps the change per role
+    // a third producer whose S cell is fine keeps the change per role
     const objected = routingProposals(
       card([
         cell({ size: "S", tier: "low", escalated: 0.7 }),
-        cell({ role: "spec_verifier", size: "S", tier: "low", escalated: 0.8 }),
-        cell({ role: "security", size: "S", tier: "low", escalated: 0 }),
+        cell({ role: "engineer_backend", size: "S", tier: "low", escalated: 0.8 }),
+        cell({ role: "engineer_frontend", size: "S", tier: "low", escalated: 0 }),
       ]),
       DCM,
     );
@@ -498,7 +546,7 @@ describe("routing proposals (D-cn)", () => {
     expect(objected.table?.by_size).toEqual(DCM.by_size);
     expect(objected.table?.roles).toEqual({
       engineer: { by_size: { S: "mid" } },
-      spec_verifier: { by_size: { S: "mid" } },
+      engineer_backend: { by_size: { S: "mid" } },
     });
   });
 
@@ -612,34 +660,6 @@ describe("routing proposals (D-cn)", () => {
     ]);
   });
 
-  it("plans a tier replay only while the trial budget allows; else the scorecard is the evidence", () => {
-    const cells = [cell({ tier: "mid", pass: 1 }), cell({ tier: "low", reason: "role", pass: 1 })];
-    // 12 tasks, 6 + 6 sampled, k 3, two arms
-    const trials = 12 * LOOKBACK_LIMITS.replayTrials * 2;
-    const funded = routingProposals(card(cells), DCM, { trialBudget: trials });
-    expect(funded.changes[0]?.replay).toEqual({
-      role: "engineer",
-      host: HOST,
-      size: "M",
-      risk: "none",
-      arms: { a: "mid", b: "low" },
-      tasks: 12,
-      trials,
-    });
-    // a plan, not a replay that ran: replay dispatch has no tier arm yet
-    expect(funded.facts[0]?.metrics["routing.replay_planned"]).toBe(1);
-    expect(funded.facts[0]?.metrics).not.toHaveProperty("routing.replay");
-    const short = routingProposals(card(cells), DCM, {
-      trialBudget: trials - 1,
-    });
-    expect(short.changes[0]?.replay).toBeNull();
-    const paced = routingProposals(card(cells), DCM, {
-      trialBudget: 100,
-      pace: { failureTasks: 2, regressionTasks: 2 },
-    });
-    expect(paced.changes[0]?.replay?.trials).toBe(4 * LOOKBACK_LIMITS.replayTrials * 2);
-  });
-
   it("selects held-out tasks of the current cell for a tier replay, failures first", () => {
     const log = new RunLog();
     let n = 0;
@@ -658,6 +678,35 @@ describe("routing proposals (D-cn)", () => {
       ["T-1", false],
       ["T-3", true],
       ["T-4", true],
+    ]);
+  });
+
+  it("takes a task the shared rule escalated as a failure of its start tier (D-cv)", () => {
+    const log = new RunLog();
+    let n = 0;
+    for (let i = 1; n < 2 && i < 1000; i += 1) {
+      const action = `act-${String(i)}`;
+      if (traceSplit({ run: "r1", trace: action }) !== "holdout") continue;
+      n += 1;
+      const task = `T-${String(n)}`;
+      log.taskCreated(task, "backend", [], { size: "S", risk: "low", riskTags: [] });
+      log.status(task, "tests_authored", "building", 1);
+      log.dispatch("engineer", { task, tier: "low", tierReason: "rule", action });
+      log.gate(task, n === 2);
+      if (n === 1) {
+        // a log from before D-cv: the second round ran on Low again
+        log.status(task, "verifying", "fixing", 2);
+        log.dispatch("engineer", { task, tier: "low", tierReason: "rule" });
+        log.gate(task, true);
+      }
+    }
+    const tasks = routingReplayTasks({
+      history: log.events,
+      cell: { role: "engineer", host: HOST, size: "S", risk: "none", start_tier: "low" },
+    });
+    expect(tasks.map((t) => [t.task, t.regressionSet])).toEqual([
+      ["T-1", false],
+      ["T-2", true],
     ]);
   });
 });
