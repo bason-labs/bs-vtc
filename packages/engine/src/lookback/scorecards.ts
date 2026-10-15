@@ -40,26 +40,34 @@ import { isRoleFailure } from "./attribution.js";
 import { readTextIfExists, writeAtomic } from "./files.js";
 import { buildTraces, traceRef, type LockedShaFor, type Trace } from "./traces.js";
 
-type MetricValue = NonNullable<Scorecard["metrics"][ScorecardMetricId]>;
-type Metrics = Scorecard["metrics"];
+export type MetricValue = NonNullable<Scorecard["metrics"][ScorecardMetricId]>;
+export type Metrics = Scorecard["metrics"];
 
-const insufficient = (n: number): MetricValue => ({ value: null, ci_low: null, ci_high: null, n });
+/** A metric below `LOOKBACK_LIMITS.minScorecardN`: "insufficient data". */
+export const insufficient = (n: number): MetricValue => ({
+  value: null,
+  ci_low: null,
+  ci_high: null,
+  n,
+});
 
-const proportion = (x: number, n: number, scale = 1): MetricValue | undefined => {
+/** A proportion with its Wilson interval; `undefined` for n 0, `null` value below the minimum n. */
+export const proportion = (x: number, n: number, scale = 1): MetricValue | undefined => {
   if (n === 0) return undefined;
   if (n < LOOKBACK_LIMITS.minScorecardN) return insufficient(n);
   const { low, high } = wilsonInterval(x, n);
   return { value: (x / n) * scale, ci_low: low * scale, ci_high: high * scale, n };
 };
 
-const mean = (sum: number, n: number): MetricValue | undefined => {
+/** A mean; `undefined` for n 0, `null` value below the minimum n. */
+export const mean = (sum: number, n: number): MetricValue | undefined => {
   if (n === 0) return undefined;
   if (n < LOOKBACK_LIMITS.minScorecardN) return insufficient(n);
   return { value: sum / n, ci_low: null, ci_high: null, n };
 };
 
 /** What happened in one trace's window. */
-interface TraceOutcome {
+export interface TraceOutcome {
   readonly trace: Trace;
   readonly firstRound: boolean;
   /** The round gate's verdict in the window, if it ran. */
@@ -70,7 +78,7 @@ interface TraceOutcome {
   readonly success: boolean;
 }
 
-interface TaskInfo {
+export interface TaskInfo {
   readonly discipline?: Discipline;
   readonly stackPacks: readonly string[];
   /** Round at which the task reached `done`. */
@@ -79,7 +87,11 @@ interface TaskInfo {
 
 const taskKey = (run: string, task: string): string => `${run}:${task}`;
 
-const outcomes = (
+/**
+ * Each trace's outcome in its window (until the same role's next dispatch on the same task).
+ * `firstRound` is the first dispatch of the trace's (task, role, mode) among `traces`.
+ */
+export const traceOutcomes = (
   events: readonly VtcEvent[],
   traces: readonly Trace[],
   failed: ReadonlySet<string>,
@@ -170,7 +182,8 @@ const outcomes = (
   });
 };
 
-const metricsOf = (
+/** The scorecard metrics of a set of trace outcomes. */
+export const metricsOf = (
   rows: readonly TraceOutcome[],
   tasks: ReadonlyMap<string, TaskInfo>,
 ): Metrics => {
@@ -219,7 +232,8 @@ const metricsOf = (
   return metrics;
 };
 
-const taskInfo = (events: readonly VtcEvent[]): Map<string, TaskInfo> => {
+/** Each task's discipline, stack packs and done round, by `<run>:<task>`. */
+export const taskInfo = (events: readonly VtcEvent[]): Map<string, TaskInfo> => {
   const tasks = new Map<string, TaskInfo>();
   for (const event of events) {
     if (isEventOfType(event, "task.created")) {
@@ -237,6 +251,12 @@ const taskInfo = (events: readonly VtcEvent[]): Map<string, TaskInfo> => {
   return tasks;
 };
 
+/** A time window: after `from`, up to and including `to` (ISO times). */
+export interface TimeWindow {
+  readonly from: string;
+  readonly to: string;
+}
+
 /** The scorecard of every prompt version the events dispatched. */
 export const computeScorecards = (input: {
   readonly events: readonly VtcEvent[];
@@ -247,7 +267,7 @@ export const computeScorecards = (input: {
 }): Scorecard[] => {
   const traces = buildTraces(input.events, input.lockedShaFor);
   const failed = new Set(input.attributions.filter(isRoleFailure).map(traceRef));
-  const rows = outcomes(input.events, traces, failed);
+  const rows = traceOutcomes(input.events, traces, failed);
   const tasks = taskInfo(input.events);
   const versions = new Map<string, TraceOutcome[]>();
   for (const row of rows) {

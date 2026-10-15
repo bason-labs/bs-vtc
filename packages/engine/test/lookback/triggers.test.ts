@@ -244,6 +244,7 @@ describe("cost regression (D-bv)", () => {
         "tokens_per_success.delta_pct": 50,
         "n.baseline": 12,
         "n.current": 12,
+        "baseline.time_window": 0,
       },
     });
     expect(UpstreamReportSchema.safeParse({ ...reportBase, ...fields }).success).toBe(true);

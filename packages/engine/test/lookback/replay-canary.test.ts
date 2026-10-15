@@ -1,6 +1,8 @@
 import {
   canaryArmFor,
+  LOOKBACK_LIMITS,
   LookbackPinsSchema,
+  lookbackPaceFor,
   ReplayResultSchema,
   sha256Hex,
   validateEventData,
@@ -104,6 +106,40 @@ describe("replay harness (AD-21 rule 6)", () => {
       ["T-1", false],
       ["T-2", true],
       ["T-4", true],
+    ]);
+  });
+
+  it("samples the replay pace: 6 failures and 6 regression tasks, first in log order (D-cq)", () => {
+    const log = new RunLog();
+    for (let i = 0; i < 16; i += 1) {
+      const task = `T-${String(i + 1)}`;
+      log.dispatch("engineer", { task, action: heldOutAction(i) });
+      // the first 8 fail, the last 8 pass
+      log.gate(task, i >= 8);
+    }
+    const attributions = attributeRun({ events: log.events, lockedShaFor, now }).attributions;
+    const sampled = (pace?: { failureTasks: number; regressionTasks: number }) =>
+      replayTasks({
+        baseline,
+        history: log.events,
+        lockedShaFor,
+        attributions,
+        ...(pace === undefined ? {} : { pace }),
+      }).map((t) => [t.task, t.regressionSet]);
+    expect(LOOKBACK_LIMITS.replayFailureTasks).toBe(6);
+    expect(LOOKBACK_LIMITS.replayRegressionTasks).toBe(6);
+    expect(sampled()).toEqual([
+      ...[1, 2, 3, 4, 5, 6].map((i) => [`T-${String(i)}`, false]),
+      ...[9, 10, 11, 12, 13, 14].map((i) => [`T-${String(i)}`, true]),
+    ]);
+    const paced = lookbackPaceFor(
+      { lookback: { replay_failure_tasks: 2, replay_regression_tasks: 1 } },
+      80,
+    );
+    expect(sampled(paced)).toEqual([
+      ["T-1", false],
+      ["T-2", false],
+      ["T-9", true],
     ]);
   });
 

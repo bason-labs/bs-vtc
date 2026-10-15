@@ -7,10 +7,11 @@
  * - {@link improvementReportFields}: a replay verdict `improve` opens the bs-vtc PR; the human's
  *   merge of it is the promotion for everyone (D-cb, reading 196), and `vtc lookback approve|pin`
  *   stays a local canary on one machine.
- * - {@link costReportFields}: a cost regression (D-bv).
+ * - {@link costReportFields}: a cost regression (D-bv), against the version before or the version's
+ *   own earlier window (D-cr).
  * - {@link newAgentReportFields}: a missing specialist (D-cd), evidence-only with `needs-eval`.
  */
-import type { ReplayResult, UpstreamReportInput } from "@vtc/shared";
+import { LOOKBACK_LIMITS, type ReplayResult, type UpstreamReportInput } from "@vtc/shared";
 import type { CostRegression } from "./cost-regression.js";
 import type { NewAgentSignal } from "./new-agent.js";
 
@@ -42,7 +43,11 @@ export const improvementReportFields = (result: ReplayResult): LookbackReportFie
   };
 };
 
-/** The `cost` report of a regression: the metric before and after, and both n. */
+/**
+ * The `cost` report of a regression: the metric before and after, both n, and which baseline
+ * (D-cr): `baseline.time_window` 1 with `baseline.window_days` when the version was compared with
+ * its own earlier window, 0 when with the version before it.
+ */
 export const costReportFields = (r: CostRegression): LookbackReportFields => ({
   kind: "cost",
   role: r.role,
@@ -55,6 +60,10 @@ export const costReportFields = (r: CostRegression): LookbackReportFields => ({
     [`${r.metric}.delta_pct`]: r.delta_pct,
     "n.baseline": r.n.baseline,
     "n.current": r.n.current,
+    "baseline.time_window": r.baseline_kind === "time_window" ? 1 : 0,
+    ...(r.baseline_kind === "time_window"
+      ? { "baseline.window_days": LOOKBACK_LIMITS.driftWindowDays }
+      : {}),
   },
 });
 

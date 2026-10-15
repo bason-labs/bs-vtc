@@ -7,7 +7,9 @@
  *   for a role that changes files, on either host (on Claude Code each arm runs its own plugin),
  *   `verdict` for a role in `VERDICT_GRADED_ROLES`. Any other is left out with its reason.
  * - **Limits.** Replay trials are engine-launched headless runs bounded by the Lead host's weekly
- *   window, the Lookback budget and the per-RETRO trial cap (`LOOKBACK_LIMITS.maxTrialsPerRetro`).
+ *   window, the Lookback budget and the per-RETRO trial cap of the replay pace (D-cq, spine §5
+ *   reading 224, `lookbackPaceFor` of the user's `~/.vtc/config.yaml` `lookback`): 24 trials, or 36
+ *   while more than half of the Lead host's weekly window is left.
  *   When a limit is hit, what is left waits for the next RETRO and the run logs
  *   `automation.skipped` with the limit's reason (`weekly_window`, `budget`, `trial_cap`).
  * - **Order.** Oldest replay first (by `PendingReplay.recordedAt`, the proposal's
@@ -24,15 +26,17 @@
  *   also logs `automation.skipped` `plugin_locked` when the lock was the cause. The caller ends
  *   such a replay (it is no longer pending), so each is reported once.
  *
- * Not wired yet: engine core's RETRO applies its own whole-replay trial cap and does not call this
- * (see the `replay-ledger` module comment for the contract proposal that makes this the one cap).
+ * Engine core's RETRO runner (`daemon/replays.ts`) calls this each RETRO; it applies no trial cap
+ * of its own, so this is the one cap (see the `replay-ledger` module comment).
  */
 import {
   LOOKBACK_LIMITS,
+  lookbackPaceFor,
   replayGraderFor,
   type AutomationSkipReason,
   type HostId,
   type ReplayGrader,
+  type UserConfig,
 } from "@vtc/shared";
 import { lookbackEvent, type LookbackEventDraft } from "./events.js";
 import {
@@ -147,7 +151,15 @@ export const planRetroReplays = <T extends ReplayTrialId>(input: {
   ) => ReadonlyMap<string, { readonly attempts: number; readonly outcome: ReplayInfraOutcome }>;
   readonly weeklyRemainingPct: number | null;
   readonly budgetAvailable: boolean;
-  /** Default `LOOKBACK_LIMITS.maxTrialsPerRetro`. */
+  /**
+   * The user's config (`~/.vtc/config.yaml`), whose `lookback` section sets the replay pace; the
+   * cap is `lookbackPaceFor(user, weeklyRemainingPct).maxTrialsPerRetro` (D-cq).
+   */
+  readonly user?: Pick<UserConfig, "lookback">;
+  /**
+   * The per-RETRO trial cap, when the caller computed it (engine core's daemon passes
+   * `lookbackPaceFor(user, weeklyRemainingPct).maxTrialsPerRetro`); it wins over `user`'s.
+   */
   readonly cap?: number;
 }): {
   readonly launch: LaunchedReplay<T>[];
@@ -250,7 +262,11 @@ export const planRetroReplays = <T extends ReplayTrialId>(input: {
       ],
     };
   }
-  let left = input.cap ?? LOOKBACK_LIMITS.maxTrialsPerRetro;
+  const cap = Math.max(
+    0,
+    input.cap ?? lookbackPaceFor(input.user, input.weeklyRemainingPct).maxTrialsPerRetro,
+  );
+  let left = cap;
   let waiting = 0;
   let waitingReplays = 0;
   const launch: LaunchedReplay<T>[] = [];
@@ -274,7 +290,7 @@ export const planRetroReplays = <T extends ReplayTrialId>(input: {
     skipped.push(
       replaySkippedEvent(
         "trial_cap",
-        `${plural(waiting, "replay trial")} of ${plural(waitingReplays, "proposal")} wait for the next RETRO: one RETRO launches at most ${String(input.cap ?? LOOKBACK_LIMITS.maxTrialsPerRetro)}`,
+        `${plural(waiting, "replay trial")} of ${plural(waitingReplays, "proposal")} wait for the next RETRO: one RETRO launches at most ${String(cap)}`,
       ),
     );
   return { launch, unreplayable, skipped };

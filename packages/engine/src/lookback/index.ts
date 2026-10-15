@@ -9,8 +9,9 @@
  * {@link renderLookbackInput} writes, and {@link checkProposal} runs when it submits.
  * Replays (AD-21 rule 6, spine §5 readings 176, 201 and 202): engine-core's runner plans the
  * `lookback_replay` trials of each proposal ({@link replayTasks} with the role's grader,
- * {@link planReplayTrials}), launches what {@link planRetroReplays} allows this RETRO (a grader
- * that can score the role, the weekly window, the budget and `maxTrialsPerRetro`, each limit an
+ * {@link planReplayTrials}; the sample and the trial cap at the replay pace, `lookbackPaceFor`,
+ * D-cq), launches what {@link planRetroReplays} allows this RETRO (a grader that can score the
+ * role, the weekly window, the budget and the pace's trial cap, each limit an
  * `automation.skipped` draft), grades each trial with {@link gradeTrial} (the gates) or
  * {@link gradeVerdictReplay} (a verdict role against the expectation its task key carries,
  * {@link expectedOfTaskKey}; `infra_error` when the replayed dispatch has no recorded outcome), keeps
@@ -19,15 +20,21 @@
  * recorded)
  * and writes it with {@link writeReplayResult} (whose `lookback.replay_finished` carries the
  * SHA-256 of the bytes written), reading the A/A noise floor with {@link cachedAaFlipRate} and
- * keeping a measured one with {@link recordAaFlipRate}. Engine core's `LookbackRetro` seam does not
- * drive {@link planRetroReplays} and the ledger yet (core caps whole replays itself and has no
- * per-trial outcome hook): a contract proposal to engine core and the daemon owner, see the
- * `replay-ledger` module comment.
+ * keeping a measured one with {@link recordAaFlipRate}. Engine core's RETRO runner
+ * (`daemon/replays.ts`, its `LookbackRetro` `replays` / `recordTrial` / `finishReplay`) drives
+ * {@link planRetroReplays} and the ledger; see the `replay-ledger` module comment.
  * At the run's end Lookback also returns what engine core hands the upstream module: cost
  * regressions ({@link costRegressions}, D-bv; their lookback target is aimed at tokens) and
  * missing specialists ({@link newAgentSignals}, D-cd, evidence-only), with the VTC-side report
  * fields of each ({@link costReportFields}, {@link newAgentReportFields}); an `improve` verdict's
- * fields ({@link improvementReportFields}) open the bs-vtc PR.
+ * fields ({@link improvementReportFields}) open the bs-vtc PR. {@link lookbackRunEndFacts} maps the
+ * drift regressions (D-cr) to the automation facts the daemon is to hand the upstream module at
+ * `run.finished` (not wired yet: a contract proposal to engine core's daemon).
+ * At RETRO (D-cn, spine §5 reading 219) {@link lookbackRoutingStep} fits engine core's
+ * `RoutingLookback` seam: it writes the routing scorecard and returns the routing-table cells it
+ * proposes to change ({@link routingProposalCells}), for the daemon to raise as `config` facts
+ * (not wired yet: engine core's `wireLookback` call leaves its `routing` argument out, a contract
+ * proposal to engine core).
  * AI tiebreak answers are recorded with {@link appendTiebreakRecord} under the VTC home; only
  * those {@link readTiebreakKeys} returns let an `ai_tiebreak` attribution count.
  * Promotion (D-cb, spine §5 reading 196): for everyone, the human's merge of the bs-vtc PR an
@@ -56,6 +63,8 @@ export { canaryArmStats, evaluateCanaries } from "./canary.js";
 export {
   COST_TRACES_MAX,
   costRegressions,
+  isTokenMetric,
+  type CostBaselineKind,
   type CostMetric,
   type CostRegression,
   type CostTrace,
@@ -109,7 +118,6 @@ export {
   recordAaFlipRate,
   replayDispatchPlan,
   replayIsolation,
-  REPLAY_MAX_TASKS,
   replayPath,
   expectedOfTaskKey,
   replayTaskKey,
@@ -155,8 +163,10 @@ export {
   type LookbackReportFields,
 } from "./reports.js";
 export {
+  DRIFT_BASELINE_SUFFIX,
   LOOKBACK_MAX_TRACES,
   lookbackAtRunEnd,
+  lookbackRunEndFacts,
   lookbackTargets,
   type HumanEditDiff,
   type LookbackDispatched,
@@ -171,7 +181,23 @@ export {
   type CompiledTexts,
   type LookbackRetroDeps,
 } from "./retro.js";
-export { computeScorecards, writeScorecards } from "./scorecards.js";
+export {
+  computeRoutingScorecard,
+  routedStartTier,
+  routingProposalCells,
+  routingProposals,
+  routingReplayTasks,
+  writeRoutingScorecard,
+  type RoutingCell,
+  type RoutingChange,
+  type RoutingConfigFact,
+  type RoutingLift,
+  type RoutingProposalCell,
+  type RoutingProposals,
+  type RoutingTierReplay,
+} from "./routing.js";
+export { lookbackRoutingStep } from "./routing-step.js";
+export { computeScorecards, writeScorecards, type TimeWindow } from "./scorecards.js";
 export {
   appendTiebreakRecord,
   readTiebreakKeys,
