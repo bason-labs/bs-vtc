@@ -3,13 +3,15 @@
  * within the RETRO's trial budget (the same prompt version on both arms, arm `a` on the cell's
  * current start tier and arm `b` on the proposed one), keeps its graded trials in the replay ledger
  * across RETROs, grades it into a `RoutingReplayResult` with the paired sign test, and raises the
- * routing `config` fact only once the replay is graded and backs the change
- * (`routingReplayBacks`). With no budget the fact carries the scorecard alone, as before.
+ * routing `config` fact only once the replay is graded, its trials' events show each ran on its
+ * arm's tier, and it backs the change (`routingReplayBacks`). With no budget, or through engine
+ * core's seam (`lookbackRoutingStep`), the fact carries the scorecard alone, as before.
  */
 import {
   engineRepoKey,
   LOOKBACK_HOME,
   LOOKBACK_LIMITS,
+  ReplayInfraRowSchema,
   ReplayTrialRowSchema,
   ROUTING_FACT_METRICS,
   ROUTING_REPLAY_VERDICT_CODES,
@@ -17,6 +19,7 @@ import {
   routingReplayPath,
   RoutingReplayResultSchema,
   type ModelTier,
+  type ReplayInfraOutcome,
   type RoutingTable,
   type VtcEvent,
 } from "@vtc/shared";
@@ -31,7 +34,8 @@ import {
   readReplayLedger,
   recordRoutingReplayTrial,
   routingReplayCosts,
-  routingReplayOffTier,
+  routingReplayStep,
+  routingReplayTrialTiers,
   traceSplit,
   type ReplayTrialRow,
   type RoutingReplayLaunch,
@@ -116,12 +120,14 @@ interface Setup {
   readonly root: string;
   readonly home: string;
   readonly repoKey: string;
+  /** The tier replay trials' own events, as the caller logs them (`replayEvents`). */
+  readonly trials: RunLog;
 }
 
 const setup = async (name: string): Promise<Setup> => {
   const root = await tempDir(`routing-replay-${name}`);
   const home = await tempDir(`routing-replay-home-${name}`);
-  return { root, home, repoKey: engineRepoKey(root) };
+  return { root, home, repoKey: engineRepoKey(root), trials: new RunLog("replays") };
 };
 
 const step = (
@@ -131,10 +137,10 @@ const step = (
     trialBudget?: number;
     replayEvents?: readonly VtcEvent[];
     graderBundleSha?: string;
-    launchesReplays?: boolean;
+    pace?: { failureTasks: number; regressionTasks: number };
   } = {},
 ) =>
-  lookbackRoutingStep({
+  routingReplayStep({
     table: DCM,
     projectRoot: s.root,
     history,
@@ -142,21 +148,41 @@ const step = (
     now,
     lockedShaFor,
     vtcHome: s.home,
-    pace: PACE,
-    launchesReplays: extra.launchesReplays ?? true,
+    pace: extra.pace ?? PACE,
+    replayEvents: extra.replayEvents ?? s.trials.events,
     ...(extra.trialBudget === undefined ? {} : { trialBudget: extra.trialBudget }),
-    ...(extra.replayEvents === undefined ? {} : { replayEvents: extra.replayEvents }),
   });
 
-/** Records `trials` in the ledger as graded: `passed` decides each one. */
+/** The trial's `role.dispatched.replay`. */
+const refOf = (proposal: string, t: RoutingReplayTrial) => ({
+  proposal,
+  task: t.task,
+  arm: t.arm,
+  trial: t.trial,
+  tier: t.tier,
+});
+
+/**
+ * Runs `trials` (each one's dispatch logged on its arm's tier, or where `ranOn` says) and records
+ * them in the ledger as graded: `passed` decides each one.
+ */
 const grade = async (
   s: Setup,
   proposal: string,
   trials: readonly RoutingReplayTrial[],
   passed: (t: RoutingReplayTrial) => boolean,
-  options: { prompt?: string; tokens?: (t: RoutingReplayTrial) => number } = {},
+  options: {
+    prompt?: string;
+    tokens?: (t: RoutingReplayTrial) => number;
+    ranOn?: (t: RoutingReplayTrial) => ModelTier;
+  } = {},
 ): Promise<void> => {
-  for (const trial of trials)
+  for (const trial of trials) {
+    s.trials.dispatch("engineer", {
+      task: "T-1",
+      tier: options.ranOn?.(trial) ?? trial.tier,
+      replay: refOf(proposal, trial),
+    });
     await recordRoutingReplayTrial(s.home, {
       repoKey: s.repoKey,
       proposal,
@@ -171,6 +197,27 @@ const grade = async (
       },
       at: now,
     });
+  }
+};
+
+/** Records `times` attempts of `trial` that measured nothing (`outcome`). */
+const unmeasured = async (
+  s: Setup,
+  proposal: string,
+  trial: RoutingReplayTrial,
+  outcome: ReplayInfraOutcome,
+  times = 3,
+): Promise<void> => {
+  for (let i = 0; i < times; i += 1)
+    await recordRoutingReplayTrial(s.home, {
+      repoKey: s.repoKey,
+      proposal,
+      prompt: EFFECTIVE,
+      graderBundleSha: BUNDLE,
+      trial,
+      record: { kind: "unmeasured", outcome },
+      at: now,
+    });
 };
 
 /** Launches every trial of the replay through as many RETROs as it takes, grading each. */
@@ -178,10 +225,14 @@ const runToEnd = async (
   s: Setup,
   history: readonly VtcEvent[],
   passed: (t: RoutingReplayTrial) => boolean,
+  pace?: { failureTasks: number; regressionTasks: number },
 ): Promise<RoutingReplayTrial[]> => {
   const all: RoutingReplayTrial[] = [];
   for (let retro = 0; retro < 10; retro += 1) {
-    const out = await step(s, history, { trialBudget: 24 });
+    const out = await step(s, history, {
+      trialBudget: 24,
+      ...(pace === undefined ? {} : { pace }),
+    });
     const [launch] = out.replays;
     if (launch === undefined) break;
     await grade(s, launch.proposal, launch.trials, passed);
@@ -223,8 +274,8 @@ describe("planning a tier replay (D-cn, reading 247(6))", () => {
     );
   });
 
-  it("is assignable to engine core's RoutingLookback seam (its replay inputs are optional)", () => {
-    // a compile-time check: the seam's input has no trial budget yet (see the contract proposal)
+  it("fits engine core's RoutingLookback seam with lookbackRoutingStep", () => {
+    // a compile-time check: the seam passes neither tier replay launches nor their events
     const seam: RoutingLookback = lookbackRoutingStep;
     expect(seam).toBe(lookbackRoutingStep);
   });
@@ -232,7 +283,7 @@ describe("planning a tier replay (D-cn, reading 247(6))", () => {
   it("plans the replay within the RETRO's trial budget and withholds the fact until it is graded", async () => {
     const s = await setup("plan");
     const out = await step(s, lowStarts(), { trialBudget: 24 });
-    expect([...out]).toEqual([]);
+    expect(out.cells).toEqual([]);
     expect(out.replays).toHaveLength(1);
     const [launch] = out.replays as RoutingReplayLaunch[];
     expect(launch).toMatchObject({
@@ -268,7 +319,7 @@ describe("planning a tier replay (D-cn, reading 247(6))", () => {
     if (first === undefined) throw new Error("no replay");
     await grade(s, LOW_MID, first.trials, higherFixes);
     const second = await step(s, history, { trialBudget: 24 });
-    expect([...second]).toEqual([]);
+    expect(second.cells).toEqual([]);
     const [next] = second.replays;
     expect(next?.trials).toHaveLength(42 - 24);
     expect(next?.remaining).toBe(0);
@@ -297,8 +348,8 @@ describe("planning a tier replay (D-cn, reading 247(6))", () => {
     expect(trials).toHaveLength(42);
     const out = await step(s, history, { trialBudget: 24 });
     expect(out.replays).toEqual([]);
-    expect(out).toHaveLength(1);
-    const [cell] = out;
+    expect(out.cells).toHaveLength(1);
+    const [cell] = out.cells;
     expect(cell).toMatchObject({ role: "engineer", size: "S", risk: "none" });
     expect(cell?.metrics).toMatchObject({
       [ROUTING_FACT_METRICS.fromTier]: 0,
@@ -323,8 +374,8 @@ describe("planning a tier replay (D-cn, reading 247(6))", () => {
       k: K,
       verdict: "improve",
       tokens_delta_pct: 0,
-      // no trial events handed in: the arms' cost is unknown
-      cost_delta_pct: null,
+      // every trial of both arms reported the same cost
+      cost_delta_pct: 0,
       isolation: "read_denied",
     });
     expect(result.per_task).toHaveLength(7);
@@ -337,15 +388,15 @@ describe("planning a tier replay (D-cn, reading 247(6))", () => {
     // Mid does no better than Low: a higher start needs `improve`
     await runToEnd(s, history, () => true);
     const out = await step(s, history, { trialBudget: 24 });
-    expect([...out]).toEqual([]);
+    expect(out.cells).toEqual([]);
     expect(out.replays).toEqual([]);
     expect((await resultOf(s, LOW_MID)).verdict).toBe("no_change");
     // and with no budget the graded verdict still decides: no scorecard-alone fact
     const broke = await step(s, history, { trialBudget: 0 });
-    expect([...broke]).toEqual([]);
+    expect(broke.cells).toEqual([]);
     // an absent budget counts as none: the graded verdict decides too
     const unbudgeted = await step(s, history);
-    expect([...unbudgeted]).toEqual([]);
+    expect(unbudgeted.cells).toEqual([]);
     expect(unbudgeted.replays).toEqual([]);
   });
 
@@ -353,14 +404,14 @@ describe("planning a tier replay (D-cn, reading 247(6))", () => {
     const s = await setup("cheaper");
     const history = midStarts();
     const first = await step(s, history, { trialBudget: 100 });
-    expect([...first]).toEqual([]);
+    expect(first.cells).toEqual([]);
     const [launch] = first.replays;
     expect(launch?.proposal).toBe(MID_LOW);
     // no task failed on Mid: the regression set only
     expect(launch?.trials).toHaveLength(PACE.regressionTasks * K * 2);
     for (const t of launch?.trials ?? []) expect(t.tier).toBe(t.arm === "a" ? "mid" : "low");
     await grade(s, MID_LOW, launch?.trials ?? [], () => true);
-    const [cell, ...rest] = await step(s, history, { trialBudget: 100 });
+    const [cell, ...rest] = (await step(s, history, { trialBudget: 100 })).cells;
     expect(rest).toEqual([]);
     expect(cell?.metrics).toMatchObject({
       [ROUTING_FACT_METRICS.fromTier]: 1,
@@ -376,7 +427,7 @@ describe("planning a tier replay (D-cn, reading 247(6))", () => {
     const [launch] = (await step(s, history, { trialBudget: 100 })).replays;
     await grade(s, MID_LOW, launch?.trials ?? [], (t) => t.arm === "a");
     const out = await step(s, history, { trialBudget: 100 });
-    expect([...out]).toEqual([]);
+    expect(out.cells).toEqual([]);
     expect((await resultOf(s, MID_LOW)).verdict).toBe("regress");
   });
 
@@ -385,14 +436,14 @@ describe("planning a tier replay (D-cn, reading 247(6))", () => {
     for (const budget of [undefined, 0]) {
       const out = await step(s, lowStarts(), budget === undefined ? {} : { trialBudget: budget });
       expect(out.replays).toEqual([]);
-      expect(out).toHaveLength(1);
-      expect(out[0]?.metrics[ROUTING_FACT_METRICS.replayPlanned]).toBe(0);
-      expect(out[0]?.metrics).not.toHaveProperty(ROUTING_FACT_METRICS.replayVerdict);
-      expect(out[0]?.metrics).not.toHaveProperty(ROUTING_FACT_METRICS.replayTrials);
-      expect(out[0]?.detail).toContain("No tier replay backs it");
+      expect(out.cells).toHaveLength(1);
+      expect(out.cells[0]?.metrics[ROUTING_FACT_METRICS.replayPlanned]).toBe(0);
+      expect(out.cells[0]?.metrics).not.toHaveProperty(ROUTING_FACT_METRICS.replayVerdict);
+      expect(out.cells[0]?.metrics).not.toHaveProperty(ROUTING_FACT_METRICS.replayTrials);
+      expect(out.cells[0]?.detail).toContain("No tier replay backs it");
     }
     // a budget too small for one pair plans nothing either
-    expect((await step(s, lowStarts(), { trialBudget: 1 }))[0]?.metrics).toMatchObject({
+    expect((await step(s, lowStarts(), { trialBudget: 1 })).cells[0]?.metrics).toMatchObject({
       [ROUTING_FACT_METRICS.replayPlanned]: 0,
     });
   });
@@ -411,27 +462,36 @@ describe("planning a tier replay (D-cn, reading 247(6))", () => {
     await grade(s, LOW_MID, launch?.trials ?? [], higherFixes);
     for (const budget of [0, undefined]) {
       const out = await step(s, history, budget === undefined ? {} : { trialBudget: budget });
-      expect([...out]).toEqual([]);
+      expect(out.cells).toEqual([]);
       expect(out.replays).toEqual([]);
       expect(out.skipped.map((e) => e.data.reason)).toEqual(["trial_cap"]);
     }
   });
 
-  it("starts no replay for a caller that does not launch them, and continues one already started", async () => {
-    const s = await setup("unconfirmed");
+  it("through the seam, launches and grades no tier replay: the scorecard alone", async () => {
+    const s = await setup("seam");
     const history = lowStarts();
-    // core passes a budget but does not say it launches `replays`: the scorecard alone
-    const fresh = await step(s, history, { trialBudget: 24, launchesReplays: false });
-    expect(fresh.replays).toEqual([]);
-    expect(fresh.skipped).toEqual([]);
+    const seam = () =>
+      lookbackRoutingStep({
+        table: DCM,
+        projectRoot: s.root,
+        history,
+        graderBundleSha: BUNDLE,
+        now,
+        lockedShaFor,
+        vtcHome: s.home,
+        pace: PACE,
+      });
+    const fresh = await seam();
     expect(fresh).toHaveLength(1);
     expect(fresh[0]?.metrics[ROUTING_FACT_METRICS.replayPlanned]).toBe(0);
-    // a replay the ledger holds trials of was launched by someone: it continues, the fact waits
-    const [launch] = (await step(s, history, { trialBudget: 2 })).replays;
-    await grade(s, LOW_MID, launch?.trials ?? [], higherFixes);
-    const started = await step(s, history, { trialBudget: 24, launchesReplays: false });
-    expect([...started]).toEqual([]);
-    expect(started.replays[0]?.trials).toHaveLength(24);
+    // a replay the ledger holds every trial of: the seam has no trial events to grade it on
+    await runToEnd(s, history, () => true);
+    const [cell, ...rest] = await seam();
+    expect(rest).toEqual([]);
+    expect(cell?.metrics[ROUTING_FACT_METRICS.replayPlanned]).toBe(0);
+    expect(cell?.metrics).not.toHaveProperty(ROUTING_FACT_METRICS.replayVerdict);
+    await expect(readFile(join(s.root, routingReplayPath(LOW_MID)), "utf8")).rejects.toThrow();
   });
 
   it("starts over under another prompt version or grader bundle", async () => {
@@ -449,25 +509,37 @@ describe("planning a tier replay (D-cn, reading 247(6))", () => {
     expect(rebundled?.trials).toEqual(launch?.trials);
   });
 
+  /** The ledger's infra rows (attempts that measured nothing), as written. */
+  const infraRows = async (s: Setup) =>
+    (await readFile(join(s.home, LOOKBACK_HOME.replayTrialsFile), "utf8"))
+      .trim()
+      .split("\n")
+      .map((line) => ReplayInfraRowSchema.safeParse(JSON.parse(line)))
+      .flatMap((parsed) => (parsed.success ? [parsed.data] : []));
+
   it("falls back to the scorecard when a trial keeps measuring nothing", async () => {
     const s = await setup("infra");
     const history = lowStarts();
     const [launch] = (await step(s, history, { trialBudget: 24 })).replays;
-    const [stuck] = launch?.trials ?? [];
+    const stuck = launch?.trials.find((t) => t.arm === "b");
     if (stuck === undefined) throw new Error("no trial");
-    for (let i = 0; i < 3; i += 1)
-      await recordRoutingReplayTrial(s.home, {
-        repoKey: s.repoKey,
+    await unmeasured(s, LOW_MID, stuck, "gate_infra");
+    // each attempt is kept with its arm's tier, the one prompt as baseline and candidate
+    const rows = await infraRows(s);
+    expect(rows).toHaveLength(3);
+    for (const row of rows)
+      expect(row).toMatchObject({
         proposal: LOW_MID,
-        prompt: EFFECTIVE,
-        graderBundleSha: BUNDLE,
-        trial: stuck,
-        record: { kind: "unmeasured", outcome: "gate_infra" },
-        at: now,
+        task: stuck.task,
+        arm: "b",
+        tier: "mid",
+        baseline: EFFECTIVE,
+        candidate: EFFECTIVE,
+        outcome: "gate_infra",
       });
     const out = await step(s, history, { trialBudget: 24 });
     expect(out.replays).toEqual([]);
-    expect(out[0]?.metrics[ROUTING_FACT_METRICS.replayPlanned]).toBe(0);
+    expect(out.cells[0]?.metrics[ROUTING_FACT_METRICS.replayPlanned]).toBe(0);
     // gate_infra is not a plugin lock: nothing to log
     expect(out.skipped).toEqual([]);
   });
@@ -478,19 +550,17 @@ describe("planning a tier replay (D-cn, reading 247(6))", () => {
     const [launch] = (await step(s, history, { trialBudget: 24 })).replays;
     const [stuck] = launch?.trials ?? [];
     if (stuck === undefined) throw new Error("no trial");
-    for (let i = 0; i < 3; i += 1)
-      await recordRoutingReplayTrial(s.home, {
-        repoKey: s.repoKey,
-        proposal: LOW_MID,
-        prompt: EFFECTIVE,
-        graderBundleSha: BUNDLE,
-        trial: stuck,
-        record: { kind: "unmeasured", outcome: "plugin_locked" },
-        at: now,
+    await unmeasured(s, LOW_MID, stuck, "plugin_locked");
+    for (const row of await infraRows(s))
+      expect(row).toMatchObject({
+        arm: "a",
+        tier: "low",
+        baseline: EFFECTIVE,
+        candidate: EFFECTIVE,
       });
     const out = await step(s, history, { trialBudget: 24 });
     expect(out.replays).toEqual([]);
-    expect(out[0]?.metrics[ROUTING_FACT_METRICS.replayPlanned]).toBe(0);
+    expect(out.cells[0]?.metrics[ROUTING_FACT_METRICS.replayPlanned]).toBe(0);
     expect(out.skipped.map((e) => e.data.reason)).toEqual(["plugin_locked"]);
     expect(out.skipped[0]?.data.detail).toContain(LOW_MID);
   });
@@ -507,39 +577,123 @@ describe("planning a tier replay (D-cn, reading 247(6))", () => {
     for (let retro = 0; retro < 2; retro += 1) {
       const out = await step(s, history, { trialBudget: 24 });
       expect(out.replays).toEqual([]);
-      expect(out).toHaveLength(1);
-      expect(out[0]?.metrics[ROUTING_FACT_METRICS.replayPlanned]).toBe(0);
-      expect(out[0]?.metrics).not.toHaveProperty(ROUTING_FACT_METRICS.replayVerdict);
+      expect(out.cells).toHaveLength(1);
+      expect(out.cells[0]?.metrics[ROUTING_FACT_METRICS.replayPlanned]).toBe(0);
+      expect(out.cells[0]?.metrics).not.toHaveProperty(ROUTING_FACT_METRICS.replayVerdict);
     }
   });
 
-  it("refuses to grade a replay one of whose trials ran clamped or on another tier", async () => {
+  it("refuses to grade a replay one of whose trials ran clamped, on a fallback model or on another tier", async () => {
     const s = await setup("clamped");
     const history = lowStarts();
     const trials = await runToEnd(s, history, higherFixes);
     const armB = trials.find((t) => t.arm === "b");
     if (armB === undefined) throw new Error("no arm b");
-    const ref = { proposal: LOW_MID, task: armB.task, arm: armB.arm, trial: armB.trial };
-    // the project's max_tier kept arm b on Low, though its rows say Mid
-    const clamped = new RunLog();
-    clamped.dispatch("engineer", {
-      task: "T-1",
-      tier: "low",
-      tierReason: "rule",
-      tierClamped: true,
-      replay: { ...ref, tier: "mid" },
-    });
-    const out = await step(s, history, { trialBudget: 24, replayEvents: clamped.events });
-    expect(out.replays).toEqual([]);
-    expect(out).toHaveLength(1);
-    expect(out[0]?.metrics[ROUTING_FACT_METRICS.replayPlanned]).toBe(0);
-    // the same trials on their arms' tiers grade as before
-    const fine = new RunLog();
-    fine.dispatch("engineer", { task: "T-1", tier: "mid", replay: { ...ref, tier: "mid" } });
-    const graded = await step(s, history, { trialBudget: 24, replayEvents: fine.events });
-    expect(graded[0]?.metrics[ROUTING_FACT_METRICS.replayVerdict]).toBe(
+    const ref = refOf(LOW_MID, armB);
+    const offTier = (dispatch: (log: RunLog) => void): VtcEvent[] => {
+      const log = new RunLog("again");
+      dispatch(log);
+      return [...s.trials.events, ...log.events];
+    };
+    const runs: VtcEvent[][] = [
+      // the project's max_tier kept arm b on Low, though its rows say Mid
+      offTier((log) =>
+        log.dispatch("engineer", { task: "T-1", tier: "low", tierClamped: true, replay: ref }),
+      ),
+      // the host refused Mid's model: the trial ran on the host default (D-cx)
+      offTier((log) =>
+        log.dispatch("engineer", {
+          task: "T-1",
+          tier: "mid",
+          modelFallback: { requested: "claude-sonnet-5", reason: "model_refused" },
+          replay: ref,
+        }),
+      ),
+      // core ignored the arm's tier: it ran on the recorded one
+      offTier((log) => log.dispatch("engineer", { task: "T-1", tier: "low", replay: ref })),
+      // a tier replay's dispatch with no tier is an anomaly, never trusted
+      offTier((log) => log.dispatch("engineer", { task: "T-1", replay: ref })),
+    ];
+    for (const replayEvents of runs) {
+      const out = await step(s, history, { trialBudget: 24, replayEvents });
+      expect(out.replays).toEqual([]);
+      expect(out.cells).toHaveLength(1);
+      expect(out.cells[0]?.metrics[ROUTING_FACT_METRICS.replayPlanned]).toBe(0);
+    }
+    await expect(readFile(join(s.root, routingReplayPath(LOW_MID)), "utf8")).rejects.toThrow();
+    // the same trials, every one on its arm's tier, grade as before
+    const graded = await step(s, history, { trialBudget: 24 });
+    expect(graded.cells[0]?.metrics[ROUTING_FACT_METRICS.replayVerdict]).toBe(
       ROUTING_REPLAY_VERDICT_CODES.improve,
     );
+  });
+
+  it("does not grade a replay whose graded trials the events do not show on their arm's tier", async () => {
+    const s = await setup("uncovered");
+    const history = lowStarts();
+    // the ledger holds every trial, all graded as if each arm ran on its tier: arm b no better
+    // (both arms on one model would look like this), which would back nothing here, but a
+    // cheaper change would read it as `no_change` and claim the replay's backing
+    await runToEnd(s, history, higherFixes);
+    const [firstTrial] = s.trials.events.filter((e) => e.type === "role.dispatched");
+    const partial = s.trials.events.filter(
+      (e) =>
+        e.run !== firstTrial?.run ||
+        (e.data as { action_id?: string }).action_id !==
+          (firstTrial.data as { action_id?: string }).action_id,
+    );
+    for (const replayEvents of [[], partial]) {
+      const out = await step(s, history, { trialBudget: 24, replayEvents });
+      expect(out.replays).toEqual([]);
+      expect(out.cells).toHaveLength(1);
+      expect(out.cells[0]?.metrics[ROUTING_FACT_METRICS.replayPlanned]).toBe(0);
+      expect(out.cells[0]?.metrics).not.toHaveProperty(ROUTING_FACT_METRICS.replayVerdict);
+    }
+    // a replay part way through stops too: its trials could not be told on-tier at its end
+    const t = await setup("uncovered-running");
+    const [launch] = (await step(t, history, { trialBudget: 2 })).replays;
+    await grade(t, LOW_MID, launch?.trials ?? [], higherFixes);
+    const stopped = await step(t, history, { trialBudget: 24, replayEvents: [] });
+    expect(stopped.replays).toEqual([]);
+    expect(stopped.cells[0]?.metrics[ROUTING_FACT_METRICS.replayPlanned]).toBe(0);
+    // with every trial's events it goes on
+    expect((await step(t, history, { trialBudget: 24 })).replays[0]?.trials).toHaveLength(24);
+  });
+
+  it("reopens a graded replay while a bucket below its pace cap gains a held-out task", async () => {
+    const s = await setup("reopen");
+    // 7 failures and 5 regression-set tasks, then an 8th failure: below a cap of 10 failures
+    const pace = { failureTasks: 10, regressionTasks: 2 };
+    const before = lowStarts();
+    const log = new RunLog();
+    const ids = heldOut(13);
+    for (let i = 1; i <= 13; i += 1) {
+      const task = `T-${String(i)}`;
+      log.taskCreated(task, "backend", [], { size: "S", risk: "low", riskTags: [] });
+      log.dispatch("engineer", { task, tier: "low", tierReason: "rule", action: ids[i - 1] ?? "" });
+      const fails = i <= 7 || i === 13;
+      log.gate(task, !fails);
+      if (fails) {
+        log.dispatch("engineer", { task, tier: "mid", tierReason: "escalation" });
+        log.gate(task, true);
+      }
+    }
+    const after = log.events;
+    expect(after.slice(0, before.length)).toEqual(before);
+    await runToEnd(s, before, higherFixes, pace);
+    const graded = await step(s, before, { trialBudget: 24, pace });
+    expect(graded.cells[0]?.metrics[ROUTING_FACT_METRICS.replayTrials]).toBe((7 + 2) * K * 2);
+    const written = await readFile(join(s.root, routingReplayPath(LOW_MID)), "utf8");
+    // the new failure joins the sample: the fact waits for its trials, the result stays
+    const reopened = await step(s, after, { trialBudget: 24, pace });
+    expect(reopened.cells).toEqual([]);
+    const [launch] = reopened.replays;
+    expect(launch?.trials).toHaveLength(K * 2);
+    expect(new Set(launch?.trials.map((t) => t.task))).toEqual(new Set(["r1:T-13"]));
+    expect(await readFile(join(s.root, routingReplayPath(LOW_MID)), "utf8")).toBe(written);
+    await grade(s, LOW_MID, launch?.trials ?? [], higherFixes);
+    const regraded = await step(s, after, { trialBudget: 24, pace });
+    expect(regraded.cells[0]?.metrics[ROUTING_FACT_METRICS.replayTrials]).toBe((8 + 2) * K * 2);
   });
 
   it("carries the scorecard alone for a role whose id is too long for a replay id", async () => {
@@ -548,8 +702,8 @@ describe("planning a tier replay (D-cn, reading 247(6))", () => {
     const s = await setup("long-role");
     const out = await step(s, lowStarts([long]), { trialBudget: 24 });
     expect(out.replays).toEqual([]);
-    expect(out.map((c) => c.role)).toEqual([long]);
-    expect(out[0]?.metrics[ROUTING_FACT_METRICS.replayPlanned]).toBe(0);
+    expect(out.cells.map((c) => c.role)).toEqual([long]);
+    expect(out.cells[0]?.metrics[ROUTING_FACT_METRICS.replayPlanned]).toBe(0);
   });
 
   it("moves a shared cell only when every role's replay backs it", async () => {
@@ -570,13 +724,13 @@ describe("planning a tier replay (D-cn, reading 247(6))", () => {
     const split = await runAll(await setup("shared-split"), (role) =>
       role === "engineer" ? higherFixes : () => true,
     );
-    expect([...split]).toEqual([]);
+    expect(split.cells).toEqual([]);
     const both = await runAll(await setup("shared-both"), () => higherFixes);
-    expect(both.map((c) => [c.role, c.metrics[ROUTING_FACT_METRICS.shared]])).toEqual([
+    expect(both.cells.map((c) => [c.role, c.metrics[ROUTING_FACT_METRICS.shared]])).toEqual([
       ["engineer", 1],
       ["engineer_backend", 1],
     ]);
-    for (const c of both)
+    for (const c of both.cells)
       expect(c.metrics[ROUTING_FACT_METRICS.replayVerdict]).toBe(
         ROUTING_REPLAY_VERDICT_CODES.improve,
       );
@@ -590,7 +744,7 @@ describe("planning a tier replay (D-cn, reading 247(6))", () => {
     const path = join(s.root, routingReplayPath(LOW_MID));
     const before = await stat(path);
     const text = await readFile(path, "utf8");
-    await lookbackRoutingStep({
+    await routingReplayStep({
       table: DCM,
       projectRoot: s.root,
       history,
@@ -600,6 +754,7 @@ describe("planning a tier replay (D-cn, reading 247(6))", () => {
       vtcHome: s.home,
       pace: PACE,
       trialBudget: 24,
+      replayEvents: s.trials.events,
     });
     expect(await readFile(path, "utf8")).toBe(text);
     expect((await stat(path)).mtimeMs).toBe(before.mtimeMs);
@@ -691,7 +846,7 @@ describe("grading a tier replay (RoutingReplayResult)", () => {
     expect(partial.complete && partial.result.cost_delta_pct).toBeNull();
   });
 
-  it("names the trials that did not run on their arm's tier", () => {
+  it("tells the trials that ran on their arm's tier from those that did not", () => {
     const log = new RunLog();
     const ref = (task: string, tier?: ModelTier) => ({
       proposal: MID_LOW,
@@ -710,16 +865,30 @@ describe("grading a tier replay (RoutingReplayResult)", () => {
     });
     // no arm tier: core ran it on the recorded tier, as a prompt replay
     log.dispatch("engineer", { task: "T-1", tier: "mid", replay: ref("r1:untiered") });
-    // no dispatched tier (a log from before 5.4.0) says nothing
+    // no dispatched tier: a tier replay is 5.7.0 or later, so this is never trusted
     log.dispatch("engineer", { task: "T-1", replay: ref("r1:unknown", "low") });
+    log.dispatch("engineer", {
+      task: "T-1",
+      tier: "low",
+      modelFallback: { requested: "claude-haiku-5", reason: "model_refused" },
+      replay: ref("r1:fallback", "low"),
+    });
     // another replay's trial is not this one's
     log.dispatch("engineer", {
       task: "T-1",
       tier: "top",
       replay: { ...ref("r1:theirs", "low"), proposal: LOW_MID },
     });
-    expect([...routingReplayOffTier(log.events, MID_LOW)].sort()).toEqual(
-      ["r1:clamped\nb\n1", "r1:other\nb\n1", "r1:untiered\nb\n1"].sort(),
+    const tiers = routingReplayTrialTiers(log.events, MID_LOW);
+    expect([...tiers.onTier]).toEqual(["r1:ok\nb\n1"]);
+    expect([...tiers.offTier].sort()).toEqual(
+      [
+        "r1:clamped\nb\n1",
+        "r1:fallback\nb\n1",
+        "r1:other\nb\n1",
+        "r1:unknown\nb\n1",
+        "r1:untiered\nb\n1",
+      ].sort(),
     );
   });
 

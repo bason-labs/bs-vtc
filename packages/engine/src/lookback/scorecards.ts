@@ -37,7 +37,7 @@ import {
 } from "@vtc/shared";
 import { join } from "node:path";
 import { isRoleFailure } from "./attribution.js";
-import { readTextIfExists, writeAtomic } from "./files.js";
+import { readTextIfExists, writeRepoFileAtomic } from "./files.js";
 import { buildTraces, traceRef, type LockedShaFor, type Trace } from "./traces.js";
 
 export type MetricValue = NonNullable<Scorecard["metrics"][ScorecardMetricId]>;
@@ -350,8 +350,9 @@ export const writeScorecards = async (
   const paths: string[] = [];
   for (const card of cards) {
     const path = scorecardPath(card.prompt.role, card.prompt.host, card.prompt.effective_sha256);
-    await writeAtomic(
-      join(projectRoot, path),
+    await writeRepoFileAtomic(
+      projectRoot,
+      path,
       `${JSON.stringify(ScorecardSchema.parse(card), null, 2)}\n`,
     );
     paths.push(path);
@@ -363,6 +364,10 @@ export const writeScorecards = async (
       ],
     };
   }
-  await writeAtomic(indexPath, `${JSON.stringify(ScorecardIndexSchema.parse(index), null, 2)}\n`);
+  await writeRepoFileAtomic(
+    projectRoot,
+    LOOKBACK_REPO.scorecardIndex,
+    `${JSON.stringify(ScorecardIndexSchema.parse(index), null, 2)}\n`,
+  );
   return paths;
 };

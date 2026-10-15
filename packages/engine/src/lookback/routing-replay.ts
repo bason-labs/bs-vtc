@@ -11,8 +11,11 @@
  *   (`LOOKBACK_HOME.replayTrialsFile`, which no role may write) with the arm's `tier`, and the one
  *   prompt version as both `baseline` and `candidate` ({@link recordRoutingReplayTrial}), so a
  *   replay continues across RETROs within the D-cq pace, and a new prompt version or grader bundle
- *   starts it over. A row counts only for the trial of its arm's tier.
- * - **Grade.** Once every planned trial has a row, {@link assembleRoutingReplay} grades it like a
+ *   starts it over. A row counts only for the trial of its arm's tier; that tier is the one the
+ *   caller names, not one the ledger saw the trial run on, so where each trial ran comes from the
+ *   trials' own events ({@link routingReplayTrialTiers}).
+ * - **Grade.** Once every planned trial has a row (and the routing step has seen each one's
+ *   dispatch on its arm's tier), {@link assembleRoutingReplay} grades it like a
  *   prompt replay: `replayVerdict`'s paired sign test of arm `b` against arm `a`, with the A/A noise
  *   floor cached for the prompt (0 when none: a tier replay runs no A/A arm), `tokens_delta_pct`
  *   from the ledger's tokens and `cost_delta_pct` from the trials' reported costs where every trial
@@ -36,7 +39,7 @@ import {
   type VtcEvent,
 } from "@vtc/shared";
 import { join } from "node:path";
-import { readRoleWrittenText, writeAtomic } from "./files.js";
+import { readRoleWrittenText, writeRepoFileAtomic } from "./files.js";
 import {
   recordReplayInfra,
   recordReplayTrial,
@@ -136,7 +139,9 @@ export type RoutingTrialRecord =
 
 /**
  * Keeps one tier replay trial's outcome in the replay ledger (D-cg, reading 247(6)): the arm's tier
- * on the row, and the prompt version as both baseline and candidate.
+ * on the row, and the prompt version as both baseline and candidate. The row says which trial it
+ * grades, not where it ran: the routing step grades a replay only when the trials' events show
+ * each ran on its arm's tier ({@link routingReplayTrialTiers}).
  */
 export const recordRoutingReplayTrial = async (
   vtcHome: string,
@@ -200,33 +205,44 @@ export const routingReplayCosts = (
   return costs;
 };
 
+/** Where the trials of one tier replay ran, by trial key (`replayTrialKey`). */
+export interface RoutingReplayTrialTiers {
+  /** Trials with a dispatch on their arm's tier, unclamped and on the tier's own model. */
+  readonly onTier: ReadonlySet<string>;
+  /** Trials with a dispatch anywhere else (see {@link routingReplayTrialTiers}). */
+  readonly offTier: ReadonlySet<string>;
+}
+
 /**
- * Pure: the trials of tier replay `proposal` that did not run on their arm's tier, by trial key
- * (`replayTrialKey`), from the replay trials' own events: a dispatch whose `replay.tier` is absent
- * (it ran on the recorded tier, as a prompt replay does), whose `tier` differs from it, that the
- * project's bounds moved (`tier_clamped`) or that ran on the host's default model
- * (`model_fallback`, D-cx). Such a trial measures another tier than the one its arm compares, so
- * the replay cannot be graded. A dispatch with no `tier` (a log from before 5.4.0) says nothing.
+ * Pure: where the trials of tier replay `proposal` ran, from the replay trials' own events
+ * (`role.dispatched` with `replay.proposal`). A dispatch is off its arm's tier when its
+ * `replay.tier` is absent (it ran on the recorded tier, as a prompt replay does), when it reports no
+ * `tier` (a tier replay is 5.7.0 or later, so a dispatch without one is an anomaly, never trusted),
+ * when its `tier` differs from the arm's, when the project's bounds moved it (`tier_clamped`) or
+ * when it ran on the host's default model (`model_fallback`, D-cx). Such a trial measures another
+ * tier than the one its arm compares. The ledger cannot tell (its row carries the arm's tier the
+ * caller names), so these events are what a tier replay is graded on: a trial with no on-tier
+ * dispatch among them is not known to have run on its arm's tier.
  */
-export const routingReplayOffTier = (
+export const routingReplayTrialTiers = (
   events: readonly VtcEvent[],
   proposal: string,
-): Set<string> => {
-  const off = new Set<string>();
+): RoutingReplayTrialTiers => {
+  const onTier = new Set<string>();
+  const offTier = new Set<string>();
   for (const event of events) {
     if (!isEventOfType(event, "role.dispatched")) continue;
     const data = readEventData(event);
     const ref = data.replay;
-    if (ref?.proposal !== proposal || data.tier === undefined) continue;
-    if (
-      ref.tier === undefined ||
-      data.tier !== ref.tier ||
-      data.tier_clamped === true ||
-      data.model_fallback !== undefined
-    )
-      off.add(replayTrialKey(ref));
+    if (ref?.proposal !== proposal) continue;
+    const on =
+      ref.tier !== undefined &&
+      data.tier === ref.tier &&
+      data.tier_clamped !== true &&
+      data.model_fallback === undefined;
+    (on ? onTier : offTier).add(replayTrialKey(ref));
   }
-  return off;
+  return { onTier, offTier };
 };
 
 const meanOf = (xs: readonly number[]): number =>
@@ -368,6 +384,10 @@ export const writeRoutingReplayResult = async (
   // the path is in the repo: a symlink, a device or an oversized file there is never the result
   const existing = await readRoleWrittenText(full, RESULT_MAX_BYTES);
   if (existing.kind === "text" && sameGrade(existing.text, result)) return { path, written: false };
-  await writeAtomic(full, `${JSON.stringify(RoutingReplayResultSchema.parse(result), null, 2)}\n`);
+  await writeRepoFileAtomic(
+    projectRoot,
+    path,
+    `${JSON.stringify(RoutingReplayResultSchema.parse(result), null, 2)}\n`,
+  );
   return { path, written: true };
 };
