@@ -830,6 +830,19 @@ describe("Codex spawnRole", () => {
     await adapter.dispose();
   });
 
+  it("hands the run's request to the outcome: a refusal on stderr naming the id asked for ends model_refused (D-cx)", async () => {
+    const { spawner, processes } = codexFakeSpawner();
+    const adapter = createCodexAdapter({ spawner, scratchDir: scratch() });
+    const spawned = await adapter.spawnRole(request());
+    if (spawned.dispatch !== "headless") throw new Error("expected a headless run");
+    const proc = processes[0]!;
+    proc.writeStderr("Error: model 'engine-model-id' is not available on your current plan\n");
+    proc.exit(1);
+    const outcome = HostOutcomeSchema.parse(await spawned.run.wait());
+    expect(outcome).toMatchObject({ kind: "error", retryable: true, cause: "model_refused" });
+    await adapter.dispose();
+  });
+
   it("a resumed run is supervised by the request's idle timeout and ends with cause idle (AD-25 rule 4)", async () => {
     const { spawner, processes } = codexFakeSpawner({
       onSpawn: (p) => {

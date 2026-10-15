@@ -261,11 +261,23 @@ const doneOutcome = (s: CodexScan): HostOutcome => ({
   cost_usd: null,
 });
 
-const outcomeOf = (s: CodexScan, endedAt: string | null = null): HostOutcome | null => {
+/** `readsRefusal`: whether a failed turn may read as a model refusal (see `failureOutcome`). */
+const outcomeOf = (
+  s: CodexScan,
+  endedAt: string | null = null,
+  readsRefusal = true,
+): HostOutcome | null => {
   if (s.terminal === null) return null;
-  return s.terminal === "completed" ? doneOutcome(s) : failureOutcome(s, s.terminal, true, endedAt);
+  return s.terminal === "completed"
+    ? doneOutcome(s)
+    : failureOutcome(s, s.terminal, true, endedAt, readsRefusal);
 };
 
+/**
+ * The pure reader, which has no request: it reads refusal wording on the stream as a model
+ * refusal whatever the run asked for. A finished run's outcome comes from
+ * `codexOutcomeAfterExit`, which counts a refusal only when the run asked for a model id.
+ */
 export const parseCodexEvents = (lines: readonly string[]): ParsedStream => {
   const s = scan(lines);
   return {
@@ -284,8 +296,10 @@ export const parseCodexEvents = (lines: readonly string[]): ParsedStream => {
  * launcher's stop cause); else a limit or sign-in signal in its last `error` event or on stderr;
  * else an `error` saying why the process ended: the launcher's stop (`timeout`, `idle`,
  * `killed`), a kill from outside (`killed`) or a bare exit (`exit_code`). `request`: the run's
- * own request; a refusal read from stderr, which is free-form, counts only when it names the
- * model id the run asked for (D-cx), so a run without one never reads a refusal there.
+ * own request. A refusal is "the host refused the model id the run asked for" (D-cx, spine §5
+ * reading 244), so a run that asked for no id (the engine's retry on the host default, or a tier
+ * without an id) never reads one: refusal wording on its stream is an ordinary error. A refusal
+ * read from stderr, which is free-form, counts only when it also names that id.
  */
 export const codexOutcomeAfterExit = (
   lines: readonly string[],
@@ -293,14 +307,15 @@ export const codexOutcomeAfterExit = (
   request?: Pick<SpawnRoleRequest, "model">,
 ): HostOutcome => {
   const s = scan(lines);
-  const outcome = outcomeOf(s, exit.endedAt);
+  const requested = request?.model.model;
+  const askedForId = requested !== undefined;
+  const outcome = outcomeOf(s, exit.endedAt, askedForId);
   if (outcome !== null) return withStopCause(outcome, exit);
   if (exit.error !== null) return spawnFailure(CODEX_BINARY, exit.error);
   const lastError =
-    s.lastError === null ? null : failureOutcome(s, s.lastError, true, exit.endedAt);
+    s.lastError === null ? null : failureOutcome(s, s.lastError, true, exit.endedAt, askedForId);
   if (lastError !== null && decides(lastError)) return lastError;
-  const requested = request?.model.model;
-  if (!s.worked && requested !== undefined && isModelRefusalText(exit.stderrTail, requested)) {
+  if (!s.worked && askedForId && isModelRefusalText(exit.stderrTail, requested)) {
     return modelRefused(s, exit.stderrTail);
   }
   const message = describeExit(CODEX_BINARY, exit, "before the turn finished");

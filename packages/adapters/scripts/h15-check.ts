@@ -4,9 +4,12 @@
  * refusal probe (reading 244). Opt-in, never a test, never in `pnpm verify` or CI, under D-cl's
  * rules (reading 206): it reads no credential (no `auth.json`, no keychain, no `~/.claude`
  * credential file; sign-in is checked only with `claude auth status --json` / `codex login
- * status`), passes no bypass or disallowed flag (AD-9, AD-25), never logs the user out and never
- * changes the real `~/.codex` or `~/.claude`: Codex probes run `--ephemeral`, Claude probes
- * `--no-session-persistence`, and nothing writes a settings file outside a temp directory.
+ * status`), passes no bypass or disallowed flag (AD-9, AD-25), never logs the user out and changes
+ * no settings or sign-in of the real `~/.codex` or `~/.claude`: Codex probes run `--ephemeral` and
+ * Claude probes `--no-session-persistence`, so no session is saved, and nothing writes a settings
+ * file outside a temp directory. A host may still keep its own bookkeeping there (logs, caches,
+ * per-project state), as any run of it does. Each host child gets the environment a role run's
+ * child gets (`childEnvironment`, AD-25 rule 4).
  *
  *   pnpm --filter @vtc/adapters live:h15 <check> --out <dir> [--model <id>]
  *
@@ -75,7 +78,7 @@ import {
   type HostOutcome,
   type SpawnRoleRequest,
 } from "@vtc/shared";
-import { createNodeSpawner, type Spawner } from "../src/common/process.js";
+import { childEnvironment, createNodeSpawner, type Spawner } from "../src/common/process.js";
 import { createCodexAdapter } from "../src/index.js";
 import { parseH15Args, type H15Args } from "./h15-check-args.js";
 import {
@@ -110,6 +113,15 @@ const version = (binary: string): string => {
     return "unknown";
   }
 };
+
+/**
+ * The environment a probe host child gets: the one a role run's child gets (AD-25 rule 4,
+ * `childEnvironment`), so no `ANTHROPIC_API_KEY`, `CLAUDE_CODE_OAUTH_TOKEN`, `NODE_OPTIONS` or
+ * `GIT_*` in the owner's shell changes what a probe measures (e.g. the sign-in `claude-strict`
+ * checks), plus `added`.
+ */
+const probeEnv = (added: Readonly<Record<string, string>> = {}): Record<string, string> =>
+  childEnvironment(process.env, added);
 
 const summarize = (args: H15Args, name: string, summary: Record<string, unknown>): void => {
   const text = `${JSON.stringify(summary, null, 2)}\n`;
@@ -244,7 +256,7 @@ const codexSignedOut = async (args: H15Args): Promise<void> => {
     const status = (() => {
       try {
         const stdout = execFileSync("codex", ["login", "status"], {
-          env: { ...process.env, CODEX_HOME: codexHome },
+          env: probeEnv({ CODEX_HOME: codexHome }),
           encoding: "utf8",
           stdio: ["ignore", "pipe", "pipe"],
           timeout: 20_000,
@@ -317,7 +329,11 @@ const codexLimit = async (args: H15Args): Promise<void> => {
 const claudeLogin = (): { loggedIn: unknown; authMethod: unknown; subscriptionType: unknown } => {
   try {
     const parsed = JSON.parse(
-      execFileSync("claude", ["auth", "status", "--json"], { encoding: "utf8", timeout: 20_000 }),
+      execFileSync("claude", ["auth", "status", "--json"], {
+        env: probeEnv(),
+        encoding: "utf8",
+        timeout: 20_000,
+      }),
     ) as Record<string, unknown>;
     return {
       loggedIn: parsed.loggedIn,
@@ -341,7 +357,7 @@ const runClaude = (
     refuseBypass(command);
     const child = spawn(command.command, [...command.args], {
       cwd,
-      env: process.env,
+      env: probeEnv(),
       stdio: ["pipe", "pipe", "pipe"],
     });
     let stdout = "";

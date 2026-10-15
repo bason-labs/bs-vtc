@@ -118,7 +118,12 @@ H-15 and D-cx live-check recordings (2026-10-15, Claude Code 2.1.299, codex-cli 
 readings 234, 239 and 244). Made with `pnpm --filter @vtc/adapters live:h15 <check> --out <dir>`
 (`scripts/h15-check.ts`) or `live:dcl claude-arm` (`scripts/dcl-check.ts`), redacted the same
 way, and read before they were copied here. Codex probes ran `--ephemeral` and Claude probes
-`--no-session-persistence`, so nothing was saved in the owner's `~/.codex` or `~/.claude`.
+`--no-session-persistence`, so no session was saved in the owner's `~/.codex` or `~/.claude`, and
+no settings or sign-in there were changed (the hosts may still have written their own logs, caches
+or per-project state, as any run does). These Claude probes ran with the owner's whole shell
+environment; the `claude-strict` and `claude-usage-unit` runs recorded `apiKeySource` `"none"`
+(the subscription sign-in, no API key). The
+script now gives every probe the environment a role run gets (`childEnvironment`, AD-25 rule 4).
 
 | File                                       | What it shows                                                                                                                                                                                                                                                                                                              |
 | ------------------------------------------ | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
