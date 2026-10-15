@@ -2,6 +2,7 @@
 import type { HostAdapter, HostCapabilities, HostId } from "@vtc/shared";
 import { claudeCodeCapabilities, createClaudeCodeAdapter } from "./claude-code/index.js";
 import { codexCapabilities, createCodexAdapter } from "./codex/index.js";
+import type { Spawner } from "./common/process.js";
 
 export {
   claudeCodeCapabilities,
@@ -49,6 +50,12 @@ export interface AdapterFactoryOptions {
    * do. Default: none.
    */
   readonly envPassthrough?: readonly string[];
+  /**
+   * Tests only: starts host processes instead of the real spawner, so a test that runs the
+   * factory-built adapter (the safety contract, `install`) never starts a real host binary. The
+   * cli never passes it.
+   */
+  readonly spawner?: Spawner;
 }
 
 /**
@@ -66,11 +73,13 @@ export const ADAPTER_FACTORIES: Readonly<
       ...(options.pluginDir === undefined ? {} : { pluginDir: options.pluginDir }),
       ...(options.vtcHome === undefined ? {} : { vtcHome: options.vtcHome }),
       ...(options.envPassthrough === undefined ? {} : { envPassthrough: options.envPassthrough }),
+      ...(options.spawner === undefined ? {} : { spawner: options.spawner }),
     }),
   codex: (options = {}) =>
     createCodexAdapter({
       ...(options.vtcVersion === undefined ? {} : { clientVersion: options.vtcVersion }),
       ...(options.vtcHome === undefined ? {} : { vtcHome: options.vtcHome }),
       ...(options.envPassthrough === undefined ? {} : { envPassthrough: options.envPassthrough }),
+      ...(options.spawner === undefined ? {} : { spawner: options.spawner }),
     }),
 };

@@ -1,0 +1,114 @@
+{
+  "codexVersion": "codex-cli 0.162.1",
+  "date": "2026-10-15",
+  "how": "Offline, in a temporary CODEX_HOME (never ~/.codex), no login and no model call; the marketplace is the one in plugin-add.json with dist/codex-plugin at ./vtc. Then the adapter's own install (createCodexAdapter({ codexHome }).install, real codex) twice into a temporary home.",
+  "steps": [
+    {
+      "argv": "plugin marketplace add <marketplace> --json",
+      "exit": 0,
+      "stdout": {
+        "marketplaceName": "vtc-local",
+        "installedRoot": "<marketplace>",
+        "alreadyAdded": false
+      }
+    },
+    {
+      "argv": "plugin add vtc@vtc-local --json",
+      "exit": 0,
+      "stdout": {
+        "pluginId": "vtc@vtc-local",
+        "name": "vtc",
+        "marketplaceName": "vtc-local",
+        "version": "0.1.0",
+        "installedPath": "<codex-home>/plugins/cache/vtc-local/vtc/0.1.0",
+        "authPolicy": "ON_INSTALL"
+      }
+    },
+    {
+      "note": "a file added to <marketplace>/vtc, the version unchanged"
+    },
+    {
+      "argv": "plugin marketplace add <marketplace> --json",
+      "exit": 0,
+      "stdout": {
+        "marketplaceName": "vtc-local",
+        "installedRoot": "<marketplace>",
+        "alreadyAdded": true
+      }
+    },
+    {
+      "argv": "plugin add vtc@vtc-local --json",
+      "exit": 0,
+      "stdout": {
+        "pluginId": "vtc@vtc-local",
+        "name": "vtc",
+        "marketplaceName": "vtc-local",
+        "version": "0.1.0",
+        "installedPath": "<codex-home>/plugins/cache/vtc-local/vtc/0.1.0",
+        "authPolicy": "ON_INSTALL"
+      },
+      "cacheHasAddedFile": true
+    },
+    {
+      "argv": "plugin marketplace add <marketplace-2> --json",
+      "exit": 1,
+      "stderr": "Error: marketplace 'vtc-local' is already added from a different source; remove it before adding this source"
+    },
+    {
+      "argv": "plugin marketplace remove vtc-local",
+      "exit": 0,
+      "stdout": "Removed marketplace `vtc-local`.",
+      "configTomlAfter": "[plugins.\"vtc@vtc-local\"]\nenabled = true\n",
+      "pluginListAfter": "No marketplace plugins found."
+    },
+    {
+      "argv": "plugin marketplace add <marketplace-2> --json",
+      "exit": 0,
+      "stdout": {
+        "marketplaceName": "vtc-local",
+        "installedRoot": "<marketplace-2>",
+        "alreadyAdded": false
+      }
+    },
+    {
+      "argv": "plugin add vtc@vtc-local --json",
+      "exit": 0,
+      "pluginListAfter": "vtc@vtc-local  installed, enabled  0.1.0    <marketplace-2>/vtc"
+    },
+    {
+      "argv": "mcp list --json",
+      "exit": 0,
+      "note": "plugin installed, no [mcp_servers.vtc] in config.toml",
+      "servers": [
+        {
+          "name": "vtc",
+          "enabled": true,
+          "command": "vtc",
+          "args": ["engine", "--mcp", "--host", "codex"],
+          "env": ["PLUGIN_DATA", "PLUGIN_ROOT"],
+          "cwd": "<codex-home>/plugins/cache/vtc-local/vtc/0.1.0"
+        }
+      ]
+    },
+    {
+      "argv": "mcp list --json",
+      "exit": 0,
+      "note": "plugin installed and the installer's [mcp_servers.vtc] appended to config.toml",
+      "servers": [
+        {
+          "name": "vtc",
+          "enabled": true,
+          "command": "vtc",
+          "args": ["engine", "--mcp", "--host", "codex"],
+          "env": null,
+          "cwd": null
+        }
+      ]
+    }
+  ],
+  "adapterInstall": {
+    "rounds": 2,
+    "bothRegistered": true,
+    "configToml": "[marketplaces.vtc-local]\nsource_type = \"local\"\nsource = \"<home>/.vtc/plugins/codex-marketplace\"\n\n[plugins.\"vtc@vtc-local\"]\nenabled = true\n"
+  }
+}

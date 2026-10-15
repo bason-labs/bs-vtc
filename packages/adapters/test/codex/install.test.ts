@@ -12,6 +12,7 @@ import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import { createCodexAdapter } from "../../src/index.js";
 import { upsertMcpServerTable } from "../../src/codex/install.js";
+import { codexFakeSpawner } from "../support/fake-spawner.js";
 import { writeFixturePlugin } from "../support/plugin-fixture.js";
 
 const dirs: string[] = [];
@@ -30,6 +31,9 @@ const setup = () => {
   writeFixturePlugin("codex", pluginDir);
   return { home, projectRoot, pluginDir };
 };
+/** An adapter whose `codex plugin …` commands a fake answers (never the real binary). */
+const codexAdapter = () =>
+  createCodexAdapter({ spawner: codexFakeSpawner().spawner, codexHome: "/fake/codex-home" });
 
 const TABLE = [
   "# Managed by `vtc install`: the vtc engine bridge (rewritten on install).",
@@ -42,7 +46,7 @@ const TABLE = [
 describe("Codex install (AD-6 rule 5, AD-16 rules 3–4)", () => {
   it("project scope: copies the compiled agents to .codex/agents and registers the engine", async () => {
     const env = setup();
-    const result = await createCodexAdapter().install({ ...env, scope: "project" });
+    const result = await codexAdapter().install({ ...env, scope: "project" });
     const agents = join(env.projectRoot, ".codex", "agents");
     const config = join(env.projectRoot, ".codex", "config.toml");
     expect(readdirSync(agents).sort()).toEqual(["vtc-engineer.toml", "vtc-qa-judge.toml"]);
@@ -51,19 +55,30 @@ describe("Codex install (AD-6 rule 5, AD-16 rules 3–4)", () => {
     );
     expect(readFileSync(config, "utf8")).toBe(TABLE);
     const skill = join(env.projectRoot, ".agents", "skills", "vtc-vtc", "SKILL.md");
-    expect([...result.written].sort()).toEqual(
-      [join(agents, "vtc-engineer.toml"), join(agents, "vtc-qa-judge.toml"), config, skill].sort(),
+    const market = join(env.home, ".vtc", "plugins", "codex-marketplace");
+    expect(
+      result.written.filter((path) => !path.startsWith(join(market, "vtc") + "/")).sort(),
+    ).toEqual(
+      [
+        join(agents, "vtc-engineer.toml"),
+        join(agents, "vtc-qa-judge.toml"),
+        config,
+        skill,
+        join(market, ".agents", "plugins", "marketplace.json"),
+      ].sort(),
     );
+    expect(result.written).toContain(join(market, "vtc", "plugin.json"));
     expect(existsSync(join(env.home, ".codex"))).toBe(false);
     expect(result.notes.join(" ")).toContain("trust this project");
   });
 
   it("user scope writes under the injected home only", async () => {
     const env = setup();
-    const result = await createCodexAdapter().install({ ...env, scope: "user" });
+    const result = await codexAdapter().install({ ...env, scope: "user" });
     for (const path of result.written)
       expect(
-        path.startsWith(join(env.home, ".codex")) || path.startsWith(join(env.home, ".agents")),
+        [".codex", ".agents", ".vtc"].some((dir) => path.startsWith(join(env.home, dir) + "/")),
+        path,
       ).toBe(true);
     expect(existsSync(join(env.projectRoot, ".codex"))).toBe(false);
   });
@@ -75,7 +90,7 @@ describe("Codex install (AD-6 rule 5, AD-16 rules 3–4)", () => {
     writeFileSync(join(skills, "mine", "SKILL.md"), "---\nname: mine\ndescription: x\n---\n");
     mkdirSync(join(skills, "vtc-gone"), { recursive: true });
     writeFileSync(join(skills, "vtc-gone", ".vtc-generated"), "");
-    const result = await createCodexAdapter().install({ ...env, scope: "project" });
+    const result = await codexAdapter().install({ ...env, scope: "project" });
     // learn.chatgpt.com/docs/build-skills: $REPO_ROOT/.agents/skills/<skill>/SKILL.md
     expect(readFileSync(join(skills, "vtc-vtc", "SKILL.md"), "utf8")).toBe(
       readFileSync(join(env.pluginDir, "skills", "vtc", "SKILL.md"), "utf8"),
@@ -83,13 +98,13 @@ describe("Codex install (AD-6 rule 5, AD-16 rules 3–4)", () => {
     expect(existsSync(join(skills, "vtc-vtc", ".vtc-generated"))).toBe(true);
     expect(existsSync(join(skills, "mine", "SKILL.md"))).toBe(true);
     expect(existsSync(join(skills, "vtc-gone"))).toBe(false);
-    // D-bn (spine §5 reading 168): the plugin is to be registered, hooks included; until this
-    // install does it, the notes say so and the skills stay where Codex loads skills
-    const registration = result.notes.find((note) => note.includes("not registered with Codex"));
-    expect(registration).toMatch(/not registered with Codex yet/);
-    expect(registration).toMatch(/hooks/);
-    expect(registration).toMatch(/desktop app/);
-    expect(registration).toContain(skills);
+    // D-bn (spine §5 readings 168, 213): the plugin is registered, hooks included, and the
+    // skills stay placed where Codex loads skills
+    expect(result.notes.join(" ")).not.toMatch(/not registered/);
+    const registration = result.notes.find((note) => note.startsWith("Registered the vtc plugin"));
+    expect(registration).toMatch(/hooks run in the Codex desktop app once you trust them/);
+    expect(registration).toMatch(/headless role runs never load it/);
+    expect(result.notes.join(" ")).toContain(skills);
     // the note a user reads carries no internal decision id
     expect(result.notes.join(" ")).not.toMatch(/\bD-[a-z]{1,3}\b/u);
     // H-1 (spine §5 reading 99, replacing F7's "no roles in v1"): the engine runs a Codex Lead's
@@ -126,7 +141,7 @@ describe("Codex install (AD-6 rule 5, AD-16 rules 3–4)", () => {
       "",
     ].join("\n");
     writeFileSync(config, mine);
-    const adapter = createCodexAdapter();
+    const adapter = codexAdapter();
     await adapter.install({ ...env, scope: "user" });
     const once = readFileSync(config, "utf8");
     expect(once).toBe(
@@ -156,7 +171,7 @@ describe("Codex install (AD-6 rule 5, AD-16 rules 3–4)", () => {
     );
     writeFileSync(join(agents, "vtc-mine.toml"), 'name = "vtc-mine"\n');
     writeFileSync(join(agents, "reviewer.toml"), 'name = "reviewer"\n');
-    const result = await createCodexAdapter().install({ ...env, scope: "project" });
+    const result = await codexAdapter().install({ ...env, scope: "project" });
     expect(readdirSync(agents).sort()).toEqual([
       "reviewer.toml",
       "vtc-engineer.toml",
@@ -169,12 +184,12 @@ describe("Codex install (AD-6 rule 5, AD-16 rules 3–4)", () => {
   it("refuses a missing plugin or one for another host", async () => {
     const env = setup();
     await expect(
-      createCodexAdapter().install({ ...env, pluginDir: temp("vtc-empty-"), scope: "user" }),
+      codexAdapter().install({ ...env, pluginDir: temp("vtc-empty-"), scope: "user" }),
     ).rejects.toThrow(/missing vtc-manifest.json/);
     const claude = temp("vtc-claude-plugin-");
     writeFixturePlugin("claude-code", claude);
     await expect(
-      createCodexAdapter().install({ ...env, pluginDir: claude, scope: "user" }),
+      codexAdapter().install({ ...env, pluginDir: claude, scope: "user" }),
     ).rejects.toThrow(/claude-code plugin/);
   });
 });

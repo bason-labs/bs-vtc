@@ -83,8 +83,8 @@
  *   (`--strict-mcp-config`). Here the adapter lists the servers a run would load before every
  *   start or resume and the command turns each one off by name ({@link CodexCommandOptions}
  *   `.mcpServersOff`, `mcp-servers.ts`); plugins go off with the features above, since a
- *   plugin's servers have no name to turn off. Codex still reports `safeHostWeb` false (see
- *   `index.ts`) until the §7 H-3 row's open probe passes.
+ *   plugin's servers have no name to turn off (the registered vtc plugin's hooks and server
+ *   included). Codex reports `safeHostWeb` false (see `index.ts`; D-cp, spine §5 reading 222).
  * - `codex exec` has no agent flag: a headless run gets no compiled role instructions
  *   (`developer_instructions` of `.codex/agents/vtc-*.toml`), so the role rests on the prompt
  *   (the task pack). Engine core carries the role itself (spine §5 reading 145): the compiled
