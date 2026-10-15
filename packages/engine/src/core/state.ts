@@ -8,6 +8,7 @@ import {
   HOST_IDS,
   isEventOfType,
   readEventData,
+  SESSION_DEFAULT_MODEL,
   type Escalation,
   type Feature,
   type Finding,
@@ -16,6 +17,7 @@ import {
   type HostId,
   type IntentContract,
   type MergeLevel,
+  type ModelFallback,
   type ModelTier,
   type RoleExit,
   type Run,
@@ -68,6 +70,19 @@ export const reportedFailureMessage = (message: string): string => {
   ).slice(0, 2000);
 };
 
+/**
+ * Whether a run the host refused its model for ends as a model refusal (D-cx, reading 244): it
+ * passed a model flag, it is not already the fallback (a second refusal is an ordinary error), and
+ * it is no replay trial (a trial measures its tier; off it, it measures nothing).
+ */
+export const modelRefusable = (
+  run: Pick<RoleRunRecord, "model" | "modelFallback" | "replayTrial">,
+): boolean =>
+  run.modelFallback === undefined &&
+  run.replayTrial !== true &&
+  run.model !== SESSION_DEFAULT_MODEL &&
+  run.model !== "unknown";
+
 /** One role run (a `role.dispatched` and what became of it). */
 export interface RoleRunRecord {
   readonly action_id: string;
@@ -99,6 +114,12 @@ export interface RoleRunRecord {
   sessionRef: SessionRef | null;
   tokens: TokenUsage | null;
   costUsd: number | null;
+  /**
+   * What the run counts toward the budgets (H-12, spine §5 reading 236): `cost_usd`, or for a
+   * run whose model has no known price `role.submitted.budget_usd` (its tokens at the host's price
+   * ceiling); `null` when nothing is known.
+   */
+  budgetUsd: number | null;
   rejection?: { reason: string; issues: string[] };
   /**
    * A failed run the engine or the human stopped, not the role's failure: a resume superseded it
@@ -116,6 +137,20 @@ export interface RoleRunRecord {
    * `killed` after a `run.paused`): engine facts only, so replay sees the same.
    */
   killedByPause?: boolean;
+  /**
+   * The dispatch passes no model flag because the host refused the one it resolved on an earlier
+   * attempt (`role.dispatched.model_fallback`, D-cx; spine §5 reading 244).
+   */
+  readonly modelFallback?: ModelFallback;
+  /** A Lookback replay trial (`role.dispatched.purpose` `lookback_replay`, reading 177). */
+  readonly replayTrial?: boolean;
+  /**
+   * The host refused the run's model before any work (`headless.ended` with cause
+   * `model_refused`, D-cx): the run ends stopped, neither a failure nor a fix round, and the step
+   * is dispatched once more without a model flag. Only a run with a model flag that is not itself
+   * the fallback, and no replay trial (its tier is what it measures), ends this way.
+   */
+  modelRefused?: boolean;
 }
 
 export interface GateReportRecord {
@@ -399,12 +434,15 @@ export const applyEvent = (state: RunState, event: VtcEvent): void => {
       agent: data.agent,
       pack: data.pack,
       resume: data.resume,
+      ...(data.model_fallback === undefined ? {} : { modelFallback: data.model_fallback }),
+      ...(data.purpose === "lookback_replay" ? { replayTrial: true } : {}),
       status: "in_flight",
       exit: null,
       verdicts: [],
       sessionRef: null,
       tokens: null,
       costUsd: null,
+      budgetUsd: null,
     });
   } else if (isEventOfType(event, "role.submitted")) {
     const data = readEventData(event);
@@ -418,6 +456,7 @@ export const applyEvent = (state: RunState, event: VtcEvent): void => {
       run.sessionRef = data.session_ref;
       run.tokens = event.tokens ?? null;
       run.costUsd = event.cost_usd ?? null;
+      run.budgetUsd = run.costUsd ?? data.budget_usd ?? null;
     }
   } else if (isEventOfType(event, "role.rejected")) {
     const data = readEventData(event);
@@ -428,6 +467,7 @@ export const applyEvent = (state: RunState, event: VtcEvent): void => {
       run.rejection = { reason: data.reason, issues: data.issues };
       run.tokens = event.tokens ?? null;
       run.costUsd = event.cost_usd ?? null;
+      run.budgetUsd = run.costUsd;
     }
   } else if (isEventOfType(event, "headless.ended")) {
     const data = readEventData(event);
@@ -443,6 +483,13 @@ export const applyEvent = (state: RunState, event: VtcEvent): void => {
       state.tasks.get(run.task)?.status === "parked"
     )
       run.stoppedOnBudget = true;
+    // D-cx (reading 244): the host refused the run's model; the step runs once more without it
+    if (run?.status === "in_flight" && data.cause === "model_refused" && modelRefusable(run)) {
+      run.status = "failed";
+      run.closedSeq = event.seq;
+      run.stopped = true;
+      run.modelRefused = true;
+    }
   } else if (isEventOfType(event, "role.failed")) {
     const data = readEventData(event);
     const run = state.roleRuns.get(data.action_id);
@@ -450,6 +497,7 @@ export const applyEvent = (state: RunState, event: VtcEvent): void => {
       run.status = "failed";
       run.closedSeq = event.seq;
       run.costUsd = event.cost_usd ?? null;
+      run.budgetUsd = run.costUsd;
       if (
         data.message.startsWith(SUPERSEDED_RUN_PREFIX) ||
         run.killedByPause === true ||
@@ -549,7 +597,10 @@ export const applyEvent = (state: RunState, event: VtcEvent): void => {
         run.status = "interrupted";
         run.closedSeq = event.seq;
         // the cost the host reported before the limit (D-at), on the hit that closed the run
-        if (event.cost_usd !== undefined) run.costUsd = event.cost_usd;
+        if (event.cost_usd !== undefined) {
+          run.costUsd = event.cost_usd;
+          run.budgetUsd = event.cost_usd;
+        }
       }
     }
   } else if (isEventOfType(event, "merge.completed")) {

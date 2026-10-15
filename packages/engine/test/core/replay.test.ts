@@ -280,6 +280,8 @@ interface FakeOptions {
   readonly gradeVerdict?: LookbackRetro["gradeVerdict"];
   /** The tier the recorded dispatch ran on (D-cm); absent: a log from before 5.4.0. */
   readonly tier?: LookbackReplayTrial["tier"];
+  /** A tier replay (D-cn): each arm's tier (`LookbackReplayTrial.armTier`). */
+  readonly armTiers?: Readonly<Record<"a" | "b", NonNullable<LookbackReplayTrial["armTier"]>>>;
   /**
    * `automation.skipped` drafts Lookback's plan returns (its limits, `planRetroReplays`); any
    * other type is a planted one core must drop.
@@ -328,6 +330,7 @@ const fakeReplays = (
         base: at,
         ...(options.protectedPaths === undefined ? {} : { protectedPaths: options.protectedPaths }),
         ...(options.tier === undefined ? {} : { tier: options.tier }),
+        ...(options.armTiers === undefined ? {} : { armTier: options.armTiers[arm] }),
       });
       const per = options.perArm ?? 1;
       return Promise.resolve({
@@ -599,6 +602,40 @@ describe("RETRO runs Lookback replays as headless runs (AD-21 rule 6, readings 1
       { model: "haiku", tier: "low", reason: "rule" },
       { model: "haiku", tier: "low", reason: "rule" },
     ]);
+    await h.release();
+  });
+
+  it("runs a tier replay's trial on its arm's tier, whatever the recorded one, and the dispatch says so (D-cn, reading 247(6))", async () => {
+    const { h, trials, reach } = atRetro(["a", "b"], {
+      tier: { tier: "mid", reason: "rule", clamped: false },
+      armTiers: { a: "low", b: "top" },
+      harness: { project: { merge_level: 1, routing: { max_tier: "mid" } } },
+    });
+    await reach();
+    expect(
+      trials.runs.map((t) => ({
+        model: t.dispatched?.model,
+        tier: t.dispatched?.data.tier,
+        reason: t.dispatched?.data.tier_reason,
+        clamped: t.dispatched?.data.tier_clamped,
+        arm: (t.dispatched?.data.replay as { tier?: string } | undefined)?.tier,
+      })),
+    ).toEqual([
+      // the arm's tier holds: the project's max_tier does not move a measured arm
+      { model: "haiku", tier: "low", reason: "rule", clamped: false, arm: "low" },
+      { model: "opus", tier: "top", reason: "rule", clamped: false, arm: "top" },
+    ]);
+    await h.release();
+  });
+
+  it("a prompt replay's dispatch names no arm tier", async () => {
+    const { h, trials, reach } = atRetro(["a"], {
+      tier: { tier: "low", reason: "rule", clamped: false },
+    });
+    await reach();
+    expect(
+      (trials.runs[0]?.dispatched?.data.replay as { tier?: string } | undefined)?.tier,
+    ).toBeUndefined();
     await h.release();
   });
 

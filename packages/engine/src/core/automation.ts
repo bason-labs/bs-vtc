@@ -805,9 +805,17 @@ export const toolShapeUpstreamKey = (shape: CommandShape): string | null =>
       )
     : null;
 
+/** The role-run ends that record the run's shell calls (`command_shapes`). */
+const SHAPED_EVENTS: ReadonlySet<string> = new Set([
+  "role.submitted",
+  "role.rejected",
+  "role.failed",
+]);
+
 /**
  * Pure (D-cs "tool signal"; spine §5 reading 221 (1), spec §13 tool promotion): a shell command
- * shape (`role.submitted.command_shapes`, keyed by {@link toolShapeUpstreamKey}) the roles ran in
+ * shape (`command_shapes` of `role.submitted`, and since 5.7.0 of `role.rejected` and `role.failed`
+ * too, reading 247(9); keyed by {@link toolShapeUpstreamKey}) the roles ran in
  * `TOOL_SIGNAL_MIN_TASKS` or more distinct tasks across the repo's runs raises one `tool` fact. The
  * subject is that key (a program, a subcommand of a known multi-command program and a flag-name
  * hash: never a value, a path or a name of the project) and the only number the task count, so the
@@ -820,7 +828,7 @@ export const toolSignalFacts = (
   const tasks = new Map<string, Set<string>>();
   for (const state of states)
     for (const event of state.events) {
-      if (event.type !== "role.submitted" || event.task === undefined) continue;
+      if (!SHAPED_EVENTS.has(event.type) || event.task === undefined) continue;
       const shapes = (event.data as { command_shapes?: unknown }).command_shapes;
       if (!Array.isArray(shapes)) continue;
       for (const raw of shapes) {

@@ -90,22 +90,21 @@ const row = (over: Partial<FactRow>): FactRow => ({
   ...over,
 });
 
-/** Discover, specify and G1 of a feature run, then the design phase, up to G2. */
-const toG2 = async (
-  h: Harness,
-  options: {
-    readonly hasUi?: boolean;
-    readonly designer?: (action: SpawnAction) => { type: string; path: string }[];
-    /** Later Designer rounds, while the engine dispatches the Designer again (D-bt). */
-    readonly designerAgain?: readonly ((action: SpawnAction) => { type: string; path: string }[])[];
-    /** `new`: DISCOVER runs the Research Analyst (default `existing`). */
-    readonly repo?: "new" | "existing";
-    /** The Architect's architecture artifact (default {@link SPINE}). */
-    readonly spine?: string;
-    /** Security's threat model (default: no SEC-n requirement). */
-    readonly threats?: string;
-  } = {},
-): Promise<ApproveGate> => {
+interface ToDesign {
+  readonly hasUi?: boolean;
+  readonly designer?: (action: SpawnAction) => { type: string; path: string }[];
+  /** Later Designer rounds, while the engine dispatches the Designer again (D-bt). */
+  readonly designerAgain?: readonly ((action: SpawnAction) => { type: string; path: string }[])[];
+  /** `new`: DISCOVER runs the Research Analyst (default `existing`). */
+  readonly repo?: "new" | "existing";
+  /** The Architect's architecture artifact (default {@link SPINE}). */
+  readonly spine?: string;
+  /** Security's threat model (default: no SEC-n requirement). */
+  readonly threats?: string;
+}
+
+/** Discover, specify and G1 of a feature run, then the design phase: the actions it ends with. */
+const toDesign = async (h: Harness, options: ToDesign = {}): Promise<LeadAction[]> => {
   await h.engine.start(
     {
       request: "Password reset",
@@ -183,8 +182,17 @@ const toG2 = async (
     const next = only(actions, "designer");
     actions = (await submitResult(h, next, { exit: "done", artifacts: again(next) })).actions;
   }
-  return gateOf(actions);
+  return actions;
 };
+
+/** {@link toDesign}, up to G2. */
+const toG2 = async (h: Harness, options: ToDesign = {}): Promise<ApproveGate> =>
+  gateOf(await toDesign(h, options));
+
+const packJson = (h: Harness, action: SpawnAction): TaskPack =>
+  TaskPackSchema.parse(
+    JSON.parse(readFileSync(join(h.repo, action.pack.replace(/\.md$/, ".json")), "utf8")),
+  );
 
 const waiveAll = (gate: ApproveGate) => ({
   waived_facts: gate.unverified_facts,
@@ -561,7 +569,12 @@ describe("G2 directions and the DESIGN coverage check (§9.1, §6.1)", () => {
   it("shows each direction with the engine's novelty verdict, and the coverage report in gate.requested", async () => {
     const h = createHarness({ roles: ROLES });
     const seam = noveltySeam(h);
-    const gate = await toG2(h, { hasUi: true, designer: gappyDesigner });
+    // the coverage loop sends the gappy design back to the Designer before G2 shows (H-13)
+    const gate = await toG2(h, {
+      hasUi: true,
+      designer: gappyDesigner,
+      designerAgain: [designerWork],
+    });
     // only a direction with a first viewport is checked, in the project's client scope
     expect(seam.checked).toEqual([
       {
@@ -600,64 +613,87 @@ describe("G2 directions and the DESIGN coverage check (§9.1, §6.1)", () => {
     ]);
     const coverage = {
       reqs_without_component: [],
+      reqs_without_screen: [],
+      screens_without_req: [],
+      components_unregistered: [],
+      ok: true,
+    };
+    expect(ofType(h, "gate.requested").at(-1)?.data.design_coverage).toEqual(coverage);
+    // the Lead shows it too
+    expect(gate.design_coverage).toEqual(coverage);
+    // each check of the loop is logged: the first found the gaps, the second none
+    const checks = ofType(h, "design.coverage_checked").map((e) => e.data);
+    expect(checks.map((c) => [c.check, c.outcome, c.redispatched])).toEqual([
+      [1, "fixing", ["designer"]],
+      [2, "complete", []],
+    ]);
+    expect(checks[0]?.report).toEqual({
+      reqs_without_component: [],
       reqs_without_screen: ["REQ-2"],
       screens_without_req: ["about"],
       components_unregistered: ["icon"],
       ok: false,
-    };
-    expect(ofType(h, "gate.requested").at(-1)?.data.design_coverage).toEqual(coverage);
-    // the Lead shows it too: the approval is refused while it fails (reading 146)
-    expect(gate.design_coverage).toEqual(coverage);
-    await expect(
-      approve(h, gate, { ...waiveAll(gate), design_direction: "signal" }),
-    ).rejects.toThrow(
-      /DESIGN check failed: REQ-2 has no screen; screen about covers no requirement; component icon is not registered/,
-    );
+    });
     await h.release();
   });
 
-  it("checks every requirement is mapped to a component, on a run without UI too (§6.1)", async () => {
+  it("checks every requirement is mapped to an AD or a component, on a run without UI too: a gap goes back to the Architect before G2 (§6.1, H-13)", async () => {
     const h = createHarness({ roles: ROLES });
-    const gate = await toG2(h, {
+    const actions = await toDesign(h, {
       spine: "# Spine\n\n## Requirement map\n\n- REQ-1: the token store\n",
     });
-    expect(gate.design_coverage).toEqual({
+    // no G2: the Architect runs again with the gap
+    expect(actions.some((a) => a.type === "approve_gate")).toBe(false);
+    const architect = only(actions, "architect");
+    expect(packJson(h, architect).coverage_gaps).toEqual({
+      round: 1,
       reqs_without_component: ["REQ-2"],
       reqs_without_screen: [],
       screens_without_req: [],
       components_unregistered: [],
-      ok: false,
     });
-    await expect(approve(h, gate, waiveAll(gate))).rejects.toThrow(
-      /DESIGN check failed: REQ-2 is mapped to no component/,
+    expect(readFileSync(join(h.repo, architect.pack), "utf8")).toMatch(
+      /coverage round: 1 of 3[\s\S]*requirements no AD or component names: REQ-2/,
     );
-    // rejecting G2 with a note sends DESIGN back to the Architect
-    const back = await h.engine.approve(
-      {
-        gates: gate.gates,
-        decision: "reject",
-        frozen: gate.artifacts,
-        waived_facts: [],
-        note: "map REQ-2",
-      },
-      CLAUDE,
+    writeFile(workdir(architect), ".vtc/architecture/spine.md", SPINE);
+    const gate = gateOf(
+      (
+        await submitResult(h, architect, {
+          exit: "done",
+          artifacts: [{ type: "architecture", path: ".vtc/architecture/spine.md" }],
+        })
+      ).actions,
     );
-    expect(only(back.actions, "architect").role).toBe("architect");
+    expect(gate.design_coverage?.ok).toBe(true);
     await h.release();
   });
 
-  it("a UI run whose Designer wrote no screens.yaml fails the check instead of skipping it", async () => {
+  it("counts a REQ that an AD of the architecture names as covered (H-13)", async () => {
     const h = createHarness({ roles: ROLES });
     const gate = await toG2(h, {
+      spine: "# Spine\n\n## AD-1 Token store\n\nCovers REQ-1 and REQ-2 with one table.\n",
+    });
+    expect(gate.design_coverage).toMatchObject({ reqs_without_component: [], ok: true });
+    await h.release();
+  });
+
+  it("a UI run whose Designer wrote no screens.yaml fails the check instead of skipping it: the Designer runs again", async () => {
+    const h = createHarness({ roles: ROLES });
+    const actions = await toDesign(h, {
       hasUi: true,
       designer: (action) => {
         writeFile(workdir(action), ".vtc/design/directions/one.md", "# One\n\nTHESIS: one\n");
         return [{ type: "design_direction", path: ".vtc/design/directions/one.md" }];
       },
     });
-    expect(gate.design_coverage).toMatchObject({
-      screens_problem: expect.stringContaining("screens.yaml") as unknown,
-      ok: false,
+    expect(actions.some((a) => a.type === "approve_gate")).toBe(false);
+    const designer = only(actions, "designer");
+    expect(packJson(h, designer).coverage_gaps?.screens_problem).toMatch(/screens\.yaml/);
+    const [check] = ofType(h, "design.coverage_checked");
+    expect(check?.data).toMatchObject({
+      outcome: "fixing",
+      redispatched: ["designer"],
+      report: { screens_problem: expect.stringContaining("screens.yaml") as unknown, ok: false },
     });
     await h.release();
   });
@@ -843,11 +879,6 @@ describe("too-similar directions, re-roll and the category standard (§9.1 steps
     await h.release();
   });
 
-  const packJson = (h: Harness, action: SpawnAction): TaskPack =>
-    TaskPackSchema.parse(
-      JSON.parse(readFileSync(join(h.repo, action.pack.replace(/\.md$/, ".json")), "utf8")),
-    );
-
   /** From the Planner's dispatch to the first Engineer's pack (one task covering the spec). */
   const engineerPack = async (h: Harness, planner: SpawnAction): Promise<TaskPack> => {
     const planned = await submitResult(h, planner, {
@@ -1008,6 +1039,204 @@ describe("too-similar directions, re-roll and the category standard (§9.1 steps
         CLAUDE,
       ),
     ).rejects.toThrow(/no design directions/);
+    await h.release();
+  });
+});
+
+describe("the G2 coverage loop (H-13, spine §5 reading 237)", () => {
+  /** A spine whose requirement map names REQ-1 only: REQ-2 is a gap. */
+  const HALF_SPINE = "# Spine\n\n## Requirement map\n\n- REQ-1: the token store\n";
+
+  const architectSubmits = async (
+    h: Harness,
+    action: SpawnAction,
+    spine: string,
+  ): Promise<LeadAction[]> => {
+    writeFile(workdir(action), ".vtc/architecture/spine.md", spine);
+    return (
+      await submitResult(h, action, {
+        exit: "done",
+        artifacts: [{ type: "architecture", path: ".vtc/architecture/spine.md" }],
+      })
+    ).actions;
+  };
+
+  /** A Designer whose screens cover both REQs and add one screen with no REQ, `orphan`. */
+  const designerWithOrphan =
+    (orphan: string | null) =>
+    (action: SpawnAction): { type: string; path: string }[] => {
+      const cwd = workdir(action);
+      writeFile(
+        cwd,
+        ".vtc/design/screens.yaml",
+        [
+          "version: 1",
+          "screens:",
+          "  - id: reset-request",
+          "    route: /reset",
+          "    states: [empty, success]",
+          "    reqs: [REQ-1, REQ-2]",
+          ...(orphan === null
+            ? []
+            : [`  - id: ${orphan}`, `    route: /${orphan}`, "    states: [success]"]),
+          "",
+        ].join("\n"),
+      );
+      writeFile(cwd, ".vtc/design/directions/one.md", "# One\n\nTHESIS: one\n");
+      return [
+        { type: "screens", path: ".vtc/design/screens.yaml" },
+        { type: "design_direction", path: ".vtc/design/directions/one.md" },
+      ];
+    };
+
+  const escalationOf = (h: Harness) => {
+    const opened = ofType(h, "escalation.opened").at(-1)?.data.escalation as
+      | {
+          id: string;
+          phase?: string;
+          reason: string;
+          question: string;
+          options: { id: string }[];
+        }
+      | undefined;
+    if (opened === undefined) throw new Error("no escalation");
+    return opened;
+  };
+
+  it("parks a loop stuck on the same gaps with a DESIGN escalation that names the uncovered REQs; G2 never shows", async () => {
+    const h = createHarness({ roles: ROLES });
+    const actions = await toDesign(h, { spine: HALF_SPINE });
+    const again = await architectSubmits(h, only(actions, "architect"), HALF_SPINE);
+    expect(again.some((a) => a.type === "approve_gate")).toBe(false);
+    expect(again.find((a) => a.type === "ask_human")).toBeDefined();
+    const escalation = escalationOf(h);
+    expect(escalation).toMatchObject({ phase: "design", reason: "stuck" });
+    expect(escalation.question).toMatch(/REQ-2 uncovered/);
+    expect(escalation.options.map((o) => o.id)).toEqual(["change_spec", "instruct_architect"]);
+    const checks = ofType(h, "design.coverage_checked").map((e) => e.data);
+    expect(checks.map((c) => [c.check, c.outcome, c.park_reason])).toEqual([
+      [1, "fixing", undefined],
+      [2, "parked", "stuck"],
+    ]);
+    expect(checks[1]?.escalation).toBe(escalation.id);
+    expect(h.engine.status({}).run.phase).toBe("design");
+    // nothing more runs while it is open, and no approval can be given
+    expect(spawns((await h.engine.next({}, CLAUDE)).actions)).toEqual([]);
+    await expect(
+      h.engine.approve(
+        { gates: ["G2"], decision: "approve", frozen: [], waived_facts: [] },
+        CLAUDE,
+      ),
+    ).rejects.toThrow(/no gate is awaiting approval/);
+    await h.release();
+  });
+
+  it("instruct_architect sends the human's text to the Architect and restarts the round budget", async () => {
+    const h = createHarness({ roles: ROLES });
+    const actions = await toDesign(h, { spine: HALF_SPINE });
+    await architectSubmits(h, only(actions, "architect"), HALF_SPINE);
+    const answered = await h.engine.answer(
+      {
+        escalation: escalationOf(h).id,
+        answer: {
+          option: "instruct_architect",
+          text: "Map REQ-2 to the reset endpoint component.",
+          who_should_have_caught: "architect",
+        },
+      },
+      CLAUDE,
+    );
+    const architect = only(answered.actions, "architect");
+    expect(packJson(h, architect).answer?.text).toBe("Map REQ-2 to the reset endpoint component.");
+    const gate = gateOf(await architectSubmits(h, architect, SPINE));
+    expect(gate.design_coverage?.ok).toBe(true);
+    // the check after the answer counts from 1 again
+    expect(ofType(h, "design.coverage_checked").map((e) => [e.data.check, e.data.outcome])).toEqual(
+      [
+        [1, "fixing"],
+        [2, "parked"],
+        [1, "complete"],
+      ],
+    );
+    await h.release();
+  });
+
+  it("change_spec goes back to SPECIFY, and the BA gets the human's text", async () => {
+    const h = createHarness({ roles: ROLES });
+    const actions = await toDesign(h, { spine: HALF_SPINE });
+    await architectSubmits(h, only(actions, "architect"), HALF_SPINE);
+    const answered = await h.engine.answer(
+      {
+        escalation: escalationOf(h).id,
+        answer: {
+          option: "change_spec",
+          text: "Drop REQ-2 from this feature.",
+          who_should_have_caught: "ba",
+        },
+      },
+      CLAUDE,
+    );
+    expect(h.engine.status({}).run.phase).toBe("specify");
+    const ba = only(answered.actions, "ba");
+    expect(packJson(h, ba).answer?.text).toBe("Drop REQ-2 from this feature.");
+    await h.release();
+  });
+
+  it("re-dispatches the Architect first when both design roles have gaps; the Designer runs after it", async () => {
+    const h = createHarness({ roles: ROLES });
+    const actions = await toDesign(h, {
+      hasUi: true,
+      spine: HALF_SPINE,
+      designer: designerWithOrphan("about"),
+    });
+    const [first] = ofType(h, "design.coverage_checked");
+    expect(first?.data).toMatchObject({
+      outcome: "fixing",
+      redispatched: ["architect", "designer"],
+    });
+    // only the Architect now; the Designer waits for its output
+    expect(spawns(actions).map((a) => a.role)).toEqual(["architect"]);
+    const next = await architectSubmits(h, only(actions, "architect"), SPINE);
+    const designer = only(next, "designer");
+    expect(packJson(h, designer).coverage_gaps).toMatchObject({
+      round: 1,
+      screens_without_req: ["about"],
+    });
+    const gate = gateOf(
+      (
+        await submitResult(h, designer, {
+          exit: "done",
+          artifacts: designerWithOrphan(null)(designer),
+        })
+      ).actions,
+    );
+    expect(gate.design_coverage?.ok).toBe(true);
+    await h.release();
+  });
+
+  it("parks at the cap after 3 fix rounds whose gaps keep changing", async () => {
+    const h = createHarness({ roles: ROLES });
+    const actions = await toDesign(h, {
+      hasUi: true,
+      designer: designerWithOrphan("a"),
+      designerAgain: [designerWithOrphan("b"), designerWithOrphan("c")],
+    });
+    const last = only(actions, "designer");
+    const parked = (
+      await submitResult(h, last, { exit: "done", artifacts: designerWithOrphan("d")(last) })
+    ).actions;
+    expect(parked.some((a) => a.type === "approve_gate")).toBe(false);
+    expect(escalationOf(h)).toMatchObject({ phase: "design", reason: "cap" });
+    expect(ofType(h, "design.coverage_checked").map((e) => [e.data.check, e.data.outcome])).toEqual(
+      [
+        [1, "fixing"],
+        [2, "fixing"],
+        [3, "fixing"],
+        [4, "parked"],
+      ],
+    );
+    // the Designer ran 1 + 3 times, no more
+    expect(ofType(h, "role.dispatched").filter((e) => e.role === "designer")).toHaveLength(4);
     await h.release();
   });
 });
