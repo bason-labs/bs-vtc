@@ -86,10 +86,13 @@ with the recommended one marked, and which tasks it blocks, so the human sees wh
 decision. Keep each item to a few lines. Recommend; never decide for the human. Record each
 answer with `answer`: `escalation` (its id) and `answer`, an object with the chosen `option`, any
 free `text` the human added, and `who_should_have_caught`: ask the human which role should have
-caught the problem (a role id, or `none`). Add `missing_capability` (`slug` and `reason`) only
-when the answer shows the role lacked a capability (a tool, a fetcher, a runner) that the
-escalation does not already name; leave it out otherwise. Budget raises are at most twice the original and
-waivers always expire; the engine enforces both.
+caught the problem (a role id, or `none`). Add `missing_capability` only when the answer shows
+the role lacked a capability (a tool, a fetcher, a runner) that the escalation does not already
+name; leave it out otherwise. Its `slug` is a short lower-case name of the capability with words
+joined by `_` only (`browser_runner`, `db_migration_tool`), the same form the roles use, so
+repeats of one capability count together; its `reason` is one sentence on what it would have
+let the role do, with no secrets. Budget raises are at most twice the original and waivers always
+expire; the engine enforces both.
 
 ## Gates
 

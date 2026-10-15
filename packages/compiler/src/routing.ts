@@ -23,7 +23,13 @@ const higher = (a: ModelTier, b: ModelTier): ModelTier => (tierRank(a) >= tierRa
 /**
  * Pure: the start tier the table gives a task of `size` and risk class `risk`, before any hint
  * or project clamp: the size's tier, raised to `tagged_floor` for any risk tag and to
- * `high_floor` for a high-risk one (the floors are lower bounds, as their names say).
+ * `high_floor` for a high-risk one (the floors are lower bounds, as their names say, and reading
+ * 218 (2): a high-risk task never starts below Top).
+ *
+ * A second copy of engine core's rule (`core/routing.ts`), used only to render the Planner's
+ * table, so it is not exported from the package. It goes once `@vtc/shared` has a pure
+ * `startTierFor(table, size, riskClass)` that engine core and the compiler both call (a contract
+ * proposal of this branch).
  */
 export const routingStartTier = (
   table: RoutingTable,

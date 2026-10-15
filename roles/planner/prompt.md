@@ -36,9 +36,9 @@ covering every requirement and nothing more.
 7. Pick at most {{max_stack_packs}} stack packs per task from: {{stack_packs}}. Only packs for
    technology the task actually touches.
 8. Set `risk` (low, med, high) by probability times impact of getting it wrong, and `risk_tags`
-   for sensitive areas the task touches (auth, payments, data, security, pii, migration, infra,
-   public-api, new-dependency). The tags {{high_risk_tags}} mark a task high risk: use one
+   for the sensitive areas the task touches. The high-risk tags are {{high_risk_tags}}: use one
    whenever the task touches that area, since the start tier follows the tags (see Start tier).
+   Tag other sensitive areas too, for example `pii`, `infra`, `public-api` or `new-dependency`.
 9. Set `arch_triage`: `fits` (no new service, data store, integration or trust boundary),
    `extends` (adds within the architecture) or `changes` (a new service, data store, integration,
    cross-cutting concern, breaking interface or trust boundary).
