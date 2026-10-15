@@ -6,7 +6,9 @@ repository has a GitHub remote.
 
 ## Todo
 
-- **sign + notarize once the owner has an Apple Developer ID** (H-2). Until then the release
+- **sign + notarize once the owner has an Apple Developer ID** (H-2). Skipped for now (H-11,
+  2026-10-15): it is needed only once other people download VTC, so revisit it before any
+  release leaves the private repository. Until then the release
   ships unsigned macOS binaries with SHA-256 checksums. The `sign-macos` job's body is a
   placeholder, not a working recipe: a runner starts with no certificate and no notary profile.
   To switch it on: store the Developer ID certificate (a base64 `.p12` and its password) and the
@@ -37,8 +39,10 @@ repository has a GitHub remote.
 5. **package**: `vtc-<version>-<os>-<arch>.tar.gz` (`.zip` for Windows), the rendered Homebrew
    formula `vtc.rb` and installer `install.sh`, and `SHA256SUMS` over all of them (sorted, LF,
    `sha256sum -c` compatible), checked with `sha256sum -c` before upload.
-6. **publish** (tags only): attests every asset with GitHub artifact attestations, creates a
-   draft release with the assets, then publishes it. With immutable releases switched on in the
+6. **publish** (tags only): attests every asset with GitHub artifact attestations when the
+   repository variable `VTC_ATTEST` is `true` (attestations need a public repository or GitHub
+   Enterprise Cloud, so the private repository on GitHub Free skips them), creates a draft
+   release with the assets, then publishes it. With immutable releases switched on in the
    repository settings, the published tag and assets cannot change.
 
 Every `uses:` is pinned to a full commit SHA; the workflow token is `contents: read` everywhere

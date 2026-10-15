@@ -136,7 +136,10 @@ describe("buildEngineParts and composeEngineDeps (AD-19)", () => {
     const deps = composeEngineDeps(parts);
     expect(deps.pullRequests).toBe(prs);
     expect(deps.adapters).toEqual({ codex: adapter });
-    expect(deps.versions).toEqual({ engine: "vtc-engine@0.0.0", contracts: CONTRACTS_VERSION });
+    expect(deps.versions).toEqual({
+      engine: `vtc-engine@${VERSION}`,
+      contracts: CONTRACTS_VERSION,
+    });
     expect(deps.openStorage({ path: ":memory:" }).driver).toBe("node:sqlite");
     expect(typeof deps.scheduler.schedule).toBe("function");
   });

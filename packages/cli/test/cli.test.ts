@@ -3,6 +3,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterAll, describe, expect, expectTypeOf, it } from "vitest";
 import { runDaemon } from "@vtc/engine";
+import { VERSION } from "../src/version.js";
 import {
   CONTRACTS_VERSION,
   type ControlResult,
@@ -48,7 +49,7 @@ describe("vtc cli smoke", () => {
     const { code, out } = await run("--version");
     expect(code).toBe(0);
     expect(out[0]).toContain(
-      `vtc 0.0.0 (vtc-engine, contracts ${CONTRACTS_VERSION}, hosts claude-code/codex`,
+      `vtc ${VERSION} (vtc-engine, contracts ${CONTRACTS_VERSION}, hosts claude-code/codex`,
     );
     expect(out[0]).toMatch(/dev on node \d+\.\d+\.\d+\)$/);
     expect((await run("version")).out).toEqual(out);
