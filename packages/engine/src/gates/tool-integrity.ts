@@ -7,9 +7,11 @@
  *   lifecycle script and the second running the scripts it skipped. Only forms checked against
  *   the real package manager (`tool-tamper.live.test.ts`): `npm ci` (`--ignore-scripts`, then
  *   `npm ci` again: an `npm install` of an installed tree runs no dependency's script),
- *   `pnpm install` (`--ignore-scripts`, then `pnpm rebuild --pending`: a second `pnpm install`
- *   leaves the pending builds unbuilt) and `bun install` (`--ignore-scripts`, then `bun install`
- *   again); `go mod download` and `cargo fetch` run no project code as they are. Any other
+ *   `pnpm install` (`--ignore-scripts`, then `pnpm rebuild --recursive --pending` with the
+ *   install's `-C`/`--dir`: a second `pnpm install` leaves the pending builds unbuilt, and a
+ *   non-recursive rebuild builds a workspace's root project only; an install with `--filter` has
+ *   no two passes) and `bun install` (`--ignore-scripts`, then `bun install --force`: a
+ *   second plain `bun install` of a workspace skips its packages' dependency scripts); `go mod download` and `cargo fetch` run no project code as they are. Any other
  *   install (Yarn, `npm install`, `uv sync`, a custom script) has no scripts-free form here.
  * - {@link hashTool}: the hash of a `project` tool's files, one line per file (its checkout-relative
  *   path and the SHA-256 of its bytes, or `link:<target>` for a symbolic link, which is never
@@ -99,6 +101,40 @@ const command = (argv0: string): string =>
 
 const IGNORE_SCRIPTS = "--ignore-scripts";
 
+/**
+ * pnpm's second pass: every workspace project's pending builds and its own install scripts (a
+ * plain `pnpm rebuild --pending` at a workspace root builds the root project only).
+ */
+const PNPM_BUILD = ["rebuild", "--recursive", "--pending"] as const;
+const PNPM_DIR_FLAGS = ["-C", "--dir"];
+/** Flags that pick which workspace projects an install covers: no rebuild picks the same ones. */
+const PNPM_SELECT = ["--filter", "-F", "--filter-prod"];
+
+/**
+ * A `pnpm install` (or `pnpm i`) and the flags that set the directory it runs in (`-C`, `--dir`),
+ * which its second pass keeps; `null` for any other pnpm command, and for an install that picks
+ * workspace projects (`--filter`), which then has no scripts-free form.
+ */
+const pnpmInstall = (argv: readonly string[]): { dirFlags: string[] } | null => {
+  const dirFlags: string[] = [];
+  let verb: string | null = null;
+  for (let i = 1; i < argv.length; i++) {
+    const token = argv[i] ?? "";
+    const eq = token.startsWith("--") ? token.indexOf("=") : -1;
+    const flag = eq < 0 ? token : token.slice(0, eq);
+    if (PNPM_SELECT.includes(flag)) return null;
+    if (PNPM_DIR_FLAGS.includes(flag)) {
+      const value = eq >= 0 ? token.slice(eq + 1) : argv[i + 1];
+      if (value === undefined) return null;
+      dirFlags.push(flag, value);
+      if (eq < 0) i++;
+      continue;
+    }
+    if (verb === null && !token.startsWith("-")) verb = token;
+  }
+  return verb === "install" || verb === "i" ? { dirFlags } : null;
+};
+
 /** An install in two passes (H-14): see {@link scriptsFreeInstall}. */
 export interface InstallPasses {
   /** The install that runs no lifecycle script. */
@@ -125,10 +161,13 @@ export const scriptsFreeInstall = (argv: readonly string[]): InstallPasses | nul
       if (["ci", "clean-install", "install-clean"].includes(verb ?? "")) return twice([...argv]);
       // `npm install` of a tree it just installed runs no dependency's script: no second pass.
       return install && ignoring ? { free: [...argv], build: null } : null;
-    case "pnpm":
-      return install ? twice([first, "rebuild", "--pending"]) : null;
+    case "pnpm": {
+      const pnpm = pnpmInstall(argv);
+      return pnpm === null ? null : twice([first, ...pnpm.dirFlags, ...PNPM_BUILD]);
+    }
     case "bun":
-      return install ? twice([...argv]) : null;
+      // A second plain `bun install` of a workspace skips its packages' dependency scripts.
+      return install ? twice(argv.includes("--force") ? [...argv] : [...argv, "--force"]) : null;
     case "go":
       return verb === "mod" && argv[2] === "download" ? { free: [...argv], build: null } : null;
     case "cargo":

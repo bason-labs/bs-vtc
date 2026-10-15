@@ -15,7 +15,7 @@
  * tool installed in the working tree, which the Gate Runner verifies by content hash at each run.
  * The confirmed commands include the second pass of each two-pass install (`scriptsFreeInstall`).
  */
-import { readFileSync } from "node:fs";
+import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import {
   GATE_SANDBOX,
@@ -122,7 +122,9 @@ export const visualAppQuestion = (app: Pick<VisualApp, "command" | "url">): stri
  * commands run (`pnpm typecheck` running `tsc`). A pinned scanner always runs from the store and
  * needs none; a gate that already names its tool keeps it. A gate with no tool found here (a
  * script that runs nothing installed, a tool outside the repository, or one not installed in the
- * working tree) gets none, and each run derives one from its command when it can.
+ * working tree) gets none, and each run derives one from its command when it can. A Node lint
+ * gate's tool also gets the ESLint plugins, configs and parsers its package.json names (see
+ * {@link lintPluginPaths}): ESLint loads them through its config, not as its dependencies.
  */
 export const withCheckTools = (
   repoRoot: string,
@@ -140,9 +142,44 @@ export const withCheckTools = (
       return gate;
     }
     recorded.push(gate.id);
-    return { ...gate, tool };
+    const plugins =
+      gate.layer === "L1" && tool.paths.some((p) => p.includes("node_modules/"))
+        ? lintPluginPaths(repoRoot, gate.cwd ?? "").filter((p) => !tool.paths.includes(p))
+        : [];
+    return { ...gate, tool: { ...tool, paths: [...tool.paths, ...plugins].slice(0, 50) } };
   });
   return { gates: out, recorded, none };
+};
+
+/** ESLint plugins, shareable configs and parsers, by package name. */
+const ESLINT_EXTENSION =
+  /^(eslint-(plugin|config)-[\w.-]+|@[\w.-]+\/eslint-(plugin|config)(-[\w.-]+)?|typescript-eslint|@typescript-eslint\/[\w.-]+)$/;
+
+/**
+ * The `node_modules/<name>/**` path of each ESLint plugin, shareable config or parser that the
+ * package.json in `cwd` (and the repository root's) lists in `dependencies` or `devDependencies`
+ * and that is installed beside it; `hashTool` hashes each with its dependency closure.
+ */
+export const lintPluginPaths = (repoRoot: string, cwd: string): string[] => {
+  const paths = new Set<string>();
+  for (const dir of [...new Set([cwd, ""])]) {
+    let manifest: unknown;
+    try {
+      manifest = JSON.parse(readFileSync(join(repoRoot, dir, "package.json"), "utf8"));
+    } catch {
+      continue;
+    }
+    if (manifest === null || typeof manifest !== "object") continue;
+    for (const field of ["dependencies", "devDependencies"]) {
+      const deps = (manifest as Record<string, unknown>)[field];
+      if (deps === null || typeof deps !== "object") continue;
+      for (const name of Object.keys(deps).sort()) {
+        const rel = [dir, "node_modules", name].filter((p) => p !== "").join("/");
+        if (ESLINT_EXTENSION.test(name) && existsSync(join(repoRoot, rel))) paths.add(`${rel}/**`);
+      }
+    }
+  }
+  return [...paths];
 };
 
 /** `config` with `visual.app` set to `app` (`null`: as it is), every other `visual` setting kept. */
@@ -259,7 +296,7 @@ export const calibrate = async (
   }
 
   // 1. Every command a human has not confirmed on this machine, before anything runs (§15),
-  // with the second pass of each two-pass install (H-14: `pnpm rebuild --pending` after
+  // with the second pass of each two-pass install (H-14: `pnpm rebuild --recursive --pending` after
   // `pnpm install --ignore-scripts`), which runs the scripts the install skipped.
   const allowlist = readAllowlist(deps.vtcHome, deps.repoRoot);
   const pending: string[][] = [];

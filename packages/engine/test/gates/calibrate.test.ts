@@ -525,16 +525,23 @@ describe("calibrate records each check gate's tool (H-14, reading 238)", () => {
     const root = nodeRepo();
     const manifest = JSON.parse(readFileSync(join(root, "package.json"), "utf8")) as {
       scripts: Record<string, string>;
+      devDependencies: Record<string, string>;
     };
     manifest.scripts.typecheck = "tsc --noEmit";
+    for (const dep of ["typescript-eslint", "@vue/eslint-plugin", "prettier", "eslint-plugin-gone"])
+      manifest.devDependencies[dep] = "1.0.0";
     writeFile(root, "package.json", JSON.stringify(manifest));
     for (const [pkg, file, bin] of [
       ["eslint", "bin/eslint.js", "eslint"],
       ["vitest", "vitest.mjs", "vitest"],
       ["typescript", "bin/tsc", "tsc"],
+      ["typescript-eslint", "dist/index.js", null],
+      ["@vue/eslint-plugin", "index.js", null],
+      ["prettier", "index.js", null],
     ] as const) {
       writeFile(root, `node_modules/${pkg}/package.json`, JSON.stringify({ name: pkg }));
       writeFile(root, `node_modules/${pkg}/${file}`, "#!/usr/bin/env node\n");
+      if (bin === null) continue;
       mkdirSync(join(root, "node_modules/.bin"), { recursive: true });
       symlinkSync(`../${pkg}/${file}`, join(root, "node_modules/.bin", bin));
     }
@@ -564,7 +571,17 @@ describe("calibrate records each check gate's tool (H-14, reading 238)", () => {
       // Package scripts: `pnpm run build` runs `tsc -b`, `pnpm typecheck` runs `tsc --noEmit`.
       build: tsc,
       typecheck: tsc,
-      lint: { source: "project", paths: ["node_modules/.bin/eslint", "node_modules/eslint/**"] },
+      // The lint gate's tool has the ESLint plugins and parsers the package.json names too
+      // (ESLint loads them through its config); `eslint-plugin-gone` is not installed.
+      lint: {
+        source: "project",
+        paths: [
+          "node_modules/.bin/eslint",
+          "node_modules/eslint/**",
+          "node_modules/@vue/eslint-plugin/**",
+          "node_modules/typescript-eslint/**",
+        ],
+      },
       test: { source: "project", paths: ["node_modules/.bin/vitest", "node_modules/vitest/**"] },
       secrets: null,
       dependencies: null,
@@ -592,7 +609,7 @@ describe("calibrate records each check gate's tool (H-14, reading 238)", () => {
     if (outcome.status !== "commands_not_confirmed") throw new Error("expected no confirmation");
     expect(outcome.pending.slice(0, 2)).toEqual([
       ["pnpm", "install", "--frozen-lockfile"],
-      ["pnpm", "rebuild", "--pending"],
+      ["pnpm", "rebuild", "--recursive", "--pending"],
     ]);
   });
 });

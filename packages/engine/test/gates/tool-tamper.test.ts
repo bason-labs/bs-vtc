@@ -44,6 +44,19 @@ writeFileSync("node_modules/lint-tool/lint.mjs", "#!/usr/bin/env node\\nimport {
 writeFileSync("node_modules/lint-tool/evil.mjs", "// planted\\n");
 `;
 
+/** A fake npx: runs the nearest `node_modules/.bin/<name>` from its cwd up, as npx does. */
+const FAKE_NPX = `#!/usr/bin/env node
+const { existsSync } = require("node:fs");
+const { dirname, join } = require("node:path");
+const { spawnSync } = require("node:child_process");
+const [name, ...rest] = process.argv.slice(2);
+for (let dir = process.cwd(); ; dir = dirname(dir)) {
+  const bin = join(dir, "node_modules", ".bin", name);
+  if (existsSync(bin)) process.exit(spawnSync(bin, rest, { stdio: "inherit" }).status ?? 1);
+  if (dirname(dir) === dir) process.exit(127);
+}
+`;
+
 const LINT = `#!/usr/bin/env node\n${TOOLS["tools/fake-lint.mjs"] ?? ""}`;
 const REPORT = ".vtc/state/gates/lint.json";
 
@@ -52,6 +65,9 @@ const setup = (gates: Parameters<typeof config>[0], files: Record<string, string
   const npm = join(bin, "npm");
   writeFile(bin, "npm", FAKE_NPM);
   chmodSync(npm, 0o755);
+  const npx = join(bin, "npx");
+  writeFile(bin, "npx", FAKE_NPX);
+  chmodSync(npx, 0o755);
   const install = {
     id: "install",
     layer: "L0" as const,
@@ -61,9 +77,9 @@ const setup = (gates: Parameters<typeof config>[0], files: Record<string, string
   const h = harness(
     { "vendor/lint.mjs": LINT, "src/a.ts": "export const a = 1;\n", ...files },
     config([install, ...gates]),
-    { allow: [[NODE], [npm], ["node_modules/.bin/lint-tool"]] },
+    { allow: [[NODE], [npm], [npx], ["node_modules/.bin/lint-tool"]] },
   );
-  return { h, npm };
+  return { h, npm, npx };
 };
 
 const result = (report: GateReport, id: string): GateResult => {
@@ -271,6 +287,78 @@ describe("H-14: a project check tool is hashed after a scripts-free install", ()
       /match no file in the checkout; re-run vtc calibrate/,
     );
     expect(lintRan(h.argvs)).toBe(false);
+  });
+
+  /**
+   * A run whose install gate is the fake `npm ci` and whose `check` gate runs `command` from `cwd`
+   * with the fake npm and npx first on PATH (a runner is known by its bare name), and, when given,
+   * a committed `postinstall.mjs`.
+   */
+  const viaPath = async (
+    command: string[],
+    files: Record<string, string>,
+    postinstall?: string,
+  ): Promise<{ report: GateReport; h: ReturnType<typeof harness> }> => {
+    const { npm } = setup([]);
+    const bin = join(npm, "..");
+    const h = harness(
+      { "vendor/lint.mjs": LINT, ...files },
+      config([
+        { id: "install", layer: "L0", phase: "install", command: [npm, "ci"] },
+        {
+          id: "check",
+          layer: "L0",
+          ...(files["packages/app/package.json"] === undefined ? {} : { cwd: "packages/app" }),
+          command,
+        },
+      ]),
+      {
+        allow: [[NODE], [npm], [command[0] ?? ""]],
+        env: { ...process.env, PATH: `${bin}:${process.env.PATH ?? ""}` },
+      },
+    );
+    if (postinstall !== undefined) writeFile(h.repo, "postinstall.mjs", postinstall);
+    writeFile(h.repo, "src/a.ts", "export const a = 2;\n");
+    return { report: await h.run({ head: commitAll(h.repo), layers: ["L0"] }), h };
+  };
+
+  it("fails a gate whose command resolves to an executable planted nearer its cwd after the hash", async () => {
+    // The gate runs in a workspace package; at hash time `npx lint-tool` there is the root's bin.
+    const files = { "packages/app/package.json": "{}\n", "packages/app/.lintrc": "strict\n" };
+    const command = ["npx", "lint-tool", "out.json"];
+    const clean = await viaPath(command, files);
+    expect(result(clean.report, "check")).toMatchObject({ status: "pass", tool: { tampered: [] } });
+
+    // A dependency's postinstall plants packages/app/node_modules/.bin/lint-tool: npx runs it.
+    const plant = `import { mkdirSync, symlinkSync, writeFileSync } from "node:fs";
+mkdirSync("packages/app/node_modules/.bin", { recursive: true });
+writeFileSync("packages/app/evil.mjs", "#!/usr/bin/env node\\nprocess.exit(0);\\n", { mode: 0o755 });
+symlinkSync("../../evil.mjs", "packages/app/node_modules/.bin/lint-tool");
+`;
+    const { report, h } = await viaPath(command, files, plant);
+    const check = result(report, "check");
+    expect(check).toMatchObject({
+      status: "fail",
+      failure_class: "product",
+      tool: { source: "project", tampered: ["packages/app/node_modules/.bin/lint-tool"] },
+    });
+    expect(check.findings[0]?.rule_id).toBe(TOOL_TAMPER_RULE_ID);
+    expect(h.argvs.some((a) => a[0] === "npx")).toBe(false);
+  });
+
+  it("does not run a gate whose package script no longer runs the hashed tool", async () => {
+    // The lint script ran the installed bin when the tool was hashed; a postinstall rewrites it.
+    const pkg = (lint: string): string => JSON.stringify({ name: "app", scripts: { lint } });
+    const { report, h } = await viaPath(
+      ["npm", "run", "lint"],
+      { "package.json": pkg("lint-tool out.json") },
+      `import { writeFileSync } from "node:fs";\nwriteFileSync("package.json", ${JSON.stringify(pkg("node evil.mjs"))});\n`,
+    );
+    expect(result(report, "check")).toMatchObject({ status: "error", failure_class: "infra" });
+    expect(evidenceLog(h.repo, "check.log")).toMatch(
+      /no longer runs the tool hashed after the scripts-free install \(node_modules\/\.bin\/lint-tool, node_modules\/lint-tool\/\*\*\)/,
+    );
+    expect(h.argvs.some((a) => a[0] === "npm" && a[1] === "run")).toBe(false);
   });
 
   it("fails a tool grown past the hash limits since the hash as tampering, not infrastructure", async () => {
