@@ -4261,6 +4261,66 @@ decision 2026-10-16, pending human review.**
       head commit, as L1's configs already were, and the gate's log names what was put back. A
       rewritten package script therefore runs as the commit has it, rather than being refused.
 
+**Reading 251 (2026-10-16, H-14 independent of command parsing).** The round-6 review kept finding
+H-14 gaps because tool integrity was derived by parsing the gate command (task runners, directory
+flags, nested scripts). The Lead's decisions in response, and the answers to the open round-6
+questions. **Lead decision 2026-10-16, pending human review.**
+
+251.  **H-14 independent of command parsing, and the round-6 answers** (amends readings 238, 249(3),
+      249(8) and 250(2); closes the review findings h14-workspace-runner-tool-misattributed,
+      h14-bin-dir-interpreter-hijack, h14-task-runner-tool-unverified and
+      h14-runtime-derived-tool-misses-lint-plugins). _Lead decision 2026-10-16, pending human
+      review._ (1) _A workspace-wide baseline_ (`workspaceToolSnapshot`): at the moment reading 238
+      hashes the gates' tools (after the scripts-free passes, before any install-phase script), the
+      gate runner hashes every tool the workspace can run, whatever the gate commands are: every
+      `node_modules/.bin` directory of the checkout (one per directory holding a `node_modules`,
+      outside any `node_modules`), each entry as a line (a link as its target, a shim or file by its
+      content), and for an entry that starts a file inside an installed package that file and every
+      file of its package (an entry that starts the project's own code, a workspace package's bin,
+      is its line only: builds change that code); every package a check config of a package
+      directory loads (ESLint, Prettier, Stylelint and the test runners' configs, the extensions
+      the package.json lists, the `plugins` of a JSON Prettier or Stylelint config), resolved the
+      way Node does, with its dependency closure; and every Python virtual environment
+      (`pyvenv.cfg`, each `bin/` or `Scripts/` entry, the site-packages startup files). Pinned tools
+      live in VTC's store outside the checkout and keep their re-verification against the pin before
+      each use. Past `WORKSPACE_HASH_LIMITS` (200,000 files, 4 GiB) or 100,000 directories no verify
+      gate runs (`infra`), never half-hashed. (2) _The comparison_: when the install phase ends, the
+      workspace is hashed again (`workspaceInstallChanges`): every baseline line that changed or is
+      gone, and every entry added to a `.bin` directory the baseline already had (a run script puts
+      it on `PATH` first, so a new `node` or `sh` there shadows what a gate runs), is tampering. An
+      entry added elsewhere (a `.bin` a later install made) is a new tool, held from then on. Just
+      before each verify gate on the run checkout, the workspace is hashed again: those install
+      changes, and any change since the install phase ended (a tool an install added and a later
+      gate changed included), fail the gate as tampering (`TOOL_TAMPER_RULE_ID`, as reading 238).
+      (3) _The command-derived tool is detail_: `deriveProjectTool`, `nodeBinChain` and
+      `lintPluginPaths` still run and their changes are added to `tampered`, but no gate depends on
+      them: a `turbo run lint`, `pnpm -C`, `npm --prefix`, `yarn --cwd` or a script that changes
+      directory is covered by (1) and (2). `ToolIntegrity.sha256` stays the command's own tool's
+      hash (the workspace's when the command names none), and the new
+      `ToolIntegrity.workspace_sha256` is the workspace's (contracts 5.10.0, MINOR, additive). A
+      known consequence: a dependency whose own install script rewrites its bin's package in the
+      scripts pass (esbuild's npm install replaces `bin/esbuild` with the native binary) now fails
+      every check gate as tampering, where before it failed only a gate whose tool's closure held
+      it; the ways out are the same as reading 238's (a pinned tool, or an install that does not
+      run that script). (4) _No scripts-free form_ (amends 249(8) and 250(2)): installs with no
+      known scripts-free form are allowed. Their gates run, the tools are hashed after the
+      install's scripts and marked `ToolIntegrity.baseline` `after_scripts`, and the workspace-wide
+      comparison of (2) still runs from that hash on. A warning is shown on the gate report (a
+      `WARNING` log in the gate's evidence) and on the dashboard's gate report view. `vtc calibrate`
+      warns which gates this affects. Reading 250(2)'s refusal is gone:
+      `gates.allow_tools_hashed_after_scripts` is still parsed but has no effect, and `vtc doctor`
+      says it can be removed. (5) _Routing PRs and graded replays_ (readings 247(6), 249(2), 250(1)):
+      a routing PR waits for a graded replay while replays fit the RETRO's trial budget; the
+      current behaviour stays. (6) _Headless Claude role runs and an empty setting source_
+      (reading 249; the §7 `--restricted` row): role runs move from `--setting-sources user` to
+      an empty setting source only after a test shows the plugin's own `--plugin-dir` hooks still
+      run under it. This is an open follow-up, with no change now. (7) _Release_ (H-16, reading
+      249(8)): round 6 ships as `v0.2.0`, with notes from the CHANGELOG's Unreleased section. The
+      `v0.1.0` notes stay as released. (8) _Accepted as built_: reading 247(7)'s flow selection
+      (`selectDesignFlow`), H-12's price ceiling per token type (`priceCeiling`, reading 236), and
+      D-cx's split between the adapter (reading the refusal) and the engine (the retry, the
+      fallback record and the refusals file).
+
 ## 6. Change process for this spine
 
 - Changing an AD, adding one, or changing a frozen contract (AD-3) needs an architecture review

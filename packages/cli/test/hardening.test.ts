@@ -553,7 +553,7 @@ describe("the gate sandbox (D-al, reading 69)", () => {
     ).toBe(null);
   });
 
-  it("vtc doctor warns while tools hashed only after an install's scripts may run (H-14, reading 250)", () => {
+  it("vtc doctor warns that the old after_scripts opt-in has no effect (H-14, reading 251)", () => {
     const config = (allow: boolean | undefined): UserConfigRead => ({
       ok: true,
       path: "/h/config.yaml",
@@ -575,7 +575,7 @@ describe("the gate sandbox (D-al, reading 69)", () => {
       name: "check tools",
       status: "warn",
       detail: expect.stringMatching(
-        /gates\.allow_tools_hashed_after_scripts is on in \/h\/config\.yaml.*install script/,
+        /gates\.allow_tools_hashed_after_scripts is on in \/h\/config\.yaml but has no effect.*install script.*remove the setting/,
       ) as string,
     });
   });

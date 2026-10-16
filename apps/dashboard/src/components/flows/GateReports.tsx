@@ -1,7 +1,7 @@
 "use client";
 
 import type { GateReport } from "@vtc/shared";
-import { ChevronRight, FileText, Table2 } from "lucide-react";
+import { AlertTriangle, ChevronRight, FileText, Table2 } from "lucide-react";
 import { useId, useMemo } from "react";
 import { gateReportModel, type GateLayerGroup } from "@/lib/gates";
 import { hrefs } from "@/lib/router";
@@ -35,6 +35,16 @@ function Layer({ run, group }: { run: string; group: GateLayerGroup }) {
                 <li key={d}>{d}</li>
               ))}
             </ul>
+            {r.warnings.length === 0 ? null : (
+              <ul aria-label={`Warnings for ${r.id}`} className="space-y-1">
+                {r.warnings.map((w) => (
+                  <li key={w} className="flex items-start gap-1.5 text-warn-fg">
+                    <AlertTriangle aria-hidden className="mt-0.5 size-3.5 shrink-0" />
+                    <span>{w}</span>
+                  </li>
+                ))}
+              </ul>
+            )}
             {r.findings.length === 0 ? null : (
               <ul className="space-y-1">
                 {r.findings.map((f) => (

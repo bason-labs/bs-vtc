@@ -133,9 +133,11 @@ export interface GateRunnerDeps {
   readonly allowUnsandboxed?: boolean;
   /**
    * `~/.vtc/config.yaml` `gates.allow_tools_hashed_after_scripts` (`UserConfigSchema`, H-14,
-   * spine §5 reading 250), read by the cli; never from `project.yaml`. Default false: a verify
-   * gate whose `project` tool was hashed only after an install gate ran its lifecycle scripts
-   * does not run (`infra`). True: it runs, its `ToolIntegrity.baseline` `after_scripts`.
+   * spine §5 reading 250), read by the cli. No effect since 5.10.0 (spine §5 reading 251): a
+   * verify gate whose tools were hashed only after an install gate ran its lifecycle scripts
+   * runs, its `ToolIntegrity.baseline` `after_scripts` and a warning in its evidence, and the
+   * workspace-wide comparison still covers every change after the hash. Kept so callers that
+   * pass it still compile.
    */
   readonly allowToolsHashedAfterScripts?: boolean;
   readonly now?: () => Date;

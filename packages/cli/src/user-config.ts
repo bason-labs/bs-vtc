@@ -138,7 +138,7 @@ export const allowUnsandboxedOf = (read: UserConfigRead): boolean =>
 
 /**
  * `gates.allow_tools_hashed_after_scripts` (H-14, spine §5 reading 250): false when the file does
- * not parse (a tool hashed only after an install's scripts ran stays refused).
+ * not parse. No effect on gate runs since reading 251; `vtc doctor` says it can be removed.
  */
 export const allowToolsHashedAfterScriptsOf = (read: UserConfigRead): boolean =>
   read.ok && gatesAllowToolsHashedAfterScripts(read.config);

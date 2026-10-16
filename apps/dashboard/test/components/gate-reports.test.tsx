@@ -52,6 +52,36 @@ const failing = (): GateReport =>
   });
 
 describe("GateReports (drawer: gate-report detail per layer)", () => {
+  it("shows a tool-integrity warning on a gate hashed after an install's scripts (reading 251)", () => {
+    const report = GateReportSchema.parse({
+      ...failing(),
+      results: [
+        {
+          gate_id: "lint",
+          layer: "L1",
+          phase: "verify",
+          status: "pass",
+          blocking: true,
+          new_violations: 0,
+          baseline_violations: 0,
+          duration_ms: 400,
+          tool: {
+            source: "project",
+            sha256: "ab".repeat(32),
+            workspace_sha256: "cd".repeat(32),
+            baseline: "after_scripts",
+          },
+        },
+      ],
+      verdict: "pass",
+    });
+    render(<GateReports run="golden-1" reports={[report]} />);
+    const warnings = screen.getByRole("list", { name: "Warnings for lint" });
+    expect(
+      within(warnings).getByText(/hashed only after an install's scripts ran/),
+    ).toBeInTheDocument();
+  });
+
   it("shows the newest report open, per layer, with test counts, coverage and report links", () => {
     render(<GateReports run="golden-1" reports={[golden()]} />);
     const report = screen.getByTestId("gate-report-0");

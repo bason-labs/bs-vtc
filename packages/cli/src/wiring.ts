@@ -231,9 +231,9 @@ export interface BuildEnginePartsOptions {
    */
   readonly allowUnsandboxed?: boolean;
   /**
-   * A verify gate whose tool was hashed only after an install's scripts ran runs anyway (H-14,
-   * spine §5 reading 250). Default: the user-level `gates.allow_tools_hashed_after_scripts` of
-   * `~/.vtc/config.yaml`; never from `project.yaml`, and false when the file does not parse.
+   * The user-level `gates.allow_tools_hashed_after_scripts` of `~/.vtc/config.yaml` (H-14, spine
+   * §5 reading 250), passed to the Gate Runner; no effect since reading 251, where a gate whose
+   * tools were hashed only after an install's scripts ran runs marked `after_scripts`.
    */
   readonly allowToolsHashedAfterScripts?: boolean;
   /**

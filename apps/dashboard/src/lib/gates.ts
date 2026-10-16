@@ -39,6 +39,8 @@ export interface GateResultRow {
   /** The redacted report, when the artifacts route can serve it (AD-5 rule 10). */
   readonly report: { readonly path: string; readonly format: string } | null;
   readonly findings: readonly ToolFinding[];
+  /** What the result passed with but the human should know (H-14 `after_scripts`, reading 251). */
+  readonly warnings: readonly string[];
 }
 
 export interface GateLayerGroup {
@@ -107,6 +109,13 @@ const resultDetails = (r: GateResult): string[] => {
   return lines;
 };
 
+/** The tool-integrity warning of a gate whose tools were hashed only after an install's scripts. */
+export const AFTER_SCRIPTS_WARNING =
+  "Tools hashed only after an install's scripts ran: what those scripts wrote before the hash is not checked (H-14). An install VTC can run scripts-free removes this warning.";
+
+const resultWarnings = (r: GateResult): string[] =>
+  r.tool?.baseline === "after_scripts" ? [AFTER_SCRIPTS_WARNING] : [];
+
 const servable = (path: string | undefined): string | null =>
   path !== undefined && isServableArtifactPath(path) ? path : null;
 
@@ -120,6 +129,7 @@ const row = (r: GateResult): GateResultRow => ({
       ? null
       : { path: r.report.path, format: r.report.format },
   findings: r.findings,
+  warnings: resultWarnings(r),
 });
 
 const worst = (results: readonly GateResult[]): StatusMeta => {

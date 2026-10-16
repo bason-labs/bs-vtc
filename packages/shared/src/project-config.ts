@@ -324,12 +324,12 @@ export const priceRun = (
  *   sandbox for gates") unless this is `true`; then gates run unconfined and every such gate run
  *   records an `unsandboxed_gate` incident. Like `env_passthrough` it exists only here, never in
  *   `project.yaml`, so a repo cannot switch the gate sandbox off.
- * - `gates.allow_tools_hashed_after_scripts` (H-14, spine §5 reading 250): a verify gate whose
- *   `project` tool could be hashed only after an install gate with no scripts-free form ran its
- *   lifecycle scripts (`ToolIntegrity.baseline` `after_scripts`) is not run (`infra`): such a hash
- *   cannot vouch for what those scripts wrote. `true` runs it anyway, marked `after_scripts`.
- *   Only here, never in `project.yaml`, so a repo cannot accept its own unverified tools. New in
- *   5.9.0.
+ * - `gates.allow_tools_hashed_after_scripts` (H-14, spine §5 reading 250): new in 5.9.0, when a
+ *   verify gate whose tools could be hashed only after an install gate with no scripts-free form
+ *   ran its lifecycle scripts did not run without it. No effect since 5.10.0 (spine §5 reading
+ *   251): such a gate runs, marked `after_scripts` with a warning, and the workspace-wide
+ *   comparison covers every change after the hash. Still parsed so an existing file stays valid;
+ *   `vtc doctor` says it can be removed. Only here, never in `project.yaml`.
  * - `prices` (§11, H-1; spine §5 reading 152): the engine's price table, model id → list price
  *   ({@link ModelPriceSchema}). The engine prices a run's tokens only when the host reported no
  *   cost (Codex reports none). Only here, never in `project.yaml`: a repo could otherwise price its
@@ -449,7 +449,7 @@ export const gatesAllowUnsandboxed = (config: Pick<UserConfig, "gates">): boolea
   config.gates?.allow_unsandboxed ?? false;
 /**
  * `gates.allow_tools_hashed_after_scripts` of a parsed user config (H-14, reading 250); false when
- * the section is absent: a tool hashed only after an install's scripts ran does not run.
+ * the section is absent. No effect on gate runs since 5.10.0 (reading 251).
  */
 export const gatesAllowToolsHashedAfterScripts = (config: Pick<UserConfig, "gates">): boolean =>
   config.gates?.allow_tools_hashed_after_scripts ?? false;

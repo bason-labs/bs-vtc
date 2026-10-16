@@ -387,9 +387,9 @@ export const checkGateSandbox = (
 };
 
 /**
- * H-14 (spine §5 reading 250): while the user-level `gates.allow_tools_hashed_after_scripts` is
- * on, a verify gate whose tool was hashed only after an install's scripts ran still runs, so an
- * install script could have replaced it undetected: a warning. `null` while it is off.
+ * H-14 (spine §5 readings 250 and 251): the user-level `gates.allow_tools_hashed_after_scripts`
+ * has no effect since reading 251 (such a gate runs, marked `after_scripts` with a warning on its
+ * report), so while it is set a warning says it can be removed. `null` while it is off.
  */
 export const checkToolsHashedAfterScripts = (config: UserConfigRead | null): DoctorCheck | null =>
   config === null || !allowToolsHashedAfterScriptsOf(config)
@@ -397,7 +397,7 @@ export const checkToolsHashedAfterScripts = (config: UserConfigRead | null): Doc
     : {
         name: "check tools",
         status: "warn",
-        detail: `gates.allow_tools_hashed_after_scripts is on in ${config.path}: a gate whose tool could be hashed only after an install gate ran its scripts still runs, so an install script that replaced the tool is not detected (H-14); prefer an install VTC runs scripts-free (npm ci, pnpm install, bun install) and remove it`,
+        detail: `gates.allow_tools_hashed_after_scripts is on in ${config.path} but has no effect any more: a gate whose tools could be hashed only after an install gate ran its scripts runs marked after_scripts, with a warning on its report, since what an install script wrote before the hash is not detected (H-14); remove the setting, and prefer an install VTC runs scripts-free (npm ci, pnpm install, bun install)`,
       };
 
 /**

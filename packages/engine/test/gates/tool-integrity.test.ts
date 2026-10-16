@@ -17,6 +17,8 @@ import {
   TOOL_HASH_LIMITS,
   ToolHashLimitError,
   toolPathsCover,
+  workspaceInstallChanges,
+  workspaceToolSnapshot,
 } from "../../src/gates/tool-integrity.js";
 import { cleanupDirs, tempDir } from "../helpers/repo.js";
 
@@ -676,5 +678,118 @@ describe("lintPluginPaths: what a lint config loads besides ESLint (reading 249)
       "node_modules/globals/**",
       "node_modules/pkg-a/**",
     ]);
+  });
+});
+
+describe("workspaceToolSnapshot: every tool the workspace can run, from no command (reading 251)", () => {
+  /** A pnpm-style workspace: a root task runner, a package's linter behind a shim, a venv. */
+  const workspace = (): string => {
+    const root = tempDir("vtc-ws-");
+    put(root, "package.json", '{"name":"root"}');
+    put(root, "node_modules/.pnpm/turbo@2/node_modules/turbo/package.json", '{"name":"turbo"}');
+    put(root, "node_modules/.pnpm/turbo@2/node_modules/turbo/bin/turbo.js", "turbo");
+    put(root, "node_modules/.pnpm/turbo@2/node_modules/turbo/lib/run.js", "run");
+    link(root, "node_modules/.bin/turbo", "../.pnpm/turbo@2/node_modules/turbo/bin/turbo.js");
+    // the workspace's own bin: its target is project code, not a tool
+    put(root, "packages/cli/package.json", '{"name":"cli"}');
+    link(root, "node_modules/.bin/vtc", "../../packages/cli/dist/cli.js");
+    put(
+      root,
+      "packages/web/package.json",
+      JSON.stringify({ name: "web", devDependencies: { "eslint-plugin-strict": "1" } }),
+    );
+    put(
+      root,
+      "packages/web/prettier.config.mjs",
+      'import p from "prettier-plugin-x";\nexport default p;\n',
+    );
+    put(root, "packages/web/node_modules/lint-tool/package.json", '{"name":"lint-tool"}');
+    put(root, "packages/web/node_modules/lint-tool/bin/lint.js", "lint");
+    put(root, "packages/web/node_modules/lint-tool/lib/rules.js", "rules");
+    put(
+      root,
+      "packages/web/node_modules/.bin/lint-tool",
+      '#!/bin/sh\nbasedir=$(dirname "$0")\nexec node "$basedir/../lint-tool/bin/lint.js" "$@"\n',
+    );
+    put(root, "packages/web/node_modules/eslint-plugin-strict/package.json", "{}");
+    put(root, "packages/web/node_modules/eslint-plugin-strict/index.js", "plugin");
+    put(root, "node_modules/prettier-plugin-x/package.json", "{}");
+    put(root, "node_modules/prettier-plugin-x/index.js", "x");
+    put(root, "tools/py/.venv/pyvenv.cfg", "home = /usr/bin\n");
+    put(root, "tools/py/.venv/bin/ruff", "ruff");
+    link(root, "tools/py/.venv/bin/python", "/usr/bin/python3");
+    put(root, "tools/py/.venv/lib/python3.12/site-packages/evil.pth", "import os\n");
+    put(root, "tools/py/.venv/lib/python3.12/site-packages/ruff/__init__.py", "not walked");
+    return root;
+  };
+
+  it("hashes each .bin entry, the file it starts and that package, check-config packages and venvs", () => {
+    const root = workspace();
+    const { snapshot, binDirs } = workspaceToolSnapshot(root);
+    expect(binDirs).toEqual(["node_modules/.bin", "packages/web/node_modules/.bin"]);
+    const turbo = "node_modules/.pnpm/turbo@2/node_modules/turbo";
+    expect([...snapshot.files.keys()]).toEqual(
+      [
+        "node_modules/.bin/turbo",
+        "node_modules/.bin/vtc",
+        `${turbo}/bin/turbo.js`,
+        `${turbo}/lib/run.js`,
+        `${turbo}/package.json`,
+        "node_modules/prettier-plugin-x/index.js",
+        "node_modules/prettier-plugin-x/package.json",
+        "packages/web/node_modules/.bin/lint-tool",
+        "packages/web/node_modules/eslint-plugin-strict/index.js",
+        "packages/web/node_modules/eslint-plugin-strict/package.json",
+        "packages/web/node_modules/lint-tool/bin/lint.js",
+        "packages/web/node_modules/lint-tool/lib/rules.js",
+        "packages/web/node_modules/lint-tool/package.json",
+        "tools/py/.venv/bin/python",
+        "tools/py/.venv/bin/ruff",
+        "tools/py/.venv/lib/python3.12/site-packages/evil.pth",
+        "tools/py/.venv/pyvenv.cfg",
+      ].sort(),
+    );
+    expect(snapshot.files.get("node_modules/.bin/vtc")).toBe("link:../../packages/cli/dist/cli.js");
+    expect(snapshot.files.get("tools/py/.venv/bin/python")).toBe("link:/usr/bin/python3");
+    expect(snapshot.files.get(`${turbo}/lib/run.js`)).toBe(sha("run"));
+    // the same tree hashes the same
+    expect(workspaceToolSnapshot(root).snapshot.sha256).toBe(snapshot.sha256);
+  });
+
+  it("refuses a workspace bigger than it hashes, rather than hashing part of it", () => {
+    const root = workspace();
+    expect(() => workspaceToolSnapshot(root, { maxFiles: 3, maxBytes: 1024 })).toThrow(
+      ToolHashLimitError,
+    );
+  });
+});
+
+describe("workspaceInstallChanges: what the install phase's scripts changed (reading 251)", () => {
+  it("lists changed and removed lines, and entries added to a .bin the baseline had", () => {
+    const root = tempDir("vtc-ws-");
+    put(root, "node_modules/lint/package.json", "{}");
+    put(root, "node_modules/lint/lint.js", "lint");
+    link(root, "node_modules/.bin/lint", "../lint/lint.js");
+    put(root, "node_modules/gone/package.json", "{}");
+    put(root, "node_modules/gone/gone.js", "gone");
+    link(root, "node_modules/.bin/gone", "../gone/gone.js");
+    const before = workspaceToolSnapshot(root);
+    put(root, "node_modules/lint/lint.js", "never fails");
+    rmSync(join(root, "node_modules/.bin/gone"));
+    put(root, "node_modules/.bin/node", "#!/bin/sh\nexit 0\n", 0o755);
+    // a .bin a later install made, and a package's new file: new tools, not changes
+    put(root, "tools/node_modules/x/package.json", "{}");
+    put(root, "tools/node_modules/x/x.js", "x");
+    link(root, "tools/node_modules/.bin/x", "../x/x.js");
+    const after = workspaceToolSnapshot(root);
+    expect(workspaceInstallChanges(before, after)).toEqual([
+      "node_modules/.bin/gone",
+      "node_modules/.bin/node",
+      "node_modules/gone/gone.js",
+      "node_modules/gone/package.json",
+      "node_modules/lint/lint.js",
+    ]);
+    expect(after.snapshot.files.has("tools/node_modules/.bin/x")).toBe(true);
+    expect(workspaceInstallChanges(after, workspaceToolSnapshot(root))).toEqual([]);
   });
 });
