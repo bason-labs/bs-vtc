@@ -212,6 +212,21 @@ const placeCodexFiles = (
   };
 };
 
+/**
+ * The `version` of the compiled plugin's `plugin.json`: the vtc release version (the compiler
+ * requires one, and the cli checks it equals its `VERSION`). `null` when it cannot be read.
+ */
+const shippedVersion = (pluginDir: string): string | null => {
+  try {
+    const parsed = JSON.parse(readFileSync(insidePlugin(pluginDir, "plugin.json"), "utf8")) as {
+      version?: unknown;
+    } | null;
+    return typeof parsed?.version === "string" ? parsed.version : null;
+  } catch {
+    return null;
+  }
+};
+
 export interface CodexInstallDeps {
   /** Runs `codex plugin …` (a short command whose output is read; tests pass a fake). */
   readonly run: RunCommand;
@@ -244,6 +259,12 @@ export const installCodex = async (
       { cause: error },
     );
   }
+  const shipped = shippedVersion(request.pluginDir);
+  const version = registered.version ?? shipped;
+  const stale =
+    registered.version !== null && shipped !== null && registered.version !== shipped
+      ? ` Codex reports version ${registered.version}, but this vtc ships ${shipped}: run vtc install codex again after restarting Codex.`
+      : "";
   return {
     written: [...written, ...filesUnder(join(root, plugin)), index],
     notes: [
@@ -253,7 +274,7 @@ export const installCodex = async (
         : [
             `Replaced the ${CODEX_MARKETPLACE} marketplace an earlier VTC home registered (${registered.replacedSource}).`,
           ]),
-      `Registered the ${plugin} plugin with Codex as ${registered.pluginId} from the ${CODEX_MARKETPLACE} marketplace in ${root}${registered.version === null ? "" : ` (version ${registered.version})`}, for your Codex user (${deps.codexHome}; Codex keeps its copy in ${registered.installedPath}). Its hooks run in the Codex desktop app once you trust them there; the engine's headless role runs never load it.`,
+      `Registered the ${plugin} plugin with Codex as ${registered.pluginId} from the ${CODEX_MARKETPLACE} marketplace in ${root}${version === null ? "" : ` (version ${version})`}, for your Codex user (${deps.codexHome}; Codex keeps its copy in ${registered.installedPath}). Its hooks run in the Codex desktop app once you trust them there; the engine's headless role runs never load it.${stale}`,
     ],
   };
 };

@@ -30,6 +30,16 @@ const usageLines = (usage: UsageReport): string[] => {
   ];
 };
 
+/**
+ * The run's spend against its cap. A run has a cap only once it has features (the sum of their
+ * budgets) or a run-scope `budget.updated`; before that (a quick fix's BA step, the owner's first
+ * run) the engine reports `budget_usd` 0, which is no cap, not a cap of $0.
+ */
+export const budgetLine = (budget: StatusResult["budget"]): string =>
+  budget.budget_usd > 0
+    ? `Budget: $${budget.spent_usd.toFixed(2)} of $${budget.budget_usd.toFixed(2)}`
+    : `Spent: $${budget.spent_usd.toFixed(2)} (no cap)`;
+
 /** `vtc status` as text. */
 export const formatStatus = (status: StatusResult): string[] => {
   const { run } = status;
@@ -45,7 +55,7 @@ export const formatStatus = (status: StatusResult): string[] => {
     ),
     ...status.features.map((f) => `Feature ${f.id}: ${f.status}`),
     `Open escalations: ${String(status.open_escalations)}`,
-    `Budget: $${status.budget.spent_usd.toFixed(2)} of $${status.budget.budget_usd.toFixed(2)}`,
+    budgetLine(status.budget),
     ...usageLines(status.usage),
   ];
 };

@@ -19,6 +19,12 @@
  * (the repo's `info/exclude`; a tracked file is refused). What still keeps the sandbox off from
  * other settings files (the repo's committed ones, the user's own) is named, never edited.
  *
+ * The user's Claude Code statusline is left alone (H-10, spine §5 reading 264): only
+ * `vtc install claude-code --statusline` wraps it in `vtc statusline-tee`, after the human
+ * confirms at the terminal as for the session sandbox, and never twice;
+ * `--no-statusline` puts back the command an earlier install wrapped. The preview of the session
+ * sandbox settings names the file and counts each list; `--verbose` prints every entry.
+ *
  * Registering the Codex plugin (marketplace and `[plugins."vtc@…"]`) is `HostAdapter.install`'s
  * job (AD-6, AD-16 rule 4, reading 60), so its files pass the adapter safety contract; until the
  * spine's §7 "Codex plugin manifest fields" row closes, the Codex install places the skills only
@@ -33,7 +39,13 @@
  */
 import { homedir } from "node:os";
 import { ADAPTER_FACTORIES } from "@vtc/adapters";
-import { DEFAULT_INSTALL_SCOPE, hostConfigDirsOf, HostIdSchema, type HostId } from "@vtc/shared";
+import {
+  DEFAULT_INSTALL_SCOPE,
+  hostConfigDirsOf,
+  HostIdSchema,
+  type HostId,
+  type StatuslineChoice,
+} from "@vtc/shared";
 import { ttyConfirm } from "../confirm.js";
 import { findRepoRoot, UsageError } from "../repo.js";
 import { runtime } from "../runtime.js";
@@ -96,6 +108,20 @@ export const defaultInstallDeps = (): InstallDeps => ({
 });
 
 /**
+ * The settings `vtc install` would write, one line per key: a list as its count, any other value
+ * as JSON. Hundreds of deny paths would bury the question (the owner's first run).
+ */
+export const settingsOutline = (value: unknown, prefix = ""): string[] => {
+  if (Array.isArray(value))
+    return [`${prefix}: ${String(value.length)} ${value.length === 1 ? "entry" : "entries"}`];
+  if (typeof value === "object" && value !== null)
+    return Object.entries(value).flatMap(([key, inner]) =>
+      settingsOutline(inner, prefix === "" ? key : `${prefix}.${key}`),
+    );
+  return [`${prefix}: ${JSON.stringify(value)}`];
+};
+
+/**
  * The Claude Code session sandbox of the repo `vtc install claude-code` runs in (D-an). Resolves
  * false when something is in the way (a link, a file that does not parse, a tracked file); a
  * human who declines is not a failure.
@@ -104,6 +130,7 @@ const installSessionSandbox = async (
   ctx: CommandContext,
   d: InstallDeps,
   repoRoot: string | null,
+  verbose: boolean,
 ): Promise<boolean> => {
   if (d.platform === "win32") {
     ctx.io.out(
@@ -146,12 +173,13 @@ const installSessionSandbox = async (
   ctx.io.out(
     `Code-running roles run inside your Claude Code session (plugin-only dispatch) only with its sandbox on. These settings go into ${read.path} (your other settings stay):`,
   );
-  for (const line of JSON.stringify(
-    sessionSandboxSettings(ctx.vtcHome, sandboxScopeOf(repoRoot, env)),
-    null,
-    2,
-  ).split("\n"))
-    ctx.io.out(`  ${line}`);
+  const wanted = sessionSandboxSettings(ctx.vtcHome, sandboxScopeOf(repoRoot, env));
+  const lines = verbose ? JSON.stringify(wanted, null, 2).split("\n") : settingsOutline(wanted);
+  for (const line of lines) ctx.io.out(`  ${line}`);
+  if (!verbose)
+    ctx.io.out(
+      "  (every list holds deny rules: paths the session may not read or write, commands it may not run; vtc install claude-code --verbose prints every entry)",
+    );
   const dropped =
     read.kind === "ok"
       ? wideningOf(
@@ -210,11 +238,14 @@ export const createInstallCommand = (
           scope: { type: "string" },
           "auto-resume": { type: "boolean" },
           "no-auto-resume": { type: "boolean" },
+          statusline: { type: "boolean" },
+          "no-statusline": { type: "boolean" },
+          verbose: { type: "boolean" },
         },
         true,
       );
       const usage =
-        "usage: vtc install <claude-code|codex> [--scope user|project] [--auto-resume | --no-auto-resume] | vtc install --auto-resume | --no-auto-resume";
+        "usage: vtc install <claude-code|codex> [--scope user|project] [--auto-resume | --no-auto-resume] [--statusline | --no-statusline] [--verbose] | vtc install --auto-resume | --no-auto-resume";
       if (positionals.length > 1 || (positionals.length === 1 && values.host !== undefined))
         throw new UsageError(usage);
       const hostName = values.host ?? positionals[0];
@@ -225,6 +256,12 @@ export const createInstallCommand = (
       const timer =
         values["auto-resume"] === true ? "on" : values["no-auto-resume"] === true ? "off" : null;
       if (hostName === undefined && timer === null) throw new UsageError(usage);
+      if (values.statusline === true && values["no-statusline"] === true)
+        throw new UsageError("pass either --statusline or --no-statusline");
+      const statuslineFlag =
+        values.statusline === true ? "wrap" : values["no-statusline"] === true ? "unwrap" : null;
+      if (statuslineFlag !== null && hostName !== "claude-code")
+        throw new UsageError("--statusline and --no-statusline are for vtc install claude-code");
       const scope = values.scope;
       if (scope !== undefined && scope !== "user" && scope !== "project")
         throw new UsageError(`--scope must be user or project, got ${scope}`);
@@ -247,6 +284,16 @@ export const createInstallCommand = (
         });
         const repoRoot = await findRepoRoot(ctx.cwd);
         const installScope = scope ?? DEFAULT_INSTALL_SCOPE[host.data];
+        let statusline: StatuslineChoice = statuslineFlag ?? "keep";
+        if (statusline === "wrap") {
+          ctx.io.out(
+            "With --statusline your Claude Code statusline runs through vtc statusline-tee: it shows your statusline unchanged and forwards only the usage windows (5-hour and weekly use) to the local engine. vtc install claude-code --no-statusline undoes it.",
+          );
+          if (!(await d.confirm("Wrap your Claude Code statusline in vtc statusline-tee?"))) {
+            ctx.io.out("Statusline left as it is.");
+            statusline = "keep";
+          }
+        }
         try {
           const result = await adapter.install({
             projectRoot: repoRoot ?? ctx.cwd,
@@ -254,6 +301,7 @@ export const createInstallCommand = (
             pluginDir,
             scope: installScope,
             vtcHome: ctx.vtcHome,
+            ...(host.data === "claude-code" ? { statusline } : {}),
           });
           ctx.io.out(`Installed the VTC plugin for ${host.data}.`);
           for (const path of result.written) ctx.io.out(`  wrote ${path}`);
@@ -261,7 +309,10 @@ export const createInstallCommand = (
         } finally {
           await adapter.dispose();
         }
-        if (host.data === "claude-code" && !(await installSessionSandbox(ctx, d, repoRoot)))
+        if (
+          host.data === "claude-code" &&
+          !(await installSessionSandbox(ctx, d, repoRoot, values.verbose === true))
+        )
           failed = true;
       }
       if (osTimer === null) {

@@ -207,6 +207,45 @@ const collectCommands = (files: readonly SourceFile[], errors: CompileError[]): 
   return commands.sort((a, b) => (a.name < b.name ? -1 : 1));
 };
 
+/** The hand-written plugin manifests whose `version` hosts show (Codex: "version 0.2.0"). */
+const VERSIONED_MANIFESTS = [
+  "plugins/claude-code/.claude-plugin/plugin.json",
+  CODEX_PLUGIN_MANIFEST,
+] as const;
+
+const SEMVER = /^\d+\.\d+\.\d+(-[0-9A-Za-z.-]+)?$/;
+
+/**
+ * Both plugin manifests carry one semver version, the vtc release's (`packages/cli` checks it
+ * equals its `VERSION`, which the compiler does not import): a Codex install under vtc 0.2.0
+ * registered "version 0.1.0" (the owner's first run).
+ */
+const checkPluginVersions = (files: readonly SourceFile[], errors: CompileError[]): void => {
+  const versions: { path: string; version: string }[] = [];
+  for (const path of VERSIONED_MANIFESTS) {
+    const text = files.find((f) => f.path === path)?.text;
+    if (text === undefined) continue;
+    let version: unknown;
+    try {
+      version = (JSON.parse(text) as { version?: unknown } | null)?.version;
+    } catch {
+      continue; // reported as invalid JSON elsewhere
+    }
+    if (typeof version !== "string" || !SEMVER.test(version)) {
+      errors.push({ path, message: "needs a semver version (the vtc release version)" });
+      continue;
+    }
+    versions.push({ path, version });
+  }
+  const [first, ...rest] = versions;
+  for (const other of rest)
+    if (first !== undefined && other.version !== first.version)
+      errors.push({
+        path: other.path,
+        message: `version ${other.version} differs from ${first.path}'s ${first.version}: both plugins carry the vtc release version`,
+      });
+};
+
 /** Hand-written files each host directory may hold (AD-16 rule 1); anything else is an error. */
 export const HOST_PLUGIN_FILES: Readonly<Record<HostId, readonly string[]>> = {
   "claude-code": [".claude-plugin/plugin.json", ".mcp.json"],
@@ -641,6 +680,7 @@ export const compilePlugins = (
       errors.push({ path: CODEX_PLUGIN_MANIFEST, message });
     }
   }
+  checkPluginVersions(files, errors);
   requireFile(files, "roles/NOTICE", errors);
   requireFile(files, "roles/_shared/result-protocol.md", errors);
   checkRolesChangelog(files, errors);

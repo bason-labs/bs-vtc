@@ -475,6 +475,22 @@ describe("compilePlugins: errors", () => {
     );
   });
 
+  it("requires one release version in both hand-written plugin manifests (the vtc VERSION, checked in the cli)", () => {
+    const claude = "plugins/claude-code/.claude-plugin/plugin.json";
+    const codex = "plugins/codex/plugin.json";
+    const codexWith = (version: string): string =>
+      `{ "$schema": "https://agent-plugins.org/schemas/1.0.0/plugin.schema.json", "name": "vtc"${version} }\n`;
+    expect(errorsOf({ [codex]: codexWith(', "version": "0.2.0"') })).toContain(
+      `${codex}: version 0.2.0 differs from ${claude}'s 0.1.0: both plugins carry the vtc release version`,
+    );
+    expect(errorsOf({ [claude]: '{ "name": "vtc" }\n' })).toContain(
+      `${claude}: needs a semver version (the vtc release version)`,
+    );
+    expect(errorsOf({ [codex]: codexWith(', "version": "next"') })).toContain(
+      `${codex}: needs a semver version (the vtc release version)`,
+    );
+  });
+
   it.each([
     "plugins/codex/../../outside.json",
     "plugins/codex/./plugin.json",

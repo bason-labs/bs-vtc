@@ -596,6 +596,8 @@ export const StatusResultSchema = z.strictObject({
   /** Every feature with its state; parked features park as a unit (§6.7a). */
   features: z.array(FeatureSchema).default([]),
   open_escalations: z.int().nonnegative(),
+  // `budget_usd` 0 is no cap yet (no feature budget and no run-scope budget.updated, e.g. a quick
+  // fix before PLAN): `vtc status` shows "Spent: $x (no cap)" (spine §5 reading 264)
   budget: z.strictObject({
     budget_usd: z.number().nonnegative(),
     spent_usd: z.number().nonnegative(),

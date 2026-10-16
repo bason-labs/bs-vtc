@@ -29,6 +29,10 @@
  * overrides, warning only when a host that reports no cost has no known price at all (H-12,
  * `prices.ts`); the model ids a host refused, with the last time and detail (D-cx,
  * `model-refusals.ts`).
+ * Since the owner's first run (readings 264, 265): a long list (a session sandbox with hundreds of
+ * missing deny rules) is counted with a few examples, `--verbose` prints it whole; a
+ * `.vtc/project.yaml` or `.vtc/gates.yml` that the repo's ignore rules keep out of git warns
+ * and names the rule (`vtc-config-ignore.ts`). Doctor never suggests the statusline shim (H-10).
  * `info` lines report and never fail.
  * `--download` fetches the missing scanners into `~/.vtc/`, each verified against its pinned
  * SHA-256 (§4.4), and refreshes the osv-scanner database into `~/.vtc/osv-db/` for the repo's
@@ -83,6 +87,7 @@ import {
   checkGateSandbox,
   checkToolsHashedAfterScripts,
   checkSessionSandbox,
+  checkVtcConfigIgnored,
   detectGateSandbox,
   runDoctorChecks,
   type DoctorCheck,
@@ -124,6 +129,7 @@ import {
   type LocalSettingsRead,
   type SessionSandboxReport,
 } from "../session-sandbox.js";
+import { ignoredVtcConfig, type IgnoredVtcConfig } from "../vtc-config-ignore.js";
 import { autoResumeTimer, defaultTimerHost } from "../timer.js";
 import { readUserConfig, type UserConfigRead } from "../user-config.js";
 import { createAdapters } from "../wiring.js";
@@ -170,6 +176,8 @@ export interface DoctorCommandEnv extends DoctorEnv {
   readonly gateSandbox?: () => Promise<GateSandboxReport>;
   /** The Claude session sandbox of the repo doctor runs in (D-an), `null` outside a repo. */
   readonly sessionSandbox?: () => Promise<SessionSandboxReport | null>;
+  /** The repo's `.vtc/project.yaml` / `gates.yml` its ignore rules match; `null` outside a repo. */
+  readonly vtcConfigIgnored?: () => Promise<readonly IgnoredVtcConfig[] | null>;
   /** The user's Claude `settings.json`, whose hooks and plugins headless role runs load (D-bp). */
   readonly claudeUserSettings?: () => LocalSettingsRead;
   /** The user's own yt-dlp for YouTube transcripts, `null` when absent (D-bs). */
@@ -354,6 +362,10 @@ export const defaultDoctorEnv = (ctx: CommandContext): DoctorCommandEnv => {
         ? null
         : claudeSessionSandboxOf(repoRoot, ctx.vtcHome, defaultSessionSandboxEnv(), ctx.cwd);
     },
+    vtcConfigIgnored: async () => {
+      const repoRoot = await findRepoRoot(ctx.cwd);
+      return repoRoot === null ? null : ignoredVtcConfig(repoRoot);
+    },
     claudeUserSettings: () => {
       const { userSettings } = defaultSessionSandboxEnv();
       return userSettings === null
@@ -375,12 +387,13 @@ export const createDoctorCommand = (
 ): CommandSpec => ({
   name: "doctor",
   summary:
-    "Check prerequisites (runtime, git, host CLIs, versions, logins and billing, gh and its login, automation and evidence (gh --attach, ffmpeg, browser), host web search, routing (tier table, project range, models per tier, Lookback pace), price tables and overrides, refused model ids, auto-resume timer, the user hooks and plugins role runs load, env passthrough, research search and yt-dlp, gate sandbox, session sandbox, the repo's engine and merge level, the browser, pinned scanners, osv database); --download fetches missing scanners and the osv database; --install-browser installs the visual stack's browser",
+    "Check prerequisites (runtime, git, host CLIs, versions, logins and billing, gh and its login, automation and evidence (gh --attach, ffmpeg, browser), host web search, routing (tier table, project range, models per tier, Lookback pace), price tables and overrides, refused model ids, auto-resume timer, the user hooks and plugins role runs load, env passthrough, research search and yt-dlp, gate sandbox, session sandbox, the repo's engine and merge level, the browser, pinned scanners, osv database, .vtc config kept out of git); --download fetches missing scanners and the osv database; --install-browser installs the visual stack's browser; --verbose lists long lists whole",
   run: (args, ctx) =>
     guarded("doctor", ctx, async () => {
       const { values } = parseFlags(args, {
         download: { type: "boolean" },
         "install-browser": { type: "boolean" },
+        verbose: { type: "boolean" },
       });
       const e = env(ctx);
       if (values["install-browser"] === true) {
@@ -423,7 +436,11 @@ export const createDoctorCommand = (
       const afterScripts = checkToolsHashedAfterScripts(userConfig);
       if (afterScripts !== null) checks.push(afterScripts);
       const session = e.sessionSandbox === undefined ? null : await e.sessionSandbox();
-      if (session !== null) checks.push(checkSessionSandbox(session));
+      if (session !== null)
+        checks.push(checkSessionSandbox(session, { verbose: values.verbose === true }));
+      const ignored = e.vtcConfigIgnored === undefined ? null : await e.vtcConfigIgnored();
+      const ignoredCheck = ignored === null ? null : checkVtcConfigIgnored(ignored);
+      if (ignoredCheck !== null) checks.push(ignoredCheck);
       const browser = e.browser === undefined ? null : await checkBrowser(e.browser);
       if (browser !== null) checks.push(browser);
       if (e.automation !== undefined) {

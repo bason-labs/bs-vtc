@@ -74,6 +74,21 @@ describe("Codex install (AD-6 rule 5, AD-16 rules 3–4)", () => {
     expect(result.notes.join(" ")).toContain("trust this project");
   });
 
+  it("says when Codex registered another version than the plugin ships", async () => {
+    const env = setup();
+    const manifest = join(env.pluginDir, "plugin.json");
+    writeFileSync(
+      manifest,
+      JSON.stringify({
+        ...(JSON.parse(readFileSync(manifest, "utf8")) as object),
+        version: "0.2.0",
+      }),
+    );
+    const result = await codexAdapter().install({ ...env, scope: "user" });
+    const registration = result.notes.find((note) => note.startsWith("Registered the vtc plugin"));
+    expect(registration).toMatch(/Codex reports version 0\.1\.0, but this vtc ships 0\.2\.0/);
+  });
+
   it("user scope writes under the injected home only", async () => {
     const env = setup();
     const result = await codexAdapter().install({ ...env, scope: "user" });
@@ -104,6 +119,9 @@ describe("Codex install (AD-6 rule 5, AD-16 rules 3–4)", () => {
     // skills stay placed where Codex loads skills
     expect(result.notes.join(" ")).not.toMatch(/not registered/);
     const registration = result.notes.find((note) => note.startsWith("Registered the vtc plugin"));
+    // the version the plugin ships (the vtc release version), as Codex registered it
+    expect(registration).toMatch(/\(version 0\.1\.0\)/);
+    expect(registration).not.toMatch(/Codex reports version/);
     expect(registration).toMatch(/hooks run in the Codex desktop app once you trust them/);
     expect(registration).toMatch(/headless role runs never load it/);
     expect(result.notes.join(" ")).toContain(skills);

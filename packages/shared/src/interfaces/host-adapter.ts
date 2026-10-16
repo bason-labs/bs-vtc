@@ -133,7 +133,19 @@ export interface InstallRequest {
    * they point. Absent: `<home>/.vtc`. New in contracts 4.4.0.
    */
   readonly vtcHome?: string;
+  /**
+   * What the Claude Code install does with the user's statusline (H-10; spine §5 reading 264).
+   * Absent or `keep`: nothing, the statusline stays the user's own. `wrap` (`vtc install
+   * claude-code --statusline`, after the human confirmed at the terminal): the command runs
+   * through `statuslineTeeCommand`, never wrapped twice. `unwrap` (`--no-statusline`): the
+   * command an earlier install wrapped is put back. Codex has no statusline and ignores it.
+   * Optional, so it changes no frozen schema.
+   */
+  readonly statusline?: StatuslineChoice;
 }
+
+/** {@link InstallRequest.statusline}. */
+export type StatuslineChoice = "keep" | "wrap" | "unwrap";
 
 export type InstallScope = "user" | "project";
 

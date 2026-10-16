@@ -5,7 +5,9 @@
  * `.vtc/.gitignore`, which keeps `.vtc/state/` out of git (§4.3). A cloned repo can plant `.vtc`
  * or either file as a symlink pointing anywhere, so init refuses symlinks and anything that is not
  * a plain directory or file, and never writes through a link: new files are created exclusively
- * and `--force` replaces the file by renaming a fresh one over it.
+ * and `--force` replaces the file by renaming a fresh one over it. When the repo's ignore rules
+ * keep `.vtc/project.yaml` or `.vtc/gates.yml` out of git (e.g. a `.vtc/` line), init warns and
+ * names the rule to change (spine §5 reading 265); it never edits the user's ignore files.
  */
 import { lstatSync, mkdirSync, renameSync, rmSync, writeFileSync, type Stats } from "node:fs";
 import { join } from "node:path";
@@ -13,6 +15,7 @@ import { core } from "@vtc/engine";
 import { ProjectConfigSchema, type ProjectConfig } from "@vtc/shared";
 import { requireRepoRoot, UsageError } from "../repo.js";
 import type { CommandSpec } from "./types.js";
+import { ignoredVtcConfig, vtcConfigIgnoredText } from "../vtc-config-ignore.js";
 import { EXIT, guarded, parseFlags } from "./util.js";
 
 const HEADER = [
@@ -95,6 +98,8 @@ export const command: CommandSpec = {
       if (!hasIgnore)
         writeFileSync(ignore, "# local engine state (§4.3)\n/state/\n", { flag: "wx" });
       ctx.io.out(`Wrote ${path}`);
+      const ignored = await ignoredVtcConfig(repoRoot);
+      if (ignored.length > 0) ctx.io.err(`vtc init: warning: ${vtcConfigIgnoredText(ignored)}.`);
       ctx.io.out(
         "Next: vtc calibrate, commit .vtc/project.yaml and .vtc/gates.yml (a run starts only on the committed copies), then /vtc start in Claude Code or Codex.",
       );

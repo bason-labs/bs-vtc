@@ -23,6 +23,7 @@ import {
 import type { DaemonState } from "./daemon.js";
 import type { Exec } from "./process.js";
 import type { SessionSandboxReport } from "./session-sandbox.js";
+import { vtcConfigIgnoredText, type IgnoredVtcConfig } from "./vtc-config-ignore.js";
 import {
   allowToolsHashedAfterScriptsOf,
   allowUnsandboxedOf,
@@ -405,7 +406,27 @@ export const checkToolsHashedAfterScripts = (config: UserConfigRead | null): Doc
  * the engine runs code-running roles in a Claude Code Lead session only when it is on. A warning
  * otherwise (Codex-only users and headless dispatch do not need it).
  */
-export const checkSessionSandbox = (report: SessionSandboxReport): DoctorCheck => {
+/** How many entries of a long list a doctor line names; `--verbose` names them all. */
+export const DOCTOR_EXAMPLES = 5;
+
+/**
+ * A list for one doctor line: whole when short or `verbose`, else its count and the first
+ * {@link DOCTOR_EXAMPLES} (a missing session sandbox lacks hundreds of deny rules).
+ */
+export const listedBriefly = (
+  items: readonly string[],
+  separator: string,
+  verbose: boolean,
+): string =>
+  verbose || items.length <= DOCTOR_EXAMPLES
+    ? items.join(separator)
+    : `${String(items.length)} entries, e.g. ${items.slice(0, DOCTOR_EXAMPLES).join(separator)} (vtc doctor --verbose lists them all)`;
+
+export const checkSessionSandbox = (
+  report: SessionSandboxReport,
+  options: { readonly verbose?: boolean } = {},
+): DoctorCheck => {
+  const verbose = options.verbose === true;
   const name = "session";
   const fix = "run vtc install --host claude-code in this repo";
   if (report.state === "on")
@@ -414,7 +435,7 @@ export const checkSessionSandbox = (report: SessionSandboxReport): DoctorCheck =
   const widened =
     report.widening.length === 0
       ? ""
-      : `; these settings let commands past it: ${report.widening.join("; ")} (remove them)`;
+      : `; these settings let commands past it: ${listedBriefly(report.widening, "; ", verbose)} (remove them)`;
   switch (report.file) {
     case "absent":
       return {
@@ -438,10 +459,20 @@ export const checkSessionSandbox = (report: SessionSandboxReport): DoctorCheck =
       return {
         name,
         status: "warn",
-        detail: `the Claude session sandbox in ${report.path} is ${report.state}${report.missing.length === 0 ? "" : `; missing: ${report.missing.join(", ")}`}${widened}: ${refused}; ${fix}`,
+        detail: `the Claude session sandbox in ${report.path} is ${report.state}${report.missing.length === 0 ? "" : `; missing: ${listedBriefly(report.missing, ", ", verbose)}`}${widened}: ${refused}; ${fix}`,
       };
   }
 };
+
+/**
+ * `.vtc/project.yaml` and `.vtc/gates.yml` the repo's ignore rules keep out of git (spine §5
+ * readings 79 and 265): a run starts only on their committed copies, so an ignore rule such as
+ * `.vtc/` blocks every run. `null` when nothing ignores them.
+ */
+export const checkVtcConfigIgnored = (ignored: readonly IgnoredVtcConfig[]): DoctorCheck | null =>
+  ignored.length === 0
+    ? null
+    : { name: "vtc config", status: "warn", detail: vtcConfigIgnoredText(ignored) };
 
 /**
  * What each host adapter's `authStatus()` reports (AD-25 rule 3): the check the engine runs

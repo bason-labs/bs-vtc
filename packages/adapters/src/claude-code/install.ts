@@ -9,9 +9,12 @@
  *    (`extraKnownMarketplaces`, `enabledPlugins`): `~/.claude/settings.json` for the user scope,
  *    the repo's personal `.claude/settings.local.json` for the project scope (the marketplace
  *    path is machine-local, so it never goes into the shared `.claude/settings.json`);
- * 3. wires the statusline tee shim around the user's own statusline command, which keeps running
- *    unchanged (§6.9): `statusLine.command` is `statuslineTeeCommand(<user command>)` from
- *    `@vtc/shared` (spine §5 reading 61), the frozen line the cli's `vtc statusline-tee` reads.
+ * 3. leaves the user's statusline alone unless the request asks (H-10, spine §5 reading 264):
+ *    `statusline: "wrap"` wires the tee shim around the user's own statusline command, which
+ *    keeps running unchanged (§6.9): `statusLine.command` is `statuslineTeeCommand(<user
+ *    command>)` from `@vtc/shared` (reading 61), the frozen line the cli's `vtc statusline-tee`
+ *    reads, never wrapped twice; `statusline: "unwrap"` puts back the command an earlier install
+ *    wrapped.
  * 4. keeps the project's local file the project's own (project scope): a linked file or `.claude`
  *    directory is refused, as is a file git tracks; one nothing ignores yet is added to the
  *    repository's `info/exclude` (local to the clone, never committed).
@@ -31,6 +34,7 @@ import {
   statuslineTeeCommand,
   type InstallRequest,
   type InstallResult,
+  type StatuslineChoice,
 } from "@vtc/shared";
 import {
   filesUnder,
@@ -86,6 +90,76 @@ const wiredStatusLine = (
   return { ...(isRecord(own) ? own : {}), type: "command", command };
 };
 
+/**
+ * The user's command inside a shim line in the frozen form (or the legacy `--wrap` one): `null`
+ * for a shim that wrapped no command, `undefined` for a line that is not one the adapter wrote.
+ */
+const unwrappedCommand = (line: string): string | null | undefined => {
+  const command = frozenTee(line);
+  if (command === TEE) return null;
+  const prefix = `${TEE} ${STATUSLINE_TEE.separator} `;
+  if (!command.startsWith(prefix)) return undefined;
+  const word = command.slice(prefix.length);
+  // exactly one word as `shellQuoteWord` writes it: '…' with each ' written as '\''
+  if (!/^'(?:[^']|'\\'')*'$/.test(word)) return undefined;
+  return word.slice(1, -1).replace(/'\\''/g, "'");
+};
+
+type StatusLinePlan =
+  | { readonly kind: "unchanged"; readonly note: string | null }
+  | { readonly kind: "set"; readonly value: Record<string, unknown>; readonly note: string }
+  | { readonly kind: "remove"; readonly note: string };
+
+const UNWRAP_HINT =
+  "vtc install claude-code --no-statusline puts your own command back (VTC skips the statusline capture, H-10).";
+
+/** What the request's `statusline` choice does to the target file's `statusLine`. */
+const statusLinePlan = (
+  choice: StatuslineChoice,
+  target: Record<string, unknown>,
+  fallbacks: readonly Record<string, unknown>[],
+  path: string,
+): StatusLinePlan => {
+  const own = statusLineCommand(target);
+  if (choice === "wrap")
+    return {
+      kind: "set",
+      value: wiredStatusLine(target, fallbacks),
+      note: "Your statusline now runs through `vtc statusline-tee`, which shows it unchanged and forwards only the usage windows to the local engine (vtc install claude-code --no-statusline undoes it).",
+    };
+  if (choice === "keep")
+    return {
+      kind: "unchanged",
+      note:
+        own !== null && isTee(own)
+          ? `Your statusline still runs through vtc statusline-tee from an earlier install (${path}); ${UNWRAP_HINT}`
+          : null,
+    };
+  if (own === null || !isTee(own))
+    return {
+      kind: "unchanged",
+      note: `Your statusline does not run through vtc statusline-tee (${path}); nothing to undo.`,
+    };
+  const user = unwrappedCommand(own);
+  if (user === undefined)
+    return {
+      kind: "unchanged",
+      note: `The statusline in ${path} runs through vtc statusline-tee in a form VTC did not write, so it was left as it is: set statusLine.command there to your own command.`,
+    };
+  const inherited = fallbacks.map(statusLineCommand).find((c) => c !== null) ?? null;
+  if (user === null || user === inherited)
+    return {
+      kind: "remove",
+      note: `Your statusline runs your own command again: removed the vtc statusline-tee line from ${path}.`,
+    };
+  const line = target.statusLine;
+  return {
+    kind: "set",
+    value: { ...(isRecord(line) ? line : {}), type: "command", command: user },
+    note: `Your statusline runs your own command again (${path}).`,
+  };
+};
+
 /** The text `writeJson` would write. */
 const jsonText = (value: unknown): string => `${JSON.stringify(value, null, 2)}\n`;
 
@@ -139,14 +213,24 @@ export const installClaudeCode = (request: InstallRequest): InstallResult => {
     ? settings.extraKnownMarketplaces
     : {};
   const enabled = isRecord(settings.enabledPlugins) ? settings.enabledPlugins : {};
+  const statusLine = statusLinePlan(
+    request.statusline ?? "keep",
+    settings,
+    fallbacks,
+    settingsPath,
+  );
+  const kept =
+    statusLine.kind === "remove"
+      ? Object.fromEntries(Object.entries(settings).filter(([key]) => key !== "statusLine"))
+      : settings;
   const registered: Record<string, unknown> = {
-    ...settings,
+    ...kept,
     extraKnownMarketplaces: {
       ...marketplaces,
       [CLAUDE_MARKETPLACE]: { source: { source: "directory", path: marketplace } },
     },
     enabledPlugins: { ...enabled, [`${manifest.plugin}@${CLAUDE_MARKETPLACE}`]: true },
-    statusLine: wiredStatusLine(settings, fallbacks),
+    ...(statusLine.kind === "set" ? { statusLine: statusLine.value } : {}),
   };
 
   const settingsText = jsonText(registered);
@@ -180,7 +264,7 @@ export const installClaudeCode = (request: InstallRequest): InstallResult => {
     ],
     notes: [
       `Restart Claude Code, then confirm the ${manifest.plugin} plugin from the ${CLAUDE_MARKETPLACE} marketplace if /plugin asks.`,
-      "Your statusline now runs through `vtc statusline-tee`, which shows it unchanged and forwards only the usage windows to the local engine.",
+      ...(statusLine.note === null ? [] : [statusLine.note]),
       ...(!writesLocal
         ? []
         : exclusion === null

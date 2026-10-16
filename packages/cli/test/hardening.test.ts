@@ -352,9 +352,9 @@ describe("vtc install --host claude-code writes the session sandbox (D-an)", () 
     const questions: string[] = [];
     const { ctx, out } = capture(join(repo), home);
     const cmd = createInstallCommand(deps((q) => (questions.push(q), Promise.resolve(true))));
-    expect(await cmd.run(["claude-code"], ctx)).toBe(0);
+    expect(await cmd.run(["claude-code", "--verbose"], ctx)).toBe(0);
     const text = out.join("\n");
-    // what is written is shown before the question
+    // what is written is shown before the question, every entry with --verbose (counted without)
     expect(text).toContain(
       JSON.stringify(sessionSandboxSettings(home, sandboxScopeOf(repo, SANDBOX_ENV)), null, 2)
         .split("\n")

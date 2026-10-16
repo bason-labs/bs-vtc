@@ -4745,6 +4745,31 @@ org.chromium.Chromium.MachPortRendezvousServer.<pid>: Permission denied (1100)` 
       most one is logged per host each hour (`USAGE_IDLE_LOG_MS`), except when a window fills or
       frees. The stored snapshot, which the engine's limit checks read, still takes every
       reading.
+264.  **The statusline is opt-in; the cli's first-run findings** (H-10; amends reading 234's
+      "the shim stays wired" and readings 6 and 61's install step). _Lead decision 2026-10-17,
+      pending human review._ (1) `vtc install claude-code` leaves the user's statusline alone:
+      `InstallRequest.statusline` (optional, absent is `keep`) is `wrap` only for
+      `--statusline` after the human confirms at the terminal, as for the session sandbox,
+      and `unwrap` for `--no-statusline`, which puts back the command an earlier install
+      wrapped (a shim that wrapped nothing, or a project-scope copy of the inherited command,
+      is removed). A wrapped line is never wrapped again; a plain install that finds one says
+      how to undo it. `vtc doctor` never suggests the shim. (2) A long list in a doctor line
+      (the session sandbox's missing deny rules, hundreds of paths) is its count with at most
+      five examples (`DOCTOR_EXAMPLES`); `vtc doctor --verbose` prints it whole. The install
+      preview names the settings file and counts each list (`settingsOutline`); `--verbose`
+      prints the settings JSON. (3) `StatusResult.budget.budget_usd` 0 means no cap yet (no
+      feature budget and no run-scope `budget.updated`, as in a quick fix before PLAN):
+      `vtc status` shows "Spent: $x (no cap)", never "of $0.00". (4) Both hand-written plugin
+      manifests carry the vtc release version: the compiler requires one semver version in
+      both, the cli tests that it equals `VERSION`, and the Codex install note prints the
+      version the plugin ships and says when Codex registered another.
+265.  **`.vtc/project.yaml` and `.vtc/gates.yml` are never gitignored** (reading 79, reading 90).
+      _Lead decision 2026-10-17, pending human review._ A run starts only on their committed
+      copies, so an ignore rule matching either (the owner's `.vtc/` line) blocks every run.
+      `vtc doctor` warns (`vtc config`) and `vtc init` warns on stderr, naming the rule as
+      `git check-ignore -v` reports it (a tracked file or a `!` rule is fine) and the line to
+      use instead: `.vtc/state/`, the only part of `.vtc/` that stays out of git (the engine
+      commits the rest at its milestones). Neither edits the user's ignore files.
 
 ## 6. Change process for this spine
 

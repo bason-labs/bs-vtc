@@ -74,11 +74,81 @@ describe("Claude install (AD-6 rule 5, AD-16 rule 4)", () => {
         "vtc-local": { source: { source: "directory", path: marketplace } },
       },
       enabledPlugins: { "vtc@vtc-local": true },
-      statusLine: { type: "command", command: "vtc statusline-tee" },
     });
+    expect(result.notes.join("\n")).not.toMatch(/statusline/i);
   });
 
-  it("wraps the user's own statusline and keeps every other setting", async () => {
+  it("leaves the user's statusline alone unless asked (H-10, reading 264)", async () => {
+    const env = setup();
+    const settingsPath = join(env.home, ".claude", "settings.json");
+    const statusLine = { type: "command", command: "~/bin/my line.sh", padding: 1 };
+    writeJsonFile(settingsPath, { model: "opus", statusLine });
+    for (const statusline of [undefined, "keep"] as const) {
+      const result = await createClaudeCodeAdapter().install({
+        ...env,
+        scope: "user",
+        ...(statusline === undefined ? {} : { statusline }),
+      });
+      expect(readJson(settingsPath).statusLine).toEqual(statusLine);
+      expect(result.notes.join("\n")).not.toMatch(/statusline/i);
+    }
+  });
+
+  it("says how to undo a statusline an earlier install wrapped, and leaves it as it is", async () => {
+    const env = setup();
+    const settingsPath = join(env.home, ".claude", "settings.json");
+    const statusLine = { type: "command", command: statuslineTeeCommand("starship") };
+    writeJsonFile(settingsPath, { statusLine });
+    const result = await createClaudeCodeAdapter().install({ ...env, scope: "user" });
+    expect(readJson(settingsPath).statusLine).toEqual(statusLine);
+    expect(result.notes.join("\n")).toMatch(
+      /still runs through vtc statusline-tee.*vtc install claude-code --no-statusline/,
+    );
+  });
+
+  it("--no-statusline puts back the command an earlier install wrapped", async () => {
+    for (const [wired, restored] of [
+      [statuslineTeeCommand("~/bin/my line.sh 'x'"), "~/bin/my line.sh 'x'"],
+      ["vtc statusline-tee --wrap 'my line'", "my line"],
+      [statuslineTeeCommand(`a'b'"c" | d`), `a'b'"c" | d`],
+    ] as const) {
+      const env = setup();
+      const settingsPath = join(env.home, ".claude", "settings.json");
+      writeJsonFile(settingsPath, {
+        model: "opus",
+        statusLine: { type: "command", command: wired, padding: 2 },
+      });
+      const result = await createClaudeCodeAdapter().install({
+        ...env,
+        scope: "user",
+        statusline: "unwrap",
+      });
+      expect(readJson(settingsPath)).toMatchObject({
+        model: "opus",
+        statusLine: { type: "command", command: restored, padding: 2 },
+      });
+      expect(result.notes.join("\n")).toMatch(/Your statusline runs your own command again/);
+    }
+  });
+
+  it("--no-statusline removes a shim that wrapped no command, and leaves a statusline it did not wrap", async () => {
+    const env = setup();
+    const settingsPath = join(env.home, ".claude", "settings.json");
+    writeJsonFile(settingsPath, { statusLine: { type: "command", command: "vtc statusline-tee" } });
+    await createClaudeCodeAdapter().install({ ...env, scope: "user", statusline: "unwrap" });
+    expect(readJson(settingsPath)).not.toHaveProperty("statusLine");
+    const own = { type: "command", command: "starship" };
+    writeJsonFile(settingsPath, { statusLine: own });
+    const result = await createClaudeCodeAdapter().install({
+      ...env,
+      scope: "user",
+      statusline: "unwrap",
+    });
+    expect(readJson(settingsPath).statusLine).toEqual(own);
+    expect(result.notes.join("\n")).toMatch(/does not run through vtc statusline-tee/);
+  });
+
+  it("wraps the user's own statusline when asked and keeps every other setting", async () => {
     const env = setup();
     const settingsPath = join(env.home, ".claude", "settings.json");
     writeJsonFile(settingsPath, {
@@ -86,7 +156,12 @@ describe("Claude install (AD-6 rule 5, AD-16 rule 4)", () => {
       enabledPlugins: { "other@market": true },
       statusLine: { type: "command", command: "~/bin/my line.sh 'x'", padding: 1 },
     });
-    await createClaudeCodeAdapter().install({ ...env, scope: "user" });
+    const result = await createClaudeCodeAdapter().install({
+      ...env,
+      scope: "user",
+      statusline: "wrap",
+    });
+    expect(result.notes.join("\n")).toContain("vtc statusline-tee");
     const settings = readJson(settingsPath);
     expect(settings.model).toBe("opus");
     expect(settings.enabledPlugins).toEqual({ "other@market": true, "vtc@vtc-local": true });
@@ -173,7 +248,7 @@ describe("Claude install (AD-6 rule 5, AD-16 rule 4)", () => {
       if (userLine !== undefined) {
         writeJsonFile(settingsPath, { statusLine: { type: "command", command: userLine } });
       }
-      await createClaudeCodeAdapter().install({ ...env, scope: "user" });
+      await createClaudeCodeAdapter().install({ ...env, scope: "user", statusline: "wrap" });
       const command = (readJson(settingsPath).statusLine as { command: string }).command;
       expect(command).toBe(expected);
       expect(command).toBe(statuslineTeeCommand(userLine));
@@ -187,7 +262,7 @@ describe("Claude install (AD-6 rule 5, AD-16 rule 4)", () => {
     writeJsonFile(settingsPath, {
       statusLine: { type: "command", command: "vtc statusline-tee --wrap 'my line'" },
     });
-    await createClaudeCodeAdapter().install({ ...env, scope: "user" });
+    await createClaudeCodeAdapter().install({ ...env, scope: "user", statusline: "wrap" });
     expect(readJson(settingsPath).statusLine).toEqual({
       type: "command",
       command: "vtc statusline-tee -- 'my line'",
@@ -227,8 +302,10 @@ describe("Claude install (AD-6 rule 5, AD-16 rule 4)", () => {
     const settingsPath = join(env.home, ".claude", "settings.json");
     writeJsonFile(settingsPath, { statusLine: { type: "command", command: "starship" } });
     const adapter = createClaudeCodeAdapter();
-    await adapter.install({ ...env, scope: "user" });
+    await adapter.install({ ...env, scope: "user", statusline: "wrap" });
     const first = readFileSync(settingsPath, "utf8");
+    await adapter.install({ ...env, scope: "user", statusline: "wrap" });
+    expect(readFileSync(settingsPath, "utf8")).toBe(first);
     await adapter.install({ ...env, scope: "user" });
     expect(readFileSync(settingsPath, "utf8")).toBe(first);
     expect(readJson(settingsPath).statusLine).toEqual({
@@ -243,7 +320,11 @@ describe("Claude install (AD-6 rule 5, AD-16 rule 4)", () => {
       statusLine: { type: "command", command: "user-line" },
     });
     writeJsonFile(join(env.projectRoot, ".claude", "settings.json"), { model: "sonnet" });
-    const result = await createClaudeCodeAdapter().install({ ...env, scope: "project" });
+    const result = await createClaudeCodeAdapter().install({
+      ...env,
+      scope: "project",
+      statusline: "wrap",
+    });
     const local = join(env.projectRoot, ".claude", "settings.local.json");
     expect(result.written).toContain(local);
     expect(result.written).not.toContain(join(env.projectRoot, ".claude", "settings.json"));
@@ -255,6 +336,9 @@ describe("Claude install (AD-6 rule 5, AD-16 rule 4)", () => {
       command: "vtc statusline-tee -- 'user-line'",
     });
     expect(result.notes.join(" ")).toContain("out of git");
+    // unwrapping drops the local copy, so the user's own statusline applies again
+    await createClaudeCodeAdapter().install({ ...env, scope: "project", statusline: "unwrap" });
+    expect(readJson(local)).not.toHaveProperty("statusLine");
   });
 
   it("refuses to overwrite a settings file it cannot read", async () => {

@@ -21,6 +21,21 @@ any release may change behaviour. Role prompt changes have their own log in `rol
   paths). VTC copies them into the run and gives them to the roles that write the
   specification. If your Lead's app does not give it the paths of pasted images, the Lead says
   so and asks you to describe them or attach the files.
+- **Your Claude Code statusline is yours (H-10).** `vtc install claude-code` no longer wraps
+  your statusline in `vtc statusline-tee`. Only `vtc install claude-code --statusline` does,
+  after asking you at the terminal, and never twice. `vtc install claude-code --no-statusline`
+  puts back the command an earlier install wrapped.
+- **Shorter sandbox messages.** `vtc doctor` says how many session sandbox deny rules are missing
+  with at most five examples, and `vtc install claude-code` shows the settings file and how
+  many entries each list adds. `--verbose` on either prints every entry.
+- **`vtc status` with no budget yet.** Before a run has any feature budget (a quick fix's first
+  steps) it shows "Spent: $2.59 (no cap)" instead of "Budget: $2.59 of $0.00".
+- **Plugin version.** The Claude Code and Codex plugins now carry the vtc version (0.2.0, not
+  0.1.0), and `vtc install codex` prints it.
+- **Gitignored VTC settings are flagged.** `vtc doctor` and `vtc init` warn when `.gitignore`
+  keeps `.vtc/project.yaml` or `.vtc/gates.yml` out of git (for example a `.vtc/` line), name
+  the line, and say to ignore only `.vtc/state/` instead: a run starts only on the committed
+  copies of those two files.
 - **Quieter run log while paused.** Usage readings are logged only when a value really changes,
   and at most once an hour while the run is paused or waiting for a limit to reset.
 
