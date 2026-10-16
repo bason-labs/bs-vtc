@@ -75,3 +75,25 @@ export const armInitFields = (
   }
   return null;
 };
+
+/**
+ * Every hook a Claude stream reports (`system/hook_response`): its name, exit status and outcome,
+ * and whether it printed anything. A plugin hook's non-zero exit that is not a block is noise to
+ * the run (round-5 item): the outcome comes from the `result` event alone.
+ */
+export const hookResponses = (
+  lines: readonly string[],
+): { hook: unknown; exitCode: unknown; outcome: unknown; printed: boolean }[] =>
+  lines.flatMap((line) => {
+    const event = parse(line);
+    if (!isObject(event) || event.type !== "system" || event.subtype !== "hook_response") return [];
+    const text = (value: unknown): string => (typeof value === "string" ? value : "");
+    return [
+      {
+        hook: event.hook_name ?? null,
+        exitCode: event.exit_code ?? null,
+        outcome: event.outcome ?? null,
+        printed: text(event.stdout) !== "" || text(event.output) !== "",
+      },
+    ];
+  });

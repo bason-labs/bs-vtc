@@ -414,6 +414,26 @@ describe("run launcher argv guard (AD-9, AD-25 rules 1-2)", () => {
     expect(processes).toHaveLength(1);
     await runs.dispose();
   });
+
+  it("gives the outcome reader the run's own request (what it asked for, D-cx)", async () => {
+    const { spawner } = fakeSpawner((p) => {
+      p.exit(0);
+    });
+    const seen: SpawnRoleRequest[] = [];
+    const runs = createRunLauncher({
+      host: "codex",
+      spawner,
+      outcome: (lines, exit, request) => {
+        seen.push(request);
+        return echoOutcome(lines, exit);
+      },
+    });
+    const started = runs.start({ command: "codex", args: ISOLATED, env: {} }, ROLE_REQUEST);
+    if (started.dispatch !== "headless") throw new Error("expected a headless run");
+    await started.run.wait();
+    expect(seen).toEqual([ROLE_REQUEST]);
+    await runs.dispose();
+  });
 });
 
 describe("child environment (AD-25 rule 4)", () => {

@@ -33,8 +33,9 @@
  *   `StructuredOutput` call made 2 turns and the run still ended `success`);
  * - kill: `--kill-after 3000 --record …` stops the run through `HeadlessRun.kill()` (SIGINT,
  *   SIGTERM, SIGKILL on the process group, as the engine does);
- * - auth: sign the host out with its own command, then `--signed-out --record …`, which runs only
- *   when `authStatus()` says `logged_in: false`; sign back in afterwards;
+ * - auth: never by signing the user out (H-15, spine §5 reading 239). Codex: `live:h15
+ *   codex-signed-out`, in a temporary `CODEX_HOME`. `--signed-out --record …` runs only when
+ *   `authStatus()` already says `logged_in: false`;
  * - limit: cannot be forced; record a run made while the host reports its limit reached.
  */
 import { execFileSync } from "node:child_process";

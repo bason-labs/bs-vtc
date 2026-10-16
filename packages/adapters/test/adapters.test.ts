@@ -128,11 +128,20 @@ describe("model ids (AD-6 rule 2)", () => {
     readdirSync(dir, { withFileTypes: true }).flatMap((entry) =>
       entry.isDirectory() ? filesUnder(join(dir, entry.name)) : [join(dir, entry.name)],
     );
-  it("no adapter source, script or fixture names a Codex model id: the engine resolves them, and the recommended ids are a §7 spike row", () => {
+  /**
+   * The one exception: Codex's default price table (H-12, spine §5 reading 236), which
+   * `HostAdapter.defaultPrices` keys by the model ids the engine's tiers use, and its test.
+   */
+  const PRICE_TABLE_FILES = [
+    join("src", "codex", "prices.ts"),
+    join("test", "codex", "prices.test.ts"),
+  ];
+  it("no adapter source, script or fixture names a Codex model id, but the price table: the engine resolves them", () => {
     const root = fileURLToPath(new URL("..", import.meta.url));
     const files = ["src", "scripts", "test"].flatMap((dir) => filesUnder(join(root, dir)));
     expect(files.length).toBeGreaterThan(20);
     for (const file of files) {
+      if (PRICE_TABLE_FILES.some((allowed) => file.endsWith(allowed))) continue;
       expect(readFileSync(file, "utf8"), file).not.toMatch(/\bgpt-\d/iu);
     }
   });

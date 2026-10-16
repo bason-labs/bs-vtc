@@ -156,7 +156,7 @@ describe("Claude parseEvents: recorded headless role runs (2026-10-14)", () => {
     expect(result?.num_turns).toBe(2);
   });
 
-  it("reads both plan windows' reset times from rate_limit_info.unifiedWindows; the use stays unknown", () => {
+  it("reads both plan windows' use and reset times from rate_limit_info.unifiedWindows", () => {
     const usage = UsageSnapshotSchema.parse(parse(lines("claude-code/stream-success.jsonl")).usage);
     expect(usage).toEqual({
       host: "claude-code",
@@ -166,15 +166,15 @@ describe("Claude parseEvents: recorded headless role runs (2026-10-14)", () => {
           kind: "five_hour",
           label: "five_hour",
           window_minutes: 300,
-          // `utilization` (0.32 here) has no confirmed unit yet (spine §7): unknown, never a guess
-          used_pct: null,
+          // `utilization` 0.32: a 0–1 fraction (H-10, confirmed against `/usage`; see below)
+          used_pct: 32,
           resets_at: "2026-10-14T15:40:00.000Z",
         },
         {
           kind: "weekly",
           label: "seven_day",
           window_minutes: 10080,
-          used_pct: null,
+          used_pct: 5,
           resets_at: "2026-10-19T14:00:00.000Z",
         },
       ],
@@ -194,12 +194,71 @@ describe("Claude parseEvents: recorded headless role runs (2026-10-14)", () => {
         kind: "weekly",
         label: "seven_day",
         window_minutes: 10080,
-        used_pct: null,
+        used_pct: 10,
         resets_at: null,
       },
     ]);
     expect(parse([event("nonsense")]).usage).toBeNull();
     expect(parse([event({ seven_day_opus: { resetsAt: 1792418400 } })]).usage).toBeNull();
+  });
+
+  /**
+   * H-10 (spine §5 reading 234): `utilization` is mapped only because a recording confirmed its
+   * unit. `live:h15 claude-usage-unit` (Claude Code 2.1.299, 2026-10-15) recorded this stream
+   * (`five_hour` 0.13, `seven_day` 0.73) and, 12 s later, Claude Code's own `/usage`: "Current
+   * session: 14% used · resets Oct 15 at 11:39pm", "Current week (all models): 73% used · resets
+   * Oct 19 at 8:59pm" (UTC+7), the same resets as the stream's. An earlier pair read 0.12 / 0.72
+   * against 13% / 73%. So it is the 0–1 fraction of the percentage `/usage` prints, read up to one
+   * point low (the stream's event comes before the run's own use): never treated as exact.
+   */
+  it("maps unifiedWindows utilization, a confirmed 0–1 fraction, to used_pct", () => {
+    const usage = UsageSnapshotSchema.parse(
+      parse(lines("claude-code/stream-usage-unit.jsonl")).usage,
+    );
+    expect(usage.windows).toEqual([
+      {
+        kind: "five_hour",
+        label: "five_hour",
+        window_minutes: 300,
+        used_pct: 13,
+        resets_at: "2026-10-15T16:40:00.000Z",
+      },
+      {
+        kind: "weekly",
+        label: "seven_day",
+        window_minutes: 10080,
+        used_pct: 73,
+        resets_at: "2026-10-19T14:00:00.000Z",
+      },
+    ]);
+  });
+
+  it("keeps used_pct unknown for a utilization outside 0–1 or not a number, never a guess", () => {
+    const event = (utilization: unknown) =>
+      JSON.stringify({
+        type: "rate_limit_event",
+        rate_limit_info: {
+          status: "allowed",
+          unifiedWindows: { five_hour: { utilization, resetsAt: 1792082400 } },
+        },
+      });
+    for (const odd of [1.5, -0.1, "0.4", null, Number.NaN]) {
+      expect(parse([event(odd)]).usage?.windows[0]?.used_pct, String(odd)).toBeNull();
+    }
+    expect(parse([event(0)]).usage?.windows[0]?.used_pct).toBe(0);
+    expect(parse([event(1)]).usage?.windows[0]?.used_pct).toBe(100);
+    expect(parse([event(0.1234)]).usage?.windows[0]?.used_pct).toBe(12.3);
+    // the latest reading wins, and a rejection is 100% whatever utilization said
+    const rejected = JSON.stringify({
+      type: "rate_limit_event",
+      rate_limit_info: {
+        status: "rejected",
+        rateLimitType: "five_hour",
+        unifiedWindows: { five_hour: { utilization: 0.97, resetsAt: 1792082400 } },
+      },
+    });
+    expect(parse([event(0.2), event(0.4)]).usage?.windows[0]?.used_pct).toBe(40);
+    expect(parse([event(0.2), rejected]).usage?.windows[0]?.used_pct).toBe(100);
   });
 });
 
@@ -542,5 +601,64 @@ describe("Claude outcome after the process exits", () => {
     );
     expect(valid(interrupted)).toMatchObject({ kind: "error", retryable: true, cause: "timeout" });
     expect(interrupted.kind === "error" && interrupted.message).toContain(TIMEOUT.message);
+  });
+});
+
+/**
+ * Round-5 item (merge follow-up): a plugin hook's non-zero exit that is not a block is noise in a
+ * headless stream, never a role failure. Recorded: before `vtc` was on `PATH`, the plugin's
+ * `SessionStart` hook exited 127 in every role run (`stream-arm-success.jsonl`, 2026-10-15) and the
+ * run still ended `done`; with `vtc` on `PATH` (`live:dcl claude-arm`, Claude Code 2.1.299,
+ * 2026-10-15) the same hook exited 0 with no output, and `agent_type` reached its input.
+ */
+describe("Claude plugin hook exits are noise (round-5 item)", () => {
+  const hookResponse = (exitCode: number, stderr: string) =>
+    JSON.stringify({
+      type: "system",
+      subtype: "hook_response",
+      hook_id: "h-1",
+      hook_name: "SessionStart:startup",
+      hook_event: "SessionStart",
+      output: stderr,
+      stdout: "",
+      stderr,
+      exit_code: exitCode,
+      outcome: "error",
+      session_id: "s-1",
+    });
+
+  it("the recorded exit-127 hook leaves the run done", () => {
+    const recorded = lines("claude-code/stream-arm-success.jsonl");
+    expect(recorded.some((l) => l.includes('"exit_code":127'))).toBe(true);
+    expect(valid(parse(recorded).outcome).kind).toBe("done");
+    expect(claudeOutcomeAfterExit(recorded, exit(0)).kind).toBe("done");
+    expect(parse(recorded).unrecognizedLines).toBe(0);
+  });
+
+  it("with vtc on PATH the plugin's SessionStart hook exits 0 silently and the bridge connects", () => {
+    const recorded = lines("claude-code/stream-arm-vtc-on-path.jsonl");
+    const events = recorded.map((l) => JSON.parse(l) as Record<string, unknown>);
+    const hooks = events.filter((e) => e.subtype === "hook_response");
+    expect(hooks.map((e) => e.exit_code)).toEqual([0, 0]);
+    // the plugin's hook printed nothing (the other is the owner's own, redacted)
+    expect(hooks.some((e) => e.stdout === "" && e.output === "" && e.stderr === "")).toBe(true);
+    const init = events.find((e) => e.subtype === "init");
+    expect(init?.mcp_servers).toEqual([{ name: "vtc", status: "connected", source: "dynamic" }]);
+    expect(valid(parse(recorded).outcome).kind).toBe("done");
+  });
+
+  it("a failing hook whose text names a limit or a sign-in changes nothing", () => {
+    const success = lines("claude-code/stream-success.jsonl");
+    for (const text of ["Error: not logged in", "usage limit reached", "rate limit 429"]) {
+      const withHook = [success[0] ?? "", hookResponse(1, text), ...success.slice(1)];
+      expect(valid(parse(withHook).outcome).kind, text).toBe("done");
+      expect(claudeOutcomeAfterExit(withHook, exit(0)).kind, text).toBe("done");
+      // no result: the exit decides, never the hook's text
+      const cut = withHook.filter((l) => !l.includes('"type":"result"'));
+      expect(claudeOutcomeAfterExit(cut, exit(1)), text).toMatchObject({
+        kind: "error",
+        cause: "exit_code",
+      });
+    }
   });
 });

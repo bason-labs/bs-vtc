@@ -10,7 +10,8 @@
  * (`headlessIsolationGaps` is empty), and carries no flag that drops the user's login or approves
  * on the user's behalf (`findDisallowedHostArgs` finds nothing). Since 4.10.0 (H-3, spine §5
  * reading 156) the same holds for a role with the host's own web tools (`RoleTools.host_web`),
- * and every adapter refuses them to a `code_sandboxed` role.
+ * and every adapter refuses them to a `code_sandboxed` role. Since 5.7.0 (H-12) an adapter's
+ * `defaultPrices`, when it ships one, is a valid `PriceTable`.
  */
 import { mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -22,6 +23,7 @@ import {
   findForbiddenInText,
   headlessIsolationGaps,
   jsonSchemaFor,
+  PriceTableSchema,
   type HostAdapter,
   type RoleTools,
   type SpawnRoleRequest,
@@ -47,7 +49,7 @@ const label = (tools: RoleTools): string =>
 
 export type SafetyContractAdapter = Pick<
   HostAdapter,
-  "host" | "sandboxProfile" | "headlessCommand" | "install"
+  "host" | "sandboxProfile" | "headlessCommand" | "install" | "defaultPrices"
 >;
 
 export const runHostAdapterSafetyContract = (adapter: SafetyContractAdapter): void => {
@@ -55,6 +57,13 @@ export const runHostAdapterSafetyContract = (adapter: SafetyContractAdapter): vo
     const dirs: string[] = [];
     afterAll(() => {
       for (const dir of dirs) rmSync(dir, { recursive: true, force: true });
+    });
+
+    // H-12 (spine §5 reading 236): a shipped price table cites its public https source and date
+    it("ships no price table, or a valid one", () => {
+      if (adapter.defaultPrices === undefined) return;
+      const table = PriceTableSchema.parse(adapter.defaultPrices);
+      expect(Object.keys(table.prices).length).toBeGreaterThan(0);
     });
     const profileFor = (tools: RoleTools, network: "none" | "registries") =>
       adapter.sandboxProfile({
