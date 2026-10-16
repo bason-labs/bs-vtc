@@ -23,14 +23,19 @@ any release may change behaviour. Role prompt changes have their own log in `rol
   The dashboard shows each coverage check before G2.
 - **Check tools that install scripts cannot replace (H-14).** Lint, typecheck and test tools run
   from a pinned copy or are verified by content hash after an install that runs no lifecycle
-  script. A tool that an install script changed, including an interpreter or shell tool planted
-  beside it and the plugins its lint config loads, fails the gate as tampering. `vtc calibrate`
-  records each gate's tool and replaces one that went stale. A tool that could only be hashed
-  after an install's own scripts ran (Yarn, `npm install`, `uv sync`, a custom install script)
-  does not run unless you set `gates.allow_tools_hashed_after_scripts: true` in
-  `~/.vtc/config.yaml`; `vtc calibrate` warns which gates that affects, and `vtc doctor` warns
-  while the setting is on. Every check gate runs with the commit's own package-manager config,
-  task-runner files and package scripts, so an install script cannot rewrite what a gate runs.
+  script. The check covers the whole workspace, not only what a gate's command names: every
+  installed bin in every package and the package it starts, every package a lint, format or test
+  config loads, and every Python virtual environment's `bin/` and `pyvenv.cfg`. So a gate that
+  runs through `turbo`/`nx`, `pnpm -C`, `npm --prefix`, `yarn --cwd` or a script that changes
+  directory is covered too. Anything an install script changed, including an interpreter planted
+  or swapped beside a bin, fails every check gate as tampering. `vtc calibrate` records each
+  gate's tool and replaces one that went stale. When an install has no scripts-free form (Yarn,
+  `npm install`, `uv sync`, a custom install script), the gates still run, but the hash comes
+  after its scripts. The gate report and the dashboard show a warning for this, and any later
+  change still fails the gate. `vtc calibrate` warns which gates this affects.
+  `gates.allow_tools_hashed_after_scripts` no longer does anything, and `vtc doctor` says you
+  can remove it. Every check gate runs with the commit's own package-manager config, task-runner
+  files and package scripts, so an install script cannot rewrite what a gate runs.
 - **Routing changes are replayed before they are proposed (D-cn).** When the weekly window and
   budget allow it, RETRO re-runs a proposed routing change's held-out tasks on the current and the
   proposed start tier, and the change is proposed only once that replay backs it.

@@ -1,5 +1,5 @@
 {
-  "contracts_version": "5.9.0",
+  "contracts_version": "5.10.0",
   "schemas": {
     "Run": {
       "$id": "https://vtc.local/schemas/Run.json",
@@ -4997,6 +4997,10 @@
                           "before_scripts",
                           "after_scripts"
                         ]
+                      },
+                      "workspace_sha256": {
+                        "type": "string",
+                        "pattern": "^[a-f0-9]{64}$"
                       }
                     },
                     "required": [
@@ -15715,6 +15719,10 @@
                 "before_scripts",
                 "after_scripts"
               ]
+            },
+            "workspace_sha256": {
+              "type": "string",
+              "pattern": "^[a-f0-9]{64}$"
             }
           },
           "required": [
@@ -16178,6 +16186,10 @@
                       "before_scripts",
                       "after_scripts"
                     ]
+                  },
+                  "workspace_sha256": {
+                    "type": "string",
+                    "pattern": "^[a-f0-9]{64}$"
                   }
                 },
                 "required": [
@@ -26157,6 +26169,10 @@
                             "before_scripts",
                             "after_scripts"
                           ]
+                        },
+                        "workspace_sha256": {
+                          "type": "string",
+                          "pattern": "^[a-f0-9]{64}$"
                         }
                       },
                       "required": [

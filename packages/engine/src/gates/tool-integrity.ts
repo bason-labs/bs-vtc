@@ -21,6 +21,10 @@
  *   `outside-checkout`). A Node package's dependency closure and a Python virtual environment
  *   script's distribution closure (with pytest's `pytest11` plugins) are hashed with it.
  * - {@link changedToolFiles}: the files the install phase changed, added or removed.
+ * - {@link workspaceToolSnapshot} and {@link workspaceInstallChanges} (spine §5 reading 251): every
+ *   tool the workspace can run, hashed without parsing any gate command, and what the install
+ *   phase's scripts changed in it. This is the check every verify gate depends on; the tool
+ *   derived from a gate's command (below) is extra detail.
  * - {@link deriveProjectTool}: a `project` tool from a gate command: the executable it resolves to
  *   inside the checkout (unwrapping `pnpm exec`, `npx`, `npm exec`, `yarn`, `bunx`, `uv run`,
  *   `poetry run`, and a package script's body) and the package that executable belongs to. A
@@ -321,6 +325,25 @@ export const hashTool = (
   globs: readonly string[],
   limits: ToolHashLimits = TOOL_HASH_LIMITS,
 ): ToolSnapshot => {
+  const hasher = createHasher(rootIn, limits);
+  for (const glob of globs) hasher.glob(glob);
+  return hasher.finish();
+};
+
+/** What {@link hashTool} and {@link workspaceToolSnapshot} hash with: one snapshot being built. */
+interface Hasher {
+  /** The checkout's real path. */
+  readonly root: string;
+  /** Adds one line as it is (a path that is not a file: `link:`, `outside-checkout`). */
+  readonly add: (rel: string, hash: string) => void;
+  /** One entry, never followed: a link is its target, a file its hash, a directory walked. */
+  readonly entry: (rel: string, abs: string) => void;
+  /** The files under a glob, with a Node package's or a venv script's closure (see hashTool). */
+  readonly glob: (glob: string) => void;
+  readonly finish: () => ToolSnapshot;
+}
+
+const createHasher = (rootIn: string, limits: ToolHashLimits): Hasher => {
   let root = rootIn;
   try {
     root = realpathSync(rootIn);
@@ -528,32 +551,32 @@ export const hashTool = (
     }
   };
 
-  for (const glob of globs) {
+  const glob = (glob: string): void => {
     const { base, whole } = literalBase(glob);
     const keep = whole ? all : (rel: string): boolean => globMatch(glob, rel);
     if (base === "") {
       for (const name of readdirSync(root).sort()) {
         if (name !== ".git") entry(name, join(root, name), keep);
       }
-      continue;
+      return;
     }
     // Nothing is read through a link on the way to the base.
     const parent = whereIs(root, dirname(join(root, base)));
     if (parent === "outside") add(base, OUTSIDE);
-    if (typeof parent !== "object") continue;
+    if (typeof parent !== "object") return;
     const abs = join(parent.real, basename(base));
     const stat = lstatOrNull(abs);
-    if (stat === null) continue;
+    if (stat === null) return;
     if (stat.isSymbolicLink() && !whole) {
       // pnpm's `node_modules/<name>`: the link is a line, and the package it points to is walked.
       add(base, `link:${readlinkSync(abs)}`);
       const where = whereIs(root, abs);
-      if (typeof where !== "object" || lstatOrNull(where.real)?.isDirectory() !== true) continue;
+      if (typeof where !== "object" || lstatOrNull(where.real)?.isDirectory() !== true) return;
       for (const name of readdirSync(where.real).sort()) {
         entry(`${base}/${name}`, join(where.real, name), keep);
       }
       if (isPackageDir(where.real)) nodeClosure(where.real);
-      continue;
+      return;
     }
     entry(base, abs, keep);
     if (stat.isDirectory() && !whole) {
@@ -562,10 +585,16 @@ export const hashTool = (
     } else if (whole && !stat.isDirectory()) {
       pythonClosure(abs);
     }
-  }
-  const sorted = new Map([...files].sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0)));
-  const lines = [...sorted].map(([path, hash]) => `${path}\u0000${hash}\n`).join("");
-  return { sha256: sha256(lines), files: sorted };
+  };
+  const finish = (): ToolSnapshot => {
+    const sorted = new Map([...files].sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0)));
+    const lines = [...sorted].map(([path, hash]) => `${path}\u0000${hash}\n`).join("");
+    return { sha256: sha256(lines), files: sorted };
+  };
+  const entryOf = (rel: string, abs: string): void => {
+    entry(rel, abs, all);
+  };
+  return { root, add, entry: entryOf, glob, finish };
 };
 
 /** Paths whose hash differs between two snapshots (changed, added or removed), sorted. */
@@ -1092,4 +1121,285 @@ export const lintPluginPaths = (repoRootIn: string, cwd: string): string[] => {
     }
   }
   return [...paths];
+};
+
+// ------------------------------------------------------------- the workspace (reading 251)
+
+/**
+ * How much of the workspace's tools {@link workspaceToolSnapshot} hashes: more than one tool's
+ * limits, since it covers every installed bin. Past them the gates do not run (infrastructure),
+ * never half-hashed.
+ */
+export const WORKSPACE_HASH_LIMITS = {
+  maxFiles: 200_000,
+  maxBytes: 4 * 1024 * 1024 * 1024,
+} as const;
+
+/** How many directories of the checkout the workspace walk visits before it gives up. */
+const WORKSPACE_MAX_DIRS = 100_000;
+
+/**
+ * Check-config files whose imports the check tools load: ESLint, Prettier, Stylelint and the test
+ * runners' configs (each a JavaScript module whose imports run when the tool starts).
+ */
+const CHECK_CONFIGS = [
+  ...LINT_CONFIGS,
+  ...["prettier", "stylelint", "vitest", "vite", "jest"].flatMap((tool) =>
+    ["js", "mjs", "cjs", "ts", "mts", "cts"].map((ext) => `${tool}.config.${ext}`),
+  ),
+  ".prettierrc.js",
+  ".prettierrc.cjs",
+  ".prettierrc.mjs",
+  ".stylelintrc.js",
+  ".stylelintrc.cjs",
+];
+
+/** The JSON check configs whose `plugins` name packages the tool loads. */
+const JSON_CHECK_CONFIGS = [".prettierrc", ".prettierrc.json", ".stylelintrc", ".stylelintrc.json"];
+
+/** Packages a check tool loads by name: ESLint's (see above), Prettier and Stylelint plugins. */
+const CHECK_EXTENSION =
+  /^(prettier-plugin-[\w.-]+|@[\w.-]+\/prettier-plugin(-[\w.-]+)?|stylelint-(plugin|config)-[\w.-]+|@[\w.-]+\/stylelint-(plugin|config)(-[\w.-]+)?)$/;
+
+/** The names a JSON config's `plugins` (strings) lists, when it is JSON at all. */
+const jsonPlugins = (text: string): string[] => {
+  try {
+    const plugins = (JSON.parse(text) as { plugins?: unknown }).plugins;
+    return Array.isArray(plugins)
+      ? plugins.flatMap((p) => {
+          const name = typeof p === "string" ? importedPackage(p) : null;
+          return name === null ? [] : [name];
+        })
+      : [];
+  } catch {
+    return [];
+  }
+};
+
+/**
+ * The packages the check configs of one package directory (`dir`, real, inside `root`) load: the
+ * ESLint, Prettier and Stylelint extensions its package.json lists in `dependencies` or
+ * `devDependencies`, every package its check configs import or require, and the `plugins` of its
+ * JSON Prettier and Stylelint configs.
+ */
+const checkConfigPackages = (root: string, dir: string): string[] => {
+  const names = new Set<string>();
+  const manifest = readSmall(root, join(dir, "package.json"));
+  if (manifest !== null) {
+    let json: unknown = null;
+    try {
+      json = JSON.parse(manifest);
+    } catch {
+      // not a manifest: nothing listed
+    }
+    for (const field of ["dependencies", "devDependencies"]) {
+      const deps =
+        json !== null && typeof json === "object" ? (json as Record<string, unknown>)[field] : null;
+      if (deps === null || typeof deps !== "object") continue;
+      for (const name of Object.keys(deps)) {
+        if (ESLINT_EXTENSION.test(name) || CHECK_EXTENSION.test(name)) names.add(name);
+      }
+    }
+  }
+  for (const file of CHECK_CONFIGS) {
+    const text = readSmall(root, join(dir, file));
+    if (text !== null) for (const name of configImports(text)) names.add(name);
+  }
+  for (const file of JSON_CHECK_CONFIGS) {
+    const text = readSmall(root, join(dir, file));
+    if (text !== null) for (const name of jsonPlugins(text)) names.add(name);
+  }
+  return [...names].sort();
+};
+
+/** The checkout-relative path of `name` as Node resolves it from `dir` up to `root`, or `null`. */
+const resolveFrom = (root: string, dir: string, name: string): string | null => {
+  for (const up of upFrom(root, dir)) {
+    const candidate = join(up, "node_modules", ...name.split("/"));
+    if (lstatOrNull(candidate) !== null) return insideRoot(root, candidate);
+  }
+  return null;
+};
+
+/**
+ * The directory of the installed package that holds `relPath` (checkout-relative, real): the path
+ * up to and including the package name after its last `node_modules` segment (`@scope/name` for a
+ * scoped one), or `null` when the path is not inside an installed package.
+ */
+const installedPackageOf = (relPath: string): string | null => {
+  const parts = relPath.split("/");
+  const at = parts.lastIndexOf("node_modules");
+  if (at < 0) return null;
+  const first = parts[at + 1];
+  if (first === undefined || first.startsWith(".")) return null;
+  const end = first.startsWith("@") ? at + 3 : at + 2;
+  if (parts.length < end) return null;
+  return parts.slice(0, end).join("/");
+};
+
+/** The real file a `.bin` entry starts: a link's target, a shim's script, or the entry itself. */
+const binTarget = (bin: string): string | null => {
+  const stat = lstatOrNull(bin);
+  if (stat === null) return null;
+  try {
+    return stat.isSymbolicLink() ? realpathSync(bin) : realpathSync(shimTarget(bin) ?? bin);
+  } catch {
+    return null;
+  }
+};
+
+/** What {@link workspaceToolSnapshot} found besides its lines. */
+export interface WorkspaceTools {
+  readonly snapshot: ToolSnapshot;
+  /** Every `node_modules/.bin` directory hashed (a real directory), checkout-relative. */
+  readonly binDirs: readonly string[];
+}
+
+/**
+ * Every check tool the workspace can run, hashed without parsing any gate command (H-14, spine §5
+ * reading 251): what a task runner (`turbo run lint`), a directory flag (`pnpm -C`, `npm --prefix`,
+ * `yarn --cwd`) or a nested script that changes directory reaches is in it, whichever gate runs it.
+ *
+ * - every `node_modules/.bin` directory of the checkout (one per directory holding a
+ *   `node_modules`, outside any `node_modules`): each entry (a link as its target, a shim or file
+ *   by its content), and, for an entry that starts a file inside an installed package, that file
+ *   and every file of its package (its dependencies are not walked: the command-derived tool of a
+ *   gate still hashes them). An entry that starts the project's own code (a workspace package's
+ *   bin) is its line only: builds change that code, and the diff under test is not a tool;
+ * - every package a check config of a package directory loads (`checkConfigPackages`: ESLint,
+ *   Prettier, Stylelint and the test runners' configs, and the extensions the package.json lists),
+ *   resolved the way Node does, with its dependency closure;
+ * - every Python virtual environment (a directory with a `pyvenv.cfg`): `pyvenv.cfg`, each entry
+ *   of its `bin/` (or `Scripts/`), links as lines, and its site-packages startup files.
+ *
+ * Pinned tools live in VTC's store outside the checkout, where install scripts cannot write, and
+ * are re-verified against their pins before each use. `.git` is never walked; no link is followed
+ * on the walk. Throws a {@link ToolHashLimitError} past `limits` or {@link WORKSPACE_MAX_DIRS}.
+ */
+export const workspaceToolSnapshot = (
+  rootIn: string,
+  limits: ToolHashLimits = WORKSPACE_HASH_LIMITS,
+): WorkspaceTools => {
+  const hasher = createHasher(rootIn, limits);
+  const root = hasher.root;
+  const binDirs: string[] = [];
+  const venvs: string[] = [];
+  const packageDirs: string[] = [];
+  const queue: string[] = [""];
+  let visited = 0;
+  for (let rel = queue.shift(); rel !== undefined; rel = queue.shift()) {
+    visited += 1;
+    if (visited > WORKSPACE_MAX_DIRS) {
+      throw new ToolHashLimitError(
+        rel,
+        `the checkout has more than ${String(WORKSPACE_MAX_DIRS)} directories, more than the gate runner walks`,
+      );
+    }
+    const abs = rel === "" ? root : join(root, rel);
+    let names: string[];
+    try {
+      names = readdirSync(abs).sort();
+    } catch {
+      continue;
+    }
+    if (rel !== "" && names.includes("pyvenv.cfg")) {
+      venvs.push(rel);
+      continue;
+    }
+    if (names.includes("package.json")) packageDirs.push(rel);
+    for (const name of names) {
+      if (name === ".git") continue;
+      const child = rel === "" ? name : `${rel}/${name}`;
+      const stat = lstatOrNull(join(abs, name));
+      if (stat === null) continue;
+      if (name === "node_modules") {
+        if (stat.isSymbolicLink()) hasher.entry(child, join(abs, name));
+        else if (stat.isDirectory()) {
+          const bin = lstatOrNull(join(abs, name, ".bin"));
+          if (bin?.isDirectory() === true) binDirs.push(`${child}/.bin`);
+          else if (bin !== null) hasher.entry(`${child}/.bin`, join(abs, name, ".bin"));
+        }
+        continue;
+      }
+      if (stat.isDirectory() && !stat.isSymbolicLink()) queue.push(child);
+    }
+  }
+  for (const binRel of binDirs) {
+    const binAbs = join(root, binRel);
+    for (const name of readdirSync(binAbs).sort()) {
+      const abs = join(binAbs, name);
+      hasher.entry(`${binRel}/${name}`, abs);
+      const target = binTarget(abs);
+      const targetRel = target === null ? null : insideRoot(root, target);
+      const pkg = targetRel === null ? null : installedPackageOf(targetRel);
+      if (target === null || targetRel === null || pkg === null) continue;
+      hasher.entry(targetRel, target);
+      hasher.entry(pkg, join(root, pkg));
+    }
+  }
+  for (const rel of packageDirs) {
+    const dir = rel === "" ? root : join(root, rel);
+    for (const name of checkConfigPackages(root, dir)) {
+      const found = resolveFrom(root, dir, name);
+      if (found !== null) hasher.glob(`${found}/**`);
+    }
+  }
+  for (const rel of venvs) {
+    const venv = rel === "" ? root : join(root, rel);
+    const prefix = rel === "" ? "" : `${rel}/`;
+    hasher.entry(`${prefix}pyvenv.cfg`, join(venv, "pyvenv.cfg"));
+    for (const bin of ["bin", "Scripts"]) {
+      const binAbs = join(venv, bin);
+      const stat = lstatOrNull(binAbs);
+      if (stat === null) continue;
+      if (!stat.isDirectory()) {
+        hasher.entry(`${prefix}${bin}`, binAbs);
+        continue;
+      }
+      for (const name of readdirSync(binAbs).sort()) {
+        hasher.entry(`${prefix}${bin}/${name}`, join(binAbs, name));
+      }
+    }
+    const sites: string[] = [`${prefix}Lib/site-packages`];
+    const lib = lstatOrNull(join(venv, "lib"));
+    if (lib?.isDirectory() === true) {
+      for (const name of readdirSync(join(venv, "lib")).sort()) {
+        if (name.startsWith("python")) sites.push(`${prefix}lib/${name}/site-packages`);
+      }
+    }
+    for (const site of sites) {
+      const siteAbs = join(root, site);
+      if (lstatOrNull(siteAbs)?.isDirectory() !== true) continue;
+      for (const name of readdirSync(siteAbs).sort()) {
+        if (name.endsWith(".pth") || ["sitecustomize.py", "usercustomize.py"].includes(name)) {
+          hasher.entry(`${site}/${name}`, join(siteAbs, name));
+        }
+      }
+    }
+  }
+  return { snapshot: hasher.finish(), binDirs };
+};
+
+/**
+ * The workspace's tool lines the install phase's scripts changed (H-14, reading 251), comparing
+ * the baseline taken before them with the snapshot after the install phase: every line of the
+ * baseline that changed or is gone, and every entry added to a `.bin` directory the baseline
+ * already had (a run script puts it on `PATH` first, so a new `node`, `sh` or tool name there
+ * shadows what the gate runs). Entries added elsewhere (a `.bin` directory a later install made)
+ * are new tools, which the comparisons before each gate then hold to the snapshot after install.
+ */
+export const workspaceInstallChanges = (
+  before: WorkspaceTools,
+  after: WorkspaceTools,
+): string[] => {
+  const binDirs = new Set(before.binDirs);
+  const changed: string[] = [];
+  for (const [path, hash] of before.snapshot.files) {
+    if (after.snapshot.files.get(path) !== hash) changed.push(path);
+  }
+  for (const path of after.snapshot.files.keys()) {
+    if (before.snapshot.files.has(path)) continue;
+    if (binDirs.has(dirname(path))) changed.push(path);
+  }
+  return [...new Set(changed)].sort();
 };

@@ -128,10 +128,16 @@ export const TOOL_TAMPER_RULE_ID = "vtc/tool-tampered";
 /**
  * How a check gate's tool was verified (H-14; `CheckTool`): its source, the SHA-256 it was checked
  * against (a `pinned` tool's `binary_sha256`; for a `project` tool the hash of its files, sorted
- * path and content hash per line, taken before the install phase's scripts ran), and the tool
- * files the install phase changed, added or removed. A non-empty `tampered` fails the gate
- * (`status: fail`, `failure_class: product`) with one {@link TOOL_TAMPER_RULE_ID} finding. New in
- * 5.7.0.
+ * path and content hash per line, taken before the install phase's scripts ran, or, for a gate
+ * whose command names no tool in the checkout, the workspace's), and the tool files the install
+ * phase changed, added or removed. A non-empty `tampered` fails the gate (`status: fail`,
+ * `failure_class: product`) with one {@link TOOL_TAMPER_RULE_ID} finding. New in 5.7.0.
+ *
+ * Since 5.10.0 (spine §5 reading 251) a `project` gate's check does not depend on parsing its
+ * command: `workspace_sha256` is the hash of every tool the workspace can run (each
+ * `node_modules/.bin` entry and the package it starts, each package a check config loads, each
+ * virtual environment's `bin/` and `pyvenv.cfg`), taken at the same time, and `tampered` lists
+ * those lines too. `sha256` of the command's own tool is extra detail, never the only check.
  */
 export const ToolIntegritySchema = z.strictObject({
   source: z.enum(["pinned", "project"]),
@@ -145,6 +151,11 @@ export const ToolIntegritySchema = z.strictObject({
    * in 5.8.0.
    */
   baseline: z.enum(["before_scripts", "after_scripts"]).optional(),
+  /**
+   * The hash of the workspace's tools (see above), sorted path and content hash per line, taken
+   * when `sha256` was; a `project` gate on the run checkout always has it. New in 5.10.0.
+   */
+  workspace_sha256: Sha256HexSchema.optional(),
 });
 export type ToolIntegrity = z.infer<typeof ToolIntegritySchema>;
 

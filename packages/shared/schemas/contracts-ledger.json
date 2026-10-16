@@ -100,6 +100,10 @@
     {
       "version": "5.9.0",
       "schemas_sha256": "df38205c1ac2fdfa06c3995bd6dce1c0150c905dd276727f744e72cf47c0862c"
+    },
+    {
+      "version": "5.10.0",
+      "schemas_sha256": "18258312d7e05460c485be6c33a1a1bbf33d32e20c3e7932229132c48c5afca6"
     }
   ]
 }

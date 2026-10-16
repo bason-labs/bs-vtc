@@ -335,5 +335,11 @@ export * from "./json-schema.js";
  * `GateRunnerDeps.allowToolsHashedAfterScripts` (H-14): a verify gate whose `project` tool was
  * hashed only after an install's scripts ran no longer runs unless the user opts in here. All
  * additive.
+ *
+ * 5.10.0 (MINOR): H-14 independent of command parsing (spine §5 reading 251).
+ * `ToolIntegrity.workspace_sha256`: the hash of every tool the workspace can run, taken before the
+ * install phase's scripts, which every `project` gate is checked against whatever its command;
+ * `UserConfig.gates.allow_tools_hashed_after_scripts` has no effect any more (a gate hashed after
+ * an install's scripts runs, marked `after_scripts` with a warning). All additive.
  */
-export const CONTRACTS_VERSION = "5.9.0";
+export const CONTRACTS_VERSION = "5.10.0";

@@ -326,7 +326,7 @@ describe("calibrate", () => {
     expect(s.lines.join("\n")).toMatch(/WARNING: no OS sandbox for gates: .*unconfined/);
   });
 
-  it("warns which gates runs will not run: a tool hashed only after an install's scripts (reading 250)", async () => {
+  it("warns which gates runs mark after_scripts: a tool hashed only after an install's scripts (reading 251)", async () => {
     const build = {
       id: "build",
       layer: "L0" as const,
@@ -338,11 +338,12 @@ describe("calibrate", () => {
     // calibration itself measures the base, so the gate ran and is kept
     expect(s.lines.join("\n")).toMatch(/L0 build: pass\/pass/);
     expect(s.lines.join("\n")).toMatch(
-      /WARNING: gate\(s\) build: .*hashed only after install gate\(s\) install ran their scripts.*gates\.allow_tools_hashed_after_scripts/,
+      /WARNING: gate\(s\) build: .*hashed only after install gate\(s\) install ran their scripts.*runs mark these gates after_scripts and warn on their reports/,
     );
+    // the old user-level opt-in changes nothing any more (reading 251)
     const opted = setup([installGate, build]);
     await calibrate({ ...opted.deps(() => true), allowToolsHashedAfterScripts: true });
-    expect(opted.lines.join("\n")).not.toMatch(/allow_tools_hashed_after_scripts/);
+    expect(opted.lines.join("\n")).toMatch(/runs mark these gates after_scripts/);
   });
 
   it("asks before running anything, runs twice, records flaky tests and freezes the baseline", async () => {

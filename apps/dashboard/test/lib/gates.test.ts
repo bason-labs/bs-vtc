@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { GateReportSchema, TaskDetailSchema, type GateReportInput } from "@vtc/shared";
-import { gateReportModel, LAYER_LABELS } from "@/lib/gates";
+import { AFTER_SCRIPTS_WARNING, gateReportModel, LAYER_LABELS } from "@/lib/gates";
 import { readFixture } from "../fixtures";
 
 const sha = (c: string) => c.repeat(40);
@@ -123,6 +123,24 @@ describe("gateReportModel (§17 drill-down: gate reports per layer)", () => {
     const arch = model.layers[3]?.results[0];
     expect(arch?.blocking).toBe(false);
     expect(arch?.details).toEqual(["Skipped: when_changed did not match"]);
+  });
+
+  it("warns on a gate whose tools were hashed only after an install's scripts ran (H-14, reading 251)", () => {
+    const r = report();
+    const typecheck = r.results[1];
+    if (typecheck === undefined) throw new Error("fixture");
+    typecheck.tool = {
+      source: "project",
+      sha256: "ab".repeat(32),
+      workspace_sha256: "cd".repeat(32),
+      tampered: [],
+      baseline: "after_scripts",
+    };
+    const layers = gateReportModel(r).layers;
+    expect(layers[0]?.results[0]?.warnings).toEqual([AFTER_SCRIPTS_WARNING]);
+    // it passed: the warning does not change its status
+    expect(layers[0]?.results[0]?.status.label).toBe("Passed");
+    expect(layers[1]?.results[0]?.warnings).toEqual([]);
   });
 
   it("only links reports the artifacts route can serve", () => {
