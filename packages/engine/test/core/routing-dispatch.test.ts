@@ -1,7 +1,9 @@
 /**
- * D-cm wired into dispatch (H-9; spine §5 reading 218): the Engineer, QA author and the reviewers
- * start on the routed tier, escalate and drop from it, and every `role.dispatched` records the tier
- * and why; the task view repeats it (`RoleRunSummary`).
+ * D-cm, D-cu and D-cv wired into dispatch (H-9; spine §5 readings 218, 241 and 242): the Engineer
+ * and QA author start on the routed tier, the reviewers on their own (Security verify and the
+ * cross-family reviewer one tier up on a high-risk task); all escalate and drop from it, a Low start
+ * one tier per failed round, and every `role.dispatched` records the tier and why; the task view
+ * repeats it (`RoleRunSummary`). The flows use the default round caps.
  */
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
@@ -111,7 +113,7 @@ describe("the routed start tier on dispatch (D-cm)", () => {
     await h.release();
   });
 
-  it("never lets a hint start a high-risk task's Engineer or Security reviewer below Top", async () => {
+  it("never lets a hint start a high-risk task's Engineer below Top; Security verify starts one tier above its own (D-cu)", async () => {
     const { h, qa } = await toQa([
       draft("T-1", {
         size: "S",
@@ -125,8 +127,22 @@ describe("the routed start tier on dispatch (D-cm)", () => {
     only(await next(h), "security");
     const top = { model: "opus", tier: "top", reason: "planner_hint", clamped: true };
     expect(tierOf(dispatched(h).find((d) => d.role === "engineer")!)).toEqual(top);
+    // Security's own tier is Mid: the high-risk raise takes it to Top, by the rule, not the hint
     const security = dispatched(h).find((d) => d.role === "security" && d.data.mode === "verify");
-    expect(tierOf(security!)).toEqual(top);
+    expect(tierOf(security!)).toEqual({
+      model: "opus",
+      tier: "top",
+      reason: "rule",
+      clamped: false,
+    });
+    // the Spec Verifier stays on its own Low
+    const verifier = dispatched(h).find((d) => d.role === "spec_verifier");
+    expect(tierOf(verifier!)).toEqual({
+      model: "haiku",
+      tier: "low",
+      reason: "role",
+      clamped: false,
+    });
     await h.release();
   });
 
@@ -179,7 +195,10 @@ describe("the routed start tier on dispatch (D-cm)", () => {
     await h.release();
   });
 
-  /** `failed` (default 2) failed rounds of an S task, then the Engineer's next dispatch. */
+  /**
+   * `failed` (default 2) failed rounds of an S task on the default caps (an S low-risk task's cap
+   * is 3), then the Engineer's next dispatch.
+   */
   const escalated = async (project: Record<string, unknown>, failed = 2): Promise<Dispatched[]> => {
     const { h, qa } = await toQa([draft("T-1", { size: "S", risk: "low" })], { project });
     await authorTests(h, qa);
@@ -202,29 +221,20 @@ describe("the routed start tier on dispatch (D-cm)", () => {
     return engineers;
   };
 
-  it("escalates a Low start to Mid after 2 failed rounds", async () => {
+  it("runs a Low start on Low, Mid, Top in rounds 1–3 within the default cap (D-cv)", async () => {
     const engineers = await escalated({});
-    expect(engineers.slice(0, 2).map((d) => d.data.tier_reason)).toEqual(["rule", "rule"]);
+    expect(engineers.map((d) => [d.model, d.data.tier, d.data.tier_reason])).toEqual([
+      ["haiku", "low", "rule"],
+      ["sonnet", "mid", "escalation"],
+      ["opus", "top", "escalation"],
+    ]);
+  });
+
+  it("escalates a Low start to Mid after one failed round", async () => {
+    const engineers = await escalated({}, 1);
     expect(tierOf(engineers.at(-1)!)).toEqual({
       model: "sonnet",
       tier: "mid",
-      reason: "escalation",
-      clamped: false,
-    });
-  });
-
-  it("escalates a Low start to Mid, then Top after 2 further failed rounds", async () => {
-    const engineers = await escalated({ caps: { low: 5 } }, 4);
-    expect(engineers.map((d) => [d.data.tier, d.data.tier_reason])).toEqual([
-      ["low", "rule"],
-      ["low", "rule"],
-      ["mid", "escalation"],
-      ["mid", "escalation"],
-      ["top", "escalation"],
-    ]);
-    expect(tierOf(engineers.at(-1)!)).toEqual({
-      model: "opus",
-      tier: "top",
       reason: "escalation",
       clamped: false,
     });
@@ -273,10 +283,12 @@ describe("the routed start tier on dispatch (D-cm)", () => {
       0.3,
     );
     expect(only(out.actions, "spec_verifier").subject).not.toBe(first.subject);
+    // the Spec Verifier starts on its own Low (D-cu), whatever the L task's size; the drop is
+    // recorded and the clamp holds it on Low
     const reviewers = dispatched(h).filter((d) => d.role === "spec_verifier");
     expect(reviewers.map(tierOf)).toEqual([
-      { model: "opus", tier: "top", reason: "rule", clamped: false },
-      { model: "sonnet", tier: "mid", reason: "budget_drop", clamped: false },
+      { model: "haiku", tier: "low", reason: "role", clamped: false },
+      { model: "haiku", tier: "low", reason: "budget_drop", clamped: false },
     ]);
     await h.release();
   });
@@ -306,7 +318,7 @@ describe("the reviewers' routed tiers in a whole flow (D-cm)", () => {
     cost_usd: 0.2,
   });
 
-  it("routes the QA judge and the cross-family reviewer of a high-risk task on Top by the rule, the latter on its own host", async () => {
+  it("starts the QA judge of a high-risk task on its own tier and the cross-family reviewer one tier above it, on its own host (D-cu)", async () => {
     const h = createHarness({
       project: {
         merge_level: 1,
@@ -326,29 +338,43 @@ describe("the reviewers' routed tiers in a whole flow (D-cm)", () => {
     ]);
     const judges = dispatched(h).filter((d) => d.role === "qa" && d.data.mode === "judge");
     expect(judges).toHaveLength(2);
-    for (const d of judges)
-      expect(d.data).toMatchObject({ tier: "top", tier_reason: "rule", tier_clamped: false });
-    // and the model is each host's own for Top
+    const byHost = (host: string) =>
+      judges.find((d) => (d as Dispatched & { host?: string }).host === host)?.data;
+    expect(byHost("claude-code")).toMatchObject({
+      tier: "mid",
+      tier_reason: "role",
+      tier_clamped: false,
+    });
+    expect(byHost("codex")).toMatchObject({
+      tier: "top",
+      tier_reason: "rule",
+      tier_clamped: false,
+    });
+    // and the cross-family run's model is its host's own for Top
     expect(h.launched[0]?.request.model.tier).toBe("top");
     await h.engine.settle();
     await h.release();
   });
 
-  it("drops a reviewer one tier at 70% of the task budget, inside its share", async () => {
+  it("drops a reviewer one tier at 70% of the task budget, from its own start", async () => {
     const h = createHarness({
-      project: { concurrency: 1, budgets: { task_usd: { S: 1, M: 1, L: 1 } } },
+      project: { concurrency: 3, budgets: { task_usd: { S: 1, M: 1, L: 1 } } },
     });
-    const actions = await throughPlan(h, [draft("T-1", { size: "L", risk: "low" })], SPEC_ONE);
+    const actions = await throughPlan(
+      h,
+      [draft("T-1", { size: "L", risk: "low", risk_tags: ["auth"] })],
+      SPEC_ONE,
+    );
     await authorTests(h, only(actions, "qa"));
     // QA author $0.10 and the Engineer $0.65: 75% of the $1 budget, no reviewer spend yet
     const engineer = only(await next(h), "engineer");
     writeFile(worktreeOf(h, "T-1"), "src/t-1/impl.ts", "export const x = 1;\n");
     expect((await submitResult(h, engineer, { exit: "built" }, 0.65)).accepted).toBe(true);
     await h.engine.settle();
-    only(await next(h), "spec_verifier");
-    const [reviewer] = dispatched(h).filter((d) => d.role === "spec_verifier");
-    // the L task's rule tier is Top: the drop takes it to Mid
-    expect(tierOf(reviewer!)).toEqual({
+    await next(h);
+    // Security verify's high-risk start is Top (its Mid raised, D-cu): the drop takes it to Mid
+    const security = dispatched(h).find((d) => d.role === "security" && d.data.mode === "verify");
+    expect(tierOf(security!)).toEqual({
       model: "sonnet",
       tier: "mid",
       reason: "budget_drop",

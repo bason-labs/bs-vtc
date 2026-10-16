@@ -634,6 +634,82 @@ describe(
       expect(spendOf(engineerRuns).usd).toBe(0.4);
       await h.release();
     });
+    // H-12 (reading 236): an unpriced model's tokens count at the host's price ceiling; a run the
+    // engine closed with role.rejected, role.failed or limit.hit counts it in the §11 shares too
+    const PRICE = { input_per_mtok: 1, cached_input_per_mtok: 0.1, output_per_mtok: 10 };
+    // 200k fresh input × $1 + 100k cached × $0.10 + 10k output × $10, per million tokens
+    const TOKENS = { in: 200_000, out: 10_000, cache_r: 100_000, cache_w: 0 };
+    const unpricedClose = async (
+      close: (h: Harness, engineer: SpawnAction) => Promise<unknown>,
+      closedAs: string,
+    ): Promise<void> => {
+      const h = createHarness({ prices: { "gpt-test": PRICE } });
+      const engineer = await toEngineer(h);
+      const spentBefore = h.engine.states().at(-1)?.tasks.get("T-1")?.spent_usd ?? 0;
+      await close(h, engineer);
+      const closing = events(h).findLast((e) => e.type === closedAs);
+      expect(closing).toBeDefined();
+      expect(closing?.cost_usd ?? null).toBeNull();
+      const state = h.engine.states().at(-1);
+      if (state === undefined) throw new Error("no run");
+      expect(state.tasks.get("T-1")?.spent_usd).toBeCloseTo(spentBefore + 0.31, 4);
+      expect(state.roleRuns.get(engineer.action_id)).toMatchObject({
+        costUsd: null,
+        budgetUsd: 0.31,
+      });
+      expect(shareSpend(state, "T-1").engineer).toBeCloseTo(0.31, 4);
+      await h.release();
+    };
+    it("counts a rejected unpriced run at the price ceiling in the shares (H-12)", async () => {
+      await unpricedClose(async (h, engineer) => {
+        // a write outside the task's files_scope: the result is rejected, still paid for
+        writeFile(worktreeOf(h, "T-1"), "docs/outside.md", "# out of scope\n");
+        const out = await h.engine.submit(
+          SubmitInputSchema.parse({
+            kind: "result",
+            action_id: engineer.action_id,
+            result: { role: "engineer", task: "T-1", summary: "done", exit: "built" },
+            usage: { model: "gpt-unknown-9", tokens: TOKENS, cost_usd: null },
+          }),
+          CLAUDE,
+        );
+        expect(out).toMatchObject({ accepted: false, rejection: { reason: "write_scope" } });
+      }, "role.rejected");
+    });
+    it("counts a failed unpriced run at the price ceiling in the shares (H-12)", async () => {
+      await unpricedClose(
+        (h, engineer) =>
+          h.engine.submit(
+            SubmitInputSchema.parse({
+              kind: "failure",
+              action_id: engineer.action_id,
+              outcome: {
+                kind: "error",
+                message: "x",
+                retryable: false,
+                tokens: TOKENS,
+                cost_usd: null,
+              },
+            }),
+            CLAUDE,
+          ),
+        "role.failed",
+      );
+    });
+    it("counts a limit-hit unpriced run at the price ceiling in the shares (H-12)", async () => {
+      await unpricedClose(
+        (h, engineer) =>
+          h.engine.submit(
+            SubmitInputSchema.parse({
+              kind: "failure",
+              action_id: engineer.action_id,
+              outcome: { ...LIMIT, tokens: TOKENS, cost_usd: null },
+            }),
+            CLAUDE,
+          ),
+        "limit.hit",
+      );
+    });
     it("a limit-hit advisor run's reported cost spends the advisor budget", async () => {
       const h = createHarness({ project: { budgets: { advisor_usd: 0.15 } } });
       await start(h);

@@ -18,8 +18,9 @@
  * Role-written files are read without following a symlink (a role could plant one to a host file).
  * - **The chosen direction** enters the per-client design library once G2 is approved, through
  *   `GateRunner.recordDesignChoice` (`recordChosenDirection`, §9.1 step 6, reading 127).
- * - **Design coverage**: every requirement of the frozen spec has a screen, every screen covers a
- *   requirement, and every component the component specs use is registered.
+ * - **Design coverage**: every requirement of the frozen spec is named by an AD or a component and
+ *   has a screen, every screen covers a requirement, and every component the component specs use
+ *   is registered; the coverage loop (`design-loop.ts`, H-13) closes the gaps before G2 shows.
  */
 import { existsSync, lstatSync, readdirSync, readFileSync } from "node:fs";
 import { basename, dirname, extname, join } from "node:path";
@@ -54,6 +55,7 @@ import {
   type UnverifiedFactSummary,
 } from "@vtc/shared";
 import { assertNoSymlinks, writeRepoFile } from "../git/index.js";
+import { coverageProblems as loopProblems } from "./design-loop.js";
 import type { Kernel, RunHandle } from "./kernel.js";
 import { lastSubmitted } from "./queries.js";
 import { frozenSpecItems } from "./read-model.js";
@@ -476,15 +478,17 @@ const names = (text: string, id: string): boolean =>
   new RegExp(`(?<![A-Za-z0-9-])${id}(?![0-9])`).test(text);
 
 /**
- * The DESIGN check (§6.1, §9; `DesignCoverageReport`, spine §5 reading 146), before every G2:
- * - every requirement of the frozen spec is mapped to a component: the Architect's architecture
- *   artifacts (its requirement-to-component map) name it;
+ * The DESIGN check (§6.1, §9; `DesignCoverageReport`, spine §5 readings 146 and 237), before every
+ * G2, run by the coverage loop (`design-loop.ts`) until its coverage is complete:
+ * - every requirement of the frozen spec is mapped to an AD or a component: the Architect's
+ *   architecture artifacts (its requirement-to-component map, or an AD that names it) name it;
  * - with UI, every requirement is covered by a screen's `reqs` (a screen covering `REQ-1` covers
  *   its ACs); every screen covers at least one requirement; every component a component spec uses
  *   (`uses`) is one a component spec defines (`id`), the registry the Engineer may build from (§9
  *   Consistency); and a `screens.yaml` that is missing or invalid fails the check
  *   (`screens_problem`) instead of skipping it.
- * An approval is refused while `ok` is false (`g2ApprovalProblem`).
+ * An approval is refused while `ok` is false (`g2ApprovalProblem`): with the loop that is only a
+ * directions shortfall (reading 174) or a design file changed after the loop's last check.
  */
 export const designCoverage = (k: Kernel, h: RunHandle): DesignCoverageReport => {
   const reqs = [
@@ -566,14 +570,10 @@ export const designCoverage = (k: Kernel, h: RunHandle): DesignCoverageReport =>
   });
 };
 
-/** What a failed DESIGN check says, one clause per gap. */
+/** What a failed DESIGN check says, one clause per gap, the directions shortfall included. */
 const coverageProblems = (r: DesignCoverageReport): string[] => [
-  ...r.reqs_without_component.map((id) => `${id} is mapped to no component`),
-  ...(r.screens_problem === undefined ? [] : [r.screens_problem]),
   ...(r.directions_problem === undefined ? [] : [r.directions_problem]),
-  ...r.reqs_without_screen.map((id) => `${id} has no screen`),
-  ...r.screens_without_req.map((id) => `screen ${id} covers no requirement`),
-  ...r.components_unregistered.map((id) => `component ${id} is not registered`),
+  ...loopProblems(r),
 ];
 
 // ---------------------------------------------------------------- the gate
@@ -618,12 +618,12 @@ export const g2ApprovalProblem = (
   input: Pick<ApproveInput, "fact_waivers" | "design_direction" | "design_exit">,
 ): string | null => {
   const problems: string[] = [];
-  // §6.1 DESIGN, reading 146: the human rejects G2 with a note, and the design roles fix it
+  // H-13 (reading 237): the coverage loop closes every coverage gap before G2 shows, so there is
+  // no "approve anyway"; a design file changed since then still fails here. Too few directions
+  // keep reading 174's rule: a blocking notice (re-roll, or the category standard)
   const coverage = extras.design_coverage;
   if (coverage !== undefined && !coverage.ok)
-    problems.push(
-      `the DESIGN check failed: ${coverageProblems(coverage).join("; ")} (reject G2 with a note so the Architect and Designer fix it)`,
-    );
+    problems.push(`the DESIGN check failed: ${coverageProblems(coverage).join("; ")}`);
   const waived = new Set((input.fact_waivers ?? []).map((w) => w.id));
   const missing = extras.unverified_facts.filter((id) => !waived.has(id));
   if (missing.length > 0)

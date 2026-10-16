@@ -231,8 +231,21 @@ export const createWorkspace = (repoRoot: string): Workspace => {
     }
     const args = [`--git-dir=${admin}`, `--work-tree=${cwd}`];
     const branch = `refs/heads/vtc/${id}`;
-    const head = await runGit(cwd, [...args, "symbolic-ref", "-q", "HEAD"], { allowFailure: true });
-    if (head.stdout.toString("utf8").trim() !== branch) {
+    // the worktree's HEAD file names its branch: read it, and ask git only when it does not say
+    // `ref: <branch>` (D-cz: one process less per worktree operation)
+    const onBranch = ((): boolean => {
+      try {
+        return readFileSync(join(admin, "HEAD"), "utf8").trim() === `ref: ${branch}`;
+      } catch {
+        return false;
+      }
+    })();
+    const head = onBranch
+      ? branch
+      : (await runGit(cwd, [...args, "symbolic-ref", "-q", "HEAD"], { allowFailure: true })).stdout
+          .toString("utf8")
+          .trim();
+    if (head !== branch) {
       // Commits land on the worktree's own branch, whatever an agent checked out.
       await runGit(cwd, [...args, "symbolic-ref", "HEAD", branch]);
     }
@@ -274,14 +287,30 @@ export const createWorkspace = (repoRoot: string): Workspace => {
       pinned = await pin(worktree);
     } catch (error) {
       if (!(error instanceof WorktreeError)) throw error;
-      await dropBroken(worktree);
+      // a new worktree has nothing to drop; a broken one (a directory, or a registration of this
+      // path) is dropped first (D-cz: two processes less for every new worktree)
+      const broken =
+        existsSync(abs(worktree)) ||
+        isSymlink(abs(worktree)) ||
+        (await adminDirFor(worktree)) !== null;
+      if (broken) await dropBroken(worktree);
       ensureRepoDir(repoRoot, WORKTREES_DIR);
-      await runGit(
-        repoRoot,
-        (await branchExists(branch))
-          ? ["worktree", "add", "--quiet", "--lock", worktree, branch]
-          : ["worktree", "add", "--quiet", "--lock", "-b", branch, worktree, base],
-      );
+      const add = async (): Promise<void> => {
+        await runGit(
+          repoRoot,
+          (await branchExists(branch))
+            ? ["worktree", "add", "--quiet", "--lock", worktree, branch]
+            : ["worktree", "add", "--quiet", "--lock", "-b", branch, worktree, base],
+        );
+      };
+      try {
+        await add();
+      } catch (failed) {
+        // a stale registration elsewhere (a crash) may hold the branch: prune, then once more
+        if (broken) throw failed;
+        await dropBroken(worktree);
+        await add();
+      }
       pinned = await pin(worktree);
     }
     return { worktree, head: await gitOut(pinned, ["rev-parse", "HEAD"]) };
@@ -450,9 +479,15 @@ export const createWorkspace = (repoRoot: string): Workspace => {
       await runGit(repoRoot, ["branch", "--quiet", "-D", branch], { allowFailure: true });
     }),
     removeWorktree: locked(async (worktree: string) => {
-      await runGit(repoRoot, ["worktree", "remove", "--force", "--force", worktree], {
-        allowFailure: true,
-      });
+      const removed = await runGit(
+        repoRoot,
+        ["worktree", "remove", "--force", "--force", worktree],
+        {
+          allowFailure: true,
+        },
+      );
+      // a clean removal leaves nothing to drop (D-cz: three processes less per removal)
+      if (removed.code === 0 && !existsSync(abs(worktree)) && !isSymlink(abs(worktree))) return;
       await dropBroken(worktree);
     }),
   };

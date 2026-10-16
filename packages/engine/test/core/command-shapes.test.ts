@@ -16,6 +16,7 @@ import {
   type LeadAction,
 } from "@vtc/shared";
 import { capabilitySignalFacts, loadRuns, type CallContext } from "../../src/core/index.js";
+import { toolSignalFacts } from "../../src/core/automation.js";
 import { drainCommandShapeSpool, SPOOL_ROW_MAX_AGE_MS } from "../../src/core/command-shapes.js";
 import { appendPrivateFile, ensurePrivateDir } from "../../src/core/guard.js";
 import type * as Guard from "../../src/core/guard.js";
@@ -131,6 +132,33 @@ describe("drainCommandShapeSpool (D-cs)", () => {
     expect(readFileSync(spool(dir), "utf8")).toBe(`${late}${row({ agent: "z" })}`);
   });
 
+  it("honours a row's action only when that action is in flight for the row's agent and cwd (reading 247(9))", () => {
+    const dir = tempDir("guard-");
+    const forA = row({ action: "a-1", command: "pnpm test" });
+    const forB = row({ action: "a-2", command: "pnpm lint" });
+    const stale = row({ action: "a-9", command: "pnpm build" });
+    writeFileSync(spool(dir), [forA, forB, stale].join(""));
+    // a-1 and a-2 are two in-flight runs of one agent in one worktree; a-9 is not in flight
+    const fits = (action: string, agent: string, cwd: string): boolean =>
+      (action === "a-1" || action === "a-2") && agent === "vtc:vtc-qa-author" && cwd === "/w/T-1";
+    // a-1's drain takes its named row and the row whose name does not fit, never a-2's
+    expect(drainCommandShapeSpool(dir, { ...match, action: "a-1", actionFits: fits }, now)).toEqual(
+      [shape("pnpm test"), shape("pnpm build")],
+    );
+    expect(readFileSync(spool(dir), "utf8")).toBe(forB);
+    expect(drainCommandShapeSpool(dir, { ...match, action: "a-2", actionFits: fits }, now)).toEqual(
+      [shape("pnpm lint")],
+    );
+  });
+
+  it("matches a named row by agent and cwd when the drain cannot check the name", () => {
+    const dir = tempDir("guard-");
+    writeFileSync(spool(dir), row({ action: "a-2" }));
+    expect(drainCommandShapeSpool(dir, { ...match, action: "a-1" }, now)).toEqual([
+      shape("git status --short"),
+    ]);
+  });
+
   it("finds nothing in a missing spool", () => {
     expect(drainCommandShapeSpool(tempDir("guard-"), match, now)).toEqual([]);
   });
@@ -235,6 +263,92 @@ describe("role.submitted.command_shapes (D-cs)", () => {
     );
     expect((submitted(h, "repo_cartographer")[0]?.data.command_shapes as unknown[]).length).toBe(3);
     await h.release();
+  });
+});
+
+const ofType = (h: Harness, type: string): Line[] =>
+  readFileSync(join(h.repo, `.vtc/runs/${h.engine.status({}).run.id}/events.jsonl`), "utf8")
+    .trim()
+    .split("\n")
+    .map((l) => JSON.parse(l) as Line)
+    .filter((e) => e.type === type);
+
+describe("command_shapes on role.rejected and role.failed (D-cs, reading 247(9))", () => {
+  it("records a rejected in-session run's spooled shapes on role.rejected", async () => {
+    const h = createHarness();
+    const actions = await throughPlan(h, [draft("T-1")], SPEC_ONE);
+    const qa = only(actions, "qa");
+    const guard = h.engine.guardDir;
+    ensurePrivateDir(guard);
+    writeFileSync(
+      spool(guard),
+      row({
+        agent: `vtc:${qa.agent}`,
+        cwd: workdir(qa),
+        at: h.clock.toISOString(),
+        command: "pnpm test",
+        action: qa.action_id,
+      }),
+    );
+    // a result that names no acceptance test is no QA author result: rejected
+    const out = await submitResult(h, qa, { exit: "done" });
+    expect(out.accepted).toBe(false);
+    const [rejected] = ofType(h, "role.rejected");
+    expect(rejected?.data.command_shapes).toEqual([{ ...shape("pnpm test"), count: 1 }]);
+    await h.release();
+  });
+
+  it("records a failed headless run's stream shapes on role.failed, and the tool signal counts them", async () => {
+    const script: HeadlessScript = () => ({
+      outcome: {
+        kind: "error",
+        message: "the host crashed",
+        retryable: true,
+        cause: "exit_code",
+        tokens: null,
+        cost_usd: null,
+      },
+      lines: [JSON.stringify({ command: "git log --oneline" })],
+    });
+    const h = createHarness({ codex: { headless: script } });
+    await h.engine.start(
+      {
+        request: "Password reset\n\nUsers reset forgotten passwords.",
+        track: "feature",
+        repo: "existing",
+        has_ui: false,
+        risk_hints: [],
+      },
+      CODEX,
+    );
+    await h.engine.next({}, CODEX);
+    await h.engine.settle();
+    const [failed] = ofType(h, "role.failed");
+    expect(failed?.data.command_shapes).toEqual(
+      countCommandShapes(commandShapes("git log --oneline")),
+    );
+    await h.release();
+  });
+
+  it("counts failed and rejected runs in the tool signal", () => {
+    const shapes = countCommandShapes(commandShapes("git log --oneline"));
+    const events = (type: string, task: string) => ({
+      type,
+      task,
+      data: { command_shapes: shapes },
+    });
+    const states = [
+      {
+        id: "r1",
+        events: [
+          events("role.submitted", "T-1"),
+          events("role.rejected", "T-2"),
+          events("role.failed", "T-3"),
+        ],
+      },
+    ] as never;
+    const base = { run: "r1", source: "run.finished", at: AT };
+    expect(toolSignalFacts(states, base).map((f) => f.metrics)).toEqual([{ "tool.tasks": 3 }]);
   });
 });
 

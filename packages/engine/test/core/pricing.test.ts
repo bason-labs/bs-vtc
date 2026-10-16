@@ -1,21 +1,32 @@
 /**
- * Budget-checked Codex runs (§11, H-1; spine §5 reading 152): Codex reports tokens but no cost,
- * so the engine prices a run's tokens from the user's price table (`~/.vtc/config.yaml`
- * `prices`). An engine-launched run on a host that cannot cap its own spend starts only when its
- * model is priced there: a model missing from the price table is an error, never $0.
+ * Priced Codex runs (§11; H-12, spine §5 reading 236, replacing reading 152's refusal): Codex
+ * reports tokens but no cost, so the engine prices a run's tokens from the host adapter's default
+ * price table (`HostAdapter.defaultPrices`) with the user's `~/.vtc/config.yaml` `prices` over it,
+ * model by model (`effectivePrices`, `priceRun`). A model with no known price never blocks a run:
+ * its cost is unknown (`null`) and the budget counts its tokens at the price ceiling of the host's
+ * known prices (`role.submitted.budget_usd`).
  */
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
-import { describe, expect, it } from "vitest";
-import type { HostOutcome, LeadAction, RoleResultInput } from "@vtc/shared";
+import { afterEach, describe, expect, it } from "vitest";
+import {
+  PriceTableSchema,
+  type HostOutcome,
+  type LeadAction,
+  type PriceTable,
+  type RoleResultInput,
+} from "@vtc/shared";
 import type { CallContext } from "../../src/core/index.js";
-import { writeFile } from "../helpers/repo.js";
+import { cleanupDirs, writeFile } from "../helpers/repo.js";
 import {
   createHarness,
   spawns,
   type Harness,
   type HeadlessScript,
 } from "../helpers/engine-harness.js";
+
+// the temp repos and VTC homes go after each test
+afterEach(cleanupDirs);
 
 const CODEX: CallContext = { host: "codex" };
 
@@ -82,9 +93,19 @@ const codexHost = {
 
 const MODELS = { codex: { top: "gpt-test", mid: "gpt-test", low: "gpt-test" } };
 const PRICE = { input_per_mtok: 1, cached_input_per_mtok: 0.1, output_per_mtok: 10 };
+const DEAR = { input_per_mtok: 2, cached_input_per_mtok: 0.2, output_per_mtok: 20 };
+
+/** An adapter's default price table (`HostAdapter.defaultPrices`, H-12). */
+const table = (prices: Record<string, typeof PRICE>): PriceTable =>
+  PriceTableSchema.parse({
+    v: 1,
+    source_url: "https://example.com/pricing",
+    as_of: "2026-10-15",
+    prices,
+  });
 
 describe(
-  "§11, H-1: an engine-launched Codex run is priced from the price table",
+  "§11, H-12: an engine-launched Codex run is priced from the effective price table",
   { timeout: 30_000 },
   () => {
     it("prices the tokens Codex reported and counts the spend", async () => {
@@ -104,20 +125,67 @@ describe(
       await h.release();
     });
 
-    it("an unpriced model never starts: the preflight fails on budget and names the price table", async () => {
+    it("prices from the adapter's default table when the user set no price (H-12)", async () => {
       const h = createHarness({
         project: { hosts: { models: MODELS } },
-        codex: codexHost,
-        prices: { "gpt-other": PRICE },
+        codex: { ...codexHost, defaultPrices: table({ "gpt-test": PRICE }) },
       });
       await start(h);
       await next(h);
-      expect(h.launched).toEqual([]);
-      const preflight = ofType(h, "headless.preflight")[0]?.data;
-      expect(preflight).toMatchObject({ host: "codex", ok: false, failed: "budget" });
-      expect(preflight?.detail).toMatch(/gpt-test.*prices/);
-      // a task-less step: the run pauses until the human prices the model and resumes
-      expect(h.engine.status({}).run.paused).toBe(true);
+      await h.engine.settle();
+      const submitted = ofType(h, "role.submitted").find((e) => e.role === "repo_cartographer");
+      expect(submitted?.cost_usd).toBe(0.31);
+      // a listed price: the budget counts the cost itself, so no budget_usd
+      expect(submitted?.data.budget_usd).toBeUndefined();
+      await h.release();
+    });
+
+    it("lets the user's price override the default table, model by model (H-12)", async () => {
+      const h = createHarness({
+        project: { hosts: { models: MODELS } },
+        codex: { ...codexHost, defaultPrices: table({ "gpt-test": DEAR }) },
+        prices: { "gpt-test": PRICE },
+      });
+      await start(h);
+      await next(h);
+      await h.engine.settle();
+      const submitted = ofType(h, "role.submitted").find((e) => e.role === "repo_cartographer");
+      expect(submitted?.cost_usd).toBe(0.31);
+      await h.release();
+    });
+
+    it("an unpriced model never blocks: the run starts, its cost is unknown and the budget counts the price ceiling (H-12)", async () => {
+      const h = createHarness({
+        project: { hosts: { models: MODELS } },
+        codex: {
+          ...codexHost,
+          defaultPrices: table({ "gpt-cheap": PRICE, "gpt-dear": DEAR }),
+        },
+      });
+      await start(h);
+      await next(h);
+      await h.engine.settle();
+      expect(ofType(h, "headless.preflight")[0]?.data).toMatchObject({ host: "codex", ok: true });
+      expect(h.launched).toHaveLength(1);
+      expect(h.engine.status({}).run.paused).toBe(false);
+      const submitted = ofType(h, "role.submitted").find((e) => e.role === "repo_cartographer");
+      expect(submitted?.cost_usd).toBeNull();
+      // each token type at its highest known price: 200k × $2 + 100k × $0.20 + 10k × $20
+      expect(submitted?.data.budget_usd).toBe(0.62);
+      // the run's spend counts what the budget counts
+      expect(h.engine.status({}).budget.spent_usd).toBe(0.62);
+      await h.release();
+    });
+
+    it("a host with no known price at all still runs; its cost and budget stay unknown (H-12)", async () => {
+      const h = createHarness({ project: { hosts: { models: MODELS } }, codex: codexHost });
+      await start(h);
+      await next(h);
+      await h.engine.settle();
+      expect(ofType(h, "headless.preflight")[0]?.data).toMatchObject({ ok: true });
+      const submitted = ofType(h, "role.submitted").find((e) => e.role === "repo_cartographer");
+      expect(submitted?.cost_usd).toBeNull();
+      expect(submitted?.data.budget_usd).toBeUndefined();
       await h.release();
     });
 
@@ -145,15 +213,17 @@ describe(
       await h.release();
     });
 
-    it("a Codex role on the docs' built-in id (D-co) is priced from the price table too: unpriced, it never starts", async () => {
+    it("a Codex role on the docs' built-in id (D-co) with no price starts, counted at the ceiling", async () => {
       const h = createHarness({ codex: codexHost, prices: { "gpt-test": PRICE } });
       await start(h);
       await next(h);
-      expect(h.launched).toEqual([]);
-      const preflight = ofType(h, "headless.preflight")[0]?.data;
-      expect(preflight).toMatchObject({ ok: false, failed: "budget" });
-      // the cartographer's own tier is mid: DEFAULT_TIER_MODELS.codex.mid
-      expect(preflight?.detail).toMatch(/gpt-6\.1-sol.*prices/);
+      await h.engine.settle();
+      expect(h.launched).toHaveLength(1);
+      // the cartographer's own tier is mid: DEFAULT_TIER_MODELS.codex.mid, which has no price here
+      expect(h.launched[0]?.request.model.model).toBe("gpt-6.1-sol");
+      const submitted = ofType(h, "role.submitted").find((e) => e.role === "repo_cartographer");
+      expect(submitted?.cost_usd).toBeNull();
+      expect(submitted?.data.budget_usd).toBe(0.31);
       await h.release();
     });
 

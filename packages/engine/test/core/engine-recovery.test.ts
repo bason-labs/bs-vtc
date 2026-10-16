@@ -300,6 +300,12 @@ describe("questions, plans and the design phase", () => {
     const designer = only(await threatModel(h, security!), "designer");
     writeFile(workdir(architect!), ".vtc/architecture/spine.md", "# spine\n");
     writeFile(workdir(designer), ".vtc/design/flows.mmd", "flowchart LR\n");
+    // a UI design needs its screens: without them the coverage loop sends the Designer back (H-13)
+    writeFile(
+      workdir(designer),
+      ".vtc/design/screens.yaml",
+      "version: 1\nscreens:\n  - id: signup\n    route: /signup\n    states: [empty]\n    reqs: [REQ-1]\n",
+    );
     // the Designer's pack carries its dealt constraints (§9.1 step 2), the Architect's its depth
     expect(readFileSync(join(h.repo, designer.pack), "utf8")).toContain("design constraints:");
     expect(readFileSync(join(h.repo, architect!.pack), "utf8")).toContain("architect depth: S");
@@ -310,7 +316,10 @@ describe("questions, plans and the design phase", () => {
     const gate = (
       await submitResult(h, designer, {
         exit: "done",
-        artifacts: [{ type: "design_flows", path: ".vtc/design/flows.mmd" }],
+        artifacts: [
+          { type: "design_flows", path: ".vtc/design/flows.mmd" },
+          { type: "screens", path: ".vtc/design/screens.yaml" },
+        ],
       })
     ).actions.find((a) => a.type === "approve_gate");
     expect(gate).toMatchObject({ gates: ["G1", "G2"] });
@@ -319,6 +328,7 @@ describe("questions, plans and the design phase", () => {
         ".vtc/architecture/spine.md",
         ".vtc/architecture/threat-model/model.md",
         ".vtc/design/flows.mmd",
+        ".vtc/design/screens.yaml",
         ".vtc/spec/spec.md",
       ]);
     await h.release();
