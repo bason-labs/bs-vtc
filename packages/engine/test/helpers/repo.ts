@@ -36,6 +36,17 @@ export const writeFile = (root: string, path: string, content: string): void => 
   writeFileSync(join(root, path), content);
 };
 
+/**
+ * Turns off git's automatic housekeeping in a test repository: `gc --auto` and `maintenance`
+ * detach into the background and keep writing `.git/objects` after the test ends, so removing
+ * the temp directory failed with ENOTEMPTY on loaded CI runners.
+ */
+const noBackgroundGit = (repo: string): void => {
+  git(repo, "config", "gc.auto", "0");
+  git(repo, "config", "gc.autoDetach", "false");
+  git(repo, "config", "maintenance.auto", "false");
+};
+
 /** A repo on `main` with one commit, `.vtc/state/` ignored and a local identity. */
 export const initRepo = (files: Record<string, string> = { "README.md": "# app\n" }): string => {
   const repo = tempDir("vtc-repo-");
@@ -43,6 +54,7 @@ export const initRepo = (files: Record<string, string> = { "README.md": "# app\n
   git(repo, "config", "user.email", "test@example.com");
   git(repo, "config", "user.name", "Test");
   git(repo, "config", "commit.gpgsign", "false");
+  noBackgroundGit(repo);
   writeFile(repo, ".gitignore", ".vtc/state/\n");
   for (const [path, content] of Object.entries(files)) writeFile(repo, path, content);
   git(repo, "add", "--all");
@@ -54,6 +66,7 @@ export const initRepo = (files: Record<string, string> = { "README.md": "# app\n
 export const addBareRemote = (repo: string): string => {
   const bare = tempDir("vtc-remote-");
   git(bare, "init", "--quiet", "--bare", "-b", "main");
+  noBackgroundGit(bare);
   git(repo, "remote", "add", "origin", bare);
   git(repo, "push", "--quiet", "origin", "main");
   return bare;
