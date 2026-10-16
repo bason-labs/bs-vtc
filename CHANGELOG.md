@@ -3,7 +3,7 @@
 All notable changes to `vtc` are listed here. Versions follow semver; while the version is 0.x,
 any release may change behaviour. Role prompt changes have their own log in `roles/CHANGELOG.md`.
 
-## Unreleased
+## v0.2.0 (2026-10-16)
 
 - **No price table to fill (H-12).** A host that reports no cost (Codex) ships its default
   prices with vtc, from the provider's public API pricing page with that page's URL and date.
@@ -21,58 +21,18 @@ any release may change behaviour. Role prompt changes have their own log in `rol
   Designer are sent the gaps and fix them, up to 3 rounds, before G2 is shown. A loop that is
   stuck or hits the cap parks and names the uncovered requirements. There is no "approve anyway".
   The dashboard shows each coverage check before G2.
-- **Check tools that install scripts cannot replace (H-14).** Lint, typecheck and test tools run
-  from a pinned copy or are verified by content hash after an install that runs no lifecycle script.
-  The check no longer picks which files matter: every file of the checkout is hashed, every
-  dependency tree whole (each `node_modules`, `.yarn`, Yarn PnP files, every Python virtual
-  environment) and your own files too. So it does not matter how a gate runs its tools (`turbo`,
-  `pnpm -r`, `pnpm --filter`, `make`, `tox`, a script that changes directory), or what a test runner
-  loads by name (a Jest preset, a Babel preset, a pytest plugin). The Go module cache and Cargo's
-  downloaded sources that check gates build from are hashed too. Anything the check cannot list or
-  read, and a link from the checkout to a place install scripts can write (such as pnpm's global
-  store), fails closed: no check gate runs. With npm and pnpm, the install's scripts run one package
-  at a time (npm by the package's directory), and a package's own script may only add files to its
-  own directory or replace its native binaries (esbuild's binary): that is shown as a warning on
-  the gate report and the dashboard. Changing or removing any other file of a package, such as its
-  JavaScript or its package.json, is tampering and fails every check gate, even when the package's
-  own script did it, so neither your own `postinstall` nor another dependency can edit a
-  dependency. Two installed versions of one package with an install script (esbuild 0.21 for
-  Vite beside esbuild 0.25) are fine: npm rebuilds each installed directory on its own, and pnpm
-  rebuilds each by name and version, so each may still rebuild only its own directory. With pnpm,
-  a package may rebuild itself only when it is the one installed copy of its name and version in
-  the whole checkout, in the store of the install that rebuilt it, and every package of its name
-  comes from one registry with an integrity hash in the `pnpm-lock.yaml` of a store an install
-  populated in this run. If one of them comes from a `file:`, `link:`, git, tarball-URL or
-  workspace source, is patched (`patchedDependencies`), comes from a second registry, or the same
-  version is installed twice (as by a nested project's own install), a package could pose as the
-  other, so none of them may rebuild itself: every change to any of them fails the gates, and
-  `vtc calibrate` tells you to install it from the registry, install one version, share one store
-  with nested projects, or keep its script from running. A commit that tracks files in a dependency
-  tree (below a `node_modules` or `.yarn/unplugged`, or in a Python virtual environment) fails the
-  run before any install: as tampering when the task added them, otherwise as an infrastructure
-  error, and `vtc calibrate` stops and tells you to stop tracking them. A dependency whose install
-  script writes anywhere else fails the gates. If that is a code generator (Prisma),
-  `vtc calibrate` tells you to run it as an install gate of its own after the install. Your own
-  projects' install scripts may add files only under their build-output directories (`dist`,
-  `build`, `out`, `.next`, `target`, and `lib` when `.gitignore` ignores it). Bun runs every
-  package's scripts at once, so with Bun no package may rebuild itself and the gates carry a
-  warning. Adding a `pnpm-workspace.yaml`, an `.npmrc`, `.yarnrc.yml` or `.pnpmfile.cjs`, or `pnpm`
-  settings in a package.json during a run fails the gates too; a task that changes a package.json's
-  `pnpm` key (its `patchedDependencies`, `overrides` or `onlyBuiltDependencies`) needs a human,
-  like the other protected configs. Adding a Babel or SWC config (`babel.config.*`, `.babelrc*`,
-  `.swcrc`), `.pytest.ini`, `.cargo/config(.toml)` or `go.work(.sum)` fails the gates too; these
-  are now protected configs everywhere a diff's configs are checked.
-  Before each check gate, anything changed since the install fails it too; build outputs, reports
-  and the tools' caches are fine. Check gates also get a fresh empty home of their own, so an
-  install script can no longer change them through `~/.npmrc`, `~/.yarnrc.yml`, `~/.bunfig.toml` or
-  a Python `usercustomize`. Hashing adds about 2 seconds per run on a 1 GiB checkout, about 2
-  seconds more for each install script step, and half a second before each check gate.
-  `vtc calibrate` records each gate's tool, which the report shows; a stale one no longer stops the
-  gate. When an install has no scripts-free form (Yarn, `npm install`, `uv sync`, a custom install
-  script), the gates still run, but the hash comes after its scripts. The gate report and the
-  dashboard show a warning for this, and any later change still fails the gate. `vtc calibrate`
-  warns which gates this affects. `gates.allow_tools_hashed_after_scripts` no longer does anything,
-  and `vtc doctor` says you can remove it.
+- **Check tools that install scripts cannot replace (H-14).** Every file of the checkout and of
+  every dependency tree (`node_modules`, `.yarn`, Python virtual environments, the Go and Cargo
+  download caches) is hashed after an install that runs no lifecycle script, and again after the
+  scripts and before each check gate. So it does not matter how a gate runs its tools (`turbo`,
+  `pnpm -r`, `make`, `tox`). Anything that changed fails the gates as tampering. Install scripts
+  run one package at a time; a package may only add files to its own directory or replace its
+  native binaries (esbuild), shown as a warning. Two registry versions of one package
+  (esbuild 0.21 beside 0.25) are fine. Also failing closed: committed dependency trees, files the
+  check cannot read, links to places install scripts can write, and new package-manager or test
+  configs (`.npmrc`, `pnpm` settings, Babel, SWC, pytest). Check gates get a fresh empty home.
+  Installs with no scripts-free form (Yarn, `npm install`, `uv sync`) still run, with a warning.
+  `vtc calibrate` explains each failure and what to change. Hashing adds about 2 seconds per GiB.
 - **Routing changes are replayed before they are proposed (D-cn).** When the weekly window and
   budget allow it, RETRO re-runs a proposed routing change's held-out tasks on the current and the
   proposed start tier, and the change is proposed only once that replay backs it.

@@ -1949,15 +1949,19 @@ export const pnpmInstallDir = (
  * a committed one would pass for it (`vtc calibrate` says how to stop tracking them). Sorted.
  */
 export const committedDependencyFiles = (tracked: readonly string[]): string[] => {
+  // Compared without case: on a case-insensitive file system (macOS APFS by default) a tracked
+  // `Node_Modules` is the same directory as `node_modules`.
   const venvs = tracked
+    .map((path) => path.toLowerCase())
     .filter((path) => path === "pyvenv.cfg" || path.endsWith("/pyvenv.cfg"))
     .map((path) => path.slice(0, -"pyvenv.cfg".length));
   return tracked
     .filter((path) => {
-      const parts = path.split("/");
+      const lower = path.toLowerCase();
+      const parts = lower.split("/");
       if (parts.includes("node_modules")) return true;
       if (parts.some((part, i) => part === ".yarn" && parts[i + 1] === "unplugged")) return true;
-      return venvs.some((venv) => (venv === "" ? path === "pyvenv.cfg" : path.startsWith(venv)));
+      return venvs.some((venv) => (venv === "" ? lower === "pyvenv.cfg" : lower.startsWith(venv)));
     })
     .sort();
 };
