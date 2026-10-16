@@ -31,7 +31,7 @@ import {
   type TestRecord,
   type VisualApp,
 } from "@vtc/shared";
-import { writeRepoFile } from "../../git/index.js";
+import { runGit, writeRepoFile } from "../../git/index.js";
 import {
   addToAllowlist,
   GATES_CONFIG_PATH,
@@ -44,6 +44,8 @@ import { runWithConfig } from "../runner.js";
 import { detectGateSandbox, resolveGateSandbox } from "../sandbox.js";
 import { createScannerStore, type ScannerStore } from "../scanners.js";
 import {
+  committedDependencyFiles,
+  COMMITTED_TREE_NOTE,
   deriveProjectTool,
   lintPluginPaths,
   scriptsFreeInstall,
@@ -124,10 +126,11 @@ const PRISMA_CLIENT = /(^|\/)node_modules\/\.prisma\//;
  * reading 253(a)): an install script that wrote outside its own package, most often a code
  * generator, is never allowed, so the project runs the generator as an install gate of its own
  * after the install instead. When a tampered path is in a package whose name another installed
- * package shares and pnpm rebuilt by name (spine §5 readings 254(1) and 255: the finding's
+ * package shares and pnpm rebuilt by name (spine §5 readings 254(1), 255 and 256: the finding's
  * message begins with `SHARED_NAME_NOTE`), it says to install every package of that name from the
- * registry, install one version of it, or keep its script from running. `null` when no gate
- * failed so.
+ * registry, install one version of it, share one store with nested projects, or keep its script
+ * from running. `null` when no gate failed so. A committed dependency tree stops calibration
+ * before anything runs ({@link committedTreeAdvice}).
  */
 export const tamperAdvice = (report: GateReport): string | null => {
   const failed = report.results.filter((r) =>
@@ -143,12 +146,60 @@ export const tamperAdvice = (report: GateReport): string | null => {
     .find((m) => m.startsWith(SHARED_NAME_NOTE));
   if (shared !== undefined) {
     const names = shared.slice(SHARED_NAME_NOTE.length).replace(/^:\s*/, "");
-    return `WARNING: gate(s) ${gates} fail on the base commit as tampering: the install phase changed ${shown}, in packages installed more than once under one name where one declares an install script: ${names}. pnpm rebuilds by name (and version), which another package can copy, so such a name may rebuild itself only when every package of it comes from the registry with an integrity hash in pnpm-lock.yaml; here one does not (a file:, link:, git, tarball-URL or workspace source), so none may (H-14, spine §5 readings 254 and 255). Install that package from the registry instead, or install one version of each (a pnpm override to a single version), or keep the install script from running (leave the name out of onlyBuiltDependencies), then calibrate again. npm rebuilds each installed directory on its own and needs none of this`;
+    return `WARNING: gate(s) ${gates} fail on the base commit as tampering: the install phase changed ${shown}, in packages installed more than once under one name where one declares an install script: ${names}. pnpm rebuilds by name (and version), which another package can copy, so a package may rebuild itself only when it is the one installed package of its name and version, in the store of the install that rebuilt it, and every package of its name comes from the registry with an integrity hash in pnpm-lock.yaml, from one registry host, in a store this run's install populated; here that does not hold (a file:, link:, git, tarball-URL, workspace or patched source, a second registry, or one version installed twice, as by a nested project's own install), so none may (H-14, spine §5 readings 254 to 256). Install that package from the registry instead, or install one version of each (a pnpm override to a single version), or make nested projects workspace projects sharing the root's store, or keep the install script from running (leave the name out of onlyBuiltDependencies), then calibrate again. npm rebuilds each installed directory on its own and needs none of this`;
   }
   if (paths.some((p) => PRISMA_CLIENT.test(p))) {
     return `WARNING: gate(s) ${gates} fail on the base commit as tampering: an install script wrote ${shown} outside its own package. That is Prisma's client generator, which H-14 does not allow in the install's scripts (spine §5 reading 253). Keep its install script from running (pnpm: leave @prisma/client and prisma out of onlyBuiltDependencies; or make the install scripts-free with --ignore-scripts), add the generator as an install gate after the install in .vtc/gates.yml, for example { id: generate, layer: L0, phase: install, command: [npx, prisma, generate] }, and calibrate again`;
   }
   return `WARNING: gate(s) ${gates} fail on the base commit as tampering: the install phase changed ${shown}, which no package's own install script may (H-14, spine §5 reading 253). If an install script generates code outside its own package, keep it from running in the install and add the generator as an install gate after the install in .vtc/gates.yml, then calibrate again`;
+};
+
+/**
+ * The files in a dependency tree that commit `revision` tracks (H-14, spine §5 reading 256(1);
+ * `committedDependencyFiles`), sorted; none when git cannot list them (the run then says so).
+ */
+const committedTreesAt = async (repoRoot: string, revision: string): Promise<string[]> => {
+  try {
+    const out = await runGit(repoRoot, [
+      "-c",
+      "core.quotePath=false",
+      "ls-tree",
+      "-r",
+      "--name-only",
+      "-z",
+      revision,
+    ]);
+    return committedDependencyFiles(
+      out.stdout
+        .toString("utf8")
+        .split("\0")
+        .filter((path) => path !== ""),
+    );
+  } catch {
+    return [];
+  }
+};
+
+/**
+ * What `vtc calibrate` says, and stops on, when the base commit tracks files in a dependency tree
+ * (H-14, spine §5 reading 256(1)): every run fails closed on it before any install, so no
+ * baseline can be taken until the project stops tracking them.
+ */
+export const committedTreeAdvice = (paths: readonly string[]): string => {
+  const venvs = paths
+    .filter((path) => path === "pyvenv.cfg" || path.endsWith("/pyvenv.cfg"))
+    .map((path) => path.slice(0, -"pyvenv.cfg".length));
+  /** The directory to stop tracking: the first node_modules or .yarn/unplugged, or the venv. */
+  const top = (path: string): string => {
+    const parts = path.split("/");
+    const at = parts.findIndex(
+      (part, i) => part === "node_modules" || (part === ".yarn" && parts[i + 1] === "unplugged"),
+    );
+    if (at >= 0) return `${parts.slice(0, at + (parts[at] === ".yarn" ? 2 : 1)).join("/")}/`;
+    return venvs.find((venv) => path.startsWith(venv)) || path;
+  };
+  const dirs = [...new Set(paths.map(top))].sort();
+  return `${COMMITTED_TREE_NOTE}: ${String(paths.length)} tracked file(s) in ${dirs.slice(0, 10).join(", ")}${dirs.length > 10 ? ", ..." : ""}`;
 };
 
 /**
@@ -294,6 +345,10 @@ export const calibrate = async (
       yaml: stringifyGatesConfig(withVisualApp(detected, app ?? proposedApp)),
     };
   }
+
+  // H-14 (spine §5 reading 256(1)): every run refuses a commit that tracks a dependency tree
+  const committed = await committedTreesAt(deps.repoRoot, deps.revision);
+  if (committed.length > 0) throw new Error(committedTreeAdvice(committed));
 
   // Nothing runs outside the gate sandbox unless the user opted in (D-al, spine §5 reading 69).
   let detail = "";

@@ -27,8 +27,8 @@ import {
   splitCommand,
   stringifyGatesConfig,
 } from "../../src/gates/index.js";
-import { tamperAdvice } from "../../src/gates/calibrate/calibrate.js";
-import { SHARED_NAME_NOTE } from "../../src/gates/tool-integrity.js";
+import { committedTreeAdvice, tamperAdvice } from "../../src/gates/calibrate/calibrate.js";
+import { COMMITTED_TREE_NOTE, SHARED_NAME_NOTE } from "../../src/gates/tool-integrity.js";
 import { cleanupDirs, initRepo, tempDir, writeFile } from "../helpers/repo.js";
 import {
   cases,
@@ -795,5 +795,30 @@ describe("calibrate says what to do about a code generator in the install (spine
     expect(advice).toMatch(/one version of each/);
     // spine §5 reading 255: the way out that keeps both versions
     expect(advice).toMatch(/from the registry with an integrity hash in pnpm-lock\.yaml/);
+  });
+
+  it("names the ways out of reading 256: one registry, one copy of a version, one store", () => {
+    const shared = report({ test: ["node_modules/.pnpm/dep@1.0.0/node_modules/dep/bin/dep"] });
+    const finding = shared.results[0]?.findings[0] as { message?: string };
+    finding.message = `${SHARED_NAME_NOTE}: dep (node_modules/.pnpm/dep@1.0.0/node_modules/dep, tools/node_modules/.pnpm/dep@1.0.0/node_modules/dep)`;
+    const advice = tamperAdvice(shared) ?? "";
+    expect(advice).toMatch(/one installed package of its name and version/);
+    expect(advice).toMatch(/patched source, a second registry, or one version installed twice/);
+    expect(advice).toMatch(/workspace projects sharing the root's store/);
+  });
+
+  it("stops on a committed dependency tree and says how to stop tracking it (reading 256(1))", () => {
+    const advice = committedTreeAdvice([
+      "tools/node_modules/.pnpm/dep@1.0.0/node_modules/dep/package.json",
+      "tools/node_modules/dep",
+      ".yarn/unplugged/x-npm-1.0.0/node_modules/x/index.js",
+      "py/env/pyvenv.cfg",
+      "py/env/lib/site.py",
+    ]);
+    expect(advice.startsWith(COMMITTED_TREE_NOTE)).toBe(true);
+    expect(advice).toMatch(/git rm -r --cached/);
+    expect(advice).toMatch(
+      /5 tracked file\(s\) in \.yarn\/unplugged\/, py\/env\/, tools\/node_modules\/$/,
+    );
   });
 });

@@ -130,11 +130,14 @@ import {
 } from "./sandbox.js";
 import { computeScopeCreep, scopeCreepFindings, type ScopeCreep } from "./scope-creep.js";
 import {
+  committedDependencyFiles,
+  COMMITTED_TREE_NOTE,
   compareGate,
   compareInstall,
   deriveProjectTool,
   hashTool,
   perPackageBuild,
+  pnpmInstallDir,
   scriptsFreeInstall,
   sha256File,
   SHARED_NAME_NOTE,
@@ -394,6 +397,17 @@ class Run {
   /** The install gates that ran their scripts outside the two-pass install (H-14). */
   private unverifiedInstalls: readonly string[] = [];
   /**
+   * The checkout-relative directories whose pnpm store an install gate of this run populated
+   * (spine §5 reading 256(3)): the store was not there before that gate's scripts-free pass. Only
+   * their lockfiles vouch for a registry package.
+   */
+  private readonly pnpmStores = new Set<string>();
+  /**
+   * The files in a dependency tree that the head commit tracks and the task's diff added (spine
+   * §5 reading 256(1)): every gate that would trust them fails as tampering; `null` when none.
+   */
+  private committedTampered: readonly string[] | null = null;
+  /**
    * The whole checkout (H-14, spine §5 reading 252; `workspaceTree`), independent of any gate
    * command: hashed before the install phase's scripts ran (`afterScripts` when an install gate
    * with no scripts-free form ran its scripts, before or after that hash), and again when the
@@ -599,11 +613,10 @@ class Run {
       this.guardedAtStart = walkGuarded(this.checkoutAbs, this.lintGuarded);
     }
     const verify = gates.filter((g) => g.phase !== "install");
-    const installFailed = await this.runInstall(
-      gates.filter((g) => g.phase === "install"),
-      verify,
-      config,
-    );
+    const install = gates.filter((g) => g.phase === "install");
+    // spine §5 reading 256(1): a committed dependency tree fails the run closed before any install
+    const refused = gates.length > 0 ? await this.refuseCommittedTrees(install) : false;
+    const installFailed = refused ? null : await this.runInstall(install, verify, config);
     for (const gate of verify) {
       if (installFailed !== null) {
         this.results.push(this.skippedResult(gate, `install gate ${installFailed} did not pass`));
@@ -642,6 +655,72 @@ class Run {
     }
     this.finishL2();
     await this.flagScopeCreep();
+  }
+
+  /**
+   * Refuses a head commit that tracks files in a dependency tree (H-14, spine §5 reading 256(1);
+   * `committedDependencyFiles`), before any install gate runs: none then runs. When the task's
+   * diff added any of them, every install gate and every verify gate that runs the project's own
+   * tools fails as tampering; otherwise they do not run (`infra`), with {@link
+   * COMMITTED_TREE_NOTE}'s advice. `false` when the commit tracks none.
+   */
+  private async refuseCommittedTrees(install: readonly Gate[]): Promise<boolean> {
+    let committed: string[];
+    try {
+      const out = await runGit(this.deps.repoRoot, [
+        "-c",
+        "core.quotePath=false",
+        "ls-tree",
+        "-r",
+        "--name-only",
+        "-z",
+        this.request.head,
+      ]);
+      committed = committedDependencyFiles(
+        out.stdout
+          .toString("utf8")
+          .split("\0")
+          .filter((path) => path !== ""),
+      );
+    } catch (error) {
+      committed = [];
+      this.workspace = {
+        problem: `the head commit's files could not be listed to look for a committed dependency tree: ${errorText(error)}`,
+      };
+    }
+    if (committed.length === 0 && this.workspace === null) return false;
+    const added = new Set(this.changed.filter((f) => f.status !== "deleted").map((f) => f.path));
+    const tampered = committed.filter((path) => added.has(path));
+    const shown = `${committed.slice(0, 20).join(", ")}${committed.length > 20 ? ", ..." : ""}`;
+    if (tampered.length > 0) {
+      this.committedTampered = tampered;
+    } else if (committed.length > 0) {
+      this.workspace = { problem: `${COMMITTED_TREE_NOTE}: ${shown}` };
+    }
+    const ws = this.workspace;
+    for (const gate of install) {
+      const logRel = `${this.evidenceRoot}/${gate.id}.log`;
+      if (this.committedTampered !== null) {
+        const { tool, tampered: paths } = this.committedTool();
+        this.results.push(this.tamperedResult(gate, tool, paths, logRel, 0));
+      } else {
+        this.note(
+          gate.id,
+          `not run: ${ws !== null && "problem" in ws ? ws.problem : COMMITTED_TREE_NOTE}`,
+        );
+        this.results.push(this.infraResult(gate.id, gate.layer, gate.phase, gate.blocking, logRel));
+      }
+    }
+    return true;
+  }
+
+  /** The tool result of a gate that would trust a dependency tree the task's diff committed. */
+  private committedTool(): { tool: ToolIntegrity; tampered: readonly string[] } {
+    const tampered = this.committedTampered ?? [];
+    return {
+      tool: { source: "project", sha256: EMPTY_TOOL.sha256, tampered: tampered.slice(0, 50) },
+      tampered,
+    };
   }
 
   /**
@@ -693,8 +772,14 @@ class Run {
     for (const { gate, passes } of freed) {
       if (failed !== null || passes === null) break;
       const last = passes.build === null;
+      // spine §5 reading 256(3): a pnpm store this gate's scripts-free pass created is its own
+      const store = pnpmInstallDir(gate.command, this.checkoutAbs, gate.cwd ?? "");
+      const hasStore = (): boolean =>
+        store !== null && present(join(this.checkoutAbs, store, "node_modules", ".pnpm"));
+      const existed = hasStore();
       if (!(await run(gate, passes.free, last, last ? undefined : "scripts-free")))
         failed = gate.id;
+      else if (store !== null && !existed && hasStore()) this.pnpmStores.add(store);
     }
     if (failed === null) {
       this.hashTools(verify, unverified.length > 0);
@@ -859,9 +944,10 @@ class Run {
 
   /** Where gate commands can write and the download caches to hash (spine §5 reading 253). */
   private treeOptions(): Parameters<typeof workspaceTree>[1] {
+    const pnpmStores = [...this.pnpmStores];
     return this.jail === null
-      ? {}
-      : { writable: this.jail.writableRoots(), caches: this.jail.downloadCaches() };
+      ? { pnpmStores }
+      : { writable: this.jail.writableRoots(), caches: this.jail.downloadCaches(), pnpmStores };
   }
 
   /**
@@ -1103,6 +1189,7 @@ class Run {
     gate: Gate,
   ): { refused: string } | { tool?: ToolIntegrity; tampered?: readonly string[] } {
     if (!this.mayHaveProjectTool(gate)) return {};
+    if (this.committedTampered !== null) return this.committedTool();
     const workspace = this.workspaceTampered();
     if (workspace !== null && "refused" in workspace) return workspace;
     const ws = this.workspace !== null && "baseline" in this.workspace ? this.workspace : null;
@@ -1163,7 +1250,11 @@ class Run {
     this.writes.push({
       rel: logRel,
       redact: true,
-      text: `not run: ${String(tampered.length)} file(s) of the checkout changed after it was hashed before the install phase's scripts (by an install-phase script, outside a package rebuilding itself, or by an earlier gate), so its check tools cannot be trusted (H-14, spine §5 reading 252):\n${shown.join("\n")}${more > 0 ? `\n... and ${String(more)} more` : ""}\n`,
+      text: `not run: ${
+        this.committedTampered !== null
+          ? `the task's diff added ${String(tampered.length)} file(s) in a dependency tree (below a node_modules or .yarn/unplugged, or in a Python virtual environment), which only the package manager may write: a committed package would pass for an installed one, so no install ran and its check tools cannot be trusted (H-14, spine §5 reading 256(1))`
+          : `${String(tampered.length)} file(s) of the checkout changed after it was hashed before the install phase's scripts (by an install-phase script, outside a package rebuilding itself, or by an earlier gate), so its check tools cannot be trusted (H-14, spine §5 reading 252)`
+      }:\n${shown.join("\n")}${more > 0 ? `\n... and ${String(more)} more` : ""}\n`,
     });
     const evidence: Evidence = { type: "command_output", ref: logRel };
     const title = `the tool of gate ${gate.id} was changed after it was hashed (${String(tampered.length)} file(s))`;

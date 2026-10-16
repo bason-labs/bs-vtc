@@ -12,6 +12,7 @@ import { createHash } from "node:crypto";
 import { dirname, join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import {
+  committedDependencyFiles,
   compareGate,
   compareInstall,
   inDependencyTree,
@@ -1016,6 +1017,9 @@ describe("h14-open3: a self-rebuild is one installed directory's, never a name's
 });
 
 describe("reading 255: a shared name keeps its allowance where the rebuild cannot mix the packages up", () => {
+  /** The checkout's snapshot, its root's pnpm store populated by this run's install (256(3)). */
+  const workspaceTree = (root: string): WorkspaceTree =>
+    walk(root, { writable: [JAIL], pnpmStores: [""] });
   const isProtected = (path: string): boolean => matchesAnyCaseless(DEFAULT_PROTECTED_GLOBS, path);
   const MAIN_JS = "export const transform = (code) => code;\n";
   const PATCHED = "export const transform = (code) => code.replace(/expect\\(/g, 'void (');\n";
@@ -1078,7 +1082,7 @@ describe("reading 255: a shared name keeps its allowance where the rebuild canno
     put(
       root,
       "node_modules/.modules.yaml",
-      "pendingBuilds:\n  - esbuild@0.21.5\n  - esbuild@0.25.0\n",
+      "pendingBuilds:\n  - esbuild@0.21.5\n  - esbuild@0.25.0\nregistries:\n  default: https://registry.npmjs.org/\n",
     );
     return root;
   };
@@ -1181,17 +1185,18 @@ describe("reading 255: a shared name keeps its allowance where the rebuild canno
       selfRebuilt: [],
       managerState: [],
     });
-    // a rebuild by name alone may write the binaries of every registry esbuild
+    // a rebuild by name alone selects two directories, and a self-rebuild is one (reading
+    // 256(2)): it may write neither esbuild's binaries
     const byName = workspaceTree(root);
     put(root, `${OLD}/esbuild.node`, NATIVE);
     put(root, `${NEW}/build/esbuild`, NATIVE);
     expect(
-      compareInstall(byName, workspaceTree(root), isProtected, { dependency: "esbuild" })
-        .selfRebuilt,
-    ).toEqual([
-      { package: OLD, files: [`${OLD}/esbuild.node`] },
-      { package: NEW, files: [`${NEW}/build/esbuild`] },
-    ]);
+      compareInstall(byName, workspaceTree(root), isProtected, { dependency: "esbuild" }),
+    ).toEqual({
+      tampered: [`${OLD}/esbuild.node`, `${NEW}/build/esbuild`],
+      selfRebuilt: [],
+      managerState: [],
+    });
   });
 
   it("pnpm: a fake esbuild from a tarball beside the registry one keeps the name's allowance off", () => {
@@ -1278,5 +1283,314 @@ describe("reading 255: a shared name keeps its allowance where the rebuild canno
     const tree = workspaceTree(hoisted);
     expect(tree.packages.get("node_modules/other/node_modules/esbuild")?.registry).toBe(false);
     expect([...unverifiedSharedNames(tree).keys()]).toEqual(["esbuild"]);
+  });
+});
+
+describe("reading 256 (h14-open4): a pnpm self-rebuild is one directory of the step's own store", () => {
+  const isProtected = (path: string): boolean => matchesAnyCaseless(DEFAULT_PROTECTED_GLOBS, path);
+  const NATIVE = "\u007fELF native";
+  const REGISTRY = "https://registry.npmjs.org/";
+  const EVIL_REGISTRY = "http://127.0.0.1:4873/";
+  const REAL = "node_modules/.pnpm/dep@1.0.0/node_modules/dep";
+  const integrity = (text: string): string =>
+    `sha512-${createHash("sha512").update(text).digest("base64")}`;
+  /** A pnpm-lock.yaml (v9) with each `name@version` resolved by `integrity` only. */
+  const lockfile = (keys: Record<string, string>): string =>
+    `lockfileVersion: '9.0'\n\nimporters:\n\n  .:\n    dependencies:\n      dep:\n        specifier: 1.0.0\n        version: 1.0.0\n\npackages:\n\n${Object.entries(
+      keys,
+    )
+      .map(([key, hash]) => `  ${key}:\n    resolution: {integrity: ${hash}}\n`)
+      .join("\n")}\nsnapshots:\n\n  dep@1.0.0: {}\n`;
+  /** pnpm's `.modules.yaml` with `pendingBuilds` and the registry it installed from. */
+  const modulesYaml = (pending: string[], registry = REGISTRY): string =>
+    `layoutVersion: 5\npendingBuilds:\n${pending.map((p) => `  - ${p}\n`).join("")}registries:\n  default: ${registry}\nstoreDir: /tmp/store\n`;
+  /** `dep` as published: a postinstall that rebuilds its own `bin/dep`, and its JavaScript. */
+  const depAt = (
+    root: string,
+    dir: string,
+    version = "1.0.0",
+    install = "node install.js",
+  ): void => {
+    put(
+      root,
+      `${dir}/package.json`,
+      JSON.stringify({
+        name: "dep",
+        version,
+        scripts: { postinstall: install },
+        bin: { dep: "bin/dep" },
+      }),
+    );
+    put(root, `${dir}/install.js`, "// rebuilds bin/dep\n");
+    put(root, `${dir}/bin/dep`, "#!/usr/bin/env node\n// js fallback\n", 0o755);
+    put(root, `${dir}/lib/index.js`, "module.exports = 1;\n");
+  };
+  /** The project after `pnpm install --ignore-scripts` at the root: the real dep@1.0.0. */
+  const project = (): string => {
+    const root = tempDir("vtc-pnpm-");
+    put(root, "package.json", pkg("app", { pnpm: { onlyBuiltDependencies: ["dep"] } }));
+    put(root, "pnpm-lock.yaml", lockfile({ "dep@1.0.0": integrity("dep-1.0.0") }));
+    depAt(root, REAL);
+    link(root, "node_modules/dep", ".pnpm/dep@1.0.0/node_modules/dep");
+    put(root, "node_modules/.modules.yaml", modulesYaml(["dep@1.0.0"]));
+    return root;
+  };
+  /** A nested project `tools` with its own store holding `dep` at `folder`, as `version`. */
+  const tools = (
+    root: string,
+    folder: string,
+    options: { version?: string; registry?: string; install?: string } = {},
+  ): string => {
+    const version = options.version ?? "1.0.0";
+    const dir = `tools/node_modules/.pnpm/${folder}/node_modules/dep`;
+    put(root, "tools/package.json", pkg("tools", { dependencies: { dep: version } }));
+    put(root, "tools/pnpm-lock.yaml", lockfile({ [`dep@${version}`]: "sha512-AAAA" }));
+    put(
+      root,
+      "tools/node_modules/.pnpm/lock.yaml",
+      lockfile({ [`dep@${version}`]: "sha512-AAAA" }),
+    );
+    put(
+      root,
+      "tools/node_modules/.modules.yaml",
+      modulesYaml([`dep@${version}`], options.registry ?? REGISTRY),
+    );
+    link(root, "tools/node_modules/dep", `.pnpm/${folder}/node_modules/dep`);
+    depAt(root, dir, version, options.install ?? "node evil.js");
+    put(root, `${dir}/evil.js`, "// overwrites the root's bin/dep\n");
+    return dir;
+  };
+  /** What the finding's fake postinstall did: the real package's binary and an added file. */
+  const evil = (root: string): void => {
+    put(root, `${REAL}/bin/dep`, "PWNED by dep@1.0.0\n", 0o755);
+    put(root, `${REAL}/bin/added-by-evil.js`, "// planted\n");
+  };
+  const ONE_STEP = { dependency: "dep", version: "1.0.0" } as const;
+
+  it("the real package alone in the store the step installed rebuilds itself", () => {
+    const root = project();
+    const before = workspaceTree(root, { pnpmStores: [""] });
+    expect(before.packages.get(REAL)).toMatchObject({
+      registry: true,
+      registryHost: "registry.npmjs.org",
+    });
+    const steps = perPackageBuild(["pnpm", "install"], root, "", before);
+    expect(steps).toEqual([
+      { argv: ["pnpm", "rebuild", "--recursive", "dep@1.0.0"], writer: ONE_STEP },
+    ]);
+    put(root, `${REAL}/bin/dep`, NATIVE, 0o755);
+    expect(compareInstall(before, workspaceTree(root), isProtected, ONE_STEP)).toEqual({
+      tampered: [],
+      selfRebuilt: [{ package: REAL, files: [`${REAL}/bin/dep`] }],
+      managerState: [],
+    });
+    // the same package from another step's store is not this step's
+    expect(
+      compareInstall(before, workspaceTree(root), isProtected, { ...ONE_STEP, store: "tools" })
+        .tampered,
+    ).toEqual([`${REAL}/bin/dep`]);
+  });
+
+  it("(H) a committed nested tools/node_modules fake of dep@1.0.0 rewriting the real bin is tampering", () => {
+    const root = project();
+    const fake = tools(root, "dep@1.0.0");
+    // reading 256(1): a run refuses the committed tree before any install
+    expect(
+      committedDependencyFiles([
+        "package.json",
+        "pnpm-lock.yaml",
+        "tools/package.json",
+        "tools/pnpm-lock.yaml",
+        "tools/node_modules/.modules.yaml",
+        "tools/node_modules/dep",
+        `${fake}/package.json`,
+        `${fake}/evil.js`,
+        "src/node_modules.ts",
+        ".yarn/unplugged/x-npm-1.0.0/node_modules/x/index.js",
+        ".yarn/releases/yarn-4.0.0.cjs",
+        "py/env/pyvenv.cfg",
+        "py/env/lib/site.py",
+        "py/envx/a.py",
+      ]),
+    ).toEqual([
+      ".yarn/unplugged/x-npm-1.0.0/node_modules/x/index.js",
+      "py/env/lib/site.py",
+      "py/env/pyvenv.cfg",
+      "tools/node_modules/.modules.yaml",
+      `${fake}/evil.js`,
+      `${fake}/package.json`,
+      "tools/node_modules/dep",
+    ]);
+    // and were it there anyway: no install gate populated tools' store, so its lockfile's text
+    // vouches for nothing (256(3)), and dep@1.0.0 is installed twice (256(2))
+    const before = workspaceTree(root, { pnpmStores: [""] });
+    expect(before.packages.get(fake)?.registry).toBe(false);
+    expect(before.packages.get(REAL)?.registry).toBe(true);
+    expect(unverifiedSharedNames(before)).toEqual(new Map([["dep", [REAL, fake].sort()]]));
+    const steps = perPackageBuild(["pnpm", "install"], root, "", before);
+    expect(steps?.map((s) => s.writer)).toEqual([ONE_STEP]);
+    for (const pnpmStores of [[""], ["", "tools"]]) {
+      const again = project();
+      const copy = tools(again, "dep@1.0.0");
+      const from = workspaceTree(again, { pnpmStores });
+      expect(from.packages.get(copy)?.registry).toBe(pnpmStores.includes("tools"));
+      evil(again);
+      expect(
+        compareInstall(from, workspaceTree(again, { pnpmStores }), isProtected, ONE_STEP),
+      ).toEqual({
+        tampered: [`${REAL}/bin/added-by-evil.js`, `${REAL}/bin/dep`],
+        selfRebuilt: [],
+        managerState: [],
+      });
+    }
+  });
+
+  it("(D) a second install gate's patchedDependencies copy of dep@1.0.0 patching the root's bin is tampering", () => {
+    const root = project();
+    const PATCHED =
+      "dep@1.0.0_patch_hash=2f3c4ab5d6e7f8091a2b3c4d5e6f7a8b9c0d1e2f3a4b5c6d7e8f9a0b1c2d3e4f";
+    const fake = tools(root, PATCHED);
+    put(
+      root,
+      "tools/package.json",
+      pkg("tools", {
+        dependencies: { dep: "1.0.0" },
+        pnpm: { patchedDependencies: { "dep@1.0.0": "patches/dep@1.0.0.patch" } },
+      }),
+    );
+    put(root, "tools/patches/dep@1.0.0.patch", "--- a/install.js\n+++ b/install.js\n");
+    // both stores populated by this run's install gates: the patched folder is still not the
+    // registry's (256(2))
+    const before = workspaceTree(root, { pnpmStores: ["", "tools"] });
+    expect(before.packages.get(fake)?.registry).toBe(false);
+    expect([...unverifiedSharedNames(before).keys()]).toEqual(["dep"]);
+    const steps = perPackageBuild(["pnpm", "install"], root, "tools", before);
+    const writer = { ...ONE_STEP, store: "tools" };
+    expect(steps).toEqual([{ argv: ["pnpm", "rebuild", "--recursive", "dep@1.0.0"], writer }]);
+    evil(root);
+    const after = workspaceTree(root, { pnpmStores: ["", "tools"] });
+    expect(compareInstall(before, after, isProtected, writer)).toEqual({
+      tampered: [`${REAL}/bin/added-by-evil.js`, `${REAL}/bin/dep`],
+      selfRebuilt: [],
+      managerState: [],
+    });
+    // and the root step may not rebuild the real one either: dep@1.0.0 is installed twice
+    expect(compareInstall(before, after, isProtected, ONE_STEP).tampered).toEqual([
+      `${REAL}/bin/added-by-evil.js`,
+      `${REAL}/bin/dep`,
+    ]);
+    // nor may the patched one rebuild itself, alone in its store
+    const alone = tempDir("vtc-pnpm-");
+    const only = tools(alone, PATCHED);
+    const lone = workspaceTree(alone, { pnpmStores: ["tools"] });
+    put(alone, `${only}/bin/dep`, NATIVE, 0o755);
+    expect(
+      compareInstall(lone, workspaceTree(alone, { pnpmStores: ["tools"] }), isProtected, writer)
+        .tampered,
+    ).toEqual([`${only}/bin/dep`]);
+  });
+
+  it("(C) a copy of dep@1.0.0 from a second registry patching the root's bin is tampering", () => {
+    const root = project();
+    put(root, "tools/.npmrc", `registry=${EVIL_REGISTRY}\n`);
+    const fake = tools(root, "dep@1.0.0", { registry: EVIL_REGISTRY });
+    const before = workspaceTree(root, { pnpmStores: ["", "tools"] });
+    // integrity-only in a store this run populated: the registry's, but another registry's
+    expect(before.packages.get(fake)).toMatchObject({
+      registry: true,
+      registryHost: "127.0.0.1:4873",
+    });
+    expect(unverifiedSharedNames(before)).toEqual(new Map([["dep", [REAL, fake].sort()]]));
+    evil(root);
+    const after = workspaceTree(root, { pnpmStores: ["", "tools"] });
+    for (const writer of [{ ...ONE_STEP, store: "tools" }, ONE_STEP]) {
+      expect(compareInstall(before, after, isProtected, writer)).toEqual({
+        tampered: [`${REAL}/bin/added-by-evil.js`, `${REAL}/bin/dep`],
+        selfRebuilt: [],
+        managerState: [],
+      });
+    }
+  });
+
+  it("256(5): another version of the name keeps the allowance only from the same registry host", () => {
+    for (const [registry, allowed] of [
+      [REGISTRY, true],
+      [EVIL_REGISTRY, false],
+    ] as const) {
+      const root = project();
+      tools(root, "dep@2.0.0", { version: "2.0.0", registry, install: "node install.js" });
+      const before = workspaceTree(root, { pnpmStores: ["", "tools"] });
+      put(root, `${REAL}/bin/dep`, NATIVE, 0o755);
+      expect(
+        compareInstall(
+          before,
+          workspaceTree(root, { pnpmStores: ["", "tools"] }),
+          isProtected,
+          ONE_STEP,
+        ),
+        registry,
+      ).toEqual(
+        allowed
+          ? {
+              tampered: [],
+              selfRebuilt: [{ package: REAL, files: [`${REAL}/bin/dep`] }],
+              managerState: [],
+            }
+          : { tampered: [`${REAL}/bin/dep`], selfRebuilt: [], managerState: [] },
+      );
+    }
+    // a store whose .modules.yaml names no registry: the host is unknown, so no allowance
+    const root = project();
+    tools(root, "dep@2.0.0", { version: "2.0.0", install: "node install.js" });
+    put(root, "tools/node_modules/.modules.yaml", "pendingBuilds:\n  - dep@2.0.0\n");
+    expect([
+      ...unverifiedSharedNames(workspaceTree(root, { pnpmStores: ["", "tools"] })).keys(),
+    ]).toEqual(["dep"]);
+  });
+
+  it("256(2): a peer-suffixed duplicate of the same name and version takes the allowance away", () => {
+    const root = project();
+    const SECOND = "node_modules/.pnpm/dep@1.0.0_peer@2.0.0/node_modules/dep";
+    depAt(root, SECOND);
+    put(root, `${SECOND}/lib/index.js`, "module.exports = 2;\n");
+    const before = workspaceTree(root, { pnpmStores: [""] });
+    put(root, `${REAL}/bin/dep`, NATIVE, 0o755);
+    expect(
+      compareInstall(before, workspaceTree(root, { pnpmStores: [""] }), isProtected, ONE_STEP)
+        .tampered,
+    ).toEqual([`${REAL}/bin/dep`]);
+  });
+
+  it("256(3): without a store an install gate populated, no lockfile vouches for the registry", () => {
+    const root = project();
+    expect(workspaceTree(root).packages.get(REAL)?.registry).toBe(false);
+    expect(workspaceTree(root, { pnpmStores: ["tools"] }).packages.get(REAL)?.registry).toBe(false);
+    expect(workspaceTree(root, { pnpmStores: [""] }).packages.get(REAL)?.registry).toBe(true);
+  });
+
+  it("256(4): .npmrc, .yarnrc.yml, .pnpmfile.cjs and pnpm settings added in either comparison are tampering", () => {
+    const root = project();
+    put(root, "packages/app/package.json", pkg("app", { scripts: { prepare: "node gen.js" } }));
+    const before = workspaceTree(root, { pnpmStores: [""] });
+    const added = [
+      "packages/app/.npmrc",
+      "packages/app/.yarnrc.yml",
+      "packages/app/.pnpmfile.cjs",
+      "packages/app/dist/.npmrc",
+      "packages/app/dist/pnpm-workspace.yaml",
+    ];
+    for (const path of added) put(root, path, "x");
+    put(
+      root,
+      "packages/app/dist/sub/package.json",
+      pkg("sub", { pnpm: { overrides: { dep: "2" } } }),
+    );
+    const after = workspaceTree(root, { pnpmStores: [""] });
+    const expected = [...added, "packages/app/dist/sub/package.json"].sort();
+    // not even with no isProtected given
+    expect(compareGate(before, after)).toEqual(expected);
+    expect(compareInstall(before, after, undefined, { project: "packages/app" }).tampered).toEqual(
+      expected,
+    );
   });
 });

@@ -4550,6 +4550,61 @@ of reading 251 ((1), (2) and (3)); 251(4)–(8) stand.
       under npm the real esbuild now rebuilds itself while the fake's patch still fails, and pnpm
       `rebuild --recursive dep@2.0.0` runs that version only). The reading-254 test of npm changes
       accordingly: the real esbuild's own binary is now allowed.
+256.  **H-14: a pnpm self-rebuild is one directory of the step's own store, and committed
+      dependency trees are refused** (amends readings 238, 254(3) and 255(2)–(3); closes the
+      h14-open4 finding h14-self-rebuild-allowance-not-attributed-to-writer, reopened under pnpm
+      by 255). _Lead decision 2026-10-16, pending human review._ Reading 255 let a pnpm writer
+      `{ dependency, version }` rebuild every installed package of that name and version anywhere
+      in the checkout, vouched for by lockfile text only, and `pnpm rebuild --recursive` also
+      descends into nested projects with their own `node_modules`: a second `dep@1.0.0` committed
+      in `tools/node_modules` (H), patched by a second install gate's `pnpm.patchedDependencies`
+      (D) or served by a second registry (C) ran in the real package's step and rewrote its
+      binary as the real package's own. npm (rebuilt by location) was not affected. (1)
+      _Committed dependency trees_: before any install gate runs, every file the head commit
+      tracks below a `node_modules` or `.yarn/unplugged`, or in a directory holding a tracked
+      `pyvenv.cfg`, fails the run closed (`committedDependencyFiles`, from `git ls-tree` of the
+      head commit): when the task's diff added any of them, every install gate and every verify
+      gate that runs the project's own tools fails as tampering (those paths); otherwise they do
+      not run (`infra`, `COMMITTED_TREE_NOTE`: stop tracking them, then calibrate again). No
+      install runs either way. `vtc calibrate` stops on such a base commit with the same advice
+      (`committedTreeAdvice`). (2) _One directory_: a pnpm writer now carries the directory the
+      step ran in (`InstallWriter.store`, absent for the root), and its allowance is one
+      directory: the one installed package of that name (and version) in the whole checkout,
+      which must be in `<store>/node_modules/.pnpm/<name>@…/node_modules/<name>`, in a folder that
+      is not a patched one (`patch_hash=`), with none of its names in `unverifiedSharedNames`. Any
+      other installed package of that name and version anywhere (another store, a nested project,
+      a peer-suffixed copy whatever its content, a patched copy) leaves none, and so does a step
+      by name alone with two versions installed. A patched folder is never a registry package.
+      (3) _Lockfiles of this run's stores only_: `PackageInfo.registry` reads the lockfile beside
+      a store only when an install gate of this run populated that store, that is when
+      `<dir>/node_modules/.pnpm` was not there before that gate's scripts-free pass
+      (`pnpmInstallDir`; `workspaceTree`'s `pnpmStores`, none by default). A committed store, or
+      one an install with no scripts-free form made, vouches for nothing. (4) _Install
+      configuration_: package.json's `pnpm` key is guarded whole in the task diff (L5 and L1's
+      base sections, `mixed-configs.ts`), as `scripts` is; `.npmrc`, `.yarnrc.yml` and
+      `.pnpmfile.*` already were (`PACKAGE_MANAGER_CONFIG_GLOBS`), and so were the settings of
+      `pnpm-workspace.yaml` (its `packages` and catalogs stay unguarded, which add no install
+      script of their own). Both comparisons (`compareInstall`, `compareGate`) now refuse an added
+      `.npmrc`, `.yarnrc`, `.yarnrc.yml` or `.pnpmfile.*` by name as they did `pnpm-workspace.yaml`
+      and a package.json with a `pnpm` key, whatever `isProtected` says. (5) _One registry_: a
+      shared name keeps its allowance only when every installed package of it has the same
+      registry host (`PackageInfo.registryHost`: the scope's, else the `default`, of the
+      `registries` in the `.modules.yaml` beside its store) and each version is installed once;
+      an unknown host is not the same. `SHARED_NAME_NOTE` and `tamperAdvice` say so, and add
+      sharing one store with nested projects (making them workspace projects) as a way out. The
+      suggested alternative, excluding nested projects from the rebuild step, was not taken: it
+      would not cover D or C, whose second store is a gate's own, and (2) makes it unnecessary.
+      No contract field changes. (6) _Tests_: `workspace-tree.test.ts` (H, D and C on the file
+      system, each a write into the real package's binary failing as tampering whichever step
+      made it; the real package alone allowed; the host rule; a peer-suffixed duplicate;
+      untrusted stores; the install configs), `tool-tamper.test.ts` end to end with the fake pnpm
+      (H added by the task: tampering and no install; H committed before: `infra`; D and C as two
+      install gates: tampering on the real `bin/dep`; the real package alone passes; esbuild
+      0.21.5 and 0.25.0 from the registry still pass under npm and pnpm), `write-scope.test.ts`
+      (the `pnpm` key and the install configs need the human) and `calibrate.test.ts` (the
+      advice). The fixtures of `tool-tamper.test.ts` commit their fake installed trees as
+      `node_modules_` and `pyvenv.cfg_`, which the fake package managers lay out under the real
+      names, since a commit tracking them is now refused.
 
 ## 6. Change process for this spine
 

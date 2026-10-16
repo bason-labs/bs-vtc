@@ -301,6 +301,38 @@ describe("package-manager configs (a gate runs through npm, pnpm, yarn or bun)",
     ]);
   });
 
+  it("guards package.json's pnpm key whole and pnpm's install settings (reading 256(4))", async () => {
+    const PKG = '{ "name": "a", "dependencies": { "dep": "1.0.0" } }\n';
+    const WS = "packages:\n  - packages/*\n";
+    const repo = initRepo({ "package.json": PKG, "pnpm-workspace.yaml": WS });
+    const base = git(repo, "rev-parse", "HEAD");
+    const ops = createGitOps({ repoRoot: repo });
+    const scope = (head: string) => ({ ...request(base, head), protected: [], filesScope: ["**"] });
+    writeFile(
+      repo,
+      "package.json",
+      '{ "name": "a", "dependencies": { "dep": "1.0.0" }, "pnpm": { "overrides": { "dep": "2.0.0" } } }\n',
+    );
+    writeFile(
+      repo,
+      "tools/package.json",
+      '{ "name": "tools", "pnpm": { "patchedDependencies": { "dep@1.0.0": "patches/dep.patch" } } }\n',
+    );
+    writeFile(repo, "tools/.npmrc", "registry=http://127.0.0.1:4873/\n");
+    writeFile(repo, "tools/.pnpmfile.cjs", "module.exports = {};\n");
+    writeFile(repo, "tools/.yarnrc.yml", "npmRegistryServer: http://127.0.0.1:4873\n");
+    writeFile(repo, "pnpm-workspace.yaml", `${WS}onlyBuiltDependencies:\n  - dep\n`);
+    const head = commitAll(repo, "install settings");
+    expect((await checkWriteScope(ops, scope(head))).violations).toEqual([
+      { kind: "protected_modified", path: "package.json" },
+      { kind: "protected_modified", path: "pnpm-workspace.yaml" },
+      { kind: "protected_modified", path: "tools/.npmrc" },
+      { kind: "protected_modified", path: "tools/.pnpmfile.cjs" },
+      { kind: "protected_modified", path: "tools/.yarnrc.yml" },
+      { kind: "protected_modified", path: "tools/package.json" },
+    ]);
+  });
+
   it("guards the packageManager field of package.json", async () => {
     const PKG = '{ "name": "a", "packageManager": "pnpm@10.0.0" }\n';
     const repo = initRepo({ "package.json": PKG });
