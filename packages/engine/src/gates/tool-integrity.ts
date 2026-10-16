@@ -1328,12 +1328,99 @@ export interface InstallComparison {
 }
 
 /**
- * Whose lifecycle scripts ran between two snapshots (spine §5 reading 253): an installed
- * dependency by its package name, one of the checkout's own projects by its checkout-relative
- * directory (`""`: the root), or `null` when nobody can be named (a package manager that runs
- * every script at once): then nothing but the package manager's state may change.
+ * Whose lifecycle scripts ran between two snapshots (spine §5 readings 253 and 254): an installed
+ * dependency by its checkout-relative directory (`installed`, where the package manager rebuilds
+ * by location: npm), or by its package name (`dependency`, where it rebuilds only by name: pnpm),
+ * one of the checkout's own projects by its checkout-relative directory (`""`: the root), or
+ * `null` when nobody can be named (a package manager that runs every script at once): then
+ * nothing but the package manager's state may change.
  */
-export type InstallWriter = { readonly dependency: string } | { readonly project: string } | null;
+export type InstallWriter =
+  | { readonly dependency: string }
+  | { readonly installed: string }
+  | { readonly project: string }
+  | null;
+
+/**
+ * The names an installed package goes by (spine §5 reading 254): its package.json `name` and the
+ * name of the folder it is installed as (an alias such as `"evil": "npm:esbuild"` differs).
+ */
+const installedNames = (dir: string, info: PackageInfo): string[] => {
+  const parts = (installedPackageOf(`${dir}/package.json`) ?? "").split("/");
+  const at = parts.lastIndexOf("node_modules");
+  const folder = at < 0 ? null : parts.slice(at + 1).join("/");
+  return [...new Set([info.name, folder].filter((n): n is string => n !== null))];
+};
+
+/**
+ * The names two or more installed packages of `tree` share where at least one of them declares an
+ * install script (spine §5 reading 254(1)), each with those packages' directories, sorted. No
+ * self-rebuild allowance applies to such a name: a package manager that rebuilds by name runs
+ * every one of them in one step, and a script of one can rewrite another, so every change under
+ * any of them is tampering.
+ */
+export const sharedInstallNames = (tree: WorkspaceTree): Map<string, string[]> => {
+  const byName = new Map<string, { dirs: string[]; scripts: boolean }>();
+  for (const [dir, info] of tree.packages) {
+    if (!info.installed) continue;
+    for (const name of installedNames(dir, info)) {
+      const entry = byName.get(name) ?? { dirs: [], scripts: false };
+      entry.dirs.push(dir);
+      entry.scripts ||= info.scripts.length > 0;
+      byName.set(name, entry);
+    }
+  }
+  return new Map(
+    [...byName]
+      .filter(([, e]) => e.dirs.length > 1 && e.scripts)
+      .sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0))
+      .map(([name, e]) => [name, [...e.dirs].sort()]),
+  );
+};
+
+/**
+ * How a tampering finding begins its message when a tampered path is in a package whose name
+ * another installed package shares ({@link sharedInstallNames}); `vtc calibrate` looks for it.
+ */
+export const SHARED_NAME_NOTE =
+  "installed packages share a name and one of them declares an install script, so none of them may rebuild itself (spine §5 reading 254)";
+
+/** The one installed directory a dependency writer may rebuild (reading 254(1)), or `null`. */
+const writerDir = (tree: WorkspaceTree, writer: InstallWriter): string | null => {
+  if (writer === null || "project" in writer) return null;
+  const shared = sharedInstallNames(tree);
+  const owns = (dir: string, info: PackageInfo | undefined): boolean =>
+    info !== undefined &&
+    info.installed &&
+    info.scripts.length > 0 &&
+    installedNames(dir, info).every((name) => !shared.has(name));
+  if ("installed" in writer) {
+    return owns(writer.installed, tree.packages.get(writer.installed)) ? writer.installed : null;
+  }
+  const named = [...tree.packages].filter(
+    ([dir, info]) => info.installed && installedNames(dir, info).includes(writer.dependency),
+  );
+  const [only] = named;
+  return named.length === 1 && only !== undefined && owns(only[0], only[1]) ? only[0] : null;
+};
+
+/**
+ * The files a package's own install script may replace in its own directory (spine §5 reading
+ * 254(2)): native binaries (`.node`, `.so`, `.dylib`, `.dll`, `.exe`, and a file without an
+ * extension under its `bin/` or `build/`), given relative to the package's directory. Any other
+ * file that was there may be neither changed nor removed, even by its own writer.
+ */
+const isNativeBinary = (rel: string): boolean => {
+  const name = rel.slice(rel.lastIndexOf("/") + 1);
+  if (/\.(node|so|dylib|dll|exe)$/i.test(name)) return true;
+  return !name.slice(1).includes(".") && /^(bin|build)\//.test(rel);
+};
+
+/**
+ * The directories of a project where its own install script may add files (spine §5 reading
+ * 254(3)): build outputs. `lib` only where the project's `.gitignore` ignores it.
+ */
+export const BUILD_OUTPUT_DIRS: readonly string[] = ["dist", "build", "out", ".next", "target"];
 
 /** The nearest directory at or above `path`'s holding one of the checkout's own packages. */
 const ownPackageOf = (path: string, tree: WorkspaceTree): string | null => {
@@ -1348,15 +1435,19 @@ const ownPackageOf = (path: string, tree: WorkspaceTree): string | null => {
 
 /**
  * What one writer's lifecycle scripts did, against the snapshot taken just before them (H-14,
- * spine §5 readings 252 and 253), both from content. Every path whose line differs is tampering,
+ * spine §5 readings 252 to 254), both from content. Every path whose line differs is tampering,
  * and so is every refused line of `after`, except:
- * - for a `dependency` writer, a change or an addition inside the directory of an installed
- *   package of that name that declared an install script (or a `binding.gyp`) before, and a
- *   `.bin` entry that started that package before and still does (pnpm relinks the bin of a
- *   package it rebuilt): that package rebuilt itself;
- * - for a `project` writer, a file added in that project's own directory (never in a nested
- *   package or dependency tree of it, never a file that `isProtected` names or pnpm's
- *   configuration, never a change to a file that was there);
+ * - for a dependency writer, inside the one installed directory it may rebuild (the directory it
+ *   names, or the only installed package of the name it names; either with an install script, or a
+ *   `binding.gyp`, before, and none whose name another installed package shares,
+ *   {@link sharedInstallNames}): a file added, a native binary replaced ({@link isNativeBinary}),
+ *   and a `.bin` entry that started that package before and still does (pnpm relinks the bin of
+ *   a package it rebuilt): that package rebuilt itself. Changing or removing any other file of it
+ *   (its JavaScript, its package.json) is tampering;
+ * - for a `project` writer, a file added under one of that project's own build-output directories
+ *   ({@link BUILD_OUTPUT_DIRS}, and `lib` when `options.ignoredLib` names the project because its
+ *   `.gitignore` ignores it); never in a nested package or dependency tree of it, never a file that
+ *   `isProtected` names or pnpm's configuration, never a change to a file that was there;
  * - the package manager's own state files ({@link MANAGER_STATE}).
  * A change is allowed by who made it, never by where it is: another package's files, a file of
  * the checkout's own a dependency wrote, a new `.bin` entry or directory, a virtual environment's
@@ -1367,25 +1458,30 @@ export const compareInstall = (
   after: WorkspaceTree,
   isProtected: (path: string) => boolean = () => false,
   writer: InstallWriter = null,
+  options: { readonly ignoredLib?: ReadonlySet<string> } = {},
 ): InstallComparison => {
   const venvs = [...new Set([...before.venvs, ...after.venvs])];
   const tampered = new Set<string>(after.refused);
   const managerState: string[] = [];
   const rebuilt = new Map<string, string[]>();
-  const dependency = writer !== null && "dependency" in writer ? writer.dependency : null;
+  const own = writerDir(before, writer);
   const project = writer !== null && "project" in writer ? writer.project : null;
-  /** Whether `pkg` is the writer's own installed package, with an install script before. */
-  const writes = (pkg: string | null | undefined): pkg is string => {
-    if (dependency === null || pkg === null || pkg === undefined) return false;
-    const info = before.packages.get(pkg);
-    return (
-      info !== undefined && info.installed && info.scripts.length > 0 && info.name === dependency
-    );
-  };
+  /** Whether `pkg` is the one installed directory the writer may rebuild. */
+  const writes = (pkg: string | null | undefined): pkg is string => own !== null && pkg === own;
   const allow = (pkg: string, path: string): void => {
     const list = rebuilt.get(pkg) ?? [];
     list.push(path);
     rebuilt.set(pkg, list);
+  };
+  /** Whether `path` is below one of the build-output directories of project `dir`. */
+  const buildOutput = (dir: string, path: string): boolean => {
+    const rest = dir === "" ? path : path.slice(dir.length + 1);
+    const at = rest.indexOf("/");
+    if (at < 0) return false;
+    const top = rest.slice(0, at);
+    return (
+      BUILD_OUTPUT_DIRS.includes(top) || (top === "lib" && options.ignoredLib?.has(dir) === true)
+    );
   };
   for (const path of changedToolFiles(before.snapshot, after.snapshot)) {
     if (isRefusedLine(after.snapshot.files.get(path))) {
@@ -1396,6 +1492,7 @@ export const compareInstall = (
       managerState.push(path);
       continue;
     }
+    const existed = before.snapshot.files.has(path);
     if (inDependencyTree(path, venvs)) {
       if (isBinEntry(path)) {
         const was = before.binOwners.get(path);
@@ -1407,16 +1504,24 @@ export const compareInstall = (
         continue;
       }
       const pkg = installedPackageOf(path);
-      if (pkg !== null && path.startsWith(`${pkg}/`) && writes(pkg)) allow(pkg, path);
+      const mine = pkg !== null && path.startsWith(`${pkg}/`) && writes(pkg);
+      // reading 254(2): add files, or replace a native binary that is still there
+      const addsOrReplacesBinary =
+        !existed ||
+        (after.snapshot.files.has(path) &&
+          pkg !== null &&
+          isNativeBinary(path.slice(pkg.length + 1)));
+      if (mine && addsOrReplacesBinary) allow(pkg, path);
       else tampered.add(path);
       continue;
     }
-    if (before.snapshot.files.has(path) || isProtected(path) || isPnpmConfig(path, after)) {
+    if (existed || isProtected(path) || isPnpmConfig(path, after)) {
       tampered.add(path);
       continue;
     }
-    const own = ownPackageOf(path, before);
-    if (project !== null && own === project) allow(own === "" ? "." : own, path);
+    const dir = ownPackageOf(path, before);
+    if (project !== null && dir === project && buildOutput(dir, path))
+      allow(dir === "" ? "." : dir, path);
     else tampered.add(path);
   }
   return {
@@ -1557,12 +1662,14 @@ const relativeDir = (from: string, to: string): string => relative(from || ".", 
  * The scripts pass of a two-pass install (see {@link scriptsFreeInstall}) one writer at a time
  * (spine §5 reading 253), once its scripts-free pass ran, so what each lifecycle script wrote is
  * attributed to it ({@link compareInstall} after each step): each pending dependency on its own
- * (`pnpm rebuild --recursive <name>`, `npm rebuild <name>`; the package manager's own policy,
- * such as pnpm's `onlyBuiltDependencies`, still decides whether it builds), then each of the
- * checkout's own projects, one lifecycle script at a time (`pnpm run` with pre/post scripts off,
- * `npm run --ignore-scripts`). The dependencies come from what the install left: pnpm's
- * `pendingBuilds` in `node_modules/.modules.yaml`, or, for npm, every installed package of
- * `tree` with an install script. `null` when VTC knows no per-package form (Bun, an npm install
+ * (`pnpm rebuild --recursive <name>`, `npm rebuild ./<directory>`: pnpm rebuilds only by name, so
+ * a name two installed packages share is allowed no rebuild, {@link sharedInstallNames}; the
+ * package manager's own policy, such as pnpm's `onlyBuiltDependencies`, still decides whether it
+ * builds), then each of the checkout's own projects, one lifecycle script at a time (`pnpm run`
+ * with pre/post scripts off, `npm run --ignore-scripts`). The dependencies come from what the
+ * install left: pnpm's `pendingBuilds` in `node_modules/.modules.yaml`, or, for npm, every
+ * installed package of `tree` with an install script in npm's tree (the root's and the
+ * workspaces' `node_modules`). `null` when VTC knows no per-package form (Bun, an npm install
  * that moves or picks workspaces, a pnpm install that left no `pendingBuilds`): the runner then
  * runs the whole second pass and allows no package to rebuild itself.
  */
@@ -1647,16 +1754,6 @@ export const perPackageBuild = (
             : dir.startsWith(`${installDir}/`)
               ? dir.slice(installDir.length + 1)
               : null;
-      const names = new Set<string>();
-      for (const [dir, info] of tree.packages) {
-        if (info.installed && info.scripts.length > 0 && info.name !== null && under(dir) !== null)
-          names.add(info.name);
-      }
-      // never a word npm would take for a flag
-      if ([...names].some((name) => name.startsWith("-"))) return null;
-      for (const name of [...names].sort()) {
-        steps.push({ argv: [first, "rebuild", name], writer: { dependency: name } });
-      }
       const manifest = readSmall(root, join(root, installDir, "package.json"));
       let globs: string[] = [];
       try {
@@ -1685,6 +1782,30 @@ export const perPackageBuild = (
         })
         .map(([dir]) => dir)
         .sort();
+      // by location, never by name (spine §5 reading 254(1)): `npm rebuild <name>` runs the
+      // scripts of every installed package of that name; `npm rebuild ./<dir>` of that one only.
+      // Only the packages of npm's own tree: the root's and the workspaces' node_modules.
+      const trees = ["", ...workspaces.map((w) => under(w) ?? w)].map((w) =>
+        w === "" ? "node_modules/" : `${w}/node_modules/`,
+      );
+      const dirs = [...tree.packages]
+        .filter(([dir, info]) => {
+          const rel = under(dir);
+          return (
+            info.installed &&
+            info.scripts.length > 0 &&
+            rel !== null &&
+            trees.some((t) => rel.startsWith(t))
+          );
+        })
+        .map(([dir]) => dir)
+        .sort();
+      for (const dir of dirs) {
+        steps.push({
+          argv: [first, "rebuild", `./${under(dir) ?? dir}`],
+          writer: { installed: dir },
+        });
+      }
       for (const project of workspaces) {
         for (const script of declaredScripts(root, project, NPM_WORKSPACE_SCRIPTS)) {
           steps.push({

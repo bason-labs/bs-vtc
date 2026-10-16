@@ -11,6 +11,7 @@ import { join } from "node:path";
 import { TOOL_TAMPER_RULE_ID, type GateReport, type GateResult } from "@vtc/shared";
 import { afterEach, describe, expect, it } from "vitest";
 import { ScannerUnavailableError } from "../../src/gates/index.js";
+import { SHARED_NAME_NOTE } from "../../src/gates/tool-integrity.js";
 import { cleanupDirs, tempDir, writeFile } from "../helpers/repo.js";
 import { commitAll, config, fakeScanners, harness, leaksGate, NODE, TOOLS } from "./fixture.js";
 
@@ -24,10 +25,12 @@ afterEach(() => {
 
 /**
  * A fake npm: `ci` installs the committed `vendor/lint.mjs` as the package `lint-tool` (with a
- * `.bin` link) and, when the checkout has a `postinstall.mjs`, the dependency `postinstall-dep`
+ * `.bin` link), the packages in `vendor/deps` (kept outside any `node_modules`, so the checkout
+ * holds one installed copy of each: spine §5 reading 254 counts every copy) and, when the checkout has a `postinstall.mjs`, the dependency `postinstall-dep`
  * whose postinstall runs it from the checkout's root; unless `--ignore-scripts`, it then runs
  * every installed package's install scripts. `rebuild <name>` runs the install scripts of the
- * installed packages named `<name>` in their own directory, as npm does; `run` runs a package
+ * installed packages named `<name>` in their own directory, as npm does, and `rebuild ./<dir>`
+ * those of the installed package in `<dir>` only (npm 10.9, checked live); `run` runs a package
  * script (`--ignore-scripts`: without its pre and post scripts).
  */
 const FAKE_NPM = `#!/usr/bin/env node
@@ -70,8 +73,9 @@ const installed = () => {
   return found;
 };
 if (args[0] === "rebuild") {
+  const at = args[1].startsWith("./") ? args[1].slice(2) : null;
   for (const dir of installed()) {
-    if (JSON.parse(readFileSync(dir + "/package.json", "utf8")).name === args[1]) lifecycle(dir);
+    if (at === null ? JSON.parse(readFileSync(dir + "/package.json", "utf8")).name === args[1] : dir === at) lifecycle(dir);
   }
   process.exit(0);
 }
@@ -97,7 +101,7 @@ chmodSync("node_modules/lint-tool/lint.mjs", 0o755);
 writeFileSync("node_modules/lint-tool/package.json", JSON.stringify({ name: "lint-tool", bin: { "lint-tool": "lint.mjs" } }));
 mkdirSync("node_modules/.bin", { recursive: true });
 symlinkSync("../lint-tool/lint.mjs", "node_modules/.bin/lint-tool");
-if (existsSync("vendor/node_modules")) cpSync("vendor/node_modules", "node_modules", { recursive: true });
+if (existsSync("vendor/deps")) cpSync("vendor/deps", "node_modules", { recursive: true });
 // a workspace: \`vendor/tree\` copied over the checkout, then \`vendor/links.json\`'s [link, target] bins
 if (existsSync("vendor/tree")) cpSync("vendor/tree", ".", { recursive: true });
 // a package kept in a store under $HOME and linked in (pnpm's global virtual store)
@@ -121,6 +125,63 @@ if (existsSync("postinstall.mjs")) {
   writeFileSync("node_modules/postinstall-dep/package.json", JSON.stringify({ name: "postinstall-dep", scripts: { postinstall: "cd ../.. && node postinstall.mjs" } }));
 }
 if (!ignoring) for (const dir of installed()) lifecycle(dir);
+`;
+
+/**
+ * A fake pnpm 10: `install` lays out each `vendor/pnpm/<entry>/<name>` as the virtual store's
+ * `node_modules/.pnpm/<entry>/node_modules/<name>`, `vendor/links.json`'s links and
+ * `vendor/modules.yaml` as `node_modules/.modules.yaml`, then,
+ * unless `--ignore-scripts`, runs every package's install scripts; `rebuild --recursive <name>`
+ * runs those of every package of the virtual store named `<name>`, as pnpm does (by name only).
+ */
+const FAKE_PNPM = `#!/usr/bin/env node
+const { cpSync, existsSync, lstatSync, mkdirSync, readdirSync, readFileSync, rmSync, symlinkSync } = require("node:fs");
+const { dirname } = require("node:path");
+const { spawnSync } = require("node:child_process");
+const all = process.argv.slice(2);
+const ignoring = all.includes("--ignore-scripts");
+const args = all.filter((a) => !a.startsWith("-"));
+const lifecycle = (dir) => {
+  const scripts = JSON.parse(readFileSync(dir + "/package.json", "utf8")).scripts ?? {};
+  for (const name of ["preinstall", "install", "postinstall"]) {
+    if (typeof scripts[name] !== "string") continue;
+    const r = spawnSync("/bin/sh", ["-c", scripts[name]], { stdio: "inherit", cwd: dir });
+    if (r.status !== 0) process.exit(r.status ?? 1);
+  }
+};
+const store = () => {
+  const found = [];
+  if (!existsSync("node_modules/.pnpm")) return found;
+  for (const entry of readdirSync("node_modules/.pnpm")) {
+    const modules = "node_modules/.pnpm/" + entry + "/node_modules";
+    if (!existsSync(modules)) continue;
+    for (const name of readdirSync(modules)) {
+      const dir = modules + "/" + name;
+      if (!lstatSync(dir).isSymbolicLink() && existsSync(dir + "/package.json")) found.push(dir);
+    }
+  }
+  return found;
+};
+if (args[0] === "rebuild") {
+  for (const dir of store()) {
+    if (JSON.parse(readFileSync(dir + "/package.json", "utf8")).name === args[1]) lifecycle(dir);
+  }
+  process.exit(0);
+}
+if (args[0] !== "install") process.exit(2);
+rmSync("node_modules", { recursive: true, force: true });
+mkdirSync("node_modules", { recursive: true });
+for (const entry of existsSync("vendor/pnpm") ? readdirSync("vendor/pnpm") : []) {
+  cpSync("vendor/pnpm/" + entry, "node_modules/.pnpm/" + entry + "/node_modules", { recursive: true });
+}
+if (existsSync("vendor/links.json")) {
+  for (const [link, target] of JSON.parse(readFileSync("vendor/links.json", "utf8"))) {
+    mkdirSync(dirname(link), { recursive: true });
+    symlinkSync(target, link);
+  }
+}
+if (existsSync("vendor/modules.yaml")) cpSync("vendor/modules.yaml", "node_modules/.modules.yaml");
+if (!ignoring) for (const dir of store()) lifecycle(dir);
 `;
 
 /** A dependency's install script that swaps the linter for one that never finds anything. */
@@ -402,11 +463,11 @@ describe("H-14: a project check tool is hashed after a scripts-free install", ()
     };
     const files = {
       // the dependency's own install script builds it in its own directory (reading 252)
-      "vendor/node_modules/native-dep/package.json": JSON.stringify({
+      "vendor/deps/native-dep/package.json": JSON.stringify({
         name: "native-dep",
         scripts: { postinstall: "node build.mjs" },
       }),
-      "vendor/node_modules/native-dep/build.mjs":
+      "vendor/deps/native-dep/build.mjs":
         'import { writeFileSync } from "node:fs";\nwriteFileSync(".built", "native");\n',
       "tools/gen.mjs":
         'import { existsSync, mkdirSync, writeFileSync } from "node:fs";\nif (!existsSync("node_modules/native-dep/.built")) process.exit(3);\nmkdirSync("node_modules/.prisma", { recursive: true });\nwriteFileSync("node_modules/.prisma/client.js", "generated");\n',
@@ -424,7 +485,7 @@ describe("H-14: a project check tool is hashed after a scripts-free install", ()
       .slice(0, 3)
       .map((a) => (a[0] === npm ? a.slice(1).join(" ") : "gen"));
     // the dependency's scripts run on their own (spine §5 reading 253)
-    expect(order).toEqual(["ci --ignore-scripts", "rebuild native-dep", "gen"]);
+    expect(order).toEqual(["ci --ignore-scripts", "rebuild ./node_modules/native-dep", "gen"]);
     expect(report.results.map((r) => [r.gate_id, r.status])).toEqual([
       ["install", "pass"],
       ["generate", "pass"],
@@ -635,10 +696,10 @@ writeFileSync(".npmrc", "script-shell=./x.sh\\n");
     const files = {
       "package.json": JSON.stringify({ devDependencies: { "eslint-plugin-strict": "1.0.0" } }),
       "eslint.config.js": 'import globals from "globals";\nexport default [];\n',
-      "vendor/node_modules/eslint-plugin-strict/package.json": '{"name":"eslint-plugin-strict"}',
-      "vendor/node_modules/eslint-plugin-strict/index.js": "export const rules = { all: 1 };\n",
-      "vendor/node_modules/globals/package.json": '{"name":"globals"}',
-      "vendor/node_modules/globals/index.js": "export default {};\n",
+      "vendor/deps/eslint-plugin-strict/package.json": '{"name":"eslint-plugin-strict"}',
+      "vendor/deps/eslint-plugin-strict/index.js": "export const rules = { all: 1 };\n",
+      "vendor/deps/globals/package.json": '{"name":"globals"}',
+      "vendor/deps/globals/index.js": "export default {};\n",
     };
     const clean = setup([derived], files);
     writeFile(clean.h.repo, "src/a.ts", "export const a = 2;\n");
@@ -1142,11 +1203,11 @@ writeFileSync(join(home, ".bunfig.toml"), "preload = [\\"" + join(home, "p.cjs")
    * checkout's root): rebuilding its own binary, and whatever else a test has it write.
    */
   const esbuild = (postinstall: [string, string][]): Record<string, string> => ({
-    "vendor/node_modules/esbuild/package.json": pkg("esbuild", {
+    "vendor/deps/esbuild/package.json": pkg("esbuild", {
       scripts: { postinstall: "cd ../.. && node esbuild-install.mjs" },
       bin: { esbuild: "bin/esbuild" },
     }),
-    "vendor/node_modules/esbuild/bin/esbuild": "#!/usr/bin/env node\n// the JS fallback\n",
+    "vendor/deps/esbuild/bin/esbuild": "#!/usr/bin/env node\n// the JS fallback\n",
     "esbuild-install.mjs": writes(postinstall),
   });
 
@@ -1213,8 +1274,11 @@ describe("H-14: the round-8 findings (h14-open2, spine §5 reading 253), end to 
     JSON.stringify({ name, version: "1.0.0", ...extra });
 
   /** Package managers and a `go` that fetch into the run's caches, on PATH and allowed. */
-  const tools = (): { bin: string; npm: string; bun: string; go: string } => {
+  const tools = (): { bin: string; npm: string; bun: string; go: string; pnpm: string } => {
     const { bin, npm } = fakePackageManagers();
+    const pnpm = join(bin, "pnpm");
+    writeFile(bin, "pnpm", FAKE_PNPM);
+    chmodSync(pnpm, 0o755);
     // a fake bun: the fake npm's `ci` as `bun install`, `--force` running the scripts again
     const bun = join(bin, "bun");
     writeFile(
@@ -1243,7 +1307,7 @@ writeFileSync(dir + "/assert.go", "package assert\\nfunc Equal(a, b any) bool { 
       writeFile(bin, name, "#!/bin/sh\nexit 0\n");
       chmodSync(join(bin, name), 0o755);
     }
-    return { bin, npm, bun, go };
+    return { bin, npm, bun, go, pnpm };
   };
 
   /** The run of `install` gates then one verify gate (`check`, L0) running `command`. */
@@ -1334,14 +1398,14 @@ chmodSync("generated/bin", 0o111);
 
   /** esbuild with its JavaScript API and a postinstall that rebuilds its own binary. */
   const ESBUILD = {
-    "vendor/node_modules/esbuild/package.json": pkg("esbuild", {
+    "vendor/deps/esbuild/package.json": pkg("esbuild", {
       scripts: { postinstall: "node install.mjs" },
       bin: { esbuild: "bin/esbuild" },
     }),
-    "vendor/node_modules/esbuild/install.mjs":
+    "vendor/deps/esbuild/install.mjs":
       'import { writeFileSync } from "node:fs";\nwriteFileSync("bin/esbuild", "\\u007fELF native");\n',
-    "vendor/node_modules/esbuild/bin/esbuild": "#!/usr/bin/env node\n// the JS fallback\n",
-    "vendor/node_modules/esbuild/lib/main.js": "export const transform = (code) => code;\n",
+    "vendor/deps/esbuild/bin/esbuild": "#!/usr/bin/env node\n// the JS fallback\n",
+    "vendor/deps/esbuild/lib/main.js": "export const transform = (code) => code;\n",
   };
 
   it("h14-self-rebuild-allowance-not-attributed-to-writer: the root postinstall rewriting esbuild's lib/main.js fails", async () => {
@@ -1365,7 +1429,7 @@ writeFileSync("node_modules/esbuild/lib/main.js", "export const transform = (cod
     const npm = h.argvs.filter((a) => a[0] === t.npm).map((a) => a.slice(1).join(" "));
     expect(npm.slice(0, 3)).toEqual([
       "ci --ignore-scripts",
-      "rebuild esbuild",
+      "rebuild ./node_modules/esbuild",
       "run --ignore-scripts postinstall",
     ]);
   });
@@ -1441,14 +1505,129 @@ writeFileSync(join(process.env.HOME, "store/lint-core/index.js"), "export const 
     const files = {
       "package.json": pkg("root", { scripts: { postinstall: "node root-postinstall.mjs" } }),
       "root-postinstall.mjs": `import { writeFileSync } from "node:fs";
+import { mkdirSync } from "node:fs";
 writeFileSync("pnpm-workspace.yaml", "enableGlobalVirtualStore: true\\n");
-writeFileSync("dist.js", "built");
+mkdirSync("dist");
+writeFileSync("dist/index.js", "built");
 `,
     };
     const { report, h } = await run([["npm", "ci"]], ["make", "test"], files);
     tamperedRun(report, h, ["pnpm-workspace.yaml"]);
     expect(result(report, "check").tool?.self_rebuilt).toEqual([
-      { package: ".", files: ["dist.js"], file_count: 1 },
+      { package: ".", files: ["dist/index.js"], file_count: 1 },
     ]);
+  });
+
+  describe("h14-open3 (spine §5 reading 254)", () => {
+    const PATCH = "export const transform = (code) => code.replace(/expect\\(/g, 'void (');\n";
+    /** A second esbuild whose postinstall patches the first one's lib/main.js at `main`. */
+    const fakeEsbuild = (main: string): Record<string, string> => ({
+      "package.json": pkg("esbuild", { scripts: { postinstall: "node install.mjs" } }),
+      "install.mjs": `import { writeFileSync } from "node:fs";\nwriteFileSync(${JSON.stringify(main)}, ${JSON.stringify(PATCH)});\n`,
+    });
+    const under = (prefix: string, files: Record<string, string>): Record<string, string> =>
+      Object.fromEntries(Object.entries(files).map(([k, v]) => [`${prefix}/${k}`, v]));
+    const realEsbuild = Object.fromEntries(
+      Object.entries(ESBUILD).map(([k, v]) => [k.replace("vendor/deps/esbuild/", ""), v]),
+    );
+
+    it("h14-self-rebuild-allowance-not-attributed-to-writer: npm, a second esbuild patching the first's lib/main.js fails", async () => {
+      const files = {
+        ...ESBUILD,
+        "package.json": pkg("root", { dependencies: { esbuild: "1", helper: "1" } }),
+        "vendor/deps/helper/package.json": pkg("helper", { dependencies: { esbuild: "0.0.1" } }),
+        ...under(
+          "vendor/deps/helper/node_modules/esbuild",
+          fakeEsbuild("../../../esbuild/lib/main.js"),
+        ),
+      };
+      const { report, h, t } = await run([["npm", "ci"]], ["make", "test"], files);
+      // each esbuild rebuilt by location, and neither may rebuild itself: their name is shared
+      tamperedRun(report, h, [
+        "node_modules/esbuild/bin/esbuild",
+        "node_modules/esbuild/lib/main.js",
+      ]);
+      const check = result(report, "check");
+      expect(check.tool?.self_rebuilt).toBeUndefined();
+      // (the fixture's vendor/deps copy is an installed package too: every copy counts)
+      expect(check.findings[0]?.message).toMatch(
+        `${SHARED_NAME_NOTE}: esbuild (node_modules/esbuild, node_modules/helper/node_modules/esbuild, `,
+      );
+      const npm = h.argvs.filter((a) => a[0] === t.npm).map((a) => a.slice(1).join(" "));
+      expect(npm).toEqual([
+        "ci --ignore-scripts",
+        "rebuild ./node_modules/esbuild",
+        "rebuild ./node_modules/helper/node_modules/esbuild",
+      ]);
+      expect(evidenceLog(h.repo, "_tool-integrity-install.log")).toMatch(
+        /share a name[^]*esbuild: node_modules\/esbuild, node_modules\/helper\/node_modules\/esbuild/,
+      );
+    });
+
+    it("h14-self-rebuild-allowance-not-attributed-to-writer: pnpm with onlyBuiltDependencies [esbuild], both pending, fails", async () => {
+      const REAL = "node_modules/.pnpm/esbuild@1.0.0/node_modules/esbuild";
+      const files = {
+        "package.json": pkg("root", { pnpm: { onlyBuiltDependencies: ["esbuild"] } }),
+        ...under("vendor/pnpm/esbuild@1.0.0/esbuild", realEsbuild),
+        ...under(
+          "vendor/pnpm/esbuild@0.0.1/esbuild",
+          fakeEsbuild("../../../esbuild@1.0.0/node_modules/esbuild/lib/main.js"),
+        ),
+        "vendor/links.json": JSON.stringify([
+          ["node_modules/esbuild", ".pnpm/esbuild@1.0.0/node_modules/esbuild"],
+        ]),
+        "vendor/modules.yaml":
+          "pendingBuilds:\n  - esbuild@file:vendor/esbuild-1.0.0.tgz\n  - esbuild@file:../vendor/esbuild-0.0.1.tgz\n",
+      };
+      const { report, h, t } = await run(
+        [["pnpm", "install", "--frozen-lockfile"]],
+        ["make", "test"],
+        files,
+      );
+      tamperedRun(report, h, [`${REAL}/bin/esbuild`, `${REAL}/lib/main.js`]);
+      expect(result(report, "check").findings[0]?.message).toMatch(
+        /^installed packages share a name/,
+      );
+      const pnpm = h.argvs.filter((a) => a[0] === t.pnpm).map((a) => a.slice(1).join(" "));
+      expect(pnpm).toEqual([
+        "install --frozen-lockfile --ignore-scripts",
+        "rebuild --recursive esbuild",
+      ]);
+    });
+
+    it("h14-unprotected-tool-config-additions-allowed: a project script adding babel.config.js or a shadow pytest.py fails", async () => {
+      const files = {
+        "package.json": pkg("root", { scripts: { postinstall: "node root-postinstall.mjs" } }),
+        "root-postinstall.mjs": `import { mkdirSync, writeFileSync } from "node:fs";
+writeFileSync("babel.config.js", "module.exports = { plugins: ['./strip-expect.js'] };\\n");
+writeFileSync("pytest.py", "import sys\\nsys.exit(0)\\n");
+mkdirSync("build", { recursive: true });
+writeFileSync("build/out.js", "built");
+`,
+      };
+      const { report, h } = await run([["npm", "ci"]], ["make", "test"], files);
+      tamperedRun(report, h, ["babel.config.js", "pytest.py"]);
+      expect(result(report, "check").tool?.self_rebuilt).toEqual([
+        { package: ".", files: ["build/out.js"], file_count: 1 },
+      ]);
+    });
+
+    it("lets a project script add files under lib/ only when its .gitignore ignores lib", async () => {
+      const files = (ignored: boolean): Record<string, string> => ({
+        "package.json": pkg("root", { scripts: { postinstall: "node root-postinstall.mjs" } }),
+        ...(ignored ? { ".gitignore": "/lib/\n" } : {}),
+        "root-postinstall.mjs": `import { mkdirSync, writeFileSync } from "node:fs";
+mkdirSync("lib", { recursive: true });
+writeFileSync("lib/index.js", "built");
+`,
+      });
+      const ignored = await run([["npm", "ci"]], ["make", "test"], files(true));
+      expect(result(ignored.report, "check")).toMatchObject({
+        status: "pass",
+        tool: { tampered: [], self_rebuilt: [{ package: ".", files: ["lib/index.js"] }] },
+      });
+      const tracked = await run([["npm", "ci"]], ["make", "test"], files(false));
+      tamperedRun(tracked.report, tracked.h, ["lib/index.js"]);
+    });
   });
 });

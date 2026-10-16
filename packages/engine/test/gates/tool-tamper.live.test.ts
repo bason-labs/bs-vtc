@@ -9,8 +9,8 @@
  * Skipped unless `VTC_LIVE_PM=1`.
  */
 import { execFileSync } from "node:child_process";
-import { existsSync, readFileSync, rmSync } from "node:fs";
-import { delimiter, join } from "node:path";
+import { existsSync, readFileSync, realpathSync, rmSync } from "node:fs";
+import { delimiter, join, relative } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import {
   compareInstall,
@@ -35,7 +35,7 @@ const mark = (path: string, text: string): string =>
 
 /**
  * A project depending on a local tarball whose postinstall writes `dep.txt` in the project, with
- * its own postinstall writing `root.txt`. As a `workspace`, the dependency and a postinstall
+ * its own postinstall writing `dist/root.txt` (a build output, spine §5 reading 254(3)). As a `workspace`, the dependency and a postinstall
  * writing `a.txt` belong to the workspace package `packages/a` instead, and the root keeps its own.
  */
 const project = (workspace: boolean): { dir: string; env: NodeJS.ProcessEnv } => {
@@ -60,7 +60,9 @@ const project = (workspace: boolean): { dir: string; env: NodeJS.ProcessEnv } =>
       version: "1.0.0",
       private: true,
       ...(workspace ? { workspaces: ["packages/*"] } : { dependencies }),
-      scripts: { postinstall: mark(join(dir, "root.txt"), "root") },
+      scripts: {
+        postinstall: `node -e "require('fs').mkdirSync('dist',{recursive:true})" && ${mark(join(dir, "dist/root.txt"), "root")}`,
+      },
       pnpm: { onlyBuiltDependencies: ["dep"] },
       trustedDependencies: ["dep"],
     }),
@@ -110,10 +112,12 @@ describe.skipIf(!live)("live: the second install pass runs the scripts the first
         const run = (argv: readonly string[]): void => {
           execFileSync(argv[0] ?? "", argv.slice(1), { cwd: dir, env, stdio: "pipe" });
         };
-        const marks = workspace ? ["dep.txt", "root.txt", "a.txt"] : ["dep.txt", "root.txt"];
+        const marks = workspace
+          ? ["dep.txt", "dist/root.txt", "a.txt"]
+          : ["dep.txt", "dist/root.txt"];
         // A lockfile, then a clean tree, as a checkout of a commit has.
         run(lock);
-        for (const path of ["node_modules", "packages/a/node_modules", ...marks]) {
+        for (const path of ["node_modules", "packages/a/node_modules", "dist", ...marks]) {
           rmSync(join(dir, path), { recursive: true, force: true });
         }
         const passes = scriptsFreeInstall(install);
@@ -140,16 +144,118 @@ describe.skipIf(!live)("live: the second install pass runs the scripts the first
             step.writer !== null && "project" in step.writer && step.writer.project === "";
           if (steps !== null)
             expect(
-              marks.every((m) => /^(dep|root|a)\.txt$/.test(m)),
+              marks.every((m) => /^(dep|a)\.txt$/.test(m)),
               marks.join(),
             ).toBe(true);
           if (own) expect(marks).toEqual([]);
           before = after;
         }
         expect(readFileSync(join(dir, "dep.txt"), "utf8")).toBe("built\n");
-        expect(readFileSync(join(dir, "root.txt"), "utf8")).toBe("root\n");
+        expect(readFileSync(join(dir, "dist/root.txt"), "utf8")).toBe("root\n");
         if (workspace) expect(readFileSync(join(dir, "a.txt"), "utf8")).toBe("a\n");
       });
     }
+  }
+});
+
+/**
+ * The h14-open3 finding's reproduction (spine §5 reading 254(1)): the project depends on esbuild
+ * and on a helper from a committed tarball that depends on a second package named esbuild, whose
+ * postinstall patches the first one's lib/main.js. pnpm runs with `onlyBuiltDependencies:
+ * [esbuild]`, which matches both by name.
+ */
+const twoEsbuilds = (): { dir: string; env: NodeJS.ProcessEnv } => {
+  const work = tempDir("vtc-live-pm-");
+  const dir = join(work, "app");
+  const tarball = (
+    name: string,
+    version: string,
+    extra: Record<string, unknown>,
+    files: Record<string, string> = {},
+  ): string => {
+    const src = join(work, `${name}-${version}`);
+    writeFile(src, "package/package.json", JSON.stringify({ name, version, ...extra }));
+    for (const [path, text] of Object.entries(files)) writeFile(src, `package/${path}`, text);
+    const out = join(work, `${name}-${version}.tgz`);
+    execFileSync("tar", ["-czf", out, "-C", src, "package"]);
+    return `file:${out}`;
+  };
+  const real = tarball(
+    "esbuild",
+    "1.0.0",
+    { scripts: { postinstall: "node install.js" }, bin: { esbuild: "bin/esbuild" } },
+    {
+      "install.js": "require('fs').writeFileSync('bin/esbuild', 'native');\n",
+      "bin/esbuild": "#!/usr/bin/env node\n",
+      "lib/main.js": "exports.transform = (code) => code;\n",
+    },
+  );
+  const main = join(dir, "node_modules/esbuild/lib/main.js");
+  const fake = tarball(
+    "esbuild",
+    "0.0.1",
+    { scripts: { postinstall: "node install.js" } },
+    {
+      "install.js": `require('fs').writeFileSync(${JSON.stringify(main)}, "exports.transform = (code) => code.replace(/expect\\\\(/g, 'void (');\\n");\n`,
+    },
+  );
+  const helper = tarball("helper", "1.0.0", { dependencies: { esbuild: fake } });
+  writeFile(
+    dir,
+    "package.json",
+    JSON.stringify({
+      name: "app",
+      version: "1.0.0",
+      private: true,
+      dependencies: { esbuild: real, helper },
+      pnpm: { onlyBuiltDependencies: ["esbuild"] },
+    }),
+  );
+  writeFile(dir, ".npmrc", `side-effects-cache=false\nstore-dir=${join(work, "pnpm-store")}\n`);
+  const env: NodeJS.ProcessEnv = Object.fromEntries(
+    Object.entries(process.env).filter(([k]) => k !== "INIT_CWD" && !/^npm_/i.test(k)),
+  );
+  env.npm_config_cache = join(work, "npm-cache");
+  return { dir, env };
+};
+
+describe.skipIf(!live)("live: two installed packages named esbuild (spine §5 reading 254)", () => {
+  for (const { pm, lock, install } of MANAGERS.filter((m) => m.pm !== "bun")) {
+    it.skipIf(!onPath(pm))(pm, () => {
+      const { dir, env } = twoEsbuilds();
+      const run = (argv: readonly string[]): void => {
+        execFileSync(argv[0] ?? "", argv.slice(1), { cwd: dir, env, stdio: "pipe" });
+      };
+      run(lock);
+      rmSync(join(dir, "node_modules"), { recursive: true, force: true });
+      const passes = scriptsFreeInstall(install);
+      if (passes?.build === null || passes === null) throw new Error(`no two passes for ${pm}`);
+      run(passes.free);
+      const realDir = relative(realpathSync(dir), realpathSync(join(dir, "node_modules/esbuild")));
+      const main = `${realDir}/lib/main.js`;
+      const steps = perPackageBuild(install, dir, "", workspaceTree(dir, { writable: [] })) ?? [];
+      // npm by location, one step each; pnpm by name, one step running both
+      expect(steps.map((s) => s.argv.slice(1).join(" "))).toEqual(
+        pm === "npm"
+          ? ["rebuild ./node_modules/esbuild", "rebuild ./node_modules/helper/node_modules/esbuild"]
+          : ["rebuild --recursive esbuild"],
+      );
+      let before = workspaceTree(dir, { writable: [] });
+      const tampered: string[] = [];
+      const rebuilt: string[] = [];
+      for (const step of steps) {
+        run(step.argv);
+        const after = workspaceTree(dir, { writable: [] });
+        const compared = compareInstall(before, after, undefined, step.writer);
+        tampered.push(...compared.tampered);
+        rebuilt.push(...compared.selfRebuilt.map((r) => r.package));
+        before = after;
+      }
+      // the patch happened, and it is tampering; neither esbuild may rebuild itself
+      expect(readFileSync(join(dir, main), "utf8")).toMatch(/void \(/);
+      expect(tampered).toContain(main);
+      expect(tampered).toContain(`${realDir}/bin/esbuild`);
+      expect(rebuilt.filter((p) => p.endsWith("/esbuild"))).toEqual([]);
+    });
   }
 });
