@@ -4511,6 +4511,45 @@ of reading 251 ((1), (2) and (3)); 251(4)–(8) stand.
       first's `lib/main.js`, a root `postinstall` adding `babel.config.js` and `pytest.py`, `lib/`
       with and without a `.gitignore`), and against the real npm 10.9.2 and pnpm 10.11.0
       (`tool-tamper.live.test.ts`, `VTC_LIVE_PM=1`).
+255.  **H-14: a shared name keeps its allowance where the rebuild cannot mix the packages up**
+      (amends reading 254(1); 254(2) and (3) stand). _Lead decision 2026-10-16, pending human
+      review._ Reading 254(1) failed every verify gate of any project with two installed versions
+      of a package that has an install script (esbuild 0.21 for Vite beside esbuild 0.25 for tsx,
+      which is common). It is narrowed without reopening what it closed, a same-name package from
+      a tarball, `file:` or git source patching the real one. (1) _npm_: rebuilt by location
+      (`npm rebuild ./<dir>`, writer `{ installed: <dir> }`), each installed directory keeps its
+      own allowance whatever its name: the step may add files and replace native binaries in that
+      one directory only (254(2)), so a second package of the name writing into the first is
+      tampering, as before. `sharedInstallNames` no longer matters under npm: no note, no message.
+      (2) _pnpm_: a shared name keeps the allowance only when every installed package of it comes
+      from a registry with an integrity hash (`PackageInfo.registry`, `unverifiedSharedNames`): it
+      is in pnpm's virtual store in the folder pnpm names a registry package of its package.json
+      `name` and plain `version` (`esbuild@0.25.0`, a peer suffix after `_`), and the
+      `pnpm-lock.yaml` beside that store has `name@version` in `packages` with a one-line
+      resolution that is `{integrity: sha…-…}` and nothing else (`registryLockKeys`; a `tarball`,
+      `directory`, `type`, `repo` or `commit` key, as `file:`, `link:`, git, tarball-URL and
+      workspace sources have, or no entry, or no lockfile, or a hoisted layout, is not). Then each
+      step may add files and replace native binaries in the directories of its name (and version),
+      per 254(2). If any package of the name is not from the registry, 254(1) applies: no
+      allowance for any of them, and the tampering finding's message begins with the reworded
+      `SHARED_NAME_NOTE`. The runner shows the note only when a step rebuilt by name. (3) _By name
+      and version_: pnpm 10.11 selects `pnpm rebuild --recursive <name>@<version>` by the package's
+      version and runs only that version's scripts (checked against the real pnpm 10.11.0 with two
+      tarball versions of one name). `perPackageBuild` now runs one step per pending
+      `name@version` with the writer `{ dependency: <name>, version: <version> }`, and keeps the
+      step by name for a name where a pending entry has no plain version (a `file:` or URL
+      source). A copied version cannot widen what is allowed: a name with a non-registry package
+      gets no allowance at all. (4) `vtc calibrate` (`tamperAdvice`) says to install that package
+      from the registry, install one version, or keep its script from running, and that npm needs
+      none of this. No contract field changes. (5) _Tests_: `workspace-tree.test.ts` (npm and pnpm
+      with esbuild 0.21.5 and 0.25.0 from the registry, each step's own binary allowed and a write
+      into the other version tampering; a fake tarball esbuild beside the registry one; every
+      resolution that is not registry-only), `tool-tamper.test.ts` end to end with fake npm and
+      pnpm (both pass; the fake tarball esbuild patching the real one still fails under both), and
+      `tool-tamper.live.test.ts` against the real npm 10.9.2 and pnpm 10.11.0 (`VTC_LIVE_PM=1`:
+      under npm the real esbuild now rebuilds itself while the fake's patch still fails, and pnpm
+      `rebuild --recursive dep@2.0.0` runs that version only). The reading-254 test of npm changes
+      accordingly: the real esbuild's own binary is now allowed.
 
 ## 6. Change process for this spine
 

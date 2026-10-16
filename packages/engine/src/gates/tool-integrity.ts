@@ -954,8 +954,16 @@ export interface PackageInfo {
   readonly scripts: readonly string[];
   /** Its package.json `name`, when that is a package name; `null` otherwise. */
   readonly name: string | null;
+  /** Its package.json `version`, when it is a string; `null` otherwise. */
+  readonly version: string | null;
   /** Whether its package.json has a `pnpm` key: pnpm's settings (spine §5 reading 253). */
   readonly pnpmSettings: boolean;
+  /**
+   * Whether it is a package of pnpm's virtual store that the lockfile beside that store resolves
+   * from a registry with an integrity hash and nothing else (spine §5 reading 255; see
+   * {@link isRegistryPackage}).
+   */
+  readonly registry: boolean;
 }
 
 /**
@@ -1091,16 +1099,24 @@ const packageInfo = (
   dir: string,
   rel: string,
   names: readonly string[],
+  registryKeys: (lockfile: string) => ReadonlySet<string>,
 ): PackageInfo => {
   const installed = rel.split("/").includes("node_modules");
   const scripts: string[] = [];
   let name: string | null = null;
+  let version: string | null = null;
   let pnpmSettings = false;
   const text = readSmall(root, join(dir, "package.json"));
   if (text !== null) {
     try {
-      const json = JSON.parse(text) as { scripts?: unknown; name?: unknown; pnpm?: unknown };
+      const json = JSON.parse(text) as {
+        scripts?: unknown;
+        name?: unknown;
+        version?: unknown;
+        pnpm?: unknown;
+      };
       if (typeof json.name === "string" && NODE_NAME.test(json.name)) name = json.name;
+      if (typeof json.version === "string") version = json.version;
       pnpmSettings = json.pnpm !== undefined;
       const declared = json.scripts;
       if (declared !== null && typeof declared === "object") {
@@ -1115,7 +1131,75 @@ const packageInfo = (
     }
   }
   if (installed && names.includes("binding.gyp")) scripts.push("binding.gyp");
-  return { installed, scripts, name, pnpmSettings };
+  const registry = installed && isRegistryPackage(rel, name, version, registryKeys);
+  return { installed, scripts, name, version, pnpmSettings, registry };
+};
+
+/** A plain version as pnpm writes it in a registry dependency path (no build metadata: `+`). */
+const PLAIN_VERSION = /^\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?$/;
+
+/** A package of pnpm's virtual store: `<dir>/node_modules/.pnpm/<folder>/node_modules/<name>`. */
+const PNPM_STORE_PACKAGE =
+  /^(?:(.*)\/)?node_modules\/\.pnpm\/([^/]+)\/node_modules\/((?:@[^/]+\/)?[^/]+)$/;
+
+/**
+ * The `name@version` keys of a pnpm lockfile's `packages` whose resolution is an integrity hash
+ * and nothing else: what pnpm resolved from a registry (spine §5 reading 255). A `file:`,
+ * `link:`, git, tarball-URL or directory source has a `tarball`, `directory`, `type`, `repo` or
+ * `commit` beside it, or no integrity, and is left out, as is any resolution not written on one
+ * line. Lockfile v6's leading `/` and peer suffixes are dropped.
+ */
+export const registryLockKeys = (text: string): Set<string> => {
+  const found = new Set<string>();
+  let inPackages = false;
+  let key: string | null = null;
+  for (const line of text.split(/\r?\n/)) {
+    if (/^\S/.test(line)) {
+      inPackages = /^packages:\s*$/.test(line);
+      key = null;
+      continue;
+    }
+    if (!inPackages) continue;
+    if (/^ {2}\S/.test(line)) {
+      // an entry's key line; anything else at that depth (`key: {}`) starts no entry
+      const entry = /^ {2}(['"]?)(.+?)\1:\s*$/.exec(line);
+      key = entry === null ? null : (entry[2] ?? "").replace(/^\//, "").replace(/\(.*$/, "");
+      continue;
+    }
+    if (
+      key !== null &&
+      /^ {4}resolution:\s*\{\s*integrity:\s*sha(256|384|512)-[A-Za-z0-9+/]+=*\s*\}\s*$/.test(line)
+    ) {
+      found.add(key);
+    }
+  }
+  return found;
+};
+
+/**
+ * Whether the installed package at checkout-relative `rel` comes from a registry with an
+ * integrity hash (spine §5 reading 255): it is in pnpm's virtual store, in the folder pnpm names
+ * a registry package of its package.json `name` and plain `version` (`esbuild@0.25.0`, with a
+ * peer suffix after `_`), and the `pnpm-lock.yaml` beside that store resolves `name@version`
+ * from a registry with an integrity hash ({@link registryLockKeys}). Anything else, a package
+ * npm or a hoisted pnpm laid out included, is not.
+ */
+const isRegistryPackage = (
+  rel: string,
+  name: string | null,
+  version: string | null,
+  registryKeys: (lockfile: string) => ReadonlySet<string>,
+): boolean => {
+  const store = PNPM_STORE_PACKAGE.exec(rel);
+  if (store === null || name === null || version === null || !PLAIN_VERSION.test(version)) {
+    return false;
+  }
+  if (store[3] !== name) return false;
+  const folder = store[2] ?? "";
+  const base = `${name.replace("/", "+")}@${version}`;
+  if (folder !== base && !folder.startsWith(`${base}_`)) return false;
+  const lockfile = store[1] === undefined ? "pnpm-lock.yaml" : `${store[1]}/pnpm-lock.yaml`;
+  return registryKeys(lockfile).has(`${name}@${version}`);
 };
 
 /** The real path of `abs`, or, where it does not exist, of its nearest existing ancestor joined to the rest. */
@@ -1206,6 +1290,17 @@ export const workspaceTree = (
   const venvs: string[] = [];
   const binOwners = new Map<string, string | null>();
   const refused: string[] = [];
+  /** Each lockfile's registry keys (reading 255), read once per walk; none when unreadable. */
+  const lockfiles = new Map<string, ReadonlySet<string>>();
+  const registryKeys = (lockfile: string): ReadonlySet<string> => {
+    let keys = lockfiles.get(lockfile);
+    if (keys === undefined) {
+      const text = readSmall(root, join(root, lockfile), 64 * 1024 * 1024);
+      keys = text === null ? new Set() : registryLockKeys(text);
+      lockfiles.set(lockfile, keys);
+    }
+    return keys;
+  };
   /** Where a walk starts: the checkout (`own`) or a download cache under its prefix. */
   interface Base {
     readonly abs: string;
@@ -1250,7 +1345,7 @@ export const workspaceTree = (
     }
     if (base.own && rel !== "" && names.includes("pyvenv.cfg")) venvs.push(rel);
     if (base.own && names.includes("package.json")) {
-      packages.set(rel, packageInfo(root, abs, rel, names));
+      packages.set(rel, packageInfo(root, abs, rel, names, registryKeys));
     }
     const binDir = base.own && isBinEntry(`${rel}/x`);
     for (const name of names) {
@@ -1328,15 +1423,16 @@ export interface InstallComparison {
 }
 
 /**
- * Whose lifecycle scripts ran between two snapshots (spine §5 readings 253 and 254): an installed
+ * Whose lifecycle scripts ran between two snapshots (spine §5 readings 253 to 255): an installed
  * dependency by its checkout-relative directory (`installed`, where the package manager rebuilds
- * by location: npm), or by its package name (`dependency`, where it rebuilds only by name: pnpm),
- * one of the checkout's own projects by its checkout-relative directory (`""`: the root), or
- * `null` when nobody can be named (a package manager that runs every script at once): then
- * nothing but the package manager's state may change.
+ * by location: npm), or by its package name and, where the rebuild selected one, its version
+ * (`dependency`, where it rebuilds by name: pnpm), one of the checkout's own projects by its
+ * checkout-relative directory (`""`: the root), or `null` when nobody can be named (a package
+ * manager that runs every script at once): then nothing but the package manager's state may
+ * change.
  */
 export type InstallWriter =
-  | { readonly dependency: string }
+  | { readonly dependency: string; readonly version?: string }
   | { readonly installed: string }
   | { readonly project: string }
   | null;
@@ -1379,29 +1475,53 @@ export const sharedInstallNames = (tree: WorkspaceTree): Map<string, string[]> =
 };
 
 /**
+ * The names of {@link sharedInstallNames} that keep no self-rebuild allowance where the package
+ * manager rebuilds by name (pnpm; spine §5 reading 255): those of which some installed package
+ * does not come from a registry with an integrity hash in the lockfile ({@link
+ * PackageInfo.registry}: a `file:`, `link:`, git, tarball-URL or workspace source, or a layout
+ * VTC cannot vouch for). Where every package of a name comes from the registry, pnpm's rebuild
+ * of it runs registry code only, and each package keeps its own directory's allowance.
+ */
+export const unverifiedSharedNames = (tree: WorkspaceTree): Map<string, string[]> =>
+  new Map(
+    [...sharedInstallNames(tree)].filter(([, dirs]) =>
+      dirs.some((dir) => tree.packages.get(dir)?.registry !== true),
+    ),
+  );
+
+/**
  * How a tampering finding begins its message when a tampered path is in a package whose name
- * another installed package shares ({@link sharedInstallNames}); `vtc calibrate` looks for it.
+ * keeps no allowance under a rebuild by name ({@link unverifiedSharedNames}); `vtc calibrate`
+ * looks for it.
  */
 export const SHARED_NAME_NOTE =
-  "installed packages share a name and one of them declares an install script, so none of them may rebuild itself (spine §5 reading 254)";
+  "installed packages share a name, one of them declares an install script, and not all of them come from a registry with an integrity hash in pnpm-lock.yaml, so under pnpm's rebuild by name none of them may rebuild itself (spine §5 readings 254 and 255)";
 
-/** The one installed directory a dependency writer may rebuild (reading 254(1)), or `null`. */
-const writerDir = (tree: WorkspaceTree, writer: InstallWriter): string | null => {
-  if (writer === null || "project" in writer) return null;
-  const shared = sharedInstallNames(tree);
-  const owns = (dir: string, info: PackageInfo | undefined): boolean =>
-    info !== undefined &&
-    info.installed &&
-    info.scripts.length > 0 &&
-    installedNames(dir, info).every((name) => !shared.has(name));
+/**
+ * The installed directories a dependency writer may rebuild (spine §5 readings 254(1) and 255),
+ * each holding an install script: for npm's writer by location, that one directory, whatever its
+ * name; for pnpm's writer by name (and version), every installed package of that name (and
+ * version), unless one of their names keeps no allowance ({@link unverifiedSharedNames}).
+ */
+const writerDirs = (tree: WorkspaceTree, writer: InstallWriter): ReadonlySet<string> => {
+  if (writer === null || "project" in writer) return new Set();
+  const builds = (info: PackageInfo | undefined): boolean =>
+    info !== undefined && info.installed && info.scripts.length > 0;
   if ("installed" in writer) {
-    return owns(writer.installed, tree.packages.get(writer.installed)) ? writer.installed : null;
+    return new Set(builds(tree.packages.get(writer.installed)) ? [writer.installed] : []);
   }
-  const named = [...tree.packages].filter(
-    ([dir, info]) => info.installed && installedNames(dir, info).includes(writer.dependency),
+  const unverified = unverifiedSharedNames(tree);
+  return new Set(
+    [...tree.packages]
+      .filter(
+        ([dir, info]) =>
+          builds(info) &&
+          installedNames(dir, info).includes(writer.dependency) &&
+          (writer.version === undefined || info.version === writer.version) &&
+          installedNames(dir, info).every((name) => !unverified.has(name)),
+      )
+      .map(([dir]) => dir),
   );
-  const [only] = named;
-  return named.length === 1 && only !== undefined && owns(only[0], only[1]) ? only[0] : null;
 };
 
 /**
@@ -1437,10 +1557,10 @@ const ownPackageOf = (path: string, tree: WorkspaceTree): string | null => {
  * What one writer's lifecycle scripts did, against the snapshot taken just before them (H-14,
  * spine §5 readings 252 to 254), both from content. Every path whose line differs is tampering,
  * and so is every refused line of `after`, except:
- * - for a dependency writer, inside the one installed directory it may rebuild (the directory it
- *   names, or the only installed package of the name it names; either with an install script, or a
- *   `binding.gyp`, before, and none whose name another installed package shares,
- *   {@link sharedInstallNames}): a file added, a native binary replaced ({@link isNativeBinary}),
+ * - for a dependency writer, inside an installed directory it may rebuild ({@link writerDirs}:
+ *   the directory it names, or each installed package of the name and version it names, none of
+ *   whose names keeps no allowance, {@link unverifiedSharedNames}; each with an install script,
+ *   or a `binding.gyp`, before): a file added, a native binary replaced ({@link isNativeBinary}),
  *   and a `.bin` entry that started that package before and still does (pnpm relinks the bin of
  *   a package it rebuilt): that package rebuilt itself. Changing or removing any other file of it
  *   (its JavaScript, its package.json) is tampering;
@@ -1464,10 +1584,11 @@ export const compareInstall = (
   const tampered = new Set<string>(after.refused);
   const managerState: string[] = [];
   const rebuilt = new Map<string, string[]>();
-  const own = writerDir(before, writer);
+  const own = writerDirs(before, writer);
   const project = writer !== null && "project" in writer ? writer.project : null;
-  /** Whether `pkg` is the one installed directory the writer may rebuild. */
-  const writes = (pkg: string | null | undefined): pkg is string => own !== null && pkg === own;
+  /** Whether `pkg` is an installed directory the writer may rebuild. */
+  const writes = (pkg: string | null | undefined): pkg is string =>
+    pkg !== null && pkg !== undefined && own.has(pkg);
   const allow = (pkg: string, path: string): void => {
     const list = rebuilt.get(pkg) ?? [];
     list.push(path);
@@ -1635,6 +1756,16 @@ const depPathName = (depPath: string): string | null => {
   return name !== null && NODE_NAME.test(name) && !name.startsWith("-") ? name : null;
 };
 
+/**
+ * The plain version of a pnpm dependency path of package `name` (`esbuild@0.25.0`,
+ * `@swc/core@1.3.0(@swc/helpers@0.5.0)`), or `null` for any other source (`file:`, a URL).
+ */
+const depPathVersion = (depPath: string, name: string): string | null => {
+  const path = depPath.startsWith("/") ? depPath.slice(1) : depPath;
+  const version = path.slice(name.length + 1).replace(/\(.*$/, "");
+  return PLAIN_VERSION.test(version) ? version : null;
+};
+
 /** The scripts of `wanted` a package.json declares, in that order. */
 const declaredScripts = (root: string, dir: string, wanted: readonly string[]): string[] => {
   const text = readSmall(root, join(root, dir, "package.json"));
@@ -1662,8 +1793,10 @@ const relativeDir = (from: string, to: string): string => relative(from || ".", 
  * The scripts pass of a two-pass install (see {@link scriptsFreeInstall}) one writer at a time
  * (spine §5 reading 253), once its scripts-free pass ran, so what each lifecycle script wrote is
  * attributed to it ({@link compareInstall} after each step): each pending dependency on its own
- * (`pnpm rebuild --recursive <name>`, `npm rebuild ./<directory>`: pnpm rebuilds only by name, so
- * a name two installed packages share is allowed no rebuild, {@link sharedInstallNames}; the
+ * (`pnpm rebuild --recursive <name>@<version>`, or `<name>` where a pending entry of it has no
+ * plain version, `npm rebuild ./<directory>`: pnpm selects only by name and version, which a
+ * second package can copy, so a name two installed packages share is allowed no rebuild unless
+ * all of them come from a registry, {@link unverifiedSharedNames}; the
  * package manager's own policy, such as pnpm's `onlyBuiltDependencies`, still decides whether it
  * builds), then each of the checkout's own projects, one lifecycle script at a time (`pnpm run`
  * with pre/post scripts off, `npm run --ignore-scripts`). The dependencies come from what the
@@ -1700,7 +1833,8 @@ export const perPackageBuild = (
       );
       const pending = yaml === null ? null : pendingBuilds(yaml);
       if (pending === null) return null;
-      const names = new Set<string>();
+      /** Each pending name's plain versions, or `null` when one entry of it has none. */
+      const names = new Map<string, Set<string> | null>();
       const projects = new Set<string>();
       for (const entry of pending) {
         const project = within(root, installDir, entry);
@@ -1711,13 +1845,26 @@ export const perPackageBuild = (
         }
         const name = depPathName(entry);
         if (name === null) return null;
-        names.add(name);
+        const version = depPathVersion(entry, name);
+        const versions = names.has(name) ? (names.get(name) ?? null) : new Set<string>();
+        names.set(name, versions === null || version === null ? null : versions.add(version));
       }
-      for (const name of [...names].sort()) {
-        steps.push({
-          argv: [first, ...pnpm.dirFlags, "rebuild", "--recursive", name],
-          writer: { dependency: name },
-        });
+      // by name and version where every entry of the name has a plain one (spine §5 reading
+      // 255; pnpm 10.11 selects `name@version` by the package's version), else by name
+      for (const [name, versions] of [...names].sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0))) {
+        if (versions === null) {
+          steps.push({
+            argv: [first, ...pnpm.dirFlags, "rebuild", "--recursive", name],
+            writer: { dependency: name },
+          });
+          continue;
+        }
+        for (const version of [...versions].sort()) {
+          steps.push({
+            argv: [first, ...pnpm.dirFlags, "rebuild", "--recursive", `${name}@${version}`],
+            writer: { dependency: name, version },
+          });
+        }
       }
       for (const project of [...projects].sort()) {
         for (const script of declaredScripts(root, project, PNPM_PROJECT_SCRIPTS)) {

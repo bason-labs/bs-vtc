@@ -159,7 +159,7 @@ describe.skipIf(!live)("live: the second install pass runs the scripts the first
 });
 
 /**
- * The h14-open3 finding's reproduction (spine §5 reading 254(1)): the project depends on esbuild
+ * The h14-open3 finding's reproduction (spine §5 readings 254(1) and 255): the project depends on esbuild
  * and on a helper from a committed tarball that depends on a second package named esbuild, whose
  * postinstall patches the first one's lib/main.js. pnpm runs with `onlyBuiltDependencies:
  * [esbuild]`, which matches both by name.
@@ -251,11 +251,63 @@ describe.skipIf(!live)("live: two installed packages named esbuild (spine §5 re
         rebuilt.push(...compared.selfRebuilt.map((r) => r.package));
         before = after;
       }
-      // the patch happened, and it is tampering; neither esbuild may rebuild itself
+      // the patch happened, and it is tampering. npm rebuilt by location, so the real esbuild's
+      // binary is its own (spine §5 reading 255); pnpm by name, and both esbuilds come from
+      // tarballs, so neither may rebuild itself
       expect(readFileSync(join(dir, main), "utf8")).toMatch(/void \(/);
       expect(tampered).toContain(main);
-      expect(tampered).toContain(`${realDir}/bin/esbuild`);
-      expect(rebuilt.filter((p) => p.endsWith("/esbuild"))).toEqual([]);
+      if (pm === "npm") {
+        expect(tampered).not.toContain(`${realDir}/bin/esbuild`);
+        expect(rebuilt.filter((p) => p.endsWith("/esbuild"))).toEqual([realDir]);
+      } else {
+        expect(tampered).toContain(`${realDir}/bin/esbuild`);
+        expect(rebuilt.filter((p) => p.endsWith("/esbuild"))).toEqual([]);
+      }
     });
   }
+});
+
+describe.skipIf(!live)("live: pnpm rebuilds by name and version (spine §5 reading 255)", () => {
+  it.skipIf(!onPath("pnpm"))(
+    "`rebuild --recursive dep@2.0.0` runs that version's script only",
+    () => {
+      const work = tempDir("vtc-live-pm-");
+      const dir = join(work, "app");
+      const log = join(work, "log.txt");
+      const tarball = (name: string, version: string, extra: Record<string, unknown>): string => {
+        const src = join(work, `${name}-${version}`);
+        writeFile(src, "package/package.json", JSON.stringify({ name, version, ...extra }));
+        const out = join(work, `${name}-${version}.tgz`);
+        execFileSync("tar", ["-czf", out, "-C", src, "package"]);
+        return `file:${out}`;
+      };
+      const dep = (version: string): string =>
+        tarball("dep", version, { scripts: { postinstall: mark(log, version) } });
+      const helper = tarball("helper", "1.0.0", { dependencies: { dep: dep("2.0.0") } });
+      writeFile(
+        dir,
+        "package.json",
+        JSON.stringify({
+          name: "app",
+          version: "1.0.0",
+          private: true,
+          dependencies: { dep: dep("1.0.0"), helper },
+          pnpm: { onlyBuiltDependencies: ["dep"] },
+        }),
+      );
+      writeFile(dir, ".npmrc", `side-effects-cache=false\nstore-dir=${join(work, "pnpm-store")}\n`);
+      const env: NodeJS.ProcessEnv = Object.fromEntries(
+        Object.entries(process.env).filter(([k]) => k !== "INIT_CWD" && !/^npm_/i.test(k)),
+      );
+      const run = (...args: string[]): void => {
+        execFileSync("pnpm", args, { cwd: dir, env, stdio: "pipe" });
+      };
+      run("install", "--ignore-scripts");
+      expect(existsSync(log)).toBe(false);
+      run("rebuild", "--recursive", "dep@2.0.0");
+      expect(readFileSync(log, "utf8")).toBe("2.0.0\n");
+      run("rebuild", "--recursive", "dep@1.0.0");
+      expect(readFileSync(log, "utf8")).toBe("2.0.0\n1.0.0\n");
+    },
+  );
 });
