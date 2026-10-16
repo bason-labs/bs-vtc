@@ -7,6 +7,7 @@
 import { mkdirSync, readFileSync, symlinkSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import {
+  DESIGN_FLOWS_PATH,
   EVIDENCE_LIMITS,
   EvidenceManifestSchema,
   LOOKBACK_REPO,
@@ -19,11 +20,18 @@ import {
 import { afterEach, describe, expect, it } from "vitest";
 import {
   artifactRouteKey,
+  BEFORE_AFTER_FLOW_ALT,
+  boundedFlowGlobMatch,
+  changedFlow,
+  FIRST_SCREEN_ALT,
   EVIDENCE_READY,
+  FLOWS_FILE_MAX_BYTES,
+  flowVideoAlt,
   manifestDir,
   type AutoPrInput,
   type UpstreamEvent,
 } from "../../src/upstream/index.js";
+import { globMatch } from "../../src/core/index.js";
 import { cleanupDirs, tempDir } from "../helpers/repo.js";
 import { fakeRecorder, type FakeRecorder } from "./fakes.js";
 import { BASE_SHA, harness } from "./harness.js";
@@ -51,6 +59,10 @@ const uiRecorder = (
     partial?: BeforeAfterResult["partial"];
     /** Extra files the recorder claims: a symlink, a wrong kind, a text file named .png. */
     planted?: (outDir: string) => BeforeAfterResult["files"];
+    /** One flow video per side, named `-before` / `-after`, as a scripting gate runner writes. */
+    sides?: boolean;
+    /** What each side's video shows when the request names a flow (contracts 5.7.0). */
+    flow?: (request: BeforeAfterRequest) => BeforeAfterResult["flow"];
   } = {},
 ): BeforeAfterRecorder => {
   const inner = fakeRecorder();
@@ -69,12 +81,17 @@ const uiRecorder = (
       if (options.partial?.reason !== "base_build_failed")
         write("01-ui-before-home.png", "ui_before");
       write("02-ui-after-home.png", "ui_after");
-      if (request.flowSeconds !== undefined) write("03-changed-flow.webm", "flow_video");
+      if (request.flowSeconds !== undefined && options.sides === true) {
+        write("03-flow-before.webm", "flow_video");
+        write("04-flow-after.webm", "flow_video");
+      } else if (request.flowSeconds !== undefined) write("03-changed-flow.webm", "flow_video");
       files.push(...(options.planted?.(request.outDir) ?? []));
+      const flow = options.flow?.(request);
       return Promise.resolve({
         files,
         failed: [],
         ...(options.partial === undefined ? {} : { partial: options.partial }),
+        ...(flow === undefined ? {} : { flow }),
       });
     },
   };
@@ -107,7 +124,7 @@ const manifest = (repoRoot: string, fp = "0123456789abcdef") =>
   );
 
 describe("an automatic run's UI PR (D-ct)", () => {
-  it("comes out complete with the gate runner's before, after and changed flow", async () => {
+  it("comes out complete with the gate runner's before, after and first-screen recording", async () => {
     const recorder = uiRecorder();
     const h = harness({ automation: { evidence: recorder, hosting: "attach" } });
     expect(await h.upstream.openPullRequest(releaseInput(), h.ctx)).toMatchObject({
@@ -132,8 +149,9 @@ describe("an automatic run's UI PR (D-ct)", () => {
       "04-ui-after-home.png",
       "05-changed-flow.webm",
     ]);
-    // the recorder renders no changed-flow steps yet (spine §5 reading 233): its video says what
-    // it shows, the first screen loading and then idle, never "the changed flow"
+    // no flows file names a flow for this change (reading 247(7)): its video says what it shows,
+    // the first screen loading and then idle, never "the changed flow"
+    expect(request).not.toHaveProperty("flow");
     expect(pr?.body).toContain("First rendered screen, loading then idle");
     expect(pr?.body).not.toContain("The changed flow");
     expect(opened(h.events)).toMatchObject({ evidence: "complete" });
@@ -277,6 +295,311 @@ describe("an automatic run's UI PR (D-ct)", () => {
       h.ctx,
     );
     expect(recorder.beforeAfter).toEqual([]);
+  });
+});
+
+/** A flows file (`.vtc/design/flows.yaml`) with two flows; `checkout` exercises `src/cart/**`. */
+const FLOWS_YAML = [
+  "version: 1",
+  "fixtures:",
+  "  coupon: SPRING10",
+  "flows:",
+  "  - id: sign-in",
+  "    start: /login",
+  "    screens: [login]",
+  "    steps:",
+  '      - { action: click, selector: "role=button[name=Sign in]" }',
+  "  - id: checkout",
+  "    start: /cart",
+  "    screens: [cart]",
+  '    paths: ["src/cart/**"]',
+  "    steps:",
+  '      - { action: fill, selector: "#coupon", fixture: coupon }',
+  "      - { action: press, key: Enter }",
+  '      - { action: wait_for, selector: "[data-testid=total]" }',
+  "",
+].join("\n");
+
+describe("choosing and captioning the changed flow (pure)", () => {
+  const read = (text: string | undefined) => () =>
+    Promise.resolve(text === undefined ? undefined : new TextEncoder().encode(text));
+  const paths = (list: readonly string[]) => () => Promise.resolve(list);
+
+  it("takes a path match first, then a touched screen, in file order", async () => {
+    expect(
+      await changedFlow({
+        readFlowsFile: read(FLOWS_YAML),
+        changedPaths: paths(["src/cart/a.ts"]),
+      }),
+    ).toBe("checkout");
+    expect(
+      await changedFlow({
+        readFlowsFile: read(FLOWS_YAML),
+        changedPaths: paths(["README.md"]),
+        screens: ["cart", "login"],
+      }),
+    ).toBe("sign-in");
+    expect(
+      await changedFlow({ readFlowsFile: read(FLOWS_YAML), changedPaths: paths(["README.md"]) }),
+    ).toBeUndefined();
+  });
+
+  it("reads a newer MINOR's flows file, dropping the keys it does not know", async () => {
+    const newer = FLOWS_YAML.replace("  - id: checkout", "  - id: checkout\n    owner: designer");
+    expect(
+      await changedFlow({ readFlowsFile: read(newer), changedPaths: paths(["src/cart/a.ts"]) }),
+    ).toBe("checkout");
+  });
+
+  it("refuses an oversized flows file", async () => {
+    const big = `${FLOWS_YAML}#${"x".repeat(FLOWS_FILE_MAX_BYTES)}\n`;
+    expect(
+      await changedFlow({ readFlowsFile: read(big), changedPaths: paths(["src/cart/a.ts"]) }),
+    ).toBeUndefined();
+  });
+
+  it("matches flow globs exactly as the engine's globMatch does", () => {
+    const match = boundedFlowGlobMatch();
+    const globs = [
+      "src/cart/**",
+      "**/*.tsx",
+      "src/**/Total.tsx",
+      "src/*/a.ts",
+      "src/?art/a.ts",
+      "**",
+      "src/**",
+      "**/x",
+      "a/**/b/**/c",
+      "src/{cart,auth}/*.ts",
+      "src/{cart,}/a.ts",
+      "{**/a,b}",
+      "src/ca**/a.ts",
+      "src/***/a.ts",
+      "a.b+c/(x)/[y]",
+      "src/}x,y",
+      "src/{a,{b}}",
+      "src/{a",
+      "README.md",
+    ];
+    const paths = [
+      "src/cart/a.ts",
+      "src/cart/deep/b.tsx",
+      "src/auth/a.ts",
+      "src/a.ts",
+      "src//a.ts",
+      "src/Total.tsx",
+      "src/x/y/Total.tsx",
+      "README.md",
+      "x",
+      "a/x",
+      "a/b/c",
+      "a/q/b/r/s/c",
+      "b",
+      "q/a",
+      "a.b+c/(x)/[y]",
+      "src/}x,y",
+      "src/ca/a.ts",
+      "src/cabc/a.ts",
+      "src/line\nbreak",
+      "src/\u{1F600}/a.ts",
+      "",
+    ];
+    for (const glob of globs)
+      for (const path of paths) {
+        let expected: boolean;
+        try {
+          expected = globMatch(glob, path);
+        } catch {
+          // core cannot build the expression (nested or unclosed braces): never a match
+          expected = false;
+        }
+        expect(match(glob, path), `${glob} ~ ${JSON.stringify(path)}`).toBe(expected);
+      }
+  });
+
+  it("selects quickly for a pathological glob against a deep path (no backtracking)", async () => {
+    // `**/` twelve times and more: core's backtracking expression takes minutes on such a path
+    const evil = `${"**/".repeat(40)}x`;
+    const starry = `${"*a".repeat(40)}b`;
+    const flows = [
+      "flows:",
+      "  - id: evil",
+      "    start: /",
+      `    paths: ["${evil}", "${starry}"]`,
+      "    steps:",
+      "      - { action: wait, ms: 10 }",
+      "",
+    ].join("\n");
+    const deep = `${Array.from({ length: 60 }, (_, i) => `d${String(i)}`).join("/")}/y`;
+    // and `*a` forty times against one long segment of `a`s with no `b`
+    const long = "a".repeat(1000);
+    const started = performance.now();
+    expect(
+      await changedFlow({ readFlowsFile: read(flows), changedPaths: paths([deep, long]) }),
+    ).toBeUndefined();
+    expect(
+      await changedFlow({
+        readFlowsFile: read(flows),
+        changedPaths: paths([deep.replace(/y$/, "x")]),
+      }),
+    ).toBe("evil");
+    expect(performance.now() - started).toBeLessThan(2000);
+  });
+
+  it("names no flow once the selection's matching budget is spent", async () => {
+    expect(
+      await changedFlow({
+        readFlowsFile: read(FLOWS_YAML),
+        changedPaths: paths(["src/cart/a.ts"]),
+        matchBudget: 10,
+      }),
+    ).toBeUndefined();
+    // the same change within the default budget
+    expect(
+      await changedFlow({
+        readFlowsFile: read(FLOWS_YAML),
+        changedPaths: paths(["src/cart/a.ts"]),
+      }),
+    ).toBe("checkout");
+  });
+
+  it("captions a side by what the gate runner reports for the requested flow", () => {
+    const flow = { id: "checkout", before: "scripted", after: "idle" } as const;
+    expect(flowVideoAlt("checkout", flow, "before")).toBe(
+      'The changed flow "checkout", scripted (before)',
+    );
+    expect(flowVideoAlt("checkout", flow, "after")).toBe(
+      'First rendered screen, loading then idle: this side has no flow "checkout" (after)',
+    );
+    // a video of no known side: one caption only when both sides agree, else both sides'
+    expect(flowVideoAlt("checkout", flow, undefined)).toBe(
+      'A recording of the changed flow "checkout" (before: scripted, after: idle)',
+    );
+    expect(
+      flowVideoAlt("checkout", { id: "checkout", before: "failed", after: "failed" }, undefined),
+    ).toBe('The changed flow "checkout" up to the step that failed');
+    // no flow asked for: the first-screen caption, which says no flow matches
+    expect(flowVideoAlt(undefined, flow, "before")).toBe(`${BEFORE_AFTER_FLOW_ALT} (before)`);
+    expect(BEFORE_AFTER_FLOW_ALT).toMatch(/^First rendered screen, loading then idle/);
+    // a flow asked for but a report of another flow, or none: the first-screen caption, with no
+    // claim that no flow matches (one did)
+    expect(flowVideoAlt("sign-in", flow, "before")).toBe(`${FIRST_SCREEN_ALT} (before)`);
+    expect(flowVideoAlt("checkout", undefined, "after")).toBe(`${FIRST_SCREEN_ALT} (after)`);
+    expect(FIRST_SCREEN_ALT).toBe("First rendered screen, loading then idle");
+  });
+});
+
+describe("the scripted flow of an automatic UI PR (D-ct; reading 247(7))", () => {
+  const withFlows = (
+    recorder: BeforeAfterRecorder,
+    options: { flows?: string; changed?: readonly string[] } = {},
+  ) => {
+    const h = harness({ automation: { evidence: recorder, hosting: "attach" } });
+    if (options.flows !== undefined)
+      h.filesAt.set(HEAD, new Map([[DESIGN_FLOWS_PATH, options.flows]]));
+    h.plumbing.changed.set(HEAD, options.changed ?? ["src/cart/Total.tsx"]);
+    return h;
+  };
+  const scripted = (request: BeforeAfterRequest): BeforeAfterResult["flow"] =>
+    request.flow === undefined
+      ? undefined
+      : { id: request.flow, before: "scripted", after: "scripted" };
+
+  it("picks the head's flow whose globs match a path the change touches, and captions it", async () => {
+    const recorder = uiRecorder({ sides: true, flow: scripted });
+    const h = withFlows(recorder, { flows: FLOWS_YAML });
+    expect(await h.upstream.openPullRequest(releaseInput(), h.ctx)).toMatchObject({
+      status: "pr",
+      evidence: "complete",
+    });
+    expect(recorder.beforeAfter[0]?.flow).toBe("checkout");
+    // the changed paths are the head's against the cut point, as git lists them
+    expect(h.plumbing.diffs).toEqual([[CUT, HEAD]]);
+    const body = h.github.state.prs[0]?.body ?? "";
+    expect(body).toContain('The changed flow "checkout", scripted (before)');
+    expect(body).toContain('The changed flow "checkout", scripted (after)');
+    expect(body).not.toContain("First rendered screen");
+    const alts = manifest(h.ctx.repoRoot)
+      .files.filter((f) => f.kind === "flow_video")
+      .map((f) => f.alt);
+    expect(alts).toEqual([
+      'The changed flow "checkout", scripted (before)',
+      'The changed flow "checkout", scripted (after)',
+    ]);
+  });
+
+  it("picks the flow that passes a touched screen when no flow's globs match", async () => {
+    const recorder = uiRecorder({ sides: true, flow: scripted });
+    const h = withFlows(recorder, { flows: FLOWS_YAML, changed: ["src/auth/Form.tsx"] });
+    await h.upstream.openPullRequest(
+      releaseInput({ source: { pushedHead: HEAD, base: CUT, screens: ["login"] } }),
+      h.ctx,
+    );
+    expect(recorder.beforeAfter[0]).toMatchObject({ flow: "sign-in", screens: ["login"] });
+  });
+
+  it("captions each side as the gate runner reports it: idle or failed", async () => {
+    const recorder = uiRecorder({
+      sides: true,
+      flow: (request) => ({ id: request.flow ?? "", before: "idle", after: "failed" }),
+    });
+    const h = withFlows(recorder, { flows: FLOWS_YAML });
+    await h.upstream.openPullRequest(releaseInput(), h.ctx);
+    const body = h.github.state.prs[0]?.body ?? "";
+    expect(body).toContain(
+      'First rendered screen, loading then idle: this side has no flow "checkout" (before)',
+    );
+    expect(body).toContain('The changed flow "checkout" up to the step that failed (after)');
+  });
+
+  it("keeps the first-screen caption when the recorder does not say what it scripted", async () => {
+    const recorder = uiRecorder({ sides: true });
+    const h = withFlows(recorder, { flows: FLOWS_YAML });
+    await h.upstream.openPullRequest(releaseInput(), h.ctx);
+    expect(recorder.beforeAfter[0]?.flow).toBe("checkout");
+    expect(h.github.state.prs[0]?.body).toContain("First rendered screen, loading then idle");
+    expect(h.github.state.prs[0]?.body).not.toContain("The changed flow");
+    // a flow did match: the caption gives no false reason
+    expect(h.github.state.prs[0]?.body).not.toContain("no scripted flow matches");
+  });
+
+  it("names no flow when none matches, or the flows file is missing or invalid", async () => {
+    for (const [label, options] of [
+      ["no match", { flows: FLOWS_YAML, changed: ["src/settings/Profile.tsx"] }],
+      ["missing", {}],
+      ["not yaml", { flows: "flows: [\n  - id: x\n" }],
+      ["not the schema", { flows: "version: 1\nflows:\n  - id: x\n    start: /\n" }],
+      [
+        "an unknown fixture",
+        {
+          flows: FLOWS_YAML.replace("fixture: coupon", "fixture: password"),
+        },
+      ],
+    ] as const) {
+      const recorder = uiRecorder({ sides: true, flow: scripted });
+      const h = withFlows(recorder, options);
+      await h.upstream.openPullRequest(releaseInput(), h.ctx);
+      expect(recorder.beforeAfter[0], label).not.toHaveProperty("flow");
+      expect(h.github.state.prs[0]?.body, label).toContain(
+        "First rendered screen, loading then idle",
+      );
+    }
+  });
+
+  it("names no flow when the head cannot be read or diffed", async () => {
+    const recorder = uiRecorder({ sides: true, flow: scripted });
+    const h = harness({ automation: { evidence: recorder, hosting: "attach" }, noGitOps: true });
+    h.plumbing.changed.set(HEAD, ["src/cart/Total.tsx"]);
+    expect(await h.upstream.openPullRequest(releaseInput(), h.ctx)).toMatchObject({
+      status: "pr",
+    });
+    expect(recorder.beforeAfter[0]).not.toHaveProperty("flow");
+    const failing = uiRecorder({ sides: true, flow: scripted });
+    const g = withFlows(failing, { flows: FLOWS_YAML });
+    (g.plumbing as { changedPaths?: unknown }).changedPaths = () =>
+      Promise.reject(new Error("git failed"));
+    await g.upstream.openPullRequest(releaseInput(), g.ctx);
+    expect(failing.beforeAfter[0]).not.toHaveProperty("flow");
   });
 });
 

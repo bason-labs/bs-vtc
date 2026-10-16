@@ -8,6 +8,7 @@
  */
 import { redactJson, redactSecrets, UpstreamReportSchema, type UpstreamReport } from "@vtc/shared";
 import { AutomationSkip } from "./skip.js";
+import { projectSubject } from "./subject.js";
 
 /** Facts the triggers hand over for an upstream item; only the allowlisted fields are read. */
 export interface UpstreamFacts {
@@ -21,6 +22,12 @@ export interface UpstreamFacts {
   readonly promptSha?: string | undefined;
   readonly errorClass?: string | undefined;
   readonly frames?: readonly string[] | undefined;
+  /**
+   * A D-cd improvement's subject as the fact named it (`tool`, `capability`, `config`): projected
+   * through its kind's pattern into the report's typed `subject` (`projectSubject`), never sent
+   * as given; ignored for any other kind.
+   */
+  readonly subject?: string | undefined;
   readonly metrics?: Readonly<Record<string, number>> | undefined;
   readonly occurrences: number;
   readonly firstSeen: string;
@@ -56,6 +63,8 @@ export const upstreamModelId = (model: string): string => {
  * which skips with `privacy` (a value that does not look like VTC-side data is never sent).
  */
 export const projectUpstreamReport = (facts: UpstreamFacts): UpstreamReport => {
+  // D-cs, D-cn, reading 247(8): the typed subject, through its kind's pattern only
+  const subject = projectSubject(facts.kind, facts.subject);
   const input: Record<string, unknown> = {
     v: 1,
     kind: facts.kind,
@@ -68,6 +77,7 @@ export const projectUpstreamReport = (facts: UpstreamFacts): UpstreamReport => {
     ...(facts.promptSha === undefined ? {} : { prompt_sha: facts.promptSha }),
     ...(facts.errorClass === undefined ? {} : { error_class: facts.errorClass }),
     vtc_frames: [...(facts.frames ?? [])].slice(0, 3),
+    ...(subject === undefined ? {} : { subject }),
     metrics: { ...(facts.metrics ?? {}) },
     occurrences: facts.occurrences,
     first_seen: facts.firstSeen,
