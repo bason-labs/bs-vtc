@@ -4400,6 +4400,78 @@ of reading 251 ((1), (2) and (3)); 251(4)–(8) stand.
       `make test` and `tox`; a `$HOME/.npmrc` with `node-options` and `script-shell`), an
       esbuild-style self-rebuild that passes with its warning, and the same package also writing
       into another package, which fails.
+253.  **H-14 fails closed on what it cannot see, and allows a write by its writer** (amends readings
+      238 and 252(1)–(3); closes the round-8 findings h14-unlistable-dir-hidden-from-tree,
+      h14-self-rebuild-allowance-not-attributed-to-writer, h14-shared-download-cache-unhashed and
+      h14-links-out-of-checkout-not-followed). _Lead decision 2026-10-16, pending human review._
+      (1) _Nothing skipped silently_ (`workspaceTree`): a directory that cannot be listed, an entry
+      that cannot be looked at (a directory listed but not searchable) and a file that cannot be
+      read are each a `refused:unreadable` line instead of being left out (an execute-only
+      `.bin`, mode 0111, still runs by path, so leaving it out reopened reading 252's planted
+      `.bin`). A refused line in the baseline stops every verify gate as `infra`; in any later
+      snapshot it is tampering, changed or not. A checkout a gate command locked this way is
+      unlocked before it is removed (`git-ops` `removeCheckoutNow`). (2) _A write is allowed by
+      who made it, never by where it is_: the scripts pass of a two-pass install runs one writer at
+      a time (`perPackageBuild`), each pending dependency on its own (`pnpm rebuild --recursive`
+      with each name in pnpm's `pendingBuilds`, whose own `onlyBuiltDependencies` policy still
+      decides whether it builds; `npm rebuild` with the name of each installed package with an
+      install script or `binding.gyp`), then each of the checkout's own projects one lifecycle
+      script at a time, in the order the real package manager runs them (pnpm 10.11: `preinstall`,
+      `install`, `postinstall`, `preprepare`, `prepare`, `postprepare` through `pnpm run` with
+      `enable-pre-post-scripts=false`, for the projects in `pendingBuilds`; npm 10.9: workspaces'
+      `preinstall`, `install`, `postinstall`, then the root's `preinstall` to `postprepare`
+      with `prepublish`, through `npm run --ignore-scripts`). After each step the checkout is
+      hashed from content and diffed against the step before (`compareInstall` with the step's
+      `InstallWriter`): a dependency's step may change only the directories of the installed
+      packages of its name that declared an install script, and the `.bin` entries that started
+      them before and still do; a project's step may only add files in that project's own
+      directory (never a protected config, never pnpm's configuration, never a change to a file
+      that was there); the package manager's state may change in any step. Everything else is
+      tampering, so the root `postinstall` (or another dependency) rewriting esbuild's
+      `lib/main.js` fails every verify gate, while esbuild's own step may still replace its
+      binary. Checked against the real npm 10.9 and pnpm 10.11 (`tool-tamper.live.test.ts`): each
+      script runs exactly once and no step changes anything its writer may not. A package manager
+      with no per-package form (Bun; an npm install with `--prefix` or `--workspace`; a pnpm
+      install that left no `pendingBuilds`) runs its whole second pass as before, with no writer:
+      no package may rebuild itself, any change outside the package manager's state is tampering,
+      and every verify gate is marked `after_scripts` with a warning. Each step is its own gate
+      pass (`<gate>.scripts-<n>` logs); a failing step is the install gate's result. (3) _The
+      download caches are hashed_: the extracted contents of the run's Go module cache (without
+      Go's own `cache/` of zips and lock files), Cargo's `registry/src` and `git/checkouts`
+      (`GateCommandJail.downloadCaches`) are hashed with the checkout under the reserved prefix
+      `.vtc-deps/` (the checkout's own `.vtc-deps` is refused), from the baseline on, and compared
+      like dependency trees in `compareInstall` and `compareGate`; nothing may change them after
+      the scripts-free `go mod download` / `cargo fetch`. This replaces reading 252(3)'s known
+      limit. Hashing was chosen over a read-only cache because it changes nothing in how Go and
+      Cargo run (not checked against the real `go` or `cargo`, which this machine lacks; if
+      `cargo test` extracted a crate that `cargo fetch` had not, the next gate fails closed).
+      (4) _Links out of the checkout fail closed_: a link whose target resolves (as far as it
+      exists) outside the checkout, into a directory gate commands can write, is a
+      `refused:link-out:<target>` line (`GateCommandJail.writableRoots`: the run's private root,
+      holding each phase's home, the temp directories and the download caches; every directory
+      when gates run unsandboxed). "VTC's own read-only stores" of the finding are read as every
+      place no gate command can write, so a virtual environment's `bin/python` linking to a system
+      interpreter stays a plain line; pnpm's global virtual store in the install home, and a
+      `link:`/`file:` dependency into a writable directory, stop every verify gate. Any
+      `pnpm-workspace.yaml` and a package.json with a `pnpm` key are protected in both
+      comparisons, whatever `tests.protected_configs` holds. (5) _Lead decisions_: (a) a code
+      generator that writes outside its own package (Prisma's client in `node_modules/.prisma`) is
+      not allowlisted: the project keeps that install script from running (pnpm: leave it out of
+      `onlyBuiltDependencies`; or a scripts-free install) and adds the generator as an install
+      gate of its own after the install in `gates.yml`; `vtc calibrate` says so when a gate fails
+      on the base commit as tampering (`tamperAdvice`, naming `npx prisma generate` when the path
+      is Prisma's). (b) The check tools' own caches between verify gates (`node_modules/.cache`,
+      `.vite`, `.vitest`, `__pycache__`) stay allowed for now; a follow-up moves them outside the
+      checkout. (c) The Go and Cargo caches are covered by (3). No contract field changes.
+      (6) _Tests_ reproduce each finding's example, on the file system (`workspace-tree.test.ts`)
+      and end to end through the Gate Runner (`tool-tamper.test.ts`): a `.bin` planted in
+      `packages/app` and made 0111 under `pnpm --filter app test`, and a baseline with a directory
+      it cannot list (`infra`); the root `postinstall` rewriting esbuild's `lib/main.js`, esbuild's
+      own rebuild alone, and Bun's whole pass; a `postinstall` patching an assertion library in
+      `GOMODCACHE`, and an untouched cache; a package the scripts-free install linked from a store
+      in the install home, and a root `postinstall` adding `pnpm-workspace.yaml`. _Found while
+      doing this, not fixed here_: `npm ci --ignore-scripts` still runs a workspace's `prepare`
+      when it links the workspace (npm 10.9), so that script runs before the baseline.
 
 ## 6. Change process for this spine
 

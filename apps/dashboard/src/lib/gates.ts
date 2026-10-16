@@ -112,16 +112,19 @@ const resultDetails = (r: GateResult): string[] => {
   return lines;
 };
 
-/** The tool-integrity warning of a gate whose tools were hashed only after an install's scripts. */
+/**
+ * The tool-integrity warning of a gate whose tools were hashed only after an install's scripts
+ * (reading 251), or whose install ran every package's scripts at once (reading 253).
+ */
 export const AFTER_SCRIPTS_WARNING =
-  "Tools hashed only after an install's scripts ran: what those scripts wrote before the hash is not checked (H-14). An install VTC can run scripts-free removes this warning.";
+  "Tools hashed only after an install's scripts ran (what those scripts wrote before the hash is not checked), or an install ran every package's scripts at once (Bun), so no package could rebuild itself (H-14). An install VTC can run scripts-free and one package at a time (npm ci, pnpm install) removes this warning.";
 
 /**
  * The tool-integrity warning of a gate run after packages rebuilt themselves in their own
- * directory during the install phase (H-14 `self_rebuilt`, reading 252), naming them.
+ * directory during the install phase (H-14 `self_rebuilt`, readings 252 and 253), naming them.
  */
 export const selfRebuiltWarning = (packages: readonly string[]): string =>
-  `Packages rebuilt themselves during install (allowed: changes in their own directory only, H-14): ${packages.join(", ")}.`;
+  `Packages rebuilt themselves during install (allowed: by their own install script, in their own directory only, H-14): ${packages.join(", ")}.`;
 
 const resultWarnings = (r: GateResult): string[] => [
   ...(r.tool?.baseline === "after_scripts" ? [AFTER_SCRIPTS_WARNING] : []),

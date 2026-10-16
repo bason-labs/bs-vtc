@@ -1,7 +1,13 @@
 /** Toolchain detection and `vtc calibrate` (§7.1, §15). */
 import { mkdirSync, readFileSync, symlinkSync } from "node:fs";
 import { join } from "node:path";
-import { GATE_SANDBOX, GatesConfigSchema, gateCommandAllowed } from "@vtc/shared";
+import {
+  GATE_SANDBOX,
+  GatesConfigSchema,
+  gateCommandAllowed,
+  TOOL_TAMPER_RULE_ID,
+  type GateReport,
+} from "@vtc/shared";
 import { afterEach, describe, expect, it } from "vitest";
 import { parseDocument, parseAllDocuments } from "yaml";
 import { createGitOps } from "../../src/git/index.js";
@@ -21,6 +27,7 @@ import {
   splitCommand,
   stringifyGatesConfig,
 } from "../../src/gates/index.js";
+import { tamperAdvice } from "../../src/gates/calibrate/calibrate.js";
 import { cleanupDirs, initRepo, tempDir, writeFile } from "../helpers/repo.js";
 import {
   cases,
@@ -736,5 +743,40 @@ describe("the calibrated fixture", () => {
     );
     expect(frozen).toBe(fixture);
     expect(GatesConfigSchema.parse(parseDocument(fixture).toJS())).toBeDefined();
+  });
+});
+
+describe("calibrate says what to do about a code generator in the install (spine §5 reading 253(a))", () => {
+  /** A report whose `tampered` gates failed as tampering, and one gate that passed. */
+  const report = (tampered: Record<string, string[]>): GateReport =>
+    ({
+      results: [
+        ...Object.entries(tampered).map(([id, paths]) => ({
+          gate_id: id,
+          status: "fail",
+          findings: [{ rule_id: TOOL_TAMPER_RULE_ID }],
+          tool: { source: "project", tampered: paths },
+        })),
+        { gate_id: "lint", status: "pass", findings: [] },
+      ],
+    }) as unknown as GateReport;
+
+  it("names Prisma's generator and the install gate that replaces its install script", () => {
+    const advice = tamperAdvice(
+      report({
+        test: ["node_modules/.pnpm/@prisma+client@5.0.0/node_modules/.prisma/client/index.js"],
+        build: ["node_modules/.prisma/client/index.d.ts"],
+      }),
+    );
+    expect(advice).toMatch(/^WARNING: gate\(s\) test, build fail on the base commit as tampering/);
+    expect(advice).toMatch(/Prisma's client generator/);
+    expect(advice).toMatch(/command: \[npx, prisma, generate\]/);
+  });
+
+  it("gives the general advice for any other write, and nothing when no gate failed so", () => {
+    expect(tamperAdvice(report({ test: ["node_modules/.cache-gen/out.js"] }))).toMatch(
+      /changed node_modules\/\.cache-gen\/out\.js.*add the generator as an install gate after the install/,
+    );
+    expect(tamperAdvice(report({}))).toBeNull();
   });
 });

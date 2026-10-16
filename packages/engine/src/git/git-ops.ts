@@ -3,7 +3,7 @@
  * checkouts, shared by engine core and the Gate Runner.
  */
 import { randomBytes } from "node:crypto";
-import { existsSync, mkdirSync, rmSync } from "node:fs";
+import { chmodSync, existsSync, lstatSync, mkdirSync, readdirSync, rmSync } from "node:fs";
 import { join } from "node:path";
 import type { CreateGitOps, GitChangedFile, GitOps, GitSha, RelPath } from "@vtc/shared";
 import { runGit, withRepoLock } from "./exec.js";
@@ -88,13 +88,38 @@ export const createGitOps: CreateGitOps = ({ repoRoot }): GitOps => ({
   },
 });
 
+/**
+ * Lets the owner list and remove every directory under `dir` (never through a link): a gate
+ * command may leave one it cannot list (`chmod 0111`, spine §5 reading 253), which a recursive
+ * removal would stop at.
+ */
+const unlockTree = (dir: string): void => {
+  try {
+    if (!lstatSync(dir).isDirectory()) return;
+    chmodSync(dir, 0o700);
+    for (const name of readdirSync(dir)) unlockTree(join(dir, name));
+  } catch {
+    // best effort: the removal says what is left
+  }
+};
+
+/** Removes a checkout's directory, unlocking what a gate command locked when it has to. */
+const removeTree = (dir: string): void => {
+  try {
+    rmSync(dir, { recursive: true, force: true });
+  } catch {
+    unlockTree(dir);
+    rmSync(dir, { recursive: true, force: true });
+  }
+};
+
 const removeCheckoutNow = async (repoRoot: string, checkout: string): Promise<void> => {
   {
     const removed = await runGit(repoRoot, ["worktree", "remove", "--force", checkout], {
       allowFailure: true,
     });
     const left = existsSync(join(repoRoot, checkout));
-    if (left) rmSync(join(repoRoot, checkout), { recursive: true, force: true });
+    if (left) removeTree(join(repoRoot, checkout));
     // a clean removal leaves no registration to prune (D-cz: one process less per checkout)
     if (removed.code !== 0 || left)
       await runGit(repoRoot, ["worktree", "prune"], { allowFailure: true });

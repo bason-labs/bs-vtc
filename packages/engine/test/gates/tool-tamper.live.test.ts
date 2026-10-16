@@ -1,7 +1,8 @@
 /**
  * Opt-in live check of the two-pass install (H-14, `scriptsFreeInstall`) against the real package
- * managers on this machine: after the first pass no lifecycle script ran, and after the second the
- * dependency's `postinstall` and the project's own install scripts did. Each manager that is not on
+ * managers on this machine: after the first pass no lifecycle script ran, and after the second,
+ * run one writer at a time where VTC knows how (`perPackageBuild`, spine §5 reading 253: npm and
+ * pnpm), each once: the dependency's `postinstall` and the project's own install scripts. Each manager that is not on
  * `PATH` is skipped. Nothing is downloaded: the one dependency is a local tarball, and every cache
  * and store is a temp directory.
  *
@@ -11,7 +12,12 @@ import { execFileSync } from "node:child_process";
 import { existsSync, readFileSync, rmSync } from "node:fs";
 import { delimiter, join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
-import { scriptsFreeInstall } from "../../src/gates/tool-integrity.js";
+import {
+  compareInstall,
+  perPackageBuild,
+  scriptsFreeInstall,
+  workspaceTree,
+} from "../../src/gates/tool-integrity.js";
 import { cleanupDirs, tempDir, writeFile } from "../helpers/repo.js";
 
 afterEach(cleanupDirs);
@@ -119,7 +125,27 @@ describe.skipIf(!live)("live: the second install pass runs the scripts the first
         );
         expect(installed).toBe(true);
         for (const path of marks) expect(existsSync(join(dir, path)), path).toBe(false);
-        run(passes.build);
+        // spine §5 reading 253: one writer at a time where the package manager has a form for it
+        const steps = perPackageBuild(install, dir, "", workspaceTree(dir, { writable: [] }));
+        if (pm === "bun") expect(steps).toBeNull();
+        else expect(steps?.length).toBeGreaterThan(0);
+        // each step changes nothing but what its own writer may, besides the marks the
+        // fixture's scripts write at the project root (a dependency's or packages/a's: tampering)
+        let before = workspaceTree(dir, { writable: [] });
+        for (const step of steps ?? [{ argv: passes.build, writer: null }]) {
+          run(step.argv);
+          const after = workspaceTree(dir, { writable: [] });
+          const marks = compareInstall(before, after, undefined, step.writer).tampered;
+          const own =
+            step.writer !== null && "project" in step.writer && step.writer.project === "";
+          if (steps !== null)
+            expect(
+              marks.every((m) => /^(dep|root|a)\.txt$/.test(m)),
+              marks.join(),
+            ).toBe(true);
+          if (own) expect(marks).toEqual([]);
+          before = after;
+        }
         expect(readFileSync(join(dir, "dep.txt"), "utf8")).toBe("built\n");
         expect(readFileSync(join(dir, "root.txt"), "utf8")).toBe("root\n");
         if (workspace) expect(readFileSync(join(dir, "a.txt"), "utf8")).toBe("a\n");

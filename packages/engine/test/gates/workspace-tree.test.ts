@@ -1,10 +1,11 @@
 /**
- * H-14 by a full dependency-tree diff (spine §5 reading 252): `workspaceTree` hashes every file
- * and link of the checkout without choosing which ones matter, `compareInstall` diffs what the
- * install phase's scripts did against it (only a package rebuilding itself in its own directory
- * is allowed), and `compareGate` what changed before a verify gate. Each review finding of
- * h14-open (round 7) is reproduced here on the file system, then end to end in
- * `tool-tamper.test.ts`.
+ * H-14 by a full dependency-tree diff (spine §5 readings 252 and 253): `workspaceTree` hashes
+ * every file and link of the checkout without choosing which ones matter, and fails closed on what
+ * it cannot list, read or vouch for; `compareInstall` diffs what one writer's install scripts did
+ * against it (only a package rebuilding itself in its own directory is allowed, and only to that
+ * package's own scripts), and `compareGate` what changed before a verify gate; `perPackageBuild`
+ * runs the scripts one writer at a time. Each review finding of h14-open (round 7) and h14-open2
+ * is reproduced here on the file system, then end to end in `tool-tamper.test.ts`.
  */
 import { appendFileSync, chmodSync, mkdirSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { createHash } from "node:crypto";
@@ -14,13 +15,31 @@ import {
   compareGate,
   compareInstall,
   inDependencyTree,
+  perPackageBuild,
   ToolHashLimitError,
   WORKSPACE_HASH_LIMITS,
-  workspaceTree,
+  workspaceTree as walk,
+  type WorkspaceTree,
 } from "../../src/gates/tool-integrity.js";
 import { cleanupDirs, tempDir } from "../helpers/repo.js";
 
-afterEach(cleanupDirs);
+/** Directories a test made unlistable, made listable again before they are removed. */
+const locked: string[] = [];
+
+afterEach(() => {
+  for (const dir of locked.splice(0)) chmodSync(dir, 0o755);
+  cleanupDirs();
+});
+
+/** Whether permissions bind this process (root reads and lists anything). */
+const permissionsBind = process.getuid?.() !== 0;
+
+/** The run's private root, which gate commands can write: none of the fixtures' links lead there. */
+const JAIL = "/private/var/vtc-test-jail-that-does-not-exist";
+
+/** The checkout's snapshot, with the gate sandbox's writable directories (`JAIL`) given. */
+const workspaceTree = (root: string, options: Parameters<typeof walk>[1] = {}): WorkspaceTree =>
+  walk(root, { writable: [JAIL], ...options });
 
 const put = (root: string, rel: string, text: string, mode?: number): void => {
   mkdirSync(dirname(join(root, rel)), { recursive: true });
@@ -149,8 +168,19 @@ describe("workspaceTree: every file and link of the checkout, chosen by nothing"
       false,
     );
     expect(tree.venvs).toEqual([".venv"]);
-    expect(tree.packages.get(ESBUILD)).toEqual({ installed: true, scripts: ["postinstall"] });
-    expect(tree.packages.get("packages/app")).toEqual({ installed: false, scripts: [] });
+    expect(tree.packages.get(ESBUILD)).toEqual({
+      installed: true,
+      scripts: ["postinstall"],
+      name: "esbuild",
+      pnpmSettings: false,
+    });
+    expect(tree.packages.get("packages/app")).toEqual({
+      installed: false,
+      scripts: [],
+      name: "app",
+      pnpmSettings: false,
+    });
+    expect(tree.refused).toEqual([]);
     expect(tree.binOwners.get("node_modules/.bin/esbuild")).toBe(ESBUILD);
     expect(tree.binOwners.get("node_modules/.bin/vitest")).toBe(VITEST);
   });
@@ -204,12 +234,16 @@ describe("workspaceTree: every file and link of the checkout, chosen by nothing"
 });
 
 describe("compareInstall: what the install phase's scripts did (reading 252)", () => {
-  /** The monorepo's baseline, `scripts` run on it, and the comparison. */
-  const install = (scripts: (root: string) => void, isProtected?: (path: string) => boolean) => {
+  /** The monorepo's baseline, `scripts` of `writer` run on it, and the comparison. */
+  const install = (
+    scripts: (root: string) => void,
+    isProtected?: (path: string) => boolean,
+    writer: Parameters<typeof compareInstall>[3] = { dependency: "esbuild" },
+  ) => {
     const root = monorepo();
     const before = workspaceTree(root);
     scripts(root);
-    return compareInstall(before, workspaceTree(root), isProtected);
+    return compareInstall(before, workspaceTree(root), isProtected, writer);
   };
 
   it("h14-task-runner-tool-unverified: a transitive dependency of the test runner, patched", () => {
@@ -326,7 +360,9 @@ describe("compareInstall: what the install phase's scripts did (reading 252)", (
     put(root, "packages/app/src/index.ts", "export const app = 2;\n");
     put(root, "packages/web/dist/index.js", "not app's");
     put(root, ".npmrc", "node-options=--require=./p.cjs\n");
-    const compared = compareInstall(before, workspaceTree(root), protectedPath);
+    const compared = compareInstall(before, workspaceTree(root), protectedPath, {
+      project: "packages/app",
+    });
     expect(compared.selfRebuilt).toEqual([
       { package: "packages/app", files: ["packages/app/dist/index.js"] },
     ]);
@@ -371,5 +407,362 @@ describe("compareGate: what changed before a verify gate (reading 252)", () => {
       "packages/app/src/index.ts",
       "packages/app/vitest.config.ts",
     ]);
+  });
+});
+
+describe("h14-unlistable-dir-hidden-from-tree: nothing is skipped silently (reading 253)", () => {
+  /** Makes `rel` execute-only (0111): looked up and run by path, never listed. */
+  const lock = (root: string, rel: string, mode = 0o111): void => {
+    chmodSync(join(root, rel), mode);
+    locked.push(join(root, rel));
+  };
+
+  it.skipIf(!permissionsBind)(
+    "a .bin planted after the baseline and made execute-only is tampering for compareInstall and compareGate",
+    () => {
+      // the finding's reproduction: packages/app has node_modules but no .bin in the baseline
+      const root = tempDir("vtc-tree-");
+      put(root, "package.json", pkg("root"));
+      put(root, "packages/app/package.json", pkg("app", { scripts: { test: "vitest run" } }));
+      put(root, "packages/app/node_modules/dep/package.json", pkg("dep"));
+      const before = workspaceTree(root);
+      put(root, "packages/app/node_modules/.bin/tool", "#!/bin/sh\nexit 0\n", 0o755);
+      lock(root, "packages/app/node_modules/.bin");
+      const after = workspaceTree(root);
+      expect(after.refused).toEqual(["packages/app/node_modules/.bin"]);
+      expect(after.snapshot.files.get("packages/app/node_modules/.bin")).toBe("refused:unreadable");
+      for (const writer of [{ dependency: "dep" }, { project: "packages/app" }, null]) {
+        expect(compareInstall(before, after, undefined, writer).tampered).toEqual([
+          "packages/app/node_modules/.bin",
+        ]);
+      }
+      expect(compareGate(before, after)).toEqual(["packages/app/node_modules/.bin"]);
+      // and still on every later snapshot, changed or not
+      expect(compareGate(after, workspaceTree(root, { previous: after }))).toEqual([
+        "packages/app/node_modules/.bin",
+      ]);
+    },
+  );
+
+  it.skipIf(!permissionsBind)(
+    "a shadow package in a new execute-only node_modules directory, under an installed package's own directory",
+    () => {
+      const root = monorepo();
+      const before = workspaceTree(root);
+      put(root, `${ESBUILD}/node_modules/vitest/index.js`, "export {};\n");
+      lock(root, `${ESBUILD}/node_modules`);
+      // even esbuild's own step may not hide a directory in its own tree
+      expect(
+        compareInstall(before, workspaceTree(root), undefined, { dependency: "esbuild" }),
+      ).toEqual({ tampered: [`${ESBUILD}/node_modules`], selfRebuilt: [], managerState: [] });
+    },
+  );
+
+  it.skipIf(!permissionsBind)(
+    "a directory listed but not searchable, and a file not readable, are refused lines too",
+    () => {
+      const root = monorepo();
+      const before = workspaceTree(root);
+      put(root, "packages/app/lib/a.js", "a");
+      lock(root, "packages/app/lib", 0o444);
+      put(root, `${EXPECT}/extra.js`, "x", 0o000);
+      locked.push(join(root, `${EXPECT}/extra.js`));
+      const after = workspaceTree(root);
+      expect(after.refused).toEqual([`${EXPECT}/extra.js`, "packages/app/lib/a.js"]);
+      expect(
+        compareInstall(before, after, undefined, { project: "packages/app" }).tampered,
+      ).toEqual([`${EXPECT}/extra.js`, "packages/app/lib/a.js"]);
+    },
+  );
+
+  it.skipIf(!permissionsBind)("a baseline that cannot be listed whole says so", () => {
+    const root = monorepo();
+    put(root, "packages/web/node_modules/.cache/x", "x");
+    lock(root, "packages/web/node_modules/.cache");
+    // the runner then runs no verify gate (infra): nothing after it could be told apart
+    expect(workspaceTree(root).refused).toEqual(["packages/web/node_modules/.cache"]);
+  });
+});
+
+describe("h14-self-rebuild-allowance-not-attributed-to-writer: allowed by who wrote it (reading 253)", () => {
+  const MAIN = `${ESBUILD}/lib/main.js`;
+
+  /** The monorepo with esbuild's JavaScript API, its baseline, `scripts`, and the comparison. */
+  const step = (writer: Parameters<typeof compareInstall>[3], scripts: (root: string) => void) => {
+    const root = monorepo();
+    put(root, MAIN, "export const transform = (code) => code;\n");
+    const before = workspaceTree(root);
+    scripts(root);
+    return compareInstall(before, workspaceTree(root), undefined, writer);
+  };
+  const dropAssertions = (root: string): void => {
+    put(root, MAIN, "export const transform = (code) => code.replace(/expect\\(/g, 'void (');\n");
+  };
+
+  it("the checkout's own postinstall rewriting esbuild's lib/main.js is tampering", () => {
+    expect(step({ project: "" }, dropAssertions)).toEqual({
+      tampered: [MAIN],
+      selfRebuilt: [],
+      managerState: [],
+    });
+  });
+
+  it("so is another dependency's script, and a scripts pass that ran all at once", () => {
+    expect(step({ dependency: "vitest" }, dropAssertions).tampered).toEqual([MAIN]);
+    expect(step(null, dropAssertions).tampered).toEqual([MAIN]);
+    // with no writer named, not even a native rebuild is allowed
+    expect(
+      step(null, (root) => {
+        put(root, `${ESBUILD}/bin/esbuild`, "\u007fELF native", 0o755);
+      }).tampered,
+    ).toEqual([`${ESBUILD}/bin/esbuild`]);
+  });
+
+  it("esbuild's own script may still rebuild its own directory", () => {
+    expect(step({ dependency: "esbuild" }, dropAssertions)).toEqual({
+      tampered: [],
+      selfRebuilt: [{ package: ESBUILD, files: [MAIN] }],
+      managerState: [],
+    });
+  });
+
+  it("a dependency's script may not add a file of the checkout's own", () => {
+    expect(
+      step({ dependency: "esbuild" }, (root) => {
+        put(root, "packages/app/dist/index.js", "built");
+      }).tampered,
+    ).toEqual(["packages/app/dist/index.js"]);
+  });
+});
+
+describe("perPackageBuild: the scripts pass one writer at a time (reading 253)", () => {
+  it("pnpm: each pending dependency on its own, then each project's own scripts", () => {
+    const root = monorepo();
+    put(root, "package.json", pkg("root", { scripts: { postinstall: "node setup.js" } }));
+    put(
+      root,
+      "packages/app/package.json",
+      pkg("app", { scripts: { prepare: "tsc", install: "x" } }),
+    );
+    put(
+      root,
+      "node_modules/.modules.yaml",
+      "layoutVersion: 5\npendingBuilds:\n  - packages/app\n  - .\n  - esbuild@0.25.0\n  - '@swc/core@1.3.0(@swc/helpers@0.5.0)'\n  - packages/web\nprunedAt: x\n",
+    );
+    expect(
+      perPackageBuild(["pnpm", "install", "--frozen-lockfile"], root, "", workspaceTree(root)),
+    ).toEqual([
+      {
+        argv: ["pnpm", "rebuild", "--recursive", "@swc/core"],
+        writer: { dependency: "@swc/core" },
+      },
+      { argv: ["pnpm", "rebuild", "--recursive", "esbuild"], writer: { dependency: "esbuild" } },
+      {
+        argv: [
+          "pnpm",
+          "--config.enable-pre-post-scripts=false",
+          "--dir",
+          ".",
+          "run",
+          "postinstall",
+        ],
+        writer: { project: "" },
+      },
+      {
+        argv: [
+          "pnpm",
+          "--config.enable-pre-post-scripts=false",
+          "--dir",
+          "packages/app",
+          "run",
+          "install",
+        ],
+        writer: { project: "packages/app" },
+      },
+      {
+        argv: [
+          "pnpm",
+          "--config.enable-pre-post-scripts=false",
+          "--dir",
+          "packages/app",
+          "run",
+          "prepare",
+        ],
+        writer: { project: "packages/app" },
+      },
+    ]);
+  });
+
+  it("pnpm: keeps the install's directory, and knows no steps without pendingBuilds", () => {
+    const root = monorepo();
+    put(root, "packages/app/node_modules/.modules.yaml", "pendingBuilds: []\n");
+    expect(
+      perPackageBuild(["pnpm", "-C", "app", "install"], root, "packages", workspaceTree(root)),
+    ).toEqual([]);
+    rmSync(join(root, "node_modules/.modules.yaml"));
+    expect(perPackageBuild(["pnpm", "install"], root, "", workspaceTree(root))).toBeNull();
+    put(root, "node_modules/.modules.yaml", "pendingBuilds:\n  - --inject@1.0.0\n");
+    expect(perPackageBuild(["pnpm", "install"], root, "", workspaceTree(root))).toBeNull();
+  });
+
+  it("npm: each installed package with an install script, then the workspaces and the root", () => {
+    const root = tempDir("vtc-npm-");
+    put(
+      root,
+      "package.json",
+      pkg("root", { workspaces: ["packages/*"], scripts: { prepare: "husky", postinstall: "x" } }),
+    );
+    put(root, "packages/a/package.json", pkg("a", { scripts: { postinstall: "x", prepare: "y" } }));
+    put(root, "packages/b/package.json", pkg("b"));
+    put(
+      root,
+      "node_modules/esbuild/package.json",
+      pkg("esbuild", { scripts: { postinstall: "x" } }),
+    );
+    put(
+      root,
+      "node_modules/x/node_modules/esbuild/package.json",
+      pkg("esbuild", { scripts: { install: "x" } }),
+    );
+    put(root, "node_modules/native/package.json", pkg("native"));
+    put(root, "node_modules/native/binding.gyp", "{}");
+    put(root, "node_modules/plain/package.json", pkg("plain"));
+    expect(perPackageBuild(["npm", "ci"], root, "", workspaceTree(root))).toEqual([
+      { argv: ["npm", "rebuild", "esbuild"], writer: { dependency: "esbuild" } },
+      { argv: ["npm", "rebuild", "native"], writer: { dependency: "native" } },
+      {
+        argv: ["npm", "--prefix", "packages/a", "run", "--ignore-scripts", "postinstall"],
+        writer: { project: "packages/a" },
+      },
+      { argv: ["npm", "run", "--ignore-scripts", "postinstall"], writer: { project: "" } },
+      { argv: ["npm", "run", "--ignore-scripts", "prepare"], writer: { project: "" } },
+    ]);
+    expect(
+      perPackageBuild(["npm", "ci", "--workspace", "a"], root, "", workspaceTree(root)),
+    ).toBeNull();
+  });
+
+  it("Bun, and an install with no second pass, have no per-package form", () => {
+    const root = monorepo();
+    expect(perPackageBuild(["bun", "install"], root, "", workspaceTree(root))).toBeNull();
+    expect(
+      perPackageBuild(["npm", "ci", "--ignore-scripts"], root, "", workspaceTree(root)),
+    ).toBeNull();
+    expect(perPackageBuild(["yarn", "install"], root, "", workspaceTree(root))).toBeNull();
+  });
+});
+
+describe("h14-shared-download-cache-unhashed: Go's and Cargo's caches are hashed (reading 253)", () => {
+  const ASSERT = "github.com/stretchr/testify@v1.9.0/assert/assertions.go";
+  const CRATE = "index.crates.io-6f17d22bba15001f/pretty_assertions-1.4.0/src/lib.rs";
+
+  /** A checkout and a run's download caches after the scripts-free `go mod download` and `cargo fetch`. */
+  const fetched = () => {
+    const root = monorepo();
+    const deps = tempDir("vtc-deps-");
+    put(deps, `go-mod/${ASSERT}`, "func Equal() bool { return check() }\n");
+    put(deps, "go-mod/cache/download/github.com/stretchr/testify/@v/v1.9.0.lock", "");
+    put(deps, `cargo-registry/src/${CRATE}`, "pub fn assert_eq() {}\n");
+    put(deps, "cargo-git/checkouts/x-1234/abc/src/lib.rs", "pub fn x() {}\n");
+    const caches = [
+      { label: "go-mod", dir: join(deps, "go-mod"), skip: ["cache"] },
+      { label: "cargo-registry/src", dir: join(deps, "cargo-registry/src") },
+      { label: "cargo-git/checkouts", dir: join(deps, "cargo-git/checkouts") },
+      { label: "missing", dir: join(deps, "nothing-here") },
+    ];
+    return { root, deps, caches, before: workspaceTree(root, { caches }) };
+  };
+
+  it("hashes the extracted contents under .vtc-deps, never Go's own download cache", () => {
+    const { before } = fetched();
+    expect([...before.snapshot.files.keys()].filter((p) => p.startsWith(".vtc-deps/"))).toEqual([
+      `.vtc-deps/cargo-git/checkouts/x-1234/abc/src/lib.rs`,
+      `.vtc-deps/cargo-registry/src/${CRATE}`,
+      `.vtc-deps/go-mod/${ASSERT}`,
+    ]);
+  });
+
+  it("a postinstall patching a Go or Rust assertion library is tampering, before a gate too", () => {
+    const { root, deps, caches, before } = fetched();
+    put(deps, `go-mod/${ASSERT}`, "func Equal() bool { return true }\n");
+    put(deps, `cargo-registry/src/${CRATE}`, "pub fn assert_eq() { /* nothing */ }\n");
+    put(deps, "go-mod/cache/download/github.com/stretchr/testify/@v/v1.9.0.lock", "held");
+    const after = workspaceTree(root, { caches });
+    expect(compareInstall(before, after, undefined, { dependency: "esbuild" }).tampered).toEqual([
+      `.vtc-deps/cargo-registry/src/${CRATE}`,
+      `.vtc-deps/go-mod/${ASSERT}`,
+    ]);
+    expect(compareGate(before, after)).toEqual([
+      `.vtc-deps/cargo-registry/src/${CRATE}`,
+      `.vtc-deps/go-mod/${ASSERT}`,
+    ]);
+  });
+
+  it("the checkout's own .vtc-deps is refused, so it never collides with a cache's lines", () => {
+    const { root, caches } = fetched();
+    put(root, `.vtc-deps/go-mod/${ASSERT}`, "func Equal() bool { return true }\n");
+    expect(workspaceTree(root, { caches }).refused).toEqual([".vtc-deps"]);
+  });
+});
+
+describe("h14-links-out-of-checkout-not-followed: links out fail closed (reading 253)", () => {
+  it("a link into a directory gate commands can write is refused; one to a system path is a line", () => {
+    const root = monorepo();
+    const jail = tempDir("vtc-jail-");
+    put(jail, "home/.local/share/pnpm/store/v10/links/vitest/index.js", "export {};\n");
+    link(
+      root,
+      "node_modules/.pnpm/vitest@2.0.0",
+      join(jail, "home/.local/share/pnpm/store/v10/links/vitest"),
+    );
+    link(root, "node_modules/later", join(jail, "home/not-yet/there"));
+    link(root, "node_modules/hop", "../node_modules/.pnpm/vitest@2.0.0");
+    const tree = walk(root, { writable: [jail] });
+    expect(tree.refused).toEqual([
+      "node_modules/.pnpm/vitest@2.0.0",
+      "node_modules/hop",
+      "node_modules/later",
+    ]);
+    expect(tree.snapshot.files.get("node_modules/later")).toBe(
+      `refused:link-out:${join(jail, "home/not-yet/there")}`,
+    );
+    // the virtual environment's interpreter is outside every writable directory
+    expect(tree.snapshot.files.get(".venv/bin/python")).toBe("link:/usr/bin/python3");
+    // by default every directory is writable: any link out of the checkout is refused
+    expect(walk(root).refused).toContain(".venv/bin/python");
+  });
+
+  it("a link out created by an install script is tampering, whoever wrote it", () => {
+    const root = monorepo();
+    const jail = tempDir("vtc-jail-");
+    const before = walk(root, { writable: [jail] });
+    link(root, `${ESBUILD}/lib`, join(jail, "home/lib"));
+    expect(
+      compareInstall(before, walk(root, { writable: [jail] }), undefined, { dependency: "esbuild" })
+        .tampered,
+    ).toEqual([`${ESBUILD}/lib`]);
+  });
+
+  it("pnpm-workspace.yaml and a package.json with pnpm settings are protected configs", () => {
+    const root = monorepo();
+    rmSync(join(root, "pnpm-workspace.yaml"));
+    const before = workspaceTree(root);
+    put(root, "pnpm-workspace.yaml", "enableGlobalVirtualStore: true\n");
+    put(root, "packages/app/tools/package.json", pkg("tools", { pnpm: { overrides: {} } }));
+    put(root, "packages/app/tools/dist.js", "built");
+    put(root, "packages/app/Pnpm-Workspace.yaml", "packages: []\n");
+    const after = workspaceTree(root);
+    const expected = [
+      "packages/app/Pnpm-Workspace.yaml",
+      "packages/app/tools/package.json",
+      "pnpm-workspace.yaml",
+    ];
+    expect(compareGate(before, after)).toEqual(expected);
+    // packages/app's own script may add its build outputs, never pnpm's configuration
+    expect(compareInstall(before, after, undefined, { project: "packages/app" })).toEqual({
+      tampered: expected,
+      selfRebuilt: [{ package: "packages/app", files: ["packages/app/tools/dist.js"] }],
+      managerState: [],
+    });
   });
 });
