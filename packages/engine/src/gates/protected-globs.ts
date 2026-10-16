@@ -42,6 +42,19 @@ export const LINT_TEST_CONFIG_GLOBS: readonly string[] = [
   "**/.coveragerc",
   "**/.golangci.y*ml",
   "**/.dependency-cruiser.*",
+  // Spine §5 reading 254: configs that silently replace or weaken a check tool. babel-jest (Jest's
+  // default transform) loads Babel's config, whose inline plugin can rewrite `expect` calls; SWC's
+  // likewise for @swc/jest; `.pytest.ini` takes precedence over pyproject.toml; Cargo's config can
+  // set a `runner`, a `rustc-wrapper` or a `[patch]` for `cargo test`; `go.work` can `replace` an
+  // assertion module with a local fake for `go test`.
+  "**/babel.config.*",
+  "**/.babelrc*",
+  "**/.swcrc",
+  "**/.pytest.ini",
+  "**/.cargo/config",
+  "**/.cargo/config.toml",
+  "**/go.work",
+  "**/go.work.sum",
 ];
 
 /**

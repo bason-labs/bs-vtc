@@ -78,7 +78,13 @@ import {
   type VisualSummary,
   type WriteScopeCheckRequest,
 } from "@vtc/shared";
-import { assertNoSymlinks, ensureRepoDir, removeRepoFile, writeRepoFile } from "../git/index.js";
+import {
+  assertNoSymlinks,
+  ensureRepoDir,
+  removeRepoFile,
+  runGit,
+  writeRepoFile,
+} from "../git/index.js";
 import { compiledL6 } from "./arch/index.js";
 import { classifyFailure, environmentSignatureLine } from "./classify.js";
 import { GATES_CONFIG_PATH, loadGatesConfig, parseGatesConfig, readAllowlist } from "./config.js";
@@ -131,6 +137,8 @@ import {
   perPackageBuild,
   scriptsFreeInstall,
   sha256File,
+  SHARED_NAME_NOTE,
+  sharedInstallNames,
   ToolHashLimitError,
   toolPathsCover,
   workspaceTree,
@@ -407,6 +415,11 @@ class Run {
         steps: WorkspaceTree | null;
         managerState: readonly string[];
         unattributed: readonly string[];
+        /**
+         * The checkout's own projects whose `lib/` the committed `.gitignore` files ignore, read
+         * before any install script ran: their install scripts may add files there (reading 254).
+         */
+        ignoredLib: ReadonlySet<string>;
         /** The latest snapshot before a verify gate: the fast path's source, never the baseline. */
         lastSeen: WorkspaceTree | null;
       }
@@ -678,7 +691,10 @@ class Run {
       if (!(await run(gate, passes.free, last, last ? undefined : "scripts-free")))
         failed = gate.id;
     }
-    if (failed === null) this.hashTools(verify, unverified.length > 0);
+    if (failed === null) {
+      this.hashTools(verify, unverified.length > 0);
+      await this.findIgnoredLibs();
+    }
     for (const { gate, passes } of freed) {
       if (failed !== null) break;
       const build = passes?.build ?? null;
@@ -812,6 +828,7 @@ class Run {
           steps: null,
           managerState: [],
           unattributed: [],
+          ignoredLib: new Set(),
           lastSeen: null,
         };
         const refused = this.workspace.baseline.refused;
@@ -842,6 +859,49 @@ class Run {
   }
 
   /**
+   * The checkout's own projects whose `lib/` directory its `.gitignore` files ignore (spine §5
+   * reading 254(3)), asked of git before any install script ran, with no user-level excludes file:
+   * an install script of such a project may add files under `lib/` as build output. Nothing when
+   * git cannot say (the default, which allows no `lib/`).
+   */
+  private async findIgnoredLibs(): Promise<void> {
+    const ws = this.workspace;
+    if (ws === null || "problem" in ws) return;
+    const projects = [...ws.baseline.packages]
+      .filter(([, info]) => !info.installed)
+      .map(([dir]) => dir);
+    if (projects.length === 0) return;
+    const asked = new Map(projects.map((dir) => [dir === "" ? "lib/" : `${dir}/lib/`, dir]));
+    try {
+      const out = await runGit(
+        this.checkoutAbs,
+        [
+          "-c",
+          `core.excludesFile=${process.platform === "win32" ? "NUL" : "/dev/null"}`,
+          "-c",
+          "core.quotePath=false",
+          "check-ignore",
+          "--no-index",
+          "--",
+          ...asked.keys(),
+        ],
+        { allowFailure: true },
+      );
+      if (out.code !== 0) return;
+      const found = out.stdout
+        .toString("utf8")
+        .split("\n")
+        .flatMap((path) => {
+          const dir = asked.get(path);
+          return dir === undefined ? [] : [dir];
+        });
+      ws.ignoredLib = new Set(found);
+    } catch {
+      // git could not say: no lib/ is a build output (a quoted unusual path is not matched either)
+    }
+  }
+
+  /**
    * After one step of an install's scripts pass (spine §5 reading 253): the checkout hashed from
    * content and diffed against the snapshot before the step (`compareInstall`), allowing only what
    * `writer` may change; `null` allows nothing but the package manager's state, and, for the
@@ -854,7 +914,9 @@ class Run {
     const before = ws.steps ?? ws.baseline;
     try {
       const after = workspaceTree(this.checkoutAbs, this.treeOptions());
-      const compared = compareInstall(before, after, this.protectedPath, writer);
+      const compared = compareInstall(before, after, this.protectedPath, writer, {
+        ignoredLib: ws.ignoredLib,
+      });
       ws.steps = after;
       ws.installChanged = [...new Set([...ws.installChanged, ...compared.tampered])].sort();
       const merged = new Map(ws.selfRebuilt.map((r) => [r.package, [...r.files]]));
@@ -903,6 +965,12 @@ class Run {
     if (done.selfRebuilt.length > 0) {
       notes.push(
         `packages whose own install scripts changed files in their own directory during the install phase (allowed, shown as a warning on each verify gate):\n${done.selfRebuilt.map((r) => `${r.package}: ${r.files.join(", ")}`).join("\n")}`,
+      );
+    }
+    const shared = sharedInstallNames(done.baseline);
+    if (shared.size > 0) {
+      notes.push(
+        `${SHARED_NAME_NOTE}: every change under any of these is tampering:\n${[...shared].map(([name, dirs]) => `${name}: ${dirs.join(", ")}`).join("\n")}`,
       );
     }
     if (done.unattributed.length > 0) {
@@ -1057,6 +1125,20 @@ class Run {
   }
 
   /**
+   * The names installed packages share that hold a tampered path (spine §5 reading 254(1)), as a
+   * finding's message beginning with {@link SHARED_NAME_NOTE}; `null` when none does.
+   */
+  private sharedNamesOf(tampered: readonly string[]): string | null {
+    const ws = this.workspace;
+    if (ws === null || "problem" in ws) return null;
+    const hits = [...sharedInstallNames(ws.baseline)].filter(([, dirs]) =>
+      tampered.some((path) => dirs.some((dir) => path.startsWith(`${dir}/`))),
+    );
+    if (hits.length === 0) return null;
+    return `${SHARED_NAME_NOTE}: ${hits.map(([name, dirs]) => `${name} (${dirs.join(", ")})`).join("; ")}`;
+  }
+
+  /**
    * A gate whose tool was tampered with (H-14): it did not run, and it fails as a product problem
    * with one security finding, so the §7.6 risk rules treat it as one.
    */
@@ -1076,6 +1158,7 @@ class Run {
     });
     const evidence: Evidence = { type: "command_output", ref: logRel };
     const title = `the tool of gate ${gate.id} was changed after it was hashed (${String(tampered.length)} file(s))`;
+    const shared = this.sharedNamesOf(tampered);
     return {
       gate_id: gate.id,
       layer: gate.layer,
@@ -1091,6 +1174,7 @@ class Run {
           rule_id: TOOL_TAMPER_RULE_ID,
           category: "security",
           title: title.slice(0, 200),
+          ...(shared === null ? {} : { message: shared.slice(0, 4000) }),
           location: { path: tampered[0] ?? gate.id },
           evidence,
           label: "high",

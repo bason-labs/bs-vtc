@@ -16,11 +16,14 @@ import {
   compareInstall,
   inDependencyTree,
   perPackageBuild,
+  sharedInstallNames,
   ToolHashLimitError,
   WORKSPACE_HASH_LIMITS,
   workspaceTree as walk,
   type WorkspaceTree,
 } from "../../src/gates/tool-integrity.js";
+import { matchesAnyCaseless } from "../../src/gates/globs.js";
+import { DEFAULT_PROTECTED_GLOBS } from "../../src/gates/protected-globs.js";
 import { cleanupDirs, tempDir } from "../helpers/repo.js";
 
 /** Directories a test made unlistable, made listable again before they are removed. */
@@ -518,10 +521,10 @@ describe("h14-self-rebuild-allowance-not-attributed-to-writer: allowed by who wr
     ).toEqual([`${ESBUILD}/bin/esbuild`]);
   });
 
-  it("esbuild's own script may still rebuild its own directory", () => {
+  it("not even esbuild's own script may change its JavaScript (reading 254(2))", () => {
     expect(step({ dependency: "esbuild" }, dropAssertions)).toEqual({
-      tampered: [],
-      selfRebuilt: [{ package: ESBUILD, files: [MAIN] }],
+      tampered: [MAIN],
+      selfRebuilt: [],
       managerState: [],
     });
   });
@@ -627,9 +630,20 @@ describe("perPackageBuild: the scripts pass one writer at a time (reading 253)",
     put(root, "node_modules/native/package.json", pkg("native"));
     put(root, "node_modules/native/binding.gyp", "{}");
     put(root, "node_modules/plain/package.json", pkg("plain"));
+    // by location, never by name (reading 254(1)): `npm rebuild esbuild` would run both
     expect(perPackageBuild(["npm", "ci"], root, "", workspaceTree(root))).toEqual([
-      { argv: ["npm", "rebuild", "esbuild"], writer: { dependency: "esbuild" } },
-      { argv: ["npm", "rebuild", "native"], writer: { dependency: "native" } },
+      {
+        argv: ["npm", "rebuild", "./node_modules/esbuild"],
+        writer: { installed: "node_modules/esbuild" },
+      },
+      {
+        argv: ["npm", "rebuild", "./node_modules/native"],
+        writer: { installed: "node_modules/native" },
+      },
+      {
+        argv: ["npm", "rebuild", "./node_modules/x/node_modules/esbuild"],
+        writer: { installed: "node_modules/x/node_modules/esbuild" },
+      },
       {
         argv: ["npm", "--prefix", "packages/a", "run", "--ignore-scripts", "postinstall"],
         writer: { project: "packages/a" },
@@ -749,7 +763,7 @@ describe("h14-links-out-of-checkout-not-followed: links out fail closed (reading
     const before = workspaceTree(root);
     put(root, "pnpm-workspace.yaml", "enableGlobalVirtualStore: true\n");
     put(root, "packages/app/tools/package.json", pkg("tools", { pnpm: { overrides: {} } }));
-    put(root, "packages/app/tools/dist.js", "built");
+    put(root, "packages/app/dist/index.js", "built");
     put(root, "packages/app/Pnpm-Workspace.yaml", "packages: []\n");
     const after = workspaceTree(root);
     const expected = [
@@ -761,7 +775,229 @@ describe("h14-links-out-of-checkout-not-followed: links out fail closed (reading
     // packages/app's own script may add its build outputs, never pnpm's configuration
     expect(compareInstall(before, after, undefined, { project: "packages/app" })).toEqual({
       tampered: expected,
-      selfRebuilt: [{ package: "packages/app", files: ["packages/app/tools/dist.js"] }],
+      selfRebuilt: [{ package: "packages/app", files: ["packages/app/dist/index.js"] }],
+      managerState: [],
+    });
+  });
+});
+
+describe("h14-open3: a self-rebuild is one installed directory's, never a name's (reading 254)", () => {
+  const isProtected = (path: string): boolean => matchesAnyCaseless(DEFAULT_PROTECTED_GLOBS, path);
+  const MAIN_JS = "export const transform = (code) => code;\n";
+  const PATCHED = "export const transform = (code) => code.replace(/expect\\(/g, 'void (');\n";
+  /** esbuild as published: a postinstall, its JS fallback binary and its JavaScript API. */
+  const esbuildAt = (root: string, dir: string, version = "0.25.0"): void => {
+    put(
+      root,
+      `${dir}/package.json`,
+      JSON.stringify({
+        name: "esbuild",
+        version,
+        scripts: { postinstall: "node install.js" },
+        bin: { esbuild: "bin/esbuild" },
+      }),
+    );
+    put(root, `${dir}/install.js`, "// rebuilds bin/esbuild\n");
+    put(root, `${dir}/bin/esbuild`, "#!/usr/bin/env node\n// js fallback\n", 0o755);
+    put(root, `${dir}/lib/main.js`, MAIN_JS);
+  };
+
+  it("npm: the second esbuild's postinstall patching the first's lib/main.js is tampering", () => {
+    // the finding's reproduction: a helper from a committed tarball depending on its own esbuild
+    const root = tempDir("vtc-npm-");
+    put(root, "package.json", pkg("app"));
+    esbuildAt(root, "node_modules/esbuild");
+    put(root, "node_modules/helper/package.json", pkg("helper"));
+    esbuildAt(root, "node_modules/helper/node_modules/esbuild", "0.0.1");
+    const tree = workspaceTree(root);
+    expect(sharedInstallNames(tree)).toEqual(
+      new Map([["esbuild", ["node_modules/esbuild", "node_modules/helper/node_modules/esbuild"]]]),
+    );
+    const steps = perPackageBuild(["npm", "ci"], root, "", tree);
+    expect(steps).toEqual([
+      {
+        argv: ["npm", "rebuild", "./node_modules/esbuild"],
+        writer: { installed: "node_modules/esbuild" },
+      },
+      {
+        argv: ["npm", "rebuild", "./node_modules/helper/node_modules/esbuild"],
+        writer: { installed: "node_modules/helper/node_modules/esbuild" },
+      },
+    ]);
+    // the real esbuild's own step: its binary, but its name is shared, so not even that
+    const real = workspaceTree(root);
+    put(root, "node_modules/esbuild/bin/esbuild", "\u007fELF native", 0o755);
+    const afterReal = workspaceTree(root);
+    expect(compareInstall(tree, afterReal, isProtected, steps?.[0]?.writer ?? null)).toEqual({
+      tampered: ["node_modules/esbuild/bin/esbuild"],
+      selfRebuilt: [],
+      managerState: [],
+    });
+    expect(real.snapshot.sha256).toBe(tree.snapshot.sha256);
+    // the second esbuild's step patching the first one's JavaScript API
+    put(root, "node_modules/esbuild/lib/main.js", PATCHED);
+    expect(
+      compareInstall(afterReal, workspaceTree(root), isProtected, steps?.[1]?.writer ?? null),
+    ).toEqual({
+      tampered: ["node_modules/esbuild/lib/main.js"],
+      selfRebuilt: [],
+      managerState: [],
+    });
+  });
+
+  it("pnpm with onlyBuiltDependencies [esbuild]: both pending, one rebuild by name, and every change under either is tampering", () => {
+    const root = tempDir("vtc-pnpm-");
+    put(root, "package.json", pkg("app", { pnpm: { onlyBuiltDependencies: ["esbuild"] } }));
+    const REAL = "node_modules/.pnpm/esbuild@file+vendor+esbuild-1.0.0.tgz/node_modules/esbuild";
+    const FAKE = "node_modules/.pnpm/esbuild@file+..+vendor+esbuild-0.0.1.tgz/node_modules/esbuild";
+    esbuildAt(root, REAL, "1.0.0");
+    esbuildAt(root, FAKE, "0.0.1");
+    link(
+      root,
+      "node_modules/esbuild",
+      `.pnpm/esbuild@file+vendor+esbuild-1.0.0.tgz/node_modules/esbuild`,
+    );
+    put(
+      root,
+      "node_modules/.modules.yaml",
+      "pendingBuilds:\n  - esbuild@file:vendor/esbuild-1.0.0.tgz\n  - esbuild@file:../vendor/esbuild-0.0.1.tgz\n",
+    );
+    const before = workspaceTree(root);
+    const steps = perPackageBuild(["pnpm", "install", "--frozen-lockfile"], root, "", before);
+    expect(steps).toEqual([
+      { argv: ["pnpm", "rebuild", "--recursive", "esbuild"], writer: { dependency: "esbuild" } },
+    ]);
+    put(root, `${REAL}/bin/esbuild`, "\u007fELF native", 0o755);
+    put(root, `${REAL}/lib/main.js`, PATCHED);
+    put(root, `${FAKE}/bin/esbuild`, "\u007fELF native", 0o755);
+    put(root, "node_modules/.modules.yaml", "pendingBuilds: []\n");
+    expect(
+      compareInstall(before, workspaceTree(root), isProtected, { dependency: "esbuild" }),
+    ).toEqual({
+      tampered: [`${FAKE}/bin/esbuild`, `${REAL}/bin/esbuild`, `${REAL}/lib/main.js`],
+      selfRebuilt: [],
+      managerState: ["node_modules/.modules.yaml"],
+    });
+  });
+
+  it("a package installed under another folder name still shares the name in its package.json", () => {
+    const root = tempDir("vtc-npm-");
+    put(root, "package.json", pkg("app"));
+    esbuildAt(root, "node_modules/esbuild");
+    // `"evil": "file:esbuild-0.0.1.tgz"`: npm installs it as node_modules/evil
+    esbuildAt(root, "node_modules/evil", "0.0.1");
+    put(root, "node_modules/plain/package.json", pkg("plain"));
+    put(root, "node_modules/x/node_modules/plain/package.json", pkg("plain"));
+    // two copies of a package with no install script share nothing that could be allowed
+    expect([...sharedInstallNames(workspaceTree(root)).keys()]).toEqual(["esbuild"]);
+  });
+
+  it("even its own writer may only add files or replace native binaries (reading 254(2))", () => {
+    const root = monorepo();
+    put(root, `${ESBUILD}/lib/main.js`, MAIN_JS);
+    put(root, `${ESBUILD}/lib/types.d.ts`, "export {};\n");
+    put(root, `${ESBUILD}/build/Release/esbuild.node`, "old native");
+    put(root, `${ESBUILD}/README.md`, "# esbuild\n");
+    const before = workspaceTree(root);
+    put(root, `${ESBUILD}/bin/esbuild`, "\u007fELF native", 0o755);
+    put(root, `${ESBUILD}/build/Release/esbuild.node`, "new native");
+    put(root, `${ESBUILD}/lib/downloaded-esbuild.js`, "// added\n");
+    put(root, `${ESBUILD}/lib/main.js`, PATCHED);
+    put(root, `${ESBUILD}/lib/types.d.ts`, "export const x = 1;\n");
+    put(root, `${ESBUILD}/install.js`, "// rewritten\n");
+    rmSync(join(root, `${ESBUILD}/README.md`));
+    expect(
+      compareInstall(before, workspaceTree(root), isProtected, { dependency: "esbuild" }),
+    ).toEqual({
+      tampered: [
+        `${ESBUILD}/README.md`,
+        `${ESBUILD}/install.js`,
+        `${ESBUILD}/lib/main.js`,
+        `${ESBUILD}/lib/types.d.ts`,
+      ],
+      selfRebuilt: [
+        {
+          package: ESBUILD,
+          files: [
+            `${ESBUILD}/bin/esbuild`,
+            `${ESBUILD}/build/Release/esbuild.node`,
+            `${ESBUILD}/lib/downloaded-esbuild.js`,
+          ],
+        },
+      ],
+      managerState: [],
+    });
+  });
+
+  it("h14-unprotected-tool-config-additions-allowed: babel, swc, cargo, go.work and .pytest.ini are protected", () => {
+    for (const path of [
+      "babel.config.js",
+      "packages/web/babel.config.cjs",
+      ".babelrc",
+      "packages/web/.babelrc.json",
+      ".swcrc",
+      ".cargo/config",
+      ".cargo/config.toml",
+      "crates/a/.cargo/config.toml",
+      "go.work",
+      "go.work.sum",
+      ".pytest.ini",
+    ]) {
+      expect(isProtected(path), path).toBe(true);
+    }
+  });
+
+  it("a project's install script may add files only under its build-output directories (reading 254(3))", () => {
+    const root = monorepo();
+    put(root, "packages/app/package.json", pkg("app", { scripts: { prepare: "node gen.js" } }));
+    const before = workspaceTree(root);
+    const added = [
+      "packages/app/babel.config.js",
+      "packages/app/.cargo/config.toml",
+      "packages/app/go.work",
+      "packages/app/.pytest.ini",
+      "packages/app/pytest.py",
+      "packages/app/src/generated.ts",
+      "packages/app/lib/index.js",
+      "packages/app/dist/index.js",
+      "packages/app/build/out.js",
+      "packages/app/out/a.js",
+      "packages/app/.next/server.js",
+      "packages/app/target/debug/app",
+      "packages/app/dist/babel.config.js",
+    ];
+    for (const path of added) put(root, path, "x");
+    const after = workspaceTree(root);
+    const writer = { project: "packages/app" };
+    const builds = [
+      "packages/app/.next/server.js",
+      "packages/app/build/out.js",
+      "packages/app/dist/index.js",
+      "packages/app/out/a.js",
+      "packages/app/target/debug/app",
+    ];
+    const always = [
+      "packages/app/.cargo/config.toml",
+      "packages/app/.pytest.ini",
+      "packages/app/babel.config.js",
+      "packages/app/dist/babel.config.js",
+      "packages/app/go.work",
+      "packages/app/pytest.py",
+      "packages/app/src/generated.ts",
+    ];
+    expect(compareInstall(before, after, isProtected, writer)).toEqual({
+      tampered: [...always, "packages/app/lib/index.js"].sort(),
+      selfRebuilt: [{ package: "packages/app", files: builds }],
+      managerState: [],
+    });
+    // lib/ only when the project's .gitignore ignores it
+    expect(
+      compareInstall(before, after, isProtected, writer, { ignoredLib: new Set(["packages/app"]) }),
+    ).toEqual({
+      tampered: always,
+      selfRebuilt: [
+        { package: "packages/app", files: [...builds, "packages/app/lib/index.js"].sort() },
+      ],
       managerState: [],
     });
   });

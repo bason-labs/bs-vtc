@@ -28,6 +28,7 @@ import {
   stringifyGatesConfig,
 } from "../../src/gates/index.js";
 import { tamperAdvice } from "../../src/gates/calibrate/calibrate.js";
+import { SHARED_NAME_NOTE } from "../../src/gates/tool-integrity.js";
 import { cleanupDirs, initRepo, tempDir, writeFile } from "../helpers/repo.js";
 import {
   cases,
@@ -778,5 +779,19 @@ describe("calibrate says what to do about a code generator in the install (spine
       /changed node_modules\/\.cache-gen\/out\.js.*add the generator as an install gate after the install/,
     );
     expect(tamperAdvice(report({}))).toBeNull();
+  });
+
+  it("explains a name two installed packages share (spine §5 reading 254(1))", () => {
+    const shared = report({
+      test: ["node_modules/esbuild/bin/esbuild", "node_modules/esbuild/lib/main.js"],
+    });
+    const finding = shared.results[0]?.findings[0] as { message?: string };
+    finding.message = `${SHARED_NAME_NOTE}: esbuild (node_modules/esbuild, node_modules/helper/node_modules/esbuild)`;
+    const advice = tamperAdvice(shared);
+    expect(advice).toMatch(/^WARNING: gate\(s\) test fail on the base commit as tampering/);
+    expect(advice).toMatch(
+      /esbuild \(node_modules\/esbuild, node_modules\/helper\/node_modules\/esbuild\)/,
+    );
+    expect(advice).toMatch(/one version of each/);
   });
 });

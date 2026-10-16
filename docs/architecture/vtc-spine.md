@@ -4472,6 +4472,45 @@ of reading 251 ((1), (2) and (3)); 251(4)–(8) stand.
       in the install home, and a root `postinstall` adding `pnpm-workspace.yaml`. _Found while
       doing this, not fixed here_: `npm ci --ignore-scripts` still runs a workspace's `prepare`
       when it links the workspace (npm 10.9), so that script runs before the baseline.
+254.  **H-14: a self-rebuild belongs to one installed directory, and adds or replaces binaries only**
+      (amends readings 238, 252 and 253(2); closes the h14-open3 findings
+      h14-self-rebuild-allowance-not-attributed-to-writer (still open after 253(2)) and
+      h14-unprotected-tool-config-additions-allowed). _Lead decision 2026-10-16, pending human
+      review._ (1) _A directory, never a name_: a package name is not an identity, and
+      `pnpm rebuild --recursive <name>` and `npm rebuild <name>` run the install script of every
+      installed package of that name. npm rebuilds by location instead (`npm rebuild ./<dir>`,
+      checked against the real npm 10.9: it runs that one package's scripts; only the packages of
+      npm's own tree, the root's and each workspace's `node_modules`), with the writer
+      `{ installed: <dir> }`. pnpm 10.11 can select only by name (or name and version, which a
+      second package can copy), so it keeps `{ dependency: <name> }`. Either way the allowance is
+      one installed directory: when two installed packages share a name (its package.json `name`
+      or the folder it is installed as, so an alias counts) and either declares an install script,
+      no allowance applies to that name, and every change under any of them is tampering
+      (`sharedInstallNames`). The tampering finding's message names those packages
+      (`SHARED_NAME_NOTE`), and `vtc calibrate` explains it (`tamperAdvice`: install one version,
+      or keep the script from running). A legitimate project with two esbuild versions fails until
+      it dedupes; that is the price of not trusting names. (2) _Add, or replace a native binary_:
+      even its own writer may only add files in the package's directory, replace a native binary
+      that is still there (`.node`, `.so`, `.dylib`, `.dll`, `.exe`, a file without an extension
+      under the package's `bin/` or `build/`) and change its own `.bin` entry; changing or removing
+      any other file that was there (`.js`, `.mjs`, `.cjs`, `.ts`, `.json`, `.py` and the rest) is
+      tampering. (3) _Protected configs and build outputs_: `babel.config.*`, `.babelrc*`,
+      `.swcrc`, `.pytest.ini`, `.cargo/config`, `.cargo/config.toml`, `go.work` and `go.work.sum`
+      join `DEFAULT_PROTECTED_GLOBS` (so L5, `compareInstall` and `compareGate` all guard them).
+      In the install phase a project's own script may add files only below one of its
+      build-output directories (`dist`, `build`, `out`, `.next`, `target`, and `lib` when the
+      checkout's `.gitignore` files ignore that project's `lib/`, asked of git's `check-ignore`
+      with no user excludes file before any install script ran); anything else it
+      adds, a root `pytest.py` shadowing `python -m pytest` included, is tampering. A module
+      shadow a verify gate writes between gates is not covered here (compareGate still allows a
+      new unprotected file of the checkout's own). No contract field changes. (4) _Tests_
+      reproduce both findings: on the file system (`workspace-tree.test.ts`: two packages named
+      esbuild under npm and under pnpm with `onlyBuiltDependencies`, an alias, the
+      add-or-replace rule, the new globs, the build-output rule), end to end through the Gate
+      Runner with fake npm and pnpm (`tool-tamper.test.ts`: the second esbuild patching the
+      first's `lib/main.js`, a root `postinstall` adding `babel.config.js` and `pytest.py`, `lib/`
+      with and without a `.gitignore`), and against the real npm 10.9.2 and pnpm 10.11.0
+      (`tool-tamper.live.test.ts`, `VTC_LIVE_PM=1`).
 
 ## 6. Change process for this spine
 

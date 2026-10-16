@@ -31,14 +31,23 @@ any release may change behaviour. Role prompt changes have their own log in `rol
   downloaded sources that check gates build from are hashed too. Anything the check cannot list or
   read, and a link from the checkout to a place install scripts can write (such as pnpm's global
   store), fails closed: no check gate runs. With npm and pnpm, the install's scripts run one package
-  at a time, and a change is allowed only to the package whose own script made it, in its own
-  directory (esbuild's native binary): that is shown as a warning on the gate report and the
-  dashboard. Any other change is tampering and fails every check gate, even inside a package that
-  rebuilds itself, so your own `postinstall` cannot edit a dependency. A dependency whose install
-  script writes anywhere else fails the gates. If that is a code generator (Prisma), `vtc calibrate`
-  tells you to run it as an install gate of its own after the install. Bun runs every package's
-  scripts at once, so with Bun no package may rebuild itself and the gates carry a warning. Adding a
-  `pnpm-workspace.yaml` or `pnpm` settings in a package.json during a run fails the gates too.
+  at a time (npm by the package's directory), and a package's own script may only add files to its
+  own directory or replace its native binaries (esbuild's binary): that is shown as a warning on
+  the gate report and the dashboard. Changing or removing any other file of a package, such as its
+  JavaScript or its package.json, is tampering and fails every check gate, even when the package's
+  own script did it, so neither your own `postinstall` nor another dependency can edit a
+  dependency. When two installed packages share a name and one of them has an install script, none
+  of them may rebuild itself, because pnpm (with `onlyBuiltDependencies` too) rebuilds by name and
+  runs both: every change to either fails the gates, and `vtc calibrate` tells you to install one
+  version of it or keep its script from running. A dependency whose install script writes anywhere
+  else fails the gates. If that is a code generator (Prisma), `vtc calibrate` tells you to run it as
+  an install gate of its own after the install. Your own projects' install scripts may add files
+  only under their build-output directories (`dist`, `build`, `out`, `.next`, `target`, and `lib`
+  when `.gitignore` ignores it). Bun runs every package's scripts at once, so with Bun no package
+  may rebuild itself and the gates carry a warning. Adding a `pnpm-workspace.yaml` or `pnpm`
+  settings in a package.json during a run fails the gates too, and so does adding a Babel or SWC
+  config (`babel.config.*`, `.babelrc*`, `.swcrc`), `.pytest.ini`, `.cargo/config(.toml)` or
+  `go.work(.sum)`, which are now protected configs everywhere a diff's configs are checked.
   Before each check gate, anything changed since the install fails it too; build outputs, reports
   and the tools' caches are fine. Check gates also get a fresh empty home of their own, so an
   install script can no longer change them through `~/.npmrc`, `~/.yarnrc.yml`, `~/.bunfig.toml` or
