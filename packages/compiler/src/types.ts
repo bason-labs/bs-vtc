@@ -45,6 +45,12 @@ export interface CompiledAgent {
    * default section, which the agent carries verbatim and a Lookback proposal replaces.
    */
   readonly sections: { readonly locked: string; readonly editable: string };
+  /**
+   * The agent's compiled locked part, trimmed (the locked core, the contract, the result protocol
+   * and the host's `prompt_append`): what a headless run that loads no compiled agent carries
+   * before its prompt (`rolePromptAssetPath(<agent>, "headless")`, contracts 5.12.0).
+   */
+  readonly headless: string;
   /** Skills the agent preloads (`role-skills.ts`), by skill name. */
   readonly skills: readonly string[];
   /**

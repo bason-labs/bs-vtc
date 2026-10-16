@@ -12,6 +12,7 @@ import {
   PluginManifestSchema,
   promptShaFor,
   rolePromptAssetPath,
+  sha256Hex,
   type AssetBundle,
   type HostId,
   type PluginManifest,
@@ -44,7 +45,17 @@ export interface PromptParts {
    * for a headless run on a host that cannot load the compiled agent (`codex exec`), the engine
    * carries both itself (spine §5 reading 145).
    */
-  readonly compiled?: { readonly locked: string; readonly editable: string };
+  readonly compiled?: {
+    readonly locked: string;
+    readonly editable: string;
+    /**
+     * The agent's compiled locked part (core, contract, result protocol, `prompt_append`), when
+     * the plugin carries it and it hashes to the manifest's `headless_sha256` (5.12.0): what a
+     * headless run on a host that cannot load the agent carries before its prompt (spine §5
+     * reading 258). Absent: the engine carries the locked core alone, as before.
+     */
+    readonly headless?: string;
+  };
 }
 
 export class PluginManifestError extends Error {
@@ -92,9 +103,10 @@ const compiledParts = (
   assets: AssetBundle | null,
   host: HostId,
   agent: string,
-): { locked: string; editable: string } | undefined => {
+  headlessSha256: string | undefined,
+): { locked: string; editable: string; headless?: string } | undefined => {
   if (assets === null) return undefined;
-  const text = (part: "locked" | "editable"): string | undefined => {
+  const text = (part: "locked" | "editable" | "headless"): string | undefined => {
     let path: string;
     try {
       path = rolePromptAssetPath(agent, part);
@@ -106,7 +118,11 @@ const compiledParts = (
   };
   const locked = text("locked");
   const editable = text("editable");
-  return locked === undefined || editable === undefined ? undefined : { locked, editable };
+  if (locked === undefined || editable === undefined) return undefined;
+  const headless = headlessSha256 === undefined ? undefined : text("headless")?.trim();
+  return headless !== undefined && sha256Hex(headless) === headlessSha256
+    ? { locked, editable, headless }
+    : { locked, editable };
 };
 
 /** A catalog over the given manifests (per host; missing ones fall back, see the module doc). */
@@ -130,7 +146,7 @@ export const createPluginCatalog = (
       const entry = manifests[host]?.agents.find((a) => a.name === agent);
       if (entry === undefined) return undefined;
       const editableInPack = entry.editable_in_pack === true;
-      const compiled = compiledParts(assets, host, agent);
+      const compiled = compiledParts(assets, host, agent, entry.headless_sha256);
       return {
         ...(entry.locked_sha256 === undefined ? {} : { lockedSha256: entry.locked_sha256 }),
         editableInPack,

@@ -11,6 +11,7 @@ import { join } from "node:path";
 import {
   capForRisk,
   checkResultAgainstContract,
+  type DispatchedRole,
   countCommandShapes,
   effectivePrices,
   escalationFromQuestion,
@@ -1705,6 +1706,18 @@ export const handleSubmit = async (
   return { accepted: true };
 };
 
+/**
+ * What a role run was dispatched as, for the conformance check and for its own structured-output
+ * schema (`roleResultSchemaFor`, spine §5 reading 258): a feature only for a task-less reviewer.
+ */
+export const dispatchedRoleOf = (run: RoleRunRecord): DispatchedRole => ({
+  role: run.role,
+  mode: run.mode,
+  task: run.task,
+  feature: run.task === undefined ? run.feature : undefined,
+  subject: run.subject,
+});
+
 const evaluate = async (
   k: Kernel,
   h: RunHandle,
@@ -1716,13 +1729,7 @@ const evaluate = async (
     return reject("dispatch_mismatch", [`no contract for role ${run.role}`]);
   const effective = resolveRoleMode(contract, run.mode);
   if (!effective.ok) return reject("undeclared_mode", [effective.error]);
-  const conformance = checkResultAgainstContract(result, effective.contract, {
-    role: run.role,
-    mode: run.mode,
-    task: run.task,
-    feature: run.task === undefined ? run.feature : undefined,
-    subject: run.subject,
-  });
+  const conformance = checkResultAgainstContract(result, effective.contract, dispatchedRoleOf(run));
   if (!conformance.ok) return reject(conformance.reason, conformance.issues);
   // a Lookback replay trial changes nothing: its work is graded where it ran (reading 176)
   const trial = run.task === undefined ? replayTrialOf(k, h, run.action_id) : undefined;

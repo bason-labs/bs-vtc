@@ -27,6 +27,22 @@ export type ConformanceCheck =
   | { readonly ok: false; readonly reason: RejectReason; readonly issues: readonly string[] };
 
 /**
+ * A readable mismatch between a result field and the dispatch, never "undefined" (the owner's
+ * first run, spine §5 reading 258): what the result named, what the dispatch has, and what to send.
+ */
+const mismatch = (
+  field: "task" | "mode",
+  returned: string | undefined,
+  dispatched: string | undefined,
+): string => {
+  if (dispatched === undefined)
+    return `the result names ${field} ${String(returned)}, but this dispatch has no ${field} (send ${field} null)`;
+  if (returned === undefined)
+    return `the result names no ${field}, but this dispatch is for ${field} ${dispatched} (send ${field} ${dispatched})`;
+  return `the result names ${field} ${returned}, but this dispatch is for ${field} ${dispatched}`;
+};
+
+/**
  * Rules, checked in this order (the first failing group names the reason):
  * 1. `dispatch_mismatch`: role, task, feature or verdict subject differ from the dispatch;
  * 2. `undeclared_mode`: the mode differs from the dispatched mode;
@@ -55,9 +71,7 @@ export const checkResultAgainstContract = (
   if (result.role !== dispatched.role || contract.id !== dispatched.role) {
     add(0, `role ${result.role} does not match the dispatched role ${dispatched.role}`);
   }
-  if (result.task !== dispatched.task) {
-    add(0, `task ${String(result.task)} does not match the dispatched ${String(dispatched.task)}`);
-  }
+  if (result.task !== dispatched.task) add(0, mismatch("task", result.task, dispatched.task));
   if (dispatched.feature !== undefined && result.feature !== dispatched.feature) {
     add(0, `feature ${String(result.feature)} does not match ${dispatched.feature}`);
   }
@@ -68,8 +82,13 @@ export const checkResultAgainstContract = (
       }
     }
   }
-  if (result.mode !== dispatched.mode || contract.mode !== dispatched.mode) {
-    add(1, `mode ${String(result.mode)} does not match the dispatched ${String(dispatched.mode)}`);
+  if (result.mode !== dispatched.mode) {
+    add(1, mismatch("mode", result.mode, dispatched.mode));
+  } else if (contract.mode !== dispatched.mode) {
+    add(
+      1,
+      `the contract's mode ${contract.mode ?? "(none)"} is not the dispatched mode ${dispatched.mode ?? "(none)"}`,
+    );
   }
   if (!contract.exits.includes(result.exit)) {
     add(2, `exit ${result.exit} is not declared (${contract.exits.join(", ")})`);
@@ -91,7 +110,10 @@ export const checkResultAgainstContract = (
   }
   for (const artifact of result.artifacts) {
     if (!artifacts.includes(artifact.type))
-      add(4, `artifact type ${artifact.type} is not declared`);
+      add(
+        4,
+        `artifact type ${artifact.type} is not declared (${artifacts.length === 0 ? "this role declares no output artifacts" : `allowed: ${artifacts.join(", ")}`})`,
+      );
   }
   const failed = groups.find(([, issues]) => issues.length > 0);
   return failed === undefined ? { ok: true } : { ok: false, reason: failed[0], issues: failed[1] };

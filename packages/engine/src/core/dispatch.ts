@@ -33,8 +33,10 @@ import {
   type TaskPackInput,
   type TierReason,
   type DesignCoverageGaps,
+  type EffectiveRoleContract,
 } from "@vtc/shared";
 import { restoreHostConfig } from "../git/index.js";
+import { runAttachments } from "./attachments.js";
 import { budgetState, sharesExceeded } from "./budget.js";
 import { DEFAULT_ACCEPTANCE_GLOBS } from "./config.js";
 import {
@@ -861,6 +863,79 @@ export const approvedDesignExit = (
     ? "category_standard"
     : undefined;
 
+/** The step's effective role contract, or `undefined` when the role or its mode is unknown. */
+const effectiveContract = (k: Kernel, step: StepSpec): EffectiveRoleContract | undefined => {
+  const contract = k.deps.roles.get(step.role);
+  const effective = contract === undefined ? undefined : resolveRoleMode(contract, step.mode);
+  return effective?.ok === true ? effective.contract : undefined;
+};
+
+/**
+ * The dispatch prompt's account of the result fields (spine §5 reading 258): the values to copy,
+ * the ones this dispatch does not have (`null`, never invented: the owner's first run returned a
+ * task id on a task-less dispatch), and the artifact types and exits the role's contract allows,
+ * which a host that loads no compiled agent learns nowhere else. The schema a headless run gets
+ * (`roleResultSchemaFor`) says the same.
+ */
+export const resultFields = (
+  step: Pick<StepSpec, "role" | "mode" | "task" | "feature" | "subject">,
+  taskFeature: string | undefined,
+  contract: EffectiveRoleContract | undefined,
+): string => {
+  const feature = step.task === undefined ? step.feature : taskFeature;
+  const values: [string, string | undefined][] = [
+    ["mode", step.mode],
+    ["task", step.task],
+    ["feature", feature],
+  ];
+  const named = values.filter(([, v]) => v !== undefined).map(([f, v]) => `${f} "${String(v)}"`);
+  const none = values.filter(([, v]) => v === undefined).map(([f]) => f);
+  const parts = [
+    `role "${step.role}"`,
+    ...named,
+    ...(step.subject === undefined ? [] : [`verdict subject "${step.subject}"`]),
+    ...(none.length === 0
+      ? []
+      : [
+          `${none.join(", ")} null (this dispatch has no ${none.join(" or ")}; never take one from the repository)`,
+        ]),
+  ];
+  if (contract !== undefined) {
+    const types = contract.output.artifacts;
+    parts.push(
+      types.length === 0
+        ? "no artifacts"
+        : `artifacts of type ${types.map((t) => `"${t}"`).join(" or ")} only`,
+      `exit ${contract.exits.map((e) => `"${e}"`).join(", ")}`,
+    );
+  }
+  return parts.join("; ");
+};
+
+/**
+ * How much to read (spine §5 reading 261). On the owner's first run a Codex BA spent ~390k input
+ * tokens on a one-line quick fix: about 20k of host context, then whole source files (~40 KB per
+ * read) that every later turn carried again, past its 60k-token context budget, and searches for
+ * inputs no quick fix has (a research brief, a repo map) and for VTC's own files. The line names
+ * the role's budget, that the pack lists every input there is, and how to read code; a task-less
+ * SPECIFY step on a quick fix also hears that its spec is short.
+ */
+const readingLine = (k: Kernel, h: RunHandle, step: StepSpec): string => {
+  const budget = k.deps.roles.get(step.role)?.budget.context_tokens;
+  const quickSpec =
+    step.task === undefined && h.state.run.track === "quick_fix" && h.state.run.phase === "specify";
+  return [
+    `Reading: keep your context under ${budget === undefined ? "what the work needs" : `${String(Math.round(budget / 1000))}k tokens`}.`,
+    "Your pack lists every input there is: do not look for other inputs (a research brief, a repo map), other dispatches' packs or VTC's own files.",
+    "Find code with `rg -n` and read only the line ranges you need, never whole large files.",
+    ...(quickSpec
+      ? [
+          "This is a quick fix: write a short specification, only the requirements the request asks for, and read code only to state today's behaviour.",
+        ]
+      : []),
+  ].join(" ");
+};
+
 /** Renders the pack for a step and writes it under `.vtc/state/packs/` (AD-14 rule 5). */
 const packFor = (k: Kernel, h: RunHandle, step: StepSpec, actionId: string): TaskPackInput => {
   const state = h.state;
@@ -892,6 +967,9 @@ const packFor = (k: Kernel, h: RunHandle, step: StepSpec, actionId: string): Tas
   const inputs: TaskPackInput["inputs"] = [...(step.inputs ?? [])];
   if (task === undefined && ["discover", "specify"].includes(state.run.phase)) {
     inputs.push({ type: "request", path: `.vtc/runs/${state.id}/request.md` });
+    // reading 262: the images the human attached to the request or a change request
+    for (const path of runAttachments(state))
+      inputs.push({ type: PACK_INPUT_TYPES.attachments, path });
   } else if (state.automation !== null && step.role === "spec_verifier") {
     // an automatic run's issue is its spec: the Spec Verifier checks the work against it too
     // (AD-27 rule 2, D-cd), and only this input type tells it the run is automatic (reading
@@ -962,7 +1040,12 @@ const packFor = (k: Kernel, h: RunHandle, step: StepSpec, actionId: string): Tas
     decisions: [],
     inputs,
     files_scope: writeScope,
-    gates: (gates?.gates ?? []).map((g) => ({ id: g.id, layer: g.layer, command: g.command })),
+    // reading 261: a task-less step (DISCOVER, SPECIFY, DESIGN, PLAN, a feature review, an
+    // advisor) has no change of its own to check, so its pack carries no gate commands
+    gates:
+      task === undefined
+        ? []
+        : (gates?.gates ?? []).map((g) => ({ id: g.id, layer: g.layer, command: g.command })),
     findings: [...(step.findings ?? [])],
     ...(step.answer === undefined ? {} : { answer: step.answer }),
     ...(step.coverageGaps === undefined ? {} : { coverage_gaps: step.coverageGaps }),
@@ -1066,7 +1149,12 @@ const pinnedPrompt = (
 const compiledPrompt = (
   target: PromptTarget,
   parts: PromptParts | undefined,
-): { readonly locked: string; readonly pinned: PinnedPrompt } | null => {
+): {
+  readonly locked: string;
+  /** What a headless run carries before its prompt: the compiled locked part, else the core. */
+  readonly instructions: string;
+  readonly pinned: PinnedPrompt;
+} | null => {
   if (parts?.compiled === undefined) return null;
   const locked = parts.compiled.locked.trim();
   const text = parts.compiled.editable.trim();
@@ -1074,6 +1162,7 @@ const compiledPrompt = (
   if (text === "" || !TaskPackSchema.shape.role_heuristics.safeParse(text).success) return null;
   return {
     locked,
+    instructions: parts.compiled.headless ?? locked,
     pinned: {
       version: {
         role: target.role,
@@ -1367,8 +1456,9 @@ export const dispatchStep = (
     `Work in: ${cwd}`,
     `Read your task pack: ${join(k.deps.repoRoot, pack)}`,
     ...(skills.length === 0 ? [] : [`Use these skills: ${skills.join(", ")}`]),
+    readingLine(k, h, step),
     ...(step.note === undefined ? [] : [step.note]),
-    `Finish with exactly one RoleResult JSON object as your final message (role "${step.role}"${step.mode === undefined ? "" : `, mode "${step.mode}"`}${step.task === undefined ? "" : `, task "${step.task}"`}${step.task === undefined && step.feature !== undefined ? `, feature "${step.feature}"` : ""}${step.subject === undefined ? "" : `, verdict subject "${step.subject}"`}). ${dispatch === "subagent" ? `The Lead submits it with action_id ${actionId}.` : `The engine records it as action ${actionId}.`}`,
+    `Finish with exactly one RoleResult JSON object as your final message: ${resultFields(step, task?.feature, effectiveContract(k, step))}. ${dispatch === "subagent" ? `The Lead submits it with action_id ${actionId}.` : `The engine records it as action ${actionId}.`}`,
   ].join("\n");
   const action: SpawnRoleAction = {
     type: "spawn_role",
@@ -1394,7 +1484,7 @@ export const dispatchStep = (
     action,
     model,
     cwd,
-    ...(core === undefined ? {} : { roleCore: core === null ? null : core.locked }),
+    ...(core === undefined ? {} : { roleCore: core === null ? null : core.instructions }),
     ...(armPlugin === undefined ? {} : { pluginDir: armPlugin.dir }),
   };
 };

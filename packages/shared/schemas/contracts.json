@@ -1,5 +1,5 @@
 {
-  "contracts_version": "5.11.0",
+  "contracts_version": "5.12.0",
   "schemas": {
     "Run": {
       "$id": "https://vtc.local/schemas/Run.json",
@@ -2431,6 +2431,15 @@
                 "issue"
               ],
               "additionalProperties": false
+            },
+            "attachments": {
+              "maxItems": 10,
+              "type": "array",
+              "items": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 1024
+              }
             }
           },
           "required": [
@@ -6033,6 +6042,15 @@
               "type": "string",
               "minLength": 1,
               "maxLength": 300
+            },
+            "attachments": {
+              "maxItems": 10,
+              "type": "array",
+              "items": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 1024
+              }
             }
           },
           "required": [
@@ -14055,6 +14073,10 @@
               "editable_in_pack": {
                 "type": "boolean"
               },
+              "headless_sha256": {
+                "type": "string",
+                "pattern": "^[a-f0-9]{64}$"
+              },
               "tier": {
                 "type": "string",
                 "enum": [
@@ -18179,6 +18201,15 @@
           "items": {
             "type": "string",
             "pattern": "^[a-z0-9][a-z0-9._-]{0,63}$"
+          }
+        },
+        "attachments": {
+          "maxItems": 10,
+          "type": "array",
+          "items": {
+            "type": "string",
+            "maxLength": 4096,
+            "pattern": "^(?:\\/|[A-Za-z]:[\\\\/])[^\\0]*$"
           }
         }
       },
@@ -24335,6 +24366,15 @@
           "type": "string",
           "minLength": 1,
           "maxLength": 8000
+        },
+        "attachments": {
+          "maxItems": 10,
+          "type": "array",
+          "items": {
+            "type": "string",
+            "maxLength": 4096,
+            "pattern": "^(?:\\/|[A-Za-z]:[\\\\/])[^\\0]*$"
+          }
         }
       },
       "required": [

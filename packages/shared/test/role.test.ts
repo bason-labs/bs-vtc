@@ -309,6 +309,87 @@ describe("checkResultAgainstContract (result conformance)", () => {
     expect(check.ok).toBe(false);
     if (!check.ok) expect(check.reason).toBe(reason);
   });
+  it("names what a task-less dispatch expects instead of `undefined` (owner run, a-1)", () => {
+    const ba = RoleContractSchema.parse({
+      ...validRoleContract(),
+      id: "ba",
+      reviewer: "spec_verifier",
+      output: { artifacts: ["spec"] },
+      exits: ["done", "blocked", "spec_conflict"],
+      tools: { profile: "write_scoped", write_paths: [".vtc/spec/**"] },
+    });
+    const resolved = resolveRoleMode(ba);
+    if (!resolved.ok) throw new Error(resolved.error);
+    const invented = RoleResultSchema.parse({
+      role: "ba",
+      mode: "specification",
+      task: "T-14",
+      exit: "done",
+      summary: "Wrote the spec.",
+      artifacts: [{ type: "spec", path: ".vtc/spec/spec.md" }],
+    });
+    const check = checkResultAgainstContract(invented, resolved.contract, { role: "ba" });
+    expect(check).toEqual({
+      ok: false,
+      reason: "dispatch_mismatch",
+      issues: ["the result names task T-14, but this dispatch has no task (send task null)"],
+    });
+    const mode = checkResultAgainstContract({ ...invented, task: undefined }, resolved.contract, {
+      role: "ba",
+    });
+    expect(mode).toEqual({
+      ok: false,
+      reason: "undeclared_mode",
+      issues: [
+        "the result names mode specification, but this dispatch has no mode (send mode null)",
+      ],
+    });
+    const missing = checkResultAgainstContract(
+      RoleResultSchema.parse({ role: "spec_verifier", exit: "unknown", summary: "No task." }),
+      contract(),
+      dispatched,
+    );
+    expect(!missing.ok && missing.issues).toEqual([
+      "the result names no task, but this dispatch is for task T-7 (send task T-7)",
+    ]);
+  });
+  it("names the declared artifact types when a type is not declared (owner run, a-2)", () => {
+    const check = checkResultAgainstContract(
+      result({ artifacts: [{ type: "specification", path: ".vtc/spec/spec.md" }] }),
+      contract(),
+      dispatched,
+    );
+    expect(check).toEqual({
+      ok: false,
+      reason: "undeclared_output",
+      issues: [
+        "artifact type specification is not declared (this role declares no output artifacts)",
+      ],
+    });
+    const ba = RoleContractSchema.parse({
+      ...validRoleContract(),
+      id: "ba",
+      reviewer: "spec_verifier",
+      output: { artifacts: ["spec"] },
+      exits: ["done"],
+      tools: { profile: "write_scoped", write_paths: [".vtc/spec/**"] },
+    });
+    const resolved = resolveRoleMode(ba);
+    if (!resolved.ok) throw new Error(resolved.error);
+    const spec = checkResultAgainstContract(
+      RoleResultSchema.parse({
+        role: "ba",
+        exit: "done",
+        summary: "Spec.",
+        artifacts: [{ type: "specification", path: ".vtc/spec/spec.md" }],
+      }),
+      resolved.contract,
+      { role: "ba" },
+    );
+    expect(!spec.ok && spec.issues).toEqual([
+      "artifact type specification is not declared (allowed: spec)",
+    ]);
+  });
   it("a reviewer that ends `unknown` may return no verdict", () => {
     expect(
       checkResultAgainstContract(result({ exit: "unknown", verdicts: [] }), contract(), dispatched),

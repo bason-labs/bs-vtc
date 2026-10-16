@@ -1,9 +1,15 @@
 /**
  * `codex exec --json` stream → `ParsedStream` / `HostOutcome` (§4.1 `parse_events`, §6.9). Pure.
  * Recorded (spike 1): `thread.started {thread_id}` → `turn.started` → `item.completed {item:
- * agent_message}` → `turn.completed {usage}`; `thread_id` is the `SessionRef`. The stream carries
- * no rate-limit data (usage comes from `codex app-server`). Documented, not yet recorded: a limit
- * hit is `turn.failed` with `codexErrorInfo: usageLimitExceeded` (§6.9) and a failure message;
+ * agent_message}` → `turn.completed {usage}`; `thread_id` is the `SessionRef`. Usage comes from
+ * `codex app-server`. A limit hit (recorded in the owner's session transcript, codex-cli 0.163.0,
+ * 2026-10-16, spine §5 reading 260; fixture `exec-usage-limit-clock.synthetic.jsonl`): the turn
+ * ends with `error {message, codex_error_info: "usage_limit_exceeded"}`, the message naming the
+ * reset as a local clock time ("… or try again at 4:00 PM."), and the `token_count` events before
+ * it carry `rate_limits {primary, secondary}` (`used_percent`, `window_minutes`, `resets_at`
+ * epoch seconds). The reader takes both, wherever they appear: as `turn.failed`, `error` or the
+ * transcript's `task_complete`, top level or wrapped in `{type: "event_msg", payload}`
+ * (`limitReset`). Documented: `codexErrorInfo: usageLimitExceeded` (§6.9) and a failure message;
  * `error {message}` events report stream errors. Documented (learn.chatgpt.com/docs/non-interactive-mode,
  * the sample `{"type":"item.started","item":{"id":"item_1","type":"command_execution","command":
  * "bash -lc ls","status":"in_progress"}}`): a shell call is a `command_execution` item, seen on
@@ -17,18 +23,21 @@
  */
 import {
   redactSecrets,
+  windowKindFromMinutes,
   type CommandShape,
   type HostOutcome,
   type ParsedStream,
   type SessionRef,
   type SpawnRoleRequest,
   type TokenUsage,
+  type UsageWindowKind,
 } from "@vtc/shared";
 import { shellCallShapes } from "../common/command-shapes.js";
 import {
   classifyFailureText,
   hostMessageLine,
   isModelRefusalText,
+  resetFromClockText,
   resetFromWaitText,
 } from "../common/failure-text.js";
 import type { RunExit } from "../common/headless-run.js";
@@ -57,8 +66,20 @@ interface Failure {
   readonly resetsAt: string | null;
 }
 
+/** One window of Codex's `rate_limits` (`primary` or `secondary`). */
+interface RateWindow {
+  readonly kind: UsageWindowKind;
+  readonly usedPercent: number | null;
+  readonly resetsAt: string | null;
+}
+
 interface CodexScan {
   readonly threadId: string | null;
+  /**
+   * The last `rate_limits` the run reported with at least one window (a `token_count` event:
+   * `{primary, secondary}`, each `{used_percent, window_minutes, resets_at}`), or null.
+   */
+  readonly rateLimits: readonly RateWindow[] | null;
   readonly lastMessage: string | null;
   readonly tokens: TokenUsage | null;
   /** The last terminal event: a completed or a failed turn. */
@@ -74,11 +95,72 @@ interface CodexScan {
   readonly unrecognized: number;
 }
 
-/** `codexErrorInfo` as a lower-cased name, whether the host sends a string or `{Name: {...}}`. */
+/**
+ * `codexErrorInfo` as a lower-cased name without underscores, whether the host sends a string
+ * (`usageLimitExceeded`, or `usage_limit_exceeded` as codex-cli 0.163.0 wrote it) or
+ * `{Name: {...}}`.
+ */
 const errorInfo = (value: unknown): string | null => {
-  if (typeof value === "string") return value.toLowerCase();
-  if (isRecord(value)) return Object.keys(value)[0]?.toLowerCase() ?? null;
-  return null;
+  const name =
+    typeof value === "string" ? value : isRecord(value) ? Object.keys(value)[0] : undefined;
+  return name === undefined ? null : name.toLowerCase().replaceAll("_", "");
+};
+
+const rateWindow = (value: unknown): RateWindow | null => {
+  if (!isRecord(value)) return null;
+  const minutes =
+    typeof value.window_minutes === "number" && Number.isInteger(value.window_minutes)
+      ? value.window_minutes
+      : null;
+  const used = value.used_percent;
+  return {
+    kind: windowKindFromMinutes(minutes),
+    usedPercent: typeof used === "number" && Number.isFinite(used) ? used : null,
+    resetsAt: epochToIso(value.resets_at),
+  };
+};
+
+/** The windows of a `rate_limits` object, or null when it has none. */
+const rateLimitsOf = (value: unknown): readonly RateWindow[] | null => {
+  if (!isRecord(value)) return null;
+  const windows = [rateWindow(value.primary), rateWindow(value.secondary)].filter(
+    (w): w is RateWindow => w !== null,
+  );
+  return windows.length === 0 ? null : windows;
+};
+
+/** Times within this of each other name the same reset (the host rounds the one it prints). */
+const SAME_RESET_MS = 5 * 60_000;
+
+/**
+ * Which window a limit hit and when it resets (spine §5 reading 260): the structured
+ * `rate_limits` first, when a window is used up (the latest reset among full ones); else the
+ * failure's own `resets_at`, else the time the message names (a clock time in the machine's local
+ * zone, else a wait), each with the window whose reset it matches. Unknown stays `null` (the
+ * engine backs off and re-reads usage).
+ */
+const limitReset = (
+  s: CodexScan,
+  failure: Failure,
+  endedAt: string | null,
+): { readonly window: UsageWindowKind | null; readonly resets_at: string | null } => {
+  const windows = s.rateLimits ?? [];
+  const full = windows
+    .filter((w) => w.usedPercent !== null && w.usedPercent >= 100 && w.resetsAt !== null)
+    .sort((a, b) => Date.parse(b.resetsAt ?? "") - Date.parse(a.resetsAt ?? ""))[0];
+  if (full !== undefined) return { window: full.kind, resets_at: full.resetsAt };
+  const named =
+    endedAt === null
+      ? null
+      : (resetFromClockText(failure.message, endedAt) ??
+        resetFromWaitText(failure.message, endedAt));
+  const at = failure.resetsAt ?? named;
+  if (at === null) return { window: null, resets_at: null };
+  const match = windows.find(
+    (w) =>
+      w.resetsAt !== null && Math.abs(Date.parse(w.resetsAt) - Date.parse(at)) <= SAME_RESET_MS,
+  );
+  return { window: match?.kind ?? null, resets_at: at };
 };
 
 const failureOf = (value: unknown): Failure => {
@@ -141,6 +223,7 @@ const scan = (lines: readonly string[]): CodexScan => {
   const { events, unrecognized: unparsed } = parseJsonLines(lines);
   let unrecognized = unparsed;
   let threadId: string | null = null;
+  let rateLimits: readonly RateWindow[] | null = null;
   let lastMessage: string | null = null;
   let tokens: TokenUsage | null = null;
   let terminal: CodexScan["terminal"] = null;
@@ -148,7 +231,10 @@ const scan = (lines: readonly string[]): CodexScan => {
   const commandShapes: CommandShape[] = [];
   const shellCallsSeen = new Set<string>();
   let worked = false;
-  for (const event of events) {
+  for (const line of events) {
+    // a session transcript wraps Codex's own events (`{type: "event_msg", payload: {...}}`)
+    const event = line.type === "event_msg" && isRecord(line.payload) ? line.payload : line;
+    rateLimits = rateLimitsOf(event.rate_limits) ?? rateLimits;
     const item = isRecord(event.item) ? event.item : {};
     if (typeof event.type === "string" && ITEM_EVENTS.has(event.type)) {
       // Codex reports its own warnings as `error` items (the recorded refusal starts with one)
@@ -174,6 +260,12 @@ const scan = (lines: readonly string[]): CodexScan => {
       case "error":
         lastError = failureOf(event);
         break;
+      case "task_complete":
+        // the session transcript's end of turn: a failed one carries `error` (codex-cli 0.163.0)
+        if (isRecord(event.error)) terminal = failureOf(event.error);
+        break;
+      case "token_count":
+        break;
       default:
         if (typeof event.type !== "string") unrecognized += 1;
     }
@@ -182,6 +274,7 @@ const scan = (lines: readonly string[]): CodexScan => {
     worked = true;
   return {
     threadId,
+    rateLimits,
     lastMessage,
     tokens,
     terminal,
@@ -210,12 +303,12 @@ const failureOutcome = (
 ): HostOutcome => {
   const byText = classifyFailureText(failure.message);
   if (failure.info === "usagelimitexceeded" || byText === "limit") {
+    const reset = limitReset(s, failure, endedAt);
     return {
       kind: "limit",
       session_ref: sessionRef(s),
-      resets_at:
-        failure.resetsAt ?? (endedAt === null ? null : resetFromWaitText(failure.message, endedAt)),
-      window: null,
+      resets_at: reset.resets_at,
+      window: reset.window,
       model: null,
       message: failure.message,
       tokens: s.tokens,

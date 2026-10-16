@@ -150,6 +150,7 @@ import { limitWait, maybeAutoResume } from "./limits.js";
 import { ACTIVE_TASK_STATUSES } from "./machines.js";
 import { applyAnswer, setTaskStatus } from "./parking.js";
 import { writePlanFile, writeRequestFile } from "./projections.js";
+import { copyAttachments, readAttachments, runAttachments } from "./attachments.js";
 import {
   awaitingReopenRebase,
   inFlight,
@@ -180,20 +181,49 @@ import { crashIncident } from "./vtc-stack.js";
 const sha256File = (path: string): string | undefined =>
   existsSync(path) ? createHash("sha256").update(readFileSync(path)).digest("hex") : undefined;
 
-/** A 5-hour reading worth logging: a changed percentage, reset or source (§6.9). */
+/**
+ * A reset that moved by less than this is the same reset: Codex reports the same window's reset a
+ * second apart from one reading to the next (the owner's first run, spine §5 reading 263).
+ */
+export const USAGE_RESET_SLACK_MS = 15 * 60_000;
+/** While the run is paused or waits for a reset, at most one `usage.updated` per host this often. */
+export const USAGE_IDLE_LOG_MS = 60 * 60_000;
+
+const sameReset = (a: string | null, b: string | null): boolean =>
+  a === b ||
+  (a !== null && b !== null && Math.abs(Date.parse(a) - Date.parse(b)) < USAGE_RESET_SLACK_MS);
+
+/**
+ * A reading worth logging against the last one logged (§6.9, reading 263): another source, other
+ * windows or model limits, a changed whole percentage, or a reset that moved by
+ * {@link USAGE_RESET_SLACK_MS} or more. A window at 0% has not started, so its reset (now plus the
+ * window) slides with the clock and never counts.
+ */
 const significant = (before: UsageSnapshot | undefined, after: UsageSnapshot): boolean => {
   if (before === undefined) return true;
-  const key = (s: UsageSnapshot): string =>
-    JSON.stringify([
-      s.source,
-      s.windows.map((w) => [
-        w.kind,
-        w.used_pct === null ? null : Math.floor(w.used_pct),
-        w.resets_at,
-      ]),
-      s.model_limits.map((m) => [m.model, m.resets_at]),
-    ]);
-  return key(before) !== key(after);
+  if (before.source !== after.source) return true;
+  if (before.windows.length !== after.windows.length) return true;
+  if (before.model_limits.length !== after.model_limits.length) return true;
+  const pct = (v: number | null): number | null => (v === null ? null : Math.floor(v));
+  const windowChanged = after.windows.some((w, i) => {
+    const b = before.windows[i];
+    if (b === undefined || b.kind !== w.kind || pct(b.used_pct) !== pct(w.used_pct)) return true;
+    return w.used_pct !== 0 && !sameReset(b.resets_at, w.resets_at);
+  });
+  return (
+    windowChanged ||
+    after.model_limits.some((m, i) => {
+      const b = before.model_limits[i];
+      return b === undefined || b.model !== m.model || !sameReset(b.resets_at, m.resets_at);
+    })
+  );
+};
+
+/** Whether a window is used up in one reading and not in the other. */
+const fullChanged = (before: UsageSnapshot | undefined, after: UsageSnapshot): boolean => {
+  const full = (s: UsageSnapshot | undefined): string =>
+    JSON.stringify((s?.windows ?? []).filter((w) => (w.used_pct ?? 0) >= 100).map((w) => w.kind));
+  return full(before) !== full(after);
 };
 
 const WINDOW_ORDER: Readonly<Record<UsageSnapshot["windows"][number]["kind"], number>> = {
@@ -299,6 +329,11 @@ const foreignRunText = (run: string): string =>
 
 export class Engine implements Kernel {
   readonly usage = new Map<HostId, UsageSnapshot>();
+  /** The last reading logged per run and host (`usage.updated`) and when (reading 263). */
+  private readonly usageLogged = new Map<
+    `${string}:${HostId}`,
+    { readonly snapshot: UsageSnapshot; readonly at: number }
+  >();
   /** Who pays per host, from its last sign-in check (D-bq; `recordBilling`). */
   private readonly billing = new Map<HostId, HostBilling | null>();
   readonly identicalTree = new Map<string, boolean>();
@@ -1449,6 +1484,8 @@ export class Engine implements Kernel {
     call: CallContext,
     automation: AutomationRunRef | null,
   ): Promise<StartResult> {
+    // reading 262: the attachments are checked before anything is registered
+    const attachments = readAttachments(input.attachments);
     // read before the checks: nothing awaits between them and registering the run
     const { head, gates: committed, project } = await this.startGates();
     if ([...this.handles.values()].some((h) => h.state.run.finished_at === undefined)) {
@@ -1497,6 +1534,7 @@ export class Engine implements Kernel {
         }
       : await startMergeLevel(this, config, automation !== null);
     return this.serial(handle, () => {
+      const copied = copyAttachments(this.deps.repoRoot, id, attachments);
       this.emit(handle, {
         type: "run.started",
         actor: "engine",
@@ -1510,6 +1548,7 @@ export class Engine implements Kernel {
           pipeline_config_hash: pipelineConfigHash(config, gates),
           origin: this.origin,
           ...(automation === null ? {} : { automation }),
+          ...(copied.length === 0 ? {} : { attachments: copied }),
         },
       });
       if (level.preflight !== null) recordMergePreflight(this, handle, level.preflight);
@@ -2026,6 +2065,7 @@ export class Engine implements Kernel {
   ): Promise<ChangeRequestResult> {
     const handle = this.resolve(input.run);
     this.assertHumanChannel(handle.state.id, call, "change_request");
+    const attachments = readAttachments(input.attachments);
     return this.serial(handle, () => {
       const state = handle.state;
       let frozen: FrozenArtifact | undefined;
@@ -2067,6 +2107,12 @@ export class Engine implements Kernel {
           },
         },
       });
+      const copied = copyAttachments(
+        this.deps.repoRoot,
+        state.id,
+        attachments,
+        runAttachments(state).length,
+      );
       this.emit(handle, {
         type: "change_request.opened",
         actor: "human",
@@ -2076,6 +2122,7 @@ export class Engine implements Kernel {
           frozen,
           ...(input.task === undefined ? {} : { task: input.task }),
           summary: input.summary,
+          ...(copied.length === 0 ? {} : { attachments: copied }),
         },
       });
       return Promise.resolve({ run: state.id, escalation: id });
@@ -2383,10 +2430,24 @@ export class Engine implements Kernel {
     const billing = this.billing.get(merged.host);
     const snapshot = billing === undefined ? merged : { ...merged, billing };
     this.usage.set(snapshot.host, snapshot);
-    if (!significant(before, snapshot)) return;
     const state = activeRun([...this.handles.values()].map((h) => h.state));
     const handle = state === undefined ? undefined : this.handles.get(state.id);
     if (handle === undefined) return;
+    // reading 263: compared with the last reading logged, not the last one received, and while
+    // nothing runs (paused, or waiting for a reset) at most hourly unless a window fills or frees
+    const key = `${handle.state.id}:${snapshot.host}` as const;
+    const logged = this.usageLogged.get(key);
+    if (!significant(logged?.snapshot, snapshot)) return;
+    const idle = handle.state.run.paused || limitWait(this, handle) !== null;
+    const now = this.now().getTime();
+    if (
+      idle &&
+      logged !== undefined &&
+      now - logged.at < USAGE_IDLE_LOG_MS &&
+      !fullChanged(logged.snapshot, snapshot)
+    )
+      return;
+    this.usageLogged.set(key, { snapshot, at: now });
     void this.serial(handle, () => {
       this.emit(handle, { type: "usage.updated", actor: "engine", data: { snapshot } });
       return Promise.resolve();

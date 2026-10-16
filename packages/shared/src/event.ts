@@ -103,6 +103,22 @@ export const eventLogPath = (run: string): string =>
 export const runRequestPath = (run: string): string =>
   `.vtc/runs/${RunIdSchema.parse(run)}/request.md`;
 
+/**
+ * `.vtc/runs/<run>/attachments/<n>-<name>`: the engine's copy of the request's `n`-th attachment
+ * (1-based, `StartInput.attachments`, spine §5 reading 262), git-tracked with the run like
+ * `request.md`. `name` is the file's base name reduced to `[A-Za-z0-9._-]` (at most 80 characters).
+ */
+export const runAttachmentPath = (run: string, n: number, sourcePath: string): string => {
+  if (!Number.isInteger(n) || n < 1) throw new RangeError(`attachment number ${String(n)}`);
+  const base = sourcePath.split(/[\\/]/).pop() ?? "";
+  const name =
+    base
+      .replace(/[^A-Za-z0-9._-]+/g, "-")
+      .replace(/^[.-]+/, "")
+      .slice(-80) || "attachment";
+  return `.vtc/runs/${RunIdSchema.parse(run)}/attachments/${String(n)}-${name}`;
+};
+
 /** Serialises one event as a JSONL line (validated, trailing newline). */
 export const toEventLine = (event: VtcEventInput): string =>
   `${JSON.stringify(EventSchema.parse(event))}\n`;

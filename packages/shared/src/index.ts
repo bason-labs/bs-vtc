@@ -59,6 +59,7 @@ export * from "./helpers/redaction.js";
 export * from "./helpers/routing.js";
 export * from "./helpers/dispatch.js";
 export * from "./helpers/conformance.js";
+export * from "./helpers/result-schema.js";
 export * from "./helpers/final-review.js";
 export * from "./json-schema.js";
 
@@ -346,5 +347,14 @@ export * from "./json-schema.js";
  * `ToolIntegrity.self_rebuilt`: the packages whose own install script changed files in their own
  * directory (allowed, shown as a warning); `workspace_sha256` now covers every file of the
  * checkout (doc). Additive.
+ *
+ * 5.12.0 (MINOR): the owner's first run (spine §5 readings 258–263). `roleResultSchemaFor`: the
+ * structured-output schema of one dispatch (only its role, task, mode, feature, subject, exits,
+ * verdicts and output artifact types), handed to hosts in place of the generic RoleResult
+ * schema; `rolePromptAssetPath(<agent>, "headless")` and `PluginManifestAgent.headless_sha256`:
+ * the compiled locked part a run that loads no agent carries; `StartInput.attachments`,
+ * `ChangeRequestInput.attachments`, `run.started.attachments`,
+ * `change_request.opened.attachments`, `ATTACHMENTS`, `runAttachmentPath` and
+ * `PACK_INPUT_TYPES.attachments`: image attachments of a request. Additive.
  */
-export const CONTRACTS_VERSION = "5.11.0";
+export const CONTRACTS_VERSION = "5.12.0";

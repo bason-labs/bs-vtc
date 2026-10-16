@@ -14,6 +14,7 @@ import {
   fromStructuredOutput,
   headlessPolicyFor,
   jsonSchemaFor,
+  roleResultSchemaFor,
   resolveRoleMode,
   type DispatchPurpose,
   type HeadlessPreflight,
@@ -47,7 +48,7 @@ import {
 import { headlessPlatformRefusal, roleSandboxProblem, roleSandboxRequest } from "./sandbox.js";
 import { hostWebRouteFor } from "./host-web.js";
 import { PARSE_FAILURE_PREFIX } from "./state.js";
-import { closeRefusedRun, handleSubmit } from "./submit.js";
+import { closeRefusedRun, dispatchedRoleOf, handleSubmit } from "./submit.js";
 import { recordModelRefusal, refusalDetail } from "./model-fallback.js";
 
 const NO_CAPABILITIES: Pick<HostCapabilities, "subagents" | "headless"> = {
@@ -612,7 +613,15 @@ export const launchHeadless = async (
     dispatch: "headless",
     cwd,
     prompt: roleCore === undefined ? action.prompt : `${roleCore}\n\n---\n\n${action.prompt}`,
-    outputSchema: jsonSchemaFor("RoleResult", { target: "structured-output" }),
+    // reading 258: only what this dispatch and its role's contract allow, so a host that honours
+    // the schema cannot invent a task, a mode or an artifact type the engine then rejects
+    outputSchema: effective.ok
+      ? roleResultSchemaFor(
+          // the pack's Dispatch lines: a task dispatch names its task's feature too
+          { ...dispatchedRoleOf(roleRun), feature: roleRun.feature },
+          effective.contract,
+        )
+      : jsonSchemaFor("RoleResult", { target: "structured-output" }),
     sandbox,
     timeoutMs: policy.wallTimeoutMs,
     idleTimeoutMs: policy.idleTimeoutMs,

@@ -54,7 +54,7 @@ export const KNOWN_ARTIFACT_TYPES = [
   "cost_history",
   "change_request",
   "run_status",
-  "attachments",
+  // "attachments" (the advisors' input too) is a pack input type since 5.12.0
   "client_export",
 ] as const;
 export type KnownArtifactType = (typeof KNOWN_ARTIFACT_TYPES)[number];

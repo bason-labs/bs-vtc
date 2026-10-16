@@ -82,6 +82,23 @@ export type HumanGateState = z.infer<typeof HumanGateStateSchema>;
  * The Lead's INTAKE classification (§6.1): the Lead (an LLM) classifies, the engine records and
  * routes. `repo` picks DISCOVER (Cartographer vs Research Analyst); `has_ui` adds the Designer.
  */
+/**
+ * Image attachments of a request or a change request (spine §5 reading 262). New in 5.12.0.
+ * `max` files per call, each at most `maxBytes`, of one of the `extensions` (the engine also
+ * checks the file's signature, so only an image is copied into the run).
+ */
+export const ATTACHMENTS = {
+  max: 10,
+  maxBytes: 10 * 1024 * 1024,
+  extensions: ["png", "jpg", "jpeg", "gif", "webp", "heic", "heif", "bmp", "tif", "tiff"],
+} as const;
+
+/** An absolute file path as the host gives it (POSIX `/…`, or a Windows drive path). */
+export const AttachmentPathSchema = z
+  .string()
+  .max(4096)
+  .regex(/^(?:\/|[A-Za-z]:[\\/])[^\0]*$/, "expected an absolute file path");
+
 export const IntakeClassificationSchema = z.strictObject({
   track: TrackSchema,
   repo: z.enum(["existing", "new"]),

@@ -419,6 +419,7 @@ const compileAgents = (
         model: built.contract.models[host],
         instructions: agentInstructions(built, inPack),
         sections: identitySections(loaded, input.sources.engineer),
+        headless: built.locked.trim(),
         skills: needs.skills,
         ...(inPack ? { editableInPack: true } : {}),
       });
@@ -440,6 +441,8 @@ const manifestAgent = (agent: CompiledAgent, file: string): PluginManifestAgent 
   locked_sha256: sha256Hex(agent.sections.locked),
   editable_sha256: sha256Hex(agent.sections.editable),
   ...(agent.editableInPack === true ? { editable_in_pack: true } : {}),
+  // 5.12.0: the compiled locked part a headless run that loads no agent carries (reading 258)
+  headless_sha256: sha256Hex(agent.headless),
   tier: agent.model.tier,
   effort: agent.model.effort,
 });
@@ -456,12 +459,14 @@ const skillFiles = (host: HostId, skills: readonly Skill[]): EmittedFile[] =>
 
 /**
  * Each agent's identity sections (`vtc/prompts/<agent>/{locked,editable}.md`, AD-21 rule 2): the
- * texts its `locked_sha256` and `editable_sha256` hash.
+ * texts its `locked_sha256` and `editable_sha256` hash; and its headless instructions
+ * (`headless.md`, `headless_sha256`, contracts 5.12.0, spine §5 reading 258).
  */
 const promptPartFiles = (agents: readonly CompiledAgent[]): EmittedFile[] =>
   agents.flatMap((a) => [
     { path: rolePromptAssetPath(a.name, "locked"), text: a.sections.locked },
     { path: rolePromptAssetPath(a.name, "editable"), text: a.sections.editable },
+    { path: rolePromptAssetPath(a.name, "headless"), text: a.headless },
   ]);
 
 const codexCommandSkill = (command: Command): string =>

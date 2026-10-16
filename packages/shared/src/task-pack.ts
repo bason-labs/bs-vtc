@@ -48,6 +48,11 @@ export const PACK_INPUT_TYPES = {
    * (the issue is the spec). New in 5.1.0.
    */
   automationIssue: "automation_issue",
+  /**
+   * An image the human attached to the request or a change request (`StartInput.attachments`),
+   * copied into the run (`runAttachmentPath`); one input per file. New in 5.12.0.
+   */
+  attachments: "attachments",
 } as const;
 
 /**

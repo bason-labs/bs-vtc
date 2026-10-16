@@ -40,7 +40,15 @@ export const ROLE_PROMPTS_ASSET_DIR = "vtc/prompts";
  */
 export const EDITABLE_IN_PACK_ROLES: readonly string[] = ["spec_verifier"];
 
-export type RolePromptPart = "locked" | "editable";
+/**
+ * One prompt asset of a compiled agent: its Lookback identity sections (`locked`, `editable`) and,
+ * since 5.12.0, `headless`: the agent's compiled locked part as the host would load it (the locked
+ * core, the generated contract, the result protocol and the host's `prompt_append`; never the
+ * editable section, which goes in the pack), for a host whose headless run loads no compiled agent
+ * (`codex exec`). Before 5.12.0 such a run got the locked core only, so the role never saw its
+ * contract or how to return its result (the owner's first run, spine §5 reading 258).
+ */
+export type RolePromptPart = "locked" | "editable" | "headless";
 
 /** Pure: the plugin asset path of one prompt section of one compiled agent. */
 export const rolePromptAssetPath = (agent: string, part: RolePromptPart): string => {
@@ -118,6 +126,13 @@ export const PluginManifestAgentSchema = z
      * New in 4.6.0.
      */
     editable_in_pack: z.boolean().optional(),
+    /**
+     * SHA-256 of the trimmed headless instructions asset (`rolePromptAssetPath(<agent>,
+     * "headless")`): the compiled locked part a run that loads no agent carries before its
+     * dispatch prompt. The engine uses the asset only when it hashes to this value. Absent in a
+     * plugin compiled before 5.12.0 (the engine then falls back to the locked core). New in 5.12.0.
+     */
+    headless_sha256: Sha256HexSchema.optional(),
     tier: ModelTierSchema,
     effort: EffortSchema,
   })

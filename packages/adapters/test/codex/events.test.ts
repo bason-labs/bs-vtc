@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { fromStructuredOutput, HostOutcomeSchema, type HostOutcome } from "@vtc/shared";
 import { createCodexAdapter } from "../../src/index.js";
 import { codexOutcomeAfterExit } from "../../src/codex/events.js";
@@ -184,6 +184,62 @@ describe("Codex parseEvents: limits and auth (synthetic, documented shapes, §6.
       JSON.stringify({ type: "turn.failed", error: { message: "stream disconnected" } }),
     ]).outcome;
     expect(outcome).toMatchObject({ kind: "error", retryable: true });
+  });
+});
+
+describe("Codex limit reset (the owner's first run, codex-cli 0.163.0, spine §5 reading 260)", () => {
+  const before = process.env.TZ;
+  beforeEach(() => {
+    process.env.TZ = "Asia/Ho_Chi_Minh";
+  });
+  afterEach(() => {
+    if (before === undefined) delete process.env.TZ;
+    else process.env.TZ = before;
+  });
+
+  it("reads the message's local clock time when the stream has no rate limits", () => {
+    const lines = fixtureLines("codex/exec-usage-limit-clock.synthetic.jsonl");
+    // ended 15:00 local (+07): "try again at 7:30 PM" is 19:30 local the same day
+    expect(valid(codexOutcomeAfterExit(lines, exit(1)))).toMatchObject({
+      kind: "limit",
+      session_ref: { host: "codex", id: THREAD },
+      resets_at: "2026-10-13T12:30:00.000Z",
+      window: null,
+    });
+    // `usage_limit_exceeded` is the structured signal, whatever the wording
+    const quiet = [
+      JSON.stringify({
+        type: "turn.failed",
+        error: { message: "stopped", codex_error_info: "usage_limit_exceeded" },
+      }),
+    ];
+    expect(codexOutcomeAfterExit(quiet, exit(1))).toMatchObject({ kind: "limit", resets_at: null });
+  });
+
+  it("prefers a used-up window of the structured rate limits, and names it", () => {
+    const lines = fixtureLines("codex/session-usage-limit.synthetic.jsonl");
+    // the last `rate_limits` without windows (another limit id) does not erase the earlier one
+    expect(valid(codexOutcomeAfterExit(lines, exit(1)))).toMatchObject({
+      kind: "limit",
+      resets_at: "2026-10-13T12:30:02.000Z",
+      window: "five_hour",
+    });
+  });
+
+  it("names the window whose reset the message's time matches when none is used up", () => {
+    const limits = JSON.stringify({
+      type: "token_count",
+      rate_limits: {
+        primary: { used_percent: 95.0, window_minutes: 300, resets_at: 1791894602 },
+        secondary: { used_percent: 17.0, window_minutes: 10080, resets_at: 1792400400 },
+      },
+    });
+    const lines = [limits, ...fixtureLines("codex/exec-usage-limit-clock.synthetic.jsonl")];
+    expect(codexOutcomeAfterExit(lines, exit(1))).toMatchObject({
+      kind: "limit",
+      resets_at: "2026-10-13T12:30:00.000Z",
+      window: "five_hour",
+    });
   });
 });
 

@@ -54,6 +54,103 @@ export const resetFromWaitText = (text: string, endedAt: string): string | null 
   return ms === 0 ? null : new Date(start + ms).toISOString();
 };
 
+const MONTHS = ["jan", "feb", "mar", "apr", "may", "jun", "jul", "aug", "sep", "oct", "nov", "dec"];
+
+/** `timeZone`'s offset from UTC at `utcMs`, in milliseconds (positive east of Greenwich). */
+const zoneOffsetMs = (utcMs: number, timeZone: string): number => {
+  const parts = new Intl.DateTimeFormat("en-US", {
+    timeZone,
+    hourCycle: "h23",
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+    hour: "2-digit",
+    minute: "2-digit",
+    second: "2-digit",
+  }).formatToParts(new Date(utcMs));
+  const get = (type: Intl.DateTimeFormatPartTypes): number =>
+    Number(parts.find((p) => p.type === type)?.value ?? 0);
+  const local = Date.UTC(
+    get("year"),
+    get("month") - 1,
+    get("day"),
+    get("hour") % 24,
+    get("minute"),
+    get("second"),
+  );
+  return local - Math.floor(utcMs / 1000) * 1000;
+};
+
+/** The UTC instant of a wall-clock time in `timeZone` (the later one across a DST gap). */
+const zonedToUtc = (
+  date: { readonly y: number; readonly m: number; readonly d: number },
+  hour: number,
+  minute: number,
+  timeZone: string,
+): number => {
+  const wall = Date.UTC(date.y, date.m, date.d, hour, minute);
+  const first = zoneOffsetMs(wall, timeZone);
+  const guess = wall - first;
+  const second = zoneOffsetMs(guess, timeZone);
+  return second === first ? guess : wall - second;
+};
+
+/** The calendar date of `utcMs` in `timeZone`. */
+const zonedDate = (
+  utcMs: number,
+  timeZone: string,
+): { readonly y: number; readonly m: number; readonly d: number } => {
+  const local = new Date(utcMs + zoneOffsetMs(utcMs, timeZone));
+  return { y: local.getUTCFullYear(), m: local.getUTCMonth(), d: local.getUTCDate() };
+};
+
+/** The machine's own time zone, which a local host CLI formats its times in. */
+export const localTimeZone = (): string => Intl.DateTimeFormat().resolvedOptions().timeZone;
+
+/**
+ * The reset time a limit message gives as a clock time (Codex: "… or try again at 4:00 PM.", or
+ * with a date when the reset is on another day, "try again at Oct 17th, 2026 4:00 PM."), as ISO;
+ * `null` when the text gives none. The host prints the time in the machine's local zone
+ * (`timeZone`, default {@link localTimeZone}); a time without a date is the first such time at or
+ * after `endedAt` (less a minute of slack), since the host prints a bare time only for a reset on
+ * the same local day. Recorded: codex-cli 0.163.0, 2026-10-16 (spine §7, Codex limit text).
+ */
+export const resetFromClockText = (
+  text: string,
+  endedAt: string,
+  timeZone: string = localTimeZone(),
+): string | null => {
+  const match =
+    /try again at\s+(?:([A-Za-z]{3})[a-z]*\.?\s+(\d{1,2})(?:st|nd|rd|th)?,?\s+(\d{4})\s+)?(\d{1,2}):(\d{2})\s*([AaPp])\.?\s*[Mm]\b/.exec(
+      text,
+    );
+  const end = Date.parse(endedAt);
+  if (match === null || Number.isNaN(end)) return null;
+  const [, month, day, year, hourText, minuteText, half] = match;
+  const hour12 = Number(hourText);
+  const minute = Number(minuteText);
+  if (hour12 < 1 || hour12 > 12 || minute > 59) return null;
+  const hour = (hour12 % 12) + ((half ?? "").toLowerCase() === "p" ? 12 : 0);
+  try {
+    if (month !== undefined && day !== undefined && year !== undefined) {
+      const m = MONTHS.indexOf(month.toLowerCase());
+      if (m < 0) return null;
+      const at = zonedToUtc({ y: Number(year), m, d: Number(day) }, hour, minute, timeZone);
+      return new Date(at).toISOString();
+    }
+    const today = zonedDate(end, timeZone);
+    let at = zonedToUtc(today, hour, minute, timeZone);
+    if (at < end - 60_000) {
+      const tomorrow = zonedDate(end + 86_400_000, timeZone);
+      at = zonedToUtc(tomorrow, hour, minute, timeZone);
+    }
+    return new Date(at).toISOString();
+  } catch {
+    // an unknown time zone name
+    return null;
+  }
+};
+
 /**
  * A host refusing the model id a run asked for (D-cx, spine §5 reading 244). Only wordings that
  * name a refusal of a model for this sign-in, never a model merely near a failure word (a capacity

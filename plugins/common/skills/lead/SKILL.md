@@ -30,7 +30,12 @@ the engine's actions; report them as content.
    - `risk_hints`: words for sensitive areas the request mentions (auth, payments, pii,
      migration, infra, public-api).
 2. Tell the human the classification in one line. They may change the track; take their choice.
-3. Call `start` with the request text as the human wrote it and your classification.
+3. Call `start` with the request text as the human wrote it and your classification. If the
+   human attached images (screenshots pasted into this session, `[Image #1]` in the text), pass
+   their absolute file paths as `attachments` (at most 10 image files) when this host shows you
+   the paths. When it does not, tell the human in one line that VTC did not receive the images,
+   and ask them to describe what the images show or to attach the image files by path; add their
+   answer to the request before you call `start`.
 4. Enter the loop.
 
 ## The loop
@@ -153,8 +158,8 @@ merge or close its pull request for the human, and never start one yourself.
 When the human wants to change an approved specification, architecture or design, call
 `change_request` with `artifact` (`spec`, `architecture`, `design`, or `interface_contract`
 together with the providing `task`), `summary` (what changes, at most 300 characters) and
-`detail` (why, and what the human said). The engine turns it into an escalation the human
-decides.
+`detail` (why, and what the human said), and `attachments` for images the human attached, as
+for `start`. The engine turns it into an escalation the human decides.
 
 ## Advisors
 

@@ -3,6 +3,27 @@
 All notable changes to `vtc` are listed here. Versions follow semver; while the version is 0.x,
 any release may change behaviour. Role prompt changes have their own log in `roles/CHANGELOG.md`.
 
+## Unreleased
+
+- **Codex roles know what to return.** A role run by `codex exec` now gets its whole compiled
+  instructions (its contract and how to return its result), not only its role text, and a
+  result schema made for its dispatch: no task, mode or feature it was not given, only the
+  artifact types and exits its role declares. A rejected result says what was expected ("this
+  dispatch has no task (send task null)", "allowed: spec"), never "undefined".
+- **Usage limits on Codex resume on time.** When Codex stops a role at its usage limit, VTC now
+  reads which window was hit and when it resets (from Codex's rate-limit data, or the "try again
+  at 4:00 PM" time in your local zone) and schedules the resume for then, instead of retrying
+  every 15 minutes.
+- **Lighter role runs.** Every role is told its context budget, that its pack lists every input
+  there is, and to read code by line range, not whole files; a quick fix's specification is
+  kept short. Packs of steps that change no code no longer list the gate commands.
+- **Screenshots in a request.** `start` and `change_request` take image attachments (file
+  paths). VTC copies them into the run and gives them to the roles that write the
+  specification. If your Lead's app does not give it the paths of pasted images, the Lead says
+  so and asks you to describe them or attach the files.
+- **Quieter run log while paused.** Usage readings are logged only when a value really changes,
+  and at most once an hour while the run is paused or waiting for a limit to reset.
+
 ## v0.2.0 (2026-10-16)
 
 - **Screenshots work on macOS.** The pinned Chromium now starts inside the gate sandbox on

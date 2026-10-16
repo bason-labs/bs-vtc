@@ -67,6 +67,8 @@ export const prepareRoleWorktree = async (
   const inputs = [
     ...ROLE_INPUT_DIRS.flatMap((dir) => filesUnder(k.deps.repoRoot, dir, 8)),
     ...filesUnder(k.deps.repoRoot, `.vtc/runs/${run}`, 0).filter((p) => p.endsWith(".md")),
+    // reading 262: the images attached to the request, which the pack lists as inputs
+    ...filesUnder(k.deps.repoRoot, `.vtc/runs/${run}/attachments`, 0),
   ];
   for (const path of inputs) {
     writeRepoFile(root, path, readFileSync(join(k.deps.repoRoot, path)));

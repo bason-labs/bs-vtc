@@ -42,6 +42,8 @@ import {
   VerdictSchema,
 } from "./role-result.js";
 import {
+  ATTACHMENTS,
+  AttachmentPathSchema,
   ChangeRequestArtifactSchema,
   FrozenArtifactSchema,
   HumanGateIdSchema,
@@ -229,6 +231,14 @@ export type ResumeInput = z.infer<typeof ResumeInputSchema>;
 export const StartInputSchema = z.strictObject({
   request: z.string().min(1).max(20000),
   ...IntakeClassificationSchema.shape,
+  /**
+   * Images the human attached to the request (screenshots pasted into the Lead session), as the
+   * absolute paths the host gives the Lead, at most {@link ATTACHMENTS.max}. The engine copies
+   * each into the run (`runAttachmentPath`) and lists the copies in the SPECIFY and DISCOVER
+   * packs as `attachments` inputs. A host that gives no path cannot pass them: the Lead then asks
+   * the human to describe them or attach the files (spine §5 reading 262). New in 5.12.0.
+   */
+  attachments: z.array(AttachmentPathSchema).max(ATTACHMENTS.max).optional(),
 });
 export type StartInput = z.infer<typeof StartInputSchema>;
 
@@ -498,6 +508,8 @@ export const ChangeRequestInputSchema = z
     task: TaskIdSchema.optional(),
     summary: z.string().min(1).max(300),
     detail: z.string().min(1).max(8000),
+    /** Images the human attached to the change, as on `start`. New in 5.12.0. */
+    attachments: z.array(AttachmentPathSchema).max(ATTACHMENTS.max).optional(),
   })
   .refine((input) => (input.artifact === "interface_contract") === (input.task !== undefined), {
     message: "task is required for, and only allowed with, interface_contract",
